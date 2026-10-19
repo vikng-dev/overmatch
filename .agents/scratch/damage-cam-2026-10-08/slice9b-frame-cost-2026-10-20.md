@@ -5,30 +5,36 @@ main `3f15af8` plus the marks (`log_presence`, `log_run`). Runner `scripts/perf/
 analyzer `scripts/perf/pencam_cost.py`; the conditions and gates are in the runner's runbook.
 Raw streams and `*.cost.json` stayed in the session's scratchpad.
 
-Per surface, p50 frame ms within ONE run: frames with the surface on screen (`on`) against frames
-with no surface on screen (`quiet`). "Same seconds" is the paired `-off` run: its frames in those
-windows against its own quiet frames, the workload there without the surface. Net is the two
-subtracted (DERIVED). The MP rows stop at the kill cam run's start (the death screen is another
-workload).
+Per surface, p50 frame ms within ONE run: frame rows with the surface on screen (`on`) against
+rows with no surface on screen (`quiet`); a row carries the frame that ended at its stamp, so a
+window is `(start, end]`. "Same seconds" is the paired `-off` run: its rows in those windows
+against its own quiet rows, the workload there without the surface. Net is the two subtracted
+(DERIVED, a difference in differences). The MP rows stop at the kill cam run's start (the death
+screen is another workload).
 
 | surface | on | quiet | delta | same seconds, off run | net p50 | on-screen |
 |---|---|---|---|---|---|---|
 | shooter corner, offline (main gun hits) | 17.68 | 12.92 | +4.77 | +0.50 | ≈ +4.3 | 16.3 s, 873 frames |
-| kill cam run, offline (the lesson) | 13.29 | 11.56 | +1.73 | +0.31 | ≈ +1.4 | 7.1 s, 472 frames |
+| kill cam run, offline (hit beat + lesson + killer beat) | 13.29 | 11.56 | +1.73 | +0.31 | ≈ +1.4 | 7.1 s, 472 frames |
+| the lesson alone, offline (the World showing) | 18.01 | 11.56 | +6.44 | +0.43 | ≈ +6.0 | 3.6 s, 190 frames |
 | shooter corner, MP | 17.50 | 11.33 | +6.17 | −0.56 | ≈ +6.2–6.8 | 5.7 s, 294 frames |
 | victim glass (corner inset), MP | 17.59 | 11.33 | +6.26 | −0.75 | ≈ +6.3–7.0 | 9.0 s, 474 frames |
 
-The kill cam's tails: mean +3.4 (same seconds +0.6), p95 +12.3 (+1.2), worst 72 ms — the run's
-staging (stage spawn, mask images) spikes, the steady state is the p50.
+The lesson's tails: mean +7.3 (same seconds +0.9), p95 +16.7 (+1.3), worst 72 ms at the run's
+staging (stage spawn, mask images). The whole run's +1.4 is the lesson averaged with its two
+cheap beats (the hit beat shows the world, the killer beat the killer's tank).
 
 ## Reads
 
 - The corner re-measures at ≈ +4.3 ms p50; slice 5's +4.0 (17.64 vs 13.62) stands.
 - The victim corner glass costs what the shooter corner costs: the inset's passes, not the content.
-- The kill cam's lesson — a full-viewport World-surface base look drawn by the player's camera —
-  costs ≈ +1.4 ms p50 in steady state. It is the structural proxy for the X world glass:
-  DERIVED ≈ +1.5–2 ms p50, under the corner, under the earlier DERIVED +2.7; corner + glass at
-  once DERIVED ≈ +6 ms. The corner-wins suspension stays unbuilt on these numbers.
+- The lesson — a full-viewport World-surface base look drawn by the player's camera — costs
+  ≈ +6 ms p50 at 2560x1440. It is the structural proxy for the X world glass (same passes:
+  two full-viewport masks, the look geometry in the main pass): DERIVED ≈ +6 ms p50, above the
+  corner's +4.3 and above the earlier DERIVED +2.7; corner + glass at once DERIVED ≈ +10 ms
+  (13 → 23 ms frames while both show). The queued optimizations (one `LookMaterial` per tier,
+  half-resolution world masks) and the corner-wins suspension policy go to the owner with this
+  number.
 
 ## Caveats
 

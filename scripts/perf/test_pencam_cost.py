@@ -62,7 +62,7 @@ class Marks(unittest.TestCase):
             [
                 Mark(61.25, "corner"),
                 Mark(70.5, "glass"),
-                Mark(80.0, "world"),
+                Mark(80.0, "lesson"),
                 Mark(84.0, "none"),
                 Mark(50.0, "run-start"),
                 Mark(66.0, "run-end"),
@@ -95,9 +95,14 @@ class Segments(unittest.TestCase):
         self.assertEqual(segs["corner"], [Segment(10.0, 11.5)])
         self.assertEqual(segs["glass"], [Segment(11.5, 16.0)])
 
-    def test_a_world_showing_is_nobodys_segment(self) -> None:
-        segs = segments([Mark(10.0, "world"), Mark(14.0, "none")], 100.0)
-        self.assertEqual(segs, {"corner": [], "glass": [], "killcam": []})
+    def test_a_world_showing_is_the_lessons_segment_inside_the_run(self) -> None:
+        segs = segments(
+            [Mark(25.0, "run-start"), Mark(25.5, "lesson"), Mark(29.1, "none"), Mark(32.1, "run-end")],
+            100.0,
+        )
+        self.assertEqual(segs["lesson"], [Segment(25.5, 29.1)])
+        self.assertEqual(segs["killcam"], [Segment(25.0, 32.1)])
+        self.assertEqual(segs["corner"], [])
 
     def test_a_showing_open_at_the_streams_end_closes_there(self) -> None:
         segs = segments([Mark(90.0, "glass")], 95.5)
@@ -115,17 +120,19 @@ class Segments(unittest.TestCase):
 
 
 class Split(unittest.TestCase):
-    def test_windows_are_half_open_and_the_warmup_is_discarded(self) -> None:
+    def test_a_window_takes_the_rows_after_its_start_up_to_its_end_and_the_warmup_is_discarded(self) -> None:
+        # A row stamped t carries the frame that ended at t: the mark at 3 is first drawn by the
+        # frame the row at 4 carries, and the clear at 6 is first drawn by the row at 7's frame.
         rows = [(float(t), float(t)) for t in range(0, 10)]
         inside, outside = split(rows, [Segment(3.0, 6.0)], 2.0)
-        self.assertEqual(inside, [3.0, 4.0, 5.0])
-        self.assertEqual(outside, [2.0, 6.0, 7.0, 8.0, 9.0])
+        self.assertEqual(inside, [4.0, 5.0, 6.0])
+        self.assertEqual(outside, [2.0, 3.0, 7.0, 8.0, 9.0])
 
-    def test_frames_from_the_cut_on_are_discarded_and_windows_clipped(self) -> None:
+    def test_rows_after_the_cut_are_discarded_and_windows_clipped(self) -> None:
         rows = [(float(t), float(t)) for t in range(0, 10)]
         inside, outside = split(rows, [Segment(3.0, 6.0)], 2.0, 8.0)
-        self.assertEqual(inside, [3.0, 4.0, 5.0])
-        self.assertEqual(outside, [2.0, 6.0, 7.0])
+        self.assertEqual(inside, [4.0, 5.0, 6.0])
+        self.assertEqual(outside, [2.0, 3.0, 7.0, 8.0])
         self.assertEqual(
             clip([Segment(3.0, 6.0), Segment(7.0, 9.0), Segment(8.0, 9.0)], 8.0),
             [Segment(3.0, 6.0), Segment(7.0, 8.0)],
@@ -137,8 +144,8 @@ class Split(unittest.TestCase):
         inside, outside = split(
             rows, [Segment(3.0, 6.0)], 2.0, busy=[Segment(3.0, 6.0), Segment(7.0, 9.0)]
         )
-        self.assertEqual(inside, [3.0, 4.0, 5.0])
-        self.assertEqual(outside, [2.0, 6.0, 9.0])
+        self.assertEqual(inside, [4.0, 5.0, 6.0])
+        self.assertEqual(outside, [2.0, 3.0, 7.0])
 
 
 class Command(unittest.TestCase):
@@ -164,7 +171,7 @@ class Command(unittest.TestCase):
     def test_on_run_reports_inside_against_outside_on_its_own_marks(self) -> None:
         # 10 ms frames, 16 ms while the corner is up (60-64 s).
         (self.dir / "corner-on.client.jsonl").write_text(
-            stream(80.0, ms_at=lambda t: 16.0 if 60.0 <= t < 64.0 else 10.0)
+            stream(80.0, ms_at=lambda t: 16.0 if 60.0 < t <= 64.0 else 10.0)
         )
         (self.dir / "corner-on.log").write_text("\n".join([shows("Slice", 60.0), clears(64.0)]) + "\n")
         code, out, err = self.run_main(
@@ -187,7 +194,7 @@ class Command(unittest.TestCase):
         (self.dir / "mp-on.client.jsonl").write_text(
             stream(
                 80.0,
-                ms_at=lambda t: 16.0 if 60.0 <= t < 64.0 or 68.0 <= t < 70.0 else (5.0 if t >= 70.0 else 10.0),
+                ms_at=lambda t: 16.0 if 60.0 < t <= 64.0 or 68.0 < t <= 70.0 else (5.0 if t > 70.0 else 10.0),
             )
         )
         (self.dir / "mp-on.log").write_text(
@@ -218,7 +225,7 @@ class Command(unittest.TestCase):
             json.dumps({"surfaces": {"corner": {"on": on_stats, "off": None}}})
         )
         (self.dir / "corner-off.client.jsonl").write_text(
-            stream(80.0, ms_at=lambda t: 11.0 if 60.0 <= t < 64.0 else 10.0)
+            stream(80.0, ms_at=lambda t: 11.0 if 60.0 < t <= 64.0 else 10.0)
         )
         (self.dir / "corner-off.log").write_text("no marks here\n")
         code, out, err = self.run_main(
@@ -241,7 +248,7 @@ class Command(unittest.TestCase):
     def test_two_surfaces_back_to_back_are_not_each_others_baseline(self) -> None:
         # Corner 60-64 s at 16 ms, glass 64-70 s at 18 ms, nothing else on screen at 10 ms.
         (self.dir / "mp-on.client.jsonl").write_text(
-            stream(80.0, ms_at=lambda t: 16.0 if 60.0 <= t < 64.0 else (18.0 if 64.0 <= t < 70.0 else 10.0))
+            stream(80.0, ms_at=lambda t: 16.0 if 60.0 < t <= 64.0 else (18.0 if 64.0 < t <= 70.0 else 10.0))
         )
         (self.dir / "mp-on.log").write_text(
             "\n".join([shows("Slice", 60.0), shows("Victim", 64.0), clears(70.0)]) + "\n"

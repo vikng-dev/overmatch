@@ -18,9 +18,15 @@ capture runs the client with `RUST_LOG=...,overmatch::damage_cam::pen_cam=debug`
     kill cam: the run ends at t=<s> s (Time<Real>)
 
 A mark opens a segment that the next mark closes; a segment is classed `corner` (the shooter's
-kinds on the Corner surface), `glass` (the victim's kind, Victim) or `killcam` (the run). A World
-showing is the run's lesson and belongs to no class of its own. A surface's `off` frames are the
-ones with NO class on screen (two surfaces back to back would otherwise be each other's baseline).
+kinds on the Corner surface), `glass` (the victim's kind, Victim), `lesson` (any kind on the World
+surface: the kill cam's lesson, the full-viewport base look) or `killcam` (the run, which holds
+the lesson plus its hit and killer beats). A surface's `off` frames are the ones with NO class on
+screen (two surfaces back to back would otherwise be each other's baseline).
+
+A frame row stamped `t` carries the frame that ENDED at that Update (`Time<Real>::delta`), while
+a mark at `t` is the state written during that Update, first drawn by the frame that ends at the
+next row: a window is therefore `(start, end]` over row stamps, and the cut keeps the row at the
+cut itself.
 `--windows-from <log>` takes the segments from ANOTHER run's log — the paired `-off` condition,
 whose scripted schedule puts the same workload at the same seconds without the surface; that
 alignment is DERIVED from the schedule, not measured, and the output says so. `--paired-json`
@@ -59,13 +65,13 @@ RUN = re.compile(r"kill cam: the run (?P<edge>starts|ends) at t=(?P<t>[0-9.]+) s
 # rest; Victim is the victim's glass (game/glass.rs).
 CORNER_KINDS = frozenset({"Glass", "Slice", "Ricochet", "Damaged"})
 GLASS_KINDS = frozenset({"Victim"})
-SURFACES = ("corner", "glass", "killcam")
+SURFACES = ("corner", "glass", "lesson", "killcam")
 STATS = (("p50", 50), ("p95", 95), ("p99", 99), ("worst", 100))
 
 
 class Mark(NamedTuple):
     t: float
-    # One of: corner, glass, world, none (the slot); run-start, run-end (the kill cam).
+    # One of: corner, glass, lesson, none (the slot); run-start, run-end (the kill cam).
     label: str
 
 
@@ -76,7 +82,7 @@ class Segment(NamedTuple):
 
 def classify(kind: str, surface: str) -> str:
     if surface != "Corner":
-        return "world"
+        return "lesson"
     if kind in CORNER_KINDS:
         return "corner"
     if kind in GLASS_KINDS:
@@ -107,7 +113,7 @@ def segments(marks: list[Mark], end_t: float) -> dict[str, list[Segment]]:
 
     def close_slot(at: float) -> None:
         nonlocal slot
-        if slot is not None and slot.label in ("corner", "glass") and at > slot.t:
+        if slot is not None and at > slot.t:
             out[slot.label].append(Segment(slot.t, at))
         slot = None
 
@@ -161,18 +167,18 @@ def split(
     *,
     busy: list[Segment] | None = None,
 ) -> tuple[list[float], list[float]]:
-    """Frame times at or after `from_t` and before `to_t`: inside any window (half-open), and
-    outside every `busy` segment (every class's windows; default: `windows`). A frame inside a
-    busy segment that is not a window counts on neither side."""
+    """Frame rows stamped after `from_t` and up to `to_t`: inside any window (`(start, end]`, see
+    the module doc), and outside every `busy` segment (every class's windows; default:
+    `windows`). A row inside a busy segment that is not a window counts on neither side."""
     busy = windows if busy is None else busy
     inside: list[float] = []
     outside: list[float] = []
     for t, ms in rows:
-        if t < from_t or (to_t is not None and t >= to_t):
+        if t < from_t or (to_t is not None and t > to_t):
             continue
-        if any(w.start <= t < w.end for w in windows):
+        if any(w.start < t <= w.end for w in windows):
             inside.append(ms)
-        elif not any(w.start <= t < w.end for w in busy):
+        elif not any(w.start < t <= w.end for w in busy):
             outside.append(ms)
     return inside, outside
 
@@ -228,8 +234,8 @@ def main() -> int:
     ap.add_argument("--warmup-s", type=float, default=5.0, help="frames before this are discarded")
     ap.add_argument(
         "--until-s", type=float, default=None,
-        help="frames from this stream second on are discarded and windows clipped to it: where the "
-        "workload changes class (the death screen after a knockout)",
+        help="frame rows stamped after this second are discarded and windows clipped to it: where "
+        "the workload changes class (the death screen after a knockout)",
     )
     ap.add_argument("--label", default=None, help="a name for the table (default: the stream's basename)")
     ap.add_argument("--json", type=Path, help="write the numbers here too")
@@ -309,7 +315,7 @@ def main() -> int:
 
 
 def parse_marks_has(marks: list[Mark], surface: str) -> bool:
-    """Whether `marks` open the surface at all (a run start for the kill cam, a slot mark else)."""
+    """Whether `marks` open the class at all (a run start for the kill cam, a slot mark else)."""
     if surface == "killcam":
         return any(m.label == "run-start" for m in marks)
     return any(m.label == surface for m in marks)

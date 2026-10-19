@@ -17,8 +17,10 @@
 #                   25/40/55 s. VICTIM GLASS PEEK On + the glass held 65-95 s
 #                   (OVERMATCH_GLASS_HOLD) / Off and no hold.
 #   killcam-on/off  offline target-kills: the target fires into the player's ammunition from 25 s
-#                   every 10 s until the knockout. KILL CAM On / Off. Offline never respawns, so
-#                   the stream ends on the death screen.
+#                   every 10 s until the knockout. KILL CAM On / Off. Reported twice: the whole
+#                   run (`killcam`: hit beat, lesson, killer beat) and the lesson alone
+#                   (`lesson`: the World showing, the full-viewport base look). Offline never
+#                   respawns, so the stream ends on the death screen.
 #   mp-on/off       a local dedicated server and the latency runner's duel
 #                   (scripts/shot/run-pencam-latency.sh): the MEASURED client connects first and
 #                   runs VISIBLE (SPIKE_SIM_VISIBLE=1), the opponent hidden. All three settings
@@ -37,7 +39,7 @@
 # of its surface. The game is muted (OVERMATCH_MUTE=1) in every condition, on and off alike.
 # =======================================================================
 
-set -eu
+set -eu -o pipefail
 setopt null_glob
 
 OUT="${1:?usage: run-pencam-cost.sh <out-dir> [condition ...]}"
@@ -132,7 +134,7 @@ for cond in "${CONDITIONS[@]}"; do
   case "$cond" in
     corner-*)  run_s=82;  scen=(OVERMATCH_TARGET_AHEAD=1 SPIKE_AUTO_FIRE=1);        armed="auto_fire: armed";    surfaces=(corner) ;;
     glass-*)   run_s=100; scen=(OVERMATCH_TARGET_AHEAD=1 OVERMATCH_TARGET_FIRES=1); armed="target fires: armed"; surfaces=(glass) ;;
-    killcam-*) run_s=100; scen=(OVERMATCH_TARGET_AHEAD=1 OVERMATCH_TARGET_KILLS=1); armed="target kills: armed"; surfaces=(killcam) ;;
+    killcam-*) run_s=100; scen=(OVERMATCH_TARGET_AHEAD=1 OVERMATCH_TARGET_KILLS=1); armed="target kills: armed"; surfaces=(killcam lesson) ;;
     mp-*)      run_s=120; mode=mp;                                                  surfaces=(corner glass) ;;
   esac
   if [[ "$cond" == *-on ]]; then
@@ -220,13 +222,21 @@ for cond in "${CONDITIONS[@]}"; do
       kill "$CLIENT_PID" 2>/dev/null || true; wait "$CLIENT_PID" 2>/dev/null || true
     fi
     CLIENT_PID=""
-    kill "$OTHER_PID" 2>/dev/null || true; wait "$OTHER_PID" 2>/dev/null || true; OTHER_PID=""
+    # The opponent's script is shorter than the measured client's, so it has run its ticks and
+    # exited by now: its status and its completion line prove it supplied the schedule. Its
+    # process is this shell's child, so `wait` reads the status.
+    other_code=0
+    wait "$OTHER_PID" 2>/dev/null || other_code=$?
+    OTHER_PID=""
     kill "$SERVER_PID" 2>/dev/null || true; wait "$SERVER_PID" 2>/dev/null || true; SERVER_PID=""
     case "$outcome" in
       spanned) ;;
       exited) (( code == 0 )) || invalid "$cond" "measured client exited with status $code (see $log)" ;;
       *) invalid "$cond" "measured client: $outcome (see $log)" ;;
     esac
+    (( other_code == 0 )) || invalid "$cond" "the opponent exited with status $other_code (see $OUT/$cond.opponent.log)"
+    grep -q "simulation script complete" "$OUT/$cond.opponent.log" \
+      || invalid "$cond" "the opponent never completed its script (see $OUT/$cond.opponent.log)"
     connects="$(grep -c "client connected" "$OUT/$cond.server.log" || true)"
     (( connects == 2 )) || invalid "$cond" "$connects client connects for 2 clients — a lane burned (cold shader cache?); rerun warm"
   fi
@@ -260,6 +270,7 @@ for cond in "${CONDITIONS[@]}"; do
     cut="$(sed -n 's/.*kill cam: the run starts at t=\([0-9.]*\) s.*/\1/p' "$OUT/${cond%-*}-on.log" | head -n1)"
     [[ -n "$cut" ]] && until_args=(--until-s "$cut")
   fi
+  # `pipefail` (set above) carries the analyzer's failure through `tee`.
   ( cd "$REPO" && uv run scripts/perf/pencam_cost.py --stream "$stream" --log "$log" \
       "${surface_args[@]}" "${windows_args[@]}" "${until_args[@]}" --warmup-s "$WARMUP_S" \
       --label "$cond" --json "$OUT/$cond.cost.json" ) | tee -a "$OUT/summary.txt" \
