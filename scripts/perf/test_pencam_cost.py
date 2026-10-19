@@ -112,6 +112,18 @@ class Segments(unittest.TestCase):
         with self.assertRaises(ValueError):
             parse_marks([shows("Glass", 10.0, surface="Inset")])
 
+    def test_marks_on_one_stamp_reconcile_by_rank_not_log_order(self) -> None:
+        # A replay opens the run on its lesson in one frame; the two loggers may write either first.
+        for order in ([Mark(25.0, "lesson"), Mark(25.0, "run-start")], [Mark(25.0, "run-start"), Mark(25.0, "lesson")]):
+            segs = segments([*order, Mark(29.0, "none"), Mark(32.0, "run-end")], 100.0)
+            self.assertEqual(segs["lesson"], [Segment(25.0, 29.0)])
+            self.assertEqual(segs["killcam"], [Segment(25.0, 32.0)])
+        # A run ending and the slot clearing on one stamp, either order.
+        for order in ([Mark(32.0, "none"), Mark(32.0, "run-end")], [Mark(32.0, "run-end"), Mark(32.0, "none")]):
+            segs = segments([Mark(25.0, "run-start"), Mark(25.5, "lesson"), *order], 100.0)
+            self.assertEqual(segs["lesson"], [Segment(25.5, 32.0)])
+            self.assertEqual(segs["killcam"], [Segment(25.0, 32.0)])
+
     def test_a_showing_open_at_the_streams_end_closes_there(self) -> None:
         segs = segments([Mark(90.0, "glass")], 95.5)
         self.assertEqual(segs["glass"], [Segment(90.0, 95.5)])

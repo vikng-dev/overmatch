@@ -105,6 +105,12 @@ def parse_marks(lines) -> list[Mark]:
     return marks
 
 
+# Marks on one stamp come from one frame, where the slot's and the kill cam's loggers have no
+# mutual order: a replay opens the run straight on its lesson, so `lesson(t)` may be logged before
+# `run-start(t)`. Equal stamps are reconciled by rank, not log order (the sort is stable otherwise).
+RANK = {"run-start": 0, "corner": 1, "glass": 1, "lesson": 1, "none": 2, "run-end": 3}
+
+
 def segments(marks: list[Mark], end_t: float) -> dict[str, list[Segment]]:
     """Each class's on-screen segments. A slot mark closes the previous slot segment and opens its
     own; `none` only closes. The run's start and end bracket a killcam segment; a lesson lives only
@@ -113,6 +119,7 @@ def segments(marks: list[Mark], end_t: float) -> dict[str, list[Segment]]:
     out: dict[str, list[Segment]] = {s: [] for s in SURFACES}
     slot: Mark | None = None
     run_start: float | None = None
+    marks = sorted(marks, key=lambda mark: (mark.t, RANK[mark.label]))
 
     def close_slot(at: float) -> None:
         nonlocal slot
