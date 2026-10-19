@@ -816,7 +816,7 @@ impl Plugin for NetClientPlugin {
         app.add_plugins(damage_cam::pen_cam::game::plugin);
 
         // Physics visualization + debug toggles, same pair `ClientPlugin` mounts for SP
-        // (`G` = force arrows + collider wireframes, `X` = x-ray, `F` = camera detach). View-only:
+        // (`G` = force arrows + collider wireframes, `F` = camera detach). View-only:
         // it reads `TrackContacts`/`GlobalTransform` and draws gizmos — nothing sim-visible — so it is
         // safe on a predicting client and is never mounted by the headless server (which composes
         // `SimPlugin` only, never this plugin). Behind the `dev_tools` feature (default-on).
@@ -945,13 +945,13 @@ pub fn run_offline() {
     // `command::offline_auto_fire_plugin`.
     #[cfg(feature = "dev_tools")]
     app.add_plugins(command::offline_auto_fire_plugin);
-    // The same boundary: the parked target firing at the player (`OVERMATCH_TARGET_FIRES`) and a
-    // scripted hold of the pen cam's victim glass (`OVERMATCH_GLASS_HOLD`), for captures of the
-    // player's own tank struck.
+    // The same boundary: the parked target firing at the player (`OVERMATCH_TARGET_FIRES`) and
+    // the scripted own-glass preference (`OVERMATCH_OWN_GLASS`), for captures of the player's own
+    // tank struck.
     #[cfg(feature = "dev_tools")]
     app.add_plugins((
         tank::scenario::offline_target_fires_plugin,
-        damage_cam::pen_cam::game::scripted_hold_plugin,
+        damage_cam::pen_cam::game::scripted_glass_plugin,
     ));
     app.run();
 }

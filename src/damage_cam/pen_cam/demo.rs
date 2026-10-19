@@ -4,8 +4,8 @@
 //! ([`super::present`]) driven from a run of the playlist.
 //!
 //! Run it: `cargo run --bin pen_cam_demo` (optionally a scenario label, `pen_cam_demo s4`, and
-//! `--once` to stop after it). Keys: `X` dismiss, hold `C` to hold, hold `V` for the own-tank
-//! glass, `P` cycles the corner setting (all / through only / off); demo-only `1`–`9`, `0`, `-`,
+//! `--once` to stop after it). Keys, the game's: `Esc` dismiss, hold `C` to hold; `P` cycles the
+//! corner setting (all / through only / off); demo-only `1`–`9`, `0`, `-`,
 //! `=` pick a scenario (`=` is K1, the victim kill cam, where `R` respawns from 0.5 s after the
 //! hit and a left-drag looks while the camera is free), `A` toggles auto-advance, `R` replays,
 //! `Space` pauses, `←`/`→` scrub, `[`/`]`
@@ -29,7 +29,7 @@ use bevy::time::TimeUpdateStrategy;
 use super::plan::Plan;
 use super::timeline::{self, CornerKind, Turn};
 use super::{Corner, Exhibit, Exhibits, Knobs, Showing, Surface};
-use super::{hud, killcam, stage, view, world};
+use super::{hud, killcam, look, stage, view, world};
 use crate::damage_cam::shapes::TankAsset;
 use crate::damage_cam::{PenetrationReport, ShotVerdict};
 
@@ -303,8 +303,6 @@ pub struct Run {
     pub dismissed: Option<(usize, f32)>,
     /// Where the auto-advance gap started.
     pub finished_at: Option<f32>,
-    /// While `V` is held: run seconds it went down.
-    pub own_glass_since: Option<f32>,
     /// Mouse orbit applied to the corner camera while paused (yaw, pitch; rad).
     pub orbit: Vec2,
     /// The shot that knocks the player's own tank out, and the kill cam's beats; the corner stays
@@ -331,7 +329,6 @@ impl Run {
             held_turn: None,
             dismissed: None,
             finished_at: None,
-            own_glass_since: None,
             orbit: Vec2::ZERO,
             kill: None,
             respawned_at: None,
@@ -525,6 +522,8 @@ pub(super) fn sequence(app: &mut App) {
                 view::pose,
                 killcam::stage,
                 camera_writers(),
+                hud::layout,
+                look::own,
                 super::present(),
                 world::animate,
                 labels,
@@ -652,18 +651,12 @@ fn controls(
     if changed {
         run.schedule(&library, &settings);
     }
-    if keys.pressed(KeyCode::KeyV) {
-        let t = run.t;
-        run.own_glass_since.get_or_insert(t);
-    } else {
-        run.own_glass_since = None;
-    }
     // Live controls act on the turn on show.
     let Some(showing) = corner.showing else {
         return;
     };
     let open = run.dismissed.is_none_or(|(turn, _)| turn != showing.turn);
-    if keys.just_pressed(KeyCode::KeyX) && open {
+    if keys.just_pressed(KeyCode::Escape) && open {
         run.dismissed = Some((showing.turn, showing.c));
     }
     if keys.just_released(KeyCode::KeyC) && run.held_turn == Some(showing.turn) {
@@ -730,22 +723,6 @@ fn corner_now(run: Res<Run>, library: Res<Library>, mut corner: ResMut<Corner>) 
     if let Some((shot, beats)) = run.kill {
         // The kill cam's lesson drives the stage's clock; the corner stays shut.
         now.showing = killcam::lesson_showing(beats, run.t, run.shots[shot].record);
-    } else if let Some(since) = run.own_glass_since
-        && let Some(record) = own_glass_record(&library)
-    {
-        // The own-tank glass on demand: open while the key is down.
-        let c = (run.t - since).max(0.0);
-        let (opacity, scale) = timeline::presence(c.min(1.0), f32::INFINITY);
-        now.showing = Some(Showing {
-            record,
-            turn: usize::MAX,
-            kind: CornerKind::Victim,
-            c: c.min(CornerKind::Victim.hold_from()),
-            opacity,
-            scale,
-            remaining: 1.0,
-            surface: Surface::Corner,
-        });
     } else {
         let held = |turn: usize| {
             if run.held_turn == Some(turn) {
@@ -790,17 +767,6 @@ fn corner_now(run: Res<Run>, library: Res<Library>, mut corner: ResMut<Corner>) 
     if *corner != now {
         *corner = now;
     }
-}
-
-/// The record the own-tank glass shows: the latest record that struck the player, which in the
-/// demo is the victim scenario's.
-fn own_glass_record(library: &Library) -> Option<usize> {
-    PLAYLIST
-        .iter()
-        .filter(|entry| entry.victim)
-        .flat_map(|entry| entry.shots.iter())
-        .last()
-        .map(|(stem, _)| library.index(stem))
 }
 
 /// The sight's reticle and the demo's labels, in Bevy's default font, ASCII only.
@@ -903,7 +869,7 @@ fn labels(
     let line = format!(
         "{}  [{}]\nt {:.2} s  x{}{}{}  corner {}  slice {}{}\n\
          1-9 0 - = scenario  A auto  {}  Space pause  Left/Right scrub  [ ] speed  \
-         X dismiss  C hold  V own tank  P setting  F expand  O ortho  L axis  M reduce motion",
+         Esc dismiss  C hold  P setting  F expand  O ortho  L axis  M reduce motion",
         entry.label,
         verdicts.join(", "),
         run.t,

@@ -94,7 +94,7 @@ pub(crate) struct GeometryLodLevel {
 /// This scene primitive has been through the chain scan. Primitives the certificate does not name
 /// carry this and nothing else.
 #[derive(Component)]
-struct GeometryLodScanned;
+pub(crate) struct GeometryLodScanned;
 
 /// Every scene primitive under this entity renders at source detail: scanned, never banded. A view
 /// whose own camera frames it at a scale the battlefield's bands do not measure (the pen cam's

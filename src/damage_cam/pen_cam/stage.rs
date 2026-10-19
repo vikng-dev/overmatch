@@ -17,8 +17,9 @@
 //!
 //! [`spawn_glass`] is the entry point that draws a record over a tank: it takes the tank's hull
 //! entity (whose frame is the record's) and the tank's own meshes of the components the record
-//! names ([`component_meshes`]), and spawns every record element under them. [`animate`] plays
-//! them from the corner's clock.
+//! names ([`component_meshes`]), and spawns every record element under them, tagged for their
+//! owner. [`Playing`] plays them from a clock: the corner's here ([`animate`]), the own glass's
+//! in the game.
 
 use std::collections::HashMap;
 
@@ -29,12 +30,12 @@ use bevy::prelude::*;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
 use super::field::{self, reach_mesh};
-use super::look::{self, FieldPrint, LookMaterial, MaskLayer, Masks};
+use super::look::{self, FieldPrint, LookMaterial, MaskLayer, MaskSet, Masks};
 use super::material::{GlowMaterial, OutlineMaterial, SliceCut, SliceMaterial, SliceParams};
 use super::plan::{BoxPlan, Cone, Plan, Reach};
 use super::timeline::{self, CornerKind};
 use super::view::{Proxy, StageView, ViewMesh, ViewRoot};
-use super::{Corner, CornerRig, Exhibits, Knobs};
+use super::{Corner, CornerRig, Exhibits, Knobs, WorldViewer};
 use crate::render_policy::{self, CameraProfile, LightProfile, VisualScope};
 
 /// The corner's clear colour.
@@ -47,7 +48,7 @@ const LINE_GLOW: f32 = 1.8;
 const TRAIL_CALIBRES: f32 = 0.3;
 /// The game's shell model, the one `ballistics::view` dresses the main-gun round with: origin at
 /// the tip, body along +Z, so `looking_to(travel)` puts the nose forward.
-const SHELL_SCENE: &str = "shell/shell.glb";
+pub(super) const SHELL_SCENE: &str = "shell/shell.glb";
 /// The model's authored diameter and length (m), MEASURED from its position bounds
 /// (±0.044 × ±0.044 × 0..0.263); the model is scaled by calibre over the diameter.
 const SHELL_MODEL_CALIBRE_M: f32 = 0.088;
@@ -107,7 +108,7 @@ pub struct StageCamera;
 pub(super) struct StageShell;
 
 /// Everything [`rebuild`] spawns for one record.
-#[derive(Component)]
+#[derive(Component, Clone, Copy)]
 pub(super) struct StageItem;
 
 /// One leg of the trail between arc lengths `from` and `to`.
@@ -193,6 +194,8 @@ pub struct Stage {
     camera: Option<Entity>,
     /// The hull the built stage is drawn under: its frame is the record's, its up the tank's.
     hull: Option<Entity>,
+    /// The mask set the built stage's look is drawn against: its viewer's.
+    masks: MaskSet,
 }
 
 impl Stage {
@@ -290,10 +293,11 @@ pub fn spawn_inset(
     ));
 }
 
-/// Rebuild the stage when the corner's record or frame changes.
+/// Rebuild the stage when the corner's record or frame changes, its look against the mask set of
+/// the camera drawing it: the inset's in the corner, the main camera's in the kill cam's lesson.
 #[expect(
     clippy::too_many_arguments,
-    reason = "rebuilds the stage from the corner, exhibits and view into the mesh store and four material stores"
+    reason = "rebuilds the stage from the corner, exhibits, view and the viewer's masks into the mesh store and four material stores"
 )]
 pub fn rebuild(
     mut commands: Commands,
@@ -303,6 +307,7 @@ pub fn rebuild(
     items: Query<Entity, With<StageItem>>,
     view: Res<StageView>,
     tank: Query<(Entity, &ViewMesh, &Mesh3d), Without<Proxy>>,
+    main: Query<Entity, With<WorldViewer>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut glows: ResMut<Assets<GlowMaterial>>,
     mut outlines: ResMut<Assets<OutlineMaterial>>,
@@ -325,6 +330,15 @@ pub fn rebuild(
     stage.key = key.clone();
     stage.stale = false;
     stage.hull = Some(hull);
+    let viewer = corner.showing.and_then(|showing| match showing.surface {
+        super::Surface::Corner => stage.camera,
+        super::Surface::World => main.single().ok(),
+    });
+    stage.masks = viewer
+        .and_then(|viewer| masks.of(viewer))
+        .cloned()
+        .unwrap_or_default();
+    let masks = stage.masks.clone();
     for entity in &items {
         commands.entity(entity).despawn();
     }
@@ -368,13 +382,7 @@ pub fn rebuild(
                 let (material, mask) = (entry.0.clone(), entry.1);
                 e.insert((MeshMaterial3d(material), Visibility::Inherited));
                 commands.spawn((
-                    Mesh3d(handle.0.clone()),
-                    MeshMaterial3d(hull_mask.clone()),
-                    Transform::IDENTITY,
-                    match mask {
-                        MaskLayer::Hull => VisualScope::PEN_CAM_HULL_MASK,
-                        MaskLayer::Part => VisualScope::PEN_CAM_PART_MASK,
-                    },
+                    mask_copy(handle.0.clone(), hull_mask.clone(), mask),
                     StageItem,
                     ChildOf(entity),
                 ));
@@ -430,13 +438,32 @@ pub fn rebuild(
             looks: &mut looks,
             masks: &masks,
         },
+        (StageItem, VisualScope::PEN_CAM_STAGE),
     );
+}
+
+/// A copy of the mesh `mesh` for the mask camera of `layer` alone, drawn with `material` (the
+/// masks' [`look::hull_mask`]), at its source's own pose: spawned as the source's child.
+pub(super) fn mask_copy(
+    mesh: Handle<Mesh>,
+    material: Handle<LookMaterial>,
+    layer: MaskLayer,
+) -> impl Bundle {
+    (
+        Mesh3d(mesh),
+        MeshMaterial3d(material),
+        Transform::IDENTITY,
+        match layer {
+            MaskLayer::Hull => VisualScope::PEN_CAM_HULL_MASK,
+            MaskLayer::Part => VisualScope::PEN_CAM_PART_MASK,
+        },
+    )
 }
 
 /// What drawing a record in the base look needs.
 pub struct LookCtx<'a> {
     pub looks: &'a mut Assets<LookMaterial>,
-    pub masks: &'a Masks,
+    pub masks: &'a MaskSet,
 }
 
 /// Draw `plan`'s record over a tank in frame `kind`: the trail, the rings, the spall cones and the
@@ -444,10 +471,11 @@ pub struct LookCtx<'a> {
 /// whose frame is the record's (the struck hull's); each tint is a copy of one of `components`, the
 /// tank's own meshes of the components the record names, spawned under that mesh. `clip` is the
 /// slice plane (unit normal toward the eye, a point on it) the cones are cut by. Everything spawned
-/// is a [`StageItem`], hidden until [`animate`] places it.
+/// carries `tag` — its owner's marker and the channel it draws on — and is hidden until
+/// [`Playing`] places it.
 #[expect(
     clippy::too_many_arguments,
-    reason = "draws one plan: the spawn sinks, the plan and its frame, the parent and clip, the components and the look are separate inputs"
+    reason = "draws one plan: the spawn sinks, the plan and its frame, the parent and clip, the components, the look and the owner's tag are separate inputs"
 )]
 pub fn spawn_glass(
     commands: &mut Commands,
@@ -460,8 +488,8 @@ pub fn spawn_glass(
     clip: Option<(Vec3, Vec3)>,
     components: &[ComponentMesh],
     look_ctx: LookCtx,
+    tag: impl Bundle + Clone,
 ) {
-    let scope = VisualScope::PEN_CAM_STAGE;
     // The trail, one cylinder per leg of the path from the drawn span's start; a round that left
     // trails on past the span behind the shell.
     let cylinder = meshes.add(Cylinder::new(0.5, 1.0));
@@ -486,8 +514,7 @@ pub fn spawn_glass(
                 to,
                 brightness,
             },
-            scope,
-            StageItem,
+            tag.clone(),
             ChildOf(hull),
         ));
     }
@@ -504,8 +531,7 @@ pub fn spawn_glass(
             transform,
             Visibility::Hidden,
             MarkItem { at_arc },
-            scope,
-            StageItem,
+            tag.clone(),
             ChildOf(hull),
         ));
     };
@@ -574,8 +600,7 @@ pub fn spawn_glass(
                     rim: true,
                     peak: 0.0,
                 },
-                scope,
-                StageItem,
+                tag.clone(),
                 ChildOf(hull),
             ));
             material.set_fade(0.0);
@@ -602,8 +627,7 @@ pub fn spawn_glass(
                     rim,
                     peak,
                 },
-                scope,
-                StageItem,
+                tag.clone(),
                 ChildOf(hull),
             ));
         }
@@ -631,8 +655,7 @@ pub fn spawn_glass(
                 Transform::IDENTITY,
                 Visibility::Hidden,
                 BoxTint { index },
-                scope,
-                StageItem,
+                tag.clone(),
                 ChildOf(component.entity),
             )
         };
@@ -861,6 +884,260 @@ fn inset_active(showing: &super::Showing) -> bool {
     showing.surface == super::Surface::Corner
 }
 
+/// One record's elements as a frame plays them: `plan` in frame `kind` at corner time `c`, under
+/// reduce motion or not, with the shell's head and the trail's end derived once. The corner plays
+/// its stage through it ([`animate`]) and the own glass its record over the live tank; each hands
+/// it its own elements, so one clock never reaches the other's.
+pub(super) struct Playing<'a> {
+    plan: &'a Plan,
+    kind: CornerKind,
+    c: f32,
+    reduce: bool,
+    head: f32,
+    drawn: bool,
+    end: (f32, Vec3),
+    line_fade: f32,
+}
+
+impl<'a> Playing<'a> {
+    pub(super) fn new(plan: &'a Plan, kind: CornerKind, c: f32, reduce: bool) -> Self {
+        let head = head_arc(plan, kind, c, reduce);
+        let drawn = shell_drawn(plan, kind, c, reduce);
+        let end = trail_end(plan, head, drawn);
+        let mut playing = Self {
+            plan,
+            kind,
+            c,
+            reduce,
+            head,
+            drawn,
+            end,
+            line_fade: 1.0,
+        };
+        if reduce {
+            playing.line_fade = playing.fade_from(kind.line_window().0);
+        }
+        playing
+    }
+
+    /// An element's fade-in from corner time `start`: short, longer under reduce motion.
+    fn fade_from(&self, start: f32) -> f32 {
+        let span = if self.reduce {
+            timeline::REDUCED_FADE_S
+        } else {
+            0.12
+        };
+        timeline::progress(self.c, start, span)
+    }
+
+    /// The shell model's pose, nose at the head at the record's calibre, or `None` while it is not
+    /// drawn; the trail ends at its tail.
+    pub(super) fn shell(&self) -> Option<Transform> {
+        self.drawn.then(|| shell_transform(self.plan, self.head))
+    }
+
+    /// A trail leg: along its drawn extent, lit by its brightness, or hidden.
+    pub(super) fn line(
+        &self,
+        seg: &LineSeg,
+        material: &MeshMaterial3d<GlowMaterial>,
+        transform: &mut Transform,
+        visibility: &mut Mut<Visibility>,
+        glows: &mut Assets<GlowMaterial>,
+    ) {
+        let plan = self.plan;
+        let Some((a, b)) = trail_span(plan, seg.from, seg.to, self.end) else {
+            visibility.set_if_neq(Visibility::Hidden);
+            return;
+        };
+        let span = b - a;
+        let length = span.length();
+        if length < 1e-5 {
+            visibility.set_if_neq(Visibility::Hidden);
+            return;
+        }
+        let trail_width = plan.calibre * TRAIL_CALIBRES;
+        *transform = Transform::from_translation(0.5 * (a + b))
+            .with_rotation(Quat::from_rotation_arc(Vec3::Y, span / length))
+            .with_scale(Vec3::new(trail_width, length, trail_width));
+        if let Some(mut m) = glows.get_mut(&material.0) {
+            m.set_fade(self.line_fade);
+            m.set_intensity(LINE_GLOW * seg.brightness);
+        }
+        visibility.set_if_neq(Visibility::Inherited);
+    }
+
+    /// A ring: faded in as the nose reaches its arc.
+    pub(super) fn mark(
+        &self,
+        mark: &MarkItem,
+        material: &MeshMaterial3d<GlowMaterial>,
+        visibility: &mut Mut<Visibility>,
+        glows: &mut Assets<GlowMaterial>,
+    ) {
+        let fade = self.fade_from(time_at_arc(self.plan, self.kind, mark.at_arc, self.reduce));
+        if let Some(mut m) = glows.get_mut(&material.0) {
+            m.set_fade(fade);
+        }
+        visibility.set_if_neq(if fade > 0.0 {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
+    }
+
+    /// A spall cone's surface: its front run out from the origin, or under reduce motion the whole
+    /// field faded in.
+    pub(super) fn cone(
+        &self,
+        shell: &ConeShell,
+        glow: Option<&MeshMaterial3d<GlowMaterial>>,
+        look: Option<&MeshMaterial3d<LookMaterial>>,
+        visibility: &mut Mut<Visibility>,
+        glows: &mut Assets<GlowMaterial>,
+        looks: &mut Assets<LookMaterial>,
+    ) {
+        let (plan, kind, c) = (self.plan, self.kind, self.c);
+        let (front, fade) = if self.reduce {
+            (
+                None,
+                self.fade_from(cone_start(plan, kind, shell.cone, true)),
+            )
+        } else {
+            let front = front_radius(plan, kind, shell.cone, c);
+            (Some(front), if front > 0.0 { 1.0 } else { 0.0 })
+        };
+        if fade <= 0.0 {
+            visibility.set_if_neq(Visibility::Hidden);
+            return;
+        }
+        if let Some(mut m) = glow.and_then(|m| glows.get_mut(&m.0)) {
+            m.set_fade(fade);
+            m.set_front(front);
+            if !shell.rim {
+                m.set_intensity(shell.peak);
+            }
+        }
+        if let Some(mut m) = look.and_then(|m| looks.get_mut(&m.0)) {
+            m.set_fade(fade);
+            m.set_front(front);
+        }
+        visibility.set_if_neq(Visibility::Inherited);
+    }
+
+    /// Each field's footprint, in world space under the record frame `hull`, on the base look's
+    /// surfaces drawn against `masks`; the frames that draw the base look or the tank outside
+    /// mark it, the slice does not.
+    pub(super) fn footprints(
+        &self,
+        hull: &GlobalTransform,
+        masks: &MaskSet,
+        looks: &mut Assets<LookMaterial>,
+    ) {
+        let (plan, kind, c) = (self.plan, self.kind, self.c);
+        if !matches!(
+            kind,
+            CornerKind::Glass | CornerKind::Victim | CornerKind::Damaged
+        ) {
+            return;
+        }
+        let linear = hull.affine().matrix3;
+        let prints: Vec<FieldPrint> = plan
+            .cones
+            .iter()
+            .enumerate()
+            .map(|(index, cone)| {
+                let axis = linear * cone.axis;
+                let scale = axis.length();
+                let reach = cone.max_reach();
+                let front = if self.reduce {
+                    if c >= cone_start(plan, kind, index, true) {
+                        reach
+                    } else {
+                        -1.0
+                    }
+                } else {
+                    front_radius(plan, kind, index, c)
+                };
+                FieldPrint {
+                    origin: hull.transform_point(cone.origin),
+                    axis: axis / scale.max(1e-6),
+                    half_angle: cone.half_angle,
+                    reach: reach * scale,
+                    front: front * scale,
+                    level: timeline::field_level(cone.strength),
+                    rays: cone
+                        .rays
+                        .iter()
+                        .map(|ray| {
+                            let direction = linear * ray.direction;
+                            (direction / direction.length().max(1e-6), ray.reach * scale)
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        look::set_footprints(looks, masks, &prints);
+    }
+
+    /// A component's state fill and its outline: risen along the up of the record frame `hull`
+    /// (the tank's) to the component's heights, filled from the moment the picture reaches it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one tint's two materials and visibility, the two stores and the frame they rise in"
+    )]
+    pub(super) fn fill(
+        &self,
+        tint: &BoxTint,
+        outline: Option<&MeshMaterial3d<OutlineMaterial>>,
+        look: Option<&MeshMaterial3d<LookMaterial>>,
+        visibility: &mut Mut<Visibility>,
+        hull: Option<&GlobalTransform>,
+        outlines: &mut Assets<OutlineMaterial>,
+        looks: &mut Assets<LookMaterial>,
+    ) {
+        let (plan, kind, c) = (self.plan, self.kind, self.c);
+        let b = &plan.boxes[tint.index];
+        let start = box_start(plan, kind, b, self.reduce);
+        let fill = if self.reduce {
+            self.fade_from(start)
+        } else {
+            timeline::ease_enter(timeline::progress(c, start, timeline::BOX_FILL_S))
+        };
+        if let Some(mut m) = outline.and_then(|m| outlines.get_mut(&m.0)) {
+            m.set_fade(fill);
+        }
+        if let Some(mut m) = look.and_then(|m| looks.get_mut(&m.0)) {
+            m.set_fade(fill);
+            if let Some(hull) = hull {
+                let up = *hull.up();
+                let height = |y: f32| hull.transform_point(Vec3::Y * y).dot(up);
+                m.set_fill_span(up, b.heights.map(|(lo, hi)| (height(lo), height(hi))));
+            }
+        }
+        visibility.set_if_neq(if fill > 0.0 {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        });
+    }
+
+    /// Each thrown cone's axis as a line, in the record's frame (the bench's switch).
+    fn axis_lines(&self, gizmos: &mut Gizmos<StageGizmos>) {
+        let (plan, kind, c) = (self.plan, self.kind, self.c);
+        for (index, cone) in plan.cones.iter().enumerate() {
+            if c >= cone_start(plan, kind, index, self.reduce) {
+                let reach = cone.max_reach();
+                gizmos.line(
+                    cone.origin,
+                    cone.origin + cone.axis * reach,
+                    Color::srgb(0.95, 0.95, 0.95),
+                );
+            }
+        }
+    }
+}
+
 /// Animate the stage from the corner's clock and frame the corner camera.
 #[expect(
     clippy::too_many_arguments,
@@ -883,11 +1160,21 @@ pub fn animate(
             &mut Transform,
             &mut Visibility,
         ),
-        (Without<MarkItem>, Without<ConeShell>, Without<StageCamera>),
+        (
+            With<StageItem>,
+            Without<MarkItem>,
+            Without<ConeShell>,
+            Without<StageCamera>,
+        ),
     >,
     mut marks: Query<
         (&MarkItem, &MeshMaterial3d<GlowMaterial>, &mut Visibility),
-        (Without<LineSeg>, Without<ConeShell>, Without<BoxTint>),
+        (
+            With<StageItem>,
+            Without<LineSeg>,
+            Without<ConeShell>,
+            Without<BoxTint>,
+        ),
     >,
     mut shells: Query<
         (
@@ -896,7 +1183,12 @@ pub fn animate(
             Option<&MeshMaterial3d<LookMaterial>>,
             &mut Visibility,
         ),
-        (Without<LineSeg>, Without<MarkItem>, Without<BoxTint>),
+        (
+            With<StageItem>,
+            Without<LineSeg>,
+            Without<MarkItem>,
+            Without<BoxTint>,
+        ),
     >,
     mut boxes: Query<
         (
@@ -905,7 +1197,12 @@ pub fn animate(
             Option<&MeshMaterial3d<LookMaterial>>,
             &mut Visibility,
         ),
-        (Without<LineSeg>, Without<MarkItem>, Without<ConeShell>),
+        (
+            With<StageItem>,
+            Without<LineSeg>,
+            Without<MarkItem>,
+            Without<ConeShell>,
+        ),
     >,
     mut camera: Query<
         (&mut Camera, &mut Transform, &mut Projection),
@@ -944,179 +1241,46 @@ pub fn animate(
     let plan = &*exhibit.plan;
     let kind = showing.kind;
     let c = showing.c;
-    let reduce = knobs.reduce_motion;
-    let fade_from = |start: f32| {
-        let span = if reduce {
-            timeline::REDUCED_FADE_S
-        } else {
-            0.12
-        };
-        timeline::progress(c, start, span)
-    };
-    let head = head_arc(plan, kind, c, reduce);
-    let line_fade = if reduce {
-        fade_from(kind.line_window().0)
-    } else {
-        1.0
-    };
+    let playing = Playing::new(plan, kind, c, knobs.reduce_motion);
 
-    // The shell, nose at the head, at the record's calibre; the trail ends at its tail.
-    let drawn = shell_drawn(plan, kind, c, reduce);
-    let end = trail_end(plan, head, drawn);
-    if drawn {
-        let want = shell_transform(plan, head);
-        if *shell_pose != want {
-            *shell_pose = want;
+    match playing.shell() {
+        Some(want) => {
+            if *shell_pose != want {
+                *shell_pose = want;
+            }
+            shell_visibility.set_if_neq(Visibility::Inherited);
         }
-        shell_visibility.set_if_neq(Visibility::Inherited);
-    } else {
-        shell_visibility.set_if_neq(Visibility::Hidden);
+        None => {
+            shell_visibility.set_if_neq(Visibility::Hidden);
+        }
     }
-
-    let trail_width = plan.calibre * TRAIL_CALIBRES;
     for (seg, material, mut transform, mut visibility) in &mut lines {
-        let Some((a, b)) = trail_span(plan, seg.from, seg.to, end) else {
-            visibility.set_if_neq(Visibility::Hidden);
-            continue;
-        };
-        let span = b - a;
-        let length = span.length();
-        if length < 1e-5 {
-            visibility.set_if_neq(Visibility::Hidden);
-            continue;
-        }
-        *transform = Transform::from_translation(0.5 * (a + b))
-            .with_rotation(Quat::from_rotation_arc(Vec3::Y, span / length))
-            .with_scale(Vec3::new(trail_width, length, trail_width));
-        if let Some(mut m) = glows.get_mut(&material.0) {
-            m.set_fade(line_fade);
-            m.set_intensity(LINE_GLOW * seg.brightness);
-        }
-        visibility.set_if_neq(Visibility::Inherited);
+        playing.line(seg, material, &mut transform, &mut visibility, &mut glows);
     }
-
     for (mark, material, mut visibility) in &mut marks {
-        let fade = fade_from(time_at_arc(plan, kind, mark.at_arc, reduce));
-        if let Some(mut m) = glows.get_mut(&material.0) {
-            m.set_fade(fade);
-        }
-        visibility.set_if_neq(if fade > 0.0 {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        });
+        playing.mark(mark, material, &mut visibility, &mut glows);
     }
-
-    for (shell, material, look_material, mut visibility) in &mut shells {
-        // Reduce motion fades the whole field in; otherwise its front runs out from the origin.
-        let (front, fade) = if reduce {
-            (None, fade_from(cone_start(plan, kind, shell.cone, true)))
-        } else {
-            let front = front_radius(plan, kind, shell.cone, c);
-            (Some(front), if front > 0.0 { 1.0 } else { 0.0 })
-        };
-        if fade <= 0.0 {
-            visibility.set_if_neq(Visibility::Hidden);
-            continue;
-        }
-        if let Some(mut m) = material.and_then(|m| glows.get_mut(&m.0)) {
-            m.set_fade(fade);
-            m.set_front(front);
-            if !shell.rim {
-                m.set_intensity(shell.peak);
-            }
-        }
-        if let Some(mut m) = look_material.and_then(|m| looks.get_mut(&m.0)) {
-            m.set_fade(fade);
-            m.set_front(front);
-        }
-        visibility.set_if_neq(Visibility::Inherited);
+    for (shell, glow, look, mut visibility) in &mut shells {
+        playing.cone(shell, glow, look, &mut visibility, &mut glows, &mut looks);
     }
-
-    // The state fills rise along the hull's up, the tank's.
+    // The state fills rise along the hull's up, the tank's; the footprints are taken in its frame.
     let hull = stage.hull.and_then(|hull| hulls.get(hull).ok());
-    // Each field's footprint, in world space, where the base look marks it.
-    if let Some(hull) = hull
-        && matches!(
-            kind,
-            CornerKind::Glass | CornerKind::Victim | CornerKind::Damaged
-        )
-    {
-        let linear = hull.affine().matrix3;
-        let prints: Vec<FieldPrint> = plan
-            .cones
-            .iter()
-            .enumerate()
-            .map(|(index, cone)| {
-                let axis = linear * cone.axis;
-                let scale = axis.length();
-                let reach = cone.max_reach();
-                let front = if reduce {
-                    if c >= cone_start(plan, kind, index, true) {
-                        reach
-                    } else {
-                        -1.0
-                    }
-                } else {
-                    front_radius(plan, kind, index, c)
-                };
-                FieldPrint {
-                    origin: hull.transform_point(cone.origin),
-                    axis: axis / scale.max(1e-6),
-                    half_angle: cone.half_angle,
-                    reach: reach * scale,
-                    front: front * scale,
-                    level: timeline::field_level(cone.strength),
-                    rays: cone
-                        .rays
-                        .iter()
-                        .map(|ray| {
-                            let direction = linear * ray.direction;
-                            (direction / direction.length().max(1e-6), ray.reach * scale)
-                        })
-                        .collect(),
-                }
-            })
-            .collect();
-        look::set_footprints(&mut looks, &prints);
+    if let Some(hull) = hull {
+        playing.footprints(hull, &stage.masks, &mut looks);
     }
-    for (tint, outline, look_material, mut visibility) in &mut boxes {
-        let b = &plan.boxes[tint.index];
-        let start = box_start(plan, kind, b, reduce);
-        let fill = if reduce {
-            fade_from(start)
-        } else {
-            timeline::ease_enter(timeline::progress(c, start, timeline::BOX_FILL_S))
-        };
-        if let Some(mut m) = outline.and_then(|m| outlines.get_mut(&m.0)) {
-            m.set_fade(fill);
-        }
-        if let Some(mut m) = look_material.and_then(|m| looks.get_mut(&m.0)) {
-            m.set_fade(fill);
-            if let Some(hull) = hull {
-                let up = *hull.up();
-                let height = |y: f32| hull.transform_point(Vec3::Y * y).dot(up);
-                m.set_fill_span(up, b.heights.map(|(lo, hi)| (height(lo), height(hi))));
-            }
-        }
-        visibility.set_if_neq(if fill > 0.0 {
-            Visibility::Inherited
-        } else {
-            Visibility::Hidden
-        });
+    for (tint, outline, look, mut visibility) in &mut boxes {
+        playing.fill(
+            tint,
+            outline,
+            look,
+            &mut visibility,
+            hull,
+            &mut outlines,
+            &mut looks,
+        );
     }
-
     if knobs.axis_line {
-        for (index, cone) in plan.cones.iter().enumerate() {
-            if c >= cone_start(plan, kind, index, reduce) {
-                let reach = cone.max_reach();
-                gizmos.line(
-                    cone.origin,
-                    cone.origin + cone.axis * reach,
-                    Color::srgb(0.95, 0.95, 0.95),
-                );
-            }
-        }
+        playing.axis_lines(&mut gizmos);
     }
 
     // The slice's reveal.

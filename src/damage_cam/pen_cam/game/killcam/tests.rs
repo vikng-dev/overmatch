@@ -53,8 +53,8 @@ fn shot(
     (victim, shooter, vocabulary, report)
 }
 
-/// The kill cam's app: [`corner_app`](super::super::tests::corner_app) with the default keys and
-/// the player's camera.
+/// The kill cam's app: [`corner_app`](super::super::tests::corner_app) with the default keys, the
+/// Esc router and the player's camera.
 fn app(settings: Settings) -> (App, Entity, Entity) {
     app_with(settings, |_| {})
 }
@@ -65,6 +65,7 @@ fn app_with(settings: Settings, mount: impl FnOnce(&mut App)) -> (App, Entity, E
     app.insert_resource(Bindings::default())
         .init_resource::<ButtonInput<KeyCode>>()
         .init_resource::<ButtonInput<MouseButton>>();
+    crate::state::escape_router(&mut app);
     let camera = app
         .world_mut()
         .spawn((PlayerView, CameraProfile::BattlefieldThirdPerson))
@@ -261,12 +262,12 @@ fn a_late_record_is_offered_for_replay() {
     assert!(!gate(&app).holds_death_screen);
 }
 
-/// The skip key ends a run at the death screen; the hold key freezes its clock while down; the
-/// replay key plays it again; none of them reads before the dead-zone's end.
+/// Esc ends a run at the death screen; the hold key freezes its clock while down; the replay key
+/// plays it again; none of them reads before the dead-zone's end.
 #[test]
 fn skip_hold_and_replay() {
     let (mut app, _, _) = killed(-1.0);
-    press(&mut app, KeyCode::KeyX);
+    press(&mut app, KeyCode::Escape);
     assert!(victim(&app).run().is_some(), "no key in the dead-zone");
     assert!(until(&mut app, 1.0, |app| beat(app) == Some(Beat::Lesson)));
     run(&mut app, 0.2);
@@ -284,7 +285,7 @@ fn skip_hold_and_replay() {
     assert!(after.t - before.t < STEP_S * 1.5, "the clock held");
     assert_eq!(after.beat(), Beat::Lesson);
 
-    press(&mut app, KeyCode::KeyX);
+    press(&mut app, KeyCode::Escape);
     assert!(victim(&app).run().is_none(), "skipped");
     assert!(!captive(&app));
     assert!(!gate(&app).holds_death_screen);
@@ -491,6 +492,27 @@ fn the_gate_is_read_on_the_frame_it_is_written() {
             "{key:?}"
         );
     }
+}
+
+/// Esc during a run ends it and opens no menu; the next Esc opens the menu; with no run, Esc opens
+/// the menu at once. On the overlay sets, as the network client composes them.
+#[test]
+fn esc_skips_the_run_before_it_reaches_the_menu() {
+    let menu = |app: &App| app.world().resource::<Overlays>().contains(Overlay::Menu);
+    let (mut app, player, camera) = composed();
+    crate::overlay::mount_bare(&mut app);
+    let (mut app, _, _) = killed_in((app, player, camera), -1.0);
+    assert!(until(&mut app, 1.0, |app| beat(app) == Some(Beat::Lesson)));
+    press(&mut app, KeyCode::Escape);
+    assert!(victim(&app).run().is_none(), "the run ended");
+    assert!(!menu(&app), "and the press opened no menu");
+    press(&mut app, KeyCode::Escape);
+    assert!(menu(&app), "the next press is the menu's");
+
+    let (mut app, _, _) = composed();
+    crate::overlay::mount_bare(&mut app);
+    press(&mut app, KeyCode::Escape);
+    assert!(menu(&app), "with no run the press is the menu's");
 }
 
 /// The captor's profile draws on the frame its beat begins: the lesson's channels on the lesson's
@@ -726,4 +748,61 @@ fn the_death_flow_owns_the_device() {
         hold_all(&mut app, 1, |_| {});
         assert_eq!(command(&app).crew_swap, swap, "{replay:?}: swapped");
     }
+}
+
+/// Esc pressed on the very frame a run starts is the run's: the router gave it to the menu on the
+/// gate as the frame entered (no run yet), and the run starting takes it back — no menu online, no
+/// pause offline, no skip inside the dead-zone.
+#[test]
+fn esc_on_the_frame_a_run_starts_is_the_runs() {
+    let (mut app, player, _) = composed();
+    crate::overlay::mount_bare(&mut app);
+    let (explanation, _, vocabulary, _) = shot(STRUCK, player_life(0), true);
+    receive(&mut app, explanation, &vocabulary);
+    knock_out(&mut app, player);
+    press(&mut app, KeyCode::Escape);
+    assert!(
+        victim(&app).run().is_some(),
+        "the run started on that frame"
+    );
+    assert!(
+        !app.world().resource::<Overlays>().contains(Overlay::Menu),
+        "and the press opened no menu"
+    );
+    assert_eq!(
+        *app.world().resource::<crate::state::EscapeAction>(),
+        crate::state::EscapeAction::None,
+        "the press was taken"
+    );
+}
+
+/// Offline, Esc on the very frame a run starts pauses nothing: the pause toggle orders after the
+/// kill cam's drive, which took the press back. The game is Playing on the frame after.
+#[test]
+fn esc_on_the_frame_a_run_starts_does_not_pause() {
+    use crate::state::AppState;
+
+    let (mut app, player, _) = app_with(Settings::default(), |app| {
+        bevy::state::app::StatesPlugin.build(app);
+    });
+    app.init_state::<AppState>();
+    crate::state::mount_pause_bare(&mut app);
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::Playing);
+    step(&mut app);
+    let (explanation, _, vocabulary, _) = shot(STRUCK, player_life(0), true);
+    receive(&mut app, explanation, &vocabulary);
+    knock_out(&mut app, player);
+    press(&mut app, KeyCode::Escape);
+    assert!(
+        victim(&app).run().is_some(),
+        "the run started on that frame"
+    );
+    step(&mut app);
+    assert_eq!(
+        *app.world().resource::<State<AppState>>().get(),
+        AppState::Playing,
+        "no pause on the run's first frame"
+    );
 }

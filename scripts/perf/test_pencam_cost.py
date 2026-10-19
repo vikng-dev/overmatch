@@ -95,6 +95,20 @@ class Segments(unittest.TestCase):
         self.assertEqual(segs["corner"], [Segment(10.0, 11.5)])
         self.assertEqual(segs["glass"], [Segment(11.5, 16.0)])
 
+    def test_the_own_glass_brackets_its_segment_beside_the_slot(self) -> None:
+        lines = [
+            "pen cam: the own glass is on at t=65.000 s (Time<Real>)",
+            "pen cam: the own glass is off at t=95.000 s (Time<Real>)",
+        ]
+        self.assertEqual(parse_marks(lines), [Mark(65.0, "glass-on"), Mark(95.0, "glass-off")])
+        segs = segments(
+            [Mark(60.0, "corner"), Mark(65.0, "glass-on"), Mark(70.0, "none"), Mark(95.0, "glass-off")],
+            100.0,
+        )
+        self.assertEqual(segs["corner"], [Segment(60.0, 70.0)], "the slot's segment is its own")
+        self.assertEqual(segs["glass"], [Segment(65.0, 95.0)])
+        self.assertEqual(segments([Mark(65.0, "glass-on")], 98.0)["glass"], [Segment(65.0, 98.0)])
+
     def test_a_world_showing_is_the_lessons_segment_inside_the_run(self) -> None:
         segs = segments(
             [Mark(25.0, "run-start"), Mark(25.5, "lesson"), Mark(29.1, "none"), Mark(32.1, "run-end")],

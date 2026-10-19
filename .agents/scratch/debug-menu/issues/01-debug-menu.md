@@ -10,7 +10,7 @@ The debug visualisations are accumulating as hardcoded, always-on toggles. We wa
 
 All dev-only (`#[cfg(debug_assertions)]`):
 
-- **X-ray** — press `X`, makes the tank translucent so inner gizmos show through (`src/debug.rs`, `toggle_xray`).
+- **X-ray** — gone (2026-10-20): `X` is the pen cam's own glass now (`src/damage_cam/pen_cam/game/glass.rs`), which shows the tank's interior as the record and the live state draw it; a debug translucency would be a second, weaker view of the same thing.
 - **Suspension force arrows** — cyan per-wheel load arrows, currently always drawn (`src/debug.rs`, `draw_suspension_forces`).
 - **Avian physics gizmos** — collider wireframes + raycast rays/hit-points/normals, currently always on via `PhysicsDebugPlugin` (`src/lib.rs`). Configurable per-category via `PhysicsGizmos` in `GizmoConfigStore` (colliders, AABBs, contacts, raycasts each have their own colour/toggle).
 - **(coming)** drive thrust vectors, lateral-friction vectors, COM marker, per-wheel numeric load readout.

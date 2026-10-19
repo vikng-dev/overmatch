@@ -612,7 +612,6 @@ pub(crate) fn drive_gunner_aim(
 }
 
 /// Live playtest knob: step [`GunnerBlend`] along its ladder with `B` and name the value on-screen.
-/// (`V` is the pen cam's own-tank glass, `command::Bindings::own_tank_glass`.)
 ///
 /// The blend only *matters* in gunner view, but cycling is allowed from anywhere so a playtester can
 /// pre-pick; the toast is the feedback. The camera reads the resource fresh each frame and keeps no

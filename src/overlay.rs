@@ -11,6 +11,7 @@ use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
 
 use crate::flow::{Flow, InMatchSystems};
+use crate::state::{EscapeAction, EscapeRouted};
 
 /// The client's full-screen overlays, ordered by PRIORITY via the derived `Ord`. The variants are
 /// declared LOW→HIGH, so the greatest is the top layer: `ConnectStatus` is the maximum (a dropped
@@ -302,6 +303,8 @@ pub(crate) enum OverlaySet {
 
 pub(crate) fn plugin(app: &mut App) {
     crate::flow::require(app, "overlay");
+    // Esc is routed once per press (`state::EscapeAction`); the menu's toggle reads the decision.
+    crate::state::escape_router(app);
     app.init_resource::<Overlays>()
         .init_resource::<RefocusGrab>()
         // Every overlay a match declared leaves with it: nothing latched in one match is up on the
@@ -320,8 +323,12 @@ pub(crate) fn plugin(app: &mut App) {
             Update,
             (
                 declare_screen.in_set(OverlaySet::Declare),
-                // Esc's routing READS the set, so it runs in the toggle stage. The menu is a match's.
-                esc_toggle.in_set(OverlaySet::Toggle).in_set(InMatchSystems),
+                // Esc's routing READS the set, so it runs in the toggle stage, and after the Esc
+                // router decided whose the press is. The menu is a match's.
+                esc_toggle
+                    .in_set(OverlaySet::Toggle)
+                    .in_set(InMatchSystems)
+                    .after(EscapeRouted),
                 cursor_owner.in_set(OverlaySet::Cursor),
                 // The ONE scrim reconciler for every marked overlay node. Ordered after every writer —
                 // the connect / death / view-death owners in `Declare` AND the Esc / `M` toggles in
@@ -331,6 +338,16 @@ pub(crate) fn plugin(app: &mut App) {
                 apply_overlay_visibility.after(OverlaySet::Toggle),
             ),
         );
+}
+
+/// The Esc menu toggle on the overlay sets, without the match flow, the cursor owner or the Esc
+/// router (the composed test mounts that), for a composed schedule under test.
+#[cfg(test)]
+pub(crate) fn mount_bare(app: &mut App) {
+    app.init_resource::<Overlays>().add_systems(
+        Update,
+        esc_toggle.in_set(OverlaySet::Toggle).after(EscapeRouted),
+    );
 }
 
 fn clear_overlays(mut overlays: ResMut<Overlays>) {
@@ -368,14 +385,15 @@ fn spawn_menu_overlay(mut commands: Commands) {
     ));
 }
 
-/// Esc toggles the menu presence directly on [`Overlays`] — the menu's one home, retiring the old
-/// `MenuOverlay{open}`. The routing is the pure [`esc_menu_target`]; the cursor follows from
-/// [`input_blocked`] via the cursor owner — this system moves no cursor itself.
+/// An Esc press the router gave the menu ([`EscapeAction::Menu`]; a kill cam run takes the press
+/// as its skip instead) toggles the menu presence directly on [`Overlays`] — the menu's one home,
+/// retiring the old `MenuOverlay{open}`. The routing is the pure [`esc_menu_target`]; the cursor
+/// follows from [`input_blocked`] via the cursor owner — this system moves no cursor itself.
 ///
 /// Runs in [`OverlaySet::Toggle`], after every state-driven declarer: the routing reads the set, so it
 /// needs this frame's connect / death declarations already in it.
-fn esc_toggle(keys: Res<ButtonInput<KeyCode>>, mut overlays: ResMut<Overlays>) {
-    if !keys.just_pressed(KeyCode::Escape) {
+fn esc_toggle(action: Res<EscapeAction>, mut overlays: ResMut<Overlays>) {
+    if *action != EscapeAction::Menu {
         return;
     }
     let present = esc_menu_target(&overlays);
@@ -713,12 +731,13 @@ mod tests {
     /// schedule would run `esc_toggle` first, against a set that does not have the connect screen in it
     /// yet, and Esc would latch an invisible input-blocking menu under it (the same-frame declare race).
     /// The executor is pinned single-threaded so registration order is the only thing the chain has to
-    /// beat.
+    /// beat. The press reaches the toggle through the Esc router, as it does in the game.
     #[test]
     fn esc_cannot_latch_a_menu_under_an_overlay_declared_the_same_frame() {
         let mut app = App::new();
         app.init_resource::<Overlays>();
         app.init_resource::<ButtonInput<KeyCode>>();
+        crate::state::escape_router(&mut app);
         app.configure_sets(
             Update,
             (OverlaySet::Declare, OverlaySet::Toggle, OverlaySet::Cursor).chain(),
@@ -726,7 +745,7 @@ mod tests {
         app.add_systems(
             Update,
             (
-                esc_toggle.in_set(OverlaySet::Toggle),
+                esc_toggle.in_set(OverlaySet::Toggle).after(EscapeRouted),
                 declare_connect_status.in_set(OverlaySet::Declare),
             ),
         );
