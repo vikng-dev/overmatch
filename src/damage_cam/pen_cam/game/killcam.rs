@@ -127,6 +127,32 @@ struct Killing {
     range_m: Option<f32>,
 }
 
+impl Killing {
+    /// `stored`, the killing record of `life`, taken `since` seconds after the knockout fact: its
+    /// killer named by the shooter's live tank file where one stands in `scene`, its range where
+    /// the record has the muzzle.
+    fn taken(stored: &StoredExplanation, scene: &Scene, life: TankLife, since: f32) -> Self {
+        let report = &stored.report;
+        let range_m = report
+            .muzzle
+            .map(|muzzle| Vec3::from(muzzle).distance(Vec3::from(report.impact.point)));
+        let vehicle = scene
+            .shooters
+            .iter()
+            .find(|(_, id, _, _)| **id == stored.explanation.shot.combatant)
+            .and_then(|(_, _, _, spec)| spec?.0.path())
+            .map(|path| path.path().to_string_lossy().into_owned());
+        Self {
+            life,
+            stored: stored.clone(),
+            timely: stored.presence == ImpactPresence::Presented && since <= RECORD_WAIT_S,
+            after_s: since,
+            killer: Killer::of_vehicle(vehicle.as_deref(), &report.round),
+            range_m,
+        }
+    }
+}
+
 /// Where beat 3 looks: the shooter's live tank, or where its muzzle fired from.
 #[derive(Clone, Copy, Debug)]
 enum ShooterAt {
@@ -479,24 +505,7 @@ pub(super) fn drive(
     if victim.record.is_none()
         && let Some(stored) = store.as_deref().and_then(|store| killing(store, life))
     {
-        let report = &stored.report;
-        let range_m = report
-            .muzzle
-            .map(|muzzle| Vec3::from(muzzle).distance(Vec3::from(report.impact.point)));
-        let vehicle = scene
-            .shooters
-            .iter()
-            .find(|(_, id, _, _)| **id == stored.explanation.shot.combatant)
-            .and_then(|(_, _, _, spec)| spec?.0.path())
-            .map(|path| path.path().to_string_lossy().into_owned());
-        victim.record = Some(Killing {
-            life,
-            stored: stored.clone(),
-            timely: stored.presence == ImpactPresence::Presented && since <= RECORD_WAIT_S,
-            after_s: since,
-            killer: Killer::of_vehicle(vehicle.as_deref(), &report.round),
-            range_m,
-        });
+        victim.record = Some(Killing::taken(stored, &scene, life, since));
     }
 
     // Input: the cursor's, past the dead-zone. The skip is the Esc router's decision, taken with

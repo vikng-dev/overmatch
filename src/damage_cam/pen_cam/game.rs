@@ -1825,7 +1825,7 @@ mod tests {
         let (early, early_vocabulary) = incoming_at("s1_through_crew", 1300, 1302);
         let (late, late_vocabulary) = incoming_at("s3_ricochet", 1300, 1305);
         receive(&mut app, late.clone(), &late_vocabulary);
-        receive(&mut app, early.clone(), &early_vocabulary);
+        receive(&mut app, early, &early_vocabulary);
         assert_eq!(
             latest(&app),
             Some(ExplanationKey::of(&late)),
