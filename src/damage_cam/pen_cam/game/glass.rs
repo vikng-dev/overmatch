@@ -63,10 +63,6 @@ use crate::sight::SightMode;
 use crate::tank::{Controlled, ViewNode};
 use crate::view::PlayerView;
 
-/// Whether the victim glass is held open this frame: by the scripted hold alone (its key is gone).
-#[derive(Resource, Default, Clone, Copy, PartialEq, Debug)]
-pub(crate) struct GlassHold(pub(crate) bool);
-
 /// The player's own-glass preference, which [`Bindings::own_glass`] toggles: kept across lives,
 /// respawn, the map and a disconnect, so the glass returns on the next live tank.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
@@ -140,6 +136,12 @@ impl Glass {
     #[cfg(test)]
     pub(super) fn plan(&self) -> Option<&Plan> {
         self.built.as_ref().map(|built| &*built.plan)
+    }
+
+    /// App seconds the record on show first showed, while built.
+    #[cfg(test)]
+    pub(super) fn since(&self) -> Option<f64> {
+        self.built.as_ref().map(|built| built.since)
     }
 }
 
@@ -378,19 +380,23 @@ pub(super) fn build(
         },
         (GlassItem, VisualScope::WORLD_EFFECT),
     );
-    let shell = state
-        .shell
-        .get_or_insert_with(|| asset_server.load(GltfAssetLabel::Scene(0).from_asset(SHELL_SCENE)))
-        .clone();
-    commands.spawn((
-        WorldAssetRoot(shell),
-        Transform::IDENTITY,
-        Visibility::Hidden,
-        VisualScope::WORLD_EFFECT,
-        GlassShell,
-        GlassItem,
-        ChildOf(hull),
-    ));
+    if plan.line.points.len() >= 2 {
+        let shell = state
+            .shell
+            .get_or_insert_with(|| {
+                asset_server.load(GltfAssetLabel::Scene(0).from_asset(SHELL_SCENE))
+            })
+            .clone();
+        commands.spawn((
+            WorldAssetRoot(shell),
+            Transform::IDENTITY,
+            Visibility::Hidden,
+            VisualScope::WORLD_EFFECT,
+            GlassShell,
+            GlassItem,
+            ChildOf(hull),
+        ));
+    }
     built.plan = Arc::new(plan);
 }
 
@@ -738,14 +744,6 @@ pub(super) fn plan(
         }
         None => Plan::bare(shapes, boxes),
     }
-}
-
-/// Whether a record tells the player something about their tank: the line put a chord into a
-/// plate, a component lost HP points, or the shot had a consequence.
-pub(super) fn tells(report: &PenetrationReport) -> bool {
-    !report.plates.is_empty()
-        || report.doses.iter().any(|dose| dose.lost > 0)
-        || !report.consequences.is_empty()
 }
 
 /// Whether `stored` is a victim projection of a shot on `life`: the struck player's copy, never the

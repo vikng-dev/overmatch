@@ -9,9 +9,9 @@
 //! its frame and its clock. Two drivers write it:
 //!
 //! * [`game`], the corner slot in play: the shooter's corner, each explanation of the local
-//!   player's own hit once its world impact is drawn, by the delivery store's rule; and the victim
-//!   glass, the player's own tank under the latest record that struck it, held by its key or
-//!   peeking when a round tells something.
+//!   player's own hit once its world impact is drawn, by the delivery store's rule. Beside it the
+//!   own glass, the player's own tank dressed in the look on the battlefield under the latest
+//!   record that struck it, is its own presentation (`game::glass`): no corner, no stage copy.
 //! * [`demo`], the design bench over the recorded scenarios in `assets/dev/pen_cam/`: its own
 //!   battlefield, virtual-time control, keys and the kill cam's lesson.
 //!
@@ -74,7 +74,8 @@ pub struct Showing {
     pub surface: Surface,
 }
 
-/// Where a [`Showing`] is drawn.
+/// Where a [`Showing`] is drawn. The own glass is on neither: it is not a showing of the corner
+/// but a dressing of the live tank.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Surface {
     /// The corner inset.

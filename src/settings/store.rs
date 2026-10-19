@@ -437,7 +437,7 @@ mod tests {
     use crate::settings::{
         DebugPanel, DisplaySelection, FrameCap, KillCam, MsaaLevel, PenCamCorner, PixelBudget,
         ReduceMotion, RenderScaleLevel, ShadowCascades, ShadowDistance, ShadowResolution,
-        UiScalePercent, VictimGlassPeek, VsyncMode, WindowModeSetting,
+        UiScalePercent, VsyncMode, WindowModeSetting,
     };
 
     /// The env override wins on every platform — the hook a packaged or scripted run needs so it
@@ -782,7 +782,6 @@ mod tests {
                 ui_scale: UiScalePercent(125),
                 debug_panel: DebugPanel::Off,
                 pen_cam_corner: PenCamCorner::ThroughOnly,
-                victim_glass_peek: VictimGlassPeek::Off,
                 kill_cam: KillCam::Off,
                 reduce_motion: ReduceMotion::On,
             },
@@ -795,6 +794,19 @@ mod tests {
         ] {
             let text = ron::ser::to_string_pretty(&original, pretty_config()).unwrap();
             assert_eq!(parse(&text), Parsed::Ok(original), "{text}");
+        }
+    }
+
+    /// A file written by a build that still had the victim glass peek — the retired
+    /// `victim_glass_peek` key, at either of its values — loads cleanly, the key ignored.
+    #[test]
+    fn a_retired_victim_glass_peek_key_still_parses() {
+        for value in ["On", "Off"] {
+            let text = format!("(shadow_distance: M700, victim_glass_peek: {value})");
+            let Parsed::Ok(settings) = parse(&text) else {
+                panic!("a file carrying the retired peek key must load");
+            };
+            assert_eq!(settings.shadow_distance, ShadowDistance::M700);
         }
     }
 
@@ -995,7 +1007,6 @@ mod tests {
             ui_scale: UiScalePercent(110),
             debug_panel: DebugPanel::Off,
             pen_cam_corner: PenCamCorner::Off,
-            victim_glass_peek: VictimGlassPeek::Off,
             kill_cam: KillCam::Off,
             reduce_motion: ReduceMotion::On,
         };
