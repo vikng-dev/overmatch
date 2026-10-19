@@ -253,7 +253,8 @@ def analyze(server_path: Path, client_paths: list[Path]) -> dict:
 
 
 def connect_failures(result: dict, clients: int, server_log: Path | None) -> list[str]:
-    """Why the run's connects invalidate it; empty when each client connected once and stayed."""
+    """Why the run's connects invalidate it; empty when each client connected exactly once and none
+    disconnected before the last send (a drop after it, or a clean final disconnect, passes)."""
     links = result["links"]
     if links is None:
         if server_log is None:
