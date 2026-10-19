@@ -1917,4 +1917,31 @@ mod tests {
             "the copy took the rung in the frame it was written"
         );
     }
+
+    /// Recency itself, read off the explanations: the encounter's first contact first, then its
+    /// completion, then the explanation's identity — each only where the one before ties.
+    #[test]
+    fn recency_reads_contact_then_completion_then_identity() {
+        let recency = |explanation: &ShotExplanation| {
+            Recency::of(ExplanationKey::of(explanation), explanation)
+        };
+        let (base, _) = incoming_at("s1_through_crew", 1299, 1300, 1302);
+        let (later_contact, _) = incoming_at("s3_ricochet", 1298, 1301, 1301);
+        let (later_completion, _) = incoming_at("s3_ricochet", 1298, 1300, 1303);
+        let (greater_identity, _) = incoming_at("s3_ricochet", 1300, 1300, 1302);
+        assert!(
+            recency(&later_contact) > recency(&base),
+            "a later contact is newer, whatever completed first"
+        );
+        assert!(
+            recency(&later_completion) > recency(&base),
+            "of one contact tick, the later completed, whatever the identities"
+        );
+        assert!(ExplanationKey::of(&later_completion) < ExplanationKey::of(&base));
+        assert!(
+            recency(&greater_identity) > recency(&base),
+            "completed together: the greater identity"
+        );
+        assert_eq!(recency(&base), recency(&base));
+    }
 }
