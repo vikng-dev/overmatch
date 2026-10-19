@@ -104,6 +104,14 @@ class Segments(unittest.TestCase):
         self.assertEqual(segs["killcam"], [Segment(25.0, 32.1)])
         self.assertEqual(segs["corner"], [])
 
+    def test_the_runs_end_closes_a_lesson_still_open_and_a_lesson_outside_a_run_is_refused(self) -> None:
+        segs = segments([Mark(25.0, "run-start"), Mark(25.5, "lesson"), Mark(32.1, "run-end")], 100.0)
+        self.assertEqual(segs["lesson"], [Segment(25.5, 32.1)])
+        with self.assertRaises(ValueError):
+            segments([Mark(10.0, "lesson"), Mark(14.0, "none")], 100.0)
+        with self.assertRaises(ValueError):
+            parse_marks([shows("Glass", 10.0, surface="Inset")])
+
     def test_a_showing_open_at_the_streams_end_closes_there(self) -> None:
         segs = segments([Mark(90.0, "glass")], 95.5)
         self.assertEqual(segs["glass"], [Segment(90.0, 95.5)])

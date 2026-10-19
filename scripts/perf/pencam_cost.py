@@ -81,8 +81,10 @@ class Segment(NamedTuple):
 
 
 def classify(kind: str, surface: str) -> str:
-    if surface != "Corner":
+    if surface == "World":
         return "lesson"
+    if surface != "Corner":
+        raise ValueError(f"unknown surface {surface!r} — the slot draws on Corner or World")
     if kind in CORNER_KINDS:
         return "corner"
     if kind in GLASS_KINDS:
@@ -105,8 +107,9 @@ def parse_marks(lines) -> list[Mark]:
 
 def segments(marks: list[Mark], end_t: float) -> dict[str, list[Segment]]:
     """Each class's on-screen segments. A slot mark closes the previous slot segment and opens its
-    own; `none` only closes. The run's start and end bracket a killcam segment. Anything still open
-    at `end_t` (the stream's last frame) closes there."""
+    own; `none` only closes. The run's start and end bracket a killcam segment; a lesson lives only
+    inside a run (the run's end closes it, one outside a run is a contract break). Anything still
+    open at `end_t` (the stream's last frame) closes there."""
     out: dict[str, list[Segment]] = {s: [] for s in SURFACES}
     slot: Mark | None = None
     run_start: float | None = None
@@ -124,9 +127,13 @@ def segments(marks: list[Mark], end_t: float) -> dict[str, list[Segment]]:
             if run_start is not None and mark.t > run_start:
                 out["killcam"].append(Segment(run_start, mark.t))
             run_start = None
+            if slot is not None and slot.label == "lesson":
+                close_slot(mark.t)
         elif mark.label == "none":
             close_slot(mark.t)
         else:
+            if mark.label == "lesson" and run_start is None:
+                raise ValueError(f"a World showing at t={mark.t} s outside a kill cam run")
             close_slot(mark.t)
             slot = mark
     close_slot(end_t)
