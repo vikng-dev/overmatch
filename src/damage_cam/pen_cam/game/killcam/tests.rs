@@ -775,3 +775,34 @@ fn esc_on_the_frame_a_run_starts_is_the_runs() {
         "the press was taken"
     );
 }
+
+/// Offline, Esc on the very frame a run starts pauses nothing: the pause toggle orders after the
+/// kill cam's drive, which took the press back. The game is Playing on the frame after.
+#[test]
+fn esc_on_the_frame_a_run_starts_does_not_pause() {
+    use crate::state::AppState;
+
+    let (mut app, player, _) = app_with(Settings::default(), |app| {
+        bevy::state::app::StatesPlugin.build(app);
+    });
+    app.init_state::<AppState>();
+    crate::state::mount_pause_bare(&mut app);
+    app.world_mut()
+        .resource_mut::<NextState<AppState>>()
+        .set(AppState::Playing);
+    step(&mut app);
+    let (explanation, _, vocabulary, _) = shot(STRUCK, player_life(0), true);
+    receive(&mut app, explanation, &vocabulary);
+    knock_out(&mut app, player);
+    press(&mut app, KeyCode::Escape);
+    assert!(
+        victim(&app).run().is_some(),
+        "the run started on that frame"
+    );
+    step(&mut app);
+    assert_eq!(
+        *app.world().resource::<State<AppState>>().get(),
+        AppState::Playing,
+        "no pause on the run's first frame"
+    );
+}

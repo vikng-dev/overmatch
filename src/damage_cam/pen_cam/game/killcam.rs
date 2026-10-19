@@ -105,7 +105,7 @@ pub(crate) struct KillCamGate {
 /// `overlay::OverlaySet::Declare`, where the first reader of the [`KillCamGate`] it writes runs;
 /// the others run after `OverlaySet::Toggle`.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(super) struct KillCamGateSet;
+pub(crate) struct KillCamGateSet;
 
 /// Present where the composition mounts the game's death screen (the network client's). Without
 /// it, the kill cam draws its own stand-in: the death tint and a panel naming the knockout.

@@ -2,10 +2,12 @@
 //! Esc router ([`EscapeAction`]).
 
 use avian3d::prelude::{Physics, PhysicsTime};
+use bevy::ecs::schedule::ScheduleConfigs;
+use bevy::ecs::system::ScheduleSystem;
 use bevy::prelude::*;
 use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow, WindowFocused};
 
-use crate::damage_cam::pen_cam::game::KillCamGate;
+use crate::damage_cam::pen_cam::game::{KillCamGate, KillCamGateSet};
 use crate::ui_font::UiFonts;
 
 /// Top-level app mode. `Loading` gates gameplay until required assets (e.g. the tank's spec
@@ -137,15 +139,12 @@ pub fn client_plugin(app: &mut App) {
     escape_router(app);
     // The pause toggle and the focus watcher must run in either state, so they are deliberately not
     // in `GameplaySet`.
-    app.add_systems(
-        Update,
-        (toggle_pause.after(EscapeRouted), release_on_focus_lost),
-    )
-    .add_systems(OnEnter(AppState::Playing), (grab_cursor, resume_physics))
-    .add_systems(
-        OnEnter(AppState::Paused),
-        (release_cursor, spawn_pause_overlay, pause_physics),
-    );
+    app.add_systems(Update, (pause_toggle(), release_on_focus_lost))
+        .add_systems(OnEnter(AppState::Playing), (grab_cursor, resume_physics))
+        .add_systems(
+            OnEnter(AppState::Paused),
+            (release_cursor, spawn_pause_overlay, pause_physics),
+        );
 }
 
 /// Lock, hide, and re-center the cursor — the single grab primitive shared by every path that
@@ -197,6 +196,22 @@ fn release_on_focus_lost(
     if *state.get() == AppState::Playing {
         next.set(AppState::Paused);
     }
+}
+
+/// [`toggle_pause`] in its place: after the Esc router, and after the kill cam's drive, which
+/// takes back a press the router gave the menu on the frame a run starts.
+fn pause_toggle() -> ScheduleConfigs<ScheduleSystem> {
+    toggle_pause
+        .after(EscapeRouted)
+        .after(KillCamGateSet)
+        .into_configs()
+}
+
+/// The Esc router and the pause toggle alone, for a composed schedule under test.
+#[cfg(test)]
+pub(crate) fn mount_pause_bare(app: &mut App) {
+    escape_router(app);
+    app.add_systems(Update, pause_toggle());
 }
 
 /// An Esc press the router gave the menu ([`EscapeAction::Menu`]) flips Playing <-> Paused.
@@ -277,8 +292,7 @@ mod tests {
         app.add_plugins(bevy::state::app::StatesPlugin)
             .init_state::<AppState>()
             .init_resource::<ButtonInput<KeyCode>>();
-        escape_router(&mut app);
-        app.add_systems(Update, toggle_pause.after(EscapeRouted));
+        mount_pause_bare(&mut app);
         app.world_mut()
             .resource_mut::<NextState<AppState>>()
             .set(AppState::Playing);

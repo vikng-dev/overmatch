@@ -44,7 +44,7 @@ pub(crate) use self::glass::OwnGlass;
 #[cfg(feature = "dev_tools")]
 pub(crate) use self::glass::scripted_glass_plugin;
 use self::glass::{LiveState, LiveVolume};
-pub(crate) use self::killcam::{GameDeathScreen, KillCamGate};
+pub(crate) use self::killcam::{GameDeathScreen, KillCamGate, KillCamGateSet};
 use super::hud::{self, CornerImages, Glyphs};
 use super::look;
 use super::plan::Plan;
@@ -1788,17 +1788,18 @@ mod tests {
         assert!(checked, "both sets existed at once");
     }
 
-    /// `name`'s record of another tank's round striking the player's first life, its encounter
-    /// opened on `contact_tick` and completed on `completion_tick`: the player's projection and
-    /// the vocabulary.
+    /// `name`'s record of another tank's round fired on `fire_tick` striking the player's first
+    /// life, its encounter opened on `contact_tick` and completed on `completion_tick`: the
+    /// player's projection and the vocabulary. The fire tick is the explanation's identity.
     fn incoming_at(
         name: &str,
+        fire_tick: u32,
         contact_tick: u32,
         completion_tick: u32,
     ) -> (ShotExplanation, ShotVocabulary) {
         let report = report(name);
         let vocabulary = vocabulary(&report);
-        let mut recorded = recorded(&report, STRUCK, contact_tick - 1, me());
+        let mut recorded = recorded(&report, STRUCK, fire_tick, me());
         recorded.contact_tick = contact_tick;
         recorded.completion_tick = completion_tick;
         recorded.outcome = Some(0);
@@ -1814,7 +1815,8 @@ mod tests {
     }
 
     /// The latest record is the newest by recency entire: of two encounters opened on the same
-    /// tick the later completed is newer; one still waiting on its impact is never the latest,
+    /// tick the later completed is newer whatever their identities' order; of two completed
+    /// together the greater identity; one still waiting on its impact is never the latest,
     /// however new.
     #[test]
     fn the_latest_record_is_the_newest_completed_whose_impact_is_drawn() {
@@ -1822,8 +1824,10 @@ mod tests {
         let latest = |app: &App| {
             glass::latest(app.world().resource::<ShotExplanations>(), me()).map(|(key, _)| key)
         };
-        let (early, early_vocabulary) = incoming_at("s1_through_crew", 1300, 1302);
-        let (late, late_vocabulary) = incoming_at("s3_ricochet", 1300, 1305);
+        // The earlier completed has the greater identity: completion is read before it.
+        let (early, early_vocabulary) = incoming_at("s1_through_crew", 1299, 1300, 1302);
+        let (late, late_vocabulary) = incoming_at("s3_ricochet", 1298, 1300, 1305);
+        assert!(ExplanationKey::of(&early) > ExplanationKey::of(&late));
         receive(&mut app, late.clone(), &late_vocabulary);
         receive(&mut app, early, &early_vocabulary);
         assert_eq!(
@@ -1831,7 +1835,16 @@ mod tests {
             Some(ExplanationKey::of(&late)),
             "the later completed of one contact tick"
         );
-        let (pending, pending_vocabulary) = incoming_at("s9_one_box_lost", 1400, 1402);
+        let (tie_low, low_vocabulary) = incoming_at("s1_through_crew", 1310, 1320, 1322);
+        let (tie_high, high_vocabulary) = incoming_at("s3_ricochet", 1311, 1320, 1322);
+        receive(&mut app, tie_high.clone(), &high_vocabulary);
+        receive(&mut app, tie_low, &low_vocabulary);
+        assert_eq!(
+            latest(&app),
+            Some(ExplanationKey::of(&tie_high)),
+            "completed together: the greater identity"
+        );
+        let (pending, pending_vocabulary) = incoming_at("s9_one_box_lost", 1399, 1400, 1402);
         let now = app.world().resource::<Time>().elapsed_secs_f64();
         app.world_mut().resource_mut::<ShotExplanations>().receive(
             pending.clone(),
@@ -1840,7 +1853,7 @@ mod tests {
         );
         assert_eq!(
             latest(&app),
-            Some(ExplanationKey::of(&late)),
+            Some(ExplanationKey::of(&tie_high)),
             "a newer record still waiting on its impact is not the latest"
         );
         app.world_mut()
@@ -1850,6 +1863,58 @@ mod tests {
             latest(&app),
             Some(ExplanationKey::of(&pending)),
             "drawn, it is"
+        );
+    }
+
+    /// A shoe's mask copy draws the rung the belt writes in the same frame: the copy follows the
+    /// source's handle after the belt's write in `PostUpdate`, so a frame never renders the source
+    /// on one rung and its mask on another. A swapper standing in for the belt is registered after
+    /// the follower, on one thread, so only the ordering edge puts it first.
+    #[test]
+    fn a_shoes_mask_copy_takes_the_rung_the_belt_writes_in_the_frame() {
+        #[derive(Resource)]
+        struct Swap(Entity, Handle<Mesh>);
+
+        fn swap(swap: Res<Swap>, mut meshes: Query<&mut Mesh3d>) {
+            if let Ok(mut mesh) = meshes.get_mut(swap.0) {
+                mesh.set_if_neq(Mesh3d(swap.1.clone()));
+            }
+        }
+
+        let (mut app, _, meshes, _) = world_glass_app();
+        press_x(&mut app);
+        run(&mut app, 0.2);
+        let source = meshes[0];
+        let copy = {
+            let world = app.world_mut();
+            let mut query = world.query::<(Entity, &glass::MaskCopy)>();
+            query
+                .iter(world)
+                .find(|(_, copy)| copy.of() == source)
+                .map(|(entity, _)| entity)
+                .expect("the source's mask copy")
+        };
+        let rung = app
+            .world_mut()
+            .resource_mut::<Assets<Mesh>>()
+            .add(Mesh::new(
+                bevy::mesh::PrimitiveTopology::TriangleList,
+                bevy::asset::RenderAssetUsages::default(),
+            ));
+        app.insert_resource(Swap(source, rung.clone()));
+        app.add_systems(
+            PostUpdate,
+            swap.in_set(crate::track::link_view::ShoeRungSelected),
+        );
+        app.edit_schedule(PostUpdate, |schedule| {
+            schedule.set_executor(bevy::ecs::schedule::SingleThreadedExecutor::new());
+        });
+        step(&mut app);
+        assert_eq!(app.world().get::<Mesh3d>(source).unwrap().0, rung);
+        assert_eq!(
+            app.world().get::<Mesh3d>(copy).unwrap().0,
+            rung,
+            "the copy took the rung in the frame it was written"
         );
     }
 }
