@@ -102,10 +102,35 @@ fn wire(app: &mut App) {
                 (view::prepare_stage, view::pose_stage, super::present())
                     .chain()
                     .run_if(resource_exists::<StageView>),
+                log_presence,
             )
                 .chain(),
         );
     killcam::wire(app);
+}
+
+/// Log each change of what the slot shows, on `Time<Real>` — the frame-cost stream's clock
+/// (`src/frame_cost.rs`), so `scripts/perf/pencam_cost.py` can window that stream by these marks.
+fn log_presence(
+    corner: Res<Corner>,
+    time: Res<Time<Real>>,
+    mut shown: Local<Option<(CornerKind, Surface)>>,
+) {
+    let now = corner
+        .showing
+        .as_ref()
+        .map(|showing| (showing.kind, showing.surface));
+    if now == *shown {
+        return;
+    }
+    let t = time.elapsed_secs_f64();
+    match now {
+        Some((kind, surface)) => {
+            debug!("pen cam: the slot shows {kind:?} on {surface:?} at t={t:.3} s (Time<Real>)");
+        }
+        None => debug!("pen cam: the slot shows nothing at t={t:.3} s (Time<Real>)"),
+    }
+    *shown = now;
 }
 
 /// What one turn shows.
@@ -709,15 +734,10 @@ fn drive(
             }),
         },
     };
-    if state.turn.is_none_or(|shown| shown.serial != turn.serial) {
-        if let Content::Corner(exhibit) = &queued.content {
-            rig.exhibits.0 = vec![exhibit.clone()];
-        }
-        debug!(
-            "pen cam: the slot shows {:?} at {:.2} s",
-            turn.kind,
-            time.elapsed_secs_f64()
-        );
+    if state.turn.is_none_or(|shown| shown.serial != turn.serial)
+        && let Content::Corner(exhibit) = &queued.content
+    {
+        rig.exhibits.0 = vec![exhibit.clone()];
     }
     state.turn = Some(turn);
     if let Content::Glass = queued.content {
