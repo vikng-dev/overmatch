@@ -223,6 +223,14 @@ pub(super) struct Stores<'w> {
     looks: ResMut<'w, Assets<LookMaterial>>,
 }
 
+/// What the glass is drawn through: the player's view mode, the kill cam and the player's camera.
+#[derive(SystemParam)]
+pub(super) struct Viewing<'w, 's> {
+    sight: Option<Res<'w, SightMode>>,
+    victim: Res<'w, Victim>,
+    camera: Query<'w, 's, Entity, With<PlayerView>>,
+}
+
 /// Whether the glass draws this frame, and for which camera: the preference on, the tank live in
 /// the third-person view, no kill cam run (this frame's, so after the kill cam's drive). Inactive,
 /// or on another tank than the one dressed, everything is restored now; the mask need is stated
@@ -230,18 +238,18 @@ pub(super) struct Stores<'w> {
 pub(super) fn drive(
     mut commands: Commands,
     glass: Res<OwnGlass>,
-    sight: Option<Res<SightMode>>,
-    victim: Res<Victim>,
+    viewing: Viewing,
     player: Player,
-    camera: Query<Entity, With<PlayerView>>,
     mut need: ResMut<MaskNeed>,
     mut state: ResMut<Glass>,
     held: Held,
 ) {
-    let third_person = sight.is_none_or(|mode| *mode == SightMode::ThirdPerson);
+    let third_person = viewing
+        .sight
+        .is_none_or(|mode| *mode == SightMode::ThirdPerson);
     let body = player.body();
-    let viewer = camera.single().ok();
-    let active = glass.on && third_person && !victim.running() && body.is_some();
+    let viewer = viewing.camera.single().ok();
+    let active = glass.on && third_person && !viewing.victim.running() && body.is_some();
     let tank = body.map(|(entity, _)| entity);
     if !active
         || state

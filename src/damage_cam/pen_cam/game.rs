@@ -538,7 +538,7 @@ fn drive(
         },
     };
     if state.turn.is_none_or(|shown| shown.serial != turn.serial) {
-        rig.exhibits.0 = vec![queued.exhibit.clone()];
+        rig.exhibits.0 = vec![queued.exhibit];
     }
     state.turn = Some(turn);
     let duration = turn.kind.duration();
