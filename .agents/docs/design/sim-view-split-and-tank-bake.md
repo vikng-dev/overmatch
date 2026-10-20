@@ -96,7 +96,7 @@ path to bake), drivetrain/suspension scalars, servo tuning + role/axis + travel,
 ballistics, recoil spring, RangeTable inputs, volume material/hp/crew/ammo facets, view configs.
 
 **View couplings that constrain the split (§6):** both cameras, the gunner optic, the bore/intent
-HUD, component-HP labels, and the cook-off turret launch all address sim rig-node **entities by
+HUD, the tank nameplates, and the cook-off turret launch all address sim rig-node **entities by
 handle** (`rig.gun/turret/muzzle/hull`, volume nodes, wheels). Cook-off
 (`damage::launch_turrets_on_cookoff`) additionally *reparents the glb turret node* into a free
 rigid body.
