@@ -428,9 +428,15 @@ pub(super) fn build(
     built.plan = Arc::new(plan);
 }
 
-/// A new match: the store's keys start over, and so do the records shown.
+/// A new match: the store's keys start over, and so do the records shown. The glass as built
+/// forgets its record too, so the next build re-keys the clock even for the same key, and
+/// settles, so it redraws even with nothing left to draw.
 pub(super) fn forget_shown(_new: On<NewMatch>, mut state: ResMut<Glass>) {
     state.shown.clear();
+    if let Some(built) = &mut state.built {
+        built.record = None;
+        built.settle = true;
+    }
 }
 
 /// Dress every undressed render primitive under `root` in its tier's look, against `built`'s

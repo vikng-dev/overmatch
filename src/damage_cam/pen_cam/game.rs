@@ -1681,10 +1681,10 @@ mod tests {
         run(&mut app, 0.2);
         assert_eq!(since(&app), Some(a_since), "A continues its clock");
 
-        // A new match, as the network client raises it with the store's reset.
+        // A new match, as the network client raises it with the store's reset, and the same key
+        // again before the glass has seen a frame of the empty store.
         *app.world_mut().resource_mut::<ShotExplanations>() = default();
         app.world_mut().trigger(NewMatch);
-        run(&mut app, 0.2);
         let (a, a_vocabulary) = incoming_at("s1_through_crew", 1299, 1300, 1302);
         assert_eq!(
             ExplanationKey::of(&a),
