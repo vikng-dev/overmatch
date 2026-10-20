@@ -1593,6 +1593,49 @@ mod tests {
         assert!(glass_census(&mut app).1 > 2, "the struck component's tint");
     }
 
+    /// A record plays once, from the moment it first shows: a record that lands while the glass is
+    /// off waits for X; X off and on, and the optic and back, continue its clock; a newer record
+    /// plays from its own first showing.
+    #[test]
+    fn a_record_plays_once_from_its_first_showing() {
+        let (mut app, _, _, _) = world_glass_app();
+        let since = |app: &App| app.world().resource::<glass::Glass>().since();
+        let now = |app: &App| app.world().resource::<Time>().elapsed_secs_f64();
+        let (first, first_vocabulary) = incoming_at("s1_through_crew", 1299, 1300, 1302);
+        let landed = now(&app);
+        receive(&mut app, first, &first_vocabulary);
+        run(&mut app, 1.0);
+        assert_eq!(since(&app), None, "off: nothing shows");
+        press_x(&mut app);
+        run(&mut app, 0.1);
+        let shown = since(&app).expect("built");
+        assert!(
+            shown >= landed + 0.9,
+            "the clock starts at X, not at the landing"
+        );
+        run(&mut app, 0.5);
+        press_x(&mut app);
+        run(&mut app, 0.2);
+        assert_eq!(since(&app), None, "X off");
+        press_x(&mut app);
+        run(&mut app, 0.2);
+        assert_eq!(since(&app), Some(shown), "X on again continues the clock");
+        app.insert_resource(crate::sight::SightMode::Gunner);
+        run(&mut app, 0.2);
+        assert_eq!(since(&app), None, "the optic");
+        app.insert_resource(crate::sight::SightMode::ThirdPerson);
+        run(&mut app, 0.2);
+        assert_eq!(since(&app), Some(shown), "and back continues the clock");
+        let (second, second_vocabulary) = incoming_at("s3_ricochet", 1310, 1320, 1322);
+        receive(&mut app, second, &second_vocabulary);
+        run(&mut app, 0.2);
+        let again = since(&app).expect("built");
+        assert!(
+            again > shown,
+            "a newer record plays from its own first showing"
+        );
+    }
+
     /// A knockout suspends the glass and X during the run it starts changes nothing; the glass
     /// returns on the respawn, the preference untouched.
     #[test]

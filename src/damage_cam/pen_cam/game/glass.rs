@@ -20,9 +20,11 @@
 //! * **The latest rule.** Of the victim records of the player's current life whose impact is no
 //!   longer waiting, strictly the newest by recency ([`latest`]; a clean ricochet replaces an
 //!   earlier penetration — a bounce is informative too). With none, the live tint alone.
-//! * **The clock.** The record plays from the moment it first shows (the toggle, or a newer
-//!   record), as the victim frame plays it, and holds at its hold beat; the tint follows the live
-//!   state in the same showing.
+//! * **The clock.** A record plays once: from the moment it first shows (X on with it the latest,
+//!   or its arrival while on), as the victim frame plays it, to its hold beat. Every later showing
+//!   of the same record — X off and on, the optic and back, a resize — continues that clock
+//!   ([`Glass::shown`]), so past the hold beat it is the held end; a record that lands while the
+//!   glass is off waits for X. The tint follows the live state in the same showing.
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -125,6 +127,9 @@ pub(super) struct GlassShell;
 #[derive(Resource, Default)]
 pub(super) struct Glass {
     built: Option<Built>,
+    /// The record last shown and the app seconds it first showed: its clock, kept across the
+    /// glass's deactivations so a record plays once.
+    shown: Option<(ExplanationKey, f64)>,
     /// Each tank file's asset, read once.
     tanks: HashMap<String, Arc<TankAsset>>,
     /// The shell model, loaded once the glass first draws a record.
@@ -362,7 +367,12 @@ pub(super) fn build(
         return;
     }
     if built.record != record {
-        built.since = now;
+        // A record's first showing starts its clock; every later showing continues it.
+        built.since = match (record, state.shown) {
+            (Some(key), Some((shown, since))) if shown == key => since,
+            _ => now,
+        };
+        state.shown = record.map(|key| (key, built.since));
     }
     built.record = record;
     built.live = live;
