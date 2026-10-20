@@ -22,11 +22,12 @@
 //!   earlier penetration — a bounce is informative too). With none, the live tint alone.
 //! * **The clock.** A record plays once: from the moment it first shows (X on with it the latest,
 //!   or its arrival while on), as the victim frame plays it, to its hold beat. Every later showing
-//!   of the same record — X off and on, the optic and back, a resize — continues that clock
-//!   ([`Glass::shown`]), so past the hold beat it is the held end; a record that lands while the
-//!   glass is off waits for X. The tint follows the live state in the same showing.
+//!   of the same record — X off and on, the optic and back, a resize, an older record back as the
+//!   latest — continues that clock ([`Glass::shown`]), so past the hold beat it is the held end; a
+//!   record that lands while the glass is off waits for X. A connection forgets every clock with
+//!   the store ([`forget_shown`]). The tint follows the live state in the same showing.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
 use bevy::camera::visibility::VisibilityRange;
@@ -47,6 +48,7 @@ use super::super::stage::{
 };
 use super::super::timeline::CornerKind;
 use super::super::view::{self, Tier};
+use super::NewMatch;
 use super::killcam::Victim;
 use super::{Player, Recency, tank_asset};
 use crate::bake::TankBlueprint;
@@ -127,9 +129,12 @@ pub(super) struct GlassShell;
 #[derive(Resource, Default)]
 pub(super) struct Glass {
     built: Option<Built>,
-    /// The record last shown and the app seconds it first showed: its clock, kept across the
-    /// glass's deactivations so a record plays once.
-    shown: Option<(ExplanationKey, f64)>,
+    /// App seconds each record first showed, for every record shown since the connection: a
+    /// record's clock, kept across the glass's deactivations so it plays once, and per record
+    /// because the store evicts by fire tick while [`latest`] picks by recency, so an older record
+    /// can come back as the latest. A connection clears it ([`forget_shown`]): a new match's keys
+    /// start over.
+    shown: BTreeMap<ExplanationKey, f64>,
     /// Each tank file's asset, read once.
     tanks: HashMap<String, Arc<TankAsset>>,
     /// The shell model, loaded once the glass first draws a record.
@@ -368,11 +373,7 @@ pub(super) fn build(
     }
     if built.record != record {
         // A record's first showing starts its clock; every later showing continues it.
-        built.since = match (record, state.shown) {
-            (Some(key), Some((shown, since))) if shown == key => since,
-            _ => now,
-        };
-        state.shown = record.map(|key| (key, built.since));
+        built.since = record.map_or(now, |key| *state.shown.entry(key).or_insert(now));
     }
     built.record = record;
     built.live = live;
@@ -425,6 +426,11 @@ pub(super) fn build(
         ));
     }
     built.plan = Arc::new(plan);
+}
+
+/// A new match: the store's keys start over, and so do the records shown.
+pub(super) fn forget_shown(_new: On<NewMatch>, mut state: ResMut<Glass>) {
+    state.shown.clear();
 }
 
 /// Dress every undressed render primitive under `root` in its tier's look, against `built`'s

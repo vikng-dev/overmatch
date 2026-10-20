@@ -72,6 +72,11 @@ pub fn plugin(app: &mut App) {
 #[derive(Event, Clone, Copy, Debug)]
 pub(crate) struct CloseCorner;
 
+/// A new connection: the store's shots are not the last match's, and neither is what the glass has
+/// shown. Triggered by the network client with the store's reset.
+#[derive(Event, Clone, Copy, Debug)]
+pub(crate) struct NewMatch;
+
 /// The slot's and the glass's state and systems, without the materials (a headless test registers
 /// the materials' assets alone).
 fn wire(app: &mut App) {
@@ -80,6 +85,7 @@ fn wire(app: &mut App) {
         .init_resource::<OwnGlass>()
         .init_resource::<glass::Glass>()
         .add_observer(close)
+        .add_observer(glass::forget_shown)
         .add_systems(
             Update,
             (
@@ -1636,6 +1642,60 @@ mod tests {
         );
     }
 
+    /// The clock is kept per record, not for the last alone: the store evicts by fire tick while
+    /// the glass picks by recency, so a newer record can leave the store before an older one that
+    /// showed earlier; back as the latest, the older continues its clock. A connection forgets
+    /// every clock with the store: the same key in the next match plays afresh.
+    #[test]
+    fn an_older_record_back_as_the_latest_continues_its_clock() {
+        let (mut app, _, _, _) = world_glass_app();
+        let since = |app: &App| app.world().resource::<glass::Glass>().since();
+        let latest = |app: &App| {
+            glass::latest(app.world().resource::<ShotExplanations>(), me()).map(|(key, _)| key)
+        };
+        press_x(&mut app);
+        // A fired later and struck earlier than B: B is the latest by recency and the first the
+        // store evicts.
+        let (a, a_vocabulary) = incoming_at("s1_through_crew", 1299, 1300, 1302);
+        let a_key = ExplanationKey::of(&a);
+        receive(&mut app, a, &a_vocabulary);
+        run(&mut app, 0.2);
+        let a_since = since(&app).expect("built");
+        let (b, b_vocabulary) = incoming_at("s3_ricochet", 1290, 1310, 1312);
+        receive(&mut app, b, &b_vocabulary);
+        run(&mut app, 0.2);
+        let b_since = since(&app).expect("built");
+        assert!(b_since > a_since, "B shows after A");
+        // Another life's records, fired after both, fill the store past its retention: B goes.
+        let other = TankLife {
+            combatant: SHOOTER,
+            life: CombatantLife(1),
+        };
+        for fire_tick in 0..(crate::damage_cam::delivery::RETAINED as u32 - 1) {
+            let tick = 1300 + fire_tick;
+            let (filler, vocabulary) =
+                incoming_for("s9_one_box_lost", tick, tick + 1, tick + 3, other);
+            receive(&mut app, filler, &vocabulary);
+        }
+        assert_eq!(latest(&app), Some(a_key), "B evicted, A the latest again");
+        run(&mut app, 0.2);
+        assert_eq!(since(&app), Some(a_since), "A continues its clock");
+
+        // A new match, as the network client raises it with the store's reset.
+        *app.world_mut().resource_mut::<ShotExplanations>() = default();
+        app.world_mut().trigger(NewMatch);
+        run(&mut app, 0.2);
+        let (a, a_vocabulary) = incoming_at("s1_through_crew", 1299, 1300, 1302);
+        assert_eq!(
+            ExplanationKey::of(&a),
+            a_key,
+            "the same key in the next match"
+        );
+        receive(&mut app, a, &a_vocabulary);
+        run(&mut app, 0.2);
+        assert!(since(&app).expect("built") > b_since, "plays afresh");
+    }
+
     /// A knockout suspends the glass and X during the run it starts changes nothing; the glass
     /// returns on the respawn, the preference untouched.
     #[test]
@@ -1840,9 +1900,20 @@ mod tests {
         contact_tick: u32,
         completion_tick: u32,
     ) -> (ShotExplanation, ShotVocabulary) {
+        incoming_for(name, fire_tick, contact_tick, completion_tick, me())
+    }
+
+    /// [`incoming_at`] for a round striking `life`, which may be another tank's.
+    fn incoming_for(
+        name: &str,
+        fire_tick: u32,
+        contact_tick: u32,
+        completion_tick: u32,
+        life: TankLife,
+    ) -> (ShotExplanation, ShotVocabulary) {
         let report = report(name);
         let vocabulary = vocabulary(&report);
-        let mut recorded = recorded(&report, STRUCK, fire_tick, me());
+        let mut recorded = recorded(&report, STRUCK, fire_tick, life);
         recorded.contact_tick = contact_tick;
         recorded.completion_tick = completion_tick;
         recorded.outcome = Some(0);

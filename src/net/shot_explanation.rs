@@ -28,7 +28,7 @@ use crate::ballistics::AuthorityOutcomeDrawn;
 use crate::damage_cam::delivery::{
     ExplanationKey, ImpactPresence, ShotExplanations, expire_explanations,
 };
-use crate::damage_cam::pen_cam::game::CloseCorner;
+use crate::damage_cam::pen_cam::game::{CloseCorner, NewMatch};
 use crate::damage_cam::recorder::RecordedShot;
 use crate::damage_cam::wire::{Audience, BuiltExplanation, ShotExplanation, ShotVocabulary};
 use crate::shot_trace::ShotTrace;
@@ -279,9 +279,14 @@ fn presence_name(presence: ImpactPresence) -> &'static str {
     }
 }
 
-/// A new connection is a new match: its shots are not the last one's.
-fn reset_shot_explanations(_connected: On<Add, Connected>, mut store: ResMut<ShotExplanations>) {
+/// A new connection is a new match: its shots are not the last one's, and the pen cam is told.
+fn reset_shot_explanations(
+    _connected: On<Add, Connected>,
+    mut store: ResMut<ShotExplanations>,
+    mut commands: Commands,
+) {
     *store = default();
+    commands.trigger(NewMatch);
 }
 
 /// The link ended: a corner explaining one of its shots closes with it.
