@@ -90,8 +90,8 @@ alternatives: they are the two ends of one continuous knob.
   coordinate wraps). `k = 0` is A, `k = 1` is E, and both are pinned as regressions in `camera`'s
   tests. Instantaneous, stateless, bounded: no damping and no spring, so the aperture cannot
   overshoot or wobble. Damping is a later decision, not a lost one.
-- **`V` cycles `k`** through a ladder, defaulting to the interior `0.5`. (The ladder was re-cut
-  — §playtest.)
+- **`k` is settled at `0.8`** (`sight::GUNNER_BLEND`, 2026-10-20). It was a playtest ladder on a
+  key first — §playtest.
 - **B and C are cut.** They were a genuinely different commit path — the mouse steering the camera
   and the gun chasing it, with no optic circle — and the free-look commit, its servos param, its
   camera and its wide gunnery FOV went with them. D's spring is cut too, recoverable from git.
@@ -232,3 +232,7 @@ cycled by `V`.** `0.0` is on it so the whole spectrum can be felt, which puts th
 to being the two cameras the five schemes collapsed into. Still stateless: the camera reads the
 resource fresh each frame and holds nothing. No time-domain filter and no spring on top — a stateful
 low-pass is the proportional blend RO2 shipped, and its documented failure is overshoot.
+
+**Settled 2026-10-20: `k = 0.8`** (`sight::GUNNER_BLEND`), after the duel playtest. The ladder, its
+key and the `GunnerBlend` resource are gone; the camera reads the constant. The endpoints and the
+interior stay pinned in `camera`'s and `reticle`'s tests at the sample fractions.

@@ -65,8 +65,8 @@ pub fn in_third_person(mode: Res<SightMode>) -> bool {
     *mode == SightMode::ThirdPerson
 }
 
-/// **Where the optic camera rides between the gun and the player's intent** — one continuous knob
-/// on both axes, consulted ONLY while [`SightMode::Gunner`], and a pure VIEW parameter: the gun is
+/// **Where the optic camera rides between the gun and the player's intent** — one fraction on
+/// both axes, consulted ONLY while [`SightMode::Gunner`], and a pure VIEW parameter: the gun is
 /// commanded by [`drive_gunner_aim`] and laid by `aim::drive_aim_servos` at every value,
 /// identically.
 ///
@@ -74,33 +74,14 @@ pub fn in_third_person(mode: Res<SightMode>) -> bool {
 /// inside the optic glass and drifts back as the gun catches up. `1` welds it to the committed
 /// intent, so the cursor holds the glass centre and the bore visibly lags behind it. Everything
 /// between is a geometric blend of the two bearings — no damping and no spring, so the view is
-/// instantaneous, stateless, and cannot overshoot.
-///
-/// Cycle the ladder live with `B`.
-#[derive(Resource, Clone, Copy, PartialEq, Debug)]
-pub struct GunnerBlend(pub f32);
+/// instantaneous, stateless, and cannot overshoot. Settled at `0.8`: the look mostly on the intent,
+/// the bore's lag visible.
+pub const GUNNER_BLEND: f32 = 0.8;
 
-/// The `B` hotkey's rungs, gun-end first. The endpoints are the two cameras this knob collapsed;
-/// the interior is the playtest hypothesis.
-pub(crate) const GUNNER_BLEND_LADDER: [f32; 6] = [0.0, 0.35, 0.5, 0.65, 0.8, 1.0];
-
-impl Default for GunnerBlend {
-    fn default() -> Self {
-        Self(GUNNER_BLEND_LADDER[2])
-    }
-}
-
-impl GunnerBlend {
-    /// The next rung, wrapping. A value off the ladder (only reachable by a caller that set one)
-    /// resumes at the gun end.
-    fn next(self) -> Self {
-        let next = GUNNER_BLEND_LADDER
-            .iter()
-            .position(|&rung| rung == self.0)
-            .map_or(0, |rung| (rung + 1) % GUNNER_BLEND_LADDER.len());
-        Self(GUNNER_BLEND_LADDER[next])
-    }
-}
+/// Blend fractions the optic's invariants are checked at: both ends, the settled value and
+/// interior samples.
+#[cfg(test)]
+pub(crate) const BLEND_SAMPLES: [f32; 6] = [0.0, 0.35, 0.5, 0.65, 0.8, 1.0];
 
 /// Hull-local unit direction for a `(yaw, pitch)` sight bearing — the shared decomposition
 /// [`GunnerIntent`] uses, exposed for the camera-placement systems (`camera.rs`). Yaw is about hull
@@ -148,8 +129,6 @@ impl GunnerIntent {
 
 pub fn plugin(app: &mut App) {
     app.init_match_resource::<SightMode>()
-        // Where the optic camera rides between the gun and the intent.
-        .init_resource::<GunnerBlend>()
         // Every HUD widget the sight draws, and the systems that keep them in step. The presentation
         // half orders itself against `toggle_sight` below.
         .add_plugins(reticle::plugin)
@@ -161,14 +140,6 @@ pub fn plugin(app: &mut App) {
                 .in_set(PlayerInputSet)
                 .in_set(TankDeviceSet)
                 .in_set(SightToggled)
-                .in_set(GameplaySet),
-        )
-        // Playtest knob: cycle where the optic camera rides between gun and intent (`B`). The
-        // camera reads it fresh every frame and holds no state, so a change needs no reseed.
-        .add_systems(
-            Update,
-            cycle_gunner_blend
-                .in_set(PlayerInputSet)
                 .in_set(GameplaySet),
         )
         // Commit the commanded aim from the magnified mouse intent. In `BeforeFixedMainLoop` (with
@@ -611,23 +582,6 @@ pub(crate) fn drive_gunner_aim(
     }
 }
 
-/// Live playtest knob: step [`GunnerBlend`] along its ladder with `B` and name the value on-screen.
-///
-/// The blend only *matters* in gunner view, but cycling is allowed from anywhere so a playtester can
-/// pre-pick; the toast is the feedback. The camera reads the resource fresh each frame and keeps no
-/// state of its own, so a change takes effect the same frame with nothing to reseed.
-fn cycle_gunner_blend(
-    keys: Res<ButtonInput<KeyCode>>,
-    mut blend: ResMut<GunnerBlend>,
-    mut toast: ResMut<Toast>,
-) {
-    if !keys.just_pressed(KeyCode::KeyB) {
-        return;
-    }
-    *blend = blend.next();
-    toast.show(format!("Optic blend k = {:.2}", blend.0));
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -798,40 +752,6 @@ mod tests {
         assert!(
             !views.drawn(hull),
             "the hull is still dropped by the optic — the shadow guarantee is not a blanket"
-        );
-    }
-
-    /// The `B` walk is a cycle: it visits every rung once and returns to where it started, so a
-    /// playtester can step in one direction and land back where they began without hunting. Both
-    /// endpoints are on it — `0` welded to the gun's sight line, `1` holding the intent — and so is
-    /// the `0.35` the ladder was extended down to.
-    #[test]
-    fn the_blend_ladder_cycles_through_every_rung() {
-        for start in GUNNER_BLEND_LADDER {
-            let mut walk = vec![start];
-            let mut blend = GunnerBlend(start);
-            for _ in 1..GUNNER_BLEND_LADDER.len() {
-                blend = blend.next();
-                walk.push(blend.0);
-            }
-            assert_eq!(
-                blend.next().0,
-                start,
-                "the ladder closes on its starting rung"
-            );
-            walk.sort_by(f32::total_cmp);
-            assert_eq!(walk, GUNNER_BLEND_LADDER, "the walk visits every rung once");
-        }
-
-        for rung in [0.0, 0.35, 1.0] {
-            assert!(
-                GUNNER_BLEND_LADDER.contains(&rung),
-                "{rung} must be reachable by pressing V",
-            );
-        }
-        assert!(
-            GUNNER_BLEND_LADDER.contains(&GunnerBlend::default().0),
-            "the default must be a rung, or the first press jumps",
         );
     }
 

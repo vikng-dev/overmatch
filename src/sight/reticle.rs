@@ -304,7 +304,7 @@ fn tick_width(major: bool) -> f32 {
 /// Spawn the ranging reticle: the zero mark and the pool of range graduations (200 m steps, majors
 /// numbered in hundreds of metres). Every mark is absolutely positioned — the whole graticule is
 /// placed against the gun's sight line each frame ([`update_ranging_reticle`]), which is not screen
-/// centre at any rung of `sight::GunnerBlend`. All hidden until shown in the optic.
+/// centre at `sight::GUNNER_BLEND`. All hidden until shown in the optic.
 fn spawn_ranging_reticle(mut commands: Commands, fonts: Res<UiFonts>) {
     commands.spawn((
         FlowScoped(Flow::InMatch),
@@ -382,7 +382,7 @@ fn place_mark(node: &mut Node, visibility: &mut Visibility, screen: Option<Vec2>
 /// (`super::sight_line`: the gun's lay minus the dialed superelevation), which is the line the shell
 /// arcs back down onto and so the only line the dialed-range mark can name. That is NOT the green
 /// bore dot, which is the barrel axis and by design rides the same superelevation ABOVE the sight
-/// line. The anchor coincides with screen centre only at `sight::GunnerBlend`'s `0` rung; above it
+/// line. The anchor coincides with screen centre only at a blend of `0`; at `sight::GUNNER_BLEND`
 /// the camera rides toward the intent and the scale correctly lags with the gun.
 ///
 /// The sight line is read off the VIEW gun node — the render-smoothed chain (`interpolate_servos`,
@@ -566,8 +566,8 @@ struct OpticGlass {
 /// Where the optic's glass lands on screen, measured through the camera's ACTUAL projection.
 ///
 /// The centre is the gun's `sight` line reprojected — neither the viewport's centre nor the camera
-/// axis, which coincide with it only at `sight::GunnerBlend`'s `0` rung; above that the glass
-/// slides as the gun lags, which is the whole point of the knob. It may land OUTSIDE the rect and is
+/// axis, which coincide with it only at a blend of `0`; at `sight::GUNNER_BLEND` the glass
+/// slides as the gun lags, which is the whole point of the blend. It may land OUTSIDE the rect and is
 /// passed through unclamped: the visible arc is still the right arc, and clamping would drag the
 /// glass off the sight line. Only a sight line BEHIND the camera has no answer, and
 /// `world_to_viewport` reports exactly that case (it answers off-rect coordinates for anything in
@@ -833,7 +833,7 @@ mod tests {
     use bevy::math::Affine3A;
 
     use super::*;
-    use crate::sight::{GUNNER_BLEND_LADDER, hull_local_dir, optic_margin, yaw_pitch_of};
+    use crate::sight::{BLEND_SAMPLES, hull_local_dir, optic_margin, yaw_pitch_of};
     use crate::spec::Optics;
 
     /// The fixture's viewport, in px.
@@ -1658,7 +1658,7 @@ mod tests {
         const RIM_SLACK: f32 = 1e-5;
 
         for viewport in ASPECTS {
-            for k in GUNNER_BLEND_LADDER {
+            for k in BLEND_SAMPLES {
                 let margin = OpticPicture::new(viewport, None, k).margin;
                 for step in 0..24 {
                     let phi = step as f32 * std::f32::consts::TAU / 24.0;

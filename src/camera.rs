@@ -41,7 +41,7 @@ use bevy::prelude::*;
 use crate::aim::CommittedAim;
 use crate::firecontrol::{RangeTable, Ranging};
 use crate::sight::{
-    GunnerBlend, SightMode, SightToggled, hull_local_dir, in_gunner, in_third_person, sight_line,
+    GUNNER_BLEND, SightMode, SightToggled, hull_local_dir, in_gunner, in_third_person, sight_line,
     yaw_pitch_of,
 };
 use crate::spec::ViewKind;
@@ -498,8 +498,8 @@ fn reaim_orbit_on_optic_exit(
 }
 
 /// The optic's look bearing (a WORLD direction): the geometric blend, fraction `k`, from the gun's
-/// `sight` line toward the committed `intent` — the two ends of the one gunner knob
-/// ([`GunnerBlend`]). `k = 0` is the sight line itself, `k = 1` the intent's bearing from the
+/// `sight` line toward the committed `intent` — the two ends of the optic's one blend, which rides
+/// at [`GUNNER_BLEND`]. `k = 0` is the sight line itself, `k = 1` the intent's bearing from the
 /// sight's own origin `eye`; the whole interval is a plain interpolation of the two BEARINGS, with
 /// no state, so the view cannot overshoot, wobble, or lag.
 ///
@@ -560,7 +560,6 @@ fn gunner_camera(
     gun: Query<&GlobalTransform, Without<PlayerView>>,
     hull: Query<&GlobalTransform, (With<Hull>, Without<PlayerView>)>,
     committed: Res<CommittedAim>,
-    blend: Res<GunnerBlend>,
     ranging: Res<Ranging>,
     tables: Query<&RangeTable>,
 ) {
@@ -587,7 +586,7 @@ fn gunner_camera(
         eye,
         sight_line(rotation, theta),
         committed.get(tank).filter(|point| point.is_finite()),
-        blend.0,
+        GUNNER_BLEND,
     );
     place_optic_camera(
         &mut transform,
@@ -627,7 +626,7 @@ fn place_optic_camera(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::sight::GUNNER_BLEND_LADDER;
+    use crate::sight::BLEND_SAMPLES;
 
     /// The angle between two directions, via `atan2` on the cross/dot pair — never `acos` of a dot
     /// product, which loses most of the f32 mantissa near 1, and these are angles that should be 0.
@@ -715,7 +714,7 @@ mod tests {
         }
         // And with nothing committed at all, every rung collapses to the same line.
         let (eye, sight, _) = sighting(0.35, 0.08, 0.0, 0.0, 50.0);
-        for k in GUNNER_BLEND_LADDER {
+        for k in BLEND_SAMPLES {
             assert_eq!(blended_look(&hull(), eye, sight, None, k), sight);
         }
     }
@@ -771,7 +770,7 @@ mod tests {
             "the fixture must lead on both axes, or this proves nothing",
         );
 
-        for k in GUNNER_BLEND_LADDER {
+        for k in BLEND_SAMPLES {
             let (yaw, pitch) = bearing(k);
             let (yaw_fraction, pitch_fraction) = (
                 shortest_angle(yaw - gun_yaw) / yaw_lead,
