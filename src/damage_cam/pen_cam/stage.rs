@@ -87,8 +87,15 @@ const CORNER_FOV_DEG: f32 = 30.0;
 const LEG_FRAME_M: f32 = 1.5;
 /// The Pen and Damaged frames look along the shot turned this far (deg) off it. TUNED.
 const SHOT_NUDGE_DEG: f32 = 20.0;
-/// Those frames hold the tank's bounds' sphere this much inside the field. TUNED.
+/// Those frames hold the tank's bounds this much inside the field: the bounds scaled about their
+/// centre by this factor just fit. TUNED.
 const BOUNDS_MARGIN: f32 = 1.1;
+/// The box fit of those frames checks the orbit at this many spins over a full turn, every 5°.
+/// TUNED.
+const ORBIT_SAMPLES: u32 = 72;
+/// The box fit's bisection steps: DERIVED, they narrow the distance to 2⁻²⁴ of the sphere's, under
+/// f32's resolution at that distance.
+const FIT_STEPS: u32 = 24;
 /// A direction whose cross product with the vertical is shorter than this (the sine of 0.06°) is
 /// vertical, for choosing an axis or an up.
 const VERTICAL_SIN: f32 = 1.0e-3;
@@ -1447,13 +1454,15 @@ fn framing(
 /// from there the eye turns `spin` (rad) about the vertical through the bounds' centre, keeping
 /// its distance and height, so the frame's slow orbit starts on the shot line.
 ///
-/// The bounds' sphere fits the vertical field, which binds while the corner is landscape.
+/// The frame fits the tank's bounding box: the eye stands at the smallest distance on its sightline
+/// at which the box, scaled about its centre by [`BOUNDS_MARGIN`], lies inside the vertical field
+/// and the corner's horizontal one ([`super::hud::ASPECT`] wider), at every one of
+/// [`ORBIT_SAMPLES`] spins of a full turn. Invariant: that distance does not depend on `spin`, so
+/// the eye holds it through the whole orbit and the frame never breathes; a full turn covers every
+/// spin a frame of any length reaches. Without bounds the frame fits the sphere around the framed
+/// points to the vertical field instead.
 fn along_shot(plan: &Plan, orbit: Vec2, spin: f32) -> (Transform, Projection) {
     let half_fov = 0.5 * CORNER_FOV_DEG.to_radians();
-    let (center, radius) = match plan.tank_bounds {
-        Some((lo, hi)) => (0.5 * (lo + hi), 0.5 * (hi - lo).length()),
-        None => enclose(&plan.framed_points()),
-    };
     let shot = plan.line.direction_at(plan.contact_arc - 1e-3);
     let lift = Vec3::Y.cross(shot);
     let axis = if lift.length() > VERTICAL_SIN {
@@ -1473,15 +1482,33 @@ fn along_shot(plan: &Plan, orbit: Vec2, spin: f32) -> (Transform, Projection) {
             .try_normalize()
             .unwrap_or(axis)
     };
-    // The eye on the sightline from the impact, `far` from the bounds' centre: the positive root of
+    // The eye on the sightline from the impact, `far` from the frame's centre: the positive root of
     // `|q + e·t| = far` for `q` the impact off the centre, real while `|q| ≤ far`, which holds
-    // for an impact inside the bounds (`|q| ≤ radius < far`).
-    let far = radius * BOUNDS_MARGIN / half_fov.sin();
-    let q = plan.impact_point - center;
-    let b = toward_eye.dot(q);
-    let t = -b + (b * b - q.length_squared() + far * far).max(0.0).sqrt();
+    // for an impact inside the bounds at any distance that fits them.
+    let eye_at = |center: Vec3, far: f32| {
+        let q = plan.impact_point - center;
+        let b = toward_eye.dot(q);
+        let t = -b + (b * b - q.length_squared() + far * far).max(0.0).sqrt();
+        plan.impact_point + toward_eye * t
+    };
+    let (center, eye) = match plan.tank_bounds {
+        Some((lo, hi)) => {
+            let center = 0.5 * (lo + hi);
+            let far = box_distance(center, 0.5 * (hi - lo), up, half_fov, |far| {
+                eye_at(center, far)
+            });
+            (center, eye_at(center, far))
+        }
+        None => {
+            let (center, radius) = enclose(&plan.framed_points());
+            (
+                center,
+                eye_at(center, radius * BOUNDS_MARGIN / half_fov.sin()),
+            )
+        }
+    };
     let turn = Quat::from_rotation_y(spin);
-    let eye = center + turn * (plan.impact_point + toward_eye * t - center);
+    let eye = center + turn * (eye - center);
     (
         Transform::from_translation(eye).looking_at(center, turn * up),
         Projection::Perspective(PerspectiveProjection {
@@ -1489,6 +1516,62 @@ fn along_shot(plan: &Plan, orbit: Vec2, spin: f32) -> (Transform, Projection) {
             ..default()
         }),
     )
+}
+
+/// The smallest distance from `center` at which the eye `eye_at(distance)`, looking at `center`
+/// with `up`, holds the box of half-extents `half` about `center`, scaled by [`BOUNDS_MARGIN`],
+/// inside the field of vertical half-angle `half_fov` at the corner's aspect, the box turned about
+/// the vertical through `center` to each of [`ORBIT_SAMPLES`] spins of a full turn (turning the box
+/// back is turning the eye on).
+///
+/// A bisection of [`FIT_STEPS`] steps between zero and the box's sphere distance (the scaled
+/// sphere's tangent cone at the vertical half-field lies inside the frustum, so that distance
+/// fits). It keeps its upper end on a fitting distance, so the result always fits at every sample:
+/// conservative, never under; where fitting holds at every distance beyond some edge, it is that
+/// edge to within the last step.
+fn box_distance(
+    center: Vec3,
+    half: Vec3,
+    up: Vec3,
+    half_fov: f32,
+    eye_at: impl Fn(f32) -> Vec3,
+) -> f32 {
+    let tan_v = half_fov.tan();
+    let tan_h = tan_v * super::hud::ASPECT;
+    let corners: [Vec3; 8] = std::array::from_fn(|k| {
+        BOUNDS_MARGIN
+            * Vec3::new(
+                if k & 1 == 0 { -half.x } else { half.x },
+                if k & 2 == 0 { -half.y } else { half.y },
+                if k & 4 == 0 { -half.z } else { half.z },
+            )
+    });
+    let fits = |far: f32| {
+        let eye = eye_at(far);
+        let to_view = Transform::from_translation(eye)
+            .looking_at(center, up)
+            .rotation
+            .inverse();
+        (0..ORBIT_SAMPLES).all(|k| {
+            let back =
+                Quat::from_rotation_y(-std::f32::consts::TAU * k as f32 / ORBIT_SAMPLES as f32);
+            corners.iter().all(|&r| {
+                let v = to_view * (center + back * r - eye);
+                let depth = -v.z;
+                depth > 0.0 && v.y.abs() <= depth * tan_v && v.x.abs() <= depth * tan_h
+            })
+        })
+    };
+    let (mut lo, mut hi) = (0.0, half.length() * BOUNDS_MARGIN / half_fov.sin());
+    for _ in 0..FIT_STEPS {
+        let mid = 0.5 * (lo + hi);
+        if fits(mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    hi
 }
 
 /// The slice's frame on its plane: centre, and width and height across and up the plane at a 1.6
@@ -1557,6 +1640,7 @@ fn enclose(points: &[Vec3]) -> (Vec3, f32) {
 #[cfg(test)]
 mod tests {
     use super::super::demo::Library;
+    use super::super::hud::ASPECT;
     use super::super::material::Blend;
     use super::super::plan::LEG_EPS_M;
     use super::*;
@@ -1951,7 +2035,7 @@ mod tests {
     /// The frames that look along the shot.
     const ALONG_SHOT: [CornerKind; 3] =
         [CornerKind::Glass, CornerKind::Victim, CornerKind::Damaged];
-    /// The corner's narrowest aspect in these tests: square, stricter than any landscape corner.
+    /// A square field, stricter than any landscape corner, for the points every corner shape holds.
     const SQUARE: f32 = 1.0;
     /// Angle tolerance (deg) on the sightline's nudge: DERIVED, f32 rounding of a unit direction
     /// through two rotations is ~1e-5°.
@@ -1989,10 +2073,10 @@ mod tests {
     }
 
     /// Every record, in every frame that looks along the shot, as recorded and with its calibre cut
-    /// to 2 mm (fixture data), as the frame opens: the whole tank's bounds and the impact lie in the
-    /// field, the camera is upright (its right is level), the sightline to the impact is the shot
-    /// turned [`SHOT_NUDGE_DEG`] back toward the shooter, and the frame does not depend on the
-    /// calibre.
+    /// to 2 mm (fixture data), as the frame opens: the whole tank's bounds lie in the corner's field
+    /// and the impact in a square one, the camera is upright (its right is level), the sightline to
+    /// the impact is the shot turned [`SHOT_NUDGE_DEG`] back toward the shooter, and the frame does
+    /// not depend on the calibre.
     #[test]
     fn the_shot_frames_hold_the_whole_tank() {
         let library = Library::load();
@@ -2020,7 +2104,7 @@ mod tests {
             for (kind, (eye, projection)) in ALONG_SHOT.iter().zip(&frames[0]) {
                 for p in corners(bounds) {
                     assert!(
-                        in_view(eye, projection, p, SQUARE),
+                        in_view(eye, projection, p, ASPECT),
                         "{name} {kind:?}: {p} is out of frame"
                     );
                 }
@@ -2130,12 +2214,151 @@ mod tests {
                 assert!((a.length() - b.length()).abs() < POSITION_TOL_M, "{name}");
                 assert!((a.y - b.y).abs() < POSITION_TOL_M, "{name}");
                 for p in corners(bounds) {
-                    assert!(in_view(&later, &projection, p, SQUARE), "{name} {kind:?}");
+                    assert!(in_view(&later, &projection, p, ASPECT), "{name} {kind:?}");
                 }
                 let (still, _) = at(from + elapsed, true);
                 assert!(
                     still.translation.distance(start.translation) < POSITION_TOL_M,
                     "{name} {kind:?}"
+                );
+            }
+        }
+    }
+
+    /// Tolerance on the box fit's edge ratio: DERIVED, well above the bisection's last step (2⁻²⁴
+    /// of the sphere's distance) and f32 rounding through the spun frame (~1e-6 relative).
+    const FIT_TOL: f32 = 1.0e-3;
+
+    /// Frame `kind` of `plan` at the corner time that has turned it `spin_deg` from the shot line.
+    fn spun(plan: &Plan, kind: CornerKind, spin_deg: f32) -> (Transform, Projection) {
+        let c = match kind {
+            CornerKind::Damaged => kind.hold_from() + spin_deg / timeline::DRIFT_DEG_S,
+            _ => spin_deg / timeline::ORBIT_DEG_S,
+        };
+        framing(plan, kind, c, &Knobs::default(), &Stage::default())
+    }
+
+    /// How far toward the field's edge `p` projects in the camera at `eye`, at the corner's
+    /// aspect, up and across: 1 on the edge.
+    fn edge_ratio(eye: &Transform, projection: &Projection, p: Vec3) -> Vec2 {
+        let Projection::Perspective(lens) = projection else {
+            panic!("perspective");
+        };
+        let v = eye.compute_affine().inverse().transform_point3(p);
+        let depth = -v.z;
+        assert!(depth > 0.0, "{p} behind the eye");
+        let tan = (0.5 * lens.fov).tan();
+        Vec2::new(
+            v.y.abs() / (depth * tan),
+            v.x.abs() / (depth * tan * ASPECT),
+        )
+    }
+
+    /// Every record, in every frame that looks along the shot, through a full turn of its orbit,
+    /// with the tank's box as recorded and stretched to three times its longer horizontal side
+    /// (fixture data, so the horizontal field binds too): every corner of the box lies in the
+    /// corner's field at every degree, and the fit is tight, the box scaled by [`BOUNDS_MARGIN`]
+    /// inside the field at every one of the fit's spins and on its edge at one of them. The
+    /// stretched box reaches the horizontal edge for at least one record.
+    #[test]
+    fn the_shot_frames_fit_the_box_through_the_turn() {
+        let library = Library::load();
+        let asset = crate::damage_cam::shapes::TankAsset::load(&library.vehicle).unwrap();
+        let step = 360 / ORBIT_SAMPLES;
+        let mut across = 0;
+        for record in &library.records {
+            let (lo, hi) = record.plan.tank_bounds.expect("the tank asset has bounds");
+            let (center, half) = (0.5 * (lo + hi), 0.5 * (hi - lo));
+            let stretch = if half.x >= half.z {
+                Vec3::new(3.0, 1.0, 1.0)
+            } else {
+                Vec3::new(1.0, 1.0, 3.0)
+            };
+            for (stretched, bounds) in [
+                (false, (lo, hi)),
+                (true, (center - half * stretch, center + half * stretch)),
+            ] {
+                let mut plan = Plan::new(&record.report, &asset.shapes(&record.report.servo_deg));
+                plan.tank_bounds = Some(bounds);
+                let name = format!(
+                    "{}{}",
+                    record.stem,
+                    if stretched { " stretched" } else { "" }
+                );
+                for kind in ALONG_SHOT {
+                    let mut widest = Vec2::ZERO;
+                    for deg in 0..360 {
+                        let (eye, projection) = spun(&plan, kind, deg as f32);
+                        for p in corners(bounds) {
+                            assert!(
+                                in_view(&eye, &projection, p, ASPECT),
+                                "{name} {kind:?} at {deg}°: {p} is out of frame"
+                            );
+                        }
+                        if deg % step != 0 {
+                            continue;
+                        }
+                        for p in corners(bounds) {
+                            let scaled = center + BOUNDS_MARGIN * (p - center);
+                            widest = widest.max(edge_ratio(&eye, &projection, scaled));
+                        }
+                    }
+                    assert!(
+                        (widest.max_element() - 1.0).abs() < FIT_TOL,
+                        "{name} {kind:?}: the scaled box reaches {widest} of the field"
+                    );
+                    if stretched && (widest.y - 1.0).abs() < FIT_TOL {
+                        across += 1;
+                    }
+                }
+            }
+        }
+        assert!(across > 0, "no stretched box reaches the horizontal edge");
+    }
+
+    /// Every record, in every frame that looks along the shot: the eye holds one distance from the
+    /// box's centre through a full turn, so the frame does not breathe as it orbits.
+    #[test]
+    fn the_shot_frames_hold_their_distance_through_the_turn() {
+        let library = Library::load();
+        for record in &library.records {
+            let plan = &record.plan;
+            let bounds = plan.tank_bounds.expect("the tank asset has bounds");
+            let center = 0.5 * (bounds.0 + bounds.1);
+            for kind in ALONG_SHOT {
+                let at = |deg: f32| spun(plan, kind, deg).0.translation.distance(center);
+                let open = at(0.0);
+                for tenth in 0..3600 {
+                    let deg = tenth as f32 * 0.1;
+                    let distance = at(deg);
+                    assert!(
+                        (distance - open).abs() < POSITION_TOL_M,
+                        "{} {kind:?} at {deg}°: {distance} m against {open} m",
+                        record.stem
+                    );
+                }
+            }
+        }
+    }
+
+    /// The box fit stands every record's eye strictly nearer than the sphere around the same box
+    /// would (its half-diagonal, scaled by [`BOUNDS_MARGIN`], on the vertical half-field): the
+    /// records' tank is long and low, nowhere near a cube, so the two never coincide.
+    #[test]
+    fn the_box_fit_stands_nearer_than_the_sphere() {
+        let library = Library::load();
+        let half_fov = 0.5 * CORNER_FOV_DEG.to_radians();
+        for record in &library.records {
+            let plan = &record.plan;
+            let (lo, hi) = plan.tank_bounds.expect("the tank asset has bounds");
+            let center = 0.5 * (lo + hi);
+            let sphere = 0.5 * (hi - lo).length() * BOUNDS_MARGIN / half_fov.sin();
+            for kind in ALONG_SHOT {
+                let fit = spun(plan, kind, 0.0).0.translation.distance(center);
+                assert!(
+                    fit < sphere - POSITION_TOL_M,
+                    "{} {kind:?}: the box fit stands {fit} m off, the sphere {sphere} m",
+                    record.stem
                 );
             }
         }
