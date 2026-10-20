@@ -307,8 +307,8 @@ pub fn plugin(app: &mut App) {
         // The shared HUD/crew plugins below read the `UiFonts` resource; mount the loader so the
         // sandbox provides it too (the sandbox's own labels keep the default font — a dev tool).
         crate::ui_font::plugin,
-        // Shared tank-state HUD (component HP + aggregate status labels), reprojected through the
-        // `PlayerView` declaration on the free-fly camera below.
+        // Shared tank nameplates, reprojected through the `PlayerView` declaration on the free-fly
+        // camera below.
         hud::plugin,
         // The controlled tank's crew bar + `1`–`5` swap input (shared with the game). The sandbox's
         // single target is marked `Controlled`, so the same code drives it here.

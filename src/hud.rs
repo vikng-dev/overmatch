@@ -1,4 +1,5 @@
-//! Shared world-anchored HUD for game and armor sandbox: a nameplate floated over each tank.
+//! Shared world-anchored HUD for game and armor sandbox: nameplates floated over tanks, as many as
+//! the pool holds.
 //!
 //! Invariant: labels read simulation state but never write it; the camera it reprojects through is
 //! the composition's declared [`PlayerView`], never a camera implementation of its own.
@@ -37,8 +38,9 @@ pub fn plugin(app: &mut App) {
 }
 
 fn spawn_labels(mut commands: Commands, fonts: Res<UiFonts>) {
-    // Nameplate pool floated over each tank — just the display name. Reprojected each frame; hidden
-    // while unused. Four covers the current SP duel + a bit of headroom, same as the old pool.
+    // Nameplate pool, just the display name, reprojected each frame and hidden while unused. Four
+    // plates: tanks past them, in query order, go unnamed (TUNED for the duel; a fuller match
+    // wants a bigger pool).
     for _ in 0..4 {
         commands.spawn((
             FlowScoped(Flow::InMatch),
@@ -63,9 +65,9 @@ fn spawn_labels(mut commands: Commands, fonts: Res<UiFonts>) {
     }
 }
 
-/// Float a name nameplate over each tank, reprojected to screen; hide the leftover plates. Anchored
-/// a little above the hull so it clears the model. The aggregate status this used to carry now lives
-/// in the controlled tank's fixed corner panel (`crew_ui::update_status_panel`).
+/// Float a nameplate over each tank the pool reaches, in query order, reprojected to screen; hide
+/// the leftover plates. Anchored a little above the hull so it clears the model. The controlled
+/// tank's aggregate status is the fixed corner panel's (`crew_ui::update_status_panel`).
 fn update_tank_nameplates(
     camera: Single<(&Camera, &GlobalTransform), With<PlayerView>>,
     tanks: Query<(Entity, &GlobalTransform, Option<&Name>), With<Tank>>,
