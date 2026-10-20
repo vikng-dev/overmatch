@@ -23,7 +23,8 @@ use crate::overlay::Overlay;
 const INSET_PX: f32 = 16.0;
 const WIDTH_FRACTION: f32 = 0.30;
 const WIDTH_PX: (f32, f32) = (384.0, 640.0);
-const ASPECT: f32 = 1.6;
+/// The corner's width over its height.
+pub(super) const ASPECT: f32 = 1.6;
 const ACCENT_PX: f32 = 3.0;
 const HAIRLINE_PX: f32 = 2.0;
 const GLYPH_PX: f32 = 20.0;
