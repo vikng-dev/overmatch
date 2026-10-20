@@ -1,4 +1,4 @@
-//! Shared world-anchored HUD for game and armor sandbox.
+//! Shared world-anchored HUD for game and armor sandbox: a nameplate floated over each tank.
 //!
 //! Invariant: labels read simulation state but never write it; the camera it reprojects through is
 //! the composition's declared [`PlayerView`], never a camera implementation of its own.
@@ -7,17 +7,11 @@ use bevy::prelude::*;
 
 use crate::net::NetBot;
 
-use crate::ballistics::{ComponentHealth, ComponentVolume};
 use crate::camera::GunnerCameraPlaced;
-use crate::damage::{Ammo, CrewStation, FunctionRole};
 use crate::flow::{Flow, FlowScoped, InMatchSystems};
-use crate::tank::{Tank, ViewNode};
+use crate::tank::Tank;
 use crate::ui_font::UiFonts;
 use crate::view::PlayerView;
-
-/// A pooled label floated over a damaged component each frame, showing its HP; hidden while unused.
-#[derive(Component)]
-struct ComponentHpLabel;
 
 /// A pooled tank nameplate, reassigned and reprojected each frame.
 #[derive(Component)]
@@ -35,7 +29,7 @@ pub fn plugin(app: &mut App) {
             // overstep and the orbit camera re-tracks every frame), so the labels jitter against the
             // model. Same read-after-Propagate idiom as the gunner reticles (`sight`) and the trace
             // recorder.
-            (update_component_hp_labels, update_tank_nameplates)
+            update_tank_nameplates
                 .after(TransformSystems::Propagate)
                 .after(GunnerCameraPlaced)
                 .in_set(InMatchSystems),
@@ -43,26 +37,6 @@ pub fn plugin(app: &mut App) {
 }
 
 fn spawn_labels(mut commands: Commands, fonts: Res<UiFonts>) {
-    // Pool of HP labels floated over damaged components each frame; hidden while unused.
-    for _ in 0..12 {
-        commands.spawn((
-            FlowScoped(Flow::InMatch),
-            ComponentHpLabel,
-            Text::new(""),
-            TextFont {
-                // Regular: a small, dense numeric readout (13px).
-                font: fonts.body.clone().into(),
-                font_size: FontSize::Px(13.0),
-                ..default()
-            },
-            TextColor(Color::srgb(1.0, 0.8, 0.3)),
-            Node {
-                position_type: PositionType::Absolute,
-                ..default()
-            },
-            Visibility::Hidden,
-        ));
-    }
     // Nameplate pool floated over each tank — just the display name. Reprojected each frame; hidden
     // while unused. Four covers the current SP duel + a bit of headroom, same as the old pool.
     for _ in 0..4 {
@@ -86,85 +60,6 @@ fn spawn_labels(mut commands: Commands, fonts: Res<UiFonts>) {
             BackgroundColor(Color::srgba(0.04, 0.06, 0.08, 0.55)),
             Visibility::Hidden,
         ));
-    }
-}
-
-/// Float an HP readout over each *damaged* component (current < max), reprojected to screen; hide
-/// the leftover labels. Lets you watch transit damage and spall chip components down (red at 0).
-/// Anchored at the volume's VIEW node where one is attached ([`ViewNode::resolve`]): a
-/// turret-resident component's sim pose steps at tick rate since the sim/view split, and the
-/// label must track the smoothly-rendered model, not the stepped skeleton.
-fn update_component_hp_labels(
-    camera: Single<(&Camera, &GlobalTransform), With<PlayerView>>,
-    components: Query<
-        (
-            Entity,
-            Option<&ViewNode>,
-            &ComponentHealth,
-            Option<&CrewStation>,
-            Option<&Ammo>,
-            Option<&FunctionRole>,
-            Option<&Name>,
-        ),
-        With<ComponentVolume>,
-    >,
-    transforms: Query<&GlobalTransform>,
-    mut labels: Query<
-        (&mut Node, &mut Text, &mut Visibility, &mut TextColor),
-        With<ComponentHpLabel>,
-    >,
-) {
-    let (camera, cam_transform) = *camera;
-    let mut damaged = components
-        .iter()
-        .filter(|(_, _, hp, _, _, _, _)| hp.current < hp.max);
-    for (mut node, mut text, mut visibility, mut color) in &mut labels {
-        let Some((entity, view, hp, crew, ammo, function, name)) = damaged.next() else {
-            *visibility = Visibility::Hidden;
-            continue;
-        };
-        let Ok(transform) = transforms.get(ViewNode::resolve(view, entity)) else {
-            *visibility = Visibility::Hidden;
-            continue;
-        };
-        match camera.world_to_viewport(cam_transform, transform.translation()) {
-            Ok(screen) => {
-                node.left = Val::Px(screen.x + 8.0);
-                node.top = Val::Px(screen.y - 8.0);
-                *text = Text::new(format!(
-                    "{}\n{}/{} hp",
-                    volume_label(crew, ammo, function, name),
-                    hp.current,
-                    hp.max
-                ));
-                *color = TextColor(if hp.current == 0 {
-                    Color::srgb(1.0, 0.3, 0.2)
-                } else {
-                    Color::srgb(1.0, 0.8, 0.3)
-                });
-                *visibility = Visibility::Visible;
-            }
-            Err(_) => *visibility = Visibility::Hidden,
-        }
-    }
-}
-
-fn volume_label(
-    crew: Option<&CrewStation>,
-    ammo: Option<&Ammo>,
-    function: Option<&FunctionRole>,
-    name: Option<&Name>,
-) -> String {
-    if let Some(crew) = crew {
-        crew.label().to_string()
-    } else if let Some(function) = function {
-        function.label().to_string()
-    } else if ammo.is_some() {
-        name.map(|name| name.as_str().to_string())
-            .unwrap_or_else(|| "Ammo".to_string())
-    } else {
-        name.map(|name| name.as_str().to_string())
-            .unwrap_or_else(|| "Component".to_string())
     }
 }
 

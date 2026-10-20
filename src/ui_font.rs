@@ -17,7 +17,7 @@ use bevy::prelude::*;
 pub(crate) struct UiFonts {
     /// SemiBold — HUD overlays, all-caps banners, big prompts, identity chips.
     pub hud: Handle<Font>,
-    /// Regular — the smaller, denser numeric readouts (HP labels, metric rows, reticle numbers).
+    /// Regular — the smaller, denser numeric readouts (metric rows, reticle numbers).
     pub body: Handle<Font>,
 }
 

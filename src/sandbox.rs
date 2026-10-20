@@ -447,7 +447,7 @@ fn spawn_camera(mut commands: Commands) {
             ));
         });
 
-    // Dedicated UI camera at the highest order, so the HUD (HP labels, reticle, legend, status) draws
+    // Dedicated UI camera at the highest order, so the HUD (nameplates, reticle, legend, status) draws
     // *above* both the main pass and the on-top overlay volumes — otherwise opaque "on top" component
     // meshes (overlay, order 1) would paint over UI carried by the order-0 main camera. It renders no
     // 3D itself (its layer holds no geometry; gizmos default to layer 0) and doesn't clear the frame,

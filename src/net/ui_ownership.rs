@@ -170,7 +170,7 @@ fn assert_hit_confirm_root(world: &mut World) {
     );
 }
 
-/// The match's HUD roots, one marker each (`TankNameplate` and `ComponentHpLabel` are pools).
+/// The match's HUD roots, one marker each (`TankNameplate` is a pool).
 const MATCH_ROOTS: &[&str] = &[
     "DebugCard",
     "CrewBarText",
@@ -185,7 +185,6 @@ const MATCH_ROOTS: &[&str] = &[
     "DeathStatusLine",
     "DamageFlashNode",
     "TankNameplate",
-    "ComponentHpLabel",
     "LeaveMatchRoot",
 ];
 

@@ -137,7 +137,7 @@ pub struct PendingSwap {
 pub const SWAP_SECONDS: f32 = 4.0;
 
 /// A repairable module function served by this volume. Function loss is derived from its HP.
-/// Identity/label only — gating keys off [`Capability`] requirements (via [`Part`]), not the function.
+/// Identity only — gating keys off [`Capability`] requirements (via [`Part`]), not the function.
 ///
 /// A requirement names a function, and [`part_qualities`] max-combines every volume serving one, so
 /// a weapon gated on its own barrel needs a barrel function no other weapon's barrel serves: the
@@ -150,19 +150,6 @@ pub enum FunctionRole {
     GunBarrel,
     CoaxMgBarrel,
     BowMgBarrel,
-}
-
-impl FunctionRole {
-    pub fn label(self) -> &'static str {
-        match self {
-            FunctionRole::Engine => "Engine",
-            FunctionRole::Transmission => "Transmission",
-            FunctionRole::Breech => "Breech",
-            FunctionRole::GunBarrel => "Gun barrel",
-            FunctionRole::CoaxMgBarrel => "Coax MG barrel",
-            FunctionRole::BowMgBarrel => "Bow MG barrel",
-        }
-    }
 }
 
 /// A gameplay verb the tank can perform (design §7b). Closed enum — consuming systems (driving,
