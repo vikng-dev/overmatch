@@ -1,9 +1,9 @@
-//! The damage cam's record: [`PenetrationReport`], one per (shot, struck tank), and its player.
+//! The damage cam's record: [`PenetrationReport`], one per (shot, struck tank).
 //!
 //! The report is plain serde data — no entities, handles or meshes — so any source can fill it (a
-//! hand-authored RON clip, or [`record`] reading a shot the sim resolved) and [`player`] consumes
-//! it unchanged. It does not ride the wire itself: [`wire`] carries it as indices and quanta, and
-//! [`delivery`] hands each recipient its own.
+//! hand-authored RON clip, or [`record`] reading a shot the sim resolved). It does not ride the
+//! wire itself: [`wire`] carries it as indices and quanta, and [`delivery`] hands each recipient
+//! its own.
 //!
 //! The record carries no geometry. It holds the shot's inputs (round, origin, shooter, struck
 //! vehicle, every servo's angle), the struck tank's state at the shot (each component's hit points,
@@ -16,12 +16,10 @@
 //! right). Units: metres for positions, unit vectors for directions, seconds for `t` measured from
 //! first contact (the approach is negative), degrees for angles, millimetres for armour, reference
 //! millimetres for doses, strengths and counts, kilograms and metres per second for the projectile.
-//! `synthetic` marks a report whose numbers were authored, not simulated; the player prints it on
-//! screen.
+//! `synthetic` marks a report whose numbers were authored, not simulated; [`wire`] never sends one.
 
 pub(crate) mod delivery;
 pub mod pen_cam;
-pub mod player;
 pub mod record;
 pub(crate) mod recorder;
 pub mod shapes;
@@ -508,7 +506,7 @@ pub(crate) mod tests {
     /// the box's record but no [`PathStep::Dosed`]. Fixture doses (reference-mm).
     #[test]
     fn a_record_is_dosed_only_where_hp_was_lost() {
-        let mut report = PenetrationReport::load(&scenario_dir().join("through.ron")).unwrap();
+        let mut report = delivery::tests::report("s1_through_crew");
         report.plates.clear();
         report.ricochets.clear();
         let dose = |lost| BoxDose {
@@ -529,32 +527,20 @@ pub(crate) mod tests {
         );
     }
 
-    fn scenario_dir() -> std::path::PathBuf {
-        crate::assets::asset_root().join(player::SCENARIO_DIR)
-    }
-
+    /// A recorded report survives RON serialization field for field: the recorder writes its files
+    /// with this serializer, and [`PenetrationReport::load`] reads them back.
     #[test]
     fn report_round_trips_through_ron() {
-        let report = PenetrationReport::load(&scenario_dir().join("through.ron")).unwrap();
+        let report = delivery::tests::report("s1_through_crew");
         let text = ron::ser::to_string_pretty(&report, ron::ser::PrettyConfig::default()).unwrap();
         assert_eq!(PenetrationReport::from_ron(&text).unwrap(), report);
     }
 
-    /// Every name a scenario's hits and consequences cite resolves to one of its internals, every
+    /// Every name a report's hits and consequences cite resolves to one of its internals, every
     /// timed list is in time order, and the path ends in or past the last plate: the sim marches a
     /// perforating shell on until it embeds or leaves the vehicle, so an embed holds the path's
     /// end and a perforated last plate has it beyond the exit. A deflection leg that ends the path
     /// (a ricochet's, or a bounce after the last plate) is unconstrained.
-    #[test]
-    fn scenarios_are_self_consistent() {
-        for (_, file) in player::SCENARIOS {
-            let report = PenetrationReport::load(&scenario_dir().join(file)).unwrap();
-            assert!(report.synthetic, "{file}: demo clips are synthetic");
-            assert_self_consistent(file, &report);
-        }
-    }
-
-    /// See [`scenarios_are_self_consistent`]; shared with the recorded scenarios.
     pub(crate) fn assert_self_consistent(file: &str, report: &PenetrationReport) {
         let cited = report
             .spall

@@ -80,7 +80,6 @@ const BARLOW_TEXT_FILES: &[&str] = &[
 /// their rendered literals must be pure printable ASCII — the typographic set is NOT available to them.
 const ASCII_ONLY_TEXT_FILES: &[&str] = &[
     "src/sandbox.rs",
-    "src/damage_cam/player.rs",
     "src/damage_cam/pen_cam/demo.rs",
     "src/track_sandbox/mod.rs",
     "src/track_sandbox/suspension_viz.rs",

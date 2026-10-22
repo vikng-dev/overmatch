@@ -164,12 +164,6 @@ test = false
 required-features = ["dev_ui"]
 
 [[bin]]
-name = "damage_cam_demo"
-path = "src/bin/damage_cam_demo.rs"
-test = false
-required-features = ["dev_tools"]
-
-[[bin]]
 name = "pen_cam_demo"
 path = "src/bin/pen_cam_demo.rs"
 test = false
