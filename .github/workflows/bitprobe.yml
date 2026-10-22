@@ -44,7 +44,7 @@ jobs:
           find assets -type f \( -name '*.blend' -o -name '*.blend1' \) -delete
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: server-net-${{ hashFiles('vendor/**') }}
+          shared-key: server-net-${{ hashFiles('vendor/**', '!vendor/**/*.md') }}
       - name: Build bitprobe with deployed-server codegen settings
         run: cargo build --release --locked --features bitprobe --bin bitprobe
 

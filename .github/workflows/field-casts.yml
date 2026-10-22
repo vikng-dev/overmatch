@@ -81,7 +81,7 @@ jobs:
       # pinned (`scripts/ci/vendor-outside-root.sh`), so a change to their content must change the key.
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: codegen-${{ hashFiles('vendor/**') }}
+          shared-key: codegen-${{ hashFiles('vendor/**', '!vendor/**/*.md') }}
 
       - name: Field casts against the pin
         shell: bash

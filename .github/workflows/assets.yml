@@ -106,7 +106,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         if: steps.scope.outputs.affected == 'true'
         with:
-          shared-key: codegen-${{ hashFiles('vendor/**') }}
+          shared-key: codegen-${{ hashFiles('vendor/**', '!vendor/**/*.md') }}
 
       # The pins are read OUT OF `scripts/toolchain.py`, never restated here: that file is the one
       # declaration, and a version written down in a workflow is a second one that drifts silently.

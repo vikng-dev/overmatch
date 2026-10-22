@@ -120,7 +120,7 @@ jobs:
       # must change the key.
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ${{ matrix.task == 'clippy' && 'check-only' || 'codegen' }}-${{ hashFiles('vendor/**') }}
+          shared-key: ${{ matrix.task == 'clippy' && 'check-only' || 'codegen' }}-${{ hashFiles('vendor/**', '!vendor/**/*.md') }}
 
       # The default dev profile: opt-3 deps run the lib suite ~6.7× faster than the
       # retired opt-0 `ci` profile paid for once at cache-cold. `--locked` builds
@@ -203,7 +203,7 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: codegen-${{ hashFiles('vendor/**') }}
+          shared-key: codegen-${{ hashFiles('vendor/**', '!vendor/**/*.md') }}
 
       - name: Build shot stress test
         run: |

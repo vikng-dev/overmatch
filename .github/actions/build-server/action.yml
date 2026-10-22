@@ -152,7 +152,7 @@ runs:
     # so a change to their content must change the key.
     - uses: Swatinem/rust-cache@v2
       with:
-        shared-key: server-net-${{ hashFiles('vendor/**') }}
+        shared-key: server-net-${{ hashFiles('vendor/**', '!vendor/**/*.md') }}
 
     # --locked builds against the committed Cargo.lock (reproducible). release profile = strip +
     # thin LTO.

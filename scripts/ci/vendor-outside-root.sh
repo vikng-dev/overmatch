@@ -11,8 +11,9 @@
 #
 # A path dependency's fingerprint is mtime only. A fresh copy is stamped "now", newer than the
 # cached fingerprint, so every copied file is stamped one old constant instead. The constant hides a
-# content change from cargo just as well: the rust-cache key carries `hashFiles('vendor/**')`, so a
-# vendor change misses the cache.
+# content change from cargo just as well: the rust-cache key carries
+# `hashFiles('vendor/**', '!vendor/**/*.md')`, so a change to anything compiled misses the cache
+# (the notes are Markdown, not compiled, and leave the key alone).
 set -euo pipefail
 
 dest="${RUNNER_TEMP:?RUNNER_TEMP names the runner scratch directory}/vendor"

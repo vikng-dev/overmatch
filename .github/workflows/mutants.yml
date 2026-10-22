@@ -72,7 +72,7 @@ jobs:
       # (`scripts/ci/vendor-outside-root.sh`), so a change to their content must change the key.
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: codegen-${{ hashFiles('vendor/**') }}
+          shared-key: codegen-${{ hashFiles('vendor/**', '!vendor/**/*.md') }}
 
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:
