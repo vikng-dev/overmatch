@@ -84,18 +84,21 @@ Lightyear has actually sent but not acknowledged, their greatest first-send age,
 marks. It does not claim bytes, application facts accepted but not yet packed, or delivery. The same
 gauges are written to an armed shot trace whenever their summary changes.
 
-`net::shot_loss` exercises production protocol registration over real loopback UDP with seeded loss,
-delayed observer delivery, correlated receive-window loss, mixed single/automatic trajectories,
-private damage confirmation, late-join disclosure checks, and a **DERIVED 30-combatant ×
-two-weapon** same-tick volley. Its 30-receiver probe adds a **DERIVED one-second 768-RPM-per-slot**
-automatic stream and injects one reliable cannon plus owner-private damage during contention.
+`net::shot_loss` exercises production protocol registration over real loopback UDP with seeded
+10 % inbound loss, on one observer: every authority shot presents exactly one observer shell and
+every sanctioned ricochet carries; then, under a **DERIVED one-second 768-RPM-per-slot** automatic
+stream saturating the visual queue, one reliable cannon shot presents exactly once on the observer
+and its owner-private `DamageConfirm` exactly once on its owner; and a late-joining observer
+receives public status and never private combat state. The same invariants were once measured at
+scale with a 30-combatant × two-weapon volley and a 30-receiver probe, since retired in favour of
+the one-observer tripwire:
 
-**MEASURED on 2026-07-13:** repeated local runs presented all 1,800 volley receiver/shot pairs
-exactly once at 10% configured inbound loss, delivered the contended cannon fire exactly once to all
-30 receivers, and delivered its damage receipt once to its owner and to no observer. One run took
-4.05 seconds; the slowest cannon presentation completed after 44 harness orchestration steps. Raw
-counters remain opaque Lightyear link payloads—including control, acknowledgements, and
-replication—not per-shot bytes or IP/UDP headers.
+**MEASURED on 2026-07-13, historical:** repeated local runs presented all 1,800 volley
+receiver/shot pairs exactly once at 10% configured inbound loss, delivered the contended cannon fire
+exactly once to all 30 receivers, and delivered its damage receipt once to its owner and to no
+observer. One run took 4.05 seconds; the slowest cannon presentation completed after 44 harness
+orchestration steps. Raw counters remain opaque Lightyear link payloads—including control,
+acknowledgements, and replication—not per-shot bytes or IP/UDP headers.
 
 **MEASURED on 2026-07-14:** a late-joining observer received the existing root's public status with
 zero `NetCrew` and zero owner-private ammunition arrivals, including transient component additions.

@@ -51,7 +51,7 @@ local `pre-push` hook is the git-lfs upload and nothing else):
 cargo fmt --all --check                                                # job `fmt`
 cargo deny --locked check -W unmaintained                              # job `deny`
 cargo clippy --locked --all-targets --features dev_ui,bitprobe -- -D warnings   # `check (clippy)`
-cargo test --locked -- --skip <the UDP probe> --skip ballistics::field_casts::  # `check (tests)`
+cargo test --locked -- --skip ballistics::field_casts::                # `check (tests)`
 ```
 
 The asset door is `.github/workflows/assets.yml`, under its own required context, `assets`.

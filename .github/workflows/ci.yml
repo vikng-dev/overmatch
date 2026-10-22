@@ -19,7 +19,7 @@ on:
   # Unfiltered: a workflow skipped by a path filter leaves its required checks pending, and a pending
   # required check blocks a pull request's merge.
   pull_request:
-  # `shot-stress` runs on a dispatch only. The asset re-cut before a release is `assets.yml`'s.
+  # The asset re-cut before a release is `assets.yml`'s.
   workflow_dispatch:
 
 # A newer run cancels an older one on the same ref: every lane here judges the tree, not a range, so
@@ -156,97 +156,16 @@ jobs:
       - name: Tests
         if: matrix.task == 'tests'
         run: |
-          cargo test --locked -- \
-            --skip net::shot_loss::thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss \
-            --skip ballistics::field_casts::
-
-  # The isolated 30-receiver UDP probe with its memory telemetry, ON DEMAND ONLY
-  # (`workflow_dispatch`). It is a DIAGNOSTIC, not a gate: it is the lane the ordinary `tests` lane
-  # explicitly `--skip`s, it must not contend with another libtest thread, and it pays a docker
-  # build on top of a codegen build for a verdict about a probe no push has ever broken. Run it
-  # from the Actions tab when the shot-loss path is what changed.
-  #
-  # It is in the `codegen` cache family with the `tests` lane above: same profile, same targets —
-  # a dispatch off a warm `tests` cache does not recompile the dependency graph, and a check-only
-  # (clippy) cache is still never mixed in.
-  #
-  # NOT a `needs` of the `check` summary below: a job that normally skips can never be a required
-  # context.
-  shot-stress:
-    if: github.event_name == 'workflow_dispatch'
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    steps:
-      # LFS on R2 via committed `.lfsconfig` (RO). checkout `lfs: true` ignores
-      # `.lfsconfig` and still hits GitHub — so pull after checkout.
-      - uses: actions/checkout@v7
-        with:
-          persist-credentials: false
-          lfs: false
-      - name: The vendored crates, from outside the workspace root
-        run: bash scripts/ci/vendor-outside-root.sh
-      - name: Git LFS pull (R2)
-        run: |
-          git lfs install --local
-          git lfs pull
-
-      - uses: ./.github/actions/rust-toolchain
-
-      # Bevy needs these to compile on Linux (alsa/udev + windowing), same as the
-      # release build.
-      - name: Install Linux build dependencies
-        run: |
-          sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || echo "apt-get update timed out or failed; installing from the indexes already on the runner image"
-          sudo timeout 600 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends \
-            pkg-config libasound2-dev libudev-dev \
-            libwayland-dev libxkbcommon-dev libx11-dev jq time
-
-      - uses: Swatinem/rust-cache@v2
-        with:
-          shared-key: codegen-${{ hashFiles('vendor/**', '!vendor/**/*.md') }}
-
-      - name: Build shot stress test
-        run: |
-          set -euo pipefail
-          artifacts="${RUNNER_TEMP}/overmatch-test-artifacts.jsonl"
-          manifest="$(realpath Cargo.toml)"
-          cargo test --locked --lib --no-run --message-format=json > "${artifacts}"
-          mapfile -t executables < <(
-            jq -r --arg manifest "${manifest}" \
-              'select(.reason == "compiler-artifact" and .manifest_path == $manifest and .target.kind == ["lib"] and .profile.test and .executable != null) | .executable' \
-              "${artifacts}"
-          )
-          test "${#executables[@]}" -eq 1
-          test -x "${executables[0]}"
-          printf '%s\n' "${executables[0]}" > "${RUNNER_TEMP}/overmatch-libtest"
-
-      - name: Build shot stress runtime image
-        run: |
-          docker build --pull \
-            --file scripts/ci/shot-stress.Dockerfile \
-            --tag overmatch-shot-stress-runtime:ci \
-            scripts/ci
-
-      - name: Shot stress test with memory telemetry
-        env:
-          # DERIVED: four GiB is about ten times the MEASURED prior normal macOS-arm peak while
-          # leaving the hosted runner headroom to report a cgroup OOM instead of losing the VM.
-          MEMORY_MAX_BYTES: 4294967296
-        run: |
-          bash scripts/ci/measure-test-memory.sh \
-            "$(<"${RUNNER_TEMP}/overmatch-libtest")" \
-            net::shot_loss::thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss \
-            --exact --test-threads=1 --nocapture
+          cargo test --locked -- --skip ballistics::field_casts::
 
   # One context that is green iff EVERY lane a push or a PR runs here is green — `fmt` included,
   # because a summary that omits a lane is a summary that can go green over its failure, whatever
   # branch protection happens to require alongside it today.
   #
-  # `shot-stress` is deliberately absent: it is dispatch-only, so needing it would make this context
-  # depend on a job that normally skips. The asset door is not a lane here: it is `assets.yml`, its
-  # own workflow and its own required context (`assets`), because it judges a push's range and must
-  # never be cancelled. The field casts (`field-casts.yml`) are a measurement for a design decision,
-  # and their red is a finding, not a broken tree.
+  # The asset door is not a lane here: it is `assets.yml`, its own workflow and its own required
+  # context (`assets`), because it judges a push's range and must never be cancelled. The field
+  # casts (`field-casts.yml`) are a measurement for a design decision, and their red is a finding,
+  # not a broken tree.
   check:
     name: check
     needs: [fmt, deny, checks]

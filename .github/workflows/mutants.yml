@@ -79,8 +79,8 @@ jobs:
           tool: cargo-mutants@27.1.0
 
       # `-f` takes a glob, and a directory matches nothing until it ends in `**`. The lib suite only
-      # (`--lib` on every cargo call, so each mutant builds one test binary), minus the two lanes
-      # the `tests` job skips too: the isolated UDP probe and the field-cast measurement.
+      # (`--lib` on every cargo call, so each mutant builds one test binary), minus the field-cast
+      # measurement the `tests` job skips too.
       - name: cargo mutants
         timeout-minutes: ${{ fromJSON(inputs.timeout) }}
         env:
@@ -96,7 +96,6 @@ jobs:
             exit 1
           fi
           cargo mutants --in-place -f "${glob}" --cargo-arg=--lib -- -- \
-            --skip net::shot_loss::thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss \
             --skip ballistics::field_casts::
 
       - name: Mutation report

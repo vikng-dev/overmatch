@@ -925,13 +925,13 @@ fn a_box_behind_a_perforated_plate_is_dosed_by_line_and_cone() {
 }
 
 /// A record is stated in the struck hull's frame: one shot through a plate into a box behind it,
-/// fired at a fixture tank at two hull poses, turned with the tank, records the same verdict,
-/// plates, components, path and muzzle. The 30° pose is fixture data; 1 mm is the tolerance on a
-/// position.
+/// fired at a fixture tank at two hull poses, moved and turned with the tank, records the same
+/// verdict, plates, components, path and muzzle. The hull is its own entity, so the frame comes
+/// from the hull's pose and not the tank root's. The second pose, turned 30° and moved 3 m aside,
+/// 0.5 m up and 2 m back, is fixture data; 1 mm is the tolerance on a position.
 #[test]
 fn a_record_is_stated_in_the_struck_hull_frame() {
-    let shot = |yaw_deg: f32| {
-        let turn = Quat::from_rotation_y(yaw_deg.to_radians());
+    let shot = |hull: Transform| {
         let volumes = [
             plate("front", THIN, 0.0, Kind::Main),
             (
@@ -941,12 +941,17 @@ fn a_record_is_stated_in_the_struck_hull_frame() {
                 Kind::Box(10_000),
             ),
         ]
-        .map(|(name, size, at, kind)| ((name, size, turn * at, kind), 0, turn));
-        let hull = Transform::from_rotation(turn);
+        .map(|(name, size, at, kind)| {
+            (
+                (name, size, hull.transform_point(at), kind),
+                0,
+                hull.rotation,
+            )
+        });
         fixture_fire_with(
             &volumes,
-            turn * LINE_FROM,
-            turn * Vec3::NEG_Z * 800.0,
+            hull.transform_point(LINE_FROM),
+            hull.rotation * Vec3::NEG_Z * 800.0,
             0,
             FIXTURE_88,
             |_| {},
@@ -956,14 +961,15 @@ fn a_record_is_stated_in_the_struck_hull_frame() {
                     .query_filtered::<Entity, With<Rig>>()
                     .single(world)
                     .expect("one fixture tank");
-                world
-                    .entity_mut(tank)
-                    .insert((hull, GlobalTransform::from(hull)));
+                let posed = world.spawn((hull, GlobalTransform::from(hull))).id();
+                world.get_mut::<Rig>(tank).expect("the fixture rig").hull = posed;
             },
         )
         .report
     };
-    let (still, turned) = (shot(0.0), shot(30.0));
+    let moved = Transform::from_rotation(Quat::from_rotation_y(30.0_f32.to_radians()))
+        .with_translation(Vec3::new(3.0, 0.5, -2.0));
+    let (still, turned) = (shot(Transform::IDENTITY), shot(moved));
     let near = |a: [f32; 3], b: [f32; 3]| Vec3::from(a).distance(Vec3::from(b)) < 1.0e-3;
     assert_eq!(still.impact.verdict, turned.impact.verdict);
     assert!(near(still.impact.point, turned.impact.point));
