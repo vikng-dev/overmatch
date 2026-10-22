@@ -249,8 +249,8 @@ pub struct MaskSet {
 /// The mask sets, one per viewer whose frame draws the base look's hull this frame: the corner's
 /// inset camera or, for the kill cam's lesson, the main camera ([`Corner::showing`],
 /// [`needs_masks`]); and the x-ray's camera, stated by that presentation ([`MaskNeed`]). The
-/// corner and the glass show at once, each against its own set; the lesson and the glass never
-/// do (a kill run suspends the glass). Every mask camera names its viewer ([`MaskCamera`]);
+/// corner and the x-ray show at once, each against its own set; the lesson and the x-ray never
+/// do (a kill run suspends the x-ray). Every mask camera names its viewer ([`MaskCamera`]);
 /// [`own`] makes and unmakes each set, and nothing else despawns its cameras.
 #[derive(Resource, Default)]
 pub struct Masks {
@@ -293,8 +293,8 @@ impl Masks {
     }
 }
 
-/// A viewer whose frame draws the base look's hull outside the corner this frame — the own
-/// glass's camera — stated by that presentation before [`own`] runs, which reads it beside
+/// A viewer whose frame draws the base look's hull outside the corner this frame — the x-ray's
+/// camera — stated by that presentation before [`own`] runs, which reads it beside
 /// [`Corner`].
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct MaskNeed(pub Option<Entity>);
@@ -323,12 +323,12 @@ fn mask_image(images: &mut Assets<Image>, size: UVec2) -> Handle<Image> {
 /// size and scale factor it renders at this frame ([`viewport_now`]), and take a set away when
 /// its viewer's need ends: the set's cameras are despawned and its images removed. A new viewer,
 /// size or scale makes a new set and rebuilds the stage, whose materials hold the images; the
-/// glass compares its set's images itself. The set's cameras draw just before their viewer. Runs
+/// x-ray compares its set's images itself. The set's cameras draw just before their viewer. Runs
 /// after every system that retargets or resizes a viewer this frame. A viewer whose target cannot
 /// be resolved gets no set until it is.
 #[expect(
     clippy::too_many_arguments,
-    reason = "a system spanning the corner, the glass's need, three camera roles, the window, the masks and their images, and the stage"
+    reason = "a system spanning the corner, the x-ray's need, three camera roles, the window, the masks and their images, and the stage"
 )]
 pub fn own(
     mut commands: Commands,
@@ -521,7 +521,7 @@ pub struct FieldPrint {
 
 /// Outline `prints` on every surface the base look drawn against `masks` draws, the hull's and
 /// the components': a base or state material is one look's by the mask set it holds, so another
-/// look's surfaces (the corner's beside the glass's) keep their own footprints. A surface is
+/// look's surfaces (the corner's beside the x-ray's) keep their own footprints. A surface is
 /// inside a field's footprint where it faces the field's origin, lies inside its cone, behind its
 /// front and no farther than the reach of the recorded direction nearest it: the field met it
 /// there, which says nothing of what stopped. The outline is where the angle from the axis
@@ -620,8 +620,8 @@ pub fn hull_mask(masks: &MaskSet) -> LookMaterial {
 }
 
 /// Component `b`'s place on the state scale in frame `kind`, `None` where it is not drawn: the
-/// shooter's views (the glass and the outside view) show what this shot did to a component it
-/// took HP from, the share of the HP points it had at the shot; the victim's glass shows its own
+/// shooter's views (the x-ray and the outside view) show what this shot did to a component it
+/// took HP from, the share of the HP points it had at the shot; the victim's x-ray shows its own
 /// tank's state, the share of each pool gone.
 fn condition(b: &BoxPlan, kind: CornerKind) -> Option<Condition> {
     match kind {

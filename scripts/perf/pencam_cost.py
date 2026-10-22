@@ -59,12 +59,12 @@ SHOWS = re.compile(
 )
 CLEARS = re.compile(r"pen cam: the slot shows nothing at t=(?P<t>[0-9.]+) s")
 RUN = re.compile(r"kill cam: the run (?P<edge>starts|ends) at t=(?P<t>[0-9.]+) s")
-GLASS = re.compile(r"pen cam: the own glass is (?P<edge>on|off) at t=(?P<t>[0-9.]+) s")
+GLASS = re.compile(r"pen cam: the x-ray is (?P<edge>on|off) at t=(?P<t>[0-9.]+) s")
 
 # The slot's kinds by surface class. The shooter's corner frames (src/damage_cam/pen_cam/timeline.rs
 # `CornerKind`): Glass is the penetration frame, Slice the non-penetration, Ricochet and Damaged the
-# rest; Victim is the victim frame's drawing mode, which the slot no longer runs. The own glass
-# (game/glass.rs) draws beside the slot and writes its own marks (`glass::log_presence`).
+# rest; Victim is the victim frame's drawing mode, which the slot no longer runs. The x-ray
+# (game/xray.rs) draws beside the slot and writes its own marks (`xray::log_presence`).
 CORNER_KINDS = frozenset({"Glass", "Slice", "Ricochet", "Damaged"})
 GLASS_KINDS = frozenset({"Victim"})
 SURFACES = ("corner", "glass", "lesson", "killcam")
@@ -74,7 +74,7 @@ STATS = (("p50", 50), ("p95", 95), ("p99", 99), ("worst", 100))
 class Mark(NamedTuple):
     t: float
     # One of: corner, glass, lesson, none (the slot); run-start, run-end (the kill cam);
-    # glass-on, glass-off (the own glass).
+    # glass-on, glass-off (the x-ray).
     label: str
 
 
@@ -128,7 +128,7 @@ RANK = {
 def segments(marks: list[Mark], end_t: float) -> dict[str, list[Segment]]:
     """Each class's on-screen segments. A slot mark closes the previous slot segment and opens its
     own; `none` only closes. The run's start and end bracket a killcam segment; a lesson lives only
-    inside a run (the run's end closes it, one outside a run is a contract break). The own glass's
+    inside a run (the run's end closes it, one outside a run is a contract break). The x-ray's
     on and off bracket a glass segment, beside the slot's. Anything still open at `end_t` (the
     stream's last frame) closes there."""
     out: dict[str, list[Segment]] = {s: [] for s in SURFACES}

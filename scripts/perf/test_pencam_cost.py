@@ -95,10 +95,10 @@ class Segments(unittest.TestCase):
         self.assertEqual(segs["corner"], [Segment(10.0, 11.5)])
         self.assertEqual(segs["glass"], [Segment(11.5, 16.0)])
 
-    def test_the_own_glass_brackets_its_segment_beside_the_slot(self) -> None:
+    def test_the_xray_brackets_its_segment_beside_the_slot(self) -> None:
         lines = [
-            "pen cam: the own glass is on at t=65.000 s (Time<Real>)",
-            "pen cam: the own glass is off at t=95.000 s (Time<Real>)",
+            "pen cam: the x-ray is on at t=65.000 s (Time<Real>)",
+            "pen cam: the x-ray is off at t=95.000 s (Time<Real>)",
         ]
         self.assertEqual(parse_marks(lines), [Mark(65.0, "glass-on"), Mark(95.0, "glass-off")])
         segs = segments(

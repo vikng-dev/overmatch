@@ -12,10 +12,10 @@
 //!   rig bound), the third-person view and no kill cam run ([`drive`]). Every deactivation —
 //!   the key, a knockout or the run it starts, the gunner's optic, a new tank, a disconnect —
 //!   restores every handle and removes every tag and child at once ([`restore`]); the preference
-//!   stays, so the glass returns on the next live tank.
+//!   stays, so the x-ray returns on the next live tank.
 //! * **The tint reads live state only.** Each component's fill is its live HP points over its pool
 //!   ([`LiveState::boxes`]), never the record's: the record supplies the path and the cones, and a
-//!   component's dose or HP at the shot never reaches the glass. An unstruck component (no point
+//!   component's dose or HP at the shot never reaches the x-ray. An unstruck component (no point
 //!   lost) is the base layout, untinted.
 //! * **The latest rule.** Of the victim records of the player's current life whose impact is no
 //!   longer waiting, strictly the newest by recency ([`latest`]; a clean ricochet replaces an
@@ -24,7 +24,7 @@
 //!   or its arrival while on), as the victim frame plays it, to its hold beat. Every later showing
 //!   of the same record — X off and on, the optic and back, a resize, an older record back as the
 //!   latest — continues that clock ([`XRayState::shown`]), so past the hold beat it is the held end; a
-//!   record that lands while the glass is off waits for X. A connection forgets every clock with
+//!   record that lands while the x-ray is off waits for X. A connection forgets every clock with
 //!   the store ([`forget_shown`]). The tint follows the live state in the same showing.
 
 use std::collections::{BTreeMap, HashMap};
@@ -68,7 +68,7 @@ use crate::tank::{Controlled, ViewNode};
 use crate::view::PlayerView;
 
 /// The player's x-ray preference, which [`Bindings::xray`] toggles: kept across lives,
-/// respawn, the map and a disconnect, so the glass returns on the next live tank.
+/// respawn, the map and a disconnect, so the x-ray returns on the next live tank.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub(crate) struct XRay {
     pub(crate) on: bool,
@@ -83,15 +83,15 @@ pub(super) fn toggle(
     bindings: Option<Res<Bindings>>,
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
     live: Query<(), (With<Controlled>, Without<TankKnockedOut>)>,
-    mut glass: ResMut<XRay>,
+    mut xray: ResMut<XRay>,
 ) {
     let pressed = bindings.is_some_and(|bindings| bindings.xray.just_pressed(&keys, &mouse));
     if pressed && !live.is_empty() && crate::state::cursor_locked(cursor) {
-        glass.on = !glass.on;
+        xray.on = !xray.on;
     }
 }
 
-/// An entity the glass spawned — a mask copy, a record element, the shell — despawned whole on
+/// An entity the x-ray spawned — a mask copy, a record element, the shell — despawned whole on
 /// restore. Never under another: a copy hangs under a dressed mesh, an element under the live
 /// hull or a dressed mesh.
 #[derive(Component, Clone, Copy)]
@@ -106,7 +106,7 @@ pub(super) struct Dressed {
     names: Vec<String>,
 }
 
-/// The glass's mask copy of a dressed mesh, drawn for the mask cameras alone: it follows the
+/// The x-ray's mask copy of a dressed mesh, drawn for the mask cameras alone: it follows the
 /// source's mesh handle ([`follow_mesh`]), which a shoe's belt swaps.
 #[derive(Component)]
 pub(super) struct MaskCopy {
@@ -121,28 +121,28 @@ impl MaskCopy {
     }
 }
 
-/// The glass's shell model, the round resting where the record ends.
+/// The x-ray's shell model, the round resting where the record ends.
 #[derive(Component)]
 pub(super) struct XRayShell;
 
-/// What the glass stands on between frames.
+/// What the x-ray stands on between frames.
 #[derive(Resource, Default)]
 pub(super) struct XRayState {
     built: Option<Built>,
     /// App seconds each record first showed, for every record shown since the connection: a
-    /// record's clock, kept across the glass's deactivations so it plays once, and per record
+    /// record's clock, kept across the x-ray's deactivations so it plays once, and per record
     /// because the store evicts by fire tick while [`latest`] picks by recency, so an older record
     /// can come back as the latest. A connection clears it ([`forget_shown`]): a new match's keys
     /// start over.
     shown: BTreeMap<ExplanationKey, f64>,
     /// Each tank file's asset, read once.
     tanks: HashMap<String, Arc<TankAsset>>,
-    /// The shell model, loaded once the glass first draws a record.
+    /// The shell model, loaded once the x-ray first draws a record.
     shell: Option<Handle<WorldAsset>>,
 }
 
 impl XRayState {
-    /// The plan the glass draws, while built.
+    /// The plan the x-ray draws, while built.
     #[cfg(test)]
     pub(super) fn plan(&self) -> Option<&Plan> {
         self.built.as_ref().map(|built| &*built.plan)
@@ -155,7 +155,7 @@ impl XRayState {
     }
 }
 
-/// The glass as built: what it was built from, and the materials it dressed the tank in.
+/// The x-ray as built: what it was built from, and the materials it dressed the tank in.
 struct Built {
     tank: Entity,
     /// The live hull's view node: the record's frame.
@@ -193,7 +193,7 @@ pub(super) struct Hierarchy<'w, 's> {
     added: Query<'w, 's, Entity, Added<Mesh3d>>,
 }
 
-/// What the glass holds in the world: the dressed meshes, its items, and what is still to dress.
+/// What the x-ray holds in the world: the dressed meshes, its items, and what is still to dress.
 #[derive(SystemParam)]
 pub(super) struct Held<'w, 's> {
     undressed: Query<
@@ -213,7 +213,7 @@ pub(super) struct Held<'w, 's> {
 }
 
 impl Held<'_, '_> {
-    /// Put every dressed mesh back in the material it wore and despawn every item of the glass.
+    /// Put every dressed mesh back in the material it wore and despawn every item of the x-ray.
     fn restore(&self, commands: &mut Commands) {
         for (entity, dressed, _) in &self.dressed {
             commands
@@ -227,7 +227,7 @@ impl Held<'_, '_> {
     }
 }
 
-/// The glass's material stores.
+/// The x-ray's material stores.
 #[derive(SystemParam)]
 pub(super) struct Stores<'w> {
     meshes: ResMut<'w, Assets<Mesh>>,
@@ -236,7 +236,7 @@ pub(super) struct Stores<'w> {
     looks: ResMut<'w, Assets<LookMaterial>>,
 }
 
-/// What the glass is drawn through: the player's view mode, the kill cam and the player's camera.
+/// What the x-ray is drawn through: the player's view mode, the kill cam and the player's camera.
 #[derive(SystemParam)]
 pub(super) struct Viewing<'w, 's> {
     sight: Option<Res<'w, SightMode>>,
@@ -244,13 +244,13 @@ pub(super) struct Viewing<'w, 's> {
     camera: Query<'w, 's, Entity, With<PlayerView>>,
 }
 
-/// Whether the glass draws this frame, and for which camera: the preference on, the tank live in
+/// Whether the x-ray draws this frame, and for which camera: the preference on, the tank live in
 /// the third-person view, no kill cam run (this frame's, so after the kill cam's drive). Inactive,
 /// or on another tank than the one dressed, everything is restored now; the mask need is stated
 /// for [`look::own`], which runs next.
 pub(super) fn drive(
     mut commands: Commands,
-    glass: Res<XRay>,
+    xray: Res<XRay>,
     viewing: Viewing,
     player: Player,
     mut need: ResMut<MaskNeed>,
@@ -262,7 +262,7 @@ pub(super) fn drive(
         .is_none_or(|mode| *mode == SightMode::ThirdPerson);
     let body = player.body();
     let viewer = viewing.camera.single().ok();
-    let active = glass.on && third_person && !viewing.victim.running() && body.is_some();
+    let active = xray.on && third_person && !viewing.victim.running() && body.is_some();
     let tank = body.map(|(entity, _)| entity);
     if !active
         || state
@@ -279,10 +279,10 @@ pub(super) fn drive(
 /// Dress the live tank and draw the record over it, once its camera has a mask set; afterwards
 /// keep it built: a mesh that lands late (a glb, a rung) is dressed as it appears, a new record or
 /// a live state change rebuilds the record's elements, a new mask set (a resize) rebuilds the
-/// whole glass.
+/// whole x-ray.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the glass's builder: the need and the masks, the clock, the record store, the blueprint, the player, its own state, the asset server, the stores, the hierarchy and what it holds"
+    reason = "the x-ray's builder: the need and the masks, the clock, the record store, the blueprint, the player, its own state, the asset server, the stores, the hierarchy and what it holds"
 )]
 pub(super) fn build(
     mut commands: Commands,
@@ -428,7 +428,7 @@ pub(super) fn build(
     built.plan = Arc::new(plan);
 }
 
-/// A new match: the store's keys start over, and so do the records shown. The glass as built
+/// A new match: the store's keys start over, and so do the records shown. The x-ray as built
 /// forgets its record too, so the next build re-keys the clock even for the same key, and
 /// settles, so it redraws even with nothing left to draw.
 pub(super) fn forget_shown(_new: On<NewMatch>, mut state: ResMut<XRayState>) {
@@ -444,7 +444,7 @@ pub(super) fn forget_shown(_new: On<NewMatch>, mut state: ResMut<XRayState>) {
 /// ladder's scan — a glTF primitive the ladder has not scanned yet (it binds the primitive's rungs
 /// off the handle this would take), which the next frame looks at again. Left as they are: the
 /// shadow ribbon (no camera draws it, and a copy of it in a mask would), a collision proxy, and
-/// the glass's own meshes.
+/// the x-ray's own meshes.
 fn dress(
     commands: &mut Commands,
     root: Entity,
@@ -525,11 +525,11 @@ fn dress(
     (any, skipped)
 }
 
-/// Play the record's elements from the glass's clock: corner seconds since the record first
+/// Play the record's elements from the x-ray's clock: corner seconds since the record first
 /// showed, held at the victim frame's hold beat.
 #[expect(
     clippy::too_many_arguments,
-    reason = "one query per disjoint glass element plus three material stores, the queries kept disjoint by their `Without` filters"
+    reason = "one query per disjoint x-ray element plus three material stores, the queries kept disjoint by their `Without` filters"
 )]
 pub(super) fn animate(
     time: Res<Time>,
@@ -645,8 +645,8 @@ pub(super) fn animate(
     }
 }
 
-/// Log each edge of the glass's drawing, on `Time<Real>` — the frame-cost stream's clock
-/// (`src/frame_cost.rs`), so `scripts/perf/pencam_cost.py` can window that stream by the glass.
+/// Log each edge of the x-ray's drawing, on `Time<Real>` — the frame-cost stream's clock
+/// (`src/frame_cost.rs`), so `scripts/perf/pencam_cost.py` can window that stream by the x-ray.
 pub(super) fn log_presence(state: Res<XRayState>, time: Res<Time<Real>>, mut on: Local<bool>) {
     let now = state.built.is_some();
     if now == *on {
@@ -677,10 +677,10 @@ pub(super) fn follow_mesh(
 
 /// The scripted preference: on from `from` to `to` app seconds, let go at `to`.
 fn scripted(from: f32, to: f32) -> impl FnMut(Res<Time>, ResMut<XRay>, Local<bool>) {
-    move |time: Res<Time>, mut glass: ResMut<XRay>, mut inside: Local<bool>| {
+    move |time: Res<Time>, mut xray: ResMut<XRay>, mut inside: Local<bool>| {
         let now = (from..to).contains(&time.elapsed_secs());
         if now != *inside {
-            glass.on = now;
+            xray.on = now;
             *inside = now;
         }
     }
@@ -757,7 +757,7 @@ impl LiveState {
         )
     }
 
-    /// Each volume as the glass draws it, its shape from `shapes`: its pool and its live points,
+    /// Each volume as the x-ray draws it, its shape from `shapes`: its pool and its live points,
     /// lost at none left or at its crewman's death. Nothing of a record.
     fn boxes(&self, shapes: &TankShapes) -> Vec<BoxPlan> {
         self.0
@@ -785,7 +785,7 @@ impl LiveState {
     }
 }
 
-/// The glass's plan: `record`'s path and cones, or no round at all without one, over `live`'s
+/// The x-ray's plan: `record`'s path and cones, or no round at all without one, over `live`'s
 /// components, posed in `shapes`.
 pub(super) fn plan(
     record: Option<&PenetrationReport>,
@@ -810,7 +810,7 @@ pub(super) fn struck(stored: &StoredExplanation, life: TankLife) -> bool {
     stored.explanation.audience != Audience::Shooter && stored.explanation.struck == life
 }
 
-/// The record the glass draws for `life`: of its victim projections whose impact is no longer
+/// The record the x-ray draws for `life`: of its victim projections whose impact is no longer
 /// waiting, strictly the newest by [`Recency`] (the encounter's first contact, then completion,
 /// identity for ties), never by arrival.
 pub(super) fn latest(
