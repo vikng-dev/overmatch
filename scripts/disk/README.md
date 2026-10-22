@@ -5,15 +5,18 @@ fleet footprint was debuginfo, 37 GB of it our own crate's `.o` files):
 
 1. **Profiles** — the real fix lives in `Cargo.toml` (`[profile.*]`): `line-tables-only`
    on our crate, `debug = 0` on deps. Nothing to install; it applies to every build.
-2. **Weekly sweep** — this directory. A safety net that caps each checkout's target dir
-   at 25 GB so stale fingerprints (old dep versions, old rustc) can't creep back.
+2. **The sweep** — this directory. A safety net that reaps leaked `.rcgu.o`, incremental
+   directories untouched for a day, and then caps each checkout's target dir at 40 GB so
+   stale fingerprints (old dep versions, old rustc) can't creep back. The ceiling sits above
+   the incremental steady state on purpose: `cargo sweep` counts `incremental/` but cannot
+   evict it, and a ceiling below it evicts every warm dependency instead (see `sweep.sh`).
 
 ## Files
 
-- `sweep.sh` — runs `cargo sweep --maxsize 25GB` over the main checkout and both worktree
-  bays (paths hardcoded; missing ones are skipped). Safe to run by hand any time.
-- `com.overmatch.target-sweep.plist` — launchd user agent that runs `sweep.sh` weekly,
-  Sunday 04:00. Logs to `/tmp/overmatch-target-sweep.log`.
+- `sweep.sh` — the reapers and `cargo sweep --maxsize 40GB` over the main checkout and every
+  `git worktree list` entry. Safe to run by hand any time (`FORCE=1` skips the session check).
+- `com.overmatch.target-sweep.plist` — launchd user agent that runs `sweep.sh` every 6 h while a
+  Claude Code session is running. Logs to `/tmp/overmatch-target-sweep.log`.
 
 - `warm-target.sh` — run from a fresh worktree's root: clones the main checkout's `target/`
   (APFS, seconds) and gives every tracked file identical to main's copy main's mtime, so cargo
