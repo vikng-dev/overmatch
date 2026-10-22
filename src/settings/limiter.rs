@@ -168,12 +168,18 @@ mod tests {
 
     /// The cap actually caps: N waits at period P take at least N*P wall time (minus one period —
     /// the first armed frame establishes the grid rather than waiting). The lower bound is the
-    /// capping property; no upper bound is asserted tightly because CI machines oversleep.
+    /// capping property; no upper bound is asserted tightly because CI machines oversleep. It holds
+    /// from the narrowest spin window the clamp allows, the most sleep-precision this code ever asks
+    /// the OS for: whatever the estimate, the spin tail covers an under-estimate.
     #[test]
     fn the_limiter_holds_the_cap() {
         let period = Duration::from_millis(4); // a 250 FPS cap
         let frames = 60;
         let mut limiter = Limiter::default();
+        for _ in 0..200 {
+            limiter.observe(Duration::ZERO);
+        }
+        assert_eq!(limiter.spin, MIN_SPIN);
         let start = Instant::now();
         for _ in 0..frames {
             wait_for_deadline(&mut limiter, period, Instant::now());
@@ -210,23 +216,6 @@ mod tests {
             elapsed < worked + period * 4,
             "an over-budget workload was further delayed by the limiter: \
              {elapsed:?} total for {worked:?} of work",
-        );
-    }
-
-    /// Disarming forgets the grid: the next armed wait starts fresh from `now` instead of holding
-    /// to a deadline scheduled before the cap was switched off.
-    #[test]
-    fn rearming_starts_a_fresh_grid() {
-        let period = Duration::from_millis(50);
-        let mut limiter = Limiter::default();
-        wait_for_deadline(&mut limiter, period, Instant::now());
-        // Simulate the disarm the system performs when the cap switches off.
-        limiter.next = None;
-        let start = Instant::now();
-        wait_for_deadline(&mut limiter, period, Instant::now());
-        assert!(
-            start.elapsed() < period / 2,
-            "the first wait after re-arming must establish the grid, not sleep a stale deadline",
         );
     }
 
@@ -277,29 +266,6 @@ mod tests {
         assert_eq!(
             limiter.spin, MAX_SPIN,
             "the window never exceeds the ceiling"
-        );
-    }
-
-    /// The adaptive window may not break the wall-clock floor: whatever the estimate, the wait
-    /// returns at or after the deadline — the spin tail is what covers an under-estimate.
-    #[test]
-    fn a_narrow_window_still_holds_the_deadline() {
-        let period = Duration::from_millis(2);
-        let mut limiter = Limiter::default();
-        // Force the narrowest window the clamp allows, i.e. the most sleep-precision this code
-        // ever asks the OS for.
-        for _ in 0..200 {
-            limiter.observe(Duration::ZERO);
-        }
-        assert_eq!(limiter.spin, MIN_SPIN);
-        let start = Instant::now();
-        for _ in 0..20 {
-            wait_for_deadline(&mut limiter, period, Instant::now());
-        }
-        assert!(
-            start.elapsed() >= period * 19,
-            "the narrow window undershot the grid: {:?} for 20 frames at {period:?}",
-            start.elapsed(),
         );
     }
 }

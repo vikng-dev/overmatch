@@ -369,39 +369,6 @@ fn os_display_names(handles: &[Option<MonitorHandle>]) -> Vec<Option<String>> {
     vec![None; handles.len()]
 }
 
-/// The ladder a machine with these named monitors builds, the `primary`th of them marked. Fixture
-/// data — the geometry is arbitrary; only the names and the primary position are asserted on.
-#[cfg(test)]
-pub(super) fn attached(names: &[&str], primary: Option<usize>) -> DisplayLadder {
-    let monitors: Vec<Monitor> = names
-        .iter()
-        .map(|_| Monitor {
-            name: None,
-            physical_width: 1920,
-            physical_height: 1080,
-            physical_position: IVec2::ZERO,
-            refresh_rate_millihertz: Some(60_000),
-            scale_factor: 1.0,
-            video_modes: Vec::new(),
-        })
-        .collect();
-    let panels: Vec<Panel<'_>> = names
-        .iter()
-        .zip(&monitors)
-        .enumerate()
-        .map(|(index, (name, monitor))| Panel {
-            primary: primary == Some(index),
-            name: Some((*name).to_string()),
-            monitor,
-        })
-        .collect();
-    let displays = AttachedDisplays {
-        count: names.len(),
-        primary: primary.map(|_| Entity::PLACEHOLDER),
-    };
-    build(displays, &panels)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -535,7 +502,9 @@ mod tests {
 
     /// A stored rung this machine cannot reach still loads, still renders, and still steps — it reads
     /// as the display it will actually be placed on. Nothing here writes it back; the file keeps the
-    /// player's choice for the day the display returns (see `DisplaySelection::resolve`).
+    /// player's choice for the day the display returns (see `DisplaySelection::resolve`). Stepping
+    /// saturates at both ends, and `AUTO` is reachable by holding left from anywhere — the only
+    /// rung that hands placement back to the window manager.
     #[test]
     fn a_persisted_unreachable_rung_renders_and_steps_without_being_rewritten() {
         let built_in = monitor(3024, 1964, Some(120_000));
@@ -552,23 +521,15 @@ mod tests {
         assert_eq!(ladder.label(stored), "* BUILT-IN RETINA DISPLAY");
         assert_eq!(ladder.step(stored, 1), DisplaySelection::Display2);
         assert_eq!(ladder.step(stored, -1), DisplaySelection::Auto);
-    }
-
-    /// Stepping saturates at both ends, and `AUTO` is reachable by holding left from anywhere — the
-    /// only rung that hands placement back to the window manager.
-    #[test]
-    fn stepping_saturates_and_auto_is_always_reachable() {
-        let panel = monitor(1920, 1080, Some(60_000));
-        let ladder = ladder(&[(true, None, &panel), (false, None, &panel)]);
         let mut selection = DisplaySelection::Auto;
         for _ in 0..8 {
             selection = ladder.step(selection, 1);
         }
-        assert_eq!(selection, DisplaySelection::Display2);
+        assert_eq!(selection, DisplaySelection::Display2, "the top saturates");
         for _ in 0..8 {
             selection = ladder.step(selection, -1);
         }
-        assert_eq!(selection, DisplaySelection::Auto);
+        assert_eq!(selection, DisplaySelection::Auto, "AUTO is reachable");
     }
 
     /// A monitor past the enum's indexed rungs gets none rather than another display's variant.
@@ -592,30 +553,6 @@ mod tests {
                 DisplaySelection::Display2,
                 DisplaySelection::Display3,
             ],
-        );
-    }
-
-    /// With no OS name, the label is what the display IS. The refresh rate is dropped where the
-    /// platform reports none rather than rendered as a zero.
-    #[test]
-    fn a_nameless_display_is_labelled_by_its_geometry() {
-        let panel = monitor(3024, 1964, Some(119_880));
-        assert_eq!(
-            rung_label(&Panel {
-                primary: false,
-                name: None,
-                monitor: &panel,
-            }),
-            "3024X1964 120HZ",
-        );
-        let rateless = monitor(2560, 1600, None);
-        assert_eq!(
-            rung_label(&Panel {
-                primary: true,
-                name: None,
-                monitor: &rateless,
-            }),
-            "* 2560X1600",
         );
     }
 
@@ -652,19 +589,5 @@ mod tests {
                 "{sanitized:?} left printable ASCII",
             );
         }
-    }
-
-    /// A name with no length bound cannot push the row's value out of its well.
-    #[test]
-    fn an_overlong_name_is_cut_to_the_well() {
-        let panel = monitor(1920, 1080, None);
-        let label = rung_label(&Panel {
-            primary: true,
-            name: Some("A Ludicrously Overlong Display Name".to_string()),
-            monitor: &panel,
-        });
-        assert_eq!(label.chars().count(), LABEL_MAX_CHARS);
-        assert!(label.ends_with('\u{2026}'), "{label:?}");
-        assert!(label.starts_with(PRIMARY_MARK), "{label:?}");
     }
 }

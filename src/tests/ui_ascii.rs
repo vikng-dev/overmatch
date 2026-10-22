@@ -324,6 +324,11 @@ fn rendered_strings_within_font_coverage() {
 /// literal but ignore comments, diagnostic strings, AND rendered literals that stay within the
 /// verified typographic set — otherwise it would either miss real tofu, fight the house style, or
 /// reject the em dashes/ellipses the Barlow files are now allowed to draw. Pin all three directions.
+///
+/// **ASCII-only regime** (`allow_typographic = false`, the sandbox files): the SAME typographic
+/// literal must ALSO be flagged — the sandbox font has no glyph for it — while comments and
+/// diagnostics are still ignored. This proves the per-file split actually tightens the sandbox files
+/// rather than silently allowing the typographic set everywhere.
 #[test]
 fn scanner_flags_uncovered_but_not_comments_logs_or_typographic_set() {
     let sample = r#"
@@ -361,44 +366,19 @@ fn demo() {
         2,
         "must flag ONLY out-of-coverage rendered literals, not comments/logs/asserts/expect/typographic-set; got {offenders:?} at lines {lines:?}"
     );
-}
 
-/// **ASCII-only regime** (`allow_typographic = false`, the sandbox files). Now the SAME typographic
-/// literal that the Barlow regime allows must ALSO be flagged — the sandbox font has no glyph for it —
-/// while comments, diagnostics, and pure-ASCII rendered literals are still ignored. This proves the
-/// per-file split actually tightens the sandbox files rather than silently allowing the typographic set
-/// everywhere.
-#[test]
-fn scanner_ascii_only_regime_flags_typographic_set_too() {
-    let sample = r#"
-// a comment with an em dash — and an ellipsis … must be ignored
-fn demo() {
-    info!("log line — never rendered, ignored …");
-    let _ = foo.expect("expect — ignored …");
-    let ok = format!("rendered {} ...", n);          // ascii, fine
-    let typo = Text::new("RANGE 1200 m — ± 5°, ≤ 4×"); // BAD here: no typographic glyphs in the default font
-    commands.spawn(Text::new("TOFU字"));              // BAD: kanji is out of coverage
-    let label = "BROKEN €";                          // BAD: euro sign is out of coverage
-}
-"#;
     let offenders = scan(sample, false);
     let lines: Vec<usize> = offenders.iter().map(|o| o.line).collect();
-    assert!(
-        offenders.iter().any(|o| o.text.contains("RANGE")),
-        "ASCII-only regime MUST flag the typographic-set literal; got {offenders:?}"
-    );
-    assert!(
-        offenders.iter().any(|o| o.text.contains("TOFU")),
-        "must still flag the kanji-bearing literal; got {offenders:?}"
-    );
-    assert!(
-        offenders.iter().any(|o| o.text.contains("BROKEN")),
-        "must still flag the euro-bearing literal; got {offenders:?}"
-    );
+    for flagged in ["RANGE", "TOFU", "BROKEN"] {
+        assert!(
+            offenders.iter().any(|o| o.text.contains(flagged)),
+            "ASCII-only regime MUST flag the {flagged} literal; got {offenders:?}"
+        );
+    }
     assert_eq!(
         offenders.len(),
         3,
-        "ASCII-only regime flags the typographic + kanji + euro literals, but still not comments/logs/expect/pure-ASCII; got {offenders:?} at lines {lines:?}"
+        "ASCII-only regime flags the typographic + kanji + euro literals, but still not comments/logs/asserts/expect/pure-ASCII; got {offenders:?} at lines {lines:?}"
     );
 }
 

@@ -539,9 +539,10 @@ fn only_a_matched_real_record_is_explained() {
 }
 
 /// MEASURED: the postcard size of each recorded scenario's projections, and of its cones.
-/// `cargo test --lib damage_cam::wire::tests::encoded_sizes -- --nocapture` prints the table the
-/// module documentation quotes.
+/// `cargo test --lib damage_cam::wire::tests::encoded_sizes -- --ignored --nocapture` prints the
+/// table the module documentation quotes.
 #[test]
+#[ignore = "a measurement, run on demand"]
 fn encoded_sizes() {
     let records = records();
     let vocabulary = vocabulary(&records);

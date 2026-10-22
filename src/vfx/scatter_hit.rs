@@ -218,7 +218,8 @@ mod tests {
     }
 
     /// The entry law: a straight path crossing the box reads ONCE, at the frame that crossed the
-    /// wall — not again on the frames spent inside it, and not again on the way out.
+    /// wall — not again on the frames spent inside it, and not again on the way out; a path that
+    /// clears the box reads nothing.
     #[test]
     fn one_crossing_reads_once() {
         let mut app = harness();
@@ -253,13 +254,10 @@ mod tests {
                 billboard.origin,
             );
         }
-    }
 
-    /// …and a path that clears the box entirely reads nothing, however long it is.
-    #[test]
-    fn a_missing_path_reads_nothing() {
+        // A path that clears the box entirely reads nothing, however long it is: the same sweep,
+        // offset well past the box's +Z half-extent of 3 m.
         let mut app = harness();
-        // The same sweep, offset well past the box's +Z half-extent of 3 m.
         let (from, path) = sweep(20.0);
         let counts = walk(&mut app, from, &path);
         assert!(

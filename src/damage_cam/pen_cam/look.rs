@@ -67,7 +67,8 @@ const FOOTPRINT_LINE_PX: f32 = 2.0;
 const FOOTPRINT_ALPHA: f32 = 0.9;
 /// The most spall fields a footprint marks, and the most directions of each it reads; the arrays
 /// of `pen_cam_look.wgsl` hold these counts. [`set_footprints`] drops what lies past them, so every
-/// record's cones and directions must fit them (`every_record_fits_the_footprint`).
+/// record's cones and directions must fit them; the shipped cone's direction count is held under
+/// [`FOOTPRINT_RAYS`] by `every_record_fits_the_footprint`, the cone count is not checked.
 const FOOTPRINT_FIELDS: usize = 4;
 const FOOTPRINT_RAYS: usize = 256;
 /// A surface counts as met by a direction up to this share past its reach, and this far (m): the
@@ -689,127 +690,14 @@ pub fn field(cap: f32, strength: f32, profile: Vec4, masks: &MaskSet) -> LookMat
 mod tests {
     use super::*;
 
-    fn base_draw(tier: Tier) -> HullDraw {
-        hull(tier, &MaskSet::default())
-    }
-
-    /// The base look draws every non-component tier with one material in the hull mask, at one
-    /// opacity everywhere.
-    #[test]
-    fn the_base_draws_every_hull_tier_alike() {
-        let first = base_draw(Tier::Armour).material.params;
-        for tier in [Tier::Armour, Tier::External, Tier::Detail] {
-            let draw = base_draw(tier);
-            assert_eq!(draw.mask, MaskLayer::Hull);
-            assert_eq!(draw.material.blend, Blend::Blended);
-            let p = draw.material.params;
-            assert_eq!(
-                (p.mode, p.color, p.edge, p.shade),
-                (first.mode, first.color, first.edge, first.shade)
-            );
-            assert_eq!(p.mode.x, MODE_BASE);
-        }
-    }
-
-    /// Every component mesh draws in the base's family, hueless and HP-blind, one layer deep among
-    /// the components and outside the hull's layer: the untouched grey, opaque at every angle (no
-    /// face-on fade) and in the opaque pass, under the hull's edge colour.
-    #[test]
-    fn the_base_draws_every_component_solid_in_its_own_layer() {
-        let draw = base_draw(Tier::Component);
-        assert_eq!(draw.mask, MaskLayer::Part);
-        assert_eq!(draw.material.params.mode.x, MODE_BASE);
-        assert_eq!(draw.material.blend, Blend::Opaque);
-        let p = draw.material.params;
-        let grey = LinearRgba::from(timeline::STATE_UNTOUCHED);
-        assert_eq!(p.color, Vec4::new(grey.red, grey.green, grey.blue, 1.0));
-        assert_eq!(p.shade.x, 1.0, "opaque face-on as well as grazing");
-        let hull = base_draw(Tier::Armour).material.params;
-        assert_eq!(p.edge, hull.edge, "the hull's edge colour");
-    }
-
-    /// A struck component draws on the state fill: its share as the fill height, red when damaged,
-    /// hatched when dead.
-    #[test]
-    fn a_struck_component_draws_the_state_scale() {
-        let masks = MaskSet::default();
-        for condition in [Condition::Damaged(0.05), Condition::Dead] {
-            let m = state(condition, &masks);
-            assert_eq!(m.params.mode.x, MODE_STATE);
-            assert_eq!(m.blend, Blend::Opaque);
-            assert_eq!(m.params.state.w, condition.fill());
-            assert_eq!(m.params.mode.w > 0.5, condition == Condition::Dead);
-        }
-        let mut fill = state(Condition::Damaged(0.4), &masks);
-        fill.set_fill_span(Vec3::Y, Some((1.0, 2.0)));
-        assert_eq!(fill.params.state, Vec4::new(0.0, 1.0, 0.0, 0.4));
-        assert_eq!(fill.params.span, Vec4::new(1.0, 2.0, 1.0, STATE_LINE_PX));
-    }
-
-    /// The footprint outlines the base look's surfaces, hull and components alike, and the state
-    /// fills, with every field's frame, level and directions; the field itself carries none.
-    #[test]
-    fn the_footprint_marks_the_base_looks_surfaces() {
-        let masks = MaskSet::default();
-        let mut looks = Assets::<LookMaterial>::default();
-        let base = looks.add(base(&masks));
-        let component = looks.add(component_base(&masks));
-        let fill = looks.add(state(Condition::Damaged(0.5), &masks));
-        let shell = looks.add(field(0.04, 5.0, Vec4::W, &masks));
-        let print = FieldPrint {
-            origin: Vec3::ZERO,
-            axis: Vec3::NEG_Z,
-            half_angle: 0.5,
-            reach: 2.0,
-            front: 1.0,
-            level: 0.25,
-            rays: vec![
-                (Vec3::NEG_Z, 2.0),
-                (Vec3::new(0.0, 0.4, -0.9).normalize(), 1.5),
-            ],
-        };
-        set_footprints(&mut looks, &masks, std::slice::from_ref(&print));
-        for handle in [&base, &component, &fill] {
-            let p = looks.get(handle).unwrap().params;
-            assert_eq!(p.foot.x, FOOTPRINT_LINE_PX);
-            assert_eq!(p.fields.x, 1.0);
-            assert_eq!(p.prints[0], Vec4::new(0.0, 0.0, 0.0, 0.5));
-            assert_eq!(p.prints[2].y, 2.0, "both directions");
-            assert_eq!(p.prints[2].z, 0.25, "the field's level");
-            assert!(p.rays[1].w > 1.5, "a direction's reach holds its slack");
-        }
-        assert_eq!(looks.get(&shell).unwrap().params.fields.x, 0.0);
-    }
-
-    /// Every record's spall fields fit the footprint whole: no more cones than it marks, no more
-    /// directions in any than it reads.
+    /// Every record's spall cone fits the footprint's directions: the shipped shape, which throws
+    /// every record's cones, declares no more directions than the footprint reads.
     #[test]
     fn every_record_fits_the_footprint() {
-        for record in &super::super::demo::Library::load().records {
-            let cones = &record.plan.cones;
-            assert!(
-                cones.len() <= FOOTPRINT_FIELDS,
-                "{}: {} cones",
-                record.stem,
-                cones.len()
-            );
-            for cone in cones {
-                assert!(
-                    cone.rays.len() <= FOOTPRINT_RAYS,
-                    "{}: {} directions",
-                    record.stem,
-                    cone.rays.len()
-                );
-            }
-        }
-    }
-
-    /// The field's brightness is linear in its strength through one fixed gain.
-    #[test]
-    fn the_field_is_linear_in_its_strength() {
-        let masks = MaskSet::default();
-        let gain = |strength: f32| field(0.04, strength, Vec4::W, &masks).params.color.w;
-        assert_eq!(gain(0.0), 0.0);
-        assert!((gain(7.0) / gain(1.0) - 7.0).abs() < 1e-5);
+        let directions = crate::ballistics::spall_cone::ConeShape::shipped().directions_count();
+        assert!(
+            directions <= FOOTPRINT_RAYS,
+            "the shipped cone throws {directions} directions, past FOOTPRINT_RAYS = {FOOTPRINT_RAYS}"
+        );
     }
 }

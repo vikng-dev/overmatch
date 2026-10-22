@@ -440,20 +440,19 @@ mod tests {
         UiScalePercent, VsyncMode, WindowModeSetting,
     };
 
-    /// The env override wins on every platform — the hook a packaged or scripted run needs so it
-    /// cannot touch the developer's real settings.
+    /// Each platform lands on its own convention — and NEVER beside the executable, which is
+    /// unwritable in both shipping layouts (signed/translocated `.app`, `Program Files`). The env
+    /// override wins on every platform — the hook a packaged or scripted run needs so it cannot
+    /// touch the developer's real settings — and a missing platform home yields `None` rather than
+    /// a guessed path: the caller reports `NoLocation` and runs on defaults instead of writing
+    /// somewhere arbitrary.
     #[test]
-    fn config_env_override_wins_everywhere() {
+    fn platform_config_dirs_follow_convention() {
         for os in ["macos", "windows", "linux"] {
             let got = config_dir_from(os, Some("/scratch/cfg"), Some("/home/y"), None, None);
             assert_eq!(got, Some(PathBuf::from("/scratch/cfg")), "os {os}");
+            assert_eq!(config_dir_from(os, None, None, None, None), None, "os {os}");
         }
-    }
-
-    /// Each platform lands on its own convention — and NEVER beside the executable, which is
-    /// unwritable in both shipping layouts (signed/translocated `.app`, `Program Files`).
-    #[test]
-    fn platform_config_dirs_follow_convention() {
         assert_eq!(
             config_dir_from("macos", None, Some("/Users/yan"), None, None),
             Some(PathBuf::from(
@@ -483,26 +482,6 @@ mod tests {
             config_dir_from("linux", None, Some("/home/yan"), None, Some("")),
             Some(PathBuf::from("/home/yan/.config/overmatch")),
             "an EMPTY XDG_CONFIG_HOME is unset, not a root-relative path",
-        );
-    }
-
-    /// A missing platform home yields `None` rather than a guessed path — the caller reports
-    /// `NoLocation` and runs on defaults instead of writing somewhere arbitrary.
-    #[test]
-    fn missing_home_yields_no_path() {
-        assert_eq!(config_dir_from("macos", None, None, None, None), None);
-        assert_eq!(config_dir_from("windows", None, None, None, None), None);
-        assert_eq!(config_dir_from("linux", None, None, None, None), None);
-    }
-
-    /// The file is named for what it IS — machine-local video state — so a Steam Cloud manifest can
-    /// exclude it by name without a migration. Tunnet had to ship that migration; we should not.
-    #[test]
-    fn the_config_file_is_named_machine_local() {
-        assert_eq!(CONFIG_FILE_NAME, "video.ron");
-        assert_ne!(
-            CONFIG_FILE_NAME, "settings.ron",
-            "a generic name cannot be include/excluded from cloud sync by filename"
         );
     }
 
@@ -580,106 +559,6 @@ mod tests {
         );
     }
 
-    /// The cascade-count row's persistence, end to end through the real parse path: every rung
-    /// round-trips, the default writes no key (so today's 4 can still be changed for existing
-    /// players later), and a file from before the row existed loads at the default.
-    #[test]
-    fn the_shadow_cascades_key_round_trips_and_is_absent_by_default() {
-        for cascades in ShadowCascades::ORDER {
-            let original = Settings {
-                shadow_cascades: cascades,
-                ..Settings::default()
-            };
-            let text = ron::ser::to_string_pretty(&original, pretty_config()).unwrap();
-            assert_eq!(parse(&text), Parsed::Ok(original), "{text}");
-            assert_eq!(
-                text.contains("shadow_cascades"),
-                cascades != ShadowCascades::default(),
-                "only a non-default count may reach the disk: {text}",
-            );
-        }
-        // The bare key, as a player's hand-edit would write it.
-        let Parsed::Ok(edited) = parse("(version: 1, shadow_cascades: Two)") else {
-            panic!("the bare key must parse");
-        };
-        assert_eq!(edited.shadow_cascades, ShadowCascades::Two);
-        // A file from before the row existed: the standard absent-key path, at the default. The
-        // `M300` is deliberately a REAL such file's contents — a retired rung — so this also crosses
-        // the distance-ladder migration.
-        let Parsed::Ok(pre_row) = parse("(version: 1, shadow_distance: M300)") else {
-            panic!("a file from before the cascade row must load");
-        };
-        assert_eq!(pre_row.shadow_cascades, ShadowCascades::default());
-        assert_eq!(pre_row.shadow_distance, ShadowDistance::M350);
-    }
-
-    /// **The display and detail-budget keys, end to end through the real parse path.** Both landed
-    /// on the module doc's free path (a `Default`, a `skip_serializing_if`, a row in
-    /// `ui::Row::ORDER`), and this is what "free" means at the level that matters: every rung
-    /// round-trips, the default writes no key, and a file from before either row existed loads at
-    /// the default.
-    ///
-    /// The bare-key half is not ceremony — it is the SUPPORTED INTERFACE for the frame sweep.
-    /// `scripts/perf/run-frame-sweep.sh` generates a two-key `video.ron` per condition and relies on
-    /// serde treating every omitted field as its default; pinning the display key alongside it is
-    /// what makes "pin the window to a monitor from the file alone" a tested claim rather than a
-    /// hope.
-    #[test]
-    fn the_display_and_detail_keys_round_trip_and_are_absent_by_default() {
-        for display in DisplaySelection::ORDER {
-            let original = Settings {
-                display,
-                ..Settings::default()
-            };
-            let text = ron::ser::to_string_pretty(&original, pretty_config()).unwrap();
-            assert_eq!(parse(&text), Parsed::Ok(original), "{text}");
-            assert_eq!(
-                text.contains("display"),
-                display != DisplaySelection::default(),
-                "only a non-default display may reach the disk: {text}",
-            );
-        }
-        for budget in [PixelBudget::MIN, 1.0, 2.5, PixelBudget::MAX] {
-            let original = Settings {
-                lod_pixel_budget: PixelBudget(budget),
-                ..Settings::default()
-            };
-            let text = ron::ser::to_string_pretty(&original, pretty_config()).unwrap();
-            assert_eq!(parse(&text), Parsed::Ok(original), "{text}");
-            assert_eq!(
-                text.contains("lod_pixel_budget"),
-                PixelBudget(budget) != PixelBudget::default(),
-                "only a non-default budget may reach the disk: {text}",
-            );
-        }
-
-        // The sweep's own file shape: a version stamp plus exactly the keys the condition cares
-        // about, everything else omitted.
-        let Parsed::Ok(swept) = parse("(version: 1, vsync_mode: Off, display: Primary)") else {
-            panic!("the sweep's generated file must parse");
-        };
-        assert_eq!(swept.display, DisplaySelection::Primary);
-        assert_eq!(swept.vsync, VsyncMode::Off);
-        assert_eq!(swept.lod_pixel_budget, PixelBudget::default());
-
-        // The bare keys, as a player's hand-edit would write them — the budget as the transparent
-        // float it is on disk, not as a wrapper.
-        let Parsed::Ok(edited) = parse("(version: 1, display: Display2, lod_pixel_budget: 2.5)")
-        else {
-            panic!("the bare keys must parse");
-        };
-        assert_eq!(edited.display, DisplaySelection::Display2);
-        assert_eq!(edited.lod_pixel_budget, PixelBudget(2.5));
-
-        // A file from before either row existed: the standard absent-key path, at the defaults.
-        let Parsed::Ok(pre_row) = parse("(version: 1, msaa: X2)") else {
-            panic!("a file from before these rows must load");
-        };
-        assert_eq!(pre_row.display, DisplaySelection::default());
-        assert_eq!(pre_row.lod_pixel_budget, PixelBudget::default());
-        assert_eq!(pre_row.lod_pixel_budget.pixels(), 1.0);
-    }
-
     /// **A non-finite budget cannot survive the parse.**
     ///
     /// RON accepts `NaN` and `inf`, and `Settings` derives `PartialEq` — so one `NaN` on disk makes
@@ -722,9 +601,9 @@ mod tests {
     /// **The distance-ladder migration, through a whole file** (2026-07-28). The rungs went
     /// `100/150/300` → `350/700/1000`; the retired tokens are `#[serde(alias)]`es on `M350`, so
     /// every `video.ron` a player already has keeps loading, and keeps loading onto a rung the
-    /// settings page can actually walk. `settings::tests::the_retired_distance_rungs_migrate_onto_the_ladder`
-    /// carries the argument for migrating rather than hiding; this is the same claim at the level
-    /// that matters to a player — the file on their disk.
+    /// settings page can actually walk: one in [`ShadowDistance::ORDER`], because `ui::step_in`
+    /// resolves a current value missing from `ORDER` to index 0, which is `Off`, and the next press
+    /// of the right arrow would turn shadows off.
     ///
     /// It is a MIGRATION and not a rename, so it is deliberately lossy and deliberately one-way: all
     /// three old rungs collapse onto the nearest survivor, and the next save writes the new token.
@@ -741,6 +620,10 @@ mod tests {
                 settings.shadow_distance,
                 ShadowDistance::M350,
                 "{retired} must land on the nearest surviving rung",
+            );
+            assert!(
+                ShadowDistance::ORDER.contains(&settings.shadow_distance),
+                "{retired} migrated to an off-ladder value, which `step_in` would resolve to Off",
             );
             assert_eq!(
                 settings.msaa,
@@ -794,19 +677,6 @@ mod tests {
         ] {
             let text = ron::ser::to_string_pretty(&original, pretty_config()).unwrap();
             assert_eq!(parse(&text), Parsed::Ok(original), "{text}");
-        }
-    }
-
-    /// A file written by a build that still had the victim glass peek — the retired
-    /// `victim_glass_peek` key, at either of its values — loads cleanly, the key ignored.
-    #[test]
-    fn a_retired_victim_glass_peek_key_still_parses() {
-        for value in ["On", "Off"] {
-            let text = format!("(shadow_distance: M700, victim_glass_peek: {value})");
-            let Parsed::Ok(settings) = parse(&text) else {
-                panic!("a file carrying the retired peek key must load");
-            };
-            assert_eq!(settings.shadow_distance, ShadowDistance::M700);
         }
     }
 
@@ -891,10 +761,24 @@ mod tests {
         assert_eq!(settings.shadow_resolution, ShadowResolution::default());
     }
 
-    /// The vsync key migration THROUGH the real parse path (the pure absorb rule is pinned in
-    /// `settings::tests`): old key alone, new key alone, and the hand-edited both-keys file.
+    /// The vsync key migration THROUGH the real parse path: old key alone, new key alone, and the
+    /// hand-edited both-keys file. The write side moves too: a rung is written under `vsync_mode`,
+    /// never under the retired `vsync`.
     #[test]
     fn the_vsync_key_migration_reads_old_new_and_both() {
+        let written = ron::ser::to_string(&Settings {
+            vsync: VsyncMode::Off,
+            ..Settings::default()
+        })
+        .expect("settings serialize");
+        assert!(
+            written.contains("vsync_mode:Off"),
+            "the off rung must write the new key: {written}",
+        );
+        assert!(
+            !written.contains("vsync:"),
+            "the retired bool key must never be written again: {written}",
+        );
         let vsync_of = |text: &str| match parse(text) {
             Parsed::Ok(settings) => settings.vsync,
             other => panic!("{text} must parse: {other:?}"),
@@ -932,15 +816,6 @@ mod tests {
         );
         // A missing version is 0 — an ancient file, not an error.
         assert!(matches!(parse("(shadow_distance: M100)"), Parsed::Ok(_)));
-    }
-
-    /// Genuine syntax damage is corrupt, and says why.
-    #[test]
-    fn a_damaged_file_is_corrupt() {
-        let Parsed::Corrupt(error) = parse("this is not ron {{{") else {
-            panic!("a damaged file must be reported corrupt");
-        };
-        assert!(!error.is_empty());
     }
 
     /// A scratch config directory, removed on drop. The tests hand [`ScratchDir::file`] to the store

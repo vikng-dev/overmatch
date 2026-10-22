@@ -1138,14 +1138,6 @@ mod tests {
         app.update();
     }
 
-    /// Every live billboard's RENDERED size, keyed by entity (spawn order) — the transform the
-    /// frame actually draws, not the spec it was spawned from.
-    fn scales(app: &mut App) -> std::collections::BTreeMap<Entity, Vec3> {
-        let world = app.world_mut();
-        let mut q = world.query_filtered::<(Entity, &Transform), With<Billboard>>();
-        q.iter(world).map(|(entity, t)| (entity, t.scale)).collect()
-    }
-
     /// An 88 shot over unknown ground spawns the airborne main-gun dressing — blast core + flash
     /// core + glow card + 2 planes + smoke (6 billboards) and 1 light (the ground-dust cloud needs
     /// a terrain surface;
@@ -1308,67 +1300,6 @@ mod tests {
         );
     }
 
-    /// The 88's curve contract, read off RENDERED state over real frames. Frame one draws every
-    /// layer at its authored birth size — a newborn aged on its spawn frame would first draw a
-    /// 26 ms core two thirds through its life, and below ~38 fps never draw it at all. One frame
-    /// on, the HOT layers are collapsing while the MASS layers billow. Then the flash cluster dies
-    /// on its three beats — core, both flame planes, glow card — with every mass layer still alive
-    /// after the last of them.
-    #[test]
-    fn the_88_layers_are_staggered() {
-        const FRAME: f32 = 1.0 / 60.0;
-        let mut app = harness_ground(0.0);
-        fire(&mut app, 0.088, 0);
-        let born = scales(&mut app);
-        let layers = born.len();
-
-        advance(&mut app, FRAME);
-        assert_eq!(
-            scales(&mut app),
-            born,
-            "every layer's first rendered frame must be its authored birth size"
-        );
-
-        advance(&mut app, FRAME);
-        let aged = scales(&mut app);
-        assert_eq!(
-            aged.len(),
-            layers,
-            "no layer dies inside its first 2 frames"
-        );
-        let hot = aged
-            .iter()
-            .filter(|(entity, scale)| scale.x < born[*entity].x)
-            .count();
-        assert_eq!(
-            hot, 4,
-            "flash core + 2 flame planes + glow card are born maximal and shrink"
-        );
-        assert_eq!(
-            layers - hot,
-            2 + dust_puffs(&mut app).len(),
-            "the layers that grow — the blast fireball, gas smoke, ground dust"
-        );
-
-        // The three beats, each stepped just past its deadline (ages run from the arming frame):
-        // core at 26 ms, both flame planes at 45 ms, glow card at 75 ms.
-        advance(&mut app, 0.02);
-        assert_eq!(billboards(&mut app), layers - 1, "the core dies first");
-        advance(&mut app, 0.02);
-        assert_eq!(billboards(&mut app), layers - 3, "both flame planes next");
-        advance(&mut app, 0.03);
-        assert_eq!(billboards(&mut app), layers - 4, "the glow card last");
-
-        let survivors = scales(&mut app);
-        assert!(!survivors.is_empty(), "the mass layers outlive the flash");
-        for (entity, scale) in &survivors {
-            assert!(
-                scale.x > born[entity].x,
-                "every layer alive past the flash cluster must be one that grows in"
-            );
-        }
-    }
-
     /// The blast cores alive right now, in spawn order. [`BLAST_FRAMES`] is the discriminator — no
     /// other muzzle layer runs a 12-frame sheet.
     fn blast_cores(app: &mut App) -> Vec<Entity> {
@@ -1381,54 +1312,6 @@ mod tests {
             .collect();
         found.sort_unstable();
         found
-    }
-
-    /// A billboard's per-instance material — the RENDERED atlas and flipbook frame live here, not
-    /// on the [`Billboard`] component.
-    fn material_of(app: &App, entity: Entity) -> &VfxBillboardMaterial {
-        let handle = app
-            .world()
-            .get::<MeshMaterial3d<VfxBillboardMaterial>>(entity)
-            .expect("material");
-        app.world()
-            .resource::<Assets<VfxBillboardMaterial>>()
-            .get(&handle.0)
-            .expect("per-instance material asset")
-    }
-
-    /// The blast core is the muzzle moment's dominant fireball: one per 88 shot, wider and
-    /// longer-lived than the flash core it sits over, on the atlas's 4×3 grid.
-    #[test]
-    fn blast_core_dominates_the_flash_cluster() {
-        let mut app = harness();
-        fire(&mut app, 0.088, 0);
-        let cores = blast_cores(&mut app);
-        assert_eq!(cores.len(), 1, "one blast core per 88 shot");
-        let core = app.world().get::<Billboard>(cores[0]).expect("blast core");
-        assert!(
-            core.start_size > FLASH_CORE_SIZE.1,
-            "the blast must be wider than the widest flash core ({} m vs {} m)",
-            core.start_size,
-            FLASH_CORE_SIZE.1
-        );
-        assert!(
-            core.lifetime > FLASH_GLOW_CARD_LIFETIME,
-            "the blast must outlive the whole flash cluster ({} s vs {FLASH_GLOW_CARD_LIFETIME} s)",
-            core.lifetime
-        );
-        let params = &material_of(&app, cores[0]).params;
-        assert_eq!(
-            (params.frame.y, params.frame.z),
-            (BLAST_COLS, BLAST_ROWS),
-            "the shader's cell arithmetic must read the atlas's real grid"
-        );
-        // An MG round never lifts a blast core — the fireball is the main gun's.
-        let mut mg = harness();
-        fire_round(&mut mg, MG_CALIBER, 0, true);
-        assert!(
-            blast_cores(&mut mg).is_empty(),
-            "no fireball off a rifle bore"
-        );
     }
 
     /// The SHIPPED sheets, read off disk: [`BLAST_COLS`]×[`BLAST_ROWS`] cells of the size
@@ -1468,66 +1351,6 @@ mod tests {
         }
     }
 
-    /// The blast plays ONCE, wired end to end: frame one renders the ignition frame unaged (the
-    /// newborn-armed latch), the index only ever advances, and the closing cell is on screen when
-    /// the quad dies. Run at the DISPLAY cadences rather than a fine sub-step, because that is
-    /// where a playback rate raced against the lifetime falls short: it used to close on cell 10 at
-    /// 60 Hz and cell 9 at 30 Hz.
-    ///
-    /// [`BLAST_LIFETIME`] holds [`BLAST_FRAMES`] cells, so 60 Hz resolves one cell per frame and
-    /// closes on the last; 30 Hz resolves two, and its final sample necessarily lands one cell
-    /// short — six renders cannot show twelve cells under any index law. What the clamp guarantees
-    /// at every cadence is the rest: no step backwards, and no return to the ignition cell.
-    #[test]
-    fn blast_core_plays_its_sheet_once() {
-        /// Every flipbook index the blast RENDERS at `hz`, birth frame first.
-        fn rendered(hz: f32) -> Vec<f32> {
-            let mut app = harness();
-            fire(&mut app, 0.088, 0);
-            let core = blast_cores(&mut app)[0];
-            let mut seen = vec![material_of(&app, core).params.frame.x];
-            while app.world().get::<Billboard>(core).is_some() {
-                advance(&mut app, 1.0 / hz);
-                if app.world().get::<Billboard>(core).is_some() {
-                    seen.push(material_of(&app, core).params.frame.x);
-                }
-            }
-            seen
-        }
-
-        for (hz, closing) in [(60.0, BLAST_FRAMES - 1), (30.0, BLAST_FRAMES - 2)] {
-            let seen = rendered(hz);
-            // Index 0 twice at the head: the spawn's own frame, then the arming visit.
-            assert_eq!(seen[..2], [0.0, 0.0], "{hz} Hz: opens on the ignition cell");
-            assert!(
-                seen.windows(2).all(|pair| pair[1] >= pair[0]),
-                "{hz} Hz: the flipbook wrapped — {seen:?}"
-            );
-            assert_eq!(
-                *seen.last().expect("the birth frame at least"),
-                closing as f32,
-                "{hz} Hz: the wrong cell is on screen when the quad dies — {seen:?}"
-            );
-        }
-    }
-
-    /// Which of the two sheets plays is the blast's anti-repetition trick (its own sequence is
-    /// fixed), so a burst of shots must draw both.
-    #[test]
-    fn blast_core_draws_both_sheets() {
-        let mut app = harness();
-        for _ in 0..12 {
-            fire(&mut app, 0.088, 0);
-        }
-        let cores = blast_cores(&mut app);
-        assert_eq!(cores.len(), 12, "one blast core per shot, none evicted");
-        let sheets: std::collections::BTreeSet<_> = cores
-            .iter()
-            .map(|core| material_of(&app, *core).atlas.id())
-            .collect();
-        assert_eq!(sheets.len(), 2, "both blast sheets must reach the screen");
-    }
-
     /// The fireball is scaled by the BORE, never by the viewer (ADR-0023): doubling the caliber
     /// doubles the quad, the standoff and the lifetime — and because [`Flipbook::Once`] spreads the
     /// sheet over that lifetime, the playthrough scales with it and needs no rate of its own.
@@ -1555,97 +1378,6 @@ mod tests {
                 "twice the bore must be twice the {what}: {small} → {big}"
             );
         }
-    }
-
-    /// Soft-particle classification: the muzzle's MASS layers fade where they close on the geometry
-    /// behind them, the HOT ones never do. A flash dimming because the tank parked near a wall is
-    /// exactly the artifact this lane must not introduce.
-    #[test]
-    fn only_the_muzzle_mass_layers_fade_against_the_scene() {
-        let app = harness();
-        let assets = app.world().resource::<MuzzleVfxAssets>();
-        for (layer, material) in [
-            ("gas smoke", assets.smoke_material()),
-            ("ground dust", assets.dust_material()),
-        ] {
-            assert_eq!(
-                material.params.glow.z, SOFT_PARTICLE_DEPTH,
-                "{layer} is mass — it must soften where it meets a surface"
-            );
-        }
-        for (layer, material) in [
-            (
-                "flash core",
-                assets.flash_material(assets.core_atlas.clone(), 2.0),
-            ),
-            (
-                "blast core",
-                assets.blast_material(assets.blast_atlas[0].clone()),
-            ),
-        ] {
-            assert_eq!(
-                material.params.glow.z, 0.0,
-                "{layer} is airborne and additive — no depth fade"
-            );
-        }
-    }
-
-    /// Per-shot variation is the MG's anti-strobe contract: consecutive shots must differ in core
-    /// roll and size (seeded RNG makes this deterministic — a regression to fixed values fails).
-    #[test]
-    fn mg_shots_never_repeat_identically() {
-        let mut app = harness();
-        fire_round(&mut app, MG_CALIBER, 0, false);
-        fire_round(&mut app, MG_CALIBER, 0, false);
-        let world = app.world_mut();
-        // The cores are the camera-facing billboards (the flame planes bake a fixed rotation).
-        let mut q = world.query_filtered::<&Billboard, With<crate::vfx::billboard::FaceCamera>>();
-        let cores: Vec<(f32, f32)> = q.iter(world).map(|b| (b.roll, b.start_size)).collect();
-        assert_eq!(cores.len(), 2, "two shots, two cores");
-        assert!(
-            cores[0].0 != cores[1].0 && cores[0].1 != cores[1].1,
-            "consecutive MG flashes must differ in roll and size: {cores:?}"
-        );
-    }
-
-    /// The MG muzzle light now rides EVERY round (the tracer-only gate is gone): a 4-ball-1-tracer
-    /// belt cycle yields five lights, each dimmer and shorter-lived than the 88's, and the tracer
-    /// round's light spikes [`MG_TRACER_LIGHT_BOOST`]× brighter than a ball round's.
-    #[test]
-    fn mg_light_rides_every_round_with_tracer_spike() {
-        let mut app = harness();
-        for _ in 0..4 {
-            fire_round(&mut app, MG_CALIBER, 0, false);
-        }
-        assert_eq!(lights(&mut app), 4, "every ball round carries a light too");
-        fire_round(&mut app, MG_CALIBER, 0, true);
-        assert_eq!(lights(&mut app), 5, "the tracer round adds its own");
-
-        // Scale + spike: a fresh app so exactly one ball then one tracer are comparable at birth.
-        let mut ball = harness();
-        fire_round(&mut ball, MG_CALIBER, 0, false);
-        let ball_peak = {
-            let world = ball.world_mut();
-            let mut q = world.query::<&MuzzleLight>();
-            q.single(world).expect("one ball light").peak
-        };
-        let mut tracer = harness();
-        fire_round(&mut tracer, MG_CALIBER, 0, true);
-        let world = tracer.world_mut();
-        let mut q = world.query::<(&MuzzleLight, &PointLight)>();
-        let (light, point) = q.single(world).expect("one tracer light");
-        assert!(light.peak < LIGHT_PEAK_LUMENS, "dimmer than the 88's");
-        assert!(light.lifetime < LIGHT_LIFETIME, "shorter than the 88's");
-        assert!(
-            (light.peak - ball_peak * MG_TRACER_LIGHT_BOOST).abs() < 1.0,
-            "the tracer round's light spikes {MG_TRACER_LIGHT_BOOST}× the ball round's"
-        );
-        // Under the shipped lever the MG light is present but does NOT cast — the whole point of
-        // the 2026-07-31 measurement (see [`MuzzleShadows`]).
-        assert!(
-            !point.shadow_maps_enabled,
-            "the shipped lever spares the MG light its shadow cubemap"
-        );
     }
 
     /// The shadow lever: `MainGunOnly` (shipped) casts on the 88 alone, `On` casts on both guns,

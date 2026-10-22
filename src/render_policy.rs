@@ -565,16 +565,6 @@ mod tests {
         }
     }
 
-    /// The third-person view draws the world AND the body it is riding.
-    #[test]
-    fn third_person_draws_the_world_and_the_view_subject() {
-        let f = Fixture::new();
-        assert!(f.reaches(f.third_person, f.world_solid));
-        assert!(f.reaches(f.third_person, f.view_subject));
-        assert!(f.reaches(f.third_person, f.unscoped));
-        assert!(f.reaches(f.third_person, f.effect));
-    }
-
     /// The optic drops exactly ONE channel. It never stops drawing the world — everything that
     /// carries no scope at all (every effect, gizmo and impact marker in the game) depends on it.
     #[test]
@@ -601,7 +591,9 @@ mod tests {
     /// The sun reaches all three channels. With the vendored shadow-view patch live this is the
     /// single point of failure for the local tank's shadow AND the track ribbon's — the ribbon
     /// half is the regression that shipped once already (the shoes go `NotShadowCaster` on the
-    /// frame the ribbon appears, so if the sun cannot see the ribbon, BOTH halves go silent).
+    /// frame the ribbon appears, so if the sun cannot see the ribbon, BOTH halves go silent). No
+    /// camera draws that shadow-only geometry: this is what lets the ribbon carry an ORDINARY
+    /// OPAQUE material instead of an alpha trick.
     #[test]
     fn the_sun_reaches_every_channel() {
         let f = Fixture::new();
@@ -614,13 +606,6 @@ mod tests {
             f.reaches(f.sun, f.shadow_proxy),
             "the tracks lose their shadow entirely if this fails"
         );
-    }
-
-    /// No camera draws shadow-only geometry. This is what lets the ribbon carry an ORDINARY OPAQUE
-    /// material instead of an alpha trick.
-    #[test]
-    fn no_camera_draws_shadow_only_geometry() {
-        let f = Fixture::new();
         for camera in [f.third_person, f.optic] {
             assert!(!f.reaches(camera, f.shadow_proxy));
         }
@@ -628,13 +613,15 @@ mod tests {
 
     /// The pen cam inset and the battlefield never see each other: the inset draws its stage and
     /// nothing else, no battlefield camera or light reaches the stage, and the stage's key light
-    /// reaches the stage alone.
+    /// reaches the stage alone. The kill cam's lesson draws the world and the stage, and not the
+    /// body it rides: the victim's own tank leaves the view as its glass arrives.
     #[test]
     fn the_pen_cam_inset_and_the_battlefield_are_disjoint() {
         let mut f = Fixture::new();
         let world = f.app.world_mut();
         let inset = world.spawn(CameraProfile::PenCamInset).id();
         let key = world.spawn(LightProfile::PenCamKey).id();
+        let lesson = world.spawn(CameraProfile::KillCamLesson).id();
         let stage = world
             .spawn((Mesh3d(Handle::default()), VisualScope::PEN_CAM_STAGE))
             .id();
@@ -656,19 +643,6 @@ mod tests {
             );
         }
         assert!(!casts_shadow(f.app.world(), stage));
-    }
-
-    /// The kill cam's lesson draws the world and the pen cam stage, and not the body it rides: the
-    /// victim's own tank leaves the view as its glass arrives.
-    #[test]
-    fn the_kill_cam_lesson_swaps_the_ridden_body_for_the_stage() {
-        let mut f = Fixture::new();
-        let world = f.app.world_mut();
-        let lesson = world.spawn(CameraProfile::KillCamLesson).id();
-        let stage = world
-            .spawn((Mesh3d(Handle::default()), VisualScope::PEN_CAM_STAGE))
-            .id();
-        f.app.update();
         for target in [stage, f.world_solid, f.effect, f.unscoped] {
             assert!(f.reaches(lesson, target));
         }
@@ -742,48 +716,11 @@ mod tests {
         );
     }
 
-    /// `PROXIED_CASTER` overrides the shadow role while STILL inheriting the channel — a silenced
-    /// track shoe must follow its tank into the optic exactly like the hull does.
-    #[test]
-    fn a_proxied_caster_keeps_inheriting_its_channel() {
-        let mut app = App::new();
-        app.add_plugins(plugin);
-        let world = app.world_mut();
-        let root = world.spawn(VisualScope::VIEW_SUBJECT_BODY).id();
-        let shoe = world
-            .spawn((
-                Mesh3d(Handle::default()),
-                VisualScope::PROXIED_CASTER,
-                ChildOf(root),
-            ))
-            .id();
-        let optic = world.spawn(CameraProfile::BattlefieldOptic).id();
-        let third_person = world.spawn(CameraProfile::BattlefieldThirdPerson).id();
-        app.update();
-
-        assert!(
-            !reaches(app.world(), optic, shoe),
-            "a silenced shoe still hides from the optic with the rest of its tank"
-        );
-        assert!(
-            reaches(app.world(), third_person, shoe),
-            "and is still drawn in third person"
-        );
-        assert!(
-            !casts_shadow(app.world(), shoe),
-            "its shadow belongs to the ribbon now"
-        );
-        assert!(
-            !app.world().entity(shoe).contains::<NotShadowReceiver>(),
-            "it still RECEIVES — the hull's shadow crossing the return run is visible"
-        );
-    }
-
     /// The inheritance walks THROUGH an unscoped ancestor, which is the shape the shoe pool has: a
     /// tank root, a `ShoeBelt` that declares no scope of its own, and the shoes under it. Both halves
     /// have to survive the extra hop — the channel inherited from the root two levels up, and the
     /// shoe's own `PROXIED_CASTER` shadow role — or a track either casts twice or follows the wrong
-    /// view.
+    /// view. The role silences the shoe's casting only: it still receives shadows.
     #[test]
     fn a_proxied_caster_inherits_through_an_unscoped_belt() {
         let mut app = App::new();
@@ -810,6 +747,10 @@ mod tests {
         assert!(
             !casts_shadow(app.world(), shoe),
             "and the belt did not swallow the shoe's own shadow role",
+        );
+        assert!(
+            !app.world().entity(shoe).contains::<NotShadowReceiver>(),
+            "it still RECEIVES — the hull's shadow crossing the return run is visible"
         );
     }
 

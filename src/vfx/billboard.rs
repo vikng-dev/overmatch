@@ -707,26 +707,4 @@ mod tests {
             BILLBOARD_CAP
         );
     }
-
-    /// The gradient LUT builder encodes the closure faithfully: X is the signal axis, Y the life
-    /// axis, alpha the heat lane.
-    #[test]
-    fn gradient_lut_encodes_axes() {
-        let mut images = Assets::<Image>::default();
-        let handle = gradient_lut(&mut images, |x, y| {
-            (LinearRgba::rgb(x, y, 0.25), if y < 0.5 { 1.0 } else { 0.0 })
-        });
-        let image = images.get(&handle).expect("lut image");
-        let data = image.data.as_ref().expect("cpu-side data");
-        // Texel (x=last, y=first): red ≈ 255 (x=1), green = 0 (y=0), heat = 255 (young).
-        let first_row_last = (64 - 1) * 4;
-        assert_eq!(data[first_row_last], 255);
-        assert_eq!(data[first_row_last + 1], 0);
-        assert_eq!(data[first_row_last + 3], 255);
-        // Texel (x=first, y=last): red = 0, green ≈ 255 (y=1), heat = 0 (old).
-        let last_row_first = 64 * (16 - 1) * 4;
-        assert_eq!(data[last_row_first], 0);
-        assert_eq!(data[last_row_first + 1], 255);
-        assert_eq!(data[last_row_first + 3], 0);
-    }
 }

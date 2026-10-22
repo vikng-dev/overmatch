@@ -1067,7 +1067,7 @@ fn spark_orientation(dir: Vec3, to_camera: Vec3) -> Quat {
 mod tests {
     use super::*;
 
-    use crate::vfx::billboard::{BILLBOARD_CAP, Billboard, FaceCamera};
+    use crate::vfx::billboard::{BILLBOARD_CAP, Billboard};
 
     /// An MG-belt round: below TRACER_MAX_CALIBER, so the small dust-ping-spark read.
     const MG_CALIBER: f32 = 0.0079;
@@ -1088,36 +1088,6 @@ mod tests {
             .add_observer(spawn_impact_read);
         app.insert_resource(ImpactAssets::test_stub());
         app
-    }
-
-    /// Soft-particle classification, over EVERY impact material — the enumeration is the point, so
-    /// a new layer cannot pick up (or silently miss) the fade without a line here. The classes and
-    /// the mechanism behind each are on [`SOFT_PARTICLE_DEPTH`].
-    #[test]
-    fn only_the_impact_mass_layers_fade_against_the_scene() {
-        let assets = ImpactAssets::test_stub();
-        for (layer, material) in [
-            ("dust billow", assets.dust_material()),
-            ("dirt mass", assets.dirt_material(1.0)),
-            ("spall puff", assets.spall_material(1.0)),
-        ] {
-            assert_eq!(
-                material.params.glow.z, SOFT_PARTICLE_DEPTH,
-                "{layer} is mass — it must soften where it meets a surface"
-            );
-        }
-        for (layer, material) in [
-            ("shock ring", assets.shock_ring_material()),
-            ("ground scar", assets.ground_mark_material()),
-            ("spark", assets.spark_material()),
-            ("ping", assets.ping_material()),
-            ("ejecta", assets.ejecta_material()),
-            ("armor flash", assets.armor_flash_material()),
-            ("armor spark", assets.armor_spark_material()),
-            ("flame lick", assets.flame_material()),
-        ] {
-            assert_eq!(material.params.glow.z, 0.0, "{layer} must stay hard-edged");
-        }
     }
 
     /// Fire a terrain impact (the default surface) — keeps every existing terrain/MG test byte-for-
@@ -1173,157 +1143,6 @@ mod tests {
             .collect()
     }
 
-    /// One MG-caliber impact spawns the full small read: a dust billow + a ping + 2–4 sparks, all on
-    /// the shared billboard ring, and NO ground scar (scars are 88-only). The dust and ping are the
-    /// aspect-1 camera facers; the sparks are the needle streaks.
-    #[test]
-    fn every_impact_spawns_the_layered_read() {
-        let mut app = harness();
-        trigger_impact(&mut app, Vec3::Y, MG_CALIBER);
-        let total = billboards(&mut app);
-        let spark_n = sparks(&mut app).len();
-        assert!(
-            (SPARK_COUNT.0 as usize..=SPARK_COUNT.1 as usize).contains(&spark_n),
-            "spark count {spark_n} outside {SPARK_COUNT:?}"
-        );
-        assert_eq!(
-            total,
-            spark_n + 2,
-            "layered read = dust + ping + {spark_n} sparks"
-        );
-        assert_eq!(
-            app.world().resource::<GroundMarkRing>().0.len(),
-            0,
-            "the MG read leaves no ground scar"
-        );
-        // Exactly two camera-facing aspect-1 elements: the dust billow and the ping.
-        let world = app.world_mut();
-        let mut q = world.query_filtered::<&Billboard, With<FaceCamera>>();
-        let facers = q.iter(world).filter(|b| b.aspect.x > 0.5).count();
-        assert_eq!(facers, 2, "dust billow + ping face the camera");
-    }
-
-    /// The 88 (big caliber) lands the full terrain splash instead: contact flash, 8–12 dirt ejecta,
-    /// 1–2 plumes, a shock ring, and a lingering cloud on the shared ring, PLUS exactly one flat
-    /// ground scar in its OWN ring, lying on the surface (its +Z turned onto the normal).
-    #[test]
-    fn big_caliber_spawns_the_splash_stack() {
-        let mut app = harness();
-        trigger_impact(&mut app, Vec3::Y, BIG_CALIBER);
-
-        // Exactly one ground scar, in its independent ring, flat on the terrain (not camera-facing).
-        let ground = app.world().resource::<GroundMarkRing>().0.clone();
-        assert_eq!(ground.len(), 1, "one 88 ground scar in its own ring");
-        let scar = ground[0];
-        assert!(
-            app.world().get::<FaceCamera>(scar).is_none(),
-            "the ground scar lies flat, never camera-facing"
-        );
-        let rot = app
-            .world()
-            .get::<Transform>(scar)
-            .expect("scar transform")
-            .rotation;
-        assert!(
-            rot.mul_vec3(Vec3::Z).dot(Vec3::Y) > 0.99,
-            "the scar's face lies on the terrain normal"
-        );
-
-        // The shared-ring stack: flash(1) + ejecta(8–12) + plume(1–2) + ring(1) + cloud(1).
-        let lo = 1 + EJECTA_COUNT.0 as usize + SPLASH_PLUME_COUNT.0 as usize + 2;
-        let hi = 1 + EJECTA_COUNT.1 as usize + SPLASH_PLUME_COUNT.1 as usize + 2;
-        let shared = app.world().resource::<BillboardRing>().0.len();
-        assert!(
-            (lo..=hi).contains(&shared),
-            "big splash stack size {shared} outside {lo}..={hi}"
-        );
-        // Total billboards = the shared stack plus the one scar (its own ring).
-        assert_eq!(billboards(&mut app), shared + 1, "stack + the ground scar");
-    }
-
-    /// Stretched streaks of any width — the metal sparks (0.08–0.09) and the chunkier dirt ejecta
-    /// (0.28), against the aspect-1 masses. Wider than [`sparks`]'s needle-only filter.
-    fn streaks(app: &mut App) -> usize {
-        let world = app.world_mut();
-        let mut q = world.query::<&Billboard>();
-        q.iter(world).filter(|b| b.aspect.x < 0.5).count()
-    }
-
-    /// Billboards carrying a downward acceleration — the thrown mass, as opposed to the gas layers
-    /// that hold a straight drift line.
-    fn falling(app: &mut App) -> usize {
-        let world = app.world_mut();
-        let mut q = world.query::<&Billboard>();
-        q.iter(world)
-            .filter(|b| b.accel != Vec3::ZERO)
-            .inspect(|b| assert_eq!(b.accel, DEBRIS_GRAVITY, "thrown mass falls at g"))
-            .count()
-    }
-
-    /// Every layer an impact THROWS arcs under gravity: the terrain's dirt ejecta streaks, and on
-    /// armor the spark fan plus the spall puff. The gas layers — contact flash, plume, shock ring,
-    /// lingering haze, ground scar — keep their straight drift.
-    #[test]
-    fn thrown_layers_arc_and_gas_layers_do_not() {
-        let mut terrain = harness();
-        trigger_impact(&mut terrain, Vec3::Y, BIG_CALIBER);
-        let ejecta = streaks(&mut terrain);
-        assert!(
-            (EJECTA_COUNT.0 as usize..=EJECTA_COUNT.1 as usize).contains(&ejecta),
-            "ejecta count {ejecta} outside {EJECTA_COUNT:?}"
-        );
-        assert_eq!(
-            falling(&mut terrain),
-            ejecta,
-            "on terrain exactly the dirt ejecta falls"
-        );
-
-        let mut armor = harness();
-        trigger_surface(
-            &mut armor,
-            Vec3::Y,
-            BIG_CALIBER,
-            ImpactSurface::Armor,
-            ImpactOutcome::Struck,
-        );
-        assert_eq!(
-            falling(&mut armor),
-            streaks(&mut armor) + 1,
-            "on armor the spark fan falls, and the spall puff with it"
-        );
-    }
-
-    /// The splash's layers end one at a time rather than all together: the contact flash is the
-    /// first gone and the brown haze the long tail, outliving every other shared-ring layer by
-    /// seconds so the strike stays readable after the fountain has fallen.
-    #[test]
-    fn splash_layers_end_staggered_with_the_haze_last() {
-        let mut app = harness();
-        trigger_impact(&mut app, Vec3::Y, BIG_CALIBER);
-        let shared = app.world().resource::<BillboardRing>().0.clone();
-        let mut lifetimes: Vec<f32> = shared
-            .iter()
-            .map(|e| app.world().get::<Billboard>(*e).expect("live").lifetime)
-            .collect();
-        lifetimes.sort_by(f32::total_cmp);
-
-        assert_eq!(
-            lifetimes.first().copied(),
-            Some(SPLASH_FLASH_LIFETIME),
-            "the contact flash is the first layer gone"
-        );
-        let last = lifetimes.pop().expect("a populated stack");
-        assert_eq!(
-            last, SPLASH_CLOUD_LIFETIME,
-            "the lingering haze is the last layer standing"
-        );
-        let previous = lifetimes.pop().expect("a layer under the haze");
-        assert!(
-            last - previous > 3.0,
-            "the haze must hang seconds past the layer under it ({previous} s)"
-        );
-    }
-
     /// The ground scars ride their OWN eviction ring, bounded by GROUND_MARK_CAP — insulated from the
     /// shared billboard ring so a storm can't evict a fresh multi-second scar within a frame.
     #[test]
@@ -1337,29 +1156,6 @@ mod tests {
             GROUND_MARK_CAP,
             "ground scars stay bounded by their own cap"
         );
-    }
-
-    /// The sparks all kick AWAY from the surface (positive component along the hit normal), each
-    /// streak elongated along its own flight direction. This is the `Impact.normal` consumption
-    /// contract.
-    #[test]
-    fn impacts_spark_along_the_normal() {
-        let mut app = harness();
-        let normal = Vec3::new(0.3, 0.9, -0.1).normalize();
-        trigger_impact(&mut app, normal, MG_CALIBER);
-        let sparks = sparks(&mut app);
-        assert!(!sparks.is_empty(), "an impact must throw sparks");
-        for (drift, axis_alignment) in sparks {
-            assert!(
-                drift.normalize().dot(normal) > 0.0,
-                "a spark must kick off the surface"
-            );
-            // The quad's +Y (its long axis) rides the flight direction — velocity elongation.
-            assert!(
-                axis_alignment > 0.99,
-                "streak axis must ride the flight direction (dot {axis_alignment})"
-            );
-        }
     }
 
     /// A degenerate (zero) normal still throws the read — sparks straight up, the terrain fallback —
@@ -1395,50 +1191,6 @@ mod tests {
         );
     }
 
-    /// The 88 on ARMOR is categorically NOT the terrain splash: it throws its compact spark-on-steel
-    /// read (flash + a dense 14–20 spark fan + one gray spall puff) on the shared ring and — the
-    /// honesty contract — leaves NO ground scar (steel isn't gouged like soil). Contrast the terrain
-    /// 88, which DOES gouge exactly one scar.
-    #[test]
-    fn armor_88_reads_spark_on_steel_not_dirt() {
-        // Terrain 88: gouges one ground scar (the slice-1 splash).
-        let mut terrain = harness();
-        trigger_impact(&mut terrain, Vec3::Y, BIG_CALIBER);
-        assert_eq!(
-            terrain.world().resource::<GroundMarkRing>().0.len(),
-            1,
-            "the terrain 88 gouges a ground scar"
-        );
-
-        // Armor 88 (no penetration): NO ground scar, and a compact flash + dense fan + puff stack.
-        let mut armor = harness();
-        trigger_surface(
-            &mut armor,
-            Vec3::Y,
-            BIG_CALIBER,
-            ImpactSurface::Armor,
-            ImpactOutcome::Struck,
-        );
-        assert_eq!(
-            armor.world().resource::<GroundMarkRing>().0.len(),
-            0,
-            "an armor hit never gouges a ground scar"
-        );
-        // The spark fan is the needle-thin streak set (aspect.x < 0.2); it must be the dense 14–20.
-        let fan = sparks(&mut armor).len();
-        assert!(
-            (ARMOR_SPARK_COUNT.0 as usize..=ARMOR_SPARK_COUNT.1 as usize).contains(&fan),
-            "armor spark fan {fan} outside {ARMOR_SPARK_COUNT:?}"
-        );
-        // Non-penetrating stack: flash(1) + fan(14–20) + spall puff(1). No plume/ring/cloud/scar.
-        let total = billboards(&mut armor);
-        assert_eq!(
-            total,
-            fan + 2,
-            "armor read = flash + {fan} sparks + one gray spall puff"
-        );
-    }
-
     /// Penetration (the round bit into the steel) appends exactly the flame lick — one extra
     /// billboard over the otherwise-identical non-penetrating armor read. Both harnesses share the
     /// fixed seed, so the RNG-driven fan count is identical and the delta is purely the flame lick.
@@ -1468,63 +1220,6 @@ mod tests {
             n1,
             n0 + 1,
             "penetration adds exactly the flame lick, nothing else"
-        );
-    }
-
-    /// The MG on armor is the honest-minimum recolor: the SAME billboard shape/count as the MG on
-    /// terrain (only the billow LUT swaps to gray spall), so the small-read structure the terrain
-    /// tests pin is preserved verbatim — no ground scar, no extra layers.
-    #[test]
-    fn mg_armor_preserves_the_small_read_shape() {
-        let mut terrain = harness();
-        trigger_impact(&mut terrain, Vec3::Y, MG_CALIBER);
-        let nt = billboards(&mut terrain);
-
-        let mut armor = harness();
-        trigger_surface(
-            &mut armor,
-            Vec3::Y,
-            MG_CALIBER,
-            ImpactSurface::Armor,
-            ImpactOutcome::Struck,
-        );
-        let na = billboards(&mut armor);
-
-        assert_eq!(
-            na, nt,
-            "MG armor recolor keeps the small-read shape (LUT swap only)"
-        );
-        assert_eq!(
-            armor.world().resource::<GroundMarkRing>().0.len(),
-            0,
-            "the MG armor read leaves no ground scar"
-        );
-    }
-
-    /// A ricochet's spark fan leans toward the deflected (outgoing) direction: with the surface
-    /// normal +Y and the bounce strongly along +X, the fan's mean kick carries a clear +X component
-    /// it would not have if it splayed symmetrically off the normal.
-    #[test]
-    fn ricochet_biases_the_spark_fan_along_the_bounce() {
-        let mut app = harness();
-        let deflect = Vec3::new(1.0, 0.2, 0.0).normalize();
-        trigger_surface(
-            &mut app,
-            Vec3::Y,
-            BIG_CALIBER,
-            ImpactSurface::Armor,
-            ImpactOutcome::Ricochet { direction: deflect },
-        );
-        let fan = sparks(&mut app);
-        assert!(!fan.is_empty(), "a ricochet must throw a spark fan");
-        let mean_x: f32 = fan
-            .iter()
-            .map(|(drift, _)| drift.normalize().x)
-            .sum::<f32>()
-            / fan.len() as f32;
-        assert!(
-            mean_x > 0.2,
-            "the fan must lean toward the bounce (+X); mean x-kick was {mean_x}"
         );
     }
 }

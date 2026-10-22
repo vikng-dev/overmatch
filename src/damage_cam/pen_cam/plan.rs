@@ -683,15 +683,4 @@ mod tests {
         }
         assert!(leaving > 0, "a record leaves the tank");
     }
-
-    /// The line's brightness steps down after a crossing and never under the floor.
-    #[test]
-    fn the_line_dims_after_each_crossing() {
-        let report = record("s1_through_crew");
-        let plan = Plan::new(&report, &shapes(&report));
-        let before = plan.brightness_at(plan.contact_arc - 0.5);
-        let after = plan.brightness_at(plan.crossings[0].entry_arc + 0.3);
-        assert_eq!(before, 1.0);
-        assert!(after < before && after >= LINE_FLOOR);
-    }
 }

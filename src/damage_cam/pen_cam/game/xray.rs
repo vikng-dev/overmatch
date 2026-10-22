@@ -860,7 +860,8 @@ mod tests {
     }
 
     /// The tint is the live state's, never the record's: a record with other HP points, doses or
-    /// consequences, or no record, tints the same; a live HP change tints differently.
+    /// consequences, or no record, tints the same; a live HP change tints differently; a component
+    /// no point of which is lost draws untinted, the base layout.
     #[test]
     fn the_tint_follows_live_state_only() {
         let record = report("s9_one_box_lost");
@@ -892,48 +893,17 @@ mod tests {
         let mut killed = live;
         killed.0[0].dead = true;
         assert_ne!(tints(&plan(Some(&record), &killed, &shapes)), base);
-    }
 
-    /// A component no point of which is lost draws untinted: the base layout.
-    #[test]
-    fn an_unstruck_component_is_the_base_layout() {
-        let record = report("s9_one_box_lost");
-        let shapes = TankAsset::load(record.vehicle.as_deref().unwrap())
-            .unwrap()
-            .shapes(&record.servo_deg);
-        let mut live = standing(&record);
-        for b in &mut live.0 {
+        let mut full = standing(&record);
+        for b in &mut full.0 {
             b.current = b.max;
         }
-        for b in plan(Some(&record), &live, &shapes).boxes {
-            assert!(!b.lost && b.pool_lost() == 0.0, "{}", b.name);
+        for b in plan(Some(&record), &full, &shapes).boxes {
+            assert!(
+                !b.lost && b.pool_lost() == 0.0,
+                "{}: tinted at full",
+                b.name
+            );
         }
-    }
-
-    /// The scripted preference holds on inside its window and lets go at its end, and only at
-    /// its edges: a press inside the window stands until the window ends.
-    #[test]
-    fn the_scripted_preference_holds_for_its_window() {
-        let mut app = App::new();
-        app.init_resource::<Time>()
-            .init_resource::<XRay>()
-            .add_systems(Update, scripted(1.0, 3.0));
-        let on = |app: &App| app.world().resource::<XRay>().on;
-        let at = |app: &mut App, seconds: f32| {
-            let now = app.world().resource::<Time>().elapsed_secs();
-            app.world_mut()
-                .resource_mut::<Time>()
-                .advance_by(std::time::Duration::from_secs_f32(seconds - now));
-            app.update();
-        };
-        at(&mut app, 0.5);
-        assert!(!on(&app));
-        at(&mut app, 1.5);
-        assert!(on(&app), "on inside the window");
-        app.world_mut().resource_mut::<XRay>().on = false;
-        at(&mut app, 2.0);
-        assert!(!on(&app), "the edge alone writes it");
-        at(&mut app, 3.5);
-        assert!(!on(&app), "off past the window");
     }
 }

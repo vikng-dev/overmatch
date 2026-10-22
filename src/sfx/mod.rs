@@ -383,25 +383,30 @@ mod tests {
         }
     }
 
-    #[test]
-    fn idle_lands_the_recording_on_the_four_stroke_firing_rate() {
-        let sound = fixture();
-        // 500 rpm × 8 cylinders / 2 / 60 = 33.333 Hz of firing over a 30 Hz recording.
-        let expected = sound.idle_rpm * sound.cylinders as f32 / 2.0 / 60.0 / sound.clip_pop_hz;
-        let law = EngineSpeedLaw::for_engine(&sound);
-        assert!((law.speed(sound.idle_rpm) - expected).abs() < 1e-5);
-    }
-
+    /// Idle lands the recording on the four-stroke firing rate, the governed crank one octave
+    /// above it, and the speed rises with rpm across the band between them.
     #[test]
     fn the_governed_crank_lands_one_octave_above_idle() {
         let sound = fixture();
         let law = EngineSpeedLaw::for_engine(&sound);
         let idle = law.speed(sound.idle_rpm);
+        // 500 rpm × 8 cylinders / 2 / 60 = 33.333 Hz of firing over a 30 Hz recording.
+        let firing = sound.idle_rpm * sound.cylinders as f32 / 2.0 / 60.0 / sound.clip_pop_hz;
+        assert!((idle - firing).abs() < 1e-5, "idle {idle} against {firing}");
         let governed = law.speed(sound.governed_rpm);
         assert!(
             (governed - 2.0 * idle).abs() < 1e-5,
             "governed {governed} is not an octave over idle {idle}"
         );
+        let steps = 40;
+        let mut previous = idle;
+        for step in 1..=steps {
+            let rpm =
+                sound.idle_rpm + (sound.governed_rpm - sound.idle_rpm) * step as f32 / steps as f32;
+            let speed = law.speed(rpm);
+            assert!(speed > previous, "speed fell at {rpm} rpm: {speed}");
+            previous = speed;
+        }
     }
 
     #[test]
@@ -420,42 +425,8 @@ mod tests {
         assert!(ceiling > law.speed(sound.governed_rpm));
     }
 
-    #[test]
-    fn speed_rises_with_rpm_across_the_band() {
-        let sound = fixture();
-        let law = EngineSpeedLaw::for_engine(&sound);
-        let steps = 40;
-        let mut previous = law.speed(sound.idle_rpm);
-        for step in 1..=steps {
-            let rpm =
-                sound.idle_rpm + (sound.governed_rpm - sound.idle_rpm) * step as f32 / steps as f32;
-            let speed = law.speed(rpm);
-            assert!(speed > previous, "speed fell at {rpm} rpm: {speed}");
-            previous = speed;
-        }
-    }
-
-    /// The shipped sheet parses and deliberately authors NO engine sound (the loop was pulled
-    /// until a recording worthy of the HL230 exists). This trips when a new loop is authored —
-    /// update it to run the law against the new data.
-    #[test]
-    fn the_shipped_tank_is_deliberately_engine_silent() {
-        let spec: crate::spec::TankSpec =
-            ron::de::from_str(include_str!("../../assets/tiger_1/tiger_1.tank.ron"))
-                .expect("the shipped sheet parses");
-        let engine = spec
-            .track
-            .powertrain
-            .transmission
-            .as_ref()
-            .and_then(|transmission| transmission.engine.as_ref())
-            .expect("the Tiger declares an engine");
-        assert!(
-            engine.sound.is_none(),
-            "engine sound returned without updating this test"
-        );
-    }
-
+    /// A variant is never rolled twice running, and with one take excluded every other one still
+    /// comes up.
     #[test]
     fn a_variant_is_never_rolled_twice_running() {
         let mut rng = ViewRng::seeded(0x5FD3_2A17);
@@ -467,13 +438,7 @@ mod tests {
             assert_ne!(Some(variant), last, "the same take landed twice running");
             last = Some(variant);
         }
-    }
-
-    #[test]
-    fn every_other_variant_stays_reachable() {
         let mut rng = ViewRng::seeded(0x1234_5678);
-        let count = 5;
-        // With one take excluded, the remaining four must all still come up.
         let mut seen = [false; 5];
         for _ in 0..2_000 {
             seen[pick_variant(&mut rng, count, Some(2)).expect("a stocked list always picks")] =

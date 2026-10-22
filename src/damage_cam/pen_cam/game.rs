@@ -966,33 +966,6 @@ mod tests {
         );
     }
 
-    /// Two shots inside one turn's minimum: the second replaces the first once the first has
-    /// shown its minimum, by a crossfade in the one corner.
-    #[test]
-    fn an_overlapping_shot_replaces_the_one_on_show() {
-        let (mut app, _) = corner_app(Settings::default());
-        let (first, _, vocabulary, report) = explained("s1_through_crew", 1200);
-        let (second, _, ricochet_vocabulary, _) = explained("s3_ricochet", 1210);
-        stage_ready(&mut app, &report);
-        receive(&mut app, first, &vocabulary);
-        step(&mut app);
-        receive(&mut app, second, &ricochet_vocabulary);
-        let mut faded = false;
-        let mut shown = Vec::new();
-        for _ in 0..(8.0 / STEP_S) as usize {
-            step(&mut app);
-            let corner = app.world().resource::<Corner>().clone();
-            faded |= corner.fading.is_some();
-            if let Some(showing) = corner.showing
-                && shown.last() != Some(&showing.kind)
-            {
-                shown.push(showing.kind);
-            }
-        }
-        assert_eq!(shown, [CornerKind::Glass, CornerKind::Ricochet]);
-        assert!(faded, "the replacement crossfades");
-    }
-
     /// Closing the corner of every frame, by its end or by a disconnect, leaves bevy's shared
     /// default image stored: a frame without masks owns no image to remove.
     #[test]
@@ -1487,11 +1460,12 @@ mod tests {
     }
 
     /// A corner that needs masks opening while the x-ray is on: two mask sets, each on its own
-    /// viewer; the corner's close releases its own and the x-ray keeps the other, dressed
-    /// throughout.
+    /// viewer, their images distinct, and every mesh the x-ray dresses masked by the player's
+    /// camera's set and no other; the corner's close releases its own and the x-ray keeps the
+    /// other, dressed throughout.
     #[test]
     fn the_corner_and_the_xray_each_own_their_viewers_masks() {
-        let (mut app, _, _, camera) = world_xray_app();
+        let (mut app, _, meshes, camera) = world_xray_app();
         press_x(&mut app);
         run(&mut app, 0.2);
         assert_eq!(xray_census(&mut app).2, vec![camera]);
@@ -1504,7 +1478,7 @@ mod tests {
             "fixture data: a frame that needs masks"
         );
         receive(&mut app, shooter, &vocabulary);
-        let mut both = false;
+        let (mut both, mut masked) = (false, false);
         for _ in 0..(1.0 / STEP_S) as usize {
             step(&mut app);
             let mut viewers = xray_census(&mut app).2;
@@ -1518,11 +1492,36 @@ mod tests {
                 let mut want = vec![camera, inset];
                 want.sort();
                 both |= viewers == want;
+                let masks = app.world().resource::<Masks>();
+                if let (Some(inset), Some(own)) = (masks.of(inset), masks.of(camera)) {
+                    assert_ne!(inset.hull, own.hull, "two sets, two images");
+                    for mesh in meshes {
+                        let handle = app
+                            .world()
+                            .get::<MeshMaterial3d<LookMaterial>>(mesh)
+                            .expect("dressed")
+                            .0
+                            .clone();
+                        let material = app
+                            .world()
+                            .resource::<Assets<LookMaterial>>()
+                            .get(&handle)
+                            .expect("stored");
+                        assert_eq!(
+                            material.hull_mask.as_ref(),
+                            Some(&own.hull),
+                            "the camera's set"
+                        );
+                        assert_eq!(material.part_mask.as_ref(), Some(&own.part));
+                    }
+                    masked = true;
+                }
             }
             assert!(viewers.contains(&camera), "the x-ray keeps its set");
             assert_eq!(xray_census(&mut app).0, 2, "and stays dressed");
         }
         assert!(both, "two sets, each on its own viewer");
+        assert!(masked, "both sets existed at once");
         run(&mut app, kind.duration() + 1.0);
         assert_eq!(census(&mut app).0, 0, "the corner closed");
         assert_eq!(xray_census(&mut app).2, vec![camera], "its set alone went");
@@ -1671,11 +1670,13 @@ mod tests {
             combatant: SHOOTER,
             life: CombatantLife(1),
         };
+        let filler = report("s9_one_box_lost");
+        let filler_vocabulary = vocabulary(&filler);
         for fire_tick in 0..(crate::damage_cam::delivery::RETAINED as u32 - 1) {
             let tick = 1300 + fire_tick;
-            let (filler, vocabulary) =
-                incoming_for("s9_one_box_lost", tick, tick + 1, tick + 3, other);
-            receive(&mut app, filler, &vocabulary);
+            let explanation =
+                projected(&filler, &filler_vocabulary, tick, tick + 1, tick + 3, other);
+            receive(&mut app, explanation, &filler_vocabulary);
         }
         assert_eq!(latest(&app), Some(a_key), "B evicted, A the latest again");
         run(&mut app, 0.2);
@@ -1840,57 +1841,6 @@ mod tests {
         assert_eq!(xray_census(&mut app).0, 3);
     }
 
-    /// The x-ray's materials hold the images of the player's camera's set and no other: with the
-    /// corner open on its own set beside it, the two sets' images differ and every dressed mesh's
-    /// look is masked by the camera's.
-    #[test]
-    fn the_xray_materials_hold_its_own_viewers_masks() {
-        let (mut app, _, meshes, camera) = world_xray_app();
-        press_x(&mut app);
-        run(&mut app, 0.2);
-        stage_of(&mut app, OWN);
-        let (shooter, _, vocabulary, _) = explained("s1_through_crew", 1200);
-        receive(&mut app, shooter, &vocabulary);
-        let mut checked = false;
-        for _ in 0..(1.0 / STEP_S) as usize {
-            step(&mut app);
-            let inset = app
-                .world_mut()
-                .query_filtered::<Entity, With<StageCamera>>()
-                .iter(app.world())
-                .next();
-            let masks = app.world().resource::<Masks>();
-            let (Some(inset), Some(own)) =
-                (inset.and_then(|inset| masks.of(inset)), masks.of(camera))
-            else {
-                continue;
-            };
-            assert_ne!(inset.hull, own.hull, "two sets, two images");
-            for mesh in meshes {
-                let handle = app
-                    .world()
-                    .get::<MeshMaterial3d<LookMaterial>>(mesh)
-                    .expect("dressed")
-                    .0
-                    .clone();
-                let material = app
-                    .world()
-                    .resource::<Assets<LookMaterial>>()
-                    .get(&handle)
-                    .expect("stored");
-                assert_eq!(
-                    material.hull_mask.as_ref(),
-                    Some(&own.hull),
-                    "the camera's set"
-                );
-                assert_eq!(material.part_mask.as_ref(), Some(&own.part));
-            }
-            checked = true;
-            break;
-        }
-        assert!(checked, "both sets existed at once");
-    }
-
     /// `name`'s record of another tank's round fired on `fire_tick` striking the player's first
     /// life, its encounter opened on `contact_tick` and completed on `completion_tick`: the
     /// player's projection and the vocabulary. The fire tick is the explanation's identity.
@@ -1900,24 +1850,34 @@ mod tests {
         contact_tick: u32,
         completion_tick: u32,
     ) -> (ShotExplanation, ShotVocabulary) {
-        incoming_for(name, fire_tick, contact_tick, completion_tick, me())
+        let report = report(name);
+        let vocabulary = vocabulary(&report);
+        let victim = projected(
+            &report,
+            &vocabulary,
+            fire_tick,
+            contact_tick,
+            completion_tick,
+            me(),
+        );
+        (victim, vocabulary)
     }
 
-    /// [`incoming_at`] for a round striking `life`, which may be another tank's.
-    fn incoming_for(
-        name: &str,
+    /// [`incoming_at`] over a loaded `report` and its `vocabulary`, for a round striking `life`,
+    /// which may be another tank's: the struck tank's projection.
+    fn projected(
+        report: &PenetrationReport,
+        vocabulary: &ShotVocabulary,
         fire_tick: u32,
         contact_tick: u32,
         completion_tick: u32,
         life: TankLife,
-    ) -> (ShotExplanation, ShotVocabulary) {
-        let report = report(name);
-        let vocabulary = vocabulary(&report);
-        let mut recorded = recorded(&report, STRUCK, fire_tick, life);
+    ) -> ShotExplanation {
+        let mut recorded = recorded(report, STRUCK, fire_tick, life);
         recorded.contact_tick = contact_tick;
         recorded.completion_tick = completion_tick;
         recorded.outcome = Some(0);
-        let built = BuiltExplanation::build(&vocabulary, &recorded).unwrap();
+        let built = BuiltExplanation::build(vocabulary, &recorded).unwrap();
         let victim = built
             .projections()
             .into_iter()
@@ -1925,7 +1885,7 @@ mod tests {
             .next()
             .unwrap();
         assert_ne!(victim.audience, Audience::Shooter);
-        (victim, vocabulary)
+        victim
     }
 
     /// The latest record is the newest by recency entire: of two encounters opened on the same

@@ -255,7 +255,7 @@ mod tests {
 
         // A FAILED probe is a different thing entirely, and this is the whole point of the
         // tri-state: it answers the poller so the probe stops, and it claims neither capability.
-        // `settings::a_failed_probe_never_rewrites_the_stored_rung` pins the writer half.
+        // `settings::the_probe_arrival_writes_the_normalized_rung_back` pins the writer half.
         assert!(PresentCaps::Unavailable.answered());
         assert!(!PresentCaps::Unprobed.answered());
         assert!(!PresentCaps::Unavailable.immediate() && !PresentCaps::Unavailable.mailbox());

@@ -443,31 +443,6 @@ pub fn spawn(mut commands: Commands, asset_server: Res<AssetServer>, library: Re
 }
 
 impl Views {
-    /// Views of no scene, for tests of systems that read the resource.
-    #[cfg(test)]
-    pub(super) fn fixture() -> Self {
-        Self {
-            spec: Handle::default(),
-            world: Entity::PLACEHOLDER,
-            servos: Vec::new(),
-            placed: false,
-            ground_y: None,
-            shooter_spec: None,
-        }
-    }
-
-    /// Views of the tank file `spec` at the root `world`, on ground at `ground_y`, for tests that
-    /// stand a scene in for the glb.
-    #[cfg(test)]
-    pub(super) fn standing_in(spec: Handle<TankSpec>, world: Entity, ground_y: f32) -> Self {
-        Self {
-            spec,
-            world,
-            ground_y: Some(ground_y),
-            ..Self::fixture()
-        }
-    }
-
     /// The staged vehicle's tank file.
     pub(super) fn spec(&self) -> &Handle<TankSpec> {
         &self.spec

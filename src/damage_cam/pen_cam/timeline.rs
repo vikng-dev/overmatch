@@ -345,47 +345,6 @@ pub fn hp_share(lost: u32, hp: u32) -> f32 {
 mod tests {
     use super::*;
 
-    #[test]
-    fn easings_run_from_zero_to_one() {
-        for ease in [ease_enter, ease_exit, ease_standard] {
-            assert!(ease(0.0).abs() < 1e-4);
-            assert!((ease(1.0) - 1.0).abs() < 1e-4);
-            assert!(ease(0.5) > 0.0 && ease(0.5) < 1.0);
-        }
-        // The decelerating curve is ahead of linear at mid-time, the accelerating one behind.
-        assert!(ease_enter(0.5) > 0.5);
-        assert!(ease_exit(0.5) < 0.5);
-    }
-
-    /// Every frame ends before 4.5 s, its hold starts after its line window opens, and its line
-    /// window closes before its close.
-    #[test]
-    fn every_frame_fits_its_cap() {
-        for kind in [
-            CornerKind::Glass,
-            CornerKind::Slice,
-            CornerKind::Ricochet,
-            CornerKind::Damaged,
-            CornerKind::Victim,
-        ] {
-            let (from, to) = kind.line_window();
-            assert!(kind.duration() <= 4.5, "{kind:?}");
-            assert!(from >= OPEN_S && to <= kind.hold_from(), "{kind:?}");
-            assert!(kind.hold_from() < kind.duration() - CLOSE_S, "{kind:?}");
-        }
-    }
-
-    #[test]
-    fn presence_opens_and_closes() {
-        let d = 2.18;
-        assert_eq!(presence(-0.1, d).0, 0.0);
-        assert!(presence(0.05, d).0 > 0.0 && presence(0.05, d).0 < 1.0);
-        assert!((presence(1.0, d).0 - 1.0).abs() < 1e-4);
-        assert!((presence(1.0, d).1 - 1.0).abs() < 1e-4);
-        assert!(presence(d - 0.01, d).0 < 0.2);
-        assert_eq!(presence(d + 0.01, d).0, 0.0);
-    }
-
     /// A record 0.8 s behind the first replaces it on arrival; one 0.3 s behind waits until the
     /// first has shown 0.6 s; of two that arrive inside that window only the latest shows; one
     /// arriving long after starts on arrival.

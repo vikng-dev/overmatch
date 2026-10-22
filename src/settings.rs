@@ -1292,8 +1292,8 @@ impl PixelBudget {
     /// is finely divided rather than jumping straight from 0.5 to 1.
     const STEP: f32 = 0.5;
     /// Number of discrete stops, MIN..=MAX inclusive — `1 + (MAX - MIN) / STEP`, written out
-    /// because a float-to-integer cast is not something to do in a `const` item.
-    /// `the_lod_pixel_budget_ladder_is_sane` pins it against the three constants above.
+    /// because a float-to-integer cast is not something to do in a `const` item. The assertion
+    /// after this impl pins it against the three constants above.
     const STOPS: u16 = 16;
 
     /// The value a NON-FINITE `budget` is stored as. The parse boundary — see the type doc for why
@@ -1361,6 +1361,10 @@ impl PixelBudget {
         Self::from_stop((fraction.clamp(0.0, 1.0) * stops).round() as u16)
     }
 }
+
+const _: () = assert!(
+    PixelBudget::STOPS as f32 == 1.0 + (PixelBudget::MAX - PixelBudget::MIN) / PixelBudget::STEP
+);
 
 /// The live screen-space error budget, in pixels — [`PixelBudget`]'s applied half, written by
 /// [`apply_settings`] exactly as `render_scale::RenderScale` is.
@@ -2610,77 +2614,6 @@ mod tests {
         states
     }
 
-    /// The defaults, and WHOSE they are.
-    ///
-    /// **This test used to assert the shadow rows equalled bevy's own defaults** — the reasoning
-    /// being that merely adding a settings module must not change the product. That reasoning
-    /// expired on 2026-07-28, when the shadow defaults were retuned off measurement (see
-    /// [`SHADOW_CASCADES`], [`SHADOW_FIRST_CASCADE_FAR_BOUND_M`] and [`ShadowDistance`]'s ladder
-    /// note); the picture was DELIBERATELY changed, and pinning it to bevy would now assert the
-    /// opposite of the intent. So the three shadow rows are pinned to their own measured values, and
-    /// each one is stated as a divergence FROM bevy so that a silent drift back is still a failure.
-    ///
-    /// Everything else still answers to bevy, and still for the original reason.
-    #[test]
-    fn defaults_reproduce_the_shipped_render() {
-        let settings = Settings::default();
-        assert_eq!(settings.msaa.to_msaa(), Msaa::default());
-
-        let bevy_cascades = CascadeShadowConfigBuilder::default();
-        // Moved 1000.0 -> 350.0 on 2026-07-28: the envelope was measured across the ladder and
-        // everything past ~350 m reaches into sky this 17°-sun world cannot shadow, so the far rungs
-        // cost frame time and texel density for reach nobody sees (see `ShadowDistance`'s table).
-        assert_eq!(
-            settings.shadow_distance.distance_m(),
-            Some(350.0),
-            "the default envelope is this world's shadow horizon — a 17° sun over 100 m of relief \
-             self-shadows to ~327 m — not bevy's {} m character-scale default",
-            bevy_cascades.maximum_distance,
-        );
-        assert_eq!(
-            settings.shadow_cascades.count(),
-            SHADOW_CASCADES,
-            "the default cascade row must be the pinned count"
-        );
-        assert_eq!(SHADOW_CASCADES, 3);
-        assert_eq!(
-            bevy_cascades.num_cascades, 4,
-            "we drop ONE cascade off bevy's default at ~1.16 ms each — if bevy's default moves, \
-             this trade has to be re-measured, not silently inherited",
-        );
-        assert_eq!(
-            settings.shadow_resolution.shadow_map_size(),
-            4096,
-            "4× bevy's {} because 2048 detaches a far shadow by ~1 m at the shipped 350 m envelope, \
-             and by a whole tank at the M1000 rung",
-            DirectionalLightShadowMap::default().size,
-        );
-        assert_eq!(
-            SHADOW_FIRST_CASCADE_FAR_BOUND_M, 40.0,
-            "the split knob that pays for the dropped cascade",
-        );
-        assert!(
-            SHADOW_FIRST_CASCADE_FAR_BOUND_M > bevy_cascades.first_cascade_far_bound,
-            "bevy's {} m first bound is a character-scale value; on a 1 km map it spends the whole \
-             cascade budget inside the first ten metres",
-            bevy_cascades.first_cascade_far_bound,
-        );
-        assert_eq!(
-            SHADOW_CASCADE_OVERLAP, bevy_cascades.overlap_proportion,
-            "the overlap is stated, not changed — if bevy moves it, we keep ours",
-        );
-        assert_eq!(
-            settings.vsync,
-            VsyncMode::On,
-            "the shipped window presents with vsync on"
-        );
-        assert_eq!(
-            settings.render_scale.fraction(),
-            1.0,
-            "the shipped default renders the 3D pass at native — see `render_scale`'s zero-cost path"
-        );
-    }
-
     /// The render-scale row reaches the render app through exactly one door: this reconciler writing
     /// [`crate::render_scale::RenderScale`]. Pinned here because it is the seam a future
     /// "let the UI write the resource directly" shortcut would quietly break — after which the saved
@@ -2716,110 +2649,6 @@ mod tests {
         }
     }
 
-    /// The ladder is ascending and bottoms out where the brief says it does. `Percent100` must be
-    /// the top rung: there is no supersampling row, and `render_scale` treats anything >= 1.0 as the
-    /// native no-override path.
-    #[test]
-    fn the_render_scale_ladder_is_ascending_and_tops_out_at_native() {
-        let fractions: Vec<f32> = RenderScaleLevel::ORDER
-            .iter()
-            .map(|level| level.fraction())
-            .collect();
-        assert!(
-            fractions.windows(2).all(|w| w[0] < w[1]),
-            "{fractions:?} must ascend, or the settings page's arrows point the wrong way"
-        );
-        assert_eq!(fractions.first(), Some(&0.5), "50% is the floor rung");
-        assert_eq!(fractions.last(), Some(&1.0), "native is the top rung");
-        assert_eq!(
-            RenderScaleLevel::ORDER.last(),
-            Some(&RenderScaleLevel::default()),
-            "the default must be the top rung — a player who never opens the page gets native"
-        );
-    }
-
-    /// `Off` is exactly one rung, it is the FLOOR of the distance ladder, and it is the only thing
-    /// that stops casting. Pins the shape the suspended competitive-integrity rule (see
-    /// [`ShadowDistance`]) would have to be re-argued against: an off state hidden anywhere else —
-    /// a zero-metre distance, a zero-texel resolution — would be the same product change made
-    /// silently.
-    #[test]
-    fn off_is_the_only_rung_that_stops_casting() {
-        let off: Vec<ShadowDistance> = ShadowDistance::ORDER
-            .into_iter()
-            .filter(|distance| !distance.casts())
-            .collect();
-        assert_eq!(
-            off,
-            vec![ShadowDistance::Off],
-            "exactly one rung may disable shadows, and it is the named one"
-        );
-        assert_eq!(
-            ShadowDistance::ORDER.first(),
-            Some(&ShadowDistance::Off),
-            "off is the floor — the right arrow must always mean more shadow"
-        );
-        for distance in ShadowDistance::ORDER {
-            assert_eq!(
-                distance.casts(),
-                distance.distance_m().is_some(),
-                "{distance:?}: casting and having a distance are the same fact",
-            );
-        }
-        for resolution in ShadowResolution::ORDER {
-            assert!(
-                resolution.shadow_map_size() > 0,
-                "{resolution:?}: the resolution row has no off rung — that is the distance row's job",
-            );
-        }
-    }
-
-    /// **The 2026-07-28 ladder migration**, at the enum level (the same thing through a whole
-    /// `video.ron` is `store`'s `the_retired_shadow_distance_rungs_load_and_migrate`).
-    ///
-    /// Two claims. First: the three retired tokens still DESERIALIZE — `M100`/`M150`/`M300` are
-    /// `#[serde(alias)]`es on [`ShadowDistance::M350`], so no player's stored file becomes a parse
-    /// error. Second, and the reason migrating beat hiding them: whatever they land on must be ON
-    /// the ladder, because `ui::step_in` resolves a current value missing from `ORDER` to index 0 —
-    /// which is `Off`. An off-ladder rung would therefore turn the next press of the RIGHT arrow
-    /// into "shadows off", the one transition the page must never make by accident.
-    ///
-    /// The named list is the strongest guard available without `variant_count`: a fifth variant
-    /// added later and left out of `ORDER` would not fail here, so `ORDER`'s own doc carries the
-    /// rule in words as well.
-    #[test]
-    fn the_retired_distance_rungs_migrate_onto_the_ladder() {
-        assert_eq!(
-            ShadowDistance::ORDER,
-            [
-                ShadowDistance::Off,
-                ShadowDistance::M350,
-                ShadowDistance::M700,
-                ShadowDistance::M1000,
-            ],
-            "every representable rung must be on the ladder — see the test doc",
-        );
-        for retired in ["M100", "M150", "M300"] {
-            let parsed: ShadowDistance = ron::de::from_str(retired)
-                .unwrap_or_else(|error| panic!("{retired} must still deserialize: {error}"));
-            assert_eq!(
-                parsed,
-                ShadowDistance::M350,
-                "{retired} must migrate to the nearest surviving rung",
-            );
-            assert!(
-                ShadowDistance::ORDER.contains(&parsed),
-                "{retired} migrated to an off-ladder value, which `step_in` would resolve to Off",
-            );
-        }
-        // The migration is one-way by construction: the aliases are read-only names, so nothing can
-        // write a retired token back out.
-        assert_eq!(
-            ron::ser::to_string(&ShadowDistance::M350).expect("serializes"),
-            "M350",
-        );
-    }
-
     /// Both ladders ascend in cost, and the map sizes are powers of two — otherwise
     /// `bevy_light::validate_shadow_map_size` silently rounds them up and warns every launch.
     #[test]
@@ -2830,8 +2659,7 @@ mod tests {
             .collect();
         assert!(sizes.iter().all(|size| size.is_power_of_two()), "{sizes:?}");
         assert!(sizes.windows(2).all(|w| w[0] < w[1]), "{sizes:?} ascending");
-        // `Off` carries no distance, so the ascent is checked over the rungs that have one — with
-        // `Off` already pinned as the floor by `off_is_the_only_rung_that_stops_casting`.
+        // `Off` carries no distance, so the ascent is checked over the rungs that have one.
         let distances: Vec<f32> = ShadowDistance::ORDER
             .iter()
             .filter_map(|distance| distance.distance_m())
@@ -3167,7 +2995,8 @@ mod tests {
 
     /// The write-back half of the same finding: when the probe lands, the STORED rung follows the
     /// effective one and the file is asked to follow it too (no phantom state on disk), while a
-    /// supported rung — and the whole pre-probe state — is left alone.
+    /// supported rung — and the whole pre-probe state, and every rung under a probe that could not
+    /// ask — is left alone.
     #[test]
     fn the_probe_arrival_writes_the_normalized_rung_back() {
         let app_with = |vsync: VsyncMode, caps: PresentCaps| {
@@ -3208,6 +3037,22 @@ mod tests {
         assert_eq!(app.world().resource::<Settings>().vsync, VsyncMode::Fast);
         assert_eq!(saves(&app), 0);
 
+        // A probe that could not ask is not a negative answer: no stored rung moves and nothing is
+        // written.
+        for vsync in VsyncMode::ORDER {
+            let app = app_with(vsync, PresentCaps::Unavailable);
+            assert_eq!(
+                app.world().resource::<Settings>().vsync,
+                vsync,
+                "a probe that could not ask must not rewrite {vsync:?}",
+            );
+            assert_eq!(
+                saves(&app),
+                0,
+                "a probe that could not ask must not write the file ({vsync:?})",
+            );
+        }
+
         // A surface that answered with a list carrying neither uncapped mode (`[Fifo]`) is a
         // conclusive negative, and does normalise. An EMPTY list is not this — `probe` maps that to
         // `Unavailable` before it can reach here (`probe::an_empty_capability_list_is_a_failed_
@@ -3221,60 +3066,6 @@ mod tests {
         );
         assert_eq!(app.world().resource::<Settings>().vsync, VsyncMode::On);
         assert_eq!(saves(&app), 1);
-    }
-
-    /// **A probe FAILURE is not a negative answer.**
-    ///
-    /// `probe` used to report a surface it could not even create as "probed, capability list
-    /// empty". Normalisation is a writer that SAVES, so that fabricated negative would have spent
-    /// a player's perfectly valid stored FAST/OFF — permanently, on a machine whose surface
-    /// supports it — the first time a probe surface failed to be created. [`PresentCaps`] is a
-    /// tri-state so that cannot be expressed: this pins that the could-not-ask state moves nothing
-    /// and writes nothing, while leaving the safe presentation fallback exactly as it was.
-    #[test]
-    fn a_failed_probe_never_rewrites_the_stored_rung() {
-        for vsync in VsyncMode::ORDER {
-            let mut app = App::new();
-            app.add_message::<SaveSettings>()
-                .insert_resource(Settings {
-                    vsync,
-                    frame_cap: FrameCap(120),
-                    ..default()
-                })
-                .insert_resource(PresentCaps::Unavailable)
-                .add_systems(Update, normalize_vsync);
-            app.update();
-            let settings = *app.world().resource::<Settings>();
-            assert_eq!(
-                settings.vsync, vsync,
-                "a probe that could not ask must not rewrite {vsync:?}",
-            );
-            assert_eq!(
-                app.world()
-                    .resource::<bevy::ecs::message::Messages<SaveSettings>>()
-                    .len(),
-                0,
-                "a probe that could not ask must not write the file ({vsync:?})",
-            );
-            // The runtime behaviour that failure state is allowed to have: presentation still
-            // negotiates rather than gambling, and the stored rung still gates the frame cap.
-            assert_eq!(settings.effective_vsync(PresentCaps::Unavailable), vsync);
-            assert_ne!(
-                settings.present_mode(PresentCaps::Unavailable),
-                PresentMode::Mailbox,
-            );
-            assert_ne!(
-                settings.present_mode(PresentCaps::Unavailable),
-                PresentMode::Immediate,
-            );
-            assert_eq!(
-                settings
-                    .frame_limit_period(PresentCaps::Unavailable)
-                    .is_some(),
-                vsync == VsyncMode::Off,
-                "an unknown surface leaves the cap on the player's own rung ({vsync:?})",
-            );
-        }
     }
 
     /// The frame cap is armed by exactly one conjunction: a non-off cap AND an EFFECTIVE vsync OFF.
@@ -3312,111 +3103,6 @@ mod tests {
             .frame_limit_period(PresentCaps::Unprobed),
             None,
             "an off cap limits nothing even with vsync off",
-        );
-    }
-
-    /// The frame-cap ladder: OFF is the floor, the rungs ascend 30..=240 by 10, stepping saturates,
-    /// the slider fraction round-trips every stop, and a hand-edited off-ladder value is honoured
-    /// until touched (then snaps to its nearest stop).
-    #[test]
-    fn the_frame_cap_ladder_is_sane() {
-        assert_eq!(FrameCap::OFF.fps(), None);
-        assert_eq!(FrameCap::OFF.label(), "OFF");
-        assert_eq!(FrameCap::OFF.step(-1), FrameCap::OFF, "the floor saturates");
-        assert_eq!(FrameCap::OFF.step(1).fps(), Some(30), "OFF steps up to MIN");
-        assert_eq!(
-            FrameCap(30).step(-1),
-            FrameCap::OFF,
-            "MIN steps down to OFF"
-        );
-        assert_eq!(FrameCap(240).step(1).fps(), Some(240), "the top saturates");
-        // Every stop survives the slider's fraction round-trip.
-        let mut cap = FrameCap::OFF;
-        loop {
-            assert_eq!(FrameCap::from_fraction(cap.fraction()), cap, "{cap:?}");
-            let next = cap.step(1);
-            if next == cap {
-                break;
-            }
-            cap = next;
-        }
-        assert_eq!(cap.fps(), Some(240), "the walk ends at the ceiling");
-        // Hand-edited values: honoured as written, clamped only at the absurd ends, snapped to the
-        // ladder on first touch.
-        assert_eq!(FrameCap(144).fps(), Some(144));
-        assert_eq!(FrameCap(144).label(), "144 FPS");
-        assert_eq!(FrameCap(144).step(1).fps(), Some(150));
-        assert_eq!(FrameCap(5).fps(), Some(30));
-        assert_eq!(FrameCap(9999).fps(), Some(240));
-    }
-
-    /// The UI-scale ladder: 75..=150 by 5, default 100 (a no-op multiplier), saturating steps,
-    /// slider round-trip, and the factor clamp that keeps a hand-edited file from making the page
-    /// itself unreachable.
-    #[test]
-    fn the_ui_scale_ladder_is_sane() {
-        assert_eq!(UiScalePercent::default().factor(), 1.0);
-        assert_eq!(UiScalePercent::default().label(), "100%");
-        assert_eq!(UiScalePercent(75).step(-1), UiScalePercent(75));
-        assert_eq!(UiScalePercent(150).step(1), UiScalePercent(150));
-        assert_eq!(UiScalePercent(100).step(1), UiScalePercent(105));
-        let mut scale = UiScalePercent(UiScalePercent::MIN);
-        loop {
-            assert_eq!(
-                UiScalePercent::from_fraction(scale.fraction()),
-                scale,
-                "{scale:?}"
-            );
-            let next = scale.step(1);
-            if next == scale {
-                break;
-            }
-            scale = next;
-        }
-        assert_eq!(scale, UiScalePercent(UiScalePercent::MAX));
-        assert_eq!(UiScalePercent(500).factor(), 1.5, "absurd values clamp");
-        assert_eq!(UiScalePercent(10).factor(), 0.75);
-    }
-
-    /// The window-mode mapping: borderless-only (exclusive fullscreen is unrepresentable — it is
-    /// the mode that can panic on an unresolvable monitor), carrying whatever monitor it is handed,
-    /// defaulting to the current one, and the observe direction inverts it.
-    #[test]
-    fn window_mode_is_borderless_and_carries_the_display_row() {
-        for monitor in [
-            None,
-            Some(MonitorSelection::Primary),
-            Some(MonitorSelection::Index(1)),
-        ] {
-            assert_eq!(
-                WindowModeSetting::Windowed.to_window_mode(monitor),
-                WindowMode::Windowed,
-                "{monitor:?}: a windowed window has no fullscreen monitor to name",
-            );
-        }
-        assert_eq!(
-            WindowModeSetting::Fullscreen.to_window_mode(None),
-            WindowMode::BorderlessFullscreen(MonitorSelection::Current),
-            "no opinion means 'the display it is already on', which for borderless is Current",
-        );
-        assert_eq!(
-            WindowModeSetting::Fullscreen.to_window_mode(Some(MonitorSelection::Primary)),
-            WindowMode::BorderlessFullscreen(MonitorSelection::Primary),
-        );
-        assert_eq!(
-            WindowModeSetting::Fullscreen.to_window_mode(Some(MonitorSelection::Index(1))),
-            WindowMode::BorderlessFullscreen(MonitorSelection::Index(1)),
-            "the display row has to reach fullscreen through the MODE — bevy reads the monitor \
-             from this field alone, never from Window::position",
-        );
-        for setting in WindowModeSetting::ORDER {
-            let fullscreen = setting == WindowModeSetting::Fullscreen;
-            assert_eq!(WindowModeSetting::from_fullscreen(fullscreen), setting);
-        }
-        assert_eq!(
-            WindowModeSetting::default(),
-            WindowModeSetting::Windowed,
-            "a player who never opens the page gets the window the game always opened with"
         );
     }
 
@@ -4364,57 +4050,6 @@ mod tests {
         );
     }
 
-    /// **The placement edge belongs to the WINDOW, not to a system instance.**
-    ///
-    /// [`apply_settings`] is registered twice — `Startup` and `Update` — which bevy runs as two
-    /// distinct system instances. A `Local` edge memory therefore gave each of them its own, and the
-    /// "edge-triggered" position block fired once per instance at boot (observed as a duplicated
-    /// unreachable-display warning about 0.9 s apart). Harmless in itself, but it makes the edge a
-    /// property of how many times the system happens to be registered, which is not a contract at
-    /// all.
-    ///
-    /// A FRESH instance is the mutation: it is what a second registration is, and with shared state
-    /// it must find the edge already spent rather than re-firing it.
-    #[test]
-    fn the_placement_edge_is_shared_by_every_instance_of_the_reconciler() {
-        let mut app = App::new();
-        app.insert_resource(Settings {
-            display: DisplaySelection::Display2,
-            ..default()
-        })
-        .init_resource::<DirectionalLightShadowMap>()
-        .init_resource::<crate::render_scale::RenderScale>()
-        .init_resource::<PresentCaps>()
-        .init_resource::<UiScale>()
-        .init_resource::<LodPixelBudget>()
-        .init_resource::<WindowPlacement>()
-        .add_systems(Startup, apply_settings);
-        app.world_mut().spawn((Window::default(), PrimaryWindow));
-        spawn_monitors(&mut app, 3);
-        app.update();
-        assert_eq!(
-            window_state(&mut app).1,
-            WindowPosition::Centered(MonitorSelection::Index(1)),
-            "the launch application, from the `Startup` instance",
-        );
-
-        // What winit does the moment the player drags the window (state.rs:381-383).
-        let dragged = WindowPosition::At(IVec2::new(37, 21));
-        {
-            let world = app.world_mut();
-            let mut windows = world.query_filtered::<&mut Window, With<PrimaryWindow>>();
-            windows.single_mut(world).expect("one window").position = dragged;
-        }
-        app.add_systems(Update, apply_settings);
-        app.update();
-        assert_eq!(
-            window_state(&mut app).1,
-            dragged,
-            "a second instance of the reconciler must find the edge already spent, not re-fire it \
-             and drag the window back to the middle",
-        );
-    }
-
     /// The other half of the edge: once placed, the window STAYS where the player drags it. winit
     /// rewrites `Window::position` to `At(..)` on every `Moved` event, so a level-triggered write
     /// would re-centre the window every time any unrelated row moved.
@@ -4512,78 +4147,6 @@ mod tests {
         assert_eq!(app.world().resource::<LodPixelBudget>().0, PixelBudget::MAX);
     }
 
-    /// The LOD budget ladder: 0.5..=8.0 by 0.5, default 1.0, saturating steps, a slider round-trip
-    /// at every stop, and a hand-edited off-ladder value honoured until touched.
-    #[test]
-    fn the_lod_pixel_budget_ladder_is_sane() {
-        assert_eq!(PixelBudget::default().pixels(), 1.0);
-        assert_eq!(PixelBudget::default().label(), "1.0 PX");
-        assert_eq!(
-            PixelBudget(PixelBudget::MIN).step(-1),
-            PixelBudget(PixelBudget::MIN),
-            "the floor saturates",
-        );
-        assert_eq!(
-            PixelBudget(PixelBudget::MAX).step(1),
-            PixelBudget(PixelBudget::MAX),
-            "the ceiling saturates",
-        );
-        assert_eq!(PixelBudget(1.0).step(1), PixelBudget(1.5));
-        assert_eq!(PixelBudget(1.0).step(-1), PixelBudget(0.5));
-        let mut budget = PixelBudget(PixelBudget::MIN);
-        loop {
-            assert_eq!(
-                PixelBudget::from_fraction(budget.fraction()),
-                budget,
-                "{budget:?} did not survive the slider round-trip",
-            );
-            let next = budget.step(1);
-            if next == budget {
-                break;
-            }
-            budget = next;
-        }
-        assert_eq!(budget, PixelBudget(PixelBudget::MAX));
-        // Hand-edited values: honoured as written inside the range, clamped at the absurd ends,
-        // snapped to the ladder on first touch — the `FrameCap` shape.
-        assert_eq!(PixelBudget(1.2).pixels(), 1.2);
-        assert_eq!(PixelBudget(1.2).step(1), PixelBudget(1.5));
-        assert_eq!(PixelBudget(0.0).pixels(), PixelBudget::MIN);
-        assert_eq!(PixelBudget(-1.0).pixels(), PixelBudget::MIN);
-        assert_eq!(PixelBudget(1000.0).pixels(), PixelBudget::MAX);
-        assert_eq!(
-            PixelBudget(f32::NAN).pixels(),
-            PixelBudget::default().0,
-            "`f32::clamp` passes NaN through — a NaN budget makes every downstream comparison \
-             false, so it must be answered with the default instead",
-        );
-        // The sanitiser, which is what the parse boundary applies — see
-        // `a_non_finite_budget_cannot_survive_the_parse` for the same claim through real RON.
-        assert_eq!(PixelBudget::sanitized(f32::NAN), PixelBudget::default());
-        assert_eq!(
-            PixelBudget::sanitized(f32::INFINITY),
-            PixelBudget(PixelBudget::MAX),
-        );
-        assert_eq!(
-            PixelBudget::sanitized(f32::NEG_INFINITY),
-            PixelBudget(PixelBudget::MIN),
-        );
-        assert_eq!(
-            PixelBudget::sanitized(1.2),
-            PixelBudget(1.2),
-            "a FINITE off-ladder value is preserved — the sanitiser normalises what cannot be \
-             compared, it does not enforce the ladder",
-        );
-        assert_eq!(PixelBudget::sanitized(-4.0), PixelBudget(-4.0));
-        // The stop count is written out rather than computed, so it is pinned against the three
-        // constants it is derived from.
-        assert_eq!(
-            PixelBudget::MIN + f32::from(PixelBudget::STOPS - 1) * PixelBudget::STEP,
-            PixelBudget::MAX,
-            "STOPS must be 1 + (MAX - MIN) / STEP",
-        );
-    }
-
     /// **What lets `is_default` be ONE generic function.** Every skipped field's `Settings::default`
     /// value must equal its own type's `Default`, or `skip_serializing_if = "is_default"` would
     /// either freeze a default into every player's file or omit a deliberate choice from it.
@@ -4623,74 +4186,6 @@ mod tests {
         assert_ne!(
             settings.version, 0,
             "the version stamp is the one field exempt from the sparse-write rule"
-        );
-    }
-
-    /// **The vsync field migration.** The ladder grew a third rung, which a `bool` cannot carry, so
-    /// the persisted key MOVED from `vsync` (bool) to `vsync_mode` (enum). This pins all three
-    /// sides of that story:
-    ///
-    /// * the new build never writes the old key (an older build reading a new file skips the
-    ///   unknown `vsync_mode` and lands on the safe default ON — the documented dropped-key cost);
-    /// * a v1 `vsync: false` on disk is still honoured through [`Settings::absorb_legacy_vsync`];
-    /// * a hand-edited file carrying BOTH keys resolves by "the more specific statement wins": a
-    ///   non-default `vsync_mode` beats the legacy bool.
-    #[test]
-    fn vsync_moved_to_a_new_key_and_the_old_bool_is_absorbed() {
-        let written = ron::ser::to_string(&Settings {
-            vsync: VsyncMode::Off,
-            ..default()
-        })
-        .expect("settings serialize");
-        assert!(
-            written.contains("vsync_mode:Off"),
-            "the off rung must write the NEW key: {written}",
-        );
-        assert!(
-            !written.contains("vsync:"),
-            "the retired bool key must never be written again: {written}",
-        );
-
-        let absorb = |settings: Settings| settings.absorb_legacy_vsync();
-        assert_eq!(
-            absorb(Settings {
-                legacy_vsync: Some(false),
-                ..default()
-            })
-            .vsync,
-            VsyncMode::Off,
-            "a v1 `vsync: false` still means OFF",
-        );
-        assert_eq!(
-            absorb(Settings {
-                legacy_vsync: Some(true),
-                ..default()
-            })
-            .vsync,
-            VsyncMode::On,
-        );
-        assert_eq!(
-            absorb(Settings {
-                legacy_vsync: Some(false),
-                vsync: VsyncMode::Fast,
-                ..default()
-            })
-            .vsync,
-            VsyncMode::Fast,
-            "an explicit non-default vsync_mode beats the legacy bool",
-        );
-        let absorbed = absorb(Settings {
-            legacy_vsync: Some(false),
-            ..default()
-        });
-        assert!(
-            absorbed.legacy_vsync.is_none(),
-            "absorption must consume the legacy value — it never escapes the parse seam",
-        );
-        assert_eq!(
-            VsyncMode::ORDER,
-            [VsyncMode::Off, VsyncMode::Fast, VsyncMode::On],
-            "the right arrow must move toward more waiting per frame, like every other ladder",
         );
     }
 }

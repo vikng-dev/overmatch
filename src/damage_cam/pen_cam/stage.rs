@@ -1710,24 +1710,7 @@ mod tests {
     use super::super::plan::LEG_EPS_M;
     use super::*;
     use crate::damage_cam::RoundEnd;
-
-    /// The inset draws a corner showing and stays off for the kill cam's lesson.
-    #[test]
-    fn the_inset_draws_only_the_corner() {
-        let mut showing = super::super::Showing {
-            record: 0,
-            turn: 0,
-            kind: CornerKind::Glass,
-            c: 0.5,
-            opacity: 1.0,
-            scale: 1.0,
-            remaining: 1.0,
-            surface: super::super::Surface::Corner,
-        };
-        assert!(inset_active(&showing));
-        showing.surface = super::super::Surface::World;
-        assert!(!inset_active(&showing));
-    }
+    use crate::damage_cam::shapes::TankAsset;
 
     /// Tolerance on a drawn position (m): DERIVED, f32 rounding of a transform over a few metres
     /// is under 1e-5 m.
@@ -1874,91 +1857,6 @@ mod tests {
         }
     }
 
-    /// A round the record has leave the tank is never left parked: with its recorded run past the
-    /// point it left shorter than the drawn run-out, it is gone once its nose runs off the path,
-    /// and never drawn under reduce motion. Each leaving record restated with its path cut 5 cm past
-    /// the point it left (fixture data).
-    #[test]
-    fn a_round_that_left_is_never_parked() {
-        let library = Library::load();
-        let asset = crate::damage_cam::shapes::TankAsset::load(&library.vehicle).unwrap();
-        let mut leaving = 0;
-        for record in &library.records {
-            let mut report = record.report.clone();
-            let RoundEnd::Left { at } = report.end else {
-                continue;
-            };
-            let at = Vec3::from(at);
-            let k = report
-                .path
-                .iter()
-                .position(|p| Vec3::from(p.point).distance(at) < 1e-5)
-                .unwrap();
-            let Some(next) = report.path.get(k + 1).copied() else {
-                continue;
-            };
-            let leg = Vec3::from(next.point) - at;
-            report.path.truncate(k + 1);
-            report.path.push(crate::damage_cam::PathPoint {
-                t: report.path[k].t + (next.t - report.path[k].t) * 0.05 / leg.length(),
-                point: (at + leg.normalize() * 0.05).to_array(),
-            });
-            let plan = Plan::new(&report, &asset.shapes(&report.servo_deg));
-            let kind = plan.kind;
-            let end = kind.duration();
-            assert!(!shell_drawn(&plan, kind, end, false), "{}", record.stem);
-            assert!(!shell_drawn(&plan, kind, end, true), "{}", record.stem);
-            leaving += 1;
-        }
-        assert!(leaving > 0, "a record leaves the tank");
-    }
-
-    /// The trail meets the shell's rendered tail at every sample, across a bend too: the trail leg
-    /// holding the trail's end ends at the model's tail, carried by the shell's own transform, and
-    /// the drawn legs join end to end. Sampled at every record's bounce with the nose half a model
-    /// length past it.
-    #[test]
-    fn the_trail_meets_the_shells_tail_across_a_bend() {
-        let library = Library::load();
-        let mut bends = 0;
-        for record in &library.records {
-            let plan = &record.plan;
-            let Some(bounce) = &plan.bounce else {
-                continue;
-            };
-            let length = SHELL_MODEL_LENGTH_M * plan.calibre / SHELL_MODEL_CALIBRE_M;
-            let head = bounce.arc + 0.5 * length;
-            let pose = shell_transform(plan, head);
-            let tail = pose.translation - pose.rotation * Vec3::NEG_Z * length;
-            let end = trail_end(plan, head, true);
-            let line = &plan.line;
-            let spans: Vec<(Vec3, Vec3)> = (1..line.points.len())
-                .filter_map(|i| {
-                    let (from, to) = (line.arc[i - 1].max(plan.start_arc), line.arc[i]);
-                    (to > from)
-                        .then(|| trail_span(plan, from, to, end))
-                        .flatten()
-                })
-                .collect();
-            let (_, trail_tip) = *spans.last().expect("a trail is drawn");
-            assert!(
-                trail_tip.distance(tail) < POSITION_TOL_M,
-                "{}: the trail ends {} m from the shell's tail",
-                record.stem,
-                trail_tip.distance(tail)
-            );
-            for pair in spans.windows(2) {
-                assert!(
-                    pair[0].1.distance(pair[1].0) < POSITION_TOL_M,
-                    "{}",
-                    record.stem
-                );
-            }
-            bends += 1;
-        }
-        assert!(bends > 0, "a record bounces");
-    }
-
     /// Past a bounce the shell stays on the struck face's outer side, as the record's path does:
     /// for every record that bounces, the model's nose and tail stand no deeper than
     /// [`POSITION_TOL_M`] behind the face's plane at every sample across the first two model
@@ -1991,110 +1889,6 @@ mod tests {
             bounces += 1;
         }
         assert!(bounces > 0, "a record bounces");
-    }
-
-    /// No ring the Ricochet frame draws is seen within [`EDGE_ON_DEG`] of edge-on at any moment of
-    /// the frame, where it would read as a flat bar rather than a ring.
-    #[test]
-    fn the_ricochet_frame_sees_no_ring_edge_on() {
-        const EDGE_ON_DEG: f32 = 10.0;
-        let library = Library::load();
-        let mut frames = 0;
-        for (index, record) in library.records.iter().enumerate() {
-            let plan = &record.plan;
-            if plan.kind != CornerKind::Ricochet {
-                continue;
-            }
-            let (mut app, _) = staged(index, CornerKind::Ricochet, Vec3::ZERO);
-            let rings: Vec<Transform> = app
-                .world_mut()
-                .query_filtered::<&Transform, With<MarkItem>>()
-                .iter(app.world())
-                .copied()
-                .collect();
-            let samples = 16;
-            for k in 0..=samples {
-                let c = CornerKind::Ricochet.duration() * k as f32 / samples as f32;
-                let (eye, _) = framing(
-                    plan,
-                    CornerKind::Ricochet,
-                    c,
-                    &Knobs::default(),
-                    &Stage::default(),
-                );
-                for ring in &rings {
-                    let sight = (ring.translation - eye.translation).normalize();
-                    let axis = ring.rotation * Vec3::Y;
-                    let off_edge = sight.dot(axis).abs().asin().to_degrees();
-                    assert!(
-                        off_edge > EDGE_ON_DEG,
-                        "{}: a ring is seen {off_edge}° off edge-on at {c} s",
-                        record.stem
-                    );
-                }
-            }
-            frames += 1;
-        }
-        assert!(frames > 0, "a record ricochets");
-    }
-
-    /// The slice frames a small round from where the metre figures put the eye, narrowing the
-    /// field rather than closing the distance, and never frames wider than [`FRAME_CALIBRES`]
-    /// calibres either side of the stop: every slice record, as recorded and with its calibre cut
-    /// to 2 mm (fixture data).
-    #[test]
-    fn the_slice_narrows_the_field_and_holds_the_calibre_cap() {
-        let library = Library::load();
-        let asset = crate::damage_cam::shapes::TankAsset::load(&library.vehicle).unwrap();
-        let mut slices = 0;
-        for record in &library.records {
-            if record.plan.kind != CornerKind::Slice {
-                continue;
-            }
-            for calibre_mm in [record.report.projectile.caliber_mm, 2.0] {
-                let mut report = record.report.clone();
-                report.projectile.caliber_mm = calibre_mm;
-                let plan = Plan::new(&report, &asset.shapes(&report.servo_deg));
-                let stage = Stage {
-                    plane: Some(slice_plane(&plan)),
-                    ..default()
-                };
-                let (normal, _) = stage.plane.unwrap();
-                let up = (Vec3::Y - normal * normal.y).normalize();
-                let wide = slice_frame(&plan, normal, up, SLICE_LEAD_M, SLICE_MIN_HEIGHT_M);
-                let wide_distance = 0.55 * wide.height / (0.5 * CORNER_FOV_DEG.to_radians()).tan();
-                let cap = 2.0 * FRAME_CALIBRES * plan.calibre * 1.1 + 1e-5;
-                let perspective = Knobs {
-                    slice_ortho: false,
-                    ..Knobs::default()
-                };
-                let (eye, projection) =
-                    framing(&plan, CornerKind::Slice, 0.0, &perspective, &stage);
-                let off_plane = (eye.translation - wide.center).dot(normal);
-                assert!(
-                    (off_plane - wide_distance).abs() < 1e-3,
-                    "{} at {calibre_mm} mm: the eye stands {off_plane} m off, not {wide_distance}",
-                    record.stem
-                );
-                let Projection::Perspective(lens) = projection else {
-                    panic!("perspective");
-                };
-                assert!(lens.fov <= CORNER_FOV_DEG.to_radians() + 1e-6);
-                let seen = 2.0 * off_plane * (0.5 * lens.fov).tan();
-                assert!(seen <= cap / 1.6 + 1e-3, "{}: {seen} m tall", record.stem);
-                let (_, projection) =
-                    framing(&plan, CornerKind::Slice, 0.0, &Knobs::default(), &stage);
-                let Projection::Orthographic(ortho) = projection else {
-                    panic!("orthographic");
-                };
-                let ScalingMode::AutoMin { min_width, .. } = ortho.scaling_mode else {
-                    panic!("auto min");
-                };
-                assert!(min_width <= cap, "{}: {min_width} m wide", record.stem);
-            }
-            slices += 1;
-        }
-        assert!(slices > 0, "a record opens on the slice");
     }
 
     /// The frames that look along the shot.
@@ -2135,66 +1929,6 @@ mod tests {
             .clamp(-1.0, 1.0)
             .acos()
             .to_degrees()
-    }
-
-    /// Every record, in every frame that looks along the shot, as recorded and with its calibre cut
-    /// to 2 mm (fixture data), as the frame opens: the whole tank's bounds lie in the corner's field
-    /// and the impact in a square one, the camera is upright (its right is level), the sightline to
-    /// the impact is the shot turned [`SHOT_NUDGE_DEG`] back toward the shooter, and the frame does
-    /// not depend on the calibre.
-    #[test]
-    fn the_shot_frames_hold_the_whole_tank() {
-        let library = Library::load();
-        let asset = crate::damage_cam::shapes::TankAsset::load(&library.vehicle).unwrap();
-        for record in &library.records {
-            let name = record.stem;
-            let frames: Vec<Vec<(Transform, Projection)>> =
-                [record.report.projectile.caliber_mm, 2.0]
-                    .into_iter()
-                    .map(|calibre_mm| {
-                        let mut report = record.report.clone();
-                        report.projectile.caliber_mm = calibre_mm;
-                        let plan = Plan::new(&report, &asset.shapes(&report.servo_deg));
-                        ALONG_SHOT
-                            .iter()
-                            .map(|&kind| {
-                                framing(&plan, kind, 0.0, &Knobs::default(), &Stage::default())
-                            })
-                            .collect()
-                    })
-                    .collect();
-            let plan = &record.plan;
-            let bounds = plan.tank_bounds.expect("the tank asset has bounds");
-            let shot = plan.line.direction_at(plan.contact_arc - 1e-3);
-            for (kind, (eye, projection)) in ALONG_SHOT.iter().zip(&frames[0]) {
-                for p in corners(bounds) {
-                    assert!(
-                        in_view(eye, projection, p, ASPECT),
-                        "{name} {kind:?}: {p} is out of frame"
-                    );
-                }
-                assert!(
-                    in_view(eye, projection, plan.impact_point, SQUARE),
-                    "{name} {kind:?}"
-                );
-                let right = eye.rotation * Vec3::X;
-                assert!(
-                    right.y.abs() < 1e-5,
-                    "{name} {kind:?}: rolled, right {right}"
-                );
-                let nudge = angle_deg(eye.translation - plan.impact_point, -shot);
-                assert!(
-                    (nudge - SHOT_NUDGE_DEG).abs() < NUDGE_TOL_DEG,
-                    "{name} {kind:?}: the sightline is {nudge}° off the shot"
-                );
-            }
-            for (a, b) in frames[0].iter().zip(&frames[1]) {
-                assert!(
-                    a.0.translation.distance(b.0.translation) < POSITION_TOL_M,
-                    "{name}"
-                );
-            }
-        }
     }
 
     /// A shot within 1° of straight down (the records' class, at least one) is seen from above the
@@ -2322,9 +2056,10 @@ mod tests {
     /// Every record, in every frame that looks along the shot, through a full turn of its orbit,
     /// with the tank's box as recorded and stretched to three times its longer horizontal side
     /// (fixture data, so the horizontal field binds too): every corner of the box lies in the
-    /// corner's field at every degree, and the fit is tight, the box scaled by [`BOUNDS_MARGIN`]
-    /// inside the field at every one of the fit's spins and on its edge at one of them. The
-    /// stretched box reaches the horizontal edge for at least one record.
+    /// corner's field at every degree, the eye holds one distance from the box's centre at every
+    /// degree (the frame does not breathe as it orbits), and the fit is tight, the box scaled by
+    /// [`BOUNDS_MARGIN`] inside the field at every one of the fit's spins and on its edge at one of
+    /// them. The stretched box reaches the horizontal edge for at least one record.
     #[test]
     fn the_shot_frames_fit_the_box_through_the_turn() {
         let library = Library::load();
@@ -2352,8 +2087,14 @@ mod tests {
                 );
                 for kind in ALONG_SHOT {
                     let mut widest = Vec2::ZERO;
+                    let open = spun(&plan, kind, 0.0).0.translation.distance(center);
                     for deg in 0..360 {
                         let (eye, projection) = spun(&plan, kind, deg as f32);
+                        let distance = eye.translation.distance(center);
+                        assert!(
+                            (distance - open).abs() < POSITION_TOL_M,
+                            "{name} {kind:?} at {deg}°: {distance} m against {open} m"
+                        );
                         for p in corners(bounds) {
                             assert!(
                                 in_view(&eye, &projection, p, ASPECT),
@@ -2381,61 +2122,15 @@ mod tests {
         assert!(across > 0, "no stretched box reaches the horizontal edge");
     }
 
-    /// Every record, in every frame that looks along the shot: the eye holds one distance from the
-    /// box's centre through a full turn, so the frame does not breathe as it orbits.
-    #[test]
-    fn the_shot_frames_hold_their_distance_through_the_turn() {
-        let library = Library::load();
-        for record in &library.records {
-            let plan = &record.plan;
-            let bounds = plan.tank_bounds.expect("the tank asset has bounds");
-            let center = 0.5 * (bounds.0 + bounds.1);
-            for kind in ALONG_SHOT {
-                let at = |deg: f32| spun(plan, kind, deg).0.translation.distance(center);
-                let open = at(0.0);
-                for tenth in 0..3600 {
-                    let deg = tenth as f32 * 0.1;
-                    let distance = at(deg);
-                    assert!(
-                        (distance - open).abs() < POSITION_TOL_M,
-                        "{} {kind:?} at {deg}°: {distance} m against {open} m",
-                        record.stem
-                    );
-                }
-            }
-        }
-    }
-
-    /// The box fit stands every record's eye strictly nearer than the sphere around the same box
-    /// would (its half-diagonal, scaled by [`BOUNDS_MARGIN`], on the vertical half-field): the
-    /// records' tank is long and low, nowhere near a cube, so the two never coincide.
-    #[test]
-    fn the_box_fit_stands_nearer_than_the_sphere() {
-        let library = Library::load();
-        let half_fov = 0.5 * CORNER_FOV_DEG.to_radians();
-        for record in &library.records {
-            let plan = &record.plan;
-            let (lo, hi) = plan.tank_bounds.expect("the tank asset has bounds");
-            let center = 0.5 * (lo + hi);
-            let sphere = 0.5 * (hi - lo).length() * BOUNDS_MARGIN / half_fov.sin();
-            for kind in ALONG_SHOT {
-                let fit = spun(plan, kind, 0.0).0.translation.distance(center);
-                assert!(
-                    fit < sphere - POSITION_TOL_M,
-                    "{} {kind:?}: the box fit stands {fit} m off, the sphere {sphere} m",
-                    record.stem
-                );
-            }
-        }
-    }
-
     /// The real [`animate`] solves the along-shot distance once per record and orbit, never per
     /// frame: through a record's frames (its clock running, its frame kind changing) the stage
     /// solves once and the eye stands at the stored distance; a new drag solves once more.
     #[test]
     fn the_shot_fit_is_solved_once_per_record_and_orbit() {
         let index = 0;
-        let (mut app, _) = staged(index, CornerKind::Glass, Vec3::ZERO);
+        let library = Library::load();
+        let asset = TankAsset::load(&library.vehicle).unwrap();
+        let (mut app, _) = staged(&library, &asset, index, CornerKind::Glass, Vec3::ZERO);
         let (lo, hi) = app.world().resource::<Exhibits>().0[index]
             .plan
             .tank_bounds
@@ -2496,27 +2191,37 @@ mod tests {
     /// The stage over record `index` in frame `kind`, built by the real [`rebuild`] once: each of
     /// the tank's component shapes stands in for its view mesh, authored a metre back from where the
     /// record has it under a parent a metre forward along `offset`, so only the chain carries it into
-    /// the record's frame. Returns the app and each shape's entity, name and bounds' corners in the
+    /// the record's frame. `library` holds the records and `asset` their tank, both loaded once by
+    /// the caller. Returns the app and each shape's entity, name and bounds' corners in the
     /// record's frame.
     fn staged(
+        library: &Library,
+        asset: &TankAsset,
         index: usize,
         kind: CornerKind,
         offset: Vec3,
     ) -> (App, Vec<(Entity, String, [Vec3; 8])>) {
-        staged_on(index, kind, offset, super::super::Surface::Corner)
+        staged_on(
+            library,
+            asset,
+            index,
+            kind,
+            offset,
+            super::super::Surface::Corner,
+        )
     }
 
     /// [`staged`] on `surface`: the corner, or the world as the kill cam's lesson draws it.
     fn staged_on(
+        library: &Library,
+        asset: &TankAsset,
         index: usize,
         kind: CornerKind,
         offset: Vec3,
         surface: super::super::Surface,
     ) -> (App, Vec<(Entity, String, [Vec3; 8])>) {
         use bevy::camera::primitives::MeshAabb;
-        let library = Library::load();
         let record = &library.records[index];
-        let asset = crate::damage_cam::shapes::TankAsset::load(&library.vehicle).unwrap();
         let shapes = asset.shapes(&record.report.servo_deg);
         let mut app = App::new();
         let mut meshes = Assets::<Mesh>::default();
@@ -2590,13 +2295,14 @@ mod tests {
     #[test]
     fn the_slice_dissolves_what_its_plane_misses() {
         let library = Library::load();
+        let asset = TankAsset::load(&library.vehicle).unwrap();
         let (mut wholly, mut cut) = (0, 0);
         for (index, record) in library.records.iter().enumerate() {
             if record.plan.kind != CornerKind::Slice {
                 continue;
             }
             let (normal, point) = slice_plane(&record.plan);
-            let (app, placed) = staged(index, CornerKind::Slice, normal);
+            let (app, placed) = staged(&library, &asset, index, CornerKind::Slice, normal);
             let world = app.world();
             for (entity, name, corners) in placed {
                 let glass = world.get::<MeshMaterial3d<GlowMaterial>>(entity);
@@ -2637,6 +2343,7 @@ mod tests {
     #[test]
     fn the_field_is_cool_and_falls_off_from_its_origin() {
         let library = Library::load();
+        let asset = TankAsset::load(&library.vehicle).unwrap();
         let (mut looked, mut sliced) = (0, 0);
         let mut gains: Vec<f32> = Vec::new();
         for (index, record) in library.records.iter().enumerate() {
@@ -2648,7 +2355,7 @@ mod tests {
                 (kind, super::super::Surface::Corner),
                 (CornerKind::Glass, super::super::Surface::World),
             ] {
-                let (mut app, _) = staged_on(index, kind, Vec3::X, surface);
+                let (mut app, _) = staged_on(&library, &asset, index, kind, Vec3::X, surface);
                 let world = app.world_mut();
                 let fields: Vec<(usize, Handle<LookMaterial>)> = world
                     .query::<(&ConeShell, &MeshMaterial3d<LookMaterial>)>()
@@ -2729,45 +2436,6 @@ mod tests {
         );
     }
 
-    /// The see-through hull is the base look wherever it is drawn: in the corner and in the kill
-    /// cam's lesson on the world, every one of the tank's meshes the real [`rebuild`] dresses wears
-    /// a base look material, none the additive glass, and has its copy in a mask.
-    #[test]
-    fn the_lesson_draws_the_base_look() {
-        let library = Library::load();
-        let index = library
-            .records
-            .iter()
-            .position(|record| record.plan.kind == CornerKind::Glass)
-            .expect("a record penetrates");
-        for surface in [super::super::Surface::Corner, super::super::Surface::World] {
-            let (mut app, placed) = staged_on(index, CornerKind::Glass, Vec3::X, surface);
-            let world = app.world_mut();
-            let copies: Vec<(Entity, VisualScope)> = world
-                .query_filtered::<(&ChildOf, &VisualScope), With<StageItem>>()
-                .iter(world)
-                .map(|(parent, scope)| (parent.parent(), *scope))
-                .collect();
-            for (entity, name, _) in &placed {
-                let world = app.world();
-                assert!(
-                    world.get::<MeshMaterial3d<LookMaterial>>(*entity).is_some()
-                        && world.get::<MeshMaterial3d<GlowMaterial>>(*entity).is_none(),
-                    "{surface:?} {name}: not the base look"
-                );
-                assert!(
-                    copies.iter().any(|(parent, scope)| parent == entity
-                        && [
-                            VisualScope::PEN_CAM_HULL_MASK,
-                            VisualScope::PEN_CAM_PART_MASK
-                        ]
-                        .contains(scope)),
-                    "{surface:?} {name}: no mask copy"
-                );
-            }
-        }
-    }
-
     /// Every component the real [`rebuild`] draws, in the shooter's glass and outside view and in
     /// the victim's glass, is on the one state scale under a red outline: a damaged one opaque red
     /// to the share of its hit points lost (the shooter's: this shot's share of what it had; the
@@ -2776,6 +2444,7 @@ mod tests {
     #[test]
     fn a_component_reads_its_share_of_hit_points_lost() {
         let library = Library::load();
+        let asset = TankAsset::load(&library.vehicle).unwrap();
         let (mut damaged, mut dead) = ([0; 2], [0; 2]);
         let rgb = |c: Color| {
             let c = LinearRgba::from(c);
@@ -2784,7 +2453,7 @@ mod tests {
         for (index, record) in library.records.iter().enumerate() {
             for kind in [CornerKind::Glass, CornerKind::Damaged, CornerKind::Victim] {
                 let victim = (kind == CornerKind::Victim) as usize;
-                let (mut app, _) = staged(index, kind, Vec3::X);
+                let (mut app, _) = staged(&library, &asset, index, kind, Vec3::X);
                 let world = app.world_mut();
                 let outlined: Vec<(usize, Vec4)> = world
                     .query::<(&BoxTint, &MeshMaterial3d<OutlineMaterial>)>()

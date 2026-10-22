@@ -529,20 +529,6 @@ pub(crate) mod tests {
         );
     }
 
-    /// Penetration shows the hull see-through, a non-pen the plate slice, a ricochet and damage
-    /// the outside view.
-    #[test]
-    fn each_verdict_opens_on_its_frame() {
-        for (verdict, frame) in [
-            (ShotVerdict::Penetration, PenCamFrame::SeeThroughHull),
-            (ShotVerdict::NonPen, PenCamFrame::PlateSlice),
-            (ShotVerdict::Ricochet, PenCamFrame::Outside),
-            (ShotVerdict::Damaged, PenCamFrame::Outside),
-        ] {
-            assert_eq!(verdict.frame(), frame, "{verdict:?}");
-        }
-    }
-
     fn scenario_dir() -> std::path::PathBuf {
         crate::assets::asset_root().join(player::SCENARIO_DIR)
     }

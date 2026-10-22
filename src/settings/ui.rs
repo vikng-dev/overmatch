@@ -642,17 +642,16 @@ const SLIDER_VALUE_WELL_PX: f32 = 64.0;
 ///   independent statements that a future bevy default could quietly separate.
 /// * [`HINT_SLOT_HEIGHT_PX`] is that line height twice, applied as `min_height`. `min_height`, not
 ///   `height`: the reservation is a floor, so copy that outgrew it would still be READ (it would
-///   shift the layout, and that is the honest failure) rather than silently clipped.
-///   `the_hint_slot_is_two_lines_and_every_hint_fits_it` is what stops it coming to that — it
-///   measures every hint against the card's content width in the shipped font.
+///   shift the layout, and that is the honest failure) rather than silently clipped. No test
+///   measures the copy against the slot.
 ///
 /// **The `min_height` goes on a WRAPPER node ([`HintSlot`]), never on the text itself.** Bevy 0.19's
 /// text measure resolves a node's effective height as `known.or(preferred.or(min))` — with no
 /// `height` set, a `min_height` IS the answer, and the text's own measured height is never consulted
 /// (`bevy_ui::measurement::resolve_axis`). A `min_height` on the `Text` node is therefore a FIXED
 /// height in disguise: three lines of copy would be clipped to two, silently, which is the one
-/// outcome the floor above is written to avoid. MEASURED — the control leg of the test caught this
-/// (an overlong string laid out in a node that never grew).
+/// outcome the floor above is written to avoid. MEASURED: an overlong string laid out in such a
+/// node never grew.
 ///
 /// Neither node carries padding, so the slot is the two lines alone; the top margin sits outside the
 /// box and is unaffected either way.
@@ -676,7 +675,7 @@ const CARD_ROW_GAP_PX: f32 = 6.0;
 ///
 /// **The page outgrew the screen and this is the measured fix.** MEASURED 2026-08-01, headless, at
 /// the shipped 11 rows, in logical px: 506 at the 75% UI-scale rung, 666 at 100%, **1000 at 150%**
-/// — against the tests' 720 px `MIN_SUPPORTED_WINDOW_HEIGHT_PX`. The top rung was already over that
+/// — against a 720 px window, the shortest a Windows or Linux player can be running. The top rung was already over that
 /// floor at 9 rows (~875 px), so this is not a debt the two newest rows created, only one they made
 /// impossible to keep ignoring: past the floor the card simply ran off the bottom of the screen,
 /// taking the footer hint and the control legend — the two things that explain the page — with it.
@@ -1489,7 +1488,6 @@ fn refresh_page(
 
 #[cfg(test)]
 mod tests {
-    use super::super::{DisplaySelection, displays};
     use super::*;
 
     /// The unprobed capability state every pure test steps under: all rungs offered.
@@ -1499,213 +1497,6 @@ mod tests {
     /// file can hold, which is what the rows that are not the display row want to step under.
     fn unlearned() -> DisplayLadder {
         DisplayLadder::default()
-    }
-
-    /// Stepping saturates rather than wrapping — the property that keeps "hold right" from dropping
-    /// a player from the highest setting to the lowest.
-    #[test]
-    fn stepping_saturates_at_both_ends() {
-        let top = *ShadowDistance::ORDER.last().expect("the ladder has rungs");
-        let bottom = *ShadowDistance::ORDER.first().expect("the ladder has rungs");
-        let mut settings = Settings {
-            shadow_distance: top,
-            ..default()
-        };
-        Row::ShadowDistance.step(&mut settings, 1, ALL_RUNGS, &unlearned());
-        assert_eq!(settings.shadow_distance, top, "top stays put");
-        for _ in 0..ShadowDistance::ORDER.len() {
-            Row::ShadowDistance.step(&mut settings, -1, ALL_RUNGS, &unlearned());
-        }
-        assert_eq!(settings.shadow_distance, bottom, "bottom stays put");
-    }
-
-    /// Every row responds to both directions, and lands on a value its own `value()` can render —
-    /// the cheap guard against a row added to `ORDER` without arms in all the matches.
-    #[test]
-    fn every_row_steps_both_ways_and_renders() {
-        for row in Row::ORDER {
-            let mut settings = Settings::default();
-            for delta in [1, -1, 1, 1, -1, -1] {
-                row.step(&mut settings, delta, ALL_RUNGS, &unlearned());
-                assert!(
-                    !row.value(&settings, &unlearned()).is_empty(),
-                    "{row:?} produced an unrenderable value"
-                );
-            }
-            assert!(!row.label().is_empty());
-            assert!(!row.hint().is_empty(), "{row:?} needs a footer hint");
-        }
-    }
-
-    /// MSAA reaches every rung, including `Off` — unlike shadows, it is not gameplay information.
-    #[test]
-    fn msaa_can_reach_off_and_the_top() {
-        let mut settings = Settings::default();
-        for _ in 0..5 {
-            Row::Msaa.step(&mut settings, -1, ALL_RUNGS, &unlearned());
-        }
-        assert_eq!(settings.msaa, MsaaLevel::Off);
-        for _ in 0..5 {
-            Row::Msaa.step(&mut settings, 1, ALL_RUNGS, &unlearned());
-        }
-        assert_eq!(settings.msaa, MsaaLevel::X4);
-    }
-
-    /// The two shadow rows are INDEPENDENT, and the distance row reaches `OFF` — the UI half of the
-    /// contract `settings::off_is_the_only_rung_that_stops_casting` pins in the model. Walking one
-    /// row to each end must leave the other exactly where it was; before the split, one ladder moved
-    /// both.
-    #[test]
-    fn the_shadow_rows_step_independently_and_distance_reaches_off() {
-        let mut settings = Settings::default();
-        let resolution_before = settings.shadow_resolution;
-        for _ in 0..ShadowDistance::ORDER.len() {
-            Row::ShadowDistance.step(&mut settings, -1, ALL_RUNGS, &unlearned());
-        }
-        assert!(
-            !settings.shadow_distance.casts(),
-            "holding left on the distance row must reach OFF"
-        );
-        assert_eq!(
-            settings.shadow_resolution, resolution_before,
-            "the distance row must not move the resolution row"
-        );
-        assert_eq!(Row::ShadowDistance.value(&settings, &unlearned()), "OFF");
-
-        let distance_before = settings.shadow_distance;
-        for _ in 0..ShadowResolution::ORDER.len() {
-            Row::ShadowResolution.step(&mut settings, 1, ALL_RUNGS, &unlearned());
-        }
-        assert_eq!(
-            settings.shadow_resolution,
-            *ShadowResolution::ORDER
-                .last()
-                .expect("the ladder has rungs"),
-        );
-        assert_eq!(
-            settings.shadow_distance, distance_before,
-            "the resolution row must not move the distance row — including out of OFF"
-        );
-
-        // And OFF is not a one-way door from the page either.
-        Row::ShadowDistance.step(&mut settings, 1, ALL_RUNGS, &unlearned());
-        assert!(settings.shadow_distance.casts());
-    }
-
-    /// The render-scale row steps the whole ladder in both directions and saturates at native — a
-    /// player leaning on the right arrow must land on 100%, not wrap round to 50%.
-    #[test]
-    fn the_render_scale_row_walks_the_ladder_and_saturates_at_native() {
-        let mut settings = Settings::default();
-        assert_eq!(Row::RenderScale.value(&settings, &unlearned()), "100%");
-        for expected in [
-            RenderScaleLevel::Percent85,
-            RenderScaleLevel::Percent75,
-            RenderScaleLevel::Percent67,
-            RenderScaleLevel::Percent50,
-            RenderScaleLevel::Percent50,
-        ] {
-            Row::RenderScale.step(&mut settings, -1, ALL_RUNGS, &unlearned());
-            assert_eq!(settings.render_scale, expected);
-        }
-        for _ in 0..8 {
-            Row::RenderScale.step(&mut settings, 1, ALL_RUNGS, &unlearned());
-        }
-        assert_eq!(
-            settings.render_scale,
-            RenderScaleLevel::Percent100,
-            "holding right must stop at native, never wrap to the bottom rung"
-        );
-    }
-
-    /// **The row can only reach displays this machine has.** Two attached monitors, one of them the
-    /// primary: holding RIGHT stops at the second display, and the rung for the first stores
-    /// `Primary` — the variant window CREATION can honour — rather than its ordinal name. Everything
-    /// the row renders is the display's own name.
-    #[test]
-    fn the_display_row_offers_only_the_attached_monitors() {
-        let ladder = displays::attached(&["Built-in Retina Display", "ARZOPA"], Some(0));
-        let mut settings = Settings::default();
-        assert_eq!(Row::Display.value(&settings, &ladder), "AUTO");
-
-        Row::Display.step(&mut settings, 1, ALL_RUNGS, &ladder);
-        assert_eq!(settings.display, DisplaySelection::Primary);
-        assert_eq!(
-            Row::Display.value(&settings, &ladder),
-            "* BUILT-IN RETINA DISPLAY",
-        );
-
-        for _ in 0..4 {
-            Row::Display.step(&mut settings, 1, ALL_RUNGS, &ladder);
-        }
-        assert_eq!(
-            settings.display,
-            DisplaySelection::Display2,
-            "holding right must stop at the last ATTACHED display",
-        );
-        assert_eq!(Row::Display.value(&settings, &ladder), "ARZOPA");
-
-        // And a file naming a display that is not here renders and steps as the one it falls back
-        // to, rather than as a rung nobody can see.
-        settings.display = DisplaySelection::Display3;
-        assert_eq!(
-            Row::Display.value(&settings, &ladder),
-            "* BUILT-IN RETINA DISPLAY",
-        );
-    }
-
-    /// The display row walks the whole ladder and saturates at AUTO — which is the property that
-    /// matters, because AUTO is the only rung that hands placement back to the window manager. A
-    /// player who picked a display that then went away must be able to hold LEFT and get out; a
-    /// wrapping ladder would put "display 3" one keypress past it.
-    ///
-    /// Under the UNSYNCHRONISED ladder, which offers every variant: nothing has been learned about
-    /// this world's monitors, so nothing is narrowed away.
-    #[test]
-    fn the_display_row_walks_the_ladder_and_saturates_at_auto() {
-        let mut settings = Settings::default();
-        assert_eq!(Row::Display.value(&settings, &unlearned()), "AUTO");
-        for expected in [
-            DisplaySelection::Primary,
-            DisplaySelection::Display1,
-            DisplaySelection::Display2,
-            DisplaySelection::Display3,
-            DisplaySelection::Display3,
-        ] {
-            Row::Display.step(&mut settings, 1, ALL_RUNGS, &unlearned());
-            assert_eq!(settings.display, expected);
-        }
-        for _ in 0..DisplaySelection::ORDER.len() + 2 {
-            Row::Display.step(&mut settings, -1, ALL_RUNGS, &unlearned());
-        }
-        assert_eq!(
-            settings.display,
-            DisplaySelection::Auto,
-            "holding left must land on AUTO, never wrap round to the far end of the ladder",
-        );
-    }
-
-    /// The detail-budget row is a SLIDER whose numbers get bigger as the picture gets worse — the
-    /// one row on this page where the right arrow means LESS quality. Pinned because it is exactly
-    /// the thing a future "make all the ladders ascend in quality" tidy-up would silently invert.
-    #[test]
-    fn the_detail_budget_row_steps_toward_a_coarser_picture() {
-        assert_eq!(Row::LodPixelBudget.kind(), RowKind::Slider);
-        let mut settings = Settings::default();
-        assert_eq!(Row::LodPixelBudget.value(&settings, &unlearned()), "1.0 PX");
-        Row::LodPixelBudget.step(&mut settings, 1, ALL_RUNGS, &unlearned());
-        assert!(
-            settings.lod_pixel_budget.pixels() > PixelBudget::default().pixels(),
-            "the right arrow must raise the ERROR budget — see the row's hint",
-        );
-        for _ in 0..64 {
-            Row::LodPixelBudget.step(&mut settings, -1, ALL_RUNGS, &unlearned());
-        }
-        assert_eq!(settings.lod_pixel_budget.pixels(), PixelBudget::MIN);
-        for _ in 0..64 {
-            Row::LodPixelBudget.step(&mut settings, 1, ALL_RUNGS, &unlearned());
-        }
-        assert_eq!(settings.lod_pixel_budget.pixels(), PixelBudget::MAX);
     }
 
     /// **A saturated step is a no-op, and stays one whatever else is in the settings.**
@@ -1753,13 +1544,6 @@ mod tests {
         }
     }
 
-    /// The page's FIRST row is render scale: it is the one setting with a large, immediate frame
-    /// effect, so it is what a player looking for frames should meet first.
-    #[test]
-    fn render_scale_leads_the_page() {
-        assert_eq!(Row::ORDER.first(), Some(&Row::RenderScale));
-    }
-
     /// The vsync row walks only the rungs the probe offered: on a Metal-shaped surface (no
     /// Mailbox) the walk goes ON <-> OFF and FAST is never visited; unprobed walks all three; a
     /// current value the caps no longer offer (a config from another machine) still steps out into
@@ -1802,37 +1586,11 @@ mod tests {
         );
     }
 
-    /// The frame-cap row is enabled exactly under vsync OFF — the same fact the limiter arms on —
-    /// and every other row is unconditional.
-    #[test]
-    fn only_the_frame_cap_row_can_be_disabled() {
-        let off = Settings {
-            vsync: VsyncMode::Off,
-            ..default()
-        };
-        for row in Row::ORDER {
-            assert!(
-                row.enabled(&off, ALL_RUNGS),
-                "{row:?} must be enabled under vsync OFF"
-            );
-        }
-        for vsync in [VsyncMode::Fast, VsyncMode::On] {
-            let settings = Settings { vsync, ..default() };
-            for row in Row::ORDER {
-                assert_eq!(
-                    row.enabled(&settings, ALL_RUNGS),
-                    row != Row::FrameCap,
-                    "{row:?} under {vsync:?}"
-                );
-            }
-        }
-    }
-
     /// A stored OFF the surface cannot present (Wayland
     /// refuses `Immediate`) must grey the frame-cap row, because that is precisely what the limiter
     /// does with it — the row used to stay lit and armed over a compositor-paced surface. The gate
     /// is the EFFECTIVE rung, so this holds in the frames before `settings::normalize_vsync` has
-    /// written the correction back.
+    /// written the correction back. Every other row is enabled under every rung on every surface.
     #[test]
     fn an_unpresentable_off_greys_the_frame_cap_row() {
         let wayland = PresentCaps::Reported {
@@ -1870,9 +1628,28 @@ mod tests {
             );
             assert!(settings.frame_limit_period(unknown).is_some());
         }
+
+        // Every other row is unconditional: no rung on any surface greys it.
+        for caps in [
+            wayland,
+            metal,
+            PresentCaps::Unprobed,
+            PresentCaps::Unavailable,
+        ] {
+            for vsync in VsyncMode::ORDER {
+                let settings = Settings { vsync, ..default() };
+                for row in Row::ORDER.into_iter().filter(|&row| row != Row::FrameCap) {
+                    assert!(
+                        row.enabled(&settings, caps),
+                        "{row:?} under {vsync:?} on {caps:?}"
+                    );
+                }
+            }
+        }
     }
 
-    /// The selection walk skips disabled rows in BOTH directions and still saturates. With the
+    /// The selection walk skips disabled rows in BOTH directions, saturates at both ends, and
+    /// resolves a stale index. With the
     /// default settings (vsync ON) the frame-cap row is a hole in the ladder: walking down from
     /// VSYNC lands on UI SCALE, walking back up from UI SCALE lands on VSYNC.
     #[test]
@@ -1903,15 +1680,12 @@ mod tests {
         let mut selection = Selection(Row::VSync.index());
         selection.step(1, |row| row.enabled(&armed, ALL_RUNGS));
         assert_eq!(selection.row(), Row::FrameCap);
-    }
 
-    /// The selection walks with the arrows and saturates at both ends, and a hover lands on exactly
-    /// the row it names.
-    #[test]
-    fn the_selection_saturates_and_a_hover_lands_on_its_row() {
+        // The walk saturates at both ends, never wrapping, and a stale index (a row removed from
+        // ORDER between frames) resolves rather than panicking.
         let all = |_: Row| true;
+        let last = *Row::ORDER.last().expect("the page has rows");
         let mut selection = Selection::default();
-        assert_eq!(selection.row(), Row::ORDER[0]);
         selection.step(-1, all);
         assert_eq!(selection.row(), Row::ORDER[0], "the top row stays put");
         for _ in 0..Row::ORDER.len() * 2 {
@@ -1919,22 +1693,15 @@ mod tests {
         }
         assert_eq!(
             selection.row(),
-            *Row::ORDER.last().expect("the page has rows"),
+            last,
             "holding down must stop at the last row, never wrap to the first",
         );
-        for row in Row::ORDER {
-            selection.select(row);
-            assert_eq!(selection.row(), row, "{row:?} did not survive a hover");
-        }
-        // A stale index (a row removed from ORDER between frames) resolves rather than panicking.
-        assert_eq!(
-            Selection(usize::MAX).row(),
-            *Row::ORDER.last().expect("the page has rows"),
-        );
+        assert_eq!(Selection(usize::MAX).row(), last);
     }
 
     /// The slider mapping round-trips through the Row API for every ladder stop of every slider
-    /// row — a drag to where the handle already sits is always a no-op.
+    /// row — a drag to where the handle already sits is always a no-op — and each row's stops
+    /// strictly ascend along its track.
     #[test]
     fn slider_fractions_round_trip_for_every_slider_row() {
         for row in Row::ORDER {
@@ -1950,11 +1717,17 @@ mod tests {
             for _ in 0..64 {
                 row.step(&mut settings, -1, ALL_RUNGS, &unlearned());
             }
+            let mut previous: Option<f32> = None;
             loop {
                 let fraction = row
                     .slider_fraction(&settings)
                     .expect("slider rows have fractions");
                 assert!((0.0..=1.0).contains(&fraction), "{row:?} at {fraction}");
+                assert!(
+                    previous.is_none_or(|previous| fraction > previous),
+                    "{row:?}: the stop at {fraction} does not ascend from {previous:?}",
+                );
+                previous = Some(fraction);
                 let mut reconstructed = settings;
                 row.set_from_fraction(&mut reconstructed, fraction);
                 assert_eq!(
@@ -2008,110 +1781,6 @@ mod tests {
         );
     }
 
-    /// **The Retina regression, restated for the slider.** All of [`track_fraction`]'s arguments
-    /// are PHYSICAL pixels; feeding it the LOGICAL cursor (what `Window::cursor_position` returns)
-    /// against a physical track rect scrubs the handle to the wrong place — silently, because 1x
-    /// displays work fine. The scenario is a 2x display and a cursor at the track's true centre.
-    #[test]
-    fn the_track_mapping_needs_both_values_in_the_same_pixel_space() {
-        const SCALE_FACTOR: f32 = 2.0;
-        let track_center_physical = 1000.0;
-        let track_width_physical = 300.0;
-        let cursor_physical = 1000.0;
-        let cursor_logical = cursor_physical / SCALE_FACTOR;
-
-        assert_eq!(
-            track_fraction(cursor_physical, track_center_physical, track_width_physical),
-            0.5,
-            "converted together, the centre reads as the centre"
-        );
-        assert_eq!(
-            track_fraction(cursor_logical, track_center_physical, track_width_physical),
-            0.0,
-            "the un-converted cursor lands the handle at the far LEFT — the bug this pins",
-        );
-    }
-
-    /// **The UI-SCALE feedback loop, pinned.** The bug: `apply_settings` writes `UiScale` live
-    /// during the drag, `ui_layout_system` re-lays the settings card out — including the track being
-    /// dragged — so a live rect re-read next frame maps the SAME physical cursor to a DIFFERENT
-    /// value. The scenario below is one grab followed by a 1.25x page rescale under a stationary
-    /// hand: with the frozen rect the value cannot move, with the live rect it does.
-    #[test]
-    fn a_drag_maps_through_the_grab_time_rect_even_when_the_page_rescales() {
-        // A 150px track centred at x=600 (spans 525..675), cursor grabbed a quarter in.
-        let grabbed = ActiveDrag {
-            row: Row::UiScale,
-            track_center_x: 600.0,
-            track_width: 150.0,
-        };
-        let cursor_x = 562.5;
-        let at_grab = grabbed.fraction(cursor_x);
-        assert_eq!(at_grab, 0.25);
-
-        // What applying the new UI scale does to the layout: same card, every `Val::Px` multiplied,
-        // so the track is wider AND its centre has moved. (The exact numbers do not matter — only
-        // that the live rect is a DIFFERENT rect.)
-        let rescaled_center_x = 640.0;
-        let rescaled_width = 187.5;
-        assert_ne!(
-            track_fraction(cursor_x, rescaled_center_x, rescaled_width),
-            at_grab,
-            "the premise: a live rect re-read after the rescale maps this cursor somewhere else",
-        );
-
-        // The fix: the drag's own mapping is unchanged by any of that.
-        assert_eq!(
-            grabbed.fraction(cursor_x),
-            at_grab,
-            "the value must depend on the cursor and the GRAB-time rect alone",
-        );
-
-        // And the setting it lands on is likewise identical across the rescale.
-        let mut before = Settings::default();
-        Row::UiScale.set_from_fraction(&mut before, at_grab);
-        let mut after = Settings::default();
-        Row::UiScale.set_from_fraction(&mut after, grabbed.fraction(cursor_x));
-        assert_eq!(before.ui_scale, after.ui_scale);
-
-        // A cursor that genuinely MOVES still scrubs — freezing the rect must not freeze the value.
-        assert!(
-            grabbed.fraction(cursor_x + 40.0) > at_grab,
-            "the frozen rect maps a moved cursor to a moved value",
-        );
-    }
-
-    /// The Retina lesson, restated for the FROZEN rect: [`ActiveDrag`] stores what
-    /// `UiGlobalTransform`/`ComputedNode` reported, i.e. PHYSICAL pixels, and
-    /// [`ActiveDrag::fraction`] must be fed the PHYSICAL cursor to match. Freezing the geometry
-    /// changes the lifetime of those numbers, never their pixel space — a logical cursor is the same
-    /// silent 2x error it always was, just held for the length of a drag.
-    #[test]
-    fn the_frozen_rect_is_physical_pixels_like_everything_else_it_is_compared_against() {
-        const SCALE_FACTOR: f32 = 2.0;
-        let drag = ActiveDrag {
-            row: Row::UiScale,
-            track_center_x: 1000.0,
-            track_width: 300.0,
-        };
-        let cursor_physical = 1000.0;
-        assert_eq!(
-            drag.fraction(cursor_physical),
-            0.5,
-            "same space on both sides: the centre reads as the centre"
-        );
-        assert_eq!(
-            drag.fraction(cursor_physical / SCALE_FACTOR),
-            0.0,
-            "a logical cursor against the physical frozen rect still lands at the far LEFT",
-        );
-        assert_eq!(
-            drag.fraction(cursor_physical),
-            track_fraction(cursor_physical, drag.track_center_x, drag.track_width),
-            "the frozen path is the same mapping, only over a captured rect",
-        );
-    }
-
     /// `step_in` clamps and tolerates a value that is not in the order (which the UI cannot produce,
     /// but a hand-edited config could hand us via serde).
     #[test]
@@ -2122,7 +1791,7 @@ mod tests {
         assert_eq!(step_in(&[1, 2, 3], 99, 1), 2, "unknown current starts at 0");
     }
 
-    // --- The fixed hint slot ------------------------------------------------------------------
+    // --- The real page -------------------------------------------------------------------------
     //
     // Measured on the REAL page, headless. `DefaultPlugins` with the GPU backends and winit off (the
     // `headless_test` recipe) still runs the whole UI stack — taffy layout and parley text shaping
@@ -2132,14 +1801,6 @@ mod tests {
     /// How long to wait for the font asset (real, async, wall-clock file IO) before calling it a
     /// failure. Generous: the loop exits the moment the card has laid out.
     const LAYOUT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
-
-    /// The shortest window the settings page claims to be USABLE in, logical pixels — 720p, the
-    /// floor of what a Windows or Linux player can be running (every Apple-Silicon Mac this project
-    /// ships to defaults to 900+ logical px). It is no longer a height the card has to FIT inside —
-    /// [`CARD_MAX_HEIGHT_PERCENT`] makes that true at any window size — but the size the scroll
-    /// machinery is sized for, and the number [`CARD_MAX_HEIGHT_PERCENT`]'s measurements are quoted
-    /// against.
-    const MIN_SUPPORTED_WINDOW_HEIGHT_PX: f32 = 720.0;
 
     /// A headless app running the REAL page — [`plugin`], not just [`spawn_page`] — with `UiScale`
     /// set to `ui_scale`. The whole plugin, so the mouse test below exercises the wiring the game
@@ -2208,8 +1869,7 @@ mod tests {
     /// # And then the layout, run until it stops moving
     ///
     /// A font that lands is re-measured and re-laid-out over the following passes, and how many
-    /// passes that takes is bevy's business rather than a number worth guessing — the same reason
-    /// [`hint_layout`] settles by repetition instead of by a fixed count.
+    /// passes that takes is bevy's business rather than a number worth guessing.
     fn settle_with_font(app: &mut App) {
         let started = std::time::Instant::now();
         loop {
@@ -2377,52 +2037,6 @@ mod tests {
         // A whole pixel of slack for the `floor()` bevy applies to the rendered scroll offset.
         row_center - row_half >= view_center - view_half - 1.0
             && row_center + row_half <= view_center + view_half + 1.0
-    }
-
-    /// **The card never outgrows its window, and the row list is what gives.**
-    ///
-    /// Two claims, and the second is what stops the first being satisfied by a card that has simply
-    /// crushed its own contents:
-    ///
-    /// * the card is at most [`CARD_MAX_HEIGHT_PERCENT`] of the window at every UI-scale rung — the
-    ///   rung matters because `UiScale` multiplies the card and the type together (see
-    ///   [`the_hint_slot_is_two_lines_and_every_hint_fits_it`]), so the tallest rung binds;
-    /// * at the tallest rung the viewport's CONTENT is genuinely taller than the viewport, i.e. the
-    ///   scroll path is live rather than hypothetical. That is the measurement that made this
-    ///   machinery necessary in the first place (CARD_MAX_HEIGHT_PERCENT's doc records the
-    ///   numbers), and it is what keeps the sibling tests below from passing vacuously on a page
-    ///   that happens to fit.
-    #[test]
-    fn the_card_never_outgrows_its_window_and_the_rows_are_what_scroll() {
-        // Asked at the SMALLEST supported window, which is where the claim is worth anything.
-        const WINDOW_PX: f32 = MIN_SUPPORTED_WINDOW_HEIGHT_PX;
-        let mut overflows = Vec::new();
-        for ui in [
-            UiScalePercent(UiScalePercent::MIN),
-            UiScalePercent::default(),
-            UiScalePercent(UiScalePercent::MAX),
-        ] {
-            let mut app = headless_card_app_in(ui.factor(), WINDOW_PX as u32);
-            settle_with_font(&mut app);
-            let height = card_height(&mut app);
-            let ceiling = WINDOW_PX * CARD_MAX_HEIGHT_PERCENT / 100.0;
-            assert!(
-                height <= ceiling + 1.0,
-                "at {} the card lays out {height:.1} px in a {WINDOW_PX:.0} px window, past its \
-                 own {CARD_MAX_HEIGHT_PERCENT}% ceiling ({ceiling:.1} px) — `max_height` is not \
-                 binding, so the footer hint and the legend are off the bottom of the screen",
-                ui.label(),
-            );
-            let (view, content, _) = viewport_state(&mut app);
-            overflows.push(content - view);
-        }
-        assert!(
-            overflows.last().is_some_and(|overflow| *overflow > 1.0),
-            "at the top UI-scale rung the {} rows must actually overflow the viewport \
-             (overflows by rung: {overflows:.1?}) — if they do not, the scroll tests below are \
-             asserting nothing and this whole viewport is dead weight",
-            Row::ORDER.len(),
-        );
     }
 
     /// **Walking the selection can never lose it off the edge of the viewport.**
@@ -2621,116 +2235,6 @@ mod tests {
                 "{unit:?}: the two directions must be symmetric",
             );
             assert_eq!(wheel_delta_css(unit, 0.0, 0.5), 0.0, "{unit:?}");
-        }
-    }
-
-    /// The hint SLOT laid out with `text` in it: its height and the scale factor it was laid out
-    /// under, in the PHYSICAL pixels `ComputedNode` reports. The slot, not the text node, because
-    /// the slot is the thing whose height must not move.
-    ///
-    /// Physical, not converted back to logical, because bevy ROUNDS a node's edges to whole physical
-    /// pixels: at 75% a 33.6-logical-px slot lands on 26 physical px, and dividing that back out
-    /// reads 34.67 "logical" px — a phantom 1.07 px of drift that is really sub-pixel rounding.
-    /// Comparing where the rounding happens keeps the tolerance a flat pixel instead of a
-    /// scale-dependent fudge.
-    fn hint_layout(app: &mut App, text: &str) -> (f32, f32) {
-        {
-            let world = app.world_mut();
-            let mut hints = world.query_filtered::<&mut Text, With<HintText>>();
-            let mut hint = hints
-                .single_mut(world)
-                .expect("the card carries exactly one hint node");
-            hint.0 = text.to_string();
-        }
-        // The write lands in `Update`; the text measure and the layout that consumes it are both in
-        // `PostUpdate`. Rather than guess how many passes a new measure takes to reach the node,
-        // run until the node stops moving — a static text settles in two or three.
-        let mut last = f32::NAN;
-        for _ in 0..32 {
-            app.update();
-            let world = app.world_mut();
-            let mut nodes = world.query_filtered::<&ComputedNode, With<HintSlot>>();
-            let node = nodes
-                .single(world)
-                .expect("the card carries exactly one hint slot");
-            let (height, scale) = (node.size().y, node.inverse_scale_factor().recip());
-            if height == last {
-                return (height, scale);
-            }
-            last = height;
-        }
-        panic!("the hint node never settled on a height for {text:?} (last {last})");
-    }
-
-    /// Assert the hint node is exactly the two-line slot tall. `physical` and `scale` are what
-    /// [`hint_layout`] measured; `what` names the case for the failure message.
-    ///
-    /// The tolerance is one physical pixel of edge rounding (see [`hint_layout`]) — nowhere near the
-    /// line of type (16.8 logical px) that either failure direction would move the node by, so it
-    /// discriminates cleanly while absorbing the only noise there is.
-    fn assert_two_line_slot(physical: f32, scale: f32, what: &str) {
-        let want = HINT_SLOT_HEIGHT_PX * scale;
-        let lines = physical / (HINT_LINE_HEIGHT_PX * scale);
-        assert!(
-            (physical - want).abs() <= 1.01,
-            "{what}: the hint node lays out {physical:.2} physical px at scale {scale} — \
-             {lines:.2} lines, where the slot is fixed at two ({want:.2} px). MORE means this copy \
-             needs a third line at this scale, so selecting the row grows the whole card: trim the \
-             hint. LESS means the reserved slot stopped being applied and the layout shifts between \
-             one- and two-line hints again.",
-        );
-    }
-
-    /// **The hint slot is exactly two lines, for every row, at every UI-scale rung.**
-    ///
-    /// One equality carries both halves of the fix:
-    ///
-    /// * a ONE-line hint must still occupy two lines, or the rows above the footer jump by a line
-    ///   every time the selection crosses between a short hint and a long one — the shift this
-    ///   reserved slot exists to remove;
-    /// * no hint may need a THIRD line, or the slot's `min_height` floor is exceeded and the page
-    ///   grows anyway. That is the copy check, done in the real font at the real wrapping width
-    ///   rather than by eye.
-    ///
-    /// The rungs matter because the copy question was asked as "at any UI scale". `UiScale`
-    /// multiplies `Val::Px` and `FontSize::Px` by the SAME factor (it is one scale factor, applied
-    /// to the whole UI — `propagate_ui_target_cameras`), so the card and the type zoom together and
-    /// the wrap is scale-invariant BY CONSTRUCTION; the ends of the ladder are here to pin that
-    /// reasoning to a measurement instead of an argument.
-    #[test]
-    fn the_hint_slot_is_two_lines_and_every_hint_fits_it() {
-        for ui in [
-            UiScalePercent(UiScalePercent::MIN),
-            UiScalePercent::default(),
-            UiScalePercent(UiScalePercent::MAX),
-        ] {
-            let mut app = headless_card_app(ui.factor());
-            settle_with_font(&mut app);
-            // The empty string the card is born with: the slot is reserved before any row is ever
-            // selected, so an unopened page is already the height it will keep.
-            let (physical, scale) = hint_layout(&mut app, "");
-            assert_two_line_slot(
-                physical,
-                scale,
-                &format!("at {} with an EMPTY hint", ui.label()),
-            );
-            for row in Row::ORDER {
-                let (physical, scale) = hint_layout(&mut app, row.hint());
-                assert_two_line_slot(physical, scale, &format!("at {} on {row:?}", ui.label()));
-            }
-
-            // CONTROL — the slot is a floor, not a clamp, so the measurement above is only
-            // meaningful if overlong copy actually MOVES it. Two hints glued together is roughly
-            // four lines; if this reads two, the node has stopped tracking its text and every
-            // assertion above is passing vacuously.
-            let overlong = format!("{} {}", Row::VSync.hint(), Row::RenderScale.hint());
-            let (physical, scale) = hint_layout(&mut app, &overlong);
-            assert!(
-                physical > HINT_SLOT_HEIGHT_PX * scale + 1.01,
-                "CONTROL at {}: deliberately overlong copy laid out {physical:.2} physical px, \
-                 i.e. still the two-line slot — the instrument is not measuring the text",
-                ui.label(),
-            );
         }
     }
 }
