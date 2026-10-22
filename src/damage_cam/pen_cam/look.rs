@@ -1,7 +1,8 @@
-//! The base look: the whole tank as one hueless grey surface one layer deep, its components a
-//! darker grey one layer deep among themselves, the struck ones on the state scale, and the spall
-//! field as light, drawn as the law defines it, with its footprint outlined on every surface it
-//! met. It is the tank rendering of every x-ray view: the corner and the kill cam's lesson.
+//! The base look: the whole tank as one hueless translucent grey surface one layer deep, its
+//! components solid in the untouched grey one layer deep among themselves, the struck ones on the
+//! state scale, and the spall field as light, drawn as the law defines it, with its footprint
+//! outlined on every surface it met. It is the tank rendering of every x-ray view: the corner,
+//! the kill cam's lesson and the own glass.
 //! [`LookMaterial`] (`pen_cam_look.wgsl`) draws every element; [`hull`], [`component`] and
 //! [`field`] choose them, and the stage spawns what they return.
 //!
@@ -54,10 +55,12 @@ const BASE_FRESNEL_POWER: f32 = 2.0;
 const BASE_CONTRAST: f32 = 0.35;
 const BASE_EDGE: Color = Color::srgb_u8(0xE6, 0xE6, 0xE6);
 const BASE_EDGE_ALPHA: f32 = 0.35;
-/// The components' base: the state scale's untouched grey, fuller than the hull.
-const BASE_COMPONENT_ALPHA: f32 = 0.55;
-const BASE_COMPONENT_FACE_SHARE: f32 = 0.6;
-const BASE_COMPONENT_EDGE_ALPHA: f32 = 0.4;
+/// The components' base: the state scale's untouched grey, opaque at every angle under firm
+/// edges, so the layout reads through the hull's glass at the corner's size and at third-person
+/// distance. It carries no HP: an unstruck component looks the same whatever its pool holds.
+const BASE_COMPONENT_ALPHA: f32 = 1.0;
+const BASE_COMPONENT_FACE_SHARE: f32 = 1.0;
+const BASE_COMPONENT_EDGE_ALPHA: f32 = 0.9;
 /// The field footprint's outline width (px) and its opacity at full level, in the field's hue.
 const FOOTPRINT_LINE_PX: f32 = 2.0;
 const FOOTPRINT_ALPHA: f32 = 0.9;
@@ -708,15 +711,24 @@ mod tests {
     }
 
     /// Every component mesh draws in the base's family, hueless and HP-blind, one layer deep among
-    /// the components and outside the hull's layer.
+    /// the components and outside the hull's layer: the untouched grey, opaque at every angle (no
+    /// face-on fade), its edges firmer than the hull's.
     #[test]
-    fn the_base_draws_every_component_grey_in_its_own_layer() {
+    fn the_base_draws_every_component_solid_in_its_own_layer() {
         let draw = base_draw(Tier::Component);
         assert_eq!(draw.mask, MaskLayer::Part);
         assert_eq!(draw.material.params.mode.x, MODE_BASE);
-        let c = draw.material.params.color;
+        let p = draw.material.params;
         let grey = LinearRgba::from(timeline::STATE_UNTOUCHED);
-        assert_eq!(c.truncate(), Vec3::new(grey.red, grey.green, grey.blue));
+        assert_eq!(p.color, Vec4::new(grey.red, grey.green, grey.blue, 1.0));
+        assert_eq!(p.shade.x, 1.0, "opaque face-on as well as grazing");
+        let hull = base_draw(Tier::Armour).material.params;
+        assert!(p.edge.w > hull.edge.w);
+        assert_eq!(
+            p.edge.truncate(),
+            hull.edge.truncate(),
+            "the hull's edge colour"
+        );
     }
 
     /// A struck component draws on the state fill: its share as the fill height, red when damaged,
