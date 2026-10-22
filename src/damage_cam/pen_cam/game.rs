@@ -1,6 +1,6 @@
 //! The corner slot in play: the shooter's corner, each explanation of the local player's own hit
 //! on another tank in the frame for its verdict ([`CornerKind::of`]). One owner, one slot. The
-//! player's own tank is never a turn here: the own glass ([`glass`]) dresses the live tank in the
+//! player's own tank is never a turn here: the x-ray ([`xray`]) dresses the live tank in the
 //! look on the battlefield, its own presentation beside the slot, and the two show at once.
 //!
 //! * **What opens the corner.** An explanation in the player's store ([`ShotExplanations`]) whose
@@ -30,8 +30,8 @@
 //! No input reaches the corner. While the player's tank is knocked out the slot holds nothing and
 //! its rig is the kill cam's ([`killcam`]).
 
-mod glass;
 mod killcam;
+mod xray;
 
 use std::collections::{BTreeSet, HashMap};
 use std::sync::Arc;
@@ -40,11 +40,11 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldAsset;
 
-pub(crate) use self::glass::OwnGlass;
-#[cfg(feature = "dev_tools")]
-pub(crate) use self::glass::scripted_glass_plugin;
-use self::glass::{LiveState, LiveVolume};
 pub(crate) use self::killcam::{GameDeathScreen, KillCamGate, KillCamGateSet};
+pub(crate) use self::xray::XRay;
+#[cfg(feature = "dev_tools")]
+pub(crate) use self::xray::scripted_xray_plugin;
+use self::xray::{LiveState, LiveVolume};
 use super::hud::{self, CornerImages, Glyphs};
 use super::look;
 use super::plan::Plan;
@@ -82,14 +82,14 @@ pub(crate) struct NewMatch;
 fn wire(app: &mut App) {
     super::presentation(app);
     app.init_resource::<Slot>()
-        .init_resource::<OwnGlass>()
-        .init_resource::<glass::Glass>()
+        .init_resource::<XRay>()
+        .init_resource::<xray::XRayState>()
         .add_observer(close)
-        .add_observer(glass::forget_shown)
+        .add_observer(xray::forget_shown)
         .add_systems(
             Update,
             (
-                glass::toggle,
+                xray::toggle,
                 drive,
                 killcam::drive.in_set(killcam::KillCamGateSet),
                 killcam::give_way
@@ -97,23 +97,23 @@ fn wire(app: &mut App) {
                     .after(crate::overlay::OverlaySet::Toggle),
                 // The glass reads this frame's kill cam run, so after its drive; it states its
                 // mask need before the masks are owned.
-                glass::drive,
+                xray::drive,
                 (view::prepare_stage, view::pose_stage, hud::layout)
                     .chain()
                     .run_if(resource_exists::<StageView>),
                 look::own,
                 super::present().run_if(resource_exists::<StageView>),
-                glass::build,
-                glass::animate,
+                xray::build,
+                xray::animate,
                 log_presence,
-                glass::log_presence,
+                xray::log_presence,
             )
                 .chain(),
         )
         // A mask copy takes its shoe's rung in the frame the belt writes it.
         .add_systems(
             PostUpdate,
-            glass::follow_mesh.after(crate::track::link_view::ShoeRungSelected),
+            xray::follow_mesh.after(crate::track::link_view::ShoeRungSelected),
         );
     killcam::wire(app);
 }
@@ -1165,14 +1165,14 @@ mod tests {
         let (_, ricochet, ricochet_vocabulary, _) = incoming("s3_ricochet", 1300);
         assert!(ricochet.contact_tick > crossing.contact_tick);
         let latest = |app: &App| {
-            glass::latest(app.world().resource::<ShotExplanations>(), me()).map(|(key, _)| key)
+            xray::latest(app.world().resource::<ShotExplanations>(), me()).map(|(key, _)| key)
         };
         press_x(&mut app);
         receive(&mut app, crossing.clone(), &vocabulary);
         assert_eq!(latest(&app), Some(ExplanationKey::of(&crossing)));
         run(&mut app, 0.2);
         let plan = |app: &App| {
-            let glass = app.world().resource::<glass::Glass>();
+            let glass = app.world().resource::<xray::XRayState>();
             let plan = glass.plan().expect("the glass is built");
             (plan.kind, !plan.crossings.is_empty(), plan.bounce.is_some())
         };
@@ -1196,7 +1196,7 @@ mod tests {
         );
     }
 
-    // --- The own glass -------------------------------------------------------------------------
+    // --- The x-ray -------------------------------------------------------------------------
 
     /// [`glass_app`] with the player's tank as a live body — a rig whose hull and turret nodes
     /// carry one mesh each in a standard material, the turret's mesh node named after the
@@ -1281,7 +1281,7 @@ mod tests {
         (app, player, [hull_mesh, turret_mesh], camera)
     }
 
-    /// Press the own-glass key for one frame.
+    /// Press the x-ray key for one frame.
     fn press_x(app: &mut App) {
         app.world_mut()
             .resource_mut::<ButtonInput<KeyCode>>()
@@ -1300,11 +1300,11 @@ mod tests {
         let looks = app.world().resource::<Assets<LookMaterial>>().len();
         let world = app.world_mut();
         let dressed = world
-            .query_filtered::<(), With<glass::Dressed>>()
+            .query_filtered::<(), With<xray::Dressed>>()
             .iter(world)
             .count();
         let items = world
-            .query_filtered::<(), With<glass::GlassItem>>()
+            .query_filtered::<(), With<xray::XRayItem>>()
             .iter(world)
             .count();
         let all = world
@@ -1319,7 +1319,7 @@ mod tests {
     fn wears_the_look(app: &mut App, mesh: Entity) -> bool {
         let copies: Vec<Entity> = {
             let world = app.world_mut();
-            let mut query = world.query::<(&glass::MaskCopy, &ChildOf)>();
+            let mut query = world.query::<(&xray::MaskCopy, &ChildOf)>();
             query
                 .iter(world)
                 .filter(|(copy, parent)| copy.of() == mesh && parent.parent() == mesh)
@@ -1327,7 +1327,7 @@ mod tests {
                 .collect()
         };
         let entity = app.world().entity(mesh);
-        entity.contains::<glass::Dressed>()
+        entity.contains::<xray::Dressed>()
             && entity.contains::<MeshMaterial3d<LookMaterial>>()
             && !entity.contains::<MeshMaterial3d<StandardMaterial>>()
             && copies.len() == 1
@@ -1369,7 +1369,7 @@ mod tests {
         assert_eq!(glass_census(&mut app).0, 0, "off until the key");
         press_x(&mut app);
         run(&mut app, 0.2);
-        assert!(app.world().resource::<OwnGlass>().on);
+        assert!(app.world().resource::<XRay>().on);
         for mesh in meshes {
             assert!(wears_the_look(&mut app, mesh), "{mesh:?}");
         }
@@ -1395,7 +1395,7 @@ mod tests {
         let hull = app.world().get::<crate::tank::Rig>(player).unwrap().hull;
         let world = app.world_mut();
         let under_hull = world
-            .query_filtered::<&ChildOf, With<glass::GlassItem>>()
+            .query_filtered::<&ChildOf, With<xray::XRayItem>>()
             .iter(world)
             .filter(|parent| parent.parent() == hull)
             .count();
@@ -1482,7 +1482,7 @@ mod tests {
                     assert!(!entity.contains::<MeshMaterial3d<LookMaterial>>());
                 }
             }
-            assert!(app.world().resource::<OwnGlass>().on == (ending != "key"));
+            assert!(app.world().resource::<XRay>().on == (ending != "key"));
         }
     }
 
@@ -1563,7 +1563,7 @@ mod tests {
         let (dressed, items, ..) = glass_census(&mut app);
         assert_eq!((dressed, items), (2, 2), "the mask copies and nothing else");
         let pools = |app: &App| -> Vec<(String, u32, u32, bool)> {
-            let glass = app.world().resource::<glass::Glass>();
+            let glass = app.world().resource::<xray::XRayState>();
             let plan = glass.plan().expect("built");
             assert!(plan.line.points.len() < 2, "no path");
             assert!(plan.cones.is_empty(), "no cone");
@@ -1579,7 +1579,7 @@ mod tests {
                 .iter()
                 .all(|(_, count, hp, lost)| hp == count && !lost)
         );
-        let since = app.world().resource::<glass::Glass>().since();
+        let since = app.world().resource::<xray::XRayState>().since();
         {
             let world = app.world_mut();
             let mut volumes = world.query::<&mut crate::ballistics::ComponentHealth>();
@@ -1592,7 +1592,7 @@ mod tests {
         run(&mut app, 0.1);
         assert_ne!(pools(&app), before, "the live loss reaches the glass");
         assert_eq!(
-            app.world().resource::<glass::Glass>().since(),
+            app.world().resource::<xray::XRayState>().since(),
             since,
             "in the same showing"
         );
@@ -1605,7 +1605,7 @@ mod tests {
     #[test]
     fn a_record_plays_once_from_its_first_showing() {
         let (mut app, _, _, _) = world_glass_app();
-        let since = |app: &App| app.world().resource::<glass::Glass>().since();
+        let since = |app: &App| app.world().resource::<xray::XRayState>().since();
         let now = |app: &App| app.world().resource::<Time>().elapsed_secs_f64();
         let (first, first_vocabulary) = incoming_at("s1_through_crew", 1299, 1300, 1302);
         let landed = now(&app);
@@ -1649,9 +1649,9 @@ mod tests {
     #[test]
     fn an_older_record_back_as_the_latest_continues_its_clock() {
         let (mut app, _, _, _) = world_glass_app();
-        let since = |app: &App| app.world().resource::<glass::Glass>().since();
+        let since = |app: &App| app.world().resource::<xray::XRayState>().since();
         let latest = |app: &App| {
-            glass::latest(app.world().resource::<ShotExplanations>(), me()).map(|(key, _)| key)
+            xray::latest(app.world().resource::<ShotExplanations>(), me()).map(|(key, _)| key)
         };
         press_x(&mut app);
         // A fired later and struck earlier than B: B is the latest by recency and the first the
@@ -1721,7 +1721,7 @@ mod tests {
         assert!(running(&app), "the run plays");
         press_x(&mut app);
         assert!(
-            app.world().resource::<OwnGlass>().on,
+            app.world().resource::<XRay>().on,
             "the press changed nothing"
         );
         assert_eq!(glass_census(&mut app).0, 0);
@@ -1936,7 +1936,7 @@ mod tests {
     fn the_latest_record_is_the_newest_completed_whose_impact_is_drawn() {
         let (mut app, _, _, _) = world_glass_app();
         let latest = |app: &App| {
-            glass::latest(app.world().resource::<ShotExplanations>(), me()).map(|(key, _)| key)
+            xray::latest(app.world().resource::<ShotExplanations>(), me()).map(|(key, _)| key)
         };
         // The earlier completed has the greater identity: completion is read before it.
         let (early, early_vocabulary) = incoming_at("s1_through_crew", 1299, 1300, 1302);
@@ -2001,7 +2001,7 @@ mod tests {
         let source = meshes[0];
         let copy = {
             let world = app.world_mut();
-            let mut query = world.query::<(Entity, &glass::MaskCopy)>();
+            let mut query = world.query::<(Entity, &xray::MaskCopy)>();
             query
                 .iter(world)
                 .find(|(_, copy)| copy.of() == source)

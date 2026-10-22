@@ -2,7 +2,7 @@
 //! components solid in the untouched grey one layer deep among themselves, the struck ones on the
 //! state scale, and the spall field as light, drawn as the law defines it, with its footprint
 //! outlined on every surface it met. It is the tank rendering of every x-ray view: the corner,
-//! the kill cam's lesson and the own glass.
+//! the kill cam's lesson and the x-ray.
 //! [`LookMaterial`] (`pen_cam_look.wgsl`) draws every element; [`hull`], [`component`] and
 //! [`field`] choose them, and the stage spawns what they return.
 //!
@@ -248,7 +248,7 @@ pub struct MaskSet {
 
 /// The mask sets, one per viewer whose frame draws the base look's hull this frame: the corner's
 /// inset camera or, for the kill cam's lesson, the main camera ([`Corner::showing`],
-/// [`needs_masks`]); and the own glass's camera, stated by that presentation ([`MaskNeed`]). The
+/// [`needs_masks`]); and the x-ray's camera, stated by that presentation ([`MaskNeed`]). The
 /// corner and the glass show at once, each against its own set; the lesson and the glass never
 /// do (a kill run suspends the glass). Every mask camera names its viewer ([`MaskCamera`]);
 /// [`own`] makes and unmakes each set, and nothing else despawns its cameras.

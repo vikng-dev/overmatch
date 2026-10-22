@@ -907,7 +907,7 @@ fn lod_shoe_meshes(source: &Mesh) -> Result<PerSide<Mesh>, GenerateTangentsError
 // ---------------------------------------------------------------------------------------------
 
 /// Where the belt writes each shoe's rung mesh handle, in `PostUpdate`: anything that copies a
-/// shoe's handle for the same frame (the own glass's mask copies) orders after it.
+/// shoe's handle for the same frame (the x-ray's mask copies) orders after it.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct ShoeRungSelected;
 

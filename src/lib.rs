@@ -946,12 +946,12 @@ pub fn run_offline() {
     #[cfg(feature = "dev_tools")]
     app.add_plugins(command::offline_auto_fire_plugin);
     // The same boundary: the parked target firing at the player (`OVERMATCH_TARGET_FIRES`) and
-    // the scripted own-glass preference (`OVERMATCH_OWN_GLASS`), for captures of the player's own
+    // the scripted x-ray preference (`OVERMATCH_XRAY`), for captures of the player's own
     // tank struck.
     #[cfg(feature = "dev_tools")]
     app.add_plugins((
         tank::scenario::offline_target_fires_plugin,
-        damage_cam::pen_cam::game::scripted_glass_plugin,
+        damage_cam::pen_cam::game::scripted_xray_plugin,
     ));
     app.run();
 }

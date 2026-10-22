@@ -3,7 +3,7 @@
 //! keys; see `Cargo.toml`). Press `G` to toggle the debug
 //! gizmos: belt-contact force arrows (cyan = support load along the contact normal, orange =
 //! traction) plus Avian's collider wireframes. `F` detaches the camera. A see-through tank is the
-//! pen cam's own glass (`X`, `damage_cam::pen_cam::game`), not a debug key.
+//! pen cam's x-ray (`X`, `damage_cam::pen_cam::game`), not a debug key.
 //!
 //! Mounted by BOTH client compositions — `ClientPlugin` (single-player) and `NetClientPlugin`
 //! (the networked client bin) — always paired with Avian's `PhysicsDebugPlugin` (which registers

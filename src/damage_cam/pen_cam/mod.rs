@@ -10,7 +10,7 @@
 //!
 //! * [`game`], the corner slot in play: the shooter's corner, each explanation of the local
 //!   player's own hit once its world impact is drawn, by the delivery store's rule. Beside it the
-//!   own glass, the player's own tank dressed in the look on the battlefield under the latest
+//!   x-ray, the player's own tank dressed in the look on the battlefield under the latest
 //!   record that struck it, is its own presentation (`game::glass`): no corner, no stage copy.
 //! * [`demo`], the design bench over the recorded scenarios in `assets/dev/pen_cam/`: its own
 //!   battlefield, virtual-time control, keys and the kill cam's lesson.
@@ -74,7 +74,7 @@ pub struct Showing {
     pub surface: Surface,
 }
 
-/// Where a [`Showing`] is drawn. The own glass is on neither: it is not a showing of the corner
+/// Where a [`Showing`] is drawn. The x-ray is on neither: it is not a showing of the corner
 /// but a dressing of the live tank.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Surface {
@@ -182,7 +182,7 @@ pub(super) fn presentation(app: &mut App) {
 /// The corner's drawing after its masks, in order, from [`Corner`] as its driver left it this
 /// frame: the stage, its animation and the corner's frame. A driver runs the corner's size and
 /// images (`hud::layout`) first, then [`look::own`], which gives every viewer that draws the base
-/// look this frame its masks — the corner's inset and the own glass's camera alike — and then
+/// look this frame its masks — the corner's inset and the x-ray's camera alike — and then
 /// this; the game gates the corner's halves on its stage view, the glass draws beside them.
 pub(super) fn present() -> ScheduleConfigs<ScheduleSystem> {
     (stage::rebuild, stage::animate, hud::animate)

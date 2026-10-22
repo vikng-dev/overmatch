@@ -149,10 +149,10 @@ pub struct Bindings {
     pub steer: AxisKeys,
     pub fire_primary: ButtonBinding,
     pub fire_secondary: ButtonBinding,
-    /// Toggles the pen cam's own glass: the player's own tank in the glass look on the
+    /// Toggles the pen cam's x-ray: the player's own tank in the glass look on the
     /// battlefield, the latest shot that struck it drawn over it (`damage_cam::pen_cam::game`). A
     /// view, not a command: it never reaches [`TankCommand`].
-    pub own_glass: ButtonBinding,
+    pub xray: ButtonBinding,
     /// The kill cam, while the player's own tank is knocked out: hold the clock while down, replay
     /// from the death screen. Views, not commands: neither reaches [`TankCommand`]. Read only
     /// while the death flow owns the device ([`DeviceOwner`]), so they may share a key with a tank
@@ -300,8 +300,8 @@ impl Default for Bindings {
             },
             fire_primary: ButtonBinding::Mouse(MouseButton::Left),
             fire_secondary: ButtonBinding::Key(KeyCode::Space),
-            // TUNED: the own glass's key.
-            own_glass: ButtonBinding::Key(KeyCode::KeyX),
+            // TUNED: the x-ray's key.
+            xray: ButtonBinding::Key(KeyCode::KeyX),
             // TUNED: the pen cam demo's kill cam keys.
             kill_cam_hold: ButtonBinding::Key(KeyCode::KeyC),
             kill_cam_replay: ButtonBinding::Key(KeyCode::Space),

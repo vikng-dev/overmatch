@@ -23,7 +23,7 @@ use crate::tank::Controlled;
 use crate::ui_font::UiFonts;
 
 /// Opens / closes the map. Free in the game client: W/A/S/D + Space drive, R respawns, T cycles,
-/// X is the own glass, Lshift switches view, Tab is SP-only, F/G are the dev-tools toggles, 1–5 are
+/// X is the x-ray, Lshift switches view, Tab is SP-only, F/G are the dev-tools toggles, 1–5 are
 /// crew stations, F3 is the debug panel, Esc is the menu. B and V are unbound. (The track
 /// sandbox's `M` is a different binary.)
 const SPAWN_MAP_KEY: KeyCode = KeyCode::KeyM;

@@ -18,7 +18,7 @@
 //! [`spawn_glass`] is the entry point that draws a record over a tank: it takes the tank's hull
 //! entity (whose frame is the record's) and the tank's own meshes of the components the record
 //! names ([`component_meshes`]), and spawns every record element under them, tagged for their
-//! owner. [`Playing`] plays them from a clock: the corner's here ([`animate`]), the own glass's
+//! owner. [`Playing`] plays them from a clock: the corner's here ([`animate`]), the x-ray's
 //! in the game.
 
 use std::collections::HashMap;
@@ -829,7 +829,7 @@ fn front_radius(plan: &Plan, kind: CornerKind, index: usize, c: f32) -> f32 {
 }
 
 /// The corner time at which component `b`'s fill starts: the line's entry, or the moment the dosing
-/// cone's front has run the distance the plan gives; the victim's own glass shows its state from
+/// cone's front has run the distance the plan gives; the victim's x-ray shows its state from
 /// the open.
 fn box_start(plan: &Plan, kind: CornerKind, b: &BoxPlan, reduce: bool) -> f32 {
     match (kind, b.reached_at) {
@@ -933,7 +933,7 @@ fn inset_active(showing: &super::Showing) -> bool {
 
 /// One record's elements as a frame plays them: `plan` in frame `kind` at corner time `c`, under
 /// reduce motion or not, with the shell's head and the trail's end derived once. The corner plays
-/// its stage through it ([`animate`]) and the own glass its record over the live tank; each hands
+/// its stage through it ([`animate`]) and the x-ray its record over the live tank; each hands
 /// it its own elements, so one clock never reaches the other's.
 pub(super) struct Playing<'a> {
     plan: &'a Plan,

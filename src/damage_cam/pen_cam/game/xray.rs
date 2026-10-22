@@ -1,5 +1,5 @@
-//! The own glass: the player's own tank in the glass look on the battlefield, the latest shot that
-//! struck it drawn over it, its key ([`OwnGlass`], X) a preference kept across lives. Its own
+//! The x-ray: the player's own tank in the glass look on the battlefield, the latest shot that
+//! struck it drawn over it, its key ([`XRay`], X) a preference kept across lives. Its own
 //! presentation beside the corner slot: no corner, no stage copy, no exhibit. The look goes on the
 //! tank's REAL render primitives — each mesh's `StandardMaterial` handle set aside ([`Dressed`])
 //! and replaced by its tier's [`LookMaterial`], a mask copy spawned under it — and the record's
@@ -23,7 +23,7 @@
 //! * **The clock.** A record plays once: from the moment it first shows (X on with it the latest,
 //!   or its arrival while on), as the victim frame plays it, to its hold beat. Every later showing
 //!   of the same record — X off and on, the optic and back, a resize, an older record back as the
-//!   latest — continues that clock ([`Glass::shown`]), so past the hold beat it is the held end; a
+//!   latest — continues that clock ([`XRayState::shown`]), so past the hold beat it is the held end; a
 //!   record that lands while the glass is off waits for X. A connection forgets every clock with
 //!   the store ([`forget_shown`]). The tint follows the live state in the same showing.
 
@@ -67,14 +67,14 @@ use crate::sight::SightMode;
 use crate::tank::{Controlled, ViewNode};
 use crate::view::PlayerView;
 
-/// The player's own-glass preference, which [`Bindings::own_glass`] toggles: kept across lives,
+/// The player's x-ray preference, which [`Bindings::xray`] toggles: kept across lives,
 /// respawn, the map and a disconnect, so the glass returns on the next live tank.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
-pub(crate) struct OwnGlass {
+pub(crate) struct XRay {
     pub(crate) on: bool,
 }
 
-/// Flip [`OwnGlass`] on the key, while the cursor is captured (a menu or a pause takes the key)
+/// Flip [`XRay`] on the key, while the cursor is captured (a menu or a pause takes the key)
 /// and the player's tank is live: knocked out, the death flow owns the device and a press changes
 /// nothing, so a kill cam run never flips it.
 pub(super) fn toggle(
@@ -83,9 +83,9 @@ pub(super) fn toggle(
     bindings: Option<Res<Bindings>>,
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
     live: Query<(), (With<Controlled>, Without<TankKnockedOut>)>,
-    mut glass: ResMut<OwnGlass>,
+    mut glass: ResMut<XRay>,
 ) {
-    let pressed = bindings.is_some_and(|bindings| bindings.own_glass.just_pressed(&keys, &mouse));
+    let pressed = bindings.is_some_and(|bindings| bindings.xray.just_pressed(&keys, &mouse));
     if pressed && !live.is_empty() && crate::state::cursor_locked(cursor) {
         glass.on = !glass.on;
     }
@@ -95,7 +95,7 @@ pub(super) fn toggle(
 /// restore. Never under another: a copy hangs under a dressed mesh, an element under the live
 /// hull or a dressed mesh.
 #[derive(Component, Clone, Copy)]
-pub(super) struct GlassItem;
+pub(super) struct XRayItem;
 
 /// A live render primitive wearing the look: the material it wore, restored exactly, and the names
 /// of its node chain up to the tank's root, nearest first, by which the record's components find
@@ -123,11 +123,11 @@ impl MaskCopy {
 
 /// The glass's shell model, the round resting where the record ends.
 #[derive(Component)]
-pub(super) struct GlassShell;
+pub(super) struct XRayShell;
 
 /// What the glass stands on between frames.
 #[derive(Resource, Default)]
-pub(super) struct Glass {
+pub(super) struct XRayState {
     built: Option<Built>,
     /// App seconds each record first showed, for every record shown since the connection: a
     /// record's clock, kept across the glass's deactivations so it plays once, and per record
@@ -141,7 +141,7 @@ pub(super) struct Glass {
     shell: Option<Handle<WorldAsset>>,
 }
 
-impl Glass {
+impl XRayState {
     /// The plan the glass draws, while built.
     #[cfg(test)]
     pub(super) fn plan(&self) -> Option<&Plan> {
@@ -205,11 +205,11 @@ pub(super) struct Held<'w, 's> {
             &'static MeshMaterial3d<StandardMaterial>,
             Option<&'static VisibilityRange>,
         ),
-        (Without<Dressed>, Without<GlassItem>),
+        (Without<Dressed>, Without<XRayItem>),
     >,
     dressed: Query<'w, 's, (Entity, &'static Dressed, &'static Mesh3d)>,
-    items: Query<'w, 's, Entity, With<GlassItem>>,
-    elements: Query<'w, 's, Entity, (With<GlassItem>, Without<MaskCopy>)>,
+    items: Query<'w, 's, Entity, With<XRayItem>>,
+    elements: Query<'w, 's, Entity, (With<XRayItem>, Without<MaskCopy>)>,
 }
 
 impl Held<'_, '_> {
@@ -250,11 +250,11 @@ pub(super) struct Viewing<'w, 's> {
 /// for [`look::own`], which runs next.
 pub(super) fn drive(
     mut commands: Commands,
-    glass: Res<OwnGlass>,
+    glass: Res<XRay>,
     viewing: Viewing,
     player: Player,
     mut need: ResMut<MaskNeed>,
-    mut state: ResMut<Glass>,
+    mut state: ResMut<XRayState>,
     held: Held,
 ) {
     let third_person = viewing
@@ -292,7 +292,7 @@ pub(super) fn build(
     store: Option<Res<ShotExplanations>>,
     blueprint: Option<Res<TankBlueprint>>,
     player: Player,
-    mut state: ResMut<Glass>,
+    mut state: ResMut<XRayState>,
     asset_server: Res<AssetServer>,
     mut stores: Stores,
     scene: Hierarchy,
@@ -406,7 +406,7 @@ pub(super) fn build(
             looks: &mut stores.looks,
             masks: set,
         },
-        (GlassItem, VisualScope::WORLD_EFFECT),
+        (XRayItem, VisualScope::WORLD_EFFECT),
     );
     if plan.line.points.len() >= 2 {
         let shell = state
@@ -420,8 +420,8 @@ pub(super) fn build(
             Transform::IDENTITY,
             Visibility::Hidden,
             VisualScope::WORLD_EFFECT,
-            GlassShell,
-            GlassItem,
+            XRayShell,
+            XRayItem,
             ChildOf(hull),
         ));
     }
@@ -431,7 +431,7 @@ pub(super) fn build(
 /// A new match: the store's keys start over, and so do the records shown. The glass as built
 /// forgets its record too, so the next build re-keys the clock even for the same key, and
 /// settles, so it redraws even with nothing left to draw.
-pub(super) fn forget_shown(_new: On<NewMatch>, mut state: ResMut<Glass>) {
+pub(super) fn forget_shown(_new: On<NewMatch>, mut state: ResMut<XRayState>) {
     state.shown.clear();
     if let Some(built) = &mut state.built {
         built.record = None;
@@ -513,7 +513,7 @@ fn dress(
             ));
         let mut copy = commands.spawn((
             mask_copy(mesh.0.clone(), built.mask.clone(), layer),
-            GlassItem,
+            XRayItem,
             MaskCopy { of: entity },
             ChildOf(entity),
         ));
@@ -533,7 +533,7 @@ fn dress(
 )]
 pub(super) fn animate(
     time: Res<Time>,
-    state: Res<Glass>,
+    state: Res<XRayState>,
     knobs: Res<Knobs>,
     hulls: Query<&GlobalTransform>,
     mut glows: ResMut<Assets<GlowMaterial>>,
@@ -547,16 +547,16 @@ pub(super) fn animate(
             &mut Visibility,
         ),
         (
-            With<GlassItem>,
+            With<XRayItem>,
             Without<MarkItem>,
             Without<ConeShell>,
-            Without<GlassShell>,
+            Without<XRayShell>,
         ),
     >,
     mut marks: Query<
         (&MarkItem, &MeshMaterial3d<GlowMaterial>, &mut Visibility),
         (
-            With<GlassItem>,
+            With<XRayItem>,
             Without<LineSeg>,
             Without<ConeShell>,
             Without<BoxTint>,
@@ -570,7 +570,7 @@ pub(super) fn animate(
             &mut Visibility,
         ),
         (
-            With<GlassItem>,
+            With<XRayItem>,
             Without<LineSeg>,
             Without<MarkItem>,
             Without<BoxTint>,
@@ -584,7 +584,7 @@ pub(super) fn animate(
             &mut Visibility,
         ),
         (
-            With<GlassItem>,
+            With<XRayItem>,
             Without<LineSeg>,
             Without<MarkItem>,
             Without<ConeShell>,
@@ -593,7 +593,7 @@ pub(super) fn animate(
     mut shell: Query<
         (&mut Transform, &mut Visibility),
         (
-            With<GlassShell>,
+            With<XRayShell>,
             Without<LineSeg>,
             Without<MarkItem>,
             Without<ConeShell>,
@@ -647,16 +647,16 @@ pub(super) fn animate(
 
 /// Log each edge of the glass's drawing, on `Time<Real>` — the frame-cost stream's clock
 /// (`src/frame_cost.rs`), so `scripts/perf/pencam_cost.py` can window that stream by the glass.
-pub(super) fn log_presence(state: Res<Glass>, time: Res<Time<Real>>, mut on: Local<bool>) {
+pub(super) fn log_presence(state: Res<XRayState>, time: Res<Time<Real>>, mut on: Local<bool>) {
     let now = state.built.is_some();
     if now == *on {
         return;
     }
     let t = time.elapsed_secs_f64();
     if now {
-        debug!("pen cam: the own glass is on at t={t:.3} s (Time<Real>)");
+        debug!("pen cam: the x-ray is on at t={t:.3} s (Time<Real>)");
     } else {
-        debug!("pen cam: the own glass is off at t={t:.3} s (Time<Real>)");
+        debug!("pen cam: the x-ray is off at t={t:.3} s (Time<Real>)");
     }
     *on = now;
 }
@@ -676,8 +676,8 @@ pub(super) fn follow_mesh(
 }
 
 /// The scripted preference: on from `from` to `to` app seconds, let go at `to`.
-fn scripted(from: f32, to: f32) -> impl FnMut(Res<Time>, ResMut<OwnGlass>, Local<bool>) {
-    move |time: Res<Time>, mut glass: ResMut<OwnGlass>, mut inside: Local<bool>| {
+fn scripted(from: f32, to: f32) -> impl FnMut(Res<Time>, ResMut<XRay>, Local<bool>) {
+    move |time: Res<Time>, mut glass: ResMut<XRay>, mut inside: Local<bool>| {
         let now = (from..to).contains(&time.elapsed_secs());
         if now != *inside {
             glass.on = now;
@@ -686,12 +686,12 @@ fn scripted(from: f32, to: f32) -> impl FnMut(Res<Time>, ResMut<OwnGlass>, Local
     }
 }
 
-/// Dev-only, offline: `OVERMATCH_OWN_GLASS=<from>-<to>` holds the own-glass preference on from
+/// Dev-only, offline: `OVERMATCH_XRAY=<from>-<to>` holds the x-ray preference on from
 /// `from` to `to` app seconds (`Time` as `Update` sees it) and lets it go at `to`, for captures.
 /// Mounted only by the offline composition.
 #[cfg(feature = "dev_tools")]
-pub(crate) fn scripted_glass_plugin(app: &mut App) {
-    let Ok(window) = std::env::var("OVERMATCH_OWN_GLASS") else {
+pub(crate) fn scripted_xray_plugin(app: &mut App) {
+    let Ok(window) = std::env::var("OVERMATCH_XRAY") else {
         return;
     };
     let Some((from, to)) = window.split_once('-').and_then(|(from, to)| {
@@ -700,10 +700,10 @@ pub(crate) fn scripted_glass_plugin(app: &mut App) {
             to.trim().parse::<f32>().ok()?,
         ))
     }) else {
-        warn!("OVERMATCH_OWN_GLASS={window}: expected <from>-<to> seconds");
+        warn!("OVERMATCH_XRAY={window}: expected <from>-<to> seconds");
         return;
     };
-    info!("pen cam: the own glass is on from {from} s to {to} s (OVERMATCH_OWN_GLASS)");
+    info!("pen cam: the x-ray is on from {from} s to {to} s (OVERMATCH_XRAY)");
     app.add_systems(Update, scripted(from, to).before(toggle));
 }
 
@@ -916,9 +916,9 @@ mod tests {
     fn the_scripted_preference_holds_for_its_window() {
         let mut app = App::new();
         app.init_resource::<Time>()
-            .init_resource::<OwnGlass>()
+            .init_resource::<XRay>()
             .add_systems(Update, scripted(1.0, 3.0));
-        let on = |app: &App| app.world().resource::<OwnGlass>().on;
+        let on = |app: &App| app.world().resource::<XRay>().on;
         let at = |app: &mut App, seconds: f32| {
             let now = app.world().resource::<Time>().elapsed_secs();
             app.world_mut()
@@ -930,7 +930,7 @@ mod tests {
         assert!(!on(&app));
         at(&mut app, 1.5);
         assert!(on(&app), "on inside the window");
-        app.world_mut().resource_mut::<OwnGlass>().on = false;
+        app.world_mut().resource_mut::<XRay>().on = false;
         at(&mut app, 2.0);
         assert!(!on(&app), "the edge alone writes it");
         at(&mut app, 3.5);
