@@ -36,3 +36,21 @@ runs:
         toolchain: ${{ steps.pin.outputs.channel }}
         components: ${{ inputs.components }}
         targets: ${{ inputs.targets }}
+
+    # rust-cache keys on EVERY installed toolchain (its `getRustVersions` walks `rustup toolchain
+    # list`), so the runner image's own stable would re-key every cache on each Rust release. Only
+    # the pin stays: a cache goes cold when this tree changes the compiler, never when the image does.
+    - name: Only the pinned toolchain stays installed
+      shell: bash
+      env:
+        CHANNEL: ${{ steps.pin.outputs.channel }}
+      run: |
+        set -euo pipefail
+        rustup default "${CHANNEL}"
+        rustup toolchain list | awk '{print $1}' | while read -r toolchain; do
+          case "${toolchain}" in
+            "${CHANNEL}"-*) ;;
+            *) rustup toolchain uninstall "${toolchain}" ;;
+          esac
+        done
+        rustup toolchain list

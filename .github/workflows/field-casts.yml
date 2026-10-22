@@ -11,7 +11,8 @@ on:
   # A release tag dispatches it on the tag (`release.yml`), so every shipped build is measured.
   workflow_dispatch:
   # Only a push that can move a cast: the compiler, the dependency graph, the patched crates, the
-  # cast code itself, and this file.
+  # ballistics module whole (its root file included), the ballistics data the cone embeds
+  # (`spall_cone.rs` carries `assets/ballistics/spall_cone.ron` by `include_str!`), and this file.
   push:
     branches: [main]
     paths:
@@ -19,7 +20,9 @@ on:
       - 'Cargo.lock'
       - 'rust-toolchain.toml'
       - 'vendor/**'
+      - 'src/ballistics.rs'
       - 'src/ballistics/**'
+      - 'assets/ballistics/**'
       - '.github/workflows/field-casts.yml'
 
 # A newer run cancels an older one on the same ref: the casts are a measurement of the tree, so the
@@ -43,7 +46,9 @@ jobs:
       matrix:
         os: [ubuntu-24.04, windows-latest, macos-latest]
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 45
+    # A cold Windows build of the lib test binary ran past 45 min (MEASURED 2026-10-22), and a leg
+    # cut short saves no cache, so the next cold run is cold again. A measurement waits it out.
+    timeout-minutes: 90
     name: field casts (${{ matrix.os }})
     steps:
       # LFS on R2 via committed `.lfsconfig` (RO). checkout `lfs: true` ignores

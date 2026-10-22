@@ -9,9 +9,9 @@ name: CI
 on:
   push:
     branches: [main]
-    # A push whose every changed path matches one of these runs no lane: no test reads them. The one
-    # hole is `doc_citations`, which requires every repo file a `src/` comment cites to exist, so a
-    # doc-only push that deletes a cited file is red at the next push that runs, not at its own.
+    # A push whose every changed path matches one of these runs no lane: no test reads them. The
+    # source scans keep `.agents/`, `upstream/` and Markdown out of their universe, and the citation
+    # scan ignores a citation whose file is gone, so a doc-only push cannot turn a lane red.
     paths-ignore:
       - '.agents/**'
       - '**/*.md'
