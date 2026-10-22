@@ -66,7 +66,7 @@ struct Rung {
     /// Zero-based position in the attached-monitor list — `None` for [`DisplaySelection::Auto`],
     /// which names no monitor at all.
     monitor: Option<usize>,
-    /// ASCII plus `…`, per [`sanitize`] — it reaches `Text`.
+    /// What [`crate::ui_font::drawable`] keeps, plus `…` — it reaches `Text`.
     label: String,
 }
 
@@ -172,9 +172,16 @@ fn unnamed(selection: DisplaySelection) -> Rung {
 }
 
 /// What one attached display is called on the row: the operating system's own name where there is
-/// one this font can draw, its geometry otherwise.
+/// one this font can draw, upper-cased to match the rest of the page, its geometry otherwise.
+/// `NSScreen::localizedName` is a LOCALIZED string, so a machine in a non-Latin locale can hand us
+/// a name with nothing legible left in it, and a rung labelled `--` states less than its
+/// resolution does.
 fn rung_label(panel: &Panel<'_>) -> String {
-    let named = panel.name.as_deref().and_then(sanitize);
+    let named = panel
+        .name
+        .as_deref()
+        .and_then(crate::ui_font::drawable)
+        .map(|name| name.to_ascii_uppercase());
     let label = named.unwrap_or_else(|| geometry_label(panel.monitor));
     let label = if panel.primary {
         format!("{PRIMARY_MARK}{label}")
@@ -182,31 +189,6 @@ fn rung_label(panel: &Panel<'_>) -> String {
         label
     };
     truncate(&label)
-}
-
-/// `name` reduced to what the shipped font can draw: printable ASCII, upper-cased to match the rest
-/// of the page, every run of anything else collapsed to a single space so a dropped glyph cannot
-/// weld two words together.
-///
-/// `None` where nothing legible survives. `NSScreen::localizedName` is a LOCALIZED string, so a
-/// machine in a non-Latin locale can hand us a name that sanitizes to punctuation or to nothing, and
-/// a rung labelled `--` states less than its resolution does.
-fn sanitize(name: &str) -> Option<String> {
-    let mut sanitized = String::new();
-    for character in name.chars() {
-        let kept = match character {
-            '!'..='~' => character.to_ascii_uppercase(),
-            _ => ' ',
-        };
-        if kept != ' ' || !(sanitized.is_empty() || sanitized.ends_with(' ')) {
-            sanitized.push(kept);
-        }
-    }
-    let sanitized = sanitized.trim_end().to_string();
-    sanitized
-        .chars()
-        .any(|character| character.is_ascii_alphanumeric())
-        .then_some(sanitized)
 }
 
 /// A display named by what it is: its physical size, and its refresh rate where the platform reports
@@ -220,7 +202,7 @@ fn geometry_label(monitor: &Monitor) -> String {
 }
 
 /// `label` cut to [`LABEL_MAX_CHARS`], ellipsised where it had to be cut. `…` is inside the shipped
-/// font's verified coverage (see AGENTS.md); nothing else here leaves ASCII.
+/// font's verified coverage (see AGENTS.md).
 fn truncate(label: &str) -> String {
     if label.chars().count() <= LABEL_MAX_CHARS {
         return label.to_string();
@@ -554,40 +536,5 @@ mod tests {
                 DisplaySelection::Display3,
             ],
         );
-    }
-
-    /// The sanitizer's whole contract: printable ASCII, upper case, collapsed runs — and `None`
-    /// wherever nothing legible is left, which is what sends the rung back to its geometry.
-    #[test]
-    fn the_sanitizer_keeps_only_what_the_font_can_draw() {
-        assert_eq!(
-            sanitize("Built-in Retina Display").as_deref(),
-            Some("BUILT-IN RETINA DISPLAY"),
-        );
-        assert_eq!(
-            sanitize("DELL\u{a0}U2723QE").as_deref(),
-            Some("DELL U2723QE")
-        );
-        // Escaped, not literal: this file is scanned by the rendered-coverage guard
-        // (`src/tests/ui_ascii.rs`), and these are the inputs that must NOT survive.
-        assert_eq!(
-            sanitize("  \u{c9}cran  externe  ").as_deref(),
-            Some("CRAN EXTERNE")
-        );
-        assert_eq!(sanitize("\u{30c7}\u{30a3}\u{30b9}"), None);
-        assert_eq!(sanitize("--"), None);
-        assert_eq!(sanitize(""), None);
-        // Every surviving character is drawable, whatever went in.
-        for name in [
-            "\u{3a9} display 4K\u{2122}",
-            "\u{1f4fa} TV",
-            "tab\tseparated",
-        ] {
-            let sanitized = sanitize(name).expect("these all keep letters");
-            assert!(
-                sanitized.chars().all(|c| (' '..='~').contains(&c)),
-                "{sanitized:?} left printable ASCII",
-            );
-        }
     }
 }

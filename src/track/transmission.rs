@@ -899,13 +899,6 @@ impl TransmissionParams {
     pub fn max_curve_rpm(&self) -> f32 {
         self.engine.torque_nm[self.engine.torque_nm.len() - 1].0
     }
-
-    /// The belt speed (m/s) the top forward gear reaches at the governed rpm — the
-    /// gearing-implied top speed the straight-line gate asserts against.
-    pub fn geared_top_speed(&self) -> f32 {
-        let g = *self.gears_fwd.last().expect("non-empty ladder");
-        self.engine.governed_rpm * RPM_TO_RAD * self.sprocket_radius / g
-    }
 }
 
 /// The joint transmission's path-dependent state — the ONLY memory (design §2's REV-14 list):

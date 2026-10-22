@@ -45,9 +45,9 @@ mod cost;
 /// both `GamePlugin` and the sandbox (each scoped to the `Controlled` tank).
 mod crew_ui;
 pub(crate) mod damage;
-/// The damage cam: the `PenetrationReport` record and its clip player, mounted by
-/// `bin/damage_cam_demo`; the player is not part of `GamePlugin`. Its recorder runs in
-/// [`SimPlugin`] on the authority.
+/// The damage cam: the `PenetrationReport` record, the wire that carries it, and the pen cam — the
+/// shipped view of a hit, mounted by both client roots. Its recorder runs in [`SimPlugin`] on the
+/// authority.
 pub mod damage_cam;
 #[cfg(feature = "dev_tools")]
 mod debug;

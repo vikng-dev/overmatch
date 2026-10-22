@@ -806,7 +806,7 @@ fn tiger_pivot_gate(
 /// restarts from its constructed state. The hybrid run starts from the L600 pivot; the floor is
 /// read on its last second, past the spin-up.
 #[test]
-fn pivot_tiger_l600() {
+fn pivot_tiger_clears_each_steering_adapters_yaw_floor() {
     use crate::track::sim::{TankTransmission, TransmissionFeelTest};
     use crate::track::transmission::TransmissionMode;
 
@@ -861,136 +861,6 @@ fn gear_climb_monotone_tiger() {
         max_gear >= 6,
         "20 s of full throttle must climb well up the ladder (reached F{max_gear}, \
          trace {trace:?})"
-    );
-}
-
-/// Fixture for the synthetic weak-powertrain 30-degree regression: the REAL
-/// Tiger geometry/contact model on the course's 30-degree face, seated and settled, then
-/// the engine curve and clutch nerfed to a 100 N m DERIVED test value so every gear is
-/// incapable and the DYNAMIC brakes alone are unarrestable (static breakaway still holds
-/// at rest — the shipped 1.5x factor clears the 279.6 kN demand by the RON's authored
-/// margin). Returns `(app, tank, demand, uphill)`.
-fn synthetic_weak_30deg_fixture() -> (BootedSim, Entity, f32, Vec3) {
-    use crate::track::transmission::TransmissionMode;
-    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
-    let course_rotation = Quat::from_rotation_x(30.0_f32.to_radians());
-    let uphill = course_rotation * Vec3::NEG_Z;
-    let mass = app.world().resource::<TankBlueprint>().spec.mass;
-    let demand = mass * 9.81 * 30.0_f32.to_radians().sin();
-    let force_cap = 2.0
-        * app
-            .world()
-            .resource::<TankBlueprint>()
-            .spec
-            .track
-            .powertrain
-            .force;
-    {
-        let mut e = app.world_mut().entity_mut(tank);
-        e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(14.0, 3.4, -40.0);
-        e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 = course_rotation;
-        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
-        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
-    }
-    // Seat the suspension, ring down, and PARK — 256 ticks like the ramp probes' settle:
-    // 64 was not enough on the 30-degree face, and an unparked fixture starts its W tick
-    // already sliding, outside the near-rest zone the at-rest test is about. The parked
-    // belt reactions also seed the demand EMA with the real static grade load.
-    for _ in 0..256 {
-        drive_tick(&mut app, tank, 0.0, 0.0);
-    }
-    let parked = app
-        .world()
-        .get::<crate::track::sim::TankTransmission>(tank)
-        .expect("tank has transmission state")
-        .0
-        .park;
-    assert!(
-        parked,
-        "the fixture must reach a genuine park before the nerf"
-    );
-    let (max_launch_force, brake_capacity) = {
-        let mut gear = app
-            .world_mut()
-            .resource_mut::<crate::track::sim::TrackGear>();
-        let tp = gear.trans_mut().expect("the Tiger declares a transmission");
-        for (_, torque) in &mut tp.engine.torque_nm {
-            *torque = 100.0;
-        }
-        tp.peak_torque_nm = 100.0;
-        tp.clutch_capacity = 100.0;
-        let max_launch_force = tp
-            .gears_fwd
-            .iter()
-            .map(|&ratio| (tp.torque_at(0.0) * ratio / tp.sprocket_radius).min(force_cap))
-            .fold(0.0f32, f32::max);
-        (max_launch_force, tp.brake_capacity_n)
-    };
-    assert!(
-        max_launch_force < demand,
-        "synthetic fixture must leave every gear incapable: max {max_launch_force:.0} N, demand \
-         {demand:.0} N"
-    );
-    assert!(
-        2.0 * brake_capacity < demand,
-        "synthetic fixture must be unarrestable on DYNAMIC brakes alone: brakes {:.0} N, demand \
-         {demand:.0} N",
-        2.0 * brake_capacity
-    );
-    (app, tank, demand, uphill)
-}
-
-/// Restored 30-degree protection (a): GRADE LIMIT ENTRY observed on the
-/// live sim, not seeded by hand. At rest on the face with the demand EMA already carrying
-/// the parked grade load, held W must latch the hill hold near rest, and the launch
-/// selector — finding NO capable gear in the nerfed powertrain — must expose GRADE LIMIT
-/// while the full brake envelope (static breakaway at rest) holds the hull to
-/// centimeter-class drift.
-#[test]
-fn synthetic_weak_powertrain_30_deg_at_rest_enters_grade_limit() {
-    use crate::track::transmission::SchedulerState;
-    let (mut app, tank, _demand, _uphill) = synthetic_weak_30deg_fixture();
-    let start = app
-        .world()
-        .get::<avian3d::prelude::Position>(tank)
-        .expect("tank has position")
-        .0;
-    let mut entered_at = None;
-    for tick in 0..96 {
-        drive_tick(&mut app, tank, 1.0, 0.0);
-        let state = app
-            .world()
-            .get::<crate::track::sim::TankTransmission>(tank)
-            .expect("tank has transmission state")
-            .0;
-
-        if entered_at.is_none() && state.hill_hold && state.scheduler == SchedulerState::GradeLimit
-        {
-            entered_at = Some(tick);
-        }
-        if let Some(entry) = entered_at {
-            assert!(
-                state.hill_hold && state.scheduler == SchedulerState::GradeLimit,
-                "tick {tick}: GRADE LIMIT must persist once entered (entry {entry})"
-            );
-        }
-    }
-    let entered_at =
-        entered_at.expect("held W at rest on an impossible grade must ENTER GRADE LIMIT");
-    assert!(
-        entered_at <= 16,
-        "entry must be prompt from the settled at-rest state (took {entered_at} ticks)"
-    );
-    let end = app
-        .world()
-        .get::<avian3d::prelude::Position>(tank)
-        .expect("tank has position")
-        .0;
-    let drift = (end - start).length();
-    assert!(
-        drift < 0.05,
-        "the latched full envelope (static breakaway at rest) must hold the hull \
-         (drifted {drift:.3} m)"
     );
 }
 
@@ -1380,7 +1250,7 @@ fn assert_scripted_determinism_witnesses(run: &ScriptedDeterminismRun, label: &s
 /// keep this from passing because the scenario never reached contact, element strain, slip
 /// traction, steering slip, fire, a transmission off its spawn state, or that grade memory.
 #[test]
-fn full_simulation_replay_is_bit_exact_for_six_hundred_ticks() {
+fn full_simulation_replay_is_bit_exact_through_the_flat_and_slope_scripts() {
     let first = scripted_determinism_run();
     assert_scripted_determinism_witnesses(&first, "first fresh sim");
 

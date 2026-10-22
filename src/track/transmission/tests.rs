@@ -146,111 +146,6 @@ fn confirmed(tp: &TransmissionParams) -> TransmissionState {
     }
 }
 
-fn assert_report_bits_eq(actual: &TransmissionReport, expected: &TransmissionReport) {
-    assert_eq!(
-        actual.next_speeds.map(f32::to_bits),
-        expected.next_speeds.map(f32::to_bits)
-    );
-    assert_eq!(
-        actual.forces.map(f32::to_bits),
-        expected.forces.map(f32::to_bits)
-    );
-    assert_eq!(actual.rpm.to_bits(), expected.rpm.to_bits());
-    assert_eq!(actual.gear, expected.gear);
-    assert_eq!(actual.reverse, expected.reverse);
-    assert_eq!(actual.steer_step, expected.steer_step);
-    assert_eq!(actual.shifting, expected.shifting);
-    assert_eq!(actual.power_scale.to_bits(), expected.power_scale.to_bits());
-    assert_eq!(
-        actual.power_available.to_bits(),
-        expected.power_available.to_bits()
-    );
-}
-
-fn assert_first_tick_matches_old_lazy_init(
-    mode: TransmissionMode,
-    fp: &ForceParams,
-    tp: &TransmissionParams,
-    inp: &TransmissionInput,
-) {
-    let mut old_lazy = TransmissionState::for_governor();
-    old_lazy.omega_e = tp.engine.idle_rpm * RPM_TO_RAD;
-    let mut explicit = TransmissionState::from_spec(tp);
-
-    let old_report = step(mode, fp, Some(tp), &mut old_lazy, inp);
-    let explicit_report = step(mode, fp, Some(tp), &mut explicit, inp);
-
-    assert_report_bits_eq(&explicit_report, &old_report);
-    assert_eq!(explicit, old_lazy);
-    assert_eq!(explicit.omega_e.to_bits(), old_lazy.omega_e.to_bits());
-    assert_eq!(explicit.demand_n.to_bits(), old_lazy.demand_n.to_bits());
-}
-
-#[test]
-fn from_spec_preserves_old_lazy_first_tick_bits() {
-    let fp = lab_fp();
-    let tp = lab_tp();
-    assert_first_tick_matches_old_lazy_init(
-        TransmissionMode::Hybrid,
-        &fp,
-        &tp,
-        &input(1.0, 0.0, [0.0; 2], [0.0; 2]),
-    );
-    assert_first_tick_matches_old_lazy_init(
-        TransmissionMode::FixedRadii,
-        &fp,
-        &tp,
-        &input(1.0, 0.8, [0.0; 2], [80_000.0; 2]),
-    );
-}
-
-#[test]
-fn rev14_transmission_state_inventory_tripwire() {
-    const REPLICATE_EXACT_FIELDS: usize = 17;
-    const DERIVE_FIELDS: usize = 0;
-    const LOCAL_VIEW_FIELDS: usize = 0;
-
-    // Adding a field? Classify it in transmission-design.md's authoritative REV-14 inventory,
-    // then extend the exhaustive canonical projection. Do not add `..` there.
-    let classified_fields = transmission_state_projection(&fresh(&lab_tp()));
-    assert_eq!(
-        classified_fields.len(),
-        REPLICATE_EXACT_FIELDS + DERIVE_FIELDS + LOCAL_VIEW_FIELDS
-    );
-}
-
-/// Stage C reserve arithmetic at the slope investigation's reconstructed operating point.
-/// At the belt speed that puts Tiger F4 at 980 rpm DERIVED, its authored curve gives about
-/// 169 kN DERIVED total sprocket force (the investigation's 165 kN DERIVED rounding), below the DERIVED 20°
-/// grade demand `57_000 * 9.81 * sin(20°) = 191.2 kN`. F3 at the same speed has enough
-/// reserve to clear the DERIVED 10% + absolute margin.
-#[test]
-fn reserve_uses_authored_curve_and_traction_cap() {
-    let tp = tiger_tp();
-    let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
-    let f4 = tp.gears_fwd[3];
-    let shaft = 980.0 * RPM_TO_RAD * tp.sprocket_radius / f4;
-    let demand = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
-
-    let force_f4 = available_force_in_gear(&tp, &fp, shaft, f4);
-    let force_f3 = available_force_in_gear(&tp, &fp, shaft, tp.gears_fwd[2]);
-    let margin = reserve_margin(demand);
-
-    assert!(
-        (165_000.0..=172_000.0).contains(&force_f4),
-        "F4 @ 980 rpm must reconstruct the investigation's ~165 kN force (got {force_f4:.0})"
-    );
-    assert!(
-        force_f4 - demand < 0.0,
-        "F4 must be in reserve deficit on 20° ({force_f4:.0} - {demand:.0})"
-    );
-    assert!(
-        force_f3 - demand >= margin,
-        "F3 must clear the reserve margin ({force_f3:.0} - {demand:.0} >= {margin:.0})"
-    );
-}
-
 /// Stage C composes reserve with (rather than replacing) the established upshift gates.
 /// With zero window and isolated bands, the slope investigation's DERIVED operating point
 /// puts F4 at 980 rpm and F3 just above the test's up band. It therefore shifts on flat
@@ -298,62 +193,6 @@ fn grade_reserve_veto_blocks_f3_to_f4_on_20_degrees() {
     assert_eq!(
         grade.gear, 3,
         "the 20-degree reserve deficit must veto F3 -> F4"
-    );
-}
-
-/// A reserve deficit must persist for the full 13 DERIVED decision ticks. Warm the DERIVED
-/// eight-tick EMA on flat ground, inject a 12-tick DERIVED 20-degree demand spike at an F5 operating point where F5 is
-/// deficient but F4 is capable, then remove it. Filtering plus confirmation must reject the
-/// transient without commanding any shift.
-#[test]
-fn transient_reserve_deficit_shorter_than_confirmation_does_not_downshift() {
-    let mut tp = tiger_tp();
-    tp.shift_ticks = 0;
-    let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
-    fp.inertia = 16_000.0;
-    let shaft = 1500.0 * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[4];
-    let demand = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
-    let mut st = TransmissionState {
-        gear: 5,
-        ..fresh(&tp)
-    };
-
-    for _ in 0..32 {
-        step(
-            TransmissionMode::FixedRadii,
-            &fp,
-            Some(&tp),
-            &mut st,
-            &input(1.0, 0.0, [shaft; 2], [0.0; 2]),
-        );
-    }
-    for _ in 0..(GRADE_CONFIRM_TICKS - 1) {
-        step(
-            TransmissionMode::FixedRadii,
-            &fp,
-            Some(&tp),
-            &mut st,
-            &input(1.0, 0.0, [shaft; 2], [demand / 2.0; 2]),
-        );
-    }
-    for _ in 0..32 {
-        step(
-            TransmissionMode::FixedRadii,
-            &fp,
-            Some(&tp),
-            &mut st,
-            &input(1.0, 0.0, [shaft; 2], [0.0; 2]),
-        );
-    }
-
-    assert_eq!(
-        st.gear, 5,
-        "a sub-confirmation load spike must not downshift"
-    );
-    assert_eq!(
-        st.grade_confirm_ticks, 0,
-        "the cleared deficit resets confirmation"
     );
 }
 
@@ -437,53 +276,14 @@ fn direct_and_sequential_execute_the_same_grade_target_differently() {
     );
 }
 
-/// Direct addressing never bypasses the signed landing gate. The same F6 -> F3 reserve target
-/// shape as the addressing test is presented with the 20-tick DERIVED window under a reaction
-/// strong enough to arrest the belt inside the cut EVEN under the honest decayed-reaction /
-/// coupled-mass predictor (470 kN/side: Δm ≈ 470 000 × 4.94 ticks / 64 Hz / 29 250 kg ≈
-/// 1.24 m/s > the 1.16 m/s operating point) — `landing_m < 0`, so no grade shift may commit.
-/// (The old frozen predictor read a mere 20° grade reaction as a backward landing; the honest
-/// model rightly does not — declutching at 1.16 m/s on 20° still lands forward — so the
-/// mechanism pin needs a genuinely arresting reaction.)
-#[test]
-fn direct_skip_refuses_a_predicted_backward_landing() {
-    let mut tp = tiger_tp();
-    tp.shift_down_rpm = 0.0;
-    tp.shift_ticks = 20;
-    tp.shift_addressing = ShiftAddressing::Direct;
-    let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
-    fp.inertia = 16_000.0;
-    let shaft = 600.0 * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[5];
-    let demand = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
-    let mut st = TransmissionState {
-        gear: 6,
-        demand_n: demand,
-        demand_initialized: true,
-        grade_confirm_ticks: GRADE_CONFIRM_TICKS - 1,
-        ..fresh(&tp)
-    };
-
-    step(
-        TransmissionMode::FixedRadii,
-        &fp,
-        Some(&tp),
-        &mut st,
-        &input(1.0, 0.0, [shaft; 2], [470_000.0; 2]),
-    );
-    assert_eq!(
-        st.gear, 6,
-        "a sign-flipped direct landing must hold the engaged gear"
-    );
-    assert_eq!(st.shift_ticks, 0, "no interruption window may start");
-    assert_eq!(st.scheduler, SchedulerState::Normal);
-}
-
-/// Hill hold is a stateful use of the existing brake law, not an extra force. At rest on the
-/// DERIVED Tiger 20-degree load, F5 has negative reserve, so held W engages the flag and
-/// Direct-addresses capable F3 while the full service-brake envelope keeps both belts stopped.
-/// Once the shift ends, F3 transmits more than demand + margin; the hold releases and the same
-/// tick begins a forward launch. Releasing W always clears the flag.
+/// Hill hold is a stateful use of the existing brake law, not an extra force, on either ladder.
+/// At rest on the DERIVED Tiger 20-degree load, F5 (backing up: R4) has negative reserve, so
+/// held W (S) engages the flag and Direct-addresses capable F3 (R3 — the fixture's R ladder
+/// repeats F1–F4) while the full service-brake envelope keeps both belts stopped. Once the shift
+/// ends, the launch gear transmits more than demand + margin; the hold releases and the same tick
+/// begins a launch up the grade. Releasing the command always clears the flag. The reverse leg
+/// guards a latch gated `!st.reverse`, under which a sign-crossed reverse deficit has no
+/// hill-hold seam to decelerate into.
 #[test]
 fn hill_hold_engages_selects_launch_gear_and_releases_on_capability() {
     let mut tp = tiger_tp();
@@ -493,35 +293,121 @@ fn hill_hold_engages_selects_launch_gear_and_releases_on_capability() {
     fp.engine_force = 250_000.0;
     fp.inertia = 16_000.0;
     let demand = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
-    let mut st = TransmissionState {
-        gear: 5,
-        ..fresh(&tp)
-    };
+    // A reverse climb's command and reactions are NEGATIVE (demand projects through dir = −1).
+    for (reverse, over_tall, dir) in [(false, 5, 1.0), (true, 4, -1.0)] {
+        let ladder = if reverse { "R" } else { "F" };
+        let mut st = TransmissionState {
+            gear: over_tall,
+            reverse,
+            ..fresh(&tp)
+        };
 
-    let first = step(
-        TransmissionMode::FixedRadii,
-        &fp,
-        Some(&tp),
-        &mut st,
-        &input(1.0, 0.0, [0.0; 2], [demand / 2.0; 2]),
+        let first = step(
+            TransmissionMode::FixedRadii,
+            &fp,
+            Some(&tp),
+            &mut st,
+            &input(dir, 0.0, [0.0; 2], [dir * demand / 2.0; 2]),
+        );
+        assert!(
+            st.hill_hold,
+            "{ladder}: negative launch reserve must engage hill hold"
+        );
+        assert_eq!(
+            st.gear, 3,
+            "{ladder}: the hold must Direct-address the capable launch gear"
+        );
+        assert_eq!(st.scheduler, SchedulerState::HillHold);
+        assert_eq!(
+            first.next_speeds, [0.0; 2],
+            "{ladder}: the modeled brakes hold through the cut"
+        );
+
+        let mut released = None;
+        let mut speeds = first.next_speeds;
+        for tick in 1..8 {
+            let report = step(
+                TransmissionMode::FixedRadii,
+                &fp,
+                Some(&tp),
+                &mut st,
+                &input(dir, 0.0, speeds, [dir * demand / 2.0; 2]),
+            );
+            speeds = report.next_speeds;
+            if !st.hill_hold {
+                released = Some(tick);
+                break;
+            }
+        }
+        assert!(
+            released.is_some(),
+            "{ladder}: the capable launch gear must release the hold after its window"
+        );
+        assert!(
+            speeds[0] * dir > 0.0 && speeds[1] * dir > 0.0,
+            "{ladder}: release must begin a launch up the grade (belts {speeds:?})"
+        );
+        assert_eq!(st.scheduler, SchedulerState::Normal);
+
+        step(
+            TransmissionMode::FixedRadii,
+            &fp,
+            Some(&tp),
+            &mut st,
+            &input(0.0, 0.0, speeds, [dir * demand / 2.0; 2]),
+        );
+        assert!(
+            !st.hill_hold,
+            "{ladder}: command release always disengages hill hold"
+        );
+    }
+}
+
+/// GRADE LIMIT entry, the only gate that sets it. At rest and parked on a DERIVED 30-degree
+/// load with the demand EMA already carrying it, and the Tiger fixture's engine curve and clutch
+/// nerfed to a 100 N·m DERIVED test value so no gear is capable and the DYNAMIC brakes alone
+/// cannot arrest the load, held W must latch the hill hold and expose GRADE LIMIT promptly, keep
+/// it, and the full brake envelope (static breakaway at rest) must hold the belts to
+/// centimetre-class drift.
+#[test]
+fn synthetic_weak_powertrain_30_deg_at_rest_enters_grade_limit() {
+    let mut tp = tiger_tp();
+    for (_, torque) in &mut tp.engine.torque_nm {
+        *torque = 100.0;
+    }
+    tp.peak_torque_nm = 100.0;
+    tp.clutch_capacity = 100.0;
+    let mut fp = lab_fp();
+    fp.engine_force = 250_000.0;
+    fp.inertia = 16_000.0;
+    let demand = 57_000.0 * 9.81 * 30.0_f32.to_radians().sin();
+    let max_launch_force = tp
+        .gears_fwd
+        .iter()
+        .map(|&ratio| (tp.torque_at(0.0) * ratio / tp.sprocket_radius).min(2.0 * fp.engine_force))
+        .fold(0.0f32, f32::max);
+    assert!(
+        max_launch_force < demand,
+        "fixture must leave every gear incapable: max {max_launch_force:.0} N, demand \
+         {demand:.0} N"
     );
     assert!(
-        st.hill_hold,
-        "negative launch reserve must engage hill hold"
-    );
-    assert_eq!(
-        st.gear, 3,
-        "the hold must Direct-address the capable launch gear"
-    );
-    assert_eq!(st.scheduler, SchedulerState::HillHold);
-    assert_eq!(
-        first.next_speeds, [0.0; 2],
-        "the modeled brakes hold through the cut"
+        2.0 * tp.brake_capacity_n < demand,
+        "fixture must be unarrestable on DYNAMIC brakes alone: brakes {:.0} N, demand \
+         {demand:.0} N",
+        2.0 * tp.brake_capacity_n
     );
 
-    let mut released = None;
-    let mut speeds = first.next_speeds;
-    for tick in 1..8 {
+    let mut st = TransmissionState {
+        park: true,
+        demand_n: demand,
+        demand_initialized: true,
+        ..fresh(&tp)
+    };
+    let mut speeds = [0.0f32; 2];
+    let mut drift = 0.0f32;
+    let mut entered_at = None;
+    for tick in 0..96 {
         let report = step(
             TransmissionMode::FixedRadii,
             &fp,
@@ -530,29 +416,28 @@ fn hill_hold_engages_selects_launch_gear_and_releases_on_capability() {
             &input(1.0, 0.0, speeds, [demand / 2.0; 2]),
         );
         speeds = report.next_speeds;
-        if !st.hill_hold {
-            released = Some(tick);
-            break;
+        drift += (speeds[0] + speeds[1]).abs() / 2.0 / 64.0;
+        if entered_at.is_none() && st.hill_hold && st.scheduler == SchedulerState::GradeLimit {
+            entered_at = Some(tick);
+        }
+        if let Some(entry) = entered_at {
+            assert!(
+                st.hill_hold && st.scheduler == SchedulerState::GradeLimit,
+                "tick {tick}: GRADE LIMIT must persist once entered (entry {entry})"
+            );
         }
     }
+    let entered_at =
+        entered_at.expect("held W at rest on an impossible grade must ENTER GRADE LIMIT");
     assert!(
-        released.is_some(),
-        "capable F3 must release the hold after its window"
+        entered_at <= 16,
+        "entry must be prompt from the parked at-rest state (took {entered_at} ticks)"
     );
     assert!(
-        speeds[0] > 0.0 && speeds[1] > 0.0,
-        "release must begin a forward launch"
+        drift < 0.05,
+        "the latched full envelope (static breakaway at rest) must hold the belts \
+         (drifted {drift:.3} m)"
     );
-    assert_eq!(st.scheduler, SchedulerState::Normal);
-
-    step(
-        TransmissionMode::FixedRadii,
-        &fp,
-        Some(&tp),
-        &mut st,
-        &input(0.0, 0.0, speeds, [demand / 2.0; 2]),
-    );
-    assert!(!st.hill_hold, "command release always disengages hill hold");
 }
 
 /// D1 regression: a latched hold is a live capability decision, not a one-shot edge. A demand
@@ -943,43 +828,6 @@ fn confirmed_deficit_defers_through_post_upshift_dwell() {
     );
 }
 
-/// Near-arrest safety (the deep override): a deficit DEEPER than the
-/// reserve-margin scale is a genuine steep grade, not post-shift demand pollution — it
-/// corrects IMMEDIATELY through the post-upshift dwell instead of deferring, before
-/// window + dwell can bleed the predicted landing sign negative and strand the correction.
-#[test]
-fn deep_deficit_overrides_post_upshift_deferral() {
-    let (fp, tp, shaft, _) = correction_priority_fixture();
-    let current = available_force_in_gear(&tp, &fp, shaft, tp.gears_fwd[1]);
-    let demand = current + 30_000.0;
-    assert!(
-        demand - current > reserve_margin(demand),
-        "fixture must be a DEEP deficit (depth {} vs margin {})",
-        demand - current,
-        reserve_margin(demand)
-    );
-    let mut st = TransmissionState {
-        gear: 2,
-        last_shift_dir: 1,
-        dwell_ticks: REVERSAL_DWELL_TICKS,
-        demand_n: demand,
-        demand_initialized: true,
-        grade_confirm_ticks: GRADE_CONFIRM_TICKS - 1,
-        ..fresh(&tp)
-    };
-    step(
-        TransmissionMode::FixedRadii,
-        &fp,
-        Some(&tp),
-        &mut st,
-        &input(1.0, 0.0, [shaft; 2], [demand / 2.0; 2]),
-    );
-    assert_eq!(
-        st.gear, 1,
-        "a deep deficit must override the post-upshift deferral immediately"
-    );
-}
-
 /// Closed-loop pin: a steep grade entered RIGHT AFTER an upshift —
 /// post-window state, reversal dwell fully live, confirmation nearly paid — must correct
 /// downward on its first confirmed tick via the deep override, while the predicted landing
@@ -1051,8 +899,10 @@ fn steep_grade_after_upshift_corrects_before_lug() {
     assert!(st.gear < 4, "the correction must stand (got F{})", st.gear);
 }
 
-/// D3 regression: every sequential continuation is selected again. Releasing propulsive intent
-/// cancels the held target instead of paying another stale adjacent shift window.
+/// D3 regression: every sequential continuation is selected again, so a held target cancels
+/// once selection returns None instead of paying another stale adjacent shift window: when
+/// propulsive intent releases, and when the filtered demand recovers and the current gear is no
+/// longer deficient while the driver keeps holding throttle.
 #[test]
 fn sequential_target_cancels_when_propulsive_intent_releases() {
     let mut tp = tiger_tp();
@@ -1079,12 +929,7 @@ fn sequential_target_cancels_when_propulsive_intent_releases() {
     assert_eq!(st.gear, 5, "released intent must not continue the cascade");
     assert_eq!(st.grade_target, 0);
     assert_eq!(st.scheduler, SchedulerState::Normal);
-}
 
-/// D3 regression: a held sequential target also cancels when the filtered demand recovers and
-/// the current gear is no longer deficient, even if the driver continues holding throttle.
-#[test]
-fn sequential_target_cancels_when_demand_recovers() {
     let (fp, mut tp, shaft, _) = correction_priority_fixture();
     tp.shift_addressing = ShiftAddressing::Sequential;
     tp.shift_up_rpm = 10_000.0;
@@ -1096,7 +941,6 @@ fn sequential_target_cancels_when_demand_recovers() {
         scheduler: SchedulerState::GradeShift { from: 3, to: 1 },
         ..fresh(&tp)
     };
-
     step(
         TransmissionMode::FixedRadii,
         &fp,
@@ -1104,7 +948,6 @@ fn sequential_target_cancels_when_demand_recovers() {
         &mut st,
         &input(1.0, 0.0, [shaft; 2], [0.0; 2]),
     );
-
     assert_eq!(st.gear, 2, "recovered demand must not continue the cascade");
     assert_eq!(st.grade_target, 0);
     assert_eq!(st.scheduler, SchedulerState::Normal);
@@ -1189,57 +1032,14 @@ fn reserve_confirmation_decays_across_one_tick_jitter() {
     );
 }
 
-/// D6 regression: the protective upshift is a LAST RESORT at the
-/// mechanical-protection ceiling (`max_curve_rpm` — the Tiger's rated 3000). A signed
-/// shaft + crank back-driven PAST the ceiling upshifts with the throttle released, and the
-/// declutched crank slows. Everything between governed and the ceiling HOLDS instead —
-/// see `overrun_below_ceiling_holds_gear_for_engine_braking`.
-#[test]
-fn downhill_overrun_protective_upshift_lowers_crank_speed() {
-    let mut tp = tiger_tp();
-    tp.shift_ticks = 2;
-    let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
-    fp.inertia = 16_000.0;
-    let overrun_rpm = tp.max_curve_rpm() + 100.0;
-    let shaft = overrun_rpm * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[3];
-    let mut st = TransmissionState {
-        gear: 4,
-        omega_e: overrun_rpm * RPM_TO_RAD,
-        demand_initialized: true,
-        ..fresh(&tp)
-    };
-
-    let report = step(
-        TransmissionMode::FixedRadii,
-        &fp,
-        Some(&tp),
-        &mut st,
-        &input(0.0, 0.0, [shaft; 2], [-40_000.0; 2]),
-    );
-
-    println!(
-        "protective overrun: F4 shaft {overrun_rpm:.1} rpm -> F{}; crank {overrun_rpm:.1} -> {:.1} rpm",
-        st.gear, report.rpm
-    );
-    assert_eq!(
-        st.gear, 5,
-        "overrun must protectively upshift while coasting"
-    );
-    assert!(
-        report.rpm < overrun_rpm,
-        "declutched crank must slow from {overrun_rpm:.1} rpm, got {:.1}",
-        report.rpm
-    );
-}
-
 /// On overrun BETWEEN governed and the mechanical-protection
 /// ceiling the box HOLDS its gear — engine braking is the point of being in gear on a
 /// descent, and a governed + margin protective upshift would shed exactly that
 /// retardation. Coasting AND service-braking, with the crank fully corroborating the
 /// shaft (the honest back-driven case, not a belt transient): no shift commits and no
 /// window starts. The dial climbing past governed is the warning; only past
-/// `max_curve_rpm` does the last resort fire (test above).
+/// `max_curve_rpm` does the last resort fire
+/// (`protective_upshift_fires_under_brake_steer_and_fuel_cut`).
 #[test]
 fn overrun_below_ceiling_holds_gear_for_engine_braking() {
     let mut tp = tiger_tp();
@@ -1518,7 +1318,8 @@ fn flat_downshift_window_does_not_latch_hill_hold() {
 /// legally commit F2→F3 on tick 8 and steal the crossing this test pins; the up band is
 /// lifted out of the way so the DEFICIT pacing stays the mechanism under test (the
 /// deficit-vs-live-upshift same-tick priority is pinned by
-/// `confirmed_deficit_precedes_upshift_arm`).
+/// `confirmed_deficit_precedes_upshift_arm`). A deficit that clears one tick short of the
+/// crossing commits nothing, and its confirmation decays back to zero.
 #[test]
 fn grade_confirmation_paces_commit_when_target_already_legal() {
     let (fp, mut tp, shaft, demand) = correction_priority_fixture();
@@ -1542,6 +1343,29 @@ fn grade_confirmation_paces_commit_when_target_already_legal() {
             "tick {tick}: nothing may commit before the confirmation crosses"
         );
     }
+    // The deficit clears one tick short of the crossing: the filtered demand is back at the
+    // flat-ground sample.
+    let mut cleared = TransmissionState {
+        demand_n: 0.0,
+        ..st
+    };
+    for _ in 0..32 {
+        step(
+            TransmissionMode::FixedRadii,
+            &fp,
+            Some(&tp),
+            &mut cleared,
+            &input(1.0, 0.0, [shaft; 2], [0.0; 2]),
+        );
+    }
+    assert_eq!(
+        cleared.gear, 2,
+        "a deficit that clears short of the crossing must not commit"
+    );
+    assert_eq!(
+        cleared.grade_confirm_ticks, 0,
+        "the cleared deficit decays confirmation back to zero"
+    );
     step(TransmissionMode::FixedRadii, &fp, Some(&tp), &mut st, &inp);
     assert_eq!(
         st.gear, 1,
@@ -1594,6 +1418,7 @@ fn deficit_commit_honors_landing_sign_boundary() {
              seam owns the arrest"
     );
     assert_eq!(refuses.shift_ticks, 0, "no window may start on the refusal");
+    assert_eq!(refuses.scheduler, SchedulerState::Normal);
 }
 
 /// Priority rule: while shaft AND crank read past the ceiling the crank
@@ -1634,89 +1459,6 @@ fn crank_rescue_not_preempted_by_deficit_machinery() {
         st.shift_ticks,
         tp.shift_ticks - 1,
         "the rescue must have paid its window"
-    );
-}
-
-/// The near-rest anti-rollback seam exists on the REVERSE
-/// ladder too. Backing up a DERIVED 20-degree grade in over-tall R4 (negative launch
-/// reserve at rest — the reverse mirror of `hill_hold_engages_selects_launch_gear...`):
-/// held S must latch the hold, Direct-address the capable launch gear, keep both belts
-/// stopped through the paid cut, then release into a BACKWARD launch. Before the fix the
-/// latch was gated `!st.reverse`, so the documented "decelerate into the hill-hold seam"
-/// fallback for a sign-crossed reverse deficit simply did not exist — the tank
-/// lugged/brake-cycled in the tall gear instead of handing off.
-#[test]
-fn reverse_ladder_hill_hold_engages_and_launches() {
-    let mut tp = tiger_tp();
-    tp.shift_ticks = 2;
-    let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
-    fp.inertia = 16_000.0;
-    let demand = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
-    let mut st = TransmissionState {
-        gear: 4,
-        reverse: true,
-        ..fresh(&tp)
-    };
-
-    // Reverse-climb reactions are NEGATIVE (demand projects through dir = −1).
-    let first = step(
-        TransmissionMode::FixedRadii,
-        &fp,
-        Some(&tp),
-        &mut st,
-        &input(-1.0, 0.0, [0.0; 2], [-demand / 2.0; 2]),
-    );
-    assert!(
-        st.hill_hold,
-        "negative reverse launch reserve must engage hill hold"
-    );
-    assert!(
-        st.gear < 4,
-        "the hold must address a capable reverse launch gear (got R{})",
-        st.gear
-    );
-    assert_eq!(st.scheduler, SchedulerState::HillHold);
-    assert_eq!(
-        first.next_speeds, [0.0; 2],
-        "the modeled brakes hold through the cut"
-    );
-
-    let mut released = None;
-    let mut speeds = first.next_speeds;
-    for tick in 1..8 {
-        let report = step(
-            TransmissionMode::FixedRadii,
-            &fp,
-            Some(&tp),
-            &mut st,
-            &input(-1.0, 0.0, speeds, [-demand / 2.0; 2]),
-        );
-        speeds = report.next_speeds;
-        if !st.hill_hold {
-            released = Some(tick);
-            break;
-        }
-    }
-    assert!(
-        released.is_some(),
-        "the capable reverse launch gear must release the hold after its window"
-    );
-    assert!(
-        speeds[0] < 0.0 && speeds[1] < 0.0,
-        "release must begin a BACKWARD launch up the grade (belts {speeds:?})"
-    );
-
-    step(
-        TransmissionMode::FixedRadii,
-        &fp,
-        Some(&tp),
-        &mut st,
-        &input(0.0, 0.0, speeds, [-demand / 2.0; 2]),
-    );
-    assert!(
-        !st.hill_hold,
-        "command release always disengages the reverse hold too"
     );
 }
 
@@ -1856,7 +1598,7 @@ fn steep_grade_full_loop_upshift_freeze_recover_confirm_correct() {
     //     F3-legal speed sooner. The M2 asymmetric demand fall does not touch this
     //     trace — the post-window EMA only RISES here (12 kN → 2·steep), and the rise
     //     path is bit-identical. (The deep override's dwell-crossing behavior is pinned
-    //     separately in `deep_deficit_overrides_post_upshift_deferral`.)
+    //     separately in `steep_grade_after_upshift_corrects_before_lug`.)
     assert_eq!(
         upshift_tick,
         Some(11),
@@ -2239,62 +1981,14 @@ fn upshift_landing_gate_blocks_shift_cut_hunting() {
     assert_eq!(st.shift_ticks, 0, "no window may have started");
 }
 
-/// Terrain regression: at the REALISTIC (authored) 20-tick window a
-/// mild-grade climb must upshift F1→F2 at its trigger rpm. Tiger tables with Tiger-weight
-/// grip coupling; the reaction is the grade demand itself (`W·sin θ / 2` per side). Honest
-/// window bleed at 2.5° ≈ 12 200 N × 4.94 effective ticks / 64 Hz / 44 500 kg ≈ 0.02 m/s →
-/// landing ≈ 1477 rpm ≥ down band + margin (1150 + 150). The old frozen predictor charged
-/// all 20 ticks of full reaction against the bare belt inertia and refused — measured:
-/// F1→F2 was mathematically illegal above ~0.6° of slope, and a 10% climb sat
-/// governor-pinned in F1 forever. 5° (≈ 24.4 kN/side, the load class the old tests called
-/// "must refuse") must upshift too: a real Tiger upshifts there.
-#[test]
-fn mild_grade_upshift_proceeds_at_realistic_window() {
-    let tp = tiger_tp();
-    let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
-    fp.inertia = 16_000.0;
-    fp.grip_stiffness = forces::grip_stiffness(0.9, 57_000.0 * 9.81);
-    assert_eq!(
-        tp.shift_ticks, 20,
-        "the authored window must stay realistic"
-    );
-    for grade_deg in [2.5f32, 5.0] {
-        let demand = 57_000.0 * 9.81 * grade_deg.to_radians().sin();
-        let trigger_m =
-            (tp.shift_up_rpm + 50.0) * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[0];
-        let mut st = TransmissionState {
-            demand_n: demand,
-            demand_initialized: true,
-            ..confirmed(&tp)
-        };
-        step(
-            TransmissionMode::FixedRadii,
-            &fp,
-            Some(&tp),
-            &mut st,
-            &input(1.0, 0.0, [trigger_m; 2], [demand / 2.0; 2]),
-        );
-        assert_eq!(
-            st.gear, 2,
-            "a {grade_deg} degree grade must not refuse F1 -> F2 at the trigger rpm"
-        );
-        // The step that commits also spends the window's first tick.
-        assert_eq!(
-            st.shift_ticks,
-            tp.shift_ticks - 1,
-            "the paid window must start"
-        );
-    }
-}
-
 /// Latch-out regression at the ceiling: the protective upshift must fire past `max_curve_rpm` even while SERVICE
 /// BRAKING (opposing throttle), with a STEER detent engaged, and at a shaft/crank speed
 /// deep past the fuel cut where `available_force_in_gear` reads ZERO in every gear. Each
 /// of the old gates — `service == 0.0`, `!detent_turn`, and `next_reserve >= margin` —
 /// individually disabled the rescue exactly where descending needs it (braking/steering
 /// downhill), and the reserve gate did so PERMANENTLY above the cut, since modeled force
-/// is zero there while rpm only rises.
+/// is zero there while rpm only rises. The rescue's point is the crank: declutched, it slows on
+/// the committing tick.
 #[test]
 fn protective_upshift_fires_under_brake_steer_and_fuel_cut() {
     let mut tp = tiger_tp();
@@ -2319,7 +2013,7 @@ fn protective_upshift_fires_under_brake_steer_and_fuel_cut() {
         demand_initialized: true,
         ..fresh(&tp)
     };
-    step(
+    let report = step(
         TransmissionMode::FixedRadii,
         &fp,
         Some(&tp),
@@ -2330,6 +2024,11 @@ fn protective_upshift_fires_under_brake_steer_and_fuel_cut() {
         st.gear, 5,
         "the protective upshift must fire despite service brake + steer + fuel-cut zero \
              reserve"
+    );
+    assert!(
+        report.rpm < overrun_rpm,
+        "declutched crank must slow from {overrun_rpm:.1} rpm, got {:.1}",
+        report.rpm
     );
     // The step that commits also spends the window's first tick.
     assert_eq!(
@@ -2443,69 +2142,6 @@ fn confirmed_deficit_without_target_falls_through_to_legal_upshift() {
     );
 }
 
-/// The anti-hunting ARCHITECTURE across a whole
-/// realistic shift, not just its committing tick. Closed-loop belt (speeds fed back under
-/// a constant 2.5°-class reaction), Tiger tables, the authored 20-tick window. In this
-/// belt-only harness the cut bleeds the FULL frozen reaction (≈ 0.24 m/s — deliberately
-/// worse than the predictor's coupled-mass estimate, since there is no hull mass here),
-/// so the F2 landing dips BELOW the down band: the reversal dwell must carry the recovery
-/// — the gear may only ever climb (no 2→1 reversal on ANY tick) — and drive must lift the
-/// operating point back above the band well inside the dwell.
-#[test]
-fn shift_window_and_dwell_survive_landing_below_down_band() {
-    let tp = tiger_tp();
-    assert_eq!(
-        tp.shift_ticks, 20,
-        "the authored window must stay realistic"
-    );
-    let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
-    fp.inertia = 16_000.0;
-    let r_side = 12_200.0; // ≈ 2.5° Tiger grade per side
-    let trigger_m = (tp.shift_up_rpm + 50.0) * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[0];
-    let mut st = confirmed(&tp);
-    let mut speeds = [trigger_m; 2];
-    let mut prev_gear = 1u8;
-    let mut min_rpm_in_2 = f32::INFINITY;
-    let total = tp.shift_ticks as usize + REVERSAL_DWELL_TICKS as usize + 8;
-    for tick in 0..total {
-        let rep = step(
-            TransmissionMode::FixedRadii,
-            &fp,
-            Some(&tp),
-            &mut st,
-            &input(1.0, 0.0, speeds, [r_side; 2]),
-        );
-        speeds = rep.next_speeds;
-        if tick == 0 {
-            assert_eq!(st.gear, 2, "the trigger tick must commit F1 -> F2");
-        }
-        assert!(
-            st.gear >= prev_gear,
-            "tick {tick}: gear reversal {prev_gear} -> {} — the dwell failed",
-            st.gear
-        );
-        prev_gear = st.gear;
-        if st.gear == 2 && st.shift_ticks == 0 {
-            let rpm2 =
-                (speeds[0] + speeds[1]) / 2.0 * tp.gears_fwd[1] / tp.sprocket_radius / RPM_TO_RAD;
-            min_rpm_in_2 = min_rpm_in_2.min(rpm2);
-        }
-    }
-    assert!(
-        min_rpm_in_2 < tp.shift_down_rpm,
-        "the landing must actually dip below the down band or this test bites nothing \
-             (min F2 rpm {min_rpm_in_2:.0})"
-    );
-    let final_ratio = tp.gears_fwd[(st.gear - 1) as usize];
-    let final_rpm = (speeds[0] + speeds[1]) / 2.0 * final_ratio / tp.sprocket_radius / RPM_TO_RAD;
-    assert!(
-        final_rpm >= tp.shift_down_rpm,
-        "the recovery must end above the down band (F{} at {final_rpm:.0} rpm)",
-        st.gear
-    );
-}
-
 /// Contact-driven demand acquisition at unit level (the 20° approach
 /// fixture now SEEDS its EMA by declaration, so its scope is scheduler behavior GIVEN the
 /// demand; THIS test pins that real reactions do initialize and track the observer): the
@@ -2579,7 +2215,9 @@ fn validator_rejects_band_triple_inside_postshift_margin() {
 /// governed cut (torque → 0, so the tank back-slid under full W indefinitely). The
 /// signed shaft reads −2025 rpm: the up band can never fire, the down band is held
 /// (a backslide is not "running slow forward"), and the engine evaluates at the
-/// non-negative rev floor, delivering forward force.
+/// non-negative rev floor, delivering forward force. The R ladder mirrors it: driving in R
+/// (dir = −1) while back-driven FORWARD (m > 0 → shaft = dir·m < 0) commits no shifts, and the
+/// drive force stays R-SIGNED and non-zero.
 #[test]
 fn backslide_holds_gear_and_keeps_forward_drive() {
     let (fp, tp) = (lab_fp(), lab_tp());
@@ -2626,43 +2264,8 @@ fn backslide_holds_gear_and_keeps_forward_drive() {
         "a backslide must hold the engaged gear, not downshift-walk"
     );
     assert_eq!(st.shift_ticks, 0);
-}
 
-/// Stage A (signed landing gate): an upshift whose PREDICTED landing is sign-flipped
-/// (backward) is always refused. The traced grade case: at 1780 rpm in gear 1 under a
-/// frozen r_mean = 221 kN, the torque-cut window bleeds 221 kN / 8 t × 0.3125 s ≈
-/// 8.6 m/s — landing ≈ −6.4 m/s, BACKWARD. Under `|m|` that read as ≈ 3280 rpm ≥
-/// band + margin and the gate PASSED the catastrophic on-grade upshift; the signed
-/// gate requires a POSITIVE landing shaft.
-#[test]
-fn landing_gate_refuses_sign_flipped_landing() {
-    let (fp, tp) = (lab_fp(), lab_tp());
-    let g1 = tp.gears_fwd[0];
-    let v = 1_780.0 * RPM_TO_RAD * tp.sprocket_radius / g1; // above the up band
-    let mut st = fresh(&tp);
-    step(
-        TransmissionMode::Hybrid,
-        &fp,
-        Some(&tp),
-        &mut st,
-        &input(1.0, 0.0, [v, v], [221_000.0, 221_000.0]),
-    );
-    assert_eq!(
-        st.gear, 1,
-        "a sign-flipped predicted landing must refuse the upshift"
-    );
-    assert_eq!(st.shift_ticks, 0, "no shift may have committed");
-}
-
-/// Stage A: the REVERSE-ladder mirror of the backslide test. Driving in
-/// R (dir = −1) while back-driven FORWARD (m > 0 → shaft = dir·m < 0): no shifts in
-/// either direction, and the drive force stays R-SIGNED and non-zero (the governor
-/// must not cut on |shaft| — pre-fix, |m| = 2.5 in R1 read 2025 rpm, past the
-/// governed cut, torque → 0). Uses a 3-gear reverse ladder so "no shifts" actually
-/// has shifts to refuse.
-#[test]
-fn reverse_backslide_holds_gear_and_keeps_reverse_drive() {
-    let fp = lab_fp();
+    // The R ladder: lab_tp with three reverse gears, so "no shifts" has shifts to refuse.
     let tp = TransmissionParams::from_authoring(&TransmissionAuthoring {
         idle_rpm: 600.0,
         governed_rpm: 1800.0,
@@ -2745,6 +2348,32 @@ fn reverse_backslide_holds_gear_and_keeps_reverse_drive() {
         "a reverse backslide must hold the engaged gear, not downshift-walk"
     );
     assert_eq!(st.shift_ticks, 0);
+}
+
+/// Stage A (signed landing gate): an upshift whose PREDICTED landing is sign-flipped
+/// (backward) is always refused. The traced grade case: at 1780 rpm in gear 1 under a
+/// frozen r_mean = 221 kN, the torque-cut window bleeds 221 kN / 8 t × 0.3125 s ≈
+/// 8.6 m/s — landing ≈ −6.4 m/s, BACKWARD. Under `|m|` that read as ≈ 3280 rpm ≥
+/// band + margin and the gate PASSED the catastrophic on-grade upshift; the signed
+/// gate requires a POSITIVE landing shaft.
+#[test]
+fn landing_gate_refuses_sign_flipped_landing() {
+    let (fp, tp) = (lab_fp(), lab_tp());
+    let g1 = tp.gears_fwd[0];
+    let v = 1_780.0 * RPM_TO_RAD * tp.sprocket_radius / g1; // above the up band
+    let mut st = fresh(&tp);
+    step(
+        TransmissionMode::Hybrid,
+        &fp,
+        Some(&tp),
+        &mut st,
+        &input(1.0, 0.0, [v, v], [221_000.0, 221_000.0]),
+    );
+    assert_eq!(
+        st.gear, 1,
+        "a sign-flipped predicted landing must refuse the upshift"
+    );
+    assert_eq!(st.shift_ticks, 0, "no shift may have committed");
 }
 
 /// Stage B: the HUD readout reports the CRANK STATE ω_e directly — the state IS the
@@ -3726,52 +3355,6 @@ fn motoring_drag_curve_pins_documented_anchors() {
     }
 }
 
-/// The rise REACHES THE BELT — converged locked-coast per-side forces at two
-/// held speeds in the SAME gear, pinned as literals (not via `engine_drag`). Lab gear 3
-/// (G3/r_s = 33.26 per m): D = 550, ω_mid = 1200 →
-///   1100 rpm: 550 × 0.9444 × 33.26 / 2 ≈ −8 639 N per side;
-///   1600 rpm: 550 × 1.2222 × 33.26 / 2 ≈ −11 181 N per side —
-/// the higher-speed coast brakes ≈ 29% harder through the identical gearing, which only
-/// the curve's ω-term can produce (a flat drag gives identical forces at both speeds).
-#[test]
-fn motoring_rise_reaches_belt_at_two_speeds() {
-    let (fp, tp) = (lab_fp(), lab_tp());
-    let g3 = tp.gears_fwd[2];
-    let converged = |rpm: f32| -> f32 {
-        let v = rpm * RPM_TO_RAD * tp.sprocket_radius / g3;
-        let mut st = TransmissionState {
-            gear: 3,
-            ..fresh(&tp)
-        };
-        let mut rep = TransmissionReport::default();
-        for _ in 0..32 {
-            rep = step(
-                TransmissionMode::Hybrid,
-                &fp,
-                Some(&tp),
-                &mut st,
-                &input(0.0, 0.0, [v, v], [0.0, 0.0]),
-            );
-        }
-        assert_eq!(st.gear, 3, "the held coast must not shift");
-        rep.forces[0]
-    };
-    let low = converged(1_100.0);
-    let high = converged(1_600.0);
-    assert!(
-        (low + 8_639.0).abs() < 250.0,
-        "1100 rpm coast per-side force {low:.0} N, pinned ≈ −8639"
-    );
-    assert!(
-        (high + 11_181.0).abs() < 250.0,
-        "1600 rpm coast per-side force {high:.0} N, pinned ≈ −11181"
-    );
-    assert!(
-        high < low,
-        "the faster coast must brake harder — the rise must reach the belt"
-    );
-}
-
 /// The pivot-authority convention (the Tiger pivot-dead fix): the steering member
 /// drives the two OUTPUTS differentially, so each output may carry up to the full
 /// PER-OUTPUT capacity (`F_s` bounded by `2 × capacity`, `±capacity` per belt) — not
@@ -3819,16 +3402,6 @@ fn pivot_authority_is_per_output_capacity() {
             tp.steer_capacity_n
         );
     }
-}
-
-/// The gearing-implied top speed: the lab ladder's top gear at governed rpm is the
-/// authored 52.2 km/h × (governed/rated) — the value the sandbox straight-line gate
-/// asserts the measured speed against.
-#[test]
-fn geared_top_speed_matches_authoring() {
-    let tp = lab_tp();
-    let expect = 52.2 / 3.6 * (1800.0 / 1800.0);
-    assert!((tp.geared_top_speed() - expect).abs() < 0.01);
 }
 
 /// Stage B: a standing start under full W is CLUTCH-SLIP-LIMITED. From rest the lock

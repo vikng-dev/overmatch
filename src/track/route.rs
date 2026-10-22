@@ -156,9 +156,8 @@ pub enum SagClip {
     /// reference the force stations are laid along, and the wheel clip's grazes are mm-scale by
     /// construction. Clipping the ends adds MEASURED ~11 mm on the Tiger's MEASURED 12.65 m loop —
     /// DERIVED 0.09 % of phantom strain fed straight into the element law, MEASURED as enough to
-    /// turn a 0.1 mm latched 20° hill hold into a >50 mm slide (`headless_test`'s
-    /// `hill_hold_20_deg_engages_and_pulls_away_tiger`). Slack the
-    /// route did not budget is not free here — and neither is the extra vertex the faithful ride
+    /// turn a 0.1 mm latched 20° hill hold on the Tiger into a >50 mm slide. Slack the route did
+    /// not budget is not free here — and neither is the extra vertex the faithful ride
     /// below would insert, which is why that ride is `EveryCircle`-only rather than universal.
     RoadWheels,
     /// Every circle, ends included, and RIDDEN rather than projected — the DRAWN belt's setting

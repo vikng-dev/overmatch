@@ -313,7 +313,8 @@ existing power-conservation scale is the binding limiter: the pivot rate settles
 engine power balances scrub dissipation. The moving curvature servo is unchanged; the two
 regimes blend continuously on |m| over `NEUTRAL_M_SPEED` (`hold_blend`). Measured
 emergent Tiger pivot: **0.654 rad/s** (belts ±1.40 m/s), against the §5 prediction of the
-0.5–0.6+ rad/s class; gate `pivot_tiger_hybrid` ≥ 0.35 rad/s.
+0.5–0.6+ rad/s class; gate `pivot_tiger_clears_each_steering_adapters_yaw_floor` (its Hybrid
+leg) ≥ 0.35 rad/s.
 
 ### 3. `neutral_fraction` deleted (unprovenanced authored scalar)
 
@@ -323,7 +324,8 @@ emergent value for a fixed-radius box — the radii table's own invariant makes
 `κ_tight(g) × v(g)` gear-independent (≈ 0.337 m/s @ 3000 rpm in every gear). Field
 removed from spec struct, RON, validation, and the L600 neutral path (which now servos to
 `neutral_d_full` directly). Measured L600 neutral turn: **0.131 rad/s** (belts exactly
-±0.281 m/s); gate `pivot_tiger_l600` ≥ 0.10 rad/s.
+±0.281 m/s); gate `pivot_tiger_clears_each_steering_adapters_yaw_floor` (its L600 leg)
+≥ 0.10 rad/s.
 
 ### 4. Brake datum re-anchored (was circular)
 
@@ -336,10 +338,12 @@ to a DUAL documented anchor: the settled 20° park-hold capability (W·sin 20°/
 WWII 57-t heavies) → `brake_force: 96_000` per side. The stop-force law
 `B = clamp(R − Q − vI/dt, ±cap)` and the park latch are untouched — only the datum moved.
 Measured service-brake stop 6 → 1 m/s: **2.23 s** (analytic ≈ 0.5 s input slew +
-5.0 m/s ÷ ~3.6 m/s² brake+drag); gate `decel_tiger` ≤ 3 s, coast leg unchanged (10.7 s);
+5.0 m/s ÷ ~3.6 m/s² brake+drag), coast unchanged (10.7 s); neither time is gated (a
+per-tank budget, ADR-0034) — the brake law is gated on lab data by
+`brake_is_discretely_passive`, the coast drag by `coast_drag_reaches_belt_through_coupling`;
 the 20° hold measured drift 0.000 m over 4 s with the latch engaged (the drift gate was
-later retired — emergent holding is benchmarked, never required; the latch requirement
-lives in `slope_park_benchmarks_the_30_deg_holding_power_tiger`). At this stage, before
+later retired — emergent holding is never required; the latch requirement is gated by
+`static_brake_capacity_requires_every_hold_predicate`). At this stage, before
 the static/dynamic split below, 30° ramps
 back-drove (139.8 kN/side DERIVED demand > dynamic capacity). Supersede the inferred
 values with a real Argus brake/output-torque rating when sourced.
@@ -413,12 +417,11 @@ wire/replication, no μ/grip changes, deterministic f32):
 Deliberately NOT in this stage: engine crank state (ω_e — next arc), grade-aware
 scheduling, skip-shifts, manual gear hold.
 
-Measured gates: `backslide_holds_gear_and_keeps_forward_drive`,
-`landing_gate_refuses_sign_flipped_landing` (units);
-`ramp_climb_20_deg_never_upshifts_backward_tiger` (headless, real Tiger L600): from REST
-mid-face on the 20° course ramp under held W the Tiger crests in **7.1 s, gear trace
-[1]** — F1 holds the grade, no upshift is predicted to land, and it never moves backward
-while a shift commits. Flat-ground behavior is undisturbed (driving with the ladder,
+Gates: `backslide_holds_gear_and_keeps_forward_drive` (both ladders) and
+`landing_gate_refuses_sign_flipped_landing`, on lab data. MEASURED on the real Tiger L600
+at the time (not a gate, ADR-0034): from REST mid-face on the 20° course ramp under held W
+the Tiger crests in **7.1 s, gear trace [1]** — F1 holds the grade, no upshift is
+predicted to land, and it never moves backward while a shift commits. Flat-ground behavior is undisturbed (driving with the ladder,
 `dir·m ≡ |m|`): the anti-hunting climbs, top speed, decel, and pivot gates are unchanged.
 
 ### Stage-A review round (same day) — three findings, dispositions
@@ -444,9 +447,9 @@ while a shift commits. Flat-ground behavior is undisturbed (driving with the lad
    of the existing finite/ascending checks (`spec.rs`).
 3. **Coverage: reverse-ladder mirror + reverse readout.** Reverse symmetry HOLDS by
    construction (`dir` mirrors everything), now pinned:
-   `reverse_backslide_holds_gear_and_keeps_reverse_drive` (driving in R, back-driven
+   `backslide_holds_gear_and_keeps_forward_drive`'s R leg (driving in R, back-driven
    forward → shaft < 0: no shifts on a 3-gear R ladder, drive stays R-signed, governor
-   does not cut) and `readout_reverse_reads_signed_shaft` (R label + positive geared rpm
+   does not cut) and `readout_reports_crank_state` (R label + positive geared rpm
    while reversing; idle while back-driven).
 
 ## Stage B (2026-07-19) — engine crank state ω_e
@@ -906,4 +909,4 @@ non-engage tick is unchanged.
 | Rescue selection | ladder walk under the guard or hold (`protective_rescue_walks_ladder_under_guard_or_holds`, `sequential_rescue_steps_toward_static_target`); not pre-empted by the deficit machinery (`crank_rescue_not_preempted_by_deficit_machinery`) |
 | Transient band excursion | refused (`upshift_confirmation_rejects_transient_band_excursions`); overrun shaft without crank corroboration refused (`upshift_arms_refuse_overrun_shaft_without_crank`) |
 | Detent race | engage on the committing tick resets confirmation (`detent_engage_on_the_committing_tick_resets_confirmation`) |
-| Deficit split | shallow defers through the post-upshift dwell (`confirmed_deficit_defers_through_post_upshift_dwell`); deep overrides it (`deep_deficit_overrides_post_upshift_deferral`) |
+| Deficit split | shallow defers through the post-upshift dwell (`confirmed_deficit_defers_through_post_upshift_dwell`); deep overrides it (`steep_grade_after_upshift_corrects_before_lug`) |

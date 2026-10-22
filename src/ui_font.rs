@@ -148,8 +148,11 @@ pub(crate) fn drawable(text: &str) -> Option<String> {
 mod tests {
     use super::*;
 
-    /// What the font draws passes unchanged; anything else collapses to a space, and a string with
-    /// nothing legible left is refused.
+    /// What the font draws passes unchanged; anything else collapses to a space, runs of spaces
+    /// collapse to one and the ends are trimmed, and a string with nothing legible left is refused.
+    /// The display row's localized monitor names are the inputs that reach it least legible.
+    /// Escaped, not literal: the rendered-coverage guard (`src/tests/ui_ascii.rs`) scans `Text`
+    /// sources, and these are inputs that must NOT survive.
     #[test]
     fn drawable_keeps_only_what_the_font_draws() {
         assert_eq!(drawable("Tiger I").as_deref(), Some("Tiger I"));
@@ -161,5 +164,16 @@ mod tests {
         assert_eq!(drawable("\u{00DC}nter").as_deref(), Some("nter"));
         assert_eq!(drawable("\u{864E}\u{738B}"), None);
         assert_eq!(drawable("\u{2014}"), None);
+        assert_eq!(
+            drawable("DELL\u{a0}U2723QE").as_deref(),
+            Some("DELL U2723QE")
+        );
+        assert_eq!(
+            drawable("  \u{c9}cran  externe  ").as_deref(),
+            Some("cran externe")
+        );
+        assert_eq!(drawable("\u{30c7}\u{30a3}\u{30b9}"), None);
+        assert_eq!(drawable("--"), None);
+        assert_eq!(drawable(""), None);
     }
 }
