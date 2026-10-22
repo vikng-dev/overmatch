@@ -2749,10 +2749,6 @@ fn regenerative(
         propulsive,
         service,
     } = driver_intent(inp, st.reverse, m);
-    #[cfg(feature = "bitprobe")]
-    {
-        bitprobe.direction = dir;
-    }
 
     update_demand_filter(
         st,
@@ -2762,15 +2758,9 @@ fn regenerative(
         &mut bitprobe,
     );
     #[cfg(feature = "bitprobe")]
-    {
-        bitprobe.demand_post = st.demand_n;
-    }
+    let demand_post = st.demand_n;
 
     let shaft = dir * m;
-    #[cfg(feature = "bitprobe")]
-    {
-        bitprobe.shaft_speed = shaft;
-    }
     let current_reserve =
         modeled_reserve_in_gear(tp, fp, shaft, ladder[(st.gear - 1) as usize], st.demand_n);
 
@@ -2838,21 +2828,9 @@ fn regenerative(
     // above the rescue trigger, so the protective upshift's crank corroboration can still read
     // past the ceiling before the clutch slip saturates.
     let omega_over = (tp.max_curve_rpm() + OVERREV_MARGIN_RPM) * RPM_TO_RAD;
-    #[cfg(feature = "bitprobe")]
-    {
-        bitprobe.gear_reduction = g;
-        bitprobe.k = k;
-        bitprobe.omega_idle = omega_idle;
-        bitprobe.omega_floor = omega_floor;
-        bitprobe.shifting = shifting;
-    }
 
     update_clutch_latch(st, propulsive, m);
     let engaged = !shifting && !st.clutch_out;
-    #[cfg(feature = "bitprobe")]
-    {
-        bitprobe.engaged = engaged;
-    }
 
     let (tau_free, p_avail) = crank_free_torque(
         tp,
@@ -2894,34 +2872,22 @@ fn regenerative(
     } else {
         0.0
     };
-    let mut f_c = k * dir * tau_c;
-    #[cfg(feature = "bitprobe")]
-    {
-        bitprobe.i_mean = i_m;
-        bitprobe.f_other = -(inp.reactions[0] + inp.reactions[1]);
-        bitprobe.f_c_pre_scale = f_c;
-    }
+    let f_c_pre_scale = k * dir * tau_c;
 
-    let (mut f_s, lambda, j) = steering_force(mode, tp, fp, st, inp, m, d, f_c);
+    let (f_s_pre_scale, lambda, j) = steering_force(mode, tp, fp, st, inp, m, d, f_c_pre_scale);
 
     let power_scale = power_conservation_scale(
         tp,
         vl,
         vr,
-        f_c,
-        f_s,
+        f_c_pre_scale,
+        f_s_pre_scale,
         p_avail,
         #[cfg(feature = "bitprobe")]
         &mut bitprobe,
     );
-    #[cfg(feature = "bitprobe")]
-    {
-        bitprobe.f_s_pre_scale = f_s;
-        bitprobe.lambda = lambda;
-        bitprobe.j = j;
-    }
-    f_c *= power_scale;
-    f_s *= power_scale;
+    let f_c = f_c_pre_scale * power_scale;
+    let f_s = f_s_pre_scale * power_scale;
 
     let hill_brake_active = st.hill_hold;
     release_hill_hold(st, tp, fp, shaft, g, dir, f_c);
@@ -2930,11 +2896,8 @@ fn regenerative(
     // power gate exactly as the belt-side force was — one bookkeeping for both ends of the
     // clutch; a bound power gate leaves MORE speed on the crank, never less, so the stall
     // guard's floor promise survives scaling).
-    st.omega_e = omega_e + (tau_free - tau_c * power_scale) * dt / tp.engine_inertia;
-    #[cfg(feature = "bitprobe")]
-    {
-        bitprobe.omega_integrated = st.omega_e;
-    }
+    let omega_integrated = omega_e + (tau_free - tau_c * power_scale) * dt / tp.engine_inertia;
+    st.omega_e = omega_integrated;
 
     // --- Assemble per-side sprocket forces.
     let mut q = [
@@ -2950,12 +2913,6 @@ fn regenerative(
         inp.speeds[1] + (q[1] - inp.reactions[1]) / fp.inertia * dt,
     ];
     let next = limit_regenerative_belt_speeds(raw_next, fp.max_speed);
-    #[cfg(feature = "bitprobe")]
-    {
-        bitprobe.forces = q;
-        bitprobe.raw_next = raw_next;
-        bitprobe.next_speeds = next;
-    }
 
     settle_crank(
         st,
@@ -2966,6 +2923,30 @@ fn regenerative(
         #[cfg(feature = "bitprobe")]
         &mut bitprobe,
     );
+    // The tick's own values; the stages that take the probe filled what they compute.
+    #[cfg(feature = "bitprobe")]
+    let bitprobe = TransmissionProbe {
+        direction: dir,
+        demand_post,
+        shaft_speed: shaft,
+        gear_reduction: g,
+        k,
+        omega_idle,
+        omega_floor,
+        shifting,
+        engaged,
+        i_mean: i_m,
+        f_other: -(inp.reactions[0] + inp.reactions[1]),
+        f_c_pre_scale,
+        f_s_pre_scale,
+        lambda,
+        j,
+        omega_integrated,
+        forces: q,
+        raw_next,
+        next_speeds: next,
+        ..bitprobe
+    };
 
     TransmissionReport {
         next_speeds: next,
