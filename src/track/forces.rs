@@ -1441,49 +1441,20 @@ mod tests {
     #[test]
     fn phase_decompose_pitch_boundaries() {
         // Next-representable f64 on both sides of positive AND negative pitch multiples —
-        // the exact ticks where the old split (f32 remainder vs f64 floor) could disagree.
+        // the exact ticks where an f32 remainder and an f64 floor could disagree — out to
+        // ≈10 km of accumulated travel, the precision regime the f64 phase exists for. The
+        // `next_down` legs are the carry seam: an f64 residual just under one pitch whose f32
+        // cast rounds UP to exactly `pitch`. Without the carry, resample would alias the
+        // offset to 0 (a full link ahead) while `wraps` lagged — the one-tick material mis-key.
         for pitch in [0.152_87_f32, 0.125] {
             let p = f64::from(pitch);
-            for k in [-40_i64, -3, -1, 0, 1, 2, 7, 40] {
+            let far = (10_000.0 / p).floor() as i64;
+            for k in [-far, -40, -3, -1, 0, 1, 2, 7, 40, far] {
                 let m = k as f64 * p;
                 for phase in [m, m.next_down(), m.next_up()] {
                     assert_canonical(phase, pitch);
                 }
             }
         }
-    }
-
-    #[test]
-    fn phase_decompose_long_travel() {
-        // ≈10 km of accumulated travel: the precision regime the f64 phase exists for —
-        // boundary neighbours must stay canonical out here too.
-        let pitch = 0.152_87_f32;
-        let p = f64::from(pitch);
-        let m = (10_000.0 / p).floor() * p;
-        for phase in [
-            m,
-            m.next_down(),
-            m.next_up(),
-            m + 0.3 * p,
-            -m,
-            (-m).next_down(),
-            (-m).next_up(),
-        ] {
-            assert_canonical(phase, pitch);
-        }
-    }
-
-    #[test]
-    fn phase_decompose_carry_advances_wraps() {
-        // The carry seam itself: an f64 residual just under one pitch whose f32 cast rounds
-        // UP to exactly `pitch`. Without the carry, resample would alias the offset to 0 (a
-        // full link ahead) while `wraps` lagged — the one-tick material mis-key.
-        let pitch = 0.152_87_f32;
-        let p = f64::from(pitch);
-        let r = p - 1e-12;
-        assert_eq!(r as f32, pitch, "test premise: the cast rounds up");
-        let (wraps, offset) = phase_decompose(5.0 * p + r, pitch);
-        assert_eq!(offset, 0.0);
-        assert_eq!(wraps, 6);
     }
 }

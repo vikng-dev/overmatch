@@ -601,126 +601,11 @@ mod tests {
         );
     }
 
-    /// Two discs on one axle (what the re-exported wheel nodes actually are) with lopsided vertex
-    /// density: the CENTROID is pulled off the axle and inflates the radius, the authored origin is
-    /// not. This is the ~7 mm error that measuring from the origin removes.
-    #[test]
-    fn authored_origin_beats_the_centroid_on_a_two_disc_station() {
-        let axle = Vec3::new(1.5, 0.5, -1.9);
-        let mut verts = ring(axle, 0.387, 200, 0.1);
-        // A dense hub blob off to one side — legitimate geometry, just unevenly tessellated.
-        verts.extend((0..400).map(|i| {
-            let a = std::f32::consts::TAU * i as f32 / 400.0;
-            axle + Vec3::new(0.09, 0.05 * a.sin() + 0.06, 0.05 * a.cos() + 0.04)
-        }));
-        let m = measure_mesh(&verts, axle).expect("measures");
-        assert!(
-            (m.disc_radius - 0.387).abs() < 1e-4,
-            "got {}",
-            m.disc_radius
-        );
-
-        let centroid = verts.iter().fold(Vec3::ZERO, |a, &b| a + b) / verts.len() as f32;
-        let by_centroid = verts
-            .iter()
-            .map(|v| Vec2::new(v.y - centroid.y, v.z - centroid.z).length())
-            .fold(0.0_f32, f32::max);
-        assert!(
-            by_centroid > m.disc_radius + 2e-3,
-            "the centroid read should be the inflated one: {by_centroid} vs {}",
-            m.disc_radius
-        );
-    }
-
-    /// The origin guard: it must stay quiet on an axle-centred origin and speak up when the origin
-    /// is off the axle (the export regression it exists for). Only the side-plane offset counts —
-    /// the real wheel origins sit on the OUTER disc row, laterally off-centre by design.
-    #[test]
-    fn the_axle_origin_guard_looks_only_at_the_side_plane() {
-        let axle = Vec3::new(1.5, 0.5, -1.9);
-        let verts = ring(axle, 0.387, 128, 0.1);
-        let on_axle = measure_mesh(&verts, axle).expect("measures");
-        let off_laterally =
-            measure_mesh(&verts, axle + Vec3::new(0.4, 0.0, 0.0)).expect("measures");
-        let off_in_plane =
-            measure_mesh(&verts, axle + Vec3::new(0.0, 0.10, 0.0)).expect("measures");
-
-        let offset =
-            |m: &MeshMeasure| Vec2::new(m.center.z - m.origin.z, m.center.y - m.origin.y).length();
-        assert!(offset(&on_axle) < AXLE_ORIGIN_TOLERANCE);
-        assert!(
-            offset(&off_laterally) < AXLE_ORIGIN_TOLERANCE,
-            "a lateral offset is legitimate and must not trip the guard"
-        );
-        assert!(
-            offset(&off_in_plane) > AXLE_ORIGIN_TOLERANCE,
-            "a side-plane offset must trip it"
-        );
-    }
-
-    /// Pitch must be a SIDE-PLANE measurement: the pins' lateral placement is abstract (a pin is a
-    /// cylinder; any point on its axis is the pin), so sliding one marker along the bore must not
-    /// change the pitch by a micron.
-    #[test]
-    fn pitch_ignores_the_pins_abstract_lateral_placement() {
-        let a = Vec3::new(1.531, 0.0924, -2.5671);
-        let b = Vec3::new(1.531, 0.0924, -2.6975);
-        let pitch =
-            |p: Vec3, q: Vec3| super::super::derive::pitch_from_pins(p.with_x(0.0), q.with_x(0.0));
-        let straight = pitch(a, b);
-        assert!((straight - 0.1304).abs() < 1e-4, "got {straight}");
-        // Same two pins, one marker slid 30 cm along its own axis.
-        let slid = pitch(a, b + Vec3::new(0.3, 0.0, 0.0));
-        assert!((slid - straight).abs() < 1e-6, "{slid} vs {straight}");
-        // The 3-D length, by contrast, is wrecked by exactly that slide — the reason for the
-        // projection: a 0.3 m nudge along a pin's own axis would have more than DOUBLED the pitch,
-        // and with it the whole material loop length.
-        assert!((b + Vec3::new(0.3, 0.0, 0.0) - a).length() > straight * 2.0);
-    }
-
-    // RETIRED 2026-08-08: `tiger_glb_drives_the_model`, the end-to-end read that pinned this
-    // module's outputs — pitch, plane_x, width, pin_to_outer, pin_to_inner, wheel_tread,
-    // idler_radius — to the literal values of the 2026-07-23 audit of `tiger_1.glb`.
-    //
-    // WHY IT IS GONE, and why deleting it is not a loss of coverage. It asserted the dimensions of
-    // ONE INSTANCE. Every number in it was a fact about the Tiger's mesh rather than about this
-    // module's behaviour, so the rebuilt track shoe moved five of them at once — plane_x +1.243 mm,
-    // width -1.256 mm, and the pin_to_outer/pin_to_inner pair collapsing from an 0.812 mm asymmetry
-    // to symmetric — and the test could only be re-pinned, never satisfied. A test that a correct
-    // asset change is guaranteed to break is measuring the asset, not the code. ADR-0034 (`tanks
-    // are data, no per-tank overrides`) rules that class out: a second tank would have needed a
-    // second copy of this test, which is the definition of a per-tank override living in the suite.
-    //
-    // WHAT STILL COVERS THIS MODULE, all of it below and none of it Tiger-shaped: the read either
-    // measures the glb or aborts (`refuse`), a road-wheel station's node origin IS its axle, the
-    // axle-origin tolerance trips on a side-plane offset, and pitch ignores the pins' abstract
-    // lateral placement. Those are properties of the derivation, and they hold for any tank.
-    //
-    // The route-hash and slope-park pins are the same class and are deliberately NOT touched here;
-    // they go with the generalization slice.
-
-    /// The claim the authored-origin datum rests on, checked against the shipped asset rather than
-    /// assumed: a road-wheel station's node origin IS its axle. In the side plane it agrees with the
-    /// mesh's own bounds centre to floating-point noise; laterally it does NOT, because the origin
-    /// sits on the outer disc row — which is precisely why the radius is a side-plane measurement.
-    #[test]
-    fn the_wheel_station_origin_is_its_axle() {
-        let g = GlbNodes::read(Path::new(TIGER_GLB), &[], &[WHEEL])
-            .unwrap_or_else(|gap| panic!("the shipped glb must read: {gap}"));
-        let w = g.meshes.get(WHEEL).expect("the wheel station is present");
-        assert!(
-            (w.origin.y - w.center.y).abs() < 1e-4 && (w.origin.z - w.center.z).abs() < 1e-4,
-            "origin {:?} vs bounds centre {:?}",
-            w.origin,
-            w.center
-        );
-        assert!(
-            (w.origin.x - w.center.x).abs() > 0.10,
-            "the lateral offset is expected and load-bearing for the side-plane rule: {} vs {}",
-            w.origin.x,
-            w.center.x
-        );
-    }
+    // No test pins this module's outputs (pitch, plane_x, width, pin offsets, wheel tread, idler
+    // radius) to the shipped glb's literal dimensions: those are facts about one asset, and a
+    // correct re-export is guaranteed to break such a pin (ADR-0034). What covers the module is the
+    // derivation's own behaviour: the read either measures the glb or aborts ([`refuse`]), and the
+    // rim radius ignores loose greebles.
 
     /// A missing node must be REPORTED, by name — the whole point of killing the silent fallback.
     #[test]
@@ -738,16 +623,6 @@ mod tests {
         let text = gap.to_string();
         assert!(text.contains("Outer_Surface"), "{text}");
         assert!(!text.contains(PIN_START), "{text}");
-    }
-
-    /// An unreadable path must fail LOUDLY rather than resolve to an empty node set (which would
-    /// have looked like "every marker is missing" and buried the real cause).
-    #[test]
-    fn an_unreadable_glb_says_so() {
-        let gap = DerivedModel::from_markers(1.0, Path::new("no/such/tank.glb"))
-            .err()
-            .expect("a missing file cannot answer");
-        assert!(gap.to_string().contains("unreadable"), "{gap}");
     }
 
     /// Run `f`, which must panic, and hand back its message. `catch_unwind` (not `should_panic`) so

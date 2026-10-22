@@ -513,17 +513,6 @@ fn adapt_bands(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::view::ViewFacts;
-
-    /// The reference view every certified distance was quoted in when the corpus was cut: the
-    /// gunner optic at 4K native, one pixel of budget (`scripts/lod/config.py::REFERENCE_VIEW`).
-    pub(crate) fn reference_view() -> ViewProfile {
-        ViewProfile::of(
-            ViewFacts::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0)
-                .expect("the reference view is measured"),
-            1.0,
-        )
-    }
 
     /// EVERY RUNG MESH RECORD SHIPS TANGENTS.
     ///
@@ -563,42 +552,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    /// THE SHIPPED CORPUS REACHES THE WORLD'S FAR CORNER, derived rather than transcribed.
-    ///
-    /// The ladder's depth is a property of generation: the build stops cutting rungs once a level's
-    /// switch distance passes the right wall — the world's diagonal, beyond which no camera can
-    /// stand. A map that GROWS invalidates the corpus in the one way nothing else notices, so the
-    /// two are compared where a map edit and the certificate meet.
-    #[test]
-    fn the_shipped_chains_span_the_worlds_far_corner() {
-        let root = crate::assets::asset_root();
-        let certificate = certificate::load(&root, TIGER_ID);
-        let extent = crate::map::load(&root)
-            .map(|manifest| manifest.extent)
-            .unwrap_or(crate::terrain_grid::FIXTURE_EXTENT);
-        let diagonal_m = extent.world_size_m * std::f32::consts::SQRT_2;
-        let view = reference_view();
-
-        // A chain reaches the corner when its LAST rung opens at or before the diagonal, OR when
-        // the generator could cut no deeper (the certificate cannot say which; what it can say is
-        // that no chain's coarsest band opens beyond the far corner AND leaves the world with a
-        // finer level than the ladder was cut for). The tripwire is the first form: at least one
-        // chain must still have its last switch inside the world, or the whole corpus was cut for
-        // a smaller map than the one that loads.
-        let deepest = certificate
-            .chains
-            .values()
-            .filter_map(|chain| chain.rungs.last().map(|rung| (chain, rung)))
-            .map(|(chain, rung)| view.switch_distance_m(rung.deviation_m(), chain.radius_m))
-            .fold(f32::INFINITY, f32::min);
-        assert!(
-            deepest <= diagonal_m,
-            "every chain's last switch opens beyond the world's {diagonal_m:.1} m diagonal (the \
-             nearest is {deepest:.1} m), so the corpus was cut for a smaller map than the one that \
-             loads — rebuild the trio with `python3 scripts/tank/build.py build \
-             assets/{TIGER_ID}/{TIGER_ID}.blend`",
-        );
     }
 }

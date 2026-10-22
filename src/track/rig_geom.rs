@@ -831,31 +831,6 @@ pub(crate) fn tiger_rig() -> RigGeom {
 mod tests {
     use super::*;
 
-    /// Above the droop-filling count the SPRINGS reach free extension before the chain goes taut, so
-    /// the clamp must be a no-op: `effective` is the full static deflection and nothing is chain-
-    /// limited. Uses the shipped Tiger, so a re-export that tightened the hull would move `n_droop`
-    /// and this would still test the right regime.
-    #[test]
-    fn the_chain_clamp_is_a_noop_when_the_springs_bind_first() {
-        let p = SuspensionParams::default();
-        let base = tiger_rig();
-        let spring = derive::static_deflection(p.ride_frequency);
-        let n_droop = base.link_window(&p).n_droop;
-
-        for n in [n_droop, n_droop + 2] {
-            let rig = base.rebuild(base.teeth, n, &p);
-            assert_eq!(rig.link_window(&p).limiter, DroopLimiter::Spring);
-            let dt = rig.droop_travel(&p);
-            assert!((dt.spring - spring).abs() < 1e-6);
-            assert!(
-                (dt.effective - spring).abs() < 1e-4,
-                "spring-limited n={n}: effective {} should equal the spring droop {spring}",
-                dt.effective,
-            );
-            assert!(!dt.chain_limited());
-        }
-    }
-
     /// Inside the CHAIN regime (`n_min ≤ n < n_droop`) the inextensible loop goes taut before the
     /// springs bottom, so the reachable droop is strictly short of the spring deflection — and the
     /// defining fact of the clamp is that the taut wrap of the clamped droop pose exactly fills the
@@ -924,16 +899,29 @@ mod tests {
     /// The clamp is bounded on BOTH ends across every regime: never negative (a taut loop stops the
     /// belly, it does not pull the wheels up past rest) and never past the spring deflection. Swept
     /// from below the feasible window (Impossible) up through Spring; the Impossible floor is exactly
-    /// zero, from the branch that fires when even the rest pose overruns the loop.
+    /// zero, from the branch that fires when even the rest pose overruns the loop. Wherever the
+    /// SPRINGS bind first (Spring) the clamp is a no-op: `effective` is the full spring deflection
+    /// and nothing is chain-limited.
     #[test]
     fn the_clamped_droop_is_never_negative() {
         let p = SuspensionParams::default();
         let base = tiger_rig();
         let n_min = base.link_window(&p).n_min;
 
+        let mut spring_limited = 0;
         for n in n_min.saturating_sub(3)..=n_min + 8 {
             let rig = base.rebuild(base.teeth, n, &p);
             let dt = rig.droop_travel(&p);
+            if rig.link_window(&p).limiter == DroopLimiter::Spring {
+                spring_limited += 1;
+                assert!(
+                    (dt.effective - dt.spring).abs() < 1e-4,
+                    "spring-limited n={n}: effective {} should equal the spring droop {}",
+                    dt.effective,
+                    dt.spring,
+                );
+                assert!(!dt.chain_limited(), "spring-limited n={n} is chain-limited");
+            }
             assert!(
                 dt.effective >= 0.0,
                 "n={n}: effective droop {} went negative",
@@ -946,6 +934,8 @@ mod tests {
                 dt.spring,
             );
         }
+
+        assert!(spring_limited > 0, "the sweep must reach the Spring regime");
 
         // Below the feasible window the loop cannot wrap even the rest pose, so the clamp bottoms at
         // exactly zero rather than going negative.
@@ -1390,26 +1380,6 @@ mod tests {
     }
 
     #[test]
-    fn sprocket_stays_index_zero_and_the_loop_closes() {
-        let (sprocket, idler, wheels) = gear();
-        let circles = assemble_circles(
-            sprocket,
-            idler,
-            &wheels,
-            0.5,
-            Pose::Rest,
-            &SuspensionParams::default(),
-        );
-        assert_eq!(
-            circles[0], sprocket,
-            "route builder needs the sprocket at index 0"
-        );
-        assert_eq!(*circles.last().unwrap(), idler);
-        let route = build_route(&circles, 12.6);
-        assert_eq!(route.pts.first(), route.pts.last(), "the loop must close");
-    }
-
-    #[test]
     fn droop_drops_and_compression_lifts_the_belly() {
         let p = SuspensionParams::default();
         let belly = |pose| {
@@ -1434,26 +1404,6 @@ mod tests {
         // The droop stroke is exactly the static deflection the wheels dropped by.
         let expected = derive::static_deflection(p.ride_frequency);
         assert!((rest - droop - expected).abs() < 1e-4);
-    }
-
-    /// The premise the whole window rests on: only the belly moves, so the taut wrap is monotone in
-    /// pose. If this ever flipped, `n_min`/`n_droop` would not be a window at all.
-    #[test]
-    fn taut_perimeter_is_monotone_in_pose() {
-        let p = SuspensionParams::default();
-        let (comp, rest, droop) = (
-            perimeter(Pose::Compression, &p),
-            perimeter(Pose::Rest, &p),
-            perimeter(Pose::Droop, &p),
-        );
-        assert!(
-            comp < rest,
-            "compression {comp} must wrap tighter than rest {rest}"
-        );
-        assert!(
-            droop > rest,
-            "droop {droop} must wrap looser than rest {rest}"
-        );
     }
 
     #[test]

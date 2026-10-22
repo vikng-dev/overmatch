@@ -39,9 +39,8 @@
 //! STAYS there: the wrap spaces its pins at the MATERIAL pitch, not the drawn one
 //! ([`crate::track::wrap::station_params`]). Resampling at the naive `polyline_len / link_count`
 //! instead spaced them at the DRAWN pitch — ~0.07 % off on this rig — and the belt walked out from
-//! under the teeth at exactly that rate: one tooth per ~160–195 m. Both halves are pinned by tests
-//! in `belt` (`the_wrap_view_keeps_its_pins_seated_over_three_hundred_metres` and its
-//! `the_naive_drawn_pitch_would_drift_a_pin_onto_a_tooth` receipt).
+//! under the teeth at exactly that rate: one tooth per ~160–195 m. `belt`'s
+//! `the_wrap_view_keeps_its_pins_seated_over_three_hundred_metres` pins the seated wrap.
 //!
 //! # Binding, and why it composes the whole transform chain
 //!

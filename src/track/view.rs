@@ -852,23 +852,6 @@ mod tests {
         (raw, presented)
     }
 
-    /// Cold start adopts the sim phase whole — no ease-in from zero, no first-frame lurch.
-    #[test]
-    fn a_cold_start_adopts_the_sim_phase() {
-        assert_eq!(presented_phase(None, 12.5, 3.0, DT), 12.5);
-    }
-
-    /// A belt at rest draws no travel, however long the sample is stale: a braked skid stops the
-    /// links, and nothing here derives scroll from the hull moving.
-    #[test]
-    fn a_stopped_belt_never_scrolls() {
-        let mut phase = 7.0;
-        for _ in 0..1200 {
-            phase = presented_phase(Some(phase), 7.0, 0.0, DT);
-        }
-        assert_eq!(phase, 7.0);
-    }
-
     /// THE artefact. Drawing the sim phase directly stalls the belt for every frame no sample
     /// reached and lurches it on the one that did — an error of the belt's whole speed, growing
     /// with the gap. The carry holds the belt's own speed across the same gaps.

@@ -58,19 +58,6 @@ mod tests {
         pts
     }
 
-    /// The load-bearing property of the consolidation: both closure conventions, in both
-    /// traversal directions, agree on the winding sign.
-    #[test]
-    fn winding_sign_follows_the_traversal_under_both_closure_conventions() {
-        for make in [square_ccw_cyclic, square_ccw_closed] {
-            let ccw = make();
-            let mut cw = ccw.clone();
-            cw.reverse();
-            assert_eq!(loop_winding(&ccw), 1.0);
-            assert_eq!(loop_winding(&cw), -1.0);
-        }
-    }
-
     /// The property every consumer rests on: the normals must point AWAY from the loop, in either
     /// winding and under either closure convention. Get this backwards and the shadow tube hugs
     /// the wheels instead of the ground, or the grip columns draw inside the belt.

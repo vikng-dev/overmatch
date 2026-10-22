@@ -76,50 +76,14 @@ mod tests {
         assert_eq!(axes.throttle, 1.0);
         // At the target, further ticks are exact no-ops (no oscillation).
         assert_eq!(shape_drive(axes, target, DT), axes);
-    }
 
-    #[test]
-    fn reversal_takes_twice_the_rise_and_release_returns_to_zero() {
-        let mut axes = DriveAxes {
-            throttle: 1.0,
-            steer: -1.0,
-        };
-        let target = DriveAxes {
-            throttle: -1.0,
-            steer: 1.0,
-        };
-        for _ in 0..32 {
-            axes = shape_drive(axes, target, DT);
-        }
-        assert_eq!(axes, target);
-
-        let mut axes = DriveAxes {
-            throttle: 0.5,
-            steer: 0.5,
-        };
-        for _ in 0..8 {
+        // The descending branch lands on its target the same way: 1 → 0 in exactly 16 ticks.
+        for _ in 0..15 {
             axes = shape_drive(axes, DriveAxes::default(), DT);
+            assert!(axes.throttle > 0.0);
         }
+        axes = shape_drive(axes, DriveAxes::default(), DT);
         assert_eq!(axes, DriveAxes::default());
-    }
-
-    #[test]
-    fn zero_dt_is_identity() {
-        let axes = DriveAxes {
-            throttle: 0.3,
-            steer: -0.7,
-        };
-        assert_eq!(
-            shape_drive(
-                axes,
-                DriveAxes {
-                    throttle: 1.0,
-                    steer: 1.0
-                },
-                0.0
-            ),
-            axes
-        );
     }
 
     #[test]

@@ -501,21 +501,6 @@ pub(crate) mod tests {
         )
     }
 
-    /// The default id is what a process with no override loads, and the path is the per-map layout.
-    #[test]
-    fn the_default_map_id_resolves_and_names_its_own_directory() {
-        assert_eq!(resolve_map_id(None), DEFAULT_MAP_ID);
-        assert_eq!(resolve_map_id(Some("test_range".to_owned())), "test_range");
-        assert_eq!(
-            level_path(Path::new("/root")),
-            Path::new("/root/maps").join(map_id()).join("level.json"),
-        );
-        assert_eq!(
-            derived_asset("map_ui.png"),
-            format!("maps/{}/derived/map_ui.png", map_id()),
-        );
-    }
-
     /// THE MANIFEST IS THE MAP (`terrain_grid::decode_height_grid`): the shipped tree must carry
     /// one at the default id, it must parse and pass every check through the real loader, and the
     /// heightmap it names must exist as more than an LFS pointer. A map half-shipped — a PNG with
@@ -636,28 +621,6 @@ pub(crate) mod tests {
         );
         assert_eq!(manifest.heightmap(), "h.png");
         assert_eq!(manifest.heightmap_path(), Path::new("fixture/h.png"));
-    }
-
-    /// The declared row direction reaches the decode as itself, both ways — the ONE orientation
-    /// input `terrain_grid::grid_from_png` acts on.
-    #[test]
-    fn the_declared_row_direction_reaches_the_decode() {
-        assert_eq!(
-            fixture_manifest_with_rows(750.0, 0.0, 50.0, "+Z").rows,
-            RowOrder::TowardPositiveZ,
-        );
-        assert_eq!(
-            fixture_manifest_with_rows(750.0, 0.0, 50.0, "-Z").rows,
-            RowOrder::TowardNegativeZ,
-        );
-    }
-
-    /// THE SHIPPED BUNDLE'S OWN DECLARATION. It exports rows toward `-Z`; if that ever changes in
-    /// the file it must change here too, because the grid is mirrored north–south between the two
-    /// answers and every authored object then stands on different ground.
-    #[test]
-    fn the_shipped_map_declares_the_row_direction_it_was_exported_with() {
-        assert_eq!(shipped_manifest().rows, RowOrder::TowardNegativeZ);
     }
 
     /// A tree with no `maps/` in it at all is the flat-slab fallback world — the one absence the

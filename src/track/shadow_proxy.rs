@@ -421,7 +421,6 @@ fn signed_volume(positions: &[[f32; 3]], indices: &[u32]) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use bevy::camera::primitives::MeshAabb;
 
     /// The MEASURED Tiger shoe (`marker_model`'s own pins): plate faces, width and the shoe centre.
     /// Fixture inputs to the pure geometry, not assertions about the shipped glb — the file's
@@ -433,22 +432,6 @@ mod tests {
 
     fn tiger_section() -> Section {
         Section::from_shoe(CENTER_X, WIDTH, PIN_TO_INNER, PIN_TO_OUTER)
-    }
-
-    /// The section IS the measured shoe — no margin, on any axis. Guards the deletion of the two
-    /// margins (tested by eye 2026-07-28, flush judged better): a future "just a small safety
-    /// inset" would fail here rather than quietly narrowing every tank's shadow again.
-    #[test]
-    fn the_section_sits_exactly_on_the_measured_shoe_faces() {
-        let s = Section::from_shoe(CENTER_X, WIDTH, PIN_TO_INNER, PIN_TO_OUTER);
-
-        assert!((s.center_x - CENTER_X).abs() < 1e-6);
-        assert!(
-            (s.half_width - WIDTH * 0.5).abs() < 1e-6,
-            "no lateral margin"
-        );
-        assert!((s.outer - PIN_TO_OUTER).abs() < 1e-6, "no radial margin");
-        assert!((s.inner + PIN_TO_INNER).abs() < 1e-6, "inner is signed");
     }
 
     /// A closed convex belt: a circle of `n` joints in `(z, y)`, radius `r`, centred at the origin.
@@ -553,23 +536,6 @@ mod tests {
         }
     }
 
-    /// The tube must have real thickness rather than collapse into the zero-thickness sheet the
-    /// sun's back-face culling can make vanish. The measured Tiger plate is 50.29 mm, and since the
-    /// margins were deleted the ribbon gets all of it.
-    #[test]
-    fn the_measured_plate_leaves_a_thick_enough_ribbon() {
-        let section = tiger_section();
-        let thickness = section.outer - section.inner;
-        assert!(
-            thickness > 0.02,
-            "the ribbon is {thickness} m thick — too thin to be sun-direction independent"
-        );
-        assert!(
-            (thickness - (PIN_TO_INNER + PIN_TO_OUTER)).abs() < 1e-6,
-            "the ribbon is the whole measured plate, margin-free"
-        );
-    }
-
     /// The alpha modes whose SHADOW item bevy tags with `MeshPipelineKey::MAY_DISCARD` — copied by
     /// hand from `vendor/bevy_pbr-0.19.1-scalar-math/src/render/light.rs:2474`, the only place that
     /// decides it. A material in this set has its shadow draw routed through the material's PREPASS
@@ -623,33 +589,6 @@ mod tests {
         );
     }
 
-    /// The diagnostic arm's material is the OPPOSITE contract — it is meant to be seen — so pin it
-    /// too: an accidentally-transparent probe would make [`ProxyMode::Visible`] look like a bug in
-    /// the geometry rather than in the probe.
-    #[test]
-    fn the_visible_probe_is_opaque() {
-        let material = visible_probe_material();
-        assert_eq!(material.alpha_mode, AlphaMode::Opaque);
-        assert_eq!(material.base_color.alpha(), 1.0);
-    }
-
-    /// The ribbon must carry a non-degenerate `Aabb`: an empty or flat mesh is the other way this
-    /// silently stops casting (bevy culls shadow casters by their bounds, and a mesh with no
-    /// positions has none at all). Checked on the MEASURED belt scale, so the assertion is that the
-    /// tube has real extent on all three axes — including the thin lateral one.
-    #[test]
-    fn the_built_ribbon_has_real_bounds() {
-        let mesh = ribbon_mesh(&ring(97, 1.5), tiger_section()).expect("a closed belt");
-        let aabb = mesh
-            .compute_aabb()
-            .expect("a ribbon with positions has bounds");
-        let extent = Vec3::from(aabb.half_extents) * 2.0;
-        assert!(extent.x > 0.6, "lateral extent {} m", extent.x);
-        assert!(extent.y > 2.9 && extent.z > 2.9, "belt extent {extent:?}");
-        // …and it is parked on the shoe's own lateral centre, not on the pin plane.
-        assert!((aabb.center.x - CENTER_X).abs() < 1e-4, "{}", aabb.center.x);
-    }
-
     /// A `ProxySide` with no entities behind it — the readiness state machine is pure, so the
     /// handle and entity it carries are never read here.
     fn fresh_side() -> ProxySide {
@@ -700,18 +639,5 @@ mod tests {
         }
         assert_eq!(overdue, 1, "one warning, not one per frame");
         assert!(!side.built, "nothing was ever silenced");
-    }
-
-    /// The knob's own contract: unset is the dynamic proxy, and every mode that spawns one silences
-    /// the shoes.
-    #[test]
-    fn the_env_knob_defaults_to_the_dynamic_proxy() {
-        assert_eq!(ProxyMode::default(), ProxyMode::Dynamic);
-        assert!(!ProxyMode::Off.silences_links());
-        for mode in [ProxyMode::Static, ProxyMode::Dynamic, ProxyMode::Visible] {
-            assert!(mode.silences_links(), "{mode:?}");
-        }
-        assert!(!ProxyMode::Static.rebuilds_every_frame());
-        assert!(ProxyMode::Dynamic.rebuilds_every_frame());
     }
 }

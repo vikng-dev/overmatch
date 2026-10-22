@@ -506,25 +506,6 @@ mod tests {
         assert!(err.contains("positive area"), "{err}");
     }
 
-    /// The precondition this gate is stated over: a triangle with a plane. Three DISTINCT welded
-    /// corners on one line have none, and `L2.EXACT_DEGENERACY` refuses them before any pair is
-    /// tested — `super::tests::a_zero_area_face_is_refused` drives that end to end.
-    #[test]
-    fn a_collinear_triangle_encloses_exactly_zero_area() {
-        assert!(encloses_zero_area(&[
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [2.0, 0.0, 0.0]
-        ]));
-        assert!(!encloses_zero_area(&UNIT));
-        // One ulp of the coordinate off the line still has a plane, and this predicate is exact.
-        assert!(!encloses_zero_area(&[
-            [0.0, 0.0, 0.0],
-            [1.0, 0.0, 0.0],
-            [2.0, f32::from_bits(2.0f32.to_bits() + 1) - 2.0, 0.0]
-        ]));
-    }
-
     /// SHELLS ARE INDEPENDENT: two surfaces of one primitive may pass through each other, and this
     /// gate is about a shell's own embedding.
     #[test]

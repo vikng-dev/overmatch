@@ -1,6 +1,6 @@
 // The ground's surface blend: bevy's standard PBR fragment for the BASE pack, then three masked
-// layers mixed into its albedo, normal and ARM. The CPU half, the blend law it mirrors, and every
-// constant this reads out of `blend.blend_law` live in `src/terrain_blend.rs`.
+// layers mixed into its albedo, normal and ARM. The CPU half and every constant this reads out of
+// `blend.blend_law` live in `src/terrain_blend.rs`; the blend law itself lives here.
 //
 // DERIVATIVES ARE TAKEN ONCE, UP FRONT. A layer whose weight is zero is not sampled, and that
 // branch is not uniform across the quad — so every layer fetch is `textureSampleGrad` with
@@ -134,8 +134,8 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         raw[slot] = weight;
     }
 
-    // THE BLEND LAW (mirrored from `terrain_blend::blend_weights`): bias every weight by its own
-    // pack's AO, cut everything more than a window behind the leader, normalize.
+    // THE BLEND LAW: bias every weight by its own pack's AO, cut everything more than a window
+    // behind the leader, normalize.
     var biased = array<f32, SLOTS>();
     var leader = 0.0;
     for (var i = 0u; i < SLOTS; i++) {

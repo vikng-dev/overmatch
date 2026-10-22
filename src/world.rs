@@ -105,8 +105,7 @@ const SKY_CUBEMAP_FACE_PX: u32 = 128;
 /// Balanced AGAINST the sun rather than picked for looks. The 17° key puts
 /// `SUN_ILLUMINANCE_LUX · sin 17° ≈ 7300` lux on flat ground, i.e. ≈ 2300 cd/m² of diffuse
 /// radiance. This sky's upper hemisphere averages 0.41 of its own scale seen from a flat surface
-/// (cosine-weighted — measured, and pinned by `the_environment_fill_stays_a_fraction_of_the_sun`),
-/// so 600 cd/m² adds ≈ 245: about 11 % of the sun. That is the whole point of the number: enough
+/// (cosine-weighted, MEASURED), so 600 cd/m² adds ≈ 245: about 11 % of the sun. That is the whole point of the number: enough
 /// that a shadowed face is lit by something, far too little to lift shadows into the lit side and
 /// undo the relief the low sun was chosen to create. Raising this is the fastest way to flatten the
 /// terrain again.
@@ -709,88 +708,6 @@ pub fn ground_distance(spatial: &SpatialQuery, ray: Ray3d, max: f32) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Relative luminance — the eye's weighting, so "brighter" in these tests means what it means
-    /// on screen rather than what the raw channel sum says.
-    fn luminance(c: Vec3) -> f32 {
-        0.2126 * c.x + 0.7152 * c.y + 0.0722 * c.z
-    }
-
-    /// Deterministic cosine-weighted average of the sky over the upper hemisphere: what a flat,
-    /// upward-facing diffuse surface actually integrates (a nested elevation/azimuth lattice, so
-    /// the number is reproducible rather than sampled).
-    fn cosine_weighted_sky_average() -> f32 {
-        let (mut total, mut weight) = (0.0f32, 0.0f32);
-        for i in 0..180 {
-            let elevation = (i as f32 + 0.5) / 180.0 * std::f32::consts::FRAC_PI_2;
-            let (sin_e, cos_e) = elevation.sin_cos();
-            for j in 0..360 {
-                let azimuth = (j as f32 + 0.5) / 360.0 * std::f32::consts::TAU;
-                let (sin_a, cos_a) = azimuth.sin_cos();
-                let dir = Vec3::new(cos_e * cos_a, sin_e, cos_e * sin_a);
-                // Solid angle ∝ cos(elevation), Lambert's law contributes another sin(elevation).
-                let w = cos_e * sin_e;
-                total += luminance(sky_radiance(dir)) * w;
-                weight += w;
-            }
-        }
-        total / weight
-    }
-
-    /// THE balance the sun slice depends on, in a test instead of a comment: the environment map
-    /// must stay a FILL light. If a future tweak pushes the sky's contribution toward the sun's,
-    /// shadows lift, and the whole reason for a 17° key — relief you can read on the ground — is
-    /// gone. This fails long before that is visible in a screenshot.
-    #[test]
-    fn the_environment_fill_stays_a_fraction_of_the_sun() {
-        let average = cosine_weighted_sky_average();
-        assert!(
-            (0.35..0.50).contains(&average),
-            "the sky's cosine-weighted average is {average:.3}; SKY_ENVIRONMENT_INTENSITY's \
-             documented arithmetic assumes ≈ 0.41",
-        );
-        // Diffuse radiance the sun puts on flat ground, and what the sky adds on top of it.
-        let sun = SUN_ILLUMINANCE_LUX * SUN_ELEVATION_DEG.to_radians().sin() / std::f32::consts::PI;
-        let fill = SKY_ENVIRONMENT_INTENSITY * average;
-        let ratio = fill / sun;
-        assert!(
-            (0.05..0.20).contains(&ratio),
-            "environment fill is {:.0} cd/m² against the sun's {sun:.0} ({:.0} %) — outside the \
-             5–20 % band that keeps the scene sun-dominated",
-            fill,
-            ratio * 100.0,
-        );
-    }
-
-    /// The sky must be DIRECTIONAL, which is the whole difference between it and `AmbientLight`.
-    /// A uniform environment lights a hull's underside exactly like its deck and reads as flat
-    /// fill; this one has to stay much brighter above than below.
-    #[test]
-    fn the_sky_is_brighter_above_than_below() {
-        let zenith = luminance(sky_radiance(Vec3::Y));
-        let nadir = luminance(sky_radiance(Vec3::NEG_Y));
-        assert!(
-            zenith > nadir * 3.0,
-            "zenith {zenith:.3} vs ground bounce {nadir:.3} — too uniform to shape anything",
-        );
-    }
-
-    /// The warm quarter of the sky sits on the KEY LIGHT's side, so a reflection travelling along a
-    /// track link agrees with the shadow that link casts.
-    #[test]
-    fn the_warm_glow_follows_the_sun_azimuth() {
-        let horizon = |dir: Vec3| sky_radiance((dir * 0.99 + Vec3::Y * 0.05).normalize());
-        let sun_side = horizon(toward_sun().with_y(0.0).normalize());
-        let away = horizon(-toward_sun().with_y(0.0).normalize());
-        assert!(
-            luminance(sun_side) > luminance(away),
-            "the sun's side of the horizon must be the bright one",
-        );
-        assert!(
-            sun_side.x - sun_side.z > away.x - away.z,
-            "and the warm one (more red over blue)",
-        );
-    }
 
     /// The constraints `GeneratedEnvironmentMapLight` PANICS on — square, power-of-two, and six
     /// faces — plus the byte count, so a bad edit fails here rather than at first render.

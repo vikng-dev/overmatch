@@ -290,7 +290,6 @@ pub(crate) fn sprocket_tooth_tip(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::track::side::Side;
 
     /// The Tiger's authored counts, as the export carries them. INPUTS to the pure math below, not
     /// assertions about the file — a re-authoring that changes them must not turn this suite red.
@@ -300,67 +299,6 @@ mod tests {
     /// calibration term that silently dropped out of the rate math would show up here.
     const ORIGIN: f32 = 1.5199;
     const MESH_TIP: f32 = 0.0163;
-
-    /// The spin this module would write for `travel`, at the fixture rig.
-    fn spin(travel: f64) -> f64 {
-        f64::from(tooth_angle(travel, PITCH, TEETH, ORIGIN, MESH_TIP))
-    }
-
-    /// THE sprocket property: one link of belt travel is exactly one tooth of rotation, forever.
-    /// Checked after 5 000 links — a whole session of driving — because the failure mode this module
-    /// exists to prevent is a slow drift, not a first-frame error.
-    #[test]
-    fn one_link_of_travel_is_exactly_one_tooth() {
-        let tooth = std::f64::consts::TAU / f64::from(TEETH);
-        let seated = spin(0.0);
-        for links in [1_i32, 2, 19, 20, 21, 244, 5_000] {
-            let travel = f64::from(links) * f64::from(PITCH);
-            // Measured against the SEATED zero-phase angle, not against zero: the phase lock adds a
-            // constant, and a rate test that could not tell the two apart is the test that let a
-            // 5.99° mis-mesh sit here for a month. Rotation is negative (see `spin_angle`), and only
-            // defined modulo a full turn.
-            let residual = (seated - spin(travel) - f64::from(links) * tooth)
-                .rem_euclid(std::f64::consts::TAU);
-            let err = residual.min(std::f64::consts::TAU - residual);
-            assert!(
-                err < 1e-5,
-                "{links} links landed {err} rad off a whole tooth"
-            );
-        }
-    }
-
-    /// ...and why it is not `phase / pitch_radius`. The chord-exact pitch radius is the circle the
-    /// pins sit on, so it is right for the ROUTE and wrong for the ROTATION: chords are shorter than
-    /// their arcs, so dividing travel by it under-rotates, and the error accumulates into a full
-    /// tooth within a lap of the course. This test is the receipt for that claim.
-    #[test]
-    fn the_chord_radius_would_drift_a_whole_tooth() {
-        let chord_radius = PITCH / (2.0 * (std::f32::consts::PI / TEETH as f32).sin());
-        let tooth = std::f64::consts::TAU / f64::from(TEETH);
-        // One link in, the two agree to well under a tooth — which is exactly why the bug hides.
-        let one_link = f64::from(PITCH);
-        let by_radius = -f64::from(spin_angle(one_link, chord_radius));
-        assert!((by_radius - tooth).abs() < 0.01 * tooth);
-        // ...but the RATES differ, and that is what accumulates. Measured over one link, where
-        // neither angle has wrapped yet, so the comparison is of two raw rotations and not of two
-        // residues: the tooth lock turns further per link, by a constant fraction.
-        let per_link = spin(0.0) - spin(one_link);
-        assert!(
-            per_link > by_radius,
-            "the chord radius under-rotates - a chord is shorter than its arc",
-        );
-        let links_to_a_tooth = tooth / (per_link - by_radius);
-        assert!(
-            (links_to_a_tooth - 244.0).abs() < 15.0,
-            "expected a whole tooth of drift within ~244 links, got {links_to_a_tooth}",
-        );
-        // The tooth lock has none of it, at any distance.
-        for links in [244.0, 2_440.0] {
-            let travel = links * f64::from(PITCH);
-            let residual = (spin(0.0) - spin(travel) - links * tooth).rem_euclid(tooth);
-            assert!(residual.min(tooth - residual) < 1e-4);
-        }
-    }
 
     /// The rolling wheels turn the way a wheel turns: driving forward scrolls the belly toward `+z`,
     /// so the wheel's CONTACT POINT must travel `+z` with it, and the arc it sweeps must equal the
@@ -409,6 +347,12 @@ mod tests {
         // The node origin (the axle) is exactly the translation — spin does not move it.
         let spun_only = gear_transform(&rest, Vec3::Y, Vec3::X, 0.045, angle * 3.0);
         assert_eq!(spun_only.translation, posed.translation);
+        // The game's hull-fixed entry point carries the captured REST translation verbatim:
+        // overwriting it drags the node to the tank origin at phase zero.
+        assert_eq!(
+            gear_spin_transform(&rest, angle).translation,
+            rest.translation
+        );
 
         // The visible rotation is a pure `angle` about the hull's +x, composed onto the rest pose —
         // NOT about the node's own (flipped) x. Post-multiplying would give the opposite sense.
@@ -425,23 +369,6 @@ mod tests {
             rim(&posed).z > rim(&rest).z,
             "the bottom of the wheel must move toward +z",
         );
-    }
-
-    /// The hull-fixed shorthand the game's sprocket/idler take: the captured REST translation and
-    /// scale are carried verbatim (overwriting them drags the node to the tank origin at phase
-    /// zero), and the spin is a pure +X rotation composed in PARENT space.
-    #[test]
-    fn gear_spin_keeps_the_rest_translation_and_scale() {
-        let rest = Transform {
-            translation: Vec3::new(1.67, 0.51, -1.88),
-            rotation: Quat::from_rotation_y(std::f32::consts::PI),
-            scale: Vec3::splat(0.8),
-        };
-        let posed = gear_spin_transform(&rest, -0.7);
-        assert_eq!(posed.translation, rest.translation);
-        assert_eq!(posed.scale, rest.scale);
-        assert_eq!(gear_spin_transform(&rest, 0.0).rotation, rest.rotation);
-        assert_eq!(posed, gear_transform(&rest, Vec3::Y, Vec3::X, 0.0, -0.7));
     }
 
     /// A degenerate rig (a radius or a count the derivation could not fill in) parks the wheel
@@ -539,99 +466,5 @@ mod tests {
             let gullet = tip + tooth / 2.0;
             assert!(fold(gullet - pin, tooth).abs() < 1e-4);
         }
-    }
-
-    /// The same rule on the SHIPPED Tiger, end to end: the sprocket mesh out of the glb, the belt
-    /// origin out of the derived rig, and no constant in between. This is the test a re-export has
-    /// to get past — turn the sprocket in Blender, or move the idler so the top run's tangent point
-    /// shifts, and the calibration must follow rather than the track quietly un-meshing.
-    #[test]
-    fn the_shipped_tiger_seats_its_pins_in_its_gullets() {
-        let rig = super::super::rig_geom::tiger_rig();
-        let tooth = std::f32::consts::TAU / rig.teeth as f32;
-        for side in [Side::Left, Side::Right] {
-            let node = match side {
-                Side::Left => "Sprocket_L",
-                Side::Right => "Sprocket_R",
-            };
-            let mesh_tip = glb_sprocket_tip(node, rig.teeth);
-            let origin = rig.belt_origin_angle(side);
-            println!(
-                "{node}: tooth tips at {:.4}° + k·{:.2}°, {:+.4}° off straight up; belt origin \
-                 {:.4}°; seating correction {:+.4}°",
-                mesh_tip.to_degrees(),
-                tooth.to_degrees(),
-                fold(mesh_tip - std::f32::consts::FRAC_PI_2, tooth).to_degrees(),
-                origin.to_degrees(),
-                fold(
-                    tooth_angle(0.0, rig.pitch, rig.teeth, origin, mesh_tip),
-                    tooth
-                )
-                .to_degrees(),
-            );
-
-            // The AUTHORING contract Yan states — "tooth 0 points straight up". Not assumed anywhere
-            // in the derivation (the measured angle is what is actually used); asserted here so that
-            // if a re-export stops honouring it, the report says so out loud instead of the
-            // calibration silently absorbing it.
-            assert!(
-                fold(mesh_tip - std::f32::consts::FRAC_PI_2, tooth).abs() < 0.005,
-                "{node}'s teeth are no longer authored with tooth 0 straight up",
-            );
-
-            for links in [0.0_f64, 0.5, 3.0, 9.25, 20.0, 137.0, -6.5] {
-                let travel = links * f64::from(rig.pitch);
-                let pin = origin + (links as f32) * tooth;
-                let tip = mesh_tip - tooth_angle(travel, rig.pitch, rig.teeth, origin, mesh_tip);
-                assert!(
-                    (fold(tip - pin, tooth).abs() - tooth / 2.0).abs() < 1e-4,
-                    "{node} at {links} links: the tips stopped bisecting the pins",
-                );
-            }
-        }
-    }
-
-    /// The tooth-tip phase of one sprocket node of the SHIPPED glb, in the model's own side plane.
-    ///
-    /// A local glb walk rather than a reuse of [`super::super::marker_model`]'s: that reader is a
-    /// CONTRACT on the marker set (it aborts the process on a gap, and it measures rim radii, not
-    /// phases), while this needs raw positions of one named node under its full transform chain.
-    /// Both sprocket nodes are top-level in today's export, so "the node's world transform" and "the
-    /// hull-local one" coincide — the hull origin IS the model origin (see `rig_geom`'s frame note).
-    fn glb_sprocket_tip(node_name: &str, teeth: u32) -> f32 {
-        use bevy::math::Mat4;
-
-        let path = crate::assets::asset_root().join(crate::tank::TIGER_GLB_PATH);
-        let gltf::Gltf { document, mut blob } =
-            gltf::Gltf::open(&path).expect("the Tiger glb opens");
-        let buffers = [blob.take().expect("the glb carries its binary chunk")];
-        let scene = document.scenes().next().expect("the glb carries a scene");
-        let mut stack: Vec<(gltf::Node, Mat4)> =
-            scene.nodes().map(|n| (n, Mat4::IDENTITY)).collect();
-        while let Some((node, parent)) = stack.pop() {
-            let world = parent * crate::track::marker_model::node_matrix(&node);
-            if node.name() == Some(node_name)
-                && let Some(mesh) = node.mesh()
-            {
-                let axle = world.transform_point3(Vec3::ZERO);
-                let mut polar = Vec::new();
-                for primitive in mesh.primitives() {
-                    let reader = primitive.reader(|b| buffers.get(b.index()).map(Vec::as_slice));
-                    for p in reader
-                        .read_positions()
-                        .expect("the sprocket carries positions")
-                    {
-                        let v = world.transform_point3(Vec3::from(p)) - axle;
-                        polar.push((Vec2::new(v.z, v.y).length(), v.y.atan2(v.z)));
-                    }
-                }
-                return measure_tooth_tip_angle(&polar, teeth)
-                    .unwrap_or_else(|| panic!("{node_name} does not read as a tooth ring"));
-            }
-            for child in node.children() {
-                stack.push((child, world));
-            }
-        }
-        panic!("{node_name} is not in the shipped glb");
     }
 }

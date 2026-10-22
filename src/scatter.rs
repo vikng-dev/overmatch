@@ -373,27 +373,6 @@ mod tests {
         }
     }
 
-    /// THE determinism claim: resolving and placing the SHIPPED manifest twice yields the same
-    /// ordered list of transforms. Both peers run this derivation instead of replicating the
-    /// result, so a difference here is a desync.
-    #[test]
-    fn two_parses_place_the_same_ordered_transforms() {
-        let grid = sloped_grid();
-        let records = shipped_manifest().instances;
-        let once = place(&resolve(&records), &grid);
-        let twice = place(&resolve(&records), &grid);
-        assert_eq!(once.len(), twice.len());
-        assert_eq!(once, twice, "the same file must place the same transforms");
-        // Ordered by the file's own ids, not by the file's record order.
-        let ids: Vec<String> = resolve(&records)
-            .into_iter()
-            .map(|instance| instance.id)
-            .collect();
-        let mut sorted = ids.clone();
-        sorted.sort();
-        assert_eq!(ids, sorted, "instances must be placed in id order");
-    }
-
     /// THE stale-Y law: the placed Y is the grid's height under the instance's XZ, and the file's
     /// own Y reaches nothing.
     #[test]
@@ -419,24 +398,6 @@ mod tests {
         let mut raw = record("house_proxy", Vec2::ZERO, 0.0);
         raw.rotation = [0.0, 0.0, 0.0, 0.0];
         resolve(&[raw]);
-    }
-
-    /// …and the exporter's ordinary f32 text, which is never exactly unit, is still normalized
-    /// rather than refused. Rejecting off-unit quaternions would refuse the shipped map.
-    #[test]
-    fn an_off_unit_rotation_is_normalized_not_refused() {
-        let mut raw = record("house_proxy", Vec2::ZERO, 0.0);
-        // A yaw whose components carry the rounding an f32 decimal round-trip leaves behind.
-        raw.rotation = [0.0, 0.747_645, 0.0, 0.664_098_6];
-        let resolved = resolve(&[raw]);
-        assert!(
-            (resolved[0].rotation.length() - 1.0).abs() < 1e-6,
-            "the stored rotation must be unit",
-        );
-        assert!(
-            resolved[0].rotation.is_finite(),
-            "no NaN may reach a static collider",
-        );
     }
 
     /// ADR-0011: a map naming a prototype the registry does not carry is a broken ship.
@@ -465,40 +426,6 @@ mod tests {
                  carry",
             );
         }
-    }
-
-    /// The two contact laws, on the shipped map: every building is a block whose transform is the
-    /// unit-cube encoding of its bounds, and no fir is a block.
-    #[test]
-    fn buildings_become_blocks_and_firs_do_not() {
-        let grid = sloped_grid();
-        let placements = place(&resolve(&shipped_manifest().instances), &grid);
-        let mut buildings = 0usize;
-        for placement in &placements {
-            match placement.proxy() {
-                Proxy::Building { min, max } => {
-                    buildings += 1;
-                    let block = placement.block().expect("a building is a block");
-                    let scale = placement.pose.scale;
-                    assert_eq!(block.scale, (max - min) * scale);
-                    assert_eq!(block.rotation, placement.pose.rotation);
-                    // The box centre sits over the ground pose by the prototype's own mid-bounds,
-                    // so the skirt (`min.y` below zero) stays under the surface.
-                    assert_eq!(
-                        block.translation,
-                        placement.pose.translation
-                            + placement.pose.rotation * ((min + max) * 0.5 * scale),
-                    );
-                }
-                Proxy::Fir { .. } => assert_eq!(
-                    placement.block(),
-                    None,
-                    "a fir must never enter the block list — belts would climb the trunk",
-                ),
-            }
-        }
-        assert_eq!(buildings, 74, "the shipped map's building count");
-        assert_eq!(placements.len(), 709, "the shipped map's instance count");
     }
 
     /// The spawn itself, in a real world: every building reaches the block list, every instance

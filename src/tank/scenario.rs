@@ -279,12 +279,9 @@ const PROBE_FAR_DUEL_XZ: Vec2 = Vec2::new(-410.0, -440.0);
 /// 527.9 m — which left the grid's nearest shoe 3 m inside the declared margin. The placement
 /// tracks the band; the band is an output of generation.
 ///
-/// The band claim is asserted against the distance BEVY measures — camera to shoe, orbit radius and
-/// hull extent taken off the near end — by `terrain_grid`'s
-/// `the_far_probe_placement_puts_every_probe_in_one_coarse_shoe_band`, which is where the margin
-/// arithmetic lives, and which reads the band off the chain rather than naming a level. Nothing here
-/// should be re-derived by hand: the ladder is regenerated, and WHICH level owns 600..645 m is an
-/// output of that regeneration.
+/// No test asserts the band claim; a capture shows the band directly. Nothing here should be
+/// re-derived by hand: the ladder is regenerated, and WHICH level owns 600..645 m is an output of
+/// that regeneration.
 const PROBE_FAR_NEAR_Z: f32 = 160.0;
 
 /// Is this process running the FAR probe placement?

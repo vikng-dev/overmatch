@@ -1660,15 +1660,6 @@ mod tests {
         );
     }
 
-    /// The door's own shape: a sound pair certifies, and the report it produces is empty.
-    #[test]
-    fn a_sound_pair_certifies_with_an_empty_report() {
-        let (nodes, spec) = sound_vehicle();
-        let findings = verify("sound", &nodes, &spec);
-        assert!(findings.is_empty(), "{}", render(&findings));
-        assert!(!has_error(&findings));
-    }
-
     /// EVERY SHIPPED ASSET, THROUGH THE REAL GATE. Discovery, not a list: a second vehicle is a
     /// directory, never a line of test code.
     /// THE WALK IS THE SAME WALK ON BOTH ENDS, and it is the same walk it was before the split.

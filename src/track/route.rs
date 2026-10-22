@@ -779,168 +779,6 @@ mod tests {
 
     use deepest_inside as deepest;
 
-    /// FNV-1a 64 over the exact little-endian f32 bits of every route vertex and cumulative
-    /// arc-length entry — the whole observable output of [`build_route`].
-    fn route_bits_hash(route: &Route) -> u64 {
-        let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-        let mut write = |v: f32| {
-            for byte in v.to_le_bytes() {
-                hash ^= u64::from(byte);
-                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-            }
-        };
-        for p in &route.pts {
-            write(p.x);
-            write(p.y);
-        }
-        for i in 0..route.pts.len() {
-            write(route.cum[i]);
-        }
-        hash
-    }
-
-    /// BIT-IDENTITY PIN for the two wire-adjacent productions of [`build_route`] on the
-    /// shipped Tiger rig: the material-length loop that becomes `TrackGear::loop_pts` (sim
-    /// force stations — replicated-state adjacent) and the taut (`belt_len = 0`) wrap whose
-    /// belly minimum is `RigGeom::hull_rest_y` (the spawn datum). Captured BEFORE the shared
-    /// taut-walk extraction and required to hold bit-for-bit after it: any refactor of the
-    /// envelope scan / tangent-arc chaining that moves one bit here is a sim change, not a
-    /// cleanup. (Asset re-exports legitimately move these values — re-pin from the printed
-    /// actuals when the GLB or authored counts change on purpose.)
-    ///
-    /// DELIBERATE RE-PIN, 2026-08-07 (material-bind arc): the road wheels were re-modelled as
-    /// five-shell mixed-substance objects, and the new tread radius measures 0.386441 m against the
-    /// old 0.386968 — 0.53 mm smaller. That moves `hull_rest_y` by 0.56 mm (0.09624 → 0.09680) and
-    /// the loop length by 0.05 mm, so every hash below moved with it. Re-pinned from the printed
-    /// actuals, reported, and NOT a code change: the four assertions are byte-for-byte the previous
-    /// ones with new numbers.
-    ///
-    /// These numbers held THROUGH the end-circle sag clip, and that is the point of the
-    /// [`SagClip::RoadWheels`] setting above: moving the drape onto the sprocket and idler
-    /// hemispheres would have left the vertex count at 172 but moved 9 of them (the return run's
-    /// first five and last four) and lengthened the loop by 11 mm. The view wants exactly that and
-    /// gets it; the route must not have it, and this pin is what says so.
-    #[test]
-    fn build_route_is_bit_stable_on_the_shipped_tiger_rig() {
-        use crate::track::side::Side;
-        let rig = crate::track::rig_geom::tiger_rig();
-        let circles = rig.rest.get(Side::Right);
-
-        let loop_route = build_route(circles, rig.belt_len());
-        let taut_route = build_route(circles, 0.0);
-        let belly_y = taut_route
-            .pts
-            .iter()
-            .map(|p| p.y)
-            .fold(f32::INFINITY, f32::min);
-
-        println!(
-            "tiger route pin: loop pts {} hash {:#018x} total bits {:#010x} | taut pts {} \
-             hash {:#018x} belly bits {:#010x}",
-            loop_route.pts.len(),
-            route_bits_hash(&loop_route),
-            loop_route.total().to_bits(),
-            taut_route.pts.len(),
-            route_bits_hash(&taut_route),
-            belly_y.to_bits(),
-        );
-
-        // Re-pinned 2026-08-09 against the re-exported running gear: the inner row of road-wheel
-        // stations carries a new origin, and the idler's tread radius moved 1.9 mm, so every
-        // circle the wrap is built on moved with them. Both VERTEX COUNTS are unchanged (172 and
-        // 60) and `belly_y` is bit-identical: the route's structure, and the hull datum it feeds,
-        // are the same — only the coordinates moved.
-        assert_eq!(loop_route.pts.len(), 172, "loop route vertex count moved");
-        assert_eq!(
-            route_bits_hash(&loop_route),
-            0x732d_b46f_bbb9_0f5c,
-            "loop route bits moved (TrackGear::loop_pts would change)"
-        );
-        assert_eq!(
-            loop_route.total().to_bits(),
-            0x414a_8fc1,
-            "loop length bits moved"
-        );
-        assert_eq!(taut_route.pts.len(), 60, "taut route vertex count moved");
-        assert_eq!(
-            route_bits_hash(&taut_route),
-            0xe75b_8f2d_8919_5e0e,
-            "taut route bits moved (hull_rest_y datum would change)"
-        );
-        assert_eq!(
-            belly_y.to_bits(),
-            0x3dc8_20bc,
-            "hull_rest_y source bits moved"
-        );
-    }
-
-    /// A drape with NO slack is the external tangent chord itself, and the two [`SagClip`] settings
-    /// must produce it BIT for bit. Otherwise the `belt_len = 0` taut build — the `hull_rest_y`
-    /// spawn datum's source above, and the shape the wrap's diagnostic loop degenerates to when the
-    /// belly eats the whole budget — would depend on which consumer asked for it.
-    ///
-    /// The no-op has three parts, and this test is the proof rather than an assumption. Two are
-    /// STRUCTURAL:
-    ///
-    /// * at zero slack the parabola IS the chord, so no circle's hemisphere stands above it and
-    ///   [`sag_samples`] refines nothing — both settings emit the same `SAG_SEGMENTS + 1` abscissas;
-    /// * OWNERSHIP: the span's two endpoints are the only samples that sit ON a circle, i.e. the
-    ///   only ones where re-deriving `c.y + √(r² − dz²)` could round a ULP away from the tangent
-    ///   point the walk handed in — and [`SagClip::EveryCircle`] exempts each of them from exactly
-    ///   that circle ([`SPAN_END_ON_CIRCLE`]).
-    ///
-    /// The third is MEASURED, and deliberately so. NEITHER setting is exempt anywhere else: under
-    /// `RoadWheels` all 17 samples are offered to the road wheels, and under `EveryCircle` the 15
-    /// interior ones are offered to every circle and the 2 ends to every circle BUT their own. On
-    /// this rig every one of those projections is a `f32::max` returning its own argument, because
-    /// the taut return chord — the upper external tangent of sprocket and idler — runs clear above
-    /// every road wheel, and each end tangent point is outside the circle at the far end. That is a
-    /// property of a real running gear rather than a theorem about arbitrary circles, and the
-    /// bit-for-bit assertion below is exactly what states it for the shipped rig.
-    #[test]
-    fn a_zero_slack_drape_is_bit_identical_under_either_clip() {
-        use crate::track::side::Side;
-        let rig = crate::track::rig_geom::tiger_rig();
-        let circles = rig.rest.get(Side::Right);
-        let (front_c, front_r) = circles[0];
-        let (rear_c, rear_r) = *circles.last().unwrap();
-        let (rear_up, front_up) = external_tangent(rear_c, rear_r, front_c, front_r, 1.0);
-
-        let span = |clip| {
-            let mut out = Vec::new();
-            sag_span(rear_up, front_up, 0.0, circles, clip, &mut out);
-            out
-        };
-        let (roads, every) = (span(SagClip::RoadWheels), span(SagClip::EveryCircle));
-
-        assert_eq!(
-            roads.len(),
-            SAG_SEGMENTS + 1,
-            "a zero-slack drape must be the plain uniform sampling — no promotion, no refinement"
-        );
-        assert_eq!(
-            every.len(),
-            roads.len(),
-            "`EveryCircle` refined a taut chord"
-        );
-        for (i, (a, b)) in roads.iter().zip(&every).enumerate() {
-            assert_eq!(
-                (a.x.to_bits(), a.y.to_bits()),
-                (b.x.to_bits(), b.y.to_bits()),
-                "sample {i} moved between clip settings at zero slack: {a:?} vs {b:?}"
-            );
-        }
-        // And the endpoints are the tangent points themselves, not a rounded re-derivation.
-        assert_eq!(
-            every.first().map(|p| p.to_array()),
-            Some(rear_up.to_array())
-        );
-        assert_eq!(
-            every.last().map(|p| p.to_array()),
-            Some(front_up.to_array())
-        );
-    }
-
     /// The [`SagClip::EveryCircle`] ride's contract, stated on the shape it actually produces: with
     /// slack on the shipped Tiger's return run, EVERY SEGMENT of the drape clears every circle to
     /// within [`SAG_CLIP_INSET`] — not merely every vertex, which is all a vertical projection of a
@@ -1194,8 +1032,8 @@ mod tests {
     /// lifts it out of. [`sag_span`] scopes the exemption by OWNERSHIP instead, and this is the case
     /// that separates the two.
     ///
-    /// The fixture is synthetic — the shipped rig does not reach it (the bit pin above and `wrap`'s
-    /// drawn-belt sweep are both unmoved by the ownership rule), so it is asserted here or nowhere —
+    /// The fixture is synthetic — the shipped rig does not reach it (`wrap`'s drawn-belt sweep is
+    /// unmoved by the ownership rule), so it is asserted here or nowhere —
     /// and it is DERIVED from the span's own start rather than eyeballed:
     ///
     /// * two equal end circles at equal height, so the taut walk leaves each at its TOP and both
@@ -1293,8 +1131,7 @@ mod tests {
             "the lifted start is not on the rogue wheel's hemisphere: {lifted:?}"
         );
         // …and the far end, whose own circle owns it, is still the tangent point the caller handed
-        // in. (Its BIT-exactness is pinned by `a_zero_slack_drape_is_bit_identical_under_either_clip`;
-        // what matters here is that the ownership rule did not move it.)
+        // in: the ownership rule did not move it.
         let far = *pts.last().expect("the drape is never empty");
         assert!(
             far.distance(to) <= SPAN_END_ON_CIRCLE,

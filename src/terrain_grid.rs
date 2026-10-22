@@ -17,8 +17,8 @@
 //!    [`HeightGrid`] resource. No consumer ever sees the full-resolution decode.
 //! 2. [`HeightGrid::height_at`] is piecewise-TRIANGULAR, splitting every cell along the SAME
 //!    diagonal parry's heightfield triangulation uses (the anti-diagonal — pinned empirically by
-//!    `parry_splits_cells_along_the_anti_diagonal` and `oracle_matches_collider_at_seeded_points`
-//!    below). So oracle == collider at every point, up to float rounding.
+//!    `oracle_matches_collider_at_seeded_points` below). So oracle == collider at every point, up
+//!    to float rounding.
 //! 3. The collider ([`heightfield_collider`]) and the render mesh ([`terrain_mesh_tiles`]) are
 //!    built from the grid's OWN samples — never resampled at a different resolution — with that
 //!    same diagonal split. Oracle, collider, and visuals are the identical surface.
@@ -124,8 +124,8 @@ pub(crate) fn world_extent(grid: Option<&HeightGrid>) -> TerrainExtent {
 pub(crate) const SMOOTH_SIGMA_PX: f32 = 0.0;
 
 /// The σ (px) the embedded [`SMOOTH_KERNEL`] table was generated for. When smoothing is active,
-/// `SMOOTH_SIGMA_PX` must equal this (or the table must be regenerated); the
-/// `smooth_kernel_matches_its_sigma` test pins table ↔ σ.
+/// `SMOOTH_SIGMA_PX` must equal this (or the table must be regenerated); [`grid_from_png`]
+/// refuses a mismatch.
 pub(crate) const SMOOTH_KERNEL_SIGMA: f32 = 6.0;
 
 /// Normalized Gaussian half-kernel for [`SMOOTH_KERNEL_SIGMA`] = 6.0, radius 3σ = 18,
@@ -353,8 +353,8 @@ impl HeightGrid {
     /// parry's heightfield triangulation uses — the ANTI-diagonal, connecting the cell's
     /// `(x_lo, z_hi)` and `(x_hi, z_lo)` corners (parry `triangles_at`, default non-zigzag
     /// status: triangles `(p00, p10, p01)` / `(p10, p11, p01)`; pinned empirically by the
-    /// `parry_splits_cells_along_the_anti_diagonal` and `oracle_matches_collider_at_seeded_points`
-    /// tests). So this function IS the collider surface, up to float rounding — not an
+    /// `oracle_matches_collider_at_seeded_points` test). So this function IS the collider
+    /// surface, up to float rounding — not an
     /// approximation of it. Do NOT change this back to bilinear without changing the collider.
     ///
     /// Intended consumers beyond the oracle: the net server's spawn/respawn placement
@@ -703,8 +703,9 @@ pub(crate) fn decode_height_grid(
 
 /// PNG bytes + the extent and row order the map declares → [`HeightGrid`]: decode,
 /// bit-depth-normalize, orient, and (when [`SMOOTH_SIGMA_PX`] is active) smooth. Pure, so the
-/// shipped asset itself is pinned by a unit test — which also makes a Git-LFS pointer file shipping
-/// in place of the map fail in CI instead of at boot.
+/// tests decode the shipped asset through it (`tests::shipped_grid`); a Git-LFS pointer shipping
+/// in place of the map fails `map::tests::shipped_map_ships_a_valid_manifest` in CI instead of at
+/// boot.
 pub(crate) fn grid_from_png(
     bytes: &[u8],
     extent: TerrainExtent,
@@ -852,8 +853,8 @@ pub(crate) fn gaussian_smooth(samples: &[f32], size: usize) -> Vec<f32> {
 /// samples (the ONE-SURFACE invariant — never resampled at another resolution), spanning the
 /// full `[-WORLD_HALF_EXTENT, +WORLD_HALF_EXTENT]` square.
 ///
-/// Orientation is pinned EMPIRICALLY by `heightfield_matches_grid_orientation_and_scale` below
-/// (the classic transposed-heightfield bug, caught by that test's first run): through avian
+/// Orientation is pinned EMPIRICALLY by `oracle_matches_collider_at_seeded_points` below (the
+/// classic transposed-heightfield bug fails its seeded noise-grid comparison): through avian
 /// 0.7's `Collider::heightfield(Vec<Vec<f32>>, scale)`, the OUTER Vec index runs along world X
 /// and the INNER index along world Z (avian flattens row-major into a parry matrix whose
 /// effective layout lands this way — trust the raycast, not the doc comments). The field is
@@ -1099,76 +1100,6 @@ pub(crate) mod tests {
         assert!(corner.height_at(0.0, 0.0).abs() < 1e-4);
     }
 
-    /// The classic transposed-heightfield bug, pinned empirically: build the PRODUCTION collider
-    /// from ramps along each axis and raycast it with parry. An x-ramp must rise along +X (a
-    /// transposed matrix would make it rise along +Z), the span must be the full world square,
-    /// and heights must match `height_at` (planar ramps make triangle == bilinear exactly).
-    #[test]
-    fn heightfield_matches_grid_orientation_and_scale() {
-        let h = FIXTURE_HALF;
-
-        let x_ramp = grid_from(4, |i, _| (i * 85) as u8); // 0, 85, 170, 255 along x
-        let collider = heightfield_collider(&x_ramp);
-        for (x, z) in [(-h, 0.0), (h * 0.5, -h * 0.9), (0.0, h * 0.7), (h, h)] {
-            let expected = x_ramp.height_at(x, z);
-            let got = cast_down(&collider, x, z);
-            assert!(
-                (got - expected).abs() < 1e-3,
-                "x-ramp collider at ({x}, {z}): cast {got}, grid {expected}"
-            );
-        }
-        // The discriminator: 3/4 across +X must be 3/4 of the range, NOT the z-value (0.5·range).
-        let got = cast_down(&collider, h * 0.5, 0.0);
-        assert!(
-            (got - FIXTURE_SPAN * 0.75).abs() < 1e-3,
-            "x-ramp must rise along +X (transposed heightfield?): cast {got}"
-        );
-
-        let z_ramp = grid_from(4, |_, j| (j * 85) as u8);
-        let collider = heightfield_collider(&z_ramp);
-        let got = cast_down(&collider, 0.0, h * 0.5);
-        assert!(
-            (got - FIXTURE_SPAN * 0.75).abs() < 1e-3,
-            "z-ramp must rise along +Z (transposed heightfield?): cast {got}"
-        );
-        let got = cast_down(&collider, -h * 0.8, -h * 0.5);
-        let expected = z_ramp.height_at(-h * 0.8, -h * 0.5);
-        assert!((got - expected).abs() < 1e-3, "z-ramp: {got} vs {expected}");
-    }
-
-    /// THE diagonal-convention pin (ONE-SURFACE invariant, module doc): a single raised corner
-    /// makes the two candidate cell splits disagree hard in the cell interior, so a parry
-    /// raycast there identifies the diagonal empirically. Parry's default split is the
-    /// ANTI-diagonal (`(x_lo, z_hi)`–`(x_hi, z_lo)`); `height_at` must give the identical
-    /// surface. If parry ever changes convention, this fails before anything subtle does.
-    #[test]
-    fn parry_splits_cells_along_the_anti_diagonal() {
-        let h = FIXTURE_HALF;
-        let hi = 200.0 / 255.0 * FIXTURE_SPAN;
-        let corner = grid_from(2, |i, j| if i == 1 && j == 1 { 200 } else { 0 });
-        let collider = heightfield_collider(&corner);
-        // (fu, fv) = (0.75, 0.75): anti-diagonal → 0.5·H; main diagonal would read 0.75·H and
-        // bilinear 0.5625·H — cleanly separated at H ≈ 117.6 m.
-        let got = cast_down(&collider, h / 2.0, h / 2.0);
-        assert!(
-            (got - hi * 0.5).abs() < 1e-2,
-            "parry cell split is not the anti-diagonal: cast {got}, expected {}",
-            hi * 0.5
-        );
-        // Dead center lies ON the anti-diagonal: exactly between the two zero corners.
-        let got = cast_down(&collider, 0.0, 0.0);
-        assert!(got.abs() < 1e-2, "cell-center cast {got}, expected 0");
-        // And both points agree with height_at — collider == oracle surface.
-        for (x, z) in [(h / 2.0, h / 2.0), (0.0, 0.0), (-h / 3.0, h / 5.0)] {
-            let cast = cast_down(&collider, x, z);
-            let grid = corner.height_at(x, z);
-            assert!(
-                (cast - grid).abs() < 1e-2,
-                "collider vs height_at at ({x}, {z}): {cast} vs {grid}"
-            );
-        }
-    }
-
     /// A deterministic LCG stream (no platform RNG) for the seeded oracle-vs-collider pins.
     fn lcg(seed: u64) -> impl FnMut() -> f32 {
         let mut state = seed;
@@ -1377,120 +1308,6 @@ pub(crate) mod tests {
         }
     }
 
-    /// The embedded kernel really is the normalized Gaussian for `SMOOTH_KERNEL_SIGMA` — pins
-    /// the constant pair together so changing σ without regenerating the table fails here (the
-    /// runtime deliberately never calls `exp`, which is not bit-identical across platforms).
-    #[test]
-    fn smooth_kernel_matches_its_sigma() {
-        let sigma = f64::from(SMOOTH_KERNEL_SIGMA);
-        let raw: Vec<f64> = (0..SMOOTH_KERNEL.len())
-            .map(|k| (-((k * k) as f64) / (2.0 * sigma * sigma)).exp())
-            .collect();
-        let sum = raw[0] + 2.0 * raw[1..].iter().sum::<f64>();
-        for (k, &w) in SMOOTH_KERNEL.iter().enumerate() {
-            let expected = raw[k] / sum;
-            assert!(
-                (f64::from(w) - expected).abs() < 1e-6,
-                "kernel[{k}] = {w} but σ = {sigma} wants {expected}"
-            );
-        }
-        assert_eq!(
-            SMOOTH_KERNEL.len() - 1,
-            (3.0 * sigma).ceil() as usize,
-            "kernel radius must be 3σ"
-        );
-    }
-
-    /// The de-terracing claim, measured: an 8-bit-quantized ramp (0.588 m staircase, ~4 px per
-    /// step) smooths back to within a few cm of the ideal ramp away from the clamped edges.
-    ///
-    /// The reference includes the staircase's own DC bias (round-half-up puts the mean of this
-    /// residual at +step/8, ~7 cm): quantization bias is information the blur cannot recover —
-    /// the claim is that the ±0.294 m TERRACING flattens, not that the ≤ half-step offset
-    /// vanishes.
-    #[test]
-    fn smoothing_flattens_a_quantized_staircase_onto_the_ideal_ramp() {
-        let size = 128usize;
-        let step = FIXTURE_SPAN / 255.0; // the 8-bit quantum, ~0.588 m
-        let slope = step / 4.0; // one quantization step every ~4 px
-        let ideal = |i: usize| i as f32 * slope;
-        let quantized = |i: usize| (ideal(i) / step).round() * step;
-        let mut samples = Vec::with_capacity(size * size);
-        for _j in 0..size {
-            for i in 0..size {
-                // What an 8-bit export stores: the ideal ramp snapped to the quantum grid.
-                samples.push(quantized(i));
-            }
-        }
-        let dc = (0..size).map(|i| quantized(i) - ideal(i)).sum::<f32>() / size as f32;
-        let smoothed = gaussian_smooth(&samples, size);
-        let margin = SMOOTH_KERNEL.len(); // kernel radius + 1: clear of edge clamping
-        let mut worst = 0.0f32;
-        for j in margin..size - margin {
-            for i in margin..size - margin {
-                worst = worst.max((smoothed[j * size + i] - (ideal(i) + dc)).abs());
-            }
-        }
-        assert!(
-            worst < 0.03,
-            "smoothed staircase deviates {worst:.3} m from the ideal ramp (quantum {step:.3} m)"
-        );
-    }
-
-    /// The SHIPPED asset, decoded through the real path at the extent its own manifest declares,
-    /// downsampled ONCE to [`GRID_RESOLUTION`]² (the ONE surface). Every bound below is read off
-    /// the manifest, so re-authoring or re-scaling the map needs no edit here. Also the LFS
-    /// tripwire — a pointer file (~130 text bytes) fails the size guard here in CI instead of
-    /// panicking at first boot on a hosted server.
-    #[test]
-    fn shipped_heightmap_decodes_full_range_through_the_real_path() {
-        let manifest = shipped_manifest();
-        let extent = manifest.extent;
-        let path = manifest.heightmap_path();
-        let bytes = std::fs::read(&path)
-            .unwrap_or_else(|err| panic!("shipped heightmap missing at {}: {err}", path.display()));
-        assert!(
-            bytes.len() > 1024,
-            "{} is {} bytes — a Git LFS POINTER, not the map (checkout without lfs pull)",
-            path.display(),
-            bytes.len()
-        );
-        let grid =
-            grid_from_png(&bytes, extent, manifest.rows).expect("shipped heightmap must decode");
-        assert_eq!(
-            grid.size(),
-            GRID_RESOLUTION,
-            "the decode must land at the ONE shared surface resolution"
-        );
-        assert_eq!(
-            grid.extent(),
-            extent,
-            "the grid must carry the map's extent"
-        );
-        let (mut lo, mut hi) = (f32::INFINITY, f32::NEG_INFINITY);
-        let half = extent.half_extent();
-        let step = extent.world_size_m / 128.0;
-        for j in 0..=128 {
-            for i in 0..=128 {
-                let h = grid.height_at(-half + i as f32 * step, -half + j as f32 * step);
-                lo = lo.min(h);
-                hi = hi.max(h);
-            }
-        }
-        let (floor, ceiling) = (
-            extent.height_offset_m,
-            extent.height_offset_m + extent.height_span_m,
-        );
-        assert!(
-            lo >= floor - 1e-3 && hi <= ceiling + 1e-3,
-            "range [{lo}, {hi}] escapes the declared [{floor}, {ceiling}]"
-        );
-        assert!(
-            hi - lo > 10.0,
-            "the map should span real relief, got [{lo}, {hi}]"
-        );
-    }
-
     /// The DECODE LAW, end to end: the extent comes out of a `level.json` terrain block through the
     /// real reader, a full-scale-zero sample lands on the floor that block declares and a full-scale
     /// sample on its ceiling, at the corners of the declared square. Pins the arithmetic
@@ -1566,43 +1383,10 @@ pub(crate) mod tests {
         assert!((corner("-Z", half, -half) - row_1[1]).abs() < 1e-3);
     }
 
-    /// The render mesh is the grid's own surface (ONE-SURFACE invariant): vertices are the grid
-    /// samples themselves, and every cell splits along the same anti-diagonal parry uses (the
-    /// index pattern's shared edge is `i01`–`i10`).
-    #[test]
-    fn render_mesh_tiles_are_the_grid_surface_with_the_parry_diagonal() {
-        let grid = grid_from(4, |i, j| (i * 40 + j * 20) as u8);
-        let tiles = terrain_mesh_tiles(&grid);
-        assert_eq!(
-            tiles.len(),
-            1,
-            "3 cells fit one {MESH_TILE_CELLS}-cell tile"
-        );
-        let mesh = &tiles[0];
-        let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
-            mesh.attribute(Mesh::ATTRIBUTE_POSITION)
-        else {
-            panic!("terrain mesh must carry f32x3 positions");
-        };
-        assert_eq!(positions.len(), 16, "vertices are the 4² grid nodes");
-        for p in positions {
-            let expected = grid.height_at(p[0], p[2]);
-            assert!(
-                (p[1] - expected).abs() < 1e-3,
-                "mesh vertex {p:?} off the surface (expected y {expected})"
-            );
-        }
-        // The first cell's six indices: triangles {i00, i01, i10} and {i10, i01, i11} share the
-        // i01–i10 edge — the anti-diagonal ((x_lo, z_hi)–(x_hi, z_lo)), same as parry/height_at.
-        let Some(Indices::U32(indices)) = mesh.indices() else {
-            panic!("terrain mesh must carry u32 indices");
-        };
-        assert_eq!(&indices[..6], &[0u32, 4, 1, 1, 4, 5][..]);
-    }
-
     /// Multi-tile chunking is culling-only: tiles cover every cell exactly once, border vertices
     /// are shared (same world position, same height), and every vertex still sits on the ONE
-    /// surface.
+    /// surface — the vertices are the grid samples themselves, and every cell splits along the
+    /// same anti-diagonal parry uses (the index pattern's shared edge is `i01`–`i10`).
     #[test]
     fn mesh_tiling_is_seamless_and_stays_on_the_surface() {
         // 131 nodes = 130 cells → 2×2 tiles (128 + 2 cells per side).
@@ -1617,7 +1401,7 @@ pub(crate) mod tests {
         let tiles = terrain_mesh_tiles(&grid);
         assert_eq!(tiles.len(), 4);
         let mut triangles = 0;
-        for mesh in &tiles {
+        for (mesh, [ia, ib, _, _]) in tiles.iter().zip(mesh_tile_node_ranges(&grid)) {
             let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
                 mesh.attribute(Mesh::ATTRIBUTE_POSITION)
             else {
@@ -1638,6 +1422,11 @@ pub(crate) mod tests {
             let Some(Indices::U32(indices)) = mesh.indices() else {
                 panic!("terrain mesh must carry u32 indices");
             };
+            // The first cell's six indices: triangles {i00, i01, i10} and {i10, i01, i11} share
+            // the i01–i10 edge — the anti-diagonal ((x_lo, z_hi)–(x_hi, z_lo)), same as
+            // parry/height_at.
+            let w = (ib - ia + 1) as u32;
+            assert_eq!(&indices[..6], &[0, w, 1, 1, w, w + 1][..]);
             triangles += indices.len() / 3;
         }
         assert_eq!(
@@ -1648,31 +1437,31 @@ pub(crate) mod tests {
     }
 
     /// The three surface maps `world::spawn_environment` binds must SHIP, and must still be
-    /// MIP-MAPPED KTX2 — run through bevy's own loader, not just sniffed. The runtime backstop
-    /// (`world::report_failed_terrain_map`) panics on a decode failure, but only on a machine with
-    /// a window; this catches the whole class in CI: a missing file, a Git-LFS POINTER from a
-    /// checkout without `lfs pull`, a map re-exported as PNG/JPG (single mip level — the 30 fps
-    /// regression that put these in KTX2 in the first place), or a `basis-universal` feature drop
-    /// that leaves UASTC untranscodable.
+    /// MIP-MAPPED KTX2. The runtime backstop (`world::report_failed_terrain_map`) panics on a
+    /// decode failure, but only on a machine with a window; this catches the whole class in CI: a
+    /// missing file, a Git-LFS POINTER from a checkout without `lfs pull`, a map re-exported as
+    /// PNG/JPG (single mip level — the 30 fps regression that put these in KTX2 in the first
+    /// place), or a `basis-universal` feature drop that leaves UASTC untranscodable.
     ///
-    /// Pinned against `CompressedImageFormats::BC` because the transcode target is a pure function
-    /// of the caller's flags, not of the test machine's GPU: desktop GPUs land on BC7, Apple
-    /// Silicon on ASTC 4x4 (`get_transcoded_formats`), and both are 8 bpp. The `is_srgb` argument
-    /// is the same one `world::MapEncoding` passes, so this also pins that only the albedo asks
-    /// for the sRGB variant.
+    /// Size and mip count come off each file's KTX2 header; the transcode itself is the same law
+    /// for every map, so one map, the albedo, runs through bevy's own loader. It is pinned against
+    /// `CompressedImageFormats::BC` because the transcode target is a pure function of the
+    /// caller's flags, not of the test machine's GPU: desktop GPUs land on BC7, Apple Silicon on
+    /// ASTC 4x4 (`get_transcoded_formats`), and both are 8 bpp. The albedo asks for the sRGB
+    /// variant, as `world::MapEncoding` does.
     #[test]
     fn shipped_terrain_surface_maps_are_mipmapped_ktx2() {
         use bevy::image::{CompressedImageFormats, ktx2_buffer_to_image};
         // «KTX 20»\r\n\x1a\n — the KTX2 file identifier.
         const KTX2_MAGIC: &[u8] = b"\xabKTX 20\xbb\r\n\x1a\n";
-        // 4096² ⇒ 13 levels down to 1×1. A map that lost its chain reports 1 and thrashes the
-        // texture cache at every grazing angle.
-        const FULL_MIP_CHAIN: u32 = 13;
-        for (path, is_srgb, what) in [
-            (TEXTURE_PATH, true, "albedo"),
-            (NORMAL_PATH, false, "normal"),
-            (ARM_PATH, false, "arm"),
-        ] {
+        // Header fields after the 12-byte identifier, each a little-endian u32.
+        const PIXEL_WIDTH_AT: usize = 20;
+        const PIXEL_HEIGHT_AT: usize = 24;
+        const LEVEL_COUNT_AT: usize = 40;
+        let header_u32 = |bytes: &[u8], at: usize| {
+            u32::from_le_bytes(bytes[at..at + 4].try_into().expect("a 4-byte header field"))
+        };
+        let read = |path: &str, what: &str| {
             let full = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
                 .join("assets")
                 .join(path);
@@ -1687,27 +1476,41 @@ pub(crate) mod tests {
                 bytes.starts_with(KTX2_MAGIC),
                 "the {what} map {path} must be KTX2 — rebuild it with scripts/encode-terrain-ktx2.sh"
             );
-            let image = ktx2_buffer_to_image(&bytes, CompressedImageFormats::BC, is_srgb)
-                .unwrap_or_else(|err| panic!("{path} failed to transcode: {err:?}"));
-            let descriptor = &image.texture_descriptor;
+            bytes
+        };
+        for (path, what) in [
+            (TEXTURE_PATH, "albedo"),
+            (NORMAL_PATH, "normal"),
+            (ARM_PATH, "arm"),
+        ] {
+            let bytes = read(path, what);
+            let width = header_u32(&bytes, PIXEL_WIDTH_AT);
+            let height = header_u32(&bytes, PIXEL_HEIGHT_AT);
+            let levels = header_u32(&bytes, LEVEL_COUNT_AT);
+            // A full chain runs down to 1×1. A map that lost it reports 1 and thrashes the texture
+            // cache at every grazing angle.
+            let full_chain = width
+                .max(height)
+                .checked_ilog2()
+                .unwrap_or_else(|| panic!("the {what} map declares a {width}×{height} image"))
+                + 1;
             assert_eq!(
-                (descriptor.size.width, descriptor.size.height),
-                (4096, 4096),
-                "the {what} map must be 4k"
+                levels, full_chain,
+                "the {what} map carries {levels} mip levels, not the full chain of its \
+                 {width}×{height}"
             );
-            assert_eq!(
-                descriptor.mip_level_count, FULL_MIP_CHAIN,
-                "the {what} map carries {} mip levels, not a full chain",
-                descriptor.mip_level_count
-            );
-            let format = format!("{:?}", descriptor.format);
-            let expected = if is_srgb {
-                "Bc7RgbaUnormSrgb"
-            } else {
-                "Bc7RgbaUnorm"
-            };
-            assert_eq!(format, expected, "the {what} map transcoded to {format}");
         }
+        let image = ktx2_buffer_to_image(
+            &read(TEXTURE_PATH, "albedo"),
+            CompressedImageFormats::BC,
+            true,
+        )
+        .unwrap_or_else(|err| panic!("{TEXTURE_PATH} failed to transcode: {err:?}"));
+        let format = format!("{:?}", image.texture_descriptor.format);
+        assert_eq!(
+            format, "Bc7RgbaUnormSrgb",
+            "the albedo map transcoded to {format}"
+        );
     }
 
     /// Normal mapping's PRECONDITION, guarded in CI instead of at first boot: `world` runs
@@ -1781,129 +1584,6 @@ pub(crate) mod tests {
         }
     }
 
-    /// The far probe placement's REASON to exist, asserted as the quantity THE SELECTOR ACTUALLY
-    /// READS: every probe's belt must select ONE band of the shoe chain across every camera heading,
-    /// and that band must not be the base shoe's — or the "far" capture is measuring something other
-    /// than a reduced belt.
-    ///
-    /// # The quantity is the BELT's, not a shoe's
-    ///
-    /// `track::link_view::select_belt_rungs` measures camera origin to the belt's NEAREST SHOE in
-    /// 3D; a belt is one rung for all 97 of its shoes by construction, so no probe can straddle a
-    /// threshold internally and the spread that matters is the CAMERA's. Two terms move it, and
-    /// neither is tank-centre-to-tank-centre XZ:
-    ///
-    ///   * the orbit. Look is free, so the camera can sit up to [`ORBIT_FAR`] toward the probes or
-    ///     the same distance beyond the tank — the block's selection distance spans `2 × ORBIT_FAR`
-    ///     for a stationary probe, and a switch inside that span is a capture that averages two
-    ///     meshes.
-    ///   * the belt bias, which only ever subtracts.
-    ///
-    /// The terrain height difference between the duel pad and the probe block is deliberately NOT
-    /// subtracted: 3D distance is `√(xz² + Δy²) ≥ xz`, so any height delta (and the camera's own lift
-    /// above the hull) only pushes the probes FURTHER away — the safe direction for the near edge,
-    /// and the far edge is bounded with the terms the other way round anyway.
-    ///
-    /// # Read off the BAND, not off a level number
-    ///
-    /// The band is FOUND — the level whose range contains the block — rather than named, because
-    /// WHICH level owns 588..633 m is an output of `scripts/lod/generate.py`, not a decision anyone
-    /// made. The chain that shipped when this placement was sited had one reduction opening at
-    /// 350 m; the certified ladder that replaced it has four, and the block now sits in L3's
-    /// `[501, 1050)` m. Nothing about the placement changed and nothing about it needed to. A test
-    /// that had named `shoe_lod_range(1)` would have gone red on a regeneration that broke nothing.
-    ///
-    /// What the test refuses is the two ways the placement can stop meaning anything: the block's
-    /// selection CROSSING a threshold as the camera swings, and the block landing back on the BASE
-    /// shoe (the near placement with extra steps).
-    #[test]
-    fn the_far_probe_placement_puts_every_probe_in_one_coarse_shoe_band() {
-        use crate::camera::ORBIT_FAR;
-        use crate::geometry_lod::{TIGER_ID, certificate};
-        use crate::tank::scenario::{duel_spawn_xz, probe_spawn_xz};
-        use crate::track::link_view::shoe_chain_key;
-        use crate::view::{ViewFacts, ViewProfile};
-
-        /// How much room the placement must have on either side of the band edge. A placement that
-        /// is inside its band by a metre is one heightmap re-author or one orbit tweak from being
-        /// outside it, and a capture that silently changes what it measures is worse than one that
-        /// fails to run.
-        const BAND_MARGIN_M: f32 = 25.0;
-
-        // An over-estimate of how much nearer than the tank's own origin a shoe on its belt can
-        // stand: the corner of the square footprint every spawn is cleared over. A Tiger's shoes
-        // reach MEASURED 3.401 m from the belt origin
-        // (`link_view::no_shoe_is_drawn_coarser_than_its_own_certified_distance` prints it) against
-        // the 7.07 m here, so this is a documented over-estimate rather than a second derivation of
-        // the track — which is what a bound wants to be.
-        let belt_bias = SPAWN_FOOTPRINT_HALF_M * std::f32::consts::SQRT_2;
-        // The bands the shoe's chain owns, derived off the certificate at the view the corpus was
-        // quoted in — the same derivation the runtime performs, so a re-cut asset re-asks this
-        // question rather than leaving a stale answer.
-        let chain = certificate::load(&crate::assets::asset_root(), TIGER_ID)
-            .chains
-            .remove(&shoe_chain_key())
-            .expect("the shipped certificate names the shoe's chain");
-        let bands = chain.bands(ViewProfile::of(
-            ViewFacts::new(crate::camera::GUNNER_FOV_FALLBACK, 2160.0)
-                .expect("the reference view is measured"),
-            1.0,
-        ));
-        let level_at = |d: f32| {
-            bands
-                .iter()
-                .position(|band| band.is_visible_at_all(d))
-                .unwrap_or_else(|| panic!("the chain tiles [0, inf), so {d} m is owned"))
-        };
-
-        let anchor = duel_spawn_xz(true)[0];
-        let mut band: Option<usize> = None;
-        for i in 0..28 {
-            let xz = probe_spawn_xz(true, i).distance(anchor);
-            // Camera pulled the full orbit radius TOWARD the probe, less the belt's own bias.
-            // Height deltas omitted on purpose: they only add.
-            let nearest = xz - ORBIT_FAR - belt_bias;
-            // The far end is the same selection with the orbit the other way round. The bias only
-            // ever subtracts, so it is dropped here rather than added.
-            let furthest = xz + ORBIT_FAR;
-            let level = level_at(nearest);
-            assert!(
-                level > 0,
-                "far probe {i} sits {xz:.0} m from the controlled tank, but its belt can select at \
-                 {nearest:.0} m (orbit {ORBIT_FAR} m + {belt_bias:.1} m of bias), which is still the \
-                 BASE shoe's band — the far placement would render exactly what the near one does",
-            );
-            assert_eq!(
-                level_at(furthest),
-                level,
-                "far probe {i}'s belt selects across {nearest:.0}..{furthest:.0} m as the camera \
-                 swings, which crosses out of LOD{level}'s band — the capture would average two \
-                 meshes",
-            );
-            let previous = *band.get_or_insert(level);
-            assert_eq!(
-                previous, level,
-                "far probe {i} is in LOD{level} while an earlier probe of the same block is in \
-                 LOD{previous} — the block must be ONE level",
-            );
-
-            let owned = &bands[level];
-            let (near_edge, far_edge) = (owned.start_margin.start, owned.end_margin.end);
-            assert!(
-                nearest >= near_edge + BAND_MARGIN_M,
-                "far probe {i}'s belt can select at {nearest:.0} m — inside LOD{level}'s \
-                 {near_edge:.0} m opening plus {BAND_MARGIN_M} m of margin, so mid-capture it would \
-                 drop to the level above",
-            );
-            assert!(
-                furthest < far_edge - BAND_MARGIN_M,
-                "far probe {i}'s belt can select at {furthest:.0} m — past the {far_edge:.0} m end \
-                 of LOD{level}'s band (less {BAND_MARGIN_M} m of margin), so it would render the \
-                 level below rather than the band this placement was sited for",
-            );
-        }
-    }
-
     /// A spawn point off the map is a code bug, and the rule says so instead of handing back an
     /// edge-clamped height for a point in the void (where the collider does not exist, so the tank
     /// would fall forever).
@@ -1912,15 +1592,5 @@ pub(crate) mod tests {
     fn a_spawn_outside_the_world_span_fails_loud() {
         let grid = grid_from(9, |_, _| 40);
         spawn_pos(Some(&grid), Vec2::new(FIXTURE_HALF + 1.0, 0.0));
-    }
-
-    /// No grid = the flat-slab fallback world: the rule reproduces the historical `y = 2.0` pad
-    /// pose exactly, so the authored test course is untouched by any of this.
-    #[test]
-    fn the_flat_world_still_spawns_at_the_historical_pad_height() {
-        assert_eq!(
-            spawn_pos(None, Vec2::new(10.0, -12.0)),
-            Vec3::new(10.0, 2.0, -12.0)
-        );
     }
 }

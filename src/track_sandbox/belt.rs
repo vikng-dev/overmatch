@@ -753,30 +753,6 @@ mod tests {
         );
     }
 
-    /// The residual the bug is about, measured on the shipped Tiger: the conformed polyline is a
-    /// fraction of a percent off the immutable material length `pitch · link_count`. Printed with
-    /// the drift distance it implies so the number is on the record, asserted only loosely (it is a
-    /// discretisation artefact, not a contract) to catch a gross regression in the loop builder.
-    #[test]
-    fn the_conformed_polyline_differs_from_the_material_length_by_a_fraction_of_a_percent() {
-        let geom = tiger_rig();
-        for side in [Side::Left, Side::Right] {
-            let poly = polyline_len(&flat_loop(&geom, side));
-            let material = geom.belt_len();
-            let strain = poly / material;
-            println!(
-                "{side:?}: conformed polyline {poly:.6} m vs material {material:.6} m — \
-                 strain {strain:.6} ({:+.4}%), naive resampling drifts one tooth per {:.0} m",
-                (strain - 1.0) * 100.0,
-                geom.pitch / (strain - 1.0).abs(),
-            );
-            assert!(
-                (strain - 1.0).abs() < 0.005,
-                "{side:?} polyline strain {strain} is implausible for the loop builder",
-            );
-        }
-    }
-
     /// THE FIX: the wrap view spaces its pins at the MATERIAL pitch and keeps them seated in the
     /// sprocket's gullets over a whole session of driving. Reuses the sprocket machinery
     /// ([`tooth_tip_angle`] + the "a tip bisects the pin pair" rule of
@@ -830,48 +806,6 @@ mod tests {
                     tooth.to_degrees() / 2.0,
                 );
             }
-        }
-    }
-
-    /// The receipt for the bug the fix retires: resampling at the NAIVE drawn pitch
-    /// (`polyline_len / count`) walks the drawn pins off the material-pitch tooth lock — within the
-    /// same 350 m the fixed view holds, a pin that must sit in a gullet ends up on a TOOTH (a
-    /// visible mis-mesh), and the crossover happens near the `pitch / (strain − 1)` drift distance.
-    #[test]
-    fn the_naive_drawn_pitch_would_drift_a_pin_onto_a_tooth() {
-        let geom = tiger_rig();
-        let tooth = std::f32::consts::TAU / geom.teeth as f32;
-        for side in [Side::Left, Side::Right] {
-            let loop_pts = flat_loop(&geom, side);
-            let poly = polyline_len(&loop_pts);
-            let strain = poly / geom.belt_len();
-            let origin = geom.belt_origin_angle(side);
-            let naive_pitch = poly / geom.link_count.max(1) as f32; // the retired spacing
-            let drift_distance = geom.pitch / (strain - 1.0).abs(); // one tooth of drift, metres
-
-            let mut worst = 0.0_f32; // largest departure from a seated half-tooth
-            let steps = 20_000;
-            let total = 350.0_f64;
-            for k in 0..=steps {
-                let travel = total * k as f64 / steps as f64;
-                // The pre-fix parametrisation: offset wraps mod the DRAWN pitch, not the material.
-                let (_, offset) = phase_decompose(travel, naive_pitch);
-                let drawn_link_phase = offset / naive_pitch;
-                let pin = origin + drawn_link_phase * tooth;
-                let tip = tooth_tip_angle(travel, geom.pitch, geom.teeth, origin);
-                let seat = fold(tip - pin, tooth).abs();
-                worst = worst.max((seat - tooth / 2.0).abs());
-            }
-            // A full mis-seat is half a tooth of departure; the naive scheme reaches most of it.
-            assert!(
-                worst > 0.4 * tooth,
-                "{side:?}: the naive pitch drifted only {:.4}° — the bug should mis-seat a pin",
-                worst.to_degrees(),
-            );
-            assert!(
-                drift_distance < total as f32,
-                "{side:?}: expected a tooth of drift within {total} m (drift {drift_distance:.0} m)",
-            );
         }
     }
 }

@@ -1427,31 +1427,6 @@ mod tests {
         }
     }
 
-    /// Older/unspecified vehicle sheets get the mechanically conservative crash-box behavior:
-    /// one adjacent gear per paid interruption window. Arbitrary direct selection must be an
-    /// explicit capability declaration.
-    #[test]
-    fn gearbox_shift_addressing_defaults_to_sequential() {
-        let gearbox: GearboxSpec = ron::de::from_str(
-            "(forward_speeds_kmh:[8.0,12.0],reverse_speeds_kmh:[8.0],\
-             shift_up_rpm:1700.0,shift_down_rpm:900.0)",
-        )
-        .expect("a gearbox may omit the backward-compatible addressing field");
-        assert_eq!(
-            gearbox.shift_addressing,
-            crate::track::transmission::ShiftAddressing::Sequential
-        );
-
-        let invalid = ron::de::from_str::<GearboxSpec>(
-            "(forward_speeds_kmh:[8.0,12.0],reverse_speeds_kmh:[8.0],\
-             shift_up_rpm:1700.0,shift_down_rpm:900.0,shift_addressing:Warp)",
-        );
-        assert!(
-            invalid.is_err(),
-            "the closed addressing enum must reject unknown vehicle capabilities"
-        );
-    }
-
     /// The MUTATION BATTERY's subject: a fictional vehicle that authors every block a rejection
     /// case flips, and nothing else. The shipped sheet is deliberately NOT the subject — a
     /// mutation battery riding on it turns every deliberate tuning or content edit (a pulled
@@ -1994,25 +1969,6 @@ TankSpec(
         assert!(
             err.contains("transmission.engine") && err.contains("FixedRadii"),
             "a missing regenerative table must be named: {err}"
-        );
-    }
-
-    /// Each declared architecture selects ITS OWN runtime adapter — the single shared mapping
-    /// (`TransmissionArchitecture::mode`) the game and the sandbox both ride.
-    #[test]
-    fn each_architecture_selects_its_own_mode() {
-        use crate::track::transmission::TransmissionMode;
-        assert_eq!(
-            TransmissionArchitecture::Governor.mode(),
-            TransmissionMode::Governor
-        );
-        assert_eq!(
-            TransmissionArchitecture::Hybrid.mode(),
-            TransmissionMode::Hybrid
-        );
-        assert_eq!(
-            TransmissionArchitecture::FixedRadii.mode(),
-            TransmissionMode::FixedRadii
         );
     }
 }

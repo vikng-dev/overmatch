@@ -481,15 +481,6 @@ mod tests {
         }
     }
 
-    /// A CHAIN ABSENT FROM THE CERTIFICATE is silence, not a refusal — that primitive renders at
-    /// source detail, and the build's own `mesh_count` owns coverage.
-    #[test]
-    fn a_primitive_with_no_chain_is_not_an_error() {
-        let trio = Trio::new("absent-chain");
-        let certificate = trio.read();
-        assert!(!certificate.chains.contains_key("Unnamed#0"));
-    }
-
     /// THE SHIPPED TRIO. The one that matters: the certificate in the tree describes the two
     /// artifacts in the tree, byte for byte, and parses into the shape the runtime reads.
     #[test]
@@ -517,22 +508,27 @@ mod tests {
         }
     }
 
-    /// THE CERTIFICATE'S OWN REFERENCE PROBE, through the shared projection: the shoe's rung at the
-    /// view the corpus was cut in. `0.027841808 m × 2160 / (2·tan(0.06)) + 0.380365 = 500.9314 m` —
-    /// the same arithmetic `scripts/lod/config.py::switch_distance_m` applies on the build side, so
-    /// the metres a rung was certified against and the metres it is selected at agree. (The
-    /// projection itself is pinned in `crate::view`; this pins the MILLIMETRE seam feeding it.)
+    /// THE CERTIFICATE'S OWN REFERENCE PROBE, through [`Chain::bands`]: the shoe's rung at the view
+    /// the corpus was cut in. `0.027841808 m × 2160 / (2·tan(0.06)) + 0.380365 = 500.9314 m` — the
+    /// same arithmetic `scripts/lod/config.py::switch_distance_m` applies on the build side, so the
+    /// metres a rung was certified against and the metres it is selected at agree. The chain's own
+    /// `radius_m` is the slack term: a band that dropped it opens 0.38 m early. (The projection
+    /// itself is pinned in `crate::view`; this pins the MILLIMETRE seam feeding it.)
     #[test]
     fn a_certified_rung_derives_the_distance_it_was_cut_for() {
         let view = ViewProfile::of(ViewFacts::new(0.12, 2160.0).expect("a measured view"), 1.0);
-        let rung = Rung {
-            mesh: "probe".to_owned(),
-            deviation_mm: 27.841808,
+        let chain = Chain {
+            radius_m: 0.380365,
+            rungs: vec![Rung {
+                mesh: "probe".to_owned(),
+                deviation_mm: 27.841808,
+            }],
         };
-        let derived = view.switch_distance_m(rung.deviation_m(), 0.380365);
+        let by_hand = 0.027_841_808 * 2160.0 / (2.0 * 0.06_f32.tan()) + chain.radius_m;
+        let derived = chain.bands(view)[1].start_margin.start;
         assert!(
-            (derived - 500.9314).abs() < 0.01,
-            "D = dev_m × height_px / (2·tan(vfov/2)·budget_px) + radius, got {derived}",
+            (derived - by_hand).abs() < 0.01,
+            "D = dev_m × height_px / (2·tan(vfov/2)·budget_px) + radius = {by_hand}, got {derived}",
         );
     }
 

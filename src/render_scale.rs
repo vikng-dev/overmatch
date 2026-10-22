@@ -554,26 +554,6 @@ mod tests {
         );
     }
 
-    /// The override math the whole feature rests on, at the five shipped rungs of a real Retina
-    /// target. Note 50% and 100%: those are the macOS integer-scaling snap points, so they must land
-    /// on exact halves rather than on a rounding artefact.
-    #[test]
-    fn the_shipped_ladder_scales_both_axes() {
-        let full = UVec2::new(2560, 1440);
-        for (scale, want) in [
-            (0.85, UVec2::new(2176, 1224)),
-            (0.75, UVec2::new(1920, 1080)),
-            (0.67, UVec2::new(1715, 964)),
-            (0.50, UVec2::new(1280, 720)),
-        ] {
-            assert_eq!(
-                RenderScale(scale).main_pass_size(full),
-                Some(want),
-                "scale {scale}"
-            );
-        }
-    }
-
     /// Degenerate targets must not produce a zero-sized or oversized main pass — a zero extent is an
     /// invalid scissor rect, and an override larger than the viewport is explicitly forbidden.
     #[test]
@@ -597,7 +577,8 @@ mod tests {
 
     /// Every rung the settings ladder can produce is a legal override for a range of real window
     /// sizes — the cheap guard against a future rung being added to `RenderScaleLevel::ORDER` that
-    /// this module cannot express.
+    /// this module cannot express. Both axes scale by the rung's fraction, and 50% lands on exact
+    /// halves: it is a macOS integer-scaling snap point, so a rounding artefact there is visible.
     #[test]
     fn every_settings_rung_produces_a_legal_main_pass() {
         use crate::settings::RenderScaleLevel;
@@ -621,6 +602,16 @@ mod tests {
                     size.x <= full.x && size.y <= full.y,
                     "{level:?} at {full} produced {size}, which is not SMALLER than the viewport"
                 );
+                let fraction = level.fraction();
+                for (axis, of) in [(size.x, full.x), (size.y, full.y)] {
+                    assert!(
+                        (axis as f32 - of as f32 * fraction).abs() <= 1.0,
+                        "{level:?} at {full}: {axis} is not {fraction} of {of}"
+                    );
+                }
+                if fraction == 0.5 {
+                    assert_eq!(size, full / 2, "50% at {full} must be exact halves");
+                }
             }
         }
     }

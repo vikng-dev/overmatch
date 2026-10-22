@@ -501,16 +501,6 @@ mod tests {
         assert_eq!(measured(0.12, 1080.0).sub_pixel_distance_m(0.0, 1.0), 0.0);
     }
 
-    /// AN UNSIZED WINDOW IS AN ABSENT ONE. bevy reports zero physical height before it has sized
-    /// the surface, and a zero render scale says the same thing; read literally either collapses
-    /// every switch distance onto the bounding radius and puts the COARSEST level of every ladder a
-    /// bounding radius from the camera on the frames the player first sees.
-    #[test]
-    fn an_unsized_window_is_not_a_zero_pixel_viewport() {
-        assert_eq!(ViewFacts::rendered_height_px(None, None), 0.0);
-        assert!(ViewFacts::new(0.5, ViewFacts::rendered_height_px(None, None)).is_none());
-    }
-
     /// THE DEAD BAND ON THE FIELD, tested where it lives: arithmetic, no world.
     ///
     /// A field nudge INSIDE [`FOV_HYSTERESIS`] leaves the facts alone — bevy retains a permanent

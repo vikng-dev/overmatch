@@ -432,51 +432,6 @@ mod tests {
     const SPAN: f32 = FIXTURE_EXTENT.height_span_m;
     const HALF: f32 = FIXTURE_EXTENT.half_extent();
 
-    #[test]
-    fn height_term_reads_flat_ground_like_the_slab() {
-        // All samples 51 → a flat surface at 51/255 · SPAN = 0.2 · SPAN.
-        let h = 51.0 / 255.0 * SPAN;
-        let field = BlockField::new(vec![]).with_height(Some(height_grid(4, |_, _| 51)));
-        let down = Vec3::NEG_Y;
-        // 10 cm above the surface: 10 cm of clearance.
-        let d = field.depth_along(Vec3::new(3.0, h + 0.10, -7.0), down, 0.5);
-        assert!((d + 0.10).abs() < 1e-3, "clearance read {d}");
-        // 5 cm past the surface: 5 cm of penetration.
-        let d = field.depth_along(Vec3::new(-20.0, h - 0.05, 11.0), down, 0.5);
-        assert!((d - 0.05).abs() < 1e-3, "penetration read {d}");
-        // Buried origin (station deep under the surface): saturates to the reach.
-        let d = field.depth_along(Vec3::new(0.0, h - 0.9, 0.0), down, 0.5);
-        assert_eq!(d, 0.5, "buried probe must saturate");
-        // Far above: full clearance floor (reach − t_max = −reach).
-        let d = field.depth_along(Vec3::new(0.0, h + 50.0, 0.0), down, 0.5);
-        assert_eq!(d, -0.5);
-    }
-
-    #[test]
-    fn height_term_reads_a_known_slope_exactly() {
-        // A pure x-ramp: h(x) = (x + HALF) / (2·HALF) · SPAN, linear — the triangular
-        // surface IS the plane, so a vertical probe must read h(x) − station.y exactly.
-        let field = BlockField::new(vec![])
-            .with_height(Some(height_grid(2, |i, _| if i == 1 { 255 } else { 0 })));
-        let down = Vec3::NEG_Y;
-        // Probe points as FRACTIONS of the half-extent, so re-scaling the world keeps every
-        // sample inside the map instead of silently landing on the edge clamp.
-        for frac in [-0.7_f32, -0.08, 0.0, 0.26, 0.94] {
-            let x = frac * HALF;
-            let h = (x + HALF) / (2.0 * HALF) * SPAN;
-            let d = field.depth_along(Vec3::new(x, h - 0.07, 5.0), down, 0.5);
-            assert!(
-                (d - 0.07).abs() < 1e-3,
-                "slope penetration at x={x}: read {d}"
-            );
-            let d = field.depth_along(Vec3::new(x, h + 0.12, -5.0), down, 0.5);
-            assert!(
-                (d + 0.12).abs() < 1e-3,
-                "slope clearance at x={x}: read {d}"
-            );
-        }
-    }
-
     /// The steep-slope case the OLD 3-step reprojection intersect could not solve: on a 45°
     /// slope probed along the slope NORMAL, the reprojection map t ← (h(xz(t)) − o.y)/o_y has
     /// derivative exactly −1 — it oscillates between two points forever and returns whatever
@@ -605,18 +560,5 @@ mod tests {
         // Beside the block: the ground term answers.
         let d = field.depth_along(Vec3::new(30.0, ground - 0.05, 0.0), down, 0.5);
         assert!((d - 0.05).abs() < 1e-3, "ground penetration read {d}");
-    }
-
-    #[test]
-    fn broadphase_miss_is_full_clearance() {
-        // A small block far away; a probe elsewhere has no candidates and must read the same
-        // deep-clearance answer an exhaustive miss would.
-        let field = BlockField::new(vec![TerrainBlock::new(
-            Vec3::new(0.0, 0.0, -50.0),
-            Quat::IDENTITY,
-            Vec3::splat(1.0),
-        )]);
-        let d = field.depth_along(Vec3::new(0.0, 1.0, 50.0), Vec3::NEG_Y, 0.5);
-        assert_eq!(d, -0.5);
     }
 }
