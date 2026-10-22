@@ -55,12 +55,13 @@ const BASE_FRESNEL_POWER: f32 = 2.0;
 const BASE_CONTRAST: f32 = 0.35;
 const BASE_EDGE: Color = Color::srgb_u8(0xE6, 0xE6, 0xE6);
 const BASE_EDGE_ALPHA: f32 = 0.35;
-/// The components' base: the state scale's untouched grey, opaque at every angle under firm
-/// edges, so the layout reads through the hull's glass at the corner's size and at third-person
-/// distance. It carries no HP: an unstruck component looks the same whatever its pool holds.
+/// The components' base: the state scale's untouched grey, opaque at every angle, so the layout
+/// reads through the hull's glass at the corner's size and at third-person distance. It carries
+/// no HP: an unstruck component looks the same whatever its pool holds. It is drawn in the opaque
+/// pass, so the hull's glass blends over every component alike whatever the blended pass's
+/// centroid order; an opaque fill in that pass would cover the hull wherever it sorted later.
 const BASE_COMPONENT_ALPHA: f32 = 1.0;
 const BASE_COMPONENT_FACE_SHARE: f32 = 1.0;
-const BASE_COMPONENT_EDGE_ALPHA: f32 = 0.9;
 /// The field footprint's outline width (px) and its opacity at full level, in the field's hue.
 const FOOTPRINT_LINE_PX: f32 = 2.0;
 const FOOTPRINT_ALPHA: f32 = 0.9;
@@ -601,15 +602,15 @@ fn base(masks: &MaskSet) -> LookMaterial {
     material
 }
 
-/// The base look's material for every component mesh: the hull's surface darkened, tested
-/// against the part mask. A struck component's fill covers it.
+/// The base look's material for every component mesh: the untouched grey, opaque, in the hull's
+/// edge colour, tested against the part mask. A struck component's fill covers it.
 fn component_base(masks: &MaskSet) -> LookMaterial {
     let mut material = base(masks);
     let grey = LinearRgba::from(timeline::STATE_UNTOUCHED);
     material.params.color = Vec4::new(grey.red, grey.green, grey.blue, BASE_COMPONENT_ALPHA);
     material.params.shade.x = BASE_COMPONENT_FACE_SHARE;
-    material.params.edge.w = BASE_COMPONENT_EDGE_ALPHA;
     material.params.mode.z = 1.0;
+    material.blend = Blend::Opaque;
     material
 }
 
@@ -712,23 +713,19 @@ mod tests {
 
     /// Every component mesh draws in the base's family, hueless and HP-blind, one layer deep among
     /// the components and outside the hull's layer: the untouched grey, opaque at every angle (no
-    /// face-on fade), its edges firmer than the hull's.
+    /// face-on fade) and in the opaque pass, under the hull's edge colour.
     #[test]
     fn the_base_draws_every_component_solid_in_its_own_layer() {
         let draw = base_draw(Tier::Component);
         assert_eq!(draw.mask, MaskLayer::Part);
         assert_eq!(draw.material.params.mode.x, MODE_BASE);
+        assert_eq!(draw.material.blend, Blend::Opaque);
         let p = draw.material.params;
         let grey = LinearRgba::from(timeline::STATE_UNTOUCHED);
         assert_eq!(p.color, Vec4::new(grey.red, grey.green, grey.blue, 1.0));
         assert_eq!(p.shade.x, 1.0, "opaque face-on as well as grazing");
         let hull = base_draw(Tier::Armour).material.params;
-        assert!(p.edge.w > hull.edge.w);
-        assert_eq!(
-            p.edge.truncate(),
-            hull.edge.truncate(),
-            "the hull's edge colour"
-        );
+        assert_eq!(p.edge, hull.edge, "the hull's edge colour");
     }
 
     /// A struck component draws on the state fill: its share as the fill height, red when damaged,
