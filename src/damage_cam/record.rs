@@ -630,22 +630,14 @@ pub(crate) fn report_from(
         start,
         contact_speed,
     } = timeline(world, struck, log, facts, first_touch, last_touch)?;
-    let mine = |mark: &ArmourMark| share_of(world, mark, struck.tank);
-    let time_at = |point: Vec3| time_on(&nodes, point);
-
-    let mut plates = Vec::new();
-    let mut ricochets = Vec::new();
-    let mut spall = Vec::new();
-    // Every deposit on a component: `(volume, dose, t, mark)`.
-    let mut line: Vec<Deposit> = Vec::new();
-    let mut field: Vec<Deposit> = Vec::new();
-    // Where the line reached each component, with its time and the mark that reached it.
-    let mut entered: Vec<(Entity, f32, Vec3, usize)> = Vec::new();
-    let mut end = None;
-    let tail = wound_tail(marks, struck.from, last_touch);
+    let on = Encounter {
+        world,
+        struck,
+        nodes: &nodes,
+        tail: wound_tail(marks, struck.from, last_touch),
+    };
+    let mut ledger = Ledger::new(on);
     let mut thrown = log.cones.iter();
-    let first = &marks[first_touch];
-    let owned = |volume: Entity| owned_by(world, volume, struck.tank);
     for (index, mark) in marks[..=last_touch].iter().enumerate() {
         if index < struck.from || !owns(mark) {
             // Its cones are an earlier encounter's or another tank's; the cone log stays aligned
@@ -655,8 +647,6 @@ pub(crate) fn report_from(
             }
             continue;
         }
-        let point = |world: Vec3| struck.point(index, world);
-        let direction = |world: Vec3| struck.direction(index, world);
         match mark {
             ArmourMark::Bounce {
                 position,
@@ -667,22 +657,8 @@ pub(crate) fn report_from(
                 shock,
                 ..
             } => {
-                let t = time_at(*position);
-                ricochets.push(Ricochet {
-                    t,
-                    point: point(*position),
-                    normal: direction(*normal),
-                    incoming: direction(*incoming),
-                    outgoing: direction(*outgoing),
-                    volume: name_of(world, *volume),
-                });
-                if class_of(world, *volume) == VolumeClass::Box {
-                    line.push((*volume, *shock, t, index));
-                    entered.push((*volume, t, *position, index));
-                }
-                end = Some(RoundEnd::Left {
-                    at: point(*position),
-                });
+                let directions = [*normal, *incoming, *outgoing];
+                ledger.bounce(index, *position, directions, *volume, *shock);
             }
             ArmourMark::Crossing {
                 volumes,
@@ -690,102 +666,15 @@ pub(crate) fn report_from(
                 cones: count,
                 ..
             } => {
-                end = mine(mark).map(|share| match share.end {
-                    ShareEnd::Left { at } => RoundEnd::Left { at: point(at) },
-                    ShareEnd::Rest { volume } => RoundEnd::Rest {
-                        volume: volume.map_or_else(String::new, |volume| name_of(world, volume)),
-                    },
-                });
-                for crossed in volumes.iter().filter(|crossed| owned(crossed.volume)) {
-                    let t = time_at(crossed.entry);
-                    let class = class_of(world, crossed.volume);
-                    if class == VolumeClass::Box {
-                        line.push((crossed.volume, crossed.cost * TRANSIT_K, t, index));
-                        entered.push((crossed.volume, t, crossed.entry, index));
-                        continue;
-                    }
-                    plates.push(Plate {
-                        name: name_of(world, crossed.volume),
-                        t,
-                        entry: point(crossed.entry),
-                        exit: crossed.perforated.then(|| point(crossed.end)),
-                        chord_mm: crossed.chord * 1000.0,
-                        steel_equiv_mm: crossed.cost,
-                        cost_mm: crossed.cost,
-                        overmatched: *overmatched,
-                        class: if class == VolumeClass::External {
-                            PlateClass::External
-                        } else {
-                            PlateClass::Main
-                        },
-                        factor: if crossed.chord > 0.0 {
-                            crossed.cost / crossed.chord
-                        } else {
-                            0.0
-                        },
-                    });
-                }
-                for cone in thrown.by_ref().take(*count) {
-                    let t = time_at(cone.origin);
-                    let fragments = cone
-                        .rays
-                        .iter()
-                        .map(|ray| {
-                            let doses = ray.doses.iter().filter(|(volume, _)| owned(*volume));
-                            for &(volume, dose) in doses.clone() {
-                                field.push((volume, dose, t, index));
-                            }
-                            Fragment {
-                                end: point(ray.end),
-                                strength: ray.strength,
-                                hits: doses
-                                    .map(|&(volume, dose)| FragmentHit {
-                                        volume: name_of(world, volume),
-                                        damage: dose,
-                                    })
-                                    .collect(),
-                            }
-                        })
-                        .collect();
-                    spall.push(SpallCone {
-                        t,
-                        origin: point(cone.origin),
-                        axis: direction(Vec3::from(cone.axis)),
-                        half_angle_deg: cone.half_angle.to_degrees(),
-                        strength: cone.strength,
-                        fragments,
-                    });
-                }
+                let cones = thrown.by_ref().take(*count);
+                ledger.crossing(index, on.mine(mark), volumes, *overmatched, cones);
             }
-            ArmourMark::Wound { volumes, .. } => {
-                // The witness law's dose as it stands: no hard-world scale applies to it.
-                for crossed in volumes.iter().filter(|crossed| owned(crossed.volume)) {
-                    let t = time_at(crossed.entry);
-                    line.push((crossed.volume, crossed.cost, t, index));
-                    entered.push((crossed.volume, t, crossed.entry, index));
-                }
-                // Past the hard world, the round ends where it last left a witness, or at rest
-                // inside the one its flight ended in.
-                if index >= tail
-                    && let Some((_, exit, left)) = wound_span(world, volumes, struck.tank)
-                {
-                    end = Some(if left {
-                        RoundEnd::Left { at: point(exit) }
-                    } else {
-                        RoundEnd::Rest {
-                            volume: volumes
-                                .iter()
-                                .filter(|crossed| owned(crossed.volume))
-                                .find(|crossed| crossed.end == exit)
-                                .map_or_else(String::new, |crossed| name_of(world, crossed.volume)),
-                        }
-                    });
-                }
-            }
+            ArmourMark::Wound { volumes, .. } => ledger.wound(index, volumes),
             ArmourMark::Failed => {}
         }
     }
 
+    let first = &marks[first_touch];
     let (impact_point, normal, incoming) = match first {
         ArmourMark::Bounce {
             position,
@@ -802,7 +691,7 @@ pub(crate) fn report_from(
             incoming,
             ..
         } => (
-            mine(first).map_or(*entrance, |share| share.entry),
+            on.mine(first).map_or(*entrance, |share| share.entry),
             *normal,
             *incoming,
         ),
@@ -813,7 +702,7 @@ pub(crate) fn report_from(
         } => (
             volumes
                 .iter()
-                .find(|crossed| owned(crossed.volume))
+                .find(|crossed| on.owned(crossed.volume))
                 .map(|crossed| crossed.entry)?,
             -*incoming,
             *incoming,
@@ -823,6 +712,16 @@ pub(crate) fn report_from(
     let normal = normal.normalize_or_zero();
     let incidence = (-incoming).dot(normal).clamp(-1.0, 1.0).acos();
 
+    let Ledger {
+        mut plates,
+        ricochets,
+        spall,
+        line,
+        field,
+        entered,
+        end,
+        ..
+    } = ledger;
     let components = components(world, struck, log.dose);
     let (doses, mut consequences) = outcomes(
         world,
@@ -879,6 +778,214 @@ pub(crate) fn report_from(
 /// One deposit on a component: `(volume, dose, t, mark)`, its dose in reference-mm and `mark` the
 /// armour mark that dealt it.
 type Deposit = (Entity, f32, f32, usize);
+
+/// What [`report_from`] reads each mark of an encounter against: the struck tank, the path's timed
+/// nodes, and `tail`, the first mark past the encounter's last hard one ([`wound_tail`]).
+#[derive(Clone, Copy)]
+struct Encounter<'a> {
+    world: &'a World,
+    struck: &'a StruckTank,
+    nodes: &'a [Node],
+    tail: usize,
+}
+
+impl Encounter<'_> {
+    /// Whether the struck tank owns `volume`.
+    fn owned(&self, volume: Entity) -> bool {
+        owned_by(self.world, volume, self.struck.tank)
+    }
+
+    /// The struck tank's share of a crossing `mark` ([`share_of`]).
+    fn mine(&self, mark: &ArmourMark) -> Option<Share> {
+        share_of(self.world, mark, self.struck.tank)
+    }
+
+    /// The path's time at `point` (WORLD), [`time_on`].
+    fn time_at(&self, point: Vec3) -> f32 {
+        time_on(self.nodes, point)
+    }
+}
+
+/// The report's parts an encounter's marks add up to, filled by [`report_from`] one mark at a time
+/// in path order: points and directions in the hull frame of the mark that states them, times on
+/// the encounter's path.
+struct Ledger<'a> {
+    on: Encounter<'a>,
+    plates: Vec<Plate>,
+    ricochets: Vec<Ricochet>,
+    spall: Vec<SpallCone>,
+    /// The line's deposits on the struck tank's components.
+    line: Vec<Deposit>,
+    /// The spall fragments' deposits on them.
+    field: Vec<Deposit>,
+    /// Where the line reached each component (WORLD), with its time and the mark that reached it.
+    entered: Vec<(Entity, f32, Vec3, usize)>,
+    /// The round's end as the marks so far state it.
+    end: Option<RoundEnd>,
+}
+
+impl<'a> Ledger<'a> {
+    fn new(on: Encounter<'a>) -> Self {
+        Self {
+            on,
+            plates: Vec::new(),
+            ricochets: Vec::new(),
+            spall: Vec::new(),
+            line: Vec::new(),
+            field: Vec::new(),
+            entered: Vec::new(),
+            end: None,
+        }
+    }
+
+    /// Mark `index`, a bounce at `position` off `volume`'s face, its `[normal, incoming, outgoing]`
+    /// `directions` (WORLD): its ricochet, the `shock` it jarred into a box, and the round leaving
+    /// there.
+    fn bounce(
+        &mut self,
+        index: usize,
+        position: Vec3,
+        directions: [Vec3; 3],
+        volume: Entity,
+        shock: f32,
+    ) {
+        let on = self.on;
+        let t = on.time_at(position);
+        let [normal, incoming, outgoing] =
+            directions.map(|direction| on.struck.direction(index, direction));
+        self.ricochets.push(Ricochet {
+            t,
+            point: on.struck.point(index, position),
+            normal,
+            incoming,
+            outgoing,
+            volume: name_of(on.world, volume),
+        });
+        if class_of(on.world, volume) == VolumeClass::Box {
+            self.line.push((volume, shock, t, index));
+            self.entered.push((volume, t, position, index));
+        }
+        self.end = Some(RoundEnd::Left {
+            at: on.struck.point(index, position),
+        });
+    }
+
+    /// Mark `index`, a crossing of `volumes` whose share for the struck tank is `share`: the round's
+    /// end as the share states it, a plate per armour volume the tank owns, a line deposit and an
+    /// entry per box, and the spall `cones` it threw with their fragments' deposits.
+    fn crossing<'c>(
+        &mut self,
+        index: usize,
+        share: Option<Share>,
+        volumes: &[VolumeCrossing],
+        overmatched: bool,
+        cones: impl Iterator<Item = &'c ThrownCone>,
+    ) {
+        let on = self.on;
+        self.end = share.map(|share| match share.end {
+            ShareEnd::Left { at } => RoundEnd::Left {
+                at: on.struck.point(index, at),
+            },
+            ShareEnd::Rest { volume } => RoundEnd::Rest {
+                volume: volume.map_or_else(String::new, |volume| name_of(on.world, volume)),
+            },
+        });
+        for crossed in volumes.iter().filter(|crossed| on.owned(crossed.volume)) {
+            let t = on.time_at(crossed.entry);
+            let class = class_of(on.world, crossed.volume);
+            if class == VolumeClass::Box {
+                self.line
+                    .push((crossed.volume, crossed.cost * TRANSIT_K, t, index));
+                self.entered.push((crossed.volume, t, crossed.entry, index));
+                continue;
+            }
+            self.plates.push(Plate {
+                name: name_of(on.world, crossed.volume),
+                t,
+                entry: on.struck.point(index, crossed.entry),
+                exit: crossed
+                    .perforated
+                    .then(|| on.struck.point(index, crossed.end)),
+                chord_mm: crossed.chord * 1000.0,
+                steel_equiv_mm: crossed.cost,
+                cost_mm: crossed.cost,
+                overmatched,
+                class: if class == VolumeClass::External {
+                    PlateClass::External
+                } else {
+                    PlateClass::Main
+                },
+                factor: if crossed.chord > 0.0 {
+                    crossed.cost / crossed.chord
+                } else {
+                    0.0
+                },
+            });
+        }
+        for cone in cones {
+            let t = on.time_at(cone.origin);
+            let fragments = cone
+                .rays
+                .iter()
+                .map(|ray| {
+                    let doses = ray.doses.iter().filter(|(volume, _)| on.owned(*volume));
+                    for &(volume, dose) in doses.clone() {
+                        self.field.push((volume, dose, t, index));
+                    }
+                    Fragment {
+                        end: on.struck.point(index, ray.end),
+                        strength: ray.strength,
+                        hits: doses
+                            .map(|&(volume, dose)| FragmentHit {
+                                volume: name_of(on.world, volume),
+                                damage: dose,
+                            })
+                            .collect(),
+                    }
+                })
+                .collect();
+            self.spall.push(SpallCone {
+                t,
+                origin: on.struck.point(index, cone.origin),
+                axis: on.struck.direction(index, Vec3::from(cone.axis)),
+                half_angle_deg: cone.half_angle.to_degrees(),
+                strength: cone.strength,
+                fragments,
+            });
+        }
+    }
+
+    /// Mark `index`, the line through the witnesses `volumes`: a line deposit and an entry per
+    /// witness the struck tank owns, and past the hard world the round's end.
+    fn wound(&mut self, index: usize, volumes: &[VolumeCrossing]) {
+        let on = self.on;
+        // The witness law's dose as it stands: no hard-world scale applies to it.
+        for crossed in volumes.iter().filter(|crossed| on.owned(crossed.volume)) {
+            let t = on.time_at(crossed.entry);
+            self.line.push((crossed.volume, crossed.cost, t, index));
+            self.entered.push((crossed.volume, t, crossed.entry, index));
+        }
+        // Past the hard world, the round ends where it last left a witness, or at rest inside the
+        // one its flight ended in.
+        if index >= on.tail
+            && let Some((_, exit, left)) = wound_span(on.world, volumes, on.struck.tank)
+        {
+            self.end = Some(if left {
+                RoundEnd::Left {
+                    at: on.struck.point(index, exit),
+                }
+            } else {
+                RoundEnd::Rest {
+                    volume: volumes
+                        .iter()
+                        .filter(|crossed| on.owned(crossed.volume))
+                        .find(|crossed| crossed.end == exit)
+                        .map_or_else(String::new, |crossed| name_of(on.world, crossed.volume)),
+                }
+            });
+        }
+    }
+}
 
 /// The struck tank's components by name, each at its HP at the shot: what the encounter's first
 /// settle of its pool found there ([`ShotDose::settles`]), the tank's captured HP elsewhere.
