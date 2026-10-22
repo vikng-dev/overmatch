@@ -184,6 +184,74 @@ struct Run {
 }
 
 impl Run {
+    /// A run of `record` from `zero` on `beats`, in the record's frame: the struck hull's pose the
+    /// record carries, else the own hull's pose now (`own_rig`), else the world's. Beat 3 looks at
+    /// the shooter's live tank where one stands in `scene`, else at the record's muzzle; without
+    /// either, `beats.shooter` is cleared. The orbit radius is the player's zoom now.
+    fn start(
+        record: &Killing,
+        zero: f64,
+        mut beats: Beats,
+        own_rig: Option<&crate::tank::Rig>,
+        scene: &Scene,
+    ) -> Self {
+        let stored = &record.stored;
+        let report = &stored.report;
+        let frame = match stored.explanation.hull_pose() {
+            Ok(Some((at, turn))) => Some(Transform::from_translation(at).with_rotation(turn)),
+            _ => own_rig
+                .and_then(|tank_rig| {
+                    let node = scene.view_nodes.get(tank_rig.hull).ok();
+                    scene
+                        .globals
+                        .get(ViewNode::resolve(node, tank_rig.hull))
+                        .ok()
+                })
+                .map(GlobalTransform::compute_transform),
+        };
+        let frame = frame.unwrap_or_default();
+        let impact = frame.transform_point(Vec3::from(report.impact.point));
+        let muzzle_point = report.muzzle.map(|m| frame.transform_point(Vec3::from(m)));
+        let muzzle = muzzle_point
+            .unwrap_or_else(|| impact - frame.rotation * Vec3::from(report.impact.incoming));
+        let live = scene
+            .shooters
+            .iter()
+            .find(|(_, id, _, _)| **id == stored.explanation.shot.combatant)
+            .and_then(|(entity, _, shooter_rig, _)| {
+                let (turret, _) = rig_world_pose(
+                    shooter_rig?.turret,
+                    entity,
+                    Vec3::ZERO,
+                    Quat::IDENTITY,
+                    &scene.parents,
+                    &scene.locals,
+                )?;
+                Some(ShooterAt::Tank(entity, turret))
+            });
+        let shooter = live.or(muzzle_point.map(ShooterAt::Point));
+        beats.shooter = shooter.is_some();
+        let radius = scene
+            .camera
+            .single()
+            .ok()
+            .and_then(|(_, _, _, orbit)| orbit)
+            .map_or(crate::camera::ORBIT_FAR, OrbitCamera::radius);
+        Self {
+            zero,
+            beats,
+            held: 0.0,
+            t: 0.0,
+            real: 0.0,
+            hit: None,
+            frame,
+            impact,
+            muzzle,
+            shooter,
+            radius,
+        }
+    }
+
     fn beat(&self) -> Beat {
         self.beats.beat(self.t)
     }
@@ -553,63 +621,10 @@ pub(super) fn drive(
         )),
         _ => None,
     };
-    if let (Some((run_zero, mut beats)), Some(record)) = (start, victim.record.as_ref()) {
-        let stored = &record.stored;
-        let report = &stored.report;
-        let frame = match stored.explanation.hull_pose() {
-            Ok(Some((at, turn))) => Some(Transform::from_translation(at).with_rotation(turn)),
-            _ => tank
-                .and_then(|(_, _, _, _, tank_rig)| tank_rig)
-                .and_then(|tank_rig| {
-                    let node = scene.view_nodes.get(tank_rig.hull).ok();
-                    scene
-                        .globals
-                        .get(ViewNode::resolve(node, tank_rig.hull))
-                        .ok()
-                })
-                .map(GlobalTransform::compute_transform),
-        };
-        let frame = frame.unwrap_or_default();
-        let impact = frame.transform_point(Vec3::from(report.impact.point));
-        let muzzle_point = report.muzzle.map(|m| frame.transform_point(Vec3::from(m)));
-        let muzzle = muzzle_point
-            .unwrap_or_else(|| impact - frame.rotation * Vec3::from(report.impact.incoming));
-        let live = scene
-            .shooters
-            .iter()
-            .find(|(_, id, _, _)| **id == stored.explanation.shot.combatant)
-            .and_then(|(entity, _, shooter_rig, _)| {
-                let (turret, _) = rig_world_pose(
-                    shooter_rig?.turret,
-                    entity,
-                    Vec3::ZERO,
-                    Quat::IDENTITY,
-                    &scene.parents,
-                    &scene.locals,
-                )?;
-                Some(ShooterAt::Tank(entity, turret))
-            });
-        let shooter = live.or(muzzle_point.map(ShooterAt::Point));
-        beats.shooter = shooter.is_some();
-        let radius = scene
-            .camera
-            .single()
-            .ok()
-            .and_then(|(_, _, _, orbit)| orbit)
-            .map_or(crate::camera::ORBIT_FAR, OrbitCamera::radius);
-        death.run = Some(Run {
-            zero: run_zero,
-            beats,
-            held: 0.0,
-            t: 0.0,
-            real: 0.0,
-            hit: None,
-            frame,
-            impact,
-            muzzle,
-            shooter,
-            radius,
-        });
+    if let (Some((run_zero, beats)), Some(record)) = (start, victim.record.as_ref()) {
+        let report = &record.stored.report;
+        let own_rig = tank.and_then(|(_, _, _, _, tank_rig)| tank_rig);
+        death.run = Some(Run::start(record, run_zero, beats, own_rig, &scene));
         // A press the router gave the menu this frame — it routed on the gate as the frame
         // entered, before this run existed — is the run's: it reaches no menu and no pause.
         if let Some(escape) = escape.as_deref_mut()
@@ -631,7 +646,7 @@ pub(super) fn drive(
         }
         info!(
             "kill cam: plays {:?} from {:.2} s after the knockout (record at {:.2} s)",
-            stored.explanation.shot,
+            record.stored.explanation.shot,
             (run_zero - zero) as f32,
             record.after_s,
         );
@@ -675,50 +690,58 @@ pub(super) fn drive(
     }
 
     // The stage, from the run's start through its lesson.
-    let staging = death
-        .run
-        .filter(|run| matches!(run.beat(), Beat::Hit | Beat::Lesson));
-    match staging {
-        Some(run) => {
-            let placed = victim
-                .record
-                .as_ref()
-                .and_then(|record| record.stored.report.vehicle.as_deref())
-                .is_some_and(|vehicle| rig.ready(&mut slot, vehicle));
-            if let Some(view) = rig.view.as_deref() {
-                let anchor = match scene.anchors.iter().next() {
-                    Some(anchor) => anchor,
-                    None => rig
-                        .commands
-                        .spawn((run.frame, Visibility::Inherited, StageAnchor, CornerRig))
-                        .id(),
-                };
-                rig.commands.entity(anchor).insert(run.frame);
-                if scene.parents.get(view.root).ok().map(ChildOf::parent) != Some(anchor) {
-                    rig.commands.entity(view.root).insert(ChildOf(anchor));
-                }
-                for (shell, parent) in &scene.shells {
-                    if parent.map(ChildOf::parent) != Some(anchor) {
-                        rig.commands.entity(shell).insert(ChildOf(anchor));
-                    }
-                }
-            }
-            let showing = lesson_showing(run.beats, run.t, 0).filter(|_| placed);
-            rig.corner.set_if_neq(Corner {
-                showing,
-                fading: None,
-            });
-        }
-        None => {
-            rig.corner.set_if_neq(Corner::default());
-        }
-    }
+    let vehicle = victim
+        .record
+        .as_ref()
+        .and_then(|record| record.stored.report.vehicle.as_deref());
+    stage(death.run, vehicle, &mut rig, &mut slot, &scene);
 
     *gate = KillCamGate {
         holds_death_screen: death.holds_death_screen(),
         settling: !settled,
         running: death.run.is_some(),
     };
+}
+
+/// The stage through the hit and lesson beats of `run`: the stage view of `vehicle` (the record's)
+/// readied, its root and the shell hung under the [`StageAnchor`] at the record's frame, and the
+/// corner showing the lesson once the view is placed. Any other beat, or no run: the corner shows
+/// nothing.
+fn stage(
+    run: Option<Run>,
+    vehicle: Option<&str>,
+    rig: &mut SlotRig,
+    slot: &mut Slot,
+    scene: &Scene,
+) {
+    let Some(run) = run.filter(|run| matches!(run.beat(), Beat::Hit | Beat::Lesson)) else {
+        rig.corner.set_if_neq(Corner::default());
+        return;
+    };
+    let placed = vehicle.is_some_and(|vehicle| rig.ready(slot, vehicle));
+    if let Some(view) = rig.view.as_deref() {
+        let anchor = match scene.anchors.iter().next() {
+            Some(anchor) => anchor,
+            None => rig
+                .commands
+                .spawn((run.frame, Visibility::Inherited, StageAnchor, CornerRig))
+                .id(),
+        };
+        rig.commands.entity(anchor).insert(run.frame);
+        if scene.parents.get(view.root).ok().map(ChildOf::parent) != Some(anchor) {
+            rig.commands.entity(view.root).insert(ChildOf(anchor));
+        }
+        for (shell, parent) in &scene.shells {
+            if parent.map(ChildOf::parent) != Some(anchor) {
+                rig.commands.entity(shell).insert(ChildOf(anchor));
+            }
+        }
+    }
+    let showing = lesson_showing(run.beats, run.t, 0).filter(|_| placed);
+    rig.corner.set_if_neq(Corner {
+        showing,
+        fading: None,
+    });
 }
 
 /// Mark the game's respawn or spawn map, taken while dead: the next frame's [`drive`] ends the run
