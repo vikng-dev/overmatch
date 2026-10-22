@@ -43,8 +43,9 @@ If a candidate needs a design conversation, it is not this brief's work. Hand it
 
 Establish this before hunting, or you will file findings the compiler already rejects.
 
-CI runs, on every push and every PR (`.github/workflows/ci.yml`, aggregated into the one `check`
-context; the local `pre-push` hook is the git-lfs upload and nothing else):
+CI runs on every PR, and on every push to `main` that changes anything outside `.agents/`,
+Markdown and `upstream/` (`.github/workflows/ci.yml`, aggregated into the one `check` context; the
+local `pre-push` hook is the git-lfs upload and nothing else):
 
 ```
 cargo fmt --all --check                                                # job `fmt`
@@ -52,6 +53,9 @@ cargo deny --locked check -W unmaintained                              # job `de
 cargo clippy --locked --all-targets --features dev_ui,bitprobe -- -D warnings   # `check (clippy)`
 cargo test --locked -- --skip <the UDP probe> --skip ballistics::field_casts::  # `check (tests)`
 ```
+
+The asset door is `.github/workflows/assets.yml`, under its own required context, `assets`.
+`.github/workflows/field-casts.yml` is a measurement, not a gate, and has no context.
 
 **Clippy.** `Cargo.toml`'s `[lints.clippy]` table is the one home for lint policy (this package
 only; `vendor/` is never linted). On top of stock clippy — `correctness` (deny), `suspicious`,
@@ -457,11 +461,13 @@ its own justification, and an explicit note in the report saying it is a pattern
 else it would apply if adopted. If it is genuinely better, say so and argue for it. What is
 prohibited is a pattern arriving as a side effect of a cleanup commit, where nobody chose it.
 
-### C3. Leave the suite green at every commit
+### C3. CI is the single full verdict
 
-`cargo test --locked` and `cargo clippy --locked --all-targets --features dev_ui,bitprobe --
--D warnings` pass at *each* commit, not merely at the end of the branch. If a commit needs a
-follow-up to be green, it is one commit, not two.
+Before each commit: `cargo fmt --all --check`, CI's clippy (`cargo clippy --locked --all-targets
+--features dev_ui,bitprobe -- -D warnings`), and the targeted tests of what changed (`cargo test
+--lib <module>`). Every commit compiles and passes clippy. The full suite runs once, on CI, after
+the push; a thread of work is pushed once, not once per fix, and a red on `main` is fixed
+forward.
 
 ### C4. Commit to the working branch; never push
 

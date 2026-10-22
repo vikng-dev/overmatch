@@ -272,12 +272,11 @@ move with a netcode, physics, ballistics, or game-rule change.
 - Re-measure build and dependency behaviour before considering Cargo package extraction.
 
 Each structural slice must pass focused owning-module tests while it is developed, followed by the
-repository gates before commit:
+local gates before each commit; the full `cargo test --locked` runs once, on CI, after the push:
 
 ```text
 cargo fmt --all --check
 cargo clippy --locked --all-targets --features dev_ui,bitprobe -- -D warnings
-cargo test --locked
 ```
 
 ## Cargo workspace extraction gates
