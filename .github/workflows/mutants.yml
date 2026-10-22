@@ -1,9 +1,9 @@
 name: Mutants
 
 # Mutation testing ON DEMAND: an instrument for reading where the suite is blind, never a gate. Its
-# own workflow, so CI's `workflow_dispatch` (the pre-release asset re-cut) never starts a mutation
-# run and the `check` context never waits on one. A red run means cargo-mutants found missed or
-# timed-out mutants; `mutants.out/` (uploaded either way) lists them.
+# own workflow, so no dispatch of another workflow starts a mutation run and the `check` context
+# never waits on one. A red run means cargo-mutants found missed or timed-out mutants;
+# `mutants.out/` (uploaded either way) lists them.
 
 on:
   workflow_dispatch:
@@ -51,12 +51,14 @@ jobs:
         with:
           persist-credentials: false
           lfs: false
+      - name: The vendored crates, from outside the workspace root
+        run: bash scripts/ci/vendor-outside-root.sh
       - name: Git LFS pull (R2)
         run: |
           git lfs install --local
           git lfs pull
 
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: ./.github/actions/rust-toolchain
 
       - name: Install Linux build dependencies
         run: |
@@ -65,10 +67,12 @@ jobs:
             pkg-config libasound2-dev libudev-dev \
             libwayland-dev libxkbcommon-dev libx11-dev
 
-      # The `tests` lane's profile and targets, so a dispatch off a warm cache skips the dep graph.
+      # The `codegen` family `ci.yml`'s tests lane saves: its profile and targets, so a dispatch off a
+      # warm cache skips the dep graph. The vendored crates are cached with their mtimes pinned
+      # (`scripts/ci/vendor-outside-root.sh`), so a change to their content must change the key.
       - uses: Swatinem/rust-cache@v2
         with:
-          key: codegen
+          shared-key: codegen-${{ hashFiles('vendor/**') }}
 
       - uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
         with:

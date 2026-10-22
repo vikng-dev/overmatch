@@ -36,7 +36,11 @@ outputs:
 runs:
   using: composite
   steps:
-    - uses: dtolnay/rust-toolchain@stable
+    - uses: ./.github/actions/rust-toolchain
+
+    - name: The vendored crates, from outside the workspace root
+      shell: bash
+      run: bash scripts/ci/vendor-outside-root.sh
 
     # THE ASSET SET IS AN ALLOWLIST, stated POSITIVELY: these are the paths `overmatch-server`
     # OPENS, not `assets/` minus whatever seemed heavy. The server mounts `SimPlugin` and no client
@@ -142,11 +146,13 @@ runs:
           pkg-config libasound2-dev libudev-dev \
           libwayland-dev libxkbcommon-dev libx11-dev
 
-    # Shared server build cache (key: server-net) — release, dispatch, and deploy all warm the
-    # same cache on purpose.
+    # One server build cache (`server-net`) — release, dispatch, deploy and bitprobe all warm the
+    # same entry on purpose: `shared-key` replaces the job id rust-cache otherwise puts in the key.
+    # The vendored crates are cached with their mtimes pinned (`scripts/ci/vendor-outside-root.sh`),
+    # so a change to their content must change the key.
     - uses: Swatinem/rust-cache@v2
       with:
-        key: server-net
+        shared-key: server-net-${{ hashFiles('vendor/**') }}
 
     # --locked builds against the committed Cargo.lock (reproducible). release profile = strip +
     # thin LTO.

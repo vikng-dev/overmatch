@@ -1,0 +1,38 @@
+name: Install the pinned Rust toolchain
+description: >-
+  Installs the toolchain `rust-toolchain.toml` pins, with the given components and targets.
+  dtolnay/rust-toolchain takes the toolchain as an input and never reads that file, so the channel
+  is read here and handed to it: the file stays the one declaration of the version.
+
+# CONTRACT: the caller checks the repo out first; the channel is read from the checkout's root.
+
+inputs:
+  components:
+    description: Comma-separated components to install beyond the minimal profile.
+    required: false
+    default: ''
+  targets:
+    description: Comma-separated targets to install beyond the host.
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Read the pinned channel
+      id: pin
+      shell: bash
+      run: |
+        set -euo pipefail
+        channel="$(sed -n 's/^channel *= *"\(.*\)"$/\1/p' rust-toolchain.toml)"
+        if [[ -z "${channel}" ]]; then
+          echo "::error::rust-toolchain.toml pins no channel"
+          exit 1
+        fi
+        echo "channel=${channel}" >> "${GITHUB_OUTPUT}"
+
+    - uses: dtolnay/rust-toolchain@master
+      with:
+        toolchain: ${{ steps.pin.outputs.channel }}
+        components: ${{ inputs.components }}
+        targets: ${{ inputs.targets }}

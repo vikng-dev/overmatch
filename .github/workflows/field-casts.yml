@@ -1,0 +1,83 @@
+name: Field casts
+
+# The spall-cone casts digested to the bit on every shipped target, against the macOS arm64 pin
+# (`src/ballistics/field_casts.rs`). A MEASUREMENT for the owner's decision on whether a client may
+# re-cast a field itself, not a gate on the tree: a red leg says this target's casts differ, and the
+# test's failure names the first differing ray. Hence a workflow of its own, no required context,
+# and no part of `ci.yml`'s `check`. The cone's direction pin (`ballistics::spall_cone::`) rides
+# along so each target reports it too.
+
+on:
+  # A release tag dispatches it on the tag (`release.yml`), so every shipped build is measured.
+  workflow_dispatch:
+  # Only a push that can move a cast: the compiler, the dependency graph, the patched crates, the
+  # cast code itself, and this file.
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'vendor/**'
+      - 'src/ballistics/**'
+      - '.github/workflows/field-casts.yml'
+
+# A newer run cancels an older one on the same ref: the casts are a measurement of the tree, so the
+# newer one covers the older commit.
+concurrency:
+  group: field-casts-${{ github.ref }}
+  cancel-in-progress: true
+
+# Least privilege: this job only reads the code, so drop the default token down to
+# read-only contents (GitHub/OpenSSF hardening guidance).
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  field-casts:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    name: field casts (${{ matrix.os }})
+    steps:
+      # LFS on R2 via committed `.lfsconfig` (RO). checkout `lfs: true` ignores
+      # `.lfsconfig` and still hits GitHub — so pull after checkout.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          lfs: false
+      - name: The vendored crates, from outside the workspace root
+        shell: bash
+        run: bash scripts/ci/vendor-outside-root.sh
+      - name: Git LFS pull (R2)
+        shell: bash
+        run: |
+          git lfs install --local
+          git lfs pull
+
+      - uses: ./.github/actions/rust-toolchain
+
+      - name: Install Linux build dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || echo "apt-get update timed out or failed; installing from the indexes already on the runner image"
+          sudo timeout 600 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends \
+            pkg-config libasound2-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev
+
+      # The `codegen` family `ci.yml`'s tests lane saves: same dev profile, so on Linux one entry
+      # serves both (rust-cache keys each OS apart). The vendored crates are cached with their mtimes
+      # pinned (`scripts/ci/vendor-outside-root.sh`), so a change to their content must change the key.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          shared-key: codegen-${{ hashFiles('vendor/**') }}
+
+      - name: Field casts against the pin
+        shell: bash
+        run: "cargo test --locked --lib -- ballistics::field_casts:: ballistics::spall_cone:: --nocapture"

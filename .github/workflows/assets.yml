@@ -1,0 +1,249 @@
+name: Assets
+
+# THE ASSET DOOR, over every trio the commit holds, with the toolchain the door pins. Its own
+# workflow and its own required context (`assets`), apart from `ci.yml`: it judges a push's RANGE,
+# where every lane there judges the tree, so a later run never covers an earlier one here.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # The lane is path-gated (see below) and therefore skips most pushes. The unconditional re-cut of
+  # every trio is a `workflow_dispatch` of this workflow away — RUN IT BEFORE A RELEASE. No cron runs
+  # it: at one to two developers and no players, a defect the path gate could not see is bounded by
+  # the next release, not by a calendar.
+  workflow_dispatch:
+
+# Every run goes to a verdict, never cancelled: a cancelled run is not red, and the scope below
+# diffs only from the previous push, so a cancelled push run is a range no later run checks. One
+# group per sha and event, because a group keeps only one pending run and cancels the rest even with
+# cancel-in-progress off.
+concurrency:
+  group: assets-${{ github.event_name }}-${{ github.sha }}
+  cancel-in-progress: false
+
+# Least privilege: this job only reads the code, so drop the default token down to
+# read-only contents (GitHub/OpenSSF hardening guidance).
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # THE ONLY PLACE THE DOOR RUNS. The local pre-push hook is the git-lfs upload and nothing else,
+  # so this lane is not a backstop for a cheaper local one — it is the verdict. The commit's own
+  # rules meet the commit's own bytes: the checkout is the pushed tree, `git lfs pull` hydrates the
+  # pointers into real blends and models, and every discovered asset is re-cut from its stored
+  # source and compared with the tracked glb byte for byte.
+  #
+  # DISCOVERY, not a list — the one trio rule, sourced from `scripts/hooks/pushed_assets.sh`
+  # (`assets_trios`), so a second vehicle is gated by the rule that found the first and no path is
+  # written down here. Zero trios is a failure: a lane that verified nothing would report success.
+  #
+  # It installs a foreign toolchain and pays a Blender launch plus a MEASURED minute of texture
+  # encode per asset, and none of that belongs in front of clippy.
+  #
+  # PATH-GATED, because that cost — MEASURED ~35 min — was being paid by every netcode push for a
+  # verdict that could not have moved. The first step asks whether anything in the push's range
+  # touches an asset trio or the shared surface (`assets_ci_scope`), and every step below is
+  # conditioned on the answer. It fails toward running: an unresolvable range, a missing baseline,
+  # a force-push and a manual dispatch all verify everything.
+  #
+  # The job still RUNS when it skips — it succeeds as a no-op that says why — so its required
+  # context stays green on a push that touches no asset.
+  assets:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      # Full history: the decision below diffs a range, and a depth-1 checkout holds neither the
+      # push's baseline nor a pull request's merge base.
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+          lfs: false
+          fetch-depth: 0
+
+      # The decision, and the whole of it, in a sourced shell file — a workflow step that decides
+      # anything is a step no suite can run, which is how a broken one ships green.
+      # `scripts/hooks/test_pushed_assets.sh` drives this over synthetic ranges.
+      - name: Does this range touch an asset verdict
+        id: scope
+        env:
+          ASSETS_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+          ASSETS_HEAD: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
+        run: sh -c '. scripts/hooks/pushed_assets.sh; assets_ci_scope'
+
+      - name: The vendored crates, from outside the workspace root
+        if: steps.scope.outputs.affected == 'true'
+        run: bash scripts/ci/vendor-outside-root.sh
+
+      - name: Git LFS pull (R2)
+        if: steps.scope.outputs.affected == 'true'
+        run: |
+          git lfs install --local
+          git lfs pull
+
+      - uses: ./.github/actions/rust-toolchain
+        if: steps.scope.outputs.affected == 'true'
+
+      # `asset_verify` links the whole crate, so this lane carries the same system libs the Linux
+      # client build does — plus the runtime libraries Blender's own binary needs. The runner has no
+      # GUI and every launch here is `--background`; these are what the linked binary loads anyway.
+      - name: Install system dependencies
+        if: steps.scope.outputs.affected == 'true'
+        run: |
+          sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || echo "apt-get update timed out or failed; installing from the indexes already on the runner image"
+          sudo timeout 600 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 install -y --no-install-recommends \
+            pkg-config libasound2-dev libudev-dev \
+            libwayland-dev libxkbcommon-dev libx11-dev \
+            libxi6 libxxf86vm1 libxfixes3 libxrender1 libgl1 libsm6 \
+            cmake ninja-build
+
+      # The `codegen` family `ci.yml`'s tests lane saves: same dev profile, so one entry serves both.
+      # The vendored crates are cached with their mtimes pinned (`scripts/ci/vendor-outside-root.sh`),
+      # so a change to their content must change the key.
+      - uses: Swatinem/rust-cache@v2
+        if: steps.scope.outputs.affected == 'true'
+        with:
+          shared-key: codegen-${{ hashFiles('vendor/**') }}
+
+      # The pins are read OUT OF `scripts/toolchain.py`, never restated here: that file is the one
+      # declaration, and a version written down in a workflow is a second one that drifts silently.
+      # It is RUN rather than quoted into a step, because a step is executable by nothing — no suite
+      # can run it, and the one that imported this module from the wrong directory shipped red.
+      - name: Resolve the pinned toolchain
+        if: steps.scope.outputs.affected == 'true'
+        run: |
+          set -euo pipefail
+          python3 scripts/toolchain.py --pins >> "${GITHUB_ENV}"
+
+      # The build decodes glb geometry to census it and to strip the sim artifact, and every stage
+      # that measures a surface reads it through numpy.
+      - name: Install numpy
+        if: steps.scope.outputs.affected == 'true'
+        run: python3 -m pip install --quiet --disable-pip-version-check numpy
+
+      # Blender is a ~300 MB download and the same bytes on every run of a given pin, so it is
+      # cached on the pin itself — a moved pin is a different key and a fresh download.
+      - name: Cache the pinned Blender
+        id: blender-cache
+        if: steps.scope.outputs.affected == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/overmatch/blender
+          key: blender-${{ env.OVERMATCH_BLENDER_VERSION }}-${{ env.OVERMATCH_BLENDER_BUILD }}
+
+      - name: Install the pinned Blender
+        if: steps.scope.outputs.affected == 'true' && steps.blender-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          series="${OVERMATCH_BLENDER_VERSION%.*}"
+          archive="blender-${OVERMATCH_BLENDER_VERSION}-linux-x64.tar.xz"
+          mkdir -p ~/.cache/overmatch/blender
+          curl -fsSL --retry 3 \
+            "https://download.blender.org/release/Blender${series}/${archive}" \
+            -o "${RUNNER_TEMP}/${archive}"
+          tar -xJf "${RUNNER_TEMP}/${archive}" -C ~/.cache/overmatch/blender --strip-components=1
+
+      # basisu ships no Linux binary release, so it is built from the pinned tag. The tag is a pin
+      # of its own — upstream's tag scheme does not spell the version — and the assertion step
+      # after install proves the built binary prints the pinned version.
+      - name: Cache the pinned Basis Universal
+        id: basisu-cache
+        if: steps.scope.outputs.affected == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/overmatch/basisu
+          key: basisu-${{ env.OVERMATCH_BASISU_VERSION }}-${{ env.OVERMATCH_BASISU_TAG }}-ubuntu-24.04
+
+      - name: Build the pinned Basis Universal
+        if: steps.scope.outputs.affected == 'true' && steps.basisu-cache.outputs.cache-hit != 'true'
+        run: |
+          set -euo pipefail
+          git clone --depth 1 --branch "${OVERMATCH_BASISU_TAG}" \
+            https://github.com/BinomialLLC/basis_universal.git "${RUNNER_TEMP}/basis_universal"
+          cmake -S "${RUNNER_TEMP}/basis_universal" -B "${RUNNER_TEMP}/basis_universal/build" \
+            -G Ninja -DCMAKE_BUILD_TYPE=Release
+          cmake --build "${RUNNER_TEMP}/basis_universal/build"
+          # This tag's CMake links executables into the source tree's bin/, not the build tree.
+          mkdir -p ~/.cache/overmatch/basisu
+          cp "${RUNNER_TEMP}/basis_universal/bin/basisu" ~/.cache/overmatch/basisu/basisu
+
+      # The same predicate the door's preflight runs, in the same report shape, before anything long
+      # starts. An install that produced another build fails here rather than inside the first asset.
+      - name: Assert the toolchain
+        if: steps.scope.outputs.affected == 'true'
+        run: |
+          set -euo pipefail
+          echo "OVERMATCH_BLENDER=${HOME}/.cache/overmatch/blender/blender" >> "${GITHUB_ENV}"
+          echo "OVERMATCH_BASISU=${HOME}/.cache/overmatch/basisu/basisu" >> "${GITHUB_ENV}"
+          export OVERMATCH_BLENDER="${HOME}/.cache/overmatch/blender/blender"
+          export OVERMATCH_BASISU="${HOME}/.cache/overmatch/basisu/basisu"
+          python3 scripts/toolchain.py
+
+      # Every discovered trio, re-cut from its own stored source and compared with the tracked
+      # model under its certified rung records (ADR 0035).
+      # The reports are kept whole: warnings never fail this lane, and the artifact is where they
+      # are read.
+      - name: Verify every asset through the build
+        if: steps.scope.outputs.affected == 'true'
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/asset-reports"
+          # A refused candidate lands in the uploaded reports, because the runner that cut it is
+          # gone the moment this job ends.
+          export OVERMATCH_DOOR_KEEP="${RUNNER_TEMP}/asset-reports"
+          # Every blend the commit holds is a canonical source, before any of them is verified: a
+          # blend of another shape is one discovery would never look at again.
+          sh -c '. scripts/hooks/pushed_assets.sh; assets_blend_shape HEAD'
+          stems=()
+          while IFS= read -r stem; do stems+=("$stem"); done < <(
+            sh -c '. scripts/hooks/pushed_assets.sh; assets_trios HEAD'
+          )
+          if [[ ${#stems[@]} -eq 0 ]]; then
+            echo "::error::No asset trio found — this lane would certify nothing and report success"
+            exit 1
+          fi
+          printf 'asset: %s\n' "${stems[@]}"
+          for stem in "${stems[@]}"; do
+            python3 scripts/tank/build.py verify "${stem}.blend" \
+              2>&1 | tee "${RUNNER_TEMP}/asset-reports/$(basename "${stem}").txt"
+          done
+
+      - name: The Blender source pass, on its synthetic fixtures
+        if: steps.scope.outputs.affected == 'true'
+        run: |
+          set -euo pipefail
+          "${OVERMATCH_BLENDER}" --background --factory-startup \
+            --python .agents/blender/test_tank_lint.py
+          "${OVERMATCH_BLENDER}" --background --factory-startup \
+            --python .agents/blender/test_addon.py
+
+      # The derivation's laws, mutated one at a time on a real exported/baked pair; the door's own
+      # chain and its refusals; the trio the build assembles and takes apart; the finding shape; the
+      # coverage table; and the assets lane's own discovery, selection and hydration.
+      - name: The derivation, door and build suites
+        if: steps.scope.outputs.affected == 'true'
+        run: |
+          set -euo pipefail
+          python3 scripts/tank/test_report.py
+          python3 scripts/tank/test_refusals.py
+          python3 scripts/tank/test_glb_ktx2.py
+          python3 scripts/tank/test_build.py
+          python3 scripts/tank/test_asset_door.py
+          sh scripts/hooks/test_pushed_assets.sh
+
+      - name: The Rust consumer contract
+        if: steps.scope.outputs.affected == 'true'
+        run: "cargo test --locked --lib bake::"
+
+      - name: Asset reports
+        if: ${{ !cancelled() && steps.scope.outputs.affected == 'true' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: asset-reports
+          path: ${{ runner.temp }}/asset-reports
+          # A lane that died before the first asset has no reports and has already said so; a
+          # second red step here would only hide which one failed.
+          if-no-files-found: warn

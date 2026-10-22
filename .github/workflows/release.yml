@@ -185,6 +185,21 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           draft: true
 
+  # Tag pushes only: the field casts (`field-casts.yml`) measured on the tag, so every shipped build
+  # has its casts measured on every target. DISPATCHED rather than called: a called workflow's red
+  # leg is this run's red, and a measurement must never colour a release. No job needs this one.
+  field-casts:
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    permissions:
+      actions: write
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Dispatch the field casts on the tag
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh workflow run field-casts.yml --repo "${GITHUB_REPOSITORY}" --ref "${GITHUB_REF_NAME}"
+
   # Build and package the Windows + Linux PVP clients without a release-write token; the small
   # upload-client job below publishes the sealed archives. macOS has the equivalent
   # untrusted-build/trusted-sign split further down.
@@ -250,6 +265,8 @@ jobs:
         shell: bash
         run: |
           find assets -type f \( -name '*.blend' -o -name '*.blend1' \) -delete
+
+      - uses: ./.github/actions/rust-toolchain
 
       - uses: Swatinem/rust-cache@v2
         with:
@@ -637,8 +654,26 @@ jobs:
       # Apple-Silicon-ONLY (2026-07-11, was universal): Intel Macs are <0.5% of Steam and macOS 26
       # is the last Intel macOS; dropping the x86_64 slice + lipo halves this job (~1h25m → one
       # arch). Steamworks depot config: "Apple Silicon Binaries Included" only.
-      - uses: dtolnay/rust-toolchain@stable
+      #
+      # The channel the built tree pins. Read here rather than through `.github/actions/rust-toolchain`,
+      # because a `./` action resolves from the checkout, which is the tag's tree: a tag cut before
+      # that action existed has neither it nor `rust-toolchain.toml`, and builds on `stable`.
+      - name: Read the pinned channel
+        id: pin
+        run: |
+          set -euo pipefail
+          channel=stable
+          if [[ -f rust-toolchain.toml ]]; then
+            channel="$(sed -n 's/^channel *= *"\(.*\)"$/\1/p' rust-toolchain.toml)"
+          fi
+          if [[ -z "${channel}" ]]; then
+            echo "::error::rust-toolchain.toml pins no channel"
+            exit 1
+          fi
+          echo "channel=${channel}" >> "${GITHUB_OUTPUT}"
+      - uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.pin.outputs.channel }}
           targets: aarch64-apple-darwin
 
       - uses: Swatinem/rust-cache@v2

@@ -1055,7 +1055,7 @@ class ToolchainProgram(unittest.TestCase):
     def test_the_workflow_runs_this_file_and_holds_no_python_of_its_own(self):
         """The class the regression came from, closed: a workflow that holds no Python holds none
         that no suite runs."""
-        with open(os.path.join(ROOT, ".github", "workflows", "ci.yml"), encoding="utf-8") as handle:
+        with open(os.path.join(ROOT, ".github", "workflows", "assets.yml"), encoding="utf-8") as handle:
             workflow = handle.read()
         self.assertEqual(
             [line.strip() for line in workflow.splitlines() if "python3 - " in line], [],

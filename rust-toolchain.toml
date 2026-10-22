@@ -1,0 +1,7 @@
+# The one declaration of the Rust toolchain. rustup applies it to every cargo and rustc run in this
+# tree, and every workflow installs the `channel` it reads from here
+# (`.github/actions/rust-toolchain`), so a local green and a CI green are the same compiler.
+[toolchain]
+channel = "1.98.0"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

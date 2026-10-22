@@ -30,7 +30,9 @@ jobs:
       # Keep toolchain, host libraries, cache family, release profile, and --locked behavior aligned
       # with .github/actions/build-server/action.yml. `--features bitprobe` is the observation-only
       # delta required to make the additional bin target available.
-      - uses: dtolnay/rust-toolchain@stable
+      - name: The vendored crates, from outside the workspace root
+        run: bash scripts/ci/vendor-outside-root.sh
+      - uses: ./.github/actions/rust-toolchain
       - name: Install Linux build dependencies
         run: |
           sudo timeout 300 apt-get -o Acquire::Retries=3 -o Acquire::http::Timeout=30 update || echo "apt-get update timed out or failed; installing from the indexes already on the runner image"
@@ -42,7 +44,7 @@ jobs:
           find assets -type f \( -name '*.blend' -o -name '*.blend1' \) -delete
       - uses: Swatinem/rust-cache@v2
         with:
-          key: server-net
+          shared-key: server-net-${{ hashFiles('vendor/**') }}
       - name: Build bitprobe with deployed-server codegen settings
         run: cargo build --release --locked --features bitprobe --bin bitprobe
 
