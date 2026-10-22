@@ -2,7 +2,7 @@
 //! with.
 //!
 //! Handles are inserted during plugin setup so every `Startup` UI spawner can read [`UiFonts`]. UI
-//! strings must remain within the shipped font coverage enforced by `tests/ui_ascii.rs`.
+//! strings must remain within the shipped font coverage enforced by `src/tests/ui_ascii.rs`.
 //!
 //! The colours below live here for the same reason [`OVERLAY_FONT_PX`] does: they are the family
 //! standard, and they had already been hand-copied into three files. Layout is deliberately NOT
@@ -117,7 +117,7 @@ pub(crate) fn plugin(app: &mut App) {
 }
 
 /// The glyphs past printable ASCII that both shipped weights carry, each confirmed in their cmaps;
-/// `tests/ui_ascii.rs` guards source literals against the same set.
+/// `src/tests/ui_ascii.rs` guards source literals against the same set.
 const TYPOGRAPHIC: [char; 7] = [
     '\u{2026}', '\u{2014}', '\u{2013}', '\u{00B0}', '\u{00D7}', '\u{00B1}', '\u{2264}',
 ];
@@ -125,7 +125,7 @@ const TYPOGRAPHIC: [char; 7] = [
 /// `text` reduced to what the shipped font draws: printable ASCII and [`TYPOGRAPHIC`], every run of
 /// anything else collapsed to one space, so a dropped glyph never welds two words. `None` where no
 /// letter or digit survives: the caller says what is missing instead. For strings that come from
-/// data (a player's name, a tank file's label), which `tests/ui_ascii.rs` cannot see.
+/// data (a player's name, a tank file's label), which `src/tests/ui_ascii.rs` cannot see.
 pub(crate) fn drawable(text: &str) -> Option<String> {
     let mut out = String::new();
     for character in text.chars() {

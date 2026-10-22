@@ -193,7 +193,7 @@ const UNIVERSE_EXTS: &[&str] = &[
 ];
 
 /// This file, which neither contributes to the universe nor is scanned — see the module doc.
-const SELF: &str = "tests/doc_citations.rs";
+const SELF: &str = "src/tests/doc_citations.rs";
 
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).to_path_buf()
@@ -709,7 +709,7 @@ fn f() {
         "repo-relative citations are resolved against the tree"
     );
     assert!(
-        citations("// lightyear server.rs:707 at 127.0.0.1:5888", &root).is_empty(),
+        citations("// upstream server.rs:707 at 127.0.0.1:5888", &root).is_empty(),
         "bare basenames and host:port pairs are not repository citations"
     );
 

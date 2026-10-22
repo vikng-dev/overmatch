@@ -28,6 +28,10 @@ const FIXED_SCHEDULES: &[&str] = &[
 
 const REGISTRATIONS: &[&str] = &["add_systems(", "configure_sets("];
 
+/// This file, which the scan skips: its detector cases are fixed-clock registrations naming `Flow`,
+/// written as string literals, and the scan reads string literals as code.
+const SELF: &str = "src/tests/flow_boundary.rs";
+
 /// Blank `//` and nested `/* */` comments, keeping newlines.
 fn strip_comments(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
@@ -284,6 +288,7 @@ fn no_fixed_clock_registration_names_flow() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     collect_rs_files(&root.join("src"), &mut files);
+    files.retain(|path| *path != root.join(SELF));
     files.sort();
     assert!(
         files.iter().any(|f| f.ends_with("flow.rs")),

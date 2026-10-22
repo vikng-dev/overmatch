@@ -1,7 +1,7 @@
 # Code quality standard — the simplifier's brief
 
 **Audience:** an agent asked to simplify, clean up, tidy or "improve quality" in `overmatch`.
-**Scope:** `src/`, `tests/`, build scripts. NOT `vendor/`.
+**Scope:** `src/`, build scripts. NOT `vendor/`.
 **Measured:** 2026-07-29, branch `feat/authoritative-facts`.
 
 This file is a *brief*, not the doctrine. The doctrine already exists (§0). This adds only the
@@ -22,8 +22,8 @@ violated guardrail costs a deploy cycle or a silent desync.
 | `.agents/skills/codebase-design/DEEPENING.md` | dependency categories; replace-don't-layer testing |
 | `.agents/skills/improve-codebase-architecture/SKILL.md` | the *discovery* flow for architectural friction; ADR-conflict etiquette |
 | `.agents/skills/writing-great-skills/SKILL.md` | information hierarchy; progressive disclosure; no-op pruning |
-| `tests/fn_length.rs` | the 300-line **function** ceiling, and the reasoning for function-not-file |
-| `tests/doc_citations.rs` | the doc-rot gate — comments may not cite dead paths or line numbers |
+| `src/tests/fn_length.rs` | the 300-line **function** ceiling, and the reasoning for function-not-file |
+| `src/tests/doc_citations.rs` | the doc-rot gate — comments may not cite dead paths or line numbers |
 | `.agents/docs/adr/` | settled decisions. Do not re-litigate; see §C.7 |
 | `.agents/GLOSSARY.md` | domain names. Use these, never invented synonyms |
 
@@ -75,7 +75,7 @@ its parameters are. The two nursery lints were enabled on their findings, MEASUR
 
 **cargo-deny** (`deny.toml`, job `deny`): a vulnerability advisory fails; an unmaintained or yanked
 crate warns; a license outside the allow-list fails; a second glam outside the audited split fails
-(the same rule `tests/determinism_deps.rs` asserts; the two must agree); an unknown registry or
+(the same rule `src/tests/determinism_deps.rs` asserts; the two must agree); an unknown registry or
 git source fails. Mutation testing (`.github/workflows/mutants.yml`) is an on-demand instrument,
 never a gate.
 
@@ -247,10 +247,11 @@ Only *after* you can state what each test would catch that the other would not.
   the shallow modules become waste once tests exist at the deepened interface. Those are deletable.
 
 MEASURED: `src/` carries **675** `#[test]` functions across **79** files with `#[cfg(test)]`;
-`tests/` carries **36**. Redundancy would accumulate in the in-`src` suite —
+the gates and tripwires (§B4) carry **36**. Redundancy would accumulate in the in-`src` suite —
 `src/track/transmission/tests.rs` alone is 4 153 lines, and `src/headless_test.rs` is 4 631.
 
-**Never touch the eleven files in `tests/`.** See §B4. Several look pointless by design.
+**Never touch the gate and tripwire files in `src/tests/` and `src/net/tests/`.** See §B4.
+Several look pointless by design.
 
 ### A6. Wrong abstraction level
 
@@ -279,7 +280,7 @@ Each of these has been misapplied before. Getting one wrong does damage.
 `src/track/transmission.rs` is ~3 065 lines with 33 public items and is **deliberately one file**.
 `src/ballistics.rs` is 4 720. `src/net/protocol.rs` is 3 227. **None of these is a finding.**
 
-`tests/fn_length.rs`'s module doc settles it in the repo's own words: the gate is on **function**
+`src/tests/fn_length.rs`'s module doc settles it in the repo's own words: the gate is on **function**
 length (300 lines) precisely *because* a file gate would fight the deep-module doctrine, and a
 2026-07-28 vendor survey found no model vendor publishes a source-file line limit — every published
 number governs files that are *always in context*, which source files are not. The doc says
@@ -334,7 +335,7 @@ simplification.** Treat every type named in `WIRE_SURFACE`, and every field reac
 frozen for this brief's purposes. "Tidying" a replicated struct's field order is a protocol change
 wearing a refactor's clothes.
 
-### B4. `tests/` is thirteen gates and tripwires — touch none of them
+### B4. `src/tests/` and `src/net/tests/` are fourteen gates and tripwires — touch none of them
 
 Several look redundant or tautological *on purpose*. Deleting one removes an alarm, not a test.
 
@@ -344,6 +345,7 @@ Several look redundant or tautological *on purpose*. Deleting one removes an ala
 | `doc_citations.rs` | doc-rot gate |
 | `ui_ascii.rs` | font-coverage gate (rendered strings only) |
 | `net_boundary.rs` | nothing outside `net` may name the netcode layer |
+| `flow_boundary.rs` | no fixed-clock registration may name the `Flow` screen state |
 | `gpu_layout.rs` | Rust ↔ shader struct layout contract |
 | `determinism_deps.rs` | **tripwire** — fails if a dep bump splits `glam` and silently drops the `scalar-math` pin |
 | `net_input_buffer_wrap.rs` | **tripwire** — pins the inverted-range input encoding (bounded but mislabeled in lightyear 0.30) and its two enablers behind the connect-hang guard |
@@ -409,7 +411,7 @@ policy; those are the most heavily adjudicated areas.
 ### B9. Rendered UI strings
 
 Any string literal reaching a Bevy `Text` must stay within Barlow Condensed coverage: printable
-ASCII plus `… — – ° × ± ≤`. `tests/ui_ascii.rs` enforces it per-file. Comments, logs, panics and
+ASCII plus `… — – ° × ± ≤`. `src/tests/ui_ascii.rs` enforces it per-file. Comments, logs, panics and
 asserts are **unrestricted**, and the house style uses em dashes heavily there — do not "normalise"
 punctuation in them. The dev sandboxes use Bevy's default font; their labels must stay ASCII.
 
@@ -503,7 +505,8 @@ simplification:
 - anything that would add a row to `fn_length.rs`'s `ALLOWED`
 - anything contradicting an ADR
 - converting stored state to derived inside `src/net/` or `src/track/`
-- any change to a file in `tests/`, including "fixing" a tripwire that looks tautological
+- any change to a file in `src/tests/` or `src/net/tests/`, including "fixing" a tripwire that
+  looks tautological
 - re-pinning a MEASURED constant
 - deleting a comment longer than a couple of lines
 - adopting a new dependency, or enabling a lint category
@@ -538,7 +541,7 @@ position early.
 
 **2. Ousterhout on module size — the house extends him.** He argues for deep classes and against
 classitis but is not specific about line counts. This repo goes further: a gate on **function**
-length and an explicit refusal to gate **file** length. **House wins**, and `tests/fn_length.rs`
+length and an explicit refusal to gate **file** length. **House wins**, and `src/tests/fn_length.rs`
 gives the reasoning — the actual defects here were function-scale (1 122 and 1 080 lines at nesting
 depth 6 and 8), invisible to any file rule. Where a general principle and a local measurement
 disagree in this repo, the local measurement wins.
@@ -578,7 +581,7 @@ inference, not re-fetched.
 `.agents/skills/codebase-design/{SKILL,DEEPENING}.md`;
 `.agents/skills/improve-codebase-architecture/SKILL.md`;
 `.agents/skills/writing-great-skills/SKILL.md`; `.agents/skills/ask-matt/SKILL.md`;
-`tests/fn_length.rs`; `tests/doc_citations.rs`; the header of every other file in `tests/`;
+`src/tests/fn_length.rs`; `src/tests/doc_citations.rs`; the header of every other §B4 file;
 `Cargo.toml`; `.cargo/config.toml`; `scripts/hooks/pre-push`; `src/net/protocol.rs` (fingerprint
 constants); `src/overlay.rs` and `src/settings/ui.rs` (cursor handling); `vendor/*/OVERMATCH_PATCH.md`.
 All line counts, comment counts, `#[test]` counts, `MEASURED`/`DERIVED` counts, the

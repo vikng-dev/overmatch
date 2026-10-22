@@ -186,7 +186,7 @@ level.
   **0**. Packet loss alone produced **0** leaks — the defect is the delay wobble, not starvation.
 - Our detector for extrapolated ticks (`get(tick).is_none() && get_last().is_some()`) is **structurally
   blind** here: both conjuncts read false, because `get_last()` also dead-ends on the `Absent`.
-- Focused cases in `tests/net_fire_release.rs` (ours, over the real lightyear types):
+- Focused cases in `src/net/tests/net_fire_release.rs` (ours, over the real lightyear types):
   `delay_shrink_strands_a_stale_pressed_tick_on_the_server` (defect **d** — the server fires on a
   `Compressed::Input(fire: true)` entry the client had already corrected);
   `delay_growth_fabricates_unauthored_pressed_ticks_on_both_ends` (defect **e** — a 1→3 delay jump

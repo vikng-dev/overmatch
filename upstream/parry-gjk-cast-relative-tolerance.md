@@ -7,7 +7,7 @@ reach this defect. The workaround (`sphere_cast_ground_contact`) was deleted who
 phase-B collateral with the raycast-era suspension, not via the tripwire — which therefore never
 fired and is gone with the test that carried it. What remains valid is ADR-0015's ≤10 m collider
 tiling rule: parry3d 0.27.0 still ships the defect, and the FIRST shape-cast consumer inherits it.
-`tests/shape_cast_reachability.rs` is the inverted tripwire that fires at that moment.
+`src/tests/shape_cast_reachability.rs` is the inverted tripwire that fires at that moment.
 
 ## Suggested title
 
@@ -81,5 +81,5 @@ pumped) and a standing amplifier of client/server divergence at contact.
 - **Every future shape-cast consumer inherits the raw defect.** Track-model contact stations, armor
   probes, any spatial query against big static geometry would have to re-derive the same witness
   reconstruction. That is the standing tax the fix removes: shape casts become trustworthy by
-  default rather than one function at a time. `tests/shape_cast_reachability.rs` holds the line at
+  default rather than one function at a time. `src/tests/shape_cast_reachability.rs` holds the line at
   zero consumers until then.

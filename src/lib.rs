@@ -102,8 +102,8 @@ pub mod dev_capture;
 /// The net client's single overlay authority (active-set resource + pure input/cursor/scrim rules for
 /// the connect / death / menu / view-death overlays). Lives at the crate root, NOT under `net`,
 /// because it is pure view-state that the always-sim `sight` module also declares into — putting it
-/// here keeps `sight` from naming `crate::net` (the `tests/net_boundary.rs` guard). Mounted only by
-/// [`NetClientPlugin`]; single-player has `state::client_plugin`'s real pause instead.
+/// here keeps `sight` from naming `crate::net` (the `src/net/tests/net_boundary.rs` guard). Mounted
+/// only by [`NetClientPlugin`]; single-player has `state::client_plugin`'s real pause instead.
 mod overlay;
 /// OS-level process and window helpers that belong to no game layer.
 mod platform;
@@ -185,6 +185,9 @@ pub(crate) mod terrain_grid;
 /// startup from the SAME decoded grid the collider and oracle read, selected by `VisibilityRange`.
 /// View-only — the oracle, the collider and `height_at` are untouched. See the module doc.
 mod terrain_lod;
+/// The repository-wide gates and the upstream tripwires on the engine.
+#[cfg(test)]
+mod tests;
 /// The jitter-trace recorder (`SPIKE_TRACE=<path>`): an env-gated JSONL log of rendered vs.
 /// simulated pose — passive instrumentation for the MP hull-jitter investigation. Off (zero cost) unless the env var is set. Everything compiles unconditionally;
 /// net-specific rows exist only where the MP client/server plugin registers them, and the net

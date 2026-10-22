@@ -27,9 +27,11 @@
 //!
 //! A long test is a linear scenario script, which is a different thing from a long code path — it
 //! has no branches to get lost in and no state to thread. Test-only modules are listed in
-//! [`TEST_ONLY_FILES`] (the ones gated by a `#[cfg(test)]` at their DECLARATION site, which is not
-//! visible in the file itself), and everything after an in-file `#[cfg(test)]` is skipped.
-//! The explicit-manifest shape follows `tests/ui_ascii.rs`, which does the same for font coverage.
+//! [`TEST_ONLY_FILES`] and [`TEST_ONLY_DIRS`] (the ones gated by a `#[cfg(test)]` at their
+//! DECLARATION site, which is not visible in the file itself), and everything after an in-file
+//! `#[cfg(test)]` is skipped.
+//! The explicit-manifest shape follows `src/tests/ui_ascii.rs`, which does the same for font
+//! coverage.
 
 use std::path::{Path, PathBuf};
 
@@ -48,6 +50,10 @@ const TEST_ONLY_FILES: &[&str] = &[
     "src/track/transmission/tests.rs",
     "src/net/shot_loss.rs",
 ];
+
+/// Directories whose every file is test-only: the repository-wide gates and the upstream tripwires,
+/// declared by the `#[cfg(test)] mod tests;` lines in `src/lib.rs` and `src/net/mod.rs`.
+const TEST_ONLY_DIRS: &[&str] = &["src/tests/", "src/net/tests/"];
 
 /// Functions allowed past [`MAX_FN_LINES`], each with the reason it is not a defect.
 ///
@@ -291,7 +297,9 @@ fn no_function_exceeds_the_ceiling_without_a_stated_reason() {
             .expect("under root")
             .to_string_lossy()
             .replace('\\', "/");
-        if TEST_ONLY_FILES.contains(&rel.as_str()) {
+        if TEST_ONLY_FILES.contains(&rel.as_str())
+            || TEST_ONLY_DIRS.iter().any(|dir| rel.starts_with(dir))
+        {
             continue;
         }
         let src = std::fs::read_to_string(path).expect("readable");

@@ -184,9 +184,9 @@ nesting is useful only when it hides implementation and improves locality.
   shorten a file.
 - A test crosses the same interface as a caller. Unit tests for pure mechanics stay beside their
   implementation; ECS behaviour tests stay with the owning module; cross-module and runtime
-  contracts live under `tests/`.
-- Retain and deepen the static network-direction guard in `tests/net_boundary.rs`. Add equivalent
-  guards when `sim` and `client` directories materialize.
+  contracts live in `src/tests/`, and the netcode's in `src/net/tests/`.
+- Retain and deepen the static network-direction guard in `src/net/tests/net_boundary.rs`. Add
+  equivalent guards when `sim` and `client` directories materialize.
 
 Bevy function plugins and plugin tuples are valid internal implementation tools. Introduce a
 custom `PluginGroup` only when a caller genuinely needs to select or reorder a stable collection;
@@ -246,7 +246,7 @@ evidence documents and link them briefly when the implementation still depends o
 | **OPEN — dependency closure** | The dedicated server is headless at runtime but still compiles Bevy rendering/window dependencies through the shared package. | A targeted server dependency report excludes render, WGPU, and Winit, and a headless Battle test runs the actual server composition. |
 | **OPEN — Battle identity** | `ShotId` is unique within the current connection-scoped Battle, but has no Battle epoch. A connection therefore may not carry reusable combatant/tick identities across multiple Battles. | Before one connection can survive Garage and enter another Battle, add an authority-issued Battle epoch to shot identity and pin cross-Battle damage-receipt deduplication. |
 | **OPEN — aggregate network budget** | Automatic shot visuals have a bounded application admission rate, but Lightyear's whole-link bandwidth limiter is disabled and no representative replication/input/control baseline exists. Channel separation is not a scheduler reservation. | Measure the full per-client traffic mix under representative movement, combat, loss, and 30-player fan-out; then choose and enforce a quota with consequence/replication priorities, reliable-age instrumentation, and real-UDP overload tests. |
-| **REPAID — guarded** | The executables previously reached through `overmatch::net::{client,server}` and `net` declared its client, server, protocol, diagnostic, and harness children public. | Executables now call crate-root `run_client`/`run_server`; networking children are private or crate-private; `tests/net_boundary.rs` rejects `overmatch::net` reach-through and compile-checks the root interface. |
+| **REPAID — guarded** | The executables previously reached through `overmatch::net::{client,server}` and `net` declared its client, server, protocol, diagnostic, and harness children public. | Executables now call crate-root `run_client`/`run_server`; networking children are private or crate-private; `src/net/tests/net_boundary.rs` rejects `overmatch::net` reach-through and compile-checks the root interface. |
 | **REPAID — guarded** | Tank model, construction, servo, integrity, scenario, and view responsibilities previously shared one file and exposed the low-level skeleton spawner to every caller. | `src/tank.rs` now owns composition and explicit exports; private children own the separate invariants; authority/offline routes use `spawn_complete_tank`; the replicated-root exception is named and isolated. **MEASURED:** the three repository gates listed below pass against the isolated staged tree. |
 | **REPAID — guarded** | Shot presentation previously used globally capped history bursts whose capacity could discard a synchronized multi-combatant volley before networking and whose outcome delivery did not distinguish sparse cannon trajectories from automatic visual traffic. | `net::shot_transport` owns per-combatant fair admission, bounded serialization, reliable single-shot trajectories, owner-private reliable damage receipts, and counters; unit and real-UDP loss/volley tests pin the boundary. |
 | **OPEN — locality** | Ballistics, protocol, client networking, and server networking still mix independent reasons to change in large files. | Each moves behind a facade with private children, while lifecycle and loss contract tests remain green. |

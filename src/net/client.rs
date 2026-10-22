@@ -244,7 +244,7 @@ fn recv_conditioner_mode(
 }
 
 /// Input delay is fixed: Lightyear input-buffer end ticks must advance exactly once per local tick.
-/// See `tests/net_fire_release.rs`.
+/// See `src/net/tests/net_fire_release.rs`.
 pub(crate) const SHIPPING_INPUT_DELAY_TICKS: u16 = 3;
 
 /// Return an RTT-independent fixed input delay.
@@ -1287,8 +1287,8 @@ fn clear_stranded_input_buffer(
 
 /// Remove an input buffer that leads Lightyear's next send tick, preventing an invalid range from
 /// reaching the native encoder. Remove this guard only after verifying that the upstream encoder
-/// rejects inverted ranges; `tests/net_input_buffer_wrap.rs` pins the safe enablers, not the
-/// unbounded encoder call.
+/// rejects inverted ranges; `src/net/tests/net_input_buffer_wrap.rs` pins the safe enablers, not
+/// the unbounded encoder call.
 fn drop_stranded_input_buffer(
     timeline: Res<LocalTimeline>,
     sync: Res<LocalTimelineSync>,
@@ -2534,7 +2534,8 @@ mod tests {
     /// exactly the change that reintroduces the MG release leak — a delay that wobbles breaks
     /// lightyear's `Δend_tick == 1` assumption and either strands a stale PRESSED input on the
     /// server or fabricates a `SameAsPrecedent` one on both ends. See [`SHIPPING_INPUT_DELAY_TICKS`]
-    /// for the full mechanism and `tests/net_fire_release.rs` for it driven over real lightyear.
+    /// for the full mechanism and `src/net/tests/net_fire_release.rs` for it driven over real
+    /// lightyear.
     ///
     /// The assertion is on the config's SHAPE rather than on a swept `input_delay_ticks()` because
     /// that function is private to `lightyear_sync`. `minimum == maximum` is precisely its

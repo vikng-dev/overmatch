@@ -227,7 +227,8 @@ mod baseline {
         // bevy_image 0.19 PANICS transcoding the Tiger's mipped UASTC KTX2 textures under
         // `CompressedImageFormats::NONE` ("range end index ... out of range" — MEASURED here
         // 2026-07-31, the baseline aborted at boot). Canonical mechanism comment + retirement
-        // tripwire: the identical insertion in `headless_test` and `tests/bevy_ktx2_uastc_fallback.rs`.
+        // tripwire: the identical insertion in `headless_test` and
+        // `src/tests/bevy_ktx2_uastc_fallback.rs`.
         // Must precede `app.finish()` below: that is when the loaders read the resource.
         app.insert_resource(bevy::image::CompressedImageFormatSupport(
             bevy::image::CompressedImageFormats::ASTC_LDR,

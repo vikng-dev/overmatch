@@ -1142,8 +1142,8 @@ mod tests {
     /// against the REAL heightmap.
     ///
     /// The sim half lives in `terrain_grid` and covers the offline duel; it cannot cover these,
-    /// because `tests/net_boundary.rs` forbids sim code from naming `crate::net`. Same rule, same
-    /// assertion helper, asserted from the layer that owns the points.
+    /// because `src/net/tests/net_boundary.rs` forbids sim code from naming `crate::net`. Same
+    /// rule, same assertion helper, asserted from the layer that owns the points.
     #[test]
     fn every_netcode_spawn_point_lands_above_the_shipped_terrain() {
         use crate::terrain_grid::tests::{assert_spawn_clears_terrain, shipped_grid};

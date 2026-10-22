@@ -40,7 +40,7 @@
 //!                                    under ε_vis (≈ 52 ms at μ = 0.9). Beyond g* the bound is
 //!                                    not honest, so the clamp presents instead.
 //! interval = one tick                the server replicates every tick (send_interval = 0, the
-//!                                    degenerate `tests/net_interp_delay.rs` pins).
+//!                                    degenerate `src/net/tests/net_interp_delay.rs` pins).
 //! v_ref   = max(|v|, ε_vis/interval) the fold-rate ceiling: the stream's own speed, floored at
 //!                                    the 0.77 m/s rate that folding ε_vis over one interval
 //!                                    already rides (under the stream's travel at any speed

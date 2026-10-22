@@ -899,14 +899,16 @@ mod tests {
     /// "just put it on layer 3" is not a thing anyone can do from a call site any more.
     #[test]
     fn no_raw_render_layers_outside_this_module() {
-        /// Files allowed to build masks by hand. Both are dev binaries with their own overlay/UI
-        /// camera stacks and a deliberately DEFERRED migration (see ADR-0031); they are not
-        /// shipped, and neither mounts [`plugin`]. This list is the exemption — a silent gap in
-        /// the scan would not be.
+        /// Files allowed to build masks by hand. The two sandboxes are dev binaries with their own
+        /// overlay/UI camera stacks and a deliberately DEFERRED migration (see ADR-0031); they are
+        /// not shipped, and neither mounts [`plugin`]. The shadow-view tripwire is a test that
+        /// hands bevy's own light-mask filter raw masks and mounts nothing of ours. This list is
+        /// the exemption — a silent gap in the scan would not be.
         const ALLOWED: &[&str] = &[
             "src/render_policy.rs",
             "src/sandbox.rs",
             "src/track_sandbox/",
+            "src/tests/bevy_shadow_view_render_layers.rs",
         ];
         /// Ways to author or mutate a mask. `&mut RenderLayers` is here because a query that can
         /// write one is the same authority as constructing one.

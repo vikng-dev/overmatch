@@ -5,7 +5,7 @@ Status: **READY TO FILE — unreported, unfixed on `main`, no pending release ad
 Found: 2026-07-27, Overmatch — the tank glb's PNG/JPEG textures are being replaced with mipped
 UASTC KTX2 (`scripts/encode-tank-ktx2.sh`), which panics every headless composition on boot.
 Root-caused from registry source, not inferred; the panic is reproduced in-tree by
-`tests/bevy_ktx2_uastc_fallback.rs`.
+`src/tests/bevy_ktx2_uastc_fallback.rs`.
 
 ## Upstream status (checked 2026-07-27)
 
@@ -89,7 +89,7 @@ So the colour path aborts the process and the greyscale/two-channel paths quietl
 from a misaligned window — the same root cause with two different symptoms. Only the panic is
 observable today.
 
-Reproduced (Overmatch `tests/bevy_ktx2_uastc_fallback.rs`, 16x16 UASTC 4x4, 5 mip levels):
+Reproduced (Overmatch `src/tests/bevy_ktx2_uastc_fallback.rs`, 16x16 UASTC 4x4, 5 mip levels):
 
 ```
 thread '…' panicked at bevy_image-0.19.0/src/ktx2.rs:209:52:
@@ -192,7 +192,7 @@ harness has no GPU to upload to, so the only consequence is which bytes sit in R
 Nothing reads texture *contents* there; the tank's collision and ballistic geometry come from the
 baked blueprint, not from image data.
 
-**Retirement is automatic.** `tests/bevy_ktx2_uastc_fallback.rs::fallback_transcode_still_panics` is
+**Retirement is automatic.** `src/tests/bevy_ktx2_uastc_fallback.rs::fallback_transcode_still_panics` is
 inverted — it asserts the panic still happens, so it PASSES while upstream is broken and FAILS the
 first time a bevy upgrade fixes the arithmetic. That failure is the instruction to delete the
 insertion, the test, its fixture, and to move this doc to DO-NOT-FILE with the fixing PR. The
@@ -201,8 +201,8 @@ companion test `astc_support_transcodes_the_same_bytes` pins the workaround's pr
 
 ## Artifacts
 
-- `tests/bevy_ktx2_uastc_fallback.rs` — the inverted tripwire + the control.
-- `tests/fixtures/uastc_16x16_mipped.ktx2` — 637 B, sha256
+- `src/tests/bevy_ktx2_uastc_fallback.rs` — the inverted tripwire + the control.
+- `src/tests/fixtures/uastc_16x16_mipped.ktx2` — 637 B, sha256
   `613f2dd06229d7faa9b07452c322524d702ec1ee268d6455745f9ba4cf0ea333`. Generated once from a
   synthetic 16x16 RGB PNG with
   `basisu -uastc -uastc_level 2 -mip_srgb -ktx2 -ktx2_zstandard_level 9 -mipmap` (basis_universal

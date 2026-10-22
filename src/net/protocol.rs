@@ -628,7 +628,8 @@ fn apply_net_crew(
 /// `Remote` tank, resolving the wire's station pair back to this tank's seat entities. This is the net
 /// half of ADR-0016 for the swap timer — replicate the cause (the server's in-flight swap), derive the
 /// view state — and it keeps the crew bar (`crew_ui`) a pure SIM-layer view: it reads `PendingSwap`
-/// exactly as in single-player, never naming the netcode (the `tests/net_boundary.rs` contract).
+/// exactly as in single-player, never naming the netcode (the `src/net/tests/net_boundary.rs`
+/// contract).
 ///
 /// Safe precisely because the deciding swap systems are authority-only: on a net client
 /// `damage::apply_crew_swap_commands` and `damage::tick_swaps` are gated off (`Without` `ClientReplica`),
@@ -1087,7 +1088,7 @@ pub(super) struct InputBridge;
 /// Invariant: consumable actions commit only when `for_tick == LocalTimeline::tick()`. Level inputs
 /// may hold last; stale, fabricated, or frozen input must never spend ammo or create an entity.
 /// `SHIPPING_INPUT_DELAY_TICKS` removes delay-wobble sources, while this attestation fails closed for
-/// all remaining input-buffer substitutions. See `tests/net_fire_release.rs`.
+/// all remaining input-buffer substitutions. See `src/net/tests/net_fire_release.rs`.
 fn bridge_action_state_to_tank_command(
     timeline: Res<LocalTimeline>,
     mut tanks: Query<(&ActionState<TankCommand>, &mut TankCommand)>,
@@ -1374,10 +1375,11 @@ mod tests {
     // --- Source-scan tripwires --------------------------------------------------------------------
     //
     // These read this crate's own source (via `CARGO_MANIFEST_DIR`) and grep it, the same SOURCE-SCAN
-    // pattern `tests/net_boundary.rs` uses to enforce an architectural contract. They are honest-but-
-    // simple line/substring scanners, NOT a Rust parser — resilient to reformatting, and biased toward
-    // FALSE TRIPS (which merely force a harmless re-pin) over false passes (which would let a wire skew
-    // through). Comments/whitespace are stripped first so prose and layout edits never trip them.
+    // pattern `src/net/tests/net_boundary.rs` uses to enforce an architectural contract. They are
+    // honest-but-simple line/substring scanners, NOT a Rust parser — resilient to reformatting, and
+    // biased toward FALSE TRIPS (which merely force a harmless re-pin) over false passes (which
+    // would let a wire skew through). Comments/whitespace are stripped first so prose and layout
+    // edits never trip them.
 
     /// Read a repo-relative source file (or `Cargo.lock`) for a scan.
     fn read_source(rel: &str) -> String {

@@ -1,11 +1,11 @@
 # Upstream: shadow views never inherit the light's `RenderLayers`, so off-layer meshes never cast
 
 Status: **FIXED UPSTREAM — shipped in bevy 0.19.1; the vendored backport is retired.**
-`tests/bevy_shadow_view_render_layers.rs` now guards upstream's shape in the linked `bevy_pbr`.
+`src/tests/bevy_shadow_view_render_layers.rs` now guards upstream's shape in the linked `bevy_pbr`.
 Kept as the mechanism record; the file references below describe the 0.19.0 backport as it was.
 Found: 2026-07-28, Overmatch, while putting meshes on non-zero render layers. Root-caused from the
 vendored source, not inferred; the main-world half of the contradiction is reproduced in-tree by
-`tests/bevy_shadow_view_render_layers.rs`.
+`src/tests/bevy_shadow_view_render_layers.rs`.
 
 ## Upstream status (checked 2026-07-28)
 
@@ -127,7 +127,7 @@ Stock 0.19.0 accepts the layer-1 cube in `check_dir_light_mesh_visibility` (it i
 `CascadesVisibleEntities`, and its `ViewVisibility` is force-set) and then drops it in
 `queue_shadows` — the plane renders unshadowed. Same outcome with `PointLight` or `SpotLight`.
 
-`tests/bevy_shadow_view_render_layers.rs::light_visibility_accepts_a_caster_the_camera_cannot_see`
+`src/tests/bevy_shadow_view_render_layers.rs::light_visibility_accepts_a_caster_the_camera_cannot_see`
 pins the first half of that as an executable assertion, with a layer-2 caster as the control that
 proves the acceptance really is mask-driven. The second half cannot be executed headless: with
 `WgpuSettings { backends: None }` bevy 0.19 never creates the `RenderApp`, so no shadow view is
@@ -175,9 +175,9 @@ cleanly against a future 0.19.x, and it changes no public type. Both leave `queu
 untouched.
 
 **Retirement:** drop the patch (and probably the whole vendor entry, pending the `MeshUniform`
-question) when bevy 0.19.1 ships with #24797. `tests/bevy_shadow_view_render_layers.rs` is the
+question) when bevy 0.19.1 ships with #24797. `src/tests/bevy_shadow_view_render_layers.rs` is the
 guard until then — it is a *forward* tripwire (it asserts the patch is present), unlike the inverted
-`tests/bevy_ktx2_uastc_fallback.rs`, so a re-vendor that silently drops the patch fails CI.
+`src/tests/bevy_ktx2_uastc_fallback.rs`, so a re-vendor that silently drops the patch fails CI.
 `queue_shadows_still_filters_on_the_view_mask` is the anchor that changes shape when upstream's
 version of the fix arrives.
 
@@ -185,5 +185,5 @@ version of the fix arrives.
 
 - `vendor/bevy_pbr-0.19.0-scalar-math/src/render/light.rs` — the patch, tagged `// OVERMATCH PATCH:`.
 - `vendor/bevy_pbr-0.19.0-scalar-math/OVERMATCH_PATCH.md` — the vendored crate's own patch inventory.
-- `tests/bevy_shadow_view_render_layers.rs` — source tripwire over all three construction sites,
+- `src/tests/bevy_shadow_view_render_layers.rs` — source tripwire over all three construction sites,
   plus the executable main-world half of the contradiction.

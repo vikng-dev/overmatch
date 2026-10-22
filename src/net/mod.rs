@@ -56,6 +56,9 @@ pub(crate) mod spawn_map;
 mod sync_margin;
 #[cfg(test)]
 mod test_harness;
+/// The netcode boundary scan and the upstream lightyear tripwires.
+#[cfg(test)]
+mod tests;
 /// The net client's UI, screen by screen: every root owned, each screen drawing only its own.
 #[cfg(test)]
 mod ui_ownership;

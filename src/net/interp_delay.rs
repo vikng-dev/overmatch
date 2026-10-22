@@ -10,8 +10,8 @@
 //!
 //! Lightyear's own `delay` term is `max(send_interval_ratio × remote_send_interval, min_delay)`,
 //! which carries the gap half only, and our per-tick server advertises `send_interval = 0` — that
-//! collapses the ratio term entirely (`tests/net_interp_delay.rs` pins the degenerate). `min_delay`
-//! is the only writable slot, so it carries the whole law:
+//! collapses the ratio term entirely (`src/net/tests/net_interp_delay.rs` pins the degenerate).
+//! `min_delay` is the only writable slot, so it carries the whole law:
 //!
 //! ```text
 //! headroom  = max(Q_p{d_i} − min{d_i} − g*, 0)           (the arrival-delay distribution's
@@ -87,7 +87,8 @@ pub(super) enum DelayMode {
 }
 
 /// The law. The send interval is one tick — the server replicates every tick (`send_interval = 0`,
-/// the degenerate `tests/net_interp_delay.rs` pins), so the gap to the next keyframe is one tick.
+/// the degenerate `src/net/tests/net_interp_delay.rs` pins), so the gap to the next keyframe is
+/// one tick.
 /// The spread pays only its excess beyond the extrapolation horizon (module doc); `saturating_sub`
 /// is the floor at zero.
 fn derived_min_delay(rtt: Duration, stats: &ArrivalStats, tick: Duration) -> Duration {
@@ -200,8 +201,8 @@ mod tests {
     use super::{ArrivalDelay, ArrivalStats, derived_min_delay, slewed};
 
     /// The game's fixed tick (64 Hz), spelled out rather than read from the config —
-    /// `tests/net_interp_delay.rs` is what fires when lightyear moves its config shape, and this
-    /// test must pin the arithmetic independently of it.
+    /// `src/net/tests/net_interp_delay.rs` is what fires when lightyear moves its config shape, and
+    /// this test must pin the arithmetic independently of it.
     const TICK: Duration = Duration::from_nanos(1_000_000_000 / 64);
 
     const EPSILON: Duration = Duration::from_micros(10);

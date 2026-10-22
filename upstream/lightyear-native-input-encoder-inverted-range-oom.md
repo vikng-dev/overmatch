@@ -117,7 +117,7 @@ Upstream should make the encoder total over any `InputBuffer` state:
 
 Until a released version contains that check and a bounded regression test,
 keep Overmatch's pre-`PrepareInputMessage` guard and its safe semantic
-tripwires in `tests/net_input_buffer_wrap.rs`. On upgrade, first inspect the
+tripwires in `src/net/tests/net_input_buffer_wrap.rs`. On upgrade, first inspect the
 upstream encoder and run a bounded reproduction; do not remove the guard merely
 because the tick-snap path or unrelated input-buffer code changed.
 

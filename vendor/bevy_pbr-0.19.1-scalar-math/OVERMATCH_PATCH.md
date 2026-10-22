@@ -17,9 +17,9 @@ buffer against the 176-byte minimum binding size.
 
 The explicit C layout preserves the existing field order, and DERIVED 16-byte structure alignment
 restores only the missing DERIVED 12 bytes of tail padding. The field offsets and DERIVED 176-byte
-size are identical to the default SIMD glam layout. `tests/gpu_layout.rs` pins those offsets and
-checks every publicly reachable Rust-repr GPU upload from the audited Bevy paths against its Encase
-minimum size.
+size are identical to the default SIMD glam layout. `src/tests/gpu_layout.rs` pins those offsets
+and checks every publicly reachable Rust-repr GPU upload from the audited Bevy paths against its
+Encase minimum size.
 
 The generic bug and proposed upstream fix are recorded in
 `upstream/bevy-uninitbuffervec-rust-size-vs-shader-stride.md`. Not fixed in 0.19.1 (`MeshUniform`

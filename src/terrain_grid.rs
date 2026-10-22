@@ -1750,9 +1750,10 @@ pub(crate) mod tests {
     /// because no test ever compared a spawn against the ground it spawns on.
     ///
     /// Split by LAYER, not by taste: the netcode's own spawn points (lanes, bot, spawn-map clamp)
-    /// are asserted the same way in `net::server`, because `tests/net_boundary.rs` forbids the sim
-    /// from naming `crate::net` — single-player has to stay runnable with no netcode mounted. Both
-    /// halves call [`assert_spawn_clears_terrain`], so there is still one rule and one assertion.
+    /// are asserted the same way in `net::server`, because `src/net/tests/net_boundary.rs` forbids
+    /// the sim from naming `crate::net` — single-player has to stay runnable with no netcode
+    /// mounted. Both halves call [`assert_spawn_clears_terrain`], so there is still one rule and
+    /// one assertion.
     ///
     /// The probe grid is in scope for exactly the same reason, and the FAR placement doubly so: it
     /// is 28 hardcoded points, 60 m from the map edge, chosen by a scan rather than by playing there

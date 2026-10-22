@@ -119,46 +119,60 @@ needless_collect = "warn"
 bevy_reflect = { path = "vendor/bevy_reflect-0.19.1-scalar-math" }
 bevy_pbr = { path = "vendor/bevy_pbr-0.19.1-scalar-math" }
 
+# `cargo test` builds one test artifact, the lib's: every test is a `#[cfg(test)]` module of the
+# lib, so the bins below hold none (`test = false`) and the docs carry no doctest.
+[lib]
+doctest = false
+
 [[bin]]
 name = "overmatch"
 path = "src/main.rs"
+test = false
 
 [[bin]]
 name = "overmatch-server"
 path = "src/bin/overmatch-server.rs"
+test = false
 
 [[bin]]
 name = "asset_verify"
 path = "src/bin/asset_verify.rs"
+test = false
 
 [[bin]]
 name = "bitprobe"
 path = "src/bin/bitprobe.rs"
+test = false
 required-features = ["bitprobe"]
 
 [[bin]]
 name = "ballistic_fuzzer"
 path = "src/bin/ballistic_fuzzer.rs"
+test = false
 required-features = ["dev_tools"]
 
 [[bin]]
 name = "track_sandbox"
 path = "src/bin/track_sandbox.rs"
+test = false
 required-features = ["dev_ui"]
 
 [[bin]]
 name = "armor_sandbox"
 path = "src/bin/armor_sandbox.rs"
+test = false
 required-features = ["dev_ui"]
 
 [[bin]]
 name = "damage_cam_demo"
 path = "src/bin/damage_cam_demo.rs"
+test = false
 required-features = ["dev_tools"]
 
 [[bin]]
 name = "pen_cam_demo"
 path = "src/bin/pen_cam_demo.rs"
+test = false
 required-features = ["dev_tools"]
 
 [profile.dev]

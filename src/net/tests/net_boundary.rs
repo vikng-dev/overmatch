@@ -162,7 +162,8 @@ fn sim_layer_does_not_name_the_netcode_layer() {
          no netcode mounted (single-player is a runtime mode, not a compile variant), so sim code \
          may not depend on lightyear or on `crate::net`. Either lift the dependency out, or — if the \
          file is genuinely view/instrumentation that observes the netcode — add it to \
-         NET_AWARE_FILES in tests/net_boundary.rs with the reason it earns the coupling.\n{}",
+         NET_AWARE_FILES in src/net/tests/net_boundary.rs with the reason it earns the \
+         coupling.\n{}",
         violations.join("\n")
     );
 }

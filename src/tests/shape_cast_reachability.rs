@@ -43,6 +43,10 @@ const SHAPE_CAST_TOKENS: &[&str] = &[
     "ShapeHitData",
 ];
 
+/// This file, which the scan skips: the token table above and the scanner's own fixture spell every
+/// token, and the scan reads string literals as code.
+const SELF: &str = "src/tests/shape_cast_reachability.rs";
+
 /// Blank out `//`-line and `/* */`-block comments, preserving everything else byte-for-byte (so
 /// line numbers in a failure message still point at the source). String literals are left intact:
 /// these tokens are Rust identifiers, not prose the UI renders, and a system name or trace field
@@ -130,6 +134,7 @@ fn src_contains_no_shape_cast_call_site() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     collect_rs_files(&root.join("src"), &mut files);
+    files.retain(|path| *path != root.join(SELF));
     files.sort();
 
     // An inverted tripwire passes when it finds nothing, so a broken walk would pass loudest.

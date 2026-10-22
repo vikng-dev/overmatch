@@ -636,8 +636,9 @@ mod tests {
     /// shipping input delay (`net::client::SHIPPING_INPUT_DELAY_TICKS`, 3) plus the render frame the
     /// commit is authored in. The floor of what the authority sees, and what the client sees too —
     /// ADR-0037 gives it no prediction. Named here rather than imported: `aim` is sim code and may
-    /// not depend on the netcode layer (`tests/net_boundary.rs`). No assertion below reads it, so a
-    /// drift changes only how hard the laws are pushed, never whether one can pass falsely.
+    /// not depend on the netcode layer (`src/net/tests/net_boundary.rs`). No assertion below reads
+    /// it, so a drift changes only how hard the laws are pushed, never whether one can pass
+    /// falsely.
     const DELIVERY_TICKS: usize = 3 + 1;
     /// The seed vehicle's authored turret traverse (`assets/tiger_1/tiger_1.tank.ron`): the numbers
     /// are the fixture's, never a law — every assertion below is stated as a formula over them.

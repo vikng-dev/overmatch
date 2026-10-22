@@ -1940,11 +1940,12 @@ fn shadow_distance_override() -> Option<f32> {
 /// window front on macOS regardless of `visible: false`, defeating the no-focus-steal guarantee
 /// the creation-time fields bought.
 ///
-/// It lives HERE, not beside the harness, because of the layering gate (`tests/net_boundary`): the
-/// sim/settings layer may never name the netcode layer — single-player is a runtime mode with no
-/// netcode mounted — so the netcode-side harness inserts a settings-OWNED marker rather than
-/// settings reading a netcode-owned one. The marker states a window/presentation contract, which
-/// is settings' domain; who pins the window is the inserter's business.
+/// It lives HERE, not beside the harness, because of the layering gate
+/// (`src/net/tests/net_boundary.rs`): the sim/settings layer may never name the netcode layer —
+/// single-player is a runtime mode with no netcode mounted — so the netcode-side harness inserts
+/// a settings-OWNED marker rather than settings reading a netcode-owned one. The marker states a
+/// window/presentation contract, which is settings' domain; who pins the window is the
+/// inserter's business.
 #[derive(Resource)]
 pub(crate) struct CaptureWindowPinned;
 

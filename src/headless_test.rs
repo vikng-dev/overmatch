@@ -185,7 +185,7 @@ fn headless_shell() -> App {
     // ASTC 4x4 is 8 bpp against RGBA8's 32 — it is also the cheaper lie). Must precede
     // `app.finish()` below: that is when the loaders read the resource.
     // Mechanism + suggested upstream fix: `upstream/bevy-ktx2-uastc-fallback-length-panic.md`.
-    // DELETE THESE LINES when `tests/bevy_ktx2_uastc_fallback.rs` fails — that failure IS the
+    // DELETE THESE LINES when `src/tests/bevy_ktx2_uastc_fallback.rs` fails — that failure IS the
     // signal that bevy fixed the transcode and the workaround has become dead weight.
     app.insert_resource(bevy::image::CompressedImageFormatSupport(
         bevy::image::CompressedImageFormats::ASTC_LDR,

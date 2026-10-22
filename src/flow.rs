@@ -1,7 +1,7 @@
 //! Which screen a windowed client is on: [`Flow`].
 //!
 //! - **View state only.** `Flow` gates UI spawns, UI update systems and the input license; nothing
-//!   registered on the fixed clock reads it (`tests/flow_boundary.rs`). The sim gate stays
+//!   registered on the fixed clock reads it (`src/tests/flow_boundary.rs`). The sim gate stays
 //!   [`crate::state::AppState`], so a client on a menu screen keeps ticking and keeps sending its
 //!   (zeroed) command.
 //! - **Derived, one writer per root.** Each windowed root writes [`flow_of`] of its facts every frame
@@ -71,7 +71,7 @@ pub(crate) fn write(next: &mut NextState<Flow>, facts: FlowFacts) {
 }
 
 /// The view systems that run only on the match screen, in `Update` and `PostUpdate`. Never a
-/// fixed-clock set: `Flow` stays off the fixed clock (`tests/flow_boundary.rs`).
+/// fixed-clock set: `Flow` stays off the fixed clock (`src/tests/flow_boundary.rs`).
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct InMatchSystems;
 

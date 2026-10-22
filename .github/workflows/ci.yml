@@ -132,8 +132,8 @@ jobs:
       # bin whose `required-features` are off — without them those bins were never linted. Additive
       # features only: the lib this lints is the default one plus two optional deps.
       # The retired `--no-default-features` pair proved the sim didn't depend on netcode; that guard
-      # now lives in `tests/net_boundary.rs` (a source scan) + `src/headless_test.rs` (boots the sim
-      # with no netcode mounted) — no second full build required.
+      # now lives in `src/net/tests/net_boundary.rs` (a source scan) + `src/headless_test.rs`
+      # (boots the sim with no netcode mounted) — no second full build required.
       - name: Clippy
         if: matrix.task == 'clippy'
         run: cargo clippy --locked --all-targets --features dev_ui,bitprobe -- -D warnings

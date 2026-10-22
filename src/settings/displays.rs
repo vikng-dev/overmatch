@@ -632,7 +632,7 @@ mod tests {
             Some("DELL U2723QE")
         );
         // Escaped, not literal: this file is scanned by the rendered-coverage guard
-        // (`tests/ui_ascii.rs`), and these are the inputs that must NOT survive.
+        // (`src/tests/ui_ascii.rs`), and these are the inputs that must NOT survive.
         assert_eq!(
             sanitize("  \u{c9}cran  externe  ").as_deref(),
             Some("CRAN EXTERNE")

@@ -100,7 +100,7 @@ and a `vec3`-shaped element whose array stride exceeds its value size.
 
 Overmatch vendors `bevy_pbr` 0.19.0 and adds `#[repr(C, align(16))]` to `MeshUniform`. This restores
 DERIVED size 176 under scalar math without changing the SIMD layout or any internal field offset.
-`tests/gpu_layout.rs` statically checks the patched type and every publicly reachable Rust-repr GPU
+`src/tests/gpu_layout.rs` statically checks the patched type and every publicly reachable Rust-repr GPU
 upload against `ShaderType::min_size()`; the test needs no GPU.
 
 This workaround is deliberately narrower than the suggested upstream fix and must be re-evaluated

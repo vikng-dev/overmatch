@@ -598,10 +598,11 @@ fn text_files_lists_are_complete() {
 
     assert!(
         unclassified.is_empty(),
-        "these src files spawn `Text` but are not classified in tests/ui_ascii.rs — the font-coverage \
-         guard is not scanning them. Add each to exactly one list: BARLOW_TEXT_FILES if it renders \
-         through `ui_font::UiFonts` (may use the typographic set), or ASCII_ONLY_TEXT_FILES if it \
-         keeps Bevy's default ASCII-only font (a dev sandbox). Unclassified:\n{}",
+        "these src files spawn `Text` but are not classified in src/tests/ui_ascii.rs — the \
+         font-coverage guard is not scanning them. Add each to exactly one list: \
+         BARLOW_TEXT_FILES if it renders through `ui_font::UiFonts` (may use the typographic set), \
+         or ASCII_ONLY_TEXT_FILES if it keeps Bevy's default ASCII-only font (a dev sandbox). \
+         Unclassified:\n{}",
         unclassified.join("\n")
     );
 }

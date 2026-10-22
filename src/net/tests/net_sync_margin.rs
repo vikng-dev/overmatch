@@ -1,6 +1,6 @@
 //! UPSTREAM TRIPWIRES for the sync-margin structure that `src/net/sync_margin.rs`'s derived laws
-//! re-size (companion to `tests/net_interp_delay.rs`, which pins the `min_delay` degenerate the
-//! other half of the downlink law compensates for).
+//! re-size (companion to `src/net/tests/net_interp_delay.rs`, which pins the `min_delay` degenerate
+//! the other half of the downlink law compensates for).
 //!
 //! The mechanisms being pinned, in lightyear 0.30:
 //!
@@ -24,8 +24,8 @@
 //! `.agents/scratch/input-lead-budget-2026-08-14.md`).
 //!
 //! Direct `lightyear_sync`/`lightyear_core` dev-dependencies for the same reason as
-//! `tests/net_interp_delay.rs`: `sync_objective` is the honest observable — the exact function the
-//! sync systems call each frame.
+//! `src/net/tests/net_interp_delay.rs`: `sync_objective` is the honest observable — the exact
+//! function the sync systems call each frame.
 
 use core::time::Duration;
 

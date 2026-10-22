@@ -12,5 +12,5 @@ impls for the aligned boolean masks `BVec3A` and `BVec4A`, so upstream's
 compile. The patch registers both with `(Clone, Debug, Default)` only — the rest of their opaque
 reflection support is unchanged.
 
-`tests/determinism_deps.rs` is the tripwire that fails if a dependency bump splits `glam` and
+`src/tests/determinism_deps.rs` is the tripwire that fails if a dependency bump splits `glam` and
 silently drops the `scalar-math` pin. Re-evaluate this vendor whenever Bevy or glam moves.
