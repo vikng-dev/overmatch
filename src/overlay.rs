@@ -625,20 +625,10 @@ mod tests {
         assert_eq!(top_dismissable(&overlays(&[Overlay::ViewDead])), None);
     }
 
-    /// The one-scrim rule: exactly the top overlay draws; ViewDead is suppressed under Death.
-    #[test]
-    fn only_the_top_overlay_draws_its_scrim() {
-        let set = overlays(&[Overlay::Death, Overlay::ViewDead]);
-        assert!(draws_scrim(&set, Overlay::Death));
-        assert!(
-            !draws_scrim(&set, Overlay::ViewDead),
-            "ViewDead suppressed entirely under Death — no opaque black over YOU DIED",
-        );
-    }
-
-    /// The original-bug regression, one scrim total: with BOTH Menu and Death latched, exactly one of
-    /// them draws its backdrop (the menu), the death backdrop is suppressed, the death status line
-    /// takes over, and R is gated (input blocked by the menu). This is the whole redesign in one case.
+    /// The one-scrim rule, the original-bug regression: with BOTH Menu and Death latched, exactly
+    /// one of them draws its backdrop (the menu), the death backdrop is suppressed, the death status
+    /// line takes over, and R is gated (input blocked by the menu); ViewDead is suppressed entirely
+    /// under Death.
     #[test]
     fn menu_over_death_yields_exactly_one_backdrop() {
         let set = overlays(&[Overlay::Menu, Overlay::Death]);
@@ -652,49 +642,47 @@ mod tests {
         assert!(!draws_scrim(&set, Overlay::Death), "death backdrop hidden");
         assert!(death_status_line(&set), "status line shown instead");
         assert!(input_blocked(&set, true), "R gated — the menu blocks input");
-    }
 
-    /// Esc under a connect screen is a NO-OP: it must not latch an invisible, input-blocking menu that
-    /// the player then reconnects into (the one-way-latch bug). With no menu present and the connect
-    /// screen on top, the routing keeps the menu absent.
-    #[test]
-    fn esc_under_connect_is_a_no_op() {
+        let dead = overlays(&[Overlay::Death, Overlay::ViewDead]);
+        assert!(draws_scrim(&dead, Overlay::Death));
         assert!(
-            !esc_menu_target(&overlays(&[Overlay::ConnectStatus])),
-            "Esc under a connect screen latches nothing",
+            !draws_scrim(&dead, Overlay::ViewDead),
+            "ViewDead suppressed entirely under Death — no opaque black over YOU DIED",
         );
     }
 
-    /// A menu latched before a reconnect took over is UNLATCHED by Esc (dismiss intent), so it isn't
-    /// waiting to block input the instant the link returns.
-    #[test]
-    fn esc_unlatches_a_menu_buried_under_connect() {
-        assert!(
-            !esc_menu_target(&overlays(&[Overlay::ConnectStatus, Overlay::Menu])),
-            "Esc dismisses a menu buried beneath the connect screen",
-        );
-    }
-
-    /// The ordinary toggle is unchanged: Esc opens the menu when nothing latched outranks it (including
-    /// over the death screen) and closes it when it is on top.
+    /// Esc opens the menu when nothing latched outranks it (including over the death screen) and
+    /// closes it when it is on top. Under a connect screen it latches nothing — no invisible,
+    /// input-blocking menu the player then reconnects into — and a menu latched before the
+    /// reconnect took over is unlatched, so it isn't waiting to block input when the link returns.
     #[test]
     fn esc_toggles_the_menu_normally() {
-        assert!(
-            esc_menu_target(&overlays(&[])),
-            "nothing up → Esc opens the menu",
-        );
-        assert!(
-            !esc_menu_target(&overlays(&[Overlay::Menu])),
-            "menu on top → Esc closes it",
-        );
-        assert!(
-            esc_menu_target(&overlays(&[Overlay::Death])),
-            "Death doesn't outrank the menu — Esc opens the menu while dead",
-        );
-        assert!(
-            !esc_menu_target(&overlays(&[Overlay::Menu, Overlay::Death])),
-            "menu over death → Esc closes it",
-        );
+        for (latched, opens, why) in [
+            (&[][..], true, "nothing up → Esc opens the menu"),
+            (&[Overlay::Menu][..], false, "menu on top → Esc closes it"),
+            (
+                &[Overlay::Death][..],
+                true,
+                "Death doesn't outrank the menu — Esc opens the menu while dead",
+            ),
+            (
+                &[Overlay::Menu, Overlay::Death][..],
+                false,
+                "menu over death → Esc closes it",
+            ),
+            (
+                &[Overlay::ConnectStatus][..],
+                false,
+                "Esc under a connect screen latches nothing",
+            ),
+            (
+                &[Overlay::ConnectStatus, Overlay::Menu][..],
+                false,
+                "Esc dismisses a menu buried beneath the connect screen",
+            ),
+        ] {
+            assert_eq!(esc_menu_target(&overlays(latched)), opens, "{why}");
+        }
     }
 
     /// Opening is gated on priority, closing never is. The spawn map is the live case: `M` under the

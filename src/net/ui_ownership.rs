@@ -244,9 +244,22 @@ fn enter(app: &mut App, flow: Flow) {
 }
 
 /// Every root on every screen has exactly one owner, a screen's trees leave with it, and outside
-/// the match nothing of the match is drawn.
+/// the match nothing of the match is drawn. The audit's control: it flags a bare root and a root
+/// claimed twice, and passes a root with one owner.
 #[test]
 fn every_root_is_owned_and_each_screen_draws_only_its_own_ui() {
+    let mut control = World::new();
+    control.spawn(Node::default());
+    control.spawn((Node::default(), FlowScoped(Flow::InMatch)));
+    control.spawn((
+        Node::default(),
+        FlowScoped(Flow::InMatch),
+        OverlayNode(crate::overlay::Overlay::Menu),
+    ));
+    control.flush();
+    let flagged = misowned(&mut control);
+    assert_eq!(flagged.len(), 2, "the audit's control: {flagged:#?}");
+
     let mut app = client_ui_app();
     for flow in [
         Flow::Boot,
@@ -465,7 +478,8 @@ fn a_return_to_the_lobby_leaves_nothing_of_the_match() {
         "the sight mode is the match's"
     );
 
-    // The replicas leave with the link (lightyear despawns them on disconnect; `net::link_drop`).
+    // The replicas leave with the link (lightyear despawns them on disconnect;
+    // `net::client::match_exit`).
     let tanks: Vec<Entity> = app
         .world_mut()
         .query_filtered::<Entity, With<crate::tank::Controlled>>()
@@ -480,20 +494,4 @@ fn a_return_to_the_lobby_leaves_nothing_of_the_match() {
         !overlays.contains(crate::overlay::Overlay::SpawnMap),
         "a spawn map open when the last match ended is not open in the next"
     );
-}
-
-/// The audit sees what it guards against: a bare root, and a root claimed twice.
-#[test]
-fn the_audit_flags_an_unowned_or_doubly_owned_root() {
-    let mut world = World::new();
-    world.spawn(Node::default());
-    world.spawn((Node::default(), FlowScoped(Flow::InMatch)));
-    world.spawn((
-        Node::default(),
-        FlowScoped(Flow::InMatch),
-        OverlayNode(crate::overlay::Overlay::Menu),
-    ));
-    world.flush();
-    let flagged = misowned(&mut world);
-    assert_eq!(flagged.len(), 2, "{flagged:#?}");
 }

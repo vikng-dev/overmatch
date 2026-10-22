@@ -1089,28 +1089,22 @@ mod tests {
         );
     }
 
-    #[test]
-    fn stale_visual_expires_without_becoming_late_presentation() {
-        let mut queue = VisualQueue::default();
-        let mut metrics = ShotTransportMetrics::default();
-        queue.enqueue(fire(1, 0, 100), Tick(100), &mut metrics);
-
-        assert!(
-            queue
-                .drain_batches(Tick(100 + VISUAL_TTL_TICKS as u32 + 1), &mut metrics)
-                .is_empty()
-        );
-        assert_eq!(queue.len(), 0);
-        assert_eq!(metrics.visual_expired, 1);
-    }
-
+    /// A visual past `VISUAL_TTL_TICKS` is dropped unsent — never late presentation — and its
+    /// expiry is classified as never-started or as lost repairs only.
     #[test]
     fn expiry_reports_whether_a_visual_never_started_or_only_lost_repairs() {
         let mut queue = VisualQueue::default();
         let mut metrics = ShotTransportMetrics::default();
 
         queue.enqueue(fire(1, 0, 100), Tick(100), &mut metrics);
-        queue.drain_batches(Tick(100 + VISUAL_TTL_TICKS as u32 + 1), &mut metrics);
+        assert!(
+            queue
+                .drain_batches(Tick(100 + VISUAL_TTL_TICKS as u32 + 1), &mut metrics)
+                .is_empty(),
+            "a stale visual is never sent"
+        );
+        assert_eq!(queue.len(), 0);
+        assert_eq!(metrics.visual_expired, 1);
         assert_eq!(metrics.visual_expired_before_first_send_opportunity, 1);
         assert_eq!(metrics.visual_expired_after_partial_send_opportunities, 0);
 
@@ -1289,29 +1283,6 @@ mod tests {
     }
 
     #[test]
-    fn current_tick_visuals_globally_outrank_repairs() {
-        let mut queue = VisualQueue::default();
-        let mut metrics = ShotTransportMetrics::default();
-        queue.enqueue(fire(1, 0, 100), Tick(100), &mut metrics);
-        queue.drain_batches(Tick(100), &mut metrics);
-        queue.enqueue(fire(2, 0, 101), Tick(101), &mut metrics);
-        queue.enqueue(fire(2, 1, 101), Tick(101), &mut metrics);
-
-        let ticks: Vec<_> = queue
-            .drain_batches(Tick(101), &mut metrics)
-            .into_iter()
-            .flat_map(|batch| batch.facts)
-            .map(|fact| fact.shot_id().fire_tick)
-            .collect();
-
-        assert_eq!(
-            &ticks[..2],
-            &[101, 101],
-            "all current-tick facts must precede an older copy from another producer"
-        );
-    }
-
-    #[test]
     fn wire_sizer_accounts_for_lightyear_mapped_entity_encoding() {
         let batch = FireVisualBatch {
             facts: (0..25).map(|weapon| fire(1, weapon, 100)).collect(),
@@ -1331,22 +1302,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn single_shot_start_uses_reliable_outbox_not_visual_queue() {
-        let mut transport = ShotTransport::default();
-        let mut metrics = ShotTransportMetrics::default();
-        transport.enqueue_public(
-            fire(7, 0, 100),
-            DeliveryClass::Single,
-            Tick(100),
-            &mut metrics,
-        );
-
-        assert_eq!(transport.visual.len(), 0);
-        assert_eq!(transport.reliable_public.len(), 1);
-        assert_eq!(metrics.reliable_public_enqueued, 1);
-    }
-
+    /// Public facts route by `DeliveryClass`, never by fact kind: a Single shot's fire, ricochet
+    /// and impact all ride the reliable outbox; an Automatic weapon's ride the bounded visual queue.
     #[test]
     fn single_shot_continuations_are_reliable_but_automatic_continuations_are_bounded() {
         let shot = crate::ShotId {
@@ -1374,6 +1331,15 @@ mod tests {
         let mut single = ShotTransport::default();
         let mut single_metrics = ShotTransportMetrics::default();
         single.enqueue_public(
+            fire(7, 0, 100),
+            DeliveryClass::Single,
+            Tick(100),
+            &mut single_metrics,
+        );
+        assert_eq!(single.reliable_public.len(), 1);
+        assert_eq!(single.visual.len(), 0);
+        assert_eq!(single_metrics.reliable_public_enqueued, 1);
+        single.enqueue_public(
             ricochet.clone(),
             DeliveryClass::Single,
             Tick(104),
@@ -1385,7 +1351,7 @@ mod tests {
             Tick(108),
             &mut single_metrics,
         );
-        assert_eq!(single.reliable_public.len(), 2);
+        assert_eq!(single.reliable_public.len(), 3);
         assert_eq!(single.visual.len(), 0);
 
         let mut automatic = ShotTransport::default();

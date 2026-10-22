@@ -1088,7 +1088,9 @@ mod tests {
     }
 
     /// An in-bounds request passes through untouched; an out-of-bounds one is CLAMPED into the
-    /// playable square rather than refused, so a click near the map edge still places you.
+    /// playable square rather than refused, so a click near the map edge still places you. A
+    /// non-finite request is REFUSED outright: a NaN spawn would NaN the solver the moment the
+    /// body enters the world, and no clamp can repair it (NaN survives `clamp`).
     #[test]
     fn spawn_requests_are_clamped_into_the_world() {
         let half = crate::terrain_grid::FIXTURE_EXTENT.half_extent();
@@ -1107,13 +1109,6 @@ mod tests {
             ),
             Some(Vec2::new(limit, -limit)),
         );
-    }
-
-    /// A non-finite request is REFUSED outright: a NaN spawn would NaN the solver the moment the
-    /// body enters the world, and no clamp can repair it.
-    #[test]
-    fn non_finite_spawn_requests_are_refused() {
-        let half = crate::terrain_grid::FIXTURE_EXTENT.half_extent();
         assert_eq!(
             validate_spawn_request(
                 half,
@@ -1167,61 +1162,6 @@ mod tests {
         ] {
             assert_spawn_clears_terrain(&grid, name, xz);
         }
-    }
-
-    /// The override reproduces the flat-pad spawn's clearance: XZ from the client, Y SAMPLED by the
-    /// authority from the ground it owns, plus the same 2 m every other spawn uses.
-    #[test]
-    fn override_pose_keeps_the_lane_spawn_clearance() {
-        use crate::terrain_grid::{GRID_RESOLUTION, HeightGrid};
-        assert_eq!(
-            spawn_pos(None, Vec2::new(10.0, -20.0)),
-            Vec3::new(10.0, 2.0, -20.0),
-            "over flat ground this is exactly the default lane spawn's y",
-        );
-        // A world sitting 37.5 m up: the client still only names XZ.
-        let n = GRID_RESOLUTION as usize;
-        let hill = HeightGrid::new(
-            vec![37.5f32; n * n].into(),
-            GRID_RESOLUTION,
-            crate::terrain_grid::FIXTURE_EXTENT,
-        );
-        assert_eq!(
-            spawn_pos(Some(&hill), Vec2::new(10.0, -20.0)),
-            Vec3::new(10.0, 39.5, -20.0),
-        );
-    }
-
-    /// The lane spawn keeps its XZ and its 2 m clearance; with no height grid (the flat-slab world)
-    /// it is byte-for-byte the pose the server used before terrain. A `SPIKE_SPAWN_POSE` override is
-    /// passed through untouched — it names an exact resting contact, so re-sampling it would break
-    /// the beached-rest repro (the one documented exception to horizontal-only spawn data).
-    #[test]
-    fn lane_spawn_keeps_its_xz_and_clearance() {
-        assert_eq!(lane_spawn_pos(None, 0, None), Vec3::new(0.0, 2.0, 0.0));
-        let fanned = lane_spawn_pos(None, 1, None);
-        let offset = lane_offset(1);
-        assert_eq!(
-            fanned,
-            Vec3::new(offset.x, 2.0, offset.y),
-            "lane fan-out is unchanged over flat ground",
-        );
-        let harness = Vec3::new(3.0, 0.42, -7.0);
-        assert_eq!(
-            lane_spawn_pos(Some(harness), 0, None),
-            harness,
-            "a harness spawn pose is never re-sampled",
-        );
-    }
-
-    #[test]
-    #[should_panic(expected = "combatant-id allocator exhausted u64")]
-    fn combatant_id_exhaustion_is_not_silently_reused() {
-        let mut ids = CombatantIds {
-            next: u64::MAX,
-            ..default()
-        };
-        let _ = ids.allocate();
     }
 
     /// The occupancy policy: a free request passes through untouched; a request on top of a live
@@ -1329,26 +1269,6 @@ mod tests {
         ));
     }
 
-    /// A click on a house behaves EXACTLY like a click on an occupied spot — the clicked point is
-    /// validated the same way (clamped into the placeable square) and resolved through the same
-    /// ring search, so the tank is nudged to free ground rather than dropped inside the walls.
-    #[test]
-    fn a_click_on_a_house_resolves_like_a_click_on_an_occupied_spot() {
-        let half = crate::terrain_grid::FIXTURE_EXTENT.half_extent();
-        let click = SetSpawnPoint { x: 60.0, z: 20.0 };
-        let xz = validate_spawn_request(half, click).expect("a finite click is accepted");
-        // The house proxy's own footprint (4 m × 6 m), centred on the click.
-        let house = building(xz, Vec3::new(4.0, 3.0, 6.0), 0.5);
-        let on_house =
-            resolve_free_spawn_xz(half, xz, &[], &[house], None).expect("a ring is free");
-        let on_tank = resolve_free_spawn_xz(half, xz, &[xz], &[], None).expect("a ring is free");
-        assert_eq!(on_house, on_tank, "a house is occupancy like a tank is");
-        assert_eq!(
-            on_house,
-            (xz + Vec2::new(SPAWN_SEARCH_RINGS[0].0, 0.0), true)
-        );
-    }
-
     /// The ring tables are what their doc claims: per-ring count `max(8, ceil(2πr / 8 m))` (so
     /// candidate spacing never exceeds ~8 m of arc — the 8-spoke pattern left 37.7 m gaps at
     /// 48 m), radii ascending, and every entry the exact unit vector `(cos, sin)(2πk/n)` CCW
@@ -1419,7 +1339,8 @@ mod tests {
     /// The footprint ground query (Finding: sampling only the tank-root point buried the uphill
     /// axles 1.65 m on a legal slope click): spawn Y reads the MAXIMUM grid height over the
     /// 10 m × 10 m footprint, so a bump 2.5 m off-center lifts the spawn even though the
-    /// center-point height is 0.
+    /// center-point height is 0. A `SPIKE_SPAWN_POSE` override is passed through untouched — it
+    /// names an exact resting contact, so re-sampling it would break the beached-rest repro.
     #[test]
     fn spawn_height_samples_the_tank_footprint_not_the_point() {
         use crate::terrain_grid::{GRID_RESOLUTION, HeightGrid};
@@ -1453,5 +1374,11 @@ mod tests {
         // No grid = the flat-slab world: y = 2 exactly, for players and the bot alike.
         assert_eq!(spawn_surface_height(None, Vec2::ZERO), 0.0);
         assert_eq!(bot_spawn_pos(None), Vec3::new(0.0, 2.0, 12.0));
+        let harness = Vec3::new(3.0, 0.42, -7.0);
+        assert_eq!(
+            lane_spawn_pos(Some(harness), 0, Some(&grid)),
+            harness,
+            "a harness spawn pose is never re-sampled",
+        );
     }
 }

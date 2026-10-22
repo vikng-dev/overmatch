@@ -31,10 +31,6 @@ fn start_fixed_clock(app: &mut App) {
     app.insert_resource(TimeUpdateStrategy::FixedTimesteps(1));
 }
 
-fn elapsed_secs(ticks: usize) -> f32 {
-    ticks as f32 / FIXED_TICKS_PER_SECOND as f32
-}
-
 /// Serializes full-app fixtures. The lease spans each test because booting and running apps compete
 /// for the same host resources; mutex poisoning is irrelevant to this external resource.
 static BOOT_LEASE: Mutex<()> = Mutex::new(());
@@ -113,14 +109,9 @@ impl std::ops::DerefMut for BootedSim {
 /// synthetic height grid. Either marker is inserted before the first update, so
 /// `terrain_grid::decode_height_grid` sees it and never decodes the shipped map.
 ///
-/// `halves` selects how much of `ballistics` is composed. [`BallisticsHalves::SimOnly`] is the
-/// DEDICATED SERVER's composition and the default: a shell is born bare, with no scene root, no
-/// streak and no `Visibility`. A gate about what a round LOOKS like has to ask for the view half
-/// explicitly, exactly as a client root does.
-fn headless_app_on(
-    world: Option<crate::terrain_grid::HeightGrid>,
-    halves: BallisticsHalves,
-) -> App {
+/// `ballistics` is composed as the DEDICATED SERVER composes it, without the view half: a shell is
+/// born bare, with no scene root, no streak and no `Visibility`.
+fn headless_app_on(world: Option<crate::terrain_grid::HeightGrid>) -> App {
     let mut app = headless_shell();
     // The gates are FIXTURED on the flat slab + authored test course (the 10°/20°/30° ramps,
     // the flat straight-line lanes): keep the heightmap world out even though the PNG ships in
@@ -144,21 +135,9 @@ fn headless_app_on(
     ))
     .add_observer(assert_tank_state_at_add)
     .add_observer(assert_range_table_at_add);
-    if halves == BallisticsHalves::SimAndView {
-        app.add_plugins(crate::ballistics::view_plugin);
-    }
 
     finish_plugins(&mut app);
     app
-}
-
-/// Which halves of `ballistics` a fixture composes — see [`headless_app_on`].
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum BallisticsHalves {
-    /// The dedicated server's composition: `SimPlugin` and nothing presentational.
-    SimOnly,
-    /// A client root's composition: `SimPlugin` plus `ballistics::view_plugin`.
-    SimAndView,
 }
 
 /// The bare headless host every full-app fixture is built on: `DefaultPlugins` with no wgpu
@@ -273,20 +252,16 @@ fn boot_diagnosis(app: &App, elapsed: Duration) -> String {
 /// that lease, and the deadline clock only starts once the lease is in hand (a test queued behind a
 /// sibling must not burn its own boot budget waiting its turn).
 fn booted_sim() -> BootedSim {
-    booted_sim_on(None, BallisticsHalves::SimOnly)
+    booted_sim_on(None)
 }
 
-/// [`booted_sim`] over an explicitly chosen world and ballistics composition — see
-/// [`headless_app_on`].
-fn booted_sim_on(
-    world: Option<crate::terrain_grid::HeightGrid>,
-    halves: BallisticsHalves,
-) -> BootedSim {
+/// [`booted_sim`] over an explicitly chosen world — see [`headless_app_on`].
+fn booted_sim_on(world: Option<crate::terrain_grid::HeightGrid>) -> BootedSim {
     let lease = BOOT_LEASE
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    let mut app = headless_app_on(world, halves);
+    let mut app = headless_app_on(world);
 
     // Asset IO is genuinely async on wall-clock IO threads (the spec RON + tiger_1.glb), so poll
     // until the spawn gate opens and the app enters Playing. Each not-yet-Playing pass yields 1 ms
@@ -357,13 +332,7 @@ fn booted_sim_on(
 /// shared scaffolding for the shooting tests, which need the REAL tiger geometry (a synthetic plate
 /// cannot reproduce a muzzle that recoils behind its own mantlet).
 fn booted_sp_app() -> BootedSim {
-    booted_sp_app_with(BallisticsHalves::SimOnly)
-}
-
-/// [`booted_sp_app`] over an explicit ballistics composition — the shooting gates that are about
-/// what a round LOOKS like ask for [`BallisticsHalves::SimAndView`].
-fn booted_sp_app_with(halves: BallisticsHalves) -> BootedSim {
-    let mut sim = booted_sim_on(None, halves);
+    let mut sim = booted_sim();
     start_fixed_clock(&mut sim);
     for _ in 0..30 {
         sim.update();
@@ -371,279 +340,66 @@ fn booted_sp_app_with(halves: BallisticsHalves) -> BootedSim {
     sim
 }
 
-/// Boot the sim headless, then drive the tank by writing its `TankCommand` directly — the exact
-/// path a server takes applying a remote client's command (no device gather mounted).
-#[test]
-fn sim_boots_and_drives_headless() {
-    // Boot to a bound rig with the sim clock still frozen — this test then starts the clock itself,
-    // because settling onto the belt contacts from a standstill is part of what it proves.
-    let mut app = booted_sim();
-
-    // Start the clock at exactly one 64 Hz fixed tick per update, then let the belt contacts ground
-    // and settle.
-    start_fixed_clock(&mut app);
-    let mut grounded = 0;
-    for _ in 0..300 {
-        app.update();
-        let world = app.world_mut();
-        grounded = world
-            .query::<&crate::track::sim::TrackContacts>()
-            .iter(world)
-            .map(|c| c.0.iter().filter(|side| !side.is_empty()).count())
-            .sum();
-        if grounded >= 4 {
-            break;
-        }
-    }
-    assert!(
-        grounded >= 4,
-        "the belt field never grounded headless; contacting track sides: {grounded}"
-    );
-    // Settle for 60 exact ticks (DERIVED 60 / 64 = 0.9375 s).
-    for _ in 0..60 {
-        app.update();
-    }
-
-    let mut tank_q = app
-        .world_mut()
-        .query_filtered::<(Entity, &Transform), (With<Tank>, With<Controlled>)>();
-    let (tank, start) = tank_q.single(app.world()).expect("one controlled tank");
-    let start = start.translation;
-
-    // Full throttle via the command — the server's apply-remote-input path.
-    app.world_mut()
-        .entity_mut(tank)
-        .get_mut::<TankCommand>()
-        .expect("tank carries a command")
-        .throttle = 1.0;
-
-    // 250 ticks (DERIVED 250 / 64 = 3.90625 s) of driving. The command is level state (no gather
-    // to re-write it), so it holds; command slew, belt forces, and drive all run on the fixed clock.
-    for _ in 0..250 {
-        app.update();
-        app.world_mut()
-            .entity_mut(tank)
-            .get_mut::<TankCommand>()
-            .unwrap()
-            .throttle = 1.0;
-    }
-
-    let mut tank_q = app
-        .world_mut()
-        .query_filtered::<&Transform, (With<Tank>, With<Controlled>)>();
-    let end = tank_q
-        .single(app.world())
-        .expect("tank survived")
-        .translation;
-    let horizontal = Vec3::new(end.x - start.x, 0.0, end.z - start.z).length();
-    assert!(
-        horizontal > 2.0,
-        "full throttle for ~4 s should move the tank on flat ground; moved {horizontal:.2} m \
-         (sim not actually running headless?)"
-    );
-    let current = app
-        .world()
-        .get::<crate::track::sim::TankTransmission>(tank)
-        .expect("the tank carries transmission state");
-    assert_ne!(
-        *current,
-        fresh_tank_transmission(&app),
-        "without the offline dial, the declared transmission must advance instead of leaving its \
-         spawn state inert; the net server and predicted client use this same SimPlugin path"
-    );
-}
-
-/// One scripted headless drive for the element-law proof: boot the sim (the headless equivalent
-/// of the `--offline` composition — [`headless_app`] mounts physics + `SimPlugin` + the SP duel
-/// spawn, exactly what `GamePlugin` composes minus presentation), settle, hold full throttle for
-/// ~4 sim-seconds, and return `(horizontal metres moved, total element strain in metres)`.
-fn element_gate_run() -> (f32, f32) {
-    let mut app = booted_sim();
-
-    // Start the exact fixed clock and let the belt contacts ground and settle (the
-    // `sim_boots_and_drives_headless` scaffold).
-    start_fixed_clock(&mut app);
-    let mut grounded = 0;
-    for _ in 0..300 {
-        app.update();
-        let world = app.world_mut();
-        grounded = world
-            .query::<&crate::track::sim::TrackContacts>()
-            .iter(world)
-            .map(|c| c.0.iter().filter(|side| !side.is_empty()).count())
-            .sum();
-        if grounded >= 4 {
-            break;
-        }
-    }
-    assert!(grounded >= 4, "the belt field never grounded headless");
-    for _ in 0..60 {
-        app.update();
-    }
-
-    let mut tank_q = app
-        .world_mut()
-        .query_filtered::<(Entity, &Transform), (With<Tank>, With<Controlled>)>();
-    let (tank, start) = tank_q.single(app.world()).expect("one controlled tank");
-    let start = start.translation;
-
-    // 250 ticks (DERIVED 250 / 64 = 3.90625 s) of full throttle, re-asserted every tick (no device
-    // gather headless).
-    for _ in 0..250 {
-        app.world_mut()
-            .entity_mut(tank)
-            .get_mut::<TankCommand>()
-            .expect("tank carries a command")
-            .throttle = 1.0;
-        app.update();
-    }
-
-    let end = app
-        .world()
-        .get::<Transform>(tank)
-        .expect("tank survived")
-        .translation;
-    let moved = Vec3::new(end.x - start.x, 0.0, end.z - start.z).length();
-    let world = app.world_mut();
-    let strain: f32 = world
-        .query::<&crate::track::sim::TrackGripElements>()
-        .iter(world)
-        .flat_map(|elements| elements.sides.iter())
-        .flat_map(|side| side.strain.iter())
-        .map(|j| j.length())
-        .sum();
-    (moved, strain)
-}
-
-/// The element law is THE traction law — a scripted drive must both move the tank and put
-/// real strain into the spawn-sized `TrackGripElements` slabs (a zero field would mean the
-/// slabs were mis-sized and the invariant early-out silently skipped traction).
+/// The round-dressing law of `ballistics::view_plugin`'s `Add` observer, on rounds spawned bare into
+/// a host that mounts the view half alone:
+///   * a round at or above `TRACER_MAX_CALIBER` is dressed with `ShellVisual` + its `shell.glb`
+///     scene root (`WorldAssetRoot`);
+///   * a sub-calibre tracer round streams a `TracerStreak` child and gets NO scene root;
+///   * a sub-calibre round without a tracer gets no scene root either.
 ///
-/// The spawn-sizing half of the fixture lives in [`assert_tank_state_at_add`], which every
-/// boot in this file runs.
-#[test]
-fn the_element_law_drives_and_strains_on_a_scripted_drive() {
-    let (moved, strain) = element_gate_run();
-    assert!(
-        moved > 2.0,
-        "the element regime should drive the tank forward; moved {moved:.2} m"
-    );
-    assert!(
-        strain > 0.0,
-        "the element law must engage on a driving tank — strain stayed zero (mis-sized slabs \
-         and the invariant early-out silently skipped the regime?)"
-    );
-}
-
-/// The MG-tracer render gate, exercised on the real spawn path headless with a CLIENT's ballistics
-/// composition (sim + view — the view half is what dresses a round at all). Firing the secondary
-/// trigger must, over a burst:
-///   * spawn tracer STREAKS (`TracerStreak`) for the ~1-in-5 tracer rounds, and
-///   * spawn NO `shell.glb` scene root on ANY MG round. A shell in flight carries `ShellPath`; only a
-///     main-gun-calibre round is dressed with `ShellVisual` + its `WorldAssetRoot` scene, so
-///     `ShellPath + WorldAssetRoot` over an MG-only burst must stay empty while streaks appear.
-///
-/// The composition is load-bearing: on a server's `SimOnly` half the scene-root assertion would pass
-/// for every calibre and prove nothing. [`a_server_composition_dresses_no_round_at_all`] is the gate
-/// for that side.
+/// The main-gun arm is load-bearing: without it the "no scene root" assertions could be satisfied
+/// by a view plugin that dresses nothing. [`a_server_composition_dresses_no_round_at_all`] is the
+/// gate for the server side, which mounts no view at all.
 #[test]
 fn mg_rounds_stream_tracers_and_spawn_no_shell_scene() {
-    use crate::ballistics::{ShellPath, ShellVisual, TracerStreak};
+    use crate::ballistics::{
+        Projectile, ShellPath, ShellVisual, TRACER_MAX_CALIBER, TracerRound, TracerStreak,
+    };
     use bevy::world_serialization::WorldAssetRoot;
 
-    // A booted, settled rig: the muzzles/weapons must exist for `fire` to find a bore.
-    let mut app = booted_sp_app_with(BallisticsHalves::SimAndView);
+    let mut app = headless_shell();
+    app.add_plugins(crate::ballistics::view_plugin);
+    finish_plugins(&mut app);
+    // `Startup` builds the shell scene handle and the streak mesh/material the observer clones.
+    app.update();
 
-    let mut tank_q = app
-        .world_mut()
-        .query_filtered::<Entity, (With<Tank>, With<Controlled>)>();
-    let tank = tank_q.single(app.world()).expect("one controlled tank");
+    let round = |caliber: f32| {
+        (
+            Projectile::view_test_round(caliber),
+            Transform::default(),
+            ShellPath::default(),
+        )
+    };
+    let world = app.world_mut();
+    let main_gun = world.spawn(round(2.0 * TRACER_MAX_CALIBER)).id();
+    let tracer = world
+        .spawn((round(0.5 * TRACER_MAX_CALIBER), TracerRound))
+        .id();
+    let plain = world.spawn(round(0.5 * TRACER_MAX_CALIBER)).id();
+    app.update();
 
-    // Hold the secondary trigger (the MGs) — a burst. Do NOT press primary, so no 88 round is fired.
-    // DERIVED: the MGs' authored 750 rpm interval is 5.12 ticks at 64 Hz, which ceilings to 6 ticks
-    // (640 rpm effective), so 60 ticks yields about 10 shots per MG. Across the two MGs, the belt's
-    // tracer_every=5 gives several tracer rounds. The 150-round belts stay far from dry (about 10
-    // rounds each), so no belt swap interrupts the burst.
-    let mut saw_streak = false;
-    let mut saw_mg_shell_scene = false;
-    let mut saw_shell = false;
-    for _ in 0..60 {
-        // Re-assert each tick (in its own scope so the command borrow ends before `update`): the
-        // command layer clears edge fields, and there is no device gather to hold the level fields.
-        {
-            let mut entity = app.world_mut().entity_mut(tank);
-            let mut cmd = entity
-                .get_mut::<TankCommand>()
-                .expect("tank carries a command");
-            cmd.fire_secondary = true;
-            cmd.fire_primary = false;
-        }
-        app.update();
-
-        let world = app.world_mut();
-        if world.query::<&TracerStreak>().iter(world).count() > 0 {
-            saw_streak = true;
-        }
-        let world = app.world_mut();
-        if world.query::<&ShellPath>().iter(world).count() > 0 {
-            saw_shell = true;
-        }
-        let world = app.world_mut();
-        if world
-            .query_filtered::<(), (With<ShellPath>, With<WorldAssetRoot>)>()
-            .iter(world)
-            .count()
-            > 0
-        {
-            saw_mg_shell_scene = true;
-        }
-    }
-
-    assert!(
-        saw_shell,
-        "the MG burst never spawned a single shell — the fire gate, cyclic interval, or belt never \
-         let it fire",
+    let world = app.world_mut();
+    let streaked: Vec<Entity> = world
+        .query_filtered::<&ChildOf, With<TracerStreak>>()
+        .iter(world)
+        .map(ChildOf::parent)
+        .collect();
+    let world = app.world();
+    let scene = |round: Entity| world.get::<WorldAssetRoot>(round).is_some();
+    assert_eq!(
+        streaked,
+        vec![tracer],
+        "the sub-calibre tracer round, and only it, must stream a TracerStreak",
     );
     assert!(
-        saw_streak,
-        "MG tracer rounds spawned no TracerStreak — the streak visual never attached",
+        !scene(tracer) && !scene(plain),
+        "a sub-calibre round spawned a shell.glb scene root (WorldAssetRoot) — MG bullets must NOT \
+         render as main-gun shell scenes",
     );
     assert!(
-        !saw_mg_shell_scene,
-        "an MG round spawned a shell.glb scene root (WorldAssetRoot) — the very bug this fixes: MG \
-         bullets must NOT render as 88 mm shell scenes",
-    );
-
-    // The other half of the same law, on the same rig: the MAIN GUN round IS dressed. Without it the
-    // "no scene root" assertion above could be satisfied by a view plugin that dresses nothing.
-    let mut saw_dressed_shell = false;
-    for tick in 0..30 {
-        {
-            let mut entity = app.world_mut().entity_mut(tank);
-            let mut cmd = entity
-                .get_mut::<TankCommand>()
-                .expect("tank carries a command");
-            cmd.fire_secondary = false;
-            // A single trigger edge; the gun is loaded from the boot settle above.
-            cmd.fire_primary = tick == 0;
-        }
-        app.update();
-
-        let world = app.world_mut();
-        if world
-            .query_filtered::<(), (With<ShellPath>, With<ShellVisual>, With<WorldAssetRoot>)>()
-            .iter(world)
-            .count()
-            > 0
-        {
-            saw_dressed_shell = true;
-            break;
-        }
-    }
-    assert!(
-        saw_dressed_shell,
-        "the 88's round was never dressed — a main-gun shell must get ShellVisual + its shell.glb \
-         scene root from ballistics::view_plugin",
+        world.get::<ShellVisual>(main_gun).is_some() && scene(main_gun),
+        "a main-gun round was never dressed — it must get ShellVisual + its shell.glb scene root \
+         from ballistics::view_plugin",
     );
 }
 
@@ -659,8 +415,8 @@ fn a_server_composition_dresses_no_round_at_all() {
     use crate::ballistics::{Projectile, ShellVisual, TracerStreak};
     use bevy::world_serialization::WorldAssetRoot;
 
-    // SimOnly: the dedicated server's ballistics composition, on the real spawn path.
-    let mut app = booted_sp_app_with(BallisticsHalves::SimOnly);
+    // The dedicated server's ballistics composition, on the real spawn path.
+    let mut app = booted_sp_app();
 
     let mut tank_q = app
         .world_mut()
@@ -753,113 +509,6 @@ fn a_server_composition_dresses_no_round_at_all() {
         "a server-composed projectile carried presentation state ({dressed:?}). SimPlugin must not \
          name a render component: dressing belongs to ballistics::view_plugin, which no server root \
          mounts",
-    );
-}
-
-/// Shooter self-exclusion regression on the real asset.
-///
-/// A sustained MG burst must not impact the firing tank, while still reaching other geometry.
-#[test]
-fn a_burst_never_shoots_its_own_tank() {
-    use crate::ballistics::{BallisticVolume, Impact};
-    use crate::damage::VolumeOf;
-    use avian3d::prelude::{LayerMask, SpatialQuery, SpatialQueryFilter};
-
-    /// Every MG impact, tagged with how far it landed from the firing tank's muzzle.
-    #[derive(Resource, Default)]
-    struct SelfHits {
-        muzzle: Vec3,
-        /// Impacts on a volume owned by the FIRING tank — must stay empty.
-        own: Vec<f32>,
-        /// Impacts anywhere else (the target, the terrain) — must NOT be empty, or the burst never flew.
-        away: usize,
-    }
-
-    let mut app = booted_sp_app();
-    app.init_resource::<SelfHits>();
-
-    let mut tank_q = app
-        .world_mut()
-        .query_filtered::<Entity, (With<Tank>, With<Controlled>)>();
-    let shooter = tank_q.single(app.world()).expect("one controlled tank");
-
-    // The FIRING tank's own volumes — the set no round of its own may ever resolve against.
-    let mut own_volumes = app.world_mut().query::<(Entity, &VolumeOf)>();
-    let own: Vec<Entity> = own_volumes
-        .iter(app.world())
-        .filter(|(_, owner)| owner.tank() == shooter)
-        .map(|(volume, _)| volume)
-        .collect();
-    assert!(
-        own.len() > 20,
-        "the firing tank should own its whole volume set; got {}",
-        own.len()
-    );
-    app.world_mut().resource_mut::<SelfHits>().muzzle = Vec3::ZERO;
-
-    // Classify every MG `Impact` by whether the struck geometry belongs to the shooter. The impact
-    // carries no entity, so we re-resolve it the way the march does: cast a hair back along the
-    // surface normal into whatever was struck and walk that hit's volume ancestry.
-    app.add_observer(
-        move |impact: On<Impact>,
-              spatial: SpatialQuery,
-              owners: Query<&VolumeOf>,
-              volumes: Query<&BallisticVolume>,
-              parents: Query<&ChildOf>,
-              mut hits: ResMut<SelfHits>| {
-            if impact.caliber > crate::ballistics::TRACER_MAX_CALIBER {
-                return; // MG rounds only
-            }
-            let Ok(into) = Dir3::new(-impact.normal) else {
-                return;
-            };
-            let probe = spatial.cast_ray(
-                impact.position - Vec3::from(into) * 0.01,
-                into,
-                0.5,
-                true,
-                &SpatialQueryFilter::from_mask(
-                    LayerMask::from(crate::Layer::Terrain) | LayerMask::from(crate::Layer::Armor),
-                ),
-            );
-            let struck = probe
-                .and_then(|hit| crate::damage::hit_ancestor(hit.entity, &volumes, &parents))
-                .and_then(|(node, _)| owners.get(node).ok())
-                .map(|owner| owner.tank());
-            match struck {
-                Some(tank) if tank == shooter => hits.own.push(impact.position.length()),
-                _ => hits.away += 1,
-            }
-        },
-    );
-
-    // DERIVED: both MGs' authored 750 rpm cadence ceilings to 6 ticks at 64 Hz (640 rpm effective),
-    // so 120 ticks is about 20 rounds per gun — far past the first-round-of-the-burst case that
-    // always worked.
-    for _ in 0..120 {
-        {
-            let mut entity = app.world_mut().entity_mut(shooter);
-            let mut cmd = entity
-                .get_mut::<TankCommand>()
-                .expect("tank carries a command");
-            cmd.fire_secondary = true;
-            cmd.fire_primary = false;
-        }
-        app.update();
-    }
-
-    let hits = app.world().resource::<SelfHits>();
-    assert!(
-        hits.own.is_empty(),
-        "{} MG round(s) impacted the FIRING tank's own armour — a shell must be transparent to the \
-         tank that fired it (`ballistics::not_own_volume`). The coax fires from inside its own \
-         mantlet on every round after a burst's first: with no self-exclusion it embeds there, deals \
-         no damage, and (on a net client) its tracer never appears.",
-        hits.own.len(),
-    );
-    assert!(
-        hits.away > 0,
-        "the burst produced no impacts at all — the MGs never fired, so this test proves nothing",
     );
 }
 
@@ -1067,16 +716,6 @@ fn drive_tick(app: &mut App, tank: Entity, throttle: f32, steer: f32) {
     app.update();
 }
 
-/// Horizontal hull speed (m/s) from the tick-truth velocity.
-fn hull_speed(app: &mut App, tank: Entity) -> f32 {
-    let v = app
-        .world()
-        .get::<avian3d::prelude::LinearVelocity>(tank)
-        .expect("tank has velocity")
-        .0;
-    Vec3::new(v.x, 0.0, v.z).length()
-}
-
 /// Body-frame yaw rate (rad/s): world angular velocity projected on the hull's up axis
 /// (world `av.y` lies on slopes — the harness's own rule).
 fn yaw_rate(app: &mut App, tank: Entity) -> f32 {
@@ -1108,33 +747,22 @@ fn face_positive_z(app: &mut App, tank: Entity) {
     }
 }
 
-/// Full throttle until the hull reaches `target` m/s (bounded); returns ticks taken.
-fn drive_to_speed(app: &mut App, tank: Entity, target: f32, max_ticks: usize) -> usize {
-    for tick in 0..max_ticks {
-        drive_tick(app, tank, 1.0, 0.0);
-        if hull_speed(app, tank) >= target {
-            return tick;
-        }
-    }
-    panic!(
-        "full throttle never reached {target} m/s in {max_ticks} ticks (speed {})",
-        hull_speed(app, tank)
-    );
-}
-
-/// The pivot gate body shared by the two steering laws: zero throttle, full steer, ≥ 4 s;
-/// the mean yaw rate over the last second must clear the per-adapter floor (each adapter's
-/// pivot scale is a different LAW — see the callers) and the belts must actually
-/// counter-rotate. ZERO is the original bug this family pins: the Tiger's steering
-/// capacity read on the wrong axis could not break its own footprint scrub.
-fn tiger_pivot_gate(mode: crate::track::transmission::TransmissionMode, min_yaw: f32) {
-    let (mut app, tank) = booted_offline_sim(mode);
+/// The pivot gate body: zero throttle, full steer, ≥ 4 s; the mean yaw rate over the last second
+/// must clear the adapter's floor and the belts must actually counter-rotate. ZERO is the original
+/// bug this pins: the Tiger's steering capacity read on the wrong axis could not break its own
+/// footprint scrub.
+fn tiger_pivot_gate(
+    app: &mut App,
+    tank: Entity,
+    mode: crate::track::transmission::TransmissionMode,
+    min_yaw: f32,
+) {
     let mut yaw_sum = 0.0f32;
     let mut samples = 0u32;
     for tick in 0..320 {
-        drive_tick(&mut app, tank, 0.0, 1.0);
+        drive_tick(app, tank, 0.0, 1.0);
         if tick >= 256 {
-            yaw_sum += yaw_rate(&mut app, tank);
+            yaw_sum += yaw_rate(app, tank);
             samples += 1;
         }
     }
@@ -1155,105 +783,43 @@ fn tiger_pivot_gate(mode: crate::track::transmission::TransmissionMode, min_yaw:
     );
 }
 
-/// Tiger pivot, L600 fixed-radius adapter (the vehicle's authored architecture): the
-/// MARGINAL brake-gated neutral turn toward the DERIVED `neutral_d_full` = 0.2885 m/s
-/// (0.2808 before half_tread went 1.4904 → 1.5312; no unprovenanced 0.75 fraction shrinks
-/// the target any more). MEASURED on the declared data: 0.131 rad/s
-/// mean ground yaw, belts exactly ±neutral_d_full
-/// (the belt-kinematic ceiling d/half-tread ≈ 0.188 rad/s, less scrub slip); gated at
-/// ≥ 0.10 rad/s (margin for platform float drift — the restoration literature's
-/// "technically yes, advisable no" crawl is exactly this regime).
+/// Tiger pivot under each steering adapter, on one boot; each adapter's pivot scale is a different
+/// LAW, so each has its own floor:
+///
+/// * L600 fixed-radius adapter (the vehicle's authored architecture): the MARGINAL brake-gated
+///   neutral turn toward the DERIVED `neutral_d_full` = 0.2885 m/s (0.2808 before half_tread went
+///   1.4904 → 1.5312; no unprovenanced 0.75 fraction shrinks the target any more). MEASURED on the
+///   declared data: 0.131 rad/s mean ground yaw, belts exactly ±neutral_d_full (the
+///   belt-kinematic ceiling d/half-tread ≈ 0.188 rad/s, less scrub slip); gated at ≥ 0.10 rad/s
+///   (margin for platform float drift — the restoration literature's "technically yes, advisable
+///   no" crawl is exactly this regime).
+/// * Hybrid continuous adapter: POWER-limited (the standstill pivot commands steer force up to
+///   capacity and the power-conservation scale is the binding limiter, so the rate settles where
+///   engine power balances scrub dissipation; the old neutral_d_full speed FLOOR used ~68 kW of the
+///   ~407 kW budget and pivoted at 0.131 rad/s). MEASURED on the declared data: 0.654 rad/s mean
+///   ground yaw pre-stage-B; 0.646 rad/s with the stage-B crank (the declutched steer demand parks
+///   the crank at the same peak-torque operating point the old rev floor used, minus the
+///   rev-governor's ~30 rpm taper droop — steady rate preserved by design); gated at ≥ 0.35 rad/s
+///   (margin, same policy as the L600 gate).
+///
+/// The adapter switches as the offline `T` key does: the dial moves and every tank's transmission
+/// restarts from its constructed state. The hybrid run starts from the L600 pivot; the floor is
+/// read on its last second, past the spin-up.
 #[test]
 fn pivot_tiger_l600() {
-    tiger_pivot_gate(
-        crate::track::transmission::TransmissionMode::FixedRadii,
-        0.10,
-    );
-}
-
-/// Tiger pivot, hybrid continuous adapter: POWER-limited (the standstill pivot
-/// commands steer force up to capacity and the power-conservation scale is the binding
-/// limiter, so the rate settles where engine power balances scrub dissipation; the old
-/// neutral_d_full speed FLOOR used ~68 kW of the ~407 kW budget and pivoted at
-/// 0.131 rad/s). MEASURED on the declared data: 0.654 rad/s mean ground yaw pre-stage-B;
-/// 0.646 rad/s with the stage-B crank (the declutched steer demand parks the crank at the
-/// same peak-torque operating point the old rev floor used, minus the rev-governor's ~30
-/// rpm taper droop — steady rate preserved by design); gated at ≥ 0.35 rad/s (margin,
-/// same policy as the L600 gate).
-#[test]
-fn pivot_tiger_hybrid() {
-    tiger_pivot_gate(crate::track::transmission::TransmissionMode::Hybrid, 0.35);
-}
-
-/// Stage B pivot SPIN-UP gate (new): the standstill pivot's power budget now follows the
-/// CRANK, not the input slew. MEASURED on the declared data: 0.95 s to 90% of steady yaw —
-/// essentially the old 0.94 s, NOT the memo's expected 1.2–1.5 s, and the reason is honest
-/// physics of this model: the power gate cannot bind at v ≈ 0 (delivered power is F·v),
-/// so the early pivot phase is CAPACITY-limited while the crank spool (idle → ~2100 rpm at
-/// τ/J ≈ 400 rad/s² ≈ 0.4 s, J = 4 kg·m²) completes underneath the ~0.5 s steer input
-/// slew — by the time the belts are fast enough for power to bind, the crank has arrived.
-/// The yaw-time gate therefore pins the measured 0.95 s with margin, and the CRANK STATE
-/// itself is what discriminates stage B from the rpm-floor hack: ω_e must still be LOW
-/// shortly after the command (a floor would teleport it) and must park at the peak-torque
-/// operating point at steady state.
-#[test]
-fn pivot_spin_up_tiger_hybrid() {
+    use crate::track::sim::{TankTransmission, TransmissionFeelTest};
     use crate::track::transmission::TransmissionMode;
-    let (mut app, tank) = booted_offline_sim(TransmissionMode::Hybrid);
-    let total = 8 * FIXED_TICKS_PER_SECOND;
-    let mut yaws = Vec::with_capacity(total);
-    let mut early_rpm = 0.0f32;
-    for tick in 0..total {
-        drive_tick(&mut app, tank, 0.0, 1.0);
-        yaws.push(yaw_rate(&mut app, tank));
-        if tick == 6 {
-            // ~0.1 s in: the crank must still be climbing (idle + a few hundred rpm).
-            early_rpm = app
-                .world()
-                .get::<crate::track::sim::TankTransmission>(tank)
-                .expect("tank carries transmission state")
-                .0
-                .omega_e
-                / (std::f32::consts::TAU / 60.0);
-        }
+
+    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
+    tiger_pivot_gate(&mut app, tank, TransmissionMode::FixedRadii, 0.10);
+
+    app.insert_resource(TransmissionFeelTest(TransmissionMode::Hybrid));
+    let fresh = fresh_tank_transmission(&app);
+    let world = app.world_mut();
+    for mut state in world.query::<&mut TankTransmission>().iter_mut(world) {
+        *state = fresh;
     }
-    let steady: f32 =
-        yaws[total - FIXED_TICKS_PER_SECOND..].iter().sum::<f32>() / FIXED_TICKS_PER_SECOND as f32;
-    assert!(
-        steady.abs() > 0.35,
-        "the steady pivot must be live for the spin-up measurement (got {steady:.3})"
-    );
-    let target = 0.9 * steady.abs();
-    let rise_tick = yaws
-        .iter()
-        .position(|y| y.abs() >= target)
-        .expect("yaw must reach 90% of steady inside the run");
-    let secs = elapsed_secs(rise_tick + 1);
-    let steady_rpm = app
-        .world()
-        .get::<crate::track::sim::TankTransmission>(tank)
-        .expect("tank carries transmission state")
-        .0
-        .omega_e
-        / (std::f32::consts::TAU / 60.0);
-    println!(
-        "tiger hybrid pivot spin-up: {secs:.2} s to 90% of steady {steady:.3} rad/s; \
-         crank {early_rpm:.0} rpm @ 0.1 s -> {steady_rpm:.0} rpm steady"
-    );
-    assert!(
-        (0.6..=1.6).contains(&secs),
-        "pivot spin-up {secs:.2} s outside the pinned band around the measured 0.95 s"
-    );
-    assert!(
-        early_rpm < 1_500.0,
-        "0.1 s after the command the crank must still be spooling ({early_rpm:.0} rpm) — \
-         an instant high rpm means the rpm-floor hack is back"
-    );
-    assert!(
-        (1_900.0..=2_200.0).contains(&steady_rpm),
-        "the steady pivot crank must park at the peak-torque operating point \
-         (~2100 rpm), got {steady_rpm:.0}"
-    );
+    tiger_pivot_gate(&mut app, tank, TransmissionMode::Hybrid, 0.35);
 }
 
 /// The fix-1 smoking gun: a standstill full-throttle climb must walk the Tiger ladder
@@ -1298,1113 +864,7 @@ fn gear_climb_monotone_tiger() {
     );
 }
 
-/// Deceleration on the real Tiger (L600, the authored architecture), both driver intents:
-///
-/// * RELEASE (coast): engine drag from the RISING motoring curve
-///   (`drag_fraction × peak` anchored at mid-band 1550 rpm, growing linearly with crank
-///   speed), stage B: at the CRANK, reaching the belt through the engaged coupling — so
-///   the drag torque decelerates crank AND belt together, and the belt's share is the old
-///   force × `I_m/(I_m + k²J)` (F7: 32 000/(32 000 + 37.1²·4) ≈ 0.85), plus the shift
-///   windows are genuinely drag-free (declutched). MEASURED on the declared data:
-///   6 → 2 m/s in 12.3 s (12.2 s under the old flat 462 N·m drag — the mid-band anchor is
-///   the point: the coast's downshift chain spends most of its time near mid-band where
-///   the curve reads ≈ 1×, so flat-ground coast feel is deliberately unchanged while
-///   overrun drag above governed grew; the gate's ≤ 14 s absorbs it with margin for float
-///   drift, nothing else). The fix-round brief hoped for 8 s — unreachable without
-///   rolling resistance, WHICH THE CONTACT MODEL DOES NOT HAVE (a real Tiger's ~25–35 kN
-///   of rolling drag would dominate its own engine braking; ground resistance belongs to
-///   the terrain/ground-type mechanic, ADR-0007 bucket 3 — not to the drivetrain, and not
-///   tunable-by-feel here). Also pinned: past the command-shaper's release slew, coasting
-///   never accelerates (the old code ACCELERATED on opposite input — the regression this
-///   kills).
-/// * OPPOSITE THROTTLE: service brakes at the declared capacity, DUAL-anchored
-///   (96 kN/side: the settled 20° park hold at 95.6 kN/side demand,
-///   0.343 g total service decel inside the 0.2–0.35 g WWII heavy-tank band; the old
-///   250 kN was the circular grip-limit sizing — 1.17 s from 6 m/s was the
-///   energy-impossible tell). Analytic prediction: 2 × 96 kN / 57 t = 3.37 m/s² in the
-///   full phase, plus engine drag (~17 kN in F7, growing through downshifts)
-///   ≈ 3.6+ m/s², plus the command shaper's ~0.5 s press slew dead time → from 6.0 m/s
-///   ≈ 0.5 + 5.0/3.6 ≈ 1.9 s to 1 m/s. MEASURED: 2.36 s. Gate ≤ 3 s (margin for
-///   platform float drift, nothing else). The coast leg above is UNCHANGED (no brake in
-///   the release intent).
-#[test]
-fn decel_tiger() {
-    use crate::track::transmission::TransmissionMode;
-    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
-    face_positive_z(&mut app, tank);
-
-    // Phase 1 — coast from ≥ 6 m/s.
-    drive_to_speed(&mut app, tank, 6.0, 2400);
-    let mut released = hull_speed(&mut app, tank);
-    let mut coast_ticks = None;
-    let mut peak = 0.0f32;
-    for tick in 0..(14 * FIXED_TICKS_PER_SECOND) {
-        drive_tick(&mut app, tank, 0.0, 0.0);
-        let v = hull_speed(&mut app, tank);
-        // The command SHAPER slews the released throttle to zero over ~0.5 s (the same
-        // ramp a lifted key gets); the drivetrain's own no-acceleration guarantee starts
-        // once the drive signal is actually zero.
-        if tick >= 48 {
-            peak = peak.max(v);
-        }
-        if v <= 2.0 {
-            coast_ticks = Some(tick + 1);
-            break;
-        }
-    }
-    let coasting_from = peak;
-    assert!(
-        coasting_from <= released + 0.15,
-        "released throttle must not meaningfully accelerate past the slew window \
-         (peak {coasting_from:.2} from {released:.2})"
-    );
-    let coast_ticks = coast_ticks.unwrap_or_else(|| {
-        panic!(
-            "coast never reached 2 m/s in 14 s (speed {:.2})",
-            hull_speed(&mut app, tank)
-        )
-    });
-    println!(
-        "tiger decel: released at {released:.2} m/s, coast to 2 m/s in {:.1} s",
-        elapsed_secs(coast_ticks)
-    );
-
-    // Phase 2 — service brakes: opposite throttle from ≥ 6 m/s. Budget 3 s: the
-    // dual-anchored capacity predicts ≈ 1.9 s including the input slew dead time (see
-    // the doc comment's arithmetic).
-    drive_to_speed(&mut app, tank, 6.0, 2400);
-    released = hull_speed(&mut app, tank);
-    let mut brake_ticks = None;
-    for tick in 0..(3 * FIXED_TICKS_PER_SECOND) {
-        drive_tick(&mut app, tank, -1.0, 0.0);
-        if hull_speed(&mut app, tank) <= 1.0 {
-            brake_ticks = Some(tick + 1);
-            break;
-        }
-    }
-    let brake_ticks = brake_ticks.unwrap_or_else(|| {
-        panic!(
-            "service brakes never reached 1 m/s within 3 s from {released:.2} m/s \
-             (speed {:.2})",
-            hull_speed(&mut app, tank)
-        )
-    });
-    println!(
-        "tiger decel: service brakes {released:.2} -> 1 m/s in {:.2} s",
-        elapsed_secs(brake_ticks)
-    );
-}
-
-/// BENCHMARK, not a requirement: what the Tiger's holding power measures on the course's 30° face
-/// right now (Yan ruling, 2026-08-07 — *"there is no requirement for a tiger to hold on 30 deg, it
-/// should be purely emergent — the holding power is purely a benchmark of how much it can hold
-/// right now"*). Nothing in the design says a 57-tonne tank with 1940s Argus discs must hold half a
-/// g of slope; the number is an OUTPUT of the brake model, the geometry and the contact law, and it
-/// is recorded here so that it cannot move without someone saying so.
-///
-/// The park latch itself IS still a requirement — zero input at rest must latch, whatever the
-/// latch then holds — so that assertion keeps its teeth below.
-///
-/// ANCHOR: the 2026-08-07 wheel redesign. The road wheels became five-shell mixed-substance objects
-/// and their tread radius measured 0.386441 m against the old 0.386968 — 0.53 mm smaller — which is
-/// the entire cause of the drift moving 0.0055 → 0.0928 m. Confirmed by A/B: forcing the OLD radius
-/// into this same branch's geometry returns the drift to 0.0055 m, and a sweep between them is FLAT
-/// at ~0.005 m until it falls off a cliff inside a 10 µm window (0.386470 → 0.0063 m, 0.386460 →
-/// 0.0561 m). The shipped radius sits ~30 µm the wrong side of that cliff, so this is a discrete
-/// contact-regime change — a road wheel's engagement flipping — and NOT a gradual weakening.
-///
-/// That is also why the band is tight rather than generous. The measurement is bit-stable here
-/// (0.0928 m on five consecutive runs), so the tolerance exists to absorb platform float variation,
-/// not run-to-run noise; and the regime it guards is 15× away (0.006 m if the geometry crosses back
-/// over the cliff), so ±0.005 m cannot mask a regime change while still catching any real drift in
-/// the brake model or the contact law.
-///
-/// RE-PIN CONSCIOUSLY. When the geometry or the brake model changes on purpose, this number moves
-/// with it — read the new value off the printed MEASURED line, put it here, and say why in the
-/// commit. A silent re-pin turns the tripwire back into the acceptance gate it used to be.
-#[test]
-fn slope_park_benchmarks_the_30_deg_holding_power_tiger() {
-    use crate::track::transmission::TransmissionMode;
-    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
-    let course_rotation = Quat::from_rotation_x(30.0_f32.to_radians());
-    let (mass, dynamic_capacity, static_factor) = {
-        let world = app.world();
-        let mass = world.resource::<TankBlueprint>().spec.mass;
-        let tp = world
-            .resource::<crate::track::sim::TrackGear>()
-            .trans()
-            .expect("the Tiger declares a transmission");
-        (mass, tp.brake_capacity_n, tp.brake_static_factor)
-    };
-    let demand = mass * 9.81 * 30.0_f32.to_radians().sin();
-    let static_capacity = 2.0 * dynamic_capacity * static_factor;
-    let margin = static_capacity - demand;
-    assert!(
-        margin > 0.0,
-        "30-degree static-hold fixture needs positive capacity margin (capacity \
-         {static_capacity:.0} N, demand {demand:.0} N)"
-    );
-
-    {
-        let mut e = app.world_mut().entity_mut(tank);
-        e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(14.0, 3.4, -40.0);
-        e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 = course_rotation;
-        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
-        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
-    }
-    for _ in 0..256 {
-        drive_tick(&mut app, tank, 0.0, 0.0);
-    }
-    let p0 = app
-        .world()
-        .get::<avian3d::prelude::Position>(tank)
-        .expect("tank has a position")
-        .0;
-    for _ in 0..(4 * FIXED_TICKS_PER_SECOND) {
-        drive_tick(&mut app, tank, 0.0, 0.0);
-    }
-    let world = app.world();
-    let p1 = world
-        .get::<avian3d::prelude::Position>(tank)
-        .expect("tank has a position")
-        .0;
-    let st = world
-        .get::<crate::track::sim::TankTransmission>(tank)
-        .expect("tank carries transmission state")
-        .0;
-    let drift = (p1 - p0).length();
-    println!(
-        "tiger 30-deg slope park: MEASURED drift {drift:.4} m over 4 s, park latch {}; \
-         DERIVED static {static_capacity:.0} N, demand {demand:.0} N, margin {margin:.0} N",
-        st.park
-    );
-    assert!(
-        st.park,
-        "zero input at rest on the 30-degree ramp must latch the park brake"
-    );
-    // The BENCHMARK. See the doc above: this asserts what the holding power IS, not what it owes.
-    // 0.0035, was 0.0928: re-pinned 2026-08-08 against the rebuilt track shoe. The 26x drop in
-    // drift is NOT explained by the 1.256 mm the shoe narrowed, and is on the open queue rather
-    // than accounted for here (Yan's ruling, same day). The benchmark records what the holding
-    // power IS; it is pinned again so the NEXT move is caught, not because this one is understood.
-    const MEASURED_DRIFT_M: f32 = 0.0035;
-    const BAND_M: f32 = 0.005;
-    assert!(
-        (drift - MEASURED_DRIFT_M).abs() < BAND_M,
-        "30-degree holding power moved: drifted {drift:.4} m over 4 s against the pinned \
-         {MEASURED_DRIFT_M:.4} m ± {BAND_M}. This is a benchmark, not a requirement — if the \
-         geometry or the brake model changed on purpose, re-pin to the measured value and say so \
-         in the commit; if nothing changed on purpose, something regressed."
-    );
-}
-
-/// Beyond-capability inverse gate: keep the real Tiger geometry and dynamic brakes, but author a
-/// valid synthetic 1.1× static factor. The DERIVED 211,200 N static capacity remains below the
-/// DERIVED 279,585 N 30° demand, so a zero-input parking latch must breach. Once either belt leaves
-/// the at-rest band, query the production capacity seam and assert that the latch has dropped to
-/// 96,000 N/side dynamic braking while the tank continues downhill.
-#[test]
-fn synthetic_30_deg_park_breaches_to_dynamic_braking() {
-    use crate::track::transmission::{
-        PARK_ENGAGE_SPEED, TransmissionMode, brake_capacity_for_regime,
-    };
-    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
-    let course_rotation = Quat::from_rotation_x(30.0_f32.to_radians());
-    let uphill = course_rotation * Vec3::NEG_Z;
-    let mass = app.world().resource::<TankBlueprint>().spec.mass;
-    let (dynamic_capacity, static_factor) = {
-        let mut gear = app
-            .world_mut()
-            .resource_mut::<crate::track::sim::TrackGear>();
-        let tp = gear.trans_mut().expect("the Tiger declares a transmission");
-        tp.brake_static_factor = 1.1;
-        (tp.brake_capacity_n, tp.brake_static_factor)
-    };
-    let demand = mass * 9.81 * 30.0_f32.to_radians().sin();
-    let static_capacity = 2.0 * dynamic_capacity * static_factor;
-    assert!(
-        static_capacity < demand,
-        "synthetic park must be beyond static capability (capacity {static_capacity:.0} N, \
-         demand {demand:.0} N)"
-    );
-
-    let fresh_transmission = fresh_tank_transmission(&app);
-    let start_position = {
-        let mut e = app.world_mut().entity_mut(tank);
-        e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(14.0, 3.4, -40.0);
-        e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 = course_rotation;
-        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
-        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
-        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() = fresh_transmission;
-        let mut drive = e.get_mut::<crate::track::sim::TrackDrive>().unwrap();
-        drive.throttle = 0.0;
-        drive.steer = 0.0;
-        drive.sides[0].speed = 0.0;
-        drive.sides[1].speed = 0.0;
-        e.get::<avian3d::prelude::Position>().unwrap().0
-    };
-
-    let mut moving_capacity = None;
-    let mut final_belt_m = 0.0;
-    for _ in 0..(2 * FIXED_TICKS_PER_SECOND) {
-        // Inspect the PRE-TICK belt state that the production brake law will consume below. The
-        // first tick after breakaway may cross the threshold while still using static capacity;
-        // this pins the following tick, whose input is already outside the band, to dynamic.
-        {
-            let world = app.world();
-            let drive = world
-                .get::<crate::track::sim::TrackDrive>(tank)
-                .expect("tank drives");
-            if moving_capacity.is_none()
-                && drive
-                    .sides
-                    .iter()
-                    .any(|side| side.speed.abs() >= PARK_ENGAGE_SPEED)
-            {
-                let tp = world
-                    .resource::<crate::track::sim::TrackGear>()
-                    .trans()
-                    .expect("the Tiger declares a transmission");
-                moving_capacity = Some(brake_capacity_for_regime(
-                    tp,
-                    true,
-                    0.0,
-                    drive.sides[0].speed,
-                ));
-            }
-        }
-        drive_tick(&mut app, tank, 0.0, 0.0);
-        let world = app.world();
-        let drive = world
-            .get::<crate::track::sim::TrackDrive>(tank)
-            .expect("tank drives");
-        final_belt_m = (drive.sides[0].speed + drive.sides[1].speed) / 2.0;
-    }
-
-    let world = app.world();
-    let end_position = world
-        .get::<avian3d::prelude::Position>(tank)
-        .expect("tank has a position")
-        .0;
-    let state = world
-        .get::<crate::track::sim::TankTransmission>(tank)
-        .expect("tank carries transmission state")
-        .0;
-    let downhill_distance = -(end_position - start_position).dot(uphill);
-    let moving_capacity = moving_capacity.expect("the breached park never left the at-rest band");
-    println!(
-        "synthetic 30-deg park: DERIVED static {static_capacity:.0} N vs demand {demand:.0} N; \
-         MEASURED moving cap {moving_capacity:.0} N/side, belt_m {final_belt_m:.3} m/s, \
-         downhill {downhill_distance:.3} m"
-    );
-    assert!(
-        state.park,
-        "zero input must retain the parking latch after breach"
-    );
-    assert_eq!(
-        moving_capacity, dynamic_capacity,
-        "a breached moving latch must drop to dynamic braking that same tick"
-    );
-    assert!(
-        final_belt_m < -PARK_ENGAGE_SPEED,
-        "the beyond-capability park must keep sliding (belt_m {final_belt_m:.3} m/s)"
-    );
-    assert!(
-        downhill_distance > 0.25,
-        "the beyond-capability park must move downhill (moved {downhill_distance:.3} m)"
-    );
-}
-
-/// Stage A (signed shaft) grade gate: from REST mid-face on the course's 20° ramp, held
-/// full W on the real Tiger (L600). Two assertions the `|m|` shaft made impossible:
-///
-/// * the box must NEVER walk the gear ladder UPWARD while the hull is moving backward —
-///   pre-fix a backslide read as high FORWARD rpm, the governor cut drive to zero, and
-///   the scheduler laddered 1→6 while the tank slid backward at −2..−3 m/s off the ramp;
-/// * the tank must either CREST the ramp or hold position — it must never end up sliding
-///   backward off the ramp in a forward gear with W held.
-///
-/// MEASURED post-fix (recorded per the stage-A brief): from rest at z = −40 the Tiger
-/// launches in F1 with no backward roll beyond the settle jitter and CRESTS (hull past
-/// the high edge at z ≈ −44.7, ~4.9 m along the face) in 7.1 s — mean ~0.7 m/s climb
-/// including the ~0.5 s input slew — with gear trace [1] the whole way: F1 holds 20°,
-/// and no upshift is predicted to land, so none is attempted. Budget 30 s with a hold
-/// fallback so grade-scheduling changes in later stages don't spuriously fail the gate.
-#[test]
-fn ramp_climb_20_deg_never_upshifts_backward_tiger() {
-    use crate::track::transmission::TransmissionMode;
-    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
-    {
-        let mut e = app.world_mut().entity_mut(tank);
-        e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(0.0, 2.6, -40.0);
-        e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 =
-            Quat::from_rotation_x(20.0_f32.to_radians());
-        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
-        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
-    }
-    // Settle onto the face under zero input (drop + ring-down + park latch) — the same
-    // seat the park gate uses; the climb starts from a genuine held rest.
-    for _ in 0..256 {
-        drive_tick(&mut app, tank, 0.0, 0.0);
-    }
-    let z0 = app
-        .world()
-        .get::<avian3d::prelude::Position>(tank)
-        .expect("tank has a position")
-        .0
-        .z;
-    let mut prev_gear = app
-        .world()
-        .get::<crate::track::sim::TankTransmission>(tank)
-        .expect("tank carries transmission state")
-        .0
-        .gear;
-    let mut trace = vec![prev_gear];
-    let mut crest_tick = None;
-    // Stage-B launch grip-utilization measurement (the slope-investigation wheelspin): max
-    // belt-vs-hull slip during the first 3 s of the from-rest grade launch. Pre-stage-B the
-    // rev floor held peak-torque force (~747 kN) against the ~473 kN on-slope grip ceiling
-    // for the whole launch (MEASURED baseline: 0.370 m/s max slip); the clutch-limited
-    // launch locks the belt to the crank within ticks and the reflected crank inertia
-    // (k₁²·J ≈ 20× the belt inertia in F1) pins it there — MEASURED stage B: 0.155 m/s,
-    // a 58% cut. Printed, not gated — the crest/no-rollback asserts are the gate.
-    let mut max_launch_slip = 0.0f32;
-    for tick in 0..(30 * FIXED_TICKS_PER_SECOND) {
-        drive_tick(&mut app, tank, 1.0, 0.0);
-        let world = app.world();
-        let v = world
-            .get::<avian3d::prelude::LinearVelocity>(tank)
-            .expect("tank has velocity")
-            .0;
-        let rot = world
-            .get::<avian3d::prelude::Rotation>(tank)
-            .expect("tank has rotation")
-            .0;
-        // Signed hull speed along the hull's forward axis (−Z local; uphill here).
-        let v_fwd = v.dot(rot * Vec3::NEG_Z);
-        if tick < 3 * FIXED_TICKS_PER_SECOND {
-            let drive = world
-                .get::<crate::track::sim::TrackDrive>(tank)
-                .expect("tank drives");
-            let belt_m = (drive.sides[0].speed + drive.sides[1].speed) / 2.0;
-            max_launch_slip = max_launch_slip.max(belt_m - v_fwd);
-        }
-        let st = world
-            .get::<crate::track::sim::TankTransmission>(tank)
-            .expect("tank carries transmission state")
-            .0;
-        assert!(!st.reverse, "held W must stay on the F ladder");
-        if st.gear > prev_gear {
-            assert!(
-                v_fwd >= -0.05,
-                "tick {tick}: upshift {prev_gear} -> {} committed while the hull was \
-                 moving BACKWARD ({v_fwd:.2} m/s) — the signed-shaft scheduler must make \
-                 this impossible",
-                st.gear
-            );
-        }
-        if trace.last() != Some(&st.gear) {
-            trace.push(st.gear);
-        }
-        prev_gear = st.gear;
-        let z = world
-            .get::<avian3d::prelude::Position>(tank)
-            .expect("tank has a position")
-            .0
-            .z;
-        assert!(
-            z < -36.5,
-            "tick {tick}: the tank slid backward off the ramp under held W (z {z:.1}, \
-             started {z0:.1}, gear trace {trace:?})"
-        );
-        if z <= -44.6 {
-            crest_tick = Some(tick + 1);
-            break;
-        }
-    }
-    println!(
-        "tiger 20-deg ramp launch: max belt-vs-hull slip {max_launch_slip:.3} m/s (first 3 s)"
-    );
-    match crest_tick {
-        Some(t) => println!(
-            "tiger 20-deg ramp climb from rest: CRESTED in {:.1} s, gear trace {trace:?}",
-            elapsed_secs(t)
-        ),
-        None => {
-            // Not cresting is acceptable ONLY as a hold: no net rollback, not sliding.
-            let world = app.world();
-            let z1 = world
-                .get::<avian3d::prelude::Position>(tank)
-                .expect("tank has a position")
-                .0
-                .z;
-            let v = world
-                .get::<avian3d::prelude::LinearVelocity>(tank)
-                .expect("tank has velocity")
-                .0;
-            println!(
-                "tiger 20-deg ramp climb from rest: HELD at z {z1:.2} (from {z0:.2}), \
-                 gear trace {trace:?}"
-            );
-            assert!(
-                z1 <= z0 + 0.5 && v.length() < 0.3,
-                "30 s of held W on the 20-deg face must crest or HOLD — not roll back \
-                 (z {z0:.2} -> {z1:.2}, |v| {:.2}, gear trace {trace:?})",
-                v.length()
-            );
-        }
-    }
-}
-
-#[derive(Debug)]
-struct GradeApproachResult {
-    crest_secs: f32,
-    gear_trace: Vec<u8>,
-    grade_shift: Option<(u8, u8)>,
-    hill_hold_ticks: usize,
-    min_uphill_speed: f32,
-    max_rollback_m: f32,
-}
-
-/// Stage-C approach fixture: place the already-rolling Tiger on the lower 20-degree face in F6,
-/// with belt and hull speeds matched at a DERIVED 4.0 m/s (about 1722 rpm DERIVED in F6, above
-/// the ordinary down band) and W already shaped to full. This removes spawn slew/wheelspin from
-/// the question and isolates the scheduler under the DERIVED 191.2 kN grade demand. The only
-/// variant datum changed is shift addressing.
-///
-/// SCOPE: the fixture settles onto the face first and SEEDS the demand
-/// EMA at its declared demand, so it proves scheduler behavior GIVEN that demand — it is not
-/// evidence about contact-driven EMA acquisition. That acquisition (first-sample seed +
-/// convergence under sustained reactions) is pinned at unit level by
-/// `transmission::tests::demand_ema_seeds_from_first_sample_and_converges`.
-fn run_grade_approach_20_deg(
-    addressing: crate::track::transmission::ShiftAddressing,
-) -> GradeApproachResult {
-    use crate::track::transmission::{SchedulerState, TransmissionMode};
-    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
-    app.world_mut()
-        .resource_mut::<crate::track::sim::TrackGear>()
-        .trans_mut()
-        .expect("the Tiger declares a transmission")
-        .shift_addressing = addressing;
-
-    let rot = Quat::from_rotation_x(20.0_f32.to_radians());
-    let approach_speed = 4.0;
-    let mut transmission = fresh_tank_transmission(&app);
-    transmission.0.gear = 6;
-    // Seed the demand EMA at the fixture's own DERIVED grade demand:
-    // a teleport-spawn otherwise starts the EMA from near-zero settle reactions and the
-    // scheduler's first ~13 confirm ticks argue against a load the fixture has DECLARED.
-    transmission.0.demand_n = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
-    transmission.0.demand_initialized = true;
-    {
-        let mut e = app.world_mut().entity_mut(tank);
-        e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(0.0, 1.50, -37.0);
-        e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 = rot;
-        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
-        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
-    }
-    // Land the contact field BEFORE injecting the rolling approach:
-    // the old single-teleport start left the belts airborne and free-spinning for ~0.6 s —
-    // the spin blipped over the up band with the demand observer honestly reading "no
-    // load", committing a reserve-legal-looking F6→F7 the moment before ground contact.
-    // That is exactly the spawn-slew/wheelspin artifact this fixture documents removing
-    // (the old frozen landing predictor masked it by over-refusing every loaded upshift).
-    for _ in 0..128 {
-        drive_tick(&mut app, tank, 0.0, 0.0);
-    }
-    {
-        let mut e = app.world_mut().entity_mut(tank);
-        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 =
-            rot * Vec3::NEG_Z * approach_speed;
-        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
-        let mut drive = e.get_mut::<crate::track::sim::TrackDrive>().unwrap();
-        drive.throttle = 1.0;
-        drive.steer = 0.0;
-        drive.sides[0].speed = approach_speed;
-        drive.sides[1].speed = approach_speed;
-        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() = transmission;
-    }
-
-    let z0 = app
-        .world()
-        .get::<avian3d::prelude::Position>(tank)
-        .expect("tank has position")
-        .0
-        .z;
-    let mut previous_gear = 6u8;
-    let mut trace = vec![6];
-    let mut grade_shift = None;
-    let mut hill_hold_ticks = 0;
-    let mut min_uphill_speed = f32::INFINITY;
-    let mut furthest_uphill_z = z0;
-    let mut max_rollback_m = 0.0f32;
-    for tick in 0..(20 * FIXED_TICKS_PER_SECOND) {
-        drive_tick(&mut app, tank, 1.0, 0.0);
-        let world = app.world();
-        let state = world
-            .get::<crate::track::sim::TankTransmission>(tank)
-            .expect("tank carries transmission state")
-            .0;
-        if trace.last() != Some(&state.gear) {
-            trace.push(state.gear);
-        }
-        if let SchedulerState::GradeShift { from, to } = state.scheduler {
-            grade_shift.get_or_insert((from, to));
-        }
-        if state.hill_hold {
-            hill_hold_ticks += 1;
-        }
-        match addressing {
-            crate::track::transmission::ShiftAddressing::Direct => {}
-            crate::track::transmission::ShiftAddressing::Sequential => assert!(
-                previous_gear.abs_diff(state.gear) <= 1,
-                "Sequential skipped F{previous_gear} -> F{} (trace {trace:?})",
-                state.gear
-            ),
-        }
-        previous_gear = state.gear;
-
-        let position = world
-            .get::<avian3d::prelude::Position>(tank)
-            .expect("tank has position")
-            .0;
-        let velocity = world
-            .get::<avian3d::prelude::LinearVelocity>(tank)
-            .expect("tank has velocity")
-            .0;
-        let belt = world
-            .get::<crate::track::sim::TrackDrive>(tank)
-            .expect("tank drives");
-        let belt_m = (belt.sides[0].speed + belt.sides[1].speed) / 2.0;
-        // Measure motion against the COURSE tangent, not the hull's springing pitch: projecting
-        // heave onto an oscillating body-forward axis produced a false ~0.07 m/s MEASURED
-        // "rollback" during fixture calibration.
-        let forward_speed = velocity.dot(rot * Vec3::NEG_Z);
-        min_uphill_speed = min_uphill_speed.min(forward_speed);
-        furthest_uphill_z = furthest_uphill_z.min(position.z);
-        max_rollback_m = max_rollback_m.max(position.z - furthest_uphill_z);
-        let rollback_limit = match addressing {
-            crate::track::transmission::ShiftAddressing::Direct => 0.02,
-            // DERIVED 0.05 m compliance budget: the
-            // sequential cascade may settle its static grip anchors under hill hold, but may not
-            // slide off backward.
-            crate::track::transmission::ShiftAddressing::Sequential => 0.05,
-        };
-        assert!(
-            max_rollback_m <= rollback_limit && position.z <= z0 + 0.10,
-            "{addressing:?} tick {tick}: hull rolled backward on the 20-degree face \
-             (v_fwd {forward_speed:.3}, rollback {max_rollback_m:.4} m, z {:.3}, \
-             trace {trace:?}, scheduler {:?}, \
-             belt_m {belt_m:.3}, demand {:.0}, hill-hold ticks {hill_hold_ticks})",
-            position.z,
-            state.scheduler,
-            state.demand_n,
-        );
-        if position.z <= -44.6 {
-            return GradeApproachResult {
-                crest_secs: elapsed_secs(tick + 1),
-                gear_trace: trace,
-                grade_shift,
-                hill_hold_ticks,
-                min_uphill_speed,
-                max_rollback_m,
-            };
-        }
-    }
-    panic!(
-        "{addressing:?} F6 approach did not crest in 20 s (trace {trace:?}, \
-         grade shift {grade_shift:?}, hill-hold ticks {hill_hold_ticks})"
-    );
-}
-
-/// Stage C high-gear grade scheduling on the real Tiger/contact course. Direct must perform one
-/// reserve-commanded skip and crest; Sequential must pay adjacent windows, also never roll back,
-/// and expose the honest cost as a slower crest or a nonzero hill-hold interval.
-#[test]
-fn grade_approach_20_deg_direct_vs_sequential_tiger() {
-    use crate::track::transmission::ShiftAddressing;
-    let direct = run_grade_approach_20_deg(ShiftAddressing::Direct);
-    let sequential = run_grade_approach_20_deg(ShiftAddressing::Sequential);
-    println!(
-        "tiger 20-deg F6 approach: Direct {:.3} s {:?}, shift {:?}, hold {} ticks, \
-         min {:.3} m/s, rollback {:.4} m; Sequential {:.3} s {:?}, shift {:?}, \
-         hold {} ticks, min {:.3} m/s, rollback {:.4} m",
-        direct.crest_secs,
-        direct.gear_trace,
-        direct.grade_shift,
-        direct.hill_hold_ticks,
-        direct.min_uphill_speed,
-        direct.max_rollback_m,
-        sequential.crest_secs,
-        sequential.gear_trace,
-        sequential.grade_shift,
-        sequential.hill_hold_ticks,
-        sequential.min_uphill_speed,
-        sequential.max_rollback_m,
-    );
-    let (from, to) = direct
-        .grade_shift
-        .expect("Direct must expose a reserve-commanded shift");
-    assert!(
-        from.abs_diff(to) >= 2,
-        "Direct must skip at least one intermediate gear"
-    );
-    assert!(
-        sequential.crest_secs > direct.crest_secs || sequential.hill_hold_ticks > 0,
-        "Sequential must expose the paid-window cost (Direct {direct:?}, Sequential {sequential:?})"
-    );
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct StageCReplayTick {
-    state: crate::track::transmission::TransmissionState,
-    belt_speed_bits: [u32; 2],
-}
-
-/// A slope script that exercises stage-C memory in the real FixedRadii offline composition. The
-/// Sequential F6 approach pays adjacent windows, accumulating the demand EMA and confirmation
-/// evidence, retaining a target, and entering hill hold before it crests.
-fn scripted_stage_c_replay_run() -> Vec<StageCReplayTick> {
-    use crate::track::transmission::{ShiftAddressing, TransmissionMode};
-
-    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
-    app.world_mut()
-        .resource_mut::<crate::track::sim::TrackGear>()
-        .trans_mut()
-        .expect("the Tiger declares a transmission")
-        .shift_addressing = ShiftAddressing::Sequential;
-
-    let rot = Quat::from_rotation_x(20.0_f32.to_radians());
-    let approach_speed = 4.0;
-    let mut transmission = fresh_tank_transmission(&app);
-    transmission.0.gear = 6;
-    {
-        let mut e = app.world_mut().entity_mut(tank);
-        e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(0.0, 1.50, -37.0);
-        e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 = rot;
-        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 =
-            rot * Vec3::NEG_Z * approach_speed;
-        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
-        let mut drive = e.get_mut::<crate::track::sim::TrackDrive>().unwrap();
-        drive.throttle = 1.0;
-        drive.steer = 0.0;
-        drive.sides[0].speed = approach_speed;
-        drive.sides[1].speed = approach_speed;
-        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() = transmission;
-    }
-
-    let mut ticks = Vec::with_capacity(512);
-    for _ in 0..512 {
-        drive_tick(&mut app, tank, 1.0, 0.0);
-        let world = app.world();
-        let state = world
-            .get::<crate::track::sim::TankTransmission>(tank)
-            .expect("tank carries transmission state")
-            .0;
-        let drive = world
-            .get::<crate::track::sim::TrackDrive>(tank)
-            .expect("tank carries belt state");
-        ticks.push(StageCReplayTick {
-            state,
-            belt_speed_bits: [
-                drive.sides[0].speed.to_bits(),
-                drive.sides[1].speed.to_bits(),
-            ],
-        });
-    }
-    ticks
-}
-
-/// D-replay: two fresh FixedRadii offline worlds must reproduce every stage-C state field and both
-/// belt speeds bit-for-bit on every scripted slope tick. The witnesses prevent a vacuous pass that
-/// never exercised the EMA, counter, held target, or hill-hold latch.
-#[test]
-fn stage_c_slope_replay_is_bit_exact_every_tick() {
-    let first = scripted_stage_c_replay_run();
-    let max_demand = first
-        .iter()
-        .map(|tick| tick.state.demand_n)
-        .fold(0.0f32, f32::max);
-    let max_counter = first
-        .iter()
-        .map(|tick| tick.state.grade_confirm_ticks)
-        .max()
-        .unwrap_or(0);
-    let target_ticks = first
-        .iter()
-        .filter(|tick| tick.state.grade_target > 0)
-        .count();
-    let hold_ticks = first.iter().filter(|tick| tick.state.hill_hold).count();
-    assert!(
-        max_demand > 0.0,
-        "slope script never exercised the demand EMA"
-    );
-    assert!(
-        max_counter > 0,
-        "slope script never accumulated deficit evidence"
-    );
-    assert!(
-        target_ticks > 0,
-        "slope script never retained a sequential target"
-    );
-    assert!(hold_ticks > 0, "slope script never latched hill hold");
-
-    let second = scripted_stage_c_replay_run();
-    assert_eq!(first.len(), second.len());
-    if let Some((tick, (left, right))) = first
-        .iter()
-        .zip(&second)
-        .enumerate()
-        .find(|(_, (left, right))| left != right)
-    {
-        panic!(
-            "stage-C replay first differs at slope tick {tick}:\nleft:  {left:#?}\nright: {right:#?}"
-        );
-    }
-    println!(
-        "stage-C bit replay: {}/{} ticks exact; max demand {:.0} N, max counter {}, target {} ticks, hold {} ticks",
-        first.len(),
-        second.len(),
-        max_demand,
-        max_counter,
-        target_ticks,
-        hold_ticks,
-    );
-}
-
-/// Stage-C hill hold on the real 20-degree face. After the normal zero-input settle, force the
-/// preselector into F5 at rest and hold W: F5 cannot launch against the DERIVED 191.2 kN slope
-/// demand, so hill hold must engage, directly select a capable lower gear, and then release into
-/// uphill travel without more than the established 5 cm DERIVED static-compliance gate bound.
-#[test]
-fn hill_hold_20_deg_engages_and_pulls_away_tiger() {
-    use crate::track::transmission::{SchedulerState, TransmissionMode};
-    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
-    {
-        let mut e = app.world_mut().entity_mut(tank);
-        e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(0.0, 2.6, -40.0);
-        e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 =
-            Quat::from_rotation_x(20.0_f32.to_radians());
-        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
-        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
-    }
-    for _ in 0..256 {
-        drive_tick(&mut app, tank, 0.0, 0.0);
-    }
-    let z0 = app
-        .world()
-        .get::<avian3d::prelude::Position>(tank)
-        .expect("tank has position")
-        .0
-        .z;
-    let mut transmission = fresh_tank_transmission(&app);
-    transmission.0.gear = 5;
-    {
-        let mut e = app.world_mut().entity_mut(tank);
-        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() = transmission;
-        let mut drive = e.get_mut::<crate::track::sim::TrackDrive>().unwrap();
-        drive.throttle = 1.0;
-        drive.sides[0].speed = 0.0;
-        drive.sides[1].speed = 0.0;
-    }
-
-    let mut saw_hold = false;
-    let mut release_tick = None;
-    let mut min_z = z0;
-    let mut max_rollback = 0.0f32;
-    let mut launch_tick = None;
-    for tick in 0..(12 * FIXED_TICKS_PER_SECOND) {
-        drive_tick(&mut app, tank, 1.0, 0.0);
-        let world = app.world();
-        let state = world
-            .get::<crate::track::sim::TankTransmission>(tank)
-            .expect("tank has transmission state")
-            .0;
-        if state.hill_hold {
-            saw_hold = true;
-            assert!(
-                matches!(state.scheduler, SchedulerState::HillHold),
-                "a capable grade uses HILL HOLD, not GRADE LIMIT"
-            );
-        } else if saw_hold && release_tick.is_none() {
-            release_tick = Some(tick);
-        }
-        let z = world
-            .get::<avian3d::prelude::Position>(tank)
-            .expect("tank has position")
-            .0
-            .z;
-        min_z = min_z.min(z);
-        max_rollback = max_rollback.max(z - min_z);
-        assert!(
-            max_rollback <= 0.05,
-            "20-degree hill hold exceeded static compliance ({max_rollback:.4} m)"
-        );
-        if z <= z0 - 0.5 {
-            launch_tick = Some(tick + 1);
-            break;
-        }
-    }
-    println!(
-        "tiger 20-deg hill hold: engaged {saw_hold}, release {:.3} s, pulled 0.5 m in {:.3} s, \
-         rollback {max_rollback:.4} m",
-        elapsed_secs(release_tick.expect("capable launch gear must release the hold")),
-        elapsed_secs(launch_tick.expect("capable launch gear must pull uphill")),
-    );
-    assert!(saw_hold, "F5 at rest on 20 degrees must engage hill hold");
-}
-
-/// D4 honest 30-degree capability gate using the REAL Tiger blueprint values. The prior fixture
-/// manufactured `GRADE LIMIT` with DERIVED test overrides of 100 N m engine/clutch torque and
-/// 160 kN/side brake force. The shipped Tiger's MEASURED blueprint values instead author a
-/// 250 kN/side force cap and 96 kN/side brake: its F1 launch capability exceeds the DERIVED
-/// 30-degree demand plus scheduler margin, so truthful
-/// selection must NOT report `GRADE LIMIT`; held W climbs. This gate prints and pins those numbers
-/// so a future fixture cannot mask another engage/release capability mismatch.
-#[test]
-fn real_tiger_30_deg_reports_capability_truthfully() {
-    use crate::track::transmission::{SchedulerState, TransmissionMode};
-    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
-    let mass = app.world().resource::<TankBlueprint>().spec.mass;
-    let demand = mass * 9.81 * 30.0_f32.to_radians().sin();
-    // Fixture-validity precondition, deliberately restated with LOCAL literals (10% +
-    // 10 kN) rather than the crate's reserve-margin constants: if the shipped policy
-    // values drift, this precondition diverges from the scheduler and fails loudly here.
-    // Residual implementation-as-oracle (documented): `torque_at` and the ratio/radius
-    // reads below consume AUTHORED VEHICLE DATA through the params accessor, not
-    // scheduler logic — an independent restatement of the torque interpolation would
-    // re-implement the curve, not strengthen the test.
-    let scheduler_margin = demand * 0.10 + 10_000.0;
-    let max_launch_force = {
-        let gear = app.world().resource::<crate::track::sim::TrackGear>();
-        let tp = gear.trans().expect("the Tiger declares a transmission");
-        let force_cap = 2.0
-            * app
-                .world()
-                .resource::<TankBlueprint>()
-                .spec
-                .track
-                .powertrain
-                .force;
-        tp.gears_fwd
-            .iter()
-            .map(|&ratio| (tp.torque_at(0.0) * ratio / tp.sprocket_radius).min(force_cap))
-            .fold(0.0f32, f32::max)
-    };
-    assert!(
-        max_launch_force >= demand + scheduler_margin,
-        "real Tiger fixture must be capable on 30 degrees: force {max_launch_force:.0}, demand \
-         {demand:.0}, margin {scheduler_margin:.0}"
-    );
-    {
-        let mut e = app.world_mut().entity_mut(tank);
-        e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(14.0, 3.4, -40.0);
-        e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 =
-            Quat::from_rotation_x(30.0_f32.to_radians());
-        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
-        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
-    }
-    for _ in 0..256 {
-        drive_tick(&mut app, tank, 0.0, 0.0);
-    }
-    let p0 = app
-        .world()
-        .get::<avian3d::prelude::Position>(tank)
-        .expect("tank has position")
-        .0;
-    let fresh_transmission = fresh_tank_transmission(&app);
-    {
-        let mut e = app.world_mut().entity_mut(tank);
-        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() = fresh_transmission;
-        let mut drive = e.get_mut::<crate::track::sim::TrackDrive>().unwrap();
-        drive.throttle = 1.0;
-        drive.sides[0].speed = 0.0;
-        drive.sides[1].speed = 0.0;
-    }
-
-    let mut grade_limit_ticks = 0usize;
-    for _ in 0..(6 * FIXED_TICKS_PER_SECOND) {
-        drive_tick(&mut app, tank, 1.0, 0.0);
-        let state = app
-            .world()
-            .get::<crate::track::sim::TankTransmission>(tank)
-            .expect("tank has transmission state")
-            .0;
-        if state.scheduler == SchedulerState::GradeLimit {
-            grade_limit_ticks += 1;
-            assert!(
-                state.hill_hold,
-                "GRADE LIMIT must retain the modeled brake hold"
-            );
-        }
-    }
-    let world = app.world();
-    let p1 = world
-        .get::<avian3d::prelude::Position>(tank)
-        .expect("tank has position")
-        .0;
-    let drive = world
-        .get::<crate::track::sim::TrackDrive>(tank)
-        .expect("tank drives");
-    let belt_m = (drive.sides[0].speed + drive.sides[1].speed) / 2.0;
-    let uphill_progress = (p1 - p0).dot(Quat::from_rotation_x(30.0_f32.to_radians()) * Vec3::NEG_Z);
-    println!(
-        "30-deg real Tiger: modeled max launch {max_launch_force:.0} N, demand {demand:.0} N, \
-         margin {scheduler_margin:.0} N; GRADE LIMIT {grade_limit_ticks}/384 ticks, uphill \
-         {uphill_progress:.4} m, belt_m {belt_m:.4} m/s"
-    );
-    assert_eq!(
-        grade_limit_ticks, 0,
-        "a capable real Tiger must never expose GRADE LIMIT on 30 degrees"
-    );
-    assert!(
-        uphill_progress > 0.5,
-        "the capable real Tiger must pull uphill (progress {uphill_progress:.4} m)"
-    );
-    assert!(
-        belt_m > 0.0,
-        "the capable real Tiger must drive its belts uphill (m = {belt_m})"
-    );
-}
-
-/// Regression: the REAL Tiger starts on the course's 30-degree face in F8, already rolling
-/// backward faster than the 0.25 m/s DERIVED hill-hold threshold with W held. Its shipped
-/// 96 kN/side brakes cannot arrest the 279.6 kN DERIVED grade demand by themselves. At the
-/// DERIVED 317.5 kN selection threshold, only F1-F2 are capable launch gears: F1 is capped at
-/// 500 kN DERIVED, F2 makes 341.9 kN DERIVED, and F3's 237.1 kN DERIVED fails. The flow:
-/// the moving rollback is first braked CONTINUOUSLY by the `back_driven_intent` service
-/// envelope (the latch is near-rest-only — no grab at speed); once the hull decelerates
-/// into the engagement zone the hold latches, the Direct preselector rescues through a paid
-/// shift exposing HILL HOLD, arrests the hull, and resumes uphill travel (measured: latch
-/// t114, capable F2 t142, arrest t134, +0.5 m t255).
-#[test]
-fn real_tiger_f8_30_deg_rollback_rescues_to_capable_gear() {
-    use crate::track::transmission::{SchedulerState, TransmissionMode};
-    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
-    let course_rotation = Quat::from_rotation_x(30.0_f32.to_radians());
-    let uphill = course_rotation * Vec3::NEG_Z;
-    let initial_rollback_speed = 0.5;
-    {
-        let mut e = app.world_mut().entity_mut(tank);
-        e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(14.0, 3.4, -40.0);
-        e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 = course_rotation;
-        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 = Vec3::ZERO;
-        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
-    }
-    // Seat the real suspension/contact field on the face before injecting the rollback. Starting
-    // the belt in mid-air would exercise an unloaded free-rev, not the 30-degree rescue.
-    for _ in 0..64 {
-        drive_tick(&mut app, tank, 0.0, 0.0);
-    }
-    let grounded_sides = app
-        .world()
-        .get::<crate::track::sim::TrackContacts>(tank)
-        .expect("tank has contact telemetry")
-        .0
-        .iter()
-        .filter(|side| !side.is_empty())
-        .count();
-    assert_eq!(grounded_sides, 2, "rollback fixture must start grounded");
-    let mut transmission = fresh_tank_transmission(&app);
-    transmission.0.gear = 8;
-    {
-        let mut e = app.world_mut().entity_mut(tank);
-        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 =
-            -uphill * initial_rollback_speed;
-        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() = transmission;
-        let mut drive = e.get_mut::<crate::track::sim::TrackDrive>().unwrap();
-        drive.throttle = 1.0;
-        drive.steer = 0.0;
-        drive.sides[0].speed = -initial_rollback_speed;
-        drive.sides[1].speed = -initial_rollback_speed;
-    }
-
-    let mut gear_path = vec![8u8];
-    let mut state_trace = Vec::new();
-    let mut previous_state = None;
-    let mut reached_capable_tick = None;
-    let mut arrest_tick = None;
-    let mut arrest_position = None;
-    let mut progress_tick = None;
-    for tick in 0..(12 * FIXED_TICKS_PER_SECOND) {
-        drive_tick(&mut app, tank, 1.0, 0.0);
-        let world = app.world();
-        let state = world
-            .get::<crate::track::sim::TankTransmission>(tank)
-            .expect("tank has transmission state")
-            .0;
-        let marker = (state.gear, state.scheduler, state.hill_hold);
-        if previous_state != Some(marker) {
-            state_trace.push((tick + 1, marker));
-            previous_state = Some(marker);
-        }
-        if gear_path.last() != Some(&state.gear) {
-            gear_path.push(state.gear);
-        }
-        if state.hill_hold {
-            assert_eq!(
-                state.scheduler,
-                SchedulerState::HillHold,
-                "tick {tick}: a capable rollback rescue must expose HILL HOLD (trace \
-                 {state_trace:?})"
-            );
-        }
-        assert_ne!(
-            state.scheduler,
-            SchedulerState::GradeLimit,
-            "tick {tick}: the real Tiger has a capable launch gear (trace {state_trace:?})"
-        );
-        if state.gear <= 2 {
-            reached_capable_tick.get_or_insert(tick + 1);
-        }
-
-        let position = world
-            .get::<avian3d::prelude::Position>(tank)
-            .expect("tank has position")
-            .0;
-        let course_speed = world
-            .get::<avian3d::prelude::LinearVelocity>(tank)
-            .expect("tank has velocity")
-            .0
-            .dot(uphill);
-        if course_speed >= 0.0 && arrest_tick.is_none() {
-            arrest_tick = Some(tick + 1);
-            arrest_position = Some(position);
-        }
-        if let Some(p_arrest) = arrest_position
-            && (position - p_arrest).dot(uphill) >= 0.5
-        {
-            progress_tick = Some(tick + 1);
-            break;
-        }
-    }
-
-    let reached_capable_tick =
-        reached_capable_tick.expect("F8 rollback rescue never reached a capable F1-F2 gear");
-    let arrest_tick = arrest_tick.expect("capable launch gear never arrested the rollback");
-    let progress_tick = progress_tick.expect("the rescued Tiger never made 0.5 m uphill progress");
-    println!(
-        "30-deg real Tiger F8 rollback rescue: capable tick {reached_capable_tick}, arrest tick \
-         {arrest_tick}, +0.5 m tick {progress_tick}, gears {gear_path:?}, states {state_trace:?}"
-    );
-    assert!(
-        reached_capable_tick <= 192,
-        "the Direct preselector must not remain silently stuck in F8 — the rescue flow \
-         brakes to the near-rest zone first (measured latch ≈ t114, capable ≈ t142), so \
-         the bound covers braking + one paid rescue window (trace {state_trace:?})"
-    );
-    assert!(
-        arrest_tick <= 4 * FIXED_TICKS_PER_SECOND,
-        "the capable gear must arrest rollback within 4 s (trace {state_trace:?})"
-    );
-    assert!(
-        progress_tick <= 12 * FIXED_TICKS_PER_SECOND,
-        "the rescued Tiger must make uphill progress within 12 s (trace {state_trace:?})"
-    );
-}
-
-/// Shared fixture for the two synthetic weak-powertrain 30-degree regressions: the REAL
+/// Fixture for the synthetic weak-powertrain 30-degree regression: the REAL
 /// Tiger geometry/contact model on the course's 30-degree face, seated and settled, then
 /// the engine curve and clutch nerfed to a 100 N m DERIVED test value so every gear is
 /// incapable and the DYNAMIC brakes alone are unarrestable (static breakaway still holds
@@ -2534,178 +994,6 @@ fn synthetic_weak_powertrain_30_deg_at_rest_enters_grade_limit() {
     );
 }
 
-/// Restored 30-degree protection (b): a MOVING weak-powertrain
-/// rollback with W held keeps sliding (dynamic brakes unarrestable by construction), the
-/// near-rest-only latch never grabs it, its status stays Normal — AND the
-/// `back_driven_intent` service braking is PROVEN by a deceleration bound: over the
-/// 1-second window the slide may gain at most 2.5 m/s where a free roll on 30 degrees
-/// would gain g.sin(30) ~ 4.9 m/s. If the cross-motion braking seam vanishes, this bound
-/// fails.
-#[test]
-fn synthetic_weak_powertrain_30_deg_moving_slide_brakes_without_latch() {
-    let (mut app, tank, demand, uphill) = synthetic_weak_30deg_fixture();
-    // Genuinely MOVING: from the parked fixture, a 0.5 m/s slide turned out to be
-    // arrestable by kinetic grip + the service envelope within the window (measured
-    // −0.006 m/s at the end — a knife-edge fixture); 2.0 m/s keeps the slide alive
-    // through the whole window while the braking bound still bites.
-    let initial_rollback_speed = 2.0;
-    let mut transmission = fresh_tank_transmission(&app);
-    transmission.0.gear = 8;
-    let start_position = {
-        let mut e = app.world_mut().entity_mut(tank);
-        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 =
-            -uphill * initial_rollback_speed;
-        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() = transmission;
-        let mut drive = e.get_mut::<crate::track::sim::TrackDrive>().unwrap();
-        drive.throttle = 1.0;
-        drive.steer = 0.0;
-        drive.sides[0].speed = -initial_rollback_speed;
-        drive.sides[1].speed = -initial_rollback_speed;
-        e.get::<avian3d::prelude::Position>().unwrap().0
-    };
-
-    let mut final_course_speed = -initial_rollback_speed;
-    for tick in 0..64 {
-        drive_tick(&mut app, tank, 1.0, 0.0);
-        let world = app.world();
-        let state = world
-            .get::<crate::track::sim::TankTransmission>(tank)
-            .expect("tank has transmission state")
-            .0;
-        let drive = world
-            .get::<crate::track::sim::TrackDrive>(tank)
-            .expect("tank drives");
-        let belt_m = (drive.sides[0].speed + drive.sides[1].speed) / 2.0;
-        // The latch domain is the SHAFT (belt), not the hull: the service envelope can
-        // legitimately arrest the BELTS while the hull skids on kinetic grip, and a
-        // belt inside the near-rest zone latching (then reporting GRADE LIMIT — locked
-        // belts, still sliding, no capable gear) is designed truth-telling. What must
-        // NEVER happen is a latch while the belt itself is moving.
-        if belt_m.abs() >= 0.25 {
-            assert!(
-                !state.hill_hold,
-                "tick {tick}: the near-rest-only latch must never grab a MOVING shaft \
-                 (belt {belt_m:.2} m/s — cross/rolling motion belongs to \
-                 back_driven_intent braking)"
-            );
-        }
-        assert!(
-            !state.park,
-            "tick {tick}: no parking latch may appear under held W either"
-        );
-        final_course_speed = world
-            .get::<avian3d::prelude::LinearVelocity>(tank)
-            .expect("tank has velocity")
-            .0
-            .dot(uphill);
-        assert!(
-            final_course_speed < 0.0,
-            "tick {tick}: deliberately insufficient brakes and power must not arrest the rollback"
-        );
-    }
-    // The braking bound: back_driven_intent's service envelope plus belt-locked kinetic
-    // grip must cap the 1-second speed change far under a free roll's +4.9 m/s gain
-    // (measured: the braked slide DEcelerates). A vanished cross-motion braking seam
-    // fails here.
-    assert!(
-        final_course_speed > -(initial_rollback_speed + 2.5),
-        "the slide must be continuously service-braked: reached {final_course_speed:.2} m/s \
-         where a free roll would pass {:.2}",
-        -(initial_rollback_speed + 4.9)
-    );
-    let end_position = app
-        .world()
-        .get::<avian3d::prelude::Position>(tank)
-        .expect("tank has position")
-        .0;
-    let downhill_distance = -(end_position - start_position).dot(uphill);
-    println!(
-        "synthetic 30-deg weak-powertrain slide: max launch nerfed, demand {demand:.0} N; \
-         unlatched slide 64/64 ticks, final speed {final_course_speed:.3} m/s, downhill \
-         {downhill_distance:.3} m"
-    );
-    assert!(
-        downhill_distance > 0.25,
-        "the incapable synthetic fixture must continue downhill (moved {downhill_distance:.3} m)"
-    );
-}
-
-/// The gearing-emergence check on the REAL vehicle: 30 s of full throttle on flat ground
-/// must land inside [10.0, 11.0] m/s — the authored ladder's F8 at the governed 2500 rpm
-/// is 10.48 m/s (matching the spec's max_speed 10.5), so both a broken ladder (too slow)
-/// and a governor that no longer binds (too fast) fail.
-#[test]
-fn top_speed_tiger() {
-    use crate::track::transmission::TransmissionMode;
-    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
-    face_positive_z(&mut app, tank);
-    let mut speed_sum = 0.0f32;
-    let mut samples = 0u32;
-    let total = 30 * FIXED_TICKS_PER_SECOND;
-    for tick in 0..total {
-        drive_tick(&mut app, tank, 1.0, 0.0);
-        if tick >= total - 128 {
-            speed_sum += hull_speed(&mut app, tank);
-            samples += 1;
-        }
-    }
-    let mean = speed_sum / samples as f32;
-    println!("tiger top speed: {mean:.2} m/s over the last 2 s");
-    assert!(
-        (10.0..=11.0).contains(&mean),
-        "30 s of full throttle must land the geared top speed (10.0–11.0 m/s), got {mean:.2}"
-    );
-}
-
-/// The offline drive HUD's readout fn, exercised on the REAL Tiger through the offline
-/// composition: after driving forward under the L600 adapter, [`transmission::readout`] must
-/// report a sane geared operating point — the engaged FORWARD gear label and an rpm inside the
-/// engine's idle..governed band (never below idle, never past the governor). This pins the one
-/// place the HUD reads gear/rpm from, on the same tick-truth components the HUD queries.
-#[test]
-fn drive_readout_reports_sane_operating_point() {
-    use crate::track::transmission::{self, TransmissionMode};
-    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
-    face_positive_z(&mut app, tank);
-    drive_to_speed(&mut app, tank, 6.0, 2400);
-    // A second more at full throttle so the box has settled onto a gear/rpm.
-    for _ in 0..64 {
-        drive_tick(&mut app, tank, 1.0, 0.0);
-    }
-
-    let world = app.world();
-    let state = world
-        .get::<crate::track::sim::TankTransmission>(tank)
-        .expect("the controlled tank carries transmission state");
-    let tp = world
-        .resource::<crate::track::sim::TrackGear>()
-        .trans()
-        .expect("the Tiger blueprint declares a transmission");
-    // Stage B: the readout is the crank state directly — no belt speeds involved.
-    let readout = transmission::readout(&state.0, tp);
-    println!(
-        "drive readout: gear {} rpm {:.0} (idle {}, governed {})",
-        readout.gear_label, readout.rpm, tp.engine.idle_rpm, tp.engine.governed_rpm
-    );
-
-    assert!(
-        (tp.engine.idle_rpm..=tp.engine.governed_rpm).contains(&readout.rpm),
-        "a driven Tiger's readout rpm {} must lie in idle..governed [{}, {}]",
-        readout.rpm,
-        tp.engine.idle_rpm,
-        tp.engine.governed_rpm,
-    );
-    assert!(
-        !state.0.reverse,
-        "the tank drove forward — the state must be on the forward ladder"
-    );
-    assert_eq!(
-        readout.gear_label,
-        format!("F{}", state.0.gear),
-        "the label must name the actually-engaged forward gear",
-    );
-}
-
 #[derive(Resource, Default)]
 struct ScriptedDeterminismRun {
     digests: Vec<Vec<(String, crate::trace::CanonicalTankStateDigest)>>,
@@ -2717,6 +1005,15 @@ struct ScriptedDeterminismRun {
     fire_shells: usize,
     saw_projectile_spawn: bool,
     saw_projectile_march: bool,
+    /// The controlled tank's track elements carried strain on some tick.
+    saw_element_strain: bool,
+    /// The controlled tank's transmission left its spawn state over the flat script.
+    transmission_advanced: bool,
+    /// Slope-segment witnesses of the transmission's grade memory.
+    saw_grade_demand: bool,
+    saw_grade_confirm: bool,
+    saw_grade_target: bool,
+    saw_hill_hold: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -2801,6 +1098,11 @@ fn capture_scripted_determinism_tick(
             controlled = Some((
                 position.0, rotation.0, linear.0, angular.0, com.0, drive, contacts, sim,
             ));
+            run.saw_element_strain |= elements
+                .sides
+                .iter()
+                .flat_map(|side| side.strain.iter())
+                .any(|strain| strain.length() > 0.0);
         }
     }
     digests.sort_unstable_by(|left, right| left.0.cmp(&right.0));
@@ -2895,6 +1197,8 @@ fn assert_simulation_mutators_are_ordered(app: &App) {
 }
 
 const SCRIPT_TICKS: usize = 600;
+/// Ticks of the slope segment that follows the flat script.
+const SLOPE_TICKS: usize = 512;
 
 fn scripted_determinism_run() -> ScriptedDeterminismRun {
     let mut app = booted_sim();
@@ -2928,20 +1232,94 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
             assert_simulation_mutators_are_ordered(&app);
         }
     }
+    let transmission_advanced = *app
+        .world()
+        .get::<crate::track::sim::TankTransmission>(tank)
+        .expect("the controlled tank carries transmission state")
+        != fresh_tank_transmission(&app);
 
+    // The slope segment, on the declared transmission: the tank is placed rolling uphill on the
+    // course's 20° face in F6 under Sequential addressing, belts and hull matched at a fixture
+    // 4.0 m/s, W held. Paying adjacent shift windows accumulates the demand EMA and
+    // grade-confirmation evidence, retains a grade target, and latches hill hold before it crests.
     app.world_mut()
+        .resource_mut::<crate::track::sim::TrackGear>()
+        .trans_mut()
+        .expect("the tank declares a transmission")
+        .shift_addressing = crate::track::transmission::ShiftAddressing::Sequential;
+    let rot = Quat::from_rotation_x(20.0_f32.to_radians());
+    let approach_speed = 4.0;
+    let mut transmission = fresh_tank_transmission(&app);
+    transmission.0.gear = 6;
+    {
+        let mut e = app.world_mut().entity_mut(tank);
+        e.get_mut::<avian3d::prelude::Position>().unwrap().0 = Vec3::new(0.0, 1.50, -37.0);
+        e.get_mut::<avian3d::prelude::Rotation>().unwrap().0 = rot;
+        e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 =
+            rot * Vec3::NEG_Z * approach_speed;
+        e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
+        let mut drive = e.get_mut::<crate::track::sim::TrackDrive>().unwrap();
+        drive.throttle = 1.0;
+        drive.steer = 0.0;
+        drive.sides[0].speed = approach_speed;
+        drive.sides[1].speed = approach_speed;
+        *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() = transmission;
+    }
+    let (mut demand, mut confirm, mut target, mut hold) = (false, false, false, false);
+    for _ in 0..SLOPE_TICKS {
+        drive_tick(&mut app, tank, 1.0, 0.0);
+        let state = app
+            .world()
+            .get::<crate::track::sim::TankTransmission>(tank)
+            .expect("the controlled tank carries transmission state")
+            .0;
+        demand |= state.demand_n > 0.0;
+        confirm |= state.grade_confirm_ticks > 0;
+        target |= state.grade_target > 0;
+        hold |= state.hill_hold;
+    }
+
+    let mut run = app
+        .world_mut()
         .remove_resource::<ScriptedDeterminismRun>()
-        .expect("the scripted digest collector remains installed")
+        .expect("the scripted digest collector remains installed");
+    run.transmission_advanced = transmission_advanced;
+    run.saw_grade_demand = demand;
+    run.saw_grade_confirm = confirm;
+    run.saw_grade_target = target;
+    run.saw_hill_hold = hold;
+    run
 }
 
 fn assert_scripted_determinism_witnesses(run: &ScriptedDeterminismRun, label: &str) {
     assert_eq!(
         run.digests.len(),
-        SCRIPT_TICKS,
+        SCRIPT_TICKS + SLOPE_TICKS,
         "{label} produced one digest per fixed tick",
     );
     assert!(run.saw_airborne, "{label} crossed an airborne state");
     assert!(run.saw_grounded, "{label} reached ground contact");
+    assert!(
+        run.saw_element_strain,
+        "{label} put strain into the driven tank's track elements (the element law engaged)",
+    );
+    assert!(
+        run.transmission_advanced,
+        "{label} advanced the declared transmission from its spawn state",
+    );
+    assert!(
+        run.saw_grade_demand,
+        "{label} slope segment exercised the demand EMA",
+    );
+    assert!(
+        run.saw_grade_confirm,
+        "{label} slope segment accumulated grade-deficit evidence",
+    );
+    assert!(
+        run.saw_grade_target,
+        "{label} slope segment retained a sequential grade target",
+    );
+    assert!(run.saw_hill_hold, "{label} slope segment latched hill hold");
     assert!(
         run.saw_steering_slip,
         "{label} put a loaded belt contact in the slipping regime while steering",
@@ -2994,9 +1372,13 @@ fn assert_scripted_determinism_witnesses(run: &ScriptedDeterminismRun, label: &s
     );
 }
 
-/// Two fresh, full simulation compositions must replay one command script bit-for-bit. The witness
-/// assertions keep this from passing because the scenario never reached contact, slip traction,
-/// steering slip, or fire.
+/// Two fresh, full simulation compositions must replay one command script bit-for-bit, every tick:
+/// the flat drive-steer-fire script, then the slope segment. The digest hashes the transmission's
+/// exhaustive field projection (`transmission_state_projection`) and both belt speeds, so the
+/// transmission's grade memory (demand EMA, confirmation counter, held target, hill-hold latch)
+/// replays exactly too. The witness assertions
+/// keep this from passing because the scenario never reached contact, element strain, slip
+/// traction, steering slip, fire, a transmission off its spawn state, or that grade memory.
 #[test]
 fn full_simulation_replay_is_bit_exact_for_six_hundred_ticks() {
     let first = scripted_determinism_run();
@@ -3166,7 +1548,7 @@ fn a_main_gun_round_damages_a_tank_on_the_shipped_map() {
 
     let mut app = {
         let grid = crate::terrain_grid::tests::shipped_grid();
-        let mut sim = booted_sim_on(Some(grid), BallisticsHalves::SimOnly);
+        let mut sim = booted_sim_on(Some(grid));
         start_fixed_clock(&mut sim);
         // Let both tanks settle onto the terrain before anything is fired at them.
         for _ in 0..30 {

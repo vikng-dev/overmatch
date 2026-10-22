@@ -11,6 +11,12 @@
 //!   ended and is on the lobby screen. Each client frame advances real time by [`SLOW_FRAME`] —
 //!   virtual time clamps a frame that long — so the give-up lands within [`GONE_FRAMES`] frames
 //!   only on the real clock.
+//!
+//!   Either way the match's replicas leave with its link: lightyear 0.30.1 despawns every
+//!   replicated entity on the client when the link's `Connected` is removed, unless the receiver
+//!   is `Persistent` (`lightyear_replication` client.rs, `on_replication_disconnect`), so a client
+//!   returning to the lobby has no replica to clean up. Both exits replicate one tank root first
+//!   and fail if it outlives the link.
 //! - **A stall over a live server.** The link drops (the server stops answering), then one client
 //!   frame spans [`LONG_STALL`], past the give-up, while the server comes back. The client must
 //!   try again on resume and stay in the match: the give-up counts failed attempts, not a stall.
@@ -27,6 +33,7 @@ use crate::net::matchmaking::{LeaveMatch, MatchClosed, MatchReady, ReadyMatch};
 use crate::net::test_harness::{TICK, base_app, finish, free_port, lock_real_udp_test};
 
 const CONNECT_STEPS: u32 = 2_000;
+const REPLICATE_STEPS: u32 = 500;
 /// Frames after LEAVE MATCH by which the link is gone and the lobby is up.
 const LEAVE_FRAMES: u32 = 8;
 /// Server frames after LEAVE MATCH by which the server has dropped the client: 20 × 15.6 ms of
@@ -144,15 +151,39 @@ fn in_match() -> (App, App) {
     panic!("the client never reached the match within {CONNECT_STEPS} steps");
 }
 
+fn replicas(client: &mut App) -> usize {
+    client
+        .world_mut()
+        .query_filtered::<(), (With<NetTank>, With<Remote>)>()
+        .iter(client.world())
+        .count()
+}
+
+/// The server replicates one tank root, and the client holds it.
+fn replicate_one_root(server: &mut App, client: &mut App) {
+    server
+        .world_mut()
+        .spawn((NetTank, Replicate::to_clients(NetworkTarget::All)));
+    for _ in 0..REPLICATE_STEPS {
+        step(Some(&mut *server), client);
+        if replicas(client) == 1 {
+            return;
+        }
+    }
+    panic!("the replicated root never reached the client within {REPLICATE_STEPS} steps");
+}
+
 #[test]
 fn leave_match_disconnects_drops_the_link_and_returns_to_the_lobby() {
     let _udp = lock_real_udp_test();
     let (mut server, mut client) = in_match();
+    replicate_one_root(&mut server, &mut client);
     client.world_mut().write_message(LeaveMatch);
     for _ in 0..LEAVE_FRAMES {
         step(Some(&mut server), &mut client);
     }
     assert!(links(&mut client).is_empty(), "the left link is removed");
+    assert_eq!(replicas(&mut client), 0, "no replica outlives the link");
     assert_eq!(flow(&client), Flow::Lobby);
     assert_eq!(
         client.world().resource::<Closed>().0,
@@ -176,7 +207,8 @@ fn leave_match_disconnects_drops_the_link_and_returns_to_the_lobby() {
 #[test]
 fn a_gone_server_ends_the_match_after_the_real_time_give_up() {
     let _udp = lock_real_udp_test();
-    let (server, mut client) = in_match();
+    let (mut server, mut client) = in_match();
+    replicate_one_root(&mut server, &mut client);
     drop(server);
     client.insert_resource(TimeUpdateStrategy::ManualDuration(SLOW_FRAME));
     let mut frames = 0;
@@ -190,6 +222,7 @@ fn a_gone_server_ends_the_match_after_the_real_time_give_up() {
         "still in the match after {GONE_FRAMES} frames of {SLOW_FRAME:?}"
     );
     assert!(links(&mut client).is_empty(), "the lost link is removed");
+    assert_eq!(replicas(&mut client), 0, "no replica outlives the link");
     assert_eq!(
         client.world().resource::<Closed>().0,
         vec![MatchClosed::Ended(

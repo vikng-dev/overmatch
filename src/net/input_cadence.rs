@@ -41,6 +41,9 @@ const WARMUP_STEPS: u32 = 64;
 const MEASURED_STEPS: u32 = 256;
 /// Explicit timeline shifts applied inside the window, each between two frames: (step, delta).
 const SHIFTS: [(u32, i32); 2] = [(64, 3), (160, -3)];
+/// The ungated control's window. It closes before the first shift: the control asserts only that
+/// the per-frame cadence sends more than two messages per tick.
+const CONTROL_STEPS: u32 = 32;
 /// Steps after the window closes, so every message authored inside it has arrived.
 const DRAIN_STEPS: u32 = 16;
 
@@ -223,7 +226,7 @@ struct Run {
     messages: usize,
 }
 
-fn run(gated: bool) -> Run {
+fn run(gated: bool, measured_steps: u32) -> Run {
     let _udp = lock_real_udp_test();
     let port = free_port();
     let mut server = build_server(port);
@@ -256,7 +259,7 @@ fn run(gated: bool) -> Run {
     let authored_before = client.world().resource::<AuthoredCommands>().0.len();
     let received_before = server.world().resource::<ReceivedFresh>().0.len();
     let ticks_before = client.world().resource::<ClientTicks>().0;
-    for step_index in 0..MEASURED_STEPS {
+    for step_index in 0..measured_steps {
         // Mid-tick: the shift lands between the frame that buffered a tick and the next one.
         let shift = SHIFTS
             .iter()
@@ -297,7 +300,7 @@ fn run(gated: bool) -> Run {
 /// Ungated, the same harness sees the per-frame cadence.
 #[test]
 fn a_fast_client_sends_one_input_message_per_tick() {
-    let gated = run(true);
+    let gated = run(true, MEASURED_STEPS);
     println!(
         "gated: {} messages carried {} authored commands over {} client ticks at {FRAMES_PER_TICK} \
          frames/tick",
@@ -333,7 +336,7 @@ fn a_fast_client_sends_one_input_message_per_tick() {
          fresh state"
     );
 
-    let ungated = run(false);
+    let ungated = run(false, CONTROL_STEPS);
     println!(
         "ungated: {} messages carried {} authored commands over {} client ticks",
         ungated.messages,

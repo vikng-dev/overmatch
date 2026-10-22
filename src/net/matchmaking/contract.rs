@@ -250,10 +250,7 @@ mod tests {
         assert_eq!(u64::from(port), raw["port"].as_u64().unwrap());
         let hex: String = key.iter().map(|byte| format!("{byte:02x}")).collect();
         assert_eq!(hex, raw["key"].as_str().unwrap().to_ascii_lowercase());
-    }
 
-    #[test]
-    fn error_example_parses() {
         let error: ErrorResponse = serde_json::from_str(ERROR).unwrap();
         assert!(!error.error.is_empty());
     }

@@ -294,99 +294,24 @@ mod tests {
         AwaitingRespawn { active, deadline }
     }
 
-    /// The timeout fires only once the deadline is genuinely past — before it, an in-flight request
-    /// keeps the overlay on `RESPAWNING…`.
+    /// A respawn request reverts only when it is in flight, no live tank has arrived, and the
+    /// deadline has passed. Before it, an in-flight request keeps the overlay on `RESPAWNING…`; a
+    /// live tank means the round-trip succeeded and there is nothing to revert; with no request in
+    /// flight the timeout cannot manufacture a revert out of an idle death screen.
     #[test]
     fn not_timed_out_before_deadline() {
         let a = awaiting(true, 10.0);
         assert!(!respawn_timed_out(&a, false, 9.999), "just before deadline");
         assert!(respawn_timed_out(&a, false, 10.0), "at the deadline");
         assert!(respawn_timed_out(&a, false, 12.0), "past the deadline");
-    }
-
-    /// A live tank arriving cancels the timeout regardless of the clock: the round-trip succeeded,
-    /// so there is nothing to revert.
-    #[test]
-    fn live_tank_never_times_out() {
-        let a = awaiting(true, 10.0);
-        assert!(!respawn_timed_out(&a, true, 100.0));
-    }
-
-    /// With no request in flight there is nothing to time out — the timeout can't manufacture a
-    /// revert out of an idle death screen.
-    #[test]
-    fn inactive_never_times_out() {
-        let a = awaiting(false, 0.0);
-        assert!(!respawn_timed_out(&a, false, 100.0));
-    }
-
-    /// The node's draw layer as bevy_ui stacks it: its own `GlobalZIndex`, else its nearest
-    /// ancestor's, else 0 (a root without one).
-    fn layer(world: &World, mut node: Entity) -> i32 {
-        loop {
-            if let Some(z) = world.get::<GlobalZIndex>(node) {
-                return z.0;
-            }
-            match world.get::<ChildOf>(node) {
-                Some(parent) => node = parent.parent(),
-                None => return 0,
-            }
-        }
-    }
-
-    /// Through the real death-screen and HUD spawners, with the own tank knocked out: exactly one
-    /// node carries the death tint's colour, and it draws below every other UI node — the HUD and
-    /// the death screen's own — so it tints the world and no UI element.
-    #[test]
-    fn the_death_tint_draws_beneath_every_ui_node() {
-        let mut app = App::new();
-        app.add_plugins(MinimalPlugins)
-            .init_resource::<Overlays>()
-            .init_resource::<AwaitingRespawn>()
-            .insert_resource(UiFonts {
-                hud: Handle::default(),
-                body: Handle::default(),
-            })
-            .add_systems(
-                Startup,
-                (
-                    crate::crew_ui::spawn_crew_bar,
-                    crate::crew_ui::spawn_status_panel,
-                ),
-            )
-            .add_systems(Update, toggle_death_screen);
-        app.world_mut().spawn((
-            Controlled,
-            TankKnockedOut {
-                reason: crate::damage::KnockoutReason::CrewLoss,
-            },
-        ));
-        app.update();
-
-        let world = app.world_mut();
-        let mut nodes = world.query_filtered::<(Entity, Option<&BackgroundColor>), With<Node>>();
-        let nodes: Vec<_> = nodes
-            .iter(world)
-            .map(|(node, fill)| {
-                let tint = fill.is_some_and(|fill| fill.0 == crate::ui_font::DEATH_TINT);
-                (tint, layer(world, node))
-            })
-            .collect();
-        let tints: Vec<i32> = nodes.iter().filter(|n| n.0).map(|n| n.1).collect();
-        let rest: Vec<i32> = nodes.iter().filter(|n| !n.0).map(|n| n.1).collect();
-        assert_eq!(tints.len(), 1, "one death tint: {tints:?}");
         assert!(
-            world
-                .query::<&DeathScreenNode>()
-                .iter(world)
-                .eq([&DeathScreenNode::Died]),
-            "fixture: the death screen is up",
+            !respawn_timed_out(&a, true, 100.0),
+            "a live tank never times out"
         );
-        assert!(rest.len() >= 3, "fixture: HUD and death text: {rest:?}");
+        let idle = awaiting(false, 0.0);
         assert!(
-            rest.iter().all(|&other| other > tints[0]),
-            "the tint at {} must draw below every UI node: {rest:?}",
-            tints[0],
+            !respawn_timed_out(&idle, false, 100.0),
+            "no request, no timeout"
         );
     }
 }

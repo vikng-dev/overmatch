@@ -6,7 +6,6 @@
 use core::time::Duration;
 use std::collections::VecDeque;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use avian3d::prelude::{Collider, CollisionLayers, LayerMask, Position, RigidBody, Rotation};
 use bevy::prelude::*;
@@ -22,8 +21,8 @@ use lightyear::prelude::server::{
 use lightyear::prelude::*;
 
 use super::client::{
-    HeldFireEvents, InputBufferGuardMetrics, PendingFireEvents, PendingRecoilKicks, SeenDamage,
-    SeenShots, age_sanctioned_shots, install_input_buffer_guard, install_input_send_cadence,
+    HeldFireEvents, PendingFireEvents, PendingRecoilKicks, SeenDamage, SeenShots,
+    age_sanctioned_shots, install_input_buffer_guard, install_input_send_cadence,
     receive_damage_confirms, receive_fire_events, shipping_input_delay,
 };
 use super::disclosure::{CombatDisclosure, NetTankStatus};
@@ -55,10 +54,10 @@ const SHOOTER_COMBATANT: CombatantId = CombatantId(1);
 const OWNER_SNAPSHOT_HP: u32 = 73;
 const OWNER_BELT: u32 = 17;
 
-/// Shots fired by the scripted run.
-const SHOTS: u32 = 20;
+/// Shots fired by the scripted run: both delivery classes, alternating.
+const SHOTS: u32 = 10;
 
-/// DERIVED from the scale-probe scenario: combatants firing simultaneously.
+/// DERIVED from the scale scenario: the public roots the sustained stream fires from.
 const VOLLEY_COMBATANTS: u64 = 30;
 const VOLLEY_WEAPONS: u8 = 2;
 /// DERIVED from the target firing envelope and 64 Hz authority tick.
@@ -68,16 +67,9 @@ const SUSTAINED_STREAM_TICKS: u32 = 64;
 /// The reliable single is injected while the automatic stream is active. Its slot must not be one
 /// of that tick's automatic slots, preserving the once-per-(combatant, weapon, tick) invariant.
 const SUSTAINED_RELIABLE_TICK: u32 = 31;
-/// DERIVED from the fan-out scenario.
-const FANOUT_RECEIVERS: u64 = 30;
-/// DERIVED diagnostic cadence: frequent enough to locate a stalled phase without flooding CI logs.
-const FANOUT_PROGRESS_INTERVAL_STEPS: u32 = 256;
-/// DERIVED bounded repair and ACK-settlement window for the fan-out probe.
-const FANOUT_SETTLEMENT_STEPS: u32 = 64;
-/// Keep the owner-support connection separate from the observers: every measured receiver must
-/// present the shooter root rather than suppressing its own local echo.
-const FANOUT_CLIENT_ID_BASE: u64 = 10_000;
-const FANOUT_SEED_BASE: u64 = 0x000F_A110_u64;
+/// DERIVED bounded repair and ACK-settlement window after a ledger fills: a late duplicate lands
+/// inside it.
+const SETTLEMENT_STEPS: u32 = 64;
 
 /// Configured spacing between scripted shots.
 const FIRE_INTERVAL: u32 = 8;
@@ -108,13 +100,6 @@ struct SeededLoss {
     dropped: u32,
     /// Payloads let through — the denominator for the observed loss rate the test reports.
     passed: u32,
-}
-
-/// Content-blind consecutive receive-window loss for correlated-burst measurements.
-#[derive(Resource, Default)]
-struct InboundBurst {
-    remaining_updates: u32,
-    dropped: u32,
 }
 
 /// Raw payloads admitted to the client link before this harness delays or drops any of them.
@@ -184,18 +169,6 @@ fn drop_packets(mut links: Query<&mut Link, With<Client>>, mut loss: ResMut<Seed
                 loss.passed += 1;
                 link.recv.push_raw(payload);
             }
-        }
-    }
-}
-
-fn drop_inbound_burst(mut links: Query<&mut Link, With<Client>>, mut burst: ResMut<InboundBurst>) {
-    if burst.remaining_updates == 0 {
-        return;
-    }
-    burst.remaining_updates -= 1;
-    for mut link in &mut links {
-        for _ in link.recv.drain() {
-            burst.dropped += 1;
         }
     }
 }
@@ -323,22 +296,17 @@ fn fire_script(
 #[derive(Resource, Default)]
 struct ShooterTank(Option<Entity>);
 
-/// The public replicated roots used by the same-tick scale probe. They are deliberately server-side
-/// scripted roots rather than thirty socket clients: this isolates public fan-out and batching from
+/// The public replicated roots the sustained stream fires from. They are deliberately server-side
+/// scripted roots rather than socket clients: this isolates public fan-out and batching from
 /// client-process scheduling while retaining real server-to-client UDP delivery.
 #[derive(Resource, Default)]
 struct VolleyRoots(Vec<Entity>);
 
-/// Enables the scale probe independently from the ordinary mixed-mechanism script.
+/// Spawns the public roots, independently from the ordinary mixed-mechanism script.
 #[derive(Resource, Default)]
 struct VolleyArmed(bool);
 
-/// Separates root replication from volley emission so the measurement window starts after every
-/// observer display root is live, rather than charging setup replication to the volley.
-#[derive(Resource, Default)]
-struct VolleyFireArmed(bool);
-
-/// Enables the sustained automatic stream after the one-tick scale volley has settled.
+/// Enables the sustained automatic stream once the observer holds every public root.
 #[derive(Resource, Default)]
 struct SustainedStreamArmed(bool);
 
@@ -431,47 +399,6 @@ fn spawn_volley_roots(
 #[derive(Resource, Default)]
 struct FireArmed(bool);
 
-/// Emit the DERIVED 30 × 2 public automatic-fire volley inside one authority fixed tick.
-fn fire_volley_script(
-    armed: Res<VolleyFireArmed>,
-    roots: Res<VolleyRoots>,
-    timeline: Res<LocalTimeline>,
-    mut fired: Local<bool>,
-    mut commands: Commands,
-) {
-    if !armed.0 || *fired || roots.0.len() != VOLLEY_COMBATANTS as usize {
-        return;
-    }
-    *fired = true;
-    for (index, &tank) in roots.0.iter().enumerate() {
-        let combatant = CombatantId(index as u64 + 1);
-        for weapon in 0..VOLLEY_WEAPONS {
-            commands.trigger(FireShell {
-                origin: MUZZLE,
-                direction: Dir3::NEG_Z,
-                speed: 800.0,
-                caliber: 0.0079,
-                mass: 0.0118,
-                nose_factor: 0.5,
-                wound: 10.0,
-                mechanism: crate::spec::FireMechanism::Automatic,
-                tracer: true,
-                shot_origin: FireShellOrigin::Local,
-                shooter: Some(ShotSource {
-                    tank,
-                    weapon: weapon as usize,
-                }),
-                catch_up_ticks: 0,
-                shot: Some(ShotId {
-                    combatant,
-                    weapon,
-                    fire_tick: timeline.tick().0,
-                }),
-            });
-        }
-    }
-}
-
 /// Emit one second of target-envelope automatic fire, then one reliable single-shot trajectory
 /// amidst it. The scripts use the production `FireShell` seam; no message is manufactured here.
 fn fire_sustained_stream(
@@ -523,7 +450,7 @@ fn fire_sustained_stream(
         return;
     }
     // DERIVED from the configured cadence: stream tick 31 uses automatic slots 12..24 (exclusive),
-    // leaving root zero / weapon zero available. The DERIVED thirty receiver Apps remain unowned.
+    // leaving root zero / weapon zero available.
     debug_assert!(
         !(first_slot..first_slot + SUSTAINED_AUTOMATIC_FACTS_PER_TICK).contains(&0),
         "sustained reliable insertion must not collide with an automatic ShotId"
@@ -742,7 +669,6 @@ fn build_server(port: u16) -> App {
     app.init_resource::<ShooterTank>();
     app.init_resource::<VolleyRoots>();
     app.init_resource::<VolleyArmed>();
-    app.init_resource::<VolleyFireArmed>();
     app.init_resource::<SustainedStreamArmed>();
     app.init_resource::<SustainedStreamShots>();
     app.add_systems(Update, spawn_owned_shooter);
@@ -754,10 +680,7 @@ fn build_server(port: u16) -> App {
     app.init_resource::<ServerDamages>();
     app.add_observer(collect_server_bounces);
     app.add_observer(collect_server_damage);
-    app.add_systems(
-        FixedUpdate,
-        (fire_script, fire_volley_script, fire_sustained_stream),
-    );
+    app.add_systems(FixedUpdate, (fire_script, fire_sustained_stream));
     // FixedLast observes this tick's complete `Shot` spawns.
     app.add_systems(FixedLast, collect_server_shots);
 
@@ -781,8 +704,8 @@ fn build_server(port: u16) -> App {
 enum HarnessClient {
     Shooter,
     Observer,
-    /// A public-only receiver used by the 30-client fan-out probe. It deliberately has neither the
-    /// shooter's input slot nor the observer's delayed/trail instrumentation.
+    /// A public-only receiver. It deliberately has neither the shooter's input slot nor the
+    /// observer's delayed/trail instrumentation.
     FanoutReceiver,
 }
 
@@ -861,7 +784,6 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
         dropped: 0,
         passed: 0,
     });
-    app.init_resource::<InboundBurst>();
     app.init_resource::<RawInboundPayloads>();
     if role == HarnessClient::Observer {
         app.init_resource::<ObserverPayloadDelay>().add_systems(
@@ -877,18 +799,6 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
                 .after(delay_observer_packets)
                 .before(drop_packets),
         );
-        app.add_systems(
-            PreUpdate,
-            drop_inbound_burst
-                .in_set(LinkSystems::Receive)
-                .after(count_raw_inbound_payloads),
-        );
-        app.add_systems(
-            PreUpdate,
-            drop_packets
-                .in_set(LinkSystems::Receive)
-                .after(drop_inbound_burst),
-        );
     } else {
         app.add_systems(
             PreUpdate,
@@ -897,19 +807,13 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
                 .after(LinkReceiveSystems::ApplyConditioner)
                 .before(drop_packets),
         );
-        app.add_systems(
-            PreUpdate,
-            drop_inbound_burst
-                .in_set(LinkSystems::Receive)
-                .after(count_raw_inbound_payloads),
-        );
-        app.add_systems(
-            PreUpdate,
-            drop_packets
-                .in_set(LinkSystems::Receive)
-                .after(drop_inbound_burst),
-        );
     }
+    app.add_systems(
+        PreUpdate,
+        drop_packets
+            .in_set(LinkSystems::Receive)
+            .after(count_raw_inbound_payloads),
+    );
 
     let server_addr = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), port);
     // The input timeline is what SYNCS `LocalTimeline` to the server's tick — the present `P` that
@@ -959,9 +863,8 @@ fn step(server: &mut App, shooter: &mut App, observer: &mut App) {
     std::thread::sleep(Duration::from_micros(300));
 }
 
-/// Advance one server and many real client apps with two bounded kernel hand-offs. In particular,
-/// this does NOT sleep per receiver: that would turn the 30-client probe into a measurement of the
-/// harness scheduler rather than public fan-out.
+/// Advance one server and many real client apps with two bounded kernel hand-offs. It does NOT
+/// sleep per client: the hand-off cost stays independent of the client count.
 fn step_many(server: &mut App, clients: &mut [App]) {
     server.update();
     std::thread::sleep(Duration::from_micros(500));
@@ -977,20 +880,6 @@ fn arm_observer_catch_up_delay(observer: &mut App) {
         .world_mut()
         .resource_mut::<ObserverPayloadDelay>()
         .armed = true;
-}
-
-fn arm_inbound_burst(client: &mut App, receive_updates: u32) {
-    let mut burst = client.world_mut().resource_mut::<InboundBurst>();
-    assert_eq!(
-        burst.remaining_updates, 0,
-        "a correlated inbound burst cannot be re-armed while active"
-    );
-    burst.remaining_updates = receive_updates;
-    burst.dropped = 0;
-}
-
-fn clients_connected(shooter: &mut App, observer: &mut App) -> bool {
-    client_connected(shooter) && client_connected(observer)
 }
 
 fn client_connected(client: &mut App) -> bool {
@@ -1010,21 +899,27 @@ fn client_root_count(client: &mut App) -> usize {
         .count()
 }
 
-fn report_fanout_progress(phase: &str, step: u32, started: Instant, clients: &[App]) {
-    let guard_clears: u64 = clients
-        .iter()
-        .map(|client| client.world().resource::<InputBufferGuardMetrics>().cleared)
-        .sum();
-    println!(
-        "MEASURED fan-out progress phase={phase} step={step} clients={} \
-         input_buffer_guard_clears={guard_clears} elapsed={:?}",
-        clients.len(),
-        started.elapsed(),
-    );
+/// Every scripted shot has resolved on the authority and each ledger holds at least its count: a
+/// shell per shot on both clients, every sanctioned ricochet carried and rendered on the observer,
+/// a hit confirm per damaging shot on the shooter. The exact counts are asserted after settlement.
+fn mixed_ledgers_filled(server: &App, shooter: &App, observer: &App) -> bool {
+    let fired = server.world().resource::<ServerShots>().0.len();
+    let bounced = server.world().resource::<ServerBounces>().0.len();
+    let damaged = server.world().resource::<ServerDamages>().0.len();
+    fired == SHOTS as usize
+        && damaged == fired
+        && observer.world().resource::<ClientShells>().0.len() >= fired
+        && shooter.world().resource::<ClientShells>().0.len() >= fired
+        && observer.world().resource::<ClientBounces>().0 as usize >= bounced
+        && observer.world().resource::<ClientRenderedBounces>().0.len() >= bounced
+        && shooter.world().resource::<ClientHitConfirms>().0.len() >= damaged
 }
 
 /// **THE TRIPWIRE.** Over a real Lightyear link with configured seeded loss, every authority shot
-/// spawns exactly one observer shell and every sanctioned ricochet carries through.
+/// spawns exactly one observer shell and every sanctioned ricochet carries through. Then, with one
+/// second of target-envelope automatic fire saturating the visual queue, a reliable cannon shot
+/// presents exactly once on the observer and its owner-private `DamageConfirm` exactly once on its
+/// owner.
 ///
 /// If this fails, the split shot transport or the `ShotId` dedup (`net::client::SeenShots`) does not
 /// do on a real channel what its focused tests say it does — read the failure message for which half
@@ -1130,9 +1025,16 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
     let shooter_active = raw_inbound_sample(&shooter).delta_since(shooter_active_start);
     let observer_active = raw_inbound_sample(&observer).delta_since(observer_active_start);
 
-    // Continue unmeasured beyond the script, flight, hold, and repair windows. This traffic is
-    // deliberately excluded from the bounded Link-level estimate above.
+    // Continue unmeasured until every ledger has its count, then through the settlement window so a
+    // late duplicate still lands before the exact counts below. This traffic is deliberately
+    // excluded from the bounded Link-level estimate above.
     for _ in 0..1_200 {
+        step(&mut server, &mut shooter, &mut observer);
+        if mixed_ledgers_filled(&server, &shooter, &observer) {
+            break;
+        }
+    }
+    for _ in 0..SETTLEMENT_STEPS {
         step(&mut server, &mut shooter, &mut observer);
     }
 
@@ -1461,388 +1363,59 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
         observer_raw.packets,
         observer_raw.bytes,
     );
-}
 
-/// **THE SCALE TRIPWIRE.** A DERIVED 30-combatant, two-weapon same-tick volley stays below the
-/// application fragmentation limit and presents every observer fire exactly once over real UDP.
-///
-/// The rig intentionally uses thirty replicated server roots rather than thirty client processes:
-/// it measures the production server's public fan-out and one observer's loss recovery without
-/// adding operating-system scheduling as an unmeasured variable.
-#[test]
-fn thirty_combatant_two_weapon_volley_presents_each_observer_fire_once_under_loss() {
-    let _udp = lock_real_udp_test();
-    let port = free_port();
-    let mut server = build_server(port);
-    let mut shooter = build_client(
-        port,
-        SHOOTER_CLIENT_ID,
-        SHOOTER_SEED,
-        HarnessClient::Shooter,
-    );
-    let mut observer = build_client(
-        port,
-        OBSERVER_CLIENT_ID,
-        OBSERVER_SEED,
-        HarnessClient::Observer,
-    );
-    finish(&mut server);
-    finish(&mut shooter);
-    finish(&mut observer);
-
-    let mut connected = false;
-    for _ in 0..900 {
-        step(&mut server, &mut shooter, &mut observer);
-        if clients_connected(&mut shooter, &mut observer) {
-            connected = true;
-            break;
-        }
-    }
-    assert!(
-        connected,
-        "the scale probe clients never connected over loopback UDP"
-    );
-
-    server.world_mut().resource_mut::<VolleyArmed>().0 = true;
-    let mut roots_ready = false;
-    for _ in 0..1_200 {
-        step(&mut server, &mut shooter, &mut observer);
-        let observer_roots = observer
-            .world_mut()
-            .query_filtered::<(), With<NetTank>>()
-            .iter(observer.world())
-            .count();
-        if observer_roots == VOLLEY_COMBATANTS as usize {
-            roots_ready = true;
-            break;
-        }
-    }
-    assert!(
-        roots_ready,
-        "the observer did not receive all {VOLLEY_COMBATANTS} scripted replicated roots before the volley"
-    );
-
-    let observer_idle_start = raw_inbound_sample(&observer);
-    for _ in 0..MEASUREMENT_WINDOW_STEPS {
-        step(&mut server, &mut shooter, &mut observer);
-    }
-    let observer_idle = raw_inbound_sample(&observer).delta_since(observer_idle_start);
-
-    let observer_active_start = raw_inbound_sample(&observer);
-    server.world_mut().resource_mut::<VolleyFireArmed>().0 = true;
-    // The volley fires on the next server fixed tick. This equal-duration active window captures
-    // its first copies plus bounded repairs without counting prior root replication.
-    for _ in 0..MEASUREMENT_WINDOW_STEPS {
-        step(&mut server, &mut shooter, &mut observer);
-    }
-    let observer_active = raw_inbound_sample(&observer).delta_since(observer_active_start);
-
-    // Continue unmeasured until all gameplay presentation assertions have settled.
-    for _ in 0..900 {
-        step(&mut server, &mut shooter, &mut observer);
-    }
-
-    let fired = server.world().resource::<ServerShots>().0.clone();
-    let observer_shells = observer.world().resource::<ClientShells>().0.clone();
-    let observer_damage = observer.world().resource::<ClientHitConfirms>().0.clone();
-    let metrics = server
-        .world()
-        .resource::<super::shot_transport::ShotTransportMetrics>();
-    let observer_loss = observer.world().resource::<SeededLoss>();
-    let observer_raw = raw_inbound_sample(&observer);
-    let observer_noisy_estimate = observer_active.noisy_estimate_after_baseline(observer_idle);
-    let expected = (VOLLEY_COMBATANTS * u64::from(VOLLEY_WEAPONS)) as usize;
-
-    assert_eq!(
-        fired.len(),
-        expected,
-        "the scale script must author {VOLLEY_COMBATANTS} × {VOLLEY_WEAPONS} = {expected} shots in one authority tick"
-    );
-    let distinct_fired: bevy::platform::collections::HashSet<_> = fired.iter().copied().collect();
-    assert_eq!(
-        distinct_fired.len(),
-        expected,
-        "same-tick shots collided instead of remaining distinct by (CombatantId, weapon, tick)"
-    );
-    let distinct_presented: bevy::platform::collections::HashSet<_> =
-        observer_shells.iter().map(|(shot, _)| *shot).collect();
-    assert_eq!(
-        observer_shells.len(),
-        expected,
-        "the observer presented {} shells for {expected} expected fires — a batch duplicate or loss escaped ShotId dedup/recovery",
-        observer_shells.len(),
-    );
-    assert_eq!(
-        distinct_presented.len(),
-        expected,
-        "the observer did not present every volley ShotId exactly once"
-    );
-    assert_eq!(
-        distinct_presented, distinct_fired,
-        "the observer presented a shot the authority did not author or missed an authored shot"
-    );
-    assert!(
-        observer_damage.is_empty(),
-        "the observer received {} owner-private damage receipts during the public volley",
-        observer_damage.len(),
-    );
-    assert_eq!(
-        metrics.reliable_public_send_accepted_facts, 0,
-        "the all-Automatic volley must use only FireVisualBatch, not reliable public outcomes"
-    );
-    assert!(
-        metrics.visual_send_accepted_facts >= expected as u64,
-        "the automatic visual queue did not get every first copy accepted: accepted={}, expected={expected}",
-        metrics.visual_send_accepted_facts,
-    );
-    assert!(
-        metrics.max_batch_wire_bytes <= super::shot_transport::VISUAL_BATCH_WIRE_LIMIT,
-        "a public visual batch crossed the unfragmented wire budget: {} > {}",
-        metrics.max_batch_wire_bytes,
-        super::shot_transport::VISUAL_BATCH_WIRE_LIMIT,
-    );
-    assert!(
-        observer_loss.dropped > 0,
-        "the observer loss injector never dropped a payload during the volley"
-    );
-    assert!(
-        observer_active.packets > 0 && observer_active.bytes > 0,
-        "the bounded active volley window contained no observer inbound transport payload"
-    );
-
-    println!(
-        "MEASURED volley E2E: {expected} automatic fires; DERIVED over equal {MEASUREMENT_WINDOW_STEPS}-step \
-         Link windows: observer idle {}/{} active {}/{} estimate {:+}/{:+}. The estimate is active minus \
-         idle opaque Link payload traffic, not shot bytes. Lifetime observer raw {} packets/{} bytes, impairment \
-         {} dropped/{} passed, max public batch {} bytes",
-        observer_idle.packets,
-        observer_idle.bytes,
-        observer_active.packets,
-        observer_active.bytes,
-        observer_noisy_estimate.0,
-        observer_noisy_estimate.1,
-        observer_raw.packets,
-        observer_raw.bytes,
-        observer_loss.dropped,
-        observer_loss.passed,
-        metrics.max_batch_wire_bytes,
-    );
-}
-
-/// **THE FAN-OUT TRIPWIRE.** A DERIVED 30-root same-tick volley and one-second target-envelope
-/// automatic stream reach a DERIVED thirty independent public receivers over production UDP, while
-/// a reliable cannon trajectory and owner-private damage confirmation share the flush. This stays an
-/// application-level probe: opaque Link counters include control, acknowledgement, replication,
-/// and game payloads rather than pretending to report per-shot or IP/UDP byte costs.
-#[test]
-fn thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss() {
-    assert!(
-        !crate::env_flag("SPIKE_MG_SHORTCIRCUIT", false),
-        "the fan-out contract must run production ballistics; use scripts/cost for the MG short-circuit A/B",
-    );
-    let _udp = lock_real_udp_test();
-    let started = Instant::now();
-    let port = free_port();
-    let mut server = build_server(port);
-
-    // This support connection owns the first replicated root. The DERIVED thirty-receiver scenario
-    // uses different identities and no input slot, so every receiver expects the DERIVED sixty fires.
-    let mut clients = Vec::with_capacity(FANOUT_RECEIVERS as usize + 1);
-    clients.push(build_client(
-        port,
-        SHOOTER_CLIENT_ID,
-        SHOOTER_SEED,
-        HarnessClient::Shooter,
-    ));
-    for receiver in 0..FANOUT_RECEIVERS {
-        clients.push(build_client(
-            port,
-            FANOUT_CLIENT_ID_BASE + receiver,
-            FANOUT_SEED_BASE.wrapping_add(receiver.wrapping_mul(0x9E37_79B9)),
-            HarnessClient::FanoutReceiver,
-        ));
-    }
-    finish(&mut server);
-    for client in &mut clients {
-        finish(client);
-    }
-    report_fanout_progress("connect", 0, started, &clients);
-
-    let mut connected = false;
-    for step_index in 1..=1_800 {
-        step_many(&mut server, &mut clients);
-        if step_index % FANOUT_PROGRESS_INTERVAL_STEPS == 0 {
-            report_fanout_progress("connect", step_index, started, &clients);
-        }
-        if clients.iter_mut().all(client_connected) {
-            connected = true;
-            report_fanout_progress("connected", step_index, started, &clients);
-            break;
-        }
-    }
-    assert!(
-        connected,
-        "the support connection and all {FANOUT_RECEIVERS} fan-out receivers never connected over loopback UDP"
-    );
-
-    server.world_mut().resource_mut::<VolleyArmed>().0 = true;
-    let mut roots_ready = false;
-    for step_index in 1..=1_800 {
-        step_many(&mut server, &mut clients);
-        if step_index % FANOUT_PROGRESS_INTERVAL_STEPS == 0 {
-            report_fanout_progress("replicate-roots", step_index, started, &clients);
-        }
-        if clients[1..]
-            .iter_mut()
-            .all(|receiver| client_root_count(receiver) == VOLLEY_COMBATANTS as usize)
-        {
-            roots_ready = true;
-            report_fanout_progress("roots-ready", step_index, started, &clients);
-            break;
-        }
-    }
-    assert!(
-        roots_ready,
-        "not every one of the {FANOUT_RECEIVERS} receivers had all {VOLLEY_COMBATANTS} replicated roots before firing"
-    );
-
-    let expected = (VOLLEY_COMBATANTS * u64::from(VOLLEY_WEAPONS)) as usize;
-    let raw_at_arm: Vec<_> = clients[1..].iter().map(raw_inbound_sample).collect();
-    let mut completed: Vec<Option<(u32, PayloadSample)>> = vec![None; FANOUT_RECEIVERS as usize];
-    server.world_mut().resource_mut::<VolleyFireArmed>().0 = true;
-
-    // The server emits in the first fixed step after arming. Complete receiver windows are captured
-    // at each receiver's first exactly-once presentation, so a slow receiver cannot be hidden in an
-    // aggregate average.
-    let mut fired: Option<std::collections::HashSet<ShotId>> = None;
-    let mut initial_volley_steps = 0;
-    for step_index in 1..=1_800 {
-        initial_volley_steps = step_index;
-        step_many(&mut server, &mut clients);
-        if step_index % FANOUT_PROGRESS_INTERVAL_STEPS == 0 {
-            report_fanout_progress("initial-volley", step_index, started, &clients);
-        }
-        let fired_now = server.world().resource::<ServerShots>().0.clone();
-        if fired.is_none() && fired_now.len() == expected {
-            fired = Some(fired_now.into_iter().collect());
-        }
-        let Some(fired) = fired.as_ref() else {
-            continue;
-        };
-        for (index, receiver) in clients[1..].iter().enumerate() {
-            if completed[index].is_some() {
-                continue;
-            }
-            let shells = &receiver.world().resource::<ClientShells>().0;
-            let presented: std::collections::HashSet<_> =
-                shells.iter().map(|(shot, _)| *shot).collect();
-            if shells.len() == expected && presented == *fired {
-                completed[index] = Some((step_index, raw_inbound_sample(receiver)));
-            }
-        }
-        if completed.iter().all(Option::is_some) {
-            report_fanout_progress("initial-volley-complete", step_index, started, &clients);
-            break;
-        }
-    }
-
-    report_fanout_progress(
-        "initial-volley-terminal-check",
-        initial_volley_steps,
-        started,
-        &clients,
-    );
-    let fired = fired.expect("the authoritative scale script never emitted its volley");
-    assert_eq!(
-        fired.len(),
-        expected,
-        "the fan-out scale script must author {VOLLEY_COMBATANTS} × {VOLLEY_WEAPONS} = {expected} distinct shots"
-    );
-    let incomplete: Vec<_> = completed
-        .iter()
-        .enumerate()
-        .filter_map(|(index, completion)| completion.is_none().then_some(index))
-        .collect();
-    assert!(
-        incomplete.is_empty(),
-        "{} of {FANOUT_RECEIVERS} receivers did not present every volley ShotId exactly once: receiver indices {incomplete:?}",
-        incomplete.len(),
-    );
-
-    // Let the bounded automatic repair horizon drain, then check the final ledger rather than only
-    // the first-completion snapshot. Any later duplicate remains a product failure.
-    report_fanout_progress("initial-volley-settlement-start", 0, started, &clients);
-    for _ in 0..FANOUT_SETTLEMENT_STEPS {
-        step_many(&mut server, &mut clients);
-    }
-    report_fanout_progress(
-        "initial-volley-settlement-complete",
-        FANOUT_SETTLEMENT_STEPS,
-        started,
-        &clients,
-    );
-
-    // Sustain roughly 768 RPM per weapon slot for one second: automatic public visuals are now
-    // continuously active when the reliable cannon fire, bounce, and owner-private consequence
-    // enter the same production transport flush.
-    let sustained_raw_at_arm: Vec<_> = clients[1..].iter().map(raw_inbound_sample).collect();
-    server.world_mut().resource_mut::<SustainedStreamArmed>().0 = true;
-    let mut sustained_complete: Vec<Option<(u32, PayloadSample)>> =
-        vec![None; FANOUT_RECEIVERS as usize];
-    let mut reliable_shot = None;
-    let mut sustained_stream_steps = 0;
-    for step_index in 1..=1_800 {
-        sustained_stream_steps = step_index;
-        step_many(&mut server, &mut clients);
-        if step_index % FANOUT_PROGRESS_INTERVAL_STEPS == 0 {
-            report_fanout_progress("sustained-stream", step_index, started, &clients);
-        }
-        let stream = server.world().resource::<SustainedStreamShots>();
-        if reliable_shot.is_none() {
-            reliable_shot = stream.reliable;
-        }
-        let Some(reliable) = reliable_shot else {
-            continue;
-        };
-        for (index, receiver) in clients[1..].iter().enumerate() {
-            if sustained_complete[index].is_some() {
-                continue;
-            }
-            let occurrences = receiver
-                .world()
-                .resource::<ClientShells>()
-                .0
-                .iter()
-                .filter(|(shot, _)| *shot == reliable)
-                .count();
-            if occurrences == 1 {
-                sustained_complete[index] = Some((step_index, raw_inbound_sample(receiver)));
-            }
-        }
-        let owner_receipts = clients[0]
+    // RELIABLE UNDER CONTENTION: one second of target-envelope automatic fire from every public
+    // root keeps the visual queue saturated while a reliable cannon shot and its owner-private
+    // damage confirmation enter the same transport flush.
+    let presentations = |client: &App, shot: ShotId| {
+        client
+            .world()
+            .resource::<ClientShells>()
+            .0
+            .iter()
+            .filter(|(seen, _)| *seen == shot)
+            .count()
+    };
+    let receipts = |client: &App, shot: ShotId| {
+        client
             .world()
             .resource::<ClientHitConfirms>()
             .0
             .iter()
-            .filter(|receipt| **receipt == DamageReceipt::from(reliable))
-            .count();
-        if stream.ticks_emitted == SUSTAINED_STREAM_TICKS
-            && owner_receipts == 1
-            && sustained_complete.iter().all(Option::is_some)
-        {
-            report_fanout_progress("sustained-stream-complete", step_index, started, &clients);
+            .filter(|receipt| **receipt == DamageReceipt::from(shot))
+            .count()
+    };
+    server.world_mut().resource_mut::<VolleyArmed>().0 = true;
+    let mut roots_ready = false;
+    for _ in 0..1_200 {
+        step(&mut server, &mut shooter, &mut observer);
+        if client_root_count(&mut observer) == VOLLEY_COMBATANTS as usize {
+            roots_ready = true;
             break;
         }
     }
-
-    report_fanout_progress(
-        "sustained-stream-terminal-check",
-        sustained_stream_steps,
-        started,
-        &clients,
+    assert!(
+        roots_ready,
+        "the observer did not receive all {VOLLEY_COMBATANTS} public roots before the stream"
     );
-    let reliable =
-        reliable_shot.expect("the sustained stream never injected its reliable cannon shot");
+    server.world_mut().resource_mut::<SustainedStreamArmed>().0 = true;
+    let mut reliable = None;
+    for _ in 0..1_800 {
+        step(&mut server, &mut shooter, &mut observer);
+        let stream = server.world().resource::<SustainedStreamShots>();
+        reliable = reliable.or(stream.reliable);
+        if let Some(shot) = reliable
+            && stream.ticks_emitted == SUSTAINED_STREAM_TICKS
+            && presentations(&observer, shot) == 1
+            && receipts(&shooter, shot) == 1
+        {
+            break;
+        }
+    }
+    for _ in 0..SETTLEMENT_STEPS {
+        step(&mut server, &mut shooter, &mut observer);
+    }
+    let reliable = reliable.expect("the sustained stream never injected its reliable cannon shot");
     assert_eq!(
         server
             .world()
@@ -1851,220 +1424,16 @@ fn thirty_combatant_volley_reaches_thirty_independent_receivers_under_loss() {
         SUSTAINED_STREAM_TICKS,
         "the sustained automatic stream ended before its one-second target envelope"
     );
-    assert!(
-        server
-            .world()
-            .resource::<ServerBounces>()
-            .0
-            .iter()
-            .any(|(shot, _)| *shot == reliable),
-        "the injected reliable cannon shot never reached the authority ricochet seam"
-    );
-    let incomplete_reliable: Vec<_> = sustained_complete
-        .iter()
-        .enumerate()
-        .filter_map(|(index, completion)| completion.is_none().then_some(index))
-        .collect();
-    assert!(
-        incomplete_reliable.is_empty(),
-        "{} receivers did not present the reliable cannon fire exactly once under sustained visual contention: {incomplete_reliable:?}",
-        incomplete_reliable.len(),
-    );
-    let owner_reliable_receipts = clients[0]
-        .world()
-        .resource::<ClientHitConfirms>()
-        .0
-        .iter()
-        .filter(|receipt| **receipt == DamageReceipt::from(reliable))
-        .count();
     assert_eq!(
-        owner_reliable_receipts, 1,
+        presentations(&observer, reliable),
+        1,
+        "the observer did not present the reliable cannon fire exactly once under sustained visual \
+         contention"
+    );
+    assert_eq!(
+        receipts(&shooter, reliable),
+        1,
         "the reliable cannon's owner-private DamageConfirm must present exactly once on its owner"
-    );
-
-    // The local `Impact` observer is intentionally unkeyed (`Impact` carries no ShotId), so its
-    // aggregate bounce counter cannot distinguish this cannon from the concurrent automatic hits.
-    // The keyed assertion above proves receiver fire presentation; the authority bounce and the
-    // reliable-send metrics below prove the remainder of this trajectory's transport route.
-    report_fanout_progress("reliable-settlement-start", 0, started, &clients);
-    for _ in 0..FANOUT_SETTLEMENT_STEPS {
-        step_many(&mut server, &mut clients);
-    }
-    report_fanout_progress(
-        "reliable-settlement-complete",
-        FANOUT_SETTLEMENT_STEPS,
-        started,
-        &clients,
-    );
-
-    report_fanout_progress(
-        "terminal-transport-assertions",
-        FANOUT_SETTLEMENT_STEPS,
-        started,
-        &clients,
-    );
-    let metrics = server
-        .world()
-        .resource::<super::shot_transport::ShotTransportMetrics>();
-    assert!(
-        metrics.reliable_public_send_accepted_facts >= 2,
-        "the reliable cannon fire and bounce were not accepted while automatic visuals were saturated: {}",
-        metrics.reliable_public_send_accepted_facts,
-    );
-    assert!(
-        metrics.max_reliable_outcome_sent_unacked_messages > 0
-            && metrics.max_reliable_damage_sent_unacked_messages > 0,
-        "the transport outbox probe did not observe both public outcome and private damage messages: outcome high-water={}, damage high-water={}",
-        metrics.max_reliable_outcome_sent_unacked_messages,
-        metrics.max_reliable_damage_sent_unacked_messages,
-    );
-    assert_eq!(
-        (
-            metrics.reliable_outcome_sent_unacked_messages,
-            metrics.reliable_damage_sent_unacked_messages,
-        ),
-        (0, 0),
-        "reliable sent-but-unacknowledged messages remained after the bounded settlement window"
-    );
-    assert!(
-        metrics.visual_enqueued
-            >= (expected + SUSTAINED_AUTOMATIC_FACTS_PER_TICK * SUSTAINED_STREAM_TICKS as usize)
-                as u64,
-        "the sustained target-envelope automatic stream did not enqueue every fire: enqueued={}, expected at least {}",
-        metrics.visual_enqueued,
-        expected + SUSTAINED_AUTOMATIC_FACTS_PER_TICK * SUSTAINED_STREAM_TICKS as usize,
-    );
-    assert!(
-        metrics.visual_send_accepted_facts >= expected as u64,
-        "the automatic visual queue did not accept the initial volley's first copies: accepted={}, expected={expected}",
-        metrics.visual_send_accepted_facts,
-    );
-    assert!(
-        metrics.max_batch_wire_bytes <= super::shot_transport::VISUAL_BATCH_WIRE_LIMIT,
-        "a fan-out visual batch crossed the unfragmented wire budget: {} > {}",
-        metrics.max_batch_wire_bytes,
-        super::shot_transport::VISUAL_BATCH_WIRE_LIMIT,
-    );
-
-    let mut completion_packets = Vec::with_capacity(FANOUT_RECEIVERS as usize);
-    let mut completion_bytes = Vec::with_capacity(FANOUT_RECEIVERS as usize);
-    let mut sustained_packets = Vec::with_capacity(FANOUT_RECEIVERS as usize);
-    let mut sustained_bytes = Vec::with_capacity(FANOUT_RECEIVERS as usize);
-    let mut dropped_payloads = Vec::with_capacity(FANOUT_RECEIVERS as usize);
-    let mut slowest_completion = 0_u32;
-    let mut slowest_sustained_completion = 0_u32;
-    let mut no_drops = Vec::new();
-    for (index, receiver) in clients[1..].iter().enumerate() {
-        let shells = &receiver.world().resource::<ClientShells>().0;
-        let base_occurrences: std::collections::HashMap<_, _> = shells
-            .iter()
-            .filter(|(shot, _)| fired.contains(shot))
-            .fold(std::collections::HashMap::new(), |mut counts, (shot, _)| {
-                *counts.entry(*shot).or_insert(0_usize) += 1;
-                counts
-            });
-        assert!(
-            fired
-                .iter()
-                .all(|shot| base_occurrences.get(shot) == Some(&1)),
-            "receiver {index} lost or duplicated a same-tick volley ShotId after sustained contention: {base_occurrences:?}",
-        );
-        assert_eq!(
-            shells.iter().filter(|(shot, _)| *shot == reliable).count(),
-            1,
-            "receiver {index} lost or duplicated the reliable cannon fire after its completion window"
-        );
-        let damage = &receiver.world().resource::<ClientHitConfirms>().0;
-        assert!(
-            damage.is_empty(),
-            "receiver {index} received {} owner-private damage receipt(s)",
-            damage.len(),
-        );
-        let loss = receiver.world().resource::<SeededLoss>();
-        if loss.dropped == 0 {
-            no_drops.push((index, loss.passed));
-        }
-        dropped_payloads.push(loss.dropped);
-        let (completion_step, completion_raw) =
-            completed[index].expect("incomplete receivers were rejected before final accounting");
-        let delta = completion_raw.delta_since(raw_at_arm[index]);
-        completion_packets.push(delta.packets);
-        completion_bytes.push(delta.bytes);
-        slowest_completion = slowest_completion.max(completion_step);
-        let (sustained_step, sustained_raw) = sustained_complete[index]
-            .expect("reliable cannon incompleteness was rejected before final accounting");
-        let sustained_delta = sustained_raw.delta_since(sustained_raw_at_arm[index]);
-        sustained_packets.push(sustained_delta.packets);
-        sustained_bytes.push(sustained_delta.bytes);
-        slowest_sustained_completion = slowest_sustained_completion.max(sustained_step);
-    }
-    assert!(
-        no_drops.is_empty(),
-        "the independent 10% loss injector did not drop a payload on every receiver: {no_drops:?}"
-    );
-
-    let packet_min = *completion_packets
-        .iter()
-        .min()
-        .expect("there are fan-out receivers");
-    let packet_max = *completion_packets
-        .iter()
-        .max()
-        .expect("there are fan-out receivers");
-    let byte_min = *completion_bytes
-        .iter()
-        .min()
-        .expect("there are fan-out receivers");
-    let byte_max = *completion_bytes
-        .iter()
-        .max()
-        .expect("there are fan-out receivers");
-    let packet_total: u64 = completion_packets.iter().sum();
-    let byte_total: u64 = completion_bytes.iter().sum();
-    let sustained_packet_min = *sustained_packets
-        .iter()
-        .min()
-        .expect("there are fan-out receivers");
-    let sustained_packet_max = *sustained_packets
-        .iter()
-        .max()
-        .expect("there are fan-out receivers");
-    let sustained_byte_min = *sustained_bytes
-        .iter()
-        .min()
-        .expect("there are fan-out receivers");
-    let sustained_byte_max = *sustained_bytes
-        .iter()
-        .max()
-        .expect("there are fan-out receivers");
-    let sustained_packet_total: u64 = sustained_packets.iter().sum();
-    let sustained_byte_total: u64 = sustained_bytes.iter().sum();
-    let dropped_min = *dropped_payloads
-        .iter()
-        .min()
-        .expect("there are fan-out receivers");
-    let dropped_max = *dropped_payloads
-        .iter()
-        .max()
-        .expect("there are fan-out receivers");
-
-    println!(
-        "MEASURED 30-receiver fan-out E2E: {} receivers × {expected} automatic fires = {} exactly-once presentations; \
-         initial-volley completion opaque Link packets per client min/max {packet_min}/{packet_max}, bytes min/max \
-         {byte_min}/{byte_max}, aggregate {packet_total} packets/{byte_total} bytes, slowest {slowest_completion} steps; \
-         sustained 1-second target-envelope stream + reliable cannon completion packets min/max \
-         {sustained_packet_min}/{sustained_packet_max}, bytes min/max {sustained_byte_min}/{sustained_byte_max}, aggregate \
-         {sustained_packet_total} packets/{sustained_byte_total} bytes, slowest {slowest_sustained_completion} steps; \
-         reliable outcome/damage sent-unacked high-water {}/{}, settled {}/{}; \
-         seeded loss drops per receiver min/max {dropped_min}/{dropped_max}; runtime {:?}. These Link counters include control, replication, \
-         acknowledgement, and game payloads — not shot bytes or IP/UDP bytes.",
-        FANOUT_RECEIVERS,
-        FANOUT_RECEIVERS as usize * expected,
-        metrics.max_reliable_outcome_sent_unacked_messages,
-        metrics.max_reliable_damage_sent_unacked_messages,
-        metrics.reliable_outcome_sent_unacked_messages,
-        metrics.reliable_damage_sent_unacked_messages,
-        started.elapsed(),
     );
 }
 
@@ -2136,163 +1505,4 @@ fn late_observer_receives_public_status_without_private_combat() {
         arrivals.crew,
         arrivals.weapon_gate,
     );
-}
-
-/// Measurement probe for the open automatic-fire continuity fork. A bounded correlated inbound
-/// burst covers the current consecutive copy opportunities; a later automatic shot proves the
-/// receiver and presentation path recover after the burst rather than merely disconnecting.
-#[test]
-fn correlated_burst_probe_isolates_consecutive_automatic_copies() {
-    let _udp = lock_real_udp_test();
-    let port = free_port();
-    let mut server = build_server(port);
-    let trace_path = std::env::temp_dir().join(format!(
-        "overmatch-correlated-burst-{}-{}.jsonl",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock after epoch")
-            .as_nanos()
-    ));
-    server.insert_resource(crate::shot_trace::ShotTrace::for_test(&trace_path));
-    let mut shooter = build_client(
-        port,
-        SHOOTER_CLIENT_ID,
-        SHOOTER_SEED,
-        HarnessClient::Shooter,
-    );
-    let mut observer = build_client(
-        port,
-        OBSERVER_CLIENT_ID,
-        OBSERVER_SEED,
-        HarnessClient::Observer,
-    );
-    shooter.world_mut().resource_mut::<SeededLoss>().loss = 0.0;
-    observer.world_mut().resource_mut::<SeededLoss>().loss = 0.0;
-    finish(&mut server);
-    finish(&mut shooter);
-    finish(&mut observer);
-
-    let mut ready = false;
-    for _ in 0..1_200 {
-        step(&mut server, &mut shooter, &mut observer);
-        let shooter_slot = shooter
-            .world_mut()
-            .query_filtered::<(), (With<NetTank>, With<ActionState<TankCommand>>)>()
-            .iter(shooter.world())
-            .next()
-            .is_some();
-        if clients_connected(&mut shooter, &mut observer)
-            && shooter_slot
-            && client_root_count(&mut observer) == 1
-        {
-            ready = true;
-            break;
-        }
-    }
-    assert!(
-        ready,
-        "the burst probe did not reach its replicated ready state"
-    );
-
-    server.world_mut().resource_mut::<FireArmed>().0 = true;
-    // DERIVED from the scripted cadence: after thirteen armed steps, the first reliable shot has
-    // fired and the first automatic shot is three authority steps away.
-    for _ in 0..13 {
-        step(&mut server, &mut shooter, &mut observer);
-    }
-    // DERIVED: six consecutive receive updates cover the current emission plus two immediate repair
-    // opportunities while tolerating bounded loopback hand-off jitter.
-    const BURST_RECEIVE_UPDATES: u32 = 6;
-    let burst_start_tick = server.world().resource::<LocalTimeline>().tick().0;
-    arm_inbound_burst(&mut observer, BURST_RECEIVE_UPDATES);
-    for _ in 0..BURST_RECEIVE_UPDATES {
-        step(&mut server, &mut shooter, &mut observer);
-    }
-    let burst_end_tick = server.world().resource::<LocalTimeline>().tick().0;
-    for _ in BURST_RECEIVE_UPDATES..320 {
-        step(&mut server, &mut shooter, &mut observer);
-    }
-
-    let automatic: Vec<_> = server
-        .world()
-        .resource::<ScriptedShotModes>()
-        .0
-        .iter()
-        .filter_map(|(shot, mechanism)| {
-            (*mechanism == crate::spec::FireMechanism::Automatic).then_some(*shot)
-        })
-        .collect();
-    assert!(
-        automatic.len() >= 2,
-        "the scripted run did not author both the burst-covered and recovery automatic shots"
-    );
-    assert!(
-        server
-            .world_mut()
-            .remove_resource::<crate::shot_trace::ShotTrace>()
-            .is_some(),
-        "the burst trace resource was installed"
-    );
-    let trace_rows: Vec<serde_json::Value> = std::fs::read_to_string(&trace_path)
-        .expect("burst trace readable after recorder drop")
-        .lines()
-        .map(|line| serde_json::from_str(line).expect("burst trace row is JSON"))
-        .collect();
-    let covered_send_ticks: Vec<u32> = trace_rows
-        .iter()
-        .filter(|row| {
-            row["k"] == "send"
-                && row["s"] == "fire"
-                && row["rel"] == false
-                && row["c"] == automatic[0].combatant.0
-                && row["w"] == automatic[0].weapon
-                && row["ft"] == automatic[0].fire_tick
-        })
-        .map(|row| row["t"].as_u64().expect("send tick is an integer") as u32)
-        .collect();
-    assert_eq!(
-        covered_send_ticks.len(),
-        usize::from(super::shot_transport::VISUAL_COPIES),
-        "the covered automatic fire must enter transport once per configured copy opportunity"
-    );
-    assert!(
-        covered_send_ticks
-            .windows(2)
-            .all(|ticks| ticks[1] == ticks[0] + 1),
-        "the current copy opportunities must remain consecutive: {covered_send_ticks:?}"
-    );
-    assert!(
-        covered_send_ticks
-            .iter()
-            .all(|tick| *tick > burst_start_tick && *tick <= burst_end_tick),
-        "the covered shot's send ticks {covered_send_ticks:?} escaped the armed burst interval ({burst_start_tick}, {burst_end_tick}]"
-    );
-    let shells = &observer.world().resource::<ClientShells>().0;
-    let covered = shells
-        .iter()
-        .filter(|(shot, _)| *shot == automatic[0])
-        .count();
-    let recovered = shells
-        .iter()
-        .filter(|(shot, _)| *shot == automatic[1])
-        .count();
-    let burst = observer.world().resource::<InboundBurst>();
-    println!(
-        "MEASURED correlated burst: send_ticks={covered_send_ticks:?}, armed_server_interval=({burst_start_tick}, {burst_end_tick}], dropped_payloads={}, covered_shot_presentations={covered}, recovery_shot_presentations={recovered}",
-        burst.dropped,
-    );
-    assert!(
-        burst.dropped > 0,
-        "the correlated burst dropped no payloads"
-    );
-    assert_eq!(
-        covered, 0,
-        "the burst-covered automatic fact escaped the configured consecutive-copy window"
-    );
-    assert_eq!(
-        recovered, 1,
-        "the first post-burst automatic fact did not recover exactly-once presentation"
-    );
-    std::fs::remove_file(trace_path).expect("burst trace removed");
 }

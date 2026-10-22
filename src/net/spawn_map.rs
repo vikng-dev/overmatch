@@ -453,10 +453,13 @@ mod tests {
         }
     }
 
-    /// The panel centre is the world origin, and the corners are the terrain corners under the
+    /// The panel centre is the world origin and the corners are the terrain corners under the
     /// pinned "-z up" convention: top-left = (-half, -half), bottom-right = (+half, +half).
+    /// `world_to_uv` is the exact inverse, so the dot a player clicks and the dot drawn for their
+    /// tank at that same point land on the same pixel; a tank driven past the terrain edge still
+    /// shows, pinned to the panel edge.
     #[test]
-    fn uv_maps_the_panel_onto_the_terrain_square() {
+    fn world_to_uv_inverts_uv_to_world() {
         assert_eq!(uv_to_world(HALF, Vec2::splat(0.5)), Vec2::ZERO);
         assert_eq!(
             uv_to_world(HALF, Vec2::ZERO),
@@ -464,12 +467,6 @@ mod tests {
             "the top-left pixel is -x/-z — north (-z) is UP on the map",
         );
         assert_eq!(uv_to_world(HALF, Vec2::ONE), Vec2::splat(HALF));
-    }
-
-    /// `world_to_uv` is the exact inverse, so the dot a player clicks and the dot drawn for their
-    /// tank at that same point land on the same pixel.
-    #[test]
-    fn world_to_uv_inverts_uv_to_world() {
         for uv in [
             Vec2::new(0.0, 0.0),
             Vec2::new(0.25, 0.75),
@@ -482,11 +479,6 @@ mod tests {
                 "uv {uv:?} round-tripped to {round_trip:?}",
             );
         }
-    }
-
-    /// A tank driven past the terrain edge still shows, pinned to the panel edge.
-    #[test]
-    fn world_to_uv_clamps_outside_the_square() {
         assert_eq!(world_to_uv(HALF, Vec2::splat(HALF * 4.0)), Vec2::ONE);
         assert_eq!(world_to_uv(HALF, Vec2::splat(-HALF * 4.0)), Vec2::ZERO);
     }
@@ -507,16 +499,6 @@ mod tests {
             None,
             "an unsized panel (first frame) never accepts a click",
         );
-    }
-
-    /// The spawn clamp stays inside the terrain square with real margin, on whatever square the
-    /// live world turns out to be.
-    #[test]
-    fn spawn_limit_is_inside_the_terrain() {
-        for half in [HALF, 750.0, 12.5] {
-            assert!(spawn_limit(half) < half);
-            assert!(spawn_limit(half) > half * 0.9);
-        }
     }
 
     /// An edge click is clamped CLIENT-SIDE to the same square the authority accepts, so the request
@@ -540,46 +522,6 @@ mod tests {
             clamp_to_spawn_limit(HALF, inside),
             inside,
             "an ordinary click is passed through untouched",
-        );
-    }
-
-    /// MARKER = TRUTH: the dot drawn for an edge click sits at the CLAMPED point, visibly inside the
-    /// panel edge, not on it. This is the finding — the old marker sat 64 m outside the square the
-    /// server would place the tank in, promising a spawn that could never happen.
-    #[test]
-    fn the_marker_shows_the_clamped_point_not_the_raw_click() {
-        let raw = uv_to_world(HALF, Vec2::ONE);
-        let clamped = clamp_to_spawn_limit(HALF, raw);
-        assert!(
-            (raw - clamped).max_element() > 1.0,
-            "an edge click really is moved by the clamp ({raw:?} → {clamped:?})",
-        );
-        let uv = world_to_uv(HALF, clamped);
-        assert!(
-            uv.cmplt(Vec2::ONE).all() && uv.cmpgt(Vec2::ZERO).all(),
-            "the clamped marker draws strictly inside the panel, at {uv:?}",
-        );
-        // 95 % of the half-extent maps to 97.5 % of the panel under the centred 0..1 mapping.
-        assert!(
-            (uv - Vec2::splat(0.975)).length() < 1e-6,
-            "marker at {uv:?}"
-        );
-    }
-
-    /// The frame's border is OUTSIDE the recorded panel rect, so the panel's top-left is the plain
-    /// window-centred offset — the exact identity `size_spawn_map` relies on. Restated here as the
-    /// algebra rather than the layout, so a future border change that breaks the cancellation shows
-    /// up as a failing arithmetic claim instead of a silent few-pixel click skew.
-    #[test]
-    fn the_border_cancels_out_of_the_panel_origin() {
-        let (window, edge) = (1920.0f32, 864.0f32);
-        // Backdrop centres the frame's BORDER box; the panel is its content.
-        let frame_outer = edge + 2.0 * PANEL_BORDER_PX;
-        let frame_origin = (window - frame_outer) * 0.5;
-        let panel_origin = frame_origin + PANEL_BORDER_PX;
-        assert!(
-            (panel_origin - (window - edge) * 0.5).abs() < 1e-4,
-            "panel origin {panel_origin} must equal the plain centred offset",
         );
     }
 

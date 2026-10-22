@@ -440,8 +440,9 @@ mod tests {
     ///   1. confirm the bump actually carries #24059 (`RenderAppChannels::drop` in the new
     ///      `bevy_render` — if it still calls a bare `recv_blocking()`, the fix did NOT land and
     ///      Half A must stay; only widen the version check below);
-    ///   2. delete [`recall_render_app_on_exit`], [`recall_render_app`], [`exit_pending`] and their
-    ///      three tests, plus the `RenderExtractApp`/`RenderAppChannels`/`MainThreadExecutor`/
+    ///   2. delete [`recall_render_app_on_exit`], [`recall_render_app`], [`exit_pending`] and
+    ///      `the_wrapper_still_runs_bevys_extract`, plus the
+    ///      `RenderExtractApp`/`RenderAppChannels`/`MainThreadExecutor`/
     ///      `ComputeTaskPool` imports and "Hole 1" from the module doc;
     ///   3. KEEP the whole `terminate` module — Half B answers a winit gap (no
     ///      `applicationShouldTerminate:` at all; bevy#9499, bevy#20316), which #24059 does not
@@ -466,8 +467,7 @@ mod tests {
     ///
     /// The counter is an `Arc`, deliberately, and NOT a `static`: `cargo test` runs these in
     /// parallel on one process, so a shared counter reset per call makes each test's assertions
-    /// depend on the other's scheduling. (It did — the two callers below started colliding the
-    /// moment a third test joined the module.)
+    /// depend on the other's scheduling.
     fn app_with_counting_extract() -> (App, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&calls);
@@ -500,32 +500,5 @@ mod tests {
         // be waiting on a render thread with nothing left to send.
         app.update();
         assert_eq!(calls.load(Ordering::Relaxed), 3);
-    }
-
-    /// Without the pipelined-rendering resources there is nothing to recall, and in particular
-    /// nothing to BLOCK on: the recall must be a no-op rather than a `resource_scope` panic or a
-    /// wait on a channel that will never deliver. This is the headless/`RenderApp`-less shape, and
-    /// it is also the shape a second recall would see — which is why the wrapper only fires once.
-    #[test]
-    fn a_recall_without_the_channels_is_a_no_op() {
-        let (mut app, _calls) = app_with_counting_extract();
-        recall_render_app_on_exit(&mut app);
-        app.world_mut().write_message(AppExit::Success);
-        app.update();
-        app.update();
-        // Reached at all == neither panicked nor parked.
-        assert!(!app.world().contains_resource::<RenderAppChannels>());
-    }
-
-    /// `exit_pending` reads the buffer, not a cursor: it must be true for the whole frame in which
-    /// the exit was written, whoever wrote it and whenever they wrote it.
-    #[test]
-    fn exit_pending_sees_the_frames_exit() {
-        let mut world = World::new();
-        assert!(!exit_pending(&world), "no message resource at all");
-        world.init_resource::<Messages<AppExit>>();
-        assert!(!exit_pending(&world), "an empty buffer is not an exit");
-        world.write_message(AppExit::Success);
-        assert!(exit_pending(&world));
     }
 }

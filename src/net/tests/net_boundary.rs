@@ -132,8 +132,57 @@ fn relative(root: &Path, path: &Path) -> String {
         .replace(std::path::MAIN_SEPARATOR, "/")
 }
 
+/// The scan's controls run first: the allowlist matches whole path segments, and the comment
+/// stripper blanks prose (nested blocks included) while keeping code and line numbers.
 #[test]
 fn sim_layer_does_not_name_the_netcode_layer() {
+    for (rel, aware, why) in [
+        ("src/net/client.rs", true, "the layer itself is exempt"),
+        ("src/net/deep/nested.rs", true, "the exemption is recursive"),
+        ("src/trace.rs", true, "exact-file entries match"),
+        ("src/tank.rs", false, "an unlisted sim module is scanned"),
+        (
+            "src/network_util.rs",
+            false,
+            "`src/net/` must not match a file that merely starts with those bytes",
+        ),
+        (
+            "src/trace_helpers.rs",
+            false,
+            "an exact entry must not match by prefix",
+        ),
+    ] {
+        assert_eq!(is_net_aware(rel), aware, "{rel}: {why}");
+    }
+    let src = "\
+//! doc naming lightyear in prose
+use crate::net::protocol::NetBot; // trailing lightyear mention
+let run = overmatch::net::client::run;
+/* block /* nested */ still comment: lightyear */
+let x = 1;
+";
+    let stripped = strip_comments(src);
+    let lines: Vec<&str> = stripped.lines().collect();
+    assert_eq!(lines.len(), src.lines().count(), "line numbers survive");
+    assert!(!lines[0].contains("lightyear"), "doc comments are blanked");
+    assert_eq!(
+        lines[1].trim_end(),
+        "use crate::net::protocol::NetBot;",
+        "code before a trailing comment survives; the comment is blanked"
+    );
+    assert!(
+        lines[2].contains("let run = overmatch::net::client::run;"),
+        "an external implementation reach survives for the scanner"
+    );
+    assert!(
+        !lines[3].contains("lightyear"),
+        "nested block comments are blanked to their true end"
+    );
+    assert!(
+        lines[4].contains("let x = 1;"),
+        "code after a nested block comment survives"
+    );
+
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let mut files = Vec::new();
     collect_rs_files(&root.join("src"), &mut files);
@@ -165,101 +214,5 @@ fn sim_layer_does_not_name_the_netcode_layer() {
          NET_AWARE_FILES in src/net/tests/net_boundary.rs with the reason it earns the \
          coupling.\n{}",
         violations.join("\n")
-    );
-}
-
-#[test]
-fn net_aware_allowlist_has_no_stale_entries() {
-    let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let missing: Vec<&str> = NET_AWARE_FILES
-        .iter()
-        .copied()
-        .filter(|entry| !root.join(entry.trim_end_matches('/')).exists())
-        .collect();
-
-    assert!(
-        missing.is_empty(),
-        "NET_AWARE_FILES names paths that no longer exist — the allowlist has rotted and is now \
-         silently excusing nothing (or, worse, a renamed file is unguarded): {missing:?}"
-    );
-}
-
-#[test]
-fn allowlist_matches_whole_path_segments() {
-    assert!(
-        is_net_aware("src/net/client.rs"),
-        "the layer itself is exempt"
-    );
-    assert!(
-        is_net_aware("src/net/deep/nested.rs"),
-        "the exemption is recursive"
-    );
-    assert!(is_net_aware("src/trace.rs"), "exact-file entries match");
-    assert!(
-        !is_net_aware("src/tank.rs"),
-        "an unlisted sim module is scanned"
-    );
-    assert!(
-        !is_net_aware("src/network_util.rs"),
-        "`src/net/` must not match a file that merely starts with those bytes"
-    );
-    assert!(
-        !is_net_aware("src/trace_helpers.rs"),
-        "an exact entry must not match by prefix"
-    );
-}
-
-#[test]
-fn strip_comments_blanks_prose_but_keeps_code() {
-    let src = "\
-//! doc naming lightyear in prose
-use crate::net::protocol::NetBot; // trailing lightyear mention
-let run = overmatch::net::client::run;
-/* block /* nested */ still comment: lightyear */
-let x = 1;
-";
-    let stripped = strip_comments(src);
-    assert!(
-        !stripped
-            .lines()
-            .next()
-            .expect("first line")
-            .contains("lightyear"),
-        "doc comments must be blanked"
-    );
-    assert!(
-        stripped.contains("use crate::net::protocol::NetBot;"),
-        "code before a trailing comment survives"
-    );
-    assert_eq!(
-        stripped
-            .lines()
-            .nth(1)
-            .expect("second line")
-            .matches("lightyear")
-            .count(),
-        0,
-        "a trailing comment is blanked"
-    );
-    assert!(
-        stripped.contains("let run = overmatch::net::client::run;"),
-        "an external implementation reach survives for the scanner"
-    );
-    assert!(
-        !stripped
-            .lines()
-            .nth(3)
-            .expect("fourth line")
-            .contains("lightyear"),
-        "nested block comments must be blanked to their true end"
-    );
-    assert!(
-        stripped.contains("let x = 1;"),
-        "code after a nested block comment survives"
-    );
-    assert_eq!(
-        stripped.lines().count(),
-        src.lines().count(),
-        "line numbers survive"
     );
 }

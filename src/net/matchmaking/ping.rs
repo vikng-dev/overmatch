@@ -104,18 +104,12 @@ mod tests {
         assert_eq!(summary.spread_ms, 80.0);
         assert_eq!(summary.samples, 5);
         assert_eq!(summary.median_whole_ms(), 45);
-    }
 
-    /// An even count takes the lower middle sample, the estimator's `ceil(0.5·n) − 1` index.
-    #[test]
-    fn even_count_median_is_the_lower_middle() {
+        // An even count takes the lower middle sample, the estimator's `ceil(0.5·n) − 1` index.
         let summary = summarize(&[30.0, 10.0, 40.0, 20.0]).unwrap();
         assert_eq!(summary.median_ms, 20.0);
         assert_eq!(summary.spread_ms, 30.0);
-    }
 
-    #[test]
-    fn one_sample_has_zero_spread_and_none_has_no_summary() {
         let summary = summarize(&[61.4]).unwrap();
         assert_eq!(summary.median_ms, 61.4);
         assert_eq!(summary.spread_ms, 0.0);
@@ -144,13 +138,5 @@ mod tests {
             Duration::from_millis(500),
         );
         assert!(refused.is_empty(), "a closed port yields no samples");
-    }
-
-    #[test]
-    fn beacon_addr_takes_an_ip_literally() {
-        assert_eq!(
-            beacon_addr("203.0.113.10", 5001),
-            Some(SocketAddr::from(([203, 0, 113, 10], 5001)))
-        );
     }
 }

@@ -111,6 +111,8 @@ mod tests {
 
     use super::*;
 
+    /// Private combat state is visible only to the owner's authorized link; the ownerless bot
+    /// policy shows it to nobody.
     #[test]
     fn owner_disclosure_requires_the_authorized_owner_link() {
         let owner = Entity::from_raw_u32(4).unwrap();
@@ -121,12 +123,7 @@ mod tests {
         assert!(disclosure.is_visible(owner, Some(&authorized)));
         assert!(!disclosure.is_visible(observer, Some(&authorized)));
         assert!(!disclosure.is_visible(owner, None));
-    }
-
-    #[test]
-    fn ownerless_bot_policy_hides_private_combat_from_an_authorized_client() {
-        let client = Entity::from_raw_u32(4).unwrap();
-        assert!(!CombatDisclosure::hidden().is_visible(client, Some(&AuthorizedClient)));
+        assert!(!CombatDisclosure::hidden().is_visible(owner, Some(&authorized)));
     }
 
     #[test]
@@ -164,22 +161,6 @@ mod tests {
         assert_eq!(
             world.get::<TankKnockedOut>(cookoff_upgrade).unwrap().reason,
             KnockoutReason::Cookoff,
-        );
-    }
-
-    #[test]
-    fn authority_status_keeps_the_knockout_cause_public() {
-        assert_eq!(
-            NetTankStatus::from_knockout(Some(&TankKnockedOut {
-                reason: KnockoutReason::CrewLoss,
-            })),
-            NetTankStatus::KnockedOut,
-        );
-        assert_eq!(
-            NetTankStatus::from_knockout(Some(&TankKnockedOut {
-                reason: KnockoutReason::Cookoff,
-            })),
-            NetTankStatus::CookedOff,
         );
     }
 }

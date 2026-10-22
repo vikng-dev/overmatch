@@ -508,6 +508,12 @@ mod tests {
     /// (`consume_edges` and the net input bridge both route through these two). A new edge added to
     /// one method but not the other fails this: `has_edge` would still report the field `clear_edges`
     /// left latched.
+    ///
+    /// `clear_edges` touches ONLY the edge fields — the levels and absolutes ride through untouched
+    /// (the property `consume_edges` and the net input bridge both depend on). It leaves
+    /// `fire_secondary` alone: that is a CONSUMABLE but not an EDGE, and folding it in here would
+    /// kill sustained fire (`consume_edges` runs every tick). Only
+    /// [`TankCommand::fail_consumables_closed`] clears both sets, and only on an unattested tick.
     #[test]
     fn clear_edges_resets_every_edge_has_edge_reports() {
         // Each latched-edge variant in isolation: has_edge true, then clear_edges makes it false.
@@ -524,15 +530,7 @@ mod tests {
             command.clear_edges();
             assert!(!command.has_edge(), "clear_edges resets the latched edge");
         }
-    }
 
-    /// `clear_edges` touches ONLY the edge fields — the levels and absolutes ride through untouched
-    /// (the property `consume_edges` and the net input bridge both depend on). Note it leaves
-    /// `fire_secondary` alone: that is a CONSUMABLE but not an EDGE, and folding it in here would
-    /// kill sustained fire (`consume_edges` runs every tick). Only
-    /// [`TankCommand::fail_consumables_closed`] clears both sets, and only on an unattested tick.
-    #[test]
-    fn clear_edges_preserves_levels_and_absolutes() {
         let mut command = TankCommand {
             throttle: 0.5,
             steer: -0.5,

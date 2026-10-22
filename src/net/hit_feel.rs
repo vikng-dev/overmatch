@@ -325,30 +325,17 @@ mod tests {
     }
 
     #[test]
-    fn no_change_is_no_hit() {
-        assert_eq!(
-            worst_drop(&modules(&[100, 50, 25]), &modules(&[100, 50, 25])),
-            None
-        );
-    }
-
-    #[test]
-    fn an_increase_raises_nothing() {
-        // A respawn resets health UP; that must not read as a hit.
-        assert_eq!(worst_drop(&modules(&[0, 10]), &modules(&[100, 100])), None);
-    }
-
-    #[test]
     fn picks_the_largest_drop_and_its_index() {
         // Volume 0 chips by 5, volume 2 by 40 — the worst is volume 2. Volume 1 rose and is
         // ignored.
         let (index, drop) = worst_drop(&modules(&[100, 30, 80]), &modules(&[95, 60, 40])).unwrap();
         assert_eq!(index, 2);
         assert_eq!(drop, 40);
-    }
-
-    #[test]
-    fn a_one_point_chip_is_a_hit() {
+        assert_eq!(
+            worst_drop(&modules(&[100, 50, 25]), &modules(&[100, 50, 25])),
+            None,
+            "no change is no hit"
+        );
         // HP is whole points: the smallest drop there is, one point, is a hit.
         assert_eq!(worst_drop(&modules(&[100]), &modules(&[99])), Some((0, 1)));
     }
@@ -365,10 +352,7 @@ mod tests {
             None,
             "a swap's HP transpose (occupant changed) is not damage",
         );
-    }
 
-    #[test]
-    fn a_genuine_drop_with_unchanged_occupant_still_registers() {
         // Same occupant in the seat, HP fell: real damage, still a hit.
         let a = [seat(100, CrewStation::Gunner)];
         let b = [seat(40, CrewStation::Gunner)];

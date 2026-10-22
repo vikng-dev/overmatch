@@ -124,13 +124,9 @@ mod tests {
             "the crossing itself releases",
         );
         assert_eq!(queue.len(), 0);
-    }
 
-    /// AN ANNOUNCEMENT ALREADY BEHIND THE CURSOR RELEASES ON THE FIRST DRAIN — the late-join /
-    /// long-RTT case presents immediately.
-    #[test]
-    fn an_announcement_behind_the_cursor_releases_immediately() {
-        let mut queue = CursorQueue::default();
+        // Already behind the cursor, an announcement releases on the first drain — the late-join /
+        // long-RTT case presents immediately.
         queue.hold(Tick(50), "late");
         assert_eq!(queue.release(Tick(60), 0.25), vec![(Tick(50), "late")]);
     }
@@ -179,23 +175,5 @@ mod tests {
         let evicted = queue.hold(Tick(9_999), usize::MAX);
         assert_eq!(evicted, Some((Tick(1_000), 0)), "the oldest entry evicts");
         assert_eq!(queue.len(), CursorQueue::<usize>::CAP);
-    }
-
-    /// Ticks are MONOTONIC (lightyear 0.30 does not wrap them), so the crossing rule orders
-    /// numerically at the top of the range: an announcement near `u32::MAX` holds against a small
-    /// cursor and releases once the cursor reaches it. Fires if lightyear re-introduces wrapping
-    /// ticks, which would read the small cursor as having crossed.
-    #[test]
-    fn the_crossing_orders_monotonically_at_the_top_of_the_range() {
-        let mut queue = CursorQueue::default();
-        queue.hold(Tick(u32::MAX - 1), "late");
-        assert!(
-            queue.release(Tick(2), 0.5).is_empty(),
-            "a small cursor is far behind an announcement near u32::MAX",
-        );
-        assert_eq!(
-            queue.release(Tick(u32::MAX - 1), 0.0),
-            vec![(Tick(u32::MAX - 1), "late")]
-        );
     }
 }

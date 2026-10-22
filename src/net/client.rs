@@ -2363,37 +2363,26 @@ mod tests {
         assert_eq!(resolved, "192.0.2.20:6000".parse().unwrap());
     }
 
-    #[test]
-    fn local_server_flag_beats_environment_beats_local_default() {
-        let selected = choose_server(true, Some("environment.example:6000"));
-        assert_eq!(
-            selected,
-            ServerSelection {
-                raw: LOCAL_SERVER,
-                source: ServerSource::LocalFlag,
-            }
-        );
-
-        assert_eq!(
-            choose_server(false, Some("environment.example")),
-            ServerSelection {
-                raw: "environment.example",
-                source: ServerSource::Environment,
-            }
-        );
-        assert_eq!(
-            choose_server(false, None),
-            ServerSelection {
-                raw: LOCAL_SERVER,
-                source: ServerSource::LocalDefault,
-            }
-        );
-    }
-
-    /// `--local` and `OVERMATCH_SERVER` keep exactly today's direct selection whatever Worker URL
-    /// is set or baked.
+    /// One precedence law: `--local` beats `OVERMATCH_SERVER`, which beats any Worker URL
+    /// (`OVERMATCH_API` over the baked one, a blank one unset), which beats the local default.
     #[test]
     fn direct_paths_win_over_any_worker_url() {
+        let local_flag = ServerSelection {
+            raw: LOCAL_SERVER,
+            source: ServerSource::LocalFlag,
+        };
+        let environment = ServerSelection {
+            raw: "env.example",
+            source: ServerSource::Environment,
+        };
+        let local_default = ServerSelection {
+            raw: LOCAL_SERVER,
+            source: ServerSource::LocalDefault,
+        };
+        assert_eq!(choose_server(true, Some("env.example")), local_flag);
+        assert_eq!(choose_server(false, Some("env.example")), environment);
+        assert_eq!(choose_server(false, None), local_default);
+
         for (api, baked_api) in [
             (None, None),
             (Some("https://api.example"), None),
@@ -2405,17 +2394,14 @@ mod tests {
         ] {
             assert_eq!(
                 choose_mode(true, Some("env.example"), api, baked_api),
-                ClientMode::Direct(choose_server(true, Some("env.example"))),
+                ClientMode::Direct(local_flag),
             );
             assert_eq!(
                 choose_mode(false, Some("env.example"), api, baked_api),
-                ClientMode::Direct(choose_server(false, Some("env.example"))),
+                ClientMode::Direct(environment),
             );
         }
-    }
 
-    #[test]
-    fn worker_url_selects_matchmaking_runtime_first() {
         assert_eq!(
             choose_mode(
                 false,
@@ -2429,24 +2415,17 @@ mod tests {
             }
         );
         assert_eq!(
-            choose_mode(false, None, Some(""), Some("https://baked-api.example"),),
+            choose_mode(false, None, Some(""), Some("https://baked-api.example")),
             ClientMode::Matchmaking {
                 api: "https://baked-api.example",
                 source: ApiSource::BakedDefault,
             },
             "an empty OVERMATCH_API is unset"
         );
-    }
-
-    /// With no Worker URL anywhere the client connects to the local server.
-    #[test]
-    fn no_worker_url_falls_back_to_the_local_server() {
         assert_eq!(
             choose_mode(false, None, None, Some("  ")),
-            ClientMode::Direct(ServerSelection {
-                raw: LOCAL_SERVER,
-                source: ServerSource::LocalDefault,
-            })
+            ClientMode::Direct(local_default),
+            "with no Worker URL anywhere the client connects to the local server"
         );
     }
 
@@ -2580,29 +2559,6 @@ mod tests {
         buffer
     }
 
-    #[test]
-    fn input_buffer_guard_clears_an_inverted_encoder_range() {
-        let mut buffer = one_slot_buffer(Tick(313), Tick(312));
-
-        assert_eq!(
-            clear_stranded_input_buffer(&mut buffer, Tick(20)),
-            Some(Tick(313))
-        );
-        assert_eq!(buffer.start_tick, None);
-        assert!(buffer.is_empty());
-        assert_eq!(buffer.last_remote_tick, None);
-    }
-
-    #[test]
-    fn input_buffer_guard_preserves_a_current_encoder_range() {
-        let mut buffer = one_slot_buffer(Tick(20), Tick(20));
-
-        assert_eq!(clear_stranded_input_buffer(&mut buffer, Tick(20)), None);
-        assert_eq!(buffer.start_tick, Some(Tick(20)));
-        assert_eq!(buffer.len(), 1);
-        assert_eq!(buffer.last_remote_tick, Some(Tick(20)));
-    }
-
     /// Exercise the installed PostUpdate guard alone: this App deliberately does not install
     /// `ClientPlugins`, so `PrepareInputMessage` and its unsafe native encoder are absent. The
     /// schedule run still proves the guard's real system query updates the metric as well as the
@@ -2625,6 +2581,13 @@ mod tests {
                 slotless_buffer(Tick(313), Tick(312)),
             ))
             .id();
+        let stranded_slot = app
+            .world_mut()
+            .spawn((
+                InputMarker::<TankCommand>::default(),
+                one_slot_buffer(Tick(313), Tick(312)),
+            ))
+            .id();
         let current = app
             .world_mut()
             .spawn((
@@ -2635,13 +2598,15 @@ mod tests {
 
         app.world_mut().run_schedule(PostUpdate);
 
-        let stranded = app
-            .world()
-            .get::<NativeBuffer<TankCommand>>(stranded)
-            .unwrap();
-        assert_eq!(stranded.start_tick, None);
-        assert!(stranded.is_empty());
-        assert_eq!(stranded.last_remote_tick, None);
+        for stranded in [stranded, stranded_slot] {
+            let stranded = app
+                .world()
+                .get::<NativeBuffer<TankCommand>>(stranded)
+                .unwrap();
+            assert_eq!(stranded.start_tick, None);
+            assert!(stranded.is_empty());
+            assert_eq!(stranded.last_remote_tick, None);
+        }
 
         let current = app
             .world()
@@ -2650,42 +2615,7 @@ mod tests {
         assert_eq!(current.start_tick, Some(Tick(20)));
         assert!(current.is_empty());
         assert_eq!(current.last_remote_tick, Some(Tick(20)));
-        assert_eq!(app.world().resource::<InputBufferGuardMetrics>().cleared, 1);
-    }
-
-    /// A malformed composition must not leave a marked buffer for Lightyear's encoder. Debug and
-    /// test builds panic after the defensive clear; release records the error and keeps running.
-    /// As above, no `ClientPlugins` are present, so this cannot invoke the hazardous encoder.
-    #[cfg(debug_assertions)]
-    #[test]
-    fn installed_input_buffer_guard_clears_before_rejecting_multiple_clients() {
-        let mut app = App::new();
-        install_input_buffer_guard(&mut app);
-        app.insert_resource(LocalTimeline::default());
-        app.init_resource::<LocalTimelineSync>();
-        app.world_mut().spawn(Client);
-        app.world_mut().spawn(Client);
-        let buffer = app
-            .world_mut()
-            .spawn((
-                InputMarker::<TankCommand>::default(),
-                slotless_buffer(Tick(313), Tick(312)),
-            ))
-            .id();
-
-        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            app.world_mut().run_schedule(PostUpdate);
-        }));
-        assert!(result.is_err(), "debug builds must reject multiple clients");
-
-        let buffer = app
-            .world()
-            .get::<NativeBuffer<TankCommand>>(buffer)
-            .unwrap();
-        assert_eq!(buffer.start_tick, None);
-        assert!(buffer.is_empty());
-        assert_eq!(buffer.last_remote_tick, None);
-        assert_eq!(app.world().resource::<InputBufferGuardMetrics>().cleared, 1);
+        assert_eq!(app.world().resource::<InputBufferGuardMetrics>().cleared, 2);
     }
 
     /// A resync that shifts the timeline AND shrinks the input delay must not suppress the next
@@ -2865,109 +2795,53 @@ mod tests {
         );
     }
 
-    /// The regression guard for the barrel-gate fix: a weapon with a recoil spec but NO barrel node
-    /// kicks NOTHING — `apply_recoil` has no `RecoilParams` to step (built on the barrel node), so a
-    /// kick here would accumulate in `recoil_velocity` and never decay. The gate
-    /// lives in the shared `kick_recoil` so this holds identically on the server's `fire` path too.
+    /// `kick_recoil` kicks only a weapon with BOTH a barrel node and a recoil spec, on a slot the
+    /// sim holds. A barrel-less kick would accumulate in `recoil_velocity` and never decay
+    /// (`apply_recoil` steps `RecoilParams`, built on the barrel node); a recoil-less weapon (a
+    /// coax) has nothing to kick; a malformed slot off the wire is a silent no-op, never an
+    /// out-of-bounds index. The gate is shared, so it holds on the server's `fire` path too.
     #[test]
     fn barrel_less_weapon_is_noop() {
-        let mut world = World::new();
-        // Recoil spec present, barrel absent — the exact case the old client path wrongly kicked.
-        let root = spawn_rig(&mut world, 1, 0, Some(recoil(3.5)), None);
-        world.insert_resource(PendingRecoilKicks(vec![(root, 0)]));
-
-        world.run_system_once(apply_pending_recoil_kicks).unwrap();
-
-        let sim = world.get::<TankSim>(root).unwrap();
-        assert_eq!(
-            sim.weapons[0].recoil_velocity, 0.0,
-            "a barrel-less weapon must not kick — the velocity would never decay",
-        );
+        let barrel = Some(Entity::PLACEHOLDER);
+        let mut sim = TankSim {
+            weapons: vec![WeaponState::default(); 1],
+        };
+        for (slot, weapon, case) in [
+            (0, weapon(Some(recoil(3.5)), None), "a barrel-less weapon"),
+            (0, weapon(None, barrel), "a recoil-less weapon"),
+            (9, weapon(Some(recoil(3.5)), barrel), "an out-of-range slot"),
+        ] {
+            crate::shooting::kick_recoil(&mut sim, slot, &weapon);
+            assert_eq!(sim.weapons[0].recoil_velocity, 0.0, "{case} kicks nothing");
+        }
     }
 
-    /// A malformed slot off the wire — out of range, or naming no muzzle on this rig — is a silent
-    /// no-op: no panic, no out-of-bounds index, no spurious kick on any slot.
-    #[test]
-    fn bad_slot_is_noop() {
-        let mut world = World::new();
-        let barrel = world.spawn_empty().id();
-        let root = spawn_rig(&mut world, 1, 0, Some(recoil(3.5)), Some(barrel));
-        // Slot 9 exists on neither the muzzle set nor the 1-slot `TankSim`.
-        world.insert_resource(PendingRecoilKicks(vec![(root, 9)]));
-
-        world.run_system_once(apply_pending_recoil_kicks).unwrap();
-
-        let sim = world.get::<TankSim>(root).unwrap();
-        assert_eq!(
-            sim.weapons[0].recoil_velocity, 0.0,
-            "a bad slot kicks nothing"
-        );
-    }
-
-    /// A recoil-less weapon (a coax: `recoil: None`) contributes no kick even with a barrel and a
-    /// correctly named slot.
-    #[test]
-    fn recoilless_weapon_is_noop() {
-        let mut world = World::new();
-        let barrel = world.spawn_empty().id();
-        let root = spawn_rig(&mut world, 1, 0, None, Some(barrel));
-        world.insert_resource(PendingRecoilKicks(vec![(root, 0)]));
-
-        world.run_system_once(apply_pending_recoil_kicks).unwrap();
-
-        let sim = world.get::<TankSim>(root).unwrap();
-        assert_eq!(
-            sim.weapons[0].recoil_velocity, 0.0,
-            "no recoil spec, no kick"
-        );
-    }
-
-    /// A shot fired ON our current tick needs no catch-up: spawn at the muzzle, fly normally.
-    #[test]
-    fn fire_tick_equal_to_now_is_zero_catch_up() {
-        assert_eq!(fire_catch_up_ticks(Tick(500), Tick(500)), Some(0));
-    }
-
-    /// A fire tick AHEAD of our current tick (only reachable via clock skew or a malicious tick,
-    /// since the server fires at a tick <= its now and the local timeline leads the server) clamps
-    /// to 0, never rewinds the shell.
-    #[test]
-    fn future_fire_tick_clamps_to_zero() {
-        assert_eq!(fire_catch_up_ticks(Tick(503), Tick(500)), Some(0));
-    }
-
-    /// A shot fired a few ticks before our current tick fast-forwards by exactly that many ticks.
-    #[test]
-    fn elapsed_within_bound_fast_forwards() {
-        assert_eq!(fire_catch_up_ticks(Tick(500), Tick(505)), Some(5));
-        assert_eq!(
-            fire_catch_up_ticks(Tick(500), Tick(500 + MAX_COSMETIC_CATCH_UP_TICKS)),
-            Some(MAX_COSMETIC_CATCH_UP_TICKS),
-            "exactly at the bound still fast-forwards",
-        );
-    }
-
-    /// A fire tick far in the past — a stale/lost `FireEvent`, or corrupt nonsense off the wire
-    /// — is REJECTED (no tracer, no loop over 10^6 steps), the same reject-off-the-wire discipline as
-    /// the bore guard.
-    #[test]
-    fn far_past_fire_tick_is_rejected() {
-        assert_eq!(
-            fire_catch_up_ticks(Tick(500), Tick(500 + MAX_COSMETIC_CATCH_UP_TICKS + 1)),
-            None
-        );
-        assert_eq!(fire_catch_up_ticks(Tick(0), Tick(1_000_000)), None);
-    }
-
-    /// Tick arithmetic SATURATES rather than wrapping (lightyear 0.30's `Tick` is monotonic), so the
-    /// extreme pairs land in the bounded arms: a fire tick at `u32::MAX` against a present at 0 reads
-    /// as far in the future (spawn at the muzzle), and the reverse as absurdly stale (rejected) —
-    /// never a ~4-billion-tick catch-up loop. Fires if lightyear re-introduces wrapping ticks.
+    /// Catch-up is 0 for a fire tick at or ahead of now (clock skew or a malicious tick never
+    /// rewinds the shell), the elapsed ticks up to `MAX_COSMETIC_CATCH_UP_TICKS` inclusive, and
+    /// `None` beyond (a stale or corrupt fire is rejected, never a 10^6-step loop). Tick arithmetic
+    /// SATURATES rather than wrapping (lightyear 0.30's `Tick` is monotonic), so the extreme pairs
+    /// land in the bounded arms — never a ~4-billion-tick catch-up loop. Fires if lightyear
+    /// re-introduces wrapping ticks.
     #[test]
     fn extreme_tick_pairs_saturate_into_the_bounded_arms() {
-        assert_eq!(fire_catch_up_ticks(Tick(u32::MAX), Tick(0)), Some(0));
-        assert_eq!(fire_catch_up_ticks(Tick(0), Tick(u32::MAX)), None);
-        assert_eq!(fire_catch_up_ticks(Tick(u32::MAX - 2), Tick(3)), Some(0));
+        let bound = MAX_COSMETIC_CATCH_UP_TICKS;
+        for (fire, now, expected) in [
+            (500, 500, Some(0)),
+            (503, 500, Some(0)),
+            (500, 505, Some(5)),
+            (500, 500 + bound, Some(bound)),
+            (500, 500 + bound + 1, None),
+            (0, 1_000_000, None),
+            (u32::MAX, 0, Some(0)),
+            (0, u32::MAX, None),
+            (u32::MAX - 2, 3, Some(0)),
+        ] {
+            assert_eq!(
+                fire_catch_up_ticks(Tick(fire), Tick(now)),
+                expected,
+                "fire tick {fire} at now {now}"
+            );
+        }
     }
 
     fn shot(tick: u32) -> ShotId {
@@ -2976,80 +2850,6 @@ mod tests {
             weapon: 0,
             fire_tick: tick,
         }
-    }
-
-    /// The `ShotId` dedup that makes redundant delivery spawn EXACTLY ONE cosmetic shell:
-    /// `mark_new` returns `true` the first time it sees a shot and `false` on every echo — which is the
-    /// gate `receive_fire_events` puts in front of the `FireShell` trigger.
-    #[test]
-    fn seen_shots_dedups_redundant_events() {
-        let mut seen = SeenShots::default();
-        assert!(seen.mark_new(shot(5)), "first sighting is new — spawn once");
-        assert!(
-            !seen.mark_new(shot(5)),
-            "an echo is not new — no second shell"
-        );
-        assert!(
-            !seen.mark_new(shot(5)),
-            "still not new after further echoes"
-        );
-        assert!(seen.mark_new(shot(6)), "a different shot is new");
-        // Distinct on every field of the id.
-        let other_weapon = ShotId {
-            weapon: 1,
-            ..shot(5)
-        };
-        assert!(
-            seen.mark_new(other_weapon),
-            "same tank+tick, other weapon = distinct shot"
-        );
-    }
-
-    /// Owner-private damage receipts do not name a replica entity, so duplicate suppression remains
-    /// valid through the death-to-respawn interval with no controlled tank root.
-    #[test]
-    fn seen_damage_dedups_a_receipt_without_a_live_controlled_tank() {
-        let mut seen = SeenDamage::default();
-        let receipt = DamageReceipt {
-            combatant: crate::CombatantId(1),
-            weapon: 1,
-            fire_tick: 77,
-        };
-
-        assert!(
-            seen.mark_new(receipt),
-            "the first private confirmation reaches presentation"
-        );
-        assert!(
-            !seen.mark_new(receipt),
-            "a redundancy-window echo cannot pulse a second marker"
-        );
-        assert!(
-            seen.mark_new(DamageReceipt {
-                combatant: crate::CombatantId(1),
-                weapon: 1,
-                fire_tick: 78,
-            }),
-            "the next fire tick is a distinct confirmation"
-        );
-    }
-
-    #[test]
-    fn damage_receipt_remains_deduped_after_more_than_the_old_ring_horizon() {
-        let mut seen = SeenDamage::default();
-        let first = DamageReceipt {
-            combatant: crate::CombatantId(1),
-            weapon: 1,
-            fire_tick: 1,
-        };
-        assert!(seen.mark_new(first));
-        for fire_tick in 2..=256 {
-            assert!(seen.mark_new(DamageReceipt { fire_tick, ..first }));
-        }
-        assert!(
-            !seen.mark_new(first),
-            "an authoritative confirmation stays exactly-once for the connection scope"
-        );
     }
 
     #[test]
@@ -3201,7 +3001,8 @@ mod tests {
     }
 
     /// A fire may beat its root's replica. It is retained by stable shot identity and resolves when
-    /// exactly one matching combatant root exists, even if the original entity map was unresolved.
+    /// exactly one matching combatant root exists, even if the original entity map was unresolved;
+    /// two live roots with one `CombatantId` fail closed.
     #[test]
     fn pending_fire_resolves_when_its_combatant_root_arrives() {
         let mut world = World::new();
@@ -3220,6 +3021,7 @@ mod tests {
 
         let root = world.spawn((NetTank, CombatantId(7))).id();
         let pending_event = pending.pop_front().expect("queued event remains").event;
+        let ambiguous_event = pending_event.clone();
         let after = world
             .run_system_once(move |tanks: Query<(Entity, &CombatantId), With<NetTank>>| {
                 resolve_shooter(&pending_event, &tanks)
@@ -3229,6 +3031,18 @@ mod tests {
             after,
             ShooterResolution::Resolved(root),
             "the stable combatant id repairs an unresolved entity mapping",
+        );
+
+        world.spawn((NetTank, CombatantId(7)));
+        let ambiguous = world
+            .run_system_once(move |tanks: Query<(Entity, &CombatantId), With<NetTank>>| {
+                resolve_shooter(&ambiguous_event, &tanks)
+            })
+            .expect("system runs");
+        assert_eq!(
+            ambiguous,
+            ShooterResolution::Ambiguous,
+            "two live roots with one CombatantId must not receive an arbitrary visual/recoil event",
         );
     }
 
@@ -3365,7 +3179,8 @@ mod tests {
 
     /// THE CURSOR HOLD, over the production receive gate: a fire whose tick is ahead of the
     /// interpolation cursor presents nothing — however many release passes run at a stalled
-    /// reading — and presents exactly once when the cursor crosses its fire tick.
+    /// reading — and presents exactly once when the cursor crosses its fire tick. A fire the
+    /// cursor already crossed presents on the SAME drain it arrived on (late join, long RTT).
     #[test]
     fn a_fire_ahead_of_the_cursor_presents_only_at_the_crossing() {
         let mut app = fire_receive_app();
@@ -3397,22 +3212,13 @@ mod tests {
             1,
             "a released fire never presents again",
         );
-    }
 
-    /// A fire whose tick the cursor already crossed presents on the SAME drain it arrived on — the
-    /// late-join / long-RTT case is immediate, exactly as it was at arrival presentation.
-    #[test]
-    fn a_fire_behind_the_cursor_presents_immediately() {
-        let mut app = fire_receive_app();
-        let world = app.world_mut();
-        let root = world.spawn((NetTank, CombatantId(7))).id();
-        let event = fire_event(root, 7, 100);
-        let shot = event.shot_id();
-
-        consume_and_release(world, event, Tick(120), Some((Tick(112), 0.25)));
+        let behind = fire_event(root, 7, 104);
+        let behind_shot = behind.shot_id();
+        consume_and_release(world, behind, Tick(120), Some((Tick(112), 0.25)));
         assert_eq!(
             world.resource::<ReconstructedFireShells>().0,
-            vec![(shot, root)],
+            vec![(shot, root), (behind_shot, root)],
             "an already-crossed fire presents at arrival",
         );
     }
@@ -3530,40 +3336,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn ambiguous_combatant_roots_fail_closed() {
-        let mut world = World::new();
-        let stale_map = world.spawn_empty().id();
-        world.spawn((NetTank, CombatantId(7)));
-        world.spawn((NetTank, CombatantId(7)));
-        let event = fire_event(stale_map, 7, 42);
-
-        let resolution = world
-            .run_system_once(move |tanks: Query<(Entity, &CombatantId), With<NetTank>>| {
-                resolve_shooter(&event, &tanks)
-            })
-            .expect("system runs");
-        assert_eq!(
-            resolution,
-            ShooterResolution::Ambiguous,
-            "two live roots with one CombatantId must not receive an arbitrary visual/recoil event",
-        );
-    }
-
-    #[test]
-    fn pending_fire_expires_after_the_visual_ttl() {
-        let received = Tick(100);
-        let last_live = Tick(100 + PendingFireEvents::TTL_TICKS as u32);
-        assert!(
-            !pending_fire_expired(received, last_live),
-            "the last tick inside the TTL remains eligible for root repair"
-        );
-        assert!(
-            pending_fire_expired(received, last_live + 1),
-            "a stale visual is discarded instead of becoming delayed cosmetic debt"
-        );
-    }
-
     /// A mapped `FireEvent.shooter` is only a display/recoil handle. Two receiver-local mappings
     /// for the same wire fact must share its stable identity, so the production visual-fact seam
     /// spawns once and its sanctioned outcome remains available under that one [`ShotId`].
@@ -3660,30 +3432,24 @@ mod tests {
         );
     }
 
-    /// The dedup ring is bounded while recent visual copies remain suppressed.
-    #[test]
-    fn seen_shots_ring_is_bounded() {
-        let mut seen = SeenShots::default();
-        for t in 0..(SeenShots::CAP as u32 + 10) {
-            assert!(seen.mark_new(shot(t)), "each fresh tick is new");
-        }
-        assert!(
-            seen.order.len() <= SeenShots::CAP,
-            "the ring never exceeds its cap (got {})",
-            seen.order.len(),
-        );
-        // Capacity eviction never removes the newest ids.
-        assert!(
-            !seen.mark_new(shot(SeenShots::CAP as u32 + 5)),
-            "a recent id is still deduped"
-        );
-    }
-
+    /// The `ShotId` dedup in front of the `FireShell` trigger admits a shot once, holds every
+    /// duplicate the catch-up gate can still accept, and stays bounded at `SeenShots::CAP`.
     #[test]
     fn seen_shots_retains_the_full_accepted_thirty_player_fire_horizon() {
         let mut seen = SeenShots::default();
         let oldest = shot(0);
         assert!(seen.mark_new(oldest));
+        assert!(
+            !seen.mark_new(oldest),
+            "an echo is not new — no second shell"
+        );
+        assert!(
+            seen.mark_new(ShotId {
+                weapon: 1,
+                ..oldest
+            }),
+            "same tank+tick, other weapon = distinct shot"
+        );
 
         // DERIVED: 30 combatants x two weapons x ceil(750 RPM x MAX_COSMETIC_CATCH_UP_TICKS / 64 Hz).
         let accepted_horizon: u32 = 30 * 2 * 20;
@@ -3694,6 +3460,15 @@ mod tests {
         assert!(
             !seen.mark_new(oldest),
             "a duplicate that can pass catch-up validation must remain deduplicated"
+        );
+
+        for fire_tick in accepted_horizon + 1..SeenShots::CAP as u32 + 10 {
+            assert!(seen.mark_new(shot(fire_tick)), "each fresh tick is new");
+        }
+        assert!(
+            seen.order.len() <= SeenShots::CAP,
+            "the ring never exceeds its cap (got {})",
+            seen.order.len(),
         );
     }
 

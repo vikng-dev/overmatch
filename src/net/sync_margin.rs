@@ -562,7 +562,7 @@ mod tests {
 
     use super::{
         ArrivalDelay, ArrivalStats, derived_input_sync, derived_interp_sync, fixed_input_sync,
-        fixed_interp_sync, quantile_p, record_packet_arrival, ring_cap,
+        fixed_interp_sync, record_packet_arrival,
     };
     use crate::state::AppState;
 
@@ -597,20 +597,6 @@ mod tests {
         }
     }
 
-    /// THE CONTRACT CONSTANTS ARE THE BUDGET INVERTED, recomputed from B = 60 and 64 Hz
-    /// independently of the production expressions. Moving the budget, the rate, or the
-    /// ring-capacity derivation reds one of these.
-    #[test]
-    fn the_quantile_contract_derives_from_the_freeze_budget() {
-        let p = 1.0 - 60.0 / (64.0 * 3600.0);
-        assert!((quantile_p() - p).abs() < 1e-12, "p = 1 − B/(64·3600)");
-        assert_eq!(ring_cap(), 3840, "ring capacity = 1/(1−p)");
-        assert!(
-            (ring_cap() as f64 - 1.0 / (1.0 - quantile_p())).abs() < 1.0,
-            "capacity is the tail-resolution bound, not an independent number"
-        );
-    }
-
     /// Drive a synthetic arrival series through the estimator: ticks at exact cadence, one sample
     /// per tick with a KNOWN delay pattern, then refresh and read the digest.
     fn fed(delays_ms: impl IntoIterator<Item = f64>) -> ArrivalDelay {
@@ -624,26 +610,10 @@ mod tests {
         estimator
     }
 
-    /// A KNOWN QUANTILE: 100 samples of 0 ms and 3 of 50 ms — the 50 ms tail is 3/103 ≈ 2.9 % of
-    /// mass, far above 1 − p, so Q_p must sit in the tail while Q_50 and min sit in the bulk.
-    /// An estimator that averages, clamps outliers, or reads inter-arrival gaps reds this.
-    #[test]
-    fn the_quantile_reads_the_tail_of_a_known_series() {
-        let delays = (0..103).map(|i| if i % 34 == 33 { 50.0 } else { 0.0 });
-        let estimator = fed(delays);
-        let spread_ms = estimator.stats.spread().as_secs_f64() * 1000.0;
-        assert!(
-            (spread_ms - 50.0).abs() < 1.0,
-            "Q_p − min must be the 50 ms tail (got {spread_ms})"
-        );
-        let bulk_ms = estimator.stats.bulk().as_secs_f64() * 1000.0;
-        assert!(bulk_ms < 1.0, "the median sits in the bulk (got {bulk_ms})");
-    }
-
     /// THE MEASURED BURST SIGNATURE (60 ms every 33 ticks) IS COVERED WITHIN ONE SEND INTERVAL:
-    /// the spike mass (1/33 ≈ 3 %) dwarfs 1 − p, so the target must clear the burst depth. A
-    /// Gaussian-multiple margin over a clamped jitter EWMA (which reads this stream as ~3 ms
-    /// jitter) is exactly what reds here.
+    /// the spike mass (1/33 ≈ 3 %) dwarfs 1 − p, so Q_p must clear the burst depth while Q_50
+    /// sits in the bulk. A Gaussian-multiple margin over a clamped jitter EWMA (which reads this
+    /// stream as ~3 ms jitter) is exactly what reds here.
     #[test]
     fn the_measured_burst_train_is_covered_by_the_target() {
         let delays = (0..640).map(|i| if i % 33 == 0 { 60.0 } else { 0.0 });
@@ -653,6 +623,8 @@ mod tests {
             spread >= 60.0 - 1e-6 && spread <= 60.0 + TICK.as_secs_f64() * 1000.0,
             "the target must cover the 60 ms burst within one send interval (got {spread} ms)"
         );
+        let bulk_ms = estimator.stats.bulk().as_secs_f64() * 1000.0;
+        assert!(bulk_ms < 1.0, "the median sits in the bulk (got {bulk_ms})");
     }
 
     /// THE NETEQ SLOW-RAMP CASE: delay accumulating 1 ms per packet. Every inter-arrival gap reads

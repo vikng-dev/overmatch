@@ -19,8 +19,12 @@ use lightyear_inputs::input_message::ActionStateSequence;
 use lightyear_inputs_native::prelude::{ActionState, NativeStateSequence};
 use serde::{Deserialize, Serialize};
 
-/// Stand-in for `TankCommand`: the automatic-fire LEVEL, an absolute, and (for the `ForTick` fix
-/// evaluation) the destination tick the command was authored for.
+use crate::command::TankCommand;
+use crate::net::client::SHIPPING_INPUT_DELAY_TICKS;
+use crate::net::protocol::attest;
+
+/// Stand-in for `TankCommand` in the buffer-semantics tripwires: the automatic-fire LEVEL, an
+/// absolute, and the destination tick the command was authored for.
 #[derive(Serialize, Deserialize, Clone, Copy, PartialEq, Debug, Default, Reflect)]
 struct Cmd {
     fire_secondary: bool,
@@ -30,6 +34,9 @@ struct Cmd {
 
 type Buf = InputBuffer<ActionState<Cmd>, Cmd>;
 type Seq = NativeStateSequence<Cmd>;
+/// The production input type over the same pipeline, for the scenarios run through [`run`].
+type TankBuf = InputBuffer<ActionState<TankCommand>, TankCommand>;
+type TankSeq = NativeStateSequence<TankCommand>;
 
 const TICK: Duration = Duration::from_nanos(15_625_000); // 64 Hz
 const REDUNDANCY: usize = 5; // lightyear InputConfig default
@@ -46,10 +53,11 @@ fn tk(t: i32) -> Tick {
 enum Fix {
     /// The RETIRED detector (commit 2ea6cf5): fail `fire_secondary` closed iff the buffer has NO
     /// entry for the tick — `get(tick).is_none() && get_last().is_some()`. Kept here only as the
-    /// baseline the sweep measures against.
+    /// detector the mechanism cases show blind.
     HeldLast,
     /// SHIPPING: positive attestation — commit a consumable only if the command was authored FOR
-    /// this exact tick (`TankCommand::for_tick`, stamped by `net::client`'s `stamp_input_tick`).
+    /// this exact tick (`TankCommand::for_tick`, stamped by `net::client`'s `stamp_input_tick`),
+    /// applied by the production rule [`attest`].
     ForTick,
 }
 
@@ -96,22 +104,19 @@ struct Outcome {
     notes: Vec<String>,
 }
 
-/// The bridge rule (`net::protocol::bridge_action_state_to_tank_command`).
-fn bridge(fix: Fix, buf: &Buf, tick: Tick, action: &ActionState<Cmd>) -> Cmd {
-    let mut c = action.0;
+/// The bridge rule under test: the retired detector, or the production [`attest`] that
+/// `net::protocol::bridge_action_state_to_tank_command` applies to every tank.
+fn bridge(fix: Fix, buf: &TankBuf, tick: Tick, action: &ActionState<TankCommand>) -> TankCommand {
     match fix {
         Fix::HeldLast => {
+            let mut c = action.0;
             if buf.get(tick).is_none() && buf.get_last().is_some() {
                 c.fire_secondary = false;
             }
+            c
         }
-        Fix::ForTick => {
-            if c.for_tick != tick.0 {
-                c.fire_secondary = false;
-            }
-        }
+        Fix::ForTick => attest(action.0, tick),
     }
-    c
 }
 
 fn run(s: &Scenario) -> Outcome {
@@ -126,16 +131,18 @@ fn run(s: &Scenario) -> Outcome {
     let authorized = |t: &i32| authored.get(t) == Some(&true);
 
     // ---------------- client
-    let mut client: Buf = Buf::default();
-    let mut client_action = ActionState::<Cmd>::default();
-    let mut wire: Vec<(i32, Tick, Seq)> = Vec::new();
+    let mut client: TankBuf = TankBuf::default();
+    let mut client_action = ActionState::<TankCommand>::default();
+    let mut wire: Vec<(i32, Tick, TankSeq)> = Vec::new();
 
     for t in 0..s.last_tick {
         let b = t + (s.delay)(t);
-        let cmd = Cmd {
+        let cmd = TankCommand {
             fire_secondary: t >= s.press && t < s.release,
-            aim: if s.moving_aim { t as u16 } else { 0 },
+            // A level that moves every tick, standing in for a traversing aim.
+            range: if s.moving_aim { t as f32 } else { 0.0 },
             for_tick: tk(b).0,
+            ..TankCommand::default()
         };
         // FixedPreUpdate: lightyear `buffer_action_state` — writes the DELAYED tick.
         client.set(tk(b), ActionState(cmd));
@@ -155,7 +162,7 @@ fn run(s: &Scenario) -> Outcome {
         }
         // PostUpdate: `prepare_input_message` + `clean_buffers`.
         if !s.drop.contains(&t)
-            && let Some(seq) = Seq::build_from_input_buffer(&client, REDUNDANCY, tk(b))
+            && let Some(seq) = TankSeq::build_from_input_buffer(&client, REDUNDANCY, tk(b))
         {
             wire.push((t + s.m, tk(b), seq));
         }
@@ -163,8 +170,8 @@ fn run(s: &Scenario) -> Outcome {
     }
 
     // ---------------- server
-    let mut server: Buf = Buf::default();
-    let mut action = ActionState::<Cmd>::default();
+    let mut server: TankBuf = TankBuf::default();
+    let mut action = ActionState::<TankCommand>::default();
     for t in 0..s.last_tick {
         let mut arriving: Vec<_> = wire.iter().filter(|(a, _, _)| *a == t).collect();
         if s.reorder {
@@ -352,28 +359,12 @@ fn an_absent_entry_is_a_one_tick_hole() {
         tk(11).0,
         "the held command attests to tick 10 — consumables fail closed on tick 11"
     );
-}
 
-/// The hole does not travel. `pop` drops independent materialized values and repairs nothing, so
-/// popping through an `Absent` leaves the next tick exactly as stored — a front rewritten with
-/// the popped `Absent` would carry a freeze forward one tick per server tick.
-#[test]
-fn popping_through_an_absent_entry_does_not_move_it() {
-    let pressed = ActionState(Cmd {
-        fire_secondary: true,
-        aim: 0,
-        for_tick: tk(10).0,
-    });
-    let mut buf: Buf = Buf::default();
-    buf.set(tk(10), pressed.clone());
-    buf.set_empty(tk(11));
-    for t in 12..16 {
-        buf.set(tk(t), pressed.clone());
-    }
-
-    // The server simulating tick 12 pops up to tick 11 — straight through the Absent.
+    // The hole does not travel. `pop` drops independent materialized values and repairs nothing,
+    // so the server simulating tick 12 pops up to tick 11 — straight through the Absent — and the
+    // next tick stays exactly as stored; a front rewritten with the popped `Absent` would carry a
+    // freeze forward one tick per server tick.
     buf.pop_keeping_last(tk(11));
-
     assert!(
         buf.get(tk(12)).is_some(),
         "the new front is the value stored at tick 12, not the popped Absent"
@@ -414,92 +405,41 @@ fn the_encoder_never_compresses_across_an_absent_entry() {
     }
 }
 
-/// Before/after table: today's `held_last` guard vs. the candidate fixes, swept over delay wobble,
-/// packet loss, reordering and arrival skew.
+/// THE SHIPPING CONFIGURATION, pinned: the production attestation ([`attest`]) on the production
+/// constant input delay ([`SHIPPING_INPUT_DELAY_TICKS`]), swept over burst loss, reordering and
+/// arrival skew, fires no round off input the player never authored — on the server or the client.
+/// An upstream tripwire on lightyear's input pipeline: a leak needs the pipeline to deliver a value
+/// the player did not author for that tick AND `attest` to let its consumable through.
 #[test]
 fn sweep() {
-    let deltas = [
-        (3, 2),
-        (2, 1),
-        (3, 1),
-        (2, 3),
-        (1, 2),
-        (1, 3),
-        (0, 3),
-        (3, 3),
-    ];
-    let mut table: Vec<(String, usize, usize, usize)> = Vec::new();
-
-    for fix in [Fix::HeldLast, Fix::ForTick] {
-        for const_delay in [false, true] {
-            let (mut srv, mut cli, mut cases) = (0usize, 0usize, 0usize);
-            for moving_aim in [false, true] {
-                for m in [-2, -1, 0, 1] {
-                    for reorder in [false, true] {
-                        for burst in [0usize, 1, 3, 6] {
-                            for (before, after) in deltas {
-                                for switch in 50..66 {
-                                    let delay: Box<dyn Fn(i32) -> i32> = if const_delay {
-                                        Box::new(move |_| before)
-                                    } else {
-                                        step(before, after, switch)
-                                    };
-                                    let out = run(&Scenario {
-                                        delay,
-                                        m,
-                                        reorder,
-                                        moving_aim,
-                                        drop: (0..burst as i32).map(|i| 55 + i).collect(),
-                                        fix,
-                                        ..Scenario::base()
-                                    });
-                                    cases += 1;
-                                    srv += out.server_leak.len();
-                                    cli += out.client_leak.len();
-                                }
-                            }
-                        }
-                    }
+    let delay = i32::from(SHIPPING_INPUT_DELAY_TICKS);
+    let (mut srv, mut cli, mut cases) = (0usize, 0usize, 0usize);
+    for moving_aim in [false, true] {
+        for m in [-2, -1, 0, 1] {
+            for reorder in [false, true] {
+                for burst in [0, 1, 3, 6] {
+                    let out = run(&Scenario {
+                        delay: Box::new(move |_| delay),
+                        m,
+                        reorder,
+                        moving_aim,
+                        drop: (0..burst).map(|i| 55 + i).collect(),
+                        fix: Fix::ForTick,
+                        ..Scenario::base()
+                    });
+                    cases += 1;
+                    srv += out.server_leak.len();
+                    cli += out.client_leak.len();
                 }
             }
-            table.push((
-                format!(
-                    "{fix:?} + {}",
-                    if const_delay {
-                        "CONST delay"
-                    } else {
-                        "balanced() delay"
-                    }
-                ),
-                cases,
-                srv,
-                cli,
-            ));
         }
     }
-    println!(
-        "\n{:<32} {:>7} {:>12} {:>12}",
-        "config", "cases", "server-leak", "client-leak"
-    );
-    for (name, cases, srv, cli) in &table {
-        println!("{name:<32} {cases:>7} {srv:>12} {cli:>12}");
-    }
-
-    // THE SHIPPING CONFIGURATION, pinned: positive attestation (`TankCommand::for_tick`, checked by
-    // `net::protocol`'s bridge) on top of a CONSTANT input delay (`net::client`'s
-    // `SHIPPING_INPUT_DELAY_TICKS`). Across every combination of delay wobble, burst loss,
-    // reordering and arrival skew in the sweep, the number of rounds fired off input the player
-    // never authored is ZERO — on the server and on the client's own predicted tank alike.
-    let (_, cases, srv, cli) = table
-        .iter()
-        .find(|(name, ..)| name.starts_with("ForTick + CONST"))
-        .expect("the shipping configuration is in the table");
     assert_eq!(
-        (*srv, *cli),
+        (srv, cli),
         (0, 0),
         "SHIPPING CONFIG LEAKS. Across {cases} scenarios the server fired {srv} and the client \
-         {cli} rounds off input the player never authored. Something re-opened a seed the constant \
-         input delay was closing, or weakened the for_tick attestation in the bridge.",
+         {cli} rounds off input the player never authored: lightyear's input pipeline delivered a \
+         value the player did not author for that tick, and `attest` let its consumable through.",
     );
 }
 

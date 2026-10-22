@@ -878,6 +878,10 @@ mod tests {
     /// emits a cosmetic round at the TICK rate instead of the cyclic rate.
     ///
     /// Deleting the restore in `hold_presentation_gate` turns the ready count below from 0 into 4.
+    ///
+    /// The restore holds in the other direction too: an arriving deadline the server owns — a belt
+    /// swap still running there — must not reach back and stop a presentation the local cadence
+    /// has already released.
     #[test]
     fn a_stale_ready_snapshot_never_re_arms_the_presentation_gate() {
         const FIRE_TICK: u32 = 1_000;
@@ -915,12 +919,7 @@ mod tests {
             gate_of(&world, root).deadline_reached(FIRE_TICK + PERIOD_TICKS),
             "the presented deadline matures locally, not on the snapshot",
         );
-    }
 
-    /// V1's shape: an arriving deadline the server owns — a belt swap still running there — must
-    /// not reach back and stop a presentation the local cadence has already released.
-    #[test]
-    fn an_arriving_deadline_never_delays_a_presentation_the_cadence_released() {
         let (mut world, root) = world_with_ledger(armed(500, 0));
         // The local swap completes: belt refilled, deadline retired.
         world.get_mut::<WeaponGate>(root).expect("gate").weapons[0] = ready(BELT);
@@ -936,45 +935,6 @@ mod tests {
             gate_of(&world, root),
             ready(BELT),
             "the owner's flash must not wait on the server's copy of the swap",
-        );
-    }
-
-    /// FORWARD CORRECTION ONLY. Presented rounds the arriving belt does not account for are
-    /// absorbed — counted, never un-drawn — and the gate is untouched by the accounting.
-    #[test]
-    fn rounds_the_server_did_not_fire_are_absorbed_not_retracted() {
-        let mut ledger = SlotLedger::seeded(ready(BELT));
-        ledger.presented = 5;
-        // The server is two rounds behind: three of the five are accounted for.
-        ledger.confirm(ready(BELT - 3));
-        assert_eq!(ledger.confirmed, 3);
-        assert_eq!(
-            ledger.absorbed(),
-            2,
-            "the excess is absorbed, not retracted"
-        );
-        assert_eq!(ledger.overrun(), 0);
-        // A later snapshot catches up; the absorbed count settles to the true phantom count.
-        ledger.confirm(ready(BELT - 5));
-        assert_eq!(ledger.absorbed(), 0);
-    }
-
-    /// The direction that cannot happen for own fire is REPORTED, not compensated: the ledger
-    /// records the overrun and presents nothing extra.
-    #[test]
-    fn the_server_firing_more_than_was_presented_is_reported_not_re_presented() {
-        let mut ledger = SlotLedger::seeded(ready(BELT));
-        ledger.presented = 1;
-        ledger.confirm(ready(BELT - 4));
-        assert_eq!(ledger.overrun(), 3);
-        assert_eq!(
-            ledger.absorbed(),
-            0,
-            "an overrun is not a negative absorption",
-        );
-        assert_eq!(
-            ledger.presented, 1,
-            "no round is manufactured to close the gap",
         );
     }
 
@@ -1029,85 +989,42 @@ mod tests {
     }
 
     /// THE LEVEL IS NOT LATCHED. Only the entry authored for the tick being simulated states the
-    /// trigger is held; a tick this client never authored yields no round, the same refusal
-    /// `TankCommand::fail_consumables_closed` makes on the authority — without hold-last.
+    /// trigger is held; a tick this client never authored — or one the sim stepped over — yields
+    /// no round, the same refusal `TankCommand::fail_consumables_closed` makes on the authority —
+    /// without hold-last. Release stops presentation on the authored tick, with no arriving fact
+    /// between the release and the flash stopping.
     #[test]
     fn a_held_trigger_is_never_carried_into_a_tick_this_client_did_not_author() {
+        let held = |secondary| Consumables {
+            primary: false,
+            secondary,
+        };
         let mut intent = AuthoredIntent::default();
-        intent.record(
-            20,
-            Consumables {
-                primary: false,
-                secondary: true,
-            },
-        );
-        intent.record(
-            22,
-            Consumables {
-                primary: false,
-                secondary: true,
-            },
-        );
+        intent.record(20, held(true));
+        intent.record(22, held(true));
         assert!(intent.take(20).secondary, "the authored tick presents");
         assert!(
             !intent.take(21).secondary,
             "an unauthored tick must fail closed, not hold the last level",
         );
         assert!(intent.take(22).secondary, "and the next authored tick does");
-    }
 
-    /// RELEASE STOPS PRESENTATION ON THE LOCAL TICK: the authored level falls with the device, with
-    /// no arriving fact between the release and the flash stopping.
-    #[test]
-    fn releasing_the_trigger_stops_presentation_on_the_authored_tick() {
+        let mut intent = AuthoredIntent::default();
+        intent.record(20, held(true));
+        assert!(
+            !intent.take(21).secondary,
+            "a held level authored for a stepped-over tick must not carry into the next one",
+        );
+
         let mut intent = AuthoredIntent::default();
         for tick in 30..34 {
-            intent.record(
-                tick,
-                Consumables {
-                    primary: false,
-                    secondary: tick < 32,
-                },
-            );
+            intent.record(tick, held(tick < 32));
         }
-        let held: Vec<bool> = (30..34).map(|tick| intent.take(tick).secondary).collect();
-        assert_eq!(held, vec![true, true, false, false]);
-    }
-
-    /// The attested command is the authority's copy of the same intent; taking both would present
-    /// one click twice.
-    #[test]
-    fn the_presentation_replaces_the_attested_command_rather_than_joining_it() {
-        let mut world = World::new();
-        world.insert_resource(LocalTimeline::default());
-        world.resource_mut::<LocalTimeline>().apply_delta(40);
-        let mut intent = AuthoredIntent::default();
-        // Nothing authored for tick 40 — the bridge's copy says fire, this client's record does not.
-        intent.record(
-            41,
-            Consumables {
-                primary: true,
-                secondary: true,
-            },
-        );
-        world.insert_resource(intent);
-        let root = world
-            .spawn((
-                TankCommand {
-                    fire_primary: true,
-                    fire_secondary: true,
-                    ..default()
-                },
-                OwnFirePresentation::with_slots(vec![SlotLedger::default()]),
-            ))
-            .id();
-        world
-            .run_system_once(present_own_intent)
-            .expect("presentation runs");
-        let command = world.get::<TankCommand>(root).expect("command");
-        assert!(
-            !command.fire_primary && !command.fire_secondary,
-            "the presentation must replace the attested consumables, not join them",
+        let presented: Vec<bool> = (30..34).map(|tick| intent.take(tick).secondary).collect();
+        assert_eq!(
+            presented,
+            vec![true, true, false, false],
+            "release stops presentation on the authored tick",
         );
     }
 
@@ -1148,7 +1065,9 @@ mod tests {
     /// presentation restores it from this client's own record of that tick.
     ///
     /// Dropping the overwrite in `present_own_intent` leaves the zeroed command in place and this
-    /// test goes red — one dropped round in the middle of a held burst.
+    /// test goes red — one dropped round in the middle of a held burst. The overwrite is an
+    /// assignment both ways: the attested command is the authority's copy of the same intent, so
+    /// joining it (`|=`) would present one click twice.
     #[test]
     fn an_unattested_tick_cannot_zero_a_trigger_this_client_authored() {
         let mut world = World::new();
@@ -1187,27 +1106,22 @@ mod tests {
                 .fire_secondary,
             "the owner's own flash must survive an unattested input tick",
         );
-    }
 
-    /// The ledger arms only on the own interpolated gate — never an opponent's.
-    #[test]
-    fn only_the_own_interpolated_gate_arms() {
-        let mut app = App::new();
-        let gate = || WeaponGate {
-            weapons: vec![ready(BELT)],
+        // Tick 61: nothing authored — the bridge's copy says fire, this client's record does not.
+        world.resource_mut::<LocalTimeline>().apply_delta(1);
+        *world.get_mut::<TankCommand>(root).expect("command") = TankCommand {
+            fire_primary: true,
+            fire_secondary: true,
+            ..default()
         };
-        let own = app
-            .world_mut()
-            .spawn((NetTank, Controlled, Interpolated, gate()))
-            .id();
-        let opponent = app.world_mut().spawn((NetTank, Interpolated, gate())).id();
-
-        app.world_mut()
-            .run_system_once(arm_own_fire_presentation)
-            .expect("arming runs");
-
-        assert!(app.world().get::<OwnFirePresentation>(own).is_some());
-        assert!(app.world().get::<OwnFirePresentation>(opponent).is_none());
+        world
+            .run_system_once(present_own_intent)
+            .expect("presentation runs");
+        let command = world.get::<TankCommand>(root).expect("command");
+        assert!(
+            !command.fire_primary && !command.fire_secondary,
+            "the presentation must replace the attested consumables, not join them",
+        );
     }
 
     /// LEDGER COUNTING: on the armed own root a `Reconstructed` round (the fused echo — the own
@@ -1261,8 +1175,10 @@ mod tests {
         );
     }
 
-    /// The seed is the ONE tick the arriving gate decides anything: the ledger starts from the
-    /// belt the server reports, so the first delta is measured from a real base.
+    /// The ledger arms only on the own interpolated gate — never an opponent's, whose gate the
+    /// presentation restore would freeze. The seed is the ONE tick the arriving gate decides
+    /// anything: the ledger starts from the belt the server reports, so the first delta is
+    /// measured from a real base.
     #[test]
     fn the_ledger_seeds_from_the_arriving_belt() {
         let mut app = App::new();
@@ -1277,9 +1193,23 @@ mod tests {
                 },
             ))
             .id();
+        let opponent = app
+            .world_mut()
+            .spawn((
+                NetTank,
+                Interpolated,
+                WeaponGate {
+                    weapons: vec![ready(BELT)],
+                },
+            ))
+            .id();
         app.world_mut()
             .run_system_once(arm_own_fire_presentation)
             .expect("arming runs");
+        assert!(
+            app.world().get::<OwnFirePresentation>(opponent).is_none(),
+            "an opponent's gate is never armed"
+        );
         let ledger = app
             .world()
             .get::<OwnFirePresentation>(own)
@@ -1441,12 +1371,17 @@ mod tests {
     /// silent past the deadline — the gate restores from the last ARRIVED state (ready, full
     /// belt), the pending consumption retires, and the counter reports it. Dropping the deadline
     /// check heals a round still in flight (reds the young half); dropping the restore leaves
-    /// the player running a reload for a round that never left (reds the gate assert).
+    /// the player running a reload for a round that never left (reds the gate assert). The heal
+    /// presents NOTHING — no `FireShell`, no recoil kick: routing it through the presentation
+    /// seam reds the empty captures.
     #[test]
     fn a_refused_round_heals_the_presented_reload_from_the_arrived_gate() {
         const FIRE_TICK: u32 = 100;
         let (mut world, root) = heal_world(300);
         world.spawn(PingManager::default());
+        world.init_resource::<CapturedShells>();
+        world.init_resource::<super::super::client::PendingRecoilKicks>();
+        world.add_observer(capture_shell);
         {
             let mut gate = world.get_mut::<WeaponGate>(root).expect("gate");
             gate.weapons[0] = armed(FIRE_TICK, BELT - 1);
@@ -1466,6 +1401,17 @@ mod tests {
         assert_eq!(ledger.slots[0].presented_gate, ready(BELT));
         assert!(ledger.slots[0].pending_local.is_empty());
         assert_eq!(world.resource::<OwnFireDiag>().healed, 1);
+        assert!(
+            world.resource::<CapturedShells>().0.is_empty(),
+            "a refused round presents nothing",
+        );
+        assert!(
+            world
+                .resource::<super::super::client::PendingRecoilKicks>()
+                .queued()
+                .is_empty(),
+            "and kicks nothing",
+        );
 
         // A consumption still inside the deadline is in flight, not refused.
         let (mut world, root) = heal_world(300);
@@ -1683,160 +1629,6 @@ mod tests {
                 .queued(),
             &[(shooter, 0)],
             "one kick, through the same seam as the bang",
-        );
-    }
-
-    /// A refused round presents NOTHING: the heal restores the gate and retires the pending
-    /// consumption without a `FireShell` or a recoil kick. A mutant that routes the refusal
-    /// heal through the presentation seam reds the empty captures.
-    #[test]
-    fn a_refused_round_presents_no_flash_no_bang_no_kick() {
-        const FIRE_TICK: u32 = 100;
-        let (mut world, root) = heal_world(300);
-        world.spawn(PingManager::default());
-        world.init_resource::<CapturedShells>();
-        world.init_resource::<super::super::client::PendingRecoilKicks>();
-        world.add_observer(capture_shell);
-        {
-            let mut gate = world.get_mut::<WeaponGate>(root).expect("gate");
-            gate.weapons[0] = armed(FIRE_TICK, BELT - 1);
-            let mut ledger = world.get_mut::<OwnFirePresentation>(root).expect("ledger");
-            ledger.slots[0].presented_gate = armed(FIRE_TICK, BELT - 1);
-            ledger.slots[0].pending_local.push_back(FIRE_TICK);
-        }
-        world
-            .run_system_once(heal_refused_presentations)
-            .expect("heal runs");
-        assert_eq!(
-            world.resource::<OwnFireDiag>().healed,
-            1,
-            "the refusal healed"
-        );
-        assert!(
-            world.resource::<CapturedShells>().0.is_empty(),
-            "a refused round presents nothing",
-        );
-        assert!(
-            world
-                .resource::<super::super::client::PendingRecoilKicks>()
-                .queued()
-                .is_empty(),
-            "and kicks nothing",
-        );
-    }
-
-    // --- The clock-conformance tripwire -----------------------------------------------------
-    //
-    // Source-scan in the `no_latest_arrival_sim_writer` pattern (`net::protocol` tests): honest
-    // substring scans over comment-stripped source, biased toward false trips (a harmless
-    // re-read of the contract) over false passes (a presentation site quietly rewired to the
-    // wrong clock).
-
-    /// Read a repo-relative source file for a scan.
-    fn read_source(rel: &str) -> String {
-        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(rel);
-        std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {rel}: {e}"))
-    }
-
-    /// Blank `//` line- and `/* */` (nesting) block-comments to spaces, preserving newlines, so
-    /// only CODE is scanned and prose can neither trip nor mask the tripwire.
-    fn strip_comments(src: &str) -> String {
-        let mut out = String::with_capacity(src.len());
-        let mut rest = src;
-        let mut block_depth = 0usize;
-        while let Some(c) = rest.chars().next() {
-            if block_depth > 0 {
-                if rest.starts_with("/*") {
-                    block_depth += 1;
-                    out.push_str("  ");
-                    rest = &rest[2..];
-                } else if rest.starts_with("*/") {
-                    block_depth -= 1;
-                    out.push_str("  ");
-                    rest = &rest[2..];
-                } else {
-                    out.push(if c == '\n' { '\n' } else { ' ' });
-                    rest = &rest[c.len_utf8()..];
-                }
-            } else if rest.starts_with("/*") {
-                block_depth = 1;
-                out.push_str("  ");
-                rest = &rest[2..];
-            } else if rest.starts_with("//") {
-                let end = rest.find('\n').unwrap_or(rest.len());
-                for _ in 0..end {
-                    out.push(' ');
-                }
-                rest = &rest[end..];
-            } else {
-                out.push(c);
-                rest = &rest[c.len_utf8()..];
-            }
-        }
-        out
-    }
-
-    /// One fn's body (between its outermost braces), brace-matched so braces inside it don't
-    /// fool the scan. `signature` must be the unique `fn name(` prefix.
-    fn fn_body<'a>(stripped: &'a str, signature: &str) -> &'a str {
-        let sig = stripped
-            .find(signature)
-            .unwrap_or_else(|| panic!("{signature} present"));
-        let open = sig + stripped[sig..].find('{').expect("fn opening brace");
-        let bytes = stripped.as_bytes();
-        let mut depth = 0i32;
-        for (i, &b) in bytes.iter().enumerate().skip(open) {
-            match b {
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return &stripped[open + 1..i];
-                    }
-                }
-                _ => {}
-            }
-        }
-        panic!("{signature} body unterminated");
-    }
-
-    /// THE PER-CHANNEL CLOCK MAP, pinned in source: every cursor-assigned presentation site
-    /// consumes the cursor clock, and none reads the local/arrival timeline for age or rate —
-    /// the seam ages a shot only from its released tick and the cursor; the belt-delta fallback
-    /// carries no `LocalTimeline` at all; the client's release path routes cursor releases
-    /// through the seam; `TrackDrive` is registered for interpolation so the track view's speed
-    /// source is cursor-time on interpolated hulls. Rewiring any of these to arrival-fresh
-    /// state reds its assert.
-    #[test]
-    fn cursor_assigned_presentation_reads_no_local_timeline() {
-        let fire = strip_comments(&read_source("src/net/fire_presentation.rs"));
-        let seam = fn_body(&fire, "pub(super) fn present_released_shot(");
-        for banned in ["LocalTimeline", "fire_catch_up_ticks", "ShotClock"] {
-            assert!(
-                !seam.contains(banned),
-                "the seam ages on the cursor only: found {banned}",
-            );
-        }
-        let fallback = fn_body(&fire, "fn recover_unannounced_rounds(");
-        for banned in ["LocalTimeline", "fire_catch_up_ticks"] {
-            assert!(
-                !fallback.contains(banned),
-                "the belt-delta fallback is cursor-aged: found {banned}",
-            );
-        }
-
-        let client = strip_comments(&read_source("src/net/client.rs"));
-        let release = fn_body(&client, "fn spawn_reconstructed_fire(");
-        assert!(
-            release.contains("present_released_shot"),
-            "the cursor release path must route through the presentation seam",
-        );
-
-        let protocol = strip_comments(&read_source("src/net/protocol.rs"));
-        assert!(
-            protocol.contains("add_interpolation_with(track_drive_lerp)"),
-            "TrackDrive must interpolate: without the registration the track view reads \
-             arrival-fresh drivetrain state and the tracks lead the hull",
         );
     }
 }

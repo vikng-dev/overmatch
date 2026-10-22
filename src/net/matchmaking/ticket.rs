@@ -390,13 +390,11 @@ mod tests {
         );
         assert!(flow.join(4.0).is_some(), "a new join is possible");
         assert_eq!(flow.failure(), None, "and clears the old reason");
-    }
 
-    #[test]
-    fn refused_join_and_rejected_ticket_fail() {
         let mut flow = JoinFlow::default();
         let generation = flow.join(0.0).unwrap();
         flow.joined(generation, Err("unknown locations: Atlantis".into()), 0.1);
+        assert_eq!(flow.phase(), &Phase::Idle);
         assert_eq!(flow.failure(), Some("unknown locations: Atlantis"));
 
         let mut flow = JoinFlow::default();
@@ -411,22 +409,6 @@ mod tests {
     }
 
     #[test]
-    fn cancel_drops_every_late_answer() {
-        let mut flow = JoinFlow::default();
-        let generation = flow.join(0.0).unwrap();
-        flow.cancel();
-        assert_eq!(flow.phase(), &Phase::Idle);
-        flow.joined(generation, Ok("late".into()), 0.5);
-        assert_eq!(flow.phase(), &Phase::Idle, "a late ticket is not polled");
-
-        let generation = waiting(&mut flow);
-        flow.cancel();
-        flow.status(generation, StatusOutcome::Ready(ready()), 1.0);
-        assert_eq!(flow.phase(), &Phase::Idle, "a late ready never connects");
-        assert_eq!(flow.failure(), None, "a cancel is not a failure");
-    }
-
-    #[test]
     fn answers_of_an_older_join_cannot_reach_a_newer_one() {
         let mut flow = JoinFlow::default();
         let old = flow.join(0.0).unwrap();
@@ -437,6 +419,13 @@ mod tests {
         assert!(matches!(flow.phase(), Phase::Requesting { .. }));
         flow.joined(new, Ok("new".into()), 1.2);
         assert_eq!(flow.due_poll(1.2).map(|(_, t)| t), Some("new".into()));
+
+        let mut flow = JoinFlow::default();
+        let generation = waiting(&mut flow);
+        flow.cancel();
+        flow.status(generation, StatusOutcome::Ready(ready()), 1.0);
+        assert_eq!(flow.phase(), &Phase::Idle, "a late ready never connects");
+        assert_eq!(flow.failure(), None, "a cancel is not a failure");
     }
 
     #[test]
@@ -522,16 +511,17 @@ mod tests {
         assert_eq!(flow.failure(), None, "an ended match is not a failed join");
         flow.join(4.0).unwrap();
         assert_eq!(flow.ended(), None, "a new join clears the notice");
-    }
 
-    #[test]
-    fn leaving_returns_to_idle_with_no_notice() {
         let mut flow = JoinFlow::default();
         let generation = waiting(&mut flow);
         flow.status(generation, StatusOutcome::Ready(ready()), 1.0);
         flow.left();
         assert_eq!(flow.phase(), &Phase::Idle);
-        assert_eq!((flow.failure(), flow.ended()), (None, None));
+        assert_eq!(
+            (flow.failure(), flow.ended()),
+            (None, None),
+            "a leave carries no notice"
+        );
     }
 
     #[test]

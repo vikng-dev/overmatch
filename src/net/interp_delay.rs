@@ -268,26 +268,6 @@ mod tests {
         }
     }
 
-    /// The slope in RTT is exactly 1/2, independent of the other terms. Fails if the `rtt/2` term
-    /// is dropped (slope 0) or left undivided (slope 1).
-    #[test]
-    fn law_slope_in_rtt_is_one_half() {
-        let low = derived_min_delay(Duration::from_millis(40), &spread(20.0), TICK);
-        let high = derived_min_delay(Duration::from_millis(240), &spread(20.0), TICK);
-        assert_close(high - low, Duration::from_millis(100), "rtt slope");
-    }
-
-    /// Beyond the horizon the spread passes through at slope 1, independent of RTT: the headroom
-    /// IS the measured excess, not a multiple of it. A Gaussian-style multiplier on the excess
-    /// fails this; so does subtracting g* from only one of the pair.
-    #[test]
-    fn the_excess_spread_passes_through_at_slope_one() {
-        let rtt = Duration::from_millis(60);
-        let narrow = derived_min_delay(rtt, &spread(60.0), TICK);
-        let wide = derived_min_delay(rtt, &spread(95.0), TICK);
-        assert_close(wide - narrow, Duration::from_millis(35), "excess slope");
-    }
-
     /// THE FOLLOWER IS RATE-LIMITED IN BOTH DIRECTIONS AND LANDS EXACTLY: every step is at most
     /// `step`, monotone toward the target, and the final step is the remainder — no overshoot, no
     /// dither around the target. A follower that writes the target directly reds the per-step

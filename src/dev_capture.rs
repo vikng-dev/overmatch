@@ -267,26 +267,26 @@ fn retarget(
 mod tests {
     use super::*;
 
+    /// The capture times default to 6 s, sort, drop junk, and fold times sharing a frame name into
+    /// one frame, so two captures never race for one file.
     #[test]
     fn times_default_sort_and_drop_junk() {
         assert_eq!(parse_times(""), vec![6.0]);
         assert_eq!(parse_times("8, 2.5,x,4"), vec![2.5, 4.0, 8.0]);
+        assert_eq!(parse_times("2.00001,2,3"), vec![2.0, 3.0]);
     }
 
-    #[test]
-    fn one_frame_keeps_the_path_and_several_stamp_it() {
-        let path = Path::new("/out/shot.png");
-        assert_eq!(frame_path(path, 8.0, 1), path);
-        assert_eq!(
-            frame_path(path, 8.5, 2),
-            Path::new("/out/shot-00008.5000s.png")
-        );
-    }
-
-    /// A sequence assembled by name plays in time order: across whole seconds, across digit counts
-    /// and between a short decimal and a long one (`1.1` before `1.1333`).
+    /// One frame keeps the given path; several stamp it. A sequence assembled by name plays in
+    /// time order: across whole seconds, across digit counts and between a short decimal and a
+    /// long one (`1.1` before `1.1333`).
     #[test]
     fn frame_names_sort_in_time_order() {
+        let single = Path::new("/out/shot.png");
+        assert_eq!(frame_path(single, 8.0, 1), single);
+        assert_eq!(
+            frame_path(single, 8.5, 2),
+            Path::new("/out/shot-00008.5000s.png")
+        );
         let spec: Vec<String> = (0..3750)
             .map(|k| format!("{:.4}", 1.0 + k as f32 / 30.0))
             .collect();
@@ -297,10 +297,5 @@ mod tests {
         let mut sorted = names.clone();
         sorted.sort();
         assert_eq!(sorted, names);
-    }
-
-    #[test]
-    fn times_sharing_a_name_are_one_frame() {
-        assert_eq!(parse_times("2.00001,2,3"), vec![2.0, 3.0]);
     }
 }

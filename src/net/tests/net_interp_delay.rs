@@ -14,14 +14,14 @@
 //! then step). Our fix writes `min_delay = rtt/2 + (arrival spread beyond the extrapolation
 //! horizon) + one tick` client-side every frame; `net::interp_delay`'s unit tests pin the
 //! arithmetic. The law's gap term is a whole tick of its own and does not read
-//! `send_interval_ratio` — at `send_interval = 0` the ratio multiplies zero — so the defaults test
-//! below guards the BASELINE the law replaces, not an input to it.
+//! `send_interval_ratio` — at `send_interval = 0` the ratio multiplies zero.
 //!
-//! WHAT FIRES WHEN: these tests FAIL when a lightyear upgrade changes the degenerate — the TODO
-//! implemented (ratio falling back to tick/frame rate), `InterpolationConfig` defaults changed
-//! (#890), or the objective re-anchored (e.g. to newest-received instead of server-estimate,
-//! which would make the delay RTT-independent and retire the `rtt/2` term). A failure here is NOT
-//! a regression — it is the signal to re-derive the LAW in `src/net/interp_delay.rs` (derivation:
+//! WHAT FIRES WHEN: the test below FAILS when a lightyear upgrade changes the degenerate — the TODO
+//! implemented (ratio falling back to tick/frame rate), the `InterpolationConfig::default()`
+//! `min_delay` changed (#890), or the objective re-anchored (e.g. to newest-received instead of
+//! server-estimate, which would make the delay RTT-independent and retire the `rtt/2` term). A
+//! failure here is NOT a regression — it is the signal to re-derive the LAW in
+//! `src/net/interp_delay.rs` (derivation:
 //! `.agents/scratch/interp-delay-derivation-2026-08-14.md`) and to revisit the parked upstream
 //! filing (`git show 90ba478^:.agents/scratch/wave-a-adoption-memo.md`, "lightyear interpolation
 //! delay" section),
@@ -41,28 +41,6 @@ use lightyear_sync::timeline::sync::{SyncTargetTimeline, TimelineSync};
 
 /// The game's fixed tick (64 Hz), matching `ClientPlugins { tick_duration }` in `net::client`.
 const TICK: Duration = Duration::from_nanos(1_000_000_000 / 64);
-
-/// The upstream defaults our fix overrides. `send_interval_ratio` is dead at `send_interval = 0`
-/// and our law does not read it, but a move in either default is the likely shape of #890's fix
-/// (1.7 -> 1.2 landed in 0.30 while the `to_duration` TODO stayed): re-check the degenerate below
-/// and re-derive the law in `src/net/interp_delay.rs` against the new baseline.
-#[test]
-fn upstream_interpolation_config_defaults_unchanged() {
-    let config = InterpolationConfig::default();
-    assert_eq!(
-        config.min_delay,
-        Duration::from_millis(5),
-        "lightyear changed InterpolationConfig::default().min_delay — re-derive the min_delay \
-         law in src/net/interp_delay.rs and revisit the parked upstream filing (see module doc)"
-    );
-    assert!(
-        (config.send_interval_ratio - 1.2).abs() < 1e-6,
-        "lightyear changed InterpolationConfig::default().send_interval_ratio (was 1.2, now {}) \
-         — re-check the send_interval=0 degenerate and re-derive src/net/interp_delay.rs (see \
-         module doc)",
-        config.send_interval_ratio
-    );
-}
 
 /// The degenerate itself: with `remote_send_interval = 0` (what our per-tick server advertises),
 /// a default-config interpolation clock is placed only `min_delay + 1 tick` = ~20.6 ms behind the

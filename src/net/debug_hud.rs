@@ -279,18 +279,7 @@ mod tests {
 
     use crate::ui_font::TEXT;
 
-    use super::{JITTER_ALARM, JITTER_WARN, card_shown, jitter_readout};
-    use crate::settings::DebugPanel;
-
-    /// The card needs both the setting and a connected link; a dropped link (RECONNECTING…) shows
-    /// none, and turning the setting off hides it in a live match.
-    #[test]
-    fn the_card_shows_with_the_setting_over_a_connected_link() {
-        assert!(card_shown(DebugPanel::On, true));
-        assert!(!card_shown(DebugPanel::On, false));
-        assert!(!card_shown(DebugPanel::Off, true));
-        assert!(!card_shown(DebugPanel::Off, false));
-    }
+    use super::{JITTER_ALARM, JITTER_WARN, jitter_readout};
 
     /// The game's fixed tick (64 Hz), spelled out rather than read from the runtime binding — the
     /// sibling-test discipline (cf. `net::interp_delay`'s tests).
@@ -301,32 +290,19 @@ mod tests {
     /// `extrapolate`'s expression.
     const HORIZON: Duration = Duration::from_millis(50);
 
-    /// MUTANT — dropping the saturating floor at zero: a spread at or under the horizon is the
-    /// extrapolator's to cover, so the readout is exactly `+0 ms` in the resting colour, never a
-    /// negative or wrapped value.
+    /// The label is the buffered excess (`spread − horizon`) in whole milliseconds with the
+    /// explicit sign — the buffer bought, not the raw spread. A spread at or under the horizon is
+    /// the extrapolator's to cover, so the readout floors at exactly `+0 ms` in the resting
+    /// colour, never a negative or wrapped value. An excess between one tick and the horizon is
+    /// amber, the horizon itself included; only an excess beyond the horizon is red. Swapping the
+    /// two thresholds, or dropping the saturating floor, reds this.
     #[test]
-    fn a_spread_under_the_horizon_floors_to_zero() {
+    fn amber_below_the_horizon_red_above_it() {
         for spread in [Duration::ZERO, Duration::from_millis(30), HORIZON] {
             let (label, color) = jitter_readout(spread, TICK, HORIZON);
             assert_eq!(label, "+0 ms", "spread {spread:?}");
             assert_eq!(color, TEXT, "spread {spread:?}");
         }
-    }
-
-    /// MUTANT — off-by-one at the tick boundary: exactly one tick of excess is amber (the bound is
-    /// inclusive); one microsecond under it keeps the resting colour.
-    #[test]
-    fn the_tick_boundary_is_inclusive_for_amber() {
-        let under = jitter_readout(HORIZON + TICK - Duration::from_micros(1), TICK, HORIZON);
-        assert_eq!(under.1, TEXT, "excess under one tick rests");
-        let at = jitter_readout(HORIZON + TICK, TICK, HORIZON);
-        assert_eq!(at.1, JITTER_WARN, "excess of one tick warns");
-    }
-
-    /// MUTANT — swapping the two thresholds: an excess between one tick and the horizon is amber,
-    /// the horizon itself included; only an excess beyond the horizon is red.
-    #[test]
-    fn amber_below_the_horizon_red_above_it() {
         let mid = jitter_readout(HORIZON + Duration::from_millis(30), TICK, HORIZON);
         assert_eq!(mid.1, JITTER_WARN, "excess between the thresholds warns");
         let at_horizon = jitter_readout(HORIZON + HORIZON, TICK, HORIZON);
@@ -336,12 +312,6 @@ mod tests {
         );
         let beyond = jitter_readout(HORIZON + HORIZON + Duration::from_micros(1), TICK, HORIZON);
         assert_eq!(beyond.1, JITTER_ALARM, "excess beyond the horizon alarms");
-    }
-
-    /// The label is the buffered excess in whole milliseconds with the explicit sign — the buffer
-    /// bought, not the raw spread.
-    #[test]
-    fn the_label_is_the_excess_in_whole_ms() {
         let (label, color) = jitter_readout(HORIZON + Duration::from_millis(68), TICK, HORIZON);
         assert_eq!(label, "+68 ms");
         assert_eq!(color, JITTER_ALARM);

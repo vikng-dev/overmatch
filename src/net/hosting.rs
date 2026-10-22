@@ -628,7 +628,7 @@ mod tests {
     }
 
     #[test]
-    fn a_missing_required_setting_names_its_variable() {
+    fn a_malformed_setting_names_its_variable_and_never_its_value() {
         for var in [API, NETCODE_KEY, REPORT_SECRET] {
             let mut env = contract_env();
             env.remove(var);
@@ -636,10 +636,6 @@ mod tests {
             assert_eq!(err.var, var);
             assert!(err.to_string().starts_with(var), "{err}");
         }
-    }
-
-    #[test]
-    fn a_malformed_setting_names_its_variable_and_never_its_value() {
         // 62 hex characters: secret-shaped, one byte short of a netcode key.
         let secret_shaped = "41d7c2e9b0a5f3e8d1c6b4a2f9e7d5c3b1a0f8e6d4c2b0a9f7e5d3c1b9a7f5";
         let cases: [(&str, String); 13] = [
@@ -866,12 +862,11 @@ mod tests {
         app.update();
         assert_eq!(app.should_exit(), Some(AppExit::Success));
 
+        // `finish` posts `end` synchronously, so any call it made is already answered; the wait
+        // covers only the fake Worker's hand-off after its reply.
         hosted.finish();
         assert!(
-            worker
-                .seen
-                .recv_timeout(Duration::from_millis(300))
-                .is_err(),
+            worker.seen.recv_timeout(Duration::from_millis(50)).is_err(),
             "no end call after a 410"
         );
     }

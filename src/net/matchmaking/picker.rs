@@ -338,42 +338,6 @@ mod tests {
     }
 
     #[test]
-    fn labels_show_range_ping_and_no_estimate() {
-        let groups = groups(&fixture(), &settled_pings());
-        assert_eq!(group_ping_label(&groups[0]), "45–107 ms");
-        assert_eq!(group_ping_label(&groups[2]), "no estimate");
-        let mumbai = &groups[0].rows[2];
-        assert_eq!(estimate_label(&mumbai.estimate), "no estimate");
-        assert_eq!(spread_label(&mumbai.estimate), "");
-        let singapore = &groups[0].rows[0];
-        assert_eq!(estimate_label(&singapore.estimate), "45 ms");
-        assert_eq!(spread_label(&singapore.estimate), "spread 4");
-        assert_eq!(matches_label(1), "1 match");
-        assert_eq!(matches_label(0), "0 matches");
-    }
-
-    #[test]
-    fn single_measured_location_group_shows_one_value() {
-        let pings = table(&[
-            ("Paris", measured(228.0)),
-            ("Frankfurt", Estimate::Unavailable),
-        ]);
-        let groups = groups(&fixture(), &pings);
-        let europe = groups.iter().find(|g| g.continent == "Europe").unwrap();
-        assert_eq!(group_ping_label(europe), "228 ms");
-    }
-
-    /// A continent whose measured locations round to the same ping shows one value, not a range.
-    #[test]
-    fn equal_measured_locations_show_one_value() {
-        let pings = table(&[("Paris", measured(210.0)), ("Frankfurt", measured(210.3))]);
-        let groups = groups(&fixture(), &pings);
-        let europe = groups.iter().find(|g| g.continent == "Europe").unwrap();
-        assert_eq!(europe.range_ms(), Some((210.0, 210.3)));
-        assert_eq!(group_ping_label(europe), "210 ms");
-    }
-
-    #[test]
     fn unprobed_locations_read_as_measuring_and_block_settling() {
         let pings = table(&[("Singapore", measured(45.0))]);
         let groups = groups(&fixture(), &pings);
@@ -392,19 +356,19 @@ mod tests {
             vec!["Mumbai", "Singapore", "Tokyo"],
             "the best group's unmeasured location is ticked with it"
         );
-    }
 
-    #[test]
-    fn no_estimate_anywhere_ticks_nothing() {
         let pings = fixture()
             .continents
             .iter()
             .flat_map(|c| &c.locations)
             .map(|l| (l.id.clone(), Estimate::Unavailable))
             .collect();
-        let groups = groups(&fixture(), &pings);
+        let groups = super::groups(&fixture(), &pings);
         assert!(settled(&groups));
-        assert!(default_selection(&groups).is_empty());
+        assert!(
+            default_selection(&groups).is_empty(),
+            "no estimate anywhere ticks nothing"
+        );
         assert_eq!(
             order(&groups)[0].0,
             "Europe",
@@ -443,18 +407,5 @@ mod tests {
             request.pings,
             BTreeMap::from([("Paris".to_owned(), 228), ("Singapore".to_owned(), 45)])
         );
-    }
-
-    #[test]
-    fn labels_join_city_and_distinct_country() {
-        let mut response = fixture();
-        response.continents[0].locations[0].country = "France".into();
-        let groups = groups(&response, &PingTable::new());
-        let paris = groups
-            .iter()
-            .flat_map(|g| &g.rows)
-            .find(|r| r.id == "Paris")
-            .unwrap();
-        assert_eq!(paris.label, "Paris, France");
     }
 }

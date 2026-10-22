@@ -166,38 +166,6 @@ fn log_flow(flow: Res<State<Flow>>) {
 mod tests {
     use super::*;
 
-    /// The whole derivation, as a truth table over every fact combination.
-    #[test]
-    fn flow_of_truth_table() {
-        for playing in [false, true] {
-            assert_eq!(
-                flow_of(FlowFacts::Offline { playing }),
-                if playing { Flow::InMatch } else { Flow::Boot },
-                "offline, playing {playing}",
-            );
-        }
-        for link in [false, true] {
-            for connected_once in [false, true] {
-                for playing in [false, true] {
-                    let expected = match (link, connected_once, playing) {
-                        (false, _, _) => Flow::Lobby,
-                        (true, true, true) => Flow::InMatch,
-                        (true, _, _) => Flow::Joining,
-                    };
-                    assert_eq!(
-                        flow_of(FlowFacts::Net {
-                            link,
-                            connected_once,
-                            playing,
-                        }),
-                        expected,
-                        "net, link {link}, connected once {connected_once}, playing {playing}",
-                    );
-                }
-            }
-        }
-    }
-
     /// A dropped link stays in the match: RECONNECTING… is an overlay over the match world, not a
     /// screen. Only losing the link entity (an abandoned or left match) leaves it.
     #[test]

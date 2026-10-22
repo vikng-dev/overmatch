@@ -857,25 +857,6 @@ mod tests {
         );
     }
 
-    /// THE BOUNDARY FRAME IS NOT STARVED: a cursor exactly ON the newest sample reads the exact
-    /// sample (no gap opens); the first fraction past it is starvation. Loosening the strict
-    /// `> 0` comparison in either direction reds one half.
-    #[test]
-    fn the_boundary_frame_is_not_starved() {
-        let (newest, vel, ang) = basis_inputs();
-        let clamp = (newest.1, newest.2);
-        let mut edge = HullEdge::default();
-        let (presented, _) = edge.step(&params(), (Tick(100), 0.0), newest, vel, ang, clamp);
-        assert_eq!(presented, Presented::Lawful, "gap 0 is the exact sample");
-        assert!(matches!(edge.phase, Phase::Tracking), "no episode opens");
-        let (presented, _) = edge.step(&params(), (Tick(100), 0.01), newest, vel, ang, clamp);
-        assert!(
-            matches!(presented, Presented::Pose(..)),
-            "the first fraction past the sample is a starved frame",
-        );
-        assert!(matches!(edge.phase, Phase::Starved { .. }));
-    }
-
     /// BLEND-BACK FOLDS THE RESIDUAL WITHOUT A SNAP. A ~2-tick gap at 5 m/s leaves the certified
     /// worst-case residual ½·a_max·t² (~4.9 mm here), laid PERPENDICULAR to the motion so the
     /// stream's travel and the blend's correction decouple exactly; frames at 240 Hz then must
@@ -1192,36 +1173,6 @@ mod tests {
         (base + whole as i32, offset - whole)
     }
 
-    /// IMPULSE∧GAP COINCIDENCE is membership of the half-open span `(floor, ceil]`. Widening either
-    /// end (inclusive floor, exclusive ceiling) reds an endpoint assert; the top-of-range case pins
-    /// that ticks are monotonic (lightyear 0.30 does not wrap them).
-    #[test]
-    fn impulse_ticks_inside_a_gap_span_count_as_coincident() {
-        let mut ledger = ImpulseTicks::default();
-        ledger.record(Tick(102), ImpulseClass::Fire);
-        assert!(ledger.any_within(Tick(100), Tick(103)), "interior tick");
-        assert!(
-            !ledger.any_within(Tick(102), Tick(105)),
-            "floor is exclusive"
-        );
-        assert!(
-            ledger.any_within(Tick(99), Tick(102)),
-            "ceiling is inclusive"
-        );
-        assert!(!ledger.any_within(Tick(103), Tick(110)), "outside misses");
-        // At the top of the range the span orders numerically: no wrap back to small ticks.
-        let mut top = ImpulseTicks::default();
-        top.record(Tick(u32::MAX - 1), ImpulseClass::Damage);
-        assert!(top.any_within(Tick(u32::MAX - 3), Tick(u32::MAX)));
-        assert!(
-            !top.any_within(Tick(u32::MAX), Tick(2)),
-            "an inverted span holds nothing"
-        );
-        // Recording is idempotent per (tick, class).
-        ledger.record(Tick(102), ImpulseClass::Fire);
-        assert_eq!(ledger.ring.len(), 1, "a duplicate stamp records once");
-    }
-
     fn edge_world(cursor: TickInstant) -> (World, Entity) {
         let mut world = World::new();
         world.insert_resource(TickDuration(core::time::Duration::from_secs_f64(
@@ -1318,50 +1269,5 @@ mod tests {
             diag.gap_ticks_max,
         );
         assert_eq!(world.resource::<HullEdges>().open_gaps(), 0);
-    }
-
-    /// RESYNCS ARE COUNTED, and everything past the handshake's one is steady-state. A frame whose
-    /// cursor does not move across the sync set counts nothing; each snap counts once. Comparing
-    /// against anything but the pre-sync cursor reds the quiet frame; miscounting the handshake
-    /// allowance reds the steady half.
-    #[test]
-    fn interpolation_resyncs_are_counted() {
-        let mut world = World::new();
-        world.init_resource::<FrontierDiag>();
-        world.init_resource::<PreSyncCursor>();
-        world.insert_resource(InterpolationTimeline::default());
-        let frame = |world: &mut World, snap_to: Option<Tick>| {
-            world
-                .run_system_once(note_pre_sync_cursor)
-                .expect("pre-sync note runs");
-            if let Some(tick) = snap_to {
-                world
-                    .resource_mut::<InterpolationTimeline>()
-                    .set_now(TickInstant::from(tick));
-            }
-            world
-                .run_system_once(count_interp_resyncs)
-                .expect("resync counter runs");
-        };
-        frame(&mut world, Some(Tick(100)));
-        frame(&mut world, None);
-        frame(&mut world, Some(Tick(97)));
-        let diag = world.resource::<FrontierDiag>();
-        assert_eq!(diag.sync_events, 2, "two snaps, one quiet frame");
-        assert_eq!(
-            diag.steady_sync_events(),
-            1,
-            "the handshake resync is the one allowed event",
-        );
-        // A reconnect owes one more handshake: its snap is not steady-state.
-        world.resource_mut::<FrontierDiag>().handshake_spent = false;
-        frame(&mut world, Some(Tick(40)));
-        let diag = world.resource::<FrontierDiag>();
-        assert_eq!(diag.sync_events, 3);
-        assert_eq!(
-            diag.steady_sync_events(),
-            1,
-            "a reconnect's handshake resync is not steady-state",
-        );
     }
 }

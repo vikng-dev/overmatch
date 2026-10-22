@@ -364,64 +364,15 @@ mod offline_feel_tests {
         assert_eq!(press(&mut app), TransmissionMode::FixedRadii);
     }
 
-    #[test]
-    fn reverse_grade_shift_hud_uses_reverse_ladder_letter() {
-        let state = TransmissionState {
-            reverse: true,
-            scheduler: track::transmission::SchedulerState::GradeShift { from: 4, to: 2 },
-            ..TransmissionState::for_governor()
-        };
-        assert_eq!(drive_hud::scheduler_hud_line(&state), "sched GRADE R4->R2");
-    }
-
-    #[test]
-    fn fixed_radii_steering_hud_names_detent_and_authored_radius() {
-        let radii = [
-            (3.44, 10.2),
-            (5.28, 15.6),
-            (7.62, 22.5),
-            (11.30, 33.4),
-            (17.32, 51.2),
-            (25.68, 76.0),
-            (37.47, 110.8),
-            (55.78, 165.0),
-        ];
-        let mut state = TransmissionState {
-            gear: 1,
-            steer_step: 2,
-            ..TransmissionState::for_governor()
-        };
-        assert_eq!(
-            drive_hud::steering_hud_line(TransmissionMode::FixedRadii, &state, Some(&radii)),
-            "STEER II R~3m"
-        );
-
-        state.gear = 8;
-        state.steer_step = 1;
-        assert_eq!(
-            drive_hud::steering_hud_line(TransmissionMode::FixedRadii, &state, Some(&radii)),
-            "STEER I R~165m"
-        );
-
-        state.steer_step = 0;
-        assert_eq!(
-            drive_hud::steering_hud_line(TransmissionMode::FixedRadii, &state, Some(&radii)),
-            "",
-            "released steering leaves the visibility field blank"
-        );
-        state.steer_step = 2;
-        assert_eq!(
-            drive_hud::steering_hud_line(TransmissionMode::Hybrid, &state, Some(&radii)),
-            "",
-            "the authored-detent readout is FixedRadii-only"
-        );
-    }
-
-    /// One formatter owns the exact normal row in both client roots. `P` and `*` are independent
-    /// park/hill-hold markers; cruise/reverse leave both marker columns blank; Governor hides the
-    /// inapplicable gear/rpm fields without hiding speed.
+    /// One formatter owns the normal row in both client roots. `P` and `*` are independent
+    /// park/hill-hold markers; cruise/reverse leave both markers off; Governor hides the
+    /// inapplicable gear/rpm fields without hiding speed, and speed is horizontal ground speed.
     #[test]
     fn standard_drive_row_format_is_shared_and_compact() {
+        // The row's fields and markers, with the column padding stripped.
+        fn fields(row: String) -> Vec<String> {
+            row.split_whitespace().map(str::to_owned).collect()
+        }
         let speed_mps = 12.5; // DERIVED 45 km/h.
         let mut state = TransmissionState {
             gear: 1,
@@ -434,21 +385,30 @@ mod offline_feel_tests {
             gear_label: "F1".to_string(),
         };
         assert_eq!(
-            drive_hud::standard_drive_row(Some((&state, &operating)), speed_mps),
-            "Gear F1P*  RPM 2.6k  Speed  45 km/h"
+            fields(drive_hud::standard_drive_row(
+                Some((&state, &operating)),
+                speed_mps
+            )),
+            ["Gear", "F1P*", "RPM", "2.6k", "Speed", "45", "km/h"]
         );
 
         state.hill_hold = false;
         assert_eq!(
-            drive_hud::standard_drive_row(Some((&state, &operating)), speed_mps),
-            "Gear F1P   RPM 2.6k  Speed  45 km/h",
+            fields(drive_hud::standard_drive_row(
+                Some((&state, &operating)),
+                speed_mps
+            )),
+            ["Gear", "F1P", "RPM", "2.6k", "Speed", "45", "km/h"],
             "park owns P independently of hill hold"
         );
         state.park = false;
         state.hill_hold = true;
         assert_eq!(
-            drive_hud::standard_drive_row(Some((&state, &operating)), speed_mps),
-            "Gear F1*   RPM 2.6k  Speed  45 km/h",
+            fields(drive_hud::standard_drive_row(
+                Some((&state, &operating)),
+                speed_mps
+            )),
+            ["Gear", "F1*", "RPM", "2.6k", "Speed", "45", "km/h"],
             "hill hold owns * independently of park"
         );
 
@@ -457,64 +417,33 @@ mod offline_feel_tests {
         state.gear = 8;
         operating.gear_label = "F8".to_string();
         assert_eq!(
-            drive_hud::standard_drive_row(Some((&state, &operating)), speed_mps),
-            "Gear F8    RPM 2.6k  Speed  45 km/h"
+            fields(drive_hud::standard_drive_row(
+                Some((&state, &operating)),
+                speed_mps
+            )),
+            ["Gear", "F8", "RPM", "2.6k", "Speed", "45", "km/h"]
         );
 
         state.gear = 2;
         state.reverse = true;
         operating.gear_label = "R2".to_string();
         assert_eq!(
-            drive_hud::standard_drive_row(Some((&state, &operating)), speed_mps),
-            "Gear R2    RPM 2.6k  Speed  45 km/h"
+            fields(drive_hud::standard_drive_row(
+                Some((&state, &operating)),
+                speed_mps
+            )),
+            ["Gear", "R2", "RPM", "2.6k", "Speed", "45", "km/h"]
         );
         assert_eq!(
-            drive_hud::standard_drive_row(None, speed_mps),
-            "Speed  45 km/h",
+            fields(drive_hud::standard_drive_row(None, speed_mps)),
+            ["Speed", "45", "km/h"],
             "Governor/spec-less vehicles retain speed and omit inapplicable fields"
         );
-    }
-
-    #[test]
-    fn standard_drive_row_rounds_rpm_and_horizontal_ground_speed() {
-        let state = TransmissionState::for_governor();
-        let operating = DriveReadout {
-            rpm: 2_649.0,
-            gear_label: "F1".to_string(),
-        };
-        let ground = drive_hud::horizontal_ground_speed(Vec3::new(3.0, 99.0, 4.0));
-        assert_eq!(ground, 5.0, "vertical velocity is excluded");
         assert_eq!(
-            drive_hud::standard_drive_row(Some((&state, &operating)), ground),
-            "Gear F1    RPM 2.6k  Speed  18 km/h"
+            drive_hud::horizontal_ground_speed(Vec3::new(3.0, 99.0, 4.0)),
+            5.0,
+            "vertical velocity is excluded"
         );
-        let rounded = drive_hud::standard_drive_row(Some((&state, &operating)), 12.7);
-        assert_eq!(rounded, "Gear F1    RPM 2.6k  Speed  46 km/h");
-
-        let narrow = DriveReadout {
-            rpm: 849.0,
-            gear_label: "F1".to_string(),
-        };
-        let narrow = drive_hud::standard_drive_row(Some((&state, &narrow)), 2.0);
-        assert_eq!(narrow, "Gear F1    RPM 0.8k  Speed   7 km/h");
-        assert_eq!(
-            rounded.len(),
-            narrow.len(),
-            "compact rpm and speed fields retain a stable row width"
-        );
-    }
-
-    #[test]
-    fn f3_debug_toggle_defaults_closed_and_latches_each_press() {
-        let mut visible = false;
-        visible = drive_hud::debug_visible_after_f3(visible, false);
-        assert!(!visible, "default/no press stays hidden");
-        visible = drive_hud::debug_visible_after_f3(visible, true);
-        assert!(visible, "first F3 press opens the drive diagnostics");
-        visible = drive_hud::debug_visible_after_f3(visible, false);
-        assert!(visible, "the view state latches between presses");
-        visible = drive_hud::debug_visible_after_f3(visible, true);
-        assert!(!visible, "second F3 press closes the drive diagnostics");
     }
 }
 

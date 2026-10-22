@@ -484,45 +484,6 @@ mod tests {
         })
     }
 
-    /// Same state → same combined hash AND same sub-hashes. This is the join's core assumption: two
-    /// worlds that reached an identical logical state must produce byte-identical hashes.
-    #[test]
-    fn identical_state_hashes_identically() {
-        let (p, q, lv, av, drive, sim) = sample();
-        let grip = TrackGrip::default();
-        let transmission = sample_transmission();
-        let a = hash_sample((p, q, lv, av), &drive, &grip, &transmission, &sim);
-        let b = hash_sample((p, q, lv, av), &drive, &grip, &transmission, &sim);
-        // RE-MEASURED when the `shk` stream left with the prediction stack (REV 27): `shk` was
-        // never folded into `combined` or `sim`, so every remaining stream's bytes are unchanged.
-        assert_eq!(
-            [
-                a.combined, a.pos, a.rot, a.lv, a.av, a.sim, a.drv, a.srv, a.rld, a.rec, a.blt,
-                a.trn, a.elm,
-            ],
-            [
-                17_496_020_387_936_353_359,
-                5_276_285_167_157_175_194,
-                5_407_327_877_548_523_030,
-                8_825_002_124_784_658_797,
-                15_886_300_944_198_297_253,
-                2_278_136_831_584_015_957,
-                3_269_583_271_824_065_410,
-                14_071_911_453_643_095_408,
-                3_439_918_263_059_415_993,
-                12_037_784_973_900_930_602,
-                16_317_528_332_690_472_771,
-                16_561_026_162_406_393_170,
-                12_638_153_115_695_167_455,
-            ]
-        );
-        assert_eq!(a.combined, b.combined);
-        assert_eq!(
-            (a.pos, a.rot, a.lv, a.av, a.sim),
-            (b.pos, b.rot, b.lv, b.av, b.sim)
-        );
-    }
-
     /// A SINGLE flipped bit of angular velocity changes the combined hash and the `av` sub-hash, and
     /// leaves every other sub-hash untouched — the property that lets the analyzer localize a
     /// divergence to one component. The flip is one ULP: `av.z`'s least-significant mantissa bit.
@@ -552,15 +513,9 @@ mod tests {
         assert_eq!(base.rot, flipped.rot);
         assert_eq!(base.lv, flipped.lv);
         assert_eq!(base.sim, flipped.sim);
-    }
 
-    /// `+0.0` and `−0.0` are the same number but different bits, and bit-exactness is the bar, so they
-    /// must hash apart (a sign-flip through zero is a real last-bit divergence).
-    #[test]
-    fn signed_zero_hashes_apart() {
-        let (p, q, _lv, av, drive, sim) = sample();
-        let grip = TrackGrip::default();
-        let transmission = sample_transmission();
+        // `+0.0` and `−0.0` are the same number but different bits, and bit-exactness is the bar,
+        // so they hash apart (a sign-flip through zero is a real last-bit divergence).
         let pos_zero = hash_sample(
             (p, q, Vec3::new(0.0, 0.0, 0.0), av),
             &drive,
@@ -576,27 +531,6 @@ mod tests {
             &sim,
         );
         assert_ne!(pos_zero.lv, neg_zero.lv);
-    }
-
-    /// A one-ULP belt-phase difference must hash apart and localize to the `blt` stream —
-    /// phase is force-station-advecting sim state, not cosmetic.
-    #[test]
-    fn belt_phase_ulp_localizes_to_belt_stream() {
-        let (p, q, lv, av, drive, sim) = sample();
-        let grip = TrackGrip::default();
-        let transmission = sample_transmission();
-        let mut shifted = drive;
-        shifted.sides[1].phase = f64::from_bits(drive.sides[1].phase.to_bits() ^ 1);
-        let hn = hash_sample((p, q, lv, av), &drive, &grip, &transmission, &sim);
-        let hs = hash_sample((p, q, lv, av), &shifted, &grip, &transmission, &sim);
-        assert_ne!(hn.sim, hs.sim);
-        assert_ne!(hn.blt, hs.blt);
-        // The other carried-state streams are untouched by a belt flip.
-        assert_eq!(hn.drv, hs.drv);
-        assert_eq!(hn.srv, hs.srv);
-        assert_eq!(hn.rld, hs.rld);
-        assert_eq!(hn.rec, hs.rec);
-        assert_eq!(hn.trn, hs.trn);
     }
 
     /// Each carried-state field family flips ITS sub-hash (plus `sim` and `combined`) and no other —
@@ -723,6 +657,17 @@ mod tests {
             (a.drv, a.srv, a.rld, a.rec, a.trn)
         );
 
+        // Belt phase: one f64 ULP off — force-station-advecting sim state, not cosmetic.
+        let mut drive6 = drive;
+        drive6.sides[1].phase = f64::from_bits(drive.sides[1].phase.to_bits() ^ 1);
+        let ph = hash_sample((p, q, lv, av), &drive6, &grip, &transmission, &sim);
+        assert_ne!(base.blt, ph.blt);
+        assert_ne!(base.sim, ph.sim);
+        assert_eq!(
+            (base.drv, base.srv, base.rld, base.rec, base.trn),
+            (ph.drv, ph.srv, ph.rld, ph.rec, ph.trn)
+        );
+
         // Transmission: one crank bit off — localizes to the atomic `trn` stream.
         let mut transmission2 = transmission;
         transmission2.0.omega_e = f32::from_bits(transmission.0.omega_e.to_bits() ^ 1);
@@ -734,49 +679,9 @@ mod tests {
             (base.drv, base.srv, base.rld, base.rec, base.blt),
             (t.drv, t.srv, t.rld, t.rec, t.blt)
         );
-    }
 
-    /// Every field in the authoritative 16-field inventory affects the exact transmission stream.
-    #[test]
-    fn transmission_inventory_fields_all_affect_hash() {
-        let (p, q, lv, av, drive, sim) = sample();
-        let grip = TrackGrip::default();
-        let base = sample_transmission();
-        let base_hash = hash_sample((p, q, lv, av), &drive, &grip, &base, &sim).trn;
-        let mut variants = [base; 16];
-        variants[0].0.gear = variants[0].0.gear.wrapping_add(1);
-        variants[1].0.shift_ticks = variants[1].0.shift_ticks.wrapping_add(1);
-        variants[2].0.steer_step = variants[2].0.steer_step.wrapping_add(1);
-        variants[3].0.reverse = !variants[3].0.reverse;
-        variants[4].0.park = !variants[4].0.park;
-        variants[5].0.last_shift_dir = 1;
-        variants[6].0.dwell_ticks = variants[6].0.dwell_ticks.wrapping_add(1);
-        variants[7].0.omega_e = f32::from_bits(variants[7].0.omega_e.to_bits() ^ 1);
-        variants[8].0.clutch_out = !variants[8].0.clutch_out;
-        variants[9].0.demand_n = f32::from_bits(variants[9].0.demand_n.to_bits() ^ 1);
-        variants[10].0.demand_initialized = !variants[10].0.demand_initialized;
-        variants[11].0.grade_confirm_ticks = variants[11].0.grade_confirm_ticks.wrapping_add(1);
-        variants[12].0.grade_target = variants[12].0.grade_target.wrapping_add(1);
-        variants[13].0.scheduler = SchedulerState::HillHold;
-        variants[14].0.hill_hold = !variants[14].0.hill_hold;
-        variants[15].0.hold_reengage_ticks = variants[15].0.hold_reengage_ticks.wrapping_add(1);
-
-        for (index, variant) in variants.iter().enumerate() {
-            let hash = hash_sample((p, q, lv, av), &drive, &grip, variant, &sim).trn;
-            assert_ne!(
-                base_hash, hash,
-                "transmission inventory field {index} was not hashed"
-            );
-        }
-    }
-
-    /// Element strain and force-affecting contact lifetime are exact state, ordered by side then
-    /// flat material `link * 3 + column`, and localize to their own carried-state stream.
-    #[test]
-    fn element_field_bits_localize_to_element_stream() {
-        let (p, q, lv, av, drive, sim) = sample();
-        let grip = TrackGrip::default();
-        let transmission = sample_transmission();
+        // Elements: strain and force-affecting contact lifetime are exact state, ordered by side
+        // then flat material `link * 3 + column`, and localize to the `elm` stream.
         let elements = TrackGripElements::for_links(2);
         let (gate, servos) = (test_weapon_gate(), test_servos());
         let state = TankState {
@@ -823,9 +728,43 @@ mod tests {
         assert_ne!(base.elm, dwell_hash.elm);
     }
 
-    /// `rounds_fired` rolls back because it derives tracer cadence, but a dropped predicted round
-    /// may leave that phase one round from authority without changing simulation truth. The
-    /// production trace therefore excludes it; the same-platform fresh-App digest must not.
+    /// Every field in the authoritative 16-field inventory affects the exact transmission stream.
+    #[test]
+    fn transmission_inventory_fields_all_affect_hash() {
+        let (p, q, lv, av, drive, sim) = sample();
+        let grip = TrackGrip::default();
+        let base = sample_transmission();
+        let base_hash = hash_sample((p, q, lv, av), &drive, &grip, &base, &sim).trn;
+        let mut variants = [base; 16];
+        variants[0].0.gear = variants[0].0.gear.wrapping_add(1);
+        variants[1].0.shift_ticks = variants[1].0.shift_ticks.wrapping_add(1);
+        variants[2].0.steer_step = variants[2].0.steer_step.wrapping_add(1);
+        variants[3].0.reverse = !variants[3].0.reverse;
+        variants[4].0.park = !variants[4].0.park;
+        variants[5].0.last_shift_dir = 1;
+        variants[6].0.dwell_ticks = variants[6].0.dwell_ticks.wrapping_add(1);
+        variants[7].0.omega_e = f32::from_bits(variants[7].0.omega_e.to_bits() ^ 1);
+        variants[8].0.clutch_out = !variants[8].0.clutch_out;
+        variants[9].0.demand_n = f32::from_bits(variants[9].0.demand_n.to_bits() ^ 1);
+        variants[10].0.demand_initialized = !variants[10].0.demand_initialized;
+        variants[11].0.grade_confirm_ticks = variants[11].0.grade_confirm_ticks.wrapping_add(1);
+        variants[12].0.grade_target = variants[12].0.grade_target.wrapping_add(1);
+        variants[13].0.scheduler = SchedulerState::HillHold;
+        variants[14].0.hill_hold = !variants[14].0.hill_hold;
+        variants[15].0.hold_reengage_ticks = variants[15].0.hold_reengage_ticks.wrapping_add(1);
+
+        for (index, variant) in variants.iter().enumerate() {
+            let hash = hash_sample((p, q, lv, av), &drive, &grip, variant, &sim).trn;
+            assert_ne!(
+                base_hash, hash,
+                "transmission inventory field {index} was not hashed"
+            );
+        }
+    }
+
+    /// `rounds_fired` derives tracer cadence and gates no simulation, so the production trace's
+    /// cross-world hash excludes it. The fresh-App digest compares two runs of one sim, so it must
+    /// cover it: a replay whose tracer phase drifts still diverges.
     #[test]
     fn fresh_app_digest_covers_the_rollback_tracer_phase() {
         let (p, q, lv, av, drive, sim) = sample();

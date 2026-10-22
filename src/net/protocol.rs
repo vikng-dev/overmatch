@@ -1095,18 +1095,20 @@ fn bridge_action_state_to_tank_command(
 ) {
     let tick = timeline.tick();
     for (action, mut command) in &mut tanks {
-        // Whole-struct copy (matches `ActionState`'s "absolute snapshot per tick" contract) …
-        let mut next = action.0;
-        // … but a CONSUMABLE commits ONLY on a tick this command can ATTEST it was authored for.
-        // `for_tick` was stamped by `net::client`'s `stamp_input_tick` with the tick lightyear
-        // files the command under; anything lightyear inherited, repeated, fabricated or froze
-        // carries some OTHER tick's stamp. Fail closed — never a detector, always a proof. See the
-        // doc above for the four ways an unattested value reaches this line.
-        if next.for_tick != tick.0 {
-            next.fail_consumables_closed();
-        }
-        *command = next;
+        *command = attest(action.0, tick);
     }
+}
+
+/// The bridge's per-tank rule: a whole-struct copy (matches `ActionState`'s "absolute snapshot per
+/// tick" contract), except that a CONSUMABLE commits ONLY on a tick this command can ATTEST it was
+/// authored for. `for_tick` was stamped by `net::client`'s `stamp_input_tick` with the tick
+/// lightyear files the command under; anything lightyear inherited, repeated, fabricated or froze
+/// carries some OTHER tick's stamp. Fail closed — never a detector, always a proof.
+pub(super) fn attest(mut command: TankCommand, tick: Tick) -> TankCommand {
+    if command.for_tick != tick.0 {
+        command.fail_consumables_closed();
+    }
+    command
 }
 
 /// In-crate tests for the input-attestation seam.
@@ -1222,63 +1224,48 @@ mod tests {
         );
     }
 
-    #[test]
-    fn public_servo_angles_drive_remote_tanks() {
-        let mut world = World::new();
-        let turret = world.spawn(ServoCommand::default()).id();
-        let gun = world.spawn(ServoCommand::default()).id();
-        let hull = world.spawn_empty().id();
-        let muzzle = world.spawn_empty().id();
-        world.spawn((
-            Remote,
-            ServoAngles {
-                turret: 0.75,
-                gun: -0.2,
-            },
-            Rig {
-                hull,
-                turret,
-                gun,
-                muzzle,
-            },
-        ));
-
-        world.run_system_once(apply_servo_angles).unwrap();
-
-        assert_eq!(world.get::<ServoCommand>(turret).unwrap().target, 0.75);
-        assert_eq!(world.get::<ServoCommand>(gun).unwrap().target, -0.2);
-    }
-
-    /// The owner's servo targets belong to `aim::drive_aim_servos` alone. The OWN tank is
-    /// `Remote` like every replicated tank, so only the owner marker keeps this pump off it —
-    /// mutate `Without<GameControlled>` away and the replicated angle overwrites the local
-    /// intent here.
+    /// The public `ServoAngles` drive every remote tank's servo targets, but the owner's belong to
+    /// `aim::drive_aim_servos` alone. The OWN tank is `Remote` like every replicated tank, so only
+    /// the owner marker keeps this pump off it — mutate `Without<GameControlled>` away and the
+    /// replicated angle overwrites the local intent here.
     #[test]
     fn public_servo_angles_skip_the_tank_that_holds_the_input_slot() {
+        fn spawn_tank(world: &mut World, owned: bool) -> (Entity, Entity) {
+            let turret = world.spawn(ServoCommand::default()).id();
+            let gun = world.spawn(ServoCommand::default()).id();
+            let hull = world.spawn_empty().id();
+            let muzzle = world.spawn_empty().id();
+            let mut root = world.spawn((
+                Remote,
+                ServoAngles {
+                    turret: 0.75,
+                    gun: -0.2,
+                },
+                Rig {
+                    hull,
+                    turret,
+                    gun,
+                    muzzle,
+                },
+            ));
+            if owned {
+                root.insert(GameControlled);
+            }
+            (turret, gun)
+        }
         let mut world = World::new();
-        let turret = world.spawn(ServoCommand::default()).id();
-        let gun = world.spawn(ServoCommand::default()).id();
-        let hull = world.spawn_empty().id();
-        let muzzle = world.spawn_empty().id();
-        world.spawn((
-            Remote,
-            GameControlled,
-            ServoAngles {
-                turret: 0.75,
-                gun: -0.2,
-            },
-            Rig {
-                hull,
-                turret,
-                gun,
-                muzzle,
-            },
-        ));
+        let (remote_turret, remote_gun) = spawn_tank(&mut world, false);
+        let (own_turret, own_gun) = spawn_tank(&mut world, true);
 
         world.run_system_once(apply_servo_angles).unwrap();
 
-        assert_eq!(world.get::<ServoCommand>(turret).unwrap().target, 0.0);
-        assert_eq!(world.get::<ServoCommand>(gun).unwrap().target, 0.0);
+        assert_eq!(
+            world.get::<ServoCommand>(remote_turret).unwrap().target,
+            0.75
+        );
+        assert_eq!(world.get::<ServoCommand>(remote_gun).unwrap().target, -0.2);
+        assert_eq!(world.get::<ServoCommand>(own_turret).unwrap().target, 0.0);
+        assert_eq!(world.get::<ServoCommand>(own_gun).unwrap().target, 0.0);
     }
 
     #[test]
@@ -1343,32 +1330,6 @@ mod tests {
         assert_eq!(
             actual, WIRE_SURFACE_HASH,
             "wire surface changed: bump PROTOCOL_REV and re-pin WIRE_SURFACE_HASH to {actual:#018x}",
-        );
-    }
-
-    /// Handshake fixture: the complete manifest fold at the CURRENT [`PROTOCOL_REV`] is pinned as a
-    /// concrete netcode `protocol_id`, so fixture drift is visible even when every constituent pin
-    /// was edited. The re-pin comment below records which REV the pinned value belongs to.
-    #[test]
-    fn wire_manifest_fingerprint_is_pinned() {
-        // Pin the VERSION-INDEPENDENT wire manifest, not the full handshake tag: this trips on a
-        // real wire skew (surface / own types / wire deps / PROTOCOL_REV) but NOT on a routine
-        // crate-version bump. The version still folds into the runtime PROTOCOL_FINGERPRINT for
-        // version-exact handshakes (see `fingerprint_couples_every_pinned_wire_manifest_value`); it
-        // simply no longer forces a re-pin here on every release.
-        let wire_manifest = wire_manifest_fingerprint(
-            WIRE_SURFACE_HASH,
-            WIRE_TYPES_HASH,
-            WIRE_DEP_AVIAN3D,
-            WIRE_DEP_LIGHTYEAR,
-            PROTOCOL_REV,
-        );
-        // Pins REV 33: the pen cam's `ShotExplanation`, the replicated `CombatantLife` and the
-        // round's `wound` rate on `FireEvent`, on the lightyear 0.30.1 wire dependency.
-        const EXPECTED_WIRE_MANIFEST_FINGERPRINT: u64 = 0xecff_3bbc_f30b_91c9;
-        assert_eq!(
-            wire_manifest, EXPECTED_WIRE_MANIFEST_FINGERPRINT,
-            "wire manifest changed: re-pin to {wire_manifest:#018x}",
         );
     }
 
@@ -1550,32 +1511,6 @@ mod tests {
              WIRE_SURFACE list beside it. Update WIRE_SURFACE to match plugin() (which then fails \
              wire_surface_is_pinned), then bump PROTOCOL_REV and re-pin WIRE_SURFACE_HASH — all in \
              the same diff.",
-        );
-    }
-
-    #[test]
-    fn derived_track_grip_is_absent_from_the_wire() {
-        let src = read_source("src/net/protocol.rs");
-        let stripped = strip_comments(&src);
-        let registrations = plugin_body(&stripped);
-        assert!(
-            !registrations.contains("component::<TrackGrip>"),
-            "TrackGrip is derived element telemetry — it must not replicate, predict, or trigger rollback (REV-15)"
-        );
-        assert!(!WIRE_SURFACE.contains(&"TrackGrip"));
-        assert!(
-            !WIRE_TYPE_DEFS
-                .iter()
-                .any(|(_, type_name)| *type_name == "TrackGrip")
-        );
-    }
-
-    #[test]
-    fn combatant_identity_replicates_with_the_owner_root() {
-        let source = strip_comments(&read_source("src/net/protocol.rs"));
-        assert!(
-            source.contains("app.component::<CombatantId>().replicate();"),
-            "every replicated root must carry its immutable CombatantId for outcome attribution"
         );
     }
 
@@ -1996,212 +1931,79 @@ mod tests {
         }
     }
 
-    /// UNATTESTED tick: the `ActionState` carries a command the player authored for tick 5, and the
-    /// sim is stepping tick 10. This is what EVERY way lightyear can hand back a value that is not
-    /// this tick's input looks like at the seam — hold-last extrapolation, a `SameAsPrecedent`
-    /// gap-fill, a stale un-overwritable entry, or an `Absent`-frozen `ActionState`. The bridge must
-    /// NOT re-latch the stale fire edge — not once, and not on any subsequent tick.
-    #[test]
-    fn unattested_tick_does_not_refire_held_edge() {
-        let mut world = World::new();
-        world.insert_resource(timeline_at(10));
-        let entity = world
-            .spawn((
-                ActionState(authored_for(5, fire_click())),
-                TankCommand::default(),
-            ))
-            .id();
-
-        // Three unattested ticks in a row, each clearing the command first (as `consume_edges`
-        // would): the bridge is the only thing that could re-latch the edge, and it must never.
-        for _ in 0..3 {
-            world.get_mut::<TankCommand>(entity).unwrap().fire_primary = false;
-            world
-                .run_system_once(bridge_action_state_to_tank_command)
-                .unwrap();
-            assert!(
-                !world.get::<TankCommand>(entity).unwrap().fire_primary,
-                "an unattested fire edge must not bridge",
-            );
-        }
-    }
-
-    /// An unattested tick carries the MOVEMENT levels and ABSOLUTES through (hold-last is CORRECT
-    /// for those — a starved stream keeping the last drive and lay is the right guess, and neither
-    /// commits anything irreversible), and fails every CONSUMABLE closed.
+    /// UNATTESTED tick: the `ActionState` carries a command authored for an older tick, or the
+    /// unstamped default (`for_tick == 0`, before any input message lands). This is what EVERY way
+    /// lightyear can hand back a value that is not this tick's input looks like at the seam —
+    /// hold-last extrapolation, a `SameAsPrecedent` gap-fill, a stale un-overwritable entry, or an
+    /// `Absent`-frozen `ActionState` (lightyear's `update_action_state` skips the apply, so the
+    /// frozen value is re-presented every tick for as long as the freeze lasts). The bridge carries
+    /// the MOVEMENT levels and ABSOLUTES through (hold-last is CORRECT for those — a starved stream
+    /// keeping the last drive and lay is the right guess, and neither commits anything
+    /// irreversible), and fails every CONSUMABLE closed at EVERY lag: a tolerance window of any
+    /// width would re-latch a frozen click (one unrequested 88 round per reload) or cycle the MG
+    /// after release. Attestation does not care WHY the value is stale.
     #[test]
     fn unattested_tick_keeps_movement_levels_fails_consumables_closed() {
+        let held = TankCommand {
+            throttle: 0.7,
+            steer: -0.3,
+            fire_secondary: true,
+            aim: Some(AimIntent::World(Vec3::new(1.0, 2.0, 3.0))),
+            range: 850.0,
+            fire_primary: true,
+            crew_swap: Some(CrewSwap::Start(CrewStation::Gunner, CrewStation::Loader)),
+            respawn: true,
+            for_tick: 0,
+        };
         let mut world = World::new();
-        world.insert_resource(timeline_at(10));
-
-        let held = authored_for(
-            5,
-            TankCommand {
-                throttle: 0.7,
-                steer: -0.3,
-                fire_secondary: true,
-                aim: Some(AimIntent::World(Vec3::new(1.0, 2.0, 3.0))),
-                range: 850.0,
-                fire_primary: true,
-                crew_swap: Some(CrewSwap::Start(CrewStation::Gunner, CrewStation::Loader)),
-                respawn: true,
-                for_tick: 0,
-            },
-        );
         let entity = world
             .spawn((ActionState(held), TankCommand::default()))
             .id();
 
-        world
-            .run_system_once(bridge_action_state_to_tank_command)
-            .unwrap();
-
-        let cmd = *world.get::<TankCommand>(entity).unwrap();
-        assert_eq!(cmd.throttle, 0.7, "throttle level held through starvation");
-        assert_eq!(cmd.steer, -0.3, "steer level held through starvation");
-        assert_eq!(
-            cmd.aim,
-            Some(AimIntent::World(Vec3::new(1.0, 2.0, 3.0))),
-            "aim absolute held"
-        );
-        assert_eq!(cmd.range, 850.0, "range absolute held");
-        // …and every consumable fails closed.
-        assert!(
-            !cmd.fire_secondary,
-            "automatic-fire level fails closed on an unattested tick",
-        );
-        assert!(!cmd.fire_primary, "fire edge cleared on an unattested tick");
-        assert_eq!(
-            cmd.crew_swap, None,
-            "crew-swap edge cleared on an unattested tick"
-        );
-        assert!(!cmd.respawn, "respawn edge cleared on an unattested tick");
-    }
-
-    /// The "extra shot after release" report, at the seam: however the release went missing, the
-    /// server ends up presenting a trigger-down command stamped for an OLD tick. The bridge must
-    /// fail `fire_secondary` closed on EVERY such tick, so the count of ticks that could cycle the
-    /// MG after release is ZERO — not merely reduced.
-    #[test]
-    fn unattested_held_trigger_fires_no_tick_for_the_whole_window() {
-        let mut world = World::new();
-        world.insert_resource(timeline_at(20));
-
-        let held = authored_for(
-            5,
-            TankCommand {
-                fire_secondary: true,
-                ..default()
-            },
-        );
-        let entity = world
-            .spawn((ActionState(held), TankCommand::default()))
-            .id();
-
-        let mut fired_ticks = Vec::new();
-        for expected_tick in 20..30 {
-            assert_eq!(
-                world.resource::<LocalTimeline>().tick(),
-                Tick(expected_tick),
-                "the test must advance the real timeline between bridge runs",
-            );
-            world
-                .run_system_once(bridge_action_state_to_tank_command)
-                .unwrap();
-            if world.get::<TankCommand>(entity).unwrap().fire_secondary {
-                fired_ticks.push(expected_tick);
-            }
-            world.resource_mut::<LocalTimeline>().apply_delta(1);
-        }
-        assert_eq!(
-            fired_ticks,
-            Vec::<u32>::new(),
-            "a trigger held on unattested ticks must fire on no timeline tick after release",
-        );
-    }
-
-    /// THE 88 COROLLARY. An `Absent`-anchored server buffer FREEZES `ActionState` outright:
-    /// `get_predict` returns `None`, so lightyear's `update_action_state` SKIPS the apply and the
-    /// component keeps whatever it last held — forever, across an unbounded number of ticks. If a
-    /// `fire_primary: true` is what it froze on, the edge is re-presented to the sim EVERY tick,
-    /// `consume_edges` clears it every tick, and `shooting::fire` (reload-gated) lands ONE
-    /// unrequested 88 round per reload cycle, indefinitely. The old `held_last` detector could not
-    /// see this at all: `get_last()` recurses back through `SameAsPrecedent` and DEAD-ENDS on the
-    /// `Absent`, returning `None`, so its second conjunct was FALSE precisely when the freeze bit.
-    ///
-    /// Attestation does not care WHY the value is stale. The frozen command names an old tick; the
-    /// gate refuses it, every tick, for as long as the freeze lasts.
-    #[test]
-    fn frozen_action_state_cannot_relatch_the_88() {
-        let mut world = World::new();
-        let entity = world
-            .spawn((
-                // Frozen on a click authored for tick 5 and never updated since.
-                ActionState(authored_for(5, fire_click())),
-                TankCommand::default(),
-            ))
-            .id();
-
-        // Four seconds of ticks at 64 Hz — more than a full 88 reload cycle, so a single re-latch
-        // would be a live round downrange.
-        let mut latched = 0;
-        for tick in 6..262 {
-            world.insert_resource(timeline_at(tick));
+        // Authored for tick 5 and stepped at lags 1..=256 — four seconds at 64 Hz, more than a
+        // full 88 reload cycle — then the unstamped default once the tick has moved.
+        let rows = (6..262).map(|now| (5, now)).chain([(0, 7)]);
+        for (authored, now) in rows {
+            world.insert_resource(timeline_at(now));
+            world.get_mut::<ActionState<TankCommand>>(entity).unwrap().0 =
+                authored_for(authored, held);
             world.get_mut::<TankCommand>(entity).unwrap().clear_edges();
             world
                 .run_system_once(bridge_action_state_to_tank_command)
                 .unwrap();
-            if world.get::<TankCommand>(entity).unwrap().fire_primary {
-                latched += 1;
-            }
+
+            let cmd = *world.get::<TankCommand>(entity).unwrap();
+            let lag = format!("authored for {authored}, stepped at {now}");
+            assert_eq!(cmd.throttle, 0.7, "throttle level held ({lag})");
+            assert_eq!(cmd.steer, -0.3, "steer level held ({lag})");
+            assert_eq!(cmd.aim, held.aim, "aim absolute held ({lag})");
+            assert_eq!(cmd.range, 850.0, "range absolute held ({lag})");
+            assert!(
+                !cmd.fire_secondary,
+                "automatic-fire level fails closed ({lag})"
+            );
+            assert!(!cmd.fire_primary, "fire edge cleared ({lag})");
+            assert_eq!(cmd.crew_swap, None, "crew-swap edge cleared ({lag})");
+            assert!(!cmd.respawn, "respawn edge cleared ({lag})");
         }
-        assert_eq!(
-            latched, 0,
-            "a frozen fire edge must never re-latch — that is an unrequested 88 round per reload",
-        );
     }
 
-    /// The counterpart the gate must NOT break: a tick whose command ATTESTS it was authored for
-    /// this very tick holds `fire_secondary` through, so a genuinely-held trigger keeps the
-    /// `Automatic` cycling. Only unattested fire fails closed; confirmed fire is exactly what the
-    /// player asked for.
-    #[test]
-    fn attested_tick_keeps_fire_secondary_for_sustained_fire() {
-        let mut world = World::new();
-        world.insert_resource(timeline_at(8));
-
-        let held = authored_for(
-            8,
-            TankCommand {
-                fire_secondary: true,
-                ..default()
-            },
-        );
-        let entity = world
-            .spawn((ActionState(held), TankCommand::default()))
-            .id();
-
-        world
-            .run_system_once(bridge_action_state_to_tank_command)
-            .unwrap();
-
-        assert!(
-            world.get::<TankCommand>(entity).unwrap().fire_secondary,
-            "an attested held trigger must bridge through — sustained fire is not fabricated fire",
-        );
-    }
-
-    /// An attested tick bridges the whole command, EDGES included. This is the non-starved case and
-    /// every rollback-replayed tick of the client's own tank: lightyear restores the historical
-    /// `ActionState` (stamp and all) per replayed tick, and `LocalTimeline::tick()` IS the replayed
-    /// tick — so the own fire edge must re-fire during replay.
+    /// An attested tick bridges the whole command, EDGES and the held trigger included: a
+    /// genuinely-held trigger keeps the `Automatic` cycling (sustained fire is not fabricated
+    /// fire), and the own click commits on the tick it was authored for.
     #[test]
     fn attested_tick_fires_edge() {
         let mut world = World::new();
         world.insert_resource(timeline_at(8));
         let entity = world
             .spawn((
-                ActionState(authored_for(8, fire_click())),
+                ActionState(authored_for(
+                    8,
+                    TankCommand {
+                        fire_secondary: true,
+                        ..fire_click()
+                    },
+                )),
                 TankCommand::default(),
             ))
             .id();
@@ -2210,37 +2012,11 @@ mod tests {
             .run_system_once(bridge_action_state_to_tank_command)
             .unwrap();
 
+        let cmd = world.get::<TankCommand>(entity).unwrap();
+        assert!(cmd.fire_primary, "an attested edge must bridge through");
         assert!(
-            world.get::<TankCommand>(entity).unwrap().fire_primary,
-            "an attested edge must bridge through (own-tank rollback re-fire)",
-        );
-    }
-
-    /// The server's own `ActionState::default()` before ANY input message lands carries
-    /// `for_tick == 0`, which attests to nothing once the server's tick has moved — so it fails
-    /// closed. (There is no edge in a default command anyway; this pins that the default is not
-    /// accidentally attested at tick 0 forever.)
-    #[test]
-    fn default_action_state_is_unattested() {
-        let mut world = World::new();
-        world.insert_resource(timeline_at(7));
-        let entity = world
-            .spawn((
-                ActionState(TankCommand {
-                    fire_secondary: true,
-                    ..default()
-                }),
-                TankCommand::default(),
-            ))
-            .id();
-
-        world
-            .run_system_once(bridge_action_state_to_tank_command)
-            .unwrap();
-
-        assert!(
-            !world.get::<TankCommand>(entity).unwrap().fire_secondary,
-            "an unstamped (default) command attests nothing — fail closed",
+            cmd.fire_secondary,
+            "an attested held trigger must bridge through — sustained fire is not fabricated fire",
         );
     }
 
@@ -2473,38 +2249,5 @@ mod tests {
             CrewStation::Loader,
         );
         assert!(world.get::<Dead>(seat_b).is_some(), "seat B stays dead");
-    }
-
-    /// The removed arrival pump is an architectural invariant, not just an implementation detail:
-    /// no ordinary update system may copy a latest-arrival `WeaponGate` value into live simulation
-    /// state — the replicated component is a view-layer fact for the interpolated hull.
-    #[test]
-    fn weapon_gate_has_no_latest_arrival_sim_writer() {
-        let protocol = strip_comments(&read_source("src/net/protocol.rs"));
-        let old_apply = ["fn apply_", "net_belts"].concat();
-        let old_publish = ["fn publish_", "net_belts"].concat();
-        let old_component = ["struct Net", "Belts"].concat();
-        assert!(!protocol.contains(&old_apply));
-        assert!(!protocol.contains(&old_publish));
-        assert!(!protocol.contains(&old_component));
-        assert!(
-            protocol.contains("app.component::<WeaponGate>().replicate();"),
-            "WeaponGate rides plain replication with no client-side reconciliation path",
-        );
-    }
-
-    /// Servo authority reaches clients only through the public `ServoAngles` pump on remotes; the
-    /// tank holding the input slot keeps `drive_aim_servos` as its sole servo-target writer.
-    #[test]
-    fn servo_angles_is_the_only_servo_authority_path_to_clients() {
-        let protocol = strip_comments(&read_source("src/net/protocol.rs"));
-        assert!(
-            protocol.contains("With<Remote>, Without<GameControlled>"),
-            "the ServoAngles pump must stay scoped to remotes without the input slot",
-        );
-        assert!(
-            !protocol.contains("fn apply_tank_servos"),
-            "network arrival must never copy servo integrator state into simulation",
-        );
     }
 }

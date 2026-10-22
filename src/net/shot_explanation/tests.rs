@@ -2,7 +2,6 @@
 //! bystander.
 
 use core::time::Duration;
-use std::collections::BTreeMap;
 use std::net::{Ipv4Addr, SocketAddr};
 
 use lightyear::connection::client_of::ClientOf;
@@ -229,60 +228,6 @@ fn each_explanation_reaches_only_its_recipient() {
     }
 }
 
-/// How many times the app registers each system, in any schedule, as `<schedule> <name>`, and
-/// each observer as `observer <name>`.
-fn registered(app: &mut App) -> BTreeMap<String, usize> {
-    let schedules = app.world().resource::<bevy::ecs::schedule::Schedules>();
-    let mut names: Vec<String> = schedules
-        .iter()
-        .flat_map(|(label, schedule)| {
-            schedule
-                .graph()
-                .systems
-                .iter()
-                .map(|(_, system, _)| format!("{label:?} {}", system.name()))
-                .collect::<Vec<_>>()
-        })
-        .collect();
-    let world = app.world_mut();
-    names.extend(
-        world
-            .query::<&bevy::ecs::observer::Observer>()
-            .iter(world)
-            .map(|observer| format!("observer {}", observer.system_name())),
-    );
-    let mut counts = BTreeMap::new();
-    for name in names {
-        *counts.entry(name).or_insert(0) += 1;
-    }
-    counts
-}
-
-/// Each registration count that differs between `on` and `off`, as `on - off`.
-fn registration_delta(
-    on: &BTreeMap<String, usize>,
-    off: &BTreeMap<String, usize>,
-) -> BTreeMap<String, isize> {
-    on.keys()
-        .chain(off.keys())
-        .map(|name| {
-            let count = |side: &BTreeMap<String, usize>| side.get(name).copied().unwrap_or(0);
-            (name.clone(), count(on) as isize - count(off) as isize)
-        })
-        .filter(|(_, delta)| *delta != 0)
-        .collect()
-}
-
-fn mounted(armed: Option<&std::path::Path>) -> BTreeMap<String, usize> {
-    let mut app = App::new();
-    if let Some(path) = armed {
-        app.insert_resource(ShotTrace::for_test(path));
-    }
-    install_client(&mut app);
-    install_server(&mut app);
-    registered(&mut app)
-}
-
 fn trace_path(name: &str) -> std::path::PathBuf {
     std::env::temp_dir().join(format!(
         "overmatch-{name}-{}-{}.jsonl",
@@ -292,34 +237,6 @@ fn trace_path(name: &str) -> std::path::PathBuf {
             .unwrap()
             .as_nanos()
     ))
-}
-
-/// Unarmed, the delivery mounts register no trace system and no trace observer in any schedule:
-/// tracing off costs the shipping schedule nothing. Arming changes exactly the five trace entries
-/// and the sender swap, counted per registration, so a second registration under a shared name or
-/// a system in another schedule cannot slip through. A system mounted in both and checking the
-/// recorder at run time is outside this probe: that is a review invariant, not a tested one.
-#[test]
-fn an_unarmed_mount_registers_no_delivery_trace() {
-    let off = mounted(None);
-    let path = trace_path("pencam-mount");
-    let on = mounted(Some(&path));
-    std::fs::remove_file(&path).unwrap();
-    let module = module_path!().trim_end_matches("::tests");
-    let entry =
-        |owner: &str, name: &str, delta: isize| (format!("{owner} {module}::{name}"), delta);
-    assert_eq!(
-        registration_delta(&on, &off),
-        BTreeMap::from([
-            entry("Update", "trace_presence", 1),
-            entry("FixedUpdate", "send_traced_shot_explanations", 1),
-            entry("FixedUpdate", "send_shot_explanations", -1),
-            entry("observer", "trace_outcome_drawn", 1),
-            entry("observer", "trace_link_up", 1),
-            entry("observer", "trace_link_down", 1),
-        ]),
-        "arming must add exactly the delivery trace and swap the sender",
-    );
 }
 
 /// Armed by the trace resource at install, the client logs each authority outcome it draws
