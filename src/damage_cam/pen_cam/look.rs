@@ -620,7 +620,7 @@ pub fn hull_mask(masks: &MaskSet) -> LookMaterial {
 }
 
 /// Component `b`'s place on the state scale in frame `kind`, `None` where it is not drawn: the
-/// shooter's views (the x-ray and the outside view) show what this shot did to a component it
+/// shooter's frames (the glass frame and the outside view) show what this shot did to a component it
 /// took HP from, the share of the HP points it had at the shot; the victim's x-ray shows its own
 /// tank's state, the share of each pool gone.
 fn condition(b: &BoxPlan, kind: CornerKind) -> Option<Condition> {
