@@ -103,7 +103,7 @@ fn choose_mode<'a>(
 /// the link can be spawned then (direct mode) or when a match is ready (matchmaking mode).
 #[derive(Resource, Clone)]
 struct ClientLinkTemplate {
-    /// See the client-id note in [`run`].
+    /// See the client-id note in [`configure_link`].
     client_id: u64,
     conditioner: Option<LinkConditionerConfig>,
     seeded: Option<SeededLink>,
@@ -252,6 +252,128 @@ pub(crate) fn shipping_input_delay() -> InputDelayConfig {
     InputDelayConfig::fixed_input_delay(SHIPPING_INPUT_DELAY_TICKS)
 }
 
+/// Where the client link goes: a server resolved once at startup, or a Worker whose Join menu
+/// finds one.
+enum LinkTarget {
+    Direct {
+        server_addr: SocketAddr,
+        source: ServerSource,
+    },
+    Matchmaking {
+        api: String,
+        source: ApiSource,
+    },
+}
+
+/// The client link as the arguments and environment configure it, read once at startup.
+struct LinkSetup {
+    target: LinkTarget,
+    template: ClientLinkTemplate,
+}
+
+/// Reads `--local`, `OVERMATCH_SERVER`, `OVERMATCH_API` and the `SPIKE_*` receive-conditioning
+/// knobs. A direct target that does not resolve is the error: the client has nowhere to connect.
+fn configure_link(simulate: bool, tick_duration: Duration) -> Result<LinkSetup, String> {
+    // A direct target is resolved once at startup. Raw socket addresses bypass DNS; hostnames
+    // select their resolver's first IPv4 result because the UDP transport binds an IPv4 wildcard
+    // (`ClientLinkTemplate::bundle`). The scripted harness has no menu to click, so it always
+    // connects directly.
+    let local = std::env::args().any(|arg| arg == "--local");
+    let environment = std::env::var("OVERMATCH_SERVER").ok();
+    let api = std::env::var("OVERMATCH_API").ok();
+    let mode = if simulate {
+        ClientMode::Direct(choose_server(local, environment.as_deref()))
+    } else {
+        choose_mode(local, environment.as_deref(), api.as_deref(), DEFAULT_API)
+    };
+    let target = match mode {
+        ClientMode::Direct(selection) => {
+            let server_addr = parse_server_endpoint(selection.raw)
+                .and_then(|endpoint| {
+                    resolve_server_endpoint(&endpoint).map_err(|error| error.to_string())
+                })
+                .map_err(|error| {
+                    format!(
+                        "cannot resolve target server {:?} from {}: {error}",
+                        selection.raw,
+                        selection.source.label()
+                    )
+                })?;
+            LinkTarget::Direct {
+                server_addr,
+                source: selection.source,
+            }
+        }
+        ClientMode::Matchmaking { api, source } => LinkTarget::Matchmaking {
+            api: api.to_owned(),
+            source,
+        },
+    };
+    // A client id is unique across machines, so it is a random u64 and never a PID: netcode does
+    // NOT enforce client-id uniqueness, so a duplicate id silently OVERWRITES the server's
+    // `PeerId → Entity` mapping, and ownership routing resolves by RAW id value — `ControlledBy` and
+    // `NetworkingMetadata::peer_map` both key on the value, not on which machine sent it. Two
+    // clients sharing an id collide: the server misroutes `ControlledBy`, and an opponent's tank
+    // arrives on the wrong client carrying `Controlled` (turret desync, one client driving both
+    // tanks, input contention). `RandomState::new()` is seeded from OS randomness on every call, so
+    // a fresh hasher's `finish()` yields a random u64 with NO new dependency. Stable for the
+    // session and fresh per launch, so a restarted client cannot collide with its own previous
+    // session inside the server's disconnect timeout.
+    let client_id = std::hash::RandomState::new().build_hasher().finish();
+    // Optional receive conditioning for local diagnostics — OFF by default: any non-zero default
+    // delays every inbound packet, and with it HUD Ping, on a real server. Set `SPIKE_LATENCY_MS` /
+    // `SPIKE_JITTER_MS` explicitly when you want a fake path.
+    let latency_ms: u64 = harness::env_parse("SPIKE_LATENCY_MS").unwrap_or(0);
+    let jitter_ms: u64 = harness::env_parse("SPIKE_JITTER_MS").unwrap_or(0);
+    let jitter_seed: Option<u64> = harness::env_parse("SPIKE_JITTER_SEED");
+    // The periodic burst (both values set = armed): `60 / 33` reproduces the measured field link.
+    let burst_ms: u64 = harness::env_parse("SPIKE_BURST_MS").unwrap_or(0);
+    let burst_period_ticks: u64 = harness::env_parse("SPIKE_BURST_PERIOD_TICKS").unwrap_or(0);
+    let burst = (burst_ms > 0 && burst_period_ticks > 0).then(|| {
+        let ticks = u32::try_from(burst_period_ticks).expect("a burst period fits ticks in u32");
+        (Duration::from_millis(burst_ms), tick_duration * ticks)
+    });
+    let (conditioner, seeded) = match recv_conditioner_mode(
+        latency_ms,
+        jitter_ms,
+        jitter_seed,
+        burst.is_some(),
+    ) {
+        RecvConditionerMode::Stock => {
+            info!(
+                "client: RecvLinkConditioner ON — latency={latency_ms}ms jitter={jitter_ms}ms (SPIKE_*)"
+            );
+            let stock = LinkConditionerConfig::default()
+                .with_incoming_latency(Duration::from_millis(latency_ms))
+                .with_incoming_jitter(Duration::from_millis(jitter_ms))
+                .with_fixed_loss(0.0);
+            (Some(stock), None)
+        }
+        RecvConditionerMode::Seeded(seed) => {
+            info!(
+                "client: SeededRecvConditioner ON — latency={latency_ms}ms jitter={jitter_ms}ms \
+                 seed={seed} burst={burst_ms}ms/{burst_period_ticks}t (SPIKE_*)"
+            );
+            let seeded = SeededLink {
+                seed,
+                latency_ms,
+                jitter_ms,
+                burst,
+            };
+            (None, Some(seeded))
+        }
+        RecvConditionerMode::Off => (None, None),
+    };
+    Ok(LinkSetup {
+        target,
+        template: ClientLinkTemplate {
+            client_id,
+            conditioner,
+            seeded,
+        },
+    })
+}
+
 pub fn run() {
     let simulate = std::env::args().any(|a| a == "--simulate-input")
         || harness::env_flag("SPIKE_SIMULATE_INPUT", false);
@@ -392,7 +514,7 @@ pub fn run() {
     // hit impulse. Private crew detail and public life state arrive independently from the server;
     // the client never runs `DamageConsequences` to decide either one.
     app.insert_resource(crate::ClientReplica);
-    // Step 8, windowed: the game's real presentation + device gather. Its writers fill the
+    // Windowed: the game's real presentation + device gather. Its writers fill the
     // `Controlled` tank's `TankCommand` at render rate; `feed_action_state` (below) hands the
     // frame's `command::DeviceCommand` to lightyear each tick. Headless simulate mode keeps writing
     // `ActionState` directly instead (`buffer_input`) — no devices, no window, no presentation.
@@ -420,85 +542,13 @@ pub fn run() {
     // Shot-lifecycle recorder: public-shot arrivals, owner-private receipt/marker boundaries, and the
     // cosmetic shell lifecycle, all keyed by stable `ShotId`. Idle unless `SPIKE_SHOT_TRACE` is set.
     app.add_plugins(crate::shot_trace::client_plugin);
-    // (FPS + frame-time diagnostics used to be registered here. They now belong to their SOLE
-    // consumer, `net::debug_hud::plugin`, which `NetClientPlugin` mounts.)
 
-    // A direct target is resolved once at startup. Raw socket addresses bypass DNS; hostnames
-    // select their resolver's first IPv4 result because the UDP transport binds an IPv4 wildcard
-    // below. The scripted harness has no menu to click, so it always connects directly.
-    let local = std::env::args().any(|arg| arg == "--local");
-    let environment = std::env::var("OVERMATCH_SERVER").ok();
-    let api = std::env::var("OVERMATCH_API").ok();
-    let mode = if simulate {
-        ClientMode::Direct(choose_server(local, environment.as_deref()))
-    } else {
-        choose_mode(local, environment.as_deref(), api.as_deref(), DEFAULT_API)
-    };
-    let direct_target = match mode {
-        ClientMode::Direct(selection) => {
-            match parse_server_endpoint(selection.raw).and_then(|endpoint| {
-                resolve_server_endpoint(&endpoint).map_err(|error| error.to_string())
-            }) {
-                Ok(server_addr) => Some((server_addr, selection)),
-                Err(error) => {
-                    error!(
-                        "client: cannot resolve target server {:?} from {}: {error}; exiting",
-                        selection.raw,
-                        selection.source.label()
-                    );
-                    return;
-                }
-            }
+    let LinkSetup { target, template } = match configure_link(simulate, tick_duration) {
+        Ok(link) => link,
+        Err(error) => {
+            error!("client: {error}; exiting");
+            return;
         }
-        ClientMode::Matchmaking { .. } => None,
-    };
-    // A per-process RANDOM client id, generated once at startup. NOT the PID (the old
-    // `u64::from(std::process::id())`): netcode does NOT enforce client-id uniqueness, so a duplicate
-    // id silently OVERWRITES the server's `PeerId → Entity` mapping, and ownership routing resolves by
-    // RAW id value — `ControlledBy` and `NetworkingMetadata::peer_map` both key on the value, not on
-    // which machine sent it. Two machines that happened to share a PID would therefore collide: the server
-    // misroutes `ControlledBy`, and an opponent's tank arrives on the wrong client carrying
-    // `Controlled` (turret desync, one client driving both tanks, input contention). A well-distributed random u64 makes a
-    // cross-machine collision vanishingly unlikely. `RandomState::new()` is seeded from OS randomness on
-    // every call, so a fresh hasher's `finish()` yields a random u64 with NO new dependency. Generated
-    // once here and stable for the session; a fresh identity across restarts is fine (back-to-back runs
-    // still can't collide inside the server's disconnect timeout — the whole reason the PID existed).
-    let client_id = std::hash::RandomState::new().build_hasher().finish();
-    // Optional receive conditioning for local diagnostics — OFF by default. A non-zero default
-    // silently inflated HUD Ping (and every inbound packet) by ~100 ms on real servers; set
-    // `SPIKE_LATENCY_MS` / `SPIKE_JITTER_MS` explicitly when you want a fake path.
-    let latency_ms: u64 = harness::env_parse("SPIKE_LATENCY_MS").unwrap_or(0);
-    let jitter_ms: u64 = harness::env_parse("SPIKE_JITTER_MS").unwrap_or(0);
-    let jitter_seed: Option<u64> = harness::env_parse("SPIKE_JITTER_SEED");
-    // The periodic burst (both values set = armed): `60 / 33` reproduces the measured field link.
-    let burst_ms: u64 = harness::env_parse("SPIKE_BURST_MS").unwrap_or(0);
-    let burst_period_ticks: u64 = harness::env_parse("SPIKE_BURST_PERIOD_TICKS").unwrap_or(0);
-    let burst = (burst_ms > 0 && burst_period_ticks > 0).then(|| {
-        let ticks = u32::try_from(burst_period_ticks).expect("a burst period fits ticks in u32");
-        (Duration::from_millis(burst_ms), tick_duration * ticks)
-    });
-    let conditioner_mode =
-        recv_conditioner_mode(latency_ms, jitter_ms, jitter_seed, burst.is_some());
-    let conditioner = match conditioner_mode {
-        RecvConditionerMode::Stock => {
-            info!(
-                "client: RecvLinkConditioner ON — latency={latency_ms}ms jitter={jitter_ms}ms (SPIKE_*)"
-            );
-            Some(
-                LinkConditionerConfig::default()
-                    .with_incoming_latency(Duration::from_millis(latency_ms))
-                    .with_incoming_jitter(Duration::from_millis(jitter_ms))
-                    .with_fixed_loss(0.0),
-            )
-        }
-        RecvConditionerMode::Seeded(seed) => {
-            info!(
-                "client: SeededRecvConditioner ON — latency={latency_ms}ms jitter={jitter_ms}ms \
-                 seed={seed} burst={burst_ms}ms/{burst_period_ticks}t (SPIKE_*)"
-            );
-            None
-        }
-        RecvConditionerMode::Off => None,
     };
     let input_delay = shipping_input_delay();
     // The install-time sync margins hold only over a session's pre-arm window; `net::sync_margin`'s
@@ -513,7 +563,7 @@ pub fn run() {
          design (~{:.0}ms)",
         f64::from(SHIPPING_INPUT_DELAY_TICKS) * 1000.0 / 64.0
     );
-    if matches!(conditioner_mode, RecvConditionerMode::Seeded(_)) {
+    if template.seeded.is_some() {
         app.add_systems(
             PreUpdate,
             harness::apply_seeded_recv_conditioner
@@ -546,48 +596,38 @@ pub fn run() {
     // estimate, so it is also the dominant own-input latency term. `net::interp_delay` owns the
     // sizing law and rewrites `min_delay` every frame.
     app.insert_resource(interpolation);
-    let template = ClientLinkTemplate {
-        client_id,
-        conditioner,
-        seeded: match conditioner_mode {
-            RecvConditionerMode::Seeded(seed) => Some(SeededLink {
-                seed,
-                latency_ms,
-                jitter_ms,
-                burst,
-            }),
-            _ => None,
-        },
-    };
     // The connection state machine: gate the FIRST connect on the tank assets, then auto-retry a
     // failed/dropped connection on a short backoff. See [`drive_connection`] for the full states.
     app.init_resource::<ConnectRetry>()
         .add_systems(Update, drive_connection);
-    match (mode, direct_target) {
-        (_, Some((server_addr, selection))) => {
+    let client_id = template.client_id;
+    match target {
+        LinkTarget::Direct {
+            server_addr,
+            source,
+        } => {
             // A direct link exists from startup, with the all-zero dev key the direct-connect
             // servers hold; its endpoint is fixed for the session, so it is logged once here.
             info!(
                 "client: target server {server_addr} (source: {}), client_id={client_id}",
-                selection.source.label()
+                source.label()
             );
             let mut client_entity = app.world_mut().spawn(template.bundle(server_addr, [0; 32]));
             if let Some(seeded) = template.seeded() {
                 client_entity.insert(seeded);
             }
         }
-        (ClientMode::Matchmaking { api, source }, None) => {
+        LinkTarget::Matchmaking { api, source } => {
             // No link until a ticket is ready: the Join menu owns the screen until then.
             info!(
                 "client: matchmaking via {api} (source: {}), client_id={client_id}",
                 source.label()
             );
-            install_matchmaking_link(&mut app, api);
+            install_matchmaking_link(&mut app, &api);
             if !simulate || sim_windowed {
                 app.add_plugins(super::matchmaking::leave_ui_plugin);
             }
         }
-        (ClientMode::Direct(_), None) => unreachable!("a direct mode resolved its target above"),
     }
     app.insert_resource(template);
     app.add_systems(Startup, load_tank_assets);
@@ -660,12 +700,12 @@ pub fn run() {
     // The server's spawn decision, read off the markers that actually arrived. Unconditional: which
     // clock the own hull moves on is the first thing any capture of this session must state.
     app.add_systems(Update, log_local_tank_role);
-    // Ownership trace (opt-in via `OVERMATCH_OWNERSHIP_TRACE`; KEPT — useful): once per second, log
-    // every `NetTank`'s ownership markers, so a two-client loopback run can confirm that each client's
+    // Ownership trace (opt-in via `OVERMATCH_OWNERSHIP_TRACE`): once per second, log every
+    // `NetTank`'s ownership markers, so a two-client loopback run can confirm that each client's
     // OWN tank is the sole carrier of `Controlled`/`InputMarker`/`Predicted` and every opponent is
-    // `Interpolated`+`Remote` only. This is exactly the axis the shared-PID bug corrupted (an opponent
-    // arriving with `Controlled`/`Predicted`). Registered only when the env var is present, so normal
-    // runs stay quiet.
+    // `Interpolated`+`Remote` only — the axis a duplicated client id corrupts (an opponent arriving
+    // with `Controlled`/`Predicted`; see [`configure_link`]). Registered only when the env var is
+    // present, so normal runs stay quiet.
     if std::env::var("OVERMATCH_OWNERSHIP_TRACE").is_ok() {
         app.add_systems(Update, log_tank_ownership);
     }
@@ -691,11 +731,11 @@ pub fn run() {
     install_input_buffer_guard(&mut app);
     install_input_send_cadence(&mut app);
 
-    // The Esc menu, the alt-tab focus watcher, and the ONE cursor owner now live in the overlay
-    // authority (`crate::overlay::plugin`, mounted by `NetClientPlugin` on same windowed condition):
-    // presence declared into `Overlays`, the cursor moved solely by `overlay::cursor_owner` from the
-    // `input_blocked` license, and the initial grab handled there too (no more `OnEnter(Playing)`
-    // grab). `gate_player_input`'s "captured cursor = license" gate still opens on `grab_mode ==
+    // The Esc menu, the alt-tab focus watcher, and the ONE cursor owner live in the overlay
+    // authority (`crate::overlay::plugin`, mounted by `NetClientPlugin` on the same windowed
+    // condition): presence declared into `Overlays`, the cursor moved solely by
+    // `overlay::cursor_owner` from the `input_blocked` license, and the initial grab handled there
+    // too. `gate_player_input`'s "captured cursor = license" gate opens on `grab_mode ==
     // Locked`, which the cursor owner drives. Headless simulate mounts no overlay authority (no window);
     // `feed_action_state` stays out of sim_windowed (the scripted `buffer_input` owns the wire), so the
     // authority's command-idling never fights the script.
