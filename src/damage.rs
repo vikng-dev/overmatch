@@ -751,10 +751,7 @@ mod tests {
         );
         assert_eq!(evaluate(&req, &q(&[(Part::Engine, 1.0)])), 0.5);
         assert_eq!(evaluate(&req, &q(&[])), 0.0);
-    }
 
-    #[test]
-    fn pool_caps_boolean_redundancy_at_one() {
         // Two full-share members (firing circuit): any one → 1.0, both → still 1.0 (capped).
         let req = vec![Group::Graded(GradedGroup::Pool(vec![
             (1.0, vec![Part::Breech]),

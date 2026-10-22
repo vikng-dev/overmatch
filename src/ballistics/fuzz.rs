@@ -524,7 +524,7 @@ fn spawn_probe_tank(
     commands.insert_resource(Spares { volume, primitive });
 }
 
-/// An Avian world holding nothing but the bound Tiger — the target both the fuzzer and the golden
+/// An Avian world holding nothing but the bound Tiger — the target the fuzzer and the fixture
 /// shots fire at.
 ///
 /// Deliberately NOT `SimPlugin`: the fuzzer wants the tank's GEOMETRY at spawn pose, and every
@@ -731,7 +731,7 @@ pub(super) fn drive(
     // The probe round's mechanism, bound as a fired shell's is at spawn.
     let round = super::bound(body);
     let radius = resolve::disc_radius(body.caliber);
-    let mut budget = resolve::Budget::new(length);
+    let mut budget = context.world.step_budget(length);
     let mut out = Drive::default();
     // The witness pass over `legs`: chord only, so the wound rate is a unit.
     let wounded = |legs: &[resolve::Leg], flight: &Flight, out: &mut Drive| {

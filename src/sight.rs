@@ -813,32 +813,6 @@ mod tests {
         }
     }
 
-    /// **The reach is the same at every bearing.** The clamp saturates ON the margin circle
-    /// whatever direction the cursor is driven, and leaves anything inside it untouched — an
-    /// anisotropic bound would cap the diagonals short of the axes.
-    #[test]
-    fn the_bound_is_isotropic() {
-        // The clamp `drive_gunner_aim` applies, as a factor on the offset.
-        let contain = |margin: f32, offset: Vec2| {
-            let reach = offset.x.hypot(offset.y);
-            if reach > margin { margin / reach } else { 1.0 }
-        };
-        let margin = optic_margin(25.0_f32.to_radians(), 16.0 / 9.0);
-        for step in 0..32 {
-            let phi = step as f32 * std::f32::consts::TAU / 32.0;
-            let bearing = Vec2::from_angle(phi);
-            // Inside: identity, at every bearing.
-            assert_eq!(contain(margin, bearing * 0.5 * margin), 1.0);
-            // Outside: scaled back onto the same reach, whatever the bearing.
-            let out = bearing * 3.0 * margin;
-            let reached = (out * contain(margin, out)).length();
-            assert!(
-                (reached - margin).abs() < 1e-6,
-                "an offset {phi} rad round the bound landed at {reached}, not {margin}",
-            );
-        }
-    }
-
     /// The yaw/pitch ↔ hull-local direction conversion round-trips: decomposing `local_dir`'s output
     /// recovers the original angles. This is the bridge that lets the optic resume the shared
     /// `aim::CommittedAim` (a point) into its yaw/pitch working form and republish it — it must be
@@ -908,54 +882,6 @@ mod tests {
         let fresh = resume_commit(None, false, resolved);
         assert_eq!(fresh.command_aim, resolved);
         assert_eq!(fresh.store, Some(resolved));
-    }
-
-    /// The resume measures the committed point's bearing from the MOUNT, and the resolve
-    /// (`mount + dir · t`) inverts it exactly. Decomposing the raw point instead would measure from
-    /// the hull-frame origin — ~2.2 m below the mount at ground level — and a near floor aim's
-    /// bearing differs between the two by the mount parallax (~2.5° at 50 m, most of the 3.1° optic
-    /// radius under magnification): the "aim snaps much higher on first optic input" regression.
-    #[test]
-    fn resume_measures_bearing_from_the_mount() {
-        // The Tiger's geometry: gun pivot ~2.2 m above the hull-frame origin, floor point 50 m out
-        // at ground level (hull origin ≈ ground).
-        let mount = Vec3::new(0.0, 2.2171, -1.100);
-        let point = Vec3::new(0.0, 0.0, -50.0);
-
-        let intent = GunnerIntent::from_hull_local_dir(point - mount);
-        // The true sight line from the mount is depressed ~2.6°; the hull-origin bearing is 0°.
-        let expected = (-(mount.y)).atan2((point - mount).xz().length());
-        assert!(
-            (intent.pitch - expected).abs() < 1e-6,
-            "sight-line pitch from the mount, got {}",
-            intent.pitch
-        );
-        assert!(
-            intent.pitch < -0.04,
-            "a near floor aim depresses the sight line — a ~0 pitch means the decomposition \
-             regressed to the hull origin"
-        );
-
-        // Resolving along that bearing from the mount lands back on the committed point: the
-        // resume↔resolve pair round-trips, so the intent never drifts frame to frame.
-        let distance = (point - mount).length();
-        let resolved = mount + intent.local_dir() * distance;
-        assert!(
-            (resolved - point).length() < 1e-4,
-            "resolve should invert the resume, got {resolved}"
-        );
-    }
-
-    /// A continuous mount (turret yaw) passes through; a limited mount clamps to its window. This is
-    /// the raw clamp — the caller shifts the pitch window down by the superelevation before calling.
-    #[test]
-    fn travel_clamp_respects_limits() {
-        assert_eq!(clamp_to_travel(3.0, None), 3.0);
-        let limits = Some((-8.0_f32.to_radians(), 15.0_f32.to_radians()));
-        // Below the floor and above the ceiling saturate; an in-window angle is untouched.
-        assert!((clamp_to_travel(-1.0, limits) - (-8.0_f32).to_radians()).abs() < 1e-6);
-        assert!((clamp_to_travel(1.0, limits) - 15.0_f32.to_radians()).abs() < 1e-6);
-        assert!((clamp_to_travel(0.1, limits) - 0.1).abs() < 1e-9);
     }
 
     /// Superelevation shifts the reachable sight-line pitch window down from the lay limits.

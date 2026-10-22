@@ -487,9 +487,12 @@ fn tilted_plate(app: &mut App, thickness: f32, tilt: f32, at: f32, factor: f32) 
 /// runtime's own first-tick speed and budget.
 ///
 /// THE PARITY IS TRANSIT PARITY. The admission observes transit deposits; the runtime also removes
-/// HP by a bounce's shock and by spall cones. Every arrangement here is transit-only, asserted, with
-/// every target in a tank of its own, outside the plates' cones ([`target_below`]);
-/// [`shock_and_field_doses_lie_outside_the_transit_parity`] shows the two routes outside it.
+/// HP by a bounce's shock and by spall cones. The crossing arrangements are transit-only, asserted,
+/// with every target in a tank of its own, outside the plates' cones ([`target_below`]). The last
+/// two are the routes outside it, each with the round's own path kept clear of the HP-bearing box:
+/// a round that bounces off the box itself jars it ([`Bounce::shock`]), and a perforation's spall
+/// cone reaches a box beside the round's path. Both sides still agree on every impact; the box is
+/// damaged and not admitted. Fixture data.
 #[test]
 fn the_runtime_and_the_gate_decide_the_same_crossings() {
     // Stop: a plate thicker than the round can defeat.
@@ -589,50 +592,62 @@ fn the_runtime_and_the_gate_decide_the_same_crossings() {
         "the round reaches the target behind the skin"
     );
     assert!(reached.transit_only());
-}
 
-/// OVERMATCH CHARGES THE PROJECTION, AND THE GATE ADMITS THROUGH IT.
-///
-/// A round that overmatches an oblique plate is charged the plate's perpendicular projection, not
-/// its slope chord (§4). A gate that admits by the straight slope cost sees armour the round never
-/// pays for and closes a route the runtime takes. Fixture: an 88 against 25 mm at 80°; the slope
-/// chord costs more than the round can spend, the projection far less (both asserted from the
-/// fixture, so the arrangement cannot drift out of the case).
-#[test]
-fn overmatch_projection_is_admitted_as_the_runtime_charges_it() {
-    let thickness = 0.025;
-    let tilt = 80.0_f32.to_radians();
-    let (speed, _) = first_tick(FIXTURE_88, 800.0);
-    let capability_in = capability(FIXTURE_88, speed);
-    let laws = WalkLaws::default();
-    assert!(
-        FIXTURE_88.caliber >= laws.overmatch_ratio * thickness,
-        "the round overmatches"
-    );
-    assert!(
-        thickness / tilt.cos() * STEEL > capability_in,
-        "the slope chord costs more than the round can spend"
-    );
-    assert!(
-        thickness * STEEL < capability_in,
-        "the projection costs less"
-    );
-    let overmatched = agree("overmatch", FIXTURE_88, 800.0, |app| {
-        tilted_plate(app, thickness, tilt, 1.0, STEEL);
-        target_below(app, FAR_BELOW, 6.0)
+    // Shock: a machine-gun round grazes an HP-bearing soft slab at 75°, too thick for it to
+    // overmatch.
+    let shocked = agree("shock", FIXTURE_MG, 755.0, |app| {
+        let tilt = 75.0_f32.to_radians();
+        let rotation = Quat::from_rotation_z(tilt);
+        let normal = rotation * Vec3::Y;
+        volume(
+            app,
+            Vec3::new(3.0, 0.4, 3.0),
+            Transform::from_translation(Vec3::new(DROP_FROM.x, 1.0, DROP_FROM.z) - normal * 0.2)
+                .with_rotation(rotation),
+            STEEL * 0.1,
+            Some(1000),
+        )
     });
-    assert!(overmatched.transit_only());
-    assert!(
-        overmatched
-            .impacts
-            .first()
-            .is_some_and(|i| i.0 == Verdict::Through),
-        "the overmatched plate is perforated: {:?}",
-        overmatched.impacts,
+    assert_eq!(
+        shocked.impacts.iter().map(|i| i.0).collect::<Vec<_>>(),
+        [Verdict::Ricochet],
     );
     assert!(
-        overmatched.admitted,
-        "and the gate admits the target behind it"
+        shocked.shock && shocked.damaged && !shocked.admitted,
+        "the bounce jars the box it bounced off, and that is not a transit route",
+    );
+
+    // Field: an 88 perforates 60 mm of steel square on; an HP-bearing box of the same (absent) tank
+    // sits 0.3 m below the plate, beside the disc's path but inside the spall cone.
+    let thrown = agree("field", FIXTURE_88, 800.0, |app| {
+        volume(
+            app,
+            Vec3::new(2.0, 0.06, 2.0),
+            Transform::from_translation(Vec3::new(DROP_FROM.x, 0.97, DROP_FROM.z)),
+            STEEL,
+            None,
+        );
+        volume(
+            app,
+            Vec3::new(0.5, 0.2, 0.6),
+            Transform::from_translation(Vec3::new(DROP_FROM.x + 0.06 + 0.25, 0.54, DROP_FROM.z)),
+            STEEL * 0.1,
+            Some(1000),
+        )
+    });
+    assert_eq!(
+        thrown.impacts.first().map(|i| i.0),
+        Some(Verdict::Through),
+        "the plate is perforated: {:?}",
+        thrown.impacts,
+    );
+    assert!(
+        thrown.field && thrown.damaged && !thrown.admitted,
+        "the cone reaches the box beside the path, and that is not a transit route: field \
+         {}, damaged {}, admitted {}",
+        thrown.field,
+        thrown.damaged,
+        thrown.admitted,
     );
 }
 
@@ -731,178 +746,6 @@ fn an_exact_budget_crossing_terminates_before_the_target() {
     assert!(exact.transit_only());
 }
 
-/// SHOCK AND FRAGMENTS LIE OUTSIDE THE TRANSIT PARITY.
-///
-/// Two routes by which the runtime removes HP that the admission does not observe, each with the
-/// round's own path kept clear of the HP-bearing box: a round that bounces off the box itself
-/// jars it ([`Bounce::shock`]), and a perforation's spall cone reaches a box beside the round's
-/// path.
-/// Both sides still agree on every impact; the box is damaged and not admitted. Fixture data.
-#[test]
-fn shock_and_field_doses_lie_outside_the_transit_parity() {
-    // Shock: a machine-gun round grazes an HP-bearing soft slab at 75°, too thick for it to
-    // overmatch.
-    let shocked = agree("shock", FIXTURE_MG, 755.0, |app| {
-        let tilt = 75.0_f32.to_radians();
-        let rotation = Quat::from_rotation_z(tilt);
-        let normal = rotation * Vec3::Y;
-        volume(
-            app,
-            Vec3::new(3.0, 0.4, 3.0),
-            Transform::from_translation(Vec3::new(DROP_FROM.x, 1.0, DROP_FROM.z) - normal * 0.2)
-                .with_rotation(rotation),
-            STEEL * 0.1,
-            Some(1000),
-        )
-    });
-    assert_eq!(
-        shocked.impacts.iter().map(|i| i.0).collect::<Vec<_>>(),
-        [Verdict::Ricochet],
-    );
-    assert!(
-        shocked.shock && shocked.damaged && !shocked.admitted,
-        "the bounce jars the box it bounced off, and that is not a transit route",
-    );
-
-    // Field: an 88 perforates 60 mm of steel square on; an HP-bearing box of the same (absent) tank
-    // sits 0.3 m below the plate, beside the disc's path but inside the spall cone.
-    let thrown = agree("field", FIXTURE_88, 800.0, |app| {
-        volume(
-            app,
-            Vec3::new(2.0, 0.06, 2.0),
-            Transform::from_translation(Vec3::new(DROP_FROM.x, 0.97, DROP_FROM.z)),
-            STEEL,
-            None,
-        );
-        volume(
-            app,
-            Vec3::new(0.5, 0.2, 0.6),
-            Transform::from_translation(Vec3::new(DROP_FROM.x + 0.06 + 0.25, 0.54, DROP_FROM.z)),
-            STEEL * 0.1,
-            Some(1000),
-        )
-    });
-    assert_eq!(
-        thrown.impacts.first().map(|i| i.0),
-        Some(Verdict::Through),
-        "the plate is perforated: {:?}",
-        thrown.impacts,
-    );
-    assert!(
-        thrown.field && thrown.damaged && !thrown.admitted,
-        "the cone reaches the box beside the path, and that is not a transit route: field \
-         {}, damaged {}, admitted {}",
-        thrown.field,
-        thrown.damaged,
-        thrown.admitted,
-    );
-}
-
-/// A RAISED FLOOR CAN REACH A BOX AFTER A BOUNCE ON A ROUTE NO LISTED GUN TAKES.
-///
-/// The gate's findings are admitted by the floor probe — the least capable listed round, flown at
-/// the speed where its capability is the floor — and its per-region report measures each listed
-/// gun at its own speed. A raised floor flies that round faster than any gun fires it, and a bounce
-/// separates the two: the graze bleeds its speed, a gun that overmatches the grazed plate bites in
-/// and bends away instead of bouncing, and a gun that bounces with it has too little left after the
-/// bleed. So "some listed gun admits every finding" is not an invariant of a raised floor. Generic
-/// geometry: a thin plate grazed at 75°, a skin square to the bounce, and a box behind the skin.
-#[test]
-fn a_raised_floor_reaches_a_box_after_a_bounce_no_listed_gun_takes() {
-    let laws = WalkLaws::default();
-    let thickness = 0.008;
-    let tilt = 75.0_f32.to_radians();
-    let rotation = Quat::from_rotation_z(tilt);
-    let normal = rotation * Vec3::Y;
-    let struck = Vec3::new(DROP_FROM.x, 1.0, DROP_FROM.z);
-    let bounced = Vec3::NEG_Y - 2.0 * Vec3::NEG_Y.dot(normal) * normal;
-    let (probe, probe_speed) = fuzz::floor_probe(&fuzz::FuzzConfig {
-        finding_floor: Some(200.0),
-        ..default()
-    });
-    // Capability after a full-coverage bounce, which keeps `ricochet_bleed` of the speed.
-    let after_bounce = |body: RoundBody, speed: f32| capability(body, speed * laws.ricochet_bleed);
-    let bouncers: Vec<f32> = fuzz::PROBE_ROUNDS
-        .iter()
-        .filter(|round| round.caliber < laws.overmatch_ratio * thickness)
-        .map(|round| after_bounce(round.body(), round.speed))
-        .collect();
-    let strongest_bouncer = bouncers.iter().copied().fold(0.0, f32::max);
-    let probe_left = after_bounce(probe, probe_speed);
-    assert!(
-        probe.caliber < laws.overmatch_ratio * thickness && !bouncers.is_empty(),
-        "the floor probe and some guns bounce off the plate rather than overmatch it",
-    );
-    assert!(
-        strongest_bouncer < probe_left,
-        "the raised floor keeps more after the bleed than any bouncing gun: {strongest_bouncer} \
-         against {probe_left}",
-    );
-    // The skin costs more than any gun that bounces can spend, less than the probe can.
-    let skin = 0.5 * (strongest_bouncer + probe_left) / STEEL;
-
-    let mut app = world_with_trimesh_plates(&[]);
-    volume(
-        &mut app,
-        Vec3::new(0.3, thickness, 0.3),
-        Transform::from_translation(struck - normal * thickness * 0.5).with_rotation(rotation),
-        STEEL,
-        None,
-    );
-    let square = Quat::from_rotation_arc(Vec3::Y, -bounced);
-    volume(
-        &mut app,
-        Vec3::new(0.4, skin, 0.4),
-        Transform::from_translation(struck + bounced * 0.5).with_rotation(square),
-        STEEL,
-        None,
-    );
-    let target = volume(
-        &mut app,
-        Vec3::splat(0.3),
-        Transform::from_translation(struck + bounced * 0.9).with_rotation(square),
-        STEEL * 0.1,
-        Some(1000),
-    );
-    for _ in 0..8 {
-        app.update();
-    }
-    let reaches = |app: &mut App, body: RoundBody, speed: f32| {
-        app.world_mut()
-            .run_system_once(
-                move |world: ProjectileMarchWorld,
-                      colliders: Query<(
-                    &'static Position,
-                    &'static Rotation,
-                    &'static Collider,
-                    Option<&'static BallisticSurfaces>,
-                )>| {
-                    let context = ResolveContext {
-                        world: &world,
-                        colliders: &colliders,
-                        deposit: false,
-                        laws: WalkLaws::default(),
-                    };
-                    fuzz::drive(&context, body, speed, DROP_FROM, Vec3::NEG_Y, 5.0)
-                },
-            )
-            .expect("the driver system runs")
-            .unwrap_or_else(|failure| panic!("the driven flight failed to walk: {failure:?}"))
-            .reaches(target)
-    };
-    assert!(
-        reaches(&mut app, probe, probe_speed),
-        "the raised floor's probe reaches the box after the bounce",
-    );
-    for round in fuzz::PROBE_ROUNDS {
-        assert!(
-            !reaches(&mut app, round.body(), round.speed),
-            "{} reaches the box, so this is not the case",
-            round.name,
-        );
-    }
-}
-
 // ---------------------------------------------------------------------------------------------
 // The step's limits: a drain never runs unbounded past the budget
 // ---------------------------------------------------------------------------------------------
@@ -970,14 +813,16 @@ fn mapped_box_trimesh(place: impl Fn(Vec3) -> Vec3) -> (Collider, BallisticSurfa
 /// The driver must stop it — fail closed, at the crossing a limit refuses — in the runtime march
 /// and in the gate's driver alike. Here the count trips first: a held link must be longer than a
 /// nudge, and every corridor must close in a gap shorter than one, which pins the period near a
-/// nudge (DERIVED below), so [`MAX_STEP_CROSSINGS`] links span metres, not [`MAX_OVERRUN`].
+/// nudge (DERIVED below), so the worlds' crossing ceiling ([`StepCrossings`]) is reached
+/// millimetres downrange, far short of [`MAX_OVERRUN`].
 ///
 /// Generic geometry, a single-sample round falling straight down so no bend moves it off the
 /// chain: square entry faces (no normalization bend), exit faces sheared 65° (not opposed to the
-/// next entry, so no ε-weld), and the chain starting a metre short of the budget's end. Fixture
-/// data throughout.
+/// next entry, so no ε-weld), and the chain starting three periods short of the budget's end.
+/// Fixture data throughout, the ceiling of 10 crossings included.
 #[test]
 fn a_chain_of_held_continuations_stops_at_the_step_s_limits() {
+    const CEILING: usize = 10;
     let body = FIXTURE_MG;
     assert!(body.caliber < DISC_MIN_CALIBER, "a one-sample round");
     let span = ENTRANCE_SPAN as f64;
@@ -1002,8 +847,8 @@ fn a_chain_of_held_continuations_stops_at_the_step_s_limits() {
     let first = span - 0.5 * gap - (m - 1.0) * period;
     let slope = 65.0_f64.to_radians().tan();
     let (_, budget) = first_tick(body, 755.0);
-    let top = DROP_FROM.y as f64 - budget as f64 + 1.0;
-    let links = MAX_STEP_CROSSINGS + 100;
+    let top = DROP_FROM.y as f64 - budget as f64 + 3.0 * period;
+    let links = CEILING + 10;
     // The ray crosses each wedge at local `x = lean`; its half-width keeps the sheared bottom below
     // the top everywhere.
     let lean = 1.0e-3;
@@ -1040,7 +885,10 @@ fn a_chain_of_held_continuations_stops_at_the_step_s_limits() {
     };
 
     let mut runtime = world_with_trimesh_plates(&[]);
-    runtime.init_resource::<Read>().add_observer(read_impact);
+    runtime
+        .insert_resource(StepCrossings(CEILING))
+        .init_resource::<Read>()
+        .add_observer(read_impact);
     build(&mut runtime);
     for _ in 0..8 {
         runtime.update();
@@ -1054,7 +902,7 @@ fn a_chain_of_held_continuations_stops_at_the_step_s_limits() {
         .filter(|(verdict, _)| *verdict == Verdict::Through)
         .count();
     assert_eq!(
-        through, MAX_STEP_CROSSINGS,
+        through, CEILING,
         "the chain is crossed until the count is spent: {through} perforations of {links} links",
     );
     assert!(
@@ -1070,6 +918,7 @@ fn a_chain_of_held_continuations_stops_at_the_step_s_limits() {
     );
 
     let mut gate = world_with_trimesh_plates(&[]);
+    gate.insert_resource(StepCrossings(CEILING));
     build(&mut gate);
     for _ in 0..8 {
         gate.update();
@@ -1079,7 +928,7 @@ fn a_chain_of_held_continuations_stops_at_the_step_s_limits() {
     assert!(
         matches!(
             failure.error,
-            WalkError::DrainExhausted { crossings, .. } if crossings == MAX_STEP_CROSSINGS + 1
+            WalkError::DrainExhausted { crossings, .. } if crossings == CEILING + 1
         ),
         "the driver names the exhausted count: {failure:?}",
     );
@@ -1088,7 +937,7 @@ fn a_chain_of_held_continuations_stops_at_the_step_s_limits() {
 /// THE STEP REFUSES THE CROSSING THAT WOULD CARRY IT PAST ITS OVERRUN, before anything is charged.
 #[test]
 fn a_step_refuses_the_crossing_past_its_overrun() {
-    let mut budget = Budget::new(1.0);
+    let mut budget = Budget::new(1.0, MAX_STEP_CROSSINGS);
     budget
         .charge(1.0 + MAX_OVERRUN)
         .expect("exactly the overrun is within it");
@@ -1109,7 +958,7 @@ fn a_step_refuses_the_crossing_past_its_overrun() {
 /// THE STEP REFUSES THE CROSSING PAST ITS COUNT, before anything is charged.
 #[test]
 fn a_step_refuses_the_crossing_past_its_count() {
-    let mut budget = Budget::new(1.0);
+    let mut budget = Budget::new(1.0, MAX_STEP_CROSSINGS);
     for _ in 0..MAX_STEP_CROSSINGS {
         budget.charge(0.0).expect("within the count");
     }
@@ -1434,9 +1283,24 @@ const GRAZED_SWEPT: Vec3 = Vec3::new(0.6, 0.8, 0.0);
 /// prism; the corridor resumed along `(0.6, 0.799999, 0)` then meets the lower face's exit (DERIVED:
 /// ~15 mm ahead) with no entry owned, `UnexpectedExit`. The certificate must either read the start
 /// inside, with the resumed corridor pairing, or refuse with a structured error. One axis sample.
+///
+/// Certified one f32 step off the lower face's own direction, `(0.6000001, 0.8, 0)`, the start's
+/// line still runs within a micron of the face across the whole prism, now crossing it
+/// transversely (DERIVED: ~0.15 m ahead of the start), and its orientation survives f32. A probe
+/// line formed metres behind the start loses the start's `2⁻²⁶` and crosses the face behind it
+/// instead, reading the start outside; the corridor resumed along the same direction then meets the
+/// exit with no entry owned. Read on the start's own line, the start is inside and the resumed
+/// corridor pairs.
 #[test]
 fn a_start_is_certified_on_the_ray_its_corridor_resumes_along() {
     let (mut app, built) = settled(grazed_prism);
+    let swept = Vec3::new(0.600_000_1, 0.8, 0.0);
+    let starts = resumed(&mut app, GRAZED_START, swept, swept, 0.0);
+    assert_eq!(
+        inside_volumes(&starts.seeds[0]),
+        built,
+        "the start a hair inside the face lies inside the prism",
+    );
     let launch = Vec3::new(0.6, 0.799_999, 0.0).normalize();
     match certified_then_resumed(&mut app, GRAZED_START, GRAZED_SWEPT, launch, 0.0) {
         Ok((starts, walked)) => {
@@ -1456,27 +1320,6 @@ fn a_start_is_certified_on_the_ray_its_corridor_resumes_along() {
              {error:?}",
         ),
     }
-}
-
-/// A START A HAIR INSIDE A GRAZED FACE IS CERTIFIED INSIDE IT.
-///
-/// The grazed prism, certified one f32 step off the lower face's own direction, `(0.6000001, 0.8,
-/// 0)`: the start's line still runs within a micron of the face across the whole prism, now
-/// crossing it transversely (DERIVED: ~0.15 m ahead of the start), and its orientation survives
-/// f32. A probe line formed metres behind the start loses the start's `2⁻²⁶` and crosses the face
-/// behind it instead, reading the start outside; the corridor resumed along the same direction then
-/// meets the exit with no entry owned. Read on the start's own line, the start is inside and the
-/// resumed corridor pairs.
-#[test]
-fn a_start_a_hair_inside_a_grazed_face_is_certified_inside_it() {
-    let (mut app, built) = settled(grazed_prism);
-    let swept = Vec3::new(0.600_000_1, 0.8, 0.0);
-    let starts = resumed(&mut app, GRAZED_START, swept, swept, 0.0);
-    assert_eq!(
-        inside_volumes(&starts.seeds[0]),
-        built,
-        "the start lies inside the prism",
-    );
 }
 
 /// A CROSSING THE COLLECTOR ADMITS IS NEVER READ AS A TANGENT.
@@ -2215,63 +2058,98 @@ fn a_cone_doses_a_box_only_an_unreached_member_leaves() {
     assert!(app.world().get::<ComponentHealth>(b).unwrap().current < FIELD_HP);
 }
 
+/// Where the fixture walks of [`slab_layers`] start, behind the throw point (m), as
+/// [`field_presence`] starts a direction's walk behind every bound it meets.
+const BEHIND: f64 = 0.25;
+
+/// The layers [`walk::walk_ray`] makes of square-on fixture slabs along one direction, each
+/// `(enter, exit, factor)` in metres from the throw point, with every layer that ends before the
+/// throw point dropped as [`field_direction`] drops it; and the slabs' volumes, in order. The walk
+/// starts [`BEHIND`] the throw point, so a slab entered behind it is one the throw starts inside.
+fn slab_layers(slabs: &[(f64, f64, f32)]) -> (Vec<walk::Layer>, Vec<Entity>) {
+    let axis = Vec3::NEG_Y;
+    let volumes: Vec<Entity> = (1..=slabs.len() as u32)
+        .map(|index| Entity::from_raw_u32(index).expect("a test entity index"))
+        .collect();
+    let mut hits = Vec::new();
+    for (index, (&(enter, exit, _), &volume)) in slabs.iter().zip(&volumes).enumerate() {
+        let primitive = Entity::from_raw_u32(index as u32 + 1_000).expect("a test entity index");
+        for (face, t, normal, entering) in [(0, enter, -axis, true), (1, exit, axis, false)] {
+            let id = 2 * index as u32 + face;
+            hits.push(FaceHit {
+                volume,
+                primitive,
+                shell: 0,
+                contact: walk::Contact::Face(id),
+                triangle: id,
+                t: BEHIND + t,
+                true_normal: normal,
+                entering,
+            });
+        }
+    }
+    let table = VolumeTable::new(
+        volumes
+            .iter()
+            .zip(slabs)
+            .map(|(&volume, &(_, _, factor))| (volume, walk::VolumeMaterial::fixture(factor))),
+    )
+    .expect("fixture factors are legal");
+    let corridor = RayCorridor {
+        anchor: Vec3::ZERO,
+        origin: Vec3::ZERO,
+        axis,
+        length: 4.0,
+        initial_presence: Vec::new(),
+        hits,
+    };
+    let mut layers = walk::walk_ray(0, &corridor, &table, &WalkLaws::default())
+        .expect("the fixture slabs walk")
+        .layers;
+    layers.retain(|layer| layer.end > BEHIND);
+    (layers, volumes)
+}
+
 /// FIRST SOLID: a direction stops where it enters the first volume. A box there takes its whole
 /// `strength × weight` and nothing beyond it is dosed; armour there takes nothing and shadows every
-/// box behind it; the plate the throw leaves stops nothing. Fixture boxes and plates on the `-Y`
-/// axis.
+/// box behind it; the plate the throw leaves stops nothing. Fixture slabs along the direction.
 #[test]
 fn a_first_solid_direction_stops_at_what_it_enters() {
     let walk = |armour_first: bool| {
-        let (mut app, boxes) = field_world(|app| {
-            let leaving = volume(
-                app,
-                Vec3::new(2.0, 0.2, 2.0),
-                Transform::from_translation(Vec3::new(0.0, 0.05, 0.0)),
-                1.0,
-                None,
-            );
-            if armour_first {
-                below(app, Vec3::new(2.0, 0.1, 2.0), 0.5, 0.0, 1.0, false);
-            }
-            vec![
-                leaving,
-                below(app, Vec3::new(1.0, 0.2, 1.0), 1.0, 0.0, 0.0, true),
-                below(app, Vec3::new(1.0, 0.2, 1.0), 2.0, 0.0, 0.0, true),
-            ]
-        });
-        let ray = field_rays_under(
-            &mut app,
-            vec![(Vec3::ZERO, Dir3::NEG_Y, 3.0)],
+        let mut slabs = vec![(-0.15, 0.05, 1.0), (0.9, 1.1, 0.0), (1.9, 2.1, 0.0)];
+        if armour_first {
+            slabs.push((0.45, 0.55, 1.0));
+        }
+        let (layers, volumes) = slab_layers(&slabs);
+        let boxes = [volumes[1], volumes[2]];
+        let layers: Vec<&walk::Layer> = layers.iter().collect();
+        let (end, doses, _, _) = first_solid(
+            &layers,
+            BEHIND,
+            Vec3::ZERO,
+            Dir3::NEG_Y,
+            3.0,
             0.25,
-            vec![boxes[0]],
-            Passage::FirstSolid,
-        )
-        .remove(0);
-        (ray, boxes)
+            &|volume| boxes.contains(&volume),
+            &[volumes[0]],
+        );
+        let doses: Vec<Dose> = doses.into_iter().map(|(_, dose)| dose).collect();
+        (end, doses, boxes)
     };
-    let (ray, boxes) = walk(false);
-    assert_eq!(ray.doses.len(), 1, "{:?}", ray.doses);
-    assert_eq!(ray.doses[0].address, boxes[1]);
+    let (end, doses, boxes) = walk(false);
+    assert_eq!(doses.len(), 1, "{doses:?}");
+    assert_eq!(doses[0].address, boxes[0]);
     assert_eq!(
-        ray.doses[0].amount, 0.75,
+        doses[0].amount, 0.75,
         "its whole strength, no attenuation in air"
     );
     assert!(
-        (ray.end.y + 0.9).abs() < 1.0e-4,
-        "stopped at the near box's face: {}",
-        ray.end
+        (end.y + 0.9).abs() < 1.0e-4,
+        "stopped at the near box's face: {end}"
     );
-    let (ray, _) = walk(true);
-    assert!(
-        ray.doses.is_empty(),
-        "armour shadows the boxes: {:?}",
-        ray.doses
-    );
-    assert!(
-        (ray.end.y + 0.45).abs() < 1.0e-4,
-        "stopped at the plate: {}",
-        ray.end
-    );
+    let (end, doses, _) = walk(true);
+    assert!(doses.is_empty(), "armour shadows the boxes: {doses:?}");
+    assert!((end.y + 0.45).abs() < 1.0e-4, "stopped at the plate: {end}");
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2340,42 +2218,28 @@ fn a_direction_thrown_inside_a_block_pays_for_it() {
     );
 }
 
-/// A shield nested inside a soft volume still shadows, and adding the soft volume never raises
-/// the dose. Fixture: steel of factor 1000 over `[1.5, 2.0]` m along the direction, soft of factor
-/// 1 over `[1, 3]` m, the box at 4 m, strength 10.
-#[test]
-fn a_nested_shield_shadows_and_the_volume_around_it_adds_nothing() {
-    let target = |app: &mut App| slab_below(app, -3.9, 0.2, 0.0, true);
-    let (mut app, boxes) = field_world(|app| {
-        slab_below(app, -1.5, 0.5, 1000.0, false);
-        vec![target(app)]
-    });
-    let (_, steel_alone) = walk_direction(&mut app, Vec3::ZERO, 10.0, &[]);
-    let (mut app, nested) = field_world(|app| {
-        slab_below(app, -1.5, 0.5, 1000.0, false);
-        slab_below(app, -1.0, 2.0, 1.0, false);
-        vec![target(app)]
-    });
-    let (_, with_soft) = walk_direction(&mut app, Vec3::ZERO, 10.0, &[]);
-    assert_eq!(dose_to(&steel_alone, boxes[0]), 0.0, "the steel blocks it");
-    assert_eq!(
-        dose_to(&with_soft, nested[0]),
-        0.0,
-        "the nested steel still blocks it"
-    );
-}
-
 /// A box wholly inside another volume the direction crosses is entered, and dosed with the
 /// strength that reaches its entry. Fixture: a soft volume of factor 1 over `[1, 3]` m, the box
 /// over `[1.9, 2.1]` m inside it: 0.9 reference-mm is spent before it.
 #[test]
 fn a_box_inside_a_traversed_volume_is_dosed() {
-    let (mut app, boxes) = field_world(|app| {
-        slab_below(app, -1.0, 2.0, 1.0, false);
-        vec![slab_below(app, -1.9, 0.2, 0.0, true)]
-    });
-    let (_, doses) = walk_direction(&mut app, Vec3::ZERO, 10.0, &[]);
-    let dose = dose_to(&doses, boxes[0]);
+    let (layers, volumes) = slab_layers(&[(1.0, 3.0, 1.0), (1.9, 2.1, 0.0)]);
+    let layers: Vec<&walk::Layer> = layers.iter().collect();
+    let (_, doses, _, _) = partial(
+        &layers,
+        BEHIND,
+        Vec3::ZERO,
+        Dir3::NEG_Y,
+        10.0,
+        1.0,
+        &|volume| volume == volumes[1],
+        &[],
+    );
+    let dose: f32 = doses
+        .iter()
+        .filter(|(_, dose)| dose.address == volumes[1])
+        .map(|(_, dose)| dose.amount)
+        .sum();
     assert!((dose - 9.1).abs() < 1.0e-4, "dosed at entry: {dose}");
 }
 
@@ -2613,9 +2477,14 @@ fn unit_free(trial: u32) -> f32 {
 /// `10x − y = 1` and `10x − y = 3`, its vertices exact in f32, so its crossings are the non-dyadic
 /// `0.1` and `0.3` along the ray; charged boundary by boundary, the three pieces of the plate
 /// leave `2^-53` of strength (DERIVED in f64), which reaches the box.
+///
+/// Softer material around the plate adds nothing inside it either: a factor-0.5 volume enclosing
+/// the plate over `[-1/16, 17/16]` m charges only its own material outside the plate, and the box
+/// still takes nothing. Charged at the enclosing factor inside the plate, the whole span would cost
+/// 0.5625 and the box would take the rest (DERIVED).
 #[test]
 fn softer_material_inside_a_plate_leaves_its_cost_unchanged() {
-    let dose_behind = |prism: bool| {
+    let dose_behind = |prism: bool, around: bool| {
         let (mut app, boxes) = field_world(|app| {
             volume(
                 app,
@@ -2630,6 +2499,15 @@ fn softer_material_inside_a_plate_leaves_its_cost_unchanged() {
                     Vec3::new(0.25 * (c.y + 1.0), 2.5 * (c.y + 1.0) - c.x - 2.0, c.z)
                 });
                 factored_mesh(app, mesh, 0.5);
+            }
+            if around {
+                volume(
+                    app,
+                    Vec3::new(1.125, 3.0, 3.0),
+                    Transform::from_translation(Vec3::new(0.5, 0.0, 0.0)),
+                    0.5,
+                    None,
+                );
             }
             vec![volume(
                 app,
@@ -2654,11 +2532,16 @@ fn softer_material_inside_a_plate_leaves_its_cost_unchanged() {
             boxes[0],
         )
     };
-    assert_eq!(dose_behind(false), 0.0, "the plate alone");
+    assert_eq!(dose_behind(false, false), 0.0, "the plate alone");
     assert_eq!(
-        dose_behind(true),
+        dose_behind(true, false),
         0.0,
         "the plate with softer material inside it"
+    );
+    assert_eq!(
+        dose_behind(false, true),
+        0.0,
+        "the plate with softer material around it"
     );
 }
 

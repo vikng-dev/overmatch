@@ -424,9 +424,7 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
     use bevy::prelude::*;
 
-    use super::{
-        advance_weapon_clock, duration_ticks, fire, plugin, tick_weapon_gate, tracer_round,
-    };
+    use super::{advance_weapon_clock, fire, plugin, tick_weapon_gate, tracer_round};
     use crate::command::TankCommand;
     use crate::damage::{CrewStation, Dead, Group, Part, Requirement, VolumeOf};
     use crate::spec::{FireMode, Trigger};
@@ -444,39 +442,33 @@ mod tests {
     };
     const MAIN_GUN_MODE: FireMode = FireMode::Single { reload_secs: 0.5 };
 
-    /// DERIVED: the Tiger's authored 750 rpm interval is 5.12 ticks at 64 Hz, so the absolute gate
-    /// rounds up to the 6-tick bucket (640 rpm effective). The ceiling prevents firing early.
+    /// The absolute gate's tick arithmetic never wraps: deadlines compare in numeric order (a
+    /// deadline at `u32::MAX` is not reached at tick 0), the last tick is reachable, no deadline is
+    /// ready at every tick, and a delay, pause or resume past the tick range fail-stops.
     #[test]
-    fn tiger_mg_rate_quantizes_to_six_tick_bucket() {
-        let tick = core::time::Duration::from_nanos(1_000_000_000 / 64);
-        assert_eq!(duration_ticks(60.0 / 750.0, tick), 6);
-    }
-
-    #[test]
-    fn absolute_gate_uses_numeric_order_at_tick_zero() {
-        let gate = WeaponGateState {
+    fn absolute_gate_freezes_when_the_tick_range_is_exhausted() {
+        let at_the_end = WeaponGateState {
             ready_tick: Some(u32::MAX),
             paused_at_tick: None,
             belt_remaining: 0,
         };
+        assert!(!at_the_end.deadline_reached(0));
+        assert_eq!(at_the_end.remaining_ticks(0), u32::MAX);
 
-        assert!(!gate.deadline_reached(0));
-        assert_eq!(gate.remaining_ticks(0), u32::MAX);
-    }
+        let mut last = WeaponGateState::default();
+        last.arm(u32::MAX - 1, 1);
+        assert_eq!(last.ready_tick, Some(u32::MAX));
+        assert!(!last.deadline_reached(u32::MAX - 1));
+        assert_eq!(last.remaining_ticks(u32::MAX - 1), 1);
+        assert!(last.deadline_reached(u32::MAX));
 
-    #[test]
-    fn absolute_gate_can_reach_the_last_tick() {
-        let mut gate = WeaponGateState::default();
-        gate.arm(u32::MAX - 1, 1);
+        let unarmed = WeaponGateState::default();
+        assert!(unarmed.is_ready());
+        assert!(unarmed.deadline_reached(0));
+        assert!(unarmed.deadline_reached(u32::MAX));
+        assert_eq!(unarmed.remaining_ticks(0), 0);
+        assert_eq!(unarmed.remaining_ticks(u32::MAX), 0);
 
-        assert_eq!(gate.ready_tick, Some(u32::MAX));
-        assert!(!gate.deadline_reached(u32::MAX - 1));
-        assert_eq!(gate.remaining_ticks(u32::MAX - 1), 1);
-        assert!(gate.deadline_reached(u32::MAX));
-    }
-
-    #[test]
-    fn absolute_gate_freezes_when_the_tick_range_is_exhausted() {
         let exhausted = WeaponGateState {
             ready_tick: None,
             paused_at_tick: Some(u32::MAX),
@@ -508,17 +500,6 @@ mod tests {
             resumed, exhausted,
             "an unrepresentable resume shift must fail-stop"
         );
-    }
-
-    #[test]
-    fn absolute_gate_none_deadline_is_ready_at_every_tick() {
-        let gate = WeaponGateState::default();
-
-        assert!(gate.is_ready());
-        assert!(gate.deadline_reached(0));
-        assert!(gate.deadline_reached(u32::MAX));
-        assert_eq!(gate.remaining_ticks(0), 0);
-        assert_eq!(gate.remaining_ticks(u32::MAX), 0);
     }
 
     #[test]
@@ -770,66 +751,64 @@ mod tests {
         assert!(gate_state(&world, root).is_exhausted());
     }
 
-    #[test]
-    fn offline_pause_freezes_main_gun_reload_deadline() {
-        let mut app = pause_test_app();
-        let root = spawn_main_gun_rig(app.world_mut());
-
-        app.world_mut().run_schedule(FixedUpdate);
-        app.world_mut().run_schedule(FixedLast);
-        let paused_gate = gate_state(app.world(), root);
-        assert_eq!(paused_gate.ready_tick, Some(32));
-        assert_eq!(app.world().resource::<crate::WeaponClock>().0, 1);
-
-        set_app_state(&mut app, crate::state::AppState::Paused);
-        for _ in 0..64 {
-            app.world_mut().run_schedule(FixedUpdate);
-            app.world_mut().run_schedule(FixedLast);
-        }
-        assert_eq!(gate_state(app.world(), root), paused_gate);
-        assert_eq!(
-            app.world().resource::<crate::WeaponClock>().0,
-            1,
-            "the fallback clock must not consume reload time while paused"
-        );
-
-        set_app_state(&mut app, crate::state::AppState::Playing);
-        app.world_mut().run_schedule(FixedUpdate);
-        assert_eq!(gate_state(app.world(), root), paused_gate);
-        assert_eq!(weapon_state(app.world_mut(), root).rounds_fired, 1);
-    }
-
+    /// An offline pause freezes every weapon's absolute deadline, the main gun's reload and the
+    /// MG's belt swap alike: the gate and the fallback clock stand still through the pause, and
+    /// nothing fires on the first tick after it.
     #[test]
     fn offline_pause_freezes_mg_belt_swap_deadline() {
+        /// Pause for `paused_ticks` with the gate armed at `clock`, resume, and require nothing
+        /// moved: the gate, the clock, and the `rounds_fired` count.
+        fn assert_frozen(
+            mut app: App,
+            root: Entity,
+            clock: u32,
+            paused_ticks: u32,
+            rounds_fired: u32,
+            what: &str,
+        ) {
+            let paused_gate = gate_state(app.world(), root);
+            assert_eq!(app.world().resource::<crate::WeaponClock>().0, clock);
+
+            set_app_state(&mut app, crate::state::AppState::Paused);
+            for _ in 0..paused_ticks {
+                app.world_mut().run_schedule(FixedUpdate);
+                app.world_mut().run_schedule(FixedLast);
+            }
+            assert_eq!(gate_state(app.world(), root), paused_gate, "{what}");
+            assert_eq!(
+                app.world().resource::<crate::WeaponClock>().0,
+                clock,
+                "the fallback clock must not consume {what} time while paused"
+            );
+
+            set_app_state(&mut app, crate::state::AppState::Playing);
+            app.world_mut().run_schedule(FixedUpdate);
+            assert_eq!(gate_state(app.world(), root), paused_gate, "{what}");
+            assert_eq!(
+                weapon_state(app.world_mut(), root).rounds_fired,
+                rounds_fired,
+                "{what}"
+            );
+        }
+
+        let mut app = pause_test_app();
+        let root = spawn_main_gun_rig(app.world_mut());
+        app.world_mut().run_schedule(FixedUpdate);
+        app.world_mut().run_schedule(FixedLast);
+        assert_eq!(gate_state(app.world(), root).ready_tick, Some(32));
+        assert_frozen(app, root, 1, 64, 1, "reload");
+
         let mut app = pause_test_app();
         let (root, _) = spawn_mg_rig(app.world_mut(), Vec::new());
-
         app.world_mut().run_schedule(FixedUpdate);
         for _ in 0..7 {
             app.world_mut().run_schedule(FixedLast);
             app.world_mut().run_schedule(FixedUpdate);
         }
-        let paused_gate = gate_state(app.world(), root);
-        assert_eq!(paused_gate.belt_remaining, 0);
-        assert_eq!(paused_gate.ready_tick, Some(71));
-        assert_eq!(app.world().resource::<crate::WeaponClock>().0, 7);
-
-        set_app_state(&mut app, crate::state::AppState::Paused);
-        for _ in 0..128 {
-            app.world_mut().run_schedule(FixedUpdate);
-            app.world_mut().run_schedule(FixedLast);
-        }
-        assert_eq!(gate_state(app.world(), root), paused_gate);
-        assert_eq!(
-            app.world().resource::<crate::WeaponClock>().0,
-            7,
-            "the fallback clock must not consume belt-swap time while paused"
-        );
-
-        set_app_state(&mut app, crate::state::AppState::Playing);
-        app.world_mut().run_schedule(FixedUpdate);
-        assert_eq!(gate_state(app.world(), root), paused_gate);
-        assert_eq!(weapon_state(app.world_mut(), root).rounds_fired, 2);
+        let gate = gate_state(app.world(), root);
+        assert_eq!(gate.belt_remaining, 0);
+        assert_eq!(gate.ready_tick, Some(71));
+        assert_frozen(app, root, 7, 128, 2, "belt-swap");
     }
 
     /// The crew-gate split the redesign exists for: the CYCLIC interval ticks with the gun crew

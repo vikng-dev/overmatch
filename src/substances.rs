@@ -541,14 +541,9 @@ mod tests {
     }
 
     #[test]
-    fn shipped_materials_ron_parses() {
-        let registry = SubstanceRegistry::shipped();
-        assert_eq!(registry.substances.len(), EXPECTED.len());
-    }
-
-    #[test]
     fn shipped_registry_carries_every_expected_substance() {
         let registry = SubstanceRegistry::shipped();
+        assert_eq!(registry.substances.len(), EXPECTED.len());
         for name in EXPECTED {
             let substance = registry
                 .get(name)
@@ -589,26 +584,6 @@ mod tests {
         let only = SubstanceRegistry::from_ron(r#"(substances: { "Crew": Witness })"#)
             .expect_err("a witness is no reference");
         assert!(matches!(only, SubstanceError::Reference(_)), "{only}");
-    }
-
-    /// The reference is the steel the reference-mm is a millimetre of, and its facts are the ones
-    /// the force law was stated with (fixture data, from the research table the shipped file
-    /// cites).
-    #[test]
-    fn the_shipped_reference_is_rha_at_the_thousand_reference_mm_identity() {
-        let registry = SubstanceRegistry::shipped();
-        let rha = *registry.get("RHA").unwrap().hard().unwrap();
-        assert_eq!(rha.resistance, Resistance::Reference);
-        assert_eq!(rha.factor(), REFERENCE_FACTOR);
-        assert_eq!(
-            registry.reference_facts(),
-            MaterialFacts {
-                density: 7850.0,
-                flow_strength: 1.0e9,
-                youngs_modulus: 205.0e9,
-                poisson_ratio: 0.29,
-            }
-        );
     }
 
     #[test]

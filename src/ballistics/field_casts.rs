@@ -63,9 +63,11 @@
 //! change meant to move the casts (geometry, the cast path, the cone shape, an engine bump).
 
 use std::fmt::Write as _;
+use std::time::Duration;
 
 use avian3d::prelude::{Collider, ColliderAabb, Position, Rotation};
 use bevy::ecs::system::RunSystemOnce;
+use bevy::time::TimeUpdateStrategy;
 
 use super::fuzz::{PROBE_TANK_AT, ProbeTank, probe_world};
 use super::spall_cone::ConeShape;
@@ -540,11 +542,91 @@ fn cast_pose(app: &mut App, layout: &Layout, pose: Pose) -> Vec<Record> {
         .expect("the cast system runs")
 }
 
+/// The probe world plus the REAL march, stepped at 16 ms. Spent shells are retained, so a round
+/// that stops inside the tick it entered still leaves its marks to read.
+fn shot_world() -> App {
+    let mut app = probe_world().expect("the bound tank builds");
+    app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+        16,
+    )))
+    .insert_resource(RetainSpentShells(true))
+    .insert_resource(MgShortCircuit(false))
+    .add_systems(Update, integrate_projectiles);
+    app
+}
+
+/// Spawn one keyed round of `round` (`(caliber, mass, nose_factor, speed, wound)`) at a tank-local
+/// origin along a tank-local direction, ready for the march. The tank spawns unrotated at
+/// [`PROBE_TANK_AT`], so tank-local to world is that translation alone.
+fn spawn_shot_round(
+    app: &mut App,
+    local_origin: Vec3,
+    local_direction: Vec3,
+    round: (f32, f32, f32, f32, f32),
+) -> Entity {
+    let (caliber, mass, nose_factor, speed, wound) = round;
+    let origin = PROBE_TANK_AT + local_origin;
+    let direction = local_direction.normalize();
+    let body = RoundBody {
+        mass,
+        caliber,
+        nose_factor,
+    };
+    app.world_mut()
+        .spawn((
+            Projectile {
+                velocity: direction * speed,
+                round: bound(body),
+                wound,
+                drag_k: drag_k(caliber, mass),
+                disc: walk::DiscFrame::anchored(direction).expect("a shot fires along a real axis"),
+                continuation: None,
+            },
+            DamageReport::default(),
+            TerminalReport::default(),
+            ShellPath {
+                points: vec![origin],
+                segment_starts: Vec::new(),
+            },
+            PenetrationMarks::default(),
+            SpallMarks::default(),
+            ShellReadout {
+                speed,
+                capability: capability(body, speed),
+            },
+            Shot(ShotId {
+                combatant: crate::CombatantId(1),
+                weapon: 0,
+                fire_tick: 100,
+            }),
+            Transform::from_translation(origin).looking_to(direction, Vec3::Y),
+        ))
+        .id()
+}
+
+/// `(caliber, mass, nose_factor, speed, wound)` of the round the bound tank's main gun names in its
+/// authored spec sheet.
+fn main_gun_round() -> (f32, f32, f32, f32, f32) {
+    let spec: crate::spec::TankSpec =
+        ron::de::from_str(include_str!("../../assets/tiger_1/tiger_1.tank.ron"))
+            .expect("the shipped sheet parses");
+    let round = spec.weapons["MainGun"]
+        .resolved_round()
+        .unwrap_or_else(|err| panic!("weapon `MainGun`: {err}"));
+    (
+        round.body.caliber,
+        round.body.mass,
+        round.body.nose_factor,
+        round.muzzle_speed,
+        round.wound,
+    )
+}
+
 /// One fixture shot through the real march, in a fresh world at spawn pose ([`SHOTS`]).
 fn shot(label: &str, local_origin: Vec3, local_direction: Vec3) -> Record {
-    let round = super::goldens::eighty_eight();
-    let mut app = super::goldens::golden_world();
-    let shell = super::goldens::spawn_golden_round(&mut app, local_origin, local_direction, round);
+    let round = main_gun_round();
+    let mut app = shot_world();
+    let shell = spawn_shot_round(&mut app, local_origin, local_direction, round);
     // Eight ticks at 16 ms: the whole tank and the run-out past it, for a main-gun round.
     for _ in 0..8 {
         app.update();

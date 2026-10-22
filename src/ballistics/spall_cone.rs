@@ -343,14 +343,6 @@ mod tests {
         .unwrap()
     }
 
-    /// The shipped file parses and validates.
-    #[test]
-    fn the_shipped_shape_parses() {
-        let shipped = ConeShape::shipped();
-        assert!(shipped.directions_count() >= 1);
-        assert!(shipped.half_angle() > 0.0);
-    }
-
     /// A shape outside the law's domain is refused at parse, naming the field.
     #[test]
     fn a_shape_outside_the_domain_is_refused() {

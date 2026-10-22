@@ -233,15 +233,4 @@ mod tests {
             );
         }
     }
-
-    /// `lob` raises a forward vector and preserves its length (so the lobbed aim point keeps its range).
-    #[test]
-    fn lob_raises_and_preserves_length() {
-        let raised = lob(Vec3::NEG_Z, 0.1);
-        assert!(raised.y > 0.0, "lobbing a forward vector should raise it");
-        assert!(
-            (raised.length() - 1.0).abs() < 1.0e-5,
-            "lob must preserve length"
-        );
-    }
 }

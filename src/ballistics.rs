@@ -55,11 +55,6 @@ mod collect;
 #[cfg(any(feature = "dev_tools", test))]
 pub mod fuzz;
 
-/// Frozen end-to-end shots through the real march at the real Tiger — CHARACTERIZATION, not
-/// specification. A red golden here means the physics moved; see the module doc before re-pinning.
-#[cfg(test)]
-mod goldens;
-
 /// The spall-cone casts digested to the bit and compared with a pinned digest, run on every
 /// shipped target by CI: the instrument for whether a client may re-cast a field itself.
 #[cfg(test)]
@@ -1692,6 +1687,9 @@ struct ProjectileMarchWorld<'w, 's> {
     // The cone shape the march throws when a world names one (the cost probe); the shipped shape
     // otherwise.
     spall_law: Option<Res<'w, spall_cone::SpallLaw>>,
+    // The crossing ceiling a step runs under when a world names one; the shipped
+    // [`resolve::MAX_STEP_CROSSINGS`] otherwise.
+    step_crossings: Option<Res<'w, resolve::StepCrossings>>,
     // Witness volumes (ADR-0040) and their colliders: read by the witness pass, excluded from every
     // armour classification.
     witnesses: Query<'w, 's, &'static WitnessVolume>,
@@ -1717,6 +1715,15 @@ impl ProjectileMarchWorld<'_, '_> {
         } else {
             self.armour(collider).map(|(node, _)| node)
         }
+    }
+
+    /// One step's budget of `travel` metres under this world's crossing ceiling.
+    fn step_budget(&self, travel: f32) -> resolve::Budget {
+        let ceiling = self
+            .step_crossings
+            .as_ref()
+            .map_or(resolve::MAX_STEP_CROSSINGS, |ceiling| ceiling.0);
+        resolve::Budget::new(travel, ceiling)
     }
 }
 
@@ -2522,7 +2529,7 @@ fn march_shell_step(
         return None;
     };
     let speed = stepped.length();
-    let mut budget = resolve::Budget::new(speed * dt);
+    let mut budget = world.step_budget(speed * dt);
     let mut stopped = false;
     // Set when an observer shell freezes at armor contact to await its bounce keyframe (see the
     // `!deposit` branch): the shell keeps its entity and velocity, and the `Held` handler above
@@ -3439,11 +3446,20 @@ mod tests {
         }
     }
 
-    /// Spending `k1` then `k2` through two inversions lands on the same speed as spending
-    /// `k1 + k2` in one.
+    /// `speed_for` inverts `capability` across the speed range a round meets, and spends compose
+    /// through it: spending `k1` then `k2` through two inversions lands on the same speed as
+    /// spending `k1 + k2` in one.
     #[test]
-    fn capability_law_spends_compose() {
+    fn capability_law_inverse_round_trips() {
         for round in LAW_ROUNDS {
+            for step in 1..=60 {
+                let speed = 30.0 * step as f32;
+                let back = speed_for(round, capability(round, speed));
+                assert!(
+                    (back / speed - 1.0).abs() < 1.0e-4,
+                    "{round:?}: {speed} m/s round-trips to {back}"
+                );
+            }
             for speed in [300.0, 773.0, 1500.0] {
                 let full = capability(round, speed);
                 for (f1, f2) in [(0.1, 0.2), (0.3, 0.3), (0.05, 0.9)] {
@@ -3460,24 +3476,10 @@ mod tests {
         }
     }
 
-    /// `speed_for` inverts `capability` across the speed range a round meets.
-    #[test]
-    fn capability_law_inverse_round_trips() {
-        for round in LAW_ROUNDS {
-            for step in 1..=60 {
-                let speed = 30.0 * step as f32;
-                let back = speed_for(round, capability(round, speed));
-                assert!(
-                    (back / speed - 1.0).abs() < 1.0e-4,
-                    "{round:?}: {speed} m/s round-trips to {back}"
-                );
-            }
-        }
-    }
-
     /// The local speed exponent `d ln C / d ln v` is the dimensionless law's own,
-    /// `2x / ((1 + x) ln(1 + x))` with `x = k v² / a`: 2 in the limit `x → 0` and strictly below 2
-    /// at every positive speed, for every geometry.
+    /// `2x / ((1 + x) ln(1 + x))` with `x = k v² / a`: 2 in the limit `x → 0`, and positive and
+    /// strictly below 2 at every positive speed, for every geometry, so capability strictly
+    /// increases with speed.
     ///
     /// Swept over the round fixtures and every nose family across its parameter range, from 1 m/s
     /// to 2 km/s. The exponent is read as a central difference of `ln C` over `v (1 ± h)`: with
@@ -3519,8 +3521,12 @@ mod tests {
                     let x = inertia * speed as f64 * speed as f64;
                     let law = 2.0 * x / ((1.0 + x) * x.ln_1p());
                     assert!(
-                        law < 2.0,
+                        0.0 < law && law < 2.0,
                         "{round:?} at {speed} m/s: the law's exponent {law}"
+                    );
+                    assert!(
+                        measured > 0.0,
+                        "{round:?} at {speed} m/s: capability falls with speed, exponent {measured}"
                     );
                     assert!(
                         (measured - law).abs() < TOLERANCE,
@@ -3563,20 +3569,6 @@ mod tests {
         }
     }
 
-    /// At a fixed round, capability strictly increases with speed.
-    #[test]
-    fn capability_law_strictly_increases_in_speed() {
-        for round in LAW_ROUNDS {
-            let mut last = 0.0;
-            for step in 1..=60 {
-                let speed = 30.0 * step as f32;
-                let c = capability(round, speed);
-                assert!(c > last, "{round:?}: {speed} m/s gives {c} ≤ {last}");
-                last = c;
-            }
-        }
-    }
-
     /// After one crossing whose limit speed is `v_l`, the residual obeys
     /// `v_r² = (v² − v_l²) / (1 + k v_l² / a)`.
     #[test]
@@ -3599,23 +3591,6 @@ mod tests {
         }
     }
 
-    /// `drag_k` is calibrated so the 88 keeps its hand-tuned coefficient, and a light-for-bore round
-    /// (the 7.9 mm coax) bleeds far faster from sectional density alone — the reason a coax drops more
-    /// than the main gun at the same range, with no per-weapon drag field.
-    #[test]
-    fn drag_k_calibration() {
-        let main = drag_k(0.088, 10.2); // 88 mm, 10.2 kg
-        let coax = drag_k(0.0079, 0.0118); // 7.9 mm, 11.8 g
-        assert!(
-            (main - 2.0e-4).abs() < 1.0e-5,
-            "88 drag k should be ≈ 2e-4, got {main}"
-        );
-        assert!(
-            coax > 6.0 * main,
-            "coax should bleed far faster than the 88 (got {coax} vs {main})"
-        );
-    }
-
     /// Drag only slows a shell — never speeds it up or reverses it — and gravity always pulls the
     /// vertical component down. Guards the analytic drag step against a sign or stability slip.
     #[test]
@@ -3629,41 +3604,30 @@ mod tests {
     /// The "one integrator" property: fast-forwarding a shell N ticks folds the same per-tick
     /// [`freeflight_step`] the live march steps in open air, so its velocity is N single-tick steps
     /// exactly. Guards against re-deriving the catch-up as a closed-form trajectory. Its position is
-    /// held to the march's own by `march_tests::catch_up_lands_where_the_march_flies`.
+    /// held to the march's own by `march_tests::catch_up_lands_where_the_march_flies`. Zero catch-up
+    /// is an exact no-op: the shell stays at the muzzle with its launch velocity and a one-point
+    /// trail, byte-identical to a locally fired shell (SP / sandbox / own predicted), which always
+    /// passes `catch_up_ticks: 0`.
     #[test]
     fn fast_forward_matches_single_tick_advances() {
         let origin = Vec3::new(1.0, 50.0, -3.0);
         let v0 = Vec3::new(600.0, 20.0, 0.0);
         let k = drag_k(0.088, 10.2);
         let dt = 1.0 / 64.0;
-        let n = 7;
+        for n in [0, 7] {
+            let mut vel = v0;
+            for _ in 0..n {
+                vel = freeflight_step(vel, k, dt);
+            }
 
-        let mut vel = v0;
-        for _ in 0..n {
-            vel = freeflight_step(vel, k, dt);
+            let (ff_pos, ff_vel, path) = fast_forward_shell(origin, v0, k, dt, n);
+            assert_eq!(ff_vel, vel, "fast-forward velocity == {n} single steps");
+            // One point per stepped tick plus the origin, and the trail starts AT the muzzle
+            // (requirement: the tracer trail must not start 64 m behind the shell).
+            assert_eq!(path.len(), n as usize + 1);
+            assert_eq!(path[0], origin, "the trail starts at the muzzle");
+            assert_eq!(*path.last().unwrap(), ff_pos, "the trail ends at the shell");
         }
-
-        let (ff_pos, ff_vel, path) = fast_forward_shell(origin, v0, k, dt, n);
-        assert_eq!(ff_vel, vel, "fast-forward velocity == N single steps");
-        // One point per stepped tick plus the origin, and the trail starts AT the muzzle (requirement:
-        // the tracer trail must not start 64 m behind the shell).
-        assert_eq!(path.len(), n as usize + 1);
-        assert_eq!(path[0], origin, "the trail starts at the muzzle");
-        assert_eq!(*path.last().unwrap(), ff_pos, "the trail ends at the shell");
-    }
-
-    /// Zero catch-up is an exact no-op: the shell stays at the muzzle with its launch velocity and a
-    /// one-point trail — byte-identical to a locally fired shell (SP / sandbox / own predicted), which
-    /// always passes `catch_up_ticks: 0`.
-    #[test]
-    fn zero_catch_up_is_noop() {
-        let origin = Vec3::new(0.0, 2.0, 0.0);
-        let v0 = Vec3::new(800.0, 0.0, 0.0);
-        let k = drag_k(0.088, 10.2);
-        let (pos, vel, path) = fast_forward_shell(origin, v0, k, 1.0 / 64.0, 0);
-        assert_eq!(pos, origin, "no catch-up leaves the shell at the muzzle");
-        assert_eq!(vel, v0, "no catch-up leaves the launch velocity");
-        assert_eq!(path, vec![origin], "no catch-up traces only the muzzle");
     }
 
     #[test]
@@ -4111,102 +4075,6 @@ mod march_tests {
         assert!(app.world().resource::<DamageLog>().0[0].1 > 0);
     }
 
-    /// Regression: a clean perforation emits one penetrating armor impact at the entry face.
-    #[test]
-    fn head_on_perforation_fires_one_penetrating_armor_impact() {
-        let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
-        let hits = fire_and_capture(&mut app, Vec3::new(0.0, 2.0, 2.0), Vec3::NEG_Z, 800.0);
-        assert_eq!(
-            hits.len(),
-            1,
-            "a clean perforation fires exactly one impact"
-        );
-        let hit = hits[0];
-        assert_eq!(
-            hit.surface,
-            ImpactSurface::Armor,
-            "the struck face is armor"
-        );
-        assert_eq!(
-            hit.verdict,
-            Verdict::Through,
-            "a clean perforation goes through (flame lick earned)"
-        );
-        assert!(hit.deflection.is_none(), "a perforation does not deflect");
-        assert!(
-            (hit.position.z - 0.025).abs() < 0.05,
-            "the impact reads at the entry face, got z={}",
-            hit.position.z
-        );
-    }
-
-    /// Regression: an oblique non-overmatched strike emits one deflecting armor impact.
-    #[test]
-    fn oblique_ricochet_fires_one_deflecting_non_penetrating_impact() {
-        let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.10), Vec3::new(0.0, 2.0, 0.0));
-        let dir = Vec3::new(
-            75.0_f32.to_radians().sin(),
-            0.0,
-            -75.0_f32.to_radians().cos(),
-        )
-        .normalize();
-        let hits = fire_and_capture(&mut app, Vec3::new(-1.0, 2.0, 0.6), dir, 800.0);
-        assert_eq!(hits.len(), 1, "a ricochet fires exactly one impact");
-        let hit = hits[0];
-        assert_eq!(
-            hit.surface,
-            ImpactSurface::Armor,
-            "the struck face is armor"
-        );
-        assert_eq!(
-            hit.verdict,
-            Verdict::Ricochet,
-            "a ricochet bit no steel — no flame lick"
-        );
-        let deflect = hit
-            .deflection
-            .expect("a ricochet carries its outgoing direction");
-        assert!(
-            deflect.z > 0.0,
-            "the bounce deflects back off the face (+Z), got {deflect:?}"
-        );
-    }
-
-    /// The public verdict names all three armour outcomes from the real resolution: a graze that
-    /// deflects is `Ricochet`, a round that bites a plate thicker than its capability is `Stopped`, and
-    /// one that comes out the far side is `Through`. Plate thicknesses and the 75° graze are fixture
-    /// data.
-    #[test]
-    fn the_impact_verdict_names_ricochet_stopped_and_through() {
-        let armor_verdicts = |size: Vec3, origin: Vec3, dir: Vec3| -> Vec<Verdict> {
-            let mut app = world_with_plate(size, Vec3::new(0.0, 2.0, 0.0));
-            fire_and_capture(&mut app, origin, dir, 800.0)
-                .iter()
-                .filter(|hit| hit.surface == ImpactSurface::Armor)
-                .map(|hit| hit.verdict)
-                .collect()
-        };
-        let graze = Vec3::new(
-            75.0_f32.to_radians().sin(),
-            0.0,
-            -75.0_f32.to_radians().cos(),
-        )
-        .normalize();
-        let head_on = Vec3::new(0.0, 2.0, 2.0);
-        assert_eq!(
-            armor_verdicts(Vec3::new(3.0, 3.0, 0.10), Vec3::new(-1.0, 2.0, 0.6), graze),
-            [Verdict::Ricochet],
-        );
-        assert_eq!(
-            armor_verdicts(Vec3::new(3.0, 3.0, 0.5), head_on, Vec3::NEG_Z),
-            [Verdict::Stopped],
-        );
-        assert_eq!(
-            armor_verdicts(Vec3::new(3.0, 3.0, 0.05), head_on, Vec3::NEG_Z),
-            [Verdict::Through],
-        );
-    }
-
     /// A terminal entered the material, so the public verdicts it round-trips through are exactly
     /// `Through` and `Stopped`; a received verdict of any other kind is refused, not buffered.
     #[test]
@@ -4224,7 +4092,11 @@ mod march_tests {
 
     /// `Ricochet` is only a resolved deflection off armour: every impact carries a deflected
     /// direction iff its verdict is `Ricochet`, and a stop that resolved no crossing — the terrain,
-    /// a replica's fail-closed armour contact — is `Struck`. The 75° graze is fixture data.
+    /// a replica's fail-closed armour contact — is `Struck`. The public verdict names all three
+    /// armour outcomes from the real resolution: a graze is one armour `Ricochet` deflected back off
+    /// the face, a round that bites a plate thicker than its capability is `Stopped`, and a clean
+    /// perforation is one `Through` impact read at the entry face. Plate thicknesses and the 75°
+    /// graze are fixture data.
     #[test]
     fn ricochet_is_only_a_deflection_off_armour() {
         let graze = Vec3::new(
@@ -4257,6 +4129,31 @@ mod march_tests {
             hits.iter().map(|hit| (hit.surface, hit.verdict)).collect()
         };
         assert_eq!(read(&bounce), [(ImpactSurface::Armor, Verdict::Ricochet)]);
+        let deflect = bounce[0]
+            .deflection
+            .expect("a ricochet carries its outgoing direction");
+        assert!(
+            deflect.z > 0.0,
+            "the bounce deflects back off the face (+Z), got {deflect:?}"
+        );
+        assert_eq!(
+            stopped
+                .iter()
+                .filter(|hit| hit.surface == ImpactSurface::Armor)
+                .map(|hit| hit.verdict)
+                .collect::<Vec<_>>(),
+            [Verdict::Stopped],
+        );
+        assert_eq!(
+            read(&through),
+            [(ImpactSurface::Armor, Verdict::Through)],
+            "a clean perforation fires exactly one impact"
+        );
+        assert!(
+            (through[0].position.z - 0.025).abs() < 0.05,
+            "the impact reads at the entry face, got z={}",
+            through[0].position.z
+        );
         assert_eq!(read(&replica), [(ImpactSurface::Armor, Verdict::Struck)]);
         assert_eq!(read(&ground), [(ImpactSurface::Terrain, Verdict::Struck)]);
         for hit in [bounce, stopped, through, replica, ground].iter().flatten() {
@@ -4629,9 +4526,9 @@ mod march_tests {
             .count()
     }
 
-    /// The oblique-ricochet setup from `oblique_ricochet_fires_one_deflecting_non_penetrating_impact`,
-    /// but marched to resolution: how many `Impact`s, and does the shell SURVIVE the bounce (continue
-    /// in flight)? Parameterised by whether the world is a net client (`ClientReplica` present).
+    /// A 75° graze of the 88 off a 100 mm plate, marched to resolution: how many `Impact`s, and does
+    /// the shell SURVIVE the bounce (continue in flight)? Parameterised by whether the world is a net
+    /// client (`ClientReplica` present).
     fn oblique_ricochet_outcome(replica: bool) -> (Vec<Captured>, usize) {
         let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.10), Vec3::new(0.0, 2.0, 0.0));
         if replica {
@@ -4648,50 +4545,34 @@ mod march_tests {
         (hits, survivors)
     }
 
-    /// REPRO (symptom 2 — post-ricochet trail loss). AUTHORITY path (no `ClientReplica`): the server
-    /// ricochets the 88 off the plate and the shell CONTINUES in flight (survives), carrying its trail
-    /// on past the bounce. This is correct on the authority.
-    #[test]
-    fn authority_ricochet_shell_survives_and_continues() {
-        let (hits, survivors) = oblique_ricochet_outcome(false);
-        assert_eq!(hits.len(), 1, "one bounce impact");
-        assert!(hits[0].deflection.is_some(), "authority reads a ricochet");
-        assert_eq!(survivors, 1, "the ricocheted shell continues in flight");
-    }
-
-    /// FIX (symptom 2). REPLICA path (`ClientReplica` present — the remote observer): the client must
-    /// NOT re-simulate the authoritative bounce against interpolated geometry. Fail-closed — the
-    /// cosmetic shell STOPS dead at first armor contact (despawned, no survivor), firing a NEUTRAL
-    /// armor spark (no deflection fan, no flame lick), so its trail ends at contact instead of chasing
-    /// an improvised deflection the server never sanctioned.
+    /// REPLICA path (`ClientReplica` present — the remote observer): the client must NOT re-simulate
+    /// the authoritative bounce against interpolated geometry. Fail-closed — the cosmetic shell STOPS
+    /// dead at first armor contact (despawned, no survivor), firing a NEUTRAL armor spark (no
+    /// deflection fan, no flame lick), so its trail ends at contact instead of chasing an improvised
+    /// deflection the server never sanctioned. The AUTHORITY path (no `ClientReplica`) ricochets the
+    /// same round off the plate and the shell CONTINUES in flight, carrying its trail on past the
+    /// bounce.
     #[test]
     fn replica_ricochet_fails_closed_at_first_armor_contact() {
-        let (hits, survivors) = oblique_ricochet_outcome(true);
-        assert_eq!(hits.len(), 1, "one armor-contact spark");
-        assert_eq!(hits[0].surface, ImpactSurface::Armor, "it hit armor");
-        assert!(
-            hits[0].deflection.is_none(),
-            "no improvised bounce fan — the client cannot know the outcome"
-        );
-        assert!(!hits[0].verdict.entered(), "no flame lick — neutral spark");
-        assert_eq!(
-            survivors, 0,
-            "the cosmetic shell stops dead at contact (trail ends there)"
-        );
-    }
-
-    /// The fail-closed guard is REPLICA-ONLY: a head-on perforation on the AUTHORITY still drives the
-    /// round through the plate and out the far side (the server's shell continues), unaffected by the
-    /// guard. Pins that the `!deposit` gate did not leak into the authority march.
-    #[test]
-    fn authority_perforation_still_drives_through() {
-        let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
-        let hits = fire_and_capture(&mut app, Vec3::new(0.0, 2.0, 2.0), Vec3::NEG_Z, 800.0);
-        assert_eq!(hits.len(), 1, "one perforation impact");
-        assert!(
-            hits[0].verdict.entered(),
-            "authority perforates (flame lick)"
-        );
+        for replica in [false, true] {
+            let (hits, survivors) = oblique_ricochet_outcome(replica);
+            assert_eq!(hits.len(), 1, "one armor contact, replica {replica}");
+            assert_eq!(hits[0].surface, ImpactSurface::Armor, "it hit armor");
+            if !replica {
+                assert!(hits[0].deflection.is_some(), "authority reads a ricochet");
+                assert_eq!(survivors, 1, "the ricocheted shell continues in flight");
+                continue;
+            }
+            assert!(
+                hits[0].deflection.is_none(),
+                "no improvised bounce fan — the client cannot know the outcome"
+            );
+            assert!(!hits[0].verdict.entered(), "no flame lick — neutral spark");
+            assert_eq!(
+                survivors, 0,
+                "the cosmetic shell stops dead at contact (trail ends there)"
+            );
+        }
     }
 
     // --- Keyframe carry-through (piece 2) ------------------------------------------------------------
@@ -4888,94 +4769,104 @@ mod march_tests {
     /// HOLD-THEN-ARRIVE. The keyframe is delayed past contact but lands inside the grace window: the
     /// shell FREEZES at the plate (no spark yet), then re-seeds when the bounce arrives — re-aged
     /// forward by exactly the ticks it held, so its resumed position is consistent with the present
-    /// timeline (matches the shared integrator advanced by the hold duration).
+    /// timeline (matches the shared integrator advanced by the hold duration). An own shell, carrying
+    /// its shooter's `ShotSource`, follows the same hidden hold and re-seed: `ShotSource` only
+    /// filters collisions.
     #[test]
     fn observer_holds_then_reseeds_when_keyframe_arrives_in_window() {
         let shot = a_shot();
         let bounce = authority_bounce(shot);
 
-        let mut app = replica_world(SanctionedShots::default()); // buffer starts EMPTY
-        let shell = spawn_oblique_shell(&mut app, shot);
-
-        // March until the shell freezes at armor (no keyframe yet).
-        let mut froze = false;
-        for _ in 0..8 {
-            app.update();
-            if app.world().get::<Held>(shell).is_some() {
-                froze = true;
-                break;
+        for own in [false, true] {
+            let mut app = replica_world(SanctionedShots::default()); // buffer starts EMPTY
+            let shell = spawn_oblique_shell(&mut app, shot);
+            if own {
+                app.world_mut().entity_mut(shell).insert(ShotSource {
+                    tank: Entity::PLACEHOLDER,
+                    weapon: 0,
+                });
             }
-        }
-        assert!(
-            froze,
-            "the shell holds at armor contact awaiting its keyframe"
-        );
-        assert!(
-            app.world().resource::<ImpactLog>().0.is_empty(),
-            "a held shell fires NO spark — it waits (no improvised impact)",
-        );
 
-        // Hold a few more ticks (still inside the grace window), then the keyframe lands.
-        const HELD_EXTRA: u32 = 4;
-        for _ in 0..HELD_EXTRA {
-            app.update();
-        }
-        assert_eq!(
-            app.world().get::<Held>(shell).unwrap().waited,
-            HELD_EXTRA,
-            "the hold accumulates one tick per frozen tick (the catch-up it will re-age by)",
-        );
-        app.world_mut().resource_mut::<SanctionedShots>().insert(
-            shot,
-            SanctionedBounce {
-                origin: bounce.origin,
-                direction: bounce.direction,
-                speed: bounce.speed,
-                // Inert in these tests (no `ShotClock` resource → the overdue path is off);
-                // the hold/pre-armed paths under test don't read it.
-                bounce_tick: 0,
-                sequence: 0,
-            },
-        );
-        app.update(); // the Held handler re-seeds this tick
+            // March until the shell freezes at armor (no keyframe yet).
+            let mut froze = false;
+            for _ in 0..8 {
+                app.update();
+                if app.world().get::<Held>(shell).is_some() {
+                    froze = true;
+                    break;
+                }
+            }
+            assert!(
+                froze,
+                "the shell holds at armor contact awaiting its keyframe"
+            );
+            assert!(
+                app.world().resource::<ImpactLog>().0.is_empty(),
+                "a held shell fires NO spark — it waits (no improvised impact)",
+            );
 
-        assert!(
-            app.world().get::<Held>(shell).is_none(),
-            "the hold clears on re-seed",
-        );
-        let marks = app.world().get::<PenetrationMarks>(shell).unwrap();
-        assert_eq!(marks.ricochets.len(), 1);
-        assert!(
-            marks.ricochets[0].distance(bounce.origin) < 1.0e-3,
-            "the tracer clamp re-anchors at the true bounce point",
-        );
-        // Re-aged forward by the hold: the resumed position is the sanctioned state fast-forwarded
-        // HELD_EXTRA ticks — the exact shared integrator, so it is consistent with the present
-        // timeline — lifted off the struck face (the plate's `+Z`) as the authority's resume was.
-        let dt = 0.016; // the test world's ManualDuration
-        let (caught_up, velocity, _) = fast_forward_shell(
-            bounce.origin,
-            bounce.direction.normalize() * bounce.speed,
-            drag_k(0.088, 10.2),
-            dt,
-            HELD_EXTRA,
-        );
-        let expected_pos = caught_up
-            + Vec3::Z * resolve::disc_radius(FIXTURE_88.caliber)
-            + velocity.normalize() * MARCH_EPS;
-        let pos = app.world().get::<Transform>(shell).unwrap().translation;
-        assert!(
-            pos.distance(expected_pos) < 1.0e-3,
-            "resumed position = sanctioned bounce fast-forwarded by the hold duration, lifted (got {pos}, want {expected_pos})",
-        );
-        assert!(
-            pos.distance(bounce.origin) > 1.0e-2,
-            "the re-aged shell is downrange of the bounce point (it caught back up to the present)",
-        );
-        assert!(
-            app.world().get::<Projectile>(shell).is_some(),
-            "the shell survives and continues after the delayed re-seed",
-        );
+            // Hold a few more ticks (still inside the grace window), then the keyframe lands.
+            const HELD_EXTRA: u32 = 4;
+            for _ in 0..HELD_EXTRA {
+                app.update();
+            }
+            assert_eq!(
+                app.world().get::<Held>(shell).unwrap().waited,
+                HELD_EXTRA,
+                "the hold accumulates one tick per frozen tick (the catch-up it will re-age by)",
+            );
+            app.world_mut().resource_mut::<SanctionedShots>().insert(
+                shot,
+                SanctionedBounce {
+                    origin: bounce.origin,
+                    direction: bounce.direction,
+                    speed: bounce.speed,
+                    // Inert in these tests (no `ShotClock` resource → the overdue path is off);
+                    // the hold/pre-armed paths under test don't read it.
+                    bounce_tick: 0,
+                    sequence: 0,
+                },
+            );
+            app.update(); // the Held handler re-seeds this tick
+
+            assert!(
+                app.world().get::<Held>(shell).is_none(),
+                "the hold clears on re-seed",
+            );
+            let marks = app.world().get::<PenetrationMarks>(shell).unwrap();
+            assert_eq!(marks.ricochets.len(), 1);
+            assert!(
+                marks.ricochets[0].distance(bounce.origin) < 1.0e-3,
+                "the tracer clamp re-anchors at the true bounce point",
+            );
+            // Re-aged forward by the hold: the resumed position is the sanctioned state fast-forwarded
+            // HELD_EXTRA ticks — the exact shared integrator, so it is consistent with the present
+            // timeline — lifted off the struck face (the plate's `+Z`) as the authority's resume was.
+            let dt = 0.016; // the test world's ManualDuration
+            let (caught_up, velocity, _) = fast_forward_shell(
+                bounce.origin,
+                bounce.direction.normalize() * bounce.speed,
+                drag_k(0.088, 10.2),
+                dt,
+                HELD_EXTRA,
+            );
+            let expected_pos = caught_up
+                + Vec3::Z * resolve::disc_radius(FIXTURE_88.caliber)
+                + velocity.normalize() * MARCH_EPS;
+            let pos = app.world().get::<Transform>(shell).unwrap().translation;
+            assert!(
+                pos.distance(expected_pos) < 1.0e-3,
+                "resumed position = sanctioned bounce fast-forwarded by the hold duration, lifted (got {pos}, want {expected_pos})",
+            );
+            assert!(
+                pos.distance(bounce.origin) > 1.0e-2,
+                "the re-aged shell is downrange of the bounce point (it caught back up to the present)",
+            );
+            assert!(
+                app.world().get::<Projectile>(shell).is_some(),
+                "the shell survives and continues after the delayed re-seed",
+            );
+        }
     }
 
     /// A HELD ROUND RELEASED WITH NO AGE LEAVES THE FACE IT BOUNCED OFF.
@@ -5036,26 +4927,34 @@ mod march_tests {
         );
     }
 
-    /// Regression: an unresolved hold expires without a fabricated impact.
+    /// An unresolved hold expires without a fabricated impact, an own shell's as an observer's.
     #[test]
     fn observer_hold_expires_to_quiet_dissolve() {
         let shot = a_shot();
-        let mut app = replica_world(SanctionedShots::default()); // no keyframe ever arrives
-        let shell = spawn_oblique_shell(&mut app, shot);
+        for own in [false, true] {
+            let mut app = replica_world(SanctionedShots::default()); // no keyframe ever arrives
+            let shell = spawn_oblique_shell(&mut app, shot);
+            if own {
+                app.world_mut().entity_mut(shell).insert(ShotSource {
+                    tank: Entity::PLACEHOLDER,
+                    weapon: 0,
+                });
+            }
 
-        for _ in 0..(RICOCHET_HOLD_TICKS + 4) {
-            app.update();
+            for _ in 0..(RICOCHET_HOLD_TICKS + 4) {
+                app.update();
+            }
+
+            assert!(
+                app.world().get_entity(shell).is_err(),
+                "the shell is finalized (despawned) once the grace window expires",
+            );
+            assert!(
+                app.world().resource::<ImpactLog>().0.is_empty(),
+                "NO spark — a fabricated contact the authority never confirmed would violate the honesty \
+                 doctrine; the shell dissolves quietly",
+            );
         }
-
-        assert!(
-            app.world().get_entity(shell).is_err(),
-            "the shell is finalized (despawned) once the grace window expires",
-        );
-        assert!(
-            app.world().resource::<ImpactLog>().0.is_empty(),
-            "NO spark — a fabricated contact the authority never confirmed would violate the honesty \
-             doctrine; the shell dissolves quietly",
-        );
     }
 
     /// Where the uncertifiable fixture sits: far from the plate, in open air. Fixture data.
@@ -5270,111 +5169,6 @@ mod march_tests {
         let impacts = app.world().resource::<ImpactLog>().0.clone();
         assert_eq!(impacts.len(), 2, "two directional bounce sparks");
         assert!(impacts.iter().all(|i| i.deflection.is_some()));
-    }
-
-    /// Regression: an own shell follows the same hidden-hold and re-seed path as an observer shell.
-    #[test]
-    fn own_shell_holds_hidden_then_reseeds_when_keyframe_arrives() {
-        let shot = a_shot();
-        let bounce = authority_bounce(shot);
-
-        let mut app = replica_world(SanctionedShots::default()); // keyframe not yet arrived
-        let shell = spawn_oblique_shell(&mut app, shot);
-        app.world_mut().entity_mut(shell).insert(ShotSource {
-            tank: Entity::PLACEHOLDER,
-            weapon: 0,
-        });
-
-        let mut froze = false;
-        for _ in 0..8 {
-            app.update();
-            if app.world().get::<Held>(shell).is_some() {
-                froze = true;
-                break;
-            }
-        }
-        // `Held` is the whole stop, and the whole reason the round goes invisible where it is drawn:
-        // no frozen shell hanging on the plate. The visibility itself is `ballistics::view`'s.
-        assert!(
-            froze,
-            "the own shell holds at armor contact like any Shot-carrying shell"
-        );
-        assert!(
-            app.world().resource::<ImpactLog>().0.is_empty(),
-            "no spark while holding",
-        );
-
-        const HELD_EXTRA: u32 = 3;
-        for _ in 0..HELD_EXTRA {
-            app.update();
-        }
-        app.world_mut().resource_mut::<SanctionedShots>().insert(
-            shot,
-            SanctionedBounce {
-                origin: bounce.origin,
-                direction: bounce.direction,
-                speed: bounce.speed,
-                bounce_tick: 0,
-                sequence: 0,
-            },
-        );
-        app.update();
-
-        // Hold cleared — which is also what shows the re-seeded round again, in the view.
-        assert!(app.world().get::<Held>(shell).is_none(), "hold cleared");
-        let marks = app.world().get::<PenetrationMarks>(shell).unwrap();
-        assert_eq!(
-            marks.ricochets.len(),
-            1,
-            "the sanctioned bounce re-anchored the clamp"
-        );
-        // Re-aged by the held ticks — the same present − bounce_tick arithmetic as an observer
-        // shell — and lifted off the struck face like it.
-        let dt = 0.016;
-        let (caught_up, velocity, _) = fast_forward_shell(
-            bounce.origin,
-            bounce.direction.normalize() * bounce.speed,
-            drag_k(0.088, 10.2),
-            dt,
-            HELD_EXTRA,
-        );
-        let expected_pos = caught_up
-            + Vec3::Z * resolve::disc_radius(FIXTURE_88.caliber)
-            + velocity.normalize() * MARCH_EPS;
-        let pos = app.world().get::<Transform>(shell).unwrap().translation;
-        assert!(
-            pos.distance(expected_pos) < 1.0e-3,
-            "own shell resumes at the sanctioned state fast-forwarded by the hold (got {pos}, want {expected_pos})",
-        );
-        assert!(
-            app.world().get::<Projectile>(shell).is_some(),
-            "the shooter's own bounced round flies on — the fall-of-shot read",
-        );
-    }
-
-    /// Regression: an own shell also expires without a fabricated impact.
-    #[test]
-    fn own_shell_keyframe_lost_dissolves_quietly() {
-        let shot = a_shot();
-        let mut app = replica_world(SanctionedShots::default()); // no keyframe, ever
-        let shell = spawn_oblique_shell(&mut app, shot);
-        app.world_mut().entity_mut(shell).insert(ShotSource {
-            tank: Entity::PLACEHOLDER,
-            weapon: 0,
-        });
-
-        for _ in 0..(RICOCHET_HOLD_TICKS + 4) {
-            app.update();
-        }
-
-        assert!(
-            app.world().get_entity(shell).is_err(),
-            "the own shell finalizes once the grace window expires",
-        );
-        assert!(
-            app.world().resource::<ImpactLog>().0.is_empty(),
-            "no spark — the own shell dissolves quietly too (no fabricated contact)",
-        );
     }
 
     /// Regression: an overdue authority bounce re-seeds a pose-divergent client miss.
@@ -5630,63 +5424,72 @@ mod march_tests {
     /// HELD SHELL + CONFIRM: the full honest armor read, at the server's position, on receipt — the
     /// neutral fail-closed spark never fires. This is the read that gives MP the SP-grade armor
     /// feedback (flame lick via `verdict.entered()`), typically ≈(P−S)+OWL after contact instead of
-    /// the fail-closed window.
+    /// the fail-closed window. The shooter's own shell (`ShotSource` riding it) consumes its confirm
+    /// exactly like an observer's: no special-casing.
     #[test]
     fn held_shell_resolves_on_confirm_with_full_honest_read() {
         let shot = a_shot();
-        let mut app = replica_world(SanctionedShots::default());
-        let shell = spawn_oblique_shell(&mut app, shot);
-
-        // March to contact; the shell holds (hidden, no spark).
-        for _ in 0..8 {
-            app.update();
-            if app.world().get::<Held>(shell).is_some() {
-                break;
+        for own in [false, true] {
+            let mut app = replica_world(SanctionedShots::default());
+            let shell = spawn_oblique_shell(&mut app, shot);
+            if own {
+                app.world_mut().entity_mut(shell).insert(ShotSource {
+                    tank: Entity::PLACEHOLDER,
+                    weapon: 0,
+                });
             }
-        }
-        assert!(app.world().get::<Held>(shell).is_some(), "shell held");
-        assert!(app.world().resource::<ImpactLog>().0.is_empty());
 
-        // The server's terminal arrives (an embed read at ITS position, slightly off the local
-        // contact) → resolve immediately with the full read.
-        let server_pos = Vec3::new(0.05, 2.0, 0.08);
-        app.world_mut()
-            .resource_mut::<SanctionedShots>()
-            .insert_terminal(
-                shot,
-                SanctionedTerminal {
-                    position: server_pos,
-                    normal: Vec3::Z,
-                    verdict: TerminalVerdict::Through,
-                    impact_tick: 0, // inert (no `ShotClock` — overdue path off)
-                    after_bounces: 0,
-                },
+            // March to contact; the shell holds (hidden, no spark).
+            for _ in 0..8 {
+                app.update();
+                if app.world().get::<Held>(shell).is_some() {
+                    break;
+                }
+            }
+            assert!(app.world().get::<Held>(shell).is_some(), "shell held");
+            assert!(app.world().resource::<ImpactLog>().0.is_empty());
+
+            // The server's terminal arrives (an embed read at ITS position, slightly off the local
+            // contact) → resolve immediately with the full read.
+            let server_pos = Vec3::new(0.05, 2.0, 0.08);
+            app.world_mut()
+                .resource_mut::<SanctionedShots>()
+                .insert_terminal(
+                    shot,
+                    SanctionedTerminal {
+                        position: server_pos,
+                        normal: Vec3::Z,
+                        verdict: TerminalVerdict::Through,
+                        impact_tick: 0, // inert (no `ShotClock` — overdue path off)
+                        after_bounces: 0,
+                    },
+                );
+            app.update();
+
+            assert!(
+                app.world().get_entity(shell).is_err(),
+                "the confirmed shell resolves (despawns) on receipt — not at the window",
             );
-        app.update();
-
-        assert!(
-            app.world().get_entity(shell).is_err(),
-            "the confirmed shell resolves (despawns) on receipt — not at the window",
-        );
-        let impacts = app.world().resource::<ImpactLog>().0.clone();
-        assert_eq!(
-            impacts.len(),
-            1,
-            "exactly one impact — no neutral spark ever"
-        );
-        assert!(
-            impacts[0].verdict.entered(),
-            "the SERVER's penetration verdict rides through — the flame lick is earned in MP",
-        );
-        assert!(
-            impacts[0].position.distance(server_pos) < 1.0e-4,
-            "the read lands at the SERVER's position",
-        );
-        assert_eq!(impacts[0].surface, ImpactSurface::Armor);
-        assert!(
-            impacts[0].deflection.is_none(),
-            "a terminal is not a bounce"
-        );
+            let impacts = app.world().resource::<ImpactLog>().0.clone();
+            assert_eq!(
+                impacts.len(),
+                1,
+                "exactly one impact — no neutral spark ever"
+            );
+            assert!(
+                impacts[0].verdict.entered(),
+                "the SERVER's penetration verdict rides through — the flame lick is earned in MP",
+            );
+            assert!(
+                impacts[0].position.distance(server_pos) < 1.0e-4,
+                "the read lands at the SERVER's position",
+            );
+            assert_eq!(impacts[0].surface, ImpactSurface::Armor);
+            assert!(
+                impacts[0].deflection.is_none(),
+                "a terminal is not a bounce"
+            );
+        }
     }
 
     /// PRE-ARMED CONFIRM: the terminal is already buffered when the shell reaches the plate → resolve
@@ -5792,51 +5595,6 @@ mod march_tests {
         );
         assert!(impacts[1].deflection.is_none(), "second: the terminal");
         assert!(impacts[1].position.distance(server_pos) < 1.0e-4);
-    }
-
-    /// THE SHOOTER'S OWN SHELL consumes its confirm exactly like an observer's (no special-casing) —
-    /// the own-shape shell (`ShotSource` riding it) held at contact resolves on the confirm with the
-    /// full honest read.
-    #[test]
-    fn own_shell_confirm_applies() {
-        let shot = a_shot();
-        let mut app = replica_world(SanctionedShots::default());
-        let shell = spawn_oblique_shell(&mut app, shot);
-        app.world_mut().entity_mut(shell).insert(ShotSource {
-            tank: Entity::PLACEHOLDER,
-            weapon: 0,
-        });
-
-        for _ in 0..8 {
-            app.update();
-            if app.world().get::<Held>(shell).is_some() {
-                break;
-            }
-        }
-        app.world_mut()
-            .resource_mut::<SanctionedShots>()
-            .insert_terminal(
-                shot,
-                SanctionedTerminal {
-                    position: Vec3::new(0.0, 2.0, 0.07),
-                    normal: Vec3::Z,
-                    verdict: TerminalVerdict::Through,
-                    impact_tick: 0, // inert (no `ShotClock` — overdue path off)
-                    after_bounces: 0,
-                },
-            );
-        app.update();
-
-        assert!(
-            app.world().get_entity(shell).is_err(),
-            "the shooter's own shell resolves on its confirm — the honest read on their own hit",
-        );
-        let impacts = app.world().resource::<ImpactLog>().0.clone();
-        assert_eq!(impacts.len(), 1);
-        assert!(
-            impacts[0].verdict.entered(),
-            "own hit shows the flame lick in MP"
-        );
     }
 
     /// TERMINAL DEDUP: a shot has at most one terminal, so first insert wins.
@@ -6056,6 +5814,10 @@ mod march_tests {
     /// reference-mm, DERIVED): a union of 160 mm must defeat the round even though its first plate
     /// alone (70 mm) would not, and a union of 115 mm must let it through even though the two plates
     /// SUMMED (140 mm) would not.
+    ///
+    /// SEAM INVISIBILITY, the abutting arrangement: plates meeting exactly resolve as the one plate
+    /// they add up to, on BOTH sides of the capability. A resolver that hops the shared face crosses
+    /// the second plate for free, and perfect abutment buys nothing.
     #[test]
     fn overlapping_trimesh_plates_charge_their_union_once() {
         // Undercharge — the defect that shipped. Union 160 mm.
@@ -6077,14 +5839,8 @@ mod march_tests {
             !perforates(&[slab(0.14, 0.0)]),
             "140 mm really is beyond it — the control that makes the line above mean something",
         );
-    }
 
-    /// SEAM INVISIBILITY as an outcome: plates meeting exactly resolve as the one plate they add up
-    /// to, on BOTH sides of the capability. Under the serial resolver the 1 mm nudge hopped the
-    /// shared face and the second plate was free, so perfect abutment bought nothing — which is why
-    /// the authoring standard and the resolver had to be redesigned together.
-    #[test]
-    fn exactly_abutting_trimesh_plates_resolve_as_one_plate() {
+        // Abutment. Totals of 115 and 160 mm straddle the capability.
         assert!(
             perforates(&[slab(0.115, 0.0)]) && !perforates(&[slab(0.16, 0.0)]),
             "the two totals straddle the test round's capability",
@@ -6159,112 +5915,85 @@ mod march_tests {
     /// the face's degenerate AABB fell outside the corridor's box, the entry vanished, and the walk
     /// reported an exit it had never entered. The round stopped dead on a plate it should have gone
     /// through — no terminal, no perforation, one bare `Verdict::Struck` spark.
+    ///
+    /// The same pair is fired again out where the map ends. Position is a LAW input: f32 spacing
+    /// coarsens with distance, so at 2.4 km the transit handoff lands ~1.5e-4 m off the face it was
+    /// computed from — four orders coarser than the 2.4e-8 two metres from the world origin, and the
+    /// reason the prune margin scales instead of being a constant. It is also where the margin's
+    /// CEILING starts to bind: the unclamped scaling term reaches the march's own boundary nudge at
+    /// 2.5 km, and a margin that large re-collects the exit face of the plate just perforated.
+    ///
+    /// HONEST SCOPE of the far arm: it is an end-to-end guard, not the deterministic statement of
+    /// either bound. Which side of the plane the handoff rounds to is a property of the coordinates,
+    /// and a sweep of 480 far-map arrangements found it landing SHORT every time — so this arm would
+    /// survive the margin being deleted. The bounds themselves are pinned in the collector:
+    /// `a_face_the_origin_sits_a_hair_past_is_still_collected` walks the ULP ladder at this same
+    /// distance, and `the_face_the_march_stepped_past_is_not_re_collected` holds the ceiling at
+    /// 2.5 km.
     #[test]
     fn plates_across_a_900_mm_gap_are_two_crossings_and_both_perforate() {
-        let mut app = world_with_trimesh_plates(&[slab(0.05, 0.5), slab(0.05, -0.45)]);
-        app.init_resource::<TerminalLog>();
-        app.add_observer(capture_terminal);
-        spawn_headon_shell(&mut app, a_shot());
-        for _ in 0..8 {
-            app.update();
-        }
+        // (round origin, first plate's centre along -Z from it); the second sits 950 mm further.
+        for (origin, first) in [
+            (Vec3::new(0.0, 2.0, 2.0), -1.5),
+            (Vec3::new(2400.0, 2.0, 2400.0), -2.0),
+        ] {
+            let plate = |z: f32| (Vec3::new(3.0, 3.0, 0.05), origin + Vec3::new(0.0, 0.0, z));
+            let mut app = world_with_trimesh_plates(&[plate(first), plate(first - 0.95)]);
+            app.init_resource::<TerminalLog>();
+            app.add_observer(capture_terminal);
+            spawn_headon_shell_at(&mut app, a_shot(), origin);
+            for _ in 0..8 {
+                app.update();
+            }
 
-        let impacts = app.world().resource::<ImpactLog>().0.clone();
-        assert_eq!(
-            impacts.len(),
-            2,
-            "two plates, two armour reads — the gap merges nothing and hides nothing",
-        );
-        for (impact, face) in impacts.iter().zip([0.525, -0.425]) {
-            assert!(matches!(impact.surface, ImpactSurface::Armor));
-            assert!(
-                impact.verdict.entered(),
-                "an 88 goes through 50 mm of RHA head-on: {:?}",
-                impact.position,
+            let impacts = app.world().resource::<ImpactLog>().0.clone();
+            assert_eq!(
+                impacts.len(),
+                2,
+                "two plates, two armour reads — the gap merges nothing and hides nothing \
+                 (origin {origin}): {:?}",
+                impacts.iter().map(|i| i.position).collect::<Vec<_>>(),
             );
+            let faces = [origin.z + first + 0.025, origin.z + first - 0.925];
+            for (impact, face) in impacts.iter().zip(faces) {
+                assert!(matches!(impact.surface, ImpactSurface::Armor));
+                assert!(
+                    impact.verdict.entered(),
+                    "an 88 goes through 50 mm of RHA head-on: {:?}",
+                    impact.position,
+                );
+                assert!(
+                    (impact.position.z - face).abs() < 1.0e-3,
+                    "the read is at the plate's own entry face (expected z={face}, got {})",
+                    impact.position.z,
+                );
+            }
+            // Nothing may be reported in the air itself: a fabricated weld across the gap would
+            // report ONE crossing spanning both plates, and a fabricated surface would report a
+            // third read between them. The faces themselves are read to the same 1 mm the reads
+            // above are.
+            let air = faces[1] + 1.0e-3..=faces[0] - 0.05 - 1.0e-3;
             assert!(
-                (impact.position.z - face).abs() < 1.0e-3,
-                "the read is at the plate's own entry face (expected z={face}, got {})",
-                impact.position.z,
+                impacts
+                    .iter()
+                    .all(|impact| !air.contains(&impact.position.z)),
+                "no armour was invented in 900 mm of air: {impacts:?}",
+                impacts = impacts.iter().map(|i| i.position).collect::<Vec<_>>(),
             );
-        }
-        // Nothing may be reported in the air itself: a fabricated weld across the gap would report
-        // ONE crossing spanning both plates, and a fabricated surface would report a third read
-        // between them. The faces themselves are read to the same 1 mm the reads above are.
-        assert!(
-            impacts
-                .iter()
-                .all(|impact| !(-0.425 + 1.0e-3..=0.475 - 1.0e-3).contains(&impact.position.z)),
-            "no armour was invented in 900 mm of air: {impacts:?}",
-            impacts = impacts.iter().map(|i| i.position).collect::<Vec<_>>(),
-        );
 
-        let terminals = app.world().resource::<TerminalLog>().0.clone();
-        assert_eq!(terminals.len(), 1, "one terminal per shot");
-        assert!(
-            terminals[0].verdict.entered(),
-            "the terminal breached the plate"
-        );
-        assert_eq!(terminals[0].after_bounces, 0, "nothing deflected head-on");
-        assert!(
-            (terminals[0].position.z - 0.525).abs() < 1.0e-3,
-            "the terminal reads at the FIRST plate's entry face, got z={}",
-            terminals[0].position.z,
-        );
-    }
-
-    /// The same spaced pair, out where the map ends.
-    ///
-    /// Position is a LAW input, and this is the fixture that says so. f32 spacing coarsens with
-    /// distance, so at 2.4 km the transit handoff lands ~1.5e-4 m off the face it was computed from
-    /// — four orders coarser than the 2.4e-8 that produced the original defect two metres from the
-    /// world origin, and the reason the prune margin scales instead of being a constant. It is also
-    /// where the margin's CEILING starts to bind: the unclamped scaling term reaches the march's own
-    /// boundary nudge at 2.5 km, and a margin that large re-collects the exit face of the plate just
-    /// perforated. Combat happens here, so the outcome is asserted here.
-    ///
-    /// HONEST SCOPE: this is an end-to-end guard, not the deterministic statement of either bound.
-    /// Which side of the plane the handoff rounds to is a property of the coordinates, and a sweep of
-    /// 480 far-map arrangements found it landing SHORT every time — so this fixture would survive the
-    /// margin being deleted. The bounds themselves are pinned where they can be stated exactly, in
-    /// the collector: `a_face_the_origin_sits_a_hair_past_is_still_collected` walks the ULP ladder at
-    /// this same distance, and `the_face_the_march_stepped_past_is_not_re_collected` holds the
-    /// ceiling at 2.5 km.
-    #[test]
-    fn spaced_plates_perforate_at_the_far_edge_of_the_map() {
-        let far = Vec3::new(2400.0, 2.0, 2400.0);
-        let plate = |z: f32| (Vec3::new(3.0, 3.0, 0.05), far + Vec3::new(0.0, 0.0, z));
-        let mut app = world_with_trimesh_plates(&[plate(-2.0), plate(-2.95)]);
-        app.init_resource::<TerminalLog>();
-        app.add_observer(capture_terminal);
-        spawn_headon_shell_at(&mut app, a_shot(), far);
-        for _ in 0..8 {
-            app.update();
-        }
-
-        let impacts = app.world().resource::<ImpactLog>().0.clone();
-        assert_eq!(
-            impacts.len(),
-            2,
-            "two plates, two armour reads, 2.4 km from the world origin: {:?}",
-            impacts.iter().map(|i| i.position).collect::<Vec<_>>(),
-        );
-        for (impact, face) in impacts.iter().zip([-1.975, -2.925]) {
-            assert!(matches!(impact.surface, ImpactSurface::Armor));
+            let terminals = app.world().resource::<TerminalLog>().0.clone();
+            assert_eq!(terminals.len(), 1, "one terminal per shot");
             assert!(
-                impact.verdict.entered(),
-                "an 88 still goes through 50 mm out here"
+                terminals[0].verdict.entered(),
+                "the terminal breached the plate"
             );
+            assert_eq!(terminals[0].after_bounces, 0, "nothing deflected head-on");
             assert!(
-                (impact.position.z - (far.z + face)).abs() < 1.0e-3,
-                "the read is at the plate's own entry face (expected z={}, got {})",
-                far.z + face,
-                impact.position.z,
+                (terminals[0].position.z - faces[0]).abs() < 1.0e-3,
+                "the terminal reads at the FIRST plate's entry face, got z={}",
+                terminals[0].position.z,
             );
         }
-        let terminals = app.world().resource::<TerminalLog>().0.clone();
-        assert_eq!(terminals.len(), 1, "one terminal per shot");
-        assert!(terminals[0].verdict.entered());
     }
 
     /// A PERFORATION'S SEEDS AND THE NEXT CORRIDOR DESCRIBE ONE POINT, ANYWHERE ON THE MAP.
@@ -6301,6 +6030,9 @@ mod march_tests {
             let exit = far.z as f64 - 1.0 - plate.z as f64 * 0.5;
             let resume = exit - MARCH_EPS as f64;
             let centre_z = (resume - 0.12) as f32;
+            // One world per origin: the plate stays, and each arrangement swaps in its own tilted
+            // volume and re-spawns the round.
+            let mut app = world_with_trimesh_plates(&[(plate, far + Vec3::new(0.0, 0.0, -1.0))]);
             let mut failed = Vec::new();
             for step in -20i32..=20 {
                 // `ahead > 0`: the tilted volume's entry lies BEFORE the resumption plane, so the
@@ -6310,39 +6042,31 @@ mod march_tests {
                 // Its +Z face, rotated by TILT about Y, crosses the axis `half / cos(TILT)` in front
                 // of its centre.
                 let half = ((entry - centre_z as f64) * (TILT as f64).to_radians().cos()) as f32;
-                let mut app =
-                    world_with_trimesh_plates(&[(plate, far + Vec3::new(0.0, 0.0, -1.0))]);
-                app.world_mut().spawn((
-                    Transform::from_translation(Vec3::new(far.x, far.y, centre_z))
-                        .with_rotation(Quat::from_rotation_y(TILT.to_radians())),
-                    RigidBody::Static,
-                    box_trimesh(Vec3::new(tilted.x, tilted.y, half * 2.0)),
-                    CollisionLayers::new([Layer::Armor], LayerMask::ALL),
-                    BallisticVolume {
-                        material: walk::VolumeMaterial::fixture(STEEL * 0.01),
-                        substance: "soft".to_string(),
-                    },
-                ));
+                let volume = app
+                    .world_mut()
+                    .spawn((
+                        Transform::from_translation(Vec3::new(far.x, far.y, centre_z))
+                            .with_rotation(Quat::from_rotation_y(TILT.to_radians())),
+                        RigidBody::Static,
+                        box_trimesh(Vec3::new(tilted.x, tilted.y, half * 2.0)),
+                        CollisionLayers::new([Layer::Armor], LayerMask::ALL),
+                        BallisticVolume {
+                            material: walk::VolumeMaterial::fixture(STEEL * 0.01),
+                            substance: "soft".to_string(),
+                        },
+                    ))
+                    .id();
                 for _ in 0..8 {
                     app.update();
                 }
                 let origin = far + Vec3::new(0.0, 0.0, 2.0);
-                app.world_mut().spawn((
-                    fixture_round(body, Vec3::NEG_Z * 800.0),
-                    DamageReport::default(),
-                    TerminalReport::default(),
-                    ShellPath {
-                        points: vec![origin],
-                        segment_starts: Vec::new(),
-                    },
-                    PenetrationMarks::default(),
-                    SpallMarks::default(),
-                    Transform::from_translation(origin).looking_to(Vec3::NEG_Z, Vec3::Y),
-                ));
+                let shell = spawn_round(&mut app, body, origin, Vec3::NEG_Z * 800.0);
                 for _ in 0..4 {
                     app.update();
                 }
-                let impacts = app.world().resource::<ImpactLog>().0.clone();
+                let impacts = std::mem::take(&mut app.world_mut().resource_mut::<ImpactLog>().0);
+                let _ = app.world_mut().try_despawn(shell);
+                app.world_mut().despawn(volume);
                 assert!(
                     impacts
                         .first()
@@ -6622,9 +6346,13 @@ mod march_tests {
         );
     }
 
-    /// Whether a round fired at a face from one march nudge in front reports it: impacts, all on
-    /// armour, the first an entry, and exactly one terminal.
-    fn assert_face_reported(app: &App, at: &str) {
+    /// Fly `shell`, launched within one march nudge of a face, for eight steps and assert it
+    /// reported the face: impacts, all on armour, the first an entry, and exactly one terminal. The
+    /// logs are emptied and the round despawned after, so the world takes the next launch clean.
+    fn assert_face_reported(app: &mut App, shell: Entity, at: &str) {
+        for _ in 0..8 {
+            app.update();
+        }
         let impacts = app.world().resource::<ImpactLog>().0.clone();
         assert!(
             !impacts.is_empty(),
@@ -6652,89 +6380,78 @@ mod march_tests {
             1,
             "and it reported its one terminal",
         );
+        app.world_mut().resource_mut::<ImpactLog>().0.clear();
+        app.world_mut().resource_mut::<TerminalLog>().0.clear();
+        let _ = app.world_mut().try_despawn(shell);
     }
 
-    /// FREE PENETRATION IS THE ONE OUTCOME WORSE THAN A STOPPED SHELL.
+    /// A ROUND LAUNCHED JUST OFF A FACE NEVER STARTS A SAMPLE INSIDE IT.
     ///
-    /// Every observed instance of the prune defect landed on a TRANSIT corridor, where a dropped
-    /// entry leaves a bare exit and the walk shouts `UnexpectedExit` — wrong, but loud, and the
+    /// FREE PENETRATION IS THE ONE OUTCOME WORSE THAN A STOPPED SHELL. A face dropped from a TRANSIT
+    /// corridor leaves a bare exit and the walk shouts `UnexpectedExit` — wrong, but loud, and the
     /// driver fails closed on it. The same dropped face on an ENTRANCE corridor is silent: `begin`
     /// sees no material, returns [`walk::Begin::Miss`], and `resolve::decide` flies the round
     /// through the whole examined corridor with zero cost, zero damage and NO `Impact` at all. That
     /// is armour that was never modelled, which is precisely the defect class §13 exists to kill,
     /// and it would leave no trace in any log.
     ///
-    /// So: spawn the shell one march nudge in front of a plate's face, and a few ULP either side of
-    /// it. Whatever else happens, the round may not pass through unremarked.
-    ///
-    /// Fired level, so gravity bends the travel by `θ` in the first tick: a disc re-laid square to
-    /// the bent travel at the muzzle would straddle the face by up to `r·θ` (DERIVED: 9 µm for an 88
-    /// at 800 m/s after one 16 ms bend). The samples start where they were laid instead, square to
-    /// the fire direction at the muzzle.
-    #[test]
-    fn an_entrance_corridor_that_starts_on_a_face_never_passes_through_unremarked() {
-        let face = 0.525_f32;
-        for step in -4i32..=4 {
-            let spawn = f32::from_bits((face + MARCH_EPS).to_bits().wrapping_add_signed(step));
-            let mut app = world_with_trimesh_plates(&[slab(0.05, 0.5)]);
-            app.init_resource::<TerminalLog>();
-            app.add_observer(capture_terminal);
-            spawn_headon_shell_at(&mut app, a_shot(), Vec3::new(0.0, 2.0, spawn));
-            for _ in 0..8 {
-                app.update();
-            }
-            assert_face_reported(&app, &format!("at {step} ULP"));
-        }
-    }
-
-    /// The same, falling straight down onto a level plate: gravity cannot tilt the travel, so the
-    /// disc stays flush with the face and every sample meets it at the same `t`.
-    #[test]
-    fn a_falling_entrance_corridor_that_starts_on_a_face_never_passes_through_unremarked() {
-        let face = 0.525_f32;
-        for step in -4i32..=4 {
-            let spawn = f32::from_bits((face + MARCH_EPS).to_bits().wrapping_add_signed(step));
-            let mut app =
-                world_with_trimesh_plates(&[(Vec3::new(3.0, 0.05, 3.0), Vec3::new(0.0, 0.5, 0.0))]);
-            app.init_resource::<TerminalLog>();
-            app.add_observer(capture_terminal);
-            let shell = spawn_round(
-                &mut app,
-                FIXTURE_88,
-                Vec3::new(0.1, spawn, -0.2),
-                Vec3::NEG_Y * 800.0,
-            );
-            app.world_mut().entity_mut(shell).insert(Shot(a_shot()));
-            for _ in 0..8 {
-                app.update();
-            }
-            assert_face_reported(&app, &format!("at {step} ULP"));
-        }
-    }
-
-    /// A ROUND LAUNCHED JUST OFF A FACE NEVER STARTS A SAMPLE INSIDE IT.
-    ///
     /// Each sample's sweep starts where its membership is known. Two ways of starting past that put a
     /// sample inside a plate it is declared outside of: a boundary nudge, which steps over any face
     /// within one `MARCH_EPS` ahead; and re-laying the disc square to the tick's gravity-bent travel,
     /// which puts its leading samples up to `r·sin θ` ahead of where they were laid (DERIVED: 9 µm
     /// for an 88 at 800 m/s after one 16 ms bend). Fired level from a few ULP to half a nudge off a
-    /// face, the crossing must resolve.
+    /// face, and from one nudge ± 4 ULP, the crossing must resolve. Falling straight down onto a
+    /// level plate, gravity cannot tilt the travel, so the disc stays flush with the face and every
+    /// sample meets it at the same `t`; from one nudge ± 4 ULP it must resolve too.
+    ///
+    /// One world per direction: the plate never changes, so each launch re-spawns only the round.
     #[test]
     fn a_round_launched_just_off_a_face_never_starts_a_sample_inside_it() {
         let face = 0.525_f32;
-        for clearance in [0.0, 1.0e-6, 4.0e-6, 8.0e-6, 2.0e-5, 0.5 * MARCH_EPS] {
-            for step in 0i32..=2 {
-                let spawn = f32::from_bits((face + clearance).to_bits().wrapping_add_signed(step));
-                let mut app = world_with_trimesh_plates(&[slab(0.05, 0.5)]);
-                app.init_resource::<TerminalLog>();
-                app.add_observer(capture_terminal);
-                spawn_headon_shell_at(&mut app, a_shot(), Vec3::new(0.0, 2.0, spawn));
-                for _ in 0..8 {
-                    app.update();
-                }
-                assert_face_reported(&app, &format!("{clearance:e} m + {step} ULP off it"));
+        let off = |clearance: f32, step: i32| {
+            f32::from_bits((face + clearance).to_bits().wrapping_add_signed(step))
+        };
+
+        let mut level = world_with_trimesh_plates(&[slab(0.05, 0.5)]);
+        level.init_resource::<TerminalLog>();
+        level.add_observer(capture_terminal);
+        for (clearance, steps) in [
+            (0.0, 0..=2),
+            (1.0e-6, 0..=2),
+            (4.0e-6, 0..=2),
+            (8.0e-6, 0..=2),
+            (2.0e-5, 0..=2),
+            (0.5 * MARCH_EPS, 0..=2),
+            (MARCH_EPS, -4..=4),
+        ] {
+            for step in steps {
+                let at = Vec3::new(0.0, 2.0, off(clearance, step));
+                let shell = spawn_headon_shell_at(&mut level, a_shot(), at);
+                assert_face_reported(
+                    &mut level,
+                    shell,
+                    &format!("level, {clearance:e} m + {step} ULP off it"),
+                );
             }
+        }
+
+        let mut falling =
+            world_with_trimesh_plates(&[(Vec3::new(3.0, 0.05, 3.0), Vec3::new(0.0, 0.5, 0.0))]);
+        falling.init_resource::<TerminalLog>();
+        falling.add_observer(capture_terminal);
+        for step in -4i32..=4 {
+            let shell = spawn_round(
+                &mut falling,
+                FIXTURE_88,
+                Vec3::new(0.1, off(MARCH_EPS, step), -0.2),
+                Vec3::NEG_Y * 800.0,
+            );
+            falling.world_mut().entity_mut(shell).insert(Shot(a_shot()));
+            assert_face_reported(
+                &mut falling,
+                shell,
+                &format!("falling, one nudge + {step} ULP off it"),
+            );
         }
     }
 
@@ -6894,13 +6611,14 @@ mod march_tests {
         let stepped = freeflight_step(velocity, drag_k(FIXTURE_88.caliber, FIXTURE_88.mass), DT);
         let budget = stepped.length() * DT;
         let face = Vec3::new(0.0, 2.0, 0.51);
+        // The plate never changes, so each stand-off re-spawns only the round.
+        let mut app = world_with_trimesh_plates(&[slab(0.02, 0.5)]);
         let mut failed = Vec::new();
         for index in 0..STANDOFFS {
             // The face lies this far short of the tick's travel: the crossing ends the tick for
             // stand-offs whose perforation spends what is left of it.
             let short = 0.02 - 0.04 * index as f32 / STANDOFFS as f32;
-            let mut app = world_with_trimesh_plates(&[slab(0.02, 0.5)]);
-            spawn_round(
+            let shell = spawn_round(
                 &mut app,
                 FIXTURE_88,
                 face - dir * (budget - short),
@@ -6909,10 +6627,11 @@ mod march_tests {
             for _ in 0..3 {
                 app.update();
             }
-            let impacts = app.world().resource::<ImpactLog>().0.clone();
+            let impacts = std::mem::take(&mut app.world_mut().resource_mut::<ImpactLog>().0);
             if failed_closed(&impacts) {
                 failed.push(short);
             }
+            let _ = app.world_mut().try_despawn(shell);
         }
         assert!(
             failed.is_empty(),

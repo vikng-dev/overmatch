@@ -1,6 +1,6 @@
 // s3_ricochet: an 88 meeting the hull side at 75 degrees from its normal bounces away
 // Recorded by the real march from `scenarios.ron` (`ballistics::pen_cam`); do not edit.
-// Re-record with `PEN_CAM_BLESS=1 cargo test --lib pen_cam`.
+// Re-record with `PEN_CAM_BLESS=1 cargo test --lib pen_cam::bless -- --ignored`.
 (
     synthetic: false,
     vehicle: Some("tiger_1/tiger_1.tank.ron"),

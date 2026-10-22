@@ -1,6 +1,6 @@
 // s4_spaced_then_stopped: an 88 through a road wheel (external armour) stopped in the lower hull side behind it; the wheel's cones fill the gap
 // Recorded by the real march from `scenarios.ron` (`ballistics::pen_cam`); do not edit.
-// Re-record with `PEN_CAM_BLESS=1 cargo test --lib pen_cam`.
+// Re-record with `PEN_CAM_BLESS=1 cargo test --lib pen_cam::bless -- --ignored`.
 (
     synthetic: false,
     vehicle: Some("tiger_1/tiger_1.tank.ron"),

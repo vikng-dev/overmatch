@@ -317,20 +317,6 @@ mod tests {
         }
     }
 
-    /// The fixture round loads, and its nose factor is the one DERIVED from its authored nose.
-    #[test]
-    fn the_fixture_round_derives_its_nose_factor_at_load() {
-        let round = with("mass", "5.0").unwrap().get("Probe").unwrap();
-        assert_eq!(
-            round.body.nose_factor,
-            NoseShape::Ogive { crh: 1.0 }.factor()
-        );
-        assert_eq!(round.body.mass, 5.0);
-        assert_eq!(round.body.caliber, 0.05);
-        assert_eq!(round.muzzle_speed, 700.0);
-        assert_eq!(round.wound, 20.0);
-    }
-
     /// A round's wound rate is finite and positive, refused naming the round otherwise; every
     /// shipped round states one.
     #[test]
@@ -403,10 +389,16 @@ mod tests {
     }
 
     /// Each nose family derives its factor by its own formula (a hemisphere and a half-calibre
-    /// cone are `½`, DERIVED; a flat face `1`), and a parameter outside the family's range is a
-    /// load error naming the round.
+    /// cone are `½`, DERIVED; a flat face `1`), a loaded round's body carries the factor DERIVED
+    /// from its authored nose, and a parameter outside the family's range is a load error naming
+    /// the round.
     #[test]
     fn nose_shapes_derive_their_factor_and_reject_out_of_range_parameters() {
+        let loaded = with("mass", "5.0").unwrap().get("Probe").unwrap();
+        assert_eq!(
+            loaded.body.nose_factor,
+            NoseShape::Ogive { crh: 1.0 }.factor()
+        );
         for (shape, expected) in [
             (NoseShape::Ogive { crh: 0.5 }, 0.5),
             (

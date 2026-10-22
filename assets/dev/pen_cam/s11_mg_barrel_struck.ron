@@ -1,6 +1,6 @@
 // s11_mg_barrel_struck: a machine-gun round from above into the bow machine gun's barrel where it leaves the ball mount
 // Recorded by the real march from `scenarios.ron` (`ballistics::pen_cam`); do not edit.
-// Re-record with `PEN_CAM_BLESS=1 cargo test --lib pen_cam`.
+// Re-record with `PEN_CAM_BLESS=1 cargo test --lib pen_cam::bless -- --ignored`.
 (
     synthetic: false,
     vehicle: Some("tiger_1/tiger_1.tank.ron"),

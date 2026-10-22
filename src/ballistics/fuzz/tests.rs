@@ -24,6 +24,10 @@ fn ci_report() -> Report {
 
 /// THE GATE. Every §13.6 invariant, over 10⁴ rays at the bound Tiger, and no corridor reaching crew
 /// or ammunition at all.
+///
+/// ANTI-VACUITY, on the same run: a gate that never reaches the crew has not cleared them, it has
+/// ignored them. Every crew and ammunition volume is crossed and has a cost-to-reach recorded, and
+/// the generator stays on the target.
 #[test]
 fn the_union_field_contract_holds_at_ci_scale() {
     let report = ci_report();
@@ -54,12 +58,7 @@ fn the_union_field_contract_holds_at_ci_scale() {
          route into the tank. There is no exemption: fix it in the model.\n{}",
         render(&report),
     );
-}
 
-/// ANTI-VACUITY. A gate that never reaches the crew has not cleared them, it has ignored them.
-#[test]
-fn every_crew_and_ammunition_volume_is_actually_reached() {
-    let report = ci_report();
     for volume in [
         "Commander",
         "Gunner",

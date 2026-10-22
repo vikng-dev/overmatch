@@ -1195,6 +1195,9 @@ mod tests {
         )
     }
 
+    /// Double-sided by construction: the same face crossed from behind reports the same distance and
+    /// the same winding normal. A mesh's exit face is a crossing, and a collector that culled
+    /// backfaces would lose every exit — half of every interval.
     #[test]
     fn a_head_on_crossing_reports_its_distance_and_winding_normal() {
         let claim = tri(Vec3::new(0.1, 0.1, 0.0), Vec3::Z).expect("the ray crosses it");
@@ -1204,12 +1207,7 @@ mod tests {
         // shooter, so it reads as an EXIT — which is exactly the fact parry's convention destroys.
         assert!((normal - Vec3::Z).length() < 1.0e-6, "{normal}");
         assert!(normal.dot(Vec3::Z) > 0.0);
-    }
 
-    /// Double-sided by construction. A mesh's exit face is a crossing, and a collector that culled
-    /// backfaces would lose every exit — half of every interval.
-    #[test]
-    fn a_crossing_from_behind_reports_the_same_winding_normal() {
         let claim = tri(Vec3::new(0.1, 0.1, 2.0), Vec3::NEG_Z).expect("the ray crosses it");
         let (t, normal) = (claim.t, claim.normal);
         assert!((t - 1.0).abs() < 1.0e-6, "{t}");
@@ -1220,13 +1218,6 @@ mod tests {
     fn a_ray_missing_the_triangle_reports_nothing() {
         assert!(tri(Vec3::new(0.9, 0.9, 0.0), Vec3::Z).is_none(), "outside");
         assert!(tri(Vec3::new(-0.1, 0.1, 0.0), Vec3::Z).is_none(), "u < 0");
-    }
-
-    /// A ray in the triangle's plane crosses nothing — there is no distance to report, and the
-    /// division that would compute one is the one that blows up.
-    #[test]
-    fn a_ray_parallel_to_the_plane_reports_nothing() {
-        assert!(tri(Vec3::new(0.1, 0.1, 1.0), Vec3::X).is_none());
     }
 
     /// Behind the origin is still a crossing — the collector, not the kernel, decides what a
@@ -1683,28 +1674,6 @@ mod tests {
         );
     }
 
-    /// Past the hand-off band the seed has no say: a later entry and a later exit of a shell the
-    /// sample is seeded inside or not are both this corridor's to count.
-    #[test]
-    fn boundaries_past_the_hand_off_band_are_the_corridor_s() {
-        let laws = WalkLaws::default();
-        let reach = sitting_reach(Some(10.0), Vec3::splat(5.0), Vec3::ONE, &laws);
-        for t in [reach as f64 * 1.01 + 1.0e-9, 1.0e-3, 0.5] {
-            for seeded in [false, true] {
-                assert_eq!(
-                    admit(t, 1.0, true, seeded, reach),
-                    Some(t),
-                    "entry at {t:e}"
-                );
-                assert_eq!(
-                    admit(t, 1.0, false, seeded, reach),
-                    Some(t),
-                    "exit at {t:e}"
-                );
-            }
-        }
-    }
-
     // -----------------------------------------------------------------------------------------
     // Edge-crossing watertightness
     // -----------------------------------------------------------------------------------------
@@ -1793,47 +1762,14 @@ mod tests {
         })
     }
 
-    /// A RAY THROUGH A SHARED EDGE MUST NOT FALL BETWEEN THE TWO TRIANGLES.
+    /// A RAY THROUGH A SHARED EDGE MUST NOT FALL BETWEEN THE TWO TRIANGLES, AND THE WALK RESOLVES
+    /// IT into one interval, end to end on a closed primitive.
     ///
     /// The two halves of the top face are anchored on DIFFERENT vertices — the shape the live
     /// failure has (`[51, 58, 59]` beside `[58, 60, 59]`), and the shape a mesh is under no
     /// obligation to avoid. A ray within a few ULP of their shared edge is then rejected by both
     /// independent barycentric tests: the entry vanishes, the walk meets an exit for a primitive it
     /// is not inside, and the driver fails the round closed in mid-armour.
-    #[test]
-    fn a_ray_on_a_shared_edge_is_claimed_by_one_of_the_two_triangles() {
-        let vertices = sweep_vertices();
-        let axis = SWEEP_DIR.normalize();
-        let target = vertices[4] + (vertices[6] - vertices[4]) * 0.5713;
-        let mut lost = 0;
-        let mut retired_lost = 0;
-        let mut total = 0;
-        for origin in sweep_origins(target, axis, SWEEP_REACH) {
-            let shear = RayShear::new(origin, axis);
-            let near = cross_triangle(&shear, axis, vertices[4], vertices[5], vertices[6]);
-            let far = cross_triangle(&shear, axis, vertices[6], vertices[7], vertices[4]);
-            if near.is_none() && far.is_none() {
-                lost += 1;
-            }
-            if !barycentric_contains(origin, axis, vertices[4], vertices[5], vertices[6])
-                && !barycentric_contains(origin, axis, vertices[6], vertices[7], vertices[4])
-            {
-                retired_lost += 1;
-            }
-            total += 1;
-        }
-        assert_eq!(
-            lost, 0,
-            "{lost} of {total} rays fell between the two triangles"
-        );
-        assert!(
-            retired_lost > 0,
-            "the retired test lost nothing on this fixture, so the sweep is not crossing the edge \
-             it was built to cross",
-        );
-    }
-
-    /// AND THE WALK RESOLVES IT — the consequence, end to end on a closed primitive.
     #[test]
     fn a_shared_edge_crossing_resolves_into_one_interval() {
         let vertices = sweep_vertices();
@@ -1842,11 +1778,22 @@ mod tests {
         let collider = Collider::trimesh(vertices.clone(), indices);
         let axis = SWEEP_DIR.normalize();
         let target = vertices[4] + (vertices[6] - vertices[4]) * 0.5713;
+        let mut retired_lost = 0;
         for origin in sweep_origins(target, axis, SWEEP_REACH) {
             let spans = sweep_walks(&collider, origin, axis)
                 .unwrap_or_else(|error| panic!("origin {origin:?}: {error:?}"));
             assert_eq!(spans, 1, "origin {origin:?} crossed the box once");
+            if !barycentric_contains(origin, axis, vertices[4], vertices[5], vertices[6])
+                && !barycentric_contains(origin, axis, vertices[6], vertices[7], vertices[4])
+            {
+                retired_lost += 1;
+            }
         }
+        assert!(
+            retired_lost > 0,
+            "the retired test lost nothing on this fixture, so the sweep is not crossing the edge \
+             it was built to cross",
+        );
     }
 
     /// Walk one sweep ray and report how many presence intervals the crossing resolved into.
@@ -2484,9 +2431,12 @@ mod tests {
     /// PARALLEL IS THE EXACT ZERO DENOMINATOR AND NOTHING ELSE.
     ///
     /// The ray in the plane cancels exactly; the ray meeting a needle's cap does not, however far
-    /// below any threshold the float determinant falls.
+    /// below any threshold the float determinant falls. A ray in a triangle's plane crosses
+    /// nothing through the kernel either: there is no distance to report, and the division that
+    /// would compute one is the one that blows up.
     #[test]
     fn the_parallel_test_is_an_exact_zero() {
+        assert!(tri(Vec3::new(0.1, 0.1, 1.0), Vec3::X).is_none());
         let ulp = |steps: u32| f32::from_bits(1.0f32.to_bits() + steps);
         let (a, b, c) = (
             Vec3::new(1.0, 1.0, 0.0),

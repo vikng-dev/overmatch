@@ -1,6 +1,6 @@
 // s10_gun_barrel_struck: an 88 from the side through the main gun barrel ahead of the hull: no armour crossed, the barrel dosed
 // Recorded by the real march from `scenarios.ron` (`ballistics::pen_cam`); do not edit.
-// Re-record with `PEN_CAM_BLESS=1 cargo test --lib pen_cam`.
+// Re-record with `PEN_CAM_BLESS=1 cargo test --lib pen_cam::bless -- --ignored`.
 (
     synthetic: false,
     vehicle: Some("tiger_1/tiger_1.tank.ron"),

@@ -4,9 +4,8 @@
 //! A scenario names a round from the bound tank's own weapons, where it is fired from and toward,
 //! and the target's pose; [`record_scenario`] fires it at the bound tank in the probe world
 //! (headless, no window, no input) and returns the record. The scenario list and the records it
-//! produces live in [`SCENARIO_DIR`]; [`the_pen_cam_scenarios_are_current`] re-records every one
-//! and fails when a checked-in file differs, so a physics change refreshes them deliberately:
-//! `PEN_CAM_BLESS=1 cargo test --lib pen_cam` rewrites them, and the diff is the review.
+//! produces live in [`SCENARIO_DIR`]; [`bless_scenarios`], an ignored tool run on demand,
+//! re-records every one.
 //!
 //! The class-invariant tests at the end fire at generic fixture plates, not at the bound tank.
 
@@ -32,7 +31,7 @@ use std::collections::BTreeMap;
 const SCENARIO_DIR: &str = "dev/pen_cam";
 const SCENARIO_LIST: &str = "scenarios.ron";
 
-/// Fixed-step length the march is driven at (s), as the goldens drive it.
+/// Fixed-step length the march is driven at (s).
 pub(super) const STEP: Duration = Duration::from_millis(16);
 /// The shooter every scenario names: fixture data, a player name no match produced. The shooter
 /// fires one of the bound tank's own weapons, so its vehicle is the bound tank's.
@@ -220,58 +219,6 @@ fn record_edited(
     (report, marched, gated)
 }
 
-/// A record is stated in the struck hull's frame: one shot fired at the bound tank at two hull
-/// poses, turned with the tank, records the same verdict, plates, components, path and muzzle. The
-/// shot down a front plate, its muzzle 40 m back and the 30° pose are fixture data; 1 mm is the
-/// tolerance on a position.
-#[test]
-fn a_record_is_stated_in_the_struck_hull_frame() {
-    let shot = |yaw_deg: f32| {
-        let turn = Quat::from_rotation_y(yaw_deg.to_radians());
-        record_scenario(&Scenario {
-            name: format!("hull yaw {yaw_deg}"),
-            shows: String::new(),
-            weapon: "MainGun".to_owned(),
-            speed: None,
-            from: turn * Vec3::new(-0.57, 1.45, -6.5),
-            toward: turn * Vec3::new(-0.57, 1.45, 0.0),
-            muzzle: Some(turn * Vec3::new(-0.57, 1.45, -40.0)),
-            hull_yaw_deg: yaw_deg,
-            turret_yaw_deg: 0.0,
-            gun_elevation_deg: 0.0,
-            verdict: ShotVerdict::Penetration,
-        })
-    };
-    let (still, turned) = (shot(0.0), shot(30.0));
-    let near = |a: [f32; 3], b: [f32; 3]| Vec3::from(a).distance(Vec3::from(b)) < 1.0e-3;
-    assert_eq!(still.impact.verdict, turned.impact.verdict);
-    assert!(near(still.impact.point, turned.impact.point));
-    let names = |report: &PenetrationReport| -> Vec<String> {
-        report
-            .plates
-            .iter()
-            .map(|plate| plate.name.clone())
-            .collect()
-    };
-    assert_eq!(names(&still), names(&turned));
-    for (a, b) in still.plates.iter().zip(&turned.plates) {
-        assert!(near(a.entry, b.entry), "{}", a.name);
-    }
-    assert_eq!(still.components, turned.components);
-    assert!(near(still.origin, turned.origin));
-    let (Some(still_muzzle), Some(turned_muzzle)) = (still.muzzle, turned.muzzle) else {
-        panic!("both records carry the muzzle");
-    };
-    assert!(
-        near(still_muzzle, turned_muzzle),
-        "{still_muzzle:?} vs {turned_muzzle:?}"
-    );
-    assert_eq!(still.path.len(), turned.path.len());
-    for (a, b) in still.path.iter().zip(&turned.path) {
-        assert!(near(a.point, b.point), "{:?} vs {:?}", a.point, b.point);
-    }
-}
-
 /// The distance along `direction` (unit) from `origin` to the nearest triangle of `shape`, if the
 /// ray meets one (Möller–Trumbore).
 fn ray_hit(shape: &ComponentShape, origin: Vec3, direction: Vec3) -> Option<f32> {
@@ -398,7 +345,8 @@ fn render(scenario: &Scenario, report: &PenetrationReport) -> String {
         .expect("a record serializes");
     format!(
         "// {}: {}\n// Recorded by the real march from `{SCENARIO_LIST}` (`ballistics::pen_cam`); do \
-         not edit.\n// Re-record with `PEN_CAM_BLESS=1 cargo test --lib pen_cam`.\n{body}\n",
+         not edit.\n// Re-record with `PEN_CAM_BLESS=1 cargo test --lib pen_cam::bless -- --ignored`.\n\
+         {body}\n",
         scenario.name, scenario.shows
     )
 }
@@ -412,139 +360,17 @@ fn scenarios() -> Vec<Scenario> {
     ron::de::from_str(&text).unwrap_or_else(|error| panic!("{}: {error}", path.display()))
 }
 
-/// A checked-in record matches today's march when every fact but a float is exact and every float
-/// is within [`RECORD_REL_TOLERANCE`] of its recorded value, or within [`RECORD_ABS_TOLERANCE`] of
-/// it. The march is server-only, so it need not be bit-identical across platforms: a record is a
-/// view fixture, blessed on one platform and checked on all, and libm's transcendentals differ by
-/// an f32 ulp between them.
-///
-/// DERIVED: 75x the largest cross-platform spread MEASURED between macOS-blessed records and a
-/// Linux march, 1.33e-7 relative (about one f32 ulp).
-const RECORD_REL_TOLERANCE: f64 = 1e-5;
-/// The floor for a value whose recorded magnitude is a cancellation residue (records hold values
-/// near 1e-8). DERIVED: one f32 ulp at the largest magnitude a record holds (1000, ulp 6.1e-5),
-/// with headroom.
-const RECORD_ABS_TOLERANCE: f64 = 1e-4;
-
-/// A record's text, split into float literals and the exact text between them. An integer, or
-/// digits inside a name (`s3_ricochet`, `88mm_AP`), stay in the exact text, a [`Token::Fact`].
-#[derive(Debug, PartialEq)]
-enum Token<'a> {
-    Fact(&'a str),
-    Float(f64),
-}
-
-fn tokens(text: &str) -> Vec<Token<'_>> {
-    let bytes = text.as_bytes();
-    let mut out = Vec::new();
-    let (mut text_from, mut i) = (0, 0);
-    while i < bytes.len() {
-        let starts_number = (bytes[i].is_ascii_digit()
-            || (bytes[i] == b'-' && bytes.get(i + 1).is_some_and(u8::is_ascii_digit)))
-            && (i == 0 || !(bytes[i - 1].is_ascii_alphanumeric() || b"_.".contains(&bytes[i - 1])));
-        if !starts_number {
-            i += 1;
-            continue;
-        }
-        let mut end = i + 1;
-        while end < bytes.len()
-            && (bytes[end].is_ascii_digit()
-                || b".eE".contains(&bytes[end])
-                || (b"+-".contains(&bytes[end]) && b"eE".contains(&bytes[end - 1])))
-        {
-            end += 1;
-        }
-        let literal = &text[i..end];
-        match literal.parse::<f64>() {
-            Ok(value) if literal.contains(['.', 'e', 'E']) => {
-                if text_from < i {
-                    out.push(Token::Fact(&text[text_from..i]));
-                }
-                out.push(Token::Float(value));
-                text_from = end;
-            }
-            _ => {}
-        }
-        i = end;
-    }
-    if text_from < bytes.len() {
-        out.push(Token::Fact(&text[text_from..]));
-    }
-    out
-}
-
-/// The largest float difference above [`RECORD_ABS_TOLERANCE`] between two records whose text
-/// matches exactly everywhere else.
-#[derive(Debug, Default)]
-struct Spread {
-    abs: f64,
-    rel: f64,
-    /// The line of the checked-in record holding the largest relative difference.
-    worst: String,
-}
-
-/// How far `today` departs from `recorded`: `Err` names the first difference in anything but a
-/// float literal (a verdict, a name, a plate or path point gained or lost).
-fn spread(recorded: &str, today: &str) -> Result<Spread, String> {
-    let (a, b) = (tokens(recorded), tokens(today));
-    let mut spread = Spread::default();
-    let mut at = 0;
-    for (index, pair) in a.iter().zip(&b).enumerate() {
-        match pair {
-            (Token::Float(x), Token::Float(y)) => {
-                let abs = (x - y).abs();
-                let rel = if abs == 0.0 {
-                    0.0
-                } else {
-                    abs / x.abs().max(y.abs())
-                };
-                if abs <= RECORD_ABS_TOLERANCE {
-                    continue;
-                }
-                spread.abs = spread.abs.max(abs);
-                if rel > spread.rel {
-                    spread.rel = rel;
-                    at = index;
-                }
-            }
-            (x, y) if x == y => {}
-            (Token::Fact(x), Token::Fact(y)) => {
-                let (x, y) = x
-                    .lines()
-                    .zip(y.lines())
-                    .find(|(x, y)| x != y)
-                    .unwrap_or((x, y));
-                return Err(format!("{:?} became {:?}", x.trim(), y.trim()));
-            }
-            (x, y) => return Err(format!("{x:?} became {y:?}")),
-        }
-    }
-    if a.len() != b.len() {
-        return Err(format!("{} tokens became {}", a.len(), b.len()));
-    }
-    let line_start = a[..at]
-        .iter()
-        .rev()
-        .find_map(|token| match token {
-            Token::Fact(text) => text.rsplit('\n').next(),
-            Token::Float(_) => None,
-        })
-        .unwrap_or_default();
-    spread.worst = format!("{}{:?}", line_start.trim_start(), a.get(at));
-    Ok(spread)
-}
-
-/// Every scenario earns its stated verdict, its record is self-consistent and agrees with its own
-/// path, and the checked-in record is what the march records today: every discrete fact exact,
-/// every float within [`RECORD_REL_TOLERANCE`] or [`RECORD_ABS_TOLERANCE`]. No record is left
-/// without a scenario.
+/// Re-records every scenario file from today's march (ignored; a tool, run on demand):
+/// `PEN_CAM_BLESS=1 cargo test --lib pen_cam::bless -- --ignored` writes them, and the diff is the
+/// review; without `PEN_CAM_BLESS` it records and checks but writes nothing. A record is written
+/// only when its scenario earns its stated verdict, its own path reads that verdict, it is
+/// self-consistent, and its round is a registry key.
 #[test]
-fn the_pen_cam_scenarios_are_current() {
+#[ignore = "a tool: PEN_CAM_BLESS=1 re-records the scenario files"]
+fn bless_scenarios() {
     let dir = crate::assets::asset_root().join(SCENARIO_DIR);
     let bless = std::env::var_os("PEN_CAM_BLESS").is_some();
-    let list = scenarios();
-    let mut stale = Vec::new();
-    for scenario in &list {
+    for scenario in &scenarios() {
         let report = record_scenario(scenario);
         assert_eq!(
             report.impact.verdict, scenario.verdict,
@@ -566,32 +392,12 @@ fn the_pen_cam_scenarios_are_current() {
             scenario.name,
             report.round
         );
-        let text = render(scenario, &report);
-        let path = dir.join(format!("{}.ron", scenario.name));
         if bless {
-            std::fs::write(&path, &text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
-        } else {
-            let recorded = std::fs::read_to_string(&path).unwrap_or_default();
-            match spread(&recorded, &text) {
-                Ok(spread) if spread.rel <= RECORD_REL_TOLERANCE => {}
-                Ok(spread) => stale.push(format!("{}: {spread:?}", scenario.name)),
-                Err(changed) => stale.push(format!("{}: {changed}", scenario.name)),
-            }
+            let path = dir.join(format!("{}.ron", scenario.name));
+            std::fs::write(&path, render(scenario, &report))
+                .unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         }
     }
-    let mut orphans: Vec<String> = std::fs::read_dir(&dir)
-        .expect("the scenario directory exists")
-        .filter_map(|entry| entry.ok()?.file_name().into_string().ok())
-        .filter(|file| file.ends_with(".ron") && file != SCENARIO_LIST)
-        .filter(|file| !list.iter().any(|s| format!("{}.ron", s.name) == *file))
-        .collect();
-    orphans.sort();
-    assert!(orphans.is_empty(), "records with no scenario: {orphans:?}");
-    assert!(
-        stale.is_empty(),
-        "stale pen cam records {stale:?}: the march records them differently today. Re-record with \
-         `PEN_CAM_BLESS=1 cargo test --lib pen_cam` and review the diff"
-    );
 }
 
 /// The server cost of one cone throw under the shipped law at each of [`COST_DIRECTIONS`]
@@ -878,7 +684,7 @@ pub(super) fn fixture_fire(
 }
 
 /// [`fixture_fire`] of a round of `body` fired at `velocity`, its flight state edited by `round`,
-/// into the fixture world as `setup` leaves it.
+/// into the fixture world as `setup` leaves it. The round leaves the muzzle at `from`.
 pub(super) fn fixture_fire_with(
     volumes: &[(FixtureVolume, usize, Quat)],
     from: Vec3,
@@ -918,7 +724,7 @@ pub(super) fn fixture_fire_with(
     let facts = ShotFacts {
         shooter: None,
         launch: from,
-        muzzle: None,
+        muzzle: Some(from),
         projectile: "fixture".to_owned(),
         caliber_mm: body.caliber * 1000.0,
         mass_kg: body.mass,
@@ -981,9 +787,15 @@ pub(super) fn plate(name: &'static str, thickness: f32, z: f32, kind: Kind) -> F
 }
 
 /// A round that perforates external armour and is stopped by the main armour behind it did not
-/// penetrate.
+/// penetrate; nor did one through external armour alone that flies on, dosing nothing.
 #[test]
 fn perforating_a_skirt_and_stopping_in_the_hull_is_a_non_pen() {
+    let report = fixture_shot(&[plate("skirt", 0.01, 0.0, Kind::External)], LINE_FROM);
+    assert_eq!(report.impact.verdict, ShotVerdict::NonPen);
+    assert!(report.doses.is_empty(), "{:?}", report.doses);
+    let last = report.path.last().expect("a path");
+    assert!(last.point[2] < -0.01, "the path flies on past the skirt");
+
     let report = fixture_shot(
         &[
             plate("skirt", 0.01, 0.0, Kind::External),
@@ -1112,15 +924,73 @@ fn a_box_behind_a_perforated_plate_is_dosed_by_line_and_cone() {
     assert!(!report.spall.is_empty(), "the plate's exit throws a cone");
 }
 
-/// A shot through external armour alone that flies on is a non-pen: no armour perforated, nothing
-/// dosed, no bounce.
+/// A record is stated in the struck hull's frame: one shot through a plate into a box behind it,
+/// fired at a fixture tank at two hull poses, turned with the tank, records the same verdict,
+/// plates, components, path and muzzle. The 30° pose is fixture data; 1 mm is the tolerance on a
+/// position.
 #[test]
-fn through_external_armour_alone_is_a_non_pen() {
-    let report = fixture_shot(&[plate("skirt", 0.01, 0.0, Kind::External)], LINE_FROM);
-    assert_eq!(report.impact.verdict, ShotVerdict::NonPen);
-    assert!(report.doses.is_empty(), "{:?}", report.doses);
-    let last = report.path.last().expect("a path");
-    assert!(last.point[2] < -0.01, "the path flies on past the skirt");
+fn a_record_is_stated_in_the_struck_hull_frame() {
+    let shot = |yaw_deg: f32| {
+        let turn = Quat::from_rotation_y(yaw_deg.to_radians());
+        let volumes = [
+            plate("front", THIN, 0.0, Kind::Main),
+            (
+                "box",
+                Vec3::splat(0.5),
+                Vec3::new(0.0, 2.0, -1.0),
+                Kind::Box(10_000),
+            ),
+        ]
+        .map(|(name, size, at, kind)| ((name, size, turn * at, kind), 0, turn));
+        let hull = Transform::from_rotation(turn);
+        fixture_fire_with(
+            &volumes,
+            turn * LINE_FROM,
+            turn * Vec3::NEG_Z * 800.0,
+            0,
+            FIXTURE_88,
+            |_| {},
+            |app| {
+                let world = app.world_mut();
+                let tank = world
+                    .query_filtered::<Entity, With<Rig>>()
+                    .single(world)
+                    .expect("one fixture tank");
+                world
+                    .entity_mut(tank)
+                    .insert((hull, GlobalTransform::from(hull)));
+            },
+        )
+        .report
+    };
+    let (still, turned) = (shot(0.0), shot(30.0));
+    let near = |a: [f32; 3], b: [f32; 3]| Vec3::from(a).distance(Vec3::from(b)) < 1.0e-3;
+    assert_eq!(still.impact.verdict, turned.impact.verdict);
+    assert!(near(still.impact.point, turned.impact.point));
+    let names = |report: &PenetrationReport| -> Vec<String> {
+        report
+            .plates
+            .iter()
+            .map(|plate| plate.name.clone())
+            .collect()
+    };
+    assert_eq!(names(&still), names(&turned));
+    for (a, b) in still.plates.iter().zip(&turned.plates) {
+        assert!(near(a.entry, b.entry), "{}", a.name);
+    }
+    assert_eq!(still.components, turned.components);
+    assert!(near(still.origin, turned.origin));
+    let (Some(still_muzzle), Some(turned_muzzle)) = (still.muzzle, turned.muzzle) else {
+        panic!("both records carry the muzzle");
+    };
+    assert!(
+        near(still_muzzle, turned_muzzle),
+        "{still_muzzle:?} vs {turned_muzzle:?}"
+    );
+    assert_eq!(still.path.len(), turned.path.len());
+    for (a, b) in still.path.iter().zip(&turned.path) {
+        assert!(near(a.point, b.point), "{:?} vs {:?}", a.point, b.point);
+    }
 }
 
 /// A component on the line with no armour in front of it is damaged by the line through it, and

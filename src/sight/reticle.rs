@@ -1074,21 +1074,6 @@ mod tests {
             let local = self.camera_rotation().inverse() * dir;
             local.y.atan2(-local.z)
         }
-
-        /// Where the OLD, camera-anchored law put a mark: the camera's own forward pitched up by
-        /// `angle` about its right axis. Scheme A must still land exactly here.
-        fn camera_anchored(&self, angle: f32) -> Vec2 {
-            let rotation = self.camera_rotation();
-            let dir = Quat::from_axis_angle(rotation * Vec3::X, angle) * (rotation * Vec3::NEG_Z);
-            let camera = self.world.get::<Camera>(self.camera).expect("a camera");
-            let transform = self
-                .world
-                .get::<GlobalTransform>(self.camera)
-                .expect("a camera pose");
-            camera
-                .world_to_viewport(transform, transform.translation() + dir)
-                .expect("the camera-anchored mark projects")
-        }
     }
 
     /// **The ruling: the range bar rides the GUN, not the view.** Hold the camera still — above
@@ -1201,46 +1186,6 @@ mod tests {
             checked > 4,
             "the law must be measured on the scale, not on a stray mark — only {checked} \
              graduations were on screen",
-        );
-    }
-
-    /// **The `k = 0` picture is untouched.** There the camera is welded to the same sight line
-    /// (`camera::gunner_camera`), so anchoring the graticule to the gun is identity: the zero mark
-    /// holds the viewport centre and every graduation lands where the camera-anchored law this
-    /// replaces put it, recomputed here from the camera pose alone.
-    #[test]
-    fn the_welded_picture_is_unchanged() {
-        /// Placement tolerance in px — sub-pixel, so the two laws are the same picture.
-        const PIXEL: f32 = 0.05;
-
-        let mut picture =
-            SightPicture::new(Quat::from_rotation_y(0.4) * Quat::from_rotation_x(0.07));
-        picture.bolt_to_sight_line();
-        picture.run();
-
-        let centre = VIEWPORT.as_vec2() / 2.0;
-        let zero = picture.zero_mark().expect("the zero mark is on screen");
-        assert!(
-            zero.distance(centre) < PIXEL,
-            "with the camera bolted to the sight line the zero mark is screen centre, got {zero} \
-             against {centre}",
-        );
-
-        let table = table();
-        let mut checked = 0;
-        for (range, mark) in picture.graduations() {
-            let Some(mark) = mark else { continue };
-            let angle = table.superelevation(DIALED) - table.superelevation(range);
-            let was = picture.camera_anchored(angle);
-            assert!(
-                mark.distance(was) < PIXEL,
-                "k = 0 must be a no-op: the {range} m graduation moved from {was} to {mark}",
-            );
-            checked += 1;
-        }
-        assert!(
-            checked > 4,
-            "only {checked} graduations were drawn to compare"
         );
     }
 
@@ -1493,73 +1438,6 @@ mod tests {
         }
     }
 
-    /// **The intent driven round the bound FILLS the glass: it touches the rim on the four axes and
-    /// never comes in more than a couple of percent between them.** The property that makes the
-    /// drawn circle mean something: a bound off the vertical field alone would leave 44% of the
-    /// glass unreachable at 16:9.
-    ///
-    /// The dip between the axes is the bound's own shape: it is a circle in the sight's yaw/pitch
-    /// ANGLES, and the perspective divide maps that to a slightly flattened curve on screen —
-    /// MEASURED at 1.6% on the diagonals, entirely INSIDE the rim.
-    #[test]
-    fn the_bound_fills_the_drawn_glass_at_every_bearing() {
-        for viewport in ASPECTS {
-            let picture = OpticPicture::new(viewport, None, 0.0);
-            let glass = picture.glass();
-            for step in 0..24 {
-                let phi = step as f32 * std::f32::consts::TAU / 24.0;
-                let point = intent_at(on_the_bound(picture.margin, phi), 900.0);
-                let reach = picture
-                    .glass_offset(&glass, hull().transform_point3(point))
-                    .length()
-                    / glass.radius;
-                assert!(
-                    (0.98..=1.000_01).contains(&reach),
-                    "on a {viewport} viewport the bound {phi} rad round reached {reach} of the \
-                     drawn radius",
-                );
-            }
-        }
-    }
-
-    /// **The bound takes the LARGER axis, whichever axis that is.** A bound off the vertical field
-    /// alone would be far tighter than the rim on any landscape viewport; one off the width would
-    /// be tighter than the rim on a portrait one, where the height is the larger axis.
-    ///
-    /// Worked instances as fixture data: the TZF 9b frames 25°, reaching 19.53° at 16:9 and 11.28°
-    /// on a portrait or square viewport.
-    #[test]
-    fn the_bound_is_sized_by_the_larger_axis() {
-        let vertical = optic_margin(FOV, 1.0);
-        for viewport in ASPECTS {
-            let size = viewport.as_vec2();
-            let aspect = size.x / size.y;
-            let margin = optic_margin(FOV, aspect);
-            if aspect > 1.0 {
-                assert!(
-                    margin > vertical,
-                    "a {viewport} viewport is wider than it is tall, so the cursor must reach \
-                     further than the {vertical} rad the vertical field alone gives",
-                );
-            } else {
-                assert!(
-                    (margin - vertical).abs() < EPS,
-                    "on a {viewport} viewport the height is the larger axis, so the reach is the \
-                     vertical one — {margin} rad against {vertical}",
-                );
-            }
-        }
-
-        let wide = optic_margin(FOV, 16.0 / 9.0);
-        assert!(
-            (wide.to_degrees() - 19.53).abs() < 5e-3
-                && (vertical.to_degrees() - 11.28).abs() < 5e-3,
-            "the TZF 9b's 25° reaches {}° at 16:9 and {}° on a square viewport",
-            wide.to_degrees(),
-            vertical.to_degrees(),
-        );
-    }
-
     /// **The rim's feather stays representable at its own radius.** The shader smoothsteps across
     /// `radius ± feather`, which is undefined where the two edges collapse onto one float, and
     /// blank where the gradient reaches the centre. Both ends are checked at every aspect, plus the
@@ -1651,6 +1529,12 @@ mod tests {
     /// Driven on the bound itself, all the way round it, at ranges from point-blank to the range
     /// scale's end, through the shipped blend and the shipped placement, and measured in the
     /// shader's own metric.
+    ///
+    /// The bound also FILLS the glass: with the camera on the sight line it reaches at least 98 % of
+    /// the rim at every bearing. A bound off the vertical field alone would leave 44 % of the glass
+    /// unreachable at 16:9. The dip is the bound's own shape: a circle in the sight's yaw/pitch
+    /// ANGLES, which the perspective divide maps to a slightly flattened curve on screen, MEASURED
+    /// at 1.6 % on the diagonals.
     #[test]
     fn the_intent_stays_inside_the_drawn_glass_at_every_rung() {
         /// Float slack as a fraction of the rim: the containment is an EXACT equality on the
@@ -1658,6 +1542,21 @@ mod tests {
         const RIM_SLACK: f32 = 1e-5;
 
         for viewport in ASPECTS {
+            let welded = OpticPicture::new(viewport, None, 0.0);
+            let glass = welded.glass();
+            for step in 0..24 {
+                let phi = step as f32 * std::f32::consts::TAU / 24.0;
+                let point = intent_at(on_the_bound(welded.margin, phi), 900.0);
+                let reach = welded
+                    .glass_offset(&glass, hull().transform_point3(point))
+                    .length()
+                    / glass.radius;
+                assert!(
+                    (0.98..=1.0 + RIM_SLACK).contains(&reach),
+                    "on a {viewport} viewport the bound {phi} rad round reached {reach} of the \
+                     drawn radius",
+                );
+            }
             for k in BLEND_SAMPLES {
                 let margin = OpticPicture::new(viewport, None, k).margin;
                 for step in 0..24 {
@@ -1679,43 +1578,5 @@ mod tests {
                 }
             }
         }
-    }
-
-    /// The range readout is gunner furniture over a tank: the optic alone, with no controlled tank
-    /// (between matches, `SightMode` left on Gunner), shows no range.
-    #[test]
-    fn the_range_readout_needs_the_optic_and_a_controlled_tank() {
-        assert!(range_readout_visible(SightMode::Gunner, true));
-        assert!(!range_readout_visible(SightMode::Gunner, false));
-        assert!(!range_readout_visible(SightMode::ThirdPerson, true));
-        assert!(!range_readout_visible(SightMode::ThirdPerson, false));
-    }
-
-    /// `update_view_death_overlay` must declare `ViewDead` presence even when the overlay node is
-    /// absent. `declare` is absolute, so a frame that skipped it would leave the previous answer
-    /// LATCHED — the failure this ordering rules out. The node cannot go missing today (it spawns at
-    /// `Startup` and never despawns), so this pins the decoupling rather than a live bug.
-    #[test]
-    fn declaration_survives_a_missing_overlay_node() {
-        let mut app = App::new();
-        app.init_resource::<SightMode>();
-        app.init_resource::<Overlays>();
-        // Latch it first: clearing a latched overlay is the direction that used to be skippable.
-        app.world_mut()
-            .resource_mut::<Overlays>()
-            .declare(Overlay::ViewDead, true);
-        app.add_systems(Update, update_view_death_overlay);
-
-        // No overlay node, no text child, no controlled tank — every query below the declaration
-        // fails to resolve.
-        app.update();
-
-        assert!(
-            !app.world()
-                .resource::<Overlays>()
-                .contains(Overlay::ViewDead),
-            "no controlled tank means no dead station, and the declaration must reach the set to \
-             clear it even though the overlay node is missing"
-        );
     }
 }

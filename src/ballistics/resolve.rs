@@ -89,6 +89,11 @@ pub(crate) const MAX_OVERRUN: f32 = MAX_CORRIDOR;
 /// stops the round (fail closed), whether or not the geometry was well formed.
 pub(crate) const MAX_STEP_CROSSINGS: usize = collect::MAX_FACES;
 
+/// The crossing ceiling a world's steps run under in place of [`MAX_STEP_CROSSINGS`], when it names
+/// one: a fixture reaches the limit in a few crossings instead of thousands.
+#[derive(Resource, Clone, Copy)]
+pub(crate) struct StepCrossings(pub(crate) usize);
+
 /// One step's travel budget, spent by its successive crossings, and the limits nothing may pass.
 ///
 /// Shared by the runtime march and the §13.6 gate's driver, so both stop a runaway step at the same
@@ -97,13 +102,17 @@ pub(crate) struct Budget {
     /// Metres of travel left; negative once a drain runs past the budget.
     remaining: f32,
     crossings: usize,
+    /// The crossings the step may decide.
+    max_crossings: usize,
 }
 
 impl Budget {
-    pub(crate) fn new(travel: f32) -> Self {
+    /// `travel` metres, spent by at most `max_crossings` crossings.
+    pub(crate) fn new(travel: f32, max_crossings: usize) -> Self {
         Self {
             remaining: travel,
             crossings: 0,
+            max_crossings,
         }
     }
 
@@ -125,7 +134,7 @@ impl Budget {
         let crossings = self.crossings + 1;
         let remaining = self.remaining - travel;
         let overrun = (-remaining).max(0.0);
-        if crossings > MAX_STEP_CROSSINGS || overrun > MAX_OVERRUN {
+        if crossings > self.max_crossings || overrun > MAX_OVERRUN {
             return Err(WalkError::DrainExhausted { crossings, overrun });
         }
         self.crossings = crossings;

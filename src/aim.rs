@@ -976,9 +976,22 @@ mod tests {
     /// on it — the case a starved buffer creates, when the authority holds the last command it got
     /// while the hull turns on under it. A hull-local transport re-applies the value to the later
     /// hull and misses by exactly the heading change.
+    ///
+    /// The jitter stair: under jitter lightyear's clamp freezes the interpolated hull, then steps
+    /// it, while the authority's turns on. An intention that travels hull-local is authored on one
+    /// stair and decomposed on another, so the commanded bearing swings by the whole step and back,
+    /// every period, while the player holds the crosshair still; a world place admits no hull pose.
+    /// SCOPE: this bounds the COMMANDED bearing, which is all the transport owns. The rendered bore
+    /// still staircases, because the hull's step carries the whole tank and the rate-limited mount
+    /// can only walk it back — the interpolated hull's smoothness to answer for, and nothing in
+    /// ADR-0038 touches it (see "what this does not fix").
     #[test]
     fn a_third_person_pick_names_a_place_whatever_the_hull_is_doing() {
         const TURN_DEG: f32 = 20.0;
+        /// The jitter stair's hull yaw rate (degrees/second).
+        const OMEGA: f32 = 10.0;
+        /// Ticks the interpolated hull holds still before it catches up in one jump.
+        const FREEZE_TICKS: u32 = 6;
         let target = ROOT + Vec3::new(0.0, 0.0, -500.0);
 
         let mut rig = AimRig::new();
@@ -1014,6 +1027,44 @@ mod tests {
             "the bore must sit exactly the commanded superelevation above the intention — the lob \
              is the only thing entitled to move it off the line of sight — got {elevation:.3}° \
              against {lobbed:.3}°",
+        );
+
+        let mut rig = AimRig::new();
+        rig.watch(target);
+        rig.frame(0.0, 0.0, Author::ThirdPerson);
+        let place = rig.picked();
+        let mut swing = (f32::MAX, f32::MIN);
+        for t in 0..512u32 {
+            // The clamp's staircase: the yaw the client SHOWS is held at the last window boundary
+            // until the next arrival steps it on; the authority's runs smoothly through.
+            let shown = (t / FREEZE_TICKS * FREEZE_TICKS) as f32;
+            rig.frame(
+                OMEGA * shown * TICK,
+                OMEGA * t as f32 * TICK,
+                Author::ThirdPerson,
+            );
+            // Past the priming ticks, so every sample is of a fully delivered intention.
+            if t >= 64 {
+                let bearing = rig.commanded_bearing_deg();
+                swing = (swing.0.min(bearing), swing.1.max(bearing));
+            }
+        }
+
+        let peak_to_peak = swing.1 - swing.0;
+        let hull_step = OMEGA * FREEZE_TICKS as f32 * TICK;
+        // The turret ring is bolted to the hull and the hull is offset from the pivot, so the ring
+        // TRANSLATES on a circle of that offset as the tank turns: the bearing from it to a fixed
+        // place genuinely shifts. That parallax — not zero — is the floor, and the square wave a
+        // hull-local transport beats out is two orders above it.
+        let parallax = (2.0 * HULL_OFFSET.xz().length() / (place - ROOT).length())
+            .atan()
+            .to_degrees();
+        assert!(
+            peak_to_peak < parallax,
+            "the commanded bearing must not move while the intention stands still, whatever the \
+             client's rendered hull does — got {peak_to_peak:.4}° of swing against the turret \
+             ring's own {parallax:.4}° of parallax, and the {hull_step:.3}° square wave a \
+             hull-local transport beats out at the clamp's period",
         );
     }
 
@@ -1062,63 +1113,6 @@ mod tests {
                  ±ω·delivery = {transport:.3}°, one way on each side",
             );
         }
-    }
-
-    /// **A jittering hull cannot shake a world-anchored bearing.** The interpolated hull does not
-    /// turn smoothly — under jitter lightyear's clamp freezes it, then steps it — while the
-    /// authority's turns on. An intention that travels hull-local is authored on one stair and
-    /// decomposed on another, so the commanded bearing swings by the whole step and back, every
-    /// period, while the player holds the crosshair perfectly still. A world place admits no hull
-    /// pose, so the commanded bearing is simply where the player put it.
-    ///
-    /// SCOPE: this is a law about the COMMANDED bearing, which is all the transport owns. The
-    /// rendered bore still staircases here, because the hull's step carries the whole tank and the
-    /// rate-limited mount can only walk it back — the interpolated hull's smoothness to answer for,
-    /// and nothing in ADR-0038 touches it (see "what this does not fix").
-    #[test]
-    fn a_frozen_then_stepped_hull_does_not_beat_the_third_person_bearing() {
-        const OMEGA: f32 = 10.0;
-        /// Ticks the interpolated hull holds still before it catches up in one jump.
-        const FREEZE_TICKS: u32 = 6;
-        let target = ROOT + Vec3::new(0.0, 0.0, -500.0);
-
-        let mut rig = AimRig::new();
-        rig.watch(target);
-        rig.frame(0.0, 0.0, Author::ThirdPerson);
-        let place = rig.picked();
-        let mut swing = (f32::MAX, f32::MIN);
-        for t in 0..512u32 {
-            // The clamp's staircase: the yaw the client SHOWS is held at the last window boundary
-            // until the next arrival steps it on; the authority's runs smoothly through.
-            let shown = (t / FREEZE_TICKS * FREEZE_TICKS) as f32;
-            rig.frame(
-                OMEGA * shown * TICK,
-                OMEGA * t as f32 * TICK,
-                Author::ThirdPerson,
-            );
-            // Past the priming ticks, so every sample is of a fully delivered intention.
-            if t >= 64 {
-                let bearing = rig.commanded_bearing_deg();
-                swing = (swing.0.min(bearing), swing.1.max(bearing));
-            }
-        }
-
-        let peak_to_peak = swing.1 - swing.0;
-        let hull_step = OMEGA * FREEZE_TICKS as f32 * TICK;
-        // The turret ring is bolted to the hull and the hull is offset from the pivot, so the ring
-        // TRANSLATES on a circle of that offset as the tank turns: the bearing from it to a fixed
-        // place genuinely shifts. That parallax — not zero — is the floor, and the square wave a
-        // hull-local transport beats out is two orders above it.
-        let parallax = (2.0 * HULL_OFFSET.xz().length() / (place - ROOT).length())
-            .atan()
-            .to_degrees();
-        assert!(
-            peak_to_peak < parallax,
-            "the commanded bearing must not move while the intention stands still, whatever the \
-             client's rendered hull does — got {peak_to_peak:.4}° of swing against the turret \
-             ring's own {parallax:.4}° of parallax, and the {hull_step:.3}° square wave a \
-             hull-local transport beats out at the clamp's period",
-        );
     }
 
     /// **The doctrine guard: a hold is a bearing, not a place.** Free-look means looking AWAY from
@@ -1396,57 +1390,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    /// **The centre dot is the third-person crosshair, and only that.** [`commit_aim`] picks along
-    /// the screen-centre ray, so the dot names a real aim there and must be drawn. Inside the optic
-    /// nothing is picked at screen centre — the intent is a bearing off the gun's sight line, and
-    /// the graticule's zero mark already stands on that line — so a dot held at the node's centre
-    /// would claim an aim it does not have.
-    ///
-    /// Run through the shipped spawn and the shipped system, and back again: the switch is a live
-    /// toggle, so the dot must return, not merely leave.
-    #[test]
-    fn the_centre_dot_is_drawn_in_third_person_and_gone_in_the_optic() {
-        let mut world = World::new();
-        world.run_system_once(spawn_hud).expect("the HUD spawns");
-        world.spawn(Controlled);
-
-        let dot = |world: &mut World, mode: SightMode| {
-            world.insert_resource(mode);
-            world
-                .run_system_once(update_centre_reticle)
-                .expect("the shipped system runs");
-            let mut dots = world.query_filtered::<&Visibility, With<CentreReticle>>();
-            *dots.single(world).expect("the HUD spawns one centre dot")
-        };
-
-        assert_eq!(
-            dot(&mut world, SightMode::ThirdPerson),
-            Visibility::Visible,
-            "third person aims down the screen centre, so the crosshair is drawn",
-        );
-        assert_eq!(
-            dot(&mut world, SightMode::Gunner),
-            Visibility::Hidden,
-            "the optic has no aim at screen centre — the graticule's zero mark is on the sight line",
-        );
-        assert_eq!(
-            dot(&mut world, SightMode::ThirdPerson),
-            Visibility::Visible,
-            "and it comes back on the way out",
-        );
-    }
-
-    /// No controlled tank, no crosshair: the dot names an aim, and with nothing to aim (a menu, a
-    /// connect screen, the tank replicating in) it would mark nothing. Pure, both views.
-    #[test]
-    fn the_centre_dot_needs_a_controlled_tank() {
-        for mode in [SightMode::ThirdPerson, SightMode::Gunner] {
-            assert!(!centre_dot_visible(mode, false), "no tank → no dot");
-        }
-        assert!(centre_dot_visible(SightMode::ThirdPerson, true));
-        assert!(!centre_dot_visible(SightMode::Gunner, true));
     }
 
     /// The possession invariant: [`CommittedAim`] is keyed by tank entity, so it hands back a
