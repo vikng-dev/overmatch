@@ -16,14 +16,10 @@
 //                 `shade.y` the light's share. The level rises along `state.xyz` (world up, unit)
 //                 from `span.x` to `span.y` (world m) by `state.w` (the share lost) times the fade;
 //                 with `span.z = 0` (no known heights) the fill covers the mesh once the fade is on.
-//   4 volume      a field as light: the closed reach mesh's surfaces (wound outward), entries
-//                 subtracting and exits adding the column `∫ p ds / (r² + ε²)` from the eye (r from
-//                 the origin, ε = `volume.w`), so the sum over a pixel is the density integrated
-//                 through the volume; `color.a` is the gain. The profile `p = profile.w + g·x / r`
-//                 (`g` = `profile.xyz` in the mesh's frame, x from the origin, r = |x|) depends on
-//                 direction only, and ε softens the inverse square alone. It is one function of
-//                 position, so the entries and exits cancel outside the volume; both terms integrate
-//                 in closed form. Additive, unoccluded.
+//   4 shell       one potency band's shell of a spall field (design doc §5, "Potency bands"):
+//                 `color.rgb` at gain `color.a`, `shade.x` of it face-on rising to the whole at a
+//                 grazing angle by power `shade.z`. Additive; the material says whether it is
+//                 occluded.
 //
 // Base and state surfaces carry the spall fields' footprint in `foot_color`: for each of the fields
 // (`fields.x`, none at 0; `prints`), a surface point facing the origin, inside the cone, behind its
@@ -31,7 +27,7 @@
 // footprint. The outline is the band `foot.x` px wide where the angle from the axis crosses the
 // half-angle, at the field's level (its third lane's `z`) of `foot_color.a`.
 //
-// Output: straight `rgb, a`; additive (volume) `rgb` with alpha 0.
+// Output: straight `rgb, a`; additive (shell) `rgb` with alpha 0.
 
 #import bevy_pbr::{forward_io::Vertex, mesh_functions, mesh_view_bindings::view}
 
@@ -60,10 +56,6 @@ struct LookParams {
     foot_color: vec4<f32>,
     // x: the fields marked.
     fields: vec4<f32>,
-    // w: the volume's cap ε (m).
-    volume: vec4<f32>,
-    // xyz: the profile's gradient `g` (the mesh's frame); w: its constant.
-    profile: vec4<f32>,
     // Four fields of three lanes: origin (world) and half-angle (rad); unit axis (world) and reach
     // (m); x: how far its front has run (m), negative before it is thrown, y: its directions, z: its
     // level in 0..1.
@@ -80,10 +72,6 @@ struct LookVertexOutput {
     @builtin(position) position: vec4<f32>,
     @location(0) world_position: vec4<f32>,
     @location(1) world_normal: vec3<f32>,
-    // The mesh's origin (world).
-    @location(2) origin: vec3<f32>,
-    // The profile's gradient, world.
-    @location(3) gradient: vec3<f32>,
 }
 
 fn mode() -> i32 {
@@ -103,10 +91,6 @@ fn vertex(vertex: Vertex) -> LookVertexOutput {
     }
     out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4(local, 1.0));
     out.position = view.clip_from_world * vec4(out.world_position.xyz, 1.0);
-    out.origin = (world_from_local * vec4(0.0, 0.0, 0.0, 1.0)).xyz;
-    let g = look.profile.xyz;
-    let turned = (world_from_local * vec4(g, 0.0)).xyz;
-    out.gradient = select(vec3(0.0), normalize(turned) * length(g), dot(g, g) > 0.0);
 #ifdef VERTEX_NORMALS
     out.world_normal = mesh_functions::mesh_normal_local_to_world(vertex.normal, vertex.instance_index);
 #else
@@ -200,7 +184,7 @@ fn lines(mask: texture_2d<f32>, frag: vec2<f32>) -> f32 {
 }
 
 @fragment
-fn fragment(in: LookVertexOutput, @builtin(front_facing) is_front: bool) -> @location(0) vec4<f32> {
+fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
     let m = mode();
     let frag = in.position.xy;
     let fade = look.shade.w;
@@ -277,29 +261,8 @@ fn fragment(in: LookVertexOutput, @builtin(front_facing) is_front: bool) -> @loc
         return vec4(mix(rgb, look.foot_color.rgb, mark), 1.0);
     }
     if m == 4 {
-        // The reach mesh is wound outward, so a back face is where the eye ray leaves it.
-        let along = -v;
-        let exiting = !is_front;
-        let a = view.world_position - in.origin;
-        let b = dot(a, along);
-        let eps = look.volume.w;
-        let near = max(dot(a, a) - b * b, 0.0);
-        let h = sqrt(max(near + eps * eps, 1e-12));
-        let column = (atan((dist + b) / h) - atan(b / h)) / h;
-        // ∫ g·x / (r (r² + ε²)) ds, with t = s + b, r² = t² + near and g·x = P + Q t:
-        // P/(hε)·atanh(ε t / (h r)) + Q/ε·atan(r / ε).
-        let q = dot(in.gradient, along);
-        let p = dot(in.gradient, a) - b * q;
-        let t1 = dist + b;
-        let r0 = max(sqrt(b * b + near), 1e-9);
-        let r1 = max(sqrt(t1 * t1 + near), 1e-9);
-        let limit = 1.0 - 1e-6;
-        let across = atanh(clamp(eps * t1 / (h * r1), -limit, limit))
-            - atanh(clamp(eps * b / (h * r0), -limit, limit));
-        let lean = p * across / (h * eps) + q * (atan(r1 / eps) - atan(r0 / eps)) / eps;
-        let density = look.profile.w * column + lean;
-        let signed = select(-density, density, exiting);
-        return vec4(look.color.rgb * look.color.a * signed * fade, 0.0);
+        let rim = mix(look.shade.x, 1.0, pow(1.0 - facing, look.shade.z));
+        return vec4(look.color.rgb * look.color.a * rim * fade, 0.0);
     }
     discard;
     return vec4(0.0);

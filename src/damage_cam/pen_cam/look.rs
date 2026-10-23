@@ -1,10 +1,11 @@
 //! The base look: the whole tank as one hueless translucent grey surface one layer deep, its
 //! components solid in the untouched grey one layer deep among themselves, the struck ones on the
-//! state scale, and the spall field as light, drawn as the law defines it, with its footprint
-//! outlined on every surface it met. It is the tank rendering of every x-ray view: the corner,
-//! the kill cam's lesson and the x-ray.
+//! state scale, and the spall field as its potency band shells, with its footprint outlined on
+//! every surface it met. It is the tank rendering of every x-ray view: the corner, the kill cam's
+//! lesson and the x-ray. The bands' law is design doc §5, "Potency bands"
+//! (`.agents/docs/design/armor-penetration-and-damage.md`; [`super::potency`]).
 //! [`LookMaterial`] (`pen_cam_look.wgsl`) draws every element; [`hull`], [`component`] and
-//! [`field`] choose them, and the stage spawns what they return.
+//! [`shell`] choose them, and the stage spawns what they return.
 //!
 //! The stacking is cut by two offscreen masks drawn from the viewing camera's own pose, lens and
 //! size before it: the hull mask (each pixel's nearest hull surface: view normal and distance) and
@@ -27,15 +28,19 @@ use bevy::window::{PrimaryWindow, WindowRef};
 
 use super::material::Blend;
 use super::plan::BoxPlan;
+use super::potency::Band;
 use super::stage::{Stage, StageCamera};
 use super::timeline::{self, Condition, CornerKind};
 use super::view::Tier;
 use super::{Corner, Surface, WorldViewer};
 use crate::render_policy::CameraProfile;
 
-/// The field's brightness per unit of its column density `∫ ds / (r² + ε²)` (m⁻¹) at full level
-/// ([`timeline::field_level`]): a display gain. TUNED, as is every figure below.
-const FIELD_GAIN: f32 = 1.5;
+/// A potency band's shell: its band's colour added at this gain, at this share face-on rising to
+/// the whole at a grazing angle by this fresnel power, so each nested shell reads as an outline
+/// round the brighter ones inside it. TUNED, as is every figure below.
+const SHELL_GAIN: f32 = 1.0;
+const SHELL_FACE_SHARE: f32 = 0.2;
+const SHELL_FRESNEL_POWER: f32 = 2.0;
 /// A struck component's red outline (physical px, an inverted hull), so a sliver of fill still
 /// reads as struck; the light's share of its shading; its fill line's width (px); the dead hatch's
 /// period (px) and the share of it in red.
@@ -90,8 +95,6 @@ pub struct LookParams {
     pub foot: Vec4,
     pub foot_color: Vec4,
     pub fields: Vec4,
-    pub volume: Vec4,
-    pub profile: Vec4,
     pub prints: [Vec4; 3 * FOOTPRINT_FIELDS],
     pub rays: [Vec4; FOOTPRINT_FIELDS * FOOTPRINT_RAYS],
 }
@@ -111,8 +114,6 @@ impl Default for LookParams {
             foot: Vec4::ZERO,
             foot_color: Vec4::ZERO,
             fields: Vec4::ZERO,
-            volume: Vec4::ZERO,
-            profile: Vec4::ZERO,
             prints: [Vec4::ZERO; 3 * FOOTPRINT_FIELDS],
             rays: [Vec4::ZERO; FOOTPRINT_FIELDS * FOOTPRINT_RAYS],
         }
@@ -129,7 +130,7 @@ impl From<&LookMaterial> for LookKey {
     fn from(material: &LookMaterial) -> Self {
         Self {
             bias: material.bias,
-            unoccluded: material.params.mode.x == MODE_VOLUME,
+            unoccluded: material.unoccluded,
         }
     }
 }
@@ -137,7 +138,7 @@ impl From<&LookMaterial> for LookKey {
 const MODE_MASK: f32 = 0.0;
 const MODE_BASE: f32 = 2.0;
 const MODE_STATE: f32 = 3.0;
-const MODE_VOLUME: f32 = 4.0;
+const MODE_SHELL: f32 = 4.0;
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 #[bind_group_data(LookKey)]
@@ -151,6 +152,8 @@ pub struct LookMaterial {
     pub blend: Blend,
     /// The depth bias a copy of a mesh needs to win the tie with the mesh it covers.
     pub bias: bool,
+    /// Drawn whatever stands in front, writing no depth.
+    pub unoccluded: bool,
 }
 
 impl LookMaterial {
@@ -167,6 +170,7 @@ impl LookMaterial {
             part_mask: Some(masks.part.clone()),
             blend,
             bias: false,
+            unoccluded: false,
         }
     }
 
@@ -229,7 +233,6 @@ impl Material for LookMaterial {
                 depth.bias.slope_scale = 1.0;
             }
             if key.unoccluded {
-                // Every entry and exit of the volume must reach the sum, whatever stands in front.
                 depth.depth_compare = Some(CompareFunction::Always);
                 depth.depth_write_enabled = Some(false);
             }
@@ -668,21 +671,19 @@ pub fn component(b: &BoxPlan, kind: CornerKind, masks: &MaskSet) -> Option<LookM
     condition(b, kind).map(|condition| state(condition, masks))
 }
 
-/// The field as the law defines it: a cone from its origin, density `profile × 1/(r² + ε²)`, cut where its
-/// directions stopped (the reach surface the mesh it wears is, wound outward), summed along the
-/// eye ray as light. `cap` is the radius ε (m) the density is capped within at the origin,
-/// `strength` the cone's on-axis strength (ref-mm), drawn linearly ([`timeline::field_level`]), and
-/// `profile` its profile law in the mesh's frame ([`super::field::profile`]). Drawn over everything.
-pub fn field(cap: f32, strength: f32, profile: Vec4, masks: &MaskSet) -> LookMaterial {
+/// Potency band `band`'s shell of a spall field ([`super::field::shell_mesh`]): the band's colour
+/// ([`timeline::field_tint`]), added, strongest at a grazing angle, drawn over everything.
+pub fn shell(band: Band, masks: &MaskSet) -> LookMaterial {
     let mut m = LookMaterial::new(
-        MODE_VOLUME,
-        timeline::FIELD.into(),
-        FIELD_GAIN * timeline::field_level(strength),
+        MODE_SHELL,
+        timeline::field_tint(band).into(),
+        SHELL_GAIN,
         Blend::Additive,
         masks,
     );
-    m.params.volume.w = cap;
-    m.params.profile = profile;
+    m.params.shade.x = SHELL_FACE_SHARE;
+    m.params.shade.z = SHELL_FRESNEL_POWER;
+    m.unoccluded = true;
     m
 }
 

@@ -8,24 +8,16 @@
 //! the emission `e = ρ s / Ω_c` in HP points per steradian, `Ω_c` the cone's solid angle; the
 //! intensity `I = e / r²` and the thresholds in HP points per m²; radii in metres. Nothing here
 //! reads a display gain, a level or a fade: the bands are the dose law's, never the look's.
-#![cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "no drawing reads the law yet: only its tests and the resolver's do"
-    )
-)]
 
 use std::f32::consts::TAU;
 
 use crate::ballistics::box_classes::BoxClasses;
 use crate::ballistics::spall_cone;
 
-/// Where a point lies in a field, by its local intensity, ascending.
+/// Where a point inside a field lies by its local intensity, ascending. A point past its
+/// direction's reach, outside the cone, or at zero intensity is in none.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Band {
-    /// Outside the field: past its reach, outside its cone, or at zero intensity.
-    None,
     /// Above zero, below the mid threshold: a graze.
     Dim,
     /// At or above the mid threshold: a crew station's face wholly here is knocked out.
@@ -35,7 +27,7 @@ pub enum Band {
 }
 
 impl Band {
-    /// The bands a field draws as surfaces, outermost first: the reach surface, then the mid and
+    /// Every band, each drawn as a surface, outermost first: the reach surface, then the mid and
     /// bright iso-surfaces inside it.
     pub const DRAWN: [Band; 3] = [Band::Dim, Band::Mid, Band::Bright];
 }
@@ -71,25 +63,31 @@ impl Potency {
 
     /// The band of `intensity` (HP points per m²): an intensity at a threshold is in the higher
     /// band, zero is in none.
-    pub fn band(&self, intensity: f32) -> Band {
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the look's shader classifies at runtime (`pen_cam_look.wgsl`, `footprint`); this is the law it mirrors, held by the tests"
+        )
+    )]
+    pub fn band(&self, intensity: f32) -> Option<Band> {
         if intensity >= self.bright {
-            Band::Bright
+            Some(Band::Bright)
         } else if intensity >= self.mid {
-            Band::Mid
+            Some(Band::Mid)
         } else if intensity > 0.0 {
-            Band::Dim
+            Some(Band::Dim)
         } else {
-            Band::None
+            None
         }
     }
 
     /// The distance (m) along a direction of emission `emission` and reach `reach` (m) out to
     /// which the field lies in `band` or a brighter one: the reach itself for the dim band, the
-    /// band's radius clipped at the reach for the others, 0 for none. A band never passes its
-    /// direction's reach, so a shadowed direction's bands end where it was stopped.
+    /// band's radius clipped at the reach for the others. A band never passes its direction's
+    /// reach, so a shadowed direction's bands end where it was stopped.
     pub fn shell_radius(&self, band: Band, reach: f32, emission: f32) -> f32 {
         let threshold = match band {
-            Band::None => return 0.0,
             Band::Dim => return reach,
             Band::Mid => self.mid,
             Band::Bright => self.bright,
@@ -105,6 +103,13 @@ pub fn solid_angle(half_angle: f32) -> f32 {
 
 /// The intensity `e / r²` (HP points per m²) at distance `r` (m) along a direction of emission
 /// `emission` (HP points per steradian), inside the direction's reach.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the look's shader takes the intensity at runtime (`pen_cam_look.wgsl`, `footprint`); this is the law it mirrors, held by the tests"
+    )
+)]
 pub fn intensity(emission: f32, r: f32) -> f32 {
     emission / (r * r)
 }
@@ -159,12 +164,12 @@ pub(super) mod tests {
             bright: 300.0,
             mid: 150.0,
         };
-        assert_eq!(potency.band(300.0), Band::Bright);
-        assert_eq!(potency.band(300.0_f32.next_down()), Band::Mid);
-        assert_eq!(potency.band(150.0), Band::Mid);
-        assert_eq!(potency.band(150.0_f32.next_down()), Band::Dim);
-        assert_eq!(potency.band(f32::MIN_POSITIVE), Band::Dim);
-        assert_eq!(potency.band(0.0), Band::None);
+        assert_eq!(potency.band(300.0), Some(Band::Bright));
+        assert_eq!(potency.band(300.0_f32.next_down()), Some(Band::Mid));
+        assert_eq!(potency.band(150.0), Some(Band::Mid));
+        assert_eq!(potency.band(150.0_f32.next_down()), Some(Band::Dim));
+        assert_eq!(potency.band(f32::MIN_POSITIVE), Some(Band::Dim));
+        assert_eq!(potency.band(0.0), None);
         for threshold in [potency.mid, potency.bright] {
             let r = band_radius(1234.0, threshold);
             let at = intensity(1234.0, r);

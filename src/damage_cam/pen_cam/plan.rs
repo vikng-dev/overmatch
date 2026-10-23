@@ -13,6 +13,7 @@
 
 use bevy::prelude::*;
 
+use super::field::Disc;
 use super::timeline::CornerKind;
 use crate::damage_cam::shapes::TankShapes;
 use crate::damage_cam::{
@@ -179,9 +180,32 @@ pub struct Cone {
     /// Where the line throws it, arc length.
     pub arc: f32,
     pub rays: Vec<Ray>,
+    /// The directions' reach and strength as one function of direction, baked from `rays`.
+    pub disc: Disc,
 }
 
 impl Cone {
+    /// The cone of these parts, its [`Disc`] baked from `rays`.
+    pub fn new(
+        origin: Vec3,
+        axis: Vec3,
+        half_angle: f32,
+        strength: f32,
+        arc: f32,
+        rays: Vec<Ray>,
+    ) -> Self {
+        let disc = Disc::of(axis, half_angle, strength, &rays);
+        Self {
+            origin,
+            axis,
+            half_angle,
+            strength,
+            arc,
+            rays,
+            disc,
+        }
+    }
+
     /// Its longest direction's reach (m); 0 with no directions.
     pub fn max_reach(&self) -> f32 {
         self.rays.iter().map(|ray| ray.reach).fold(0.0, f32::max)
@@ -517,14 +541,14 @@ fn cone(cone: &SpallCone, line: &Polyline) -> Cone {
             })
         })
         .collect();
-    Cone {
+    Cone::new(
         origin,
         axis,
         half_angle,
-        strength: cone.strength,
-        arc: line.arc_of(origin),
+        cone.strength,
+        line.arc_of(origin),
         rays,
-    }
+    )
 }
 
 #[cfg(test)]

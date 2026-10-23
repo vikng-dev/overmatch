@@ -1,18 +1,20 @@
-//! A spall cone's reach surface as a mesh: the surface that joins the points where each of the
-//! record's directions was spent, closed back to the cone's origin along its rim. A shadowed
-//! direction ends short, so a shadow shows as a dent from any angle.
+//! A spall cone's recorded directions as one function of direction, and the surfaces drawn from it.
 //!
-//! The record samples the cone at its directions. Their angular positions — polar angle
-//! over the half-angle, azimuth about the axis — are triangulated (Delaunay), and each triangle is
-//! subdivided with its corners' reach and strength interpolated linearly: a drawing between the
-//! record's samples, never a direction the record does not hold at a corner. Positions are relative
-//! to the cone's origin, so a copy scales about it and the stage's material holds a front, and
-//! falls off, by distance from it.
+//! The record samples the cone at its directions. Each direction's place on the cone's polar disc
+//! — `q = (cos φ, sin φ) · θ/α`, polar angle θ over the half-angle α, azimuth φ about the axis —
+//! is triangulated (Delaunay), and the reach and strength the record gives each are interpolated
+//! linearly within the triangles: a drawing between the record's samples, never a direction the
+//! record does not hold at a corner. [`Disc`] bakes that function onto a grid and reads it
+//! bilinearly; the look's footprints read the same grid the same way (`pen_cam_look.wgsl`,
+//! `disc_at`), and every band shell ([`shell_mesh`]) is drawn through its samples, so the shells
+//! and the footprints draw one function of direction.
 //!
-//! Vertex colour alpha carries the strength fraction `s(θ)/S` the record gave each direction, for
-//! the baseline's shells. The look's field reads the same fractions as one law over the cone
-//! ([`profile`]), since its density must be one function of position for the surfaces' entries and
-//! exits to sum to the integral through the volume.
+//! A band shell joins, along every direction, the point out to which the field lies in that potency
+//! band or a brighter one ([`Potency::shell_radius`]), closed back to the origin along the cone's
+//! rim; the dim band's is the reach surface. A shadowed direction ends short, so a shadow shows as
+//! a dent in every shell its reach cuts. The slice still draws the reach surface through the
+//! record's own triangulation ([`reach_mesh`]). Positions are relative to the cone's origin, so
+//! the look's material holds a front by distance from it.
 //!
 //! Every triangle is wound outward (counter-clockwise seen from outside the closed surface): a
 //! surface triangle so its corners' directions turn positively about the origin, which holds
@@ -24,9 +26,222 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use super::plan::{Cone, Ray};
+use super::potency::{Band, Potency};
 
 /// Each Delaunay triangle is cut into `SUBDIVISION²` triangles.
 const SUBDIVISION: usize = 4;
+/// The disc's grid: this many nodes a side over `q ∈ [−1, 1]²`, a node every 0.087 of the disc's
+/// radius (DERIVED), against ~0.22 between the shipped cone's 64 directions (DERIVED: `√(π / 64)`).
+/// Even, so the look packs two nodes a lane; `pen_cam_look.wgsl` declares the same side.
+pub const DISC_SIDE: usize = 24;
+/// A band shell's rings out from the axis and sectors about it: one a disc node's spacing apart
+/// (DERIVED from [`DISC_SIDE`]), so the shell follows every node the footprint reads.
+const SHELL_RINGS: usize = 12;
+const SHELL_SECTORS: usize = 64;
+
+/// A cone's recorded directions as one function over its polar disc: the disc's frame (the
+/// cone's unit axis, its half-angle, and `u`, `v` across the axis, azimuth from `u` toward `v`)
+/// and [`DISC_SIDE`]² nodes over `q ∈ [−1, 1]²`, row by row from `q.y = −1`, each the
+/// `(reach m, strength ref-mm)` the triangulation of the record's directions interpolates there; a
+/// node outside it takes the value at the nearest point of its boundary.
+#[derive(Clone, Debug)]
+pub struct Disc {
+    pub axis: Vec3,
+    pub half_angle: f32,
+    pub u: Vec3,
+    pub v: Vec3,
+    pub nodes: Vec<Vec2>,
+}
+
+impl Disc {
+    /// The disc of a cone about unit `axis` of half-angle `half_angle` (rad) whose on-axis strength
+    /// is `strength` (ref-mm), sampled at `rays`.
+    pub fn of(axis: Vec3, half_angle: f32, strength: f32, rays: &[Ray]) -> Self {
+        let (u, v) = axis.any_orthonormal_pair();
+        let mut disc = Self {
+            axis,
+            half_angle,
+            u,
+            v,
+            nodes: Vec::new(),
+        };
+        let points: Vec<Vec2> = rays.iter().map(|ray| disc.point(ray.direction)).collect();
+        let values: Vec<Vec2> = rays
+            .iter()
+            .map(|ray| Vec2::new(ray.reach, ray.weight * strength))
+            .collect();
+        let triangles = delaunay(&points);
+        let boundary = hull_edges(&triangles);
+        let step = 2.0 / (DISC_SIDE - 1) as f32;
+        disc.nodes = (0..DISC_SIDE * DISC_SIDE)
+            .map(|k| {
+                let q = Vec2::new((k % DISC_SIDE) as f32, (k / DISC_SIDE) as f32) * step - 1.0;
+                interpolate(&points, &values, &triangles, &boundary, q)
+            })
+            .collect();
+        disc
+    }
+
+    /// The disc point of unit `direction`: `(cos φ, sin φ) · θ/α`.
+    pub fn point(&self, direction: Vec3) -> Vec2 {
+        let theta = direction.dot(self.axis).clamp(-1.0, 1.0).acos();
+        let across = Vec2::new(direction.dot(self.u), direction.dot(self.v));
+        across.normalize_or_zero() * (theta / self.half_angle.max(1e-3))
+    }
+
+    /// The unit direction at disc point `q`.
+    pub fn direction(&self, q: Vec2) -> Vec3 {
+        let theta = q.length() * self.half_angle.max(1e-3);
+        let phi = q.y.atan2(q.x);
+        let across = self.u * phi.cos() + self.v * phi.sin();
+        (self.axis * theta.cos() + across * theta.sin()).normalize()
+    }
+
+    /// The `(reach m, strength ref-mm)` at disc point `q`, bilinear between its four nodes, `q`
+    /// clamped to the grid.
+    pub fn sample(&self, q: Vec2) -> Vec2 {
+        let top = (DISC_SIDE - 1) as f32;
+        let g = ((q + 1.0) * 0.5 * top).clamp(Vec2::ZERO, Vec2::splat(top));
+        let low = g.floor().min(Vec2::splat(top - 1.0));
+        let t = g - low;
+        let (i, j) = (low.x as usize, low.y as usize);
+        let at = |i: usize, j: usize| self.nodes[j * DISC_SIDE + i];
+        let below = at(i, j).lerp(at(i + 1, j), t.x);
+        let above = at(i, j + 1).lerp(at(i + 1, j + 1), t.x);
+        below.lerp(above, t.y)
+    }
+}
+
+/// The value the triangulation of `points` (carrying `values`) interpolates at `q`: barycentric
+/// within the triangle that holds it, else at the nearest point of the `boundary` edges, else (no
+/// triangle) the nearest point's; zero with no points.
+fn interpolate(
+    points: &[Vec2],
+    values: &[Vec2],
+    triangles: &[[usize; 3]],
+    boundary: &[(usize, usize)],
+    q: Vec2,
+) -> Vec2 {
+    const INSIDE: f32 = -1e-5;
+    for &[a, b, c] in triangles {
+        let (pa, pb, pc) = (points[a], points[b], points[c]);
+        let area = (pb - pa).perp_dot(pc - pa);
+        if area.abs() < 1e-12 {
+            continue;
+        }
+        let wb = (q - pa).perp_dot(pc - pa) / area;
+        let wc = (pb - pa).perp_dot(q - pa) / area;
+        let wa = 1.0 - wb - wc;
+        if wa >= INSIDE && wb >= INSIDE && wc >= INSIDE {
+            return values[a] * wa + values[b] * wb + values[c] * wc;
+        }
+    }
+    let mut nearest = (f32::INFINITY, Vec2::ZERO);
+    for &(a, b) in boundary {
+        let span = points[b] - points[a];
+        let t = ((q - points[a]).dot(span) / span.length_squared().max(1e-12)).clamp(0.0, 1.0);
+        let distance = q.distance(points[a] + span * t);
+        if distance < nearest.0 {
+            nearest = (distance, values[a].lerp(values[b], t));
+        }
+    }
+    if boundary.is_empty() {
+        for (point, value) in points.iter().zip(values) {
+            let distance = q.distance(*point);
+            if distance < nearest.0 {
+                nearest = (distance, *value);
+            }
+        }
+    }
+    nearest.1
+}
+
+/// `cone`'s shell of potency band `band` as a mesh about its origin: along every direction the
+/// point [`Potency::shell_radius`] gives for the disc's sample there, over [`SHELL_RINGS`] rings
+/// and [`SHELL_SECTORS`] sectors of the disc out to its rim at the half-angle, closed back to the
+/// origin by a fan along the rim. Flat-shaded, wound outward.
+pub fn shell_mesh(cone: &Cone, band: Band, potency: &Potency) -> Mesh {
+    let disc = &cone.disc;
+    let mut positions: Vec<[f32; 3]> = Vec::new();
+    let mut directions: Vec<Vec3> = Vec::new();
+    let mut vertex = |q: Vec2| {
+        let along = disc.direction(q);
+        let [reach, strength] = disc.sample(q).to_array();
+        let emission = potency.emission(strength, cone.half_angle);
+        positions.push((along * potency.shell_radius(band, reach, emission)).to_array());
+        directions.push(along);
+        (positions.len() - 1) as u32
+    };
+    let ring = |k: usize, j: usize| {
+        let phi = std::f32::consts::TAU * (j % SHELL_SECTORS) as f32 / SHELL_SECTORS as f32;
+        Vec2::from_angle(phi) * (k as f32 / SHELL_RINGS as f32)
+    };
+    let mut indices: Vec<u32> = Vec::new();
+    let centre = vertex(Vec2::ZERO);
+    let mut rows: Vec<Vec<u32>> = vec![vec![centre; SHELL_SECTORS]];
+    for k in 1..=SHELL_RINGS {
+        rows.push((0..SHELL_SECTORS).map(|j| vertex(ring(k, j))).collect());
+    }
+    for k in 0..SHELL_RINGS {
+        for j in 0..SHELL_SECTORS {
+            let next = (j + 1) % SHELL_SECTORS;
+            let (a, b) = (rows[k][j], rows[k][next]);
+            let (c, d) = (rows[k + 1][j], rows[k + 1][next]);
+            if k > 0 {
+                indices.extend([a, c, b]);
+            }
+            indices.extend([b, c, d]);
+        }
+    }
+    let surface = indices.len();
+    let origin = vertex(Vec2::ZERO);
+    positions[origin as usize] = [0.0; 3];
+    let rim = &rows[SHELL_RINGS];
+    for j in 0..SHELL_SECTORS {
+        indices.extend([origin, rim[j], rim[(j + 1) % SHELL_SECTORS]]);
+    }
+    wind_outward(&positions, &directions, &mut indices, surface, cone.axis);
+    flat_mesh(positions, indices)
+}
+
+/// Turn every triangle of `indices` outward: the first `surface` indices are surface triangles,
+/// wound so their corners' `directions` turn positively about the origin; the rest are rim
+/// triangles, wound so their normal points away from `axis`.
+fn wind_outward(
+    positions: &[[f32; 3]],
+    directions: &[Vec3],
+    indices: &mut [u32],
+    surface: usize,
+    axis: Vec3,
+) {
+    for (at, triangle) in indices.as_chunks_mut::<3>().0.iter_mut().enumerate() {
+        let [a, b, c] = [0, 1, 2].map(|k| triangle[k] as usize);
+        let inward = if 3 * at < surface {
+            directions[a].dot(directions[b].cross(directions[c])) < 0.0
+        } else {
+            let point = |i: usize| Vec3::from(positions[i]);
+            let normal = (point(b) - point(a)).cross(point(c) - point(a));
+            let middle = (point(a) + point(b) + point(c)) / 3.0;
+            normal.dot(middle - axis * middle.dot(axis)) < 0.0
+        };
+        if inward {
+            triangle.swap(1, 2);
+        }
+    }
+}
+
+/// A flat-shaded triangle list of `positions` and `indices`.
+fn flat_mesh(positions: Vec<[f32; 3]>, indices: Vec<u32>) -> Mesh {
+    let mut mesh = Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    );
+    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
+    mesh.insert_indices(Indices::U32(indices));
+    mesh.duplicate_vertices();
+    mesh.compute_flat_normals();
+    mesh
+}
 
 /// The reach surface of `cone` as a mesh about its origin.
 pub fn reach_mesh(cone: &Cone) -> Mesh {
@@ -132,34 +347,6 @@ pub fn reach_mesh(cone: &Cone) -> Mesh {
     mesh.duplicate_vertices();
     mesh.compute_flat_normals();
     mesh
-}
-
-/// The cone's profile as one law of position, `w + g·x̂` (`x̂` the unit direction from the origin,
-/// mesh frame), scaled to a mean of one over the directions: `xyz` is `g`, `w` the constant. Both
-/// shipped profiles are linear in `cos θ` ([`crate::ballistics::spall_cone`]), so the least-squares
-/// line through the record's `(cos θ_k, s_k/S)` is the profile itself. Equal fractions (the flat
-/// profile) give exactly `(0, 0, 0, 1)`: brightness `1/(r² + ε²)`, the flat field's own; so do no
-/// fractions above zero.
-pub fn profile(cone: &Cone) -> Vec4 {
-    const FLAT: Vec4 = Vec4::new(0.0, 0.0, 0.0, 1.0);
-    let n = cone.rays.len() as f32;
-    let first = cone.rays.first().map_or(0.0, |ray| ray.weight);
-    if cone.rays.iter().all(|ray| ray.weight == first) {
-        return FLAT;
-    }
-    let mean_weight = cone.rays.iter().map(|ray| ray.weight).sum::<f32>() / n;
-    if mean_weight <= 0.0 {
-        return FLAT;
-    }
-    let cos = |ray: &Ray| ray.direction.dot(cone.axis);
-    let mean_cos = cone.rays.iter().map(cos).sum::<f32>() / n;
-    let (sxx, sxy) = cone.rays.iter().fold((0.0, 0.0), |(sxx, sxy), ray| {
-        let dx = cos(ray) - mean_cos;
-        (sxx + dx * dx, sxy + dx * (ray.weight - mean_weight))
-    });
-    let slope = if sxx > 0.0 { sxy / sxx } else { 0.0 };
-    let constant = mean_weight - slope * mean_cos;
-    (cone.axis * slope / mean_weight).extend(constant / mean_weight)
 }
 
 /// Delaunay triangles of `points` (Bowyer–Watson), as index triples. Fewer than three points give
@@ -269,140 +456,172 @@ mod tests {
         }
     }
 
-    /// A fixture cone of 24 spiral directions, direction `k` reaching `reach(k)`.
-    fn fixture_cone(reach: impl Fn(usize) -> f32) -> Cone {
+    /// A fixture cone of `n` spiral directions about −Z, half-angle 25° and on-axis strength
+    /// 10 ref-mm, direction `k` at disc point `q` reaching `reach(k, q)` with strength fraction
+    /// `weight(q)`. Fixture data.
+    fn fixture_cone(
+        n: usize,
+        reach: impl Fn(usize, Vec2) -> f32,
+        weight: impl Fn(Vec2) -> f32,
+    ) -> Cone {
         let axis = Vec3::NEG_Z;
-        let (u, v) = axis.any_orthonormal_pair();
         let half_angle = 25.0_f32.to_radians();
-        let rays = spiral(24)
+        let frame = Disc::of(axis, half_angle, 0.0, &[]);
+        let rays = spiral(n)
             .into_iter()
             .enumerate()
-            .map(|(k, q)| {
-                let theta = q.length() * half_angle;
-                let phi = q.y.atan2(q.x);
-                Ray {
-                    direction: axis * theta.cos() + (u * phi.cos() + v * phi.sin()) * theta.sin(),
-                    reach: reach(k),
-                    weight: 1.0 - q.length(),
-                }
+            .map(|(k, q)| Ray {
+                direction: frame.direction(q),
+                reach: reach(k, q),
+                weight: weight(q),
             })
             .collect();
-        Cone {
-            origin: Vec3::ZERO,
-            axis,
-            half_angle,
-            strength: 1.0,
-            arc: 0.0,
-            rays,
-        }
+        Cone::new(Vec3::ZERO, axis, half_angle, 10.0, 0.0, rays)
     }
 
-    /// The profile law reproduces every direction's recorded fraction over the mean, and a flat
-    /// cone draws exactly the uniform density. Fixture weights: linear in `cos θ` from the rim.
-    #[test]
-    fn the_profile_law_reads_the_recorded_fractions() {
-        let mut cone = fixture_cone(|_| 1.0);
-        let cos_alpha = cone.half_angle.cos();
-        for ray in &mut cone.rays {
-            ray.weight = (ray.direction.dot(cone.axis) - cos_alpha) / (1.0 - cos_alpha);
-        }
-        let law = profile(&cone);
-        let mean = cone.rays.iter().map(|ray| ray.weight).sum::<f32>() / cone.rays.len() as f32;
-        for ray in &cone.rays {
-            let drawn = law.w + law.truncate().dot(ray.direction);
-            assert!(
-                (drawn - ray.weight / mean).abs() < 1e-3,
-                "{drawn} vs {}",
-                ray.weight / mean
-            );
-        }
-        for ray in &mut cone.rays {
-            ray.weight = 0.5;
-        }
-        assert_eq!(profile(&cone), Vec4::new(0.0, 0.0, 0.0, 1.0));
-    }
-
-    /// The surface is closed and wound outward, however short its reaches: every edge is crossed
-    /// once each way, and the volume it encloses, summed from its windings, is positive. Fixture
-    /// reaches include directions stopped at the origin.
-    #[test]
-    fn the_surface_is_closed_and_wound_outward() {
-        for reach in [
-            Box::new(|k: usize| 1.0 + 0.1 * k as f32) as Box<dyn Fn(usize) -> f32>,
-            Box::new(|k: usize| {
-                if k.is_multiple_of(3) {
-                    0.0
-                } else {
-                    0.5 + 0.2 * (k % 5) as f32
-                }
-            }),
-        ] {
-            let mesh = reach_mesh(&fixture_cone(reach));
-            let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
-                mesh.attribute(Mesh::ATTRIBUTE_POSITION)
-            else {
-                panic!("positions");
-            };
-            let key = |p: [f32; 3]| p.map(|x| (x * 1.0e4).round() as i64);
-            let mut edges = std::collections::HashMap::<([i64; 3], [i64; 3]), i32>::new();
-            let mut volume = 0.0;
-            for triangle in positions.as_chunks::<3>().0 {
-                let [a, b, c] = [0, 1, 2].map(|k| Vec3::from(triangle[k]));
-                volume += a.dot(b.cross(c)) / 6.0;
-                for (from, to) in [(0, 1), (1, 2), (2, 0)] {
-                    let (from, to) = (key(triangle[from]), key(triangle[to]));
-                    if from != to {
-                        *edges.entry((from, to)).or_default() += 1;
-                        *edges.entry((to, from)).or_default() -= 1;
+    /// Fixture reaches: rising with the direction's index, and a third of the directions stopped
+    /// at the origin among others stopped short. Under [`POTENCY`] both cross the band radii
+    /// (1.41 m bright, 1.99 m mid at the flat fraction, DERIVED: `√(ρ · 5 / (Ω_c T))`).
+    fn fixture_cones() -> [Cone; 2] {
+        [
+            fixture_cone(24, |k, _| 1.0 + 0.1 * k as f32, |_| 0.5),
+            fixture_cone(
+                24,
+                |k, _| {
+                    if k.is_multiple_of(3) {
+                        0.0
+                    } else {
+                        0.5 + 0.2 * (k % 5) as f32
                     }
-                }
-            }
-            assert!(volume > 0.0, "{volume}");
-            assert!(
-                edges.values().all(|n| *n == 0),
-                "an edge crossed one way only"
-            );
-        }
+                },
+                |q| 0.5 + 0.3 * q.x,
+            ),
+        ]
     }
 
-    /// The surface passes through every recorded reach end.
-    #[test]
-    fn the_surface_holds_every_reach_end() {
-        let axis = Vec3::NEG_Z;
-        let (u, v) = axis.any_orthonormal_pair();
-        let half_angle = 25.0_f32.to_radians();
-        let rays: Vec<Ray> = spiral(24)
-            .into_iter()
-            .enumerate()
-            .map(|(k, q)| {
-                let theta = q.length() * half_angle;
-                let phi = q.y.atan2(q.x);
-                let direction = axis * theta.cos() + (u * phi.cos() + v * phi.sin()) * theta.sin();
-                Ray {
-                    direction,
-                    reach: 1.0 + 0.1 * k as f32,
-                    weight: 1.0 - q.length(),
-                }
-            })
-            .collect();
-        let ends: Vec<Vec3> = rays.iter().map(|r| r.direction * r.reach).collect();
-        let cone = Cone {
-            origin: Vec3::ZERO,
-            axis,
-            half_angle,
-            strength: 1.0,
-            arc: 0.0,
-            rays,
-        };
-        let mesh = reach_mesh(&cone);
+    /// Fixture potency: the shipped figures' shape, not their source.
+    const POTENCY: Potency = Potency {
+        rate: 70.0,
+        bright: 300.0,
+        mid: 150.0,
+    };
+
+    fn positions(mesh: &Mesh) -> &[[f32; 3]] {
         let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
             mesh.attribute(Mesh::ATTRIBUTE_POSITION)
         else {
             panic!("positions");
         };
-        for end in ends {
+        positions
+    }
+
+    /// The disc reads the record: a reach and a strength linear in the disc point come back
+    /// exactly, at every point well inside the directions' hull and at every direction there.
+    /// The footprint and the shells both read the record through it; a grid read on swapped axes,
+    /// a wrong barycentric weight or a misplaced bilinear corner fails here. Fixture: the shipped
+    /// cone's 64 directions; the four nodes about any point within 0.7 of the axis lie within
+    /// 0.83 of it (DERIVED), inside the hull.
+    #[test]
+    fn the_disc_reproduces_what_is_linear_in_it() {
+        let reach = |q: Vec2| 2.0 + 0.6 * q.x - 0.4 * q.y;
+        let weight = |q: Vec2| 0.5 + 0.2 * q.y;
+        let cone = fixture_cone(64, |_, q| reach(q), weight);
+        let want = |q: Vec2| Vec2::new(reach(q), 10.0 * weight(q));
+        let mut checked = 0;
+        for i in -10..=10 {
+            for j in -10..=10 {
+                let q = Vec2::new(i as f32, j as f32) * 0.07;
+                if q.length() > 0.7 {
+                    continue;
+                }
+                let got = cone.disc.sample(q);
+                assert!(
+                    got.distance(want(q)) < 1e-4,
+                    "{q}: {got} against {}",
+                    want(q)
+                );
+                checked += 1;
+            }
+        }
+        for ray in &cone.rays {
+            let q = cone.disc.point(ray.direction);
+            if q.length() <= 0.7 {
+                let got = cone.disc.sample(q);
+                assert!(got.distance(want(q)) < 1e-4, "{q}: {got}");
+                checked += 1;
+            }
+        }
+        assert!(checked > 300, "{checked}");
+    }
+
+    /// Every band shell is drawn through the disc: each vertex off the origin lies, along its own
+    /// direction, at the shell radius of the disc's sample there. The footprint reads the same
+    /// samples, so a shell built from the record's directions any other way parts from the
+    /// colours on the surfaces it meets.
+    #[test]
+    fn every_shell_is_drawn_through_the_disc() {
+        for cone in fixture_cones() {
+            for band in Band::DRAWN {
+                let mesh = shell_mesh(&cone, band, &POTENCY);
+                let mut off_origin = 0;
+                for p in positions(&mesh).iter().map(|p| Vec3::from(*p)) {
+                    let Some(along) = p.try_normalize() else {
+                        continue;
+                    };
+                    let [reach, strength] = cone.disc.sample(cone.disc.point(along)).to_array();
+                    let e = POTENCY.emission(strength, cone.half_angle);
+                    let want = POTENCY.shell_radius(band, reach, e);
+                    assert!(
+                        (p.length() - want).abs() < 1e-3,
+                        "{band:?}: {p} against {want}"
+                    );
+                    off_origin += 1;
+                }
+                assert!(off_origin > 0, "{band:?}");
+            }
+        }
+    }
+
+    /// Every surface is closed and wound outward, however short its reaches: every edge is crossed
+    /// once each way, and the volume it encloses, summed from its windings, is positive. A
+    /// fragment's facing tells entering from leaving by it. Fixture reaches include directions
+    /// stopped at the origin.
+    #[test]
+    fn every_surface_is_closed_and_wound_outward() {
+        for cone in fixture_cones() {
+            let shells = Band::DRAWN.map(|band| shell_mesh(&cone, band, &POTENCY));
+            for mesh in std::iter::once(reach_mesh(&cone)).chain(shells) {
+                let key = |p: [f32; 3]| p.map(|x| (x * 1.0e4).round() as i64);
+                let mut edges = std::collections::HashMap::<([i64; 3], [i64; 3]), i32>::new();
+                let mut volume = 0.0;
+                for triangle in positions(&mesh).as_chunks::<3>().0 {
+                    let [a, b, c] = [0, 1, 2].map(|k| Vec3::from(triangle[k]));
+                    volume += a.dot(b.cross(c)) / 6.0;
+                    for (from, to) in [(0, 1), (1, 2), (2, 0)] {
+                        let (from, to) = (key(triangle[from]), key(triangle[to]));
+                        if from != to {
+                            *edges.entry((from, to)).or_default() += 1;
+                            *edges.entry((to, from)).or_default() -= 1;
+                        }
+                    }
+                }
+                assert!(volume > 0.0, "{volume}");
+                assert!(
+                    edges.values().all(|n| *n == 0),
+                    "an edge crossed one way only"
+                );
+            }
+        }
+    }
+
+    /// The reach surface passes through every recorded reach end.
+    #[test]
+    fn the_surface_holds_every_reach_end() {
+        let [cone, _] = fixture_cones();
+        let mesh = reach_mesh(&cone);
+        for end in cone.rays.iter().map(|r| r.direction * r.reach) {
             assert!(
-                positions
+                positions(&mesh)
                     .iter()
                     .any(|p| Vec3::from(*p).distance(end) < 1e-4),
                 "{end}"
