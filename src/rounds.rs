@@ -1,15 +1,18 @@
 //! The round registry (`assets/ballistics/rounds.ron`): every round a weapon can fire, keyed by
 //! key. A weapon names its rounds by those keys ([`crate::spec::WeaponSpec::rounds`]); a round
 //! states its display name, core material, nose geometry, mass, calibre, muzzle speed and crew line
-//! rate, each with its provenance ([`crate::provenance`]). The key is the data's handle and is
+//! rate, and optionally its penetrator's mass and calibre, each with its provenance
+//! ([`crate::provenance`]). The key is the data's handle and is
 //! never shown to a player; the display name is ([`RoundRegistry::name`]).
 //!
 //! Parsed once from the embedded file and validated at parse: a missing display name or one the
 //! shipped font does not draw whole ([`crate::ui_font::drawable`]), a core that is not a substance
 //! with material facts, a nose parameter outside its family's range, or a round outside the force
-//! law's domain is a load error naming the round. What a round derives — its nose factor and the body
-//! the force law reads ([`RoundBody`]) — is computed here, once; the mechanism binds from that body
-//! at spawn ([`crate::ballistics`]'s `Projectile`), synchronously and from data alone.
+//! law's domain, or a penetrator heavier or wider than its round, is a load error naming the round.
+//! What a round derives — its nose factor and its two bodies ([`RoundBody`]) — is computed here,
+//! once. A round flies as its whole `body` and meets the plate as its `penetrator`: the mechanism
+//! binds from the penetrator at spawn ([`crate::ballistics`]'s `Projectile`), synchronously and
+//! from data alone; drag and the shell's view read the body.
 //!
 //! The target structure (rounds name a core material and author their nose as geometry) is
 //! `.agents/scratch/damage-cam-2026-10-08/research/recommendation-solid-shot.md` Part 1 item 5.
@@ -30,9 +33,13 @@ const ROUNDS_RON: &str = include_str!("../assets/ballistics/rounds.ron");
 /// One round, resolved and validated.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Round {
-    /// What the force law reads: mass (kg), calibre (m) and the nose factor DERIVED from the
-    /// authored nose at load.
+    /// The whole round as it flies: mass (kg), calibre (m) and the nose factor DERIVED from the
+    /// authored nose at load. Drag and the shell's view read it.
     pub(crate) body: RoundBody,
+    /// What meets the plate: the force law, the disc, overmatch and the cone's hole read it. The
+    /// body's nose factor; mass and calibre no greater than the body's. Equal to `body` for a
+    /// round authored without a penetrator block.
+    pub(crate) penetrator: RoundBody,
     /// m/s.
     pub(crate) muzzle_speed: f32,
     /// What the round's line does to a witness (crew): reference-mm of dose per metre of disc-mean
@@ -56,6 +63,17 @@ struct RoundFile {
     caliber: Sourced<f32>,
     muzzle_speed: Sourced<f32>,
     wound: Sourced<f32>,
+    /// The part of a sub-calibre round that meets the plate; absent, the whole round does.
+    #[serde(default)]
+    penetrator: Option<PenetratorFile>,
+}
+
+/// A penetrator as authored: its mass (kg) and calibre (m). Its nose is the round's.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PenetratorFile {
+    mass: Sourced<f32>,
+    caliber: Sourced<f32>,
 }
 
 #[derive(Deserialize)]
@@ -158,6 +176,31 @@ fn resolved(file: RoundFile, substances: &SubstanceRegistry) -> Result<(Round, S
     round_in_domain(body, muzzle_speed).map_err(|reason| {
         format!("the round (nose {nose:?}) is outside the capability law's domain: {reason}")
     })?;
+    let penetrator = match file.penetrator {
+        None => body,
+        Some(penetrator) => {
+            let penetrator = RoundBody {
+                mass: penetrator.mass.0,
+                caliber: penetrator.caliber.0,
+                nose_factor: body.nose_factor,
+            };
+            round_in_domain(penetrator, muzzle_speed).map_err(|reason| {
+                format!("the penetrator is outside the capability law's domain: {reason}")
+            })?;
+            for (field, part, whole) in [
+                ("mass", penetrator.mass, body.mass),
+                ("caliber", penetrator.caliber, body.caliber),
+            ] {
+                if part > whole {
+                    return Err(format!(
+                        "the penetrator's {field} {part} exceeds the round's {whole} — a \
+                         penetrator is part of the round it flies in"
+                    ));
+                }
+            }
+            penetrator
+        }
+    };
     let wound = file.wound.0;
     if !wound.is_finite() || wound <= 0.0 {
         return Err(format!(
@@ -168,6 +211,7 @@ fn resolved(file: RoundFile, substances: &SubstanceRegistry) -> Result<(Round, S
     Ok((
         Round {
             body,
+            penetrator,
             muzzle_speed,
             wound,
             core,
@@ -240,15 +284,31 @@ impl RoundRegistry {
 mod tests {
     use super::*;
 
-    /// A registry of one round whose fields are `fields`, each authored with a fixture provenance.
-    fn one(fields: &[(&str, &str)]) -> Result<RoundRegistry, RoundError> {
-        let body = fields
+    /// `fields` as authored round fields, each with a fixture provenance.
+    fn authored(fields: &[(&str, &str)]) -> String {
+        fields
             .iter()
             .map(|(field, value)| format!(r#"{field}: ({value}, Tuned("fixture"))"#))
             .collect::<Vec<_>>()
-            .join(", ");
+            .join(", ")
+    }
+
+    /// A registry of one round whose fields are `fields`, each authored with a fixture provenance.
+    fn one(fields: &[(&str, &str)]) -> Result<RoundRegistry, RoundError> {
         RoundRegistry::from_ron(
-            &format!(r#"(rounds: {{ "Probe": ({body}) }})"#),
+            &format!(r#"(rounds: {{ "Probe": ({}) }})"#, authored(fields)),
+            SubstanceRegistry::shipped_static(),
+        )
+    }
+
+    /// The fixture round with a penetrator block of `mass` (kg) and `caliber` (m).
+    fn with_penetrator(mass: &str, caliber: &str) -> Result<RoundRegistry, RoundError> {
+        RoundRegistry::from_ron(
+            &format!(
+                r#"(rounds: {{ "Probe": ({}, penetrator: Some((mass: ({mass}, Tuned("fixture")),
+                    caliber: ({caliber}, Tuned("fixture"))))) }})"#,
+                authored(&FIXTURE)
+            ),
             SubstanceRegistry::shipped_static(),
         )
     }
@@ -281,6 +341,13 @@ mod tests {
         for (name, (round, shown)) in &registry.rounds {
             round_in_domain(round.body, round.muzzle_speed)
                 .unwrap_or_else(|reason| panic!("{name}: {reason}"));
+            round_in_domain(round.penetrator, round.muzzle_speed)
+                .unwrap_or_else(|reason| panic!("{name} penetrator: {reason}"));
+            assert!(
+                round.penetrator.mass <= round.body.mass
+                    && round.penetrator.caliber <= round.body.caliber,
+                "{name}"
+            );
             assert!(round.core.flow_strength > 0.0, "{name}");
             assert_eq!(registry.name(name).unwrap(), shown);
             assert_ne!(shown, name, "{name} shows its key");
@@ -344,6 +411,72 @@ mod tests {
         }
     }
 
+    /// A round authored without a penetrator block meets the plate as itself, bit for bit: every
+    /// full-calibre round's record and digest rest on it. One with a block carries the block's mass
+    /// and calibre and the round's nose, and flies as its own body still. A mutant that defaults
+    /// the penetrator to anything but the body, or that reads the block into the body, fails here.
+    #[test]
+    fn a_penetrator_is_the_body_unless_authored() {
+        let whole = with("mass", "5.0").unwrap().get("Probe").unwrap();
+        for (penetrator, body) in [
+            (whole.penetrator.mass, whole.body.mass),
+            (whole.penetrator.caliber, whole.body.caliber),
+            (whole.penetrator.nose_factor, whole.body.nose_factor),
+        ] {
+            assert_eq!(penetrator.to_bits(), body.to_bits());
+        }
+
+        let cored = with_penetrator("1.25", "0.02")
+            .unwrap()
+            .get("Probe")
+            .unwrap();
+        assert_eq!(whole.body, cored.body, "the block must not move the body");
+        assert_eq!(
+            cored.penetrator,
+            RoundBody {
+                mass: 1.25,
+                caliber: 0.02,
+                nose_factor: whole.body.nose_factor,
+            }
+        );
+    }
+
+    /// A penetrator is part of the round it flies in: one heavier or wider than its round, or one
+    /// outside the force law's domain at the round's muzzle speed, is refused at parse naming the
+    /// round and the field; one as heavy and as wide as its round loads. The march reads the
+    /// penetrator at the plate and never re-checks it.
+    #[test]
+    fn a_penetrator_outside_its_round_or_the_law_s_domain_is_refused() {
+        for (mass, caliber, field) in [
+            ("5.01", "0.02", "mass"),
+            ("1.25", "0.0501", "caliber"),
+            ("0.0", "0.02", "mass"),
+            ("1.25", "NaN", "caliber"),
+        ] {
+            let err = with_penetrator(mass, caliber).unwrap_err();
+            assert!(
+                matches!(&err, RoundError::Invalid { round, reason }
+                    if round == "Probe" && reason.contains("penetrator") && reason.contains(field)),
+                "({mass}, {caliber}): {err}"
+            );
+        }
+        let flush = with_penetrator("5.0", "0.05")
+            .unwrap()
+            .get("Probe")
+            .unwrap();
+        assert_eq!(flush.penetrator, flush.body);
+
+        let stray = format!(
+            r#"(rounds: {{ "Probe": ({}, penetrator: Some((mass: (1.0, Tuned("x")),
+                caliber: (0.02, Tuned("x")), nose: (Flat, Tuned("x"))))) }})"#,
+            authored(&FIXTURE)
+        );
+        assert!(
+            RoundRegistry::from_ron(&stray, SubstanceRegistry::shipped_static()).is_err(),
+            "a penetrator states no nose of its own"
+        );
+    }
+
     /// An unknown name is an error naming the name and the vocabulary, never a default.
     #[test]
     fn an_unknown_round_is_an_error_naming_it() {
@@ -375,11 +508,7 @@ mod tests {
         let err = RoundRegistry::from_ron(bare, substances).unwrap_err();
         assert!(err.to_string().contains("provenance"), "{err}");
 
-        let round = FIXTURE
-            .iter()
-            .map(|(field, value)| format!(r#"{field}: ({value}, Tuned("fixture"))"#))
-            .collect::<Vec<_>>()
-            .join(", ");
+        let round = authored(&FIXTURE);
         let twice = format!(r#"(rounds: {{ "Probe": ({round}), "Probe": ({round}) }})"#);
         let err = RoundRegistry::from_ron(&twice, substances).unwrap_err();
         assert!(err.to_string().contains("twice"), "{err}");
