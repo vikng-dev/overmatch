@@ -10,7 +10,6 @@ mod bevy_shadow_view_render_layers;
 mod determinism_deps;
 mod doc_citations;
 mod flow_boundary;
-mod fn_length;
 mod gpu_layout;
 mod shape_cast_reachability;
 mod ui_ascii;

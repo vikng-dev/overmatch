@@ -114,6 +114,8 @@ allow_attributes_without_reason = "warn"
 undocumented_unsafe_blocks = "warn"
 redundant_clone = "warn"
 needless_collect = "warn"
+# A function body stays within `clippy.toml`'s threshold, red in CI; function, not file (quality standard §B1).
+too_many_lines = "warn"
 
 [patch.crates-io]
 bevy_reflect = { path = "vendor/bevy_reflect-0.19.1-scalar-math" }

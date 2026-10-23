@@ -924,6 +924,12 @@ fn mixed_ledgers_filled(server: &App, shooter: &App, observer: &App) -> bool {
 /// If this fails, the split shot transport or the `ShotId` dedup (`net::client::SeenShots`) does not
 /// do on a real channel what its focused tests say it does — read the failure message for which half
 /// broke.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one real-UDP scenario whose phases (a volley under seeded loss, a saturating automatic \
+              stream around one reliable cannon shot, the owner-private receipt) each assert on the \
+              live link the previous phase built, so splitting them would rebuild that link per phase"
+)]
 #[test]
 fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
     let _udp = lock_real_udp_test();
