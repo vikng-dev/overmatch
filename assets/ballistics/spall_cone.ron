@@ -27,12 +27,13 @@
     // at every N, so N changes how finely a box's dose is resolved, never how much the cone
     // carries.
     directions: (64, Tuned("owner decision 2026-10-17 ('64 for now'), the cost against the
-        resolution: one throw under this law MEASURED 2026-10-17 by
-        ballistics::pen_cam::spall_law_cost (release, macOS arm64, best of 9, the 6 cones of the
-        penetrating scenarios): 0.42 ms at N = 24, 0.71 at 64, 1.22 at 128, 2.50 at 256; the dose
-        step is 5.6 HP per direction on the s1 cone at 64 (DERIVED: S/2 = 5.09 reference-mm ×
-        70 HP per reference-mm / 64). The count changes how finely
-        a box's dose is resolved, never the emitted total")),
+        resolution: one throw under the ball law MEASURED 2026-10-24 by
+        ballistics::pen_cam::spall_law_cost (release, macOS arm64, best of 9, the 7 cones of the
+        penetrating scenarios): 0.30 ms at N = 24, 0.64 at 64, 1.23 at 128, 2.29 at 256; the dose
+        step per direction on the s1 cone at 64 runs from 9.3 HP on the axis to 0.58 HP at the
+        rim, 5.6 HP on average (DERIVED: S·f_k × 70 HP per reference-mm / 64, S = 10.18
+        reference-mm). The count changes how finely a box's dose is resolved, never the emitted
+        total")),
 
     // How a direction passes through the hard bodies it meets. `FirstSolid`: stopped by the first
     // hard body it enters, a box there taking its whole strength, armour none. `Partial`: spent by
