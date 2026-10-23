@@ -12,14 +12,14 @@ A substance is one of two kinds, each under its own law.
 - **Witness** — crew. It has no resistance at all: the kind carries no factor field, so a zero or
   a dummy value cannot be written down. It is no layer: it never changes the shell's state, never
   resists, never shadows and never throws. Once the hard world has resolved a shot, each witness
-  box is wounded by what passed through it:
+  box is dosed by what passed through it:
   - **the line:** the shell's disc-mean chord through the box (the walk's own disc sampling, cut
-    at the rest point of a shell stopped inside) × the **round's** wound rate, as a `Line`
+    at the rest point of a shell stopped inside) × the **round's** crew line rate, as a `Line`
     deposit;
   - **the field:** each spall direction entering the box doses it at its strength there × its
     share, as a `Field` deposit, and continues to the first hard body.
 
-The wound rate is round data (`rounds.ron`, reference-mm per metre of chord, TUNED). Dose units,
+The crew line rate is round data (`rounds.ron` `wound`, reference-mm per metre of chord, TUNED). Dose units,
 HP pools, the once-per-box rounding and the `ShotDose` tally are the hard world's. A witness
 substance sits only on a crew-role volume and a crew-role volume wears only a witness substance;
 the bake refuses a tank file that breaks either, naming the node.
@@ -30,9 +30,10 @@ is in `src/substances.rs` (the kinds), `src/ballistics/wound.rs` (the witness pa
 
 ## Why
 
-- A penetrator damages a hard body by the energy that body absorbs, and soft tissue by its wound
-  channel. `chord × resistance` measures the first and says nothing about the second: flesh at
-  1 % of RHA needed about 30 cm of chord to kill a 30 HP crewman (DERIVED).
+- A penetrator's potency against a hard body is the energy that body absorbs; against a crew
+  pool it is the chord through the station. `chord × resistance` measures the first and says
+  nothing about the second: a crew substance at 1 % of RHA needed about 30 cm of chord to empty
+  a 30 HP pool (DERIVED).
 - A body does not stop fragments. Crew shadowing crew was an artefact of `passage: FirstSolid`
   stopping at every HP box.
 - A property that only one substance uses is not a property of every substance. A class with its
@@ -43,36 +44,38 @@ is in `src/substances.rs` (the kinds), `src/ballistics/wound.rs` (the witness pa
 - The hard world does not see crew. The shell's path, every armour event, every field
   direction's reach and every module's dose read the same with the crew removed (a class
   invariant test, `src/ballistics/wound/tests.rs`).
-- Aiming at a crew station is rewarded. A clean main-gun pass kills: 10 cm of chord at 30
-  reference-mm/m is 30 HP (DERIVED). A graze of the box's edge wounds.
-- One perforation wounds everyone in the cone, and nobody hides behind a comrade. Modules still
-  shield.
-- Caliber reaches a crewman only through the round's wound rate.
-- The dials are data: the wound rate per round, crew HP, and the cone's strength and direction
-  count.
-- A crewman exit throws no cone, and a fragment's reach surface in the pen cam ends only on hard
+- Aiming at a crew station is rewarded. A clean main-gun pass empties the pool by its line
+  alone: 10 cm of chord at 30 reference-mm/m is 30 HP (DERIVED). A graze of the box's edge
+  leaves it reduced.
+- One perforation doses every crew station in the cone, and nobody hides behind a comrade.
+  Modules still shield. The field converts at its own calibration (`spall_cone.ron`), set so a
+  station fully inside the cone's knockout radius — about 2 m from the hole for a weak ordinary
+  perforation at the intended humanoid's 0.2 m² face, 3.2 m at the placeholder crew box's
+  (DERIVED) — is knocked out; a station the cone's dim edge grazes keeps HP, reduced.
+- Caliber reaches a crew pool only through the round's crew line rate.
+- The dials are data: the crew line rate per round, the shared crew pool (30 HP, TUNED,
+  provisional, `box_classes.ron`; no tank file authors it), the field's HP per reference-mm, and
+  the cone's strength and direction count. Every other HP pool is its sturdiness class times the
+  box's mean face (#2 and #3 in
+  `.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md`;
+  design doc §5, §6).
+- A crew exit throws no cone, and a fragment's reach surface in the pen cam ends only on hard
   bodies.
-- Crew consequences are unchanged (stations, backfill, the knockout rule of playtest fork F2). They remain the place for
-  crew-only ideas such as wounded-not-dead.
+- Crew consequences are unchanged (stations, backfill, the knockout rule of playtest fork F2).
+  They remain the place for crew-only ideas such as a reduced state with an effect.
 
-**Amended 2026-10-23.** The field converts its dose to HP at its own calibration; every crew
-station has one shared 30 HP pool (TUNED, provisional) that no tank file authors, and every other
-HP pool is its sturdiness class times the box's mean face (#2 and #3 in
-`.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md`; design
-doc §5, §6). One perforation now knocks out every crew station fully inside the cone's knockout
-radius, about 2 m from the hole for a weak ordinary perforation at the intended humanoid's 0.2 m²
-face and 3.2 m at the placeholder crew box's (DERIVED); a station the cone's dim edge grazes keeps
-HP, reduced. Nobody still hides behind a comrade, modules still shield, and the clean main-gun
-pass above still empties the crew pool by its line alone.
+**Amended 2026-10-23.** The field's own calibration, the shared crew pool and the class × face
+pools above replaced the first version's reading, under which the field left a station reduced
+and only the line knocked it out.
 
 ## Rejected
 
-- **A wound factor on every material.** Steel and engine blocks would have to carry a value that
-  only flesh uses. That is overgeneralisation: a dummy field on every hard substance, and a
-  plausible wrong value whenever one is mis-set.
-- **A binary transit kill by role.** "The line through a crew box kills" turns a graze into a kill
-  and has no channel for a wound. It also adds a role branch to the damage law, where a dose
-  through HP already has one.
-- **Hole volume.** The tissue volume the shell's disc sweeps, rather than its chord, would make a
-  crewman's dose scale with caliber squared. It double-counts what the per-round wound rate
+- **A crew-dose factor on every material.** Steel and engine blocks would have to carry a value
+  that only the crew substance uses. That is overgeneralisation: a dummy field on every hard
+  substance, and a plausible wrong value whenever one is mis-set.
+- **A binary transit knockout by role.** "The line through a crew box knocks it out" turns a
+  graze into a knockout and has no channel for a reduced state. It also adds a role branch to the
+  damage law, where a dose through HP already has one.
+- **Hole volume.** The box volume the shell's disc sweeps, rather than its chord, would make a
+  crew pool's dose scale with caliber squared. It double-counts what the per-round crew line rate
   already carries, and it adds a geometric quantity no other law reads.

@@ -19,8 +19,8 @@
 // Derived, Tuned, Resolution, Unknown (`src/provenance.rs`); a value without one does not load.
 (
     crew_hp: (30, Tuned("owner decision 2026-10-23, provisional: one pool for every crew station
-        of every tank, revised if play shows it out of proportion to the tank's other pools. A
-        crewman is one entity across tanks, and the crew box is a placeholder for a humanoid
+        of every tank, revised if play shows it out of proportion to the tank's other pools. Crew
+        is one shared entity across tanks, and the crew box is a placeholder for a humanoid
         shape, so its face is no basis for a pool. The field's calibration in spall_cone.ron and
         the crew line rate in rounds.ron are set against it")),
     ammo: (150, Tuned("as fragile per m² as the crew pool at the intended humanoid's 0.2 m² face
