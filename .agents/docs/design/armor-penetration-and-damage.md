@@ -119,20 +119,34 @@ march, per volume crossed:
    restatement, not in its primary. `B = 1` is the target inertia factor, a named approximation
    weakly constrained by the available plate data. The fixture rounds at muzzle carry about
    115 reference-mm (main gun, 773 m/s) and 14.5 reference-mm (machine gun, 755 m/s), DERIVED.
-   The nose factor `N` is the frictionless nose factor of the cavity-expansion form, in `(0, 1]`. It is **shell data authored as geometry**: each weapon in the tank RON carries a
-   required `nose` (parameters in calibres), and `spec.rs` derives `N` once at load — `Ogive(crh:
-   ψ)`, `ψ ≥ 0.5`: `N = (8ψ − 1) / (24ψ²)`; `Cone(length_calibres: φ)`, `φ > 0`:
-   `N = 1 / (1 + 4φ²)`; `Cap(radius_calibres: φ)`, `φ ≥ 0.5`: `N = 1 − 1 / (8φ²)`; `Flat`:
-   `N = 1`. A parameter outside its range fails to load. The derived scalar travels with mass and
-   calibre through `FireShell`, `Projectile` and the `FireEvent` wire; the shape never leaves the
-   spec layer. Fixture noses are labelled: `Ogive(crh: 1.0)` for the main gun,
-   `Cap(radius_calibres: 0.5)` (a hemisphere, `N = 0.5`) for the machine-gun rounds. Calibre enters raw penetration through `A`: at equal mass a wider round
-   presents more area and goes less deep. The law's invariants: strictly increasing in speed;
-   replica scaling (mass ×s³, calibre
-   ×s gives capability ×s); the local speed exponent is 2 at low speed (the inertia term is
-   negligible) and falls below 2 as it grows; and spending composes, because a crossing spends
-   reference-mm and the inverse is exact. A crossing whose limit speed is `v_l` leaves
-   `v_r² = (v² − v_l²) / (1 + k v_l² / a)`.
+   The nose factor `N` is the frictionless nose factor of the cavity-expansion form, in `(0, 1]`.
+   It is **round data authored as geometry**: each round in `assets/ballistics/rounds.ron` carries
+   a required `nose` (parameters in calibres), and `N` is derived once at load
+   (`spec::NoseShape::factor`) — `Ogive(crh: ψ)`, `ψ ≥ 0.5`: `N = (8ψ − 1) / (24ψ²)`;
+   `Cone(length_calibres: φ)`, `φ > 0`: `N = 1 / (1 + 4φ²)`; `Cap(radius_calibres: φ)`,
+   `φ ≥ 0.5`: `N = 1 − 1 / (8φ²)`; `Flat`: `N = 1`. A parameter outside its range fails to load.
+   The derived scalar travels with mass and calibre through `FireShell` and `Projectile`; the fire
+   wire (`FireEvent`) carries the round's index in its weapon's `rounds` list, and every role binds
+   the round from its own data. The shape never leaves load. Fixture noses are labelled:
+   `Ogive(crh: 1.0)` for the main-gun rounds, `Cap(radius_calibres: 0.5)` (a hemisphere,
+   `N = 0.5`) for the machine-gun round. Calibre enters raw penetration through `A`: at equal mass
+   a wider round presents more area and goes less deep. The law's invariants: strictly increasing
+   in speed; replica scaling (mass ×s³, calibre ×s gives capability ×s); the local speed exponent
+   is 2 at low speed (the inertia term is negligible) and falls below 2 as it grows; and spending
+   composes, because a crossing spends reference-mm and the inverse is exact. A crossing whose
+   limit speed is `v_l` leaves `v_r² = (v² − v_l²) / (1 + k v_l² / a)`.
+
+   **A sub-calibre round flies whole and meets the plate as its penetrator** (owner, 2026-10-23;
+   `.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md` #4).
+   A round may author a `penetrator` (mass and calibre; its nose is the round's), no heavier and
+   no wider than the round; without one the round is its own penetrator, bit for bit. Flight reads
+   the whole round: drag (`drag_k`) and the shell's view. Everything at the plate reads the
+   penetrator: the disc the shell samples the world with, overmatch, this law, the cone's hole
+   (§5), and the momentum the hit and a bounce deliver. Penetration stays rigid: the penetrator's
+   material is named (`core`) and read by no law. The 88's Pzgr. 40 reads about 180
+   reference-mm at the muzzle (930 m/s) as its 1.93 kg, 35.7 mm core, against about 112 as its
+   whole 7.3 kg body and the Pzgr. 39's about 115 (DERIVED, shipped RHA facts); the record gives
+   it more than the Pzgr. 39 at the muzzle by about 1.4× (Jentz & Doyle), the law 1.57×.
 2. `cost = LOS_distance × material_factor` (× angle effects), also reference-mm.
 3. If `capability > cost` → **perforate**: spend `cost`, invert `f` back to a reduced **residual
    velocity** (the Lambert–Jonas shape — barely-penetrate exits slow, big overmatch barely slows),
@@ -196,15 +210,22 @@ is the most any one box can take from a cone — every direction doses a box at 
 directions' weights emit `S/2` (**Sampling**) — so a gated cone could not have cost any box a
 point. The gate adds no constant: it is the HP quantum.
 
-**Strength.** `S = spend × κ × (v_exit / v_entry)²` (reference-mm, on the axis). `spend` is what
-the round's mechanism spent crossing that body (its readout drop, η-weighted by the disc);
-`v_entry`, `v_exit` are the round's speeds entering and leaving it. `κ = f_rear / f_ref` is the
-debris competence of the exit material (owner, 2026-10-17): `f_rear` the resistance factor of the
-body's last layer before the exit — its highest, since a body never steps down — and `f_ref` the
-reference factor (RHA, 1000). κ is exactly 1 for the reference, so a steel exit's `S` keeps its
-bits; every other material scales by its own data, and soft bodies fall to noise on their own
-(`.agents/scratch/damage-cam-2026-10-08/research/debris-strength-law.md`). A barely-through round
-has a small energy ratio. Calibre has no role.
+**Strength.** `S = spend × κ × (v_exit / v_entry)² × (d / d_ref)²` (reference-mm, on the axis).
+`spend` is what the round's mechanism spent crossing that body (its readout drop, η-weighted by
+the disc); `v_entry`, `v_exit` are the round's speeds entering and leaving it. `κ = f_rear / f_ref`
+is the debris competence of the exit material (owner, 2026-10-17): `f_rear` the resistance factor
+of the body's last layer before the exit — its highest, since a body never steps down — and
+`f_ref` the reference factor (RHA, 1000). κ is exactly 1 for the reference, so a steel exit's `S`
+keeps its bits; every other material scales by its own data, and soft bodies fall to noise on
+their own (`.agents/scratch/damage-cam-2026-10-08/research/debris-strength-law.md`). A
+barely-through round has a small energy ratio. `(d / d_ref)²` is the **hole term** (owner,
+2026-10-23): the cone's budget goes with the area of the hole, `d` the calibre of the round's
+penetrator (§3) and `d_ref` the calibre the field's rate was set against (`reference_calibre_m`
+in `assets/ballistics/spall_cone.ron`, 88 mm, TUNED). The exponent 2 is the law (a plug's mass
+goes with its area), not data. The term is exactly 1 at the reference calibre (`x / x` is 1 in
+IEEE arithmetic), so a reference-calibre cone keeps its bits; two rounds of different width
+through one plate throw different cones. DERIVED: the Pzgr. 40's 35.7 mm core gives 0.165, a
+7.9 mm machine-gun round 0.0081.
 
 **Profile.** Shipped: **even** — every direction of the cone carries the same strength, `S/2`
 (owner, 2026-10-17): the player controls the shell and learns the cone's shape; a fade across the
