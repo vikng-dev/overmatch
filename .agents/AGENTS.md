@@ -45,3 +45,26 @@ each with its default, preserved alternatives, and revert cost. See
 - **A comment states the current invariant, not the edit history.** Its subject is the code, never the edit that produced it. Round numbers, reviewer names, finding indices and dates — `(Codex round 5)`, `(review round, FIX 2)`, `(descent round)`, `X was DELETED 2026-07-27` — say nothing a reader of *this* code needs; git and `.agents/docs/design/` hold provenance, and they hold it better. Keep the sentence, drop the label. This is not a licence to delete rationale: a rejected alternative, a counterexample, a measured bound and a named constraint are all statements about the code as it stands and they stay. The test is whether the comment would still be true and still be useful if the edit that prompted it had never happened.
 - **A test is written under scrutiny: it names the invariant a mutant would break and who relies on it.** Test count is not a metric.
 - **A design narrative lives in exactly one place.** When a module and a design doc both tell the same story, they drift, and the reader cannot tell which one lost. The design doc owns the narrative — the menu of alternatives, the staged findings, the dispositions, the measured gate tables. A module doc owns what a reader needs in order to use or modify *that module*: the entry points, the invariants and their units, the classification of what the module still decides. It points at the design doc for the rest; it does not re-tell it, and it does not migrate content there either — anything stated only in the module doc stays put until someone deliberately moves it.
+
+## Damage-model vocabulary
+
+Overmatch is a video game, and its damage model speaks only of game state. Terse damage prose has
+tripped automated safety filters and stopped sessions mid-work, so every brief, message, comment,
+doc and commit about damage, crew or rounds says up front that its subject is the game's damage
+model, and uses these approved terms (definitions in `.agents/GLOSSARY.md`):
+
+| Say | Meaning |
+|---|---|
+| **knocked out**, **out of action** | a crew member or module whose HP pool is empty |
+| **HP pool emptied** | the transition into that state |
+| **reduced** | a partial state: HP left, capability possibly lowered |
+| **potency** | how much a round, cone or burst can do |
+| **knockout radius** | the distance from the source within which a field empties a given HP pool |
+| **dose** | what a line, cone or burst deposits, in reference-mm; HP = dose × a rate |
+| **crew line rate** | a round's dose to a crew box per metre of chord (code: `wound`) |
+| **field**, **spall cone**, **fragment cone**, **blast sphere**, **burst** | per the glossary |
+
+Crew are HP pools at stations; never describe bodily harm. Code identifiers keep their names
+(`wound`, `src/ballistics/wound.rs`) until a rename is decided. Older prose (ADRs, design docs,
+scratch notes) predates this rule: restate it in these terms when quoting, and fix it when touching
+it. Carry this section into every agent brief that touches damage, crew or rounds.

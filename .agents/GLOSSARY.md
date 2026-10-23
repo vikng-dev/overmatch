@@ -344,15 +344,16 @@ The umbrella term for a dose field thrown by a cause, whatever its shape: streng
 _Avoid_: cloud (implies an amorphous shape; older records use it to mean a field)
 
 **Spall cone** (spall):
-The field of fragments thrown from a body exit when a round perforates — even across its angle, each direction stopped by the first hard body it meets — wounding every crewman it reaches. Its strength comes from the spend at that exit and the exit material's debris competence; its law is design doc §5 (`.agents/docs/design/armor-penetration-and-damage.md`).
+The field of fragments thrown from a body exit when a round perforates — even across its angle, each direction stopped by the first hard body it meets — dosing every crew HP pool it reaches. Its strength comes from the spend at that exit and the exit material's debris competence; its law is design doc §5 (`.agents/docs/design/armor-penetration-and-damage.md`).
 _Avoid_: spalling, fragmentation, frag, spall cloud (the noun is spall; the emitter is the spall cone)
 
 **Witness**:
-A substance kind with no resistance, worn only by crew: no layer of the walk, so it never resists, slows, bends or shadows anything. It is wounded by what the hard world sent through it — the shell's disc-mean chord times the round's **wound rate**, and each field direction entering it. Its opposite is a **hard** substance (armour, modules). Decision: ADR-0040; law: design doc §6.
+A substance kind with no resistance, worn only by crew: no layer of the walk, so it never resists, slows, bends or shadows anything. Its HP pool takes dose from what the hard world sent through it — the shell's disc-mean chord times the round's **crew line rate**, and each field direction entering it. Its opposite is a **hard** substance (armour, modules). Decision: ADR-0040; law: design doc §6.
 _Avoid_: soft armour, flesh factor (a witness has no factor)
 
-**Wound rate**:
-A round's dose to a witness per metre of chord (reference-mm/m, `rounds.ron`, TUNED). Round data, never a material's.
+**Crew line rate**:
+A round's dose to a witness per metre of chord (reference-mm/m, `rounds.ron` field `wound`, TUNED). Round data, never a material's.
+_Avoid_: wound rate (the code identifier keeps `wound` until a rename is decided)
 
 **Fragment cone**:
 The field of a bursting round's own fragments, which carry its velocity forward. Not built.
@@ -361,12 +362,12 @@ The field of a bursting round's own fragments, which carry its velocity forward.
 The field of a blast or shockwave, even in every direction. Not built.
 
 **Station**:
-The *place* a crewman works — a fixed, spatial ballistic volume carrying a **role** (the gunner's station grants the gunnery capabilities). Persists whether occupied by a living crewman, a corpse, or briefly no one. Role lives on the station, not the occupant.
+The *place* a crewman works — a fixed, spatial ballistic volume carrying a **role** (the gunner's station grants the gunnery capabilities). Persists whether occupied by an active crewman, a knocked-out one, or briefly no one. Role lives on the station, not the occupant.
 _Avoid_: crew slot, seat, position
 
 **Crewman**:
-The *human* occupant — carries HP, death, and (later) skill. **Occupies** one station at a time; backfills a foreign station at degraded effectiveness, the commander being the universal backup. Crew ↔ station is always a 1:1 matching; a swap is a transposition (the dead occupant takes the survivor's vacated station).
-_Avoid_: treating crew as a counter (crew is never a count — see kill model)
+The occupant — carries an HP pool, a knocked-out state, and (later) skill. **Occupies** one station at a time; backfills a foreign station at degraded effectiveness, the commander being the universal backup. Crew ↔ station is always a 1:1 matching; a swap is a transposition (the knocked-out occupant takes the active crewman's vacated station).
+_Avoid_: treating crew as a counter (crew is never a count)
 
 **Capability**:
 A gameplay verb the tank can perform, gated *and graded* by its requirements (crew stations + module functions); its current degree is its effectiveness. The grammar (Group / Part / Pool / Backup, evaluated over part qualities) is shared, but the verbs are now **layered by scope** rather than one global list (ADR-0013): per-**servo** slew gates (`requires`), per-**weapon** `fire`/`load` gates, per-**view** gates (`requires`), and a small global `Capability` map for genuinely tank-wide verbs — currently only **Drive**. (Traverse / Fire / Load / GunnerSight / CommanderView were global capabilities before the rig refactor; they moved onto the servo / weapon / view that owns them.)
@@ -377,7 +378,7 @@ How well a capability is currently served, ∈ [0, 1] (0 = unavailable, 1 = full
 _Avoid_: efficiency (reserve that for a single requirement member's coefficient)
 
 **Cookoff**:
-Detonation of an ammunition volume when its HP is depleted — instantly kills all crew. The one terminal, non-repairable event.
+Detonation of an ammunition volume when its HP pool is emptied — every crew HP pool is emptied at once. The one terminal, non-repairable event.
 _Avoid_: ammo rack explosion, detonation (reserve detonation for HE)
 
 **Union field**:
