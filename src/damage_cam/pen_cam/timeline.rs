@@ -332,19 +332,6 @@ pub fn field_tint(band: Band) -> Color {
         Band::Bright => FIELD_BRIGHT,
     }
 }
-/// The field's edge shell: near-white, a contour with no hue of its own.
-pub const FIELD_EDGE: Color = Color::srgb_u8(0xE6, 0xEE, 0xF5);
-
-/// The cone strength (ref-mm) a spall field is drawn at full level: the one display gain of the
-/// field's brightness and its footprint's opacity, both linear in the strength. TUNED: a steel
-/// plate's exit at the demo's ranges.
-pub const FIELD_FULL_MM: f32 = 10.0;
-
-/// A field's display level, linear in its cone's on-axis strength `strength_mm` (ref-mm): 1 at
-/// [`FIELD_FULL_MM`], unbounded above, 0 for none.
-pub fn field_level(strength_mm: f32) -> f32 {
-    strength_mm.max(0.0) / FIELD_FULL_MM
-}
 
 /// The share of its HP points a component lost to the shot, of the points it had at the shot,
 /// clamped at 1 — full exactly when the shot disabled it. A component with none left at the shot

@@ -22,6 +22,8 @@
 //                 grazing angle by power `shade.z`. Additive; the material says whether it is
 //                 occluded.
 //
+// In every mode, `mode.y = 1` discards what lies on `plane`'s normal side (the slice's cut).
+//
 // Base and state surfaces carry the spall fields' footprint (`footprint`; design doc §5, "Potency
 // bands"): for each of the fields (`fields.x`, none at 0; `prints`), a surface point facing the
 // origin, inside the cone, behind its front and no farther than its direction's reach on the
@@ -46,7 +48,7 @@ struct LookParams {
     field: vec4<f32>,
     // x: the state hatch's period (px); y: its hatched share.
     hatch: vec4<f32>,
-    // x: mode; z: the part mask (base, 1); w: hatch on (state, 1).
+    // x: mode; y: cut by `plane` (1); z: the part mask (base, 1); w: hatch on (state, 1).
     mode: vec4<f32>,
     // xyz: the fill's up (world, unit); w: the share of the height filled.
     state: vec4<f32>,
@@ -55,6 +57,9 @@ struct LookParams {
     span: vec4<f32>,
     // rgb: the unfilled remainder's colour.
     rest: vec4<f32>,
+    // The cut (`mode.y = 1`): xyz the plane's unit normal toward the discarded side (world), w
+    // normal · a point on it.
+    plane: vec4<f32>,
     // x: the lines' width (px), y: their opacity; z, w: a surface counts as met up to `z` times its
     // direction's reach plus `w` (m).
     foot: vec4<f32>,
@@ -257,6 +262,9 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
     // Where the masks hold this fragment: its position within its own viewport.
     let pix = frag - view.viewport.xy;
 
+    if look.mode.y > 0.5 && dot(look.plane.xyz, in.world_position.xyz) > look.plane.w {
+        discard;
+    }
     if m == 0 {
         let vn = normalize((view.view_from_world * vec4(n, 0.0)).xyz);
         return vec4(vn * 0.5 + 0.5, dist);

@@ -96,6 +96,7 @@ pub struct LookParams {
     pub state: Vec4,
     pub span: Vec4,
     pub rest: Vec4,
+    pub plane: Vec4,
     pub foot: Vec4,
     pub bands: Vec4,
     pub tints: [Vec4; 3],
@@ -116,6 +117,7 @@ impl Default for LookParams {
             state: Vec4::ZERO,
             span: Vec4::ZERO,
             rest: Vec4::ZERO,
+            plane: Vec4::ZERO,
             foot: Vec4::ZERO,
             bands: Vec4::ZERO,
             tints: [Vec4::ZERO; 3],
@@ -186,6 +188,18 @@ impl LookMaterial {
 
     pub fn set_front(&mut self, radius: Option<f32>) {
         self.params.field.x = radius.map_or(-1.0, |r| r.max(0.0));
+    }
+
+    /// Discard what lies on `normal`'s side of the plane through `point` (world); `None` cuts
+    /// nothing.
+    pub fn set_cut(&mut self, plane: Option<(Vec3, Vec3)>) {
+        match plane {
+            Some((normal, point)) => {
+                self.params.plane = normal.extend(normal.dot(point));
+                self.params.mode.y = 1.0;
+            }
+            None => self.params.mode.y = 0.0,
+        }
     }
 
     /// A state fill's frame: `up` (world, unit) and its component's low and high heights along it
@@ -694,8 +708,11 @@ pub fn component(b: &BoxPlan, kind: CornerKind, masks: &MaskSet) -> Option<LookM
 }
 
 /// Potency band `band`'s shell of a spall field ([`super::field::shell_mesh`]): the band's colour
-/// ([`timeline::field_tint`]), added, strongest at a grazing angle, drawn over everything.
-pub fn shell(band: Band, masks: &MaskSet) -> LookMaterial {
+/// ([`timeline::field_tint`]), added, strongest at a grazing angle. Uncut it is drawn over
+/// everything, through the base look's glass; `cut` by the slice plane (unit normal toward the
+/// discarded side, a point on it) it is drawn under the tank's own surfaces, which the slice keeps
+/// opaque past the plane.
+pub fn shell(band: Band, masks: &MaskSet, cut: Option<(Vec3, Vec3)>) -> LookMaterial {
     let mut m = LookMaterial::new(
         MODE_SHELL,
         timeline::field_tint(band).into(),
@@ -705,7 +722,9 @@ pub fn shell(band: Band, masks: &MaskSet) -> LookMaterial {
     );
     m.params.shade.x = SHELL_FACE_SHARE;
     m.params.shade.z = SHELL_FRESNEL_POWER;
-    m.unoccluded = true;
+    m.set_cut(cut);
+    m.unoccluded = cut.is_none();
+    m.bias = cut.is_some();
     m
 }
 

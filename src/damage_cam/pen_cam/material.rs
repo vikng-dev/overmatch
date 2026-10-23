@@ -14,9 +14,6 @@ use bevy::shader::ShaderRef;
 pub struct GlowParams {
     pub color: Vec4,
     pub rim: Vec4,
-    pub plane: Vec4,
-    pub flags: Vec4,
-    pub field: Vec4,
 }
 
 /// How a [`LookMaterial`](super::look::LookMaterial) composites.
@@ -30,17 +27,13 @@ pub enum Blend {
     Opaque,
 }
 
-/// One flat colour added to what lies behind it, optionally rim-lit by view angle, vertex-coloured,
-/// clipped by a plane, faded by distance from the mesh's origin or cut off at a radius from it;
-/// both faces drawn. Additive is commutative, so it needs no sort order.
+/// One flat colour added to what lies behind it, optionally rim-lit by view angle; both faces
+/// drawn. Additive is commutative, so it needs no sort order.
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct GlowMaterial {
     #[uniform(0)]
     pub params: GlowParams,
 }
-
-/// [`GlowParams::field`] with no front (`x < 0`) and no falloff (`y = 0`).
-const NO_FIELD: Vec4 = Vec4::new(-1.0, 0.0, 0.0, 0.0);
 
 impl GlowMaterial {
     /// An additive glow of `color` (linear) at `intensity`, without rim.
@@ -49,9 +42,6 @@ impl GlowMaterial {
             params: GlowParams {
                 color: Vec4::new(color.red, color.green, color.blue, 1.0),
                 rim: Vec4::new(intensity, 0.0, 1.0, 0.0),
-                plane: Vec4::ZERO,
-                flags: Vec4::new(0.0, 0.0, 0.0, 1.0),
-                field: NO_FIELD,
             },
         }
     }
@@ -64,38 +54,8 @@ impl GlowMaterial {
         self
     }
 
-    /// Multiply colour by the mesh's vertex colour and intensity by its alpha.
-    pub fn with_vertex_color(mut self) -> Self {
-        self.params.rim.w = 1.0;
-        self
-    }
-
-    /// Intensity falls as `min(1, (r₀ / r)²)` with `r` the distance (m) from the mesh's origin: a
-    /// field's fluence from its source, unity inside `r₀`.
-    pub fn with_falloff(mut self, r0: f32) -> Self {
-        self.params.field.y = r0;
-        self
-    }
-
-    /// Every vertex farther than `radius` (m) from the mesh's origin is drawn at that radius, along
-    /// its own direction: a front grown that far. `None` draws the mesh whole.
-    pub fn set_front(&mut self, radius: Option<f32>) {
-        self.params.field.x = radius.map_or(NO_FIELD.x, |r| r.max(0.0));
-    }
-
-    /// Discard fragments on `normal`'s side of the plane through `point`; `None` clips nothing.
-    pub fn set_clip(&mut self, plane: Option<(Vec3, Vec3)>) {
-        match plane {
-            Some((normal, point)) => {
-                self.params.plane = normal.extend(normal.dot(point));
-                self.params.flags.x = 1.0;
-            }
-            None => self.params.flags.x = 0.0,
-        }
-    }
-
     pub fn set_fade(&mut self, fade: f32) {
-        self.params.flags.w = fade;
+        self.params.color.w = fade;
     }
 
     pub fn set_intensity(&mut self, intensity: f32) {

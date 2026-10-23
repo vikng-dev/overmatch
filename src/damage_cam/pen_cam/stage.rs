@@ -2,7 +2,7 @@
 //! over it — the round as the game's shell model at the record's calibre, travelling the recorded
 //! path nose first with a thin trail behind it, a ring where it crossed each plate or glanced off a
 //! face, every spall cone as its potency band shells in the field's cool hue, cut where its
-//! directions stopped ([`look::shell`], nested reach surfaces cut by the plane in the slice), and
+//! directions stopped ([`look::shell`], and by the plane in the slice), and
 //! each struck component's real mesh on the state scale ([`look::component`]): filled red from the
 //! bottom up to the share of its HP points lost, one knocked out charcoal and hatched.
 //! The shell rests where the record ends; a round the record has leave the tank runs on out of the
@@ -28,10 +28,10 @@ use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
-use super::field::{self, reach_mesh};
+use super::field;
 use super::look::{self, FieldPrint, LookMaterial, MaskLayer, MaskSet, Masks};
 use super::material::{GlowMaterial, OutlineMaterial, SliceCut, SliceMaterial, SliceParams};
-use super::plan::{BoxPlan, Cone, Plan, Reach};
+use super::plan::{BoxPlan, Plan, Reach};
 use super::potency::{Band, Potency};
 use super::timeline::{self, CornerKind};
 use super::view::{Proxy, StageView, ViewMesh, ViewRoot};
@@ -60,21 +60,6 @@ const FRAME_CALIBRES: f32 = 80.0;
 /// glow.
 const RING_THICKNESS: f32 = 0.12;
 const RING_GLOW: f32 = 2.0;
-/// In the slice, the spall cone is drawn as this many nested copies of its reach surface, scaled
-/// about its origin and cut by the plane, so its density reads as depth; the on-axis brightness of all of them together is
-/// [`CONE_PEAK`] at the top of the dose scale. TUNED, as are the cone's and the boxes' figures
-/// below.
-const CONE_SHELLS: usize = 4;
-const CONE_PEAK: f32 = 0.35;
-/// The shells' emission gain over [`CONE_PEAK`], for the bloom: a diagram choice.
-const CONE_GAIN: f32 = 4.0;
-/// The outer reach surface's view-angle glow at the top of the dose scale, held at this fraction
-/// of the nested shells' on-axis sum so the directions' own strengths, not the outline, carry the
-/// field's shape.
-const CONE_RIM_SHARE: f32 = 0.3;
-/// The slice's field density falls as `(r₀ / r)²` from its origin, unity inside `r₀`, this
-/// fraction of the cone's longest reach.
-const FIELD_FALLOFF_REACH: f32 = 0.3;
 /// The slice's cut face.
 const CUT: Color = Color::srgb_u8(0xC8, 0xCD, 0xD3);
 /// The corner camera's vertical field (deg) in perspective.
@@ -130,12 +115,10 @@ pub(super) struct MarkItem {
     at_arc: f32,
 }
 
-/// One copy of cone `cone`'s reach surface, scaled about its origin; `rim` marks the outer surface.
+/// One potency band's shell of cone `cone`, about its origin.
 #[derive(Component)]
 pub(super) struct ConeShell {
     cone: usize,
-    rim: bool,
-    peak: f32,
 }
 
 /// A copy of one mesh of component `index` of the plan, over the tank's own, tinted by its dose.
@@ -619,54 +602,21 @@ pub fn spawn_glass(
         );
     }
 
-    // Spall cones: each one's potency band shells, or in the slice nested reach surfaces and a
-    // muted outer one, clipped by the slice plane.
+    // Spall cones: each one's potency band shells, cut by the slice plane in the slice.
     let potency = Potency::shipped();
     for (index, cone) in plan.cones.iter().enumerate() {
         if matches!(kind, CornerKind::Ricochet) {
             break;
         }
-        if kind != CornerKind::Slice {
-            for band in Band::DRAWN {
-                let mut material = look::shell(band, look_ctx.masks);
-                material.set_fade(0.0);
-                commands.spawn((
-                    Mesh3d(meshes.add(field::shell_mesh(cone, band, &potency))),
-                    MeshMaterial3d(look_ctx.looks.add(material)),
-                    Transform::from_translation(cone.origin),
-                    Visibility::Hidden,
-                    ConeShell {
-                        cone: index,
-                        rim: true,
-                        peak: 0.0,
-                    },
-                    tag.clone(),
-                    ChildOf(hull),
-                ));
-            }
-            continue;
-        }
-        let mesh = meshes.add(reach_mesh(cone));
-        for shell in 0..=CONE_SHELLS {
-            let rim = shell == CONE_SHELLS;
-            let k = if rim {
-                1.0
-            } else {
-                (shell + 1) as f32 / CONE_SHELLS as f32
-            };
-            let (mut material, peak) = field_material(cone, rim);
-            material.set_clip(clip);
+        for band in Band::DRAWN {
+            let mut material = look::shell(band, look_ctx.masks, clip);
             material.set_fade(0.0);
             commands.spawn((
-                Mesh3d(mesh.clone()),
-                MeshMaterial3d(glows.add(material)),
-                Transform::from_translation(cone.origin).with_scale(Vec3::splat(k)),
+                Mesh3d(meshes.add(field::shell_mesh(cone, band, &potency))),
+                MeshMaterial3d(look_ctx.looks.add(material)),
+                Transform::from_translation(cone.origin),
                 Visibility::Hidden,
-                ConeShell {
-                    cone: index,
-                    rim,
-                    peak,
-                },
+                ConeShell { cone: index },
                 tag.clone(),
                 ChildOf(hull),
             ));
@@ -702,30 +652,6 @@ pub fn spawn_glass(
         commands.spawn((tint(), MeshMaterial3d(look_ctx.looks.add(fill))));
         commands.spawn((tint(), MeshMaterial3d(outlines.add(outline))));
     }
-}
-
-/// One of a cone's reach surfaces, and its peak intensity at full fade: the nested shells carry
-/// each direction's strength in their vertex alpha, so the field's angular profile is theirs; the
-/// outer shell (`rim`) adds only a view-angle edge at [`CONE_RIM_SHARE`] of their on-axis sum. Both
-/// fall off as 1/r² from the origin, in [`timeline::FIELD`]'s cool hue.
-fn field_material(cone: &Cone, rim: bool) -> (GlowMaterial, f32) {
-    let reach = cone.max_reach();
-    let r0 = (FIELD_FALLOFF_REACH * reach).max(1e-3);
-    let interior = CONE_GAIN * CONE_PEAK * timeline::field_level(cone.strength);
-    let (material, peak) = if rim {
-        let peak = CONE_RIM_SHARE * interior;
-        (
-            GlowMaterial::additive(timeline::FIELD_EDGE.into(), 0.0).with_rim(0.0, peak, 2.5),
-            peak,
-        )
-    } else {
-        let peak = interior / CONE_SHELLS as f32;
-        (
-            GlowMaterial::additive(timeline::FIELD.into(), peak).with_vertex_color(),
-            peak,
-        )
-    };
-    (material.with_falloff(r0), peak)
 }
 
 /// The ring a calibre across on a face, stretched along the line's track on it by
@@ -1031,10 +957,8 @@ impl<'a> Playing<'a> {
     pub(super) fn cone(
         &self,
         shell: &ConeShell,
-        glow: Option<&MeshMaterial3d<GlowMaterial>>,
-        look: Option<&MeshMaterial3d<LookMaterial>>,
+        look: &MeshMaterial3d<LookMaterial>,
         visibility: &mut Mut<Visibility>,
-        glows: &mut Assets<GlowMaterial>,
         looks: &mut Assets<LookMaterial>,
     ) {
         let (plan, kind, c) = (self.plan, self.kind, self.c);
@@ -1051,14 +975,7 @@ impl<'a> Playing<'a> {
             visibility.set_if_neq(Visibility::Hidden);
             return;
         }
-        if let Some(mut m) = glow.and_then(|m| glows.get_mut(&m.0)) {
-            m.set_fade(fade);
-            m.set_front(front);
-            if !shell.rim {
-                m.set_intensity(shell.peak);
-            }
-        }
-        if let Some(mut m) = look.and_then(|m| looks.get_mut(&m.0)) {
+        if let Some(mut m) = looks.get_mut(&look.0) {
             m.set_fade(fade);
             m.set_front(front);
         }
@@ -1214,12 +1131,7 @@ pub fn animate(
         ),
     >,
     mut shells: Query<
-        (
-            &ConeShell,
-            Option<&MeshMaterial3d<GlowMaterial>>,
-            Option<&MeshMaterial3d<LookMaterial>>,
-            &mut Visibility,
-        ),
+        (&ConeShell, &MeshMaterial3d<LookMaterial>, &mut Visibility),
         (
             With<StageItem>,
             Without<LineSeg>,
@@ -1297,8 +1209,8 @@ pub fn animate(
     for (mark, material, mut visibility) in &mut marks {
         playing.mark(mark, material, &mut visibility, &mut glows);
     }
-    for (shell, glow, look, mut visibility) in &mut shells {
-        playing.cone(shell, glow, look, &mut visibility, &mut glows, &mut looks);
+    for (shell, look, mut visibility) in &mut shells {
+        playing.cone(shell, look, &mut visibility, &mut looks);
     }
     // The state fills rise along the hull's up, the tank's; the footprints are taken in its frame.
     let hull = stage.hull.and_then(|hull| hulls.get(hull).ok());
@@ -2323,16 +2235,15 @@ mod tests {
         })
     }
 
-    /// Every record's spall field as the real [`rebuild`] draws it. In every frame but the slice,
-    /// the corner's and the kill cam's lesson on the world alike, each cone draws one shell per
-    /// potency band, each in its band's colour on one cool ladder — more blue than red, off the
-    /// state scale, each band brighter than the one below it — added over everything at one gain
-    /// across every record: the colour says the band and nothing else, never the cone's strength.
-    /// In the slice, every nested shell falls off as 1/r² from the cone's origin in that hue, and
-    /// the outer shell's view-angle glow is at most half the nested shells' on-axis sum, so the
-    /// directions' strengths shape the field. At least one record throws a cone in each.
+    /// Every record's spall field as the real [`rebuild`] draws it, in every frame, the corner's and
+    /// the kill cam's lesson on the world alike: each cone draws one shell per potency band, each in
+    /// its band's colour on one cool ladder — more blue than red, off the state scale, each band
+    /// brighter than the one below it — added at one gain across every record, so the colour says
+    /// the band and nothing else, never the cone's strength. Outside the slice a shell is uncut and
+    /// drawn over everything, through the glass; in the slice it is cut by the slice plane and drawn
+    /// under the tank the slice keeps. At least one record throws a cone in each.
     #[test]
-    fn the_field_is_cool_and_falls_off_from_its_origin() {
+    fn the_field_is_its_bands_on_one_cool_ladder() {
         let library = Library::load();
         let asset = TankAsset::load(&library.vehicle).unwrap();
         let (mut looked, mut sliced) = (0, 0);
@@ -2364,15 +2275,17 @@ mod tests {
                     .iter(world)
                     .map(|(shell, m)| (shell.cone, m.0.clone()))
                     .collect();
+                assert_eq!(
+                    fields.len(),
+                    3 * record.plan.cones.len(),
+                    "{} {surface:?}",
+                    record.stem
+                );
                 let slice = kind == CornerKind::Slice;
-                let want = if slice {
-                    0
-                } else {
-                    3 * record.plan.cones.len()
-                };
-                assert_eq!(fields.len(), want, "{} {surface:?}", record.stem);
+                let cut = world.resource::<Stage>().plane;
+                assert_eq!(cut.is_some(), slice, "{} {surface:?}", record.stem);
+                let looks = world.resource::<Assets<LookMaterial>>();
                 for (cone, _) in record.plan.cones.iter().enumerate() {
-                    let looks = world.resource::<Assets<LookMaterial>>();
                     let mut colors: Vec<Vec3> = Vec::new();
                     for (_, handle) in fields.iter().filter(|(of, _)| *of == cone) {
                         let m = looks.get(handle).unwrap();
@@ -2382,64 +2295,39 @@ mod tests {
                             "{}: {color}",
                             record.stem
                         );
-                        assert!(m.unoccluded, "{}", record.stem);
+                        match cut {
+                            Some((normal, point)) => {
+                                assert_eq!(m.params.mode.y, 1.0, "{}", record.stem);
+                                assert_eq!(m.params.plane, normal.extend(normal.dot(point)));
+                                assert!(!m.unoccluded && m.bias, "{}", record.stem);
+                            }
+                            None => {
+                                assert_eq!(m.params.mode.y, 0.0, "{}", record.stem);
+                                assert!(m.unoccluded, "{}", record.stem);
+                            }
+                        }
                         gains.push(m.params.color.w);
                         colors.push(color);
                     }
-                    if !slice {
-                        for band in Band::DRAWN {
-                            assert_eq!(
-                                colors.iter().filter(|c| **c == tint(band)).count(),
-                                1,
-                                "{} {surface:?}: {band:?}",
-                                record.stem
-                            );
-                        }
-                        looked += 1;
-                    }
-                }
-                let mut shells = world.query::<(&ConeShell, &MeshMaterial3d<GlowMaterial>)>();
-                let glows = world.resource::<Assets<GlowMaterial>>();
-                for (cone, _) in record.plan.cones.iter().enumerate() {
-                    let materials: Vec<(bool, &GlowMaterial)> = shells
-                        .iter(world)
-                        .filter(|(shell, _)| shell.cone == cone)
-                        .map(|(shell, m)| (shell.rim, glows.get(&m.0).unwrap()))
-                        .collect();
-                    let want = if slice { CONE_SHELLS + 1 } else { 0 };
-                    assert_eq!(materials.len(), want, "{} {surface:?}", record.stem);
-                    if !slice {
-                        continue;
-                    }
-                    let mut interior = 0.0;
-                    let mut rim = 0.0;
-                    for (is_rim, m) in &materials {
-                        assert!(m.params.field.y > 0.0, "{}: no falloff", record.stem);
-                        let color = m.params.color.truncate();
-                        assert!(color.z > color.x, "{}: {color} is warm", record.stem);
-                        assert!(
-                            !on_state_scale(color),
-                            "{}: {color} is on the state scale",
+                    for band in Band::DRAWN {
+                        assert_eq!(
+                            colors.iter().filter(|c| **c == tint(band)).count(),
+                            1,
+                            "{} {surface:?}: {band:?}",
                             record.stem
                         );
-                        if *is_rim {
-                            rim += m.params.rim.y;
-                        } else {
-                            interior += m.params.rim.x;
-                        }
                     }
-                    assert!(
-                        rim <= 0.5 * interior,
-                        "{}: rim {rim} against {interior}",
-                        record.stem
-                    );
-                    sliced += 1;
+                    if slice {
+                        sliced += 1;
+                    } else {
+                        looked += 1;
+                    }
                 }
             }
         }
         assert!(
             looked > 0 && sliced > 0,
-            "{looked} banded fields, {sliced} sliced"
+            "{looked} fields through the glass, {sliced} sliced"
         );
         assert!(
             gains.iter().all(|gain| *gain == gains[0]),

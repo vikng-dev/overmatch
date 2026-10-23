@@ -563,12 +563,7 @@ pub(super) fn animate(
         ),
     >,
     mut shells: Query<
-        (
-            &ConeShell,
-            Option<&MeshMaterial3d<GlowMaterial>>,
-            Option<&MeshMaterial3d<LookMaterial>>,
-            &mut Visibility,
-        ),
+        (&ConeShell, &MeshMaterial3d<LookMaterial>, &mut Visibility),
         (
             With<XRayItem>,
             Without<LineSeg>,
@@ -625,8 +620,8 @@ pub(super) fn animate(
     for (mark, material, mut visibility) in &mut marks {
         playing.mark(mark, material, &mut visibility, &mut glows);
     }
-    for (cone, glow, look, mut visibility) in &mut shells {
-        playing.cone(cone, glow, look, &mut visibility, &mut glows, &mut looks);
+    for (cone, look, mut visibility) in &mut shells {
+        playing.cone(cone, look, &mut visibility, &mut looks);
     }
     let hull = hulls.get(built.hull).ok();
     if let Some(hull) = hull {

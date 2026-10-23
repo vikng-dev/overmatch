@@ -12,9 +12,8 @@
 //! A band shell joins, along every direction, the point out to which the field lies in that potency
 //! band or a brighter one ([`Potency::shell_radius`]), closed back to the origin along the cone's
 //! rim; the dim band's is the reach surface. A shadowed direction ends short, so a shadow shows as
-//! a dent in every shell its reach cuts. The slice still draws the reach surface through the
-//! record's own triangulation ([`reach_mesh`]). Positions are relative to the cone's origin, so
-//! the look's material holds a front by distance from it.
+//! a dent in every shell its reach cuts. Positions are relative to the cone's origin, so the look's
+//! material holds a front by distance from it.
 //!
 //! Every triangle is wound outward (counter-clockwise seen from outside the closed surface): a
 //! surface triangle so its corners' directions turn positively about the origin, which holds
@@ -28,8 +27,6 @@ use bevy::prelude::*;
 use super::plan::{Cone, Ray};
 use super::potency::{Band, Potency};
 
-/// Each Delaunay triangle is cut into `SUBDIVISION²` triangles.
-const SUBDIVISION: usize = 4;
 /// The disc's grid: this many nodes a side over `q ∈ [−1, 1]²`, a node every 0.087 of the disc's
 /// radius (DERIVED), against ~0.22 between the shipped cone's 64 directions (DERIVED: `√(π / 64)`).
 /// Even, so the look packs two nodes a lane; `pen_cam_look.wgsl` declares the same side.
@@ -237,112 +234,6 @@ fn flat_mesh(positions: Vec<[f32; 3]>, indices: Vec<u32>) -> Mesh {
         RenderAssetUsages::default(),
     );
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_indices(Indices::U32(indices));
-    mesh.duplicate_vertices();
-    mesh.compute_flat_normals();
-    mesh
-}
-
-/// The reach surface of `cone` as a mesh about its origin.
-pub fn reach_mesh(cone: &Cone) -> Mesh {
-    let axis = cone.axis;
-    let (u, v) = axis.any_orthonormal_pair();
-    let angle = cone.half_angle.max(1e-3);
-    let disc: Vec<Vec2> = cone
-        .rays
-        .iter()
-        .map(|ray| {
-            let theta = ray.direction.dot(axis).clamp(-1.0, 1.0).acos();
-            let phi = ray.direction.dot(v).atan2(ray.direction.dot(u));
-            Vec2::from_angle(phi) * (theta / angle)
-        })
-        .collect();
-    let triangles = delaunay(&disc);
-    // A disc point back to a direction: polar angle from the radius, azimuth from the angle.
-    let direction = |q: Vec2| {
-        let theta = q.length() * angle;
-        let phi = q.y.atan2(q.x);
-        (axis * theta.cos() + (u * phi.cos() + v * phi.sin()) * theta.sin()).normalize()
-    };
-    let mut positions: Vec<[f32; 3]> = Vec::new();
-    let mut directions: Vec<Vec3> = Vec::new();
-    let mut colors: Vec<[f32; 4]> = Vec::new();
-    let mut indices: Vec<u32> = Vec::new();
-    let mut vertex = |q: Vec2, reach: f32, weight: f32| {
-        let along = direction(q);
-        positions.push((along * reach).to_array());
-        directions.push(along);
-        colors.push([1.0, 1.0, 1.0, weight]);
-        (positions.len() - 1) as u32
-    };
-    let n = SUBDIVISION;
-    for [a, b, c] in &triangles {
-        let corner = |i: usize| {
-            let ray = &cone.rays[i];
-            (disc[i], ray.reach, ray.weight)
-        };
-        let (ka, kb, kc) = (corner(*a), corner(*b), corner(*c));
-        // Barycentric grid: row i from a toward c, column j toward b.
-        let mut grid: Vec<Vec<u32>> = Vec::with_capacity(n + 1);
-        for i in 0..=n {
-            let mut row = Vec::with_capacity(n + 1 - i);
-            for j in 0..=(n - i) {
-                let wc = i as f32 / n as f32;
-                let wb = j as f32 / n as f32;
-                let wa = 1.0 - wb - wc;
-                let q = ka.0 * wa + kb.0 * wb + kc.0 * wc;
-                let reach = ka.1 * wa + kb.1 * wb + kc.1 * wc;
-                let weight = ka.2 * wa + kb.2 * wb + kc.2 * wc;
-                row.push(vertex(q, reach, weight));
-            }
-            grid.push(row);
-        }
-        for i in 0..n {
-            for j in 0..(n - i) {
-                indices.extend([grid[i][j], grid[i][j + 1], grid[i + 1][j]]);
-                if j + 1 < n - i {
-                    indices.extend([grid[i][j + 1], grid[i + 1][j + 1], grid[i + 1][j]]);
-                }
-            }
-        }
-    }
-    let surface = indices.len();
-    // The rim: every hull edge closed back to the origin by a fan.
-    for (a, b) in hull_edges(&triangles) {
-        let origin = vertex(Vec2::ZERO, 0.0, 0.0);
-        let mut previous = None;
-        for k in 0..=n {
-            let f = k as f32 / n as f32;
-            let q = disc[a].lerp(disc[b], f);
-            let reach = cone.rays[a].reach * (1.0 - f) + cone.rays[b].reach * f;
-            let weight = cone.rays[a].weight * (1.0 - f) + cone.rays[b].weight * f;
-            let current = vertex(q, reach, weight);
-            if let Some(previous) = previous {
-                indices.extend([origin, previous, current]);
-            }
-            previous = Some(current);
-        }
-    }
-    for (at, triangle) in indices.as_chunks_mut::<3>().0.iter_mut().enumerate() {
-        let [a, b, c] = [0, 1, 2].map(|k| triangle[k] as usize);
-        let inward = if 3 * at < surface {
-            directions[a].dot(directions[b].cross(directions[c])) < 0.0
-        } else {
-            let point = |i: usize| Vec3::from(positions[i]);
-            let normal = (point(b) - point(a)).cross(point(c) - point(a));
-            let middle = (point(a) + point(b) + point(c)) / 3.0;
-            normal.dot(middle - axis * middle.dot(axis)) < 0.0
-        };
-        if inward {
-            triangle.swap(1, 2);
-        }
-    }
-    let mut mesh = Mesh::new(
-        PrimitiveTopology::TriangleList,
-        RenderAssetUsages::default(),
-    );
-    mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
     mesh.duplicate_vertices();
     mesh.compute_flat_normals();
@@ -589,8 +480,7 @@ mod tests {
     #[test]
     fn every_surface_is_closed_and_wound_outward() {
         for cone in fixture_cones() {
-            let shells = Band::DRAWN.map(|band| shell_mesh(&cone, band, &POTENCY));
-            for mesh in std::iter::once(reach_mesh(&cone)).chain(shells) {
+            for mesh in Band::DRAWN.map(|band| shell_mesh(&cone, band, &POTENCY)) {
                 let key = |p: [f32; 3]| p.map(|x| (x * 1.0e4).round() as i64);
                 let mut edges = std::collections::HashMap::<([i64; 3], [i64; 3]), i32>::new();
                 let mut volume = 0.0;
@@ -611,21 +501,6 @@ mod tests {
                     "an edge crossed one way only"
                 );
             }
-        }
-    }
-
-    /// The reach surface passes through every recorded reach end.
-    #[test]
-    fn the_surface_holds_every_reach_end() {
-        let [cone, _] = fixture_cones();
-        let mesh = reach_mesh(&cone);
-        for end in cone.rays.iter().map(|r| r.direction * r.reach) {
-            assert!(
-                positions(&mesh)
-                    .iter()
-                    .any(|p| Vec3::from(*p).distance(end) < 1e-4),
-                "{end}"
-            );
         }
     }
 }
