@@ -256,10 +256,11 @@ cone) becomes whole HP points once, on its total (§6). Every field deposit, to 
 witness alike, enters that total at the field's own calibration (`hp_per_reference_mm` in
 `spall_cone.ron`, TUNED 70 HP points per reference-mm against the line's 10) and nothing on the
 line or a bounce's shock does; `S` stays in reference-mm, so the calibration sets every cone's
-potency at once and the HP quantum gate tests `S/2` at it. With pools as class × face (§6) a box's
-knockout radius in the cone, `R = sqrt(E / (class Ω_c))` with `Ω_c = 2π(1 − cos α)`, is the same
-for every box of a class: about 2 m for a crew station on a weak ordinary perforation (DERIVED in
-`spall_cone.ron`). Dose summed over boxes is not conserved under the partial passage (two thin
+potency at once and the HP quantum gate tests `S/2` at it. A box of face `A` fully inside the cone
+has the knockout radius `R = sqrt(E A / (pool Ω_c))`, `Ω_c = 2π(1 − cos α)`: the same for every
+box of a class whose pool is class × `A` (§6), and on a weak ordinary perforation about 2 m for the
+30 HP crew pool at the intended humanoid's 0.2 m² face, 3.2 m at the placeholder crew box's
+0.516 m² (DERIVED in `spall_cone.ron`). Dose summed over boxes is not conserved under the partial passage (two thin
 boxes in line both take nearly full strength); the emitted budget is.
 
 **Data.** `α`, the axis rule, `N`, the profile and the passage live in
@@ -293,11 +294,14 @@ minimum steel-equivalent thickness, then detonates after a delay.
 
 ## 6. Component damage — HP per component, never per tank
 
-Every component has its own **HP pool** in whole **HP points**, authored as integers in the tank
-data as its sturdiness class (HP points per m², `assets/ballistics/box_classes.ron`, TUNED) times
-the box's mean face, the mean of the three axis-aligned face areas of its bounds (a crewman 77, an
-engine 336 on the seed tank, DERIVED); `src/tests/box_pools.rs` holds every tank asset within
-±25 % of that, which the field's calibration (§5) and the pen cam's potency bands rely on. One
+Every component has its own **HP pool** in whole **HP points**. A crew station's is the one shared
+crew pool (30 HP, TUNED, provisional, `assets/ballistics/box_classes.ron`), which a tank file
+cannot author: a crewman is one entity across tanks, and the crew box is a placeholder for a
+humanoid shape. Every other pool is authored as an integer in the tank data, its sturdiness class
+(HP points per m², same file, TUNED) times the box's mean face, the mean of the three axis-aligned
+face areas of its bounds (an engine 336 on the seed tank, DERIVED); `src/tests/box_pools.rs` holds
+every tank asset to both, which the field's calibration (§5) and the pen cam's potency bands rely
+on. One
 point is 0.1 reference-mm of line dose (`ballistics::HP_PER_REFERENCE_MM`, a unit with Resolution
 provenance, not a balance value); a field deposit converts at the field's calibration (§5). A spall
 cone doses it by the strength reaching it (§5); the **main penetrator transiting** a hard module
@@ -327,8 +331,8 @@ kept alternative, playtest fork F2.
 
 - **Crew are witnesses** (low HP) — the kill currency; a graze of the cone's edge leaves a station
   reduced, a station inside the cone's knockout radius is knocked out, and a clean main-gun
-  transit's line alone empties a 77 HP crew pool at about 26 cm of chord at 30 reference-mm/m
-  (DERIVED). (HP, not binary, so fire-over-time and near-misses have somewhere to accumulate.)
+  transit's line alone empties the crew pool (10 cm of chord at 30 reference-mm/m is 30 HP,
+  DERIVED). (HP, not binary, so fire-over-time and near-misses have somewhere to accumulate.)
 - **Modules are tougher and repairable** — one stray fragment scratches an engine; a faceful or a
   direct transit wrecks it.
 - **Degraded performance (later):** checkpoints preferred (e.g. ≤50% HP → −x% power) over continuous

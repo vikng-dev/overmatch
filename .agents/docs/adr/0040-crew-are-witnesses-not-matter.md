@@ -55,15 +55,15 @@ is in `src/substances.rs` (the kinds), `src/ballistics/wound.rs` (the witness pa
 - Crew consequences are unchanged (stations, backfill, the knockout rule of playtest fork F2). They remain the place for
   crew-only ideas such as wounded-not-dead.
 
-**Amended 2026-10-23.** The field converts its dose to HP at its own calibration, and every HP
-pool is its sturdiness class times the box's mean face (#2 and #3 in
+**Amended 2026-10-23.** The field converts its dose to HP at its own calibration; every crew
+station has one shared 30 HP pool (TUNED, provisional) that no tank file authors, and every other
+HP pool is its sturdiness class times the box's mean face (#2 and #3 in
 `.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md`; design
 doc §5, §6). One perforation now knocks out every crew station fully inside the cone's knockout
-radius, about 2 m from the hole for a weak ordinary perforation (DERIVED); a station the cone's dim
-edge grazes keeps HP, reduced. Nobody still hides behind a comrade, and modules still shield. The
-crew pool is the crew class's 150 HP per m² × the station's mean face, 77 HP on the seed tank
-(DERIVED), so a clean main-gun pass's line alone empties it at about 26 cm of chord at 30
-reference-mm/m (DERIVED), not the 10 cm above, which was read against a 30 HP pool.
+radius, about 2 m from the hole for a weak ordinary perforation at the intended humanoid's 0.2 m²
+face and 3.2 m at the placeholder crew box's (DERIVED); a station the cone's dim edge grazes keeps
+HP, reduced. Nobody still hides behind a comrade, modules still shield, and the clean main-gun
+pass above still empties the crew pool by its line alone.
 
 ## Rejected
 
