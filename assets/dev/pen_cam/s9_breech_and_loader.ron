@@ -1,4 +1,4 @@
-// s9_one_box_lost: the turret traversed 30 degrees: an 88 through its side loses one box, the breech
+// s9_breech_and_loader: the turret traversed 30 degrees: an 88 through its side knocks out two boxes, the breech and the loader station
 // Recorded by the real march from `scenarios.ron` (`ballistics::pen_cam`); do not edit.
 // Re-record with `PEN_CAM_BLESS=1 cargo test --lib pen_cam::bless -- --ignored`.
 (

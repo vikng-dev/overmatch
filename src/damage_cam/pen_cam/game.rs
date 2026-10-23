@@ -1100,14 +1100,14 @@ mod tests {
     const OWN: &str = "tiger_1/tiger_1.tank.ron";
 
     /// [`corner_app`] with the player's tank file and, as volumes of the player's tank, every
-    /// component of the fixture `s9_one_box_lost`'s tank at its full pool.
+    /// component of the fixture `s9_breech_and_loader`'s tank at its full pool.
     fn xray_app(settings: Settings) -> (App, Entity) {
         let (mut app, player) = corner_app(settings);
         let spec = app.world().resource::<AssetServer>().load::<TankSpec>(OWN);
         app.world_mut()
             .entity_mut(player)
             .insert(TankSpecHandle(spec));
-        for component in report("s9_one_box_lost").components {
+        for component in report("s9_breech_and_loader").components {
             app.world_mut().spawn((
                 Name::new(component.name),
                 crate::ballistics::ComponentHealth {
@@ -1183,7 +1183,7 @@ mod tests {
         app.insert_resource(Bindings::default())
             .init_resource::<ButtonInput<KeyCode>>()
             .init_resource::<ButtonInput<MouseButton>>();
-        let component = report("s9_one_box_lost").components[0].name.clone();
+        let component = report("s9_breech_and_loader").components[0].name.clone();
         let world = app.world_mut();
         let standard = world
             .resource_mut::<Assets<StandardMaterial>>()
@@ -1670,7 +1670,7 @@ mod tests {
             combatant: SHOOTER,
             life: CombatantLife(1),
         };
-        let filler = report("s9_one_box_lost");
+        let filler = report("s9_breech_and_loader");
         let filler_vocabulary = vocabulary(&filler);
         for fire_tick in 0..(crate::damage_cam::delivery::RETAINED as u32 - 1) {
             let tick = 1300 + fire_tick;
@@ -1918,7 +1918,7 @@ mod tests {
             Some(ExplanationKey::of(&tie_high)),
             "completed together: the greater identity"
         );
-        let (pending, pending_vocabulary) = incoming_at("s9_one_box_lost", 1399, 1400, 1402);
+        let (pending, pending_vocabulary) = incoming_at("s9_breech_and_loader", 1399, 1400, 1402);
         let now = app.world().resource::<Time>().elapsed_secs_f64();
         app.world_mut().resource_mut::<ShotExplanations>().receive(
             pending.clone(),

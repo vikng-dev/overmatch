@@ -81,8 +81,8 @@
         verdict: NonPen,
     ),
     (
-        name: "s9_one_box_lost",
-        shows: "the turret traversed 30 degrees: an 88 through its side loses one box, the breech",
+        name: "s9_breech_and_loader",
+        shows: "the turret traversed 30 degrees: an 88 through its side knocks out two boxes, the breech and the loader station",
         weapon: "MainGun",
         from: (-4.0, 2.0, -0.5),
         toward: (0.0, 2.0, -0.5),

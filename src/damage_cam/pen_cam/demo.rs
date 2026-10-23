@@ -88,8 +88,8 @@ pub const PLAYLIST: &[Entry] = &[
         victim: false,
     },
     Entry {
-        label: "S9 own tank hit, one box lost (victim glass)",
-        shots: &[("s9_one_box_lost", 0.0)],
+        label: "S9 own tank hit, breech and loader out (victim glass)",
+        shots: &[("s9_breech_and_loader", 0.0)],
         victim: true,
     },
     Entry {

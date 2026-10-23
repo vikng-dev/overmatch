@@ -859,7 +859,7 @@ mod tests {
     /// no point of which is lost draws untinted, the base layout.
     #[test]
     fn the_tint_follows_live_state_only() {
-        let record = report("s9_one_box_lost");
+        let record = report("s9_breech_and_loader");
         let shapes = TankAsset::load(record.vehicle.as_deref().unwrap())
             .unwrap()
             .shapes(&record.servo_deg);
