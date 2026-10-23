@@ -264,6 +264,27 @@ box of a class whose pool is class × `A` (§6), and on a weak ordinary perforat
 0.516 m² (DERIVED in `spall_cone.ron`). Dose summed over boxes is not conserved under the partial passage (two thin
 boxes in line both take nearly full strength); the emitted budget is.
 
+**Potency bands.** The pen cam colours a field by its potency, never by a display gain (decision
+record `.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md`,
+#8). Each of the `N` directions stands for `Ω_c / N` of the cone and deposits `s / N`, so a
+direction of strength `s` emits `ρ s / Ω_c` HP points per steradian (`ρ` = `hp_per_reference_mm`),
+and at distance `r` along it, inside the cone and short of its reach, the **local intensity** is
+`I = ρ s / (Ω_c r²)` HP points per m², zero past the reach; a thin unshadowed box of face `A` there
+takes `I · A` (resolver test `the_pen_cam_intensity_times_a_face_is_its_dose`). The thresholds are
+the classes' (`assets/ballistics/box_classes.ron`): **bright** at `I ≥` the hard class (300),
+**mid** at `I ≥ crew_hp / crew_face_m2` (30 / 0.2 = 150, DERIVED; the ammo class coincides today,
+a data coincidence, no fourth band), **dim** above zero below mid. A band's surface lies along each
+direction at `sqrt(ρ s / (Ω_c T))`, clipped at the direction's reach, so a shadow dents every band it
+cuts; on the s1 record (`S` = 10.18 reference-mm, flat `s = S/2`) bright ends at 1.42 m and mid at
+2.01 m (DERIVED), the crew knockout radius above. The promise: a hard box whose face lies wholly in
+bright has its pool emptied, and a crew station at the intended humanoid's face wholly in mid or
+bright is knocked out. A box only partly inside the cone takes its band's intensity over that part
+alone, so a bright patch on a box with HP left is no contradiction (s1's transmission: one direction
+ends on it, at 1.35 m in bright, DERIVED from the record; 6 of its 479 HP points lost). The pen cam draws each band as a shell
+(`src/damage_cam/pen_cam/field.rs`) and tints every surface the field met by the band at its own
+point (`assets/shaders/pen_cam_look.wgsl`), both read from one disc baked from the record's
+directions. The calibration is provisional until the emergent shape lands.
+
 **Data.** `α`, the axis rule, `N`, the profile and the passage live in
 `assets/ballistics/spall_cone.ron`, parsed and validated while the app is built (ADR-0014: built
 from data, synchronously); a half-angle whose `cos α` rounds to 1, or a shape not emitting `S/2`

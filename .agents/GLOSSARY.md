@@ -361,6 +361,10 @@ The field of a bursting round's own fragments, which carry its velocity forward.
 **Blast sphere**:
 The field of a blast or shockwave, even in every direction. Not built.
 
+**Potency band**:
+Where a point inside a field lies by its local intensity (HP points per m², a direction's emission over the squared distance) against the box classes' thresholds: **bright** at or above the hard class, **mid** at or above the crew pool over the intended humanoid's face, **dim** below that and above zero; none past a direction's reach. The pen cam draws each band as a shell and tints every surface the field met by its band. Law: design doc §5, "Potency bands".
+_Avoid_: brightness, level (a band is potency, never a display gain)
+
 **Station**:
 The *place* a crewman works — a fixed, spatial ballistic volume carrying a **role** (the gunner's station grants the gunnery capabilities). Persists whether occupied by an active crewman, a knocked-out one, or briefly no one. Role lives on the station, not the occupant.
 _Avoid_: crew slot, seat, position
