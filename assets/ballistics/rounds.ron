@@ -46,9 +46,9 @@
         "88mm_APCR": (
             name: ("8.8 cm Pzgr. 40", Measured("the 8.8 cm KwK 36's APCR round; Jentz & Doyle,
                 Tiger I Heavy Tank 1942-45, Osprey New Vanguard 5 (1993), p.17")),
-            core: ("GunSteel", Tuned("placeholder until a tungsten-carbide substance lands: the
-                round's 1.93 kg core is tungsten carbide (TM 9-1985-3), which materials.ron does
-                not carry. The rigid regime reads no core fact")),
+            core: ("TungstenCarbide", Measured("the round's 1.93 kg core is tungsten carbide: US
+                Army TM 9-1985-3, German Explosive Ordnance (Projectiles and Projectile Fuzes),
+                March 1953, pp.439-440. The rigid regime reads no core fact")),
             nose: (Ogive(crh: 1.0), Tuned("labelled fixture value: the Pzgr. 39's blunt ogive of
                 1 crh")),
             // Potency is provisional: the strength law reads mass, calibre and nose and has no

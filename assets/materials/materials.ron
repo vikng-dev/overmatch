@@ -7,9 +7,9 @@
 //
 // Every entry is one of two KINDS (ADR-0040). `Hard(..)` is matter: a layer of the §13 walk that
 // resists the shell, is charged its spend and shadows the spall field. `Witness` is not matter: it
-// states no resistance (none, not zero), never enters the walk, and is wounded by what the hard
-// world sends through it — the shell's line at the ROUND's wound rate (`rounds.ron`), each spall
-// direction at its strength. A witness substance sits only on a crew volume and a crew volume wears
+// states no resistance (none, not zero), never enters the walk, and takes dose from what the hard
+// world sends through it — the shell's line at the ROUND's crew line rate (`wound`, `rounds.ron`),
+// each spall direction at its strength. A witness substance sits only on a crew volume and a crew volume wears
 // only a witness substance; the bake refuses a tank file that breaks either.
 //
 // `resistance` = how the substance resists a round's force law. Exactly one entry is `Reference`:
@@ -25,6 +25,8 @@
 // ratio they give (DERIVED, at the strength-limited end) differs from the declared factor:
 //   - GunSteel, 4340-class quenched-and-tempered analogue: a / a_ref ≈ 1.129 (≈ 1129), ρ / ρ_ref ≈ 0.994.
 //   - MildSteel, 1020 analogue: a / a_ref ≈ 0.460 (≈ 460), ρ / ρ_ref ≈ 1.006.
+//   - TungstenCarbide, 6 % cobalt cemented-carbide analogue: a / a_ref ≈ 4.16 (≈ 4160),
+//     ρ / ρ_ref ≈ 1.898.
 //   Cast armour has no sourced row.
 //
 // PROVENANCE: every number is authored `(value, Kind("source or reason"))`, Kind one of Measured,
@@ -157,9 +159,33 @@
             paintable: false,
             facts: None,
         ),
-        // Crew. A WITNESS, not matter: a body neither stops a shell nor shadows a fragment, so it
-        // has no resistance to state. What wounds it is the round's wound rate along the chord the
-        // shell's disc cut through it, and each spall direction's strength entering it.
+        // A sub-calibre round's penetrator core (`rounds.ron`); no armour is made of it. Its facts
+        // are a modern 6 % cobalt cemented-carbide grade's, the class analogue: the wartime cores'
+        // composition is not recorded here.
+        "TungstenCarbide": Hard(
+            resistance: Effective((1000.0, Unknown("carried at the reference factor: no armour is
+                made of it and nothing reads a penetrator's factor under the rigid rule; settled
+                when the core-vs-plate hardness contest reads it. Not derived from the facts below,
+                which give ≈ 4160 (DERIVED)"))),
+            paintable: false,
+            facts: Some((
+                density: (14900.0, Measured("14.9 g/cm³ (ASTM C20), grade ACI-Co6 (WC, 6 % cobalt,
+                    submicron grain): CoorsTek, Tungsten Carbide datasheet 01129 E (2017), read")),
+                flow_strength: (4.585e9, Derived("the ACI-Co6 compressive strength 4585 MPa
+                    (MEASURED, ASTM C773; CoorsTek datasheet 01129 E, 2017, read) taken as the flow
+                    stress: a cemented carbide fails in compression with little plastic flow, so
+                    its compressive strength bounds the flow stress the cavity law reads. The
+                    convention is an assumption, unlike Q2's for the steels")),
+                youngs_modulus: (627.0e9, Measured("627 GPa at 20 °C (ASTM C848), grade ACI-Co6:
+                    CoorsTek datasheet 01129 E (2017), read")),
+                poisson_ratio: (0.21, Measured("0.21 at 20 °C (ASTM C848), grade ACI-Co6: CoorsTek
+                    datasheet 01129 E (2017), read")),
+            )),
+        ),
+        // Crew. A WITNESS, not matter: a crew station neither stops a shell nor shadows a
+        // fragment, so it has no resistance to state. What reduces its HP pool is the round's
+        // crew line rate along the chord the shell's disc cut through it, and each spall
+        // direction's strength entering it.
         "Flesh": Witness,
     },
 )
