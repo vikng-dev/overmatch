@@ -26,9 +26,10 @@ use bevy::render::render_resource::{AsBindGroup, CompareFunction, ShaderType, Te
 use bevy::shader::ShaderRef;
 use bevy::window::{PrimaryWindow, WindowRef};
 
+use super::field::DISC_SIDE;
 use super::material::Blend;
 use super::plan::BoxPlan;
-use super::potency::Band;
+use super::potency::{Band, Potency};
 use super::stage::{Stage, StageCamera};
 use super::timeline::{self, Condition, CornerKind};
 use super::view::Tier;
@@ -39,7 +40,7 @@ use crate::render_policy::CameraProfile;
 /// the whole at a grazing angle by this fresnel power, so each nested shell reads as an outline
 /// round the brighter ones inside it. TUNED, as is every figure below.
 const SHELL_GAIN: f32 = 1.0;
-const SHELL_FACE_SHARE: f32 = 0.2;
+const SHELL_FACE_SHARE: f32 = 0.08;
 const SHELL_FRESNEL_POWER: f32 = 2.0;
 /// A struck component's red outline (physical px, an inverted hull), so a sliver of fill still
 /// reads as struck; the light's share of its shading; its fill line's width (px); the dead hatch's
@@ -67,17 +68,20 @@ const BASE_EDGE_ALPHA: f32 = 0.35;
 /// centroid order; an opaque fill in that pass would cover the hull wherever it sorted later.
 const BASE_COMPONENT_ALPHA: f32 = 1.0;
 const BASE_COMPONENT_FACE_SHARE: f32 = 1.0;
-/// The field footprint's outline width (px) and its opacity at full level, in the field's hue.
+/// The field footprint: its band lines' width (px) and opacity, and its band fill's opacity, short
+/// of opaque so the HP fill under it, the outcome, reads through.
 const FOOTPRINT_LINE_PX: f32 = 2.0;
-const FOOTPRINT_ALPHA: f32 = 0.9;
-/// The most spall fields a footprint marks, and the most directions of each it reads; the arrays
-/// of `pen_cam_look.wgsl` hold these counts. [`set_footprints`] drops what lies past them, so every
-/// record's cones and directions must fit them; the shipped cone's direction count is held under
-/// [`FOOTPRINT_RAYS`] by `every_record_fits_the_footprint`, the cone count is not checked.
+const FOOTPRINT_LINE_ALPHA: f32 = 0.9;
+const FOOTPRINT_FILL_ALPHA: f32 = 0.6;
+/// The most spall fields a footprint marks; `pen_cam_look.wgsl`'s arrays hold this many fields'
+/// lanes and [`set_footprints`] drops what lies past it, so every record's cones must fit it
+/// (`every_record_fits_the_footprint`).
 const FOOTPRINT_FIELDS: usize = 4;
-const FOOTPRINT_RAYS: usize = 256;
+/// One field's disc in lanes, two nodes a lane.
+const DISC_LANES: usize = DISC_SIDE * DISC_SIDE / 2;
 /// A surface counts as met by a direction up to this share past its reach, and this far (m): the
-/// record ends a direction on the surface that stopped it.
+/// record ends a direction on the surface that stopped it, and between directions the disc's
+/// reach is interpolated, not the surface's distance.
 const FOOTPRINT_REACH_SLACK: (f32, f32) = (1.03, 0.03);
 
 /// The uniform block `pen_cam_look.wgsl` reads; its lanes are documented there.
@@ -93,10 +97,11 @@ pub struct LookParams {
     pub span: Vec4,
     pub rest: Vec4,
     pub foot: Vec4,
-    pub foot_color: Vec4,
+    pub bands: Vec4,
+    pub tints: [Vec4; 3],
     pub fields: Vec4,
-    pub prints: [Vec4; 3 * FOOTPRINT_FIELDS],
-    pub rays: [Vec4; FOOTPRINT_FIELDS * FOOTPRINT_RAYS],
+    pub prints: [Vec4; 4 * FOOTPRINT_FIELDS],
+    pub disc: [Vec4; FOOTPRINT_FIELDS * DISC_LANES],
 }
 
 impl Default for LookParams {
@@ -112,10 +117,11 @@ impl Default for LookParams {
             span: Vec4::ZERO,
             rest: Vec4::ZERO,
             foot: Vec4::ZERO,
-            foot_color: Vec4::ZERO,
+            bands: Vec4::ZERO,
+            tints: [Vec4::ZERO; 3],
             fields: Vec4::ZERO,
-            prints: [Vec4::ZERO; 3 * FOOTPRINT_FIELDS],
-            rays: [Vec4::ZERO; FOOTPRINT_FIELDS * FOOTPRINT_RAYS],
+            prints: [Vec4::ZERO; 4 * FOOTPRINT_FIELDS],
+            disc: [Vec4::ZERO; FOOTPRINT_FIELDS * DISC_LANES],
         }
     }
 }
@@ -508,44 +514,59 @@ pub fn follow_pose(
     }
 }
 
-/// One spall field where a footprint is taken, in world space: its origin, unit axis, half-angle
-/// (rad), reach (m, its longest direction's), how far its front has run (m, negative before it is
-/// thrown), its display level ([`timeline::field_level`]) and its recorded directions (unit) with
-/// each one's reach (m).
+/// One spall field where a footprint is taken, in world space: its origin, its disc's frame (the
+/// unit axis, `u` and `v` across it, the half-angle in rad), how far its front has run (m,
+/// negative before it is thrown), the world's metres per record metre, and its disc's nodes
+/// ([`super::field::Disc::nodes`], record units).
 #[derive(Clone, Debug)]
-pub struct FieldPrint {
+pub struct FieldPrint<'a> {
     pub origin: Vec3,
     pub axis: Vec3,
+    pub u: Vec3,
+    pub v: Vec3,
     pub half_angle: f32,
-    pub reach: f32,
     pub front: f32,
-    pub level: f32,
-    pub rays: Vec<(Vec3, f32)>,
+    pub scale: f32,
+    pub nodes: &'a [Vec2],
 }
 
-/// Outline `prints` on every surface the base look drawn against `masks` draws, the hull's and
-/// the components': a base or state material is one look's by the mask set it holds, so another
-/// look's surfaces (the corner's beside the x-ray's) keep their own footprints. A surface is
-/// inside a field's footprint where it faces the field's origin, lies inside its cone, behind its
-/// front and no farther than the reach of the recorded direction nearest it: the field met it
-/// there, which says nothing of what stopped. The outline is where the angle from the axis
-/// crosses the half-angle, its opacity [`FOOTPRINT_ALPHA`] times the field's level, at most 1, so a
-/// weak field's outline is as faint as its body.
-pub fn set_footprints(looks: &mut Assets<LookMaterial>, masks: &MaskSet, prints: &[FieldPrint]) {
-    let mut lanes = [Vec4::ZERO; 3 * FOOTPRINT_FIELDS];
-    let mut rays = [Vec4::ZERO; FOOTPRINT_FIELDS * FOOTPRINT_RAYS];
-    let (share, metres) = FOOTPRINT_REACH_SLACK;
+/// Mark `prints` on every surface the base look drawn against `masks` draws, the hull's and the
+/// components': a base or state material is one look's by the mask set it holds, so another
+/// look's surfaces (the corner's beside the x-ray's) keep their own footprints. A surface point is
+/// in a field where it faces the field's origin, lies inside its cone, behind its front and no
+/// farther than its direction's reach on the disc: the field met it there. It is filled in the
+/// potency band of the fields' summed intensity there ([`super::potency`]), lined where that band
+/// changes and along each cone's edge. The disc lanes carry each node's reach and emission
+/// `ρ s / Ω_c` ([`Potency::emission`]) in world units and the bands lane the thresholds: nothing
+/// display-side classifies.
+pub fn set_footprints(
+    looks: &mut Assets<LookMaterial>,
+    masks: &MaskSet,
+    prints: &[FieldPrint],
+    potency: &Potency,
+) {
+    let mut lanes = [Vec4::ZERO; 4 * FOOTPRINT_FIELDS];
+    let mut disc = [Vec4::ZERO; FOOTPRINT_FIELDS * DISC_LANES];
     let count = prints.len().min(FOOTPRINT_FIELDS);
     for (i, print) in prints.iter().take(count).enumerate() {
-        let n = print.rays.len().min(FOOTPRINT_RAYS);
-        lanes[3 * i] = print.origin.extend(print.half_angle);
-        lanes[3 * i + 1] = print.axis.extend(print.reach);
-        lanes[3 * i + 2] = Vec4::new(print.front, n as f32, print.level.clamp(0.0, 1.0), 0.0);
-        for (j, (direction, reach)) in print.rays.iter().take(n).enumerate() {
-            rays[i * FOOTPRINT_RAYS + j] = direction.extend(reach * share + metres);
+        lanes[4 * i] = print.origin.extend(print.half_angle);
+        lanes[4 * i + 1] = print.axis.extend(print.front);
+        lanes[4 * i + 2] = print.u.extend(0.0);
+        lanes[4 * i + 3] = print.v.extend(0.0);
+        let world = |node: Vec2| {
+            let emission = potency.emission(node.y, print.half_angle);
+            Vec2::new(node.x * print.scale, emission * print.scale * print.scale)
+        };
+        for (k, pair) in print.nodes.chunks(2).take(DISC_LANES).enumerate() {
+            let second = pair.get(1).copied().map_or(Vec2::ZERO, world);
+            disc[i * DISC_LANES + k] = world(pair[0]).extend(second.x).extend(second.y);
         }
     }
-    let hue = LinearRgba::from(timeline::FIELD);
+    let (share, metres) = FOOTPRINT_REACH_SLACK;
+    let tints = Band::DRAWN.map(|band| {
+        let tint = LinearRgba::from(timeline::field_tint(band));
+        Vec4::new(tint.red, tint.green, tint.blue, FOOTPRINT_FILL_ALPHA)
+    });
     for (_, material) in looks.iter_mut() {
         let mode = material.params.mode.x;
         if mode != MODE_BASE && mode != MODE_STATE
@@ -553,11 +574,12 @@ pub fn set_footprints(looks: &mut Assets<LookMaterial>, masks: &MaskSet, prints:
         {
             continue;
         }
-        material.params.foot = Vec4::new(FOOTPRINT_LINE_PX, 0.0, 0.0, 0.0);
-        material.params.foot_color = Vec4::new(hue.red, hue.green, hue.blue, FOOTPRINT_ALPHA);
+        material.params.foot = Vec4::new(FOOTPRINT_LINE_PX, FOOTPRINT_LINE_ALPHA, share, metres);
+        material.params.bands = Vec4::new(potency.mid, potency.bright, 0.0, 0.0);
+        material.params.tints = tints;
         material.params.fields = Vec4::new(count as f32, 0.0, 0.0, 0.0);
         material.params.prints = lanes;
-        material.params.rays = rays;
+        material.params.disc = disc;
     }
 }
 
@@ -691,14 +713,80 @@ pub fn shell(band: Band, masks: &MaskSet) -> LookMaterial {
 mod tests {
     use super::*;
 
-    /// Every record's spall cone fits the footprint's directions: the shipped shape, which throws
-    /// every record's cones, declares no more directions than the footprint reads.
+    /// Every record's spall cones fit the footprint: none throws more than [`FOOTPRINT_FIELDS`],
+    /// past which [`set_footprints`] drops a field unmarked, and a disc's nodes fill its lanes
+    /// exactly, whatever the cone's direction count.
     #[test]
     fn every_record_fits_the_footprint() {
-        let directions = crate::ballistics::spall_cone::ConeShape::shipped().directions_count();
-        assert!(
-            directions <= FOOTPRINT_RAYS,
-            "the shipped cone throws {directions} directions, past FOOTPRINT_RAYS = {FOOTPRINT_RAYS}"
-        );
+        for (name, report) in super::super::plan::tests::records() {
+            let cones = report.spall.len();
+            assert!(
+                cones <= FOOTPRINT_FIELDS,
+                "{name} throws {cones} cones, past FOOTPRINT_FIELDS = {FOOTPRINT_FIELDS}"
+            );
+        }
+        assert_eq!(2 * DISC_LANES, DISC_SIDE * DISC_SIDE);
+    }
+
+    /// `pen_cam_look.wgsl` declares the look's counts: the disc's side and lanes, the arrays'
+    /// lengths and the fields its footprint loops over. A count that drifts reads the wrong node
+    /// or field without a word.
+    #[test]
+    fn the_shader_declares_the_lane_counts() {
+        let path = crate::assets::asset_root().join("shaders/pen_cam_look.wgsl");
+        let shader = std::fs::read_to_string(path).unwrap();
+        for declared in [
+            format!("const DISC_SIDE: i32 = {DISC_SIDE};"),
+            format!("const DISC_LANES: i32 = {DISC_LANES};"),
+            format!("prints: array<vec4<f32>, {}>,", 4 * FOOTPRINT_FIELDS),
+            format!("disc: array<vec4<f32>, {}>,", FOOTPRINT_FIELDS * DISC_LANES),
+            format!("for (var f = 0; f < {FOOTPRINT_FIELDS}; f = f + 1)"),
+        ] {
+            assert!(shader.contains(&declared), "{declared}");
+        }
+    }
+
+    /// The band reads no gain: the lanes the footprint classifies from carry each node's reach and
+    /// emission `ρ s / Ω_c` in world units (squared metres for the emission, whose intensity falls
+    /// as the square of a world distance) and the shipped thresholds, and fading a material moves
+    /// its fade lane alone. The colour promise relies on it; a display gain, level or fade in a
+    /// classifying lane fails here. Fixture: two nodes, a stage at twice the record's size.
+    #[test]
+    fn the_band_reads_no_gain() {
+        let potency = Potency::shipped();
+        let masks = MaskSet::default();
+        let mut looks = Assets::<LookMaterial>::default();
+        let handle = looks.add(base(&masks));
+        let nodes = [Vec2::new(1.5, 5.0), Vec2::new(0.4, 2.5)];
+        let half_angle = 25.0_f32.to_radians();
+        let print = FieldPrint {
+            origin: Vec3::ONE,
+            axis: Vec3::NEG_Z,
+            u: Vec3::X,
+            v: Vec3::Y,
+            half_angle,
+            front: 3.0,
+            scale: 2.0,
+            nodes: &nodes,
+        };
+        set_footprints(&mut looks, &masks, &[print], &potency);
+        let params = looks.get(&handle).unwrap().params;
+        let lane = params.disc[0];
+        for (k, node) in nodes.iter().enumerate() {
+            let (reach, emission) = (lane[2 * k], lane[2 * k + 1]);
+            assert_eq!(reach, 2.0 * node.x);
+            assert_eq!(emission, 4.0 * potency.emission(node.y, half_angle));
+            assert_eq!(
+                emission,
+                4.0 * potency.rate * node.y / super::super::potency::solid_angle(half_angle)
+            );
+        }
+        assert_eq!(params.bands.x, potency.mid);
+        assert_eq!(params.bands.y, potency.bright);
+        let mut faded = looks.get(&handle).unwrap().clone();
+        faded.set_fade(0.25);
+        let mut want = params;
+        want.shade.w = 0.25;
+        assert_eq!(format!("{:?}", faded.params), format!("{want:?}"));
     }
 }

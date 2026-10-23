@@ -1089,10 +1089,13 @@ impl<'a> Playing<'a> {
             .map(|(index, cone)| {
                 let axis = linear * cone.axis;
                 let scale = axis.length();
-                let reach = cone.max_reach();
+                let unit = |v: Vec3| {
+                    let v = linear * v;
+                    v / v.length().max(1e-6)
+                };
                 let front = if self.reduce {
                     if c >= cone_start(plan, kind, index, true) {
-                        reach
+                        cone.max_reach()
                     } else {
                         -1.0
                     }
@@ -1101,23 +1104,17 @@ impl<'a> Playing<'a> {
                 };
                 FieldPrint {
                     origin: hull.transform_point(cone.origin),
-                    axis: axis / scale.max(1e-6),
-                    half_angle: cone.half_angle,
-                    reach: reach * scale,
+                    axis: unit(cone.disc.axis),
+                    u: unit(cone.disc.u),
+                    v: unit(cone.disc.v),
+                    half_angle: cone.disc.half_angle,
                     front: front * scale,
-                    level: timeline::field_level(cone.strength),
-                    rays: cone
-                        .rays
-                        .iter()
-                        .map(|ray| {
-                            let direction = linear * ray.direction;
-                            (direction / direction.length().max(1e-6), ray.reach * scale)
-                        })
-                        .collect(),
+                    scale,
+                    nodes: &cone.disc.nodes,
                 }
             })
             .collect();
-        look::set_footprints(looks, masks, &prints);
+        look::set_footprints(looks, masks, &prints, &Potency::shipped());
     }
 
     /// A component's state fill and its outline: risen along the up of the record frame `hull`
