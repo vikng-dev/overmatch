@@ -361,9 +361,9 @@ The field of a bursting round's own fragments, which carry its velocity forward.
 **Blast sphere**:
 The field of a blast or shockwave, even in every direction. Not built.
 
-**Potency band**:
-Where a point inside a field lies by its local intensity (HP points per m², a direction's emission over the squared distance) against the box classes' thresholds: **bright** at or above the hard class, **mid** at or above the crew pool over the intended humanoid's face, **dim** below that and above zero; none past a direction's reach. The pen cam draws each band as a shell and tints every surface the field met by its band. Law: design doc §5, "Potency bands".
-_Avoid_: brightness, level (a band is potency, never a display gain)
+**Potency colour**:
+The pen cam's colour for a point inside a field: one smooth, monotone function of its local intensity alone (HP points per m², a direction's emission over the squared distance), anchored at the box classes' thresholds: the field teal exactly at **mid**, the crew pool over the intended humanoid's face; near-white exactly at **bright**, the hard class, and above; deep teal three octaves below mid and lower. White promises that a hard box whose face lies wholly there has its HP pool emptied; teal, that a crew station whose face lies wholly there or whiter is knocked out. The pen cam draws each cone as one translucent volume in it, its opacity the field's thickness, and tints every surface the field met by it. Law: design doc §5, "Potency colour".
+_Avoid_: brightness, level, band (the colour is potency, never a display gain, and a gradient, not bands)
 
 **Station**:
 The *place* a crewman works — a fixed, spatial ballistic volume carrying a **role** (the gunner's station grants the gunnery capabilities). Persists whether occupied by an active crewman, a knocked-out one, or briefly no one. Role lives on the station, not the occupant.

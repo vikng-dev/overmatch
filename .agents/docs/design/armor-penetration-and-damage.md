@@ -264,26 +264,36 @@ box of a class whose pool is class × `A` (§6), and on a weak ordinary perforat
 0.516 m² (DERIVED in `spall_cone.ron`). Dose summed over boxes is not conserved under the partial passage (two thin
 boxes in line both take nearly full strength); the emitted budget is.
 
-**Potency bands.** The pen cam colours a field by its potency, never by a display gain (decision
+**Potency colour.** The pen cam colours a field by its potency, never by a display gain (decision
 record `.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md`,
 #8). Each of the `N` directions stands for `Ω_c / N` of the cone and deposits `s / N`, so a
 direction of strength `s` emits `ρ s / Ω_c` HP points per steradian (`ρ` = `hp_per_reference_mm`),
 and at distance `r` along it, inside the cone and short of its reach, the **local intensity** is
 `I = ρ s / (Ω_c r²)` HP points per m², zero past the reach; a thin unshadowed box of face `A` there
 takes `I · A` (resolver test `the_pen_cam_intensity_times_a_face_is_its_dose`). The thresholds are
-the classes' (`assets/ballistics/box_classes.ron`): **bright** at `I ≥` the hard class (300),
-**mid** at `I ≥ crew_hp / crew_face_m2` (30 / 0.2 = 150, DERIVED; the ammo class coincides today,
-a data coincidence, no fourth band), **dim** above zero below mid. A band's surface lies along each
-direction at `sqrt(ρ s / (Ω_c T))`, clipped at the direction's reach, so a shadow dents every band it
-cuts; on the s1 record (`S` = 10.18 reference-mm, flat `s = S/2`) bright ends at 1.42 m and mid at
-2.01 m (DERIVED), the crew knockout radius above. The promise: a hard box whose face lies wholly in
-bright has its pool emptied, and a crew station at the intended humanoid's face wholly in mid or
-bright is knocked out. A box only partly inside the cone takes its band's intensity over that part
-alone, so a bright patch on a box with HP left is no contradiction (s1's transmission: one direction
-ends on it, at 1.35 m in bright, DERIVED from the record; 6 of its 479 HP points lost). The pen cam draws each band as a shell
-(`src/damage_cam/pen_cam/field.rs`) and tints every surface the field met by the band at its own
-point (`assets/shaders/pen_cam_look.wgsl`), both read from one disc baked from the record's
-directions. The calibration is provisional until the emergent shape lands.
+the classes' (`assets/ballistics/box_classes.ron`): **bright** `T_bright` = the hard class (300),
+**mid** `T_mid` = `crew_hp / crew_face_m2` (30 / 0.2 = 150, DERIVED; the ammo class coincides
+today, a data coincidence). The colour is one function of `I` alone (`ramp`, `Ramp` in
+`src/damage_cam/pen_cam/potency.rs`) on `u = log2(I / T_mid)`, which the inverse square makes
+linear in `log r`, so the colour runs evenly along a direction: the deep teal at `u ≤ −3` (an eighth
+of mid and below; the span TUNED), the field teal exactly at mid (`u = 0`), the near-white exactly
+at bright and above (`u = log2(T_bright / T_mid)`, 1 with the shipped classes, DERIVED), a monotone
+cubic between, so it is smooth and never falls as `I` rises. Along a direction the intensity
+reaches mid at `sqrt(ρ s / (Ω_c T_mid))` and bright at `sqrt(ρ s / (Ω_c T_bright))` from the origin,
+where that is short of the direction's reach; on the s1 record (`S` = 10.18 reference-mm, flat
+`s = S/2`) bright ends at 1.42 m and mid at 2.01 m (DERIVED), the crew knockout radius above. The
+promise, white is bright and teal is mid: a hard box whose face lies wholly at white has its pool
+emptied, and a crew station at the intended humanoid's face wholly at teal or whiter is knocked out.
+A box only partly inside the cone takes that intensity over that part alone, so a white patch on a
+box with HP left is no contradiction (s1's transmission: one direction ends on it, at 1.35 m, white,
+DERIVED from the record; 6 of its 479 HP points lost). The pen cam draws each cone as one
+translucent volume inside its reach surface (`src/damage_cam/pen_cam/field.rs`, `reach_mesh`;
+`assets/shaders/pen_cam_look.wgsl`, `volume`): a pixel takes the mean colour along the eye ray's
+path inside the field, at an opacity that climbs with that path's length, so the colour says the
+potency and the opacity the thickness. Every surface the field met is tinted in the colour at its
+own point, lined along the cone's edge and, with the look's `THRESHOLD_RINGS`, where its intensity
+crosses mid and bright. Volume and surfaces read one disc baked from the record's directions. The
+calibration is provisional until the emergent shape lands.
 
 **Data.** `α`, the axis rule, `N`, the profile and the passage live in
 `assets/ballistics/spall_cone.ron`, parsed and validated while the app is built (ADR-0014: built
@@ -322,7 +332,7 @@ cannot author: a crewman is one entity across tanks, and the crew box is a place
 humanoid shape. Every other pool is authored as an integer in the tank data, its sturdiness class
 (HP points per m², same file, TUNED) times the box's mean face, the mean of the three axis-aligned
 face areas of its bounds (an engine 336 on the seed tank, DERIVED); `src/tests/box_pools.rs` holds
-every tank asset to both, which the field's calibration (§5) and the pen cam's potency bands rely
+every tank asset to both, which the field's calibration (§5) and the pen cam's potency colour rely
 on. One
 point is 0.1 reference-mm of line dose (`ballistics::HP_PER_REFERENCE_MM`, a unit with Resolution
 provenance, not a balance value); a field deposit converts at the field's calibration (§5). A spall
