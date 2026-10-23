@@ -266,9 +266,13 @@ pub struct WeaponSpec {
     /// Recoiling barrel node, if the weapon reciprocates; omitted → no recoil (e.g. a coax).
     #[serde(default)]
     pub barrel: Option<String>,
-    /// The round this weapon fires: a key in the round registry (`assets/ballistics/rounds.ron`),
-    /// which states its core, nose, mass, calibre and muzzle speed ([`Self::resolved_round`]).
-    pub round: String,
+    /// The rounds this weapon can load, in order: keys in the round registry
+    /// (`assets/ballistics/rounds.ron`), which states each one's core, nose, mass, calibre and muzzle
+    /// speed ([`Self::resolved_rounds`]). The first is the default — the round the weapon spawns
+    /// loaded with and selected. `validate()` refuses an empty list, a key named twice, an unknown
+    /// key, and more than [`MAX_WEAPON_ROUNDS`] (a round is addressed by its `u8` index here, on the
+    /// command and on the fire event).
+    pub rounds: Vec<String>,
     /// The fire mechanism: single-shot reload or belt-fed automatic. Required (no code default,
     /// ADR-0011) — a weapon with an unstated mechanism is an authoring omission.
     pub fire_mode: FireMode,
@@ -290,12 +294,29 @@ pub struct WeaponSpec {
     pub report_clips: Vec<String>,
 }
 
+/// The most rounds one weapon can list: its round index travels as a `u8`.
+pub(crate) const MAX_WEAPON_ROUNDS: usize = u8::MAX as usize + 1;
+
 impl WeaponSpec {
-    /// The round this weapon names, resolved in the shipped round registry; an unknown name is an
-    /// error naming it. `validate()` resolves every weapon's round, so on a validated spec this is
-    /// `Ok`.
+    /// The key of the default round, the first of [`Self::rounds`]; `""` (no registry key) on an
+    /// empty list, which `validate()` refuses.
+    pub(crate) fn default_round_key(&self) -> &str {
+        self.rounds.first().map_or("", String::as_str)
+    }
+
+    /// The default round, resolved in the shipped round registry; an unknown key is an error naming
+    /// it. On a validated spec this is `Ok`.
     pub(crate) fn resolved_round(&self) -> Result<crate::rounds::Round, crate::rounds::RoundError> {
-        crate::rounds::RoundRegistry::shipped().get(&self.round)
+        crate::rounds::RoundRegistry::shipped().get(self.default_round_key())
+    }
+
+    /// Every round in [`Self::rounds`], in order, resolved in the shipped round registry; the first
+    /// unknown key is an error naming it. On a validated spec this is `Ok`.
+    pub(crate) fn resolved_rounds(
+        &self,
+    ) -> Result<Vec<crate::rounds::Round>, crate::rounds::RoundError> {
+        let registry = crate::rounds::RoundRegistry::shipped();
+        self.rounds.iter().map(|key| registry.get(key)).collect()
     }
 }
 
@@ -1076,7 +1097,33 @@ impl TankSpec {
             }
         }
         for (name, weapon) in &self.weapons {
-            if let Err(err) = weapon.resolved_round() {
+            if weapon.rounds.is_empty() {
+                return Err(format!(
+                    "weapon `{name}`: rounds is empty — a weapon loads at least one round"
+                )
+                .into());
+            }
+            if weapon.rounds.len() > MAX_WEAPON_ROUNDS {
+                return Err(format!(
+                    "weapon `{name}`: {} rounds listed, at most {MAX_WEAPON_ROUNDS}",
+                    weapon.rounds.len()
+                )
+                .into());
+            }
+            if let Some((index, key)) = weapon
+                .rounds
+                .iter()
+                .enumerate()
+                .find(|(index, key)| weapon.rounds[..*index].contains(key))
+            {
+                return Err(format!(
+                    "weapon `{name}`: round {key:?} is listed twice (again at index {index}) — a \
+                     selection steps through the list, so a duplicate is one round under two \
+                     indices"
+                )
+                .into());
+            }
+            if let Err(err) = weapon.resolved_rounds() {
                 return Err(format!("weapon `{name}`: {err}").into());
             }
             match weapon.fire_mode {
@@ -1516,7 +1563,7 @@ TankSpec(
             trigger: Primary,
             muzzle: "Cannon_Muzzle",
             barrel: "Cannon_Recoil",
-            round: "88mm_AP",
+            rounds: ["88mm_AP", "88mm_APCR"],
             fire_mode: Single(reload_secs: 3.0),
             recoil: (kick: 10.0, stiffness: 90.0, damping: 14.0),
             fire: [Gunner, Breech],
@@ -1526,7 +1573,7 @@ TankSpec(
         "MG": (
             trigger: Secondary,
             muzzle: "MG_Muzzle",
-            round: "7.9mm_AP",
+            rounds: ["7.9mm_AP"],
             fire_mode: Automatic(rpm: 600.0, belt_size: 100, belt_swap_secs: 3.0, tracer_every: 5),
             report_clips: [],
         ),
@@ -1674,19 +1721,35 @@ TankSpec(
         }
     }
 
-    /// A weapon naming a round the registry does not carry is a load error naming the weapon and
-    /// the round. A round's own validity is the registry's ([`crate::rounds`]).
+    /// A weapon's round list loads only whole: every key in the registry, none twice, at least
+    /// one, at most [`MAX_WEAPON_ROUNDS`]; the error names the weapon and what is wrong. Spawn binds
+    /// every listed round and the selector and the fire event address them by `u8` index, so a list
+    /// that slips through panics mid-spawn or puts one round under two indices. The unknown key sits
+    /// second, so a check of the default round alone does not pass. A round's own validity is the
+    /// registry's ([`crate::rounds`]).
     #[test]
-    fn a_weapon_naming_an_unknown_round_is_refused() {
-        let mut spec = fixture();
-        let mut weapon = spec.weapons["MG"].clone();
-        weapon.round = "Unobtainium".to_string();
-        spec.weapons.insert("Phantom".to_string(), weapon);
-        let err = spec.validate().unwrap_err().to_string();
-        assert!(
-            err.contains("Phantom") && err.contains("Unobtainium"),
-            "{err}"
-        );
+    fn a_weapon_s_round_list_is_validated_whole() {
+        let with_rounds = |rounds: Vec<&str>| {
+            let mut spec = fixture();
+            let mut weapon = spec.weapons["MG"].clone();
+            weapon.rounds = rounds.into_iter().map(str::to_string).collect();
+            spec.weapons.insert("Phantom".to_string(), weapon);
+            spec.validate().map_err(|err| err.to_string())
+        };
+        with_rounds(vec!["7.9mm_AP", "88mm_AP"]).expect("known, distinct keys load");
+        for (rounds, named) in [
+            (vec!["7.9mm_AP", "Unobtainium"], "Unobtainium"),
+            (vec!["7.9mm_AP", "88mm_AP", "7.9mm_AP"], "7.9mm_AP"),
+            (Vec::new(), "empty"),
+            (vec!["7.9mm_AP"; MAX_WEAPON_ROUNDS + 1], "at most"),
+        ] {
+            let shown = format!("{:?}", &rounds[..rounds.len().min(3)]);
+            let err = with_rounds(rounds).expect_err(&shown);
+            assert!(
+                err.contains("Phantom") && err.contains(named),
+                "{shown}: {err}"
+            );
+        }
     }
 
     /// `validate()` rejects each silently-bricked `FireMode` value, and its error names the weapon.

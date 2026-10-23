@@ -207,7 +207,7 @@ fn record_edited(
         projectile: scenario.weapon.clone(),
         caliber_mm: body.caliber * 1000.0,
         mass_kg: body.mass,
-        round: weapon.round.clone(),
+        round: weapon.default_round_key().to_owned(),
         vehicle: Some(crate::tank::TIGER_SPEC_PATH.to_owned()),
     };
     let gated = app

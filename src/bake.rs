@@ -2019,7 +2019,7 @@ mod tests {
         trigger: Primary,
         muzzle: "Muzzle",
         barrel: "Recoil",
-        round: "88mm_AP",
+        rounds: ["88mm_AP"],
         fire_mode: Single(reload_secs: 1.0),
         recoil: (kick: 1.0, stiffness: 1.0, damping: 1.0),
         report_clips: [],

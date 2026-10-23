@@ -1,5 +1,5 @@
 //! The round registry (`assets/ballistics/rounds.ron`): every round a weapon can fire, keyed by
-//! key. A weapon names its round by that key ([`crate::spec::WeaponSpec::round`]); the round states
+//! key. A weapon names its rounds by those keys ([`crate::spec::WeaponSpec::rounds`]); a round states
 //! its display name, core material, nose geometry, mass, calibre, muzzle speed and wound rate, each
 //! with its provenance ([`crate::provenance`]). The key is the data's handle and is never shown to a player;
 //! the display name is ([`RoundRegistry::name`]).

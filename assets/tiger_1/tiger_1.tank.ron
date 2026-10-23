@@ -343,9 +343,11 @@ TankSpec(
             trigger: Primary,
             muzzle: "Main_Gun_Muzzle",
             barrel: "Main_Gun_Recoil",
-            // The round fired: a key in assets/ballistics/rounds.ron, which states its core, nose,
-            // mass, calibre and muzzle speed with their provenance.
-            round: "88mm_AP",
+            // The rounds it loads: keys in assets/ballistics/rounds.ron, which states each one's
+            // core, nose, mass, calibre and muzzle speed with their provenance. The first is the
+            // round it spawns loaded with; the crew selects among them, and a selection takes
+            // effect at the next load.
+            rounds: ["88mm_AP", "88mm_APCR"],
             fire_mode: Single(reload_secs: 3.0),
             recoil: (kick: 14.0, stiffness: 90.0, damping: 14.0),
             fire: [Gunner, Breech, GunBarrel],
@@ -365,7 +367,7 @@ TankSpec(
             trigger: Secondary,
             muzzle: "Coax_MG_Muzzle",
             barrel: "Coax_MG_Recoil",
-            round: "7.9mm_AP",
+            rounds: ["7.9mm_AP"],
             fire_mode: Automatic(rpm: 750.0, belt_size: 150, belt_swap_secs: 3.5, tracer_every: 5),
             recoil: (kick: 3.0, stiffness: 240.0, damping: 18.0),
             fire: [Backup([(1.0, [Gunner]), (1.0, [Loader])]), CoaxMgBarrel],
@@ -377,7 +379,7 @@ TankSpec(
             trigger: Secondary,
             muzzle: "Hull_MG_Muzzle",
             barrel: "Hull_MG_Recoil",
-            round: "7.9mm_AP",
+            rounds: ["7.9mm_AP"],
             fire_mode: Automatic(rpm: 750.0, belt_size: 150, belt_swap_secs: 3.5, tracer_every: 5),
             recoil: (kick: 3.0, stiffness: 240.0, damping: 18.0),
             fire: [BowGunner, BowMgBarrel],
