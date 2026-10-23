@@ -1,8 +1,8 @@
 //! The round registry (`assets/ballistics/rounds.ron`): every round a weapon can fire, keyed by
-//! key. A weapon names its rounds by those keys ([`crate::spec::WeaponSpec::rounds`]); a round states
-//! its display name, core material, nose geometry, mass, calibre, muzzle speed and wound rate, each
-//! with its provenance ([`crate::provenance`]). The key is the data's handle and is never shown to a player;
-//! the display name is ([`RoundRegistry::name`]).
+//! key. A weapon names its rounds by those keys ([`crate::spec::WeaponSpec::rounds`]); a round
+//! states its display name, core material, nose geometry, mass, calibre, muzzle speed and crew line
+//! rate, each with its provenance ([`crate::provenance`]). The key is the data's handle and is
+//! never shown to a player; the display name is ([`RoundRegistry::name`]).
 //!
 //! Parsed once from the embedded file and validated at parse: a missing display name or one the
 //! shipped font does not draw whole ([`crate::ui_font::drawable`]), a core that is not a substance
@@ -130,7 +130,7 @@ fn resolved(file: RoundFile, substances: &SubstanceRegistry) -> Result<(Round, S
     if crate::ui_font::drawable(&name).as_deref() != Some(name.as_str()) {
         return Err(format!(
             "name {name:?} is not drawn whole by the shipped font — a round's display name is \
-             what the kill card shows"
+             what `killcam::card_lines` draws"
         ));
     }
     let core_name = file.core.0;
@@ -161,8 +161,8 @@ fn resolved(file: RoundFile, substances: &SubstanceRegistry) -> Result<(Round, S
     let wound = file.wound.0;
     if !wound.is_finite() || wound <= 0.0 {
         return Err(format!(
-            "wound rate must be finite and positive (got {wound}) — it is the dose per metre of \
-             chord the round's line deals a witness"
+            "`wound`, the crew line rate, must be finite and positive (got {wound}) — it is the \
+             dose per metre of chord the round's line deals a witness"
         ));
     }
     Ok((
@@ -317,7 +317,7 @@ mod tests {
         }
     }
 
-    /// A round's wound rate is finite and positive, refused naming the round otherwise; every
+    /// A round's crew line rate is finite and positive, refused naming the round otherwise; every
     /// shipped round states one.
     #[test]
     fn a_wound_rate_is_finite_and_positive() {
@@ -336,7 +336,7 @@ mod tests {
             .collect();
         assert!(
             one(&unwounding).is_err(),
-            "a round without a wound rate must not load"
+            "a round without a crew line rate must not load"
         );
         for name in RoundRegistry::shipped().keys() {
             let round = RoundRegistry::shipped().get(name).unwrap();

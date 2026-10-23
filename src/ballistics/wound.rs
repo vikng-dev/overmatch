@@ -5,8 +5,8 @@
 //! without it, and this pass only reads what they were. Two intersections dose a witness:
 //!
 //! - [`line`]: the round's axis legs ([`Leg`]), each sampled by the walk's own disc; per
-//!   witness, the disc-mean chord, dosed `chord × wound` (the round's wound rate, reference-mm per
-//!   metre).
+//!   witness, the disc-mean chord, dosed `chord × wound` (the round's crew line rate,
+//!   reference-mm per metre).
 //! - [`entries`]: where a field direction enters each witness, which
 //!   [`super::resolve::field_direction`] doses at the direction's strength there times its share.
 //!

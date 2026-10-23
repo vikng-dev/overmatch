@@ -1,6 +1,6 @@
 #![enable(implicit_some)]
 TankSpec(
-    // The name a player reads for this vehicle (kill feed, pen cam).
+    // The name a player reads for this vehicle (knockout feed, pen cam).
     display_name: "Tiger I",
     mass: 57_000.0,
     inertia_extents: (3.0, 2.0, 6.3),
@@ -267,7 +267,7 @@ TankSpec(
         "Loader":           (crew: Loader),
         "Driver":           (crew: Driver),
         "BowGunner":        (crew: BowGunner),
-        // --- Ammunition (ammo: true means cookoff when dead) ---
+        // --- Ammunition (ammo: true means cookoff when its HP pool empties) ---
         // ammo, 150 HP per m²: mean face 0.479 m², least 0.268.
         "Ammo_L_0":         (hp:  72, ammo: true),
         "Ammo_L_1":         (hp:  72, ammo: true),
@@ -391,8 +391,8 @@ TankSpec(
     views: {
         // The gunner's sight is the TZF 9b: 2.5× over a 25° true field, both MEASURED off the
         // instrument's data sheet. The commander looks through a hatch, so his view has no
-        // magnification to state and authors the field alone. `requires` gates the view — a dead
-        // crewman blacks it out.
+        // magnification to state and authors the field alone. `requires` gates the view — a
+        // knocked-out crewman blacks it out.
         Gunner:    (node: "Main_Gun_Pitch", optics: Magnified(magnification: 2.5, field_deg: 25.0), requires: [Gunner]),
         Commander: (node: "Turret_Yaw",     optics: Unaided(45.0), requires: [Commander]),
     },
