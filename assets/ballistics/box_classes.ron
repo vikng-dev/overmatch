@@ -1,26 +1,31 @@
-// The sturdiness classes of the boxes that carry an HP pool, in HP points per m² of a box's mean
-// face. Read by `src/ballistics/box_classes.rs`, embedded and parsed once, validated at parse.
+// The HP pools of the boxes that carry one: the one crew pool every crew station of every tank
+// shares, and the sturdiness classes every other box's pool is authored from, in HP points per m²
+// of the box's mean face. Read by `src/ballistics/box_classes.rs`, embedded and parsed once,
+// validated at parse.
 //
-// A tank file authors each pool (`hp` in `<tank>.tank.ron`'s `volumes`) as its class × the box's
-// measured mean face, the mean of the three axis-aligned face areas of its bounds in the tank's
-// sim geometry, rounded to a whole point; `src/tests/box_pools.rs` holds every tank asset to
-// within ±25 % of that. The class follows the box's facets: a crew station is `crew`, an
-// ammunition box `ammo`, any other box with a pool `hard`. So a box of one class at one place in
-// the field fares as any other box of that class there, whatever its size: the field's dose to a
-// box grows with the face it presents, and so does its pool. The law is design doc §6,
+// A crew station's pool is `crew_hp`, filled in when a tank file is parsed; a tank file that
+// authors `hp` on a crew-facet volume does not load (`src/spec.rs`). Every other pool (`hp` in
+// `<tank>.tank.ron`'s `volumes`) is authored as its class × the box's measured mean face, the
+// mean of the three axis-aligned face areas of its bounds in the tank's sim geometry, rounded to a
+// whole point; `src/tests/box_pools.rs` holds every tank asset to within ±25 % of that, and every
+// crew pool to `crew_hp`. The class follows the box's facets: an ammunition box is `ammo`, any
+// other box with a pool `hard`. So a box of one class at one place in the field fares as any other
+// box of that class there, whatever its size: the field's dose to a box grows with the face it
+// presents, and so does its pool. The law is design doc §6,
 // `.agents/docs/design/armor-penetration-and-damage.md`; the decision is #3 in
 // `.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md`.
 //
 // PROVENANCE: every value is authored `(value, Kind("source or reason"))`, Kind one of Measured,
 // Derived, Tuned, Resolution, Unknown (`src/provenance.rs`); a value without one does not load.
 (
-    crew: (150, Tuned("owner decision 2026-10-23 (#2, #3): the class the field's calibration in
-        spall_cone.ron is set against, a crew box fully inside a weak ordinary perforation's cone
-        about 2 m from the hole having its pool emptied. The knockout radius depends on the class
-        alone, never the face (DERIVED in spall_cone.ron)")),
-    ammo: (150, Tuned("as fragile per m² as a crew station: a propellant case a fragment reaches
-        is lost. The hard class would leave a bin a round's line passes straight through in
-        action (pen cam scenario s5)")),
+    crew_hp: (30, Tuned("owner decision 2026-10-23, provisional: one pool for every crew station
+        of every tank, revised if play shows it out of proportion to the tank's other pools. A
+        crewman is one entity across tanks, and the crew box is a placeholder for a humanoid
+        shape, so its face is no basis for a pool. The field's calibration in spall_cone.ron and
+        the crew line rate in rounds.ron are set against it")),
+    ammo: (150, Tuned("as fragile per m² as the crew pool at the intended humanoid's 0.2 m² face
+        (DERIVED: 30 / 0.2): a propellant case a fragment reaches is lost. The hard class would
+        leave a bin a round's line passes straight through in action (pen cam scenario s5)")),
     hard: (300, Tuned("owner decision 2026-10-23: sturdier components hold up a little better,
-        never through half a cone; twice the crew class per m²")),
+        never through half a cone; twice the ammo class per m²")),
 )

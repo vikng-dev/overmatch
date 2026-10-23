@@ -74,23 +74,32 @@ const EXTERNAL_WITH_FACETS: &str = "an external armour volume carries no compone
      crew, ammo, function): a volume is armour or a component, never both";
 const COMPONENT_WITHOUT_HP: &str = "a component volume needs an hp pool; a main armour volume has \
      no entry, and external armour is `(external: true)`";
+const CREW_WITH_HP: &str = "a crew station authors no hp: every crew station of every tank has \
+     the one shared crew pool (`crew_hp` in assets/ballistics/box_classes.ron)";
 
 impl TryFrom<VolumeEntry> for VolumeSpec {
     type Error = String;
 
+    /// A crew station's pool is the shared crew pool, filled in here; every other component's is
+    /// the one its entry authors.
     fn try_from(entry: VolumeEntry) -> Result<Self, String> {
         let facets = entry.crew.is_some() || entry.ammo || entry.function.is_some();
-        match (entry.external, entry.hp) {
-            (true, None) if !facets => Ok(Self::External),
-            (true, _) => Err(EXTERNAL_WITH_FACETS.into()),
-            (false, Some(hp)) => Ok(Self::Component(ComponentSpec {
-                hp,
-                crew: entry.crew,
-                ammo: entry.ammo,
-                function: entry.function,
-            })),
-            (false, None) => Err(COMPONENT_WITHOUT_HP.into()),
-        }
+        let hp = match (entry.external, entry.hp, entry.crew) {
+            (true, None, _) if !facets => return Ok(Self::External),
+            (true, ..) => return Err(EXTERNAL_WITH_FACETS.into()),
+            (false, Some(_), Some(_)) => return Err(CREW_WITH_HP.into()),
+            (false, None, Some(_)) => {
+                crate::ballistics::box_classes::BoxClasses::shipped().crew_hp()
+            }
+            (false, Some(hp), None) => hp,
+            (false, None, None) => return Err(COMPONENT_WITHOUT_HP.into()),
+        };
+        Ok(Self::Component(ComponentSpec {
+            hp,
+            crew: entry.crew,
+            ammo: entry.ammo,
+            function: entry.function,
+        }))
     }
 }
 
@@ -103,7 +112,9 @@ impl TryFrom<VolumeEntry> for VolumeSpec {
 #[derive(Clone)]
 pub struct ComponentSpec {
     /// HP pool, in whole HP points (`ballistics::HP_PER_REFERENCE_MM`: one point is 0.1
-    /// reference-mm of dose). Depleting it is what "damaged" means for this component; the
+    /// reference-mm of line dose). A crew station's is the shared crew pool
+    /// (`ballistics::box_classes::BoxClasses::crew_hp`), never authored in a tank file; every other
+    /// component's is authored. Depleting it is what "damaged" means for this component; the
     /// consequences of reaching zero come from the facets below.
     pub hp: u32,
     /// Crew station served by this volume.
@@ -1492,7 +1503,7 @@ TankSpec(
         "Turret_Yaw": (role: Yaw, max_speed: 30.0, accel: 60.0, travel: Continuous, requires: [Gunner]),
     },
     volumes: {
-        "Gunner": (hp: 30, crew: Gunner),
+        "Gunner": (crew: Gunner),
         "Breech": (hp: 80, function: Breech),
     },
     colliders: ["Hull_Collider"],
@@ -1541,7 +1552,9 @@ TankSpec(
     }
 
     /// A volume entry is a component or external armour, never both and never neither: the
-    /// external tag carries no component facet, and a component carries an hp pool.
+    /// external tag carries no component facet, a component other than a crew station authors an
+    /// hp pool, and a crew station authors none and carries the shared crew pool, so no tank file
+    /// can give its crew a pool of its own.
     #[test]
     fn a_volume_entry_is_a_component_or_external_armour() {
         // The extension the shipped sheets declare.
@@ -1552,11 +1565,15 @@ TankSpec(
             parse("(external: true)"),
             Ok(VolumeSpec::External)
         ));
-        let component = parse("(hp: 30, crew: Driver)").expect("a component parses");
-        let component = component.component().expect("it is a component");
-        assert_eq!(component.hp, 30);
-        assert_eq!(component.crew, Some(CrewStation::Driver));
-        assert!(parse("(hp: 20, external: false)").is_ok());
+        let crew = parse("(crew: Driver)").expect("a crew station parses");
+        let crew = crew.component().expect("it is a component");
+        assert_eq!(
+            crew.hp,
+            crate::ballistics::box_classes::BoxClasses::shipped().crew_hp()
+        );
+        assert_eq!(crew.crew, Some(CrewStation::Driver));
+        let module = parse("(hp: 20, external: false)").expect("a module parses");
+        assert_eq!(module.component().expect("it is a component").hp, 20);
         for refused in [
             "(external: true, hp: 20)",
             "(external: true, ammo: true)",
@@ -1564,7 +1581,7 @@ TankSpec(
             "(external: true, function: Engine)",
             "()",
             "(external: false)",
-            "(crew: Driver)",
+            "(hp: 30, crew: Driver)",
         ] {
             assert!(parse(refused).is_err(), "`{refused}` must not parse");
         }

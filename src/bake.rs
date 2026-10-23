@@ -2195,7 +2195,7 @@ mod tests {
             fixture::spec(&["Proxy"], &wheels, &[])
                 .replace("volumes: {}", &format!("volumes: {{\"Seat\": {entry}}}"))
         };
-        let crew = declared("(hp: 10, crew: Driver)");
+        let crew = declared("(crew: Driver)");
         let with = |extra: Node| {
             let (mut nodes, _) = sound_vehicle();
             nodes.push(extra);

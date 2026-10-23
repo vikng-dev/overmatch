@@ -1,5 +1,6 @@
-//! Gate: every HP pool a tank file authors is its sturdiness class's HP per m² times the box's
-//! measured mean face, within [`TOLERANCE`] (`assets/ballistics/box_classes.ron`, design doc §6).
+//! Gate: every crew station's HP pool is the one shared crew pool, and every other HP pool a tank
+//! file authors is its sturdiness class's HP per m² times the box's measured mean face, within
+//! [`TOLERANCE`] (`assets/ballistics/box_classes.ron`, design doc §6).
 //!
 //! The mean face is the mean of the three axis-aligned face areas of the box's bounds, read from
 //! the sim geometry the bake extracts from every tank asset under `assets/` (the tank file and its
@@ -40,15 +41,17 @@ fn faces((lo, hi): (bevy::math::Vec3, bevy::math::Vec3)) -> [f32; 3] {
     [e.x * e.y, e.y * e.z, e.z * e.x]
 }
 
-/// INVARIANT: every box with an HP pool, in every tank asset, holds a pool within ±[`TOLERANCE`]
-/// of its class's HP per m² times its mean face. The pen cam's potency bands are calibrated in HP
-/// per m² of face and promise that a box of its class inside a band is knocked out; a pool above
-/// its class breaks that promise for the box (it survives a band that names its loss), and the
-/// field's calibration (`assets/ballistics/spall_cone.ron`) is set against the crew class. A
-/// mutant pool, a box whose geometry no longer resolves, or a class read from the wrong facet
-/// fails here, naming the box.
+/// INVARIANT: in every tank asset, every crew station's pool is the shared crew pool
+/// ([`BoxClasses::crew_hp`]) and is exempt from class × face, and every other box with an HP pool
+/// holds a pool within ±[`TOLERANCE`] of its class's HP per m² times its mean face. A crewman is one
+/// entity across tanks, and the field's calibration (`assets/ballistics/spall_cone.ron`) and the
+/// crew line rate (`assets/ballistics/rounds.ron`) are set against the shared pool. The pen cam's
+/// potency bands are calibrated in HP per m² of face and promise that a box of its class inside a
+/// band is knocked out; a pool above its class breaks that promise for the box (it survives a band
+/// that names its loss). A mutant pool, a crew pool that is not the shared one, a box whose
+/// geometry no longer resolves, or a class read from the wrong facet fails here, naming the box.
 #[test]
-fn every_pool_is_its_class_times_its_mean_face() {
+fn every_pool_is_the_crew_pool_or_its_class_times_its_mean_face() {
     let root = crate::assets::asset_root();
     let mut files = Vec::new();
     tank_files(&root, &root, &mut files);
@@ -65,6 +68,19 @@ fn every_pool_is_its_class_times_its_mean_face() {
                 continue;
             };
             pooled += 1;
+            let Some(class) = BoxClass::of(component) else {
+                if show {
+                    println!("{file} {name}: crew, hp {}", component.hp);
+                }
+                if component.hp != classes.crew_hp() {
+                    wrong.push(format!(
+                        "{file} {name}: crew hp {} is not the shared crew pool {}",
+                        component.hp,
+                        classes.crew_hp()
+                    ));
+                }
+                continue;
+            };
             let Some(shape) = shapes.get(name) else {
                 wrong.push(format!("{file} {name}: no sim geometry"));
                 continue;
@@ -72,7 +88,6 @@ fn every_pool_is_its_class_times_its_mean_face() {
             let faces = faces(shape.bounds());
             let mean = faces.iter().sum::<f32>() / 3.0;
             let least = faces.iter().copied().fold(f32::INFINITY, f32::min);
-            let class = BoxClass::of(component);
             let expected = classes.hp_per_square_metre(class) as f32 * mean;
             if show {
                 println!(
@@ -93,7 +108,7 @@ fn every_pool_is_its_class_times_its_mean_face() {
     assert!(pooled > 0, "no tank asset authors an HP pool");
     assert!(
         wrong.is_empty(),
-        "pools off their class × mean face:\n{}",
+        "pools off the crew pool or their class × mean face:\n{}",
         wrong.join("\n")
     );
 }
