@@ -18,7 +18,7 @@ use bevy::prelude::*;
 use chrono::Local as LocalTime;
 use serde_json::{Value, json};
 
-use crate::tank::{Controlled, RemoteServos, Tank, TankServos, TankSim, WeaponGate};
+use crate::tank::{Controlled, RemoteServos, Tank, TankServos, TankSim, WeaponGate, WeaponLoads};
 use crate::track::sim::{
     TankTransmission, TrackContacts, TrackDrive, TrackGrip, TrackGripElements,
 };
@@ -380,7 +380,7 @@ fn record_tick(
             &TrackGrip,
             Option<&TrackGripElements>,
             &TankTransmission,
-            Option<&WeaponGate>,
+            (Option<&WeaponGate>, Option<&WeaponLoads>),
             Option<&TankServos>,
             Option<&RemoteServos>,
             &TrackContacts,
@@ -440,7 +440,7 @@ fn record_tick(
         grip,
         elements,
         transmission,
-        weapon_gate,
+        (weapon_gate, weapon_loads),
         servos,
         remote_servos,
         track_contacts,
@@ -507,6 +507,7 @@ fn record_tick(
             elements,
             transmission,
             weapon_gate,
+            loads: weapon_loads,
             servos: servo_states,
             sim,
         });

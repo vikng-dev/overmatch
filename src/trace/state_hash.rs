@@ -4,7 +4,7 @@ use bevy::prelude::{Quat, Vec3};
 
 #[cfg(test)]
 use crate::tank::TankServos;
-use crate::tank::{ServoState, TankSim, WeaponGate};
+use crate::tank::{ServoState, TankSim, WeaponGate, WeaponLoads};
 use crate::track::sim::{TankTransmission, TrackDrive, TrackGrip, TrackGripElements};
 use crate::track::transmission::{TransmissionProjectionValue, transmission_state_projection};
 
@@ -97,7 +97,8 @@ pub(super) struct TankStateHash {
     pub(super) drv: u64,
     /// Servo current/previous/velocity, every servo in slot order.
     pub(super) srv: u64,
-    /// Weapon gate (`ready_tick`, pause tick, then belt count), every weapon in slot order.
+    /// Weapon gate (`ready_tick`, pause tick, then belt count), every weapon in slot order, then
+    /// the round choice (`loaded`, `selected`) per slot.
     pub(super) rld: u64,
     /// Barrel recoil offset/velocity, every weapon in slot order.
     pub(super) rec: u64,
@@ -110,8 +111,8 @@ pub(super) struct TankStateHash {
 }
 
 /// One tank root's canonical sim state, borrowed for [`hash_tank_state`]. `elements` is `None`
-/// where the element field is not disclosed (a remote client's replica); `weapon_gate` is `None`
-/// where the root carries none.
+/// where the element field is not disclosed (a remote client's replica); `weapon_gate` and
+/// `loads` are `None` where the root carries none (both are owner-private replicas).
 #[derive(Clone, Copy)]
 pub(crate) struct TankState<'a> {
     pub(crate) position: Vec3,
@@ -123,6 +124,7 @@ pub(crate) struct TankState<'a> {
     pub(crate) elements: Option<&'a TrackGripElements>,
     pub(crate) transmission: &'a TankTransmission,
     pub(crate) weapon_gate: Option<&'a WeaponGate>,
+    pub(crate) loads: Option<&'a WeaponLoads>,
     pub(crate) servos: &'a [ServoState],
     pub(crate) sim: &'a TankSim,
 }
@@ -133,8 +135,9 @@ pub(crate) struct TankState<'a> {
 /// worlds' entity ids. Field order is fixed and load-bearing: `position, rotation, linvel, angvel`,
 /// then `TrackDrive` (shaped command + per-side belt state), `TrackGrip`, `TrackGripElements`, the
 /// complete `TankTransmission` inventory, `WeaponGate` (`present`, then per slot: deadline-present,
-/// deadline, pause-present, pause tick, belt count), `TankServos` in slot order with each slot's
-/// `current, previous, velocity`, then `TankSim::weapons` in slot order.
+/// deadline, pause-present, pause tick, belt count), `WeaponLoads` (`present`, then per slot:
+/// `loaded`, `selected`), `TankServos` in slot order with each slot's `current, previous, velocity`,
+/// then `TankSim::weapons` in slot order.
 pub(super) fn hash_tank_state(state: &TankState) -> TankStateHash {
     let &TankState {
         position,
@@ -146,6 +149,7 @@ pub(super) fn hash_tank_state(state: &TankState) -> TankStateHash {
         elements,
         transmission,
         weapon_gate,
+        loads,
         servos,
         sim,
     } = state;
@@ -197,6 +201,16 @@ pub(super) fn hash_tank_state(state: &TankState) -> TankStateHash {
             // Belt count and absolute deadline are the complete authoritative fire gate. Contrast
             // `rounds_fired`, deliberately excluded because it only chooses cosmetic tracers.
             hrl.write_u32(weapon.belt_remaining);
+        }
+    }
+    // The round choice rides the gate stream: `loaded` is the round the slot's next shot fires and
+    // `selected` the round its next load takes, so a dropped selection diverges a replay here.
+    hrl.write_bool(loads.is_some());
+    if let Some(loads) = loads {
+        hrl.write_u32(loads.weapons.len() as u32);
+        for load in &loads.weapons {
+            hrl.write_u8(load.loaded);
+            hrl.write_u8(load.selected);
         }
     }
     for weapon in &sim.weapons {
@@ -331,6 +345,43 @@ fn hash_sample_with_gate_and_servos(
         elements: None,
         transmission,
         weapon_gate: Some(weapon_gate),
+        loads: None,
+        servos: &servos.states,
+        sim,
+    })
+}
+
+#[cfg(test)]
+fn test_weapon_loads() -> WeaponLoads {
+    WeaponLoads {
+        weapons: vec![crate::tank::WeaponLoad {
+            loaded: 0,
+            selected: 0,
+        }],
+    }
+}
+
+#[cfg(test)]
+fn hash_sample_with_loads(
+    (position, rotation, linvel, angvel): Pose,
+    drive: &TrackDrive,
+    grip: &TrackGrip,
+    transmission: &TankTransmission,
+    loads: &WeaponLoads,
+    sim: &TankSim,
+) -> TankStateHash {
+    let (gate, servos) = (test_weapon_gate(), test_servos());
+    hash_tank_state(&TankState {
+        position,
+        rotation,
+        linvel,
+        angvel,
+        drive,
+        grip,
+        elements: None,
+        transmission,
+        weapon_gate: Some(&gate),
+        loads: Some(loads),
         servos: &servos.states,
         sim,
     })
@@ -533,6 +584,58 @@ mod tests {
         assert_ne!(pos_zero.lv, neg_zero.lv);
     }
 
+    /// The round choice (`WeaponLoads`) rides the gate stream and touches no other family: an
+    /// absent component reads differently from a present one on its default round, and one step
+    /// of `selected` (the mutant that drops a selection) or of `loaded` diverges `rld`. The replay
+    /// window attribution relies on it.
+    #[test]
+    fn round_choice_flip_localizes_to_the_gate_stream() {
+        let (p, q, lv, av, drive, sim) = sample();
+        let grip = TrackGrip::default();
+        let transmission = sample_transmission();
+        let base = hash_sample((p, q, lv, av), &drive, &grip, &transmission, &sim);
+
+        let with_loads = hash_sample_with_loads(
+            (p, q, lv, av),
+            &drive,
+            &grip,
+            &transmission,
+            &test_weapon_loads(),
+            &sim,
+        );
+        assert_ne!(base.rld, with_loads.rld);
+        assert_eq!(
+            (base.drv, base.srv, base.rec, base.blt, base.trn),
+            (
+                with_loads.drv,
+                with_loads.srv,
+                with_loads.rec,
+                with_loads.blt,
+                with_loads.trn
+            )
+        );
+        let steps: [fn(&mut crate::tank::WeaponLoad); 2] =
+            [|load| load.selected += 1, |load| load.loaded += 1];
+        for step in steps {
+            let mut loads = test_weapon_loads();
+            step(&mut loads.weapons[0]);
+            let l =
+                hash_sample_with_loads((p, q, lv, av), &drive, &grip, &transmission, &loads, &sim);
+            assert_ne!(with_loads.rld, l.rld);
+            assert_ne!(with_loads.sim, l.sim);
+            assert_eq!(
+                (
+                    with_loads.drv,
+                    with_loads.srv,
+                    with_loads.rec,
+                    with_loads.blt,
+                    with_loads.trn
+                ),
+                (l.drv, l.srv, l.rec, l.blt, l.trn)
+            );
+        }
+    }
+
     /// Each carried-state field family flips ITS sub-hash (plus `sim` and `combined`) and no other —
     /// the per-field decode the window attribution relies on. One-ULP flips, same bar as the
     /// velocity-bit test.
@@ -694,6 +797,7 @@ mod tests {
             elements: Some(&elements),
             transmission: &transmission,
             weapon_gate: Some(&gate),
+            loads: None,
             servos: &servos.states,
             sim: &sim,
         };
@@ -783,24 +887,24 @@ mod tests {
             elements: Some(&elements),
             transmission: &transmission,
             weapon_gate: Some(&gate),
+            loads: None,
             servos: &servos.states,
             sim: &sim,
         };
         let base = canonical_tank_state_digest(&state);
-        // RE-MEASURED when the `shk` stream left with the prediction stack (REV 27): `shk` was
-        // never folded into `combined`, so `simulation` and `rollback` are unchanged.
+        // MEASURED on the sample state; any change to a stream's field order re-measures it.
         assert_eq!(
             base,
             CanonicalTankStateDigest {
-                simulation: 17_452_262_217_714_196_273,
-                rollback: 1_649_749_266_986_927_987,
+                simulation: 13_273_883_614_073_939_632,
+                rollback: 13_210_661_411_403_520_878,
                 position: 5_276_285_167_157_175_194,
                 rotation: 5_407_327_877_548_523_030,
                 linear_velocity: 8_825_002_124_784_658_797,
                 angular_velocity: 15_886_300_944_198_297_253,
                 drive: 3_269_583_271_824_065_410,
                 servo: 14_071_911_453_643_095_408,
-                weapon_gate: 3_439_918_263_059_415_993,
+                weapon_gate: 2_827_740_641_294_898_011,
                 recoil: 12_037_784_973_900_930_602,
                 belts: 16_317_528_332_690_472_771,
                 transmission: 16_561_026_162_406_393_170,
