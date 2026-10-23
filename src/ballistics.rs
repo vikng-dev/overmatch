@@ -2503,14 +2503,8 @@ fn march_shell_step(
     tick: &mut MarchTick,
 ) -> Option<MarchStep> {
     let MarchTick {
-        sanctioned,
-        now,
-        dt,
-        deposit,
-        ..
+        now, dt, deposit, ..
     } = *tick;
-    let (shot_trace, commands) = (&mut *tick.shot_trace, &mut *tick.commands);
-    let shot = shell.shot;
     // Accumulate the authority's actual HP decrease across every direct crossing and spall fragment
     // this step. The caller's per-shell latch turns the aggregate into at most one discrete confirm.
     let mut damage_dealt = 0;
@@ -2586,7 +2580,14 @@ fn march_shell_step(
         Err(error) => {
             let position = shell.transform.translation;
             let holding = uncertified_start(
-                shell, deposit, position, dir, &error, now, shot_trace, commands,
+                shell,
+                deposit,
+                position,
+                dir,
+                &error,
+                now,
+                tick.shot_trace,
+                tick.commands,
             );
             return Some(MarchStep {
                 position,
@@ -2610,8 +2611,8 @@ fn march_shell_step(
                 flight.direction,
                 &error,
                 now,
-                shot_trace,
-                commands,
+                tick.shot_trace,
+                tick.commands,
             );
             stopped = !holding;
             break;
@@ -2643,38 +2644,11 @@ fn march_shell_step(
                 flight.fly(displacement);
                 break;
             }
-            // The ground stops the shell: same `Impact` read whether or not the MG short-circuit
-            // is armed (the B-arm's terrain stop was already identical); only the lifecycle row
-            // differs — the short-circuit records nothing, exactly as before.
             Ahead::Terrain { distance, normal } => {
                 let entry = origin + dir * distance;
                 let leg = resolve::Leg::new(origin, dir, distance, &flight.sample_offsets(radius));
                 damage_dealt += wound_legs(shell, &context, &not_own, &[leg], speed, health);
-                let shorted =
-                    shortcircuit && shell.projectile.caliber() < MG_SHORTCIRCUIT_CALIBER_MAX;
-                commands.trigger(Impact {
-                    position: entry,
-                    normal,
-                    caliber: shell.projectile.caliber(),
-                    surface: ImpactSurface::Terrain,
-                    outcome: ImpactOutcome::Struck,
-                });
-                // A terrain stop is the one shot terminal that needs NO confirm: static,
-                // pose-independent geometry, so both ends already agree (ADR-0021's
-                // invariant). Recorded on the client so the analyzer can close the lifecycle
-                // of a shot that simply never reached armor.
-                if !shorted
-                    && !deposit
-                    && let Some(shot) = shot
-                {
-                    crate::shot_trace::record(
-                        shot_trace,
-                        "end",
-                        now,
-                        shot.0,
-                        || json!({ "why": "terrain" }),
-                    );
-                }
+                strike_ground(shell, entry, normal, shortcircuit, tick);
                 flight.position = entry;
                 stopped = true;
                 break;
@@ -2689,59 +2663,7 @@ fn march_shell_step(
         let contact_normal = hit.map_or(-Vec3::from(dir), |hit| hit.normal);
 
         if let Some(hit) = hit {
-            // EXPERIMENTAL B-arm (`SPIKE_MG_SHORTCIRCUIT`): a sub-20 mm round stops dead at the
-            // first surface, skipping the entire penetration-resolution march below
-            // (thickness/span probes, ricochet, spall, HP). Population-preserving — same
-            // despawn-on-contact as the live path — so the A−B tick-cost delta isolates the
-            // resolution machinery. Default off (see the type).
-            if shortcircuit && shell.projectile.caliber() < MG_SHORTCIRCUIT_CALIBER_MAX {
-                // Classify the first surface from the hit's volume ancestry (the same
-                // `hit_ancestor` rule the full march uses just below) so the read is honest even in
-                // the B-arm. The short-circuit stops dead without resolving penetration, so
-                // `Struck`.
-                let surface = if world.armour(hit.entity).is_some() {
-                    ImpactSurface::Armor
-                } else {
-                    ImpactSurface::Terrain
-                };
-                commands.trigger(Impact {
-                    position: entry,
-                    normal: hit.normal,
-                    caliber: shell.projectile.caliber(),
-                    surface,
-                    outcome: ImpactOutcome::Struck,
-                });
-                flight.position = entry;
-                stopped = true;
-                break;
-            }
-
-            // The struck `BallisticVolume` sits on the hit's ancestry (`hit_ancestor`, the shared
-            // hierarchy-resolution rule). No volume in the ancestry ⇒ classified terrain (an
-            // Armor-layer entity without ownership — same rule as before the cast split). The
-            // crossing itself finds every volume for itself; this read only tells armour from
-            // terrain.
-            if world.armour(hit.entity).is_none() {
-                commands.trigger(Impact {
-                    position: entry,
-                    normal: hit.normal,
-                    caliber: shell.projectile.caliber(),
-                    surface: ImpactSurface::Terrain,
-                    outcome: ImpactOutcome::Struck,
-                });
-                // A terrain stop is the one shot terminal that needs NO confirm: static,
-                // pose-independent geometry, so both ends already agree (ADR-0021's invariant).
-                // Recorded on the client so the analyzer can close the lifecycle of a shot that
-                // simply never reached armor, instead of filing it as never-consumed.
-                if !deposit && let Some(shot) = shot {
-                    crate::shot_trace::record(
-                        shot_trace,
-                        "end",
-                        now,
-                        shot.0,
-                        || json!({ "why": "terrain" }),
-                    );
-                }
+            if stops_unresolved(shell, world, hit, entry, shortcircuit, tick) {
                 flight.position = entry;
                 stopped = true;
                 break;
@@ -2752,63 +2674,17 @@ fn march_shell_step(
             // arm below continues or breaks, so the physical armor resolution after it is
             // authority-only.
             if !deposit {
-                let hit_normal = hit.normal;
-                match resolve_replica_armor_contact(
-                    shell, entry, hit.normal, sanctioned, now, shot_trace, commands,
-                ) {
-                    ReplicaArmorContact::Reseed {
-                        origin,
-                        direction,
-                        speed: sanctioned_speed,
-                    } => {
-                        // The same step limits the authority's crossings are held to, charged from
-                        // the flight's position.
-                        if let Err(error) = budget.charge(hit.distance + MARCH_EPS) {
-                            warn_once!(
-                                "ballistics: a replica's step ran out of its limits, stopping the \
-                                 round: {error:?}"
-                            );
-                            flight.position = entry;
-                            stopped = true;
-                            break;
-                        }
-                        if let Some(new_dir) = direction {
-                            // Carry the sampling basis through the sanctioned bend, exactly as the
-                            // authority's own ricochet does. A replica that re-seeds on server
-                            // truth without transporting its frame keeps a basis built for the
-                            // INCOMING heading — one whose vectors have a component along the new
-                            // travel axis, so its ring samples sit in front of and behind the disc
-                            // rather than across it.
-                            flight.frame =
-                                flight.frame.transport(Vec3::from(dir), Vec3::from(new_dir));
-                            flight.direction = new_dir;
-                        }
-                        flight.speed = sanctioned_speed;
-                        flight.continuation = None;
-                        // Lift the shell's BODY clear of the face it bounced off and nudge it off
-                        // along the new heading, exactly as the authority's own ricochet does
-                        // (`resolve::Bounce::resume`). At oblique incidence a disc's lateral
-                        // offsets lie mostly along the struck surface's normal, so resuming at the
-                        // contact point leaves half the ring behind the face and first contact
-                        // fires again on the very surface just left — which on a replica means
-                        // holding for a keyframe that was already consumed. The lift clears that
-                        // face only; the fresh disc's membership against everything else is
-                        // established before it sweeps (`resolve::Flight::settle`). The RECORDED
-                        // bounce point is untouched; only where the march resumes moves.
-                        flight.position = origin
-                            + Vec3::new(hit_normal.x, hit_normal.y, hit_normal.z)
-                                .normalize_or_zero()
-                                * radius
-                            + flight.direction * MARCH_EPS;
+                match replica_contact(shell, &mut flight, &mut budget, hit, entry, radius, tick) {
+                    ReplicaSweep::Reseeded => {
                         bent = true;
                         continue;
                     }
-                    ReplicaArmorContact::Stopped => {
+                    ReplicaSweep::Stopped => {
                         flight.position = entry;
                         stopped = true;
                         break;
                     }
-                    ReplicaArmorContact::Holding => {
+                    ReplicaSweep::Holding => {
                         flight.position = entry;
                         holding = true;
                         break;
@@ -2840,22 +2716,7 @@ fn march_shell_step(
                 decision
             }
             Err(error) => {
-                error!(
-                    shot = ?shell.shot.map(|shot| shot.0),
-                    shell = ?shell.entity,
-                    struck = ?hit.map(|hit| hit.entity),
-                    ?error,
-                    "ballistics: union walk failed, stopping the round at contact; it opens no \
-                     pen cam"
-                );
-                shell.marks.log.push(ArmourMark::Failed);
-                commands.trigger(Impact {
-                    position: entry,
-                    normal: contact_normal,
-                    caliber: shell.projectile.caliber(),
-                    surface: ImpactSurface::Armor,
-                    outcome: ImpactOutcome::Struck,
-                });
+                walk_failed(shell, hit, entry, contact_normal, &error, tick.commands);
                 flight.position = entry;
                 stopped = true;
                 break;
@@ -2868,7 +2729,7 @@ fn march_shell_step(
             &mut terminal_emitted,
             health,
             bodies,
-            commands,
+            tick.commands,
         );
         // Every outcome leaves the round off its original free-flight segment (see the open-air
         // break above), whether it bounced off the face or bent into the plate.
@@ -2901,6 +2762,220 @@ fn march_shell_step(
         holding,
         damage_dealt,
     })
+}
+
+/// The ground stops the shell at `entry`: the struck terrain [`Impact`], the same whether or not
+/// the MG short-circuit is armed, and on a client the lifecycle row closing the shot, which the
+/// short-circuit does not record. The caller stops the flight at `entry`.
+fn strike_ground(
+    shell: &MarchingShell,
+    entry: Vec3,
+    normal: Vec3,
+    shortcircuit: bool,
+    tick: &mut MarchTick,
+) {
+    let MarchTick { now, deposit, .. } = *tick;
+    let (shot_trace, commands) = (&mut *tick.shot_trace, &mut *tick.commands);
+    let shot = shell.shot;
+    let shorted = shortcircuit && shell.projectile.caliber() < MG_SHORTCIRCUIT_CALIBER_MAX;
+    commands.trigger(Impact {
+        position: entry,
+        normal,
+        caliber: shell.projectile.caliber(),
+        surface: ImpactSurface::Terrain,
+        outcome: ImpactOutcome::Struck,
+    });
+    // A terrain stop is the one shot terminal that needs NO confirm: static, pose-independent
+    // geometry, so both ends already agree (ADR-0021's invariant). Recorded on the client so the
+    // analyzer can close the lifecycle of a shot that simply never reached armor.
+    if !shorted
+        && !deposit
+        && let Some(shot) = shot
+    {
+        crate::shot_trace::record(
+            shot_trace,
+            "end",
+            now,
+            shot.0,
+            || json!({ "why": "terrain" }),
+        );
+    }
+}
+
+/// Whether the round stops dead at its first surface, `hit`, with no crossing resolved, and the
+/// struck [`Impact`] it shows at `entry`: under the MG short-circuit, or where the hit's ancestry
+/// holds no ballistic volume, which is terrain. The caller stops the flight at `entry`.
+fn stops_unresolved(
+    shell: &MarchingShell,
+    world: &ProjectileMarchWorld,
+    hit: avian3d::prelude::RayHitData,
+    entry: Vec3,
+    shortcircuit: bool,
+    tick: &mut MarchTick,
+) -> bool {
+    let MarchTick { now, deposit, .. } = *tick;
+    let (shot_trace, commands) = (&mut *tick.shot_trace, &mut *tick.commands);
+    let shot = shell.shot;
+    // EXPERIMENTAL B-arm (`SPIKE_MG_SHORTCIRCUIT`): a sub-20 mm round stops dead at the
+    // first surface, skipping the entire penetration-resolution march below
+    // (thickness/span probes, ricochet, spall, HP). Population-preserving — same
+    // despawn-on-contact as the live path — so the A−B tick-cost delta isolates the
+    // resolution machinery. Default off (see the type).
+    if shortcircuit && shell.projectile.caliber() < MG_SHORTCIRCUIT_CALIBER_MAX {
+        // Classify the first surface from the hit's volume ancestry (the same
+        // `hit_ancestor` rule the full march uses just below) so the read is honest even in
+        // the B-arm. The short-circuit stops dead without resolving penetration, so
+        // `Struck`.
+        let surface = if world.armour(hit.entity).is_some() {
+            ImpactSurface::Armor
+        } else {
+            ImpactSurface::Terrain
+        };
+        commands.trigger(Impact {
+            position: entry,
+            normal: hit.normal,
+            caliber: shell.projectile.caliber(),
+            surface,
+            outcome: ImpactOutcome::Struck,
+        });
+        return true;
+    }
+
+    // The struck `BallisticVolume` sits on the hit's ancestry (`hit_ancestor`, the shared
+    // hierarchy-resolution rule). No volume in the ancestry ⇒ classified terrain (an
+    // Armor-layer entity without ownership). The crossing itself finds every volume for
+    // itself; this read only tells armour from terrain.
+    if world.armour(hit.entity).is_none() {
+        commands.trigger(Impact {
+            position: entry,
+            normal: hit.normal,
+            caliber: shell.projectile.caliber(),
+            surface: ImpactSurface::Terrain,
+            outcome: ImpactOutcome::Struck,
+        });
+        // A terrain stop is the one shot terminal that needs NO confirm: static,
+        // pose-independent geometry, so both ends already agree (ADR-0021's invariant).
+        // Recorded on the client so the analyzer can close the lifecycle of a shot that
+        // simply never reached armor, instead of filing it as never-consumed.
+        if !deposit && let Some(shot) = shot {
+            crate::shot_trace::record(
+                shot_trace,
+                "end",
+                now,
+                shot.0,
+                || json!({ "why": "terrain" }),
+            );
+        }
+        return true;
+    }
+    false
+}
+
+/// How a replica's armour contact ends the sweep that met it ([`replica_contact`]).
+enum ReplicaSweep {
+    /// The flight re-seeded from the authority's bounce; the step marches on.
+    Reseeded,
+    /// The round stops at the contact.
+    Stopped,
+    /// A keyed shell holds at the contact for the authority's verdict.
+    Holding,
+}
+
+/// A REPLICA's armour contact at `entry` on `hit`, resolved by [`resolve_replica_armor_contact`]:
+/// a buffered bounce re-seeds `flight` from authority truth, charged to the step's `budget`.
+/// `flight` is as the sweep that met the contact left it, so its direction is the heading the
+/// face was struck on. A stopped or holding round is left for the caller to stop at `entry`.
+fn replica_contact(
+    shell: &mut MarchingShell,
+    flight: &mut resolve::Flight,
+    budget: &mut resolve::Budget,
+    hit: avian3d::prelude::RayHitData,
+    entry: Vec3,
+    radius: f32,
+    tick: &mut MarchTick,
+) -> ReplicaSweep {
+    let MarchTick {
+        sanctioned, now, ..
+    } = *tick;
+    let (shot_trace, commands) = (&mut *tick.shot_trace, &mut *tick.commands);
+    let dir = flight.direction;
+    let hit_normal = hit.normal;
+    match resolve_replica_armor_contact(
+        shell, entry, hit.normal, sanctioned, now, shot_trace, commands,
+    ) {
+        ReplicaArmorContact::Reseed {
+            origin,
+            direction,
+            speed: sanctioned_speed,
+        } => {
+            // The same step limits the authority's crossings are held to, charged from
+            // the flight's position.
+            if let Err(error) = budget.charge(hit.distance + MARCH_EPS) {
+                warn_once!(
+                    "ballistics: a replica's step ran out of its limits, stopping the \
+                     round: {error:?}"
+                );
+                return ReplicaSweep::Stopped;
+            }
+            if let Some(new_dir) = direction {
+                // Carry the sampling basis through the sanctioned bend, exactly as the
+                // authority's own ricochet does. A replica that re-seeds on server
+                // truth without transporting its frame keeps a basis built for the
+                // INCOMING heading — one whose vectors have a component along the new
+                // travel axis, so its ring samples sit in front of and behind the disc
+                // rather than across it.
+                flight.frame = flight.frame.transport(Vec3::from(dir), Vec3::from(new_dir));
+                flight.direction = new_dir;
+            }
+            flight.speed = sanctioned_speed;
+            flight.continuation = None;
+            // Lift the shell's BODY clear of the face it bounced off and nudge it off
+            // along the new heading, exactly as the authority's own ricochet does
+            // (`resolve::Bounce::resume`). At oblique incidence a disc's lateral
+            // offsets lie mostly along the struck surface's normal, so resuming at the
+            // contact point leaves half the ring behind the face and first contact
+            // fires again on the very surface just left — which on a replica means
+            // holding for a keyframe that was already consumed. The lift clears that
+            // face only; the fresh disc's membership against everything else is
+            // established before it sweeps (`resolve::Flight::settle`). The RECORDED
+            // bounce point is untouched; only where the march resumes moves.
+            flight.position = origin
+                + Vec3::new(hit_normal.x, hit_normal.y, hit_normal.z).normalize_or_zero() * radius
+                + flight.direction * MARCH_EPS;
+            ReplicaSweep::Reseeded
+        }
+        ReplicaArmorContact::Stopped => ReplicaSweep::Stopped,
+        ReplicaArmorContact::Holding => ReplicaSweep::Holding,
+    }
+}
+
+/// AUTHORITY: a union walk that failed stops the round at its contact, `entry`: logged, its record
+/// marked [`ArmourMark::Failed`] so it opens no pen cam, and a struck armour [`Impact`] shown
+/// there. The caller stops the flight at `entry`.
+fn walk_failed(
+    shell: &mut MarchingShell,
+    hit: Option<avian3d::prelude::RayHitData>,
+    entry: Vec3,
+    contact_normal: Vec3,
+    error: &walk::WalkError,
+    commands: &mut Commands,
+) {
+    error!(
+        shot = ?shell.shot.map(|shot| shot.0),
+        shell = ?shell.entity,
+        struck = ?hit.map(|hit| hit.entity),
+        ?error,
+        "ballistics: union walk failed, stopping the round at contact; it opens no \
+         pen cam"
+    );
+    shell.marks.log.push(ArmourMark::Failed);
+    commands.trigger(Impact {
+        position: entry,
+        normal: contact_normal,
+        caliber: shell.projectile.caliber(),
+        surface: ImpactSurface::Armor,
+        outcome: ImpactOutcome::Struck,
+    });
 }
 
 /// End the step at a fresh start whose membership could not be established

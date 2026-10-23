@@ -920,6 +920,17 @@ impl Field {
     }
 }
 
+/// One step of the union field's maximum factor, at a batch of crossings sharing one exact `t`:
+/// the maximum before and after the batch, and the summed normals of its entries and of its exits
+/// (`None` where the batch held none).
+struct Transition {
+    t: f64,
+    before: f32,
+    after: f32,
+    entry_normal: Option<Vec3>,
+    exit_normal: Option<Vec3>,
+}
+
 /// Walk one sample ray: reduce topology, build presence, integrate the union field, ε-weld the runs
 /// and emit the boundary events.
 pub fn walk_ray(
@@ -980,6 +991,76 @@ pub fn walk_ray(
             .then(a.contact.cmp(&b.contact))
     });
 
+    let (intervals, transitions) = integrate_field(sample, corridor, &crossings, volumes)?;
+    let (spans, cost) = canonical_spans(corridor, volumes, &transitions)?;
+    let raw_runs = raw_runs(&spans);
+
+    // Boundary normals, looked up by the transition that opens/closes each run.
+    let normal_at = |t: f64, entry: bool| -> Vec3 {
+        transitions
+            .iter()
+            .filter(|transition| transition.t == t)
+            .find_map(|transition| {
+                if entry {
+                    transition.entry_normal
+                } else {
+                    transition.exit_normal
+                }
+            })
+            .map(unit_or_zero)
+            // A run that opens at the corridor origin (declared initial presence) has no entry face
+            // in this corridor; the incoming axis is the honest stand-in — the same fallback the
+            // serial resolver uses for a degenerate normal.
+            .unwrap_or(if entry { -corridor.axis } else { corridor.axis })
+    };
+
+    let runs = weld_runs(
+        sample, corridor, &spans, &raw_runs, &intervals, &normal_at, laws,
+    )?;
+    let events = boundary_events(corridor, &runs);
+    let presence = entity_presence(&intervals, volumes)?;
+    let layers = layers(corridor.length as f64, &presence, volumes)?;
+
+    let mut by_shell: BTreeMap<ShellKey, Vec<(f64, f64)>> = BTreeMap::new();
+    for (key, open, close) in &intervals {
+        by_shell.entry(*key).or_default().push((*open, *close));
+    }
+    let shells = by_shell
+        .into_iter()
+        .map(|(key, mut spans)| {
+            spans.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
+            // The field opened a declared shell at the corridor origin, which is where its CHORD
+            // starts; its ENTRY is the seed's, and lies behind the origin.
+            if corridor.initial_presence.contains(&key)
+                && let Some(first) = spans.first_mut()
+            {
+                first.0 = f64::NEG_INFINITY;
+            }
+            ShellPresence { key, spans }
+        })
+        .collect();
+
+    Ok(RayWalk {
+        spans,
+        runs,
+        cost,
+        presence,
+        shells,
+        events,
+        layers,
+    })
+}
+
+/// Integrate the union field along `crossings` (sorted by exact `t`), opened on the corridor's
+/// declared initial presence: the per-shell presence intervals, in close order, and the
+/// transitions where the field's maximum factor steps. Every shell the field opens closes inside
+/// the corridor, or the walk fails.
+fn integrate_field(
+    sample: usize,
+    corridor: &RayCorridor,
+    crossings: &[Crossing],
+    volumes: &VolumeTable,
+) -> Result<(Vec<(ShellKey, f64, f64)>, Vec<Transition>), WalkError> {
     let mut field = Field {
         open: BTreeMap::new(),
         per_entity: BTreeMap::new(),
@@ -993,13 +1074,6 @@ pub fn walk_ray(
 
     // Per-shell presence intervals, in close order.
     let mut intervals: Vec<(ShellKey, f64, f64)> = Vec::new();
-    struct Transition {
-        t: f64,
-        before: f32,
-        after: f32,
-        entry_normal: Option<Vec3>,
-        exit_normal: Option<Vec3>,
-    }
     let mut transitions: Vec<Transition> = Vec::new();
 
     let mut i = 0usize;
@@ -1100,8 +1174,17 @@ pub fn walk_ray(
         });
     }
 
-    // Canonical spans. Cut ONLY at factor changes, so equal-factor abutment and one thick plate
-    // produce the identical span list and therefore the identical cost bits.
+    Ok((intervals, transitions))
+}
+
+/// The canonical spans over `[0, length)`, and their summed cost. Cut ONLY at factor changes, so
+/// equal-factor abutment and one thick plate produce the identical span list and therefore the
+/// identical cost bits.
+fn canonical_spans(
+    corridor: &RayCorridor,
+    volumes: &VolumeTable,
+    transitions: &[Transition],
+) -> Result<(Vec<Span>, f32), WalkError> {
     let mut spans: Vec<Span> = Vec::new();
     let mut cursor = 0.0f64;
     let mut factor = if transitions.is_empty() {
@@ -1110,7 +1193,7 @@ pub fn walk_ray(
     } else {
         transitions[0].before
     };
-    for transition in &transitions {
+    for transition in transitions {
         if transition.t > cursor {
             spans.push(Span {
                 start: cursor,
@@ -1136,8 +1219,11 @@ pub fn walk_ray(
         }
     }
     let cost = cost_acc as f32;
+    Ok((spans, cost))
+}
 
-    // Runs: maximal stretches of factor > 0, as index ranges into `spans`.
+/// The runs of `spans`: maximal stretches of factor > 0, as index ranges into `spans`.
+fn raw_runs(spans: &[Span]) -> Vec<(usize, usize)> {
     let mut raw_runs: Vec<(usize, usize)> = Vec::new();
     let mut open: Option<usize> = None;
     for (index, span) in spans.iter().enumerate() {
@@ -1150,61 +1236,7 @@ pub fn walk_ray(
     if let Some(start) = open.take() {
         raw_runs.push((start, spans.len()));
     }
-
-    // Boundary normals, looked up by the transition that opens/closes each run.
-    let normal_at = |t: f64, entry: bool| -> Vec3 {
-        transitions
-            .iter()
-            .filter(|transition| transition.t == t)
-            .find_map(|transition| {
-                if entry {
-                    transition.entry_normal
-                } else {
-                    transition.exit_normal
-                }
-            })
-            .map(unit_or_zero)
-            // A run that opens at the corridor origin (declared initial presence) has no entry face
-            // in this corridor; the incoming axis is the honest stand-in — the same fallback the
-            // serial resolver uses for a degenerate normal.
-            .unwrap_or(if entry { -corridor.axis } else { corridor.axis })
-    };
-
-    let runs = weld_runs(
-        sample, corridor, &spans, &raw_runs, &intervals, &normal_at, laws,
-    )?;
-    let events = boundary_events(corridor, &runs);
-    let presence = entity_presence(&intervals, volumes)?;
-    let layers = layers(corridor.length as f64, &presence, volumes)?;
-
-    let mut by_shell: BTreeMap<ShellKey, Vec<(f64, f64)>> = BTreeMap::new();
-    for (key, open, close) in &intervals {
-        by_shell.entry(*key).or_default().push((*open, *close));
-    }
-    let shells = by_shell
-        .into_iter()
-        .map(|(key, mut spans)| {
-            spans.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
-            // The field opened a declared shell at the corridor origin, which is where its CHORD
-            // starts; its ENTRY is the seed's, and lies behind the origin.
-            if corridor.initial_presence.contains(&key)
-                && let Some(first) = spans.first_mut()
-            {
-                first.0 = f64::NEG_INFINITY;
-            }
-            ShellPresence { key, spans }
-        })
-        .collect();
-
-    Ok(RayWalk {
-        spans,
-        runs,
-        cost,
-        presence,
-        shells,
-        events,
-        layers,
-    })
+    raw_runs
 }
 
 /// The ordered encounters over `[0, length)`: cut at every presence boundary, each listing the
@@ -2221,11 +2253,61 @@ fn build_event(
     let entry_position = entry_position / covered as f32;
     let exit_position = exit_position / covered as f32;
 
-    // Disc-mean cost readout, accumulated over the union of every contributing sample's canonical
-    // span boundaries; between two of them every sample's factor is constant, so the mean slope is
-    // exact.
+    let cost = disc_mean_cost(walks, &by_sample, start, end, k);
+    let encounters = encounters(walks, &by_sample, start, end, k);
+    let shares = entity_shares(walks, &by_sample, k);
+    let (exits, exit_covered) = body_exits(corridor, walks, &by_sample);
+
+    let mut primitives: Vec<PrimitiveKey> = by_sample
+        .iter()
+        .flat_map(|(sample, runs)| {
+            runs.iter()
+                .flat_map(move |run| walks[*sample].runs[*run].primitives.iter().copied())
+        })
+        .collect();
+    primitives.sort();
+    primitives.dedup();
+
+    let Some(entrance_volume) = entrance_volume else {
+        // Defensive: a cluster is built from at least one welded run, and every run names the
+        // volume whose shell opens it. A stand-in entity here would be an event with no owner,
+        // spending capability and marking a penetration against nothing.
+        return Err(WalkError::BadCorridor {
+            sample: 0,
+            reason: "a disc crossing cluster holds no run",
+        });
+    };
+    Ok(DiscEvent {
+        start,
+        end,
+        entrance_volume,
+        primitives,
+        entry_normal,
+        entry_position,
+        exit_normal,
+        exit_position,
+        coverage,
+        exit_coverage: (exit_covered as f64 / kf) as f32,
+        cost,
+        encounters,
+        exits,
+        shares,
+    })
+}
+
+/// The disc-mean cost of one crossing over `[start, end]`, accumulated over the union of every
+/// contributing sample's canonical span boundaries; between two of them every sample's factor is
+/// constant, so the mean slope is exact.
+fn disc_mean_cost(
+    walks: &[RayWalk],
+    by_sample: &BTreeMap<usize, Vec<usize>>,
+    start: f64,
+    end: f64,
+    k: usize,
+) -> f32 {
+    let kf = k as f64;
     let mut breaks: Vec<f64> = vec![start, end];
-    for (&sample, runs) in &by_sample {
+    for (&sample, runs) in by_sample {
         for &run in runs {
             let extent = &walks[sample].runs[run];
             let spans = &walks[sample].spans;
@@ -2249,7 +2331,7 @@ fn build_event(
         let (a, b) = (window[0], window[1]);
         let mid = 0.5 * (a + b);
         let mut slope = 0.0f64;
-        for (&sample, runs) in &by_sample {
+        for (&sample, runs) in by_sample {
             // The CANONICAL spans carry the field, welded voids included at factor 0 — reading the
             // material segments instead would smear steel across a deleted gap, and welding deletes
             // faces, never material (§13.4).
@@ -2270,12 +2352,18 @@ fn build_event(
         }
         total += (b - a) * slope / kf;
     }
-    let cost = total as f32;
-    let encounters = encounters(walks, &by_sample, start, end, k);
+    total as f32
+}
 
-    // Per-entity shares, unioned per sample then averaged over the disc.
+/// The per-entity shares of one crossing, unioned per sample then averaged over the disc.
+fn entity_shares(
+    walks: &[RayWalk],
+    by_sample: &BTreeMap<usize, Vec<usize>>,
+    k: usize,
+) -> Vec<EntityShare> {
+    let kf = k as f64;
     let mut shares: BTreeMap<Entity, (f32, Vec<(f64, f64)>, BTreeSet<usize>)> = BTreeMap::new();
-    for (&sample, runs) in &by_sample {
+    for (&sample, runs) in by_sample {
         let (lo, hi) = (
             walks[sample].runs[runs[0]].start,
             walks[sample].runs[runs[runs.len() - 1]].end,
@@ -2295,7 +2383,7 @@ fn build_event(
             }
         }
     }
-    let shares = shares
+    shares
         .into_iter()
         .map(|(entity, (factor, spans, samples))| {
             let chord: f64 = spans.iter().map(|(a, b)| *b - *a).sum::<f64>() / kf;
@@ -2307,13 +2395,20 @@ fn build_event(
                 coverage: (samples.len() as f64 / kf) as f32,
             }
         })
-        .collect();
+        .collect()
+}
 
-    // Body exits, per sample, then grouped over the disc ([`BodyExit`]).
+/// The body exits of one crossing, per sample, then grouped over the disc ([`BodyExit`]) and
+/// ordered by mean exit depth; with the number of samples one of whose runs exits material.
+fn body_exits(
+    corridor: &DiscCorridor,
+    walks: &[RayWalk],
+    by_sample: &BTreeMap<usize, Vec<usize>>,
+) -> (Vec<BodyExit>, usize) {
     let mut exit_groups: BTreeMap<(Vec<SubstanceId>, bool, usize), Vec<ExitMember>> =
         BTreeMap::new();
     let mut exit_covered = 0usize;
-    for (&sample, runs) in &by_sample {
+    for (&sample, runs) in by_sample {
         let base = corridor.origin + corridor.samples[sample].offset;
         let mut ordinals: BTreeMap<(Vec<SubstanceId>, bool), usize> = BTreeMap::new();
         let mut member = |substances: Vec<SubstanceId>,
@@ -2406,42 +2501,7 @@ fn build_event(
         exit.members.iter().map(|m| m.end).sum::<f64>() / exit.members.len() as f64
     };
     exits.sort_by(|a, b| mean_end(a).total_cmp(&mean_end(b)));
-
-    let mut primitives: Vec<PrimitiveKey> = by_sample
-        .iter()
-        .flat_map(|(sample, runs)| {
-            runs.iter()
-                .flat_map(move |run| walks[*sample].runs[*run].primitives.iter().copied())
-        })
-        .collect();
-    primitives.sort();
-    primitives.dedup();
-
-    let Some(entrance_volume) = entrance_volume else {
-        // Defensive: a cluster is built from at least one welded run, and every run names the
-        // volume whose shell opens it. A stand-in entity here would be an event with no owner,
-        // spending capability and marking a penetration against nothing.
-        return Err(WalkError::BadCorridor {
-            sample: 0,
-            reason: "a disc crossing cluster holds no run",
-        });
-    };
-    Ok(DiscEvent {
-        start,
-        end,
-        entrance_volume,
-        primitives,
-        entry_normal,
-        entry_position,
-        exit_normal,
-        exit_position,
-        coverage,
-        exit_coverage: (exit_covered as f64 / kf) as f32,
-        cost,
-        encounters,
-        exits,
-        shares,
-    })
+    (exits, exit_covered)
 }
 
 /// The layers of `layers` (one sample's, which tile its corridor in order) that touch
