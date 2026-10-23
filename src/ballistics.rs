@@ -36,6 +36,9 @@ mod mechanism;
 /// calibration, the field's HP points per reference-mm.
 pub(crate) mod spall_cone;
 
+/// The sturdiness classes HP pools are authored from: HP points per m² of a box's mean face.
+pub(crate) mod box_classes;
+
 /// The §13 walk driven against the live world: corridor collection, the staged `begin`/`finish`, and
 /// the mapping from its declarative plan onto this module's impacts, spall, damage and impulses.
 mod resolve;
@@ -1349,6 +1352,8 @@ pub fn sim_plugin(app: &mut App) {
     // the app is built, so a malformed file stops startup rather than the first throw.
     spall_cone::ConeShape::shipped();
     spall_cone::hp_per_reference_mm();
+    // So are the sturdiness classes the tank files' pools are authored from.
+    box_classes::BoxClasses::shipped();
     app.init_resource::<RetainSpentShells>()
         .init_resource::<MarchMode>()
         .insert_resource(MgShortCircuit(crate::env_flag(
