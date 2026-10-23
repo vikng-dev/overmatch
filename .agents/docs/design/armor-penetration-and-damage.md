@@ -211,7 +211,8 @@ is the most any one box can take from a cone — every direction doses a box at 
 directions' weights emit `S/2` (**Sampling**) — so a gated cone could not have cost any box a
 point. The gate adds no constant: it is the HP quantum.
 
-**Strength.** `S = spend × κ × (v_exit / v_entry)² × (d / d_ref)²` (reference-mm, on the axis).
+**Strength.** `S = spend × κ × (v_exit / v_entry)² × (d / d_ref)²` (reference-mm; the cone emits
+`S/2` in all, **Sampling**).
 `spend` is what the round's mechanism spent crossing that body (its readout drop, η-weighted by
 the disc); `v_entry`, `v_exit` are the round's speeds entering and leaving it. `κ = f_rear / f_ref`
 is the debris competence of the exit material (owner, 2026-10-17): `f_rear` the resistance factor
@@ -228,14 +229,25 @@ IEEE arithmetic), so a reference-calibre cone keeps its bits; two rounds of diff
 through one plate throw different cones. DERIVED: the Pzgr. 40's 35.7 mm core gives 0.165, a
 7.9 mm machine-gun round 0.0081.
 
-**Profile.** Shipped: **even** — every direction of the cone carries the same strength, `S/2`
-(owner, 2026-10-17): the player controls the shell and learns the cone's shape; a fade across the
-angle is nuance outside his control. Kept as a data dial (playtest fork F6, `profile: Linear`):
+**Profile — the ball law** (owner, 2026-10-23, night; decision record
+`.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md`, the law
+in `shape-law.md` §1.2 beside it). The debris leaves the exit with sideways speeds spread evenly
+through a ball about its forward speed, the greatest `1/λ` of it. The share of the emission inside
+polar angle `θ` of the axis is
 
-> `s(θ) = S · (cos θ − cos α) / (1 − cos α)` inside the cone, `0` outside,
+> `F(μ) = 1 − μ·D³`, `μ = cos θ`, `D = sqrt(1 − λ²(1 − μ²))`,
 
-strongest on the axis and zero at the rim, the measured fall-off of fragment fluence off the debris
-axis; the same emitted total.
+0 on the axis and 1 at the rim `α = asin(1/λ)`; per steradian the field is
+`p_Ω = D(D² + 3λ²μ²) / (2π)`, brightest on the axis and nothing at the rim. The exponent 3 is the
+law (a ball of speeds), not data: another profile is another law. A cone's `λ` is its exit layer's
+substance's (**Data**), so its half-angle is the exit material's. A cone carries its law and `λ` as
+its **field descriptor** (a law id and one `f32`) in the shot record and on the wire, and the
+client rebuilds every direction and weight from it (`src/damage_cam/wire.rs`); a ratio below 1, a
+field over the whole sphere, is representable and refused by this law (the APHE burst adds it). The
+on-axis weight is half the centre weight `(1 + 3λ²)(1 − cos α)`: through RHA (26.2°) the axis
+direction carries about `0.84 S` and the outermost of 64 about `0.05 S`, so an on-axis box takes
+about 1.7× what an even profile gave it, one near the rim a graze, one at an average spot the same
+(DERIVED). The even/linear dial (playtest fork F6) retired with it.
 
 **Axis.** At a genuine exit (material to air through a rear face), `normalize(n_rear + d_exit)`,
 `n_rear` the face's outward normal and `d_exit` the round's direction; at an internal step (no face
@@ -243,11 +255,14 @@ of its own), `d_exit`. ENGINEERING ASSUMPTION with MEASURED support (Verolme 199
 1967: 25° measured against 22.5° predicted at 45° obliquity).
 
 **Sampling.** `N` directions in equal-solid-angle strata, `μ_k = cos θ_k = 1 − (1 − cos α)(k + ½)/N`,
-golden-angle azimuth, each standing for `1/N` of the cone. The emitted total `(1/N) Σ s_k` is `S/2`
-at every `N` under either profile (the midpoint rule is exact on a profile linear in `cos θ`): `N`
-is resolution, never balance. Shipped `N` = 64 (owner, 2026-10-17), the throw's cost against its
-resolution (one throw MEASURED at each count in `assets/ballistics/spall_cone.ron`'s provenance). The strata are generated with `libm` so their
-bits match on every shipped target.
+golden-angle azimuth, each standing for `1/N` of the cone. Direction `k` carries `s_k = S·f_k`, its
+weight `f_k = (N/2)[F(e_{k+1}) − F(e_k)]` its stratum's exact share of the emission between the
+stratum's edges `e_j = 1 − (1 − cos α) j / N`, so the emitted total `(1/N) Σ s_k` telescopes to
+`S/2` at every `N`: `N` is resolution, never balance. Shipped `N` = 64 (owner, 2026-10-17), the
+throw's cost against its resolution (one throw MEASURED at each count in
+`assets/ballistics/spall_cone.ron`'s provenance). The azimuths are generated once with `libm`; a
+cone's `μ_k`, `sin θ_k` and `f_k` are built from its `λ` with IEEE arithmetic and `sqrt` alone, so
+their bits match on every shipped target and a decoder rebuilds them from the descriptor.
 
 **Shadowing and reach.** A direction's strength is constant in air — no drag, no range — and it
 doses only the struck tank's boxes (hitting another tank is a preserved alternative). Shipped:
@@ -279,11 +294,14 @@ cone) becomes whole HP points once, on its total (§6). Every field deposit, to 
 witness alike, enters that total at the field's own calibration (`hp_per_reference_mm` in
 `spall_cone.ron`, TUNED 70 HP points per reference-mm against the line's 10) and nothing on the
 line or a bounce's shock does; `S` stays in reference-mm, so the calibration sets every cone's
-potency at once and the HP quantum gate tests `S/2` at it. A box of face `A` fully inside the cone
-has the knockout radius `R = sqrt(E A / (pool Ω_c))`, `Ω_c = 2π(1 − cos α)`: the same for every
-box of a class whose pool is class × `A` (§6), and on a weak ordinary perforation about 2 m for the
-30 HP crew pool at the intended humanoid's 0.2 m² face, 3.2 m at the placeholder crew box's
-0.516 m² (DERIVED in `spall_cone.ron`). Dose summed over boxes is not conserved under the partial passage (two thin
+potency at once and the HP quantum gate tests `S/2` at it. A box of face `A` fully inside the cone,
+`θ` off its axis, has the knockout radius `R = sqrt(2 f(θ) E A / (pool Ω_c))`, `E = S/2`,
+`Ω_c = 2π(1 − cos α)` and `f(θ)` the ball's weight there (½ averaged over the cone): the same for
+every box of a class whose pool is class × `A` (§6). On a weak ordinary perforation through RHA, for
+the 30 HP crew pool at the intended humanoid's 0.2 m² face, it is about 1.9 m at an average spot and
+2.5 m on the axis, 3.1 m and 4.0 m at the placeholder crew box's 0.516 m² (DERIVED in
+`spall_cone.ron`). The rate stays 70 under the ball (owner, 2026-10-23, night): lowering it to hold
+the on-axis radius would weaken every cone. Dose summed over boxes is not conserved under the partial passage (two thin
 boxes in line both take nearly full strength); the emitted budget is.
 
 **Potency colour.** The pen cam colours a field by its potency, never by a display gain (decision
@@ -302,29 +320,39 @@ of mid and below; the span TUNED), the field teal exactly at mid (`u = 0`), the 
 at bright and above (`u = log2(T_bright / T_mid)`, 1 with the shipped classes, DERIVED), a monotone
 cubic between, so it is smooth and never falls as `I` rises. Along a direction the intensity
 reaches mid at `sqrt(ρ s / (Ω_c T_mid))` and bright at `sqrt(ρ s / (Ω_c T_bright))` from the origin,
-where that is short of the direction's reach; on the s1 record (`S` = 10.18 reference-mm, flat
-`s = S/2`) bright ends at 1.42 m and mid at 2.01 m (DERIVED), the crew knockout radius above. The
+where that is short of the direction's reach; on the s1 record (`S` = 10.18 reference-mm through
+RHA) bright ends at 1.76 m and mid at 2.48 m along the axis direction (`s = 0.84 S`), and at
+1.36 m and 1.92 m where `s = S/2` (DERIVED), the crew knockout radii above. The
 promise, white is bright and teal is mid: a hard box whose face lies wholly at white has its pool
 emptied, and a crew station at the intended humanoid's face wholly at teal or whiter is knocked out.
 A box only partly inside the cone takes that intensity over that part alone, so a white patch on a
-box with HP left is no contradiction (s1's transmission: one direction ends on it, at 1.35 m, white,
-DERIVED from the record; 6 of its 479 HP points lost). The pen cam draws each cone as one
+box with HP left is no contradiction (s1's `Ammo_L_1`: one direction ends on it at 1.15 m, white,
+DERIVED from the record; 36 of its 72 HP points lost). The pen cam draws each cone as one
 translucent volume inside its reach surface (`src/damage_cam/pen_cam/field.rs`, `reach_mesh`;
 `assets/shaders/pen_cam_look.wgsl`, `volume`): a pixel takes the mean colour along the eye ray's
 path inside the field, at an opacity that climbs with that path's length, so the colour says the
 potency and the opacity the thickness. Every surface the field met is tinted in the colour at its
 own point and lined along the cone's edge. Volume and surfaces read one disc baked from the
-record's directions. The calibration is provisional until the emergent shape lands.
+record's directions. The calibration stays provisional until the scenarios re-recorded under the
+ball are seen (owner, 2026-10-23, night).
 
-**Data.** `α`, the axis rule, `N`, the profile and the passage live in
-`assets/ballistics/spall_cone.ron`, parsed and validated while the app is built (ADR-0014: built
-from data, synchronously); a half-angle whose `cos α` rounds to 1, or a shape not emitting `S/2`
-within the rounding of its weights, is refused. `α` = 25° is TUNED/provisional (owner 2026-10-12;
-MEASURED normal-impact outer extents ~26°, Qi et al. 2026). The half-angle and the axis are playtest
-fork F5, the profile and the passage F6 (`.agents/scratch/playtest-forks/README.md`).
+**Data.** The axis rule, `N` and the passage live in `assets/ballistics/spall_cone.ron`, parsed
+and validated while the app is built (ADR-0014: built from data, synchronously). A cone's ratio is
+its exit layer's substance's: every hard substance authors `debris_half_angle_deg`
+(`assets/materials/materials.ron`, `λ = 1/sin α`), refused at load outside `(0°, 90°]`. The exit
+layer is the one `κ` reads, the body's last before the exit; where volumes overlap in it, the cone
+takes the one of highest factor, the larger ratio between equals. RHA's 26.2° is the constant-angle
+fit of the MEASURED Qi et al. 2026 normal-impact debris extents (shots 5 and 6, `shape-law.md`
+§2.1–2.2); those are 97 % contours, so the ball's rim may sit up to about 2° wider. Every other hard
+substance authors RHA's value as Unknown until its own extent is measured. A spread whose rim's
+`cos α` rounds to 1, or which does not emit `S/2` within the rounding of its weights, is refused,
+and a throw whose ratio the law refuses throws nothing. The axis is playtest fork F5 (its
+half-angle settled by this), the passage F6 (its profile settled by the ball)
+(`.agents/scratch/playtest-forks/README.md`).
 
 **Class invariants** (tests hold them for any tank and any cone; fixture numbers are fixture data).
-Under every profile and passage: exact emission `S/2` at N ∈ {1, 7, 24, 97}; resolution stability;
+Exact emission `S/2` at every N from 1 to 1024 and every ratio from 1 to 10⁴; under the ball at a
+fixture ratio and every passage: resolution stability;
 homogeneity in `S` where no direction is exhausted; inverse square for an unshadowed thin box;
 factor independence of a box's own dose; shadowing monotone (adding a volume never raises a dose).
 κ is 1 to the bit for the reference and proportional otherwise; a cone below the HP quantum is not
@@ -333,7 +361,10 @@ the first volume it enters, a box there taking its whole strength, armour nothin
 passage: a dose never falls as the strength rises through a plate; shadowing monotone along one
 direction through randomized stacks; a direction pays for the material it starts inside, a nested
 shield shadows, a box inside a traversed volume is dosed, a plate thinner than any nudge is
-charged. The linear profile is maximal on the axis and zero at and past the rim. Witnesses: adding one never
+charged. The ball's weights are its strata's shares of the emission, never grow from the axis to the
+rim, and leave the rim stratum a graze; its continuous weight is zero at and past the rim; a thrown
+cone's field is its exit layer's substance's, and its rays' strengths are `S·f_k` of that field to
+the bit. Witnesses: adding one never
 changes the shell's state, any direction's reach or any hard box's dose; a witness behind a witness
 is dosed as it would be alone. The shipped cone's
 walks, and six whole main-gun shots at the bound tank (exit detection, spends and speeds, strength,

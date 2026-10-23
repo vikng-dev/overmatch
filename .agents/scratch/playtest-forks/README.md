@@ -186,33 +186,37 @@ ADR-0021.
 
 ## F5 — Spall cone half-angle and axis
 
-**Status:** open · default chosen 2026-10-12 (owner) · settle in the damage feel pass
+**Status:** half-angle settled 2026-10-23 (owner): measured, per plate material · axis open,
+default chosen 2026-10-12 (owner) · settle the axis in the damage feel pass
 
 **The question.** How wide is the spall cone thrown from a body exit, and where does it point
 behind an oblique plate? Together they decide which boxes behind a perforation take a dose, and how
 far off the shot line a crewman is safe.
 
-**Default — `α` = 25° (0.436 rad), axis = the bisector.** The axis is
-`normalize(rear-face outward normal + exit direction)` at a genuine exit and the exit direction at
-an internal step. The half-angle is TUNED/provisional: the comparable MEASURED normal-impact outer
-extents are ~26° (Qi et al. 2026). The bisector is an ENGINEERING ASSUMPTION with MEASURED support
-(Verolme 1997; Recht & Howell 1967). Evidence:
+**Settled — the half-angle is the exit material's, measured.** A cone's half-angle is its exit
+layer's substance's `debris_half_angle_deg` (`assets/materials/materials.ron`), the rim of the ball
+law (F6). RHA's 26.2° is the constant-angle fit of the MEASURED Qi et al. 2026 normal-impact debris
+extents (shots 5 and 6; `.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/shape-law.md`
+§2.1–2.2); those are 97 % contours, so the ball's rim may sit up to about 2° wider. Every other
+hard substance authors RHA's value as Unknown until its own extent is measured. The 25° that stood
+before it was chosen at random, and the fixed-angle alternatives (20°, 29°, 35°) retire with it.
+
+**Default — axis = the bisector.** The axis is `normalize(rear-face outward normal + exit
+direction)` at a genuine exit and the exit direction at an internal step. The bisector is an
+ENGINEERING ASSUMPTION with MEASURED support (Verolme 1997; Recht & Howell 1967). Evidence:
 `.agents/scratch/damage-cam-2026-10-08/research/cloud-angle-deep.md` and
 `research/codex-cloud-angle/verdict.md`.
 
 **Alternatives kept alive:**
-- **0.35 rad (~20°) with the exit-direction axis** — the cone as it stood before 2026-10-12: narrower,
-  and straight along the round's path behind an oblique plate.
-- **0.5 rad (~29°)** — wider; the earlier research recommendation, a judgement rather than a fit.
-- **~0.6 rad (35°)** — the median MEASURED maximum extent for steel plates at ordnance speed, if the
-  rim is read as the outermost fragment rather than the low-threshold witness extent.
+- **The exit-direction axis** (`ExitDirection`) — the cone as it stood before 2026-10-12: straight
+  along the round's path behind an oblique plate.
 
-**Why it's a playtest call.** The measurements fix neither the observable the rim corresponds to nor
-the axis at obliquity in the game's regime. Watch whether crew a little off the shot line die too
-often or too rarely, and whether a sloped plate's spall goes where a player expects.
+**Why it's a playtest call.** The measurements do not fix the axis at obliquity in the game's
+regime. Watch whether a sloped plate's spall goes where a player expects, and whether crew a little
+off the shot line are knocked out too often or too rarely.
 
-**Revert cost.** Low — one data edit: `half_angle_deg` and `axis` (`RearNormalBisector` /
-`ExitDirection`) in `assets/ballistics/spall_cone.ron`. Box counts may then want the feel pass again.
+**Revert cost.** Low — one data edit: `axis` (`RearNormalBisector` / `ExitDirection`) in
+`assets/ballistics/spall_cone.ron`. Box counts may then want the feel pass again.
 
 **Lives in.** Design §5 (`.agents/docs/design/armor-penetration-and-damage.md`). Code:
 `src/ballistics/spall_cone.rs` (shape, axis rule, directions) and `throw_spall_cone` in
@@ -220,25 +224,29 @@ often or too rarely, and whether a sloped plate's spall goes where a player expe
 
 ## F6 — Spall field profile and passage (balance dials)
 
-**Status:** default chosen 2026-10-17 (owner) · revisit when spall reads too strong or too weak
+**Status:** profile settled 2026-10-23 (owner): the ball law · passage default chosen 2026-10-17
+(owner) · revisit the passage when spall reads too strong or too weak
 
 **The question.** How is a spall cone's strength spread across its angle, and what happens when a
 direction meets material? Together they decide how much a box behind a perforation takes, and
 whether internals shield what lies behind them. Crew are witnesses under either dial: dosed by
 every direction entering them, never stopping one (ADR-0040).
 
-**Default — even profile, full shadowing.** Every direction of the cone carries the same strength
-(`profile: Flat`), and a direction stops at the first hard body it enters: an armour face (no
-dose) or a hard HP-bearing box (that box takes its whole strength) (`passage: FirstSolid`). Owner's reasoning: the
-player controls the shell and learns the cone's *shape*; a fade across the angle and fragments
-pushing through material are nuance the player can never control, so the game stays consistent and
-learnable without them. The cone's half-angle and axis stay F5.
+**Settled — the ball law.** Sideways debris speeds spread evenly through a ball, from zero to the
+greatest, give a cone brightest on its axis and fading to nothing at its rim
+(`.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/shape-law.md` §1.2): direction
+`k` carries `S·f_k`, about 0.84 S on the axis and 0.05 S at the outermost of 64 strata of RHA's
+26.2° cone (DERIVED), and the cone still emits S/2 in all. Owner decisions 2026-10-23, night
+(`research/ap-aphe-2026-10-23/decision-2026-10-23.md`); the Flat/Linear dial retired with it, and
+another profile is another field law (`FieldLaw`), a code and wire change. The half-angle and axis
+are F5.
+
+**Default — full shadowing.** A direction stops at the first hard body it enters: an armour face (no
+dose) or a hard HP-bearing box (that box takes its whole strength) (`passage: FirstSolid`). Owner's
+reasoning: fragments pushing through material are nuance the player can never control, so the game
+stays consistent and learnable without them.
 
 **Alternatives kept alive (rebalance dials):**
-- **`profile: Linear`** — `s(θ) = S·(cos θ − cos α)/(1 − cos α)`, strongest on the axis and zero
-  at the rim. MEASURED support: per solid angle, hole density peaks at 0–5° up to ~1.5 km/s
-  (Verolme, DERIVED from its annex); deeper witness plates hold only the core (Diederen).
-  Evidence: `.agents/scratch/damage-cam-2026-10-08/research/cloud-angle-deep.md`.
 - **`passage: Partial`** — a direction spends `chord × resistance` through every hard body and doses
   each box it enters at its entry strength, then continues. Graded shadowing (a plate stops it, an
   engine mostly); depends on material data, two values of which are Unknown.
@@ -249,9 +257,9 @@ learnable without them. The cone's half-angle and axis stay F5.
 weak (perforations that do nothing visible) is the trigger; each dial moves that balance in a
 different way.
 
-**Revert cost.** Low — data: `profile` and `passage` in `assets/ballistics/spall_cone.ron` (both
-laws stay in code behind the data). Records and box-count tuning want the feel pass again.
+**Revert cost.** Low — data: `passage` in `assets/ballistics/spall_cone.ron` (both passages stay in
+code behind the data). Records and box-count tuning want the feel pass again.
 
 **Lives in.** Design §5 (`.agents/docs/design/armor-penetration-and-damage.md`). Code:
 `src/ballistics/spall_cone.rs` and `field_direction` in `src/ballistics/resolve.rs`. Captures of
-the shipped law: `.agents/scratch/damage-cam-2026-10-08/demo/capture/looktest/field-final.*`.
+the even profile the ball replaced: `.agents/scratch/damage-cam-2026-10-08/demo/capture/looktest/field-final.*`.
