@@ -17,24 +17,35 @@
 //                 from `span.x` to `span.y` (world m) by `state.w` (the share lost) times the fade;
 //                 with `span.z = 0` (no known heights) the fill covers the mesh once the fade is on.
 //                 Its field footprint tints it over the fill.
-//   4 shell       one potency band's shell of a spall field (design doc §5, "Potency bands"):
-//                 `color.rgb` at gain `color.a`, `shade.x` of it face-on rising to the whole at a
-//                 grazing angle by power `shade.z`. Additive; the material says whether it is
-//                 occluded.
+//   4 volume      one spall field's volume (`volume`), drawn on the back faces of its reach
+//                 surface, where the eye ray leaves it: the ray is marched back toward the eye in
+//                 steps of `volume.z` (m), at most `VOLUME_STEPS`, while it stays inside the field
+//                 (`sample`: inside the cone, behind the front, within the disc's reach, on the
+//                 cut's kept side), where the ray enters it refined by `VOLUME_REFINE` halvings,
+//                 the eye the end if it lies inside. The pixel takes the length-weighted mean of
+//                 `ramp` at every sample's intensity, at opacity
+//                 `volume.x · (1 − exp(−L / volume.y))` for `L` the length marched inside, times
+//                 the fade. Field 0's lanes alone.
 //
 // In every mode, `mode.y = 1` discards what lies on `plane`'s normal side (the slice's cut).
 //
-// Base and state surfaces carry the spall fields' footprint (`footprint`; design doc §5, "Potency
-// bands"): for each of the fields (`fields.x`, none at 0; `prints`), a surface point facing the
-// origin, inside the cone, behind its front and no farther than its direction's reach on the
-// field's disc (`disc`, with the slack `foot.zw`) takes the field's intensity there, emission over
-// the squared distance. The summed intensity's potency band (`bands`: the mid and bright
-// thresholds) fills the point in that band's tint (`tints`: dim, mid, bright; a: the fill's
-// opacity), and lines `foot.x` px wide at opacity `foot.y` mark where the band changes and where
-// the angle from a cone's axis crosses its half-angle. No lane the band is read from carries a
-// display gain.
+// The potency colour (`ramp`; design doc §5, "Potency colour") is one function of intensity
+// alone: a monotone cubic in `u = log2(I / T_mid)` through three anchors (`ramp[0..3]`: rgb, and
+// `u` in w), level at the ends and at the middle anchor of slope `ramp[3].rgb`, `ramp[3].w` the
+// mid threshold `T_mid`; `potency::Ramp` is the same curve. A spall field's intensity at a point
+// is the emission at its direction on the disc over the squared distance from its origin.
 //
-// Output: straight `rgb, a`; additive (shell) `rgb` with alpha 0.
+// Base and state surfaces carry the spall fields' footprint (`footprint`): for each of the fields
+// (`fields.x`, none at 0; `prints`), a surface point facing the origin, inside the cone, behind its
+// front and no farther than its direction's reach on the field's disc (`disc`, with the slack
+// `foot.zw`) takes the field's intensity there. The fields' summed intensity fills the point in
+// its potency colour at opacity `thresholds.w`; lines `foot.x` px wide at opacity `foot.y` mark
+// where the angle from a cone's axis crosses its half-angle, in the potency colour there, and,
+// with `thresholds.z = 1`, where the summed intensity crosses the mid threshold (`thresholds.x`)
+// and the bright (`thresholds.y`), in the ramp's deep anchor. No lane the colour is read from
+// carries a display gain.
+//
+// Output: straight `rgb, a`.
 
 #import bevy_pbr::{forward_io::Vertex, mesh_functions, mesh_view_bindings::view}
 
@@ -63,10 +74,15 @@ struct LookParams {
     // x: the lines' width (px), y: their opacity; z, w: a surface counts as met up to `z` times its
     // direction's reach plus `w` (m).
     foot: vec4<f32>,
-    // x: the mid band's threshold, y: the bright band's (HP points per m²).
-    bands: vec4<f32>,
-    // The dim, mid and bright bands' tints: rgb, a: the fill's opacity.
-    tints: array<vec4<f32>, 3>,
+    // x: the mid threshold, y: the bright (HP points per m²); z: the threshold rings drawn (1); w:
+    // the footprint fill's opacity.
+    thresholds: vec4<f32>,
+    // The potency colour's anchors (rgb, and `u` in w) and its middle slope (rgb, and the mid
+    // threshold in w).
+    ramp: array<vec4<f32>, 4>,
+    // The volume: x its opacity at most, y the length over which it climbs (m), z the march's step
+    // (m).
+    volume: vec4<f32>,
     // x: the fields marked.
     fields: vec4<f32>,
     // Four fields of four lanes: origin (world) and half-angle (rad); unit axis (world) and how far
@@ -80,6 +96,10 @@ struct LookParams {
 // `field::DISC_SIDE` and the lanes one field's disc takes.
 const DISC_SIDE: i32 = 24;
 const DISC_LANES: i32 = 288;
+// `look::VOLUME_STEPS`, the step being a field's longest chord over it; the halvings that refine
+// where the eye ray enters the volume, to an eighth of a step.
+const VOLUME_STEPS: i32 = 16;
+const VOLUME_REFINE: i32 = 3;
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> look: LookParams;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var hull_mask: texture_2d<f32>;
@@ -142,11 +162,46 @@ fn disc_at(f: i32, q: vec2<f32>) -> vec2<f32> {
     return mix(below, above, t.y);
 }
 
-// What the footprint draws at a surface point: its potency band (0 none, 1 dim, 2 mid, 3 bright)
-// and the band whose tint a line there takes, 0 for no line.
+// The potency colour (linear rgb) at intensity `i` (HP points per m²): `potency::Ramp::colour`.
+fn ramp(i: f32) -> vec3<f32> {
+    let u = log2(max(i, 1e-30) / look.ramp[3].w);
+    if u >= look.ramp[2].w {
+        return look.ramp[2].rgb;
+    }
+    if u <= look.ramp[0].w {
+        return look.ramp[0].rgb;
+    }
+    let k = select(0, 1, u >= look.ramp[1].w);
+    let a = look.ramp[k];
+    let b = look.ramp[k + 1];
+    let span = b.w - a.w;
+    let t = (u - a.w) / span;
+    let t2 = t * t;
+    let t3 = t2 * t;
+    // The cubic Hermite between the segment's anchors; only the middle anchor has a slope.
+    let slope_a = select(vec3(0.0), look.ramp[3].rgb, k == 1);
+    let slope_b = select(vec3(0.0), look.ramp[3].rgb, k == 0);
+    return a.rgb * (2.0 * t3 - 3.0 * t2 + 1.0) + slope_a * span * (t3 - 2.0 * t2 + t)
+        + b.rgb * (3.0 * t2 - 2.0 * t3) + slope_b * span * (t3 - t2);
+}
+
+// Unit direction `dir` from field `f`'s origin on its disc: the disc point (xy) and the angle
+// from the axis (z, rad). Past the half-angle the point is the rim's.
+fn polar(f: i32, dir: vec3<f32>) -> vec3<f32> {
+    let half_angle = look.prints[4 * f].w;
+    let angle = acos(clamp(dot(dir, look.prints[4 * f + 1].xyz), -1.0, 1.0));
+    let across = vec2(dot(dir, look.prints[4 * f + 2].xyz), dot(dir, look.prints[4 * f + 3].xyz));
+    let s = length(across);
+    let q = select(vec2(0.0), across / max(s, 1e-6) * min(angle / half_angle, 1.0), s > 1e-6);
+    return vec3(q, angle);
+}
+
+// What the footprint draws at a surface point: the fields' summed intensity there (HP points per
+// m², 0 outside every field), and a line there (1, in `line_rgb`) or none (0).
 struct Footprint {
-    band: i32,
-    line: i32,
+    intensity: f32,
+    line: f32,
+    line_rgb: vec3<f32>,
 }
 
 // The footprint at world point `p` (normal `n`; its change across a pixel `dpx`, `dpy`).
@@ -167,44 +222,125 @@ fn footprint(p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>) -> Foot
             continue;
         }
         let dir = d / r;
+        let on_disc = polar(f, dir);
         let c = clamp(dot(dir, along.xyz), -1.0, 1.0);
-        let angle = acos(c);
         // The angle's gradient in space, (c d/r - axis) / (r sin θ), across the pixel.
         let g = (c * dir - along.xyz) / max(r * sqrt(max(1.0 - c * c, 1e-8)), 1e-6);
         let per_px = abs(dot(g, dpx)) + abs(dot(g, dpy));
-        let on_edge = abs(angle - at.w) < 0.5 * look.foot.x * per_px;
-        if angle > at.w && !on_edge {
+        let on_edge = abs(on_disc.z - at.w) < 0.5 * look.foot.x * per_px;
+        if on_disc.z > at.w && !on_edge {
             continue;
         }
-        let across = vec2(dot(dir, look.prints[4 * f + 2].xyz), dot(dir, look.prints[4 * f + 3].xyz));
-        let s = length(across);
-        let q = select(vec2(0.0), across / max(s, 1e-6) * min(angle / at.w, 1.0), s > 1e-6);
-        let here = disc_at(f, q);
+        let here = disc_at(f, on_disc.xy);
         if r > here.x * look.foot.z + look.foot.w {
             continue;
         }
         edge = edge || on_edge;
-        if angle <= at.w {
+        if on_disc.z <= at.w {
             let i = here.y / (r * r);
             intensity = intensity + i;
             change = change + 2.0 * i / r * (abs(dot(dir, dpx)) + abs(dot(dir, dpy)));
         }
     }
-    var out = Footprint(0, 0);
-    if intensity > 0.0 {
-        out.band = select(select(1, 2, intensity >= look.bands.x), 3, intensity >= look.bands.y);
-        // A threshold's line: where the intensity is within half the line's width of it.
+    var out = Footprint(intensity, 0.0, vec3(0.0));
+    if intensity > 0.0 && look.thresholds.z > 0.5 {
+        // A threshold's ring: where the intensity is within half the line's width of it.
         let half = 0.5 * look.foot.x * change;
-        if abs(intensity - look.bands.y) < half {
-            out.line = 3;
-        } else if abs(intensity - look.bands.x) < half {
-            out.line = 2;
+        if abs(intensity - look.thresholds.y) < half || abs(intensity - look.thresholds.x) < half {
+            out.line = 1.0;
+            out.line_rgb = look.ramp[0].rgb;
         }
     }
-    if edge && out.line == 0 {
-        out.line = max(out.band, 1);
+    if edge && out.line == 0.0 {
+        out.line = 1.0;
+        out.line_rgb = ramp(intensity);
     }
     return out;
+}
+
+// A point on an eye ray in field 0's volume: whether it lies inside (in the cone, behind the
+// front, within its direction's reach on the disc, on the cut's kept side) and its intensity
+// there (HP points per m²).
+struct Sample {
+    inside: bool,
+    intensity: f32,
+}
+
+fn sample(p: vec3<f32>) -> Sample {
+    let at = look.prints[0];
+    let front = look.prints[1].w;
+    let d = p - at.xyz;
+    let r = length(d);
+    if r < 1e-5 {
+        return Sample(front > 0.0, 1e30);
+    }
+    let on_disc = polar(0, d / r);
+    let here = disc_at(0, on_disc.xy);
+    let cut = look.mode.y > 0.5 && dot(look.plane.xyz, p) > look.plane.w;
+    let inside = on_disc.z <= at.w && r <= min(here.x, front) && !cut;
+    return Sample(inside, here.y / (r * r));
+}
+
+// Field 0's volume seen through `exit`, a point where the eye ray leaves it: the ray marched back
+// toward the eye, its colour the length-weighted mean of the potency colour along it (the
+// trapezoid rule between samples), its opacity climbing with the length inside.
+fn volume(exit: vec3<f32>, fade: f32) -> vec4<f32> {
+    // The ray's unit direction and the exit's distance along it from the eye; an orthographic
+    // view's rays are parallel, from its camera's plane.
+    var dir = vec3(0.0);
+    var t_exit = 0.0;
+    if view.clip_from_view[3][3] == 1.0 {
+        dir = -normalize(view.world_from_view[2].xyz);
+        t_exit = dot(exit - view.world_position, dir);
+    } else {
+        let d = exit - view.world_position;
+        t_exit = length(d);
+        dir = d / max(t_exit, 1e-6);
+    }
+    let step = look.volume.z;
+    var last_t = t_exit;
+    var last_rgb = ramp(sample(exit).intensity);
+    var colour = vec3(0.0);
+    var inside = 0.0;
+    for (var k = 1; k <= VOLUME_STEPS; k = k + 1) {
+        let t = max(t_exit - f32(k) * step, 0.0);
+        let here = sample(exit - dir * (t_exit - t));
+        if here.inside {
+            let rgb = ramp(here.intensity);
+            colour = colour + 0.5 * (rgb + last_rgb) * (last_t - t);
+            inside = inside + (last_t - t);
+            last_rgb = rgb;
+            last_t = t;
+            if t <= 0.0 {
+                break;
+            }
+            continue;
+        }
+        // The ray came in between `t` and `last_t`: halve that span toward the crossing.
+        var lo = t;
+        var hi = last_t;
+        var hi_intensity = -1.0;
+        for (var j = 0; j < VOLUME_REFINE; j = j + 1) {
+            let mid = 0.5 * (lo + hi);
+            let probe = sample(exit - dir * (t_exit - mid));
+            if probe.inside {
+                hi = mid;
+                hi_intensity = probe.intensity;
+            } else {
+                lo = mid;
+            }
+        }
+        let entry = 0.5 * (lo + hi);
+        let near_rgb = select(last_rgb, ramp(hi_intensity), hi_intensity >= 0.0);
+        colour = colour + 0.5 * (near_rgb + last_rgb) * (last_t - entry);
+        inside = inside + (last_t - entry);
+        break;
+    }
+    if inside <= 0.0 {
+        discard;
+    }
+    let a = look.volume.x * (1.0 - exp(-inside / look.volume.y)) * fade;
+    return vec4(colour / inside, clamp(a, 0.0, 1.0));
 }
 
 // A mask's edge at a pixel: 1 at a depth edge, 0.5 at a normal edge alone, 0 elsewhere.
@@ -283,10 +419,10 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
         let mark = footprint(in.world_position.xyz, n, dpx, dpy);
         // Beneath the nearest layer only the footprint's lines draw.
         if nearest > 0.0 && dist > nearest * 1.002 + 0.003 {
-            if mark.line == 0 {
+            if mark.line == 0.0 {
                 discard;
             }
-            return vec4(look.tints[mark.line - 1].rgb, look.foot.y * fade);
+            return vec4(mark.line_rgb, look.foot.y * fade);
         }
         var rgb = look.color.rgb * shading;
         var a = look.color.a * mix(look.shade.x, 1.0, pow(1.0 - facing, look.shade.z));
@@ -294,13 +430,12 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
             rgb = look.edge.rgb;
             a = max(a, look.edge.a);
         }
-        if mark.band > 0 {
-            let tint = look.tints[mark.band - 1];
-            rgb = mix(rgb, tint.rgb, tint.a);
-            a = max(a, tint.a);
+        if mark.intensity > 0.0 {
+            rgb = mix(rgb, ramp(mark.intensity), look.thresholds.w);
+            a = max(a, look.thresholds.w);
         }
-        if mark.line > 0 {
-            rgb = mix(rgb, look.tints[mark.line - 1].rgb, look.foot.y);
+        if mark.line > 0.0 {
+            rgb = mix(rgb, mark.line_rgb, look.foot.y);
             a = max(a, look.foot.y);
         }
         return vec4(rgb, clamp(a, 0.0, 1.0) * fade);
@@ -326,18 +461,16 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
             rgb = look.edge.rgb;
         }
         let mark = footprint(in.world_position.xyz, n, dpx, dpy);
-        if mark.band > 0 {
-            let tint = look.tints[mark.band - 1];
-            rgb = mix(rgb, tint.rgb, tint.a);
+        if mark.intensity > 0.0 {
+            rgb = mix(rgb, ramp(mark.intensity), look.thresholds.w);
         }
-        if mark.line > 0 {
-            rgb = mix(rgb, look.tints[mark.line - 1].rgb, look.foot.y);
+        if mark.line > 0.0 {
+            rgb = mix(rgb, mark.line_rgb, look.foot.y);
         }
         return vec4(rgb, 1.0);
     }
     if m == 4 {
-        let rim = mix(look.shade.x, 1.0, pow(1.0 - facing, look.shade.z));
-        return vec4(look.color.rgb * look.color.a * rim * fade, 0.0);
+        return volume(in.world_position.xyz, fade);
     }
     discard;
     return vec4(0.0);

@@ -1,11 +1,11 @@
 //! The base look: the whole tank as one hueless translucent grey surface one layer deep, its
 //! components solid in the untouched grey one layer deep among themselves, the struck ones on the
-//! state scale, and the spall field as its potency band shells, with its footprint outlined on
-//! every surface it met. It is the tank rendering of every x-ray view: the corner, the kill cam's
-//! lesson and the x-ray. The bands' law is design doc §5, "Potency bands"
+//! state scale, and each spall field as one translucent volume in the potency colour, with its
+//! footprint on every surface it met. It is the tank rendering of every x-ray view: the corner,
+//! the kill cam's lesson and the x-ray. The colour's law is design doc §5, "Potency colour"
 //! (`.agents/docs/design/armor-penetration-and-damage.md`; [`super::potency`]).
 //! [`LookMaterial`] (`pen_cam_look.wgsl`) draws every element; [`hull`], [`component`] and
-//! [`shell`] choose them, and the stage spawns what they return.
+//! [`volume`] choose them, and the stage spawns what they return.
 //!
 //! The stacking is cut by two offscreen masks drawn from the viewing camera's own pose, lens and
 //! size before it: the hull mask (each pixel's nearest hull surface: view normal and distance) and
@@ -22,26 +22,38 @@
 use bevy::camera::{Hdr, ImageRenderTarget, RenderTarget};
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::prelude::*;
-use bevy::render::render_resource::{AsBindGroup, CompareFunction, ShaderType, TextureFormat};
+use bevy::render::render_resource::{
+    AsBindGroup, CompareFunction, Face, ShaderType, TextureFormat,
+};
 use bevy::shader::ShaderRef;
 use bevy::window::{PrimaryWindow, WindowRef};
 
 use super::field::DISC_SIDE;
 use super::material::Blend;
 use super::plan::BoxPlan;
-use super::potency::{Band, Potency};
+use super::potency::Potency;
 use super::stage::{Stage, StageCamera};
 use super::timeline::{self, Condition, CornerKind};
 use super::view::Tier;
 use super::{Corner, Surface, WorldViewer};
 use crate::render_policy::CameraProfile;
 
-/// A potency band's shell: its band's colour added at this gain, at this share face-on rising to
-/// the whole at a grazing angle by this fresnel power, so each nested shell reads as an outline
-/// round the brighter ones inside it. TUNED, as is every figure below.
-const SHELL_GAIN: f32 = 1.0;
-const SHELL_FACE_SHARE: f32 = 0.08;
-const SHELL_FRESNEL_POWER: f32 = 2.0;
+/// A spall field's volume: its opacity at most, and the path through it, as a share of its
+/// cone's longest reach, over which its opacity climbs to `1 − 1/e` of that, so a thin stretch
+/// (the silhouette, a sliver beside a shadowed direction) stays faint. TUNED, as is every figure
+/// below that is not marked otherwise.
+const VOLUME_OPACITY: f32 = 0.55;
+const VOLUME_DEPTH_SHARE: f32 = 0.2;
+/// The march's samples along an eye ray inside a volume. The step is the cone's longest chord over
+/// this count (DERIVED, [`VolumeGeometry::of`]), so the march spans any chord in at most this many
+/// steps; `pen_cam_look.wgsl` declares the same count.
+const VOLUME_STEPS: usize = 16;
+/// A volume sorts this far (m) nearer the eye than its mesh's centre, so it draws after every
+/// other translucent surface, the glass included, and its colour reads unwashed by them.
+const VOLUME_SORT_BIAS: f32 = 1.0e4;
+/// Whether the footprint draws the threshold rings: thin lines where the summed intensity on a
+/// surface crosses the mid and the bright threshold. A choice of look, both states drawn.
+pub const THRESHOLD_RINGS: bool = true;
 /// A struck component's red outline (physical px, an inverted hull), so a sliver of fill still
 /// reads as struck; the light's share of its shading; its fill line's width (px); the dead hatch's
 /// period (px) and the share of it in red.
@@ -68,8 +80,8 @@ const BASE_EDGE_ALPHA: f32 = 0.35;
 /// centroid order; an opaque fill in that pass would cover the hull wherever it sorted later.
 const BASE_COMPONENT_ALPHA: f32 = 1.0;
 const BASE_COMPONENT_FACE_SHARE: f32 = 1.0;
-/// The field footprint: its band lines' width (px) and opacity, and its band fill's opacity, short
-/// of opaque so the HP fill under it, the outcome, reads through.
+/// The field footprint: its lines' width (px) and opacity, and its fill's opacity, short of
+/// opaque so the HP fill under it, the outcome, reads through.
 const FOOTPRINT_LINE_PX: f32 = 2.0;
 const FOOTPRINT_LINE_ALPHA: f32 = 0.9;
 const FOOTPRINT_FILL_ALPHA: f32 = 0.6;
@@ -98,8 +110,9 @@ pub struct LookParams {
     pub rest: Vec4,
     pub plane: Vec4,
     pub foot: Vec4,
-    pub bands: Vec4,
-    pub tints: [Vec4; 3],
+    pub thresholds: Vec4,
+    pub ramp: [Vec4; 4],
+    pub volume: Vec4,
     pub fields: Vec4,
     pub prints: [Vec4; 4 * FOOTPRINT_FIELDS],
     pub disc: [Vec4; FOOTPRINT_FIELDS * DISC_LANES],
@@ -119,8 +132,9 @@ impl Default for LookParams {
             rest: Vec4::ZERO,
             plane: Vec4::ZERO,
             foot: Vec4::ZERO,
-            bands: Vec4::ZERO,
-            tints: [Vec4::ZERO; 3],
+            thresholds: Vec4::ZERO,
+            ramp: [Vec4::ZERO; 4],
+            volume: Vec4::ZERO,
             fields: Vec4::ZERO,
             prints: [Vec4::ZERO; 4 * FOOTPRINT_FIELDS],
             disc: [Vec4::ZERO; FOOTPRINT_FIELDS * DISC_LANES],
@@ -132,6 +146,7 @@ impl Default for LookParams {
 pub struct LookKey {
     bias: bool,
     unoccluded: bool,
+    volume: bool,
 }
 
 impl From<&LookMaterial> for LookKey {
@@ -139,6 +154,7 @@ impl From<&LookMaterial> for LookKey {
         Self {
             bias: material.bias,
             unoccluded: material.unoccluded,
+            volume: material.is_volume(),
         }
     }
 }
@@ -146,7 +162,7 @@ impl From<&LookMaterial> for LookKey {
 const MODE_MASK: f32 = 0.0;
 const MODE_BASE: f32 = 2.0;
 const MODE_STATE: f32 = 3.0;
-const MODE_SHELL: f32 = 4.0;
+const MODE_VOLUME: f32 = 4.0;
 
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 #[bind_group_data(LookKey)]
@@ -184,6 +200,28 @@ impl LookMaterial {
 
     pub fn set_fade(&mut self, fade: f32) {
         self.params.shade.w = fade;
+    }
+
+    /// Whether it draws a spall field's volume ([`volume`]).
+    pub fn is_volume(&self) -> bool {
+        self.params.mode.x == MODE_VOLUME
+    }
+
+    /// A volume's field, `print`, in its first field's lanes: the field's frame and front, its
+    /// disc's reach and emission ([`pack`]), and the march's step and the opacity's depth from the
+    /// disc's longest reach ([`VolumeGeometry::of`]). The colour lanes, set when the volume is
+    /// made, are untouched.
+    pub fn set_volume(&mut self, print: &FieldPrint, potency: &Potency) {
+        pack(
+            print,
+            potency,
+            &mut self.params.prints[..4],
+            &mut self.params.disc[..DISC_LANES],
+        );
+        let geometry = VolumeGeometry::of(print);
+        self.params.volume.y = geometry.depth;
+        self.params.volume.z = geometry.step;
+        self.params.fields.x = 1.0;
     }
 
     pub fn set_front(&mut self, radius: Option<f32>) {
@@ -224,9 +262,16 @@ impl Material for LookMaterial {
 
     fn alpha_mode(&self) -> AlphaMode {
         match self.blend {
-            Blend::Additive => AlphaMode::Add,
             Blend::Blended => AlphaMode::Blend,
             Blend::Opaque => AlphaMode::Opaque,
+        }
+    }
+
+    fn depth_bias(&self) -> f32 {
+        if self.is_volume() {
+            VOLUME_SORT_BIAS
+        } else {
+            0.0
         }
     }
 
@@ -244,8 +289,10 @@ impl Material for LookMaterial {
         _layout: &bevy::mesh::MeshVertexBufferLayoutRef,
         key: bevy::pbr::MaterialPipelineKey<Self>,
     ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
-        descriptor.primitive.cull_mode = None;
         let key = key.bind_group_data;
+        // A volume is drawn from the faces where the eye ray leaves it, the back faces of its
+        // outward-wound surface (`field::reach_mesh`); every other element from both faces.
+        descriptor.primitive.cull_mode = key.volume.then_some(Face::Front);
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
             if key.bias {
                 // Toward the eye under bevy's reverse Z.
@@ -528,9 +575,9 @@ pub fn follow_pose(
     }
 }
 
-/// One spall field where a footprint is taken, in world space: its origin, its disc's frame (the
-/// unit axis, `u` and `v` across it, the half-angle in rad), how far its front has run (m,
-/// negative before it is thrown), the world's metres per record metre, and its disc's nodes
+/// One spall field where a footprint or a volume is taken, in world space: its origin, its disc's
+/// frame (the unit axis, `u` and `v` across it, the half-angle in rad), how far its front has run
+/// (m, negative before it is thrown), the world's metres per record metre, and its disc's nodes
 /// ([`super::field::Disc::nodes`], record units).
 #[derive(Clone, Debug)]
 pub struct FieldPrint<'a> {
@@ -544,15 +591,60 @@ pub struct FieldPrint<'a> {
     pub nodes: &'a [Vec2],
 }
 
+/// `print` in one field's lanes: four `frame` lanes (origin and half-angle; axis and front; `u`;
+/// `v`) and its disc's [`DISC_LANES`] lanes, two nodes a lane, each node's reach and emission
+/// `ρ s / Ω_c` ([`Potency::emission`]) in world units: metres for the reach, squared metres for
+/// the emission, whose intensity falls as the square of a world distance.
+fn pack(print: &FieldPrint, potency: &Potency, frame: &mut [Vec4], disc: &mut [Vec4]) {
+    frame[0] = print.origin.extend(print.half_angle);
+    frame[1] = print.axis.extend(print.front);
+    frame[2] = print.u.extend(0.0);
+    frame[3] = print.v.extend(0.0);
+    let world = |node: Vec2| {
+        let emission = potency.emission(node.y, print.half_angle);
+        Vec2::new(node.x * print.scale, emission * print.scale * print.scale)
+    };
+    for (lane, pair) in disc.iter_mut().zip(print.nodes.chunks(2)) {
+        let second = pair.get(1).copied().map_or(Vec2::ZERO, world);
+        *lane = world(pair[0]).extend(second.x).extend(second.y);
+    }
+}
+
+/// The march's step and the opacity's depth of a field's volume, world metres.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct VolumeGeometry {
+    /// The longest chord any eye ray can run inside the volume, over [`VOLUME_STEPS`].
+    pub step: f32,
+    /// [`VOLUME_DEPTH_SHARE`] of the disc's longest reach.
+    pub depth: f32,
+}
+
+impl VolumeGeometry {
+    /// `print`'s, from `R`, the longest reach among its disc's nodes (world m), past which neither
+    /// the volume's surface nor its march reads the disc. Every point of the volume lies within
+    /// `R` of the origin on a direction at most `α` off the axis, so two of them lie at most
+    /// `R · max(1, 2 sin α)` apart (DERIVED: the third side of a triangle whose other two are at
+    /// most `R` about an angle at most `2α`, for `α ≤ 90°` as `spall_cone.ron`'s parse holds): the
+    /// longest chord.
+    pub fn of(print: &FieldPrint) -> Self {
+        let reach = print.nodes.iter().map(|node| node.x).fold(0.0, f32::max) * print.scale;
+        let chord = reach * (2.0 * print.half_angle.sin()).max(1.0);
+        Self {
+            step: chord / VOLUME_STEPS as f32,
+            depth: VOLUME_DEPTH_SHARE * reach,
+        }
+    }
+}
+
 /// Mark `prints` on every surface the base look drawn against `masks` draws, the hull's and the
 /// components': a base or state material is one look's by the mask set it holds, so another
 /// look's surfaces (the corner's beside the x-ray's) keep their own footprints. A surface point is
 /// in a field where it faces the field's origin, lies inside its cone, behind its front and no
 /// farther than its direction's reach on the disc: the field met it there. It is filled in the
-/// potency band of the fields' summed intensity there ([`super::potency`]), lined where that band
-/// changes and along each cone's edge. The disc lanes carry each node's reach and emission
-/// `ρ s / Ω_c` ([`Potency::emission`]) in world units and the bands lane the thresholds: nothing
-/// display-side classifies.
+/// potency colour of the fields' summed intensity there ([`super::potency::Ramp`]) and lined along
+/// each cone's edge, and, with [`THRESHOLD_RINGS`], where that intensity crosses the mid and the
+/// bright threshold. The disc lanes ([`pack`]), the ramp lanes and the thresholds lane carry the
+/// law alone: nothing display-side sets the colour.
 pub fn set_footprints(
     looks: &mut Assets<LookMaterial>,
     masks: &MaskSet,
@@ -563,24 +655,21 @@ pub fn set_footprints(
     let mut disc = [Vec4::ZERO; FOOTPRINT_FIELDS * DISC_LANES];
     let count = prints.len().min(FOOTPRINT_FIELDS);
     for (i, print) in prints.iter().take(count).enumerate() {
-        lanes[4 * i] = print.origin.extend(print.half_angle);
-        lanes[4 * i + 1] = print.axis.extend(print.front);
-        lanes[4 * i + 2] = print.u.extend(0.0);
-        lanes[4 * i + 3] = print.v.extend(0.0);
-        let world = |node: Vec2| {
-            let emission = potency.emission(node.y, print.half_angle);
-            Vec2::new(node.x * print.scale, emission * print.scale * print.scale)
-        };
-        for (k, pair) in print.nodes.chunks(2).take(DISC_LANES).enumerate() {
-            let second = pair.get(1).copied().map_or(Vec2::ZERO, world);
-            disc[i * DISC_LANES + k] = world(pair[0]).extend(second.x).extend(second.y);
-        }
+        pack(
+            print,
+            potency,
+            &mut lanes[4 * i..4 * (i + 1)],
+            &mut disc[i * DISC_LANES..(i + 1) * DISC_LANES],
+        );
     }
     let (share, metres) = FOOTPRINT_REACH_SLACK;
-    let tints = Band::DRAWN.map(|band| {
-        let tint = LinearRgba::from(timeline::field_tint(band));
-        Vec4::new(tint.red, tint.green, tint.blue, FOOTPRINT_FILL_ALPHA)
-    });
+    let thresholds = Vec4::new(
+        potency.mid,
+        potency.bright,
+        THRESHOLD_RINGS as u8 as f32,
+        FOOTPRINT_FILL_ALPHA,
+    );
+    let ramp = potency.ramp().lanes();
     for (_, material) in looks.iter_mut() {
         let mode = material.params.mode.x;
         if mode != MODE_BASE && mode != MODE_STATE
@@ -589,8 +678,8 @@ pub fn set_footprints(
             continue;
         }
         material.params.foot = Vec4::new(FOOTPRINT_LINE_PX, FOOTPRINT_LINE_ALPHA, share, metres);
-        material.params.bands = Vec4::new(potency.mid, potency.bright, 0.0, 0.0);
-        material.params.tints = tints;
+        material.params.thresholds = thresholds;
+        material.params.ramp = ramp;
         material.params.fields = Vec4::new(count as f32, 0.0, 0.0, 0.0);
         material.params.prints = lanes;
         material.params.disc = disc;
@@ -707,21 +796,18 @@ pub fn component(b: &BoxPlan, kind: CornerKind, masks: &MaskSet) -> Option<LookM
     condition(b, kind).map(|condition| state(condition, masks))
 }
 
-/// Potency band `band`'s shell of a spall field ([`super::field::shell_mesh`]): the band's colour
-/// ([`timeline::field_tint`]), added, strongest at a grazing angle. Uncut it is drawn over
-/// everything, through the base look's glass; `cut` by the slice plane (unit normal toward the
-/// discarded side, a point on it) it is drawn under the tank's own surfaces, which the slice keeps
-/// opaque past the plane.
-pub fn shell(band: Band, masks: &MaskSet, cut: Option<(Vec3, Vec3)>) -> LookMaterial {
-    let mut m = LookMaterial::new(
-        MODE_SHELL,
-        timeline::field_tint(band).into(),
-        SHELL_GAIN,
-        Blend::Additive,
-        masks,
-    );
-    m.params.shade.x = SHELL_FACE_SHARE;
-    m.params.shade.z = SHELL_FRESNEL_POWER;
+/// A spall field's volume, drawn on its reach surface ([`super::field::reach_mesh`]): from each
+/// fragment where the eye ray leaves the volume, the ray is marched back toward the eye through
+/// it, and the pixel takes the mean potency colour of what it crossed ([`super::potency::Ramp`]),
+/// at an opacity that climbs with the length crossed to [`VOLUME_OPACITY`]; its field's lanes are
+/// set each frame ([`LookMaterial::set_volume`]). Straight alpha, sorted after every other
+/// translucent surface. Uncut it is drawn over everything, through the base look's glass; `cut` by
+/// the slice plane (unit normal toward the discarded side, a point on it) it stops at the plane
+/// and is drawn under the tank's own surfaces, which the slice keeps opaque past it.
+pub fn volume(potency: &Potency, masks: &MaskSet, cut: Option<(Vec3, Vec3)>) -> LookMaterial {
+    let mut m = LookMaterial::new(MODE_VOLUME, LinearRgba::BLACK, 0.0, Blend::Blended, masks);
+    m.params.ramp = potency.ramp().lanes();
+    m.params.volume.x = VOLUME_OPACITY;
     m.set_cut(cut);
     m.unoccluded = cut.is_none();
     m.bias = cut.is_some();
@@ -747,9 +833,10 @@ mod tests {
         assert_eq!(2 * DISC_LANES, DISC_SIDE * DISC_SIDE);
     }
 
-    /// `pen_cam_look.wgsl` declares the look's counts: the disc's side and lanes, the arrays'
-    /// lengths and the fields its footprint loops over. A count that drifts reads the wrong node
-    /// or field without a word.
+    /// `pen_cam_look.wgsl` declares the look's counts: the disc's side and lanes, the volume's
+    /// march samples, the arrays' lengths and the fields its footprint loops over.
+    /// A count that drifts reads the wrong node, field or ramp anchor without a word, or marches a
+    /// volume short of its far side.
     #[test]
     fn the_shader_declares_the_lane_counts() {
         let path = crate::assets::asset_root().join("shaders/pen_cam_look.wgsl");
@@ -757,6 +844,8 @@ mod tests {
         for declared in [
             format!("const DISC_SIDE: i32 = {DISC_SIDE};"),
             format!("const DISC_LANES: i32 = {DISC_LANES};"),
+            format!("const VOLUME_STEPS: i32 = {VOLUME_STEPS};"),
+            "ramp: array<vec4<f32>, 4>,".to_owned(),
             format!("prints: array<vec4<f32>, {}>,", 4 * FOOTPRINT_FIELDS),
             format!("disc: array<vec4<f32>, {}>,", FOOTPRINT_FIELDS * DISC_LANES),
             format!("for (var f = 0; f < {FOOTPRINT_FIELDS}; f = f + 1)"),
@@ -765,47 +854,117 @@ mod tests {
         }
     }
 
-    /// The band reads no gain: the lanes the footprint classifies from carry each node's reach and
-    /// emission `ρ s / Ω_c` in world units (squared metres for the emission, whose intensity falls
-    /// as the square of a world distance) and the shipped thresholds, and fading a material moves
-    /// its fade lane alone. The colour promise relies on it; a display gain, level or fade in a
-    /// classifying lane fails here. Fixture: two nodes, a stage at twice the record's size.
+    /// Fixture: two nodes, a stage at twice the record's size.
+    fn fixture_print(nodes: &[Vec2]) -> FieldPrint<'_> {
+        FieldPrint {
+            origin: Vec3::ONE,
+            axis: Vec3::NEG_Z,
+            u: Vec3::X,
+            v: Vec3::Y,
+            half_angle: 25.0_f32.to_radians(),
+            front: 3.0,
+            scale: 2.0,
+            nodes,
+        }
+    }
+
+    /// The colour reads no gain: the lanes a footprint and a volume colour from carry each node's
+    /// reach and emission `ρ s / Ω_c` in world units (squared metres for the emission, whose
+    /// intensity falls as the square of a world distance), the shipped thresholds and the shipped
+    /// ramp, and fading a material moves its fade lane alone. The colour promise relies on it; a
+    /// display gain, level or fade in a colouring lane, or a volume packed apart from the
+    /// footprint, fails here.
     #[test]
-    fn the_band_reads_no_gain() {
+    fn the_colour_reads_no_gain() {
         let potency = Potency::shipped();
         let masks = MaskSet::default();
         let mut looks = Assets::<LookMaterial>::default();
         let handle = looks.add(base(&masks));
         let nodes = [Vec2::new(1.5, 5.0), Vec2::new(0.4, 2.5)];
-        let half_angle = 25.0_f32.to_radians();
-        let print = FieldPrint {
-            origin: Vec3::ONE,
-            axis: Vec3::NEG_Z,
-            u: Vec3::X,
-            v: Vec3::Y,
-            half_angle,
-            front: 3.0,
-            scale: 2.0,
-            nodes: &nodes,
-        };
-        set_footprints(&mut looks, &masks, &[print], &potency);
+        let print = fixture_print(&nodes);
+        set_footprints(&mut looks, &masks, std::slice::from_ref(&print), &potency);
         let params = looks.get(&handle).unwrap().params;
         let lane = params.disc[0];
         for (k, node) in nodes.iter().enumerate() {
             let (reach, emission) = (lane[2 * k], lane[2 * k + 1]);
             assert_eq!(reach, 2.0 * node.x);
-            assert_eq!(emission, 4.0 * potency.emission(node.y, half_angle));
+            assert_eq!(emission, 4.0 * potency.emission(node.y, print.half_angle));
             assert_eq!(
                 emission,
-                4.0 * potency.rate * node.y / super::super::potency::solid_angle(half_angle)
+                4.0 * potency.rate * node.y / super::super::potency::solid_angle(print.half_angle)
             );
         }
-        assert_eq!(params.bands.x, potency.mid);
-        assert_eq!(params.bands.y, potency.bright);
-        let mut faded = looks.get(&handle).unwrap().clone();
-        faded.set_fade(0.25);
-        let mut want = params;
-        want.shade.w = 0.25;
-        assert_eq!(format!("{:?}", faded.params), format!("{want:?}"));
+        assert_eq!(params.thresholds.x, potency.mid);
+        assert_eq!(params.thresholds.y, potency.bright);
+        assert_eq!(params.thresholds.z, THRESHOLD_RINGS as u8 as f32);
+        assert_eq!(params.ramp, potency.ramp().lanes());
+
+        let mut field = volume(&potency, &masks, None);
+        assert_eq!(field.params.ramp, potency.ramp().lanes());
+        field.set_volume(&print, &potency);
+        assert_eq!(field.params.disc[..DISC_LANES], params.disc[..DISC_LANES]);
+        assert_eq!(field.params.prints[..4], params.prints[..4]);
+        assert_eq!(field.params.ramp, potency.ramp().lanes());
+        assert_eq!(field.params.volume.x, VOLUME_OPACITY);
+
+        for material in [looks.get(&handle).unwrap(), &field] {
+            let mut faded = material.clone();
+            faded.set_fade(0.25);
+            let mut want = material.params;
+            want.shade.w = 0.25;
+            assert_eq!(format!("{:?}", faded.params), format!("{want:?}"));
+        }
+    }
+
+    /// A volume's march spans its longest chord: [`VOLUME_STEPS`] steps cover the distance between
+    /// any two vertices of its reach surface, the volume's bound, for every record's cones at the
+    /// record's size and at the stage's. The shader marches at most that many steps back from where
+    /// the eye ray leaves; a step from the mean reach, or one that forgets the cone's width, leaves
+    /// the near part of a long chord unread and its colour short.
+    #[test]
+    fn the_march_spans_every_chord() {
+        let mut checked = 0;
+        for (name, plan) in super::super::potency::tests::plans() {
+            for cone in &plan.cones {
+                let mesh = super::super::field::reach_mesh(cone);
+                let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
+                    mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+                else {
+                    panic!("positions");
+                };
+                let mut corners: Vec<[u32; 3]> =
+                    positions.iter().map(|p| p.map(f32::to_bits)).collect();
+                corners.sort_unstable();
+                corners.dedup();
+                let corners: Vec<Vec3> = corners
+                    .iter()
+                    .map(|p| Vec3::from(p.map(f32::from_bits)))
+                    .collect();
+                let chord = corners
+                    .iter()
+                    .flat_map(|a| corners.iter().map(|b| a.distance(*b)))
+                    .fold(0.0, f32::max);
+                for scale in [1.0, 2.0] {
+                    let print = FieldPrint {
+                        origin: cone.origin,
+                        axis: cone.disc.axis,
+                        u: cone.disc.u,
+                        v: cone.disc.v,
+                        half_angle: cone.half_angle,
+                        front: 0.0,
+                        scale,
+                        nodes: &cone.disc.nodes,
+                    };
+                    let span = VOLUME_STEPS as f32 * VolumeGeometry::of(&print).step;
+                    assert!(
+                        span >= scale * chord * (1.0 - 1e-5),
+                        "{name}: {span} m marched against a {} m chord",
+                        scale * chord
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 0);
     }
 }

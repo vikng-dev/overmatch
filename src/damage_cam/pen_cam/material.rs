@@ -19,8 +19,6 @@ pub struct GlowParams {
 /// How a [`LookMaterial`](super::look::LookMaterial) composites.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Blend {
-    /// Commutative, so it needs no sort order.
-    Additive,
     /// Straight alpha.
     Blended,
     /// Writes depth: what an inverted-hull outline needs in front of it, and the masks.

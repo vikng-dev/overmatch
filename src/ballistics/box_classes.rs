@@ -4,13 +4,13 @@
 //! classes every other pool is authored from, HP points per m² of the box's mean face (the mean of
 //! the three axis-aligned face areas of its bounds in the tank's sim geometry). The pool gate
 //! (`src/tests/box_pools.rs`) holds every tank asset to both. The class follows the box's facets
-//! ([`BoxClass::of`]). Design doc §6. The pen cam's potency bands read their thresholds from the
-//! same file ([`BoxClasses::band_thresholds`], design doc §5).
+//! ([`BoxClass::of`]). Design doc §6. The pen cam's potency colour reads its thresholds from the
+//! same file ([`BoxClasses::potency_thresholds`], design doc §5).
 #![cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "the pool gate reads the classes by box under test; at runtime only the crew pool and the band thresholds are read"
+        reason = "the pool gate reads the classes by box under test; at runtime only the crew pool and the potency thresholds are read"
     )
 )]
 
@@ -67,21 +67,22 @@ pub(crate) struct BoxClasses {
     hard: u32,
 }
 
-/// The pen cam's potency band thresholds, HP points per m² of face: a box presenting its class's
+/// The pen cam's potency colour thresholds, HP points per m² of face: a box presenting its class's
 /// face wholly at or above its threshold takes at least its pool.
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct BandThresholds {
-    /// The hard class: a hard box's face wholly in the bright band has its HP pool emptied.
+pub(crate) struct PotencyThresholds {
+    /// The hard class, where the colour reaches its near-white: a hard box's face wholly at or
+    /// above it has its HP pool emptied.
     pub(crate) bright: f32,
-    /// The crew pool over the face it is set against: a crew station's face wholly in the mid band
-    /// or brighter is knocked out.
+    /// The crew pool over the face it is set against, where the colour is the field teal: a crew
+    /// station's face wholly at or above it is knocked out.
     pub(crate) mid: f32,
 }
 
 impl BoxClasses {
     /// Parse and validate a class file, refusing a crew pool of zero or a class of zero HP per m²
     /// (a box of either would have no pool) and a crew face that is not a positive finite area
-    /// (the mid band's threshold divides by it).
+    /// (the mid threshold divides by it).
     pub(crate) fn from_ron(text: &str) -> Result<Self, String> {
         let file: ClassFile = ron::de::from_str(text).map_err(|err| err.to_string())?;
         let classes = Self {
@@ -132,9 +133,9 @@ impl BoxClasses {
         }
     }
 
-    /// The thresholds the pen cam's potency bands read.
-    pub(crate) fn band_thresholds(&self) -> BandThresholds {
-        BandThresholds {
+    /// The thresholds the pen cam's potency colour is anchored at.
+    pub(crate) fn potency_thresholds(&self) -> PotencyThresholds {
+        PotencyThresholds {
             bright: self.hard as f32,
             mid: self.crew_hp as f32 / self.crew_face_m2,
         }
@@ -195,15 +196,15 @@ mod tests {
         }
     }
 
-    /// The bands' thresholds are the file's classes: bright the hard class, mid the crew pool over
+    /// The potency thresholds are the file's classes: bright the hard class, mid the crew pool over
     /// the face it is set against (fixture data: 30 HP over 0.25 m² is 120 HP per m²). The pen
     /// cam's colour promise relies on both; a threshold read from anywhere else breaks it.
     #[test]
-    fn the_band_thresholds_are_the_classes() {
+    fn the_potency_thresholds_are_the_classes() {
         let classes = BoxClasses::from_ron(&file(CREW, "")).unwrap();
         assert_eq!(
-            classes.band_thresholds(),
-            BandThresholds {
+            classes.potency_thresholds(),
+            PotencyThresholds {
                 bright: 300.0,
                 mid: 120.0
             }

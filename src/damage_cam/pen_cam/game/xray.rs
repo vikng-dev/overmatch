@@ -43,7 +43,7 @@ use super::super::look::{self, LookMaterial, MaskLayer, MaskNeed, MaskSet, Masks
 use super::super::material::{GlowMaterial, OutlineMaterial};
 use super::super::plan::{BoxPlan, Plan};
 use super::super::stage::{
-    BoxTint, ConeShell, LineSeg, LookCtx, MarkItem, Playing, SHELL_SCENE, component_meshes,
+    BoxTint, ConeVolume, LineSeg, LookCtx, MarkItem, Playing, SHELL_SCENE, component_meshes,
     mask_copy, spawn_glass,
 };
 use super::super::timeline::CornerKind;
@@ -549,7 +549,7 @@ pub(super) fn animate(
         (
             With<XRayItem>,
             Without<MarkItem>,
-            Without<ConeShell>,
+            Without<ConeVolume>,
             Without<XRayShell>,
         ),
     >,
@@ -558,12 +558,12 @@ pub(super) fn animate(
         (
             With<XRayItem>,
             Without<LineSeg>,
-            Without<ConeShell>,
+            Without<ConeVolume>,
             Without<BoxTint>,
         ),
     >,
-    mut shells: Query<
-        (&ConeShell, &MeshMaterial3d<LookMaterial>, &mut Visibility),
+    mut volumes: Query<
+        (&ConeVolume, &MeshMaterial3d<LookMaterial>, &mut Visibility),
         (
             With<XRayItem>,
             Without<LineSeg>,
@@ -582,7 +582,7 @@ pub(super) fn animate(
             With<XRayItem>,
             Without<LineSeg>,
             Without<MarkItem>,
-            Without<ConeShell>,
+            Without<ConeVolume>,
         ),
     >,
     mut shell: Query<
@@ -591,7 +591,7 @@ pub(super) fn animate(
             With<XRayShell>,
             Without<LineSeg>,
             Without<MarkItem>,
-            Without<ConeShell>,
+            Without<ConeVolume>,
             Without<BoxTint>,
         ),
     >,
@@ -620,10 +620,10 @@ pub(super) fn animate(
     for (mark, material, mut visibility) in &mut marks {
         playing.mark(mark, material, &mut visibility, &mut glows);
     }
-    for (cone, look, mut visibility) in &mut shells {
-        playing.cone(cone, look, &mut visibility, &mut looks);
-    }
     let hull = hulls.get(built.hull).ok();
+    for (cone, look, mut visibility) in &mut volumes {
+        playing.cone(cone, look, &mut visibility, hull, &mut looks);
+    }
     if let Some(hull) = hull {
         playing.footprints(hull, &built.masks, &mut looks);
     }

@@ -6,7 +6,6 @@
 use bevy::math::cubic_splines::CubicSegment;
 use bevy::prelude::*;
 
-use super::potency::Band;
 use crate::damage_cam::ShotVerdict;
 
 /// The corner's look while it plays one record.
@@ -316,22 +315,13 @@ impl Condition {
 }
 
 /// The spall field's hue: a cool teal apart from the state scale and the glass hull's grey, so a
-/// field never reads as damage or as hull. Its potency bands climb one luminance ladder in it
-/// ([`field_tint`]): this teal is the mid band, a deep teal the dim band below it, a teal-tinted
-/// near-white the bright band above it, so the bright part of the field is literally the brightest.
-/// TUNED.
+/// field never reads as damage or as hull. The potency colour climbs one luminance ladder in it
+/// ([`super::potency::Ramp`]): this teal at the mid threshold, a deep teal well below it, a
+/// teal-tinted near-white at the bright threshold and above, so the bright part of the field is
+/// literally the brightest. TUNED.
 pub const FIELD: Color = Color::srgb_u8(0x3F, 0xD0, 0xC8);
 pub const FIELD_DIM: Color = Color::srgb_u8(0x1E, 0x6B, 0x66);
 pub const FIELD_BRIGHT: Color = Color::srgb_u8(0xD8, 0xFF, 0xF8);
-
-/// Potency band `band`'s colour on the field's ladder.
-pub fn field_tint(band: Band) -> Color {
-    match band {
-        Band::Dim => FIELD_DIM,
-        Band::Mid => FIELD,
-        Band::Bright => FIELD_BRIGHT,
-    }
-}
 
 /// The share of its HP points a component lost to the shot, of the points it had at the shot,
 /// clamped at 1 — full exactly when the shot disabled it. A component with none left at the shot
