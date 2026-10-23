@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 
 use super::protocol::{NetCrew, NetTank};
 use crate::damage::{KnockoutReason, TankKnockedOut};
-use crate::tank::WeaponGate;
+use crate::tank::{WeaponGate, WeaponLoads};
 
 /// Public, server-authored tank-life fact. Detailed damage and ammunition state stay owner-only.
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -36,7 +36,7 @@ impl NetTankStatus {
 }
 
 /// Immutable policy attached at tank spawn. It exposes the replicated internal combat snapshots
-/// (`NetCrew`, `WeaponGate`) only to `owner`.
+/// (`NetCrew`, `WeaponGate`, `WeaponLoads`) only to `owner`.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 #[component(immutable)]
 pub(super) struct CombatDisclosure {
@@ -55,7 +55,7 @@ impl CombatDisclosure {
 
 impl VisibilityFilter for CombatDisclosure {
     type ClientComponent = AuthorizedClient;
-    type Scope = (NetCrew, WeaponGate);
+    type Scope = (NetCrew, WeaponGate, WeaponLoads);
 
     fn is_visible(&self, client: Entity, authorized: Option<&AuthorizedClient>) -> bool {
         authorized.is_some() && self.owner == Some(client)

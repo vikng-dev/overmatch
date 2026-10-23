@@ -26,6 +26,7 @@ use crate::fingerprint::{fingerprint_field, fnv1a_64};
 use crate::state::GameplaySet;
 use crate::tank::{
     Controlled as GameControlled, Rig, ServoCommand, ServoIndex, ServoSpec, TankServos, WeaponGate,
+    WeaponLoads,
 };
 use crate::track::sim::{TankTransmission, TrackDrive, TrackDriveSide};
 use crate::{CombatantId, CombatantLife, ShotId};
@@ -152,7 +153,10 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// replicates beside `CombatantId`, so a client can tell the life an explanation is about from
 /// the one its tank is living. Surface, own-type graph and REV move. REV 33 has not shipped, so
 /// the round's `wound` rate (ADR-0040) joins `FireEvent` under it, the REV-19 precedent: a
-/// replica builds the round the authority fired from the event alone. Own-type graph moves.
+/// replica builds the round the authority fired from the event alone. Own-type graph moves. The
+/// round selector rides it too: `TankCommand` gains the `select_round` edge, and the authority's
+/// per-weapon round choice (`WeaponLoads`) replicates owner-private beside `WeaponGate`. Surface
+/// and own-type graph move.
 pub const PROTOCOL_REV: u32 = 33;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
@@ -857,10 +861,11 @@ const WIRE_SURFACE: &[&str] = &[
     "TrackDrive",
     "TankTransmission",
     "WeaponGate",
+    "WeaponLoads",
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0xb470_a6b8_51dc_085a;
+const WIRE_SURFACE_HASH: u64 = 0xe1f7_a13c_f454_773b;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -881,8 +886,9 @@ const WIRE_SURFACE_HASH: u64 = 0xb470_a6b8_51dc_085a;
 //     stripped, so a doc or reformat edit is invisible; a field/variant/type change is not) and hashes
 //     the lot. This is the whole `WIRE_SURFACE` own-type graph, followed through embeds: `NetCrew`
 //     carries `VolumeSnapshot` which carries `CrewSnapshot`, `TankTransmission` carries
-//     `TransmissionState`/`SchedulerState`, `WeaponGate` carries `WeaponGateState`,
-//     `TankCommand` (src/command.rs) carries `CrewSwap`, and both
+//     `TransmissionState`/`SchedulerState`, `WeaponGate` carries `WeaponGateState`, `WeaponLoads`
+//     carries `WeaponLoad`, `TankCommand` (src/command.rs) carries `CrewSwap` and `RoundSelect`
+//     (which carries `RoundStep`), and both
 //     `CrewSnapshot` and `CrewSwap` carry `CrewStation` (src/damage.rs).
 //   * EXTERNAL types (avian `Position`/`Rotation`/`LinearVelocity`/`AngularVelocity`, plus lightyear's
 //     own wire framing) — their source is not in this tree to scan, so they are covered by DEP VERSION:
@@ -896,7 +902,7 @@ const WIRE_SURFACE_HASH: u64 = 0xb470_a6b8_51dc_085a;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xdf25_b45a_5739_dca3;
+const WIRE_TYPES_HASH: u64 = 0x6f93_c4a9_35ae_09d9;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1037,6 +1043,8 @@ pub(crate) fn plugin(app: &mut App) {
     // Complete weapon eligibility state: one atomic snapshot. `net::fire_presentation` reconciles
     // it as a legality report against the locally authored cadence.
     app.component::<WeaponGate>().replicate();
+    // Each weapon's loaded and selected round: authority-written, read beside the gate.
+    app.component::<WeaponLoads>().replicate();
 
     app.add_systems(
         FixedPostUpdate,
@@ -1517,8 +1525,9 @@ mod tests {
     /// The own wire-facing types whose DEFINITION TEXT rides [`WIRE_TYPES_HASH`], each as
     /// `(source file, type name)`. This is the `WIRE_SURFACE` own-type graph followed through its
     /// embeds (see the coverage-model block by the const): protocol types, the public status in
-    /// `disclosure.rs`, `WeaponGate`/`WeaponGateState` from `tank/model.rs`,
-    /// `TankCommand`/`AimIntent`/`CrewSwap` from `command.rs`, `CrewStation` and `KnockoutReason`
+    /// `disclosure.rs`, `WeaponGate`/`WeaponGateState`/`WeaponLoads`/`WeaponLoad` from
+    /// `tank/model.rs`, `TankCommand`/`AimIntent`/`CrewSwap`/`RoundSelect`/`RoundStep` from
+    /// `command.rs`, `CrewStation` and `KnockoutReason`
     /// from `damage.rs`, and the shot explanation's graph from `damage_cam/wire.rs` and
     /// `damage_cam/mod.rs`.
     /// External wire types (avian/lightyear) are covered by dependency version. An embedded ENUM
@@ -1534,6 +1543,8 @@ mod tests {
         ("src/track/transmission.rs", "SchedulerState"),
         ("src/tank/model.rs", "WeaponGate"),
         ("src/tank/model.rs", "WeaponGateState"),
+        ("src/tank/model.rs", "WeaponLoads"),
+        ("src/tank/model.rs", "WeaponLoad"),
         ("src/net/protocol.rs", "NetBot"),
         ("src/lib.rs", "CombatantId"),
         ("src/lib.rs", "CombatantLife"),
@@ -1582,6 +1593,8 @@ mod tests {
         ("src/command.rs", "TankCommand"),
         ("src/command.rs", "AimIntent"),
         ("src/command.rs", "CrewSwap"),
+        ("src/command.rs", "RoundSelect"),
+        ("src/command.rs", "RoundStep"),
         ("src/damage.rs", "CrewStation"),
     ];
 
@@ -1952,6 +1965,10 @@ mod tests {
             range: 850.0,
             fire_primary: true,
             crew_swap: Some(CrewSwap::Start(CrewStation::Gunner, CrewStation::Loader)),
+            select_round: Some(crate::command::RoundSelect {
+                weapon: 0,
+                step: crate::command::RoundStep::Next,
+            }),
             respawn: true,
             for_tick: 0,
         };
@@ -1984,6 +2001,7 @@ mod tests {
             );
             assert!(!cmd.fire_primary, "fire edge cleared ({lag})");
             assert_eq!(cmd.crew_swap, None, "crew-swap edge cleared ({lag})");
+            assert_eq!(cmd.select_round, None, "round-select edge cleared ({lag})");
             assert!(!cmd.respawn, "respawn edge cleared ({lag})");
         }
     }

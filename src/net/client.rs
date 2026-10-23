@@ -2767,11 +2767,7 @@ mod tests {
         Weapon {
             name: "MainGun".into(),
             round: "88mm_AP".into(),
-            speed: 800.0,
-            caliber: 0.088,
-            mass: 10.2,
-            nose_factor: 0.3,
-            wound: 30.0,
+            rounds: vec![crate::tank::WeaponRound::resolve("88mm_AP").expect("a shipped round")],
             fire_mode: FireMode::Single { reload_secs: 8.0 },
             recoil,
             barrel,

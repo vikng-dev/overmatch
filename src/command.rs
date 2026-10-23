@@ -8,8 +8,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::damage::{CrewStation, TankKnockedOut};
 use crate::firecontrol::Ranging;
+use crate::spec::Trigger;
 use crate::state::{GameplaySet, PlayerInputSet};
-use crate::tank::Controlled;
+use crate::tank::{Controlled, Muzzle, TankRoot, Weapon, WeaponIndex};
 
 /// One tick's driver intent for a tank.
 #[derive(Component, Default, Clone, Copy, PartialEq, Debug, Serialize, Deserialize, Reflect)]
@@ -29,6 +30,8 @@ pub struct TankCommand {
     pub range: f32,
     /// Crew-swap edge, validated against the tank's seats by simulation authority.
     pub crew_swap: Option<CrewSwap>,
+    /// Round-selection edge, validated against the weapon's round list by simulation authority.
+    pub select_round: Option<RoundSelect>,
     /// Respawn edge; authority validates that this tank is knocked out.
     pub respawn: bool,
     /// Tick this command was authored for.
@@ -45,6 +48,7 @@ impl TankCommand {
     pub fn clear_edges(&mut self) {
         self.fire_primary = false;
         self.crew_swap = None;
+        self.select_round = None;
         self.respawn = false;
     }
 
@@ -61,7 +65,7 @@ impl TankCommand {
     /// the edge set lives in exactly one place. [`consume_edges`] uses it to skip the mutable
     /// touch (and its change-detection churn) on a command with no edge to clear.
     pub fn has_edge(&self) -> bool {
-        self.fire_primary || self.crew_swap.is_some() || self.respawn
+        self.fire_primary || self.crew_swap.is_some() || self.select_round.is_some() || self.respawn
     }
 
     /// The command of a tank whose death flow owns the device ([`DeviceOwner`]): the respawn edge
@@ -134,8 +138,41 @@ pub enum CrewSwap {
     Cancel,
 }
 
+/// One round-selection step for one weapon, addressed by its slot ([`WeaponIndex`], the name-sorted
+/// order). The step is relative and wraps through the weapon's round list, so steps authored before
+/// the first is confirmed each count; the authority applies it to the weapon's selection
+/// (`tank::WeaponLoads`), which takes effect at the weapon's next load.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Reflect)]
+pub struct RoundSelect {
+    pub weapon: u8,
+    pub step: RoundStep,
+}
+
+/// A step through a weapon's round list, wrapping at either end.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize, Reflect)]
+pub enum RoundStep {
+    Next,
+    Previous,
+}
+
+impl RoundStep {
+    /// The index one step from `from` in a list of `count` rounds, wrapping; `from` past the end is
+    /// first taken modulo `count`. `None` for an empty list or a result past `u8`.
+    pub fn apply(self, from: u8, count: usize) -> Option<u8> {
+        if count == 0 {
+            return None;
+        }
+        let from = usize::from(from) % count;
+        let to = match self {
+            Self::Next => (from + 1) % count,
+            Self::Previous => (from + count - 1) % count,
+        };
+        u8::try_from(to).ok()
+    }
+}
+
 // `TankCommand` has no `Entity` fields (`aim`/`range` are plain data, `crew_swap` addresses seats
-// by `CrewStation`, not entity id) — lightyear's native input plugin requires `MapEntities` on the
+// by `CrewStation` and `select_round` weapons by slot, not entity id) — lightyear's native input plugin requires `MapEntities` on the
 // input type regardless, so this is a no-op, matching the examples' pattern for entity-less inputs.
 impl MapEntities for TankCommand {
     fn map_entities<M: EntityMapper>(&mut self, _entity_mapper: &mut M) {}
@@ -159,6 +196,10 @@ pub struct Bindings {
     /// binding. Esc skips the run (`state::EscapeAction`), unbound here.
     pub kill_cam_hold: ButtonBinding,
     pub kill_cam_replay: ButtonBinding,
+    /// Step the main gun's (the `Primary` trigger's weapon) round selection forward or back
+    /// through its round list ([`RoundSelect`]); the selection is loaded at the next load.
+    pub round_next: ButtonBinding,
+    pub round_previous: ButtonBinding,
 }
 
 /// Who the player's device speaks for.
@@ -305,6 +346,9 @@ impl Default for Bindings {
             // TUNED: the pen cam demo's kill cam keys.
             kill_cam_hold: ButtonBinding::Key(KeyCode::KeyC),
             kill_cam_replay: ButtonBinding::Key(KeyCode::Space),
+            // TUNED: the round selector's keys.
+            round_next: ButtonBinding::Key(KeyCode::KeyE),
+            round_previous: ButtonBinding::Key(KeyCode::KeyQ),
         }
     }
 }
@@ -356,7 +400,7 @@ pub fn client_plugin(app: &mut App) {
         // missed or doubled by the fixed clock.
         .add_systems(
             RunFixedMainLoop,
-            gather_commands
+            (gather_commands, select_round_input)
                 .in_set(RunFixedMainLoopSystems::BeforeFixedMainLoop)
                 .in_set(PlayerInputSet)
                 .in_set(TankDeviceSet)
@@ -478,6 +522,35 @@ pub(crate) fn gather_commands(
     }
 }
 
+/// Latch a round-selection step for the controlled tank's weapon on the `Primary` trigger from the
+/// `round_next`/`round_previous` bindings. Only the step goes on the command: the authority applies
+/// it (`shooting::apply_round_selection`), and the HUD shows the replicated choice, never this
+/// latch. Pressing both in one frame latches nothing. In [`TankDeviceSet`].
+fn select_round_input(
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    bindings: Res<Bindings>,
+    mut tanks: Query<(Entity, &mut TankCommand), With<Controlled>>,
+    weapons: Query<(&Weapon, &WeaponIndex, &TankRoot), With<Muzzle>>,
+) {
+    let step = match (
+        bindings.round_next.just_pressed(&keys, &mouse),
+        bindings.round_previous.just_pressed(&keys, &mouse),
+    ) {
+        (true, false) => RoundStep::Next,
+        (false, true) => RoundStep::Previous,
+        _ => return,
+    };
+    for (tank, mut command) in &mut tanks {
+        let primary = weapons.iter().find_map(|(weapon, slot, root)| {
+            (root.0 == tank && weapon.trigger == Trigger::Primary).then_some(slot.0)
+        });
+        if let Some(weapon) = primary.and_then(|slot| u8::try_from(slot).ok()) {
+            command.select_round = Some(RoundSelect { weapon, step });
+        }
+    }
+}
+
 /// Clear the latched edges at the end of each fixed tick — the consuming half of the latch
 /// contract described on [`TankCommand::fire_primary`].
 fn consume_edges(mut tanks: Query<&mut TankCommand>) {
@@ -517,9 +590,15 @@ mod tests {
     #[test]
     fn clear_edges_resets_every_edge_has_edge_reports() {
         // Each latched-edge variant in isolation: has_edge true, then clear_edges makes it false.
-        let edges: [fn(&mut TankCommand); 3] = [
+        let edges: [fn(&mut TankCommand); 4] = [
             |c| c.fire_primary = true,
             |c| c.crew_swap = Some(CrewSwap::Start(CrewStation::Gunner, CrewStation::Loader)),
+            |c| {
+                c.select_round = Some(RoundSelect {
+                    weapon: 0,
+                    step: RoundStep::Next,
+                })
+            },
             |c| c.respawn = true,
         ];
         for set_edge in edges {
@@ -539,6 +618,10 @@ mod tests {
             range: 800.0,
             fire_primary: true,
             crew_swap: Some(CrewSwap::Cancel),
+            select_round: Some(RoundSelect {
+                weapon: 1,
+                step: RoundStep::Previous,
+            }),
             respawn: true,
             for_tick: 0,
         };

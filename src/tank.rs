@@ -26,6 +26,7 @@ pub(crate) use model::rig_world_pose;
 pub use model::{
     Controlled, EngineSound, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot, TankServos, TankSim,
     TankViews, TrackSide, Turret, ViewConfig, Weapon, WeaponGate, WeaponGateState, WeaponIndex,
+    WeaponLoad, WeaponLoads, WeaponRound,
 };
 pub use scenario::{client_plugin, sp_spawn_plugin};
 pub(crate) use servo::RemoteServos;

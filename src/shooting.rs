@@ -16,7 +16,7 @@ use crate::damage::{TankVolumes, VolumeFacets, requirement_met};
 use crate::spec::{FireMode, Trigger};
 use crate::state::{AppState, GameplaySet, SimPhase};
 use crate::tank::{
-    Muzzle, Tank, TankRoot, TankSim, Weapon, WeaponGate, WeaponIndex, rig_world_pose,
+    Muzzle, Tank, TankRoot, TankSim, Weapon, WeaponGate, WeaponIndex, WeaponLoads, rig_world_pose,
 };
 use crate::track::sim::apply_explicit_impulse;
 
@@ -83,7 +83,9 @@ pub(crate) fn tracer_round(rounds_fired: u32, tracer_every: u32) -> bool {
 
 pub fn plugin(app: &mut App) {
     // The gun is sim: readiness and firing run on the fixed clock, driven by each tank's
-    // `TankCommand` — `fire` consumes the click edge, so it must precede edge clearing.
+    // `TankCommand` — `fire` consumes the click edge, so it must precede edge clearing, and so does
+    // the authority's round selection, which follows `fire` so a shot in its tick fires the round
+    // chambered before it.
     //
     // `SimPhase` owns the cross-feature order: driving samples tick-start velocity before this
     // impulse changes it, then recoil integrates the new kick in the same tick.
@@ -95,7 +97,11 @@ pub fn plugin(app: &mut App) {
         .add_systems(
             FixedUpdate,
             (
-                (tick_weapon_gate, fire)
+                (
+                    tick_weapon_gate,
+                    fire,
+                    apply_round_selection.run_if(not(resource_exists::<crate::ClientReplica>)),
+                )
                     .chain()
                     .in_set(SimPhase::WeaponFire)
                     .before(ConsumeCommandEdges),
@@ -211,7 +217,7 @@ fn fire(
     volumes: Query<VolumeFacets>,
     weapons: Query<(Entity, &Weapon, &WeaponIndex, &TankRoot), With<Muzzle>>,
     mut sims: Query<&mut TankSim>,
-    mut gates: Query<&mut WeaponGate>,
+    (mut gates, loads): (Query<&mut WeaponGate>, Query<&WeaponLoads>),
     mut bodies: Query<Forces, With<Tank>>,
     parents: Query<&ChildOf>,
     locals: Query<&Transform>,
@@ -258,6 +264,16 @@ fn fire(
         if !triggered || !ready || !requirement_met(tank_volumes, &weapon.fire, &volumes) {
             continue;
         }
+        // The chambered round ([`crate::tank::WeaponLoad::loaded`]). A slot with no load state or
+        // an index past the weapon's list holds the shot, as a missing gate does.
+        let Some(fired) = loads
+            .get(root.0)
+            .ok()
+            .and_then(|loads| loads.weapons.get(slot.0))
+            .and_then(|load| weapon.rounds.get(usize::from(load.loaded)))
+        else {
+            continue;
+        };
 
         // Tick-truth muzzle pose (`rig_world_pose`, never `GlobalTransform` — see its doc): the
         // muzzle decides where the shell goes, so it must be the pose the server's tick also
@@ -320,16 +336,16 @@ fn fire(
         // flash, and barrel kick present from that echo at the cursor; an unkeyed shot has no echo
         // and presents locally.
         let fused_echo = replica.is_some() && shot.is_some();
-        // Hand off to ballistics: fire down the bore at the weapon's muzzle speed.
+        // Hand off to ballistics: fire the chambered round down the bore at its muzzle speed.
         if !fused_echo {
             commands.trigger(FireShell {
                 origin: muzzle_position,
                 direction: bore,
-                speed: weapon.speed,
-                caliber: weapon.caliber,
-                mass: weapon.mass,
-                nose_factor: weapon.nose_factor,
-                wound: weapon.wound,
+                speed: fired.round.muzzle_speed,
+                caliber: fired.round.body.caliber,
+                mass: fired.round.body.mass,
+                nose_factor: fired.round.body.nose_factor,
+                wound: fired.round.wound,
                 mechanism: weapon.fire_mode.mechanism(),
                 tracer,
                 // This shell belongs to a tank: name its root AND the firing weapon slot so the net
@@ -357,7 +373,7 @@ fn fire(
         // pitches the nose up (gun climb), not just shoves the hull back. Each weapon kicks by its
         // own momentum, so the MGs barely register.
         if let Ok(forces) = bodies.get_mut(root.0) {
-            let impulse = recoil_impulse(bore, weapon.mass, weapon.speed);
+            let impulse = recoil_impulse(bore, fired.round.body.mass, fired.round.muzzle_speed);
             apply_explicit_impulse(forces, impulse, muzzle_position);
         }
         // Arm an absolute deadline per mechanism. `Single`: crew-gated reload. `Automatic`: consume
@@ -384,6 +400,42 @@ fn fire(
                 weapon_clock.0,
                 duration_ticks(delay_secs, fixed_time.timestep()),
             );
+        }
+    }
+}
+
+/// Apply each tank's round-selection edge, then the next-load rule ([`crate::tank::WeaponLoad`]) —
+/// authority only: a client reads the replicated [`WeaponLoads`] and never writes it.
+///
+/// The edge steps the addressed slot's `selected` through the weapon's round list, wrapping; an edge
+/// naming no weapon slot of the tank changes nothing. Then every slot whose weapon is loading takes
+/// `loaded = selected`. Chained after [`fire`]: a shot in this tick fired the round chambered before
+/// the edge, and the reload it armed loads the selection.
+fn apply_round_selection(
+    mut tanks: Query<(&TankCommand, &WeaponGate, &mut WeaponLoads), With<Tank>>,
+    weapons: Query<(&Weapon, &WeaponIndex, &TankRoot), With<Muzzle>>,
+) {
+    for (weapon, slot, root) in &weapons {
+        let Ok((command, gate, mut loads)) = tanks.get_mut(root.0) else {
+            continue;
+        };
+        let (Some(&state), Some(&load)) = (gate.weapons.get(slot.0), loads.weapons.get(slot.0))
+        else {
+            continue;
+        };
+        let mut next = load;
+        if let Some(select) = command.select_round
+            && usize::from(select.weapon) == slot.0
+            && let Some(selected) = select.step.apply(load.selected, weapon.rounds.len())
+        {
+            next.selected = selected;
+        }
+        if weapon.is_loading(state) {
+            next.loaded = next.selected;
+        }
+        // Written only on a change: an unchanged choice must not re-replicate.
+        if next != load {
+            loads.weapons[slot.0] = next;
         }
     }
 }
@@ -430,7 +482,7 @@ mod tests {
     use crate::spec::{FireMode, Trigger};
     use crate::tank::{
         Muzzle, Tank, TankRoot, TankSim, Weapon, WeaponGate, WeaponGateState, WeaponIndex,
-        WeaponState,
+        WeaponLoad, WeaponLoads, WeaponRound, WeaponState,
     };
 
     /// The belt-fed test mode: 600 rpm = a 0.1 s cyclic interval, a 2-round belt, a 1 s swap.
@@ -533,6 +585,9 @@ mod tests {
                 WeaponGate {
                     weapons: vec![WeaponGateState::for_mode(&MG_MODE)],
                 },
+                WeaponLoads {
+                    weapons: vec![WeaponLoad::default()],
+                },
                 crate::CombatantId(1),
             ))
             .id();
@@ -546,11 +601,7 @@ mod tests {
             Weapon {
                 name: "MG".into(),
                 round: "7.9mm_AP".into(),
-                speed: 755.0,
-                caliber: 0.0079,
-                mass: 0.0118,
-                nose_factor: 0.5,
-                wound: 10.0,
+                rounds: vec![WeaponRound::resolve("7.9mm_AP").expect("a shipped round")],
                 fire_mode: MG_MODE,
                 recoil: None,
                 barrel: None,
@@ -579,6 +630,9 @@ mod tests {
                 WeaponGate {
                     weapons: vec![WeaponGateState::for_mode(&MAIN_GUN_MODE)],
                 },
+                WeaponLoads {
+                    weapons: vec![WeaponLoad::default()],
+                },
                 crate::CombatantId(1),
             ))
             .id();
@@ -592,11 +646,9 @@ mod tests {
             Weapon {
                 name: "88 mm".into(),
                 round: "88mm_AP".into(),
-                speed: 810.0,
-                caliber: 0.088,
-                mass: 10.2,
-                nose_factor: 0.3,
-                wound: 30.0,
+                rounds: ["88mm_AP", "88mm_APCR"]
+                    .map(|key| WeaponRound::resolve(key).expect("a shipped round"))
+                    .into(),
                 fire_mode: MAIN_GUN_MODE,
                 recoil: None,
                 barrel: None,

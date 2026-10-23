@@ -12,7 +12,7 @@ use super::integrity::authored_attachment;
 use super::model::{
     EngineSound, Gun, GunBarrel, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot, TankServos, TankSim,
     TankViews, TrackSide, Turret, ViewConfig, Weapon, WeaponGate, WeaponGateState, WeaponIndex,
-    WeaponState,
+    WeaponLoad, WeaponLoads, WeaponRound, WeaponState,
 };
 use super::servo::{RemoteServos, ServoCommand, ServoIndex, ServoRest, ServoRole, ServoSpec};
 use super::view::{SimParts, bind_tank_view};
@@ -196,6 +196,13 @@ fn weapon_gate(spec: &TankSpec) -> WeaponGate {
     }
 }
 
+/// Every weapon slot on its default round, loaded and selected, in [`weapon_gate`]'s slot order.
+fn weapon_loads(spec: &TankSpec) -> WeaponLoads {
+    WeaponLoads {
+        weapons: vec![WeaponLoad::default(); spec.weapons.len()],
+    }
+}
+
 fn tank_servos(spec: &TankSpec) -> TankServos {
     TankServos::for_count(spec.servos.len())
 }
@@ -219,6 +226,8 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
         // Complete REV-17 weapon gate, synchronously constructed from the same sorted spec data as
         // its weapon slots. Replicated client attachment must preserve the arriving authority value.
         weapon_gate(content.spec()),
+        // The round each slot has loaded and selected, beside the gate it is read with.
+        weapon_loads(content.spec()),
         // Complete servo integrator inventory is data-built in the same spawn flush. The glb is a
         // view and never initializes replicated state.
         tank_servos(content.spec()),
@@ -252,6 +261,7 @@ pub(crate) fn spawn_headless_tank<B: Bundle>(
             TrackGripElements::for_links(content.spec().track.link_count),
             tank_transmission(content.spec()),
             weapon_gate(content.spec()),
+            weapon_loads(content.spec()),
             tank_servos(content.spec()),
             root_bundle,
         ))
@@ -277,7 +287,7 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
     root_commands
         .insert((
             presentation.root_bundle(),
-            // Replicated authority state (TankTransmission, WeaponGate, servo snapshots) arrived
+            // Replicated authority state (TankTransmission, WeaponGate, WeaponLoads, servo snapshots) arrived
             // in the replication init snapshot. Do not overwrite it with fresh spec-derived values.
             root_bundle,
         ))
@@ -576,17 +586,24 @@ fn insert_weapons(
     {
         let muzzle = entity_at(muzzle_index);
         let barrel = barrel_index.map(&entity_at);
-        let round = weapon.resolved_round().unwrap_or_else(|err| {
-            panic!("weapon `{weapon_name}`: {err} — the spec's validate() resolves every round")
-        });
+        let rounds = weapon
+            .rounds
+            .iter()
+            .map(|key| WeaponRound::resolve(key))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap_or_else(|err| {
+                panic!("weapon `{weapon_name}`: {err} — the spec's validate() resolves every round")
+            });
+        // The sight's range table is graduated for the default round.
+        let range_table = RangeTable::for_weapon(
+            rounds[0].round.muzzle_speed,
+            rounds[0].round.body.caliber,
+            rounds[0].round.body.mass,
+        );
         let weapon_component = Weapon {
             name: (*weapon_name).clone(),
             round: weapon.default_round_key().to_owned(),
-            speed: round.muzzle_speed,
-            caliber: round.body.caliber,
-            mass: round.body.mass,
-            nose_factor: round.body.nose_factor,
-            wound: round.wound,
+            rounds,
             fire_mode: weapon.fire_mode,
             recoil: weapon.recoil.clone(),
             barrel,
@@ -595,11 +612,6 @@ fn insert_weapons(
             trigger: weapon.trigger,
             report_clips: weapon.report_clips.clone(),
         };
-        let range_table = RangeTable::for_weapon(
-            weapon_component.speed,
-            weapon_component.caliber,
-            weapon_component.mass,
-        );
         commands.entity(muzzle).insert((
             Muzzle,
             TankRoot(root),

@@ -60,14 +60,12 @@ pub struct GunBarrel;
 pub struct Weapon {
     /// Logical authored name, distinct from the muzzle node name.
     pub name: String,
-    /// The round it fires: its key in the round registry.
+    /// The default round's registry key, `rounds[0].key`: the key the shot recorder
+    /// (`damage_cam::recorder`) names a recorded round by.
     pub round: String,
-    pub speed: f32,
-    pub caliber: f32,
-    pub mass: f32,
-    pub nose_factor: f32,
-    /// Wound rate of the round (reference-mm per metre of witness chord), from `rounds.ron`.
-    pub wound: f32,
+    /// Every round the weapon can load, in authored order; index 0 is the default. A slot's
+    /// [`WeaponLoad`] and a fired round's `ShotSource::round` index this list.
+    pub rounds: Vec<WeaponRound>,
     /// Reload/cyclic mechanism and its edge-versus-level input semantics.
     pub fire_mode: FireMode,
     pub recoil: Option<RecoilSpec>,
@@ -80,6 +78,41 @@ pub struct Weapon {
     /// Authored report clips (asset-relative paths); empty = a silent weapon. `sfx` rolls one per
     /// round off this list.
     pub report_clips: Vec<String>,
+}
+
+/// One round a weapon can load, resolved from the round registry (`assets/ballistics/rounds.ron`)
+/// at spawn.
+#[derive(Clone, Debug, PartialEq)]
+pub struct WeaponRound {
+    /// The registry key: the data's handle, never shown to a player.
+    pub key: String,
+    /// The registry's display name, drawn whole by the shipped font.
+    pub name: String,
+    /// The body the force law binds, the muzzle speed and the wound rate.
+    pub(crate) round: crate::rounds::Round,
+}
+
+impl WeaponRound {
+    /// The shipped registry's round keyed `key`, or the registry's error naming it.
+    pub(crate) fn resolve(key: &str) -> Result<Self, crate::rounds::RoundError> {
+        let registry = crate::rounds::RoundRegistry::shipped();
+        Ok(Self {
+            key: key.to_owned(),
+            name: registry.name(key)?.to_owned(),
+            round: registry.get(key)?,
+        })
+    }
+}
+
+impl Weapon {
+    /// Whether `state` is a load in progress: a `Single` reloading, an `Automatic` with a dry belt
+    /// awaiting its swap. The window in which [`WeaponLoad::loaded`] follows the selection.
+    pub fn is_loading(&self, state: WeaponGateState) -> bool {
+        match self.fire_mode {
+            FireMode::Single { .. } => !state.is_ready(),
+            FireMode::Automatic { .. } => state.belt_remaining == 0,
+        }
+    }
 }
 
 /// The tank's engine recording and the facts its playback speed is derived from — spec data on the
@@ -233,6 +266,29 @@ impl WeaponGateState {
 #[derive(Component, Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct WeaponGate {
     pub weapons: Vec<WeaponGateState>,
+}
+
+/// One weapon's round choice, as indices into its [`Weapon::rounds`].
+///
+/// Invariant (the next-load rule): `loaded` is the round the weapon's next shot fires, and it
+/// changes only while the weapon [is loading](Weapon::is_loading), when it follows `selected`. A
+/// chambered round — a ready `Single`, a belt with rounds left — is fired as it was loaded,
+/// whatever is selected after. A selection made while a reload has not completed applies to that
+/// reload; one made in the tick a reload completes waits for the next load.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub struct WeaponLoad {
+    pub loaded: u8,
+    pub selected: u8,
+}
+
+/// The round choice for every weapon slot, in the name-sorted slot order of [`WeaponGate`]. Built at
+/// spawn from the spec with every slot on its default round (index 0). Only the authority writes it
+/// (`shooting::apply_round_selection`, from the command's `select_round` edge); it replicates to the
+/// owner beside `WeaponGate`, and a client reads it and never writes it, so a selection is in force
+/// only once the authority's value arrives.
+#[derive(Component, Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct WeaponLoads {
+    pub weapons: Vec<WeaponLoad>,
 }
 
 /// Tick-correlated servo integrator state in deterministic name-sorted [`super::ServoIndex`] order.

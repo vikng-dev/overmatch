@@ -87,7 +87,9 @@ use super::sync_margin::ArrivalDelay;
 use crate::ballistics::{FireShell, FireShellOrigin, MAX_COSMETIC_CATCH_UP_TICKS, ShotSource};
 use crate::command::TankCommand;
 use crate::state::GameplaySet;
-use crate::tank::{Controlled, Muzzle, TankRoot, Weapon, WeaponGate, WeaponGateState, WeaponIndex};
+use crate::tank::{
+    Controlled, Muzzle, TankRoot, Weapon, WeaponGate, WeaponGateState, WeaponIndex, WeaponLoads,
+};
 
 /// Authored ticks retained before the oldest is dropped. A memory bound only: consumption is by
 /// exact tick, so an evicted entry is one no presentation tick can still reach.
@@ -553,7 +555,7 @@ fn recover_unannounced_rounds(
     arrival: Option<Res<ArrivalDelay>>,
     // Skips the whole system until the cursor syncs: an unsynced cursor defines no wait.
     cursor: SyncedInterpolationTimeline,
-    mut roots: Query<(Entity, &mut OwnFirePresentation)>,
+    mut roots: Query<(Entity, &mut OwnFirePresentation, Option<&WeaponLoads>)>,
     muzzles: Query<(&Weapon, &WeaponIndex, &TankRoot, &GlobalTransform), With<Muzzle>>,
     mut recoil: ResMut<super::client::PendingRecoilKicks>,
     mut diag: ResMut<OwnFireDiag>,
@@ -567,7 +569,7 @@ fn recover_unannounced_rounds(
     // recovered round's age is the seam's `cursor − revealed_tick` — a fallback bang lands at the
     // same lag its lost announcement would have presented at.
     let cursor = (cursor.tick(), f64::from(cursor.overstep().to_f32()));
-    for (root, mut ledger) in &mut roots {
+    for (root, mut ledger, loads) in &mut roots {
         for (slot, entry) in ledger.slots.iter_mut().enumerate() {
             let Some(&Reveal { revealed_tick, .. }) = entry.reveals.front() else {
                 continue;
@@ -583,14 +585,24 @@ fn recover_unannounced_rounds(
             let Ok(direction) = Dir3::new(muzzle.rotation() * Vec3::NEG_Z) else {
                 continue;
             };
+            // The fired round's index died with its announcement; the slot's present `loaded`
+            // stands in, which is the fired round unless a selection was loaded since; an index past
+            // the list presents the default round rather than jam the slot. The shell is a cosmetic
+            // repair either way.
+            let loaded = loads
+                .and_then(|loads| loads.weapons.get(slot))
+                .map_or(0, |load| usize::from(load.loaded));
+            let Some(fired) = weapon.rounds.get(loaded).or_else(|| weapon.rounds.first()) else {
+                continue;
+            };
             let facts = ReleasedShot {
                 origin: muzzle.translation(),
                 direction,
-                speed: weapon.speed,
-                caliber: weapon.caliber,
-                mass: weapon.mass,
-                nose_factor: weapon.nose_factor,
-                wound: weapon.wound,
+                speed: fired.round.muzzle_speed,
+                caliber: fired.round.body.caliber,
+                mass: fired.round.body.mass,
+                nose_factor: fired.round.body.nose_factor,
+                wound: fired.round.wound,
                 // The round's belt phase died with the announcement; a recovered round
                 // presents traced — the visible arm of the self-heal.
                 tracer: true,
@@ -1482,11 +1494,9 @@ mod tests {
             Weapon {
                 name: "test gun".into(),
                 round: "88mm_AP".into(),
-                speed: 755.0,
-                caliber: 0.088,
-                mass: 10.2,
-                nose_factor: 0.3,
-                wound: 30.0,
+                rounds: vec![
+                    crate::tank::WeaponRound::resolve("88mm_AP").expect("a shipped round"),
+                ],
                 fire_mode: crate::spec::FireMode::Single { reload_secs: 6.0 },
                 recoil: None,
                 barrel: None,
