@@ -1493,7 +1493,6 @@ mod tests {
             GlobalTransform::from(Transform::from_xyz(1.0, 2.0, 3.0)),
             Weapon {
                 name: "test gun".into(),
-                round: "88mm_AP".into(),
                 rounds: vec![
                     crate::tank::WeaponRound::resolve("88mm_AP").expect("a shipped round"),
                 ],

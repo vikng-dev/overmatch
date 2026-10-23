@@ -60,9 +60,6 @@ pub struct GunBarrel;
 pub struct Weapon {
     /// Logical authored name, distinct from the muzzle node name.
     pub name: String,
-    /// The default round's registry key, `rounds[0].key`: the key the shot recorder
-    /// (`damage_cam::recorder`) names a recorded round by.
-    pub round: String,
     /// Every round the weapon can load, in authored order; index 0 is the default. A slot's
     /// [`WeaponLoad`] and a fired round's `ShotSource::round` index this list.
     pub rounds: Vec<WeaponRound>,

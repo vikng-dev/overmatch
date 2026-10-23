@@ -605,7 +605,6 @@ mod tests {
             ChildOf(root),
             Weapon {
                 name: "MG".into(),
-                round: "7.9mm_AP".into(),
                 rounds: vec![WeaponRound::resolve("7.9mm_AP").expect("a shipped round")],
                 fire_mode: MG_MODE,
                 recoil: None,
@@ -650,7 +649,6 @@ mod tests {
             ChildOf(root),
             Weapon {
                 name: "88 mm".into(),
-                round: "88mm_AP".into(),
                 rounds: ["88mm_AP", "88mm_APCR"]
                     .map(|key| WeaponRound::resolve(key).expect("a shipped round"))
                     .into(),

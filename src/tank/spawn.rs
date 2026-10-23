@@ -602,7 +602,6 @@ fn insert_weapons(
         );
         let weapon_component = Weapon {
             name: (*weapon_name).clone(),
-            round: weapon.default_round_key().to_owned(),
             rounds,
             fire_mode: weapon.fire_mode,
             recoil: weapon.recoil.clone(),

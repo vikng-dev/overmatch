@@ -2791,7 +2791,6 @@ mod tests {
     fn weapon(recoil: Option<RecoilSpec>, barrel: Option<Entity>) -> Weapon {
         Weapon {
             name: "MainGun".into(),
-            round: "88mm_AP".into(),
             rounds: vec![crate::tank::WeaponRound::resolve("88mm_AP").expect("a shipped round")],
             fire_mode: FireMode::Single { reload_secs: 8.0 },
             recoil,

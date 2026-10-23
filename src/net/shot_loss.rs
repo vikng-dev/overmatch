@@ -135,7 +135,6 @@ fn arm_fixture_weapons(add: On<Add, NetTank>, mut commands: Commands) {
             TankRoot(add.entity),
             Weapon {
                 name: format!("fixture {slot}"),
-                round: rounds[0].key.clone(),
                 rounds: rounds.clone(),
                 fire_mode: crate::spec::FireMode::Single { reload_secs: 1.0 },
                 recoil: None,

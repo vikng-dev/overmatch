@@ -160,7 +160,10 @@ impl ShotRecording {
                 projectile: weapon.map_or_else(String::new, |weapon| weapon.name.clone()),
                 caliber_mm: fire.caliber * 1000.0,
                 mass_kg: fire.mass,
-                round: weapon.map_or_else(String::new, |weapon| weapon.round.clone()),
+                round: weapon
+                    .zip(fire.shooter)
+                    .and_then(|(weapon, source)| weapon.rounds.get(usize::from(source.round)))
+                    .map_or_else(String::new, |round| round.key.clone()),
                 vehicle: None,
             },
             source: fire.shooter,
