@@ -1787,6 +1787,49 @@ fn an_unshadowed_dose_falls_as_the_inverse_square() {
     }
 }
 
+/// The pen cam's potency bands read this resolver's dose, under every law: the intensity its law
+/// draws at distance `r` along a direction (`ρ s / (Ω_c r²)`, `pen_cam::potency`) times a thin
+/// unresisting face's area there is `ρ` times the dose the face takes. The band colour's promise —
+/// a box's face wholly in a band takes at least that band's pool — relies on it; a pen cam law that
+/// drifts from the dose law (a lost `Ω_c`, a square dropped, the profile ignored) fails here.
+/// Fixture: a 0.1 m square face-on on the axis at 1.0 and 1.5 m, 16384 directions. At 1.5 m it
+/// covers ~124 strata, one stratum 0.8 % of its dose (DERIVED: `(A / r²) / Ω_c · N`), and the
+/// tolerance is three strata; MEASURED within 1.0 % under every law.
+#[test]
+fn the_pen_cam_intensity_times_a_face_is_its_dose() {
+    use crate::damage_cam::pen_cam::potency::{Potency, intensity};
+    let potency = Potency::shipped();
+    let side = 0.1;
+    for law in LAWS {
+        let shape =
+            ConeShape::new(FIELD_ALPHA, AxisRule::ExitDirection, 16384, law.0, law.1).unwrap();
+        let (_, on_axis) = shape
+            .directions(Dir3::NEG_Y)
+            .max_by(|a, b| a.0.y.total_cmp(&b.0.y).reverse())
+            .unwrap();
+        for depth in [1.0, 1.5] {
+            let (mut app, boxes) = field_world(|app| {
+                vec![below(
+                    app,
+                    Vec3::new(side, 0.002, side),
+                    depth,
+                    0.0,
+                    0.0,
+                    true,
+                )]
+            });
+            let dose = field_doses(&mut app, &boxes, 10.0, 16384, law)[0];
+            let e = potency.emission(10.0 * on_axis, FIELD_ALPHA as f32);
+            let drawn = intensity(e, depth - 0.001) as f64 * (side * side) as f64;
+            let ratio = drawn / (potency.rate as f64 * dose);
+            assert!(
+                (ratio - 1.0).abs() < 0.025,
+                "{law:?}, r = {depth}: I·A / ρD = {ratio}"
+            );
+        }
+    }
+}
+
 /// CLASS INVARIANT 6, FACTOR INDEPENDENCE, under every law: a box's dose is the strength arriving
 /// at it, never scaled by its own factor.
 #[test]

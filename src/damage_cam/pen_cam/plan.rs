@@ -528,7 +528,7 @@ fn cone(cone: &SpallCone, line: &Polyline) -> Cone {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use crate::damage_cam::PenetrationReport;
 
@@ -549,7 +549,8 @@ mod tests {
         PenetrationReport::load(&path).unwrap()
     }
 
-    fn records() -> Vec<(String, PenetrationReport)> {
+    /// Every recorded scenario in `assets/dev/pen_cam/`, by name, name-sorted.
+    pub(in super::super) fn records() -> Vec<(String, PenetrationReport)> {
         let dir = crate::assets::asset_root().join("dev/pen_cam");
         let mut out: Vec<(String, PenetrationReport)> = std::fs::read_dir(&dir)
             .unwrap()

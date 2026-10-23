@@ -29,6 +29,7 @@ mod killcam;
 mod look;
 mod material;
 mod plan;
+pub(crate) mod potency;
 mod stage;
 mod timeline;
 mod view;
