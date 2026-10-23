@@ -170,9 +170,10 @@ struct SlotLedger {
     /// one of these is the same round arriving twice and must not present again. `fire_tick`
     /// after every entry is a future round and never matches, so a stale entry cannot swallow one.
     owed_swallows: VecDeque<u32>,
-    /// The slot's replicated `loaded` index as of the last fold. A consumption's reveal takes
-    /// this value before the fold refreshes it, so a load that arrives beside the consumption
-    /// cannot rename the round it fired. 0 (the default round) until the first fold.
+    /// The slot's replicated `loaded` index as of the arm, then as of the last fold. A
+    /// consumption's reveal takes this value before the fold refreshes it, so a load that
+    /// arrives beside the consumption cannot rename the round it fired. 0 (the default round)
+    /// where no `WeaponLoads` has arrived.
     arrived_loaded: u8,
 }
 
@@ -387,10 +388,18 @@ pub(super) fn present_shot_at_age(
     recoil.push(shot.shooter.tank, shot.shooter.weapon);
 }
 
-/// Arm the own tank once the server stream owns its gate.
+/// Slot `slot`'s replicated `loaded` index: 0 (the default round) where no `WeaponLoads` has
+/// arrived or the slot lies past its list.
+fn loaded_of(loads: Option<&WeaponLoads>, slot: usize) -> u8 {
+    loads
+        .and_then(|loads| loads.weapons.get(slot))
+        .map_or(0, |load| load.loaded)
+}
+
+/// Arm the own tank once the server stream owns its gate, each slot's load as it arrived.
 fn arm_own_fire_presentation(
     tanks: Query<
-        (Entity, &WeaponGate),
+        (Entity, &WeaponGate, Option<&WeaponLoads>),
         (
             With<NetTank>,
             With<Controlled>,
@@ -401,17 +410,21 @@ fn arm_own_fire_presentation(
     >,
     mut commands: Commands,
 ) {
-    for (entity, gate) in &tanks {
+    for (entity, gate, loads) in &tanks {
         info!("net: {entity} own interpolated gate armed with the fire-presentation ledger");
+        let slots = gate
+            .weapons
+            .iter()
+            .enumerate()
+            .map(|(slot, arriving)| {
+                let mut entry = SlotLedger::seeded(*arriving);
+                entry.arrived_loaded = loaded_of(loads, slot);
+                entry
+            })
+            .collect();
         commands
             .entity(entity)
-            .insert(OwnFirePresentation::with_slots(
-                gate.weapons
-                    .iter()
-                    .copied()
-                    .map(SlotLedger::seeded)
-                    .collect(),
-            ));
+            .insert(OwnFirePresentation::with_slots(slots));
     }
 }
 
@@ -441,7 +454,8 @@ fn fold_arrivals(
         .map(|tick| tick.0);
     for (gate, loads, mut ledger) in &mut roots {
         if ledger.gate_write_mark != Some(gate.last_changed()) {
-            // An unset mark (fresh arm) folds once against the seed — zero rounds by construction.
+            // An unset mark (fresh arm) folds against the seed: zero rounds, unless a replication
+            // write landed between the arm and this fold, which confirms as any other.
             ledger.gate_write_mark = Some(gate.last_changed());
             for (slot, entry) in ledger.slots.iter_mut().enumerate() {
                 let Some(arriving) = gate.weapons.get(slot).copied() else {
@@ -472,9 +486,7 @@ fn fold_arrivals(
         // slot's next load can arrive in one snapshot, and the reveal must name the round fired,
         // not the one loaded behind it.
         for (slot, entry) in ledger.slots.iter_mut().enumerate() {
-            entry.arrived_loaded = loads
-                .and_then(|loads| loads.weapons.get(slot))
-                .map_or(0, |load| load.loaded);
+            entry.arrived_loaded = loaded_of(loads, slot);
         }
     }
 }
@@ -1225,6 +1237,18 @@ mod tests {
                 WeaponGate {
                     weapons: vec![ready(BELT - 7), ready(0)],
                 },
+                crate::tank::WeaponLoads {
+                    weapons: vec![
+                        crate::tank::WeaponLoad {
+                            loaded: 1,
+                            selected: 1,
+                        },
+                        crate::tank::WeaponLoad {
+                            loaded: 0,
+                            selected: 0,
+                        },
+                    ],
+                },
             ))
             .id();
         let opponent = app
@@ -1251,6 +1275,86 @@ mod tests {
         assert_eq!(ledger.slots.len(), 2, "one entry per weapon slot");
         assert_eq!(ledger.slots[0].seen_belt, BELT - 7);
         assert_eq!(ledger.slots[0].absorbed(), 0);
+        assert_eq!(
+            (
+                ledger.slots[0].arrived_loaded,
+                ledger.slots[1].arrived_loaded
+            ),
+            (1, 0),
+            "the load that arrived with the gate names a reveal before the first fold"
+        );
+    }
+
+    /// THE REVEAL NAMES THE ROUND ITS CONSUMPTION FIRED. The ledger carries the replica's load as
+    /// of the fold BEFORE a consumption arrives, so a consumption and its slot's next load landing
+    /// in one snapshot reveal the round that was in the breech, not the one loaded behind it, and
+    /// the next consumption reveals that new load. Refreshing the load before the fold (or never
+    /// after the arm) reds the first assert; dropping the refresh reds the second.
+    #[test]
+    fn a_reveal_names_the_load_as_of_the_fold_before_its_consumption() {
+        let (mut world, root) = world_with_ledger(ready(BELT));
+        world.insert_resource(ArrivalDelay::test_with_newest_remote(Tick(700)));
+        world.entity_mut(root).insert(crate::tank::WeaponLoads {
+            weapons: vec![crate::tank::WeaponLoad {
+                loaded: 0,
+                selected: 1,
+            }],
+        });
+        // The first fold reads the arrived load and confirms nothing.
+        world.run_system_once(fold_arrivals).expect("fold runs");
+        assert_eq!(
+            world
+                .get::<OwnFirePresentation>(root)
+                .expect("ledger")
+                .slots[0]
+                .confirmed,
+            0
+        );
+
+        // One snapshot carries a consumption (a belt draw) and the reload that put the selected
+        // round in the breech behind it.
+        {
+            let mut root_ref = world.entity_mut(root);
+            root_ref.get_mut::<WeaponGate>().expect("gate").weapons[0] = ready(BELT - 1);
+            root_ref
+                .get_mut::<crate::tank::WeaponLoads>()
+                .expect("loads")
+                .weapons[0]
+                .loaded = 1;
+        }
+        world.run_system_once(fold_arrivals).expect("fold runs");
+        {
+            let slot = &world
+                .get::<OwnFirePresentation>(root)
+                .expect("ledger")
+                .slots[0];
+            assert_eq!(slot.confirmed, 1);
+            assert_eq!(
+                slot.reveals
+                    .front()
+                    .expect("the consumption is revealed")
+                    .loaded,
+                0,
+                "the round fired is the one loaded before this fold, not the one loaded behind it",
+            );
+        }
+
+        // The next consumption fires the round that reload put in the breech.
+        world.get_mut::<WeaponGate>(root).expect("gate").weapons[0] = ready(BELT - 2);
+        world.run_system_once(fold_arrivals).expect("fold runs");
+        let slot = &world
+            .get::<OwnFirePresentation>(root)
+            .expect("ledger")
+            .slots[0];
+        assert_eq!(slot.confirmed, 2);
+        assert_eq!(
+            slot.reveals
+                .back()
+                .expect("the second consumption is revealed")
+                .loaded,
+            1,
+            "a later consumption names the load the previous fold arrived with",
+        );
     }
 
     /// CONSUMPTION IS `max(belt delta, arm edge)`, NEVER THEIR SUM. A `Single` draws no belt —
