@@ -590,6 +590,17 @@ fn collect_client_shells(fire: On<FireShell>, mut shells: ResMut<ClientShells>) 
     }
 }
 
+/// Every keyed shell's calibre at spawn, on any role: the server's from its scripted round, a
+/// client's from the round its fixture weapon lists at the fire event's index.
+#[derive(Resource, Default)]
+struct ShellCalibers(Vec<(ShotId, f32)>);
+
+fn collect_shell_calibers(fire: On<FireShell>, mut calibers: ResMut<ShellCalibers>) {
+    if let Some(shot) = fire.shot {
+        calibers.0.push((shot, fire.caliber));
+    }
+}
+
 /// A hidden keyed shell created by the catch-up armor path (a spawn fast-forwarded into a
 /// contact). Under the cursor clock the steady delayed-observer link must record NONE: the round
 /// waits in the `CursorQueue` and presents at its own tick, age ~0, at the muzzle — a hold here
@@ -737,6 +748,8 @@ fn build_server(port: u16) -> App {
     app.init_resource::<FireArmed>();
     app.init_resource::<ServerShots>();
     app.init_resource::<ScriptedShotModes>();
+    app.init_resource::<ShellCalibers>();
+    app.add_observer(collect_shell_calibers);
     app.init_resource::<ServerBounces>();
     app.init_resource::<ServerDamages>();
     app.add_observer(collect_server_bounces);
@@ -820,6 +833,8 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
     app.add_observer(arm_fixture_weapons);
 
     app.init_resource::<ClientShells>();
+    app.init_resource::<ShellCalibers>();
+    app.add_observer(collect_shell_calibers);
     app.init_resource::<ClientBounces>();
     app.init_resource::<ClientRenderedBounces>();
     app.init_resource::<ClientCatchUpArmorHolds>();
@@ -1503,6 +1518,34 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
         1,
         "the reliable cannon's owner-private DamageConfirm must present exactly once on its owner"
     );
+
+    // ROUND BINDING over the real wire: every shell a client presented flies the round the
+    // authority fired. The stream fires the MG fixture round and the scripts the cannon round, so a
+    // fire event that lost its round index binds the wrong calibre here.
+    let fired_calibers: std::collections::HashMap<ShotId, f32> = server
+        .world()
+        .resource::<ShellCalibers>()
+        .0
+        .iter()
+        .copied()
+        .collect();
+    for (role, client) in [("observer", &observer), ("shooter", &shooter)] {
+        let presented = &client.world().resource::<ShellCalibers>().0;
+        for round in [CANNON_ROUND, MG_ROUND] {
+            let caliber = FIXTURE_ROUNDS[usize::from(round)].1.caliber;
+            assert!(
+                presented.iter().any(|&(_, presented)| presented == caliber),
+                "the {role} presented no shell of fixture round {round}"
+            );
+        }
+        for &(shot, caliber) in presented {
+            assert_eq!(
+                fired_calibers.get(&shot),
+                Some(&caliber),
+                "the {role} bound a round for {shot:?} the authority did not fire"
+            );
+        }
+    }
 }
 
 /// A client that joins after the replicated combat root exists receives public life state but never

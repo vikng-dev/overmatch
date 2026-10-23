@@ -3377,6 +3377,74 @@ mod tests {
         }
     }
 
+    /// A FIRE BINDS ITS ROUND FROM THE RECEIVER'S OWN TANK DATA: the event names the round by its
+    /// index in the shooter's weapon list, and the reconstructed shell flies that round with the
+    /// index on its source. An index the receiver's list lacks presents nothing and waits like a
+    /// missing shooter. A mutant that bound the default round, or fell back to it, would draw a
+    /// shell the authority never fired.
+    #[test]
+    fn a_fire_binds_the_round_its_index_names_in_the_shooter_s_weapon() {
+        #[derive(Resource, Default)]
+        struct Bound(Vec<(u8, [f32; 5])>);
+
+        fn bind(fire: On<FireShell>, mut bound: ResMut<Bound>) {
+            if fire.shot_origin == FireShellOrigin::Reconstructed
+                && let Some(source) = fire.shooter
+            {
+                bound.0.push((
+                    source.round,
+                    [
+                        fire.speed,
+                        fire.caliber,
+                        fire.mass,
+                        fire.nose_factor,
+                        fire.wound,
+                    ],
+                ));
+            }
+        }
+
+        let mut app = fire_receive_app();
+        app.init_resource::<Bound>();
+        app.add_observer(bind);
+        let world = app.world_mut();
+        let root = spawn_shooter(world, 7);
+        let named = crate::tank::WeaponRound::resolve("88mm_APCR")
+            .expect("a shipped round")
+            .round;
+
+        let mut second = fire_event(root, 7, 42);
+        second.mechanism = crate::spec::FireMechanism::Single;
+        second.weapon = 1;
+        second.round = 1;
+        consume_and_release(world, second, Tick(42), None);
+        assert_eq!(
+            world.resource::<Bound>().0,
+            [(
+                1,
+                [
+                    named.muzzle_speed,
+                    named.body.caliber,
+                    named.body.mass,
+                    named.body.nose_factor,
+                    named.wound,
+                ],
+            )],
+            "the shell flies the round the index names in the shooter's list",
+        );
+
+        let mut unknown = fire_event(root, 7, 43);
+        unknown.weapon = 1;
+        unknown.round = 2;
+        consume_and_release(world, unknown, Tick(43), None);
+        assert_eq!(
+            world.resource::<Bound>().0.len(),
+            1,
+            "an index past the list presents nothing",
+        );
+        assert_eq!(world.resource::<PendingFireEvents>().len(), 1);
+    }
+
     /// FUSED OWN FIRE: the echo of a locally-fired round is the round's one presentation — the
     /// local fire tick drew nothing, so the echo must present the shell and carry the kick.
     #[test]

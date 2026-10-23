@@ -482,7 +482,7 @@ mod tests {
     use bevy::prelude::*;
 
     use super::{advance_weapon_clock, fire, plugin, tick_weapon_gate, tracer_round};
-    use crate::command::TankCommand;
+    use crate::command::{RoundSelect, RoundStep, TankCommand};
     use crate::damage::{CrewStation, Dead, Group, Part, Requirement, VolumeOf};
     use crate::spec::{FireMode, Trigger};
     use crate::tank::{
@@ -698,6 +698,45 @@ mod tests {
     fn set_app_state(app: &mut App, state: crate::state::AppState) {
         app.insert_state(state);
         app.world_mut().run_schedule(StateTransition);
+    }
+
+    /// Each fired shell's round, as the shooter source names it, and the muzzle speed it flies at.
+    #[derive(Resource, Default)]
+    struct FiredRounds(Vec<(u8, f32)>);
+
+    fn record_fired_round(fire: On<crate::ballistics::FireShell>, mut fired: ResMut<FiredRounds>) {
+        let source = fire.shooter.expect("a gun's shell names its shooter");
+        fired.0.push((source.round, fire.speed));
+    }
+
+    /// One fixed tick of the production gun schedule, with this tick's trigger click and
+    /// round-select edge on the rig's command.
+    fn gun_tick(app: &mut App, root: Entity, trigger: bool, select: Option<RoundStep>) {
+        let mut command = app
+            .world_mut()
+            .get_mut::<TankCommand>(root)
+            .expect("command on root");
+        command.fire_primary = trigger;
+        command.select_round = select.map(|step| RoundSelect { weapon: 0, step });
+        app.world_mut().run_schedule(FixedUpdate);
+        app.world_mut().run_schedule(FixedLast);
+    }
+
+    /// Idle gun ticks until the armed reload completes on the next tick.
+    fn idle_until_the_reload_completes_next(app: &mut App, root: Entity) {
+        let ready_tick = gate_state(app.world(), root)
+            .ready_tick
+            .expect("a reload is armed");
+        while app.world().resource::<crate::WeaponClock>().0 < ready_tick {
+            gun_tick(app, root, false, None);
+        }
+    }
+
+    fn load_state(world: &World, root: Entity) -> WeaponLoad {
+        world
+            .get::<WeaponLoads>(root)
+            .expect("loads on root")
+            .weapons[0]
     }
 
     fn advance(world: &mut World, ticks: u32) {
@@ -1070,6 +1109,118 @@ mod tests {
             weapon_state(&mut world, root).recoil_velocity > 0.0,
             "the authority applies the local barrel kick",
         );
+    }
+
+    /// THE NEXT-LOAD RULE (`WeaponLoad`), on the production gun schedule as the authority: a shot
+    /// fires the loaded round, and `loaded` follows `selected` only while the gun is loading. A
+    /// selection never swaps the chambered round; one made during a reload applies to that reload;
+    /// one made in the tick the reload completes waits for the next load. The HUD's `next:` readout
+    /// relies on it, and so does every replica, which binds the fired round by the index this
+    /// yields. A mutant that loads on every tick fires the selection from the chamber; one that
+    /// never loads fires the default round forever.
+    #[test]
+    fn a_selection_loads_at_the_next_load_and_the_chambered_round_fires_as_loaded() {
+        let mut app = pause_test_app();
+        app.init_resource::<FiredRounds>();
+        app.add_observer(record_fired_round);
+        let root = spawn_main_gun_rig(app.world_mut());
+        // Fixture data: the rig's two rounds, told apart by muzzle speed.
+        let speeds = ["88mm_AP", "88mm_APCR"].map(|key| {
+            WeaponRound::resolve(key)
+                .expect("a shipped round")
+                .round
+                .muzzle_speed
+        });
+        assert_ne!(speeds[0], speeds[1], "the fixture's rounds must differ");
+        let load = |loaded, selected| WeaponLoad { loaded, selected };
+
+        gun_tick(&mut app, root, false, Some(RoundStep::Next));
+        assert_eq!(
+            load_state(app.world(), root),
+            load(0, 1),
+            "a ready gun keeps its chambered round",
+        );
+
+        gun_tick(&mut app, root, true, None);
+        assert_eq!(app.world().resource::<FiredRounds>().0, [(0, speeds[0])]);
+        assert_eq!(
+            load_state(app.world(), root),
+            load(1, 1),
+            "the reload the shot armed loads the selection",
+        );
+
+        // Mid-reload, each selection applies to this reload; stepping past either end wraps.
+        gun_tick(&mut app, root, false, Some(RoundStep::Next));
+        assert_eq!(load_state(app.world(), root), load(0, 0));
+        gun_tick(&mut app, root, false, Some(RoundStep::Previous));
+        assert_eq!(load_state(app.world(), root), load(1, 1));
+
+        idle_until_the_reload_completes_next(&mut app, root);
+        gun_tick(&mut app, root, false, Some(RoundStep::Next));
+        assert_eq!(gate_state(app.world(), root).ready_tick, None);
+        assert_eq!(
+            load_state(app.world(), root),
+            load(1, 0),
+            "a selection in the tick the reload completes waits for the next load",
+        );
+
+        gun_tick(&mut app, root, true, None);
+        assert_eq!(
+            app.world().resource::<FiredRounds>().0,
+            [(0, speeds[0]), (1, speeds[1])],
+            "the shot fires the loaded round, bound from the weapon's list",
+        );
+        assert_eq!(load_state(app.world(), root), load(0, 0));
+    }
+
+    /// THE SELECTION IS SERVER-CONFIRMED: on a client (`ClientReplica`) the gun schedule never
+    /// applies a select edge, so an unconfirmed selection fires the round the authority loaded, and
+    /// only the replicated `WeaponLoads` changes it. Observed through unkeyed rounds, which present
+    /// locally. A client that latched its own selection would fire a round the authority never
+    /// loaded, a shell the authority's echo contradicts.
+    #[test]
+    fn a_client_fires_the_authority_s_loaded_round_until_its_selection_is_confirmed() {
+        let mut app = pause_test_app();
+        app.insert_resource(crate::ClientReplica);
+        app.init_resource::<FiredRounds>();
+        app.add_observer(record_fired_round);
+        let root = spawn_main_gun_rig(app.world_mut());
+        let fired = |app: &App| {
+            app.world()
+                .resource::<FiredRounds>()
+                .0
+                .iter()
+                .map(|&(round, _)| round)
+                .collect::<Vec<_>>()
+        };
+
+        // A selection inside a reload, the window in which the authority would load it.
+        gun_tick(&mut app, root, true, None);
+        gun_tick(&mut app, root, false, Some(RoundStep::Next));
+        assert_eq!(
+            load_state(app.world(), root),
+            WeaponLoad::default(),
+            "a client never writes the round choice",
+        );
+        idle_until_the_reload_completes_next(&mut app, root);
+        gun_tick(&mut app, root, true, None);
+        assert_eq!(
+            fired(&app),
+            [0, 0],
+            "the unconfirmed selection is not fired"
+        );
+
+        // The authority's confirmation arrives as replicated state.
+        app.world_mut()
+            .get_mut::<WeaponLoads>(root)
+            .expect("loads on root")
+            .weapons[0] = WeaponLoad {
+            loaded: 1,
+            selected: 1,
+        };
+        idle_until_the_reload_completes_next(&mut app, root);
+        gun_tick(&mut app, root, true, None);
+        assert_eq!(fired(&app), [0, 0, 1], "the confirmed round fires");
     }
 
     /// An UNKEYED round (no `ShotClock` → no `ShotId` → no echo will ever arrive) presents locally
