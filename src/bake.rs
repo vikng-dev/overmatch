@@ -403,8 +403,52 @@ pub(crate) fn manifold_gate(
     scale: Vec3,
 ) -> Result<ShellCertificate, Vec<Finding>> {
     let at = || Subject::node(node).element(format!("primitive {index}"));
-    let mut findings: Vec<Finding> = Vec::new();
 
+    let findings = form_refusals(&at, primitive, scale);
+    if !findings.is_empty() {
+        return Err(sorted(findings));
+    }
+
+    let (welded, points) = weld(&primitive.positions);
+    let (triangles, findings) = welded_triangles(&at, &primitive.indices, &welded, &points);
+    if !findings.is_empty() {
+        return Err(sorted(findings));
+    }
+
+    let findings = directed_edge_census(&at, &triangles);
+    if !findings.is_empty() {
+        return Err(sorted(findings));
+    }
+
+    let shells =
+        outward_shells(&at, primitive, &triangles).map_err(|hollow| sorted(vec![hollow]))?;
+
+    // EMBEDDING, over the surface. Closure and outward winding give a shell an inside; this is
+    // what says a ray that enters it leaves it. Unconditional — no flag and no allowlist, because
+    // a shell that passes through itself charges a fraction of the plate it crossed and the walk's
+    // one-dimensional evidence for that can cancel before it is read.
+    if let Err(evidence) = embedding::certify_embedding(&triangles, &shells, &points) {
+        return Err(sorted(vec![Finding::new(
+            &L2_SHELL_EMBEDDING,
+            at(),
+            evidence,
+            "separate the two faces in the .blend — a shell that passes through itself charges a \
+             fraction of the plate the walk crossed, and the one-dimensional evidence for that can \
+             cancel before it is read",
+        )]));
+    }
+
+    Ok(ShellCertificate {
+        shells,
+        corners: triangles,
+    })
+}
+
+/// The [`manifold_gate`] preconditions every later stage reads the buffers under: a non-empty index
+/// buffer of whole triangles, a bit-exactly unit composed `scale`, and every coordinate inside
+/// [`CERTIFIED_RANGE`]. All three are judged, so one report names every form defect at once.
+fn form_refusals(at: &impl Fn() -> Subject, primitive: &MeshGeometry, scale: Vec3) -> Vec<Finding> {
+    let mut findings: Vec<Finding> = Vec::new();
     if primitive.indices.is_empty() || !primitive.indices.len().is_multiple_of(3) {
         findings.push(Finding::new(
             &L2_PRIMITIVE_FORM,
@@ -446,19 +490,21 @@ pub(crate) fn manifold_gate(
             ),
         ));
     }
-    if !findings.is_empty() {
-        return Err(sorted(findings));
-    }
+    findings
+}
 
-    // Weld by EXACT position. `-0.0` is canonicalized so a coordinate that is zero has one bit
-    // pattern; otherwise two vertices at the same point can fail to weld and open a phantom seam.
+/// Weld by EXACT position: the welded id of each vertex, index-aligned with `positions` and dense
+/// in first-occurrence order, and the canonical position of each id. `-0.0` is canonicalized so a
+/// coordinate that is zero has one bit pattern; otherwise two vertices at the same point can fail
+/// to weld and open a phantom seam.
+fn weld(positions: &[[f32; 3]]) -> (Vec<u32>, Vec<[f32; 3]>) {
     let mut canonical: HashMap<[u32; 3], u32> = HashMap::new();
-    let mut welded: Vec<u32> = Vec::with_capacity(primitive.positions.len());
+    let mut welded: Vec<u32> = Vec::with_capacity(positions.len());
     // The canonical position of each welded id, which is what the embedding certificate measures:
     // one point per id, so two triangles naming a corner the same way are AT the same point by
     // construction rather than by comparison.
     let mut points: Vec<[f32; 3]> = Vec::new();
-    for position in &primitive.positions {
+    for position in positions {
         let mut key = [0u32; 3];
         for (slot, value) in key.iter_mut().zip(position) {
             *slot = if *value == 0.0 { 0.0f32 } else { *value }.to_bits();
@@ -470,11 +516,23 @@ pub(crate) fn manifold_gate(
         }
         welded.push(id);
     }
+    (welded, points)
+}
 
-    let mut triangles: Vec<[u32; 3]> = Vec::with_capacity(primitive.indices.len() / 3);
+/// Every triangle of `indices` in welded ids, in index-buffer order, with the refusals of the
+/// triangle pass: a corner that indexes past the POSITION accessor (that triangle is dropped), and
+/// a triangle that encloses exactly zero area (it is kept, and refused).
+fn welded_triangles(
+    at: &impl Fn() -> Subject,
+    indices: &[u32],
+    welded: &[u32],
+    points: &[[f32; 3]],
+) -> (Vec<[u32; 3]>, Vec<Finding>) {
+    let mut findings: Vec<Finding> = Vec::new();
+    let mut triangles: Vec<[u32; 3]> = Vec::with_capacity(indices.len() / 3);
     let mut out_of_range: Vec<String> = Vec::new();
     let mut degenerate: Vec<String> = Vec::new();
-    for (triangle, corners) in primitive.indices.as_chunks::<3>().0.iter().enumerate() {
+    for (triangle, corners) in indices.as_chunks::<3>().0.iter().enumerate() {
         let mut welded_corners = [0u32; 3];
         let mut resolved = true;
         for (slot, &corner) in welded_corners.iter_mut().zip(corners) {
@@ -528,16 +586,20 @@ pub(crate) fn manifold_gate(
              parity and has no plane for the walk to cross",
         ));
     }
-    if !findings.is_empty() {
-        return Err(sorted(findings));
-    }
+    (triangles, findings)
+}
 
-    // Directed-edge census: closure AND winding consistency. A `BTreeMap` and two ORDERED passes,
-    // so the diagnostic is the same sentence every run — a defect that reports differently each time
-    // is one nobody can grep for. Winding is checked FIRST, because a duplicated or same-wound face
-    // also looks like a closure failure, and naming it that way sends the fix the wrong way.
+/// Directed-edge census: closure AND winding consistency over the welded triangles, refused unless
+/// each directed welded edge occurs exactly once and its reverse exactly once.
+///
+/// A `BTreeMap` and two ORDERED passes, so the diagnostic is the same sentence every run — a defect
+/// that reports differently each time is one nobody can grep for. Winding is checked FIRST, because
+/// a duplicated or same-wound face also looks like a closure failure, and naming it that way sends
+/// the fix the wrong way.
+fn directed_edge_census(at: &impl Fn() -> Subject, triangles: &[[u32; 3]]) -> Vec<Finding> {
+    let mut findings: Vec<Finding> = Vec::new();
     let mut directed: BTreeMap<(u32, u32), u32> = BTreeMap::new();
-    for &[a, b, c] in &triangles {
+    for &[a, b, c] in triangles {
         for edge in [(a, b), (b, c), (c, a)] {
             *directed.entry(edge).or_insert(0) += 1;
         }
@@ -575,10 +637,17 @@ pub(crate) fn manifold_gate(
              the walk without the exit face, which is silently zero armour",
         ));
     }
-    if !findings.is_empty() {
-        return Err(sorted(findings));
-    }
+    findings
+}
 
+/// The closed shell each welded triangle belongs to, index-aligned with `triangles` — refused unless
+/// every edge-connected shell encloses finite, strictly positive signed volume over the primitive's
+/// stored positions.
+fn outward_shells(
+    at: &impl Fn() -> Subject,
+    primitive: &MeshGeometry,
+    triangles: &[[u32; 3]],
+) -> Result<Vec<u32>, Finding> {
     // Connected shells, by shared welded edge. Union-find over triangles.
     let mut parent: Vec<usize> = (0..triangles.len()).collect();
     fn find(parent: &mut [usize], mut node: usize) -> usize {
@@ -628,13 +697,13 @@ pub(crate) fn manifold_gate(
         .map(|(shell, volume)| format!("the shell rooted at triangle {shell} encloses {volume} m³"))
         .collect();
     if let Some(evidence) = first_of(&hollow) {
-        return Err(sorted(vec![Finding::new(
+        return Err(Finding::new(
             &L2_POSITIVE_SHELL_VOLUME,
             at(),
             evidence,
             "recompute the shell's outward normals in the .blend — a negative volume is an \
              inside-out shell whose entry faces the walk reads as exits, and a zero one is flat",
-        )]));
+        ));
     }
 
     // Publish the roots as DENSE ids in first-triangle order. The root is a union-find artefact —
@@ -647,26 +716,7 @@ pub(crate) fn manifold_gate(
         let next = ids.len() as u32;
         shells.push(*ids.entry(root).or_insert(next));
     }
-
-    // EMBEDDING, over the surface. Closure and outward winding give a shell an inside; this is
-    // what says a ray that enters it leaves it. Unconditional — no flag and no allowlist, because
-    // a shell that passes through itself charges a fraction of the plate it crossed and the walk's
-    // one-dimensional evidence for that can cancel before it is read.
-    if let Err(evidence) = embedding::certify_embedding(&triangles, &shells, &points) {
-        return Err(sorted(vec![Finding::new(
-            &L2_SHELL_EMBEDDING,
-            at(),
-            evidence,
-            "separate the two faces in the .blend — a shell that passes through itself charges a \
-             fraction of the plate the walk crossed, and the one-dimensional evidence for that can \
-             cancel before it is read",
-        )]));
-    }
-
-    Ok(ShellCertificate {
-        shells,
-        corners: triangles,
-    })
+    Ok(shells)
 }
 
 pub(crate) fn plugin(app: &mut App) {
@@ -940,6 +990,12 @@ pub(crate) fn extract_tank_geometry(
         }
     }
 
+    let capture = MeshCapture {
+        registry,
+        declared_colliders: &declared_colliders,
+        buffers: &buffers,
+    };
+
     // The loader instantiates `GltfAssetLabel::Scene(0)` under a wrapper entity named after the
     // scene (`Scene{i}` fallback) whose transform is the coordinate-conversion transform —
     // IDENTITY while bevy_gltf's opt-in glTF→Bevy conversion stays off (the repo never enables
@@ -996,86 +1052,10 @@ pub(crate) fn extract_tank_geometry(
         // Avian's own composition, verbatim (`collider_transform/plugin.rs:133`).
         let root_scale = nodes[parent].root_scale * transform.scale;
 
-        let mut primitives = Vec::new();
-        if let Some(mesh) = node.mesh() {
-            let is_collider = declared_colliders.contains(name.as_str());
-            let mut captured: Vec<(usize, Option<PrimitiveSubstance>)> = Vec::new();
-            let mut ballistic = 0usize;
-            let mut plain = 0usize;
-            for primitive in mesh.primitives() {
-                match classify(&primitive, registry) {
-                    Some(substance) => {
-                        ballistic += 1;
-                        captured.push((primitive.index(), Some(substance)));
-                    }
-                    None => {
-                        plain += 1;
-                        if is_collider {
-                            captured.push((primitive.index(), None));
-                        }
-                    }
-                }
-            }
-            // Half-armour has no honest meaning: the shadow compare diffs a node's mesh bytes as a
-            // whole, so a partially-captured node would quietly stop being covered, and the walk
-            // would meet a solid whose other half it cannot see.
-            if ballistic > 0 && plain > 0 {
-                findings.push(Finding::new(
-                    &L2_ROLE_COHERENCE,
-                    Subject::node(&name),
-                    format!(
-                        "{ballistic} substance primitive(s) and {plain} non-substance one(s) in \
-                         one mesh"
-                    ),
-                    "split the object, or give every primitive a registry substance — membership \
-                     is the material (§12)",
-                ));
-            }
-            if is_collider && ballistic > 0 {
-                findings.push(Finding::new(
-                    &L2_ROLE_COHERENCE,
-                    Subject::node(&name),
-                    format!(
-                        "declared a collision proxy and wearing {ballistic} registry substance(s)"
-                    ),
-                    "strip the substance material, or drop the node from the spec's `colliders` — \
-                     a convex hull that is also armour is charged twice by the march",
-                ));
-            }
-            for (index, substance) in captured {
-                let Some(primitive) = mesh.primitives().nth(index) else {
-                    continue;
-                };
-                let reader = primitive.reader(|b| buffers.get(b.index()).map(Vec::as_slice));
-                let Some(positions) = reader.read_positions() else {
-                    findings.push(Finding::new(
-                        &L2_PRIMITIVE_FORM,
-                        Subject::node(&name).element(format!("primitive {index}")),
-                        "no POSITION accessor",
-                        "re-export the mesh — a primitive the sim consumes must carry its vertex \
-                         positions",
-                    ));
-                    continue;
-                };
-                let indices: Vec<u32> = reader
-                    .read_indices()
-                    .map(|i| i.into_u32().collect())
-                    .unwrap_or_default();
-                let mut geometry = MeshGeometry {
-                    positions: positions.collect(),
-                    indices,
-                    substance,
-                    certificate: None,
-                };
-                if geometry.substance.is_some() {
-                    match manifold_gate(&name, index, &geometry, root_scale) {
-                        Ok(certificate) => geometry.certificate = Some(certificate),
-                        Err(refusals) => findings.extend(refusals),
-                    }
-                }
-                primitives.push(geometry);
-            }
-        }
+        let primitives = match node.mesh() {
+            Some(mesh) => capture.primitives(&mesh, &name, root_scale, &mut findings),
+            None => Vec::new(),
+        };
 
         let index = nodes.len();
         // Blender enforces unique object names and the fallback names are unique by index; a
@@ -1136,6 +1116,106 @@ pub(crate) fn extract_tank_geometry(
         return Err(sorted(findings));
     }
     Ok(geometry)
+}
+
+/// What every node's mesh is captured against: the registry that decides membership ([`classify`]),
+/// the spec's declared collision proxies, and the document's resolved buffers.
+struct MeshCapture<'a> {
+    registry: &'a SubstanceRegistry,
+    declared_colliders: &'a HashSet<&'a str>,
+    buffers: &'a [Vec<u8>],
+}
+
+impl MeshCapture<'_> {
+    /// The primitives of node `name`'s mesh the sim consumes, in primitive order: every substance
+    /// primitive, gated by [`manifold_gate`] at the node's composed `root_scale`, and every primitive
+    /// of a declared collision proxy. Refusals are appended to `findings`: the node's role-coherence
+    /// refusals first, then each captured primitive's, in primitive order.
+    fn primitives(
+        &self,
+        mesh: &gltf::Mesh,
+        name: &str,
+        root_scale: Vec3,
+        findings: &mut Vec<Finding>,
+    ) -> Vec<MeshGeometry> {
+        let is_collider = self.declared_colliders.contains(name);
+        let mut captured: Vec<(usize, Option<PrimitiveSubstance>)> = Vec::new();
+        let mut ballistic = 0usize;
+        let mut plain = 0usize;
+        for primitive in mesh.primitives() {
+            match classify(&primitive, self.registry) {
+                Some(substance) => {
+                    ballistic += 1;
+                    captured.push((primitive.index(), Some(substance)));
+                }
+                None => {
+                    plain += 1;
+                    if is_collider {
+                        captured.push((primitive.index(), None));
+                    }
+                }
+            }
+        }
+        // Half-armour has no honest meaning: the shadow compare diffs a node's mesh bytes as a
+        // whole, so a partially-captured node would quietly stop being covered, and the walk
+        // would meet a solid whose other half it cannot see.
+        if ballistic > 0 && plain > 0 {
+            findings.push(Finding::new(
+                &L2_ROLE_COHERENCE,
+                Subject::node(name),
+                format!(
+                    "{ballistic} substance primitive(s) and {plain} non-substance one(s) in \
+                     one mesh"
+                ),
+                "split the object, or give every primitive a registry substance — membership \
+                 is the material (§12)",
+            ));
+        }
+        if is_collider && ballistic > 0 {
+            findings.push(Finding::new(
+                &L2_ROLE_COHERENCE,
+                Subject::node(name),
+                format!("declared a collision proxy and wearing {ballistic} registry substance(s)"),
+                "strip the substance material, or drop the node from the spec's `colliders` — \
+                 a convex hull that is also armour is charged twice by the march",
+            ));
+        }
+        let mut primitives = Vec::new();
+        for (index, substance) in captured {
+            let Some(primitive) = mesh.primitives().nth(index) else {
+                continue;
+            };
+            let reader = primitive.reader(|b| self.buffers.get(b.index()).map(Vec::as_slice));
+            let Some(positions) = reader.read_positions() else {
+                findings.push(Finding::new(
+                    &L2_PRIMITIVE_FORM,
+                    Subject::node(name).element(format!("primitive {index}")),
+                    "no POSITION accessor",
+                    "re-export the mesh — a primitive the sim consumes must carry its vertex \
+                     positions",
+                ));
+                continue;
+            };
+            let indices: Vec<u32> = reader
+                .read_indices()
+                .map(|i| i.into_u32().collect())
+                .unwrap_or_default();
+            let mut geometry = MeshGeometry {
+                positions: positions.collect(),
+                indices,
+                substance,
+                certificate: None,
+            };
+            if geometry.substance.is_some() {
+                match manifold_gate(name, index, &geometry, root_scale) {
+                    Ok(certificate) => geometry.certificate = Some(certificate),
+                    Err(refusals) => findings.extend(refusals),
+                }
+            }
+            primitives.push(geometry);
+        }
+        primitives
+    }
 }
 
 /// The two classes stay apart (ADR-0040): a crew volume is a witness, and only a crew volume is.
