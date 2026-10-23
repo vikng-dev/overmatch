@@ -58,11 +58,13 @@
     // profile and the passage all conserve a cone's emitted total.
     hp_per_reference_mm: (70, Tuned("owner decision 2026-10-23 (#2 in
         .agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md):
-        a crew box fully inside the cone about 2 m from the hole has its HP pool emptied by a weak
-        ordinary perforation. DERIVED: a box of face A at distance R inside a cone of half-angle α
-        catches A / (R² Ω_c) of its emission E, Ω_c = 2π(1 − cos α) = 0.589 sr at 25°, and its
-        pool is its class × A (box_classes.ron), so its knockout radius R = sqrt(E / (class Ω_c))
-        is the same for every box of a class. On the recorded s1 cone (S/2 = 5.09 reference-mm)
-        the crew class's 150 HP per m² gives R = 0.76 m at the line's 10 HP per reference-mm and
-        R = 2.0 m at 70")),
+        the 30 HP crew pool (box_classes.ron) with a 0.2 m² face, the intended humanoid's
+        presented area, is emptied within about 2 m of the hole on the recorded s1 cone, a weak
+        ordinary perforation. DERIVED: a box of face A at distance R fully inside a cone of
+        half-angle α catches A / (R² Ω_c) of its emission E, Ω_c = 2π(1 − cos α) = 0.589 sr at
+        25°, so its knockout radius is R = sqrt(E A / (pool Ω_c)); on the s1 cone (S/2 = 5.09
+        reference-mm) that is 0.76 m at the line's 10 HP per reference-mm and 2.0 m at 70. The
+        placeholder crew box's MEASURED 0.516 m² mean face gives about 3.2 m (DERIVED) until the
+        humanoid shape lands. A box whose pool is its class × A has R = sqrt(E / (class Ω_c)),
+        the same for every box of its class")),
 )
