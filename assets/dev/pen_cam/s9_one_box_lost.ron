@@ -665,7 +665,7 @@
             volume: "Loader",
             line: 0.0,
             field: 0.4841626,
-            lost: 34,
+            lost: 30,
             entered: None,
         ),
     ],
@@ -675,6 +675,12 @@
             volume: "Breech",
             state: Lost,
             function: Some("Breech"),
+        ),
+        (
+            t: 0.00014184555,
+            volume: "Loader",
+            state: Lost,
+            function: None,
         ),
     ],
     components: [
@@ -705,8 +711,8 @@
         (
             name: "BowGunner",
             role: Crew,
-            count: 77,
-            hp: 77,
+            count: 30,
+            hp: 30,
         ),
         (
             name: "Breech",
@@ -723,14 +729,14 @@
         (
             name: "Commander",
             role: Crew,
-            count: 77,
-            hp: 77,
+            count: 30,
+            hp: 30,
         ),
         (
             name: "Driver",
             role: Crew,
-            count: 77,
-            hp: 77,
+            count: 30,
+            hp: 30,
         ),
         (
             name: "Engine",
@@ -741,8 +747,8 @@
         (
             name: "Gunner",
             role: Crew,
-            count: 77,
-            hp: 77,
+            count: 30,
+            hp: 30,
         ),
         (
             name: "Hull_MG_Barrel",
@@ -753,8 +759,8 @@
         (
             name: "Loader",
             role: Crew,
-            count: 77,
-            hp: 77,
+            count: 30,
+            hp: 30,
         ),
         (
             name: "Main_Gun_Barrel",

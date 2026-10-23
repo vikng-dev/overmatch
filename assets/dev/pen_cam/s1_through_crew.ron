@@ -814,7 +814,7 @@
             volume: "Driver",
             line: 5.3565907,
             field: 3.9757612,
-            lost: 77,
+            lost: 30,
             entered: Some((-0.5699997, 1.4209003, -1.5096474)),
         ),
         (
@@ -828,7 +828,7 @@
             volume: "Gunner",
             line: 1.3520298,
             field: 0.6361218,
-            lost: 58,
+            lost: 30,
             entered: Some((-0.5699997, 1.3934937, -0.79422045)),
         ),
         (
@@ -843,6 +843,12 @@
         (
             t: 0.00019922294,
             volume: "Driver",
+            state: Lost,
+            function: None,
+        ),
+        (
+            t: 0.00019922294,
+            volume: "Gunner",
             state: Lost,
             function: None,
         ),
@@ -875,8 +881,8 @@
         (
             name: "BowGunner",
             role: Crew,
-            count: 77,
-            hp: 77,
+            count: 30,
+            hp: 30,
         ),
         (
             name: "Breech",
@@ -893,14 +899,14 @@
         (
             name: "Commander",
             role: Crew,
-            count: 77,
-            hp: 77,
+            count: 30,
+            hp: 30,
         ),
         (
             name: "Driver",
             role: Crew,
-            count: 77,
-            hp: 77,
+            count: 30,
+            hp: 30,
         ),
         (
             name: "Engine",
@@ -911,8 +917,8 @@
         (
             name: "Gunner",
             role: Crew,
-            count: 77,
-            hp: 77,
+            count: 30,
+            hp: 30,
         ),
         (
             name: "Hull_MG_Barrel",
@@ -923,8 +929,8 @@
         (
             name: "Loader",
             role: Crew,
-            count: 77,
-            hp: 77,
+            count: 30,
+            hp: 30,
         ),
         (
             name: "Main_Gun_Barrel",

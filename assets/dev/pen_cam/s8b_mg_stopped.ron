@@ -93,8 +93,8 @@
         (
             name: "BowGunner",
             role: Crew,
-            count: 77,
-            hp: 77,
+            count: 30,
+            hp: 30,
         ),
         (
             name: "Breech",
@@ -111,14 +111,14 @@
         (
             name: "Commander",
             role: Crew,
-            count: 77,
-            hp: 77,
+            count: 30,
+            hp: 30,
         ),
         (
             name: "Driver",
             role: Crew,
-            count: 77,
-            hp: 77,
+            count: 30,
+            hp: 30,
         ),
         (
             name: "Engine",
@@ -129,8 +129,8 @@
         (
             name: "Gunner",
             role: Crew,
-            count: 77,
-            hp: 77,
+            count: 30,
+            hp: 30,
         ),
         (
             name: "Hull_MG_Barrel",
@@ -141,8 +141,8 @@
         (
             name: "Loader",
             role: Crew,
-            count: 77,
-            hp: 77,
+            count: 30,
+            hp: 30,
         ),
         (
             name: "Main_Gun_Barrel",

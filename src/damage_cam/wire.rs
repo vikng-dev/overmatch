@@ -63,18 +63,18 @@
 //!
 //! | scenario | total B | shooter B | fields B | cones | rays | hits | B per cone |
 //! |---|---|---|---|---|---|---|---|
-//! | s1_through_crew | 719 | 691 | 394 | 1 | 64 | 80 | 394 |
-//! | s2_stopped_mantlet | 183 | 141 | 0 | 0 | 0 | 0 | – |
-//! | s3_ricochet | 189 | 147 | 0 | 0 | 0 | 0 | – |
-//! | s4_spaced_then_stopped | 588 | 546 | 300 | 2 | 128 | 0 | 150 |
-//! | s5_oblique_through | 515 | 475 | 282 | 1 | 64 | 64 | 282 |
-//! | s6_overpen | 505 | 463 | 264 | 2 | 128 | 0 | 132 |
-//! | s7_engine_shadow | 514 | 478 | 265 | 1 | 64 | 53 | 265 |
-//! | s8a_mg_ricochet | 189 | 147 | 0 | 0 | 0 | 0 | – |
-//! | s8b_mg_stopped | 181 | 139 | 0 | 0 | 0 | 0 | – |
-//! | s9_one_box_lost | 559 | 525 | 298 | 1 | 64 | 48 | 298 |
-//! | s10_gun_barrel_struck | 580 | 540 | 369 | 2 | 128 | 64 | 184 |
-//! | s11_mg_barrel_struck | 183 | 143 | 0 | 0 | 0 | 0 | – |
+//! | s1_through_crew | 726 | 696 | 394 | 1 | 64 | 80 | 394 |
+//! | s2_stopped_mantlet | 187 | 141 | 0 | 0 | 0 | 0 | – |
+//! | s3_ricochet | 193 | 147 | 0 | 0 | 0 | 0 | – |
+//! | s4_spaced_then_stopped | 742 | 696 | 450 | 3 | 192 | 0 | 150 |
+//! | s5_oblique_through | 519 | 475 | 282 | 1 | 64 | 64 | 282 |
+//! | s6_overpen | 544 | 498 | 299 | 2 | 128 | 0 | 149 |
+//! | s7_engine_shadow | 519 | 480 | 265 | 1 | 64 | 53 | 265 |
+//! | s8a_mg_ricochet | 193 | 147 | 0 | 0 | 0 | 0 | – |
+//! | s8b_mg_stopped | 185 | 139 | 0 | 0 | 0 | 0 | – |
+//! | s9_one_box_lost | 567 | 530 | 298 | 1 | 64 | 48 | 298 |
+//! | s10_gun_barrel_struck | 649 | 606 | 433 | 2 | 128 | 64 | 216 |
+//! | s11_mg_barrel_struck | 187 | 143 | 0 | 0 | 0 | 0 | – |
 //!
 //! The DERIVED estimate `36 + 2 + 2N` per cone (166 B at N = 64) counts a cone's metadata and its
 //! reaches; a cone that reaches no component measures 132–150 B (a reach under 128 mm takes one
