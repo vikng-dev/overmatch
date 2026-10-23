@@ -623,6 +623,7 @@ fn a_replica_coax_shell_clears_the_shooters_mantlet() {
     app.world_mut().trigger(fire(Some(ShotSource {
         tank: shot.tank,
         weapon: shot.slot,
+        round: 0,
     })));
     app.update();
     let mut shells = app.world_mut().query::<(Entity, &Transform, &ShellPath)>();
@@ -1503,6 +1504,7 @@ fn a_main_gun_round_damages_a_tank_on_the_shipped_map() {
         shooter: Some(ShotSource {
             tank: shooter,
             weapon: 0,
+            round: 0,
         }),
         tracer: false,
         shot_origin: FireShellOrigin::Local,

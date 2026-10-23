@@ -199,6 +199,7 @@ fn fire_along(
         shooter: Some(ShotSource {
             tank: shooter,
             weapon: 0,
+            round: 0,
         }),
         tracer: false,
         shot_origin: FireShellOrigin::Local,

@@ -266,11 +266,14 @@ fn fire(
         }
         // The chambered round ([`crate::tank::WeaponLoad::loaded`]). A slot with no load state or
         // an index past the weapon's list holds the shot, as a missing gate does.
-        let Some(fired) = loads
+        let Some((loaded, fired)) = loads
             .get(root.0)
             .ok()
             .and_then(|loads| loads.weapons.get(slot.0))
-            .and_then(|load| weapon.rounds.get(usize::from(load.loaded)))
+            .and_then(|load| {
+                let fired = weapon.rounds.get(usize::from(load.loaded))?;
+                Some((load.loaded, fired))
+            })
         else {
             continue;
         };
@@ -348,12 +351,14 @@ fn fire(
                 wound: fired.round.wound,
                 mechanism: weapon.fire_mode.mechanism(),
                 tracer,
-                // This shell belongs to a tank: name its root AND the firing weapon slot so the net
-                // server can broadcast the cosmetic tracer and the barrel-recoil cause to every OTHER
-                // client (`net::server`'s FireShell observer), which each derive the kick locally.
+                // This shell belongs to a tank: name its root, the firing weapon slot and the round
+                // so the net server can broadcast the cosmetic tracer and the barrel-recoil cause to
+                // every OTHER client (`net::server`'s FireShell observer), which each derive the
+                // kick locally and bind the round from their own copy of the weapon's round list.
                 shooter: Some(ShotSource {
                     tank: root.0,
                     weapon: slot.0,
+                    round: loaded,
                 }),
                 shot_origin: FireShellOrigin::Local,
                 // Locally fired: the shell spawns at the muzzle THIS tick — no net catch-up.

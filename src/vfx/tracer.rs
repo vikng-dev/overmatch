@@ -73,6 +73,7 @@ mod tests {
             shooter: Some(crate::ballistics::ShotSource {
                 tank: Entity::PLACEHOLDER,
                 weapon: 0,
+                round: 0,
             }),
             shot_origin: if shot.is_some() {
                 FireShellOrigin::Reconstructed

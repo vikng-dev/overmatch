@@ -31,11 +31,13 @@ use super::protocol::{DamageReceipt, NetCrew, NetTank, VolumeSnapshot, protocol_
 use super::server::attach_replication_sender;
 use super::test_harness::{TICK, base_app, finish, free_port, lock_real_udp_test};
 use crate::ballistics::{
-    BallisticVolume, ComponentHealth, FireShell, FireShellOrigin, Impact, SanctionedShots,
-    ShellDamage, Shot, ShotSource,
+    BallisticVolume, ComponentHealth, FireShell, FireShellOrigin, Impact, RoundBody,
+    SanctionedShots, ShellDamage, Shot, ShotSource,
 };
 use crate::command::TankCommand;
-use crate::tank::{TankServos, WeaponGate, WeaponGateState};
+use crate::tank::{
+    Muzzle, TankRoot, TankServos, Weapon, WeaponGate, WeaponGateState, WeaponIndex, WeaponRound,
+};
 use crate::{ClientReplica, CombatantId, Layer, ShotId};
 
 /// Configured seeded packet-loss rate on each client's inbound link.
@@ -60,6 +62,92 @@ const SHOTS: u32 = 10;
 /// DERIVED from the scale scenario: the public roots the sustained stream fires from.
 const VOLLEY_COMBATANTS: u64 = 30;
 const VOLLEY_WEAPONS: u8 = 2;
+
+/// Fixture data: the harness's rounds as (muzzle speed m/s, body, wound). Every fixture weapon slot
+/// lists them in this order, so a scripted shell names its round by index and each client binds
+/// the same round from its own fixture weapons ([`arm_fixture_weapons`]).
+const FIXTURE_ROUNDS: [(f32, RoundBody, f32); 2] = [
+    (
+        800.0,
+        RoundBody {
+            mass: 10.2,
+            caliber: 0.088,
+            nose_factor: 0.3,
+        },
+        30.0,
+    ),
+    (
+        800.0,
+        RoundBody {
+            mass: 0.0118,
+            caliber: 0.0079,
+            nose_factor: 0.5,
+        },
+        10.0,
+    ),
+];
+/// The cannon fixture's index in [`FIXTURE_ROUNDS`].
+const CANNON_ROUND: u8 = 0;
+/// The MG fixture's index in [`FIXTURE_ROUNDS`].
+const MG_ROUND: u8 = 1;
+
+/// A scripted authority shell firing `source`'s fixture round from its weapon slot.
+fn scripted_shell(
+    mechanism: crate::spec::FireMechanism,
+    source: ShotSource,
+    shot: ShotId,
+) -> FireShell {
+    let (speed, body, wound) = FIXTURE_ROUNDS[usize::from(source.round)];
+    FireShell {
+        origin: MUZZLE,
+        direction: Dir3::NEG_Z,
+        speed,
+        caliber: body.caliber,
+        mass: body.mass,
+        nose_factor: body.nose_factor,
+        wound,
+        mechanism,
+        tracer: true,
+        shot_origin: FireShellOrigin::Local,
+        shooter: Some(source),
+        catch_up_ticks: 0,
+        shot: Some(shot),
+    }
+}
+
+/// Give each replicated root the fixture weapon slots the scripts fire from, as a production
+/// client's rig does at spawn: the receive path binds every fire's round from these lists.
+fn arm_fixture_weapons(add: On<Add, NetTank>, mut commands: Commands) {
+    let rounds: Vec<WeaponRound> = FIXTURE_ROUNDS
+        .iter()
+        .map(|&(speed, body, wound)| {
+            let mut fixture = WeaponRound::resolve("88mm_AP").expect("a shipped round");
+            fixture.round.muzzle_speed = speed;
+            fixture.round.body = body;
+            fixture.round.wound = wound;
+            fixture
+        })
+        .collect();
+    for slot in 0..usize::from(VOLLEY_WEAPONS) {
+        commands.spawn((
+            Muzzle,
+            WeaponIndex(slot),
+            TankRoot(add.entity),
+            Weapon {
+                name: format!("fixture {slot}"),
+                round: rounds[0].key.clone(),
+                rounds: rounds.clone(),
+                fire_mode: crate::spec::FireMode::Single { reload_secs: 1.0 },
+                recoil: None,
+                barrel: None,
+                fire: Vec::new(),
+                load: Vec::new(),
+                trigger: crate::spec::Trigger::Primary,
+                report_clips: Vec::new(),
+            },
+        ));
+    }
+}
 /// DERIVED from the target firing envelope and 64 Hz authority tick.
 const SUSTAINED_AUTOMATIC_FACTS_PER_TICK: usize = 12;
 /// DERIVED: one second of sustained traffic at 64 Hz.
@@ -270,26 +358,17 @@ fn fire_script(
         fire_tick: timeline.tick().0,
     };
     modes.0.push((shot, mechanism));
-    commands.trigger(FireShell {
-        origin: MUZZLE,
-        direction: Dir3::NEG_Z,
-        speed: 800.0,
-        caliber: 0.088,
-        mass: 10.2,
-        nose_factor: 0.3,
-        wound: 30.0,
+    // Attribution names the replicated shooter root. Stable `ShotId` data remains independent of
+    // each client's mapped display/self-exclusion entity.
+    commands.trigger(scripted_shell(
         mechanism,
-        tracer: true,
-        shot_origin: FireShellOrigin::Local,
-        // Attribution names the replicated shooter root. Stable `ShotId` data remains independent of
-        // each client's mapped display/self-exclusion entity.
-        shooter: Some(ShotSource {
+        ShotSource {
             tank: shooter,
             weapon: weapon as usize,
-        }),
-        catch_up_ticks: 0,
-        shot: Some(shot),
-    });
+            round: CANNON_ROUND,
+        },
+        shot,
+    ));
 }
 
 /// The owned, replicated server shooter. It is absent until the real client link connects.
@@ -422,28 +501,19 @@ fn fire_sustained_stream(
         let slot = (first_slot + offset) % (VOLLEY_COMBATANTS as usize * VOLLEY_WEAPONS as usize);
         let root_index = slot / VOLLEY_WEAPONS as usize;
         let weapon = (slot % VOLLEY_WEAPONS as usize) as u8;
-        commands.trigger(FireShell {
-            origin: MUZZLE,
-            direction: Dir3::NEG_Z,
-            speed: 800.0,
-            caliber: 0.0079,
-            mass: 0.0118,
-            nose_factor: 0.5,
-            wound: 10.0,
-            mechanism: crate::spec::FireMechanism::Automatic,
-            tracer: true,
-            shot_origin: FireShellOrigin::Local,
-            shooter: Some(ShotSource {
+        commands.trigger(scripted_shell(
+            crate::spec::FireMechanism::Automatic,
+            ShotSource {
                 tank: roots.0[root_index],
                 weapon: weapon as usize,
-            }),
-            catch_up_ticks: 0,
-            shot: Some(ShotId {
+                round: MG_ROUND,
+            },
+            ShotId {
                 combatant: CombatantId(root_index as u64 + 1),
                 weapon,
                 fire_tick: timeline.tick().0,
-            }),
-        });
+            },
+        ));
     }
 
     if stream_tick != SUSTAINED_RELIABLE_TICK {
@@ -461,24 +531,15 @@ fn fire_sustained_stream(
         fire_tick: timeline.tick().0,
     };
     stream.reliable = Some(reliable);
-    commands.trigger(FireShell {
-        origin: MUZZLE,
-        direction: Dir3::NEG_Z,
-        speed: 800.0,
-        caliber: 0.088,
-        mass: 10.2,
-        nose_factor: 0.3,
-        wound: 30.0,
-        mechanism: crate::spec::FireMechanism::Single,
-        tracer: true,
-        shot_origin: FireShellOrigin::Local,
-        shooter: Some(ShotSource {
+    commands.trigger(scripted_shell(
+        crate::spec::FireMechanism::Single,
+        ShotSource {
             tank: roots.0[0],
             weapon: 0,
-        }),
-        catch_up_ticks: 0,
-        shot: Some(reliable),
-    });
+            round: CANNON_ROUND,
+        },
+        reliable,
+    ));
 }
 
 /// Every authoritative `ShotId` — the shots the client must each see exactly once. Collected after
@@ -756,6 +817,7 @@ fn build_client(port: u16, client_id: u64, seed: u64, role: HarnessClient) -> Ap
     app.init_resource::<super::fire_presentation::OwnFireDiag>();
     app.add_systems(Update, (receive_fire_events, receive_damage_confirms));
     app.add_systems(FixedUpdate, age_sanctioned_shots);
+    app.add_observer(arm_fixture_weapons);
 
     app.init_resource::<ClientShells>();
     app.init_resource::<ClientBounces>();

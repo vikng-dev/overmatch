@@ -310,11 +310,8 @@ impl OwnFireDiag {
 pub(super) struct ReleasedShot {
     pub(super) origin: Vec3,
     pub(super) direction: Dir3,
-    pub(super) speed: f32,
-    pub(super) caliber: f32,
-    pub(super) mass: f32,
-    pub(super) nose_factor: f32,
-    pub(super) wound: f32,
+    /// The fired round, bound from the shooter's weapon data.
+    pub(super) round: crate::rounds::Round,
     pub(super) tracer: bool,
     pub(super) mechanism: crate::spec::FireMechanism,
     pub(super) shooter: ShotSource,
@@ -366,11 +363,11 @@ pub(super) fn present_shot_at_age(
     commands.trigger(FireShell {
         origin: shot.origin,
         direction: shot.direction,
-        speed: shot.speed,
-        caliber: shot.caliber,
-        mass: shot.mass,
-        nose_factor: shot.nose_factor,
-        wound: shot.wound,
+        speed: shot.round.muzzle_speed,
+        caliber: shot.round.body.caliber,
+        mass: shot.round.body.mass,
+        nose_factor: shot.round.body.nose_factor,
+        wound: shot.round.wound,
         mechanism: shot.mechanism,
         tracer: shot.tracer,
         shooter: Some(shot.shooter),
@@ -591,18 +588,19 @@ fn recover_unannounced_rounds(
             // repair either way.
             let loaded = loads
                 .and_then(|loads| loads.weapons.get(slot))
-                .map_or(0, |load| usize::from(load.loaded));
-            let Some(fired) = weapon.rounds.get(loaded).or_else(|| weapon.rounds.first()) else {
+                .map_or(0, |load| load.loaded);
+            let round = if usize::from(loaded) < weapon.rounds.len() {
+                loaded
+            } else {
+                0
+            };
+            let Some(fired) = weapon.rounds.get(usize::from(round)) else {
                 continue;
             };
             let facts = ReleasedShot {
                 origin: muzzle.translation(),
                 direction,
-                speed: fired.round.muzzle_speed,
-                caliber: fired.round.body.caliber,
-                mass: fired.round.body.mass,
-                nose_factor: fired.round.body.nose_factor,
-                wound: fired.round.wound,
+                round: fired.round,
                 // The round's belt phase died with the announcement; a recovered round
                 // presents traced — the visible arm of the self-heal.
                 tracer: true,
@@ -610,6 +608,7 @@ fn recover_unannounced_rounds(
                 shooter: ShotSource {
                     tank: root,
                     weapon: slot,
+                    round,
                 },
                 // The round's ShotId died with its announcement, so the shell flies
                 // uncorrected (no sanctioned bounces) — the honest remainder.
@@ -1166,6 +1165,7 @@ mod tests {
             event.shooter = Some(crate::ballistics::ShotSource {
                 tank: root,
                 weapon: 0,
+                round: 0,
             });
             app.world_mut().trigger(event);
             app.world()
@@ -1591,16 +1591,15 @@ mod tests {
         let facts = ReleasedShot {
             origin: Vec3::new(1.0, 2.0, 3.0),
             direction: Dir3::NEG_Z,
-            speed: 755.0,
-            caliber: 0.088,
-            mass: 10.2,
-            nose_factor: 0.3,
-            wound: 30.0,
+            round: crate::tank::WeaponRound::resolve("88mm_AP")
+                .expect("a shipped round")
+                .round,
             tracer: true,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: ShotSource {
                 tank: shooter,
                 weapon: 0,
+                round: 0,
             },
             shot: None,
         };

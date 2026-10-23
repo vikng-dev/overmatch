@@ -152,11 +152,11 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// [`ShotExplanationChannel`] to the shooter and the struck tank's player, and `CombatantLife`
 /// replicates beside `CombatantId`, so a client can tell the life an explanation is about from
 /// the one its tank is living. Surface, own-type graph and REV move. REV 33 has not shipped, so
-/// the round's `wound` rate (ADR-0040) joins `FireEvent` under it, the REV-19 precedent: a
-/// replica builds the round the authority fired from the event alone. Own-type graph moves. The
-/// round selector rides it too: `TankCommand` gains the `select_round` edge, and the authority's
-/// per-weapon round choice (`WeaponLoads`) replicates owner-private beside `WeaponGate`. Surface
-/// and own-type graph move.
+/// the round selector rides it, the REV-19 precedent: `TankCommand` gains the `select_round` edge,
+/// the authority's per-weapon round choice (`WeaponLoads`) replicates owner-private beside
+/// `WeaponGate`, and `FireEvent` names the fired round by its index in the weapon's round list in
+/// place of the round's physical fields, so a replica builds the round the authority fired from its
+/// own copy of the tank data. Surface and own-type graph move.
 pub const PROTOCOL_REV: u32 = 33;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
@@ -300,18 +300,13 @@ pub struct SetSpawnPoint {
 }
 
 /// A public, loss-tolerant reconstruction of an authoritative shot. The receiver maps `shooter` for
-/// recoil and self-echo suppression, validates the raw bore, and reconstructs a cosmetic shell.
+/// recoil and self-echo suppression, validates the raw bore, binds the fired round from its own
+/// copy of the shooter's weapon, and reconstructs a cosmetic shell.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct FireEvent {
     pub origin: Vec3,
     /// Raw bore direction, validated before conversion to `Dir3` on receipt.
     pub direction: Vec3,
-    pub speed: f32,
-    pub caliber: f32,
-    pub mass: f32,
-    pub nose_factor: f32,
-    /// Reference-mm of dose per metre of chord through a witness (ADR-0040).
-    pub wound: f32,
     pub mechanism: crate::spec::FireMechanism,
     /// Authoritative tracer selection.
     pub tracer: bool,
@@ -321,6 +316,9 @@ pub struct FireEvent {
     pub combatant: CombatantId,
     /// Weapon slot in the local rig; receipt code bounds-checks it.
     pub weapon: u8,
+    /// The fired round's index in that weapon's `Weapon::rounds`, the list every role binds from the
+    /// same tank data; receipt code bounds-checks it.
+    pub round: u8,
     /// Authority tick used to derive the stable `ShotId` and fast-forward the cosmetic shell to the
     /// receiver's predicted present. The receiver bounds its accepted age.
     pub fire_tick: Tick,
@@ -902,7 +900,7 @@ const WIRE_SURFACE_HASH: u64 = 0xe1f7_a13c_f454_773b;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x6f93_c4a9_35ae_09d9;
+const WIRE_TYPES_HASH: u64 = 0xf981_412f_0e33_b684;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can

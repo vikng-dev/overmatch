@@ -1639,8 +1639,8 @@ pub(super) struct FireLedgers<'w> {
 /// `TankSim` recoil write crosses to the fixed clock.
 pub(super) fn receive_fire_events(
     inbox: FireInbox,
-    // Fire's display/recoil entity must resolve before a cosmetic shell can be created.
-    tanks: Query<(Entity, &CombatantId), With<NetTank>>,
+    // A fire's shooter root and its weapon's round must resolve before a cosmetic shell exists.
+    shooters: FireShooters,
     // Fast-forward remote shells to this client's current tick.
     timeline: Res<LocalTimeline>,
     // The release clock: the fractional interpolation cursor every held announcement compares its
@@ -1715,7 +1715,7 @@ pub(super) fn receive_fire_events(
     release_due_fire_events(
         now,
         cursor,
-        &tanks,
+        &shooters,
         &mut pending,
         &mut held,
         &mut pending_fires,
@@ -1727,7 +1727,7 @@ pub(super) fn receive_fire_events(
     resolve_pending_fire_events(
         now,
         cursor,
-        &tanks,
+        &shooters,
         &mut pending,
         &mut pending_fires,
         &mut own_ledgers,
@@ -1914,10 +1914,37 @@ fn resolve_shooter(
     }
 }
 
+/// What a released fire resolves against on this replica: the live shooter roots, and the weapons
+/// whose round lists bind the fired round.
+#[derive(SystemParam)]
+pub(super) struct FireShooters<'w, 's> {
+    tanks: Query<'w, 's, (Entity, &'static CombatantId), With<NetTank>>,
+    weapons:
+        Query<'w, 's, (&'static Weapon, &'static WeaponIndex, &'static TankRoot), With<Muzzle>>,
+}
+
+impl FireShooters<'_, '_> {
+    /// The fire's shooter root and the round that root's weapon slot lists at `event.round`, bound
+    /// from this replica's own tank data. `None` defers the fire: the root is missing or ambiguous,
+    /// or its weapon slot or round index is not on this replica — an index the tank data lacks
+    /// never resolves and expires with [`PendingFireEvents::TTL_TICKS`].
+    fn resolve(&self, event: &FireEvent) -> Option<(Entity, crate::rounds::Round)> {
+        let ShooterResolution::Resolved(shooter) = resolve_shooter(event, &self.tanks) else {
+            return None;
+        };
+        let (weapon, ..) = self
+            .weapons
+            .iter()
+            .find(|(_, slot, root)| root.0 == shooter && slot.0 == usize::from(event.weapon))?;
+        let fired = weapon.rounds.get(usize::from(event.round))?;
+        Some((shooter, fired.round))
+    }
+}
+
 /// The release half of the cursor hold: pop every fire whose tick the cursor has crossed and
-/// present it. A missing/ambiguous shooter defers to [`PendingFireEvents`], which owns the
-/// replica-race case (and its TTL) exactly as it did when presentation was at arrival. `None`
-/// cursor = release everything (pre-sync fallback: arrival presentation).
+/// present it. A fire [`FireShooters::resolve`] cannot resolve defers to [`PendingFireEvents`],
+/// which owns the replica-race case (and its TTL) exactly as it did when presentation was at
+/// arrival. `None` cursor = release everything (pre-sync fallback: arrival presentation).
 #[expect(
     clippy::too_many_arguments,
     reason = "one release boundary owns cursor crossing and shooter resolution"
@@ -1925,7 +1952,7 @@ fn resolve_shooter(
 fn release_due_fire_events(
     now: Tick,
     cursor: Option<(Tick, f64)>,
-    tanks: &Query<(Entity, &CombatantId), With<NetTank>>,
+    shooters: &FireShooters,
     pending_recoil: &mut PendingRecoilKicks,
     held: &mut HeldFireEvents,
     pending_fires: &mut PendingFireEvents,
@@ -1939,10 +1966,11 @@ fn release_due_fire_events(
         None => held.0.release_all(),
     };
     for (_, event) in due {
-        match resolve_shooter(&event, tanks) {
-            ShooterResolution::Resolved(shooter) => spawn_reconstructed_fire(
+        match shooters.resolve(&event) {
+            Some((shooter, round)) => spawn_reconstructed_fire(
                 &event,
                 shooter,
+                round,
                 now,
                 cursor,
                 pending_recoil,
@@ -1951,7 +1979,7 @@ fn release_due_fire_events(
                 shot_trace,
                 commands,
             ),
-            ShooterResolution::Missing | ShooterResolution::Ambiguous => {
+            None => {
                 if let Some(evicted) = pending_fires.insert(event, now) {
                     crate::shot_trace::record(
                         shot_trace,
@@ -1973,7 +2001,7 @@ fn release_due_fire_events(
 fn resolve_pending_fire_events(
     now: Tick,
     cursor: Option<(Tick, f64)>,
-    tanks: &Query<(Entity, &CombatantId), With<NetTank>>,
+    shooters: &FireShooters,
     pending_recoil: &mut PendingRecoilKicks,
     pending_fires: &mut PendingFireEvents,
     own_ledgers: &mut Query<&mut super::fire_presentation::OwnFirePresentation>,
@@ -1997,10 +2025,11 @@ fn resolve_pending_fire_events(
             );
             continue;
         }
-        match resolve_shooter(&pending.event, tanks) {
-            ShooterResolution::Resolved(shooter) => spawn_reconstructed_fire(
+        match shooters.resolve(&pending.event) {
+            Some((shooter, round)) => spawn_reconstructed_fire(
                 &pending.event,
                 shooter,
+                round,
                 now,
                 cursor,
                 pending_recoil,
@@ -2009,9 +2038,7 @@ fn resolve_pending_fire_events(
                 shot_trace,
                 commands,
             ),
-            ShooterResolution::Missing | ShooterResolution::Ambiguous => {
-                pending_fires.requeue(pending)
-            }
+            None => pending_fires.requeue(pending),
         }
     }
 }
@@ -2027,6 +2054,7 @@ fn pending_fire_expired(received_tick: Tick, now: Tick) -> bool {
 fn spawn_reconstructed_fire(
     event: &FireEvent,
     shooter: Entity,
+    round: crate::rounds::Round,
     now: Tick,
     cursor: Option<(Tick, f64)>,
     pending_recoil: &mut PendingRecoilKicks,
@@ -2057,16 +2085,13 @@ fn spawn_reconstructed_fire(
     let facts = super::fire_presentation::ReleasedShot {
         origin: event.origin,
         direction,
-        speed: event.speed,
-        caliber: event.caliber,
-        mass: event.mass,
-        nose_factor: event.nose_factor,
-        wound: event.wound,
+        round,
         tracer: event.tracer,
         mechanism: event.mechanism,
         shooter: ShotSource {
             tank: shooter,
             weapon: event.weapon as usize,
+            round: event.round,
         },
         shot: Some(event.shot_id()),
     };
@@ -3022,18 +3047,31 @@ mod tests {
         FireEvent {
             origin: Vec3::ZERO,
             direction: Vec3::NEG_Z,
-            speed: 800.0,
-            caliber: 0.0079,
-            mass: 0.0118,
-            nose_factor: 0.5,
-            wound: 10.0,
             mechanism: crate::spec::FireMechanism::Automatic,
             tracer: true,
             shooter,
             combatant: CombatantId(combatant),
             weapon: 0,
+            round: 0,
             fire_tick: Tick(tick),
         }
+    }
+
+    /// A shooter root for `combatant` carrying the weapon slots the fixture fires name: slot 0
+    /// loads the MG round, slot 1 the two cannon rounds, default first. A receiver binds every
+    /// fire's round from these lists, so a root without them never presents.
+    fn spawn_shooter(world: &mut World, combatant: u64) -> Entity {
+        let root = world.spawn((NetTank, CombatantId(combatant))).id();
+        let slots: [&[&str]; 2] = [&["7.9mm_AP"], &["88mm_AP", "88mm_APCR"]];
+        for (slot, keys) in slots.into_iter().enumerate() {
+            let mut fixture = weapon(None, None);
+            fixture.rounds = keys
+                .iter()
+                .map(|key| crate::tank::WeaponRound::resolve(key).expect("a shipped round"))
+                .collect();
+            world.spawn((Muzzle, WeaponIndex(slot), TankRoot(root), fixture));
+        }
+        root
     }
 
     /// A fire may beat its root's replica. It is retained by stable shot identity and resolves when
@@ -3092,7 +3130,7 @@ mod tests {
     ) {
         world
             .run_system_once(
-                move |tanks: Query<(Entity, &CombatantId), With<NetTank>>,
+                move |shooters: FireShooters,
                       mut recoil: ResMut<PendingRecoilKicks>,
                       mut seen: ResMut<SeenShots>,
                       mut held: ResMut<HeldFireEvents>,
@@ -3107,7 +3145,7 @@ mod tests {
                     release_due_fire_events(
                         now,
                         cursor,
-                        &tanks,
+                        &shooters,
                         &mut recoil,
                         &mut held,
                         &mut pending,
@@ -3125,7 +3163,7 @@ mod tests {
     fn release_at(world: &mut World, now: Tick, cursor: Option<(Tick, f64)>) {
         world
             .run_system_once(
-                move |tanks: Query<(Entity, &CombatantId), With<NetTank>>,
+                move |shooters: FireShooters,
                       mut recoil: ResMut<PendingRecoilKicks>,
                       mut held: ResMut<HeldFireEvents>,
                       mut pending: ResMut<PendingFireEvents>,
@@ -3138,7 +3176,7 @@ mod tests {
                     release_due_fire_events(
                         now,
                         cursor,
-                        &tanks,
+                        &shooters,
                         &mut recoil,
                         &mut held,
                         &mut pending,
@@ -3173,10 +3211,10 @@ mod tests {
         let shot = event.shot_id();
 
         consume_and_release(world, event.clone(), Tick(42), None);
-        let root = world.spawn((NetTank, CombatantId(7))).id();
+        let root = spawn_shooter(world, 7);
         world
             .run_system_once(
-                |tanks: Query<(Entity, &CombatantId), With<NetTank>>,
+                |shooters: FireShooters,
                  mut recoil: ResMut<PendingRecoilKicks>,
                  mut pending: ResMut<PendingFireEvents>,
                  mut own_ledgers: Query<
@@ -3188,7 +3226,7 @@ mod tests {
                     resolve_pending_fire_events(
                         Tick(42),
                         None,
-                        &tanks,
+                        &shooters,
                         &mut recoil,
                         &mut pending,
                         &mut own_ledgers,
@@ -3221,7 +3259,7 @@ mod tests {
     fn a_fire_ahead_of_the_cursor_presents_only_at_the_crossing() {
         let mut app = fire_receive_app();
         let world = app.world_mut();
-        let root = world.spawn((NetTank, CombatantId(7))).id();
+        let root = spawn_shooter(world, 7);
         let event = fire_event(root, 7, 100);
         let shot = event.shot_id();
 
@@ -3283,7 +3321,7 @@ mod tests {
         app.init_resource::<Certified>();
         app.add_observer(certify);
         let world = app.world_mut();
-        let root = world.spawn((NetTank, CombatantId(7))).id();
+        let root = spawn_shooter(world, 7);
 
         // The burst: 20 MG rounds every 5 ticks from tick 100, plus 2 cannon rounds. Every
         // round is a tracer, so the tracer counter must equal the bang counter.
@@ -3292,9 +3330,6 @@ mod tests {
         for cannon_tick in [103, 158] {
             let mut cannon = fire_event(root, 7, cannon_tick);
             cannon.mechanism = crate::spec::FireMechanism::Single;
-            cannon.speed = 773.0;
-            cannon.caliber = 0.088;
-            cannon.mass = 10.2;
             cannon.weapon = 1;
             events.push(cannon);
         }
@@ -3348,14 +3383,11 @@ mod tests {
     fn the_own_echo_is_the_rounds_one_presentation() {
         let mut app = fire_receive_app();
         let world = app.world_mut();
-        let own = world
-            .spawn((
-                NetTank,
-                CombatantId(7),
-                ActionState::<TankCommand>::default(),
-                InputMarker::<TankCommand>::default(),
-            ))
-            .id();
+        let own = spawn_shooter(world, 7);
+        world.entity_mut(own).insert((
+            ActionState::<TankCommand>::default(),
+            InputMarker::<TankCommand>::default(),
+        ));
 
         let fused_event = fire_event(own, 7, 43);
         let fused_shot = fused_event.shot_id();
@@ -3380,8 +3412,8 @@ mod tests {
         let mut app = fire_receive_app();
         app.init_resource::<SanctionedShots>();
         let world = app.world_mut();
-        let mapped_here = world.spawn((NetTank, CombatantId(7))).id();
-        let mapped_elsewhere = world.spawn((NetTank, CombatantId(7))).id();
+        let mapped_here = spawn_shooter(world, 7);
+        let mapped_elsewhere = spawn_shooter(world, 7);
         let here = fire_event(mapped_here, 7, 42);
         let elsewhere = fire_event(mapped_elsewhere, 7, 42);
         let shot = here.shot_id();
@@ -3395,7 +3427,7 @@ mod tests {
 
         world
             .run_system_once(
-                move |tanks: Query<(Entity, &CombatantId), With<NetTank>>,
+                move |shooters: FireShooters,
                       mut recoil: ResMut<PendingRecoilKicks>,
                       mut seen: ResMut<SeenShots>,
                       mut held: ResMut<HeldFireEvents>,
@@ -3444,7 +3476,7 @@ mod tests {
                     release_due_fire_events(
                         Tick(43),
                         None,
-                        &tanks,
+                        &shooters,
                         &mut recoil,
                         &mut held,
                         &mut pending,

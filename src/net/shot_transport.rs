@@ -452,23 +452,19 @@ fn queue_fire(
     let event = FireEvent {
         origin: fire.origin,
         direction: fire.direction.as_vec3(),
-        speed: fire.speed,
-        caliber: fire.caliber,
-        mass: fire.mass,
-        nose_factor: fire.nose_factor,
-        wound: fire.wound,
         mechanism: fire.mechanism,
         tracer: fire.tracer,
         shooter: source.tank,
         combatant,
         weapon,
+        round: source.round,
         fire_tick: Tick(shot.fire_tick),
     };
     crate::shot_trace::record(&mut shot_trace, "fire", timeline.tick().0, shot, || {
         json!({
             "o": [event.origin.x, event.origin.y, event.origin.z],
             "tr": event.tracer,
-            "cal": event.caliber,
+            "cal": fire.caliber,
         })
     });
     transport.enqueue_public(
@@ -907,16 +903,12 @@ mod tests {
         FireVisualFact::Fire(FireEvent {
             origin: Vec3::ZERO,
             direction: Vec3::NEG_Z,
-            speed: 800.0,
-            caliber: 0.0079,
-            mass: 0.0118,
-            nose_factor: 0.5,
-            wound: 10.0,
             mechanism: crate::spec::FireMechanism::Automatic,
             tracer: true,
             shooter: Entity::from_raw_u32(combatant as u32).unwrap(),
             combatant: crate::CombatantId(combatant),
             weapon,
+            round: 0,
             fire_tick: Tick(tick),
         })
     }
@@ -1284,9 +1276,17 @@ mod tests {
 
     #[test]
     fn wire_sizer_accounts_for_lightyear_mapped_entity_encoding() {
-        let batch = FireVisualBatch {
-            facts: (0..25).map(|weapon| fire(1, weapon, 100)).collect(),
-        };
+        // The largest batch the sender's own placeholder-entity encoding fits under the limit.
+        let batch = (1..=u8::MAX)
+            .map(|count| FireVisualBatch {
+                facts: (0..count).map(|weapon| fire(1, weapon, 100)).collect(),
+            })
+            .take_while(|batch| {
+                postcard::to_allocvec(batch).unwrap().len() + MESSAGE_NET_ID_BYTES
+                    <= VISUAL_BATCH_WIRE_LIMIT
+            })
+            .last()
+            .expect("one fire fits a batch");
         let mut mapped = batch.clone();
         for fact in &mut mapped.facts {
             if let FireVisualFact::Fire(event) = fact {
@@ -1298,7 +1298,7 @@ mod tests {
         assert_eq!(batch_wire_upper_bound(&batch), mapped_wire_bytes);
         assert!(
             mapped_wire_bytes > VISUAL_BATCH_WIRE_LIMIT,
-            "the old placeholder-sized 25-fire batch must be split after recipient mapping"
+            "a batch the placeholder encoding fits must still be split after recipient mapping"
         );
     }
 

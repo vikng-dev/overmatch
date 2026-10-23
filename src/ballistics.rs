@@ -751,6 +751,9 @@ pub struct ShotSource {
     pub tank: Entity,
     /// The firing weapon's slot in `TankSim::weapons` — its spawn-time `WeaponIndex`.
     pub weapon: usize,
+    /// The fired round: its index in the firing weapon's `Weapon::rounds`, which every role reads
+    /// from the same tank data (the fire event carries this index, not the round).
+    pub round: u8,
 }
 
 /// Network shot identity supplied in the initial shell bundle.
@@ -4095,6 +4098,7 @@ mod march_tests {
                     ShotSource {
                         tank: shooter,
                         weapon: 0,
+                        round: 0,
                     },
                     Transform::from_translation(origin).looking_to(dir, Vec3::Y),
                 ))
@@ -4366,6 +4370,7 @@ mod march_tests {
             shooter: Some(ShotSource {
                 tank: shooter,
                 weapon: shot.weapon as usize,
+                round: 0,
             }),
             tracer: true,
             shot_origin: FireShellOrigin::Local,
@@ -4928,6 +4933,7 @@ mod march_tests {
                 app.world_mut().entity_mut(shell).insert(ShotSource {
                     tank: Entity::PLACEHOLDER,
                     weapon: 0,
+                    round: 0,
                 });
             }
 
@@ -5082,6 +5088,7 @@ mod march_tests {
                 app.world_mut().entity_mut(shell).insert(ShotSource {
                     tank: Entity::PLACEHOLDER,
                     weapon: 0,
+                    round: 0,
                 });
             }
 
@@ -5580,6 +5587,7 @@ mod march_tests {
                 app.world_mut().entity_mut(shell).insert(ShotSource {
                     tank: Entity::PLACEHOLDER,
                     weapon: 0,
+                    round: 0,
                 });
             }
 
@@ -6872,6 +6880,7 @@ mod march_tests {
         app.world_mut().entity_mut(shell).insert(ShotSource {
             tank: Entity::PLACEHOLDER,
             weapon: 0,
+            round: 0,
         });
         for _ in 0..8 {
             app.update();
