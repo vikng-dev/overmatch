@@ -1892,13 +1892,15 @@ fn a_cone_doses_the_struck_tank_alone() {
     );
 }
 
-/// THE HP QUANTUM GATE: a body exit whose cone's whole emission `S/2` converts to no HP point is
-/// not thrown — no direction walked, no cone recorded, the crossing counting none — and one above
-/// it is. Fixture: an 88 through 0.3 m of a factor-10 slab (spend ≈ 3 reference-mm, κ = 0.01, so
-/// `S/2` ≈ 0.015 reference-mm, 0.15 of a point, DERIVED) and through 20 mm of steel.
+/// THE HP QUANTUM GATE: a body exit whose cone's whole emission `S/2` converts to no HP point at
+/// the field's rate `r` (HP points per reference-mm, `spall_cone::hp_per_reference_mm`) is not
+/// thrown — no direction walked, no cone recorded, the crossing counting none — and one above it
+/// is. Fixture: an 88 through `3/r` m of a factor-10 slab (spend ≈ `30/r` reference-mm, κ = 0.01,
+/// so `S/2` ≈ `0.15/r` reference-mm, 0.15 of a point at `r`, DERIVED) and through 20 mm of steel.
 #[test]
 fn a_cone_below_the_hp_quantum_is_not_thrown() {
-    for (thickness, factor, thrown) in [(0.3, 10.0, false), (0.02, STEEL, true)] {
+    let slab = 3.0 / crate::ballistics::spall_cone::hp_per_reference_mm() as f32;
+    for (thickness, factor, thrown) in [(slab, 10.0, false), (0.02, STEEL, true)] {
         let mut app = world_with_trimesh_plates(&[]);
         volume(
             &mut app,

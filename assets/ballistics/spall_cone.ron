@@ -1,7 +1,8 @@
-// The spall cone's shape — the field thrown from every body exit a round reaches. Read by
-// `src/ballistics/spall_cone.rs`, embedded and parsed once, validated at parse. The law itself
-// (strength, profile, shadowing, dose) is design doc §5,
-// `.agents/docs/design/armor-penetration-and-damage.md`; this file holds only its shape data.
+// The spall cone's shape and its calibration — the field thrown from every body exit a round
+// reaches. Read by `src/ballistics/spall_cone.rs`, embedded and parsed once, validated at parse.
+// The law itself (strength, profile, shadowing, dose) is design doc §5,
+// `.agents/docs/design/armor-penetration-and-damage.md`; this file holds its shape data and the
+// one number that converts its dose to HP points.
 //
 // Every value here is a choice the owner can change by editing this file alone; none is a
 // constant of the law. The playtest fork on the half-angle and the axis is F5 in
@@ -11,8 +12,9 @@
 // Derived, Tuned, Resolution, Unknown (`src/provenance.rs`); a value without one does not load.
 (
     // Half-angle α (degrees) of the cone: the rim where the profile's strength reaches zero.
-    half_angle_deg: (25.0, Tuned("provisional default, owner 2026-10-12 (playtest fork F5);
-        comparable MEASURED normal-impact outer extents ~26° (Qi et al. 2026,
+    half_angle_deg: (25.0, Tuned("chosen at random by the owner (playtest fork F5): no measured
+        support is claimed, and it is never a calibration target. For reference, MEASURED
+        normal-impact outer extents of ~26° (Qi et al. 2026,
         .agents/scratch/damage-cam-2026-10-08/research/cloud-angle-deep.md)")),
 
     // The cone's axis. `RearNormalBisector`: normalize(rear-face outward normal + exit direction)
@@ -48,4 +50,19 @@
     passage: (FirstSolid, Tuned("owner decision 2026-10-17 (playtest fork F6): full shadowing, so
         a hard box shields what lies behind it whatever its material; Partial, graded by material,
         is kept as the dial")),
+
+    // The field's calibration: HP points per reference-mm of field dose, where the line converts
+    // at `ballistics::HP_PER_REFERENCE_MM`. A field deposit of d reference-mm enters a box's
+    // per-shot dose as d × this / that, in whole dose units; the cone's strength S stays in
+    // reference-mm. It sets the potency of every cone at once and nothing else: the shape, the
+    // profile and the passage all conserve a cone's emitted total.
+    hp_per_reference_mm: (70, Tuned("owner decision 2026-10-23 (#2 in
+        .agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md):
+        a crew box fully inside the cone about 2 m from the hole has its HP pool emptied by a weak
+        ordinary perforation. DERIVED: a box of face A at distance R inside a cone of half-angle α
+        catches A / (R² Ω_c) of its emission E, Ω_c = 2π(1 − cos α) = 0.589 sr at 25°, and its
+        pool is its class × A (box_classes.ron), so its knockout radius R = sqrt(E / (class Ω_c))
+        is the same for every box of a class. On the recorded s1 cone (S/2 = 5.09 reference-mm)
+        the crew class's 150 HP per m² gives R = 0.76 m at the line's 10 HP per reference-mm and
+        R = 2.0 m at 70")),
 )

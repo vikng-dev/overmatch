@@ -78,7 +78,7 @@ pub enum PathStep {
         rested: bool,
     },
     /// A component of the struck tank lost HP to the shot: its dose rounded once per box per shot
-    /// ([`crate::ballistics::hp_points`]) came to at least one point and its pool had it. A dose
+    /// ([`crate::ballistics::ShotDose`]) came to at least one point and its pool had it. A dose
     /// that rounds to none changed nothing in the game and is not this step.
     Dosed,
     /// A walk that failed closed: an error, never a pen cam.
@@ -300,8 +300,8 @@ pub struct FragmentHit {
 }
 
 /// One box's dose from the shot (reference-mm): the line's, a bounce's shock included, and the
-/// spall cones'; and the HP points it lost, the sum of the two rounded once
-/// ([`crate::ballistics::hp_points`]) and capped at the HP it had.
+/// spall cones'; and the HP points it lost, the sum of the two rounded once, the field's at its own
+/// HP per reference-mm ([`crate::ballistics::field_units`]), and capped at the HP it had.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct BoxDose {
     /// A [`ComponentState::name`].

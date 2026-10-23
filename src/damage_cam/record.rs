@@ -40,7 +40,8 @@ use super::{
 use crate::ballistics::SpallCone as ThrownCone;
 use crate::ballistics::{
     ArmourMark, BallisticVolume, ComponentHealth, CrossingEnd, ExternalArmour, PenetrationMarks,
-    ShellPath, ShotDose, SpallMarks, TRANSIT_K, VolumeCrossing, dose_units, hp_of_units,
+    ShellPath, ShotDose, SpallMarks, TRANSIT_K, VolumeCrossing, dose_units, field_units,
+    hp_of_units,
 };
 use crate::damage::{Ammo, CrewStation, FunctionRole, VolumeOf};
 use crate::tank::{
@@ -1068,22 +1069,28 @@ fn outcomes(
                 .find(|settle| settle.mark >= struck.from && settle.emptied())
         });
         if let Some(emptying) = emptying {
-            let mut landed: Vec<Deposit> = from_line
+            // Each deposit in the units the shot's tally took it in: the field's at its own rate.
+            let mut landed: Vec<(u64, f32, usize)> = from_line
                 .into_iter()
-                .chain(from_field)
+                .map(|(_, dose, t, mark)| (dose_units(dose), t, mark))
+                .chain(
+                    from_field
+                        .into_iter()
+                        .map(|(_, dose, t, mark)| (field_units(dose), t, mark)),
+                )
                 .filter(|&(.., mark)| mark == emptying.mark)
                 .collect();
-            landed.sort_by(|a, b| a.2.total_cmp(&b.2));
+            landed.sort_by(|a, b| a.1.total_cmp(&b.1));
             let taken_before = hp_of_units(emptying.units_before);
             let mut total = emptying.units_before;
             let t = landed
                 .iter()
-                .find(|(_, dose, ..)| {
-                    total += dose_units(*dose);
+                .find(|(units, ..)| {
+                    total += units;
                     hp_of_units(total) - taken_before >= emptying.held
                 })
                 .or(landed.last())
-                .map_or(0.0, |&(_, _, t, _)| t);
+                .map_or(0.0, |&(_, t, _)| t);
             consequences.push(Consequence {
                 t,
                 volume: state.name.clone(),

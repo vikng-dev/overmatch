@@ -1,9 +1,9 @@
-//! The spall cone's shape: its half-angle, its axis rule, the directions it is sampled by, its
-//! profile and how a direction passes through what it meets, read from
-//! `assets/ballistics/spall_cone.ron`. The law the shape serves — strength, profile, shadowing,
-//! dose — is design doc §5 (`.agents/docs/design/armor-penetration-and-damage.md`); the throw that
-//! applies it is `throw_spall_cone` in the parent module, and a world may throw another shape
-//! ([`SpallLaw`]).
+//! The spall cone's shape — its half-angle, its axis rule, the directions it is sampled by, its
+//! profile and how a direction passes through what it meets — and its calibration, the field's HP
+//! points per reference-mm ([`hp_per_reference_mm`]), read from `assets/ballistics/spall_cone.ron`.
+//! The law the shape serves — strength, profile, shadowing, dose — is design doc §5
+//! (`.agents/docs/design/armor-penetration-and-damage.md`); the throw that applies it is
+//! `throw_spall_cone` in the parent module, and a world may throw another shape ([`SpallLaw`]).
 //!
 //! # Profiles and passages
 //!
@@ -89,6 +89,31 @@ struct ShapeFile {
     directions: Sourced<usize>,
     profile: Sourced<Profile>,
     passage: Sourced<Passage>,
+    hp_per_reference_mm: Sourced<u64>,
+}
+
+/// The field's calibration, parsed once from the shipped file: HP points per reference-mm of field
+/// dose, where the line converts at [`super::HP_PER_REFERENCE_MM`]. A field deposit of `d`
+/// reference-mm enters a box's per-shot dose at `d × this / HP_PER_REFERENCE_MM`
+/// ([`super::field_units`]); a cone's strength `S` stays in reference-mm. Panics on a malformed
+/// file, as [`ConeShape::shipped`] does; [`super::sim_plugin`] calls it while the app is built.
+pub(crate) fn hp_per_reference_mm() -> u64 {
+    static RATE: std::sync::LazyLock<u64> = std::sync::LazyLock::new(|| {
+        rate_from_ron(SPALL_CONE_RON).unwrap_or_else(|err| {
+            panic!("spall cone: embedded spall_cone.ron's calibration is unusable: {err}")
+        })
+    });
+    *RATE
+}
+
+/// Parse a shape file's calibration, refusing a rate of zero: a field that converts to no HP point
+/// is no field.
+fn rate_from_ron(text: &str) -> Result<u64, String> {
+    let file: ShapeFile = ron::de::from_str(text).map_err(|err| err.to_string())?;
+    match file.hp_per_reference_mm.0 {
+        0 => Err("hp_per_reference_mm must be at least 1 (got 0)".into()),
+        rate => Ok(rate),
+    }
 }
 
 /// One direction of the cone in the cone's own frame: `cos θ`, the two lateral components
@@ -371,40 +396,59 @@ mod tests {
         let text = r#"(half_angle_deg: (25.0, Tuned("fixture")),
             axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")),
             profile: (Linear, Tuned("fixture")), passage: (Partial, Tuned("fixture")),
-            range: (6.0, Tuned("fixture")))"#;
+            hp_per_reference_mm: (70, Tuned("fixture")), range: (6.0, Tuned("fixture")))"#;
         assert!(
             ConeShape::from_ron(text).is_err(),
             "an unknown field is refused"
         );
     }
 
-    /// A shape value authored without its provenance is refused at parse.
+    /// A shape value authored without its provenance is refused at parse, the calibration's too.
     #[test]
     fn a_shape_value_without_provenance_is_refused() {
         let sourced = r#"(half_angle_deg: (25.0, Tuned("fixture")),
             axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")),
-            profile: (Linear, Tuned("fixture")), passage: (Partial, Tuned("fixture")))"#;
+            profile: (Linear, Tuned("fixture")), passage: (Partial, Tuned("fixture")),
+            hp_per_reference_mm: (70, Tuned("fixture")))"#;
         assert!(ConeShape::from_ron(sourced).is_ok());
+        assert_eq!(rate_from_ron(sourced), Ok(70));
         for bare in [
             r#"(half_angle_deg: 25.0, axis: (ExitDirection, Tuned("fixture")),
                 directions: (24, Resolution("fixture")), profile: (Linear, Tuned("fixture")),
-                passage: (Partial, Tuned("fixture")))"#,
+                passage: (Partial, Tuned("fixture")), hp_per_reference_mm: (70, Tuned("fixture")))"#,
             r#"(half_angle_deg: (25.0, Tuned("fixture")), axis: ExitDirection,
                 directions: (24, Resolution("fixture")), profile: (Linear, Tuned("fixture")),
-                passage: (Partial, Tuned("fixture")))"#,
+                passage: (Partial, Tuned("fixture")), hp_per_reference_mm: (70, Tuned("fixture")))"#,
             r#"(half_angle_deg: (25.0, Tuned("fixture")), axis: (ExitDirection, Tuned("fixture")),
                 directions: 24, profile: (Linear, Tuned("fixture")),
-                passage: (Partial, Tuned("fixture")))"#,
+                passage: (Partial, Tuned("fixture")), hp_per_reference_mm: (70, Tuned("fixture")))"#,
             r#"(half_angle_deg: (25.0, Tuned("fixture")), axis: (ExitDirection, Tuned("fixture")),
                 directions: (24, Resolution("fixture")), profile: Flat,
-                passage: (Partial, Tuned("fixture")))"#,
+                passage: (Partial, Tuned("fixture")), hp_per_reference_mm: (70, Tuned("fixture")))"#,
             r#"(half_angle_deg: (25.0, Tuned("fixture")), axis: (ExitDirection, Tuned("fixture")),
                 directions: (24, Resolution("fixture")), profile: (Linear, Tuned("fixture")),
-                passage: FirstSolid)"#,
+                passage: FirstSolid, hp_per_reference_mm: (70, Tuned("fixture")))"#,
+            r#"(half_angle_deg: (25.0, Tuned("fixture")), axis: (ExitDirection, Tuned("fixture")),
+                directions: (24, Resolution("fixture")), profile: (Linear, Tuned("fixture")),
+                passage: (Partial, Tuned("fixture")), hp_per_reference_mm: 70)"#,
         ] {
             let error = ConeShape::from_ron(bare).expect_err(bare);
             assert!(error.contains("provenance"), "{bare}: {error}");
+            let error = rate_from_ron(bare).expect_err(bare);
+            assert!(error.contains("provenance"), "{bare}: {error}");
         }
+    }
+
+    /// A calibration of zero HP points per reference-mm is refused at parse, naming the field: a
+    /// zero rate would silently switch every cone off through the HP quantum gate.
+    #[test]
+    fn a_zero_field_calibration_is_refused() {
+        let zero = r#"(half_angle_deg: (25.0, Tuned("fixture")),
+            axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")),
+            profile: (Linear, Tuned("fixture")), passage: (Partial, Tuned("fixture")),
+            hp_per_reference_mm: (0, Tuned("fixture")))"#;
+        let error = rate_from_ron(zero).expect_err("a zero rate is refused");
+        assert!(error.contains("hp_per_reference_mm"), "{error}");
     }
 
     /// A half-angle the profile cannot resolve is refused at parse: at `1e-9` rad `cos α` rounds to

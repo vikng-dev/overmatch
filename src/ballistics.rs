@@ -32,7 +32,8 @@ pub(crate) use walk::VolumeMaterial;
 /// Solid shot is the only one built.
 mod mechanism;
 
-/// The spall cone's shape data: half-angle, axis rule and the directions it is sampled by.
+/// The spall cone's shape data (half-angle, axis rule and the directions it is sampled by) and its
+/// calibration, the field's HP points per reference-mm.
 pub(crate) mod spall_cone;
 
 /// The §13 walk driven against the live world: corridor collection, the staged `begin`/`finish`, and
@@ -293,10 +294,11 @@ pub(crate) fn round_in_domain(round: RoundBody, speed: f32) -> Result<(), String
 /// Main-penetrator transit damage = the cost it paid crossing that volume × this (design §6).
 pub(crate) const TRANSIT_K: f32 = 1.0;
 
-/// HP points per reference-mm of dose: one HP point is 0.1 reference-mm, the quantum a box's dose
-/// from one shot is rounded to (design doc §6). RESOLUTION: the unit every component's `hp` in the
-/// tank data is authored in, and the quantum below which a spall cone is not thrown; it is a unit,
-/// not a balance value, so changing it rescales every authored pool with it.
+/// HP points per reference-mm of dose on the line (a transit, a bounce's shock, a witness's chord):
+/// one HP point is 0.1 reference-mm, the quantum a box's dose from one shot is rounded to (design
+/// doc §6). RESOLUTION: the unit every component's `hp` in the tank data is authored in; it is a
+/// unit, not a balance value, so changing it rescales every authored pool with it. The field
+/// converts at its own calibrated rate ([`spall_cone::hp_per_reference_mm`], [`field_units`]).
 pub(crate) const HP_PER_REFERENCE_MM: u64 = 10;
 
 /// Fixed-point dose units per reference-mm. Every dose contribution is quantized to whole units
@@ -319,6 +321,17 @@ pub(crate) fn dose_units(dose: f32) -> u64 {
     (f64::from(dose) * DOSE_UNITS_PER_REFERENCE_MM as f64).round() as u64
 }
 
+/// One FIELD dose contribution of `dose` reference-mm in the dose units a box's total is kept in:
+/// [`dose_units`] scaled by the field's HP points per reference-mm over the line's
+/// ([`spall_cone::hp_per_reference_mm`] / [`HP_PER_REFERENCE_MM`]), in integer arithmetic, so a
+/// box's per-shot total stays an integer sum, the same in every order. Every field deposit enters
+/// a total through this (a hard box's cone dose and a witness's alike); nothing on the line does.
+/// The deposit is quantized before it is scaled, so it converts to the same units wherever it is
+/// summed (the shot's tally, the pen cam record's emptying deposit). The product saturates.
+pub(crate) fn field_units(dose: f32) -> u64 {
+    dose_units(dose).saturating_mul(spall_cone::hp_per_reference_mm()) / HP_PER_REFERENCE_MM
+}
+
 /// The whole HP points `units` dose units convert to, rounded to nearest, ties away from zero.
 pub(crate) fn hp_of_units(units: u64) -> u32 {
     let points =
@@ -326,9 +339,10 @@ pub(crate) fn hp_of_units(units: u64) -> u32 {
     u32::try_from(points).unwrap_or(u32::MAX)
 }
 
-/// The whole HP points one dose of `dose` reference-mm converts to: [`dose_units`] then
+/// The whole HP points one line dose of `dose` reference-mm converts to: [`dose_units`] then
 /// [`hp_of_units`], the rounding a box's per-shot total takes. A negative or NaN dose converts to
 /// none.
+#[cfg(test)]
 pub(crate) fn hp_points(dose: f32) -> u32 {
     hp_of_units(dose_units(dose))
 }
@@ -336,8 +350,9 @@ pub(crate) fn hp_points(dose: f32) -> u32 {
 /// One shot's dose to each box it has reached, in whole dose units ([`dose_units`]), the HP points
 /// already taken for it and the HP its pool actually lost. A box loses `hp_of_units(total)` over the
 /// shot, its total from the line, a bounce's shock and every spall cone summed first: each
-/// contribution quantized, the integers summed, the sum rounded once per box per shot, never per
-/// direction or per source, and never dependent on the order the contributions arrive in.
+/// contribution quantized (a field deposit at the field's rate, [`field_units`]), the integers
+/// summed, the sum rounded once per box per shot, never per direction or per source, and never
+/// dependent on the order the contributions arrive in.
 /// [`Self::settle`] takes what the running total has added since it last ran, so HP falls as the
 /// shot goes and lands on the rounded total when it ends.
 ///
@@ -385,9 +400,13 @@ impl Settle {
 }
 
 impl ShotDose {
-    /// Add `amount` reference-mm to `address`'s dose.
+    /// Add `amount` reference-mm on the line to `address`'s dose.
     fn add(&mut self, address: Entity, amount: f32) {
-        let units = dose_units(amount);
+        self.add_units(address, dose_units(amount));
+    }
+
+    /// Add `units` dose units to `address`'s dose.
+    fn add_units(&mut self, address: Entity, units: u64) {
         match self
             .tallies
             .iter_mut()
@@ -415,15 +434,15 @@ impl ShotDose {
         }
     }
 
-    /// Add every dose of `doses`, a line dose scaled by [`TRANSIT_K`]; a field dose is already in
-    /// the count unit.
+    /// Add every dose of `doses`: a line dose scaled by [`TRANSIT_K`], a field dose (in the count
+    /// unit) at the field's HP per reference-mm ([`field_units`]).
     fn add_all(&mut self, doses: &[mechanism::Dose]) {
         for dose in doses {
-            let amount = match dose.source {
-                mechanism::DoseSource::Line { .. } => dose.amount * TRANSIT_K,
-                mechanism::DoseSource::Field => dose.amount,
+            let units = match dose.source {
+                mechanism::DoseSource::Line { .. } => dose_units(dose.amount * TRANSIT_K),
+                mechanism::DoseSource::Field => field_units(dose.amount),
             };
-            self.add(dose.address, amount);
+            self.add_units(dose.address, units);
         }
     }
 
@@ -1326,9 +1345,10 @@ const MG_SHORTCIRCUIT_CALIBER_MAX: f32 = 0.020;
 /// builds no mesh or material, and writes no `Visibility` — a shell born here is a bare simulation
 /// entity, and [`view::plugin`] (client roots only) is what dresses one.
 pub fn sim_plugin(app: &mut App) {
-    // The spall cone's shape is authored data: parsed and validated here, while the app is built,
-    // so a malformed file stops startup rather than the first throw.
+    // The spall cone's shape and calibration are authored data: parsed and validated here, while
+    // the app is built, so a malformed file stops startup rather than the first throw.
     spall_cone::ConeShape::shipped();
+    spall_cone::hp_per_reference_mm();
     app.init_resource::<RetainSpentShells>()
         .init_resource::<MarchMode>()
         .insert_resource(MgShortCircuit(crate::env_flag(
@@ -3207,10 +3227,11 @@ fn resolve_replica_armor_contact(
 /// Throw the spall cone of one body exit, appending it to the shell's record and its doses to the
 /// shot's [`ShotDose`] (design doc §5). Returns whether it was thrown.
 ///
-/// Strength `S` is [`walk::SpallSource::strength`]. A cone whose whole emission `S/2` converts to
-/// no HP point ([`hp_points`]) is not thrown: no direction is walked and nothing is recorded. `S/2`
-/// is the most one box can take from it, since every direction doses a box at most once and the
-/// shape's weights emit half the on-axis strength ([`spall_cone::EMITTED_SHARE`]). Otherwise
+/// Strength `S` is [`walk::SpallSource::strength`], in reference-mm. A cone whose whole emission
+/// `S/2` converts to no HP point at the field's rate ([`field_units`], the rate every one of its
+/// doses converts at) is not thrown: no direction is walked and nothing is recorded. `S/2` is the
+/// most one box can take from it, since every direction doses a box at most once and the shape's
+/// weights emit half the on-axis strength ([`spall_cone::EMITTED_SHARE`]). Otherwise
 /// direction `k` of the shape ([`spall_cone::ConeShape`]) carries `S·f_k` and stands for `1/N` of the
 /// cone, walked through the volumes of `tank`, the struck tank, alone
 /// ([`resolve::field_direction`]). A direction whose walk fails is fail-closed: it doses nothing, and
@@ -3230,7 +3251,7 @@ fn throw_spall_cone(
         .as_deref()
         .map_or(spall_cone::ConeShape::shipped(), |law| &law.0);
     let strength = source.strength();
-    if hp_points(strength * spall_cone::EMITTED_SHARE) == 0 {
+    if hp_of_units(field_units(strength * spall_cone::EMITTED_SHARE)) == 0 {
         spall.gated += 1;
         return false;
     }
@@ -3451,6 +3472,49 @@ mod tests {
             "1.5 points, a tie, rounds away from zero"
         );
         assert_eq!(hp_of_units(3 * DOSE_UNITS_PER_HP / 2 - 1), 1);
+    }
+
+    /// THE FIELD'S CALIBRATION: a field deposit converts at the field's HP points per reference-mm
+    /// ([`spall_cone::hp_per_reference_mm`]); a line deposit, a bounce's shock and a witness's
+    /// chord dose convert at the line's ([`HP_PER_REFERENCE_MM`]); mixed deposits sum as whole
+    /// dose units, in either order, before the one rounding. The HP quantum gate and the pen cam's
+    /// reading of which boxes a cone knocks out rely on every field deposit converting at that
+    /// rate and nothing on the line doing so. Fixture doses (reference-mm).
+    #[test]
+    fn a_field_dose_converts_at_the_fields_rate_and_a_line_dose_at_the_lines() {
+        use mechanism::{Dose, DoseSource};
+        let target = Entity::from_raw_u32(1).unwrap();
+        let line = |amount| Dose {
+            address: target,
+            amount,
+            source: DoseSource::Line { chord: 0.1 },
+        };
+        let field = |amount| Dose {
+            address: target,
+            amount,
+            source: DoseSource::Field,
+        };
+        let points = |doses: &[Dose], shocks: &[f32]| -> u32 {
+            let mut shot = ShotDose::default();
+            shot.add_all(doses);
+            for shock in shocks {
+                shot.add(target, *shock);
+            }
+            hp_of_units(shot.tallies[0].units)
+        };
+        let field_rate = u32::try_from(spall_cone::hp_per_reference_mm()).unwrap();
+        let line_rate = u32::try_from(HP_PER_REFERENCE_MM).unwrap();
+        assert_eq!(points(&[field(1.0)], &[]), field_rate, "a field deposit");
+        assert_eq!(points(&[line(1.0)], &[]), line_rate, "a line deposit");
+        assert_eq!(points(&[], &[1.0]), line_rate, "a shock or a chord dose");
+        assert_eq!(
+            points(&[field(1.0), line(1.0)], &[1.0]),
+            field_rate + 2 * line_rate
+        );
+        assert_eq!(
+            points(&[line(1.0), field(1.0)], &[1.0]),
+            field_rate + 2 * line_rate
+        );
     }
 
     /// Rounds the capability-law invariants are swept over. Fixture data, not a spec: the laws
