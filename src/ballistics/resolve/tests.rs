@@ -1059,7 +1059,14 @@ fn a_bounce_lifted_into_a_neighbour_resolves_it() {
                 flight.settle(&context, &|_| true, radius)?;
                 // Short of the nearest sample's first contact; it only sizes the first corridor.
                 let contact = 0.8;
-                let decision = decide(&context, &|_| true, &bound(ROUND), &flight, contact)?;
+                let decision = decide(
+                    &context,
+                    &|_| true,
+                    &bound(ROUND),
+                    ROUND.mass,
+                    &flight,
+                    contact,
+                )?;
                 assert!(
                     matches!(decision, Decision::Bounce(_)),
                     "the graze bounces: {decision:?}"

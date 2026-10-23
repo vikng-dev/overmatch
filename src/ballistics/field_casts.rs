@@ -578,6 +578,7 @@ fn spawn_shot_round(
                 velocity: direction * speed,
                 round: bound(body),
                 caliber,
+                mass,
                 wound,
                 drag_k: drag_k(caliber, mass),
                 disc: walk::DiscFrame::anchored(direction).expect("a shot fires along a real axis"),

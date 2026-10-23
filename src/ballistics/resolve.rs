@@ -1383,12 +1383,15 @@ pub(crate) struct ResolveContext<'a, 'w, 's> {
 /// [`walk::finish`] advancing the round's bound mechanism, the residual speed, the travel and the
 /// continuation.
 ///
-/// `contact` is the distance from [`Flight::sweep_origin`] to the nearest sample's first armour
-/// contact; it sizes the first corridor and nothing else.
+/// `round` is what meets the plate, the penetrator's mechanism; `mass` the whole round's (kg),
+/// since the momentum a bounce or a bite delivers is the whole round's, its body stopping at the
+/// plate with its penetrator. `contact` is the distance from [`Flight::sweep_origin`] to the
+/// nearest sample's first armour contact; it sizes the first corridor and nothing else.
 pub(crate) fn decide(
     context: &ResolveContext<'_, '_, '_>,
     not_own: &dyn Fn(Entity) -> bool,
     round: &SolidShot,
+    mass: f32,
     flight: &Flight,
     contact: f32,
 ) -> Result<Decision, WalkError> {
@@ -1485,7 +1488,7 @@ pub(crate) fn decide(
                 speed: bled,
                 incoming: dir,
                 speed_in: speed,
-                impulse: body.mass * (v_in - Vec3::from(out) * bled),
+                impulse: mass * (v_in - Vec3::from(out) * bled),
                 travel: approach + MARCH_EPS,
                 resume: position + read.normal * radius + out * MARCH_EPS,
                 approach: way_in,
@@ -1510,7 +1513,7 @@ pub(crate) fn decide(
             Ok(Decision::Bite(bite(
                 &transit,
                 plan,
-                body.mass,
+                mass,
                 from,
                 dir,
                 &entrance.offsets,

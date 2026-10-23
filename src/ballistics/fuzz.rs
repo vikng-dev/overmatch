@@ -778,8 +778,15 @@ pub(super) fn drive(
                 hit.distance
             }
         };
-        let decision = resolve::decide(context, &|_| true, &round, &flight, contact)
-            .map_err(|error| fail(error, &flight))?;
+        let decision = resolve::decide(
+            context,
+            &|_| true,
+            &round,
+            round.body().mass,
+            &flight,
+            contact,
+        )
+        .map_err(|error| fail(error, &flight))?;
         budget
             .charge(decision.charged())
             .map_err(|error| fail(error, &flight))?;

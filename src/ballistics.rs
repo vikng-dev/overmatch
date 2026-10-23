@@ -870,6 +870,9 @@ pub(crate) struct Projectile {
     round: mechanism::SolidShot,
     /// The whole round's calibre (m): what the shell's view and its impacts are sized by.
     caliber: f32,
+    /// The whole round's mass (kg): the momentum a hit or a bounce delivers is the whole round's,
+    /// its body stopping at the plate with its penetrator.
+    mass: f32,
     /// Reference-mm of dose per metre of chord the round's line cuts through a witness (ADR-0040).
     /// Read only by the witness pass; the hard walk never sees it.
     wound: f32,
@@ -930,6 +933,7 @@ impl Projectile {
                 nose_factor: 0.3,
             }),
             caliber,
+            mass: 1.0,
             wound: 30.0,
             drag_k: 0.0,
             disc: walk::DiscFrame {
@@ -1592,6 +1596,7 @@ fn on_fire_shell(
             velocity,
             round: bound(penetrator),
             caliber: fire.caliber,
+            mass: fire.mass,
             wound: fire.wound,
             drag_k: drag,
             // From the BORE, not from the post-catch-up travel direction: a shell reconstructed with
@@ -2737,8 +2742,15 @@ fn march_shell_step(
         // spall, no transit damage. Free penetration is the one outcome worse than a stopped shell,
         // because it is indistinguishable from armour that was never modelled. The budget is charged
         // BEFORE the crossing is applied, so a refused crossing lands none of its consequences.
-        let decided = resolve::decide(&context, &not_own, &round, &flight, contact)
-            .and_then(|decision| budget.charge(decision.charged()).map(|()| decision));
+        let decided = resolve::decide(
+            &context,
+            &not_own,
+            &round,
+            shell.projectile.mass,
+            &flight,
+            contact,
+        )
+        .and_then(|decision| budget.charge(decision.charged()).map(|()| decision));
         let decision = match decided {
             Ok(decision) => {
                 damage_dealt += wound_legs(
@@ -3895,6 +3907,7 @@ mod march_tests {
                 velocity,
                 round: bound(penetrator),
                 caliber: body.caliber,
+                mass: body.mass,
                 wound: FIXTURE_WOUND,
                 drag_k: drag_k(body.caliber, body.mass),
                 // Anchored on THIS round's fire direction, exactly as `on_fire_shell` would.
@@ -3985,8 +3998,20 @@ mod march_tests {
     /// Spawn an 88 round at `origin` travelling `dir` (unit) at `speed`, then march until an impact is
     /// captured (or the bound trips). Returns every impact fired.
     fn fire_and_capture(app: &mut App, origin: Vec3, dir: Vec3, speed: f32) -> Vec<Captured> {
+        fire_with(app, FIXTURE_88, FIXTURE_88, origin, dir, speed)
+    }
+
+    /// [`fire_and_capture`] of a round that flies as `body` and meets the plate as `penetrator`.
+    fn fire_with(
+        app: &mut App,
+        body: RoundBody,
+        penetrator: RoundBody,
+        origin: Vec3,
+        dir: Vec3,
+        speed: f32,
+    ) -> Vec<Captured> {
         app.world_mut().spawn((
-            fixture_round(FIXTURE_88, dir * speed),
+            fixture_round_with(body, penetrator, dir * speed),
             DamageReport::default(),
             TerminalReport::default(),
             ShellPath {
@@ -4004,6 +4029,72 @@ mod march_tests {
             }
         }
         app.world().resource::<ImpactLog>().0.clone()
+    }
+
+    /// The momentum a hit delivers is the whole round's, whatever meets the plate: the body stops
+    /// at the plate with its penetrator. A sub-calibre fixture round embedding in a thick plate
+    /// moves the authority body by `mass × speed / M`, the whole round's momentum, not the core's.
+    /// The hull shock a hit gives relies on it; a mutant that delivers the penetrator's momentum
+    /// fails here.
+    #[test]
+    fn a_hit_delivers_the_whole_round_s_momentum() {
+        const CORE: RoundBody = RoundBody {
+            mass: 2.0,
+            caliber: 0.04,
+            nose_factor: FIXTURE_88.nose_factor,
+        };
+        const SPEED: f32 = 900.0;
+        const BODY_MASS: f32 = 100.0;
+        // 400 mm of reference steel: the whole 88 (about 148 reference-mm at 900 m/s) and the core
+        // (about 141) both embed (DERIVED), so the whole momentum lands in the plate's body.
+        let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.4), Vec3::new(0.0, 2.0, 0.0));
+        let body = app
+            .world_mut()
+            .spawn((
+                RigidBody::Dynamic,
+                Transform::default(),
+                Mass(BODY_MASS),
+                AngularInertia::new(Vec3::splat(50.0)),
+                NoAutoMass,
+                NoAutoAngularInertia,
+                GravityScale(0.0),
+            ))
+            .id();
+        let mut plates = app
+            .world_mut()
+            .query_filtered::<Entity, With<BallisticVolume>>();
+        let plate = plates.single(app.world()).expect("one plate");
+        app.world_mut().entity_mut(plate).insert(VolumeOf(body));
+        app.update();
+
+        fire_with(
+            &mut app,
+            FIXTURE_88,
+            CORE,
+            Vec3::new(0.0, 2.0, 2.0),
+            Vec3::NEG_Z,
+            SPEED,
+        );
+        for _ in 0..2 {
+            app.update();
+        }
+        let delivered = app
+            .world()
+            .get::<LinearVelocity>(body)
+            .expect("dynamic body has linear velocity")
+            .0
+            .length()
+            * BODY_MASS;
+        let whole = FIXTURE_88.mass * SPEED;
+        assert!(
+            (delivered / whole - 1.0).abs() < 0.02,
+            "delivered {delivered} N·s against the whole round's {whole}"
+        );
+        assert!(
+            (delivered - CORE.mass * SPEED).abs() > 0.5 * whole,
+            "the core's momentum alone would be {}",
+            CORE.mass * SPEED
+        );
     }
 
     /// A volume crossing transfers momentum to its authority-owned tank body, while a replica keeps

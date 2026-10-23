@@ -141,8 +141,9 @@ march, per volume crossed:
    A round may author a `penetrator` (mass and calibre; its nose is the round's), no heavier and
    no wider than the round; without one the round is its own penetrator, bit for bit. Flight reads
    the whole round: drag (`drag_k`) and the shell's view. Everything at the plate reads the
-   penetrator: the disc the shell samples the world with, overmatch, this law, the cone's hole
-   (§5), and the momentum the hit and a bounce deliver. Penetration stays rigid: the penetrator's
+   penetrator: the disc the shell samples the world with, overmatch, this law and the cone's hole
+   (§5). The momentum a hit or a bounce delivers is the whole round's: the body stops at the plate
+   with its penetrator. Penetration stays rigid: the penetrator's
    material is named (`core`) and read by no law. The 88's Pzgr. 40 reads about 180
    reference-mm at the muzzle (930 m/s) as its 1.93 kg, 35.7 mm core, against about 112 as its
    whole 7.3 kg body and the Pzgr. 39's about 115 (DERIVED, shipped RHA facts); the record gives
