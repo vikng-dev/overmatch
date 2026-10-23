@@ -1679,6 +1679,7 @@ mod tests {
         std::fs::write(
             &elsewhere,
             r#"SubstanceRegistry(substances: {"Cheese": Hard(resistance: Reference, paintable: false,
+                debris_half_angle_deg: (26.2, Tuned("fixture")),
                 facts: Some((density: (1000.0, Tuned("fixture")),
                     flow_strength: (1.0e6, Tuned("fixture")),
                     youngs_modulus: (1.0e9, Tuned("fixture")),
