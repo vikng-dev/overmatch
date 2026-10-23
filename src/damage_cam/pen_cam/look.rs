@@ -51,9 +51,6 @@ const VOLUME_STEPS: usize = 16;
 /// A volume sorts this far (m) nearer the eye than its mesh's centre, so it draws after every
 /// other translucent surface, the glass included, and its colour reads unwashed by them.
 const VOLUME_SORT_BIAS: f32 = 1.0e4;
-/// Whether the footprint draws the threshold rings: thin lines where the summed intensity on a
-/// surface crosses the mid and the bright threshold. A choice of look, both states drawn.
-pub const THRESHOLD_RINGS: bool = true;
 /// A struck component's red outline (physical px, an inverted hull), so a sliver of fill still
 /// reads as struck; the light's share of its shading; its fill line's width (px); the dead hatch's
 /// period (px) and the share of it in red.
@@ -110,7 +107,7 @@ pub struct LookParams {
     pub rest: Vec4,
     pub plane: Vec4,
     pub foot: Vec4,
-    pub thresholds: Vec4,
+    pub fill: Vec4,
     pub ramp: [Vec4; 4],
     pub volume: Vec4,
     pub fields: Vec4,
@@ -132,7 +129,7 @@ impl Default for LookParams {
             rest: Vec4::ZERO,
             plane: Vec4::ZERO,
             foot: Vec4::ZERO,
-            thresholds: Vec4::ZERO,
+            fill: Vec4::ZERO,
             ramp: [Vec4::ZERO; 4],
             volume: Vec4::ZERO,
             fields: Vec4::ZERO,
@@ -642,9 +639,8 @@ impl VolumeGeometry {
 /// in a field where it faces the field's origin, lies inside its cone, behind its front and no
 /// farther than its direction's reach on the disc: the field met it there. It is filled in the
 /// potency colour of the fields' summed intensity there ([`super::potency::Ramp`]) and lined along
-/// each cone's edge, and, with [`THRESHOLD_RINGS`], where that intensity crosses the mid and the
-/// bright threshold. The disc lanes ([`pack`]), the ramp lanes and the thresholds lane carry the
-/// law alone: nothing display-side sets the colour.
+/// each cone's edge. The disc lanes ([`pack`]) and the ramp lanes carry the law alone: nothing
+/// display-side sets the colour.
 pub fn set_footprints(
     looks: &mut Assets<LookMaterial>,
     masks: &MaskSet,
@@ -663,12 +659,7 @@ pub fn set_footprints(
         );
     }
     let (share, metres) = FOOTPRINT_REACH_SLACK;
-    let thresholds = Vec4::new(
-        potency.mid,
-        potency.bright,
-        THRESHOLD_RINGS as u8 as f32,
-        FOOTPRINT_FILL_ALPHA,
-    );
+    let fill = Vec4::new(FOOTPRINT_FILL_ALPHA, 0.0, 0.0, 0.0);
     let ramp = potency.ramp().lanes();
     for (_, material) in looks.iter_mut() {
         let mode = material.params.mode.x;
@@ -678,7 +669,7 @@ pub fn set_footprints(
             continue;
         }
         material.params.foot = Vec4::new(FOOTPRINT_LINE_PX, FOOTPRINT_LINE_ALPHA, share, metres);
-        material.params.thresholds = thresholds;
+        material.params.fill = fill;
         material.params.ramp = ramp;
         material.params.fields = Vec4::new(count as f32, 0.0, 0.0, 0.0);
         material.params.prints = lanes;
@@ -894,9 +885,6 @@ mod tests {
                 4.0 * potency.rate * node.y / super::super::potency::solid_angle(print.half_angle)
             );
         }
-        assert_eq!(params.thresholds.x, potency.mid);
-        assert_eq!(params.thresholds.y, potency.bright);
-        assert_eq!(params.thresholds.z, THRESHOLD_RINGS as u8 as f32);
         assert_eq!(params.ramp, potency.ramp().lanes());
 
         let mut field = volume(&potency, &masks, None);

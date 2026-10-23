@@ -39,11 +39,9 @@
 // (`fields.x`, none at 0; `prints`), a surface point facing the origin, inside the cone, behind its
 // front and no farther than its direction's reach on the field's disc (`disc`, with the slack
 // `foot.zw`) takes the field's intensity there. The fields' summed intensity fills the point in
-// its potency colour at opacity `thresholds.w`; lines `foot.x` px wide at opacity `foot.y` mark
-// where the angle from a cone's axis crosses its half-angle, in the potency colour there, and,
-// with `thresholds.z = 1`, where the summed intensity crosses the mid threshold (`thresholds.x`)
-// and the bright (`thresholds.y`), in the ramp's deep anchor. No lane the colour is read from
-// carries a display gain.
+// its potency colour at opacity `fill.x`; lines `foot.x` px wide at opacity `foot.y` mark where
+// the angle from a cone's axis crosses its half-angle, in the potency colour there. No lane the
+// colour is read from carries a display gain.
 //
 // Output: straight `rgb, a`.
 
@@ -74,9 +72,8 @@ struct LookParams {
     // x: the lines' width (px), y: their opacity; z, w: a surface counts as met up to `z` times its
     // direction's reach plus `w` (m).
     foot: vec4<f32>,
-    // x: the mid threshold, y: the bright (HP points per m²); z: the threshold rings drawn (1); w:
-    // the footprint fill's opacity.
-    thresholds: vec4<f32>,
+    // x: the footprint fill's opacity.
+    fill: vec4<f32>,
     // The potency colour's anchors (rgb, and `u` in w) and its middle slope (rgb, and the mid
     // threshold in w).
     ramp: array<vec4<f32>, 4>,
@@ -207,8 +204,6 @@ struct Footprint {
 // The footprint at world point `p` (normal `n`; its change across a pixel `dpx`, `dpy`).
 fn footprint(p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>) -> Footprint {
     var intensity = 0.0;
-    // The summed intensity's change across a pixel along each field's radius, `2 I / r` a metre.
-    var change = 0.0;
     var edge = false;
     for (var f = 0; f < 4; f = f + 1) {
         if f32(f) >= look.fields.x {
@@ -237,21 +232,11 @@ fn footprint(p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>) -> Foot
         }
         edge = edge || on_edge;
         if on_disc.z <= at.w {
-            let i = here.y / (r * r);
-            intensity = intensity + i;
-            change = change + 2.0 * i / r * (abs(dot(dir, dpx)) + abs(dot(dir, dpy)));
+            intensity = intensity + here.y / (r * r);
         }
     }
     var out = Footprint(intensity, 0.0, vec3(0.0));
-    if intensity > 0.0 && look.thresholds.z > 0.5 {
-        // A threshold's ring: where the intensity is within half the line's width of it.
-        let half = 0.5 * look.foot.x * change;
-        if abs(intensity - look.thresholds.y) < half || abs(intensity - look.thresholds.x) < half {
-            out.line = 1.0;
-            out.line_rgb = look.ramp[0].rgb;
-        }
-    }
-    if edge && out.line == 0.0 {
+    if edge {
         out.line = 1.0;
         out.line_rgb = ramp(intensity);
     }
@@ -431,8 +416,8 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
             a = max(a, look.edge.a);
         }
         if mark.intensity > 0.0 {
-            rgb = mix(rgb, ramp(mark.intensity), look.thresholds.w);
-            a = max(a, look.thresholds.w);
+            rgb = mix(rgb, ramp(mark.intensity), look.fill.x);
+            a = max(a, look.fill.x);
         }
         if mark.line > 0.0 {
             rgb = mix(rgb, mark.line_rgb, look.foot.y);
@@ -462,7 +447,7 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
         }
         let mark = footprint(in.world_position.xyz, n, dpx, dpy);
         if mark.intensity > 0.0 {
-            rgb = mix(rgb, ramp(mark.intensity), look.thresholds.w);
+            rgb = mix(rgb, ramp(mark.intensity), look.fill.x);
         }
         if mark.line > 0.0 {
             rgb = mix(rgb, mark.line_rgb, look.foot.y);

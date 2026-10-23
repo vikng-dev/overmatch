@@ -291,9 +291,8 @@ translucent volume inside its reach surface (`src/damage_cam/pen_cam/field.rs`, 
 `assets/shaders/pen_cam_look.wgsl`, `volume`): a pixel takes the mean colour along the eye ray's
 path inside the field, at an opacity that climbs with that path's length, so the colour says the
 potency and the opacity the thickness. Every surface the field met is tinted in the colour at its
-own point, lined along the cone's edge and, with the look's `THRESHOLD_RINGS`, where its intensity
-crosses mid and bright. Volume and surfaces read one disc baked from the record's directions. The
-calibration is provisional until the emergent shape lands.
+own point and lined along the cone's edge. Volume and surfaces read one disc baked from the
+record's directions. The calibration is provisional until the emergent shape lands.
 
 **Data.** `α`, the axis rule, `N`, the profile and the passage live in
 `assets/ballistics/spall_cone.ron`, parsed and validated while the app is built (ADR-0014: built
