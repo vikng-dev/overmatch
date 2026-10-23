@@ -135,11 +135,15 @@ pub(super) fn plugin(app: &mut App) {
 }
 
 /// One server consumption no presentation accounts for yet: stamped with the newest remote tick
-/// whose arrival revealed it — the base of the announcement wait.
+/// whose arrival revealed it — the base of the announcement wait — and the round it fired.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Reveal {
     revealed_tick: u32,
     remaining: u32,
+    /// The slot's `loaded` index as of the fold before the consumption arrived: the round the
+    /// consumption fired, whatever the slot has loaded since (the next-load rule,
+    /// [`crate::tank::WeaponLoad`]).
+    loaded: u8,
 }
 
 /// One weapon slot's presentation ledger.
@@ -166,6 +170,10 @@ struct SlotLedger {
     /// one of these is the same round arriving twice and must not present again. `fire_tick`
     /// after every entry is a future round and never matches, so a stale entry cannot swallow one.
     owed_swallows: VecDeque<u32>,
+    /// The slot's replicated `loaded` index as of the last fold. A consumption's reveal takes
+    /// this value before the fold refreshes it, so a load that arrives beside the consumption
+    /// cannot rename the round it fired. 0 (the default round) until the first fold.
+    arrived_loaded: u8,
 }
 
 impl SlotLedger {
@@ -225,6 +233,7 @@ impl SlotLedger {
             self.reveals.push_back(Reveal {
                 revealed_tick,
                 remaining: target - queued,
+                loaded: self.arrived_loaded,
             });
             if self.reveals.len() > QUEUE_CAP {
                 self.reveals.pop_front();
@@ -420,40 +429,52 @@ fn stamp_gate_write_mark(mut roots: Query<(Ref<WeaponGate>, &mut OwnFirePresenta
 /// the signal [`heal_refused_presentations`] measures — never a fold.
 fn fold_arrivals(
     arrival: Option<Res<ArrivalDelay>>,
-    mut roots: Query<(Ref<WeaponGate>, &mut OwnFirePresentation)>,
+    mut roots: Query<(
+        Ref<WeaponGate>,
+        Option<&WeaponLoads>,
+        &mut OwnFirePresentation,
+    )>,
 ) {
     let revealed_tick = arrival
         .as_ref()
         .and_then(|estimator| estimator.newest_remote())
         .map(|tick| tick.0);
-    for (gate, mut ledger) in &mut roots {
-        if ledger.gate_write_mark == Some(gate.last_changed()) {
-            continue;
+    for (gate, loads, mut ledger) in &mut roots {
+        if ledger.gate_write_mark != Some(gate.last_changed()) {
+            // An unset mark (fresh arm) folds once against the seed — zero rounds by construction.
+            ledger.gate_write_mark = Some(gate.last_changed());
+            for (slot, entry) in ledger.slots.iter_mut().enumerate() {
+                let Some(arriving) = gate.weapons.get(slot).copied() else {
+                    continue;
+                };
+                if arriving == entry.last_arrived {
+                    continue;
+                }
+                if entry.confirm(arriving) > 0 {
+                    entry.reconcile_reveals(revealed_tick);
+                }
+                if entry.overrun() > 0 {
+                    // Under fused own fire the state's consumption legitimately lands before the
+                    // echoed round crosses the cursor, so a transient overrun is the in-flight
+                    // window (and, past the wait, the fallback's due list), not a violated
+                    // invariant.
+                    debug!(
+                        "net: weapon {slot} has {} confirmed rounds not yet presented \
+                         (presented {}, confirmed {})",
+                        entry.overrun(),
+                        entry.presented,
+                        entry.confirmed,
+                    );
+                }
+            }
         }
-        // An unset mark (fresh arm) folds once against the seed — zero rounds by construction.
-        ledger.gate_write_mark = Some(gate.last_changed());
+        // The load as of this frame's arrivals, refreshed AFTER the fold: a consumption and its
+        // slot's next load can arrive in one snapshot, and the reveal must name the round fired,
+        // not the one loaded behind it.
         for (slot, entry) in ledger.slots.iter_mut().enumerate() {
-            let Some(arriving) = gate.weapons.get(slot).copied() else {
-                continue;
-            };
-            if arriving == entry.last_arrived {
-                continue;
-            }
-            if entry.confirm(arriving) > 0 {
-                entry.reconcile_reveals(revealed_tick);
-            }
-            if entry.overrun() > 0 {
-                // Under fused own fire the state's consumption legitimately lands before the
-                // echoed round crosses the cursor, so a transient overrun is the in-flight
-                // window (and, past the wait, the fallback's due list), not a violated invariant.
-                debug!(
-                    "net: weapon {slot} has {} confirmed rounds not yet presented \
-                     (presented {}, confirmed {})",
-                    entry.overrun(),
-                    entry.presented,
-                    entry.confirmed,
-                );
-            }
+            entry.arrived_loaded = loads
+                .and_then(|loads| loads.weapons.get(slot))
+                .map_or(0, |load| load.loaded);
         }
     }
 }
@@ -552,7 +573,7 @@ fn recover_unannounced_rounds(
     arrival: Option<Res<ArrivalDelay>>,
     // Skips the whole system until the cursor syncs: an unsynced cursor defines no wait.
     cursor: SyncedInterpolationTimeline,
-    mut roots: Query<(Entity, &mut OwnFirePresentation, Option<&WeaponLoads>)>,
+    mut roots: Query<(Entity, &mut OwnFirePresentation)>,
     muzzles: Query<(&Weapon, &WeaponIndex, &TankRoot, &GlobalTransform), With<Muzzle>>,
     mut recoil: ResMut<super::client::PendingRecoilKicks>,
     mut diag: ResMut<OwnFireDiag>,
@@ -566,9 +587,14 @@ fn recover_unannounced_rounds(
     // recovered round's age is the seam's `cursor − revealed_tick` — a fallback bang lands at the
     // same lag its lost announcement would have presented at.
     let cursor = (cursor.tick(), f64::from(cursor.overstep().to_f32()));
-    for (root, mut ledger, loads) in &mut roots {
+    for (root, mut ledger) in &mut roots {
         for (slot, entry) in ledger.slots.iter_mut().enumerate() {
-            let Some(&Reveal { revealed_tick, .. }) = entry.reveals.front() else {
+            let Some(&Reveal {
+                revealed_tick,
+                loaded,
+                ..
+            }) = entry.reveals.front()
+            else {
                 continue;
             };
             if (cursor.0 - Tick(revealed_tick)) < wait as i32 {
@@ -582,13 +608,9 @@ fn recover_unannounced_rounds(
             let Ok(direction) = Dir3::new(muzzle.rotation() * Vec3::NEG_Z) else {
                 continue;
             };
-            // The fired round's index died with its announcement; the slot's present `loaded`
-            // stands in, which is the fired round unless a selection was loaded since; an index past
-            // the list presents the default round rather than jam the slot. The shell is a cosmetic
-            // repair either way.
-            let loaded = loads
-                .and_then(|loads| loads.weapons.get(slot))
-                .map_or(0, |load| load.loaded);
+            // The fired round's index died with its announcement; the reveal's `loaded` is the
+            // round the consumption fired. An index past the list presents the default round
+            // rather than jam the slot. The shell is a cosmetic repair either way.
             let round = if usize::from(loaded) < weapon.rounds.len() {
                 loaded
             } else {
@@ -1267,10 +1289,14 @@ mod tests {
     fn reveals_carry_exactly_the_unpresented_confirmations() {
         let queued = |slot: &SlotLedger| -> u32 { slot.reveals.iter().map(|r| r.remaining).sum() };
         let mut slot = SlotLedger::seeded(ready(BELT));
+        // The load as of the fold before this consumption: the round the reveal names, whatever
+        // the slot loads afterwards.
+        slot.arrived_loaded = 1;
         slot.confirm(ready(BELT - 2));
         slot.reconcile_reveals(Some(700));
         assert_eq!(queued(&slot), 2, "two confirmed, none presented");
-        assert_eq!(slot.reveals.front().expect("stamped").revealed_tick, 700);
+        let front = slot.reveals.front().expect("stamped");
+        assert_eq!((front.revealed_tick, front.loaded), (700, 1));
         // An echo catches up: the oldest owed reveal settles.
         slot.presented += 1;
         slot.reconcile_reveals(None);
@@ -1446,14 +1472,18 @@ mod tests {
         assert_eq!(world.resource::<OwnFireDiag>().healed, 0);
     }
 
-    /// One presented `FireShell`'s identifying fields, captured off the observer channel.
+    /// One presented `FireShell`'s identifying fields, captured off the observer channel: source,
+    /// catch-up, whether it is unkeyed, and the mass that names its round.
     #[derive(Resource, Default)]
-    struct CapturedShells(Vec<(Option<crate::ballistics::ShotSource>, u32, bool)>);
+    struct CapturedShells(Vec<(Option<crate::ballistics::ShotSource>, u32, bool, f32)>);
 
     fn capture_shell(fire: On<FireShell>, mut captured: ResMut<CapturedShells>) {
-        captured
-            .0
-            .push((fire.shooter, fire.catch_up_ticks, fire.shot.is_none()));
+        captured.0.push((
+            fire.shooter,
+            fire.catch_up_ticks,
+            fire.shot.is_none(),
+            fire.mass,
+        ));
     }
 
     fn recovery_app(cursor_tick: u32) -> (App, Entity) {
@@ -1475,12 +1505,15 @@ mod tests {
         timeline.set_now(TickInstant::from(Tick(cursor_tick)));
         lightyear::prelude::TimelineSync::set_synced(&mut timeline, true);
         app.insert_resource(timeline);
-        // The armed root: one state-proven consumption revealed at tick 100, never announced.
+        // The armed root: one state-proven consumption revealed at tick 100, never announced,
+        // which fired the slot's second round. The root carries no `WeaponLoads` and the slot's
+        // present load is unknowable here: only the reveal names the round.
         let mut slot = SlotLedger::seeded(ready(BELT));
         slot.confirmed = 1;
         slot.reveals.push_back(Reveal {
             revealed_tick: 100,
             remaining: 1,
+            loaded: 1,
         });
         let root = app
             .world_mut()
@@ -1493,9 +1526,9 @@ mod tests {
             GlobalTransform::from(Transform::from_xyz(1.0, 2.0, 3.0)),
             Weapon {
                 name: "test gun".into(),
-                rounds: vec![
-                    crate::tank::WeaponRound::resolve("88mm_AP").expect("a shipped round"),
-                ],
+                rounds: ["88mm_AP", "88mm_APCR"]
+                    .map(|key| crate::tank::WeaponRound::resolve(key).expect("a shipped round"))
+                    .to_vec(),
                 fire_mode: crate::spec::FireMode::Single { reload_secs: 6.0 },
                 recoil: None,
                 barrel: None,
@@ -1524,7 +1557,7 @@ mod tests {
         {
             let world = app.world();
             let captured = world.resource::<CapturedShells>();
-            let &[(shooter, catch_up, unkeyed)] = captured.0.as_slice() else {
+            let &[(shooter, catch_up, unkeyed, mass)] = captured.0.as_slice() else {
                 panic!(
                     "exactly one recovered bang presents, got {}",
                     captured.0.len()
@@ -1532,6 +1565,21 @@ mod tests {
             };
             let source = shooter.expect("the bang is keyed to the armed root");
             assert_eq!((source.tank, source.weapon), (root, 0));
+            let [default_mass, fired_mass] = ["88mm_AP", "88mm_APCR"].map(|key| {
+                crate::tank::WeaponRound::resolve(key)
+                    .expect("a shipped round")
+                    .round
+                    .body
+                    .mass
+            });
+            assert_ne!(
+                default_mass, fired_mass,
+                "the fixture's two rounds must differ"
+            );
+            assert_eq!(
+                mass, fired_mass,
+                "the bang presents the round the reveal names, not the slot's default",
+            );
             assert_eq!(
                 catch_up, 5,
                 "catch-up spans reveal (100) to the CURSOR (105) — the cursor clock, never the \
@@ -1625,7 +1673,7 @@ mod tests {
         );
         let world = app.world();
         let captured = world.resource::<CapturedShells>();
-        let &[(source, presented_catch_up, _)] = captured.0.as_slice() else {
+        let &[(source, presented_catch_up, _, _)] = captured.0.as_slice() else {
             panic!("exactly one bang presents, got {}", captured.0.len());
         };
         let source = source.expect("the bang carries its shooter");
