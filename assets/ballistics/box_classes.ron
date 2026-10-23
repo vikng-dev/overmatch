@@ -15,6 +15,11 @@
 // `.agents/docs/design/armor-penetration-and-damage.md`; the decision is #3 in
 // `.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md`.
 //
+// The pen cam's potency bands read two thresholds from this file, in HP points per m² of face:
+// bright at `hard`, mid at `crew_hp / crew_face_m2`. Each threshold times its class's face is the
+// class's pool, so a box presenting that face wholly inside the band, or a brighter one, has its
+// HP pool emptied. Design doc §5, "Potency bands".
+//
 // PROVENANCE: every value is authored `(value, Kind("source or reason"))`, Kind one of Measured,
 // Derived, Tuned, Resolution, Unknown (`src/provenance.rs`); a value without one does not load.
 (
@@ -23,8 +28,13 @@
         is one shared entity across tanks, and the crew box is a placeholder for a humanoid
         shape, so its face is no basis for a pool. The field's calibration in spall_cone.ron and
         the crew line rate in rounds.ron are set against it")),
-    ammo: (150, Tuned("as fragile per m² as the crew pool at the intended humanoid's 0.2 m² face
-        (DERIVED: 30 / 0.2): a propellant case a fragment reaches is lost. The hard class would
+    // The presented area (m²) the crew pool is set against: the mid band's threshold is
+    // `crew_hp` over it. The crew box is a placeholder, so this is not its measured face.
+    crew_face_m2: (0.2, Tuned("the intended humanoid's presented area, the face the field's
+        calibration in spall_cone.ron is set against; the placeholder crew box's MEASURED mean
+        face is 0.516 m² until the humanoid shape lands")),
+    ammo: (150, Tuned("as fragile per m² as the crew pool at crew_face_m2 (DERIVED: 30 / 0.2):
+        a propellant case a fragment reaches is lost. The hard class would
         leave a bin a round's line passes straight through in action (pen cam scenario s5)")),
     hard: (300, Tuned("owner decision 2026-10-23: sturdier components hold up a little better,
         never through half a cone; twice the ammo class per m²")),

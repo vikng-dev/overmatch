@@ -4,12 +4,13 @@
 //! classes every other pool is authored from, HP points per m² of the box's mean face (the mean of
 //! the three axis-aligned face areas of its bounds in the tank's sim geometry). The pool gate
 //! (`src/tests/box_pools.rs`) holds every tank asset to both. The class follows the box's facets
-//! ([`BoxClass::of`]). Design doc §6.
+//! ([`BoxClass::of`]). Design doc §6. The pen cam's potency bands read their thresholds from the
+//! same file ([`BoxClasses::band_thresholds`], design doc §5).
 #![cfg_attr(
     not(test),
     expect(
         dead_code,
-        reason = "the pool gate reads the classes under test; at runtime only the crew pool is read"
+        reason = "the pool gate reads the classes by box under test; at runtime only the crew pool and the band thresholds are read"
     )
 )]
 
@@ -51,28 +52,50 @@ impl BoxClass {
 #[serde(deny_unknown_fields)]
 struct ClassFile {
     crew_hp: Sourced<u32>,
+    crew_face_m2: Sourced<f32>,
     ammo: Sourced<u32>,
     hard: Sourced<u32>,
 }
 
-/// The shared crew pool and each class's HP points per m² of mean face, validated.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The shared crew pool, the face (m²) it is set against, and each class's HP points per m² of
+/// mean face, validated.
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct BoxClasses {
     crew_hp: u32,
+    crew_face_m2: f32,
     ammo: u32,
     hard: u32,
 }
 
+/// The pen cam's potency band thresholds, HP points per m² of face: a box presenting its class's
+/// face wholly at or above its threshold takes at least its pool.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct BandThresholds {
+    /// The hard class: a hard box's face wholly in the bright band has its HP pool emptied.
+    pub(crate) bright: f32,
+    /// The crew pool over the face it is set against: a crew station's face wholly in the mid band
+    /// or brighter is knocked out.
+    pub(crate) mid: f32,
+}
+
 impl BoxClasses {
-    /// Parse and validate a class file, refusing a crew pool of zero or a class of zero HP per m²:
-    /// a box of either would have no pool.
+    /// Parse and validate a class file, refusing a crew pool of zero or a class of zero HP per m²
+    /// (a box of either would have no pool) and a crew face that is not a positive finite area
+    /// (the mid band's threshold divides by it).
     pub(crate) fn from_ron(text: &str) -> Result<Self, String> {
         let file: ClassFile = ron::de::from_str(text).map_err(|err| err.to_string())?;
         let classes = Self {
             crew_hp: file.crew_hp.0,
+            crew_face_m2: file.crew_face_m2.0,
             ammo: file.ammo.0,
             hard: file.hard.0,
         };
+        if !(classes.crew_face_m2.is_finite() && classes.crew_face_m2 > 0.0) {
+            return Err(format!(
+                "crew_face_m2 must be a positive area (got {})",
+                classes.crew_face_m2
+            ));
+        }
         for (name, rate) in [
             ("crew_hp", classes.crew_hp),
             ("ammo", classes.ammo),
@@ -108,42 +131,82 @@ impl BoxClasses {
             BoxClass::Hard => self.hard,
         }
     }
+
+    /// The thresholds the pen cam's potency bands read.
+    pub(crate) fn band_thresholds(&self) -> BandThresholds {
+        BandThresholds {
+            bright: self.hard as f32,
+            mid: self.crew_hp as f32 / self.crew_face_m2,
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// A value authored without its provenance, an unknown entry or a zero is refused at parse,
-    /// naming what is wrong.
+    /// A fixture class file: `crew` (its crew entries), the fixture classes, then `rest`.
+    fn file(crew: &str, rest: &str) -> String {
+        format!(r#"({crew}, ammo: (200, Tuned("fixture")), hard: (300, Tuned("fixture")){rest})"#)
+    }
+
+    /// Fixture crew entries: 30 HP set against 0.25 m².
+    const CREW: &str = r#"crew_hp: (30, Tuned("fixture")), crew_face_m2: (0.25, Tuned("fixture"))"#;
+
+    /// A value authored without its provenance, an unknown entry, a zero pool or class, or a crew
+    /// face that is no positive area is refused at parse, naming what is wrong.
     #[test]
     fn a_malformed_class_file_is_refused() {
-        let sourced = r#"(crew_hp: (30, Tuned("fixture")), ammo: (200, Tuned("fixture")),
-            hard: (300, Tuned("fixture")))"#;
-        let classes = BoxClasses::from_ron(sourced).expect("a sourced file parses");
+        let classes = BoxClasses::from_ron(&file(CREW, "")).expect("a sourced file parses");
         assert_eq!(classes.crew_hp(), 30);
         assert_eq!(classes.hp_per_square_metre(BoxClass::Ammo), 200);
         assert_eq!(classes.hp_per_square_metre(BoxClass::Hard), 300);
-        let bare = r#"(crew_hp: 30, ammo: (200, Tuned("fixture")), hard: (300, Tuned("fixture")))"#;
-        let error = BoxClasses::from_ron(bare).expect_err("a bare value is refused");
+        let bare = file(r#"crew_hp: 30, crew_face_m2: (0.25, Tuned("fixture"))"#, "");
+        let error = BoxClasses::from_ron(&bare).expect_err("a bare value is refused");
         assert!(error.contains("provenance"), "{error}");
-        let unknown = r#"(crew_hp: (30, Tuned("fixture")), ammo: (200, Tuned("fixture")),
-            hard: (300, Tuned("fixture")), crew: (150, Tuned("fixture")))"#;
-        assert!(BoxClasses::from_ron(unknown).is_err(), "an unknown entry");
-        for (zero, name) in [
+        let unknown = file(CREW, r#", crew: (150, Tuned("fixture"))"#);
+        assert!(BoxClasses::from_ron(&unknown).is_err(), "an unknown entry");
+        for (text, name) in [
             (
-                r#"(crew_hp: (0, Tuned("fixture")), ammo: (200, Tuned("fixture")),
-                    hard: (300, Tuned("fixture")))"#,
+                file(
+                    r#"crew_hp: (0, Tuned("fixture")), crew_face_m2: (0.25, Tuned("fixture"))"#,
+                    "",
+                ),
                 "crew_hp",
             ),
+            (file(CREW, "").replace("ammo: (200", "ammo: (0"), "ammo"),
             (
-                r#"(crew_hp: (30, Tuned("fixture")), ammo: (0, Tuned("fixture")),
-                    hard: (300, Tuned("fixture")))"#,
-                "ammo",
+                file(
+                    r#"crew_hp: (30, Tuned("fixture")), crew_face_m2: (0.0, Tuned("fixture"))"#,
+                    "",
+                ),
+                "crew_face_m2",
+            ),
+            (
+                file(
+                    r#"crew_hp: (30, Tuned("fixture")), crew_face_m2: (-0.2, Tuned("fixture"))"#,
+                    "",
+                ),
+                "crew_face_m2",
             ),
         ] {
-            let error = BoxClasses::from_ron(zero).expect_err("a zero is refused");
+            let error = BoxClasses::from_ron(&text).expect_err("a zero is refused");
             assert!(error.contains(name), "{error}");
         }
+    }
+
+    /// The bands' thresholds are the file's classes: bright the hard class, mid the crew pool over
+    /// the face it is set against (fixture data: 30 HP over 0.25 m² is 120 HP per m²). The pen
+    /// cam's colour promise relies on both; a threshold read from anywhere else breaks it.
+    #[test]
+    fn the_band_thresholds_are_the_classes() {
+        let classes = BoxClasses::from_ron(&file(CREW, "")).unwrap();
+        assert_eq!(
+            classes.band_thresholds(),
+            BandThresholds {
+                bright: 300.0,
+                mid: 120.0
+            }
+        );
     }
 }
