@@ -11,7 +11,9 @@ use crate::damage::{
 };
 use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
 use crate::spec::{FireMode, ViewKind};
-use crate::tank::{Controlled, TankRoot, TankViews, Weapon, WeaponIndex};
+use crate::tank::{
+    Controlled, TankRoot, TankViews, Weapon, WeaponIndex, WeaponLoad, WeaponLoads, WeaponRound,
+};
 use crate::ui_font::{PANEL_BG, TEXT, UiFonts};
 
 /// The controlled tank's crew bar: one cell per seat, driven by the `1`–`5` swap input.
@@ -136,9 +138,27 @@ fn weapon_status(
     }
 }
 
+/// One weapon's round readout: the loaded round's display name, and the selected round's while it
+/// waits for the next load. `None` for a weapon that lists one round — it has no choice to show.
+fn round_line(weapon_name: &str, rounds: &[WeaponRound], load: WeaponLoad) -> Option<String> {
+    if rounds.len() < 2 {
+        return None;
+    }
+    let name = |index: u8| {
+        rounds
+            .get(usize::from(index))
+            .map_or("-", |round| round.name.as_str())
+    };
+    let mut line = format!("{weapon_name} round: {}", name(load.loaded));
+    if load.selected != load.loaded {
+        line.push_str(&format!("   next: {}", name(load.selected)));
+    }
+    Some(line)
+}
+
 /// Render the controlled tank's vitals card: crew alive/total, Drive + Gunner-sight effectiveness,
-/// and each weapon's reload/fire state (`READY` / `x.xs` / `no-fire`). A pure view over the
-/// controlled tank's local components.
+/// each weapon's reload/fire state (`READY` / `x.xs` / `no-fire`), and the round choice of each
+/// weapon that has one ([`round_line`]). A pure view over the controlled tank's local components.
 #[expect(
     clippy::too_many_arguments,
     reason = "a view over the controlled tank's crew, weapons, gates and clocks, writing one panel"
@@ -157,6 +177,8 @@ fn update_status_panel(
     seats: Query<(Option<&Dead>, &VolumeOf), With<CrewStation>>,
     weapons: Query<(&Weapon, &WeaponIndex, &TankRoot)>,
     gates: Query<&crate::tank::WeaponGate>,
+    // The authority's round choice; on a client, the owner's replicated copy.
+    loads: Query<&WeaponLoads>,
     weapon_clock: Res<crate::WeaponClock>,
     fixed_time: Res<Time<Fixed>>,
     facets: Query<VolumeFacets>,
@@ -219,21 +241,32 @@ fn update_status_panel(
                 remaining_secs,
                 state.belt_remaining,
             );
+            let rounds = loads
+                .get(root.0)
+                .ok()
+                .and_then(|loads| loads.weapons.get(slot.0))
+                .and_then(|&load| round_line(&weapon.name, &weapon.rounds, load));
             (
                 weapon.name.to_string(),
                 format!("{} {}", weapon.name, status),
+                rounds,
             )
         })
         .collect::<Vec<_>>();
     // Order by weapon name only — not the mutable status text — so rows don't reshuffle as reload
     // state changes; "-" stands in for a tank with no weapons (the world-space block's placeholder).
     weapon_entries.sort_by(|a, b| a.0.cmp(&b.0));
+    let round_lines: String = weapon_entries
+        .iter()
+        .filter_map(|(_, _, rounds)| rounds.as_deref())
+        .map(|line| format!("\n{line}"))
+        .collect();
     let weapon_line = if weapon_entries.is_empty() {
         "-".to_string()
     } else {
         weapon_entries
             .into_iter()
-            .map(|(_, entry)| entry)
+            .map(|(_, entry, _)| entry)
             .collect::<Vec<_>>()
             .join("   ")
     };
@@ -244,7 +277,7 @@ fn update_status_panel(
         .unwrap_or_else(|| "ALIVE".to_string());
 
     *text = Text::new(format!(
-        "{state}\nCrew {alive}/{total}\n{} {}%   Gunner {}%\nWeapons: {}",
+        "{state}\nCrew {alive}/{total}\n{} {}%   Gunner {}%\nWeapons: {}{round_lines}",
         Capability::Drive.label(),
         (drive * 100.0).round() as i32,
         (gunner * 100.0).round() as i32,
@@ -388,5 +421,49 @@ mod tests {
         assert_eq!(weapon_status(AUTO, true, 2.7, 0), "no-fire");
         // Single, mid-reload, fire crew dead: the reload is frozen — must read `no-fire`.
         assert_eq!(weapon_status(SINGLE, true, 1.4, 0), "no-fire");
+    }
+
+    /// The round readout a player steers the selector by: a weapon with a choice names the loaded
+    /// round, and names the selection only while it differs, i.e. while it waits for the next load.
+    /// A mutant that showed the selection as loaded would tell the player a round is chambered
+    /// that the next shot does not fire; a one-round weapon shows no line at all.
+    #[test]
+    fn a_weapon_with_a_choice_names_the_loaded_round_and_a_pending_selection() {
+        let round = |key: &str| WeaponRound::resolve(key).expect("a shipped round");
+        let choice = [round("88mm_AP"), round("88mm_APCR")];
+        let (first, second) = (&choice[0].name, &choice[1].name);
+        assert_eq!(
+            round_line(
+                "Gun",
+                &choice,
+                WeaponLoad {
+                    loaded: 0,
+                    selected: 0
+                }
+            ),
+            Some(format!("Gun round: {first}")),
+        );
+        assert_eq!(
+            round_line(
+                "Gun",
+                &choice,
+                WeaponLoad {
+                    loaded: 0,
+                    selected: 1
+                }
+            ),
+            Some(format!("Gun round: {first}   next: {second}")),
+        );
+        assert_eq!(
+            round_line(
+                "Gun",
+                &choice[..1],
+                WeaponLoad {
+                    loaded: 0,
+                    selected: 0
+                }
+            ),
+            None,
+        );
     }
 }
