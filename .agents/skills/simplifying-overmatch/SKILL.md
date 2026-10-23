@@ -15,8 +15,9 @@ Inlined because every simplification run needs them and the cost of loading them
 commit. Everything else is in the doc.
 
 1. **Never split a file for being large.** `transmission.rs` (~3 065 lines, 33 public items) is
-   deliberately one file. The gate is on **function** length (300, `src/tests/fn_length.rs`),
-   and it is function-not-file *for stated reasons*. Do not add rows to its `ALLOWED` list.
+   deliberately one file. The gate is the function-length lint (`clippy.toml`) — **function**, not
+   file, for the reasons in the standard's §B1. Do not add `#[expect(clippy::too_many_lines)]` to
+   get past it.
 2. **Never open a commit to remove comments.** 23 % of `src/` is comments and 14 % is `///` item
    docs, which are the module *interface*. The applicable rule is about content, not volume: a
    comment states the current invariant, never the edit history.

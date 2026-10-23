@@ -22,7 +22,7 @@ violated guardrail costs a deploy cycle or a silent desync.
 | `.agents/skills/codebase-design/DEEPENING.md` | dependency categories; replace-don't-layer testing |
 | `.agents/skills/improve-codebase-architecture/SKILL.md` | the *discovery* flow for architectural friction; ADR-conflict etiquette |
 | `.agents/skills/writing-great-skills/SKILL.md` | information hierarchy; progressive disclosure; no-op pruning |
-| `src/tests/fn_length.rs` | the 300-line **function** ceiling, and the reasoning for function-not-file |
+| `Cargo.toml` `[lints.clippy]` + `clippy.toml` | the function-length lint (`too_many_lines`) and its threshold; §B1 of this document gives the reasoning for function-not-file |
 | `src/tests/doc_citations.rs` | the doc-rot gate — comments may not cite dead paths or line numbers |
 | `.agents/docs/adr/` | settled decisions. Do not re-litigate; see §C.7 |
 | `.agents/GLOSSARY.md` | domain names. Use these, never invented synonyms |
@@ -68,13 +68,14 @@ only; `vendor/` is never linted). On top of stock clippy — `correctness` (deny
 | `undocumented_unsafe_blocks` | warn | restriction | every `unsafe` block carries a `// SAFETY:` comment |
 | `redundant_clone` | warn | nursery | a clone whose source is never used again |
 | `needless_collect` | warn | nursery | a `collect` feeding a single iteration |
+| `too_many_lines` | warn | pedantic | a function body stays within `clippy.toml`'s threshold (§B1) |
 
 Levels are `warn` so local iteration is never blocked; CI's `-D warnings` makes every one an
 error, as it does every stock warning. `too_many_arguments` (stock `complexity`) is no longer
 allowed crate-wide: each function past its limit either takes a `SystemParam` bundle or an
 argument struct, or carries an `#[expect(clippy::too_many_arguments, reason = "…")]` naming what
 its parameters are. The two nursery lints were enabled on their findings, MEASURED: 17 for
-`redundant_clone`, all real and fixed; 0 for `needless_collect`. `pedantic`, the rest of
+`redundant_clone`, all real and fixed; 0 for `needless_collect`. The rest of `pedantic` and
 `nursery`, `restriction` and `cargo` stay off. (VERIFIED against the clippy lint index — §E.)
 
 **cargo-deny** (`deny.toml`, job `deny`): a vulnerability advisory fails; an unmaintained or yanked
@@ -284,19 +285,23 @@ Each of these has been misapplied before. Getting one wrong does damage.
 `src/track/transmission.rs` is ~3 065 lines with 33 public items and is **deliberately one file**.
 `src/ballistics.rs` is 4 720. `src/net/protocol.rs` is 3 227. **None of these is a finding.**
 
-`src/tests/fn_length.rs`'s module doc settles it in the repo's own words: the gate is on **function**
-length (300 lines) precisely *because* a file gate would fight the deep-module doctrine, and a
-2026-07-28 vendor survey found no model vendor publishes a source-file line limit — every published
-number governs files that are *always in context*, which source files are not. The doc says
-splitting `transmission.rs` "would scatter the drivetrain and manufacture exactly the
-bouncing-between-small-modules friction `improve-codebase-architecture` says to hunt for."
+The gate is on **function** length, not file length, because deep modules are house doctrine:
+splitting `transmission.rs` would scatter the drivetrain and manufacture exactly the
+bouncing-between-small-modules friction `improve-codebase-architecture` says to hunt for. The
+defects that motivated it were function-scale — 1 122 and 1 080 physical lines at nesting depth 6
+and 8 — invisible to any file rule. A 2026-07-28 vendor survey found no published source-file limit:
+every published number governs files that are *always in context*, which source files are not.
+
+The gate is clippy's `too_many_lines` at 200 code lines (comments and blanks not counted), set in
+`clippy.toml`, red under CI's `-D warnings`. A function that must stay over it carries
+`#[expect(clippy::too_many_lines, reason = "…")]` naming why — one does today, a real-UDP scenario
+test.
 
 **"Split this large file" is a wrong answer in this repo.** If a file feels unnavigable, the
 finding is about its module doc or its internal ordering, not its size.
 
-Corollary: a long *function* is fair game up to the gate — and the gate's `ALLOWED` list is short
-by design ("meant to stay SHORT and to shrink"; "I did not want to refactor it is not a reason").
-**Do not add rows to it.** If your simplification would need a new exception row, it is not one.
+Corollary: a long *function* is fair game up to the gate. **Do not add an `#[expect]` to get past
+it.** If your simplification would need one, it is not one.
 
 ### B2. Comment volume is not the problem — and the numbers are counter-intuitive
 
@@ -339,13 +344,12 @@ simplification.** Treat every type named in `WIRE_SURFACE`, and every field reac
 frozen for this brief's purposes. "Tidying" a replicated struct's field order is a protocol change
 wearing a refactor's clothes.
 
-### B4. `src/tests/` and `src/net/tests/` are fourteen gates and tripwires — touch none of them
+### B4. `src/tests/` and `src/net/tests/` are thirteen gates and tripwires — touch none of them
 
 Several look redundant or tautological *on purpose*. Deleting one removes an alarm, not a test.
 
 | file | what it is |
 |---|---|
-| `fn_length.rs` | function-length gate |
 | `doc_citations.rs` | doc-rot gate |
 | `ui_ascii.rs` | font-coverage gate (rendered strings only) |
 | `net_boundary.rs` | nothing outside `net` may name the netcode layer |
@@ -508,7 +512,7 @@ Do not guess. Report it and move to the next item. Automatically a judgement cal
 simplification:
 
 - anything touching a type in `WIRE_SURFACE`, or a replicated component
-- anything that would add a row to `fn_length.rs`'s `ALLOWED`
+- anything that would need `#[expect(clippy::too_many_lines)]`
 - anything contradicting an ADR
 - converting stored state to derived inside `src/net/` or `src/track/`
 - any change to a file in `src/tests/` or `src/net/tests/`, including "fixing" a tripwire that
@@ -547,10 +551,8 @@ position early.
 
 **2. Ousterhout on module size — the house extends him.** He argues for deep classes and against
 classitis but is not specific about line counts. This repo goes further: a gate on **function**
-length and an explicit refusal to gate **file** length. **House wins**, and `src/tests/fn_length.rs`
-gives the reasoning — the actual defects here were function-scale (1 122 and 1 080 lines at nesting
-depth 6 and 8), invisible to any file rule. Where a general principle and a local measurement
-disagree in this repo, the local measurement wins.
+length and an explicit refusal to gate **file** length. **House wins**; §B1 gives the reasoning.
+Where a general principle and a local measurement disagree in this repo, the local measurement wins.
 
 **3. Ousterhout's "depth = implementation lines ÷ interface lines" — explicitly rejected.**
 `codebase-design/SKILL.md` names this in its *Rejected framings*: the ratio rewards padding the
@@ -559,8 +561,8 @@ informally, to argue a module is deep.
 
 **4. "Prefer many small functions" (Clean Code; most linter defaults) — rejected here.** The house
 position is that bouncing between small modules to understand one concept is itself the friction to
-hunt — `improve-codebase-architecture` says so in as many words. **House wins**, with the 300-line
-function gate as the negotiated ceiling, *not* an aspiration to beat.
+hunt — `improve-codebase-architecture` says so in as many words. **House wins**, with the
+function-length lint (§B1) as the negotiated ceiling, *not* an aspiration to beat.
 
 **5. DRY as usually taught — heavily qualified.** The sim/view split (ADR-0014) and the
 client/server split deliberately keep code that *looks* alike but encodes different knowledge.
@@ -587,7 +589,8 @@ inference, not re-fetched.
 `.agents/skills/codebase-design/{SKILL,DEEPENING}.md`;
 `.agents/skills/improve-codebase-architecture/SKILL.md`;
 `.agents/skills/writing-great-skills/SKILL.md`; `.agents/skills/ask-matt/SKILL.md`;
-`src/tests/fn_length.rs`; `src/tests/doc_citations.rs`; the header of every other §B4 file;
+`src/tests/fn_length.rs` (since replaced by the `too_many_lines` lint, §B1);
+`src/tests/doc_citations.rs`; the header of every other §B4 file;
 `Cargo.toml`; `.cargo/config.toml`; `scripts/hooks/pre-push`; `src/net/protocol.rs` (fingerprint
 constants); `src/overlay.rs` and `src/settings/ui.rs` (cursor handling); `vendor/*/OVERMATCH_PATCH.md`.
 All line counts, comment counts, `#[test]` counts, `MEASURED`/`DERIVED` counts, the
