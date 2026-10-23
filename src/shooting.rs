@@ -348,6 +348,8 @@ fn fire(
                 caliber: fired.round.body.caliber,
                 mass: fired.round.body.mass,
                 nose_factor: fired.round.body.nose_factor,
+                penetrator_caliber: fired.round.penetrator.caliber,
+                penetrator_mass: fired.round.penetrator.mass,
                 wound: fired.round.wound,
                 mechanism: weapon.fire_mode.mechanism(),
                 tracer,

@@ -66,6 +66,8 @@ mod tests {
             caliber: 0.0079,
             mass: 0.0118,
             nose_factor: 0.5,
+            penetrator_caliber: 0.0079,
+            penetrator_mass: 0.0118,
             wound: 10.0,
             mechanism: crate::spec::FireMechanism::Automatic,
             tracer: true,

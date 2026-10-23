@@ -505,8 +505,8 @@ mod tests {
     }
 
     /// The reference calibre is the file's: a shape file's value is what the calibration carries,
-    /// and the shipped one is the shipped file's. One that is zero, negative, subnormal or not finite
-    /// is refused at parse naming the field: every cone's strength divides by it.
+    /// and the shipped one is the shipped file's. One that is zero, negative, subnormal or not
+    /// finite is refused at parse naming the field: every cone's strength divides by it.
     #[test]
     fn the_reference_calibre_is_read_from_the_file_and_must_be_positive() {
         let file = |reference: &str| {

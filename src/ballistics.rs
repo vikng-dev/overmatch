@@ -830,13 +830,20 @@ pub struct FireShell {
     pub origin: Vec3,
     pub direction: Dir3,
     pub speed: f32,
-    /// Shell calibre (m), used for overmatch and spall-hole size.
+    /// The whole round's calibre (m): drag and the shell's view read it.
     pub caliber: f32,
-    /// Projectile mass (kg).
+    /// The whole round's mass (kg): drag reads it.
     pub mass: f32,
-    /// Nose factor (dimensionless, `0 < N ≤ 1`), read by the capability law.
+    /// Nose factor (dimensionless, `0 < N ≤ 1`) of the round and its penetrator, read by the
+    /// capability law.
     pub nose_factor: f32,
-    /// Wound rate: reference-mm of dose per metre of chord through a witness (ADR-0040).
+    /// The penetrator's calibre (m) ([`crate::rounds::Round::penetrator`]), no greater than
+    /// `caliber`: what meets the plate reads it — the bound mechanism, the disc, overmatch and the
+    /// cone's hole. The whole round's for a full-calibre round.
+    pub penetrator_caliber: f32,
+    /// The penetrator's mass (kg), no greater than `mass`; the bound mechanism reads it.
+    pub penetrator_mass: f32,
+    /// Crew line rate: reference-mm of dose per metre of chord through a witness (ADR-0040).
     pub wound: f32,
     /// Fire mechanism at the source.
     pub mechanism: crate::spec::FireMechanism,
@@ -857,13 +864,17 @@ pub struct FireShell {
 #[require(ShotDose)]
 pub(crate) struct Projectile {
     velocity: Vec3,
-    /// The round's mechanism, bound at spawn from its fire data and the substance registry
-    /// ([`mechanism::SolidShot::bind`]) — data, never an asset.
+    /// The mechanism of what meets the plate, the round's penetrator, bound at spawn from its fire
+    /// data and the substance registry ([`mechanism::SolidShot::bind`]) — data, never an asset.
+    /// The disc, overmatch, the force law and the cone's hole read its body.
     round: mechanism::SolidShot,
+    /// The whole round's calibre (m): what the shell's view and its impacts are sized by.
+    caliber: f32,
     /// Reference-mm of dose per metre of chord the round's line cuts through a witness (ADR-0040).
     /// Read only by the witness pass; the hard walk never sees it.
     wound: f32,
-    /// Quadratic-drag coefficient (1/m), from the shell's sectional density at spawn (see [`drag_k`]).
+    /// Quadratic-drag coefficient (1/m), from the whole round's sectional density at spawn (see
+    /// [`drag_k`]).
     drag_k: f32,
     /// The basis the §13.5 sample ring is laid out in — SIM state, not a view detail: it decides
     /// where the disc's rays go and therefore what the shell hits.
@@ -889,13 +900,14 @@ pub(crate) struct Projectile {
 }
 
 impl Projectile {
-    /// The round's caliber (m) — the same value [`Impact::caliber`] carries, read by view code that
-    /// sizes an effect off a shell in flight rather than off a landed impact.
+    /// The whole round's caliber (m) — the same value [`Impact::caliber`] carries, read by view
+    /// code that sizes an effect off a shell in flight rather than off a landed impact.
     pub(crate) fn caliber(&self) -> f32 {
-        self.round.body().caliber
+        self.caliber
     }
 
-    /// What the capability law reads off this round.
+    /// What meets the plate: the penetrator's body, which the capability law, the disc and
+    /// overmatch read.
     fn body(&self) -> RoundBody {
         self.round.body()
     }
@@ -917,6 +929,7 @@ impl Projectile {
                 caliber,
                 nose_factor: 0.3,
             }),
+            caliber,
             wound: 30.0,
             drag_k: 0.0,
             disc: walk::DiscFrame {
@@ -1569,14 +1582,16 @@ fn on_fire_shell(
     // drawn (a non-tracer MG round still bounces, ricochets, and lands; dead-reckoned streaks were
     // rejected). What the round IS rides along as [`TracerRound`]; whether anything is DRAWN for it is
     // decided by `ballistics::view`, which a server never mounts.
+    let penetrator = RoundBody {
+        mass: fire.penetrator_mass,
+        caliber: fire.penetrator_caliber,
+        nose_factor: fire.nose_factor,
+    };
     let shell_base = (
         Projectile {
             velocity,
-            round: bound(RoundBody {
-                mass: fire.mass,
-                caliber: fire.caliber,
-                nose_factor: fire.nose_factor,
-            }),
+            round: bound(penetrator),
+            caliber: fire.caliber,
             wound: fire.wound,
             drag_k: drag,
             // From the BORE, not from the post-catch-up travel direction: a shell reconstructed with
@@ -1599,14 +1614,7 @@ fn on_fire_shell(
         SpallMarks::default(),
         ShellReadout {
             speed,
-            capability: capability(
-                RoundBody {
-                    mass: fire.mass,
-                    caliber: fire.caliber,
-                    nose_factor: fire.nose_factor,
-                },
-                speed,
-            ),
+            capability: capability(penetrator, speed),
         },
         Transform::from_translation(position).looking_to(travel, Vec3::Y),
     );
@@ -2444,7 +2452,7 @@ fn resume_from_catch_up(
     if let Ok(direction) = Dir3::new(caught_up.velocity) {
         if let Some(normal) = lift {
             shell.transform.translation += normal.normalize_or_zero()
-                * resolve::disc_radius(shell.projectile.caliber())
+                * resolve::disc_radius(shell.projectile.body().caliber)
                 + direction * MARCH_EPS;
         }
         shell.transform.look_to(direction, Vec3::Y);
@@ -2580,7 +2588,7 @@ fn march_shell_step(
     // state that must not read a view detail.
     let previous = Dir3::new(shell.projectile.velocity).unwrap_or(dir);
     let round = shell.projectile.round;
-    let radius = resolve::disc_radius(shell.projectile.caliber());
+    let radius = resolve::disc_radius(round.body().caliber);
     let context = resolve::ResolveContext {
         world,
         colliders,
@@ -3866,14 +3874,27 @@ mod march_tests {
     /// main-gun value `rounds.ron` tunes, a labelled fixture number.
     pub(super) const FIXTURE_WOUND: f32 = 30.0;
 
-    /// A fixture round's flight state and its initial readout, both from one body, so the readout
-    /// the march starts from is the capability of the round it marches.
+    /// A full-calibre fixture round's flight state and its initial readout: [`fixture_round_with`]
+    /// of a round that meets the plate as itself.
     pub(super) fn fixture_round(body: RoundBody, velocity: Vec3) -> (Projectile, ShellReadout) {
+        fixture_round_with(body, body, velocity)
+    }
+
+    /// The flight state and initial readout of a fixture round that flies as `body` and meets the
+    /// plate as `penetrator`, built as `on_fire_shell` builds them: drag from the body, the
+    /// mechanism and the readout from the penetrator, so the readout the march starts from is the
+    /// capability of what it marches.
+    pub(super) fn fixture_round_with(
+        body: RoundBody,
+        penetrator: RoundBody,
+        velocity: Vec3,
+    ) -> (Projectile, ShellReadout) {
         let speed = velocity.length();
         (
             Projectile {
                 velocity,
-                round: bound(body),
+                round: bound(penetrator),
+                caliber: body.caliber,
                 wound: FIXTURE_WOUND,
                 drag_k: drag_k(body.caliber, body.mass),
                 // Anchored on THIS round's fire direction, exactly as `on_fire_shell` would.
@@ -3882,7 +3903,7 @@ mod march_tests {
             },
             ShellReadout {
                 speed,
-                capability: capability(body, speed),
+                capability: capability(penetrator, speed),
             },
         )
     }
@@ -4325,6 +4346,8 @@ mod march_tests {
             caliber: FIXTURE_88.caliber,
             mass: FIXTURE_88.mass,
             nose_factor: FIXTURE_88.nose_factor,
+            penetrator_caliber: FIXTURE_88.caliber,
+            penetrator_mass: FIXTURE_88.mass,
             wound: 30.0,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: None,
@@ -4365,6 +4388,8 @@ mod march_tests {
             caliber: FIXTURE_88.caliber,
             mass: FIXTURE_88.mass,
             nose_factor: FIXTURE_88.nose_factor,
+            penetrator_caliber: FIXTURE_88.caliber,
+            penetrator_mass: FIXTURE_88.mass,
             wound: 30.0,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: Some(ShotSource {
@@ -4384,6 +4409,61 @@ mod march_tests {
             Some(shot),
             "Shot is present in the Projectile's initial spawn bundle",
         );
+    }
+
+    /// A sub-calibre round flies as its whole body and meets the plate as its penetrator: the shell
+    /// [`on_fire_shell`] spawns from a fire whose penetrator differs from its body binds the
+    /// penetrator's mechanism (the disc, overmatch and the cone's hole read its calibre), starts
+    /// its readout at the penetrator's capability at the muzzle, drags as the whole body, and is
+    /// sized for the view as the whole body. Every role's shell of a sub-calibre round is spawned
+    /// here. The core is fixture data inside the 88 fixture body. A mutant that binds the body, or
+    /// drags the penetrator, fails here.
+    #[test]
+    fn a_fired_shell_flies_as_its_body_and_meets_the_plate_as_its_penetrator() {
+        const CORE: RoundBody = RoundBody {
+            mass: 2.0,
+            caliber: 0.04,
+            nose_factor: FIXTURE_88.nose_factor,
+        };
+        const SPEED: f32 = 900.0;
+        let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, -50.0));
+        app.add_observer(on_fire_shell);
+        app.world_mut().trigger(FireShell {
+            origin: Vec3::new(0.0, 2.0, 2.0),
+            direction: Dir3::NEG_Z,
+            speed: SPEED,
+            caliber: FIXTURE_88.caliber,
+            mass: FIXTURE_88.mass,
+            nose_factor: FIXTURE_88.nose_factor,
+            penetrator_caliber: CORE.caliber,
+            penetrator_mass: CORE.mass,
+            wound: FIXTURE_WOUND,
+            mechanism: crate::spec::FireMechanism::Single,
+            shooter: None,
+            tracer: true,
+            shot_origin: FireShellOrigin::Local,
+            catch_up_ticks: 0,
+            shot: None,
+        });
+        app.world_mut().flush();
+
+        let world = app.world_mut();
+        let mut shells = world.query::<(&Projectile, &ShellReadout)>();
+        let (projectile, readout) = shells.single(world).expect("one shell is born");
+        assert_eq!(
+            projectile.body(),
+            CORE,
+            "the mechanism binds the penetrator"
+        );
+        assert_eq!(readout.capability, capability(CORE, SPEED));
+        assert_ne!(readout.capability, capability(FIXTURE_88, SPEED));
+        assert_eq!(
+            projectile.drag_k,
+            drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
+            "the whole round flies"
+        );
+        assert_ne!(projectile.drag_k, drag_k(CORE.caliber, CORE.mass));
+        assert_eq!(projectile.caliber(), FIXTURE_88.caliber);
     }
 
     /// A FRESH unkeyed catch-up (≤ STALE_FIRE_TICKS) has no authority outcome to await, so its
@@ -4445,6 +4525,8 @@ mod march_tests {
             caliber: FIXTURE_88.caliber,
             mass: FIXTURE_88.mass,
             nose_factor: FIXTURE_88.nose_factor,
+            penetrator_caliber: FIXTURE_88.caliber,
+            penetrator_mass: FIXTURE_88.mass,
             wound: 30.0,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: None,
@@ -4557,6 +4639,8 @@ mod march_tests {
             caliber: FIXTURE_88.caliber,
             mass: FIXTURE_88.mass,
             nose_factor: FIXTURE_88.nose_factor,
+            penetrator_caliber: FIXTURE_88.caliber,
+            penetrator_mass: FIXTURE_88.mass,
             wound: 30.0,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: None,

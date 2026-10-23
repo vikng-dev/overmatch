@@ -577,6 +577,7 @@ fn spawn_shot_round(
             Projectile {
                 velocity: direction * speed,
                 round: bound(body),
+                caliber,
                 wound,
                 drag_k: drag_k(caliber, mass),
                 disc: walk::DiscFrame::anchored(direction).expect("a shot fires along a real axis"),
@@ -605,7 +606,8 @@ fn spawn_shot_round(
 }
 
 /// `(caliber, mass, nose_factor, speed, wound)` of the round the bound tank's main gun names in its
-/// authored spec sheet.
+/// authored spec sheet. A full-calibre round: the casts' input digest carries one body, so a
+/// sub-calibre default round is refused here rather than pinned as its whole body.
 fn main_gun_round() -> (f32, f32, f32, f32, f32) {
     let spec: crate::spec::TankSpec =
         ron::de::from_str(include_str!("../../assets/tiger_1/tiger_1.tank.ron"))
@@ -613,6 +615,10 @@ fn main_gun_round() -> (f32, f32, f32, f32, f32) {
     let round = spec.weapons["MainGun"]
         .resolved_round()
         .unwrap_or_else(|err| panic!("weapon `MainGun`: {err}"));
+    assert_eq!(
+        round.penetrator, round.body,
+        "the field casts pin a full-calibre round"
+    );
     (
         round.body.caliber,
         round.body.mass,

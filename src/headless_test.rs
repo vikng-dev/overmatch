@@ -591,6 +591,8 @@ fn a_replica_coax_shell_clears_the_shooters_mantlet() {
         caliber: 0.0079,
         mass: 0.0118,
         nose_factor: 0.5,
+        penetrator_caliber: 0.0079,
+        penetrator_mass: 0.0118,
         wound: 10.0,
         mechanism: crate::spec::FireMechanism::Automatic,
         tracer: true,
@@ -1500,6 +1502,8 @@ fn a_main_gun_round_damages_a_tank_on_the_shipped_map() {
         caliber: 0.088,
         mass: 10.2,
         nose_factor: 0.3,
+        penetrator_caliber: 0.088,
+        penetrator_mass: 10.2,
         wound: 30.0,
         mechanism: crate::spec::FireMechanism::Single,
         shooter: Some(ShotSource {

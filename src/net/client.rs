@@ -3377,14 +3377,14 @@ mod tests {
     }
 
     /// A FIRE BINDS ITS ROUND FROM THE RECEIVER'S OWN TANK DATA: the event names the round by its
-    /// index in the shooter's weapon list, and the reconstructed shell flies that round with the
-    /// index on its source. An index the receiver's list lacks presents nothing and waits like a
-    /// missing shooter. A mutant that bound the default round, or fell back to it, would draw a
-    /// shell the authority never fired.
+    /// index in the shooter's weapon list, and the reconstructed shell flies that round, body and
+    /// penetrator, with the index on its source. An index the receiver's list lacks presents
+    /// nothing and waits like a missing shooter. A mutant that bound the default round, or fell
+    /// back to it, or dropped the penetrator, would draw a shell the authority never fired.
     #[test]
     fn a_fire_binds_the_round_its_index_names_in_the_shooter_s_weapon() {
         #[derive(Resource, Default)]
-        struct Bound(Vec<(u8, [f32; 5])>);
+        struct Bound(Vec<(u8, [f32; 7])>);
 
         fn bind(fire: On<FireShell>, mut bound: ResMut<Bound>) {
             if fire.shot_origin == FireShellOrigin::Reconstructed
@@ -3397,6 +3397,8 @@ mod tests {
                         fire.caliber,
                         fire.mass,
                         fire.nose_factor,
+                        fire.penetrator_caliber,
+                        fire.penetrator_mass,
                         fire.wound,
                     ],
                 ));
@@ -3426,6 +3428,8 @@ mod tests {
                     named.body.caliber,
                     named.body.mass,
                     named.body.nose_factor,
+                    named.penetrator.caliber,
+                    named.penetrator.mass,
                     named.wound,
                 ],
             )],

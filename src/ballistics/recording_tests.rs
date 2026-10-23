@@ -194,6 +194,8 @@ fn fire_along(
         caliber: FIXTURE_88.caliber,
         mass: FIXTURE_88.mass,
         nose_factor: FIXTURE_88.nose_factor,
+        penetrator_caliber: FIXTURE_88.caliber,
+        penetrator_mass: FIXTURE_88.mass,
         wound: 30.0,
         mechanism,
         shooter: Some(ShotSource {

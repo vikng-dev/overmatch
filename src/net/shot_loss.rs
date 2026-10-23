@@ -105,6 +105,8 @@ fn scripted_shell(
         caliber: body.caliber,
         mass: body.mass,
         nose_factor: body.nose_factor,
+        penetrator_caliber: body.caliber,
+        penetrator_mass: body.mass,
         wound,
         mechanism,
         tracer: true,
@@ -124,6 +126,7 @@ fn arm_fixture_weapons(add: On<Add, NetTank>, mut commands: Commands) {
             let mut fixture = WeaponRound::resolve("88mm_AP").expect("a shipped round");
             fixture.round.muzzle_speed = speed;
             fixture.round.body = body;
+            fixture.round.penetrator = body;
             fixture.round.wound = wound;
             fixture
         })

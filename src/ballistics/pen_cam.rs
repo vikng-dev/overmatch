@@ -16,7 +16,7 @@ use bevy::time::TimeUpdateStrategy;
 use serde::Deserialize;
 
 use super::fuzz::{PROBE_TANK_AT, ProbeTank, probe_world, probe_world_posed};
-use super::march_tests::{FIXTURE_88, fixture_round};
+use super::march_tests::{FIXTURE_88, fixture_round, fixture_round_with};
 use super::*;
 use crate::damage::VolumeOf;
 use crate::damage_cam::record::{self, ShotFacts, StruckTank};
@@ -174,7 +174,7 @@ fn record_edited(
     let origin = PROBE_TANK_AT + scenario.from;
     let direction = (scenario.toward - scenario.from).normalize();
     let struck = StruckTank::capture(app.world_mut(), tank).expect("the tank has a rig");
-    let (mut projectile, readout) = fixture_round(body, direction * speed);
+    let (mut projectile, readout) = fixture_round_with(body, round.penetrator, direction * speed);
     projectile.wound = round.wound;
     let shell = app
         .world_mut()

@@ -51,14 +51,13 @@
                 March 1953, pp.439-440. The rigid regime reads no core fact")),
             nose: (Ogive(crh: 1.0), Tuned("labelled fixture value: the Pzgr. 39's blunt ogive of
                 1 crh")),
-            // Potency is provisional: the strength law reads mass, calibre and nose and has no
-            // penetrator term yet (decision #4 in
-            // .agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md,
-            // the hole-size term from penetrator mass and calibre), so at the muzzle this round
-            // reads about 112 reference-mm against the Pzgr. 39's about 115 (DERIVED from the
-            // force law with the shipped RHA facts), the reverse of the record (Jentz & Doyle:
-            // more at the muzzle, less behind the plate). Until that term lands, selecting it
-            // buys muzzle speed alone.
+            // The round flies as its whole body and meets the plate as its core (`penetrator`
+            // below): at the muzzle the core reads about 180 reference-mm against the Pzgr. 39's
+            // about 115 (DERIVED from the force law with the shipped RHA facts; read as its whole
+            // body it would be about 112), a ratio of 1.57 against the record's about 1.4 (Jentz
+            // & Doyle: more at the muzzle, less behind the plate), and its cone's hole term is
+            // (35.7 / 88)² = 0.165 (DERIVED). Still provisional: the core's nose is the round's,
+            // a labelled fixture, and the rigid rule reads no fact of the core.
             mass: (7.3, Measured("Jentz & Doyle, Tiger I Heavy Tank 1942-45, Osprey New
                 Vanguard 5 (1993), p.17")),
             caliber: (0.088, Measured("the gun's nominal 8.8 cm calibre designation")),

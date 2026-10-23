@@ -869,6 +869,9 @@ fn fire(
         caliber: shot.caliber,
         mass: shot.mass,
         nose_factor: shot.nose_factor,
+        // The study shot is full calibre: it meets the plate as itself.
+        penetrator_caliber: shot.caliber,
+        penetrator_mass: shot.mass,
         wound: shot.wound,
         mechanism: crate::spec::FireMechanism::Single,
         // A single sighting round — mark it a tracer. Moot for the sandbox's own visuals (it retains
