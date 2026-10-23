@@ -1,4 +1,4 @@
-// The round registry: every round a weapon can fire, keyed by the name a weapon's `round` names.
+// The round registry: every round a weapon can fire, keyed by the names a weapon's `rounds` list.
 // Read by `src/rounds.rs`, embedded and parsed once, validated at parse; a round is bound to its
 // mechanism at spawn from this data alone.
 //
@@ -28,14 +28,30 @@
                 body, the class Q7 recommends for the large round; GunSteel carries that class's
                 facts. The rigid regime reads no core fact")),
             nose: (Ogive(crh: 1.0), Tuned("labelled fixture value: a blunt ogive of 1 crh")),
-            mass: (10.2, Unknown("no source recorded in the repo; settled by a cited munition
-                table")),
+            mass: (10.2, Measured("Jentz & Doyle, Tiger I Heavy Tank 1942-45, Osprey New
+                Vanguard 5 (1993), p.17")),
             caliber: (0.088, Measured("the gun's nominal 8.8 cm calibre designation")),
-            muzzle_speed: (773.0, Unknown("no source recorded in the repo; settled by a cited
-                firing table")),
+            muzzle_speed: (773.0, Measured("Jentz & Doyle, Tiger I Heavy Tank 1942-45, Osprey New
+                Vanguard 5 (1993), p.17")),
             wound: (30.0, Tuned("a main-gun round lethal to a 30 HP crewman at ~10 cm of chord
                 (3 / 0.10), so a clean pass through a station kills and a graze of its edge wounds
                 (crew-model decision 2026-10-17)")),
+        ),
+        "88mm_APCR": (
+            name: ("8.8 cm Pzgr. 40", Measured("the 8.8 cm KwK 36's APCR round; Jentz & Doyle,
+                Tiger I Heavy Tank 1942-45, Osprey New Vanguard 5 (1993), p.17")),
+            core: ("GunSteel", Tuned("placeholder until a tungsten-carbide substance lands: the
+                round's 1.93 kg core is tungsten carbide (TM 9-1985-3), which materials.ron does
+                not carry. The rigid regime reads no core fact")),
+            nose: (Ogive(crh: 1.0), Tuned("labelled fixture value: the Pzgr. 39's blunt ogive of
+                1 crh")),
+            mass: (7.3, Measured("Jentz & Doyle, Tiger I Heavy Tank 1942-45, Osprey New
+                Vanguard 5 (1993), p.17")),
+            caliber: (0.088, Measured("the gun's nominal 8.8 cm calibre designation")),
+            muzzle_speed: (930.0, Measured("Jentz & Doyle, Tiger I Heavy Tank 1942-45, Osprey New
+                Vanguard 5 (1993), p.17")),
+            wound: (30.0, Tuned("the Pzgr. 39's main-gun rate: a 30 HP crewman's pool is emptied
+                at ~10 cm of chord (3 / 0.10)")),
         ),
         "7.9mm_AP": (
             name: ("7.92 mm S.m.K.", Measured("Spitzgeschoss mit Kern, the German 7.92 mm
