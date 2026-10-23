@@ -13,8 +13,9 @@
 //! (no trig in the pose). The ray set is laid out in tank-local metres from the tank's armour
 //! bounds and each damageable box's bounds, read at spawn pose:
 //!
-//! - `cone`: spall cones of the shipped shape ([`spall_cone::ConeShape`]) from interior origins,
-//!   each direction carrying its profile's share of a fixture on-axis strength;
+//! - `cone`: spall cones of the shipped shape spread by the ball at a fixture ratio
+//!   ([`spall_cone::ConeShape::spread`]) from interior origins, each direction carrying its weight
+//!   times a fixture strength;
 //! - `lattice`: a grid of slightly off-axis rays into each face of the bounds (crosses seams);
 //! - `graze`: rays skimming the four sides and the top at shallow inward angles;
 //! - `box`: rays aimed at each damageable box's centre from two quadrants.
@@ -22,10 +23,10 @@
 //! and, at spawn pose in a fresh world each, `shot`: the tank's own main-gun round fired through the
 //! real march along fixture lines ([`SHOTS`]), so the pin covers a whole shot end to end — body-exit
 //! detection, the mechanism's spends and speeds, each cone's strength and axis, and its walks. A shot
-//! record digests every penetration event, every cone (origin, axis, half-angle; its source's spend,
-//! entry and exit speeds and strength `S`, each as raw bits, so a source parameter that moves no
-//! direction's end and no HP still moves the record; and each direction's end and whether it
-//! dosed), and every named box's HP points after the shot.
+//! record digests every penetration event, every cone (origin, axis, field, half-angle; its
+//! source's spend, entry and exit speeds and strength `S`, each as raw bits, so a source parameter
+//! that moves no direction's end and no HP still moves the record; and each direction's end and
+//! whether it dosed), and every named box's HP points after the shot.
 //!
 //! Each ray goes through two paths:
 //!
@@ -70,7 +71,7 @@ use bevy::ecs::system::RunSystemOnce;
 use bevy::time::TimeUpdateStrategy;
 
 use super::fuzz::{PROBE_TANK_AT, ProbeTank, probe_world};
-use super::spall_cone::ConeShape;
+use super::spall_cone::{ConeShape, FieldDescriptor};
 use super::*;
 
 /// The line pass's disc calibre (m), wound rate (reference-mm per metre) and reach (m): fixture
@@ -80,7 +81,7 @@ const LINE_WOUND: f32 = 30.0;
 const LINE_REACH: f32 = 20.0;
 
 /// The digest of every line of `field_casts.pinned`, MEASURED on macOS arm64 (the test profile).
-const PINNED_TOTAL: u64 = 0xab07_e64c_4349_8e0c;
+const PINNED_TOTAL: u64 = 0x1aec_567f_0e87_b79a;
 
 const PINNED: &str = include_str!("field_casts.pinned");
 
@@ -101,8 +102,12 @@ const SHOTS: [(&str, Vec3, Vec3); 6] = [
     ("right-rear", Vec3::new(6.0, 1.3, 1.0), Vec3::NEG_X),
 ];
 
-/// Fixture on-axis strength (reference-mm) of every ray: fixture data.
+/// Fixture strength `S` (reference-mm): a lattice, graze or box ray carries it whole, a cone
+/// direction `S·f_k`. Fixture data.
 const STRENGTH: f32 = 30.0;
+
+/// The `cone` family's field ratio `λ` (a 26.1° cone, DERIVED): fixture data.
+const CONE_RATIO: f32 = 2.27;
 
 /// 64-bit FNV-1a over bytes. Stable by definition: offset basis `0xcbf29ce484222325`, prime
 /// `0x100000001b3`.
@@ -186,8 +191,10 @@ fn rays(layout: &Layout, pose: Pose) -> Vec<WorldRay> {
     let dir_world = |d: Vec3| Dir3::new(pose.rotation * d).expect("fixture direction is nonzero");
     let center = (layout.lo + layout.hi) * 0.5;
     let half = (layout.hi - layout.lo) * 0.5;
-    let shape = ConeShape::shipped();
-    let weight = 1.0 / shape.directions_count() as f32;
+    let spread = ConeShape::shipped()
+        .spread(FieldDescriptor::ball(CONE_RATIO))
+        .expect("the fixture ratio lies in the ball's domain");
+    let weight = 1.0 / spread.directions_count() as f32;
     let mut out = Vec::new();
 
     // cone: 3 axes × 2 sides × 2 lateral offsets, each a cone pointing inward.
@@ -198,7 +205,7 @@ fn rays(layout: &Layout, pose: Pose) -> Vec<WorldRay> {
                 let origin =
                     center + axis(a) * (s * 0.8 * half[a]) + b * (k * 0.35 * half[(a + 1) % 3]);
                 let axis_local = -s * axis(a) + 0.2 * k * b + 0.1 * d;
-                for (n, (dir, profile)) in shape.directions(dir_world(axis_local)).enumerate() {
+                for (n, (dir, profile)) in spread.directions(dir_world(axis_local)).enumerate() {
                     out.push(WorldRay {
                         label: format!("{}/cone/{a}{si}{ki}/{n:02}", pose.label),
                         origin: to_world(origin),
@@ -681,6 +688,9 @@ fn shot(label: &str, local_origin: Vec3, local_direction: Vec3) -> Record {
         bits3(&mut output, cone.origin);
         output.push(' ');
         bits3(&mut output, Vec3::from(cone.axis));
+        output.push(' ');
+        let _ = write!(output, "{:?} ", cone.field.law);
+        bits(&mut output, cone.field.ratio);
         output.push(' ');
         bits(&mut output, cone.half_angle);
         for value in [cone.spend, cone.entry_speed, cone.exit_speed, cone.strength] {

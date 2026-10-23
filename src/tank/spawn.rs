@@ -733,11 +733,15 @@ fn insert_ballistic_volumes(
                     .as_ref()
                     .expect("grouped by substance");
                 match resolved.matter {
-                    Matter::Hard { factor } => {
+                    Matter::Hard {
+                        factor,
+                        debris_ratio,
+                    } => {
                         entity.insert(BallisticVolume {
                             material: VolumeMaterial {
                                 substance: resolved.id,
                                 factor,
+                                debris_ratio,
                             },
                             substance: (*substance).to_owned(),
                         });
@@ -826,12 +830,17 @@ fn insert_ballistic_volumes(
                             material: {
                                 let resolved =
                                     primitive.substance.as_ref().expect("grouped by substance");
-                                let Matter::Hard { factor } = resolved.matter else {
+                                let Matter::Hard {
+                                    factor,
+                                    debris_ratio,
+                                } = resolved.matter
+                                else {
                                     unreachable!("L2.WITNESS_ROLE: a witness node is one substance")
                                 };
                                 VolumeMaterial {
                                     substance: resolved.id,
                                     factor,
+                                    debris_ratio,
                                 }
                             },
                             substance: (*substance).to_owned(),

@@ -1,36 +1,43 @@
-//! The spall cone's shape — its half-angle, its axis rule, the directions it is sampled by, its
-//! profile and how a direction passes through what it meets — and its calibration, the field's HP
-//! points per reference-mm ([`hp_per_reference_mm`]) and the calibre that rate was set against
+//! The spall cone's shape — its axis rule, the directions it is sampled by and how a direction
+//! passes through what it meets —, the field law that weights those directions and sets the
+//! cone's half-angle ([`FieldDescriptor`]), and the field's calibration, its HP points per
+//! reference-mm ([`hp_per_reference_mm`]) and the calibre that rate was set against
 //! ([`reference_calibre`]), read from `assets/ballistics/spall_cone.ron`.
 //! The law the shape serves — strength, profile, shadowing, dose — is design doc §5
 //! (`.agents/docs/design/armor-penetration-and-damage.md`); the throw that applies it is
 //! `throw_spall_cone` in the parent module, and a world may throw another shape ([`SpallLaw`]).
 //!
-//! # Profiles and passages
+//! # The field law
 //!
-//! The shipped law is [`Profile::Flat`] and [`Passage::FirstSolid`] (design doc §5); the others are
-//! kept as data-selectable dials (playtest fork F6). [`Profile::Flat`] carries `S/2` along every
-//! direction; [`Profile::Linear`] carries `S·f_k` with `f_k` below, the same emitted total
-//! weighted toward the axis.
+//! A cone is described by a law and one shape number, its ratio `λ` ([`FieldDescriptor`]). Under
+//! the one law, [`FieldLaw::Ball`], the share of the cone's emission inside polar angle `θ` of its
+//! axis is `F(μ) = 1 − μ·D^m`, `μ = cos θ`, `D = √(1 − λ²(1 − μ²))`, `m` = [`BALL_EXPONENT`]: the
+//! field is brightest on the axis and falls to zero at the rim `α = asin(1/λ)`. A plate exit's `λ`
+//! is its rear layer's substance's (`crate::substances::HardSubstance::debris_ratio`), so the
+//! half-angle is the exit material's. The passage stays a data-selectable dial (playtest fork F6):
+//! the shipped [`Passage::FirstSolid`] and the kept [`Passage::Partial`].
 //!
 //! # Directions
 //!
-//! `N` directions in equal-solid-angle strata: direction `k` sits at `μ_k = cos θ_k =
-//! 1 − (1 − cos α)(k + ½)/N`, the stratum's midpoint in `cos θ`, at golden-angle azimuth `φ_k =
-//! k·π(3 − √5)`, and stands for `1/N` of the cone's solid angle. Its linear profile weight is
-//! `f_k = (μ_k − cos α)/(1 − cos α)`, so a cone of on-axis strength `S` sends `S·f_k` along it, and
-//! the emitted total `(1/N) Σ S·f_k` is `S/2` at every `N` (the midpoint rule is exact on a profile
-//! linear in `cos θ`); the flat profile's `f_k = ½` emits the same total.
+//! `N` directions in equal-solid-angle strata: with `w = 1 − cos α`, direction `k` sits at
+//! `μ_k = 1 − w(k + ½)/N`, the stratum's midpoint in `cos θ`, at golden-angle azimuth
+//! `φ_k = k·π(3 − √5)`, and stands for `1/N` of the cone's solid angle. Its weight is its stratum's
+//! exact share of the emission, `f_k = (N/2)[F(e_{k+1}) − F(e_k)]` over the stratum's edges
+//! `e_j = 1 − w·j/N`, so a cone of strength `S` sends `S·f_k` along it, and the emitted total
+//! `(1/N) Σ S·f_k` telescopes to `S/2` at every `N`.
 //!
 //! # Determinism
 //!
-//! The strata are built once, at parse, in f64 with `libm`'s `cos`/`sin` and IEEE `sqrt`, then cast
-//! to f32: the platform's own `sin`/`cos` are not the same on every shipped target. Placing a
-//! stratum on an axis is IEEE f32 arithmetic alone (scalar glam, no fused operations), so a cone's
-//! directions are the same bits on every target for the same axis.
+//! The azimuths are built once per shape, at parse, in f64 with `libm`'s `cos`/`sin`, and kept in
+//! f64: the platform's own `sin`/`cos` are not the same on every shipped target. A cone's `μ_k`,
+//! `sin θ_k` and `f_k` are built from its `λ` in f64 with IEEE `+`, `−`, `×`, `/` and `sqrt` alone,
+//! each correctly rounded, then cast to f32, so a decoder on any target rebuilds the same bits from
+//! the same descriptor; its half-angle is `libm`'s `asin`. Placing a stratum on an axis is IEEE f32
+//! arithmetic alone (scalar glam, no fused operations), so a cone's directions are the same bits on
+//! every target for the same axis.
 
 use bevy::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::provenance::Sourced;
 
@@ -38,21 +45,120 @@ use crate::provenance::Sourced;
 /// data, synchronously).
 const SPALL_CONE_RON: &str = include_str!("../../assets/ballistics/spall_cone.ron");
 
-/// The share of the on-axis strength `S` a cone emits in total, `(1/N) Σ f_k`, for every profile:
-/// the midpoint rule's exact value on the linear profile, and the flat profile's weight. Every
-/// shape is validated against it at parse.
+/// The share of the strength `S` a cone emits in total, `(1/N) Σ f_k`, under every law: a law's
+/// stratum shares sum to its whole emission, 1, and `f_k` is `N/2` of a share. Every spread is
+/// validated against it.
 pub(crate) const EMITTED_SHARE: f32 = 0.5;
+
+/// The ball law's exponent `m`: sideways debris speeds spread evenly through a ball, from zero to
+/// the greatest, give `F(μ) = 1 − μ·D³`. A constant of the law, not data: another `m` is another
+/// law.
+pub(crate) const BALL_EXPONENT: u32 = 3;
 
 /// The golden angle `π(3 − √5)` (rad): the azimuth step between successive directions.
 const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653;
 
-/// How a cone's strength is spread over its directions.
-#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Profile {
-    /// `(cos θ − cos α)/(1 − cos α)` of the on-axis strength: greatest on the axis, zero at the rim.
-    Linear,
-    /// Half the on-axis strength along every direction.
-    Flat,
+/// How a field's strength is spread over its directions, and how wide it is.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FieldLaw {
+    /// Sideways debris speeds uniform in a ball about the forward speed, the greatest `1/λ` of
+    /// it: share inside `θ` `F(μ) = 1 − μ·D^m`, `m` = [`BALL_EXPONENT`], rim `α = asin(1/λ)`;
+    /// brightest on the axis, zero at the rim.
+    Ball,
+}
+
+impl FieldLaw {
+    /// Every law, in id order.
+    pub(crate) const ALL: [FieldLaw; 1] = [FieldLaw::Ball];
+}
+
+/// A field's law and its one shape number: what a record and the wire carry per cone. With the
+/// shot vocabulary's [`ConeShape`] it rebuilds the cone's directions and weights
+/// ([`ConeShape::spread`]).
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
+pub struct FieldDescriptor {
+    pub law: FieldLaw,
+    /// `λ`: the debris's forward speed over its greatest sideways speed; the cone's half-angle is
+    /// `asin(1/λ)`. The representation admits `λ < 1`, a field over the whole sphere; the ball's
+    /// domain is `λ ≥ 1`, a plate exit's (`α ≤ 90°`).
+    pub ratio: f32,
+}
+
+/// The ball law's terms for one ratio: `λ²` and the cap's depth `w = 1 − cos α`.
+#[derive(Clone, Copy, Debug)]
+struct BallTerms {
+    l2: f64,
+    w: f64,
+}
+
+impl BallTerms {
+    /// The share of the emission inside the cone of depth `t = 1 − cos θ` about the axis,
+    /// `1 − μ·D^m`, `D² = 1 − λ²·t(2 − t)` (`= 1 − λ²(1 − μ²)`, without the cancellation), held
+    /// at zero past the rim. `D^m` is `m` IEEE products.
+    fn share(&self, t: f64, exponent: u32) -> f64 {
+        let d = (1.0 - self.l2 * (t * (2.0 - t))).max(0.0).sqrt();
+        1.0 - (1.0 - t) * (0..exponent).fold(1.0, |power, _| power * d)
+    }
+}
+
+impl FieldDescriptor {
+    /// The ball law at ratio `ratio`.
+    pub(crate) fn ball(ratio: f32) -> Self {
+        Self {
+            law: FieldLaw::Ball,
+            ratio,
+        }
+    }
+
+    /// The law's terms, refusing a descriptor outside its domain: a ratio that is not finite, a
+    /// ratio below 1 (a full sphere, which the APHE burst slice adds), and a cone so narrow that
+    /// `1 − w`, the rim's `cos α`, rounds to 1 (`λ` above about 10⁸, DERIVED). Names the violation.
+    fn terms(&self) -> Result<BallTerms, String> {
+        let FieldLaw::Ball = self.law;
+        let lambda = self.ratio as f64;
+        if !lambda.is_finite() {
+            return Err(format!("a field's ratio must be finite (got {lambda})"));
+        }
+        if lambda < 1.0 {
+            return Err(format!(
+                "a field's ratio below 1 (got {lambda}) throws over the whole sphere; the APHE \
+                 burst slice adds it, and a plate exit's cone has a ratio of at least 1"
+            ));
+        }
+        let l2 = lambda * lambda;
+        let w = 1.0 / (l2 * (1.0 + (1.0 - 1.0 / l2).sqrt()));
+        if 1.0 - w >= 1.0 {
+            return Err(format!(
+                "a field of ratio {lambda} is narrower than the law resolves: its rim's cos α \
+                 rounds to 1"
+            ));
+        }
+        Ok(BallTerms { l2, w })
+    }
+
+    /// Whether the descriptor lies in its law's domain ([`Self::terms`]); names the violation.
+    pub(crate) fn check(&self) -> Result<(), String> {
+        self.terms().map(|_| ())
+    }
+
+    /// The law's weight along a direction at `mu = cos θ` from the axis: the continuous form of a
+    /// spread's `f_k`, `½·w·(D^m + m·λ²μ²·D^(m−2))` under the ball, `(w/2)·(−dF/dμ)`; zero at and
+    /// past the rim, and for a descriptor outside the law's domain.
+    pub(crate) fn weight_at(&self, mu: f64) -> f64 {
+        let Ok(terms) = self.terms() else {
+            return 0.0;
+        };
+        // `D²` is even in `μ`: past the rim it turns positive again behind the plate, so the cap is
+        // bounded by its depth, not by the sign of `D²`.
+        let t = 1.0 - mu;
+        if t.is_nan() || t >= terms.w {
+            return 0.0;
+        }
+        let d = (1.0 - terms.l2 * (t * (2.0 - t))).max(0.0).sqrt();
+        let power = |n: u32| (0..n).fold(1.0, |p, _| p * d);
+        let m = BALL_EXPONENT;
+        0.5 * terms.w * (power(m) + m as f64 * terms.l2 * mu * mu * power(m - 2))
+    }
 }
 
 /// How a direction of the cone passes through the hard bodies it meets. Under either, a witness
@@ -85,10 +191,8 @@ pub(crate) enum AxisRule {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ShapeFile {
-    half_angle_deg: Sourced<f64>,
     axis: Sourced<AxisRule>,
     directions: Sourced<usize>,
-    profile: Sourced<Profile>,
     passage: Sourced<Passage>,
     hp_per_reference_mm: Sourced<u64>,
     reference_calibre_m: Sourced<f32>,
@@ -150,121 +254,61 @@ fn calibration_from_ron(text: &str) -> Result<Calibration, String> {
     })
 }
 
-/// One direction of the cone in the cone's own frame: `cos θ`, the two lateral components
-/// `sin θ cos φ` and `sin θ sin φ`, and its profile weight `f`.
+/// One direction of a cone in the cone's own frame: `cos θ`, the two lateral components
+/// `sin θ cos φ` and `sin θ sin φ`, and its law weight `f`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct Stratum {
     mu: f32,
     lateral: (f32, f32),
-    profile: f32,
+    weight: f32,
 }
 
-/// The cone's shape, validated.
+/// The cone's shape, validated: everything about a cone but its field law.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ConeShape {
-    /// α (rad).
-    half_angle: f32,
     axis: AxisRule,
     passage: Passage,
+    /// `(cos φ_k, sin φ_k)` of each direction's golden-angle azimuth, in stratum order.
+    azimuths: Vec<(f64, f64)>,
+}
+
+/// One cone's directions and weights: a [`ConeShape`]'s strata under a [`FieldDescriptor`].
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct Spread {
+    field: FieldDescriptor,
+    /// α (rad).
+    half_angle: f32,
     strata: Vec<Stratum>,
 }
 
 /// Largest `N` a shape may declare: a bound on the work one throw does, not a law.
 const MAX_DIRECTIONS: usize = 65_536;
 
-/// How far a shape's emitted total `(1/N) Σ f_k` may lie from ½ (the midpoint rule's exact value):
-/// the rounding of its `f32` profile weights, each within `2^-24` relative of its f64 value, so
-/// their mean is within `2^-25` of ½. DERIVED; this is `f32::EPSILON`, four times that.
+/// How far a spread's emitted total `(1/N) Σ f_k` may lie from ½. In f64 the shares telescope to
+/// ½ within a few f64 ulps; each f32 weight is within `2^-24` relative of its f64 value and every
+/// weight is non-negative, so their mean is within `2^-25` of ½. DERIVED; this is `f32::EPSILON`,
+/// four times that.
 const EMISSION_TOLERANCE: f64 = f32::EPSILON as f64;
 
-/// The linear profile `(cos θ − cos α)/(1 − cos α)` at `mu = cos θ`, zero outside the cone.
-pub(crate) fn linear(mu: f64, cos_alpha: f64) -> f64 {
-    ((mu - cos_alpha) / (1.0 - cos_alpha)).max(0.0)
-}
-
 impl ConeShape {
-    /// A shape of half-angle `half_angle` (rad) sampled by `directions` strata in `profile`, its
-    /// directions passing as `passage`. Refuses a half-angle
-    /// outside `(0, π/2]` or a direction count outside `1..=MAX_DIRECTIONS`, and a shape whose
-    /// construction is numerically degenerate: a half-angle so small that `cos α` rounds to 1 (the
-    /// profile's denominator `1 − cos α` vanishes), any non-finite stratum, or an emitted total
-    /// `(1/N) Σ f_k` farther from ½ than [`EMISSION_TOLERANCE`].
-    pub(crate) fn new(
-        half_angle: f64,
-        axis: AxisRule,
-        directions: usize,
-        profile: Profile,
-        passage: Passage,
-    ) -> Result<Self, String> {
-        if !(half_angle.is_finite()
-            && half_angle > 0.0
-            && half_angle <= std::f64::consts::FRAC_PI_2)
-        {
-            return Err(format!(
-                "half-angle must be in (0°, 90°] (got {}°)",
-                half_angle.to_degrees()
-            ));
-        }
+    /// A shape of `directions` strata about an axis chosen by `axis`, its directions passing as
+    /// `passage`. Refuses a direction count outside `1..=MAX_DIRECTIONS`.
+    pub(crate) fn new(axis: AxisRule, directions: usize, passage: Passage) -> Result<Self, String> {
         if !(1..=MAX_DIRECTIONS).contains(&directions) {
             return Err(format!(
                 "directions must be in 1..={MAX_DIRECTIONS} (got {directions})"
             ));
         }
-        let cos_alpha = libm::cos(half_angle);
-        if 1.0 - cos_alpha <= 0.0 {
-            return Err(format!(
-                "half-angle {}° is below what the profile can resolve: cos α rounds to 1",
-                half_angle.to_degrees()
-            ));
-        }
-        let n = directions as f64;
-        let strata = (0..directions)
+        let azimuths = (0..directions)
             .map(|k| {
-                let mu = 1.0 - (1.0 - cos_alpha) * (k as f64 + 0.5) / n;
-                let sin_theta = (1.0 - mu * mu).max(0.0).sqrt();
                 let phi = k as f64 * GOLDEN_ANGLE;
-                Stratum {
-                    mu: mu as f32,
-                    lateral: (
-                        (sin_theta * libm::cos(phi)) as f32,
-                        (sin_theta * libm::sin(phi)) as f32,
-                    ),
-                    profile: match profile {
-                        Profile::Linear => linear(mu, cos_alpha) as f32,
-                        Profile::Flat => EMITTED_SHARE,
-                    },
-                }
+                (libm::cos(phi), libm::sin(phi))
             })
-            .collect::<Vec<Stratum>>();
-        if let Some(k) = strata.iter().position(|stratum| {
-            ![
-                stratum.mu,
-                stratum.lateral.0,
-                stratum.lateral.1,
-                stratum.profile,
-            ]
-            .iter()
-            .all(|value| value.is_finite())
-        }) {
-            return Err(format!("direction {k} of the cone is not finite"));
-        }
-        let emitted = strata
-            .iter()
-            .map(|stratum| stratum.profile as f64)
-            .sum::<f64>()
-            / n;
-        // Every stratum is finite (checked above), so the total is.
-        if (emitted - EMITTED_SHARE as f64).abs() > EMISSION_TOLERANCE {
-            return Err(format!(
-                "the cone emits {emitted} of its on-axis strength, not ½, at half-angle {}°",
-                half_angle.to_degrees()
-            ));
-        }
+            .collect();
         Ok(Self {
-            half_angle: half_angle as f32,
             axis,
             passage,
-            strata,
+            azimuths,
         })
     }
 
@@ -275,15 +319,9 @@ impl ConeShape {
         Self::from_file(file, directions)
     }
 
-    /// Validate `file`'s shape sampled by `directions` strata; degrees are converted here, once.
+    /// Validate `file`'s shape sampled by `directions` strata.
     fn from_file(file: ShapeFile, directions: usize) -> Result<Self, String> {
-        Self::new(
-            file.half_angle_deg.0 * std::f64::consts::PI / 180.0,
-            file.axis.0,
-            directions,
-            file.profile.0,
-            file.passage.0,
-        )
+        Self::new(file.axis.0, directions, file.passage.0)
     }
 
     /// The shipped shape sampled by `directions` strata in place of its own count: a probe of how
@@ -307,14 +345,9 @@ impl ConeShape {
         &SHAPE
     }
 
-    /// α (rad).
-    pub(crate) fn half_angle(&self) -> f32 {
-        self.half_angle
-    }
-
     /// N.
     pub(crate) fn directions_count(&self) -> usize {
-        self.strata.len()
+        self.azimuths.len()
     }
 
     /// How each direction passes through what it meets.
@@ -331,6 +364,11 @@ impl ConeShape {
         }
     }
 
+    /// Each direction's `(cos φ_k, sin φ_k)`, in stratum order.
+    pub(crate) fn azimuths(&self) -> impl Iterator<Item = (f64, f64)> + '_ {
+        self.azimuths.iter().copied()
+    }
+
     /// The cone's axis for an exit whose round leaves along `direction`, through a rear face of
     /// outward normal `face` (`None` at an internal step).
     pub(crate) fn axis(&self, face: Option<Vec3>, direction: Dir3) -> Dir3 {
@@ -342,12 +380,6 @@ impl ConeShape {
         }
     }
 
-    /// Every direction of a cone about `axis`, with its profile weight `f_k`, in stratum order: the
-    /// strata placed about `axis` and its [`Self::lateral_axis`].
-    pub(crate) fn directions(&self, axis: Dir3) -> impl Iterator<Item = (Dir3, f32)> + '_ {
-        self.directions_about(axis, Self::lateral_axis(Vec3::from(axis)))
-    }
-
     /// The first lateral axis of a cone about the unit axis `z`: `z × up`, normalized, `up` the
     /// frame's `+Y`, or `+X` where `z` lies within ~8° of `±Y`. The second is `z` × this.
     pub(crate) fn lateral_axis(z: Vec3) -> Vec3 {
@@ -355,8 +387,96 @@ impl ConeShape {
         z.cross(up).normalize()
     }
 
-    /// Every direction of a cone about `axis` whose first lateral axis is `x` (unit, normal to
-    /// `axis`), with its profile weight `f_k`, in stratum order.
+    /// This shape's strata under `field`: each direction placed in its stratum of the cone
+    /// `field` bounds, and weighted by its stratum's share of the emission. Refuses a descriptor
+    /// outside its law's domain ([`FieldDescriptor::check`]), and a spread whose construction is
+    /// numerically degenerate: any non-finite stratum, or an emitted total `(1/N) Σ f_k` farther
+    /// from ½ than [`EMISSION_TOLERANCE`].
+    pub(crate) fn spread(&self, field: FieldDescriptor) -> Result<Spread, String> {
+        self.spread_under(field, BALL_EXPONENT)
+    }
+
+    /// [`Self::spread`] with the ball's exponent `exponent` in place of [`BALL_EXPONENT`]: the
+    /// shot vocabulary's fingerprint folds the law's strata through it, so its test can show that
+    /// the exponent moves the fingerprint.
+    pub(crate) fn spread_under(
+        &self,
+        field: FieldDescriptor,
+        exponent: u32,
+    ) -> Result<Spread, String> {
+        let terms = field.terms()?;
+        let n = self.azimuths.len() as f64;
+        let share = |edge: usize| terms.share(terms.w * edge as f64 / n, exponent);
+        let strata: Vec<Stratum> = self
+            .azimuths
+            .iter()
+            .enumerate()
+            .map(|(k, &(cos_phi, sin_phi))| {
+                let t = terms.w * (k as f64 + 0.5) / n;
+                let sin_theta = (t * (2.0 - t)).sqrt();
+                Stratum {
+                    mu: (1.0 - t) as f32,
+                    lateral: ((sin_theta * cos_phi) as f32, (sin_theta * sin_phi) as f32),
+                    weight: (0.5 * n * (share(k + 1) - share(k))) as f32,
+                }
+            })
+            .collect();
+        if let Some(k) = strata.iter().position(|stratum| {
+            ![
+                stratum.mu,
+                stratum.lateral.0,
+                stratum.lateral.1,
+                stratum.weight,
+            ]
+            .iter()
+            .all(|value| value.is_finite())
+        }) {
+            return Err(format!("direction {k} of the cone is not finite"));
+        }
+        let emitted = strata
+            .iter()
+            .map(|stratum| stratum.weight as f64)
+            .sum::<f64>()
+            / n;
+        // Every stratum is finite (checked above), so the total is.
+        if (emitted - EMITTED_SHARE as f64).abs() > EMISSION_TOLERANCE {
+            return Err(format!(
+                "the cone emits {emitted} of its strength, not ½, at ratio {}",
+                field.ratio
+            ));
+        }
+        Ok(Spread {
+            field,
+            half_angle: libm::asin(1.0 / field.ratio as f64) as f32,
+            strata,
+        })
+    }
+}
+
+impl Spread {
+    /// The descriptor it was built from.
+    pub(crate) fn field(&self) -> FieldDescriptor {
+        self.field
+    }
+
+    /// α (rad): `asin(1/λ)`.
+    pub(crate) fn half_angle(&self) -> f32 {
+        self.half_angle
+    }
+
+    /// N.
+    pub(crate) fn directions_count(&self) -> usize {
+        self.strata.len()
+    }
+
+    /// Every direction of the cone about `axis`, with its weight `f_k`, in stratum order: the
+    /// strata placed about `axis` and its [`ConeShape::lateral_axis`].
+    pub(crate) fn directions(&self, axis: Dir3) -> impl Iterator<Item = (Dir3, f32)> + '_ {
+        self.directions_about(axis, ConeShape::lateral_axis(Vec3::from(axis)))
+    }
+
+    /// Every direction of the cone about `axis` whose first lateral axis is `x` (unit, normal to
+    /// `axis`), with its weight `f_k`, in stratum order.
     pub(crate) fn directions_about(
         &self,
         axis: Dir3,
@@ -366,19 +486,19 @@ impl ConeShape {
         let y = z.cross(x);
         self.strata.iter().map(move |stratum| {
             let local = z * stratum.mu + x * stratum.lateral.0 + y * stratum.lateral.1;
-            (Dir3::new(local).unwrap_or(axis), stratum.profile)
+            (Dir3::new(local).unwrap_or(axis), stratum.weight)
         })
     }
 
     /// Every direction in the cone's own frame, in stratum order: `cos θ`, the two lateral
-    /// components and the profile weight `f`.
+    /// components and the weight `f`.
     pub(crate) fn strata(&self) -> impl Iterator<Item = [f32; 4]> + '_ {
         self.strata.iter().map(|stratum| {
             [
                 stratum.mu,
                 stratum.lateral.0,
                 stratum.lateral.1,
-                stratum.profile,
+                stratum.weight,
             ]
         })
     }
@@ -388,99 +508,89 @@ impl ConeShape {
 mod tests {
     use super::*;
 
-    /// Fixture half-angle (rad): fixture data, not the shipped value.
-    const ALPHA: f64 = 0.436;
+    /// Fixture ratio `λ` (a 24.6° cone, DERIVED): fixture data, not a substance's value.
+    const RATIO: f32 = 2.4;
+
+    /// Ratios the law's invariants are checked across: the hemisphere, wide, plate-like and narrow
+    /// cones. Fixture data.
+    const RATIOS: [f32; 7] = [1.0, 1.05, 1.5, 2.27, 4.0, 100.0, 1.0e4];
 
     fn shape(directions: usize) -> ConeShape {
-        ConeShape::new(
-            ALPHA,
-            AxisRule::RearNormalBisector,
-            directions,
-            Profile::Linear,
-            Passage::Partial,
-        )
-        .unwrap()
+        ConeShape::new(AxisRule::RearNormalBisector, directions, Passage::Partial).unwrap()
     }
 
-    /// A shape outside the law's domain is refused at parse, naming the field.
+    fn spread(directions: usize, ratio: f32) -> Spread {
+        shape(directions)
+            .spread(FieldDescriptor::ball(ratio))
+            .unwrap()
+    }
+
+    fn weights(spread: &Spread) -> Vec<f64> {
+        spread.strata().map(|[.., f]| f as f64).collect()
+    }
+
+    /// A fixture shape file whose first fields are `fields`.
+    fn file(fields: &str) -> String {
+        format!(
+            r#"({fields}, directions: (24, Resolution("fixture")),
+            passage: (Partial, Tuned("fixture")), hp_per_reference_mm: (70, Tuned("fixture")),
+            reference_calibre_m: (0.088, Tuned("fixture")))"#
+        )
+    }
+
+    /// A shape outside its domain is refused at parse, and so is a slot the shape does not declare:
+    /// the half-angle is the exit material's and the profile the law's, so a file that authors
+    /// either is refused rather than read past.
     #[test]
     fn a_shape_outside_the_domain_is_refused() {
-        for (half_angle, directions) in [(0.0, 24), (-0.1, 24), (f64::NAN, 24), (1.6, 24)] {
-            assert!(
-                ConeShape::new(
-                    half_angle,
-                    AxisRule::ExitDirection,
-                    directions,
-                    Profile::Linear,
-                    Passage::Partial
-                )
-                .is_err()
-            );
-        }
+        assert!(ConeShape::new(AxisRule::ExitDirection, 0, Passage::Partial).is_err());
         assert!(
             ConeShape::new(
-                ALPHA,
                 AxisRule::ExitDirection,
-                0,
-                Profile::Linear,
+                MAX_DIRECTIONS + 1,
                 Passage::Partial
             )
             .is_err()
         );
-        let text = r#"(half_angle_deg: (25.0, Tuned("fixture")),
-            axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")),
-            profile: (Linear, Tuned("fixture")), passage: (Partial, Tuned("fixture")),
-            hp_per_reference_mm: (70, Tuned("fixture")),
-            reference_calibre_m: (0.088, Tuned("fixture")), range: (6.0, Tuned("fixture")))"#;
-        assert!(
-            ConeShape::from_ron(text).is_err(),
-            "an unknown field is refused"
-        );
+        assert!(ConeShape::from_ron(&file(r#"axis: (ExitDirection, Tuned("fixture"))"#)).is_ok());
+        for undeclared in [
+            r#"axis: (ExitDirection, Tuned("fixture")), half_angle_deg: (25.0, Tuned("fixture"))"#,
+            r#"axis: (ExitDirection, Tuned("fixture")), profile: (Flat, Tuned("fixture"))"#,
+            r#"axis: (ExitDirection, Tuned("fixture")), range: (6.0, Tuned("fixture"))"#,
+        ] {
+            assert!(
+                ConeShape::from_ron(&file(undeclared)).is_err(),
+                "an unknown field is refused: {undeclared}"
+            );
+        }
     }
 
     /// A shape value authored without its provenance is refused at parse, the calibration's too.
     #[test]
     fn a_shape_value_without_provenance_is_refused() {
-        let sourced = r#"(half_angle_deg: (25.0, Tuned("fixture")),
-            axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")),
-            profile: (Linear, Tuned("fixture")), passage: (Partial, Tuned("fixture")),
-            hp_per_reference_mm: (70, Tuned("fixture")),
-                reference_calibre_m: (0.088, Tuned("fixture")))"#;
-        assert!(ConeShape::from_ron(sourced).is_ok());
+        let sourced = file(r#"axis: (ExitDirection, Tuned("fixture"))"#);
+        assert!(ConeShape::from_ron(&sourced).is_ok());
         assert_eq!(
-            calibration_from_ron(sourced),
+            calibration_from_ron(&sourced),
             Ok(Calibration {
                 hp_per_reference_mm: 70,
                 reference_calibre: 0.088,
             })
         );
         for bare in [
-            r#"(half_angle_deg: 25.0, axis: (ExitDirection, Tuned("fixture")),
-                directions: (24, Resolution("fixture")), profile: (Linear, Tuned("fixture")),
+            r#"(axis: ExitDirection, directions: (24, Resolution("fixture")),
                 passage: (Partial, Tuned("fixture")), hp_per_reference_mm: (70, Tuned("fixture")),
                 reference_calibre_m: (0.088, Tuned("fixture")))"#,
-            r#"(half_angle_deg: (25.0, Tuned("fixture")), axis: ExitDirection,
-                directions: (24, Resolution("fixture")), profile: (Linear, Tuned("fixture")),
+            r#"(axis: (ExitDirection, Tuned("fixture")), directions: 24,
                 passage: (Partial, Tuned("fixture")), hp_per_reference_mm: (70, Tuned("fixture")),
                 reference_calibre_m: (0.088, Tuned("fixture")))"#,
-            r#"(half_angle_deg: (25.0, Tuned("fixture")), axis: (ExitDirection, Tuned("fixture")),
-                directions: 24, profile: (Linear, Tuned("fixture")),
-                passage: (Partial, Tuned("fixture")), hp_per_reference_mm: (70, Tuned("fixture")),
-                reference_calibre_m: (0.088, Tuned("fixture")))"#,
-            r#"(half_angle_deg: (25.0, Tuned("fixture")), axis: (ExitDirection, Tuned("fixture")),
-                directions: (24, Resolution("fixture")), profile: Flat,
-                passage: (Partial, Tuned("fixture")), hp_per_reference_mm: (70, Tuned("fixture")),
-                reference_calibre_m: (0.088, Tuned("fixture")))"#,
-            r#"(half_angle_deg: (25.0, Tuned("fixture")), axis: (ExitDirection, Tuned("fixture")),
-                directions: (24, Resolution("fixture")), profile: (Linear, Tuned("fixture")),
+            r#"(axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")),
                 passage: FirstSolid, hp_per_reference_mm: (70, Tuned("fixture")),
                 reference_calibre_m: (0.088, Tuned("fixture")))"#,
-            r#"(half_angle_deg: (25.0, Tuned("fixture")), axis: (ExitDirection, Tuned("fixture")),
-                directions: (24, Resolution("fixture")), profile: (Linear, Tuned("fixture")),
+            r#"(axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")),
                 passage: (Partial, Tuned("fixture")), hp_per_reference_mm: 70,
                 reference_calibre_m: (0.088, Tuned("fixture")))"#,
-            r#"(half_angle_deg: (25.0, Tuned("fixture")), axis: (ExitDirection, Tuned("fixture")),
-                directions: (24, Resolution("fixture")), profile: (Linear, Tuned("fixture")),
+            r#"(axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")),
                 passage: (Partial, Tuned("fixture")), hp_per_reference_mm: (70, Tuned("fixture")),
                 reference_calibre_m: 0.088)"#,
         ] {
@@ -495,9 +605,8 @@ mod tests {
     /// zero rate would silently switch every cone off through the HP quantum gate.
     #[test]
     fn a_zero_field_calibration_is_refused() {
-        let zero = r#"(half_angle_deg: (25.0, Tuned("fixture")),
-            axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")),
-            profile: (Linear, Tuned("fixture")), passage: (Partial, Tuned("fixture")),
+        let zero = r#"(axis: (ExitDirection, Tuned("fixture")),
+            directions: (24, Resolution("fixture")), passage: (Partial, Tuned("fixture")),
             hp_per_reference_mm: (0, Tuned("fixture")),
             reference_calibre_m: (0.088, Tuned("fixture")))"#;
         let error = calibration_from_ron(zero).expect_err("a zero rate is refused");
@@ -511,9 +620,8 @@ mod tests {
     fn the_reference_calibre_is_read_from_the_file_and_must_be_positive() {
         let file = |reference: &str| {
             format!(
-                r#"(half_angle_deg: (25.0, Tuned("fixture")),
-                axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")),
-                profile: (Linear, Tuned("fixture")), passage: (Partial, Tuned("fixture")),
+                r#"(axis: (ExitDirection, Tuned("fixture")),
+                directions: (24, Resolution("fixture")), passage: (Partial, Tuned("fixture")),
                 hp_per_reference_mm: (70, Tuned("fixture")),
                 reference_calibre_m: ({reference}, Tuned("fixture")))"#
             )
@@ -535,103 +643,177 @@ mod tests {
         }
     }
 
-    /// A half-angle the profile cannot resolve is refused at parse: at `1e-9` rad `cos α` rounds to
-    /// 1 and the profile's denominator vanishes (DERIVED). Every half-angle the profile resolves
-    /// emits ½ at every direction count.
+    /// The ball's domain is `λ ≥ 1`: a ratio below 1 is refused naming the APHE burst as the slice
+    /// that adds the full sphere, a non-finite ratio is refused, and a ratio so large that the
+    /// rim's `cos α` rounds to 1 is refused as unresolved (at `λ = 10⁹`, `1 − cos α ≈ 5·10⁻¹⁹`,
+    /// DERIVED). Every ratio the law resolves spreads at every direction count. The throw, the
+    /// substance registry and the wire's decoder rely on the refusal to keep a cone inside the law.
     #[test]
-    fn a_numerically_degenerate_half_angle_is_refused() {
-        let error = ConeShape::new(
-            1.0e-9,
-            AxisRule::ExitDirection,
-            24,
-            Profile::Linear,
-            Passage::Partial,
-        )
-        .unwrap_err();
-        assert!(error.contains("cos α rounds to 1"), "{error}");
-        for half_angle in [1.0e-3, 0.0175, ALPHA, 1.0, std::f64::consts::FRAC_PI_2] {
+    fn a_ratio_outside_the_balls_domain_is_refused() {
+        let shape = shape(24);
+        for ratio in [0.999, 0.5, 0.0, -2.0] {
+            let error = shape.spread(FieldDescriptor::ball(ratio)).unwrap_err();
+            assert!(error.contains("APHE burst"), "λ = {ratio}: {error}");
+            assert!(FieldDescriptor::ball(ratio).check().is_err());
+        }
+        for ratio in [f32::NAN, f32::INFINITY] {
+            let error = shape.spread(FieldDescriptor::ball(ratio)).unwrap_err();
+            assert!(error.contains("finite"), "λ = {ratio}: {error}");
+        }
+        let error = shape.spread(FieldDescriptor::ball(1.0e9)).unwrap_err();
+        assert!(error.contains("rounds to 1"), "{error}");
+        for ratio in RATIOS {
             for directions in [1, 24, 97, MAX_DIRECTIONS] {
                 assert!(
-                    ConeShape::new(
-                        half_angle,
-                        AxisRule::ExitDirection,
-                        directions,
-                        Profile::Linear,
-                        Passage::Partial
-                    )
-                    .is_ok(),
-                    "α = {half_angle} rad, N = {directions}"
+                    self::shape(directions)
+                        .spread(FieldDescriptor::ball(ratio))
+                        .is_ok(),
+                    "λ = {ratio}, N = {directions}"
                 );
             }
         }
     }
 
-    /// CLASS INVARIANT 1, EXACT EMISSION: with nothing in the cone, `(1/N) Σ s_k = S/2` to float
-    /// precision at every N.
+    /// CLASS INVARIANT 1, EXACT EMISSION: with nothing in the cone, `(1/N) Σ f_k = ½` to float
+    /// precision at every `N` and every `λ ≥ 1`, so a cone emits `S/2` whatever its width and
+    /// resolution. The field's calibration (`hp_per_reference_mm`) and the throw's HP-quantum gate
+    /// rely on it. Sampling the density at each stratum's midpoint in place of the stratum's share
+    /// fails at small `N`; a dropped `N/2` fails everywhere.
     #[test]
-    fn the_emitted_total_is_half_the_on_axis_strength_at_every_resolution() {
-        for directions in [1, 7, 24, 97] {
-            let shape = shape(directions);
-            let total: f64 =
-                shape.strata.iter().map(|s| s.profile as f64).sum::<f64>() / directions as f64;
+    fn the_emitted_total_is_half_the_strength_at_every_resolution_and_ratio() {
+        for ratio in RATIOS {
+            for directions in [1, 2, 7, 24, 64, 97, 1024] {
+                let emitted =
+                    weights(&spread(directions, ratio)).iter().sum::<f64>() / directions as f64;
+                assert!(
+                    (emitted - 0.5).abs() <= EMISSION_TOLERANCE,
+                    "λ = {ratio}, N = {directions}: emitted {emitted} of S"
+                );
+            }
+        }
+    }
+
+    /// The ball's density per steradian, `p_Ω = D(D² + 3λ²μ²)/(2π)` (m = 3, design doc §5),
+    /// stated apart from the code's cumulative share.
+    fn ball_density(ratio: f64, mu: f64) -> f64 {
+        let d2 = 1.0 - ratio * ratio * (1.0 - mu * mu);
+        if d2 <= 0.0 {
+            return 0.0;
+        }
+        let d = d2.sqrt();
+        d * (d2 + 3.0 * ratio * ratio * mu * mu) / (2.0 * std::f64::consts::PI)
+    }
+
+    /// CLASS INVARIANT 5, PROFILE SHAPE: the weights are the ball's. Each `f_k` is `N/2` of the
+    /// ball's density integrated over its stratum (an independent midpoint sum of `2π p_Ω dμ`,
+    /// 4096 steps a stratum, within 2.1e-8 of the exact share in f64, MEASURED; the f32 weights
+    /// add at most 1.2e-7, DERIVED; tolerance 1e-6); the weights never grow from the axis to the
+    /// rim; the rim stratum is a graze (below a tenth of the axis's at 64 strata, and falling as
+    /// `N^(−½)`: 0.497–0.500 of it at 256, DERIVED, bound 0.6); and at `λ = 1` the share inside
+    /// each stratum edge is `1 − μ⁴`. Every direction lies
+    /// inside the cone. A flat profile, the rim-bright shell law (`m = 1`) and a wrong exponent
+    /// each fail here; the look's centre-bright field and the graze a box near the rim takes rely
+    /// on it.
+    #[test]
+    fn the_weights_are_the_balls() {
+        for ratio in [1.0, 1.5, 2.27, 4.0] {
+            let lambda = ratio as f64;
+            let coarse = spread(64, ratio);
+            let f = weights(&coarse);
+            let w = 1.0 - (1.0 - 1.0 / (lambda * lambda)).sqrt();
+            let steps = 4096;
+            for (k, weight) in f.iter().enumerate() {
+                let low = 1.0 - w * (k + 1) as f64 / 64.0;
+                let h = (w / 64.0) / steps as f64;
+                let share: f64 = (0..steps)
+                    .map(|i| {
+                        let mu = low + h * (i as f64 + 0.5);
+                        2.0 * std::f64::consts::PI * ball_density(lambda, mu) * h
+                    })
+                    .sum();
+                assert!(
+                    (weight - 32.0 * share).abs() < 1.0e-6,
+                    "λ = {ratio}, stratum {k}: {weight} against {}",
+                    32.0 * share
+                );
+            }
             assert!(
-                (total - 0.5).abs() < 1.0e-6,
-                "N = {directions}: emitted {total} of S"
+                f.windows(2).all(|pair| pair[1] <= pair[0]),
+                "λ = {ratio}: non-increasing {f:?}"
+            );
+            assert!(
+                f[63] < 0.1 * f[0],
+                "λ = {ratio}: rim {} axis {}",
+                f[63],
+                f[0]
+            );
+            let fine = weights(&spread(256, ratio));
+            assert!(
+                fine[255] < 0.6 * f[63],
+                "λ = {ratio}: the rim stratum falls with N: {} at 256, {} at 64",
+                fine[255],
+                f[63]
+            );
+            let axis = Dir3::new(Vec3::new(0.3, -0.2, 0.9)).unwrap();
+            for (direction, _) in coarse.directions(axis) {
+                let angle = direction.angle_between(Vec3::from(axis));
+                assert!(
+                    angle <= coarse.half_angle() + 1.0e-5,
+                    "{angle} past the rim"
+                );
+            }
+        }
+        let mut inside = 0.0;
+        for (k, weight) in weights(&spread(64, 1.0)).iter().enumerate() {
+            inside += weight / 32.0;
+            let edge = 1.0 - (k + 1) as f64 / 64.0;
+            let want = 1.0 - edge * edge * edge * edge;
+            assert!(
+                (inside - want).abs() < 1.0e-6,
+                "edge {k}: {inside} inside, 1 − μ⁴ = {want}"
             );
         }
     }
 
-    /// The flat profile emits the same total as the linear one, `S/2`, spread evenly: every
-    /// direction carries half the on-axis strength.
+    /// The continuous weight is the spread's at the limit: on the axis it is half the centre
+    /// weight `(1 + 3λ²)(1 − cos α)`, it is zero at and past the rim, and at a stratum's midpoint
+    /// of a fine spread it is that stratum's weight (DERIVED: a stratum's share over its width is
+    /// the density at its midpoint to second order; tolerance 1e-4 at 4096 strata). The pen cam's
+    /// drawing of a cone recorded without strengths relies on it.
     #[test]
-    fn the_flat_profile_emits_the_same_total_evenly() {
-        for directions in [1, 24, 256] {
-            let flat = ConeShape::new(
-                ALPHA,
-                AxisRule::ExitDirection,
-                directions,
-                Profile::Flat,
-                Passage::FirstSolid,
-            )
-            .unwrap();
-            assert_eq!(flat.passage(), Passage::FirstSolid);
-            assert!(flat.directions(Dir3::Z).all(|(_, weight)| weight == 0.5));
-        }
-    }
-
-    /// CLASS INVARIANT 5, PROFILE SHAPE: the strength is greatest on the axis, does not grow with
-    /// angle, and is zero at and past the rim; every direction lies inside the cone.
-    #[test]
-    fn the_profile_falls_from_the_axis_to_zero_at_the_rim() {
-        let cos_alpha = libm::cos(ALPHA);
-        assert_eq!(linear(1.0, cos_alpha), 1.0);
-        assert_eq!(linear(cos_alpha, cos_alpha), 0.0);
-        assert_eq!(linear(libm::cos(ALPHA * 1.5), cos_alpha), 0.0);
-        let mut last = f64::INFINITY;
-        for step in 0..=100 {
-            let theta = ALPHA * step as f64 / 100.0;
-            let value = linear(libm::cos(theta), cos_alpha);
-            assert!(value <= last, "non-increasing at θ = {theta}");
-            last = value;
-        }
-        let axis = Dir3::new(Vec3::new(0.3, -0.2, 0.9)).unwrap();
-        for (direction, weight) in shape(97).directions(axis) {
-            let angle = direction.angle_between(Vec3::from(axis));
-            assert!(angle <= ALPHA as f32 + 1.0e-5, "{angle} past the rim");
-            assert!(weight > 0.0 && weight < 1.0);
+    fn the_continuous_weight_is_the_spreads_limit() {
+        for ratio in [1.0, 2.27, 4.0] {
+            let field = FieldDescriptor::ball(ratio);
+            let lambda = ratio as f64;
+            let cos_alpha = (1.0 - 1.0 / (lambda * lambda)).sqrt();
+            let centre = (1.0 + 3.0 * lambda * lambda) * (1.0 - cos_alpha);
+            assert!((field.weight_at(1.0) - 0.5 * centre).abs() < 1.0e-12);
+            assert_eq!(field.weight_at(cos_alpha - 1.0e-9), 0.0);
+            assert_eq!(field.weight_at(-1.0), 0.0);
+            for [mu, .., weight] in spread(4096, ratio).strata().step_by(97) {
+                let want = field.weight_at(mu as f64);
+                assert!(
+                    (weight as f64 - want).abs() < 1.0e-4,
+                    "λ = {ratio}, μ = {mu}: {weight} against {want}"
+                );
+            }
         }
     }
 
     /// The strata are equal in solid angle: their `cos θ` midpoints are evenly spaced and span the
-    /// cap from the axis to the rim.
+    /// cap from the axis to the rim `asin(1/λ)`.
     #[test]
     fn the_strata_are_equal_in_solid_angle() {
-        let shape = shape(24);
-        let cos_alpha = libm::cos(ALPHA) as f32;
+        let spread = spread(24, RATIO);
+        assert!(
+            (spread.half_angle() - (1.0 / RATIO).asin()).abs() < 1.0e-6,
+            "the rim is asin(1/λ)"
+        );
+        let cos_alpha = spread.half_angle().cos();
         let width = (1.0 - cos_alpha) / 24.0;
-        for (k, stratum) in shape.strata.iter().enumerate() {
+        for (k, [mu, ..]) in spread.strata().enumerate() {
             let expected = 1.0 - width * (k as f32 + 0.5);
-            assert!((stratum.mu - expected).abs() < 1.0e-6, "stratum {k}");
+            assert!((mu - expected).abs() < 1.0e-6, "stratum {k}");
         }
     }
 
@@ -655,27 +837,20 @@ mod tests {
         assert!((to_normal + to_exit - std::f32::consts::FRAC_PI_4).abs() < 1.0e-6);
 
         assert_eq!(shape.axis(None, oblique), oblique);
-        let along = ConeShape::new(
-            ALPHA,
-            AxisRule::ExitDirection,
-            24,
-            Profile::Linear,
-            Passage::Partial,
-        )
-        .unwrap();
+        let along = ConeShape::new(AxisRule::ExitDirection, 24, Passage::Partial).unwrap();
         assert_eq!(along.axis(Some(normal), oblique), oblique);
     }
 
-    /// The directions are the same bits on every target: pinned raw IEEE bits of a few directions
-    /// for two fixture axes. MEASURED on macOS arm64; a red run on another target means the
-    /// generator is not reproducible there.
+    /// The directions and weights are the same bits on every target: pinned raw IEEE bits of a
+    /// few directions for two fixture axes. MEASURED on macOS arm64; a red run on another target
+    /// means the generator is not reproducible there.
     #[test]
     fn the_directions_are_pinned_to_the_bit() {
-        let shape = shape(24);
+        let spread = spread(24, RATIO);
         let axes = [Dir3::Z, Dir3::new(Vec3::new(0.3, -0.2, 0.9)).unwrap()];
         let mut bits = Vec::new();
         for axis in axes {
-            let directions: Vec<(Dir3, f32)> = shape.directions(axis).collect();
+            let directions: Vec<(Dir3, f32)> = spread.directions(axis).collect();
             for k in [0usize, 5, 23] {
                 let (direction, weight) = directions[k];
                 let v = Vec3::from(direction);
@@ -696,11 +871,11 @@ mod tests {
     /// `[x, y, z, f_k]` bits of directions 0, 5 and 23 about each fixture axis. MEASURED on macOS
     /// arm64; print them with `OVERMATCH_SPALL_CONE_SHOW=1` and `--nocapture`.
     const PINNED_BITS: [[u32; 4]; 6] = [
-        [0xbd7f9aca, 0x00000000, 0x3f7f8045, 0x3f7aaaab],
-        [0xbe31f2ae, 0x3de26451, 0x3f7a82fa, 0x3f455555],
-        [0xbdbbf055, 0x3ed0da09, 0x3f688cb8, 0x3caaaaab],
-        [0x3e7f9cf6, 0xbe52d2ca, 0x3f723a67, 0x3f7aaaab],
-        [0x3e14a0a2, 0xbdbfe3e4, 0x3f7c269b, 0x3f455555],
-        [0x3e61edc7, 0x3e58d58a, 0x3f73bc66, 0x3caaaaab],
+        [0xbd7c_0403, 0x0000_0000, 0x3f7f_83d6, 0x3f51_733f],
+        [0xbe2f_7939, 0x3ddf_3e69, 0x3f7a_aa31, 0x3f30_2361],
+        [0xbdb9_6be7, 0x3ece_0de5, 0x3f69_3447, 0x3db1_e40d],
+        [0x3e80_3da4, 0xbe52_d5ba, 0x3f72_2b8d, 0x3f51_733f],
+        [0x3e17_0fd6, 0xbdc3_392d, 0x3f7c_0537, 0x3f30_2361],
+        [0x3e63_916b, 0x3e52_d1ce, 0x3f73_f864, 0x3db1_e40d],
     ];
 }

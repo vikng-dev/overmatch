@@ -945,6 +945,7 @@ impl Pass<'_, '_, '_> {
         let stronger = walk::VolumeMaterial {
             substance: SubstanceId::probe(),
             factor: material.factor * 2.0,
+            ..material
         };
         for (scale, copy, kind) in [
             (1.0_f32, material, ViolationKind::DuplicationChangedCost),

@@ -175,7 +175,8 @@ pub struct Cone {
     pub axis: Vec3,
     /// Half-angle (rad).
     pub half_angle: f32,
-    /// On-axis strength `S` (ref-mm); zero on a hand-authored clip.
+    /// The strength `S` (ref-mm): a direction was thrown with `S` times its weight; zero on a
+    /// hand-authored clip.
     pub strength: f32,
     /// Where the line throws it, arc length.
     pub arc: f32,
@@ -212,8 +213,8 @@ impl Cone {
     }
 }
 
-/// One direction of a cone: unit direction, reach (m) and the strength fraction `s(θ)/S` it was
-/// thrown with.
+/// One direction of a cone: unit direction, reach (m) and its weight `f_k`, the multiple of the
+/// cone's strength it was thrown with (about 0.84 on the axis of a 26° ball, DERIVED).
 pub struct Ray {
     pub direction: Vec3,
     pub reach: f32,
@@ -519,10 +520,6 @@ fn cone(cone: &SpallCone, line: &Polyline) -> Cone {
     let origin = Vec3::from(cone.origin);
     let axis = Vec3::from(cone.axis).normalize_or(Vec3::NEG_Z);
     let half_angle = cone.half_angle_deg.to_radians();
-    let profile = |direction: Vec3| {
-        let cos_alpha = half_angle.cos();
-        ((direction.dot(axis) - cos_alpha) / (1.0 - cos_alpha)).clamp(0.0, 1.0)
-    };
     let rays = cone
         .fragments
         .iter()
@@ -530,9 +527,9 @@ fn cone(cone: &SpallCone, line: &Polyline) -> Cone {
             let span = Vec3::from(fragment.end) - origin;
             let direction = span.try_normalize()?;
             let weight = if cone.strength > 0.0 {
-                (fragment.strength / cone.strength).clamp(0.0, 1.0)
+                (fragment.strength / cone.strength).max(0.0)
             } else {
-                profile(direction)
+                cone.field.weight_at(f64::from(direction.dot(axis))) as f32
             };
             Some(Ray {
                 direction,

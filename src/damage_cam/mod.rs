@@ -271,8 +271,12 @@ pub struct SpallCone {
     pub origin: [f32; 3],
     /// Unit cone axis.
     pub axis: [f32; 3],
+    /// The field law and ratio that weight its directions and set its rim.
+    pub field: crate::ballistics::spall_cone::FieldDescriptor,
+    /// The field's rim, `asin(1/λ)`, in degrees.
     pub half_angle_deg: f32,
-    /// The on-axis strength `S` (reference-mm). Zero on a hand-authored clip.
+    /// The strength `S` (reference-mm): direction `k` was thrown with `S·f_k`, and the cone emits
+    /// `S/2` in all. Zero on a hand-authored clip.
     #[serde(default)]
     pub strength: f32,
     pub fragments: Vec<Fragment>,

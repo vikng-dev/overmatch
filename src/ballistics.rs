@@ -1160,8 +1160,8 @@ pub struct SpallRay {
     pub doses: Vec<(Entity, f32)>,
 }
 
-/// One spall cone — the field thrown from a body exit (design doc §5): origin, axis and half-angle
-/// describe its shape; `spend`, the speeds and `strength` are its source's
+/// One spall cone — the field thrown from a body exit (design doc §5): origin, axis, field and
+/// half-angle describe its shape; `spend`, the speeds and `strength` are its source's
 /// ([`walk::SpallSource`]); `rays` are its directions as marched, in stratum order.
 #[cfg_attr(
     not(test),
@@ -1173,6 +1173,9 @@ pub struct SpallRay {
 pub struct SpallCone {
     pub origin: Vec3,
     pub axis: Dir3,
+    /// The field law and ratio its directions were weighted by: its exit layer's substance's.
+    pub field: spall_cone::FieldDescriptor,
+    /// Radians: the field's rim, `asin(1/λ)`.
     pub half_angle: f32,
     /// Reference-mm the round spent across the body it left.
     pub spend: f32,
@@ -1180,7 +1183,8 @@ pub struct SpallCone {
     pub entry_speed: f32,
     /// m/s where it left it.
     pub exit_speed: f32,
-    /// The on-axis strength `S` (reference-mm) the directions were thrown with.
+    /// The strength `S` (reference-mm) the directions were thrown with: direction `k` carries
+    /// `S·f_k`, and the cone emits `S/2` in all.
     pub strength: f32,
     pub rays: Vec<SpallRay>,
 }
@@ -3258,13 +3262,15 @@ fn resolve_replica_armor_contact(
 /// Strength `S` is [`walk::SpallSource::strength`], in reference-mm. A cone whose whole emission
 /// `S/2` converts to no HP point at the field's rate ([`field_units`], the rate every one of its
 /// doses converts at) is not thrown: no direction is walked and nothing is recorded. `S/2` is the
-/// most one box can take from it, since every direction doses a box at most once and the shape's
-/// weights emit half the on-axis strength ([`spall_cone::EMITTED_SHARE`]). Otherwise
-/// direction `k` of the shape ([`spall_cone::ConeShape`]) carries `S·f_k` and stands for `1/N` of the
-/// cone, walked through the volumes of `tank`, the struck tank, alone
-/// ([`resolve::field_direction`]). A direction whose walk fails is fail-closed: it doses nothing, and
-/// the cone logs its first error. A direction whose witness pass alone fails keeps its hard doses
-/// and reach and doses no witness; the cone logs that once too.
+/// most one box can take from it, since every direction doses a box at most once and the field's
+/// weights emit `S/2` in all ([`spall_cone::EMITTED_SHARE`]). Otherwise the cone is spread by the
+/// ball law at the source's ratio ([`walk::SpallSource::debris_ratio`]): direction `k` of the
+/// spread ([`spall_cone::Spread`]) carries `S·f_k` and stands for `1/N` of the cone, walked
+/// through the volumes of `tank`, the struck tank, alone ([`resolve::field_direction`]). A ratio
+/// outside the law's domain throws nothing and logs why; substances refuse one at load, so only a
+/// fixture reaches it. A direction whose walk fails is fail-closed: it doses nothing, and the cone logs its
+/// first error. A direction whose witness pass alone fails keeps its hard doses and reach and doses
+/// no witness; the cone logs that once too.
 fn throw_spall_cone(
     spall: &mut Mut<SpallMarks>,
     dose: &mut Mut<ShotDose>,
@@ -3283,9 +3289,19 @@ fn throw_spall_cone(
         spall.gated += 1;
         return false;
     }
+    let spread = match shape.spread(spall_cone::FieldDescriptor::ball(source.debris_ratio)) {
+        Ok(spread) => spread,
+        Err(error) => {
+            error!(
+                origin = ?source.position,
+                "ballistics: a spall cone is not thrown, its field is outside the law: {error}"
+            );
+            return false;
+        }
+    };
     let direction = Dir3::new(source.direction).unwrap_or(Dir3::NEG_Z);
     let axis = shape.axis(source.face, direction);
-    let weight = 1.0 / shape.directions_count() as f32;
+    let weight = 1.0 / spread.directions_count() as f32;
     let within = |collider: Entity| {
         world
             .volume_of(collider)
@@ -3294,16 +3310,17 @@ fn throw_spall_cone(
     let mut cone = SpallCone {
         origin: source.position,
         axis,
-        half_angle: shape.half_angle(),
+        field: spread.field(),
+        half_angle: spread.half_angle(),
         spend: source.spend,
         entry_speed: source.entry_speed,
         exit_speed: source.exit_speed,
         strength,
-        rays: Vec::with_capacity(shape.directions_count()),
+        rays: Vec::with_capacity(spread.directions_count()),
     };
     let mut failed: Option<(usize, walk::WalkError)> = None;
     let mut unwitnessed: Option<(usize, walk::WalkError)> = None;
-    for (ray_dir, profile) in shape.directions(axis) {
+    for (ray_dir, profile) in spread.directions(axis) {
         let thrown = strength * profile;
         let walked = resolve::field_direction(
             context,

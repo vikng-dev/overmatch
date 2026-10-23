@@ -156,7 +156,9 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// the authority's per-weapon round choice (`WeaponLoads`) replicates owner-private beside
 /// `WeaponGate`, and `FireEvent` names the fired round by its index in the weapon's round list in
 /// place of the round's physical fields, so a replica builds the round the authority fired from its
-/// own copy of the tank data. Surface and own-type graph move.
+/// own copy of the tank data. Surface and own-type graph move. The cone's field descriptor rides
+/// it too: each `WireCone` carries its field law and ratio (`spall_cone::FieldDescriptor`), from
+/// which the client rebuilds the cone's directions and weights. Own-type graph moves.
 pub const PROTOCOL_REV: u32 = 33;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
@@ -900,7 +902,7 @@ const WIRE_SURFACE_HASH: u64 = 0xe1f7_a13c_f454_773b;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xf981_412f_0e33_b684;
+const WIRE_TYPES_HASH: u64 = 0xdde9_f88d_9558_676d;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1526,8 +1528,8 @@ mod tests {
     /// `disclosure.rs`, `WeaponGate`/`WeaponGateState`/`WeaponLoads`/`WeaponLoad` from
     /// `tank/model.rs`, `TankCommand`/`AimIntent`/`CrewSwap`/`RoundSelect`/`RoundStep` from
     /// `command.rs`, `CrewStation` and `KnockoutReason`
-    /// from `damage.rs`, and the shot explanation's graph from `damage_cam/wire.rs` and
-    /// `damage_cam/mod.rs`.
+    /// from `damage.rs`, and the shot explanation's graph from `damage_cam/wire.rs`,
+    /// `damage_cam/mod.rs` and, for a cone's field descriptor, `ballistics/spall_cone.rs`.
     /// External wire types (avian/lightyear) are covered by dependency version. An embedded ENUM
     /// earns its own row: postcard encodes the variant as its declaration index, so reordering
     /// variants changes what the bytes mean without touching one character of the type that embeds
@@ -1580,6 +1582,8 @@ mod tests {
         ("src/damage_cam/wire.rs", "WirePlate"),
         ("src/damage_cam/wire.rs", "WireBounce"),
         ("src/damage_cam/wire.rs", "WireCone"),
+        ("src/ballistics/spall_cone.rs", "FieldDescriptor"),
+        ("src/ballistics/spall_cone.rs", "FieldLaw"),
         ("src/damage_cam/wire.rs", "WireHit"),
         ("src/damage_cam/wire.rs", "WireEnd"),
         ("src/damage_cam/wire.rs", "WireDose"),

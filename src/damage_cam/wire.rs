@@ -36,8 +36,12 @@
 //! | plate factor | cost over chord, derived | four f32 ulps, relative |
 //! | incidence | `f32`, the record's own: an f32 `acos` of the decoded directions is off by 0.04° near normal impact (MEASURED) | exact |
 //!
-//! A ray's direction is not carried: it is the cone shape's stratum about the cone's axis, placed by
-//! the cone's roll — the turn about the axis from the shape's own lateral axis
+//! A ray's direction and strength are not carried. A cone carries its field descriptor, a law id
+//! and its ratio `λ` (`spall_cone::FieldDescriptor`), and the client spreads the vocabulary's shape
+//! by it, rebuilding each stratum and weight to the bit (`spall_cone` module doc, "Determinism");
+//! the encoder refuses a cone whose rays' strengths are not `S·f_k` under its descriptor to the bit, or
+//! whose half-angle is not the descriptor's. A ray's direction is its stratum about the cone's
+//! axis, placed by the cone's roll — the turn about the axis from the shape's own lateral axis
 //! ([`ConeShape::lateral_axis`]) to the one the throw used, which the record's hull frame and the
 //! world's `+Y` decide. The encoder fits the roll to the record's ray ends, weighting each by its
 //! reach. The client never re-integrates a ray: the reach is the authority's.
@@ -63,25 +67,27 @@
 //!
 //! | scenario | total B | shooter B | fields B | cones | rays | hits | B per cone |
 //! |---|---|---|---|---|---|---|---|
-//! | s1_through_crew | 726 | 696 | 394 | 1 | 64 | 80 | 394 |
+//! | s1_through_crew | 920 | 890 | 588 | 1 | 64 | 75 | 588 |
 //! | s2_stopped_mantlet | 187 | 141 | 0 | 0 | 0 | 0 | – |
 //! | s3_ricochet | 193 | 147 | 0 | 0 | 0 | 0 | – |
-//! | s4_spaced_then_stopped | 742 | 696 | 450 | 3 | 192 | 0 | 150 |
-//! | s5_oblique_through | 519 | 475 | 282 | 1 | 64 | 64 | 282 |
-//! | s6_overpen | 544 | 498 | 299 | 2 | 128 | 0 | 149 |
-//! | s7_engine_shadow | 519 | 480 | 265 | 1 | 64 | 53 | 265 |
+//! | s4_spaced_then_stopped | 757 | 711 | 465 | 3 | 192 | 0 | 155 |
+//! | s5_oblique_through | 776 | 732 | 539 | 1 | 64 | 64 | 539 |
+//! | s6_overpen | 554 | 508 | 309 | 2 | 128 | 0 | 154 |
+//! | s7_engine_shadow | 720 | 681 | 466 | 1 | 64 | 51 | 466 |
 //! | s8a_mg_ricochet | 193 | 147 | 0 | 0 | 0 | 0 | – |
 //! | s8b_mg_stopped | 185 | 139 | 0 | 0 | 0 | 0 | – |
-//! | s9_breech_and_loader | 567 | 530 | 298 | 1 | 64 | 48 | 298 |
-//! | s10_gun_barrel_struck | 649 | 606 | 433 | 2 | 128 | 64 | 216 |
+//! | s9_breech_and_loader | 757 | 722 | 476 | 1 | 64 | 47 | 476 |
+//! | s10_gun_barrel_struck | 912 | 869 | 696 | 2 | 128 | 64 | 348 |
 //! | s11_mg_barrel_struck | 187 | 143 | 0 | 0 | 0 | 0 | – |
-//! | s12_apcr_through_crew | 726 | 696 | 394 | 1 | 64 | 80 | 394 |
+//! | s12_apcr_through_crew | 920 | 890 | 588 | 1 | 64 | 75 | 588 |
 //!
-//! The DERIVED estimate `36 + 2 + 2N` per cone (166 B at N = 64) counts a cone's metadata and its
-//! reaches; a cone that reaches no component measures 132–150 B (a reach under 128 mm takes one
-//! varint byte, one of 16.4 m or more three). Each hit adds about three bytes (ray skip, volume,
-//! dose palette index, a varint each) and each distinct dose four, so a cone that lights the
-//! fighting compartment measures 260–400 B, and every recorded message stays under 0.75 KB.
+//! The DERIVED estimate `41 + 2 + 2N` per cone (171 B at N = 64) counts a cone's metadata, its
+//! field descriptor's law byte and `f32` ratio among it, and its reaches; a cone that reaches no
+//! component measures 154–155 B on average per scenario (a reach under 128 mm takes one varint
+//! byte, one of 16.4 m or more three). Each hit adds about three bytes (ray skip, volume, dose
+//! palette index, a varint each) and each distinct dose four. Under the ball every direction is
+//! thrown at its own strength, so nearly every hit's dose is distinct: a cone that lights the
+//! fighting compartment measures 460–590 B, and every recorded message stays under 0.95 KB.
 
 use std::collections::BTreeMap;
 
@@ -95,7 +101,7 @@ use super::{
     ShotVerdict, SpallCone,
 };
 use crate::bake::TankGeometry;
-use crate::ballistics::spall_cone::ConeShape;
+use crate::ballistics::spall_cone::{BALL_EXPONENT, ConeShape, FieldDescriptor, FieldLaw, Spread};
 use crate::damage::{FunctionRole, KnockoutReason};
 use crate::fingerprint::{FNV_OFFSET_BASIS, fingerprint_field, fnv1a_64};
 use crate::rounds::RoundRegistry;
@@ -267,6 +273,57 @@ impl VehicleWords {
     }
 }
 
+/// The ratios the vocabulary's fingerprint spreads its cone shape at ([`fold_cone`]): probes of the
+/// law's weights, the hemisphere and a 30° cone. Probe data, not any substance's.
+const FINGERPRINT_RATIOS: [f32; 2] = [1.0, 2.0];
+
+/// `hash` folded with what a decoder rebuilds a cone's rays from besides the cone's own descriptor:
+/// every law's id and name, the ball's exponent `exponent`, the shape's direction count and
+/// azimuths, and the shape's strata under the ball at each of [`FINGERPRINT_RATIOS`]. Two ends that
+/// would rebuild different rays from one descriptor fold differently.
+fn fold_cone(mut hash: u64, cone: &ConeShape, exponent: u32) -> u64 {
+    for law in FieldLaw::ALL {
+        hash = fingerprint_field(hash, b"field_law", &[law as u8]);
+        hash = fingerprint_field(hash, b"field_law_name", format!("{law:?}").as_bytes());
+    }
+    hash = fingerprint_field(hash, b"ball_exponent", &exponent.to_le_bytes());
+    hash = fingerprint_field(
+        hash,
+        b"cone_directions",
+        &(cone.directions_count() as u64).to_le_bytes(),
+    );
+    for (cos, sin) in cone.azimuths() {
+        let bytes: Vec<u8> = [cos, sin]
+            .iter()
+            .flat_map(|value| value.to_bits().to_le_bytes())
+            .collect();
+        hash = fingerprint_field(hash, b"azimuth", &bytes);
+    }
+    for ratio in FINGERPRINT_RATIOS {
+        // A probe ratio lies in the ball's domain, so a refusal is a broken law: it is folded, not
+        // skipped, and no end that spreads it folds alike.
+        hash = match cone.spread_under(FieldDescriptor::ball(ratio), exponent) {
+            Ok(spread) => {
+                let mut hash = fingerprint_field(
+                    hash,
+                    b"probe_half_angle",
+                    &spread.half_angle().to_bits().to_le_bytes(),
+                );
+                for stratum in spread.strata() {
+                    let bytes: Vec<u8> = stratum
+                        .iter()
+                        .flat_map(|value| value.to_bits().to_le_bytes())
+                        .collect();
+                    hash = fingerprint_field(hash, b"probe_stratum", &bytes);
+                }
+                hash
+            }
+            Err(error) => fingerprint_field(hash, b"probe_refused", error.as_bytes()),
+        };
+    }
+    hash
+}
+
 /// Every name a pen cam record can hold, by index, and the cone shape its rays were thrown in.
 #[derive(Resource, Clone, Debug)]
 pub(crate) struct ShotVocabulary {
@@ -316,7 +373,7 @@ impl ShotVocabulary {
 
     /// Every name and value the decode reads, in order, each labelled.
     fn fold(&self) -> u64 {
-        let mut hash = fnv1a_64(FNV_OFFSET_BASIS, b"overmatch-shot-vocabulary-v1\0");
+        let mut hash = fnv1a_64(FNV_OFFSET_BASIS, b"overmatch-shot-vocabulary-v2\0");
         for vehicle in &self.vehicles {
             hash = fingerprint_field(hash, b"vehicle", vehicle.file.as_bytes());
             for servo in &vehicle.servos {
@@ -350,19 +407,7 @@ impl ShotVocabulary {
         for round in &self.rounds {
             hash = fingerprint_field(hash, b"round", round.as_bytes());
         }
-        hash = fingerprint_field(
-            hash,
-            b"cone_half_angle",
-            &self.cone.half_angle().to_bits().to_le_bytes(),
-        );
-        for stratum in self.cone.strata() {
-            let bytes: Vec<u8> = stratum
-                .iter()
-                .flat_map(|value| value.to_bits().to_le_bytes())
-                .collect();
-            hash = fingerprint_field(hash, b"stratum", &bytes);
-        }
-        hash
+        fold_cone(hash, &self.cone, BALL_EXPONENT)
     }
 
     fn vehicle(&self, file: &str) -> Result<u16, CodecError> {
@@ -665,7 +710,8 @@ struct WireBounce {
 }
 
 /// One spall cone: its metadata, each ray's reach and each ray's hits. The ray count is the
-/// reaches' count, the vocabulary's cone shape's.
+/// reaches' count, the vocabulary's cone shape's; each ray's direction and strength are rebuilt
+/// from the shape spread by `field`.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 struct WireCone {
     t: i32,
@@ -673,6 +719,7 @@ struct WireCone {
     axis: Oct,
     /// The turn about the axis from the shape's lateral axis to the throw's.
     roll: Turn,
+    field: FieldDescriptor,
     strength: f32,
     /// Each ray's reach in stratum order, mm; [`REACH_OVERFLOW`] takes the next of `overflow`.
     reaches: Vec<u16>,
@@ -1004,14 +1051,14 @@ fn encode_dose(
     })
 }
 
-/// The roll (rad) about `axis` that places the cone shape's strata nearest the cone's ray ends:
-/// the turn from the shape's lateral axis to the throw's, each ray weighted by its reach.
-fn fitted_roll(shape: &ConeShape, axis: Vec3, cone: &SpallCone) -> f32 {
+/// The roll (rad) about `axis` that places the cone's strata nearest its ray ends: the turn from
+/// the shape's lateral axis to the throw's, each ray weighted by its reach.
+fn fitted_roll(spread: &Spread, axis: Vec3, cone: &SpallCone) -> f32 {
     let x = ConeShape::lateral_axis(axis);
     let y = axis.cross(x);
     let origin = Vec3::from(cone.origin);
     let (mut sine, mut cosine) = (0.0f64, 0.0f64);
-    for (fragment, [_, l0, l1, _]) in cone.fragments.iter().zip(shape.strata()) {
+    for (fragment, [_, l0, l1, _]) in cone.fragments.iter().zip(spread.strata()) {
         let span = Vec3::from(fragment.end) - origin;
         let (a, b) = (span.dot(x) as f64, span.dot(y) as f64);
         let (l0, l1) = (l0 as f64, l1 as f64);
@@ -1026,23 +1073,27 @@ fn encode_cone(
     vehicle: &VehicleWords,
     cone: &SpallCone,
 ) -> Result<WireCone, CodecError> {
-    let shape = &vocabulary.cone;
-    if cone.fragments.len() != shape.directions_count()
-        || cone.half_angle_deg != shape.half_angle().to_degrees()
+    let spread = match vocabulary.cone.spread(cone.field) {
+        Ok(spread) => spread,
+        Err(error) => return refuse(format!("a cone's field is outside its law: {error}")),
+    };
+    if cone.fragments.len() != spread.directions_count()
+        || cone.half_angle_deg != spread.half_angle().to_degrees()
     {
         return refuse(format!(
-            "a cone of {} rays at {}° is not the vocabulary's shape",
+            "a cone of {} rays at {}° is not the vocabulary's shape under its field {:?}",
             cone.fragments.len(),
-            cone.half_angle_deg
+            cone.half_angle_deg,
+            cone.field
         ));
     }
-    for (fragment, [.., profile]) in cone.fragments.iter().zip(shape.strata()) {
-        if fragment.strength != cone.strength * profile {
-            return refuse("a ray's strength is not the cone's profile of its strength");
+    for (fragment, [.., weight]) in cone.fragments.iter().zip(spread.strata()) {
+        if fragment.strength.to_bits() != (cone.strength * weight).to_bits() {
+            return refuse("a ray's strength is not its weight under the cone's field times S");
         }
     }
     let axis = Oct::of(cone.axis)?;
-    let roll = Turn::of_radians(fitted_roll(shape, axis.direction(), cone))?;
+    let roll = Turn::of_radians(fitted_roll(&spread, axis.direction(), cone))?;
     let origin = Vec3::from(cone.origin);
     let mut reaches = Vec::with_capacity(cone.fragments.len());
     let mut overflow = Vec::new();
@@ -1086,6 +1137,7 @@ fn encode_cone(
         origin: Mm::of(cone.origin)?,
         axis,
         roll,
+        field: cone.field,
         strength: cone.strength,
         reaches,
         overflow,
@@ -1111,12 +1163,11 @@ fn finite(record: &Record) -> Result<(), CodecError> {
             .iter()
             .flat_map(|plate| [plate.chord_mm, plate.cost_mm]),
     )
-    .chain(
-        record
-            .cones
-            .iter()
-            .flat_map(|cone| std::iter::once(cone.strength).chain(cone.doses.iter().copied())),
-    )
+    .chain(record.cones.iter().flat_map(|cone| {
+        [cone.field.ratio, cone.strength]
+            .into_iter()
+            .chain(cone.doses.iter().copied())
+    }))
     .chain(record.doses.iter().flat_map(|dose| [dose.line, dose.field]));
     for value in values {
         if !value.is_finite() {
@@ -1280,8 +1331,11 @@ fn decode_cone(
     vehicle: &VehicleWords,
     cone: &WireCone,
 ) -> Result<SpallCone, CodecError> {
-    let shape = &vocabulary.cone;
-    if cone.reaches.len() != shape.directions_count() {
+    let spread = match vocabulary.cone.spread(cone.field) {
+        Ok(spread) => spread,
+        Err(error) => return refuse(format!("a cone's field is outside its law: {error}")),
+    };
+    if cone.reaches.len() != spread.directions_count() {
         return refuse("the cone's ray count is not the vocabulary's shape");
     }
     let axis = cone.axis.direction();
@@ -1297,7 +1351,7 @@ fn decode_cone(
     for (&reach, (direction, profile)) in cone
         .reaches
         .iter()
-        .zip(shape.directions_about(dir, lateral))
+        .zip(spread.directions_about(dir, lateral))
     {
         let mm = if reach == REACH_OVERFLOW {
             *overflow
@@ -1332,7 +1386,8 @@ fn decode_cone(
         t: seconds(cone.t),
         origin: origin.to_array(),
         axis: axis.to_array(),
-        half_angle_deg: shape.half_angle().to_degrees(),
+        field: cone.field,
+        half_angle_deg: spread.half_angle().to_degrees(),
         strength: cone.strength,
         fragments,
     })

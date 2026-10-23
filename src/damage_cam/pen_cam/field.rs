@@ -49,7 +49,7 @@ pub struct Disc {
 }
 
 impl Disc {
-    /// The disc of a cone about unit `axis` of half-angle `half_angle` (rad) whose on-axis strength
+    /// The disc of a cone about unit `axis` of half-angle `half_angle` (rad) whose strength
     /// is `strength` (ref-mm), sampled at `rays`.
     pub fn of(axis: Vec3, half_angle: f32, strength: f32, rays: &[Ray]) -> Self {
         let (u, v) = axis.any_orthonormal_pair();
@@ -343,7 +343,7 @@ mod tests {
         }
     }
 
-    /// A fixture cone of `n` spiral directions about −Z, half-angle 25° and on-axis strength
+    /// A fixture cone of `n` spiral directions about −Z, half-angle 25° and strength
     /// 10 ref-mm, direction `k` at disc point `q` reaching `reach(k, q)` with strength fraction
     /// `weight(q)`. Fixture data.
     fn fixture_cone(

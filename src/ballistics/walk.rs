@@ -212,31 +212,42 @@ impl FaceHit {
     }
 }
 
-/// What a volume is made of, as the walk and the mechanisms read it: the substance's identity and
-/// its declared resistance, reference-mm per metre of chord (`crate::substances::HardSubstance::factor`).
-/// Hard matter only: a witness (ADR-0040) states no resistance and is never a walk volume.
+/// What a volume is made of, as the walk and the mechanisms read it: the substance's identity, its
+/// declared resistance, reference-mm per metre of chord
+/// (`crate::substances::HardSubstance::factor`), and the field law's ratio of the spall cone an exit through it throws
+/// (`crate::substances::HardSubstance::debris_ratio`). Hard matter only: a witness (ADR-0040)
+/// states no resistance and is never a walk volume.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct VolumeMaterial {
     pub substance: SubstanceId,
     pub factor: f32,
+    pub debris_ratio: f32,
 }
+
+/// The debris ratio of every fixture material ([`VolumeMaterial::fixture`]): a 30° cone. Fixture
+/// data.
+#[cfg(test)]
+pub(crate) const FIXTURE_DEBRIS_RATIO: f32 = 2.0;
 
 impl VolumeMaterial {
     /// The hard substance named `name` in `registry`. Hard error on an unknown name or a witness.
     pub fn of(registry: &SubstanceRegistry, name: &str) -> Result<Self, SubstanceError> {
+        let hard = registry.hard(name)?;
         Ok(Self {
             substance: registry.id(name)?,
-            factor: registry.hard(name)?.factor(),
+            factor: hard.factor(),
+            debris_ratio: hard.debris_ratio,
         })
     }
 
     /// A fixture material of `factor` reference-mm per metre, its substance one per factor
-    /// ([`SubstanceId::fixture`]).
+    /// ([`SubstanceId::fixture`]), its debris ratio [`FIXTURE_DEBRIS_RATIO`].
     #[cfg(test)]
     pub(crate) fn fixture(factor: f32) -> Self {
         Self {
             substance: SubstanceId::fixture(factor),
             factor,
+            debris_ratio: FIXTURE_DEBRIS_RATIO,
         }
     }
 }
@@ -1737,6 +1748,8 @@ pub struct ExitMember {
     /// The factor of the body's last layer on this ray, the one the exit leaves: the body's highest,
     /// since a body never steps down in factor.
     pub rear_factor: f32,
+    /// The debris ratio of that layer: its hardest presence's, the greatest on a tie of factors.
+    pub debris_ratio: f32,
 }
 
 /// One body exit of a crossing, aggregated over the disc: geometry only, before any mechanism
@@ -1787,6 +1800,10 @@ pub struct SpallSource {
     /// `f_rear`: the factor of the body's last layer before the exit, the highest over the reached
     /// members ([`ExitMember::rear_factor`]).
     pub rear_factor: f32,
+    /// `λ`, the field law's ratio of the cone thrown here: the debris ratio of the rear layer
+    /// [`Self::rear_factor`] reads, the member with the highest factor's, the greatest ratio on a
+    /// tie ([`ExitMember::debris_ratio`]).
+    pub debris_ratio: f32,
     /// The round's speed (m/s) where the earliest member entered the body.
     pub entry_speed: f32,
     /// The round's speed (m/s) where the latest reached member left it.
@@ -1799,13 +1816,13 @@ pub struct SpallSource {
 }
 
 impl SpallSource {
-    /// The cone's on-axis strength against the shipped reference calibre
+    /// The cone's strength against the shipped reference calibre
     /// ([`super::spall_cone::reference_calibre`]); [`Self::strength_against`] states the law.
     pub fn strength(&self) -> f32 {
         self.strength_against(super::spall_cone::reference_calibre())
     }
 
-    /// The cone's on-axis strength `S = spend × κ × (v_exit / v_entry)² × (d / d_ref)²`
+    /// The cone's strength `S = spend × κ × (v_exit / v_entry)² × (d / d_ref)²`
     /// (reference-mm), `κ = f_rear / f_ref` ([`Self::rear_factor`] over [`REFERENCE_FACTOR`]), `d`
     /// the hole's calibre ([`Self::caliber`]) and `d_ref` = `reference` (m): the spend at the exit,
     /// scaled by how competent the exit material's debris is against the reference steel, by the
@@ -2410,6 +2427,17 @@ fn entity_shares(
         .collect()
 }
 
+/// The debris ratio of a layer of `present` volumes: its hardest presence's, the greatest on a tie
+/// of factors (a total order on `(factor, ratio)`, so the answer does not hang on volume order);
+/// zero for an empty layer.
+fn debris_ratio(present: &[Presence]) -> f32 {
+    present
+        .iter()
+        .map(|presence| (presence.material.factor, presence.material.debris_ratio))
+        .max_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)))
+        .map_or(0.0, |(_, ratio)| ratio)
+}
+
 /// The body exits of one crossing, per sample, then grouped over the disc ([`BodyExit`]) and
 /// ordered by mean exit depth; with the number of samples one of whose runs exits material.
 fn body_exits(
@@ -2424,7 +2452,7 @@ fn body_exits(
         let base = corridor.origin + corridor.samples[sample].offset;
         let mut ordinals: BTreeMap<(Vec<SubstanceId>, bool), usize> = BTreeMap::new();
         let mut member = |substances: Vec<SubstanceId>,
-                          rear_factor: f32,
+                          (rear_factor, debris_ratio): (f32, f32),
                           start: f64,
                           end: f64,
                           face: Option<Vec3>,
@@ -2444,6 +2472,7 @@ fn body_exits(
                     face,
                     exited,
                     rear_factor,
+                    debris_ratio,
                 });
             *ordinal += 1;
         };
@@ -2457,10 +2486,10 @@ fn body_exits(
             {
                 saw_exit = true;
             }
-            // (substances so far, factor of its latest layer, start, end, volumes of its latest
-            // layer) of the body the sample is in. A layer resisting at least as much as the one
-            // before it continues the body.
-            type Body = (Vec<SubstanceId>, f32, f64, f64, Vec<Entity>);
+            // (substances so far, factor and debris ratio of its latest layer, start, end, volumes
+            // of its latest layer) of the body the sample is in. A layer resisting at least as
+            // much as the one before it continues the body.
+            type Body = (Vec<SubstanceId>, (f32, f32), f64, f64, Vec<Entity>);
             let mut body: Option<Body> = None;
             for layer in layers_over(&walks[sample].layers, extent.start, extent.end) {
                 let (from, to) = (layer.start.max(extent.start), layer.end.min(extent.end));
@@ -2472,29 +2501,30 @@ fn body_exits(
                     .present
                     .iter()
                     .fold(0.0f32, |most, presence| most.max(presence.material.factor));
+                let rear = (factor, debris_ratio(&layer.present));
                 let volumes: Vec<Entity> = layer.present.iter().map(|p| p.volume).collect();
                 body = Some(match body.take() {
-                    Some((held, before, start, end, last)) if factor < before => {
+                    Some((held, before, start, end, last)) if factor < before.0 => {
                         let left = last
                             .into_iter()
                             .filter(|volume| !volumes.contains(volume))
                             .collect();
                         member(held, before, start, end, None, left);
-                        (substances, factor, from, to, volumes)
+                        (substances, rear, from, to, volumes)
                     }
                     Some((mut held, _, start, _, _)) => {
                         held.extend(substances);
                         held.sort();
                         held.dedup();
-                        (held, factor, start, to, volumes)
+                        (held, rear, start, to, volumes)
                     }
-                    None => (substances, factor, from, to, volumes),
+                    None => (substances, rear, from, to, volumes),
                 });
             }
-            if let Some((held, factor, start, end, last)) = body
-                && factor > 0.0
+            if let Some((held, rear, start, end, last)) = body
+                && rear.0 > 0.0
             {
-                member(held, factor, start, end, Some(extent.exit_normal), last);
+                member(held, rear, start, end, Some(extent.exit_normal), last);
             }
         }
         if saw_exit {
@@ -3235,6 +3265,11 @@ fn spall_sources<M: Mechanism>(
                 .iter()
                 .map(|member| member.rear_factor)
                 .fold(0.0, f32::max),
+            debris_ratio: reached
+                .iter()
+                .map(|member| (member.rear_factor, member.debris_ratio))
+                .max_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)))
+                .map_or(0.0, |(_, ratio)| ratio),
             entry_speed: mechanism.speed(entry) as f32,
             exit_speed: mechanism.speed(exit_state) as f32,
             coverage: (count as f64 / disc as f64) as f32,

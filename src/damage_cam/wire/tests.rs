@@ -215,8 +215,8 @@ fn assert_round_trip(name: &str, decoded: &PenetrationReport, recorded: &Penetra
         assert_point(name, d.origin, r.origin);
         assert_direction(name, d.axis, r.axis);
         assert_eq!(
-            (d.half_angle_deg, d.strength, d.fragments.len()),
-            (r.half_angle_deg, r.strength, r.fragments.len()),
+            (d.field, d.half_angle_deg, d.strength, d.fragments.len()),
+            (r.field, r.half_angle_deg, r.strength, r.fragments.len()),
             "{name}"
         );
         let (d_origin, r_origin) = (Vec3::from(d.origin), Vec3::from(r.origin));
@@ -323,6 +323,112 @@ fn a_reach_past_u16_millimetres_overflows() {
     assert_eq!(built.full.record.cones[0].overflow, [70_000, 4_000_250]);
     let decoded = built.full.decode(&vocabulary).unwrap();
     assert_round_trip(&name, &decoded, &report);
+}
+
+/// The first recorded scenario that throws a cone.
+fn with_a_cone(records: &[(String, PenetrationReport)]) -> &(String, PenetrationReport) {
+    records
+        .iter()
+        .find(|(_, report)| !report.spall.is_empty())
+        .expect("a recorded scenario throws a cone")
+}
+
+/// `report` with every cone thrown under `field` instead: each ray's direction and strength the
+/// shipped shape's spread by it about the cone's axis, its reach and hits kept.
+fn rethrown(report: &PenetrationReport, field: FieldDescriptor) -> PenetrationReport {
+    let spread = ConeShape::shipped().spread(field).unwrap();
+    let mut report = report.clone();
+    for cone in &mut report.spall {
+        let origin = Vec3::from(cone.origin);
+        let axis = Dir3::new(Vec3::from(cone.axis)).unwrap();
+        cone.field = field;
+        cone.half_angle_deg = spread.half_angle().to_degrees();
+        for (fragment, (direction, weight)) in
+            cone.fragments.iter_mut().zip(spread.directions(axis))
+        {
+            let reach = (Vec3::from(fragment.end) - origin).length();
+            fragment.end = (origin + Vec3::from(direction) * reach).to_array();
+            fragment.strength = cone.strength * weight;
+        }
+    }
+    report
+}
+
+/// A cone's field rides the wire: thrown under a wide ratio (1.5, a 41.8° cone) and a narrow one
+/// (4, 14.5°), both fixture data, a cone comes back with its descriptor, its half-angle and every
+/// ray's strength to the bit, and its ray ends within the quanta. A decoder that spread the shape
+/// by any descriptor but the cone's own fails here.
+#[test]
+fn a_cone_of_any_ratio_round_trips() {
+    let records = records();
+    let vocabulary = vocabulary(&records);
+    let (name, report) = with_a_cone(&records);
+    for ratio in [1.5, 4.0] {
+        let field = FieldDescriptor::ball(ratio);
+        let report = rethrown(report, field);
+        let built = BuiltExplanation::build(&vocabulary, &recorded(&report))
+            .unwrap_or_else(|err| panic!("{name} at {ratio}: {err}"));
+        assert!(
+            built
+                .full
+                .record
+                .cones
+                .iter()
+                .all(|cone| cone.field == field)
+        );
+        let decoded = built.full.decode(&vocabulary).unwrap();
+        assert_round_trip(name, &decoded, &report);
+    }
+}
+
+/// A cone its law did not throw is refused both ways. The encoder refuses a ray's strength one ulp
+/// off `S·f_k`, a half-angle not its descriptor's, a ratio below the ball's domain, and strengths
+/// thrown under one ratio carried with another's descriptor; the decoder refuses a cone whose
+/// ratio is outside the domain. Each would hand the client rays the authority never threw.
+#[test]
+fn a_cone_off_its_law_is_refused() {
+    let records = records();
+    let vocabulary = vocabulary(&records);
+    let (_, report) = with_a_cone(&records);
+    let built = BuiltExplanation::build(&vocabulary, &recorded(report)).unwrap();
+    let spoilers: [fn(&mut SpallCone); 4] = [
+        |cone| {
+            let strength = &mut cone.fragments[5].strength;
+            *strength = f32::from_bits(strength.to_bits() + 1);
+        },
+        |cone| cone.half_angle_deg += 0.01,
+        |cone| cone.field.ratio = 0.5,
+        |cone| {
+            cone.field.ratio *= 1.01;
+            let spread = ConeShape::shipped().spread(cone.field).unwrap();
+            cone.half_angle_deg = spread.half_angle().to_degrees();
+        },
+    ];
+    for (index, spoil) in spoilers.into_iter().enumerate() {
+        let mut report = report.clone();
+        spoil(&mut report.spall[0]);
+        assert!(
+            BuiltExplanation::build(&vocabulary, &recorded(&report)).is_err(),
+            "spoiler {index}"
+        );
+    }
+    let mut explanation = built.full;
+    assert!(explanation.decode(&vocabulary).is_ok());
+    explanation.record.cones[0].field.ratio = 0.5;
+    assert!(explanation.decode(&vocabulary).is_err());
+}
+
+/// The fingerprint folds the law a decoder spreads a cone by: another exponent of the ball, or
+/// another direction count, folds another, so a client whose law differs refuses an explanation
+/// rather than rebuild other weights from the same descriptor.
+#[test]
+fn the_fingerprint_folds_the_field_law() {
+    let shape = ConeShape::shipped();
+    let base = fold_cone(FNV_OFFSET_BASIS, shape, BALL_EXPONENT);
+    assert_eq!(base, fold_cone(FNV_OFFSET_BASIS, shape, BALL_EXPONENT));
+    assert_ne!(base, fold_cone(FNV_OFFSET_BASIS, shape, BALL_EXPONENT + 1));
+    let wider = ConeShape::shipped_at(shape.directions_count() + 1);
+    assert_ne!(base, fold_cone(FNV_OFFSET_BASIS, &wider, BALL_EXPONENT));
 }
 
 /// The quanta's bounds hold over a dense sweep: every direction of a Fibonacci sphere, every angle
@@ -627,10 +733,11 @@ fn a_non_finite_number_is_refused() {
         .expect("a recorded scenario crosses a plate and doses through a cone");
     let built = BuiltExplanation::build(&vocabulary, &recorded(report)).unwrap();
     assert!(built.full.decode(&vocabulary).is_ok());
-    let hostile: [fn(&mut Record); 5] = [
+    let hostile: [fn(&mut Record); 6] = [
         |record| record.speed_mps = f32::NAN,
         |record| record.impact.incidence_deg = f32::INFINITY,
         |record| record.cones[0].strength = f32::NEG_INFINITY,
+        |record| record.cones[0].field.ratio = f32::INFINITY,
         |record| record.doses[0].field = f32::NAN,
         |record| record.plates[0].cost_mm = f32::NAN,
     ];

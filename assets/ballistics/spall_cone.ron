@@ -1,23 +1,19 @@
 // The spall cone's shape and its calibration — the field thrown from every body exit a round
 // reaches. Read by `src/ballistics/spall_cone.rs`, embedded and parsed once, validated at parse.
-// The law itself (strength, profile, shadowing, dose) is design doc §5,
-// `.agents/docs/design/armor-penetration-and-damage.md`; this file holds its shape data and its
+// The law itself (strength, the ball law's centre-weighted profile, shadowing, dose) is design doc
+// §5, `.agents/docs/design/armor-penetration-and-damage.md`; this file holds its shape data and its
 // calibration: the number that converts its dose to HP points and the calibre that number was set
-// against, the reference a cone's hole-area term is measured from.
+// against, the reference a cone's hole-area term is measured from. A cone's half-angle and profile
+// are not here: both follow from its field's ratio, the exit layer's substance's
+// (`debris_half_angle_deg` in `assets/materials/materials.ron`).
 //
 // Every value here is a choice the owner can change by editing this file alone; none is a
-// constant of the law. The playtest fork on the half-angle and the axis is F5 in
+// constant of the law. The playtest fork on the axis is F5 in
 // `.agents/scratch/playtest-forks/README.md`.
 //
 // PROVENANCE: every value is authored `(value, Kind("source or reason"))`, Kind one of Measured,
 // Derived, Tuned, Resolution, Unknown (`src/provenance.rs`); a value without one does not load.
 (
-    // Half-angle α (degrees) of the cone: the rim where the profile's strength reaches zero.
-    half_angle_deg: (25.0, Tuned("chosen at random by the owner (playtest fork F5): no measured
-        support is claimed, and it is never a calibration target. For reference, MEASURED
-        normal-impact outer extents of ~26° (Qi et al. 2026,
-        .agents/scratch/damage-cam-2026-10-08/research/cloud-angle-deep.md)")),
-
     // The cone's axis. `RearNormalBisector`: normalize(rear-face outward normal + exit direction)
     // at a genuine exit, the exit direction at an internal step (which has no face).
     // `ExitDirection`: the exit direction everywhere.
@@ -26,9 +22,10 @@
         measured against 22.5° predicted at 45° obliquity (Verolme 1997, Recht & Howell 1967;
         research/cloud-angle-deep.md)")),
 
-    // N, the number of directions the cone is sampled by, in equal-solid-angle strata of weight
-    // 1/N. The emitted total is S/2 at every N, so N changes how finely a box's dose is resolved,
-    // never how much the cone carries.
+    // N, the number of directions the cone is sampled by, in equal-solid-angle strata of 1/N of the
+    // cone each, every one weighted by its stratum's share of the field. The emitted total is S/2
+    // at every N, so N changes how finely a box's dose is resolved, never how much the cone
+    // carries.
     directions: (64, Tuned("owner decision 2026-10-17 ('64 for now'), the cost against the
         resolution: one throw under this law MEASURED 2026-10-17 by
         ballistics::pen_cam::spall_law_cost (release, macOS arm64, best of 9, the 6 cones of the
@@ -36,14 +33,6 @@
         step is 5.6 HP per direction on the s1 cone at 64 (DERIVED: S/2 = 5.09 reference-mm ×
         70 HP per reference-mm / 64). The count changes how finely
         a box's dose is resolved, never the emitted total")),
-
-    // How the strength is spread over the directions. `Flat`: S/2 along every direction.
-    // `Linear`: S·(cos θ − cos α)/(1 − cos α), greatest on the axis, zero at the rim, the same
-    // total.
-    profile: (Flat, Tuned("owner decision 2026-10-17 (playtest fork F6): the player controls the
-        shell and learns the cone's shape; a fade across the angle is nuance outside his control.
-        Linear, the measured fall-off of fragment fluence off the debris axis
-        (research/cloud-angle-deep.md), is kept as the dial")),
 
     // How a direction passes through the hard bodies it meets. `FirstSolid`: stopped by the first
     // hard body it enters, a box there taking its whole strength, armour none. `Partial`: spent by
@@ -57,18 +46,22 @@
     // at `ballistics::HP_PER_REFERENCE_MM`. A field deposit of d reference-mm enters a box's
     // per-shot dose as d × this / that, in whole dose units; the cone's strength S stays in
     // reference-mm. It sets the potency of every cone at once and nothing else: the shape, the
-    // profile and the passage all conserve a cone's emitted total.
+    // field law and the passage all conserve a cone's emitted total.
     hp_per_reference_mm: (70, Tuned("owner decision 2026-10-23 (#2 in
         .agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md):
         the 30 HP crew pool (box_classes.ron) with a 0.2 m² face, the intended humanoid's
         presented area, is emptied within about 2 m of the hole on the recorded s1 cone, a weak
-        ordinary perforation. DERIVED: a box of face A at distance R fully inside a cone of
-        half-angle α catches A / (R² Ω_c) of its emission E, Ω_c = 2π(1 − cos α) = 0.589 sr at
-        25°, so its knockout radius is R = sqrt(E A / (pool Ω_c)); on the s1 cone (S/2 = 5.09
-        reference-mm) that is 0.76 m at the line's 10 HP per reference-mm and 2.0 m at 70. The
-        placeholder crew box's MEASURED 0.516 m² mean face gives about 3.2 m (DERIVED) until the
-        humanoid shape lands. A box whose pool is its class × A has R = sqrt(E / (class Ω_c)),
-        the same for every box of its class")),
+        ordinary perforation; kept at 70 under the ball law (owner decision 2026-10-23, night, same
+        file), which keeps every cone's emitted total and moves its potency toward the axis.
+        DERIVED: a box of face A at distance R fully inside a cone of half-angle α, at angle θ off
+        its axis, catches 2 f(θ) A / (R² Ω_c) of its emission E = S/2, Ω_c = 2π(1 − cos α) and
+        f(θ) the ball's weight there (½ averaged over the cone), so its knockout radius is
+        R = sqrt(2 f(θ) E A / (pool Ω_c)). On the s1 cone (S/2 = 5.09 reference-mm through RHA,
+        α = 26.2°, Ω_c = 0.646 sr) that is 1.92 m at an average spot and 2.49 m on the axis
+        (f = 0.842), against 0.73 m and 0.94 m at the line's 10 HP per reference-mm. The
+        placeholder crew box's MEASURED 0.516 m² mean face gives about 3.1 m and 4.0 m (DERIVED)
+        until the humanoid shape lands. A box whose pool is its class × A has
+        R = sqrt(2 f(θ) E / (class Ω_c)), the same for every box of its class")),
 
     // d_ref (m), the calibre `hp_per_reference_mm` was set against. A cone's strength goes as the
     // area of the hole its round's penetrator made, (d / d_ref)² of a hole of calibre d (design

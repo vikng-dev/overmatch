@@ -31,6 +31,8 @@
 //!   behaviour ([`Resistance::Effective`]): it resists as a fixed fraction of the reference force at
 //!   every speed. Declared, never inferred from a fill fraction or from facts the law does not yet
 //!   read.
+//! - The debris half-angle: the rim of the spall cone a body exit through it throws, authored in
+//!   degrees and carried as the field law's ratio ([`HardSubstance::debris_ratio`]).
 //!
 //! FAIL-LOUD, NO DEFAULTS (ADR-0011, and §13.1's defect class): an unknown substance name is a hard
 //! error naming the name, never a fallback; a malformed entry is refused at parse, naming the entry.
@@ -156,6 +158,10 @@ pub struct HardSubstance {
     /// Whether the runtime livery composes onto this substance — exterior steels yes, interior
     /// substances no. View-layer data; the walk never reads it.
     pub paintable: bool,
+    /// `λ = 1/sin α` of the authored debris half-angle `α`: the field law's ratio for the spall
+    /// cone a body exit through this substance throws (design doc §5), at least 1 and in the law's
+    /// domain (checked at parse).
+    pub debris_ratio: f32,
     /// The substance's material facts, or `None` where none are sourced.
     pub facts: Option<MaterialFacts>,
 }
@@ -185,19 +191,22 @@ impl Substance {
         match self {
             Self::Hard(hard) => Matter::Hard {
                 factor: hard.factor(),
+                debris_ratio: hard.debris_ratio,
             },
             Self::Witness => Matter::Witness,
         }
     }
 }
 
-/// A substance's kind as a ballistic primitive carries it, resolved once at the bake: the factor
-/// the walk reads for hard matter, nothing for a witness.
+/// A substance's kind as a ballistic primitive carries it, resolved once at the bake: what the
+/// walk reads of hard matter, nothing for a witness.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Matter {
-    /// The §13.2 field value: reference-mm per metre of chord.
     Hard {
+        /// The §13.2 field value: reference-mm per metre of chord.
         factor: f32,
+        /// [`HardSubstance::debris_ratio`].
+        debris_ratio: f32,
     },
     Witness,
 }
@@ -211,6 +220,8 @@ enum SubstanceFile {
     Hard {
         resistance: ResistanceFile,
         paintable: bool,
+        /// Degrees, converted once at parse ([`debris_ratio`]).
+        debris_half_angle_deg: Sourced<f64>,
         facts: Option<FactsFile>,
     },
     Witness,
@@ -231,29 +242,51 @@ struct FactsFile {
     poisson_ratio: Sourced<f64>,
 }
 
-impl From<SubstanceFile> for Substance {
-    fn from(file: SubstanceFile) -> Self {
-        match file {
-            SubstanceFile::Hard {
-                resistance,
-                paintable,
-                facts,
-            } => Self::Hard(HardSubstance {
-                resistance: match resistance {
-                    ResistanceFile::Reference => Resistance::Reference,
-                    ResistanceFile::Effective(Sourced(factor)) => Resistance::Effective(factor),
-                },
-                paintable,
-                facts: facts.map(|facts| MaterialFacts {
-                    density: facts.density.0,
-                    flow_strength: facts.flow_strength.0,
-                    youngs_modulus: facts.youngs_modulus.0,
-                    poisson_ratio: facts.poisson_ratio.0,
-                }),
-            }),
-            SubstanceFile::Witness => Self::Witness,
-        }
+/// The field law's ratio `λ = 1/sin α` of the debris half-angle `degrees` authored for substance
+/// `name`, converted once here with `libm`'s `sin` (the same bits on every shipped target).
+/// Refuses an angle outside `(0°, 90°]` and one the field law cannot resolve
+/// ([`crate::ballistics::spall_cone::FieldDescriptor::check`]), naming the substance.
+fn debris_ratio(name: &str, degrees: f64) -> Result<f32, String> {
+    if !(degrees > 0.0 && degrees <= 90.0) {
+        return Err(format!(
+            "substance {name:?} has a debris half-angle of {degrees}° — a plate exit's spall \
+             cone opens to an angle in (0°, 90°]"
+        ));
     }
+    let ratio = (1.0 / libm::sin(degrees * std::f64::consts::PI / 180.0)) as f32;
+    crate::ballistics::spall_cone::FieldDescriptor::ball(ratio)
+        .check()
+        .map_err(|why| {
+            format!("substance {name:?} has a debris half-angle of {degrees}°: {why}")
+        })?;
+    Ok(ratio)
+}
+
+/// Substance `name` as authored, converted: the debris half-angle to its ratio
+/// ([`debris_ratio`]), refused there by name.
+fn converted(name: &str, file: SubstanceFile) -> Result<Substance, String> {
+    Ok(match file {
+        SubstanceFile::Hard {
+            resistance,
+            paintable,
+            debris_half_angle_deg,
+            facts,
+        } => Substance::Hard(HardSubstance {
+            resistance: match resistance {
+                ResistanceFile::Reference => Resistance::Reference,
+                ResistanceFile::Effective(Sourced(factor)) => Resistance::Effective(factor),
+            },
+            paintable,
+            debris_ratio: debris_ratio(name, debris_half_angle_deg.0)?,
+            facts: facts.map(|facts| MaterialFacts {
+                density: facts.density.0,
+                flow_strength: facts.flow_strength.0,
+                youngs_modulus: facts.youngs_modulus.0,
+                poisson_ratio: facts.poisson_ratio.0,
+            }),
+        }),
+        SubstanceFile::Witness => Substance::Witness,
+    })
 }
 
 /// The parsed `materials.ron` — every substance in the game, keyed by material datablock name.
@@ -301,7 +334,9 @@ impl<'de> Deserialize<'de> for SubstanceMap {
                 // ordered by construction rather than by hash seed.
                 let mut out: BTreeMap<String, Substance> = BTreeMap::new();
                 while let Some((name, substance)) = access.next_entry::<String, SubstanceFile>()? {
-                    let substance = checked(&name, substance.into()).map_err(de::Error::custom)?;
+                    let substance = converted(&name, substance)
+                        .and_then(|substance| checked(&name, substance))
+                        .map_err(de::Error::custom)?;
                     if out.insert(name.clone(), substance).is_some() {
                         return Err(de::Error::custom(format!(
                             "substance {name:?} is declared twice — the datablock name is the join \
@@ -531,7 +566,7 @@ mod tests {
     fn with(extra: &str) -> String {
         format!(
             r#"(substances: {{
-                "Ref": Hard(resistance: Reference, paintable: true, facts: Some((
+                "Ref": Hard(resistance: Reference, paintable: true, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: Some((
                         density: (7850.0, Tuned("fixture")),
                         flow_strength: (1.0e9, Tuned("fixture")),
                         youngs_modulus: (205.0e9, Tuned("fixture")),
@@ -606,7 +641,7 @@ mod tests {
     #[test]
     fn an_unknown_field_fails_the_parse() {
         let err = SubstanceRegistry::from_ron(&with(
-            r#""Steel": Hard(resistance: Effective((900.0, Tuned("fixture"))), paintable: true, facts: None, hardness: 3.0),"#,
+            r#""Steel": Hard(resistance: Effective((900.0, Tuned("fixture"))), paintable: true, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None, hardness: 3.0),"#,
         ))
         .expect_err("deny_unknown_fields must reject a stray key");
         assert!(matches!(err, SubstanceError::Parse(_)));
@@ -615,10 +650,11 @@ mod tests {
     /// A factor or a fact authored without its provenance does not load.
     #[test]
     fn a_number_without_provenance_fails_the_parse() {
-        let bare_factor =
-            with(r#""Cast": Hard(resistance: Effective(900.0), paintable: true, facts: None),"#);
+        let bare_factor = with(
+            r#""Cast": Hard(resistance: Effective(900.0), paintable: true, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
+        );
         let bare_fact = with(
-            r#""Mild": Hard(resistance: Effective((800.0, Tuned("fixture"))), paintable: true,
+            r#""Mild": Hard(resistance: Effective((800.0, Tuned("fixture"))), paintable: true, debris_half_angle_deg: (26.2, Tuned("fixture")),
                 facts: Some((density: 7900.0, flow_strength: (0.4e9, Tuned("fixture")),
                 youngs_modulus: (190.0e9, Tuned("fixture")), poisson_ratio: (0.29, Tuned("fixture"))))),"#,
         );
@@ -634,8 +670,8 @@ mod tests {
     #[test]
     fn a_duplicated_substance_name_fails_the_parse() {
         let err = SubstanceRegistry::from_ron(&with(
-            r#""Cast": Hard(resistance: Effective((900.0, Tuned("fixture"))), paintable: true, facts: None),
-               "Cast": Hard(resistance: Effective((10.0, Tuned("fixture"))), paintable: false, facts: None),"#,
+            r#""Cast": Hard(resistance: Effective((900.0, Tuned("fixture"))), paintable: true, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),
+               "Cast": Hard(resistance: Effective((10.0, Tuned("fixture"))), paintable: false, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
         ))
         .expect_err("a duplicate key must not silently overwrite");
         assert!(err.to_string().contains("Cast"), "{err}");
@@ -646,7 +682,7 @@ mod tests {
     #[test]
     fn a_negative_factor_fails_the_parse() {
         let err = SubstanceRegistry::from_ron(&with(
-            r#""Rubber": Hard(resistance: Effective((-50.0, Tuned("fixture"))), paintable: false, facts: None),"#,
+            r#""Rubber": Hard(resistance: Effective((-50.0, Tuned("fixture"))), paintable: false, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
         ))
         .expect_err("a negative factor must not parse");
         assert!(err.to_string().contains("Rubber"), "{err}");
@@ -658,7 +694,7 @@ mod tests {
     fn a_non_finite_factor_fails_the_parse() {
         for literal in ["NaN", "inf", "-inf"] {
             let err = SubstanceRegistry::from_ron(&with(&format!(
-                r#""Flesh": Hard(resistance: Effective(({literal}, Tuned("fixture"))), paintable: false, facts: None),"#
+                r#""Flesh": Hard(resistance: Effective(({literal}, Tuned("fixture"))), paintable: false, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#
             )))
             .unwrap_err();
             assert!(
@@ -668,13 +704,57 @@ mod tests {
         }
     }
 
+    /// The debris half-angle converts once, at parse, to the field law's ratio `1/sin α` (90° to
+    /// exactly 1, the hemisphere), and an angle outside `(0°, 90°]` — or one the law cannot
+    /// resolve, or none at all — is refused naming the substance. The spall cone's width rests on it: an
+    /// angle past 90° would throw back into the plate the cone leaves, and a ratio below 1 is a
+    /// field the ball law does not have. Fixture angles.
+    #[test]
+    fn a_debris_half_angle_outside_the_quarter_turn_is_refused() {
+        let entry = |degrees: &str| {
+            with(&format!(
+                r#""Odd": Hard(resistance: Effective((500.0, Tuned("fixture"))), paintable: false, debris_half_angle_deg: ({degrees}, Tuned("fixture")), facts: None),"#
+            ))
+        };
+        let ratio = |degrees: &str| {
+            SubstanceRegistry::from_ron(&entry(degrees))
+                .unwrap()
+                .hard("Odd")
+                .unwrap()
+                .debris_ratio
+        };
+        assert_eq!(ratio("90.0"), 1.0);
+        let thirty = ratio("30.0");
+        assert!((thirty - 2.0).abs() < 2.0 * f32::EPSILON, "{thirty}");
+        assert!(
+            ratio("26.2") > ratio("40.0"),
+            "a narrower cone has the larger ratio"
+        );
+        for degrees in ["0.0", "-5.0", "90.5", "180.0", "NaN", "inf", "1.0e-9"] {
+            let err = SubstanceRegistry::from_ron(&entry(degrees)).expect_err(degrees);
+            assert!(err.to_string().contains("Odd"), "{degrees}: {err}");
+            assert!(
+                err.to_string().contains("debris half-angle"),
+                "{degrees}: {err}"
+            );
+        }
+        let missing = SubstanceRegistry::from_ron(&with(
+            r#""Odd": Hard(resistance: Effective((500.0, Tuned("fixture"))), paintable: false, facts: None),"#,
+        ))
+        .expect_err("a hard entry states its debris half-angle");
+        assert!(
+            missing.to_string().contains("debris_half_angle_deg"),
+            "{missing}"
+        );
+    }
+
     /// `-0.0` is canonicalized: "no resistance" gets exactly one bit pattern, because the walk
     /// coalesces its canonical spans by factor BITS and a second zero would cut a span where the
     /// field never changed.
     #[test]
     fn negative_zero_is_canonicalized() {
         let registry = SubstanceRegistry::from_ron(&with(
-            r#""Void": Hard(resistance: Effective((-0.0, Tuned("fixture"))), paintable: false, facts: None),"#,
+            r#""Void": Hard(resistance: Effective((-0.0, Tuned("fixture"))), paintable: false, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
         ))
         .expect("zero resistance is legal, it is just nothing");
         assert_eq!(
@@ -717,7 +797,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(", ");
             let err = SubstanceRegistry::from_ron(&with(&format!(
-                r#""Odd": Hard(resistance: Effective((500.0, Tuned("fixture"))), paintable: true, facts: Some(({facts}))),"#
+                r#""Odd": Hard(resistance: Effective((500.0, Tuned("fixture"))), paintable: true, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: Some(({facts}))),"#
             )))
             .expect_err("facts out of domain must not parse");
             assert!(
@@ -732,19 +812,19 @@ mod tests {
     #[test]
     fn the_reference_is_exactly_one_entry_with_facts() {
         let factless = SubstanceRegistry::from_ron(
-            r#"(substances: { "Ref": Hard(resistance: Reference, paintable: true, facts: None) })"#,
+            r#"(substances: { "Ref": Hard(resistance: Reference, paintable: true, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None) })"#,
         )
         .expect_err("a reference without facts must not parse");
         assert!(factless.to_string().contains("Ref"), "{factless}");
 
         let none = SubstanceRegistry::from_ron(
-            r#"(substances: { "Cast": Hard(resistance: Effective((900.0, Tuned("fixture"))), paintable: true, facts: None) })"#,
+            r#"(substances: { "Cast": Hard(resistance: Effective((900.0, Tuned("fixture"))), paintable: true, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None) })"#,
         )
         .expect_err("a registry without a reference must not load");
         assert!(matches!(none, SubstanceError::Reference(_)), "{none}");
 
         let two = SubstanceRegistry::from_ron(&with(
-            r#""Other": Hard(resistance: Reference, paintable: true, facts: Some((
+            r#""Other": Hard(resistance: Reference, paintable: true, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: Some((
                 density: (7800.0, Tuned("fixture")),
                 flow_strength: (1.18e9, Tuned("fixture")),
                 youngs_modulus: (190.0e9, Tuned("fixture")),

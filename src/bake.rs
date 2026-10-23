@@ -1597,7 +1597,10 @@ mod tests {
             substance: Some(PrimitiveSubstance {
                 name: SUBSTANCE.into(),
                 id: crate::substances::SubstanceId::fixture(1000.0),
-                matter: crate::substances::Matter::Hard { factor: 1000.0 },
+                matter: crate::substances::Matter::Hard {
+                    factor: 1000.0,
+                    debris_ratio: 2.0,
+                },
             }),
             certificate: None,
         }
@@ -1870,7 +1873,7 @@ mod tests {
                         .expect("a volume holds only substance primitives");
                     assert!(
                         match substance.matter {
-                            crate::substances::Matter::Hard { factor } => factor > 0.0,
+                            crate::substances::Matter::Hard { factor, .. } => factor > 0.0,
                             crate::substances::Matter::Witness => true,
                         },
                         "`{}` wears `{}`, a hard substance whose factor is not positive",

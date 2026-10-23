@@ -1706,14 +1706,25 @@ fn each_source_uses_the_speeds_across_its_own_body() {
     );
 }
 
-/// A volume table from `(volume, substance, factor)` triples.
+/// A volume table from `(volume, substance, factor)` triples, each of the fixture debris ratio.
 fn substance_table(entries: &[(u32, SubstanceId, f32)]) -> VolumeTable {
-    VolumeTable::new(entries.iter().map(|(v, substance, factor)| {
+    debris_table(
+        &entries
+            .iter()
+            .map(|&(v, substance, factor)| (v, substance, factor, FIXTURE_DEBRIS_RATIO))
+            .collect::<Vec<_>>(),
+    )
+}
+
+/// A volume table from `(volume, substance, factor, debris ratio)` rows.
+fn debris_table(entries: &[(u32, SubstanceId, f32, f32)]) -> VolumeTable {
+    VolumeTable::new(entries.iter().map(|&(v, substance, factor, debris_ratio)| {
         (
-            volume(*v),
+            volume(v),
             VolumeMaterial {
-                substance: *substance,
-                factor: *factor,
+                substance,
+                factor,
+                debris_ratio,
             },
         )
     }))
@@ -1815,6 +1826,49 @@ fn the_strength_scales_by_the_exit_layers_factor_over_the_reference() {
     assert_eq!(cone.rear_factor, REFERENCE_FACTOR);
     let (bare, strength) = strength_of(cone);
     assert_eq!(strength.to_bits(), bare.to_bits());
+}
+
+/// The cone's ratio, and so its half-angle, is its rear layer's substance's, the layer
+/// [`SpallSource::rear_factor`] reads: a body of a softer front and a harder rear in contact, of
+/// different debris ratios, throws one cone at the rear's ratio whichever way the ratios run, and a
+/// plate of either alone throws at its own. A ratio read from the front layer, the greater of the
+/// body's, or one global ratio fails here; the throw's field descriptor rests on it. Fixture
+/// factors and ratios, 50 mm plates head-on.
+#[test]
+fn the_cone_ratio_is_the_rear_layers_substance() {
+    let soft = SubstanceId::fixture(800.0);
+    let hard = SubstanceId::fixture(REFERENCE_FACTOR);
+    for (soft_ratio, hard_ratio) in [(1.5, 3.0), (3.0, 1.5)] {
+        let rows = [
+            (1, soft, 800.0, soft_ratio),
+            (2, hard, REFERENCE_FACTOR, hard_ratio),
+        ];
+        let cones = spall_through(
+            &debris_table(&rows),
+            &[
+                Slab::at(1, 0, 0.5, -AXIS, 0.05),
+                Slab::at(2, 1, 0.55, -AXIS, 0.05),
+            ],
+        );
+        let [cone] = cones.as_slice() else {
+            panic!("a step up continues the body: {cones:?}");
+        };
+        assert_eq!(cone.rear_factor, REFERENCE_FACTOR);
+        assert_eq!(cone.debris_ratio, hard_ratio, "the rear layer's ratio");
+        for row in rows {
+            let alone = spall_through(
+                &debris_table(&[row]),
+                &[Slab::at(row.0, 0, 0.5, -AXIS, 0.05)],
+            );
+            let [plate] = alone.as_slice() else {
+                panic!("one cone: {alone:?}");
+            };
+            assert_eq!(
+                plate.debris_ratio, row.3,
+                "a plate alone throws at its own ratio"
+            );
+        }
+    }
 }
 
 /// The cone's budget goes with the hole's area: two bodies alike but for the calibre of the shot
@@ -3087,7 +3141,7 @@ fn an_interface_is_a_change_of_substance_never_of_volume_alone() {
     // Fixture data: a second substance id at the first one's factor.
     let other = VolumeMaterial {
         substance: SubstanceId::fixture(999.0),
-        factor: 1000.0,
+        ..VolumeMaterial::fixture(1000.0)
     };
     let interfaces = |second: VolumeMaterial| {
         let volumes = VolumeTable::new([

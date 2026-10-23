@@ -29,6 +29,11 @@
 //     ρ / ρ_ref ≈ 1.898.
 //   Cast armour has no sourced row.
 //
+// `debris_half_angle_deg` = the half-angle α (degrees) of the spall cone a body exit through this
+// substance throws, the rim of its debris field: a constant of the material, not of the exit's
+// speed. Converted once at parse to the field law's ratio λ = 1/sin α (design doc §5); refused
+// outside (0°, 90°].
+//
 // PROVENANCE: every number is authored `(value, Kind("source or reason"))`, Kind one of Measured,
 // Derived, Tuned, Resolution, Unknown (`src/provenance.rs`); a number without one does not load.
 // "Q2" below is the research table in
@@ -89,6 +94,12 @@
         "RHA": Hard(
             resistance: Reference,
             paintable: true,
+            debris_half_angle_deg: (26.2, Derived("the constant-angle fit of the MEASURED
+                normal-impact debris extents of Qi et al. 2026, shots 5 and 6 (sin α 0.446 and
+                0.436): reading B of
+                .agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/shape-law.md
+                §2.1–2.2, its source [4]. Those extents are 97 % contours, so the ball's bound
+                may sit up to about 2° wider (§2.2, Quantile)")),
             facts: Some((
                 density: (7850.0, Unknown("generic structural-steel density, carried as the force
                     law's former reference density; Q2 read no RHA-specific value (4340 MEASURED at
@@ -108,6 +119,7 @@
                 gun steel taken as RHA quality, unified at the reference (research pass
                 2026-08-07). Not derived from the facts below, which give ≈ 1129 (DERIVED)"))),
             paintable: true,
+            debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: Some((
                 density: (7800.0, Measured("4340, MakeItFrom 'Quenched and Tempered 4340 Ni-Cr-Mo
                     Steel' (read, secondary), Q2")),
@@ -121,6 +133,7 @@
             resistance: Effective((900.0, Derived("mid of cast armour running ~5–15 % below rolled
                 ballistically (research pass 2026-08-07)"))),
             paintable: true,
+            debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: None,
         ),
         "MildSteel": Hard(
@@ -128,6 +141,7 @@
                 at ~0.8× RHA (research pass 2026-08-07). Not derived from the facts below, which
                 give ≈ 460 (DERIVED)"))),
             paintable: true,
+            debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: Some((
                 density: (7900.0, Measured("1020, MakeItFrom via search excerpt (read, secondary;
                     the page redirected), Q2")),
@@ -143,6 +157,7 @@
                 fraction along a shot line ≈ 140, rounded to 150 (research pass 2026-08-07). The
                 fill scaling is an assumption, not a fact"))),
             paintable: false,
+            debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: None,
         ),
         "Ammunition": Hard(
@@ -150,6 +165,7 @@
                 per-node factors of the first tank file (2026-08-06). Settled by an effective
                 resistance for stowed rounds and propellant"))),
             paintable: false,
+            debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: None,
         ),
         "Rubber": Hard(
@@ -157,6 +173,7 @@
                 per-node factors of the first tank file (2026-08-06). Settled by a penetration
                 equivalence for road-wheel rubber"))),
             paintable: false,
+            debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: None,
         ),
         // A sub-calibre round's penetrator core (`rounds.ron`); no armour is made of it. Its facts
@@ -168,6 +185,7 @@
                 when the core-vs-plate hardness contest reads it. Not derived from the facts below,
                 which give ≈ 4160 (DERIVED)"))),
             paintable: false,
+            debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: Some((
                 density: (14900.0, Measured("14.9 g/cm³ (ASTM C20), grade ACI-Co6 (WC, 6 % cobalt,
                     submicron grain): CoorsTek, Tungsten Carbide datasheet 01129 E (2017), read")),
