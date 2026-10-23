@@ -2,7 +2,9 @@
 // The pen cam demo's scripted shots (`demo/ux-spec.md` §5), recorded by the real march at the
 // bound tank (`ballistics::pen_cam`). Positions are metres in the target's spawn frame: the tank
 // root at the origin, -Z its front, +Y up; a pose turns the tank under the shot. `verdict` is what
-// the shot earns on the bound tank today, checked on every run. Every shot is fixture data.
+// the shot earns on the bound tank today, checked on every run. `round` names a key in the
+// weapon's `rounds` list; the weapon's default round fires when it is absent. Every shot is
+// fixture data.
 [
     (
         name: "s1_through_crew",
@@ -102,5 +104,14 @@
         from: (0.579, 5.0, -2.35),
         toward: (0.579, 1.591, -2.35),
         verdict: Damaged,
+    ),
+    (
+        name: "s12_apcr_through_crew",
+        shows: "s1's line fired with the 88's sub-calibre round: it flies whole and meets the plate as its tungsten-carbide core, which leaves the driver's front plate faster than s1's round through a hole a sixth the area, so its cone is weaker; the gunner's HP pool, reduced by the cone, is emptied by the core's line, and the core stops deeper in the rear plate",
+        weapon: "MainGun",
+        round: "88mm_APCR",
+        from: (-0.57, 1.45, -6.5),
+        toward: (-0.57, 1.45, 0.0),
+        verdict: Penetration,
     ),
 ]

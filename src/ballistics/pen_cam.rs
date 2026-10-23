@@ -53,7 +53,11 @@ struct Scenario {
     shows: String,
     /// One of the bound tank's weapons, by its name in the tank file.
     weapon: String,
-    /// Striking speed (m/s); the weapon's muzzle speed when absent.
+    /// The round fired, by its key in the weapon's `rounds` list; the weapon's default round when
+    /// absent.
+    #[serde(default)]
+    round: Option<String>,
+    /// Striking speed (m/s); the round's muzzle speed when absent.
     #[serde(default)]
     speed: Option<f32>,
     from: Vec3,
@@ -166,8 +170,18 @@ fn record_edited(
         .weapons
         .get(&scenario.weapon)
         .unwrap_or_else(|| panic!("{}: no weapon `{}`", scenario.name, scenario.weapon));
-    let round = weapon
-        .resolved_round()
+    let key = scenario
+        .round
+        .as_deref()
+        .unwrap_or_else(|| weapon.default_round_key());
+    assert!(
+        weapon.rounds.iter().any(|listed| listed == key),
+        "{}: weapon `{}` loads no round `{key}`",
+        scenario.name,
+        scenario.weapon
+    );
+    let round = crate::rounds::RoundRegistry::shipped()
+        .get(key)
         .unwrap_or_else(|err| panic!("{}: {err}", scenario.name));
     let body = round.body;
     let speed = scenario.speed.unwrap_or(round.muzzle_speed);
@@ -207,7 +221,7 @@ fn record_edited(
         projectile: scenario.weapon.clone(),
         caliber_mm: body.caliber * 1000.0,
         mass_kg: body.mass,
-        round: weapon.default_round_key().to_owned(),
+        round: key.to_owned(),
         vehicle: Some(crate::tank::TIGER_SPEC_PATH.to_owned()),
     };
     let gated = app
@@ -260,6 +274,7 @@ fn an_elevated_gun_shot_draws_the_barrel_where_the_path_crosses_it() {
         name: "elevated gun".to_owned(),
         shows: String::new(),
         weapon: "MainGun".to_owned(),
+        round: None,
         speed: None,
         from,
         toward,
@@ -1205,6 +1220,7 @@ fn the_muzzle_is_read_off_the_shooters_rig() {
         name: "muzzle".to_owned(),
         shows: String::new(),
         weapon: "MainGun".to_owned(),
+        round: None,
         speed: None,
         from: Vec3::ZERO,
         toward: Vec3::NEG_Z,
@@ -1244,6 +1260,7 @@ fn the_muzzle_is_read_before_the_globals_catch_up() {
         name: "muzzle".to_owned(),
         shows: String::new(),
         weapon: "MainGun".to_owned(),
+        round: None,
         speed: None,
         from: Vec3::ZERO,
         toward: Vec3::NEG_Z,

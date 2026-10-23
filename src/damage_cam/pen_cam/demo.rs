@@ -5,13 +5,13 @@
 //!
 //! Run it: `cargo run --bin pen_cam_demo` (optionally a scenario label, `pen_cam_demo s4`, and
 //! `--once` to stop after it). Keys, the game's: `Esc` dismiss, hold `C` to hold; `P` cycles the
-//! corner setting (all / through only / off); demo-only `1`–`9`, `0`, `-`,
-//! `=` pick a scenario (`=` is K1, the victim kill cam, where `R` respawns from 0.5 s after the
-//! hit and a left-drag looks while the camera is free), `A` toggles auto-advance, `R` replays,
-//! `Space` pauses, `←`/`→` scrub, `[`/`]`
-//! change speed, mouse drag orbits the corner while paused, `F` expands the corner, `O` switches
-//! the slice between orthographic and perspective, `L` toggles each spall cone's axis line and `M`
-//! toggles reduce motion; captures set the expanded corner through [`Settings::from_env`].
+//! corner setting (all / through only / off); demo-only `1`–`9`, `0`, `-`, `=`, `Backspace` pick
+//! a scenario (`=` is K1, the victim kill cam, where `R` respawns from 0.5 s after the hit and a
+//! left-drag looks while the camera is free), `A` toggles auto-advance, `R` replays, `Space`
+//! pauses, `←`/`→` scrub, `[`/`]` change speed, mouse drag orbits the corner while paused, `F`
+//! expands the corner, `O` switches the slice between orthographic and perspective, `L` toggles
+//! each spall cone's axis line and `M` toggles reduce motion; captures set the expanded corner
+//! through [`Settings::from_env`].
 //!
 //! Capture: with `OVERMATCH_CAPTURE` set the clock steps a fixed 1/30 s per frame, so
 //! `dev_capture`'s frame times are presentation times; virtual time stays paused until both tank
@@ -44,8 +44,8 @@ pub struct Entry {
     pub victim: bool,
 }
 
-/// The playlist, in key order (`1`–`9`, `0`, `-`). Fixture data: which recorded shots the demo
-/// plays and how they are paired.
+/// The playlist, in key order (`1`–`9`, `0`, `-`, `=`, `Backspace`). Fixture data: which recorded
+/// shots the demo plays and how they are paired.
 pub const PLAYLIST: &[Entry] = &[
     Entry {
         label: "S1 through, spall cone into the crew",
@@ -107,9 +107,14 @@ pub const PLAYLIST: &[Entry] = &[
         shots: &[("s5_oblique_through", 0.0)],
         victim: true,
     },
+    Entry {
+        label: "S12 sub-calibre on S1's line, the core through, a weaker cone",
+        shots: &[("s12_apcr_through_crew", 0.0)],
+        victim: false,
+    },
 ];
 
-pub(super) const ENTRY_KEYS: [KeyCode; 12] = [
+pub(super) const ENTRY_KEYS: [KeyCode; 13] = [
     KeyCode::Digit1,
     KeyCode::Digit2,
     KeyCode::Digit3,
@@ -122,6 +127,7 @@ pub(super) const ENTRY_KEYS: [KeyCode; 12] = [
     KeyCode::Digit0,
     KeyCode::Minus,
     KeyCode::Equal,
+    KeyCode::Backspace,
 ];
 
 /// Seconds of quiet sight picture before the first shot.
@@ -868,7 +874,7 @@ fn labels(
     };
     let line = format!(
         "{}  [{}]\nt {:.2} s  x{}{}{}  corner {}  slice {}{}\n\
-         1-9 0 - = scenario  A auto  {}  Space pause  Left/Right scrub  [ ] speed  \
+         1-9 0 - = Backspace scenario  A auto  {}  Space pause  Left/Right scrub  [ ] speed  \
          Esc dismiss  C hold  P setting  F expand  O ortho  L axis  M reduce motion",
         entry.label,
         verdicts.join(", "),

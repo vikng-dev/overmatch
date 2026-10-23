@@ -75,6 +75,7 @@
 //! | s9_one_box_lost | 567 | 530 | 298 | 1 | 64 | 48 | 298 |
 //! | s10_gun_barrel_struck | 649 | 606 | 433 | 2 | 128 | 64 | 216 |
 //! | s11_mg_barrel_struck | 187 | 143 | 0 | 0 | 0 | 0 | – |
+//! | s12_apcr_through_crew | 726 | 696 | 394 | 1 | 64 | 80 | 394 |
 //!
 //! The DERIVED estimate `36 + 2 + 2N` per cone (166 B at N = 64) counts a cone's metadata and its
 //! reaches; a cone that reaches no component measures 132–150 B (a reach under 128 mm takes one
