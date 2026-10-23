@@ -1,8 +1,9 @@
 // The spall cone's shape and its calibration — the field thrown from every body exit a round
 // reaches. Read by `src/ballistics/spall_cone.rs`, embedded and parsed once, validated at parse.
 // The law itself (strength, profile, shadowing, dose) is design doc §5,
-// `.agents/docs/design/armor-penetration-and-damage.md`; this file holds its shape data and the
-// one number that converts its dose to HP points.
+// `.agents/docs/design/armor-penetration-and-damage.md`; this file holds its shape data and its
+// calibration: the number that converts its dose to HP points and the calibre that number was set
+// against, the reference a cone's hole-area term is measured from.
 //
 // Every value here is a choice the owner can change by editing this file alone; none is a
 // constant of the law. The playtest fork on the half-angle and the axis is F5 in
@@ -68,4 +69,10 @@
         placeholder crew box's MEASURED 0.516 m² mean face gives about 3.2 m (DERIVED) until the
         humanoid shape lands. A box whose pool is its class × A has R = sqrt(E / (class Ω_c)),
         the same for every box of its class")),
+
+    // d_ref (m), the calibre `hp_per_reference_mm` was set against. A cone's strength goes as the
+    // area of the hole its round's penetrator made, (d / d_ref)² of a hole of calibre d (design
+    // doc §5; the exponent is the law, not data), so a round of this calibre throws its cone
+    // unscaled and every other is measured from it. Finite, positive and normal.
+    reference_calibre_m: (0.088, Tuned("the calibre the field's rate was set against")),
 )

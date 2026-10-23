@@ -1722,9 +1722,14 @@ fn substance_table(entries: &[(u32, SubstanceId, f32)]) -> VolumeTable {
 
 /// The spall sources of a head-on 88 at [`AP_88_CAPABILITY`] through `slabs`.
 fn spall_through(volumes: &VolumeTable, slabs: &[Slab]) -> Vec<SpallSource> {
+    spall_through_shot(volumes, slabs, &AP_88)
+}
+
+/// The spall sources of a head-on `shot` at [`AP_88_CAPABILITY`] through `slabs`.
+fn spall_through_shot(volumes: &VolumeTable, slabs: &[Slab], shot: &Shot) -> Vec<SpallSource> {
     let laws = WalkLaws::default();
     let walked = walk_disc(&entrance_disc(slabs, 3.0), volumes, &laws).unwrap();
-    let request = transit_request(&walked, &AP_88, &laws);
+    let request = transit_request(&walked, shot, &laws);
     let transit = walk_disc(&transit_disc(&request, slabs, 3.0), volumes, &laws).unwrap();
     finish_at(&transit, &request, AP_88_CAPABILITY, &laws)
         .unwrap()
@@ -1767,15 +1772,19 @@ fn equal_factor_plates_in_contact_throw_one_cone_with_the_summed_spend() {
 
 /// κ: a body's strength is `spend × (v_exit / v_entry)²` scaled by the factor of its last layer
 /// before the exit over the reference: unscaled to the bit where that layer is the reference, in
-/// proportion for any other, and a softer layer the body began with does not lower it. Fixture
-/// stacks, 50 mm plates head-on; 800 is a fixture factor.
+/// proportion for any other, and a softer layer the body began with does not lower it. Read at a
+/// hole of the reference calibre, so the area term is 1. Fixture stacks, 50 mm plates head-on; 800
+/// is a fixture factor.
 #[test]
 fn the_strength_scales_by_the_exit_layers_factor_over_the_reference() {
     let rha = SubstanceId::fixture(REFERENCE_FACTOR);
     let mild = SubstanceId::fixture(800.0);
     let strength_of = |cone: &SpallSource| {
         let ratio = cone.exit_speed / cone.entry_speed;
-        (cone.spend * ratio * ratio, cone.strength())
+        (
+            cone.spend * ratio * ratio,
+            cone.strength_against(cone.caliber),
+        )
     };
     for (substance, factor) in [(rha, REFERENCE_FACTOR), (mild, 800.0)] {
         let table = substance_table(&[(1, substance, factor)]);
@@ -1806,6 +1815,62 @@ fn the_strength_scales_by_the_exit_layers_factor_over_the_reference() {
     assert_eq!(cone.rear_factor, REFERENCE_FACTOR);
     let (bare, strength) = strength_of(cone);
     assert_eq!(strength.to_bits(), bare.to_bits());
+}
+
+/// The cone's budget goes with the hole's area: two bodies alike but for the calibre of the shot
+/// that left them throw strengths in the ratio `(d₁ / d₂)²` against any reference, and a hole of
+/// the reference calibre leaves `spend × κ × ratio²` unscaled to the bit, whatever the reference.
+/// The hole is the shot's: [`finish`] carries [`Shot::caliber`] into every source, and
+/// [`SpallSource::strength`] reads the reference from the cone's data. Calibres and references are
+/// fixture data, both shots short of overmatch on the 50 mm fixture plate. A linear area term, a
+/// hole read from anywhere but the shot, or a reference fixed in the law fails here; every record
+/// of a round at the reference calibre rests on the unscaled case.
+#[test]
+fn the_strength_goes_with_the_hole_area() {
+    let rha = SubstanceId::fixture(REFERENCE_FACTOR);
+    let table = substance_table(&[(1, rha, REFERENCE_FACTOR)]);
+    let slabs = [Slab::at(1, 0, 0.5, -AXIS, 0.05)];
+    let cone_of = |caliber: f32| {
+        let cones = spall_through_shot(&table, &slabs, &Shot { caliber });
+        let [cone] = cones.as_slice() else {
+            panic!("one cone: {cones:?}");
+        };
+        cone.clone()
+    };
+    let (wide, narrow) = (cone_of(0.088), cone_of(0.022));
+    assert_eq!((wide.caliber, narrow.caliber), (0.088, 0.022));
+    assert_eq!(
+        SpallSource {
+            caliber: wide.caliber,
+            ..narrow.clone()
+        },
+        wide,
+        "the shot's calibre moves the hole and nothing else of the source"
+    );
+    let ratio = wide.exit_speed / wide.entry_speed;
+    let unscaled = wide.spend * ratio * ratio;
+    assert!(unscaled > 0.0);
+    for reference in [0.022, 0.05, 0.088] {
+        let at = SpallSource {
+            caliber: reference,
+            ..wide.clone()
+        };
+        assert_eq!(
+            at.strength_against(reference).to_bits(),
+            unscaled.to_bits(),
+            "a hole of the reference calibre {reference} is unscaled"
+        );
+        let area = narrow.strength_against(reference) / wide.strength_against(reference);
+        assert!(
+            (area - (0.022f32 / 0.088).powi(2)).abs() < 1.0e-6,
+            "against {reference}: {area}"
+        );
+    }
+    assert_eq!(
+        wide.strength().to_bits(),
+        wide.strength_against(crate::ballistics::spall_cone::reference_calibre())
+            .to_bits()
+    );
 }
 
 /// Only a step into softer material or air throws; a step into harder or equal material continues

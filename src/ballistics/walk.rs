@@ -1793,20 +1793,32 @@ pub struct SpallSource {
     pub exit_speed: f32,
     /// Fraction of the disc whose ray reached this exit.
     pub coverage: f32,
+    /// The calibre (m) of the hole: the shot's ([`Shot::caliber`]), the penetrator's for a
+    /// sub-calibre round.
+    pub caliber: f32,
 }
 
 impl SpallSource {
-    /// The cone's on-axis strength `S = spend × κ × (v_exit / v_entry)²` (reference-mm), `κ =
-    /// f_rear / f_ref` ([`Self::rear_factor`] over [`REFERENCE_FACTOR`]): the spend at the exit,
-    /// scaled by how competent the exit material's debris is against the reference steel and by the
-    /// fraction of the round's kinetic energy left across the body. κ is exactly 1 for a body whose
-    /// last layer is the reference, so its strength is `spend × ratio²` to the bit. Zero for a round
-    /// that entered at rest.
+    /// The cone's on-axis strength against the shipped reference calibre
+    /// ([`super::spall_cone::reference_calibre`]); [`Self::strength_against`] states the law.
     pub fn strength(&self) -> f32 {
+        self.strength_against(super::spall_cone::reference_calibre())
+    }
+
+    /// The cone's on-axis strength `S = spend × κ × (v_exit / v_entry)² × (d / d_ref)²`
+    /// (reference-mm), `κ = f_rear / f_ref` ([`Self::rear_factor`] over [`REFERENCE_FACTOR`]), `d`
+    /// the hole's calibre ([`Self::caliber`]) and `d_ref` = `reference` (m): the spend at the exit,
+    /// scaled by how competent the exit material's debris is against the reference steel, by the
+    /// fraction of the round's kinetic energy left across the body, and by the hole's area against
+    /// the reference's. κ is exactly 1 for a body whose last layer is the reference and the area
+    /// term exactly 1 for a hole of the reference calibre (`d / d = 1` in IEEE), so such a body's
+    /// strength is `spend × ratio²` to the bit. Zero for a round that entered at rest.
+    pub(crate) fn strength_against(&self, reference: f32) -> f32 {
         if self.entry_speed > 0.0 {
             let ratio = self.exit_speed / self.entry_speed;
             let kappa = self.rear_factor / REFERENCE_FACTOR;
-            self.spend * kappa * ratio * ratio
+            let hole = self.caliber / reference;
+            self.spend * kappa * ratio * ratio * hole * hole
         } else {
             0.0
         }
@@ -2692,6 +2704,9 @@ pub struct TransitRequest {
     /// The spawn-anchored basis, parallel-transported onto the bent axis. Never re-derived.
     pub frame: DiscFrame,
     pub radius: f32,
+    /// The shot's calibre ([`Shot::caliber`]): the hole each spall source of the crossing is
+    /// thrown from.
+    pub caliber: f32,
     /// k — the corridor supplied to [`finish`] must sample the disc the same way.
     pub samples: usize,
     /// The entities the entrance crossing engaged, sorted. [`finish`] checks the supplied corridor's
@@ -2811,6 +2826,7 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Begin {
         origin: handoff,
         frame: entrance.frame.transport(entrance.axis, Vec3::from(bent)),
         radius: entrance.radius,
+        caliber: shot.caliber,
         samples: entrance.samples(),
         entrance_entities,
         entrance_primitives: event.primitives.clone(),
@@ -3006,6 +3022,7 @@ pub(crate) fn finish<M: Mechanism>(
         advanced.stop,
         transit.axis,
         transit.samples(),
+        request.caliber,
     );
 
     Ok(ResolutionPlan {
@@ -3137,6 +3154,8 @@ fn spall_sources<M: Mechanism>(
     direction: Vec3,
     // k: the disc's sample count.
     disc: usize,
+    // The hole's calibre (m).
+    caliber: f32,
 ) -> Vec<SpallSource> {
     let disc_spend: Vec<f64> = stretches
         .iter()
@@ -3219,6 +3238,7 @@ fn spall_sources<M: Mechanism>(
             entry_speed: mechanism.speed(entry) as f32,
             exit_speed: mechanism.speed(exit_state) as f32,
             coverage: (count as f64 / disc as f64) as f32,
+            caliber,
         });
     }
     out.sort_by(|a, b| a.t.total_cmp(&b.t));
