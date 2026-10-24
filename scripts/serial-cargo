@@ -12,8 +12,9 @@
 # In a linked worktree with no target/, the first caller warms it from the main checkout
 # (`scripts/disk/warm-target.sh`) inside the lock, so the clone never copies a build in flight.
 #
-# CARGO_BUILD_JOBS defaults to 6; the caller's value wins. OVERMATCH_CARGO_LOCK_WAIT_S bounds the
-# wait for the lock (default 3600 s; lockf exits 75 when it runs out).
+# `test` builds under the `edit` profile (Cargo.toml) unless the caller names a profile, so every
+# edit loop shares one build of the crate. OVERMATCH_CARGO_LOCK_WAIT_S bounds the wait for the lock
+# (default 3600 s; lockf exits 75 when it runs out).
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd -P)
@@ -26,7 +27,9 @@ if [[ "${1:-}" == "--holding-lock" ]]; then
     (cd "$top" && "$here/disk/warm-target.sh")
   fi
   while pgrep -f '^[^ ]*rustc( |$)' >/dev/null; do sleep 2; done
-  export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-6}
+  if [[ "${1:-}" == "test" ]] && ! printf '%s\n' "$@" | grep -qE '^(--profile|--release|-r)(=|$)'; then
+    set -- test --profile edit "${@:2}"
+  fi
   exec cargo "$@"
 fi
 

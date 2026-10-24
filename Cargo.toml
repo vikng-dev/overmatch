@@ -197,6 +197,16 @@ debug = 2
 # A debugger needs the object files that `dev` stops keeping.
 split-debuginfo = "unpacked"
 
+# The edit loop's test profile: `scripts/serial-cargo test` builds under it unless the caller names a
+# profile. Dev's default thin-local LTO pass is 33–39 s of a ~50 s crate rebuild whatever the edit;
+# without it a one-line edit rebuilds in ~18 s and tests run ~20 % slower (MEASURED,
+# `.agents/scratch/build-throughput-2026-10-24/measurements.md`). Dev keeps the pass because its
+# dependencies would lose it too, at a play-build frame cost not measured; `lto` cannot be set per
+# package.
+[profile.edit]
+inherits = "dev"
+lto = "off"
+
 [profile.release]
 strip = true
 lto = "thin"
