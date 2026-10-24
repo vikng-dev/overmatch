@@ -677,8 +677,10 @@ fn only_a_matched_real_record_is_explained() {
 fn encoded_sizes() {
     let records = records();
     let vocabulary = vocabulary(&records);
-    println!("| scenario | total B | shooter B | fields B | cones | rays | hits | B per cone |");
-    println!("|---|---|---|---|---|---|---|---|");
+    println!(
+        "| scenario | total B | shooter B | fields B | cones | rays | hits | B per cone | burst B |"
+    );
+    println!("|---|---|---|---|---|---|---|---|---|");
     for (name, report) in &records {
         let built = BuiltExplanation::build(&vocabulary, &recorded(report)).unwrap();
         let projections = built.projections();
@@ -704,8 +706,16 @@ fn encoded_sizes() {
         } else {
             (fields / cones.len()).to_string()
         };
+        let burst = built
+            .full
+            .record
+            .burst
+            .as_ref()
+            .map_or("–".to_owned(), |burst| {
+                postcard::to_allocvec(burst).unwrap().len().to_string()
+            });
         println!(
-            "| {name} | {victim} | {shooter} | {fields} | {} | {rays} | {hits} | {per_cone} |",
+            "| {name} | {victim} | {shooter} | {fields} | {} | {rays} | {hits} | {per_cone} | {burst} |",
             cones.len()
         );
         assert!(shooter <= victim, "{name}");

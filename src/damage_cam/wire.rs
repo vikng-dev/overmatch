@@ -64,24 +64,29 @@
 //! # Encoded sizes
 //!
 //! MEASURED with the serializer Lightyear 0.30 sends messages with (postcard), every recorded
-//! scenario, N = 64 rays per cone (`wire::tests::encoded_sizes`). Total is the victim's message,
-//! fields its cones alone:
+//! scenario, N = 64 rays per spall cone and 256 per burst field (`wire::tests::encoded_sizes`).
+//! Total is the victim's message, fields its spall cones alone, burst the record's burst with its
+//! field:
 //!
-//! | scenario | total B | shooter B | fields B | cones | rays | hits | B per cone |
-//! |---|---|---|---|---|---|---|---|
-//! | s1_through_crew | 920 | 890 | 588 | 1 | 64 | 75 | 588 |
-//! | s2_stopped_mantlet | 187 | 141 | 0 | 0 | 0 | 0 | – |
-//! | s3_ricochet | 193 | 147 | 0 | 0 | 0 | 0 | – |
-//! | s4_spaced_then_stopped | 757 | 711 | 465 | 3 | 192 | 0 | 155 |
-//! | s5_oblique_through | 776 | 732 | 539 | 1 | 64 | 64 | 539 |
-//! | s6_overpen | 554 | 508 | 309 | 2 | 128 | 0 | 154 |
-//! | s7_engine_shadow | 720 | 681 | 466 | 1 | 64 | 51 | 466 |
-//! | s8a_mg_ricochet | 193 | 147 | 0 | 0 | 0 | 0 | – |
-//! | s8b_mg_stopped | 185 | 139 | 0 | 0 | 0 | 0 | – |
-//! | s9_breech_and_loader | 757 | 722 | 476 | 1 | 64 | 47 | 476 |
-//! | s10_gun_barrel_struck | 912 | 869 | 696 | 2 | 128 | 64 | 348 |
-//! | s11_mg_barrel_struck | 187 | 143 | 0 | 0 | 0 | 0 | – |
-//! | s12_apcr_through_crew | 920 | 890 | 588 | 1 | 64 | 75 | 588 |
+//! | scenario | total B | shooter B | fields B | cones | rays | hits | B per cone | burst B |
+//! |---|---|---|---|---|---|---|---|---|
+//! | s1_through_crew | 921 | 891 | 588 | 1 | 64 | 75 | 588 | – |
+//! | s2_stopped_mantlet | 188 | 142 | 0 | 0 | 0 | 0 | – | – |
+//! | s3_ricochet | 194 | 148 | 0 | 0 | 0 | 0 | – | – |
+//! | s4_spaced_then_stopped | 758 | 712 | 465 | 3 | 192 | 0 | 155 | – |
+//! | s5_oblique_through | 777 | 733 | 539 | 1 | 64 | 64 | 539 | – |
+//! | s6_overpen | 555 | 509 | 309 | 2 | 128 | 0 | 154 | – |
+//! | s7_engine_shadow | 721 | 682 | 466 | 1 | 64 | 51 | 466 | – |
+//! | s8a_mg_ricochet | 194 | 148 | 0 | 0 | 0 | 0 | – | – |
+//! | s8b_mg_stopped | 186 | 140 | 0 | 0 | 0 | 0 | – | – |
+//! | s9_breech_and_loader | 758 | 723 | 476 | 1 | 64 | 47 | 476 | – |
+//! | s10_gun_barrel_struck | 913 | 870 | 696 | 2 | 128 | 64 | 348 | – |
+//! | s11_mg_barrel_struck | 188 | 144 | 0 | 0 | 0 | 0 | – | – |
+//! | s12_apcr_through_crew | 921 | 891 | 588 | 1 | 64 | 75 | 588 | – |
+//! | s13_ring_through_crew | 1657 | 1627 | 588 | 1 | 64 | 75 | 588 | 718 |
+//! | s14_ball_through_crew | 2175 | 2145 | 588 | 1 | 64 | 75 | 588 | 1270 |
+//! | s15_unarmed_overpen | 555 | 509 | 309 | 2 | 128 | 0 | 154 | – |
+//! | s16_restart_at_rest | 1066 | 1020 | 465 | 3 | 192 | 0 | 155 | 300 |
 //!
 //! The DERIVED estimate `41 + 2 + 2N` per cone (171 B at N = 64) counts a cone's metadata, its
 //! field descriptor's law byte and `f32` ratio among it, and its reaches; a cone that reaches no
@@ -89,7 +94,10 @@
 //! byte, one of 16.4 m or more three). Each hit adds about three bytes (ray skip, volume, dose
 //! palette index, a varint each) and each distinct dose four. Under the ball every direction is
 //! thrown at its own strength, so nearly every hit's dose is distinct: a cone that lights the
-//! fighting compartment measures 460–590 B, and every recorded message stays under 0.95 KB.
+//! fighting compartment measures 460–590 B, and every recorded message without a burst stays under
+//! 0.95 KB. A burst's field at its 256 directions adds 300 B where no direction leaves the burst
+//! point (s16) and 0.7–1.3 KB where its directions reach the compartment's boxes, so the largest
+//! recorded message is 2.2 KB.
 
 use std::collections::BTreeMap;
 
