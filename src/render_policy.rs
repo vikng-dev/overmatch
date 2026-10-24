@@ -874,6 +874,7 @@ mod tests {
         const ALLOWED: &[&str] = &[
             "src/render_policy.rs",
             "src/sandbox.rs",
+            "src/sandbox/",
             "src/track_sandbox/",
             "src/tests/bevy_shadow_view_render_layers.rs",
         ];
