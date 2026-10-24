@@ -17,13 +17,15 @@ use bevy::prelude::*;
 
 use super::PenetrationReport;
 use super::recorder::RecordedShot;
-use super::wire::{BuiltExplanation, CodecError, ShotExplanation, ShotVocabulary, TankLife};
+use super::wire::{
+    Audience, BuiltExplanation, CodecError, ShotExplanation, ShotVocabulary, TankLife,
+};
 use crate::bake::TankBlueprint;
 use crate::ballistics::spall_cone::ConeShape;
 use crate::rounds::RoundRegistry;
 use crate::state::GameplaySet;
 use crate::tank::Controlled;
-use crate::{CombatantId, ShotClock, ShotId, WeaponClock};
+use crate::{CombatantId, FreeShooter, ShotClock, ShotId, WeaponClock};
 
 /// How many explanations a recipient keeps, and how many drawn outcomes. TUNED: [`READ_WINDOW_S`]
 /// of explanations arriving at 12.8 a second. A recipient receives one explanation per encounter of
@@ -81,8 +83,11 @@ pub(crate) enum ImpactPresence {
     TimedOut,
 }
 
-/// A stored explanation's place: its shot, its struck life and its encounter, in tick order. Two
-/// tanks one round struck share a shot and an encounter number; the struck life parts them.
+/// A stored explanation's place: its shot, its struck life, its encounter and its side, in tick
+/// order. Two tanks one round struck share a shot and an encounter number; the struck life parts
+/// them. A recipient holding two combatants (a [`FreeShooter`] and the tank it fires at) holds the
+/// shooter's and the struck tank's projection of one encounter; the side parts them. One recipient
+/// receives one projection per side, so the side, not the [`Audience`], is the key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct ExplanationKey {
     fire_tick: u32,
@@ -91,6 +96,8 @@ pub(crate) struct ExplanationKey {
     struck: u64,
     life: u32,
     encounter: u32,
+    /// The shooter's projection, not the struck tank's.
+    to_shooter: bool,
 }
 
 impl ExplanationKey {
@@ -103,6 +110,7 @@ impl ExplanationKey {
             struck: explanation.struck.combatant.0,
             life: explanation.struck.life.0,
             encounter: explanation.encounter,
+            to_shooter: explanation.audience == Audience::Shooter,
         }
     }
 
@@ -344,12 +352,13 @@ fn publish_offline_shot_clock(weapon: Res<WeaponClock>, mut shot: ResMut<ShotClo
     shot.0 = weapon.0;
 }
 
-/// Build each record once and store the projection addressed to the player's combatant, its impact
-/// drawn: the authority's own shell drew every impact on its tick, past a perforation too.
+/// Build each record once and store each projection addressed to a combatant the player holds (its
+/// tank, or a [`FreeShooter`] it fires as), its impact drawn: the authority's own shell drew every
+/// impact on its tick, past a perforation too.
 pub(crate) fn deliver_offline(
     mut records: MessageReader<RecordedShot>,
     vocabulary: Option<Res<ShotVocabulary>>,
-    player: Query<&CombatantId, With<Controlled>>,
+    player: Query<&CombatantId, Or<(With<Controlled>, With<FreeShooter>)>>,
     time: Res<Time<Virtual>>,
     mut store: ResMut<ShotExplanations>,
 ) {

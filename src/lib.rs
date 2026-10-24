@@ -496,6 +496,15 @@ pub(crate) struct CombatantId(pub(crate) u64);
 #[derive(Component, Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 pub(crate) struct CombatantLife(pub(crate) u32);
 
+/// A combatant that fires rounds without a tank: its entity is the [`ShotSource::tank`] its rounds
+/// name, and each of its weapons a [`tank::Weapon`] whose [`tank::TankRoot`] names it. It carries
+/// its own [`CombatantId`] and [`CombatantLife`]; the pen cam treats it as the player's combatant,
+/// a shooter that no round knocks out.
+///
+/// [`ShotSource::tank`]: ballistics::ShotSource::tank
+#[derive(Component, Clone, Copy, Debug, Default)]
+pub(crate) struct FreeShooter;
+
 /// Canonical, net-neutral identity for one shot: `(combatant, weapon, fire_tick)`.
 ///
 /// Invariant: `fire_tick` distinguishes successive rounds from one weapon, while `combatant` is

@@ -747,7 +747,7 @@ fn march_demo(mode: Res<MarchMode>) -> bool {
 /// fire attribution.
 #[derive(Clone, Copy, Component)]
 pub struct ShotSource {
-    /// The tank root the shell was fired from.
+    /// The tank root the shell was fired from, or the [`crate::FreeShooter`] that fired it.
     pub tank: Entity,
     /// The firing weapon's slot in `TankSim::weapons` — its spawn-time `WeaponIndex`.
     pub weapon: usize,

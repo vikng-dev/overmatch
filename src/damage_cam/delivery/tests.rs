@@ -383,3 +383,34 @@ fn offline_play_delivers_the_same_projections() {
         }
     }
 }
+
+/// A player firing as a [`FreeShooter`] at the tank it holds holds both combatants of one
+/// encounter: offline delivery stores the shooter's projection and the victim's, one each, as the
+/// corner reads the first and the x-ray the second. The armour sandbox's range relies on it.
+#[test]
+fn a_free_shooter_holding_its_target_keeps_both_projections() {
+    let report = report("s1_through_crew");
+    let vocabulary = vocabulary(&report);
+    let mut app = App::new();
+    app.add_plugins(MinimalPlugins).add_plugins(offline_plugin);
+    app.insert_resource(vocabulary);
+    app.insert_resource(WeaponClock(0));
+    app.world_mut().spawn((SHOOTER, FreeShooter));
+    app.world_mut().spawn((STRUCK, Controlled));
+    let mut recorded_shot = recorded(&report, SHOOTER, 1200, life(1));
+    recorded_shot.outcome = None;
+    app.world_mut().write_message(recorded_shot);
+    app.world_mut().run_schedule(FixedUpdate);
+
+    let store = app.world().resource::<ShotExplanations>();
+    let audiences: Vec<Audience> = store
+        .iter()
+        .map(|(_, stored)| stored.explanation.audience)
+        .collect();
+    let to_shooter = audiences
+        .iter()
+        .filter(|&&audience| audience == Audience::Shooter)
+        .count();
+    assert_eq!(audiences.len(), 2, "{audiences:?}");
+    assert_eq!(to_shooter, 1, "{audiences:?}");
+}

@@ -6,7 +6,8 @@
 //!   replicated status, never a client guess). The cam plays the explanation of that life whose
 //!   audience is the killed victim's (`ShotExplanation::lesson`) and whose report names the
 //!   knockout (`killed`), once its impact is drawn ([`ImpactPresence::Presented`]). A shooter's
-//!   copy, a victim projection without `killed` and a record of another life never play it.
+//!   copy, a victim projection without `killed` and a record of another life never play it. A
+//!   player firing as a [`FreeShooter`] has no death: the tank it holds is its target.
 //! * **Either order.** The fact and the record may arrive in either order. The clock starts at the
 //!   fact; the record is waited for [`RECORD_WAIT_S`] from it. One in hand by then plays, its
 //!   lesson starting no sooner than [`HIT_S`] after the fact and no sooner than its arrival.
@@ -78,7 +79,7 @@ use crate::tank::{Controlled, Tank, TankViews, ViewNode, rig_world_pose};
 use crate::ui_font::UiFonts;
 use crate::view::PlayerView;
 use crate::world::ground_distance;
-use crate::{CombatantId, CombatantLife};
+use crate::{CombatantId, CombatantLife, FreeShooter};
 
 /// How long the kill cam waits for the killing record from the knockout fact, real seconds. TUNED:
 /// delivery's impact timeout (`delivery::IMPACT_TIMEOUT_S`), the reference.
@@ -465,6 +466,8 @@ pub(super) struct Scene<'w, 's> {
     shells: Query<'w, 's, (Entity, Option<&'static ChildOf>), With<StageShell>>,
     ui: Query<'w, 's, Entity, With<KillCamUi>>,
     fonts: Option<Res<'w, UiFonts>>,
+    /// A free shooter the player fires as: its held tank's knockout is no death.
+    free: Query<'w, 's, (), With<FreeShooter>>,
 }
 
 /// The killing record of `life` among `store`'s: the killed victim's projection whose report names
@@ -504,7 +507,7 @@ pub(super) fn drive(
     let settings = settings.as_deref().copied().unwrap_or_default();
     let by = (settings.kill_cam, settings.reduce_motion);
     let victim = &mut *victim;
-    let tank = own.single().ok();
+    let tank = own.single().ok().filter(|_| scene.free.is_empty());
     let dead_life = tank.and_then(|(_, &combatant, &life, knocked_out, _)| {
         knocked_out.map(|_| TankLife { combatant, life })
     });

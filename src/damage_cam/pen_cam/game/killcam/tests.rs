@@ -806,3 +806,37 @@ fn esc_on_the_frame_a_run_starts_does_not_pause() {
         "no pause on the run's first frame"
     );
 }
+
+/// A player firing as a [`FreeShooter`] at the tank it holds: that tank knocked out by the free
+/// shooter's round is no death (no run, no captive camera, no gate held), and the corner shows the
+/// round. The armour sandbox's range relies on both.
+#[test]
+fn a_free_shooters_held_tank_knocked_out_is_no_death() {
+    let (mut app, held, _) = app(Settings::default());
+    app.world_mut().entity_mut(held).insert(STRUCK);
+    app.world_mut()
+        .spawn((SHOOTER, CombatantLife(0), FreeShooter));
+    step(&mut app);
+    let struck = TankLife {
+        combatant: STRUCK,
+        life: CombatantLife(0),
+    };
+    let (victim_projection, shooter, vocabulary, report) = shot(SHOOTER, struck, true);
+    stage_of(&mut app, report.vehicle.as_deref().unwrap());
+    knock_out(&mut app, held);
+    receive(&mut app, victim_projection, &vocabulary);
+    receive(&mut app, shooter, &vocabulary);
+    let mut cornered = false;
+    for _ in 0..(4.0 / STEP_S).ceil() as usize {
+        step(&mut app);
+        assert!(victim(&app).death.is_none(), "no death");
+        assert!(!captive(&app), "the camera stays the player's");
+        assert_eq!(gate(&app), KillCamGate::default());
+        cornered |= app
+            .world()
+            .resource::<Corner>()
+            .showing
+            .is_some_and(|showing| showing.surface == Surface::Corner);
+    }
+    assert!(cornered, "the corner shows the free shooter's round");
+}

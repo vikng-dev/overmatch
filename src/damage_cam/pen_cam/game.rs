@@ -4,8 +4,9 @@
 //! look on the battlefield, its own presentation beside the slot, and the two show at once.
 //!
 //! * **What opens the corner.** An explanation in the player's store ([`ShotExplanations`]) whose
-//!   audience is [`Audience::Shooter`], fired by the player's combatant at another, admitted by
-//!   the player's corner setting ([`PenCamCorner::opens`]). A victim projection opens nothing.
+//!   audience is [`Audience::Shooter`], fired by the player's combatant (its tank, or the
+//!   [`FreeShooter`] it fires as) at another, admitted by the player's corner setting
+//!   ([`PenCamCorner::opens`]). A victim projection opens nothing.
 //! * **When.** It opens once its world impact is drawn ([`ImpactPresence::Presented`]); one
 //!   released undrawn ([`ImpactPresence::TimedOut`]) is skipped, as the slot rides on the impact
 //!   the player saw. Each explanation is considered once. It opens [`timeline::OPEN_LATENCY_S`]
@@ -22,13 +23,13 @@
 //!   the record's plan over the same tank asset the demo stages ([`TankAsset`]); a component the
 //!   shooter's projection does not list is the base layout, untinted.
 //! * **Teardown.** The slot's entities exist from an arrival until the slot closes with nothing
-//!   queued, a new life of the player's tank, its knockout or no tank, a change of the corner
-//!   setting, or a [`CloseCorner`] (the network client's disconnect). Every one goes at once
-//!   ([`Rig::teardown`]): the cameras, lights, stage view, UI and the images they own; the
-//!   corner's mask set follows a frame later (`look::own`).
+//!   queued, a new life of that combatant (a tank's knockout or absence ends one; a free
+//!   shooter's never ends), a change of the corner setting, or a [`CloseCorner`] (the network
+//!   client's disconnect). Every one goes at once ([`Rig::teardown`]): the cameras, lights, stage
+//!   view, UI and the images they own; the corner's mask set follows a frame later (`look::own`).
 //!
 //! No input reaches the corner. While the player's tank is knocked out the slot holds nothing and
-//! its rig is the kill cam's ([`killcam`]).
+//! its rig is the kill cam's ([`killcam`]); a player firing as a free shooter has no kill cam.
 
 mod killcam;
 mod xray;
@@ -60,7 +61,7 @@ use crate::damage_cam::wire::{Audience, ShotExplanation, TankLife};
 use crate::settings::{PenCamCorner, Settings};
 use crate::spec::{TankSpec, TankSpecHandle};
 use crate::tank::{Controlled, Rig as TankRig};
-use crate::{CombatantId, CombatantLife};
+use crate::{CombatantId, CombatantLife, FreeShooter};
 
 /// The corner slot on a client composition: the stage's materials and [`wire`].
 pub fn plugin(app: &mut App) {
@@ -338,7 +339,8 @@ impl Rig<'_, '_> {
     }
 }
 
-/// The player's tank: who it is this life, its body, its file and its components' live state.
+/// The player's tank: who it is this life, its body, its file and its components' live state; and
+/// the [`FreeShooter`] the player fires as, where it fires as one.
 #[derive(SystemParam)]
 struct Player<'w, 's> {
     tank: Query<
@@ -356,6 +358,7 @@ struct Player<'w, 's> {
         With<Controlled>,
     >,
     volumes: Query<'w, 's, LiveVolume>,
+    free: Query<'w, 's, (&'static CombatantId, &'static CombatantLife), With<FreeShooter>>,
 }
 
 impl Player<'_, '_> {
@@ -363,6 +366,16 @@ impl Player<'_, '_> {
     fn life(&self) -> Option<TankLife> {
         let (_, &combatant, &life, _, _, _, knocked_out) = self.tank.single().ok()?;
         (!knocked_out).then_some(TankLife { combatant, life })
+    }
+
+    /// The combatant whose shots the corner shows: the [`FreeShooter`] the player fires as, where
+    /// there is exactly one, else the tank's [`Self::life`].
+    fn shooter(&self) -> Option<TankLife> {
+        self.free
+            .single()
+            .ok()
+            .map(|(&combatant, &life)| TankLife { combatant, life })
+            .or_else(|| self.life())
     }
 
     /// The tank's body — its entity and rig — while it has a life and is not knocked out.
@@ -423,7 +436,7 @@ fn drive(
     }
     let store = store.as_deref();
     let blueprint = blueprint.as_deref();
-    let life = player.life();
+    let life = player.shooter();
     let admits = settings.pen_cam_corner;
     if life != state.life || Some(admits) != state.admits {
         if rig.exists(&state) {
