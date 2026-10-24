@@ -1123,4 +1123,85 @@ mod tests {
         }
         assert!(checked > 0);
     }
+
+    /// A cone's presentation is finite across the field law's whole domain: at the hemisphere
+    /// (`λ = 1`) and at the narrowest cone the law resolves (the largest ratio
+    /// `FieldDescriptor::check` admits, about 9.5·10⁷, a half-angle of about 10⁻⁸ rad, DERIVED),
+    /// a direction's emission is finite and positive, and every lane [`set_footprints`] and
+    /// [`LookMaterial::set_volume`] pack (the field's frame, its disc's reach and emission through
+    /// `field::Disc`'s mapping, the march's step and depth) is finite. The shader's footprint and
+    /// volume take the potency colour from those lanes; a solid angle that rounds to zero makes
+    /// the emission infinite and every colour of the field undefined. Fixture strength and reach.
+    #[test]
+    fn a_cone_packs_finite_lanes_across_the_law() {
+        use super::super::plan::{Cone, Ray};
+        use crate::ballistics::spall_cone::{ConeShape, FieldDescriptor};
+        let admitted = |bits: u32| FieldDescriptor::ball(f32::from_bits(bits)).check().is_ok();
+        let (mut lo, mut hi) = (1.0_f32.to_bits(), 1.0e9_f32.to_bits());
+        assert!(admitted(lo) && !admitted(hi));
+        // A positive f32's bits order as its value, and the law admits every ratio up to its top.
+        while hi - lo > 1 {
+            let mid = lo + (hi - lo) / 2;
+            if admitted(mid) {
+                lo = mid;
+            } else {
+                hi = mid;
+            }
+        }
+        let top = f32::from_bits(lo);
+        assert!(top > 1.0e7, "the law resolves ratios up to {top}");
+        let potency = Potency::shipped();
+        let masks = MaskSet::default();
+        let (strength, reach) = (10.0, 2.0);
+        for ratio in [1.0, top] {
+            let spread = ConeShape::shipped()
+                .spread(FieldDescriptor::ball(ratio))
+                .unwrap();
+            let rays = spread
+                .directions(Dir3::NEG_Z)
+                .map(|(direction, weight)| Ray {
+                    direction: direction.into(),
+                    reach,
+                    weight,
+                })
+                .collect();
+            let cone = Cone::new(
+                Vec3::ZERO,
+                Vec3::NEG_Z,
+                spread.half_angle(),
+                strength,
+                0.0,
+                rays,
+            );
+            let emission = potency.emission(strength, cone.half_angle);
+            assert!(
+                emission.is_finite() && emission > 0.0,
+                "λ = {ratio}: emission {emission}"
+            );
+            let print = FieldPrint {
+                origin: cone.origin,
+                axis: cone.disc.axis,
+                u: cone.disc.u,
+                v: cone.disc.v,
+                half_angle: cone.disc.half_angle,
+                front: cone.max_reach(),
+                scale: 2.0,
+                nodes: &cone.disc.nodes,
+            };
+            let mut looks = Assets::<LookMaterial>::default();
+            let handle = looks.add(base(&masks));
+            set_footprints(&mut looks, &masks, std::slice::from_ref(&print), &potency);
+            let mut field = volume(&potency, &masks, CornerKind::Glass, None);
+            field.set_volume(&print, &potency);
+            for params in [looks.get(&handle).unwrap().params, field.params] {
+                let lanes = params.prints[..4]
+                    .iter()
+                    .chain(&params.disc[..DISC_LANES])
+                    .chain([&params.volume]);
+                for (k, lane) in lanes.enumerate() {
+                    assert!(lane.is_finite(), "λ = {ratio}: lane {k} is {lane}");
+                }
+            }
+        }
+    }
 }

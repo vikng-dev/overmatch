@@ -73,9 +73,13 @@ impl Potency {
     }
 }
 
-/// The solid angle `Ω_c = 2π (1 − cos α)` (sr) of a cone of half-angle `half_angle` (rad).
+/// The solid angle `Ω_c = 2π (1 − cos α) = 4π sin²(α/2)` (sr) of a cone of half-angle
+/// `half_angle` (rad), in the second form: the first cancels, and in f32 it is zero below about
+/// 2.4·10⁻⁴ rad (DERIVED: `α²/2` under half an ulp of 1, `2⁻²⁵`), while the field law admits
+/// cones down to about 10⁻⁸ rad (`spall_cone::FieldDescriptor`).
 pub fn solid_angle(half_angle: f32) -> f32 {
-    TAU * (1.0 - half_angle.cos())
+    let half = (0.5 * half_angle).sin();
+    2.0 * TAU * half * half
 }
 
 /// The intensity `e / r²` (HP points per m²) at distance `r` (m) along a direction of emission
