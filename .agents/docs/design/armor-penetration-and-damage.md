@@ -397,9 +397,9 @@ delay, and where the delay runs out the round bursts and throws a field from tha
 flight direction. The owner compares two shapes of that field, the **ring** and the **ball**, both
 built as rounds on the main gun's selector (playtest fork F7); the loser leaves the list after
 play. Brief: `.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/brief-4b-aphe-sim.md`,
-its round data from `tiger-ammo-history.md` and its speed law from `shape-law.md` §4 beside it. A
-round without a burst block (`assets/ballistics/rounds.ron`) is inert; a sub-calibre round carries
-none.
+its round data from `tiger-ammo-history.md`, its fuze's delay and arming threshold from
+`burst-delay-history.md` and its speed law from `shape-law.md` §4 beside it. A round without a
+burst block (`assets/ballistics/rounds.ron`) is inert; a sub-calibre round carries none.
 
 **The trigger.** The shell's fuze is built at spawn from its round's burst block (ADR-0014) and
 advanced by the authority's march alone; a replica's march decides no crossing, so its fuze never
@@ -410,7 +410,12 @@ the speed the round loses in the air over the delay is not counted (DERIVED). Ev
 after that restarts a delay still running from that exit at its speed, whatever that body's spend,
 and so does a bounce off a face; a bounce never arms. The count runs over every metre the round flies: open
 air, a corridor found clear, the gaps between a crossing's bodies, the approach to a body it stops
-in. A round no body arms flies as a solid shot, bit for bit.
+in. A round no body arms flies as a solid shot, bit for bit. The shipped burst rounds arm at 35
+reference-mm (MEASURED as 35 mm of plate at normal impact: L.Dv. 487, March 1943, page 487_21,
+which also states the restart) and burst 1.5 ms after the exit (DERIVED: the midpoint of the 1–2 ms
+that page gives the Bd.Z. 5127; it is the Pzgr. 39/1's and 39/43's fuze, and no time is found for
+the Pzgr. 39's own Bd.Z. 5103), so the burst lies 0.38 m past an exit at 250 m/s, 0.6 m at 400 m/s
+and 0.9 m at 600 m/s (DERIVED).
 
 **The burst point.** The round bursts where the count runs out, in open air or a clear corridor,
 inside the tank or past it; the crew boxes the leg to there crosses take their line (§6). A delay
@@ -493,7 +498,7 @@ it stopped there), the burst point, the carried speed, the ring's nose piece's m
 as a cone record (absent when the HP quantum gate held it). The ball's record ends `Burst`; the
 ring's path runs on with the nose piece's line to its own end, its open air timed at the carried
 speed. A struck tank's record stays open while a fuze that tank armed runs, so a burst past its last
-body lands in it. The wire round-trips the burst; its 256 directions add 0.3–1.3 KB to a message
+body lands in it. The wire round-trips the burst; its 256 directions add 0.3–2.1 KB to a message
 (MEASURED, `src/damage_cam/wire.rs`). The pen cam draws the burst field as it draws a plate cone
 (`src/damage_cam/pen_cam/field.rs`): thrown when the shell's nose reaches the burst point on the
 corner's clock, its front running out each direction's reach, over the law's support alone. The ring
@@ -503,13 +508,17 @@ rests at the end; the ring's runs on with the nose piece. A box the burst doses 
 first field that dosed it, a plate cone's or the burst's, reaches it.
 
 **Scenarios** (`assets/dev/pen_cam/`, fixture data; each record's `shows` says what it shows).
-s13 and s14 fly s1's line with the ring and the ball: the upper front plate arms the fuze, the
-round bursts 2.93 m past its exit at 244.6 m/s, and either field empties the HP pools of the
-engine and an ammunition rack, which the solid s1 only reduces. s15 flies s6's line with the ball:
-no body holds the arming spend, so its record is s6's. s16 flies s4's line with the ball: the road
-wheel arms the fuze, its rubber and far disc restart the delay, and the round stops 20.7 mm into
-the lower hull side and bursts at rest there; every direction starts inside that plate, which
-stops it, so the field doses nothing (MEASURED, from the records).
+s13 and s14 fly s1's line with the ring and the ball: the upper front plate arms the fuze, and the
+round bursts 0.37 m past its exit at 244.6 m/s, short of the driver's station. The ring's band
+empties the HP pools of the bow gunner, the transmission and two ammunition racks, and its nose
+piece flies on through the driver's and the gunner's stations to the rear plate. The ball's lobe
+empties those of the commander, the loader, the engine and three ammunition racks, and the round
+ends short of the driver. In both the plate's cone knocks out the driver and the gunner, as in s1,
+which empties no other HP pool. s15 flies s6's line with the ball: no body holds the arming spend,
+so its record is s6's. s16 flies s4's line with the ball: the road wheel arms the fuze, its rubber
+and far disc restart the delay, and the round stops 20.7 mm into the lower hull side and bursts at
+rest there; every direction starts inside that plate, which stops it, so the field doses nothing
+(MEASURED, from the records).
 
 **Class invariants** (tests hold them for any round and tank; fixture numbers are fixture data).
 The fuze arms only at the threshold; the delay runs from the exit and restarts at a later body or
