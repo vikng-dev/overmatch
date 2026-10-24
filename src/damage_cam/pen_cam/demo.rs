@@ -7,10 +7,11 @@
 //! `--once` to stop after it). Keys, the game's: `Esc` dismiss, hold `C` to hold; `P` cycles the
 //! corner setting (all / through only / off); demo-only `1`–`9`, `0`, `-`, `=`, `Backspace` pick
 //! a scenario (`=` is K1, the victim kill cam, where `R` respawns from 0.5 s after the hit and a
-//! left-drag looks while the camera is free), `A` toggles auto-advance, `R` replays, `Space`
+//! left-drag looks while the camera is free; the burst scenarios past the keys play by their tag,
+//! `pen_cam_demo s13`, or auto-advance), `A` toggles auto-advance, `R` replays, `Space`
 //! pauses, `←`/`→` scrub, `[`/`]` change speed, mouse drag orbits the corner while paused, `F`
 //! expands the corner, `O` switches the slice between orthographic and perspective, `L` toggles
-//! each spall cone's axis line and `M` toggles reduce motion; captures set the expanded corner, the
+//! each field's axis line and `M` toggles reduce motion; captures set the expanded corner, the
 //! slice's lens and a frame for every shooter record through [`Settings::from_env`].
 //!
 //! Capture: with `OVERMATCH_CAPTURE` set the clock steps a fixed 1/30 s per frame, so
@@ -44,8 +45,9 @@ pub struct Entry {
     pub victim: bool,
 }
 
-/// The playlist, in key order (`1`–`9`, `0`, `-`, `=`, `Backspace`). Fixture data: which recorded
-/// shots the demo plays and how they are paired.
+/// The playlist, in key order (`1`–`9`, `0`, `-`, `=`, `Backspace`; the entries past the keys by
+/// their tag or auto-advance). Fixture data: which recorded shots the demo plays and how they are
+/// paired.
 pub const PLAYLIST: &[Entry] = &[
     Entry {
         label: "S1 through, spall cone into the crew",
@@ -110,6 +112,21 @@ pub const PLAYLIST: &[Entry] = &[
     Entry {
         label: "S12 sub-calibre on S1's line, the core through, a weaker cone",
         shots: &[("s12_apcr_through_crew", 0.0)],
+        victim: false,
+    },
+    Entry {
+        label: "S13 burst round, ring: a band about the line, the nose piece flies on",
+        shots: &[("s13_ring_through_crew", 0.0)],
+        victim: false,
+    },
+    Entry {
+        label: "S14 burst round, ball: one lobe ahead, the round ends at the burst",
+        shots: &[("s14_ball_through_crew", 0.0)],
+        victim: false,
+    },
+    Entry {
+        label: "S16 burst at rest in the hull side, the plate stops its field",
+        shots: &[("s16_restart_at_rest", 0.0)],
         victim: false,
     },
 ];

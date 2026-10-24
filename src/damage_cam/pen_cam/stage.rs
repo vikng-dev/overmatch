@@ -1,10 +1,9 @@
 //! The corner's stage: the struck tank's stage view dressed for the frame, and the record drawn
 //! over it — the round as the game's shell model at the record's calibre, travelling the recorded
 //! path nose first with a thin trail behind it, a ring where it crossed each plate or glanced off a
-//! face, every spall cone as one translucent volume in the potency colour of its field's local
-//! intensity, bounded where its directions stopped ([`look::volume`], and by the plane in the
-//! slice), and
-//! each struck component's real mesh on the state scale ([`look::component`]): filled red from the
+//! face, every field (each spall cone, and a burst's) as one translucent volume in the potency
+//! colour of its local intensity, bounded where its directions stopped ([`look::volume`], and by
+//! the plane in the slice), and each struck component's real mesh on the state scale ([`look::component`]): filled red from the
 //! bottom up to the share of its HP points lost, one knocked out charcoal and hatched.
 //! The shell rests where the record ends; a round the record has leave the tank runs on out of the
 //! frame. A cone's front runs from its origin at the shell's own on-screen speed.
@@ -567,7 +566,7 @@ pub struct LookCtx<'a> {
     pub masks: &'a MaskSet,
 }
 
-/// Draw `plan`'s record over a tank in frame `kind`: the trail, the rings, the spall cones and the
+/// Draw `plan`'s record over a tank in frame `kind`: the trail, the rings, the fields and the
 /// components on the state scale. Every element but the tints is spawned under `hull`, an entity
 /// whose frame is the record's (the struck hull's); each tint is a copy of one of `components`, the
 /// tank's own meshes of the components the record names, spawned under that mesh. `clip` is the
@@ -1023,9 +1022,9 @@ impl<'a> Playing<'a> {
         });
     }
 
-    /// A spall cone's volume, its field in world space under the record frame `hull` (hidden
-    /// without one): its front run out from the origin, or under reduce motion the whole field
-    /// faded in.
+    /// A field's volume (a spall cone's or a burst's), its field in world space under the record
+    /// frame `hull` (hidden without one): its front run out from the origin, or under reduce motion
+    /// the whole field faded in.
     pub(super) fn cone(
         &self,
         volume: &ConeVolume,
@@ -1083,6 +1082,7 @@ impl<'a> Playing<'a> {
             u: unit(cone.disc.u),
             v: unit(cone.disc.v),
             half_angle: cone.disc.half_angle,
+            inner: cone.disc.inner,
             front: front * scale,
             scale,
             nodes: &cone.disc.nodes,

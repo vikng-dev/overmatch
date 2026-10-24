@@ -190,6 +190,19 @@ impl FieldDescriptor {
         }
     }
 
+    /// The field's inner edge (rad), the least angle off the axis it reaches: the ring's near edge
+    /// `atan2(1, λ) − h`, held at the axis (0) where the band reaches it as [`Self::terms`] holds
+    /// it; 0 for the ball, which reaches the axis. Computed as [`Self::half_angle`] is, so the two
+    /// bound one support on every target.
+    pub(crate) fn inner_angle(&self) -> f32 {
+        match self.law {
+            FieldLaw::Ball => 0.0,
+            FieldLaw::Ring { half_width } => {
+                (libm::atan2(1.0, self.ratio as f64) - half_width as f64).max(0.0) as f32
+            }
+        }
+    }
+
     /// The law's terms, refusing a descriptor outside its domain: a ratio that is negative or not
     /// finite, a ball so narrow that the rim's `cos α` rounds to 1 (`λ` above about 10⁸, DERIVED),
     /// and a ring whose half-width is outside `(0, π/2)` or whose band rounds away. Names the
@@ -1182,9 +1195,11 @@ mod tests {
 
     /// A ring's directions lie in its band, `θ_c ∓ h` about `θ_c = atan(1/λ)`, its near edge held
     /// at the axis, in equal-solid-angle strata spanning it, each weighted ½: the field is uniform
-    /// over the band, and its rim is `θ_c + h`. A ring centred anywhere but `atan(1/λ)`, or a
-    /// band weighted toward one edge, fails here; the burst's ring and its knockout radius rely
-    /// on it. 1e-5 rad is the f32 tolerance on an angle.
+    /// over the band, its rim is `θ_c + h` and its inner edge the near edge. A ring centred
+    /// anywhere but `atan(1/λ)`, a band weighted toward one edge, or an inner edge off the near
+    /// edge or not held at the axis, fails here; the burst's ring, its knockout radius and the pen
+    /// cam's band, which holds nothing off it, rely on it. 1e-5 rad is the f32 tolerance on an
+    /// angle.
     #[test]
     fn a_rings_directions_lie_in_its_band() {
         for (ratio, degrees) in RINGS {
@@ -1194,6 +1209,7 @@ mod tests {
             let h = degrees.to_radians();
             let (near, far) = ((centre - h).max(0.0), centre + h);
             assert!((field.half_angle() - far).abs() < 1.0e-5, "{field:?}");
+            assert!((field.inner_angle() - near).abs() < 1.0e-5, "{field:?}");
             let axis = Dir3::new(Vec3::new(0.3, -0.2, 0.9)).unwrap();
             for (direction, weight) in spread.directions(axis) {
                 let angle = direction.angle_between(Vec3::from(axis));

@@ -1,14 +1,15 @@
 //! What the corner draws for one record, read off it and the tank asset's component shapes: the
 //! line as an arc-length polyline, the crossings, the bounce, the stop or the point the round left
-//! the tank, each spall cone's directions and reach, and each component's dose and the moment the
-//! picture reaches it. Positions are in the record's frame (hull-local, metres).
+//! the tank, each field's directions and reach (a spall cone's or a burst's), and each component's
+//! dose and the moment the picture reaches it. Positions are in the record's frame (hull-local,
+//! metres).
 //!
 //! Whether the round stopped, where it left the tank and where the line entered a component are the
 //! record's own facts; nothing here re-derives them from geometry. A component's shape, and the
 //! whole tank's bounds, serve only framing, never timing. Two things are derived rather than read,
 //! and are labelled where they are made: the line's remaining capability, `(v/v₀)²` from the
 //! path's times (the record carries no capability), and the moment a component is reached (the arc of the line's
-//! recorded entry, or the cone that dosed it; a synthetic clip that names neither is reached at
+//! recorded entry, or the field that dosed it; a synthetic clip that names neither is reached at
 //! contact).
 
 use bevy::prelude::*;
@@ -60,6 +61,8 @@ pub struct Plan {
     pub bounce: Option<Bounce>,
     /// Where the round came to rest, inside armour or a component, if the record has it rest.
     pub stop: Option<Vec3>,
+    /// Every field the record threw, in [`PenetrationReport::fields`]' order: its spall cones,
+    /// then its burst's.
     pub cones: Vec<Cone>,
     pub boxes: Vec<BoxPlan>,
     /// The whole struck tank's bounds (low, high corners), posed as the record has it
@@ -169,11 +172,12 @@ pub struct Bounce {
     pub arc: f32,
 }
 
-/// One spall cone as the record marched it.
+/// One field as the record marched it: a spall cone, or a burst's field
+/// ([`PenetrationReport::fields`]).
 pub struct Cone {
     pub origin: Vec3,
     pub axis: Vec3,
-    /// Half-angle (rad).
+    /// Half-angle (rad): the support's rim, π for a field over the whole sphere.
     pub half_angle: f32,
     /// The strength `S` (ref-mm): a direction was thrown with `S` times its weight; zero on a
     /// hand-authored clip.
@@ -186,16 +190,18 @@ pub struct Cone {
 }
 
 impl Cone {
-    /// The cone of these parts, its [`Disc`] baked from `rays`.
+    /// The cone of these parts, its support from `inner` to `half_angle` (rad) off its axis, its
+    /// [`Disc`] baked from `rays`.
     pub fn new(
         origin: Vec3,
         axis: Vec3,
         half_angle: f32,
+        inner: f32,
         strength: f32,
         arc: f32,
         rays: Vec<Ray>,
     ) -> Self {
-        let disc = Disc::of(axis, half_angle, strength, &rays);
+        let disc = Disc::of(axis, half_angle, inner, strength, &rays);
         Self {
             origin,
             axis,
@@ -321,7 +327,7 @@ impl Plan {
             outgoing: Vec3::from(bounce.outgoing).normalize_or(Vec3::NEG_Z),
             arc: line.arc_of(Vec3::from(bounce.point)),
         });
-        let cones: Vec<Cone> = report.spall.iter().map(|c| cone(c, &line)).collect();
+        let cones: Vec<Cone> = report.fields().map(|c| cone(c, &line)).collect();
         let boxes = report
             .components
             .iter()
@@ -339,7 +345,7 @@ impl Plan {
                     .then(|| dose.and_then(|d| d.entered))
                     .flatten()
                     .map(|entered| Reach::Line(line.arc_of(Vec3::from(entered))));
-                let by_cone = report.spall.iter().enumerate().find_map(|(index, cone)| {
+                let by_cone = report.fields().enumerate().find_map(|(index, cone)| {
                     let origin = Vec3::from(cone.origin);
                     cone.fragments
                         .iter()
@@ -542,6 +548,7 @@ fn cone(cone: &SpallCone, line: &Polyline) -> Cone {
         origin,
         axis,
         half_angle,
+        cone.field.inner_angle(),
         cone.strength,
         line.arc_of(origin),
         rays,
@@ -587,9 +594,11 @@ pub(super) mod tests {
     }
 
     /// For every recorded scenario: the drawn span starts before contact and ends at or after
-    /// it, the energy never rises along the path, every cone ray reaches somewhere, a box is
-    /// reached exactly when it took a dose, and a round rested in a plate stops, where the drawn
-    /// line ends.
+    /// it, the energy never rises along the path, the plan holds every field the record threw,
+    /// each with a ray for every fragment that left its origin and none for one that did not, a
+    /// box is reached exactly when it took a dose, and a round rested in a plate stops, where the
+    /// drawn line ends. The look, its volumes and the kill cam draw every field from the plan, so
+    /// a field the plan drops (a burst's, say) is one the corner never draws.
     #[test]
     fn every_record_plans_a_drawable_picture() {
         let all = records();
@@ -604,8 +613,15 @@ pub(super) mod tests {
             for pair in plan.line.energy.windows(2).skip(1) {
                 assert!(pair[1] <= pair[0] + 1e-3, "{name}: energy rises");
             }
-            for cone in &plan.cones {
-                assert!(!cone.rays.is_empty(), "{name}");
+            assert_eq!(plan.cones.len(), report.fields().count(), "{name}");
+            for (cone, field) in plan.cones.iter().zip(report.fields()) {
+                assert_eq!(cone.origin, Vec3::from(field.origin), "{name}");
+                let left = field.fragments.iter().filter(|fragment| {
+                    (Vec3::from(fragment.end) - cone.origin)
+                        .try_normalize()
+                        .is_some()
+                });
+                assert_eq!(cone.rays.len(), left.count(), "{name}");
                 assert!(cone.rays.iter().all(|ray| ray.reach > 0.0), "{name}");
             }
             for b in &plan.boxes {
@@ -640,7 +656,13 @@ pub(super) mod tests {
                 stripped_any |= dose.line > 0.0 && dose.entered.is_some();
                 dose.entered = None;
             }
-            for fragment in report.spall.iter_mut().flat_map(|c| &mut c.fragments) {
+            let burst = report.burst.iter_mut().filter_map(|b| b.field.as_mut());
+            for fragment in report
+                .spall
+                .iter_mut()
+                .chain(burst)
+                .flat_map(|c| &mut c.fragments)
+            {
                 fragment.hits.clear();
             }
             let with = Plan::new(&report, &asset.shapes(&report.servo_deg));

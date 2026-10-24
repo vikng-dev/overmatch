@@ -1,11 +1,12 @@
 //! The pen cam's potency colour: a spall field's local intensity at a point, and the colour that
-//! intensity takes on the field's ramp ([`Ramp`]). Pure functions of the record's cone and the
-//! shipped data: the field's rate (`assets/ballistics/spall_cone.ron`) and the thresholds
-//! (`assets/ballistics/box_classes.ron`). The law, its anchors and its promise are design doc §5,
-//! "Potency colour" (`.agents/docs/design/armor-penetration-and-damage.md`).
+//! intensity takes on the field's ramp ([`Ramp`]). Pure functions of the record's field (a spall
+//! cone or a burst's) and the shipped data: the field's rate (`assets/ballistics/spall_cone.ron`)
+//! and the thresholds (`assets/ballistics/box_classes.ron`). The law, its anchors and its promise
+//! are design doc §5, "Potency colour" (`.agents/docs/design/armor-penetration-and-damage.md`).
 //!
 //! Units: a direction's strength `s` in reference-mm; the rate `ρ` in HP points per reference-mm;
-//! the emission `e = ρ s / Ω_c` in HP points per steradian, `Ω_c` the cone's solid angle; the
+//! the emission `e = ρ s / Ω` in HP points per steradian, `Ω` the solid angle of the field's
+//! support (a cap, a ring's band or the whole sphere); the
 //! intensity `I = e / r²` and the thresholds in HP points per m²; radii in metres; colours linear
 //! RGB. Nothing here reads a display gain, a level or a fade: the colour is the dose law's, never
 //! the look's.
@@ -46,12 +47,13 @@ impl Potency {
         }
     }
 
-    /// The emission `e = ρ s / Ω_c` (HP points per steradian) of a direction of strength
-    /// `strength` (reference-mm) in a cone of half-angle `half_angle` (rad): each of the cone's `N`
-    /// directions stands for `Ω_c / N` of its solid angle and deposits `s / N`, so `e` is its
-    /// dose per steradian.
-    pub fn emission(&self, strength: f32, half_angle: f32) -> f32 {
-        self.rate * strength / solid_angle(half_angle)
+    /// The emission `e = ρ s / Ω` (HP points per steradian) of a direction of strength `strength`
+    /// (reference-mm) in a field whose support lies from `inner` to `half_angle` (rad) off its
+    /// axis, `Ω = Ω(half_angle) − Ω(inner)` ([`solid_angle`]; a cap's and the sphere's `inner` is
+    /// 0, whose solid angle is exactly 0): each of the field's `N` directions stands for `Ω / N` of
+    /// its support and deposits `s / N`, so `e` is its dose per steradian.
+    pub fn emission(&self, strength: f32, inner: f32, half_angle: f32) -> f32 {
+        self.rate * strength / (solid_angle(half_angle) - solid_angle(inner))
     }
 
     /// The potency colour's ramp, anchored at these thresholds.

@@ -1683,9 +1683,21 @@ fn field_doses(
     directions: usize,
     passage: Passage,
 ) -> Vec<f64> {
+    field_doses_of(app, boxes, FIELD, strength, directions, passage)
+}
+
+/// [`field_doses`] under the field `field`.
+fn field_doses_of(
+    app: &mut App,
+    boxes: &[Entity],
+    field: FieldDescriptor,
+    strength: f32,
+    directions: usize,
+    passage: Passage,
+) -> Vec<f64> {
     let spread = ConeShape::new(AxisRule::ExitDirection, directions, passage)
         .unwrap()
-        .spread(FIELD)
+        .spread(field)
         .unwrap();
     let rays = spread
         .directions(Dir3::NEG_Y)
@@ -1802,48 +1814,60 @@ fn an_unshadowed_dose_falls_as_the_inverse_square() {
     }
 }
 
-/// The pen cam's potency colour reads this resolver's dose, under every passage: the intensity its
-/// law draws at distance `r` along a direction (`ρ s / (Ω_c r²)`, `pen_cam::potency`) times a thin
-/// unresisting face's area there is `ρ` times the dose the face takes. The colour's promise — a
-/// box's face wholly at or above a threshold takes at least that threshold's pool — relies on it; a
-/// pen cam law that drifts from the dose law (a lost `Ω_c`, a square dropped, the profile ignored)
-/// fails here.
-/// Fixture: a 0.1 m square face-on on the axis at 1.0 and 1.5 m, 16384 directions. At 1.5 m it
-/// covers ~124 strata, one stratum 0.8 % of its dose (DERIVED: `(A / r²) / Ω_c · N`), and the
-/// tolerance is three strata; MEASURED within 1.0 % under every passage.
+/// The pen cam's potency colour reads this resolver's dose, under every passage and on every
+/// support: the intensity its law draws at distance `r` along a direction (`ρ s / (Ω r²)`,
+/// `pen_cam::potency`, `Ω` the support's solid angle) times a thin unresisting face's area there
+/// is `ρ` times the dose the face takes. The colour's promise — a box's face wholly at or above a
+/// threshold takes at least that threshold's pool — relies on it; a pen cam law that drifts from
+/// the dose law (a lost `Ω`, a ring's band taken as the cap it lies in, a square dropped, the
+/// profile ignored) fails here.
+/// Fixture: a ball's cap ([`FIELD`]) with a 0.1 m square face-on on its axis, and a ring's band
+/// (`λ = 0.45`, half-width 10°) with a 0.2 m square face-on at its middle, each at 1.0 and 1.5 m,
+/// 16384 directions. At 1.5 m the faces cover ~124 and ~146 strata, one stratum under 0.8 % of
+/// the dose (DERIVED: `(A / r²) / Ω · N`), and the tolerance is three strata. MEASURED alike under
+/// both passages: the ball's 0.5 % and 2.4 % off, the ring's 2.2 % and 1.1 %, ~1.2 % of the
+/// ring's at 1.0 m its larger face's (DERIVED: `A / r²` over the square's exact solid angle).
 #[test]
 fn the_pen_cam_intensity_times_a_face_is_its_dose() {
     use crate::damage_cam::pen_cam::potency::{Potency, intensity};
     let potency = Potency::shipped();
-    let side = 0.1;
+    let ring = FieldDescriptor::ring(0.45, 10.0_f32.to_radians());
+    let middle = libm::atan2(1.0, 0.45) as f32;
+    let fields = [
+        (FIELD, Vec3::NEG_Y, 0.1),
+        (ring, Vec3::new(middle.sin(), -middle.cos(), 0.0), 0.2),
+    ];
     for passage in PASSAGES {
-        let spread = ConeShape::new(AxisRule::ExitDirection, 16384, passage)
-            .unwrap()
-            .spread(FIELD)
-            .unwrap();
-        let (_, on_axis) = spread
-            .directions(Dir3::NEG_Y)
-            .max_by(|a, b| a.0.y.total_cmp(&b.0.y).reverse())
-            .unwrap();
-        for depth in [1.0, 1.5] {
-            let (mut app, boxes) = field_world(|app| {
-                vec![below(
-                    app,
-                    Vec3::new(side, 0.002, side),
-                    depth,
-                    0.0,
-                    0.0,
-                    true,
-                )]
-            });
-            let dose = field_doses(&mut app, &boxes, 10.0, 16384, passage)[0];
-            let e = potency.emission(10.0 * on_axis, spread.field().half_angle());
-            let drawn = intensity(e, depth - 0.001) as f64 * (side * side) as f64;
-            let ratio = drawn / (potency.rate as f64 * dose);
-            assert!(
-                (ratio - 1.0).abs() < 0.025,
-                "{passage:?}, r = {depth}: I·A / ρD = {ratio}"
-            );
+        for (field, face, side) in fields {
+            let spread = ConeShape::new(AxisRule::ExitDirection, 16384, passage)
+                .unwrap()
+                .spread(field)
+                .unwrap();
+            let (_, weight) = spread
+                .directions(Dir3::NEG_Y)
+                .max_by(|a, b| a.0.dot(face).total_cmp(&b.0.dot(face)))
+                .unwrap();
+            for depth in [1.0, 1.5] {
+                let (mut app, boxes) = field_world(|app| {
+                    let at = Transform::from_translation(face * depth)
+                        .with_rotation(Quat::from_rotation_arc(Vec3::NEG_Y, face));
+                    vec![volume(
+                        app,
+                        Vec3::new(side, 0.002, side),
+                        at,
+                        0.0,
+                        Some(FIELD_HP),
+                    )]
+                });
+                let dose = field_doses_of(&mut app, &boxes, field, 10.0, 16384, passage)[0];
+                let e = potency.emission(10.0 * weight, field.inner_angle(), field.half_angle());
+                let drawn = intensity(e, depth - 0.001) as f64 * (side * side) as f64;
+                let ratio = drawn / (potency.rate as f64 * dose);
+                assert!(
+                    (ratio - 1.0).abs() < 0.025,
+                    "{passage:?}, {field:?}, r = {depth}: I·A / ρD = {ratio}"
+                );
+            }
         }
     }
 }

@@ -1,8 +1,8 @@
 //! The base look: the whole tank as one hueless translucent grey surface one layer deep, its
 //! components solid in the untouched grey one layer deep among themselves, the struck ones on the
-//! state scale, and each spall field as one translucent volume in the potency colour, with its
-//! footprint on every surface it met. It is the tank rendering of every x-ray view: the corner,
-//! the kill cam's lesson and the x-ray. The colour's law, the volume's rim and the draw order are
+//! state scale, and each field (a spall cone's or a burst's) as one translucent volume in the
+//! potency colour, with its footprint on every surface it met. It is the tank rendering of every
+//! x-ray view: the corner, the kill cam's lesson and the x-ray. The colour's law, the volume's rim and the draw order are
 //! design doc §5, "Potency colour" and "Draw order"
 //! (`.agents/docs/design/armor-penetration-and-damage.md`; [`super::potency`]).
 //! [`LookMaterial`] (`pen_cam_look.wgsl`) draws every element; [`hull`], [`component`] and
@@ -104,8 +104,8 @@ const BASE_COMPONENT_FACE_SHARE: f32 = 1.0;
 /// The field footprint's fill opacity, short of opaque so the HP fill under it, the outcome,
 /// reads through.
 const FOOTPRINT_FILL_ALPHA: f32 = 0.6;
-/// The most spall fields a footprint marks; `pen_cam_look.wgsl`'s arrays hold this many fields'
-/// lanes and [`set_footprints`] drops what lies past it, so every record's cones must fit it
+/// The most fields a footprint marks; `pen_cam_look.wgsl`'s arrays hold this many fields'
+/// lanes and [`set_footprints`] drops what lies past it, so every record's fields must fit it
 /// (`every_record_fits_the_footprint`).
 const FOOTPRINT_FIELDS: usize = 4;
 /// One field's disc in lanes, two nodes a lane.
@@ -604,9 +604,10 @@ pub fn follow_pose(
     }
 }
 
-/// One spall field where a footprint or a volume is taken, in world space: its origin, its disc's
-/// frame (the unit axis, `u` and `v` across it, the half-angle in rad), how far its front has run
-/// (m, negative before it is thrown), the world's metres per record metre, and its disc's nodes
+/// One field (a spall cone or a burst's) where a footprint or a volume is taken, in world space:
+/// its origin, its disc's frame (the unit axis, `u` and `v` across it, the half-angle and the
+/// support's inner edge in rad, [`super::field::Disc::inner`]), how far its front has run (m,
+/// negative before it is thrown), the world's metres per record metre, and its disc's nodes
 /// ([`super::field::Disc::nodes`], record units).
 #[derive(Clone, Debug)]
 pub struct FieldPrint<'a> {
@@ -615,22 +616,24 @@ pub struct FieldPrint<'a> {
     pub u: Vec3,
     pub v: Vec3,
     pub half_angle: f32,
+    pub inner: f32,
     pub front: f32,
     pub scale: f32,
     pub nodes: &'a [Vec2],
 }
 
-/// `print` in one field's lanes: four `frame` lanes (origin and half-angle; axis and front; `u`;
-/// `v`) and its disc's [`DISC_LANES`] lanes, two nodes a lane, each node's reach and emission
-/// `ρ s / Ω_c` ([`Potency::emission`]) in world units: metres for the reach, squared metres for
-/// the emission, whose intensity falls as the square of a world distance.
+/// `print` in one field's lanes: four `frame` lanes (origin and half-angle; axis and front; `u`
+/// and inner edge; `v`) and its disc's [`DISC_LANES`] lanes, two nodes a lane, each node's reach
+/// and emission `ρ s / Ω` ([`Potency::emission`], `Ω` its support's solid angle) in world units:
+/// metres for the reach, squared metres for the emission, whose intensity falls as the square of
+/// a world distance.
 fn pack(print: &FieldPrint, potency: &Potency, frame: &mut [Vec4], disc: &mut [Vec4]) {
     frame[0] = print.origin.extend(print.half_angle);
     frame[1] = print.axis.extend(print.front);
-    frame[2] = print.u.extend(0.0);
+    frame[2] = print.u.extend(print.inner);
     frame[3] = print.v.extend(0.0);
     let world = |node: Vec2| {
-        let emission = potency.emission(node.y, print.half_angle);
+        let emission = potency.emission(node.y, print.inner, print.half_angle);
         Vec2::new(node.x * print.scale, emission * print.scale * print.scale)
     };
     for (lane, pair) in disc.iter_mut().zip(print.nodes.chunks(2)) {
@@ -652,12 +655,13 @@ impl VolumeGeometry {
     /// `print`'s, from `R`, the longest reach among its disc's nodes (world m), past which neither
     /// the volume's surface nor its march reads the disc. Every point of the volume lies within
     /// `R` of the origin on a direction at most `α` off the axis, so two of them lie at most
-    /// `R · max(1, 2 sin α)` apart (DERIVED: the third side of a triangle whose other two are at
-    /// most `R` about an angle at most `2α`, for `α ≤ 90°` as `spall_cone.ron`'s parse holds): the
-    /// longest chord.
+    /// `R · max(1, 2 sin min(α, 90°))` apart (DERIVED: the third side of a triangle whose other
+    /// two are at most `R` about an angle at most `min(2α, 180°)`): the longest chord, `2R` for a
+    /// field past the hemisphere.
     pub fn of(print: &FieldPrint) -> Self {
         let reach = print.nodes.iter().map(|node| node.x).fold(0.0, f32::max) * print.scale;
-        let chord = reach * (2.0 * print.half_angle.sin()).max(1.0);
+        let wide = print.half_angle.min(std::f32::consts::FRAC_PI_2);
+        let chord = reach * (2.0 * wide.sin()).max(1.0);
         Self {
             step: chord / VOLUME_STEPS as f32,
             depth: VOLUME_DEPTH_SHARE * reach,
@@ -668,8 +672,9 @@ impl VolumeGeometry {
 /// Mark `prints` on every surface the base look drawn against `masks` draws, the hull's and the
 /// components': a base or state material is one look's by the mask set it holds, so another
 /// look's surfaces (the corner's beside the x-ray's) keep their own footprints. A surface point is
-/// in a field where it faces the field's origin, lies inside its cone, behind its front and no
-/// farther than its direction's reach on the disc: the field met it there. It is filled in the
+/// in a field where it faces the field's origin, lies on its support (inside its cone, past a
+/// band's inner edge), behind its front and no farther than its direction's reach on the disc:
+/// the field met it there. It is filled in the
 /// potency colour of the fields' summed intensity there ([`super::potency::Ramp`]). The disc lanes
 /// ([`pack`]) and the ramp lanes carry the law alone: nothing display-side sets the colour.
 pub fn set_footprints(
@@ -864,16 +869,16 @@ mod tests {
     use super::*;
     use crate::fingerprint::{FNV_OFFSET_BASIS, fnv1a_64};
 
-    /// Every record's spall cones fit the footprint: none throws more than [`FOOTPRINT_FIELDS`],
-    /// past which [`set_footprints`] drops a field unmarked, and a disc's nodes fill its lanes
-    /// exactly, whatever the cone's direction count.
+    /// Every record's fields fit the footprint: none throws more than [`FOOTPRINT_FIELDS`], its
+    /// spall cones and its burst's field together, past which [`set_footprints`] drops a field
+    /// unmarked, and a disc's nodes fill its lanes exactly, whatever the field's direction count.
     #[test]
     fn every_record_fits_the_footprint() {
         for (name, report) in super::super::plan::tests::records() {
-            let cones = report.spall.len();
+            let fields = report.fields().count();
             assert!(
-                cones <= FOOTPRINT_FIELDS,
-                "{name} throws {cones} cones, past FOOTPRINT_FIELDS = {FOOTPRINT_FIELDS}"
+                fields <= FOOTPRINT_FIELDS,
+                "{name} throws {fields} fields, past FOOTPRINT_FIELDS = {FOOTPRINT_FIELDS}"
             );
         }
         assert_eq!(2 * DISC_LANES, DISC_SIDE * DISC_SIDE);
@@ -937,6 +942,7 @@ mod tests {
             u: Vec3::X,
             v: Vec3::Y,
             half_angle: 25.0_f32.to_radians(),
+            inner: 0.0,
             front: 3.0,
             scale: 2.0,
             nodes,
@@ -944,7 +950,7 @@ mod tests {
     }
 
     /// The colour reads no gain: the lanes a footprint and a volume colour from carry each node's
-    /// reach and emission `ρ s / Ω_c` in world units (squared metres for the emission, whose
+    /// reach and emission `ρ s / Ω` in world units (squared metres for the emission, whose
     /// intensity falls as the square of a world distance), the shipped thresholds and the shipped
     /// ramp, and fading a material moves its fade lane alone. The colour promise relies on it; a
     /// display gain, level or fade in a colouring lane, or a volume packed apart from the
@@ -963,7 +969,10 @@ mod tests {
         for (k, node) in nodes.iter().enumerate() {
             let (reach, emission) = (lane[2 * k], lane[2 * k + 1]);
             assert_eq!(reach, 2.0 * node.x);
-            assert_eq!(emission, 4.0 * potency.emission(node.y, print.half_angle));
+            assert_eq!(
+                emission,
+                4.0 * potency.emission(node.y, print.inner, print.half_angle)
+            );
             assert_eq!(
                 emission,
                 4.0 * potency.rate * node.y / super::super::potency::solid_angle(print.half_angle)
@@ -1074,11 +1083,11 @@ mod tests {
         ("pen_cam_look.wgsl", "node", 0x09ad_7fd3_59ca_3573),
         ("pen_cam_look.wgsl", "disc_at", 0x11bd_83b4_bbab_7d73),
         ("pen_cam_look.wgsl", "ramp", 0x6cc6_ee49_6e8f_dcda),
-        ("pen_cam_look.wgsl", "polar", 0xdbe8_47f2_5de0_3442),
-        ("pen_cam_look.wgsl", "footprint", 0xe25c_9129_0d22_eacd),
+        ("pen_cam_look.wgsl", "polar", 0xc733_d528_4266_a92f),
+        ("pen_cam_look.wgsl", "footprint", 0xc9a9_971b_8011_e86f),
         ("pen_cam_look.wgsl", "weight", 0x12fd_a42c_e98c_c0f4),
         ("pen_cam_look.wgsl", "weighed", 0xd301_7b52_7fd1_b173),
-        ("pen_cam_look.wgsl", "sample", 0x4b2e_66dc_d41e_b188),
+        ("pen_cam_look.wgsl", "sample", 0xe249_6117_1214_fdad),
         ("pen_cam_look.wgsl", "volume", 0x10f5_a579_4c74_12f4),
         ("pen_cam_look.wgsl", "lines", 0x5560_efe8_d460_738c),
         ("pen_cam_look.wgsl", "fragment", 0x48ae_8a95_463a_6e06),
@@ -1272,15 +1281,43 @@ mod tests {
     }
 
     /// A volume's march spans its longest chord: [`VOLUME_STEPS`] steps cover the distance between
-    /// any two vertices of its reach surface, the volume's bound, for every record's cones at the
-    /// record's size and at the stage's. The shader marches at most that many steps back from where
-    /// the eye ray leaves; a step from the mean reach, or one that forgets the cone's width, leaves
-    /// the near part of a long chord unread and its colour short.
+    /// any two vertices of its reach surface, the volume's bound, for every record's fields and a
+    /// field over the whole sphere (a ball at rest, fixture reach 2 m) at the record's size and at
+    /// the stage's. The shader marches at most that many steps back from where the eye ray leaves;
+    /// a step from the mean reach, or one that forgets the field's width, past the hemisphere
+    /// included, leaves the near part of a long chord unread and its colour short.
     #[test]
     fn the_march_spans_every_chord() {
+        use super::super::plan::{Cone, Plan, Ray};
+        use crate::ballistics::spall_cone::{ConeShape, FieldDescriptor};
+        let rest = FieldDescriptor::ball(0.0);
+        let rays = ConeShape::shipped()
+            .spread(rest)
+            .unwrap()
+            .directions(Dir3::NEG_Z)
+            .map(|(direction, weight)| Ray {
+                direction: direction.into(),
+                reach: 2.0,
+                weight,
+            })
+            .collect();
+        let sphere = Cone::new(
+            Vec3::ZERO,
+            Vec3::NEG_Z,
+            rest.half_angle(),
+            rest.inner_angle(),
+            10.0,
+            0.0,
+            rays,
+        );
+        let mut plans: Vec<(String, Vec<Cone>)> = super::super::potency::tests::plans()
+            .into_iter()
+            .map(|(name, plan): (String, Plan)| (name, plan.cones))
+            .collect();
+        plans.push(("the sphere".to_owned(), vec![sphere]));
         let mut checked = 0;
-        for (name, plan) in super::super::potency::tests::plans() {
-            for cone in &plan.cones {
+        for (name, cones) in plans {
+            for cone in &cones {
                 let mesh = super::super::field::reach_mesh(cone);
                 let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
                     mesh.attribute(Mesh::ATTRIBUTE_POSITION)
@@ -1306,6 +1343,7 @@ mod tests {
                         u: cone.disc.u,
                         v: cone.disc.v,
                         half_angle: cone.half_angle,
+                        inner: cone.disc.inner,
                         front: 0.0,
                         scale,
                         nodes: &cone.disc.nodes,
@@ -1323,8 +1361,9 @@ mod tests {
         assert!(checked > 0);
     }
 
-    /// A cone's presentation is finite across the field law's whole domain: at the hemisphere
-    /// (`λ = 1`) and at the narrowest cone the law resolves (the largest ratio
+    /// A field's presentation is finite across the field law's whole domain: over the whole
+    /// sphere (a ball at rest, `λ = 0`), over a ring's band (fixture `λ = 0.45`, half-width 10°), at
+    /// the hemisphere (`λ = 1`) and at the narrowest cone the law resolves (the largest ratio
     /// `FieldDescriptor::check` admits, about 9.5·10⁷, a half-angle of about 10⁻⁸ rad, DERIVED),
     /// a direction's emission is finite and positive, and every lane [`set_footprints`] and
     /// [`LookMaterial::set_volume`] pack (the field's frame, its disc's reach and emission through
@@ -1352,8 +1391,14 @@ mod tests {
         let potency = Potency::shipped();
         let masks = MaskSet::default();
         let (strength, reach) = (10.0, 2.0);
-        for ratio in [1.0, top] {
-            let descriptor = FieldDescriptor::ball(ratio);
+        let fields = [
+            FieldDescriptor::ball(0.0),
+            FieldDescriptor::ring(0.45, 10.0_f32.to_radians()),
+            FieldDescriptor::ball(1.0),
+            FieldDescriptor::ball(top),
+        ];
+        for descriptor in fields {
+            let ratio = descriptor.ratio;
             let spread = ConeShape::shipped().spread(descriptor).unwrap();
             let rays = spread
                 .directions(Dir3::NEG_Z)
@@ -1367,11 +1412,12 @@ mod tests {
                 Vec3::ZERO,
                 Vec3::NEG_Z,
                 descriptor.half_angle(),
+                descriptor.inner_angle(),
                 strength,
                 0.0,
                 rays,
             );
-            let emission = potency.emission(strength, cone.half_angle);
+            let emission = potency.emission(strength, cone.disc.inner, cone.half_angle);
             assert!(
                 emission.is_finite() && emission > 0.0,
                 "λ = {ratio}: emission {emission}"
@@ -1382,6 +1428,7 @@ mod tests {
                 u: cone.disc.u,
                 v: cone.disc.v,
                 half_angle: cone.disc.half_angle,
+                inner: cone.disc.inner,
                 front: cone.max_reach(),
                 scale: 2.0,
                 nodes: &cone.disc.nodes,

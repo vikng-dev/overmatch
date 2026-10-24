@@ -18,12 +18,12 @@
 //                 from `span.x` to `span.y` (world m) by `state.w` (the share lost) times the fade;
 //                 with `span.z = 0` (no known heights) the fill covers the mesh once the fade is on.
 //                 Its field footprint tints it over the fill.
-//   4 volume      one spall field's volume (`volume`), drawn on the back faces of its reach
-//                 surface, where the eye ray leaves it, whatever stands in front: the ray is
-//                 marched back toward the eye in steps of `volume.z` (m), at most `VOLUME_STEPS`,
-//                 while it stays inside the field (`sample`: inside the cone, behind the front,
-//                 within the disc's reach, on the cut's kept side), where the ray enters it refined
-//                 by `VOLUME_REFINE` halvings, the eye the end if it lies inside. With
+//   4 volume      one field's volume (a spall cone's or a burst's, `volume`), drawn on the back
+//                 faces of its reach surface, where the eye ray leaves it, whatever stands in
+//                 front: the ray is marched back toward the eye in steps of `volume.z` (m), at most
+//                 `VOLUME_STEPS`, while it stays inside the field (`sample`: on its support, behind
+//                 the front, within the disc's reach, on the cut's kept side), where the ray enters
+//                 it refined by `VOLUME_REFINE` halvings, the eye the end if it lies inside. With
 //                 `volume.w = 1` the pixel's nearest scene surface in the part mask bounds it: the
 //                 stretch behind that surface is passed over, and the march takes the rest from
 //                 the surface toward the eye, or nothing where the ray's stretch inside lies
@@ -48,11 +48,13 @@
 // The potency colour (`ramp`; design doc §5, "Potency colour") is one function of intensity
 // alone: a monotone cubic in `u = log2(I / T_mid)` through three anchors (`ramp[0..3]`: rgb, and
 // `u` in w), level at the ends and at the middle anchor of slope `ramp[3].rgb`, `ramp[3].w` the
-// mid threshold `T_mid`; `potency::Ramp` is the same curve. A spall field's intensity at a point
-// is the emission at its direction on the disc over the squared distance from its origin.
+// mid threshold `T_mid`; `potency::Ramp` is the same curve. A field's intensity at a point is the
+// emission at its direction on the disc over the squared distance from its origin. A field's
+// support is the directions from its inner edge to its half-angle off its axis: a cap (inner edge
+// 0), a ring's band, or the whole sphere (half-angle π); nothing off it is in the field.
 //
-// Base and state surfaces carry the spall fields' footprint (`footprint`): for each of the fields
-// (`fields.x`, none at 0; `prints`), a surface point facing the origin, inside the cone, behind its
+// Base and state surfaces carry the fields' footprint (`footprint`): for each of the fields
+// (`fields.x`, none at 0; `prints`), a surface point facing the origin, on its support, behind its
 // front and no farther than its direction's reach on the field's disc (`disc`, with the slack
 // `foot.yz`) takes the field's intensity there. The fields' summed intensity fills the point in
 // its potency colour at opacity `foot.x`. No lane the colour is read from carries a display gain.
@@ -99,7 +101,8 @@ struct LookParams {
     // x: the fields marked.
     fields: vec4<f32>,
     // Four fields of four lanes: origin (world) and half-angle (rad); unit axis (world) and how far
-    // its front has run (m), negative before it is thrown; the disc's `u` and `v` (world, unit).
+    // its front has run (m), negative before it is thrown; the disc's `u` (world, unit) and the
+    // support's inner edge (rad, 0 on a cap and the sphere); the disc's `v` (world, unit).
     prints: array<vec4<f32>, 16>,
     // Four fields of `DISC_LANES` lanes, two disc nodes a lane: each node's reach (m) and emission
     // (HP points per sr, world), row by row from `q.y = −1` (`field::Disc`).
@@ -223,13 +226,14 @@ fn ramp(i: f32) -> vec3<f32> {
 }
 
 // Unit direction `dir` from field `f`'s origin on its disc: the disc point (xy) and the angle
-// from the axis (z, rad). Past the half-angle the point is the rim's.
+// from the axis (z, rad), `field::Disc::point`. Past the half-angle the point is the rim's; a
+// direction with no azimuth (on the axis, or the sphere's antipode) takes azimuth 0.
 fn polar(f: i32, dir: vec3<f32>) -> vec3<f32> {
     let half_angle = look.prints[4 * f].w;
     let angle = acos(clamp(dot(dir, look.prints[4 * f + 1].xyz), -1.0, 1.0));
     let across = vec2(dot(dir, look.prints[4 * f + 2].xyz), dot(dir, look.prints[4 * f + 3].xyz));
     let s = length(across);
-    let q = select(vec2(0.0), across / max(s, 1e-6) * min(angle / half_angle, 1.0), s > 1e-6);
+    let q = select(vec2(1.0, 0.0), across / max(s, 1e-6), s > 1e-6) * min(angle / half_angle, 1.0);
     return vec3(q, angle);
 }
 
@@ -250,7 +254,7 @@ fn footprint(p: vec3<f32>, n: vec3<f32>) -> f32 {
         }
         let dir = d / r;
         let on_disc = polar(f, dir);
-        if on_disc.z > at.w {
+        if on_disc.z > at.w || on_disc.z < look.prints[4 * f + 2].w {
             continue;
         }
         let here = disc_at(f, on_disc.xy);
@@ -275,7 +279,7 @@ fn weighed(i: f32) -> vec4<f32> {
     return vec4(ramp(i) * w, w);
 }
 
-// A point on an eye ray in field 0's volume: whether it lies inside (in the cone, behind the
+// A point on an eye ray in field 0's volume: whether it lies inside (on its support, behind the
 // front, within its direction's reach on the disc, on the cut's kept side) and its intensity
 // there (HP points per m²).
 struct Sample {
@@ -294,7 +298,8 @@ fn sample(p: vec3<f32>) -> Sample {
     let on_disc = polar(0, d / r);
     let here = disc_at(0, on_disc.xy);
     let cut = look.mode.y > 0.5 && dot(look.plane.xyz, p) > look.plane.w;
-    let inside = on_disc.z <= at.w && r <= min(here.x, front) && !cut;
+    let on_support = on_disc.z <= at.w && on_disc.z >= look.prints[2].w;
+    let inside = on_support && r <= min(here.x, front) && !cut;
     return Sample(inside, here.y / (r * r));
 }
 

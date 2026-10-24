@@ -107,7 +107,7 @@ pub struct Knobs {
     pub slice_ortho: bool,
     /// The corner fills the window.
     pub expanded: bool,
-    /// Each spall cone's axis drawn as a line.
+    /// Each field's axis drawn as a line.
     pub axis_line: bool,
     /// The viewer's drag on the corner camera (yaw, pitch; rad).
     pub orbit: Vec2,
