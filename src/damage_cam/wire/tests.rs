@@ -382,7 +382,7 @@ fn a_cone_of_any_ratio_round_trips() {
 }
 
 /// A cone its law did not throw is refused both ways. The encoder refuses a ray's strength one ulp
-/// off `S·f_k`, a half-angle not its descriptor's, a ratio below the ball's domain, and strengths
+/// off `S·f_k`, a half-angle not its descriptor's, a ratio outside the law's domain, and strengths
 /// thrown under one ratio carried with another's descriptor; the decoder refuses a cone whose
 /// ratio is outside the domain. Each would hand the client rays the authority never threw.
 #[test]
@@ -397,7 +397,7 @@ fn a_cone_off_its_law_is_refused() {
             *strength = f32::from_bits(strength.to_bits() + 1);
         },
         |cone| cone.half_angle_deg += 0.01,
-        |cone| cone.field.ratio = 0.5,
+        |cone| cone.field.ratio = -0.5,
         |cone| {
             cone.field.ratio *= 1.01;
             cone.half_angle_deg = cone.field.half_angle().to_degrees();
@@ -413,7 +413,7 @@ fn a_cone_off_its_law_is_refused() {
     }
     let mut explanation = built.full;
     assert!(explanation.decode(&vocabulary).is_ok());
-    explanation.record.cones[0].field.ratio = 0.5;
+    explanation.record.cones[0].field.ratio = -0.5;
     assert!(explanation.decode(&vocabulary).is_err());
 }
 

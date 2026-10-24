@@ -9,30 +9,37 @@
 //!
 //! # The field law
 //!
-//! A cone is described by a law and one shape number, its ratio `λ` ([`FieldDescriptor`]). Under
-//! the one law, [`FieldLaw::Ball`], the share of the cone's emission inside polar angle `θ` of its
-//! axis is `F(μ) = 1 − μ·D^m`, `μ = cos θ`, `D = √(1 − λ²(1 − μ²))`, `m` = [`BALL_EXPONENT`]: the
-//! field is brightest on the axis and falls to zero at the rim `α = asin(1/λ)`. A plate exit's `λ`
-//! is its rear layer's substance's (`crate::substances::HardSubstance::debris_ratio`), so the
-//! half-angle is the exit material's. The passage stays a data-selectable dial (playtest fork F6):
-//! the shipped [`Passage::FirstSolid`] and the kept [`Passage::Partial`].
+//! A field is described by a law and one shape number, its ratio `λ`, the forward speed over the
+//! greatest sideways one ([`FieldDescriptor`]). Under [`FieldLaw::Ball`] the share of the field's
+//! emission inside polar angle `θ` of its axis is `F(μ) = 1 − μ·D^m`, `μ = cos θ`,
+//! `D = √(1 − λ²(1 − μ²))`, `m` = [`BALL_EXPONENT`]: the field is brightest on the axis and falls to
+//! zero at the rim `α = asin(1/λ)`. A plate exit's `λ` is its rear layer's substance's
+//! (`crate::substances::HardSubstance::debris_ratio`), at least 1, so the half-angle is the exit
+//! material's. A burst's ball may run below `λ = 1` (design doc §5, "The burst"), where it fills
+//! the whole sphere: `F = (1 + λ − μg)(2 + λ − λ² + λμg)/4`, `g = λμ + D`, the `m = 3` law's
+//! closed form, uniform at `λ = 0`. Under [`FieldLaw::Ring`], a burst's ring, the field is uniform
+//! over the band `θ_c ∓ h` about `θ_c = atan(1/λ)`, its near edge held at the axis. The passage
+//! stays a data-selectable dial (playtest fork F6): the shipped [`Passage::FirstSolid`] and the
+//! kept [`Passage::Partial`].
 //!
 //! # Directions
 //!
-//! `N` directions in equal-solid-angle strata: with `w = 1 − cos α`, direction `k` sits at
-//! `μ_k = 1 − w(k + ½)/N`, the stratum's midpoint in `cos θ`, at golden-angle azimuth
-//! `φ_k = k·π(3 − √5)`, and stands for `1/N` of the cone's solid angle. Its weight is its stratum's
+//! `N` directions in equal-solid-angle strata over the field's support `[t_lo, t_hi]` in depth
+//! `t = 1 − cos θ` — the cap `[0, 1 − cos α]`, the sphere `[0, 2]`, the band: direction `k` sits at
+//! `t_k = t_lo + (t_hi − t_lo)(k + ½)/N`, the stratum's midpoint, at golden-angle azimuth
+//! `φ_k = k·π(3 − √5)`, and stands for `1/N` of the field's solid angle. Its weight is its stratum's
 //! exact share of the emission, `f_k = (N/2)[F(e_{k+1}) − F(e_k)]` over the stratum's edges
-//! `e_j = 1 − w·j/N`, so a cone of strength `S` sends `S·f_k` along it, and the emitted total
-//! `(1/N) Σ S·f_k` telescopes to `S/2` at every `N`.
+//! `e_j = t_lo + (t_hi − t_lo)·j/N`, so a field of strength `S` sends `S·f_k` along it, and the
+//! emitted total `(1/N) Σ S·f_k` telescopes to `S/2` at every `N`.
 //!
 //! # Determinism
 //!
 //! The azimuths are built once per shape, at parse, in f64 with `libm`'s `cos`/`sin`, and kept in
 //! f64: the platform's own `sin`/`cos` are not the same on every shipped target. A cone's `μ_k`,
-//! `sin θ_k` and `f_k` are built from its `λ` in f64 with IEEE `+`, `−`, `×`, `/` and `sqrt` alone,
-//! each correctly rounded, then cast to f32, so a decoder on any target rebuilds the same bits from
-//! the same descriptor; its half-angle is `libm`'s `asin`. Placing a stratum on an axis is IEEE f32
+//! `sin θ_k` and `f_k` are built from its descriptor in f64 with IEEE `+`, `−`, `×`, `/` and `sqrt`
+//! alone, each correctly rounded, then cast to f32, the ring's band edges with `libm`'s `cos`/`sin`
+//! of its half-width, so a decoder on any target rebuilds the same bits from the same descriptor;
+//! its half-angle is `libm`'s `asin`, the ring's `atan2`. Placing a stratum on an axis is IEEE f32
 //! arithmetic alone (scalar glam, no fused operations), so a cone's directions are the same bits on
 //! every target for the same axis.
 
@@ -59,17 +66,22 @@ pub(crate) const BALL_EXPONENT: u32 = 3;
 const GOLDEN_ANGLE: f64 = 2.399_963_229_728_653;
 
 /// How a field's strength is spread over its directions, and how wide it is.
-#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub enum FieldLaw {
     /// Sideways debris speeds uniform in a ball about the forward speed, the greatest `1/λ` of
     /// it: share inside `θ` `F(μ) = 1 − μ·D^m`, `m` = [`BALL_EXPONENT`], rim `α = asin(1/λ)`;
-    /// brightest on the axis, zero at the rim.
+    /// brightest on the axis, zero at the rim. Below `λ = 1` the whole sphere, under the `m = 3`
+    /// law's closed form.
     Ball,
+    /// A burst's ring: uniform over the band `half_width` (rad, in `(0, π/2)`) to either side of
+    /// `θ_c = atan(1/λ)`, the near edge held at the axis.
+    Ring { half_width: f32 },
 }
 
 impl FieldLaw {
-    /// Every law, in id order.
-    pub(crate) const ALL: [FieldLaw; 1] = [FieldLaw::Ball];
+    /// Every law's name, in declaration order: a law's index here is the variant index its
+    /// serialized form carries.
+    pub(crate) const NAMES: [&'static str; 2] = ["Ball", "Ring"];
 }
 
 /// A field's law and its one shape number: what a record and the wire carry per cone. With the
@@ -78,69 +90,134 @@ impl FieldLaw {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 pub struct FieldDescriptor {
     pub law: FieldLaw,
-    /// `λ`: the debris's forward speed over its greatest sideways speed; the cone's half-angle is
-    /// `asin(1/λ)`. The representation admits `λ < 1`, a field over the whole sphere; the ball's
-    /// domain is `λ ≥ 1`, a plate exit's (`α ≤ 90°`).
+    /// `λ`: the debris's forward speed over its greatest sideways speed, finite and not negative.
+    /// A plate exit's is at least 1 (`α ≤ 90°`); a burst's is zero at rest.
     pub ratio: f32,
 }
 
-/// The ball law's terms for one ratio: `λ²` and the cap's depth `w = 1 − cos α`.
+/// A law's terms for one descriptor: its support in depth `t = 1 − cos θ` and its share there.
 #[derive(Clone, Copy, Debug)]
-struct BallTerms {
-    l2: f64,
-    w: f64,
+enum Terms {
+    /// The ball at `λ ≥ 1`: `λ²` and the cap's depth `w = 1 − cos α`.
+    Cap { l2: f64, w: f64 },
+    /// The ball at `λ < 1`, over the whole sphere.
+    Sphere { lambda: f64 },
+    /// The ring over its band `[lo, hi]`.
+    Band { lo: f64, hi: f64 },
 }
 
-impl BallTerms {
-    /// The share of the emission inside the cone of depth `t = 1 − cos θ` about the axis,
-    /// `1 − μ·D^m`, `D² = 1 − λ²·t(2 − t)` (`= 1 − λ²(1 − μ²)`, without the cancellation), held
-    /// at zero past the rim. `D^m` is `m` IEEE products.
+impl Terms {
+    /// `[t_lo, t_hi]`, the support in depth.
+    fn support(&self) -> (f64, f64) {
+        match *self {
+            Terms::Cap { w, .. } => (0.0, w),
+            Terms::Sphere { .. } => (0.0, 2.0),
+            Terms::Band { lo, hi } => (lo, hi),
+        }
+    }
+
+    /// The share of the emission inside depth `t` of the axis. The cap's is `1 − μ·D^m`,
+    /// `D² = 1 − λ²·t(2 − t)` (`= 1 − λ²(1 − μ²)`, without the cancellation), held at zero past the
+    /// rim, `D^m` `m` IEEE products; the sphere's the `m = 3` closed form (`exponent` unread); the
+    /// band's linear across it.
     fn share(&self, t: f64, exponent: u32) -> f64 {
-        let d = (1.0 - self.l2 * (t * (2.0 - t))).max(0.0).sqrt();
-        1.0 - (1.0 - t) * (0..exponent).fold(1.0, |power, _| power * d)
+        match *self {
+            Terms::Cap { l2, .. } => {
+                let d = (1.0 - l2 * (t * (2.0 - t))).max(0.0).sqrt();
+                1.0 - (1.0 - t) * (0..exponent).fold(1.0, |power, _| power * d)
+            }
+            Terms::Sphere { lambda } => {
+                let mu = 1.0 - t;
+                let d = (1.0 - lambda * lambda * (t * (2.0 - t))).sqrt();
+                let g = lambda * mu + d;
+                (1.0 + lambda - mu * g) * (2.0 + lambda - lambda * lambda + lambda * mu * g) / 4.0
+            }
+            Terms::Band { lo, hi } => ((t - lo) / (hi - lo)).clamp(0.0, 1.0),
+        }
     }
 }
 
 impl FieldDescriptor {
     /// The ball law at ratio `ratio`.
-    pub(crate) fn ball(ratio: f32) -> Self {
+    pub(crate) const fn ball(ratio: f32) -> Self {
         Self {
             law: FieldLaw::Ball,
             ratio,
         }
     }
 
-    /// α (rad), the field's rim: `asin(1/λ)`, `libm`'s in f64 cast to f32, so a descriptor gives
-    /// the same bits on every target. Every reader of a cone's half-angle takes it from here.
-    pub(crate) fn half_angle(&self) -> f32 {
-        let FieldLaw::Ball = self.law;
-        libm::asin(1.0 / self.ratio as f64) as f32
+    /// The ring law of half-width `half_width` (rad) at ratio `ratio`.
+    pub(crate) const fn ring(ratio: f32, half_width: f32) -> Self {
+        Self {
+            law: FieldLaw::Ring { half_width },
+            ratio,
+        }
     }
 
-    /// The law's terms, refusing a descriptor outside its domain: a ratio that is not finite, a
-    /// ratio below 1 (a full sphere, which the APHE burst slice adds), and a cone so narrow that
-    /// `1 − w`, the rim's `cos α`, rounds to 1 (`λ` above about 10⁸, DERIVED). Names the violation.
-    fn terms(&self) -> Result<BallTerms, String> {
-        let FieldLaw::Ball = self.law;
+    /// α (rad), the field's rim, the greatest angle off the axis it reaches: the ball's
+    /// `asin(1/λ)`, or π below `λ = 1`; the ring's `atan2(1, λ) + h`. `libm`'s in f64 cast to f32,
+    /// so a descriptor gives the same bits on every target. Every reader of a field's half-angle
+    /// takes it from here.
+    pub(crate) fn half_angle(&self) -> f32 {
         let lambda = self.ratio as f64;
-        if !lambda.is_finite() {
-            return Err(format!("a field's ratio must be finite (got {lambda})"));
+        match self.law {
+            FieldLaw::Ball if lambda < 1.0 => std::f32::consts::PI,
+            FieldLaw::Ball => libm::asin(1.0 / lambda) as f32,
+            FieldLaw::Ring { half_width } => (libm::atan2(1.0, lambda) + half_width as f64) as f32,
         }
-        if lambda < 1.0 {
+    }
+
+    /// The law's terms, refusing a descriptor outside its domain: a ratio that is negative or not
+    /// finite, a ball so narrow that the rim's `cos α` rounds to 1 (`λ` above about 10⁸, DERIVED),
+    /// and a ring whose half-width is outside `(0, π/2)` or whose band rounds away. Names the
+    /// violation.
+    fn terms(&self) -> Result<Terms, String> {
+        let lambda = self.ratio as f64;
+        if !lambda.is_finite() || lambda < 0.0 {
             return Err(format!(
-                "a field's ratio below 1 (got {lambda}) throws over the whole sphere; the APHE \
-                 burst slice adds it, and a plate exit's cone has a ratio of at least 1"
+                "a field's ratio must be finite and not negative (got {lambda})"
             ));
         }
-        let l2 = lambda * lambda;
-        let w = 1.0 / (l2 * (1.0 + (1.0 - 1.0 / l2).sqrt()));
-        if 1.0 - w >= 1.0 {
-            return Err(format!(
-                "a field of ratio {lambda} is narrower than the law resolves: its rim's cos α \
-                 rounds to 1"
-            ));
+        match self.law {
+            FieldLaw::Ball if lambda < 1.0 => Ok(Terms::Sphere { lambda }),
+            FieldLaw::Ball => {
+                let l2 = lambda * lambda;
+                let w = 1.0 / (l2 * (1.0 + (1.0 - 1.0 / l2).sqrt()));
+                if 1.0 - w >= 1.0 {
+                    return Err(format!(
+                        "a field of ratio {lambda} is narrower than the law resolves: its rim's \
+                         cos α rounds to 1"
+                    ));
+                }
+                Ok(Terms::Cap { l2, w })
+            }
+            FieldLaw::Ring { half_width } => {
+                let h = half_width as f64;
+                if !(h > 0.0 && h < std::f64::consts::FRAC_PI_2) {
+                    return Err(format!(
+                        "a ring's half-width must lie in (0, π/2) rad (got {h})"
+                    ));
+                }
+                // cos θ_c and sin θ_c of θ_c = atan(1/λ), and the band's edges `θ_c ∓ h` in depth.
+                let r = (1.0 + lambda * lambda).sqrt();
+                let (cos_c, sin_c) = (lambda / r, 1.0 / r);
+                let (cos_h, sin_h) = (libm::cos(h), libm::sin(h));
+                let hi = 1.0 - (cos_c * cos_h - sin_c * sin_h);
+                let lo = if sin_c * cos_h > cos_c * sin_h {
+                    1.0 - (cos_c * cos_h + sin_c * sin_h)
+                } else {
+                    0.0
+                };
+                // Every term is finite: the ratio and half-width are checked above.
+                if hi <= lo {
+                    return Err(format!(
+                        "a ring of ratio {lambda} and half-width {h} rad is narrower than the law \
+                         resolves"
+                    ));
+                }
+                Ok(Terms::Band { lo, hi })
+            }
         }
-        Ok(BallTerms { l2, w })
     }
 
     /// Whether the descriptor lies in its law's domain ([`Self::terms`]); names the violation.
@@ -149,22 +226,42 @@ impl FieldDescriptor {
     }
 
     /// The law's weight along a direction at `mu = cos θ` from the axis: the continuous form of a
-    /// spread's `f_k`, `½·w·(D^m + m·λ²μ²·D^(m−2))` under the ball, `(w/2)·(−dF/dμ)`; zero at and
-    /// past the rim, and for a descriptor outside the law's domain.
+    /// spread's `f_k`, `(t_hi − t_lo)/2 · (−dF/dμ)` — under the ball's cap
+    /// `½·w·(D^m + m·λ²μ²·D^(m−2))`, zero at and past the rim; over its sphere `(λμ + D)³/2`; across
+    /// the ring's band ½, zero off it. Zero for a descriptor outside the law's domain.
     pub(crate) fn weight_at(&self, mu: f64) -> f64 {
         let Ok(terms) = self.terms() else {
             return 0.0;
         };
-        // `D²` is even in `μ`: past the rim it turns positive again behind the plate, so the cap is
-        // bounded by its depth, not by the sign of `D²`.
         let t = 1.0 - mu;
-        if t.is_nan() || t >= terms.w {
-            return 0.0;
+        match terms {
+            // `D²` is even in `μ`: past the rim it turns positive again behind the plate, so the
+            // cap is bounded by its depth, not by the sign of `D²`.
+            Terms::Cap { l2, w } => {
+                if t.is_nan() || t >= w {
+                    return 0.0;
+                }
+                let d = (1.0 - l2 * (t * (2.0 - t))).max(0.0).sqrt();
+                let power = |n: u32| (0..n).fold(1.0, |p, _| p * d);
+                let m = BALL_EXPONENT;
+                0.5 * w * (power(m) + m as f64 * l2 * mu * mu * power(m - 2))
+            }
+            Terms::Sphere { lambda } => {
+                if !(-1.0..=1.0).contains(&mu) {
+                    return 0.0;
+                }
+                let d = (1.0 - lambda * lambda * (t * (2.0 - t))).sqrt();
+                let reach = lambda * mu + d;
+                0.5 * reach * reach * reach
+            }
+            Terms::Band { lo, hi } => {
+                if (lo..=hi).contains(&t) {
+                    0.5
+                } else {
+                    0.0
+                }
+            }
         }
-        let d = (1.0 - terms.l2 * (t * (2.0 - t))).max(0.0).sqrt();
-        let power = |n: u32| (0..n).fold(1.0, |p, _| p * d);
-        let m = BALL_EXPONENT;
-        0.5 * terms.w * (power(m) + m as f64 * terms.l2 * mu * mu * power(m - 2))
     }
 }
 
@@ -392,7 +489,7 @@ impl ConeShape {
         z.cross(up).normalize()
     }
 
-    /// This shape's strata under `field`: each direction placed in its stratum of the cone
+    /// This shape's strata under `field`: each direction placed in its stratum of the support
     /// `field` bounds, and weighted by its stratum's share of the emission. Refuses a descriptor
     /// outside its law's domain ([`FieldDescriptor::check`]), and a spread whose construction is
     /// numerically degenerate: any non-finite stratum, or an emitted total `(1/N) Σ f_k` farther
@@ -410,14 +507,22 @@ impl ConeShape {
         exponent: u32,
     ) -> Result<Spread, String> {
         let terms = field.terms()?;
+        if matches!(terms, Terms::Sphere { .. }) && exponent != BALL_EXPONENT {
+            return Err(format!(
+                "the ball below a ratio of 1 is the exponent-{BALL_EXPONENT} law's closed form \
+                 (got exponent {exponent})"
+            ));
+        }
         let n = self.azimuths.len() as f64;
-        let share = |edge: usize| terms.share(terms.w * edge as f64 / n, exponent);
+        let (lo, hi) = terms.support();
+        let width = hi - lo;
+        let share = |edge: usize| terms.share(lo + width * edge as f64 / n, exponent);
         let strata: Vec<Stratum> = self
             .azimuths
             .iter()
             .enumerate()
             .map(|(k, &(cos_phi, sin_phi))| {
-                let t = terms.w * (k as f64 + 0.5) / n;
+                let t = lo + width * (k as f64 + 0.5) / n;
                 let sin_theta = (t * (2.0 - t)).sqrt();
                 Stratum {
                     mu: (1.0 - t) as f32,
@@ -510,6 +615,35 @@ mod tests {
     /// Ratios the law's invariants are checked across: the hemisphere, wide, plate-like and narrow
     /// cones. Fixture data.
     const RATIOS: [f32; 7] = [1.0, 1.05, 1.5, 2.27, 4.0, 100.0, 1.0e4];
+
+    /// Ratios below 1, where the ball fills the whole sphere: at rest, a burst's ring and ball at
+    /// a slow carried speed, and just under the hemisphere. Fixture data.
+    const SPHERE_RATIOS: [f32; 5] = [0.0, 0.3, 0.45, 0.9, 0.999];
+
+    /// Ring descriptors `(λ, h°)`: at rest, slow, near the band's edge reaching the axis, past it,
+    /// and a wide band. Fixture data.
+    const RINGS: [(f32, f32); 5] = [
+        (0.0, 10.0),
+        (0.45, 10.0),
+        (5.6, 10.0),
+        (100.0, 10.0),
+        (1.0, 45.0),
+    ];
+
+    fn ring(ratio: f32, degrees: f32) -> FieldDescriptor {
+        FieldDescriptor::ring(ratio, degrees.to_radians())
+    }
+
+    /// Every field the law's invariants are checked across: the ball at every ratio, above and
+    /// below 1, and every ring.
+    fn fields() -> Vec<FieldDescriptor> {
+        RATIOS
+            .iter()
+            .chain(&SPHERE_RATIOS)
+            .map(|&ratio| FieldDescriptor::ball(ratio))
+            .chain(RINGS.iter().map(|&(ratio, degrees)| ring(ratio, degrees)))
+            .collect()
+    }
 
     fn shape(directions: usize) -> ConeShape {
         ConeShape::new(AxisRule::RearNormalBisector, directions, Passage::Partial).unwrap()
@@ -639,52 +773,156 @@ mod tests {
         }
     }
 
-    /// The ball's domain is `λ ≥ 1`: a ratio below 1 is refused naming the APHE burst as the slice
-    /// that adds the full sphere, a non-finite ratio is refused, and a ratio so large that the
-    /// rim's `cos α` rounds to 1 is refused as unresolved (at `λ = 10⁹`, `1 − cos α ≈ 5·10⁻¹⁹`,
-    /// DERIVED). Every ratio the law resolves spreads at every direction count. The throw, the
-    /// substance registry and the wire's decoder rely on the refusal to keep a cone inside the law.
+    /// The law's domain is a finite ratio `λ ≥ 0`: a negative or non-finite ratio is refused under
+    /// either law, a ball so narrow that the rim's `cos α` rounds to 1 is refused as unresolved
+    /// (at `λ = 10⁹`, `1 − cos α ≈ 5·10⁻¹⁹`, DERIVED), and a ring whose half-width is outside
+    /// `(0, π/2)` is refused naming it; the ball below `λ = 1`, the `m = 3` law's closed form, is
+    /// refused under another exponent rather than spread as that law. Every field the law resolves
+    /// spreads at every direction count, the ball below `λ = 1` among them. The throw, the
+    /// substance registry, the wire's decoder and the vocabulary's fingerprint rely on the refusal
+    /// to keep a field inside the law.
     #[test]
-    fn a_ratio_outside_the_balls_domain_is_refused() {
+    fn a_field_outside_the_laws_domain_is_refused() {
         let shape = shape(24);
-        for ratio in [0.999, 0.5, 0.0, -2.0] {
-            let error = shape.spread(FieldDescriptor::ball(ratio)).unwrap_err();
-            assert!(error.contains("APHE burst"), "λ = {ratio}: {error}");
-            assert!(FieldDescriptor::ball(ratio).check().is_err());
-        }
-        for ratio in [f32::NAN, f32::INFINITY] {
-            let error = shape.spread(FieldDescriptor::ball(ratio)).unwrap_err();
-            assert!(error.contains("finite"), "λ = {ratio}: {error}");
+        for field in [
+            FieldDescriptor::ball(-2.0),
+            FieldDescriptor::ball(f32::NAN),
+            FieldDescriptor::ball(f32::INFINITY),
+            ring(-0.5, 10.0),
+            ring(f32::NAN, 10.0),
+        ] {
+            let error = shape.spread(field).unwrap_err();
+            assert!(
+                error.contains("finite and not negative"),
+                "{field:?}: {error}"
+            );
+            assert!(field.check().is_err());
         }
         let error = shape.spread(FieldDescriptor::ball(1.0e9)).unwrap_err();
         assert!(error.contains("rounds to 1"), "{error}");
-        for ratio in RATIOS {
+        for degrees in [0.0, -5.0, 90.0, f32::NAN] {
+            let error = shape.spread(ring(0.45, degrees)).unwrap_err();
+            assert!(error.contains("half-width"), "h = {degrees}°: {error}");
+        }
+        let sphere = FieldDescriptor::ball(0.5);
+        assert!(shape.spread_under(sphere, BALL_EXPONENT + 1).is_err());
+        for field in fields() {
             for directions in [1, 24, 97, MAX_DIRECTIONS] {
                 assert!(
-                    self::shape(directions)
-                        .spread(FieldDescriptor::ball(ratio))
-                        .is_ok(),
-                    "λ = {ratio}, N = {directions}"
+                    self::shape(directions).spread(field).is_ok(),
+                    "{field:?}, N = {directions}"
                 );
             }
         }
     }
 
-    /// CLASS INVARIANT 1, EXACT EMISSION: with nothing in the cone, `(1/N) Σ f_k = ½` to float
-    /// precision at every `N` and every `λ ≥ 1`, so a cone emits `S/2` whatever its width and
-    /// resolution. The field's calibration (`hp_per_reference_mm`) and the throw's HP-quantum gate
-    /// rely on it. Sampling the density at each stratum's midpoint in place of the stratum's share
-    /// fails at small `N`; a dropped `N/2` fails everywhere.
+    /// CLASS INVARIANT 1, EXACT EMISSION: with nothing in the field, `(1/N) Σ f_k = ½` to float
+    /// precision at every `N`, under the ball at every `λ`, above and below 1, and under every
+    /// ring, so a field emits `S/2` whatever its width and resolution. The field's calibration
+    /// (`hp_per_reference_mm`), the burst's potency and the throw's HP-quantum gate rely on it.
+    /// Sampling the density at each stratum's midpoint in place of the stratum's share fails at
+    /// small `N`; a dropped `N/2` fails everywhere.
     #[test]
     fn the_emitted_total_is_half_the_strength_at_every_resolution_and_ratio() {
-        for ratio in RATIOS {
+        for field in fields() {
             for directions in [1, 2, 7, 24, 64, 97, 1024] {
-                let emitted =
-                    weights(&spread(directions, ratio)).iter().sum::<f64>() / directions as f64;
+                let spread = shape(directions).spread(field).unwrap();
+                let emitted = weights(&spread).iter().sum::<f64>() / directions as f64;
                 assert!(
                     (emitted - 0.5).abs() <= EMISSION_TOLERANCE,
-                    "λ = {ratio}, N = {directions}: emitted {emitted} of S"
+                    "{field:?}, N = {directions}: emitted {emitted} of S"
                 );
+            }
+        }
+    }
+
+    /// The ball's density per steradian below `λ = 1`, `(t₊³ − max(t₋, 0)³)/(4π)`, `t± = λμ ± D`
+    /// (design doc §5): the share of a uniform ball of sideways speeds about the forward one along
+    /// each direction, stated apart from the code's closed form.
+    fn sphere_density(ratio: f64, mu: f64) -> f64 {
+        let d = (1.0 - ratio * ratio * (1.0 - mu * mu)).sqrt();
+        let (near, far) = (ratio * mu - d, ratio * mu + d);
+        (far.max(0.0).powi(3) - near.max(0.0).powi(3)) / (4.0 * std::f64::consts::PI)
+    }
+
+    /// Below `λ = 1` the ball fills the whole sphere and its weights are its density's: each `f_k`
+    /// is `N/2` of `2π p_Ω dμ` integrated over its stratum (a midpoint sum, 4096 steps a stratum,
+    /// tolerance 1e-6, as the cap's), the weights never grow from the axis to the back, the field
+    /// is uniform at rest (`λ = 0`, every `f_k` ½) and reaches straight back (the last stratum's
+    /// midpoint is half a stratum, `1/N` in `μ`, short of `μ = −1`). At `λ → 1⁻` the share inside
+    /// each stratum edge meets the cap's `1 − μ⁴`, so the law is continuous across the hemisphere.
+    /// A burst's ball below 1, and its knockout radius at rest, rely on it.
+    #[test]
+    fn below_a_ratio_of_one_the_ball_fills_the_sphere() {
+        for ratio in [0.3, 0.45, 0.9] {
+            let lambda = ratio as f64;
+            let f = weights(&spread(64, ratio));
+            let steps = 4096;
+            for (k, weight) in f.iter().enumerate() {
+                let low = 1.0 - 2.0 * (k + 1) as f64 / 64.0;
+                let h = (2.0 / 64.0) / steps as f64;
+                let share: f64 = (0..steps)
+                    .map(|i| {
+                        let mu = low + h * (i as f64 + 0.5);
+                        2.0 * std::f64::consts::PI * sphere_density(lambda, mu) * h
+                    })
+                    .sum();
+                assert!(
+                    (weight - 32.0 * share).abs() < 1.0e-6,
+                    "λ = {ratio}, stratum {k}: {weight} against {}",
+                    32.0 * share
+                );
+            }
+            assert!(
+                f.windows(2).all(|pair| pair[1] <= pair[0]),
+                "λ = {ratio}: non-increasing {f:?}"
+            );
+        }
+        let rest = spread(64, 0.0);
+        assert!(weights(&rest).iter().all(|f| (f - 0.5).abs() < 1.0e-7));
+        assert_eq!(rest.field().half_angle(), std::f32::consts::PI);
+        let [back, ..] = rest.strata().last().unwrap();
+        assert!((back - (-1.0 + 1.0 / 64.0)).abs() < 1.0e-6, "{back}");
+        let mut inside = 0.0;
+        for (k, weight) in weights(&spread(64, 0.999_999)).iter().enumerate() {
+            inside += weight / 32.0;
+            let edge = 1.0 - 2.0 * (k + 1) as f64 / 64.0;
+            let want = if edge > 0.0 { 1.0 - edge.powi(4) } else { 1.0 };
+            assert!(
+                (inside - want).abs() < 1.0e-4,
+                "edge {k}: {inside} inside, the cap's {want}"
+            );
+        }
+    }
+
+    /// A ring's directions lie in its band, `θ_c ∓ h` about `θ_c = atan(1/λ)`, its near edge held
+    /// at the axis, in equal-solid-angle strata spanning it, each weighted ½: the field is uniform
+    /// over the band, and its rim is `θ_c + h`. A ring centred anywhere but `atan(1/λ)`, or a
+    /// band weighted toward one edge, fails here; the burst's ring and its knockout radius rely
+    /// on it. 1e-5 rad is the f32 tolerance on an angle.
+    #[test]
+    fn a_rings_directions_lie_in_its_band() {
+        for (ratio, degrees) in RINGS {
+            let field = ring(ratio, degrees);
+            let spread = shape(64).spread(field).unwrap();
+            let centre = (1.0 / ratio as f64).atan() as f32;
+            let h = degrees.to_radians();
+            let (near, far) = ((centre - h).max(0.0), centre + h);
+            assert!((field.half_angle() - far).abs() < 1.0e-5, "{field:?}");
+            let axis = Dir3::new(Vec3::new(0.3, -0.2, 0.9)).unwrap();
+            for (direction, weight) in spread.directions(axis) {
+                let angle = direction.angle_between(Vec3::from(axis));
+                assert!(
+                    angle >= near - 1.0e-5 && angle <= far + 1.0e-5,
+                    "{field:?}: {angle} outside [{near}, {far}]"
+                );
+                assert!((weight - 0.5).abs() < 1.0e-6, "{field:?}: {weight}");
+            }
+            let (cos_near, cos_far) = (near.cos(), far.cos());
+            let width = (cos_near - cos_far) / 64.0;
+            for (k, [mu, ..]) in spread.strata().enumerate() {
+                let expected = cos_near - width * (k as f32 + 0.5);
+                assert!((mu - expected).abs() < 1.0e-5, "{field:?}: stratum {k}");
             }
         }
     }
@@ -774,10 +1012,28 @@ mod tests {
     /// The continuous weight is the spread's at the limit: on the axis it is half the centre
     /// weight `(1 + 3λ²)(1 − cos α)`, it is zero at and past the rim, and at a stratum's midpoint
     /// of a fine spread it is that stratum's weight (DERIVED: a stratum's share over its width is
-    /// the density at its midpoint to second order; tolerance 1e-4 at 4096 strata). The pen cam's
-    /// drawing of a cone recorded without strengths relies on it.
+    /// the density at its midpoint to second order; tolerance 1e-4 at 4096 strata), under the ball
+    /// below `λ = 1` and the ring too, the ring's zero off its band. The pen cam's drawing of a
+    /// cone recorded without strengths relies on it.
     #[test]
     fn the_continuous_weight_is_the_spreads_limit() {
+        for field in SPHERE_RATIOS
+            .iter()
+            .map(|&ratio| FieldDescriptor::ball(ratio))
+            .chain(RINGS.iter().map(|&(ratio, degrees)| ring(ratio, degrees)))
+        {
+            for [mu, .., weight] in shape(4096).spread(field).unwrap().strata().step_by(97) {
+                let want = field.weight_at(mu as f64);
+                assert!(
+                    (weight as f64 - want).abs() < 1.0e-4,
+                    "{field:?}, μ = {mu}: {weight} against {want}"
+                );
+            }
+        }
+        let band = ring(0.45, 10.0);
+        let centre = (1.0_f64 / 0.45).atan();
+        assert_eq!(band.weight_at((centre + 0.2).cos()), 0.0);
+        assert_eq!(band.weight_at((centre - 0.2).cos()), 0.0);
         for ratio in [1.0, 2.27, 4.0] {
             let field = FieldDescriptor::ball(ratio);
             let lambda = ratio as f64;

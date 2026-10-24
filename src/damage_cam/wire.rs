@@ -36,9 +36,10 @@
 //! | plate factor | cost over chord, derived | four f32 ulps, relative |
 //! | incidence | `f32`, the record's own: an f32 `acos` of the decoded directions is off by 0.04° near normal impact (MEASURED) | exact |
 //!
-//! A ray's direction and strength are not carried. A cone carries its field descriptor, a law id
-//! and its ratio `λ` (`spall_cone::FieldDescriptor`), and the client spreads the vocabulary's shape
-//! by it, rebuilding each stratum and weight to the bit (`spall_cone` module doc, "Determinism");
+//! A ray's direction and strength are not carried. A cone carries its field descriptor, its law (a
+//! ring's with its half-width) and its ratio `λ` (`spall_cone::FieldDescriptor`), and the client
+//! spreads the vocabulary's shape by it, rebuilding each stratum and weight to the bit
+//! (`spall_cone` module doc, "Determinism");
 //! the encoder refuses a cone whose rays' strengths are not `S·f_k` under its descriptor to the bit, or
 //! whose half-angle is not the descriptor's. A ray's direction is its stratum about the cone's
 //! axis, placed by the cone's roll — the turn about the axis from the shape's own lateral axis
@@ -273,18 +274,24 @@ impl VehicleWords {
     }
 }
 
-/// The ratios the vocabulary's fingerprint spreads its cone shape at ([`fold_cone`]): probes of the
-/// law's weights, the hemisphere and a 30° cone. Probe data, not any substance's.
-const FINGERPRINT_RATIOS: [f32; 2] = [1.0, 2.0];
+/// The fields the vocabulary's fingerprint spreads its cone shape under ([`fold_cone`]): probes of
+/// each law's weights, the hemisphere, a 30° cone, the ball below a ratio of 1 and a ring. Probe
+/// data, not any substance's or round's.
+const FINGERPRINT_FIELDS: [FieldDescriptor; 4] = [
+    FieldDescriptor::ball(1.0),
+    FieldDescriptor::ball(2.0),
+    FieldDescriptor::ball(0.5),
+    FieldDescriptor::ring(0.5, 0.2),
+];
 
 /// `hash` folded with what a decoder rebuilds a cone's rays from besides the cone's own descriptor:
 /// every law's id and name, the ball's exponent `exponent`, the shape's direction count and
-/// azimuths, and the shape's strata under the ball at each of [`FINGERPRINT_RATIOS`]. Two ends that
-/// would rebuild different rays from one descriptor fold differently.
+/// azimuths, and the shape's strata under each of [`FINGERPRINT_FIELDS`]. Two ends that would
+/// rebuild different rays from one descriptor fold differently.
 fn fold_cone(mut hash: u64, cone: &ConeShape, exponent: u32) -> u64 {
-    for law in FieldLaw::ALL {
-        hash = fingerprint_field(hash, b"field_law", &[law as u8]);
-        hash = fingerprint_field(hash, b"field_law_name", format!("{law:?}").as_bytes());
+    for (id, name) in FieldLaw::NAMES.iter().enumerate() {
+        hash = fingerprint_field(hash, b"field_law", &[id as u8]);
+        hash = fingerprint_field(hash, b"field_law_name", name.as_bytes());
     }
     hash = fingerprint_field(hash, b"ball_exponent", &exponent.to_le_bytes());
     hash = fingerprint_field(
@@ -299,10 +306,10 @@ fn fold_cone(mut hash: u64, cone: &ConeShape, exponent: u32) -> u64 {
             .collect();
         hash = fingerprint_field(hash, b"azimuth", &bytes);
     }
-    for ratio in FINGERPRINT_RATIOS {
-        // A probe ratio lies in the ball's domain, so a refusal is a broken law: it is folded, not
-        // skipped, and no end that spreads it folds alike.
-        hash = match cone.spread_under(FieldDescriptor::ball(ratio), exponent) {
+    for field in FINGERPRINT_FIELDS {
+        // A probe lies in its law's domain, so a refusal is a broken law or an exponent the ball's
+        // sphere does not take: it is folded, not skipped, and no end that spreads it folds alike.
+        hash = match cone.spread_under(field, exponent) {
             Ok(spread) => {
                 let mut hash = fingerprint_field(
                     hash,

@@ -158,7 +158,9 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// place of the round's physical fields, so a replica builds the round the authority fired from its
 /// own copy of the tank data. Surface and own-type graph move. The cone's field descriptor rides
 /// it too: each `WireCone` carries its field law and ratio (`spall_cone::FieldDescriptor`), from
-/// which the client rebuilds the cone's directions and weights. Own-type graph moves.
+/// which the client rebuilds the cone's directions and weights. Own-type graph moves. The field law
+/// gains a burst's: the ball below a ratio of 1 and the ring (`FieldLaw::Ring`). Own-type graph
+/// moves.
 pub const PROTOCOL_REV: u32 = 33;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
@@ -902,7 +904,7 @@ const WIRE_SURFACE_HASH: u64 = 0xe1f7_a13c_f454_773b;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xdde9_f88d_9558_676d;
+const WIRE_TYPES_HASH: u64 = 0xd9ed_e10a_1d42_bdd2;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
