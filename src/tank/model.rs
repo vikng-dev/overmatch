@@ -102,6 +102,31 @@ impl WeaponRound {
 }
 
 impl Weapon {
+    /// The weapon `name` as `spec` authors it, every round resolved in the shipped registry, its
+    /// recoiling barrel `barrel`; an unknown round key is the registry's error naming it.
+    pub(crate) fn of_spec(
+        name: &str,
+        spec: &crate::spec::WeaponSpec,
+        barrel: Option<Entity>,
+    ) -> Result<Self, crate::rounds::RoundError> {
+        let rounds = spec
+            .rounds
+            .iter()
+            .map(|key| WeaponRound::resolve(key))
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self {
+            name: name.to_owned(),
+            rounds,
+            fire_mode: spec.fire_mode,
+            recoil: spec.recoil.clone(),
+            barrel,
+            fire: spec.fire.clone(),
+            load: spec.load.clone(),
+            trigger: spec.trigger,
+            report_clips: spec.report_clips.clone(),
+        })
+    }
+
     /// Whether `state` is a load in progress: a `Single` reloading, an `Automatic` with a dry belt
     /// awaiting its swap. The window in which [`WeaponLoad::loaded`] follows the selection.
     pub fn is_loading(&self, state: WeaponGateState) -> bool {

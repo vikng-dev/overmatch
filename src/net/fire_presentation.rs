@@ -371,21 +371,17 @@ pub(super) fn present_shot_at_age(
     commands: &mut Commands,
 ) {
     commands.trigger(FireShell {
-        origin: shot.origin,
-        direction: shot.direction,
-        speed: shot.round.muzzle_speed,
-        caliber: shot.round.body.caliber,
-        mass: shot.round.body.mass,
-        nose_factor: shot.round.body.nose_factor,
-        penetrator_caliber: shot.round.penetrator.caliber,
-        penetrator_mass: shot.round.penetrator.mass,
-        wound: shot.round.wound,
-        mechanism: shot.mechanism,
-        tracer: shot.tracer,
-        shooter: Some(shot.shooter),
         shot_origin: FireShellOrigin::Reconstructed,
         catch_up_ticks,
-        shot: shot.shot,
+        ..FireShell::of_round(
+            &shot.round,
+            shot.origin,
+            shot.direction,
+            shot.mechanism,
+            shot.tracer,
+            Some(shot.shooter),
+            shot.shot,
+        )
     });
     recoil.push(shot.shooter.tank, shot.shooter.weapon);
 }

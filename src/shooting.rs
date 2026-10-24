@@ -10,7 +10,7 @@ use core::time::Duration;
 use avian3d::prelude::{Forces, Position, Rotation};
 use bevy::prelude::*;
 
-use crate::ballistics::{FireShell, FireShellOrigin, ShotSource};
+use crate::ballistics::{FireShell, ShotSource};
 use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::{TankVolumes, VolumeFacets, requirement_met};
 use crate::spec::{FireMode, Trigger};
@@ -113,7 +113,7 @@ pub fn plugin(app: &mut App) {
 
 /// Advance the local-only fallback clock after a completed fixed tick. Network compositions
 /// overwrite it from `LocalTimeline` before the next gameplay pass.
-fn advance_weapon_clock(mut clock: ResMut<crate::WeaponClock>) {
+pub(crate) fn advance_weapon_clock(mut clock: ResMut<crate::WeaponClock>) {
     clock.0 = clock.0.saturating_add(1);
 }
 
@@ -341,32 +341,23 @@ fn fire(
         let fused_echo = replica.is_some() && shot.is_some();
         // Hand off to ballistics: fire the chambered round down the bore at its muzzle speed.
         if !fused_echo {
-            commands.trigger(FireShell {
-                origin: muzzle_position,
-                direction: bore,
-                speed: fired.round.muzzle_speed,
-                caliber: fired.round.body.caliber,
-                mass: fired.round.body.mass,
-                nose_factor: fired.round.body.nose_factor,
-                penetrator_caliber: fired.round.penetrator.caliber,
-                penetrator_mass: fired.round.penetrator.mass,
-                wound: fired.round.wound,
-                mechanism: weapon.fire_mode.mechanism(),
+            commands.trigger(FireShell::of_round(
+                &fired.round,
+                muzzle_position,
+                bore,
+                weapon.fire_mode.mechanism(),
                 tracer,
                 // This shell belongs to a tank: name its root, the firing weapon slot and the round
                 // so the net server can broadcast the cosmetic tracer and the barrel-recoil cause to
                 // every OTHER client (`net::server`'s FireShell observer), which each derive the
                 // kick locally and bind the round from their own copy of the weapon's round list.
-                shooter: Some(ShotSource {
+                Some(ShotSource {
                     tank: root.0,
                     weapon: slot.0,
                     round: loaded,
                 }),
-                shot_origin: FireShellOrigin::Local,
-                // Locally fired: the shell spawns at the muzzle THIS tick — no net catch-up.
-                catch_up_ticks: 0,
                 shot,
-            });
+            ));
         }
         // Kick the barrel back (root-resident recoil state); apply_recoil springs it home. The
         // shared `kick_recoil` owns the whole decision (barrel + recoil spec present, slot valid), so

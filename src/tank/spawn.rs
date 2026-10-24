@@ -12,7 +12,7 @@ use super::integrity::authored_attachment;
 use super::model::{
     EngineSound, Gun, GunBarrel, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot, TankServos, TankSim,
     TankViews, TrackSide, Turret, ViewConfig, Weapon, WeaponGate, WeaponGateState, WeaponIndex,
-    WeaponLoad, WeaponLoads, WeaponRound, WeaponState,
+    WeaponLoad, WeaponLoads, WeaponState,
 };
 use super::servo::{RemoteServos, ServoCommand, ServoIndex, ServoRest, ServoRole, ServoSpec};
 use super::view::{SimParts, bind_tank_view};
@@ -586,31 +586,16 @@ fn insert_weapons(
     {
         let muzzle = entity_at(muzzle_index);
         let barrel = barrel_index.map(&entity_at);
-        let rounds = weapon
-            .rounds
-            .iter()
-            .map(|key| WeaponRound::resolve(key))
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap_or_else(|err| {
-                panic!("weapon `{weapon_name}`: {err} — the spec's validate() resolves every round")
-            });
+        let weapon_component = Weapon::of_spec(weapon_name, weapon, barrel).unwrap_or_else(|err| {
+            panic!("weapon `{weapon_name}`: {err} — the spec's validate() resolves every round")
+        });
         // The sight's range table is graduated for the default round.
+        let default = &weapon_component.rounds[0].round;
         let range_table = RangeTable::for_weapon(
-            rounds[0].round.muzzle_speed,
-            rounds[0].round.body.caliber,
-            rounds[0].round.body.mass,
+            default.muzzle_speed,
+            default.body.caliber,
+            default.body.mass,
         );
-        let weapon_component = Weapon {
-            name: (*weapon_name).clone(),
-            rounds,
-            fire_mode: weapon.fire_mode,
-            recoil: weapon.recoil.clone(),
-            barrel,
-            fire: weapon.fire.clone(),
-            load: weapon.load.clone(),
-            trigger: weapon.trigger,
-            report_clips: weapon.report_clips.clone(),
-        };
         commands.entity(muzzle).insert((
             Muzzle,
             TankRoot(root),

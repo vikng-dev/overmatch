@@ -855,8 +855,41 @@ pub struct FireShell {
     pub shot_origin: FireShellOrigin,
     /// Free-flight ticks to apply at spawn for a reconstructed remote shell.
     pub catch_up_ticks: u32,
-    /// Network identity; `None` is valid for authority and sandbox shells.
+    /// Network identity; `None` for a shell fired where no shot clock runs.
     pub shot: Option<ShotId>,
+}
+
+impl FireShell {
+    /// `round` fired from `origin` down `direction` at its own muzzle speed, with the bodies and the
+    /// crew line rate its data states, locally authored with no catch-up: the one mapping from a
+    /// round's data to a shell. A reconstructed shell overrides the origin kind and the catch-up.
+    pub(crate) fn of_round(
+        round: &crate::rounds::Round,
+        origin: Vec3,
+        direction: Dir3,
+        mechanism: crate::spec::FireMechanism,
+        tracer: bool,
+        shooter: Option<ShotSource>,
+        shot: Option<ShotId>,
+    ) -> Self {
+        Self {
+            origin,
+            direction,
+            speed: round.muzzle_speed,
+            caliber: round.body.caliber,
+            mass: round.body.mass,
+            nose_factor: round.body.nose_factor,
+            penetrator_caliber: round.penetrator.caliber,
+            penetrator_mass: round.penetrator.mass,
+            wound: round.wound,
+            mechanism,
+            tracer,
+            shooter,
+            shot_origin: FireShellOrigin::Local,
+            catch_up_ticks: 0,
+            shot,
+        }
+    }
 }
 
 /// A shell in flight. Kinematic — integrated by hand, no physics engine.
