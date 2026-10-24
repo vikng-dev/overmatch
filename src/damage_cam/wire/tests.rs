@@ -342,7 +342,7 @@ fn rethrown(report: &PenetrationReport, field: FieldDescriptor) -> PenetrationRe
         let origin = Vec3::from(cone.origin);
         let axis = Dir3::new(Vec3::from(cone.axis)).unwrap();
         cone.field = field;
-        cone.half_angle_deg = spread.half_angle().to_degrees();
+        cone.half_angle_deg = field.half_angle().to_degrees();
         for (fragment, (direction, weight)) in
             cone.fragments.iter_mut().zip(spread.directions(axis))
         {
@@ -400,8 +400,7 @@ fn a_cone_off_its_law_is_refused() {
         |cone| cone.field.ratio = 0.5,
         |cone| {
             cone.field.ratio *= 1.01;
-            let spread = ConeShape::shipped().spread(cone.field).unwrap();
-            cone.half_angle_deg = spread.half_angle().to_degrees();
+            cone.half_angle_deg = cone.field.half_angle().to_degrees();
         },
     ];
     for (index, spoil) in spoilers.into_iter().enumerate() {

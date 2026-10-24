@@ -1156,9 +1156,8 @@ mod tests {
         let masks = MaskSet::default();
         let (strength, reach) = (10.0, 2.0);
         for ratio in [1.0, top] {
-            let spread = ConeShape::shipped()
-                .spread(FieldDescriptor::ball(ratio))
-                .unwrap();
+            let descriptor = FieldDescriptor::ball(ratio);
+            let spread = ConeShape::shipped().spread(descriptor).unwrap();
             let rays = spread
                 .directions(Dir3::NEG_Z)
                 .map(|(direction, weight)| Ray {
@@ -1170,7 +1169,7 @@ mod tests {
             let cone = Cone::new(
                 Vec3::ZERO,
                 Vec3::NEG_Z,
-                spread.half_angle(),
+                descriptor.half_angle(),
                 strength,
                 0.0,
                 rays,

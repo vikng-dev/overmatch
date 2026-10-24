@@ -1837,7 +1837,7 @@ fn the_pen_cam_intensity_times_a_face_is_its_dose() {
                 )]
             });
             let dose = field_doses(&mut app, &boxes, 10.0, 16384, passage)[0];
-            let e = potency.emission(10.0 * on_axis, spread.half_angle());
+            let e = potency.emission(10.0 * on_axis, spread.field().half_angle());
             let drawn = intensity(e, depth - 0.001) as f64 * (side * side) as f64;
             let ratio = drawn / (potency.rate as f64 * dose);
             assert!(
@@ -2002,11 +2002,11 @@ fn a_cone_below_the_hp_quantum_is_not_thrown() {
 }
 
 /// A plate exit's cone is spread by its rear layer's substance's field: two steel plates in
-/// contact, each of its own ratio, throw one cone whose descriptor is the rear plate's, whose half-angle is
-/// that ratio's rim, and whose every direction carries `S·f_k` of that spread to the bit. A throw
-/// that read the front layer, the larger or the smaller ratio, or a fixed one fails one of the two
-/// orders. Fixture: an 88 square on through 20 mm at 0.8 of the steel factor, then 20 mm of steel;
-/// ratios 3.0 and 1.5 (19.5° and 41.8° cones, DERIVED), fixture data.
+/// contact, each of its own ratio, throw one cone whose descriptor is the rear plate's, and whose
+/// every direction carries `S·f_k` of that spread to the bit. A throw that read the front layer,
+/// the larger or the smaller ratio, or a fixed one fails one of the two orders. Fixture: an 88
+/// square on through 20 mm at 0.8 of the steel factor, then 20 mm of steel; ratios 3.0 and 1.5
+/// (19.5° and 41.8° cones, DERIVED), fixture data.
 #[test]
 fn a_thrown_cone_is_its_rear_layers_field() {
     for (front, rear) in [(3.0, 1.5), (1.5, 3.0)] {
@@ -2036,8 +2036,6 @@ fn a_thrown_cone_is_its_rear_layers_field() {
         let field = FieldDescriptor::ball(rear);
         let spread = ConeShape::shipped().spread(field).unwrap();
         assert_eq!(cone.field, field, "front {front}, rear {rear}");
-        assert_eq!(cone.half_angle.to_bits(), spread.half_angle().to_bits());
-        assert!((cone.half_angle - (1.0 / rear).asin()).abs() < 1.0e-6);
         assert_eq!(cone.rays.len(), spread.directions_count());
         for (ray, [.., weight]) in cone.rays.iter().zip(spread.strata()) {
             assert_eq!(ray.strength.to_bits(), (cone.strength * weight).to_bits());

@@ -950,7 +950,7 @@ impl<'a> Ledger<'a> {
                 origin: on.struck.point(index, cone.origin),
                 axis: on.struck.direction(index, Vec3::from(cone.axis)),
                 field: cone.field,
-                half_angle_deg: cone.half_angle.to_degrees(),
+                half_angle_deg: cone.field.half_angle().to_degrees(),
                 strength: cone.strength,
                 fragments,
             });

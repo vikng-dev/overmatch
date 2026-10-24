@@ -1160,9 +1160,9 @@ pub struct SpallRay {
     pub doses: Vec<(Entity, f32)>,
 }
 
-/// One spall cone — the field thrown from a body exit (design doc §5): origin, axis, field and
-/// half-angle describe its shape; `spend`, the speeds and `strength` are its source's
-/// ([`walk::SpallSource`]); `rays` are its directions as marched, in stratum order.
+/// One spall cone — the field thrown from a body exit (design doc §5): origin, axis and field
+/// describe its shape; `spend`, the speeds and `strength` are its source's ([`walk::SpallSource`]);
+/// `rays` are its directions as marched, in stratum order.
 #[cfg_attr(
     not(test),
     expect(
@@ -1174,9 +1174,8 @@ pub struct SpallCone {
     pub origin: Vec3,
     pub axis: Dir3,
     /// The field law and ratio its directions were weighted by: its exit layer's substance's.
+    /// Its rim, the cone's half-angle, is [`spall_cone::FieldDescriptor::half_angle`].
     pub field: spall_cone::FieldDescriptor,
-    /// Radians: the field's rim, `asin(1/λ)`.
-    pub half_angle: f32,
     /// Reference-mm the round spent across the body it left.
     pub spend: f32,
     /// m/s where the round entered the body.
@@ -3311,7 +3310,6 @@ fn throw_spall_cone(
         origin: source.position,
         axis,
         field: spread.field(),
-        half_angle: spread.half_angle(),
         spend: source.spend,
         entry_speed: source.entry_speed,
         exit_speed: source.exit_speed,

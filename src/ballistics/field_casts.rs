@@ -692,7 +692,7 @@ fn shot(label: &str, local_origin: Vec3, local_direction: Vec3) -> Record {
         let _ = write!(output, "{:?} ", cone.field.law);
         bits(&mut output, cone.field.ratio);
         output.push(' ');
-        bits(&mut output, cone.half_angle);
+        bits(&mut output, cone.field.half_angle());
         for value in [cone.spend, cone.entry_speed, cone.exit_speed, cone.strength] {
             output.push(' ');
             bits(&mut output, value);

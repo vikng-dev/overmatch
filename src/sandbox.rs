@@ -1103,7 +1103,7 @@ fn draw_spall(mut gizmos: Gizmos, marks: Query<&SpallMarks>) {
             // where its directions stop short.
             let axis = Vec3::from(cone.axis);
             let tip = cone.origin + axis * OUTLINE;
-            let rim = OUTLINE * cone.half_angle.tan();
+            let rim = OUTLINE * cone.field.half_angle().tan();
             let facing = Quat::from_rotation_arc(Vec3::Z, axis);
             gizmos.line(cone.origin, tip, Color::srgb(0.35, 0.37, 0.42));
             gizmos.circle(

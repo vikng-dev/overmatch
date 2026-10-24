@@ -803,7 +803,6 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
         origin: z(4.9),
         axis: Dir3::NEG_Z,
         field: super::spall_cone::FieldDescriptor::ball(2.0),
-        half_angle: 0.5_f32.asin(),
         spend: 100.0,
         entry_speed: SPEED,
         exit_speed: SPEED,

@@ -519,7 +519,7 @@ fn polyline(report: &PenetrationReport) -> Polyline {
 fn cone(cone: &SpallCone, line: &Polyline) -> Cone {
     let origin = Vec3::from(cone.origin);
     let axis = Vec3::from(cone.axis).normalize_or(Vec3::NEG_Z);
-    let half_angle = cone.half_angle_deg.to_radians();
+    let half_angle = cone.field.half_angle();
     let rays = cone
         .fragments
         .iter()

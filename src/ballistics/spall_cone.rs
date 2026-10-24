@@ -110,6 +110,13 @@ impl FieldDescriptor {
         }
     }
 
+    /// α (rad), the field's rim: `asin(1/λ)`, `libm`'s in f64 cast to f32, so a descriptor gives
+    /// the same bits on every target. Every reader of a cone's half-angle takes it from here.
+    pub(crate) fn half_angle(&self) -> f32 {
+        let FieldLaw::Ball = self.law;
+        libm::asin(1.0 / self.ratio as f64) as f32
+    }
+
     /// The law's terms, refusing a descriptor outside its domain: a ratio that is not finite, a
     /// ratio below 1 (a full sphere, which the APHE burst slice adds), and a cone so narrow that
     /// `1 − w`, the rim's `cos α`, rounds to 1 (`λ` above about 10⁸, DERIVED). Names the violation.
@@ -276,8 +283,6 @@ pub(crate) struct ConeShape {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct Spread {
     field: FieldDescriptor,
-    /// α (rad).
-    half_angle: f32,
     strata: Vec<Stratum>,
 }
 
@@ -445,11 +450,7 @@ impl ConeShape {
                 field.ratio
             ));
         }
-        Ok(Spread {
-            field,
-            half_angle: libm::asin(1.0 / field.ratio as f64) as f32,
-            strata,
-        })
+        Ok(Spread { field, strata })
     }
 }
 
@@ -457,11 +458,6 @@ impl Spread {
     /// The descriptor it was built from.
     pub(crate) fn field(&self) -> FieldDescriptor {
         self.field
-    }
-
-    /// α (rad): `asin(1/λ)`.
-    pub(crate) fn half_angle(&self) -> f32 {
-        self.half_angle
     }
 
     /// N.
@@ -758,7 +754,7 @@ mod tests {
             for (direction, _) in coarse.directions(axis) {
                 let angle = direction.angle_between(Vec3::from(axis));
                 assert!(
-                    angle <= coarse.half_angle() + 1.0e-5,
+                    angle <= coarse.field().half_angle() + 1.0e-5,
                     "{angle} past the rim"
                 );
             }
@@ -806,10 +802,10 @@ mod tests {
     fn the_strata_are_equal_in_solid_angle() {
         let spread = spread(24, RATIO);
         assert!(
-            (spread.half_angle() - (1.0 / RATIO).asin()).abs() < 1.0e-6,
+            (spread.field().half_angle() - (1.0 / RATIO).asin()).abs() < 1.0e-6,
             "the rim is asin(1/λ)"
         );
-        let cos_alpha = spread.half_angle().cos();
+        let cos_alpha = spread.field().half_angle().cos();
         let width = (1.0 - cos_alpha) / 24.0;
         for (k, [mu, ..]) in spread.strata().enumerate() {
             let expected = 1.0 - width * (k as f32 + 0.5);

@@ -307,7 +307,7 @@ fn fold_cone(mut hash: u64, cone: &ConeShape, exponent: u32) -> u64 {
                 let mut hash = fingerprint_field(
                     hash,
                     b"probe_half_angle",
-                    &spread.half_angle().to_bits().to_le_bytes(),
+                    &spread.field().half_angle().to_bits().to_le_bytes(),
                 );
                 for stratum in spread.strata() {
                     let bytes: Vec<u8> = stratum
@@ -1078,7 +1078,7 @@ fn encode_cone(
         Err(error) => return refuse(format!("a cone's field is outside its law: {error}")),
     };
     if cone.fragments.len() != spread.directions_count()
-        || cone.half_angle_deg != spread.half_angle().to_degrees()
+        || cone.half_angle_deg != cone.field.half_angle().to_degrees()
     {
         return refuse(format!(
             "a cone of {} rays at {}° is not the vocabulary's shape under its field {:?}",
@@ -1387,7 +1387,7 @@ fn decode_cone(
         origin: origin.to_array(),
         axis: axis.to_array(),
         field: cone.field,
-        half_angle_deg: spread.half_angle().to_degrees(),
+        half_angle_deg: cone.field.half_angle().to_degrees(),
         strength: cone.strength,
         fragments,
     })
