@@ -10,8 +10,8 @@
 //! left-drag looks while the camera is free), `A` toggles auto-advance, `R` replays, `Space`
 //! pauses, `←`/`→` scrub, `[`/`]` change speed, mouse drag orbits the corner while paused, `F`
 //! expands the corner, `O` switches the slice between orthographic and perspective, `L` toggles
-//! each spall cone's axis line and `M` toggles reduce motion; captures set the expanded corner
-//! through [`Settings::from_env`].
+//! each spall cone's axis line and `M` toggles reduce motion; captures set the expanded corner, the
+//! slice's lens and a frame for every shooter record through [`Settings::from_env`].
 //!
 //! Capture: with `OVERMATCH_CAPTURE` set the clock steps a fixed 1/30 s per frame, so
 //! `dev_capture`'s frame times are presentation times; virtual time stays paused until both tank
@@ -253,6 +253,9 @@ pub struct Settings {
     pub slice_ortho: bool,
     pub expanded: bool,
     pub axis_line: bool,
+    /// The frame every shooter record shows in, in place of its verdict's: the bench's way to see
+    /// one record in another frame. `None` keeps each record's own.
+    pub frame: Option<CornerKind>,
 }
 
 impl Default for Settings {
@@ -263,16 +266,31 @@ impl Default for Settings {
             slice_ortho: true,
             expanded: false,
             axis_line: false,
+            frame: None,
         }
     }
 }
 
 impl Settings {
-    /// The defaults with the capture environment applied: `PEN_CAM_EXPANDED=1`.
+    /// The defaults with the capture environment applied: `PEN_CAM_EXPANDED=1` expands the corner,
+    /// `PEN_CAM_SLICE_ORTHO=0` draws the slice in perspective, and `PEN_CAM_FRAME` (`glass`,
+    /// `slice`, `ricochet` or `damaged`) shows every shooter record in that frame.
     fn from_env() -> Self {
+        let defaults = Self::default();
         Self {
             expanded: std::env::var("PEN_CAM_EXPANDED").is_ok_and(|value| value == "1"),
-            ..Self::default()
+            slice_ortho: std::env::var("PEN_CAM_SLICE_ORTHO")
+                .map_or(defaults.slice_ortho, |value| value != "0"),
+            frame: std::env::var("PEN_CAM_FRAME")
+                .ok()
+                .and_then(|value| match value.as_str() {
+                    "glass" => Some(CornerKind::Glass),
+                    "slice" => Some(CornerKind::Slice),
+                    "ricochet" => Some(CornerKind::Ricochet),
+                    "damaged" => Some(CornerKind::Damaged),
+                    _ => None,
+                }),
+            ..defaults
         }
     }
 }
@@ -317,6 +335,8 @@ pub struct Run {
     /// Run seconds at which the player pressed respawn on a kill run: the death panel reads
     /// [`killcam::RESPAWNING`] for [`killcam::RESPAWN_S`], then the run starts a fresh life.
     pub respawned_at: Option<f32>,
+    /// [`Settings::frame`] as the run was laid out under it.
+    pub frame: Option<CornerKind>,
 }
 
 impl Run {
@@ -338,6 +358,7 @@ impl Run {
             orbit: Vec2::ZERO,
             kill: None,
             respawned_at: None,
+            frame: settings.frame,
         };
         run.schedule(library, settings);
         run
@@ -416,7 +437,8 @@ impl Run {
         if PLAYLIST[self.entry].victim {
             CornerKind::Victim
         } else {
-            library.records[self.shots[shot].record].plan.kind
+            self.frame
+                .unwrap_or(library.records[self.shots[shot].record].plan.kind)
         }
     }
 
