@@ -10,5 +10,7 @@ fn main() {
         // is the repo root under `cargo run` — no override needed (the sandbox isn't bundled).
         .add_plugins(DefaultPlugins)
         .add_plugins(overmatch::sandbox::plugin)
+        // Documentation frames; inert without `OVERMATCH_CAPTURE`.
+        .add_plugins(overmatch::dev_capture::plugin)
         .run();
 }

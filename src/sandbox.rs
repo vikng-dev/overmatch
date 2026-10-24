@@ -9,6 +9,11 @@
 //! corner, and the x-ray key dresses the tank in the glass look; a plate is no tank and opens no
 //! corner. Sandbox controls use real time so inspection remains available while simulation time is
 //! paused.
+//!
+//! For in-engine captures (`dev_capture`) the range runs on an autopilot instead of the mouse:
+//! `OVERMATCH_RANGE_POSE=x,y,z,lx,ly,lz` stands the camera-gun at `x,y,z` looking at `lx,ly,lz`,
+//! and `OVERMATCH_RANGE_FIRE=<round>@<s>[,…]` fires the gun's round `<round>` (an index into its
+//! rounds) down the view axis at app second `<s>`. Either one leaves the cursor free.
 
 use avian3d::prelude::{
     Collider, CollisionLayers, LayerMask, PhysicsInterpolationPlugin, PhysicsPlugins, RigidBody,
@@ -413,7 +418,7 @@ pub fn plugin(app: &mut App) {
         Startup,
         (
             spawn_camera,
-            grab_cursor,
+            grab_cursor.run_if(not(resource_exists::<Autopilot>)),
             spawn_targets,
             spawn_hud,
             load_target,
@@ -468,6 +473,7 @@ pub fn plugin(app: &mut App) {
     // `EguiPlugin` and runs in `EguiPrimaryContextPass`. Launch it with the `cargo armor` alias.
     #[cfg(feature = "dev_ui")]
     app.add_plugins(panel::plugin);
+    autopilot_plugin(app);
 }
 
 fn spawn_camera(mut commands: Commands) {
@@ -990,10 +996,29 @@ fn fire(
         return;
     }
     let (camera, transform, &combatant) = *camera;
+    if fire_round(
+        &mut commands,
+        (camera, transform, combatant),
+        &gun,
+        *shot,
+        clock.0,
+    ) {
+        *last_tick = Some(clock.0);
+    }
+}
+
+/// Fire `gun`'s round `shot` from the camera-gun `shooter` down its view axis on shot-clock tick
+/// `tick`: whether the gun lists that round.
+fn fire_round(
+    commands: &mut Commands,
+    (camera, transform, combatant): (Entity, &Transform, CombatantId),
+    gun: &Weapon,
+    shot: ShotParams,
+    tick: u32,
+) -> bool {
     let Some(loaded) = gun.rounds.get(usize::from(shot.round)) else {
-        return;
+        return false;
     };
-    *last_tick = Some(clock.0);
     let round = FireShell::of_round(
         &loaded.round,
         transform.translation,
@@ -1008,13 +1033,98 @@ fn fire(
         Some(ShotId {
             combatant,
             weapon: 0,
-            fire_tick: clock.0,
+            fire_tick: tick,
         }),
     );
     commands.trigger(FireShell {
         speed: shot.muzzle_speed.unwrap_or(round.speed),
         ..round
     });
+    true
+}
+
+/// The capture autopilot (module doc): the camera-gun's pose, taken on the first frame, and the
+/// rounds still to fire with their app seconds, earliest first.
+#[derive(Resource)]
+struct Autopilot {
+    pose: Option<Transform>,
+    fire: std::collections::VecDeque<(u8, f32)>,
+}
+
+/// Mount the [`Autopilot`] when either of its variables is set.
+fn autopilot_plugin(app: &mut App) {
+    let pose = std::env::var("OVERMATCH_RANGE_POSE").ok();
+    let fire = std::env::var("OVERMATCH_RANGE_FIRE").ok();
+    if pose.is_none() && fire.is_none() {
+        return;
+    }
+    let pose = pose.and_then(|pose| {
+        let v: Vec<f32> = pose
+            .split(',')
+            .filter_map(|v| v.trim().parse().ok())
+            .collect();
+        let [x, y, z, lx, ly, lz] = v[..] else {
+            warn!("OVERMATCH_RANGE_POSE={pose}: expected x,y,z,lx,ly,lz");
+            return None;
+        };
+        Some(Transform::from_xyz(x, y, z).looking_at(Vec3::new(lx, ly, lz), Vec3::Y))
+    });
+    let mut shots: Vec<(u8, f32)> = fire
+        .iter()
+        .flat_map(|fire| fire.split(','))
+        .filter_map(|shot| {
+            let (round, at) = shot.split_once('@')?;
+            Some((round.trim().parse().ok()?, at.trim().parse().ok()?))
+        })
+        .collect();
+    shots.sort_by(|a, b| a.1.total_cmp(&b.1));
+    info!("armour sandbox: autopilot pose {pose:?}, fire {shots:?}");
+    app.insert_resource(Autopilot {
+        pose,
+        fire: shots.into(),
+    })
+    .add_systems(Update, drive_autopilot);
+}
+
+/// Stand the camera-gun at the autopilot's pose, then fire each round at its second, one per
+/// shot-clock tick.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the trigger's own inputs, as `fire` reads them, plus the clock and the autopilot"
+)]
+fn drive_autopilot(
+    time: Res<Time>,
+    mut pilot: ResMut<Autopilot>,
+    camera: Single<(Entity, &mut Transform, &CombatantId), With<FreeFlyCam>>,
+    gun: Single<&Weapon, With<RangeGun>>,
+    mut shot: ResMut<ShotParams>,
+    clock: Res<ShotClock>,
+    mut last_tick: Local<Option<u32>>,
+    mut commands: Commands,
+) {
+    let (camera, mut transform, &combatant) = camera.into_inner();
+    if let Some(pose) = pilot.pose.take() {
+        *transform = pose;
+    }
+    let Some(&(round, at)) = pilot.fire.front() else {
+        return;
+    };
+    if time.elapsed_secs() < at || *last_tick == Some(clock.0) {
+        return;
+    }
+    pilot.fire.pop_front();
+    *shot = ShotParams {
+        round,
+        muzzle_speed: None,
+    };
+    *last_tick = Some(clock.0);
+    fire_round(
+        &mut commands,
+        (camera, &*transform, combatant),
+        &gun,
+        *shot,
+        clock.0,
+    );
 }
 
 /// The round bindings step the [`RangeGun`]'s selection through its rounds, wrapping, and drop a
