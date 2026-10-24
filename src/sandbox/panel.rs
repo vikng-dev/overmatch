@@ -28,8 +28,7 @@ use bevy::prelude::*;
 use bevy::time::Virtual;
 use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 
-use crate::ballistics::{ComponentHealth, MarchMode, ShellReadout};
-use crate::damage::{CookedOff, TankKnockedOut};
+use crate::ballistics::MarchMode;
 use crate::damage_cam::pen_cam::game::XRay;
 use crate::tank::Weapon;
 
@@ -43,9 +42,6 @@ pub(super) fn plugin(app: &mut App) {
         // The primary context runs multi-pass in 0.41, so UI MUST be drawn in this schedule.
         .add_systems(EguiPrimaryContextPass, panel);
 }
-
-const OK: egui::Color32 = egui::Color32::from_rgb(120, 210, 140);
-const WARN: egui::Color32 = egui::Color32::from_rgb(235, 90, 70);
 
 /// The resources the panel WRITES, as one bundle. Each is `Copy + PartialEq` or a tiny flag, so the
 /// panel edits a local and writes back on change (see the module doc).
@@ -62,21 +58,10 @@ struct Write<'w> {
     want: ResMut<'w, PanelWantsInput>,
 }
 
-/// The live read-outs the Telemetry section shows: the count of shells still on the board, the
-/// target's damage state and when a knocked-out target is rebuilt.
-#[derive(SystemParam)]
-struct Telemetry<'w, 's> {
-    shells: Query<'w, 's, (), With<ShellReadout>>,
-    knocked_out: Query<'w, 's, (), With<TankKnockedOut>>,
-    cooked_off: Query<'w, 's, (), With<CookedOff>>,
-    health: Query<'w, 's, &'static ComponentHealth>,
-    respawn: Res<'w, Respawn>,
-}
-
 fn panel(
     mut contexts: EguiContexts,
     mut w: Write,
-    telemetry: Telemetry,
+    respawn: Res<Respawn>,
     gun: Query<&Weapon, With<RangeGun>>,
 ) {
     let Ok(ctx) = contexts.ctx_mut() else {
@@ -145,16 +130,16 @@ fn panel(
                 egui::CollapsingHeader::new("Telemetry")
                     .default_open(true)
                     .show(ui, |ui| {
-                        telemetry_section(ui, &telemetry, now_s, time_scale, paused, march_real)
+                        telemetry_section(ui, &respawn, now_s, time_scale, paused, march_real)
                     });
 
                 egui::CollapsingHeader::new("Scene")
                     .default_open(false)
                     .show(ui, |ui| {
-                        if ui.button("Clear shots").clicked() {
+                        if ui.button("Clear").clicked() {
                             do_clear = true;
                         }
-                        if ui.button("Reset world (rebuild target)").clicked() {
+                        if ui.button("Rebuild").clicked() {
                             do_reset = true;
                         }
                     });
@@ -207,9 +192,9 @@ fn panel(
     }
 }
 
-/// The look (`X`) and the armour overlay (`F2`) over the panel's LOCAL copies.
+/// The x-ray (`X`) and the armour overlay (`F2`) over the panel's LOCAL copies.
 fn view_section(ui: &mut egui::Ui, look: &mut bool, overlay: &mut ArmourOverlay) {
-    ui.checkbox(look, "look");
+    ui.checkbox(look, "x-ray");
     ui.horizontal(|ui| {
         ui.label("armour");
         for option in ArmourOverlay::ALL {
@@ -257,14 +242,11 @@ fn shot_section(
     ui.separator();
     ui.monospace(format!("own speed  {own:.0} m/s"));
     let mut overriding = shot.muzzle_speed.is_some();
-    if ui
-        .checkbox(&mut overriding, "override muzzle speed")
-        .changed()
-    {
+    if ui.checkbox(&mut overriding, "override").changed() {
         shot.muzzle_speed = overriding.then_some(own);
     }
     if let Some(speed) = shot.muzzle_speed.as_mut() {
-        ui.add(egui::Slider::new(speed, 100.0..=1200.0).text("muzzle (m/s)"));
+        ui.add(egui::Slider::new(speed, 100.0..=1200.0).text("m/s"));
     }
     if ui.button("Reset shot").clicked() {
         *reset_shot = true;
@@ -296,16 +278,20 @@ fn time_section(
     });
     ui.separator();
     ui.label("march cadence");
-    ui.radio_value(march_real, false, "Demo (smooth per-frame)");
-    ui.radio_value(march_real, true, "Real (fixed server cadence)");
+    ui.radio_value(march_real, false, MARCH_DEMO);
+    ui.radio_value(march_real, true, MARCH_REAL);
 }
 
-/// Live read-out: the clock state, the shell count on the board, the target's damage state and,
-/// while it is knocked out, the virtual seconds until its rebuild. Monospace so the columns line
-/// up.
+/// The march cadences' names: [`MarchMode::Demo`] marches each frame, [`MarchMode::Real`] each
+/// fixed tick, as the server does.
+const MARCH_DEMO: &str = "per frame";
+const MARCH_REAL: &str = "per tick";
+
+/// What the picture cannot show: the clock's rate, the march cadence and, while the target is
+/// knocked out, the virtual seconds until its rebuild. Monospace so the columns line up.
 fn telemetry_section(
     ui: &mut egui::Ui,
-    t: &Telemetry,
+    respawn: &Respawn,
     now_s: f64,
     time_scale: f32,
     paused: bool,
@@ -316,27 +302,10 @@ fn telemetry_section(
     } else {
         format!("{time_scale:.3}x")
     };
-    let mode = if march_real { "real" } else { "demo" };
-    ui.monospace(format!("time    {rate}  [{mode}]"));
-    ui.monospace(format!("shells  {}", t.shells.iter().count()));
-
-    ui.separator();
-    let (mut damaged, mut total) = (0usize, 0usize);
-    for hp in &t.health {
-        total += 1;
-        if hp.current < hp.max {
-            damaged += 1;
-        }
-    }
-    ui.monospace(format!("modules {damaged}/{total} damaged"));
-    if t.cooked_off.iter().next().is_some() {
-        ui.colored_label(WARN, "ammo COOKED OFF");
-    } else if t.knocked_out.iter().next().is_some() {
-        ui.colored_label(WARN, "target KNOCKED OUT");
-    } else {
-        ui.colored_label(OK, "target operational");
-    }
-    if let Some(due_s) = t.respawn.due_s {
-        ui.monospace(format!("rebuilt in {:.1} s", (due_s - now_s).max(0.0)));
+    let march = if march_real { MARCH_REAL } else { MARCH_DEMO };
+    ui.monospace(format!("time     {rate}"));
+    ui.monospace(format!("march    {march}"));
+    if let Some(due_s) = respawn.due_s {
+        ui.monospace(format!("rebuild  {:.1} s", (due_s - now_s).max(0.0)));
     }
 }

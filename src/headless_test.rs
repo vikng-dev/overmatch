@@ -1325,40 +1325,43 @@ fn boot_sandbox_headless(root: fn(&mut App)) -> (App, MutexGuard<'static, ()>) {
     (app, lease)
 }
 
-/// Every string rendered by a `Text` node this frame — the sandboxes' HUD surface, read without
-/// reaching into another module's private marker components.
-fn rendered_text(app: &mut App) -> Vec<String> {
-    let mut texts = app.world_mut().query::<&Text>();
-    texts.iter(app.world()).map(|text| text.0.clone()).collect()
+/// Every string a `Text` node shows this frame — its own `Visibility` and every ancestor's other
+/// than `Hidden`: the sandboxes' HUD surface, read without reaching into another module's private
+/// marker components.
+fn shown_text(app: &mut App) -> Vec<String> {
+    let world = app.world_mut();
+    let mut texts = world.query::<(Entity, &Text)>();
+    let world = &*world;
+    let hidden = |node: Entity| world.get::<Visibility>(node) == Some(&Visibility::Hidden);
+    texts
+        .iter(world)
+        .filter(|&(entity, _)| {
+            !std::iter::successors(Some(entity), |&node| {
+                world.get::<ChildOf>(node).map(ChildOf::parent)
+            })
+            .any(hidden)
+        })
+        .map(|(_, text)| text.0.clone())
+        .collect()
 }
 
-/// The armour/penetration sandbox boots and keeps running.
+/// The armour/penetration sandbox boots and keeps running, its view's text at a glance.
 ///
-/// The regression this pins is the `Res<WeaponClock>` panic described above, but the assertions
-/// deliberately go one step further than "it didn't panic": the target tank must actually be up and
-/// the shared status panel must have RENDERED it. The panicking system is `update_status_panel`, so
-/// a guard that only proved the app survived could be satisfied by a panel that silently drew
-/// nothing — which is the state the "just make the resource optional" fix would have produced.
+/// The regression this pins is the `Res<WeaponClock>` panic described above; past surviving, the
+/// target tank must be up, the free shooter must hold the range gun, and the weapon clock must
+/// advance. The view shows one line at boot, the selected round's name: the legend waits behind a
+/// key and no game HUD (crew bar, status card, nameplate) is mounted, since the look shows the
+/// target's state. A mounted HUD, a shown legend or a label carrying more than the name fails it.
 #[test]
 fn armor_sandbox_boots_headless() {
     let (mut app, _lease) = boot_sandbox_headless(crate::sandbox::plugin);
 
-    let mut targets = app
-        .world_mut()
-        .query_filtered::<Entity, (With<Tank>, With<Controlled>)>();
+    let mut targets = app.world_mut().query_filtered::<Entity, With<Tank>>();
     assert_eq!(
         targets.iter(app.world()).count(),
         1,
-        "the armor sandbox must spawn exactly one Controlled target tank from the blueprint \
-         within {SANDBOX_BOOT_FRAMES} frames — the crew bar and the status panel are both scoped \
-         to `Controlled`, so without it they render nothing and this guard proves nothing",
-    );
-
-    let texts = rendered_text(&mut app);
-    assert!(
-        texts.iter().any(|text| text.contains("Weapons:")),
-        "the shared status panel (crew_ui::update_status_panel) rendered no weapons row in the \
-         armor sandbox; text nodes were {texts:?}",
+        "the armor sandbox must spawn exactly one target tank from the blueprint within \
+         {SANDBOX_BOOT_FRAMES} frames",
     );
 
     // The range: the camera is the one free shooter, and exactly one weapon names it as its root.
@@ -1370,47 +1373,45 @@ fn armor_sandbox_boots_headless() {
     let mut weapons = app
         .world_mut()
         .query::<(&crate::tank::Weapon, &crate::tank::TankRoot)>();
-    assert_eq!(
-        weapons
-            .iter(app.world())
-            .filter(|(_, root)| root.0 == shooter)
-            .count(),
-        1,
-        "the free shooter holds no range gun (or more than one)",
-    );
+    let guns: Vec<_> = weapons
+        .iter(app.world())
+        .filter(|(_, root)| root.0 == shooter)
+        .map(|(gun, _)| gun.rounds[0].name.clone())
+        .collect();
+    let [first_round] = guns.as_slice() else {
+        panic!("the free shooter holds no range gun (or more than one)");
+    };
 
     // The weapon clock advances one tick per fixed step, as the game's does: each range round's
-    // `ShotId` names its tick. The target's own gun is never armed, so the status panel still reads
-    // a tank that has never fired against the moving clock.
+    // `ShotId` names its tick.
     assert!(
         app.world().resource::<crate::WeaponClock>().0 > 0,
         "the armor sandbox's weapon clock never advanced — every range round would share tick 0",
     );
-    assert!(
-        texts.iter().any(|text| text.contains("READY")),
-        "the target's unarmed main gun no longer reads READY against the moving clock; text nodes \
-         were {texts:?}",
+
+    let shown = shown_text(&mut app);
+    assert_eq!(
+        shown,
+        std::slice::from_ref(first_round),
+        "the armour sandbox's view shows only the selected round's name at boot",
     );
 }
 
-/// A range round on the armour sandbox's target is explained where the pen cam reads it: through
-/// the real trigger, the offline delivery stores the shooter's projection of the round's record for
-/// the free shooter (the corner) and the victim's for the target (the x-ray), each naming the free
-/// shooter's shot, the target's life and the gun's selected round. The subject is the game's
+/// A range round on the armour sandbox's target is explained where the look reads it, and opens no
+/// corner: through the real trigger, the offline delivery stores the shooter's projection of the
+/// round's record for the free shooter, naming its shot, the target's life and the gun's selected
+/// round, and no camera opens beside the range's own while it plays. The subject is the game's
 /// damage-model tooling.
 #[test]
-fn a_range_round_on_the_target_is_explained_to_both_combatants() {
+fn a_range_round_on_the_target_is_explained_and_opens_no_corner() {
     use crate::damage_cam::delivery::ShotExplanations;
     use crate::damage_cam::wire::{Audience, TankLife};
 
     let (mut app, _lease) = boot_sandbox_headless(crate::sandbox::plugin);
     let world = app.world_mut();
     let (struck, target) = {
-        let mut targets = world.query_filtered::<(
-            Entity,
-            &crate::CombatantId,
-            &crate::CombatantLife,
-        ), (With<Tank>, With<Controlled>)>();
+        let mut targets = world
+            .query_filtered::<(Entity, &crate::CombatantId, &crate::CombatantLife), With<Tank>>();
         let (entity, &combatant, &life) = targets.single(world).expect("one target");
         (TankLife { combatant, life }, entity)
     };
@@ -1466,31 +1467,34 @@ fn a_range_round_on_the_target_is_explained_to_both_combatants() {
         state: bevy::input::ButtonState::Pressed,
         window: shooter,
     });
+    let mut cameras = world.query_filtered::<(), With<Camera>>();
+    let range_cameras = cameras.iter(world).count();
 
-    let explained = |app: &App, audience: Audience| {
+    let explained = |app: &App| {
         app.world()
             .resource::<ShotExplanations>()
             .iter()
             .any(|(_, stored)| {
-                stored.explanation.audience == audience
+                stored.explanation.audience == Audience::Shooter
                     && stored.explanation.shot.combatant == shooter_id
                     && stored.explanation.struck == struck
                     && stored.report.round == round
             })
     };
-    for _ in 0..600 {
+    // MEASURED: the record lands on frame 2, and with the corner admitting every hit its camera
+    // opens on that same frame; the watch runs well past both.
+    const CORNER_WATCH_FRAMES: usize = 120;
+    for frame in 0..CORNER_WATCH_FRAMES {
         app.update();
-        if explained(&app, Audience::Shooter) {
-            break;
-        }
+        assert_eq!(
+            cameras.iter(app.world()).count(),
+            range_cameras,
+            "a camera opened beside the range's own on frame {frame}: the pen cam corner",
+        );
     }
     assert!(
-        explained(&app, Audience::Shooter),
+        explained(&app),
         "no explanation of the range round reached the free shooter",
-    );
-    assert!(
-        explained(&app, Audience::Victim) || explained(&app, Audience::KilledVictim),
-        "no explanation of the range round reached the target",
     );
 }
 

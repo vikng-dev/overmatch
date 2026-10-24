@@ -94,7 +94,8 @@ pub(crate) fn offline_plugin(app: &mut App) {
     app.add_systems(Update, derive_offline_flow);
 }
 
-/// A root that is always in a match: no writer, no transitions.
+/// A root that is always in a match: no writer, no transitions. Only test apps are such a root.
+#[cfg(test)]
 pub(crate) fn in_match_plugin(app: &mut App) {
     app.insert_state(Flow::InMatch);
     configure_in_match(app);
@@ -126,8 +127,8 @@ fn reset_resource<R: Resource + FromWorld>(world: &mut World) {
 pub(crate) fn require(app: &App, plugin: &str) {
     assert!(
         app.world().contains_resource::<State<Flow>>(),
-        "{plugin} spawns and gates on `flow::Flow`; mount `flow::plugin` (or `in_match_plugin`) \
-         before it"
+        "{plugin} spawns and gates on `flow::Flow`; mount `flow::plugin` (or, in a test, \
+         `in_match_plugin`) before it"
     );
 }
 

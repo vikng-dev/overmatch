@@ -20,6 +20,12 @@
 //!   ([`sweep_tank_shots`]). The armour overlay (F2, off by default) draws the target's armour
 //!   plates over everything, which the look draws as one body with the rest of the hull.
 //!
+//! * **Text only at a glance.** The view carries the selected round's name (its speed beside it only
+//!   when overridden, [`round_line`]), the aim dot and the key legend, hidden until H. The look shows
+//!   the target's crew and module state, so no crew bar or status card is mounted; the egui panel
+//!   holds the controls and what the picture cannot show (time rate, march cadence, the rebuild
+//!   countdown).
+//!
 //! Sandbox controls use real time so inspection remains available while simulation time is paused.
 //!
 //! For in-engine captures (`dev_capture`) the range runs on an autopilot instead of the mouse:
@@ -47,19 +53,16 @@ use crate::ballistics::{
     self, ArmorVolume, ArmourMark, BallisticVolume, ComponentHealth, FireShell, PenetrationMarks,
     Projectile, ShellPath, ShotSource,
 };
-use crate::command::{self, Bindings, RoundStep};
+use crate::command::{Bindings, RoundStep};
 use crate::damage::{self, CookedOff, Dead, LaunchedTurret, TankKnockedOut, VolumeOf};
 use crate::damage_cam::pen_cam::game::{PenCamSet, XRay, XRayRelease, XRaySubject};
 use crate::settings::{PenCamCorner, Settings};
 use crate::tank::{
-    Controlled, Tank, TankPresentation, TankRoot, TankSimSource, ViewOf, Weapon, WeaponIndex,
+    Tank, TankPresentation, TankRoot, TankSimSource, ViewOf, Weapon, WeaponIndex,
     spawn_complete_tank,
 };
 use crate::view::PlayerView;
-use crate::{
-    CombatantId, CombatantLife, FreeShooter, Layer, ShotClock, ShotId, bake, crew_ui, hud, spec,
-    world,
-};
+use crate::{CombatantId, CombatantLife, FreeShooter, Layer, ShotClock, ShotId, bake, spec, world};
 
 // The clickable egui control panel — the sandbox's View / Shot / Time / Telemetry / Scene surface.
 // Behind `dev_ui` so `bevy_egui` compiles ONLY into the sandbox build, never the shipping client
@@ -92,8 +95,7 @@ const PANEL_WIDTH: f32 = 300.0;
 #[cfg(not(feature = "dev_ui"))]
 const PANEL_WIDTH: f32 = 0.0;
 
-/// Where the view's left-anchored UI starts, logical pixels: the legend, the shared status card
-/// and the crew bar, clear of the panel ([`clear_the_panel`]).
+/// Where the key legend starts, logical pixels: clear of the panel.
 const UI_LEFT: f32 = PANEL_WIDTH + 10.0;
 
 /// The round the range fires: an index into the [`RangeGun`]'s rounds (E/Q, or the panel), and an
@@ -260,8 +262,6 @@ pub fn plugin(app: &mut App) {
     // chains are already off their source rung (up to ~16 mm of surface). A tool whose whole use is
     // "look at where this shell went into this plate" shows the authored plate.
     app.insert_resource(crate::geometry_lod::SourceDetailOnly);
-    // A sandbox is always in a match: the shared HUD/crew plugins below spawn on entering it.
-    app.add_plugins(crate::flow::in_match_plugin);
     // The sandbox's own App composition — physics + the shared shell mechanic + a battlefield to
     // hit. Deliberately omits driving, aim, the game cameras, sight, and shooting.
     app.add_plugins((
@@ -288,28 +288,19 @@ pub fn plugin(app: &mut App) {
         // The render-side view attach: the target is static, but cook-off detaches the sim
         // turret and the rendered glb turret must follow the free body.
         crate::tank::view_attach_plugin,
-        // The shared HUD/crew plugins below read the `UiFonts` resource; mount the loader so the
-        // sandbox provides it too (the sandbox's own labels keep the default font — a dev tool).
+        // The render half of ballistics — the shell scene, the tracer streak, and the visibility a
+        // hold draws with. This root mounts `ballistics` but NOT `vfx`, which is exactly why that
+        // half is a ballistics-owned view plugin rather than a vfx concern: without this line the
+        // sandbox's shells would fly invisibly.
+        ballistics::view_plugin,
+        // The shipped font (`UiFonts`) the round label draws a round's name in; the sandbox's other
+        // labels keep the default font.
         crate::ui_font::plugin,
-        // Shared tank nameplates, reprojected through the `PlayerView` declaration on the free-fly
-        // camera below.
-        hud::plugin,
-        // The controlled tank's crew bar + `1`–`5` swap input (shared with the game). The sandbox's
-        // single target is marked `Controlled`, so the same code drives it here.
-        crew_ui::plugin,
-        // Command core (no device gather): the crew bar writes `CrewSwap` commands, and the
-        // sandbox tank needs a `TankCommand` + the per-tick edge consumption for them to land.
-        command::core_plugin,
     ))
-    // The render half of ballistics — the shell scene, the tracer streak, and the visibility a hold
-    // draws with. This root mounts `ballistics` but NOT `vfx`, which is exactly why that half is a
-    // ballistics-owned view plugin rather than a vfx concern: without this line the sandbox's shells
-    // would fly invisibly. (Its own call: the tuple above is at bevy's 15-plugin arity limit.)
-    .add_plugins(ballistics::view_plugin)
     // The pen cam as single-player runs it: the recorder of the authority's main-gun rounds, the
-    // vocabulary its explanations fold, the offline delivery to the player's combatants (the free
-    // shooter and the held target), the render channels its cameras resolve through, and the
-    // x-ray and the kill cam (which stands aside for a free shooter).
+    // vocabulary its explanations fold, the offline delivery to the player's combatant (the free
+    // shooter), the render channels its cameras resolve through, and the x-ray and the kill cam
+    // (which stands aside for a free shooter).
     .add_plugins((
         crate::damage_cam::recorder::plugin,
         crate::damage_cam::delivery::plugin,
@@ -328,12 +319,8 @@ pub fn plugin(app: &mut App) {
     // the kill cam stands aside for a free shooter, so the pivot stays unset.
     .init_resource::<crate::camera::TurretPivot>()
     // The weapon clock, one tick per fixed step as the game advances it: the offline delivery
-    // publishes it as the shot clock, so each range round's `ShotId` names its tick, and the shared
-    // status panel (`crew_ui::update_status_panel`) reads it. This root mounts no
-    // `shooting::plugin`: the target's own gun is a passive test article, never armed, so every
-    // `WeaponGate` stays at its spawn state and the panel's readouts stay true of a tank that has
-    // never fired ("READY", a full belt). `no-fire`, when the gunner's or the breech's HP pool is
-    // emptied, is quality-derived and stays live.
+    // publishes it as the shot clock, so each range round's `ShotId` names its tick. This root
+    // mounts no `shooting::plugin`: the target's own gun is a passive test article, never armed.
     .init_resource::<crate::WeaponClock>()
     .add_systems(FixedLast, crate::shooting::advance_weapon_clock)
     // The game's keys for the round selector and the x-ray.
@@ -400,7 +387,7 @@ pub fn plugin(app: &mut App) {
             // Both despawn the target the look may be drawing (`TargetRebuild::rebuild`).
             (reset_world, respawn_target).after(PenCamSet),
             update_round_label,
-            clear_the_panel,
+            toggle_legend,
         ),
     );
 
@@ -586,10 +573,7 @@ fn spawn_target_from_blueprint(
         pending.0.clone(),
         (
             Transform::from_xyz(0.0, 2.0, -12.0),
-            Name::new("Tiger I target"),
-            // The sandbox's single tank is the one under study — mark it `Controlled` so the shared
-            // crew bar (scoped to the controlled tank) drives it, exactly as in the game.
-            Controlled,
+            Name::new("range target"),
             RigidBody::Static,
             RANGE_TARGET,
             CombatantLife(life.0),
@@ -612,8 +596,9 @@ fn respawn_target(
     }
     let now = time.elapsed_secs_f64();
     let knocked_out_s = *respawn.knocked_out_s.get_or_insert(now);
-    let due = rebuild_due(knocked_out_s, target.xray.shown_since());
-    respawn.due_s = Some(due);
+    let due = *respawn
+        .due_s
+        .insert(rebuild_due(knocked_out_s, target.xray.shown_since()));
     if now >= due {
         target.rebuild();
         *respawn = Respawn::default();
@@ -1199,27 +1184,23 @@ fn draw_shell_ends(
     }
 }
 
-/// The HUD line naming the [`RangeGun`]'s selected round and the speed it fires at.
+/// The view's line naming the [`RangeGun`]'s selected round.
 #[derive(Component)]
 struct RoundLabel;
 
-/// The selected round's line: its display name, its place in the gun's list and the speed it fires
-/// at, with the round's own beside an override.
+/// The key legend, hidden until H ([`toggle_legend`]).
+#[derive(Component)]
+struct Legend;
+
+/// The selected round's line: its display name, and the speed it fires at only when overridden.
 fn round_line(gun: &Weapon, shot: ShotParams) -> String {
     let Some(loaded) = gun.rounds.get(usize::from(shot.round)) else {
         return String::new();
     };
-    let own = loaded.round.muzzle_speed;
-    let speed = match shot.muzzle_speed {
-        Some(speed) => format!("{speed:.0} m/s (override; own {own:.0} m/s)"),
-        None => format!("{own:.0} m/s"),
-    };
-    format!(
-        "{}  ({}/{})   {speed}",
-        loaded.name,
-        usize::from(shot.round) + 1,
-        gun.rounds.len()
-    )
+    match shot.muzzle_speed {
+        Some(speed) => format!("{}  {speed:.0} m/s", loaded.name),
+        None => loaded.name.clone(),
+    }
 }
 
 /// Keep the [`RoundLabel`] on the selected round, written only on a change.
@@ -1234,18 +1215,24 @@ fn update_round_label(
     }
 }
 
-/// The slim keybindings legend (the direct-manipulation keys that survive alongside the egui panel)
-/// bottom left above the crew bar and the [`RoundLabel`] bottom right; the top of the view stays to
-/// the status card (left). View / shot / time / scene controls, and the time + shell-count
-/// readouts, live in the panel's View / Shot / Time / Telemetry / Scene sections.
+/// The view's text: the [`Legend`] bottom left, hidden, the [`RoundLabel`] bottom right, and the
+/// aim dot at the centre.
 fn spawn_hud(mut commands: Commands, fonts: Res<crate::ui_font::UiFonts>) {
     commands.spawn((
+        Legend,
         Text::new(
-            "WASD / Shift / Ctrl  fly     LMB  fire the round     E / Q  next / previous round\n\
-             X  the look on / off     F2  armour overlay off / opaque / translucent\n\
-             Esc  free cursor for the panel\n\
-             1-5  crew seats: tap source then target to swap occupants (re-tap cancels)\n\
-             Everything else (speed / time / clear / reset) lives on the left panel.",
+            "WASD / Shift / Ctrl  fly\n\
+             LMB  fire\n\
+             E / Q  round\n\
+             X  x-ray\n\
+             F2  armour overlay\n\
+             C  clear\n\
+             R  rebuild\n\
+             Space  freeze\n\
+             Up / Down  slow-mo\n\
+             T  march cadence\n\
+             Esc  free cursor\n\
+             H  keys",
         ),
         TextFont {
             font_size: FontSize::Px(14.0),
@@ -1254,11 +1241,11 @@ fn spawn_hud(mut commands: Commands, fonts: Res<crate::ui_font::UiFonts>) {
         TextColor(Color::srgb(0.85, 0.87, 0.95)),
         Node {
             position_type: PositionType::Absolute,
-            // Above the crew bar: its 10 px inset and one line of 15 px text, with a gap (DERIVED).
-            bottom: Val::Px(36.0),
+            bottom: Val::Px(12.0),
             left: Val::Px(UI_LEFT),
             ..default()
         },
+        Visibility::Hidden,
     ));
     // The shipped font: it draws a round's display name, which is data, whole.
     commands.spawn((
@@ -1299,12 +1286,12 @@ fn spawn_hud(mut commands: Commands, fonts: Res<crate::ui_font::UiFonts>) {
         });
 }
 
-/// Move the shared crew UI's left-anchored nodes, the status card top left and the crew bar bottom
-/// left, to [`UI_LEFT`] as `crew_ui` spawns them, so the panel covers neither.
-fn clear_the_panel(
-    mut nodes: Query<&mut Node, Or<(Added<crew_ui::StatusPanelText>, Added<crew_ui::CrewBarText>)>>,
+/// H shows or hides the [`Legend`].
+fn toggle_legend(
+    keys: Res<ButtonInput<KeyCode>>,
+    mut legend: Single<&mut Visibility, With<Legend>>,
 ) {
-    for mut node in &mut nodes {
-        node.left = Val::Px(UI_LEFT);
+    if keys.just_pressed(KeyCode::KeyH) {
+        legend.toggle_inherited_hidden();
     }
 }
