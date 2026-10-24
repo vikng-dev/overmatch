@@ -1557,7 +1557,7 @@ fn a_delay_run_out_between_bodies_bursts_where_the_crossing_hands_back() {
     let from = LINE_FROM.with_z(0.5 * THIN + step.length() * dt - 0.15);
     let volumes = [
         plate("front", THIN, 0.0, Kind::Main),
-        plate("filler", 0.2, -0.5 * THIN - 0.1, Kind::Box(100_000)),
+        plate("soft box", 0.2, -0.5 * THIN - 0.1, Kind::Box(100_000)),
         plate("back", THIN, -THIN - 0.2, Kind::Main),
     ]
     .map(|volume| (volume, 0, Quat::IDENTITY));
@@ -1616,13 +1616,13 @@ fn an_armed_round_at_rest_bursts_where_it_rests() {
         // The front plate's exit speed, read where its crossing ends there.
         let mut exit_speed = None;
         let front = plate("front", THIN, 0.0, Kind::Main);
-        let filler = plate("filler", 0.2, -0.5 * THIN - 0.1, Kind::Box(100_000));
+        let soft_box = plate("soft box", 0.2, -0.5 * THIN - 0.1, Kind::Box(100_000));
         for (volumes, crossings) in [
             (vec![front, plate("back", THICK, -2.0, Kind::Main)], 2),
             (
                 vec![
                     front,
-                    filler,
+                    soft_box,
                     plate("back", THICK, -0.5 * THIN - 0.2 - 0.5 * THICK, Kind::Main),
                 ],
                 1,
