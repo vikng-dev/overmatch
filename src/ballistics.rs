@@ -1170,6 +1170,10 @@ pub enum ArmourMark {
     Burst {
         at: Vec3,
         speed: f32,
+        /// Seconds from the round reaching `at` to the burst: the delay's remainder for a round at
+        /// rest, zero in flight. The march settles the field in the tick the round stopped; the
+        /// record times it here.
+        after: f32,
         nose: Option<f32>,
         /// The tank whose body armed or last restarted the fuze: the tank the field walks.
         tank: Option<Entity>,
@@ -2883,7 +2887,8 @@ fn march_shell_step(
             break;
         }
     }
-    // An armed round that stopped short of its delay bursts where it lies, at rest.
+    // An armed round that stopped short of its delay bursts where it lies, at rest, when the
+    // delay's remainder runs out (its mark's `after`); its field settles this tick.
     if stopped {
         damage_dealt += burst_here(shell, &context, &flight, 0.0, health).1;
     }
@@ -2962,7 +2967,8 @@ fn launch(
 /// AUTHORITY: advance the fuze over a decided crossing (design doc §5, "The burst"). A corridor
 /// found clear is open path. A bounce meets a body: an armed fuze restarts from it. A bite exits
 /// each body it reached in turn, which arms the fuze at the threshold or restarts an armed one,
-/// then flies on from the last exit to where the flight resumes.
+/// then flies on from the last exit, or exiting none from the flight's position, to where the
+/// flight resumes or the round came to rest.
 fn advance_fuze(fuze: &mut burst::Fuze, decision: &resolve::Decision) {
     match decision {
         resolve::Decision::Clear { travel, .. } => fuze.flown(*travel),
@@ -2971,18 +2977,21 @@ fn advance_fuze(fuze: &mut burst::Fuze, decision: &resolve::Decision) {
             for source in &bite.spall {
                 fuze.exited(source.spend, source.exit_speed, bite.owner);
             }
-            if let (
-                resolve::BiteEnd::Perforated {
-                    resume, direction, ..
-                },
-                Some(last),
-            ) = (&bite.end, bite.spall.last())
-            {
-                fuze.flown(
+            match (&bite.end, bite.spall.last()) {
+                (
+                    resolve::BiteEnd::Perforated {
+                        resume, direction, ..
+                    },
+                    Some(last),
+                ) => fuze.flown(
                     (*resume - last.position)
                         .dot(Vec3::from(*direction))
                         .max(0.0),
-                );
+                ),
+                (resolve::BiteEnd::Embedded { at, .. }, Some(last)) => {
+                    fuze.flown(at.distance(last.position));
+                }
+                (_, None) => fuze.flown(bite.travel),
             }
         }
     }
@@ -3016,8 +3025,9 @@ fn burst_ahead(
     (ended, wounded + removed)
 }
 
-/// AUTHORITY: burst an armed round where `flight` stands, travelling at `speed` (zero at rest):
-/// log its [`ArmourMark::Burst`] and settle its doses at that mark. Under the ball the round ends;
+/// AUTHORITY: burst an armed round where `flight` stands, travelling at `speed` (zero at rest, the
+/// delay's remainder then waited out where it lies): log its [`ArmourMark::Burst`] and settle its
+/// doses at that mark. Under the ball the round ends;
 /// under the ring its nose piece flies on as the shell's round, inert, unless the round is at
 /// rest. Returns whether the round ended and the HP removed; an unarmed fuze does nothing.
 fn burst_here(
@@ -3030,6 +3040,11 @@ fn burst_here(
     let Some((burst, tank)) = shell.projectile.fuze.armed() else {
         return (false, 0);
     };
+    let after = if speed > 0.0 {
+        0.0
+    } else {
+        shell.projectile.fuze.delay_left().unwrap_or(0.0)
+    };
     shell.projectile.fuze = burst::Fuze::Inert;
     let (shape, nose) = match burst.option {
         burst::BurstOption::Ring { nose } => (burst::BurstShape::Ring, Some(nose)),
@@ -3038,6 +3053,7 @@ fn burst_here(
     shell.marks.log.push(ArmourMark::Burst {
         at: flight.position,
         speed,
+        after,
         nose: nose.map(|nose| nose.mass),
         tank,
     });

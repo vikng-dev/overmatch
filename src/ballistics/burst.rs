@@ -177,11 +177,13 @@ pub(crate) enum Fuze {
     /// Not yet armed: no body's spend has reached the threshold.
     Unarmed(Burst),
     /// Armed: the round bursts after `remaining` more metres of path, unless a body met first
-    /// restarts the delay. `tank` owns the body that armed or last restarted it, and is the tank
-    /// the burst's field walks.
+    /// restarts the delay. `speed` is the speed the delay started at, which turns those metres
+    /// into the delay's seconds left. `tank` owns the body that armed or last restarted it, and is
+    /// the tank the burst's field walks.
     Armed {
         burst: Burst,
         remaining: f32,
+        speed: f32,
         tank: Option<Entity>,
     },
 }
@@ -205,6 +207,7 @@ impl Fuze {
         *self = Self::Armed {
             burst,
             remaining: speed * burst.delay,
+            speed,
             tank,
         };
     }
@@ -216,6 +219,7 @@ impl Fuze {
             *self = Self::Armed {
                 burst,
                 remaining: speed * burst.delay,
+                speed,
                 tank,
             };
         }
@@ -233,6 +237,21 @@ impl Fuze {
     pub(crate) fn due_within(&self, metres: f32) -> Option<f32> {
         match *self {
             Self::Armed { remaining, .. } if remaining <= metres => Some(remaining.max(0.0)),
+            _ => None,
+        }
+    }
+
+    /// The delay's seconds left, when the fuze is armed: the metres left at the speed the delay
+    /// started at. A round that stopped waits them out where it lies.
+    pub(crate) fn delay_left(&self) -> Option<f32> {
+        match *self {
+            Self::Armed {
+                remaining, speed, ..
+            } => Some(if speed > 0.0 {
+                (remaining / speed).max(0.0)
+            } else {
+                0.0
+            }),
             _ => None,
         }
     }

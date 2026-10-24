@@ -293,6 +293,8 @@ pub struct SpallCone {
 /// the round carried into it, the nose piece that flew on, and the field it threw.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Burst {
+    /// When it burst: when the path reached the burst point, or for a round at rest the delay's
+    /// remainder after it stopped there.
     pub t: f32,
     /// The burst point, a point of the path.
     pub point: [f32; 3],
@@ -640,10 +642,12 @@ pub(crate) mod tests {
                     )
                 });
             // Each time is quantized to a microsecond on the wire on its own.
+            let waited = burst.t - on_path.t;
             assert!(
-                (on_path.t - burst.t).abs() < 2.0e-6,
-                "{file}: it burst at {} s, its point on the path is at {} s",
+                waited > -2.0e-6 && (burst.speed_mps == 0.0 || waited < 2.0e-6),
+                "{file}: it burst at {} s at {} m/s, its point on the path is at {} s",
                 burst.t,
+                burst.speed_mps,
                 on_path.t
             );
             if let Some(field) = &burst.field {

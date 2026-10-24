@@ -690,8 +690,12 @@ pub(crate) fn report_from(
             }
             ArmourMark::Wound { volumes, .. } => ledger.wound(index, volumes),
             ArmourMark::Burst {
-                at, speed, nose, ..
-            } => ledger.burst(index, *at, *speed, *nose, log.burst),
+                at,
+                speed,
+                after,
+                nose,
+                ..
+            } => ledger.burst(index, (*at, *speed, *after), *nose, log.burst),
             ArmourMark::Failed => {}
         }
     }
@@ -962,13 +966,12 @@ impl<'a> Ledger<'a> {
     fn burst(
         &mut self,
         index: usize,
-        at: Vec3,
-        speed: f32,
+        (at, speed, after): (Vec3, f32, f32),
         nose: Option<f32>,
         thrown: Option<&BurstField>,
     ) {
         let on = self.on;
-        let t = on.time_at(at);
+        let t = on.time_at(at) + after;
         let field = thrown.map(|burst| {
             let throw = (burst.origin, burst.axis, burst.field, burst.strength);
             self.field(index, t, throw, &burst.rays)

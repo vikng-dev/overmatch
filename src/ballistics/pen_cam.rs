@@ -1540,37 +1540,86 @@ fn a_body_met_before_the_burst_restarts_the_delay() {
     );
 }
 
-/// An armed round stopped before its delay ends bursts where it rests, at no speed: the ring then
-/// throws no nose piece on, and either ends the round. A mutant that drops the burst of a round at
-/// rest, or flies a nose on from it, fails here. The 500 mm back plate stops the fixture 88 inside
-/// the delay (fixture data).
+/// An armed round stopped before its delay ends bursts where it rests, at no speed, when the delay
+/// ends: the delay's seconds less the path from the arming exit to the rest point at the exit's
+/// speed, after the record has it arrive there. The ring then throws no nose piece on, and either
+/// ends the round. The back plate stands 1.7 m behind the front, a crossing of its own, then behind
+/// a 200 mm soft box filling the space from the front, one crossing that exits the front and rests
+/// in the back; the 500 mm plate stops the fixture 88 inside the delay (fixture data). A mutant that drops the burst of a round at rest, flies a nose on from it, times
+/// it on arrival, or flies none of the path to the rest point in either crossing fails here.
 #[test]
 fn an_armed_round_at_rest_bursts_where_it_rests() {
     for shape in [burst::BurstShape::Ball, burst::BurstShape::Ring] {
         let burst = fixture_burst(shape);
-        let fired = fire_fused(
-            &[
-                plate("front", THIN, 0.0, Kind::Main),
-                plate("back", THICK, -2.0, Kind::Main),
-            ],
-            burst::Fuze::of(Some(burst)),
-        );
-        let ends = crossing_ends(&fired.log);
-        let rest = match ends.last() {
-            Some(CrossingEnd::Rest { at }) => *at,
-            other => panic!("{shape:?}: the back plate stops the round: {other:?}"),
-        };
-        let found = bursts(&fired.log);
-        assert_eq!(found.len(), 1, "{shape:?}");
-        let (at, speed, _) = found[0];
-        assert_eq!(speed, 0.0, "{shape:?}: at rest");
-        assert!(
-            at.distance(rest) < BURST_TOLERANCE,
-            "{shape:?}: {at} vs {rest}"
-        );
-        assert_eq!(fired.flying, None, "{shape:?}: nothing flies on");
-        let field = fired.burst.expect("the burst throws its field").field;
-        assert_eq!(field.ratio, 0.0, "{shape:?}: thrown at rest");
+        // The front plate's exit speed, read where its crossing ends there.
+        let mut exit_speed = None;
+        let front = plate("front", THIN, 0.0, Kind::Main);
+        let filler = plate("filler", 0.2, -0.5 * THIN - 0.1, Kind::Box(100_000));
+        for (volumes, crossings) in [
+            (vec![front, plate("back", THICK, -2.0, Kind::Main)], 2),
+            (
+                vec![
+                    front,
+                    filler,
+                    plate("back", THICK, -0.5 * THIN - 0.2 - 0.5 * THICK, Kind::Main),
+                ],
+                1,
+            ),
+        ] {
+            let fired = fire_fused(&volumes, burst::Fuze::of(Some(burst)));
+            let ends = crossing_ends(&fired.log);
+            assert_eq!(ends.len(), crossings, "{shape:?}: {ends:?}");
+            let rest = match ends.last() {
+                Some(CrossingEnd::Rest { at }) => *at,
+                other => panic!("{shape:?}: the back plate stops the round: {other:?}"),
+            };
+            if let CrossingEnd::Exit { speed, .. } = ends[0] {
+                exit_speed = Some(speed);
+            }
+            let exit_speed = exit_speed.expect("the far back plate is fired first");
+            let exit = fired
+                .log
+                .iter()
+                .flat_map(|mark| match mark {
+                    ArmourMark::Crossing { volumes, .. } => volumes.as_slice(),
+                    _ => &[],
+                })
+                .find(|crossed| fired.names[&crossed.volume] == "front")
+                .expect("the round crosses the front plate")
+                .end;
+            let found = bursts(&fired.log);
+            assert_eq!(found.len(), 1, "{shape:?}");
+            let (at, speed, _) = found[0];
+            assert_eq!(speed, 0.0, "{shape:?}: at rest");
+            assert!(
+                at.distance(rest) < BURST_TOLERANCE,
+                "{shape:?}: {at} vs {rest}"
+            );
+            let left = burst.delay - rest.distance(exit) / exit_speed;
+            let after = fired
+                .log
+                .iter()
+                .find_map(|mark| match mark {
+                    ArmourMark::Burst { after, .. } => Some(*after),
+                    _ => None,
+                })
+                .expect("the burst's mark");
+            assert!(left > 0.0, "{shape:?}: it stops inside the delay");
+            assert!(
+                (after - left).abs() < BURST_TOLERANCE / exit_speed,
+                "{shape:?}, {crossings} crossings: it waits {after} s, not {left} s"
+            );
+            let recorded = fired.report.burst.as_ref().expect("the record's burst");
+            let arrived = fired.report.path.last().expect("a path").t;
+            assert!(
+                (recorded.t - (arrived + after)).abs() < 1.0e-6,
+                "{shape:?}: recorded at {} s, arrived at {arrived} s",
+                recorded.t
+            );
+            assert_eq!(fired.flying, None, "{shape:?}: nothing flies on");
+            let field = fired.burst.expect("the burst throws its field").field;
+            assert_eq!(field.ratio, 0.0, "{shape:?}: thrown at rest");
+        }
     }
 }
 
