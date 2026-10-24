@@ -83,8 +83,8 @@ const STATE_HATCH_PX: f32 = 7.0;
 const STATE_HATCH_SHARE: f32 = 0.3;
 /// The base surface: a hueless grey, its opacity at a grazing angle and the share of that kept
 /// face-on, the fresnel power between them, the light's share of the shading (the rest is flat),
-/// and its edge colour and opacity. It keeps one opacity everywhere: a struck component shows
-/// through it as every other component does.
+/// and its edge colour and opacity. It keeps one opacity wherever it draws, and gives way to a
+/// struck component as to every other.
 const BASE_GREY: Color = Color::srgb_u8(0xA4, 0xA4, 0xA4);
 const BASE_ALPHA: f32 = 0.6;
 const BASE_FACE_SHARE: f32 = 0.4;
@@ -93,10 +93,12 @@ const BASE_CONTRAST: f32 = 0.35;
 const BASE_EDGE: Color = Color::srgb_u8(0xE6, 0xE6, 0xE6);
 const BASE_EDGE_ALPHA: f32 = 0.35;
 /// The components' base: the state scale's untouched grey, opaque at every angle, so the layout
-/// reads through the hull's glass at the corner's size and at third-person distance. It carries
-/// no HP: an unstruck component looks the same whatever its pool holds. It is drawn in the opaque
-/// pass, so the hull's glass blends over every component alike whatever the blended pass's
-/// centroid order; an opaque fill in that pass would cover the hull wherever it sorted later.
+/// reads solid in front of the body's glass at the corner's size and at third-person distance.
+/// It carries no HP: an unstruck component looks the same whatever its pool holds. It is drawn
+/// in the opaque pass and writes depth, so a blended element that is depth-tested and lies behind
+/// it (another component's outline, the trail, a ring) stays hidden whatever the blended pass's
+/// centroid order. The body's glass never covers it: a body fragment is discarded wherever the
+/// part mask holds a scene surface.
 const BASE_COMPONENT_ALPHA: f32 = 1.0;
 const BASE_COMPONENT_FACE_SHARE: f32 = 1.0;
 /// The field footprint's fill opacity, short of opaque so the HP fill under it, the outcome,
@@ -417,13 +419,13 @@ fn mask_image(images: &mut Assets<Image>, size: UVec2) -> Handle<Image> {
     ))
 }
 
-/// Give a mask set to each camera that draws the base look this frame, at the physical viewport
-/// size and scale factor it renders at this frame ([`viewport_now`]), and take a set away when
-/// its viewer's need ends: the set's cameras are despawned and its images removed. A new viewer,
-/// size or scale makes a new set and rebuilds the stage, whose materials hold the images; the
-/// x-ray compares its set's images itself. The set's cameras draw just before their viewer. Runs
-/// after every system that retargets or resizes a viewer this frame. A viewer whose target cannot
-/// be resolved gets no set until it is.
+/// Give a mask set to each camera whose frame draws the body behind this frame ([`body_behind`],
+/// [`MaskNeed`]), at the physical viewport size and scale factor it renders at this frame
+/// ([`viewport_now`]), and take a set away when its viewer's need ends: the set's cameras are
+/// despawned and its images removed. A new viewer, size or scale makes a new set and rebuilds the
+/// stage, whose materials hold the images; the x-ray compares its set's images itself. The set's
+/// cameras draw just before their viewer. Runs after every system that retargets or resizes a
+/// viewer this frame. A viewer whose target cannot be resolved gets no set until it is.
 #[expect(
     clippy::too_many_arguments,
     reason = "a system spanning the corner, the x-ray's need, three camera roles, the window, the masks and their images, and the stage"
@@ -775,7 +777,7 @@ fn component_base(masks: &MaskSet) -> LookMaterial {
     material
 }
 
-/// The masks' material: view normal and distance, drawn into either mask.
+/// The masks' material: view normal and eye depth, drawn into either mask.
 pub fn hull_mask(masks: &MaskSet) -> LookMaterial {
     LookMaterial::new(MODE_MASK, LinearRgba::BLACK, 1.0, Blend::Opaque, masks)
 }
