@@ -37,6 +37,11 @@ wgpu = { version = "29.0", default-features = false }
 image = { version = "0.25", default-features = false, features = ["png"] }
 flate2 = { version = "1", optional = true }
 bevy_egui = { version = "0.42", optional = true }
+# Named by no code: it fixes bevy_winit's feature set across builds. bevy_egui asks for its default
+# features, bevy does not, so without this line a `dev_ui` build hashes bevy_winit differently and
+# compiles a second copy of it and of everything above it (avian3d, lightyear, bevy's plugin
+# crates). Its one default, `x11`, is already on through bevy; only the feature name differs.
+bevy_winit = "0.19"
 gltf = "1.4"
 # Already in the tree through the asset stack (same locked version — this adds no compiled crate);
 # named directly only by `geometry_lod::certificate`, which fingerprints the shipped trio's bytes
@@ -93,11 +98,14 @@ objc2-app-kit = { version = "0.2.2", features = [
 ] }
 objc2-foundation = { version = "0.2.2", features = ["NSThread", "NSValue"] }
 
+# Without their defaults, so a test build and a bin build give these crates one feature set and
+# share their compiled copies: lightyear depends on each with `default-features = false`, and its
+# `std` already turns on the `std` their defaults name.
 [dev-dependencies]
-lightyear_sync = "0.30.1"
-lightyear_core = "0.30.1"
-lightyear_inputs = "0.30.1"
-lightyear_inputs_native = "0.30.1"
+lightyear_sync = { version = "0.30.1", default-features = false }
+lightyear_core = { version = "0.30.1", default-features = false }
+lightyear_inputs = { version = "0.30.1", default-features = false }
+lightyear_inputs_native = { version = "0.30.1", default-features = false }
 
 [features]
 default = ["dev_tools"]
@@ -204,3 +212,13 @@ codegen-units = 1
 inherits = "release"
 strip = false
 debug = true
+
+# Release optimization without release's slow build, for the on-demand measurements that need
+# optimized code (`cargo test --profile perf …`): no LTO, 16 codegen units, incremental. Release
+# took 601 s cold and 343 s after a one-line edit (MEASURED 2026-10-24, one agent's worktree). A
+# timing taken under it compares with other `perf` timings, not with a shipped (release) number.
+[profile.perf]
+inherits = "release"
+lto = false
+codegen-units = 16
+incremental = true

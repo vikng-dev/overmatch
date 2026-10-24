@@ -1,10 +1,10 @@
 //! The crew-outcome sweep (ADR-0040): main-gun hits on the bound tank under the witness law and
-//! under the law it replaced, counted per crewman as dead, wounded and untouched, and per hit as a
-//! tank knocked out under each [`Rule`]; over the same random hits, the crew outcomes that change
-//! with the spall cone's direction count; and aimed shots fired in sequence at one tank until it is
-//! knocked out, as shots and pen verdicts to the kill. A measurement, run on demand:
+//! under the law it replaced, counted per crewman as knocked out, reduced and untouched, and per
+//! hit as a tank knocked out under each [`Rule`]; over the same random hits, the crew outcomes that
+//! change with the spall cone's direction count; and aimed shots fired in sequence at one tank
+//! until it is knocked out, as shots and pen verdicts to the kill. A measurement, run on demand:
 //!
-//! `cargo test --release --lib crew_sweep -- --ignored --nocapture`
+//! `cargo test --profile perf --lib crew_sweep -- --ignored --nocapture`
 //!
 //! A PEN VERDICT is a shot whose whole-shot verdict is [`ShotVerdict::Penetration`]: the round
 //! exited the main armour. A shot stopped in the armour is not one, whatever it damaged inside, so
