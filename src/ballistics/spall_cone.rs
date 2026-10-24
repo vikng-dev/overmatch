@@ -118,23 +118,44 @@ impl Terms {
         }
     }
 
-    /// The share of the emission inside depth `t` of the axis. The cap's is `1 − μ·D^m`,
-    /// `D² = 1 − λ²·t(2 − t)` (`= 1 − λ²(1 − μ²)`, without the cancellation), held at zero past the
-    /// rim, `D^m` `m` IEEE products; the sphere's the `m = 3` closed form (`exponent` unread); the
-    /// band's linear across it.
-    fn share(&self, t: f64, exponent: u32) -> f64 {
+    /// The share of the emission between depths `a ≤ b` of the axis. The cap's is the difference
+    /// of its share inside `t`, `1 − μ·D^m`, `D² = 1 − λ²·t(2 − t)` (`= 1 − λ²(1 − μ²)`, without
+    /// the cancellation), held at zero past the rim, `D^m` `m` IEEE products; the band's the
+    /// difference of its share, linear across it. The sphere's is the `m = 3` law's (`exponent`
+    /// unread) density `g³/2` integrated over the stratum,
+    /// `(b − a)(g_a + g_b)²(g_a² + g_b² + 2c) / (16(D_a + D_b))`, `c = 1 − λ²`,
+    /// `D = √(c + λ²μ²)`, `g = λμ + D`, taken behind the plate as `c / (D − λμ)`: every factor is a
+    /// sum or product of non-negative terms, where the difference of two nearly saturated shares
+    /// rounds below zero just under `λ = 1`.
+    fn stratum(&self, a: f64, b: f64, exponent: u32) -> f64 {
         match *self {
             Terms::Cap { l2, .. } => {
-                let d = (1.0 - l2 * (t * (2.0 - t))).max(0.0).sqrt();
-                1.0 - (1.0 - t) * (0..exponent).fold(1.0, |power, _| power * d)
+                let share = |t: f64| {
+                    let d = (1.0 - l2 * (t * (2.0 - t))).max(0.0).sqrt();
+                    1.0 - (1.0 - t) * (0..exponent).fold(1.0, |power, _| power * d)
+                };
+                share(b) - share(a)
             }
             Terms::Sphere { lambda } => {
-                let mu = 1.0 - t;
-                let d = (1.0 - lambda * lambda * (t * (2.0 - t))).sqrt();
-                let g = lambda * mu + d;
-                (1.0 + lambda - mu * g) * (2.0 + lambda - lambda * lambda + lambda * mu * g) / 4.0
+                let c = (1.0 - lambda) * (1.0 + lambda);
+                let reach = |t: f64| {
+                    let mu = 1.0 - t;
+                    let d = (c + lambda * mu * (lambda * mu)).sqrt();
+                    let g = if mu >= 0.0 {
+                        lambda * mu + d
+                    } else {
+                        c / (d - lambda * mu)
+                    };
+                    (g, d)
+                };
+                let ((g_a, d_a), (g_b, d_b)) = (reach(a), reach(b));
+                let sum = g_a + g_b;
+                (b - a) * (sum * sum) * (g_a * g_a + g_b * g_b + 2.0 * c) / (16.0 * (d_a + d_b))
             }
-            Terms::Band { lo, hi } => ((t - lo) / (hi - lo)).clamp(0.0, 1.0),
+            Terms::Band { lo, hi } => {
+                let share = |t: f64| ((t - lo) / (hi - lo)).clamp(0.0, 1.0);
+                share(b) - share(a)
+            }
         }
     }
 }
@@ -638,7 +659,7 @@ impl ConeShape {
         let n = self.azimuths.len() as f64;
         let (lo, hi) = terms.support();
         let width = hi - lo;
-        let share = |edge: usize| terms.share(lo + width * edge as f64 / n, exponent);
+        let edge = |k: usize| lo + width * k as f64 / n;
         let strata: Vec<Stratum> = self
             .azimuths
             .iter()
@@ -649,7 +670,7 @@ impl ConeShape {
                 Stratum {
                     mu: (1.0 - t) as f32,
                     lateral: ((sin_theta * cos_phi) as f32, (sin_theta * sin_phi) as f32),
-                    weight: (0.5 * n * (share(k + 1) - share(k))) as f32,
+                    weight: (0.5 * n * terms.stratum(edge(k), edge(k + 1), exponent)) as f32,
                 }
             })
             .collect();
@@ -1051,6 +1072,47 @@ mod tests {
             for directions in [1, 2, 7, 24, 64, 97, 1024] {
                 let spread = shape(directions).spread(field).unwrap();
                 let emitted = weights(&spread).iter().sum::<f64>() / directions as f64;
+                assert!(
+                    (emitted - 0.5).abs() <= EMISSION_TOLERANCE,
+                    "{field:?}, N = {directions}: emitted {emitted} of S"
+                );
+            }
+        }
+    }
+
+    /// Every direction's weight `f_k` is at least zero at every resolution up to
+    /// [`MAX_DIRECTIONS`], under the ball across its domain (at rest, the least positive and least
+    /// normal f32 ratios, up to `λ = 1` in decades of `1 − λ`, the largest f32 below 1, 1 itself
+    /// and past it) and under rings there, while the field still emits ½. A negative `f_k` throws a
+    /// negative strength along its direction, and [`EMISSION_TOLERANCE`]'s bound assumes none. The
+    /// sphere's weights as differences of its share inside each stratum edge fail here just below 1
+    /// (MEASURED: at `λ = 0.999999` and `N = 256`, 21 weights below zero, the least −1.4e-14).
+    #[test]
+    fn every_weight_is_non_negative_across_the_ratios_domain() {
+        let near_one = (1..=6).map(|decade| 1.0 - 10.0_f32.powi(-decade));
+        let ratios: Vec<f32> = [0.0, f32::from_bits(1), f32::MIN_POSITIVE, 0.5]
+            .into_iter()
+            .chain(near_one)
+            .chain([1.0 - f32::EPSILON / 2.0, 1.0, 1.0 + f32::EPSILON, 4.0])
+            .collect();
+        let fields = ratios.iter().flat_map(|&ratio| {
+            [
+                FieldDescriptor::ball(ratio),
+                ring(ratio, 10.0),
+                ring(ratio, 45.0),
+            ]
+        });
+        let shapes: Vec<ConeShape> = [1, 2, 3, 24, 97, 256, 4096, MAX_DIRECTIONS]
+            .into_iter()
+            .map(shape)
+            .collect();
+        for field in fields {
+            for shape in &shapes {
+                let directions = shape.directions_count();
+                let f = weights(&shape.spread(field).unwrap());
+                let least = f.iter().copied().fold(f64::INFINITY, f64::min);
+                assert!(least >= 0.0, "{field:?}, N = {directions}: f_k = {least}");
+                let emitted = f.iter().sum::<f64>() / directions as f64;
                 assert!(
                     (emitted - 0.5).abs() <= EMISSION_TOLERANCE,
                     "{field:?}, N = {directions}: emitted {emitted} of S"
