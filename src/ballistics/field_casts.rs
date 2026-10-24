@@ -20,8 +20,9 @@
 //! - `graze`: rays skimming the four sides and the top at shallow inward angles;
 //! - `box`: rays aimed at each damageable box's centre from two quadrants.
 //!
-//! and, at spawn pose in a fresh world each, `shot`: the tank's own main-gun round fired through the
-//! real march along fixture lines ([`SHOTS`]), so the pin covers a whole shot end to end — body-exit
+//! and, at spawn pose in a fresh world each, `shot`: the fixture main-gun round ([`FIXTURE_ROUND`])
+//! fired through the real march along fixture lines ([`SHOTS`]), so the pin covers a whole shot end
+//! to end — body-exit
 //! detection, the mechanism's spends and speeds, each cone's strength and axis, and its walks. A shot
 //! record digests every penetration event, every cone (origin, axis, field, half-angle; its
 //! source's spend, entry and exit speeds and strength `S`, each as raw bits, so a source parameter
@@ -588,6 +589,7 @@ fn spawn_shot_round(
                 mass,
                 wound,
                 drag_k: drag_k(caliber, mass),
+                fuze: burst::Fuze::Inert,
                 disc: walk::DiscFrame::anchored(direction).expect("a shot fires along a real axis"),
                 continuation: None,
             },
@@ -613,20 +615,22 @@ fn spawn_shot_round(
         .id()
 }
 
-/// `(caliber, mass, nose_factor, speed, wound)` of the round the bound tank's main gun names in its
-/// authored spec sheet. A full-calibre round: the casts' input digest carries one body, so a
-/// sub-calibre default round is refused here rather than pinned as its whole body.
+/// The round the shots fire: a key in the round registry, fixture data. The shot pin digests one
+/// solid shot's cones; a round off the selector stays here as the fixture.
+const FIXTURE_ROUND: &str = "88mm_AP";
+
+/// `(caliber, mass, nose_factor, speed, wound)` of [`FIXTURE_ROUND`]. A full-calibre inert round:
+/// the casts' input digest carries one body and no burst, so a sub-calibre or burst round is
+/// refused here rather than pinned as its whole body.
 fn main_gun_round() -> (f32, f32, f32, f32, f32) {
-    let spec: crate::spec::TankSpec =
-        ron::de::from_str(include_str!("../../assets/tiger_1/tiger_1.tank.ron"))
-            .expect("the shipped sheet parses");
-    let round = spec.weapons["MainGun"]
-        .resolved_round()
-        .unwrap_or_else(|err| panic!("weapon `MainGun`: {err}"));
+    let round = crate::rounds::RoundRegistry::shipped()
+        .get(FIXTURE_ROUND)
+        .unwrap_or_else(|err| panic!("the field casts' round: {err}"));
     assert_eq!(
         round.penetrator, round.body,
         "the field casts pin a full-calibre round"
     );
+    assert_eq!(round.burst, None, "the field casts pin an inert round");
     (
         round.body.caliber,
         round.body.mass,

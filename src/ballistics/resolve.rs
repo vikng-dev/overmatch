@@ -127,6 +127,12 @@ impl Budget {
         self.remaining > MARCH_EPS || flight.holds_material()
     }
 
+    /// Spend `travel` metres of open flight, counting no crossing; a negative `travel` hands
+    /// metres back.
+    pub(crate) fn fly(&mut self, travel: f32) {
+        self.remaining -= travel;
+    }
+
     /// Charge one more crossing of `travel` metres, BEFORE its consequences are applied — or the
     /// structured error that stops the round where it stands. Exhaustion fails closed: a round that
     /// hits a limit stops; it is never waved through.

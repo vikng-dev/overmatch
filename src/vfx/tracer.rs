@@ -69,6 +69,7 @@ mod tests {
             penetrator_caliber: 0.0079,
             penetrator_mass: 0.0118,
             wound: 10.0,
+            burst: None,
             mechanism: crate::spec::FireMechanism::Automatic,
             tracer: true,
             // Identity, not authority — both paths name their shooter (the coax self-exclusion).

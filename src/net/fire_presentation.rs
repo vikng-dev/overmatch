@@ -1181,6 +1181,7 @@ mod tests {
             penetrator_caliber: 0.0079,
             penetrator_mass: 0.0118,
             wound: 10.0,
+            burst: None,
             mechanism: crate::spec::FireMechanism::Automatic,
             shooter: None,
             tracer: true,

@@ -14,6 +14,11 @@
 //! binds from the penetrator at spawn ([`crate::ballistics`]'s `Projectile`), synchronously and
 //! from data alone; drag and the shell's view read the body.
 //!
+//! A round may carry a burst block naming a burst core type of the registry's `burst_cores`; its
+//! burst is derived here, once ([`crate::ballistics::burst::Burst::derived`]), and rides the round
+//! to the shot as the penetrator does. A round without the block is inert. The burst's story is
+//! design doc §5, "The burst".
+//!
 //! The target structure (rounds name a core material and author their nose as geometry) is
 //! `.agents/scratch/damage-cam-2026-10-08/research/recommendation-solid-shot.md` Part 1 item 5.
 
@@ -21,6 +26,7 @@ use serde::Deserialize;
 use serde::de::{self, MapAccess, Visitor};
 use std::collections::BTreeMap;
 
+use crate::ballistics::burst::{Burst, BurstInputs, BurstOption, BurstShape};
 use crate::ballistics::{RoundBody, round_in_domain};
 use crate::provenance::Sourced;
 use crate::spec::NoseShape;
@@ -49,6 +55,9 @@ pub(crate) struct Round {
     /// The core's material facts. The rigid regime models every core as rigid and reads none of
     /// them; a regime that deforms or erodes the round reads them.
     pub(crate) core: MaterialFacts,
+    /// The round's burst, derived from its burst block and its body steel (`core`'s density);
+    /// `None` for an inert round.
+    pub(crate) burst: Option<Burst>,
 }
 
 /// One round as authored.
@@ -66,6 +75,40 @@ struct RoundFile {
     /// The part of a sub-calibre round that meets the plate; absent, the whole round does.
     #[serde(default)]
     penetrator: Option<PenetratorFile>,
+    /// The round's burst core and fuze; absent, the round is inert.
+    #[serde(default)]
+    burst: Option<BurstFile>,
+}
+
+/// A burst block as authored: the core type it names, the field it throws, the fuze's threshold
+/// (reference-mm spent in one body) and delay (s), and the core's mass, the base parts' mass (kg)
+/// and the cavity's diameter (m).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BurstFile {
+    core_type: Sourced<String>,
+    option: Sourced<BurstShape>,
+    arming_spend: Sourced<f32>,
+    delay: Sourced<f32>,
+    core_mass: Sourced<f64>,
+    base_mass: Sourced<f64>,
+    cavity_diameter: Sourced<f64>,
+}
+
+/// A burst core type as authored: its density (kg/m³) and speed constant `K` (m/s).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CoreTypeFile {
+    density: Sourced<f64>,
+    speed_constant_mps: Sourced<f64>,
+}
+
+/// A burst core type, validated: density (kg/m³) and speed constant (m/s), each finite and
+/// positive.
+#[derive(Clone, Copy, Debug)]
+struct CoreType {
+    density: f64,
+    speed_constant: f64,
 }
 
 /// A penetrator as authored: its mass (kg) and calibre (m). Its nose is the round's.
@@ -79,40 +122,50 @@ struct PenetratorFile {
 #[derive(Deserialize)]
 #[serde(rename = "RoundRegistry", deny_unknown_fields)]
 struct RegistryFile {
-    rounds: RoundMap,
+    rounds: KeyedMap<RoundFile>,
+    /// Burst core types by key; a burst block names one.
+    #[serde(default)]
+    burst_cores: KeyedMap<CoreTypeFile>,
 }
 
-/// The round table as authored, refusing a duplicated name at parse: serde's default map fill
-/// would keep the last of two rounds of one name with nobody told.
-struct RoundMap(BTreeMap<String, RoundFile>);
+/// A table as authored, refusing a duplicated key at parse: serde's default map fill would keep
+/// the last of two entries of one key with nobody told.
+struct KeyedMap<T>(BTreeMap<String, T>);
 
-impl<'de> Deserialize<'de> for RoundMap {
+impl<T> Default for KeyedMap<T> {
+    fn default() -> Self {
+        Self(BTreeMap::new())
+    }
+}
+
+impl<'de, T: Deserialize<'de>> Deserialize<'de> for KeyedMap<T> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct MapVisitor;
+        struct MapVisitor<T>(std::marker::PhantomData<T>);
 
-        impl<'de> Visitor<'de> for MapVisitor {
-            type Value = RoundMap;
+        impl<'de, T: Deserialize<'de>> Visitor<'de> for MapVisitor<T> {
+            type Value = KeyedMap<T>;
 
             fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("a map of round name to round")
+                f.write_str("a map of key to entry")
             }
 
             fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
                 let mut out = BTreeMap::new();
-                while let Some((name, round)) = access.next_entry::<String, RoundFile>()? {
+                while let Some((name, entry)) = access.next_entry::<String, T>()? {
                     if out.contains_key(&name) {
                         return Err(de::Error::custom(format!(
-                            "round {name:?} is declared twice — a weapon names its round by this \
-                             key, so a duplicate is two answers for one name"
+                            "{name:?} is declared twice — a weapon names its round, and a round \
+                             its burst core type, by this key, so a duplicate is two answers for \
+                             one name"
                         )));
                     }
-                    out.insert(name, round);
+                    out.insert(name, entry);
                 }
-                Ok(RoundMap(out))
+                Ok(KeyedMap(out))
             }
         }
 
-        deserializer.deserialize_map(MapVisitor)
+        deserializer.deserialize_map(MapVisitor(std::marker::PhantomData))
     }
 }
 
@@ -141,9 +194,13 @@ impl std::fmt::Display for RoundError {
     }
 }
 
-/// Resolve one authored round against `substances` into the round and its display name, or say why
-/// it cannot be fired or shown.
-fn resolved(file: RoundFile, substances: &SubstanceRegistry) -> Result<(Round, String), String> {
+/// Resolve one authored round against `substances` and the burst core types `cores` into the round
+/// and its display name, or say why it cannot be fired or shown.
+fn resolved(
+    file: RoundFile,
+    substances: &SubstanceRegistry,
+    cores: &BTreeMap<String, CoreType>,
+) -> Result<(Round, String), String> {
     let name = file.name.0;
     if crate::ui_font::drawable(&name).as_deref() != Some(name.as_str()) {
         return Err(format!(
@@ -176,6 +233,7 @@ fn resolved(file: RoundFile, substances: &SubstanceRegistry) -> Result<(Round, S
     round_in_domain(body, muzzle_speed).map_err(|reason| {
         format!("the round (nose {nose:?}) is outside the capability law's domain: {reason}")
     })?;
+    let sub_calibre = file.penetrator.is_some();
     let penetrator = match file.penetrator {
         None => body,
         Some(penetrator) => {
@@ -208,6 +266,45 @@ fn resolved(file: RoundFile, substances: &SubstanceRegistry) -> Result<(Round, S
              dose per metre of chord the round's line deals a witness"
         ));
     }
+    let burst = match file.burst {
+        None => None,
+        Some(_) if sub_calibre => {
+            return Err(
+                "a round with a penetrator block carries no burst block — the burst's parts are \
+                 derived from a full-calibre body"
+                    .into(),
+            );
+        }
+        Some(block) => {
+            let key = block.core_type.0;
+            let core_type = cores.get(&key).ok_or_else(|| {
+                format!(
+                    "burst: unknown core type {key:?} — `burst_cores` declares [{}]",
+                    cores.keys().cloned().collect::<Vec<_>>().join(", ")
+                )
+            })?;
+            let inputs = BurstInputs {
+                shape: block.option.0,
+                arming_spend: block.arming_spend.0,
+                delay: block.delay.0,
+                core_mass: block.core_mass.0,
+                core_density: core_type.density,
+                speed_constant: core_type.speed_constant,
+                base_mass: block.base_mass.0,
+                cavity_diameter: block.cavity_diameter.0,
+            };
+            let burst = Burst::derived(body, core.density, &inputs)
+                .map_err(|reason| format!("burst: {reason}"))?;
+            if let BurstOption::Ring { nose } = burst.option {
+                round_in_domain(nose, muzzle_speed).map_err(|reason| {
+                    format!(
+                        "burst: the nose piece is outside the capability law's domain: {reason}"
+                    )
+                })?;
+            }
+            Some(burst)
+        }
+    };
     Ok((
         Round {
             body,
@@ -215,9 +312,36 @@ fn resolved(file: RoundFile, substances: &SubstanceRegistry) -> Result<(Round, S
             muzzle_speed,
             wound,
             core,
+            burst,
         },
         name,
     ))
+}
+
+/// The authored burst core types, each refused unless its density and speed constant are finite
+/// and positive.
+fn core_types(file: KeyedMap<CoreTypeFile>) -> Result<BTreeMap<String, CoreType>, RoundError> {
+    file.0
+        .into_iter()
+        .map(|(key, core)| {
+            let core_type = CoreType {
+                density: core.density.0,
+                speed_constant: core.speed_constant_mps.0,
+            };
+            for (field, value) in [
+                ("density", core_type.density),
+                ("speed_constant_mps", core_type.speed_constant),
+            ] {
+                if !value.is_finite() || value <= 0.0 {
+                    return Err(RoundError::Parse(format!(
+                        "burst core type {key:?}: {field} must be finite and positive (got \
+                         {value})"
+                    )));
+                }
+            }
+            Ok((key, core_type))
+        })
+        .collect()
 }
 
 /// The parsed, validated `rounds.ron`.
@@ -232,11 +356,12 @@ impl RoundRegistry {
     pub(crate) fn from_ron(text: &str, substances: &SubstanceRegistry) -> Result<Self, RoundError> {
         let file: RegistryFile =
             ron::de::from_str(text).map_err(|err| RoundError::Parse(err.to_string()))?;
+        let cores = core_types(file.burst_cores)?;
         let rounds = file
             .rounds
             .0
             .into_iter()
-            .map(|(name, round)| match resolved(round, substances) {
+            .map(|(name, round)| match resolved(round, substances, &cores) {
                 Ok(resolved) => Ok((name, resolved)),
                 Err(reason) => Err(RoundError::Invalid {
                     round: name,
@@ -475,6 +600,68 @@ mod tests {
             RoundRegistry::from_ron(&stray, SubstanceRegistry::shipped_static()).is_err(),
             "a penetrator states no nose of its own"
         );
+    }
+
+    /// The fixture round with a burst block naming core type `core_type`, and a penetrator block
+    /// when `penetrator`. The block's numbers and the one core type are fixture data.
+    fn with_burst(core_type: &str, penetrator: bool) -> Result<RoundRegistry, RoundError> {
+        let penetrator = if penetrator {
+            r#", penetrator: Some((mass: (1.0, Tuned("x")), caliber: (0.02, Tuned("x"))))"#
+        } else {
+            ""
+        };
+        RoundRegistry::from_ron(
+            &format!(
+                r#"(rounds: {{ "Probe": ({}{penetrator}, burst: Some((
+                    core_type: ({core_type:?}, Tuned("x")), option: (Ring, Tuned("x")),
+                    arming_spend: (35.0, Tuned("x")), delay: (0.012, Tuned("x")),
+                    core_mass: (0.02, Tuned("x")), base_mass: (0.1, Tuned("x")),
+                    cavity_diameter: (0.02, Tuned("x"))))) }},
+                burst_cores: {{ "Fixture core": (density: (1650.0, Tuned("x")),
+                    speed_constant_mps: (2680.0, Tuned("x"))) }})"#,
+                authored(&FIXTURE)
+            ),
+            SubstanceRegistry::shipped_static(),
+        )
+    }
+
+    /// A burst block rides its round as the burst derived from the round's body, its body steel's
+    /// density and the core type it names; a round without one is inert. A block naming no
+    /// declared core type, or on a sub-calibre round, is refused naming the round, never read as
+    /// inert: a mutant that drops the block, or derives it from another density, fails here.
+    #[test]
+    fn a_burst_block_rides_its_round_or_is_refused() {
+        let inert = with("mass", "5.0").unwrap().get("Probe").unwrap();
+        assert_eq!(inert.burst, None);
+        let fused = with_burst("Fixture core", false)
+            .unwrap()
+            .get("Probe")
+            .unwrap();
+        let inputs = BurstInputs {
+            shape: BurstShape::Ring,
+            arming_spend: 35.0,
+            delay: 0.012,
+            core_mass: 0.02,
+            core_density: 1650.0,
+            speed_constant: 2680.0,
+            base_mass: 0.1,
+            cavity_diameter: 0.02,
+        };
+        assert_eq!(
+            fused.burst,
+            Some(Burst::derived(fused.body, fused.core.density, &inputs).unwrap())
+        );
+        for (core_type, penetrator, word) in [
+            ("Nope", false, "core type"),
+            ("Fixture core", true, "penetrator"),
+        ] {
+            let err = with_burst(core_type, penetrator).unwrap_err();
+            assert!(
+                matches!(&err, RoundError::Invalid { round, reason }
+                    if round == "Probe" && reason.contains(word)),
+                "{core_type}, {penetrator}: {err}"
+            );
+        }
     }
 
     /// An unknown name is an error naming the name and the vocabulary, never a default.

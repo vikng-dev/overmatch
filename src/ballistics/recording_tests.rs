@@ -197,6 +197,7 @@ fn fire_along(
         penetrator_caliber: FIXTURE_88.caliber,
         penetrator_mass: FIXTURE_88.mass,
         wound: 30.0,
+        burst: None,
         mechanism,
         shooter: Some(ShotSource {
             tank: shooter,

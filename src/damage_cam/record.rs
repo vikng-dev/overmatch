@@ -285,8 +285,8 @@ fn steps_of(
             }),
             ArmourMark::Failed => Some(PathStep::Failed),
             // A witness's wound is a dose, never a step of the path: the hard world's marks alone
-            // decide the verdict, and a dose reaches it as `Dosed` below.
-            ArmourMark::Wound { .. } => None,
+            // decide the verdict, and a dose reaches it as `Dosed` below. So is a burst's field.
+            ArmourMark::Wound { .. } | ArmourMark::Burst { .. } => None,
         };
         // A crossing has a step for the tank only where one of its volumes is the tank's.
         if let Some(step) = step
@@ -394,6 +394,7 @@ fn touches(world: &World, mark: &ArmourMark, tank: Entity) -> bool {
         ArmourMark::Crossing { volumes, .. } | ArmourMark::Wound { volumes, .. } => {
             volumes.iter().any(|crossed| owned(crossed.volume))
         }
+        ArmourMark::Burst { tank: walked, .. } => *walked == Some(tank),
         ArmourMark::Failed => true,
     }
 }
@@ -498,7 +499,7 @@ fn timeline(
     let mut speed = match marks.get(struck.from)? {
         ArmourMark::Bounce { speed_in, .. } | ArmourMark::Crossing { speed_in, .. } => *speed_in,
         ArmourMark::Wound { speed, .. } => *speed,
-        ArmourMark::Failed => return None,
+        ArmourMark::Failed | ArmourMark::Burst { .. } => return None,
     };
     legs.push((start, speed, first_touch));
     let mut last = start;
@@ -553,6 +554,18 @@ fn timeline(
                 }
             }
             ArmourMark::Failed => return None,
+            // The round's flight to the burst point; the ball ends it there, the ring's nose piece
+            // flies on at the burst's speed.
+            ArmourMark::Burst {
+                at,
+                speed: carried,
+                nose,
+                ..
+            } => {
+                legs.push((*at, *carried, index));
+                last = *at;
+                flying &= nose.is_some() && *carried > 0.0;
+            }
             ArmourMark::Wound { volumes, speed, .. } => {
                 if index >= tail
                     && let Some((entry, exit, _)) = wound_span(world, volumes, struck.tank)
@@ -671,7 +684,7 @@ pub(crate) fn report_from(
                 ledger.crossing(index, on.mine(mark), volumes, *overmatched, cones);
             }
             ArmourMark::Wound { volumes, .. } => ledger.wound(index, volumes),
-            ArmourMark::Failed => {}
+            ArmourMark::Failed | ArmourMark::Burst { .. } => {}
         }
     }
 
@@ -708,7 +721,7 @@ pub(crate) fn report_from(
             -*incoming,
             *incoming,
         ),
-        ArmourMark::Failed => return None,
+        ArmourMark::Failed | ArmourMark::Burst { .. } => return None,
     };
     let normal = normal.normalize_or_zero();
     let incidence = (-incoming).dot(normal).clamp(-1.0, 1.0).acos();

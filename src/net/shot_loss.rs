@@ -108,6 +108,7 @@ fn scripted_shell(
         penetrator_caliber: body.caliber,
         penetrator_mass: body.mass,
         wound,
+        burst: None,
         mechanism,
         tracer: true,
         shot_origin: FireShellOrigin::Local,

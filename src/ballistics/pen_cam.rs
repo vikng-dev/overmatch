@@ -190,6 +190,7 @@ fn record_edited(
     let struck = StruckTank::capture(app.world_mut(), tank).expect("the tank has a rig");
     let (mut projectile, readout) = fixture_round_with(body, round.penetrator, direction * speed);
     projectile.wound = round.wound;
+    projectile.fuze = super::burst::Fuze::of(round.burst);
     let shell = app
         .world_mut()
         .spawn((
@@ -674,6 +675,8 @@ pub(super) struct FixtureFired {
     /// The shell where the march left it: position, and velocity while it still flies.
     pub at: Vec3,
     pub velocity: Option<Vec3>,
+    /// While it still flies, the shell's round: its body, its whole mass, its fuze.
+    pub flying: Option<(RoundBody, f32, burst::Fuze)>,
     /// Every fixture volume's name by entity.
     pub names: BTreeMap<Entity, String>,
 }
@@ -770,6 +773,9 @@ pub(super) fn fixture_fire_with(
     let velocity = world
         .get::<Projectile>(shell)
         .map(|projectile| projectile.velocity);
+    let flying = world
+        .get::<Projectile>(shell)
+        .map(|projectile| (projectile.body(), projectile.mass, projectile.fuze));
     let names = world
         .query_filtered::<(Entity, &Name), With<VolumeOf>>()
         .iter(world)
@@ -780,6 +786,7 @@ pub(super) fn fixture_fire_with(
         log,
         at,
         velocity,
+        flying,
         names,
     }
 }
@@ -1304,4 +1311,218 @@ fn the_muzzle_is_read_before_the_globals_catch_up() {
         read.distance(caught_up) < 1.0e-3,
         "read {read}, the propagated node at {caught_up}"
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The burst on generic fixtures (design doc §5, "The burst")
+// ---------------------------------------------------------------------------------------------
+
+/// The fixture 88 carrying a burst of `shape` ([`burst::fixture_inputs`]).
+fn fixture_burst(shape: burst::BurstShape) -> burst::Burst {
+    burst::Burst::derived(
+        FIXTURE_88,
+        burst::FIXTURE_STEEL,
+        &burst::fixture_inputs(shape),
+    )
+    .expect("the fixture burst derives")
+}
+
+/// [`fixture_fire`] down the head-on line through tank 0's `volumes`, the round fused by `fuze`.
+fn fire_fused(volumes: &[FixtureVolume], fuze: burst::Fuze) -> FixtureFired {
+    let owned: Vec<(FixtureVolume, usize, Quat)> = volumes
+        .iter()
+        .map(|&volume| (volume, 0, Quat::IDENTITY))
+        .collect();
+    fixture_fire(&owned, LINE_FROM, Vec3::NEG_Z, 0, |projectile| {
+        projectile.fuze = fuze;
+    })
+}
+
+/// Every crossing's end in the log, in march order.
+fn crossing_ends(log: &[ArmourMark]) -> Vec<CrossingEnd> {
+    log.iter()
+        .filter_map(|mark| match mark {
+            ArmourMark::Crossing { end, .. } => Some(*end),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every burst in the log: where, at what speed, and the nose piece's mass.
+fn bursts(log: &[ArmourMark]) -> Vec<(Vec3, f32, Option<f32>)> {
+    log.iter()
+        .filter_map(|mark| match mark {
+            ArmourMark::Burst {
+                at, speed, nose, ..
+            } => Some((*at, *speed, *nose)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The exit point and speed of a crossing the round left.
+fn exit_of(end: CrossingEnd) -> (Vec3, f32) {
+    match end {
+        CrossingEnd::Exit { at, speed } => (at, speed),
+        CrossingEnd::Rest { at } => panic!("the round rests at {at}"),
+    }
+}
+
+/// Metres a burst may lie off `speed × delay` past the exit: the f32 path the fuze sums over the
+/// march's legs, and gravity's bend of the ~10 m it flies (DERIVED < 1 mm). Fixture tolerance.
+const BURST_TOLERANCE: f32 = 1.0e-3;
+
+/// An armed round bursts `exit speed × delay` of path past the exit of the body that armed it: the
+/// field's origin, and for the ring the nose piece's start. The ball ends the round there; the ring's
+/// nose flies on from there at the burst's speed as an inert round of the derived nose mass and the
+/// round's calibre and nose, nothing else of the round. A mutant that counts the delay from the
+/// entrance, flies the nose at the whole round's mass, or lets the ball fly on fails here. The 50 mm
+/// plate spends 50 reference-mm across, over the fixture threshold (fixture data).
+#[test]
+fn an_armed_round_bursts_its_delay_past_the_arming_exit() {
+    for shape in [burst::BurstShape::Ball, burst::BurstShape::Ring] {
+        let burst = fixture_burst(shape);
+        let fired = fire_fused(
+            &[plate("front", THIN, 0.0, Kind::Main)],
+            burst::Fuze::of(Some(burst)),
+        );
+        let ends = crossing_ends(&fired.log);
+        assert_eq!(ends.len(), 1, "{shape:?}: one crossing");
+        let (exit, exit_speed) = exit_of(ends[0]);
+        let found = bursts(&fired.log);
+        assert_eq!(found.len(), 1, "{shape:?}: one burst");
+        let (at, speed, nose) = found[0];
+        let past = at.distance(exit);
+        assert!(
+            (past - exit_speed * burst.delay).abs() < BURST_TOLERANCE,
+            "{shape:?}: the burst lies {past} m past the exit, not {} m",
+            exit_speed * burst.delay
+        );
+        assert!(
+            speed > 0.0 && speed <= exit_speed,
+            "{shape:?}: it bursts in flight, at {speed} m/s"
+        );
+        match burst.option {
+            burst::BurstOption::Ball => {
+                assert_eq!(nose, None, "the ball leaves no nose piece");
+                assert!(
+                    matches!(fired.log.last(), Some(ArmourMark::Burst { .. })),
+                    "the ball ends the round at the burst"
+                );
+                assert_eq!(fired.flying, None, "the ball ends the round");
+                assert!(fired.at.distance(at) < BURST_TOLERANCE, "{}", fired.at);
+            }
+            burst::BurstOption::Ring { nose: piece } => {
+                assert_eq!(nose, Some(piece.mass), "the mark carries the nose's mass");
+                assert_eq!(
+                    piece,
+                    RoundBody {
+                        mass: piece.mass,
+                        ..FIXTURE_88
+                    }
+                );
+                assert!(piece.mass < FIXTURE_88.mass);
+                let (body, mass, fuze) = fired.flying.expect("the ring's nose flies on");
+                assert_eq!(body, piece, "the nose flies as its own body");
+                assert_eq!(mass, piece.mass, "the nose carries its own mass");
+                assert_eq!(fuze, burst::Fuze::Inert, "the nose bursts no more");
+                assert!(fired.at.z < at.z, "the nose flies on past the burst");
+            }
+        }
+    }
+}
+
+/// A body whose spend is under the threshold leaves the round unarmed, and a round without a burst
+/// never bursts: either flies on through the plate as a solid shot. A mutant that arms on any
+/// exit, or bursts an inert fuze, fails here. The 20 mm plate spends 20 reference-mm across, under
+/// the fixture threshold (fixture data).
+#[test]
+fn an_unarmed_or_inert_round_flies_on_as_a_solid_shot() {
+    let burst = fixture_burst(burst::BurstShape::Ball);
+    for (thickness, fuze) in [
+        (0.02, burst::Fuze::of(Some(burst))),
+        (THIN, burst::Fuze::Inert),
+    ] {
+        let fired = fire_fused(&[plate("front", thickness, 0.0, Kind::Main)], fuze);
+        let spent: f32 = fired
+            .log
+            .iter()
+            .filter_map(|mark| match mark {
+                ArmourMark::Crossing { volumes, .. } => {
+                    Some(volumes.iter().map(|volume| volume.cost).sum::<f32>())
+                }
+                _ => None,
+            })
+            .sum();
+        if fuze != burst::Fuze::Inert {
+            assert!(spent < burst.arming_spend, "the fixture spends {spent}");
+        }
+        assert_eq!(bursts(&fired.log), [], "{thickness} m plate");
+        let (_, _, left) = fired.flying.expect("the round flies on");
+        assert_eq!(left, fuze, "the fuze is as fired");
+    }
+}
+
+/// A body met before the delay ends restarts it from that body's exit at that exit's speed,
+/// whatever that body's spend: the burst lies the delay past the LAST body. A mutant that ignores
+/// the second plate bursts ~3 m short of where this one reads. The 10 mm second plate, under the
+/// threshold, and its place inside the first delay are fixture data.
+#[test]
+fn a_body_met_before_the_burst_restarts_the_delay() {
+    let burst = fixture_burst(burst::BurstShape::Ball);
+    let fired = fire_fused(
+        &[
+            plate("front", THIN, 0.0, Kind::Main),
+            plate("second", 0.01, -3.0, Kind::Main),
+        ],
+        burst::Fuze::of(Some(burst)),
+    );
+    let ends = crossing_ends(&fired.log);
+    assert_eq!(ends.len(), 2, "the round crosses both plates");
+    let (first, first_speed) = exit_of(ends[0]);
+    assert!(
+        first_speed * burst.delay > first.z + 3.0,
+        "the second plate lies inside the first delay"
+    );
+    let (exit, exit_speed) = exit_of(ends[1]);
+    let found = bursts(&fired.log);
+    assert_eq!(found.len(), 1);
+    let past = found[0].0.distance(exit);
+    assert!(
+        (past - exit_speed * burst.delay).abs() < BURST_TOLERANCE,
+        "the burst lies {past} m past the second exit, not {} m",
+        exit_speed * burst.delay
+    );
+}
+
+/// An armed round stopped before its delay ends bursts where it rests, at no speed: the ring then
+/// throws no nose piece on, and either ends the round. A mutant that drops the burst of a round at
+/// rest, or flies a nose on from it, fails here. The 500 mm back plate stops the fixture 88 inside
+/// the delay (fixture data).
+#[test]
+fn an_armed_round_at_rest_bursts_where_it_rests() {
+    for shape in [burst::BurstShape::Ball, burst::BurstShape::Ring] {
+        let burst = fixture_burst(shape);
+        let fired = fire_fused(
+            &[
+                plate("front", THIN, 0.0, Kind::Main),
+                plate("back", THICK, -2.0, Kind::Main),
+            ],
+            burst::Fuze::of(Some(burst)),
+        );
+        let ends = crossing_ends(&fired.log);
+        let rest = match ends.last() {
+            Some(CrossingEnd::Rest { at }) => *at,
+            other => panic!("{shape:?}: the back plate stops the round: {other:?}"),
+        };
+        let found = bursts(&fired.log);
+        assert_eq!(found.len(), 1, "{shape:?}");
+        let (at, speed, _) = found[0];
+        assert_eq!(speed, 0.0, "{shape:?}: at rest");
+        assert!(
+            at.distance(rest) < BURST_TOLERANCE,
+            "{shape:?}: {at} vs {rest}"
+        );
+        assert_eq!(fired.flying, None, "{shape:?}: nothing flies on");
+    }
 }

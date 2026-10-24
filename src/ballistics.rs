@@ -32,6 +32,9 @@ pub(crate) use walk::VolumeMaterial;
 /// Solid shot is the only one built.
 mod mechanism;
 
+/// A burst round's derived burst and the fuze that times it.
+pub(crate) mod burst;
+
 /// The spall cone's shape data (half-angle, axis rule and the directions it is sampled by) and its
 /// calibration, the field's HP points per reference-mm.
 pub(crate) mod spall_cone;
@@ -845,6 +848,8 @@ pub struct FireShell {
     pub penetrator_mass: f32,
     /// Crew line rate: reference-mm of dose per metre of chord through a witness (ADR-0040).
     pub wound: f32,
+    /// The round's burst ([`crate::rounds::Round::burst`]); `None` for an inert round.
+    pub burst: Option<burst::Burst>,
     /// Fire mechanism at the source.
     pub mechanism: crate::spec::FireMechanism,
     /// Firing source for self-exclusion and authority attribution.
@@ -882,6 +887,7 @@ impl FireShell {
             penetrator_caliber: round.penetrator.caliber,
             penetrator_mass: round.penetrator.mass,
             wound: round.wound,
+            burst: round.burst,
             mechanism,
             tracer,
             shooter,
@@ -912,6 +918,9 @@ pub(crate) struct Projectile {
     /// Quadratic-drag coefficient (1/m), from the whole round's sectional density at spawn (see
     /// [`drag_k`]).
     drag_k: f32,
+    /// The round's fuze, built at spawn from its fire data ([`burst::Fuze::of`]) and advanced by
+    /// the authority's march alone: SIM state, never on the wire.
+    fuze: burst::Fuze,
     /// The basis the §13.5 sample ring is laid out in — SIM state, not a view detail: it decides
     /// where the disc's rays go and therefore what the shell hits.
     ///
@@ -969,6 +978,7 @@ impl Projectile {
             mass: 1.0,
             wound: 30.0,
             drag_k: 0.0,
+            fuze: burst::Fuze::Inert,
             disc: walk::DiscFrame {
                 u: Vec3::X,
                 v: Vec3::Y,
@@ -1146,6 +1156,17 @@ pub enum ArmourMark {
     },
     /// A walk that failed closed: the round stopped at contact with no crossing resolved.
     Failed,
+    /// The round's fuze ran out at `at` (design doc §5, "The burst"), the round travelling at
+    /// `speed` (zero for a round at rest). `nose` is the mass (kg) of the ring's nose piece, which
+    /// flies on from `at` unless the round was at rest; `None` under the ball, which ends the round
+    /// here.
+    Burst {
+        at: Vec3,
+        speed: f32,
+        nose: Option<f32>,
+        /// The tank whose body armed or last restarted the fuze: the tank the field walks.
+        tank: Option<Entity>,
+    },
     /// The round's line through witness volumes (ADR-0040) along the legs it flew since the last
     /// mark, logged before the mark of the decision whose legs they are: each witness's disc-mean
     /// chord and its dose `chord × wound` as `cost`. No event of the flight; it moves nothing.
@@ -1635,6 +1656,7 @@ fn on_fire_shell(
             mass: fire.mass,
             wound: fire.wound,
             drag_k: drag,
+            fuze: burst::Fuze::of(fire.burst),
             // From the BORE, not from the post-catch-up travel direction: a shell reconstructed with
             // catch-up must anchor its ring exactly where the locally fired one did.
             disc: walk::DiscFrame::anchored(Vec3::from(fire.direction)).unwrap_or(
@@ -2628,8 +2650,9 @@ fn march_shell_step(
     // `looking_to` is degenerate for a round travelling straight down, and the sampling basis is sim
     // state that must not read a view detail.
     let previous = Dir3::new(shell.projectile.velocity).unwrap_or(dir);
-    let round = shell.projectile.round;
-    let radius = resolve::disc_radius(round.body().caliber);
+    // A ring burst swaps the round for its nose piece mid-step ([`burst_here`]); the disc keeps its
+    // radius, the nose being the round's calibre.
+    let radius = resolve::disc_radius(shell.projectile.body().caliber);
     let context = resolve::ResolveContext {
         world,
         colliders,
@@ -2641,40 +2664,11 @@ fn march_shell_step(
     // perforation that leaves a sample inside material is resolved on within this step, past the
     // travel budget if need be (see [`next_surface`]), within the step's limits
     // (`resolve::Budget`); what crosses the tick is the starts, never an owed exit.
-    let launched = resolve::Flight::launched(
-        &context,
-        &not_own,
-        shell.transform.translation,
-        previous,
-        dir,
-        speed,
-        shell.projectile.disc,
-        radius,
-        shell.projectile.continuation.take(),
-    );
-    let mut flight = match launched {
+    let mut flight = match launch(
+        shell, &context, &not_own, previous, dir, speed, radius, tick,
+    ) {
         Ok(flight) => flight,
-        Err(error) => {
-            let position = shell.transform.translation;
-            let holding = uncertified_start(
-                shell,
-                deposit,
-                position,
-                dir,
-                &error,
-                now,
-                tick.shot_trace,
-                tick.commands,
-            );
-            return Some(MarchStep {
-                position,
-                direction: dir,
-                speed,
-                stopped: !holding,
-                holding,
-                damage_dealt,
-            });
-        }
+        Err(step) => return Some(step),
     };
 
     loop {
@@ -2699,16 +2693,31 @@ fn march_shell_step(
         }
         let origin = flight.sweep_origin();
         let dir = flight.direction;
-        let hit = match next_surface(world, &flight, radius, budget.remaining(), &not_own) {
-            // Open air — fly out the rest of the step. On the original (unbent) segment this is
-            // exactly the catch-up kernel's displacement; a `continue` past this point only ever
-            // follows a bend, so `bent` is the exact discriminant.
+        let ahead = next_surface(world, &flight, radius, budget.remaining(), &not_own);
+        // Open air flies out the rest of the step. On the original (unbent) segment this is
+        // exactly the catch-up kernel's displacement; a `continue` past this point only ever
+        // follows a bend, so `bent` is the exact discriminant.
+        let displacement = if bent {
+            dir * budget.remaining()
+        } else {
+            stepped * dt
+        };
+        // An armed round whose delay runs out short of what lies ahead bursts in the open.
+        let open = ahead.open_metres(displacement.length());
+        if let Some(at) = open.and_then(|open| shell.projectile.fuze.due_within(open)) {
+            let (ended, removed) =
+                burst_ahead(shell, &context, &mut flight, &mut budget, at, health);
+            damage_dealt += removed;
+            if ended {
+                stopped = true;
+                break;
+            }
+            bent = true;
+            continue;
+        }
+        let hit = match ahead {
             Ahead::Open => {
-                let displacement = if bent {
-                    dir * budget.remaining()
-                } else {
-                    stepped * dt
-                };
+                shell.projectile.fuze.flown(displacement.length());
                 if let Ok(along) = Dir3::new(displacement) {
                     let leg = resolve::Leg::new(
                         origin,
@@ -2781,12 +2790,29 @@ fn march_shell_step(
         let decided = resolve::decide(
             &context,
             &not_own,
-            &round,
+            &shell.projectile.round,
             shell.projectile.mass,
             &flight,
             contact,
         )
         .and_then(|decision| budget.charge(decision.charged()).map(|()| decision));
+        // A corridor the disc found clear is open flight: an armed round whose delay runs out
+        // inside it bursts there. The budget was charged the whole corridor, which is handed back;
+        // the burst charges what it flies.
+        if let Ok(resolve::Decision::Clear { travel, .. }) = &decided
+            && let Some(at) = shell.projectile.fuze.due_within(*travel)
+        {
+            budget.fly(-*travel);
+            let (ended, removed) =
+                burst_ahead(shell, &context, &mut flight, &mut budget, at, health);
+            damage_dealt += removed;
+            if ended {
+                stopped = true;
+                break;
+            }
+            bent = true;
+            continue;
+        }
         let decision = match decided {
             Ok(decision) => {
                 damage_dealt += wound_legs(
@@ -2818,6 +2844,7 @@ fn march_shell_step(
         // Every outcome leaves the round off its original free-flight segment (see the open-air
         // break above), whether it bounced off the face or bent into the plate.
         bent = true;
+        advance_fuze(&mut shell.projectile.fuze, &decision);
         // The budget was charged what the crossing actually flew, summed over its segments by the
         // only code that knows them (see `resolve::Bite::travel`) — never the distance to the
         // NEAREST sample's contact, which at oblique incidence leads the axis handoff by
@@ -2826,6 +2853,10 @@ fn march_shell_step(
             stopped = true;
             break;
         }
+    }
+    // An armed round that stopped short of its delay bursts where it lies, at rest.
+    if stopped {
+        damage_dealt += burst_here(shell, &context, &flight, 0.0, health).1;
     }
     // Carry the (possibly re-rolled) basis and the per-sample starts back onto the shell, so the
     // next tick transports from where this one left off and resumes every sample where its ray
@@ -2846,6 +2877,156 @@ fn march_shell_step(
         holding,
         damage_dealt,
     })
+}
+
+/// The flight a step starts from, launched where the shell stands ([`resolve::Flight::launched`]);
+/// or, from an uncertified start, the step that ends or holds the round there
+/// ([`uncertified_start`]).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the march's own state threaded through; a struct would be built for this one call"
+)]
+fn launch(
+    shell: &mut MarchingShell,
+    context: &resolve::ResolveContext<'_, '_, '_>,
+    not_own: &dyn Fn(Entity) -> bool,
+    previous: Dir3,
+    dir: Dir3,
+    speed: f32,
+    radius: f32,
+    tick: &mut MarchTick,
+) -> Result<resolve::Flight, MarchStep> {
+    let launched = resolve::Flight::launched(
+        context,
+        not_own,
+        shell.transform.translation,
+        previous,
+        dir,
+        speed,
+        shell.projectile.disc,
+        radius,
+        shell.projectile.continuation.take(),
+    );
+    launched.map_err(|error| {
+        let position = shell.transform.translation;
+        let holding = uncertified_start(
+            shell,
+            tick.deposit,
+            position,
+            dir,
+            &error,
+            tick.now,
+            tick.shot_trace,
+            tick.commands,
+        );
+        MarchStep {
+            position,
+            direction: dir,
+            speed,
+            stopped: !holding,
+            holding,
+            damage_dealt: 0,
+        }
+    })
+}
+
+/// AUTHORITY: advance the fuze over a decided crossing (design doc §5, "The burst"). A corridor
+/// found clear is open path. A bounce meets a body: an armed fuze restarts from it. A bite exits
+/// each body it reached in turn, which arms the fuze at the threshold or restarts an armed one,
+/// then flies on from the last exit to where the flight resumes.
+fn advance_fuze(fuze: &mut burst::Fuze, decision: &resolve::Decision) {
+    match decision {
+        resolve::Decision::Clear { travel, .. } => fuze.flown(*travel),
+        resolve::Decision::Bounce(bounce) => fuze.bounced(bounce.speed, bounce.owner),
+        resolve::Decision::Bite(bite) => {
+            for source in &bite.spall {
+                fuze.exited(source.spend, source.exit_speed, bite.owner);
+            }
+            if let (
+                resolve::BiteEnd::Perforated {
+                    resume, direction, ..
+                },
+                Some(last),
+            ) = (&bite.end, bite.spall.last())
+            {
+                fuze.flown(
+                    (*resume - last.position)
+                        .dot(Vec3::from(*direction))
+                        .max(0.0),
+                );
+            }
+        }
+    }
+}
+
+/// AUTHORITY: fly the round `metres` of open path, where its fuze runs out, with the witness pass
+/// over that leg, and burst there at the flight's speed ([`burst_here`]). Returns whether the round
+/// ended, and the HP removed.
+fn burst_ahead(
+    shell: &mut MarchingShell,
+    context: &resolve::ResolveContext<'_, '_, '_>,
+    flight: &mut resolve::Flight,
+    budget: &mut resolve::Budget,
+    metres: f32,
+    health: &mut Query<&mut ComponentHealth>,
+) -> (bool, u32) {
+    let (owners, parents) = (&context.world.owners, &context.world.parents);
+    let shooter = shell.source.map(|source| source.tank);
+    let not_own = |entity: Entity| not_own_volume(entity, shooter, owners, parents);
+    let radius = resolve::disc_radius(shell.projectile.body().caliber);
+    let leg = resolve::Leg::new(
+        flight.sweep_origin(),
+        flight.direction,
+        metres,
+        &flight.sample_offsets(radius),
+    );
+    let wounded = wound_legs(shell, context, &not_own, &[leg], flight.speed, health);
+    flight.fly(flight.direction * metres);
+    budget.fly(metres);
+    let (ended, removed) = burst_here(shell, context, flight, flight.speed, health);
+    (ended, wounded + removed)
+}
+
+/// AUTHORITY: burst an armed round where `flight` stands, travelling at `speed` (zero at rest):
+/// log its [`ArmourMark::Burst`] and settle its doses at that mark. Under the ball the round ends;
+/// under the ring its nose piece flies on as the shell's round, inert, unless the round is at
+/// rest. Returns whether the round ended and the HP removed; an unarmed fuze does nothing.
+fn burst_here(
+    shell: &mut MarchingShell,
+    context: &resolve::ResolveContext<'_, '_, '_>,
+    flight: &resolve::Flight,
+    speed: f32,
+    health: &mut Query<&mut ComponentHealth>,
+) -> (bool, u32) {
+    let Some((burst, tank)) = shell.projectile.fuze.armed() else {
+        return (false, 0);
+    };
+    shell.projectile.fuze = burst::Fuze::Inert;
+    let nose = match burst.option {
+        burst::BurstOption::Ring { nose } => Some(nose),
+        burst::BurstOption::Ball => None,
+    };
+    shell.marks.log.push(ArmourMark::Burst {
+        at: flight.position,
+        speed,
+        nose: nose.map(|nose| nose.mass),
+        tank,
+    });
+    shell.path.points.push(flight.position);
+    let removed = shell
+        .dose
+        .settle(health, context.deposit, shell.marks.log.len() - 1);
+    let ended = match nose {
+        Some(nose) if speed > 0.0 => {
+            let projectile = &mut **shell.projectile;
+            projectile.round = bound(nose);
+            projectile.mass = nose.mass;
+            projectile.drag_k = drag_k(projectile.caliber, nose.mass);
+            false
+        }
+        _ => true,
+    };
+    (ended, removed)
 }
 
 /// The ground stops the shell at `entry`: the struck terrain [`Impact`], the same whether or not
@@ -3136,6 +3317,19 @@ enum Ahead {
     /// The flight holds a continuation inside material and the cast found no surface: the
     /// continuation's own corridor resolves it.
     Held,
+}
+
+impl Ahead {
+    /// Metres of open path the flight has before what lies ahead: `open`, its open-air leg, when
+    /// nothing does; the distance to a surface. None for a held continuation, inside material.
+    fn open_metres(&self, open: f32) -> Option<f32> {
+        match self {
+            Ahead::Open => Some(open),
+            Ahead::Terrain { distance, .. } => Some(*distance),
+            Ahead::Armor(hit) => Some(hit.distance),
+            Ahead::Held => None,
+        }
+    }
 }
 
 /// The next surface a flight meets within `budget` metres — shared by the runtime march and the
@@ -3958,6 +4152,7 @@ mod march_tests {
                 mass: body.mass,
                 wound: FIXTURE_WOUND,
                 drag_k: drag_k(body.caliber, body.mass),
+                fuze: burst::Fuze::Inert,
                 // Anchored on THIS round's fire direction, exactly as `on_fire_shell` would.
                 disc: test_disc(velocity.normalize()),
                 continuation: None,
@@ -4488,6 +4683,7 @@ mod march_tests {
             penetrator_caliber: FIXTURE_88.caliber,
             penetrator_mass: FIXTURE_88.mass,
             wound: 30.0,
+            burst: None,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: None,
             tracer: true,
@@ -4530,6 +4726,7 @@ mod march_tests {
             penetrator_caliber: FIXTURE_88.caliber,
             penetrator_mass: FIXTURE_88.mass,
             wound: 30.0,
+            burst: None,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: Some(ShotSource {
                 tank: shooter,
@@ -4577,6 +4774,7 @@ mod march_tests {
             penetrator_caliber: CORE.caliber,
             penetrator_mass: CORE.mass,
             wound: FIXTURE_WOUND,
+            burst: None,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: None,
             tracer: true,
@@ -4667,6 +4865,7 @@ mod march_tests {
             penetrator_caliber: FIXTURE_88.caliber,
             penetrator_mass: FIXTURE_88.mass,
             wound: 30.0,
+            burst: None,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: None,
             tracer: true,
@@ -4781,6 +4980,7 @@ mod march_tests {
             penetrator_caliber: FIXTURE_88.caliber,
             penetrator_mass: FIXTURE_88.mass,
             wound: 30.0,
+            burst: None,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: None,
             tracer: true,
