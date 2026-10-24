@@ -559,15 +559,17 @@ fn timeline(
                 }
             }
             ArmourMark::Failed => return None,
-            // The round's flight to the burst point; the ball ends it there, the ring's nose piece
-            // flies on at the burst's speed.
+            // The round's flight to the burst point, at the burst's speed, or for a round that
+            // stopped there at the speed it flew there at (its wait is the mark's `after`); the
+            // ball ends it there, the ring's nose piece flies on at the burst's speed.
             ArmourMark::Burst {
                 at,
                 speed: carried,
                 nose,
                 ..
             } => {
-                legs.push((*at, *carried, index));
+                let flown = if *carried > 0.0 { *carried } else { speed };
+                legs.push((*at, flown, index));
                 last = *at;
                 flying &= nose.is_some() && *carried > 0.0;
             }

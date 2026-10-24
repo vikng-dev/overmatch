@@ -1685,6 +1685,123 @@ fn an_armed_round_at_rest_bursts_where_it_rests() {
     }
 }
 
+/// An armed round stopped on the ground counts its approach against the delay before it waits out
+/// the rest: it bursts where it struck, `after` the delay less the path from the arming exit at the
+/// exit's speed, and the record times that path at that speed, so the burst falls the delay after
+/// the exit. A horizontal 50 mm deck arms the round fired straight down at it at 800 m/s, drag-free,
+/// and the ground lies 975 mm under the deck (fixture data). The shot is marched in one step, over
+/// two split at the deck's hand-back, and over two split in the open air between deck and ground,
+/// every first step flying the same velocity (step lengths fixture data): the first split is
+/// bit-identical to the one step; the second re-rounds the flight's world position at the step
+/// boundary, so it agrees to f32 rounding. A mutant that reads the delay before the approach, or
+/// times the approach at no speed in the record, fails here.
+#[test]
+fn a_ground_stop_counts_its_approach_whatever_the_step() {
+    // Metres of path a world position re-rounded at a step boundary moves the sums it splits: a
+    // few f32 ulps at the fixture's metre scale (DERIVED).
+    const SPLIT_TOLERANCE: f32 = 1.0e-5;
+    let target = Vec3::NEG_Y * 800.0;
+    let deck = (
+        "deck",
+        Vec3::new(FACE, THIN, FACE),
+        Vec3::new(0.0, 1.0, 0.0),
+        Kind::Main,
+    );
+    let burst = fixture_burst(burst::BurstShape::Ball);
+    // The first step past the ground, ending inside the deck's crossing, and ending between deck
+    // and ground: 12.8 m, 3.0 m and 3.5 m of travel from 4 m up (fixture data).
+    let fired: Vec<(Vec3, f32, f32, f32)> = [
+        STEP,
+        Duration::from_micros(3750),
+        Duration::from_micros(4375),
+    ]
+    .into_iter()
+    .map(|step| {
+        let dt = step.as_secs_f32();
+        let velocity = target - GRAVITY * dt;
+        assert_eq!(
+            freeflight_step(velocity, 0.0, dt),
+            target,
+            "every first step flies the same velocity"
+        );
+        let fired = fixture_fire_with(
+            &[(deck, 0, Quat::IDENTITY)],
+            Vec3::new(0.0, 4.0, 0.0),
+            velocity,
+            0,
+            FIXTURE_88,
+            |projectile| {
+                projectile.drag_k = 0.0;
+                projectile.fuze = burst::Fuze::of(Some(burst));
+            },
+            |app| {
+                app.world_mut().spawn((
+                    Transform::from_xyz(0.0, -0.5, 0.0),
+                    RigidBody::Static,
+                    Collider::cuboid(40.0, 1.0, 40.0),
+                    CollisionLayers::new([crate::Layer::Terrain], LayerMask::ALL),
+                ));
+                for _ in 0..8 {
+                    app.update();
+                }
+                app.insert_resource(TimeUpdateStrategy::ManualDuration(step));
+            },
+        );
+        let ends = crossing_ends(&fired.log);
+        assert_eq!(ends.len(), 1, "{step:?}: {ends:?}");
+        let (exit, exit_speed) = exit_of(ends[0]);
+        let found = bursts(&fired.log);
+        assert_eq!(found.len(), 1, "{step:?}");
+        let (at, speed, _) = found[0];
+        assert_eq!(speed, 0.0, "{step:?}: at rest");
+        assert!(
+            at.y.abs() < BURST_TOLERANCE,
+            "{step:?}: on the ground, {at}"
+        );
+        let after = fired
+            .log
+            .iter()
+            .find_map(|mark| match mark {
+                ArmourMark::Burst { after, .. } => Some(*after),
+                _ => None,
+            })
+            .expect("the burst's mark");
+        let left = burst.delay - at.distance(exit) / exit_speed;
+        assert!(
+            (after - left).abs() < BURST_TOLERANCE / exit_speed,
+            "{step:?}: it waits {after} s, not {left} s"
+        );
+        let recorded = fired.report.burst.as_ref().expect("the record's burst").t;
+        let exited = fired
+            .report
+            .path
+            .iter()
+            .find(|node| Vec3::from(node.point).distance(exit) < 1.0e-6)
+            .expect("the path's node at the exit")
+            .t;
+        assert!(
+            (recorded - exited - burst.delay).abs() < 1.0e-6,
+            "{step:?}: recorded {} s after the exit, not {} s",
+            recorded - exited,
+            burst.delay
+        );
+        (at, after, recorded, exit_speed)
+    })
+    .collect();
+    assert_eq!(fired[1], fired[0], "split at the hand-back: bit-identical");
+    let (at, after, _, exit_speed) = fired[2];
+    assert!(
+        at.distance(fired[0].0) < SPLIT_TOLERANCE,
+        "{at} vs {}",
+        fired[0].0
+    );
+    assert!(
+        (after - fired[0].1).abs() * exit_speed < SPLIT_TOLERANCE,
+        "split in the air: it waits {after} s, not {} s",
+        fired[0].1
+    );
+}
+
 /// A burst throws its field from the burst point about the flight direction, at the carried speed:
 /// its strength is the burst's driven-mass energy at the shipped rate, its field the round's burst
 /// shape at `λ = v_c / v_s`, and direction `k` of the shape's `N` carries `S·f_k` of that field's

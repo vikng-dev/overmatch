@@ -2768,7 +2768,7 @@ fn march_shell_step(
                 let leg = resolve::Leg::new(origin, dir, distance, &flight.sample_offsets(radius));
                 damage_dealt += wound_legs(shell, &context, &not_own, &[leg], speed, health);
                 strike_ground(shell, entry, normal, shortcircuit, tick);
-                flight.position = entry;
+                stop_at(shell, &mut flight, entry, distance);
                 stopped = true;
                 break;
             }
@@ -2783,7 +2783,7 @@ fn march_shell_step(
 
         if let Some(hit) = hit {
             if stops_unresolved(shell, world, hit, entry, shortcircuit, tick) {
-                flight.position = entry;
+                stop_at(shell, &mut flight, entry, contact);
                 stopped = true;
                 break;
             }
@@ -2860,7 +2860,7 @@ fn march_shell_step(
             }
             Err(error) => {
                 walk_failed(shell, hit, entry, contact_normal, &error, tick.commands);
-                flight.position = entry;
+                stop_at(shell, &mut flight, entry, contact);
                 stopped = true;
                 break;
             }
@@ -2990,6 +2990,14 @@ fn advance_fuze(fuze: &mut burst::Fuze, decision: &resolve::Decision) {
             fuze.flown((bite.travel - flown).max(0.0));
         }
     }
+}
+
+/// The round stops at `entry`, `approach` metres of path from the flight's sweep origin, with no
+/// crossing resolved: the fuze flies them first, so an armed round waits out only what is left of
+/// its delay where it stops ([`burst_here`]).
+fn stop_at(shell: &mut MarchingShell, flight: &mut resolve::Flight, entry: Vec3, approach: f32) {
+    shell.projectile.fuze.flown(approach);
+    flight.position = entry;
 }
 
 /// AUTHORITY: advance the fuze ([`advance_fuze`]) and the flight over a decided crossing. A delay
