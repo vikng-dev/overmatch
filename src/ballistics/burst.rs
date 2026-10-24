@@ -276,7 +276,8 @@ impl Fuze {
 #[cfg(test)]
 pub(super) const FIXTURE_STEEL: f64 = 7800.0;
 
-/// A burst block of `shape` whose numbers are fixture data of the shipped rounds' magnitude.
+/// A burst block of `shape` whose numbers are fixture data of the shipped rounds' magnitude, but for
+/// a delay long enough that the fixtures' bodies, metres apart, lie inside it.
 #[cfg(test)]
 pub(super) fn fixture_inputs(shape: BurstShape) -> BurstInputs {
     BurstInputs {

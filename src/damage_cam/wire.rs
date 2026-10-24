@@ -83,10 +83,10 @@
 //! | s10_gun_barrel_struck | 913 | 870 | 696 | 2 | 128 | 64 | 348 | – |
 //! | s11_mg_barrel_struck | 188 | 144 | 0 | 0 | 0 | 0 | – | – |
 //! | s12_apcr_through_crew | 921 | 891 | 588 | 1 | 64 | 75 | 588 | – |
-//! | s13_ring_through_crew | 1657 | 1627 | 588 | 1 | 64 | 75 | 588 | 718 |
-//! | s14_ball_through_crew | 2175 | 2145 | 588 | 1 | 64 | 75 | 588 | 1270 |
+//! | s13_ring_through_crew | 1865 | 1839 | 588 | 1 | 64 | 75 | 588 | 899 |
+//! | s14_ball_through_crew | 3040 | 3019 | 588 | 1 | 64 | 75 | 588 | 2088 |
 //! | s15_unarmed_overpen | 555 | 509 | 309 | 2 | 128 | 0 | 154 | – |
-//! | s16_restart_at_rest | 1066 | 1020 | 465 | 3 | 192 | 0 | 155 | 300 |
+//! | s16_restart_at_rest | 1064 | 1018 | 465 | 3 | 192 | 0 | 155 | 298 |
 //!
 //! The DERIVED estimate `41 + 2 + 2N` per cone (171 B at N = 64) counts a cone's metadata, its
 //! field descriptor's law byte and `f32` ratio among it, and its reaches; a cone that reaches no
@@ -96,8 +96,8 @@
 //! thrown at its own strength, so nearly every hit's dose is distinct: a cone that lights the
 //! fighting compartment measures 460–590 B, and every recorded message without a burst stays under
 //! 0.95 KB. A burst's field at its 256 directions adds 300 B where no direction leaves the burst
-//! point (s16) and 0.7–1.3 KB where its directions reach the compartment's boxes, so the largest
-//! recorded message is 2.2 KB.
+//! point (s16) and 0.9–2.1 KB where its directions reach the compartment's boxes, so the largest
+//! recorded message is 3.0 KB.
 
 use std::collections::BTreeMap;
 

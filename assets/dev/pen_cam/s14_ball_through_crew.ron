@@ -1,4 +1,4 @@
-// s14_ball_through_crew: s1's line fired with the 88's burst round as the ball: it bursts where s13's does, and its forward lobe, within 57 degrees of the line, empties the HP pools of the engine and an ammunition rack; nothing flies on, and the line knocks out the driver and the gunner as in s1
+// s14_ball_through_crew: s1's line fired with the 88's burst round as the ball: it bursts where s13's does, and its forward lobe, within 57 degrees of the line, empties the HP pools of the commander, the loader, the engine and three ammunition racks; the round ends at the burst, short of the driver's station, and the plate's cone knocks out the driver and the gunner as in s1
 // Recorded by the real march from `scenarios.ron` (`ballistics::pen_cam`); do not edit.
 // Re-record with `PEN_CAM_BLESS=1 cargo test --lib pen_cam::bless -- --ignored`.
 (
@@ -59,8 +59,8 @@
             point: (-0.5699997, 1.4452634, -2.1456108),
         ),
         (
-            t: 0.012199225,
-            point: (-0.5699997, 1.3329148, 0.78711987),
+            t: 0.0016992236,
+            point: (-0.5699997, 1.4312196, -1.7790194),
         ),
     ],
     spall: [
@@ -751,13 +751,13 @@
         ),
     ],
     burst: Some((
-        t: 0.012199225,
-        point: (-0.5699997, 1.3329148, 0.78711987),
+        t: 0.0016992236,
+        point: (-0.5699997, 1.4312196, -1.7790194),
         speed_mps: 244.57344,
         nose_kg: None,
         field: Some((
-            t: 0.012199225,
-            origin: (-0.5699997, 1.3329148, 0.78711987),
+            t: 0.0016992236,
+            origin: (-0.5699997, 1.4312196, -1.7790194),
             axis: (0.000000026283137, -0.03828034, 0.9992671),
             field: (
                 law: Ball,
@@ -767,29 +767,73 @@
             strength: 214.8364,
             fragments: [
                 (
-                    end: (-0.65182686, 1.2590699, 2.7147565),
+                    end: (-0.76075745, 1.2590699, 2.714756),
                     strength: 257.84125,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 1.0071924,
+                        ),
+                        (
+                            volume: "Gunner",
+                            damage: 1.0071924,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.46544552, 1.1634264, 2.7093668),
+                    end: (-0.35228348, 1.078289, 2.2237291),
                     strength: 256.18884,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 1.0007377,
+                        ),
+                        (
+                            volume: "Engine",
+                            damage: 1.0007377,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.5860672, 1.441886, 2.7250576),
+                    end: (-0.6074562, 1.685257, 2.7387714),
                     strength: 254.5428,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.9943078,
+                        ),
+                        (
+                            volume: "Gunner",
+                            damage: 0.9943078,
+                        ),
+                        (
+                            volume: "Commander",
+                            damage: 0.9943078,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.7020035, 1.087163, 2.7044458),
+                    end: (-0.8775244, 0.8587003, 2.6877022),
                     strength: 252.90314,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.9879029,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 1.3052478, 2.5153594),
+                    end: (-0.17550659, 1.3810878, 1.3524885),
                     strength: 251.26984,
                     hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.9815228,
+                        ),
+                        (
+                            volume: "Gunner",
+                            damage: 0.9815228,
+                        ),
                         (
                             volume: "Engine",
                             damage: 0.9815228,
@@ -797,29 +841,61 @@
                     ],
                 ),
                 (
-                    end: (-0.8008604, 1.405716, 2.7230196),
+                    end: (-1.1081905, 1.6009359, 2.7340198),
                     strength: 249.64287,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.97516745,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.49308968, 0.9734733, 2.6961136),
+                    end: (-0.39173508, 0.5980942, 2.64571),
                     strength: 248.02226,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.96883696,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.42214298, 1.5433536, 2.7307749),
+                    end: (-0.32536316, 1.7794032, 1.4368706),
                     strength: 246.40796,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.9625311,
+                        ),
+                        (
+                            volume: "Gunner",
+                            damage: 0.9625311,
+                        ),
+                        (
+                            volume: "Commander",
+                            damage: 0.9625311,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.890028, 1.1423626, 2.70818),
+                    end: (-0.9765711, 1.1891375, 0.6615372),
                     strength: 244.8,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.95625,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 1.1949406, 2.0411081),
+                    end: (-0.02631092, 1.0866652, 1.3524885),
                     strength: 243.19833,
                     hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.9499935,
+                        ),
                         (
                             volume: "Engine",
                             damage: 0.9499935,
@@ -827,19 +903,41 @@
                     ],
                 ),
                 (
-                    end: (-0.73163414, 1.6039824, 2.7341914),
+                    end: (-0.77761745, 1.7794027, 0.7219744),
                     strength: 241.60295,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.9437615,
+                        ),
+                        (
+                            volume: "Gunner",
+                            damage: 0.9437615,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.68855, 0.8818064, 2.6893954),
+                    end: (-0.7928543, 0.5832138, 1.7969303),
                     strength: 240.01384,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.93755406,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 1.4143147, 1.9582357),
+                    end: (0.012162209, 1.6488786, 1.3524885),
                     strength: 238.43102,
                     hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.93137115,
+                        ),
+                        (
+                            volume: "Gunner",
+                            damage: 0.93137115,
+                        ),
                         (
                             volume: "Engine",
                             damage: 0.93137115,
@@ -847,14 +945,27 @@
                     ],
                 ),
                 (
-                    end: (-0.99308586, 1.3519521, 2.7199898),
+                    end: (-0.98231316, 1.4497724, 0.10463524),
                     strength: 236.85443,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.9252126,
+                        ),
+                        (
+                            volume: "Ammo_L_0",
+                            damage: 0.9252126,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 0.9612303, 2.3997965),
+                    end: (-0.14723778, 0.7094796, 1.3524885),
                     strength: 235.28409,
                     hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.91907847,
+                        ),
                         (
                             volume: "Engine",
                             damage: 0.91907847,
@@ -862,19 +973,41 @@
                     ],
                 ),
                 (
-                    end: (-0.5099764, 1.7216072, 2.7408195),
+                    end: (-0.48296165, 1.9948516, 1.0539856),
                     strength: 233.72002,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.9129688,
+                        ),
+                        (
+                            volume: "Gunner",
+                            damage: 0.9129688,
+                        ),
+                        (
+                            volume: "Commander",
+                            damage: 0.9129688,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.93579674, 0.9513264, 2.6944904),
+                    end: (-0.97500515, 1.0087299, 0.33279514),
                     strength: 232.16212,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.9068833,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 1.2914462, 1.6344185),
+                    end: (0.23465061, 1.2779574, 1.3524885),
                     strength: 230.61046,
                     hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.9008221,
+                        ),
                         (
                             volume: "Engine",
                             damage: 0.9008221,
@@ -882,34 +1015,65 @@
                     ],
                 ),
                 (
-                    end: (-0.9328699, 1.6196604, 2.735075),
+                    end: (-0.9455404, 1.7279782, 0.23695803),
                     strength: 229.06497,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.89478505,
+                        ),
+                        (
+                            volume: "Ammo_L_0",
+                            damage: 0.89478505,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.54601383, 0.7414727, 2.6755047),
+                    end: (-0.5245838, 0.3113649, 1.7965059),
                     strength: 227.52571,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.8887723,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 1.5470304, 2.0132785),
+                    end: (-0.06104946, 1.9317536, 1.0873485),
                     strength: 225.99258,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
+                            damage: 0.88278353,
+                        ),
+                        (
+                            volume: "Gunner",
                             damage: 0.88278353,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.1170092, 1.1855798, 2.7105055),
+                    end: (-0.9455404, 1.3300686, -0.45854807),
                     strength: 224.46564,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.8768189,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 0.8768189,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 1.1469316, 1.6848612),
+                    end: (0.18943787, 0.7824719, 1.3524885),
                     strength: 222.94482,
                     hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.8708782,
+                        ),
                         (
                             volume: "Engine",
                             damage: 0.8708782,
@@ -917,1641 +1081,2130 @@
                     ],
                 ),
                 (
-                    end: (-0.68564415, 1.7794037, 2.560667),
+                    end: (-0.7439413, 2.102785, 0.8885803),
                     strength: 221.43015,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.8649615,
+                        ),
+                        (
+                            volume: "Gunner",
+                            damage: 0.8649615,
+                        ),
+                        (
+                            volume: "Commander",
+                            damage: 0.8649615,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.86168575, 0.75109315, 2.677504),
+                    end: (-0.97500515, 0.62336063, 0.8457775),
                     strength: 219.92162,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.8590688,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 1.3744259, 1.5179534),
+                    end: (0.775897, 1.6878371, 2.7389169),
                     strength: 218.41917,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.8531999,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.1319981, 1.5183587, 2.7293668),
+                    end: (-0.9455404, 1.5551376, -0.48116302),
                     strength: 216.92285,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.8473549,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 0.8473549,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 0.74697685, 2.4926348),
+                    end: (-0.15389729, 0.31136513, 1.4805889),
                     strength: 215.43263,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.8415337,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.38690186, 1.7794032, 2.4301748),
+                    end: (-0.2451191, 2.2234507, 1.1363497),
                     strength: 213.94847,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.8357362,
+                        ),
+                        (
+                            volume: "Gunner",
+                            damage: 0.8357362,
+                        ),
+                        (
+                            volume: "Commander",
+                            damage: 0.8357362,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.97500515, 1.0685825, 2.126688),
+                    end: (-0.97500515, 1.1668873, -0.4394517),
                     strength: 212.47038,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.82996243,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 1.250617, 1.4362326),
+                    end: (0.92831326, 0.8648491, 2.6881523),
                     strength: 210.99834,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.82421225,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.90005684, 1.7794037, 2.54138),
+                    end: (-1.0102625, 2.0267897, 0.5609846),
                     strength: 209.53235,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.81848574,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.684185, 0.5968237, 2.6454458),
+                    end: (-0.74371624, 0.31136513, 1.0481501),
                     strength: 208.07239,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.81278276,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 1.4724112, 1.5503674),
+                    end: (0.26102924, 1.9636817, 1.1343241),
                     strength: 206.61845,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.80710334,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.2807207, 1.3178749, 2.717895),
+                    end: (-0.9455404, 1.4232726, -0.7588086),
                     strength: 205.1705,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.8014473,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 0.8014473,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 1.0650487, 1.6315513),
+                    end: (0.3401947, 0.3113649, 1.751256),
                     strength: 203.72856,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.7958147,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.572423, 1.7794032, 2.1083126),
+                    end: (-0.57512474, 2.3755903, 1.0154452),
                     strength: 202.2926,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.7902055,
+                        ),
+                        (
+                            volume: "Gunner",
+                            damage: 0.7902055,
+                        ),
+                        (
+                            volume: "Commander",
+                            damage: 0.7902055,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.97500515, 0.82714844, 2.3267164),
+                    end: (-0.97500515, 0.9254532, -0.23942375),
                     strength: 200.86263,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.7846196,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.34910393, 1.3317442, 1.3524885),
+                    end: (1.189352, 1.4218946, 2.7239313),
                     strength: 199.4386,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.779057,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.1846809, 1.7249279, 2.7410064),
+                    end: (-0.9455404, 1.670721, -0.5852871),
                     strength: 198.02052,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.77351767,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 0.77351767,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.43468666, 0.51800656, 2.629067),
+                    end: (-0.38405132, 0.31136513, 0.7522011),
                     strength: 196.60837,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.76800144,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 1.6404166, 1.7979727),
+                    end: (-0.18885612, 1.9695463, -0.009374142),
                     strength: 195.20215,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
+                            damage: 0.7625084,
+                        ),
+                        (
+                            volume: "Gunner",
+                            damage: 0.7625084,
+                        ),
+                        (
+                            volume: "Breech",
                             damage: 0.7625084,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.0308475, 1.1626282, 1.9329481),
+                    end: (-1.053606, 1.2525234, -0.5766063),
                     strength: 193.80185,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.7570385,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 1.1989884, 1.3644428),
+                    end: (0.7893486, 0.59502554, 1.8256006),
                     strength: 192.40742,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.7515915,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.75322914, 1.7794032, 2.0427985),
+                    end: (-0.7128868, 1.7794027, -0.799809),
                     strength: 191.0189,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.7461676,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.8742752, 0.51438785, 2.628315),
+                    end: (-0.97500515, 0.34172106, 0.6716995),
                     strength: 189.63626,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.74076664,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.34834194, 1.4163814, 1.3524885),
+                    end: (0.53050995, 1.8456225, 1.0279856),
                     strength: 188.25948,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.7353886,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.3866177, 1.5104885, 2.728817),
+                    end: (-0.9455404, 1.5128808, -0.8860841),
                     strength: 186.88855,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.7300334,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 0.7300334,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 0.92484117, 1.7348943),
+                    end: (0.02746582, 0.31136513, 0.8219061),
                     strength: 185.52345,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.724701,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.46495628, 1.7794032, 1.9106207),
+                    end: (-0.48808384, 1.7794027, -0.90288496),
                     strength: 184.16418,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.71939135,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.97500515, 1.0038862, 1.8605356),
+                    end: (-0.97500515, 1.102191, -0.7056036),
                     strength: 182.81075,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.7141045,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.30949116, 1.2787662, 1.3524885),
+                    end: (0.97500515, 1.1100774, 1.5740299),
                     strength: 181.46309,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.7088402,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.99610806, 1.7794032, 2.2094717),
+                    end: (-0.9022894, 1.7794027, -0.6698332),
                     strength: 180.12125,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.7035986,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.6019058, 0.38781595, 2.6020122),
+                    end: (-0.6078062, 0.31136513, 0.371459),
                     strength: 178.78517,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.6983796,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 1.5288615, 1.443399),
+                    end: (0.028133392, 1.9695463, 0.023983955),
                     strength: 177.45486,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
+                            damage: 0.69318306,
+                        ),
+                        (
+                            volume: "Breech",
                             damage: 0.69318306,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.5008926, 1.2115617, 2.711523),
+                    end: (-0.9455404, 1.3822632, -1.002676),
                     strength: 176.13031,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.688009,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 0.688009,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 1.1310339, 1.3577871),
+                    end: (0.63769245, 0.31136513, 1.3865309),
                     strength: 174.8115,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.6828574,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.6376381, 1.7794032, 1.7964516),
+                    end: (-0.62008286, 1.7618241, -1.0316544),
                     strength: 173.49841,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.6777282,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.97500515, 0.6903379, 2.1954823),
+                    end: (-0.97500515, 0.7886429, -0.37065744),
                     strength: 172.19107,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.67262137,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.29344368, 1.374938, 1.3524885),
+                    end: (1.5457134, 1.7527065, 2.546167),
                     strength: 170.88942,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.6675368,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.4277439, 1.7443428, 2.7421007),
+                    end: (-0.9455404, 1.6113524, -0.9230819),
                     strength: 169.59346,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.66247445,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 0.66247445,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 0.6097207, 2.1338153),
+                    end: (-0.2328701, 0.31136513, 0.30631638),
                     strength: 168.30319,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.65743434,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.34819317, 1.7794032, 1.8354487),
+                    end: (-0.39702892, 1.7794027, -0.9615059),
                     strength: 167.01859,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.65241635,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.97500515, 1.1290541, 1.6201148),
+                    end: (-0.97500515, 1.2273588, -0.9460249),
                     strength: 165.73962,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.6474204,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.286191, 1.2106638, 1.3524885),
+                    end: (0.97500515, 0.76570463, 1.2987509),
                     strength: 164.46634,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.64244664,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.82866, 1.7794032, 1.8376155),
+                    end: (-0.77170944, 1.7794027, -0.959816),
                     strength: 163.19867,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.6374948,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.8160639, 0.31136465, 2.5763154),
+                    end: (-0.7782364, 0.56671286, -0.26487732),
                     strength: 161.93665,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.632565,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.31517506, 1.4769907, 1.3524885),
+                    end: (0.66058445, 2.1269822, 0.9512229),
                     strength: 160.6802,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.62765706,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.5457134, 1.4264989, 2.5967607),
+                    end: (-0.9455404, 1.4672389, -1.082509),
                     strength: 159.42937,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.62277097,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 0.62277097,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 1.0303516, 1.4149966),
+                    end: (0.23581696, 0.31136513, 0.5448961),
                     strength: 158.18413,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.61790675,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.53259945, 1.7794032, 1.6677394),
+                    end: (-0.5408344, 1.7794027, -1.0922899),
                     strength: 156.94444,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.6130642,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.97500515, 0.91713214, 1.7569752),
+                    end: (-0.97500515, 1.0154371, -0.80916405),
                     strength: 155.71033,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.60824347,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.24902248, 1.3143907, 1.3524885),
+                    end: (0.98135185, 1.3416872, 0.9535303),
                     strength: 154.48175,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
+                            damage: 0.60344434,
+                        ),
+                        (
+                            volume: "Ammo_R_1",
                             damage: 0.60344434,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.122776, 1.7794032, 2.103612),
+                    end: (-0.9455404, 1.7345514, -0.88463116),
                     strength: 153.25873,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.5986669,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 0.5986669,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.47646046, 0.31136465, 2.4178715),
+                    end: (-0.46745872, 0.31136513, 0.0086603165),
                     strength: 152.04123,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.59391105,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 1.5986404, 1.4206901),
+                    end: (-0.28472424, 1.7794023, -0.9488454),
                     strength: 150.82922,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.58917665,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.2452621, 1.1619291, 1.9524584),
+                    end: (-0.9455404, 1.3361273, -1.1309271),
                     strength: 149.62274,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.58446383,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 0.58446383,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.28249454, 1.1321535, 1.3524885),
+                    end: (0.97500515, 0.35236406, 1.2591715),
                     strength: 148.42172,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.57977235,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.703722, 1.7794032, 1.6386395),
+                    end: (-0.6742792, 1.7794027, -1.1149826),
                     strength: 147.2262,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.5751023,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.97500515, 0.47767735, 2.2458148),
+                    end: (-0.9720011, 0.582325, -0.33114243),
                     strength: 146.03613,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.57045364,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.25188255, 1.4310503, 1.3524885),
+                    end: (0.86469364, 1.873807, 0.77076817),
                     strength: 144.8515,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.5658262,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.5457134, 1.6583543, 2.5233207),
+                    end: (-0.9455404, 1.5564775, -1.110776),
                     strength: 143.67232,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.56122,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 0.56122,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 0.8482692, 1.5871973),
+                    end: (-0.06693077, 0.31136513, 0.06969309),
                     strength: 142.49857,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.556635,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.42527962, 1.7794032, 1.6100149),
+                    end: (-0.45714283, 1.7794023, -1.1373043),
                     strength: 141.33023,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.5520712,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.97500515, 1.0642185, 1.5311546),
+                    end: (-0.97500515, 1.1625233, -1.0349846),
                     strength: 140.16728,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.54752845,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.21980572, 1.2377877, 1.3524885),
+                    end: (0.97500515, 1.0115328, 0.7153053),
                     strength: 139.00974,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.5430068,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.9164562, 1.7794032, 1.7421207),
+                    end: (-0.8401756, 1.7794027, -1.0342855),
                     strength: 137.85754,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.53850603,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.68537617, 0.3113649, 2.2693076),
+                    end: (-0.69647884, 0.31136537, -0.15420008),
                     strength: 136.71072,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.53402627,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.29832077, 1.5449705, 1.3524885),
+                    end: (0.119688034, 1.9695463, -0.34376907),
                     strength: 135.56926,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Breech",
                             damage: 0.5295674,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.5457134, 1.3060474, 2.2934866),
+                    end: (-0.9577179, 1.4205432, -1.1804371),
                     strength: 134.43314,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.52512944,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 0.52512944,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.30098152, 1.0485291, 1.3524885),
+                    end: (-0.12702084, 0.96293545, -0.8480549),
                     strength: 133.30232,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
+                            damage: 0.5207122,
+                        ),
+                        (
+                            volume: "Transmission",
                             damage: 0.5207122,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.59658337, 1.7794032, 1.527616),
+                    end: (-0.5907297, 1.7794027, -1.201561),
                     strength: 132.17683,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.51631576,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.97500515, 0.80122685, 1.7334614),
+                    end: (-0.97500515, 0.89953184, -0.8326783),
                     strength: 131.05664,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.51194,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.1979599, 1.3650537, 1.3524885),
+                    end: (0.98135185, 1.5652347, 0.57848644),
                     strength: 129.94174,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
+                            damage: 0.5075849,
+                        ),
+                        (
+                            volume: "Loader",
+                            damage: 0.5075849,
+                        ),
+                        (
+                            volume: "Ammo_R_1",
                             damage: 0.5075849,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.2996655, 1.7794032, 2.1200867),
+                    end: (-0.9455404, 1.6610165, -1.0929737),
                     strength: 128.83212,
-                    hits: [],
-                ),
-                (
-                    end: (-0.342741, 0.31136465, 2.216793),
-                    strength: 127.72775,
-                    hits: [],
-                ),
-                (
-                    end: (-0.35228348, 1.6962671, 1.4558601),
-                    strength: 126.62863,
                     hits: [
                         (
-                            volume: "Engine",
-                            damage: 0.4946431,
+                            volume: "Ammo_L_1",
+                            damage: 0.5032505,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.9765711, 1.175015, 1.4060364),
-                    strength: 125.53475,
+                    end: (-0.32087135, 0.31136513, -0.21176815),
+                    strength: 127.72775,
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.49893653,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.36358452, 1.7757115, -1.1449909),
+                    strength: 126.62863,
                     hits: [],
                 ),
                 (
-                    end: (-0.21001911, 1.1490607, 1.3524885),
+                    end: (-0.9765711, 1.2733202, -1.1601028),
+                    strength: 125.53475,
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.49037012,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.97500515, 0.6421323, 0.6474943),
                     strength: 124.446106,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.4861176,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.77440643, 1.7794032, 1.5494194),
+                    end: (-0.72940063, 1.7794027, -1.1845589),
                     strength: 123.36265,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.48188534,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.8138523, 0.5935755, 1.8183107),
+                    end: (-0.93935585, 0.31136537, -0.21710682),
                     strength: 122.28441,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.47767347,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.22357273, 1.4978018, 1.3524885),
+                    end: (0.9355316, 2.1477976, 0.67800283),
                     strength: 121.21134,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Loader",
                             damage: 0.4734818,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.5457134, 1.5254202, 2.2154083),
+                    end: (-0.97891235, 1.5118971, -1.1804371),
                     strength: 120.14346,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.4693104,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 0.4693104,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.34317493, 0.96569157, 1.3524885),
+                    end: (-0.210392, 0.8490238, -0.88268423),
                     strength: 119.08073,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
+                            damage: 0.4651591,
+                        ),
+                        (
+                            volume: "Transmission",
                             damage: 0.4651591,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.4935608, 1.7794032, 1.4709325),
+                    end: (-0.5103903, 1.7794023, -1.2457647),
                     strength: 118.023155,
                     hits: [],
                 ),
                 (
-                    end: (-0.97500515, 0.9857855, 1.488419),
+                    end: (-0.97500515, 1.0840902, -1.0777206),
                     strength: 116.97071,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.45691684,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.15862465, 1.2811909, 1.3524885),
+                    end: (1.2027788, 1.2083206, 0.65737915),
                     strength: 115.92338,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.4528257,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.0241776, 1.7794032, 1.708806),
+                    end: (-0.9241791, 1.7794027, -1.0602646),
                     strength: 114.88116,
                     hits: [],
                 ),
                 (
-                    end: (-0.5557766, 0.3113649, 2.0678453),
+                    end: (-0.5544081, 0.31136537, -0.3750491),
                     strength: 113.84404,
-                    hits: [],
-                ),
-                (
-                    end: (-0.29694176, 1.6184545, 1.3524885),
-                    strength: 112.812,
                     hits: [
                         (
-                            volume: "Engine",
-                            damage: 0.44067186,
+                            volume: "Driver",
+                            damage: 0.44470328,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.5457134, 1.1826348, 2.0966854),
-                    strength: 111.78503,
+                    end: (-0.2370367, 1.7794023, -1.0896177),
+                    strength: 112.812,
                     hits: [],
                 ),
                 (
-                    end: (-0.22313023, 1.0531006, 1.3524885),
+                    end: (-1.0159836, 1.3625288, -1.1804371),
+                    strength: 111.78503,
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.43666026,
+                        ),
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 0.43666026,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.010504723, 0.96293545, -0.83284473),
                     strength: 110.76311,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
+                            damage: 0.4326684,
+                        ),
+                        (
+                            volume: "Transmission",
                             damage: 0.4326684,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.66046715, 1.7794032, 1.4396086),
+                    end: (-0.6405487, 1.7794027, -1.2701921),
                     strength: 109.74625,
                     hits: [],
                 ),
                 (
-                    end: (-0.97500515, 0.63676095, 1.7771778),
+                    end: (-0.97500515, 0.73506594, -0.7889619),
                     strength: 108.7344,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.42474374,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.15703201, 1.4288635, 1.3524885),
+                    end: (0.92859554, 1.7794023, 0.272614),
                     strength: 107.72756,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Loader",
                             damage: 0.4208108,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.5457134, 1.7670331, 2.2226639),
+                    end: (-0.97684574, 1.6122351, -1.1804371),
                     strength: 106.72573,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 0.4168974,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 0.7330408, 1.5528307),
+                    end: (-0.16356468, 0.31136537, -0.34957838),
                     strength: 105.728905,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.41300353,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.38329506, 1.7794032, 1.4559636),
+                    end: (-0.42440224, 1.7794023, -1.2574377),
                     strength: 104.73704,
                     hits: [],
                 ),
                 (
-                    end: (-0.97500515, 1.1142645, 1.3536959),
+                    end: (-0.97500515, 1.2125692, -1.2124434),
                     strength: 103.75014,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.40527397,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.13872719, 1.1827908, 1.3524885),
+                    end: (0.97500515, 0.8934088, 0.24637699),
                     strength: 102.76819,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.40143824,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.8537245, 1.7794032, 1.5006523),
+                    end: (-0.79125595, 1.7794027, -1.2225885),
                     strength: 101.791176,
                     hits: [],
                 ),
                 (
-                    end: (-0.76934433, 0.3113649, 1.9956079),
+                    end: (-0.7885275, 0.31136537, -0.45423794),
                     strength: 100.819084,
-                    hits: [],
-                ),
-                (
-                    end: (-0.2089014, 1.5732937, 1.3524885),
-                    strength: 99.851906,
                     hits: [
                         (
-                            volume: "Engine",
-                            damage: 0.3900465,
+                            volume: "Driver",
+                            damage: 0.39382455,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.5457134, 1.3982096, 2.0070305),
-                    strength: 98.88961,
+                    end: (-0.04695797, 1.7794023, -0.9600978),
+                    strength: 99.851906,
                     hits: [],
                 ),
                 (
-                    end: (-0.2615595, 0.95570946, 1.3524885),
+                    end: (-1.0487604, 1.4632583, -1.1804371),
+                    strength: 98.88961,
+                    hits: [
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 0.38628754,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.1870842, 0.96293545, -1.0771389),
                     strength: 97.932205,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
+                            damage: 0.38254768,
+                        ),
+                        (
+                            volume: "Transmission",
                             damage: 0.38254768,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.55748177, 1.7794032, 1.3788271),
+                    end: (-0.5602379, 1.7794027, -1.3175907),
                     strength: 96.97966,
                     hits: [],
                 ),
                 (
-                    end: (-0.97500515, 0.8869879, 1.4799771),
+                    end: (-0.97500515, 0.9852929, -1.0861626),
                     strength: 96.03197,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.37512487,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.10427761, 1.3396482, 1.3524885),
+                    end: (0.98166084, 1.4536533, 0.104634285),
                     strength: 95.08912,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Loader",
+                            damage: 0.37144187,
+                        ),
+                        (
+                            volume: "Ammo_R_1",
                             damage: 0.37144187,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.165246, 1.7794032, 1.7266779),
+                    end: (-0.9492245, 1.7156725, -1.1804371),
                     strength: 94.1511,
-                    hits: [],
-                ),
-                (
-                    end: (-0.42395592, 0.3113649, 1.930851),
-                    strength: 93.21788,
-                    hits: [],
-                ),
-                (
-                    end: (-0.31104946, 1.6955829, 1.3524885),
-                    strength: 92.28947,
                     hits: [
                         (
-                            volume: "Engine",
-                            damage: 0.36050573,
+                            volume: "Ammo_L_1",
+                            damage: 0.36777773,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.1006107, 1.1807384, 1.4273686),
-                    strength: 91.36584,
+                    end: (-0.40990257, 0.31136537, -0.5252261),
+                    strength: 93.21788,
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.36413234,
+                        ),
+                    ],
+                ),
+                (
+                    end: (-0.32139206, 1.7794023, -1.2362318),
+                    strength: 92.28947,
                     hits: [],
                 ),
                 (
-                    end: (-0.14249992, 1.0743585, 1.3524885),
+                    end: (-1.1268139, 1.2715282, -1.1071529),
+                    strength: 91.36584,
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.3568978,
+                        ),
+                    ],
+                ),
+                (
+                    end: (0.95497704, 0.5088968, 0.2377634),
                     strength: 90.44697,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.35330847,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.72721577, 1.7794032, 1.3832626),
+                    end: (-0.69260025, 1.7794027, -1.3141317),
                     strength: 89.53286,
                     hits: [],
                 ),
                 (
-                    end: (-0.9185562, 0.51091146, 1.754817),
+                    end: (-0.97500515, 0.47609138, -0.65460205),
                     strength: 88.62349,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.3461855,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.12749577, 1.5042462, 1.3524885),
+                    end: (1.0983906, 2.077198, 0.35261345),
                     strength: 87.71884,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Loader",
                             damage: 0.34265172,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.5457134, 1.6221404, 1.9858313),
+                    end: (-1.0572271, 1.5756459, -1.1804371),
                     strength: 86.81891,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 0.33913636,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.3263836, 0.86343074, 1.3524885),
+                    end: (-0.210392, 0.73820066, -0.9444628),
                     strength: 85.92367,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
+                            damage: 0.33563933,
+                        ),
+                        (
+                            volume: "Transmission",
                             damage: 0.33563933,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.45397758, 1.7794032, 1.3530483),
+                    end: (-0.4795227, 1.7794023, -1.3376942),
                     strength: 85.03311,
                     hits: [],
                 ),
                 (
-                    end: (-0.97500515, 1.0431805, 1.3265262),
+                    end: (-0.97500515, 1.1414857, -1.2396135),
                     strength: 84.147224,
-                    hits: [],
-                ),
-                (
-                    end: (-0.07071304, 1.2328963, 1.3524885),
-                    strength: 83.26598,
                     hits: [
                         (
-                            volume: "Engine",
-                            damage: 0.32525775,
+                            volume: "Driver",
+                            damage: 0.3287001,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.9473219, 1.7794032, 1.4817696),
+                    end: (0.97500515, 1.1217203, -0.029529095),
+                    strength: 83.26598,
+                    hits: [],
+                ),
+                (
+                    end: (-0.8642454, 1.7794027, -1.2373133),
                     strength: 82.38938,
                     hits: [],
                 ),
                 (
-                    end: (-0.63679314, 0.3113649, 1.8427696),
+                    end: (-0.6432209, 0.3113656, -0.6217842),
                     strength: 81.5174,
-                    hits: [],
-                ),
-                (
-                    end: (-0.20866013, 1.6557312, 1.3524885),
-                    strength: 80.65003,
                     hits: [
                         (
-                            volume: "Engine",
-                            damage: 0.3150392,
+                            volume: "Driver",
+                            damage: 0.31842735,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.9455404, 1.3097553, 1.2002153),
+                    end: (-0.18903637, 1.7715673, -1.1829472),
+                    strength: 80.65003,
+                    hits: [],
+                ),
+                (
+                    end: (-1.1141653, 1.3976612, -1.1804371),
                     strength: 79.78725,
                     hits: [
                         (
-                            volume: "Ammo_L_0",
+                            volume: "Ammo_L_1",
                             damage: 0.31166893,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.17325687, 0.9615414, 1.3524885),
+                    end: (-0.06972599, 0.96293545, -1.0661163),
                     strength: 78.92905,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
+                            damage: 0.3083166,
+                        ),
+                        (
+                            volume: "Transmission",
                             damage: 0.3083166,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.6201191, 1.7794032, 1.3157182),
+                    end: (-0.6090841, 1.7794027, -1.3668051),
                     strength: 78.07539,
                     hits: [],
                 ),
                 (
-                    end: (-0.97500515, 0.75480795, 1.50595),
+                    end: (-0.97500515, 0.8531127, -1.0601892),
                     strength: 77.2263,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.30166525,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.05861759, 1.4121146, 1.3524885),
+                    end: (0.9813528, 1.6714835, -0.06389189),
                     strength: 76.38173,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Loader",
+                            damage: 0.29836613,
+                        ),
+                        (
+                            volume: "Ammo_R_0",
                             damage: 0.29836613,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.3665485, 1.7794032, 1.8051386),
+                    end: (-1.0383606, 1.6937494, -1.1804371),
                     strength: 75.54167,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 0.29508466,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.35228348, 0.55041575, 1.5919971),
+                    end: (-0.25842094, 0.31136537, -0.6271391),
                     strength: 74.706116,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.29182076,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.33839703, 1.7794032, 1.3587856),
+                    end: (-0.38939, 1.7794023, -1.3332195),
                     strength: 73.87503,
                     hits: [],
                 ),
                 (
-                    end: (-0.97500515, 1.1585484, 1.2392812),
+                    end: (-0.97500515, 1.2568531, -1.3268585),
                     strength: 73.048416,
                     hits: [],
                 ),
                 (
-                    end: (-0.061320305, 1.1126614, 1.3524885),
+                    end: (0.97500515, 0.7622466, -0.06183338),
                     strength: 72.22625,
-                    hits: [
-                        (
-                            volume: "Engine",
-                            damage: 0.2821338,
-                        ),
-                    ],
+                    hits: [],
                 ),
                 (
-                    end: (-0.8000803, 1.7794032, 1.3491082),
+                    end: (-0.7494221, 1.7794027, -1.340766),
                     strength: 71.40851,
                     hits: [],
                 ),
                 (
-                    end: (-0.85697174, 0.3113649, 1.8115797),
+                    end: (-0.88458633, 0.31136537, -0.65597534),
                     strength: 70.59519,
-                    hits: [],
-                ),
-                (
-                    end: (-0.11078167, 1.5896955, 1.3524885),
-                    strength: 69.78627,
                     hits: [
                         (
-                            volume: "Engine",
-                            damage: 0.27260262,
+                            volume: "Driver",
+                            damage: 0.27576247,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.9455404, 1.3926935, 1.1835737),
+                    end: (0.052679062, 1.7794023, -1.0124063),
+                    strength: 69.78627,
+                    hits: [],
+                ),
+                (
+                    end: (-1.1370068, 1.5214758, -1.1804371),
                     strength: 68.98173,
                     hits: [
                         (
-                            volume: "Ammo_L_0",
+                            volume: "Ammo_L_1",
                             damage: 0.26945987,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.23306084, 0.851001, 1.3524885),
+                    end: (-0.210392, 0.9168825, -1.1756134),
                     strength: 68.18155,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
+                            damage: 0.26633418,
+                        ),
+                        (
+                            volume: "Transmission",
                             damage: 0.26633418,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.51894, 1.7794027, 1.2808652),
+                    end: (-0.5301819, 1.7794023, -1.3939838),
                     strength: 67.38573,
                     hits: [],
                 ),
                 (
-                    end: (-0.97500515, 0.95720863, 1.3186588),
+                    end: (-0.97500515, 1.0555134, -1.2474804),
                     strength: 66.594215,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.26013365,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.008189201, 1.2989888, 1.3524885),
+                    end: (0.9813528, 1.3375382, -0.2178421),
                     strength: 65.80703,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Ammo_R_0",
                             damage: 0.2570587,
                         ),
                     ],
                 ),
                 (
-                    end: (-1.0643349, 1.7794032, 1.4907107),
+                    end: (-0.9554949, 1.7794027, -1.230341),
                     strength: 65.02413,
                     hits: [],
                 ),
                 (
-                    end: (-0.5051975, 0.3113649, 1.7329302),
+                    end: (-0.49896145, 0.3113656, -0.7421932),
                     strength: 64.24551,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.250959,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.19333553, 1.7794027, 1.4021778),
+                    end: (-0.27626705, 1.7794023, -1.2993813),
                     strength: 63.471134,
                     hits: [],
                 ),
                 (
-                    end: (-1.3929262, 1.1744165, 1.6038566),
+                    end: (-1.1731186, 1.3150568, -1.1804371),
                     strength: 62.701008,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 0.24492581,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.08034897, 0.9843223, 1.3524885),
+                    end: (0.087776184, 0.96293545, -1.0195274),
                     strength: 61.935093,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
+                            damage: 0.24193396,
+                        ),
+                        (
+                            volume: "Transmission",
                             damage: 0.24193396,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.6841202, 1.7794032, 1.2723484),
+                    end: (-0.6589937, 1.7794027, -1.4006252),
                     strength: 61.173378,
                     hits: [],
                 ),
                 (
-                    end: (-0.97500515, 0.56216097, 1.5785842),
+                    end: (-0.97500515, 0.6604662, -0.9875555),
                     strength: 60.415848,
-                    hits: [],
-                ),
-                (
-                    end: (-0.023571968, 1.4975414, 1.3524885),
-                    strength: 59.662468,
                     hits: [
                         (
-                            volume: "Engine",
-                            damage: 0.23305652,
+                            volume: "Driver",
+                            damage: 0.2359994,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.9455404, 1.4823742, 1.1880026),
+                    end: (1.0307713, 1.913496, -0.12276173),
+                    strength: 59.662468,
+                    hits: [],
+                ),
+                (
+                    end: (-1.130743, 1.654386, -1.1804371),
                     strength: 58.913242,
                     hits: [
                         (
-                            volume: "Ammo_L_0",
+                            volume: "Ammo_L_1",
                             damage: 0.23012985,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.32238865, 0.75016975, 1.3524885),
+                    end: (-0.210392, 0.5848918, -0.9579277),
                     strength: 58.16812,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
+                            damage: 0.22721922,
+                        ),
+                        (
+                            volume: "Transmission",
                             damage: 0.22721922,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.41301727, 1.7794027, 1.2722301),
+                    end: (-0.44758034, 1.7794023, -1.4007177),
                     strength: 57.42711,
                     hits: [],
                 ),
                 (
-                    end: (-0.97500515, 1.093236, 1.2168884),
+                    end: (-0.97500515, 1.1915412, -1.3492508),
                     strength: 56.690166,
                     hits: [],
                 ),
                 (
-                    end: (0.018068314, 1.1683497, 1.3524885),
+                    end: (0.97500515, 0.99886584, -0.2936535),
                     strength: 55.957283,
-                    hits: [
-                        (
-                            volume: "Engine",
-                            damage: 0.21858314,
-                        ),
-                    ],
+                    hits: [],
                 ),
                 (
-                    end: (-0.88335896, 1.7794032, 1.3329167),
+                    end: (-0.8143654, 1.7794027, -1.3533926),
                     strength: 55.228436,
                     hits: [],
                 ),
                 (
-                    end: (-0.7197943, 0.31136513, 1.6813769),
+                    end: (-0.73420906, 0.3113656, -0.7987075),
                     strength: 54.5036,
-                    hits: [],
-                ),
-                (
-                    end: (-0.108353615, 1.6836886, 1.3524885),
-                    strength: 53.78275,
                     hits: [
                         (
-                            volume: "Engine",
-                            damage: 0.21008886,
+                            volume: "Driver",
+                            damage: 0.21290469,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.9455404, 1.3433108, 1.1360455),
+                    end: (-0.111763, 1.7794023, -1.2178268),
+                    strength: 53.78275,
+                    hits: [],
+                ),
+                (
+                    end: (-1.214241, 1.4490542, -1.1804371),
                     strength: 53.06587,
                     hits: [
                         (
-                            volume: "Ammo_L_0",
+                            volume: "Ammo_L_1",
                             damage: 0.20728855,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.1309557, 0.85452414, 1.3524885),
+                    end: (-0.14023113, 0.96293545, -1.2255955),
                     strength: 52.352932,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
+                            damage: 0.20450364,
+                        ),
+                        (
+                            volume: "Transmission",
                             damage: 0.20450364,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.5812969, 1.7794027, 1.2290778),
+                    end: (-0.57880974, 1.7794023, -1.4343691),
                     strength: 51.64391,
                     hits: [],
                 ),
                 (
-                    end: (-0.97500515, 0.84738994, 1.330894),
+                    end: (-0.97500515, 0.9456949, -1.2352457),
                     strength: 50.938786,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.19897963,
+                        ),
+                    ],
                 ),
                 (
-                    end: (0.046577454, 1.38061, 1.3524885),
+                    end: (0.98135185, 1.5512233, -0.35651255),
                     strength: 50.23753,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Ammo_R_0",
                             damage: 0.19624035,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.9455404, 1.5902891, 1.2169633),
+                    end: (-1.078042, 1.7794027, -1.1975155),
                     strength: 49.54012,
+                    hits: [],
+                ),
+                (
+                    end: (-0.35113811, 0.3113656, -0.82842064),
+                    strength: 48.846523,
                     hits: [
                         (
-                            volume: "Ammo_L_0",
-                            damage: 0.19351609,
+                            volume: "Driver",
+                            damage: 0.19080673,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.37035084, 0.31136513, 1.6542721),
-                    strength: 48.846523,
-                    hits: [],
-                ),
-                (
-                    end: (-0.2896347, 1.7794027, 1.2905841),
+                    end: (-0.35136414, 1.7794023, -1.386405),
                     strength: 48.156723,
                     hits: [],
                 ),
                 (
-                    end: (-1.0042105, 1.189424, 1.1849041),
+                    end: (-1.0256529, 1.2806425, -1.3615913),
                     strength: 47.470684,
                     hits: [],
                 ),
                 (
-                    end: (0.014937401, 1.0251455, 1.3524885),
+                    end: (0.97500515, 0.6183028, -0.2857027),
                     strength: 46.78838,
-                    hits: [
-                        (
-                            volume: "Engine",
-                            damage: 0.18276711,
-                        ),
-                    ],
+                    hits: [],
                 ),
                 (
-                    end: (-0.75225544, 1.7794032, 1.2437162),
+                    end: (-0.71212673, 1.7794027, -1.4229536),
                     strength: 46.10978,
                     hits: [],
                 ),
                 (
-                    end: (-0.94942856, 0.31136513, 1.6761646),
+                    end: (-0.97500515, 0.34080982, -0.83004665),
                     strength: 45.43486,
-                    hits: [],
-                ),
-                (
-                    end: (-0.0010690689, 1.5948148, 1.3524885),
-                    strength: 44.763588,
                     hits: [
                         (
-                            volume: "Engine",
-                            damage: 0.17485777,
+                            volume: "Driver",
+                            damage: 0.17747992,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.9455404, 1.4276457, 1.130487),
+                    end: (0.18636417, 1.7794023, -1.0273914),
+                    strength: 44.763588,
+                    hits: [],
+                ),
+                (
+                    end: (-1.2246704, 1.5963616, -1.1804371),
                     strength: 44.09593,
                     hits: [
                         (
-                            volume: "Ammo_L_0",
+                            volume: "Ammo_L_1",
                             damage: 0.17224972,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.21481228, 0.7310066, 1.3524885),
+                    end: (-0.210392, 0.82182026, -1.2066145),
                     strength: 43.43185,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
+                            damage: 0.16965567,
+                        ),
+                        (
+                            volume: "Transmission",
                             damage: 0.16965567,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.4801159, 1.7794027, 1.2098646),
+                    end: (-0.49990654, 1.7794027, -1.4493523),
                     strength: 42.771328,
                     hits: [],
                 ),
                 (
-                    end: (-0.97500515, 1.0168581, 1.2068858),
+                    end: (-0.97500515, 1.1151628, -1.3592529),
                     strength: 42.114315,
                     hits: [],
                 ),
                 (
-                    end: (0.0932436, 1.2416596, 1.3524885),
+                    end: (0.97500515, 1.2186432, -0.46201038),
                     strength: 41.46079,
-                    hits: [
-                        (
-                            volume: "Engine",
-                            damage: 0.1619562,
-                        ),
-                    ],
+                    hits: [],
                 ),
                 (
-                    end: (-0.98356247, 1.7794032, 1.333859),
+                    end: (-0.8925066, 1.7794027, -1.3526583),
                     strength: 40.8107,
                     hits: [],
                 ),
                 (
-                    end: (-0.5867748, 0.31136513, 1.5847955),
+                    end: (-0.58838844, 0.3113656, -0.904583),
                     strength: 40.16402,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.1568907,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.12688828, 1.7794027, 1.3459015),
+                    end: (-0.22445011, 1.7794023, -1.3432674),
                     strength: 39.520706,
                     hits: [],
                 ),
                 (
-                    end: (-1.5457134, 1.2326522, 1.601893),
+                    end: (-1.2868195, 1.3575602, -1.1804371),
                     strength: 38.88072,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Ammo_L_1",
+                            damage: 0.1518778,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.021932602, 0.87580895, 1.3524885),
+                    end: (-0.008529663, 0.96293545, -1.1998253),
                     strength: 38.244015,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Transmission",
                             damage: 0.14939068,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.6436186, 1.7794027, 1.1917582),
+                    end: (-0.627409, 1.7794027, -1.4634724),
                     strength: 37.610554,
                     hits: [],
                 ),
                 (
-                    end: (-0.97500515, 0.6966791, 1.3692551),
+                    end: (-0.97500515, 0.7949841, -1.1968842),
                     strength: 36.98029,
-                    hits: [],
-                ),
-                (
-                    end: (0.09130669, 1.4771934, 1.3524885),
-                    strength: 36.353172,
                     hits: [
                         (
-                            volume: "Engine",
-                            damage: 0.14200458,
+                            volume: "Driver",
+                            damage: 0.14445426,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.9455404, 1.5226083, 1.1433496),
+                    end: (1.0259066, 1.7794023, -0.41463614),
+                    strength: 36.353172,
+                    hits: [],
+                ),
+                (
+                    end: (-1.2010317, 1.7499666, -1.1804371),
                     strength: 35.729153,
                     hits: [
                         (
-                            volume: "Ammo_L_0",
+                            volume: "Ammo_L_1",
                             damage: 0.139567,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.33171272, 0.62229514, 1.3524885),
+                    end: (-0.19448757, 0.3113656, -0.8880644),
                     strength: 35.10818,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
                             damage: 0.13714133,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.36988258, 1.7794027, 1.2121468),
+                    end: (-0.4139433, 1.7794023, -1.4475727),
                     strength: 34.490208,
                     hits: [],
                 ),
                 (
-                    end: (-0.97500515, 1.1381435, 1.1371756),
+                    end: (-0.97500515, 1.2364483, -1.4289637),
                     strength: 33.875168,
                     hits: [],
                 ),
                 (
-                    end: (0.11023712, 1.0850029, 1.3524885),
+                    end: (0.97500515, 0.8681431, -0.49491215),
                     strength: 33.26301,
-                    hits: [
-                        (
-                            volume: "Engine",
-                            damage: 0.12993363,
-                        ),
-                    ],
+                    hits: [],
                 ),
                 (
-                    end: (-0.8279476, 1.7794032, 1.2272754),
+                    end: (-0.7711544, 1.7794027, -1.4357748),
                     strength: 32.65367,
                     hits: [],
                 ),
                 (
-                    end: (-0.80560684, 0.3113649, 1.557456),
+                    end: (-0.8282795, 0.3113656, -0.9345536),
                     strength: 32.047085,
-                    hits: [],
-                ),
-                (
-                    end: (0.0069828033, 1.7027516, 1.3524885),
-                    strength: 31.443182,
                     hits: [
                         (
-                            volume: "Engine",
-                            damage: 0.12282493,
+                            volume: "Driver",
+                            damage: 0.12518393,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.9455404, 1.376595, 1.0875096),
+                    end: (-0.026799202, 1.7794023, -1.2467537),
+                    strength: 31.443182,
+                    hits: [],
+                ),
+                (
+                    end: (-1.3183355, 1.5182605, -1.1804371),
                     strength: 30.841892,
                     hits: [
                         (
-                            volume: "Ammo_L_0",
+                            volume: "Ammo_L_1",
                             damage: 0.12047614,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.09559059, 0.7281866, 1.3524885),
+                    end: (-0.202631, 0.96293545, -1.3412142),
                     strength: 30.243141,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
+                            damage: 0.11813727,
+                        ),
+                        (
+                            volume: "Transmission",
                             damage: 0.11813727,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.5431318, 1.7794027, 1.1639175),
+                    end: (-0.54904747, 1.7794027, -1.4851828),
                     strength: 29.646849,
                     hits: [],
                 ),
                 (
-                    end: (-0.97500515, 0.9230151, 1.209559),
+                    end: (-0.97500515, 1.0213199, -1.3565807),
                     strength: 29.052929,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.113488,
+                        ),
+                    ],
                 ),
                 (
-                    end: (0.16172123, 1.3326955, 1.3524885),
+                    end: (0.98135185, 1.4307547, -0.580358),
                     strength: 28.46129,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Ammo_R_0",
                             damage: 0.111176915,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.9455404, 1.6424184, 1.1804223),
+                    end: (-0.9924736, 1.7794027, -1.3365641),
                     strength: 27.87184,
+                    hits: [],
+                ),
+                (
+                    end: (-0.44226456, 0.3113656, -0.98330975),
+                    strength: 27.284475,
                     hits: [
                         (
-                            volume: "Ammo_L_0",
-                            damage: 0.10887437,
+                            volume: "Driver",
+                            damage: 0.10657998,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.45347786, 0.31136513, 1.5129795),
-                    strength: 27.284475,
-                    hits: [],
-                ),
-                (
-                    end: (-0.2357359, 1.7794027, 1.2394013),
+                    end: (-0.3093319, 1.7794023, -1.4263191),
                     strength: 26.69909,
                     hits: [],
                 ),
                 (
-                    end: (-1.1875191, 1.1867504, 1.2595387),
+                    end: (-1.2180138, 1.2778368, -1.2832708),
                     strength: 26.115562,
                     hits: [],
                 ),
                 (
-                    end: (0.09195423, 0.9166117, 1.3524885),
+                    end: (0.17460823, 0.96293545, -1.1430569),
                     strength: 25.533772,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Transmission",
                             damage: 0.099741295,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.7084055, 1.7794027, 1.1654081),
+                    end: (-0.67793274, 1.7794027, -1.4840202),
                     strength: 24.953585,
                     hits: [],
                 ),
                 (
-                    end: (-0.97500515, 0.46792793, 1.4502859),
+                    end: (-0.97500515, 0.56623316, -1.1158533),
                     strength: 24.374857,
-                    hits: [],
-                ),
-                (
-                    end: (0.123719215, 1.5880728, 1.3524885),
-                    strength: 23.797432,
                     hits: [
                         (
-                            volume: "Engine",
-                            damage: 0.09295872,
+                            volume: "Driver",
+                            damage: 0.095214285,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.9455404, 1.4637384, 1.0895),
+                    end: (0.3766327, 1.7794023, -1.0075312),
+                    strength: 23.797432,
+                    hits: [],
+                ),
+                (
+                    end: (-1.3134098, 1.6901941, -1.1804371),
                     strength: 23.221144,
                     hits: [
                         (
-                            volume: "Ammo_L_0",
+                            volume: "Ammo_L_1",
                             damage: 0.09070759,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.20731544, 0.59132195, 1.352488),
+                    end: (-0.210392, 0.69591737, -1.2184467),
                     strength: 22.64581,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
+                            damage: 0.08846019,
+                        ),
+                        (
+                            volume: "Transmission",
                             damage: 0.08846019,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.4403057, 1.7794027, 1.154995),
+                    end: (-0.46886063, 1.7794023, -1.4921408),
                     strength: 22.071228,
                     hits: [],
                 ),
                 (
-                    end: (-0.97500515, 1.0689707, 1.1248417),
+                    end: (-0.97500515, 1.1672754, -1.4412975),
                     strength: 21.497185,
                     hits: [],
                 ),
                 (
-                    end: (0.20306683, 1.1647687, 1.3524885),
+                    end: (0.97500515, 1.0951729, -0.64910746),
                     strength: 20.923443,
-                    hits: [
-                        (
-                            volume: "Engine",
-                            damage: 0.0817322,
-                        ),
-                    ],
+                    hits: [],
                 ),
                 (
-                    end: (-0.91605186, 1.7794032, 1.2222466),
+                    end: (-0.83985996, 1.7794027, -1.4396963),
                     strength: 20.34974,
                     hits: [],
                 ),
                 (
-                    end: (-0.6694021, 0.31136513, 1.4677644),
+                    end: (-0.6789684, 0.3113656, -1.032876),
                     strength: 19.775787,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.07724917,
+                        ),
+                    ],
                 ),
                 (
-                    end: (-0.048835754, 1.7794027, 1.3052387),
+                    end: (-0.1635828, 1.7794023, -1.3749771),
                     strength: 19.20127,
                     hits: [],
                 ),
                 (
-                    end: (-0.9455404, 1.3271933, 1.0547948),
+                    end: (-1.4097958, 1.4184246, -1.1804371),
                     strength: 18.625828,
                     hits: [
                         (
-                            volume: "Ammo_L_0",
+                            volume: "Ammo_L_1",
                             damage: 0.07275714,
                         ),
                     ],
                 ),
                 (
-                    end: (0.033813477, 0.74415565, 1.3524885),
+                    end: (-0.08974266, 0.96293545, -1.32934),
                     strength: 18.049067,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Transmission",
                             damage: 0.070504166,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.6047306, 1.7794027, 1.1297083),
+                    end: (-0.59708405, 1.7794027, -1.5118599),
                     strength: 17.470537,
                     hits: [],
                 ),
                 (
-                    end: (-0.97500515, 0.80039096, 1.2277064),
+                    end: (-0.97500515, 0.89869595, -1.3384333),
                     strength: 16.889742,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.065975554,
+                        ),
+                    ],
                 ),
                 (
-                    end: (0.2209816, 1.4414482, 1.3524885),
+                    end: (0.98135185, 1.6440864, -0.67016125),
                     strength: 16.306103,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Ammo_R_0",
                             damage: 0.063695714,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.9455404, 1.5660782, 1.1086264),
+                    end: (-1.1307964, 1.7794027, -1.298913),
                     strength: 15.718966,
+                    hits: [],
+                ),
+                (
+                    end: (-0.29083538, 0.3113656, -1.0409708),
+                    strength: 15.127576,
                     hits: [
                         (
-                            volume: "Ammo_L_0",
-                            damage: 0.06140221,
+                            volume: "Driver",
+                            damage: 0.059092093,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.315341, 0.31136513, 1.4603801),
-                    strength: 15.127576,
-                    hits: [],
-                ),
-                (
-                    end: (-0.32367325, 1.7794027, 1.1648359),
+                    end: (-0.37790775, 1.7794023, -1.4844666),
                     strength: 14.531056,
                     hits: [],
                 ),
                 (
-                    end: (-0.9765711, 1.1787453, 1.077354),
+                    end: (-0.9765711, 1.27705, -1.4887857),
                     strength: 13.928378,
                     hits: [],
                 ),
                 (
-                    end: (0.20847893, 0.97862434, 1.3524885),
+                    end: (0.97500515, 0.7280786, -0.65696335),
                     strength: 13.318323,
-                    hits: [
-                        (
-                            volume: "Engine",
-                            damage: 0.0520247,
-                        ),
-                    ],
+                    hits: [],
                 ),
                 (
-                    end: (-0.77852535, 1.7794032, 1.1480322),
+                    end: (-0.73261356, 1.7794027, -1.497571),
                     strength: 12.699432,
                     hits: [],
                 ),
                 (
-                    end: (-0.8953695, 0.31136513, 1.4574056),
+                    end: (-0.9266796, 0.3113656, -1.0442314),
                     strength: 12.069936,
-                    hits: [],
+                    hits: [
+                        (
+                            volume: "Driver",
+                            damage: 0.047148187,
+                        ),
+                    ],
                 ),
                 (
-                    end: (0.26691055, 1.7794027, 1.4521074),
+                    end: (0.08264351, 1.7794023, -1.2604456),
                     strength: 11.427649,
                     hits: [],
                 ),
                 (
-                    end: (-0.9455404, 1.4102726, 1.0489011),
+                    end: (-1.4287024, 1.6081042, -1.1804371),
                     strength: 10.769828,
                     hits: [
                         (
-                            volume: "Ammo_L_0",
+                            volume: "Ammo_L_1",
                             damage: 0.04206964,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.067222595, 0.57691765, 1.3524885),
+                    end: (-0.210392, 0.8904977, -1.3746433),
                     strength: 10.092961,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Driver",
+                            damage: 0.03942563,
+                        ),
+                        (
+                            volume: "Transmission",
                             damage: 0.03942563,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.5049381, 1.7794027, 1.1122637),
+                    end: (-0.51926327, 1.7794023, -1.525464),
                     strength: 9.392415,
                     hits: [],
                 ),
                 (
-                    end: (-0.97500515, 0.98681283, 1.1209526),
+                    end: (-0.97500515, 1.0851178, -1.4451866),
                     strength: 8.661891,
                     hits: [],
                 ),
                 (
-                    end: (0.2908516, 1.2652187, 1.3524885),
+                    end: (0.98135185, 1.3092232, -0.7601609),
                     strength: 7.89245,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Ammo_R_0",
                             damage: 0.030829882,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.9455404, 1.7020197, 1.1529241),
+                    end: (-0.9242544, 1.7794027, -1.4339504),
                     strength: 7.070682,
+                    hits: [],
+                ),
+                (
+                    end: (-0.53265, 0.3113656, -1.1078987),
+                    strength: 6.1748176,
                     hits: [
                         (
-                            volume: "Ammo_L_0",
-                            damage: 0.027619852,
+                            volume: "Driver",
+                            damage: 0.024120381,
                         ),
                     ],
                 ),
                 (
-                    end: (-0.5359287, 0.31136513, 1.3993278),
-                    strength: 6.1748176,
-                    hits: [],
-                ),
-                (
-                    end: (-0.17497635, 1.7794027, 1.1990695),
+                    end: (-0.2619505, 1.7794023, -1.4577703),
                     strength: 5.165008,
                     hits: [],
                 ),
                 (
-                    end: (-1.5457134, 1.1893702, 1.4172044),
+                    end: (-1.5457134, 1.2876749, -1.1489353),
                     strength: 3.9508793,
                     hits: [],
                 ),
                 (
-                    end: (0.17174435, 0.78139305, 1.3524885),
+                    end: (0.05979824, 0.96293545, -1.2989788),
                     strength: 2.1415358,
                     hits: [
                         (
-                            volume: "Engine",
+                            volume: "Transmission",
                             damage: 0.008365374,
                         ),
                     ],
@@ -2560,56 +3213,84 @@
         )),
     )),
     end: Burst(
-        at: (-0.5699997, 1.3329148, 0.78711987),
+        at: (-0.5699997, 1.4312196, -1.7790194),
     ),
     doses: [
         (
             volume: "Ammo_L_0",
             line: 0.0,
-            field: 2.1515954,
+            field: 1.923806,
             lost: 72,
             entered: None,
         ),
         (
             volume: "Ammo_L_1",
             line: 0.0,
-            field: 0.50865674,
-            lost: 36,
+            field: 14.048146,
+            lost: 72,
+            entered: None,
+        ),
+        (
+            volume: "Ammo_R_0",
+            line: 0.0,
+            field: 0.9573677,
+            lost: 67,
+            entered: None,
+        ),
+        (
+            volume: "Ammo_R_1",
+            line: 0.0,
+            field: 1.4824711,
+            lost: 72,
+            entered: None,
+        ),
+        (
+            volume: "Breech",
+            line: 0.0,
+            field: 1.9852588,
+            lost: 139,
             entered: None,
         ),
         (
             volume: "Commander",
             line: 0.0,
-            field: 0.39191413,
-            lost: 27,
+            field: 5.752625,
+            lost: 30,
             entered: None,
         ),
         (
             volume: "Driver",
-            line: 5.3565907,
-            field: 4.323528,
+            line: 0.0,
+            field: 89.46409,
             lost: 30,
-            entered: Some((-0.5699997, 1.4209003, -1.5096474)),
+            entered: None,
         ),
         (
             volume: "Engine",
             line: 0.0,
-            field: 38.81256,
+            field: 7.3687167,
             lost: 336,
             entered: None,
         ),
         (
             volume: "Gunner",
-            line: 1.3520298,
-            field: 0.71796167,
+            line: 0.0,
+            field: 11.587812,
             lost: 30,
-            entered: Some((-0.5699997, 1.3934937, -0.79422045)),
+            entered: None,
+        ),
+        (
+            volume: "Loader",
+            line: 0.0,
+            field: 2.4143372,
+            lost: 30,
+            entered: None,
         ),
         (
             volume: "Transmission",
             line: 0.0,
-            field: 0.035025544,
-            lost: 2,
+            field: 4.1637397,
+            lost: 291,
             entered: None,
         ),
     ],
@@ -2627,16 +3308,40 @@
             function: None,
         ),
         (
-            t: 0.012199225,
+            t: 0.0016992236,
             volume: "Ammo_L_0",
             state: Cookoff,
             function: None,
         ),
         (
-            t: 0.012199225,
+            t: 0.0016992236,
+            volume: "Ammo_L_1",
+            state: Cookoff,
+            function: None,
+        ),
+        (
+            t: 0.0016992236,
+            volume: "Ammo_R_1",
+            state: Cookoff,
+            function: None,
+        ),
+        (
+            t: 0.0016992236,
+            volume: "Commander",
+            state: Lost,
+            function: None,
+        ),
+        (
+            t: 0.0016992236,
             volume: "Engine",
             state: Lost,
             function: Some("Engine"),
+        ),
+        (
+            t: 0.0016992236,
+            volume: "Loader",
+            state: Lost,
+            function: None,
         ),
     ],
     components: [

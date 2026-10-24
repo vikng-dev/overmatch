@@ -127,7 +127,7 @@
     ),
     (
         name: "s13_ring_through_crew",
-        shows: "s1's line fired with the 88's burst round as the ring: the driver's front plate arms the fuze, and the round bursts 2.9 m past its exit at 245 m/s, where the band 56-76 degrees off the line empties the HP pools of an ammunition rack and the engine; the nose piece flies on and stops in the rear plate, and the line knocks out the driver and the gunner as in s1",
+        shows: "s1's line fired with the 88's burst round as the ring: the driver's front plate arms the fuze, and the round bursts 0.37 m past its exit at 245 m/s, short of the driver's station, where the band 56-76 degrees off the line empties the HP pools of the bow gunner, the transmission and two ammunition racks; the nose piece flies on through the driver's and the gunner's stations and stops in the rear plate, and the driver and the gunner are knocked out as in s1",
         weapon: "MainGun",
         round: "88mm_APHE_ring",
         from: (-0.57, 1.45, -6.5),
@@ -136,7 +136,7 @@
     ),
     (
         name: "s14_ball_through_crew",
-        shows: "s1's line fired with the 88's burst round as the ball: it bursts where s13's does, and its forward lobe, within 57 degrees of the line, empties the HP pools of the engine and an ammunition rack; nothing flies on, and the line knocks out the driver and the gunner as in s1",
+        shows: "s1's line fired with the 88's burst round as the ball: it bursts where s13's does, and its forward lobe, within 57 degrees of the line, empties the HP pools of the commander, the loader, the engine and three ammunition racks; the round ends at the burst, short of the driver's station, and the plate's cone knocks out the driver and the gunner as in s1",
         weapon: "MainGun",
         round: "88mm_APHE_ball",
         from: (-0.57, 1.45, -6.5),
