@@ -1360,17 +1360,136 @@ fn armor_sandbox_boots_headless() {
          armor sandbox; text nodes were {texts:?}",
     );
 
-    // The frozen weapon clock the sandbox root inserts BECAUSE it does not simulate the gun: no
-    // system here advances it, and none arms a `WeaponGate` either, so the readouts derived
-    // against it stay true of a tank that has never fired. A clock that has moved means something
-    // started ticking it — at which point this sandbox is claiming to simulate a gun it does not
-    // have, and the comment on that `insert_resource` is a lie.
+    // The range: the camera is the one free shooter, and exactly one weapon names it as its root.
+    let shooter = app
+        .world_mut()
+        .query_filtered::<Entity, With<crate::FreeShooter>>()
+        .single(app.world())
+        .expect("the armor sandbox's free-fly camera is its one free shooter");
+    let mut weapons = app
+        .world_mut()
+        .query::<(&crate::tank::Weapon, &crate::tank::TankRoot)>();
     assert_eq!(
-        app.world().resource::<crate::WeaponClock>().0,
-        0,
-        "the armor sandbox's weapon clock advanced — it mounts no gun simulation, so a moving \
-         clock means the panel's reload readouts are now measured against a tick nothing else here \
-         respects",
+        weapons
+            .iter(app.world())
+            .filter(|(_, root)| root.0 == shooter)
+            .count(),
+        1,
+        "the free shooter holds no range gun (or more than one)",
+    );
+
+    // The weapon clock advances one tick per fixed step, as the game's does: each range round's
+    // `ShotId` names its tick. The target's own gun is never armed, so the status panel still reads
+    // a tank that has never fired against the moving clock.
+    assert!(
+        app.world().resource::<crate::WeaponClock>().0 > 0,
+        "the armor sandbox's weapon clock never advanced — every range round would share tick 0",
+    );
+    assert!(
+        texts.iter().any(|text| text.contains("READY")),
+        "the target's unarmed main gun no longer reads READY against the moving clock; text nodes \
+         were {texts:?}",
+    );
+}
+
+/// A range round on the armour sandbox's target is explained where the pen cam reads it: through
+/// the real trigger, the offline delivery stores the shooter's projection of the round's record for
+/// the free shooter (the corner) and the victim's for the target (the x-ray), each naming the free
+/// shooter's shot, the target's life and the gun's selected round. The subject is the game's
+/// damage-model tooling.
+#[test]
+fn a_range_round_on_the_target_is_explained_to_both_combatants() {
+    use crate::damage_cam::delivery::ShotExplanations;
+    use crate::damage_cam::wire::{Audience, TankLife};
+
+    let (mut app, _lease) = boot_sandbox_headless(crate::sandbox::plugin);
+    let world = app.world_mut();
+    let (struck, target) = {
+        let mut targets = world.query_filtered::<(
+            Entity,
+            &crate::CombatantId,
+            &crate::CombatantLife,
+        ), (With<Tank>, With<Controlled>)>();
+        let (entity, &combatant, &life) = targets.single(world).expect("one target");
+        (TankLife { combatant, life }, entity)
+    };
+    let (shooter, shooter_id) = {
+        let mut shooters =
+            world.query_filtered::<(Entity, &crate::CombatantId), With<crate::FreeShooter>>();
+        let (entity, &id) = shooters.single(world).expect("one free shooter");
+        (entity, id)
+    };
+    let round = {
+        let mut weapons = world.query::<(&crate::tank::Weapon, &crate::tank::TankRoot)>();
+        let (gun, _) = weapons
+            .iter(world)
+            .find(|(_, root)| root.0 == shooter)
+            .expect("the range gun");
+        gun.rounds[0].key.clone()
+    };
+
+    // Broadside through the centre of the target's colliders, from outside them: the line crosses
+    // the tank's side, clear of the plates downrange of the camera's spawn.
+    let mut colliders = world.query::<(Entity, &avian3d::prelude::ColliderAabb)>();
+    let (min, max) = colliders
+        .iter(world)
+        .filter(|&(entity, _)| {
+            std::iter::successors(Some(entity), |&node| {
+                world.get::<ChildOf>(node).map(ChildOf::parent)
+            })
+            .any(|node| node == target)
+        })
+        .fold((Vec3::MAX, Vec3::MIN), |(min, max), (_, aabb)| {
+            (min.min(aabb.min), max.max(aabb.max))
+        });
+    assert!(min.cmple(max).all(), "the target has colliders");
+    let aim = (min + max) / 2.0;
+    let side = world
+        .get::<GlobalTransform>(target)
+        .expect("the target is posed")
+        .right();
+    let from = aim + side * ((max - min).length() + 2.0);
+    *world.get_mut::<Transform>(shooter).expect("the camera") =
+        Transform::from_translation(from).looking_at(aim, Vec3::Y);
+    world.spawn(bevy::window::CursorOptions {
+        grab_mode: bevy::window::CursorGrabMode::Locked,
+        ..default()
+    });
+    let crate::command::ButtonBinding::Mouse(button) =
+        world.resource::<crate::command::Bindings>().fire_primary
+    else {
+        panic!("the fire binding is a mouse button");
+    };
+    world.write_message(bevy::input::mouse::MouseButtonInput {
+        button,
+        state: bevy::input::ButtonState::Pressed,
+        window: shooter,
+    });
+
+    let explained = |app: &App, audience: Audience| {
+        app.world()
+            .resource::<ShotExplanations>()
+            .iter()
+            .any(|(_, stored)| {
+                stored.explanation.audience == audience
+                    && stored.explanation.shot.combatant == shooter_id
+                    && stored.explanation.struck == struck
+                    && stored.report.round == round
+            })
+    };
+    for _ in 0..600 {
+        app.update();
+        if explained(&app, Audience::Shooter) {
+            break;
+        }
+    }
+    assert!(
+        explained(&app, Audience::Shooter),
+        "no explanation of the range round reached the free shooter",
+    );
+    assert!(
+        explained(&app, Audience::Victim) || explained(&app, Audience::KilledVictim),
+        "no explanation of the range round reached the target",
     );
 }
 

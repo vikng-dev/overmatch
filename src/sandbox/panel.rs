@@ -30,10 +30,11 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 
 use crate::ballistics::{ComponentHealth, MarchMode, ShellReadout};
 use crate::damage::{CookedOff, TankKnockedOut};
+use crate::tank::Weapon;
 
 use super::{
-    ClearRequested, LayerView, MeshState, PanelWantsInput, ResetRequested, SPEEDS, ShotParams,
-    SpeedIndex, VolumeState,
+    ClearRequested, LayerView, MeshState, PanelWantsInput, RangeGun, ResetRequested, Respawn,
+    SPEEDS, ShotParams, SpeedIndex, VolumeState,
 };
 
 pub(super) fn plugin(app: &mut App) {
@@ -59,17 +60,23 @@ struct Write<'w> {
     want: ResMut<'w, PanelWantsInput>,
 }
 
-/// The live read-outs the Telemetry section shows: the count of shells still on the board and the
-/// target's damage state.
+/// The live read-outs the Telemetry section shows: the count of shells still on the board, the
+/// target's damage state and when a knocked-out target is rebuilt.
 #[derive(SystemParam)]
 struct Telemetry<'w, 's> {
     shells: Query<'w, 's, (), With<ShellReadout>>,
     knocked_out: Query<'w, 's, (), With<TankKnockedOut>>,
     cooked_off: Query<'w, 's, (), With<CookedOff>>,
     health: Query<'w, 's, &'static ComponentHealth>,
+    respawn: Res<'w, Respawn>,
 }
 
-fn panel(mut contexts: EguiContexts, mut w: Write, telemetry: Telemetry) {
+fn panel(
+    mut contexts: EguiContexts,
+    mut w: Write,
+    telemetry: Telemetry,
+    gun: Query<&Weapon, With<RangeGun>>,
+) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
@@ -104,6 +111,7 @@ fn panel(mut contexts: EguiContexts, mut w: Write, telemetry: Telemetry) {
     let mut speed_idx = w.speed.0;
     let mut paused = w.time.is_paused();
     let time_scale = w.time.relative_speed();
+    let now_s = w.time.elapsed_secs_f64();
     let mut do_clear = false;
     let mut do_reset = false;
     let mut reset_shot = false;
@@ -121,7 +129,9 @@ fn panel(mut contexts: EguiContexts, mut w: Write, telemetry: Telemetry) {
 
                 egui::CollapsingHeader::new("Shot")
                     .default_open(true)
-                    .show(ui, |ui| shot_section(ui, &mut shot, &mut reset_shot));
+                    .show(ui, |ui| {
+                        shot_section(ui, gun.single().ok(), &mut shot, &mut reset_shot)
+                    });
 
                 egui::CollapsingHeader::new("Time")
                     .default_open(false)
@@ -132,7 +142,7 @@ fn panel(mut contexts: EguiContexts, mut w: Write, telemetry: Telemetry) {
                 egui::CollapsingHeader::new("Telemetry")
                     .default_open(true)
                     .show(ui, |ui| {
-                        telemetry_section(ui, &telemetry, time_scale, paused, march_real)
+                        telemetry_section(ui, &telemetry, now_s, time_scale, paused, march_real)
                     });
 
                 egui::CollapsingHeader::new("Scene")
@@ -148,7 +158,7 @@ fn panel(mut contexts: EguiContexts, mut w: Write, telemetry: Telemetry) {
             });
         });
 
-    // Reset-to-88 restores the authored shot; it wins over any slider edit made the same frame.
+    // Reset restores the first round at its own speed; it wins over any edit made the same frame.
     if reset_shot {
         shot = ShotParams::default();
     }
@@ -230,20 +240,50 @@ fn layers_section(ui: &mut egui::Ui, layers: &mut LayerView) {
     volume_state_row(ui, "component", &mut layers.components);
 }
 
-/// The live shot parameters — muzzle speed, calibre, mass, nose factor — as sliders over the panel's LOCAL
-/// [`ShotParams`], plus a restore-the-88 button. Calibre is edited in mm (stored in m).
-fn shot_section(ui: &mut egui::Ui, shot: &mut ShotParams, reset_shot: &mut bool) {
-    ui.add(egui::Slider::new(&mut shot.muzzle_speed, 100.0..=1200.0).text("muzzle (m/s)"));
-    let mut cal_mm = shot.caliber * 1e3;
+/// The range gun's rounds as a selectable list, each display name with its registry key, and a
+/// muzzle-speed override that stands in for range, over the panel's LOCAL [`ShotParams`]: off
+/// fires the round at its own speed, on starts at it. Selecting another round drops the override.
+fn shot_section(
+    ui: &mut egui::Ui,
+    gun: Option<&Weapon>,
+    shot: &mut ShotParams,
+    reset_shot: &mut bool,
+) {
+    let Some(gun) = gun else {
+        return;
+    };
+    for (index, loaded) in gun.rounds.iter().enumerate() {
+        let Ok(index) = u8::try_from(index) else {
+            break;
+        };
+        let label = format!("{}  [{}]", loaded.name, loaded.key);
+        if ui.selectable_label(shot.round == index, label).clicked() && shot.round != index {
+            *shot = ShotParams {
+                round: index,
+                muzzle_speed: None,
+            };
+        }
+    }
+    let Some(own) = gun
+        .rounds
+        .get(usize::from(shot.round))
+        .map(|loaded| loaded.round.muzzle_speed)
+    else {
+        return;
+    };
+    ui.separator();
+    ui.monospace(format!("own speed  {own:.0} m/s"));
+    let mut overriding = shot.muzzle_speed.is_some();
     if ui
-        .add(egui::Slider::new(&mut cal_mm, 20.0..=150.0).text("calibre (mm)"))
+        .checkbox(&mut overriding, "override muzzle speed")
         .changed()
     {
-        shot.caliber = cal_mm / 1e3;
+        shot.muzzle_speed = overriding.then_some(own);
     }
-    ui.add(egui::Slider::new(&mut shot.mass, 1.0..=25.0).text("mass (kg)"));
-    ui.add(egui::Slider::new(&mut shot.nose_factor, 0.05..=1.0).text("nose factor"));
-    if ui.button("Reset to 88 mm").clicked() {
+    if let Some(speed) = shot.muzzle_speed.as_mut() {
+        ui.add(egui::Slider::new(speed, 100.0..=1200.0).text("muzzle (m/s)"));
+    }
+    if ui.button("Reset shot").clicked() {
         *reset_shot = true;
     }
 }
@@ -277,12 +317,13 @@ fn time_section(
     ui.radio_value(march_real, true, "Real (fixed server cadence)");
 }
 
-/// Live read-out: the clock state, the shell count on the board, and the target's damage state —
-/// what the retired top-left `StatusText` HUD used to carry, plus a shot-verdict line. Monospace so
-/// the columns line up.
+/// Live read-out: the clock state, the shell count on the board, the target's damage state and,
+/// while it is knocked out, the virtual seconds until its rebuild. Monospace so the columns line
+/// up.
 fn telemetry_section(
     ui: &mut egui::Ui,
     t: &Telemetry,
+    now_s: f64,
     time_scale: f32,
     paused: bool,
     march_real: bool,
@@ -311,5 +352,8 @@ fn telemetry_section(
         ui.colored_label(WARN, "target KNOCKED OUT");
     } else {
         ui.colored_label(OK, "target operational");
+    }
+    if let Some(due_s) = t.respawn.due_s {
+        ui.monospace(format!("rebuilt in {:.1} s", (due_s - now_s).max(0.0)));
     }
 }

@@ -229,8 +229,7 @@ fn fire(
     // Present in a composed network app, where `net::protocol` republishes the `LocalTimeline`
     // before `GameplaySet`, so an attributed local FireShell is born with the identity that changes
     // its ballistic hold/keyframe behaviour; and in single-player, whose clock
-    // (`damage_cam::delivery::offline_plugin`) keys the rounds its pen cam records explain. The
-    // sandboxes have none.
+    // (`damage_cam::delivery::offline_plugin`) keys the rounds its pen cam records explain.
     shot_clock: Option<Res<crate::ShotClock>>,
     weapon_clock: Res<crate::WeaponClock>,
     fixed_time: Res<Time<Fixed>>,
@@ -323,7 +322,7 @@ fn fire(
         // The identity belongs to the event, not a later post-spawn repair: `on_fire_shell`
         // includes it in the shell's initial bundle, so lifecycle observers and the first march
         // see the same keyed state. A slot that cannot fit the wire's u8 has no network shot
-        // (the server likewise declines to broadcast it), and the sandboxes have no clock.
+        // (the server likewise declines to broadcast it).
         let shot = shot_clock.as_ref().and_then(|clock| {
             let combatant = combatant.expect(
                 "network tank fired without spawn-complete CombatantId; immutable sim state \

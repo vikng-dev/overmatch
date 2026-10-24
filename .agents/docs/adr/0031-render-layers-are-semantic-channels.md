@@ -159,7 +159,9 @@ not paid for now.
 
 - **Sandbox migration.** `src/sandbox.rs` and `src/track_sandbox/` keep their own overlay/UI layer
   stacks and are on the scan's explicit allow-list. They are dev binaries with several cameras
-  each and neither mounts the resolver; migrating them buys nothing today.
+  each; the armour sandbox mounts the resolver for the pen cam's cameras and holds its own two
+  layers clear of every channel (`render_policy::is_channel_layer`, tested in `sandbox::tests`), the
+  track sandbox mounts none. Migrating them buys nothing today.
 - **More channels.** No garage, x-ray, outline or minimap channel is reserved. A channel with no
   camera behind it is a bitmask waiting to be misused; they arrive when a real camera or pass does.
 - **Faction appearance.** Appearance-by-omission was the fourth job the bitmask was doing. It is a

@@ -126,6 +126,30 @@ impl Channel {
     }
 }
 
+/// Whether `layer` is a channel's render layer: what a root that places raw layers beside the
+/// channels (the armour sandbox's overlay and HUD cameras) must stay clear of.
+#[cfg(test)]
+pub(crate) fn is_channel_layer(layer: usize) -> bool {
+    let every = [
+        Channel::BattlefieldWorld,
+        Channel::ViewSubjectBody,
+        Channel::ShadowOnly,
+        Channel::PenCamStage,
+        Channel::PenCamHullMask,
+        Channel::PenCamPartMask,
+    ];
+    // A new channel fails this match until it is listed in `every`.
+    let _every_channel = |channel: Channel| match channel {
+        Channel::BattlefieldWorld
+        | Channel::ViewSubjectBody
+        | Channel::ShadowOnly
+        | Channel::PenCamStage
+        | Channel::PenCamHullMask
+        | Channel::PenCamPartMask => (),
+    };
+    every.into_iter().any(|channel| channel.bit() == layer)
+}
+
 /// What an object does in the shadow passes — per-object policy, deliberately NOT a channel
 /// (Unreal's `bCastHiddenShadow`, not Unity's culling mask).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -842,9 +866,11 @@ mod tests {
     fn no_raw_render_layers_outside_this_module() {
         /// Files allowed to build masks by hand. The two sandboxes are dev binaries with their own
         /// overlay/UI camera stacks and a deliberately DEFERRED migration (see ADR-0031); they are
-        /// not shipped, and neither mounts [`plugin`]. The shadow-view tripwire is a test that
-        /// hands bevy's own light-mask filter raw masks and mounts nothing of ours. This list is
-        /// the exemption — a silent gap in the scan would not be.
+        /// not shipped. The armour sandbox mounts [`plugin`] for the pen cam's cameras and holds its
+        /// own layers clear of every channel ([`is_channel_layer`]); the track sandbox mounts
+        /// nothing of ours. The shadow-view tripwire is a test that hands bevy's own light-mask
+        /// filter raw masks and mounts nothing of ours. This list is the exemption — a silent gap in
+        /// the scan would not be.
         const ALLOWED: &[&str] = &[
             "src/render_policy.rs",
             "src/sandbox.rs",

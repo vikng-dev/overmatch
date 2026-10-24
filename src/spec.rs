@@ -300,12 +300,14 @@ pub(crate) const MAX_WEAPON_ROUNDS: usize = u8::MAX as usize + 1;
 impl WeaponSpec {
     /// The key of the default round, the first of [`Self::rounds`]; `""` (no registry key) on an
     /// empty list, which `validate()` refuses.
+    #[cfg(test)]
     pub(crate) fn default_round_key(&self) -> &str {
         self.rounds.first().map_or("", String::as_str)
     }
 
     /// The default round, resolved in the shipped round registry; an unknown key is an error naming
     /// it. On a validated spec this is `Ok`.
+    #[cfg(test)]
     pub(crate) fn resolved_round(&self) -> Result<crate::rounds::Round, crate::rounds::RoundError> {
         crate::rounds::RoundRegistry::shipped().get(self.default_round_key())
     }

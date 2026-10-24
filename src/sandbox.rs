@@ -1,11 +1,19 @@
-//! Isolated penetration-march sandbox, mounted only by `bin/armor_sandbox`.
+//! The armour sandbox, mounted only by `bin/armor_sandbox`: a shooting range for the game's damage
+//! model.
 //!
-//! The free-fly camera is the gun; sandbox controls use real time so inspection remains available
-//! while simulation time is paused.
+//! The free-fly camera holds the seed tank's primary weapon as a [`FreeShooter`] ([`RangeGun`]) and
+//! fires its selected round down the view axis through the game's round-to-shell mapping
+//! ([`FireShell::of_round`]). Downrange stand four static RHA plates and the seed tank, rebuilt
+//! [`RESPAWN_DELAY_S`] after its knockout. A shot on the tank is recorded and delivered as in
+//! single-player (`damage_cam::recorder`, `delivery::offline_plugin`), so it plays in the pen cam
+//! corner, and the x-ray key dresses the tank in the glass look; a plate is no tank and opens no
+//! corner. Sandbox controls use real time so inspection remains available while simulation time is
+//! paused.
 
 use avian3d::prelude::{
     Collider, CollisionLayers, LayerMask, PhysicsInterpolationPlugin, PhysicsPlugins, RigidBody,
 };
+use bevy::ecs::system::SystemParam;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
 use bevy::time::{Real, Virtual};
@@ -15,20 +23,21 @@ use bevy::camera::ClearColorConfig;
 use bevy::camera::visibility::RenderLayers;
 use bevy::ui::IsDefaultUiCamera;
 
-use crate::Layer;
-use crate::bake;
 use crate::ballistics::{
-    self, ArmorVolume, BallisticVolume, ComponentHealth, ComponentVolume, FireShell,
-    FireShellOrigin, Impact, ImpactMarker, PenetrationMarks, ShellPath, ShellReadout, SpallMarks,
+    self, ArmorVolume, BallisticVolume, ComponentHealth, ComponentVolume, FireShell, Impact,
+    ImpactMarker, PenetrationMarks, ShellPath, ShellReadout, ShotSource, SpallMarks,
 };
-use crate::command;
-use crate::crew_ui;
+use crate::command::{self, Bindings, RoundStep};
 use crate::damage::{self, Ammo, CookedOff, Dead, LaunchedTurret, TankKnockedOut};
-use crate::hud;
-use crate::spec;
-use crate::tank::{Controlled, Tank, TankPresentation, TankSimSource, ViewOf, spawn_complete_tank};
+use crate::tank::{
+    Controlled, Tank, TankPresentation, TankRoot, TankSimSource, ViewOf, Weapon, WeaponIndex,
+    spawn_complete_tank,
+};
 use crate::view::PlayerView;
-use crate::world;
+use crate::{
+    CombatantId, CombatantLife, FreeShooter, Layer, ShotClock, ShotId, bake, crew_ui, hud, spec,
+    world,
+};
 
 // The clickable egui control panel — the sandbox's Layers / Shot / Time / Telemetry / Scene surface.
 // Behind `dev_ui` so `bevy_egui` compiles ONLY into the sandbox build, never the shipping client
@@ -36,44 +45,62 @@ use crate::world;
 #[cfg(feature = "dev_ui")]
 mod panel;
 
-/// The spec sheet of the tank the sandbox spawns; [`ShotParams::default`] fires its primary weapon
-/// as authored there.
+#[cfg(test)]
+mod tests;
+
+/// The spec sheet of the tank the sandbox spawns; the range's gun is its primary weapon as
+/// authored there ([`seed_gun`]).
 const SEED_SPEC: &str = include_str!("../assets/tiger_1/tiger_1.tank.ron");
 
-/// The live shot parameters every fired shell reads — muzzle speed, calibre, mass and nose factor,
-/// the four penetration drivers. Seeded from the seed tank's primary weapon; the `dev_ui` panel's Shot
-/// section edits them so penetration can be studied against the plate ladder without a recompile.
-/// Read only by [`fire`] (no change-detection reactor), so the panel writes it back on change purely
-/// for tidy change-ticks. `Copy + PartialEq` for that local-copy → write-on-change pattern.
-#[derive(Resource, Clone, Copy, PartialEq)]
+/// The free-fly camera's combatant: the shooter every range round names.
+const RANGE_SHOOTER: CombatantId = CombatantId(1);
+
+/// The target tank's combatant, the same across its rebuilds; [`TargetLife`] counts them.
+const RANGE_TARGET: CombatantId = CombatantId(2);
+
+/// How long a knocked-out target stands before the range rebuilds it, seconds of virtual time.
+/// TUNED: long enough to read the knockout on the target and the start of the pen cam corner's
+/// playback.
+const RESPAWN_DELAY_S: f64 = 3.0;
+
+/// The round the range fires: an index into the [`RangeGun`]'s rounds (E/Q, or the panel), and an
+/// optional muzzle-speed override, m/s, that stands in for range; `None` fires the round at its own
+/// speed. Every other property of the shot is the round's data. `Copy + PartialEq` for the panel's
+/// local-copy, write-on-change pattern.
+#[derive(Resource, Clone, Copy, PartialEq, Default)]
 struct ShotParams {
-    muzzle_speed: f32,
-    caliber: f32,
-    mass: f32,
-    nose_factor: f32,
-    wound: f32,
+    round: u8,
+    muzzle_speed: Option<f32>,
 }
 
-impl Default for ShotParams {
-    fn default() -> Self {
-        let sheet: spec::TankSpec =
-            ron::de::from_str(SEED_SPEC).expect("the shipped spec sheet parses");
-        let weapon = sheet
-            .weapons
-            .values()
-            .find(|weapon| weapon.trigger == spec::Trigger::Primary)
-            .expect("the seed tank authors a primary weapon");
-        let round = weapon
-            .resolved_round()
-            .unwrap_or_else(|err| panic!("the seed tank's primary weapon: {err}"));
-        Self {
-            muzzle_speed: round.muzzle_speed,
-            caliber: round.body.caliber,
-            mass: round.body.mass,
-            nose_factor: round.body.nose_factor,
-            wound: round.wound,
-        }
-    }
+/// The range's gun: the seed tank's primary weapon, a child of the free-fly camera, which fires it
+/// as a [`FreeShooter`]. Its [`TankRoot`] names the camera and its [`WeaponIndex`] is 0, so the
+/// recorder finds it from a round's [`ShotSource`] as it finds a tank's weapon.
+#[derive(Component)]
+struct RangeGun;
+
+/// The seed tank's primary weapon, every round it lists resolved in the shipped registry.
+fn seed_gun() -> Weapon {
+    let sheet: spec::TankSpec =
+        ron::de::from_str(SEED_SPEC).expect("the shipped spec sheet parses");
+    let (name, weapon) = sheet
+        .weapons
+        .iter()
+        .find(|(_, weapon)| weapon.trigger == spec::Trigger::Primary)
+        .expect("the seed tank authors a primary weapon");
+    Weapon::of_spec(name, weapon, None)
+        .unwrap_or_else(|err| panic!("the seed tank's primary weapon: {err}"))
+}
+
+/// Which life of [`RANGE_TARGET`] the standing target is: one more each rebuild, so a record of an
+/// earlier target is never read as the live one's.
+#[derive(Resource, Default)]
+struct TargetLife(u32);
+
+/// When the knocked-out target is rebuilt, virtual seconds; `None` while no target is knocked out.
+#[derive(Resource, Default)]
+struct Respawn {
+    due_s: Option<f64>,
 }
 
 /// Whether the egui panel currently holds keyboard or pointer focus — written each frame by the
@@ -243,10 +270,12 @@ struct VolumeMaterials {
 
 /// Render layer for volumes drawn "on top" — the overlay camera renders only this, with its own
 /// depth buffer and no clear, so it composites over the main scene regardless of containment.
-const OVERLAY_LAYER: usize = 1;
+/// Clear of every `render_policy` channel, which this root resolves for the pen cam's cameras.
+const OVERLAY_LAYER: usize = 6;
 /// Isolated render layer for the UI camera: no geometry is placed on it, so that camera renders only
 /// the HUD. Highest camera `order` = drawn last = HUD sits above the scene *and* the on-top volumes.
-const UI_LAYER: usize = 2;
+/// Clear of every `render_policy` channel, like [`OVERLAY_LAYER`].
+const UI_LAYER: usize = 7;
 
 /// Marks the overlay camera (renders [`OVERLAY_LAYER`] on top of the main view).
 #[derive(Component)]
@@ -322,28 +351,33 @@ pub fn plugin(app: &mut App) {
     // ballistics-owned view plugin rather than a vfx concern: without this line the sandbox's shells
     // would fly invisibly. (Its own call: the tuple above is at bevy's 15-plugin arity limit.)
     .add_plugins(ballistics::view_plugin)
-    // The weapon clock the shared status panel (`crew_ui::update_status_panel`) reads, FROZEN at
-    // tick 0 — this sandbox does not simulate the gun and must not pretend to.
-    //
-    // Every composition that mounts `crew_ui` owes it a clock: the game's `shooting::plugin` and
-    // the net composition (`net::protocol`) each insert one and then advance it. This root mounts
-    // NEITHER (the sandbox's shells come from the free-fly camera through `fire` below, not out of
-    // the target's barrel), so without this line the panel's `Res<WeaponClock>` fails parameter
-    // validation and the binary panics on its first `Update` — which is exactly what it did.
-    //
-    // Mounting `shooting::plugin` here to "do it properly" would be the dishonest fix, twice over:
-    // it would arm the target's own gun in a tool whose target is a passive test article, and it
-    // would not even produce a running clock — `advance_weapon_clock` is `in_state(Playing)` and
-    // this root has no `AppState` at all (`state::plugin` is the game's), so `in_state`'s absent-
-    // resource arm returns false forever and the clock would sit at 0 anyway, only with a live
-    // `tick_weapon_gate` on top of it.
-    //
-    // Frozen is CONSISTENT, not merely convenient: nothing here arms a `WeaponGate` either, so
-    // every gate stays at its spawn state and the readouts derived against tick 0 stay literally
-    // true of a tank that has never fired ("READY", a full belt). The half of that row this tool
-    // actually exists to show — `no-fire` when a penetration kills the gunner or wrecks the breech
-    // — is quality-derived and clock-independent, so it stays live.
-    .insert_resource(crate::WeaponClock::default())
+    // The pen cam as single-player runs it: the recorder of the authority's main-gun rounds, the
+    // vocabulary its explanations fold, the offline delivery to the player's combatants (the free
+    // shooter and the held target), the render channels its cameras resolve through, and the
+    // corner, the x-ray and the kill cam (which stands aside for a free shooter).
+    .add_plugins((
+        crate::damage_cam::recorder::plugin,
+        crate::damage_cam::delivery::plugin,
+        crate::damage_cam::delivery::offline_plugin,
+        crate::render_policy::plugin,
+        crate::damage_cam::pen_cam::game::plugin,
+    ))
+    // The kill cam's pose reads the orbit camera's turret pivot. This root mounts no orbit camera and
+    // the kill cam stands aside for a free shooter, so the pivot stays unset.
+    .init_resource::<crate::camera::TurretPivot>()
+    // The weapon clock, one tick per fixed step as the game advances it: the offline delivery
+    // publishes it as the shot clock, so each range round's `ShotId` names its tick, and the shared
+    // status panel (`crew_ui::update_status_panel`) reads it. This root mounts no
+    // `shooting::plugin`: the target's own gun is a passive test article, never armed, so every
+    // `WeaponGate` stays at its spawn state and the panel's readouts stay true of a tank that has
+    // never fired ("READY", a full belt). `no-fire`, when the gunner's or the breech's HP pool is
+    // emptied, is quality-derived and stays live.
+    .init_resource::<crate::WeaponClock>()
+    .add_systems(FixedLast, crate::shooting::advance_weapon_clock)
+    // The game's keys for the round selector and the x-ray.
+    .init_resource::<Bindings>()
+    .init_resource::<TargetLife>()
+    .init_resource::<Respawn>()
     // Keep spent shells frozen in place (with their tracer + marks) for inspection.
     .insert_resource(ballistics::RetainSpentShells(true))
     // Default to smooth per-frame motion; `T` toggles to the true fixed-rate cadence.
@@ -389,7 +423,10 @@ pub fn plugin(app: &mut App) {
             fly_camera
                 .run_if(cursor_locked)
                 .run_if(not(panel_capturing)),
-            fire.run_if(cursor_locked).run_if(not(panel_capturing)),
+            (select_round, fire)
+                .chain()
+                .run_if(cursor_locked)
+                .run_if(not(panel_capturing)),
             // Up/Down step the slow-mo ladder; a focused egui slider also reads the arrows, so gate
             // this the same way the fly does (the armour-sandbox analogue of the track sandbox's
             // `read_drive_input` gate).
@@ -408,7 +445,8 @@ pub fn plugin(app: &mut App) {
             draw_consequence_gizmos,
             update_shell_labels,
         ),
-    );
+    )
+    .add_systems(Update, (respawn_target, update_round_label));
 
     // The egui control panel — the sandbox's whole non-camera control surface (Layers / Shot / Time /
     // Telemetry / Scene). Behind `dev_ui` so `bevy_egui` is compiled ONLY here (the `armor_sandbox`
@@ -419,7 +457,7 @@ pub fn plugin(app: &mut App) {
 }
 
 fn spawn_camera(mut commands: Commands) {
-    commands
+    let camera = commands
         .spawn((
             Camera3d::default(),
             Transform::from_xyz(0.0, 3.0, 18.0).looking_at(Vec3::new(0.0, 2.0, 0.0), Vec3::Y),
@@ -429,6 +467,10 @@ fn spawn_camera(mut commands: Commands) {
             // LOD ladders, the HUD reprojection, the billboards — reads it here too. The overlay and
             // UI cameras below carry none, which is exactly what keeps them out of that answer.
             PlayerView,
+            // The player's combatant on the range: it fires the gun below, one life throughout.
+            FreeShooter,
+            RANGE_SHOOTER,
+            CombatantLife(0),
             // Main 3D pass (order 0, render layer 0): the scene + gizmos.
         ))
         .with_children(|parent| {
@@ -445,7 +487,16 @@ fn spawn_camera(mut commands: Commands) {
                 RenderLayers::layer(OVERLAY_LAYER),
                 OverlayCamera,
             ));
-        });
+        })
+        .id();
+    commands.spawn((
+        Name::new("range gun"),
+        RangeGun,
+        seed_gun(),
+        WeaponIndex(0),
+        TankRoot(camera),
+        ChildOf(camera),
+    ));
 
     // Dedicated UI camera at the highest order, so the HUD (nameplates, reticle, legend, status) draws
     // *above* both the main pass and the on-top overlay volumes — otherwise opaque "on top" component
@@ -524,17 +575,44 @@ fn spawn_targets(
 #[derive(Resource)]
 struct PendingTarget(TankPresentation);
 
-fn load_target(mut commands: Commands, asset_server: Res<AssetServer>) {
-    commands.insert_resource(PendingTarget(TankPresentation::new(
+/// The seed tank's presentation, the target the next [`spawn_target_from_blueprint`] builds.
+fn pending_target(asset_server: &AssetServer) -> PendingTarget {
+    PendingTarget(TankPresentation::new(
         Some(asset_server.load(GltfAssetLabel::Scene(0).from_asset(crate::tank::TIGER_GLB_PATH))),
-        asset_server.load("tiger_1/tiger_1.tank.ron"),
-    )));
+        asset_server.load(crate::tank::TIGER_SPEC_PATH),
+    ))
+}
+
+fn load_target(mut commands: Commands, asset_server: Res<AssetServer>) {
+    commands.insert_resource(pending_target(&asset_server));
+}
+
+/// Rebuilding the target: every tank and launched turret goes, and the next life of
+/// [`RANGE_TARGET`] is pending.
+#[derive(SystemParam)]
+struct TargetRebuild<'w, 's> {
+    asset_server: Res<'w, AssetServer>,
+    targets: Query<'w, 's, Entity, Or<(With<Tank>, With<LaunchedTurret>)>>,
+    life: ResMut<'w, TargetLife>,
+    commands: Commands<'w, 's>,
+}
+
+impl TargetRebuild<'_, '_> {
+    fn rebuild(&mut self) {
+        for entity in &self.targets {
+            self.commands.entity(entity).despawn();
+        }
+        self.life.0 = self.life.0.saturating_add(1);
+        self.commands
+            .insert_resource(pending_target(&self.asset_server));
+    }
 }
 
 /// Spawn the static target synchronously from the blueprint; its glb view may attach later.
 fn spawn_target_from_blueprint(
     mut commands: Commands,
     pending: Option<Res<PendingTarget>>,
+    life: Res<TargetLife>,
     source: TankSimSource,
 ) {
     let Some(pending) = pending else {
@@ -554,9 +632,31 @@ fn spawn_target_from_blueprint(
             // crew bar (scoped to the controlled tank) drives it, exactly as in the game.
             Controlled,
             RigidBody::Static,
+            RANGE_TARGET,
+            CombatantLife(life.0),
         ),
     );
     commands.remove_resource::<PendingTarget>();
+}
+
+/// Rebuild the target [`RESPAWN_DELAY_S`] of virtual time after its knockout. Clearing the knockout
+/// first (`C`) cancels the rebuild.
+fn respawn_target(
+    time: Res<Time<Virtual>>,
+    knocked_out: Query<(), (With<Tank>, With<TankKnockedOut>)>,
+    mut respawn: ResMut<Respawn>,
+    mut target: TargetRebuild,
+) {
+    if knocked_out.is_empty() {
+        respawn.due_s = None;
+        return;
+    }
+    let now = time.elapsed_secs_f64();
+    let due = *respawn.due_s.get_or_insert(now + RESPAWN_DELAY_S);
+    if now >= due {
+        target.rebuild();
+        respawn.due_s = None;
+    }
 }
 
 fn setup_volume_materials(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
@@ -851,42 +951,80 @@ fn fly_camera(
     crate::camera::free_fly_transform(&mut transform, &keys, motion.delta, time.delta_secs());
 }
 
-/// Left-click fires a shell straight down the view axis. The camera has no parent, so its
-/// `Transform` is its world pose — read it directly (no one-frame `GlobalTransform` lag).
+/// The fire binding fires the [`RangeGun`]'s selected round down the view axis, as the game's
+/// round-to-shell mapping makes it, at the override speed when one is set. The camera has no
+/// parent, so its `Transform` is its world pose (no one-frame `GlobalTransform` lag).
+///
+/// One round per shot-clock tick: a round's [`ShotId`] is its tick, and two rounds sharing one would
+/// be one shot to the recorder and the delivery. The gun is never armed, so it never reloads.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "a trigger reading its binding, both devices, the shooter, its gun, the selection, the clock and its own last tick"
+)]
 fn fire(
-    camera: Single<&Transform, With<FreeFlyCam>>,
+    bindings: Res<Bindings>,
+    keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
+    camera: Single<(Entity, &Transform, &CombatantId), With<FreeFlyCam>>,
+    gun: Single<&Weapon, With<RangeGun>>,
     shot: Res<ShotParams>,
+    clock: Res<ShotClock>,
+    mut last_tick: Local<Option<u32>>,
     mut commands: Commands,
 ) {
-    if !mouse.just_pressed(MouseButton::Left) {
+    if !bindings.fire_primary.just_pressed(&keys, &mouse) || *last_tick == Some(clock.0) {
         return;
     }
+    let (camera, transform, &combatant) = *camera;
+    let Some(loaded) = gun.rounds.get(usize::from(shot.round)) else {
+        return;
+    };
+    *last_tick = Some(clock.0);
+    let round = FireShell::of_round(
+        &loaded.round,
+        transform.translation,
+        transform.forward(),
+        gun.fire_mode.mechanism(),
+        true,
+        Some(ShotSource {
+            tank: camera,
+            weapon: 0,
+            round: shot.round,
+        }),
+        Some(ShotId {
+            combatant,
+            weapon: 0,
+            fire_tick: clock.0,
+        }),
+    );
     commands.trigger(FireShell {
-        origin: camera.translation,
-        direction: camera.forward(),
-        speed: shot.muzzle_speed,
-        caliber: shot.caliber,
-        mass: shot.mass,
-        nose_factor: shot.nose_factor,
-        // The study shot is full calibre: it meets the plate as itself.
-        penetrator_caliber: shot.caliber,
-        penetrator_mass: shot.mass,
-        wound: shot.wound,
-        mechanism: crate::spec::FireMechanism::Single,
-        // A single sighting round — mark it a tracer. Moot for the sandbox's own visuals (it retains
-        // spent shells and draws its own path gizmos, and the default calibre is main-gun-sized so it keeps the
-        // shell scene regardless), but keeps the field honest.
-        tracer: true,
-        // The free-fly camera is not a tank, so there is nothing to attribute (and the sandbox is
-        // single-process anyway) — `None` never broadcasts.
-        shooter: None,
-        shot_origin: FireShellOrigin::Local,
-        // Locally fired: no net catch-up.
-        catch_up_ticks: 0,
-        // Single-process sandbox — no network identity, no bounce keyframes.
-        shot: None,
+        speed: shot.muzzle_speed.unwrap_or(round.speed),
+        ..round
     });
+}
+
+/// The round bindings step the [`RangeGun`]'s selection through its rounds, wrapping, and drop a
+/// speed override: an override is set against one round's own speed.
+fn select_round(
+    bindings: Res<Bindings>,
+    keys: Res<ButtonInput<KeyCode>>,
+    mouse: Res<ButtonInput<MouseButton>>,
+    gun: Single<&Weapon, With<RangeGun>>,
+    mut shot: ResMut<ShotParams>,
+) {
+    let step = if bindings.round_next.just_pressed(&keys, &mouse) {
+        RoundStep::Next
+    } else if bindings.round_previous.just_pressed(&keys, &mouse) {
+        RoundStep::Previous
+    } else {
+        return;
+    };
+    if let Some(round) = step.apply(shot.round, gun.rounds.len()) {
+        *shot = ShotParams {
+            round,
+            muzzle_speed: None,
+        };
+    }
 }
 
 /// Run condition: the cursor is captured (mouse-look active). Esc releases it, which disables flying
@@ -968,15 +1106,13 @@ fn clear_shots(
     }
 }
 
-/// `r` rebuilds the sandbox target from its source scene/spec. This is heavier than `c`, but it
-/// restores hierarchy after cookoff has detached/launched the turret.
+/// `r` rebuilds the sandbox target from its source scene/spec and wipes the shots. This is heavier
+/// than `c`, but it restores hierarchy after cookoff has detached/launched the turret.
 fn reset_world(
     keys: Res<ButtonInput<KeyCode>>,
     mut requested: ResMut<ResetRequested>,
-    asset_server: Res<AssetServer>,
-    targets: Query<Entity, Or<(With<Tank>, With<LaunchedTurret>)>>,
     shots: Query<Entity, Or<(With<ShellPath>, With<ImpactMarker>)>>,
-    mut commands: Commands,
+    mut target: TargetRebuild,
 ) {
     // `R` or the panel's Scene button; consume the flag on the frame it fires (see `clear_shots`).
     let by_panel = requested.0;
@@ -987,15 +1123,9 @@ fn reset_world(
         return;
     }
     for entity in &shots {
-        commands.entity(entity).despawn();
+        target.commands.entity(entity).despawn();
     }
-    for entity in &targets {
-        commands.entity(entity).despawn();
-    }
-    commands.insert_resource(PendingTarget(TankPresentation::new(
-        Some(asset_server.load(GltfAssetLabel::Scene(0).from_asset(crate::tank::TIGER_GLB_PATH))),
-        asset_server.load("tiger_1/tiger_1.tank.ron"),
-    )));
+    target.rebuild();
 }
 
 /// Time controls on the **virtual** clock (which drives the fixed timestep the march/physics run
@@ -1143,16 +1273,53 @@ fn draw_consequence_gizmos(
     }
 }
 
-/// The slim keybindings legend (the direct-manipulation keys that survive alongside the egui panel)
-/// and a small pool of floating shell labels. Layer / shot / time / scene controls, and the time +
-/// shell-count readouts, all moved into the panel's Layers / Shot / Time / Telemetry / Scene sections.
-fn spawn_hud(mut commands: Commands) {
+/// The HUD line naming the [`RangeGun`]'s selected round and the speed it fires at.
+#[derive(Component)]
+struct RoundLabel;
+
+/// The selected round's line: its display name, its place in the gun's list and the speed it fires
+/// at, with the round's own beside an override.
+fn round_line(gun: &Weapon, shot: ShotParams) -> String {
+    let Some(loaded) = gun.rounds.get(usize::from(shot.round)) else {
+        return String::new();
+    };
+    let own = loaded.round.muzzle_speed;
+    let speed = match shot.muzzle_speed {
+        Some(speed) => format!("{speed:.0} m/s (override; own {own:.0} m/s)"),
+        None => format!("{own:.0} m/s"),
+    };
+    format!(
+        "{}  ({}/{})   {speed}",
+        loaded.name,
+        usize::from(shot.round) + 1,
+        gun.rounds.len()
+    )
+}
+
+/// Keep the [`RoundLabel`] on the selected round, written only on a change.
+fn update_round_label(
+    shot: Res<ShotParams>,
+    gun: Single<&Weapon, With<RangeGun>>,
+    mut label: Single<&mut Text, With<RoundLabel>>,
+) {
+    let line = round_line(&gun, *shot);
+    if label.0 != line {
+        label.0 = line;
+    }
+}
+
+/// The slim keybindings legend (the direct-manipulation keys that survive alongside the egui panel),
+/// the [`RoundLabel`] bottom right (clear of the pen cam corner and the crew row), and a small pool
+/// of floating shell labels. Layer / shot / time / scene controls, and the time + shell-count
+/// readouts, live in the panel's Layers / Shot / Time / Telemetry / Scene sections.
+fn spawn_hud(mut commands: Commands, fonts: Res<crate::ui_font::UiFonts>) {
     commands.spawn((
         Text::new(
-            "WASD / Shift / Ctrl  fly     LMB  fire     Esc  free cursor for the panel\n\
+            "WASD / Shift / Ctrl  fly     LMB  fire the round     E / Q  next / previous round\n\
+             X  x-ray the target     Esc  free cursor for the panel\n\
              F1/F2/F3  cycle mesh / armor / component layers (also on the panel)\n\
              1-5  crew seats: tap source then target to swap occupants (re-tap cancels)\n\
-             Everything else (shot / time / clear / reset) lives on the left panel.",
+             Everything else (speed / time / clear / reset) lives on the left panel.",
         ),
         TextFont {
             font_size: FontSize::Px(14.0),
@@ -1164,6 +1331,23 @@ fn spawn_hud(mut commands: Commands) {
             top: Val::Px(8.0),
             // Clear of the left panel (default width ~300 px).
             left: Val::Px(330.0),
+            ..default()
+        },
+    ));
+    // The shipped font: it draws a round's display name, which is data, whole.
+    commands.spawn((
+        RoundLabel,
+        Text::new(""),
+        TextFont {
+            font: fonts.body.clone().into(),
+            font_size: FontSize::Px(20.0),
+            ..default()
+        },
+        TextColor(Color::srgb(1.0, 0.9, 0.5)),
+        Node {
+            position_type: PositionType::Absolute,
+            bottom: Val::Px(12.0),
+            right: Val::Px(16.0),
             ..default()
         },
     ));
