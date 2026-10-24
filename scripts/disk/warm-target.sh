@@ -16,6 +16,12 @@
 # Why step 2 is sound: for each mirrored file, cargo in this worktree sees exactly the
 # (content, mtime) pair cargo in SOURCE sees, so it reaches SOURCE's freshness verdict, which
 # is correct for SOURCE's target. Files that differ keep their checkout mtime and rebuild.
+#
+# The crate's own `src/` is never mirrored, so overmatch itself rebuilds here on the first build.
+# Its binaries bake the checkout's path in through `env!("CARGO_MANIFEST_DIR")`: one borrowed
+# from SOURCE reads SOURCE's assets and sources, so an edit to a RON file or an asset here would
+# go untested. And rustc discards a borrowed incremental cache (its working directory is a
+# tracked option), so that full crate compile is owed on the first edit regardless.
 # The verdict is only borrowed for a target that came from SOURCE, so the script refuses to
 # run over an existing target/: there, an older mtime could hide an edit the local target
 # never compiled.
@@ -56,6 +62,7 @@ fi
 mirrored=0
 differ=0
 while IFS= read -r -d '' f; do
+  [[ "$f" == src/* ]] && continue
   [[ -f "$dest/$f" && ! -L "$dest/$f" && -f "$src/$f" && ! -L "$src/$f" ]] || continue
   if cmp -s "$src/$f" "$dest/$f"; then
     touch -r "$src/$f" "$dest/$f"
@@ -65,4 +72,4 @@ while IFS= read -r -d '' f; do
   fi
 done < <(git -C "$dest" ls-files -z)
 
-echo "warm-target: cloned $src/target; mirrored $mirrored mtimes, $differ files differ"
+echo "warm-target: cloned $src/target; mirrored $mirrored mtimes, $differ files differ; src/ left to rebuild"

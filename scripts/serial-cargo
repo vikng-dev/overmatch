@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# serial-cargo — run one cargo command with this machine's build lock held.
+#
+# Usage: scripts/serial-cargo <cargo arguments>      e.g. scripts/serial-cargo test --lib ballistics
+#
+# One compile at a time per machine (AGENTS.md): this crate's rustc peaks at 2.3–4.5 GB (MEASURED
+# 2026-10-24) on a 16 GB box, and two builds at once each run slower than alone. Callers queue on
+# one `lockf` lock file and the next starts the moment the holder exits. Inside the lock, a rustc
+# started without this script (a build in the owner's terminal) is waited out first; a game left
+# running under `cargo run` holds no rustc and does not block.
+#
+# In a linked worktree with no target/, the first caller warms it from the main checkout
+# (`scripts/disk/warm-target.sh`) inside the lock, so the clone never copies a build in flight.
+#
+# CARGO_BUILD_JOBS defaults to 6; the caller's value wins. OVERMATCH_CARGO_LOCK_WAIT_S bounds the
+# wait for the lock (default 3600 s; lockf exits 75 when it runs out).
+set -euo pipefail
+
+here=$(cd "$(dirname "$0")" && pwd -P)
+
+if [[ "${1:-}" == "--holding-lock" ]]; then
+  shift
+  top=$(git rev-parse --show-toplevel)
+  if [[ ! -e "$top/target" &&
+        "$(git rev-parse --path-format=absolute --git-dir)" != "$(git rev-parse --path-format=absolute --git-common-dir)" ]]; then
+    (cd "$top" && "$here/disk/warm-target.sh")
+  fi
+  while pgrep -f '^[^ ]*rustc( |$)' >/dev/null; do sleep 2; done
+  export CARGO_BUILD_JOBS=${CARGO_BUILD_JOBS:-6}
+  exec cargo "$@"
+fi
+
+exec /usr/bin/lockf -k -t "${OVERMATCH_CARGO_LOCK_WAIT_S:-3600}" /tmp/overmatch-cargo.lock \
+  "$here/serial-cargo" --holding-lock "$@"
