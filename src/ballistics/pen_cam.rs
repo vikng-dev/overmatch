@@ -2020,3 +2020,66 @@ fn the_record_carries_the_burst() {
         }
     }
 }
+
+/// The record's clock keeps the burst trigger's: a burst in flight lies the delay after the exit
+/// that started it, the record timing that leg at the exit's speed as the trigger counts its path,
+/// and the ring's nose piece flies its open air from the burst at the carried speed it starts at.
+/// The fixture's delay is raised to 0.04 s so the drag met over it sets the carried speed under the
+/// exit speed, and the nose piece's leg to the next point of the path is metres long, each by more
+/// than ten tolerances (fixture data). A mutant that times the leg to the burst at the carried
+/// speed records the burst late by `delay × (v_exit / v_c − 1)`; one that flies the nose piece on
+/// at the exit speed records its leg short; each fails here.
+#[test]
+fn the_record_times_the_burst_at_the_triggers_speeds() {
+    // Seconds of f32 rounding in two path times near 0.1 s and one leg's length over its speed: a
+    // few ulps of 7.5e-9 s (DERIVED).
+    const CLOCK_TOLERANCE: f32 = 1.0e-7;
+    for shape in [burst::BurstShape::Ball, burst::BurstShape::Ring] {
+        let burst = burst::Burst {
+            delay: 0.04,
+            ..fixture_burst(shape)
+        };
+        let fired = fire_fused(
+            &[plate("front", THIN, 0.0, Kind::Main)],
+            burst::Fuze::of(Some(burst)),
+        );
+        let (exit, exit_speed) = exit_of(crossing_ends(&fired.log)[0]);
+        let (_, carried, _) = bursts(&fired.log)[0];
+        // The fuze's path sum may lie BURST_TOLERANCE off the straight leg the record times.
+        let tolerance = BURST_TOLERANCE / exit_speed;
+        assert!(
+            burst.delay * (exit_speed / carried - 1.0) > 10.0 * tolerance,
+            "{shape:?}: the drag leaves {carried} m/s of {exit_speed} m/s"
+        );
+        let report = &fired.report;
+        let node = |point: Vec3| {
+            report
+                .path
+                .iter()
+                .position(|node| Vec3::from(node.point).distance(point) < 1.0e-6)
+                .unwrap_or_else(|| panic!("{shape:?}: no path node at {point}"))
+        };
+        let recorded = report.burst.as_ref().expect("the record's burst");
+        let exited = report.path[node(exit)].t;
+        assert!(
+            (recorded.t - exited - burst.delay).abs() < tolerance,
+            "{shape:?}: recorded {} s after the exit, not {} s",
+            recorded.t - exited,
+            burst.delay
+        );
+        if shape == burst::BurstShape::Ring {
+            let at = node(Vec3::from(recorded.point));
+            let (from, to) = (report.path[at], report.path[at + 1]);
+            let length = Vec3::from(to.point).distance(Vec3::from(from.point));
+            assert!(
+                length * (1.0 / carried - 1.0 / exit_speed) > 10.0 * CLOCK_TOLERANCE,
+                "the nose piece's leg is {length} m"
+            );
+            assert!(
+                (to.t - from.t - length / carried).abs() < CLOCK_TOLERANCE,
+                "{shape:?}: the nose piece flies {length} m in {} s, not at {carried} m/s",
+                to.t - from.t
+            );
+        }
+    }
+}

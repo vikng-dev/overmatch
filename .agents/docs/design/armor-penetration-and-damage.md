@@ -486,19 +486,21 @@ s1's carried speed (244.6 m/s):
 | ball at 244.6 m/s (`λ` 1.188, rim 57.3°) | on the axis | 10.47 | 6.46 m | 4.57 m |
 | ring at 244.6 m/s (`λ` 0.452, band 55.7–75.7°) | in the band | 6.32 | 4.98 m | 3.52 m |
 
-**The record.** The shot record carries the burst (`damage_cam::Burst`): when (the path reaching
-the burst point, or for a round at rest the delay's remainder after it stopped there), the burst
-point, the carried speed, the ring's nose piece's mass, and the field as a cone record (absent when
-the HP quantum gate held it). The ball's record ends `Burst`; the ring's path runs on with the nose
-piece's line to its own end. A struck tank's record stays open while a fuze that tank armed runs,
-so a burst past its last body lands in it. The wire round-trips the burst; its 256 directions add
-0.3–1.3 KB to a message (MEASURED, `src/damage_cam/wire.rs`). The pen cam draws the burst field
-as it draws a plate cone (`src/damage_cam/pen_cam/field.rs`): thrown when the shell's nose reaches
-the burst point on the corner's clock, its front running out each direction's reach, over the law's
-support alone. The ring reads as a band about the line with nothing drawn inside its near edge; the
-ball as a cap ahead, or the whole sphere, closed with no seam. The ball's line ends at the burst
-point, where the shell rests at the end; the ring's runs on with the nose piece. A box the burst
-doses is reached when the first field that dosed it, a plate cone's or the burst's, reaches it.
+**The record.** The shot record carries the burst (`damage_cam::Burst`): when (the path reaching the
+burst point, its last leg timed at the speed the burst trigger counts it at, so a burst in flight
+lies the delay after the exit that last started it; for a round at rest, the delay's remainder after
+it stopped there), the burst point, the carried speed, the ring's nose piece's mass, and the field
+as a cone record (absent when the HP quantum gate held it). The ball's record ends `Burst`; the
+ring's path runs on with the nose piece's line to its own end, its open air timed at the carried
+speed. A struck tank's record stays open while a fuze that tank armed runs, so a burst past its last
+body lands in it. The wire round-trips the burst; its 256 directions add 0.3–1.3 KB to a message
+(MEASURED, `src/damage_cam/wire.rs`). The pen cam draws the burst field as it draws a plate cone
+(`src/damage_cam/pen_cam/field.rs`): thrown when the shell's nose reaches the burst point on the
+corner's clock, its front running out each direction's reach, over the law's support alone. The ring
+reads as a band about the line with nothing drawn inside its near edge; the ball as a cap ahead, or
+the whole sphere, closed with no seam. The ball's line ends at the burst point, where the shell
+rests at the end; the ring's runs on with the nose piece. A box the burst doses is reached when the
+first field that dosed it, a plate cone's or the burst's, reaches it.
 
 **Scenarios** (`assets/dev/pen_cam/`, fixture data; each record's `shows` says what it shows).
 s13 and s14 fly s1's line with the ring and the ball: the upper front plate arms the fuze, the
