@@ -6,11 +6,13 @@
 //!
 //! Whether the round stopped, where it left the tank and where the line entered a component are the
 //! record's own facts; nothing here re-derives them from geometry. A component's shape, and the
-//! whole tank's bounds, serve only framing, never timing. Two things are derived rather than read,
-//! and are labelled where they are made: the line's remaining capability, `(v/v₀)²` from the
-//! path's times (the record carries no capability), and the moment a component is reached (the arc of the line's
-//! recorded entry, or the field that dosed it; a synthetic clip that names neither is reached at
-//! contact).
+//! whole tank's bounds, serve only framing, never timing. Three things are derived rather than
+//! read, and are labelled where they are made: the line's remaining capability, `(v/v₀)²` from the
+//! path's times (the record carries no capability), the moment a component is reached (the arc of
+//! the line's recorded entry, or the field that dosed it; a synthetic clip that names neither is
+//! reached at contact), and each field front's speed ([`Cone::speed`]; the record holds no fragment
+//! speed). Every time here is the record's own (s); the corner plays it at a fixed slowdown
+//! (`super::timeline::REPLAY_SLOWDOWN`).
 
 use bevy::prelude::*;
 
@@ -70,11 +72,14 @@ pub struct Plan {
     pub tank_bounds: Option<(Vec3, Vec3)>,
 }
 
-/// The path as points with cumulative arc length and the remaining-capability fraction of the
-/// segment that ends at each point.
+/// The path as points with cumulative arc length, the record's time at each point and the
+/// remaining-capability fraction of the segment that ends at each point.
 pub struct Polyline {
     pub points: Vec<Vec3>,
     pub arc: Vec<f32>,
+    /// The record's time (s) at each point ([`crate::damage_cam::PathPoint::t`]), never decreasing
+    /// along the path, as the record's self-consistency check holds every record to.
+    pub times: Vec<f32>,
     /// `(v/v₀)²` of the segment ending at point `i` (DERIVED from the path's times), `1` at `0`.
     pub energy: Vec<f32>,
 }
@@ -117,6 +122,69 @@ impl Polyline {
             }
         }
         Vec3::NEG_Z
+    }
+
+    /// The record time (s) at arc length `s`: linear in arc along each leg, the line's first time
+    /// before it, and past its end run on at the last leg's speed.
+    pub fn time_at(&self, s: f32) -> f32 {
+        let (Some(&first), Some(&last)) = (self.times.first(), self.times.last()) else {
+            return 0.0;
+        };
+        if s <= 0.0 {
+            return first;
+        }
+        for i in 1..self.points.len() {
+            if s <= self.arc[i] {
+                let span = self.arc[i] - self.arc[i - 1];
+                let f = if span > 0.0 {
+                    (s - self.arc[i - 1]) / span
+                } else {
+                    1.0
+                };
+                return self.times[i - 1] + f * (self.times[i] - self.times[i - 1]);
+            }
+        }
+        self.last_speed()
+            .map_or(last, |v| last + (s - self.length()) / v)
+    }
+
+    /// The arc length the round's nose stands at at record time `t` (s): linear in arc along each
+    /// leg, a leg with no time span crossed at once, the line's start before it, and past its end
+    /// run on at the last leg's speed.
+    pub fn arc_at_time(&self, t: f32) -> f32 {
+        let Some(&last) = self.times.last() else {
+            return 0.0;
+        };
+        for i in 1..self.points.len() {
+            if t < self.times[i] {
+                let dt = self.times[i] - self.times[i - 1];
+                let f = if dt > 0.0 {
+                    ((t - self.times[i - 1]) / dt).clamp(0.0, 1.0)
+                } else {
+                    0.0
+                };
+                return self.arc[i - 1] + f * (self.arc[i] - self.arc[i - 1]);
+            }
+        }
+        self.last_speed()
+            .map_or(self.length(), |v| self.length() + (t - last) * v)
+    }
+
+    /// The record's speed (m/s) on leg `i` (from point `i − 1` to point `i`): its length over its
+    /// time span, infinite for a leg with none; `None` for no leg.
+    pub fn leg_speed(&self, i: usize) -> Option<f32> {
+        if i == 0 || i >= self.points.len() {
+            return None;
+        }
+        let dt = self.times[i] - self.times[i - 1];
+        let length = self.arc[i] - self.arc[i - 1];
+        Some(if dt > 0.0 { length / dt } else { f32::INFINITY })
+    }
+
+    /// The last leg's speed (m/s), where it is finite and positive.
+    fn last_speed(&self) -> Option<f32> {
+        self.leg_speed(self.points.len().saturating_sub(1))
+            .filter(|v| v.is_finite() && *v > 0.0)
     }
 
     /// The index of the leg the line runs on just past arc length `s`: the first point whose arc
@@ -172,6 +240,17 @@ pub struct Bounce {
     pub arc: f32,
 }
 
+/// Where and when a field is thrown, and how fast its front runs.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Thrown {
+    /// The line's arc length at its origin.
+    pub arc: f32,
+    /// The record time (s) it was thrown ([`SpallCone::t`]).
+    pub t: f32,
+    /// Its front's speed (m/s of record): [`Cone::speed`].
+    pub speed: f32,
+}
+
 /// One field as the record marched it: a spall cone, or a burst's field
 /// ([`PenetrationReport::fields`]).
 pub struct Cone {
@@ -184,21 +263,29 @@ pub struct Cone {
     pub strength: f32,
     /// Where the line throws it, arc length.
     pub arc: f32,
+    /// The record time (s) it was thrown.
+    pub t: f32,
+    /// Its front's speed (m/s of record), the same in every direction: a spall cone's is the
+    /// round's exit speed off the plate that threw it (the record's speed on the path leg leaving
+    /// that crossing), a burst's field's the burst's sideways speed ([`crate::damage_cam::Burst`]).
+    /// DERIVED stand-ins: the record holds no fragment speed. A front with no finite positive
+    /// speed (a leg with no time span) is whole once thrown.
+    pub speed: f32,
     pub rays: Vec<Ray>,
     /// The directions' reach and strength as one function of direction, baked from `rays`.
     pub disc: Disc,
 }
 
 impl Cone {
-    /// The cone of these parts, its support from `inner` to `half_angle` (rad) off its axis, its
-    /// [`Disc`] baked from `rays`.
+    /// The cone of these parts, its support from `inner` to `half_angle` (rad) off its axis,
+    /// `thrown` as given, its [`Disc`] baked from `rays`.
     pub fn new(
         origin: Vec3,
         axis: Vec3,
         half_angle: f32,
         inner: f32,
         strength: f32,
-        arc: f32,
+        thrown: Thrown,
         rays: Vec<Ray>,
     ) -> Self {
         let disc = Disc::of(axis, half_angle, inner, strength, &rays);
@@ -207,9 +294,33 @@ impl Cone {
             axis,
             half_angle,
             strength,
-            arc,
+            arc: thrown.arc,
+            t: thrown.t,
+            speed: thrown.speed,
             rays,
             disc,
+        }
+    }
+
+    /// Record seconds its front takes to run `distance` (m) from its origin; none for a front with
+    /// no finite positive speed.
+    pub fn run_time(&self, distance: f32) -> f32 {
+        if self.speed.is_finite() && self.speed > 0.0 {
+            distance / self.speed
+        } else {
+            0.0
+        }
+    }
+
+    /// How far (m) its front has run `dt` record seconds after it was thrown: negative before, and
+    /// for a front with no finite positive speed its longest reach from then on.
+    pub fn front(&self, dt: f32) -> f32 {
+        if self.speed.is_finite() && self.speed > 0.0 {
+            self.speed * dt
+        } else if dt >= 0.0 {
+            self.max_reach()
+        } else {
+            dt
         }
     }
 
@@ -327,7 +438,16 @@ impl Plan {
             outgoing: Vec3::from(bounce.outgoing).normalize_or(Vec3::NEG_Z),
             arc: line.arc_of(Vec3::from(bounce.point)),
         });
-        let cones: Vec<Cone> = report.fields().map(|c| cone(c, &line)).collect();
+        let spall = report.spall.iter().map(|c| {
+            let arc = line.arc_of(Vec3::from(c.origin));
+            let exit = line.leg_speed(line.leg_after(arc)).unwrap_or(0.0);
+            cone(c, &line, exit)
+        });
+        let burst = report
+            .burst
+            .iter()
+            .filter_map(|b| b.field.as_ref().map(|c| cone(c, &line, b.sideways_mps)));
+        let cones: Vec<Cone> = spall.chain(burst).collect();
         let boxes = report
             .components
             .iter()
@@ -417,6 +537,7 @@ impl Plan {
             line: Polyline {
                 points: Vec::new(),
                 arc: Vec::new(),
+                times: Vec::new(),
                 energy: Vec::new(),
             },
             start_arc: 0.0,
@@ -518,11 +639,13 @@ fn polyline(report: &PenetrationReport) -> Polyline {
     Polyline {
         points,
         arc,
+        times,
         energy,
     }
 }
 
-fn cone(cone: &SpallCone, line: &Polyline) -> Cone {
+/// The plan's field of `cone`, thrown on `line`, its front running at `speed` (m/s of record).
+fn cone(cone: &SpallCone, line: &Polyline, speed: f32) -> Cone {
     let origin = Vec3::from(cone.origin);
     let axis = Vec3::from(cone.axis).normalize_or(Vec3::NEG_Z);
     let half_angle = cone.field.half_angle();
@@ -550,7 +673,11 @@ fn cone(cone: &SpallCone, line: &Polyline) -> Cone {
         half_angle,
         cone.field.inner_angle(),
         cone.strength,
-        line.arc_of(origin),
+        Thrown {
+            arc: line.arc_of(origin),
+            t: cone.t,
+            speed,
+        },
         rays,
     )
 }

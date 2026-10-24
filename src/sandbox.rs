@@ -596,9 +596,11 @@ fn respawn_target(
     }
     let now = time.elapsed_secs_f64();
     let knocked_out_s = *respawn.knocked_out_s.get_or_insert(now);
-    let due = *respawn
-        .due_s
-        .insert(rebuild_due(knocked_out_s, target.xray.shown_since()));
+    let due = *respawn.due_s.insert(rebuild_due(
+        knocked_out_s,
+        target.xray.shown_since(),
+        target.xray.hold_from(),
+    ));
     if now >= due {
         target.rebuild();
         *respawn = Respawn::default();
@@ -606,12 +608,13 @@ fn respawn_target(
 }
 
 /// When a target knocked out at `knocked_out_s` is rebuilt: [`REBUILD_BEAT_S`] past the hold beat
-/// of the look's replay of the record on show, first shown at `shown_since` — taken as shown at the
-/// knockout when it showed before it (an earlier shot's) or none shows (the look off). Virtual
-/// seconds, the look's clock in `Update`.
-fn rebuild_due(knocked_out_s: f64, shown_since: Option<f64>) -> f64 {
+/// (corner time `hold_from`, [`XRayRelease::hold_from`]) of the look's replay of the record on
+/// show, first shown at `shown_since` — taken as shown at the knockout when it showed before it
+/// (an earlier shot's) or none shows (the look off). Virtual seconds, the look's clock in
+/// `Update`.
+fn rebuild_due(knocked_out_s: f64, shown_since: Option<f64>, hold_from: f32) -> f64 {
     let shown = shown_since.map_or(knocked_out_s, |shown| shown.max(knocked_out_s));
-    XRayRelease::held_at(shown) + REBUILD_BEAT_S
+    XRayRelease::held_at(shown, hold_from) + REBUILD_BEAT_S
 }
 
 /// The [`ArmourOverlay`]'s two materials, one armour blue: lit + matte, so adjacent plates shade

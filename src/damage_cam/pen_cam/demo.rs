@@ -407,12 +407,14 @@ impl Run {
             .victim
             .then(|| {
                 self.shots.iter().enumerate().find_map(|(index, shot)| {
-                    library.records[shot.record].knockout.map(|_| {
+                    let record = &library.records[shot.record];
+                    record.knockout.map(|_| {
                         (
                             index,
                             killcam::Beats {
                                 impact: shot.impact,
-                                shooter: library.records[shot.record].report.shooter.is_some(),
+                                shooter: record.report.shooter.is_some(),
+                                lesson_s: killcam::lesson_length(Some(&record.plan)),
                             },
                         )
                     })
@@ -442,7 +444,7 @@ impl Run {
         let corner_end = self
             .turns
             .last()
-            .map(|turn| turn.start + self.kind_of(turn.record, library).duration())
+            .map(|turn| turn.start + self.pace_of(turn.record, library).duration)
             .unwrap_or(0.0);
         self.end = (last_impact + 1.0).max(corner_end) + TAIL_S;
         if let Some((_, beats)) = self.kill {
@@ -457,6 +459,12 @@ impl Run {
             self.frame
                 .unwrap_or(library.records[self.shots[shot].record].plan.kind)
         }
+    }
+
+    /// Shot `shot`'s corner times in its frame ([`stage::pace`]).
+    pub fn pace_of(&self, shot: usize, library: &Library) -> timeline::Pace {
+        let plan = &library.records[self.shots[shot].record].plan;
+        stage::pace(plan, self.kind_of(shot, library))
     }
 
     /// Drop beat 3 from the kill run, whose shooter cannot be staged: the death screen follows the
@@ -736,7 +744,7 @@ fn advance(
     let dt = time.delta_secs() * SPEEDS[run.speed];
     if let Some(showing) = corner.showing
         && keys.pressed(KeyCode::KeyC)
-        && showing.c >= showing.kind.hold_from()
+        && showing.c >= stage::pace(&library.records[showing.record].plan, showing.kind).hold_from
         && run.dismissed.is_none_or(|(turn, _)| turn != showing.turn)
     {
         if run.held_turn != Some(showing.turn) {
@@ -779,7 +787,7 @@ fn corner_now(run: Res<Run>, library: Res<Library>, mut corner: ResMut<Corner>) 
         for (index, turn) in run.turns.iter().enumerate() {
             let kind = run.kind_of(turn.record, &library);
             let c = run.t - turn.start - held(index);
-            let mut duration = kind.duration();
+            let mut duration = run.pace_of(turn.record, &library).duration;
             if let Some((dismissed, at)) = run.dismissed
                 && dismissed == index
             {
@@ -792,8 +800,7 @@ fn corner_now(run: Res<Run>, library: Res<Library>, mut corner: ResMut<Corner>) 
             }
             let replacing = index > 0 && {
                 let previous = &run.turns[index - 1];
-                let previous_kind = run.kind_of(previous.record, &library);
-                turn.start < previous.start + previous_kind.duration()
+                turn.start < previous.start + run.pace_of(previous.record, &library).duration
             };
             let (opacity, scale, fading) = timeline::turn_presence(c, duration, replacing);
             now.fading = fading;

@@ -54,7 +54,7 @@ use bevy::window::{CursorOptions, PrimaryWindow};
 
 use super::super::killcam::{
     self as demo, Beat, Beats, Card, CardAccent, CardText, DeathPanel, DeathText, DeathTint, HIT_S,
-    Index, Killer, Prompt, card_lines, lesson_showing,
+    Index, Killer, Prompt, card_lines, lesson_length, lesson_showing,
 };
 use super::super::plan::Plan;
 use super::super::stage::StageShell;
@@ -602,30 +602,30 @@ pub(super) fn drive(
         death.resolved = true;
     }
 
-    // A run starts: on its own once, or on the replay key at the death screen.
+    // A run starts: on its own once, or on the replay key at the death screen. The run's zero and
+    // its impact on the run's clock.
     let start = match (&victim.record, death.run) {
         (Some(record), None) if !death.resolved && record.timely => {
             death.resolved = true;
             // The lesson opens no sooner than the hit beat's end and the record's arrival.
-            Some((
-                zero,
-                Beats {
-                    impact: (record.after_s - HIT_S).max(0.0),
-                    shooter: false,
-                },
-            ))
+            Some((zero, (record.after_s - HIT_S).max(0.0)))
         }
-        (Some(_), None) if death.resolved && replay && !map => Some((
-            now,
-            Beats {
-                impact: -HIT_S,
-                shooter: false,
-            },
-        )),
+        (Some(_), None) if death.resolved && replay && !map => Some((now, -HIT_S)),
         _ => None,
     };
-    if let (Some((run_zero, beats)), Some(record)) = (start, victim.record.as_ref()) {
+    if let (Some((run_zero, impact)), Some(record)) = (start, victim.record.as_ref()) {
         let report = &record.stored.report;
+        // The lesson's record, for the stage the slot keeps.
+        let plan = report
+            .vehicle
+            .as_deref()
+            .and_then(|vehicle| slot.tank(vehicle, blueprint.as_deref()))
+            .map(|tank_asset| Arc::new(Plan::new(report, &tank_asset.shapes(&report.servo_deg))));
+        let beats = Beats {
+            impact,
+            shooter: false,
+            lesson_s: lesson_length(plan.as_deref()),
+        };
         let own_rig = tank.and_then(|(_, _, _, _, tank_rig)| tank_rig);
         death.run = Some(Run::start(record, run_zero, beats, own_rig, &scene));
         // A press the router gave the menu this frame — it routed on the gate as the frame
@@ -635,15 +635,10 @@ pub(super) fn drive(
         {
             *escape = EscapeAction::None;
         }
-        // The lesson's record, on the stage the slot keeps.
         rig.exhibits.0.clear();
-        if let Some(tank_asset) = report
-            .vehicle
-            .as_deref()
-            .and_then(|vehicle| slot.tank(vehicle, blueprint.as_deref()))
-        {
+        if let Some(plan) = plan {
             rig.exhibits.0.push(Exhibit {
-                plan: Arc::new(Plan::new(report, &tank_asset.shapes(&report.servo_deg))),
+                plan,
                 servo_deg: report.servo_deg.clone(),
             });
         }

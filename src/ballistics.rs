@@ -1174,6 +1174,8 @@ pub enum ArmourMark {
         /// rest, zero in flight. The march settles the field in the tick the round stopped; the
         /// record times it here.
         after: f32,
+        /// The burst's greatest sideways speed `v_s` (m/s), its round's ([`burst::Burst`]).
+        sideways: f32,
         nose: Option<f32>,
         /// The tank whose body armed or last restarted the fuze: the tank the field walks.
         tank: Option<Entity>,
@@ -3077,6 +3079,7 @@ fn burst_here(
         at: flight.position,
         speed,
         after,
+        sideways: burst.sideways_speed,
         nose: nose.map(|nose| nose.mass),
         tank,
     });

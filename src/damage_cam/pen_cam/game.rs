@@ -151,20 +151,23 @@ fn log_presence(
     *shown = now;
 }
 
-/// One explanation queued for the slot: its exhibit.
+/// One explanation queued for the slot: its exhibit, and its length in its frame
+/// ([`stage::pace`]).
 #[derive(Clone)]
 struct Queued {
     serial: usize,
     kind: CornerKind,
+    duration: f32,
     vehicle: String,
     exhibit: Exhibit,
 }
 
-/// The turn on show: its serial and frame, and when it started on the slot's clock.
+/// The turn on show: its serial, frame and length, and when it started on the slot's clock.
 #[derive(Clone, Copy)]
 struct Turn {
     serial: usize,
     kind: CornerKind,
+    duration: f32,
     start: f32,
     /// Whether it replaced a turn still open when it started.
     replacing: bool,
@@ -486,9 +489,11 @@ fn drive(
         state.serials += 1;
         state.newest = Some(recency);
         floor = Some(recency);
+        let kind = exhibit.plan.kind;
         let queued = Queued {
             serial: state.serials,
-            kind: exhibit.plan.kind,
+            kind,
+            duration: stage::pace(&exhibit.plan, kind).duration,
             vehicle,
             exhibit,
         };
@@ -501,7 +506,7 @@ fn drive(
     let now = (time.elapsed_secs_f64() - epoch) as f32;
     state.lineup.advance(now, |_, _| {});
     let current = state.lineup.current().map(|(queued, start)| {
-        let ended = now - start > queued.kind.duration();
+        let ended = now - start > queued.duration;
         (queued.clone(), start, ended)
     });
     let ended = current.as_ref().is_none_or(|(_, _, ended)| *ended);
@@ -534,9 +539,10 @@ fn drive(
         previous => Turn {
             serial: queued.serial,
             kind: queued.kind,
+            duration: queued.duration,
             start,
             replacing: previous.is_some_and(|previous| {
-                start < previous.start + previous.kind.duration() && rig.corner.showing.is_some()
+                start < previous.start + previous.duration && rig.corner.showing.is_some()
             }),
         },
     };
@@ -544,7 +550,7 @@ fn drive(
         rig.exhibits.0 = vec![queued.exhibit];
     }
     state.turn = Some(turn);
-    let duration = turn.kind.duration();
+    let duration = turn.duration;
     let c = now - turn.start;
     let (opacity, scale, fading) = timeline::turn_presence(c, duration, turn.replacing);
     rig.corner.set_if_neq(Corner {
@@ -663,6 +669,13 @@ mod tests {
         let mut view = StageView::standing_in(spec, root);
         view.vehicle = vehicle;
         world.insert_resource(view);
+    }
+
+    /// How long `report`'s corner runs in its verdict's frame ([`stage::pace`]); a component's
+    /// shape never times a record, so no tank's shapes are needed.
+    fn corner_length(report: &PenetrationReport) -> f32 {
+        let plan = Plan::new(report, &crate::damage_cam::shapes::TankShapes::default());
+        stage::pace(&plan, plan.kind).duration
     }
 
     /// `name`'s record fired by the shooter at the struck tank's first life on `fire_tick`: the
@@ -810,7 +823,7 @@ mod tests {
     }
 
     /// The player's shooter explanation opens exactly one corner, in its verdict's frame, for its
-    /// timeline's length, then closes it and leaves nothing of it.
+    /// record's corner length, then closes it and leaves nothing of it.
     #[test]
     fn a_shooter_explanation_opens_one_corner_in_its_frame_and_closes_it() {
         for name in ["s1_through_crew", "s2_stopped_mantlet", "s3_ricochet"] {
@@ -819,9 +832,10 @@ mod tests {
             let kind = CornerKind::of(report.impact.verdict);
             stage_ready(&mut app, &report);
             receive(&mut app, shooter, &vocabulary);
+            let duration = corner_length(&report);
             let mut frames = 0;
             let mut shown = Vec::new();
-            for _ in 0..((kind.duration() + 1.0) / STEP_S) as usize {
+            for _ in 0..((duration + 1.0) / STEP_S) as usize {
                 step(&mut app);
                 if let Some(showing) = app.world().resource::<Corner>().showing {
                     frames += 1;
@@ -835,9 +849,8 @@ mod tests {
             assert_eq!(shown.len(), 1, "{name}: one turn");
             let shown_s = frames as f32 * STEP_S;
             assert!(
-                (shown_s - kind.duration()).abs() <= 2.0 * STEP_S,
-                "{name}: shown {shown_s} s of {} s",
-                kind.duration()
+                (shown_s - duration).abs() <= 2.0 * STEP_S,
+                "{name}: shown {shown_s} s of {duration} s"
             );
             assert!(app.world().resource::<Corner>().showing.is_none());
             assert_eq!(census(&mut app).0, 0, "{name}: nothing of the corner left");
@@ -946,7 +959,12 @@ mod tests {
         let later = now + crate::damage_cam::delivery::IMPACT_TIMEOUT_S;
         store.expire(later);
         store.receive(waiting.clone(), &vocabulary, later);
-        assert_eq!(run(&mut app, 5.0).len(), 1, "only the drawn impact opens");
+        let length = corner_length(&report) + 1.0;
+        assert_eq!(
+            run(&mut app, length).len(),
+            1,
+            "only the drawn impact opens"
+        );
         assert_eq!(census(&mut app).0, 0, "the corner closed");
 
         stage_ready(&mut app, &report);
@@ -954,7 +972,7 @@ mod tests {
             .resource_mut::<ShotExplanations>()
             .drew(waiting.shot, waiting.outcome.unwrap());
         assert_eq!(
-            run(&mut app, 5.0).len(),
+            run(&mut app, length).len(),
             1,
             "the waiting one opens once drawn"
         );
@@ -974,7 +992,7 @@ mod tests {
                 if disconnect {
                     app.world_mut().trigger(CloseCorner);
                 }
-                run(&mut app, 5.0);
+                run(&mut app, corner_length(&report));
                 assert_eq!(census(&mut app).0, 0, "{name}: the corner closed");
                 assert!(default_image_kept(&app), "{name}, disconnect {disconnect}");
             }
@@ -1016,7 +1034,7 @@ mod tests {
         let (c, _, c_vocabulary, _) = explained("s3_ricochet", 1100);
         stage_ready(&mut app, &report);
         receive(&mut app, a, &a_vocabulary);
-        let mut shown = run(&mut app, CornerKind::Glass.duration());
+        let mut shown = run(&mut app, corner_length(&report));
         let now = app.world().resource::<Time>().elapsed_secs_f64();
         app.world_mut()
             .resource_mut::<ShotExplanations>()
@@ -1673,7 +1691,7 @@ mod tests {
         }
         assert!(both, "two sets, each on its own viewer");
         assert!(masked, "both sets existed at once");
-        run(&mut app, kind.duration() + 1.0);
+        run(&mut app, corner_length(&report) + 1.0);
         assert_eq!(census(&mut app).0, 0, "the corner closed");
         assert_eq!(xray_census(&mut app).2, vec![camera], "its set alone went");
         assert_eq!(xray_census(&mut app).0, 2);

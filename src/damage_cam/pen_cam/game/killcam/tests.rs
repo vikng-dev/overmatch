@@ -14,6 +14,16 @@ use crate::damage_cam::wire::{BuiltExplanation, ShotExplanation, ShotVocabulary}
 /// The recorded scenario every test kills with: fixture data.
 const RECORD: &str = "s1_through_crew";
 
+/// The lesson's length for [`RECORD`] ([`lesson_length`]); a component's shape never times a
+/// record, so no tank's shapes are needed.
+fn lesson_s() -> f32 {
+    let plan = Plan::new(
+        &report(RECORD),
+        &crate::damage_cam::shapes::TankShapes::default(),
+    );
+    lesson_length(Some(&plan))
+}
+
 /// Where the fixture's shooter fired from, in the record's frame (m): fixture data, so the killer
 /// beat plays.
 const MUZZLE_M: [f32; 3] = [400.0, 1.8, 300.0];
@@ -175,6 +185,11 @@ fn either_arrival_order_plays_the_four_beats() {
         let lesson = victim(&app).run().unwrap().beats.lesson();
         assert!(lesson >= HIT_S, "{record_after_s}: lesson at {lesson}");
         assert!(lesson + 1e-3 >= record_after_s, "{record_after_s}");
+        let length = victim(&app).run().unwrap().beats.lesson_s;
+        assert!(
+            (length - lesson_s()).abs() < 1e-2,
+            "{record_after_s}: the lesson runs {length} s, its record's"
+        );
 
         assert!(until(&mut app, 1.5, |app| beat(app) == Some(Beat::Lesson)));
         let now = app.world().resource::<Time>().elapsed_secs_f64();
@@ -188,7 +203,9 @@ fn either_arrival_order_plays_the_four_beats() {
         );
         assert_eq!(app.world().resource::<Exhibits>().0.len(), 1);
 
-        assert!(until(&mut app, 5.0, |app| beat(app) == Some(Beat::Killer)));
+        assert!(until(&mut app, lesson_s() + 1.4, |app| {
+            beat(app) == Some(Beat::Killer)
+        }));
         assert!(captive(&app));
         assert!(app.world().resource::<Corner>().showing.is_none());
         assert!(gate(&app).holds_death_screen);
@@ -258,7 +275,9 @@ fn a_late_record_is_offered_for_replay() {
     press(&mut app, KeyCode::Space);
     assert_eq!(beat(&app), Some(Beat::Lesson));
     assert!(gate(&app).holds_death_screen);
-    assert!(until(&mut app, 10.0, |app| victim(app).run().is_none()));
+    assert!(until(&mut app, lesson_s() + 6.4, |app| victim(app)
+        .run()
+        .is_none()));
     assert!(!gate(&app).holds_death_screen);
 }
 
@@ -292,7 +311,9 @@ fn skip_hold_and_replay() {
 
     press(&mut app, KeyCode::Space);
     assert_eq!(beat(&app), Some(Beat::Lesson), "replayed");
-    assert!(until(&mut app, 10.0, |app| victim(app).run().is_none()));
+    assert!(until(&mut app, lesson_s() + 6.4, |app| victim(app)
+        .run()
+        .is_none()));
     assert!(victim(&app).record.is_some());
 }
 
@@ -340,7 +361,7 @@ fn respawn_or_disconnect_mid_beat_leaves_nothing() {
         knock_out(&mut app, player);
         step(&mut app);
         stage_of(&mut app, report.vehicle.as_deref().unwrap());
-        assert!(until(&mut app, 6.0, |app| beat(app) == Some(at)));
+        assert!(until(&mut app, lesson_s() + 2.4, |app| beat(app) == Some(at)));
         if at == Beat::Lesson {
             // The captive placement's profile, which runs in `PostUpdate` with the camera plugin.
             app.world_mut()
@@ -404,7 +425,9 @@ fn the_slot_stays_closed_under_the_kill_cam() {
     };
     let (_, shooter, vocabulary, _) = shot(SHOOTER, struck, false);
     receive(&mut app, shooter, &vocabulary);
-    assert!(until(&mut app, 10.0, |app| victim(app).run().is_none()));
+    assert!(until(&mut app, lesson_s() + 6.4, |app| victim(app)
+        .run()
+        .is_none()));
     assert!(app.world().resource::<Corner>().showing.is_none());
 }
 
@@ -535,7 +558,9 @@ fn each_beats_channels_resolve_on_its_first_frame() {
         (Beat::Lesson, CameraProfile::KillCamLesson),
         (Beat::Killer, CameraProfile::BattlefieldThirdPerson),
     ] {
-        assert!(until(&mut app, 6.0, |app| beat(app) == Some(beat_now)));
+        assert!(until(&mut app, lesson_s() + 2.4, |app| {
+            beat(app) == Some(beat_now)
+        }));
         assert_eq!(layers(&app), Some(profile.mask()), "{beat_now:?}");
     }
 }
@@ -725,7 +750,9 @@ fn the_death_flow_owns_the_device() {
         };
         hold_all(&mut app, 8, silent);
         let_go(&mut app);
-        assert!(until(&mut app, 10.0, |app| victim(app).run().is_none()));
+        assert!(until(&mut app, lesson_s() + 6.4, |app| victim(app)
+            .run()
+            .is_none()));
         hold_all(&mut app, 8, silent);
         assert_eq!(beat(&app), Some(Beat::Lesson), "{replay:?}: replayed");
         assert_eq!(

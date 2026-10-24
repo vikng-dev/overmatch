@@ -219,7 +219,11 @@ fn assert_round_trip(name: &str, decoded: &PenetrationReport, recorded: &Penetra
     if let (Some(d), Some(r)) = (&decoded.burst, &recorded.burst) {
         assert_time(name, d.t, r.t);
         assert_point(name, d.point, r.point);
-        assert_eq!((d.speed_mps, d.nose_kg), (r.speed_mps, r.nose_kg), "{name}");
+        assert_eq!(
+            (d.speed_mps, d.sideways_mps, d.nose_kg),
+            (r.speed_mps, r.sideways_mps, r.nose_kg),
+            "{name}"
+        );
         assert_eq!(d.field.is_some(), r.field.is_some(), "{name}");
         if let (Some(d), Some(r)) = (&d.field, &r.field) {
             assert_field(name, d, r);

@@ -5,6 +5,7 @@
 use std::time::Duration;
 
 use bevy::asset::AssetPlugin;
+use bevy::ecs::system::RunSystemOnce;
 use bevy::time::TimeUpdateStrategy;
 use bevy::world_serialization::WorldAsset;
 
@@ -212,6 +213,13 @@ fn respawn() -> App {
     app
 }
 
+/// The x-ray's hold beat as `app` reads it: the victim frame's minimum, the look not mounted.
+fn hold_from(app: &mut App) -> f32 {
+    app.world_mut()
+        .run_system_once(|xray: XRayRelease| xray.hold_from())
+        .unwrap()
+}
+
 fn now_s(app: &App) -> f64 {
     app.world().resource::<Time<Virtual>>().elapsed_secs_f64()
 }
@@ -230,28 +238,30 @@ fn knocked_out() -> TankKnockedOut {
 /// cuts it short.
 #[test]
 fn the_rebuild_waits_out_the_looks_replay_of_the_knockout() {
-    // Fixture data: a knockout at 10 s, the knockout's record first shown 0.4 s after it.
+    // Fixture data: a knockout at 10 s, the knockout's record first shown 0.4 s after it and
+    // reaching its hold beat 2.5 s into its replay.
     let knocked_out_s = 10.0;
     let shown_s = knocked_out_s + 0.4;
+    let hold_from = 2.5;
     assert!(
-        XRayRelease::held_at(knocked_out_s) > knocked_out_s,
+        XRayRelease::held_at(knocked_out_s, hold_from) > knocked_out_s,
         "the hold beat comes after the first showing"
     );
-    let from_knockout = XRayRelease::held_at(knocked_out_s) + REBUILD_BEAT_S;
+    let from_knockout = XRayRelease::held_at(knocked_out_s, hold_from) + REBUILD_BEAT_S;
     assert_eq!(
-        rebuild_due(knocked_out_s, None),
+        rebuild_due(knocked_out_s, None, hold_from),
         from_knockout,
         "the look off"
     );
     assert_eq!(
-        rebuild_due(knocked_out_s, Some(knocked_out_s - 3.0)),
+        rebuild_due(knocked_out_s, Some(knocked_out_s - 3.0), hold_from),
         from_knockout,
         "an earlier shot's record on show"
     );
     assert_eq!(
-        rebuild_due(knocked_out_s, Some(shown_s)),
-        XRayRelease::held_at(shown_s) + REBUILD_BEAT_S,
-        "the knockout's record on show"
+        rebuild_due(knocked_out_s, Some(shown_s), hold_from),
+        shown_s + f64::from(hold_from) + REBUILD_BEAT_S,
+        "the knockout's record on show, held at its own hold beat"
     );
 }
 
@@ -268,7 +278,7 @@ fn a_knocked_out_target_is_rebuilt_once_due() {
     let due = respawn_s
         .due_s
         .expect("a knocked-out target is due a rebuild");
-    assert_eq!(due, rebuild_due(knocked_out_s, None));
+    assert_eq!(due, rebuild_due(knocked_out_s, None, hold_from(&mut app)));
     loop {
         app.update();
         if now_s(&app) >= due {
@@ -288,8 +298,8 @@ fn a_knocked_out_target_is_rebuilt_once_due() {
 /// rather than inheriting the cancelled one's.
 #[test]
 fn clearing_the_knockout_cancels_the_rebuild() {
-    let wait = rebuild_due(0.0, None);
     let mut app = respawn();
+    let wait = rebuild_due(0.0, None, hold_from(&mut app));
     let tank = app.world_mut().spawn((Tank, knocked_out())).id();
     app.update();
     app.world_mut().entity_mut(tank).remove::<TankKnockedOut>();
@@ -360,6 +370,7 @@ fn a_shot_met_a_tank_by_its_log() {
         at: Vec3::ZERO,
         speed: 0.0,
         after: 0.0,
+        sideways: 0.0,
         nose: None,
         tank,
     };

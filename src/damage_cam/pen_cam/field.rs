@@ -486,8 +486,17 @@ fn hull_edges(triangles: &[[usize; 3]]) -> Vec<(usize, usize)> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
+    use super::super::plan::Thrown;
     use super::*;
+
+    /// A fixture field's throw: at the line's start, at record time zero, its front at 1 m/s. These
+    /// tests read a field's shape, never its timing. Fixture data.
+    pub(in super::super) const AT_ORIGIN: Thrown = Thrown {
+        arc: 0.0,
+        t: 0.0,
+        speed: 1.0,
+    };
 
     /// Golden-spiral points, as the cone's strata place its directions.
     fn spiral(n: usize) -> Vec<Vec2> {
@@ -540,7 +549,7 @@ mod tests {
                 weight: weight(q),
             })
             .collect();
-        Cone::new(Vec3::ZERO, axis, half_angle, 0.0, 10.0, 0.0, rays)
+        Cone::new(Vec3::ZERO, axis, half_angle, 0.0, 10.0, AT_ORIGIN, rays)
     }
 
     /// A fixture field of `n` directions about −Z over the support from `inner` to `half_angle`
@@ -570,7 +579,7 @@ mod tests {
                 }
             })
             .collect();
-        Cone::new(Vec3::ZERO, axis, half_angle, inner, 10.0, 0.0, rays)
+        Cone::new(Vec3::ZERO, axis, half_angle, inner, 10.0, AT_ORIGIN, rays)
     }
 
     /// A ring's band, 56° to 76° off the axis (a ring of `λ = 0.45` and half-width 10°), over

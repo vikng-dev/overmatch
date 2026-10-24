@@ -6,7 +6,11 @@
 //! the plane in the slice), and each struck component's real mesh on the state scale ([`look::component`]): filled red from the
 //! bottom up to the share of its HP points lost, one knocked out charcoal and hatched.
 //! The shell rests where the record ends; a round the record has leave the tank runs on out of the
-//! frame. A cone's front runs from its origin at the shell's own on-screen speed.
+//! frame. The nose and every field's front move on the record's own clock at one constant slowdown
+//! ([`timeline::REPLAY_SLOWDOWN`]): the nose along the record's timed path, a spall cone's front at
+//! the round's exit speed, a burst's at its sideways speed ([`super::plan::Cone::speed`]), each
+//! from its record time. [`pace`] is a record's corner times in a frame. The rule and the frames'
+//! minimum lengths: `demo/ux-spec.md` §3, "Time".
 //! Rebuilt when the corner's record or frame changes; animated every frame from the corner's clock
 //! alone, so a scrub lands on the same picture.
 //!
@@ -769,19 +773,19 @@ fn slice_plane(plan: &Plan) -> (Vec3, Vec3) {
     (normal, point)
 }
 
-/// The on-screen speed of the shell (m of path per corner second): the drawn span over the frame's
-/// travel window, constant in every frame. An eased run would have the shell slow in the air
-/// before it strikes, which no record says.
-fn travel_speed(plan: &Plan, kind: CornerKind) -> f32 {
-    let (from, to) = kind.line_window();
-    (plan.end_arc - plan.start_arc).max(1e-3) / (to - from)
+/// The corner time at which the record reaches record time `t` (s) in frame `kind`: the nose stands
+/// at the drawn span's start at the frame's travel start, and the record runs on from there at
+/// [`timeline::REPLAY_SLOWDOWN`].
+fn corner_at(plan: &Plan, kind: CornerKind, t: f32) -> f32 {
+    kind.travel_start() + (t - plan.line.time_at(plan.start_arc)) * timeline::REPLAY_SLOWDOWN
 }
 
-/// The arc length of the shell's nose at corner time `c`. It crosses the drawn span in the travel
-/// window and stops where the record's path ends; a round that left runs on along the path at the
-/// same speed, out of the frame. Reduce motion puts it at the span's end when the window opens.
+/// The arc length of the shell's nose at corner time `c`: the record's own arc at the record time
+/// `c` stands for ([`corner_at`]), so it crosses each leg at that leg's record speed scaled and
+/// stops where the record's path ends; a round that left runs on along its last leg at that leg's
+/// speed, out of the frame. Reduce motion puts it at the span's end when the travel starts.
 fn head_arc(plan: &Plan, kind: CornerKind, c: f32, reduce: bool) -> f32 {
-    let (from, _) = kind.line_window();
+    let from = kind.travel_start();
     if reduce {
         return if c >= from {
             plan.end_arc
@@ -789,37 +793,41 @@ fn head_arc(plan: &Plan, kind: CornerKind, c: f32, reduce: bool) -> f32 {
             plan.start_arc
         };
     }
-    let run = travel_speed(plan, kind) * (c - from).max(0.0);
-    (plan.start_arc + run).min(plan.line.length())
+    let t = plan.line.time_at(plan.start_arc) + (c - from).max(0.0) / timeline::REPLAY_SLOWDOWN;
+    plan.line
+        .arc_at_time(t)
+        .max(plan.start_arc)
+        .min(plan.line.length())
 }
 
 /// The corner time at which the nose reaches arc `s`.
 fn time_at_arc(plan: &Plan, kind: CornerKind, s: f32, reduce: bool) -> f32 {
-    let (from, _) = kind.line_window();
     if reduce {
-        return from;
+        return kind.travel_start();
     }
-    from + (s - plan.start_arc).max(0.0) / travel_speed(plan, kind)
+    corner_at(plan, kind, plan.line.time_at(s.max(plan.start_arc)))
 }
 
-/// The corner time at which cone `index` is thrown: the shell's nose at its origin.
+/// The corner time at which cone `index` is thrown: its record time.
 fn cone_start(plan: &Plan, kind: CornerKind, index: usize, reduce: bool) -> f32 {
-    time_at_arc(plan, kind, plan.cones[index].arc, reduce)
+    if reduce {
+        return kind.travel_start();
+    }
+    corner_at(plan, kind, plan.cones[index].t)
 }
 
 /// How far (m) cone `index`'s front has run from its origin at corner time `c`, negative before the
-/// cone is thrown. It runs from the moment the shell's nose reaches the origin at the shell's own
-/// on-screen speed, [`travel_speed`]: on the shell's replay clock every leg, the one leaving the
-/// plate that threw the cone included, plays at that one speed, so this is the round's exit speed,
-/// the same in every direction (the record holds no fragment speed). The front keeps pace with
-/// the shell and never outruns it.
+/// cone is thrown: its own speed ([`super::plan::Cone::speed`]) over the record time since it was
+/// thrown, so on screen it runs at that speed over [`timeline::REPLAY_SLOWDOWN`], whatever the
+/// line's length.
 fn front_radius(plan: &Plan, kind: CornerKind, index: usize, c: f32) -> f32 {
-    travel_speed(plan, kind) * (c - cone_start(plan, kind, index, false))
+    let dt = (c - cone_start(plan, kind, index, false)) / timeline::REPLAY_SLOWDOWN;
+    plan.cones[index].front(dt)
 }
 
-/// The corner time at which component `b`'s fill starts: the line's entry, or the moment the dosing
-/// cone's front has run the distance the plan gives; the victim's x-ray shows its state from
-/// the open.
+/// The corner time at which component `b`'s fill starts: the nose's entry, or the moment the dosing
+/// cone's front has run the distance the plan gives at that front's own speed; the victim's x-ray
+/// shows its state from the open.
 fn box_start(plan: &Plan, kind: CornerKind, b: &BoxPlan, reduce: bool) -> f32 {
     match (kind, b.reached_at) {
         (CornerKind::Victim, _) => 0.0,
@@ -828,37 +836,43 @@ fn box_start(plan: &Plan, kind: CornerKind, b: &BoxPlan, reduce: bool) -> f32 {
             if reduce {
                 cone_start(plan, kind, cone, true)
             } else {
-                cone_start(plan, kind, cone, false) + distance / travel_speed(plan, kind)
+                cone_start(plan, kind, cone, false)
+                    + plan.cones[cone].run_time(distance) * timeline::REPLAY_SLOWDOWN
             }
         }
         (_, None) => f32::INFINITY,
     }
 }
 
-/// The corner time by which every element of `plan` has arrived in frame `kind`: each cone's front
-/// at its longest reach and each dosed component's fill complete.
-#[cfg(test)]
-pub(super) fn settled(plan: &Plan, kind: CornerKind) -> f32 {
-    let speed = travel_speed(plan, kind);
+/// `plan`'s corner times in frame `kind`: its travel from the frame's travel start to the nose at
+/// the drawn span's end, its settle — that, each cone's front at its longest reach and each dosed
+/// component's fill complete — and the hold and length that follow ([`timeline::Pace`]). A plan
+/// with no line travels nowhere.
+pub(super) fn pace(plan: &Plan, kind: CornerKind) -> timeline::Pace {
+    let travel_end = if plan.line.points.len() < 2 {
+        kind.travel_start()
+    } else {
+        time_at_arc(plan, kind, plan.end_arc, false)
+    };
     let cones = plan.cones.iter().enumerate().map(|(index, cone)| {
-        let reach = cone.max_reach();
-        cone_start(plan, kind, index, false) + reach / speed
+        cone_start(plan, kind, index, false)
+            + cone.run_time(cone.max_reach()) * timeline::REPLAY_SLOWDOWN
     });
     let boxes = plan
         .boxes
         .iter()
         .map(|b| box_start(plan, kind, b, false) + timeline::BOX_FILL_S)
         .filter(|t| t.is_finite());
-    cones.chain(boxes).fold(kind.line_window().1, f32::max)
+    let settle = cones.chain(boxes).fold(travel_end, f32::max);
+    timeline::Pace::new(kind, travel_end, settle)
 }
 
-/// Whether the shell is drawn at corner time `c`: from the travel window on, until a round the
+/// Whether the shell is drawn at corner time `c`: from the travel start on, until a round the
 /// record has leave the tank runs off the end of its recorded path. Under reduce motion a round
 /// that left is never drawn, since it would stand parked in the air at the span's end. A plan
 /// with no line ([`Plan::bare`]) draws no shell.
 fn shell_drawn(plan: &Plan, kind: CornerKind, c: f32, reduce: bool) -> bool {
-    let (from, _) = kind.line_window();
-    if c < from || plan.line.points.len() < 2 {
+    if c < kind.travel_start() || plan.line.points.len() < 2 {
         return false;
     }
     if !plan.left() {
@@ -951,7 +965,7 @@ impl<'a> Playing<'a> {
             line_fade: 1.0,
         };
         if reduce {
-            playing.line_fade = playing.fade_from(kind.line_window().0);
+            playing.line_fade = playing.fade_from(kind.travel_start());
         }
         playing
     }
@@ -1343,6 +1357,7 @@ fn framing(
             .shot_fit
             .map_or_else(|| shot_distance(plan, orbit), |fit| fit.distance)
     };
+    let hold_from = pace(plan, kind).hold_from;
     let motion = |rate_deg: f32, from: f32| {
         if knobs.reduce_motion {
             0.0
@@ -1372,12 +1387,9 @@ fn framing(
         CornerKind::Glass | CornerKind::Victim => {
             along_shot(plan, orbit, motion(timeline::ORBIT_DEG_S, 0.0), far())
         }
-        CornerKind::Damaged => along_shot(
-            plan,
-            orbit,
-            motion(timeline::DRIFT_DEG_S, kind.hold_from()),
-            far(),
-        ),
+        CornerKind::Damaged => {
+            along_shot(plan, orbit, motion(timeline::DRIFT_DEG_S, hold_from), far())
+        }
         CornerKind::Slice => {
             let (normal, _) = stage.plane.unwrap_or((Vec3::X, Vec3::ZERO));
             let up = (Vec3::Y - normal * normal.y)
@@ -1453,7 +1465,7 @@ fn framing(
             let up = (bounce.normal - normal * bounce.normal.dot(normal))
                 .try_normalize()
                 .unwrap_or_else(|| normal.any_orthonormal_vector());
-            let drift = motion(timeline::DRIFT_DEG_S, kind.hold_from());
+            let drift = motion(timeline::DRIFT_DEG_S, hold_from);
             let direction = Quat::from_axis_angle(up, drift + orbit.x) * normal;
             aim(
                 (wide_center, wide_radius.max(0.6)),
@@ -1685,10 +1697,10 @@ mod tests {
     use super::super::demo::Library;
     use super::super::hud::ASPECT;
     use super::super::material::Blend;
-    use super::super::plan::LEG_EPS_M;
+    use super::super::plan::{LEAD_M, LEG_EPS_M};
     use super::*;
-    use crate::damage_cam::RoundEnd;
-    use crate::damage_cam::shapes::TankAsset;
+    use crate::damage_cam::shapes::{TankAsset, TankShapes};
+    use crate::damage_cam::{PenetrationReport, RoundEnd};
 
     /// Tolerance on a drawn position (m): DERIVED, f32 rounding of a transform over a few metres
     /// is under 1e-5 m.
@@ -1762,35 +1774,31 @@ mod tests {
         assert!(!model_fits(scene_bounds(&scaled.document)));
     }
 
-    /// For every record: the shell sets off from the drawn span's start as its travel window opens,
-    /// crosses the span at one constant speed, and is drawn nose first on the line at the record's
-    /// calibre; a round the record has rest keeps its nose on the record's last point to the end of
-    /// the frame, and one the record has leave is drawn no longer once its nose runs off the end of
-    /// its path, and never under reduce motion.
+    /// For every record: the shell sets off from the drawn span's start at its frame's travel
+    /// start, reaches the span's end at its pace's travel end, and is drawn nose first on the line
+    /// at the record's calibre; a round the record has rest keeps its nose on the record's last
+    /// point to the end of the frame, and one the record has leave is drawn no longer once its nose
+    /// runs off the end of its path, and never under reduce motion.
     #[test]
     fn the_shell_ends_where_the_record_ends() {
         let library = Library::load();
         for record in &library.records {
             let plan = &record.plan;
             let kind = plan.kind;
-            let (from, to) = kind.line_window();
+            let pace = pace(plan, kind);
+            let (from, to) = (pace.travel_start, pace.travel_end);
             let name = record.stem;
-            assert_eq!(head_arc(plan, kind, from, false), plan.start_arc, "{name}");
+            assert_eq!(from, kind.travel_start(), "{name}");
+            assert!(
+                (head_arc(plan, kind, from, false) - plan.start_arc).abs() < 1e-5,
+                "{name}"
+            );
             assert!(
                 (head_arc(plan, kind, to, false) - plan.end_arc).abs() < 1e-3,
                 "{name}"
             );
             let samples = 16;
             let step = (to - from) / samples as f32;
-            let increments: Vec<f32> = (0..samples)
-                .map(|k| {
-                    let c = from + step * k as f32;
-                    head_arc(plan, kind, c + step, false) - head_arc(plan, kind, c, false)
-                })
-                .collect();
-            for d in &increments {
-                assert!((d - increments[0]).abs() < 1e-4, "{name}: {increments:?}");
-            }
             for k in 0..=samples {
                 let head = head_arc(plan, kind, from + step * k as f32, false);
                 let pose = shell_transform(plan, head);
@@ -1821,7 +1829,7 @@ mod tests {
                 }
                 RoundEnd::Rest { .. } | RoundEnd::Burst { .. } => {
                     for reduce in [false, true] {
-                        let end = kind.duration();
+                        let end = pace.duration;
                         assert!(shell_drawn(plan, kind, end, reduce), "{name}");
                         let nose = plan.line.at(head_arc(plan, kind, end, reduce));
                         assert!(nose.distance(last) < 1e-4, "{name}");
@@ -1833,6 +1841,63 @@ mod tests {
                 assert!((head_arc(plan, kind, at, false) - s).abs() < 1e-3, "{name}");
             }
         }
+    }
+
+    /// Every record's nose crosses each leg of its drawn span at that leg's own record speed over
+    /// [`timeline::REPLAY_SLOWDOWN`]: read off the record's path (length over the derived time
+    /// span), so the shell slows exactly where the record says it slowed and nowhere else. The
+    /// corner, the kill cam's lesson and the x-ray all place the shell by this clock. The library
+    /// holds a record whose legs differ in speed by more than a quarter, so neither a span-over-
+    /// window pace nor one speed for every leg passes.
+    #[test]
+    fn the_nose_runs_each_leg_at_its_record_speed() {
+        let library = Library::load();
+        let mut legs = 0;
+        let mut spread: f32 = 1.0;
+        for record in &library.records {
+            let plan = &record.plan;
+            let kind = plan.kind;
+            let name = record.stem;
+            let mut speeds: Vec<f32> = Vec::new();
+            for pair in record.report.path.windows(2) {
+                let (a, b) = (Vec3::from(pair[0].point), Vec3::from(pair[1].point));
+                let dt = pair[1].t - pair[0].t;
+                if dt <= 0.0 || a.distance(b) < 1e-3 {
+                    continue;
+                }
+                let speed = a.distance(b) / dt;
+                let lo = plan.line.arc_of(a).max(plan.start_arc);
+                let hi = plan.line.arc_of(b).min(plan.end_arc);
+                if hi - lo < 1e-2 {
+                    continue;
+                }
+                let (c0, c1) = (
+                    time_at_arc(plan, kind, lo, false),
+                    time_at_arc(plan, kind, hi, false),
+                );
+                let (ca, cb) = (c0 + 0.25 * (c1 - c0), c0 + 0.75 * (c1 - c0));
+                let shown =
+                    (head_arc(plan, kind, cb, false) - head_arc(plan, kind, ca, false)) / (cb - ca);
+                let want = speed / timeline::REPLAY_SLOWDOWN;
+                assert!(
+                    (shown - want).abs() <= 1e-3 * want,
+                    "{name}: {shown} m per corner-s on a {speed} m/s leg"
+                );
+                speeds.push(speed);
+                legs += 1;
+            }
+            if let (Some(fast), Some(slow)) = (
+                speeds.iter().copied().reduce(f32::max),
+                speeds.iter().copied().reduce(f32::min),
+            ) {
+                spread = spread.max(fast / slow);
+            }
+        }
+        assert!(legs > 0, "a record crosses a leg");
+        assert!(
+            spread > 1.25,
+            "the library's legs differ in speed: {spread}"
+        );
     }
 
     /// Past a bounce the shell stays on the struck face's outer side, as the record's path does:
@@ -1949,9 +2014,9 @@ mod tests {
 
     /// The frames that orbit start on the shot line and turn about the vertical through the tank's
     /// bounds' centre at their rates: the Pen frames at [`timeline::ORBIT_DEG_S`] from the open, the
-    /// Damaged frame at [`timeline::DRIFT_DEG_S`] from its hold. Two seconds on, every record's eye
-    /// has turned that far about the centre at its distance and height, the tank still in the field;
-    /// under reduce motion it has not moved.
+    /// Damaged frame at [`timeline::DRIFT_DEG_S`] from the record's hold ([`pace`]). Two seconds
+    /// on, every record's eye has turned that far about the centre at its distance and height, the
+    /// tank still in the field; under reduce motion it has not moved.
     #[test]
     fn the_shot_frames_orbit_the_tank_centre() {
         let library = Library::load();
@@ -1966,7 +2031,7 @@ mod tests {
                 (
                     CornerKind::Damaged,
                     timeline::DRIFT_DEG_S,
-                    CornerKind::Damaged.hold_from(),
+                    pace(plan, CornerKind::Damaged).hold_from,
                 ),
             ] {
                 let at = |c: f32, reduce: bool| {
@@ -2009,7 +2074,7 @@ mod tests {
     /// Frame `kind` of `plan` at the corner time that has turned it `spin_deg` from the shot line.
     fn spun(plan: &Plan, kind: CornerKind, spin_deg: f32) -> (Transform, Projection) {
         let c = match kind {
-            CornerKind::Damaged => kind.hold_from() + spin_deg / timeline::DRIFT_DEG_S,
+            CornerKind::Damaged => pace(plan, kind).hold_from + spin_deg / timeline::DRIFT_DEG_S,
             _ => spin_deg / timeline::ORBIT_DEG_S,
         };
         framing(plan, kind, c, &Knobs::default(), &Stage::default())
@@ -2800,51 +2865,220 @@ mod tests {
         );
     }
 
-    /// Every record's spall fronts run on the shell's own clock: each starts as the shell's nose
-    /// reaches the cone's origin and, while the shell is still moving, stands exactly as far from
-    /// the origin as the nose has run along the line since, so it neither lags nor outruns the
-    /// shell; a component a cone dosed starts to fill when the front has run the distance the plan
-    /// gives it.
+    /// The on-screen speed (m per corner-second) of cone `index`'s front, read across the middle
+    /// of its run.
+    fn front_speed(plan: &Plan, kind: CornerKind, index: usize) -> f32 {
+        let start = cone_start(plan, kind, index, false);
+        let cone = &plan.cones[index];
+        let run = cone.run_time(cone.max_reach()) * timeline::REPLAY_SLOWDOWN;
+        let (a, b) = (start + 0.25 * run, start + 0.75 * run);
+        (front_radius(plan, kind, index, b) - front_radius(plan, kind, index, a)) / (b - a)
+    }
+
+    /// The record's speed (m/s) on the path leg leaving the node at `point`, time `t`: the exit
+    /// speed off the plate that threw a spall cone there. `None` where no timed leg leaves it.
+    fn exit_speed(report: &PenetrationReport, point: Vec3, t: f32) -> Option<f32> {
+        let path = &report.path;
+        let at = (0..path.len()).find(|&i| {
+            Vec3::from(path[i].point).distance(point) < POSITION_TOL_M
+                && (path[i].t - t).abs() < 1e-7
+        })?;
+        let next = path.get(at + 1)?;
+        let dt = next.t - path[at].t;
+        (dt > 0.0).then(|| Vec3::from(next.point).distance(point) / dt)
+    }
+
+    /// Every field's front sets off at its own record time and runs at its own speed over
+    /// [`timeline::REPLAY_SLOWDOWN`], read off the record apart from the plan: a spall cone's at
+    /// the round's speed on the path leg leaving the plate that threw it, a burst's field's at the
+    /// burst's sideways speed `v_s`; neither is the line's pace. A component a front doses starts
+    /// its fill when that front reaches it. The library holds a spall cone whose exit speed is
+    /// under half its contact speed and a burst whose `v_s` is apart from its carried speed, so
+    /// neither the contact speed nor the carried speed passes.
     #[test]
-    fn the_field_front_keeps_pace_with_the_shell() {
+    fn each_front_runs_at_its_own_speed() {
         let library = Library::load();
-        let mut fronts = 0;
+        let (mut spall, mut burst) = (0, 0);
         for record in &library.records {
-            let plan = &record.plan;
-            let kind = plan.kind;
-            if kind == CornerKind::Ricochet {
-                continue;
-            }
-            for (index, cone) in plan.cones.iter().enumerate() {
-                let start = cone_start(plan, kind, index, false);
-                assert!(front_radius(plan, kind, index, start).abs() < 1e-5);
-                assert!(front_radius(plan, kind, index, start - 0.01) < 0.0);
-                let gone = time_at_arc(plan, kind, plan.line.length(), false);
-                for k in 1..=16 {
-                    let c = start + (gone - start) * k as f32 / 16.0;
-                    let run = head_arc(plan, kind, c, false) - cone.arc;
-                    let front = front_radius(plan, kind, index, c);
+            let (plan, report) = (&record.plan, &record.report);
+            let name = record.stem;
+            for kind in [CornerKind::Glass, plan.kind] {
+                for (index, cone) in plan.cones.iter().enumerate() {
+                    let start = cone_start(plan, kind, index, false);
                     assert!(
-                        (front - run).abs() < 1e-3,
-                        "{} cone {index}: front {front} m, shell {run} m at {c}",
-                        record.stem
+                        front_radius(plan, kind, index, start).abs() < 1e-5,
+                        "{name}"
+                    );
+                    assert!(
+                        front_radius(plan, kind, index, start - 0.01) < 0.0,
+                        "{name}"
+                    );
+                    let want = match report.spall.get(index) {
+                        Some(c) => {
+                            assert_eq!(cone.t, c.t, "{name} cone {index}");
+                            let Some(exit) = exit_speed(report, Vec3::from(c.origin), c.t) else {
+                                continue;
+                            };
+                            if exit < 0.5 * report.projectile.speed_mps {
+                                spall += 1;
+                            }
+                            exit
+                        }
+                        None => {
+                            let b = report
+                                .burst
+                                .as_ref()
+                                .expect("a cone past the spall is the burst's");
+                            assert_eq!(cone.t, b.t, "{name} burst");
+                            if (b.sideways_mps - b.speed_mps).abs() > 0.25 * b.sideways_mps {
+                                burst += 1;
+                            }
+                            b.sideways_mps
+                        }
+                    };
+                    if cone.max_reach() <= 0.0 {
+                        continue;
+                    }
+                    let shown = front_speed(plan, kind, index);
+                    let scaled = want / timeline::REPLAY_SLOWDOWN;
+                    assert!(
+                        (shown - scaled).abs() <= 1e-3 * scaled,
+                        "{name} cone {index}: {shown} m per corner-s for {want} m/s"
                     );
                 }
-                fronts += 1;
-            }
-            for b in &plan.boxes {
-                if let Some(Reach::Cone { cone, distance }) = b.reached_at {
-                    let at = box_start(plan, kind, b, false);
-                    assert!(
-                        (front_radius(plan, kind, cone, at) - distance).abs() < 1e-3,
-                        "{}: {}",
-                        record.stem,
-                        b.name
-                    );
+                for b in &plan.boxes {
+                    if let Some(Reach::Cone { cone, distance }) = b.reached_at {
+                        let at = box_start(plan, kind, b, false);
+                        assert!(
+                            (front_radius(plan, kind, cone, at) - distance).abs() < 1e-3,
+                            "{name}: {}",
+                            b.name
+                        );
+                    }
                 }
             }
         }
-        assert!(fronts > 0, "a record throws a cone");
+        assert!(
+            spall > 0,
+            "a spall cone's exit speed is apart from its contact speed"
+        );
+        assert!(burst > 0, "a burst's v_s is apart from its carried speed");
+    }
+
+    /// The approach is a diagram choice, so its length never paces the record: cutting a record's
+    /// approach to a quarter and to three quarters of the drawn lead moves when its fields are
+    /// thrown, but not how each front grows from then nor when each dosed component's fill starts
+    /// after it. Any line-length term in the pace fails here.
+    #[test]
+    fn the_approach_paces_no_front() {
+        let library = Library::load();
+        let asset = TankAsset::load(&library.vehicle).unwrap();
+        let mut compared = 0;
+        for record in &library.records {
+            let base = &record.plan;
+            if base.cones.is_empty() {
+                continue;
+            }
+            let report = &record.report;
+            let name = record.stem;
+            assert_eq!(
+                report.path[1].t, 0.0,
+                "{name}: contact is the path's second node"
+            );
+            let contact = Vec3::from(report.path[1].point);
+            let approach = contact - Vec3::from(report.path[0].point);
+            let speed = approach.length() / (report.path[1].t - report.path[0].t);
+            let lead = base.reach(LEAD_M);
+            let cut = |share: f32| {
+                let mut report = report.clone();
+                let l = share * lead;
+                let from = contact - approach.normalize() * l;
+                report.path[0].point = from.to_array();
+                report.path[0].t = -l / speed;
+                report.origin = from.to_array();
+                Plan::new(&report, &asset.shapes(&report.servo_deg))
+            };
+            let (short, long) = (cut(0.25), cut(0.75));
+            for kind in [CornerKind::Glass, base.kind] {
+                let from = |plan: &Plan, i: usize| cone_start(plan, kind, i, false);
+                assert!(
+                    from(&long, 0) - from(&short, 0) > 0.05,
+                    "{name}: a longer approach throws later"
+                );
+                for index in 0..base.cones.len() {
+                    for k in 0..=16 {
+                        let x = 0.05 * k as f32;
+                        let a = front_radius(&short, kind, index, from(&short, index) + x);
+                        let b = front_radius(&long, kind, index, from(&long, index) + x);
+                        assert!(
+                            (a - b).abs() < 1e-3,
+                            "{name} cone {index} at +{x}: {a} vs {b}"
+                        );
+                    }
+                }
+                for (bs, bl) in short.boxes.iter().zip(&long.boxes) {
+                    if let Some(Reach::Cone { cone, .. }) = bs.reached_at {
+                        let after = |plan: &Plan, b: &BoxPlan| {
+                            box_start(plan, kind, b, false) - from(plan, cone)
+                        };
+                        let (a, b) = (after(&short, bs), after(&long, bl));
+                        assert!((a - b).abs() < 1e-3, "{name} {}: {a} vs {b}", bs.name);
+                    }
+                }
+            }
+            compared += 1;
+        }
+        assert!(compared > 0, "a record throws a field");
+    }
+
+    /// A record's corner runs no shorter than its frame's minimum and holds its full hold beat and
+    /// close after every element has arrived: `hold_from >= settle`, `duration >= settle + hold +
+    /// close`. The hold key and the corner's end in the game, the demo and the x-ray read these.
+    /// Both regimes occur: a record that settles late runs past the minimum, and the x-ray's
+    /// record-less plan settles early and runs the minimum, so neither a fixed length nor a dropped
+    /// minimum passes.
+    #[test]
+    fn the_corner_holds_after_the_record_settles() {
+        let library = Library::load();
+        let bare = Plan::bare(&TankShapes::default(), Vec::new());
+        let plans = library
+            .records
+            .iter()
+            .map(|r| (r.stem, &*r.plan))
+            .chain([("bare", &bare)]);
+        let (mut late, mut early) = (0, 0);
+        for (name, plan) in plans {
+            for kind in [
+                CornerKind::Glass,
+                CornerKind::Slice,
+                CornerKind::Ricochet,
+                CornerKind::Damaged,
+                CornerKind::Victim,
+            ] {
+                let pace = pace(plan, kind);
+                let eps = 1e-5;
+                assert!(pace.settle >= pace.travel_end, "{name} {kind:?}");
+                assert!(pace.hold_from >= pace.settle - eps, "{name} {kind:?}");
+                assert!(
+                    pace.hold_from >= kind.min_hold_from() - eps,
+                    "{name} {kind:?}"
+                );
+                assert!(
+                    pace.duration >= kind.min_duration() - eps,
+                    "{name} {kind:?}"
+                );
+                assert!(
+                    pace.duration >= pace.settle + kind.hold_s() + timeline::CLOSE_S - eps,
+                    "{name} {kind:?}"
+                );
+                if pace.duration > kind.min_duration() + eps {
+                    late += 1;
+                } else if pace.settle < kind.min_hold_from() {
+                    early += 1;
+                }
+            }
+        }
+        assert!(late > 0 && early > 0, "late {late}, early {early}");
     }
 
     /// Each of a tank's meshes belongs to the component its nearest named node of the plan's

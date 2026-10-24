@@ -1943,9 +1943,10 @@ fn the_burst_field_leans_with_the_carried_speed() {
 }
 
 /// The record carries the burst as the march threw it: its point on the path, the carried speed,
-/// the ring's nose piece's mass, and its field with every direction's strength and doses, in the
-/// hull frame; a box's field dose sums its hits from every field, the burst's after the cones',
-/// and a box the burst empties is lost at the burst's time. The ball ends the round at the burst
+/// the round's sideways speed `v_s` (the pen cam's burst front), the ring's nose piece's mass, and
+/// its field with every direction's strength and doses, in the hull frame; a box's field dose sums
+/// its hits from every field, the burst's after the cones', and a box the burst empties is lost at
+/// the burst's time. The ball ends the round at the burst
 /// point; the ring's nose piece runs the path on past it. A mutant that leaves the burst's
 /// deposits out of the ledger, the field out of the record, or the ring's round ending at the
 /// burst fails here; the wire and the pen cam read the record.
@@ -1958,6 +1959,11 @@ fn the_record_carries_the_burst() {
         assert_eq!(report.unresolved(), Vec::<String>::new(), "{shape:?}");
         let recorded = report.burst.as_ref().expect("the record carries the burst");
         assert_eq!(recorded.speed_mps, speed, "{shape:?}");
+        assert_eq!(
+            recorded.sideways_mps,
+            fixture_burst(shape).sideways_speed,
+            "{shape:?}"
+        );
         assert_eq!(recorded.nose_kg, bursts(&fired.log)[0].2, "{shape:?}");
         // The fixture tank's hull stands at the world origin, unturned.
         assert!(

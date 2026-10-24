@@ -2,6 +2,13 @@
 //! record that arrives while another shows, and the colour scales. Pure functions of a clock, so
 //! a scrub or a replay lands on the same picture. Every duration, colour and scale here is a design
 //! choice (`demo/ux-spec.md` §3–§5, INFERENCE grade), not physics.
+//!
+//! Two clocks meet here. The record's physical motion — the round's nose, every field's front, the
+//! moment each sets a component's fill going — plays at one constant slowdown of the record's own
+//! time, [`REPLAY_SLOWDOWN`], so every on-screen speed is a record speed scaled. Every presentation
+//! beat — open, close, accent, the slice's reveal, a fill, a fade, the orbit and drift, the
+//! replacement rule — keeps its own corner-second length. A record's corner length follows from
+//! both ([`Pace`]): each frame's lengths below are its minimum (`ux-spec.md` §3, "Time").
 
 use bevy::math::cubic_splines::CubicSegment;
 use bevy::prelude::*;
@@ -33,8 +40,9 @@ impl CornerKind {
         }
     }
 
-    /// Seconds from the start of the open to the end of the close.
-    pub fn duration(self) -> f32 {
+    /// The shortest corner: seconds from the start of the open to the end of the close. A record
+    /// whose motion settles late runs longer ([`Pace`]).
+    pub fn min_duration(self) -> f32 {
         match self {
             Self::Ricochet => 2.18,
             Self::Slice | Self::Damaged => 2.90,
@@ -43,8 +51,8 @@ impl CornerKind {
         }
     }
 
-    /// Where the hold beat starts: the hold key freezes the clock here and after.
-    pub fn hold_from(self) -> f32 {
+    /// The earliest the hold beat starts.
+    pub fn min_hold_from(self) -> f32 {
         match self {
             Self::Ricochet => 0.78,
             Self::Slice => 1.28,
@@ -53,12 +61,58 @@ impl CornerKind {
         }
     }
 
-    /// The window in which the shell crosses the drawn span, corner seconds.
-    pub fn line_window(self) -> (f32, f32) {
+    /// The hold beat's length, from its start to the close: Ricochet 1.20, Slice 1.42, Damaged
+    /// 1.67, Glass 3.22, Victim 1.92 s (DERIVED from the frame minimums).
+    pub fn hold_s(self) -> f32 {
+        self.min_duration() - self.min_hold_from() - CLOSE_S
+    }
+
+    /// When the shell sets off from the drawn span's start, corner seconds: after the slice's cut
+    /// reveal, else after the open.
+    pub fn travel_start(self) -> f32 {
         match self {
-            Self::Slice => (0.48, 1.08),
-            Self::Ricochet | Self::Damaged => (0.18, 0.78),
-            Self::Glass | Self::Victim => (0.18, 0.88),
+            Self::Slice => SLICE_REVEAL.1,
+            Self::Ricochet | Self::Damaged | Self::Glass | Self::Victim => OPEN_S,
+        }
+    }
+}
+
+/// Corner seconds per record second: the record's physical motion plays at this one multiple of
+/// its own time, so 1 ms of record shows for 0.2 s and an on-screen speed is a record speed over
+/// this. TUNED.
+pub const REPLAY_SLOWDOWN: f32 = 200.0;
+
+/// One record's corner times in one frame, corner seconds from the open: where its physical
+/// motion runs, set by the record (`super::stage::pace`), and the beats placed after it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pace {
+    /// The shell sets off from the drawn span's start ([`CornerKind::travel_start`]).
+    pub travel_start: f32,
+    /// The shell's nose reaches the drawn span's end.
+    pub travel_end: f32,
+    /// Every element of the record has arrived: the nose at the drawn span's end, each field's
+    /// front at its longest reach, each dosed component's fill complete.
+    pub settle: f32,
+    /// The hold beat starts: the hold key freezes the clock here and after. Never before the
+    /// frame's minimum nor before `settle`.
+    pub hold_from: f32,
+    /// From the start of the open to the end of the close: the hold beat's full length
+    /// ([`CornerKind::hold_s`]) and the close after `hold_from`, and never under the frame's
+    /// minimum.
+    pub duration: f32,
+}
+
+impl Pace {
+    /// The pace of a record in frame `kind` whose nose reaches the drawn span's end at
+    /// `travel_end` and whose every element has arrived by `settle` (corner seconds).
+    pub fn new(kind: CornerKind, travel_end: f32, settle: f32) -> Self {
+        let hold_from = kind.min_hold_from().max(settle);
+        Self {
+            travel_start: kind.travel_start(),
+            travel_end,
+            settle,
+            hold_from,
+            duration: kind.min_duration().max(hold_from + kind.hold_s() + CLOSE_S),
         }
     }
 }

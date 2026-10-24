@@ -1307,7 +1307,7 @@ mod tests {
             rest.half_angle(),
             rest.inner_angle(),
             10.0,
-            0.0,
+            super::super::field::tests::AT_ORIGIN,
             rays,
         );
         let mut plans: Vec<(String, Vec<Cone>)> = super::super::potency::tests::plans()
@@ -1414,7 +1414,7 @@ mod tests {
                 descriptor.half_angle(),
                 descriptor.inner_angle(),
                 strength,
-                0.0,
+                super::super::field::tests::AT_ORIGIN,
                 rays,
             );
             let emission = potency.emission(strength, cone.disc.inner, cone.half_angle);

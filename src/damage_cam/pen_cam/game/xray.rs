@@ -52,7 +52,7 @@ use super::super::look::{self, Layer, LookMaterial, MaskNeed, MaskSet, Masks};
 use super::super::material::{GlowMaterial, OutlineMaterial};
 use super::super::plan::{BoxPlan, Plan};
 use super::super::stage::{
-    BoxTint, ConeVolume, LineSeg, LookCtx, MarkItem, Playing, SHELL_SCENE, component_meshes,
+    self, BoxTint, ConeVolume, LineSeg, LookCtx, MarkItem, Playing, SHELL_SCENE, component_meshes,
     mask_copy, round_copies, spawn_glass,
 };
 use super::super::timeline::CornerKind;
@@ -379,10 +379,22 @@ impl XRayRelease<'_, '_> {
         Some(built.since)
     }
 
-    /// `Time` seconds at which a record first shown at `shown` reaches the victim frame's hold
-    /// beat, where the x-ray's replay of it stops ([`CornerKind::hold_from`]).
-    pub(crate) fn held_at(shown: f64) -> f64 {
-        shown + f64::from(CornerKind::Victim.hold_from())
+    /// The corner time at which the record on show reaches the victim frame's hold beat, where the
+    /// x-ray's replay of it stops ([`stage::pace`]); the frame's minimum while none shows.
+    pub(crate) fn hold_from(&self) -> f32 {
+        self.state
+            .as_ref()
+            .and_then(|state| state.built.as_ref())
+            .filter(|built| built.record.is_some())
+            .map_or(CornerKind::Victim.min_hold_from(), |built| {
+                stage::pace(&built.plan, CornerKind::Victim).hold_from
+            })
+    }
+
+    /// `Time` seconds at which a record first shown at `shown` reaches its hold beat, at corner
+    /// time `hold_from` ([`Self::hold_from`]).
+    pub(crate) fn held_at(shown: f64, hold_from: f32) -> f64 {
+        shown + f64::from(hold_from)
     }
 
     /// Restore every dressed handle and despawn every item, with `commands`, ahead of whatever
@@ -797,7 +809,8 @@ pub(super) fn animate(
     let Some(built) = state.built.as_ref() else {
         return;
     };
-    let c = ((time.elapsed_secs_f64() - built.since) as f32).min(CornerKind::Victim.hold_from());
+    let hold_from = stage::pace(&built.plan, CornerKind::Victim).hold_from;
+    let c = ((time.elapsed_secs_f64() - built.since) as f32).min(hold_from);
     let playing = Playing::new(&built.plan, CornerKind::Victim, c, knobs.reduce_motion);
     for (mut pose, mut visibility) in &mut shell {
         match playing.shell() {

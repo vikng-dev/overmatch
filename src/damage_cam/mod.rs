@@ -290,7 +290,8 @@ pub struct SpallCone {
 }
 
 /// A burst round's burst (design doc §5a, "The burst"): where and when its fuze ran out, how fast
-/// the round carried into it, the nose piece that flew on, and the field it threw.
+/// the round carried into it, how fast it drives its mass sideways, the nose piece that flew on,
+/// and the field it threw.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Burst {
     /// When it burst: when the path reached the burst point, or for a round at rest the delay's
@@ -300,6 +301,9 @@ pub struct Burst {
     pub point: [f32; 3],
     /// The carried speed (m/s); zero for a round that burst at rest.
     pub speed_mps: f32,
+    /// The greatest sideways speed `v_s` (m/s) the burst gives its driven mass: the round's,
+    /// DERIVED at load from its burst block (`ballistics::burst::Burst::sideways_speed`).
+    pub sideways_mps: f32,
     /// The ring's nose piece's mass (kg), which flies on along the line from the burst point
     /// unless the round was at rest; `None` under the ball.
     pub nose_kg: Option<f32>,

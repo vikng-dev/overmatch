@@ -83,10 +83,10 @@
 //! | s10_gun_barrel_struck | 913 | 870 | 696 | 2 | 128 | 64 | 348 | – |
 //! | s11_mg_barrel_struck | 188 | 144 | 0 | 0 | 0 | 0 | – | – |
 //! | s12_apcr_through_crew | 921 | 891 | 588 | 1 | 64 | 75 | 588 | – |
-//! | s13_ring_through_crew | 1865 | 1839 | 588 | 1 | 64 | 75 | 588 | 899 |
-//! | s14_ball_through_crew | 3040 | 3019 | 588 | 1 | 64 | 75 | 588 | 2088 |
+//! | s13_ring_through_crew | 1869 | 1843 | 588 | 1 | 64 | 75 | 588 | 903 |
+//! | s14_ball_through_crew | 3044 | 3023 | 588 | 1 | 64 | 75 | 588 | 2092 |
 //! | s15_unarmed_overpen | 555 | 509 | 309 | 2 | 128 | 0 | 154 | – |
-//! | s16_restart_at_rest | 1064 | 1018 | 465 | 3 | 192 | 0 | 155 | 298 |
+//! | s16_restart_at_rest | 1068 | 1022 | 465 | 3 | 192 | 0 | 155 | 302 |
 //!
 //! The DERIVED estimate `41 + 2 + 2N` per cone (171 B at N = 64) counts a cone's metadata, its
 //! field descriptor's law byte and `f32` ratio among it, and its reaches; a cone that reaches no
@@ -762,13 +762,14 @@ struct WireCone {
     hits: Vec<WireHit>,
 }
 
-/// A burst: when and where, the carried speed, the nose piece's mass, and its field, a cone under
-/// the vocabulary's burst shape of its law.
+/// A burst: when and where, the carried and the greatest sideways speed, the nose piece's mass, and
+/// its field, a cone under the vocabulary's burst shape of its law.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 struct WireBurst {
     t: i32,
     point: Mm,
     speed_mps: f32,
+    sideways_mps: f32,
     nose_kg: Option<f32>,
     field: Option<WireCone>,
 }
@@ -1003,6 +1004,7 @@ fn encode(vocabulary: &ShotVocabulary, report: &PenetrationReport) -> Result<Rec
                 t: micros(burst.t)?,
                 point: Mm::of(burst.point)?,
                 speed_mps: burst.speed_mps,
+                sideways_mps: burst.sideways_mps,
                 nose_kg: burst.nose_kg,
                 field: burst
                     .field
@@ -1241,12 +1243,11 @@ fn finite(record: &Record) -> Result<(), CodecError> {
                     .chain(cone.doses.iter().copied())
             }),
     )
-    .chain(
-        record
-            .burst
-            .iter()
-            .flat_map(|burst| [burst.speed_mps].into_iter().chain(burst.nose_kg)),
-    )
+    .chain(record.burst.iter().flat_map(|burst| {
+        [burst.speed_mps, burst.sideways_mps]
+            .into_iter()
+            .chain(burst.nose_kg)
+    }))
     .chain(record.doses.iter().flat_map(|dose| [dose.line, dose.field]));
     for value in values {
         if !value.is_finite() {
@@ -1330,6 +1331,7 @@ fn decode(vocabulary: &ShotVocabulary, record: &Record) -> Result<PenetrationRep
                 t: seconds(burst.t),
                 point: burst.point.point(),
                 speed_mps: burst.speed_mps,
+                sideways_mps: burst.sideways_mps,
                 nose_kg: burst.nose_kg,
                 field: burst
                     .field

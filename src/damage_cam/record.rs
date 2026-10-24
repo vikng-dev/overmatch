@@ -699,9 +699,10 @@ pub(crate) fn report_from(
                 at,
                 speed,
                 after,
+                sideways,
                 nose,
                 ..
-            } => ledger.burst(index, (*at, *speed, *after), *nose, log.burst),
+            } => ledger.burst(index, (*at, *speed, *after, *sideways), *nose, log.burst),
             ArmourMark::Failed => {}
         }
     }
@@ -966,13 +967,14 @@ impl<'a> Ledger<'a> {
         }
     }
 
-    /// Mark `index`, the round's burst at `at` (WORLD) at the carried `speed`, its nose piece's
-    /// mass `nose` and its field `thrown` (`None` where it threw none): the burst with its field's
+    /// Mark `index`, the round's burst at `at` (WORLD) at the carried `speed`, `after` seconds past
+    /// the round reaching `at`, at the greatest sideways speed `sideways`, its nose piece's mass
+    /// `nose` and its field `thrown` (`None` where it threw none): the burst with its field's
     /// deposits, and the round's end there when nothing flies on from a burst in flight.
     fn burst(
         &mut self,
         index: usize,
-        (at, speed, after): (Vec3, f32, f32),
+        (at, speed, after, sideways): (Vec3, f32, f32, f32),
         nose: Option<f32>,
         thrown: Option<&BurstField>,
     ) {
@@ -990,6 +992,7 @@ impl<'a> Ledger<'a> {
             t,
             point,
             speed_mps: speed,
+            sideways_mps: sideways,
             nose_kg: nose,
             field,
         });

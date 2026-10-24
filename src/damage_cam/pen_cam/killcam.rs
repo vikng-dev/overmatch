@@ -5,7 +5,8 @@
 //! 2. **Lesson** — captive: the look eases to a three-quarter from the shot's side; the main camera
 //!    swaps to [`CameraProfile::KillCamLesson`], so the tank it rides leaves the view and the pen
 //!    cam stage, which sits on it in the record's frame, draws the record over the live world at
-//!    [`LESSON_RATE`] of the corner's tempo. The world clock is untouched.
+//!    [`LESSON_RATE`] of the corner's tempo. It runs until the record has settled and held
+//!    ([`lesson_length`]; `demo/ux-spec.md` §3, "Time"). The world clock is untouched.
 //! 3. **Killer** — captive: back on the victim's own orbit at the play radius, the look turns
 //!    toward the shooter and tracks it, and the killer card shows name, vehicle, range and round.
 //! 4. **Death** — free: the orbit about the victim, opening on the shooter where beat 3 played,
@@ -32,6 +33,8 @@ use bevy::prelude::*;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
 use super::demo::{Library, PLAYLIST, Run, Settings};
+use super::plan::Plan;
+use super::stage;
 use super::timeline::{self, CornerKind};
 use super::view::{self, ViewRoot, Views};
 use super::world::MainCamera;
@@ -48,10 +51,12 @@ use crate::ui_font::{PANEL_BG, TEXT, TEXT_DIM, UiFonts, drawable};
 pub const HIT_S: f32 = 0.5;
 /// The look eases into the lesson's bearing over this; every camera move here runs rest to rest.
 const MOVE_S: f32 = 0.6;
-/// The lesson's length (real seconds).
+/// The lesson's shortest length (real seconds).
 pub const LESSON_S: f32 = 3.6;
 /// The record's tempo in the lesson, as a fraction of the corner's.
 pub const LESSON_RATE: f32 = 0.5;
+/// The lesson holds on the settled record this long (real seconds) before it ends.
+pub const LESSON_HOLD_S: f32 = 1.0;
 /// Beat 3's length: the look's turn toward the shooter over [`MOVE_S`], then the track.
 const KILLER_S: f32 = 3.0;
 /// The demo's run ends this long into the death screen.
@@ -163,6 +168,16 @@ impl Beat {
     }
 }
 
+/// The lesson's length (real seconds) for the record of `plan`: until the record has settled in
+/// the glass at [`LESSON_RATE`] ([`stage::pace`]) and held [`LESSON_HOLD_S`] on it, never under
+/// [`LESSON_S`]; that minimum when the stage has no plan to draw.
+pub fn lesson_length(plan: Option<&Plan>) -> f32 {
+    plan.map_or(LESSON_S, |plan| {
+        let settle = stage::pace(plan, CornerKind::Glass).settle;
+        LESSON_S.max(settle / LESSON_RATE + LESSON_HOLD_S)
+    })
+}
+
 /// The sequence's beats in run seconds, from the killing shot's world impact.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Beats {
@@ -170,6 +185,8 @@ pub struct Beats {
     /// Whether beat 3 plays: only for a shooter the kill cam can stage. Without one the death
     /// screen follows the lesson.
     pub shooter: bool,
+    /// The lesson's length (real seconds): [`lesson_length`] of the record it draws.
+    pub lesson_s: f32,
 }
 
 impl Beats {
@@ -177,7 +194,7 @@ impl Beats {
         self.impact + HIT_S
     }
     pub fn killer(self) -> f32 {
-        self.lesson() + LESSON_S
+        self.lesson() + self.lesson_s
     }
     /// Where the killer card enters: the look's arrival on the shooter, or the death screen's
     /// start without beat 3.
@@ -1024,13 +1041,16 @@ mod tests {
 
     /// The beats run in order; the camera is captive exactly in the lesson and the killer beats;
     /// respawn is live from the end of the hit; by the lesson's end the record's corner clock is
-    /// past its last event for every record that knocks its tank out (the travel window's end, a
-    /// cone's front at its longest reach, a component's fill).
+    /// past its settle for every record that knocks its tank out (the nose at the span's end, a
+    /// field's front at its longest reach, a component's fill), held there [`LESSON_HOLD_S`], and
+    /// the lesson is never under [`LESSON_S`]. The library holds a knockout record that settles too
+    /// late for the minimum alone, so a lesson blind to its record fails here.
     #[test]
     fn the_beats_run_in_order() {
         let beats = Beats {
             impact: 2.0,
             shooter: true,
+            lesson_s: LESSON_S,
         };
         assert!(beats.lesson() < beats.killer());
         assert!(beats.killer() < beats.arrive() && beats.arrive() < beats.death());
@@ -1047,19 +1067,33 @@ mod tests {
         }
         assert!(!beats.respawn_live(beats.impact + HIT_S - 0.01));
         assert!(beats.respawn_live(beats.impact + HIT_S));
+        assert!(beats.lesson_c(beats.killer()).is_none());
+        assert_eq!(lesson_length(None), LESSON_S);
         let library = Library::load();
-        let mut knockouts = 0;
+        let (mut knockouts, mut longer) = (0, 0);
         for record in library.records.iter().filter(|r| r.knockout.is_some()) {
-            let last_event = super::super::stage::settled(&record.plan, CornerKind::Glass);
+            let beats = Beats {
+                lesson_s: lesson_length(Some(&record.plan)),
+                ..beats
+            };
+            let settle = stage::pace(&record.plan, CornerKind::Glass).settle;
+            let held = beats.killer() - LESSON_HOLD_S + 1e-3;
             assert!(
-                beats.lesson_c(beats.killer() - 1e-3).unwrap() >= last_event,
-                "{}: settles at {last_event}",
+                beats.lesson_c(held).unwrap() >= settle,
+                "{}: settles at {settle}",
                 record.stem
             );
+            assert!(beats.lesson_s >= LESSON_S, "{}", record.stem);
+            if settle / LESSON_RATE > LESSON_S {
+                longer += 1;
+            }
             knockouts += 1;
         }
         assert!(knockouts > 0, "a record knocks its tank out");
-        assert!(beats.lesson_c(beats.killer()).is_none());
+        assert!(
+            longer > 0,
+            "a knockout record settles past the minimum lesson"
+        );
     }
 
     /// The camera never jumps: at every beat boundary its pose is continuous.
@@ -1069,6 +1103,7 @@ mod tests {
         let beats = Beats {
             impact: 2.0,
             shooter: true,
+            lesson_s: LESSON_S,
         };
         let hit = Rig::player_look();
         let death = rig.death_look(beats, false);
@@ -1104,6 +1139,7 @@ mod tests {
         let beats = Beats {
             impact: 2.0,
             shooter: true,
+            lesson_s: LESSON_S,
         };
         let side = rig.incoming_flat().cross(Vec3::Y) * 60.0;
         rig.shooter_pivot = rig.shooter_pivot.map(|pivot| pivot + side);
@@ -1187,6 +1223,7 @@ mod tests {
         let beats = Beats {
             impact: 2.0,
             shooter: false,
+            lesson_s: LESSON_S,
         };
         assert_eq!(beats.death(), beats.killer());
         let mut rig = rig();
