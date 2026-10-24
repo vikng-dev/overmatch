@@ -1802,6 +1802,59 @@ fn a_ground_stop_counts_its_approach_whatever_the_step() {
     );
 }
 
+/// A round that rests in a body it entered obliquely throws its burst about the direction it
+/// travelled in that body, the entrance's bend and not the way in: the ring spins its band about
+/// it. The 500 mm back plate is turned 40° about `Y` (fixture data), so the entrance bends the
+/// round off its way in before it stops; the bend must exceed 10 mrad for the check to tell the two
+/// apart, and 1 mrad is the tolerance. A mutant that keeps the way in as the stopped round's
+/// direction fails here.
+#[test]
+fn a_round_at_rest_bursts_about_the_direction_it_stopped_along() {
+    let burst = fixture_burst(burst::BurstShape::Ring);
+    let turn = Quat::from_rotation_y(40.0_f32.to_radians());
+    let fired = fixture_fire(
+        &[
+            (plate("front", THIN, 0.0, Kind::Main), 0, Quat::IDENTITY),
+            (plate("back", THICK, -2.0, Kind::Main), 0, turn),
+        ],
+        LINE_FROM,
+        Vec3::NEG_Z,
+        0,
+        |projectile| projectile.fuze = burst::Fuze::of(Some(burst)),
+    );
+    let ends = crossing_ends(&fired.log);
+    assert!(
+        matches!(
+            ends.as_slice(),
+            [CrossingEnd::Exit { .. }, CrossingEnd::Rest { .. }]
+        ),
+        "the back plate stops the round: {ends:?}"
+    );
+    let (incoming, stopped) = fired
+        .log
+        .iter()
+        .find_map(|mark| match mark {
+            ArmourMark::Crossing {
+                incoming, volumes, ..
+            } => volumes
+                .iter()
+                .find(|crossed| fired.names[&crossed.volume] == "back")
+                .map(|crossed| (*incoming, (crossed.end - crossed.entry).normalize())),
+            _ => None,
+        })
+        .expect("the round enters the back plate");
+    let bend = incoming.angle_between(stopped);
+    assert!(bend > 0.01, "the entrance bends the round {bend} rad");
+    let thrown = fired.burst.expect("the burst throws its field");
+    assert_eq!(thrown.field.ratio, 0.0, "thrown at rest");
+    let off = Vec3::from(thrown.axis).angle_between(stopped);
+    assert!(
+        off < 1.0e-3,
+        "the band spins {off} rad off the direction the round stopped along, {bend} rad off \
+         the way in"
+    );
+}
+
 /// A burst throws its field from the burst point about the flight direction, at the carried speed:
 /// its strength is the burst's driven-mass energy at the shipped rate, its field the round's burst
 /// shape at `λ = v_c / v_s`, and direction `k` of the shape's `N` carries `S·f_k` of that field's

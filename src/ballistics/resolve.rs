@@ -1121,7 +1121,11 @@ impl Flight {
                 false
             }
             Decision::Bite(bite) => match bite.end {
-                BiteEnd::Embedded { at, .. } => {
+                BiteEnd::Embedded { at, direction, .. } => {
+                    self.frame = self
+                        .frame
+                        .transport(Vec3::from(self.direction), Vec3::from(direction));
+                    self.direction = direction;
                     self.position = at;
                     self.continuation = None;
                     true
@@ -1356,8 +1360,14 @@ impl Bite {
 /// How a bite ended.
 #[derive(Clone, Debug)]
 pub(crate) enum BiteEnd {
-    /// Defeated: buried at `at`, the whole remaining momentum to the entrance body.
-    Embedded { at: Vec3, impulse: Vec3 },
+    /// Defeated: buried at `at`, travelling along `direction` through the body when it stopped
+    /// (the bend at the entrance, not the way in), the whole remaining momentum to the entrance
+    /// body.
+    Embedded {
+        at: Vec3,
+        direction: Dir3,
+        impulse: Vec3,
+    },
     /// Punched through.
     Perforated {
         /// The aggregate exit face — what the crossing's marks record.
@@ -1595,6 +1605,7 @@ fn bite(
         Outcome::Embedded { at, t } => (
             BiteEnd::Embedded {
                 at: world(at),
+                direction: bent,
                 impulse: mass * v_in,
             },
             t,
@@ -1974,7 +1985,7 @@ fn apply_bite(
     shell.dose.add_all(&bite.deposits);
 
     let (verdict, position, terminal_at) = match &bite.end {
-        BiteEnd::Embedded { at, impulse } => {
+        BiteEnd::Embedded { at, impulse, .. } => {
             shell.marks.events.push(PenetrationEvent {
                 entry: bite.entrance,
                 exit: *at,
