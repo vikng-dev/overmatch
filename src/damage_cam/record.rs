@@ -2,10 +2,10 @@
 //!
 //! Two reads bracket the shot. [`StruckTank::capture`] takes the struck tank's hull frame, its
 //! components and their HP, and every servo's angle, before it; [`report`] reads the shell's armour
-//! log ([`crate::ballistics::ArmourMark`]), its spall cones and its own per-box tally
-//! ([`ShotDose`]) after it, and states it all in the struck hull's frame. In the game the recorder
-//! (`super::recorder`) fills the same [`StruckTank`] from the pose each mark was resolved against
-//! and reads the logs through `report_from`.
+//! log ([`crate::ballistics::ArmourMark`]), its spall cones, its burst's field and its own per-box
+//! tally ([`ShotDose`]) after it, and states it all in the struck hull's frame. In the game the
+//! recorder (`super::recorder`) fills the same [`StruckTank`] from the pose each mark was resolved
+//! against and reads the logs through `report_from`.
 //!
 //! A report covers one encounter of the shell with the struck tank, its marks and settles from the
 //! encounter's first mark on (the whole flight, for a capture). A component's HP at the shot is what
@@ -17,11 +17,11 @@
 //!
 //! Nothing here decides anything the march did not: the verdict is [`ShotVerdict::of_path`] over
 //! the logged path, plate classes come from the volumes' components, the round's end is the last
-//! crossing or bounce the log has on the struck tank, and every dose is one the march recorded.
-//! The outcome is the struck tank's alone: first contact, plates, bounces, cones and their
-//! fragments' hits are read only off marks and volumes the tank owns, and the path stops one leg
-//! past the struck tank's last mark. No component geometry is
-//! read: the record names each component, and its shape stays the tank asset's.
+//! crossing, bounce or burst the log has on the struck tank, and every dose is one the march
+//! recorded. The outcome is the struck tank's alone: first contact, plates, bounces, the burst, the
+//! fields and their fragments' hits are read only off marks and volumes the tank owns, and the path
+//! stops one leg past the struck tank's last mark. No component geometry is read: the record names
+//! each component, and its shape stays the tank asset's.
 //!
 //! The path's times are DERIVED, not marched: each leg's length over the speed in effect on it
 //! (the round's speed between crossings, the mean of its entry and exit speeds inside one, half
@@ -33,15 +33,16 @@ use bevy::math::Affine3A;
 use bevy::prelude::*;
 
 use super::{
-    BoxDose, ComponentState, Consequence, ConsequenceState, Fragment, FragmentHit, Impact,
+    BoxDose, Burst, ComponentState, Consequence, ConsequenceState, Fragment, FragmentHit, Impact,
     PathPoint, PathStep, PenetrationReport, Plate, PlateClass, Projectile, Ricochet, Role,
     RoundEnd, Shooter, ShotVerdict, SpallCone,
 };
 use crate::ballistics::SpallCone as ThrownCone;
+use crate::ballistics::spall_cone::FieldDescriptor;
 use crate::ballistics::{
-    ArmourMark, BallisticVolume, ComponentHealth, CrossingEnd, ExternalArmour, PenetrationMarks,
-    ShellPath, ShotDose, SpallMarks, TRANSIT_K, VolumeCrossing, dose_units, field_units,
-    hp_of_units,
+    ArmourMark, BallisticVolume, BurstField, ComponentHealth, CrossingEnd, ExternalArmour,
+    PenetrationMarks, ShellPath, ShotDose, SpallMarks, SpallRay, TRANSIT_K, VolumeCrossing,
+    dose_units, field_units, hp_of_units,
 };
 use crate::damage::{Ammo, CrewStation, FunctionRole, VolumeOf};
 use crate::tank::{
@@ -167,11 +168,13 @@ impl StruckTank {
     }
 }
 
-/// One shell's logs as the march left them: its armour log, the cones it threw, its path and its
-/// per-box tally (`None` where the shell carries none).
+/// One shell's logs as the march left them: its armour log, the cones it threw, its burst's field,
+/// its path and its per-box tally (`None` where the shell carries none).
 pub(crate) struct ShotLog<'a> {
     pub marks: &'a [ArmourMark],
     pub cones: &'a [ThrownCone],
+    /// The field of the log's one [`ArmourMark::Burst`], where it threw one.
+    pub burst: Option<&'a BurstField>,
     pub path: &'a [Vec3],
     pub dose: Option<&'a ShotDose>,
 }
@@ -179,9 +182,11 @@ pub(crate) struct ShotLog<'a> {
 impl<'a> ShotLog<'a> {
     /// `shell`'s logs, read off its components.
     pub(crate) fn read(world: &'a World, shell: Entity) -> Option<Self> {
+        let spall = world.get::<SpallMarks>(shell)?;
         Some(Self {
             marks: &world.get::<PenetrationMarks>(shell)?.log,
-            cones: &world.get::<SpallMarks>(shell)?.cones,
+            cones: &spall.cones,
+            burst: spall.burst.as_ref(),
             path: &world.get::<ShellPath>(shell)?.points,
             dose: world.get::<ShotDose>(shell),
         })
@@ -684,7 +689,10 @@ pub(crate) fn report_from(
                 ledger.crossing(index, on.mine(mark), volumes, *overmatched, cones);
             }
             ArmourMark::Wound { volumes, .. } => ledger.wound(index, volumes),
-            ArmourMark::Failed | ArmourMark::Burst { .. } => {}
+            ArmourMark::Burst {
+                at, speed, nose, ..
+            } => ledger.burst(index, *at, *speed, *nose, log.burst),
+            ArmourMark::Failed => {}
         }
     }
 
@@ -730,6 +738,7 @@ pub(crate) fn report_from(
         mut plates,
         ricochets,
         spall,
+        burst,
         line,
         field,
         entered,
@@ -781,6 +790,7 @@ pub(crate) fn report_from(
             })
             .collect(),
         spall,
+        burst,
         end: end?,
         doses,
         consequences,
@@ -828,9 +838,10 @@ struct Ledger<'a> {
     plates: Vec<Plate>,
     ricochets: Vec<Ricochet>,
     spall: Vec<SpallCone>,
+    burst: Option<Burst>,
     /// The line's deposits on the struck tank's components.
     line: Vec<Deposit>,
-    /// The spall fragments' deposits on them.
+    /// The fields' deposits on them: the spall cones' and the burst's.
     field: Vec<Deposit>,
     /// Where the line reached each component (WORLD), with its time and the mark that reached it.
     entered: Vec<(Entity, f32, Vec3, usize)>,
@@ -845,6 +856,7 @@ impl<'a> Ledger<'a> {
             plates: Vec::new(),
             ricochets: Vec::new(),
             spall: Vec::new(),
+            burst: None,
             line: Vec::new(),
             field: Vec::new(),
             entered: Vec::new(),
@@ -938,35 +950,80 @@ impl<'a> Ledger<'a> {
         }
         for cone in cones {
             let t = on.time_at(cone.origin);
-            let fragments = cone
-                .rays
-                .iter()
-                .map(|ray| {
-                    let doses = ray.doses.iter().filter(|(volume, _)| on.owned(*volume));
-                    for &(volume, dose) in doses.clone() {
-                        self.field.push((volume, dose, t, index));
-                    }
-                    Fragment {
-                        end: on.struck.point(index, ray.end),
-                        strength: ray.strength,
-                        hits: doses
-                            .map(|&(volume, dose)| FragmentHit {
-                                volume: name_of(on.world, volume),
-                                damage: dose,
-                            })
-                            .collect(),
-                    }
-                })
-                .collect();
-            self.spall.push(SpallCone {
-                t,
-                origin: on.struck.point(index, cone.origin),
-                axis: on.struck.direction(index, Vec3::from(cone.axis)),
-                field: cone.field,
-                half_angle_deg: cone.field.half_angle().to_degrees(),
-                strength: cone.strength,
-                fragments,
-            });
+            let thrown = (cone.origin, cone.axis, cone.field, cone.strength);
+            let cone = self.field(index, t, thrown, &cone.rays);
+            self.spall.push(cone);
+        }
+    }
+
+    /// Mark `index`, the round's burst at `at` (WORLD) at the carried `speed`, its nose piece's
+    /// mass `nose` and its field `thrown` (`None` where it threw none): the burst with its field's
+    /// deposits, and the round's end there when nothing flies on from a burst in flight.
+    fn burst(
+        &mut self,
+        index: usize,
+        at: Vec3,
+        speed: f32,
+        nose: Option<f32>,
+        thrown: Option<&BurstField>,
+    ) {
+        let on = self.on;
+        let t = on.time_at(at);
+        let field = thrown.map(|burst| {
+            let throw = (burst.origin, burst.axis, burst.field, burst.strength);
+            self.field(index, t, throw, &burst.rays)
+        });
+        let point = on.struck.point(index, at);
+        if nose.is_none() && speed > 0.0 {
+            self.end = Some(RoundEnd::Burst { at: point });
+        }
+        self.burst = Some(Burst {
+            t,
+            point,
+            speed_mps: speed,
+            nose_kg: nose,
+            field,
+        });
+    }
+
+    /// The field of mark `index` thrown at `t` from `origin` about `axis` (WORLD) by `field` at
+    /// strength `S`, marched by `rays`: its fragments, its deposits on the struck tank's components
+    /// added to the ledger's.
+    fn field(
+        &mut self,
+        index: usize,
+        t: f32,
+        (origin, axis, field, strength): (Vec3, Dir3, FieldDescriptor, f32),
+        rays: &[SpallRay],
+    ) -> SpallCone {
+        let on = self.on;
+        let fragments = rays
+            .iter()
+            .map(|ray| {
+                let doses = ray.doses.iter().filter(|(volume, _)| on.owned(*volume));
+                for &(volume, dose) in doses.clone() {
+                    self.field.push((volume, dose, t, index));
+                }
+                Fragment {
+                    end: on.struck.point(index, ray.end),
+                    strength: ray.strength,
+                    hits: doses
+                        .map(|&(volume, dose)| FragmentHit {
+                            volume: name_of(on.world, volume),
+                            damage: dose,
+                        })
+                        .collect(),
+                }
+            })
+            .collect();
+        SpallCone {
+            t,
+            origin: on.struck.point(index, origin),
+            axis: on.struck.direction(index, Vec3::from(axis)),
+            field,
+            half_angle_deg: field.half_angle().to_degrees(),
+            strength,
+            fragments,
         }
     }
 

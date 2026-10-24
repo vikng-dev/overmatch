@@ -20,6 +20,7 @@ pub(crate) fn vocabulary_with(report: &PenetrationReport, cone: &ConeShape) -> S
         [(file, asset.geometry(), asset.spec())],
         RoundRegistry::shipped(),
         cone,
+        crate::ballistics::spall_cone::BurstFields::shipped(),
     )
 }
 

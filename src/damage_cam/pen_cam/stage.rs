@@ -1819,7 +1819,7 @@ mod tests {
                     assert!(!shell_drawn(plan, kind, gone, false), "{name}");
                     assert!(!shell_drawn(plan, kind, to, true), "{name}");
                 }
-                RoundEnd::Rest { .. } => {
+                RoundEnd::Rest { .. } | RoundEnd::Burst { .. } => {
                     for reduce in [false, true] {
                         let end = kind.duration();
                         assert!(shell_drawn(plan, kind, end, reduce), "{name}");

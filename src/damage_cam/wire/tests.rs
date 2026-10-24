@@ -39,6 +39,7 @@ fn vocabulary(records: &[(String, PenetrationReport)]) -> ShotVocabulary {
             .map(|(file, asset)| (*file, asset.geometry(), asset.spec())),
         RoundRegistry::shipped(),
         ConeShape::shipped(),
+        crate::ballistics::spall_cone::BurstFields::shipped(),
     )
 }
 
@@ -211,33 +212,23 @@ fn assert_round_trip(name: &str, decoded: &PenetrationReport, recorded: &Penetra
 
     assert_eq!(decoded.spall.len(), recorded.spall.len(), "{name}");
     for (d, r) in decoded.spall.iter().zip(&recorded.spall) {
+        assert_field(name, d, r);
+    }
+
+    assert_eq!(decoded.burst.is_some(), recorded.burst.is_some(), "{name}");
+    if let (Some(d), Some(r)) = (&decoded.burst, &recorded.burst) {
         assert_time(name, d.t, r.t);
-        assert_point(name, d.origin, r.origin);
-        assert_direction(name, d.axis, r.axis);
-        assert_eq!(
-            (d.field, d.half_angle_deg, d.strength, d.fragments.len()),
-            (r.field, r.half_angle_deg, r.strength, r.fragments.len()),
-            "{name}"
-        );
-        let (d_origin, r_origin) = (Vec3::from(d.origin), Vec3::from(r.origin));
-        for (df, rf) in d.fragments.iter().zip(&r.fragments) {
-            assert_eq!((df.strength, &df.hits), (rf.strength, &rf.hits), "{name}");
-            let reach = (Vec3::from(rf.end) - r_origin).length();
-            let off = (Vec3::from(df.end) - Vec3::from(rf.end)).length();
-            assert!(
-                off <= end_bound(reach),
-                "{name}: a ray of reach {reach} m ends {off} m off"
-            );
-            let decoded_reach = (Vec3::from(df.end) - d_origin).length();
-            assert!(
-                (decoded_reach - reach).abs() <= 0.000_5 + 4.0 * half_ulp(reach.max(1.0)),
-                "{name}: reach {decoded_reach} vs {reach}"
-            );
+        assert_point(name, d.point, r.point);
+        assert_eq!((d.speed_mps, d.nose_kg), (r.speed_mps, r.nose_kg), "{name}");
+        assert_eq!(d.field.is_some(), r.field.is_some(), "{name}");
+        if let (Some(d), Some(r)) = (&d.field, &r.field) {
+            assert_field(name, d, r);
         }
     }
 
     match (&decoded.end, &recorded.end) {
-        (RoundEnd::Left { at: d }, RoundEnd::Left { at: r }) => assert_point(name, *d, *r),
+        (RoundEnd::Left { at: d }, RoundEnd::Left { at: r })
+        | (RoundEnd::Burst { at: d }, RoundEnd::Burst { at: r }) => assert_point(name, *d, *r),
         (d, r) => assert_eq!(d, r, "{name}"),
     }
 
@@ -272,6 +263,33 @@ fn assert_round_trip(name: &str, decoded: &PenetrationReport, recorded: &Penetra
     assert_eq!(decoded.killed, recorded.killed, "{name}");
 }
 
+/// One field, a spall cone or a burst's: as decoded against as recorded.
+fn assert_field(name: &str, d: &SpallCone, r: &SpallCone) {
+    assert_time(name, d.t, r.t);
+    assert_point(name, d.origin, r.origin);
+    assert_direction(name, d.axis, r.axis);
+    assert_eq!(
+        (d.field, d.half_angle_deg, d.strength, d.fragments.len()),
+        (r.field, r.half_angle_deg, r.strength, r.fragments.len()),
+        "{name}"
+    );
+    let (d_origin, r_origin) = (Vec3::from(d.origin), Vec3::from(r.origin));
+    for (df, rf) in d.fragments.iter().zip(&r.fragments) {
+        assert_eq!((df.strength, &df.hits), (rf.strength, &rf.hits), "{name}");
+        let reach = (Vec3::from(rf.end) - r_origin).length();
+        let off = (Vec3::from(df.end) - Vec3::from(rf.end)).length();
+        assert!(
+            off <= end_bound(reach),
+            "{name}: a ray of reach {reach} m ends {off} m off"
+        );
+        let decoded_reach = (Vec3::from(df.end) - d_origin).length();
+        assert!(
+            (decoded_reach - reach).abs() <= 0.000_5 + 4.0 * half_ulp(reach.max(1.0)),
+            "{name}: reach {decoded_reach} vs {reach}"
+        );
+    }
+}
+
 /// Every recorded scenario comes back from its victim's explanation as it was recorded, up to the
 /// quanta, and each ray's reach is the record's to the millimetre on the wire.
 #[test]
@@ -287,7 +305,15 @@ fn every_recorded_scenario_round_trips() {
         let read: ShotExplanation = postcard::from_bytes(&bytes).unwrap();
         assert_eq!(read, built.full, "{name}: postcard round trip");
 
-        for (wire, cone) in built.full.record.cones.iter().zip(&report.spall) {
+        let wire_fields = built.full.record.cones.iter().chain(
+            built
+                .full
+                .record
+                .burst
+                .iter()
+                .filter_map(|burst| burst.field.as_ref()),
+        );
+        for (wire, cone) in wire_fields.zip(report.fields()) {
             let origin = Vec3::from(cone.origin);
             let mut overflow = wire.overflow.iter();
             for (&reach, fragment) in wire.reaches.iter().zip(&cone.fragments) {

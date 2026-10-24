@@ -7,8 +7,9 @@
 //!
 //! No name rides the wire. [`ShotVocabulary`] maps every name a record holds (vehicle file, servo,
 //! volume — armour, external armour and component alike —, weapon, round) to an index, and holds
-//! the spall cone shape the client rebuilds each ray's direction from. Both ends build it from data:
-//! each vehicle's tank file and sim artifact, the round registry and the cone shape. What a
+//! the shapes the client rebuilds each ray's direction from: the spall cone's and each burst law's.
+//! Both ends build it from data: each vehicle's tank file and sim artifact, the round registry, the
+//! cone shape and the burst fields. What a
 //! component is (role, HP pool, function) and an armour volume's class are read from the vocabulary
 //! on decode, not carried. Its fingerprint rides every explanation, folded the way the protocol
 //! fingerprint folds its manifest ([`crate::fingerprint`]); a client whose vocabulary
@@ -38,8 +39,8 @@
 //!
 //! A ray's direction and strength are not carried. A cone carries its field descriptor, its law (a
 //! ring's with its half-width) and its ratio `λ` (`spall_cone::FieldDescriptor`), and the client
-//! spreads the vocabulary's shape by it, rebuilding each stratum and weight to the bit
-//! (`spall_cone` module doc, "Determinism");
+//! spreads the vocabulary's shape by it (a burst's field: the burst shape of its law), rebuilding
+//! each stratum and weight to the bit (`spall_cone` module doc, "Determinism");
 //! the encoder refuses a cone whose rays' strengths are not `S·f_k` under its descriptor to the bit, or
 //! whose half-angle is not the descriptor's. A ray's direction is its stratum about the cone's
 //! axis, placed by the cone's roll — the turn about the axis from the shape's own lateral axis
@@ -97,12 +98,14 @@ use serde::{Deserialize, Serialize};
 
 use super::recorder::RecordedShot;
 use super::{
-    BoxDose, ComponentState, Consequence, ConsequenceState, Fragment, FragmentHit, Impact,
+    BoxDose, Burst, ComponentState, Consequence, ConsequenceState, Fragment, FragmentHit, Impact,
     PathPoint, PenetrationReport, Plate, PlateClass, Projectile, Ricochet, Role, RoundEnd,
     ShotVerdict, SpallCone,
 };
 use crate::bake::TankGeometry;
-use crate::ballistics::spall_cone::{BALL_EXPONENT, ConeShape, FieldDescriptor, FieldLaw, Spread};
+use crate::ballistics::spall_cone::{
+    BALL_EXPONENT, BurstFields, ConeShape, FieldDescriptor, FieldLaw, Spread,
+};
 use crate::damage::{FunctionRole, KnockoutReason};
 use crate::fingerprint::{FNV_OFFSET_BASIS, fingerprint_field, fnv1a_64};
 use crate::rounds::RoundRegistry;
@@ -331,7 +334,8 @@ fn fold_cone(mut hash: u64, cone: &ConeShape, exponent: u32) -> u64 {
     hash
 }
 
-/// Every name a pen cam record can hold, by index, and the cone shape its rays were thrown in.
+/// Every name a pen cam record can hold, by index, and the shapes its rays were thrown in: the
+/// cone shape and the burst fields'.
 #[derive(Resource, Clone, Debug)]
 pub(crate) struct ShotVocabulary {
     /// File-sorted.
@@ -341,16 +345,19 @@ pub(crate) struct ShotVocabulary {
     /// The round registry's keys, in key order.
     rounds: Vec<String>,
     cone: ConeShape,
+    burst: BurstFields,
     fingerprint: u64,
 }
 
 impl ShotVocabulary {
     /// The vocabulary of `vehicles` — each a tank file (relative to the asset root), its sim
-    /// artifact and its spec —, the registry `rounds` and the cone shape `cone`.
+    /// artifact and its spec —, the registry `rounds`, the cone shape `cone` and the burst fields
+    /// `burst`.
     pub(crate) fn new<'a>(
         vehicles: impl IntoIterator<Item = (&'a str, &'a TankGeometry, &'a TankSpec)>,
         rounds: &RoundRegistry,
         cone: &ConeShape,
+        burst: &BurstFields,
     ) -> Self {
         let mut weapons = Vec::new();
         let mut words = Vec::new();
@@ -366,6 +373,7 @@ impl ShotVocabulary {
             weapons,
             rounds: rounds.keys().map(str::to_owned).collect(),
             cone: cone.clone(),
+            burst: burst.clone(),
             fingerprint: 0,
         };
         vocabulary.fingerprint = vocabulary.fold();
@@ -414,7 +422,15 @@ impl ShotVocabulary {
         for round in &self.rounds {
             hash = fingerprint_field(hash, b"round", round.as_bytes());
         }
-        fold_cone(hash, &self.cone, BALL_EXPONENT)
+        hash = fold_cone(hash, &self.cone, BALL_EXPONENT);
+        for shape in self.burst.shapes() {
+            hash = fold_cone(
+                fingerprint_field(hash, b"burst_shape", &[]),
+                shape,
+                BALL_EXPONENT,
+            );
+        }
+        hash
     }
 
     fn vehicle(&self, file: &str) -> Result<u16, CodecError> {
@@ -679,6 +695,7 @@ struct Record {
     bounces: Vec<WireBounce>,
     path: Vec<(i32, Mm)>,
     cones: Vec<WireCone>,
+    burst: Option<WireBurst>,
     end: WireEnd,
     doses: Vec<WireDose>,
     components: Vec<WireComponent>,
@@ -737,6 +754,17 @@ struct WireCone {
     hits: Vec<WireHit>,
 }
 
+/// A burst: when and where, the carried speed, the nose piece's mass, and its field, a cone under
+/// the vocabulary's burst shape of its law.
+#[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
+struct WireBurst {
+    t: i32,
+    point: Mm,
+    speed_mps: f32,
+    nose_kg: Option<f32>,
+    field: Option<WireCone>,
+}
+
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 struct WireHit {
     /// Rays after the previous hit's (after ray 0, for the first).
@@ -751,6 +779,7 @@ enum WireEnd {
     /// At rest in a volume; `None` where the march named none.
     Rest(Option<u16>),
     Left(Mm),
+    Burst(Mm),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -956,12 +985,32 @@ fn encode(vocabulary: &ShotVocabulary, report: &PenetrationReport) -> Result<Rec
     let cones = report
         .spall
         .iter()
-        .map(|cone| encode_cone(vocabulary, vehicle, cone))
+        .map(|cone| encode_cone(&vocabulary.cone, vehicle, cone))
         .collect::<Result<_, _>>()?;
+    let burst = report
+        .burst
+        .as_ref()
+        .map(|burst| {
+            Ok::<_, CodecError>(WireBurst {
+                t: micros(burst.t)?,
+                point: Mm::of(burst.point)?,
+                speed_mps: burst.speed_mps,
+                nose_kg: burst.nose_kg,
+                field: burst
+                    .field
+                    .as_ref()
+                    .map(|field| {
+                        encode_cone(vocabulary.burst.shape_of(field.field), vehicle, field)
+                    })
+                    .transpose()?,
+            })
+        })
+        .transpose()?;
     let end = match &report.end {
         RoundEnd::Rest { volume } if volume.is_empty() => WireEnd::Rest(None),
         RoundEnd::Rest { volume } => WireEnd::Rest(Some(vehicle.volume(volume)?)),
         RoundEnd::Left { at } => WireEnd::Left(Mm::of(*at)?),
+        RoundEnd::Burst { at } => WireEnd::Burst(Mm::of(*at)?),
     };
     for consequence in &report.consequences {
         if !report
@@ -1020,6 +1069,7 @@ fn encode(vocabulary: &ShotVocabulary, report: &PenetrationReport) -> Result<Rec
         bounces,
         path,
         cones,
+        burst,
         end,
         doses,
         components,
@@ -1075,12 +1125,14 @@ fn fitted_roll(spread: &Spread, axis: Vec3, cone: &SpallCone) -> f32 {
     sine.atan2(cosine) as f32
 }
 
+/// `cone` on the wire, its rays thrown in `shape`; refused where its rays are not `shape`'s under
+/// its field.
 fn encode_cone(
-    vocabulary: &ShotVocabulary,
+    shape: &ConeShape,
     vehicle: &VehicleWords,
     cone: &SpallCone,
 ) -> Result<WireCone, CodecError> {
-    let spread = match vocabulary.cone.spread(cone.field) {
+    let spread = match shape.spread(cone.field) {
         Ok(spread) => spread,
         Err(error) => return refuse(format!("a cone's field is outside its law: {error}")),
     };
@@ -1170,11 +1222,23 @@ fn finite(record: &Record) -> Result<(), CodecError> {
             .iter()
             .flat_map(|plate| [plate.chord_mm, plate.cost_mm]),
     )
-    .chain(record.cones.iter().flat_map(|cone| {
-        [cone.field.ratio, cone.strength]
-            .into_iter()
-            .chain(cone.doses.iter().copied())
-    }))
+    .chain(
+        record
+            .cones
+            .iter()
+            .chain(record.burst.iter().filter_map(|burst| burst.field.as_ref()))
+            .flat_map(|cone| {
+                [cone.field.ratio, cone.strength]
+                    .into_iter()
+                    .chain(cone.doses.iter().copied())
+            }),
+    )
+    .chain(
+        record
+            .burst
+            .iter()
+            .flat_map(|burst| [burst.speed_mps].into_iter().chain(burst.nose_kg)),
+    )
     .chain(record.doses.iter().flat_map(|dose| [dose.line, dose.field]));
     for value in values {
         if !value.is_finite() {
@@ -1248,8 +1312,27 @@ fn decode(vocabulary: &ShotVocabulary, record: &Record) -> Result<PenetrationRep
     let spall = record
         .cones
         .iter()
-        .map(|cone| decode_cone(vocabulary, vehicle, cone))
+        .map(|cone| decode_cone(&vocabulary.cone, vehicle, cone))
         .collect::<Result<_, _>>()?;
+    let burst = record
+        .burst
+        .as_ref()
+        .map(|burst| {
+            Ok::<_, CodecError>(Burst {
+                t: seconds(burst.t),
+                point: burst.point.point(),
+                speed_mps: burst.speed_mps,
+                nose_kg: burst.nose_kg,
+                field: burst
+                    .field
+                    .as_ref()
+                    .map(|field| {
+                        decode_cone(vocabulary.burst.shape_of(field.field), vehicle, field)
+                    })
+                    .transpose()?,
+            })
+        })
+        .transpose()?;
     let end = match &record.end {
         WireEnd::Rest(None) => RoundEnd::Rest {
             volume: String::new(),
@@ -1258,6 +1341,7 @@ fn decode(vocabulary: &ShotVocabulary, record: &Record) -> Result<PenetrationRep
             volume: name(*volume)?,
         },
         WireEnd::Left(at) => RoundEnd::Left { at: at.point() },
+        WireEnd::Burst(at) => RoundEnd::Burst { at: at.point() },
     };
     let mut doses = Vec::with_capacity(record.doses.len());
     let mut consequences = Vec::new();
@@ -1325,6 +1409,7 @@ fn decode(vocabulary: &ShotVocabulary, record: &Record) -> Result<PenetrationRep
             })
             .collect(),
         spall,
+        burst,
         end,
         doses,
         consequences,
@@ -1333,12 +1418,13 @@ fn decode(vocabulary: &ShotVocabulary, record: &Record) -> Result<PenetrationRep
     })
 }
 
+/// `cone` off the wire, its rays rebuilt from `shape` spread by its field.
 fn decode_cone(
-    vocabulary: &ShotVocabulary,
+    shape: &ConeShape,
     vehicle: &VehicleWords,
     cone: &WireCone,
 ) -> Result<SpallCone, CodecError> {
-    let spread = match vocabulary.cone.spread(cone.field) {
+    let spread = match shape.spread(cone.field) {
         Ok(spread) => spread,
         Err(error) => return refuse(format!("a cone's field is outside its law: {error}")),
     };

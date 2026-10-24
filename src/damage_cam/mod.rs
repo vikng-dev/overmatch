@@ -159,6 +159,9 @@ pub struct PenetrationReport {
     /// Timed shell path, approach included; a ricochet's deflection leg continues it.
     pub path: Vec<PathPoint>,
     pub spall: Vec<SpallCone>,
+    /// The round's burst, where a burst round's fuze ran out on the struck tank; `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub burst: Option<Burst>,
     /// How the round's flight ended.
     pub end: RoundEnd,
     /// What the shot dosed each component with, in [`Self::components`] order; a component it never
@@ -192,6 +195,9 @@ pub enum RoundEnd {
     /// It left the struck tank at `at`, a point of the path: the far end of its last crossing, or
     /// the face of its last bounce. The path runs on past it.
     Left { at: [f32; 3] },
+    /// It burst in flight at `at`, the path's last point, and nothing flew on: the ball
+    /// ([`Burst`]).
+    Burst { at: [f32; 3] },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -263,8 +269,8 @@ pub struct PathPoint {
     pub point: [f32; 3],
 }
 
-/// One spall cone — the field a body exit throws (design doc §5) — and the directions it was
-/// marched by.
+/// One field thrown from a point (design doc §5) — a body exit's spall cone, or a burst's field
+/// ([`Burst`]) — and the directions it was marched by.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct SpallCone {
     pub t: f32,
@@ -273,7 +279,8 @@ pub struct SpallCone {
     pub axis: [f32; 3],
     /// The field law and ratio that weight its directions and set its rim.
     pub field: crate::ballistics::spall_cone::FieldDescriptor,
-    /// The field's rim, `asin(1/λ)`, in degrees.
+    /// The field's rim ([`crate::ballistics::spall_cone::FieldDescriptor::half_angle`]), in
+    /// degrees.
     pub half_angle_deg: f32,
     /// The strength `S` (reference-mm): direction `k` was thrown with `S·f_k`, and the cone emits
     /// `S/2` in all. Zero on a hand-authored clip.
@@ -282,7 +289,25 @@ pub struct SpallCone {
     pub fragments: Vec<Fragment>,
 }
 
-/// One direction of a spall cone.
+/// A burst round's burst (design doc §5, "The burst"): where and when its fuze ran out, how fast
+/// the round carried into it, the nose piece that flew on, and the field it threw.
+#[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
+pub struct Burst {
+    pub t: f32,
+    /// The burst point, a point of the path.
+    pub point: [f32; 3],
+    /// The carried speed (m/s); zero for a round that burst at rest.
+    pub speed_mps: f32,
+    /// The ring's nose piece's mass (kg), which flies on along the line from the burst point
+    /// unless the round was at rest; `None` under the ball.
+    pub nose_kg: Option<f32>,
+    /// The field thrown from the burst point about the round's flight direction, the burst shape's
+    /// law at ratio carried speed over greatest sideways speed; `None` where its emission was below
+    /// the HP quantum and it was not thrown.
+    pub field: Option<SpallCone>,
+}
+
+/// One direction of a field.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Fragment {
     /// Where the direction's reach ended: inside the volume that exhausted it, or where it left
@@ -304,8 +329,9 @@ pub struct FragmentHit {
 }
 
 /// One box's dose from the shot (reference-mm): the line's, a bounce's shock included, and the
-/// spall cones'; and the HP points it lost, the sum of the two rounded once, the field's at its own
-/// HP per reference-mm ([`crate::ballistics::field_units`]), and capped at the HP it had.
+/// fields' (the spall cones' and a burst's); and the HP points it lost, the sum of the two rounded
+/// once, the field's at its own HP per reference-mm ([`crate::ballistics::field_units`]), and
+/// capped at the HP it had.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct BoxDose {
     /// A [`ComponentState::name`].
@@ -315,7 +341,7 @@ pub struct BoxDose {
     /// HP points the shot took from it.
     pub lost: u32,
     /// Where the line first reached it: its entry, or the face it bounced off. `None` when only a
-    /// spall cone did.
+    /// field did.
     #[serde(default)]
     pub entered: Option<[f32; 3]>,
 }
@@ -373,9 +399,16 @@ impl PenetrationReport {
             .find(|component| component.name == name)
     }
 
+    /// Every field the shot threw on the struck tank: its spall cones, then its burst's field.
+    pub fn fields(&self) -> impl Iterator<Item = &SpallCone> {
+        self.spall
+            .iter()
+            .chain(self.burst.iter().filter_map(|burst| burst.field.as_ref()))
+    }
+
     /// Every outcome the record states without the reference that places it: a line dose with no
-    /// [`BoxDose::entered`], a field dose no spall cone's fragment names, a name no component of
-    /// the record holds. Empty for every record the recorder writes; a synthetic clip may lack the
+    /// [`BoxDose::entered`], a field dose no field's fragment names, a name no component of the
+    /// record holds. Empty for every record the recorder writes; a synthetic clip may lack the
     /// places, and its picture reaches such a component at contact.
     pub fn unresolved(&self) -> Vec<String> {
         let mut out = Vec::new();
@@ -386,7 +419,7 @@ impl PenetrationReport {
             if dose.line > 0.0 && dose.entered.is_none() {
                 out.push(format!("{}: a line dose with no entry", dose.volume));
             }
-            let thrown = self.spall.iter().flat_map(|cone| &cone.fragments).any(|f| {
+            let thrown = self.fields().flat_map(|cone| &cone.fragments).any(|f| {
                 f.hits
                     .iter()
                     .any(|hit| hit.volume == dose.volume && hit.damage > 0.0)
@@ -544,12 +577,12 @@ pub(crate) mod tests {
     /// timed list is in time order, and the path ends in or past the last plate: the sim marches a
     /// perforating shell on until it embeds or leaves the vehicle, so an embed holds the path's
     /// end and a perforated last plate has it beyond the exit. A deflection leg that ends the path
-    /// (a ricochet's, or a bounce after the last plate) is unconstrained.
+    /// (a ricochet's, or a bounce after the last plate) is unconstrained. A burst lies on the path
+    /// and its field is thrown from it; a round that burst in flight ends there, under the ball.
     pub(crate) fn assert_self_consistent(file: &str, report: &PenetrationReport) {
         let cited = report
-            .spall
-            .iter()
-            .flat_map(|burst| &burst.fragments)
+            .fields()
+            .flat_map(|field| &field.fragments)
             .flat_map(|fragment| &fragment.hits)
             .map(|hit| hit.volume.as_str())
             .chain(report.doses.iter().map(|d| d.volume.as_str()))
@@ -583,6 +616,39 @@ pub(crate) mod tests {
                     report.path.iter().any(|p| distance(p.point, *at) < 1.0e-5),
                     "{file}: where it left, {at:?}, is not a point of its path"
                 );
+            }
+            RoundEnd::Burst { at } => {
+                let burst = report
+                    .burst
+                    .as_ref()
+                    .expect("a round that burst has a burst");
+                assert_eq!(burst.nose_kg, None, "{file}: nothing flies on from the end");
+                assert_eq!(burst.point, *at, "{file}: it ends where it burst");
+                let last = report.path.last().map(|p| p.point);
+                assert_eq!(last, Some(*at), "{file}: the path ends at the burst");
+            }
+        }
+        if let Some(burst) = &report.burst {
+            let on_path = report
+                .path
+                .iter()
+                .find(|p| distance(p.point, burst.point) < 1.0e-5)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{file}: the burst point {:?} is not a point of its path",
+                        burst.point
+                    )
+                });
+            // Each time is quantized to a microsecond on the wire on its own.
+            assert!(
+                (on_path.t - burst.t).abs() < 2.0e-6,
+                "{file}: it burst at {} s, its point on the path is at {} s",
+                burst.t,
+                on_path.t
+            );
+            if let Some(field) = &burst.field {
+                assert_eq!(field.origin, burst.point, "{file}: thrown from the burst");
+                assert_eq!(field.t, burst.t, "{file}: thrown when it burst");
             }
         }
         assert_eq!(

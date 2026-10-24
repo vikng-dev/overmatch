@@ -50,7 +50,7 @@ pub struct Plan {
     pub contact_arc: f32,
     pub end_arc: f32,
     /// Where the record has the round leave the tank ([`RoundEnd::Left`]), and its arc length;
-    /// `None` when it rested.
+    /// `None` when it rested or burst.
     pub left_at: Option<(Vec3, f32)>,
     pub crossings: Vec<Crossing>,
     /// Outward normal and incidence (rad) at first contact.
@@ -294,7 +294,7 @@ impl Plan {
         let calibre = report.projectile.caliber_mm * 1.0e-3;
         let reach = |metres: f32| metres.min(REACH_CALIBRES * calibre);
         let left_at = match &report.end {
-            RoundEnd::Rest { .. } => None,
+            RoundEnd::Rest { .. } | RoundEnd::Burst { .. } => None,
             RoundEnd::Left { at } => {
                 let at = Vec3::from(*at);
                 Some((at, line.arc_of(at)))

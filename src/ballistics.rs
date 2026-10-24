@@ -963,6 +963,13 @@ impl Projectile {
         self.velocity.length()
     }
 
+    /// Whether the round's fuze is armed by a body of `tank`, so its burst will walk that tank.
+    pub(crate) fn armed_by(&self, tank: Entity) -> bool {
+        self.fuze
+            .armed()
+            .is_some_and(|(_, armed)| armed == Some(tank))
+    }
+
     /// A shell of `caliber` at rest, for view-layer tests that need a projectile ENTITY and none of
     /// the flight state (the view never marches one). Not compiled into a shipped binary.
     #[cfg(test)]
@@ -1244,21 +1251,12 @@ pub struct SpallCone {
 
 /// A burst's field (design doc §5, "The burst"): thrown from the burst point about the round's
 /// flight direction at the carried speed; `rays` are its directions as marched, in stratum order.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "read by the burst's tests; the record does not carry it"
-    )
-)]
 pub struct BurstField {
     pub origin: Vec3,
     pub axis: Dir3,
     /// The burst law and ratio its directions were weighted by: the round's burst shape at the
-    /// carried speed over the burst's greatest sideways speed.
+    /// carried speed (its [`ArmourMark::Burst`]'s) over the burst's greatest sideways speed.
     pub field: spall_cone::FieldDescriptor,
-    /// m/s the round carried into the burst; zero at rest.
-    pub speed: f32,
     /// The strength `S` (reference-mm) the directions were thrown with: direction `k` carries
     /// `S·f_k`, and the field emits `S/2` in all.
     pub strength: f32,
@@ -3578,7 +3576,6 @@ fn throw_burst(
         origin: throw.origin,
         axis: throw.axis,
         field,
-        speed,
         strength: throw.strength,
         rays,
     });

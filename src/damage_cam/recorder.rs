@@ -24,8 +24,9 @@
 //! emptied that tick, for crew loss the last crew station, in deposition order across every shell
 //! (automatic fire included, which can kill though it is not recorded).
 //!
-//! An encounter's record is finished ([`finish_records`]) once the shell ended or is clear of the
-//! tank's colliders. A tank gone by then (despawned, or respawned as a new entity) gets no record.
+//! An encounter's record is finished ([`finish_records`]) once the shell ended, or is clear of the
+//! tank's colliders with no fuze that tank armed still running: a burst wherever the delay ends is
+//! the encounter's. A tank gone by then (despawned, or respawned as a new entity) gets no record.
 
 use std::collections::BTreeMap;
 
@@ -39,8 +40,8 @@ use super::PenetrationReport;
 use super::record::{self, HullFrame, ShotFacts, ShotLog, StruckTank};
 use super::wire::TankLife;
 use crate::ballistics::{
-    ArmourMark, ComponentHealth, FireShell, PenetrationMarks, Projectile as Flying, ShellPath,
-    ShotDose, ShotSource, SpallCone, SpallMarks,
+    ArmourMark, BurstField, ComponentHealth, FireShell, PenetrationMarks, Projectile as Flying,
+    ShellPath, ShotDose, ShotSource, SpallCone, SpallMarks,
 };
 use crate::damage::{
     Ammo, CrewStation, DamageConsequences, KnockoutReason, TankKnockedOut, TankVolumes, VolumeOf,
@@ -116,6 +117,7 @@ struct Spent {
     recording: ShotRecording,
     marks: Vec<ArmourMark>,
     cones: Vec<SpallCone>,
+    burst: Option<BurstField>,
     path: Vec<Vec3>,
     dose: ShotDose,
 }
@@ -320,6 +322,7 @@ fn keep_spent(
         recording: std::mem::take(&mut *recording),
         marks: std::mem::take(&mut marks.log),
         cones: std::mem::take(&mut spall.cones),
+        burst: spall.burst.take(),
         path: std::mem::take(&mut path.points),
         dose: std::mem::take(&mut *dose),
     });
@@ -452,15 +455,19 @@ fn attribute_kills(
     recorder.emptied.clear();
 }
 
-/// Finish every encounter whose shell ended or is clear of the tank, and emit its record.
+/// Finish every encounter whose shell ended, or is clear of the tank with no fuze that tank armed
+/// still running, and emit its record.
 fn finish_records(world: &mut World) {
     let spent = std::mem::take(&mut world.resource_mut::<ShotRecorder>().spent);
     let mut finished: Vec<(Entity, usize)> = Vec::new();
     let mut records = Vec::new();
-    let mut live = world.query::<(Entity, &ShotRecording, Has<Flying>, &Transform)>();
+    let mut live = world.query::<(Entity, &ShotRecording, Option<&Flying>, &Transform)>();
     for (shell, recording, flying, at) in live.iter(world) {
         for (index, struck) in recording.struck.iter().enumerate() {
-            if struck.done || (flying && !clear_of(world, struck.tank, at.translation)) {
+            let open = flying.is_some_and(|round| {
+                round.armed_by(struck.tank) || !clear_of(world, struck.tank, at.translation)
+            });
+            if struck.done || open {
                 continue;
             }
             finished.push((shell, index));
@@ -474,6 +481,7 @@ fn finish_records(world: &mut World) {
         let log = ShotLog {
             marks: &spent.marks,
             cones: &spent.cones,
+            burst: spent.burst.as_ref(),
             path: &spent.path,
             dose: Some(&spent.dose),
         };

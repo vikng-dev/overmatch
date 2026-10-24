@@ -1591,7 +1591,6 @@ fn a_burst_throws_its_field_from_where_it_bursts() {
         let (at, speed, _) = bursts(&fired.log)[0];
         let thrown = fired.burst.expect("the burst throws its field");
         assert_eq!(thrown.origin, at, "{shape:?}: from the burst point");
-        assert_eq!(thrown.speed, speed, "{shape:?}: at the carried speed");
         assert!(
             thrown.axis.dot(Vec3::NEG_Z) > 0.9999,
             "{shape:?}: about the flight direction, {:?}",
@@ -1608,43 +1607,48 @@ fn a_burst_throws_its_field_from_where_it_bursts() {
     }
 }
 
+/// A burst of `shape` fired through the fixture's 50 mm front plate with crew boxes at `angles`
+/// off the flight axis, each named, 0.4 m on a side with a 30 HP pool, 1.5 m from the burst point
+/// toward `+Y` (fixture data): the shot, and the burst's point and carried speed. `angles` is given
+/// the field's brightest angle, the ball's axis or the ring's band centre `atan(v_s / v_c)`, first
+/// measured with no box present; the boxes move no burst.
+fn fire_burst_at_boxes(
+    shape: burst::BurstShape,
+    angles: impl Fn(f32) -> Vec<(&'static str, f32)>,
+) -> (FixtureFired, Vec3, f32) {
+    let burst = fixture_burst(shape);
+    let front = plate("front", THIN, 0.0, Kind::Main);
+    let probe = fire_fused(&[front], burst::Fuze::of(Some(burst)));
+    let (at, speed, _) = bursts(&probe.log)[0];
+    let brightest = match shape {
+        burst::BurstShape::Ball => 0.0,
+        burst::BurstShape::Ring => (burst.sideways_speed / speed).atan(),
+    };
+    let mut volumes = vec![front];
+    for (name, angle) in angles(brightest) {
+        let centre = at + 1.5 * (Vec3::NEG_Z * angle.cos() + Vec3::Y * angle.sin());
+        volumes.push((name, Vec3::splat(0.4), centre, Kind::Witness(30)));
+    }
+    let fired = fire_fused(&volumes, burst::Fuze::of(Some(burst)));
+    let moved = bursts(&fired.log)[0].0.distance(at);
+    assert!(
+        moved < BURST_TOLERANCE,
+        "{shape:?}: the boxes move the burst {moved} m"
+    );
+    (fired, at, speed)
+}
+
 /// The field leans with the carried speed: the burst doses a crew box where it is brightest (the
 /// ball's axis; the ring's band centre, `atan(v_s / v_c)` off it), and none past its rim, behind
 /// the burst at 150° from the axis. A mutant that inverts the ratio throws the ball over the whole
-/// sphere and moves the ring's band, and fails here. The boxes stand 1.5 m from the burst point,
-/// 0.4 m on a side, with a 30 HP pool (fixture data); the plate's cone reaches both, so the
+/// sphere and moves the ring's band, and fails here. The plate's cone reaches both boxes, so the
 /// burst's own rays are read.
 #[test]
 fn the_burst_field_leans_with_the_carried_speed() {
     for shape in [burst::BurstShape::Ball, burst::BurstShape::Ring] {
-        let burst = fixture_burst(shape);
-        let front = plate("front", THIN, 0.0, Kind::Main);
-        let probe = fire_fused(&[front], burst::Fuze::of(Some(burst)));
-        let (at, speed, _) = bursts(&probe.log)[0];
-        let lean = match shape {
-            burst::BurstShape::Ball => 0.0,
-            burst::BurstShape::Ring => (burst.sideways_speed / speed).atan(),
-        };
-        let toward = |angle: f32| at + 1.5 * (Vec3::NEG_Z * angle.cos() + Vec3::Y * angle.sin());
-        let side = Vec3::splat(0.4);
-        let fired = fire_fused(
-            &[
-                front,
-                ("lit", side, toward(lean), Kind::Witness(30)),
-                (
-                    "behind",
-                    side,
-                    toward(150.0_f32.to_radians()),
-                    Kind::Witness(30),
-                ),
-            ],
-            burst::Fuze::of(Some(burst)),
-        );
-        let moved = bursts(&fired.log)[0].0.distance(at);
-        assert!(
-            moved < BURST_TOLERANCE,
-            "{shape:?}: the boxes move the burst {moved} m"
-        );
+        let (fired, ..) = fire_burst_at_boxes(shape, |brightest| {
+            vec![("lit", brightest), ("behind", 150.0_f32.to_radians())]
+        });
         let thrown = fired.burst.expect("the burst throws its field");
         let dosed: Vec<&str> = thrown
             .rays
@@ -1654,5 +1658,84 @@ fn the_burst_field_leans_with_the_carried_speed() {
             .collect();
         assert!(dosed.contains(&"lit"), "{shape:?}: {dosed:?}");
         assert!(!dosed.contains(&"behind"), "{shape:?}: {dosed:?}");
+    }
+}
+
+/// The record carries the burst as the march threw it: its point on the path, the carried speed,
+/// the ring's nose piece's mass, and its field with every direction's strength and doses, in the
+/// hull frame; a box's field dose sums its hits from every field, the burst's after the cones',
+/// and a box the burst empties is lost at the burst's time. The ball ends the round at the burst
+/// point; the ring's nose piece runs the path on past it. A mutant that leaves the burst's
+/// deposits out of the ledger, the field out of the record, or the ring's round ending at the
+/// burst fails here; the wire and the pen cam read the record.
+#[test]
+fn the_record_carries_the_burst() {
+    for shape in [burst::BurstShape::Ball, burst::BurstShape::Ring] {
+        let (fired, at, speed) = fire_burst_at_boxes(shape, |brightest| vec![("lit", brightest)]);
+        let report = &fired.report;
+        crate::damage_cam::tests::assert_self_consistent("fixture", report);
+        assert_eq!(report.unresolved(), Vec::<String>::new(), "{shape:?}");
+        let recorded = report.burst.as_ref().expect("the record carries the burst");
+        assert_eq!(recorded.speed_mps, speed, "{shape:?}");
+        assert_eq!(recorded.nose_kg, bursts(&fired.log)[0].2, "{shape:?}");
+        // The fixture tank's hull stands at the world origin, unturned.
+        assert!(
+            Vec3::from(recorded.point).distance(at) < 1.0e-6,
+            "{shape:?}"
+        );
+        let thrown = fired.burst.as_ref().expect("the burst throws its field");
+        let field = recorded
+            .field
+            .as_ref()
+            .expect("the record carries its field");
+        assert_eq!(field.field, thrown.field, "{shape:?}");
+        assert_eq!(field.strength, thrown.strength, "{shape:?}");
+        assert_eq!(field.fragments.len(), thrown.rays.len(), "{shape:?}");
+        for (fragment, ray) in field.fragments.iter().zip(&thrown.rays) {
+            assert_eq!(fragment.strength, ray.strength, "{shape:?}");
+            let hits: Vec<(&str, f32)> = fragment
+                .hits
+                .iter()
+                .map(|hit| (hit.volume.as_str(), hit.damage))
+                .collect();
+            let doses: Vec<(&str, f32)> = ray
+                .doses
+                .iter()
+                .map(|(volume, dose)| (fired.names[volume].as_str(), *dose))
+                .collect();
+            assert_eq!(hits, doses, "{shape:?}");
+        }
+        let lit = report
+            .doses
+            .iter()
+            .find(|dose| dose.volume == "lit")
+            .expect("the burst doses the lit box");
+        let hits = report
+            .fields()
+            .flat_map(|cone| &cone.fragments)
+            .flat_map(|fragment| &fragment.hits)
+            .filter(|hit| hit.volume == "lit")
+            .fold(0.0, |sum, hit| sum + hit.damage);
+        assert_eq!(lit.field, hits, "{shape:?}");
+        let emptied = report
+            .consequences
+            .iter()
+            .find(|consequence| consequence.volume == "lit")
+            .expect("the burst knocks out the lit box");
+        assert_eq!(emptied.t, recorded.t, "{shape:?}: at the burst");
+        match shape {
+            burst::BurstShape::Ball => {
+                assert_eq!(report.end, RoundEnd::Burst { at: recorded.point })
+            }
+            burst::BurstShape::Ring => {
+                assert!(
+                    !matches!(report.end, RoundEnd::Burst { .. }),
+                    "{:?}",
+                    report.end
+                );
+                let last = Vec3::from(report.path.last().unwrap().point);
+                assert!(last.z < at.z, "the nose runs the path on: {last}");
+            }
+        }
     }
 }

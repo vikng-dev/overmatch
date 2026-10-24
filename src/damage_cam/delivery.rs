@@ -21,7 +21,7 @@ use super::wire::{
     Audience, BuiltExplanation, CodecError, ShotExplanation, ShotVocabulary, TankLife,
 };
 use crate::bake::TankBlueprint;
-use crate::ballistics::spall_cone::ConeShape;
+use crate::ballistics::spall_cone::{BurstFields, ConeShape};
 use crate::rounds::RoundRegistry;
 use crate::state::GameplaySet;
 use crate::tank::Controlled;
@@ -56,7 +56,7 @@ pub(crate) fn plugin(app: &mut App) {
     );
 }
 
-/// Every vehicle this build spawns, the shipped round registry and the shipped cone shape.
+/// Every vehicle this build spawns, the shipped round registry, cone shape and burst fields.
 fn build_vocabulary(blueprint: Res<TankBlueprint>, mut commands: Commands) {
     commands.insert_resource(ShotVocabulary::new(
         [(
@@ -66,6 +66,7 @@ fn build_vocabulary(blueprint: Res<TankBlueprint>, mut commands: Commands) {
         )],
         RoundRegistry::shipped(),
         ConeShape::shipped(),
+        BurstFields::shipped(),
     ));
 }
 

@@ -397,6 +397,20 @@ impl BurstFields {
         (energy as f64 / 1000.0 * self.reference_mm_per_kj as f64) as f32
     }
 
+    /// The ring's shape and the ball's.
+    pub(crate) fn shapes(&self) -> [&ConeShape; 2] {
+        [&self.ring, &self.ball]
+    }
+
+    /// The shape a burst field of descriptor `field` was thrown in: the ring's for a ring, the
+    /// ball's for a ball. A decoder rebuilds the field's directions from it.
+    pub(crate) fn shape_of(&self, field: FieldDescriptor) -> &ConeShape {
+        match field.law {
+            FieldLaw::Ring { .. } => &self.ring,
+            FieldLaw::Ball => &self.ball,
+        }
+    }
+
     /// The field a burst of `shape` throws at ratio `ratio` (its carried speed over its greatest
     /// sideways speed), and the shape it is thrown in.
     pub(crate) fn field(&self, shape: BurstShape, ratio: f32) -> (FieldDescriptor, &ConeShape) {
