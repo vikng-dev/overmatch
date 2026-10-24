@@ -71,7 +71,7 @@
     // unscaled and every other is measured from it. Finite, positive and normal.
     reference_calibre_m: (0.088, Tuned("the calibre the field's rate was set against")),
 
-    // A burst's field (design doc §5, "The burst"): thrown from the burst point about the round's
+    // A burst's field (design doc §5a, "The burst"): thrown from the burst point about the round's
     // flight direction, its ratio the carried speed over the burst's greatest sideways speed v_s,
     // through the struck tank's volumes, passing as the spall cone's directions do, its dose
     // converting at `hp_per_reference_mm`. The ring and the ball are the two burst shapes a round's

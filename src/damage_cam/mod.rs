@@ -289,7 +289,7 @@ pub struct SpallCone {
     pub fragments: Vec<Fragment>,
 }
 
-/// A burst round's burst (design doc §5, "The burst"): where and when its fuze ran out, how fast
+/// A burst round's burst (design doc §5a, "The burst"): where and when its fuze ran out, how fast
 /// the round carried into it, the nose piece that flew on, and the field it threw.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Burst {

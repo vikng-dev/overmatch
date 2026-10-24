@@ -1163,7 +1163,7 @@ pub enum ArmourMark {
     },
     /// A walk that failed closed: the round stopped at contact with no crossing resolved.
     Failed,
-    /// The round's fuze ran out at `at` (design doc §5, "The burst"), the round travelling at
+    /// The round's fuze ran out at `at` (design doc §5a, "The burst"), the round travelling at
     /// `speed` (zero for a round at rest). `nose` is the mass (kg) of the ring's nose piece, which
     /// flies on from `at` unless the round was at rest; `None` under the ball, which ends the round
     /// here.
@@ -1253,7 +1253,7 @@ pub struct SpallCone {
     pub rays: Vec<SpallRay>,
 }
 
-/// A burst's field (design doc §5, "The burst"): thrown from the burst point about the round's
+/// A burst's field (design doc §5a, "The burst"): thrown from the burst point about the round's
 /// flight direction at the carried speed; `rays` are its directions as marched, in stratum order.
 pub struct BurstField {
     pub origin: Vec3,
@@ -2964,7 +2964,7 @@ fn launch(
     })
 }
 
-/// AUTHORITY: advance the fuze over a decided crossing (design doc §5, "The burst"). A corridor
+/// AUTHORITY: advance the fuze over a decided crossing (design doc §5a, "The burst"). A corridor
 /// found clear is open path. A bounce meets a body: an armed fuze restarts from it. A bite exits
 /// each body it reached in turn, which arms the fuze at the threshold or restarts an armed one,
 /// then flies on from the last exit, or exiting none from the flight's position, to where the
@@ -3537,7 +3537,7 @@ fn resolve_replica_armor_contact(
     ReplicaArmorContact::Stopped
 }
 
-/// AUTHORITY: throw an armed round's burst field (design doc §5, "The burst") from where `flight`
+/// AUTHORITY: throw an armed round's burst field (design doc §5a, "The burst") from where `flight`
 /// stands, about its direction, at the carried `speed`, recording it as the shell's
 /// [`SpallMarks::burst`] and adding its doses to the shot's [`ShotDose`]. Its strength `S` is the
 /// burst's driven-mass energy at the burst fields' rate ([`spall_cone::BurstFields::strength`]),

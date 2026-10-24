@@ -24,7 +24,7 @@
 // threshold (reference-mm spent in one body) and delay (s), the core's mass and the base parts'
 // mass (kg), and the core cavity's diameter (m). Its parts (cavity length, wall and nose masses),
 // its greatest sideways speed v_s = K (M/C + 1/2)^-1/2 and its driven mass's energy are DERIVED
-// at load, never authored; the burst's story is design doc §5, "The burst". A round without the
+// at load, never authored; the burst's story is design doc §5a, "The burst". A round without the
 // block is inert, and a sub-calibre round carries none.
 //
 // PROVENANCE: every value is authored `(value, Kind("source or reason"))`, Kind one of Measured,

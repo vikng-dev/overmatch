@@ -17,7 +17,7 @@
 //! A round may carry a burst block naming a burst core type of the registry's `burst_cores`; its
 //! burst is derived here, once ([`crate::ballistics::burst::Burst::derived`]), and rides the round
 //! to the shot as the penetrator does. A round without the block is inert. The burst's story is
-//! design doc §5, "The burst".
+//! design doc §5a, "The burst".
 //!
 //! The target structure (rounds name a core material and author their nose as geometry) is
 //! `.agents/scratch/damage-cam-2026-10-08/research/recommendation-solid-shot.md` Part 1 item 5.

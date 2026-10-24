@@ -1,6 +1,6 @@
 //! A burst round's derived burst ([`Burst::derived`]) and the fuze the march advances per shell
 //! ([`Fuze`]). The burst's story — the trigger, the ring and the ball, the derived masses and
-//! speeds — is design doc §5, "The burst" (`.agents/docs/design/armor-penetration-and-damage.md`);
+//! speeds — is design doc §5a, "The burst" (`.agents/docs/design/armor-penetration-and-damage.md`);
 //! the march that runs the fuze and throws the burst's field is the parent module's.
 //!
 //! Units: masses kg, lengths m, speeds m/s, the delay s, the arming threshold reference-mm, the

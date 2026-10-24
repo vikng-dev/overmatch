@@ -295,6 +295,6 @@ round's `option` in `assets/ballistics/rounds.ron`. Both laws stay in code and o
 the loser's round leaves the list with no code change; the burst's potency, the ring's width and
 each law's `N` are the `burst` block of `assets/ballistics/spall_cone.ron`.
 
-**Lives in.** Design §5, "The burst" (`.agents/docs/design/armor-penetration-and-damage.md`).
+**Lives in.** Design §5a, "The burst" (`.agents/docs/design/armor-penetration-and-damage.md`).
 Code: `src/ballistics/burst.rs` (the fuze and the derived parts), `throw_burst` and `burst_here` in
 `src/ballistics.rs`, `FieldLaw` and `BurstFields` in `src/ballistics/spall_cone.rs`.

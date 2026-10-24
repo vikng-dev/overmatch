@@ -355,8 +355,12 @@ _Avoid_: soft armour, flesh factor (a witness has no factor)
 A round's dose to a witness per metre of chord (reference-mm/m, `rounds.ron` field `wound`, TUNED). Round data, never a material's.
 _Avoid_: wound rate (the code identifier keeps `wound` until a rename is decided)
 
-**Fragment cone**:
-The field of a bursting round's own fragments, which carry its velocity forward. Not built.
+**Burst**:
+A burst round's fuze running out: armed by a body whose spend reaches its threshold, after a delay counted as path from that body's exit (restarted by every body met after it), the round bursts at the burst point and throws its **fragment cone** there, or bursts at rest where it stopped first. Law: design doc §5a.
+_Avoid_: detonation, explosion (the game state is the burst and its field)
+
+**Fragment cone** (burst field):
+The field a **burst** throws from its burst point about the round's flight direction, carrying the round's velocity forward: the **ring** (the wall around the burst core as a band, the nose piece flying on) or the **ball** (one lobe of the round less its core, a cone at speed and the whole sphere when slow), the two shapes of playtest fork F7. Code and records call it the burst field. Law: design doc §5a.
 
 **Blast sphere**:
 The field of a blast or shockwave, even in every direction. Not built.

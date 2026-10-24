@@ -1359,7 +1359,7 @@ fn the_muzzle_is_read_before_the_globals_catch_up() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The burst on generic fixtures (design doc §5, "The burst")
+// The burst on generic fixtures (design doc §5a, "The burst")
 // ---------------------------------------------------------------------------------------------
 
 /// The fixture 88 carrying a burst of `shape` ([`burst::fixture_inputs`]).

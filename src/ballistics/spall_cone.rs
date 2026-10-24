@@ -16,7 +16,7 @@
 //! `D = √(1 − λ²(1 − μ²))`, `m` = [`BALL_EXPONENT`]: the field is brightest on the axis and falls to
 //! zero at the rim `α = asin(1/λ)`. A plate exit's `λ` is its rear layer's substance's
 //! (`crate::substances::HardSubstance::debris_ratio`), at least 1, so the half-angle is the exit
-//! material's. A burst's ball may run below `λ = 1` (design doc §5, "The burst"), where it fills
+//! material's. A burst's ball may run below `λ = 1` (design doc §5a, "The burst"), where it fills
 //! the whole sphere: `F = (1 + λ − μg)(2 + λ − λ² + λμg)/4`, `g = λμ + D`, the `m = 3` law's
 //! closed form, uniform at `λ = 0`. Under [`FieldLaw::Ring`], a burst's ring, the field is uniform
 //! over the band `θ_c ∓ h` about `θ_c = atan(1/λ)`, its near edge held at the axis. The passage
@@ -315,7 +315,7 @@ struct BurstFile {
     ball_directions: Sourced<usize>,
 }
 
-/// A burst's field, validated (design doc §5, "The burst"): its strength per kJ of its driven
+/// A burst's field, validated (design doc §5a, "The burst"): its strength per kJ of its driven
 /// mass's energy, the ring's half-width, and the shape each burst law is thrown in, sampled by its
 /// own direction count and passing as the spall cone's directions do.
 #[derive(Clone, Debug, PartialEq)]
