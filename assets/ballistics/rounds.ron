@@ -19,6 +19,14 @@
 // 30 HP crew pool (3 reference-mm, `ballistics::HP_PER_REFERENCE_MM`): a rate of `3 / L` empties
 // the pool at a chord of `L` metres.
 //
+// A burst round adds `burst: Some((...))`: the burst core type it carries (a key of
+// `burst_cores`, below), the burst shape it throws (`Ring` or `Ball`), the fuze's arming
+// threshold (reference-mm spent in one body) and delay (s), the core's mass and the base parts'
+// mass (kg), and the core cavity's diameter (m). Its parts (cavity length, wall and nose masses),
+// its greatest sideways speed v_s = K (M/C + 1/2)^-1/2 and its driven mass's energy are DERIVED
+// at load, never authored; the burst's story is design doc §5, "The burst". A round without the
+// block is inert, and a sub-calibre round carries none.
+//
 // PROVENANCE: every value is authored `(value, Kind("source or reason"))`, Kind one of Measured,
 // Derived, Tuned, Resolution, Unknown (`src/provenance.rs`); a value without one does not load.
 // "Q7" is the fixture-materials recommendation in
@@ -26,6 +34,69 @@
 // munition data: the rounds are labelled fixtures.
 (
     rounds: {
+        // The burst rounds of the owner's comparison (playtest fork F7): the Pzgr. 39's body
+        // with its burst core, each throwing one of the two burst shapes. DERIVED at load from
+        // the data below and the body's GunSteel density: a cavity of 36.4 cm³ and 36.3 mm length;
+        // a wall of 1.440 kg and a nose of 8.370 kg; v_s 541.5 m/s under the ring (the wall
+        // driven) and 205.8 m/s under the ball (the round less its core driven), 211.1 kJ and
+        // 214.8 kJ of driven-mass energy. No source gives the nose's mass: DERIVED, provisional.
+        "88mm_APHE_ring": (
+            name: ("8.8 cm Pzgr. 39 ring", Tuned("the owner's comparison (brief 4b): the 8.8 cm
+                Pzgr. 39 bursting as the ring")),
+            core: ("GunSteel", Tuned("the Pzgr. 39's fixture body steel")),
+            nose: (Ogive(crh: 1.0), Tuned("labelled fixture value: the Pzgr. 39's blunt ogive of
+                1 crh")),
+            mass: (10.2, Measured("Jentz & Doyle, Tiger I Heavy Tank 1942-45, Osprey New
+                Vanguard 5 (1993), p.17")),
+            caliber: (0.088, Measured("the gun's nominal 8.8 cm calibre designation")),
+            muzzle_speed: (773.0, Measured("Jentz & Doyle, Tiger I Heavy Tank 1942-45, Osprey New
+                Vanguard 5 (1993), p.17")),
+            wound: (30.0, Tuned("the Pzgr. 39's main-gun rate, kept by the nose piece past the
+                burst: the 30 HP crew pool is emptied at ~10 cm of chord (3 / 0.10)")),
+            burst: Some((
+                core_type: ("88mm_burst_core", Measured("the round's burst core:
+                    tiger-ammo-history.md")),
+                option: (Ring, Tuned("the owner's comparison (brief 4b): the wall becomes a band,
+                    the nose piece flies on")),
+                arming_spend: (35.0, Measured("the reference-mm the round spends in one body to
+                    arm the fuze: tiger-ammo-history.md")),
+                delay: (0.012, Measured("upper bound: tiger-ammo-history.md")),
+                core_mass: (0.060, Measured("range 0.059-0.064 kg: tiger-ammo-history.md")),
+                base_mass: (0.33, Measured("the trigger and trace element at the base, range
+                    0.319-0.333 kg: tiger-ammo-history.md")),
+                cavity_diameter: (0.0357, Tuned("provisional: the measured core diameter of the
+                    round's predecessor (tiger-ammo-history.md); no source gives this round's")),
+            )),
+        ),
+        "88mm_APHE_ball": (
+            name: ("8.8 cm Pzgr. 39 ball", Tuned("the owner's comparison (brief 4b): the 8.8 cm
+                Pzgr. 39 bursting as the ball")),
+            core: ("GunSteel", Tuned("the Pzgr. 39's fixture body steel")),
+            nose: (Ogive(crh: 1.0), Tuned("labelled fixture value: the Pzgr. 39's blunt ogive of
+                1 crh")),
+            mass: (10.2, Measured("Jentz & Doyle, Tiger I Heavy Tank 1942-45, Osprey New
+                Vanguard 5 (1993), p.17")),
+            caliber: (0.088, Measured("the gun's nominal 8.8 cm calibre designation")),
+            muzzle_speed: (773.0, Measured("Jentz & Doyle, Tiger I Heavy Tank 1942-45, Osprey New
+                Vanguard 5 (1993), p.17")),
+            wound: (30.0, Tuned("the Pzgr. 39's main-gun rate: the 30 HP crew pool is emptied at
+                ~10 cm of chord (3 / 0.10)")),
+            burst: Some((
+                core_type: ("88mm_burst_core", Measured("the round's burst core:
+                    tiger-ammo-history.md")),
+                option: (Ball, Tuned("the owner's comparison (brief 4b): one lobe of the round
+                    less its core; nothing flies on")),
+                arming_spend: (35.0, Measured("the reference-mm the round spends in one body to
+                    arm the fuze: tiger-ammo-history.md")),
+                delay: (0.012, Measured("upper bound: tiger-ammo-history.md")),
+                core_mass: (0.060, Measured("range 0.059-0.064 kg: tiger-ammo-history.md")),
+                base_mass: (0.33, Measured("the trigger and trace element at the base, range
+                    0.319-0.333 kg: tiger-ammo-history.md")),
+                cavity_diameter: (0.0357, Tuned("provisional: the measured core diameter of the
+                    round's predecessor (tiger-ammo-history.md); no source gives this round's")),
+            )),
+        ),
+        // The solid Pzgr. 39: the fixture round the pen cam scenarios and the field casts fire.
         "88mm_AP": (
             name: ("8.8 cm Pzgr. 39", Measured("the 8.8 cm KwK 36's APCBC round, whose 10.2 kg
                 and 773 m/s this entry carries; en.wikipedia.org/wiki/8.8_cm_KwK_36, ammunition
@@ -93,6 +164,14 @@
             wound: (10.0, Tuned("a rifle-calibre bullet empties the 30 HP crew pool at ~30 cm of
                 chord (3 / 0.30): one pass through a station leaves it reduced, two knock it out
                 (crew-model decision 2026-10-17)")),
+        ),
+    },
+    // Burst core types by key: a burst block names one. Each carries its density (kg/m³) and its
+    // speed constant K (m/s), the sideways speed scale of v_s.
+    burst_cores: {
+        "88mm_burst_core": (
+            density: (1650.0, Derived("1.65 g/cm³: shape-law.md §4")),
+            speed_constant_mps: (2680.0, Derived("shape-law.md §4")),
         ),
     },
 )

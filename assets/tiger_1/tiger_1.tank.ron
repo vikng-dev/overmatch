@@ -346,8 +346,9 @@ TankSpec(
             // The rounds it loads: keys in assets/ballistics/rounds.ron, which states each one's
             // core, nose, mass, calibre and muzzle speed with their provenance. The first is the
             // round it spawns loaded with; the crew selects among them, and a selection takes
-            // effect at the next load.
-            rounds: ["88mm_AP", "88mm_APCR"],
+            // effect at the next load. The ring and the ball are the two burst shapes of the
+            // owner's comparison (playtest fork F7); the loser leaves the list after play.
+            rounds: ["88mm_APHE_ring", "88mm_APHE_ball", "88mm_APCR"],
             fire_mode: Single(reload_secs: 3.0),
             recoil: (kick: 14.0, stiffness: 90.0, damping: 14.0),
             fire: [Gunner, Breech, GunBarrel],

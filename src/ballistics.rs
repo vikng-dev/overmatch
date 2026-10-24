@@ -1242,12 +1242,38 @@ pub struct SpallCone {
     pub rays: Vec<SpallRay>,
 }
 
-/// The spall a shell has thrown this flight — one cone per body exit it reached. Public like
-/// `PenetrationMarks`; freed when the shell despawns.
+/// A burst's field (design doc §5, "The burst"): thrown from the burst point about the round's
+/// flight direction at the carried speed; `rays` are its directions as marched, in stratum order.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "read by the burst's tests; the record does not carry it"
+    )
+)]
+pub struct BurstField {
+    pub origin: Vec3,
+    pub axis: Dir3,
+    /// The burst law and ratio its directions were weighted by: the round's burst shape at the
+    /// carried speed over the burst's greatest sideways speed.
+    pub field: spall_cone::FieldDescriptor,
+    /// m/s the round carried into the burst; zero at rest.
+    pub speed: f32,
+    /// The strength `S` (reference-mm) the directions were thrown with: direction `k` carries
+    /// `S·f_k`, and the field emits `S/2` in all.
+    pub strength: f32,
+    pub rays: Vec<SpallRay>,
+}
+
+/// The fields a shell has thrown this flight — one cone per body exit it reached, and its burst.
+/// Public like `PenetrationMarks`; freed when the shell despawns.
 #[derive(Component, Default)]
 pub struct SpallMarks {
     pub cones: Vec<SpallCone>,
-    /// Body exits reached whose cone was below the HP quantum and not thrown.
+    /// The round's burst field, once it has burst and thrown one.
+    pub burst: Option<BurstField>,
+    /// Fields reached whose emission was below the HP quantum and not thrown: body exits' cones
+    /// and a burst's.
     pub gated: usize,
 }
 
@@ -1425,10 +1451,12 @@ const MG_SHORTCIRCUIT_CALIBER_MAX: f32 = 0.020;
 /// builds no mesh or material, and writes no `Visibility` — a shell born here is a bare simulation
 /// entity, and [`view::plugin`] (client roots only) is what dresses one.
 pub fn sim_plugin(app: &mut App) {
-    // The spall cone's shape and calibration are authored data: parsed and validated here, while
-    // the app is built, so a malformed file stops startup rather than the first throw.
+    // The spall cone's shape, its calibration and a burst's field are authored data: parsed and
+    // validated here, while the app is built, so a malformed file stops startup rather than the
+    // first throw.
     spall_cone::ConeShape::shipped();
     spall_cone::hp_per_reference_mm();
+    spall_cone::BurstFields::shipped();
     // So are the sturdiness classes the tank files' pools are authored from.
     box_classes::BoxClasses::shipped();
     app.init_resource::<RetainSpentShells>()
@@ -1786,6 +1814,9 @@ struct ProjectileMarchWorld<'w, 's> {
     // The cone shape the march throws when a world names one (the cost probe); the shipped shape
     // otherwise.
     spall_law: Option<Res<'w, spall_cone::SpallLaw>>,
+    // The burst fields the march throws when a world names them (the cost probe); the shipped ones
+    // otherwise.
+    burst_law: Option<Res<'w, spall_cone::BurstLaw>>,
     // The crossing ceiling a step runs under when a world names one; the shipped
     // [`resolve::MAX_STEP_CROSSINGS`] otherwise.
     step_crossings: Option<Res<'w, resolve::StepCrossings>>,
@@ -3002,9 +3033,9 @@ fn burst_here(
         return (false, 0);
     };
     shell.projectile.fuze = burst::Fuze::Inert;
-    let nose = match burst.option {
-        burst::BurstOption::Ring { nose } => Some(nose),
-        burst::BurstOption::Ball => None,
+    let (shape, nose) = match burst.option {
+        burst::BurstOption::Ring { nose } => (burst::BurstShape::Ring, Some(nose)),
+        burst::BurstOption::Ball => (burst::BurstShape::Ball, None),
     };
     shell.marks.log.push(ArmourMark::Burst {
         at: flight.position,
@@ -3013,6 +3044,16 @@ fn burst_here(
         tank,
     });
     shell.path.points.push(flight.position);
+    throw_burst(
+        shell,
+        context,
+        &burst,
+        shape,
+        tank,
+        flight,
+        speed,
+        &|volume| health.contains(volume),
+    );
     let removed = shell
         .dose
         .settle(health, context.deposit, shell.marks.log.len() - 1);
@@ -3482,6 +3523,159 @@ fn resolve_replica_armor_contact(
     ReplicaArmorContact::Stopped
 }
 
+/// AUTHORITY: throw an armed round's burst field (design doc §5, "The burst") from where `flight`
+/// stands, about its direction, at the carried `speed`, recording it as the shell's
+/// [`SpallMarks::burst`] and adding its doses to the shot's [`ShotDose`]. Its strength `S` is the
+/// burst's driven-mass energy at the burst fields' rate ([`spall_cone::BurstFields::strength`]),
+/// its field the burst's `shape` at ratio `speed / v_s` ([`spall_cone::BurstFields::field`]),
+/// walked through the volumes of `tank`, the fuze's, leaving none. A field whose emission converts
+/// to no HP point is not thrown, as a cone's is not ([`throw_spall_cone`]); one outside its law's
+/// domain throws nothing and logs why.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the burst's throw: the shell, the world, the burst and its shape, its tank, where it \
+              stands and how fast, and which volumes hold a pool"
+)]
+fn throw_burst(
+    shell: &mut MarchingShell,
+    context: &resolve::ResolveContext<'_, '_, '_>,
+    burst: &burst::Burst,
+    shape: burst::BurstShape,
+    tank: Option<Entity>,
+    flight: &resolve::Flight,
+    speed: f32,
+    is_box: &dyn Fn(Entity) -> bool,
+) {
+    let fields = context
+        .world
+        .burst_law
+        .as_deref()
+        .map_or(spall_cone::BurstFields::shipped(), |law| &law.0);
+    let throw = FieldThrow {
+        origin: flight.position,
+        axis: flight.direction,
+        strength: fields.strength(burst.energy),
+        tank,
+        exited: &[],
+    };
+    if hp_of_units(field_units(throw.strength * spall_cone::EMITTED_SHARE)) == 0 {
+        shell.spall.gated += 1;
+        return;
+    }
+    let (field, law) = fields.field(shape, speed / burst.sideways_speed);
+    let spread = match law.spread(field) {
+        Ok(spread) => spread,
+        Err(error) => {
+            error!(
+                origin = ?throw.origin,
+                "ballistics: a burst field is not thrown, its field is outside the law: {error}"
+            );
+            return;
+        }
+    };
+    let rays = walk_field(&throw, &spread, law.passage(), shell.dose, context, is_box);
+    shell.spall.burst = Some(BurstField {
+        origin: throw.origin,
+        axis: throw.axis,
+        field,
+        speed,
+        strength: throw.strength,
+        rays,
+    });
+}
+
+/// One field's throw: where from, about what axis, at what strength (reference-mm), through the
+/// volumes of which tank, and leaving which volumes (a body exit's), which a direction starting
+/// inside one does not enter there.
+struct FieldThrow<'a> {
+    origin: Vec3,
+    axis: Dir3,
+    strength: f32,
+    tank: Option<Entity>,
+    exited: &'a [Entity],
+}
+
+/// Walk every direction of `spread` about `throw`'s axis from its origin, direction `k` at
+/// strength `S·f_k`, standing for `1/N` of the field, through the volumes of `throw`'s tank alone
+/// ([`resolve::field_direction`]), adding its doses to `dose`; returns the rays in stratum order.
+/// A direction whose walk fails is fail-closed: it doses nothing, and the field logs its first
+/// error. A direction whose witness pass alone fails keeps its hard doses and reach and doses no
+/// witness; the field logs that once too.
+fn walk_field(
+    throw: &FieldThrow<'_>,
+    spread: &spall_cone::Spread,
+    passage: spall_cone::Passage,
+    dose: &mut ShotDose,
+    context: &resolve::ResolveContext<'_, '_, '_>,
+    is_box: &dyn Fn(Entity) -> bool,
+) -> Vec<SpallRay> {
+    let world = context.world;
+    let weight = 1.0 / spread.directions_count() as f32;
+    let within = |collider: Entity| {
+        world
+            .volume_of(collider)
+            .is_some_and(|node| world.owners.get(node).ok().map(VolumeOf::tank) == throw.tank)
+    };
+    let mut rays = Vec::with_capacity(spread.directions_count());
+    let mut failed: Option<(usize, walk::WalkError)> = None;
+    let mut unwitnessed: Option<(usize, walk::WalkError)> = None;
+    for (ray_dir, profile) in spread.directions(throw.axis) {
+        let thrown = throw.strength * profile;
+        let walked = resolve::field_direction(
+            context,
+            &within,
+            is_box,
+            throw.exited,
+            throw.origin,
+            ray_dir,
+            thrown,
+            weight,
+            passage,
+        );
+        let ray = match walked {
+            Ok(ray) => ray,
+            Err(error) => {
+                failed = Some(failed.map_or((1, error), |(count, first)| (count + 1, first)));
+                resolve::FieldRay {
+                    end: throw.origin,
+                    doses: Vec::new(),
+                    witness_error: None,
+                }
+            }
+        };
+        if let Some(error) = ray.witness_error.clone() {
+            unwitnessed = Some(unwitnessed.map_or((1, error), |(count, first)| (count + 1, first)));
+        }
+        dose.add_all(&ray.doses);
+        rays.push(SpallRay {
+            end: ray.end,
+            deposited: !ray.doses.is_empty(),
+            strength: thrown,
+            doses: ray
+                .doses
+                .iter()
+                .map(|dose| (dose.address, dose.amount))
+                .collect(),
+        });
+    }
+    if let Some((count, error)) = failed {
+        error!(
+            origin = ?throw.origin,
+            ?error,
+            "ballistics: {count} field direction(s) could not be walked; each doses nothing"
+        );
+    }
+    if let Some((count, error)) = unwitnessed {
+        error!(
+            origin = ?throw.origin,
+            ?error,
+            "ballistics: the witness pass failed on {count} field direction(s); each doses no \
+             witness and keeps its hard doses and reach"
+        );
+    }
+    rays
+}
+
 /// Throw the spall cone of one body exit, appending it to the shell's record and its doses to the
 /// shot's [`ShotDose`] (design doc §5). Returns whether it was thrown.
 ///
@@ -3492,11 +3686,9 @@ fn resolve_replica_armor_contact(
 /// weights emit `S/2` in all ([`spall_cone::EMITTED_SHARE`]). Otherwise the cone is spread by the
 /// ball law at the source's ratio ([`walk::SpallSource::debris_ratio`]): direction `k` of the
 /// spread ([`spall_cone::Spread`]) carries `S·f_k` and stands for `1/N` of the cone, walked
-/// through the volumes of `tank`, the struck tank, alone ([`resolve::field_direction`]). A ratio
-/// outside the law's domain throws nothing and logs why; substances refuse one at load, so only a
-/// fixture reaches it. A direction whose walk fails is fail-closed: it doses nothing, and the cone logs its
-/// first error. A direction whose witness pass alone fails keeps its hard doses and reach and doses
-/// no witness; the cone logs that once too.
+/// through the volumes of `tank`, the struck tank, alone ([`walk_field`]). A ratio outside the
+/// law's domain throws nothing and logs why; substances refuse one at load, so only a fixture
+/// reaches it.
 fn throw_spall_cone(
     spall: &mut Mut<SpallMarks>,
     dose: &mut Mut<ShotDose>,
@@ -3526,80 +3718,24 @@ fn throw_spall_cone(
         }
     };
     let direction = Dir3::new(source.direction).unwrap_or(Dir3::NEG_Z);
-    let axis = shape.axis(source.face, direction);
-    let weight = 1.0 / spread.directions_count() as f32;
-    let within = |collider: Entity| {
-        world
-            .volume_of(collider)
-            .is_some_and(|node| world.owners.get(node).ok().map(VolumeOf::tank) == tank)
-    };
-    let mut cone = SpallCone {
+    let throw = FieldThrow {
         origin: source.position,
-        axis,
+        axis: shape.axis(source.face, direction),
+        strength,
+        tank,
+        exited: &source.exited,
+    };
+    let rays = walk_field(&throw, &spread, shape.passage(), dose, context, is_box);
+    spall.cones.push(SpallCone {
+        origin: source.position,
+        axis: throw.axis,
         field: spread.field(),
         spend: source.spend,
         entry_speed: source.entry_speed,
         exit_speed: source.exit_speed,
         strength,
-        rays: Vec::with_capacity(spread.directions_count()),
-    };
-    let mut failed: Option<(usize, walk::WalkError)> = None;
-    let mut unwitnessed: Option<(usize, walk::WalkError)> = None;
-    for (ray_dir, profile) in spread.directions(axis) {
-        let thrown = strength * profile;
-        let walked = resolve::field_direction(
-            context,
-            &within,
-            is_box,
-            &source.exited,
-            source.position,
-            ray_dir,
-            thrown,
-            weight,
-            shape.passage(),
-        );
-        let ray = match walked {
-            Ok(ray) => ray,
-            Err(error) => {
-                failed = Some(failed.map_or((1, error), |(count, first)| (count + 1, first)));
-                resolve::FieldRay {
-                    end: source.position,
-                    doses: Vec::new(),
-                    witness_error: None,
-                }
-            }
-        };
-        if let Some(error) = ray.witness_error.clone() {
-            unwitnessed = Some(unwitnessed.map_or((1, error), |(count, first)| (count + 1, first)));
-        }
-        dose.add_all(&ray.doses);
-        cone.rays.push(SpallRay {
-            end: ray.end,
-            deposited: !ray.doses.is_empty(),
-            strength: thrown,
-            doses: ray
-                .doses
-                .iter()
-                .map(|dose| (dose.address, dose.amount))
-                .collect(),
-        });
-    }
-    if let Some((count, error)) = failed {
-        error!(
-            origin = ?source.position,
-            ?error,
-            "ballistics: {count} spall cone direction(s) could not be walked; each doses nothing"
-        );
-    }
-    if let Some((count, error)) = unwitnessed {
-        error!(
-            origin = ?source.position,
-            ?error,
-            "ballistics: the witness pass failed on {count} spall cone direction(s); each doses no \
-             witness and keeps its hard doses and reach"
-        );
-    }
-    spall.cones.push(cone);
+        rays,
+    });
     true
 }
 

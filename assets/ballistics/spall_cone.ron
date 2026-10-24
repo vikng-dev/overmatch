@@ -1,5 +1,6 @@
 // The spall cone's shape and its calibration — the field thrown from every body exit a round
-// reaches. Read by `src/ballistics/spall_cone.rs`, embedded and parsed once, validated at parse.
+// reaches —, and a burst's field. Read by `src/ballistics/spall_cone.rs`, embedded and parsed once,
+// validated at parse.
 // The law itself (strength, the ball law's centre-weighted profile, shadowing, dose) is design doc
 // §5, `.agents/docs/design/armor-penetration-and-damage.md`; this file holds its shape data and its
 // calibration: the number that converts its dose to HP points and the calibre that number was set
@@ -69,4 +70,38 @@
     // doc §5; the exponent is the law, not data), so a round of this calibre throws its cone
     // unscaled and every other is measured from it. Finite, positive and normal.
     reference_calibre_m: (0.088, Tuned("the calibre the field's rate was set against")),
+
+    // A burst's field (design doc §5, "The burst"): thrown from the burst point about the round's
+    // flight direction, its ratio the carried speed over the burst's greatest sideways speed v_s,
+    // through the struck tank's volumes, passing as the spall cone's directions do, its dose
+    // converting at `hp_per_reference_mm`. The ring and the ball are the two burst shapes a round's
+    // burst block names (`assets/ballistics/rounds.ron`).
+    burst: (
+        // The burst's strength S (reference-mm) per kJ of its driven mass's kinetic energy
+        // ½ M v_s² (the wall under the ring, the round less its core under the ball); the field
+        // emits S/2 in all.
+        reference_mm_per_kj: (1.0, Tuned("provisional: a crew box presenting the crew pool's 0.2 m²
+            face (box_classes.ron) fully inside the ball at rest, 2.0 m from the burst, has its 30
+            HP pool emptied. DERIVED: at rest the ball is uniform over the sphere, so the box
+            catches A/(4πR²) of the emission E = S/2, and its knockout radius is
+            R = sqrt(E A × 70 / (30 × 4π)); R = 2.0 m needs E = 107.7 reference-mm, S = 215.4,
+            against the shipped ball round's 214.8 kJ: 1.003 per kJ, rounded to 1.0, R = 2.00 m")),
+        // h (degrees): the ring spans θ_c − h to θ_c + h of polar angle from the flight axis,
+        // θ_c = atan(1/λ), uniform over that band; its near edge is held at the axis.
+        ring_half_width_deg: (10.0, Tuned("provisional (owner's brief 4b): the band the wall's
+            fragments leave in, one datum for every ring")),
+        // N for each burst law, as `directions` is for the cone: the emitted total is S/2 at every
+        // N, so N sets how finely a box's dose is resolved, never how much the burst carries. One
+        // throw's cost MEASURED 2026-10-24 by ballistics::pen_cam::burst_law_cost (release, macOS
+        // arm64, best of 9, s1's line fired with each burst round). At rest each direction
+        // carries S/2 × 70 / N HP points of dose (DERIVED, the field uniform over its support).
+        ring_directions: (256, Tuned("provisional, flagged for the owner: the cost against the
+            resolution. The ring's throw: 0.50 ms at N = 64, 1.47 at 256, 4.01 at 684; at rest
+            115, 29 and 11 HP points per direction (S = 211.1), so at 256 one direction is about
+            one crew pool")),
+        ball_directions: (256, Tuned("provisional, flagged for the owner: the cost against the
+            resolution. The ball's throw: 0.41 ms at N = 64, 0.99 at 256, 3.26 at 684; at rest
+            117, 29 and 11 HP points per direction (S = 214.8), so at 256 one direction is about
+            one crew pool")),
+    ),
 )

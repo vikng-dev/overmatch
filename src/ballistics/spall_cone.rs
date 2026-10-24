@@ -1,8 +1,9 @@
 //! The spall cone's shape — its axis rule, the directions it is sampled by and how a direction
 //! passes through what it meets —, the field law that weights those directions and sets the
-//! cone's half-angle ([`FieldDescriptor`]), and the field's calibration, its HP points per
+//! cone's half-angle ([`FieldDescriptor`]), the field's calibration, its HP points per
 //! reference-mm ([`hp_per_reference_mm`]) and the calibre that rate was set against
-//! ([`reference_calibre`]), read from `assets/ballistics/spall_cone.ron`.
+//! ([`reference_calibre`]), and a burst's field data ([`BurstFields`]), read from
+//! `assets/ballistics/spall_cone.ron`.
 //! The law the shape serves — strength, profile, shadowing, dose — is design doc §5
 //! (`.agents/docs/design/armor-penetration-and-damage.md`); the throw that applies it is
 //! `throw_spall_cone` in the parent module, and a world may throw another shape ([`SpallLaw`]).
@@ -46,6 +47,7 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use super::burst::BurstShape;
 use crate::provenance::Sourced;
 
 /// The shipped shape, embedded so a throw never waits on the asset server (ADR-0014: built from
@@ -300,6 +302,112 @@ struct ShapeFile {
     passage: Sourced<Passage>,
     hp_per_reference_mm: Sourced<u64>,
     reference_calibre_m: Sourced<f32>,
+    burst: BurstFile,
+}
+
+/// A burst's field data as authored.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BurstFile {
+    reference_mm_per_kj: Sourced<f32>,
+    ring_half_width_deg: Sourced<f32>,
+    ring_directions: Sourced<usize>,
+    ball_directions: Sourced<usize>,
+}
+
+/// A burst's field, validated (design doc §5, "The burst"): its strength per kJ of its driven
+/// mass's energy, the ring's half-width, and the shape each burst law is thrown in, sampled by its
+/// own direction count and passing as the spall cone's directions do.
+#[derive(Clone, Debug, PartialEq)]
+pub(crate) struct BurstFields {
+    /// Reference-mm of strength `S` per kJ of `½ M v_s²`; finite, positive and normal.
+    reference_mm_per_kj: f32,
+    /// The ring's half-width `h` (rad), in `(0, π/2)`.
+    ring_half_width: f32,
+    ring: ConeShape,
+    ball: ConeShape,
+}
+
+/// The burst fields a world's march throws, in place of the shipped ones: inserted by a world that
+/// measures another direction count (the throw-cost probe, `pen_cam::burst_law_cost`).
+#[derive(Resource, Clone, Debug)]
+pub(crate) struct BurstLaw(pub BurstFields);
+
+impl BurstFields {
+    /// Parse and validate a shape file's burst block.
+    pub(crate) fn from_ron(text: &str) -> Result<Self, String> {
+        let file: ShapeFile = ron::de::from_str(text).map_err(|err| err.to_string())?;
+        let (ring, ball) = (file.burst.ring_directions.0, file.burst.ball_directions.0);
+        Self::from_file(&file, ring, ball)
+    }
+
+    /// Validate `file`'s burst block, its ring sampled by `ring` strata and its ball by `ball`:
+    /// refuses a potency rate that is not finite, positive and normal, a half-width outside
+    /// `(0°, 90°)` and a direction count outside the shape's domain, naming the field.
+    fn from_file(file: &ShapeFile, ring: usize, ball: usize) -> Result<Self, String> {
+        let burst = &file.burst;
+        let reference_mm_per_kj = burst.reference_mm_per_kj.0;
+        if !reference_mm_per_kj.is_normal() || reference_mm_per_kj < 0.0 {
+            return Err(format!(
+                "burst.reference_mm_per_kj must be finite, positive and normal (got \
+                 {reference_mm_per_kj})"
+            ));
+        }
+        let degrees = burst.ring_half_width_deg.0;
+        if !(degrees > 0.0 && degrees < 90.0) {
+            return Err(format!(
+                "burst.ring_half_width_deg must lie in (0, 90) (got {degrees})"
+            ));
+        }
+        let shape = |directions: usize, field: &str| {
+            ConeShape::new(file.axis.0, directions, file.passage.0)
+                .map_err(|err| format!("burst.{field}: {err}"))
+        };
+        Ok(Self {
+            reference_mm_per_kj,
+            ring_half_width: (degrees as f64).to_radians() as f32,
+            ring: shape(ring, "ring_directions")?,
+            ball: shape(ball, "ball_directions")?,
+        })
+    }
+
+    /// The shipped burst fields with the ring sampled by `ring` strata and the ball by `ball` in
+    /// place of their own counts: a probe of how the throw's cost scales with `N`.
+    #[cfg(test)]
+    pub(crate) fn shipped_at(ring: usize, ball: usize) -> Self {
+        let file: ShapeFile = ron::de::from_str(SPALL_CONE_RON).expect("the shipped shape parses");
+        Self::from_file(&file, ring, ball)
+            .expect("the shipped burst fields validate at any direction count")
+    }
+
+    /// The shipped burst fields, parsed once. Panics on a malformed file, as
+    /// [`ConeShape::shipped`] does; [`super::sim_plugin`] reads them while the app is built.
+    pub(crate) fn shipped() -> &'static Self {
+        static FIELDS: std::sync::LazyLock<BurstFields> = std::sync::LazyLock::new(|| {
+            BurstFields::from_ron(SPALL_CONE_RON).unwrap_or_else(|err| {
+                panic!("spall cone: embedded spall_cone.ron's burst block is unusable: {err}")
+            })
+        });
+        &FIELDS
+    }
+
+    /// The strength `S` (reference-mm) of a burst whose driven mass carries `energy` J across it:
+    /// `energy / 1000 × reference_mm_per_kj`, in f64, so the same bits on every target.
+    pub(crate) fn strength(&self, energy: f32) -> f32 {
+        (energy as f64 / 1000.0 * self.reference_mm_per_kj as f64) as f32
+    }
+
+    /// The field a burst of `shape` throws at ratio `ratio` (its carried speed over its greatest
+    /// sideways speed), and the shape it is thrown in.
+    pub(crate) fn field(&self, shape: BurstShape, ratio: f32) -> (FieldDescriptor, &ConeShape) {
+        match shape {
+            BurstShape::Ring => (
+                FieldDescriptor::ring(ratio, self.ring_half_width),
+                &self.ring,
+            ),
+            BurstShape::Ball => (FieldDescriptor::ball(ratio), &self.ball),
+        }
+    }
 }
 
 /// The field's calibration as parsed: the two numbers every cone's dose is scaled by.
@@ -664,7 +772,21 @@ mod tests {
         format!(
             r#"({fields}, directions: (24, Resolution("fixture")),
             passage: (Partial, Tuned("fixture")), hp_per_reference_mm: (70, Tuned("fixture")),
-            reference_calibre_m: (0.088, Tuned("fixture")))"#
+            reference_calibre_m: (0.088, Tuned("fixture")), {BURST})"#
+        )
+    }
+
+    /// A fixture burst block.
+    const BURST: &str = r#"burst: (reference_mm_per_kj: (1.0, Tuned("fixture")),
+        ring_half_width_deg: (10.0, Tuned("fixture")), ring_directions: (24, Tuned("fixture")),
+        ball_directions: (32, Tuned("fixture")))"#;
+
+    /// A fixture shape file whose burst block's fields are `fields`.
+    fn burst_file(fields: &str) -> String {
+        format!(
+            r#"(axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")),
+            passage: (Partial, Tuned("fixture")), hp_per_reference_mm: (70, Tuned("fixture")),
+            reference_calibre_m: (0.088, Tuned("fixture")), burst: ({fields}))"#
         )
     }
 
@@ -695,11 +817,13 @@ mod tests {
         }
     }
 
-    /// A shape value authored without its provenance is refused at parse, the calibration's too.
+    /// A shape value authored without its provenance is refused at parse, the calibration's and
+    /// the burst block's too.
     #[test]
     fn a_shape_value_without_provenance_is_refused() {
         let sourced = file(r#"axis: (ExitDirection, Tuned("fixture"))"#);
         assert!(ConeShape::from_ron(&sourced).is_ok());
+        assert!(BurstFields::from_ron(&sourced).is_ok());
         assert_eq!(
             calibration_from_ron(&sourced),
             Ok(Calibration {
@@ -707,26 +831,51 @@ mod tests {
                 reference_calibre: 0.088,
             })
         );
-        for bare in [
-            r#"(axis: ExitDirection, directions: (24, Resolution("fixture")),
-                passage: (Partial, Tuned("fixture")), hp_per_reference_mm: (70, Tuned("fixture")),
-                reference_calibre_m: (0.088, Tuned("fixture")))"#,
-            r#"(axis: (ExitDirection, Tuned("fixture")), directions: 24,
-                passage: (Partial, Tuned("fixture")), hp_per_reference_mm: (70, Tuned("fixture")),
-                reference_calibre_m: (0.088, Tuned("fixture")))"#,
-            r#"(axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")),
-                passage: FirstSolid, hp_per_reference_mm: (70, Tuned("fixture")),
-                reference_calibre_m: (0.088, Tuned("fixture")))"#,
-            r#"(axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")),
-                passage: (Partial, Tuned("fixture")), hp_per_reference_mm: 70,
-                reference_calibre_m: (0.088, Tuned("fixture")))"#,
-            r#"(axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")),
-                passage: (Partial, Tuned("fixture")), hp_per_reference_mm: (70, Tuned("fixture")),
-                reference_calibre_m: 0.088)"#,
+        for (value, bare) in [
+            (
+                r#"axis: (ExitDirection, Tuned("fixture"))"#,
+                "axis: ExitDirection",
+            ),
+            (
+                r#"directions: (24, Resolution("fixture"))"#,
+                "directions: 24",
+            ),
+            (
+                r#"passage: (Partial, Tuned("fixture"))"#,
+                "passage: FirstSolid",
+            ),
+            (
+                r#"hp_per_reference_mm: (70, Tuned("fixture"))"#,
+                "hp_per_reference_mm: 70",
+            ),
+            (
+                r#"reference_calibre_m: (0.088, Tuned("fixture"))"#,
+                "reference_calibre_m: 0.088",
+            ),
+            (
+                r#"reference_mm_per_kj: (1.0, Tuned("fixture"))"#,
+                "reference_mm_per_kj: 1.0",
+            ),
+            (
+                r#"ring_half_width_deg: (10.0, Tuned("fixture"))"#,
+                "ring_half_width_deg: 10.0",
+            ),
+            (
+                r#"ring_directions: (24, Tuned("fixture"))"#,
+                "ring_directions: 24",
+            ),
+            (
+                r#"ball_directions: (32, Tuned("fixture"))"#,
+                "ball_directions: 32",
+            ),
         ] {
-            let error = ConeShape::from_ron(bare).expect_err(bare);
+            let bare = sourced.replacen(value, bare, 1);
+            assert_ne!(bare, sourced, "{value}");
+            let error = ConeShape::from_ron(&bare).expect_err(&bare);
             assert!(error.contains("provenance"), "{bare}: {error}");
-            let error = calibration_from_ron(bare).expect_err(bare);
+            let error = calibration_from_ron(&bare).expect_err(&bare);
+            assert!(error.contains("provenance"), "{bare}: {error}");
+            let error = BurstFields::from_ron(&bare).expect_err(&bare);
             assert!(error.contains("provenance"), "{bare}: {error}");
         }
     }
@@ -735,12 +884,73 @@ mod tests {
     /// zero rate would silently switch every cone off through the HP quantum gate.
     #[test]
     fn a_zero_field_calibration_is_refused() {
-        let zero = r#"(axis: (ExitDirection, Tuned("fixture")),
-            directions: (24, Resolution("fixture")), passage: (Partial, Tuned("fixture")),
-            hp_per_reference_mm: (0, Tuned("fixture")),
-            reference_calibre_m: (0.088, Tuned("fixture")))"#;
-        let error = calibration_from_ron(zero).expect_err("a zero rate is refused");
+        let zero = file(r#"axis: (ExitDirection, Tuned("fixture"))"#).replacen(
+            "hp_per_reference_mm: (70",
+            "hp_per_reference_mm: (0",
+            1,
+        );
+        let error = calibration_from_ron(&zero).expect_err("a zero rate is refused");
         assert!(error.contains("hp_per_reference_mm"), "{error}");
+    }
+
+    /// A burst block is read from the file: its counts sample the ring's and the ball's shapes, its
+    /// half-width the ring's field, its rate the strength `energy/1000 × rate`; the shipped one is
+    /// the shipped file's. A rate that is zero, negative, subnormal or not finite, a half-width
+    /// outside `(0°, 90°)` and a direction count outside `1..=MAX_DIRECTIONS` are refused at parse
+    /// naming the field: a burst's strength scales by the rate, and the ring's law refuses such a
+    /// band at the first throw.
+    #[test]
+    fn a_burst_block_is_read_and_its_domain_is_refused() {
+        let read = BurstFields::from_ron(&burst_file(
+            r#"reference_mm_per_kj: (2.0, Tuned("fixture")),
+            ring_half_width_deg: (30.0, Tuned("fixture")), ring_directions: (24, Tuned("fixture")),
+            ball_directions: (32, Tuned("fixture"))"#,
+        ))
+        .unwrap();
+        assert_eq!(read.strength(150_000.0), 300.0);
+        let (ring, shape) = read.field(BurstShape::Ring, 0.5);
+        assert_eq!(
+            ring,
+            FieldDescriptor::ring(0.5, (30.0_f64).to_radians() as f32)
+        );
+        assert_eq!(shape.directions_count(), 24);
+        let (ball, shape) = read.field(BurstShape::Ball, 0.5);
+        assert_eq!(ball, FieldDescriptor::ball(0.5));
+        assert_eq!(shape.directions_count(), 32);
+        assert_eq!(
+            BurstFields::shipped(),
+            &BurstFields::from_ron(SPALL_CONE_RON).unwrap()
+        );
+        let sourced = burst_file(
+            r#"reference_mm_per_kj: (1.0, Tuned("fixture")),
+            ring_half_width_deg: (10.0, Tuned("fixture")), ring_directions: (24, Tuned("fixture")),
+            ball_directions: (32, Tuned("fixture"))"#,
+        );
+        for (value, refused, field) in [
+            (
+                "(1.0",
+                ["(0.0", "(-1.0", "(1.0e-40", "(NaN", "(inf"].as_slice(),
+                "reference_mm_per_kj",
+            ),
+            (
+                "(10.0",
+                ["(0.0", "(-5.0", "(90.0", "(NaN"].as_slice(),
+                "ring_half_width_deg",
+            ),
+            ("(24", ["(0", "(65537"].as_slice(), "ring_directions"),
+            ("(32", ["(0", "(65537"].as_slice(), "ball_directions"),
+        ] {
+            for refused in refused {
+                let text = sourced.replacen(
+                    &format!("{field}: {value}"),
+                    &format!("{field}: {refused}"),
+                    1,
+                );
+                assert_ne!(text, sourced, "{field}");
+                let error = BurstFields::from_ron(&text).expect_err(&text);
+                assert!(error.contains(field), "{field} {refused}: {error}");
+            }
+        }
     }
 
     /// The reference calibre is the file's: a shape file's value is what the calibration carries,
@@ -748,15 +958,14 @@ mod tests {
     /// finite is refused at parse naming the field: every cone's strength divides by it.
     #[test]
     fn the_reference_calibre_is_read_from_the_file_and_must_be_positive() {
-        let file = |reference: &str| {
-            format!(
-                r#"(axis: (ExitDirection, Tuned("fixture")),
-                directions: (24, Resolution("fixture")), passage: (Partial, Tuned("fixture")),
-                hp_per_reference_mm: (70, Tuned("fixture")),
-                reference_calibre_m: ({reference}, Tuned("fixture")))"#
+        let with = |reference: &str| {
+            file(r#"axis: (ExitDirection, Tuned("fixture"))"#).replacen(
+                "reference_calibre_m: (0.088",
+                &format!("reference_calibre_m: ({reference}"),
+                1,
             )
         };
-        let read = calibration_from_ron(&file("0.05")).unwrap();
+        let read = calibration_from_ron(&with("0.05")).unwrap();
         assert_eq!(read.reference_calibre, 0.05);
         assert_eq!(
             reference_calibre(),
@@ -765,7 +974,7 @@ mod tests {
                 .reference_calibre
         );
         for reference in ["0.0", "-0.088", "1.0e-40", "NaN", "inf"] {
-            let error = calibration_from_ron(&file(reference)).expect_err(reference);
+            let error = calibration_from_ron(&with(reference)).expect_err(reference);
             assert!(
                 error.contains("reference_calibre_m"),
                 "{reference}: {error}"

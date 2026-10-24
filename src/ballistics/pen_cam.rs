@@ -44,7 +44,7 @@ pub(super) const STEPS: usize = 8;
 /// One scripted shot. Positions are metres in the target's spawn frame: the probe tank's root at
 /// the origin, the world's axes (`-Z` its front, `+Y` up). The target's pose turns the tank under
 /// the shot; the shot itself does not move.
-#[derive(Deserialize)]
+#[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 struct Scenario {
     /// The record's file stem.
@@ -53,8 +53,8 @@ struct Scenario {
     shows: String,
     /// One of the bound tank's weapons, by its name in the tank file.
     weapon: String,
-    /// The round fired, by its key in the weapon's `rounds` list; the weapon's default round when
-    /// absent.
+    /// The round fired, by its round registry key, whether or not the weapon lists it; the weapon's
+    /// default round when absent.
     #[serde(default)]
     round: Option<String>,
     /// Striking speed (m/s); the round's muzzle speed when absent.
@@ -174,12 +174,6 @@ fn record_edited(
         .round
         .as_deref()
         .unwrap_or_else(|| weapon.default_round_key());
-    assert!(
-        weapon.rounds.iter().any(|listed| listed == key),
-        "{}: weapon `{}` loads no round `{key}`",
-        scenario.name,
-        scenario.weapon
-    );
     let round = crate::rounds::RoundRegistry::shipped()
         .get(key)
         .unwrap_or_else(|err| panic!("{}: {err}", scenario.name));
@@ -468,6 +462,51 @@ fn spall_law_cost() {
 /// The direction counts the throw's cost is measured at.
 const COST_DIRECTIONS: [usize; 4] = [24, 64, 128, 256];
 
+/// The server cost of one burst field's throw at each of [`BURST_COST_DIRECTIONS`] (ignored; run
+/// it on demand). The first scenario's line is fired with every burst round of the registry, its
+/// march timed with both burst laws at `N` directions and at one; the throw's cost is the
+/// difference, scaled from `N − 1` to `N` directions, the best of [`COST_RUNS`] runs.
+/// `cargo test --release --lib --features dev_tools pen_cam::burst_law_cost -- --ignored --nocapture`
+#[test]
+#[ignore = "a measurement, run on demand"]
+fn burst_law_cost() {
+    let line = scenarios().into_iter().next().expect("a scenario");
+    let registry = crate::rounds::RoundRegistry::shipped();
+    let bursting: Vec<&str> = registry
+        .keys()
+        .filter(|key| registry.get(key).is_ok_and(|round| round.burst.is_some()))
+        .collect();
+    assert!(!bursting.is_empty(), "the registry holds a burst round");
+    for key in bursting {
+        let scenario = Scenario {
+            round: Some(key.to_owned()),
+            ..line.clone()
+        };
+        let best = |directions: usize| {
+            (0..COST_RUNS)
+                .map(|_| {
+                    let fields = spall_cone::BurstFields::shipped_at(directions, directions);
+                    record_edited(&scenario, None, |app| {
+                        app.insert_resource(spall_cone::BurstLaw(fields));
+                    })
+                    .1
+                })
+                .fold(f64::INFINITY, f64::min)
+        };
+        let one = best(1);
+        for directions in BURST_COST_DIRECTIONS {
+            let n = directions as f64;
+            println!(
+                "{key}: N = {directions}: {:.3} ms per throw",
+                1000.0 * (best(directions) - one) * n / (n - 1.0)
+            );
+        }
+    }
+}
+
+/// The direction counts the burst's throw cost is measured at.
+const BURST_COST_DIRECTIONS: [usize; 3] = [64, 256, 684];
+
 /// The runs a cost is the best of.
 const COST_RUNS: usize = 9;
 
@@ -677,6 +716,8 @@ pub(super) struct FixtureFired {
     pub velocity: Option<Vec3>,
     /// While it still flies, the shell's round: its body, its whole mass, its fuze.
     pub flying: Option<(RoundBody, f32, burst::Fuze)>,
+    /// The burst field the shell threw, if it burst.
+    pub burst: Option<BurstField>,
     /// Every fixture volume's name by entity.
     pub names: BTreeMap<Entity, String>,
 }
@@ -781,12 +822,16 @@ pub(super) fn fixture_fire_with(
         .iter(world)
         .map(|(entity, name)| (entity, name.as_str().to_owned()))
         .collect();
+    let burst = world
+        .get_mut::<SpallMarks>(shell)
+        .and_then(|mut marks| marks.burst.take());
     FixtureFired {
         report,
         log,
         at,
         velocity,
         flying,
+        burst,
         names,
     }
 }
@@ -1524,5 +1569,90 @@ fn an_armed_round_at_rest_bursts_where_it_rests() {
             "{shape:?}: {at} vs {rest}"
         );
         assert_eq!(fired.flying, None, "{shape:?}: nothing flies on");
+        let field = fired.burst.expect("the burst throws its field").field;
+        assert_eq!(field.ratio, 0.0, "{shape:?}: thrown at rest");
+    }
+}
+
+/// A burst throws its field from the burst point about the flight direction, at the carried speed:
+/// its strength is the burst's driven-mass energy at the shipped rate, its field the round's burst
+/// shape at `λ = v_c / v_s`, and direction `k` of the shape's `N` carries `S·f_k` of that field's
+/// spread, to the bit. A mutant that throws from the exit, at the exit speed, at `v_s / v_c`, at
+/// another strength or under the other shape fails here; the record and the pen cam rely on it.
+#[test]
+fn a_burst_throws_its_field_from_where_it_bursts() {
+    let fields = spall_cone::BurstFields::shipped();
+    for shape in [burst::BurstShape::Ball, burst::BurstShape::Ring] {
+        let burst = fixture_burst(shape);
+        let fired = fire_fused(
+            &[plate("front", THIN, 0.0, Kind::Main)],
+            burst::Fuze::of(Some(burst)),
+        );
+        let (at, speed, _) = bursts(&fired.log)[0];
+        let thrown = fired.burst.expect("the burst throws its field");
+        assert_eq!(thrown.origin, at, "{shape:?}: from the burst point");
+        assert_eq!(thrown.speed, speed, "{shape:?}: at the carried speed");
+        assert!(
+            thrown.axis.dot(Vec3::NEG_Z) > 0.9999,
+            "{shape:?}: about the flight direction, {:?}",
+            thrown.axis
+        );
+        assert_eq!(thrown.strength, fields.strength(burst.energy), "{shape:?}");
+        let (field, law) = fields.field(shape, speed / burst.sideways_speed);
+        assert_eq!(thrown.field, field, "{shape:?}");
+        let spread = law.spread(field).unwrap();
+        assert_eq!(thrown.rays.len(), spread.directions_count(), "{shape:?}");
+        for (ray, [.., weight]) in thrown.rays.iter().zip(spread.strata()) {
+            assert_eq!(ray.strength, thrown.strength * weight, "{shape:?}");
+        }
+    }
+}
+
+/// The field leans with the carried speed: the burst doses a crew box where it is brightest (the
+/// ball's axis; the ring's band centre, `atan(v_s / v_c)` off it), and none past its rim, behind
+/// the burst at 150° from the axis. A mutant that inverts the ratio throws the ball over the whole
+/// sphere and moves the ring's band, and fails here. The boxes stand 1.5 m from the burst point,
+/// 0.4 m on a side, with a 30 HP pool (fixture data); the plate's cone reaches both, so the
+/// burst's own rays are read.
+#[test]
+fn the_burst_field_leans_with_the_carried_speed() {
+    for shape in [burst::BurstShape::Ball, burst::BurstShape::Ring] {
+        let burst = fixture_burst(shape);
+        let front = plate("front", THIN, 0.0, Kind::Main);
+        let probe = fire_fused(&[front], burst::Fuze::of(Some(burst)));
+        let (at, speed, _) = bursts(&probe.log)[0];
+        let lean = match shape {
+            burst::BurstShape::Ball => 0.0,
+            burst::BurstShape::Ring => (burst.sideways_speed / speed).atan(),
+        };
+        let toward = |angle: f32| at + 1.5 * (Vec3::NEG_Z * angle.cos() + Vec3::Y * angle.sin());
+        let side = Vec3::splat(0.4);
+        let fired = fire_fused(
+            &[
+                front,
+                ("lit", side, toward(lean), Kind::Witness(30)),
+                (
+                    "behind",
+                    side,
+                    toward(150.0_f32.to_radians()),
+                    Kind::Witness(30),
+                ),
+            ],
+            burst::Fuze::of(Some(burst)),
+        );
+        let moved = bursts(&fired.log)[0].0.distance(at);
+        assert!(
+            moved < BURST_TOLERANCE,
+            "{shape:?}: the boxes move the burst {moved} m"
+        );
+        let thrown = fired.burst.expect("the burst throws its field");
+        let dosed: Vec<&str> = thrown
+            .rays
+            .iter()
+            .flat_map(|ray| &ray.doses)
+            .map(|(volume, _)| fired.names[volume].as_str())
+            .collect();
+        assert!(dosed.contains(&"lit"), "{shape:?}: {dosed:?}");
+        assert!(!dosed.contains(&"behind"), "{shape:?}: {dosed:?}");
     }
 }
