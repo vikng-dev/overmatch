@@ -35,13 +35,13 @@
 //
 // In every mode, `mode.y = 1` discards what lies on `plane`'s normal side (the slice's cut).
 //
-// Draw order (`look.rs`, module doc): the body draws behind the components and the fields, which
-// are ordered by depth among themselves. A body surface is discarded wherever the part mask holds
-// a component, and a volume is drawn after the body and over it; a component is opaque and
-// depth-tested, and a volume's march ends at the nearest component. Every depth read against a
-// mask is the eye depth (`eye_depth`): the distance from the eye in a perspective view, the
-// distance along the camera's forward from its plane in an orthographic one, the masks' own
-// cameras sharing the viewer's pose and lens.
+// Draw order (design doc §5, "Draw order"; `look.rs`, module doc): the body draws behind the
+// components and the fields, which are ordered by depth among themselves. A body surface is
+// discarded wherever the part mask holds a component, and a volume is drawn after the body and
+// over it; a component is opaque and depth-tested, and a volume's march ends at the nearest
+// component. Every depth read against a mask is the eye depth (`eye_depth`): the distance from the
+// eye in a perspective view, the distance along the camera's forward from its plane in an
+// orthographic one, the masks' own cameras sharing the viewer's pose and lens.
 //
 // The potency colour (`ramp`; design doc §5, "Potency colour") is one function of intensity
 // alone: a monotone cubic in `u = log2(I / T_mid)` through three anchors (`ramp[0..3]`: rgb, and

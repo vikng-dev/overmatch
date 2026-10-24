@@ -2,8 +2,9 @@
 //! components solid in the untouched grey one layer deep among themselves, the struck ones on the
 //! state scale, and each spall field as one translucent volume in the potency colour, with its
 //! footprint on every surface it met. It is the tank rendering of every x-ray view: the corner,
-//! the kill cam's lesson and the x-ray. The colour's law and the draw order are design doc §5,
-//! "Potency colour" (`.agents/docs/design/armor-penetration-and-damage.md`; [`super::potency`]).
+//! the kill cam's lesson and the x-ray. The colour's law, the volume's rim and the draw order are
+//! design doc §5, "Potency colour" and "Draw order"
+//! (`.agents/docs/design/armor-penetration-and-damage.md`; [`super::potency`]).
 //! [`LookMaterial`] (`pen_cam_look.wgsl`) draws every element; [`hull`], [`component`] and
 //! [`volume`] choose them, and the stage spawns what they return.
 //!

@@ -329,12 +329,26 @@ A box only partly inside the cone takes that intensity over that part alone, so 
 box with HP left is no contradiction (s1's `Ammo_L_1`: one direction ends on it at 1.15 m, white,
 DERIVED from the record; 36 of its 72 HP points lost). The pen cam draws each cone as one
 translucent volume inside its reach surface (`src/damage_cam/pen_cam/field.rs`, `reach_mesh`;
-`assets/shaders/pen_cam_look.wgsl`, `volume`): a pixel takes the mean colour along the eye ray's
-path inside the field, at an opacity that climbs with that path's length, so the colour says the
-potency and the opacity the thickness. Every surface the field met is tinted in the colour at its
-own point and lined along the cone's edge. Volume and surfaces read one disc baked from the
-record's directions. The calibration stays provisional until the scenarios re-recorded under the
-ball are seen (owner, 2026-10-23, night).
+`assets/shaders/pen_cam_look.wgsl`, `volume`). Each sample along the eye ray's path inside the
+field weighs `w(I)`, a smoothstep in `u` from 0 at the ramp's dim end (`u = −3`) to 1 at mid
+(`u = 0`; `Rim` in `potency.rs`, anchors TUNED), and a pixel takes the weighted mean colour along
+the path at an opacity that climbs with the path's weighted length: the colour says the potency,
+the opacity the thickness, and the volume fades out toward the dim end instead of ending on its
+reach surface. Every surface the field met is tinted in the colour at its own point; nothing marks
+the cone's edge. Volume and surfaces read one disc baked from the record's directions. The
+calibration stays provisional until the scenarios re-recorded under the ball are seen (owner,
+2026-10-23, night).
+
+**Draw order.** Every x-ray view that draws the tank's body (the corner's glass frames, the kill
+cam's lesson, the victim's x-ray, the slice) draws the body, the main armour, external armour and
+detail, behind everything else. The scene, the components with their state fills and outlines and
+the fields' volumes, is ordered by depth among itself: a component in front of a field hides it, a
+field in front of a component blends over it. Each layer is one surface deep. Every depth the
+order compares is the eye depth, one convention in both projections: the distance from the eye in
+perspective, the distance along the camera's forward in orthographic. The outside view (a damaged
+tank seen whole) keeps the body in front and the volume unbounded. The trail, the rings and the
+shell model are outside the order. Mechanism and entry points: `src/damage_cam/pen_cam/look.rs`,
+module doc.
 
 **Data.** The axis rule, `N` and the passage live in `assets/ballistics/spall_cone.ron`, parsed
 and validated while the app is built (ADR-0014: built from data, synchronously). A cone's ratio is
