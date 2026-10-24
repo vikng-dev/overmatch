@@ -5,8 +5,9 @@
 //! colour of its local intensity, bounded where its directions stopped ([`look::volume`], and by
 //! the plane in the slice), and each struck component's real mesh on the state scale ([`look::component`]): filled red from the
 //! bottom up to the share of its HP points lost, one knocked out charcoal and hatched.
-//! The shell rests where the record ends; a round the record has leave the tank runs on out of the
-//! frame. The nose and every field's front move on the record's own clock at one constant slowdown
+//! The shell rests where the record ends; a round the record has leave the tank runs on past the
+//! path's last node along its last leg for the rest of the play ([`shell_drawn`]). The nose and
+//! every field's front move on the record's own clock at one constant slowdown
 //! ([`timeline::REPLAY_SLOWDOWN`]): the nose along the record's timed path, a spall cone's front at
 //! the round's exit speed, a burst's at its sideways speed ([`super::plan::Cone::speed`]), each
 //! from its record time. [`pace`] is a record's corner times in a frame. The rule and the frames'
@@ -106,7 +107,8 @@ pub(super) struct StageShell;
 #[derive(Component, Clone, Copy)]
 pub(super) struct StageItem;
 
-/// One leg of the trail between arc lengths `from` and `to`.
+/// One leg of the trail between arc lengths `from` and `to`; `to` is unbounded on the last leg of a
+/// round that left, which runs on behind the shell past the path's last node.
 #[derive(Component)]
 pub(super) struct LineSeg {
     from: f32,
@@ -595,7 +597,7 @@ pub fn spawn_glass(
     tag: impl Bundle + Clone,
 ) {
     // The trail, one cylinder per leg of the path from the drawn span's start; a round that left
-    // trails on past the span behind the shell.
+    // trails on past the span behind the shell, and its last leg past the path's last node.
     let cylinder = meshes.add(Cylinder::new(0.5, 1.0));
     let line = &plan.line;
     for i in 1..line.points.len() {
@@ -606,6 +608,11 @@ pub fn spawn_glass(
         // In the slice the trail lies in the cut, so it is dimmed for the band to read through it.
         let brightness = plan.brightness_at(0.5 * (from + to))
             * if kind == CornerKind::Slice { 0.45 } else { 1.0 };
+        let to = if plan.left() && i + 1 == line.points.len() {
+            f32::INFINITY
+        } else {
+            to
+        };
         let mut material = GlowMaterial::additive(LINE.into(), LINE_GLOW * brightness);
         material.set_fade(0.0);
         commands.spawn((
@@ -782,8 +789,9 @@ fn corner_at(plan: &Plan, kind: CornerKind, t: f32) -> f32 {
 
 /// The arc length of the shell's nose at corner time `c`: the record's own arc at the record time
 /// `c` stands for ([`corner_at`]), so it crosses each leg at that leg's record speed scaled and
-/// stops where the record's path ends; a round that left runs on along its last leg at that leg's
-/// speed, out of the frame. Reduce motion puts it at the span's end when the travel starts.
+/// stops where the record's path ends; a round that left runs on past the path's last node along
+/// its last leg at that leg's speed ([`super::plan::Polyline::arc_at_time`]). Reduce motion puts it
+/// at the span's end when the travel starts.
 fn head_arc(plan: &Plan, kind: CornerKind, c: f32, reduce: bool) -> f32 {
     let from = kind.travel_start();
     if reduce {
@@ -794,10 +802,12 @@ fn head_arc(plan: &Plan, kind: CornerKind, c: f32, reduce: bool) -> f32 {
         };
     }
     let t = plan.line.time_at(plan.start_arc) + (c - from).max(0.0) / timeline::REPLAY_SLOWDOWN;
-    plan.line
-        .arc_at_time(t)
-        .max(plan.start_arc)
-        .min(plan.line.length())
+    let head = plan.line.arc_at_time(t).max(plan.start_arc);
+    if plan.left() {
+        head
+    } else {
+        head.min(plan.line.length())
+    }
 }
 
 /// The corner time at which the nose reaches arc `s`.
@@ -867,18 +877,14 @@ pub(super) fn pace(plan: &Plan, kind: CornerKind) -> timeline::Pace {
     timeline::Pace::new(kind, travel_end, settle)
 }
 
-/// Whether the shell is drawn at corner time `c`: from the travel start on, until a round the
-/// record has leave the tank runs off the end of its recorded path. Under reduce motion a round
-/// that left is never drawn, since it would stand parked in the air at the span's end. A plan
-/// with no line ([`Plan::bare`]) draws no shell.
+/// Whether the shell is drawn at corner time `c`: from the travel start to the end of the play. A
+/// round the record has leave the tank runs on past its path's last node ([`head_arc`]) and no
+/// frame follows it, so nothing hides it in flight: its bound is the play's end, the corner's or
+/// the lesson's (the x-ray's clock stops at the hold, and the shell with it). Under reduce motion
+/// a round that left is never drawn, since it would stand parked in the air at the span's end. A
+/// plan with no line ([`Plan::bare`]) draws no shell.
 fn shell_drawn(plan: &Plan, kind: CornerKind, c: f32, reduce: bool) -> bool {
-    if c < kind.travel_start() || plan.line.points.len() < 2 {
-        return false;
-    }
-    if !plan.left() {
-        return true;
-    }
-    !reduce && head_arc(plan, kind, c, reduce) < plan.line.length() - 1e-4
+    c >= kind.travel_start() && plan.line.points.len() >= 2 && !(reduce && plan.left())
 }
 
 /// The shell model's transform with its nose at arc `head`: the tip on the line, the body along
@@ -914,7 +920,7 @@ fn trail_end(plan: &Plan, head: f32, drawn: bool) -> (f32, Vec3) {
 }
 
 /// The drawn extent of the trail leg between arcs `from` and `to`, cut at the trail's end: the
-/// leg holding that end runs to its point.
+/// leg holding that end runs to its point, so an unbounded `to` always ends there.
 fn trail_span(plan: &Plan, from: f32, to: f32, end: (f32, Vec3)) -> Option<(Vec3, Vec3)> {
     let (end_arc, end_point) = end;
     if end_arc <= from {
@@ -1777,8 +1783,8 @@ mod tests {
     /// For every record: the shell sets off from the drawn span's start at its frame's travel
     /// start, reaches the span's end at its pace's travel end, and is drawn nose first on the line
     /// at the record's calibre; a round the record has rest keeps its nose on the record's last
-    /// point to the end of the frame, and one the record has leave is drawn no longer once its nose
-    /// runs off the end of its path, and never under reduce motion.
+    /// point to the end of the frame, and one the record has leave is never drawn under reduce
+    /// motion (its run past the path: `a_round_that_left_runs_on_past_its_last_node`).
     #[test]
     fn the_shell_ends_where_the_record_ends() {
         let library = Library::load();
@@ -1823,8 +1829,6 @@ mod tests {
             let last = *plan.line.points.last().unwrap();
             match record.report.end {
                 RoundEnd::Left { .. } => {
-                    let gone = time_at_arc(plan, kind, plan.line.length(), false) + 1e-3;
-                    assert!(!shell_drawn(plan, kind, gone, false), "{name}");
                     assert!(!shell_drawn(plan, kind, to, true), "{name}");
                 }
                 RoundEnd::Rest { .. } | RoundEnd::Burst { .. } => {
@@ -1841,6 +1845,92 @@ mod tests {
                 assert!((head_arc(plan, kind, at, false) - s).abs() < 1e-3, "{name}");
             }
         }
+    }
+
+    /// A round the record has leave the tank runs on past its path's last node, which is where the
+    /// record stops logging its flight, not where the round stopped: from the corner time its nose
+    /// reaches that node the shell stays drawn, its nose on the last leg produced at that leg's
+    /// record speed over [`timeline::REPLAY_SLOWDOWN`] and its body along it. The corner, the
+    /// lesson and the x-ray place the shell by this. Each leaving record plays as recorded and cut
+    /// 5 cm past the point it left (fixture data), its last node then well inside the frame, so
+    /// neither a nose clamped to the last node nor a shell hidden there passes. The trail
+    /// [`spawn_glass`] lays runs on to the shell's tail, so a trail that stops at the last node
+    /// fails too.
+    #[test]
+    fn a_round_that_left_runs_on_past_its_last_node() {
+        use crate::damage_cam::PathPoint;
+        let library = Library::load();
+        let asset = TankAsset::load(&library.vehicle).unwrap();
+        let mut leaving = 0;
+        for (index, record) in library.records.iter().enumerate() {
+            let RoundEnd::Left { at } = record.report.end else {
+                continue;
+            };
+            let at = Vec3::from(at);
+            let mut cut = record.report.clone();
+            let k = cut
+                .path
+                .iter()
+                .position(|p| Vec3::from(p.point).distance(at) < 1.0e-5)
+                .expect("where the round left is a point of its path");
+            let next = cut.path[k + 1];
+            let leg = Vec3::from(next.point) - at;
+            cut.path.truncate(k + 1);
+            cut.path.push(PathPoint {
+                t: cut.path[k].t + (next.t - cut.path[k].t) * 0.05 / leg.length(),
+                point: (at + leg.normalize() * 0.05).to_array(),
+            });
+            let cut_plan = Plan::new(&cut, &asset.shapes(&cut.servo_deg));
+            let name = record.stem;
+            for (plan, played) in [(&*record.plan, "as recorded"), (&cut_plan, "cut")] {
+                let line = &plan.line;
+                let n = line.points.len() - 1;
+                let (direction, speed) = (line.leg_direction(n), line.leg_speed(n).unwrap());
+                for kind in [CornerKind::Glass, plan.kind] {
+                    let reached = time_at_arc(plan, kind, line.length(), false);
+                    for k in 1..=8 {
+                        let c = reached + 0.25 * k as f32;
+                        assert!(
+                            shell_drawn(plan, kind, c, false),
+                            "{name} {played}: hidden at {c} s, past its last node"
+                        );
+                        let head = head_arc(plan, kind, c, false);
+                        let run = (c - reached) / timeline::REPLAY_SLOWDOWN * speed;
+                        assert!(
+                            (head - line.length() - run).abs() < 1e-3,
+                            "{name} {played}: {} m past the last node, not {run}",
+                            head - line.length()
+                        );
+                        let pose = shell_transform(plan, head);
+                        let nose = line.points[n] + direction * (head - line.length());
+                        assert!(
+                            pose.translation.distance(nose) < POSITION_TOL_M,
+                            "{name} {played}: the nose is off the last leg"
+                        );
+                        assert!(
+                            (pose.rotation * Vec3::NEG_Z).dot(direction) > 1.0 - 1e-5,
+                            "{name} {played}: the body is off the last leg"
+                        );
+                    }
+                    assert!(!shell_drawn(plan, kind, reached + 1.0, true), "{name}");
+                }
+            }
+            let plan = &record.plan;
+            let (mut app, _) = staged(&library, &asset, index, plan.kind, Vec3::ZERO);
+            let c = time_at_arc(plan, plan.kind, plan.line.length(), false) + 0.5;
+            let head = head_arc(plan, plan.kind, c, false);
+            let (tail_arc, tail) = trail_end(plan, head, true);
+            assert!(tail_arc > plan.line.length(), "{name}");
+            let world = app.world_mut();
+            let mut segs = world.query::<&LineSeg>();
+            let reaches_tail = segs.iter(world).any(|seg| {
+                trail_span(plan, seg.from, seg.to, (tail_arc, tail))
+                    .is_some_and(|(_, b)| b.distance(tail) < POSITION_TOL_M)
+            });
+            assert!(reaches_tail, "{name}: the trail stops short of the tail");
+            leaving += 1;
+        }
+        assert!(leaving > 0, "a record leaves the tank");
     }
 
     /// Every record's nose crosses each leg of its drawn span at that leg's own record speed over
@@ -2875,30 +2965,43 @@ mod tests {
         (front_radius(plan, kind, index, b) - front_radius(plan, kind, index, a)) / (b - a)
     }
 
-    /// The record's speed (m/s) on the path leg leaving the node at `point`, time `t`: the exit
-    /// speed off the plate that threw a spall cone there. `None` where no timed leg leaves it.
-    fn exit_speed(report: &PenetrationReport, point: Vec3, t: f32) -> Option<f32> {
+    /// For a spall cone thrown at record time `t`: the record's speed (m/s) on the path leg
+    /// leaving the node nearest `t` in time, where the crossing that threw it ends, and the speed
+    /// of the leg `t` itself falls on. Read off the path's times alone, never the cone's origin.
+    fn exit_speed(report: &PenetrationReport, t: f32) -> (f32, f32) {
         let path = &report.path;
-        let at = (0..path.len()).find(|&i| {
-            Vec3::from(path[i].point).distance(point) < POSITION_TOL_M
-                && (path[i].t - t).abs() < 1e-7
-        })?;
-        let next = path.get(at + 1)?;
-        let dt = next.t - path[at].t;
-        (dt > 0.0).then(|| Vec3::from(next.point).distance(point) / dt)
+        let gap = |i: usize| (path[i].t - t).abs();
+        let at = (0..path.len())
+            .min_by(|&a, &b| gap(a).total_cmp(&gap(b)))
+            .expect("a recorded path");
+        let speed = |a: &crate::damage_cam::PathPoint, b: &crate::damage_cam::PathPoint| {
+            Vec3::from(a.point).distance(Vec3::from(b.point)) / (b.t - a.t)
+        };
+        let leaving = path[at + 1..]
+            .iter()
+            .find(|next| Vec3::from(next.point).distance(Vec3::from(path[at].point)) > 1e-6)
+            .map(|next| speed(&path[at], next))
+            .expect("a timed leg leaves the node a spall cone is thrown at");
+        let holding = path
+            .windows(2)
+            .find(|pair| pair[0].t <= t && t < pair[1].t)
+            .map_or(leaving, |pair| speed(&pair[0], &pair[1]));
+        (leaving, holding)
     }
 
     /// Every field's front sets off at its own record time and runs at its own speed over
     /// [`timeline::REPLAY_SLOWDOWN`], read off the record apart from the plan: a spall cone's at
     /// the round's speed on the path leg leaving the plate that threw it, a burst's field's at the
     /// burst's sideways speed `v_s`; neither is the line's pace. A component a front doses starts
-    /// its fill when that front reaches it. The library holds a spall cone whose exit speed is
-    /// under half its contact speed and a burst whose `v_s` is apart from its carried speed, so
-    /// neither the contact speed nor the carried speed passes.
+    /// its fill when that front reaches it. Every spall cone is checked, its origin on the path or
+    /// off it. The library holds a spall cone whose exit speed is under half its contact speed, one
+    /// whose origin projects inside the crossing that threw it (its own time falls on the in-plate
+    /// leg), and a burst whose `v_s` is apart from its carried speed, so neither the contact speed,
+    /// the leg the origin projects onto nor the carried speed passes.
     #[test]
     fn each_front_runs_at_its_own_speed() {
         let library = Library::load();
-        let (mut spall, mut burst) = (0, 0);
+        let (mut spall, mut inside, mut burst) = (0, 0, 0);
         for record in &library.records {
             let (plan, report) = (&record.plan, &record.report);
             let name = record.stem;
@@ -2916,11 +3019,12 @@ mod tests {
                     let want = match report.spall.get(index) {
                         Some(c) => {
                             assert_eq!(cone.t, c.t, "{name} cone {index}");
-                            let Some(exit) = exit_speed(report, Vec3::from(c.origin), c.t) else {
-                                continue;
-                            };
+                            let (exit, holding) = exit_speed(report, c.t);
                             if exit < 0.5 * report.projectile.speed_mps {
                                 spall += 1;
+                            }
+                            if (holding - exit).abs() > 0.05 * exit {
+                                inside += 1;
                             }
                             exit
                         }
@@ -2962,7 +3066,92 @@ mod tests {
             spall > 0,
             "a spall cone's exit speed is apart from its contact speed"
         );
+        assert!(
+            inside > 0,
+            "a spall cone's origin projects inside its crossing"
+        );
         assert!(burst > 0, "a burst's v_s is apart from its carried speed");
+    }
+
+    /// A component's fill starts the first moment the picture reaches it: the earliest of the nose
+    /// entering it where the record has the line enter, and each field that dosed it having run,
+    /// from its own record time at its own speed, the reach of its shortest direction that dosed
+    /// it. Every candidate is read off the record apart from the plan's choice. The corner's fill
+    /// and the pace's settle start from it. The library holds a component a later-listed field
+    /// reaches first and one a front reaches before the nose enters it, so neither the first-listed
+    /// dosing field nor the line taken first whenever it dosed passes.
+    #[test]
+    fn each_component_fills_from_its_earliest_arrival() {
+        let library = Library::load();
+        let (mut later_field, mut front_first) = (0, 0);
+        for record in &library.records {
+            let (plan, report) = (&record.plan, &record.report);
+            let name = record.stem;
+            for kind in [CornerKind::Glass, plan.kind] {
+                for b in &plan.boxes {
+                    let Some(dose) = report.doses.iter().find(|d| d.volume == b.name) else {
+                        continue;
+                    };
+                    let by_line = dose.entered.filter(|_| dose.line > 0.0).map(|entered| {
+                        let arc = plan.line.arc_of(Vec3::from(entered));
+                        time_at_arc(plan, kind, arc, false)
+                    });
+                    let by_field: Vec<f32> = report
+                        .fields()
+                        .enumerate()
+                        .filter_map(|(index, field)| {
+                            let origin = Vec3::from(field.origin);
+                            let dosed = |fragment: &&crate::damage_cam::Fragment| {
+                                fragment
+                                    .hits
+                                    .iter()
+                                    .any(|hit| hit.volume == b.name && hit.damage > 0.0)
+                            };
+                            let reach = field
+                                .fragments
+                                .iter()
+                                .filter(dosed)
+                                .map(|fragment| Vec3::from(fragment.end).distance(origin))
+                                .reduce(f32::min)?;
+                            let run = plan.cones[index].run_time(reach);
+                            let from = cone_start(plan, kind, index, false);
+                            Some(from + run * timeline::REPLAY_SLOWDOWN)
+                        })
+                        .collect();
+                    let first_front = by_field.iter().copied().reduce(f32::min);
+                    let Some(earliest) = by_line.into_iter().chain(first_front).reduce(f32::min)
+                    else {
+                        continue;
+                    };
+                    let start = box_start(plan, kind, b, false);
+                    assert!(
+                        (start - earliest).abs() < 1e-4,
+                        "{name} {kind:?} {}: fills at {start}, reached at {earliest}",
+                        b.name
+                    );
+                    if by_field
+                        .first()
+                        .is_some_and(|&listed| listed > earliest + 1e-3)
+                        && by_line.is_none_or(|line| line > earliest + 1e-3)
+                    {
+                        later_field += 1;
+                    }
+                    if let (Some(line), Some(front)) = (by_line, first_front)
+                        && front < line - 1e-3
+                    {
+                        front_first += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            later_field > 0,
+            "a later-listed field reaches a component first"
+        );
+        assert!(
+            front_first > 0,
+            "a front reaches a component before the nose"
+        );
     }
 
     /// The approach is a diagram choice, so its length never paces the record: cutting a record's

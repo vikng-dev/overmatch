@@ -8,11 +8,11 @@
 //! record's own facts; nothing here re-derives them from geometry. A component's shape, and the
 //! whole tank's bounds, serve only framing, never timing. Three things are derived rather than
 //! read, and are labelled where they are made: the line's remaining capability, `(v/v₀)²` from the
-//! path's times (the record carries no capability), the moment a component is reached (the arc of
-//! the line's recorded entry, or the field that dosed it; a synthetic clip that names neither is
-//! reached at contact), and each field front's speed ([`Cone::speed`]; the record holds no fragment
-//! speed). Every time here is the record's own (s); the corner plays it at a fixed slowdown
-//! (`super::timeline::REPLAY_SLOWDOWN`).
+//! path's times (the record carries no capability), the moment a component is reached (the
+//! earliest of the line's recorded entry and each dosing field's front arriving; a synthetic clip
+//! that names neither is reached at contact), and each field front's speed ([`Cone::speed`]; the
+//! record holds no fragment speed). Every time here is the record's own (s); the corner plays it at
+//! a fixed slowdown (`super::timeline::REPLAY_SLOWDOWN`).
 
 use bevy::prelude::*;
 
@@ -89,7 +89,8 @@ impl Polyline {
         self.arc.last().copied().unwrap_or(0.0)
     }
 
-    /// The point at arc length `s`, clamped to the line.
+    /// The point at arc length `s`: the line's first point before it, and past its end run on along
+    /// its last leg, every recorded point left where it is.
     pub fn at(&self, s: f32) -> Vec3 {
         let Some(first) = self.points.first() else {
             return Vec3::ZERO;
@@ -108,7 +109,11 @@ impl Polyline {
                 return self.points[i - 1].lerp(self.points[i], f);
             }
         }
-        *self.points.last().unwrap_or(first)
+        let last = self.points.len() - 1;
+        if last == 0 {
+            return *first;
+        }
+        self.points[last] + self.leg_direction(last) * (s - self.length())
     }
 
     /// The direction of travel at arc length `s`.
@@ -203,6 +208,16 @@ impl Polyline {
         }
     }
 
+    /// The index of the line's point nearest `p`; 0 on a line with no point.
+    pub fn nearest_node(&self, p: Vec3) -> usize {
+        (0..self.points.len())
+            .min_by(|&a, &b| {
+                let d = |i: usize| self.points[i].distance_squared(p);
+                d(a).total_cmp(&d(b))
+            })
+            .unwrap_or(0)
+    }
+
     /// The arc length of the point on the line nearest `p`.
     pub fn arc_of(&self, p: Vec3) -> f32 {
         let mut best = (f32::INFINITY, 0.0);
@@ -267,9 +282,9 @@ pub struct Cone {
     pub t: f32,
     /// Its front's speed (m/s of record), the same in every direction: a spall cone's is the
     /// round's exit speed off the plate that threw it (the record's speed on the path leg leaving
-    /// that crossing), a burst's field's the burst's sideways speed ([`crate::damage_cam::Burst`]).
-    /// DERIVED stand-ins: the record holds no fragment speed. A front with no finite positive
-    /// speed (a leg with no time span) is whole once thrown.
+    /// the node where that crossing ends, [`Plan::new`]), a burst's field's the burst's sideways
+    /// speed ([`crate::damage_cam::Burst`]). DERIVED stand-ins: the record holds no fragment speed.
+    /// A front with no finite positive speed (a leg with no time span) is whole once thrown.
     pub speed: f32,
     pub rays: Vec<Ray>,
     /// The directions' reach and strength as one function of direction, baked from `rays`.
@@ -357,8 +372,9 @@ pub struct BoxPlan {
     pub field: f32,
     /// The HP points the shot took from it.
     pub lost_hp: u32,
-    /// When the picture reaches it: the arc where the record has the line enter it, else the first
-    /// cone that dosed it, else (a synthetic clip that names neither) the contact.
+    /// When the picture reaches it: the earliest, in record time, of the line entering it where the
+    /// record has it enter and each dosing field's front arriving ([`Reach::Cone`]), the line first
+    /// on a tie; a synthetic clip that names neither reaches it at the contact.
     pub reached_at: Option<Reach>,
     /// Lost before the shot (no hit points left at it), or lost or cooked off by it.
     pub lost: bool,
@@ -438,9 +454,15 @@ impl Plan {
             outgoing: Vec3::from(bounce.outgoing).normalize_or(Vec3::NEG_Z),
             arc: line.arc_of(Vec3::from(bounce.point)),
         });
+        // A spall cone is thrown where its crossing ends, a node of the path, and its front runs at
+        // the speed of the leg leaving that node. Its origin, the mean of the exits the round's
+        // disc reached, stands off the node across the path and may project inside the crossing
+        // (0.7 mm short of it in s4, MEASURED), so the node is the one nearest the origin, never
+        // the leg its projection falls on. Invariant: an origin lies nearer its own node than any
+        // other, so within half the crossing's chord of it and half the leg leaving it.
         let spall = report.spall.iter().map(|c| {
-            let arc = line.arc_of(Vec3::from(c.origin));
-            let exit = line.leg_speed(line.leg_after(arc)).unwrap_or(0.0);
+            let node = line.nearest_node(Vec3::from(c.origin));
+            let exit = line.leg_speed(node + 1).unwrap_or(0.0);
             cone(c, &line, exit)
         });
         let burst = report
@@ -461,29 +483,31 @@ impl Plan {
                     let (lo, hi) = shape.bounds();
                     (lo.y, hi.y)
                 });
+                // Each way the picture reaches it, at its record time: the line's entry, and each
+                // dosing field's front at that field's own speed.
                 let by_line = (line_dose > 0.0)
                     .then(|| dose.and_then(|d| d.entered))
                     .flatten()
-                    .map(|entered| Reach::Line(line.arc_of(Vec3::from(entered))));
-                let by_cone = report.fields().enumerate().find_map(|(index, cone)| {
-                    let origin = Vec3::from(cone.origin);
-                    cone.fragments
-                        .iter()
-                        .filter(|fragment| {
-                            fragment
-                                .hits
-                                .iter()
-                                .any(|hit| hit.volume == component.name && hit.damage > 0.0)
-                        })
-                        .map(|fragment| Vec3::from(fragment.end).distance(origin))
-                        .reduce(f32::min)
-                        .map(|distance| Reach::Cone {
-                            cone: index,
-                            distance,
-                        })
+                    .map(|entered| {
+                        let arc = line.arc_of(Vec3::from(entered));
+                        (line.time_at(arc), Reach::Line(arc))
+                    });
+                let fields = report.fields().zip(&cones).enumerate();
+                let by_cone = fields.filter_map(|(index, (field, cone))| {
+                    let distance = dosing_reach(field, &component.name)?;
+                    let reach = Reach::Cone {
+                        cone: index,
+                        distance,
+                    };
+                    Some((cone.t + cone.run_time(distance), reach))
                 });
-                let reached_at = (line_dose + field_dose > 0.0)
-                    .then(|| by_line.or(by_cone).unwrap_or(Reach::Line(contact_arc)));
+                let reached_at = (line_dose + field_dose > 0.0).then(|| {
+                    by_line
+                        .into_iter()
+                        .chain(by_cone)
+                        .reduce(|first, next| if next.0 < first.0 { next } else { first })
+                        .map_or(Reach::Line(contact_arc), |(_, reach)| reach)
+                });
                 let lost_before = component.count > 0 && component.hp == 0;
                 BoxPlan {
                     name: component.name.clone(),
@@ -642,6 +666,24 @@ fn polyline(report: &PenetrationReport) -> Polyline {
         times,
         energy,
     }
+}
+
+/// How far (m) from `field`'s origin its shortest direction that dosed component `name` ended: the
+/// latest its front can have reached it, the record holding no point where a direction met it.
+/// `None` when none of its directions dosed it.
+fn dosing_reach(field: &SpallCone, name: &str) -> Option<f32> {
+    let origin = Vec3::from(field.origin);
+    field
+        .fragments
+        .iter()
+        .filter(|fragment| {
+            fragment
+                .hits
+                .iter()
+                .any(|hit| hit.volume == name && hit.damage > 0.0)
+        })
+        .map(|fragment| Vec3::from(fragment.end).distance(origin))
+        .reduce(f32::min)
 }
 
 /// The plan's field of `cone`, thrown on `line`, its front running at `speed` (m/s of record).
