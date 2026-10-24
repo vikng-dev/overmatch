@@ -94,10 +94,8 @@ const BASE_EDGE_ALPHA: f32 = 0.35;
 /// centroid order; an opaque fill in that pass would cover the hull wherever it sorted later.
 const BASE_COMPONENT_ALPHA: f32 = 1.0;
 const BASE_COMPONENT_FACE_SHARE: f32 = 1.0;
-/// The field footprint: its lines' width (px) and opacity, and its fill's opacity, short of
-/// opaque so the HP fill under it, the outcome, reads through.
-const FOOTPRINT_LINE_PX: f32 = 2.0;
-const FOOTPRINT_LINE_ALPHA: f32 = 0.9;
+/// The field footprint's fill opacity, short of opaque so the HP fill under it, the outcome,
+/// reads through.
 const FOOTPRINT_FILL_ALPHA: f32 = 0.6;
 /// The most spall fields a footprint marks; `pen_cam_look.wgsl`'s arrays hold this many fields'
 /// lanes and [`set_footprints`] drops what lies past it, so every record's cones must fit it
@@ -124,7 +122,6 @@ pub struct LookParams {
     pub rest: Vec4,
     pub plane: Vec4,
     pub foot: Vec4,
-    pub fill: Vec4,
     pub ramp: [Vec4; 4],
     pub volume: Vec4,
     pub fields: Vec4,
@@ -146,7 +143,6 @@ impl Default for LookParams {
             rest: Vec4::ZERO,
             plane: Vec4::ZERO,
             foot: Vec4::ZERO,
-            fill: Vec4::ZERO,
             ramp: [Vec4::ZERO; 4],
             volume: Vec4::ZERO,
             fields: Vec4::ZERO,
@@ -665,9 +661,8 @@ impl VolumeGeometry {
 /// look's surfaces (the corner's beside the x-ray's) keep their own footprints. A surface point is
 /// in a field where it faces the field's origin, lies inside its cone, behind its front and no
 /// farther than its direction's reach on the disc: the field met it there. It is filled in the
-/// potency colour of the fields' summed intensity there ([`super::potency::Ramp`]) and lined along
-/// each cone's edge. The disc lanes ([`pack`]) and the ramp lanes carry the law alone: nothing
-/// display-side sets the colour.
+/// potency colour of the fields' summed intensity there ([`super::potency::Ramp`]). The disc lanes
+/// ([`pack`]) and the ramp lanes carry the law alone: nothing display-side sets the colour.
 pub fn set_footprints(
     looks: &mut Assets<LookMaterial>,
     masks: &MaskSet,
@@ -686,7 +681,7 @@ pub fn set_footprints(
         );
     }
     let (share, metres) = FOOTPRINT_REACH_SLACK;
-    let fill = Vec4::new(FOOTPRINT_FILL_ALPHA, 0.0, 0.0, 0.0);
+    let foot = Vec4::new(FOOTPRINT_FILL_ALPHA, share, metres, 0.0);
     let ramp = potency.ramp().lanes();
     for (_, material) in looks.iter_mut() {
         let mode = material.params.mode.x;
@@ -695,8 +690,7 @@ pub fn set_footprints(
         {
             continue;
         }
-        material.params.foot = Vec4::new(FOOTPRINT_LINE_PX, FOOTPRINT_LINE_ALPHA, share, metres);
-        material.params.fill = fill;
+        material.params.foot = foot;
         material.params.ramp = ramp;
         material.params.fields = Vec4::new(count as f32, 0.0, 0.0, 0.0);
         material.params.prints = lanes;
@@ -976,15 +970,17 @@ mod tests {
     }
 
     /// The look draws the body behind the scene: a body surface is discarded wherever the part
-    /// mask holds a component; a volume's pipeline tests no depth and writes none, while every
-    /// other element keeps the pass's own; and in every frame that draws the body behind, the
-    /// volume's march reads its pixel's bound from the part mask, in the eye depth the masks
-    /// store and the march and the nearest-surface test read. In the outside view, whose
-    /// components lie hidden in the tank, the volume is drawn whole. The draw order relies on it: a
-    /// body that tests no part mask washes the components in grey, a volume tested against the
-    /// depth drops the stretch of field in front of a component and vanishes behind the slice's
-    /// body, one without the bound draws over a component in front of it, and a depth read in two
-    /// conventions bounds an orthographic view's field at the wrong place.
+    /// mask holds a component; each layer is one surface deep, a surface beneath its mask's
+    /// nearest discarded; a volume's pipeline tests no depth and writes none, while every other
+    /// element keeps the pass's own; and in every frame that draws the body behind, the volume's
+    /// march reads its pixel's bound from the part mask, in the eye depth the masks store and the
+    /// march and the nearest-surface test read. In the outside view, whose components lie hidden in
+    /// the tank, the volume is drawn whole. The draw order relies on it: a body that tests no part
+    /// mask washes the components in grey, a surface drawn beneath its layer's nearest stacks the
+    /// glass, a volume tested against the depth drops the stretch of field in front of a component
+    /// and vanishes behind the slice's body, one without the bound draws over a component in front
+    /// of it, and a depth read in two conventions bounds an orthographic view's field at the wrong
+    /// place.
     #[test]
     fn the_body_draws_behind_the_scene() {
         let potency = Potency::shipped();
@@ -1023,7 +1019,7 @@ mod tests {
             "let t_exit = eye_depth(exit);",
             "let depth = eye_depth(in.world_position.xyz);",
             "return vec4(vn * 0.5 + 0.5, max(depth, 1e-4));",
-            "if nearest > 0.0 && depth > nearest * 1.002 + 0.003 {",
+            "if nearest > 0.0 && depth > nearest * 1.002 + 0.003 {\n            discard;\n        }",
         ] {
             assert!(shader.contains(read), "{read}");
         }

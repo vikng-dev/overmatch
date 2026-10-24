@@ -8,8 +8,8 @@
 //                 component; a component (`mode.z = 1`) the part mask's. Half-Lambert shading with
 //                 `shade.y` the light's share, opacity `color.a` at a grazing angle falling to
 //                 `shade.x` of it face-on (power `shade.z`), and that mask's depth edges in `edge`
-//                 (rgb, a: opacity), under its field footprint. Where the surface is not its mask's
-//                 nearest, only the footprint's lines draw.
+//                 (rgb, a: opacity), under its field footprint. Each layer is one surface deep: a
+//                 surface that is not its mask's nearest is discarded.
 //   3 state       a component on the state scale, opaque: below its fill level `color` (red, or
 //                 charcoal under an `edge`-coloured diagonal hatch when `mode.w = 1`, period
 //                 `hatch.x` px, `hatch.y` of it hatched), above it `rest` (the untouched grey), a
@@ -50,10 +50,8 @@
 // Base and state surfaces carry the spall fields' footprint (`footprint`): for each of the fields
 // (`fields.x`, none at 0; `prints`), a surface point facing the origin, inside the cone, behind its
 // front and no farther than its direction's reach on the field's disc (`disc`, with the slack
-// `foot.zw`) takes the field's intensity there. The fields' summed intensity fills the point in
-// its potency colour at opacity `fill.x`; lines `foot.x` px wide at opacity `foot.y` mark where
-// the angle from a cone's axis crosses its half-angle, in the potency colour there. No lane the
-// colour is read from carries a display gain.
+// `foot.yz`) takes the field's intensity there. The fields' summed intensity fills the point in
+// its potency colour at opacity `foot.x`. No lane the colour is read from carries a display gain.
 //
 // Output: straight `rgb, a`.
 
@@ -82,11 +80,9 @@ struct LookParams {
     // The cut (`mode.y = 1`): xyz the plane's unit normal toward the discarded side (world), w
     // normal · a point on it.
     plane: vec4<f32>,
-    // x: the lines' width (px), y: their opacity; z, w: a surface counts as met up to `z` times its
-    // direction's reach plus `w` (m).
+    // x: the footprint fill's opacity; y, z: a surface counts as met up to `y` times its
+    // direction's reach plus `z` (m).
     foot: vec4<f32>,
-    // x: the footprint fill's opacity.
-    fill: vec4<f32>,
     // The potency colour's anchors (rgb, and `u` in w) and its middle slope (rgb, and the mid
     // threshold in w).
     ramp: array<vec4<f32>, 4>,
@@ -230,18 +226,10 @@ fn polar(f: i32, dir: vec3<f32>) -> vec3<f32> {
     return vec3(q, angle);
 }
 
-// What the footprint draws at a surface point: the fields' summed intensity there (HP points per
-// m², 0 outside every field), and a line there (1, in `line_rgb`) or none (0).
-struct Footprint {
-    intensity: f32,
-    line: f32,
-    line_rgb: vec3<f32>,
-}
-
-// The footprint at world point `p` (normal `n`; its change across a pixel `dpx`, `dpy`).
-fn footprint(p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>) -> Footprint {
+// The footprint at world point `p` (normal `n`): the fields' summed intensity there (HP points
+// per m², 0 outside every field).
+fn footprint(p: vec3<f32>, n: vec3<f32>) -> f32 {
     var intensity = 0.0;
-    var edge = false;
     for (var f = 0; f < 4; f = f + 1) {
         if f32(f) >= look.fields.x {
             break;
@@ -255,29 +243,16 @@ fn footprint(p: vec3<f32>, n: vec3<f32>, dpx: vec3<f32>, dpy: vec3<f32>) -> Foot
         }
         let dir = d / r;
         let on_disc = polar(f, dir);
-        let c = clamp(dot(dir, along.xyz), -1.0, 1.0);
-        // The angle's gradient in space, (c d/r - axis) / (r sin θ), across the pixel.
-        let g = (c * dir - along.xyz) / max(r * sqrt(max(1.0 - c * c, 1e-8)), 1e-6);
-        let per_px = abs(dot(g, dpx)) + abs(dot(g, dpy));
-        let on_edge = abs(on_disc.z - at.w) < 0.5 * look.foot.x * per_px;
-        if on_disc.z > at.w && !on_edge {
+        if on_disc.z > at.w {
             continue;
         }
         let here = disc_at(f, on_disc.xy);
-        if r > here.x * look.foot.z + look.foot.w {
+        if r > here.x * look.foot.y + look.foot.z {
             continue;
         }
-        edge = edge || on_edge;
-        if on_disc.z <= at.w {
-            intensity = intensity + here.y / (r * r);
-        }
+        intensity = intensity + here.y / (r * r);
     }
-    var out = Footprint(intensity, 0.0, vec3(0.0));
-    if edge {
-        out.line = 1.0;
-        out.line_rgb = ramp(intensity);
-    }
-    return out;
+    return intensity;
 }
 
 // A point on an eye ray in field 0's volume: whether it lies inside (in the cone, behind the
@@ -420,12 +395,9 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
     let v = to_eye / max(dist, 1e-6);
     let n = normalize(in.world_normal);
     let facing = abs(dot(n, v));
-    // The state fill's height, its change across a pixel, and the position's, taken in uniform
-    // control flow.
+    // The state fill's height and its change across a pixel, taken in uniform control flow.
     let height = dot(in.world_position.xyz, look.state.xyz);
     let height_px = fwidth(height);
-    let dpx = dpdx(in.world_position.xyz);
-    let dpy = dpdy(in.world_position.xyz);
     let toward = select(-n, n, dot(n, v) >= 0.0);
     let lambert = 0.5 * (dot(toward, normalize(vec3(0.4, 1.0, 0.3))) + 1.0);
     let shading = 1.0 - look.shade.y + look.shade.y * lambert;
@@ -456,13 +428,8 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
             nearest = mask_at(hull_mask, p).a;
             edge = lines(hull_mask, pix);
         }
-        let mark = footprint(in.world_position.xyz, n, dpx, dpy);
-        // Beneath the nearest layer only the footprint's lines draw.
         if nearest > 0.0 && depth > nearest * 1.002 + 0.003 {
-            if mark.line == 0.0 {
-                discard;
-            }
-            return vec4(mark.line_rgb, look.foot.y * fade);
+            discard;
         }
         var rgb = look.color.rgb * shading;
         var a = look.color.a * mix(look.shade.x, 1.0, pow(1.0 - facing, look.shade.z));
@@ -470,13 +437,10 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
             rgb = look.edge.rgb;
             a = max(a, look.edge.a);
         }
-        if mark.intensity > 0.0 {
-            rgb = mix(rgb, ramp(mark.intensity), look.fill.x);
-            a = max(a, look.fill.x);
-        }
-        if mark.line > 0.0 {
-            rgb = mix(rgb, mark.line_rgb, look.foot.y);
-            a = max(a, look.foot.y);
+        let print = footprint(in.world_position.xyz, n);
+        if print > 0.0 {
+            rgb = mix(rgb, ramp(print), look.foot.x);
+            a = max(a, look.foot.x);
         }
         return vec4(rgb, clamp(a, 0.0, 1.0) * fade);
     }
@@ -500,12 +464,9 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
         if partial && abs(height - level) < 0.5 * look.span.w * height_px {
             rgb = look.edge.rgb;
         }
-        let mark = footprint(in.world_position.xyz, n, dpx, dpy);
-        if mark.intensity > 0.0 {
-            rgb = mix(rgb, ramp(mark.intensity), look.fill.x);
-        }
-        if mark.line > 0.0 {
-            rgb = mix(rgb, mark.line_rgb, look.foot.y);
+        let print = footprint(in.world_position.xyz, n);
+        if print > 0.0 {
+            rgb = mix(rgb, ramp(print), look.foot.x);
         }
         return vec4(rgb, 1.0);
     }
