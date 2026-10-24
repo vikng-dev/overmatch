@@ -9,29 +9,33 @@
 //! [`volume`] choose them, and the stage spawns what they return.
 //!
 //! Draw order, in every frame that draws the body behind ([`body_behind`]: the glass frames and
-//! the slice): each tank mesh is on one layer by its tier ([`Layer::of`]). The body draws behind
-//! everything else: a body fragment is discarded wherever the part mask holds a component, and
-//! every volume is drawn after it and over it, writing no depth. The scene (the components, their
-//! state fills and outlines, and the fields' volumes) is ordered by depth among itself: a
-//! component is opaque and depth-tested, and a volume's march ends at its pixel's nearest
-//! component in the part mask, so a component in front of a field hides it and a field in front
-//! of a component blends over it. A volume tests no other depth, the world's included. The slice
-//! keeps the tank's own materials with the same rule (`super::material::SliceMaterial`): a body
-//! fragment on the cut's kept side is discarded where the part mask holds a component, and the
-//! part mask holds the components' kept side alone. The trail, the rings and the shell model are
-//! outside the order: drawn and depth-tested as their own materials are.
+//! the slice): each tank mesh is on one layer by its tier ([`Layer::of`]), and the round's model
+//! is on the scene's ([`Layer::ROUND`]). The body draws behind everything else: a body fragment
+//! is discarded wherever the part mask holds a scene surface, and every volume is drawn after it
+//! and over it, writing no depth. The scene (the components, their state fills and outlines, the
+//! round's model and the fields' volumes) is ordered by depth among itself: a component is opaque
+//! and depth-tested, as is the round in its own opaque material, and a volume's march ends at its
+//! pixel's nearest scene surface in the part mask, so a component or the round in front of a
+//! field hides it and a field in front of either blends over it. A volume tests no other depth,
+//! the world's included. The round is drawn whole in every frame, the slice's included, and so is
+//! its mask copy. The slice keeps the tank's own materials with the same rule
+//! (`super::material::SliceMaterial`): a body fragment on the cut's kept side is discarded where
+//! the part mask holds a scene surface, and the part mask holds the components' kept side alone
+//! and the round whole. The trail and the rings are outside the order: drawn and depth-tested as
+//! their own materials are.
 //!
 //! The masks: two offscreen images drawn from the viewing camera's own pose, lens and size before
 //! it: the hull mask (each pixel's nearest body surface) and the part mask (each pixel's nearest
-//! component surface), each a view normal (rgb, 0..1) and an eye depth (a, m; 0 where nothing
-//! is). The eye depth has one convention for every reader: the distance from the eye in a
-//! perspective view, the distance along the camera's forward from its plane in an orthographic
-//! one. The masks store it, and the nearest-surface tests and the volume's march compare against
-//! it. A body or component surface draws only where its fragment is its own mask's nearest, and
-//! its edges come from that mask. The masks hold the looked-at tank's mask copies alone, never
-//! the battlefield, so over the world the body composites by straight alpha on whatever the viewer
-//! drew behind it, under the world's own depth. Each viewer that draws the look has its own set
-//! ([`Masks`]), and every material of a look is built on the set of the viewer that draws it.
+//! scene surface: a component or the round), each a view normal (rgb, 0..1) and an eye depth (a,
+//! m; 0 where nothing is). The eye depth has one convention for every reader: the distance from
+//! the eye in a perspective view, the distance along the camera's forward from its plane in an
+//! orthographic one. The masks store it, and the nearest-surface tests and the volume's march
+//! compare against it. A body or component surface draws only where its fragment is its own
+//! mask's nearest, and its edges come from that mask. The masks hold the mask copies of the
+//! looked-at tank and its round alone, never the battlefield, so over the world the body
+//! composites by straight alpha on whatever the viewer drew behind it, under the world's own
+//! depth. Each viewer that draws the look has its own set ([`Masks`]), and every material of a
+//! look is built on the set of the viewer that draws it.
 //!
 //! Tiers come from the tank's data alone ([`Tier`]): main armour, external armour, component and
 //! detail, by the substance each mesh wears and the tank file's volume entries.
@@ -707,17 +711,21 @@ pub struct HullDraw {
     pub layer: Layer,
 }
 
-/// The side of the draw order a tank mesh is on, and so the mask its copy is drawn into.
+/// The side of the draw order a mesh is on, and so the mask its copy is drawn into.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Layer {
-    /// The body (main armour, external armour, detail): drawn behind every component and field,
-    /// into the hull mask.
+    /// The body (main armour, external armour, detail): drawn behind the scene, into the hull
+    /// mask.
     Body,
-    /// A component: ordered by depth with the other components and the fields, into the part mask.
+    /// A component or the round's model: ordered by depth among themselves and with the fields,
+    /// into the part mask.
     Scene,
 }
 
 impl Layer {
+    /// The layer of the round's model: the one place the round is placed in the draw order.
+    pub const ROUND: Self = Self::Scene;
+
     /// The layer of a mesh of tier `tier`: the one place a tier is placed in the draw order.
     pub fn of(tier: Tier) -> Self {
         match tier {
@@ -738,7 +746,7 @@ pub fn hull(tier: Tier, masks: &MaskSet) -> HullDraw {
 }
 
 /// The base look's one material for every body mesh: armour, running gear and detail. It is
-/// discarded wherever the part mask holds a component (`mode.z = 0`).
+/// discarded wherever the part mask holds a scene surface (`mode.z = 0`).
 fn base(masks: &MaskSet) -> LookMaterial {
     let edge = LinearRgba::from(BASE_EDGE);
     let mut material = LookMaterial::new(
@@ -829,9 +837,9 @@ pub fn component(b: &BoxPlan, kind: CornerKind, masks: &MaskSet) -> Option<LookM
 /// Straight alpha, sorted after every other
 /// translucent surface, drawn whatever stands in front and writing no depth ([`LookKey::depth`]).
 /// In a frame that draws the body behind ([`body_behind`]) the march ends at its pixel's nearest
-/// component in `masks`' part mask (`volume.w = 1`), so a component in front of the field hides
-/// it; in the outside view it is drawn over the tank whole. `cut` by the slice plane (unit normal
-/// toward the discarded side, a point on it) it stops at the plane.
+/// scene surface in `masks`' part mask (`volume.w = 1`), so a component or the round in front of
+/// the field hides it; in the outside view it is drawn over the tank whole. `cut` by the slice
+/// plane (unit normal toward the discarded side, a point on it) it stops at the plane.
 pub fn volume(
     potency: &Potency,
     masks: &MaskSet,
@@ -1009,7 +1017,7 @@ mod tests {
     }
 
     /// The look draws the body behind the scene: a body surface is discarded wherever the part
-    /// mask holds a component; each layer is one surface deep, a surface beneath its mask's
+    /// mask holds a scene surface; each layer is one surface deep, a surface beneath its mask's
     /// nearest discarded; a volume's pipeline tests no depth and writes none, while every other
     /// element keeps the pass's own; and in every frame that draws the body behind, the volume's
     /// march reads its pixel's bound from the part mask, in the eye depth the masks store and the

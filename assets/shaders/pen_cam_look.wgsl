@@ -4,8 +4,8 @@
 //   0 mask        rgb: view-space normal (0..1), a: the eye depth (m, `eye_depth`). Opaque. The
 //                 hull and the part masks are both drawn in it.
 //   2 base        one hueless surface, drawn only where it is its mask's nearest surface: a body
-//                 surface (`mode.z = 0`) the hull mask's, and nowhere the part mask holds a
-//                 component; a component (`mode.z = 1`) the part mask's. Half-Lambert shading with
+//                 surface (`mode.z = 0`) the hull mask's, and nowhere the part mask holds a scene
+//                 surface; a component (`mode.z = 1`) the part mask's. Half-Lambert shading with
 //                 `shade.y` the light's share, opacity `color.a` at a grazing angle falling to
 //                 `shade.x` of it face-on (power `shade.z`), and that mask's depth edges in `edge`
 //                 (rgb, a: opacity), under its field footprint. Each layer is one surface deep: a
@@ -24,9 +24,9 @@
 //                 while it stays inside the field (`sample`: inside the cone, behind the front,
 //                 within the disc's reach, on the cut's kept side), where the ray enters it refined
 //                 by `VOLUME_REFINE` halvings, the eye the end if it lies inside. With
-//                 `volume.w = 1` the pixel's nearest component in the part mask bounds it: the
-//                 stretch behind the component is passed over, and the march takes the rest from
-//                 the component toward the eye, or nothing where the ray's stretch inside lies
+//                 `volume.w = 1` the pixel's nearest scene surface in the part mask bounds it: the
+//                 stretch behind that surface is passed over, and the march takes the rest from
+//                 the surface toward the eye, or nothing where the ray's stretch inside lies
 //                 wholly behind it. Each sample weighs `weight` of its intensity (the rim), the
 //                 colour and the length alike (`weighed`): the pixel takes the weighted mean of
 //                 `ramp` at every sample's intensity, at opacity `volume.x · (1 − exp(−L_w /
@@ -36,12 +36,14 @@
 // In every mode, `mode.y = 1` discards what lies on `plane`'s normal side (the slice's cut).
 //
 // Draw order (design doc §5, "Draw order"; `look.rs`, module doc): the body draws behind the
-// components and the fields, which are ordered by depth among themselves. A body surface is
-// discarded wherever the part mask holds a component, and a volume is drawn after the body and
-// over it; a component is opaque and depth-tested, and a volume's march ends at the nearest
-// component. Every depth read against a mask is the eye depth (`eye_depth`): the distance from the
-// eye in a perspective view, the distance along the camera's forward from its plane in an
-// orthographic one, the masks' own cameras sharing the viewer's pose and lens.
+// scene, the components, the round's model and the fields, ordered by depth among themselves; the
+// part mask holds the scene's surfaces, the components' and the round's. A body surface is
+// discarded wherever the part mask holds a scene surface, and a volume is drawn after the body
+// and over it; a component is opaque and depth-tested, as is the round in its own material, and a
+// volume's march ends at the nearest scene surface. Every depth read against a mask is the eye
+// depth (`eye_depth`): the distance from the eye in a perspective view, the distance along the
+// camera's forward from its plane in an orthographic one, the masks' own cameras sharing the
+// viewer's pose and lens.
 //
 // The potency colour (`ramp`; design doc §5, "Potency colour") is one function of intensity
 // alone: a monotone cubic in `u = log2(I / T_mid)` through three anchors (`ramp[0..3]`: rgb, and
@@ -89,7 +91,7 @@ struct LookParams {
     // threshold in w).
     ramp: array<vec4<f32>, 4>,
     // The volume: x its opacity at most, y the length over which it climbs (m), z the march's step
-    // (m), w bounded by the part mask's nearest component (1).
+    // (m), w bounded by the part mask's nearest scene surface (1).
     volume: vec4<f32>,
     // The volume's rim (`weight`): x the `u` at and below which a sample weighs nothing, y the `u`
     // at and above which it weighs fully.
@@ -297,7 +299,7 @@ fn sample(p: vec3<f32>) -> Sample {
 }
 
 // Field 0's volume seen through `exit`, a point where the eye ray leaves it, at mask pixel `p`:
-// the ray marched back toward the eye from the exit, or from the nearest component where one
+// the ray marched back toward the eye from the exit, or from the nearest scene surface where one
 // stands in front of the exit, its colour the weighted mean of the potency colour along it and its
 // opacity climbing with the weighted length inside, both by the trapezoid rule between samples.
 fn volume(exit: vec3<f32>, p: vec2<i32>, fade: f32) -> vec4<f32> {
@@ -314,7 +316,7 @@ fn volume(exit: vec3<f32>, p: vec2<i32>, fade: f32) -> vec4<f32> {
     let step = look.volume.z;
     var last_t = far;
     let start = sample(exit - dir * (t_exit - far));
-    // A component in front of the exit with the field's edge between them: the field this exit
+    // A scene surface in front of the exit with the field's edge between them: the field this exit
     // closes lies wholly behind it.
     if far < t_exit && !start.inside {
         discard;
@@ -326,7 +328,8 @@ fn volume(exit: vec3<f32>, p: vec2<i32>, fade: f32) -> vec4<f32> {
         let t = max(t_exit - f32(k) * step, 0.0);
         let here = sample(exit - dir * (t_exit - t));
         if t >= far {
-            // Behind the component: passed over, the ray only held to the field this exit closes.
+            // Behind the scene surface: passed over, the ray only held to the field this exit
+            // closes.
             if !here.inside {
                 discard;
             }
@@ -437,7 +440,7 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
             nearest = mask_at(part_mask, p).a;
             edge = lines(part_mask, pix);
         } else {
-            // The body is behind every component.
+            // The body is behind the scene.
             if mask_at(part_mask, p).a > 0.0 {
                 discard;
             }

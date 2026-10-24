@@ -86,6 +86,7 @@ fn wire(app: &mut App) {
         .init_resource::<xray::XRayState>()
         .add_observer(close)
         .add_observer(xray::forget_shown)
+        .add_observer(xray::round_landed)
         .add_systems(
             Update,
             (
@@ -601,6 +602,7 @@ mod tests {
             TaskPoolPlugin::default(),
             AssetPlugin::default(),
             TransformPlugin,
+            bevy::world_serialization::WorldSerializationPlugin,
         ));
         mount(&mut app);
         while app.plugins_state() == bevy::app::PluginsState::Adding {
@@ -609,7 +611,6 @@ mod tests {
         app.finish();
         app.cleanup();
         app.init_asset::<TankSpec>()
-            .init_asset::<WorldAsset>()
             .init_asset::<Mesh>()
             .init_asset::<StandardMaterial>()
             .init_asset::<Image>()
@@ -1801,6 +1802,128 @@ mod tests {
             !app.world().resource::<Assets<Image>>().contains(&old),
             "the old set's images are gone"
         );
+    }
+
+    /// The x-ray's round is on the scene side of the draw order: once its model lands under the
+    /// real spawner, each of its meshes keeps its own material and carries exactly one mask copy of
+    /// its own mesh, in the part mask, drawn with the material every mask copy of the tank wears
+    /// (the masks' material, uncut); a new mask set (a resize) draws it again on the new set. The
+    /// x-ray relies on it: without the copy a field behind the round draws over it and the body's
+    /// glass covers it, a copy in the hull mask bounds no field, and a copy on the old set reads
+    /// images that are gone. Fixture cuboids stand in for the model: the order reads that a mesh
+    /// is the round's, never its shape.
+    #[test]
+    fn the_xray_round_is_on_the_scene_side() {
+        use bevy::camera::{ImageRenderTarget, RenderTarget};
+        use bevy::render::render_resource::TextureFormat;
+
+        use crate::render_policy::VisualScope;
+
+        let (mut app, _, meshes, camera) = world_xray_app();
+        app.register_type::<MeshMaterial3d<StandardMaterial>>();
+        let world = app.world_mut();
+        let cuboid = world
+            .resource_mut::<Assets<Mesh>>()
+            .add(Cuboid::new(0.1, 0.1, 0.3));
+        let material = world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let mut model = World::new();
+        let node = model.spawn(Transform::IDENTITY).id();
+        let first = model
+            .spawn((
+                Mesh3d(cuboid.clone()),
+                MeshMaterial3d(material.clone()),
+                Transform::IDENTITY,
+                ChildOf(node),
+            ))
+            .id();
+        model.spawn((
+            Mesh3d(cuboid.clone()),
+            MeshMaterial3d(material.clone()),
+            Transform::from_xyz(0.0, 0.0, 0.2),
+            ChildOf(first),
+        ));
+        let model = world
+            .resource_mut::<Assets<WorldAsset>>()
+            .add(WorldAsset::new(model));
+        world
+            .resource_mut::<xray::XRayState>()
+            .stand_in_shell(model);
+        let (_, crossing, vocabulary, _) = incoming("s1_through_crew", 1200);
+        receive(&mut app, crossing, &vocabulary);
+        press_x(&mut app);
+        run(&mut app, 0.2);
+        let check = |app: &mut App, when: &str| {
+            let tank_copy = {
+                let world = app.world_mut();
+                world
+                    .query::<(&xray::MaskCopy, &MeshMaterial3d<LookMaterial>)>()
+                    .iter(world)
+                    .find(|(copy, _)| copy.of() == meshes[0])
+                    .map(|(_, material)| material.0.clone())
+                    .expect("the hull mesh's mask copy")
+            };
+            let world = app.world_mut();
+            type Own = Option<&'static MeshMaterial3d<StandardMaterial>>;
+            let round: Vec<(Entity, Option<AssetId<StandardMaterial>>)> = world
+                .query_filtered::<(Entity, &Mesh3d, Own), Without<MeshMaterial3d<LookMaterial>>>()
+                .iter(world)
+                .filter(|(_, mesh, _)| mesh.0 == cuboid)
+                .map(|(entity, _, own)| (entity, own.map(|m| m.id())))
+                .collect();
+            assert_eq!(round.len(), 2, "{when}: the model landed");
+            let copies: Vec<(Entity, VisualScope, Handle<LookMaterial>)> = world
+                .query::<(
+                    &Mesh3d,
+                    &ChildOf,
+                    &VisualScope,
+                    &MeshMaterial3d<LookMaterial>,
+                )>()
+                .iter(world)
+                .filter(|(mesh, ..)| mesh.0 == cuboid)
+                .map(|(_, parent, scope, material)| (parent.parent(), *scope, material.0.clone()))
+                .collect();
+            assert_eq!(copies.len(), round.len(), "{when}: one copy a mesh");
+            for (mesh, own) in round {
+                assert_eq!(own, Some(material.id()), "{when}: its own material");
+                let mine: Vec<_> = copies.iter().filter(|copy| copy.0 == mesh).collect();
+                assert_eq!(mine.len(), 1, "{when}");
+                assert_eq!(mine[0].1, VisualScope::PEN_CAM_PART_MASK, "{when}");
+                assert_eq!(mine[0].2, tank_copy, "{when}: the tank's copies' material");
+            }
+            let looks = world.resource::<Assets<LookMaterial>>();
+            let set = world
+                .resource::<Masks>()
+                .of(camera)
+                .cloned()
+                .expect("the camera's set");
+            assert_eq!(
+                looks.get(&tank_copy).unwrap().params.mode,
+                look::hull_mask(&set).params.mode
+            );
+            tank_copy
+        };
+        let old = check(&mut app, "built");
+
+        let image = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(Image::new_target_texture(
+                128,
+                64,
+                TextureFormat::Rgba8UnormSrgb,
+                None,
+            ));
+        app.world_mut()
+            .entity_mut(camera)
+            .insert(RenderTarget::Image(ImageRenderTarget {
+                handle: image,
+                scale_factor: 1.0,
+            }));
+        run(&mut app, 0.2);
+        let new = check(&mut app, "a new set");
+        assert_ne!(new, old, "the new set's material");
     }
 
     /// A glTF primitive landing under a dressed tank is dressed once the LOD ladder has scanned

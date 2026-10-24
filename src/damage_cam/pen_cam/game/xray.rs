@@ -36,7 +36,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::gltf::{GltfMaterialName, GltfMeshName};
 use bevy::prelude::*;
 use bevy::window::{CursorOptions, PrimaryWindow};
-use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
+use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldInstanceReady};
 
 use super::super::Knobs;
 use super::super::look::{self, Layer, LookMaterial, MaskNeed, MaskSet, Masks};
@@ -44,7 +44,7 @@ use super::super::material::{GlowMaterial, OutlineMaterial};
 use super::super::plan::{BoxPlan, Plan};
 use super::super::stage::{
     BoxTint, ConeVolume, LineSeg, LookCtx, MarkItem, Playing, SHELL_SCENE, component_meshes,
-    mask_copy, spawn_glass,
+    mask_copy, round_copies, spawn_glass,
 };
 use super::super::timeline::CornerKind;
 use super::super::view::{self, Tier};
@@ -91,9 +91,9 @@ pub(super) fn toggle(
     }
 }
 
-/// An entity the x-ray spawned — a mask copy, a record element, the shell — despawned whole on
-/// restore. Never under another: a copy hangs under a dressed mesh, an element under the live
-/// hull or a dressed mesh.
+/// An entity the x-ray spawned — a dressed mesh's mask copy, a record element, the shell —
+/// despawned whole on restore. Never under another: a copy hangs under a dressed mesh, an element
+/// under the live hull or a dressed mesh.
 #[derive(Component, Clone, Copy)]
 pub(super) struct XRayItem;
 
@@ -121,7 +121,8 @@ impl MaskCopy {
     }
 }
 
-/// The x-ray's shell model, the round resting where the record ends.
+/// The x-ray's shell model, the round resting where the record ends. Its meshes' mask copies hang
+/// under them ([`round_landed`]), untagged, and go with it.
 #[derive(Component)]
 pub(super) struct XRayShell;
 
@@ -152,6 +153,12 @@ impl XRayState {
     #[cfg(test)]
     pub(super) fn since(&self) -> Option<f64> {
         self.built.as_ref().map(|built| built.since)
+    }
+
+    /// Draw `shell` as the round's model, in place of the game's.
+    #[cfg(test)]
+    pub(super) fn stand_in_shell(&mut self, shell: Handle<WorldAsset>) {
+        self.shell = Some(shell);
     }
 }
 
@@ -426,6 +433,30 @@ pub(super) fn build(
         ));
     }
     built.plan = Arc::new(plan);
+}
+
+/// The x-ray's round has landed: each of its meshes gets its mask copy against the x-ray's masks
+/// as built. A new mask set rebuilds the x-ray, the round included, so the copies always hold the
+/// current set. A global observer gated to the x-ray's shell, so the shell carries no observer
+/// entity and the x-ray spawns nothing beyond its items and what hangs under them.
+pub(super) fn round_landed(
+    ready: On<WorldInstanceReady>,
+    mut commands: Commands,
+    state: Res<XRayState>,
+    shells: Query<(), With<XRayShell>>,
+    children: Query<&Children>,
+    meshes: Query<&Mesh3d>,
+) {
+    let Some(built) = &state.built else {
+        return;
+    };
+    if !shells.contains(ready.entity) {
+        return;
+    }
+    let round = children
+        .iter_descendants(ready.entity)
+        .filter_map(|entity| Some((entity, meshes.get(entity).ok()?.0.clone())));
+    round_copies(&mut commands, round, &built.mask, ());
 }
 
 /// A new match: the store's keys start over, and so do the records shown. The x-ray as built

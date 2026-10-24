@@ -30,7 +30,7 @@
 //! | `ShadowOnly`       | invisible caster geometry standing in for something expensive       |
 //! | `PenCamStage`      | the pen cam inset's own stage: the struck tank as the record draws it |
 //! | `PenCamHullMask`   | the stage's hull as the glass looks' mask camera draws it           |
-//! | `PenCamPartMask`   | the stage's struck components as the part mask camera draws them    |
+//! | `PenCamPartMask`   | the stage's components and round as the part mask camera draws them |
 //!
 //! `ViewSubjectBody` is deliberately NOT called `Self` or `Local`: the channel means "the body this
 //! camera is riding", which is the right answer for a future spectator or replay camera too, and
@@ -101,7 +101,7 @@ enum Channel {
     PenCamStage,
     /// The stage's hull, drawn into the glass looks' hull mask (distance and normal) alone.
     PenCamHullMask,
-    /// The stage's struck components, drawn into the glass looks' part mask alone.
+    /// The stage's components and round, drawn into the glass looks' part mask alone.
     PenCamPartMask,
 }
 
@@ -226,7 +226,7 @@ impl VisualScope {
         shadow: ShadowRole::Neither,
     };
 
-    /// A copy of a stage component mesh for the part mask camera alone.
+    /// A copy of a stage component's or the round's mesh for the part mask camera alone.
     pub(crate) const PEN_CAM_PART_MASK: Self = Self {
         channel: Some(Channel::PenCamPartMask),
         shadow: ShadowRole::Neither,
@@ -249,7 +249,7 @@ pub(crate) enum CameraProfile {
     KillCamLesson,
     /// The pen cam glass looks' hull mask: the stage hull's copies alone.
     PenCamHullMask,
-    /// The pen cam glass looks' part mask: the stage components' copies alone.
+    /// The pen cam glass looks' part mask: the copies of the stage's components and round alone.
     PenCamPartMask,
 }
 

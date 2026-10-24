@@ -179,7 +179,7 @@ pub type SliceMaterial = ExtendedMaterial<StandardMaterial, SliceCut>;
 /// The slice's half of [`SliceMaterial`]. Bindings start at 100, bevy's convention for a material
 /// extension. A body mesh's (`params.params.w = 1`) reads its viewer's part mask
 /// ([`super::look::MaskSet`]) and is discarded on the cut's kept side wherever the mask holds a
-/// component: the slice's share of the draw order ([`super::look`]).
+/// scene surface, a component or the round: the slice's share of the draw order ([`super::look`]).
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 pub struct SliceCut {
     #[uniform(100)]

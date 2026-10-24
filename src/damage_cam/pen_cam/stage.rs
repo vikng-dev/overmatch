@@ -25,9 +25,10 @@ use std::collections::HashMap;
 
 use bevy::camera::ScalingMode;
 use bevy::camera::{Hdr, RenderTarget};
+use bevy::ecs::system::SystemParam;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
-use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
+use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldInstanceReady};
 
 use super::field;
 use super::look::{self, FieldPrint, Layer, LookMaterial, MaskSet, Masks};
@@ -175,7 +176,8 @@ pub(super) struct StageKey {
 #[derive(Resource, Default)]
 pub struct Stage {
     key: Option<StageKey>,
-    /// Whether the built stage holds materials made before a change they depend on (the masks).
+    /// Whether the built stage predates a change it depends on: the masks its materials are made
+    /// against, or the round's meshes landing ([`round_landed`]).
     stale: bool,
     /// The slice plane: unit normal toward the eye, and a point on it.
     plane: Option<(Vec3, Vec3)>,
@@ -314,21 +316,47 @@ pub fn spawn_inset(
     }
     let shell: Handle<WorldAsset> =
         asset_server.load(GltfAssetLabel::Scene(0).from_asset(SHELL_SCENE));
-    commands.spawn((
-        WorldAssetRoot(shell),
-        Transform::IDENTITY,
-        Visibility::Hidden,
-        VisualScope::PEN_CAM_STAGE,
-        StageShell,
-        CornerRig,
-    ));
+    commands
+        .spawn((
+            WorldAssetRoot(shell),
+            Transform::IDENTITY,
+            Visibility::Hidden,
+            VisualScope::PEN_CAM_STAGE,
+            StageShell,
+            CornerRig,
+        ))
+        .observe(round_landed);
+}
+
+/// The round's meshes have landed: the stage is built again, so they get their mask copies.
+fn round_landed(_ready: On<WorldInstanceReady>, mut stage: ResMut<Stage>) {
+    stage.invalidate();
+}
+
+/// The round's model on the stage, for [`rebuild`] to copy into the part mask.
+#[derive(SystemParam)]
+pub struct StageRound<'w, 's> {
+    shells: Query<'w, 's, Entity, With<StageShell>>,
+    children: Query<'w, 's, &'static Children>,
+    /// Not the copies a rebuild despawns, which hang under the round's meshes.
+    meshes: Query<'w, 's, &'static Mesh3d, Without<StageItem>>,
+}
+
+impl StageRound<'_, '_> {
+    /// Each of the round's meshes, with its mesh.
+    fn meshes(&self) -> impl Iterator<Item = (Entity, Handle<Mesh>)> + '_ {
+        self.shells
+            .iter()
+            .flat_map(|shell| self.children.iter_descendants(shell))
+            .filter_map(|entity| Some((entity, self.meshes.get(entity).ok()?.0.clone())))
+    }
 }
 
 /// Rebuild the stage when the corner's record or frame changes, its look against the mask set of
 /// the camera drawing it: the inset's in the corner, the main camera's in the kill cam's lesson.
 #[expect(
     clippy::too_many_arguments,
-    reason = "rebuilds the stage from the corner, exhibits, view and the viewer's masks into the mesh store and four material stores"
+    reason = "rebuilds the stage from the corner, exhibits, view, round and the viewer's masks into the mesh store and four material stores"
 )]
 pub fn rebuild(
     mut commands: Commands,
@@ -338,6 +366,7 @@ pub fn rebuild(
     items: Query<Entity, With<StageItem>>,
     view: Res<StageView>,
     tank: Query<(Entity, &ViewMesh, &Mesh3d), Without<Proxy>>,
+    round: StageRound,
     main: Query<Entity, With<WorldViewer>>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut glows: ResMut<Assets<GlowMaterial>>,
@@ -466,6 +495,9 @@ pub fn rebuild(
             }
         }
     }
+    if look::body_behind(kind) {
+        round_copies(&mut commands, round.meshes(), &hull_mask, StageItem);
+    }
 
     let components = component_meshes(
         plan,
@@ -491,9 +523,9 @@ pub fn rebuild(
     );
 }
 
-/// A copy of the mesh `mesh` for the mask camera of `layer` alone (the body's the hull mask, a
-/// component's the part mask), drawn with `material` (the masks' [`look::hull_mask`]), at its
-/// source's own pose: spawned as the source's child.
+/// A copy of the mesh `mesh` for the mask camera of `layer` alone (the body's the hull mask, the
+/// scene's the part mask), drawn with `material` (the masks' [`look::hull_mask`]), at its source's
+/// own pose: spawned as the source's child.
 pub(super) fn mask_copy(
     mesh: Handle<Mesh>,
     material: Handle<LookMaterial>,
@@ -508,6 +540,25 @@ pub(super) fn mask_copy(
             Layer::Scene => VisualScope::PEN_CAM_PART_MASK,
         },
     )
+}
+
+/// The round's mask copies, one under each of its meshes (`meshes`, each with its mesh), on
+/// [`Layer::ROUND`]'s side, each carrying `tag`. `material` is the viewer's masks' material
+/// uncut: the round is drawn whole in every frame, the slice's included. A copy takes its mesh's
+/// pose and visibility, so a hidden round bounds no field.
+pub(super) fn round_copies(
+    commands: &mut Commands,
+    meshes: impl IntoIterator<Item = (Entity, Handle<Mesh>)>,
+    material: &Handle<LookMaterial>,
+    tag: impl Bundle + Clone,
+) {
+    for (entity, mesh) in meshes {
+        commands.spawn((
+            mask_copy(mesh, material.clone(), Layer::ROUND),
+            tag.clone(),
+            ChildOf(entity),
+        ));
+    }
 }
 
 /// What drawing a record in the base look needs.
@@ -2533,6 +2584,147 @@ mod tests {
         assert!(
             checked.iter().all(|n| *n > 0) && outlined > 0,
             "{checked:?}"
+        );
+    }
+
+    /// A stand-in for the round's model beside `app`'s stage, as a glTF instance has it: two
+    /// meshes down a node chain under the shell, each in its own standard material, and the stage
+    /// built again. Fixture cuboids: the order reads that a mesh is the round's, never its shape.
+    /// Returns each mesh with its material.
+    fn with_round(app: &mut App) -> Vec<(Entity, Handle<StandardMaterial>)> {
+        let world = app.world_mut();
+        let cuboid = world
+            .resource_mut::<Assets<Mesh>>()
+            .add(Cuboid::new(0.1, 0.1, 0.3));
+        let shell = world
+            .spawn((Transform::IDENTITY, Visibility::Inherited, StageShell))
+            .id();
+        let mut parent = world.spawn((Transform::IDENTITY, ChildOf(shell))).id();
+        let mut round = Vec::new();
+        for z in [0.0, 0.2] {
+            let material = world
+                .resource_mut::<Assets<StandardMaterial>>()
+                .add(StandardMaterial::default());
+            parent = world
+                .spawn((
+                    Mesh3d(cuboid.clone()),
+                    MeshMaterial3d(material.clone()),
+                    Transform::from_xyz(0.0, 0.0, z),
+                    ChildOf(parent),
+                ))
+                .id();
+            round.push((parent, material));
+        }
+        world.resource_mut::<Stage>().invalidate();
+        app.update();
+        round
+    }
+
+    /// The round's model is on the scene side of the draw order in every frame that draws the body
+    /// behind, as the real [`rebuild`] dresses it, built twice: in the corner's glass, the
+    /// victim's, the kill cam's lesson on the world and the slice, each of its meshes keeps its own
+    /// material and carries exactly one mask copy of its own mesh, in the part mask, drawn with its
+    /// viewer's masks' material uncut, the slice's included, where the round is drawn whole. The
+    /// outside frames copy it into no mask. The corner, the lesson and the slice rely on it:
+    /// without the copy a field behind the round draws over it and the body's glass covers it, a
+    /// copy in the hull mask bounds no field, a cut copy leaves the round's near half unbounded,
+    /// and a rebuild that copies the copies leaves strays in the part mask.
+    #[test]
+    fn the_round_is_on_the_scene_side() {
+        use super::super::Surface;
+        let library = Library::load();
+        let asset = TankAsset::load(&library.vehicle).unwrap();
+        let index = library
+            .records
+            .iter()
+            .position(|record| !record.plan.cones.is_empty())
+            .expect("a record with a spall cone");
+        for (kind, surface) in [
+            (CornerKind::Glass, Surface::Corner),
+            (CornerKind::Victim, Surface::Corner),
+            (CornerKind::Glass, Surface::World),
+            (CornerKind::Slice, Surface::Corner),
+            (CornerKind::Damaged, Surface::Corner),
+            (CornerKind::Ricochet, Surface::Corner),
+        ] {
+            let (mut app, _) = staged_on(&library, &asset, index, kind, Vec3::X, surface);
+            let round = with_round(&mut app);
+            app.world_mut().resource_mut::<Stage>().invalidate();
+            app.update();
+            let world = app.world_mut();
+            let at = format!("{kind:?} {surface:?}");
+            let cuboid = world.get::<Mesh3d>(round[0].0).unwrap().0.clone();
+            let copied = world
+                .query_filtered::<&Mesh3d, With<MeshMaterial3d<LookMaterial>>>()
+                .iter(world)
+                .filter(|mesh| mesh.0 == cuboid)
+                .count();
+            let behind = look::body_behind(kind);
+            assert_eq!(copied, if behind { round.len() } else { 0 }, "{at}");
+            let uncut = look::hull_mask(&world.resource::<Stage>().masks);
+            let looks = world.resource::<Assets<LookMaterial>>();
+            for (mesh, material) in &round {
+                let own = world.get::<MeshMaterial3d<StandardMaterial>>(*mesh);
+                assert_eq!(own.map(|m| &m.0), Some(material), "{at}: its own material");
+                let copies = mask_copies(world, *mesh);
+                if !behind {
+                    assert!(copies.is_empty(), "{at}");
+                    continue;
+                }
+                assert_eq!(copies.len(), 1, "{at}");
+                assert_eq!(copies[0].0, VisualScope::PEN_CAM_PART_MASK, "{at}");
+                let copy = looks.get(&copies[0].1).unwrap();
+                assert_eq!(copy.params.mode, uncut.params.mode, "{at}: uncut");
+                assert_eq!(copy.hull_mask, uncut.hull_mask, "{at}");
+                assert_eq!(copy.part_mask, uncut.part_mask, "{at}");
+            }
+        }
+    }
+
+    /// The round's model lands after the stage is built, a glTF scene instancing late: the real
+    /// [`spawn_inset`]'s round, instanced by the real spawner, marks the stage for a rebuild, so
+    /// its meshes get their mask copies. The corner and the lesson rely on it: a round landing
+    /// after its record went on show would bound no field until the record or frame changed.
+    #[test]
+    fn the_round_landing_rebuilds_the_stage() {
+        use bevy::world_serialization::WorldSerializationPlugin;
+        let mut app = App::new();
+        app.add_plugins((
+            TaskPoolPlugin::default(),
+            AssetPlugin::default(),
+            WorldSerializationPlugin,
+        ))
+        .init_asset::<Image>()
+        .init_resource::<Stage>()
+        .add_systems(Startup, spawn);
+        app.update();
+        let world = app.world_mut();
+        let shell = world
+            .query_filtered::<Entity, With<StageShell>>()
+            .single(world)
+            .expect("the inset's round");
+        let mut model = World::new();
+        model.spawn(Transform::IDENTITY);
+        let model = world
+            .resource_mut::<Assets<WorldAsset>>()
+            .add(WorldAsset::new(model));
+        world.entity_mut(shell).insert(WorldAssetRoot(model));
+        world.resource_mut::<Stage>().stale = false;
+        let mut frames = 0;
+        while !app.world().resource::<Stage>().stale && frames < 8 {
+            app.update();
+            frames += 1;
+        }
+        assert!(
+            app.world().resource::<Stage>().stale,
+            "after {frames} frames"
+        );
+        let world = app.world();
+        assert!(
+            world
+                .get::<Children>(shell)
+                .is_some_and(|children| !children.is_empty()),
+            "the model is instanced under the round"
         );
     }
 

@@ -341,14 +341,14 @@ calibration stays provisional until the scenarios re-recorded under the ball are
 
 **Draw order.** Every x-ray view that draws the tank's body (the corner's glass frames, the kill
 cam's lesson, the victim's x-ray, the slice) draws the body, the main armour, external armour and
-detail, behind everything else. The scene, the components with their state fills and outlines and
-the fields' volumes, is ordered by depth among itself: a component in front of a field hides it, a
-field in front of a component blends over it. Each layer is one surface deep. Every depth the
+detail, behind everything else. The scene, the components with their state fills and outlines, the
+round's own model and the fields' volumes, is ordered by depth among itself: a component or the
+round in front of a field hides it, a field in front of either blends over it. The round keeps its
+own materials and is drawn whole, in the slice too. Each layer is one surface deep. Every depth the
 order compares is the eye depth, one convention in both projections: the distance from the eye in
 perspective, the distance along the camera's forward in orthographic. The outside view (a damaged
-tank seen whole) keeps the body in front and the volume unbounded. The trail, the rings and the
-shell model are outside the order. Mechanism and entry points: `src/damage_cam/pen_cam/look.rs`,
-module doc.
+tank seen whole) keeps the body in front and the volume unbounded. The trail and the rings are
+outside the order. Mechanism and entry points: `src/damage_cam/pen_cam/look.rs`, module doc.
 
 **Data.** The axis rule, `N` and the passage live in `assets/ballistics/spall_cone.ron`, parsed
 and validated while the app is built (ADR-0014: built from data, synchronously). A cone's ratio is

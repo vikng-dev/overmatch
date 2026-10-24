@@ -4,9 +4,10 @@
 // it, 1 removes all of it). A back face — the inside of a closed armour volume, seen through the cut
 // — is the flat cut colour under a 45° section hatch.
 //
-// The body (`params.w = 1`) draws behind the components (`look.rs`, module doc): a body fragment on
-// the plane's kept side is discarded wherever the part mask (`part_mask`, a: the eye depth of the
-// pixel's nearest component's kept side, 0 where none) holds a component.
+// The body (`params.w = 1`) draws behind the scene (`look.rs`, module doc): a body fragment on the
+// plane's kept side is discarded wherever the part mask (`part_mask`, a: the eye depth of the
+// pixel's nearest scene surface, a component's kept side or the round whole, 0 where none) holds
+// one.
 
 #import bevy_pbr::{
     forward_io::{VertexOutput, FragmentOutput},
@@ -27,8 +28,8 @@ struct SliceParams {
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> slice: SliceParams;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var part_mask: texture_2d<f32>;
 
-// Whether the part mask holds a component at the fragment at framebuffer position `frag`.
-fn behind_a_component(frag: vec2<f32>) -> bool {
+// Whether the part mask holds a scene surface at the fragment at framebuffer position `frag`.
+fn behind_the_scene(frag: vec2<f32>) -> bool {
     let size = vec2<i32>(textureDimensions(part_mask));
     let p = clamp(vec2<i32>(frag - view.viewport.xy), vec2(0), size - 1);
     return textureLoad(part_mask, p, 0).a > 0.0;
@@ -51,7 +52,7 @@ fn fragment(
     if eye_side && bayer(in.position.xy) < slice.params.x {
         discard;
     }
-    if !eye_side && slice.params.w > 0.5 && behind_a_component(in.position.xy) {
+    if !eye_side && slice.params.w > 0.5 && behind_the_scene(in.position.xy) {
         discard;
     }
     var pbr_input = pbr_input_from_standard_material(in, is_front);
