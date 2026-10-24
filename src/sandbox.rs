@@ -63,6 +63,17 @@ const RANGE_TARGET: CombatantId = CombatantId(2);
 /// playback.
 const RESPAWN_DELAY_S: f64 = 3.0;
 
+/// The egui control panel's width, logical pixels (egui points at bevy_egui's default zoom): the
+/// panel is fixed-width on the window's left edge. No panel is compiled without `dev_ui`.
+#[cfg(feature = "dev_ui")]
+const PANEL_WIDTH: f32 = 300.0;
+#[cfg(not(feature = "dev_ui"))]
+const PANEL_WIDTH: f32 = 0.0;
+
+/// Where the view's left-anchored UI starts, logical pixels: the legend, the shared status card
+/// and the crew bar, clear of the panel ([`clear_the_panel`]).
+const UI_LEFT: f32 = PANEL_WIDTH + 10.0;
+
 /// The round the range fires: an index into the [`RangeGun`]'s rounds (E/Q, or the panel), and an
 /// optional muzzle-speed override, m/s, that stands in for range; `None` fires the round at its own
 /// speed. Every other property of the shot is the round's data. `Copy + PartialEq` for the panel's
@@ -446,7 +457,10 @@ pub fn plugin(app: &mut App) {
             update_shell_labels,
         ),
     )
-    .add_systems(Update, (respawn_target, update_round_label));
+    .add_systems(
+        Update,
+        (respawn_target, update_round_label, clear_the_panel),
+    );
 
     // The egui control panel — the sandbox's whole non-camera control surface (Layers / Shot / Time /
     // Telemetry / Scene). Behind `dev_ui` so `bevy_egui` is compiled ONLY here (the `armor_sandbox`
@@ -1308,10 +1322,11 @@ fn update_round_label(
     }
 }
 
-/// The slim keybindings legend (the direct-manipulation keys that survive alongside the egui panel),
-/// the [`RoundLabel`] bottom right (clear of the pen cam corner and the crew row), and a small pool
-/// of floating shell labels. Layer / shot / time / scene controls, and the time + shell-count
-/// readouts, live in the panel's Layers / Shot / Time / Telemetry / Scene sections.
+/// The slim keybindings legend (the direct-manipulation keys that survive alongside the egui panel)
+/// bottom left above the crew bar, the [`RoundLabel`] bottom right, and a small pool of floating
+/// shell labels; the top of the view stays to the status card (left) and the pen cam corner
+/// (right). Layer / shot / time / scene controls, and the time + shell-count readouts, live in the
+/// panel's Layers / Shot / Time / Telemetry / Scene sections.
 fn spawn_hud(mut commands: Commands, fonts: Res<crate::ui_font::UiFonts>) {
     commands.spawn((
         Text::new(
@@ -1328,9 +1343,9 @@ fn spawn_hud(mut commands: Commands, fonts: Res<crate::ui_font::UiFonts>) {
         TextColor(Color::srgb(0.85, 0.87, 0.95)),
         Node {
             position_type: PositionType::Absolute,
-            top: Val::Px(8.0),
-            // Clear of the left panel (default width ~300 px).
-            left: Val::Px(330.0),
+            // Above the crew bar: its 10 px inset and one line of 15 px text, with a gap (DERIVED).
+            bottom: Val::Px(36.0),
+            left: Val::Px(UI_LEFT),
             ..default()
         },
     ));
@@ -1389,6 +1404,16 @@ fn spawn_hud(mut commands: Commands, fonts: Res<crate::ui_font::UiFonts>) {
         ));
     }
     // The component-HP and aggregate tank-status label pools live in the shared `hud` module.
+}
+
+/// Move the shared crew UI's left-anchored nodes, the status card top left and the crew bar bottom
+/// left, to [`UI_LEFT`] as `crew_ui` spawns them, so the panel covers neither.
+fn clear_the_panel(
+    mut nodes: Query<&mut Node, Or<(Added<crew_ui::StatusPanelText>, Added<crew_ui::CrewBarText>)>>,
+) {
+    for mut node in &mut nodes {
+        node.left = Val::Px(UI_LEFT);
+    }
 }
 
 /// Position each pooled label beside a live shell (reprojected to screen) and write its speed,

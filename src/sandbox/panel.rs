@@ -33,8 +33,8 @@ use crate::damage::{CookedOff, TankKnockedOut};
 use crate::tank::Weapon;
 
 use super::{
-    ClearRequested, LayerView, MeshState, PanelWantsInput, RangeGun, ResetRequested, Respawn,
-    SPEEDS, ShotParams, SpeedIndex, VolumeState,
+    ClearRequested, LayerView, MeshState, PANEL_WIDTH, PanelWantsInput, RangeGun, ResetRequested,
+    Respawn, SPEEDS, ShotParams, SpeedIndex, VolumeState,
 };
 
 pub(super) fn plugin(app: &mut App) {
@@ -118,7 +118,7 @@ fn panel(
 
     egui::Panel::left("armor_sandbox_panel")
         .resizable(false)
-        .default_size(300.0)
+        .default_size(PANEL_WIDTH)
         .show(&mut viewport, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Armor sandbox");

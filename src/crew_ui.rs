@@ -18,11 +18,11 @@ use crate::ui_font::{PANEL_BG, TEXT, UiFonts};
 
 /// The controlled tank's crew bar: one cell per seat, driven by the `1`–`5` swap input.
 #[derive(Component)]
-struct CrewBarText;
+pub(crate) struct CrewBarText;
 
 /// The controlled tank's vitals panel (top-left corner): crew count, capability, and weapon state.
 #[derive(Component)]
-struct StatusPanelText;
+pub(crate) struct StatusPanelText;
 
 /// Crew-bar selection: the seat tapped as the swap *source*, awaiting a target.
 #[derive(Resource, Default)]
