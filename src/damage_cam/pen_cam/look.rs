@@ -2,19 +2,35 @@
 //! components solid in the untouched grey one layer deep among themselves, the struck ones on the
 //! state scale, and each spall field as one translucent volume in the potency colour, with its
 //! footprint on every surface it met. It is the tank rendering of every x-ray view: the corner,
-//! the kill cam's lesson and the x-ray. The colour's law is design doc §5, "Potency colour"
-//! (`.agents/docs/design/armor-penetration-and-damage.md`; [`super::potency`]).
+//! the kill cam's lesson and the x-ray. The colour's law and the draw order are design doc §5,
+//! "Potency colour" (`.agents/docs/design/armor-penetration-and-damage.md`; [`super::potency`]).
 //! [`LookMaterial`] (`pen_cam_look.wgsl`) draws every element; [`hull`], [`component`] and
 //! [`volume`] choose them, and the stage spawns what they return.
 //!
-//! The stacking is cut by two offscreen masks drawn from the viewing camera's own pose, lens and
-//! size before it: the hull mask (each pixel's nearest hull surface: view normal and distance) and
-//! the part mask (each pixel's nearest component surface). A surface draws only where its fragment
-//! is its mask's nearest, and its edges come from that mask. The masks hold the looked-at tank's
-//! mask copies alone, never the battlefield, so over the world the base surface composites by
-//! straight alpha on whatever the viewer drew behind it, under the world's own depth. Each viewer
-//! that draws the look has its own set ([`Masks`]), and every material of a look is built on the
-//! set of the viewer that draws it.
+//! Draw order, in every frame that draws the body behind ([`body_behind`]: the glass frames and
+//! the slice): each tank mesh is on one layer by its tier ([`Layer::of`]). The body draws behind
+//! everything else: a body fragment is discarded wherever the part mask holds a component, and
+//! every volume is drawn after it and over it, writing no depth. The scene (the components, their
+//! state fills and outlines, and the fields' volumes) is ordered by depth among itself: a
+//! component is opaque and depth-tested, and a volume's march ends at its pixel's nearest
+//! component in the part mask, so a component in front of a field hides it and a field in front
+//! of a component blends over it. A volume tests no other depth, the world's included. The slice
+//! keeps the tank's own materials with the same rule (`super::material::SliceMaterial`): a body
+//! fragment on the cut's kept side is discarded where the part mask holds a component, and the
+//! part mask holds the components' kept side alone. The trail, the rings and the shell model are
+//! outside the order: drawn and depth-tested as their own materials are.
+//!
+//! The masks: two offscreen images drawn from the viewing camera's own pose, lens and size before
+//! it: the hull mask (each pixel's nearest body surface) and the part mask (each pixel's nearest
+//! component surface), each a view normal (rgb, 0..1) and an eye depth (a, m; 0 where nothing
+//! is). The eye depth has one convention for every reader: the distance from the eye in a
+//! perspective view, the distance along the camera's forward from its plane in an orthographic
+//! one. The masks store it, and the nearest-surface tests and the volume's march compare against
+//! it. A body or component surface draws only where its fragment is its own mask's nearest, and
+//! its edges come from that mask. The masks hold the looked-at tank's mask copies alone, never
+//! the battlefield, so over the world the body composites by straight alpha on whatever the viewer
+//! drew behind it, under the world's own depth. Each viewer that draws the look has its own set
+//! ([`Masks`]), and every material of a look is built on the set of the viewer that draws it.
 //!
 //! Tiers come from the tank's data alone ([`Tier`]): main armour, external armour, component and
 //! detail, by the substance each mesh wears and the tank file's volume entries.
@@ -49,8 +65,9 @@ const VOLUME_DEPTH_SHARE: f32 = 0.2;
 /// steps; `pen_cam_look.wgsl` declares the same count.
 const VOLUME_STEPS: usize = 16;
 /// A volume sorts this far (m) nearer the eye than its mesh's centre, so it draws after every
-/// other translucent surface, the glass included, and its colour reads unwashed by them.
-const VOLUME_SORT_BIAS: f32 = 1.0e4;
+/// other translucent surface, the glass and the outlines included
+/// ([`super::material::OUTLINE_SORT_BIAS`]), and its colour reads unwashed by them.
+pub const VOLUME_SORT_BIAS: f32 = 1.0e4;
 /// A struck component's red outline (physical px, an inverted hull), so a sliver of fill still
 /// reads as struck; the light's share of its shading; its fill line's width (px); the dead hatch's
 /// period (px) and the share of it in red.
@@ -142,7 +159,6 @@ impl Default for LookParams {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct LookKey {
     bias: bool,
-    unoccluded: bool,
     volume: bool,
 }
 
@@ -150,9 +166,17 @@ impl From<&LookMaterial> for LookKey {
     fn from(material: &LookMaterial) -> Self {
         Self {
             bias: material.bias,
-            unoccluded: material.unoccluded,
             volume: material.is_volume(),
         }
+    }
+}
+
+impl LookKey {
+    /// The depth test and depth write its pipeline takes, `None` where it keeps the pass's own: a
+    /// volume is drawn whatever stands in front and writes no depth, its march bounded by the part
+    /// mask instead.
+    fn depth(self) -> Option<(CompareFunction, bool)> {
+        self.volume.then_some((CompareFunction::Always, false))
     }
 }
 
@@ -173,8 +197,6 @@ pub struct LookMaterial {
     pub blend: Blend,
     /// The depth bias a copy of a mesh needs to win the tie with the mesh it covers.
     pub bias: bool,
-    /// Drawn whatever stands in front, writing no depth.
-    pub unoccluded: bool,
 }
 
 impl LookMaterial {
@@ -191,7 +213,6 @@ impl LookMaterial {
             part_mask: Some(masks.part.clone()),
             blend,
             bias: false,
-            unoccluded: false,
         }
     }
 
@@ -296,9 +317,9 @@ impl Material for LookMaterial {
                 depth.bias.constant = 8;
                 depth.bias.slope_scale = 1.0;
             }
-            if key.unoccluded {
-                depth.depth_compare = Some(CompareFunction::Always);
-                depth.depth_write_enabled = Some(false);
+            if let Some((compare, write)) = key.depth() {
+                depth.depth_compare = Some(compare);
+                depth.depth_write_enabled = Some(write);
             }
         }
         Ok(())
@@ -306,17 +327,18 @@ impl Material for LookMaterial {
 }
 
 /// The two mask images one viewer's base look is drawn against. Without a set the handles are
-/// `Handle::default()`, the id bevy keeps its shared white image at: a material built on that set
-/// draws against no mask.
+/// `Handle::default()`, the id bevy keeps its shared white image at, whose every pixel reads as a
+/// surface 1 m from the eye: a material built on that set draws against no real mask, and a frame
+/// that draws the body behind is built again once its viewer's set exists ([`own`]).
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct MaskSet {
     pub hull: Handle<Image>,
     pub part: Handle<Image>,
 }
 
-/// The mask sets, one per viewer whose frame draws the base look's hull this frame: the corner's
+/// The mask sets, one per viewer whose frame draws the body behind this frame: the corner's
 /// inset camera or, for the kill cam's lesson, the main camera ([`Corner::showing`],
-/// [`needs_masks`]); and the x-ray's camera, stated by that presentation ([`MaskNeed`]). The
+/// [`body_behind`]); and the x-ray's camera, stated by that presentation ([`MaskNeed`]). The
 /// corner and the x-ray show at once, each against its own set; the lesson and the x-ray never
 /// do (a kill run suspends the x-ray). Every mask camera names its viewer ([`MaskCamera`]);
 /// [`own`] makes and unmakes each set, and nothing else despawns its cameras.
@@ -361,7 +383,7 @@ impl Masks {
     }
 }
 
-/// A viewer whose frame draws the base look's hull outside the corner this frame — the x-ray's
+/// A viewer whose frame draws the body behind outside the corner this frame — the x-ray's
 /// camera — stated by that presentation before [`own`] runs, which reads it beside
 /// [`Corner`].
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
@@ -373,9 +395,14 @@ pub(super) struct MaskCamera {
     pub(super) viewer: Entity,
 }
 
-/// Whether frame `kind` draws the base look's hull, the one element that reads the masks.
-fn needs_masks(kind: CornerKind) -> bool {
-    matches!(kind, CornerKind::Glass | CornerKind::Victim)
+/// Whether frame `kind` draws the tank's body behind its components and fields, and so reads the
+/// masks: the glass frames and the slice. The outside views draw the tank as built, the body in
+/// front.
+pub fn body_behind(kind: CornerKind) -> bool {
+    matches!(
+        kind,
+        CornerKind::Glass | CornerKind::Victim | CornerKind::Slice
+    )
 }
 
 fn mask_image(images: &mut Assets<Image>, size: UVec2) -> Handle<Image> {
@@ -413,7 +440,7 @@ pub fn own(
 ) {
     let corners = corner
         .showing
-        .filter(|showing| needs_masks(showing.kind))
+        .filter(|showing| body_behind(showing.kind))
         .and_then(|showing| match showing.surface {
             Surface::Corner => inset.single().ok(),
             Surface::World => main.single().ok(),
@@ -677,35 +704,44 @@ pub fn set_footprints(
     }
 }
 
-/// How a hull mesh is drawn in the base look: its material and the mask that holds it.
+/// How a tank mesh is drawn in the base look: its material and its layer.
 pub struct HullDraw {
     pub material: LookMaterial,
-    pub mask: MaskLayer,
+    pub layer: Layer,
 }
 
-/// The offscreen mask a hull mesh is drawn into, for the nearest-surface test of its own layer.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MaskLayer {
-    Hull,
-    /// The part mask: every component mesh.
-    Part,
+/// The side of the draw order a tank mesh is on, and so the mask its copy is drawn into.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Layer {
+    /// The body (main armour, external armour, detail): drawn behind every component and field,
+    /// into the hull mask.
+    Body,
+    /// A component: ordered by depth with the other components and the fields, into the part mask.
+    Scene,
 }
 
-/// How a hull mesh of tier `tier` is drawn in the base look.
-pub fn hull(tier: Tier, masks: &MaskSet) -> HullDraw {
-    match tier {
-        Tier::Component => HullDraw {
-            material: component_base(masks),
-            mask: MaskLayer::Part,
-        },
-        _ => HullDraw {
-            material: base(masks),
-            mask: MaskLayer::Hull,
-        },
+impl Layer {
+    /// The layer of a mesh of tier `tier`: the one place a tier is placed in the draw order.
+    pub fn of(tier: Tier) -> Self {
+        match tier {
+            Tier::Component => Self::Scene,
+            Tier::Armour | Tier::External | Tier::Detail => Self::Body,
+        }
     }
 }
 
-/// The base look's one material for every hull part it draws: armour, running gear and detail.
+/// How a tank mesh of tier `tier` is drawn in the base look.
+pub fn hull(tier: Tier, masks: &MaskSet) -> HullDraw {
+    let layer = Layer::of(tier);
+    let material = match layer {
+        Layer::Body => base(masks),
+        Layer::Scene => component_base(masks),
+    };
+    HullDraw { material, layer }
+}
+
+/// The base look's one material for every body mesh: armour, running gear and detail. It is
+/// discarded wherever the part mask holds a component (`mode.z = 0`).
 fn base(masks: &MaskSet) -> LookMaterial {
     let edge = LinearRgba::from(BASE_EDGE);
     let mut material = LookMaterial::new(
@@ -722,8 +758,8 @@ fn base(masks: &MaskSet) -> LookMaterial {
     material
 }
 
-/// The base look's material for every component mesh: the untouched grey, opaque, in the hull's
-/// edge colour, tested against the part mask. A struck component's fill covers it.
+/// The base look's material for every component mesh: the untouched grey, opaque, in the body's
+/// edge colour, tested against the part mask (`mode.z = 1`). A struck component's fill covers it.
 fn component_base(masks: &MaskSet) -> LookMaterial {
     let mut material = base(masks);
     let grey = LinearRgba::from(timeline::STATE_UNTOUCHED);
@@ -792,16 +828,22 @@ pub fn component(b: &BoxPlan, kind: CornerKind, masks: &MaskSet) -> Option<LookM
 /// it, and the pixel takes the mean potency colour of what it crossed ([`super::potency::Ramp`]),
 /// at an opacity that climbs with the length crossed to [`VOLUME_OPACITY`]; its field's lanes are
 /// set each frame ([`LookMaterial::set_volume`]). Straight alpha, sorted after every other
-/// translucent surface. Uncut it is drawn over everything, through the base look's glass; `cut` by
-/// the slice plane (unit normal toward the discarded side, a point on it) it stops at the plane
-/// and is drawn under the tank's own surfaces, which the slice keeps opaque past it.
-pub fn volume(potency: &Potency, masks: &MaskSet, cut: Option<(Vec3, Vec3)>) -> LookMaterial {
+/// translucent surface, drawn whatever stands in front and writing no depth ([`LookKey::depth`]).
+/// In a frame that draws the body behind ([`body_behind`]) the march ends at its pixel's nearest
+/// component in `masks`' part mask (`volume.w = 1`), so a component in front of the field hides
+/// it; in the outside view it is drawn over the tank whole. `cut` by the slice plane (unit normal
+/// toward the discarded side, a point on it) it stops at the plane.
+pub fn volume(
+    potency: &Potency,
+    masks: &MaskSet,
+    kind: CornerKind,
+    cut: Option<(Vec3, Vec3)>,
+) -> LookMaterial {
     let mut m = LookMaterial::new(MODE_VOLUME, LinearRgba::BLACK, 0.0, Blend::Blended, masks);
     m.params.ramp = potency.ramp().lanes();
     m.params.volume.x = VOLUME_OPACITY;
+    m.params.volume.w = body_behind(kind) as u8 as f32;
     m.set_cut(cut);
-    m.unoccluded = cut.is_none();
-    m.bias = cut.is_some();
     m
 }
 
@@ -824,14 +866,20 @@ mod tests {
         assert_eq!(2 * DISC_LANES, DISC_SIDE * DISC_SIDE);
     }
 
-    /// `pen_cam_look.wgsl` declares the look's counts: the disc's side and lanes, the volume's
-    /// march samples, the arrays' lengths and the fields its footprint loops over.
-    /// A count that drifts reads the wrong node, field or ramp anchor without a word, or marches a
-    /// volume short of its far side.
+    /// The look's shader, read from the shipped assets.
+    fn shader() -> String {
+        let path = crate::assets::asset_root().join("shaders/pen_cam_look.wgsl");
+        std::fs::read_to_string(path).unwrap()
+    }
+
+    /// `pen_cam_look.wgsl` declares the look's counts and lanes: the disc's side and lanes, the
+    /// volume's march samples, the arrays' lengths, the fields its footprint loops over, and
+    /// [`LookParams`]' lanes in their order. A count that drifts reads the wrong node, field or
+    /// ramp anchor without a word, or marches a volume short of its far side; a lane added,
+    /// dropped or moved on one side alone reads every lane after it from its neighbour's slot.
     #[test]
     fn the_shader_declares_the_lane_counts() {
-        let path = crate::assets::asset_root().join("shaders/pen_cam_look.wgsl");
-        let shader = std::fs::read_to_string(path).unwrap();
+        let shader = shader();
         for declared in [
             format!("const DISC_SIDE: i32 = {DISC_SIDE};"),
             format!("const DISC_LANES: i32 = {DISC_LANES};"),
@@ -843,6 +891,29 @@ mod tests {
         ] {
             assert!(shader.contains(&declared), "{declared}");
         }
+        let block = shader
+            .split("struct LookParams {")
+            .nth(1)
+            .and_then(|rest| rest.split("\n}").next())
+            .expect("the shader declares LookParams");
+        let wgsl: Vec<&str> = block
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .filter_map(|line| line.split_once(':').map(|(name, _)| name.trim()))
+            .collect();
+        let debug = format!("{:?}", LookParams::default());
+        let rust: Vec<&str> = debug
+            .match_indices(": ")
+            .map(|(at, _)| {
+                let head = &debug[..at];
+                let start = head
+                    .rfind(|c: char| !(c.is_alphanumeric() || c == '_'))
+                    .map_or(0, |i| i + 1);
+                &head[start..]
+            })
+            .collect();
+        assert_eq!(wgsl, rust);
     }
 
     /// Fixture: two nodes, a stage at twice the record's size.
@@ -887,7 +958,7 @@ mod tests {
         }
         assert_eq!(params.ramp, potency.ramp().lanes());
 
-        let mut field = volume(&potency, &masks, None);
+        let mut field = volume(&potency, &masks, CornerKind::Glass, None);
         assert_eq!(field.params.ramp, potency.ramp().lanes());
         field.set_volume(&print, &potency);
         assert_eq!(field.params.disc[..DISC_LANES], params.disc[..DISC_LANES]);
@@ -901,6 +972,60 @@ mod tests {
             let mut want = material.params;
             want.shade.w = 0.25;
             assert_eq!(format!("{:?}", faded.params), format!("{want:?}"));
+        }
+    }
+
+    /// The look draws the body behind the scene: a body surface is discarded wherever the part
+    /// mask holds a component; a volume's pipeline tests no depth and writes none, while every
+    /// other element keeps the pass's own; and in every frame that draws the body behind, the
+    /// volume's march reads its pixel's bound from the part mask, in the eye depth the masks
+    /// store and the march and the nearest-surface test read. In the outside view, whose
+    /// components lie hidden in the tank, the volume is drawn whole. The draw order relies on it: a
+    /// body that tests no part mask washes the components in grey, a volume tested against the
+    /// depth drops the stretch of field in front of a component and vanishes behind the slice's
+    /// body, one without the bound draws over a component in front of it, and a depth read in two
+    /// conventions bounds an orthographic view's field at the wrong place.
+    #[test]
+    fn the_body_draws_behind_the_scene() {
+        let potency = Potency::shipped();
+        let masks = MaskSet::default();
+        for kind in [
+            CornerKind::Glass,
+            CornerKind::Victim,
+            CornerKind::Slice,
+            CornerKind::Damaged,
+        ] {
+            let m = volume(&potency, &masks, kind, None);
+            assert_eq!(
+                LookKey::from(&m).depth(),
+                Some((CompareFunction::Always, false)),
+                "{kind:?}"
+            );
+            let bounded = if body_behind(kind) { 1.0 } else { 0.0 };
+            assert_eq!(m.params.volume.w, bounded, "{kind:?}");
+        }
+        assert!(body_behind(CornerKind::Glass) && body_behind(CornerKind::Slice));
+        assert!(!body_behind(CornerKind::Damaged) && !body_behind(CornerKind::Ricochet));
+        for m in [
+            base(&masks),
+            component_base(&masks),
+            hull_mask(&masks),
+            state(Condition::Dead, &masks),
+        ] {
+            assert_eq!(LookKey::from(&m).depth(), None);
+        }
+        assert_eq!(base(&masks).params.mode.z, 0.0);
+        assert_eq!(component_base(&masks).params.mode.z, 1.0);
+        let shader = shader();
+        for read in [
+            "if mask_at(part_mask, p).a > 0.0 {\n                discard;",
+            "if look.volume.w > 0.5 {\n        let bound = mask_at(part_mask, p).a;",
+            "let t_exit = eye_depth(exit);",
+            "let depth = eye_depth(in.world_position.xyz);",
+            "return vec4(vn * 0.5 + 0.5, max(depth, 1e-4));",
+            "if nearest > 0.0 && depth > nearest * 1.002 + 0.003 {",
+        ] {
+            assert!(shader.contains(read), "{read}");
         }
     }
 

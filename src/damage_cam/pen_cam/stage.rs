@@ -30,7 +30,7 @@ use bevy::prelude::*;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
 use super::field;
-use super::look::{self, FieldPrint, LookMaterial, MaskLayer, MaskSet, Masks};
+use super::look::{self, FieldPrint, Layer, LookMaterial, MaskSet, Masks};
 use super::material::{GlowMaterial, OutlineMaterial, SliceCut, SliceMaterial, SliceParams};
 use super::plan::{BoxPlan, Plan, Reach};
 use super::potency::Potency;
@@ -179,7 +179,9 @@ pub struct Stage {
     stale: bool,
     /// The slice plane: unit normal toward the eye, and a point on it.
     plane: Option<(Vec3, Vec3)>,
-    slices: HashMap<AssetId<StandardMaterial>, Handle<SliceMaterial>>,
+    /// The slice's material for each of the tank's own materials on each layer: a material the
+    /// body and a component share takes one for each.
+    slices: HashMap<(AssetId<StandardMaterial>, Layer), Handle<SliceMaterial>>,
     camera: Option<Entity>,
     /// The hull the built stage is drawn under: its frame is the record's, its up the tank's.
     hull: Option<Entity>,
@@ -392,9 +394,15 @@ pub fn rebuild(
     let plan = &*exhibit.plan;
     let kind = key.kind;
     stage.plane = (kind == CornerKind::Slice).then(|| slice_plane(plan));
-    let mut tier_materials: HashMap<super::view::Tier, (Handle<LookMaterial>, MaskLayer)> =
+    let mut tier_materials: HashMap<super::view::Tier, (Handle<LookMaterial>, Layer)> =
         HashMap::new();
     let hull_mask = looks.add(look::hull_mask(&masks));
+    // The slice's part mask holds each component's kept side alone, as the slice draws it.
+    let cut_mask = stage.plane.map(|plane| {
+        let mut material = look::hull_mask(&masks);
+        material.set_cut(Some(plane));
+        looks.add(material)
+    });
 
     // The tank, dressed for the frame.
     for (entity, mesh, handle) in &tank {
@@ -406,40 +414,52 @@ pub fn rebuild(
             CornerKind::Glass | CornerKind::Victim => {
                 let entry = tier_materials.entry(mesh.tier).or_insert_with(|| {
                     let draw = look::hull(mesh.tier, &masks);
-                    (looks.add(draw.material), draw.mask)
+                    (looks.add(draw.material), draw.layer)
                 });
-                let (material, mask) = (entry.0.clone(), entry.1);
+                let (material, layer) = (entry.0.clone(), entry.1);
                 e.insert((MeshMaterial3d(material), Visibility::Inherited));
                 commands.spawn((
-                    mask_copy(handle.0.clone(), hull_mask.clone(), mask),
+                    mask_copy(handle.0.clone(), hull_mask.clone(), layer),
                     StageItem,
                     ChildOf(entity),
                 ));
             }
             CornerKind::Slice => {
+                let layer = Layer::of(mesh.tier);
                 let (normal, point) = stage.plane.unwrap_or((Vec3::Z, Vec3::ZERO));
                 let params = SliceParams {
                     plane: normal.extend(normal.dot(point)),
                     cut_color: LinearRgba::from(CUT).to_vec4(),
-                    params: Vec4::new(0.0, 8.0, 0.3, 0.0),
+                    params: Vec4::new(0.0, 8.0, 0.3, (layer == Layer::Body) as u8 as f32),
                 };
-                let handle = stage
+                let material = stage
                     .slices
-                    .entry(mesh.original.id())
+                    .entry((mesh.original.id(), layer))
                     .or_insert_with(|| {
                         let mut base = standard.get(&mesh.original).cloned().unwrap_or_default();
                         base.cull_mode = None;
                         base.double_sided = true;
                         slices.add(SliceMaterial {
                             base,
-                            extension: SliceCut { params },
+                            extension: SliceCut {
+                                params,
+                                part_mask: None,
+                            },
                         })
                     })
                     .clone();
-                if let Some(mut material) = slices.get_mut(&handle) {
-                    material.extension.params = params;
+                if let Some(mut slice) = slices.get_mut(&material) {
+                    slice.extension.params = params;
+                    slice.extension.part_mask = Some(masks.part.clone());
                 }
-                e.insert((MeshMaterial3d(handle), Visibility::Inherited));
+                e.insert((MeshMaterial3d(material), Visibility::Inherited));
+                if let (Layer::Scene, Some(cut_mask)) = (layer, &cut_mask) {
+                    commands.spawn((
+                        mask_copy(handle.0.clone(), cut_mask.clone(), Layer::Scene),
+                        StageItem,
+                        ChildOf(entity),
+                    ));
+                }
             }
             CornerKind::Ricochet | CornerKind::Damaged => {
                 e.insert((MeshMaterial3d(mesh.original.clone()), Visibility::Inherited));
@@ -471,20 +491,21 @@ pub fn rebuild(
     );
 }
 
-/// A copy of the mesh `mesh` for the mask camera of `layer` alone, drawn with `material` (the
-/// masks' [`look::hull_mask`]), at its source's own pose: spawned as the source's child.
+/// A copy of the mesh `mesh` for the mask camera of `layer` alone (the body's the hull mask, a
+/// component's the part mask), drawn with `material` (the masks' [`look::hull_mask`]), at its
+/// source's own pose: spawned as the source's child.
 pub(super) fn mask_copy(
     mesh: Handle<Mesh>,
     material: Handle<LookMaterial>,
-    layer: MaskLayer,
+    layer: Layer,
 ) -> impl Bundle {
     (
         Mesh3d(mesh),
         MeshMaterial3d(material),
         Transform::IDENTITY,
         match layer {
-            MaskLayer::Hull => VisualScope::PEN_CAM_HULL_MASK,
-            MaskLayer::Part => VisualScope::PEN_CAM_PART_MASK,
+            Layer::Body => VisualScope::PEN_CAM_HULL_MASK,
+            Layer::Scene => VisualScope::PEN_CAM_PART_MASK,
         },
     )
 }
@@ -609,7 +630,7 @@ pub fn spawn_glass(
         if matches!(kind, CornerKind::Ricochet) {
             break;
         }
-        let mut material = look::volume(&potency, look_ctx.masks, clip);
+        let mut material = look::volume(&potency, look_ctx.masks, kind, clip);
         material.set_fade(0.0);
         commands.spawn((
             Mesh3d(meshes.add(field::reach_mesh(cone))),
@@ -2244,9 +2265,9 @@ mod tests {
     /// the shipped potency ramp alone — its anchors more blue than red, off the state scale, each
     /// brighter than the one below it — at one opacity across every record, so the colour says the
     /// field's local intensity and nothing else, never a gain of the cone's. Outside the slice a
-    /// volume is uncut and drawn over everything, through the glass; in the slice it is cut by the
-    /// slice plane and drawn under the tank the slice keeps. At least one record throws a cone in
-    /// each.
+    /// volume is uncut; in the slice it is cut by the slice plane. Where its frame draws the body
+    /// behind, it is bounded by its viewer's part mask ([`the_x_ray_draws_the_body_behind`]). At
+    /// least one record throws a cone in each.
     #[test]
     fn the_field_is_one_volume_on_one_cool_ramp() {
         let library = Library::load();
@@ -2305,13 +2326,11 @@ mod tests {
                         Some((normal, point)) => {
                             assert_eq!(m.params.mode.y, 1.0, "{}", record.stem);
                             assert_eq!(m.params.plane, normal.extend(normal.dot(point)));
-                            assert!(!m.unoccluded && m.bias, "{}", record.stem);
                         }
-                        None => {
-                            assert_eq!(m.params.mode.y, 0.0, "{}", record.stem);
-                            assert!(m.unoccluded, "{}", record.stem);
-                        }
+                        None => assert_eq!(m.params.mode.y, 0.0, "{}", record.stem),
                     }
+                    let bounded = look::body_behind(kind) as u8 as f32;
+                    assert_eq!(m.params.volume.w, bounded, "{}", record.stem);
                     opacities.push(m.params.volume.x);
                     if slice {
                         sliced += 1;
@@ -2328,6 +2347,192 @@ mod tests {
         assert!(
             opacities.iter().all(|o| *o == opacities[0]),
             "a volume's opacity varies across the records: {opacities:?}"
+        );
+    }
+
+    /// One body mesh per body tier beside `app`'s staged components, all wearing the components'
+    /// own material, and the stage built again over them. Fixture cubes: the draw order reads a
+    /// mesh's tier, never its shape.
+    fn with_body(app: &mut App) -> Vec<Entity> {
+        use super::super::view::Tier;
+        let world = app.world_mut();
+        let cube = world
+            .resource_mut::<Assets<Mesh>>()
+            .add(Cuboid::new(1.0, 1.0, 1.0));
+        let body = [Tier::Armour, Tier::External, Tier::Detail]
+            .map(|tier| {
+                world
+                    .spawn((
+                        ViewMesh {
+                            root: ViewRoot::Stage,
+                            names: Vec::new(),
+                            original: Handle::default(),
+                            tier,
+                        },
+                        Mesh3d(cube.clone()),
+                        Transform::IDENTITY,
+                    ))
+                    .id()
+            })
+            .to_vec();
+        world.resource_mut::<Stage>().invalidate();
+        app.update();
+        body
+    }
+
+    /// The mask channels `entity`'s children are copied into, each with its copy's material.
+    fn mask_copies(world: &World, entity: Entity) -> Vec<(VisualScope, Handle<LookMaterial>)> {
+        let masks = [
+            VisualScope::PEN_CAM_HULL_MASK,
+            VisualScope::PEN_CAM_PART_MASK,
+        ];
+        world
+            .get::<Children>(entity)
+            .into_iter()
+            .flat_map(|children| children.iter())
+            .filter_map(|child| {
+                let scope = *world.get::<VisualScope>(child)?;
+                let material = world.get::<MeshMaterial3d<LookMaterial>>(child)?;
+                masks.contains(&scope).then(|| (scope, material.0.clone()))
+            })
+            .collect()
+    }
+
+    /// Every frame that draws the body behind puts each of the tank's meshes on its tier's side of
+    /// the draw order as the real [`rebuild`] dresses it, in the corner's glass, the victim's, the
+    /// kill cam's lesson on the world and the slice: a body mesh (main armour, external armour,
+    /// detail) wears the body's glass, discarded where the part mask holds a component, and is
+    /// copied into the hull mask alone, or in the slice wears the tank's own material, discarded
+    /// likewise on the cut's kept side, and is copied into no mask; a component wears the opaque
+    /// grey tested against the part mask, or in the slice the tank's own material, and is copied
+    /// into the part mask alone, in the slice with the cut. Every volume is bounded by its viewer's
+    /// part mask, and every outline sorts after the body's glass and before the volumes. The x-ray
+    /// relies on it: a body mesh on the scene's side covers the components with glass, a component
+    /// on the body's side bounds no field and hides behind the glass, and a volume without the
+    /// bound draws over a component in front of it.
+    #[test]
+    fn the_x_ray_draws_the_body_behind() {
+        use super::super::Surface;
+        let library = Library::load();
+        let asset = TankAsset::load(&library.vehicle).unwrap();
+        // Records checked, and outlines checked, per frame; the order is per mesh, never per
+        // record, so a few records cover it.
+        let (mut checked, mut outlined) = ([0; 4], 0);
+        for (index, record) in library.records.iter().enumerate() {
+            if record.plan.cones.is_empty() || !record.plan.boxes.iter().any(|b| b.struck()) {
+                continue;
+            }
+            if checked.iter().all(|n| *n >= 3) {
+                break;
+            }
+            for (frame, (kind, surface)) in [
+                (CornerKind::Glass, Surface::Corner),
+                (CornerKind::Victim, Surface::Corner),
+                (CornerKind::Glass, Surface::World),
+                (CornerKind::Slice, Surface::Corner),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let (mut app, placed) = staged_on(&library, &asset, index, kind, Vec3::X, surface);
+                let body = with_body(&mut app);
+                let world = app.world_mut();
+                let (masks, plane) = {
+                    let stage = world.resource::<Stage>();
+                    (stage.masks.clone(), stage.plane)
+                };
+                let at = |what: &str| format!("{} {kind:?} {surface:?}: {what}", record.stem);
+                let looks = world.resource::<Assets<LookMaterial>>();
+                let slices = world.resource::<Assets<SliceMaterial>>();
+                let worn = |entity: Entity| {
+                    world
+                        .get::<MeshMaterial3d<LookMaterial>>(entity)
+                        .and_then(|m| looks.get(&m.0))
+                };
+                let sliced = |entity: Entity| {
+                    world
+                        .get::<MeshMaterial3d<SliceMaterial>>(entity)
+                        .and_then(|m| slices.get(&m.0))
+                };
+                let meshes = body
+                    .iter()
+                    .map(|entity| (*entity, Layer::Body, "body".to_owned()))
+                    .chain(
+                        placed
+                            .iter()
+                            .map(|(entity, name, _)| (*entity, Layer::Scene, name.clone())),
+                    );
+                for (entity, layer, name) in meshes {
+                    let copies = mask_copies(world, entity);
+                    let into = match layer {
+                        Layer::Body => VisualScope::PEN_CAM_HULL_MASK,
+                        Layer::Scene => VisualScope::PEN_CAM_PART_MASK,
+                    };
+                    if kind == CornerKind::Slice {
+                        let slice = sliced(entity).unwrap_or_else(|| panic!("{}", at(&name)));
+                        let behind = (layer == Layer::Body) as u8 as f32;
+                        assert_eq!(slice.extension.params.params.w, behind, "{}", at(&name));
+                        assert_eq!(slice.extension.part_mask.as_ref(), Some(&masks.part));
+                        match layer {
+                            Layer::Body => assert!(copies.is_empty(), "{}", at(&name)),
+                            Layer::Scene => {
+                                assert_eq!(copies.len(), 1, "{}", at(&name));
+                                assert_eq!(copies[0].0, into, "{}", at(&name));
+                                let (normal, point) = plane.unwrap();
+                                let copy = looks.get(&copies[0].1).unwrap();
+                                assert_eq!(copy.params.mode.y, 1.0, "{}", at(&name));
+                                assert_eq!(copy.params.plane, normal.extend(normal.dot(point)));
+                            }
+                        }
+                    } else {
+                        let m = worn(entity).unwrap_or_else(|| panic!("{}", at(&name)));
+                        let (z, blend) = match layer {
+                            Layer::Body => (0.0, Blend::Blended),
+                            Layer::Scene => (1.0, Blend::Opaque),
+                        };
+                        assert!(!m.is_volume(), "{}", at(&name));
+                        assert_eq!((m.params.mode.z, m.blend), (z, blend), "{}", at(&name));
+                        assert_eq!(m.part_mask.as_ref(), Some(&masks.part), "{}", at(&name));
+                        assert_eq!(copies.len(), 1, "{}", at(&name));
+                        assert_eq!(copies[0].0, into, "{}", at(&name));
+                    }
+                }
+                let volumes: Vec<Handle<LookMaterial>> = world
+                    .query_filtered::<&MeshMaterial3d<LookMaterial>, With<ConeVolume>>()
+                    .iter(world)
+                    .map(|m| m.0.clone())
+                    .collect();
+                let looks = world.resource::<Assets<LookMaterial>>();
+                assert!(!volumes.is_empty(), "{}", at("volumes"));
+                for handle in &volumes {
+                    let m = looks.get(handle).unwrap();
+                    assert_eq!(m.params.volume.w, 1.0, "{}", at("volume"));
+                    assert_eq!(m.part_mask.as_ref(), Some(&masks.part), "{}", at("volume"));
+                    assert_eq!(m.depth_bias(), look::VOLUME_SORT_BIAS);
+                }
+                let outlines: Vec<Handle<OutlineMaterial>> = world
+                    .query::<&MeshMaterial3d<OutlineMaterial>>()
+                    .iter(world)
+                    .map(|m| m.0.clone())
+                    .collect();
+                let store = world.resource::<Assets<OutlineMaterial>>();
+                for handle in &outlines {
+                    let outline = store.get(handle).unwrap();
+                    assert_eq!(outline.alpha_mode(), AlphaMode::Blend, "{}", at("outline"));
+                    let bias = outline.depth_bias();
+                    assert!(
+                        bias > 0.0 && bias < look::VOLUME_SORT_BIAS,
+                        "{}",
+                        at("outline")
+                    );
+                }
+                checked[frame] += 1;
+                outlined += outlines.len();
+            }
+        }
+        assert!(
+            checked.iter().all(|n| *n > 0) && outlined > 0,
+            "{checked:?}"
         );
     }
 

@@ -106,9 +106,15 @@ pub struct OutlineParams {
     pub center: Vec4,
 }
 
+/// An outline sorts this far (m) nearer the eye than its mesh's centre: after every surface of the
+/// base look's body, whose glass would otherwise wash the band where it lies outside its
+/// component, and before every volume ([`super::look::VOLUME_SORT_BIAS`]).
+pub const OUTLINE_SORT_BIAS: f32 = 5.0e3;
+
 /// A mesh's silhouette as an inverted hull: the mesh pushed out on screen from its centre by a
 /// fixed pixel width with its front faces culled, so its back faces show only as a band around the
-/// opaque fill the mesh itself wears.
+/// opaque fill the mesh itself wears, which hides the rest of them by depth. Drawn in the blended
+/// pass, writing no depth, sorted by [`OUTLINE_SORT_BIAS`].
 #[derive(Asset, TypePath, AsBindGroup, Debug, Clone)]
 pub struct OutlineMaterial {
     #[uniform(0)]
@@ -141,6 +147,14 @@ impl Material for OutlineMaterial {
         "shaders/pen_cam_outline.wgsl".into()
     }
 
+    fn alpha_mode(&self) -> AlphaMode {
+        AlphaMode::Blend
+    }
+
+    fn depth_bias(&self) -> f32 {
+        OUTLINE_SORT_BIAS
+    }
+
     fn enable_prepass() -> bool {
         false
     }
@@ -163,11 +177,15 @@ impl Material for OutlineMaterial {
 pub type SliceMaterial = ExtendedMaterial<StandardMaterial, SliceCut>;
 
 /// The slice's half of [`SliceMaterial`]. Bindings start at 100, bevy's convention for a material
-/// extension.
+/// extension. A body mesh's (`params.params.w = 1`) reads its viewer's part mask
+/// ([`super::look::MaskSet`]) and is discarded on the cut's kept side wherever the mask holds a
+/// component: the slice's share of the draw order ([`super::look`]).
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 pub struct SliceCut {
     #[uniform(100)]
     pub params: SliceParams,
+    #[texture(101)]
+    pub part_mask: Option<Handle<Image>>,
 }
 
 /// The uniform block `pen_cam_slice.wgsl` reads; its lanes are documented there.

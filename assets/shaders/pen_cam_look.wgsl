@@ -1,13 +1,14 @@
 // The pen cam's corner look (`src/damage_cam/pen_cam/look.rs`, `LookMaterial`): one material, its
 // drawing chosen per instance by `mode.x`.
 //
-//   0 mask        rgb: view-space normal (0..1), a: distance (m) from the eye. Opaque. The hull
-//                 and the part masks are both drawn in it.
-//   2 base        one hueless surface, drawn only where it is its mask's nearest surface (the hull
-//                 mask, or the part mask with `mode.z = 1`): half-Lambert shading with `shade.y` the
-//                 light's share, opacity `color.a` at a grazing angle falling to `shade.x` of it
-//                 face-on (power `shade.z`), and that mask's depth edges in `edge` (rgb, a:
-//                 opacity), under its field footprint. Where the surface is not its mask's
+//   0 mask        rgb: view-space normal (0..1), a: the eye depth (m, `eye_depth`). Opaque. The
+//                 hull and the part masks are both drawn in it.
+//   2 base        one hueless surface, drawn only where it is its mask's nearest surface: a body
+//                 surface (`mode.z = 0`) the hull mask's, and nowhere the part mask holds a
+//                 component; a component (`mode.z = 1`) the part mask's. Half-Lambert shading with
+//                 `shade.y` the light's share, opacity `color.a` at a grazing angle falling to
+//                 `shade.x` of it face-on (power `shade.z`), and that mask's depth edges in `edge`
+//                 (rgb, a: opacity), under its field footprint. Where the surface is not its mask's
 //                 nearest, only the footprint's lines draw.
 //   3 state       a component on the state scale, opaque: below its fill level `color` (red, or
 //                 charcoal under an `edge`-coloured diagonal hatch when `mode.w = 1`, period
@@ -18,16 +19,27 @@
 //                 with `span.z = 0` (no known heights) the fill covers the mesh once the fade is on.
 //                 Its field footprint tints it over the fill.
 //   4 volume      one spall field's volume (`volume`), drawn on the back faces of its reach
-//                 surface, where the eye ray leaves it: the ray is marched back toward the eye in
-//                 steps of `volume.z` (m), at most `VOLUME_STEPS`, while it stays inside the field
-//                 (`sample`: inside the cone, behind the front, within the disc's reach, on the
-//                 cut's kept side), where the ray enters it refined by `VOLUME_REFINE` halvings,
-//                 the eye the end if it lies inside. The pixel takes the length-weighted mean of
-//                 `ramp` at every sample's intensity, at opacity
-//                 `volume.x · (1 − exp(−L / volume.y))` for `L` the length marched inside, times
-//                 the fade. Field 0's lanes alone.
+//                 surface, where the eye ray leaves it, whatever stands in front: the ray is
+//                 marched back toward the eye in steps of `volume.z` (m), at most `VOLUME_STEPS`,
+//                 while it stays inside the field (`sample`: inside the cone, behind the front,
+//                 within the disc's reach, on the cut's kept side), where the ray enters it refined
+//                 by `VOLUME_REFINE` halvings, the eye the end if it lies inside. With
+//                 `volume.w = 1` the pixel's nearest component in the part mask bounds it: the
+//                 stretch behind the component is passed over, and the march takes the rest from
+//                 the component toward the eye, or nothing where the ray's stretch inside lies
+//                 wholly behind it. The pixel takes the length-weighted mean of `ramp` at every
+//                 sample's intensity, at opacity `volume.x · (1 − exp(−L / volume.y))` for `L` the
+//                 length marched inside, times the fade. Field 0's lanes alone.
 //
 // In every mode, `mode.y = 1` discards what lies on `plane`'s normal side (the slice's cut).
+//
+// Draw order (`look.rs`, module doc): the body draws behind the components and the fields, which
+// are ordered by depth among themselves. A body surface is discarded wherever the part mask holds
+// a component, and a volume is drawn after the body and over it; a component is opaque and
+// depth-tested, and a volume's march ends at the nearest component. Every depth read against a
+// mask is the eye depth (`eye_depth`): the distance from the eye in a perspective view, the
+// distance along the camera's forward from its plane in an orthographic one, the masks' own
+// cameras sharing the viewer's pose and lens.
 //
 // The potency colour (`ramp`; design doc §5, "Potency colour") is one function of intensity
 // alone: a monotone cubic in `u = log2(I / T_mid)` through three anchors (`ramp[0..3]`: rgb, and
@@ -57,7 +69,8 @@ struct LookParams {
     field: vec4<f32>,
     // x: the state hatch's period (px); y: its hatched share.
     hatch: vec4<f32>,
-    // x: mode; y: cut by `plane` (1); z: the part mask (base, 1); w: hatch on (state, 1).
+    // x: mode; y: cut by `plane` (1); z: a component, tested against the part mask (base, 1), or
+    // the body (base, 0); w: hatch on (state, 1).
     mode: vec4<f32>,
     // xyz: the fill's up (world, unit); w: the share of the height filled.
     state: vec4<f32>,
@@ -78,7 +91,7 @@ struct LookParams {
     // threshold in w).
     ramp: array<vec4<f32>, 4>,
     // The volume: x its opacity at most, y the length over which it climbs (m), z the march's step
-    // (m).
+    // (m), w bounded by the part mask's nearest component (1).
     volume: vec4<f32>,
     // x: the fields marked.
     fields: vec4<f32>,
@@ -136,6 +149,30 @@ fn vertex(vertex: Vertex) -> LookVertexOutput {
 fn mask_at(tex: texture_2d<f32>, p: vec2<i32>) -> vec4<f32> {
     let size = vec2<i32>(textureDimensions(tex));
     return textureLoad(tex, clamp(p, vec2(0), size - 1), 0);
+}
+
+fn orthographic() -> bool {
+    return view.clip_from_view[3][3] == 1.0;
+}
+
+// The eye depth of world point `p` (m): its distance from the eye in a perspective view, its
+// distance along the camera's forward from the camera's plane in an orthographic one. The masks
+// store it; every test against them reads it.
+fn eye_depth(p: vec3<f32>) -> f32 {
+    if orthographic() {
+        return dot(p - view.world_position, -normalize(view.world_from_view[2].xyz));
+    }
+    return length(p - view.world_position);
+}
+
+// The unit direction of the eye ray through world point `p`, away from the eye: an orthographic
+// view's rays are parallel, along its forward. A point `s` nearer the eye on that ray than `p` is
+// `p - eye_ray(p) * s`, at eye depth `eye_depth(p) - s`.
+fn eye_ray(p: vec3<f32>) -> vec3<f32> {
+    if orthographic() {
+        return -normalize(view.world_from_view[2].xyz);
+    }
+    return normalize(p - view.world_position);
 }
 
 // Field `f`'s disc node `(i, j)`: its reach (m) and emission (HP points per sr).
@@ -266,30 +303,42 @@ fn sample(p: vec3<f32>) -> Sample {
     return Sample(inside, here.y / (r * r));
 }
 
-// Field 0's volume seen through `exit`, a point where the eye ray leaves it: the ray marched back
-// toward the eye, its colour the length-weighted mean of the potency colour along it (the
-// trapezoid rule between samples), its opacity climbing with the length inside.
-fn volume(exit: vec3<f32>, fade: f32) -> vec4<f32> {
-    // The ray's unit direction and the exit's distance along it from the eye; an orthographic
-    // view's rays are parallel, from its camera's plane.
-    var dir = vec3(0.0);
-    var t_exit = 0.0;
-    if view.clip_from_view[3][3] == 1.0 {
-        dir = -normalize(view.world_from_view[2].xyz);
-        t_exit = dot(exit - view.world_position, dir);
-    } else {
-        let d = exit - view.world_position;
-        t_exit = length(d);
-        dir = d / max(t_exit, 1e-6);
+// Field 0's volume seen through `exit`, a point where the eye ray leaves it, at mask pixel `p`:
+// the ray marched back toward the eye from the exit, or from the nearest component where one
+// stands in front of the exit, its colour the length-weighted mean of the potency colour along it
+// (the trapezoid rule between samples), its opacity climbing with the length inside.
+fn volume(exit: vec3<f32>, p: vec2<i32>, fade: f32) -> vec4<f32> {
+    // Depths along the ray are eye depths: `t` lies `t_exit - t` nearer the eye than the exit.
+    let dir = eye_ray(exit);
+    let t_exit = eye_depth(exit);
+    var far = t_exit;
+    if look.volume.w > 0.5 {
+        let bound = mask_at(part_mask, p).a;
+        if bound > 0.0 && t_exit > bound * 1.002 + 0.003 {
+            far = bound;
+        }
     }
     let step = look.volume.z;
-    var last_t = t_exit;
-    var last_rgb = ramp(sample(exit).intensity);
+    var last_t = far;
+    let start = sample(exit - dir * (t_exit - far));
+    // A component in front of the exit with the field's edge between them: the field this exit
+    // closes lies wholly behind it.
+    if far < t_exit && !start.inside {
+        discard;
+    }
+    var last_rgb = ramp(start.intensity);
     var colour = vec3(0.0);
     var inside = 0.0;
     for (var k = 1; k <= VOLUME_STEPS; k = k + 1) {
         let t = max(t_exit - f32(k) * step, 0.0);
         let here = sample(exit - dir * (t_exit - t));
+        if t >= far {
+            // Behind the component: passed over, the ray only held to the field this exit closes.
+            if !here.inside {
+                discard;
+            }
+            continue;
+        }
         if here.inside {
             let rgb = ramp(here.intensity);
             colour = colour + 0.5 * (rgb + last_rgb) * (last_t - t);
@@ -382,13 +431,15 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
     let shading = 1.0 - look.shade.y + look.shade.y * lambert;
     // Where the masks hold this fragment: its position within its own viewport.
     let pix = frag - view.viewport.xy;
+    let depth = eye_depth(in.world_position.xyz);
 
     if look.mode.y > 0.5 && dot(look.plane.xyz, in.world_position.xyz) > look.plane.w {
         discard;
     }
     if m == 0 {
         let vn = normalize((view.view_from_world * vec4(n, 0.0)).xyz);
-        return vec4(vn * 0.5 + 0.5, dist);
+        // Never 0, the empty pixel's depth.
+        return vec4(vn * 0.5 + 0.5, max(depth, 1e-4));
     }
     if m == 2 {
         let p = vec2<i32>(pix);
@@ -398,12 +449,16 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
             nearest = mask_at(part_mask, p).a;
             edge = lines(part_mask, pix);
         } else {
+            // The body is behind every component.
+            if mask_at(part_mask, p).a > 0.0 {
+                discard;
+            }
             nearest = mask_at(hull_mask, p).a;
             edge = lines(hull_mask, pix);
         }
         let mark = footprint(in.world_position.xyz, n, dpx, dpy);
         // Beneath the nearest layer only the footprint's lines draw.
-        if nearest > 0.0 && dist > nearest * 1.002 + 0.003 {
+        if nearest > 0.0 && depth > nearest * 1.002 + 0.003 {
             if mark.line == 0.0 {
                 discard;
             }
@@ -455,7 +510,7 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
         return vec4(rgb, 1.0);
     }
     if m == 4 {
-        return volume(in.world_position.xyz, fade);
+        return volume(in.world_position.xyz, vec2<i32>(pix), fade);
     }
     discard;
     return vec4(0.0);

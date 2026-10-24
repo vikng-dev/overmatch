@@ -39,7 +39,7 @@ use bevy::window::{CursorOptions, PrimaryWindow};
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot};
 
 use super::super::Knobs;
-use super::super::look::{self, LookMaterial, MaskLayer, MaskNeed, MaskSet, Masks};
+use super::super::look::{self, Layer, LookMaterial, MaskNeed, MaskSet, Masks};
 use super::super::material::{GlowMaterial, OutlineMaterial};
 use super::super::plan::{BoxPlan, Plan};
 use super::super::stage::{
@@ -168,7 +168,7 @@ struct Built {
     since: f64,
     plan: Arc<Plan>,
     /// One material per tier the tank's meshes wear, and the layer each is masked in.
-    tiers: HashMap<Tier, (Handle<LookMaterial>, MaskLayer)>,
+    tiers: HashMap<Tier, (Handle<LookMaterial>, Layer)>,
     /// The masks' material, on every mask copy.
     mask: Handle<LookMaterial>,
     /// Meshes were dressed this frame: the record's elements are built again next frame, once
@@ -498,7 +498,7 @@ fn dress(
             .entry(tier)
             .or_insert_with(|| {
                 let draw = look::hull(tier, &built.masks);
-                (looks.add(draw.material), draw.mask)
+                (looks.add(draw.material), draw.layer)
             })
             .clone();
         commands
