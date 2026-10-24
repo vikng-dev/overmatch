@@ -27,9 +27,11 @@
 //                 `volume.w = 1` the pixel's nearest component in the part mask bounds it: the
 //                 stretch behind the component is passed over, and the march takes the rest from
 //                 the component toward the eye, or nothing where the ray's stretch inside lies
-//                 wholly behind it. The pixel takes the length-weighted mean of `ramp` at every
-//                 sample's intensity, at opacity `volume.x · (1 − exp(−L / volume.y))` for `L` the
-//                 length marched inside, times the fade. Field 0's lanes alone.
+//                 wholly behind it. Each sample weighs `weight` of its intensity (the rim), the
+//                 colour and the length alike (`weighed`): the pixel takes the weighted mean of
+//                 `ramp` at every sample's intensity, at opacity `volume.x · (1 − exp(−L_w /
+//                 volume.y))` for `L_w` the weighted length marched inside, times the fade, so the
+//                 volume fades out toward the ramp's dim end. Field 0's lanes alone.
 //
 // In every mode, `mode.y = 1` discards what lies on `plane`'s normal side (the slice's cut).
 //
@@ -89,6 +91,9 @@ struct LookParams {
     // The volume: x its opacity at most, y the length over which it climbs (m), z the march's step
     // (m), w bounded by the part mask's nearest component (1).
     volume: vec4<f32>,
+    // The volume's rim (`weight`): x the `u` at and below which a sample weighs nothing, y the `u`
+    // at and above which it weighs fully.
+    rim: vec4<f32>,
     // x: the fields marked.
     fields: vec4<f32>,
     // Four fields of four lanes: origin (world) and half-angle (rad); unit axis (world) and how far
@@ -255,6 +260,19 @@ fn footprint(p: vec3<f32>, n: vec3<f32>) -> f32 {
     return intensity;
 }
 
+// A march sample's weight at intensity `i` (HP points per m²; the rim, `potency::Rim`):
+// `smoothstep` from `rim.x` to `rim.y` in `u = log2(I / T_mid)`.
+fn weight(i: f32) -> f32 {
+    return smoothstep(look.rim.x, look.rim.y, log2(max(i, 1e-30) / look.ramp[3].w));
+}
+
+// A march sample's share of its volume at intensity `i`: the potency colour times its weight
+// (rgb) and the weight (a), so the colour's mean and the length inside take the same weights.
+fn weighed(i: f32) -> vec4<f32> {
+    let w = weight(i);
+    return vec4(ramp(i) * w, w);
+}
+
 // A point on an eye ray in field 0's volume: whether it lies inside (in the cone, behind the
 // front, within its direction's reach on the disc, on the cut's kept side) and its intensity
 // there (HP points per m²).
@@ -280,8 +298,8 @@ fn sample(p: vec3<f32>) -> Sample {
 
 // Field 0's volume seen through `exit`, a point where the eye ray leaves it, at mask pixel `p`:
 // the ray marched back toward the eye from the exit, or from the nearest component where one
-// stands in front of the exit, its colour the length-weighted mean of the potency colour along it
-// (the trapezoid rule between samples), its opacity climbing with the length inside.
+// stands in front of the exit, its colour the weighted mean of the potency colour along it and its
+// opacity climbing with the weighted length inside, both by the trapezoid rule between samples.
 fn volume(exit: vec3<f32>, p: vec2<i32>, fade: f32) -> vec4<f32> {
     // Depths along the ray are eye depths: `t` lies `t_exit - t` nearer the eye than the exit.
     let dir = eye_ray(exit);
@@ -301,9 +319,9 @@ fn volume(exit: vec3<f32>, p: vec2<i32>, fade: f32) -> vec4<f32> {
     if far < t_exit && !start.inside {
         discard;
     }
-    var last_rgb = ramp(start.intensity);
-    var colour = vec3(0.0);
-    var inside = 0.0;
+    var last = weighed(start.intensity);
+    // rgb: the weighted colour's integral along the ray; a: the weighted length inside (m).
+    var sum = vec4(0.0);
     for (var k = 1; k <= VOLUME_STEPS; k = k + 1) {
         let t = max(t_exit - f32(k) * step, 0.0);
         let here = sample(exit - dir * (t_exit - t));
@@ -315,10 +333,9 @@ fn volume(exit: vec3<f32>, p: vec2<i32>, fade: f32) -> vec4<f32> {
             continue;
         }
         if here.inside {
-            let rgb = ramp(here.intensity);
-            colour = colour + 0.5 * (rgb + last_rgb) * (last_t - t);
-            inside = inside + (last_t - t);
-            last_rgb = rgb;
+            let now = weighed(here.intensity);
+            sum = sum + 0.5 * (now + last) * (last_t - t);
+            last = now;
             last_t = t;
             if t <= 0.0 {
                 break;
@@ -340,16 +357,15 @@ fn volume(exit: vec3<f32>, p: vec2<i32>, fade: f32) -> vec4<f32> {
             }
         }
         let entry = 0.5 * (lo + hi);
-        let near_rgb = select(last_rgb, ramp(hi_intensity), hi_intensity >= 0.0);
-        colour = colour + 0.5 * (near_rgb + last_rgb) * (last_t - entry);
-        inside = inside + (last_t - entry);
+        let near = select(last, weighed(hi_intensity), hi_intensity >= 0.0);
+        sum = sum + 0.5 * (near + last) * (last_t - entry);
         break;
     }
-    if inside <= 0.0 {
+    if sum.a <= 0.0 {
         discard;
     }
-    let a = look.volume.x * (1.0 - exp(-inside / look.volume.y)) * fade;
-    return vec4(colour / inside, clamp(a, 0.0, 1.0));
+    let a = look.volume.x * (1.0 - exp(-sum.a / look.volume.y)) * fade;
+    return vec4(sum.rgb / sum.a, clamp(a, 0.0, 1.0));
 }
 
 // A mask's edge at a pixel: 1 at a depth edge, 0.5 at a normal edge alone, 0 elsewhere.

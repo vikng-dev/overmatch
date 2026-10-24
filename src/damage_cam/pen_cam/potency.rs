@@ -21,6 +21,9 @@ use crate::ballistics::spall_cone;
 /// The ramp's lowest anchor, in octaves of intensity below the mid threshold: an intensity this
 /// far below it or farther takes the deep teal. TUNED.
 const RAMP_DIM_OCTAVES: f32 = 3.0;
+/// The volume's rim ([`Rim`]): a march sample's weight is zero at and below the first `u`, the
+/// ramp's dim end, and full at and above the second, the mid threshold. TUNED.
+const RIM_OCTAVES: (f32, f32) = (-RAMP_DIM_OCTAVES, 0.0);
 
 /// The field's rate and the thresholds, as the shipped data states them.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -58,6 +61,15 @@ impl Potency {
             self.bright,
             [timeline::FIELD_DIM, timeline::FIELD, timeline::FIELD_BRIGHT],
         )
+    }
+
+    /// The volume's rim weight, about the mid threshold.
+    pub fn rim(&self) -> Rim {
+        Rim {
+            mid: self.mid,
+            zero: RIM_OCTAVES.0,
+            full: RIM_OCTAVES.1,
+        }
     }
 }
 
@@ -164,6 +176,43 @@ impl Ramp {
             self.colours[2].extend(self.at[2]),
             self.slope.extend(self.mid),
         ]
+    }
+}
+
+/// A spall field volume's rim: each sample of the march through a volume counts toward its colour
+/// and its opacity alike by a weight of its intensity, `smoothstep(zero, full, u)` in
+/// `u = log2(I / T_mid)`: zero at and below `zero`, full at and above `full`, a cubic between, so
+/// the volume fades out where its intensity falls toward the ramp's dim end instead of ending on
+/// its reach surface. `pen_cam_look.wgsl` (`weight`) evaluates the same curve from [`Rim::lanes`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Rim {
+    /// The mid threshold (HP points per m²), where `u = 0`.
+    mid: f32,
+    /// The `u` at and below which a sample weighs nothing, and the `u` at and above which it
+    /// weighs fully.
+    zero: f32,
+    full: f32,
+}
+
+impl Rim {
+    /// A sample's weight at intensity `intensity` (HP points per m²); zero weighs nothing.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the look's shader weighs the march at runtime (`pen_cam_look.wgsl`, `weight`); this is the curve it mirrors, held by the tests"
+        )
+    )]
+    pub fn weight(&self, intensity: f32) -> f32 {
+        let u = (intensity.max(0.0) / self.mid).log2();
+        let t = ((u - self.zero) / (self.full - self.zero)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    }
+
+    /// The lane `pen_cam_look.wgsl` weighs the march from: `zero` (x) and `full` (y); the mid
+    /// threshold is the ramp's lane.
+    pub fn lanes(&self) -> Vec4 {
+        Vec4::new(self.zero, self.full, 0.0, 0.0)
     }
 }
 
@@ -301,5 +350,50 @@ pub(super) mod tests {
         assert_eq!(lanes[1].w, 0.0);
         assert_eq!(lanes[2].w, (potency.bright / potency.mid).log2());
         assert_eq!(lanes[3].w, potency.mid);
+    }
+
+    /// The rim weighs nothing at and below the ramp's dim end and fully at and above the mid
+    /// threshold, rising smoothly between: over a fine sweep in `u` the weight never falls and no
+    /// step climbs faster than the cubic's steepest slope, `1.5` over the span, and a quarter of
+    /// the way it is the cubic's `5/32` (DERIVED, `t²(3 − 2t)` at `t = 1/4`, as WGSL's
+    /// `smoothstep` is). The volume's core, at mid and above, keeps its whole opacity, and its
+    /// outer stretch fades to nothing exactly where the colour reaches the deep teal; a weight
+    /// anchored apart from the ramp, a step, a weight that falls, or a curve other than the
+    /// shader's fails here. Its lane carries the anchors alone.
+    #[test]
+    fn the_rim_fades_from_the_dim_end_to_mid() {
+        let potency = Potency::shipped();
+        let (ramp, rim) = (potency.ramp(), potency.rim());
+        assert_eq!((rim.zero, rim.full), (ramp.at[0], ramp.at[1]));
+        assert_eq!(rim.mid, potency.mid);
+        assert_eq!(rim.lanes(), Vec4::new(ramp.at[0], ramp.at[1], 0.0, 0.0));
+        let at = |u: f32| rim.weight(potency.mid * u.exp2());
+        for u in [rim.zero, rim.zero - 0.5, rim.zero - 9.0] {
+            assert_eq!(at(u), 0.0, "u = {u}");
+        }
+        assert_eq!(rim.weight(0.0), 0.0);
+        for u in [rim.full, rim.full + 0.5, ramp.at[2] + 9.0] {
+            assert_eq!(at(u), 1.0, "u = {u}");
+        }
+        let steps = 4000;
+        let (from, to) = (rim.zero - 1.0, rim.full + 1.0);
+        let du = (to - from) / steps as f32;
+        let steepest = 1.5 / (rim.full - rim.zero);
+        let mut previous = at(from);
+        for k in 1..=steps {
+            let u = from + du * k as f32;
+            let here = at(u);
+            assert!(here >= previous - 1e-6, "u = {u}: {previous} to {here}");
+            assert!(
+                here - previous <= steepest * du + 1e-5,
+                "u = {u}: a jump of {}",
+                here - previous
+            );
+            previous = here;
+        }
+        let between = at(0.5 * (rim.zero + rim.full));
+        assert!(between > 0.0 && between < 1.0, "{between}");
+        let quarter = at(rim.zero + 0.25 * (rim.full - rim.zero));
+        assert!((quarter - 5.0 / 32.0).abs() < 1e-5, "{quarter}");
     }
 }

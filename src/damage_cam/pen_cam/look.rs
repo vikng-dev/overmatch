@@ -54,10 +54,10 @@ use super::view::Tier;
 use super::{Corner, Surface, WorldViewer};
 use crate::render_policy::CameraProfile;
 
-/// A spall field's volume: its opacity at most, and the path through it, as a share of its
-/// cone's longest reach, over which its opacity climbs to `1 − 1/e` of that, so a thin stretch
-/// (the silhouette, a sliver beside a shadowed direction) stays faint. TUNED, as is every figure
-/// below that is not marked otherwise.
+/// A spall field's volume: its opacity at most, and the weighted path through it
+/// ([`super::potency::Rim`]), as a share of its cone's longest reach, over which its opacity
+/// climbs to `1 − 1/e` of that, so a thin stretch (the silhouette, a sliver beside a shadowed
+/// direction) stays faint. TUNED, as is every figure below that is not marked otherwise.
 const VOLUME_OPACITY: f32 = 0.55;
 const VOLUME_DEPTH_SHARE: f32 = 0.2;
 /// The march's samples along an eye ray inside a volume. The step is the cone's longest chord over
@@ -124,6 +124,7 @@ pub struct LookParams {
     pub foot: Vec4,
     pub ramp: [Vec4; 4],
     pub volume: Vec4,
+    pub rim: Vec4,
     pub fields: Vec4,
     pub prints: [Vec4; 4 * FOOTPRINT_FIELDS],
     pub disc: [Vec4; FOOTPRINT_FIELDS * DISC_LANES],
@@ -145,6 +146,7 @@ impl Default for LookParams {
             foot: Vec4::ZERO,
             ramp: [Vec4::ZERO; 4],
             volume: Vec4::ZERO,
+            rim: Vec4::ZERO,
             fields: Vec4::ZERO,
             prints: [Vec4::ZERO; 4 * FOOTPRINT_FIELDS],
             disc: [Vec4::ZERO; FOOTPRINT_FIELDS * DISC_LANES],
@@ -819,9 +821,11 @@ pub fn component(b: &BoxPlan, kind: CornerKind, masks: &MaskSet) -> Option<LookM
 
 /// A spall field's volume, drawn on its reach surface ([`super::field::reach_mesh`]): from each
 /// fragment where the eye ray leaves the volume, the ray is marched back toward the eye through
-/// it, and the pixel takes the mean potency colour of what it crossed ([`super::potency::Ramp`]),
-/// at an opacity that climbs with the length crossed to [`VOLUME_OPACITY`]; its field's lanes are
-/// set each frame ([`LookMaterial::set_volume`]). Straight alpha, sorted after every other
+/// it, each sample weighed by its intensity ([`super::potency::Rim`]), and the pixel takes the
+/// weighted mean potency colour of what it crossed ([`super::potency::Ramp`]), at an opacity that
+/// climbs with the weighted length crossed to [`VOLUME_OPACITY`], so the volume fades out toward
+/// the ramp's dim end; its field's lanes are set each frame ([`LookMaterial::set_volume`]).
+/// Straight alpha, sorted after every other
 /// translucent surface, drawn whatever stands in front and writing no depth ([`LookKey::depth`]).
 /// In a frame that draws the body behind ([`body_behind`]) the march ends at its pixel's nearest
 /// component in `masks`' part mask (`volume.w = 1`), so a component in front of the field hides
@@ -835,6 +839,7 @@ pub fn volume(
 ) -> LookMaterial {
     let mut m = LookMaterial::new(MODE_VOLUME, LinearRgba::BLACK, 0.0, Blend::Blended, masks);
     m.params.ramp = potency.ramp().lanes();
+    m.params.rim = potency.rim().lanes();
     m.params.volume.x = VOLUME_OPACITY;
     m.params.volume.w = body_behind(kind) as u8 as f32;
     m.set_cut(cut);
@@ -958,6 +963,7 @@ mod tests {
         assert_eq!(field.params.disc[..DISC_LANES], params.disc[..DISC_LANES]);
         assert_eq!(field.params.prints[..4], params.prints[..4]);
         assert_eq!(field.params.ramp, potency.ramp().lanes());
+        assert_eq!(field.params.rim, potency.rim().lanes());
         assert_eq!(field.params.volume.x, VOLUME_OPACITY);
 
         for material in [looks.get(&handle).unwrap(), &field] {
@@ -966,6 +972,38 @@ mod tests {
             let mut want = material.params;
             want.shade.w = 0.25;
             assert_eq!(format!("{:?}", faded.params), format!("{want:?}"));
+        }
+    }
+
+    /// A volume fades at its rim: the shader weighs each march sample by the curve of
+    /// `potency::Rim::weight`, from the volume's rim lane about the ramp lane's mid threshold, and
+    /// one weighed sample carries both the colour and the length, so the colour is the weighted
+    /// mean and the opacity climbs with the weighted length alone. The rim promise relies on it:
+    /// an opacity from the plain length keeps the faint outer stretch at full strength, and a
+    /// colour weighted apart from the length shifts the mean toward the deep teal the opacity no
+    /// longer shows.
+    #[test]
+    fn the_volume_fades_at_its_rim() {
+        let potency = Potency::shipped();
+        let masks = MaskSet::default();
+        let field = volume(&potency, &masks, CornerKind::Glass, None);
+        let rim = potency.rim();
+        assert_eq!(field.params.rim, rim.lanes());
+        let mid = field.params.ramp[3].w;
+        assert_eq!(rim.weight(mid), 1.0);
+        assert_eq!(rim.weight(mid * field.params.rim.x.exp2()), 0.0);
+        assert!(field.params.rim.x < field.params.rim.y);
+        let shader = shader();
+        for read in [
+            "return smoothstep(look.rim.x, look.rim.y, log2(max(i, 1e-30) / look.ramp[3].w));",
+            "let w = weight(i);\n    return vec4(ramp(i) * w, w);",
+            "sum = sum + 0.5 * (now + last) * (last_t - t);",
+            "let near = select(last, weighed(hi_intensity), hi_intensity >= 0.0);",
+            "sum = sum + 0.5 * (near + last) * (last_t - entry);",
+            "let a = look.volume.x * (1.0 - exp(-sum.a / look.volume.y)) * fade;",
+            "return vec4(sum.rgb / sum.a, clamp(a, 0.0, 1.0));",
+        ] {
+            assert!(shader.contains(read), "{read}");
         }
     }
 
