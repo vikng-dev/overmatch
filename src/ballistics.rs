@@ -2877,12 +2877,13 @@ fn march_shell_step(
         // Every outcome leaves the round off its original free-flight segment (see the open-air
         // break above), whether it bounced off the face or bent into the plate.
         bent = true;
-        advance_fuze(&mut shell.projectile.fuze, &decision);
         // The budget was charged what the crossing actually flew, summed over its segments by the
         // only code that knows them (see `resolve::Bite::travel`) — never the distance to the
         // NEAREST sample's contact, which at oblique incidence leads the axis handoff by
         // `r·tan(incidence)`.
-        if flight.follow(decision) {
+        let (ended, removed) = follow_crossing(shell, &context, &mut flight, decision, health);
+        damage_dealt += removed;
+        if ended {
             stopped = true;
             break;
         }
@@ -2964,37 +2965,52 @@ fn launch(
     })
 }
 
-/// AUTHORITY: advance the fuze over a decided crossing (design doc §5a, "The burst"). A corridor
-/// found clear is open path. A bounce meets a body: an armed fuze restarts from it. A bite exits
-/// each body it reached in turn, which arms the fuze at the threshold or restarts an armed one,
-/// then flies on from the last exit, or exiting none from the flight's position, to where the
-/// flight resumes or the round came to rest.
+/// AUTHORITY: advance the fuze over a decided crossing (design doc §5a, "The trigger"). The count
+/// runs over every metre of the crossing's path. A corridor found clear is open path. A bounce
+/// flies its way in, then meets a body: an armed fuze restarts from it. A bite flies from the
+/// flight's position to each body exit it reached in turn ([`resolve::Bite::path_to`]), which arms
+/// the fuze at the threshold or restarts an armed one, then on to where the flight resumes or the
+/// round came to rest. A delay that runs out on the way is restarted by nothing after it
+/// ([`burst::Fuze::exited`]): it is due where the crossing hands the flight back.
 fn advance_fuze(fuze: &mut burst::Fuze, decision: &resolve::Decision) {
     match decision {
         resolve::Decision::Clear { travel, .. } => fuze.flown(*travel),
-        resolve::Decision::Bounce(bounce) => fuze.bounced(bounce.speed, bounce.owner),
+        resolve::Decision::Bounce(bounce) => {
+            fuze.flown(bounce.travel);
+            fuze.bounced(bounce.speed, bounce.owner);
+        }
         resolve::Decision::Bite(bite) => {
+            let mut flown = 0.0;
             for source in &bite.spall {
+                let at = bite.path_to(source.position).max(flown);
+                fuze.flown(at - flown);
+                flown = at;
                 fuze.exited(source.spend, source.exit_speed, bite.owner);
             }
-            match (&bite.end, bite.spall.last()) {
-                (
-                    resolve::BiteEnd::Perforated {
-                        resume, direction, ..
-                    },
-                    Some(last),
-                ) => fuze.flown(
-                    (*resume - last.position)
-                        .dot(Vec3::from(*direction))
-                        .max(0.0),
-                ),
-                (resolve::BiteEnd::Embedded { at, .. }, Some(last)) => {
-                    fuze.flown(at.distance(last.position));
-                }
-                (_, None) => fuze.flown(bite.travel),
-            }
+            fuze.flown((bite.travel - flown).max(0.0));
         }
     }
+}
+
+/// AUTHORITY: advance the fuze ([`advance_fuze`]) and the flight over a decided crossing. A delay
+/// that ran out inside the crossing bursts where the crossing hands the flight back, at the speed it
+/// hands back, whatever is left of the step's budget ([`burst_here`]). Returns whether the round
+/// ended, at rest or in the burst, and the HP the burst removed.
+fn follow_crossing(
+    shell: &mut MarchingShell,
+    context: &resolve::ResolveContext<'_, '_, '_>,
+    flight: &mut resolve::Flight,
+    decision: resolve::Decision,
+    health: &mut Query<&mut ComponentHealth>,
+) -> (bool, u32) {
+    advance_fuze(&mut shell.projectile.fuze, &decision);
+    if flight.follow(decision) {
+        return (true, 0);
+    }
+    if shell.projectile.fuze.due_within(0.0).is_some() {
+        return burst_here(shell, context, flight, flight.speed, health);
+    }
+    (false, 0)
 }
 
 /// AUTHORITY: fly the round `metres` of open path, where its fuze runs out, with the witness pass

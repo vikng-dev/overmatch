@@ -407,8 +407,8 @@ arms. It arms when the round leaves a body (§5, **Which steps throw**) whose sp
 arming threshold: the reference-mm spent in that one body, never a sum over bodies. The delay is
 counted as path from that exit: the burst lies `v × delay` metres past it, `v` the exit speed, so
 the speed the round loses in the air over the delay is not counted (DERIVED). Every body exit
-after that restarts the delay from that exit at its speed, whatever that body's spend, and so does
-a bounce off a face; a bounce never arms. The count runs over every metre the round flies: open
+after that restarts a delay still running from that exit at its speed, whatever that body's spend,
+and so does a bounce off a face; a bounce never arms. The count runs over every metre the round flies: open
 air, a corridor found clear, the gaps between a crossing's bodies, the approach to a body it stops
 in. A round no body arms flies as a solid shot, bit for bit.
 

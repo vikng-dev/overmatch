@@ -1540,6 +1540,68 @@ fn a_body_met_before_the_burst_restarts_the_delay() {
     );
 }
 
+/// A delay that runs out between two bodies of one crossing is due there: the path between their
+/// exits counts against it, the later exit does not restart it, and the round bursts where the
+/// crossing hands the flight back, at the speed it hands back. A gap shorter than the delay's path
+/// leaves it running, and the later exit restarts it as a body met. The front plate arms the round;
+/// a 200 mm soft box carries the crossing on to a 50 mm back plate in contact, whose exit lies
+/// 250 mm past the front's, and the step's travel ends 150 mm into the crossing (fixture data): the
+/// 0.1 ms delay (fixture data) runs out in the gap, the fixture's own does not. A mutant that counts
+/// no path between the exits, restarts a delay that has run out, or leaves the due burst to the next
+/// tick's open air, at that tick's speed, fails here.
+#[test]
+fn a_delay_run_out_between_bodies_bursts_where_the_crossing_hands_back() {
+    let dt = STEP.as_secs_f32();
+    let velocity = Vec3::NEG_Z * 800.0;
+    let step = freeflight_step(velocity, drag_k(FIXTURE_88.caliber, FIXTURE_88.mass), dt);
+    let from = LINE_FROM.with_z(0.5 * THIN + step.length() * dt - 0.15);
+    let volumes = [
+        plate("front", THIN, 0.0, Kind::Main),
+        plate("filler", 0.2, -0.5 * THIN - 0.1, Kind::Box(100_000)),
+        plate("back", THIN, -THIN - 0.2, Kind::Main),
+    ]
+    .map(|volume| (volume, 0, Quat::IDENTITY));
+    let shipped = fixture_burst(burst::BurstShape::Ball);
+    for (delay, due) in [(1.0e-4, true), (shipped.delay, false)] {
+        let burst = burst::Burst { delay, ..shipped };
+        let fired = fixture_fire(&volumes, from, Vec3::NEG_Z, 0, |projectile| {
+            projectile.fuze = burst::Fuze::of(Some(burst));
+        });
+        let ends = crossing_ends(&fired.log);
+        assert_eq!(ends.len(), 1, "one crossing: {ends:?}");
+        let (exit, exit_speed) = exit_of(ends[0]);
+        let (speed_in, front) = fired
+            .log
+            .iter()
+            .find_map(|mark| match mark {
+                ArmourMark::Crossing {
+                    speed_in, volumes, ..
+                } => volumes
+                    .iter()
+                    .find(|crossed| fired.names[&crossed.volume] == "front")
+                    .map(|crossed| (*speed_in, crossed.end)),
+                _ => None,
+            })
+            .expect("the round crosses the front plate");
+        let gap = exit.distance(front);
+        assert_eq!(gap > speed_in * delay, due, "{delay} s: a {gap} m gap");
+        let found = bursts(&fired.log);
+        assert_eq!(found.len(), 1, "{delay} s");
+        let (at, speed, _) = found[0];
+        let past = at.distance(exit);
+        if due {
+            assert!(past < 2.0 * MARCH_EPS, "it bursts {past} m past the exit");
+            assert_eq!(speed, exit_speed, "at the speed the crossing hands back");
+        } else {
+            assert!(
+                (past - exit_speed * delay).abs() < BURST_TOLERANCE,
+                "the burst lies {past} m past the later exit, not {} m",
+                exit_speed * delay
+            );
+        }
+    }
+}
+
 /// An armed round stopped before its delay ends bursts where it rests, at no speed, when the delay
 /// ends: the delay's seconds less the path from the arming exit to the rest point at the exit's
 /// speed, after the record has it arrive there. The ring then throws no nose piece on, and either

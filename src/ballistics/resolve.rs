@@ -1334,10 +1334,23 @@ pub(crate) struct Bite {
     /// hands the round that much free travel inside the same tick, which moves subsequent impacts
     /// across tick accounting boundaries.
     pub travel: f32,
+    /// Line-of-sight metres of `travel` flown from the flight's position to the axis hand-off,
+    /// along the way in; the rest is the transit along the bend.
+    pub approach: f32,
     pub end: BiteEnd,
     /// The approach to the axis hand-off along `incoming`, then the transit along the bend to the
     /// rest point or the resume point.
     pub legs: [Leg; 2],
+}
+
+impl Bite {
+    /// Metres of path from the flight's position to `point` (WORLD) on the crossing: the approach
+    /// to the axis hand-off, then the transit along the bend to `point`'s place on its axis. At the
+    /// rest or resume point it is [`Self::travel`], to rounding.
+    pub(crate) fn path_to(&self, point: Vec3) -> f32 {
+        let transit = &self.legs[1];
+        self.approach + (point - transit.from).dot(*transit.axis)
+    }
 }
 
 /// How a bite ended.
@@ -1628,6 +1641,7 @@ fn bite(
             })
             .collect(),
         travel: approach + flown,
+        approach,
         end,
         legs: [
             way_in,

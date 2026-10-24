@@ -177,9 +177,10 @@ pub(crate) enum Fuze {
     /// Not yet armed: no body's spend has reached the threshold.
     Unarmed(Burst),
     /// Armed: the round bursts after `remaining` more metres of path, unless a body met first
-    /// restarts the delay. `speed` is the speed the delay started at, which turns those metres
-    /// into the delay's seconds left. `tank` owns the body that armed or last restarted it, and is
-    /// the tank the burst's field walks.
+    /// restarts the delay. At or below zero the delay has run out and the burst is due where the
+    /// round stands: nothing restarts it. `speed` is the speed the delay started at, which turns
+    /// those metres into the delay's seconds left. `tank` owns the body that armed or last
+    /// restarted it, and is the tank the burst's field walks.
     Armed {
         burst: Burst,
         remaining: f32,
@@ -195,13 +196,14 @@ impl Fuze {
     }
 
     /// The round left a body it spent `spend` reference-mm across, at `speed`, the body owned by
-    /// `tank`. An unarmed fuze arms when `spend` reaches the threshold; an armed one restarts
-    /// whatever the spend. Either way the burst then lies `speed × delay` metres of path past this
-    /// exit.
+    /// `tank`. An unarmed fuze arms when `spend` reaches the threshold; an armed one whose delay
+    /// still runs restarts whatever the spend. Either way the burst then lies `speed × delay`
+    /// metres of path past this exit. A delay that has run out is not restarted.
     pub(crate) fn exited(&mut self, spend: f32, speed: f32, tank: Option<Entity>) {
         let burst = match *self {
             Self::Inert => return,
             Self::Unarmed(burst) if spend < burst.arming_spend => return,
+            Self::Armed { remaining, .. } if remaining <= 0.0 => return,
             Self::Unarmed(burst) | Self::Armed { burst, .. } => burst,
         };
         *self = Self::Armed {
@@ -213,9 +215,14 @@ impl Fuze {
     }
 
     /// The round bounced off a face of `tank`'s, leaving at `speed`: a body met, so an armed fuze
-    /// restarts from the bounce. An unarmed fuze stays unarmed: a bounce spends nothing.
+    /// whose delay still runs restarts from the bounce. An unarmed fuze stays unarmed: a bounce
+    /// spends nothing. A delay that has run out is not restarted.
     pub(crate) fn bounced(&mut self, speed: f32, tank: Option<Entity>) {
-        if let Self::Armed { burst, .. } = *self {
+        if let Self::Armed {
+            burst, remaining, ..
+        } = *self
+            && remaining > 0.0
+        {
             *self = Self::Armed {
                 burst,
                 remaining: speed * burst.delay,
@@ -408,5 +415,26 @@ mod tests {
         let mut unarmed = Fuze::of(Some(burst));
         unarmed.bounced(100.0, None);
         assert_eq!(unarmed, Fuze::Unarmed(burst));
+    }
+
+    /// A delay run out to zero or below is due where the round stands, and no later exit or bounce
+    /// restarts it or takes its tank, whatever the spend: the march bursts the round where the
+    /// crossing hands the flight back, through the tank that last restarted it. A mutant that
+    /// restarts a due delay fails here.
+    #[test]
+    fn a_delay_run_out_is_not_restarted() {
+        let burst = burst();
+        let mut fuze = Fuze::of(Some(burst));
+        fuze.exited(burst.arming_spend, 250.0, None);
+        fuze.flown(250.0 * burst.delay);
+        assert_eq!(fuze.due_within(0.0), Some(0.0), "due at zero");
+        let due = fuze;
+        fuze.exited(burst.arming_spend * 2.0, 200.0, Some(Entity::PLACEHOLDER));
+        assert_eq!(fuze, due, "an exit restarts no due delay");
+        fuze.bounced(100.0, Some(Entity::PLACEHOLDER));
+        assert_eq!(fuze, due, "nor does a bounce");
+        fuze.flown(1.0);
+        assert_eq!(fuze.due_within(0.0), Some(0.0), "past zero it stays due");
+        assert_eq!(fuze.delay_left(), Some(0.0));
     }
 }
