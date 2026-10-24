@@ -859,7 +859,10 @@ pub fn volume(
 
 #[cfg(test)]
 mod tests {
+    use bevy::camera::CameraProjection;
+
     use super::*;
+    use crate::fingerprint::{FNV_OFFSET_BASIS, fnv1a_64};
 
     /// Every record's spall cones fit the footprint: none throws more than [`FOOTPRINT_FIELDS`],
     /// past which [`set_footprints`] drops a field unmarked, and a disc's nodes fill its lanes
@@ -876,9 +879,9 @@ mod tests {
         assert_eq!(2 * DISC_LANES, DISC_SIDE * DISC_SIDE);
     }
 
-    /// The look's shader, read from the shipped assets.
-    fn shader() -> String {
-        let path = crate::assets::asset_root().join("shaders/pen_cam_look.wgsl");
+    /// A pen cam shader, read from the shipped assets.
+    fn shader(file: &str) -> String {
+        let path = crate::assets::asset_root().join("shaders").join(file);
         std::fs::read_to_string(path).unwrap()
     }
 
@@ -889,7 +892,7 @@ mod tests {
     /// dropped or moved on one side alone reads every lane after it from its neighbour's slot.
     #[test]
     fn the_shader_declares_the_lane_counts() {
-        let shader = shader();
+        let shader = shader("pen_cam_look.wgsl");
         for declared in [
             format!("const DISC_SIDE: i32 = {DISC_SIDE};"),
             format!("const DISC_LANES: i32 = {DISC_LANES};"),
@@ -992,7 +995,8 @@ mod tests {
     /// mean and the opacity climbs with the weighted length alone. The rim promise relies on it:
     /// an opacity from the plain length keeps the faint outer stretch at full strength, and a
     /// colour weighted apart from the length shifts the mean toward the deep teal the opacity no
-    /// longer shows.
+    /// longer shows. The lanes are checked here; the shader's `weight`, `weighed` and `volume` are
+    /// pinned ([`the_shaders_are_the_ones_the_frames_were_captured_with`]).
     #[test]
     fn the_volume_fades_at_its_rim() {
         let potency = Potency::shipped();
@@ -1004,18 +1008,6 @@ mod tests {
         assert_eq!(rim.weight(mid), 1.0);
         assert_eq!(rim.weight(mid * field.params.rim.x.exp2()), 0.0);
         assert!(field.params.rim.x < field.params.rim.y);
-        let shader = shader();
-        for read in [
-            "return smoothstep(look.rim.x, look.rim.y, log2(max(i, 1e-30) / look.ramp[3].w));",
-            "let w = weight(i);\n    return vec4(ramp(i) * w, w);",
-            "sum = sum + 0.5 * (now + last) * (last_t - t);",
-            "let near = select(last, weighed(hi_intensity), hi_intensity >= 0.0);",
-            "sum = sum + 0.5 * (near + last) * (last_t - entry);",
-            "let a = look.volume.x * (1.0 - exp(-sum.a / look.volume.y)) * fade;",
-            "return vec4(sum.rgb / sum.a, clamp(a, 0.0, 1.0));",
-        ] {
-            assert!(shader.contains(read), "{read}");
-        }
     }
 
     /// The look draws the body behind the scene: a body surface is discarded wherever the part
@@ -1029,7 +1021,9 @@ mod tests {
     /// glass, a volume tested against the depth drops the stretch of field in front of a component
     /// and vanishes behind the slice's body, one without the bound draws over a component in front
     /// of it, and a depth read in two conventions bounds an orthographic view's field at the wrong
-    /// place.
+    /// place. The pipeline keys and lanes are checked here; the shaders' discards, layer test,
+    /// bound and eye depth are pinned ([`the_shaders_are_the_ones_the_frames_were_captured_with`])
+    /// and the eye depth mirrored ([`the_eye_depth_runs_forward_in_both_projections`]).
     #[test]
     fn the_body_draws_behind_the_scene() {
         let potency = Potency::shipped();
@@ -1061,16 +1055,219 @@ mod tests {
         }
         assert_eq!(base(&masks).params.mode.z, 0.0);
         assert_eq!(component_base(&masks).params.mode.z, 1.0);
-        let shader = shader();
-        for read in [
-            "if mask_at(part_mask, p).a > 0.0 {\n                discard;",
-            "if look.volume.w > 0.5 {\n        let bound = mask_at(part_mask, p).a;",
-            "let t_exit = eye_depth(exit);",
-            "let depth = eye_depth(in.world_position.xyz);",
-            "return vec4(vn * 0.5 + 0.5, max(depth, 1e-4));",
-            "if nearest > 0.0 && depth > nearest * 1.002 + 0.003 {\n            discard;\n        }",
+    }
+
+    /// The item the module scope is pinned under: everything outside a function (imports,
+    /// bindings, structs, constants, entry-point attributes).
+    const MODULE_SCOPE: &str = "module scope";
+
+    /// Every top-level item of the look's and the slice's shaders, `(file, item, digest)`: the
+    /// FNV-1a fold of the item's text with comments and whitespace removed. MEASURED from the
+    /// shaders the shipped frames were captured with.
+    const SHADER_PINS: [(&str, &str, u64); 22] = [
+        ("pen_cam_look.wgsl", "mode", 0xd884_58c8_42c2_833e),
+        ("pen_cam_look.wgsl", "vertex", 0xf2e3_9b22_751a_00c7),
+        ("pen_cam_look.wgsl", "mask_at", 0x1d10_776f_dc3c_0e87),
+        ("pen_cam_look.wgsl", "orthographic", 0xd848_4040_5cc7_bf5b),
+        ("pen_cam_look.wgsl", "eye_depth", 0x959c_ebcc_5e07_ea9e),
+        ("pen_cam_look.wgsl", "eye_ray", 0x8fbf_c6b6_664e_ae7b),
+        ("pen_cam_look.wgsl", "node", 0x09ad_7fd3_59ca_3573),
+        ("pen_cam_look.wgsl", "disc_at", 0x11bd_83b4_bbab_7d73),
+        ("pen_cam_look.wgsl", "ramp", 0x6cc6_ee49_6e8f_dcda),
+        ("pen_cam_look.wgsl", "polar", 0xdbe8_47f2_5de0_3442),
+        ("pen_cam_look.wgsl", "footprint", 0xe25c_9129_0d22_eacd),
+        ("pen_cam_look.wgsl", "weight", 0x12fd_a42c_e98c_c0f4),
+        ("pen_cam_look.wgsl", "weighed", 0xd301_7b52_7fd1_b173),
+        ("pen_cam_look.wgsl", "sample", 0x4b2e_66dc_d41e_b188),
+        ("pen_cam_look.wgsl", "volume", 0x10f5_a579_4c74_12f4),
+        ("pen_cam_look.wgsl", "lines", 0x5560_efe8_d460_738c),
+        ("pen_cam_look.wgsl", "fragment", 0x48ae_8a95_463a_6e06),
+        ("pen_cam_look.wgsl", MODULE_SCOPE, 0xcca5_f288_3c99_edd1),
+        (
+            "pen_cam_slice.wgsl",
+            "behind_the_scene",
+            0xd02c_1b1f_4fea_44f0,
+        ),
+        ("pen_cam_slice.wgsl", "bayer", 0x101e_1ea8_a796_5e70),
+        ("pen_cam_slice.wgsl", "fragment", 0x8758_36dd_1da3_fde7),
+        ("pen_cam_slice.wgsl", MODULE_SCOPE, 0xbbfa_4d63_379f_a666),
+    ];
+
+    /// The top-level items of WGSL `source` with comments and whitespace removed: each function by
+    /// name, then the module scope. A function is the one that starts a line with `fn `; one
+    /// written otherwise stays in the module scope, pinned there. Block comments are not stripped,
+    /// so a source holding one is refused.
+    fn shader_items(source: &str) -> Vec<(String, String)> {
+        assert!(
+            !source.contains("/*"),
+            "a block comment: strip it before pinning"
+        );
+        let code: String = source
+            .lines()
+            .flat_map(|line| ["\n", line.split("//").next().unwrap_or_default()])
+            .collect();
+        let mut items = Vec::new();
+        let mut scope = String::new();
+        let mut rest = code.as_str();
+        while let Some(start) = rest.find("\nfn ").map(|at| at + 1) {
+            scope.push_str(&rest[..start]);
+            let open = start + rest[start..].find('{').expect("a function body");
+            let mut depth = 0;
+            let end = rest[open..]
+                .char_indices()
+                .find_map(|(at, c)| {
+                    depth += match c {
+                        '{' => 1,
+                        '}' => -1,
+                        _ => 0,
+                    };
+                    (depth == 0).then_some(open + at + 1)
+                })
+                .expect("a closed function body");
+            let name = rest[start + 3..].split('(').next().unwrap_or_default();
+            items.push((name.trim().to_owned(), rest[start..end].to_owned()));
+            rest = &rest[end..];
+        }
+        scope.push_str(rest);
+        items.push((MODULE_SCOPE.to_owned(), scope));
+        items
+            .into_iter()
+            .map(|(name, text)| (name, text.split_whitespace().collect()))
+            .collect()
+    }
+
+    /// The look's and the slice's shaders are the ones the Rust mirrors were checked against and
+    /// the frames were captured with: every top-level item, each function and the module scope,
+    /// folds to its pin with comments and whitespace removed. A comment or a layout change keeps
+    /// every pin; any other change moves the pin of the item it touches, whatever text it keeps
+    /// elsewhere. The colour, rim, eye-depth and draw-order promises rely on it: their Rust side
+    /// is tested against the WGSL pinned here, and an unpinned item (`orthographic`, a binding)
+    /// breaks a pinned one's frame with its text unchanged.
+    #[test]
+    fn the_shaders_are_the_ones_the_frames_were_captured_with() {
+        let hex = |d: u64| {
+            format!(
+                "0x{:04x}_{:04x}_{:04x}_{:04x}",
+                d >> 48,
+                (d >> 32) & 0xffff,
+                (d >> 16) & 0xffff,
+                d & 0xffff
+            )
+        };
+        let mut moved = Vec::new();
+        let mut found = Vec::new();
+        for file in ["pen_cam_look.wgsl", "pen_cam_slice.wgsl"] {
+            for (item, text) in shader_items(&shader(file)) {
+                let digest = fnv1a_64(FNV_OFFSET_BASIS, text.as_bytes());
+                let pinned = SHADER_PINS
+                    .iter()
+                    .find(|&&(f, i, _)| f == file && i == item);
+                if pinned.map(|&(_, _, pin)| pin) != Some(digest) {
+                    moved.push(format!("(\"{file}\", \"{item}\", {}),", hex(digest)));
+                }
+                found.push((file, item));
+            }
+        }
+        for (file, item, _) in SHADER_PINS {
+            if !found.iter().any(|(f, i)| *f == file && i == item) {
+                moved.push(format!("{file} `{item}`: pinned, no longer in the shader"));
+            }
+        }
+        assert!(
+            moved.is_empty(),
+            "the pen cam's shaders moved; the moved items' pins:\n{}\nRe-pin only after the Rust \
+             mirrors are read against the new WGSL and pass (`potency::tests` for `ramp` and \
+             `weight`, `the_pen_cam_intensity_times_a_face_is_its_dose` for the intensity, \
+             `field::tests` for `disc_at`, `the_eye_depth_runs_forward_in_both_projections` for \
+             `eye_depth` and `eye_ray`) and a hidden capture of every frame the moved items draw \
+             (`OVERMATCH_CAPTURE` over `pen_cam_demo`) shows the change meant.",
+            moved.join("\n")
+        );
+    }
+
+    /// `pen_cam_look.wgsl`'s `orthographic`, `eye_depth` and `eye_ray`, read from a view's
+    /// `world_from_view` (the camera's `GlobalTransform`) and `clip_from_view` (its projection's)
+    /// as Bevy's view uniform hands them to the shader; WGSL's `m[c]` is glam's column `c`.
+    struct Eye {
+        world_from_view: Mat4,
+        clip_from_view: Mat4,
+    }
+
+    impl Eye {
+        fn orthographic(&self) -> bool {
+            self.clip_from_view.w_axis.w == 1.0
+        }
+
+        fn forward(&self) -> Vec3 {
+            -self.world_from_view.z_axis.truncate().normalize()
+        }
+
+        fn to(&self, p: Vec3) -> Vec3 {
+            p - self.world_from_view.w_axis.truncate()
+        }
+
+        fn depth(&self, p: Vec3) -> f32 {
+            if self.orthographic() {
+                self.to(p).dot(self.forward())
+            } else {
+                self.to(p).length()
+            }
+        }
+
+        fn ray(&self, p: Vec3) -> Vec3 {
+            if self.orthographic() {
+                self.forward()
+            } else {
+                self.to(p).normalize()
+            }
+        }
+    }
+
+    /// The eye depth the masks store and the volume's march reads is a world point's distance from
+    /// the eye in a perspective view and its distance along the camera's forward in an orthographic
+    /// one, positive in front of the camera in both, and a point `s` back toward the eye along the
+    /// eye ray lies `s` shallower: Bevy's orthographic projection is the one whose
+    /// `clip_from_view[3][3]` is 1, and a camera looks down its `-Z` column. The mask write, the
+    /// nearest-surface test and the volume's bound rely on it: a forward read the wrong way gives
+    /// every surface in front of an orthographic camera a negative depth, which the mask write
+    /// floors and every test against the masks then passes, and a ray that disagrees with the depth
+    /// marches the volume from the wrong place. Fixture: a camera off every axis, points off its
+    /// forward.
+    #[test]
+    fn the_eye_depth_runs_forward_in_both_projections() {
+        let camera =
+            Transform::from_xyz(3.0, 2.0, -4.0).looking_at(Vec3::new(-1.0, 0.5, 2.0), Vec3::Y);
+        let world_from_view = GlobalTransform::from(camera).to_matrix();
+        let (forward, right) = (*camera.forward(), *camera.right());
+        for (clip_from_view, orthographic) in [
+            (
+                OrthographicProjection::default_3d().get_clip_from_view(),
+                true,
+            ),
+            (PerspectiveProjection::default().get_clip_from_view(), false),
         ] {
-            assert!(shader.contains(read), "{read}");
+            let eye = Eye {
+                world_from_view,
+                clip_from_view,
+            };
+            assert_eq!(eye.orthographic(), orthographic);
+            for along in [0.5, 7.0, 40.0] {
+                let offset = forward * along + right * 1.5;
+                let p = camera.translation + offset;
+                let depth = if orthographic { along } else { offset.length() };
+                let at = eye.depth(p);
+                assert!(
+                    (at - depth).abs() < 1e-3,
+                    "{orthographic}: {at}, not {depth}"
+                );
+                for s in [0.25, 0.5 * along] {
+                    let nearer = eye.depth(p - eye.ray(p) * s);
+                    assert!(
+                        (nearer - (depth - s)).abs() < 1e-3,
+                        "{orthographic}: {s} nearer than {depth} is {nearer}"
+                    );
+                }
+            }
         }
     }
 
