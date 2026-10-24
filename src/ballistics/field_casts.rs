@@ -704,7 +704,7 @@ fn shot(label: &str, local_origin: Vec3, local_direction: Vec3) -> Record {
         for ray in &cone.rays {
             output.push(' ');
             bits3(&mut output, ray.end);
-            output.push(if ray.deposited { '+' } else { '-' });
+            output.push(if ray.doses.is_empty() { '-' } else { '+' });
         }
         output.push(';');
     }

@@ -1215,10 +1215,9 @@ pub struct VolumeCrossing {
 }
 
 /// One direction of a spall cone, as marched: where it stopped (its strength exhausted, or where it
-/// left the struck tank), and whether it dosed a box on the way.
+/// left the struck tank), and the boxes it dosed on the way.
 pub struct SpallRay {
     pub end: Vec3,
-    pub deposited: bool,
     /// The strength (reference-mm) the direction was thrown with: the cone's `S` times its profile.
     pub strength: f32,
     /// The doses it addressed (volume, reference-mm), in entry order.
@@ -3686,7 +3685,6 @@ fn walk_field(
         dose.add_all(&ray.doses);
         rays.push(SpallRay {
             end: ray.end,
-            deposited: !ray.doses.is_empty(),
             strength: thrown,
             doses: ray
                 .doses

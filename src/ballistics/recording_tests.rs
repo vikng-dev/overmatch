@@ -879,7 +879,6 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
         strength: cone,
         rays: vec![SpallRay {
             end: z(3.5),
-            deposited: true,
             strength: cone,
             doses: vec![(ammo, cone)],
         }],

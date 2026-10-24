@@ -3,17 +3,31 @@
 //!
 //! The free-fly camera holds the seed tank's primary weapon as a [`FreeShooter`] ([`RangeGun`]) and
 //! fires its selected round down the view axis through the game's round-to-shell mapping
-//! ([`FireShell::of_round`]). Downrange stand four static RHA plates and the seed tank, rebuilt
-//! [`RESPAWN_DELAY_S`] after its knockout. A shot on the tank is recorded and delivered as in
-//! single-player (`damage_cam::recorder`, `delivery::offline_plugin`), so it plays in the pen cam
-//! corner, and the x-ray key dresses the tank in the glass look; a plate is no tank and opens no
-//! corner. Sandbox controls use real time so inspection remains available while simulation time is
-//! paused.
+//! ([`FireShell::of_round`]). Downrange stand four static RHA plates and the seed tank.
+//!
+//! * **The look explains the tank.** A shot on the tank is recorded and delivered as in
+//!   single-player (`damage_cam::recorder`, `delivery::offline_plugin`). The game's x-ray draws it:
+//!   its subject here is the target ([`XRaySubject::Struck`]), its records the free shooter's of
+//!   hits on the target's current life, its tint the target's live HP, its masks the free-fly
+//!   camera's (the one [`PlayerView`]). Each record replays once on the look's clock to its hold
+//!   beat and holds until the next shot; X toggles the look, on from the start. The pen cam corner
+//!   stays closed by its own setting ([`PenCamCorner::Off`]).
+//! * **The rebuild.** A knocked-out target stands until the look's replay of the shot that knocked
+//!   it out has held [`REBUILD_BEAT_S`] ([`rebuild_due`]), then the range rebuilds it; R rebuilds
+//!   at once. The look lets go of the target before it goes ([`TargetRebuild::rebuild`]).
+//! * **The rest is gizmos.** A shot that met no tank — a plate, the ground — draws its path, its
+//!   crossings and its end; a shot that met a tank draws none of that, and its spent shell goes
+//!   ([`sweep_tank_shots`]). The armour overlay (F2, off by default) draws the target's armour
+//!   plates over everything, which the look draws as one body with the rest of the hull.
+//!
+//! Sandbox controls use real time so inspection remains available while simulation time is paused.
 //!
 //! For in-engine captures (`dev_capture`) the range runs on an autopilot instead of the mouse:
 //! `OVERMATCH_RANGE_POSE=x,y,z,lx,ly,lz` stands the camera-gun at `x,y,z` looking at `lx,ly,lz`,
 //! and `OVERMATCH_RANGE_FIRE=<round>@<s>[,…]` fires the gun's round `<round>` (an index into its
 //! rounds) down the view axis at app second `<s>`. Either one leaves the cursor free.
+
+use std::collections::HashSet;
 
 use avian3d::prelude::{
     Collider, CollisionLayers, LayerMask, PhysicsInterpolationPlugin, PhysicsPlugins, RigidBody,
@@ -26,14 +40,17 @@ use bevy::window::{CursorGrabMode, CursorOptions, PrimaryWindow};
 
 use bevy::camera::ClearColorConfig;
 use bevy::camera::visibility::RenderLayers;
+use bevy::gltf::GltfMeshName;
 use bevy::ui::IsDefaultUiCamera;
 
 use crate::ballistics::{
-    self, ArmorVolume, BallisticVolume, ComponentHealth, ComponentVolume, FireShell, Impact,
-    ImpactMarker, PenetrationMarks, ShellPath, ShellReadout, ShotSource, SpallMarks,
+    self, ArmorVolume, ArmourMark, BallisticVolume, ComponentHealth, FireShell, PenetrationMarks,
+    Projectile, ShellPath, ShotSource,
 };
 use crate::command::{self, Bindings, RoundStep};
-use crate::damage::{self, Ammo, CookedOff, Dead, LaunchedTurret, TankKnockedOut};
+use crate::damage::{self, CookedOff, Dead, LaunchedTurret, TankKnockedOut, VolumeOf};
+use crate::damage_cam::pen_cam::game::{PenCamSet, XRay, XRayRelease, XRaySubject};
+use crate::settings::{PenCamCorner, Settings};
 use crate::tank::{
     Controlled, Tank, TankPresentation, TankRoot, TankSimSource, ViewOf, Weapon, WeaponIndex,
     spawn_complete_tank,
@@ -44,7 +61,7 @@ use crate::{
     world,
 };
 
-// The clickable egui control panel — the sandbox's Layers / Shot / Time / Telemetry / Scene surface.
+// The clickable egui control panel — the sandbox's View / Shot / Time / Telemetry / Scene surface.
 // Behind `dev_ui` so `bevy_egui` compiles ONLY into the sandbox build, never the shipping client
 // (`bin/overmatch`); mounted below under the same gate. (`cargo armor` = `--features dev_ui`.)
 #[cfg(feature = "dev_ui")]
@@ -63,10 +80,10 @@ const RANGE_SHOOTER: CombatantId = CombatantId(1);
 /// The target tank's combatant, the same across its rebuilds; [`TargetLife`] counts them.
 const RANGE_TARGET: CombatantId = CombatantId(2);
 
-/// How long a knocked-out target stands before the range rebuilds it, seconds of virtual time.
-/// TUNED: long enough to read the knockout on the target and the start of the pen cam corner's
-/// playback.
-const RESPAWN_DELAY_S: f64 = 3.0;
+/// How long a knocked-out target stands past the hold beat of the look's replay of the shot that
+/// knocked it out, seconds of virtual time ([`rebuild_due`]). TUNED: long enough to read the held
+/// end of the replay on the target before it goes.
+const REBUILD_BEAT_S: f64 = 1.5;
 
 /// The egui control panel's width, logical pixels (egui points at bevy_egui's default zoom): the
 /// panel is fixed-width on the window's left edge. No panel is compiled without `dev_ui`.
@@ -113,9 +130,11 @@ fn seed_gun() -> Weapon {
 #[derive(Resource, Default)]
 struct TargetLife(u32);
 
-/// When the knocked-out target is rebuilt, virtual seconds; `None` while no target is knocked out.
+/// The standing target's knockout, virtual seconds: when it was first seen knocked out, and when
+/// it is rebuilt ([`rebuild_due`], restated each frame); both `None` while no target is knocked out.
 #[derive(Resource, Default)]
 struct Respawn {
+    knocked_out_s: Option<f64>,
     due_s: Option<f64>,
 }
 
@@ -149,10 +168,6 @@ struct ResetRequested(bool);
 #[derive(Component)]
 struct FreeFlyCam;
 
-/// A pooled floating label, reassigned to a live shell each frame (no per-shell UI churn).
-#[derive(Component)]
-struct ShellLabel;
-
 /// The slow-motion ladder the Up/Down arrows step through (a shell flies ~773 m/s).
 const SPEEDS: [f32; 6] = [1.0, 0.25, 0.06, 0.015, 0.004, 0.001];
 
@@ -160,136 +175,61 @@ const SPEEDS: [f32; 6] = [1.0, 0.25, 0.06, 0.015, 0.004, 0.001];
 #[derive(Resource, Default)]
 struct SpeedIndex(usize);
 
-/// The hull's tap-loop state: solid → x-ray (translucent) → hidden.
-#[derive(Default, Clone, Copy, PartialEq)]
-enum MeshState {
+/// The armour overlay, F2 (or the panel): the target's armour plates — the union the march walks,
+/// which the look draws as one body with the rest of the hull — drawn over the whole view, opaque
+/// or translucent ([`draw_armour_overlay`]). Off by default. `Copy + PartialEq` for the panel's
+/// write-on-change discipline.
+#[derive(Resource, Default, Clone, Copy, PartialEq)]
+enum ArmourOverlay {
     #[default]
-    Solid,
-    Xray,
-    Hidden,
+    Off,
+    Opaque,
+    Translucent,
 }
 
-impl MeshState {
-    /// The three states in tap order, for the panel's segmented control. `allow(dead_code)`: only
-    /// the `dev_ui` panel references it, and the module compiles without that feature.
+impl ArmourOverlay {
+    /// The states in tap order, for the panel's segmented control.
     #[cfg_attr(
         not(feature = "dev_ui"),
         allow(dead_code, reason = "read only by the dev_ui panel")
     )]
-    const ALL: [MeshState; 3] = [MeshState::Solid, MeshState::Xray, MeshState::Hidden];
+    const ALL: [Self; 3] = [Self::Off, Self::Opaque, Self::Translucent];
 
     fn next(self) -> Self {
         match self {
-            MeshState::Solid => MeshState::Xray,
-            MeshState::Xray => MeshState::Hidden,
-            MeshState::Hidden => MeshState::Solid,
+            Self::Off => Self::Opaque,
+            Self::Opaque => Self::Translucent,
+            Self::Translucent => Self::Off,
         }
     }
 
-    /// `allow(dead_code)`: only the `dev_ui` panel's segmented control reads the label now.
     #[cfg_attr(
         not(feature = "dev_ui"),
         allow(dead_code, reason = "read only by the dev_ui panel")
     )]
     fn label(self) -> &'static str {
         match self {
-            MeshState::Solid => "solid",
-            MeshState::Xray => "xray",
-            MeshState::Hidden => "off",
+            Self::Off => "off",
+            Self::Opaque => "opaque",
+            Self::Translucent => "translucent",
         }
     }
 }
 
-/// A volume layer's tap-loop state: off → drawn-on-top → solid (depth-tested) → x-ray (translucent).
-#[derive(Default, Clone, Copy, PartialEq)]
-enum VolumeState {
-    #[default]
-    Hidden,
-    OnTop,
-    Solid,
-    Xray,
-}
-
-impl VolumeState {
-    /// The four states in tap order, for the panel's segmented control. `allow(dead_code)`: see
-    /// [`MeshState::ALL`].
-    #[cfg_attr(
-        not(feature = "dev_ui"),
-        allow(dead_code, reason = "read only by the dev_ui panel")
-    )]
-    const ALL: [VolumeState; 4] = [
-        VolumeState::Hidden,
-        VolumeState::OnTop,
-        VolumeState::Solid,
-        VolumeState::Xray,
-    ];
-
-    fn next(self) -> Self {
-        match self {
-            VolumeState::Hidden => VolumeState::OnTop,
-            VolumeState::OnTop => VolumeState::Solid,
-            VolumeState::Solid => VolumeState::Xray,
-            VolumeState::Xray => VolumeState::Hidden,
-        }
-    }
-
-    /// `allow(dead_code)`: only the `dev_ui` panel's segmented control reads the label now.
-    #[cfg_attr(
-        not(feature = "dev_ui"),
-        allow(dead_code, reason = "read only by the dev_ui panel")
-    )]
-    fn label(self) -> &'static str {
-        match self {
-            VolumeState::Hidden => "off",
-            VolumeState::OnTop => "on top",
-            VolumeState::Solid => "solid",
-            VolumeState::Xray => "xray",
-        }
-    }
-}
-
-/// The target's per-layer view state, advanced by `F1/F2/F3` (or the panel's Layers rows). Opens on
-/// a useful default: hull translucent (xray), armour translucent (xray), components solid — so the
-/// inner volumes read at a glance without first cycling the layers.
-///
-/// `Copy + PartialEq` so the `dev_ui` panel edits a LOCAL copy behind its segmented controls and
-/// writes the resource back only on a real change (the write-on-change discipline the panel doc
-/// explains).
-#[derive(Resource, Clone, Copy, PartialEq)]
-struct LayerView {
-    mesh: MeshState,
-    armor: VolumeState,
-    components: VolumeState,
-}
-
-impl Default for LayerView {
-    fn default() -> Self {
-        Self {
-            mesh: MeshState::Xray,
-            armor: VolumeState::Xray,
-            components: VolumeState::Solid,
-        }
-    }
-}
-
-/// Opaque unlit materials for the volumes (so they read the same in the main and overlay passes,
-/// with no light on the overlay layer), plus a translucent material the hull swaps to in its middle
-/// state. "On top" is done by render layer, not by a material trick.
+/// The armour overlay's materials: armour blue, opaque and translucent, lit by the overlay's own
+/// sun ([`spawn_overlay_light`]).
 #[derive(Resource)]
-struct VolumeMaterials {
-    armor: Handle<StandardMaterial>,
-    armor_xray: Handle<StandardMaterial>,
-    component: Handle<StandardMaterial>,
-    component_xray: Handle<StandardMaterial>,
-    hull_translucent: Handle<StandardMaterial>,
+struct OverlayMaterials {
+    opaque: Handle<StandardMaterial>,
+    translucent: Handle<StandardMaterial>,
 }
 
-/// Render layer for volumes drawn "on top" — the overlay camera renders only this, with its own
-/// depth buffer and no clear, so it composites over the main scene regardless of containment.
-/// Clear of every `render_policy` channel, which this root resolves for the pen cam's cameras.
+/// Render layer the overlay camera alone draws, with its own depth buffer and no clear, so what is
+/// on it composites over the main scene regardless of containment. Clear of every `render_policy`
+/// channel, which this root resolves for the pen cam's cameras.
 const OVERLAY_LAYER: usize = 6;
 /// Isolated render layer for the UI camera: no geometry is placed on it, so that camera renders only
-/// the HUD. Highest camera `order` = drawn last = HUD sits above the scene *and* the on-top volumes.
+/// the HUD. Highest camera `order` = drawn last = HUD sits above the scene *and* the overlay.
 /// Clear of every `render_policy` channel, like [`OVERLAY_LAYER`].
 const UI_LAYER: usize = 7;
 
@@ -297,18 +237,17 @@ const UI_LAYER: usize = 7;
 #[derive(Component)]
 struct OverlayCamera;
 
-/// Tags a painted volume mesh (so the apply step can swap its normal/x-ray material).
+/// An overlay copy of one of the target's armour primitives: a root entity, so the look, which
+/// dresses what hangs under the target, never dresses it; posed each frame at its source.
 #[derive(Component)]
-struct VolumePaint {
-    armor: bool,
+struct ArmourCopy {
+    of: Entity,
 }
 
-/// Tags a hull visual mesh and remembers its original material, so x-ray can swap it translucent and
-/// back.
+/// A shot that met a tank: the look explains it, so the range draws none of its march, and its
+/// shell goes once spent ([`sweep_tank_shots`]).
 #[derive(Component)]
-struct HullMesh {
-    original: Handle<StandardMaterial>,
-}
+struct MetTank;
 
 pub fn plugin(app: &mut App) {
     // The armor sandbox stays on the flat slab + authored blocks: its target placement and shot
@@ -370,7 +309,7 @@ pub fn plugin(app: &mut App) {
     // The pen cam as single-player runs it: the recorder of the authority's main-gun rounds, the
     // vocabulary its explanations fold, the offline delivery to the player's combatants (the free
     // shooter and the held target), the render channels its cameras resolve through, and the
-    // corner, the x-ray and the kill cam (which stands aside for a free shooter).
+    // x-ray and the kill cam (which stands aside for a free shooter).
     .add_plugins((
         crate::damage_cam::recorder::plugin,
         crate::damage_cam::delivery::plugin,
@@ -378,6 +317,13 @@ pub fn plugin(app: &mut App) {
         crate::render_policy::plugin,
         crate::damage_cam::pen_cam::game::plugin,
     ))
+    // The look's subject is the target, on from the start; the corner never opens (module doc).
+    .insert_resource(XRaySubject::Struck(RANGE_TARGET))
+    .insert_resource(XRay { on: true })
+    .insert_resource(Settings {
+        pen_cam_corner: PenCamCorner::Off,
+        ..default()
+    })
     // The kill cam's pose reads the orbit camera's turret pivot. This root mounts no orbit camera and
     // the kill cam stands aside for a free shooter, so the pivot stays unset.
     .init_resource::<crate::camera::TurretPivot>()
@@ -398,7 +344,7 @@ pub fn plugin(app: &mut App) {
     .insert_resource(ballistics::RetainSpentShells(true))
     // Default to smooth per-frame motion; `T` toggles to the true fixed-rate cadence.
     .insert_resource(ballistics::MarchMode::Demo)
-    .init_resource::<LayerView>()
+    .init_resource::<ArmourOverlay>()
     .init_resource::<SpeedIndex>()
     .init_resource::<ShotParams>()
     // Panel↔keyboard shared seams + the egui input-capture flags. Always present (default) so the
@@ -407,13 +353,6 @@ pub fn plugin(app: &mut App) {
     .init_resource::<PanelWantsInput>()
     .init_resource::<ClearRequested>()
     .init_resource::<ResetRequested>()
-    // Paint translucent materials onto the volume meshes as the view binds to the sim parts.
-    .add_observer(paint_view_volumes)
-    // The sandbox's own impact marker: `ballistics` no longer spawns one (it stays pure sim,
-    // ADR-0014), so the sandbox subscribes to the sim `Impact` event itself. Unlike the game
-    // client's debug marker (ring-buffered, gizmo-gated in `debug.rs`), the sandbox keeps every
-    // marker until the `C` clear — inspecting a whole session of shots is the point.
-    .add_observer(spawn_impact_marker)
     .add_systems(
         Startup,
         (
@@ -422,8 +361,7 @@ pub fn plugin(app: &mut App) {
             spawn_targets,
             spawn_hud,
             load_target,
-            setup_volume_materials,
-            setup_impact_marker,
+            setup_overlay_materials,
             spawn_overlay_light,
         ),
     )
@@ -449,25 +387,24 @@ pub fn plugin(app: &mut App) {
             time_controls.run_if(not(panel_capturing)),
             toggle_full_pause,
             clear_shots,
-            reset_world,
             toggle_march_mode,
             spawn_target_from_blueprint,
-            tag_hull_meshes,
-            toggle_layers,
-            apply_layer_visibility,
-            draw_shell_paths,
-            draw_penetrations,
-            draw_spall,
-            draw_consequence_gizmos,
-            update_shell_labels,
+            (toggle_armour_overlay, draw_armour_overlay).chain(),
+            (
+                sweep_tank_shots,
+                draw_shell_paths,
+                draw_penetrations,
+                draw_shell_ends,
+            )
+                .chain(),
+            // Both despawn the target the look may be drawing (`TargetRebuild::rebuild`).
+            (reset_world, respawn_target).after(PenCamSet),
+            update_round_label,
+            clear_the_panel,
         ),
-    )
-    .add_systems(
-        Update,
-        (respawn_target, update_round_label, clear_the_panel),
     );
 
-    // The egui control panel — the sandbox's whole non-camera control surface (Layers / Shot / Time /
+    // The egui control panel — the sandbox's whole non-camera control surface (View / Shot / Time /
     // Telemetry / Scene). Behind `dev_ui` so `bevy_egui` is compiled ONLY here (the `armor_sandbox`
     // bin declares `required-features = ["dev_ui"]`), never into `bin/overmatch`. It brings its own
     // `EguiPlugin` and runs in `EguiPrimaryContextPass`. Launch it with the `cargo armor` alias.
@@ -496,7 +433,7 @@ fn spawn_camera(mut commands: Commands) {
         .with_children(|parent| {
             // Overlay camera: a child (so it shares the fly camera's pose), drawn after the main
             // camera with no clear, rendering only the overlay layer — its own depth buffer makes
-            // those volumes draw on top of the scene even when geometrically inside the hull.
+            // the armour overlay draw on top of the scene.
             parent.spawn((
                 Camera3d::default(),
                 Camera {
@@ -518,9 +455,9 @@ fn spawn_camera(mut commands: Commands) {
         ChildOf(camera),
     ));
 
-    // Dedicated UI camera at the highest order, so the HUD (nameplates, reticle, legend, status) draws
-    // *above* both the main pass and the on-top overlay volumes — otherwise opaque "on top" component
-    // meshes (overlay, order 1) would paint over UI carried by the order-0 main camera. It renders no
+    // Dedicated UI camera at the highest order, so the HUD draws *above* both the main pass and the
+    // armour overlay — otherwise the overlay's opaque plates (order 1) would paint over UI carried
+    // by the order-0 main camera. It renders no
     // 3D itself (its layer holds no geometry; gizmos default to layer 0) and doesn't clear the frame,
     // so it only composites the UI. (bevy_camera 0.19: higher `order` renders later/on top; bevy_ui
     // 0.19: UI without an explicit target goes to the `IsDefaultUiCamera`.)
@@ -607,18 +544,20 @@ fn load_target(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(pending_target(&asset_server));
 }
 
-/// Rebuilding the target: every tank and launched turret goes, and the next life of
-/// [`RANGE_TARGET`] is pending.
+/// Rebuilding the target: the look lets go of it, every tank and launched turret goes, and the
+/// next life of [`RANGE_TARGET`] is pending.
 #[derive(SystemParam)]
 struct TargetRebuild<'w, 's> {
     asset_server: Res<'w, AssetServer>,
     targets: Query<'w, 's, Entity, Or<(With<Tank>, With<LaunchedTurret>)>>,
     life: ResMut<'w, TargetLife>,
+    xray: XRayRelease<'w, 's>,
     commands: Commands<'w, 's>,
 }
 
 impl TargetRebuild<'_, '_> {
     fn rebuild(&mut self) {
+        self.xray.release(&mut self.commands);
         for entity in &self.targets {
             self.commands.entity(entity).despawn();
         }
@@ -659,8 +598,8 @@ fn spawn_target_from_blueprint(
     commands.remove_resource::<PendingTarget>();
 }
 
-/// Rebuild the target [`RESPAWN_DELAY_S`] of virtual time after its knockout. Clearing the knockout
-/// first (`C`) cancels the rebuild.
+/// Rebuild a knocked-out target once [`rebuild_due`], restated each frame: the record of the shot
+/// that knocked it out shows after the knockout. Clearing the knockout first (`C`) cancels it.
 fn respawn_target(
     time: Res<Time<Virtual>>,
     knocked_out: Query<(), (With<Tank>, With<TankKnockedOut>)>,
@@ -668,191 +607,57 @@ fn respawn_target(
     mut target: TargetRebuild,
 ) {
     if knocked_out.is_empty() {
-        respawn.due_s = None;
+        *respawn = Respawn::default();
         return;
     }
     let now = time.elapsed_secs_f64();
-    let due = *respawn.due_s.get_or_insert(now + RESPAWN_DELAY_S);
+    let knocked_out_s = *respawn.knocked_out_s.get_or_insert(now);
+    let due = rebuild_due(knocked_out_s, target.xray.shown_since());
+    respawn.due_s = Some(due);
     if now >= due {
         target.rebuild();
-        respawn.due_s = None;
+        *respawn = Respawn::default();
     }
 }
 
-fn setup_volume_materials(mut commands: Commands, mut materials: ResMut<Assets<StandardMaterial>>) {
-    // Lit + matte, so adjacent/overlapping volumes shade differently and read as separate forms.
-    // (The overlay layer gets its own light in `spawn_overlay_light`, else these render dark there.)
-    let solid = |color: Color| StandardMaterial {
-        base_color: color,
-        perceptual_roughness: 0.75,
-        ..default()
-    };
-    // X-ray = the same colour, translucent + depth-tested in the main pass (parallel to the hull's).
-    let xray = |color: Srgba| StandardMaterial {
-        base_color: color.with_alpha(0.3).into(),
-        alpha_mode: AlphaMode::Blend,
-        perceptual_roughness: 0.75,
-        ..default()
-    };
-    commands.insert_resource(VolumeMaterials {
-        armor: materials.add(solid(Color::srgb(0.35, 0.55, 0.95))),
-        armor_xray: materials.add(xray(Srgba::new(0.35, 0.55, 0.95, 1.0))),
-        component: materials.add(solid(Color::srgb(0.95, 0.55, 0.18))),
-        component_xray: materials.add(xray(Srgba::new(0.95, 0.55, 0.18, 1.0))),
-        hull_translucent: materials.add(StandardMaterial {
-            base_color: Color::srgba(0.62, 0.64, 0.68, 0.16),
+/// When a target knocked out at `knocked_out_s` is rebuilt: [`REBUILD_BEAT_S`] past the hold beat
+/// of the look's replay of the record on show, first shown at `shown_since` — taken as shown at the
+/// knockout when it showed before it (an earlier shot's) or none shows (the look off). Virtual
+/// seconds, the look's clock in `Update`.
+fn rebuild_due(knocked_out_s: f64, shown_since: Option<f64>) -> f64 {
+    let shown = shown_since.map_or(knocked_out_s, |shown| shown.max(knocked_out_s));
+    XRayRelease::held_at(shown) + REBUILD_BEAT_S
+}
+
+/// The [`ArmourOverlay`]'s two materials, one armour blue: lit + matte, so adjacent plates shade
+/// apart, its own sun lighting the overlay layer ([`spawn_overlay_light`]).
+fn setup_overlay_materials(
+    mut commands: Commands,
+    mut materials: ResMut<Assets<StandardMaterial>>,
+) {
+    let blue = Srgba::new(0.35, 0.55, 0.95, 1.0);
+    commands.insert_resource(OverlayMaterials {
+        opaque: materials.add(StandardMaterial {
+            base_color: blue.into(),
+            perceptual_roughness: 0.75,
+            ..default()
+        }),
+        translucent: materials.add(StandardMaterial {
+            base_color: blue.with_alpha(0.3).into(),
             alpha_mode: AlphaMode::Blend,
+            perceptual_roughness: 0.75,
             ..default()
         }),
     });
 }
 
-/// Preloaded mesh+material for the sandbox's impact markers, cloned per hit by `spawn_impact_marker`.
-#[derive(Resource)]
-struct ImpactMarkerAssets {
-    mesh: Handle<Mesh>,
-    material: Handle<StandardMaterial>,
-}
-
-/// Small red sphere reused for every impact marker.
-fn setup_impact_marker(
-    mut commands: Commands,
-    mut meshes: ResMut<Assets<Mesh>>,
-    mut materials: ResMut<Assets<StandardMaterial>>,
-) {
-    commands.insert_resource(ImpactMarkerAssets {
-        mesh: meshes.add(Sphere::new(0.2)),
-        material: materials.add(Color::srgb(1.0, 0.3, 0.1)),
-    });
-}
-
-/// Drop a red sphere at each shell impact and leave it there — no cap, no gate. The sandbox is a
-/// dev tool for studying shots, so markers pile up until `C` wipes the board (`clear_shots`).
-fn spawn_impact_marker(
-    impact: On<Impact>,
-    assets: Res<ImpactMarkerAssets>,
-    mut commands: Commands,
-) {
-    commands.spawn((
-        ImpactMarker,
-        Mesh3d(assets.mesh.clone()),
-        MeshMaterial3d(assets.material.clone()),
-        Transform::from_translation(impact.position),
-    ));
-}
-
-/// When a glb view node binds to a sim part (`ViewOf`, inserted by `bind_tank_view`), check
-/// whether that part is a ballistic volume and paint the view node's mesh primitives accordingly
-/// — armor blue, component amber. The volume components live on the sim skeleton (spawned from
-/// data, no meshes); the renderable copies of the volume geometry live in the glb view tree, and
-/// `ViewOf` is the name-keyed join between the two.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "an observer classifying a bound view node: bindings, two volume roles, hierarchy, meshes and materials"
-)]
-fn paint_view_volumes(
-    add: On<Add, ViewOf>,
-    views: Query<&ViewOf>,
-    armor: Query<(), With<ArmorVolume>>,
-    components: Query<(), With<ComponentVolume>>,
-    children: Query<&Children>,
-    meshes: Query<(), With<Mesh3d>>,
-    materials: Res<VolumeMaterials>,
-    mut commands: Commands,
-) {
-    let Ok(view) = views.get(add.entity) else {
-        return;
-    };
-    let (is_armor, material) = if armor.contains(view.0) {
-        (true, &materials.armor)
-    } else if components.contains(view.0) {
-        (false, &materials.component)
-    } else {
-        return;
-    };
-    paint_volume(
-        add.entity,
-        is_armor,
-        &children,
-        &meshes,
-        material,
-        &mut commands,
-    );
-}
-
-/// Set `material` + a [`VolumePaint`] tag on every mesh in the volume node's subtree (the glTF
-/// loader puts the mesh on a child primitive, so walk descendants).
-fn paint_volume(
-    node: Entity,
-    armor: bool,
-    children: &Query<&Children>,
-    meshes: &Query<(), With<Mesh3d>>,
-    material: &Handle<StandardMaterial>,
-    commands: &mut Commands,
-) {
-    for entity in std::iter::once(node).chain(children.iter_descendants(node)) {
-        if meshes.contains(entity) {
-            commands.entity(entity).insert((
-                MeshMaterial3d(material.clone()),
-                VolumePaint { armor },
-                // Start in the main pass; the apply step moves it to the overlay layer when "on top".
-                RenderLayers::layer(0),
-            ));
-        }
-    }
-}
-
-/// Tag the model's *visual* meshes (and remember their material), so x-ray can swap them
-/// translucent and let the painted sim volumes show through. A hull mesh is any rendered mesh that
-/// is neither a declared collision proxy nor a sim volume/collider — checked up the hierarchy by
-/// component (the sandbox's standalone plates carry both on the mesh entity) and, in the tank's glb
-/// view tree (where those roles live on the sim skeleton, so the mesh's ancestors only *name*
-/// them), by asking the BAKE what those names declare — the same verdict `tank::bind_tank_view`
-/// hides by. Runs each frame; `Without<HullMesh>` makes it tag each mesh just once.
-fn tag_hull_meshes(
-    candidates: Query<
-        (Entity, &MeshMaterial3d<StandardMaterial>),
-        (With<Mesh3d>, Without<HullMesh>, Without<VolumePaint>),
-    >,
-    blueprint: Option<Res<crate::bake::TankBlueprint>>,
-    parents: Query<&ChildOf>,
-    names: Query<&Name>,
-    volumes: Query<(), Or<(With<ArmorVolume>, With<ComponentVolume>)>>,
-    colliders: Query<(), With<Collider>>,
-    mut commands: Commands,
-) {
-    let geometry = blueprint.as_deref().map(|blueprint| &blueprint.geometry);
-    for (entity, material) in &candidates {
-        let mut probe = entity;
-        let mut is_hull = true;
-        loop {
-            let proxy_name = names.get(probe).is_ok_and(|name| {
-                geometry.is_some_and(|geometry| geometry.is_collision_proxy(name.as_str()))
-            });
-            if proxy_name || volumes.contains(probe) || colliders.contains(probe) {
-                is_hull = false;
-                break;
-            }
-            match parents.get(probe) {
-                Ok(parent) => probe = parent.parent(),
-                Err(_) => break,
-            }
-        }
-        if is_hull {
-            commands.entity(entity).insert(HullMesh {
-                original: material.0.clone(),
-            });
-        }
-    }
-}
-
 /// A directional light on the overlay layer, matching the world light's direction — without it the
-/// "on top" volumes (rendered by the overlay camera) get no scene light and read flat/dark.
+/// overlay's plates (rendered by the overlay camera) get no scene light and read flat/dark.
 ///
 /// Both the direction and the intensity come from `world`'s single sun definition rather than a
-/// second copy of the numbers: the overlay volumes are drawn OVER the same scene, so any drift
-/// between the two lights shows up as volumes lit from a different sun than the tank under them.
-/// No shadows — this light exists only to shade the overlay layer.
+/// second copy of the numbers: the overlay is drawn OVER the same scene, so any drift between the
+/// two lights shows up as plates lit from a different sun than the tank under them. No shadows —
+/// this light exists only to shade the overlay layer.
 fn spawn_overlay_light(mut commands: Commands) {
     commands.spawn((
         crate::world::sun_light(),
@@ -861,100 +666,101 @@ fn spawn_overlay_light(mut commands: Commands) {
     ));
 }
 
-/// `F1/F2/F3` advance the mesh / armor / component tap-loops — kept as accelerators for the panel's
-/// Layers rows (both write the same [`LayerView`], write-on-change on the panel side).
-fn toggle_layers(keys: Res<ButtonInput<KeyCode>>, mut view: ResMut<LayerView>) {
-    // Moved off the number row (now the crew bar, `1`–`5`) onto the function keys.
-    if keys.just_pressed(KeyCode::F1) {
-        view.mesh = view.mesh.next();
-    }
+/// F2 steps the [`ArmourOverlay`] (the panel writes the same resource).
+fn toggle_armour_overlay(keys: Res<ButtonInput<KeyCode>>, mut overlay: ResMut<ArmourOverlay>) {
     if keys.just_pressed(KeyCode::F2) {
-        view.armor = view.armor.next();
-    }
-    if keys.just_pressed(KeyCode::F3) {
-        view.components = view.components.next();
+        *overlay = overlay.next();
     }
 }
 
-/// Apply the layer states to the target's meshes. The hull swaps material/visibility for its loop;
-/// each volume mesh sets its visibility and **render layer** — moving to the overlay layer draws it
-/// on top (via the overlay camera), staying on layer 0 keeps it depth-tested in the main pass.
-/// `Visibility::Visible` shows a volume even through a hidden hull. Writes only on change, re-checked
-/// each frame so late-binding meshes pick up the current state.
-fn apply_layer_visibility(
-    view: Res<LayerView>,
-    materials: Option<Res<VolumeMaterials>>,
-    mut hull_meshes: Query<
-        (
-            &HullMesh,
-            &mut Visibility,
-            &mut MeshMaterial3d<StandardMaterial>,
-        ),
-        Without<VolumePaint>,
+/// Which render primitives are armour's: a primitive whose nearest [`ViewOf`], itself or an
+/// ancestor, names an [`ArmorVolume`].
+#[derive(SystemParam)]
+struct ArmourPrimitives<'w, 's> {
+    views: Query<'w, 's, &'static ViewOf>,
+    parents: Query<'w, 's, &'static ChildOf>,
+    armour: Query<'w, 's, (), With<ArmorVolume>>,
+}
+
+impl ArmourPrimitives<'_, '_> {
+    fn contains(&self, primitive: Entity) -> bool {
+        std::iter::once(primitive)
+            .chain(self.parents.iter_ancestors(primitive))
+            .find_map(|node| self.views.get(node).ok())
+            .is_some_and(|view| self.armour.contains(view.0))
+    }
+}
+
+/// Draw the [`ArmourOverlay`]: an [`ArmourCopy`] of each of the [`ArmourPrimitives`], on
+/// [`OVERLAY_LAYER`], posed at its source each frame. A copy goes with its source, and every copy
+/// with the overlay off. `render_policy` resolves a new mesh onto the battlefield channel in the
+/// frame it lands, so a copy is shown only once its layer reads the overlay's.
+fn draw_armour_overlay(
+    overlay: Res<ArmourOverlay>,
+    materials: Option<Res<OverlayMaterials>>,
+    primitives: Query<
+        (Entity, &Mesh3d, &GlobalTransform),
+        (With<GltfMeshName>, Without<ArmourCopy>),
     >,
-    mut volume_meshes: Query<
-        (
-            &VolumePaint,
-            &mut Visibility,
-            &mut RenderLayers,
-            &mut MeshMaterial3d<StandardMaterial>,
-        ),
-        Without<HullMesh>,
-    >,
+    armour: ArmourPrimitives,
+    mut copies: Query<(
+        Entity,
+        &ArmourCopy,
+        &mut Mesh3d,
+        &mut MeshMaterial3d<StandardMaterial>,
+        &mut Transform,
+        &mut RenderLayers,
+        &mut Visibility,
+    )>,
+    mut commands: Commands,
 ) {
-    let Some(materials) = materials else {
+    let material = match (*overlay, materials.as_deref()) {
+        (ArmourOverlay::Opaque, Some(materials)) => Some(&materials.opaque),
+        (ArmourOverlay::Translucent, Some(materials)) => Some(&materials.translucent),
+        (ArmourOverlay::Off, _) | (_, None) => None,
+    };
+    let Some(material) = material else {
+        for (copy, ..) in &copies {
+            commands.entity(copy).despawn();
+        }
         return;
     };
-
-    // Hull: opaque (original) → x-ray (translucent) → hidden.
-    for (hull, mut visibility, mut material) in &mut hull_meshes {
-        let (want_vis, want_mat) = match view.mesh {
-            MeshState::Solid => (Visibility::Inherited, &hull.original),
-            MeshState::Xray => (Visibility::Inherited, &materials.hull_translucent),
-            MeshState::Hidden => (Visibility::Hidden, &hull.original),
+    let layer = RenderLayers::layer(OVERLAY_LAYER);
+    let mut copied = HashSet::new();
+    for (copy, of, mut mesh, mut worn, mut pose, mut layers, mut visibility) in &mut copies {
+        let Ok((_, source, at)) = primitives.get(of.of) else {
+            commands.entity(copy).despawn();
+            continue;
         };
-        if *visibility != want_vis {
-            *visibility = want_vis;
+        copied.insert(of.of);
+        mesh.set_if_neq(source.clone());
+        if worn.0 != *material {
+            worn.0 = material.clone();
         }
-        if material.0 != *want_mat {
-            material.0 = want_mat.clone();
+        pose.set_if_neq(at.compute_transform());
+        let on_layer = *layers == layer;
+        if !on_layer {
+            *layers = layer.clone();
         }
+        visibility.set_if_neq(if on_layer {
+            Visibility::Visible
+        } else {
+            Visibility::Hidden
+        });
     }
-
-    // Volumes: off → on-top (overlay layer, opaque) → solid (main pass, opaque) → x-ray (main pass,
-    // translucent).
-    for (paint, mut visibility, mut layers, mut material) in &mut volume_meshes {
-        let state = if paint.armor {
-            view.armor
-        } else {
-            view.components
-        };
-        let opaque = if paint.armor {
-            &materials.armor
-        } else {
-            &materials.component
-        };
-        let ghost = if paint.armor {
-            &materials.armor_xray
-        } else {
-            &materials.component_xray
-        };
-        let (want_vis, want_layer, want_mat) = match state {
-            VolumeState::Hidden => (Visibility::Hidden, 0, opaque),
-            VolumeState::OnTop => (Visibility::Visible, OVERLAY_LAYER, opaque),
-            VolumeState::Solid => (Visibility::Visible, 0, opaque),
-            VolumeState::Xray => (Visibility::Visible, 0, ghost),
-        };
-        if *visibility != want_vis {
-            *visibility = want_vis;
+    for (primitive, mesh, at) in &primitives {
+        if copied.contains(&primitive) || !armour.contains(primitive) {
+            continue;
         }
-        let want_layers = RenderLayers::layer(want_layer);
-        if *layers != want_layers {
-            *layers = want_layers;
-        }
-        if material.0 != *want_mat {
-            material.0 = want_mat.clone();
-        }
+        commands.spawn((
+            Name::new("armour overlay"),
+            ArmourCopy { of: primitive },
+            mesh.clone(),
+            MeshMaterial3d(material.clone()),
+            at.compute_transform(),
+            layer.clone(),
+            Visibility::Hidden,
+        ));
     }
 }
 
@@ -1188,7 +994,7 @@ fn toggle_full_pause(
 }
 
 /// `c` wipes the board: every shell (in-flight or frozen) with its tracer + penetration marks, and
-/// every impact marker — so you can start a clean shot.
+/// the target's HP pools refilled and knockouts cleared — so you can start a clean shot.
 #[expect(
     clippy::too_many_arguments,
     reason = "a sandbox command sweeping shells, health and three damage-state markers"
@@ -1196,7 +1002,7 @@ fn toggle_full_pause(
 fn clear_shots(
     keys: Res<ButtonInput<KeyCode>>,
     mut requested: ResMut<ClearRequested>,
-    shots: Query<Entity, Or<(With<ShellPath>, With<ImpactMarker>)>>,
+    shots: Query<Entity, With<ShellPath>>,
     mut health: Query<&mut ComponentHealth>,
     dead: Query<Entity, With<Dead>>,
     cooked_off: Query<Entity, With<CookedOff>>,
@@ -1235,7 +1041,7 @@ fn clear_shots(
 fn reset_world(
     keys: Res<ButtonInput<KeyCode>>,
     mut requested: ResMut<ResetRequested>,
-    shots: Query<Entity, Or<(With<ShellPath>, With<ImpactMarker>)>>,
+    shots: Query<Entity, With<ShellPath>>,
     mut target: TargetRebuild,
 ) {
     // `R` or the panel's Scene button; consume the flag on the frame it fires (see `clear_shots`).
@@ -1293,9 +1099,8 @@ fn toggle_march_mode(keys: Res<ButtonInput<KeyCode>>, mut mode: ResMut<ballistic
     }
 }
 
-/// Tracer: draw each in-flight shell's accumulated path as a gizmo polyline. The first piece of the
-/// inspection draw the penetration march will build on (path segments, entry/exit, spall cones).
-fn draw_shell_paths(mut gizmos: Gizmos, paths: Query<&ShellPath>) {
+/// Tracer: each shell's accumulated path as a gizmo polyline, of the shells that met no tank.
+fn draw_shell_paths(mut gizmos: Gizmos, paths: Query<&ShellPath, Without<MetTank>>) {
     for path in &paths {
         let mut start = 0;
         for end in path
@@ -1315,9 +1120,10 @@ fn draw_shell_paths(mut gizmos: Gizmos, paths: Query<&ShellPath>) {
     }
 }
 
-/// Inspection draw for the march: each volume crossing as a green entry marker, a red exit marker,
-/// and an orange through-span (its length is the geometric line-of-sight thickness).
-fn draw_penetrations(mut gizmos: Gizmos, marks: Query<&PenetrationMarks>) {
+/// Inspection draw for the march of the shells that met no tank: each volume crossing as a green
+/// entry marker, a red exit marker, and an orange through-span (its length is the geometric
+/// line-of-sight thickness).
+fn draw_penetrations(mut gizmos: Gizmos, marks: Query<&PenetrationMarks, Without<MetTank>>) {
     for mark in &marks {
         for event in &mark.events {
             // Entry green normally, magenta when this crossing was an overmatch.
@@ -1345,55 +1151,51 @@ fn draw_penetrations(mut gizmos: Gizmos, marks: Query<&PenetrationMarks>) {
     }
 }
 
-/// Spall draw: each direction of a body exit's spall cone, from the exit to where it stopped — hot
-/// orange where it dosed a box, dim grey where it only shadowed (armour) or left the tank. Each
-/// direction runs until material exhausts its strength (design doc §5).
-fn draw_spall(mut gizmos: Gizmos, marks: Query<&SpallMarks>) {
-    // A short representative length for the cone outline (directions stop where they are spent).
-    const OUTLINE: f32 = 1.2;
-    for mark in &marks {
-        for cone in &mark.cones {
-            // Faint cone outline: the axis and a rim circle, so the cone's aim + spread read even
-            // where its directions stop short.
-            let axis = Vec3::from(cone.axis);
-            let tip = cone.origin + axis * OUTLINE;
-            let rim = OUTLINE * cone.field.half_angle().tan();
-            let facing = Quat::from_rotation_arc(Vec3::Z, axis);
-            gizmos.line(cone.origin, tip, Color::srgb(0.35, 0.37, 0.42));
-            gizmos.circle(
-                Isometry3d::new(tip, facing),
-                rim,
-                Color::srgb(0.35, 0.37, 0.42),
-            );
-            for ray in &cone.rays {
-                let color = if ray.deposited {
-                    Color::srgb(1.0, 0.4, 0.1)
-                } else {
-                    Color::srgb(0.45, 0.47, 0.52)
-                };
-                gizmos.line(cone.origin, ray.end, color);
-                if ray.deposited {
-                    gizmos.sphere(
-                        Isometry3d::from_translation(ray.end),
-                        0.05,
-                        Color::srgb(1.0, 0.2, 0.1),
-                    );
-                }
-            }
+/// Whether a shell's armour log met a tank: bounced off, crossed or ran a line through a volume
+/// `of_tank` names, or burst with a field that walks a tank.
+fn met_a_tank(log: &[ArmourMark], of_tank: impl Fn(Entity) -> bool) -> bool {
+    log.iter().any(|mark| match mark {
+        ArmourMark::Bounce { struck, .. } => of_tank(*struck),
+        ArmourMark::Crossing { volumes, .. } | ArmourMark::Wound { volumes, .. } => {
+            volumes.iter().any(|crossing| of_tank(crossing.volume))
+        }
+        ArmourMark::Burst { tank, .. } => tank.is_some(),
+        ArmourMark::Failed => false,
+    })
+}
+
+/// A shell that met a tank ([`met_a_tank`], a volume with a [`VolumeOf`]) is [`MetTank`] while it
+/// flies and goes once spent: the look explains it.
+fn sweep_tank_shots(
+    shells: Query<(Entity, &PenetrationMarks, Has<Projectile>, Has<MetTank>), With<ShellPath>>,
+    tank_volumes: Query<(), With<VolumeOf>>,
+    mut commands: Commands,
+) {
+    for (shell, marks, flying, marked) in &shells {
+        if !marked && !met_a_tank(&marks.log, |volume| tank_volumes.contains(volume)) {
+            continue;
+        }
+        if !flying {
+            commands.entity(shell).despawn();
+        } else if !marked {
+            commands.entity(shell).insert(MetTank);
         }
     }
 }
 
-fn draw_consequence_gizmos(
+/// A red sphere where each spent shell that met no tank came to rest, the end of its path.
+fn draw_shell_ends(
     mut gizmos: Gizmos,
-    cooked_ammo: Query<&GlobalTransform, (With<Ammo>, With<CookedOff>)>,
+    spent: Query<&ShellPath, (Without<Projectile>, Without<MetTank>)>,
 ) {
-    for transform in &cooked_ammo {
-        gizmos.sphere(
-            Isometry3d::from_translation(transform.translation()),
-            0.45,
-            Color::srgb(1.0, 0.35, 0.02),
-        );
+    for path in &spent {
+        if let Some(&end) = path.points.last() {
+            gizmos.sphere(
+                Isometry3d::from_translation(end),
+                0.2,
+                Color::srgb(1.0, 0.3, 0.1),
+            );
+        }
     }
 }
 
@@ -1433,16 +1235,15 @@ fn update_round_label(
 }
 
 /// The slim keybindings legend (the direct-manipulation keys that survive alongside the egui panel)
-/// bottom left above the crew bar, the [`RoundLabel`] bottom right, and a small pool of floating
-/// shell labels; the top of the view stays to the status card (left) and the pen cam corner
-/// (right). Layer / shot / time / scene controls, and the time + shell-count readouts, live in the
-/// panel's Layers / Shot / Time / Telemetry / Scene sections.
+/// bottom left above the crew bar and the [`RoundLabel`] bottom right; the top of the view stays to
+/// the status card (left). View / shot / time / scene controls, and the time + shell-count
+/// readouts, live in the panel's View / Shot / Time / Telemetry / Scene sections.
 fn spawn_hud(mut commands: Commands, fonts: Res<crate::ui_font::UiFonts>) {
     commands.spawn((
         Text::new(
             "WASD / Shift / Ctrl  fly     LMB  fire the round     E / Q  next / previous round\n\
-             X  x-ray the target     Esc  free cursor for the panel\n\
-             F1/F2/F3  cycle mesh / armor / component layers (also on the panel)\n\
+             X  the look on / off     F2  armour overlay off / opaque / translucent\n\
+             Esc  free cursor for the panel\n\
              1-5  crew seats: tap source then target to swap occupants (re-tap cancels)\n\
              Everything else (speed / time / clear / reset) lives on the left panel.",
         ),
@@ -1496,24 +1297,6 @@ fn spawn_hud(mut commands: Commands, fonts: Res<crate::ui_font::UiFonts>) {
                 BackgroundColor(Color::WHITE),
             ));
         });
-    // Pool of labels positioned over live shells each frame; hidden while unused.
-    for _ in 0..8 {
-        commands.spawn((
-            ShellLabel,
-            Text::new(""),
-            TextFont {
-                font_size: FontSize::Px(13.0),
-                ..default()
-            },
-            TextColor(Color::srgb(1.0, 0.9, 0.5)),
-            Node {
-                position_type: PositionType::Absolute,
-                ..default()
-            },
-            Visibility::Hidden,
-        ));
-    }
-    // The component-HP and aggregate tank-status label pools live in the shared `hud` module.
 }
 
 /// Move the shared crew UI's left-anchored nodes, the status card top left and the crew bar bottom
@@ -1523,36 +1306,5 @@ fn clear_the_panel(
 ) {
     for mut node in &mut nodes {
         node.left = Val::Px(UI_LEFT);
-    }
-}
-
-/// Position each pooled label beside a live shell (reprojected to screen) and write its speed,
-/// remaining capability, and plate count; hide the leftover labels.
-fn update_shell_labels(
-    camera: Single<(&Camera, &GlobalTransform), With<FreeFlyCam>>,
-    shells: Query<(&Transform, &ShellReadout, &PenetrationMarks)>,
-    mut labels: Query<(&mut Node, &mut Text, &mut Visibility), With<ShellLabel>>,
-) {
-    let (camera, cam_transform) = *camera;
-    let mut shells = shells.iter();
-    for (mut node, mut text, mut visibility) in &mut labels {
-        let Some((transform, readout, marks)) = shells.next() else {
-            *visibility = Visibility::Hidden;
-            continue;
-        };
-        match camera.world_to_viewport(cam_transform, transform.translation) {
-            Ok(screen) => {
-                node.left = Val::Px(screen.x + 12.0);
-                node.top = Val::Px(screen.y - 8.0);
-                *text = Text::new(format!(
-                    "{:.0} m/s\n{:.0} mm\n{} crossed",
-                    readout.speed,
-                    readout.capability,
-                    marks.events.len()
-                ));
-                *visibility = Visibility::Visible;
-            }
-            Err(_) => *visibility = Visibility::Hidden,
-        }
     }
 }

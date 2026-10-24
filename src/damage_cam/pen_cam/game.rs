@@ -42,10 +42,9 @@ use bevy::prelude::*;
 use bevy::world_serialization::WorldAsset;
 
 pub(crate) use self::killcam::{GameDeathScreen, KillCamGate, KillCamGateSet};
-pub(crate) use self::xray::XRay;
 #[cfg(feature = "dev_tools")]
 pub(crate) use self::xray::scripted_xray_plugin;
-use self::xray::{LiveState, LiveVolume};
+pub(crate) use self::xray::{XRay, XRayRelease, XRaySubject};
 use super::hud::{self, CornerImages, Glyphs};
 use super::look;
 use super::plan::Plan;
@@ -54,13 +53,13 @@ use super::timeline::{self, CornerKind, Lineup};
 use super::view::{self, StageView};
 use super::{Corner, CornerRig, Exhibit, Exhibits, Knobs, Showing, Surface};
 use crate::bake::TankBlueprint;
-use crate::damage::{TankKnockedOut, TankVolumes};
+use crate::damage::TankKnockedOut;
 use crate::damage_cam::delivery::{ExplanationKey, ImpactPresence, ShotExplanations};
 use crate::damage_cam::shapes::TankAsset;
 use crate::damage_cam::wire::{Audience, ShotExplanation, TankLife};
 use crate::settings::{PenCamCorner, Settings};
-use crate::spec::{TankSpec, TankSpecHandle};
-use crate::tank::{Controlled, Rig as TankRig};
+use crate::spec::TankSpec;
+use crate::tank::Controlled;
 use crate::{CombatantId, CombatantLife, FreeShooter};
 
 /// The corner slot on a client composition: the stage's materials and [`wire`].
@@ -78,12 +77,19 @@ pub(crate) struct CloseCorner;
 #[derive(Event, Clone, Copy, Debug)]
 pub(crate) struct NewMatch;
 
+/// The pen cam's chained `Update` systems — the slot's, the kill cam's drive and the x-ray's: a
+/// system that despawns a tank they may be drawing runs after them, so nothing they queue in a
+/// frame lands on a despawned entity.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct PenCamSet;
+
 /// The slot's and the x-ray's state and systems, without the materials (a headless test registers
 /// the materials' assets alone).
 fn wire(app: &mut App) {
     super::presentation(app);
     app.init_resource::<Slot>()
         .init_resource::<XRay>()
+        .init_resource::<XRaySubject>()
         .init_resource::<xray::XRayState>()
         .add_observer(close)
         .add_observer(xray::forget_shown)
@@ -110,7 +116,8 @@ fn wire(app: &mut App) {
                 log_presence,
                 xray::log_presence,
             )
-                .chain(),
+                .chain()
+                .in_set(PenCamSet),
         )
         // A mask copy takes its shoe's rung in the frame the belt writes it.
         .add_systems(
@@ -339,32 +346,27 @@ impl Rig<'_, '_> {
     }
 }
 
-/// The player's tank: who it is this life, its body, its file and its components' live state; and
-/// the [`FreeShooter`] the player fires as, where it fires as one.
+/// The player's tank, who it is this life; and the [`FreeShooter`] the player fires as, where it
+/// fires as one.
 #[derive(SystemParam)]
 struct Player<'w, 's> {
     tank: Query<
         'w,
         's,
         (
-            Entity,
             &'static CombatantId,
             &'static CombatantLife,
-            Option<&'static TankVolumes>,
-            Option<&'static TankSpecHandle>,
-            Option<&'static TankRig>,
             Has<TankKnockedOut>,
         ),
         With<Controlled>,
     >,
-    volumes: Query<'w, 's, LiveVolume>,
     free: Query<'w, 's, (&'static CombatantId, &'static CombatantLife), With<FreeShooter>>,
 }
 
 impl Player<'_, '_> {
     /// The tank's life, while it has one and is not knocked out.
     fn life(&self) -> Option<TankLife> {
-        let (_, &combatant, &life, _, _, _, knocked_out) = self.tank.single().ok()?;
+        let (&combatant, &life, knocked_out) = self.tank.single().ok()?;
         (!knocked_out).then_some(TankLife { combatant, life })
     }
 
@@ -376,29 +378,6 @@ impl Player<'_, '_> {
             .ok()
             .map(|(&combatant, &life)| TankLife { combatant, life })
             .or_else(|| self.life())
-    }
-
-    /// The tank's body — its entity and rig — while it has a life and is not knocked out.
-    fn body(&self) -> Option<(Entity, &TankRig)> {
-        let (entity, _, _, _, _, rig, knocked_out) = self.tank.single().ok()?;
-        (!knocked_out).then_some(())?;
-        Some((entity, rig?))
-    }
-
-    /// The tank's file, as a record names it.
-    fn vehicle(&self) -> Option<String> {
-        let (_, _, _, _, spec, _, _) = self.tank.single().ok()?;
-        let path = spec?.0.path()?;
-        Some(path.path().to_string_lossy().into_owned())
-    }
-
-    fn live(&self) -> LiveState {
-        self.tank
-            .single()
-            .ok()
-            .and_then(|(_, _, _, volumes, _, _, _)| volumes)
-            .map(|volumes| LiveState::read(volumes, &self.volumes))
-            .unwrap_or_default()
     }
 }
 
@@ -594,6 +573,7 @@ mod tests {
     use crate::damage_cam::pen_cam::look::{LookMaterial, Masks};
     use crate::damage_cam::pen_cam::stage::StageCamera;
     use crate::damage_cam::wire::{BuiltExplanation, ShotVocabulary};
+    use crate::spec::TankSpecHandle;
 
     /// The test's frame step (s), a 30 Hz frame: fixture data.
     pub(super) const STEP_S: f32 = 1.0 / 30.0;
@@ -1473,6 +1453,163 @@ mod tests {
         }
     }
 
+    /// [`world_xray_app`] with the x-ray's subject the [`STRUCK`] combatant's tank and the corner
+    /// closed, as the armour sandbox mounts it: a second body like the player's — the player's
+    /// tank file, the fixture's components at their full pools, a hull and a turret mesh — standing
+    /// as `STRUCK`'s first life. The app, the player's meshes, the struck tank and its meshes.
+    fn struck_xray_app() -> (App, [Entity; 2], Entity, [Entity; 2]) {
+        let (mut app, player, own, _) = world_xray_app();
+        app.insert_resource(XRaySubject::Struck(STRUCK))
+            .insert_resource(Settings {
+                pen_cam_corner: PenCamCorner::Off,
+                ..default()
+            });
+        let spec = app.world().get::<TankSpecHandle>(player).unwrap().0.clone();
+        let standard = app
+            .world()
+            .get::<MeshMaterial3d<StandardMaterial>>(own[0])
+            .unwrap()
+            .0
+            .clone();
+        let fixture = report("s9_breech_and_loader");
+        let world = app.world_mut();
+        let target = world
+            .spawn((
+                STRUCK,
+                CombatantLife(0),
+                crate::tank::Tank,
+                TankSpecHandle(spec),
+                Transform::from_xyz(0.0, 0.0, -12.0),
+                Visibility::default(),
+            ))
+            .id();
+        let node = |world: &mut World, name: Option<&str>, parent: Entity| {
+            let mut node =
+                world.spawn((Transform::IDENTITY, Visibility::default(), ChildOf(parent)));
+            if let Some(name) = name {
+                node.insert(Name::new(name.to_owned()));
+            }
+            node.id()
+        };
+        let hull = node(world, Some(view::HULL_NODE), target);
+        let turret = node(world, Some("Turret"), hull);
+        let gun = node(world, None, turret);
+        let muzzle = node(world, None, gun);
+        let mesh = |world: &mut World, name: Option<&str>, parent: Entity| {
+            let mesh = node(world, name, parent);
+            world
+                .entity_mut(mesh)
+                .insert((Mesh3d(Handle::default()), MeshMaterial3d(standard.clone())));
+            mesh
+        };
+        let hull_mesh = mesh(world, None, hull);
+        let turret_mesh = mesh(world, Some(&fixture.components[0].name), turret);
+        world.entity_mut(target).insert(crate::tank::Rig {
+            hull,
+            turret,
+            gun,
+            muzzle,
+        });
+        for component in fixture.components {
+            world.spawn((
+                Name::new(component.name),
+                crate::ballistics::ComponentHealth {
+                    current: component.count,
+                    max: component.count,
+                },
+                crate::damage::VolumeOf(target),
+            ));
+        }
+        app.update();
+        (app, own, target, [hull_mesh, turret_mesh])
+    }
+
+    /// With the subject a struck combatant's tank, X dresses that tank and leaves the player's own
+    /// untouched; over it the x-ray draws the player's shooter record of the hit on it, never a
+    /// victim projection of a hit on it however new; knocked out, the struck tank stays dressed,
+    /// where the player's own would be let go. The armour sandbox's look explains the free
+    /// shooter's shots on its target with exactly this, the target knocked out included.
+    #[test]
+    fn a_struck_subject_wears_the_look_under_the_players_shot() {
+        let (mut app, own, target, meshes) = struck_xray_app();
+        let (shot, _, vocabulary, _) = explained("s1_through_crew", 1200);
+        let (_, newer, newer_vocabulary, _) = explained("s3_ricochet", 1300);
+        receive(&mut app, shot.clone(), &vocabulary);
+        receive(&mut app, newer, &newer_vocabulary);
+        press_x(&mut app);
+        run(&mut app, 0.2);
+        for mesh in meshes {
+            assert!(wears_the_look(&mut app, mesh), "{mesh:?}");
+        }
+        for mesh in own {
+            assert!(!wears_the_look(&mut app, mesh), "the player's own {mesh:?}");
+        }
+        assert_eq!(
+            app.world().resource::<xray::XRayState>().record(),
+            Some(ExplanationKey::of(&shot)),
+            "the player's shooter record"
+        );
+        app.world_mut().entity_mut(target).insert(TankKnockedOut {
+            reason: crate::damage::KnockoutReason::CrewLoss,
+        });
+        run(&mut app, 0.2);
+        for mesh in meshes {
+            assert!(wears_the_look(&mut app, mesh), "knocked out: {mesh:?}");
+        }
+    }
+
+    /// A composition about to despawn the subject lets go of it: every dressed mesh back in exactly
+    /// the material it wore, nothing of the x-ray left and no record on show; the subject still
+    /// standing, the next frame dresses it afresh. Before the release, the record's first showing
+    /// is the x-ray's own clock. The armour sandbox's rebuild releases ahead of despawning its
+    /// target, and times the rebuild from that first showing.
+    #[test]
+    fn a_release_restores_the_subject_exactly() {
+        use bevy::ecs::system::RunSystemOnce;
+
+        let (mut app, _, _, meshes) = struck_xray_app();
+        let original = app
+            .world()
+            .get::<MeshMaterial3d<StandardMaterial>>(meshes[0])
+            .unwrap()
+            .id();
+        let (shot, _, vocabulary, _) = explained("s1_through_crew", 1200);
+        receive(&mut app, shot, &vocabulary);
+        press_x(&mut app);
+        run(&mut app, 0.2);
+        let shown = |app: &mut App| {
+            app.world_mut()
+                .run_system_once(|release: XRayRelease| release.shown_since())
+                .unwrap()
+        };
+        let since = app.world().resource::<xray::XRayState>().since();
+        assert!(since.is_some());
+        assert_eq!(shown(&mut app), since);
+        app.world_mut()
+            .run_system_once(|mut release: XRayRelease, mut commands: Commands| {
+                release.release(&mut commands);
+            })
+            .unwrap();
+        let (dressed, items, ..) = xray_census(&mut app);
+        assert_eq!((dressed, items), (0, 0), "nothing of the x-ray");
+        for mesh in meshes {
+            let entity = app.world().entity(mesh);
+            assert_eq!(
+                entity
+                    .get::<MeshMaterial3d<StandardMaterial>>()
+                    .map(|m| m.id()),
+                Some(original),
+                "{mesh:?}: the same handle"
+            );
+            assert!(!entity.contains::<MeshMaterial3d<LookMaterial>>());
+        }
+        assert_eq!(shown(&mut app), None);
+        run(&mut app, 0.2);
+        for mesh in meshes {
+            assert!(wears_the_look(&mut app, mesh), "dressed afresh: {mesh:?}");
+        }
+    }
+
     /// A corner that needs masks opening while the x-ray is on: two mask sets, each on its own
     /// viewer, their images distinct, and every mesh the x-ray dresses masked by the player's
     /// camera's set and no other; the corner's close releases its own and the x-ray keeps the
@@ -1975,6 +2112,35 @@ mod tests {
         run(&mut app, 0.2);
         assert!(wears_the_look(&mut app, late), "dressed once scanned");
         assert_eq!(xray_census(&mut app).0, 3);
+    }
+
+    /// Under [`SourceDetailOnly`](crate::geometry_lod::SourceDetailOnly) no ladder scans, so a glTF
+    /// primitive is dressed as it lands: waiting for a scan that never comes would leave the armour
+    /// sandbox's tank, which mounts it, undressed.
+    #[test]
+    fn under_source_detail_a_primitive_is_dressed_unscanned() {
+        let (mut app, player, _, _) = world_xray_app();
+        app.insert_resource(crate::geometry_lod::SourceDetailOnly);
+        press_x(&mut app);
+        run(&mut app, 0.2);
+        let standard = app
+            .world_mut()
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        let hull = app.world().get::<crate::tank::Rig>(player).unwrap().hull;
+        let late = app
+            .world_mut()
+            .spawn((
+                bevy::gltf::GltfMeshName("Late".into()),
+                Mesh3d(Handle::default()),
+                MeshMaterial3d(standard),
+                Transform::IDENTITY,
+                Visibility::default(),
+                ChildOf(hull),
+            ))
+            .id();
+        run(&mut app, 0.2);
+        assert!(wears_the_look(&mut app, late));
     }
 
     /// `name`'s record of another tank's round fired on `fire_tick` striking the player's first

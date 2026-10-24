@@ -11,8 +11,8 @@
 //!
 //! The panel NEVER hands egui `&mut resource.field`: it copies each mutable resource into a local,
 //! draws every widget against the local, and writes the resource back only when the local actually
-//! differs (`!=`-guarded). Every resource it edits — [`LayerView`], [`ShotParams`] — derives
-//! `Copy + PartialEq` for exactly that. The armour sandbox has NO `run_if(resource_changed::<...>)`
+//! differs (`!=`-guarded). Every resource it edits — [`ArmourOverlay`], [`ShotParams`], the look's
+//! [`XRay`] flag — is `Copy + PartialEq` for exactly that. The armour sandbox has NO `run_if(resource_changed::<...>)`
 //! reactor on any resource this panel touches (unlike the track sandbox's `sync_collider_gizmos`),
 //! so a spurious change-tick could not retrigger heavy work even if we leaked one; the write-on-change
 //! discipline is kept regardless, both to match the precedent and to keep the intent seams
@@ -30,11 +30,12 @@ use bevy_egui::{EguiContexts, EguiPlugin, EguiPrimaryContextPass, egui};
 
 use crate::ballistics::{ComponentHealth, MarchMode, ShellReadout};
 use crate::damage::{CookedOff, TankKnockedOut};
+use crate::damage_cam::pen_cam::game::XRay;
 use crate::tank::Weapon;
 
 use super::{
-    ClearRequested, LayerView, MeshState, PANEL_WIDTH, PanelWantsInput, RangeGun, ResetRequested,
-    Respawn, SPEEDS, ShotParams, SpeedIndex, VolumeState,
+    ArmourOverlay, ClearRequested, PANEL_WIDTH, PanelWantsInput, RangeGun, ResetRequested, Respawn,
+    SPEEDS, ShotParams, SpeedIndex,
 };
 
 pub(super) fn plugin(app: &mut App) {
@@ -50,7 +51,8 @@ const WARN: egui::Color32 = egui::Color32::from_rgb(235, 90, 70);
 /// panel edits a local and writes back on change (see the module doc).
 #[derive(SystemParam)]
 struct Write<'w> {
-    layers: ResMut<'w, LayerView>,
+    xray: ResMut<'w, XRay>,
+    overlay: ResMut<'w, ArmourOverlay>,
     shot: ResMut<'w, ShotParams>,
     march: ResMut<'w, MarchMode>,
     speed: ResMut<'w, SpeedIndex>,
@@ -105,7 +107,8 @@ fn panel(
     );
 
     // Local working copies — every widget edits THESE, never the resources (change-tick discipline).
-    let mut layers = *w.layers;
+    let mut look = w.xray.on;
+    let mut overlay = *w.overlay;
     let mut shot = *w.shot;
     let mut march_real = *w.march == MarchMode::Real;
     let mut speed_idx = w.speed.0;
@@ -123,9 +126,9 @@ fn panel(
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Armor sandbox");
 
-                egui::CollapsingHeader::new("Layers")
+                egui::CollapsingHeader::new("View")
                     .default_open(true)
-                    .show(ui, |ui| layers_section(ui, &mut layers));
+                    .show(ui, |ui| view_section(ui, &mut look, &mut overlay));
 
                 egui::CollapsingHeader::new("Shot")
                     .default_open(true)
@@ -164,8 +167,11 @@ fn panel(
     }
 
     // Write-backs — resources are touched ONLY on a real change.
-    if layers != *w.layers {
-        *w.layers = layers;
+    if look != w.xray.on {
+        w.xray.on = look;
+    }
+    if overlay != *w.overlay {
+        *w.overlay = overlay;
     }
     if shot != *w.shot {
         *w.shot = shot;
@@ -201,43 +207,20 @@ fn panel(
     }
 }
 
-/// A segmented control row for the hull's [`MeshState`] — the solid / x-ray / off loop as a strip of
-/// `SelectableLabel`s over the panel's LOCAL copy (write-on-change is enforced in [`panel`]).
-fn mesh_state_row(ui: &mut egui::Ui, label: &str, state: &mut MeshState) {
+/// The look (`X`) and the armour overlay (`F2`) over the panel's LOCAL copies.
+fn view_section(ui: &mut egui::Ui, look: &mut bool, overlay: &mut ArmourOverlay) {
+    ui.checkbox(look, "look");
     ui.horizontal(|ui| {
-        ui.label(label);
-        for option in MeshState::ALL {
+        ui.label("armour");
+        for option in ArmourOverlay::ALL {
             if ui
-                .selectable_label(*state == option, option.label())
+                .selectable_label(*overlay == option, option.label())
                 .clicked()
             {
-                *state = option;
+                *overlay = option;
             }
         }
     });
-}
-
-/// A segmented control row for a volume category's [`VolumeState`] — off / on-top / solid / x-ray.
-fn volume_state_row(ui: &mut egui::Ui, label: &str, state: &mut VolumeState) {
-    ui.horizontal(|ui| {
-        ui.label(label);
-        for option in VolumeState::ALL {
-            if ui
-                .selectable_label(*state == option, option.label())
-                .clicked()
-            {
-                *state = option;
-            }
-        }
-    });
-}
-
-/// The three inspection layers (the `F1`/`F2`/`F3` tap-loops) as segmented controls over the panel's
-/// LOCAL [`LayerView`].
-fn layers_section(ui: &mut egui::Ui, layers: &mut LayerView) {
-    mesh_state_row(ui, "mesh     ", &mut layers.mesh);
-    volume_state_row(ui, "armor    ", &mut layers.armor);
-    volume_state_row(ui, "component", &mut layers.components);
 }
 
 /// The range gun's rounds as a selectable list, each display name with its registry key, and a

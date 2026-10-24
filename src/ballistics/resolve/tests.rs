@@ -321,7 +321,7 @@ fn marched(app: &mut App, body: RoundBody, speed: f32) -> (Vec<(Verdict, Vec3)>,
             .cones
             .iter()
             .flat_map(|cone| &cone.rays)
-            .any(|ray| ray.deposited)
+            .any(|ray| !ray.doses.is_empty())
     });
     (app.world().resource::<Read>().0.clone(), field)
 }
@@ -2177,7 +2177,7 @@ fn a_cone_doses_a_box_only_an_unreached_member_leaves() {
         "the cone comes off A's rear face, on the axis inside B: {:?}",
         cone.origin
     );
-    let undosed = cone.rays.iter().filter(|ray| !ray.deposited).count();
+    let undosed = cone.rays.iter().filter(|ray| ray.doses.is_empty()).count();
     assert_eq!(
         undosed,
         0,

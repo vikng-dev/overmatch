@@ -1,25 +1,34 @@
-//! The x-ray: the player's own tank in the glass look on the battlefield, the latest shot that
-//! struck it drawn over it, its key ([`XRay`], X) a preference kept across lives. Its own
-//! presentation beside the corner slot: no corner, no stage copy, no exhibit. The look goes on the
-//! tank's REAL render primitives — each mesh's `StandardMaterial` handle set aside ([`Dressed`])
-//! and replaced by its tier's [`LookMaterial`], a mask copy spawned under it — and the record's
-//! elements hang under the live hull and component meshes ([`spawn_glass`]), so the pose, the
-//! servos, the certified LOD and the pooled shoes follow for free; nothing is hidden and nothing
-//! is copied. One mask set is owned for the player's camera ([`MaskNeed`]). While on, the tank
-//! casts no shadow (`LookMaterial` casts none).
+//! The x-ray: a tank in the glass look on the battlefield, the latest shot that struck it drawn
+//! over it, its key ([`XRay`], X) a preference kept across lives. Its own presentation beside the
+//! corner slot: no corner, no stage copy, no exhibit. The look goes on the tank's REAL render
+//! primitives — each mesh's `StandardMaterial` handle set aside ([`Dressed`]) and replaced by its
+//! tier's [`LookMaterial`], a mask copy spawned under it — and the record's elements hang under the
+//! live hull and component meshes ([`spawn_glass`]), so the pose, the servos, the certified LOD and
+//! the pooled shoes follow for free; nothing is hidden and nothing is copied. One mask set is owned
+//! for the player's camera ([`MaskNeed`]). While on, the tank casts no shadow (`LookMaterial` casts
+//! none).
 //!
-//! * **When it draws.** The preference on, the player's tank live (a life, not knocked out, its
-//!   rig bound), the third-person view and no kill cam run ([`drive`]). Every deactivation —
-//!   the key, a knockout or the run it starts, the gunner's optic, a new tank, a disconnect —
-//!   restores every handle and removes every tag and child at once ([`restore`]); the preference
-//!   stays, so the x-ray returns on the next live tank.
+//! * **The subject.** Which tank, and whose records, the composition that mounts the x-ray chooses
+//!   ([`XRaySubject`]): the player's own tank under its victim records (the game's, the default),
+//!   or the tank of a combatant the player fires at under the player's shooter records of hits on
+//!   it (the armour sandbox's). Everything below holds for either; [`Subject`] is the only reader
+//!   of the choice.
+//! * **When it draws.** The preference on, the subject drawable (the player's own tank: a life,
+//!   not knocked out; a struck tank: its current life, knocked out too; either with its rig
+//!   bound), the third-person view and no kill cam run ([`drive`]). Every deactivation — the key,
+//!   a knockout of the player's tank or the run it starts, the gunner's optic, a new tank, a
+//!   disconnect — restores every handle and removes every tag and child at once ([`restore`]);
+//!   the preference stays, so the x-ray returns on the next tank. A composition that despawns the
+//!   subject itself lets go first ([`XRayRelease`]), ordered after the pen cam's systems
+//!   ([`PenCamSet`](super::PenCamSet)) so nothing the x-ray queued that frame lands on it after.
 //! * **The tint reads live state only.** Each component's fill is its live HP points over its pool
 //!   ([`LiveState::boxes`]), never the record's: the record supplies the path and the cones, and a
 //!   component's dose or HP at the shot never reaches the x-ray. An unstruck component (no point
 //!   lost) is the base layout, untinted.
-//! * **The latest rule.** Of the victim records of the player's current life whose impact is no
-//!   longer waiting, strictly the newest by recency ([`latest`]; a clean ricochet replaces an
-//!   earlier penetration — a bounce is informative too). With none, the live tint alone.
+//! * **The latest rule.** Of the subject's records of its current life whose impact is no longer
+//!   waiting, strictly the newest by recency ([`latest`], [`latest_shot`]; a clean ricochet
+//!   replaces an earlier penetration — a bounce is informative too). With none, the live tint
+//!   alone.
 //! * **The clock.** A record plays once: from the moment it first shows (X on with it the latest,
 //!   or its arrival while on), as the victim frame plays it, to its hold beat. Every later showing
 //!   of the same record — X off and on, the optic and back, a resize, an older record back as the
@@ -50,7 +59,7 @@ use super::super::timeline::CornerKind;
 use super::super::view::{self, Tier};
 use super::NewMatch;
 use super::killcam::Victim;
-use super::{Player, Recency, tank_asset};
+use super::{Recency, tank_asset};
 use crate::bake::TankBlueprint;
 use crate::ballistics::ComponentHealth;
 use crate::command::Bindings;
@@ -61,11 +70,13 @@ use crate::damage_cam::delivery::{
 use crate::damage_cam::shapes::{TankAsset, TankShapes};
 use crate::damage_cam::wire::{Audience, TankLife};
 use crate::damage_cam::{PenetrationReport, Role};
-use crate::geometry_lod::GeometryLodScanned;
+use crate::geometry_lod::{GeometryLodScanned, SourceDetailOnly};
 use crate::render_policy::VisualScope;
 use crate::sight::SightMode;
-use crate::tank::{Controlled, ViewNode};
+use crate::spec::TankSpecHandle;
+use crate::tank::{Controlled, Rig as TankRig, Tank, ViewNode};
 use crate::view::PlayerView;
+use crate::{CombatantId, CombatantLife};
 
 /// The player's x-ray preference, which [`Bindings::xray`] toggles: kept across lives,
 /// respawn, the map and a disconnect, so the x-ray returns on the next live tank.
@@ -74,19 +85,128 @@ pub(crate) struct XRay {
     pub(crate) on: bool,
 }
 
+/// Whose tank the x-ray dresses and whose records it draws over it, set by the composition that
+/// mounts it (module doc).
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum XRaySubject {
+    /// The player's tank ([`Controlled`]) under its victim records, while it is not knocked out:
+    /// knocked out, the death flow owns the view.
+    #[default]
+    OwnTank,
+    /// The [`Tank`] of this combatant under the player's shooter records of hits on its current
+    /// life, knocked out as well as live.
+    Struck(CombatantId),
+}
+
+/// A candidate subject tank: who it is, its components, its file, its rig and its knockout.
+type SubjectRow = (
+    Entity,
+    &'static CombatantId,
+    &'static CombatantLife,
+    Option<&'static TankVolumes>,
+    Option<&'static TankSpecHandle>,
+    Option<&'static TankRig>,
+    Has<TankKnockedOut>,
+);
+
+/// The x-ray's subject as [`XRaySubject`] chooses it: the tank, its life, its file, its live state
+/// and the record drawn over it.
+#[derive(SystemParam)]
+pub(super) struct Subject<'w, 's> {
+    choice: Res<'w, XRaySubject>,
+    own: Query<'w, 's, SubjectRow, With<Controlled>>,
+    tanks: Query<'w, 's, SubjectRow, With<Tank>>,
+    volumes: Query<'w, 's, LiveVolume>,
+}
+
+impl Subject<'_, '_> {
+    /// The subject tank while the x-ray may draw it: the player's own, exactly one and not knocked
+    /// out; the struck combatant's, exactly one, knocked out or not.
+    fn tank(
+        &self,
+    ) -> Option<(
+        Entity,
+        &CombatantId,
+        &CombatantLife,
+        Option<&TankVolumes>,
+        Option<&TankSpecHandle>,
+        Option<&TankRig>,
+        bool,
+    )> {
+        match *self.choice {
+            XRaySubject::OwnTank => self.own.single().ok().filter(|row| !row.6),
+            XRaySubject::Struck(combatant) => {
+                let mut matching = self.tanks.iter().filter(|row| *row.1 == combatant);
+                let row = matching.next()?;
+                matching.next().is_none().then_some(row)
+            }
+        }
+    }
+
+    /// Whether the key reaches the preference: never while the player's own tank is knocked out
+    /// or absent ([`toggle`]); a struck subject leaves the player's device alone.
+    fn keyed(&self) -> bool {
+        match *self.choice {
+            XRaySubject::OwnTank => self.own.iter().any(|row| !row.6),
+            XRaySubject::Struck(_) => true,
+        }
+    }
+
+    /// The subject's life.
+    fn life(&self) -> Option<TankLife> {
+        let (_, &combatant, &life, ..) = self.tank()?;
+        Some(TankLife { combatant, life })
+    }
+
+    /// The subject's body — its entity and rig — once its rig is bound.
+    fn body(&self) -> Option<(Entity, &TankRig)> {
+        let (entity, _, _, _, _, rig, _) = self.tank()?;
+        Some((entity, rig?))
+    }
+
+    /// The subject's tank file, as a record names it.
+    fn vehicle(&self) -> Option<String> {
+        let (_, _, _, _, spec, _, _) = self.tank()?;
+        let path = spec?.0.path()?;
+        Some(path.path().to_string_lossy().into_owned())
+    }
+
+    /// The subject's components as they stand.
+    fn live(&self) -> LiveState {
+        self.tank()
+            .and_then(|(_, _, _, volumes, _, _, _)| volumes)
+            .map(|volumes| LiveState::read(volumes, &self.volumes))
+            .unwrap_or_default()
+    }
+
+    /// The record drawn over the subject's life `life`, by the latest rule: of its victim records
+    /// for the player's own tank ([`latest`]), of the player's shooter records for a struck one
+    /// ([`latest_shot`]).
+    fn record<'a>(
+        &self,
+        store: &'a ShotExplanations,
+        life: TankLife,
+    ) -> Option<(ExplanationKey, &'a StoredExplanation)> {
+        match *self.choice {
+            XRaySubject::OwnTank => latest(store, life),
+            XRaySubject::Struck(_) => latest_shot(store, life),
+        }
+    }
+}
+
 /// Flip [`XRay`] on the key, while the cursor is captured (a menu or a pause takes the key)
-/// and the player's tank is live: knocked out, the death flow owns the device and a press changes
-/// nothing, so a kill cam run never flips it.
+/// and the subject takes it ([`Subject::keyed`]): the player's own tank knocked out, the death
+/// flow owns the device and a press changes nothing, so a kill cam run never flips it.
 pub(super) fn toggle(
     keys: Res<ButtonInput<KeyCode>>,
     mouse: Res<ButtonInput<MouseButton>>,
     bindings: Option<Res<Bindings>>,
     cursor: Query<&CursorOptions, With<PrimaryWindow>>,
-    live: Query<(), (With<Controlled>, Without<TankKnockedOut>)>,
+    subject: Subject,
     mut xray: ResMut<XRay>,
 ) {
     let pressed = bindings.is_some_and(|bindings| bindings.xray.just_pressed(&keys, &mouse));
-    if pressed && !live.is_empty() && crate::state::cursor_locked(cursor) {
+    if pressed && subject.keyed() && crate::state::cursor_locked(cursor) {
         xray.on = !xray.on;
     }
 }
@@ -155,6 +275,12 @@ impl XRayState {
         self.built.as_ref().map(|built| built.since)
     }
 
+    /// The record on show, while built with one.
+    #[cfg(test)]
+    pub(super) fn record(&self) -> Option<ExplanationKey> {
+        self.built.as_ref().and_then(|built| built.record)
+    }
+
     /// Draw `shell` as the round's model, in place of the game's.
     #[cfg(test)]
     pub(super) fn stand_in_shell(&mut self, shell: Handle<WorldAsset>) {
@@ -195,6 +321,8 @@ pub(super) struct Hierarchy<'w, 's> {
     material_names: Query<'w, 's, &'static GltfMaterialName>,
     primitives: Query<'w, 's, (), With<GltfMeshName>>,
     scanned: Query<'w, 's, (), With<GeometryLodScanned>>,
+    /// Present, no LOD ladder scans a primitive: each keeps its source mesh.
+    source_only: Option<Res<'w, SourceDetailOnly>>,
     scopes: Query<'w, 's, &'static VisualScope>,
     view_nodes: Query<'w, 's, &'static ViewNode>,
     added: Query<'w, 's, Entity, Added<Mesh3d>>,
@@ -234,6 +362,39 @@ impl Held<'_, '_> {
     }
 }
 
+/// The x-ray as a composition that despawns its subject reads and lets go of it, from a system
+/// ordered after [`PenCamSet`](super::PenCamSet). Without the pen cam mounted it reads nothing and
+/// lets go of nothing.
+#[derive(SystemParam)]
+pub(crate) struct XRayRelease<'w, 's> {
+    state: Option<ResMut<'w, XRayState>>,
+    held: Held<'w, 's>,
+}
+
+impl XRayRelease<'_, '_> {
+    /// `Time` seconds at which the record on show first showed, while the x-ray is built with one.
+    pub(crate) fn shown_since(&self) -> Option<f64> {
+        let built = self.state.as_ref()?.built.as_ref()?;
+        built.record?;
+        Some(built.since)
+    }
+
+    /// `Time` seconds at which a record first shown at `shown` reaches the victim frame's hold
+    /// beat, where the x-ray's replay of it stops ([`CornerKind::hold_from`]).
+    pub(crate) fn held_at(shown: f64) -> f64 {
+        shown + f64::from(CornerKind::Victim.hold_from())
+    }
+
+    /// Restore every dressed handle and despawn every item, with `commands`, ahead of whatever
+    /// despawns the subject in them; the next frame dresses afresh whatever subject stands.
+    pub(crate) fn release(&mut self, commands: &mut Commands) {
+        self.held.restore(commands);
+        if let Some(state) = self.state.as_mut() {
+            state.built = None;
+        }
+    }
+}
+
 /// The x-ray's material stores.
 #[derive(SystemParam)]
 pub(super) struct Stores<'w> {
@@ -251,15 +412,15 @@ pub(super) struct Viewing<'w, 's> {
     camera: Query<'w, 's, Entity, With<PlayerView>>,
 }
 
-/// Whether the x-ray draws this frame, and for which camera: the preference on, the tank live in
-/// the third-person view, no kill cam run (this frame's, so after the kill cam's drive). Inactive,
-/// or on another tank than the one dressed, everything is restored now; the mask need is stated
-/// for [`look::own`], which runs next.
+/// Whether the x-ray draws this frame, and for which camera: the preference on, the subject
+/// drawable in the third-person view, no kill cam run (this frame's, so after the kill cam's
+/// drive). Inactive, or on another tank than the one dressed, everything is restored now; the mask
+/// need is stated for [`look::own`], which runs next.
 pub(super) fn drive(
     mut commands: Commands,
     xray: Res<XRay>,
     viewing: Viewing,
-    player: Player,
+    subject: Subject,
     mut need: ResMut<MaskNeed>,
     mut state: ResMut<XRayState>,
     held: Held,
@@ -267,7 +428,7 @@ pub(super) fn drive(
     let third_person = viewing
         .sight
         .is_none_or(|mode| *mode == SightMode::ThirdPerson);
-    let body = player.body();
+    let body = subject.body();
     let viewer = viewing.camera.single().ok();
     let active = xray.on && third_person && !viewing.victim.running() && body.is_some();
     let tank = body.map(|(entity, _)| entity);
@@ -283,13 +444,13 @@ pub(super) fn drive(
     need.set_if_neq(MaskNeed(viewer.filter(|_| active)));
 }
 
-/// Dress the live tank and draw the record over it, once its camera has a mask set; afterwards
+/// Dress the subject tank and draw the record over it, once its camera has a mask set; afterwards
 /// keep it built: a mesh that lands late (a glb, a rung) is dressed as it appears, a new record or
 /// a live state change rebuilds the record's elements, a new mask set (a resize) rebuilds the
 /// whole x-ray.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the x-ray's builder: the need and the masks, the clock, the record store, the blueprint, the player, its own state, the asset server, the stores, the hierarchy and what it holds"
+    reason = "the x-ray's builder: the need and the masks, the clock, the record store, the blueprint, the subject, its own state, the asset server, the stores, the hierarchy and what it holds"
 )]
 pub(super) fn build(
     mut commands: Commands,
@@ -298,7 +459,7 @@ pub(super) fn build(
     time: Res<Time>,
     store: Option<Res<ShotExplanations>>,
     blueprint: Option<Res<TankBlueprint>>,
-    player: Player,
+    subject: Subject,
     mut state: ResMut<XRayState>,
     asset_server: Res<AssetServer>,
     mut stores: Stores,
@@ -312,7 +473,7 @@ pub(super) fn build(
         return;
     };
     let (Some((tank, rig)), Some(life), Some(vehicle)) =
-        (player.body(), player.life(), player.vehicle())
+        (subject.body(), subject.life(), subject.vehicle())
     else {
         return;
     };
@@ -370,9 +531,11 @@ pub(super) fn build(
     }
 
     // The record's elements, over the components as they are dressed.
-    let latest = store.as_deref().and_then(|store| latest(store, life));
+    let latest = store
+        .as_deref()
+        .and_then(|store| subject.record(store, life));
     let record = latest.map(|(key, _)| key);
-    let live = player.live();
+    let live = subject.live();
     let settle = std::mem::take(&mut built.settle);
     if !fresh && !settle && built.record == record && built.live == live {
         built.settle = dressed_now;
@@ -473,9 +636,10 @@ pub(super) fn forget_shown(_new: On<NewMatch>, mut state: ResMut<XRayState>) {
 /// Dress every undressed render primitive under `root` in its tier's look, against `built`'s
 /// masks, with a mask copy under it: whether any was, and whether one was left for the LOD
 /// ladder's scan — a glTF primitive the ladder has not scanned yet (it binds the primitive's rungs
-/// off the handle this would take), which the next frame looks at again. Left as they are: the
-/// shadow ribbon (no camera draws it, and a copy of it in a mask would), a collision proxy, and
-/// the x-ray's own meshes.
+/// off the handle this would take), which the next frame looks at again; under
+/// [`SourceDetailOnly`] no ladder scans, and every primitive is dressed as it lands. Left as they
+/// are: the shadow ribbon (no camera draws it, and a copy of it in a mask would), a collision
+/// proxy, and the x-ray's own meshes.
 fn dress(
     commands: &mut Commands,
     root: Entity,
@@ -491,7 +655,10 @@ fn dress(
         let Ok((entity, mesh, material, range)) = held.undressed.get(entity) else {
             continue;
         };
-        if scene.primitives.contains(entity) && !scene.scanned.contains(entity) {
+        if scene.source_only.is_none()
+            && scene.primitives.contains(entity)
+            && !scene.scanned.contains(entity)
+        {
             skipped = true;
             continue;
         }
@@ -733,7 +900,7 @@ pub(crate) fn scripted_xray_plugin(app: &mut App) {
     app.add_systems(Update, scripted(from, to).before(toggle));
 }
 
-/// One health-bearing volume of the player's tank as its replicated state stands.
+/// One health-bearing volume of the subject tank as its replicated state stands.
 #[derive(Clone, Debug, PartialEq)]
 struct LiveBox {
     name: String,
@@ -743,8 +910,9 @@ struct LiveBox {
     dead: bool,
 }
 
-/// Every health-bearing volume of the player's tank, in the tank's volume order: its HP points
-/// (`ComponentHealth`, which `NetCrew` writes on a network client) and its crew death.
+/// Every health-bearing volume of the subject tank, in the tank's volume order: its HP points
+/// (`ComponentHealth`, which `NetCrew` writes on a network client) and whether its crew member is
+/// knocked out (`Dead`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct LiveState(Vec<LiveBox>);
 
@@ -784,7 +952,7 @@ impl LiveState {
     }
 
     /// Each volume as the x-ray draws it, its shape from `shapes`: its pool and its live points,
-    /// lost at none left or at its crewman's death. Nothing of a record.
+    /// lost at none left or with its crew member knocked out. Nothing of a record.
     fn boxes(&self, shapes: &TankShapes) -> Vec<BoxPlan> {
         self.0
             .iter()
@@ -836,16 +1004,38 @@ pub(super) fn struck(stored: &StoredExplanation, life: TankLife) -> bool {
     stored.explanation.audience != Audience::Shooter && stored.explanation.struck == life
 }
 
-/// The record the x-ray draws for `life`: of its victim projections whose impact is no longer
-/// waiting, strictly the newest by [`Recency`] (the encounter's first contact, then completion,
-/// identity for ties), never by arrival.
+/// The record the x-ray draws for the player's own `life`: of its victim projections whose impact
+/// is no longer waiting, strictly the newest ([`newest`]).
 pub(super) fn latest(
     store: &ShotExplanations,
     life: TankLife,
 ) -> Option<(ExplanationKey, &StoredExplanation)> {
+    newest(store, life, |stored| struck(stored, life))
+}
+
+/// The record the x-ray draws for a struck tank's `life`: of the shooter projections of hits on it
+/// whose impact is no longer waiting, strictly the newest ([`newest`]). The store holds the
+/// player's records alone, so every shooter projection in it is of a shot the player fired.
+pub(super) fn latest_shot(
+    store: &ShotExplanations,
+    life: TankLife,
+) -> Option<(ExplanationKey, &StoredExplanation)> {
+    newest(store, life, |stored| {
+        stored.explanation.audience == Audience::Shooter
+    })
+}
+
+/// Of the stored records of hits on `life` that `admits` and whose impact is no longer waiting,
+/// strictly the newest by [`Recency`] (the encounter's first contact, then completion, identity
+/// for ties), never by arrival.
+fn newest(
+    store: &ShotExplanations,
+    life: TankLife,
+    admits: impl Fn(&StoredExplanation) -> bool,
+) -> Option<(ExplanationKey, &StoredExplanation)> {
     store
         .live(life)
-        .filter(|stored| struck(stored, life) && stored.presence != ImpactPresence::Pending)
+        .filter(|stored| admits(stored) && stored.presence != ImpactPresence::Pending)
         .map(|stored| {
             let key = ExplanationKey::of(&stored.explanation);
             (Recency::of(key, &stored.explanation), key, stored)
