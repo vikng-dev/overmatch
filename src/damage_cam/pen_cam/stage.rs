@@ -958,9 +958,10 @@ fn box_start(plan: &Plan, kind: CornerKind, b: &BoxPlan, reduce: bool) -> f32 {
 }
 
 /// `plan`'s corner times in frame `kind`: its travel from the frame's travel start to the nose at
-/// the drawn span's end, its settle — that, each cone's front at its longest reach, each of a
-/// burst's pieces gone and each dosed component's fill complete — and the hold and length that
-/// follow ([`timeline::Pace`]). A plan with no line travels nowhere.
+/// the drawn span's end, its settle — that, each cone's front at its longest reach, a burst's
+/// break-up (with a field or without one) and each of its pieces gone, and each dosed component's
+/// fill complete — and the hold and length that follow ([`timeline::Pace`]). A plan with no line
+/// travels nowhere.
 pub(super) fn pace(plan: &Plan, kind: CornerKind) -> timeline::Pace {
     let travel_end = if plan.line.points.len() < 2 {
         kind.travel_start()
@@ -984,7 +985,15 @@ pub(super) fn pace(plan: &Plan, kind: CornerKind) -> timeline::Pace {
         .iter()
         .map(|b| box_start(plan, kind, b, false) + timeline::BOX_FILL_S)
         .filter(|t| t.is_finite());
-    let settle = cones.chain(pieces).chain(boxes).fold(travel_end, f32::max);
+    let bursts = plan
+        .burst
+        .iter()
+        .map(|burst| burst_start(plan, kind, burst, false));
+    let settle = cones
+        .chain(pieces)
+        .chain(bursts)
+        .chain(boxes)
+        .fold(travel_end, f32::max);
     timeline::Pace::new(kind, travel_end, settle)
 }
 
@@ -2538,6 +2547,33 @@ mod tests {
     /// most [`PIECES_MAX`], each hidden until played, all on one mesh and the stage's round
     /// material ([`shell_material`]): never a mesh or a material per piece. A field whose every
     /// direction ended where it was thrown (a round that burst at rest inside a plate) throws none.
+    /// A burst settles its corner even without a field (one below the HP quantum throws none):
+    /// the hold never comes before the shell breaks up, so the x-ray, whose clock stops at the
+    /// hold, never freezes the whole shell. Mutant: the settle counting a burst only through its
+    /// field.
+    #[test]
+    fn a_burst_without_a_field_still_settles_the_corner() {
+        let library = Library::load();
+        let asset = TankAsset::load(&library.vehicle).unwrap();
+        let record = library
+            .records
+            .iter()
+            .find(|record| record.plan.burst.is_some())
+            .expect("the library holds a burst");
+        let mut plan = Plan::new(&record.report, &asset.shapes(&record.report.servo_deg));
+        let kind = plan.kind;
+        let last = pace(&plan, kind).settle;
+        let burst = plan.burst.as_mut().unwrap();
+        burst.cone = None;
+        burst.t += last / timeline::REPLAY_SLOWDOWN + 1.0;
+        let breakup = burst_start(&plan, kind, plan.burst.as_ref().unwrap(), false);
+        assert!(
+            breakup > last,
+            "fixture: the burst comes after everything else"
+        );
+        assert!(pace(&plan, kind).settle >= breakup);
+    }
+
     #[test]
     fn a_bursts_pieces_share_one_mesh_and_the_rounds_material() {
         let library = Library::load();
@@ -2958,6 +2994,9 @@ mod tests {
             placed.push((entity, name.to_owned(), corners(local).map(|p| p + offset)));
         }
         let mut view = StageView::standing_in(Handle::default(), root);
+        // A strong handle of its own, so a piece drawn with any other material is told apart.
+        let mut standard = Assets::<StandardMaterial>::default();
+        let round_material = standard.add(StandardMaterial::default());
         view.hull = Some(hull);
         app.insert_resource(library.exhibits())
             .insert_resource(Corner {
@@ -2973,12 +3012,15 @@ mod tests {
                 }),
                 fading: None,
             })
-            .insert_resource(Stage::default())
+            .insert_resource(Stage {
+                round_material,
+                ..default()
+            })
             .insert_resource(view)
             .insert_resource(meshes)
             .insert_resource(Assets::<GlowMaterial>::default())
             .insert_resource(Assets::<OutlineMaterial>::default())
-            .insert_resource(Assets::<StandardMaterial>::default())
+            .insert_resource(standard)
             .insert_resource(Assets::<SliceMaterial>::default())
             .insert_resource(Assets::<LookMaterial>::default())
             .insert_resource(Assets::<Image>::default())
