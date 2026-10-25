@@ -66,6 +66,8 @@ pub struct Plan {
     /// Every field the record threw, in [`PenetrationReport::fields`]' order: its spall cones,
     /// then its burst's.
     pub cones: Vec<Cone>,
+    /// The round's burst, where the record has one.
+    pub burst: Option<BurstPlan>,
     pub boxes: Vec<BoxPlan>,
     /// The whole struck tank's bounds (low, high corners), posed as the record has it
     /// ([`TankShapes::bounds`]); `None` without the tank asset's shapes.
@@ -345,6 +347,19 @@ impl Cone {
     }
 }
 
+/// The round's burst ([`crate::damage_cam::Burst`]): when the shell breaks up, the share of it
+/// that flies on, and the field its pieces ride.
+pub struct BurstPlan {
+    /// The record time (s) it burst ([`crate::damage_cam::Burst::t`]).
+    pub t: f32,
+    /// The nose piece's share of the round's mass where one flies on: a ring's nose mass over the
+    /// round's ([`crate::damage_cam::Projectile::mass_kg`]), from a burst in flight. `None` under
+    /// the ball and for a round that burst at rest, where nothing flies on.
+    pub nose: Option<f32>,
+    /// Its field's index in [`Plan::cones`], where it threw one.
+    pub cone: Option<usize>,
+}
+
 /// One direction of a cone: unit direction, reach (m) and its weight `f_k`, the multiple of the
 /// cone's strength it was thrown with (about 0.84 on the axis of a 26° ball, DERIVED).
 pub struct Ray {
@@ -465,11 +480,24 @@ impl Plan {
             let exit = line.leg_speed(node + 1).unwrap_or(0.0);
             cone(c, &line, exit)
         });
-        let burst = report
+        let burst_field = report
             .burst
             .iter()
             .filter_map(|b| b.field.as_ref().map(|c| cone(c, &line, b.sideways_mps)));
-        let cones: Vec<Cone> = spall.chain(burst).collect();
+        let cones: Vec<Cone> = spall.chain(burst_field).collect();
+        let mass = report.projectile.mass_kg;
+        // A nose piece flies on only from a burst in flight: one at rest has no flight to fly on.
+        let burst = report.burst.as_ref().map(|b| BurstPlan {
+            t: b.t,
+            nose: b.nose_kg.filter(|_| b.speed_mps > 0.0).map(|kg| {
+                if mass > 0.0 {
+                    (kg / mass).min(1.0)
+                } else {
+                    1.0
+                }
+            }),
+            cone: b.field.as_ref().map(|_| report.spall.len()),
+        });
         let boxes = report
             .components
             .iter()
@@ -546,6 +574,7 @@ impl Plan {
             bounce,
             stop: report.rested().then(|| line.at(line.length())),
             cones,
+            burst,
             boxes,
             tank_bounds: shapes.bounds(),
             line,
@@ -575,6 +604,7 @@ impl Plan {
             bounce: None,
             stop: None,
             cones: Vec::new(),
+            burst: None,
             boxes,
             tank_bounds: shapes.bounds(),
         }

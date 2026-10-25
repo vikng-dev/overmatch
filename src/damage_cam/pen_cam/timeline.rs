@@ -97,7 +97,8 @@ pub struct Pace {
     /// The shell's nose reaches the drawn span's end.
     pub travel_end: f32,
     /// Every element of the record has arrived: the nose at the drawn span's end, each field's
-    /// front at its longest reach, each dosed component's fill complete.
+    /// front at its longest reach, each of a burst's pieces gone, each dosed component's fill
+    /// complete.
     pub settle: f32,
     /// The hold beat starts: the hold key freezes the clock here and after. Never before the
     /// frame's minimum nor before `settle`.

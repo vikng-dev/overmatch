@@ -6,12 +6,15 @@
 //! the plane in the slice), and each struck component's real mesh on the state scale ([`look::component`]): filled red from the
 //! bottom up to the share of its HP points lost, one knocked out charcoal and hatched.
 //! The shell rests where the record ends; a round the record has leave the tank runs on past the
-//! path's last node along its last leg for the rest of the play ([`shell_drawn`]). The nose and
-//! every field's front move on the record's own clock at one constant slowdown
-//! ([`timeline::REPLAY_SLOWDOWN`]): the nose along the record's timed path, a spall cone's front at
-//! the round's exit speed, a burst's at its sideways speed ([`super::plan::Cone::speed`]), each
-//! from its record time. [`pace`] is a record's corner times in a frame. The rule and the frames'
-//! minimum lengths: `demo/ux-spec.md` §3, "Time".
+//! path's last node along its last leg for the rest of the play ([`shell_share`]). A round that
+//! bursts breaks up at the burst's record time: only a ring's nose piece flies on, the model
+//! shortened to its share, and a few pieces of the round ride the burst field's front, each along
+//! one of its directions to that direction's end ([`Piece`]). The nose and every field's front
+//! move on the record's own clock at one constant slowdown ([`timeline::REPLAY_SLOWDOWN`]): the
+//! nose along the record's timed path, a spall cone's front at the round's exit speed, a burst's
+//! at its sideways speed ([`super::plan::Cone::speed`]), each from its record time. [`pace`] is a
+//! record's corner times in a frame. The rule, the burst's beat and the frames' minimum lengths:
+//! `demo/ux-spec.md` §3, "Time".
 //! Rebuilt when the corner's record or frame changes; animated every frame from the corner's clock
 //! alone, so a scrub lands on the same picture.
 //!
@@ -37,7 +40,7 @@ use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldInstanceReady};
 use super::field;
 use super::look::{self, FieldPrint, Layer, LookMaterial, MaskSet, Masks};
 use super::material::{GlowMaterial, OutlineMaterial, SliceCut, SliceMaterial, SliceParams};
-use super::plan::{BoxPlan, Plan, Reach};
+use super::plan::{BoxPlan, BurstPlan, Plan, Reach};
 use super::potency::Potency;
 use super::timeline::{self, CornerKind};
 use super::view::{Proxy, StageView, ViewMesh, ViewRoot};
@@ -59,6 +62,13 @@ pub(super) const SHELL_SCENE: &str = "shell/shell.glb";
 /// (±0.044 × ±0.044 × 0..0.263); the model is scaled by calibre over the diameter.
 const SHELL_MODEL_CALIBRE_M: f32 = 0.088;
 const SHELL_MODEL_LENGTH_M: f32 = 0.263;
+/// A piece of a burst: a shard's length along its direction and its width, in calibres. TUNED: a
+/// diagram choice, small beside the shell.
+const PIECE_CALIBRES: (f32, f32) = (0.5, 0.2);
+/// The most pieces a burst throws: an even subset of its field's directions. TUNED.
+const PIECES_MAX: usize = 32;
+/// A piece shrinks away over this many corner seconds from the moment it stops. TUNED.
+const PIECE_FADE_S: f32 = 0.5;
 /// The slice's and the ricochet's framed radius is at most this many calibres (TUNED), about the
 /// stop or else the contact: 7.0 m for 88 mm, 0.63 m for a 7.9 mm round (DERIVED).
 const FRAME_CALIBRES: f32 = 80.0;
@@ -102,6 +112,16 @@ pub struct StageCamera;
 /// The round: one shell model, placed and scaled for the record on show.
 #[derive(Component)]
 pub(super) struct StageShell;
+
+/// A piece of the round's burst, riding direction `ray` of the burst's field, cone `cone`. `cut`
+/// is the slice plane (unit normal toward the eye, a point on it): the piece is never drawn on the
+/// eye's side, where the slice cuts the field away.
+#[derive(Component)]
+pub(super) struct Piece {
+    cone: usize,
+    ray: usize,
+    cut: Option<(Vec3, Vec3)>,
+}
 
 /// Everything [`rebuild`] spawns for one record.
 #[derive(Component, Clone, Copy)]
@@ -194,6 +214,8 @@ pub struct Stage {
     hull: Option<Entity>,
     /// The mask set the built stage's look is drawn against: its viewer's.
     masks: MaskSet,
+    /// The round's own material, which a burst's pieces wear ([`shell_material`]).
+    round_material: Handle<StandardMaterial>,
     /// The along-shot frames' eye distance ([`shot_distance`]), one solve per record per orbit
     /// value, never per frame: [`animate`] solves it before it frames and re-solves only when the
     /// record on show or the viewer's drag differs from the one it was solved for. `None` (a stage
@@ -321,6 +343,7 @@ pub fn spawn_inset(
     }
     let shell: Handle<WorldAsset> =
         asset_server.load(GltfAssetLabel::Scene(0).from_asset(SHELL_SCENE));
+    stage.round_material = shell_material(asset_server);
     commands
         .spawn((
             WorldAssetRoot(shell),
@@ -331,6 +354,17 @@ pub fn spawn_inset(
             CornerRig,
         ))
         .observe(round_landed);
+}
+
+/// The material the shell model wears: bevy_pbr's glTF handler adds each glTF material's
+/// `StandardMaterial` under `<label>/std` and gives a mesh of that material that handle
+/// (`bevy_pbr-0.19.1/src/gltf.rs`, `on_material`); the model has one material, unscaled (MEASURED).
+pub(super) fn shell_material(asset_server: &AssetServer) -> Handle<StandardMaterial> {
+    let label = GltfAssetLabel::Material {
+        index: 0,
+        is_scale_inverted: false,
+    };
+    asset_server.load(format!("{SHELL_SCENE}#{label}/std"))
 }
 
 /// The round's meshes have landed: the stage is built again, so they get their mask copies.
@@ -355,6 +389,42 @@ impl StageRound<'_, '_> {
             .flat_map(|shell| self.children.iter_descendants(shell))
             .filter_map(|entity| Some((entity, self.meshes.get(entity).ok()?.0.clone())))
     }
+}
+
+/// The round on the stage as [`animate`] places it: the shell model and a burst's pieces.
+#[derive(SystemParam)]
+pub struct StageRoundPose<'w, 's> {
+    shell: Query<
+        'w,
+        's,
+        (&'static mut Transform, &'static mut Visibility),
+        (
+            With<StageShell>,
+            Without<LineSeg>,
+            Without<MarkItem>,
+            Without<ConeVolume>,
+            Without<BoxTint>,
+            Without<StageCamera>,
+        ),
+    >,
+    pieces: Query<
+        'w,
+        's,
+        (
+            &'static Piece,
+            &'static mut Transform,
+            &'static mut Visibility,
+        ),
+        (
+            With<StageItem>,
+            Without<StageShell>,
+            Without<LineSeg>,
+            Without<MarkItem>,
+            Without<ConeVolume>,
+            Without<BoxTint>,
+            Without<StageCamera>,
+        ),
+    >,
 }
 
 /// Rebuild the stage when the corner's record or frame changes, its look against the mask set of
@@ -524,6 +594,7 @@ pub fn rebuild(
             looks: &mut looks,
             masks: &masks,
         },
+        &stage.round_material,
         (StageItem, VisualScope::PEN_CAM_STAGE),
     );
 }
@@ -572,16 +643,17 @@ pub struct LookCtx<'a> {
     pub masks: &'a MaskSet,
 }
 
-/// Draw `plan`'s record over a tank in frame `kind`: the trail, the rings, the fields and the
-/// components on the state scale. Every element but the tints is spawned under `hull`, an entity
-/// whose frame is the record's (the struck hull's); each tint is a copy of one of `components`, the
-/// tank's own meshes of the components the record names, spawned under that mesh. `clip` is the
-/// slice plane (unit normal toward the eye, a point on it) the cones are cut by. Everything spawned
-/// carries `tag` — its owner's marker and the channel it draws on — and is hidden until
-/// [`Playing`] places it.
+/// Draw `plan`'s record over a tank in frame `kind`: the trail, the rings, the fields, a burst's
+/// pieces and the components on the state scale. Every element but the tints is spawned under
+/// `hull`, an entity whose frame is the record's (the struck hull's); each tint is a copy of one of
+/// `components`, the tank's own meshes of the components the record names, spawned under that
+/// mesh. `clip` is the slice plane (unit normal toward the eye, a point on it) the cones and the
+/// pieces are cut by. The pieces wear `round_material`, the round's own ([`shell_material`]).
+/// Everything spawned carries `tag` — its owner's marker and the channel it draws on — and is
+/// hidden until [`Playing`] places it.
 #[expect(
     clippy::too_many_arguments,
-    reason = "draws one plan: the spawn sinks, the plan and its frame, the parent and clip, the components, the look and the owner's tag are separate inputs"
+    reason = "draws one plan: the spawn sinks, the plan and its frame, the parent and clip, the components, the look, the round's material and the owner's tag are separate inputs"
 )]
 pub fn spawn_glass(
     commands: &mut Commands,
@@ -594,6 +666,7 @@ pub fn spawn_glass(
     clip: Option<(Vec3, Vec3)>,
     components: &[ComponentMesh],
     look_ctx: LookCtx,
+    round_material: &Handle<StandardMaterial>,
     tag: impl Bundle + Clone,
 ) {
     // The trail, one cylinder per leg of the path from the drawn span's start; a round that left
@@ -702,6 +775,34 @@ pub fn spawn_glass(
             tag.clone(),
             ChildOf(hull),
         ));
+    }
+
+    // A burst's pieces: one mesh and the round's material shared by all, no light, each on the
+    // round's side of the draw order where the frame draws the body behind, as the round is.
+    if let Some(index) = plan.burst.as_ref().and_then(|burst| burst.cone)
+        && kind != CornerKind::Ricochet
+    {
+        let shard = meshes.add(Tetrahedron::default());
+        let mask =
+            look::body_behind(kind).then(|| look_ctx.looks.add(look::hull_mask(look_ctx.masks)));
+        for ray in piece_rays(plan.cones[index].rays.len()) {
+            let mut piece = commands.spawn((
+                Mesh3d(shard.clone()),
+                MeshMaterial3d(round_material.clone()),
+                Transform::IDENTITY,
+                Visibility::Hidden,
+                Piece {
+                    cone: index,
+                    ray,
+                    cut: clip,
+                },
+                tag.clone(),
+                ChildOf(hull),
+            ));
+            if let Some(mask) = &mask {
+                piece.with_child(mask_copy(shard.clone(), mask.clone(), Layer::ROUND));
+            }
+        }
     }
 
     // Components, in their own meshes, on the state scale.
@@ -855,9 +956,9 @@ fn box_start(plan: &Plan, kind: CornerKind, b: &BoxPlan, reduce: bool) -> f32 {
 }
 
 /// `plan`'s corner times in frame `kind`: its travel from the frame's travel start to the nose at
-/// the drawn span's end, its settle — that, each cone's front at its longest reach and each dosed
-/// component's fill complete — and the hold and length that follow ([`timeline::Pace`]). A plan
-/// with no line travels nowhere.
+/// the drawn span's end, its settle — that, each cone's front at its longest reach, each of a
+/// burst's pieces gone and each dosed component's fill complete — and the hold and length that
+/// follow ([`timeline::Pace`]). A plan with no line travels nowhere.
 pub(super) fn pace(plan: &Plan, kind: CornerKind) -> timeline::Pace {
     let travel_end = if plan.line.points.len() < 2 {
         kind.travel_start()
@@ -868,39 +969,69 @@ pub(super) fn pace(plan: &Plan, kind: CornerKind) -> timeline::Pace {
         cone_start(plan, kind, index, false)
             + cone.run_time(cone.max_reach()) * timeline::REPLAY_SLOWDOWN
     });
+    let pieces = plan
+        .burst
+        .iter()
+        .filter_map(|burst| burst.cone)
+        .flat_map(|index| {
+            piece_rays(plan.cones[index].rays.len())
+                .map(move |ray| piece_stop(plan, kind, index, ray) + PIECE_FADE_S)
+        });
     let boxes = plan
         .boxes
         .iter()
         .map(|b| box_start(plan, kind, b, false) + timeline::BOX_FILL_S)
         .filter(|t| t.is_finite());
-    let settle = cones.chain(boxes).fold(travel_end, f32::max);
+    let settle = cones.chain(pieces).chain(boxes).fold(travel_end, f32::max);
     timeline::Pace::new(kind, travel_end, settle)
 }
 
-/// Whether the shell is drawn at corner time `c`: from the travel start to the end of the play. A
-/// round the record has leave the tank runs on past its path's last node ([`head_arc`]) and no
-/// frame follows it, so nothing hides it in flight: its bound is the play's end, the corner's or
-/// the lesson's (the x-ray's clock stops at the hold, and the shell with it). Under reduce motion
-/// a round that left is never drawn, since it would stand parked in the air at the span's end. A
-/// plan with no line ([`Plan::bare`]) draws no shell.
-fn shell_drawn(plan: &Plan, kind: CornerKind, c: f32, reduce: bool) -> bool {
-    c >= kind.travel_start() && plan.line.points.len() >= 2 && !(reduce && plan.left())
+/// The corner time at which `burst` breaks the shell up: its record time, or under reduce motion
+/// the travel start, where every element shows whole.
+fn burst_start(plan: &Plan, kind: CornerKind, burst: &BurstPlan, reduce: bool) -> f32 {
+    if reduce {
+        kind.travel_start()
+    } else {
+        corner_at(plan, kind, burst.t)
+    }
 }
 
-/// The shell model's transform with its nose at arc `head`: the tip on the line, the body along
-/// the chord to the line's point one model length back, scaled from the model's calibre to the
-/// record's. On a straight leg the chord is the travel; within a model length past a bend the body
-/// pivots across it, so past a bounce it stays on the face's outer side as the path does, where
-/// the travel's own direction would stand it inside the face.
-fn shell_transform(plan: &Plan, head: f32) -> Transform {
+/// The share of the shell model's length drawn at corner time `c`, `None` while none is: the
+/// whole model from the travel start; from a burst on ([`burst_start`]) only the nose piece where
+/// one flies on, at its share of the round ([`BurstPlan::nose`]), and nothing where none does (the
+/// ball, a round that burst at rest). A round the record has leave the tank runs on past its
+/// path's last node ([`head_arc`]) and no frame follows it, so nothing hides it in flight: its
+/// bound is the play's end, the corner's or the lesson's (the x-ray's clock stops at the hold, and
+/// the shell with it). Under reduce motion a round that left is never drawn, since it would stand
+/// parked in the air at the span's end. A plan with no line ([`Plan::bare`]) draws no shell.
+fn shell_share(plan: &Plan, kind: CornerKind, c: f32, reduce: bool) -> Option<f32> {
+    if c < kind.travel_start() || plan.line.points.len() < 2 || (reduce && plan.left()) {
+        return None;
+    }
+    match &plan.burst {
+        Some(burst) if c >= burst_start(plan, kind, burst, reduce) => burst.nose,
+        _ => Some(1.0),
+    }
+}
+
+/// The shell model's transform with its nose at arc `head`, `share` of its length drawn: the tip
+/// on the line, the body along the chord to the line's point that much of a model length back,
+/// scaled from the model's calibre to the record's and along its body by `share`. A nose piece is
+/// drawn as the model's front shortened to its share of the round's mass: a DERIVED visual proxy
+/// that treats the round's mass per length as even. On a straight leg the chord is the travel;
+/// within a model length past a bend the body pivots across it, so past a bounce it stays on the
+/// face's outer side as the path does, where the travel's own direction would stand it inside the
+/// face.
+fn shell_transform(plan: &Plan, head: f32, share: f32) -> Transform {
     let nose = plan.line.at(head);
-    let back = plan.line.at(head - shell_length(plan));
+    let back = plan.line.at(head - share * shell_length(plan));
     let body = (nose - back)
         .try_normalize()
         .unwrap_or_else(|| plan.line.direction_at(head));
+    let scale = plan.calibre / SHELL_MODEL_CALIBRE_M;
     Transform::from_translation(nose)
         .looking_to(body, Vec3::Y)
-        .with_scale(Vec3::splat(plan.calibre / SHELL_MODEL_CALIBRE_M))
+        .with_scale(Vec3::new(scale, scale, scale * share))
 }
 
 /// The shell model's length (m) at the record's calibre.
@@ -908,15 +1039,31 @@ fn shell_length(plan: &Plan) -> f32 {
     SHELL_MODEL_LENGTH_M * plan.calibre / SHELL_MODEL_CALIBRE_M
 }
 
-/// Where the trail ends: its arc along the line and its point. Behind a drawn shell it ends at the
-/// model's tail, which within a model length past a bend stands just off the line, the body's chord
-/// across the bend being shorter than the model; otherwise at the nose.
-fn trail_end(plan: &Plan, head: f32, drawn: bool) -> (f32, Vec3) {
-    if !drawn {
+/// Where the trail ends: its arc along the line and its point. Behind a drawn shell (`share` of
+/// the model, [`shell_share`]) it ends at the model's tail, which within a model length past a
+/// bend stands just off the line, the body's chord across the bend being shorter than the model;
+/// otherwise at the nose.
+fn trail_end(plan: &Plan, head: f32, share: Option<f32>) -> (f32, Vec3) {
+    let Some(share) = share else {
         return (head, plan.line.at(head));
-    }
-    let tail = shell_transform(plan, head).transform_point(Vec3::Z * SHELL_MODEL_LENGTH_M);
-    (head - shell_length(plan), tail)
+    };
+    let tail = shell_transform(plan, head, share).transform_point(Vec3::Z * SHELL_MODEL_LENGTH_M);
+    (head - share * shell_length(plan), tail)
+}
+
+/// The directions of a field of `count` that a burst's pieces ride, by index: an even subset, at
+/// most [`PIECES_MAX`].
+fn piece_rays(count: usize) -> impl Iterator<Item = usize> {
+    let pieces = count.min(PIECES_MAX);
+    (0..pieces).map(move |k| k * count / pieces)
+}
+
+/// The corner time at which the piece on direction `ray` of cone `index` stops: its front reaches
+/// the direction's recorded end.
+fn piece_stop(plan: &Plan, kind: CornerKind, index: usize, ray: usize) -> f32 {
+    let cone = &plan.cones[index];
+    cone_start(plan, kind, index, false)
+        + cone.run_time(cone.rays[ray].reach) * timeline::REPLAY_SLOWDOWN
 }
 
 /// The drawn extent of the trail leg between arcs `from` and `to`, cut at the trail's end: the
@@ -950,7 +1097,7 @@ pub(super) struct Playing<'a> {
     c: f32,
     reduce: bool,
     head: f32,
-    drawn: bool,
+    share: Option<f32>,
     end: (f32, Vec3),
     line_fade: f32,
 }
@@ -958,15 +1105,15 @@ pub(super) struct Playing<'a> {
 impl<'a> Playing<'a> {
     pub(super) fn new(plan: &'a Plan, kind: CornerKind, c: f32, reduce: bool) -> Self {
         let head = head_arc(plan, kind, c, reduce);
-        let drawn = shell_drawn(plan, kind, c, reduce);
-        let end = trail_end(plan, head, drawn);
+        let share = shell_share(plan, kind, c, reduce);
+        let end = trail_end(plan, head, share);
         let mut playing = Self {
             plan,
             kind,
             c,
             reduce,
             head,
-            drawn,
+            share,
             end,
             line_fade: 1.0,
         };
@@ -986,10 +1133,67 @@ impl<'a> Playing<'a> {
         timeline::progress(self.c, start, span)
     }
 
-    /// The shell model's pose, nose at the head at the record's calibre, or `None` while it is not
-    /// drawn; the trail ends at its tail.
+    /// The shell model's pose, nose at the head at the record's calibre and the share of it drawn,
+    /// or `None` while it is not drawn; the trail ends at its tail.
     pub(super) fn shell(&self) -> Option<Transform> {
-        self.drawn.then(|| shell_transform(self.plan, self.head))
+        self.share
+            .map(|share| shell_transform(self.plan, self.head, share))
+    }
+
+    /// A piece of a burst: placed, or hidden while [`Self::piece_pose`] draws none.
+    pub(super) fn piece(
+        &self,
+        piece: &Piece,
+        transform: &mut Mut<Transform>,
+        visibility: &mut Mut<Visibility>,
+    ) {
+        match self.piece_pose(piece) {
+            Some(pose) => {
+                transform.set_if_neq(pose);
+                visibility.set_if_neq(Visibility::Inherited);
+            }
+            None => {
+                visibility.set_if_neq(Visibility::Hidden);
+            }
+        }
+    }
+
+    /// A piece's pose in the record's frame, or `None` while it is not drawn: from its field's
+    /// throw (the burst), on its direction from the field's origin at the field's front
+    /// ([`front_radius`]), so the pieces are where the field's volume ends; stopped at the
+    /// direction's recorded end and shrunk away over [`PIECE_FADE_S`] from the moment it stops
+    /// ([`piece_stop`]). A shard of [`PIECE_CALIBRES`] at the record's calibre, its length along
+    /// the direction. Never under reduce motion, nor on the eye's side of the slice plane.
+    fn piece_pose(&self, piece: &Piece) -> Option<Transform> {
+        let (plan, kind, c) = (self.plan, self.kind, self.c);
+        if self.reduce || c < cone_start(plan, kind, piece.cone, false) {
+            return None;
+        }
+        let cone = &plan.cones[piece.cone];
+        let ray = &cone.rays[piece.ray];
+        let at =
+            cone.origin + ray.direction * front_radius(plan, kind, piece.cone, c).min(ray.reach);
+        if piece
+            .cut
+            .is_some_and(|(normal, point)| (at - point).dot(normal) > 0.0)
+        {
+            return None;
+        }
+        let gone = timeline::progress(
+            c,
+            piece_stop(plan, kind, piece.cone, piece.ray),
+            PIECE_FADE_S,
+        );
+        if gone >= 1.0 {
+            return None;
+        }
+        let size = 1.0 - timeline::ease_exit(gone);
+        let (length, width) = PIECE_CALIBRES;
+        Some(
+            Transform::from_translation(at)
+                .with_rotation(Quat::from_rotation_arc(Vec3::Y, ray.direction))
+                .with_scale(Vec3::new(width, length, width) * plan.calibre * size),
+        )
     }
 
     /// A trail leg: along its drawn extent, lit by its brightness, or hidden.
@@ -1253,23 +1457,13 @@ pub fn animate(
         (&mut Camera, &mut Transform, &mut Projection),
         (With<StageCamera>, Without<LineSeg>, Without<ConeVolume>),
     >,
-    mut shell: Query<
-        (&mut Transform, &mut Visibility),
-        (
-            With<StageShell>,
-            Without<LineSeg>,
-            Without<MarkItem>,
-            Without<ConeVolume>,
-            Without<BoxTint>,
-            Without<StageCamera>,
-        ),
-    >,
+    mut round: StageRoundPose,
     mut gizmos: Gizmos<StageGizmos>,
 ) {
     let Ok((mut camera, mut eye, mut projection)) = camera.single_mut() else {
         return;
     };
-    let Ok((mut shell_pose, mut shell_visibility)) = shell.single_mut() else {
+    let Ok((mut shell_pose, mut shell_visibility)) = round.shell.single_mut() else {
         return;
     };
     let Some(showing) = corner.showing else {
@@ -1298,6 +1492,9 @@ pub fn animate(
         None => {
             shell_visibility.set_if_neq(Visibility::Hidden);
         }
+    }
+    for (piece, mut transform, mut visibility) in &mut round.pieces {
+        playing.piece(piece, &mut transform, &mut visibility);
     }
     for (seg, material, mut transform, mut visibility) in &mut lines {
         playing.line(seg, material, &mut transform, &mut visibility, &mut glows);
@@ -1782,9 +1979,11 @@ mod tests {
 
     /// For every record: the shell sets off from the drawn span's start at its frame's travel
     /// start, reaches the span's end at its pace's travel end, and is drawn nose first on the line
-    /// at the record's calibre; a round the record has rest keeps its nose on the record's last
-    /// point to the end of the frame, and one the record has leave is never drawn under reduce
-    /// motion (its run past the path: `a_round_that_left_runs_on_past_its_last_node`).
+    /// at the record's calibre, along its body at the share of it drawn; a round the record has
+    /// rest keeps its nose on the record's last point to the end of the frame, drawn whole or, past
+    /// a burst, as what of it the record has fly on (`a_burst_draws_only_what_flies_on`), and one
+    /// the record has leave is never drawn under reduce motion (its run past the path:
+    /// `a_round_that_left_runs_on_past_its_last_node`).
     #[test]
     fn the_shell_ends_where_the_record_ends() {
         let library = Library::load();
@@ -1806,8 +2005,12 @@ mod tests {
             let samples = 16;
             let step = (to - from) / samples as f32;
             for k in 0..=samples {
-                let head = head_arc(plan, kind, from + step * k as f32, false);
-                let pose = shell_transform(plan, head);
+                let c = from + step * k as f32;
+                let head = head_arc(plan, kind, c, false);
+                let Some(share) = shell_share(plan, kind, c, false) else {
+                    continue;
+                };
+                let pose = shell_transform(plan, head, share);
                 assert!(
                     pose.translation.distance(plan.line.at(head)) < POSITION_TOL_M,
                     "{name}: the nose is off the line"
@@ -1824,17 +2027,24 @@ mod tests {
                 );
                 let across = pose.scale.x * SHELL_MODEL_CALIBRE_M;
                 assert!((across - plan.calibre).abs() < 1e-6, "{name}: {across}");
-                assert_eq!(pose.scale, Vec3::splat(pose.scale.x), "{name}");
+                assert_eq!(pose.scale.y, pose.scale.x, "{name}");
+                assert!((pose.scale.z - pose.scale.x * share).abs() < 1e-6, "{name}");
             }
             let last = *plan.line.points.last().unwrap();
             match record.report.end {
                 RoundEnd::Left { .. } => {
-                    assert!(!shell_drawn(plan, kind, to, true), "{name}");
+                    assert!(shell_share(plan, kind, to, true).is_none(), "{name}");
                 }
                 RoundEnd::Rest { .. } | RoundEnd::Burst { .. } => {
+                    // The whole shell, or what of it a burst left flying.
+                    let left = match &record.report.burst {
+                        Some(_) => flies_on(&record.report),
+                        None => Some(1.0),
+                    };
                     for reduce in [false, true] {
                         let end = pace.duration;
-                        assert!(shell_drawn(plan, kind, end, reduce), "{name}");
+                        let share = shell_share(plan, kind, end, reduce);
+                        assert!(same_share(share, left), "{name}: {share:?}, not {left:?}");
                         let nose = plan.line.at(head_arc(plan, kind, end, reduce));
                         assert!(nose.distance(last) < 1e-4, "{name}");
                     }
@@ -1890,10 +2100,9 @@ mod tests {
                     let reached = time_at_arc(plan, kind, line.length(), false);
                     for k in 1..=8 {
                         let c = reached + 0.25 * k as f32;
-                        assert!(
-                            shell_drawn(plan, kind, c, false),
-                            "{name} {played}: hidden at {c} s, past its last node"
-                        );
+                        let Some(share) = shell_share(plan, kind, c, false) else {
+                            panic!("{name} {played}: hidden at {c} s, past its last node");
+                        };
                         let head = head_arc(plan, kind, c, false);
                         let run = (c - reached) / timeline::REPLAY_SLOWDOWN * speed;
                         assert!(
@@ -1901,7 +2110,7 @@ mod tests {
                             "{name} {played}: {} m past the last node, not {run}",
                             head - line.length()
                         );
-                        let pose = shell_transform(plan, head);
+                        let pose = shell_transform(plan, head, share);
                         let nose = line.points[n] + direction * (head - line.length());
                         assert!(
                             pose.translation.distance(nose) < POSITION_TOL_M,
@@ -1912,14 +2121,17 @@ mod tests {
                             "{name} {played}: the body is off the last leg"
                         );
                     }
-                    assert!(!shell_drawn(plan, kind, reached + 1.0, true), "{name}");
+                    assert!(
+                        shell_share(plan, kind, reached + 1.0, true).is_none(),
+                        "{name}"
+                    );
                 }
             }
             let plan = &record.plan;
             let (mut app, _) = staged(&library, &asset, index, plan.kind, Vec3::ZERO);
             let c = time_at_arc(plan, plan.kind, plan.line.length(), false) + 0.5;
             let head = head_arc(plan, plan.kind, c, false);
-            let (tail_arc, tail) = trail_end(plan, head, true);
+            let (tail_arc, tail) = trail_end(plan, head, shell_share(plan, plan.kind, c, false));
             assert!(tail_arc > plan.line.length(), "{name}");
             let world = app.world_mut();
             let mut segs = world.query::<&LineSeg>();
@@ -2007,7 +2219,7 @@ mod tests {
             let samples = 32;
             for k in 0..=samples {
                 let head = bounce.arc + 2.0 * length * k as f32 / samples as f32;
-                let pose = shell_transform(plan, head);
+                let pose = shell_transform(plan, head, 1.0);
                 let tail = pose.transform_point(Vec3::Z * SHELL_MODEL_LENGTH_M);
                 for (part, p) in [("nose", pose.translation), ("tail", tail)] {
                     let depth = (bounce.point - p).dot(bounce.normal);
@@ -2022,6 +2234,354 @@ mod tests {
             bounces += 1;
         }
         assert!(bounces > 0, "a record bounces");
+    }
+
+    /// The share of the round the record has fly on from its burst, read off the record: a ring's
+    /// nose mass over the round's, from a burst in flight; none under the ball or from a round
+    /// that burst at rest.
+    fn flies_on(report: &PenetrationReport) -> Option<f32> {
+        let burst = report.burst.as_ref()?;
+        burst
+            .nose_kg
+            .filter(|_| burst.speed_mps > 0.0)
+            .map(|kg| kg / report.projectile.mass_kg)
+    }
+
+    /// Whether two drawn shares are the same, to f32 rounding.
+    fn same_share(a: Option<f32>, b: Option<f32>) -> bool {
+        match (a, b) {
+            (Some(a), Some(b)) => (a - b).abs() < 1e-6,
+            (a, b) => a.is_none() && b.is_none(),
+        }
+    }
+
+    /// From the corner time the record bursts on, the shell is drawn only as what flies on: under
+    /// the ball, and for a round that burst at rest, nothing; under a ring in flight its nose
+    /// piece, the model's front at the nose's share of the round's mass read off the record, its
+    /// nose on the line where the record's clock has it, parked at the path's end. Before the
+    /// burst the whole model is drawn. The corner, the lesson and the x-ray place the shell by
+    /// this. The library holds a ball, a round that burst at rest and a ring whose path runs on
+    /// past its burst point by more than a model length (fixture data), so neither a shell drawn
+    /// whole to the end, a nose piece drawn full length, nor one parked at the burst point passes.
+    #[test]
+    fn a_burst_draws_only_what_flies_on() {
+        let library = Library::load();
+        let (mut balls, mut at_rest, mut rings) = (0, 0, 0);
+        for record in &library.records {
+            let Some(burst) = &record.report.burst else {
+                continue;
+            };
+            let plan = &record.plan;
+            let name = record.stem;
+            let flies_on = flies_on(&record.report);
+            let last = *plan.line.points.last().unwrap();
+            for kind in [CornerKind::Glass, plan.kind] {
+                let pace = pace(plan, kind);
+                let bursts = corner_of(plan, kind, burst.t);
+                let before = bursts - 1e-3;
+                if before >= kind.travel_start() {
+                    let drawn = shell_share(plan, kind, before, false);
+                    assert!(
+                        same_share(drawn, Some(1.0)),
+                        "{name}: {drawn:?} before the burst"
+                    );
+                }
+                let samples = 16;
+                for k in 0..=samples {
+                    let c = bursts + (pace.duration - bursts) * k as f32 / samples as f32;
+                    let shell = Playing::new(plan, kind, c, false).shell();
+                    let Some(share) = flies_on else {
+                        assert!(
+                            shell.is_none(),
+                            "{name}: a shell drawn at {c} s, past its burst"
+                        );
+                        continue;
+                    };
+                    let pose = shell.unwrap_or_else(|| panic!("{name}: no nose piece at {c} s"));
+                    let head = head_arc(plan, kind, c, false);
+                    assert!(
+                        pose.translation.distance(plan.line.at(head)) < POSITION_TOL_M,
+                        "{name}: the nose piece is off the line at {c} s"
+                    );
+                    let drawn = pose.scale.z / pose.scale.x;
+                    assert!(
+                        (drawn - share).abs() < 1e-5,
+                        "{name}: the nose piece is {drawn} of the model, not {share}"
+                    );
+                }
+                if flies_on.is_some() {
+                    let parked = Playing::new(plan, kind, pace.duration, false).shell();
+                    let nose = parked.map_or(Vec3::INFINITY, |pose| pose.translation);
+                    assert!(
+                        nose.distance(last) < 1e-4,
+                        "{name}: the nose piece parks {} m off the path's end",
+                        nose.distance(last)
+                    );
+                }
+            }
+            match flies_on {
+                None if burst.speed_mps > 0.0 => balls += 1,
+                None => at_rest += 1,
+                Some(share) => {
+                    assert!(share < 1.0, "{name}: the nose piece is the whole round");
+                    if last.distance(Vec3::from(burst.point)) > shell_length(plan) {
+                        rings += 1;
+                    }
+                }
+            }
+        }
+        assert!(
+            balls > 0 && at_rest > 0 && rings > 0,
+            "{balls} balls, {at_rest} at rest, {rings} rings flying on"
+        );
+    }
+
+    /// The corner time at which record time `t` plays in frame `kind`, from the test's own reading
+    /// of the clock: the drawn span's start at the frame's travel start, then
+    /// [`timeline::REPLAY_SLOWDOWN`].
+    fn corner_of(plan: &Plan, kind: CornerKind, t: f32) -> f32 {
+        kind.travel_start() + (t - plan.line.time_at(plan.start_arc)) * timeline::REPLAY_SLOWDOWN
+    }
+
+    /// A burst's pieces ride its field: each on a recorded direction
+    /// ([`crate::damage_cam::Fragment::end`]) from the field's origin, at the front the record
+    /// gives — the burst's sideways speed over the record time since the field was thrown
+    /// ([`crate::damage_cam::Burst::sideways_mps`]) — and never past the direction's end, where it
+    /// stops and then shrinks away within [`PIECE_FADE_S`]; none before the burst, and every one
+    /// gone by the settle, so the hold never freezes one mid-flight. A record's sideways speed
+    /// differs from the round's carried speed (fixture data), so a piece run at the shell's pace
+    /// fails, as does one run on past its end.
+    #[test]
+    fn a_bursts_pieces_ride_its_field_front() {
+        let library = Library::load();
+        let (mut fields, mut differ) = (0, 0);
+        for record in &library.records {
+            let Some((burst, field)) = record
+                .report
+                .burst
+                .as_ref()
+                .and_then(|burst| Some((burst, burst.field.as_ref()?)))
+            else {
+                continue;
+            };
+            let plan = &record.plan;
+            let name = record.stem;
+            let index = plan
+                .burst
+                .as_ref()
+                .and_then(|b| b.cone)
+                .expect("the field is drawn");
+            let cone = &plan.cones[index];
+            let origin = Vec3::from(field.origin);
+            for kind in [CornerKind::Glass, plan.kind] {
+                let thrown = corner_of(plan, kind, field.t);
+                let settle = pace(plan, kind).settle;
+                for ray in piece_rays(cone.rays.len()) {
+                    let piece = Piece {
+                        cone: index,
+                        ray,
+                        cut: None,
+                    };
+                    let direction = cone.rays[ray].direction;
+                    let reach = cone.rays[ray].reach;
+                    let end = origin + direction * reach;
+                    assert!(
+                        field
+                            .fragments
+                            .iter()
+                            .any(|f| Vec3::from(f.end).distance(end) < POSITION_TOL_M),
+                        "{name}: piece {ray} rides no recorded direction"
+                    );
+                    let pose = |c: f32| Playing::new(plan, kind, c, false).piece_pose(&piece);
+                    assert!(
+                        pose(thrown - 1e-3).is_none(),
+                        "{name}: piece {ray} before the burst"
+                    );
+                    let stops = thrown + reach / burst.sideways_mps * timeline::REPLAY_SLOWDOWN;
+                    assert!(
+                        stops + PIECE_FADE_S <= settle + 1e-4,
+                        "{name}: piece {ray} outlasts the settle"
+                    );
+                    let samples = 32;
+                    let span = stops + PIECE_FADE_S + 0.1 - thrown;
+                    let mut drawn = 0;
+                    for k in 0..=samples {
+                        let c = thrown + span * k as f32 / samples as f32;
+                        let Some(pose) = pose(c) else {
+                            assert!(
+                                c >= stops + PIECE_FADE_S - 1e-4,
+                                "{name}: piece {ray} hidden at {c} s, before it is gone"
+                            );
+                            continue;
+                        };
+                        assert!(
+                            c < stops + PIECE_FADE_S + 1e-4,
+                            "{name}: piece {ray} lingers"
+                        );
+                        let t = field.t + (c - thrown) / timeline::REPLAY_SLOWDOWN;
+                        let front = burst.sideways_mps * (t - field.t);
+                        let want = origin + direction * front.min(reach);
+                        assert!(
+                            pose.translation.distance(want) < POSITION_TOL_M,
+                            "{name}: piece {ray} at {c} s stands {} m off the front",
+                            pose.translation.distance(want)
+                        );
+                        assert!(
+                            pose.translation.distance(origin) <= reach + POSITION_TOL_M,
+                            "{name}: piece {ray} past its end"
+                        );
+                        drawn += 1;
+                    }
+                    assert!(
+                        drawn > samples / 2,
+                        "{name}: piece {ray} drawn {drawn} times"
+                    );
+                }
+            }
+            if (burst.sideways_mps - burst.speed_mps).abs() > 1.0 {
+                differ += 1;
+            }
+            fields += 1;
+        }
+        assert!(
+            fields > 0 && differ > 0,
+            "{fields} burst fields, {differ} faster than the round"
+        );
+    }
+
+    /// In the slice no piece is drawn on the eye's side of the plane, where the slice cuts the
+    /// field away. A burst record the slice frames throws pieces to both sides of its plane
+    /// (fixture data), so neither an ignored cut nor one that hides every piece passes.
+    #[test]
+    fn the_slice_cuts_a_bursts_pieces() {
+        let library = Library::load();
+        let (mut kept, mut cut) = (0, 0);
+        for record in &library.records {
+            let plan = &record.plan;
+            let Some(index) = plan.burst.as_ref().and_then(|b| b.cone) else {
+                continue;
+            };
+            let (normal, point) = slice_plane(plan);
+            let thrown = cone_start(plan, CornerKind::Slice, index, false);
+            for ray in piece_rays(plan.cones[index].rays.len()) {
+                let whole = Piece {
+                    cone: index,
+                    ray,
+                    cut: None,
+                };
+                let sliced = Piece {
+                    cut: Some((normal, point)),
+                    ..whole
+                };
+                for k in 0..=16 {
+                    let c = thrown + 0.05 * k as f32;
+                    let playing = Playing::new(plan, CornerKind::Slice, c, false);
+                    match (playing.piece_pose(&whole), playing.piece_pose(&sliced)) {
+                        (Some(_), Some(pose)) => {
+                            assert!(
+                                (pose.translation - point).dot(normal) <= 0.0,
+                                "{}: piece {ray} on the eye's side",
+                                record.stem
+                            );
+                            kept += 1;
+                        }
+                        (Some(_), None) => cut += 1,
+                        (None, None) => {}
+                        (None, Some(_)) => panic!("{}: the cut draws piece {ray}", record.stem),
+                    }
+                }
+            }
+        }
+        assert!(kept > 0 && cut > 0, "{kept} kept, {cut} cut");
+    }
+
+    /// Under reduce motion a burst throws no piece at any time, and the shell shows what the burst
+    /// leaves from the travel start on: the nose piece parked at the path's end, or nothing (as
+    /// for any round that left).
+    #[test]
+    fn reduce_motion_draws_no_piece() {
+        let library = Library::load();
+        let mut bursts = 0;
+        for record in &library.records {
+            let plan = &record.plan;
+            let Some(index) = plan.burst.as_ref().and_then(|b| b.cone) else {
+                continue;
+            };
+            let name = record.stem;
+            for kind in [CornerKind::Glass, plan.kind] {
+                let pace = pace(plan, kind);
+                let left = shell_share(plan, kind, kind.travel_start(), true);
+                let want = flies_on(&record.report).filter(|_| !plan.left());
+                assert!(same_share(left, want), "{name}: {left:?}, not {want:?}");
+                for k in 0..=32 {
+                    let c = pace.duration * k as f32 / 32.0;
+                    let playing = Playing::new(plan, kind, c, true);
+                    for ray in piece_rays(plan.cones[index].rays.len()) {
+                        let piece = Piece {
+                            cone: index,
+                            ray,
+                            cut: None,
+                        };
+                        assert!(
+                            playing.piece_pose(&piece).is_none(),
+                            "{name}: piece {ray} drawn at {c} s under reduce motion"
+                        );
+                    }
+                }
+            }
+            bursts += 1;
+        }
+        assert!(bursts > 0, "a record bursts with a field");
+    }
+
+    /// The real [`rebuild`] throws a burst's pieces as an even subset of its field's directions, at
+    /// most [`PIECES_MAX`], each hidden until played, all on one mesh and the stage's round
+    /// material ([`shell_material`]): never a mesh or a material per piece. A field whose every
+    /// direction ended where it was thrown (a round that burst at rest inside a plate) throws none.
+    #[test]
+    fn a_bursts_pieces_share_one_mesh_and_the_rounds_material() {
+        let library = Library::load();
+        let asset = TankAsset::load(&library.vehicle).unwrap();
+        let mut built = 0;
+        for (index, record) in library.records.iter().enumerate() {
+            let Some(cone) = record.plan.burst.as_ref().and_then(|b| b.cone) else {
+                continue;
+            };
+            let count = record.plan.cones[cone].rays.len();
+            let name = record.stem;
+            let (mut app, _) = staged(&library, &asset, index, record.plan.kind, Vec3::ZERO);
+            let world = app.world_mut();
+            let round = world.resource::<Stage>().round_material.id();
+            let mut pieces = world.query::<(
+                &Piece,
+                &Mesh3d,
+                &MeshMaterial3d<StandardMaterial>,
+                &Visibility,
+            )>();
+            let mut rays = Vec::new();
+            let mut meshes = std::collections::HashSet::new();
+            for (piece, mesh, material, visibility) in pieces.iter(world) {
+                assert_eq!(material.0.id(), round, "{name}");
+                assert_eq!(*visibility, Visibility::Hidden, "{name}");
+                meshes.insert(mesh.0.id());
+                rays.push(piece.ray);
+            }
+            rays.sort_unstable();
+            assert_eq!(rays.len(), count.min(PIECES_MAX), "{name}");
+            if count == 0 {
+                continue;
+            }
+            assert_eq!(meshes.len(), 1, "{name}");
+            let gaps: Vec<usize> = rays
+                .windows(2)
+                .map(|pair| pair[1] - pair[0])
+                .chain([count - rays[rays.len() - 1] + rays[0]])
+                .collect();
+            let (lo, hi) = (gaps.iter().min().unwrap(), gaps.iter().max().unwrap());
+            assert!(hi - lo <= 1, "{name}: uneven gaps {lo}..{hi}");
+            built += 1;
+        }
+        assert!(built > 0, "a record bursts with a field");
     }
 
     /// The frames that look along the shot.
@@ -2850,6 +3410,7 @@ mod tests {
             WorldSerializationPlugin,
         ))
         .init_asset::<Image>()
+        .init_asset::<StandardMaterial>()
         .init_resource::<Stage>()
         .add_systems(Startup, spawn);
         app.update();

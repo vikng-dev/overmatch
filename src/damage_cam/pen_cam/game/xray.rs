@@ -52,8 +52,8 @@ use super::super::look::{self, Layer, LookMaterial, MaskNeed, MaskSet, Masks};
 use super::super::material::{GlowMaterial, OutlineMaterial};
 use super::super::plan::{BoxPlan, Plan};
 use super::super::stage::{
-    self, BoxTint, ConeVolume, LineSeg, LookCtx, MarkItem, Playing, SHELL_SCENE, component_meshes,
-    mask_copy, round_copies, spawn_glass,
+    self, BoxTint, ConeVolume, LineSeg, LookCtx, MarkItem, Piece, Playing, SHELL_SCENE,
+    component_meshes, mask_copy, round_copies, spawn_glass,
 };
 use super::super::timeline::CornerKind;
 use super::super::view::{self, Tier};
@@ -260,6 +260,9 @@ pub(super) struct XRayState {
     tanks: HashMap<String, Arc<TankAsset>>,
     /// The shell model, loaded once the x-ray first draws a record.
     shell: Option<Handle<WorldAsset>>,
+    /// The shell model's material, which a burst's pieces wear: loaded once the x-ray first draws
+    /// a burst's pieces.
+    shell_material: Option<Handle<StandardMaterial>>,
 }
 
 impl XRayState {
@@ -543,6 +546,18 @@ pub(super) fn build(
         .map(|report| report.servo_deg.clone())
         .unwrap_or_default();
     let plan = plan(report, &built.live, &asset.shapes(&servo_deg));
+    let round_material = if plan
+        .burst
+        .as_ref()
+        .is_some_and(|burst| burst.cone.is_some())
+    {
+        state
+            .shell_material
+            .get_or_insert_with(|| stage::shell_material(&asset_server))
+            .clone()
+    } else {
+        Handle::default()
+    };
     let components = component_meshes(
         &plan,
         held.dressed
@@ -563,6 +578,7 @@ pub(super) fn build(
             looks: &mut stores.looks,
             masks: set,
         },
+        &round_material,
         (XRayItem, VisualScope::WORLD_EFFECT),
     );
     if plan.line.points.len() >= 2 {
@@ -780,6 +796,17 @@ pub(super) fn animate(
             Without<BoxTint>,
         ),
     >,
+    mut pieces: Query<
+        (&Piece, &mut Transform, &mut Visibility),
+        (
+            With<XRayItem>,
+            Without<XRayShell>,
+            Without<LineSeg>,
+            Without<MarkItem>,
+            Without<ConeVolume>,
+            Without<BoxTint>,
+        ),
+    >,
 ) {
     let Some(built) = state.built.as_ref() else {
         return;
@@ -799,6 +826,9 @@ pub(super) fn animate(
                 visibility.set_if_neq(Visibility::Hidden);
             }
         }
+    }
+    for (piece, mut transform, mut visibility) in &mut pieces {
+        playing.piece(piece, &mut transform, &mut visibility);
     }
     for (seg, material, mut transform, mut visibility) in &mut lines {
         playing.line(seg, material, &mut transform, &mut visibility, &mut glows);
