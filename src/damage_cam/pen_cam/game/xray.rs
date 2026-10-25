@@ -21,10 +21,13 @@
 //!   the preference stays, so the x-ray returns on the next tank. A composition that despawns the
 //!   subject itself lets go first ([`XRayRelease`]), ordered after the pen cam's systems
 //!   ([`PenCamSet`](super::PenCamSet)) so nothing the x-ray queued that frame lands on it after.
-//! * **The tint reads live state only.** Each component's fill is its live HP points over its pool
-//!   ([`LiveState::boxes`]), never the record's: the record supplies the path and the cones, and a
-//!   component's dose or HP at the shot never reaches the x-ray. An unstruck component (no point
-//!   lost) is the base layout, untinted.
+//! * **The tint ends on the live state.** Each component's fill settles on its live HP points over
+//!   its pool, out of action as live has it ([`LiveState::boxes`]); a record's doses and
+//!   consequences never reach it. A component the record reaches starts from its HP points at the
+//!   shot, never fewer than its live points, and rises to that end at the record's reach time, as
+//!   the victim frame fills it; any other — one the record does not reach or does not name, or
+//!   every one with no record — holds its live state from the first frame. A component no point of
+//!   which is lost is the base layout, untinted.
 //! * **The latest rule.** Of the subject's records of its current life whose impact is no longer
 //!   waiting, strictly the newest by recency ([`latest`], [`latest_shot`]; a clean ricochet
 //!   replaces an earlier penetration — a bounce is informative too). With none, the live tint
@@ -34,7 +37,7 @@
 //!   of the same record — X off and on, the optic and back, a resize, an older record back as the
 //!   latest — continues that clock ([`XRayState::shown`]), so past the hold beat it is the held end; a
 //!   record that lands while the x-ray is off waits for X. A connection forgets every clock with
-//!   the store ([`forget_shown`]). The tint follows the live state in the same showing.
+//!   the store ([`forget_shown`]). The tint's end follows the live state in the same showing.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
@@ -969,13 +972,21 @@ impl LiveState {
         )
     }
 
-    /// Each volume as the x-ray draws it, its shape from `shapes`: its pool and its live points,
-    /// lost at none left or with its crew member knocked out. Nothing of a record.
-    fn boxes(&self, shapes: &TankShapes) -> Vec<BoxPlan> {
+    /// Each volume as the x-ray draws it, its shape from `shapes`, ending on its live state: its
+    /// pool, its live points, lost at none left or with its crew member knocked out. One that the
+    /// box of its name in `record` reaches starts from that box's points at the shot, never fewer
+    /// than its live points, and rises to the end at that box's reach time; any other starts at
+    /// the end. Invariant: `hp - lost_hp` is its live points, so its settled share is live's.
+    fn boxes(&self, shapes: &TankShapes, record: &[BoxPlan]) -> Vec<BoxPlan> {
         self.0
             .iter()
             .map(|live| {
                 let shape = shapes.get(&live.name);
+                let reached = record
+                    .iter()
+                    .find(|b| b.name == live.name)
+                    .and_then(|b| Some((b.hp, b.reached_at?)));
+                let hp = reached.map_or(live.current, |(hp, _)| hp.max(live.current));
                 BoxPlan {
                     name: live.name.clone(),
                     role: live.role,
@@ -985,11 +996,11 @@ impl LiveState {
                         (lo.y, hi.y)
                     }),
                     count: live.max,
-                    hp: live.current,
+                    hp,
                     line: 0.0,
                     field: 0.0,
-                    lost_hp: 0,
-                    reached_at: None,
+                    lost_hp: hp - live.current,
+                    reached_at: reached.map(|(_, reach)| reach),
                     lost: live.dead || (live.max > 0 && live.current == 0),
                 }
             })
@@ -998,21 +1009,21 @@ impl LiveState {
 }
 
 /// The x-ray's plan: `record`'s path and cones, or no round at all without one, over `live`'s
-/// components, posed in `shapes`.
+/// components, posed in `shapes`, each rising from its state at `record`'s shot where the record
+/// reaches it ([`LiveState::boxes`]).
 pub(super) fn plan(
     record: Option<&PenetrationReport>,
     live: &LiveState,
     shapes: &TankShapes,
 ) -> Plan {
-    let boxes = live.boxes(shapes);
     match record {
         Some(report) => {
             let mut plan = Plan::new(report, shapes);
             plan.kind = CornerKind::Victim;
-            plan.boxes = boxes;
+            plan.boxes = live.boxes(shapes, &plan.boxes);
             plan
         }
-        None => Plan::bare(shapes, boxes),
+        None => Plan::bare(shapes, live.boxes(shapes, &[])),
     }
 }
 
@@ -1065,14 +1076,31 @@ fn newest(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::damage_cam::delivery::tests::report;
+    use crate::damage_cam::pen_cam::demo::Library;
+    use crate::damage_cam::pen_cam::timeline::Condition;
     use crate::damage_cam::shapes::TankAsset;
 
-    /// Each box's tint inputs: name, pool, points held, points lost, lost.
-    fn tints(plan: &Plan) -> Vec<(String, u32, u32, u32, bool)> {
-        plan.boxes
-            .iter()
-            .map(|b| (b.name.clone(), b.count, b.hp, b.lost_hp, b.lost))
+    /// Seventeen moments of a fill's rise, its start and its end among them.
+    fn rises() -> impl Iterator<Item = f32> {
+        (0..=16).map(|k| k as f32 / 16.0)
+    }
+
+    /// Every record of the demo's playlist, by stem, with its tank's shapes as posed at its shot.
+    fn records() -> Vec<(&'static str, PenetrationReport, TankShapes)> {
+        let mut assets = HashMap::<String, TankAsset>::new();
+        Library::reports()
+            .into_iter()
+            .map(|(stem, report)| {
+                let vehicle = report
+                    .vehicle
+                    .clone()
+                    .expect("a recorded scenario names its vehicle");
+                let shapes = assets
+                    .entry(vehicle)
+                    .or_insert_with_key(|vehicle| TankAsset::load(vehicle).unwrap())
+                    .shapes(&report.servo_deg);
+                (stem, report, shapes)
+            })
             .collect()
     }
 
@@ -1093,51 +1121,216 @@ mod tests {
         )
     }
 
-    /// The tint is the live state's, never the record's: a record with other HP points, doses or
-    /// consequences, or no record, tints the same; a live HP change tints differently; a component
-    /// no point of which is lost draws untinted, the base layout.
-    #[test]
-    fn the_tint_follows_live_state_only() {
-        let record = report("s9_breech_and_loader");
-        let shapes = TankAsset::load(record.vehicle.as_deref().unwrap())
-            .unwrap()
-            .shapes(&record.servo_deg);
-        let live = standing(&record);
-        assert!(
-            live.0.iter().any(|b| b.max > 1),
-            "fixture data: a component with a pool to lose points of"
+    /// The live state of `record`'s components as its shot left them: their HP points at the shot
+    /// less the points it took.
+    fn after_shot(record: &PenetrationReport) -> LiveState {
+        let mut live = standing(record);
+        for b in &mut live.0 {
+            let taken = record
+                .doses
+                .iter()
+                .find(|dose| dose.volume == b.name)
+                .map_or(0, |dose| dose.lost);
+            b.current = b.current.saturating_sub(taken);
+        }
+        live
+    }
+
+    /// `live` with every component `points` HP points lower: points lost since the shot that no
+    /// record tells (fixture data).
+    fn lower(live: &LiveState, points: u32) -> LiveState {
+        let mut lower = live.clone();
+        for b in &mut lower.0 {
+            b.current = b.current.saturating_sub(points);
+        }
+        lower
+    }
+
+    /// Where a live component's fill settles on the state scale: the share of its pool gone, out
+    /// of action with no point left or its crew member knocked out.
+    fn settled(live: &LiveBox) -> Option<Condition> {
+        let share = if live.max == 0 {
+            0.0
+        } else {
+            (1.0 - live.current as f32 / live.max as f32).clamp(0.0, 1.0)
+        };
+        Condition::of(live.dead || (live.max > 0 && live.current == 0), share)
+    }
+
+    /// `plan`'s components beside `live`'s, after checking the plan draws live's components and
+    /// no other, in their order.
+    fn beside<'a>(
+        plan: &'a Plan,
+        live: &'a LiveState,
+    ) -> impl Iterator<Item = (&'a BoxPlan, &'a LiveBox)> {
+        assert_eq!(
+            plan.boxes
+                .iter()
+                .map(|b| b.name.as_str())
+                .collect::<Vec<_>>(),
+            live.0.iter().map(|l| l.name.as_str()).collect::<Vec<_>>(),
+            "the x-ray draws live's components"
         );
-        let base = tints(&plan(Some(&record), &live, &shapes));
+        plan.boxes.iter().zip(&live.0)
+    }
 
-        let mut rewritten = record.clone();
-        for component in &mut rewritten.components {
-            component.hp = 0;
+    /// Every component's fill settles on its live state whatever the record says — the record
+    /// as shot; the same with no HP points at the shot, a point more taken from each component
+    /// it doses and no consequences; no record — over live states as they stood at the shot, as
+    /// the shot left them, a point lower since, at full, and with every crew member knocked out.
+    /// Every viewer of the x-ray relies on it: the end of every rise is the tank as it stands.
+    /// A mutant that ends on the record's after-shot share, or takes its out-of-action state
+    /// from the record's consequences, breaks it.
+    #[test]
+    fn the_fill_settles_on_the_live_state() {
+        let mut drawn = 0;
+        for (stem, record, shapes) in records() {
+            let mut rewritten = record.clone();
+            for component in &mut rewritten.components {
+                component.hp = 0;
+            }
+            for dose in &mut rewritten.doses {
+                dose.lost += 1;
+            }
+            rewritten.consequences.clear();
+            let shot = after_shot(&record);
+            let mut full = standing(&record);
+            for b in &mut full.0 {
+                b.current = b.max;
+            }
+            let mut out = shot.clone();
+            for b in out.0.iter_mut().filter(|b| b.role == Role::Crew) {
+                b.dead = true;
+            }
+            for live in [standing(&record), lower(&shot, 1), shot, full, out] {
+                for told in [Some(&record), Some(&rewritten), None] {
+                    let plan = plan(told, &live, &shapes);
+                    for (b, l) in beside(&plan, &live) {
+                        assert_eq!(look::condition(b, 1.0), settled(l), "{stem} {}", b.name);
+                        drawn += usize::from(settled(l).is_some());
+                    }
+                }
+            }
         }
-        for dose in &mut rewritten.doses {
-            dose.lost += 1;
-        }
-        rewritten.consequences.clear();
-        assert_eq!(tints(&plan(Some(&rewritten), &live, &shapes)), base);
-        assert_eq!(tints(&plan(None, &live, &shapes)), base);
+        assert!(drawn > 0, "a component with any of its pool gone");
+    }
 
-        let mut hurt = live.clone();
-        let b = hurt.0.iter_mut().find(|b| b.max > 1).unwrap();
-        b.current = b.max - 1;
-        assert_ne!(tints(&plan(Some(&record), &hurt, &shapes)), base);
-        let mut killed = live;
-        killed.0[0].dead = true;
-        assert_ne!(tints(&plan(Some(&record), &killed, &shapes)), base);
+    /// A component the record reaches, and that had lost half its pool before the shot (fixture
+    /// data: every pool doubled), starts where the record's own victim frame starts it — its
+    /// state before the shot, at the record's reach time — and rises from there, never falling,
+    /// to its live state. The victim relies on it: a fill at its end from the first frame shows a
+    /// new shot's work before the picture reaches the component. A mutant that ignores the
+    /// record, so nothing rises, breaks it.
+    #[test]
+    fn a_reached_component_rises_from_its_state_before_the_shot_to_live() {
+        let mut rose = 0;
+        for (stem, mut record, shapes) in records() {
+            for component in &mut record.components {
+                component.count *= 2;
+            }
+            let live = after_shot(&record);
+            let shot = Plan::new(&record, &shapes);
+            let plan = plan(Some(&record), &live, &shapes);
+            for (b, l) in beside(&plan, &live) {
+                let Some(r) = shot.boxes.iter().find(|r| r.name == b.name && r.struck()) else {
+                    continue;
+                };
+                let name = format!("{stem} {}", b.name);
+                assert!(r.reached_at.is_some(), "{name}: struck and never reached");
+                assert_eq!(
+                    b.reached_at, r.reached_at,
+                    "{name}: the record's reach time"
+                );
+                let start = look::condition(b, 0.0);
+                assert_eq!(start, look::condition(r, 0.0), "{name}: the record's start");
+                assert_eq!(look::condition(b, 1.0), settled(l), "{name}: the live end");
+                assert_ne!(start, settled(l), "{name}: nothing rises");
+                let mut last = 0.0;
+                for rise in rises() {
+                    let fill = look::condition(b, rise).map_or(0.0, Condition::fill);
+                    assert!(fill >= last, "{name}: falls at {rise}");
+                    last = fill;
+                }
+                rose += 1;
+            }
+        }
+        assert!(rose > 0, "a reached component the shot took HP from");
+    }
 
-        let mut full = standing(&record);
-        for b in &mut full.0 {
-            b.current = b.max;
+    /// A record that has a component it reaches at fewer HP points at the shot than live holds
+    /// now (fixture data: half the live points at the shot) never draws that component more
+    /// damaged than live: its fill is the live state at every moment of the rise. The victim
+    /// relies on it: a start more damaged than live would fall toward live, damage undone on
+    /// screen. A mutant that drops the clamp of the start to live breaks it.
+    #[test]
+    fn the_start_is_never_more_damaged_than_live() {
+        let mut clamped = 0;
+        for (stem, record, shapes) in records() {
+            let live = after_shot(&record);
+            let mut older = record.clone();
+            for component in &mut older.components {
+                if let Some(l) = live.0.iter().find(|l| l.name == component.name) {
+                    component.hp = l.current / 2;
+                }
+            }
+            let plan = plan(Some(&older), &live, &shapes);
+            for (b, l) in beside(&plan, &live) {
+                for rise in rises() {
+                    assert_eq!(
+                        look::condition(b, rise),
+                        settled(l),
+                        "{stem} {} at {rise}",
+                        b.name
+                    );
+                }
+                clamped += usize::from(b.reached_at.is_some() && l.current / 2 < l.current);
+            }
         }
-        for b in plan(Some(&record), &full, &shapes).boxes {
-            assert!(
-                !b.lost && b.pool_lost() == 0.0,
-                "{}: tinted at full",
-                b.name
-            );
+        assert!(
+            clamped > 0,
+            "a reached component lower at the shot than live"
+        );
+    }
+
+    /// A component the record does not reach holds its live state from the first frame through
+    /// every moment of the rise: one the record does not name (fixture data: the record's first
+    /// dosed component struck from it), one it names and never reached, and every one with no
+    /// record — each a point lower since the shot, so each is drawn. The victim relies on it: a
+    /// fill never waits on a reach the record does not have, nor starts from a state the record
+    /// never stated. A mutant that rises from an untouched pool, or that takes the start of a
+    /// named component the record never reached, breaks it.
+    #[test]
+    fn a_component_the_record_does_not_reach_holds_live_from_the_first_frame() {
+        // Unnamed, named and never reached, no record.
+        let mut held = [0; 3];
+        for (stem, record, shapes) in records() {
+            let Some(struck) = record.doses.first().map(|dose| dose.volume.clone()) else {
+                continue;
+            };
+            let mut unnamed = record.clone();
+            unnamed.components.retain(|c| c.name != struck);
+            unnamed.doses.retain(|d| d.volume != struck);
+            let live = lower(&after_shot(&record), 1);
+            let reached = Plan::new(&unnamed, &shapes);
+            for told in [Some(&unnamed), None] {
+                let plan = plan(told, &live, &shapes);
+                for (b, l) in beside(&plan, &live) {
+                    let case = match told.and(reached.boxes.iter().find(|r| r.name == b.name)) {
+                        Some(r) if r.reached_at.is_some() => continue,
+                        Some(_) => 1,
+                        None if told.is_some() => 0,
+                        None => 2,
+                    };
+                    let name = format!("{stem} {}", b.name);
+                    assert!(settled(l).is_some(), "{name}: fixture data: drawn");
+                    assert_eq!(b.reached_at, None, "{name}: reached");
+                    for rise in rises() {
+                        assert_eq!(look::condition(b, rise), settled(l), "{name} at {rise}");
+                    }
+                    held[case] += 1;
+                }
+            }
         }
+        assert!(held.iter().all(|n| *n > 0), "{held:?}");
     }
 }
