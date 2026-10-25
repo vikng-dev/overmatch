@@ -345,7 +345,18 @@ share one atlas, baked once per record. A point reads its field from the four te
 direction, each testing the point against its own reach, the results weighted bilinearly: a reach
 is never interpolated across a shadow's edge, so behind a body the field reads the same share at
 every depth out to what lies beyond it, and none once every texel about the direction is the
-body's. The fields draw as **one volume** (`assets/shaders/pen_cam_look.wgsl`, `volume`) on the
+body's. A texel's reach stands for its whole cell of directions, and a surface the field stops on
+lies a little before or past it across the cell, so each texel also counts a point within a
+**reach tolerance** past its own reach, never past the farthest of the four: twice the texel's
+diagonal angle times `r` (the angle DERIVED from the map's zoom, the factor TUNED). A surface the
+field stops on reads inside to about 63° off square where the octahedral turn is steepest and 80°
+at a cap's axis (DERIVED), with no texel-by-texel flips; a point deeper behind a body than
+the tolerance keeps its shadow, and a shadow's edge on a second body moves by at most one texel
+cell, only where that body lies within the tolerance of the one casting it (DERIVED). The cells
+themselves stay: where the four texels' results differ, across a shadow's edge or a step in
+strength, the weighted sum, and so a band's edge, follows the bilinear weights cell by cell, a
+stair-step a texel cell wide at close zoom that no tolerance moves (MEASURED: the same stair-step
+at 8 diagonals and at the farthest of the four). The fields draw as **one volume** (`assets/shaders/pen_cam_look.wgsl`, `volume`) on the
 back faces of a box about every field's reach: each eye ray is cut at the ends of every field's
 stretch along it, each piece is sampled no farther apart than the smallest ball across in 48
 steps among the fields whose stretches hold it, so every field is sampled at its own size and a
@@ -353,9 +364,17 @@ small field inside a wide one never falls between two samples, and each threshol
 two samples is placed by 8 halvings, so a band's length along the ray is its iso-surface's chord
 and its edge on screen the iso-surface's silhouette, with no stair-steps and no noise. Each band
 takes its colour at an opacity that climbs with its length over its extinction length (knockout
-0.6 m, reduced 3 m, the whole at most 0.55; TUNED), the nearer laid over the farther. A field is
-drawn as its volume alone: a surface it meets keeps its own look (a playtest fork,
-`.agents/scratch/playtest-forks/field-footprints.md`). Mechanism and entry points:
+0.6 m, reduced 3 m, the whole at most 0.55; TUNED), the nearer laid over the farther. The fields
+are also **painted** on the components' surfaces (a playtest fork,
+`.agents/scratch/playtest-forks/field-footprints.md`): a point takes the band of the summed
+intensity there, at opacity 0.6 (TUNED), its band edges a pixel wide, by the rule its
+component's role gives. A hard component (every role but crew) is painted where a field meets
+it: on a face turned to the field's origin, on the support, inside the front, and within each
+texel's reach, its tolerance and 1 cm (TUNED). A crew station, a witness (ADR-0040), is painted
+wherever its surface lies inside a field, the volume's own test, whichever way the face turns, so
+its far faces read the field it stands in. The hull glass and every surface no component claims
+are never painted. The glass, victim and outside frames and the victim's x-ray paint; the slice
+does not. Mechanism and entry points:
 `src/damage_cam/pen_cam/look.rs`, module doc. The calibration stays provisional until the
 scenarios re-recorded under the ball are seen (owner, 2026-10-23, night).
 
@@ -363,8 +382,9 @@ scenarios re-recorded under the ball are seen (owner, 2026-10-23, night).
 cam's lesson, the victim's x-ray, the slice) draws the body, the main armour, external armour and
 detail, behind everything else. The scene, the components with their state fills and outlines, the
 round's own model and the fields' volume, is ordered by depth among itself: a component or the
-round in front of a field hides it, a field in front of either blends over it. The round keeps its
-own materials and is drawn whole, in the slice too. Each layer is one surface deep. Every depth the
+round in front of a field hides it, a field in front of either blends over it. The fields'
+painting lies on a component's own surface (its mesh's, its state fill's), so it is ordered as the
+component is. The round keeps its own materials and is drawn whole, in the slice too. Each layer is one surface deep. Every depth the
 order compares is the eye depth, one convention in both projections: the distance from the eye in
 perspective, the distance along the camera's forward in orthographic. The outside view (a damaged
 tank seen whole) keeps the body in front and the volume unbounded. The trail and the rings are

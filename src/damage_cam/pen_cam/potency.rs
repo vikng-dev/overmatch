@@ -85,7 +85,7 @@ impl Potency {
         not(test),
         expect(
             dead_code,
-            reason = "the look's shader parts the bands at runtime (`pen_cam_look.wgsl`, `step_over`); this is the law it applies, held by the tests"
+            reason = "the look's shader parts the bands at runtime (`pen_cam_look.wgsl`, `step_over` and `footprint`); this is the law it applies, held by the tests"
         )
     )]
     pub fn band(&self, intensity: f32) -> Band {
@@ -124,6 +124,23 @@ pub fn solid_angle(half_angle: f32) -> f32 {
 )]
 pub fn intensity(emission: f32, r: f32) -> f32 {
     emission / (r * r)
+}
+
+/// A band's edge as the painting draws it: how far value `x` is past `edge`, `smoothstep` over
+/// `width` centred on it (`width` the value's change across a pixel, so the edge is one pixel wide
+/// at every zoom), a hard step where the value does not change. `pen_cam_look.wgsl` (`soft_step`)
+/// evaluates the same; this is the curve it mirrors, held by the tests.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the look's shader takes the edge at runtime (`pen_cam_look.wgsl`, `soft_step`); this is the curve it mirrors, held by the tests"
+    )
+)]
+pub fn soft_step(edge: f32, width: f32, x: f32) -> f32 {
+    let half = 0.5 * width.max(1e-6);
+    let t = ((x - (edge - half)) / (2.0 * half)).clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 #[cfg(test)]
@@ -201,5 +218,32 @@ mod tests {
             let c = LinearRgba::from(colour).to_vec3();
             assert!(c.z > c.x && c.y > c.x, "{c}");
         }
+    }
+
+    /// A band's edge on a painted surface is a smoothstep one pixel wide, centred on the
+    /// threshold: half way at the threshold, nothing a half-width below, whole a half-width above,
+    /// monotone between, and a hard step where the value is flat across the pixel. Every zoom
+    /// draws the edge crisp and unaliased; a cut (a step function), an edge off its threshold or
+    /// one wider than the pixel fails here. Tolerance at the threshold: the curve's slope there,
+    /// 1.5 per width, times the f32 rounding of `edge ∓ width / 2`, two ulps of `edge` (DERIVED).
+    #[test]
+    fn a_band_edge_is_one_pixel_wide() {
+        for (edge, width) in [(0.0_f32, 1.0_f32), (7.2, 0.05), (-3.0, 4.0)] {
+            let rounding = 1.5 * 2.0 * f32::EPSILON * edge.abs().max(1.0) / width;
+            assert!((soft_step(edge, width, edge) - 0.5).abs() <= rounding + 1e-6);
+            assert_eq!(soft_step(edge, width, edge - 0.5 * width), 0.0);
+            assert_eq!(soft_step(edge, width, edge + 0.5 * width), 1.0);
+            let mut last = 0.0;
+            for k in 0..=100 {
+                let x = edge - 0.5 * width + width * k as f32 / 100.0;
+                let here = soft_step(edge, width, x);
+                assert!(here >= last - 1e-6, "{edge} {width}: {x}");
+                last = here;
+            }
+            let inside = soft_step(edge, width, edge + 0.25 * width);
+            assert!(inside > 0.5 && inside < 1.0, "{inside}");
+        }
+        assert_eq!(soft_step(1.0, 0.0, 1.0 + 1e-3), 1.0);
+        assert_eq!(soft_step(1.0, 0.0, 1.0 - 1e-3), 0.0);
     }
 }

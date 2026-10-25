@@ -8,8 +8,8 @@
 //                 surface; a component (`mode.z = 1`) the part mask's. Half-Lambert shading with
 //                 `shade.y` the light's share, opacity `color.a` at a grazing angle falling to
 //                 `shade.x` of it face-on (power `shade.z`), and that mask's depth edges in `edge`
-//                 (rgb, a: opacity). Each layer is one surface deep: a surface that is not its
-//                 mask's nearest is discarded.
+//                 (rgb, a: opacity), a component under the fields' painting (`footprint`). Each
+//                 layer is one surface deep: a surface that is not its mask's nearest is discarded.
 //   3 state       a component on the state scale, opaque: below its fill level `color` (red, or
 //                 charcoal under an `edge`-coloured diagonal hatch when `mode.w = 1`, period
 //                 `hatch.x` px, `hatch.y` of it hatched), above it `rest` (the untouched grey), a
@@ -17,6 +17,7 @@
 //                 `shade.y` the light's share. The level rises along `state.xyz` (world up, unit)
 //                 from `span.x` to `span.y` (world m) by `state.w` (the share lost) times the fade;
 //                 with `span.z = 0` (no known heights) the fill covers the mesh once the fade is on.
+//                 The fields' painting (`footprint`) lies over the fill.
 //   4 volume      the record's fields as one volume (`volume`), drawn on the back faces of a box
 //                 about every field's reach, whatever stands in front. The eye ray's stretch inside
 //                 each field (`stretch`: its ball out to its front or its longest reach, the
@@ -33,8 +34,12 @@
 //                 (`over`); the pixel takes the result at `volume.x` times its opacity, times the
 //                 fade.
 //
-// The fields are drawn as the volume alone: no other mode reads them, so a surface a field meets
-// keeps its own look.
+// The fields are painted on the components alone (`footprint`, `foot.x > 0`), in the bands of
+// their summed intensity at opacity `foot.x`, each band's edge a pixel wide; never on the body's
+// surfaces. A hard component (`foot.z = 0`) is painted where a field meets it: a surface point
+// facing the field's origin, on its support, behind its front and lit within each texel's reach,
+// its tolerance and `foot.y` (m) past it (`map_at`). A crew station (`foot.z = 1`), a witness the field passes
+// through, is painted wherever the volume holds the field: no facing test and no slack.
 //
 // In modes 0, 2 and 3, `mode.y = 1` discards what lies on `plane`'s normal side (the slice's cut);
 // the volume clips its march to the kept side.
@@ -60,7 +65,9 @@
 // `[−zoom, zoom]²` of octahedral coordinates, `MAP_TEXELS`² texels with a one-texel gutter, in
 // tile `(f % 2, f / 2)` of `field_map`, each texel its reach (r, record m) and strength (g, ref-mm),
 // loaded unfiltered: each of the four texels about a direction tests the point against its own
-// reach, and the results are weighted bilinearly (`map_at`; `Map::lit` is the same read).
+// reach, within `REACH_TOLERANCE_DIAGONALS` texel diagonals of turn times the point's distance
+// past it and never past the farthest of the four, and the results are weighted bilinearly
+// (`map_at`; `Map::lit` is the same read).
 //
 // Output: straight `rgb, a`.
 
@@ -87,6 +94,9 @@ struct LookParams {
     // The cut (`mode.y = 1`): xyz the plane's unit normal toward the discarded side (world), w
     // normal · a point on it.
     plane: vec4<f32>,
+    // The fields' painting (`footprint`): x its opacity (0: none), y how far (m) past each texel's
+    // reach a surface counts as met, z the witness rule (1) or the hard one (0).
+    foot: vec4<f32>,
     // x: the floor threshold `T_floor`, y: the mid threshold `T_mid` (HP points per m²).
     bands: vec4<f32>,
     // rgb: the knockout band's colour; w: its extinction length (m).
@@ -115,7 +125,14 @@ const MAP_TEXELS: f32 = 258.0;
 // and `look::VOLUME_REFINE`, the halvings that place a threshold's crossing between two samples.
 const VOLUME_STEPS: i32 = 48;
 const VOLUME_REFINE: i32 = 8;
+// `field::OCTAHEDRAL_TURN`, the most a direction turns (rad) per unit of octahedral coordinate,
+// and `field::REACH_TOLERANCE_DIAGONALS`, how far past its own reach a texel counts a point: that
+// many texel diagonals of turn times the point's distance.
+const OCTAHEDRAL_TURN: f32 = 3.0;
+const REACH_TOLERANCE_DIAGONALS: f32 = 2.0;
 const HALF_PI: f32 = 1.57079633;
+const PI: f32 = 3.14159265;
+const SQRT_2: f32 = 1.41421356;
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> look: LookParams;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var hull_mask: texture_2d<f32>;
@@ -191,11 +208,13 @@ fn octahedral(local: vec3<f32>) -> vec2<f32> {
 // Field `f`'s strength (ref-mm) lit along unit direction `dir` (world) at `r` world m from its
 // origin, `scale` world m per record m: each of the four texels about the direction's map
 // coordinate, which the clamp holds inside the field's tile, gives its strength where `r` lies
-// within its own reach and nothing past it, and the four are weighted bilinearly. A reach is
+// within its own reach, and nothing past it, and the four are weighted bilinearly. A texel's
+// reach counts out to its tolerance past it (`REACH_TOLERANCE_DIAGONALS` texel diagonals of turn
+// times `r`, never past the farthest of the four), and `slack` world m past that. A reach is
 // compared per texel and never interpolated, so a shadow's depth is a texel's own: across a
-// silhouette a point behind the blocker gets the open texels' share alone, the same at every
-// depth out to the wall. `Map::lit`.
-fn map_at(f: i32, dir: vec3<f32>, r: f32, scale: f32) -> f32 {
+// silhouette a point behind the blocker, past the tolerance, gets the open texels' share alone,
+// the same at every depth out to the wall. `Map::lit`.
+fn map_at(f: i32, dir: vec3<f32>, r: f32, scale: f32, slack: f32) -> f32 {
     let base = PRINT_LANES * f;
     let frame_u = look.prints[base + 2].xyz;
     let frame_v = look.prints[base + 3];
@@ -210,7 +229,11 @@ fn map_at(f: i32, dir: vec3<f32>, r: f32, scale: f32) -> f32 {
     let t01 = textureLoad(field_map, at + vec2(0, 1), 0).xy;
     let t11 = textureLoad(field_map, at + vec2(1, 1), 0).xy;
     let reach = vec4(t00.x, t10.x, t01.x, t11.x) * scale;
-    let lit = select(vec4(0.0), vec4(t00.y, t10.y, t01.y, t11.y), vec4(r) <= reach);
+    let farthest = max(max(reach.x, reach.y), max(reach.z, reach.w));
+    let diagonal = OCTAHEDRAL_TURN * SQRT_2 * 2.0 * frame_v.w / MAP_SIDE;
+    let tolerance = REACH_TOLERANCE_DIAGONALS * diagonal * r;
+    let met = min(vec4(farthest), reach + vec4(tolerance)) + vec4(slack);
+    let lit = select(vec4(0.0), vec4(t00.y, t10.y, t01.y, t11.y), vec4(r) <= met);
     return mix(mix(lit.x, lit.y, t.x), mix(lit.z, lit.w, t.x), t.y);
 }
 
@@ -235,7 +258,7 @@ fn field_at(f: i32, p: vec3<f32>) -> f32 {
     if c > cos(look.prints[base + 2].w) || c < cos(at.w) {
         return 0.0;
     }
-    return map_at(f, dir, r, scale.y) * scale.x / (r * r);
+    return map_at(f, dir, r, scale.y, 0.0) * scale.x / (r * r);
 }
 
 // The fields' summed intensity at world point `p` (HP points per m²): doses add, so the bands
@@ -249,6 +272,66 @@ fn intensity(p: vec3<f32>) -> f32 {
         sum = sum + field_at(f, p);
     }
     return sum;
+}
+
+// A band's edge one pixel wide: `smoothstep` over `width` centred on `edge`, `potency::soft_step`.
+fn soft_step(edge: f32, width: f32, x: f32) -> f32 {
+    let half = 0.5 * max(width, 1e-6);
+    return smoothstep(edge - half, edge + half, x);
+}
+
+// How much of the pixel lies on the positive side of signed distance `s`: its zero crossing one
+// pixel wide. Called in uniform control flow: it takes a derivative.
+fn inside(s: f32) -> f32 {
+    return clamp(s / max(fwidth(s), 1e-7) + 0.5, 0.0, 1.0);
+}
+
+// The fields' painting at world point `p` on a component's surface of unit normal `n` (world):
+// the presence over the pixel of the floor (x: the reduced and the knockout bands together) and
+// of the knockout band (y). A field covers the point where it lies on the field's support and
+// behind its front and, under the hard rule (`foot.z = 0`), faces the field's origin, each edge a
+// pixel wide, at the strength its map lights there `foot.y` past each texel's reach (`map_at`);
+// the witness rule (`foot.z = 1`) asks no facing. The covered fields' intensities add, and each
+// band's edge is a smoothstep a pixel wide in `log2` of the sum (`soft_step`). `look::painting`.
+// Called in uniform control flow: it takes derivatives.
+fn footprint(p: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
+    var sum = 0.0;
+    for (var f = 0; f < FIELDS; f = f + 1) {
+        if f32(f) >= look.fields.x {
+            break;
+        }
+        let base = PRINT_LANES * f;
+        let at = look.prints[base];
+        let along = look.prints[base + 1];
+        let inner = look.prints[base + 2].w;
+        let scale = look.prints[base + 4];
+        let d = p - at.xyz;
+        let r = max(length(d), 1e-5);
+        let dir = d / r;
+        let theta = acos(clamp(dot(dir, along.xyz), -1.0, 1.0));
+        // Each edge as a signed distance, positive inside: short of the front (m), off the rim and
+        // short of the inner edge (m across the surface's direction, `r` times the angle), and the
+        // facing (the cosine of the origin off the normal, 1 under the witness rule).
+        let rim = select(1e6, r * (at.w - theta), at.w < PI);
+        let hole = select(1e6, r * (theta - inner), inner > 0.0);
+        let facing = select(dot(n, -dir), 1.0, look.foot.z > 0.5);
+        let cover = inside(along.w - r) * inside(rim) * inside(hole) * inside(facing);
+        sum = sum + cover * map_at(f, dir, r, scale.y, look.foot.y) * scale.x / (r * r);
+    }
+    // Below a 4096th of the floor the sum is nothing: its log stays finite for the derivative.
+    let level = log2(max(sum, look.bands.x / 4096.0));
+    let width = fwidth(level);
+    return vec2(
+        soft_step(log2(look.bands.x), width, level),
+        soft_step(log2(look.bands.y), width, level),
+    );
+}
+
+// A surface's colour `rgb` under the painting `print` (`footprint`): each band's colour over it at
+// its presence times `foot.x`.
+fn printed(rgb: vec3<f32>, print: vec2<f32>) -> vec3<f32> {
+    let bands = look.knockout.rgb * print.y + look.reduced.rgb * (print.x - print.y);
+    return rgb * (1.0 - look.foot.x * print.x) + look.foot.x * bands;
 }
 
 // Field `f`'s stretch of the ray `eye + dir t` (t ≥ 0, `dir` unit): inside its ball out to its
@@ -538,9 +621,14 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
     let v = to_eye / max(dist, 1e-6);
     let n = normalize(in.world_normal);
     let facing = abs(dot(n, v));
-    // The state fill's height and its change across a pixel, taken in uniform control flow.
+    // The state fill's height and its change across a pixel, and the fields' painting, taken in
+    // uniform control flow.
     let height = dot(in.world_position.xyz, look.state.xyz);
     let height_px = fwidth(height);
+    var print = vec2(0.0);
+    if look.foot.x > 0.0 {
+        print = footprint(in.world_position.xyz, n);
+    }
     let toward = select(-n, n, dot(n, v) >= 0.0);
     let lambert = 0.5 * (dot(toward, normalize(vec3(0.4, 1.0, 0.3))) + 1.0);
     let shading = 1.0 - look.shade.y + look.shade.y * lambert;
@@ -583,6 +671,8 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
             rgb = look.edge.rgb;
             a = max(a, look.edge.a);
         }
+        rgb = printed(rgb, print);
+        a = max(a, look.foot.x * print.x);
         return vec4(rgb, clamp(a, 0.0, 1.0) * fade);
     }
     if m == 3 {
@@ -605,7 +695,7 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
         if partial && abs(height - level) < 0.5 * look.span.w * height_px {
             rgb = look.edge.rgb;
         }
-        return vec4(rgb, 1.0);
+        return vec4(printed(rgb, print), 1.0);
     }
     discard;
     return vec4(0.0);

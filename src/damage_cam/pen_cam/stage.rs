@@ -3,7 +3,9 @@
 //! path nose first with a thin trail behind it, a ring where it crossed each plate or glanced off a
 //! face, the record's fields (each spall cone, and a burst's) as one translucent volume in the
 //! potency bands of their summed intensity, bounded where their directions stopped
-//! ([`look::volume`], and by the plane in the slice), and each component's real mesh on the state
+//! ([`look::volume`], and by the plane in the slice) and painted on the components' surfaces by
+//! each component's role ([`look::Footprint`]; never the hull glass or the slice), and each
+//! component's real mesh on the state
 //! scale ([`look::component`]): filled red from the bottom up to the share of its whole HP pool
 //! gone, rising at its reach time from its state before the shot to its state after it, one
 //! knocked out charcoal and hatched.
@@ -40,13 +42,14 @@ use bevy::prelude::*;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldInstanceReady};
 
 use super::field;
-use super::look::{self, FieldPrint, Layer, LookMaterial, MaskSet, Masks};
+use super::look::{self, FieldPrint, Footprint, Layer, LookMaterial, MaskSet, Masks};
 use super::material::{GlowMaterial, OutlineMaterial, SliceCut, SliceMaterial, SliceParams};
 use super::plan::{BoxPlan, BurstPlan, Plan, Reach};
 use super::potency::Potency;
 use super::timeline::{self, CornerKind};
 use super::view::{Proxy, StageView, ViewMesh, ViewRoot};
 use super::{Corner, CornerRig, Exhibits, Knobs, WorldViewer};
+use crate::damage_cam::Role;
 use crate::render_policy::{self, CameraProfile, LightProfile, VisualScope};
 
 /// The corner's clear colour.
@@ -216,6 +219,12 @@ pub struct Stage {
     masks: MaskSet,
     /// The round's own material, which a burst's pieces wear ([`shell_material`]).
     round_material: Handle<StandardMaterial>,
+    /// The built record's field maps ([`field::atlas`]), which its volume and its painting read;
+    /// `None` where it draws no field.
+    atlas: Option<Handle<Image>>,
+    /// The materials of the tank's component meshes the built frame paints the fields on
+    /// ([`look::Footprint::of_mesh`]); the state fills are painted beside them ([`Playing::fill`]).
+    painted: Vec<Handle<LookMaterial>>,
     /// The along-shot frames' eye distance ([`shot_distance`]), one solve per record per orbit
     /// value, never per frame: [`animate`] solves it before it frames and re-solves only when the
     /// record on show or the viewer's drag differs from the one it was solved for. `None` (a stage
@@ -465,6 +474,8 @@ pub fn rebuild(
     stage.key = key.clone();
     stage.stale = false;
     stage.hull = Some(hull);
+    stage.atlas = None;
+    stage.painted.clear();
     let viewer = corner.showing.and_then(|showing| match showing.surface {
         super::Surface::Corner => stage.camera,
         super::Surface::World => main.single().ok(),
@@ -498,8 +509,21 @@ pub fn rebuild(
     let plan = &*exhibit.plan;
     let kind = key.kind;
     stage.plane = (kind == CornerKind::Slice).then(|| slice_plane(plan));
-    let mut tier_materials: HashMap<super::view::Tier, (Handle<LookMaterial>, Layer)> =
-        HashMap::new();
+    let components = component_meshes(
+        plan,
+        tank.iter()
+            .filter(|(_, mesh, _)| mesh.root == ViewRoot::Stage)
+            .map(|(entity, mesh, handle)| (entity, mesh.names.as_slice(), handle.0.clone())),
+    );
+    let roles: HashMap<Entity, Role> = components
+        .iter()
+        .map(|component| (component.entity, plan.boxes[component.index].role))
+        .collect();
+    // One material per tier and painting rule: a component's mesh paints by its component's role.
+    let mut tier_materials: HashMap<
+        (super::view::Tier, Option<Footprint>),
+        (Handle<LookMaterial>, Layer),
+    > = HashMap::new();
     let hull_mask = looks.add(look::hull_mask(&masks));
     // The slice's part mask holds each component's kept side alone, as the slice draws it.
     let cut_mask = stage.plane.map(|plane| {
@@ -516,8 +540,10 @@ pub fn rebuild(
         let mut e = commands.entity(entity);
         match kind {
             CornerKind::Glass | CornerKind::Victim => {
-                let entry = tier_materials.entry(mesh.tier).or_insert_with(|| {
-                    let draw = look::hull(mesh.tier, &masks);
+                let role = roles.get(&entity).copied();
+                let rule = Footprint::of_mesh(mesh.tier, role);
+                let entry = tier_materials.entry((mesh.tier, rule)).or_insert_with(|| {
+                    let draw = look::hull(mesh.tier, role, &masks);
                     (looks.add(draw.material), draw.layer)
                 });
                 let (material, layer) = (entry.0.clone(), entry.1);
@@ -573,14 +599,13 @@ pub fn rebuild(
     if look::body_behind(kind) {
         round_copies(&mut commands, round.meshes(), &hull_mask, StageItem);
     }
+    stage.painted = tier_materials
+        .into_iter()
+        .filter(|((_, rule), _)| rule.is_some())
+        .map(|(_, (material, _))| material)
+        .collect();
 
-    let components = component_meshes(
-        plan,
-        tank.iter()
-            .filter(|(_, mesh, _)| mesh.root == ViewRoot::Stage)
-            .map(|(entity, mesh, handle)| (entity, mesh.names.as_slice(), handle.0.clone())),
-    );
-    spawn_glass(
+    stage.atlas = spawn_glass(
         &mut commands,
         &mut meshes,
         &mut glows,
@@ -652,7 +677,9 @@ pub struct LookCtx<'a> {
 /// mesh. `clip` is the slice plane (unit normal toward the eye, a point on it) the fields and the
 /// pieces are cut by. The pieces wear `round_material`, the round's own ([`shell_material`]).
 /// Everything spawned carries `tag` — its owner's marker and the channel it draws on — and is
-/// hidden until [`Playing`] places it.
+/// hidden until [`Playing`] places it. Returns the atlas of the record's field maps
+/// ([`Plan::maps`], [`field::atlas`]) its volume and the state fills' painting read, which the
+/// painted component meshes are to read too; `None` where the frame draws no field.
 #[expect(
     clippy::too_many_arguments,
     reason = "draws one plan: the spawn sinks, the plan and its frame, the parent and clip, the components, the look, the round's material and the owner's tag are separate inputs"
@@ -670,7 +697,7 @@ pub fn spawn_glass(
     look_ctx: LookCtx,
     round_material: &Handle<StandardMaterial>,
     tag: impl Bundle + Clone,
-) {
+) -> Option<Handle<Image>> {
     // The trail, one cylinder per leg of the path from the drawn span's start; a round that left
     // trails on past the span behind the shell, and its last leg past the path's last node.
     let cylinder = meshes.add(Cylinder::new(0.5, 1.0));
@@ -763,11 +790,13 @@ pub fn spawn_glass(
     // The fields: their maps in one atlas, and one volume on the box about their reach, cut by
     // the slice plane in the slice.
     let maps = plan.maps();
+    let mut atlas = None;
     if kind != CornerKind::Ricochet
         && let Some((lo, hi)) = look::field_bounds(&plan.cones, maps)
     {
-        let atlas = look_ctx.images.add(field::atlas(maps));
-        let mut material = look::volume(&Potency::shipped(), look_ctx.masks, kind, clip, atlas);
+        let maps = look_ctx.images.add(field::atlas(maps));
+        atlas = Some(maps.clone());
+        let mut material = look::volume(&Potency::shipped(), look_ctx.masks, kind, clip, maps);
         material.set_fade(0.0);
         commands.spawn((
             Mesh3d(meshes.add(Cuboid::from_corners(lo, hi))),
@@ -822,6 +851,7 @@ pub fn spawn_glass(
             .map_or(Vec3::ZERO, |aabb| Vec3::from(aabb.center));
         let mut outline =
             OutlineMaterial::new(timeline::STATE_RED.into(), look::STATE_OUTLINE_PX, center);
+        fill.field_map = atlas.clone();
         fill.set_fade(0.0);
         outline.set_fade(0.0);
         let tint = || {
@@ -837,6 +867,7 @@ pub fn spawn_glass(
         commands.spawn((tint(), MeshMaterial3d(look_ctx.looks.add(fill))));
         commands.spawn((tint(), MeshMaterial3d(outlines.add(outline))));
     }
+    atlas
 }
 
 /// The ring a calibre across on a face, stretched along the line's track on it by
@@ -1257,14 +1288,14 @@ impl<'a> Playing<'a> {
         });
     }
 
-    /// The fields' volume (the spall cones' and a burst's), in world space under the record frame
-    /// `hull` (hidden without one): each field's front run out from its origin, or under reduce
-    /// motion each whole field faded in.
+    /// The fields' volume (the spall cones' and a burst's): the fields `prints` in world space under
+    /// the record frame ([`Self::prints`]; hidden without them), each field's front run out from
+    /// its origin, or under reduce motion each whole field faded in.
     pub(super) fn fields(
         &self,
         look: &MeshMaterial3d<LookMaterial>,
         visibility: &mut Mut<Visibility>,
-        hull: Option<&GlobalTransform>,
+        prints: Option<&[FieldPrint]>,
         looks: &mut Assets<LookMaterial>,
     ) {
         let (plan, kind, c) = (self.plan, self.kind, self.c);
@@ -1279,12 +1310,12 @@ impl<'a> Playing<'a> {
                 }
             })
             .fold(0.0, f32::max);
-        let Some(hull) = hull.filter(|_| fade > 0.0) else {
+        let Some(prints) = prints.filter(|_| fade > 0.0) else {
             visibility.set_if_neq(Visibility::Hidden);
             return;
         };
         if let Some(mut m) = looks.get_mut(&look.0) {
-            m.set_fields(&self.prints(hull), &Potency::shipped());
+            m.set_fields(prints, &Potency::shipped());
             m.set_fade(fade);
         }
         visibility.set_if_neq(Visibility::Inherited);
@@ -1292,8 +1323,9 @@ impl<'a> Playing<'a> {
 
     /// Every field in world space under the record frame `hull`: its origin, its map's frame and
     /// zoom, and its front run out from the origin, or under reduce motion its map's longest reach
-    /// once it is thrown and negative before.
-    fn prints(&self, hull: &GlobalTransform) -> Vec<FieldPrint> {
+    /// once it is thrown and negative before. The volume ([`Self::fields`]) and the painting
+    /// ([`look::paint_fields`], [`Self::fill`]) read the same.
+    pub(super) fn prints(&self, hull: &GlobalTransform) -> Vec<FieldPrint> {
         let (plan, kind, c) = (self.plan, self.kind, self.c);
         let linear = hull.affine().matrix3;
         let unit = |v: Vec3| {
@@ -1336,9 +1368,10 @@ impl<'a> Playing<'a> {
     /// ([`look::condition`]): its state before the shot until the picture reaches it, then rising
     /// over [`timeline::BOX_FILL_S`] to its state after it. Shown while it has a condition; the
     /// outline whole wherever the component had one before the shot, else fading in with the rise.
+    /// The fill is painted by the fields `prints` ([`Self::prints`], none without the frame).
     #[expect(
         clippy::too_many_arguments,
-        reason = "one tint's two materials and visibility, the two stores and the frame they rise in"
+        reason = "one tint's two materials and visibility, the two stores, the frame they rise in and the fields they are painted by"
     )]
     pub(super) fn fill(
         &self,
@@ -1347,6 +1380,7 @@ impl<'a> Playing<'a> {
         look: Option<&MeshMaterial3d<LookMaterial>>,
         visibility: &mut Mut<Visibility>,
         hull: Option<&GlobalTransform>,
+        prints: &[FieldPrint],
         outlines: &mut Assets<OutlineMaterial>,
         looks: &mut Assets<LookMaterial>,
     ) {
@@ -1373,6 +1407,7 @@ impl<'a> Playing<'a> {
             if let Some(condition) = condition {
                 m.set_condition(condition);
             }
+            m.set_fields(prints, &Potency::shipped());
             if let Some(hull) = hull {
                 let up = *hull.up();
                 let height = |y: f32| hull.transform_point(Vec3::Y * y).dot(up);
@@ -1515,8 +1550,17 @@ pub fn animate(
     }
     // The state fills rise along the hull's up, the tank's; the fields are taken in its frame.
     let hull = stage.hull.and_then(|hull| hulls.get(hull).ok());
+    let prints = hull.map(|hull| playing.prints(hull));
     for (look, mut visibility) in &mut volumes {
-        playing.fields(look, &mut visibility, hull, &mut looks);
+        playing.fields(look, &mut visibility, prints.as_deref(), &mut looks);
+    }
+    for handle in &stage.painted {
+        look::paint_fields(
+            &mut looks,
+            handle,
+            prints.as_deref().unwrap_or_default(),
+            stage.atlas.as_ref(),
+        );
     }
     for (tint, outline, look, mut visibility) in &mut boxes {
         playing.fill(
@@ -1525,6 +1569,7 @@ pub fn animate(
             look,
             &mut visibility,
             hull,
+            prints.as_deref().unwrap_or_default(),
             &mut outlines,
             &mut looks,
         );
@@ -3187,32 +3232,38 @@ mod tests {
         );
     }
 
-    /// A field is drawn as its volume alone, so a surface it meets keeps its own look: once the
-    /// real [`animate`] has played a record to its hold, the volume holds the fields' lanes and
-    /// maps, and every other look material on the stage (the components' base, the state fills,
-    /// the masks' material) holds no field lane and no map. Every record that throws a field, in
-    /// each frame that draws look surfaces beside a field: the glass frame and the outside view. A
-    /// field painted on the surfaces it meets fails here.
+    /// The fields are painted on the components alone, each by its role's rule: once the real
+    /// [`animate`] has played a record to its hold, every look material on a component's surface
+    /// (its mesh's in the glass and the victim's frame, its state fill there and in the outside
+    /// view) carries its role's painting lane ([`Footprint::of`]: a crew station a witness, every
+    /// other component hard) and the fields' lanes, read from the volume's own maps; every other
+    /// look material on the stage (the hull glass, a mesh no component claims, the masks')
+    /// carries no painting, no field lane and no map. Every record that throws a field, in each
+    /// frame that paints, with a body mesh of each body tier beside the components. The x-ray
+    /// relies on it: painted hull glass covers the tank in the bands; a crew station painted hard
+    /// shows bare faces inside the field; a painted surface off the volume's maps draws a field the
+    /// volume does not.
     #[test]
-    fn only_the_volume_reads_the_fields() {
+    fn the_fields_are_painted_on_the_components_alone() {
         let library = Library::load();
         let asset = TankAsset::load(&library.vehicle).unwrap();
-        let mut surfaces = 0;
+        let (mut painted, mut glass, mut bare, mut rules) = (0, 0, 0, Vec::new());
         for (index, record) in library.records.iter().enumerate() {
-            if record.plan.cones.is_empty() || record.plan.kind == CornerKind::Ricochet {
+            let plan = &record.plan;
+            if plan.cones.is_empty() || plan.kind == CornerKind::Ricochet {
                 continue;
             }
-            for kind in [CornerKind::Glass, CornerKind::Damaged] {
+            for kind in [CornerKind::Glass, CornerKind::Victim, CornerKind::Damaged] {
                 let at = format!("{} {kind:?}", record.stem);
-                let (mut app, _) = staged(&library, &asset, index, kind, Vec3::ZERO);
+                let (mut app, placed) = staged(&library, &asset, index, kind, Vec3::ZERO);
+                let body = with_body(&mut app);
                 animated(&mut app);
-                let hold = pace(&record.plan, kind).hold_from;
                 app.world_mut()
                     .resource_mut::<Corner>()
                     .showing
                     .as_mut()
                     .expect("a frame on show")
-                    .c = hold;
+                    .c = pace(plan, kind).hold_from;
                 app.update();
                 let world = app.world_mut();
                 let volume = world
@@ -3221,20 +3272,85 @@ mod tests {
                     .expect("one volume")
                     .0
                     .id();
-                for (id, m) in world.resource::<Assets<LookMaterial>>().iter() {
-                    if id == volume {
-                        assert!(m.params.fields.x > 0.0 && m.field_map.is_some(), "{at}");
-                        continue;
+                let role = |name: &str| plan.boxes.iter().find(|b| b.name == name).map(|b| b.role);
+                let worn = |entity: Entity| {
+                    world
+                        .get::<MeshMaterial3d<LookMaterial>>(entity)
+                        .map(|m| m.0.id())
+                };
+                let mut rule: HashMap<AssetId<LookMaterial>, Option<Footprint>> = placed
+                    .iter()
+                    .filter_map(|(entity, name, _)| {
+                        Some((worn(*entity)?, role(name).map(Footprint::of)))
+                    })
+                    .collect();
+                let hull_glass: Vec<_> = body.iter().filter_map(|entity| worn(*entity)).collect();
+                if kind != CornerKind::Damaged {
+                    assert_eq!(
+                        hull_glass.len(),
+                        body.len(),
+                        "{at}: the body wears no glass"
+                    );
+                }
+                for id in &hull_glass {
+                    rule.insert(*id, None);
+                }
+                let mut fills = world.query::<(&BoxTint, &MeshMaterial3d<LookMaterial>)>();
+                for (tint, m) in fills.iter(world) {
+                    rule.insert(m.0.id(), Some(Footprint::of(plan.boxes[tint.index].role)));
+                }
+                // The materials worn on the stage: one an earlier build left in the store, worn by
+                // nothing, draws nothing.
+                let mut on_stage: Vec<_> = world
+                    .query::<&MeshMaterial3d<LookMaterial>>()
+                    .iter(world)
+                    .map(|m| m.0.id())
+                    .filter(|id| *id != volume)
+                    .collect();
+                on_stage.sort_unstable();
+                on_stage.dedup();
+                let looks = world.resource::<Assets<LookMaterial>>();
+                let maps = looks.get(volume).and_then(|m| {
+                    (m.params.fields.x > 0.0)
+                        .then(|| m.field_map.clone())
+                        .flatten()
+                });
+                assert!(maps.is_some(), "{at}: the volume holds no field");
+                for id in on_stage {
+                    let m = looks.get(id).expect("a worn material is in the store");
+                    match rule.get(&id).copied().flatten() {
+                        Some(want) => {
+                            assert_eq!(m.params.foot, want.lane(), "{at}: the rule");
+                            assert!(
+                                m.params.fields.x > 0.0 && m.field_map == maps,
+                                "{at}: a component's surface reads no field or another's maps"
+                            );
+                            if !rules.contains(&want) {
+                                rules.push(want);
+                            }
+                            painted += 1;
+                        }
+                        None => {
+                            let reads = m.is_painted()
+                                || m.params.fields.x > 0.0
+                                || m.params.prints.iter().any(|lane| *lane != Vec4::ZERO)
+                                || m.field_map.is_some();
+                            assert!(
+                                !reads,
+                                "{at}: a surface off the components reads the fields"
+                            );
+                            glass += hull_glass.contains(&id) as usize;
+                            bare += 1;
+                        }
                     }
-                    let reads = m.params.fields.x > 0.0
-                        || m.params.prints.iter().any(|lane| *lane != Vec4::ZERO)
-                        || m.field_map.is_some();
-                    assert!(!reads, "{at}: a look surface reads the fields");
-                    surfaces += 1;
                 }
             }
         }
-        assert!(surfaces > 0, "no look surface beside a field");
+        assert!(
+            painted > 0 && glass > 0 && bare > glass,
+            "{painted} painted, {glass} hull glass, {bare} bare"
+        );
+        assert_eq!(rules.len(), 2, "both rules painted: {rules:?}");
     }
 
     /// One body mesh per body tier beside `app`'s staged components, all wearing the components'
@@ -3616,6 +3732,7 @@ mod tests {
             Some(&look),
             &mut visibility,
             None,
+            &[],
             &mut outlines,
             &mut looks,
         );
@@ -3684,6 +3801,7 @@ mod tests {
                                     look,
                                     &mut visibility,
                                     None,
+                                    &[],
                                     &mut outlines,
                                     &mut looks,
                                 );

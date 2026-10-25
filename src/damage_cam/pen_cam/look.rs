@@ -1,12 +1,14 @@
 //! The base look: the whole tank as one hueless translucent grey surface one layer deep, its
 //! components solid in the untouched grey one layer deep among themselves, the struck ones on the
 //! state scale, and the record's fields (its spall cones and a burst's) as one translucent volume
-//! in their potency bands, the volume alone: a surface a field meets keeps its own look. It is the
-//! tank rendering of every x-ray view: the corner, the kill cam's lesson and the x-ray. The
-//! band law, the fields' drawing and the draw order are design doc §5, "Potency colour" and "Draw
-//! order" (`.agents/docs/design/armor-penetration-and-damage.md`; [`super::potency`],
-//! [`super::field`]). [`LookMaterial`] (`pen_cam_look.wgsl`) draws every element; [`hull`],
-//! [`component`] and [`volume`] choose them, and the stage spawns what they return.
+//! in their potency bands, painted in the same bands on the components alone, each by its role's
+//! rule ([`Footprint`]): a hard component where a field meets it, a crew station, a witness,
+//! wherever the volume holds the field. It is the tank rendering of every x-ray view: the corner,
+//! the kill cam's lesson and the x-ray. The band law, the fields' drawing and the draw order are
+//! design doc §5, "Potency colour" and "Draw order"
+//! (`.agents/docs/design/armor-penetration-and-damage.md`; [`super::potency`], [`super::field`]).
+//! [`LookMaterial`] (`pen_cam_look.wgsl`) draws every element; [`hull`], [`component`] and
+//! [`volume`] choose them, and the stage spawns what they return.
 //!
 //! Draw order, in every frame that draws the body behind ([`body_behind`]: the glass frames and
 //! the slice): each tank mesh is on one layer by its tier ([`Layer::of`]), and the round's model
@@ -40,6 +42,8 @@
 //! Tiers come from the tank's data alone ([`Tier`]): main armour, external armour, component and
 //! detail, by the substance each mesh wears and the tank file's volume entries.
 
+use std::f32::consts::PI;
+
 use bevy::camera::{Hdr, ImageRenderTarget, RenderTarget};
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
 use bevy::prelude::*;
@@ -57,6 +61,7 @@ use super::stage::{Stage, StageCamera};
 use super::timeline::{self, Condition, CornerKind};
 use super::view::Tier;
 use super::{Corner, Surface, WorldViewer};
+use crate::damage_cam::Role;
 use crate::render_policy::CameraProfile;
 
 /// The fields' volume: its opacity at most, and each band's extinction length (record m), the
@@ -104,6 +109,12 @@ const BASE_EDGE_ALPHA: f32 = 0.35;
 /// part mask holds a scene surface.
 const BASE_COMPONENT_ALPHA: f32 = 1.0;
 const BASE_COMPONENT_FACE_SHARE: f32 = 1.0;
+/// The fields' painting on a component: its opacity, short of opaque so the component's own look,
+/// the HP fill under it included, reads through; and how far (m) past each texel's reach a hard
+/// component's surface counts as met, past the tolerance ([`super::field::Map::lit`]): the half
+/// float the map holds a reach in is good to 3.9 mm at 8 m (DERIVED, `2⁻⁸` m from 4 m to 8 m).
+const FOOTPRINT_FILL_ALPHA: f32 = 0.6;
+const FOOTPRINT_REACH_SLACK_M: f32 = 0.01;
 /// The most fields the look draws: the atlas's tiles. `pen_cam_look.wgsl`'s arrays hold this many
 /// fields' lanes and [`pack`] drops what lies past it, so every record's fields must fit it
 /// (`every_record_fits_the_look`).
@@ -112,7 +123,7 @@ const FIELDS: usize = MAP_FIELDS;
 const PRINT_LANES: usize = 5;
 
 /// The uniform block `pen_cam_look.wgsl` reads; its lanes are documented there.
-#[derive(ShaderType, Debug, Clone, Copy, Default)]
+#[derive(ShaderType, Debug, Clone, Copy, Default, PartialEq)]
 pub struct LookParams {
     pub color: Vec4,
     pub edge: Vec4,
@@ -123,6 +134,7 @@ pub struct LookParams {
     pub span: Vec4,
     pub rest: Vec4,
     pub plane: Vec4,
+    pub foot: Vec4,
     pub bands: Vec4,
     pub knockout: Vec4,
     pub reduced: Vec4,
@@ -169,8 +181,8 @@ pub struct LookMaterial {
     pub hull_mask: Option<Handle<Image>>,
     #[texture(2)]
     pub part_mask: Option<Handle<Image>>,
-    /// The record's field maps ([`super::field::atlas`]), which the volume loads unfiltered; `None`
-    /// on every other element.
+    /// The record's field maps ([`super::field::atlas`]), which the volume and the painting load
+    /// unfiltered; `None` on every other element, and where the record throws no field.
     #[texture(3)]
     pub field_map: Option<Handle<Image>>,
     pub blend: Blend,
@@ -204,13 +216,17 @@ impl LookMaterial {
         self.params.mode.x == MODE_VOLUME
     }
 
-    /// The volume's fields, `prints`, in its field lanes ([`pack`]), and each band's extinction
-    /// length at their scale: every print of a record shares its hull's. The colour and opacity
-    /// lanes, set when the volume is made, are untouched.
+    /// The fields, `prints`, in its field lanes ([`pack`]), and each band's extinction length at
+    /// their scale: every print of a record shares its hull's. Without its maps (`field_map`) it
+    /// draws none. The colour and opacity lanes, set when the material is made, are untouched.
     pub fn set_fields(&mut self, prints: &[FieldPrint], potency: &Potency) {
         let (lanes, count) = pack(prints, potency);
         self.params.prints = lanes;
-        self.params.fields.x = count as f32;
+        self.params.fields.x = if self.field_map.is_some() {
+            count as f32
+        } else {
+            0.0
+        };
         let scale = prints.first().map_or(1.0, |print| print.scale);
         self.params.knockout.w = KNOCKOUT_EXTINCTION_M * scale;
         self.params.reduced.w = REDUCED_EXTINCTION_M * scale;
@@ -251,6 +267,21 @@ impl LookMaterial {
         self.params.edge = Vec4::new(line.red, line.green, line.blue, 1.0);
         self.params.mode.w = hatch as u8 as f32;
         self.params.state.w = condition.fill();
+    }
+
+    /// The fields' painting by `rule` ([`Footprint::lane`]) in the shipped bands' thresholds and
+    /// colours ([`band_lanes`]); the fields themselves come each frame ([`Self::set_fields`]).
+    fn paint(&mut self, rule: Footprint) {
+        let [bands, knockout, reduced] = band_lanes(&Potency::shipped());
+        self.params.foot = rule.lane();
+        self.params.bands = bands;
+        self.params.knockout = knockout;
+        self.params.reduced = reduced;
+    }
+
+    /// Whether it paints the fields ([`Self::paint`]).
+    pub fn is_painted(&self) -> bool {
+        self.params.foot.x > 0.0
     }
 }
 
@@ -642,6 +673,29 @@ fn band_lanes(potency: &Potency) -> [Vec4; 3] {
     ]
 }
 
+/// The fields `prints` on the painted material `handle` ([`LookMaterial::is_painted`]), its maps
+/// read from `atlas` ([`LookMaterial::set_fields`]; `None`, no field). The material is written
+/// only where that changes it, so a frame that holds still re-uploads none; one not painted is
+/// left as it is.
+pub fn paint_fields(
+    looks: &mut Assets<LookMaterial>,
+    handle: &Handle<LookMaterial>,
+    prints: &[FieldPrint],
+    atlas: Option<&Handle<Image>>,
+) {
+    let Some(material) = looks.get(handle).filter(|m| m.is_painted()) else {
+        return;
+    };
+    let mut want = material.clone();
+    want.field_map = atlas.cloned();
+    want.set_fields(prints, &Potency::shipped());
+    if (want.params != material.params || want.field_map != material.field_map)
+        && let Some(mut material) = looks.get_mut(handle)
+    {
+        *material = want;
+    }
+}
+
 /// The fields' summed intensity (HP points per m²) at world point `p`, as the volume samples it
 /// (`pen_cam_look.wgsl`, `intensity` and `field_at`): each of `prints`, whose maps are `maps`'
 /// alike, adds `ρ s / (Ω r²)` where `p` lies on its support and within its front, `s` the strength
@@ -676,7 +730,53 @@ pub fn intensity(prints: &[FieldPrint], maps: &[Map], potency: &Potency, p: Vec3
         }
         let local = Vec3::new(dir.dot(lane[2].truncate()), dir.dot(lane[3].truncate()), c);
         let direction = map.u * local.x + map.v * local.y + map.axis * local.z;
-        sum += map.lit(direction, r, lane[4].y) * lane[4].x / (r * r);
+        sum += map.lit(direction, r, lane[4].y, 0.0) * lane[4].x / (r * r);
+    }
+    sum
+}
+
+/// The fields' summed intensity (HP points per m²) a component's surface is painted by at world
+/// point `p`, its unit normal `n` (world), under `rule`, as `pen_cam_look.wgsl`'s `footprint`
+/// sums it with every edge sharp: each of `prints` (maps `maps`, as [`intensity`] reads them) that
+/// covers `p` adds `ρ s / (Ω r²)`, `s` the strength its map lights at `p` within the rule's slack
+/// past each texel's reach ([`Map::lit`]). A field covers `p` where `p` lies on its support and
+/// within its front, and under [`Footprint::Hard`] where `n` faces its origin; under
+/// [`Footprint::Witness`] whatever the facing, so a witness is painted exactly where the volume
+/// holds the field ([`intensity`]). The point takes the band of the sum ([`Potency::band`]). This
+/// is the sum the shader mirrors, held by the tests.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the look's shader paints the fields at runtime (`pen_cam_look.wgsl`, `footprint`); this is the sum it mirrors, held by the tests"
+    )
+)]
+pub fn painting(
+    prints: &[FieldPrint],
+    maps: &[Map],
+    potency: &Potency,
+    rule: Footprint,
+    p: Vec3,
+    n: Vec3,
+) -> f32 {
+    let (lanes, count) = pack(prints, potency);
+    let foot = rule.lane();
+    let mut sum = 0.0;
+    for (lane, map) in lanes.chunks(PRINT_LANES).zip(maps).take(count) {
+        let d = p - lane[0].truncate();
+        let r = d.length().max(1e-5);
+        let dir = d / r;
+        let c = dir.dot(lane[1].truncate()).clamp(-1.0, 1.0);
+        let theta = c.acos();
+        let on_rim = lane[0].w >= PI || theta <= lane[0].w;
+        let off_hole = lane[2].w <= 0.0 || theta >= lane[2].w;
+        let facing = foot.z > 0.5 || n.dot(-dir) > 0.0;
+        if r > lane[1].w || !on_rim || !off_hole || !facing {
+            continue;
+        }
+        let local = Vec3::new(dir.dot(lane[2].truncate()), dir.dot(lane[3].truncate()), c);
+        let direction = map.u * local.x + map.v * local.y + map.axis * local.z;
+        sum += map.lit(direction, r, lane[4].y, foot.y) * lane[4].x / (r * r);
     }
     sum
 }
@@ -953,12 +1053,57 @@ impl Layer {
     }
 }
 
-/// How a tank mesh of tier `tier` is drawn in the base look.
-pub fn hull(tier: Tier, masks: &MaskSet) -> HullDraw {
+/// The rule a component's surface takes the fields' painting by (`pen_cam_look.wgsl`,
+/// `footprint`): its role's ([`Self::of`]), set in its material when the material is built.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Footprint {
+    /// A hard component stops a field's directions on its surface: painted where a field meets
+    /// it, a surface point facing the field's origin, on its support, behind its front and within
+    /// each texel's reach along its direction, its tolerance
+    /// ([`super::field::REACH_TOLERANCE_DIAGONALS`]) and [`FOOTPRINT_REACH_SLACK_M`] past it.
+    Hard,
+    /// A crew station is a witness the field passes through (ADR-0040): painted wherever the
+    /// volume holds the field, on any face, with no slack.
+    Witness,
+}
+
+impl Footprint {
+    /// The rule a component of role `role` takes: a crew station's the witness rule, every other
+    /// component's the hard one.
+    pub fn of(role: Role) -> Self {
+        match role {
+            Role::Crew => Self::Witness,
+            Role::Module | Role::Ammo | Role::Engine => Self::Hard,
+        }
+    }
+
+    /// The rule a tank mesh of tier `tier` takes: a component's mesh its component's role's,
+    /// `role` (`None` where it belongs to no component the record names, and is not painted); a
+    /// body mesh none.
+    pub fn of_mesh(tier: Tier, role: Option<Role>) -> Option<Self> {
+        match Layer::of(tier) {
+            Layer::Scene => role.map(Self::of),
+            Layer::Body => None,
+        }
+    }
+
+    /// The `foot` lane (`pen_cam_look.wgsl`): the painting's opacity, how far (m) past each
+    /// texel's reach a surface counts as met, and the witness rule (1) or the hard one (0).
+    pub fn lane(self) -> Vec4 {
+        match self {
+            Self::Hard => Vec4::new(FOOTPRINT_FILL_ALPHA, FOOTPRINT_REACH_SLACK_M, 0.0, 0.0),
+            Self::Witness => Vec4::new(FOOTPRINT_FILL_ALPHA, 0.0, 1.0, 0.0),
+        }
+    }
+}
+
+/// How a tank mesh of tier `tier` is drawn in the base look; a component's mesh, `role` its
+/// component's, painted by its rule ([`Footprint::of_mesh`]).
+pub fn hull(tier: Tier, role: Option<Role>, masks: &MaskSet) -> HullDraw {
     let layer = Layer::of(tier);
     let material = match layer {
         Layer::Body => base(masks),
-        Layer::Scene => component_base(masks),
+        Layer::Scene => component_base(masks, Footprint::of_mesh(tier, role)),
     };
     HullDraw { material, layer }
 }
@@ -982,14 +1127,18 @@ fn base(masks: &MaskSet) -> LookMaterial {
 }
 
 /// The base look's material for every component mesh: the untouched grey, opaque, in the body's
-/// edge colour, tested against the part mask (`mode.z = 1`). A struck component's fill covers it.
-fn component_base(masks: &MaskSet) -> LookMaterial {
+/// edge colour, tested against the part mask (`mode.z = 1`), painted by `rule` (`None`: not
+/// painted). A struck component's fill covers it.
+fn component_base(masks: &MaskSet, rule: Option<Footprint>) -> LookMaterial {
     let mut material = base(masks);
     let grey = LinearRgba::from(timeline::STATE_UNTOUCHED);
     material.params.color = Vec4::new(grey.red, grey.green, grey.blue, BASE_COMPONENT_ALPHA);
     material.params.shade.x = BASE_COMPONENT_FACE_SHARE;
     material.params.mode.z = 1.0;
     material.blend = Blend::Opaque;
+    if let Some(rule) = rule {
+        material.paint(rule);
+    }
     material
 }
 
@@ -1032,10 +1181,11 @@ fn state(condition: Condition, masks: &MaskSet) -> LookMaterial {
 }
 
 /// Component `b`'s fill in frame `kind`, in any look: the state scale ([`state`]) at its state
-/// once the shot has dosed it, drawn under a [`timeline::STATE_RED`] outline [`STATE_OUTLINE_PX`]
-/// wide; `None` where it is not drawn. The shooter's frames (the glass frame and the outside view)
-/// draw a component this shot took HP from, and no other, so no earlier damage reaches the
-/// shooter; the victim's x-ray draws every component with any of its pool gone.
+/// once the shot has dosed it, painted by its role's rule ([`Footprint::of`]), drawn under a
+/// [`timeline::STATE_RED`] outline [`STATE_OUTLINE_PX`] wide; `None` where it is not drawn. The
+/// shooter's frames (the glass frame and the outside view) draw a component this shot took HP
+/// from, and no other, so no earlier damage reaches the shooter; the victim's x-ray draws every
+/// component with any of its pool gone.
 pub fn component(b: &BoxPlan, kind: CornerKind, masks: &MaskSet) -> Option<LookMaterial> {
     let settled = condition(b, 1.0)?;
     let drawn = match kind {
@@ -1043,7 +1193,11 @@ pub fn component(b: &BoxPlan, kind: CornerKind, masks: &MaskSet) -> Option<LookM
         CornerKind::Victim => true,
         CornerKind::Slice | CornerKind::Ricochet => false,
     };
-    drawn.then(|| state(settled, masks))
+    drawn.then(|| {
+        let mut fill = state(settled, masks);
+        fill.paint(Footprint::of(b.role));
+        fill
+    })
 }
 
 /// The record's fields as one volume, drawn on the back faces of a box about every field's reach
@@ -1081,10 +1235,11 @@ pub fn volume(
 mod tests {
     use bevy::camera::CameraProjection;
 
-    use super::super::field::tests::{band, cap, fixture_field, sphere};
-    use super::super::field::{MAP_SIDE, MAP_TEXELS};
+    use super::super::field::tests::{band, cap, cuboid, fixture_field, guide, sphere};
+    use super::super::field::{MAP_SIDE, MAP_TEXELS, OCTAHEDRAL_TURN, REACH_TOLERANCE_DIAGONALS};
     use super::super::potency::solid_angle;
     use super::*;
+    use crate::damage_cam::shapes::HardBodies;
     use crate::fingerprint::{FNV_OFFSET_BASIS, fnv1a_64};
 
     /// Every record's fields fit the look: none throws more than [`FIELDS`], its spall cones and
@@ -1109,10 +1264,11 @@ mod tests {
 
     /// `pen_cam_look.wgsl` declares the look's counts and lanes: the fields and each one's lanes,
     /// the map's side and texels, the atlas's tiles, the volume's march samples and halvings, the
-    /// arrays' lengths, and [`LookParams`]' lanes in their order. A count that drifts reads the
-    /// wrong field or texel without a word, or marches a volume short of its far side; a lane
-    /// added, dropped or moved on one side alone reads every lane after it from its neighbour's
-    /// slot.
+    /// octahedral turn and the reach tolerance its maps are read with ([`Map::lit`]), the arrays'
+    /// lengths, and [`LookParams`]' lanes in their order. A count that drifts reads the wrong field
+    /// or texel without a word, or marches a volume short of its far side; a tolerance that drifts
+    /// reads the GPU's shadows apart from the mirror's; a lane added, dropped or moved on one side
+    /// alone reads every lane after it from its neighbour's slot.
     #[test]
     fn the_shader_declares_the_lane_counts() {
         let shader = shader("pen_cam_look.wgsl");
@@ -1132,6 +1288,8 @@ mod tests {
             format!("const MAP_TEXELS: f32 = {:.1};", MAP_TEXELS as f32),
             format!("const VOLUME_STEPS: i32 = {VOLUME_STEPS};"),
             format!("const VOLUME_REFINE: i32 = {VOLUME_REFINE};"),
+            format!("const OCTAHEDRAL_TURN: f32 = {OCTAHEDRAL_TURN:?};"),
+            format!("const REACH_TOLERANCE_DIAGONALS: f32 = {REACH_TOLERANCE_DIAGONALS:?};"),
             format!("prints: array<vec4<f32>, {}>,", PRINT_LANES * FIELDS),
             format!("var lo = array<f32, {FIELDS}>("),
             format!("var hi = array<f32, {FIELDS}>("),
@@ -1185,9 +1343,11 @@ mod tests {
     /// The colour reads no gain: the lanes the volume colours from carry the field's frame, its
     /// emission per reference-mm `ρ / Ω` in world units (squared metres, whose intensity falls as
     /// the square of a world distance), its scale and longest reach, the shipped thresholds and
-    /// each band's colour from the band law, and fading the volume or a base surface moves its fade
-    /// lane alone; the volume's extinction lengths scale with the stage. The colour promise relies
-    /// on it: a display gain, level or fade in a colouring lane fails here.
+    /// each band's colour from the band law, and fading the volume, a base surface or a painted
+    /// component moves its fade lane alone; the volume's extinction lengths scale with the stage. A
+    /// painted component reads the same lanes, and no field without its maps. The colour promise
+    /// relies on it: a display gain, level or fade in a colouring lane, or a painting packed apart
+    /// from the volume, fails here.
     #[test]
     fn the_colour_reads_no_gain() {
         let potency = Potency::shipped();
@@ -1230,7 +1390,24 @@ mod tests {
         assert_eq!(params.reduced.w, REDUCED_EXTINCTION_M * print.scale);
         assert_eq!(params.volume.x, VOLUME_OPACITY);
 
-        for material in [&base(&masks), &field] {
+        // A painted component draws the fields' bands from the volume's lanes, and no field
+        // without its maps.
+        let mut painted = component_base(&masks, Some(Footprint::Hard));
+        painted.set_fields(std::slice::from_ref(&print), &potency);
+        assert_eq!(painted.params.fields.x, 0.0);
+        painted.field_map = Some(atlas);
+        painted.set_fields(std::slice::from_ref(&print), &potency);
+        assert_eq!(painted.params.fields.x, 1.0);
+        assert_eq!(painted.params.prints, params.prints);
+        assert_eq!(painted.params.bands, params.bands);
+        assert_eq!(
+            painted.params.knockout.truncate(),
+            params.knockout.truncate()
+        );
+        assert_eq!(painted.params.reduced.truncate(), params.reduced.truncate());
+        assert_eq!(painted.params.foot.x, FOOTPRINT_FILL_ALPHA);
+
+        for material in [&base(&masks), &field, &painted] {
             let mut faded = material.clone();
             faded.set_fade(0.25);
             let mut want = material.params;
@@ -1276,14 +1453,15 @@ mod tests {
         assert!(!body_behind(CornerKind::Damaged) && !body_behind(CornerKind::Ricochet));
         for m in [
             base(&masks),
-            component_base(&masks),
+            component_base(&masks, None),
+            component_base(&masks, Some(Footprint::Hard)),
             hull_mask(&masks),
             state(Condition::Dead, &masks),
         ] {
             assert_eq!(LookKey::from(&m).depth(), None);
         }
         assert_eq!(base(&masks).params.mode.z, 0.0);
-        assert_eq!(component_base(&masks).params.mode.z, 1.0);
+        assert_eq!(component_base(&masks, None).params.mode.z, 1.0);
     }
 
     /// The print of `map`'s field from `origin` with its front at `front` (world m), `scale` world
@@ -1478,6 +1656,200 @@ mod tests {
         assert_eq!(potency.band(both), Band::Knockout);
     }
 
+    /// A struck component of role `role`: half its pool taken by the line. Fixture data.
+    fn struck_box(role: Role) -> BoxPlan {
+        BoxPlan {
+            name: "fixture".to_owned(),
+            role,
+            center: None,
+            heights: None,
+            count: 10,
+            hp: 10,
+            line: 1.0,
+            field: 0.0,
+            lost_hp: 5,
+            reached_at: Some(super::super::plan::Reach::Line(0.0)),
+            lost: false,
+        }
+    }
+
+    /// A crew station is painted by the witness rule, and nothing else is: crew takes the witness
+    /// rule and every other role the hard one ([`Footprint::of`]), and the rule is the lane of
+    /// every material its component is drawn in, its mesh's base and its state fill in each frame
+    /// that draws one; a body mesh is never painted, whatever role is named for it, nor a
+    /// component's mesh that no component of the record claims. ADR-0040 relies on it: crew under
+    /// the hard rule leaves the faces of a station a field passes through bare where they turn from
+    /// its origin, and a hard component under the witness rule is painted through its own body.
+    #[test]
+    fn a_crew_station_is_painted_as_a_witness_and_nothing_else_is() {
+        let masks = MaskSet::default();
+        for role in [Role::Crew, Role::Module, Role::Ammo, Role::Engine] {
+            // A role added to `Role` fails to compile here until it is listed above.
+            match role {
+                Role::Crew | Role::Module | Role::Ammo | Role::Engine => {}
+            }
+            let rule = Footprint::of(role);
+            assert_eq!(rule == Footprint::Witness, role == Role::Crew, "{role:?}");
+            let base = hull(Tier::Component, Some(role), &masks).material;
+            assert_eq!(base.params.foot, rule.lane(), "{role:?}");
+            for tier in [Tier::Armour, Tier::External, Tier::Detail] {
+                assert_eq!(Footprint::of_mesh(tier, Some(role)), None, "{tier:?}");
+                let body = hull(tier, Some(role), &masks).material;
+                assert!(!body.is_painted(), "{role:?} {tier:?}");
+            }
+            let b = struck_box(role);
+            for kind in [CornerKind::Glass, CornerKind::Victim, CornerKind::Damaged] {
+                let fill = component(&b, kind, &masks).expect("a struck component is drawn");
+                assert_eq!(fill.params.foot, rule.lane(), "{role:?} {kind:?}");
+            }
+        }
+        assert!(!hull(Tier::Component, None, &masks).material.is_painted());
+        assert_eq!(Footprint::Witness.lane().z, 1.0);
+        assert_eq!(Footprint::Hard.lane().z, 0.0);
+    }
+
+    /// A crew station is painted on any face inside the field: a point the volume holds, on a face
+    /// turned from the field's origin, is painted by the witness rule at the volume's own
+    /// intensity there ([`intensity`]), and across a sweep through the field and past its reach
+    /// the witness rule paints exactly what the volume holds, on faces turned every way; the hard
+    /// rule leaves the turned face bare and paints a face toward the origin up to its slack past
+    /// the reach, where the witness rule paints nothing. A facing test on crew leaves the back of a
+    /// station the field passes through unpainted, and a slack on crew paints past the field;
+    /// both fail here. Fixture: a 25° cap, every direction reaching 2 m, its front past the reach.
+    #[test]
+    fn a_crew_station_is_painted_on_any_face_inside_the_field() {
+        let map = Map::of(&cap(|_, _| 2.0, |_| 1.0), None);
+        let print = print_of(&map, Vec3::ZERO, 5.0, 1.0);
+        let (prints, maps) = (std::slice::from_ref(&print), std::slice::from_ref(&map));
+        let potency = Potency::shipped();
+        let paint = |rule, p, n| painting(prints, maps, &potency, rule, p, n);
+        let p = map.axis;
+        let held = intensity(prints, maps, &potency, p);
+        assert!(held > 0.0);
+        assert_eq!(paint(Footprint::Witness, p, map.axis), held);
+        assert_eq!(paint(Footprint::Hard, p, map.axis), 0.0);
+        assert_eq!(paint(Footprint::Hard, p, -map.axis), held);
+        let past = map.axis * 2.005;
+        assert_eq!(intensity(prints, maps, &potency, past), 0.0);
+        assert_eq!(paint(Footprint::Witness, past, map.axis), 0.0);
+        assert_eq!(paint(Footprint::Witness, past, -map.axis), 0.0);
+        assert!(paint(Footprint::Hard, past, -map.axis) > 0.0);
+        let normals = [map.axis, -map.axis, map.u, -map.u, map.v];
+        let (mut inside, mut outside) = (0, 0);
+        for k in 0..60 {
+            for j in 0..41 {
+                let p = map.axis * (0.05 + 0.05 * k as f32) + map.u * (0.05 * j as f32 - 1.0);
+                let held = intensity(prints, maps, &potency, p);
+                for n in normals {
+                    let got = paint(Footprint::Witness, p, n);
+                    assert!(
+                        (got - held).abs() <= 1e-6 * held,
+                        "{p} {n}: {got} of {held}"
+                    );
+                }
+                if held > 0.0 {
+                    inside += 1
+                } else {
+                    outside += 1
+                }
+            }
+        }
+        assert!(inside > 300 && outside > 300, "{inside} {outside}");
+    }
+
+    /// A 25° cap from the origin down its axis, its directions ending on a wall 3 m out and on a
+    /// plate 1 m out over the cap's `+u` half, `thickness` (m) thick: its map, guided by those
+    /// bodies, and its print, the front past the wall. Fixture data.
+    fn plate_field(thickness: f32) -> (Map, FieldPrint) {
+        let mut parts = (Vec::new(), Vec::new(), Vec::new());
+        cuboid(
+            Vec3::new(-5.0, -5.0, -3.2),
+            Vec3::new(5.0, 5.0, -3.0),
+            0,
+            &mut parts,
+        );
+        cuboid(
+            Vec3::new(0.0, -5.0, -1.0 - thickness),
+            Vec3::new(5.0, 5.0, -1.0),
+            1,
+            &mut parts,
+        );
+        let bodies = HardBodies::new(parts.0, parts.1, parts.2);
+        let map = Map::of(&cap(|_, d| guide(&bodies, d), |_| 1.0), Some(&bodies));
+        let print = print_of(&map, Vec3::ZERO, 10.0, 1.0);
+        (map, print)
+    }
+
+    /// A hard component is painted only where a field meets it: on a plate 3 cm thick that stops
+    /// the field, the face toward the origin is painted at every direction that meets it, and the
+    /// face behind, past where each of those directions stopped, is bare at every one, those
+    /// within a texel of the plate's edge included, where the open texels beside them light the
+    /// volume there and the witness rule paints it. A hard component under the witness rule shows
+    /// the field on its own far side along its silhouette, and fails here. Fixture:
+    /// [`plate_field`]; directions 8°, 14° and 20° off the axis, swept a degree either side of the
+    /// plate's edge in steps of a hundredth.
+    #[test]
+    fn a_hard_face_behind_where_the_field_stopped_is_bare() {
+        let thickness = 0.03;
+        let (map, print) = plate_field(thickness);
+        let (prints, maps) = (std::slice::from_ref(&print), std::slice::from_ref(&map));
+        let potency = Potency::shipped();
+        let paint = |rule, p, n| painting(prints, maps, &potency, rule, p, n);
+        // The plate's faces: toward the origin, and away from it behind.
+        let (toward, away) = (-map.axis, map.axis);
+        let (mut met, mut beside) = (0, 0);
+        for theta in [8.0_f32, 14.0, 20.0] {
+            let theta = theta.to_radians();
+            for k in 0..=200 {
+                // Off the edge toward the plate (`+u`) by `off` across the sky.
+                let off = (k as f32 - 100.0) * 0.01_f32.to_radians();
+                let phi = std::f32::consts::FRAC_PI_2 - off / theta.sin();
+                let d =
+                    map.axis * theta.cos() + (map.u * phi.cos() + map.v * phi.sin()) * theta.sin();
+                let depth = d.dot(map.axis);
+                if d.dot(map.u) <= 0.0 {
+                    continue;
+                }
+                let front = d * (1.0 / depth);
+                let back = d * ((1.0 + thickness) / depth);
+                assert!(paint(Footprint::Hard, front, toward) > 0.0, "{d}");
+                assert_eq!(paint(Footprint::Hard, back, away), 0.0, "{d}");
+                beside += usize::from(paint(Footprint::Witness, back, away) > 0.0);
+                met += 1;
+            }
+        }
+        assert!(
+            met > 250 && beside > 20,
+            "{met} met, {beside} beside the edge"
+        );
+    }
+
+    /// A crew station behind a hard body is not painted: the field stops on the plate, so a
+    /// station half a metre behind it, deep in its shadow, is bare on every face, while one in
+    /// the open beside it at the same depth is painted. The witness rule paints what the volume
+    /// holds, and the volume holds nothing past a direction's reach; a witness painted through a
+    /// shadow fails here. Fixture: [`plate_field`], the plate 10 cm thick; directions 6° to 18°
+    /// off the axis toward `+u` and toward `−u`.
+    #[test]
+    fn a_crew_station_behind_a_hard_body_is_bare() {
+        let (map, print) = plate_field(0.1);
+        let (prints, maps) = (std::slice::from_ref(&print), std::slice::from_ref(&map));
+        let potency = Potency::shipped();
+        let paint = |p, n| painting(prints, maps, &potency, Footprint::Witness, p, n);
+        let normals = [map.axis, -map.axis, map.u, -map.u, map.v];
+        for k in 0..13 {
+            let theta = (6.0 + k as f32).to_radians();
+            for (side, shadowed) in [(map.u, true), (-map.u, false)] {
+                let d = map.axis * theta.cos() + side * theta.sin();
+                let p = d * (1.5 / d.dot(map.axis));
+                for n in normals {
+                    let got = paint(p, n);
+                    assert_eq!(got == 0.0, shadowed, "{theta} {side} {n}: {got}");
+                }
+            }
+        }
+    }
+
     /// A field's stretch along an eye ray holds every point the field gives an intensity: the
     /// volume marches only its fields' stretches, so a point outside them is never sampled and its
     /// band never drawn. Fixture: a 25° cap, a 120° cap (wider than the hemisphere, which no cone
@@ -1550,7 +1922,7 @@ mod tests {
     /// Every top-level item of the look's and the slice's shaders, `(file, item, digest)`: the
     /// FNV-1a fold of the item's text with comments and whitespace removed. MEASURED from the
     /// shaders the shipped frames were captured with.
-    const SHADER_PINS: [(&str, &str, u64); 25] = [
+    const SHADER_PINS: [(&str, &str, u64); 29] = [
         ("pen_cam_look.wgsl", "mode", 0xd884_58c8_42c2_833e),
         ("pen_cam_look.wgsl", "vertex", 0x0c5f_0c8e_ce2c_65f2),
         ("pen_cam_look.wgsl", "mask_at", 0x1d10_776f_dc3c_0e87),
@@ -1559,9 +1931,13 @@ mod tests {
         ("pen_cam_look.wgsl", "eye_ray", 0x8fbf_c6b6_664e_ae7b),
         ("pen_cam_look.wgsl", "sign_not_zero", 0x1679_03a6_bf5e_8900),
         ("pen_cam_look.wgsl", "octahedral", 0xee8d_db25_da07_f4ea),
-        ("pen_cam_look.wgsl", "map_at", 0x23c8_71ef_035f_c9d2),
-        ("pen_cam_look.wgsl", "field_at", 0x525d_bd40_63e0_2dd3),
+        ("pen_cam_look.wgsl", "map_at", 0x48a4_832c_eced_eaee),
+        ("pen_cam_look.wgsl", "field_at", 0x1b30_26d2_fe21_ca45),
         ("pen_cam_look.wgsl", "intensity", 0xa1d0_858a_a0d0_eea1),
+        ("pen_cam_look.wgsl", "soft_step", 0x05cd_e5fb_8619_f8d0),
+        ("pen_cam_look.wgsl", "inside", 0xbe35_1ba6_c6e3_7355),
+        ("pen_cam_look.wgsl", "footprint", 0xae74_4998_9ac6_2efb),
+        ("pen_cam_look.wgsl", "printed", 0xa3ef_69a5_13f1_8034),
         ("pen_cam_look.wgsl", "stretch", 0xf54b_5e9e_e1d2_8521),
         ("pen_cam_look.wgsl", "over", 0xbcd5_9d02_0fb0_72c6),
         ("pen_cam_look.wgsl", "crossing", 0xf3eb_38f6_6b3c_7759),
@@ -1570,8 +1946,8 @@ mod tests {
         ("pen_cam_look.wgsl", "march", 0xec61_59f5_827e_b60c),
         ("pen_cam_look.wgsl", "volume", 0xab58_3d8f_98ae_99bf),
         ("pen_cam_look.wgsl", "lines", 0x5560_efe8_d460_738c),
-        ("pen_cam_look.wgsl", "fragment", 0xe3bf_ec3e_a4b8_f368),
-        ("pen_cam_look.wgsl", MODULE_SCOPE, 0x4ad3_6624_c454_cb8f),
+        ("pen_cam_look.wgsl", "fragment", 0x025b_eb62_7e58_1499),
+        ("pen_cam_look.wgsl", MODULE_SCOPE, 0x4567_6605_9a12_3573),
         (
             "pen_cam_slice.wgsl",
             "behind_the_scene",
@@ -1665,8 +2041,9 @@ mod tests {
         assert!(
             moved.is_empty(),
             "the pen cam's shaders moved; the moved items' pins:\n{}\nRe-pin only after the Rust \
-             mirrors are read against the new WGSL and pass (`field::tests` for `octahedral` and \
-             `map_at` (`Map::lit`), \
+             mirrors are read against the new WGSL and pass (`potency::tests` for `soft_step`, \
+             `field::tests` for `octahedral` and `map_at` (`Map::lit`), the painting's tests \
+             (`painting`) for `footprint`, `inside` and `printed`, \
              `a_band_runs_its_iso_surfaces_chord` and `doses_add_where_fields_overlap` for \
              `field_at`, `intensity`, `crossing`, `step_over`, `spacing` and `march`, \
              `a_small_field_inside_a_wide_one_is_drawn` for `volume`'s schedule (`schedule`), \

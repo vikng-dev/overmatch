@@ -18,11 +18,11 @@
 //! [`Map`] bakes the function onto an octahedral map about the field's axis, [`MAP_TEXELS`]² texels
 //! with a one-texel gutter; [`atlas`] packs a record's maps into the one texture the look's shader
 //! reads them from (`pen_cam_look.wgsl`, `map_at`). The look tests a point against each of the
-//! four texels about its direction, each against its own reach, and weighs the results
-//! bilinearly, so a reach is never interpolated across a shadow's edge; [`Map::lit`] is the same
-//! read on the CPU, and [`Map::sample`] the bilinear blend of the four, the map's own content
-//! between texels. [`bake`] bakes every field of a record, its rows spread over the machine's
-//! threads.
+//! four texels about its direction, each against its own reach within a tolerance
+//! ([`REACH_TOLERANCE_DIAGONALS`]), and weighs the results bilinearly, so a reach is never
+//! interpolated across a shadow's edge; [`Map::lit`] is the same read on the CPU, and
+//! [`Map::sample`] the bilinear blend of the four, the map's own content between texels. [`bake`]
+//! bakes every field of a record, its rows spread over the machine's threads.
 
 use std::f32::consts::{FRAC_PI_2, PI, SQRT_2};
 use std::sync::Mutex;
@@ -58,12 +58,34 @@ const ENDING_SLACK_M: f32 = 1.0e-3;
 /// The most a direction turns (rad) per unit of octahedral coordinate (DERIVED: along a face's
 /// diagonal at its centre, where `p = (1/3, 1/3, 1/3)` is `1/√3` long and its step
 /// `(1, 1, −2)/√2` is `√3` long and square to it; MEASURED 2.999 over 4·10⁵ random steps).
-const OCTAHEDRAL_TURN: f32 = 3.0;
-/// The texel diagonals past the support's edges a map bakes, each at most
-/// `OCTAHEDRAL_TURN · √2 · 2 · zoom / MAP_SIDE` rad: a read on the support weighs texels at most
-/// one diagonal off it, and the look reads the map on the support alone (`pen_cam_look.wgsl`,
-/// `field_at`). Every texel farther off holds zero.
-const SUPPORT_MARGIN_DIAGONALS: f32 = 1.0;
+/// `pen_cam_look.wgsl` declares it (`map_at`).
+pub const OCTAHEDRAL_TURN: f32 = 3.0;
+/// The texel diagonals past the support's edges a map bakes, each [`Map::diagonal`] rad: a read on
+/// the support weighs texels at most one diagonal off it, and the second keeps whole a read up to
+/// a diagonal past an edge, where a painted surface's edge a pixel wide reads
+/// (`pen_cam_look.wgsl`, `footprint`). Every texel farther off holds zero.
+const SUPPORT_MARGIN_DIAGONALS: f32 = 2.0;
+/// How far past a texel's own reach the look counts a point within it, at most: this many texel
+/// diagonals of turn ([`Map::diagonal`]) times the point's distance from the origin, and never
+/// past the farthest reach of the four texels about the point's direction ([`Map::lit`]). TUNED.
+///
+/// A hard body stops the field on its surface, so each texel's reach lands on the surface along
+/// the texel's own direction, and a surface point between texel directions lies past the reach of
+/// those whose directions meet the surface nearer: read without a tolerance, the last stretch
+/// before the surface flips texel by texel, a stair-step that stretches into streaks where the
+/// surface turns edge-on to the field. Each texel's reach lies at or past its direction's entry
+/// into the body, and a direction between the four enters a convex body no farther than the
+/// farthest of theirs (the directions that meet it within a distance form a convex set), so with
+/// the tolerance a surface point reads inside wherever the reach grows by less than the tolerance
+/// across the four: where the turn is steepest
+/// (`OCTAHEDRAL_TURN`), a surface up to `tan⁻¹ 2` = 63° off square to the field (DERIVED), and
+/// steeper where the turn is less, up to 80° at a cap's axis (DERIVED, a turn of 1). Where the four
+/// texels all end on a blocker, none reads past the farthest of them, so a point behind it stays
+/// outside however near; across a silhouette a blocked texel reads past its blocker only for a
+/// surface within the tolerance behind it, 2.2 cm at 1 m for a 26° spall cone and 6.6 cm for the
+/// whole sphere (DERIVED), and the shadow's edge there moves at most the one texel cell the
+/// silhouette crosses (DERIVED); on a surface farther behind, not at all.
+pub const REACH_TOLERANCE_DIAGONALS: f32 = 2.0;
 
 /// A field's recorded directions as one function of direction, baked onto an octahedral map about
 /// the field's axis: [`MAP_TEXELS`]² texels, row by row, each the `(reach m, strength ref-mm)` the
@@ -168,10 +190,15 @@ impl Map {
         self.u * local.x + self.v * local.y + self.axis * local.z
     }
 
+    /// The most a direction turns (rad) across one texel's diagonal:
+    /// `OCTAHEDRAL_TURN · √2 · 2 · zoom / MAP_SIDE` (DERIVED).
+    pub fn diagonal(&self) -> f32 {
+        OCTAHEDRAL_TURN * SQRT_2 * 2.0 * self.zoom / MAP_SIDE as f32
+    }
+
     /// Unit `direction` lies within [`SUPPORT_MARGIN_DIAGONALS`] of the support.
     fn near_support(&self, direction: Vec3) -> bool {
-        let diagonal = OCTAHEDRAL_TURN * SQRT_2 * 2.0 * self.zoom / MAP_SIDE as f32;
-        let margin = SUPPORT_MARGIN_DIAGONALS * diagonal;
+        let margin = SUPPORT_MARGIN_DIAGONALS * self.diagonal();
         let theta = direction.dot(self.axis).clamp(-1.0, 1.0).acos();
         theta >= self.inner - margin && theta <= self.half_angle + margin
     }
@@ -202,15 +229,23 @@ impl Map {
 
     /// The strength (ref-mm) lit along unit `direction` at `r` world m from the field's origin,
     /// `scale` world m per record m: each of the four texels about its map coordinate gives its
-    /// strength where `r` lies within its own reach and nothing past it, and the four are weighted
-    /// bilinearly. A reach is compared per texel and never interpolated, so across a silhouette a
-    /// point behind the blocker gets the open texels' share alone, the same at every depth out to
-    /// the wall, and a point on the open side some share right up to the edge. The look's shader
-    /// reads the map so (`pen_cam_look.wgsl`, `map_at`); this is the read it mirrors, held by the
-    /// tests.
-    pub fn lit(&self, direction: Vec3, r: f32, scale: f32) -> f32 {
+    /// strength where `r` lies within its own reach, and nothing past it, and the four are weighted
+    /// bilinearly. A texel's reach counts out to its tolerance past it
+    /// ([`REACH_TOLERANCE_DIAGONALS`]: up to that many [`Self::diagonal`]s times `r`, never past
+    /// the farthest of the four), and `slack` world m past that. A reach is compared per texel and
+    /// never interpolated, so across a silhouette a point behind the blocker, past the tolerance,
+    /// gets the open texels' share alone, the same at every depth out to the wall, and a point on
+    /// the open side some share right up to the edge. The look's shader reads the map so
+    /// (`pen_cam_look.wgsl`, `map_at`); this is the read it mirrors, held by the tests.
+    pub fn lit(&self, direction: Vec3, r: f32, scale: f32, slack: f32) -> f32 {
         let (texels, t) = self.footprint(direction);
-        let [a, b, c, d] = texels.map(|texel| if r <= texel.x * scale { texel.y } else { 0.0 });
+        let reach = texels.map(|texel| texel.x * scale);
+        let farthest = reach.into_iter().fold(0.0, f32::max);
+        let tolerance = REACH_TOLERANCE_DIAGONALS * self.diagonal() * r;
+        let [a, b, c, d] = std::array::from_fn(|k| {
+            let met = farthest.min(reach[k] + tolerance) + slack;
+            if r <= met { texels[k].y } else { 0.0 }
+        });
         let (below, above) = (a + (b - a) * t.x, c + (d - c) * t.x);
         below + (above - below) * t.y
     }
@@ -1028,7 +1063,12 @@ pub(super) mod tests {
     }
 
     /// A box of hard body `body` from `lo` to `hi`: 12 triangles wound outward.
-    fn cuboid(lo: Vec3, hi: Vec3, body: u32, bodies: &mut (Vec<Vec3>, Vec<[u32; 3]>, Vec<u32>)) {
+    pub(in super::super) fn cuboid(
+        lo: Vec3,
+        hi: Vec3,
+        body: u32,
+        bodies: &mut (Vec<Vec3>, Vec<[u32; 3]>, Vec<u32>),
+    ) {
         let base = bodies.0.len() as u32;
         let centre = 0.5 * (lo + hi);
         for k in 0..8 {
@@ -1091,7 +1131,7 @@ pub(super) mod tests {
     }
 
     /// The guide's own reach along `d`: the first body's entry.
-    fn guide(bodies: &HardBodies, d: Vec3) -> f32 {
+    pub(in super::super) fn guide(bodies: &HardBodies, d: Vec3) -> f32 {
         bodies.entry(Vec3::ZERO, d, GUIDE_REACH_M).unwrap().0
     }
 
@@ -1108,8 +1148,9 @@ pub(super) mod tests {
     /// the texels' reaches before testing a point against them carries the field past the plate
     /// to a depth no texel holds. Fixture: the plate and the wall of [`fixture_bodies`], the rod's
     /// side away from the read; one strength throughout; points 1.2 and 2.9 times the plate's
-    /// depth along a direction, past every plate texel's reach about it and short of every wall
-    /// texel's (DERIVED: the texels about a direction lie within half a degree of it).
+    /// depth along a direction, past every plate texel's reach about it and its tolerance (under
+    /// 3 cm there, [`REACH_TOLERANCE_DIAGONALS`]) and short of every wall texel's (DERIVED: the
+    /// texels about a direction lie within half a degree of it).
     #[test]
     fn a_shadow_edge_is_the_bodys_silhouette() {
         let bodies = fixture_bodies();
@@ -1149,8 +1190,8 @@ pub(super) mod tests {
                     FRAC_PI_2 + off / theta.to_radians().sin(),
                 );
                 let depth = d.dot(AXIS);
-                let behind = guided.lit(d, 1.2 / depth, 1.0);
-                let before_wall = guided.lit(d, 2.9 / depth, 1.0);
+                let behind = guided.lit(d, 1.2 / depth, 1.0, 0.0);
+                let before_wall = guided.lit(d, 2.9 / depth, 1.0, 0.0);
                 assert!(
                     (behind - before_wall).abs() <= 1e-5 * full,
                     "{d}: {behind} behind the plate, {before_wall} before the wall"
@@ -1175,6 +1216,121 @@ pub(super) mod tests {
             }
         }
         assert!(read == 603 && shared > 20, "{read} {shared}");
+    }
+
+    /// A surface the field stops on reads inside across it: on a plane every direction of a cap
+    /// stops on, each texel reaching the plane along its own direction, a point of the plane reads
+    /// the field whole at every direction swept across it, though about most of them a texel
+    /// whose direction meets the plane nearer leaves the point past that texel's own reach. The
+    /// volume's march ends on a component's surface and the painting lies on it; a read with no
+    /// tolerance ([`REACH_TOLERANCE_DIAGONALS`]) flips the last stretch before the surface texel by
+    /// texel, a stair-step, and a tolerance not grown with the distance flips it on a surface far
+    /// out. Fixture: the 25° cap; the plane 3 m out, turned 45° about `v`, so the swept directions,
+    /// up to 20° off the axis, meet it from 20° to 60° off square and 3 to 6 m out, short of
+    /// `tan⁻¹ 2` = 63°, the steepest the tolerance holds wherever the octahedral turn is steepest
+    /// (DERIVED); every texel's reach the plane's distance along it, as the guide bakes a surface.
+    #[test]
+    fn a_surface_the_field_stops_on_reads_inside_across_it() {
+        let (u, _) = AXIS.any_orthonormal_pair();
+        let tilt = 45.0_f32.to_radians();
+        // The plane's unit normal away from the origin, and its distance from it.
+        let away = AXIS * tilt.cos() + u * tilt.sin();
+        let distance = 3.0;
+        let plane = |d: Vec3| distance / d.dot(away);
+        let mut map = Map::of(&cap(|_, _| 1.0, |_| 0.5), None);
+        for j in 0..MAP_TEXELS {
+            for i in 0..MAP_TEXELS {
+                let d = map.texel_direction(i, j);
+                let texel = &mut map.texels[j * MAP_TEXELS + i];
+                if texel.y > 0.0 {
+                    texel.x = plane(d);
+                }
+            }
+        }
+        let full = 5.0;
+        let (mut checked, mut stepped) = (0, 0);
+        for k in 0..60 {
+            for j in 0..48 {
+                let d = direction((k as f32 / 3.0).to_radians(), j as f32 * TAU / 48.0 + 0.1);
+                if d.dot(away).acos() > 60.0_f32.to_radians() {
+                    continue;
+                }
+                let r = plane(d);
+                let got = map.lit(d, r, 1.0, 0.0);
+                assert!(
+                    (got - full).abs() <= 1e-5 * full,
+                    "{d} at {r} m: {got} of {full}"
+                );
+                let (texels, _) = map.footprint(d);
+                stepped += usize::from(texels.iter().any(|texel| texel.x < r));
+                checked += 1;
+            }
+        }
+        assert!(
+            checked > 2000 && 2 * stepped > checked,
+            "{checked} {stepped}"
+        );
+    }
+
+    /// A point a body's thickness behind a blocker stays outside: behind a plate 3 cm thick 1 m
+    /// out, a point on the plate's far face reads the field as one before the wall behind it does,
+    /// the open texels' share alone, at every direction across the plate's silhouette; and 5 mm
+    /// past the plate's near face, where every texel about it ends on the plate, a point reads
+    /// nothing. A blocked texel reads past its reach by at most [`REACH_TOLERANCE_DIAGONALS`]
+    /// diagonals times the distance (2.3 cm here, DERIVED) and never past the farthest of the four
+    /// about a direction, so a shadow holds behind a body thicker than that; a tolerance wider (more
+    /// diagonals, or a fixed length past the plate's thickness) carries the field onto the far
+    /// face beside the silhouette, and one reaching past the farthest of the four carries it into
+    /// the plate. Fixture: a wall 3 m out (body 0), the plate over the cap's `+u` half (body 1),
+    /// the record's directions ending where they meet them.
+    #[test]
+    fn a_point_a_bodys_thickness_behind_a_blocker_stays_outside() {
+        let thickness = 0.03;
+        let mut parts = (Vec::new(), Vec::new(), Vec::new());
+        cuboid(
+            Vec3::new(-5.0, -5.0, -3.2),
+            Vec3::new(5.0, 5.0, -3.0),
+            0,
+            &mut parts,
+        );
+        cuboid(
+            Vec3::new(0.0, -5.0, -1.0 - thickness),
+            Vec3::new(5.0, 5.0, -1.0),
+            1,
+            &mut parts,
+        );
+        let bodies = HardBodies::new(parts.0, parts.1, parts.2);
+        let cone = cap(|_, d| guide(&bodies, d), |_| 0.5);
+        let map = Map::of(&cone, Some(&bodies));
+        let full = 0.5 * cone.strength;
+        let texel = 4.0 * map.zoom / MAP_SIDE as f32;
+        let (mut across, mut within) = (0, 0);
+        for k in 0..=200 {
+            let off = (k as f32 - 100.0) * 0.01_f32.to_radians();
+            for theta in [8.0_f32, 14.0, 20.0] {
+                let d = direction(
+                    theta.to_radians(),
+                    FRAC_PI_2 + off / theta.to_radians().sin(),
+                );
+                if bodies.entry(Vec3::ZERO, d, GUIDE_REACH_M).unwrap().1 != 1 {
+                    continue;
+                }
+                let depth = d.dot(AXIS);
+                let far_face = map.lit(d, (1.0 + thickness) / depth, 1.0, 0.0);
+                let before_wall = map.lit(d, 2.9 / depth, 1.0, 0.0);
+                assert!(
+                    (far_face - before_wall).abs() <= 1e-5 * full,
+                    "{d}: {far_face} on the plate's far face, {before_wall} before the wall"
+                );
+                across += 1;
+                if d.x / depth >= 1.5 * texel {
+                    let inside = map.lit(d, 1.005 / depth, 1.0, 0.0);
+                    assert_eq!(inside, 0.0, "{d}: 5 mm past the plate's near face");
+                    within += 1;
+                }
+            }
+        }
+        assert!(across > 250 && within > 150, "{across} {within}");
     }
 
     /// Where every record direction about a point ended alike, the record decides, never the

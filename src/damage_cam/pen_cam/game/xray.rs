@@ -2,7 +2,8 @@
 //! over it, its key ([`XRay`], X) a preference kept across lives. Its own presentation beside the
 //! corner slot: no corner, no stage copy, no exhibit. The look goes on the tank's REAL render
 //! primitives — each mesh's `StandardMaterial` handle set aside ([`Dressed`]) and replaced by its
-//! tier's [`LookMaterial`], a mask copy spawned under it — and the record's elements hang under the
+//! tier's [`LookMaterial`], a component's painted with the record's fields by its live role
+//! ([`Footprint`]), a mask copy spawned under it — and the record's elements hang under the
 //! live hull and component meshes ([`spawn_glass`]), so the pose, the servos, the certified LOD and
 //! the pooled shoes follow for free; nothing is hidden and nothing is copied. One mask set is owned
 //! for the player's camera ([`MaskNeed`]). While on, the tank casts no shadow (`LookMaterial` casts
@@ -51,7 +52,7 @@ use bevy::window::{CursorOptions, PrimaryWindow};
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldInstanceReady};
 
 use super::super::Knobs;
-use super::super::look::{self, Layer, LookMaterial, MaskNeed, MaskSet, Masks};
+use super::super::look::{self, Footprint, Layer, LookMaterial, MaskNeed, MaskSet, Masks};
 use super::super::material::{GlowMaterial, OutlineMaterial};
 use super::super::plan::{BoxPlan, Plan};
 use super::super::stage::{
@@ -306,8 +307,12 @@ struct Built {
     /// App seconds the record on show first showed: its elements play from there.
     since: f64,
     plan: Arc<Plan>,
-    /// One material per tier the tank's meshes wear, and the layer each is masked in.
-    tiers: HashMap<Tier, (Handle<LookMaterial>, Layer)>,
+    /// One material per tier and painting rule the tank's meshes wear (a component's mesh paints
+    /// by its component's role, [`Footprint::of_mesh`]), and the layer each is masked in.
+    tiers: HashMap<(Tier, Option<Footprint>), (Handle<LookMaterial>, Layer)>,
+    /// The atlas of the record's field maps its volume reads, which the painted materials read
+    /// too ([`spawn_glass`]); `None` without a field.
+    atlas: Option<Handle<Image>>,
     /// The masks' material, on every mask copy.
     mask: Handle<LookMaterial>,
     /// Meshes were dressed this frame: the record's elements are built again next frame, once
@@ -499,6 +504,7 @@ pub(super) fn build(
         since: now,
         plan: Arc::new(Plan::bare(&TankShapes::default(), Vec::new())),
         tiers: HashMap::new(),
+        atlas: None,
         mask: stores.looks.add(look::hull_mask(set)),
         settle: false,
         rescan: false,
@@ -509,12 +515,14 @@ pub(super) fn build(
         .added
         .iter()
         .any(|added| scene.parents.iter_ancestors(added).any(|a| a == tank));
+    let live = subject.live();
     let mut dressed_now = false;
     if fresh || landed || built.rescan {
         let (dressed, skipped) = dress(
             &mut commands,
             tank,
             asset.spec(),
+            &live,
             built,
             &mut stores.looks,
             &scene,
@@ -529,7 +537,6 @@ pub(super) fn build(
         .as_deref()
         .and_then(|store| subject.record(store, life));
     let record = latest.map(|(key, _)| key);
-    let live = subject.live();
     let settle = std::mem::take(&mut built.settle);
     if !fresh && !settle && built.record == record && built.live == live {
         built.settle = dressed_now;
@@ -572,7 +579,7 @@ pub(super) fn build(
             .iter()
             .map(|(entity, dressed, mesh)| (entity, dressed.names.as_slice(), mesh.0.clone())),
     );
-    spawn_glass(
+    built.atlas = spawn_glass(
         &mut commands,
         &mut stores.meshes,
         &mut stores.glows,
@@ -645,17 +652,23 @@ pub(super) fn forget_shown(_new: On<NewMatch>, mut state: ResMut<XRayState>) {
     }
 }
 
-/// Dress every undressed render primitive under `root` in its tier's look, against `built`'s
-/// masks, with a mask copy under it: whether any was, and whether one was left for the LOD
+/// Dress every undressed render primitive under `root` in its tier's look, a component's painted
+/// by the role `live` gives its component ([`LiveState::role_of`]), against `built`'s masks, with
+/// a mask copy under it: whether any was, and whether one was left for the LOD
 /// ladder's scan — a glTF primitive the ladder has not scanned yet (it binds the primitive's rungs
 /// off the handle this would take), which the next frame looks at again; under
 /// [`SourceDetailOnly`] no ladder scans, and every primitive is dressed as it lands. Left as they
 /// are: the shadow ribbon (no camera draws it, and a copy of it in a mask would), a collision
 /// proxy, and the x-ray's own meshes.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "dresses one tank: the command sink, the tank, its spec and live state, the build, the material store and the hierarchy and held reads are separate inputs"
+)]
 fn dress(
     commands: &mut Commands,
     root: Entity,
     spec: &crate::spec::TankSpec,
+    live: &LiveState,
     built: &mut Built,
     looks: &mut Assets<LookMaterial>,
     scene: &Hierarchy,
@@ -703,11 +716,12 @@ fn dress(
         if proxy {
             continue;
         }
+        let role = live.role_of(&names);
         let (handle, layer) = built
             .tiers
-            .entry(tier)
+            .entry((tier, Footprint::of_mesh(tier, role)))
             .or_insert_with(|| {
-                let draw = look::hull(tier, &built.masks);
+                let draw = look::hull(tier, role, &built.masks);
                 (looks.add(draw.material), draw.layer)
             })
             .clone();
@@ -847,8 +861,19 @@ pub(super) fn animate(
         playing.mark(mark, material, &mut visibility, &mut glows);
     }
     let hull = hulls.get(built.hull).ok();
+    let prints = hull.map(|hull| playing.prints(hull));
     for (look, mut visibility) in &mut volumes {
-        playing.fields(look, &mut visibility, hull, &mut looks);
+        playing.fields(look, &mut visibility, prints.as_deref(), &mut looks);
+    }
+    for ((_, rule), (handle, _)) in &built.tiers {
+        if rule.is_some() {
+            look::paint_fields(
+                &mut looks,
+                handle,
+                prints.as_deref().unwrap_or_default(),
+                built.atlas.as_ref(),
+            );
+        }
     }
     for (tint, outline, look, mut visibility) in &mut boxes {
         playing.fill(
@@ -857,6 +882,7 @@ pub(super) fn animate(
             look,
             &mut visibility,
             hull,
+            prints.as_deref().unwrap_or_default(),
             &mut outlines,
             &mut looks,
         );
@@ -974,6 +1000,15 @@ impl LiveState {
                 })
                 .collect(),
         )
+    }
+
+    /// The role of the volume the first of a mesh's `names` names, as [`component_meshes`] matches
+    /// a mesh to its component; `None` where none does.
+    fn role_of(&self, names: &[String]) -> Option<Role> {
+        names
+            .iter()
+            .find_map(|name| self.0.iter().find(|live| live.name == *name))
+            .map(|live| live.role)
     }
 
     /// Each volume as the x-ray draws it, its shape from `shapes`, ending on its live state: its
