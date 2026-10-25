@@ -3,8 +3,9 @@
 //! path nose first with a thin trail behind it, a ring where it crossed each plate or glanced off a
 //! face, every field (each spall cone, and a burst's) as one translucent volume in the potency
 //! colour of its local intensity, bounded where its directions stopped ([`look::volume`], and by
-//! the plane in the slice), and each struck component's real mesh on the state scale ([`look::component`]): filled red from the
-//! bottom up to the share of its HP points lost, one knocked out charcoal and hatched.
+//! the plane in the slice), and each component's real mesh on the state scale ([`look::component`]):
+//! filled red from the bottom up to the share of its whole HP pool gone, rising at its reach time
+//! from its state before the shot to its state after it, one knocked out charcoal and hatched.
 //! The shell rests where the record ends; a round the record has leave the tank runs on past the
 //! path's last node along its last leg for the rest of the play ([`shell_share`]). A round that
 //! bursts breaks up at the burst's record time: only a ring's nose piece flies on, the model
@@ -936,14 +937,13 @@ fn front_radius(plan: &Plan, kind: CornerKind, index: usize, c: f32) -> f32 {
     plan.cones[index].front(dt)
 }
 
-/// The corner time at which component `b`'s fill starts: the nose's entry, or the moment the dosing
-/// cone's front has run the distance the plan gives at that front's own speed; the victim's x-ray
-/// shows its state from the open.
+/// The corner time at which component `b`'s fill starts, in every frame: the nose's entry, or the
+/// moment the dosing cone's front has run the distance the plan gives at that front's own speed;
+/// never for a component the picture does not reach.
 fn box_start(plan: &Plan, kind: CornerKind, b: &BoxPlan, reduce: bool) -> f32 {
-    match (kind, b.reached_at) {
-        (CornerKind::Victim, _) => 0.0,
-        (_, Some(Reach::Line(arc))) => time_at_arc(plan, kind, arc, reduce),
-        (_, Some(Reach::Cone { cone, distance })) => {
+    match b.reached_at {
+        Some(Reach::Line(arc)) => time_at_arc(plan, kind, arc, reduce),
+        Some(Reach::Cone { cone, distance }) => {
             if reduce {
                 cone_start(plan, kind, cone, true)
             } else {
@@ -951,7 +951,7 @@ fn box_start(plan: &Plan, kind: CornerKind, b: &BoxPlan, reduce: bool) -> f32 {
                     + plan.cones[cone].run_time(distance) * timeline::REPLAY_SLOWDOWN
             }
         }
-        (_, None) => f32::INFINITY,
+        None => f32::INFINITY,
     }
 }
 
@@ -1335,7 +1335,10 @@ impl<'a> Playing<'a> {
     }
 
     /// A component's state fill and its outline: risen along the up of the record frame `hull`
-    /// (the tank's) to the component's heights, filled from the moment the picture reaches it.
+    /// (the tank's) to the component's heights, at its condition of the moment
+    /// ([`look::condition`]): its state before the shot until the picture reaches it, then rising
+    /// over [`timeline::BOX_FILL_S`] to its state after it. Shown while it has a condition; the
+    /// outline whole wherever the component had one before the shot, else fading in with the rise.
     #[expect(
         clippy::too_many_arguments,
         reason = "one tint's two materials and visibility, the two stores and the frame they rise in"
@@ -1353,23 +1356,33 @@ impl<'a> Playing<'a> {
         let (plan, kind, c) = (self.plan, self.kind, self.c);
         let b = &plan.boxes[tint.index];
         let start = box_start(plan, kind, b, self.reduce);
-        let fill = if self.reduce {
+        let run = if self.reduce {
             self.fade_from(start)
         } else {
-            timeline::ease_enter(timeline::progress(c, start, timeline::BOX_FILL_S))
+            timeline::progress(c, start, timeline::BOX_FILL_S)
         };
+        // Whole exactly when its run is: the ease's solve lands within a tolerance of its end.
+        let rise = if run >= 1.0 || self.reduce {
+            run
+        } else {
+            timeline::ease_enter(run)
+        };
+        let (before, condition) = (look::condition(b, 0.0), look::condition(b, rise));
         if let Some(mut m) = outline.and_then(|m| outlines.get_mut(&m.0)) {
-            m.set_fade(fill);
+            m.set_fade(if before.is_some() { 1.0 } else { rise });
         }
         if let Some(mut m) = look.and_then(|m| looks.get_mut(&m.0)) {
-            m.set_fade(fill);
+            m.set_fade(condition.is_some() as u8 as f32);
+            if let Some(condition) = condition {
+                m.set_condition(condition);
+            }
             if let Some(hull) = hull {
                 let up = *hull.up();
                 let height = |y: f32| hull.transform_point(Vec3::Y * y).dot(up);
                 m.set_fill_span(up, b.heights.map(|(lo, hi)| (height(lo), height(hi))));
             }
         }
-        visibility.set_if_neq(if fill > 0.0 {
+        visibility.set_if_neq(if condition.is_some() {
             Visibility::Inherited
         } else {
             Visibility::Hidden
@@ -1901,6 +1914,7 @@ mod tests {
     use super::super::hud::ASPECT;
     use super::super::material::Blend;
     use super::super::plan::{LEAD_M, LEG_EPS_M};
+    use super::super::timeline::Condition;
     use super::*;
     use crate::damage_cam::shapes::{TankAsset, TankShapes};
     use crate::damage_cam::{PenetrationReport, RoundEnd};
@@ -3444,24 +3458,132 @@ mod tests {
         );
     }
 
+    /// Fixture data: the playlist's records with every component's pool doubled, so each stood at
+    /// half its pool before the shot, and the first component no dose names left with no hit
+    /// points at the shot, lost before it. No recorded scenario carries damage from before its
+    /// shot.
+    fn with_prior_damage() -> Library {
+        let reports = Library::reports()
+            .into_iter()
+            .map(|(stem, mut report)| {
+                for component in &mut report.components {
+                    component.count *= 2;
+                }
+                let undosed = report
+                    .components
+                    .iter()
+                    .position(|component| !report.doses.iter().any(|d| d.volume == component.name));
+                if let Some(index) = undosed {
+                    report.components[index].hp = 0;
+                }
+                (stem, report)
+            })
+            .collect();
+        Library::of(reports)
+    }
+
+    /// Component `index` of `plan` as the real [`Playing::fill`] leaves it in frame `kind` at
+    /// corner time `c`, over the material [`look::component`] builds for it: its fill's lanes and
+    /// its outline's fade while shown, `None` while hidden or where the frame does not draw it.
+    fn fill_at(
+        plan: &Plan,
+        kind: CornerKind,
+        index: usize,
+        c: f32,
+    ) -> Option<(look::LookParams, f32)> {
+        let masks = MaskSet::default();
+        let mut looks = Assets::<LookMaterial>::default();
+        let mut outlines = Assets::<OutlineMaterial>::default();
+        let look = MeshMaterial3d(looks.add(look::component(&plan.boxes[index], kind, &masks)?));
+        let outline = MeshMaterial3d(outlines.add(OutlineMaterial::new(
+            timeline::STATE_RED.into(),
+            look::STATE_OUTLINE_PX,
+            Vec3::ZERO,
+        )));
+        let mut world = World::new();
+        let entity = world.spawn(Visibility::Hidden).id();
+        let mut visibility = world.get_mut::<Visibility>(entity).unwrap();
+        Playing::new(plan, kind, c, false).fill(
+            &BoxTint { index },
+            Some(&outline),
+            Some(&look),
+            &mut visibility,
+            None,
+            &mut outlines,
+            &mut looks,
+        );
+        (*visibility == Visibility::Inherited).then(|| {
+            (
+                looks.get(&look.0).unwrap().params,
+                outlines.get(&outline.0).unwrap().params.color.w,
+            )
+        })
+    }
+
+    /// A state fill's lanes, read back as the place on the state scale they draw: out of action
+    /// where the hatch is on, else reduced to the level.
+    fn read_condition(params: &look::LookParams) -> Condition {
+        if params.mode.w > 0.5 {
+            Condition::Dead
+        } else {
+            Condition::Damaged(params.state.w)
+        }
+    }
+
+    /// A state scale colour, opaque, as a fill's lanes carry it.
+    fn lanes(color: Color) -> Vec4 {
+        let c = LinearRgba::from(color);
+        Vec4::new(c.red, c.green, c.blue, 1.0)
+    }
+
     /// Every component the real [`rebuild`] draws, in the shooter's glass and outside view and in
-    /// the victim's glass, is on the one state scale under a red outline: a damaged one opaque red
-    /// to the share of its hit points lost (the shooter's: this shot's share of what it had; the
-    /// victim's: the share of its pool gone), over the untouched grey; a dead one charcoal and
-    /// hatched. Across the records at least one of each in each view.
+    /// the victim's glass, played by the real [`Playing::fill`] to the record's settle, is on the
+    /// one state scale under a red outline: a reduced one opaque red to the share of its whole pool
+    /// gone, prior damage included, over the untouched grey; one out of action charcoal and
+    /// hatched. The shooter's frames draw exactly the components the shot took HP from, the
+    /// victim's every one with any of its pool gone. Over the records with damage before the shot
+    /// (fixture data), at least one of each in each view. The shooter relies on the frame never
+    /// showing earlier damage of a component the shot missed, and every viewer on the fill reading
+    /// the whole pool: this shot's share of what remained reads a component that had lost half its
+    /// pool and lost a quarter more as half gone.
     #[test]
-    fn a_component_reads_its_share_of_hit_points_lost() {
-        let library = Library::load();
+    fn a_component_reads_the_share_of_its_pool_gone() {
+        use bevy::ecs::system::RunSystemOnce;
+        let library = with_prior_damage();
         let asset = TankAsset::load(&library.vehicle).unwrap();
-        let (mut damaged, mut dead) = ([0; 2], [0; 2]);
-        let rgb = |c: Color| {
-            let c = LinearRgba::from(c);
-            Vec4::new(c.red, c.green, c.blue, 1.0)
-        };
+        let (mut reduced, mut out) = ([0; 2], [0; 2]);
         for (index, record) in library.records.iter().enumerate() {
+            let shapes = asset.shapes(&record.report.servo_deg);
             for kind in [CornerKind::Glass, CornerKind::Damaged, CornerKind::Victim] {
                 let victim = (kind == CornerKind::Victim) as usize;
                 let (mut app, _) = staged(&library, &asset, index, kind, Vec3::X);
+                let plan = record.plan.clone();
+                let settle = pace(&plan, kind).settle;
+                app.world_mut()
+                    .run_system_once(
+                        move |mut boxes: Query<(
+                            &BoxTint,
+                            Option<&MeshMaterial3d<OutlineMaterial>>,
+                            Option<&MeshMaterial3d<LookMaterial>>,
+                            &mut Visibility,
+                        )>,
+                              mut outlines: ResMut<Assets<OutlineMaterial>>,
+                              mut looks: ResMut<Assets<LookMaterial>>| {
+                            let playing = Playing::new(&plan, kind, settle, false);
+                            for (tint, outline, look, mut visibility) in &mut boxes {
+                                playing.fill(
+                                    tint,
+                                    outline,
+                                    look,
+                                    &mut visibility,
+                                    None,
+                                    &mut outlines,
+                                    &mut looks,
+                                );
+                            }
+                        },
+                    )
+                    .unwrap();
                 let world = app.world_mut();
                 let outlined: Vec<(usize, Vec4)> = world
                     .query::<(&BoxTint, &MeshMaterial3d<OutlineMaterial>)>()
@@ -3471,49 +3593,189 @@ mod tests {
                         (tint.index, outlines.get(&m.0).unwrap().params.color)
                     })
                     .collect();
-                let mut tints = world.query::<(&BoxTint, &MeshMaterial3d<LookMaterial>)>();
+                let mut tints =
+                    world.query::<(&BoxTint, &MeshMaterial3d<LookMaterial>, &Visibility)>();
                 let looks = world.resource::<Assets<LookMaterial>>();
-                for (tint, material) in tints.iter(world) {
+                let mut drawn = Vec::new();
+                for (tint, material, visibility) in tints.iter(world) {
                     let b = &record.plan.boxes[tint.index];
                     let m = looks.get(&material.0).unwrap();
                     let name = format!("{} {kind:?} {}", record.stem, b.name);
+                    drawn.push(tint.index);
+                    assert_eq!(*visibility, Visibility::Inherited, "{name}: hidden");
                     assert!(
                         outlined.iter().any(|(index, color)| *index == tint.index
-                            && color.truncate() == rgb(timeline::STATE_RED).truncate()),
-                        "{name}: no red outline"
+                            && *color == lanes(timeline::STATE_RED)),
+                        "{name}: no whole red outline"
                     );
                     assert_eq!(m.blend, Blend::Opaque, "{name}: not opaque");
-                    assert_eq!(m.params.rest, rgb(timeline::STATE_UNTOUCHED), "{name}");
-                    let share = if victim == 1 {
-                        b.pool_lost()
-                    } else {
-                        assert!(b.struck(), "{name}: drawn unstruck");
-                        timeline::hp_share(b.lost_hp, b.hp)
-                    };
+                    assert_eq!(m.params.rest, lanes(timeline::STATE_UNTOUCHED), "{name}");
+                    let share = b.pool_lost();
                     if b.lost || share >= 1.0 {
+                        assert_eq!(m.params.color, lanes(timeline::STATE_DEAD), "{name}");
                         assert_eq!(
-                            m.params.color.truncate(),
-                            rgb(timeline::STATE_DEAD).truncate()
+                            m.params.state.w, 1.0,
+                            "{name}: an out-of-action fill is whole"
                         );
-                        assert_eq!(m.params.state.w, 1.0, "{name}: a dead fill is whole");
-                        assert!(m.params.mode.w > 0.5, "{name}: dead and unhatched");
-                        dead[victim] += 1;
+                        assert!(m.params.mode.w > 0.5, "{name}: out of action and unhatched");
+                        out[victim] += 1;
                         continue;
                     }
-                    assert_eq!(
-                        m.params.color.truncate(),
-                        rgb(timeline::STATE_RED).truncate()
-                    );
+                    assert_eq!(m.params.color, lanes(timeline::STATE_RED), "{name}");
                     assert_eq!(m.params.state.w, share, "{name}");
-                    assert!(m.params.mode.w < 0.5, "{name}: damaged and hatched");
-                    damaged[victim] += 1;
+                    assert!(m.params.mode.w < 0.5, "{name}: reduced and hatched");
+                    reduced[victim] += 1;
+                }
+                drawn.sort_unstable();
+                drawn.dedup();
+                let want: Vec<usize> = (0..record.plan.boxes.len())
+                    .filter(|&i| {
+                        let b = &record.plan.boxes[i];
+                        let shown = if victim == 1 {
+                            b.lost || b.pool_lost() > 0.0
+                        } else {
+                            b.struck()
+                        };
+                        shown && shapes.get(&b.name).is_some()
+                    })
+                    .collect();
+                assert_eq!(drawn, want, "{} {kind:?}", record.stem);
+            }
+        }
+        assert!(
+            reduced.iter().all(|n| *n > 0) && out.iter().all(|n| *n > 0),
+            "{reduced:?} reduced, {out:?} out of action"
+        );
+    }
+
+    /// A component the shot took HP from, and that had lost some before it, reads its share
+    /// before the shot from the first frame until the picture reaches it, never less from then
+    /// on, and its state after the shot once its fill completes, outline whole throughout, in
+    /// every frame that draws it (damage before the shot: fixture data). Every viewer relies on
+    /// it: a fill that rises from nothing shows a reduced component untouched until it is struck.
+    #[test]
+    fn a_struck_component_rises_from_its_state_before_the_shot() {
+        let library = with_prior_damage();
+        let mut rose = 0;
+        for record in &library.records {
+            let plan = &*record.plan;
+            for kind in [CornerKind::Glass, CornerKind::Damaged, CornerKind::Victim] {
+                let settle = pace(plan, kind).settle;
+                for (index, b) in plan.boxes.iter().enumerate() {
+                    if !b.struck() {
+                        continue;
+                    }
+                    let name = format!("{} {kind:?} {}", record.stem, b.name);
+                    let before = Condition::Damaged(b.pool_lost_before());
+                    let start = box_start(plan, kind, b, false);
+                    let at = |c: f32| {
+                        let (params, outline) = fill_at(plan, kind, index, c)
+                            .unwrap_or_else(|| panic!("{name}: hidden at {c}"));
+                        assert_eq!(outline, 1.0, "{name}: a faded outline at {c}");
+                        read_condition(&params)
+                    };
+                    for c in [0.0, 0.5 * start, start] {
+                        assert_eq!(at(c), before, "{name} at {c}, reached at {start}");
+                    }
+                    for k in 1..=16 {
+                        let c = start + timeline::BOX_FILL_S * k as f32 / 16.0;
+                        let now = at(c);
+                        assert!(
+                            now.fill() >= before.fill(),
+                            "{name} at {c}: {now:?} below {before:?}"
+                        );
+                    }
+                    let after = Condition::of(b.lost, b.pool_lost()).expect("struck");
+                    assert_eq!(at(settle), after, "{name} settled");
+                    rose += 1;
+                }
+            }
+        }
+        assert!(rose > 0, "a struck component");
+    }
+
+    /// In the victim's glass, a component this shot took no HP from shows its state from the
+    /// first frame and holds it, outline whole, through the settle: red to its share of the pool
+    /// gone, or out of action when it was lost before the shot (damage before the shot: fixture
+    /// data). The victim relies on it: a fill that rises at the open reads as this shot's work.
+    #[test]
+    fn a_component_the_shot_missed_holds_its_state() {
+        let library = with_prior_damage();
+        let kind = CornerKind::Victim;
+        let (mut reduced, mut out) = (0, 0);
+        for record in &library.records {
+            let plan = &*record.plan;
+            let settle = pace(plan, kind).settle;
+            for (index, b) in plan.boxes.iter().enumerate() {
+                if b.struck() {
+                    continue;
+                }
+                let Some(state) = Condition::of(b.lost, b.pool_lost()) else {
+                    continue;
+                };
+                let name = format!("{} {}", record.stem, b.name);
+                for k in 0..=16 {
+                    let c = settle * k as f32 / 16.0;
+                    let (params, outline) = fill_at(plan, kind, index, c)
+                        .unwrap_or_else(|| panic!("{name}: hidden at {c}"));
+                    assert_eq!(read_condition(&params), state, "{name} at {c}");
+                    assert_eq!(outline, 1.0, "{name}: a faded outline at {c}");
+                }
+                match state {
+                    Condition::Damaged(_) => reduced += 1,
+                    Condition::Dead => out += 1,
                 }
             }
         }
         assert!(
-            damaged.iter().all(|n| *n > 0) && dead.iter().all(|n| *n > 0),
-            "{damaged:?} damaged, {dead:?} dead"
+            reduced > 0 && out > 0,
+            "{reduced} reduced, {out} out of action"
         );
+    }
+
+    /// A component this shot empties reads red and unhatched, its level never falling, until its
+    /// fill completes, and out of action (charcoal, hatched, whole) from that moment on, in every
+    /// frame that draws it. Every viewer relies on it to see the rise before the knockout: out of
+    /// action from the start hides how far the shot took it.
+    #[test]
+    fn a_component_the_shot_empties_is_knocked_out_when_its_rise_completes() {
+        let library = with_prior_damage();
+        let mut emptied = 0;
+        for record in &library.records {
+            let plan = &*record.plan;
+            for kind in [CornerKind::Glass, CornerKind::Damaged, CornerKind::Victim] {
+                for (index, b) in plan.boxes.iter().enumerate() {
+                    if !(b.struck() && b.lost) {
+                        continue;
+                    }
+                    let name = format!("{} {kind:?} {}", record.stem, b.name);
+                    let start = box_start(plan, kind, b, false);
+                    let done = start + timeline::BOX_FILL_S;
+                    let at = |c: f32| {
+                        fill_at(plan, kind, index, c)
+                            .unwrap_or_else(|| panic!("{name}: hidden at {c}"))
+                            .0
+                    };
+                    let mut level = 0.0;
+                    for c in [0.0, start, start + 0.1, start + 0.2, done - 0.01] {
+                        let params = at(c);
+                        assert_eq!(params.color, lanes(timeline::STATE_RED), "{name} at {c}");
+                        assert!(params.mode.w < 0.5, "{name}: hatched at {c}");
+                        assert!(params.state.w >= level, "{name}: falls at {c}");
+                        level = params.state.w;
+                    }
+                    assert!(level < 1.0, "{name}: whole before its rise completes");
+                    for c in [done, done + 1.0] {
+                        let params = at(c);
+                        assert_eq!(params.color, lanes(timeline::STATE_DEAD), "{name} at {c}");
+                        assert!(params.mode.w > 0.5, "{name}: unhatched at {c}");
+                        assert_eq!(params.state.w, 1.0, "{name} at {c}");
+                    }
+                    emptied += 1;
+                }
+            }
+        }
+        assert!(emptied > 0, "a component the shot empties");
     }
 
     /// The on-screen speed (m per corner-second) of cone `index`'s front, read across the middle
@@ -3634,11 +3896,12 @@ mod tests {
         assert!(burst > 0, "a burst's v_s is apart from its carried speed");
     }
 
-    /// A component's fill starts the first moment the picture reaches it: the earliest of the nose
-    /// entering it where the record has the line enter, and each field that dosed it having run,
-    /// from its own record time at its own speed, the reach of its shortest direction that dosed
-    /// it. Every candidate is read off the record apart from the plan's choice. The corner's fill
-    /// and the pace's settle start from it. The library holds a component a later-listed field
+    /// A component's fill starts the first moment the picture reaches it, in every frame, the
+    /// victim's included: the earliest of the nose entering it where the record has the line
+    /// enter, and each field that dosed it having run, from its own record time at its own speed,
+    /// the reach of its shortest direction that dosed it. Every candidate is read off the record
+    /// apart from the plan's choice. The corner's fill and the pace's settle start from it; a
+    /// victim's fill that starts at the open shows this shot's damage before the round arrives. The library holds a component a later-listed field
     /// reaches first and one a front reaches before the nose enters it, so neither the first-listed
     /// dosing field nor the line taken first whenever it dosed passes.
     #[test]
@@ -3648,7 +3911,7 @@ mod tests {
         for record in &library.records {
             let (plan, report) = (&record.plan, &record.report);
             let name = record.stem;
-            for kind in [CornerKind::Glass, plan.kind] {
+            for kind in [CornerKind::Glass, plan.kind, CornerKind::Victim] {
                 for b in &plan.boxes {
                     let Some(dose) = report.doses.iter().find(|d| d.volume == b.name) else {
                         continue;

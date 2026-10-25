@@ -337,18 +337,18 @@ pub fn verdict_color(kind: CornerKind) -> Color {
 /// The component state scale, one for every view that draws a component. A component works fully
 /// until it has no hit points left, so damage is a quantity, never a hue: an untouched component is
 /// a hueless grey, a damaged one fills with one red from the bottom up (tank-up) to the share of
-/// its hit points lost, and a dead one is charcoal under a red diagonal hatch, which carries the
-/// state without its colour. TUNED.
+/// its whole pool gone, and one out of action is charcoal under a red diagonal hatch, which
+/// carries the state without its colour. TUNED.
 pub const STATE_UNTOUCHED: Color = Color::srgb_u8(0x7C, 0x7C, 0x7C);
 pub const STATE_RED: Color = Color::srgb_u8(0xE0, 0x30, 0x28);
 pub const STATE_DEAD: Color = Color::srgb_u8(0x26, 0x28, 0x2C);
 /// The line a damaged component's fill ends in: lighter than the red and the grey either side.
 pub const STATE_LINE: Color = Color::srgb_u8(0xFF, 0xC8, 0xB8);
 
-/// A struck component's place on the state scale.
+/// A component's place on the state scale.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Condition {
-    /// Working, the share of its hit points lost in `(0, 1)`.
+    /// Working, the share of its whole pool gone, above 0.
     Damaged(f32),
     Dead,
 }
@@ -383,16 +383,6 @@ impl Condition {
 pub const FIELD: Color = Color::srgb_u8(0x3F, 0xD0, 0xC8);
 pub const FIELD_DIM: Color = Color::srgb_u8(0x1E, 0x6B, 0x66);
 pub const FIELD_BRIGHT: Color = Color::srgb_u8(0xD8, 0xFF, 0xF8);
-
-/// The share of its HP points a component lost to the shot, of the points it had at the shot,
-/// clamped at 1 — full exactly when the shot disabled it. A component with none left at the shot
-/// reads full.
-pub fn hp_share(lost: u32, hp: u32) -> f32 {
-    if hp == 0 {
-        return 1.0;
-    }
-    (lost as f32 / hp as f32).min(1.0)
-}
 
 #[cfg(test)]
 mod tests {
@@ -484,14 +474,6 @@ mod tests {
         held.hold_until(1.5);
         assert_eq!(held.current().map(|(_, start)| start), Some(1.5));
         assert!(!held.pending());
-    }
-
-    #[test]
-    fn the_hp_share_is_the_points_lost_of_the_points_held() {
-        assert_eq!(hp_share(10, 30), 1.0 / 3.0);
-        assert_eq!(hp_share(90, 30), 1.0);
-        assert_eq!(hp_share(0, 30), 0.0);
-        assert_eq!(hp_share(10, 0), 1.0);
     }
 
     /// A component is untouched with no share lost, damaged below the whole of it, dead at the

@@ -418,8 +418,16 @@ impl BoxPlan {
         self.lost_hp > 0
     }
 
-    /// The share of its whole pool gone once the shot has dosed it, 1 when lost; the victim's own
-    /// view of its tank, prior damage included.
+    /// The share of its whole pool gone before the shot: 1 with no hit points left at it.
+    pub fn pool_lost_before(&self) -> f32 {
+        if self.count == 0 {
+            return 0.0;
+        }
+        (1.0 - self.hp as f32 / self.count as f32).clamp(0.0, 1.0)
+    }
+
+    /// The share of its whole pool gone once the shot has dosed it, 1 when lost, prior damage
+    /// included.
     pub fn pool_lost(&self) -> f32 {
         if self.lost {
             return 1.0;

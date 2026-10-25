@@ -272,6 +272,21 @@ impl LookMaterial {
             None => Vec4::new(0.0, 0.0, 0.0, self.params.span.w),
         };
     }
+
+    /// A state fill at `condition`: reduced, red from the bottom up to its share over the
+    /// untouched grey, a crisp lighter line between them; out of action, whole, charcoal under
+    /// a red hatch.
+    pub fn set_condition(&mut self, condition: Condition) {
+        let (color, line, hatch) = match condition {
+            Condition::Damaged(_) => (timeline::STATE_RED, timeline::STATE_LINE, false),
+            Condition::Dead => (timeline::STATE_DEAD, timeline::STATE_RED, true),
+        };
+        let (color, line) = (LinearRgba::from(color), LinearRgba::from(line));
+        self.params.color = Vec4::new(color.red, color.green, color.blue, 1.0);
+        self.params.edge = Vec4::new(line.red, line.green, line.blue, 1.0);
+        self.params.mode.w = hatch as u8 as f32;
+        self.params.state.w = condition.fill();
+    }
 }
 
 impl Material for LookMaterial {
@@ -787,52 +802,52 @@ pub fn hull_mask(masks: &MaskSet) -> LookMaterial {
     LookMaterial::new(MODE_MASK, LinearRgba::BLACK, 1.0, Blend::Opaque, masks)
 }
 
-/// Component `b`'s place on the state scale in frame `kind`, `None` where it is not drawn: the
-/// shooter's frames (the glass frame and the outside view) show what this shot did to a component it
-/// took HP from, the share of the HP points it had at the shot; the victim's x-ray shows its own
-/// tank's state, the share of each pool gone.
-fn condition(b: &BoxPlan, kind: CornerKind) -> Option<Condition> {
-    match kind {
-        CornerKind::Glass | CornerKind::Damaged if b.struck() => {
-            Condition::of(b.lost, timeline::hp_share(b.lost_hp, b.hp))
-        }
-        CornerKind::Victim => Condition::of(b.lost, b.pool_lost()),
-        _ => None,
+/// Component `b`'s place on the state scale, the share of its whole pool gone, once `rise` of its
+/// fill has run: 0 before the picture reaches it, exactly 1 once [`timeline::BOX_FILL_S`] has
+/// passed since. A component this shot took HP from rises from its state before the shot
+/// (untouched, or red to [`BoxPlan::pool_lost_before`]) to its state after it
+/// ([`BoxPlan::pool_lost`]); one whose HP pool the shot emptied rises red to the top and is out
+/// of action once the rise completes. One the shot took no HP from holds its state throughout:
+/// out of action from the start when lost before the shot. `None` while untouched.
+pub fn condition(b: &BoxPlan, rise: f32) -> Option<Condition> {
+    let after = Condition::of(b.lost, b.pool_lost());
+    if !b.struck() || rise >= 1.0 {
+        return after;
     }
+    let before = b.pool_lost_before();
+    let share = before + (b.pool_lost() - before) * rise;
+    (share > 0.0).then_some(Condition::Damaged(share))
 }
 
-/// The state scale's opaque fill for `condition`: the struck share of the component's height in
-/// red from the bottom up, the rest in the untouched grey, a crisp lighter line between them; a
-/// dead component charcoal under a red hatch. Its frame is set each frame
-/// ([`LookMaterial::set_fill_span`]) and its fade raises the fill.
+/// The state scale's opaque fill at `condition` ([`LookMaterial::set_condition`]). Its frame
+/// ([`LookMaterial::set_fill_span`]) and its condition are set each frame; its fade multiplies
+/// the level, and is whole wherever it is shown.
 fn state(condition: Condition, masks: &MaskSet) -> LookMaterial {
-    let (color, hatch) = match condition {
-        Condition::Damaged(_) => (timeline::STATE_RED, false),
-        Condition::Dead => (timeline::STATE_DEAD, true),
-    };
-    let mut m = LookMaterial::new(MODE_STATE, color.into(), 1.0, Blend::Opaque, masks);
+    let mut m = LookMaterial::new(MODE_STATE, LinearRgba::BLACK, 1.0, Blend::Opaque, masks);
     m.bias = true;
-    let line = LinearRgba::from(if hatch {
-        timeline::STATE_RED
-    } else {
-        timeline::STATE_LINE
-    });
     let rest = LinearRgba::from(timeline::STATE_UNTOUCHED);
-    m.params.edge = Vec4::new(line.red, line.green, line.blue, 1.0);
     m.params.rest = Vec4::new(rest.red, rest.green, rest.blue, 1.0);
     m.params.shade.y = STATE_CONTRAST;
-    m.params.state.w = condition.fill();
     m.params.span.w = STATE_LINE_PX;
-    m.params.mode.w = hatch as u8 as f32;
     m.params.hatch.x = STATE_HATCH_PX;
     m.params.hatch.y = STATE_HATCH_SHARE;
+    m.set_condition(condition);
     m
 }
 
-/// Component `b`'s fill in frame `kind`, in any look: the state scale ([`state`]), drawn under a
-/// [`timeline::STATE_RED`] outline [`STATE_OUTLINE_PX`] wide; `None` where it is not drawn.
+/// Component `b`'s fill in frame `kind`, in any look: the state scale ([`state`]) at its state
+/// once the shot has dosed it, drawn under a [`timeline::STATE_RED`] outline [`STATE_OUTLINE_PX`]
+/// wide; `None` where it is not drawn. The shooter's frames (the glass frame and the outside view)
+/// draw a component this shot took HP from, and no other, so no earlier damage reaches the
+/// shooter; the victim's x-ray draws every component with any of its pool gone.
 pub fn component(b: &BoxPlan, kind: CornerKind, masks: &MaskSet) -> Option<LookMaterial> {
-    condition(b, kind).map(|condition| state(condition, masks))
+    let settled = condition(b, 1.0)?;
+    let drawn = match kind {
+        CornerKind::Glass | CornerKind::Damaged => b.struck(),
+        CornerKind::Victim => true,
+        CornerKind::Slice | CornerKind::Ricochet => false,
+    };
+    drawn.then(|| state(settled, masks))
 }
 
 /// A spall field's volume, drawn on its reach surface ([`super::field::reach_mesh`]): from each
