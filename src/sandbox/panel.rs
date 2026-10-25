@@ -33,8 +33,8 @@ use crate::damage_cam::pen_cam::game::XRay;
 use crate::tank::Weapon;
 
 use super::{
-    ArmourOverlay, ClearRequested, PANEL_WIDTH, PanelWantsInput, RangeGun, ResetRequested, Respawn,
-    SPEEDS, ShotParams, SpeedIndex,
+    ArmourOverlay, ClearRequested, PANEL_WIDTH, PanelWantsInput, RangeGun, ResetRequested, SPEEDS,
+    ShotParams, SpeedIndex,
 };
 
 pub(super) fn plugin(app: &mut App) {
@@ -58,12 +58,7 @@ struct Write<'w> {
     want: ResMut<'w, PanelWantsInput>,
 }
 
-fn panel(
-    mut contexts: EguiContexts,
-    mut w: Write,
-    respawn: Res<Respawn>,
-    gun: Query<&Weapon, With<RangeGun>>,
-) {
+fn panel(mut contexts: EguiContexts, mut w: Write, gun: Query<&Weapon, With<RangeGun>>) {
     let Ok(ctx) = contexts.ctx_mut() else {
         return;
     };
@@ -99,7 +94,6 @@ fn panel(
     let mut speed_idx = w.speed.0;
     let mut paused = w.time.is_paused();
     let time_scale = w.time.relative_speed();
-    let now_s = w.time.elapsed_secs_f64();
     let mut do_clear = false;
     let mut do_reset = false;
     let mut reset_shot = false;
@@ -130,7 +124,7 @@ fn panel(
                 egui::CollapsingHeader::new("Telemetry")
                     .default_open(true)
                     .show(ui, |ui| {
-                        telemetry_section(ui, &respawn, now_s, time_scale, paused, march_real)
+                        telemetry_section(ui, time_scale, paused, march_real)
                     });
 
                 egui::CollapsingHeader::new("Scene")
@@ -287,16 +281,9 @@ fn time_section(
 const MARCH_DEMO: &str = "per frame";
 const MARCH_REAL: &str = "per tick";
 
-/// What the picture cannot show: the clock's rate, the march cadence and, while the target is
-/// knocked out, the virtual seconds until its rebuild. Monospace so the columns line up.
-fn telemetry_section(
-    ui: &mut egui::Ui,
-    respawn: &Respawn,
-    now_s: f64,
-    time_scale: f32,
-    paused: bool,
-    march_real: bool,
-) {
+/// What the picture cannot show: the clock's rate and the march cadence. Monospace so the
+/// columns line up.
+fn telemetry_section(ui: &mut egui::Ui, time_scale: f32, paused: bool, march_real: bool) {
     let rate = if paused {
         "paused".to_string()
     } else {
@@ -305,7 +292,4 @@ fn telemetry_section(
     let march = if march_real { MARCH_REAL } else { MARCH_DEMO };
     ui.monospace(format!("time     {rate}"));
     ui.monospace(format!("march    {march}"));
-    if let Some(due_s) = respawn.due_s {
-        ui.monospace(format!("rebuild  {:.1} s", (due_s - now_s).max(0.0)));
-    }
 }

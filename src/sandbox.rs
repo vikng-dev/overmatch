@@ -12,9 +12,8 @@
 //!   camera's (the one [`PlayerView`]). Each record replays once on the look's clock to its hold
 //!   beat and holds until the next shot; X toggles the look, on from the start. The pen cam corner
 //!   stays closed by its own setting ([`PenCamCorner::Off`]).
-//! * **The rebuild.** A knocked-out target stands until the look's replay of the shot that knocked
-//!   it out has held [`REBUILD_BEAT_S`] ([`rebuild_due`]), then the range rebuilds it; R rebuilds
-//!   at once. The look lets go of the target before it goes ([`TargetRebuild::rebuild`]).
+//! * **The rebuild.** A knocked-out target stands until R (or the panel's Rebuild) rebuilds it. The
+//!   look lets go of the target before it goes ([`TargetRebuild::rebuild`]).
 //! * **The rest is gizmos.** A shot that met no tank — a plate, the ground — draws its path, its
 //!   crossings and its end; a shot that met a tank draws none of that, and its spent shell goes
 //!   ([`sweep_tank_shots`]). The armour overlay (F2, off by default) draws the target's armour
@@ -23,8 +22,7 @@
 //! * **Text only at a glance.** The view carries the selected round's name (its speed beside it only
 //!   when overridden, [`round_line`]), the aim dot and the key legend, hidden until H. The look shows
 //!   the target's crew and module state, so no crew bar or status card is mounted; the egui panel
-//!   holds the controls and what the picture cannot show (time rate, march cadence, the rebuild
-//!   countdown).
+//!   holds the controls and what the picture cannot show (time rate, march cadence).
 //!
 //! Sandbox controls use real time so inspection remains available while simulation time is paused.
 //!
@@ -83,11 +81,6 @@ const RANGE_SHOOTER: CombatantId = CombatantId(1);
 /// The target tank's combatant, the same across its rebuilds; [`TargetLife`] counts them.
 const RANGE_TARGET: CombatantId = CombatantId(2);
 
-/// How long a knocked-out target stands past the hold beat of the look's replay of the shot that
-/// knocked it out, seconds of virtual time ([`rebuild_due`]). TUNED: long enough to read the held
-/// end of the replay on the target before it goes.
-const REBUILD_BEAT_S: f64 = 1.5;
-
 /// The egui control panel's width, logical pixels (egui points at bevy_egui's default zoom): the
 /// panel is fixed-width on the window's left edge. No panel is compiled without `dev_ui`.
 #[cfg(feature = "dev_ui")]
@@ -131,14 +124,6 @@ fn seed_gun() -> Weapon {
 /// earlier target is never read as the live one's.
 #[derive(Resource, Default)]
 struct TargetLife(u32);
-
-/// The standing target's knockout, virtual seconds: when it was first seen knocked out, and when
-/// it is rebuilt ([`rebuild_due`], restated each frame); both `None` while no target is knocked out.
-#[derive(Resource, Default)]
-struct Respawn {
-    knocked_out_s: Option<f64>,
-    due_s: Option<f64>,
-}
 
 /// Whether the egui panel currently holds keyboard or pointer focus — written each frame by the
 /// `dev_ui` panel, read by [`panel_capturing`] to gate the firing/fly/time input off so a slider
@@ -326,7 +311,6 @@ pub fn plugin(app: &mut App) {
     // The game's keys for the round selector and the x-ray.
     .init_resource::<Bindings>()
     .init_resource::<TargetLife>()
-    .init_resource::<Respawn>()
     // Keep spent shells frozen in place (with their tracer + marks) for inspection.
     .insert_resource(ballistics::RetainSpentShells(true))
     // Default to smooth per-frame motion; `T` toggles to the true fixed-rate cadence.
@@ -384,8 +368,8 @@ pub fn plugin(app: &mut App) {
                 draw_shell_ends,
             )
                 .chain(),
-            // Both despawn the target the look may be drawing (`TargetRebuild::rebuild`).
-            (reset_world, respawn_target).after(PenCamSet),
+            // Despawns the target the look may be drawing (`TargetRebuild::rebuild`).
+            reset_world.after(PenCamSet),
             update_round_label,
             toggle_legend,
         ),
@@ -580,41 +564,6 @@ fn spawn_target_from_blueprint(
         ),
     );
     commands.remove_resource::<PendingTarget>();
-}
-
-/// Rebuild a knocked-out target once [`rebuild_due`], restated each frame: the record of the shot
-/// that knocked it out shows after the knockout. Clearing the knockout first (`C`) cancels it.
-fn respawn_target(
-    time: Res<Time<Virtual>>,
-    knocked_out: Query<(), (With<Tank>, With<TankKnockedOut>)>,
-    mut respawn: ResMut<Respawn>,
-    mut target: TargetRebuild,
-) {
-    if knocked_out.is_empty() {
-        *respawn = Respawn::default();
-        return;
-    }
-    let now = time.elapsed_secs_f64();
-    let knocked_out_s = *respawn.knocked_out_s.get_or_insert(now);
-    let due = *respawn.due_s.insert(rebuild_due(
-        knocked_out_s,
-        target.xray.shown_since(),
-        target.xray.hold_from(),
-    ));
-    if now >= due {
-        target.rebuild();
-        *respawn = Respawn::default();
-    }
-}
-
-/// When a target knocked out at `knocked_out_s` is rebuilt: [`REBUILD_BEAT_S`] past the hold beat
-/// (corner time `hold_from`, [`XRayRelease::hold_from`]) of the look's replay of the record on
-/// show, first shown at `shown_since` — taken as shown at the knockout when it showed before it
-/// (an earlier shot's) or none shows (the look off). Virtual seconds, the look's clock in
-/// `Update`.
-fn rebuild_due(knocked_out_s: f64, shown_since: Option<f64>, hold_from: f32) -> f64 {
-    let shown = shown_since.map_or(knocked_out_s, |shown| shown.max(knocked_out_s));
-    XRayRelease::held_at(shown, hold_from) + REBUILD_BEAT_S
 }
 
 /// The [`ArmourOverlay`]'s two materials, one armour blue: lit + matte, so adjacent plates shade

@@ -372,31 +372,6 @@ pub(crate) struct XRayRelease<'w, 's> {
 }
 
 impl XRayRelease<'_, '_> {
-    /// `Time` seconds at which the record on show first showed, while the x-ray is built with one.
-    pub(crate) fn shown_since(&self) -> Option<f64> {
-        let built = self.state.as_ref()?.built.as_ref()?;
-        built.record?;
-        Some(built.since)
-    }
-
-    /// The corner time at which the record on show reaches the victim frame's hold beat, where the
-    /// x-ray's replay of it stops ([`stage::pace`]); the frame's minimum while none shows.
-    pub(crate) fn hold_from(&self) -> f32 {
-        self.state
-            .as_ref()
-            .and_then(|state| state.built.as_ref())
-            .filter(|built| built.record.is_some())
-            .map_or(CornerKind::Victim.min_hold_from(), |built| {
-                stage::pace(&built.plan, CornerKind::Victim).hold_from
-            })
-    }
-
-    /// `Time` seconds at which a record first shown at `shown` reaches its hold beat, at corner
-    /// time `hold_from` ([`Self::hold_from`]).
-    pub(crate) fn held_at(shown: f64, hold_from: f32) -> f64 {
-        shown + f64::from(hold_from)
-    }
-
     /// Restore every dressed handle and despawn every item, with `commands`, ahead of whatever
     /// despawns the subject in them; the next frame dresses afresh whatever subject stands.
     pub(crate) fn release(&mut self, commands: &mut Commands) {

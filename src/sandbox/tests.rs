@@ -1,18 +1,11 @@
-//! The armour sandbox's range, a tool for the game's damage model: what its gun fires, when its
-//! knocked-out target is rebuilt, which shots it draws, its armour overlay, and its own cameras
-//! and render layers beside the channels.
-
-use std::time::Duration;
+//! The armour sandbox's range, a tool for the game's damage model: what its gun fires, which shots
+//! it draws, its armour overlay, and its own cameras and render layers beside the channels.
 
 use bevy::asset::AssetPlugin;
-use bevy::ecs::system::RunSystemOnce;
-use bevy::time::TimeUpdateStrategy;
-use bevy::world_serialization::WorldAsset;
 
 use super::*;
 use crate::ballistics::{CrossingEnd, VolumeCrossing};
 use crate::command::ButtonBinding;
-use crate::damage::KnockoutReason;
 
 /// The fields of a fired shell the range decides.
 #[derive(Debug, PartialEq)]
@@ -193,137 +186,6 @@ fn the_range_fires_one_round_per_tick() {
         .map(|shell| shell.shot.map(|shot| shot.fire_tick))
         .collect();
     assert_eq!(ticks, vec![Some(3), Some(4)]);
-}
-
-/// One frame of virtual time: under the virtual clock's maximum step, so each update advances it
-/// by exactly this.
-const STEP: Duration = Duration::from_millis(100);
-
-/// The rebuild rule alone, on a manual clock, the look not mounted; the asset server loads the
-/// presentation it hands the next target.
-fn respawn() -> App {
-    let mut app = App::new();
-    app.add_plugins((MinimalPlugins, AssetPlugin::default()))
-        .init_asset::<WorldAsset>()
-        .init_asset::<spec::TankSpec>()
-        .insert_resource(TimeUpdateStrategy::ManualDuration(STEP))
-        .init_resource::<TargetLife>()
-        .init_resource::<Respawn>()
-        .add_systems(Update, respawn_target);
-    app
-}
-
-/// The x-ray's hold beat as `app` reads it: the victim frame's minimum, the look not mounted.
-fn hold_from(app: &mut App) -> f32 {
-    app.world_mut()
-        .run_system_once(|xray: XRayRelease| xray.hold_from())
-        .unwrap()
-}
-
-fn now_s(app: &App) -> f64 {
-    app.world().resource::<Time<Virtual>>().elapsed_secs_f64()
-}
-
-fn knocked_out() -> TankKnockedOut {
-    TankKnockedOut {
-        reason: KnockoutReason::CrewLoss,
-    }
-}
-
-/// A knocked-out target stands until the look has replayed the shot that knocked it out to its
-/// hold beat and held it [`REBUILD_BEAT_S`]: timed from the record's first showing when it showed
-/// at or after the knockout, from the knockout when the record on show is an earlier shot's (the
-/// knockout's not yet shown) or none shows (the look off). The kill cam stands aside for the
-/// range's shooter, so the look's replay is where a player reads the knockout; a rebuild inside it
-/// cuts it short.
-#[test]
-fn the_rebuild_waits_out_the_looks_replay_of_the_knockout() {
-    // Fixture data: a knockout at 10 s, the knockout's record first shown 0.4 s after it and
-    // reaching its hold beat 2.5 s into its replay.
-    let knocked_out_s = 10.0;
-    let shown_s = knocked_out_s + 0.4;
-    let hold_from = 2.5;
-    assert!(
-        XRayRelease::held_at(knocked_out_s, hold_from) > knocked_out_s,
-        "the hold beat comes after the first showing"
-    );
-    let from_knockout = XRayRelease::held_at(knocked_out_s, hold_from) + REBUILD_BEAT_S;
-    assert_eq!(
-        rebuild_due(knocked_out_s, None, hold_from),
-        from_knockout,
-        "the look off"
-    );
-    assert_eq!(
-        rebuild_due(knocked_out_s, Some(knocked_out_s - 3.0), hold_from),
-        from_knockout,
-        "an earlier shot's record on show"
-    );
-    assert_eq!(
-        rebuild_due(knocked_out_s, Some(shown_s), hold_from),
-        shown_s + f64::from(hold_from) + REBUILD_BEAT_S,
-        "the knockout's record on show, held at its own hold beat"
-    );
-}
-
-/// A knocked-out target stands until [`rebuild_due`], then goes and the next life of the target is
-/// pending.
-#[test]
-fn a_knocked_out_target_is_rebuilt_once_due() {
-    let mut app = respawn();
-    let tank = app.world_mut().spawn((Tank, knocked_out())).id();
-    app.update();
-    let respawn_s = app.world().resource::<Respawn>();
-    let knocked_out_s = respawn_s.knocked_out_s.expect("the knockout is seen");
-    assert_eq!(knocked_out_s, now_s(&app));
-    let due = respawn_s
-        .due_s
-        .expect("a knocked-out target is due a rebuild");
-    assert_eq!(due, rebuild_due(knocked_out_s, None, hold_from(&mut app)));
-    loop {
-        app.update();
-        if now_s(&app) >= due {
-            break;
-        }
-        assert!(app.world().get_entity(tank).is_ok(), "rebuilt early");
-        assert!(!app.world().contains_resource::<PendingTarget>());
-    }
-    assert!(app.world().get_entity(tank).is_err(), "the target stands");
-    assert!(app.world().contains_resource::<PendingTarget>());
-    assert_eq!(app.world().resource::<TargetLife>().0, 1);
-    let respawn_s = app.world().resource::<Respawn>();
-    assert_eq!((respawn_s.knocked_out_s, respawn_s.due_s), (None, None));
-}
-
-/// Clearing the knockout (`C`) cancels the rebuild, and a later knockout waits the whole time again
-/// rather than inheriting the cancelled one's.
-#[test]
-fn clearing_the_knockout_cancels_the_rebuild() {
-    let mut app = respawn();
-    let wait = rebuild_due(0.0, None, hold_from(&mut app));
-    let tank = app.world_mut().spawn((Tank, knocked_out())).id();
-    app.update();
-    app.world_mut().entity_mut(tank).remove::<TankKnockedOut>();
-    app.update();
-    assert_eq!(app.world().resource::<Respawn>().due_s, None);
-    let until = now_s(&app) + 2.0 * wait;
-    while now_s(&app) < until {
-        app.update();
-    }
-    assert!(
-        app.world().get_entity(tank).is_ok(),
-        "a cleared target is rebuilt"
-    );
-    assert_eq!(app.world().resource::<TargetLife>().0, 0);
-
-    app.world_mut().entity_mut(tank).insert(knocked_out());
-    app.update();
-    let due = app
-        .world()
-        .resource::<Respawn>()
-        .due_s
-        .expect("a fresh knockout is due a rebuild");
-    assert!((due - now_s(&app) - wait).abs() < 1e-9);
-    assert!(app.world().get_entity(tank).is_ok());
 }
 
 /// A shot met a tank when its log bounced off, crossed or ran a line through a volume of a tank,

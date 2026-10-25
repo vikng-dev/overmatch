@@ -1578,9 +1578,8 @@ mod tests {
 
     /// A composition about to despawn the subject lets go of it: every dressed mesh back in exactly
     /// the material it wore, nothing of the x-ray left and no record on show; the subject still
-    /// standing, the next frame dresses it afresh. Before the release, the record's first showing
-    /// is the x-ray's own clock. The armour sandbox's rebuild releases ahead of despawning its
-    /// target, and times the rebuild from that first showing.
+    /// standing, the next frame dresses it afresh. The armour sandbox's rebuild releases ahead of
+    /// despawning its target.
     #[test]
     fn a_release_restores_the_subject_exactly() {
         use bevy::ecs::system::RunSystemOnce;
@@ -1595,14 +1594,8 @@ mod tests {
         receive(&mut app, shot, &vocabulary);
         press_x(&mut app);
         run(&mut app, 0.2);
-        let shown = |app: &mut App| {
-            app.world_mut()
-                .run_system_once(|release: XRayRelease| release.shown_since())
-                .unwrap()
-        };
-        let since = app.world().resource::<xray::XRayState>().since();
-        assert!(since.is_some());
-        assert_eq!(shown(&mut app), since);
+        let since = |app: &App| app.world().resource::<xray::XRayState>().since();
+        assert!(since(&app).is_some());
         app.world_mut()
             .run_system_once(|mut release: XRayRelease, mut commands: Commands| {
                 release.release(&mut commands);
@@ -1621,7 +1614,7 @@ mod tests {
             );
             assert!(!entity.contains::<MeshMaterial3d<LookMaterial>>());
         }
-        assert_eq!(shown(&mut app), None);
+        assert_eq!(since(&app), None);
         run(&mut app, 0.2);
         for mesh in meshes {
             assert!(wears_the_look(&mut app, mesh), "dressed afresh: {mesh:?}");
