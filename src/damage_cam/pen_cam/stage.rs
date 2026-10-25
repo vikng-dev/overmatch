@@ -41,9 +41,9 @@ use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldInstanceReady};
 
-use super::field;
 use super::look::{self, FieldPrint, Footprint, Layer, LookMaterial, MaskSet, Masks};
 use super::material::{GlowMaterial, OutlineMaterial, SliceCut, SliceMaterial, SliceParams};
+use super::picture::PictureJobs;
 use super::plan::{BoxPlan, BurstPlan, Plan, Reach};
 use super::potency::Potency;
 use super::timeline::{self, CornerKind};
@@ -219,8 +219,8 @@ pub struct Stage {
     masks: MaskSet,
     /// The round's own material, which a burst's pieces wear ([`shell_material`]).
     round_material: Handle<StandardMaterial>,
-    /// The built record's field maps ([`field::atlas`]), which its volume and its painting read;
-    /// `None` where it draws no field.
+    /// The built record's depth pictures ([`super::picture::Pictures::image`]), which its volume
+    /// and its painting read; `None` where it draws no field.
     atlas: Option<Handle<Image>>,
     /// The materials of the tank's component meshes the built frame paints the fields on
     /// ([`look::Footprint::of_mesh`]); the state fills are painted beside them ([`Playing::fill`]).
@@ -457,7 +457,11 @@ pub fn rebuild(
     mut outlines: ResMut<Assets<OutlineMaterial>>,
     standard: Res<Assets<StandardMaterial>>,
     mut slices: ResMut<Assets<SliceMaterial>>,
-    (mut looks, mut images): (ResMut<Assets<LookMaterial>>, ResMut<Assets<Image>>),
+    (mut looks, mut images, mut jobs): (
+        ResMut<Assets<LookMaterial>>,
+        ResMut<Assets<Image>>,
+        ResMut<PictureJobs>,
+    ),
     masks: Res<Masks>,
 ) {
     let key = corner.showing.map(|showing| StageKey {
@@ -618,6 +622,7 @@ pub fn rebuild(
         LookCtx {
             looks: &mut looks,
             images: &mut images,
+            jobs: &mut jobs,
             masks: &masks,
         },
         &stage.round_material,
@@ -663,10 +668,12 @@ pub(super) fn round_copies(
     }
 }
 
-/// What drawing a record in the base look needs.
+/// What drawing a record in the base look needs: the material and image stores, the depth
+/// pictures waiting to be rendered, and the viewer's masks.
 pub struct LookCtx<'a> {
     pub looks: &'a mut Assets<LookMaterial>,
     pub images: &'a mut Assets<Image>,
+    pub jobs: &'a mut PictureJobs,
     pub masks: &'a MaskSet,
 }
 
@@ -677,9 +684,10 @@ pub struct LookCtx<'a> {
 /// mesh. `clip` is the slice plane (unit normal toward the eye, a point on it) the fields and the
 /// pieces are cut by. The pieces wear `round_material`, the round's own ([`shell_material`]).
 /// Everything spawned carries `tag` — its owner's marker and the channel it draws on — and is
-/// hidden until [`Playing`] places it. Returns the atlas of the record's field maps
-/// ([`Plan::maps`], [`field::atlas`]) its volume and the state fills' painting read, which the
-/// painted component meshes are to read too; `None` where the frame draws no field.
+/// hidden until [`Playing`] places it. Returns the atlas of the record's depth pictures
+/// ([`Plan::pictures`], [`super::picture::Pictures::image`]) its volume and the state fills'
+/// painting read, which the painted component meshes are to read too; `None` where the frame
+/// draws no field.
 #[expect(
     clippy::too_many_arguments,
     reason = "draws one plan: the spawn sinks, the plan and its frame, the parent and clip, the components, the look, the round's material and the owner's tag are separate inputs"
@@ -787,16 +795,15 @@ pub fn spawn_glass(
         );
     }
 
-    // The fields: their maps in one atlas, and one volume on the box about their reach, cut by
-    // the slice plane in the slice.
-    let maps = plan.maps();
+    // The fields: their depth pictures in one atlas, and one volume on the box about their reach,
+    // cut by the slice plane in the slice.
     let mut atlas = None;
     if kind != CornerKind::Ricochet
-        && let Some((lo, hi)) = look::field_bounds(&plan.cones, maps)
+        && let Some((lo, hi)) = look::field_bounds(&plan.cones)
+        && let Some(pictures) = plan.pictures().image(look_ctx.images, look_ctx.jobs)
     {
-        let maps = look_ctx.images.add(field::atlas(maps));
-        atlas = Some(maps.clone());
-        let mut material = look::volume(&Potency::shipped(), look_ctx.masks, kind, clip, maps);
+        atlas = Some(pictures.clone());
+        let mut material = look::volume(&Potency::shipped(), look_ctx.masks, kind, clip, pictures);
         material.set_fade(0.0);
         commands.spawn((
             Mesh3d(meshes.add(Cuboid::from_corners(lo, hi))),
@@ -851,7 +858,7 @@ pub fn spawn_glass(
             .map_or(Vec3::ZERO, |aabb| Vec3::from(aabb.center));
         let mut outline =
             OutlineMaterial::new(timeline::STATE_RED.into(), look::STATE_OUTLINE_PX, center);
-        fill.field_map = atlas.clone();
+        fill.pictures = atlas.clone();
         fill.set_fade(0.0);
         outline.set_fade(0.0);
         let tint = || {
@@ -1321,9 +1328,9 @@ impl<'a> Playing<'a> {
         visibility.set_if_neq(Visibility::Inherited);
     }
 
-    /// Every field in world space under the record frame `hull`: its origin, its map's frame and
-    /// zoom, its strength and law, and its front run out from the origin, or under reduce motion
-    /// its map's longest reach once it is thrown and negative before. The volume
+    /// Every field in world space under the record frame `hull`: its origin, its picture's frame,
+    /// pitch and faces, its strength and law, and its front run out from the origin, or under
+    /// reduce motion its longest reach once it is thrown and negative before. The volume
     /// ([`Self::fields`]) and the painting ([`look::paint_fields`], [`Self::fill`]) read the same.
     pub(super) fn prints(&self, hull: &GlobalTransform) -> Vec<FieldPrint> {
         let (plan, kind, c) = (self.plan, self.kind, self.c);
@@ -1334,13 +1341,13 @@ impl<'a> Playing<'a> {
         };
         plan.cones
             .iter()
-            .zip(plan.maps().iter())
+            .zip(&plan.pictures().fields)
             .enumerate()
-            .map(|(index, (cone, map))| {
-                let scale = (linear * map.axis).length();
+            .map(|(index, (cone, picture))| {
+                let scale = (linear * picture.axis).length();
                 let front = if self.reduce {
                     if c >= cone_start(plan, kind, index, true) {
-                        map.longest
+                        picture.longest
                     } else {
                         -1.0
                     }
@@ -1349,15 +1356,16 @@ impl<'a> Playing<'a> {
                 };
                 FieldPrint {
                     origin: hull.transform_point(cone.origin),
-                    axis: unit(map.axis),
-                    u: unit(map.u),
-                    v: unit(map.v),
-                    half_angle: map.half_angle,
-                    inner: map.inner,
-                    zoom: map.zoom,
+                    axis: unit(picture.axis),
+                    u: unit(picture.u),
+                    v: unit(picture.v),
+                    half_angle: picture.half_angle,
+                    inner: picture.inner,
+                    pitch: picture.pitch,
+                    faces: picture.lanes(),
                     front: front * scale,
                     scale,
-                    longest: map.longest,
+                    longest: picture.longest,
                     strength: cone.strength,
                     law: look::law_lane(cone.field, cone.strata),
                 }
@@ -1598,6 +1606,34 @@ pub fn animate(
         *eye = want;
     }
     *projection = want_projection;
+}
+
+/// The views the corner draws `plan`'s fields from, each a camera's pose and lens in the record
+/// frame: the along-shot eye at every one of [`ORBIT_SAMPLES`] spins of a full turn (the glass,
+/// victim and damaged frames, the kill cam's lesson among them), and in a record shown in the
+/// slice the slice's eye in both its lenses. The fields' pictures take their pitch from these
+/// ([`super::picture::pitch_of`]); the viewer's drag, the x-ray and the gunner's sight see the
+/// fields at the pitch these give.
+pub(super) fn field_sightings(plan: &Plan) -> Vec<(Transform, Projection)> {
+    let far = shot_distance(plan, Vec2::ZERO);
+    let turn = std::f32::consts::TAU / ORBIT_SAMPLES as f32;
+    let mut sightings: Vec<_> = (0..ORBIT_SAMPLES)
+        .map(|k| along_shot(plan, Vec2::ZERO, turn * k as f32, far))
+        .collect();
+    if plan.kind == CornerKind::Slice {
+        let stage = Stage {
+            plane: Some(slice_plane(plan)),
+            ..default()
+        };
+        for slice_ortho in [true, false] {
+            let knobs = Knobs {
+                slice_ortho,
+                ..default()
+            };
+            sightings.push(framing(plan, CornerKind::Slice, 0.0, &knobs, &stage));
+        }
+    }
+    sightings
 }
 
 /// The corner camera for frame `kind` at corner time `c`.
@@ -3071,6 +3107,7 @@ mod tests {
             .insert_resource(Assets::<SliceMaterial>::default())
             .insert_resource(Assets::<LookMaterial>::default())
             .insert_resource(Assets::<Image>::default())
+            .init_resource::<PictureJobs>()
             .init_resource::<Masks>()
             .add_systems(Update, rebuild);
         app.update();
@@ -3124,8 +3161,9 @@ mod tests {
 
     /// Every record's fields as the real [`rebuild`] draws them, in every frame, the corner's and
     /// the kill cam's lesson on the world alike: one volume, blended, on a box that holds every
-    /// field out to its longest reach, reading the record's field maps from their atlas
-    /// ([`field::atlas`]); its bands parted at the shipped thresholds and coloured from
+    /// field out to its longest reach, reading the record's depth pictures from their one atlas
+    /// ([`super::super::picture::Pictures::image`]); its bands parted at the shipped thresholds
+    /// and coloured from
     /// the band law alone — the knockout band the field teal, the reduced band the deep teal, both
     /// more blue than red and off the state scale, the knockout band the brighter — at one opacity
     /// across every record, so the colour says the band of the fields' summed intensity and
@@ -3154,7 +3192,6 @@ mod tests {
             if record.plan.cones.is_empty() || kind == CornerKind::Ricochet {
                 continue;
             }
-            let atlas = field::atlas(record.plan.maps()).data;
             for (kind, surface) in [
                 (kind, super::super::Surface::Corner),
                 (CornerKind::Glass, super::super::Surface::World),
@@ -3170,8 +3207,13 @@ mod tests {
                 let slice = kind == CornerKind::Slice;
                 let cut = world.resource::<Stage>().plane;
                 assert_eq!(cut.is_some(), slice, "{} {surface:?}", record.stem);
-                let maps = record.plan.maps();
-                assert_eq!(maps.len(), record.plan.cones.len(), "{}", record.stem);
+                let pictures = record.plan.pictures();
+                assert_eq!(
+                    pictures.fields.len(),
+                    record.plan.cones.len(),
+                    "{}",
+                    record.stem
+                );
                 let looks = world.resource::<Assets<LookMaterial>>();
                 let meshes = world.resource::<Assets<Mesh>>();
                 let images = world.resource::<Assets<Image>>();
@@ -3182,8 +3224,8 @@ mod tests {
                         pose.transform_point(Vec3::from(aabb.min())),
                         pose.transform_point(Vec3::from(aabb.max())),
                     );
-                    for (cone, map) in record.plan.cones.iter().zip(maps.iter()) {
-                        let reach = Vec3::splat(map.longest);
+                    for cone in &record.plan.cones {
+                        let reach = Vec3::splat(cone.max_reach());
                         assert!(
                             (cone.origin - reach).cmpge(lo - 1e-4).all()
                                 && (cone.origin + reach).cmple(hi + 1e-4).all(),
@@ -3197,9 +3239,11 @@ mod tests {
                         "{}",
                         record.stem
                     );
-                    let read = m.field_map.as_ref().and_then(|map| images.get(map));
+                    let read = m.pictures.as_ref().and_then(|atlas| images.get(atlas));
                     assert!(
-                        read.is_some_and(|image| image.data == atlas),
+                        read.is_some_and(|image| image.size() == pictures.size
+                            && image.texture_descriptor.format
+                                == bevy::render::render_resource::TextureFormat::R32Float),
                         "{} {surface:?}: the volume reads another atlas",
                         record.stem
                     );
@@ -3238,12 +3282,12 @@ mod tests {
     /// [`animate`] has played a record to its hold, every look material on a component's surface
     /// (its mesh's in the glass and the victim's frame, its state fill there and in the outside
     /// view) carries its role's painting lane ([`Footprint::of`]: a crew station a witness, every
-    /// other component hard) and the fields' lanes, read from the volume's own maps; every other
+    /// other component hard) and the fields' lanes, read from the volume's own pictures; every other
     /// look material on the stage (the hull glass, a mesh no component claims, the masks')
-    /// carries no painting, no field lane and no map. Every record that throws a field, in each
+    /// carries no painting, no field lane and no picture. Every record that throws a field, in each
     /// frame that paints, with a body mesh of each body tier beside the components. The x-ray
     /// relies on it: painted hull glass covers the tank in the bands; a crew station painted hard
-    /// shows bare faces inside the field; a painted surface off the volume's maps draws a field the
+    /// shows bare faces inside the field; a painted surface off the volume's pictures draws a field the
     /// volume does not.
     #[test]
     fn the_fields_are_painted_on_the_components_alone() {
@@ -3312,20 +3356,20 @@ mod tests {
                 on_stage.sort_unstable();
                 on_stage.dedup();
                 let looks = world.resource::<Assets<LookMaterial>>();
-                let maps = looks.get(volume).and_then(|m| {
+                let atlas = looks.get(volume).and_then(|m| {
                     (m.params.fields.x > 0.0)
-                        .then(|| m.field_map.clone())
+                        .then(|| m.pictures.clone())
                         .flatten()
                 });
-                assert!(maps.is_some(), "{at}: the volume holds no field");
+                assert!(atlas.is_some(), "{at}: the volume holds no field");
                 for id in on_stage {
                     let m = looks.get(id).expect("a worn material is in the store");
                     match rule.get(&id).copied().flatten() {
                         Some(want) => {
                             assert_eq!(m.params.foot, want.lane(), "{at}: the rule");
                             assert!(
-                                m.params.fields.x > 0.0 && m.field_map == maps,
-                                "{at}: a component's surface reads no field or another's maps"
+                                m.params.fields.x > 0.0 && m.pictures == atlas,
+                                "{at}: a component's surface reads no field or another's pictures"
                             );
                             if !rules.contains(&want) {
                                 rules.push(want);
@@ -3336,7 +3380,7 @@ mod tests {
                             let reads = m.is_painted()
                                 || m.params.fields.x > 0.0
                                 || m.params.prints.iter().any(|lane| *lane != Vec4::ZERO)
-                                || m.field_map.is_some();
+                                || m.pictures.is_some();
                             assert!(
                                 !reads,
                                 "{at}: a surface off the components reads the fields"

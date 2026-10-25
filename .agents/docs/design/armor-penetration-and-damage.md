@@ -337,31 +337,36 @@ window's ends. At a stratum's centre the window is the stratum and the strength 
 continuously. The law's density read at a stratum's centre (`FieldDescriptor::weight_at`) is not
 the record's `f_k`: it lies up to 3.1·10⁻³ `S` off it (MEASURED), so the look takes the mean.
 
-The pen cam reads each field's reach from a **direction map** (`src/damage_cam/pen_cam/field.rs`,
-`Map`): 256² texels, octahedral about the field's axis and zoomed to its support, so the sphere
-has no pole and no rim, each texel holding the reach (record m) the record's directions give
-along it. The reach interpolates the directions about the texel where they ended alike (inside
-one hard body, past one, or free). Where they ended
-unlike, a shadow's edge lies between them: a ray cast against the struck tank's hard bodies,
-posed for the record, picks the directions that ended as the texel's own ray would, so the edge
-is the body's silhouette, never a curve interpolated across it. At a record direction the reach
-is the record's, and a direction the record says passed a body keeps its reach. A record's maps
-share one atlas, baked once per record. A point reads its field from the four texels about its
-direction, each testing the point against its own reach, the results weighted bilinearly: a reach
-is never interpolated across a shadow's edge, so behind a body the field reads the same share at
-every depth out to what lies beyond it, and none once every texel about the direction is the
-body's. A texel's reach stands for its whole cell of directions, and a surface the field stops on
-lies a little before or past it across the cell, so each texel also counts a point within a
-**reach tolerance** past its own reach, never past the farthest of the four: twice the texel's
-diagonal angle times `r` (the angle DERIVED from the map's zoom, the factor TUNED). A surface the
-field stops on reads inside to about 63° off square where the octahedral turn is steepest and 80°
-at a cap's axis (DERIVED), with no texel-by-texel flips; a point deeper behind a body than
-the tolerance keeps its shadow, and a shadow's edge on a second body moves by at most one texel
-cell, only where that body lies within the tolerance of the one casting it (DERIVED). The cells
-themselves stay: where the four texels' results differ, across a shadow's edge, the weighted sum,
-and so a band's edge, follows the bilinear weights cell by cell, a
-stair-step a texel cell wide at close zoom that no tolerance moves (MEASURED: the same stair-step
-at 8 diagonals and at the farthest of the four). The fields draw as **one volume** (`assets/shaders/pen_cam_look.wgsl`, `volume`) on the
+The pen cam reads each field's reach from a **depth picture**
+(`src/damage_cam/pen_cam/picture.rs`): the struck tank's hard bodies, posed for the record, drawn
+on the GPU from the field's origin once per record, each texel holding the radial distance (record
+m) to the nearest face its direction meets head-on, so a line from inside a body leaves it; a
+direction that meets no body ends on the world-axis box about them. Crew stations are witnesses
+and never cast (ADR-0040). A field's colour is the law's intensity wherever its picture says it
+reaches: the law × the depth picture. The picture is the cube about the field's axis, each face
+cropped to the support, and a record's faces share one atlas, which the corner's frames and the
+x-ray read alike. A field's **pitch** (rad a texel) is the least angle one pixel of a 4K corner
+spans seen from its origin, over every point of its recorded directions the corner's along-shot
+eye sees at any spin, and the slice's in both lenses where the record is shown in the slice: so a
+texel spans at most a pixel of a 4K corner wherever those frames draw the field (DERIVED); the
+viewer's drag, the x-ray and the gunner's sight see the field at that pitch. The shipped records'
+finest is 5.5·10⁻⁴ rad (MEASURED). Over every recorded direction of every shipped record, the
+picture ends where the record's direction does to within 10⁻⁴ m (MEASURED: 1,728 directions in 21
+fields): a direction stops at the first hard body it enters. **The record wins**: a field whose
+recorded directions all ended at its origin (s16's burst at rest inside armour) is drawn nowhere,
+whatever its picture would hold. A point reads its field from the four texels about its
+direction, each testing the point against its own reach, the results weighted bilinearly: a
+reach is never interpolated across a shadow's edge, so behind a body the field reads the same
+share at every depth out to what lies beyond it, and none once every texel about the direction
+is the body's. A texel's reach stands for its whole cell of directions, and a surface the field
+stops on lies a little before or past it across the cell, so each texel also counts a point
+within a **reach tolerance** past its own reach, never past the farthest of the four: twice the
+diagonal of a texel at the pitch, times `r` (`REACH_TOLERANCE_DIAGONALS`; the angle DERIVED from
+the pitch, the factor TUNED). A surface the field stops on reads inside to at least 63° off square
+(DERIVED, tan⁻¹ 2), and a point deeper behind a body than the tolerance keeps its shadow. Where the
+four texels' results differ, across a shadow's edge, a band's edge follows the bilinear weights
+texel by texel: a stair-step at most a pixel of a 4K corner wide where the along-shot frames draw
+it (DERIVED from the pitch). The fields draw as **one volume** (`assets/shaders/pen_cam_look.wgsl`, `volume`) on the
 back faces of a box about every field's reach: each eye ray is cut at the ends of every field's
 stretch along it, each piece is sampled no farther apart than the smallest ball across in 48
 steps among the fields whose stretches hold it, so every field is sampled at its own size and a
@@ -389,7 +394,9 @@ detail, behind everything else. The scene, the components with their state fills
 round's own model and the fields' volume, is ordered by depth among itself: a component or the
 round in front of a field hides it, a field in front of either blends over it. The fields'
 painting lies on a component's own surface (its mesh's, its state fill's), so it is ordered as the
-component is. The round keeps its own materials and is drawn whole, in the slice too. Each layer is one surface deep. Every depth the
+component is. The round keeps its own materials and is drawn whole, in the slice too. The fields' depth pictures
+are drawn off screen, once per record before a frame first reads them, and take no part in the
+order. Each layer is one surface deep. Every depth the
 order compares is the eye depth, one convention in both projections: the distance from the eye in
 perspective, the distance along the camera's forward in orthographic. The outside view (a damaged
 tank seen whole) keeps the body in front and the volume unbounded. The trail and the rings are
@@ -542,7 +549,7 @@ ring's path runs on with the nose piece's line to its own end, its open air time
 speed. A struck tank's record stays open while a fuze that tank armed runs, so a burst past its last
 body lands in it. The wire round-trips the burst; its 256 directions add 0.3–2.1 KB to a message
 (MEASURED, `src/damage_cam/wire.rs`). The pen cam draws the burst field as it draws a plate cone
-(`src/damage_cam/pen_cam/field.rs`): thrown when the shell's nose reaches the burst point on the
+(`src/damage_cam/pen_cam/picture.rs`): thrown when the shell's nose reaches the burst point on the
 corner's clock, its front running out each direction's reach, over the law's support alone. The ring
 reads as a band about the line with nothing drawn inside its near edge; the ball as a cap ahead, or
 the whole sphere, closed with no seam. The ball's line ends at the burst point, where the shell

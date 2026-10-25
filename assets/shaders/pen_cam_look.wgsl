@@ -38,8 +38,9 @@
 // their summed intensity at opacity `foot.x`, each band's edge a pixel wide; never on the body's
 // surfaces. A hard component (`foot.z = 0`) is painted where a field meets it: a surface point
 // facing the field's origin, on its support, behind its front and lit within each texel's reach,
-// its tolerance and `foot.y` (m) past it (`map_at`). A crew station (`foot.z = 1`), a witness the field passes
-// through, is painted wherever the volume holds the field: no facing test and no slack.
+// its tolerance and `foot.y` (m) past it (`picture_at`). A crew station (`foot.z = 1`), a witness
+// the field passes through, is painted wherever the volume holds the field: no facing test and no
+// slack.
 //
 // In modes 0, 2 and 3, `mode.y = 1` discards what lies on `plane`'s normal side (the slice's cut);
 // the volume clips its march to the kept side.
@@ -56,18 +57,22 @@
 //
 // The bands (design doc §5, "Potency colour"; `potency::Band`): a point's intensity is the sum of
 // every field's there (`intensity`), a field's `e w m / r²`, `e` the emission its strength `S`
-// gives, `w` its law's weight along the point's direction (`law`) and `m` the share its map lights
-// at the point (`map_at`), where the point lies on its support (from its inner edge to its
-// half-angle off its axis) and within its front, and nothing elsewhere. Knockout at and above `bands.y` (`T_mid`), reduced from `bands.x`
-// (`T_floor`) up to it, nothing below. No lane the bands are read from carries a display gain.
+// gives, `w` its law's weight along the point's direction (`law`) and `m` the share its depth
+// picture lights at the point (`picture_at`), where the point lies on its support (from its inner
+// edge to its half-angle off its axis) and within its front, and nothing elsewhere. Knockout at
+// and above `bands.y` (`T_mid`), reduced from `bands.x` (`T_floor`) up to it, nothing below. No
+// lane the bands are read from carries a display gain.
 //
-// The maps (`field::Map`, `field::atlas`): field `f`'s, octahedral about its axis over the square
-// `[−zoom, zoom]²` of octahedral coordinates, `MAP_TEXELS`² texels with a one-texel gutter, in
-// tile `(f % 2, f / 2)` of `field_map`, each texel its reach (record m), loaded unfiltered: each
-// of the four texels about a direction tests the point against its own
-// reach, within `REACH_TOLERANCE_DIAGONALS` texel diagonals of turn times the point's distance
-// past it and never past the farthest of the four, and the results are weighted bilinearly
-// (`map_at`; `Map::lit` is the same read).
+// The depth pictures (`picture::Picture`, `picture::Pictures`; `pen_cam_picture.wgsl` renders
+// them): field `f`'s, the reach (record m) from its origin to the struck tank's hard bodies along
+// each direction of its support, on the cube about its axis (`face_of`), each face cropped to the
+// support at the field's pitch and placed in `pictures`, loaded unfiltered: each of the four
+// texels about a direction tests the point against its own reach, within
+// `REACH_TOLERANCE_DIAGONALS` texel diagonals (`√2` pitches) times the point's distance past it
+// and never past the farthest of the four, and the results are weighted bilinearly (`picture_at`;
+// `Picture::lit` is the same read). The record wins: a field whose recorded directions all ended
+// at its origin has no face and a longest reach of zero, and lights nothing, at its origin
+// included (`field_at`).
 //
 // Output: straight `rgb, a`.
 
@@ -108,28 +113,25 @@ struct LookParams {
     // x: the fields drawn.
     fields: vec4<f32>,
     // `FIELDS` fields of `PRINT_LANES` lanes: origin (world) and half-angle (rad); unit axis
-    // (world) and how far its front has run (m), negative before it is thrown; the map's `u`
-    // (world, unit) and the support's inner edge (rad, 0 on a cap and the sphere); the map's `v`
-    // (world, unit) and its zoom; the emission its strength `S` gives (`ρ S / Ω`, HP points per sr,
-    // world), the world's metres per record metre, and the longest reach (m); its law (`law`): the
-    // kind of its terms, their two numbers and its strata `N`.
-    prints: array<vec4<f32>, 24>,
+    // (world) and how far its front has run (m), negative before it is thrown; the picture's `u`
+    // (world, unit) and the support's inner edge (rad, 0 on a cap and the sphere); the picture's
+    // `v` (world, unit) and its pitch (rad a texel); the emission its strength `S` gives
+    // (`ρ S / Ω`, HP points per sr, world), the world's metres per record metre, and the longest
+    // reach (m); its law (`law`): the kind of its terms, their two numbers and its strata `N`; and
+    // the picture's six faces, two lanes each: the crop's tangent corner `x0, y1` and its size
+    // (texels), and its place in `pictures` (texels).
+    prints: array<vec4<f32>, 72>,
 }
 
 // `look::FIELDS` and the lanes a field takes.
 const FIELDS: i32 = 4;
-const PRINT_LANES: i32 = 6;
-// `field::MAP_SIDE` and `field::MAP_TEXELS`, the map's texels a side inside and with its gutter.
-const MAP_SIDE: f32 = 256.0;
-const MAP_TEXELS: f32 = 258.0;
+const PRINT_LANES: i32 = 18;
 // `look::VOLUME_STEPS`, the steps across a field's ball and the most along a piece of the march,
 // and `look::VOLUME_REFINE`, the halvings that place a threshold's crossing between two samples.
 const VOLUME_STEPS: i32 = 48;
 const VOLUME_REFINE: i32 = 8;
-// `field::OCTAHEDRAL_TURN`, the most a direction turns (rad) per unit of octahedral coordinate,
-// and `field::REACH_TOLERANCE_DIAGONALS`, how far past its own reach a texel counts a point: that
-// many texel diagonals of turn times the point's distance.
-const OCTAHEDRAL_TURN: f32 = 3.0;
+// `picture::REACH_TOLERANCE_DIAGONALS`, how far past its own reach a texel counts a point: that
+// many texel diagonals (`√2` pitches) times the point's distance.
 const REACH_TOLERANCE_DIAGONALS: f32 = 2.0;
 const HALF_PI: f32 = 1.57079633;
 const PI: f32 = 3.14159265;
@@ -138,7 +140,7 @@ const SQRT_2: f32 = 1.41421356;
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> look: LookParams;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var hull_mask: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var part_mask: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(3) var field_map: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(3) var pictures: texture_2d<f32>;
 
 struct LookVertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -193,46 +195,69 @@ fn eye_ray(p: vec3<f32>) -> vec3<f32> {
     return normalize(p - view.world_position);
 }
 
-fn sign_not_zero(v: vec2<f32>) -> vec2<f32> {
-    return select(vec2(-1.0), vec2(1.0), v >= vec2(0.0));
+// A direction on the cube about a field's axis: its face (`picture::FRAMES`) and its tangent there.
+struct OnFace {
+    face: i32,
+    t: vec2<f32>,
 }
 
-// The octahedral coordinate of unit `local` (z the axis): `field::octahedral`.
-fn octahedral(local: vec3<f32>) -> vec2<f32> {
-    let p = local / max(abs(local.x) + abs(local.y) + abs(local.z), 1e-12);
-    if p.z >= 0.0 {
-        return p.xy;
+// The face unit `local` (across `u` and `v`, along the axis) lies on, and its tangent there:
+// `picture::face_of`.
+fn face_of(local: vec3<f32>) -> OnFace {
+    let a = abs(local);
+    if a.z >= a.x && a.z >= a.y {
+        if local.z >= 0.0 {
+            return OnFace(0, vec2(local.x, -local.y) / a.z);
+        }
+        return OnFace(1, vec2(local.x, local.y) / a.z);
     }
-    return (vec2(1.0) - abs(p.yx)) * sign_not_zero(p.xy);
+    if a.x >= a.y {
+        if local.x >= 0.0 {
+            return OnFace(2, vec2(local.z, local.y) / a.x);
+        }
+        return OnFace(3, vec2(-local.z, local.y) / a.x);
+    }
+    if local.y >= 0.0 {
+        return OnFace(4, vec2(local.x, local.z) / a.y);
+    }
+    return OnFace(5, vec2(local.x, -local.z) / a.y);
 }
 
 // The share (0..1) of field `f` lit along unit direction `dir` (world) at `r` world m from its
-// origin, `scale` world m per record m: each of the four texels about the direction's map
-// coordinate, which the clamp holds inside the field's tile, lights where `r` lies within its own
-// reach, and not past it, and the four are weighted bilinearly. A texel's
-// reach counts out to its tolerance past it (`REACH_TOLERANCE_DIAGONALS` texel diagonals of turn
+// origin, `scale` world m per record m: on the direction's face of the field's picture
+// (`face_of`), each of the four texels about it in the face's crop, which the clamp holds inside
+// the crop, lights where `r` lies within its own reach, and the four are weighted bilinearly. A
+// texel's reach counts out to its tolerance past it (`REACH_TOLERANCE_DIAGONALS` texel diagonals
 // times `r`, never past the farthest of the four), and `slack` world m past that. A reach is
 // compared per texel and never interpolated, so a shadow's depth is a texel's own: across a
 // silhouette a point behind the blocker, past the tolerance, gets the open texels' share alone,
-// the same at every depth out to the wall. `Map::lit`.
-fn map_at(f: i32, dir: vec3<f32>, r: f32, scale: f32, slack: f32) -> f32 {
+// the same at every depth out to the wall. An empty face lights nothing. `Picture::lit`.
+fn picture_at(f: i32, dir: vec3<f32>, r: f32, scale: f32, slack: f32) -> f32 {
     let base = PRINT_LANES * f;
-    let frame_u = look.prints[base + 2].xyz;
     let frame_v = look.prints[base + 3];
-    let local = vec3(dot(dir, frame_u), dot(dir, frame_v.xyz), dot(dir, look.prints[base + 1].xyz));
-    let c = octahedral(local) / frame_v.w;
-    let g = clamp((c + 1.0) * 0.5 * MAP_SIDE + 0.5, vec2(0.0), vec2(MAP_TEXELS - 1.0));
-    let low = min(floor(g), vec2(MAP_TEXELS - 2.0));
-    let t = g - low;
-    let at = vec2<i32>(low) + vec2(f % 2, f / 2) * i32(MAP_TEXELS);
-    let t00 = textureLoad(field_map, at, 0).x;
-    let t10 = textureLoad(field_map, at + vec2(1, 0), 0).x;
-    let t01 = textureLoad(field_map, at + vec2(0, 1), 0).x;
-    let t11 = textureLoad(field_map, at + vec2(1, 1), 0).x;
+    let local = vec3(
+        dot(dir, look.prints[base + 2].xyz),
+        dot(dir, frame_v.xyz),
+        dot(dir, look.prints[base + 1].xyz),
+    );
+    let on = face_of(local);
+    let crop = look.prints[base + 6 + 2 * on.face];
+    let place = look.prints[base + 7 + 2 * on.face].xy;
+    if crop.z < 2.0 || crop.w < 2.0 {
+        return 0.0;
+    }
+    let pitch = frame_v.w;
+    let g = vec2(on.t.x - crop.x, crop.y - on.t.y) / pitch - 0.5;
+    let low = clamp(floor(g), vec2(0.0), crop.zw - 2.0);
+    let t = clamp(g - low, vec2(0.0), vec2(1.0));
+    let at = vec2<i32>(place + low);
+    let t00 = textureLoad(pictures, at, 0).x;
+    let t10 = textureLoad(pictures, at + vec2(1, 0), 0).x;
+    let t01 = textureLoad(pictures, at + vec2(0, 1), 0).x;
+    let t11 = textureLoad(pictures, at + vec2(1, 1), 0).x;
     let reach = vec4(t00, t10, t01, t11) * scale;
     let farthest = max(max(reach.x, reach.y), max(reach.z, reach.w));
-    let diagonal = OCTAHEDRAL_TURN * SQRT_2 * 2.0 * frame_v.w / MAP_SIDE;
-    let tolerance = REACH_TOLERANCE_DIAGONALS * diagonal * r;
+    let tolerance = REACH_TOLERANCE_DIAGONALS * SQRT_2 * pitch * r;
     let met = min(vec4(farthest), reach + vec4(tolerance)) + vec4(slack);
     let lit = select(vec4(0.0), vec4(1.0), vec4(r) <= met);
     return mix(mix(lit.x, lit.y, t.x), mix(lit.z, lit.w, t.x), t.y);
@@ -300,9 +325,10 @@ fn law(f: i32, dir: vec3<f32>) -> f32 {
 }
 
 // Field `f`'s intensity at world point `p` (HP points per m²): `e w m / r²` on its support and
-// within its front, `w` its law's weight along `p`'s direction (`law`) and `m` the share its map
-// lights at `p` (`map_at`), 0 elsewhere, past its longest reach included; at its origin, once
-// thrown, unbounded.
+// within its front, `w` its law's weight along `p`'s direction (`law`) and `m` the share its
+// picture lights at `p` (`picture_at`), 0 elsewhere, past its longest reach included; at its
+// origin, once thrown, unbounded, unless the record ended every direction of it there (its longest
+// reach zero): the record wins.
 fn field_at(f: i32, p: vec3<f32>) -> f32 {
     let base = PRINT_LANES * f;
     let at = look.prints[base];
@@ -311,7 +337,7 @@ fn field_at(f: i32, p: vec3<f32>) -> f32 {
     let d = p - at.xyz;
     let r = length(d);
     if r < 1e-5 {
-        return select(0.0, 1e30, along.w > 0.0);
+        return select(0.0, 1e30, along.w > 0.0 && scale.z > 0.0);
     }
     if r > min(along.w, scale.z) {
         return 0.0;
@@ -321,7 +347,7 @@ fn field_at(f: i32, p: vec3<f32>) -> f32 {
     if c > cos(look.prints[base + 2].w) || c < cos(at.w) {
         return 0.0;
     }
-    return map_at(f, dir, r, scale.y, 0.0) * law(f, dir) * scale.x / (r * r);
+    return picture_at(f, dir, r, scale.y, 0.0) * law(f, dir) * scale.x / (r * r);
 }
 
 // The fields' summed intensity at world point `p` (HP points per m²): doses add, so the bands
@@ -353,9 +379,8 @@ fn inside(s: f32) -> f32 {
 // the presence over the pixel of the floor (x: the reduced and the knockout bands together) and
 // of the knockout band (y). A field covers the point where it lies on the field's support and
 // behind its front and, under the hard rule (`foot.z = 0`), faces the field's origin, each edge a
-// pixel wide, at its law's weight there (`law`) lit as its map lights it `foot.y` past each
-// texel's reach (`map_at`);
-// the witness rule (`foot.z = 1`) asks no facing. The covered fields' intensities add, and each
+// pixel wide, at its law's weight there (`law`) lit as its picture lights it `foot.y` past each
+// texel's reach (`picture_at`); the witness rule (`foot.z = 1`) asks no facing. The covered fields' intensities add, and each
 // band's edge is a smoothstep a pixel wide in `log2` of the sum (`soft_step`). `look::painting`.
 // Called in uniform control flow: it takes derivatives.
 fn footprint(p: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
@@ -380,7 +405,7 @@ fn footprint(p: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
         let hole = select(1e6, r * (theta - inner), inner > 0.0);
         let facing = select(dot(n, -dir), 1.0, look.foot.z > 0.5);
         let cover = inside(along.w - r) * inside(rim) * inside(hole) * inside(facing);
-        let lit = map_at(f, dir, r, scale.y, look.foot.y) * law(f, dir);
+        let lit = picture_at(f, dir, r, scale.y, look.foot.y) * law(f, dir);
         sum = sum + cover * lit * scale.x / (r * r);
     }
     // Below a 4096th of the floor the sum is nothing: its log stays finite for the derivative.

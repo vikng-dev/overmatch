@@ -22,12 +22,12 @@
 //! places, and the record's few derived quantities are named in [`plan`].
 
 mod demo;
-mod field;
 pub mod game;
 mod hud;
 mod killcam;
 mod look;
 mod material;
+mod picture;
 mod plan;
 pub(crate) mod potency;
 mod stage;
@@ -135,7 +135,8 @@ pub struct CornerRig;
 #[derive(Component, Default, Clone, Copy)]
 pub struct WorldViewer;
 
-/// The materials the stage draws with.
+/// The materials the stage draws with, and the render world's pass that draws the fields' depth
+/// pictures they read.
 pub(super) fn materials(app: &mut App) {
     app.add_plugins((
         MaterialPlugin::<material::GlowMaterial>::default(),
@@ -143,9 +144,11 @@ pub(super) fn materials(app: &mut App) {
         MaterialPlugin::<material::SliceMaterial>::default(),
         MaterialPlugin::<look::LookMaterial>::default(),
     ));
+    picture::render(app);
 }
 
-/// The presentation's resources and the mask cameras' following, which a driver mounts once.
+/// The presentation's resources, the depth pictures' jobs and the mask cameras' following, which a
+/// driver mounts once.
 ///
 /// The mask cameras copy their viewer's lens and pose ([`look::follow_lens`], [`look::follow_pose`]),
 /// so they run after every writer of either. The corner's viewer, the inset camera, is written
@@ -177,6 +180,7 @@ pub(super) fn presentation(app: &mut App) {
                     .before(VisibilitySystems::UpdateFrusta),
             ),
         );
+    picture::jobs(app);
     stage::plugin(app);
 }
 

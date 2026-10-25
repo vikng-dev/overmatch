@@ -54,6 +54,7 @@ use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldInstanceReady};
 use super::super::Knobs;
 use super::super::look::{self, Footprint, Layer, LookMaterial, MaskNeed, MaskSet, Masks};
 use super::super::material::{GlowMaterial, OutlineMaterial};
+use super::super::picture::PictureJobs;
 use super::super::plan::{BoxPlan, Plan};
 use super::super::stage::{
     self, BoxTint, FieldVolume, LineSeg, LookCtx, MarkItem, Piece, Playing, SHELL_SCENE,
@@ -310,7 +311,7 @@ struct Built {
     /// One material per tier and painting rule the tank's meshes wear (a component's mesh paints
     /// by its component's role, [`Footprint::of_mesh`]), and the layer each is masked in.
     tiers: HashMap<(Tier, Option<Footprint>), (Handle<LookMaterial>, Layer)>,
-    /// The atlas of the record's field maps its volume reads, which the painted materials read
+    /// The atlas of the record's depth pictures its volume reads, which the painted materials read
     /// too ([`spawn_glass`]); `None` without a field.
     atlas: Option<Handle<Image>>,
     /// The masks' material, on every mask copy.
@@ -401,6 +402,7 @@ pub(super) struct Stores<'w> {
     outlines: ResMut<'w, Assets<OutlineMaterial>>,
     looks: ResMut<'w, Assets<LookMaterial>>,
     images: ResMut<'w, Assets<Image>>,
+    jobs: ResMut<'w, PictureJobs>,
 }
 
 /// What the x-ray is drawn through: the player's view mode, the kill cam and the player's camera.
@@ -559,7 +561,7 @@ pub(super) fn build(
         .unwrap_or_default();
     let mut plan = plan(report, &built.live, &asset.shapes(&servo_deg));
     if same_record {
-        plan.share_maps(&built.plan);
+        plan.share_pictures(&built.plan);
     }
     let round_material = if plan
         .burst
@@ -592,6 +594,7 @@ pub(super) fn build(
         LookCtx {
             looks: &mut stores.looks,
             images: &mut stores.images,
+            jobs: &mut stores.jobs,
             masks: set,
         },
         &round_material,

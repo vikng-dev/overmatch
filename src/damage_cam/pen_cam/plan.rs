@@ -18,7 +18,7 @@ use bevy::prelude::*;
 
 use std::sync::{Arc, OnceLock};
 
-use super::field::{self, Map};
+use super::picture::Pictures;
 use super::timeline::CornerKind;
 use crate::ballistics::spall_cone::FieldDescriptor;
 use crate::damage_cam::shapes::{HardBodies, TankShapes};
@@ -75,11 +75,12 @@ pub struct Plan {
     /// The whole struck tank's bounds (low, high corners), posed as the record has it
     /// ([`TankShapes::bounds`]); `None` without the tank asset's shapes.
     pub tank_bounds: Option<(Vec3, Vec3)>,
-    /// The struck tank's hard bodies, posed as the record has it ([`TankShapes::hard`]): the guide
-    /// that places the fields' shadow edges ([`field`]); `None` without the tank asset's shapes.
+    /// The struck tank's hard bodies, posed as the record has it ([`TankShapes::hard`]): what the
+    /// fields' depth pictures are rendered from ([`super::picture`]); `None` without the tank
+    /// asset's shapes.
     pub bodies: Option<Arc<HardBodies>>,
-    /// Each field's direction map, baked on first read ([`Self::maps`]).
-    maps: OnceLock<Arc<[Map]>>,
+    /// The fields' depth pictures, laid out on first read ([`Self::pictures`]).
+    pictures: OnceLock<Arc<Pictures>>,
 }
 
 /// The path as points with cumulative arc length, the record's time at each point and the
@@ -605,7 +606,7 @@ impl Plan {
             boxes,
             tank_bounds: shapes.bounds(),
             bodies: shapes.hard().cloned(),
-            maps: OnceLock::new(),
+            pictures: OnceLock::new(),
             line,
         }
     }
@@ -637,22 +638,31 @@ impl Plan {
             boxes,
             tank_bounds: shapes.bounds(),
             bodies: shapes.hard().cloned(),
-            maps: OnceLock::new(),
+            pictures: OnceLock::new(),
         }
     }
 
-    /// Each field's direction map, in [`Self::cones`]' order, its shadow edges placed by
-    /// [`Self::bodies`]: baked on the first read ([`field::bake`]), then held.
-    pub fn maps(&self) -> &Arc<[Map]> {
-        self.maps
-            .get_or_init(|| field::bake(&self.cones, self.bodies.as_deref()).into())
+    /// The fields' depth pictures, in [`Self::cones`]' order, from [`Self::bodies`], each at the
+    /// pitch the corner's views of the record derive ([`super::stage::field_sightings`]): laid
+    /// out on the first read, then held, and rendered once, the first time a frame draws them
+    /// ([`Pictures::image`]).
+    pub fn pictures(&self) -> &Arc<Pictures> {
+        self.pictures.get_or_init(|| {
+            let sightings = if self.cones.is_empty() {
+                Vec::new()
+            } else {
+                super::stage::field_sightings(self)
+            };
+            Arc::new(Pictures::of(&self.cones, self.bodies.as_ref(), &sightings))
+        })
     }
 
-    /// Take `from`'s maps, baked or not, as this plan's: a plan of the same record bakes the same
-    /// maps, so a replan of an unchanged record never bakes them again.
-    pub fn share_maps(&mut self, from: &Plan) {
-        if let Some(maps) = from.maps.get() {
-            self.maps = OnceLock::from(maps.clone());
+    /// Take `from`'s pictures, laid out or not, as this plan's: a plan of the same record has the
+    /// same pictures, so a replan of an unchanged record never lays them out or renders them
+    /// again.
+    pub fn share_pictures(&mut self, from: &Plan) {
+        if let Some(pictures) = from.pictures.get() {
+            self.pictures = OnceLock::from(pictures.clone());
         }
     }
 

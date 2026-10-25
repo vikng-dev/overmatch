@@ -20,7 +20,7 @@ use super::timeline::{self, CornerKind};
 use super::{CornerRig, Knobs};
 use crate::overlay::Overlay;
 
-const INSET_PX: f32 = 16.0;
+pub(super) const INSET_PX: f32 = 16.0;
 const WIDTH_FRACTION: f32 = 0.30;
 const WIDTH_PX: (f32, f32) = (384.0, 640.0);
 /// The corner's width over its height.
