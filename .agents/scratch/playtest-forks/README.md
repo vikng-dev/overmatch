@@ -222,15 +222,15 @@ off the shot line are knocked out too often or too rarely.
 `src/ballistics/spall_cone.rs` (shape, axis rule, directions) and `throw_spall_cone` in
 `src/ballistics.rs`.
 
-## F6 — Spall field profile and passage (balance dials)
+## F6 — Spall field profile and passage
 
-**Status:** profile settled 2026-10-23 (owner): the ball law · passage default chosen 2026-10-17
-(owner) · revisit the passage when spall reads too strong or too weak
+**Status:** settled · profile 2026-10-23 (owner): the ball law · passage retired 2026-10-26 (Yan):
+full shadowing is the only law
 
 **The question.** How is a spall cone's strength spread across its angle, and what happens when a
 direction meets material? Together they decide how much a box behind a perforation takes, and
-whether internals shield what lies behind them. Crew are witnesses under either dial: dosed by
-every direction entering them, never stopping one (ADR-0040).
+whether internals shield what lies behind them. Crew are witnesses: dosed by every direction that
+enters them short of where it stops, never stopping one (ADR-0040).
 
 **Settled — the ball law.** Sideways debris speeds spread evenly through a ball, from zero to the
 greatest, give a cone brightest on its axis and fading to nothing at its rim
@@ -241,24 +241,23 @@ greatest, give a cone brightest on its axis and fading to nothing at its rim
 another profile is another field law (`FieldLaw`), a code and wire change. The half-angle and axis
 are F5.
 
-**Default — full shadowing.** A direction stops at the first hard body it enters: an armour face (no
-dose) or a hard HP-bearing box (that box takes its whole strength) (`passage: FirstSolid`). Owner's
-reasoning: fragments pushing through material are nuance the player can never control, so the game
-stays consistent and learnable without them.
+**Settled — full shadowing.** A direction stops at the first hard body it enters: an armour face
+(no dose) or a hard HP-bearing box (that box takes its whole strength). The default from 2026-10-17
+(owner), on the reasoning that fragments pushing through material are nuance the player can never
+control, so the game stays consistent and learnable without them. Yan retired the `passage` dial on
+2026-10-26: full shadowing is the only law, with no key in `assets/ballistics/spall_cone.ron`, and
+another passage is another law, a code change.
 
-**Alternatives kept alive (rebalance dials):**
-- **`passage: Partial`** — a direction spends `chord × resistance` through every hard body and doses
-  each box it enters at its entry strength, then continues. Graded shadowing (a plate stops it, an
-  engine mostly); depends on material data, two values of which are Unknown.
-- **Absorbed dose** (not built) — like Partial, but a box takes only the strength it spends
-  inside it, so dose is conserved and materials still matter.
+**Retired.**
+- **`passage: Partial`** — a direction spent `chord × resistance` through every hard body and dosed
+  each box it entered at its entry strength, then continued. Graded shadowing (a plate stops it, an
+  engine mostly), resting on material data two values of which are Unknown.
+- **Absorbed dose** (never built) — like Partial, but a box takes only the strength it spends
+  inside it, so dose is conserved and materials still matter. Another passage law, a code change.
 
-**Why it's a playtest call.** Spall feeling too strong (whole crews lost to one perforation) or too
-weak (perforations that do nothing visible) is the trigger; each dial moves that balance in a
-different way.
-
-**Revert cost.** Low — data: `passage` in `assets/ballistics/spall_cone.ron` (both passages stay in
-code behind the data). Records and box-count tuning want the feel pass again.
+**Revert cost.** One commit: reverting `damage model: a field direction stops at the first hard
+body it enters; the partial passage is retired` restores the `Partial` passage, the `passage` key
+and their tests. Records and box-count tuning would want the feel pass again.
 
 **Lives in.** Design §5 (`.agents/docs/design/armor-penetration-and-damage.md`). Code:
 `src/ballistics/spall_cone.rs` and `field_direction` in `src/ballistics/resolve.rs`. Captures of

@@ -1222,8 +1222,8 @@ pub struct VolumeCrossing {
     pub perforated: bool,
 }
 
-/// One direction of a spall cone, as marched: where it stopped (its strength exhausted, or where it
-/// left the struck tank), and the boxes it dosed on the way.
+/// One direction of a spall cone, as marched: where it stopped (where it entered the first hard
+/// body it met, or the struck tank's horizon when it met none), and the boxes it dosed.
 pub struct SpallRay {
     pub end: Vec3,
     /// The strength (reference-mm) the direction was thrown with: the cone's `S` times its profile.
@@ -3619,7 +3619,7 @@ fn throw_burst(
             return;
         }
     };
-    let rays = walk_field(&throw, &spread, law.passage(), shell.dose, context, is_box);
+    let rays = walk_field(&throw, &spread, shell.dose, context, is_box);
     shell.spall.burst = Some(BurstField {
         origin: throw.origin,
         axis: throw.axis,
@@ -3649,7 +3649,6 @@ struct FieldThrow<'a> {
 fn walk_field(
     throw: &FieldThrow<'_>,
     spread: &spall_cone::Spread,
-    passage: spall_cone::Passage,
     dose: &mut ShotDose,
     context: &resolve::ResolveContext<'_, '_, '_>,
     is_box: &dyn Fn(Entity) -> bool,
@@ -3675,7 +3674,6 @@ fn walk_field(
             ray_dir,
             thrown,
             weight,
-            passage,
         );
         let ray = match walked {
             Ok(ray) => ray,
@@ -3769,7 +3767,7 @@ fn throw_spall_cone(
         tank,
         exited: &source.exited,
     };
-    let rays = walk_field(&throw, &spread, shape.passage(), dose, context, is_box);
+    let rays = walk_field(&throw, &spread, dose, context, is_box);
     spall.cones.push(SpallCone {
         origin: source.position,
         axis: throw.axis,

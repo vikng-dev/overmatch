@@ -9,7 +9,7 @@ use crate::ballistics::pen_cam::{
     FixtureFired, FixtureVolume, Kind, LINE_FROM, THICK, THIN, fixture_fire, fixture_fire_with,
     plate,
 };
-use crate::ballistics::{ArmourMark, CrossingEnd, RoundBody, VolumeCrossing, spall_cone};
+use crate::ballistics::{ArmourMark, CrossingEnd, RoundBody, VolumeCrossing};
 use crate::damage_cam::{BoxDose, RoundEnd, ShotVerdict};
 
 /// Fire the fixture 88 down the head-on line at `volumes`, all one tank's, with its wound rate set
@@ -459,29 +459,27 @@ fn a_cone_born_inside_a_witness_doses_it_from_its_origin() {
     }
 }
 
-/// Under the partial passage a witness is dosed at the strength that reaches it: each direction
-/// doses it exactly what it doses a hard box in its place, and one that spent strength in a hard
-/// box first doses the witness behind with less than it dosed that box.
+/// A witness is dosed at the strength that reaches it: each direction doses it exactly what it
+/// doses a hard box in its place, and a direction a hard box stops short of it doses it nothing,
+/// every other direction what it would with that box gone. A witness dosed by other arithmetic
+/// than a hard box's, or dosed past the hard body that stopped the direction, fails it.
 #[test]
-fn under_partial_passage_a_witness_takes_the_strength_left_at_its_entry() {
-    let partial = spall_cone::ConeShape::shipped().with_passage(spall_cone::Passage::Partial);
-    let fire_as = |kind: Kind| {
-        fire_square(
-            &[
-                plate("front", THIN, 0.0, Kind::Main),
-                // Off the shell's line to one side, so the cone reaches the crewman both through
-                // it and past it (fixture geometry).
-                cube("module", 0.4, Vec3::new(0.25, 2.0, -0.6), Kind::Box(DEEP)),
-                crewman(kind),
-                plate("rear", THICK, -3.0, Kind::Main),
-            ],
-            FIXTURE_88,
-            SPEED_88,
-            WOUND,
-            |app| {
-                app.insert_resource(spall_cone::SpallLaw(partial.clone()));
-            },
-        )
+fn a_witness_takes_the_strength_that_reaches_it() {
+    let fire_as = |kind: Kind, module: bool| {
+        let mut volumes = vec![plate("front", THIN, 0.0, Kind::Main)];
+        if module {
+            // Off the shell's line to one side, between the front plate's exit and the crewman, so
+            // the cone meets the crewman both past it and, with it gone, through where it stood
+            // (fixture geometry).
+            volumes.push(cube(
+                "module",
+                0.4,
+                Vec3::new(0.25, 2.0, -0.6),
+                Kind::Box(DEEP),
+            ));
+        }
+        volumes.extend([crewman(kind), plate("rear", THICK, -3.0, Kind::Main)]);
+        fire_square(&volumes, FIXTURE_88, SPEED_88, WOUND, |_| {})
     };
     let cone_doses = |fired: &FixtureFired| -> Vec<(Option<f32>, Option<f32>)> {
         fired.report.spall[0]
@@ -499,29 +497,27 @@ fn under_partial_passage_a_witness_takes_the_strength_left_at_its_entry() {
             })
             .collect()
     };
-    let witnessed = cone_doses(&fire_as(Kind::Witness(DEEP)));
+    let witnessed = cone_doses(&fire_as(Kind::Witness(DEEP), true));
     assert_eq!(
         witnessed,
-        cone_doses(&fire_as(Kind::Box(DEEP))),
+        cone_doses(&fire_as(Kind::Box(DEEP), true)),
         "(crewman, module) per direction"
     );
-    let (mut behind, mut clear) = (0, 0);
-    for (crewman, module) in witnessed {
-        match (crewman, module) {
-            (Some(crewman), Some(module)) => {
-                behind += 1;
-                assert!(
-                    crewman < module,
-                    "{crewman} vs {module}: spent in the module"
-                );
-            }
-            (Some(_), None) => clear += 1,
-            _ => {}
+    let alone = cone_doses(&fire_as(Kind::Witness(DEEP), false));
+    let (mut shadowed, mut clear) = (0, 0);
+    for (index, ((crewman, module), (unshadowed, _))) in witnessed.iter().zip(&alone).enumerate() {
+        let expected = if module.is_some() { None } else { *unshadowed };
+        assert_eq!(*crewman, expected, "direction {index}");
+        if module.is_some() && unshadowed.is_some() {
+            shadowed += 1;
+        } else if crewman.is_some() {
+            clear += 1;
         }
     }
     assert!(
-        behind > 0 && clear > 0,
-        "the fixture reaches the crewman both through the module and past it: {behind}, {clear}"
+        shadowed > 0 && clear > 0,
+        "the fixture's cone meets the crewman both behind the module and past it: {shadowed}, \
+         {clear}"
     );
 }
 

@@ -1569,7 +1569,7 @@ fn a_probe_past_its_face_ceiling_fails_closed() {
 // ---------------------------------------------------------------------------------------------
 
 use crate::ballistics::ProjectileMarchWorld;
-use crate::ballistics::spall_cone::{AxisRule, ConeShape, FieldDescriptor, Passage};
+use crate::ballistics::spall_cone::{AxisRule, ConeShape, FieldDescriptor};
 
 /// The colliders a fixture's field walk reads, as the runtime's systems hold them.
 type Colliders<'w, 's> = Query<
@@ -1584,23 +1584,13 @@ type Colliders<'w, 's> = Query<
 >;
 
 /// Walk every `(origin, direction, strength)` of `rays` with weight `weight` through every volume
-/// of the world (volumes of no tank: one tank), none of them exited, each walk failing the test.
+/// of the world (volumes of no tank: one tank), each throw leaving `exited`, each walk failing the
+/// test.
 fn field_rays(
     app: &mut App,
     rays: Vec<(Vec3, Dir3, f32)>,
     weight: f32,
     exited: Vec<Entity>,
-) -> Vec<FieldRay> {
-    field_rays_under(app, rays, weight, exited, Passage::Partial)
-}
-
-/// [`field_rays`] under `passage`.
-fn field_rays_under(
-    app: &mut App,
-    rays: Vec<(Vec3, Dir3, f32)>,
-    weight: f32,
-    exited: Vec<Entity>,
-    passage: Passage,
 ) -> Vec<FieldRay> {
     app.world_mut()
         .run_system_once(
@@ -1625,7 +1615,6 @@ fn field_rays_under(
                             dir,
                             strength,
                             weight,
-                            passage,
                         )
                         .expect("a fixture direction walks")
                     })
@@ -1669,21 +1658,11 @@ fn below(app: &mut App, size: Vec3, depth: f32, lateral: f32, factor: f32, hp: b
     )
 }
 
-/// Every passage a cone shape may declare: the shipped one and its dial (playtest fork F6). An
-/// invariant that holds under any passage is tested under each.
-const PASSAGES: [Passage; 2] = [Passage::FirstSolid, Passage::Partial];
-
-/// Each of `boxes`' dose from one cone of `directions` strata under `passage` and the field
-/// [`FIELD`], of strength `strength`, thrown from the origin down `-Y` through every volume of the
-/// world (volumes of no tank: one tank).
-fn field_doses(
-    app: &mut App,
-    boxes: &[Entity],
-    strength: f32,
-    directions: usize,
-    passage: Passage,
-) -> Vec<f64> {
-    field_doses_of(app, boxes, FIELD, strength, directions, passage)
+/// Each of `boxes`' dose from one cone of `directions` strata and the field [`FIELD`], of strength
+/// `strength`, thrown from the origin down `-Y` through every volume of the world (volumes of no
+/// tank: one tank).
+fn field_doses(app: &mut App, boxes: &[Entity], strength: f32, directions: usize) -> Vec<f64> {
+    field_doses_of(app, boxes, FIELD, strength, directions)
 }
 
 /// [`field_doses`] under the field `field`.
@@ -1693,9 +1672,8 @@ fn field_doses_of(
     field: FieldDescriptor,
     strength: f32,
     directions: usize,
-    passage: Passage,
 ) -> Vec<f64> {
-    let spread = ConeShape::new(AxisRule::ExitDirection, directions, passage)
+    let spread = ConeShape::new(AxisRule::ExitDirection, directions)
         .unwrap()
         .spread(field)
         .unwrap();
@@ -1704,7 +1682,7 @@ fn field_doses_of(
         .map(|(dir, weight)| (Vec3::ZERO, dir, strength * weight))
         .collect();
     let mut dose = vec![0.0f64; boxes.len()];
-    for ray in field_rays_under(app, rays, 1.0 / directions as f32, Vec::new(), passage) {
+    for ray in field_rays(app, rays, 1.0 / directions as f32, Vec::new()) {
         for applied in ray.doses {
             if let Some(index) = boxes.iter().position(|b| *b == applied.address) {
                 dose[index] += applied.amount as f64;
@@ -1714,44 +1692,42 @@ fn field_doses_of(
     dose
 }
 
-/// CLASS INVARIANT 2, RESOLUTION STABILITY, under every passage: a box's dose converges as the
-/// direction count grows — in the convergence regime the change from N to 4N shrinks with every
-/// step — and at the shipped count it lies within a stated tolerance of the converged value.
-/// Fixture: a soft box off the axis, a metre down.
+/// CLASS INVARIANT 2, RESOLUTION STABILITY: a box's dose converges as the direction count grows —
+/// in the convergence regime the change from N to 4N shrinks with every step — and at the shipped
+/// count it lies within a stated tolerance of the converged value. Fixture: a soft box off the
+/// axis, a metre down. A direction's dose not scaled by its `1/N` share, or a stratum weight that
+/// is not its stratum's share, fails it.
 ///
 /// The steps are taken from 384 directions up. Below that the strata the box's edges cut are noise
 /// of a stratum's weight, not a trend, and the axis strata the box covers carry the field's
-/// heaviest weights: MEASURED on this fixture under the first-solid passage, 96 → 384 → 1536
-/// changed the dose by 0.016 then 0.055 (of ~1.83), then 0.027 and 0.004.
+/// heaviest weights: MEASURED on this fixture, 96 → 384 → 1536 changed the dose by 0.016 then
+/// 0.055 (of ~1.83), then 0.027 and 0.004.
 #[test]
 fn a_box_dose_is_stable_under_resolution() {
     let (mut app, boxes) =
         field_world(|app| vec![below(app, Vec3::new(0.4, 0.05, 0.4), 1.0, 0.15, 0.0, true)]);
     let counts = [384, 1536, 6144, 24576];
-    for passage in PASSAGES {
-        let doses: Vec<f64> = counts
-            .iter()
-            .map(|&n| field_doses(&mut app, &boxes, 10.0, n, passage)[0])
-            .collect();
-        let changes: Vec<f64> = doses.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
-        assert!(
-            changes.windows(2).all(|w| w[1] <= w[0]),
-            "{passage:?}: the change shrinks as N quadruples: doses {doses:?}, changes {changes:?}"
-        );
-        let converged = doses[doses.len() - 1];
-        let shipped = ConeShape::shipped().directions_count();
-        let at_shipped = field_doses(&mut app, &boxes, 10.0, shipped, passage)[0];
-        // Fixture tolerance: a tenth of the converged dose at the shipped resolution.
-        assert!(
-            (at_shipped - converged).abs() <= 0.1 * converged,
-            "{passage:?}, N = {shipped}: {at_shipped} against {converged}"
-        );
-    }
+    let doses: Vec<f64> = counts
+        .iter()
+        .map(|&n| field_doses(&mut app, &boxes, 10.0, n)[0])
+        .collect();
+    let changes: Vec<f64> = doses.windows(2).map(|w| (w[1] - w[0]).abs()).collect();
+    assert!(
+        changes.windows(2).all(|w| w[1] <= w[0]),
+        "the change shrinks as N quadruples: doses {doses:?}, changes {changes:?}"
+    );
+    let converged = doses[doses.len() - 1];
+    let shipped = ConeShape::shipped().directions_count();
+    let at_shipped = field_doses(&mut app, &boxes, 10.0, shipped)[0];
+    // Fixture tolerance: a tenth of the converged dose at the shipped resolution.
+    assert!(
+        (at_shipped - converged).abs() <= 0.1 * converged,
+        "N = {shipped}: {at_shipped} against {converged}"
+    );
 }
 
-/// CLASS INVARIANT 3, HOMOGENEITY: under every passage, where no direction is exhausted, scaling
-/// the strength `S` scales every dose by the same factor; under the partial passage, where a plate
-/// exhausts directions, a dose never falls as the strength rises.
+/// CLASS INVARIANT 3, HOMOGENEITY: scaling the strength `S` scales every dose by the same factor.
+/// A dose with a strength-dependent offset or cut-off fails it.
 #[test]
 fn doses_are_homogeneous_in_strength() {
     let (mut app, boxes) = field_world(|app| {
@@ -1760,62 +1736,40 @@ fn doses_are_homogeneous_in_strength() {
             below(app, Vec3::new(0.2, 0.05, 0.2), 1.5, -0.2, 0.0, true),
         ]
     });
-    for passage in PASSAGES {
-        let one = field_doses(&mut app, &boxes, 10.0, FIELD_N, passage);
-        let scaled = field_doses(&mut app, &boxes, 37.0, FIELD_N, passage);
-        for (a, b) in one.iter().zip(&scaled) {
-            assert!(*a > 0.0, "{passage:?}: the fixture boxes lie in the cone");
-            assert!(
-                (b / a - 3.7).abs() < 1.0e-5,
-                "{passage:?}: {b} against 3.7 × {a}"
-            );
-        }
+    let one = field_doses(&mut app, &boxes, 10.0, FIELD_N);
+    let scaled = field_doses(&mut app, &boxes, 37.0, FIELD_N);
+    for (a, b) in one.iter().zip(&scaled) {
+        assert!(*a > 0.0, "the fixture boxes lie in the cone");
+        assert!((b / a - 3.7).abs() < 1.0e-5, "{b} against 3.7 × {a}");
     }
-
-    let (mut app, boxes) = field_world(|app| {
-        below(app, Vec3::new(2.0, 0.01, 2.0), 0.5, 0.0, STEEL, false);
-        vec![below(app, Vec3::new(0.4, 0.05, 0.4), 1.0, 0.1, 10.0, true)]
-    });
-    let mut last = 0.0;
-    for strength in [1.0, 5.0, 9.0, 11.0, 20.0, 50.0, 200.0] {
-        let dose = field_doses(&mut app, &boxes, strength, FIELD_N, Passage::Partial)[0];
-        assert!(dose >= last, "S = {strength}: {dose} below {last}");
-        last = dose;
-    }
-    assert!(last > 0.0, "a strong enough cone gets through the plate");
 }
 
-/// CLASS INVARIANT 4, INVERSE SQUARE, under every passage: strength is not spent in air, so a thin
-/// unresisting box on the axis takes a quarter of the dose at twice the distance — the share of the
-/// cone it covers. Fixture: a 0.1 m square; the ball's density across it falls by at most 2.1 % at
-/// 1 m and a quarter of that at 2 m (DERIVED: `1 − p_Ω(θ)/p_Ω(0) ≈ 3λ²(3 + λ²)θ²/(2(1 + 3λ²))`,
-/// at the corner's θ = 0.071 and 0.035), inside the tolerance.
+/// CLASS INVARIANT 4, INVERSE SQUARE: strength is not spent in air, so a thin unresisting box on
+/// the axis takes a quarter of the dose at twice the distance — the share of the cone it covers. A
+/// strength that falls with distance travelled fails it. Fixture: a 0.1 m square; the ball's
+/// density across it falls by at most 2.1 % at 1 m and a quarter of that at 2 m (DERIVED:
+/// `1 − p_Ω(θ)/p_Ω(0) ≈ 3λ²(3 + λ²)θ²/(2(1 + 3λ²))`, at the corner's θ = 0.071 and 0.035), inside
+/// the tolerance.
 #[test]
 fn an_unshadowed_dose_falls_as_the_inverse_square() {
-    for passage in PASSAGES {
-        let dose_at = |depth: f32| {
-            let (mut app, boxes) = field_world(|app| {
-                vec![below(
-                    app,
-                    Vec3::new(0.1, 0.002, 0.1),
-                    depth,
-                    0.0,
-                    0.0,
-                    true,
-                )]
-            });
-            field_doses(&mut app, &boxes, 10.0, 16384, passage)[0]
-        };
-        let ratio = dose_at(2.0) / dose_at(1.0);
-        assert!(
-            (ratio - 0.25).abs() < 0.01,
-            "{passage:?}: D(2r)/D(r) = {ratio}"
-        );
-    }
+    let dose_at = |depth: f32| {
+        let (mut app, boxes) = field_world(|app| {
+            vec![below(
+                app,
+                Vec3::new(0.1, 0.002, 0.1),
+                depth,
+                0.0,
+                0.0,
+                true,
+            )]
+        });
+        field_doses(&mut app, &boxes, 10.0, 16384)[0]
+    };
+    let ratio = dose_at(2.0) / dose_at(1.0);
+    assert!((ratio - 0.25).abs() < 0.01, "D(2r)/D(r) = {ratio}");
 }
 
-/// The pen cam's potency colour reads this resolver's dose, under every passage and on every
-/// support: the intensity its law draws at distance `r` along a direction (`ρ s / (Ω r²)`,
+/// The pen cam's potency colour reads this resolver's dose, on every support: the intensity its law draws at distance `r` along a direction (`ρ s / (Ω r²)`,
 /// `pen_cam::potency`, `Ω` the support's solid angle) times a thin unresisting face's area there
 /// is `ρ` times the dose the face takes. The colour's promise — a box's face wholly at or above a
 /// threshold takes at least that threshold's pool — relies on it; a pen cam law that drifts from
@@ -1824,9 +1778,9 @@ fn an_unshadowed_dose_falls_as_the_inverse_square() {
 /// Fixture: a ball's cap ([`FIELD`]) with a 0.1 m square face-on on its axis, and a ring's band
 /// (`λ = 0.45`, half-width 10°) with a 0.2 m square face-on at its middle, each at 1.0 and 1.5 m,
 /// 16384 directions. At 1.5 m the faces cover ~124 and ~146 strata, one stratum under 0.8 % of
-/// the dose (DERIVED: `(A / r²) / Ω · N`), and the tolerance is three strata. MEASURED alike under
-/// both passages: the ball's 0.5 % and 2.4 % off, the ring's 2.2 % and 1.1 %, ~1.2 % of the
-/// ring's at 1.0 m its larger face's (DERIVED: `A / r²` over the square's exact solid angle).
+/// the dose (DERIVED: `(A / r²) / Ω · N`), and the tolerance is three strata. MEASURED: the ball's
+/// 0.5 % and 2.4 % off, the ring's 2.2 % and 1.1 %, ~1.2 % of the ring's at 1.0 m its larger
+/// face's (DERIVED: `A / r²` over the square's exact solid angle).
 #[test]
 fn the_pen_cam_intensity_times_a_face_is_its_dose() {
     use crate::damage_cam::pen_cam::potency::{Potency, intensity};
@@ -1837,72 +1791,63 @@ fn the_pen_cam_intensity_times_a_face_is_its_dose() {
         (FIELD, Vec3::NEG_Y, 0.1),
         (ring, Vec3::new(middle.sin(), -middle.cos(), 0.0), 0.2),
     ];
-    for passage in PASSAGES {
-        for (field, face, side) in fields {
-            let spread = ConeShape::new(AxisRule::ExitDirection, 16384, passage)
-                .unwrap()
-                .spread(field)
-                .unwrap();
-            let (_, weight) = spread
-                .directions(Dir3::NEG_Y)
-                .max_by(|a, b| a.0.dot(face).total_cmp(&b.0.dot(face)))
-                .unwrap();
-            for depth in [1.0, 1.5] {
-                let (mut app, boxes) = field_world(|app| {
-                    let at = Transform::from_translation(face * depth)
-                        .with_rotation(Quat::from_rotation_arc(Vec3::NEG_Y, face));
-                    vec![volume(
-                        app,
-                        Vec3::new(side, 0.002, side),
-                        at,
-                        0.0,
-                        Some(FIELD_HP),
-                    )]
-                });
-                let dose = field_doses_of(&mut app, &boxes, field, 10.0, 16384, passage)[0];
-                let e = potency.emission(10.0 * weight, field.inner_angle(), field.half_angle());
-                let drawn = intensity(e, depth - 0.001) as f64 * (side * side) as f64;
-                let ratio = drawn / (potency.rate as f64 * dose);
-                assert!(
-                    (ratio - 1.0).abs() < 0.025,
-                    "{passage:?}, {field:?}, r = {depth}: I·A / ρD = {ratio}"
-                );
-            }
+    for (field, face, side) in fields {
+        let spread = ConeShape::new(AxisRule::ExitDirection, 16384)
+            .unwrap()
+            .spread(field)
+            .unwrap();
+        let (_, weight) = spread
+            .directions(Dir3::NEG_Y)
+            .max_by(|a, b| a.0.dot(face).total_cmp(&b.0.dot(face)))
+            .unwrap();
+        for depth in [1.0, 1.5] {
+            let (mut app, boxes) = field_world(|app| {
+                let at = Transform::from_translation(face * depth)
+                    .with_rotation(Quat::from_rotation_arc(Vec3::NEG_Y, face));
+                vec![volume(
+                    app,
+                    Vec3::new(side, 0.002, side),
+                    at,
+                    0.0,
+                    Some(FIELD_HP),
+                )]
+            });
+            let dose = field_doses_of(&mut app, &boxes, field, 10.0, 16384)[0];
+            let e = potency.emission(10.0 * weight, field.inner_angle(), field.half_angle());
+            let drawn = intensity(e, depth - 0.001) as f64 * (side * side) as f64;
+            let ratio = drawn / (potency.rate as f64 * dose);
+            assert!(
+                (ratio - 1.0).abs() < 0.025,
+                "{field:?}, r = {depth}: I·A / ρD = {ratio}"
+            );
         }
     }
 }
 
-/// CLASS INVARIANT 6, FACTOR INDEPENDENCE, under every passage: a box's dose is the strength
-/// arriving at it, never scaled by its own factor.
+/// CLASS INVARIANT 6, FACTOR INDEPENDENCE: a box's dose is the strength arriving at it, never
+/// scaled by its own factor. A dose scaled by the box's factor, or charged for its chord through
+/// the box, fails it.
 #[test]
 fn a_box_dose_does_not_depend_on_its_own_factor() {
-    for passage in PASSAGES {
-        let dose_with = |factor: f32| {
-            let (mut app, boxes) = field_world(|app| {
-                vec![below(app, Vec3::new(0.3, 0.2, 0.3), 1.0, 0.1, factor, true)]
-            });
-            field_doses(&mut app, &boxes, 10.0, FIELD_N, passage)[0]
-        };
-        let soft = dose_with(10.0);
-        assert!(soft > 0.0, "{passage:?}");
-        assert_eq!(soft.to_bits(), dose_with(900.0).to_bits(), "{passage:?}");
-    }
+    let dose_with = |factor: f32| {
+        let (mut app, boxes) =
+            field_world(|app| vec![below(app, Vec3::new(0.3, 0.2, 0.3), 1.0, 0.1, factor, true)]);
+        field_doses(&mut app, &boxes, 10.0, FIELD_N)[0]
+    };
+    let soft = dose_with(10.0);
+    assert!(soft > 0.0);
+    assert_eq!(soft.to_bits(), dose_with(900.0).to_bits());
 }
 
-/// CLASS INVARIANT 7, SHADOWING IS MONOTONE, under every passage: adding any volume between the
-/// origin and a box — armour or another box, thin or thick — never raises the box's dose.
+/// CLASS INVARIANT 7, SHADOWING IS MONOTONE: adding any volume between the origin and a box —
+/// armour or another box, thin or thick — never raises the box's dose. Each fixture volume lies
+/// across some of the box's directions, and a hard body stops a direction it meets, so each lowers
+/// it: a hard body a direction passes through, armour or a box dosed on the way, fails it.
 #[test]
 fn adding_a_volume_never_raises_a_dose() {
-    for passage in PASSAGES {
-        shadowing_is_monotone(passage);
-    }
-}
-
-/// [`adding_a_volume_never_raises_a_dose`] under `passage`.
-fn shadowing_is_monotone(passage: Passage) {
     let target = |app: &mut App| below(app, Vec3::new(0.4, 0.05, 0.4), 1.2, 0.1, 10.0, true);
     let (mut app, boxes) = field_world(|app| vec![target(app)]);
-    let bare = field_doses(&mut app, &boxes, 10.0, FIELD_N, passage)[0];
+    let bare = field_doses(&mut app, &boxes, 10.0, FIELD_N)[0];
     assert!(bare > 0.0);
     let between: [(Vec3, f32, f32, bool); 4] = [
         (Vec3::new(0.2, 0.01, 0.2), 0.0, STEEL, false),
@@ -1915,10 +1860,10 @@ fn shadowing_is_monotone(passage: Passage) {
             below(app, size, 0.6, lateral, factor, hp);
             vec![target(app)]
         });
-        let shadowed = field_doses(&mut app, &boxes, 10.0, FIELD_N, passage)[0];
+        let shadowed = field_doses(&mut app, &boxes, 10.0, FIELD_N)[0];
         assert!(
-            shadowed <= bare,
-            "{passage:?}, {size:?} at factor {factor}: {shadowed} above {bare}"
+            shadowed < bare,
+            "{size:?} at factor {factor}: {shadowed} against {bare}"
         );
     }
 }
@@ -2239,11 +2184,13 @@ fn slab_layers(slabs: &[(f64, f64, f32)]) -> (Vec<walk::Layer>, Vec<Entity>) {
     (layers, volumes)
 }
 
-/// FIRST SOLID: a direction stops where it enters the first volume. A box there takes its whole
-/// `strength × weight` and nothing beyond it is dosed; armour there takes nothing and shadows every
-/// box behind it; the plate the throw leaves stops nothing. Fixture slabs along the direction.
+/// A direction stops where it enters the first volume: a box there is the one dosed and nothing
+/// beyond it is reached; armour there doses nothing and shadows every box behind it; the plate the
+/// throw leaves stops nothing. A hard body passed through, a box beyond the first dosed, armour
+/// that does not stop, or the left plate stopping the direction at the throw point fails it.
+/// Fixture slabs along the direction.
 #[test]
-fn a_first_solid_direction_stops_at_what_it_enters() {
+fn a_direction_stops_at_the_first_volume_it_enters() {
     let walk = |armour_first: bool| {
         let mut slabs = vec![(-0.15, 0.05, 1.0), (0.9, 1.1, 0.0), (1.9, 2.1, 0.0)];
         if armour_first {
@@ -2251,34 +2198,24 @@ fn a_first_solid_direction_stops_at_what_it_enters() {
         }
         let (layers, volumes) = slab_layers(&slabs);
         let boxes = [volumes[1], volumes[2]];
-        let layers: Vec<&walk::Layer> = layers.iter().collect();
-        let (end, doses, _, _) = first_solid(
-            &layers,
-            BEHIND,
-            Vec3::ZERO,
-            Dir3::NEG_Y,
-            3.0,
-            0.25,
-            &|volume| boxes.contains(&volume),
-            &[volumes[0]],
-        );
-        let doses: Vec<Dose> = doses.into_iter().map(|(_, dose)| dose).collect();
-        (end, doses, boxes)
+        let (at, dosed) = first_solid(&layers, BEHIND, &[volumes[0]], &|volume| {
+            boxes.contains(&volume)
+        })
+        .expect("the direction enters a slab");
+        (at - BEHIND, dosed, boxes)
     };
-    let (end, doses, boxes) = walk(false);
-    assert_eq!(doses.len(), 1, "{doses:?}");
-    assert_eq!(doses[0].address, boxes[0]);
-    assert_eq!(
-        doses[0].amount, 0.75,
-        "its whole strength, no attenuation in air"
-    );
+    let (depth, dosed, boxes) = walk(false);
+    assert_eq!(dosed, Some(boxes[0]), "the near box");
     assert!(
-        (end.y + 0.9).abs() < 1.0e-4,
-        "stopped at the near box's face: {end}"
+        (depth - 0.9).abs() < 1.0e-6,
+        "stopped at the near box's face: {depth}"
     );
-    let (end, doses, _) = walk(true);
-    assert!(doses.is_empty(), "armour shadows the boxes: {doses:?}");
-    assert!((end.y + 0.45).abs() < 1.0e-4, "stopped at the plate: {end}");
+    let (depth, dosed, _) = walk(true);
+    assert_eq!(dosed, None, "armour shadows the boxes");
+    assert!(
+        (depth - 0.45).abs() < 1.0e-6,
+        "stopped at the plate: {depth}"
+    );
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2330,355 +2267,30 @@ fn slab_below(app: &mut App, top: f32, thickness: f32, factor: f32, hp: bool) ->
     )
 }
 
-/// A direction thrown from inside a soft block starts inside it and pays for it: strength 10 into
-/// a block of factor 150 exhausts 10/150 m in, and the box beyond the block takes nothing. Fixture:
-/// the block spans 0.5 m above the origin to 1 m below it.
+/// A plate thinner than any nudge is still material: a direction meeting half a millimetre of
+/// steel stops at its face and the box behind takes nothing. A walk that loses a plate whose faces
+/// lie within a nudge of each other fails it.
 #[test]
-fn a_direction_thrown_inside_a_block_pays_for_it() {
-    let (mut app, boxes) = field_world(|app| {
-        slab_below(app, 0.5, 1.5, 150.0, false);
-        vec![slab_below(app, -1.4, 0.2, 0.0, true)]
-    });
-    let (end, doses) = walk_direction(&mut app, Vec3::ZERO, 10.0, &[]);
-    assert_eq!(dose_to(&doses, boxes[0]), 0.0, "the box beyond is shadowed");
-    assert!(
-        (end.y + 10.0 / 150.0).abs() < 1.0e-4,
-        "the direction exhausts 66.7 mm into the block: {end:?}"
-    );
-}
-
-/// A box wholly inside another volume the direction crosses is entered, and dosed with the
-/// strength that reaches its entry. Fixture: a soft volume of factor 1 over `[1, 3]` m, the box
-/// over `[1.9, 2.1]` m inside it: 0.9 reference-mm is spent before it.
-#[test]
-fn a_box_inside_a_traversed_volume_is_dosed() {
-    let (layers, volumes) = slab_layers(&[(1.0, 3.0, 1.0), (1.9, 2.1, 0.0)]);
-    let layers: Vec<&walk::Layer> = layers.iter().collect();
-    let (_, doses, _, _) = partial(
-        &layers,
-        BEHIND,
-        Vec3::ZERO,
-        Dir3::NEG_Y,
-        10.0,
-        1.0,
-        &|volume| volume == volumes[1],
-        &[],
-    );
-    let dose: f32 = doses
-        .iter()
-        .filter(|(_, dose)| dose.address == volumes[1])
-        .map(|(_, dose)| dose.amount)
-        .sum();
-    assert!((dose - 9.1).abs() < 1.0e-4, "dosed at entry: {dose}");
-}
-
-/// A plate thinner than any nudge is still material: half a millimetre of steel costs 0.5
-/// reference-mm, so a direction of strength 0.25 exhausts halfway through it and the box behind
-/// takes nothing.
-#[test]
-fn a_direction_exhausts_halfway_through_a_thin_plate() {
+fn a_plate_thinner_than_any_nudge_stops_a_direction() {
     let (mut app, boxes) = field_world(|app| {
         slab_below(app, -1.0, 0.0005, 1000.0, false);
         vec![slab_below(app, -2.0, 0.2, 0.0, true)]
     });
-    let (end, doses) = walk_direction(&mut app, Vec3::ZERO, 0.25, &[]);
+    let (end, doses) = walk_direction(&mut app, Vec3::ZERO, 10.0, &[]);
     assert_eq!(dose_to(&doses, boxes[0]), 0.0, "the box behind is shadowed");
     assert!(
-        (end.y + 1.000_25).abs() < 2.0e-6,
-        "the direction exhausts halfway through the plate: {end:?}"
-    );
-}
-
-/// CLASS INVARIANT, SHADOWING IS MONOTONE ALONG ONE DIRECTION: adding any volume anywhere along a
-/// direction — before, around, inside or overlapping the volumes already there — never raises any
-/// box's dose, a box sitting exactly on its exhaustion threshold included ([`field_direction`]
-/// states the exact guarantee). Fixture: randomized stacks of overlapping volumes of random factor
-/// along `-Y`.
-#[test]
-fn adding_material_along_a_direction_never_raises_a_dose() {
-    let mut state = 0x2545_f491_u32;
-    let mut unit = move || {
-        state = state.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
-        (state >> 8) as f32 / (1u32 << 24) as f32
-    };
-    let factors = [0.0, 1.0, 20.0, 150.0, 1000.0];
-    for trial in 0..16 {
-        // (top, thickness, factor, box) of each volume; the first three are boxes.
-        let mut stack: Vec<(f32, f32, f32, bool)> = (0..6)
-            .map(|index| {
-                let top = -0.2 - 3.0 * unit();
-                let thickness = 0.001 + 1.2 * unit() * unit();
-                let factor = factors[(unit() * factors.len() as f32) as usize % factors.len()];
-                (top, thickness, factor, index < 3)
-            })
-            .collect();
-        let doses = |stack: &[(f32, f32, f32, bool)]| {
-            let (mut app, boxes) = field_world(|app| {
-                stack
-                    .iter()
-                    .filter_map(|&(top, thickness, factor, hp)| {
-                        let entity = slab_below(app, top, thickness, factor, hp);
-                        hp.then_some(entity)
-                    })
-                    .collect()
-            });
-            let (_, doses) =
-                walk_direction(&mut app, Vec3::ZERO, 4.0 + 20.0 * unit_free(trial), &[]);
-            boxes
-                .iter()
-                .map(|b| dose_to(&doses, *b))
-                .collect::<Vec<f32>>()
-        };
-        let before = doses(&stack);
-        stack.push((
-            -0.1 - 3.2 * unit(),
-            0.001 + 2.0 * unit() * unit(),
-            factors[(unit() * factors.len() as f32) as usize % factors.len()],
-            false,
-        ));
-        let after = doses(&stack);
-        for (index, (b, a)) in before.iter().zip(&after).enumerate() {
-            assert!(
-                a <= b,
-                "trial {trial}, box {index}: adding {:?} raised the dose {b} to {a} (stack \
-                 {stack:?})",
-                stack.last()
-            );
-        }
-    }
-
-    // Exhaustion thresholds: stacks on a 1/1024 m grid, where every cost is exact in f64 and the
-    // cost of reaching a box is exact in f32, thrown with exactly that strength — the box sits on
-    // the threshold, undosed, and a strength one ulp higher doses it. The added material is a slab
-    // off the grid or a sloped prism whose crossings are non-dyadic; neither may lift the box off
-    // the threshold, nor raise any dose.
-    let grid = |value: f32| (value * 1024.0).round() / 1024.0;
-    for trial in 0..16 {
-        let stack: Vec<(f32, f32, f32, bool)> = (0..6)
-            .map(|index| {
-                let top = grid(-0.2 - 3.0 * unit());
-                let thickness = grid(0.01 + 1.2 * unit() * unit());
-                let factor = factors[(unit() * factors.len() as f32) as usize % factors.len()];
-                (top, thickness, factor, index < 3)
-            })
-            .collect();
-        // `∫ max(factor)` from the origin down to `depth`, over the stack's own cuts.
-        let cost_to = |depth: f64| -> f64 {
-            let mut cuts: Vec<f64> = stack
-                .iter()
-                .flat_map(|&(top, thickness, _, _)| {
-                    [-(top as f64), -(top as f64) + thickness as f64]
-                })
-                .filter(|t| *t < depth)
-                .chain([0.0, depth])
-                .collect();
-            cuts.sort_by(f64::total_cmp);
-            cuts.dedup();
-            cuts.windows(2)
-                .map(|w| {
-                    let mid = 0.5 * (w[0] + w[1]);
-                    let factor = stack
-                        .iter()
-                        .filter(|&&(top, thickness, _, _)| {
-                            -(top as f64) <= mid && mid < -(top as f64) + thickness as f64
-                        })
-                        .fold(0.0f64, |most, &(_, _, factor, _)| most.max(factor as f64));
-                    (w[1] - w[0]) * factor
-                })
-                .sum()
-        };
-        let Some((target, cost)) = (0..3)
-            .map(|index| (index, cost_to(-(stack[index].0 as f64))))
-            .filter(|(_, cost)| *cost > 0.0)
-            .max_by(|a, b| a.1.total_cmp(&b.1))
-        else {
-            continue;
-        };
-        let strength = cost as f32;
-        assert_eq!(
-            strength as f64, cost,
-            "trial {trial}: the threshold is exact"
-        );
-        let doses =
-            |stack: &[(f32, f32, f32, bool)], prism: Option<(f32, f32, f32)>, strength: f32| {
-                let (mut app, boxes) = field_world(|app| {
-                    if let Some((base, height, factor)) = prism {
-                        sloped_prism(app, base, height, factor);
-                    }
-                    stack
-                        .iter()
-                        .filter_map(|&(top, thickness, factor, hp)| {
-                            let entity = slab_below(app, top, thickness, factor, hp);
-                            hp.then_some(entity)
-                        })
-                        .collect()
-                });
-                let (_, doses) = walk_direction(&mut app, Vec3::ZERO, strength, &[]);
-                boxes
-                    .iter()
-                    .map(|b| dose_to(&doses, *b))
-                    .collect::<Vec<f32>>()
-            };
-        let before = doses(&stack, None, strength);
-        assert_eq!(
-            before[target], 0.0,
-            "trial {trial}: box {target} sits on the threshold (stack {stack:?})"
-        );
-        let above = doses(&stack, None, f32::from_bits(strength.to_bits() + 1));
-        assert!(
-            above[target] > 0.0,
-            "trial {trial}: one ulp more strength doses box {target} (stack {stack:?})"
-        );
-        let factor = factors[(unit() * factors.len() as f32) as usize % factors.len()];
-        let (stacked, prism) = if trial % 2 == 0 {
-            let mut stacked = stack.clone();
-            stacked.push((
-                -0.1 - 3.2 * unit(),
-                0.001 + 2.0 * unit() * unit(),
-                factor,
-                false,
-            ));
-            (stacked, None)
-        } else {
-            // Inside the target's shadow — between the origin and its entry — where there is room.
-            let height = grid(0.01 + 1.5 * unit() * unit());
-            let (lowest, highest) = (stack[target].0 - 0.2, -(height + 0.6));
-            let base = if highest > lowest {
-                grid(lowest + (highest - lowest) * unit())
-            } else {
-                grid(-(height + 0.6) - 2.5 * unit())
-            };
-            (stack.clone(), Some((base, height, factor)))
-        };
-        let after = doses(&stacked, prism, strength);
-        for (index, (b, a)) in before.iter().zip(&after).enumerate() {
-            assert!(
-                a <= b,
-                "threshold trial {trial}, box {index}: adding {:?} raised the dose {b} to {a} \
-                 (stack {stack:?})",
-                prism.map_or(stacked.last().copied(), |(base, height, factor)| Some((
-                    base, height, factor, false
-                )))
-            );
-        }
-    }
-}
-
-/// A static trimesh volume of `factor` reference-mm per metre, of the closed shell `mesh`.
-fn factored_mesh(app: &mut App, mesh: (Collider, BallisticSurfaces), factor: f32) -> Entity {
-    app.world_mut()
-        .spawn((
-            Transform::IDENTITY,
-            RigidBody::Static,
-            mesh,
-            CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
-            BallisticVolume {
-                material: walk::VolumeMaterial::fixture(factor),
-                substance: "fixture".to_string(),
-            },
-        ))
-        .id()
-}
-
-/// A prism of `factor` whose top and bottom faces rise 0.4 per metre of `+X`, over `x ∈ [-0.5,
-/// 0.75]`: it crosses the `-Y` axis at heights `base + 0.2` and `base + height + 0.2`, non-dyadic
-/// though every vertex is exact in f32 for `base` and `height` on a dyadic grid.
-fn sloped_prism(app: &mut App, base: f32, height: f32, factor: f32) -> Entity {
-    let mesh = mapped_box_trimesh(|c| {
-        Vec3::new(
-            0.625 * c.x + 0.125,
-            base + 0.5 * height * (c.y + 1.0) + 0.25 * (c.x + 1.0),
-            0.5 * c.z,
-        )
-    });
-    factored_mesh(app, mesh, factor)
-}
-
-/// A trial's strength, a function of the trial alone so both walks of a trial throw the same.
-fn unit_free(trial: u32) -> f32 {
-    ((trial.wrapping_mul(2_654_435_761) >> 8) as f32 / (1u32 << 24) as f32).fract()
-}
-
-/// Softer material inside a plate leaves the plate's cost bit-identical: strength 1 thrown along
-/// `+X` from 0.125 m before a plate of factor 1 over `[0, 1]` m is exhausted exactly at its rear
-/// face, with or without a factor-0.5 prism crossing the ray over `[0.1, 0.3]` m inside it, and the
-/// box behind takes nothing either way. Fixture (DERIVED): the prism is bounded by the planes
-/// `10x − y = 1` and `10x − y = 3`, its vertices exact in f32, so its crossings are the non-dyadic
-/// `0.1` and `0.3` along the ray; charged boundary by boundary, the three pieces of the plate
-/// leave `2^-53` of strength (DERIVED in f64), which reaches the box.
-///
-/// Softer material around the plate adds nothing inside it either: a factor-0.5 volume enclosing
-/// the plate over `[-1/16, 17/16]` m charges only its own material outside the plate, and the box
-/// still takes nothing. Charged at the enclosing factor inside the plate, the whole span would cost
-/// 0.5625 and the box would take the rest (DERIVED).
-#[test]
-fn softer_material_inside_a_plate_leaves_its_cost_unchanged() {
-    let dose_behind = |prism: bool, around: bool| {
-        let (mut app, boxes) = field_world(|app| {
-            volume(
-                app,
-                Vec3::new(1.0, 2.0, 2.0),
-                Transform::from_translation(Vec3::new(0.5, 0.0, 0.0)),
-                1.0,
-                None,
-            );
-            if prism {
-                // The cube's faces `x = ∓1` land on the planes `10x − y = 1` and `10x − y = 3`.
-                let mesh = mapped_box_trimesh(|c| {
-                    Vec3::new(0.25 * (c.y + 1.0), 2.5 * (c.y + 1.0) - c.x - 2.0, c.z)
-                });
-                factored_mesh(app, mesh, 0.5);
-            }
-            if around {
-                volume(
-                    app,
-                    Vec3::new(1.125, 3.0, 3.0),
-                    Transform::from_translation(Vec3::new(0.5, 0.0, 0.0)),
-                    0.5,
-                    None,
-                );
-            }
-            vec![volume(
-                app,
-                Vec3::new(0.2, 2.0, 2.0),
-                Transform::from_translation(Vec3::new(1.6, 0.0, 0.0)),
-                0.0,
-                Some(FIELD_HP),
-            )]
-        });
-        let ray = field_rays(
-            &mut app,
-            vec![(Vec3::new(-0.125, 0.0, 0.0), Dir3::X, 1.0)],
-            1.0,
-            Vec::new(),
-        )
-        .remove(0);
-        dose_to(
-            &ray.doses
-                .iter()
-                .map(|dose| (dose.address, dose.amount))
-                .collect::<Vec<_>>(),
-            boxes[0],
-        )
-    };
-    assert_eq!(dose_behind(false, false), 0.0, "the plate alone");
-    assert_eq!(
-        dose_behind(true, false),
-        0.0,
-        "the plate with softer material inside it"
-    );
-    assert_eq!(
-        dose_behind(false, true),
-        0.0,
-        "the plate with softer material around it"
+        (end.y + 1.0).abs() < 2.0e-6,
+        "the direction stops at the plate's face: {end:?}"
     );
 }
 
 /// A direction recognises the volume it is thrown from by identity, never by displacement: starting
-/// a millimetre inside the box its throw leaves, it pays for that millimetre but does not dose the
-/// box, and it doses the box it steps into with the strength left at its entry. Named as anything
-/// but the volume the throw leaves, the same box is entered at the throw point and dosed. Fixture: a
-/// box of factor 150 ending 1 mm along the direction, a box of factor 20 in contact behind it.
+/// a millimetre inside the box its throw leaves, it neither doses that box nor stops in it, and the
+/// box it steps into takes its whole strength. Named as anything but the volume the throw leaves,
+/// the same box is entered at the throw point: it takes the whole strength and stops the direction
+/// there. A direction that doses or stops in the volume its throw leaves, or that passes through
+/// one it starts inside without leaving, fails it. Fixture: a box ending 1 mm along the direction,
+/// a box in contact behind it.
 #[test]
 fn a_direction_does_not_dose_the_volume_its_throw_leaves() {
     let (mut app, boxes) = field_world(|app| {
@@ -2687,17 +2299,19 @@ fn a_direction_does_not_dose_the_volume_its_throw_leaves() {
             slab_below(app, -0.001, 0.5, 20.0, true),
         ]
     });
-    let (_, doses) = walk_direction(&mut app, Vec3::ZERO, 10.0, &[boxes[0]]);
+    let (end, doses) = walk_direction(&mut app, Vec3::ZERO, 10.0, &[boxes[0]]);
     assert_eq!(dose_to(&doses, boxes[0]), 0.0, "the throw's own box");
-    let behind = dose_to(&doses, boxes[1]);
+    assert_eq!(dose_to(&doses, boxes[1]), 10.0, "the box stepped into");
     assert!(
-        (behind - (10.0 - 0.001 * 150.0)).abs() < 1.0e-4,
-        "the box stepped into, at entry: {behind}"
+        (end.y + 0.001).abs() < 1.0e-5,
+        "stopped where it steps into the box behind: {end:?}"
     );
-    let (_, doses) = walk_direction(&mut app, Vec3::ZERO, 10.0, &[]);
+    let (end, doses) = walk_direction(&mut app, Vec3::ZERO, 10.0, &[]);
     assert_eq!(
         dose_to(&doses, boxes[0]),
         10.0,
         "entered at the throw point"
     );
+    assert_eq!(dose_to(&doses, boxes[1]), 0.0, "stopped in the first box");
+    assert_eq!(end, Vec3::ZERO, "stopped at the throw point");
 }

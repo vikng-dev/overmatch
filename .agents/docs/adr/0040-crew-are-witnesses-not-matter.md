@@ -34,8 +34,8 @@ is in `src/substances.rs` (the kinds), `src/ballistics/wound.rs` (the witness pa
   pool it is the chord through the station. `chord × resistance` measures the first and says
   nothing about the second: a crew substance at 1 % of RHA needed about 30 cm of chord to empty
   a 30 HP pool (DERIVED).
-- A body does not stop fragments. Crew shadowing crew was an artefact of `passage: FirstSolid`
-  stopping at every HP box.
+- A body does not stop fragments. Crew shadowing crew was an artefact of a field direction
+  stopping at the first HP box it entered, crew boxes included.
 - A property that only one substance uses is not a property of every substance. A class with its
   own law is the honest shape.
 

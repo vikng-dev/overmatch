@@ -265,44 +265,40 @@ cone's `μ_k`, `sin θ_k` and `f_k` are built from its `λ` with IEEE arithmetic
 their bits match on every shipped target and a decoder rebuilds them from the descriptor.
 
 **Shadowing and reach.** A direction's strength is constant in air — no drag, no range — and it
-doses only the struck tank's boxes (hitting another tank is a preserved alternative). Shipped:
-**full shadowing** (owner, 2026-10-17) — a direction stops at the first hard body it enters: armour
-takes nothing and stops it, a hard box takes its whole strength and stops it, so whatever hard
-body lies first shields everything behind it, whatever its material. Kept as a data dial (F6,
-`passage: Partial`): a direction spent by `chord × factor` through every hard body, stopping where
-that exhausts it or where it leaves the struck tank, dosing each box it enters at its strength
-there — graded shadowing (a plate nearly always stops it, an engine block mostly). Under either, a
-witness (§6) never stops or spends a direction: each one it enters short of where it stops is
-dosed at its strength there, so crew never shield crew. The `1/r²` fall-off is not a parameter: a
-box farther away covers fewer directions.
+doses only the struck tank's boxes (hitting another tank is a preserved alternative). **Full
+shadowing** (owner, 2026-10-17): a direction stops at the first hard body it enters. Armour takes
+nothing and stops it, a hard box takes its whole strength and stops it, so whatever hard body lies
+first shields everything behind it, whatever its material; a direction that enters none ends where
+it leaves the struck tank. A witness (§6) never stops a direction: each one it enters short of
+where it stops is dosed at its strength, so crew never shield crew. The `1/r²` fall-off is not a
+parameter: a box farther away covers fewer directions.
 
 **Walk.** A direction is walked like the line's corridors: the collector and the pairing walk along
 the whole ray through the struck tank, from outside every candidate's bounds through the throw
 point, with nothing declared. So what it starts inside is established, never assumed, and every
 volume along it is present in order, nested and overlapping ones included. No nudge displaces the
 ray: the volumes the exit leaves are recognised by identity, so a direction starting inside one of
-them has not entered it and does not dose it there (under the partial passage it still pays for
-that material). Under full shadowing a direction that starts inside another volume has entered it
-at the throw point.
+them has not entered it and is neither stopped nor dosed by it there. A direction that starts inside
+any other volume has entered it at the throw point.
 
-**Dose.** A box's dose from one cone is `D_b = (1/N) Σ s_i` over the directions that dose it —
-under full shadowing those stopped in it, under the partial passage those entering it, and a
-witness every one entering it, at their strength there — each direction dosing a box once, in the count unit (reference-mm), never scaled
-by the box's own factor; armour (no count) takes nothing. Doses go through the addressed `Dose`
-effect, like the line's. A box's dose from the whole shot (the line, a bounce's shock and every
-cone) becomes whole HP points once, on its total (§6). Every field deposit, to a hard box and a
-witness alike, enters that total at the field's own calibration (`hp_per_reference_mm` in
-`spall_cone.ron`, TUNED 70 HP points per reference-mm against the line's 10) and nothing on the
-line or a bounce's shock does; `S` stays in reference-mm, so the calibration sets every cone's
-potency at once and the HP quantum gate tests `S/2` at it. A box of face `A` fully inside the cone,
-`θ` off its axis, has the knockout radius `R = sqrt(2 f(θ) E A / (pool Ω_c))`, `E = S/2`,
-`Ω_c = 2π(1 − cos α)` and `f(θ)` the ball's weight there (½ averaged over the cone): the same for
-every box of a class whose pool is class × `A` (§6). On a weak ordinary perforation through RHA, for
-the 30 HP crew pool at the intended humanoid's 0.2 m² face, it is about 1.9 m at an average spot and
-2.5 m on the axis, 3.1 m and 4.0 m at the placeholder crew box's 0.516 m² (DERIVED in
-`spall_cone.ron`). The rate stays 70 under the ball (owner, 2026-10-23, night): lowering it to hold
-the on-axis radius would weaken every cone. Dose summed over boxes is not conserved under the partial passage (two thin
-boxes in line both take nearly full strength); the emitted budget is.
+**Dose.** A box's dose from one cone is `D_b = (1/N) Σ s_i` over the directions that dose it — a
+hard box those stopped in it, a witness every one entering it short of its stop — each direction
+dosing a box once, in the count unit (reference-mm), never scaled by the box's own factor; armour
+(no count) takes nothing. Doses go through the addressed `Dose` effect, like the line's. A box's
+dose from the whole shot (the line, a bounce's shock and every cone) becomes whole HP points once,
+on its total (§6). Every field deposit, to a hard box and a witness alike, enters that total at the
+field's own calibration (`hp_per_reference_mm` in `spall_cone.ron`, TUNED 70 HP points per
+reference-mm against the line's 10) and nothing on the line or a bounce's shock does; `S` stays in
+reference-mm, so the calibration sets every cone's potency at once and the HP quantum gate tests
+`S/2` at it. A box of face `A` fully inside the cone, `θ` off its axis, has the knockout radius
+`R = sqrt(2 f(θ) E A / (pool Ω_c))`, `E = S/2`, `Ω_c = 2π(1 − cos α)` and `f(θ)` the ball's weight
+there (½ averaged over the cone): the same for every box of a class whose pool is class × `A` (§6).
+On a weak ordinary perforation through RHA, for the 30 HP crew pool at the intended humanoid's 0.2
+m² face, it is about 1.9 m at an average spot and 2.5 m on the axis, 3.1 m and 4.0 m at the
+placeholder crew box's 0.516 m² (DERIVED in `spall_cone.ron`). The rate stays 70 under the ball
+(owner, 2026-10-23, night): lowering it to hold the on-axis radius would weaken every cone. Dose
+summed over boxes is not conserved (a direction doses every witness it enters short of its stop as
+well as the hard box that stops it); the emitted budget is.
 
 **Potency colour.** The pen cam colours a field by its potency, never by a display gain (decision
 record `.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md`,
@@ -399,7 +395,7 @@ perspective, the distance along the camera's forward in orthographic. The outsid
 tank seen whole) keeps the body in front and the volume unbounded. The trail and the rings are
 outside the order. Mechanism and entry points: `src/damage_cam/pen_cam/look.rs`, module doc.
 
-**Data.** The axis rule, `N` and the passage live in `assets/ballistics/spall_cone.ron`, parsed
+**Data.** The axis rule and `N` live in `assets/ballistics/spall_cone.ron`, parsed
 and validated while the app is built (ADR-0014: built from data, synchronously). A cone's ratio is
 its exit layer's substance's: every hard substance authors `debris_half_angle_deg`
 (`assets/materials/materials.ron`, `λ = 1/sin α`), refused at load outside `(0°, 90°]`. The exit
@@ -410,29 +406,26 @@ fit of the MEASURED Qi et al. 2026 normal-impact debris extents (shots 5 and 6, 
 substance authors RHA's value as Unknown until its own extent is measured. A spread whose rim's
 `cos α` rounds to 1, or which does not emit `S/2` within the rounding of its weights, is refused,
 and a throw whose ratio the law refuses throws nothing. The axis is playtest fork F5 (its
-half-angle settled by this), the passage F6 (its profile settled by the ball)
-(`.agents/scratch/playtest-forks/README.md`).
+half-angle settled by this; `.agents/scratch/playtest-forks/README.md`).
 
 **Class invariants** (tests hold them for any tank and any cone; fixture numbers are fixture data).
 Exact emission `S/2` at every N from 1 to 1024 and every ratio from 1 to 10⁴; under the ball at a
-fixture ratio and every passage: resolution stability;
-homogeneity in `S` where no direction is exhausted; inverse square for an unshadowed thin box;
+fixture ratio: resolution stability; homogeneity in `S`; inverse square for an unshadowed thin box;
 factor independence of a box's own dose; shadowing monotone (adding a volume never raises a dose).
 κ is 1 to the bit for the reference and proportional otherwise; a cone below the HP quantum is not
-thrown; a shot's dose to a box is rounded once on its total. Full shadowing: a direction stops at
-the first volume it enters, a box there taking its whole strength, armour nothing. The partial
-passage: a dose never falls as the strength rises through a plate; shadowing monotone along one
-direction through randomized stacks; a direction pays for the material it starts inside, a nested
-shield shadows, a box inside a traversed volume is dosed, a plate thinner than any nudge is
-charged. The ball's weights are its strata's shares of the emission, never grow from the axis to the
-rim, and leave the rim stratum a graze; its continuous weight is zero at and past the rim; a thrown
-cone's field is its exit layer's substance's, and its rays' strengths are `S·f_k` of that field to
-the bit. Witnesses: adding one never
-changes the shell's state, any direction's reach or any hard box's dose; a witness behind a witness
-is dosed as it would be alone. The shipped cone's
-walks, and six whole main-gun shots at the bound tank (exit detection, spends and speeds, strength,
-axis, walks, HP points), are digested on every target by `src/ballistics/field_casts.rs`; the force
-law's transcendentals are `libm`'s, so a shot's spall sources are the same bits everywhere.
+thrown; a shot's dose to a box is rounded once on its total. A direction stops at the first volume
+it enters, a box there taking its whole strength, armour nothing and shielding what lies behind;
+a plate thinner than any nudge stops it; it is neither stopped nor dosed by a volume its throw
+leaves, and has entered any other it starts inside at the throw point. The ball's weights are its
+strata's shares of the emission, never grow from the axis to the rim, and leave the rim stratum a
+graze; its continuous weight is zero at and past the rim; a thrown cone's field is its exit layer's
+substance's, and its rays' strengths are `S·f_k` of that field to the bit. Witnesses: adding one
+never changes the shell's state, any direction's reach or any hard box's dose; a witness behind a
+witness is dosed as it would be alone; a witness takes what a hard box in its place would, and
+nothing past the hard body that stops a direction. The shipped cone's walks, and six whole
+main-gun shots at the bound tank (exit detection, spends and speeds, strength, axis, walks, HP
+points), are digested on every target by `src/ballistics/field_casts.rs`; the force law's
+transcendentals are `libm`'s, so a shot's spall sources are the same bits everywhere.
 
 **Not built.** The blast sphere; plate failure mode (coherent plug vs distributed debris)
 selected by material and impact conditions. **HE** stays a separate, penetration-independent

@@ -29,7 +29,7 @@
 //! # Fields
 //!
 //! A spall cone's directions are walked by the same collector and pairing walk as the line's
-//! corridors ([`field_presence`]), and spent and dosed over the ordered presence it returns
+//! corridors ([`field_presence`]), and stopped and dosed over the ordered presence it returns
 //! ([`field_direction`]). The field law they serve — strength, profile, shadowing, dose — is the
 //! design doc's §5 (`.agents/docs/design/armor-penetration-and-damage.md`).
 //!
@@ -46,8 +46,7 @@ use avian3d::prelude::{Collider, Forces, Position, Rotation, SimpleCollider};
 use bevy::prelude::*;
 
 use super::collect::{self, Corridor};
-use super::mechanism::{Dose, DoseSource, Limits, Mechanism, SolidShot, overlap_of};
-use super::spall_cone::Passage;
+use super::mechanism::{Dose, DoseSource, Limits, Mechanism, SolidShot};
 use super::walk::{
     self, Begin, DiscCorridor, DiscFrame, DiscWalk, Outcome, RayCorridor, SampleCorridor,
     SampleSeed, ShellKey, Shot, SpallSource, VolumeTable, WalkError, WalkLaws,
@@ -489,9 +488,8 @@ pub(crate) fn certified(
 /// One direction of a field, walked ([`field_direction`]).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FieldRay {
-    /// Where the direction ended: inside the hard volume that exhausted or stopped it, or where it
-    /// left the last hard volume of the struck tank it crossed. One that meets no hard volume ahead
-    /// ends at the struck tank's horizon ([`horizon`]). Witness-independent.
+    /// Where the direction ended: where it entered the hard volume that stopped it, or, entering
+    /// none, at the struck tank's horizon ([`horizon`]). Witness-independent.
     pub end: Vec3,
     /// The doses it addressed, in entry order.
     pub doses: Vec<Dose>,
@@ -620,49 +618,29 @@ pub(crate) fn field_presence(
 }
 
 /// March one direction of a field thrown from the world point `at` through the volumes `within`
-/// admits (the struck tank's), from its ordered presence ([`field_presence`]): the hard world's
-/// spend and reach first, then the witnesses along it ([`super::wound::entries`]).
+/// admits (the struck tank's), from its ordered presence ([`field_presence`]): where the hard world
+/// stops it ([`first_solid`]), then the witnesses along it ([`super::wound::entries`]).
 ///
-/// `strength` (reference-mm) is constant in air and spent by `chord × factor` through each SPAN in
-/// order: a maximal run of consecutive layers over which the governing factor — the union-field
-/// overlap rule's ([`overlap_of`]) — is one value, coalesced as the line walker coalesces its own
-/// spans. The layers inside a span only address doses. Entering a volume that `is_box` (an
-/// HP-bearing one), the direction doses it `strength × weight` — its strength at entry, the span's
-/// strength less `factor` times the progress into the span, times its share of the field — once,
-/// never scaled by the box's factor; armour shadows and takes nothing. A volume the direction starts
-/// inside it enters at `at`, except one of `exited`, the volumes the throw leaves: the direction has
-/// not entered them there. It stops where its strength is exhausted, inside the span at
-/// `strength / factor` of it, or where it leaves the last admitted volume.
-///
-/// Under [`Passage::FirstSolid`] the direction instead stops at the first volume it enters
-/// (`exited` ones aside, while it is still leaving them): a box there takes `strength × weight`,
-/// armour takes nothing, and nothing beyond is reached. The span law below is [`Passage::Partial`]'s.
+/// `strength` (reference-mm) is constant along the direction. It stops where it enters the first
+/// volume: one it starts inside it enters at `at`, except one of `exited`, the volumes the throw
+/// leaves, which it has not entered while it is still leaving them. That volume, when it `is_box`
+/// (an HP-bearing one), takes `strength × weight`, never scaled by its own factor; armour takes
+/// nothing; nothing beyond is reached. A direction that enters no volume (`exited` ones it is
+/// leaving aside) ends at the struck tank's [`horizon`], so its reach does not depend on what
+/// witnesses lie along it. A direction of no positive strength doses nothing.
 ///
 /// Every volume above is hard: a witness (ADR-0040) is never a layer of the presence, so it neither
-/// spends, nor stops, nor shadows. Each witness `within` admits that the direction's line enters
-/// short of where it stopped — exhausted, or under `FirstSolid` at the first hard body; a direction
-/// that left the last hard body goes on — takes the strength arriving at its first presence times
-/// `weight`, once, by the same arithmetic as a hard box at the same point (a witness holding `at`
-/// is entered there). `end` and every hard dose are what they would be with no witness present.
-/// The doses are in entry order, a hard box before a witness entered at the same point. A witness
-/// pass that fails doses no witness and leaves `end` and the hard doses as they are
+/// stops nor shadows. Each witness `within` admits that the direction's line enters short of where
+/// it stopped takes `strength × weight`, once, the arithmetic of a hard box's dose (a witness
+/// holding `at` is entered there). `end` and the hard dose are what they would be with no witness
+/// present. The doses are in entry order, a hard box before a witness entered at the same point. A
+/// witness pass that fails doses no witness and leaves `end` and the hard dose as they are
 /// ([`FieldRay::witness_error`]).
 ///
-/// A direction that enters no hard volume (`exited` ones it is leaving aside) is never exhausted
-/// and ends at the struck tank's [`horizon`], so its reach does not depend on what witnesses lie
-/// along it.
-///
-/// MONOTONICITY, exactly as it holds. The strength arriving at a point, and the point where it is
-/// exhausted, are computed from the spans before it and the point's own position alone: a presence
-/// boundary that leaves the governing factor unchanged takes no part. So material that leaves the
-/// governing factor unchanged at every point (softer material inside harder, equal-factor material
-/// in contact) changes no bit of the strength arriving anywhere, and so of no other box's dose,
+/// MONOTONICITY. Every dose is `strength × weight` or nothing, and adding a volume can only move
+/// the stop to an earlier entry or leave it where it is, so it raises no other volume's dose,
 /// provided the walk's start is unchanged: added bounds that reach behind `at` move the start, and
-/// every boundary's f64 position with it. Material that raises the governing factor over a stretch
-/// lowers every strength beyond it in exact arithmetic, since a maximum cannot fall when a factor
-/// is added; in f64 that holds up to the rounding of the spans the raise splits one into, one
-/// product and one subtraction each (DERIVED: a few ulp of the larger of the strength and those
-/// spans' costs), so only a raise whose own cost is within that rounding is not guaranteed to show.
+/// every boundary's f64 position with it.
 #[expect(
     clippy::too_many_arguments,
     reason = "the field kernel: the world, the struck tank, the throw and the direction's own state"
@@ -676,45 +654,40 @@ pub(crate) fn field_direction(
     dir: Dir3,
     strength: f32,
     weight: f32,
-    passage: Passage,
 ) -> Result<FieldRay, WalkError> {
-    let (mut end, mut doses, profile, met) = match field_presence(context, within, at, dir)? {
-        None => (at, Vec::new(), Profile::air(strength, 0.0), false),
-        Some((start, walked)) => {
-            let layers: Vec<&walk::Layer> = walked
-                .layers
-                .iter()
-                .filter(|layer| layer.end > start)
-                .collect();
-            if passage == Passage::FirstSolid {
-                first_solid(&layers, start, at, dir, strength, weight, is_box, exited)
-            } else {
-                partial(&layers, start, at, dir, strength, weight, is_box, exited)
-            }
-        }
+    let (start, stop) = match field_presence(context, within, at, dir)? {
+        None => (0.0, None),
+        Some((start, walked)) => (start, first_solid(&walked.layers, start, exited, is_box)),
     };
-    if !met && !profile.reach.is_finite() {
-        end = horizon(context, within, at, dir);
-    }
-    let reach = if profile.reach.is_finite() {
-        (profile.reach - profile.start) as f32
+    let dose = |address: Entity| Dose {
+        address,
+        amount: strength * weight,
+        source: DoseSource::Field,
+    };
+    // `reach`: the stop's progress along the walk, infinite for a direction that entered nothing.
+    let (end, reach, mut doses) = match stop {
+        Some((t, entered)) => (
+            at + Vec3::from(dir) * (t - start) as f32,
+            t,
+            entered
+                .filter(|_| strength > 0.0)
+                .map(|volume| (t, dose(volume)))
+                .into_iter()
+                .collect::<Vec<(f64, Dose)>>(),
+        ),
+        None => (horizon(context, within, at, dir), f64::INFINITY, Vec::new()),
+    };
+    let ahead = if reach.is_finite() {
+        (reach - start) as f32
     } else {
         MAX_CORRIDOR
     };
-    let witness_error = match super::wound::entries(context, within, at, dir, reach) {
+    let witness_error = match super::wound::entries(context, within, at, dir, ahead) {
         Ok(entered) => {
             for (witness, t) in entered {
-                let t = profile.start + t;
-                let arriving = profile.at(t);
-                if t < profile.reach && arriving > 0.0 && is_box(witness) {
-                    doses.push((
-                        t,
-                        Dose {
-                            address: witness,
-                            amount: (arriving * weight as f64) as f32,
-                            source: DoseSource::Field,
-                        },
-                    ));
+                let t = start + t;
+                if t < reach && strength > 0.0 && is_box(witness) {
+                    doses.push((t, dose(witness)));
                 }
             }
             None
@@ -765,194 +738,32 @@ fn horizon(
     }
 }
 
-/// One field direction's strength along its walk, which starts `start` behind its throw point:
-/// `strength` at the start, falling by `factor` per metre through each `(from, to, factor)` span
-/// in order and constant between them, exhausted at `reach` (infinite for a direction that left
-/// the last hard body unspent).
-struct Profile {
-    start: f64,
-    strength: f64,
-    spans: Vec<(f64, f64, f64)>,
-    reach: f64,
-}
-
-impl Profile {
-    /// A constant strength, never exhausted.
-    fn air(strength: f32, start: f64) -> Self {
-        Profile {
-            start,
-            strength: strength as f64,
-            spans: Vec::new(),
-            reach: f64::INFINITY,
-        }
-    }
-
-    /// The strength arriving at `t`, by the arithmetic the partial law doses a hard box with: the
-    /// span's strength less `factor` times the progress into it.
-    fn at(&self, t: f64) -> f64 {
-        let mut strength = self.strength;
-        for &(from, to, factor) in &self.spans {
-            if t <= from {
-                break;
-            }
-            if t < to {
-                return strength - (t - from) * factor;
-            }
-            strength -= (to - from) * factor;
-        }
-        strength
-    }
-}
-
-/// One direction under [`Passage::Partial`] ([`field_direction`]): its end, its hard doses with
-/// their entry points, its [`Profile`], and whether it entered any volume.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the direction's walk and its throw, as `field_direction` holds them"
-)]
-fn partial(
-    layers: &[&walk::Layer],
-    start: f64,
-    at: Vec3,
-    dir: Dir3,
-    strength: f32,
-    weight: f32,
-    is_box: &dyn Fn(Entity) -> bool,
-    exited: &[Entity],
-) -> (Vec3, Vec<(f64, Dose)>, Profile, bool) {
-    let mut profile = Profile::air(strength, start);
-    let mut met = false;
-    let factor_of =
-        |layer: &walk::Layer| overlap_of(layer.present.iter().map(|p| p.material.factor));
-    // Strength at the start of the current span.
-    let mut strength = strength as f64;
-    let mut end = start;
-    let mut doses: Vec<(f64, Dose)> = Vec::new();
-    let mut previous: &[walk::Presence] = &[];
-    let mut first = 0;
-    while first < layers.len() {
-        // The span: this layer and every following one the governing factor does not change over.
-        let governing = factor_of(layers[first]);
-        let last = (first + 1..layers.len())
-            .take_while(|&index| factor_of(layers[index]).to_bits() == governing.to_bits())
-            .last()
-            .unwrap_or(first);
-        let from = layers[first].start.max(start);
-        let to = layers[last].end;
-        let factor = governing as f64;
-        let cost = (to - from) * factor;
-        profile.spans.push((from, to, factor));
-        for (index, layer) in layers.iter().enumerate().take(last + 1).skip(first) {
-            // The span's first layer is entered with the span's strength itself.
-            let entered_at = layer.start.max(start);
-            let arriving = strength - (entered_at - from) * factor;
-            for presence in &layer.present {
-                let volume = presence.volume;
-                let entered = !previous.iter().any(|before| before.volume == volume)
-                    && !(index == 0 && exited.contains(&volume));
-                met |= entered;
-                if entered
-                    && arriving > 0.0
-                    && is_box(volume)
-                    && !doses.iter().any(|(_, dose)| dose.address == volume)
-                {
-                    doses.push((
-                        entered_at,
-                        Dose {
-                            address: volume,
-                            amount: (arriving * weight as f64) as f32,
-                            source: DoseSource::Field,
-                        },
-                    ));
-                }
-            }
-            if !layer.present.is_empty() {
-                end = layer.end;
-            }
-            previous = &layer.present;
-        }
-        if cost > 0.0 && cost >= strength {
-            end = from + (to - from) * (strength / cost);
-            profile.reach = end;
-            break;
-        }
-        strength -= cost;
-        first = last + 1;
-    }
-    (
-        at + Vec3::from(dir) * (end - start) as f32,
-        doses,
-        profile,
-        met,
-    )
-}
-
-/// One direction under [`Passage::FirstSolid`] ([`field_direction`]): stopped where it enters the
-/// first hard volume of `layers` that is not one of `exited` it is still leaving; that volume, when it
-/// `is_box`, takes `strength × weight`. A direction that enters none ends where the last presence
-/// it crossed ends, as under the partial law. Its [`Profile`] is constant up to that stop; the
-/// flag is whether it entered a volume.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the direction's walk and its throw, as `field_direction` holds them"
-)]
+/// Where a direction walked over `layers`, from the progress `start` of its throw point, stops
+/// ([`field_direction`]): the progress at which it enters the first volume that is not one of
+/// `exited` it is still leaving, and the first of the volumes it enters there that `is_box`.
+/// `None` when it enters none. Layers that end at or before `start` lie behind the throw point and
+/// take no part.
 fn first_solid(
-    layers: &[&walk::Layer],
+    layers: &[walk::Layer],
     start: f64,
-    at: Vec3,
-    dir: Dir3,
-    strength: f32,
-    weight: f32,
-    is_box: &dyn Fn(Entity) -> bool,
     exited: &[Entity],
-) -> (Vec3, Vec<(f64, Dose)>, Profile, bool) {
-    let mut profile = Profile::air(strength, start);
+    is_box: &dyn Fn(Entity) -> bool,
+) -> Option<(f64, Option<Entity>)> {
     let mut leaving: Vec<Entity> = exited.to_vec();
-    let mut end = start;
-    for layer in layers {
+    for layer in layers.iter().filter(|layer| layer.end > start) {
         leaving.retain(|volume| layer.present.iter().any(|p| p.volume == *volume));
-        let met: Vec<Entity> = layer
+        let entered: Vec<Entity> = layer
             .present
             .iter()
             .map(|presence| presence.volume)
             .filter(|volume| !leaving.contains(volume))
             .collect();
-        if !met.is_empty() {
-            let at_t = layer.start.max(start);
-            let doses = met
-                .iter()
-                .find(|volume| is_box(**volume))
-                .filter(|_| strength > 0.0)
-                .map(|volume| {
-                    (
-                        at_t,
-                        Dose {
-                            address: *volume,
-                            amount: strength * weight,
-                            source: DoseSource::Field,
-                        },
-                    )
-                })
-                .into_iter()
-                .collect();
-            profile.reach = at_t;
-            return (
-                at + Vec3::from(dir) * (at_t - start) as f32,
-                doses,
-                profile,
-                true,
-            );
-        }
-        if !layer.present.is_empty() {
-            end = layer.end;
+        if !entered.is_empty() {
+            let at = layer.start.max(start);
+            return Some((at, entered.into_iter().find(|volume| is_box(*volume))));
         }
     }
-    (
-        at + Vec3::from(dir) * (end - start) as f32,
-        Vec::new(),
-        profile,
-        false,
-    )
+    None
 }
 
 /// The state successive crossings read and advance: where the round is, where it is going, and the

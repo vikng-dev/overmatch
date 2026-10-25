@@ -36,19 +36,11 @@
         reference-mm). The count changes how finely a box's dose is resolved, never the emitted
         total")),
 
-    // How a direction passes through the hard bodies it meets. `FirstSolid`: stopped by the first
-    // hard body it enters, a box there taking its whole strength, armour none. `Partial`: spent by
-    // chord × factor through every hard body, dosing each box it enters at its strength there.
-    // Under either, a crew witness is dosed and stops nothing (ADR-0040).
-    passage: (FirstSolid, Tuned("owner decision 2026-10-17 (playtest fork F6): full shadowing, so
-        a hard box shields what lies behind it whatever its material; Partial, graded by material,
-        is kept as the dial")),
-
     // The field's calibration: HP points per reference-mm of field dose, where the line converts
     // at `ballistics::HP_PER_REFERENCE_MM`. A field deposit of d reference-mm enters a box's
     // per-shot dose as d × this / that, in whole dose units; the cone's strength S stays in
-    // reference-mm. It sets the potency of every cone at once and nothing else: the shape, the
-    // field law and the passage all conserve a cone's emitted total.
+    // reference-mm. It sets the potency of every cone at once and nothing else: the shape and the
+    // field law both conserve a cone's emitted total.
     hp_per_reference_mm: (70, Tuned("owner decision 2026-10-23 (#2 in
         .agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md):
         the 30 HP crew pool (box_classes.ron) with a 0.2 m² face, the intended humanoid's

@@ -1,8 +1,7 @@
-//! The spall cone's shape — its axis rule, the directions it is sampled by and how a direction
-//! passes through what it meets —, the field law that weights those directions and sets the
-//! cone's half-angle ([`FieldDescriptor`]), the field's calibration, its HP points per
-//! reference-mm ([`hp_per_reference_mm`]) and the calibre that rate was set against
-//! ([`reference_calibre`]), and a burst's field data ([`BurstFields`]), read from
+//! The spall cone's shape — its axis rule and the directions it is sampled by —, the field law
+//! that weights those directions and sets the cone's half-angle ([`FieldDescriptor`]), the field's
+//! calibration, its HP points per reference-mm ([`hp_per_reference_mm`]) and the calibre that rate
+//! was set against ([`reference_calibre`]), and a burst's field data ([`BurstFields`]), read from
 //! `assets/ballistics/spall_cone.ron`.
 //! The law the shape serves — strength, profile, shadowing, dose — is design doc §5
 //! (`.agents/docs/design/armor-penetration-and-damage.md`); the throw that applies it is
@@ -19,9 +18,7 @@
 //! material's. A burst's ball may run below `λ = 1` (design doc §5a, "The burst"), where it fills
 //! the whole sphere: `F = (1 + λ − μg)(2 + λ − λ² + λμg)/4`, `g = λμ + D`, the `m = 3` law's
 //! closed form, uniform at `λ = 0`. Under [`FieldLaw::Ring`], a burst's ring, the field is uniform
-//! over the band `θ_c ∓ h` about `θ_c = atan(1/λ)`, its near edge held at the axis. The passage
-//! stays a data-selectable dial (playtest fork F6): the shipped [`Passage::FirstSolid`] and the
-//! kept [`Passage::Partial`].
+//! over the band `θ_c ∓ h` about `θ_c = atan(1/λ)`, its near edge held at the axis.
 //!
 //! # Directions
 //!
@@ -308,18 +305,6 @@ impl FieldDescriptor {
     }
 }
 
-/// How a direction of the cone passes through the hard bodies it meets. Under either, a witness
-/// (ADR-0040) is dosed at the strength entering it and neither spends nor stops the direction.
-#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Passage {
-    /// Spent by `chord × factor` through every hard body in turn; each box it enters is dosed at
-    /// its strength there, and it goes on until spent.
-    Partial,
-    /// Stopped by the first hard body it enters: a box there takes its whole strength, armour
-    /// none.
-    FirstSolid,
-}
-
 /// The cone shape a world's march throws, in place of the shipped one: inserted by a world that
 /// measures another shape (the throw-cost probe, `pen_cam::spall_law_cost`).
 #[derive(Resource, Clone, Debug)]
@@ -340,7 +325,6 @@ pub(crate) enum AxisRule {
 struct ShapeFile {
     axis: Sourced<AxisRule>,
     directions: Sourced<usize>,
-    passage: Sourced<Passage>,
     hp_per_reference_mm: Sourced<u64>,
     reference_calibre_m: Sourced<f32>,
     burst: BurstFile,
@@ -401,8 +385,7 @@ impl BurstFields {
             ));
         }
         let shape = |directions: usize, field: &str| {
-            ConeShape::new(file.axis.0, directions, file.passage.0)
-                .map_err(|err| format!("burst.{field}: {err}"))
+            ConeShape::new(file.axis.0, directions).map_err(|err| format!("burst.{field}: {err}"))
         };
         Ok(Self {
             reference_mm_per_kj,
@@ -534,7 +517,6 @@ struct Stratum {
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct ConeShape {
     axis: AxisRule,
-    passage: Passage,
     /// `(cos φ_k, sin φ_k)` of each direction's golden-angle azimuth, in stratum order.
     azimuths: Vec<(f64, f64)>,
 }
@@ -556,9 +538,9 @@ const MAX_DIRECTIONS: usize = 65_536;
 const EMISSION_TOLERANCE: f64 = f32::EPSILON as f64;
 
 impl ConeShape {
-    /// A shape of `directions` strata about an axis chosen by `axis`, its directions passing as
-    /// `passage`. Refuses a direction count outside `1..=MAX_DIRECTIONS`.
-    pub(crate) fn new(axis: AxisRule, directions: usize, passage: Passage) -> Result<Self, String> {
+    /// A shape of `directions` strata about an axis chosen by `axis`. Refuses a direction count
+    /// outside `1..=MAX_DIRECTIONS`.
+    pub(crate) fn new(axis: AxisRule, directions: usize) -> Result<Self, String> {
         if !(1..=MAX_DIRECTIONS).contains(&directions) {
             return Err(format!(
                 "directions must be in 1..={MAX_DIRECTIONS} (got {directions})"
@@ -570,11 +552,7 @@ impl ConeShape {
                 (libm::cos(phi), libm::sin(phi))
             })
             .collect();
-        Ok(Self {
-            axis,
-            passage,
-            azimuths,
-        })
+        Ok(Self { axis, azimuths })
     }
 
     /// Parse and validate a shape file.
@@ -586,7 +564,7 @@ impl ConeShape {
 
     /// Validate `file`'s shape sampled by `directions` strata.
     fn from_file(file: ShapeFile, directions: usize) -> Result<Self, String> {
-        Self::new(file.axis.0, directions, file.passage.0)
+        Self::new(file.axis.0, directions)
     }
 
     /// The shipped shape sampled by `directions` strata in place of its own count: a probe of how
@@ -613,20 +591,6 @@ impl ConeShape {
     /// N.
     pub(crate) fn directions_count(&self) -> usize {
         self.azimuths.len()
-    }
-
-    /// How each direction passes through what it meets.
-    pub(crate) fn passage(&self) -> Passage {
-        self.passage
-    }
-
-    /// This shape under `passage` instead.
-    #[cfg(test)]
-    pub(crate) fn with_passage(&self, passage: Passage) -> Self {
-        Self {
-            passage,
-            ..self.clone()
-        }
     }
 
     /// Each direction's `(cos φ_k, sin φ_k)`, in stratum order.
@@ -809,7 +773,7 @@ mod tests {
     }
 
     fn shape(directions: usize) -> ConeShape {
-        ConeShape::new(AxisRule::RearNormalBisector, directions, Passage::Partial).unwrap()
+        ConeShape::new(AxisRule::RearNormalBisector, directions).unwrap()
     }
 
     fn spread(directions: usize, ratio: f32) -> Spread {
@@ -826,7 +790,7 @@ mod tests {
     fn file(fields: &str) -> String {
         format!(
             r#"({fields}, directions: (24, Resolution("fixture")),
-            passage: (Partial, Tuned("fixture")), hp_per_reference_mm: (70, Tuned("fixture")),
+            hp_per_reference_mm: (70, Tuned("fixture")),
             reference_calibre_m: (0.088, Tuned("fixture")), {BURST})"#
         )
     }
@@ -840,30 +804,25 @@ mod tests {
     fn burst_file(fields: &str) -> String {
         format!(
             r#"(axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")),
-            passage: (Partial, Tuned("fixture")), hp_per_reference_mm: (70, Tuned("fixture")),
+            hp_per_reference_mm: (70, Tuned("fixture")),
             reference_calibre_m: (0.088, Tuned("fixture")), burst: ({fields}))"#
         )
     }
 
     /// A shape outside its domain is refused at parse, and so is a slot the shape does not declare:
-    /// the half-angle is the exit material's and the profile the law's, so a file that authors
-    /// either is refused rather than read past.
+    /// the half-angle is the exit material's, the profile the law's and a direction's passage
+    /// through what it meets the resolver's, so a file that authors any of them is refused rather
+    /// than read past.
     #[test]
     fn a_shape_outside_the_domain_is_refused() {
-        assert!(ConeShape::new(AxisRule::ExitDirection, 0, Passage::Partial).is_err());
-        assert!(
-            ConeShape::new(
-                AxisRule::ExitDirection,
-                MAX_DIRECTIONS + 1,
-                Passage::Partial
-            )
-            .is_err()
-        );
+        assert!(ConeShape::new(AxisRule::ExitDirection, 0).is_err());
+        assert!(ConeShape::new(AxisRule::ExitDirection, MAX_DIRECTIONS + 1).is_err());
         assert!(ConeShape::from_ron(&file(r#"axis: (ExitDirection, Tuned("fixture"))"#)).is_ok());
         for undeclared in [
             r#"axis: (ExitDirection, Tuned("fixture")), half_angle_deg: (25.0, Tuned("fixture"))"#,
             r#"axis: (ExitDirection, Tuned("fixture")), profile: (Flat, Tuned("fixture"))"#,
             r#"axis: (ExitDirection, Tuned("fixture")), range: (6.0, Tuned("fixture"))"#,
+            r#"axis: (ExitDirection, Tuned("fixture")), passage: (Partial, Tuned("fixture"))"#,
         ] {
             assert!(
                 ConeShape::from_ron(&file(undeclared)).is_err(),
@@ -894,10 +853,6 @@ mod tests {
             (
                 r#"directions: (24, Resolution("fixture"))"#,
                 "directions: 24",
-            ),
-            (
-                r#"passage: (Partial, Tuned("fixture"))"#,
-                "passage: FirstSolid",
             ),
             (
                 r#"hp_per_reference_mm: (70, Tuned("fixture"))"#,
@@ -1397,7 +1352,7 @@ mod tests {
         assert!((to_normal + to_exit - std::f32::consts::FRAC_PI_4).abs() < 1.0e-6);
 
         assert_eq!(shape.axis(None, oblique), oblique);
-        let along = ConeShape::new(AxisRule::ExitDirection, 24, Passage::Partial).unwrap();
+        let along = ConeShape::new(AxisRule::ExitDirection, 24).unwrap();
         assert_eq!(along.axis(Some(normal), oblique), oblique);
     }
 

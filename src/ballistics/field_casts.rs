@@ -34,9 +34,9 @@
 //! 1. the ordered presence a direction is walked over ([`resolve::field_presence`]), with no
 //!    strength: the progress of the ray's origin, then every layer as its `[start, end)` and the
 //!    volumes present over it (stable identity and factor);
-//! 2. [`resolve::field_direction`] itself, through the probe tank's volumes under the shipped
-//!    passage: the ray's end and every dose it addresses (box and amount, in reference-mm) are
-//!    recorded, and each box's dose accumulates in f32 in ray order;
+//! 2. [`resolve::field_direction`] itself, through the probe tank's volumes: the ray's end and
+//!    every dose it addresses (box and amount, in reference-mm) are recorded, and each box's dose
+//!    accumulates in f32 in ray order;
 //! 3. the witness pass's line ([`super::wound::line`]) along the ray, on a fixture disc at a
 //!    fixture wound rate: every witness's chord and raw dose, before any rounding to HP.
 //!
@@ -485,7 +485,6 @@ fn cast_pose(app: &mut App, layout: &Layout, pose: Pose) -> Vec<Record> {
                         ray.dir,
                         ray.strength,
                         ray.weight,
-                        ConeShape::shipped().passage(),
                     )
                     .unwrap_or_else(|error| panic!("{}: the walk failed: {error:?}", ray.label));
                     output.push_str(" end ");
