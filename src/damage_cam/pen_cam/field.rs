@@ -58,9 +58,9 @@ const ENDING_SLACK_M: f32 = 1.0e-3;
 const OCTAHEDRAL_TURN: f32 = 3.0;
 /// The texel diagonals past the support's edges a map bakes, each at most
 /// `OCTAHEDRAL_TURN · √2 · 2 · zoom / MAP_SIDE` rad: a bilinear read on the support blends texels at
-/// most one diagonal off it, and the second keeps whole a read up to a diagonal inside an edge,
-/// where a footprint's pixel-wide edge reads. Every texel farther off holds zero.
-const SUPPORT_MARGIN_DIAGONALS: f32 = 2.0;
+/// most one diagonal off it, and the look reads the map on the support alone (`pen_cam_look.wgsl`,
+/// `field_at`). Every texel farther off holds zero.
+const SUPPORT_MARGIN_DIAGONALS: f32 = 1.0;
 
 /// A field's recorded directions as one function of direction, baked onto an octahedral map about
 /// the field's axis: [`MAP_TEXELS`]² texels, row by row, each the `(reach m, strength ref-mm)` the
@@ -872,11 +872,11 @@ pub(super) mod tests {
 
     /// The map reads the record: a reach and a strength linear in the direction come back from a
     /// bilinear read of the map at every direction well inside the directions' hull, and the read
-    /// at a texel's centre is that texel. The volume and the footprints read the record through
-    /// it; a map read on swapped axes, a wrong barycentric weight, a misplaced bilinear corner or
-    /// a gutter off by a texel fails here. Fixture: a cap of 64 directions; directions within
-    /// 18° of its 25° axis lie inside their hull; tolerance the bilinear read's curvature error
-    /// over a 0.24° texel (DERIVED, under 1e-4 of a unit-slope function).
+    /// at a texel's centre is that texel. The volume reads the record through it; a map read on
+    /// swapped axes, a wrong barycentric weight, a misplaced bilinear corner or a gutter off by a
+    /// texel fails here. Fixture: a cap of 64 directions; directions within 18° of its 25° axis
+    /// lie inside their hull; tolerance the bilinear read's curvature error over a 0.24° texel
+    /// (DERIVED, under 1e-4 of a unit-slope function).
     #[test]
     fn the_map_reproduces_what_is_linear_in_it() {
         let reach = |d: Vec3| 2.0 + 0.6 * d.x - 0.4 * d.y;
@@ -902,10 +902,10 @@ pub(super) mod tests {
     }
 
     /// A band holds nothing off it: the map reads zero along every direction short of its inner
-    /// edge or past its rim and reads the band on it. The look's volume and footprints test the
-    /// support before they read the map (`pen_cam_look.wgsl`, `field_at`); a band drawn as the cap
-    /// it lies in fills the cone about the line, where the ring threw nothing. Directions sampled
-    /// half a degree off each edge, against an f32 angle good to 1e-5 rad.
+    /// edge or past its rim and reads the band on it. The look's volume tests the support before
+    /// it reads the map (`pen_cam_look.wgsl`, `field_at`); a band drawn as the cap it lies in
+    /// fills the cone about the line, where the ring threw nothing. Directions sampled half a
+    /// degree off each edge, against an f32 angle good to 1e-5 rad.
     #[test]
     fn a_band_holds_nothing_off_it() {
         let cone = band(|_, _| 1.0);
@@ -923,31 +923,38 @@ pub(super) mod tests {
         }
     }
 
-    /// A band's triangulation stops at its inner edge: just inside the hole, where a read at the
-    /// band's edge blends, the map holds the value of the band's nearest edge, never a blend across
-    /// the hole of the band's two sides. A triangle spanning the hole carries the far side's
-    /// reach to the near edge. Fixture: reach 3 on the band's `+u` side, 1 on its `−u` side; read
-    /// a texel inside the inner edge, within 60° of either side's middle.
+    /// A band's triangulation stops at its inner edge: every texel the map bakes inside the hole,
+    /// which a read at the band's edge blends, holds the value of the band's nearest edge, never a
+    /// blend across the hole of the band's two sides. A triangle spanning the hole carries the far
+    /// side's reach toward the near edge. Fixture: reach 3 on the band's `+u` side, 1 on its `−u`
+    /// side; the texels within 60° of either side's middle.
     #[test]
     fn a_band_is_not_interpolated_across_its_hole() {
-        let (u, _) = AXIS.any_orthonormal_pair();
+        let (u, v) = AXIS.any_orthonormal_pair();
         let cone = band(|_, d| if d.dot(u) > 0.0 { 3.0 } else { 1.0 });
         let map = Map::of(&cone, None);
-        let inside = map.inner - 4.0 * map.zoom / MAP_SIDE as f32;
         let mut checked = 0;
-        for j in 0..36 {
-            let phi = j as f32 * TAU / 36.0;
-            let from_u = phi.cos().acos().to_degrees();
-            let want = if from_u < 60.0 {
-                3.0
-            } else if from_u > 120.0 {
-                1.0
-            } else {
-                continue;
-            };
-            let got = map.sample(direction(inside, phi)).x;
-            assert!((got - want).abs() < 1e-3, "{phi}: {got} against {want}");
-            checked += 1;
+        for j in 0..MAP_TEXELS {
+            for i in 0..MAP_TEXELS {
+                let d = map.texel_direction(i, j);
+                if d.dot(AXIS).acos() >= map.inner || !map.near_support(d) {
+                    continue;
+                }
+                let from_u = d.dot(v).abs().atan2(d.dot(u)).to_degrees();
+                let want = if from_u < 60.0 {
+                    3.0
+                } else if from_u > 120.0 {
+                    1.0
+                } else {
+                    continue;
+                };
+                let got = map.texels[j * MAP_TEXELS + i].x;
+                assert!(
+                    (got - want).abs() < 1e-3,
+                    "({i}, {j}): {got} against {want}"
+                );
+                checked += 1;
+            }
         }
         assert!(checked > 20, "{checked}");
     }

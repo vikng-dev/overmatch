@@ -8,8 +8,8 @@
 //                 surface; a component (`mode.z = 1`) the part mask's. Half-Lambert shading with
 //                 `shade.y` the light's share, opacity `color.a` at a grazing angle falling to
 //                 `shade.x` of it face-on (power `shade.z`), and that mask's depth edges in `edge`
-//                 (rgb, a: opacity), under its field footprint. Each layer is one surface deep: a
-//                 surface that is not its mask's nearest is discarded.
+//                 (rgb, a: opacity). Each layer is one surface deep: a surface that is not its
+//                 mask's nearest is discarded.
 //   3 state       a component on the state scale, opaque: below its fill level `color` (red, or
 //                 charcoal under an `edge`-coloured diagonal hatch when `mode.w = 1`, period
 //                 `hatch.x` px, `hatch.y` of it hatched), above it `rest` (the untouched grey), a
@@ -17,7 +17,6 @@
 //                 `shade.y` the light's share. The level rises along `state.xyz` (world up, unit)
 //                 from `span.x` to `span.y` (world m) by `state.w` (the share lost) times the fade;
 //                 with `span.z = 0` (no known heights) the fill covers the mesh once the fade is on.
-//                 Its field footprint tints it over the fill.
 //   4 volume      the record's fields as one volume (`volume`), drawn on the back faces of a box
 //                 about every field's reach, whatever stands in front. The eye ray's stretch inside
 //                 each field (`stretch`: its ball out to its front or its longest reach, the
@@ -31,6 +30,9 @@
 //                 `reduced`: rgb) at opacity `1 − exp(−length / w)`, laid over what lies behind it
 //                 (`over`); the pixel takes the result at `volume.x` times its opacity, times the
 //                 fade.
+//
+// The fields are drawn as the volume alone: no other mode reads them, so a surface a field meets
+// keeps its own look.
 //
 // In modes 0, 2 and 3, `mode.y = 1` discards what lies on `plane`'s normal side (the slice's cut);
 // the volume clips its march to the kept side.
@@ -58,12 +60,6 @@
 // tile `(f % 2, f / 2)` of `field_map`, each texel its reach (r, record m) and strength (g, ref-mm),
 // read bilinearly (`map_at`; `Map::sample` is the same read).
 //
-// Base and state surfaces carry the fields' footprint (`footprint`): each field covers a surface
-// point facing its origin, on its support, behind its front and within `foot.y` (m) past its
-// map's reach, each of those edges one pixel wide; the covered fields' intensities add, and each
-// band's edge is a smoothstep one pixel wide in `log2` of the sum (`soft_step`,
-// `potency::soft_step`). The bands fill the point at opacity `foot.x`.
-//
 // Output: straight `rgb, a`.
 
 #import bevy_pbr::{forward_io::Vertex, mesh_functions, mesh_view_bindings::view}
@@ -89,8 +85,6 @@ struct LookParams {
     // The cut (`mode.y = 1`): xyz the plane's unit normal toward the discarded side (world), w
     // normal · a point on it.
     plane: vec4<f32>,
-    // x: the footprint's opacity; y: how far (m) past its map's reach a surface counts as met.
-    foot: vec4<f32>,
     // x: the floor threshold `T_floor`, y: the mid threshold `T_mid` (HP points per m²).
     bands: vec4<f32>,
     // rgb: the knockout band's colour; w: its extinction length (m).
@@ -120,7 +114,6 @@ const MAP_TEXELS: f32 = 258.0;
 // two samples.
 const VOLUME_STEPS: i32 = 48;
 const VOLUME_REFINE: i32 = 8;
-const PI: f32 = 3.14159265;
 const HALF_PI: f32 = 1.57079633;
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(0) var<uniform> look: LookParams;
@@ -246,62 +239,6 @@ fn intensity(p: vec3<f32>) -> f32 {
         sum = sum + field_at(f, p);
     }
     return sum;
-}
-
-// A band's edge one pixel wide: `smoothstep` over `width` centred on `edge`, `potency::soft_step`.
-fn soft_step(edge: f32, width: f32, x: f32) -> f32 {
-    let half = 0.5 * max(width, 1e-6);
-    return smoothstep(edge - half, edge + half, x);
-}
-
-// How much of the pixel lies on the positive side of signed distance `s`: its zero crossing one
-// pixel wide. Called in uniform control flow: it takes a derivative.
-fn inside(s: f32) -> f32 {
-    return clamp(s / max(fwidth(s), 1e-7) + 0.5, 0.0, 1.0);
-}
-
-// The fields' footprint at world point `p` on a surface of normal `n`: the presence over the
-// pixel of the floor (x: the reduced and the knockout bands together) and of the knockout band
-// (y). Called in uniform control flow: it takes derivatives.
-fn footprint(p: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
-    var sum = 0.0;
-    for (var f = 0; f < FIELDS; f = f + 1) {
-        if f32(f) >= look.fields.x {
-            break;
-        }
-        let base = PRINT_LANES * f;
-        let at = look.prints[base];
-        let along = look.prints[base + 1];
-        let inner = look.prints[base + 2].w;
-        let scale = look.prints[base + 4];
-        let d = p - at.xyz;
-        let r = max(length(d), 1e-5);
-        let dir = d / r;
-        let theta = acos(clamp(dot(dir, along.xyz), -1.0, 1.0));
-        let here = map_at(f, dir);
-        // Each edge as a signed distance, positive inside: past the reach and the front (m), off
-        // the rim and short of the inner edge (m across the surface's direction, `r` times the
-        // angle), and the facing (the cosine of the origin off the normal).
-        let rim = select(1e6, r * (at.w - theta), at.w < PI);
-        let hole = select(1e6, r * (theta - inner), inner > 0.0);
-        let cover = inside(here.x * scale.y + look.foot.y - r) * inside(along.w - r) * inside(rim)
-            * inside(hole) * inside(dot(n, -dir));
-        sum = sum + cover * here.y * scale.x / (r * r);
-    }
-    // Below a 4096th of the floor the sum is nothing: its log stays finite for the derivative.
-    let level = log2(max(sum, look.bands.x / 4096.0));
-    let width = fwidth(level);
-    return vec2(
-        soft_step(log2(look.bands.x), width, level),
-        soft_step(log2(look.bands.y), width, level),
-    );
-}
-
-// A surface's colour `rgb` under the footprint `print` (`footprint`): each band's colour over it
-// at its presence times `foot.x`.
-fn printed(rgb: vec3<f32>, print: vec2<f32>) -> vec3<f32> {
-    let bands = look.knockout.rgb * print.y + look.reduced.rgb * (print.x - print.y);
-    return rgb * (1.0 - look.foot.x * print.x) + look.foot.x * bands;
 }
 
 // Field `f`'s stretch of the ray `eye + dir t` (t ≥ 0, `dir` unit): inside its ball out to its
@@ -589,14 +526,9 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
     let v = to_eye / max(dist, 1e-6);
     let n = normalize(in.world_normal);
     let facing = abs(dot(n, v));
-    // The state fill's height and its change across a pixel, and the footprint, taken in uniform
-    // control flow.
+    // The state fill's height and its change across a pixel, taken in uniform control flow.
     let height = dot(in.world_position.xyz, look.state.xyz);
     let height_px = fwidth(height);
-    var print = vec2(0.0);
-    if m == 2 || m == 3 {
-        print = footprint(in.world_position.xyz, n);
-    }
     let toward = select(-n, n, dot(n, v) >= 0.0);
     let lambert = 0.5 * (dot(toward, normalize(vec3(0.4, 1.0, 0.3))) + 1.0);
     let shading = 1.0 - look.shade.y + look.shade.y * lambert;
@@ -639,8 +571,6 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
             rgb = look.edge.rgb;
             a = max(a, look.edge.a);
         }
-        rgb = printed(rgb, print);
-        a = max(a, look.foot.x * print.x);
         return vec4(rgb, clamp(a, 0.0, 1.0) * fade);
     }
     if m == 3 {
@@ -663,7 +593,7 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
         if partial && abs(height - level) < 0.5 * look.span.w * height_px {
             rgb = look.edge.rgb;
         }
-        return vec4(printed(rgb, print), 1.0);
+        return vec4(rgb, 1.0);
     }
     discard;
     return vec4(0.0);

@@ -306,9 +306,6 @@ struct Built {
     /// App seconds the record on show first showed: its elements play from there.
     since: f64,
     plan: Arc<Plan>,
-    /// The record's field maps ([`super::super::field::atlas`]), which its footprints read; `None`
-    /// where it draws no field.
-    atlas: Option<Handle<Image>>,
     /// One material per tier the tank's meshes wear, and the layer each is masked in.
     tiers: HashMap<Tier, (Handle<LookMaterial>, Layer)>,
     /// The masks' material, on every mask copy.
@@ -501,7 +498,6 @@ pub(super) fn build(
         live: LiveState::default(),
         since: now,
         plan: Arc::new(Plan::bare(&TankShapes::default(), Vec::new())),
-        atlas: None,
         tiers: HashMap::new(),
         mask: stores.looks.add(look::hull_mask(set)),
         settle: false,
@@ -576,7 +572,7 @@ pub(super) fn build(
             .iter()
             .map(|(entity, dressed, mesh)| (entity, dressed.names.as_slice(), mesh.0.clone())),
     );
-    built.atlas = spawn_glass(
+    spawn_glass(
         &mut commands,
         &mut stores.meshes,
         &mut stores.glows,
@@ -853,9 +849,6 @@ pub(super) fn animate(
     let hull = hulls.get(built.hull).ok();
     for (look, mut visibility) in &mut volumes {
         playing.fields(look, &mut visibility, hull, &mut looks);
-    }
-    if let Some(hull) = hull {
-        playing.footprints(hull, &built.masks, &mut looks, built.atlas.as_ref());
     }
     for (tint, outline, look, mut visibility) in &mut boxes {
         playing.fill(

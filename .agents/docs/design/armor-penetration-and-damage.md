@@ -346,9 +346,9 @@ farther apart than the widest field's ball across in 48 steps, and each threshol
 two samples is placed by 8 halvings, so a band's length along the ray is its iso-surface's chord
 and its edge on screen the iso-surface's silhouette, with no stair-steps and no noise. Each band
 takes its colour at an opacity that climbs with its length over its extinction length (knockout
-0.6 m, reduced 3 m, the whole at most 0.55; TUNED), the nearer laid over the farther. Every surface
-a field met takes the band of the summed intensity at its own point, its **footprint**, each edge
-a pixel wide. The volume and the footprints read the same maps. Mechanism and entry points:
+0.6 m, reduced 3 m, the whole at most 0.55; TUNED), the nearer laid over the farther. A field is
+drawn as its volume alone: a surface it meets keeps its own look (a playtest fork,
+`.agents/scratch/playtest-forks/field-footprints.md`). Mechanism and entry points:
 `src/damage_cam/pen_cam/look.rs`, module doc. The calibration stays provisional until the
 scenarios re-recorded under the ball are seen (owner, 2026-10-23, night).
 
