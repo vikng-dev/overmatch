@@ -33,7 +33,8 @@ pub struct Potency {
 pub enum Band {
     /// Below the floor: the dose its face takes rounds to no HP point.
     Nothing,
-    /// From the floor up to mid: its pool is dosed, not emptied.
+    /// From the floor up to mid: its pool is dosed, and usually not emptied; from `mid − floor` up
+    /// its face's total rounds to the whole pool.
     Reduced,
     /// At or above mid: its HP pool is emptied.
     Knockout,

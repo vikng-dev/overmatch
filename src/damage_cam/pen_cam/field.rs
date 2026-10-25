@@ -16,16 +16,19 @@
 //! on the sphere, by their convex hull, so its interpolation has no rim and no seam.
 //!
 //! [`Map`] bakes the function onto an octahedral map about the field's axis, [`MAP_TEXELS`]² texels
-//! with a one-texel gutter, read bilinearly; [`atlas`] packs a record's maps into the one texture
-//! the look's shader reads them from (`pen_cam_look.wgsl`, `map_at`), and [`Map::sample`] is the
-//! same read on the CPU. [`bake`] bakes every field of a record, its rows spread over the
-//! machine's threads.
+//! with a one-texel gutter; [`atlas`] packs a record's maps into the one texture the look's shader
+//! reads them from (`pen_cam_look.wgsl`, `map_at`). The look tests a point against each of the
+//! four texels about its direction, each against its own reach, and weighs the results
+//! bilinearly, so a reach is never interpolated across a shadow's edge; [`Map::lit`] is the same
+//! read on the CPU, and [`Map::sample`] the bilinear blend of the four, the map's own content
+//! between texels. [`bake`] bakes every field of a record, its rows spread over the machine's
+//! threads.
 
 use std::f32::consts::{FRAC_PI_2, PI, SQRT_2};
 use std::sync::Mutex;
 
 use bevy::asset::RenderAssetUsages;
-use bevy::image::{Image, ImageSampler};
+use bevy::image::Image;
 use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
@@ -39,8 +42,8 @@ use crate::damage_cam::shapes::HardBodies;
 /// `√(4π / 256²)`).
 pub const MAP_SIDE: usize = 256;
 /// The map's texels a side with its gutter, one texel each side holding the value just past the
-/// map's edge (across the octahedron's fold on the sphere), so a bilinear read at the edge blends
-/// what lies across it.
+/// map's edge (across the octahedron's fold on the sphere), so a read at the edge weighs what lies
+/// across it.
 pub const MAP_TEXELS: usize = MAP_SIDE + 2;
 /// The most fields one record's atlas holds: two tiles a side.
 pub const MAP_FIELDS: usize = 4;
@@ -57,8 +60,8 @@ const ENDING_SLACK_M: f32 = 1.0e-3;
 /// `(1, 1, −2)/√2` is `√3` long and square to it; MEASURED 2.999 over 4·10⁵ random steps).
 const OCTAHEDRAL_TURN: f32 = 3.0;
 /// The texel diagonals past the support's edges a map bakes, each at most
-/// `OCTAHEDRAL_TURN · √2 · 2 · zoom / MAP_SIDE` rad: a bilinear read on the support blends texels at
-/// most one diagonal off it, and the look reads the map on the support alone (`pen_cam_look.wgsl`,
+/// `OCTAHEDRAL_TURN · √2 · 2 · zoom / MAP_SIDE` rad: a read on the support weighs texels at most
+/// one diagonal off it, and the look reads the map on the support alone (`pen_cam_look.wgsl`,
 /// `field_at`). Every texel farther off holds zero.
 const SUPPORT_MARGIN_DIAGONALS: f32 = 1.0;
 
@@ -173,20 +176,43 @@ impl Map {
         theta >= self.inner - margin && theta <= self.half_angle + margin
     }
 
-    /// The `(reach m, strength ref-mm)` along unit `direction`, bilinear between the four texels
-    /// about its map coordinate, as a texture unit filters them: the look's shader reads the map so
-    /// (`pen_cam_look.wgsl`, `map_at`); this is the read it mirrors, held by the tests.
-    pub fn sample(&self, direction: Vec3) -> Vec2 {
+    /// The four texels about unit `direction`'s map coordinate, `(i, j)`, `(i + 1, j)`,
+    /// `(i, j + 1)` and `(i + 1, j + 1)`, the clamp holding them inside the map, and its place
+    /// between them (0..1 along `i` and `j`).
+    fn footprint(&self, direction: Vec3) -> ([Vec2; 4], Vec2) {
         let top = (MAP_TEXELS - 1) as f32;
         let g = ((self.coordinate(direction) + 1.0) * 0.5 * MAP_SIDE as f32 + 0.5)
             .clamp(Vec2::ZERO, Vec2::splat(top));
         let low = g.floor().min(Vec2::splat(top - 1.0));
-        let t = g - low;
         let (i, j) = (low.x as usize, low.y as usize);
         let at = |i: usize, j: usize| self.texels[j * MAP_TEXELS + i];
-        let below = at(i, j).lerp(at(i + 1, j), t.x);
-        let above = at(i, j + 1).lerp(at(i + 1, j + 1), t.x);
-        below.lerp(above, t.y)
+        (
+            [at(i, j), at(i + 1, j), at(i, j + 1), at(i + 1, j + 1)],
+            g - low,
+        )
+    }
+
+    /// The `(reach m, strength ref-mm)` along unit `direction`, bilinear between the four texels
+    /// about its map coordinate: the map's content between texels, which the tests read. The look
+    /// never blends a reach ([`Self::lit`]).
+    pub fn sample(&self, direction: Vec3) -> Vec2 {
+        let ([a, b, c, d], t) = self.footprint(direction);
+        a.lerp(b, t.x).lerp(c.lerp(d, t.x), t.y)
+    }
+
+    /// The strength (ref-mm) lit along unit `direction` at `r` world m from the field's origin,
+    /// `scale` world m per record m: each of the four texels about its map coordinate gives its
+    /// strength where `r` lies within its own reach and nothing past it, and the four are weighted
+    /// bilinearly. A reach is compared per texel and never interpolated, so across a silhouette a
+    /// point behind the blocker gets the open texels' share alone, the same at every depth out to
+    /// the wall, and a point on the open side some share right up to the edge. The look's shader
+    /// reads the map so (`pen_cam_look.wgsl`, `map_at`); this is the read it mirrors, held by the
+    /// tests.
+    pub fn lit(&self, direction: Vec3, r: f32, scale: f32) -> f32 {
+        let (texels, t) = self.footprint(direction);
+        let [a, b, c, d] = texels.map(|texel| if r <= texel.x * scale { texel.y } else { 0.0 });
+        let (below, above) = (a + (b - a) * t.x, c + (d - c) * t.x);
+        below + (above - below) * t.y
     }
 
     /// The `(reach m, strength ref-mm)` along unit `direction`: [`Self::sample`] on the support,
@@ -211,8 +237,8 @@ pub fn tile(index: usize) -> UVec2 {
 }
 
 /// The first [`MAP_FIELDS`] of `maps` as one texture: field `k`'s map in tile [`tile`]`(k)`, each
-/// texel's reach (m) in red and strength (ref-mm) in green as half floats, read with linear
-/// filtering and clamped at the edge; an unused tile holds zero.
+/// texel's reach (m) in red and strength (ref-mm) in green as half floats, loaded unfiltered
+/// ([`Map::lit`]); an unused tile holds zero.
 pub fn atlas(maps: &[Map]) -> Image {
     let side = (ATLAS_TILES * MAP_TEXELS) as u32;
     let mut image = Image::new_fill(
@@ -226,7 +252,6 @@ pub fn atlas(maps: &[Map]) -> Image {
         TextureFormat::Rg16Float,
         RenderAssetUsages::default(),
     );
-    image.sampler = ImageSampler::linear();
     for (index, map) in maps.iter().take(MAP_FIELDS).enumerate() {
         let origin = tile(index);
         for (k, texel) in map.texels.iter().enumerate() {
@@ -962,11 +987,12 @@ pub(super) mod tests {
     /// The sphere's map has no seam and no pinch: across the octahedron's fold, where the map's
     /// edge wraps onto itself, and about the antipode, at the square's four corners, a read on
     /// either side of the fold or at any azimuth close about the antipode takes nearly the same
-    /// value, and the antipode the value of the directions about it. The look reads the map
-    /// bilinearly at the fold, so a gutter that does not wrap draws a seam of different reaches
-    /// along the sphere's back. Fixture: a reach turning with azimuth, `2 + 0.5 d·u + 0.3 d·axis`;
-    /// tolerances the hull faces' planes, `0.3 (1 − cos 0.6)` = 0.05 (DERIVED: faces twice the
-    /// strata's spacing `√(4π / 128)` = 0.31 rad), and the reads 0.4° apart across the fold.
+    /// value, and the antipode the value of the directions about it. The look weighs the four
+    /// texels about a direction at the fold too, so a gutter that does not wrap draws a seam of
+    /// different reaches along the sphere's back. Fixture: a reach turning with azimuth,
+    /// `2 + 0.5 d·u + 0.3 d·axis`; tolerances the hull faces' planes, `0.3 (1 − cos 0.6)` = 0.05
+    /// (DERIVED: faces twice the strata's spacing `√(4π / 128)` = 0.31 rad), and the reads 0.4°
+    /// apart across the fold.
     #[test]
     fn the_sphere_has_no_seam_and_no_pinch() {
         let (u, _) = AXIS.any_orthonormal_pair();
@@ -1073,9 +1099,17 @@ pub(super) mod tests {
     /// silhouette, not the record's interpolation: every texel of a cap whose record directions
     /// each end where the bodies stop them reads the guide's reach, the plate's or the wall's, up
     /// to a texel from the plate's edge, while the record's interpolation alone smears the edge
-    /// over the ~5° between directions. The look draws every shadow from the map; a map that
-    /// interpolates across a silhouette draws the wavy blobs this replaces. Fixture: the plate and
-    /// the wall of [`fixture_bodies`], the rod's side away from the read.
+    /// over the ~5° between directions. And the look's read ([`Map::lit`]) never reaches a depth
+    /// between the two sides, right up to the edge: a point between the plate and the wall reads
+    /// the same share of the field at every depth there, behind the plate less than the whole and
+    /// none once its texels are all the plate's, on the open side some and the whole once its
+    /// texels are all the wall's. The look draws every shadow from the map; a map that
+    /// interpolates across a silhouette draws the wavy blobs this replaces, and a read that blends
+    /// the texels' reaches before testing a point against them carries the field past the plate
+    /// to a depth no texel holds. Fixture: the plate and the wall of [`fixture_bodies`], the rod's
+    /// side away from the read; one strength throughout; points 1.2 and 2.9 times the plate's
+    /// depth along a direction, past every plate texel's reach about it and short of every wall
+    /// texel's (DERIVED: the texels about a direction lie within half a degree of it).
     #[test]
     fn a_shadow_edge_is_the_bodys_silhouette() {
         let bodies = fixture_bodies();
@@ -1104,6 +1138,43 @@ pub(super) mod tests {
             }
         }
         assert!(checked > 100 && smeared > 10, "{checked} {smeared}");
+        // The look's read across the edge, the texels either side of it included.
+        let full = 0.5 * cone.strength;
+        let (mut read, mut shared) = (0, 0);
+        for k in 0..=200 {
+            let off = (k as f32 - 100.0) * 0.01_f32.to_radians();
+            for theta in [8.0_f32, 14.0, 20.0] {
+                let d = direction(
+                    theta.to_radians(),
+                    FRAC_PI_2 + off / theta.to_radians().sin(),
+                );
+                let depth = d.dot(AXIS);
+                let behind = guided.lit(d, 1.2 / depth, 1.0);
+                let before_wall = guided.lit(d, 2.9 / depth, 1.0);
+                assert!(
+                    (behind - before_wall).abs() <= 1e-5 * full,
+                    "{d}: {behind} behind the plate, {before_wall} before the wall"
+                );
+                let blocked = bodies.entry(Vec3::ZERO, d, GUIDE_REACH_M).unwrap().1 == 1;
+                let clear = d.x.abs() / depth >= 1.5 * texel;
+                if blocked {
+                    assert!(
+                        behind < full * (1.0 - 1e-4),
+                        "{d}: {behind} behind the plate"
+                    );
+                    assert!(!clear || behind == 0.0, "{d}: {behind} behind the plate");
+                } else {
+                    assert!(before_wall > 0.0, "{d}: nothing on the open side");
+                    assert!(
+                        !clear || (before_wall - full).abs() <= 1e-4 * full,
+                        "{d}: {before_wall} on the open side"
+                    );
+                }
+                shared += usize::from(behind > 0.0 && behind < full * (1.0 - 1e-4));
+                read += 1;
+            }
+        }
+        assert!(read == 603 && shared > 20, "{read} {shared}");
     }
 
     /// Where every record direction about a point ended alike, the record decides, never the

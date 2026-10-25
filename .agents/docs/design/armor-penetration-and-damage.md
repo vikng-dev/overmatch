@@ -318,8 +318,10 @@ classify the sum of their intensities. Three **potency bands**, parted at the cl
 up to it; **nothing** below `T_floor`, the least share of an HP point the sim's once-per-shot
 rounding counts (half a point: to nearest, ties away, `ballistics::least_counted_hp`) over the same
 face (0.5 / 0.2 = 2.5, DERIVED). The promise: a crew station whose face lies wholly in knockout is
-knocked out, one wholly in reduced has its pool dosed and not emptied, one wholly in nothing takes
-no HP point from the field. A box only partly inside a field takes that intensity over that part
+knocked out; one wholly in reduced has its pool dosed and usually not emptied, for the rounding
+tips it at the band's top, from `T_mid − T_floor` (147.5, DERIVED), where its face's total
+(29.5 HP points) rounds to the whole pool; one wholly in nothing takes no HP point from the
+field. A box only partly inside a field takes that intensity over that part
 alone. Knockout takes the field teal and reduced the deep teal (`timeline::FIELD`, `FIELD_DIM`;
 relative luminance 0.50 and 0.12, DERIVED, so they part in every colour vision type), nothing no
 colour; neither is the state scale's red. Along a direction the intensity reaches mid at
@@ -339,10 +341,15 @@ unlike, a shadow's edge lies between them: a ray cast against the struck tank's 
 posed for the record, picks the directions that ended as the texel's own ray would, so the edge
 is the body's silhouette, never a curve interpolated across it. At a record direction the reach
 is the record's, and a direction the record says passed a body keeps its reach. A record's maps
-share one atlas, baked once per record. The fields draw as **one volume**
-(`assets/shaders/pen_cam_look.wgsl`, `volume`) on the back faces of a box about every field's
-reach: each eye ray's stretches inside the fields, merged where they overlap, are sampled no
-farther apart than the widest field's ball across in 48 steps, and each threshold crossed between
+share one atlas, baked once per record. A point reads its field from the four texels about its
+direction, each testing the point against its own reach, the results weighted bilinearly: a reach
+is never interpolated across a shadow's edge, so behind a body the field reads the same share at
+every depth out to what lies beyond it, and none once every texel about the direction is the
+body's. The fields draw as **one volume** (`assets/shaders/pen_cam_look.wgsl`, `volume`) on the
+back faces of a box about every field's reach: each eye ray is cut at the ends of every field's
+stretch along it, each piece is sampled no farther apart than the smallest ball across in 48
+steps among the fields whose stretches hold it, so every field is sampled at its own size and a
+small field inside a wide one never falls between two samples, and each threshold crossed between
 two samples is placed by 8 halvings, so a band's length along the ray is its iso-surface's chord
 and its edge on screen the iso-surface's silhouette, with no stair-steps and no noise. Each band
 takes its colour at an opacity that climbs with its length over its extinction length (knockout

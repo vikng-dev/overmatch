@@ -21,10 +21,12 @@
 //                 about every field's reach, whatever stands in front. The eye ray's stretch inside
 //                 each field (`stretch`: its ball out to its front or its longest reach, the
 //                 nearer, and a cap's cone), clipped to the cut's kept side and, with
-//                 `volume.w = 1`, short of the pixel's nearest scene surface in the part mask,
-//                 merged where they overlap, is marched back toward the eye (`march`):
-//                 samples of the fields' summed intensity (`intensity`) no farther apart than the
-//                 widest field's ball across over `VOLUME_STEPS` (`spacing`), each threshold
+//                 `volume.w = 1`, short of the pixel's nearest scene surface in the part mask, is
+//                 cut at every stretch's ends, and each piece between two adjacent ends is marched
+//                 back toward the eye (`march`): samples of the fields' summed intensity
+//                 (`intensity`) no farther apart than the finest spacing (`spacing`: its ball
+//                 across over `VOLUME_STEPS`) of the fields whose stretches hold the piece, so
+//                 every field is sampled at its own spacing wherever it lies, each threshold
 //                 crossed between two samples placed by `VOLUME_REFINE` halvings
 //                 (`step_over`). Each piece in a band takes the band's colour (`knockout`,
 //                 `reduced`: rgb) at opacity `1 − exp(−length / w)`, laid over what lies behind it
@@ -48,17 +50,17 @@
 // viewer's pose and lens.
 //
 // The bands (design doc §5, "Potency colour"; `potency::Band`): a point's intensity is the sum of
-// every field's there (`intensity`), a field's `e s / r²`, `s` the strength its map holds along
-// the point's direction from its origin and `e` its emission a reference-mm of strength gives,
-// where the point lies on its support (from its inner edge to its half-angle off its axis), within
-// its front and within its map's reach along that direction, and nothing elsewhere. Knockout at
-// and above `bands.y` (`T_mid`), reduced from `bands.x` (`T_floor`) up to it, nothing below. No
-// lane the bands are read from carries a display gain.
+// every field's there (`intensity`), a field's `e s / r²`, `s` the strength its map lights at the
+// point (`map_at`) and `e` its emission a reference-mm of strength gives, where the point lies on
+// its support (from its inner edge to its half-angle off its axis) and within its front, and
+// nothing elsewhere. Knockout at and above `bands.y` (`T_mid`), reduced from `bands.x`
+// (`T_floor`) up to it, nothing below. No lane the bands are read from carries a display gain.
 //
 // The maps (`field::Map`, `field::atlas`): field `f`'s, octahedral about its axis over the square
 // `[−zoom, zoom]²` of octahedral coordinates, `MAP_TEXELS`² texels with a one-texel gutter, in
 // tile `(f % 2, f / 2)` of `field_map`, each texel its reach (r, record m) and strength (g, ref-mm),
-// read bilinearly (`map_at`; `Map::sample` is the same read).
+// loaded unfiltered: each of the four texels about a direction tests the point against its own
+// reach, and the results are weighted bilinearly (`map_at`; `Map::lit` is the same read).
 //
 // Output: straight `rgb, a`.
 
@@ -109,9 +111,8 @@ const PRINT_LANES: i32 = 5;
 // `field::MAP_SIDE` and `field::MAP_TEXELS`, the map's texels a side inside and with its gutter.
 const MAP_SIDE: f32 = 256.0;
 const MAP_TEXELS: f32 = 258.0;
-// `look::VOLUME_STEPS`, the steps across the widest field's ball and the most along a stretch of
-// the march, and `look::VOLUME_REFINE`, the halvings that place a threshold's crossing between
-// two samples.
+// `look::VOLUME_STEPS`, the steps across a field's ball and the most along a piece of the march,
+// and `look::VOLUME_REFINE`, the halvings that place a threshold's crossing between two samples.
 const VOLUME_STEPS: i32 = 48;
 const VOLUME_REFINE: i32 = 8;
 const HALF_PI: f32 = 1.57079633;
@@ -120,7 +121,6 @@ const HALF_PI: f32 = 1.57079633;
 @group(#{MATERIAL_BIND_GROUP}) @binding(1) var hull_mask: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(2) var part_mask: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(3) var field_map: texture_2d<f32>;
-@group(#{MATERIAL_BIND_GROUP}) @binding(4) var field_sampler: sampler;
 
 struct LookVertexOutput {
     @builtin(position) position: vec4<f32>,
@@ -188,44 +188,54 @@ fn octahedral(local: vec3<f32>) -> vec2<f32> {
     return (vec2(1.0) - abs(p.yx)) * sign_not_zero(p.xy);
 }
 
-// Field `f`'s map along unit direction `dir` (world): its reach (record m) and strength (ref-mm),
-// bilinear between the four texels about its map coordinate, which the clamp holds inside the
-// field's tile: `Map::sample`.
-fn map_at(f: i32, dir: vec3<f32>) -> vec2<f32> {
+// Field `f`'s strength (ref-mm) lit along unit direction `dir` (world) at `r` world m from its
+// origin, `scale` world m per record m: each of the four texels about the direction's map
+// coordinate, which the clamp holds inside the field's tile, gives its strength where `r` lies
+// within its own reach and nothing past it, and the four are weighted bilinearly. A reach is
+// compared per texel and never interpolated, so a shadow's depth is a texel's own: across a
+// silhouette a point behind the blocker gets the open texels' share alone, the same at every
+// depth out to the wall. `Map::lit`.
+fn map_at(f: i32, dir: vec3<f32>, r: f32, scale: f32) -> f32 {
     let base = PRINT_LANES * f;
     let frame_u = look.prints[base + 2].xyz;
     let frame_v = look.prints[base + 3];
     let local = vec3(dot(dir, frame_u), dot(dir, frame_v.xyz), dot(dir, look.prints[base + 1].xyz));
     let c = octahedral(local) / frame_v.w;
     let g = clamp((c + 1.0) * 0.5 * MAP_SIDE + 0.5, vec2(0.0), vec2(MAP_TEXELS - 1.0));
-    let tile = vec2(f32(f % 2), f32(f / 2)) * MAP_TEXELS;
-    let uv = (tile + g + 0.5) / (2.0 * MAP_TEXELS);
-    return textureSampleLevel(field_map, field_sampler, uv, 0.0).xy;
+    let low = min(floor(g), vec2(MAP_TEXELS - 2.0));
+    let t = g - low;
+    let at = vec2<i32>(low) + vec2(f % 2, f / 2) * i32(MAP_TEXELS);
+    let t00 = textureLoad(field_map, at, 0).xy;
+    let t10 = textureLoad(field_map, at + vec2(1, 0), 0).xy;
+    let t01 = textureLoad(field_map, at + vec2(0, 1), 0).xy;
+    let t11 = textureLoad(field_map, at + vec2(1, 1), 0).xy;
+    let reach = vec4(t00.x, t10.x, t01.x, t11.x) * scale;
+    let lit = select(vec4(0.0), vec4(t00.y, t10.y, t01.y, t11.y), vec4(r) <= reach);
+    return mix(mix(lit.x, lit.y, t.x), mix(lit.z, lit.w, t.x), t.y);
 }
 
-// Field `f`'s intensity at world point `p` (HP points per m²): `e s / r²` on its support, within
-// its front and within its map's reach along its direction, 0 elsewhere; at its origin, once
-// thrown, unbounded.
+// Field `f`'s intensity at world point `p` (HP points per m²): `e s / r²` on its support and
+// within its front, `s` its map's strength lit at `p` (`map_at`), 0 elsewhere, past its longest
+// reach included; at its origin, once thrown, unbounded.
 fn field_at(f: i32, p: vec3<f32>) -> f32 {
     let base = PRINT_LANES * f;
     let at = look.prints[base];
     let along = look.prints[base + 1];
+    let scale = look.prints[base + 4];
     let d = p - at.xyz;
     let r = length(d);
     if r < 1e-5 {
         return select(0.0, 1e30, along.w > 0.0);
+    }
+    if r > min(along.w, scale.z) {
+        return 0.0;
     }
     let dir = d / r;
     let c = clamp(dot(dir, along.xyz), -1.0, 1.0);
     if c > cos(look.prints[base + 2].w) || c < cos(at.w) {
         return 0.0;
     }
-    let here = map_at(f, dir);
-    let scale = look.prints[base + 4];
-    if r > min(here.x * scale.y, along.w) {
-        return 0.0;
-    }
-    return here.y * scale.x / (r * r);
+    return map_at(f, dir, r, scale.y) * scale.x / (r * r);
 }
 
 // The fields' summed intensity at world point `p` (HP points per m²): doses add, so the bands
@@ -373,21 +383,14 @@ fn step_over(acc: vec4<f32>, eye: vec3<f32>, dir: vec3<f32>, t_far: f32, i_far: 
     return out;
 }
 
-// The march's spacing (m): the widest field's ball across in `VOLUME_STEPS` steps, its radius
-// the nearer of its front and its longest reach. `look::spacing`.
-fn spacing() -> f32 {
-    var widest = 0.0;
-    for (var f = 0; f < FIELDS; f = f + 1) {
-        if f32(f) >= look.fields.x {
-            break;
-        }
-        let base = PRINT_LANES * f;
-        widest = max(widest, min(look.prints[base + 1].w, look.prints[base + 4].z));
-    }
-    return 2.0 * widest / f32(VOLUME_STEPS);
+// Field `f`'s spacing (m): its ball across in `VOLUME_STEPS` steps, its radius the nearer of its
+// front and its longest reach, as `stretch` bounds it. `look::spacing`.
+fn spacing(f: i32) -> f32 {
+    let base = PRINT_LANES * f;
+    return 2.0 * min(look.prints[base + 1].w, look.prints[base + 4].z) / f32(VOLUME_STEPS);
 }
 
-// The stretch from `near` to `far` on the ray `eye + dir t` marched back toward the eye in equal
+// The piece from `near` to `far` on the ray `eye + dir t` marched back toward the eye in equal
 // steps no longer than `space`, `VOLUME_STEPS` at most, laid over `acc`. `look::march`.
 fn march(acc: vec4<f32>, eye: vec3<f32>, dir: vec3<f32>, near: f32, far: f32, space: f32) -> vec4<f32> {
     let steps = i32(clamp(ceil((far - near) / max(space, 1e-6)), 1.0, f32(VOLUME_STEPS)));
@@ -407,7 +410,10 @@ fn march(acc: vec4<f32>, eye: vec3<f32>, dir: vec3<f32>, near: f32, far: f32, sp
 
 // The fields' volume seen through `exit`, a point where the eye ray leaves the box about them, at
 // mask pixel `p`: each field's stretch of the ray, clipped to the cut's kept side and short of
-// the nearest scene surface, merged where they overlap and marched far to near.
+// the nearest scene surface, cut at every stretch's ends and marched far to near, each piece at
+// the finest spacing of the fields whose stretches hold it (`look::schedule`). A field's ends are
+// samples and its stretch is sampled at its own spacing or finer, so a small field never falls
+// between two samples of a wide one.
 fn volume(exit: vec3<f32>, p: vec2<i32>, fade: f32) -> vec4<f32> {
     // Depths along the ray are eye depths: `eye + dir t` lies at eye depth `t`.
     let dir = eye_ray(exit);
@@ -434,9 +440,11 @@ fn volume(exit: vec3<f32>, p: vec2<i32>, fade: f32) -> vec4<f32> {
             near = max(near, -g0 / gd);
         }
     }
-    // Each field's stretch, sorted by its near end.
-    var lo = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
+    // Each field's stretch (empty, `lo > hi`, where the ray misses it) and every stretch's ends in
+    // order.
+    var lo = array<f32, 4>(1.0, 1.0, 1.0, 1.0);
     var hi = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
+    var ends = array<f32, 8>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
     var count = 0;
     for (var f = 0; f < FIELDS; f = f + 1) {
         if f32(f) >= look.fields.x {
@@ -448,34 +456,38 @@ fn volume(exit: vec3<f32>, p: vec2<i32>, fade: f32) -> vec4<f32> {
         if a >= b {
             continue;
         }
-        var k = count;
-        while k > 0 && lo[k - 1] > a {
-            lo[k] = lo[k - 1];
-            hi[k] = hi[k - 1];
-            k = k - 1;
+        lo[f] = a;
+        hi[f] = b;
+        for (var e = 0; e < 2; e = e + 1) {
+            let t = select(b, a, e == 0);
+            var k = count;
+            while k > 0 && ends[k - 1] > t {
+                ends[k] = ends[k - 1];
+                k = k - 1;
+            }
+            ends[k] = t;
+            count = count + 1;
         }
-        lo[k] = a;
-        hi[k] = b;
-        count = count + 1;
     }
     if count == 0 {
         discard;
     }
-    // Overlapping stretches merged, so a sample counts every field once.
-    var merged = 0;
-    for (var k = 1; k < count; k = k + 1) {
-        if lo[k] <= hi[merged] {
-            hi[merged] = max(hi[merged], hi[k]);
-        } else {
-            merged = merged + 1;
-            lo[merged] = lo[k];
-            hi[merged] = hi[k];
-        }
-    }
+    // Far to near, each piece between adjacent ends that a stretch holds, a sample counting every
+    // field once.
     var acc = vec4(0.0);
-    let space = spacing();
-    for (var k = merged; k >= 0; k = k - 1) {
-        acc = march(acc, eye, dir, lo[k], hi[k], space);
+    for (var k = count - 1; k > 0; k = k - 1) {
+        let a = ends[k - 1];
+        let b = ends[k];
+        let mid = 0.5 * (a + b);
+        var space = 1e30;
+        for (var f = 0; f < FIELDS; f = f + 1) {
+            if lo[f] <= mid && mid <= hi[f] {
+                space = min(space, spacing(f));
+            }
+        }
+        if a < b && space < 1e30 {
+            acc = march(acc, eye, dir, a, b, space);
+        }
     }
     if acc.a <= 0.0 {
         discard;

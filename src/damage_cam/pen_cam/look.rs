@@ -66,10 +66,10 @@ use crate::render_policy::CameraProfile;
 const VOLUME_OPACITY: f32 = 0.55;
 const KNOCKOUT_EXTINCTION_M: f32 = 0.6;
 const REDUCED_EXTINCTION_M: f32 = 3.0;
-/// The volume's march: the steps across the widest field's ball, which set the samples' spacing
-/// ([`spacing`]) and bound their count along a stretch of an eye ray, and the halvings that place
-/// a band's edge between two samples, to `2⁻⁸` of a step (DERIVED). `pen_cam_look.wgsl` declares
-/// both ([`march`]).
+/// The volume's march: the steps across a field's ball, which set its samples' spacing
+/// ([`spacing`]) and bound their count along a piece of an eye ray ([`schedule`]), and the halvings
+/// that place a band's edge between two samples, to `2⁻⁸` of a step (DERIVED).
+/// `pen_cam_look.wgsl` declares both ([`march`]).
 const VOLUME_STEPS: usize = 48;
 const VOLUME_REFINE: usize = 8;
 /// A volume sorts this far (m) nearer the eye than its mesh's centre, so it draws after every
@@ -169,10 +169,9 @@ pub struct LookMaterial {
     pub hull_mask: Option<Handle<Image>>,
     #[texture(2)]
     pub part_mask: Option<Handle<Image>>,
-    /// The record's field maps ([`super::field::atlas`]), which the volume reads; `None` on every
-    /// other element.
+    /// The record's field maps ([`super::field::atlas`]), which the volume loads unfiltered; `None`
+    /// on every other element.
     #[texture(3)]
-    #[sampler(4)]
     pub field_map: Option<Handle<Image>>,
     pub blend: Blend,
     /// The depth bias a copy of a mesh needs to win the tie with the mesh it covers.
@@ -645,10 +644,11 @@ fn band_lanes(potency: &Potency) -> [Vec4; 3] {
 
 /// The fields' summed intensity (HP points per m²) at world point `p`, as the volume samples it
 /// (`pen_cam_look.wgsl`, `intensity` and `field_at`): each of `prints`, whose maps are `maps`'
-/// alike, adds `ρ s / (Ω r²)` where `p` lies on its support, within its front and within its
-/// map's reach along its direction, `s` the map's strength there; at its origin, once thrown, it
-/// is unbounded (`1e30`). Doses add, so the bands classify the sum, never a field's own. This is
-/// the sum the shader mirrors, held by the tests.
+/// alike, adds `ρ s / (Ω r²)` where `p` lies on its support and within its front, `s` the strength
+/// its map lights at `p` ([`Map::lit`]: each texel about `p`'s direction tested against its own
+/// reach), nothing past its longest reach; at its origin, once thrown, it is unbounded (`1e30`).
+/// Doses add, so the bands classify the sum, never a field's own. This is the sum the shader
+/// mirrors, held by the tests.
 #[cfg_attr(
     not(test),
     expect(
@@ -666,25 +666,26 @@ pub fn intensity(prints: &[FieldPrint], maps: &[Map], potency: &Potency, p: Vec3
             sum += if lane[1].w > 0.0 { 1e30 } else { 0.0 };
             continue;
         }
+        if r > lane[1].w.min(lane[4].z) {
+            continue;
+        }
         let dir = d / r;
         let c = dir.dot(lane[1].truncate()).clamp(-1.0, 1.0);
         if c > lane[2].w.cos() || c < lane[0].w.cos() {
             continue;
         }
         let local = Vec3::new(dir.dot(lane[2].truncate()), dir.dot(lane[3].truncate()), c);
-        let here = map.sample(map.u * local.x + map.v * local.y + map.axis * local.z);
-        if r > (here.x * lane[4].y).min(lane[1].w) {
-            continue;
-        }
-        sum += here.y * lane[4].x / (r * r);
+        let direction = map.u * local.x + map.v * local.y + map.axis * local.z;
+        sum += map.lit(direction, r, lane[4].y) * lane[4].x / (r * r);
     }
     sum
 }
 
-/// The march's spacing (m) over fields `prints`, as `pen_cam_look.wgsl`'s `spacing` takes it: the
-/// widest field's ball (its radius the nearer of its front and its longest reach, as [`stretch`]
-/// bounds it) across in [`VOLUME_STEPS`] steps. Every stretch is sampled at least this finely, so
-/// a short stretch takes few samples and a long one no coarser ones.
+/// Field `print`'s spacing (m), as `pen_cam_look.wgsl`'s `spacing` takes it: its ball (its radius
+/// the nearer of its front and its longest reach, as [`stretch`] bounds it) across in
+/// [`VOLUME_STEPS`] steps. The march samples a field's stretch at least this finely wherever it
+/// lies ([`schedule`]), so each field is drawn at its own size's resolution, whatever other field
+/// it lies in.
 #[cfg_attr(
     not(test),
     expect(
@@ -692,18 +693,61 @@ pub fn intensity(prints: &[FieldPrint], maps: &[Map], potency: &Potency, p: Vec3
         reason = "the look's shader spaces its march at runtime (`pen_cam_look.wgsl`, `spacing`); this is the spacing it mirrors, held by the tests"
     )
 )]
-pub fn spacing(prints: &[FieldPrint]) -> f32 {
-    let widest = prints
-        .iter()
-        .take(FIELDS)
-        .map(|print| print.front.min(print.longest * print.scale))
-        .fold(0.0, f32::max);
-    2.0 * widest / VOLUME_STEPS as f32
+pub fn spacing(print: &FieldPrint) -> f32 {
+    2.0 * print.front.min(print.longest * print.scale) / VOLUME_STEPS as f32
 }
 
-/// The volume's march over one stretch of an eye ray, from `far` back to `near` (m along it), as
-/// `pen_cam_look.wgsl`'s `march` and `step_over` take it: equal steps no longer than `space`
-/// ([`spacing`]), [`VOLUME_STEPS`] at most, the band (`potency`'s, [`Potency::band`]) of
+/// The march's pieces along the eye ray `eye + dir t` over fields `prints`, kept to `[near, far]`
+/// (m along the ray), as `pen_cam_look.wgsl`'s `volume` takes them: each field's stretch
+/// ([`stretch`]) clipped to it, every stretch's ends in order, and between each two adjacent ends
+/// that a stretch holds the piece `(near, far, space)`, `space` the finest [`spacing`] of the
+/// fields whose stretches hold it; far to near. Every field's ends are samples and its whole
+/// stretch is sampled at its own spacing or finer, so a field never falls between two samples of
+/// a wider one, and a piece takes at most [`VOLUME_STEPS`] steps: it lies inside the ball of every
+/// field that spaces it. This is the schedule the shader mirrors, held by the tests.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the look's shader schedules its march at runtime (`pen_cam_look.wgsl`, `volume`); this is the schedule it mirrors, held by the tests"
+    )
+)]
+pub fn schedule(
+    prints: &[FieldPrint],
+    eye: Vec3,
+    dir: Vec3,
+    near: f32,
+    far: f32,
+) -> Vec<(f32, f32, f32)> {
+    let stretches: Vec<(f32, f32, f32)> = prints
+        .iter()
+        .take(FIELDS)
+        .filter_map(|print| {
+            let (lo, hi) = stretch(print, eye, dir)?;
+            let (lo, hi) = (lo.max(near), hi.min(far));
+            (lo < hi).then_some((lo, hi, spacing(print)))
+        })
+        .collect();
+    let mut ends: Vec<f32> = stretches.iter().flat_map(|&(lo, hi, _)| [lo, hi]).collect();
+    ends.sort_by(f32::total_cmp);
+    ends.windows(2)
+        .rev()
+        .filter_map(|pair| {
+            let (a, b) = (pair[0], pair[1]);
+            let mid = 0.5 * (a + b);
+            let space = stretches
+                .iter()
+                .filter(|&&(lo, hi, _)| lo <= mid && mid <= hi)
+                .map(|&(.., space)| space)
+                .reduce(f32::min)?;
+            (a < b).then_some((a, b, space))
+        })
+        .collect()
+}
+
+/// The volume's march over one piece of an eye ray ([`schedule`]), from `far` back to `near` (m
+/// along it), as `pen_cam_look.wgsl`'s `march` and `step_over` take it: equal steps no longer than
+/// `space` ([`spacing`]), [`VOLUME_STEPS`] at most, the band (`potency`'s, [`Potency::band`]) of
 /// `intensity` at each sample, and between two samples on either side of a threshold the
 /// crossing placed by [`VOLUME_REFINE`] halvings. `visit` takes
 /// each piece, far to near, as its length and band; the shader lays each band's pieces over what
@@ -1004,16 +1048,16 @@ pub fn component(b: &BoxPlan, kind: CornerKind, masks: &MaskSet) -> Option<LookM
 
 /// The record's fields as one volume, drawn on the back faces of a box about every field's reach
 /// ([`field_bounds`]), reading their maps from `atlas`. From each fragment the eye ray's stretches
-/// inside the fields ([`stretch`], merged where they overlap) are marched back toward the eye
-/// ([`march`]), each sample the fields' summed intensity ([`intensity`]); each band takes its
-/// colour at an opacity that climbs with its length along the ray over its extinction length, the
-/// nearer laid over the farther, the whole at most [`VOLUME_OPACITY`]. The fields' lanes are set
-/// each frame ([`LookMaterial::set_fields`]). Straight alpha, sorted after every other translucent
-/// surface, drawn whatever stands in front and writing no depth ([`LookKey::depth`]). In a frame
-/// that draws the body behind ([`body_behind`]) the march ends at its pixel's nearest scene
-/// surface in `masks`' part mask (`volume.w = 1`), so a component or the round in front of a field
-/// hides it; in the outside view it is drawn over the tank whole. `cut` by the slice plane (unit
-/// normal toward the discarded side, a point on it) it stops at the plane.
+/// inside the fields ([`stretch`]), cut at every stretch's ends ([`schedule`]), are marched back
+/// toward the eye ([`march`]), each sample the fields' summed intensity ([`intensity`]); each band
+/// takes its colour at an opacity that climbs with its length along the ray over its extinction
+/// length, the nearer laid over the farther, the whole at most [`VOLUME_OPACITY`]. The fields'
+/// lanes are set each frame ([`LookMaterial::set_fields`]). Straight alpha, sorted after every
+/// other translucent surface, drawn whatever stands in front and writing no depth
+/// ([`LookKey::depth`]). In a frame that draws the body behind ([`body_behind`]) the march ends at
+/// its pixel's nearest scene surface in `masks`' part mask (`volume.w = 1`), so a component or the
+/// round in front of a field hides it; in the outside view it is drawn over the tank whole. `cut`
+/// by the slice plane (unit normal toward the discarded side, a point on it) it stops at the plane.
 pub fn volume(
     potency: &Potency,
     masks: &MaskSet,
@@ -1091,8 +1135,8 @@ mod tests {
             format!("prints: array<vec4<f32>, {}>,", PRINT_LANES * FIELDS),
             format!("var lo = array<f32, {FIELDS}>("),
             format!("var hi = array<f32, {FIELDS}>("),
-            "let tile = vec2(f32(f % 2), f32(f / 2)) * MAP_TEXELS;".to_owned(),
-            "let uv = (tile + g + 0.5) / (2.0 * MAP_TEXELS);".to_owned(),
+            format!("var ends = array<f32, {}>(", 2 * FIELDS),
+            "let at = vec2<i32>(low) + vec2(f % 2, f / 2) * i32(MAP_TEXELS);".to_owned(),
             "for (var f = 0; f < FIELDS; f = f + 1)".to_owned(),
         ] {
             assert!(shader.contains(&declared), "{declared}");
@@ -1261,20 +1305,20 @@ mod tests {
 
     /// The march lays each band along an eye ray over the stretch its iso-surface cuts from the
     /// ray. Fixture: one field over the whole sphere, every direction reaching 2 m at 5 ref-mm, so
-    /// its intensity falls as `1/r²` out to its reach, and a fixture potency whose mid and floor
-    /// it crosses at 1 m and 1.6 m: the knockout band is the ball of radius 1 m, the reduced band
-    /// the shell out to 1.6 m, nothing the shell out to the reach, and a ray `d` off the origin
-    /// crosses each over its chord `2√(r² − d²)`, at the record's size and, every length doubled,
-    /// at twice it. The march is bounded by the field's stretch ([`stretch`]). A band's opacity
-    /// climbs with its length, so the volume shows the dose law only where these lengths are the
-    /// chords: a march whose crossings are not halved (`VOLUME_REFINE = 0`) is off by up to half a
-    /// step, an intensity that does not fall as the square of a world distance moves the stage's
-    /// iso-radii, a stretch short of the reach drops the shell's far end, and samples spaced wider
-    /// than [`spacing`] (one step a stretch) step over the knockout ball whole. The rays cross the
-    /// ball from its centre to near its rim, so their stretches take from all [`VOLUME_STEPS`]
-    /// steps down to a few. Tolerance: each band edge to `2⁻⁹` of the spacing, a step's bound
-    /// (DERIVED from [`VOLUME_REFINE`]), two edges to a band and the shell two bands, and the map's
-    /// rounding.
+    /// its intensity falls as `1/r²` out to its reach, and a fixture potency whose mid and floor it
+    /// crosses at 1 m and 1.6 m: the knockout band is the ball of radius 1 m, the reduced band the
+    /// shell out to 1.6 m, nothing the shell out to the reach, and a ray `d` off the origin crosses
+    /// each over its chord `2√(r² − d²)`, at the record's size and, every length doubled, at twice
+    /// it. The march is bounded by the field's stretch ([`stretch`], [`schedule`]). A band's
+    /// opacity climbs with its length, so the volume shows the dose law only where these lengths
+    /// are the chords: a march whose crossings are not halved (`VOLUME_REFINE = 0`) is off by up to
+    /// half a step, an intensity that does not fall as the square of a world distance moves the
+    /// stage's iso-radii, a stretch short of the reach drops the shell's far end, and samples
+    /// spaced wider than [`spacing`] (one step a stretch) step over the knockout ball whole. The
+    /// rays cross the ball from its centre to near its rim, so their stretches take from all
+    /// [`VOLUME_STEPS`] steps down to a few. Tolerance: each band edge to `2⁻⁹` of the spacing, a
+    /// step's bound (DERIVED from [`VOLUME_REFINE`]), two edges to a band and the shell two bands,
+    /// and the map's rounding.
     #[test]
     fn a_band_runs_its_iso_surfaces_chord() {
         let map = Map::of(&sphere(|_, _| 2.0), None);
@@ -1294,11 +1338,15 @@ mod tests {
         for scale in [1.0, 2.0] {
             let print = print_of(&map, Vec3::new(0.5, -1.0, 2.0), 10.0 * scale, scale);
             let prints = std::slice::from_ref(&print);
-            let space = spacing(prints);
+            let space = spacing(&print);
             assert_eq!(space, 2.0 * map.longest * scale / VOLUME_STEPS as f32);
             for d in [0.0, 0.35, 0.9, 1.3, 1.75] {
                 let eye = print.origin - dir * 6.0 * scale + across * d * scale;
                 let (near, far) = stretch(&print, eye, dir).expect("the ray crosses the field");
+                assert_eq!(
+                    schedule(prints, eye, dir, 0.0, f32::MAX),
+                    [(near, far, space)]
+                );
                 let mut lengths = [0.0_f32; 3];
                 march(
                     near,
@@ -1328,6 +1376,74 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A field is drawn wherever it lies inside another: the march samples each field's stretch at
+    /// the field's own spacing ([`schedule`]), so a small field whose stretch lies between two
+    /// samples of a wide one runs its knockout chord along the ray wherever it stands and however
+    /// far its front has run; it never pops in as a sample happens to fall on it, as the camera or
+    /// its front moves. One spacing across a merged stretch, the widest field's, steps over it
+    /// whole. Fixture: two fields over the whole sphere of one strength, a wide one reaching 4 m
+    /// and a small one reaching 1 m, its front at 2, 3 and 4 cm, so its ball lies inside the wide
+    /// one's; a fixture potency whose mid lies 10 cm from either's origin and whose floor 1 m from
+    /// it; an eye ray 1.5 m off the wide field's origin, where it alone draws nothing, through the
+    /// small field's origin, set at 16 places within the middle of one of the wide field's own
+    /// steps, its ball clear of both ends. The small field's ball lies wholly in knockout, so its
+    /// knockout chord is its ball's diameter and nothing else is drawn. Tolerance: each of the
+    /// ball's two edges to `2⁻⁹` of the wide field's step (a sample at the ball's end that reads it
+    /// inside leaves its edge to the wide piece's halvings) and 0.1 mm for its stretch's ends,
+    /// rounded at 6 m from the eye (DERIVED: f32 at 36 m² over a 4 cm radius).
+    #[test]
+    fn a_small_field_inside_a_wide_one_is_drawn() {
+        let wide_map = Map::of(&sphere(|_, _| 4.0), None);
+        let small_map = Map::of(&sphere(|_, _| 1.0), None);
+        let strength = wide_map.sample(Vec3::X).y;
+        assert!((small_map.sample(Vec3::X).y - strength).abs() < 1e-4);
+        let k = strength / solid_angle(std::f32::consts::PI);
+        let potency = Potency {
+            rate: 1.0,
+            floor: k,
+            mid: k / (0.1 * 0.1),
+        };
+        let maps = [wide_map.clone(), small_map.clone()];
+        let dir = Vec3::new(1.0, 0.2, -0.4).normalize();
+        let wide = print_of(&wide_map, Vec3::new(0.5, -1.0, 2.0), 10.0, 1.0);
+        let eye = wide.origin - dir * 6.0 + dir.any_orthonormal_vector() * 1.5;
+        let (near, far) = stretch(&wide, eye, dir).expect("the ray crosses the wide field");
+        let steps = ((far - near) / spacing(&wide))
+            .ceil()
+            .min(VOLUME_STEPS as f32);
+        let step = (far - near) / steps;
+        let middle = far - (0.5 * steps).floor() * step - 0.5 * step;
+        let tolerance = 2.0 * step / 512.0 + 2.0 * 1e-4;
+        let mut checked = 0;
+        for front in [0.02, 0.03, 0.04] {
+            let room = 0.5 * step - front;
+            assert!(room > 0.02, "the small ball spans a wide step: {step} m");
+            for n in 0..16 {
+                let at = middle + room * (n as f32 / 7.5 - 1.0);
+                let prints = [wide, print_of(&small_map, eye + dir * at, front, 1.0)];
+                let mut lengths = [0.0_f32; 3];
+                for (near, far, space) in schedule(&prints, eye, dir, 0.0, f32::MAX) {
+                    march(
+                        near,
+                        far,
+                        space,
+                        &potency,
+                        |t| intensity(&prints, &maps, &potency, eye + dir * t),
+                        |length, band| lengths[band as usize] += length,
+                    );
+                }
+                let chord = 2.0 * front;
+                let error = (lengths[Band::Knockout as usize] - chord).abs();
+                assert!(
+                    error <= tolerance && lengths[Band::Reduced as usize] <= tolerance,
+                    "front {front}, at {at}: bands run {lengths:?} m, the small ball's chord {chord} m"
+                );
+                checked += 1;
+            }
+        }
+        assert_eq!(checked, 48);
     }
 
     /// Fields' doses add: where two fields overlap, the band is their summed intensity's, never
@@ -1443,19 +1559,19 @@ mod tests {
         ("pen_cam_look.wgsl", "eye_ray", 0x8fbf_c6b6_664e_ae7b),
         ("pen_cam_look.wgsl", "sign_not_zero", 0x1679_03a6_bf5e_8900),
         ("pen_cam_look.wgsl", "octahedral", 0xee8d_db25_da07_f4ea),
-        ("pen_cam_look.wgsl", "map_at", 0x7248_45da_66a6_a60d),
-        ("pen_cam_look.wgsl", "field_at", 0x70fb_21e1_5b50_2ec7),
+        ("pen_cam_look.wgsl", "map_at", 0x23c8_71ef_035f_c9d2),
+        ("pen_cam_look.wgsl", "field_at", 0x525d_bd40_63e0_2dd3),
         ("pen_cam_look.wgsl", "intensity", 0xa1d0_858a_a0d0_eea1),
         ("pen_cam_look.wgsl", "stretch", 0xf54b_5e9e_e1d2_8521),
         ("pen_cam_look.wgsl", "over", 0xbcd5_9d02_0fb0_72c6),
         ("pen_cam_look.wgsl", "crossing", 0xf3eb_38f6_6b3c_7759),
         ("pen_cam_look.wgsl", "step_over", 0xa701_5de6_1500_b34c),
-        ("pen_cam_look.wgsl", "spacing", 0x2965_9a2f_86a2_a75f),
+        ("pen_cam_look.wgsl", "spacing", 0x4525_6005_34ea_30f3),
         ("pen_cam_look.wgsl", "march", 0xec61_59f5_827e_b60c),
-        ("pen_cam_look.wgsl", "volume", 0xf205_578b_73d1_2d09),
+        ("pen_cam_look.wgsl", "volume", 0xab58_3d8f_98ae_99bf),
         ("pen_cam_look.wgsl", "lines", 0x5560_efe8_d460_738c),
         ("pen_cam_look.wgsl", "fragment", 0xe3bf_ec3e_a4b8_f368),
-        ("pen_cam_look.wgsl", MODULE_SCOPE, 0xa8b5_b572_9df8_d338),
+        ("pen_cam_look.wgsl", MODULE_SCOPE, 0x4ad3_6624_c454_cb8f),
         (
             "pen_cam_slice.wgsl",
             "behind_the_scene",
@@ -1550,9 +1666,10 @@ mod tests {
             moved.is_empty(),
             "the pen cam's shaders moved; the moved items' pins:\n{}\nRe-pin only after the Rust \
              mirrors are read against the new WGSL and pass (`field::tests` for `octahedral` and \
-             `map_at` (`Map::sample`), \
+             `map_at` (`Map::lit`), \
              `a_band_runs_its_iso_surfaces_chord` and `doses_add_where_fields_overlap` for \
              `field_at`, `intensity`, `crossing`, `step_over`, `spacing` and `march`, \
+             `a_small_field_inside_a_wide_one_is_drawn` for `volume`'s schedule (`schedule`), \
              `the_stretch_holds_every_point_of_its_field` for `stretch`, \
              `the_pen_cam_intensity_times_a_face_is_its_dose` for the intensity's law, \
              `the_eye_depth_runs_forward_in_both_projections` for `eye_depth` and `eye_ray`) and \
