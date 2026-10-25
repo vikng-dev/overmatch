@@ -345,6 +345,12 @@ pub(crate) fn hp_of_units(units: u64) -> u32 {
     u32::try_from(points).unwrap_or(u32::MAX)
 }
 
+/// The least share of one HP point a box's per-shot total converts to a whole point at
+/// ([`hp_of_units`]: to nearest, ties away from zero): a total below it converts to none.
+pub(crate) fn least_counted_hp() -> f64 {
+    (DOSE_UNITS_PER_HP / 2) as f64 / DOSE_UNITS_PER_HP as f64
+}
+
 /// The whole HP points one line dose of `dose` reference-mm converts to: [`dose_units`] then
 /// [`hp_of_units`], the rounding a box's per-shot total takes. A negative or NaN dose converts to
 /// none.
@@ -3916,6 +3922,17 @@ mod tests {
             "1.5 points, a tie, rounds away from zero"
         );
         assert_eq!(hp_of_units(3 * DOSE_UNITS_PER_HP / 2 - 1), 1);
+    }
+
+    /// The least counted share is the rounding's own edge: a total of that share of one HP point
+    /// converts to one point and a unit less to none. The pen cam's floor band
+    /// (`pen_cam::potency::Potency::floor`) is that share over the crew face and relies on it; a
+    /// share read as a whole point, or as a truncating rounding's, fails here.
+    #[test]
+    fn the_least_counted_hp_is_the_roundings_edge() {
+        let units = (least_counted_hp() * DOSE_UNITS_PER_HP as f64).round() as u64;
+        assert_eq!(hp_of_units(units), 1);
+        assert_eq!(hp_of_units(units - 1), 0);
     }
 
     /// THE FIELD'S CALIBRATION: a field deposit converts at the field's HP points per reference-mm

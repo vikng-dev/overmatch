@@ -55,7 +55,7 @@ use super::super::look::{self, Layer, LookMaterial, MaskNeed, MaskSet, Masks};
 use super::super::material::{GlowMaterial, OutlineMaterial};
 use super::super::plan::{BoxPlan, Plan};
 use super::super::stage::{
-    self, BoxTint, ConeVolume, LineSeg, LookCtx, MarkItem, Piece, Playing, SHELL_SCENE,
+    self, BoxTint, FieldVolume, LineSeg, LookCtx, MarkItem, Piece, Playing, SHELL_SCENE,
     component_meshes, mask_copy, round_copies, spawn_glass,
 };
 use super::super::timeline::CornerKind;
@@ -306,6 +306,9 @@ struct Built {
     /// App seconds the record on show first showed: its elements play from there.
     since: f64,
     plan: Arc<Plan>,
+    /// The record's field maps ([`super::super::field::atlas`]), which its footprints read; `None`
+    /// where it draws no field.
+    atlas: Option<Handle<Image>>,
     /// One material per tier the tank's meshes wear, and the layer each is masked in.
     tiers: HashMap<Tier, (Handle<LookMaterial>, Layer)>,
     /// The masks' material, on every mask copy.
@@ -395,6 +398,7 @@ pub(super) struct Stores<'w> {
     glows: ResMut<'w, Assets<GlowMaterial>>,
     outlines: ResMut<'w, Assets<OutlineMaterial>>,
     looks: ResMut<'w, Assets<LookMaterial>>,
+    images: ResMut<'w, Assets<Image>>,
 }
 
 /// What the x-ray is drawn through: the player's view mode, the kill cam and the player's camera.
@@ -497,6 +501,7 @@ pub(super) fn build(
         live: LiveState::default(),
         since: now,
         plan: Arc::new(Plan::bare(&TankShapes::default(), Vec::new())),
+        atlas: None,
         tiers: HashMap::new(),
         mask: stores.looks.add(look::hull_mask(set)),
         settle: false,
@@ -534,7 +539,8 @@ pub(super) fn build(
         built.settle = dressed_now;
         return;
     }
-    if built.record != record {
+    let same_record = built.record == record;
+    if !same_record {
         // A record's first showing starts its clock; every later showing continues it.
         built.since = record.map_or(now, |key| *state.shown.entry(key).or_insert(now));
     }
@@ -548,7 +554,10 @@ pub(super) fn build(
     let servo_deg = report
         .map(|report| report.servo_deg.clone())
         .unwrap_or_default();
-    let plan = plan(report, &built.live, &asset.shapes(&servo_deg));
+    let mut plan = plan(report, &built.live, &asset.shapes(&servo_deg));
+    if same_record {
+        plan.share_maps(&built.plan);
+    }
     let round_material = if plan
         .burst
         .as_ref()
@@ -567,7 +576,7 @@ pub(super) fn build(
             .iter()
             .map(|(entity, dressed, mesh)| (entity, dressed.names.as_slice(), mesh.0.clone())),
     );
-    spawn_glass(
+    built.atlas = spawn_glass(
         &mut commands,
         &mut stores.meshes,
         &mut stores.glows,
@@ -579,6 +588,7 @@ pub(super) fn build(
         &components,
         LookCtx {
             looks: &mut stores.looks,
+            images: &mut stores.images,
             masks: set,
         },
         &round_material,
@@ -753,7 +763,7 @@ pub(super) fn animate(
         (
             With<XRayItem>,
             Without<MarkItem>,
-            Without<ConeVolume>,
+            Without<FieldVolume>,
             Without<XRayShell>,
         ),
     >,
@@ -762,14 +772,15 @@ pub(super) fn animate(
         (
             With<XRayItem>,
             Without<LineSeg>,
-            Without<ConeVolume>,
+            Without<FieldVolume>,
             Without<BoxTint>,
         ),
     >,
     mut volumes: Query<
-        (&ConeVolume, &MeshMaterial3d<LookMaterial>, &mut Visibility),
+        (&MeshMaterial3d<LookMaterial>, &mut Visibility),
         (
             With<XRayItem>,
+            With<FieldVolume>,
             Without<LineSeg>,
             Without<MarkItem>,
             Without<BoxTint>,
@@ -786,7 +797,7 @@ pub(super) fn animate(
             With<XRayItem>,
             Without<LineSeg>,
             Without<MarkItem>,
-            Without<ConeVolume>,
+            Without<FieldVolume>,
         ),
     >,
     mut shell: Query<
@@ -795,7 +806,7 @@ pub(super) fn animate(
             With<XRayShell>,
             Without<LineSeg>,
             Without<MarkItem>,
-            Without<ConeVolume>,
+            Without<FieldVolume>,
             Without<BoxTint>,
         ),
     >,
@@ -806,7 +817,7 @@ pub(super) fn animate(
             Without<XRayShell>,
             Without<LineSeg>,
             Without<MarkItem>,
-            Without<ConeVolume>,
+            Without<FieldVolume>,
             Without<BoxTint>,
         ),
     >,
@@ -840,11 +851,11 @@ pub(super) fn animate(
         playing.mark(mark, material, &mut visibility, &mut glows);
     }
     let hull = hulls.get(built.hull).ok();
-    for (cone, look, mut visibility) in &mut volumes {
-        playing.cone(cone, look, &mut visibility, hull, &mut looks);
+    for (look, mut visibility) in &mut volumes {
+        playing.fields(look, &mut visibility, hull, &mut looks);
     }
     if let Some(hull) = hull {
-        playing.footprints(hull, &built.masks, &mut looks);
+        playing.footprints(hull, &built.masks, &mut looks, built.atlas.as_ref());
     }
     for (tint, outline, look, mut visibility) in &mut boxes {
         playing.fill(

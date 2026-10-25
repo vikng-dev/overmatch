@@ -67,15 +67,14 @@ pub(crate) struct BoxClasses {
     hard: u32,
 }
 
-/// The pen cam's potency colour thresholds, HP points per m² of face: a box presenting its class's
-/// face wholly at or above its threshold takes at least its pool.
+/// The pen cam's potency band thresholds, HP points per m² of a crew station's face.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PotencyThresholds {
-    /// The hard class, where the colour reaches its near-white: a hard box's face wholly at or
-    /// above it has its HP pool emptied.
-    pub(crate) bright: f32,
-    /// The crew pool over the face it is set against, where the colour is the field teal: a crew
-    /// station's face wholly at or above it is knocked out.
+    /// The least counted share of one HP point ([`crate::ballistics::least_counted_hp`]) over the
+    /// crew face: a crew station's face wholly below it takes a total that converts to none.
+    pub(crate) floor: f32,
+    /// The crew pool over the face it is set against: a crew station's face wholly at or above it
+    /// is knocked out.
     pub(crate) mid: f32,
 }
 
@@ -133,10 +132,10 @@ impl BoxClasses {
         }
     }
 
-    /// The thresholds the pen cam's potency colour is anchored at.
+    /// The thresholds the pen cam's potency bands part at.
     pub(crate) fn potency_thresholds(&self) -> PotencyThresholds {
         PotencyThresholds {
-            bright: self.hard as f32,
+            floor: crate::ballistics::least_counted_hp() as f32 / self.crew_face_m2,
             mid: self.crew_hp as f32 / self.crew_face_m2,
         }
     }
@@ -196,16 +195,17 @@ mod tests {
         }
     }
 
-    /// The potency thresholds are the file's classes: bright the hard class, mid the crew pool over
-    /// the face it is set against (fixture data: 30 HP over 0.25 m² is 120 HP per m²). The pen
-    /// cam's colour promise relies on both; a threshold read from anywhere else breaks it.
+    /// The potency thresholds are the file's crew entries: mid the crew pool over the face it is
+    /// set against, the floor half an HP point (the sim's rounding edge) over the same face
+    /// (fixture data: 30 HP over 0.25 m² is 120 HP per m², half a point over it 2). The pen cam's
+    /// band promise relies on both; a threshold read from anywhere else breaks it.
     #[test]
     fn the_potency_thresholds_are_the_classes() {
         let classes = BoxClasses::from_ron(&file(CREW, "")).unwrap();
         assert_eq!(
             classes.potency_thresholds(),
             PotencyThresholds {
-                bright: 300.0,
+                floor: 2.0,
                 mid: 120.0
             }
         );

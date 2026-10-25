@@ -1,22 +1,22 @@
 //! The base look: the whole tank as one hueless translucent grey surface one layer deep, its
 //! components solid in the untouched grey one layer deep among themselves, the struck ones on the
-//! state scale, and each field (a spall cone's or a burst's) as one translucent volume in the
-//! potency colour, with its footprint on every surface it met. It is the tank rendering of every
-//! x-ray view: the corner, the kill cam's lesson and the x-ray. The colour's law, the volume's rim and the draw order are
-//! design doc §5, "Potency colour" and "Draw order"
-//! (`.agents/docs/design/armor-penetration-and-damage.md`; [`super::potency`]).
-//! [`LookMaterial`] (`pen_cam_look.wgsl`) draws every element; [`hull`], [`component`] and
-//! [`volume`] choose them, and the stage spawns what they return.
+//! state scale, and the record's fields (its spall cones and a burst's) as one translucent volume
+//! in their potency bands, with their footprint in the same bands on every surface they met. It is
+//! the tank rendering of every x-ray view: the corner, the kill cam's lesson and the x-ray. The
+//! band law, the fields' drawing and the draw order are design doc §5, "Potency colour" and "Draw
+//! order" (`.agents/docs/design/armor-penetration-and-damage.md`; [`super::potency`],
+//! [`super::field`]). [`LookMaterial`] (`pen_cam_look.wgsl`) draws every element; [`hull`],
+//! [`component`] and [`volume`] choose them, and the stage spawns what they return.
 //!
 //! Draw order, in every frame that draws the body behind ([`body_behind`]: the glass frames and
 //! the slice): each tank mesh is on one layer by its tier ([`Layer::of`]), and the round's model
 //! is on the scene's ([`Layer::ROUND`]). The body draws behind everything else: a body fragment
-//! is discarded wherever the part mask holds a scene surface, and every volume is drawn after it
-//! and over it, writing no depth. The scene (the components, their state fills and outlines, the
-//! round's model and the fields' volumes) is ordered by depth among itself: a component is opaque
-//! and depth-tested, as is the round in its own opaque material, and a volume's march ends at its
+//! is discarded wherever the part mask holds a scene surface, and the fields' volume is drawn after
+//! it and over it, writing no depth. The scene (the components, their state fills and outlines, the
+//! round's model and the fields' volume) is ordered by depth among itself: a component is opaque
+//! and depth-tested, as is the round in its own opaque material, and the volume's march ends at its
 //! pixel's nearest scene surface in the part mask, so a component or the round in front of a
-//! field hides it and a field in front of either blends over it. A volume tests no other depth,
+//! field hides it and a field in front of either blends over it. The volume tests no other depth,
 //! the world's included. The round is drawn whole in every frame, the slice's included, and so is
 //! its mask copy. The slice keeps the tank's own materials with the same rule
 //! (`super::material::SliceMaterial`): a body fragment on the cut's kept side is discarded where
@@ -49,26 +49,29 @@ use bevy::render::render_resource::{
 use bevy::shader::ShaderRef;
 use bevy::window::{PrimaryWindow, WindowRef};
 
-use super::field::DISC_SIDE;
+use super::field::{MAP_FIELDS, Map};
 use super::material::Blend;
-use super::plan::BoxPlan;
-use super::potency::Potency;
+use super::plan::{BoxPlan, Cone};
+use super::potency::{Band, Potency};
 use super::stage::{Stage, StageCamera};
 use super::timeline::{self, Condition, CornerKind};
 use super::view::Tier;
 use super::{Corner, Surface, WorldViewer};
 use crate::render_policy::CameraProfile;
 
-/// A spall field's volume: its opacity at most, and the weighted path through it
-/// ([`super::potency::Rim`]), as a share of its cone's longest reach, over which its opacity
-/// climbs to `1 − 1/e` of that, so a thin stretch (the silhouette, a sliver beside a shadowed
-/// direction) stays faint. TUNED, as is every figure below that is not marked otherwise.
+/// The fields' volume: its opacity at most, and each band's extinction length (record m), the
+/// stretch of it along an eye ray that takes `1 − 1/e` of that opacity: short in the knockout band,
+/// so its core reads dense, long in the reduced band, so its wide shell reads faint. TUNED, as is
+/// every figure below that is not marked otherwise.
 const VOLUME_OPACITY: f32 = 0.55;
-const VOLUME_DEPTH_SHARE: f32 = 0.2;
-/// The march's samples along an eye ray inside a volume. The step is the cone's longest chord over
-/// this count (DERIVED, [`VolumeGeometry::of`]), so the march spans any chord in at most this many
-/// steps; `pen_cam_look.wgsl` declares the same count.
-const VOLUME_STEPS: usize = 16;
+const KNOCKOUT_EXTINCTION_M: f32 = 0.6;
+const REDUCED_EXTINCTION_M: f32 = 3.0;
+/// The volume's march: the steps across the widest field's ball, which set the samples' spacing
+/// ([`spacing`]) and bound their count along a stretch of an eye ray, and the halvings that place
+/// a band's edge between two samples, to `2⁻⁸` of a step (DERIVED). `pen_cam_look.wgsl` declares
+/// both ([`march`]).
+const VOLUME_STEPS: usize = 48;
+const VOLUME_REFINE: usize = 8;
 /// A volume sorts this far (m) nearer the eye than its mesh's centre, so it draws after every
 /// other translucent surface, the glass and the outlines included
 /// ([`super::material::OUTLINE_SORT_BIAS`]), and its colour reads unwashed by them.
@@ -104,24 +107,23 @@ const BASE_COMPONENT_FACE_SHARE: f32 = 1.0;
 /// The field footprint's fill opacity, short of opaque so the HP fill under it, the outcome,
 /// reads through.
 const FOOTPRINT_FILL_ALPHA: f32 = 0.6;
-/// The most fields a footprint marks; `pen_cam_look.wgsl`'s arrays hold this many fields'
-/// lanes and [`set_footprints`] drops what lies past it, so every record's fields must fit it
-/// (`every_record_fits_the_footprint`).
-const FOOTPRINT_FIELDS: usize = 4;
-/// One field's disc in lanes, two nodes a lane.
-const DISC_LANES: usize = DISC_SIDE * DISC_SIDE / 2;
-/// A surface counts as met by a direction up to this share past its reach, and this far (m): the
-/// record ends a direction on the surface that stopped it, and between directions the disc's
-/// reach is interpolated, not the surface's distance.
-const FOOTPRINT_REACH_SLACK: (f32, f32) = (1.03, 0.03);
+/// The most fields the look draws: the atlas's tiles. `pen_cam_look.wgsl`'s arrays hold this many
+/// fields' lanes and [`pack`] drops what lies past it, so every record's fields must fit it
+/// (`every_record_fits_the_look`).
+const FIELDS: usize = MAP_FIELDS;
+/// One field's lanes ([`pack`]).
+const PRINT_LANES: usize = 5;
+/// A surface counts as met by a direction up to this far (m) past the map's reach along it: the
+/// half float the map holds a reach in is good to 3.9 mm at 8 m (DERIVED, `2⁻⁸` m from 4 m to 8 m),
+/// and a bilinear read departs from a curved body's surface within a texel.
+const FOOTPRINT_REACH_SLACK_M: f32 = 0.01;
 
 /// The uniform block `pen_cam_look.wgsl` reads; its lanes are documented there.
-#[derive(ShaderType, Debug, Clone, Copy)]
+#[derive(ShaderType, Debug, Clone, Copy, Default)]
 pub struct LookParams {
     pub color: Vec4,
     pub edge: Vec4,
     pub shade: Vec4,
-    pub field: Vec4,
     pub hatch: Vec4,
     pub mode: Vec4,
     pub state: Vec4,
@@ -129,36 +131,12 @@ pub struct LookParams {
     pub rest: Vec4,
     pub plane: Vec4,
     pub foot: Vec4,
-    pub ramp: [Vec4; 4],
+    pub bands: Vec4,
+    pub knockout: Vec4,
+    pub reduced: Vec4,
     pub volume: Vec4,
-    pub rim: Vec4,
     pub fields: Vec4,
-    pub prints: [Vec4; 4 * FOOTPRINT_FIELDS],
-    pub disc: [Vec4; FOOTPRINT_FIELDS * DISC_LANES],
-}
-
-impl Default for LookParams {
-    fn default() -> Self {
-        Self {
-            color: Vec4::ZERO,
-            edge: Vec4::ZERO,
-            shade: Vec4::ZERO,
-            field: Vec4::ZERO,
-            hatch: Vec4::ZERO,
-            mode: Vec4::ZERO,
-            state: Vec4::ZERO,
-            span: Vec4::ZERO,
-            rest: Vec4::ZERO,
-            plane: Vec4::ZERO,
-            foot: Vec4::ZERO,
-            ramp: [Vec4::ZERO; 4],
-            volume: Vec4::ZERO,
-            rim: Vec4::ZERO,
-            fields: Vec4::ZERO,
-            prints: [Vec4::ZERO; 4 * FOOTPRINT_FIELDS],
-            disc: [Vec4::ZERO; FOOTPRINT_FIELDS * DISC_LANES],
-        }
-    }
+    pub prints: [Vec4; PRINT_LANES * FIELDS],
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -199,6 +177,11 @@ pub struct LookMaterial {
     pub hull_mask: Option<Handle<Image>>,
     #[texture(2)]
     pub part_mask: Option<Handle<Image>>,
+    /// The record's field maps ([`super::field::atlas`]), which the footprints and the volume read;
+    /// `None` where it marks no field.
+    #[texture(3)]
+    #[sampler(4)]
+    pub field_map: Option<Handle<Image>>,
     pub blend: Blend,
     /// The depth bias a copy of a mesh needs to win the tie with the mesh it covers.
     pub bias: bool,
@@ -210,12 +193,12 @@ impl LookMaterial {
             params: LookParams {
                 color: Vec4::new(color.red, color.green, color.blue, alpha),
                 shade: Vec4::new(1.0, 0.0, 1.0, 1.0),
-                field: Vec4::new(-1.0, 0.0, 0.0, 0.0),
                 mode: Vec4::new(mode, 0.0, 0.0, 0.0),
                 ..default()
             },
             hull_mask: Some(masks.hull.clone()),
             part_mask: Some(masks.part.clone()),
+            field_map: None,
             blend,
             bias: false,
         }
@@ -225,30 +208,21 @@ impl LookMaterial {
         self.params.shade.w = fade;
     }
 
-    /// Whether it draws a spall field's volume ([`volume`]).
+    /// Whether it draws the fields' volume ([`volume`]).
     pub fn is_volume(&self) -> bool {
         self.params.mode.x == MODE_VOLUME
     }
 
-    /// A volume's field, `print`, in its first field's lanes: the field's frame and front, its
-    /// disc's reach and emission ([`pack`]), and the march's step and the opacity's depth from the
-    /// disc's longest reach ([`VolumeGeometry::of`]). The colour lanes, set when the volume is
-    /// made, are untouched.
-    pub fn set_volume(&mut self, print: &FieldPrint, potency: &Potency) {
-        pack(
-            print,
-            potency,
-            &mut self.params.prints[..4],
-            &mut self.params.disc[..DISC_LANES],
-        );
-        let geometry = VolumeGeometry::of(print);
-        self.params.volume.y = geometry.depth;
-        self.params.volume.z = geometry.step;
-        self.params.fields.x = 1.0;
-    }
-
-    pub fn set_front(&mut self, radius: Option<f32>) {
-        self.params.field.x = radius.map_or(-1.0, |r| r.max(0.0));
+    /// The volume's fields, `prints`, in its field lanes ([`pack`]), and each band's extinction
+    /// length at their scale: every print of a record shares its hull's. The colour and opacity
+    /// lanes, set when the volume is made, are untouched.
+    pub fn set_fields(&mut self, prints: &[FieldPrint], potency: &Potency) {
+        let (lanes, count) = pack(prints, potency);
+        self.params.prints = lanes;
+        self.params.fields.x = count as f32;
+        let scale = prints.first().map_or(1.0, |print| print.scale);
+        self.params.knockout.w = KNOCKOUT_EXTINCTION_M * scale;
+        self.params.reduced.w = REDUCED_EXTINCTION_M * scale;
     }
 
     /// Discard what lies on `normal`'s side of the plane through `point` (world); `None` cuts
@@ -329,7 +303,7 @@ impl Material for LookMaterial {
     ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
         let key = key.bind_group_data;
         // A volume is drawn from the faces where the eye ray leaves it, the back faces of its
-        // outward-wound surface (`field::reach_mesh`); every other element from both faces.
+        // outward-wound box ([`field_bounds`]); every other element from both faces.
         descriptor.primitive.cull_mode = key.volume.then_some(Face::Front);
         if let Some(depth) = descriptor.depth_stencil.as_mut() {
             if key.bias {
@@ -619,99 +593,83 @@ pub fn follow_pose(
     }
 }
 
-/// One field (a spall cone or a burst's) where a footprint or a volume is taken, in world space:
-/// its origin, its disc's frame (the unit axis, `u` and `v` across it, the half-angle and the
-/// support's inner edge in rad, [`super::field::Disc::inner`]), how far its front has run (m,
-/// negative before it is thrown), the world's metres per record metre, and its disc's nodes
-/// ([`super::field::Disc::nodes`], record units).
-#[derive(Clone, Debug)]
-pub struct FieldPrint<'a> {
+/// One field (a spall cone or a burst's) where a footprint or the volume is taken, in world space:
+/// its origin, its map's frame (the unit axis, `u` and `v` across it, [`Map`]), its support's
+/// half-angle and inner edge (rad), its map's zoom, how far its front has run (m, negative before
+/// it is thrown), the world's metres per record metre, and its map's longest reach (record m).
+#[derive(Clone, Copy, Debug)]
+pub struct FieldPrint {
     pub origin: Vec3,
     pub axis: Vec3,
     pub u: Vec3,
     pub v: Vec3,
     pub half_angle: f32,
     pub inner: f32,
+    pub zoom: f32,
     pub front: f32,
     pub scale: f32,
-    pub nodes: &'a [Vec2],
+    pub longest: f32,
 }
 
-/// `print` in one field's lanes: four `frame` lanes (origin and half-angle; axis and front; `u`
-/// and inner edge; `v`) and its disc's [`DISC_LANES`] lanes, two nodes a lane, each node's reach
-/// and emission `ρ s / Ω` ([`Potency::emission`], `Ω` its support's solid angle) in world units:
-/// metres for the reach, squared metres for the emission, whose intensity falls as the square of
-/// a world distance.
-fn pack(print: &FieldPrint, potency: &Potency, frame: &mut [Vec4], disc: &mut [Vec4]) {
-    frame[0] = print.origin.extend(print.half_angle);
-    frame[1] = print.axis.extend(print.front);
-    frame[2] = print.u.extend(print.inner);
-    frame[3] = print.v.extend(0.0);
-    let world = |node: Vec2| {
-        let emission = potency.emission(node.y, print.inner, print.half_angle);
-        Vec2::new(node.x * print.scale, emission * print.scale * print.scale)
+/// The first [`FIELDS`] of `prints` in the fields' lanes, [`PRINT_LANES`] a field, and how many:
+/// the origin (world) and half-angle; the unit axis (world) and the front (m); `u` and the inner
+/// edge; `v` and the map's zoom; and the emission a reference-mm of strength gives, `ρ / Ω`
+/// ([`Potency::emission`], `Ω` its support's solid angle) in world units (squared metres, whose
+/// intensity falls as the square of a world distance), the world's metres per record metre (the
+/// map holds record metres) and the longest reach (world m). Field `k` reads its map from the
+/// atlas's tile `k` ([`super::field::tile`]).
+fn pack(prints: &[FieldPrint], potency: &Potency) -> ([Vec4; PRINT_LANES * FIELDS], usize) {
+    let mut lanes = [Vec4::ZERO; PRINT_LANES * FIELDS];
+    for (print, lane) in prints.iter().zip(lanes.chunks_mut(PRINT_LANES)) {
+        lane[0] = print.origin.extend(print.half_angle);
+        lane[1] = print.axis.extend(print.front);
+        lane[2] = print.u.extend(print.inner);
+        lane[3] = print.v.extend(print.zoom);
+        let emission = potency.emission(1.0, print.inner, print.half_angle);
+        lane[4] = Vec4::new(
+            emission * print.scale * print.scale,
+            print.scale,
+            print.longest * print.scale,
+            0.0,
+        );
+    }
+    (lanes, prints.len().min(FIELDS))
+}
+
+/// The lanes the bands are drawn from: the floor and mid thresholds (HP points per m²), and the
+/// knockout and reduced bands' colours (linear rgb; w their extinction length, set with the
+/// fields, [`LookMaterial::set_fields`]).
+fn band_lanes(potency: &Potency) -> [Vec4; 3] {
+    let colour = |band: Band| {
+        let c = LinearRgba::from(band.colour().unwrap_or(Color::NONE));
+        Vec4::new(c.red, c.green, c.blue, 0.0)
     };
-    for (lane, pair) in disc.iter_mut().zip(print.nodes.chunks(2)) {
-        let second = pair.get(1).copied().map_or(Vec2::ZERO, world);
-        *lane = world(pair[0]).extend(second.x).extend(second.y);
-    }
-}
-
-/// The march's step and the opacity's depth of a field's volume, world metres.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct VolumeGeometry {
-    /// The longest chord any eye ray can run inside the volume, over [`VOLUME_STEPS`].
-    pub step: f32,
-    /// [`VOLUME_DEPTH_SHARE`] of the disc's longest reach.
-    pub depth: f32,
-}
-
-impl VolumeGeometry {
-    /// `print`'s, from `R`, the longest reach among its disc's nodes (world m), past which neither
-    /// the volume's surface nor its march reads the disc. Every point of the volume lies within
-    /// `R` of the origin on a direction at most `α` off the axis, so two of them lie at most
-    /// `R · max(1, 2 sin min(α, 90°))` apart (DERIVED: the third side of a triangle whose other
-    /// two are at most `R` about an angle at most `min(2α, 180°)`): the longest chord, `2R` for a
-    /// field past the hemisphere.
-    pub fn of(print: &FieldPrint) -> Self {
-        let reach = print.nodes.iter().map(|node| node.x).fold(0.0, f32::max) * print.scale;
-        let wide = print.half_angle.min(std::f32::consts::FRAC_PI_2);
-        let chord = reach * (2.0 * wide.sin()).max(1.0);
-        Self {
-            step: chord / VOLUME_STEPS as f32,
-            depth: VOLUME_DEPTH_SHARE * reach,
-        }
-    }
+    [
+        potency.lanes(),
+        colour(Band::Knockout),
+        colour(Band::Reduced),
+    ]
 }
 
 /// Mark `prints` on every surface the base look drawn against `masks` draws, the hull's and the
-/// components': a base or state material is one look's by the mask set it holds, so another
-/// look's surfaces (the corner's beside the x-ray's) keep their own footprints. A surface point is
-/// in a field where it faces the field's origin, lies on its support (inside its cone, past a
-/// band's inner edge), behind its front and no farther than its direction's reach on the disc:
-/// the field met it there. It is filled in the
-/// potency colour of the fields' summed intensity there ([`super::potency::Ramp`]). The disc lanes
-/// ([`pack`]) and the ramp lanes carry the law alone: nothing display-side sets the colour.
+/// components', reading their maps from `atlas`: a base or state material is one look's by the
+/// mask set it holds, so another look's surfaces (the corner's beside the x-ray's) keep their own
+/// footprints. A surface point is in a field where it faces the field's origin, lies on its
+/// support, behind its front and no farther than [`FOOTPRINT_REACH_SLACK_M`] past the map's reach
+/// along its direction: the field met it there. The fields' intensities there add, and the point
+/// takes the band their sum falls in ([`Potency::band`]), each edge a pixel wide. The lanes carry
+/// the law alone: nothing display-side sets the band. Without an atlas no field is marked.
 pub fn set_footprints(
     looks: &mut Assets<LookMaterial>,
     masks: &MaskSet,
     prints: &[FieldPrint],
     potency: &Potency,
+    atlas: Option<&Handle<Image>>,
 ) {
-    let mut lanes = [Vec4::ZERO; 4 * FOOTPRINT_FIELDS];
-    let mut disc = [Vec4::ZERO; FOOTPRINT_FIELDS * DISC_LANES];
-    let count = prints.len().min(FOOTPRINT_FIELDS);
-    for (i, print) in prints.iter().take(count).enumerate() {
-        pack(
-            print,
-            potency,
-            &mut lanes[4 * i..4 * (i + 1)],
-            &mut disc[i * DISC_LANES..(i + 1) * DISC_LANES],
-        );
-    }
-    let (share, metres) = FOOTPRINT_REACH_SLACK;
-    let foot = Vec4::new(FOOTPRINT_FILL_ALPHA, share, metres, 0.0);
-    let ramp = potency.ramp().lanes();
+    let (lanes, count) = pack(prints, potency);
+    let count = if atlas.is_some() { count } else { 0 };
+    let foot = Vec4::new(FOOTPRINT_FILL_ALPHA, FOOTPRINT_REACH_SLACK_M, 0.0, 0.0);
+    let [bands, knockout, reduced] = band_lanes(potency);
     for (_, material) in looks.iter_mut() {
         let mode = material.params.mode.x;
         if mode != MODE_BASE && mode != MODE_STATE
@@ -720,11 +678,251 @@ pub fn set_footprints(
             continue;
         }
         material.params.foot = foot;
-        material.params.ramp = ramp;
+        material.params.bands = bands;
+        material.params.knockout = knockout;
+        material.params.reduced = reduced;
         material.params.fields = Vec4::new(count as f32, 0.0, 0.0, 0.0);
         material.params.prints = lanes;
-        material.params.disc = disc;
+        if material.field_map.as_ref() != atlas {
+            material.field_map = atlas.cloned();
+        }
     }
+}
+
+/// The fields' summed intensity (HP points per m²) at world point `p`, as the volume samples it
+/// (`pen_cam_look.wgsl`, `intensity` and `field_at`): each of `prints`, whose maps are `maps`'
+/// alike, adds `ρ s / (Ω r²)` where `p` lies on its support, within its front and within its
+/// map's reach along its direction, `s` the map's strength there; at its origin, once thrown, it
+/// is unbounded (`1e30`). Doses add, so the bands classify the sum, never a field's own. This is
+/// the sum the shader mirrors, held by the tests.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the look's shader sums the fields at runtime (`pen_cam_look.wgsl`, `intensity`); this is the sum it mirrors, held by the tests"
+    )
+)]
+pub fn intensity(prints: &[FieldPrint], maps: &[Map], potency: &Potency, p: Vec3) -> f32 {
+    let (lanes, count) = pack(prints, potency);
+    let mut sum = 0.0;
+    for (lane, map) in lanes.chunks(PRINT_LANES).zip(maps).take(count) {
+        let d = p - lane[0].truncate();
+        let r = d.length();
+        if r < 1e-5 {
+            sum += if lane[1].w > 0.0 { 1e30 } else { 0.0 };
+            continue;
+        }
+        let dir = d / r;
+        let c = dir.dot(lane[1].truncate()).clamp(-1.0, 1.0);
+        if c > lane[2].w.cos() || c < lane[0].w.cos() {
+            continue;
+        }
+        let local = Vec3::new(dir.dot(lane[2].truncate()), dir.dot(lane[3].truncate()), c);
+        let here = map.sample(map.u * local.x + map.v * local.y + map.axis * local.z);
+        if r > (here.x * lane[4].y).min(lane[1].w) {
+            continue;
+        }
+        sum += here.y * lane[4].x / (r * r);
+    }
+    sum
+}
+
+/// The march's spacing (m) over fields `prints`, as `pen_cam_look.wgsl`'s `spacing` takes it: the
+/// widest field's ball (its radius the nearer of its front and its longest reach, as [`stretch`]
+/// bounds it) across in [`VOLUME_STEPS`] steps. Every stretch is sampled at least this finely, so
+/// a short stretch takes few samples and a long one no coarser ones.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the look's shader spaces its march at runtime (`pen_cam_look.wgsl`, `spacing`); this is the spacing it mirrors, held by the tests"
+    )
+)]
+pub fn spacing(prints: &[FieldPrint]) -> f32 {
+    let widest = prints
+        .iter()
+        .take(FIELDS)
+        .map(|print| print.front.min(print.longest * print.scale))
+        .fold(0.0, f32::max);
+    2.0 * widest / VOLUME_STEPS as f32
+}
+
+/// The volume's march over one stretch of an eye ray, from `far` back to `near` (m along it), as
+/// `pen_cam_look.wgsl`'s `march` and `step_over` take it: equal steps no longer than `space`
+/// ([`spacing`]), [`VOLUME_STEPS`] at most, the band (`potency`'s, [`Potency::band`]) of
+/// `intensity` at each sample, and between two samples on either side of a threshold the
+/// crossing placed by [`VOLUME_REFINE`] halvings. `visit` takes
+/// each piece, far to near, as its length and band; the shader lays each band's pieces over what
+/// lies behind them. A band's length along the ray is so its iso-surface's chord to `2⁻⁸` of a
+/// step wherever the ray crosses it once between samples. This is the march the shader mirrors,
+/// held by the tests.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the look's shader marches at runtime (`pen_cam_look.wgsl`, `march`); this is the march it mirrors, held by the tests"
+    )
+)]
+pub fn march(
+    near: f32,
+    far: f32,
+    space: f32,
+    potency: &Potency,
+    intensity: impl Fn(f32) -> f32,
+    mut visit: impl FnMut(f32, Band),
+) {
+    let (floor, mid) = (potency.floor, potency.mid);
+    let crossing = |far: f32, near: f32, threshold: f32, far_above: bool| {
+        let (mut a, mut b) = (far, near);
+        for _ in 0..VOLUME_REFINE {
+            let half = 0.5 * (a + b);
+            if (intensity(half) >= threshold) == far_above {
+                a = half;
+            } else {
+                b = half;
+            }
+        }
+        0.5 * (a + b)
+    };
+    let steps = ((far - near) / space.max(1e-6))
+        .ceil()
+        .clamp(1.0, VOLUME_STEPS as f32) as usize;
+    let step = (far - near) / steps as f32;
+    let (mut t_far, mut i_far) = (far, intensity(far));
+    for k in 1..=steps {
+        let t_near = far - k as f32 * step;
+        let i_near = intensity(t_near);
+        let (f_far, f_near) = (i_far >= floor, i_near >= floor);
+        let (m_far, m_near) = (i_far >= mid, i_near >= mid);
+        let c_f = if f_far != f_near {
+            crossing(t_far, t_near, floor, f_far)
+        } else {
+            t_near
+        };
+        let c_m = if m_far != m_near {
+            crossing(t_far, t_near, mid, m_far)
+        } else {
+            t_near
+        };
+        let points = [t_far, c_f.max(c_m), c_f.min(c_m), t_near];
+        for piece in points.windows(2) {
+            let (a, b) = (piece[0], piece[1]);
+            if a <= b {
+                continue;
+            }
+            let t = 0.5 * (a + b);
+            let f_in = if f_far != f_near && t < c_f {
+                f_near
+            } else {
+                f_far
+            };
+            let m_in = if m_far != m_near && t < c_m {
+                m_near
+            } else {
+                m_far
+            };
+            let band = if m_in {
+                Band::Knockout
+            } else if f_in {
+                Band::Reduced
+            } else {
+                Band::Nothing
+            };
+            visit(a - b, band);
+        }
+        (t_far, i_far) = (t_near, i_near);
+    }
+}
+
+/// Field `print`'s stretch of the ray `eye + dir t` (`t ≥ 0`, `dir` unit), as `pen_cam_look.wgsl`'s
+/// `stretch` finds it: inside its ball out to its front or its longest reach, the nearer, and for a
+/// cap no wider than a hemisphere inside its cone too; `None` where the ray misses it. Every point
+/// the field holds on the ray lies within it, so the march, which samples only these stretches,
+/// misses none. This is the stretch the shader mirrors, held by the tests.
+#[cfg_attr(
+    not(test),
+    expect(
+        dead_code,
+        reason = "the look's shader bounds its march at runtime (`pen_cam_look.wgsl`, `stretch`); this is the bound it mirrors, held by the tests"
+    )
+)]
+pub fn stretch(print: &FieldPrint, eye: Vec3, dir: Vec3) -> Option<(f32, f32)> {
+    let radius = print.front.min(print.longest * print.scale);
+    if radius <= 0.0 {
+        return None;
+    }
+    let oc = eye - print.origin;
+    let b = oc.dot(dir);
+    let h = b * b - (oc.length_squared() - radius * radius);
+    if h <= 0.0 {
+        return None;
+    }
+    let (mut lo, mut hi) = (-b - h.sqrt(), -b + h.sqrt());
+    if print.half_angle < std::f32::consts::FRAC_PI_2 && print.inner <= 0.0 {
+        let cos2 = print.half_angle.cos().powi(2);
+        let (dv, ov) = (dir.dot(print.axis), oc.dot(print.axis));
+        // The cone's own nappe: `ov + t dv ≥ 0`.
+        if dv.abs() > 1e-6 {
+            let t0 = -ov / dv;
+            if dv > 0.0 {
+                lo = lo.max(t0);
+            } else {
+                hi = hi.min(t0);
+            }
+        } else if ov < 0.0 {
+            return None;
+        }
+        // Inside the double cone: `qa t² + qb t + qc ≥ 0`.
+        let qa = dv * dv - cos2;
+        let qb = 2.0 * (dv * ov - cos2 * b);
+        let qc = ov * ov - cos2 * oc.length_squared();
+        let disc = qb * qb - 4.0 * qa * qc;
+        if qa.abs() < 1e-7 {
+            if qb.abs() > 1e-12 {
+                let t1 = -qc / qb;
+                if qb > 0.0 {
+                    lo = lo.max(t1);
+                } else {
+                    hi = hi.min(t1);
+                }
+            } else if qc < 0.0 {
+                return None;
+            }
+        } else if qa < 0.0 {
+            // Inside between the roots alone.
+            if disc <= 0.0 {
+                return None;
+            }
+            let r = disc.sqrt();
+            let (t1, t2) = ((-qb + r) / (2.0 * qa), (-qb - r) / (2.0 * qa));
+            lo = lo.max(t1.min(t2));
+            hi = hi.min(t1.max(t2));
+        } else if disc > 0.0 {
+            // Inside outside the roots: the ray runs steeper than the cone's side, so the cone's
+            // own nappe holds the side of the roots the ray runs into it on.
+            let r = disc.sqrt();
+            let (t1, t2) = ((-qb - r) / (2.0 * qa), (-qb + r) / (2.0 * qa));
+            if dv > 0.0 {
+                lo = lo.max(t2);
+            } else {
+                hi = hi.min(t1);
+            }
+        }
+    }
+    let lo = lo.max(0.0);
+    (lo < hi).then_some((lo, hi))
+}
+
+/// The box (record frame, low and high corners) about every field of `cones` out to its longest
+/// reach on its map in `maps`, which the volume is drawn on; `None` where no field reaches.
+pub fn field_bounds(cones: &[Cone], maps: &[Map]) -> Option<(Vec3, Vec3)> {
+    cones
+        .iter()
+        .zip(maps)
+        .take(FIELDS)
+        .filter(|(_, map)| map.longest > 0.0)
+        .map(|(cone, map)| (cone.origin - map.longest, cone.origin + map.longest))
+        .reduce(|(lo, hi), (a, b)| (lo.min(a), hi.max(b)))
 }
 
 /// How a tank mesh is drawn in the base look: its material and its layer.
@@ -850,29 +1048,33 @@ pub fn component(b: &BoxPlan, kind: CornerKind, masks: &MaskSet) -> Option<LookM
     drawn.then(|| state(settled, masks))
 }
 
-/// A spall field's volume, drawn on its reach surface ([`super::field::reach_mesh`]): from each
-/// fragment where the eye ray leaves the volume, the ray is marched back toward the eye through
-/// it, each sample weighed by its intensity ([`super::potency::Rim`]), and the pixel takes the
-/// weighted mean potency colour of what it crossed ([`super::potency::Ramp`]), at an opacity that
-/// climbs with the weighted length crossed to [`VOLUME_OPACITY`], so the volume fades out toward
-/// the ramp's dim end; its field's lanes are set each frame ([`LookMaterial::set_volume`]).
-/// Straight alpha, sorted after every other
-/// translucent surface, drawn whatever stands in front and writing no depth ([`LookKey::depth`]).
-/// In a frame that draws the body behind ([`body_behind`]) the march ends at its pixel's nearest
-/// scene surface in `masks`' part mask (`volume.w = 1`), so a component or the round in front of
-/// the field hides it; in the outside view it is drawn over the tank whole. `cut` by the slice
-/// plane (unit normal toward the discarded side, a point on it) it stops at the plane.
+/// The record's fields as one volume, drawn on the back faces of a box about every field's reach
+/// ([`field_bounds`]), reading their maps from `atlas`. From each fragment the eye ray's stretches
+/// inside the fields ([`stretch`], merged where they overlap) are marched back toward the eye
+/// ([`march`]), each sample the fields' summed intensity ([`intensity`]); each band takes its
+/// colour at an opacity that climbs with its length along the ray over its extinction length, the
+/// nearer laid over the farther, the whole at most [`VOLUME_OPACITY`]. The fields' lanes are set
+/// each frame ([`LookMaterial::set_fields`]). Straight alpha, sorted after every other translucent
+/// surface, drawn whatever stands in front and writing no depth ([`LookKey::depth`]). In a frame
+/// that draws the body behind ([`body_behind`]) the march ends at its pixel's nearest scene
+/// surface in `masks`' part mask (`volume.w = 1`), so a component or the round in front of a field
+/// hides it; in the outside view it is drawn over the tank whole. `cut` by the slice plane (unit
+/// normal toward the discarded side, a point on it) it stops at the plane.
 pub fn volume(
     potency: &Potency,
     masks: &MaskSet,
     kind: CornerKind,
     cut: Option<(Vec3, Vec3)>,
+    atlas: Handle<Image>,
 ) -> LookMaterial {
     let mut m = LookMaterial::new(MODE_VOLUME, LinearRgba::BLACK, 0.0, Blend::Blended, masks);
-    m.params.ramp = potency.ramp().lanes();
-    m.params.rim = potency.rim().lanes();
+    let [bands, knockout, reduced] = band_lanes(potency);
+    m.params.bands = bands;
+    m.params.knockout = knockout;
+    m.params.reduced = reduced;
     m.params.volume.x = VOLUME_OPACITY;
     m.params.volume.w = body_behind(kind) as u8 as f32;
+    m.field_map = Some(atlas);
     m.set_cut(cut);
     m
 }
@@ -881,22 +1083,24 @@ pub fn volume(
 mod tests {
     use bevy::camera::CameraProjection;
 
+    use super::super::field::tests::{band, cap, fixture_field, sphere};
+    use super::super::field::{MAP_SIDE, MAP_TEXELS};
+    use super::super::potency::solid_angle;
     use super::*;
     use crate::fingerprint::{FNV_OFFSET_BASIS, fnv1a_64};
 
-    /// Every record's fields fit the footprint: none throws more than [`FOOTPRINT_FIELDS`], its
-    /// spall cones and its burst's field together, past which [`set_footprints`] drops a field
-    /// unmarked, and a disc's nodes fill its lanes exactly, whatever the field's direction count.
+    /// Every record's fields fit the look: none throws more than [`FIELDS`], its spall cones and
+    /// its burst's field together, past which [`pack`] drops a field and the atlas holds no map
+    /// for it, so neither its footprint nor its volume is drawn.
     #[test]
-    fn every_record_fits_the_footprint() {
+    fn every_record_fits_the_look() {
         for (name, report) in super::super::plan::tests::records() {
             let fields = report.fields().count();
             assert!(
-                fields <= FOOTPRINT_FIELDS,
-                "{name} throws {fields} fields, past FOOTPRINT_FIELDS = {FOOTPRINT_FIELDS}"
+                fields <= FIELDS,
+                "{name} throws {fields} fields, past FIELDS = {FIELDS}"
             );
         }
-        assert_eq!(2 * DISC_LANES, DISC_SIDE * DISC_SIDE);
     }
 
     /// A pen cam shader, read from the shipped assets.
@@ -905,22 +1109,37 @@ mod tests {
         std::fs::read_to_string(path).unwrap()
     }
 
-    /// `pen_cam_look.wgsl` declares the look's counts and lanes: the disc's side and lanes, the
-    /// volume's march samples, the arrays' lengths, the fields its footprint loops over, and
-    /// [`LookParams`]' lanes in their order. A count that drifts reads the wrong node, field or
-    /// ramp anchor without a word, or marches a volume short of its far side; a lane added,
-    /// dropped or moved on one side alone reads every lane after it from its neighbour's slot.
+    /// `pen_cam_look.wgsl` declares the look's counts and lanes: the fields and each one's lanes,
+    /// the map's side and texels, the atlas's tiles, the volume's march samples and halvings, the
+    /// arrays' lengths, and [`LookParams`]' lanes in their order. A count that drifts reads the
+    /// wrong field or texel without a word, or marches a volume short of its far side; a lane
+    /// added, dropped or moved on one side alone reads every lane after it from its neighbour's
+    /// slot.
     #[test]
     fn the_shader_declares_the_lane_counts() {
         let shader = shader("pen_cam_look.wgsl");
+        for k in 0..FIELDS {
+            let tile = super::super::field::tile(k);
+            assert_eq!(
+                tile,
+                UVec2::new(k as u32 % 2, k as u32 / 2) * MAP_TEXELS as u32
+            );
+        }
+        let atlas = super::super::field::atlas(&[]);
+        assert_eq!(atlas.size(), UVec2::splat(2 * MAP_TEXELS as u32));
         for declared in [
-            format!("const DISC_SIDE: i32 = {DISC_SIDE};"),
-            format!("const DISC_LANES: i32 = {DISC_LANES};"),
+            format!("const FIELDS: i32 = {FIELDS};"),
+            format!("const PRINT_LANES: i32 = {PRINT_LANES};"),
+            format!("const MAP_SIDE: f32 = {:.1};", MAP_SIDE as f32),
+            format!("const MAP_TEXELS: f32 = {:.1};", MAP_TEXELS as f32),
             format!("const VOLUME_STEPS: i32 = {VOLUME_STEPS};"),
-            "ramp: array<vec4<f32>, 4>,".to_owned(),
-            format!("prints: array<vec4<f32>, {}>,", 4 * FOOTPRINT_FIELDS),
-            format!("disc: array<vec4<f32>, {}>,", FOOTPRINT_FIELDS * DISC_LANES),
-            format!("for (var f = 0; f < {FOOTPRINT_FIELDS}; f = f + 1)"),
+            format!("const VOLUME_REFINE: i32 = {VOLUME_REFINE};"),
+            format!("prints: array<vec4<f32>, {}>,", PRINT_LANES * FIELDS),
+            format!("var lo = array<f32, {FIELDS}>("),
+            format!("var hi = array<f32, {FIELDS}>("),
+            "let tile = vec2(f32(f % 2), f32(f / 2)) * MAP_TEXELS;".to_owned(),
+            "let uv = (tile + g + 0.5) / (2.0 * MAP_TEXELS);".to_owned(),
+            "for (var f = 0; f < FIELDS; f = f + 1)".to_owned(),
         ] {
             assert!(shader.contains(&declared), "{declared}");
         }
@@ -949,89 +1168,95 @@ mod tests {
         assert_eq!(wgsl, rust);
     }
 
-    /// Fixture: two nodes, a stage at twice the record's size.
-    fn fixture_print(nodes: &[Vec2]) -> FieldPrint<'_> {
+    /// Fixture: a field's print at twice the record's size, its frame off the world's axes.
+    fn fixture_print() -> FieldPrint {
         FieldPrint {
             origin: Vec3::ONE,
             axis: Vec3::NEG_Z,
-            u: Vec3::X,
-            v: Vec3::Y,
+            u: Vec3::Y,
+            v: Vec3::X,
             half_angle: 25.0_f32.to_radians(),
             inner: 0.0,
+            zoom: 0.3,
             front: 3.0,
             scale: 2.0,
-            nodes,
+            longest: 1.5,
         }
     }
 
-    /// The colour reads no gain: the lanes a footprint and a volume colour from carry each node's
-    /// reach and emission `ρ s / Ω` in world units (squared metres for the emission, whose
-    /// intensity falls as the square of a world distance), the shipped thresholds and the shipped
-    /// ramp, and fading a material moves its fade lane alone. The colour promise relies on it; a
-    /// display gain, level or fade in a colouring lane, or a volume packed apart from the
-    /// footprint, fails here.
+    /// The colour reads no gain: the lanes a footprint and a volume colour from carry the field's
+    /// frame, its emission per reference-mm `ρ / Ω` in world units (squared metres, whose
+    /// intensity falls as the square of a world distance), its scale and longest reach, the
+    /// shipped thresholds and each band's colour from the band law, and fading a material moves
+    /// its fade lane alone; the volume's extinction lengths scale with the stage. Without its maps
+    /// a surface marks no field. The colour promise relies on it: a display gain, level or fade in
+    /// a colouring lane, or a volume packed apart from the footprint, fails here.
     #[test]
     fn the_colour_reads_no_gain() {
         let potency = Potency::shipped();
         let masks = MaskSet::default();
+        let atlas = Handle::<Image>::default();
         let mut looks = Assets::<LookMaterial>::default();
         let handle = looks.add(base(&masks));
-        let nodes = [Vec2::new(1.5, 5.0), Vec2::new(0.4, 2.5)];
-        let print = fixture_print(&nodes);
-        set_footprints(&mut looks, &masks, std::slice::from_ref(&print), &potency);
-        let params = looks.get(&handle).unwrap().params;
-        let lane = params.disc[0];
-        for (k, node) in nodes.iter().enumerate() {
-            let (reach, emission) = (lane[2 * k], lane[2 * k + 1]);
-            assert_eq!(reach, 2.0 * node.x);
-            assert_eq!(
-                emission,
-                4.0 * potency.emission(node.y, print.inner, print.half_angle)
-            );
-            assert_eq!(
-                emission,
-                4.0 * potency.rate * node.y / super::super::potency::solid_angle(print.half_angle)
-            );
-        }
-        assert_eq!(params.ramp, potency.ramp().lanes());
+        let print = fixture_print();
+        let prints = std::slice::from_ref(&print);
+        set_footprints(&mut looks, &masks, prints, &potency, None);
+        let unmapped = looks.get(&handle).unwrap();
+        assert_eq!(unmapped.params.fields.x, 0.0);
+        assert_eq!(unmapped.field_map, None);
+        set_footprints(&mut looks, &masks, prints, &potency, Some(&atlas));
+        let footprint = looks.get(&handle).unwrap().clone();
+        let params = footprint.params;
+        assert_eq!(footprint.field_map.as_ref(), Some(&atlas));
+        assert_eq!(params.fields.x, 1.0);
+        let lane = &params.prints[..PRINT_LANES];
+        assert_eq!(lane[0], print.origin.extend(print.half_angle));
+        assert_eq!(lane[1], print.axis.extend(print.front));
+        assert_eq!(lane[2], print.u.extend(print.inner));
+        assert_eq!(lane[3], print.v.extend(print.zoom));
+        assert_eq!(
+            lane[4].x,
+            4.0 * potency.emission(1.0, print.inner, print.half_angle)
+        );
+        assert_eq!(
+            lane[4].x,
+            4.0 * potency.rate / solid_angle(print.half_angle)
+        );
+        assert_eq!(lane[4].y, print.scale);
+        assert_eq!(lane[4].z, print.longest * print.scale);
+        assert!(
+            params.prints[PRINT_LANES..]
+                .iter()
+                .all(|l| *l == Vec4::ZERO)
+        );
+        assert_eq!(
+            params.bands,
+            Vec4::new(potency.floor, potency.mid, 0.0, 0.0)
+        );
+        let rgb = |colour: Color| LinearRgba::from(colour).to_vec3();
+        assert_eq!(params.knockout.truncate(), rgb(timeline::FIELD));
+        assert_eq!(params.reduced.truncate(), rgb(timeline::FIELD_DIM));
+        assert_eq!(params.foot.x, FOOTPRINT_FILL_ALPHA);
 
-        let mut field = volume(&potency, &masks, CornerKind::Glass, None);
-        assert_eq!(field.params.ramp, potency.ramp().lanes());
-        field.set_volume(&print, &potency);
-        assert_eq!(field.params.disc[..DISC_LANES], params.disc[..DISC_LANES]);
-        assert_eq!(field.params.prints[..4], params.prints[..4]);
-        assert_eq!(field.params.ramp, potency.ramp().lanes());
-        assert_eq!(field.params.rim, potency.rim().lanes());
+        let mut field = volume(&potency, &masks, CornerKind::Glass, None, atlas.clone());
+        assert_eq!(field.field_map.as_ref(), Some(&atlas));
+        field.set_fields(prints, &potency);
+        assert_eq!(field.params.prints, params.prints);
+        assert_eq!(field.params.fields.x, 1.0);
+        assert_eq!(field.params.bands, params.bands);
+        assert_eq!(field.params.knockout.truncate(), params.knockout.truncate());
+        assert_eq!(field.params.reduced.truncate(), params.reduced.truncate());
+        assert_eq!(field.params.knockout.w, KNOCKOUT_EXTINCTION_M * print.scale);
+        assert_eq!(field.params.reduced.w, REDUCED_EXTINCTION_M * print.scale);
         assert_eq!(field.params.volume.x, VOLUME_OPACITY);
 
-        for material in [looks.get(&handle).unwrap(), &field] {
+        for material in [&footprint, &field] {
             let mut faded = material.clone();
             faded.set_fade(0.25);
             let mut want = material.params;
             want.shade.w = 0.25;
             assert_eq!(format!("{:?}", faded.params), format!("{want:?}"));
         }
-    }
-
-    /// A volume fades at its rim: the shader weighs each march sample by the curve of
-    /// `potency::Rim::weight`, from the volume's rim lane about the ramp lane's mid threshold, and
-    /// one weighed sample carries both the colour and the length, so the colour is the weighted
-    /// mean and the opacity climbs with the weighted length alone. The rim promise relies on it:
-    /// an opacity from the plain length keeps the faint outer stretch at full strength, and a
-    /// colour weighted apart from the length shifts the mean toward the deep teal the opacity no
-    /// longer shows. The lanes are checked here; the shader's `weight`, `weighed` and `volume` are
-    /// pinned ([`the_shaders_are_the_ones_the_frames_were_captured_with`]).
-    #[test]
-    fn the_volume_fades_at_its_rim() {
-        let potency = Potency::shipped();
-        let masks = MaskSet::default();
-        let field = volume(&potency, &masks, CornerKind::Glass, None);
-        let rim = potency.rim();
-        assert_eq!(field.params.rim, rim.lanes());
-        let mid = field.params.ramp[3].w;
-        assert_eq!(rim.weight(mid), 1.0);
-        assert_eq!(rim.weight(mid * field.params.rim.x.exp2()), 0.0);
-        assert!(field.params.rim.x < field.params.rim.y);
     }
 
     /// The look draws the body behind the scene: a body surface is discarded wherever the part
@@ -1058,7 +1283,7 @@ mod tests {
             CornerKind::Slice,
             CornerKind::Damaged,
         ] {
-            let m = volume(&potency, &masks, kind, None);
+            let m = volume(&potency, &masks, kind, None, Handle::default());
             assert_eq!(
                 LookKey::from(&m).depth(),
                 Some((CompareFunction::Always, false)),
@@ -1081,6 +1306,191 @@ mod tests {
         assert_eq!(component_base(&masks).params.mode.z, 1.0);
     }
 
+    /// The print of `map`'s field from `origin` with its front at `front` (world m), `scale` world
+    /// metres per record metre.
+    fn print_of(map: &Map, origin: Vec3, front: f32, scale: f32) -> FieldPrint {
+        FieldPrint {
+            origin,
+            axis: map.axis,
+            u: map.u,
+            v: map.v,
+            half_angle: map.half_angle,
+            inner: map.inner,
+            zoom: map.zoom,
+            front,
+            scale,
+            longest: map.longest,
+        }
+    }
+
+    /// The march lays each band along an eye ray over the stretch its iso-surface cuts from the
+    /// ray. Fixture: one field over the whole sphere, every direction reaching 2 m at 5 ref-mm, so
+    /// its intensity falls as `1/r²` out to its reach, and a fixture potency whose mid and floor
+    /// it crosses at 1 m and 1.6 m: the knockout band is the ball of radius 1 m, the reduced band
+    /// the shell out to 1.6 m, nothing the shell out to the reach, and a ray `d` off the origin
+    /// crosses each over its chord `2√(r² − d²)`, at the record's size and, every length doubled,
+    /// at twice it. The march is bounded by the field's stretch ([`stretch`]). A band's opacity
+    /// climbs with its length, so the volume shows the dose law only where these lengths are the
+    /// chords: a march whose crossings are not halved (`VOLUME_REFINE = 0`) is off by up to half a
+    /// step, an intensity that does not fall as the square of a world distance moves the stage's
+    /// iso-radii, a stretch short of the reach drops the shell's far end, and samples spaced wider
+    /// than [`spacing`] (one step a stretch) step over the knockout ball whole. The rays cross the
+    /// ball from its centre to near its rim, so their stretches take from all [`VOLUME_STEPS`]
+    /// steps down to a few. Tolerance: each band edge to `2⁻⁹` of the spacing, a step's bound
+    /// (DERIVED from [`VOLUME_REFINE`]), two edges to a band and the shell two bands, and the map's
+    /// rounding.
+    #[test]
+    fn a_band_runs_its_iso_surfaces_chord() {
+        let map = Map::of(&sphere(|_, _| 2.0), None);
+        let strength = map.sample(Vec3::X).y;
+        assert!((strength - 5.0).abs() < 1e-4 && (map.longest - 2.0).abs() < 1e-4);
+        let (r_mid, r_floor, reach) = (1.0_f32, 1.6_f32, 2.0_f32);
+        let rate = 1.0;
+        let k = rate * strength / solid_angle(map.half_angle);
+        let potency = Potency {
+            rate,
+            floor: k / (r_floor * r_floor),
+            mid: k / (r_mid * r_mid),
+        };
+        let maps = std::slice::from_ref(&map);
+        let dir = Vec3::new(1.0, 0.2, -0.4).normalize();
+        let across = dir.any_orthonormal_vector();
+        for scale in [1.0, 2.0] {
+            let print = print_of(&map, Vec3::new(0.5, -1.0, 2.0), 10.0 * scale, scale);
+            let prints = std::slice::from_ref(&print);
+            let space = spacing(prints);
+            assert_eq!(space, 2.0 * map.longest * scale / VOLUME_STEPS as f32);
+            for d in [0.0, 0.35, 0.9, 1.3, 1.75] {
+                let eye = print.origin - dir * 6.0 * scale + across * d * scale;
+                let (near, far) = stretch(&print, eye, dir).expect("the ray crosses the field");
+                let mut lengths = [0.0_f32; 3];
+                march(
+                    near,
+                    far,
+                    space,
+                    &potency,
+                    |t| intensity(prints, maps, &potency, eye + dir * t),
+                    |length, band| lengths[band as usize] += length,
+                );
+                let chord = |r: f32| 2.0 * (r * r - d * d).max(0.0).sqrt() * scale;
+                let edge = space / 512.0 + 1e-4 * scale;
+                let want = [
+                    chord(reach) - chord(r_floor),
+                    chord(r_floor) - chord(r_mid),
+                    chord(r_mid),
+                ];
+                for (band, (got, want)) in lengths.iter().zip(want).enumerate() {
+                    let tolerance = if band == Band::Knockout as usize {
+                        2.0 * edge
+                    } else {
+                        4.0 * edge
+                    };
+                    assert!(
+                        (got - want).abs() <= tolerance,
+                        "scale {scale}, d {d}: band {band} runs {got} m, its chord {want} m"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Fields' doses add: where two fields overlap, the band is their summed intensity's, never
+    /// either field's own nor the larger of the two ([`intensity`], `pen_cam_look.wgsl`'s
+    /// `intensity`). The merged volume and the footprints rely on it. Fixture: two 25° caps of one
+    /// strength from origins 0.2 m apart, their axes parallel, read at a point 1 m along the axis
+    /// between them, where each lies 5.7° off its own axis; a fixture potency whose mid lies 1.6
+    /// times above either field's intensity there and whose floor at half it.
+    #[test]
+    fn doses_add_where_fields_overlap() {
+        let map = Map::of(&cap(|_, _| 3.0, |_| 1.0), None);
+        let maps = [map.clone(), map.clone()];
+        let point = map.axis;
+        let prints = [
+            print_of(&map, map.u * 0.1, 5.0, 1.0),
+            print_of(&map, -map.u * 0.1, 5.0, 1.0),
+        ];
+        let mut potency = Potency {
+            rate: 1.0,
+            floor: 0.0,
+            mid: 0.0,
+        };
+        let one = intensity(&prints[..1], &maps, &potency, point);
+        let other = intensity(&prints[1..], &maps[1..], &potency, point);
+        assert!(one > 0.0 && (one - other).abs() <= 1e-4 * one);
+        potency.floor = 0.5 * one;
+        potency.mid = 1.6 * one;
+        let both = intensity(&prints, &maps, &potency, point);
+        assert!((both - (one + other)).abs() <= 1e-5 * both);
+        assert_eq!(potency.band(one), Band::Reduced);
+        assert_eq!(potency.band(other), Band::Reduced);
+        assert_eq!(potency.band(both), Band::Knockout);
+    }
+
+    /// A field's stretch along an eye ray holds every point the field gives an intensity: the
+    /// volume marches only its fields' stretches, so a point outside them is never sampled and its
+    /// band never drawn. Fixture: a 25° cap, a 120° cap (wider than the hemisphere, which no cone
+    /// bounds), a ring's band and the sphere, each direction's reach one of 0.8, 1.3 and 1.8 m, at
+    /// twice the record's size, their fronts mid-run and past every reach; eye rays from eyes
+    /// about each origin (on its axis both ways and across it) toward a grid of points about it,
+    /// read every 5 mm. A stretch that takes the cone's far nappe for its own, or bounds a cap
+    /// wider than the hemisphere by its cone, holds a point out, and that point's band goes
+    /// undrawn.
+    #[test]
+    fn the_stretch_holds_every_point_of_its_field() {
+        let reach = |k: usize, _: Vec3| [0.8, 1.3, 1.8][k % 3];
+        let fields = [
+            cap(reach, |_| 1.0),
+            fixture_field(120.0_f32.to_radians(), 0.0, 128, reach, |_| 1.0),
+            band(reach),
+            sphere(reach),
+        ];
+        let potency = Potency::shipped();
+        let scale = 2.0;
+        for cone in &fields {
+            let map = Map::of(cone, None);
+            let maps = std::slice::from_ref(&map);
+            let mut met = 0;
+            for front in [1.2 * scale, 10.0] {
+                let print = print_of(&map, Vec3::new(-0.3, 0.7, 0.2), front, scale);
+                let prints = std::slice::from_ref(&print);
+                let eyes = [
+                    map.axis,
+                    -map.axis,
+                    map.u,
+                    -map.v,
+                    (map.axis + map.u).normalize(),
+                ];
+                for eye in eyes.map(|e| print.origin + e * 5.0 * scale) {
+                    for (i, j) in (0..25).map(|n| (n % 5, n / 5)) {
+                        let at = print.origin
+                            + (map.u * (i as f32 - 2.0) + map.v * (j as f32 - 2.0)) * 0.7 * scale;
+                        let dir = (at - eye).normalize();
+                        let span = stretch(&print, eye, dir);
+                        for n in 0..2400 {
+                            let t = n as f32 * 0.005 * scale;
+                            if intensity(prints, maps, &potency, eye + dir * t) <= 0.0 {
+                                continue;
+                            }
+                            let held =
+                                span.is_some_and(|(lo, hi)| t >= lo - 1e-3 && t <= hi + 1e-3);
+                            assert!(
+                                held,
+                                "half-angle {}, front {front}: t = {t} off {span:?}",
+                                map.half_angle
+                            );
+                            met += 1;
+                        }
+                    }
+                }
+            }
+            assert!(
+                met > 1000,
+                "half-angle {}: {met} points met",
+                map.half_angle
+            );
+        }
+    }
+
     /// The item the module scope is pinned under: everything outside a function (imports,
     /// bindings, structs, constants, entry-point attributes).
     const MODULE_SCOPE: &str = "module scope";
@@ -1088,25 +1498,32 @@ mod tests {
     /// Every top-level item of the look's and the slice's shaders, `(file, item, digest)`: the
     /// FNV-1a fold of the item's text with comments and whitespace removed. MEASURED from the
     /// shaders the shipped frames were captured with.
-    const SHADER_PINS: [(&str, &str, u64); 22] = [
+    const SHADER_PINS: [(&str, &str, u64); 29] = [
         ("pen_cam_look.wgsl", "mode", 0xd884_58c8_42c2_833e),
-        ("pen_cam_look.wgsl", "vertex", 0xf2e3_9b22_751a_00c7),
+        ("pen_cam_look.wgsl", "vertex", 0x0c5f_0c8e_ce2c_65f2),
         ("pen_cam_look.wgsl", "mask_at", 0x1d10_776f_dc3c_0e87),
         ("pen_cam_look.wgsl", "orthographic", 0xd848_4040_5cc7_bf5b),
         ("pen_cam_look.wgsl", "eye_depth", 0x959c_ebcc_5e07_ea9e),
         ("pen_cam_look.wgsl", "eye_ray", 0x8fbf_c6b6_664e_ae7b),
-        ("pen_cam_look.wgsl", "node", 0x09ad_7fd3_59ca_3573),
-        ("pen_cam_look.wgsl", "disc_at", 0x11bd_83b4_bbab_7d73),
-        ("pen_cam_look.wgsl", "ramp", 0x6cc6_ee49_6e8f_dcda),
-        ("pen_cam_look.wgsl", "polar", 0xc733_d528_4266_a92f),
-        ("pen_cam_look.wgsl", "footprint", 0xc9a9_971b_8011_e86f),
-        ("pen_cam_look.wgsl", "weight", 0x12fd_a42c_e98c_c0f4),
-        ("pen_cam_look.wgsl", "weighed", 0xd301_7b52_7fd1_b173),
-        ("pen_cam_look.wgsl", "sample", 0xe249_6117_1214_fdad),
-        ("pen_cam_look.wgsl", "volume", 0x10f5_a579_4c74_12f4),
+        ("pen_cam_look.wgsl", "sign_not_zero", 0x1679_03a6_bf5e_8900),
+        ("pen_cam_look.wgsl", "octahedral", 0xee8d_db25_da07_f4ea),
+        ("pen_cam_look.wgsl", "map_at", 0x7248_45da_66a6_a60d),
+        ("pen_cam_look.wgsl", "field_at", 0x70fb_21e1_5b50_2ec7),
+        ("pen_cam_look.wgsl", "intensity", 0xa1d0_858a_a0d0_eea1),
+        ("pen_cam_look.wgsl", "soft_step", 0x05cd_e5fb_8619_f8d0),
+        ("pen_cam_look.wgsl", "inside", 0xbe35_1ba6_c6e3_7355),
+        ("pen_cam_look.wgsl", "footprint", 0x0dd7_8dae_99b2_e455),
+        ("pen_cam_look.wgsl", "printed", 0xa3ef_69a5_13f1_8034),
+        ("pen_cam_look.wgsl", "stretch", 0xf54b_5e9e_e1d2_8521),
+        ("pen_cam_look.wgsl", "over", 0xbcd5_9d02_0fb0_72c6),
+        ("pen_cam_look.wgsl", "crossing", 0xf3eb_38f6_6b3c_7759),
+        ("pen_cam_look.wgsl", "step_over", 0xa701_5de6_1500_b34c),
+        ("pen_cam_look.wgsl", "spacing", 0x2965_9a2f_86a2_a75f),
+        ("pen_cam_look.wgsl", "march", 0xec61_59f5_827e_b60c),
+        ("pen_cam_look.wgsl", "volume", 0xf205_578b_73d1_2d09),
         ("pen_cam_look.wgsl", "lines", 0x5560_efe8_d460_738c),
-        ("pen_cam_look.wgsl", "fragment", 0x48ae_8a95_463a_6e06),
-        ("pen_cam_look.wgsl", MODULE_SCOPE, 0xcca5_f288_3c99_edd1),
+        ("pen_cam_look.wgsl", "fragment", 0x959e_e32d_8def_9e8f),
+        ("pen_cam_look.wgsl", MODULE_SCOPE, 0xd4a2_1a75_60f0_55e2),
         (
             "pen_cam_slice.wgsl",
             "behind_the_scene",
@@ -1164,7 +1581,7 @@ mod tests {
     /// the frames were captured with: every top-level item, each function and the module scope,
     /// folds to its pin with comments and whitespace removed. A comment or a layout change keeps
     /// every pin; any other change moves the pin of the item it touches, whatever text it keeps
-    /// elsewhere. The colour, rim, eye-depth and draw-order promises rely on it: their Rust side
+    /// elsewhere. The colour, band, eye-depth and draw-order promises rely on it: their Rust side
     /// is tested against the WGSL pinned here, and an unpinned item (`orthographic`, a binding)
     /// breaks a pinned one's frame with its text unchanged.
     #[test]
@@ -1200,11 +1617,15 @@ mod tests {
         assert!(
             moved.is_empty(),
             "the pen cam's shaders moved; the moved items' pins:\n{}\nRe-pin only after the Rust \
-             mirrors are read against the new WGSL and pass (`potency::tests` for `ramp` and \
-             `weight`, `the_pen_cam_intensity_times_a_face_is_its_dose` for the intensity, \
-             `field::tests` for `disc_at`, `the_eye_depth_runs_forward_in_both_projections` for \
-             `eye_depth` and `eye_ray`) and a hidden capture of every frame the moved items draw \
-             (`OVERMATCH_CAPTURE` over `pen_cam_demo`) shows the change meant.",
+             mirrors are read against the new WGSL and pass (`potency::tests` for `soft_step`, \
+             `field::tests` for `octahedral` and `map_at` (`Map::sample`), \
+             `a_band_runs_its_iso_surfaces_chord` and `doses_add_where_fields_overlap` for \
+             `field_at`, `intensity`, `crossing`, `step_over`, `spacing` and `march`, \
+             `the_stretch_holds_every_point_of_its_field` for `stretch`, \
+             `the_pen_cam_intensity_times_a_face_is_its_dose` for the intensity's law, \
+             `the_eye_depth_runs_forward_in_both_projections` for `eye_depth` and `eye_ray`) and \
+             a hidden capture of every frame the moved items draw (`OVERMATCH_CAPTURE` over \
+             `pen_cam_demo`) shows the change meant.",
             moved.join("\n")
         );
     }
@@ -1295,96 +1716,15 @@ mod tests {
         }
     }
 
-    /// A volume's march spans its longest chord: [`VOLUME_STEPS`] steps cover the distance between
-    /// any two vertices of its reach surface, the volume's bound, for every record's fields and a
-    /// field over the whole sphere (a ball at rest, fixture reach 2 m) at the record's size and at
-    /// the stage's. The shader marches at most that many steps back from where the eye ray leaves;
-    /// a step from the mean reach, or one that forgets the field's width, past the hemisphere
-    /// included, leaves the near part of a long chord unread and its colour short.
-    #[test]
-    fn the_march_spans_every_chord() {
-        use super::super::plan::{Cone, Plan, Ray};
-        use crate::ballistics::spall_cone::{ConeShape, FieldDescriptor};
-        let rest = FieldDescriptor::ball(0.0);
-        let rays = ConeShape::shipped()
-            .spread(rest)
-            .unwrap()
-            .directions(Dir3::NEG_Z)
-            .map(|(direction, weight)| Ray {
-                direction: direction.into(),
-                reach: 2.0,
-                weight,
-            })
-            .collect();
-        let sphere = Cone::new(
-            Vec3::ZERO,
-            Vec3::NEG_Z,
-            rest.half_angle(),
-            rest.inner_angle(),
-            10.0,
-            super::super::field::tests::AT_ORIGIN,
-            rays,
-        );
-        let mut plans: Vec<(String, Vec<Cone>)> = super::super::potency::tests::plans()
-            .into_iter()
-            .map(|(name, plan): (String, Plan)| (name, plan.cones))
-            .collect();
-        plans.push(("the sphere".to_owned(), vec![sphere]));
-        let mut checked = 0;
-        for (name, cones) in plans {
-            for cone in &cones {
-                let mesh = super::super::field::reach_mesh(cone);
-                let Some(bevy::mesh::VertexAttributeValues::Float32x3(positions)) =
-                    mesh.attribute(Mesh::ATTRIBUTE_POSITION)
-                else {
-                    panic!("positions");
-                };
-                let mut corners: Vec<[u32; 3]> =
-                    positions.iter().map(|p| p.map(f32::to_bits)).collect();
-                corners.sort_unstable();
-                corners.dedup();
-                let corners: Vec<Vec3> = corners
-                    .iter()
-                    .map(|p| Vec3::from(p.map(f32::from_bits)))
-                    .collect();
-                let chord = corners
-                    .iter()
-                    .flat_map(|a| corners.iter().map(|b| a.distance(*b)))
-                    .fold(0.0, f32::max);
-                for scale in [1.0, 2.0] {
-                    let print = FieldPrint {
-                        origin: cone.origin,
-                        axis: cone.disc.axis,
-                        u: cone.disc.u,
-                        v: cone.disc.v,
-                        half_angle: cone.half_angle,
-                        inner: cone.disc.inner,
-                        front: 0.0,
-                        scale,
-                        nodes: &cone.disc.nodes,
-                    };
-                    let span = VOLUME_STEPS as f32 * VolumeGeometry::of(&print).step;
-                    assert!(
-                        span >= scale * chord * (1.0 - 1e-5),
-                        "{name}: {span} m marched against a {} m chord",
-                        scale * chord
-                    );
-                    checked += 1;
-                }
-            }
-        }
-        assert!(checked > 0);
-    }
-
     /// A field's presentation is finite across the field law's whole domain: over the whole
     /// sphere (a ball at rest, `λ = 0`), over a ring's band (fixture `λ = 0.45`, half-width 10°), at
     /// the hemisphere (`λ = 1`) and at the narrowest cone the law resolves (the largest ratio
     /// `FieldDescriptor::check` admits, about 9.5·10⁷, a half-angle of about 10⁻⁸ rad, DERIVED),
-    /// a direction's emission is finite and positive, and every lane [`set_footprints`] and
-    /// [`LookMaterial::set_volume`] pack (the field's frame, its disc's reach and emission through
-    /// `field::Disc`'s mapping, the march's step and depth) is finite. The shader's footprint and
-    /// volume take the potency colour from those lanes; a solid angle that rounds to zero makes
-    /// the emission infinite and every colour of the field undefined. Fixture strength and reach.
+    /// a direction's emission is finite and positive, its map ([`Map::of`]) is finite with a
+    /// positive zoom, and every lane [`set_footprints`] and [`LookMaterial::set_fields`] pack is
+    /// finite. The shader's footprint and volume take their bands from those lanes; a solid angle
+    /// that rounds to zero makes the emission infinite and every band of the field undefined, and
+    /// a zoom of zero reads every direction off the map. Fixture strength and reach.
     #[test]
     fn a_cone_packs_finite_lanes_across_the_law() {
         use super::super::plan::{Cone, Ray};
@@ -1432,32 +1772,41 @@ mod tests {
                 super::super::field::tests::AT_ORIGIN,
                 rays,
             );
-            let emission = potency.emission(strength, cone.disc.inner, cone.half_angle);
+            let emission = potency.emission(strength, cone.inner, cone.half_angle);
             assert!(
                 emission.is_finite() && emission > 0.0,
                 "λ = {ratio}: emission {emission}"
             );
-            let print = FieldPrint {
-                origin: cone.origin,
-                axis: cone.disc.axis,
-                u: cone.disc.u,
-                v: cone.disc.v,
-                half_angle: cone.disc.half_angle,
-                inner: cone.disc.inner,
-                front: cone.max_reach(),
-                scale: 2.0,
-                nodes: &cone.disc.nodes,
-            };
+            let map = Map::of(&cone, None);
+            assert!(
+                map.zoom.is_finite() && map.zoom > 0.0,
+                "λ = {ratio}: zoom {}",
+                map.zoom
+            );
+            assert!(
+                map.longest.is_finite() && map.texels.iter().all(|t| t.is_finite()),
+                "λ = {ratio}: a texel is not finite"
+            );
+            let print = print_of(&map, cone.origin, cone.max_reach(), 2.0);
+            let atlas = Handle::<Image>::default();
             let mut looks = Assets::<LookMaterial>::default();
             let handle = looks.add(base(&masks));
-            set_footprints(&mut looks, &masks, std::slice::from_ref(&print), &potency);
-            let mut field = volume(&potency, &masks, CornerKind::Glass, None);
-            field.set_volume(&print, &potency);
+            set_footprints(
+                &mut looks,
+                &masks,
+                std::slice::from_ref(&print),
+                &potency,
+                Some(&atlas),
+            );
+            let mut field = volume(&potency, &masks, CornerKind::Glass, None, atlas);
+            field.set_fields(std::slice::from_ref(&print), &potency);
             for params in [looks.get(&handle).unwrap().params, field.params] {
-                let lanes = params.prints[..4]
-                    .iter()
-                    .chain(&params.disc[..DISC_LANES])
-                    .chain([&params.volume]);
+                let lanes = params.prints[..PRINT_LANES].iter().chain([
+                    &params.bands,
+                    &params.knockout,
+                    &params.reduced,
+                    &params.volume,
+                ]);
                 for (k, lane) in lanes.enumerate() {
                     assert!(lane.is_finite(), "λ = {ratio}: lane {k} is {lane}");
                 }

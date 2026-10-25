@@ -10,16 +10,19 @@
 //! nothing here names a vehicle.
 
 use std::collections::{BTreeMap, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use bevy::asset::RenderAssetUsages;
 use bevy::math::Affine3A;
 use bevy::mesh::{Mesh, PrimitiveTopology};
 use bevy::prelude::*;
 
+use avian3d::parry::query::{Ray, RayCullingMode};
+use avian3d::parry::shape::{FeatureId, TriMesh};
+
 use crate::bake::{TankBlueprint, TankGeometry, extract_tank_geometry};
 use crate::spec::TankSpec;
-use crate::substances::SubstanceRegistry;
+use crate::substances::{Matter, SubstanceRegistry};
 use crate::tank::{ServoRole, servo_pose};
 
 /// The node every tank file's rig names its hull: the record's frame.
@@ -124,13 +127,97 @@ impl TankAsset {
     }
 }
 
-/// Every component of a tank by name, posed for one record, and the whole tank's bounds.
+/// Every component of a tank by name, posed for one record, the whole tank's bounds, and its hard
+/// bodies.
 #[derive(Clone, Debug, Default)]
 pub struct TankShapes {
     by_name: HashMap<String, ComponentShape>,
     /// The low and high corners, in the record's frame, of every ballistic primitive of every node
     /// (armour and components alike) as posed; `None` when the geometry holds none.
     bounds: Option<(Vec3, Vec3)>,
+    hard: Option<Arc<HardBodies>>,
+}
+
+/// Every hard ballistic primitive of a tank, posed for one record, as one triangle mesh: the
+/// bodies a field's direction is spent in and stopped by (`ballistics::resolve::field_direction`),
+/// which a witness never is. Each primitive is one body, a closed shell wound outward (the manifold
+/// gate's certificate), so a line enters a body through a face it meets head-on
+/// (`normal · direction < 0`) and leaves it through one it meets from behind. The mesh's bounding
+/// volume hierarchy is built on the first cast, so shapes that are never cast against cost none.
+pub struct HardBodies {
+    vertices: Vec<Vec3>,
+    triangles: Vec<[u32; 3]>,
+    /// Each triangle's body: its primitive's index among the hard ones.
+    body: Vec<u32>,
+    mesh: OnceLock<Option<TriMesh>>,
+}
+
+/// Where a line first enters a hard body and next leaves one (m along it), and the body it entered.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BodyHit {
+    pub entry: f32,
+    pub exit: f32,
+    pub body: u32,
+}
+
+impl HardBodies {
+    /// The bodies of `triangles` over `vertices` (record frame), triangle `k` of body `body[k]`.
+    pub fn new(vertices: Vec<Vec3>, triangles: Vec<[u32; 3]>, body: Vec<u32>) -> Self {
+        assert_eq!(triangles.len(), body.len(), "one body per triangle");
+        Self {
+            vertices,
+            triangles,
+            body,
+            mesh: OnceLock::new(),
+        }
+    }
+
+    fn mesh(&self) -> Option<&TriMesh> {
+        self.mesh
+            .get_or_init(|| TriMesh::new(self.vertices.clone(), self.triangles.clone()).ok())
+            .as_ref()
+    }
+
+    /// The first body the line from `origin` along unit `direction` enters within `reach` (m),
+    /// and where (m along it): the nearest face it meets head-on. A face the line meets from
+    /// behind before any, as when it starts inside a body, is passed over: a line leaving the body
+    /// it starts in has not entered it.
+    pub fn entry(&self, origin: Vec3, direction: Vec3, reach: f32) -> Option<(f32, u32)> {
+        let mesh = self.mesh()?;
+        let ray = Ray::new(origin, direction);
+        let hit = mesh.cast_local_ray_with_culling(&ray, reach, RayCullingMode::IgnoreBackfaces)?;
+        let FeatureId::Face(face) = hit.feature else {
+            return None;
+        };
+        Some((
+            hit.time_of_impact,
+            self.body[face as usize % self.body.len()],
+        ))
+    }
+
+    /// [`Self::entry`], and past the entry the nearest face the line meets from behind, where it
+    /// leaves (`reach` when none lies within it).
+    pub fn first(&self, origin: Vec3, direction: Vec3, reach: f32) -> Option<BodyHit> {
+        let (entry, body) = self.entry(origin, direction, reach)?;
+        let inside = Ray::new(origin + direction * entry, direction);
+        let exit = self
+            .mesh()?
+            .cast_local_ray_with_culling(
+                &inside,
+                (reach - entry).max(0.0),
+                RayCullingMode::IgnoreFrontfaces,
+            )
+            .map_or(reach, |leave| entry + leave.time_of_impact);
+        Some(BodyHit { entry, exit, body })
+    }
+}
+
+impl std::fmt::Debug for HardBodies {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("HardBodies")
+            .field("triangles", &self.body.len())
+            .finish_non_exhaustive()
+    }
 }
 
 impl TankShapes {
@@ -163,15 +250,36 @@ impl TankShapes {
             .get(HULL_NODE)
             .map_or(Affine3A::IDENTITY, |&hull| poses[hull].inverse());
         let mut bounds: Option<(Vec3, Vec3)> = None;
+        let (mut vertices, mut triangles, mut body) = (Vec::new(), Vec::new(), Vec::new());
+        let mut bodies = 0;
         for (pose, node) in poses.iter().zip(&geometry.nodes) {
             let to_record = hull_from_root * *pose;
-            for primitive in node.primitives.iter().filter(|p| p.substance.is_some()) {
-                for p in &primitive.positions {
-                    let p = to_record.transform_point3(Vec3::from(*p));
+            for primitive in &node.primitives {
+                let Some(substance) = &primitive.substance else {
+                    continue;
+                };
+                let posed: Vec<Vec3> = primitive
+                    .positions
+                    .iter()
+                    .map(|p| to_record.transform_point3(Vec3::from(*p)))
+                    .collect();
+                for &p in &posed {
                     bounds = Some(bounds.map_or((p, p), |(lo, hi)| (lo.min(p), hi.max(p))));
                 }
+                if matches!(substance.matter, Matter::Witness) {
+                    continue;
+                }
+                let base = vertices.len() as u32;
+                vertices.extend(posed);
+                for t in primitive.indices.as_chunks::<3>().0 {
+                    triangles.push([base + t[0], base + t[1], base + t[2]]);
+                    body.push(bodies);
+                }
+                bodies += 1;
             }
         }
+        let hard =
+            (!triangles.is_empty()).then(|| Arc::new(HardBodies::new(vertices, triangles, body)));
         let mut by_name = HashMap::new();
         for name in components {
             let Some(&index) = geometry.by_name.get(name) else {
@@ -200,7 +308,16 @@ impl TankShapes {
             }
             by_name.insert(name.to_owned(), shape);
         }
-        Self { by_name, bounds }
+        Self {
+            by_name,
+            bounds,
+            hard,
+        }
+    }
+
+    /// The tank's hard bodies as posed; `None` when the geometry holds none.
+    pub fn hard(&self) -> Option<&Arc<HardBodies>> {
+        self.hard.as_ref()
     }
 
     /// The whole tank's bounds in the record's frame, low and high corners: every ballistic

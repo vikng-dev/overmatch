@@ -15,10 +15,11 @@
 // `.agents/docs/design/armor-penetration-and-damage.md`; the decision is #3 in
 // `.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md`.
 //
-// The pen cam's potency colour is anchored at two thresholds from this file, in HP points per m²
-// of face: near-white at bright, `hard`; the field teal at mid, `crew_hp / crew_face_m2`. Each
-// threshold times its class's face is the class's pool, so a box presenting that face wholly at or
-// above the threshold has its HP pool emptied. Design doc §5, "Potency colour".
+// The pen cam's potency bands part at two thresholds from this file, in HP points per m² of a
+// crew station's face: mid, `crew_hp / crew_face_m2`, so a crew station presenting that face
+// wholly at or above it is knocked out; the floor, the least share of an HP point the sim's
+// rounding counts over `crew_face_m2`, below which it takes no HP point. Design doc §5, "Potency
+// colour".
 //
 // PROVENANCE: every value is authored `(value, Kind("source or reason"))`, Kind one of Measured,
 // Derived, Tuned, Resolution, Unknown (`src/provenance.rs`); a value without one does not load.

@@ -16,9 +16,11 @@
 
 use bevy::prelude::*;
 
-use super::field::Disc;
+use std::sync::{Arc, OnceLock};
+
+use super::field::{self, Map};
 use super::timeline::CornerKind;
-use crate::damage_cam::shapes::TankShapes;
+use crate::damage_cam::shapes::{HardBodies, TankShapes};
 use crate::damage_cam::{
     ConsequenceState, PenetrationReport, PlateClass, Role, RoundEnd, SpallCone,
 };
@@ -72,6 +74,11 @@ pub struct Plan {
     /// The whole struck tank's bounds (low, high corners), posed as the record has it
     /// ([`TankShapes::bounds`]); `None` without the tank asset's shapes.
     pub tank_bounds: Option<(Vec3, Vec3)>,
+    /// The struck tank's hard bodies, posed as the record has it ([`TankShapes::hard`]): the guide
+    /// that places the fields' shadow edges ([`field`]); `None` without the tank asset's shapes.
+    pub bodies: Option<Arc<HardBodies>>,
+    /// Each field's direction map, baked on first read ([`Self::maps`]).
+    maps: OnceLock<Arc<[Map]>>,
 }
 
 /// The path as points with cumulative arc length, the record's time at each point and the
@@ -289,13 +296,14 @@ pub struct Cone {
     /// A front with no finite positive speed (a leg with no time span) is whole once thrown.
     pub speed: f32,
     pub rays: Vec<Ray>,
-    /// The directions' reach and strength as one function of direction, baked from `rays`.
-    pub disc: Disc,
+    /// The support's inner edge (rad off the axis): a ring's band starts there; 0 on a cap and the
+    /// sphere.
+    pub inner: f32,
 }
 
 impl Cone {
     /// The cone of these parts, its support from `inner` to `half_angle` (rad) off its axis,
-    /// `thrown` as given, its [`Disc`] baked from `rays`.
+    /// `thrown` as given.
     pub fn new(
         origin: Vec3,
         axis: Vec3,
@@ -305,7 +313,6 @@ impl Cone {
         thrown: Thrown,
         rays: Vec<Ray>,
     ) -> Self {
-        let disc = Disc::of(axis, half_angle, inner, strength, &rays);
         Self {
             origin,
             axis,
@@ -315,7 +322,7 @@ impl Cone {
             t: thrown.t,
             speed: thrown.speed,
             rays,
-            disc,
+            inner,
         }
     }
 
@@ -585,6 +592,8 @@ impl Plan {
             burst,
             boxes,
             tank_bounds: shapes.bounds(),
+            bodies: shapes.hard().cloned(),
+            maps: OnceLock::new(),
             line,
         }
     }
@@ -615,6 +624,23 @@ impl Plan {
             burst: None,
             boxes,
             tank_bounds: shapes.bounds(),
+            bodies: shapes.hard().cloned(),
+            maps: OnceLock::new(),
+        }
+    }
+
+    /// Each field's direction map, in [`Self::cones`]' order, its shadow edges placed by
+    /// [`Self::bodies`]: baked on the first read ([`field::bake`]), then held.
+    pub fn maps(&self) -> &Arc<[Map]> {
+        self.maps
+            .get_or_init(|| field::bake(&self.cones, self.bodies.as_deref()).into())
+    }
+
+    /// Take `from`'s maps, baked or not, as this plan's: a plan of the same record bakes the same
+    /// maps, so a replan of an unchanged record never bakes them again.
+    pub fn share_maps(&mut self, from: &Plan) {
+        if let Some(maps) = from.maps.get() {
+            self.maps = OnceLock::from(maps.clone());
         }
     }
 

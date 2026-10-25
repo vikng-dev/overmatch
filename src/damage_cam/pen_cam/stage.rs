@@ -1,11 +1,12 @@
 //! The corner's stage: the struck tank's stage view dressed for the frame, and the record drawn
 //! over it — the round as the game's shell model at the record's calibre, travelling the recorded
 //! path nose first with a thin trail behind it, a ring where it crossed each plate or glanced off a
-//! face, every field (each spall cone, and a burst's) as one translucent volume in the potency
-//! colour of its local intensity, bounded where its directions stopped ([`look::volume`], and by
-//! the plane in the slice), and each component's real mesh on the state scale ([`look::component`]):
-//! filled red from the bottom up to the share of its whole HP pool gone, rising at its reach time
-//! from its state before the shot to its state after it, one knocked out charcoal and hatched.
+//! face, the record's fields (each spall cone, and a burst's) as one translucent volume in the
+//! potency bands of their summed intensity, bounded where their directions stopped
+//! ([`look::volume`], and by the plane in the slice), and each component's real mesh on the state
+//! scale ([`look::component`]): filled red from the bottom up to the share of its whole HP pool
+//! gone, rising at its reach time from its state before the shot to its state after it, one
+//! knocked out charcoal and hatched.
 //! The shell rests where the record ends; a round the record has leave the tank runs on past the
 //! path's last node along its last leg for the rest of the play ([`shell_share`]). A round that
 //! bursts breaks up at the burst's record time: only a ring's nose piece flies on, the model
@@ -143,11 +144,9 @@ pub(super) struct MarkItem {
     at_arc: f32,
 }
 
-/// Cone `cone`'s volume, about its origin.
+/// The record's fields' one volume, on the box about their reach ([`look::field_bounds`]).
 #[derive(Component)]
-pub(super) struct ConeVolume {
-    cone: usize,
-}
+pub(super) struct FieldVolume;
 
 /// A copy of one mesh of component `index` of the plan, over the tank's own, tinted by its dose.
 #[derive(Component)]
@@ -217,6 +216,9 @@ pub struct Stage {
     masks: MaskSet,
     /// The round's own material, which a burst's pieces wear ([`shell_material`]).
     round_material: Handle<StandardMaterial>,
+    /// The built record's field maps ([`field::atlas`]), which its footprints read; `None` where
+    /// it draws no field.
+    atlas: Option<Handle<Image>>,
     /// The along-shot frames' eye distance ([`shot_distance`]), one solve per record per orbit
     /// value, never per frame: [`animate`] solves it before it frames and re-solves only when the
     /// record on show or the viewer's drag differs from the one it was solved for. `None` (a stage
@@ -403,7 +405,7 @@ pub struct StageRoundPose<'w, 's> {
             With<StageShell>,
             Without<LineSeg>,
             Without<MarkItem>,
-            Without<ConeVolume>,
+            Without<FieldVolume>,
             Without<BoxTint>,
             Without<StageCamera>,
         ),
@@ -421,7 +423,7 @@ pub struct StageRoundPose<'w, 's> {
             Without<StageShell>,
             Without<LineSeg>,
             Without<MarkItem>,
-            Without<ConeVolume>,
+            Without<FieldVolume>,
             Without<BoxTint>,
             Without<StageCamera>,
         ),
@@ -432,7 +434,7 @@ pub struct StageRoundPose<'w, 's> {
 /// the camera drawing it: the inset's in the corner, the main camera's in the kill cam's lesson.
 #[expect(
     clippy::too_many_arguments,
-    reason = "rebuilds the stage from the corner, exhibits, view, round and the viewer's masks into the mesh store and four material stores"
+    reason = "rebuilds the stage from the corner, exhibits, view, round and the viewer's masks into the mesh and image stores and four material stores"
 )]
 pub fn rebuild(
     mut commands: Commands,
@@ -449,7 +451,7 @@ pub fn rebuild(
     mut outlines: ResMut<Assets<OutlineMaterial>>,
     standard: Res<Assets<StandardMaterial>>,
     mut slices: ResMut<Assets<SliceMaterial>>,
-    mut looks: ResMut<Assets<LookMaterial>>,
+    (mut looks, mut images): (ResMut<Assets<LookMaterial>>, ResMut<Assets<Image>>),
     masks: Res<Masks>,
 ) {
     let key = corner.showing.map(|showing| StageKey {
@@ -466,6 +468,7 @@ pub fn rebuild(
     stage.key = key.clone();
     stage.stale = false;
     stage.hull = Some(hull);
+    stage.atlas = None;
     let viewer = corner.showing.and_then(|showing| match showing.surface {
         super::Surface::Corner => stage.camera,
         super::Surface::World => main.single().ok(),
@@ -581,7 +584,7 @@ pub fn rebuild(
             .filter(|(_, mesh, _)| mesh.root == ViewRoot::Stage)
             .map(|(entity, mesh, handle)| (entity, mesh.names.as_slice(), handle.0.clone())),
     );
-    spawn_glass(
+    stage.atlas = spawn_glass(
         &mut commands,
         &mut meshes,
         &mut glows,
@@ -593,6 +596,7 @@ pub fn rebuild(
         &components,
         LookCtx {
             looks: &mut looks,
+            images: &mut images,
             masks: &masks,
         },
         &stage.round_material,
@@ -641,6 +645,7 @@ pub(super) fn round_copies(
 /// What drawing a record in the base look needs.
 pub struct LookCtx<'a> {
     pub looks: &'a mut Assets<LookMaterial>,
+    pub images: &'a mut Assets<Image>,
     pub masks: &'a MaskSet,
 }
 
@@ -648,10 +653,12 @@ pub struct LookCtx<'a> {
 /// pieces and the components on the state scale. Every element but the tints is spawned under
 /// `hull`, an entity whose frame is the record's (the struck hull's); each tint is a copy of one of
 /// `components`, the tank's own meshes of the components the record names, spawned under that
-/// mesh. `clip` is the slice plane (unit normal toward the eye, a point on it) the cones and the
+/// mesh. `clip` is the slice plane (unit normal toward the eye, a point on it) the fields and the
 /// pieces are cut by. The pieces wear `round_material`, the round's own ([`shell_material`]).
 /// Everything spawned carries `tag` — its owner's marker and the channel it draws on — and is
-/// hidden until [`Playing`] places it.
+/// hidden until [`Playing`] places it. Returns the atlas of the record's field maps
+/// ([`Plan::maps`], [`field::atlas`]) its volume reads and its footprints are to read; `None` where
+/// the frame draws no field.
 #[expect(
     clippy::too_many_arguments,
     reason = "draws one plan: the spawn sinks, the plan and its frame, the parent and clip, the components, the look, the round's material and the owner's tag are separate inputs"
@@ -669,7 +676,7 @@ pub fn spawn_glass(
     look_ctx: LookCtx,
     round_material: &Handle<StandardMaterial>,
     tag: impl Bundle + Clone,
-) {
+) -> Option<Handle<Image>> {
     // The trail, one cylinder per leg of the path from the drawn span's start; a round that left
     // trails on past the span behind the shell, and its last leg past the path's last node.
     let cylinder = meshes.add(Cylinder::new(0.5, 1.0));
@@ -759,20 +766,28 @@ pub fn spawn_glass(
         );
     }
 
-    // Spall cones: each one's volume, cut by the slice plane in the slice.
-    let potency = Potency::shipped();
-    for (index, cone) in plan.cones.iter().enumerate() {
-        if matches!(kind, CornerKind::Ricochet) {
-            break;
-        }
-        let mut material = look::volume(&potency, look_ctx.masks, kind, clip);
+    // The fields: their maps in one atlas, and one volume on the box about their reach, cut by
+    // the slice plane in the slice.
+    let maps = plan.maps();
+    let atlas = (kind != CornerKind::Ricochet && !maps.is_empty())
+        .then(|| look_ctx.images.add(field::atlas(maps)));
+    if let Some(atlas) = &atlas
+        && let Some((lo, hi)) = look::field_bounds(&plan.cones, maps)
+    {
+        let mut material = look::volume(
+            &Potency::shipped(),
+            look_ctx.masks,
+            kind,
+            clip,
+            atlas.clone(),
+        );
         material.set_fade(0.0);
         commands.spawn((
-            Mesh3d(meshes.add(field::reach_mesh(cone))),
+            Mesh3d(meshes.add(Cuboid::from_corners(lo, hi))),
             MeshMaterial3d(look_ctx.looks.add(material)),
-            Transform::from_translation(cone.origin),
+            Transform::from_translation(0.5 * (lo + hi)),
             Visibility::Hidden,
-            ConeVolume { cone: index },
+            FieldVolume,
             tag.clone(),
             ChildOf(hull),
         ));
@@ -835,6 +850,7 @@ pub fn spawn_glass(
         commands.spawn((tint(), MeshMaterial3d(look_ctx.looks.add(fill))));
         commands.spawn((tint(), MeshMaterial3d(outlines.add(outline))));
     }
+    atlas
 }
 
 /// The ring a calibre across on a face, stretched along the line's track on it by
@@ -1246,81 +1262,89 @@ impl<'a> Playing<'a> {
         });
     }
 
-    /// A field's volume (a spall cone's or a burst's), its field in world space under the record
-    /// frame `hull` (hidden without one): its front run out from the origin, or under reduce motion
-    /// the whole field faded in.
-    pub(super) fn cone(
+    /// The fields' volume (the spall cones' and a burst's), in world space under the record frame
+    /// `hull` (hidden without one): each field's front run out from its origin, or under reduce
+    /// motion each whole field faded in.
+    pub(super) fn fields(
         &self,
-        volume: &ConeVolume,
         look: &MeshMaterial3d<LookMaterial>,
         visibility: &mut Mut<Visibility>,
         hull: Option<&GlobalTransform>,
         looks: &mut Assets<LookMaterial>,
     ) {
         let (plan, kind, c) = (self.plan, self.kind, self.c);
-        let fade = if self.reduce {
-            self.fade_from(cone_start(plan, kind, volume.cone, true))
-        } else if front_radius(plan, kind, volume.cone, c) > 0.0 {
-            1.0
-        } else {
-            0.0
-        };
+        let fade = (0..plan.cones.len())
+            .map(|index| {
+                if self.reduce {
+                    self.fade_from(cone_start(plan, kind, index, true))
+                } else if front_radius(plan, kind, index, c) > 0.0 {
+                    1.0
+                } else {
+                    0.0
+                }
+            })
+            .fold(0.0, f32::max);
         let Some(hull) = hull.filter(|_| fade > 0.0) else {
             visibility.set_if_neq(Visibility::Hidden);
             return;
         };
         if let Some(mut m) = looks.get_mut(&look.0) {
-            let print = self.print(volume.cone, hull);
-            m.set_volume(&print, &Potency::shipped());
+            m.set_fields(&self.prints(hull), &Potency::shipped());
             m.set_fade(fade);
-            m.set_front((!self.reduce).then_some(print.front));
         }
         visibility.set_if_neq(Visibility::Inherited);
     }
 
-    /// Cone `index`'s field in world space under the record frame `hull`: its frame, and its front
-    /// run out from the origin, or under reduce motion its longest reach once it is thrown and
-    /// negative before.
-    fn print(&self, index: usize, hull: &GlobalTransform) -> FieldPrint<'a> {
+    /// Every field in world space under the record frame `hull`: its origin, its map's frame and
+    /// zoom, and its front run out from the origin, or under reduce motion its map's longest reach
+    /// once it is thrown and negative before.
+    fn prints(&self, hull: &GlobalTransform) -> Vec<FieldPrint> {
         let (plan, kind, c) = (self.plan, self.kind, self.c);
-        let cone = &plan.cones[index];
         let linear = hull.affine().matrix3;
-        let axis = linear * cone.axis;
-        let scale = axis.length();
         let unit = |v: Vec3| {
             let v = linear * v;
             v / v.length().max(1e-6)
         };
-        let front = if self.reduce {
-            if c >= cone_start(plan, kind, index, true) {
-                cone.max_reach()
-            } else {
-                -1.0
-            }
-        } else {
-            front_radius(plan, kind, index, c)
-        };
-        FieldPrint {
-            origin: hull.transform_point(cone.origin),
-            axis: unit(cone.disc.axis),
-            u: unit(cone.disc.u),
-            v: unit(cone.disc.v),
-            half_angle: cone.disc.half_angle,
-            inner: cone.disc.inner,
-            front: front * scale,
-            scale,
-            nodes: &cone.disc.nodes,
-        }
+        plan.cones
+            .iter()
+            .zip(plan.maps().iter())
+            .enumerate()
+            .map(|(index, (cone, map))| {
+                let scale = (linear * map.axis).length();
+                let front = if self.reduce {
+                    if c >= cone_start(plan, kind, index, true) {
+                        map.longest
+                    } else {
+                        -1.0
+                    }
+                } else {
+                    front_radius(plan, kind, index, c)
+                };
+                FieldPrint {
+                    origin: hull.transform_point(cone.origin),
+                    axis: unit(map.axis),
+                    u: unit(map.u),
+                    v: unit(map.v),
+                    half_angle: map.half_angle,
+                    inner: map.inner,
+                    zoom: map.zoom,
+                    front: front * scale,
+                    scale,
+                    longest: map.longest,
+                }
+            })
+            .collect()
     }
 
-    /// Each field's footprint, in world space under the record frame `hull`, on the base look's
-    /// surfaces drawn against `masks`; the frames that draw the base look or the tank outside
-    /// mark it, the slice does not.
+    /// The fields' footprint, in world space under the record frame `hull`, on the base look's
+    /// surfaces drawn against `masks`, read from the record's field maps in `atlas`; the frames
+    /// that draw the base look or the tank outside mark it, the slice does not.
     pub(super) fn footprints(
         &self,
         hull: &GlobalTransform,
         masks: &MaskSet,
         looks: &mut Assets<LookMaterial>,
+        atlas: Option<&Handle<Image>>,
     ) {
         if !matches!(
             self.kind,
@@ -1328,10 +1352,7 @@ impl<'a> Playing<'a> {
         ) {
             return;
         }
-        let prints: Vec<FieldPrint> = (0..self.plan.cones.len())
-            .map(|index| self.print(index, hull))
-            .collect();
-        look::set_footprints(looks, masks, &prints, &Potency::shipped());
+        look::set_footprints(looks, masks, &self.prints(hull), &Potency::shipped(), atlas);
     }
 
     /// A component's state fill and its outline: risen along the up of the record frame `hull`
@@ -1430,7 +1451,7 @@ pub fn animate(
         (
             With<StageItem>,
             Without<MarkItem>,
-            Without<ConeVolume>,
+            Without<FieldVolume>,
             Without<StageCamera>,
         ),
     >,
@@ -1439,14 +1460,15 @@ pub fn animate(
         (
             With<StageItem>,
             Without<LineSeg>,
-            Without<ConeVolume>,
+            Without<FieldVolume>,
             Without<BoxTint>,
         ),
     >,
     mut volumes: Query<
-        (&ConeVolume, &MeshMaterial3d<LookMaterial>, &mut Visibility),
+        (&MeshMaterial3d<LookMaterial>, &mut Visibility),
         (
             With<StageItem>,
+            With<FieldVolume>,
             Without<LineSeg>,
             Without<MarkItem>,
             Without<BoxTint>,
@@ -1463,12 +1485,12 @@ pub fn animate(
             With<StageItem>,
             Without<LineSeg>,
             Without<MarkItem>,
-            Without<ConeVolume>,
+            Without<FieldVolume>,
         ),
     >,
     mut camera: Query<
         (&mut Camera, &mut Transform, &mut Projection),
-        (With<StageCamera>, Without<LineSeg>, Without<ConeVolume>),
+        (With<StageCamera>, Without<LineSeg>, Without<FieldVolume>),
     >,
     mut round: StageRoundPose,
     mut gizmos: Gizmos<StageGizmos>,
@@ -1517,11 +1539,11 @@ pub fn animate(
     }
     // The state fills rise along the hull's up, the tank's; the fields are taken in its frame.
     let hull = stage.hull.and_then(|hull| hulls.get(hull).ok());
-    for (volume, look, mut visibility) in &mut volumes {
-        playing.cone(volume, look, &mut visibility, hull, &mut looks);
+    for (look, mut visibility) in &mut volumes {
+        playing.fields(look, &mut visibility, hull, &mut looks);
     }
     if let Some(hull) = hull {
-        playing.footprints(hull, &stage.masks, &mut looks);
+        playing.footprints(hull, &stage.masks, &mut looks, stage.atlas.as_ref());
     }
     for (tint, outline, look, mut visibility) in &mut boxes {
         playing.fill(
@@ -2989,6 +3011,7 @@ mod tests {
             .insert_resource(Assets::<StandardMaterial>::default())
             .insert_resource(Assets::<SliceMaterial>::default())
             .insert_resource(Assets::<LookMaterial>::default())
+            .insert_resource(Assets::<Image>::default())
             .init_resource::<Masks>()
             .add_systems(Update, rebuild);
         app.update();
@@ -3040,32 +3063,33 @@ mod tests {
         })
     }
 
-    /// Every record's spall field as the real [`rebuild`] draws it, in every frame, the corner's and
-    /// the kill cam's lesson on the world alike: each cone draws one volume, blended, coloured by
-    /// the shipped potency ramp alone — its anchors more blue than red, off the state scale, each
-    /// brighter than the one below it — at one opacity across every record, so the colour says the
-    /// field's local intensity and nothing else, never a gain of the cone's. Outside the slice a
-    /// volume is uncut; in the slice it is cut by the slice plane. Where its frame draws the body
-    /// behind, it is bounded by its viewer's part mask ([`the_x_ray_draws_the_body_behind`]). At
-    /// least one record throws a cone in each.
+    /// Every record's fields as the real [`rebuild`] draws them, in every frame, the corner's and
+    /// the kill cam's lesson on the world alike: one volume, blended, on a box that holds every
+    /// field out to its longest reach, reading the record's field maps from the stage's atlas,
+    /// which the footprints read too; its bands parted at the shipped thresholds and coloured from
+    /// the band law alone — the knockout band the field teal, the reduced band the deep teal, both
+    /// more blue than red and off the state scale, the knockout band the brighter — at one opacity
+    /// across every record, so the colour says the band of the fields' summed intensity and
+    /// nothing else. Outside the slice the volume is uncut; in the slice it is cut by the slice
+    /// plane. Where its frame draws the body behind, it is bounded by its viewer's part mask
+    /// ([`the_x_ray_draws_the_body_behind`]). At least one record throws a field in each. A box
+    /// short of a field's reach clips that field's far side; a volume per field draws an overlap
+    /// twice, in neither field's band.
     #[test]
-    fn the_field_is_one_volume_on_one_cool_ramp() {
+    fn the_fields_are_one_volume_in_their_bands() {
+        use super::super::potency::Band;
         let library = Library::load();
         let asset = TankAsset::load(&library.vehicle).unwrap();
         let (mut looked, mut sliced) = (0, 0);
         let mut opacities: Vec<f32> = Vec::new();
-        let ramp = Potency::shipped().ramp().lanes();
+        let potency = Potency::shipped();
         let luminance = |c: Vec3| c.dot(Vec3::new(0.2126, 0.7152, 0.0722));
-        for anchor in &ramp[..3] {
-            let colour = anchor.truncate();
-            assert!(colour.z > colour.x && !on_state_scale(colour), "{colour}");
+        let colour = |band: Band| LinearRgba::from(band.colour().unwrap()).to_vec3();
+        let (knockout, reduced) = (colour(Band::Knockout), colour(Band::Reduced));
+        for c in [knockout, reduced] {
+            assert!(c.z > c.x && !on_state_scale(c), "{c}");
         }
-        for pair in ramp[..3].windows(2) {
-            assert!(
-                luminance(pair[0].truncate()) < luminance(pair[1].truncate()),
-                "{pair:?}"
-            );
-        }
+        assert!(luminance(reduced) < luminance(knockout));
         for (index, record) in library.records.iter().enumerate() {
             let kind = record.plan.kind;
             if record.plan.cones.is_empty() || kind == CornerKind::Ricochet {
@@ -3077,31 +3101,47 @@ mod tests {
             ] {
                 let (mut app, _) = staged_on(&library, &asset, index, kind, Vec3::X, surface);
                 let world = app.world_mut();
-                let fields: Vec<(usize, Handle<LookMaterial>)> = world
-                    .query::<(&ConeVolume, &MeshMaterial3d<LookMaterial>)>()
+                let fields: Vec<(Handle<Mesh>, Transform, Handle<LookMaterial>)> = world
+                    .query_filtered::<(&Mesh3d, &Transform, &MeshMaterial3d<LookMaterial>), With<FieldVolume>>()
                     .iter(world)
-                    .map(|(volume, m)| (volume.cone, m.0.clone()))
+                    .map(|(mesh, pose, m)| (mesh.0.clone(), *pose, m.0.clone()))
                     .collect();
-                let mut cones: Vec<usize> = fields.iter().map(|(cone, _)| *cone).collect();
-                cones.sort_unstable();
-                assert_eq!(
-                    cones,
-                    (0..record.plan.cones.len()).collect::<Vec<_>>(),
-                    "{} {surface:?}",
-                    record.stem
-                );
+                assert_eq!(fields.len(), 1, "{} {surface:?}", record.stem);
                 let slice = kind == CornerKind::Slice;
                 let cut = world.resource::<Stage>().plane;
+                let atlas = world.resource::<Stage>().atlas.clone();
+                assert!(atlas.is_some(), "{} {surface:?}", record.stem);
                 assert_eq!(cut.is_some(), slice, "{} {surface:?}", record.stem);
+                let maps = record.plan.maps();
+                assert_eq!(maps.len(), record.plan.cones.len(), "{}", record.stem);
                 let looks = world.resource::<Assets<LookMaterial>>();
-                for (_, handle) in &fields {
+                let meshes = world.resource::<Assets<Mesh>>();
+                for (mesh, pose, handle) in &fields {
+                    use bevy::camera::primitives::MeshAabb;
+                    let aabb = meshes.get(mesh).and_then(|m| m.compute_aabb()).unwrap();
+                    let (lo, hi) = (
+                        pose.transform_point(Vec3::from(aabb.min())),
+                        pose.transform_point(Vec3::from(aabb.max())),
+                    );
+                    for (cone, map) in record.plan.cones.iter().zip(maps.iter()) {
+                        let reach = Vec3::splat(map.longest);
+                        assert!(
+                            (cone.origin - reach).cmpge(lo - 1e-4).all()
+                                && (cone.origin + reach).cmple(hi + 1e-4).all(),
+                            "{}: a field reaches past its volume's box",
+                            record.stem
+                        );
+                    }
                     let m = looks.get(handle).unwrap();
                     assert!(
                         m.is_volume() && m.blend == Blend::Blended,
                         "{}",
                         record.stem
                     );
-                    assert_eq!(m.params.ramp, ramp, "{}", record.stem);
+                    assert_eq!(m.field_map, atlas, "{}", record.stem);
+                    assert_eq!(m.params.bands, potency.lanes(), "{}", record.stem);
+                    assert_eq!(m.params.knockout.truncate(), knockout, "{}", record.stem);
+                    assert_eq!(m.params.reduced.truncate(), reduced, "{}", record.stem);
                     match cut {
                         Some((normal, point)) => {
                             assert_eq!(m.params.mode.y, 1.0, "{}", record.stem);
@@ -3278,7 +3318,7 @@ mod tests {
                     }
                 }
                 let volumes: Vec<Handle<LookMaterial>> = world
-                    .query_filtered::<&MeshMaterial3d<LookMaterial>, With<ConeVolume>>()
+                    .query_filtered::<&MeshMaterial3d<LookMaterial>, With<FieldVolume>>()
                     .iter(world)
                     .map(|m| m.0.clone())
                     .collect();

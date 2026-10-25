@@ -375,14 +375,12 @@ impl Condition {
     }
 }
 
-/// The spall field's hue: a cool teal apart from the state scale and the glass hull's grey, so a
-/// field never reads as damage or as hull. The potency colour climbs one luminance ladder in it
-/// ([`super::potency::Ramp`]): this teal at the mid threshold, a deep teal well below it, a
-/// teal-tinted near-white at the bright threshold and above, so the bright part of the field is
-/// literally the brightest. TUNED.
+/// The field's hue: a cool teal apart from the state scale and the glass hull's grey, so a field
+/// never reads as damage or as hull. Its two potency bands ([`super::potency::Band`]) are two steps
+/// of one luminance ladder in it: this teal for knockout, the deep teal for reduced, apart in
+/// relative luminance (0.50 against 0.12, DERIVED) so they part in every colour vision type. TUNED.
 pub const FIELD: Color = Color::srgb_u8(0x3F, 0xD0, 0xC8);
 pub const FIELD_DIM: Color = Color::srgb_u8(0x1E, 0x6B, 0x66);
-pub const FIELD_BRIGHT: Color = Color::srgb_u8(0xD8, 0xFF, 0xF8);
 
 #[cfg(test)]
 mod tests {
