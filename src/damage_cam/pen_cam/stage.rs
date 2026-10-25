@@ -1322,9 +1322,9 @@ impl<'a> Playing<'a> {
     }
 
     /// Every field in world space under the record frame `hull`: its origin, its map's frame and
-    /// zoom, and its front run out from the origin, or under reduce motion its map's longest reach
-    /// once it is thrown and negative before. The volume ([`Self::fields`]) and the painting
-    /// ([`look::paint_fields`], [`Self::fill`]) read the same.
+    /// zoom, its strength and law, and its front run out from the origin, or under reduce motion
+    /// its map's longest reach once it is thrown and negative before. The volume
+    /// ([`Self::fields`]) and the painting ([`look::paint_fields`], [`Self::fill`]) read the same.
     pub(super) fn prints(&self, hull: &GlobalTransform) -> Vec<FieldPrint> {
         let (plan, kind, c) = (self.plan, self.kind, self.c);
         let linear = hull.affine().matrix3;
@@ -1358,6 +1358,8 @@ impl<'a> Playing<'a> {
                     front: front * scale,
                     scale,
                     longest: map.longest,
+                    strength: cone.strength,
+                    law: look::law_lane(cone.field, cone.strata),
                 }
             })
             .collect()

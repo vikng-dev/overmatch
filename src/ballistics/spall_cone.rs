@@ -99,7 +99,7 @@ pub struct FieldDescriptor {
 
 /// A law's terms for one descriptor: its support in depth `t = 1 − cos θ` and its share there.
 #[derive(Clone, Copy, Debug)]
-enum Terms {
+pub(crate) enum Terms {
     /// The ball at `λ ≥ 1`: `λ²` and the cap's depth `w = 1 − cos α`.
     Cap { l2: f64, w: f64 },
     /// The ball at `λ < 1`, over the whole sphere.
@@ -110,7 +110,7 @@ enum Terms {
 
 impl Terms {
     /// `[t_lo, t_hi]`, the support in depth.
-    fn support(&self) -> (f64, f64) {
+    pub(crate) fn support(&self) -> (f64, f64) {
         match *self {
             Terms::Cap { w, .. } => (0.0, w),
             Terms::Sphere { .. } => (0.0, 2.0),
@@ -207,7 +207,7 @@ impl FieldDescriptor {
     /// finite, a ball so narrow that the rim's `cos α` rounds to 1 (`λ` above about 10⁸, DERIVED),
     /// and a ring whose half-width is outside `(0, π/2)` or whose band rounds away. Names the
     /// violation.
-    fn terms(&self) -> Result<Terms, String> {
+    pub(crate) fn terms(&self) -> Result<Terms, String> {
         let lambda = self.ratio as f64;
         if !lambda.is_finite() || lambda < 0.0 {
             return Err(format!(
@@ -265,6 +265,13 @@ impl FieldDescriptor {
     /// spread's `f_k`, `(t_hi − t_lo)/2 · (−dF/dμ)` — under the ball's cap
     /// `½·w·(D^m + m·λ²μ²·D^(m−2))`, zero at and past the rim; over its sphere `(λμ + D)³/2`; across
     /// the ring's band ½, zero off it. Zero for a descriptor outside the law's domain.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the law's density, which the spread's tests read; the pen cam draws its mean over a stratum (`pen_cam::look::law`)"
+        )
+    )]
     pub(crate) fn weight_at(&self, mu: f64) -> f64 {
         let Ok(terms) = self.terms() else {
             return 0.0;
@@ -1314,8 +1321,8 @@ mod tests {
     /// weight `(1 + 3λ²)(1 − cos α)`, it is zero at and past the rim, and at a stratum's midpoint
     /// of a fine spread it is that stratum's weight (DERIVED: a stratum's share over its width is
     /// the density at its midpoint to second order; tolerance 1e-4 at 4096 strata), under the ball
-    /// below `λ = 1` and the ring too, the ring's zero off its band. The pen cam's drawing of a
-    /// cone recorded without strengths relies on it.
+    /// below `λ = 1` and the ring too, the ring's zero off its band. The spread is this density
+    /// in strata, and the pen cam's law (`pen_cam::look::law`) its mean over a stratum.
     #[test]
     fn the_continuous_weight_is_the_spreads_limit() {
         for field in SPHERE_RATIOS

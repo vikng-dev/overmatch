@@ -55,16 +55,16 @@
 // viewer's pose and lens.
 //
 // The bands (design doc §5, "Potency colour"; `potency::Band`): a point's intensity is the sum of
-// every field's there (`intensity`), a field's `e s / r²`, `s` the strength its map lights at the
-// point (`map_at`) and `e` its emission a reference-mm of strength gives, where the point lies on
-// its support (from its inner edge to its half-angle off its axis) and within its front, and
-// nothing elsewhere. Knockout at and above `bands.y` (`T_mid`), reduced from `bands.x`
+// every field's there (`intensity`), a field's `e w m / r²`, `e` the emission its strength `S`
+// gives, `w` its law's weight along the point's direction (`law`) and `m` the share its map lights
+// at the point (`map_at`), where the point lies on its support (from its inner edge to its
+// half-angle off its axis) and within its front, and nothing elsewhere. Knockout at and above `bands.y` (`T_mid`), reduced from `bands.x`
 // (`T_floor`) up to it, nothing below. No lane the bands are read from carries a display gain.
 //
 // The maps (`field::Map`, `field::atlas`): field `f`'s, octahedral about its axis over the square
 // `[−zoom, zoom]²` of octahedral coordinates, `MAP_TEXELS`² texels with a one-texel gutter, in
-// tile `(f % 2, f / 2)` of `field_map`, each texel its reach (r, record m) and strength (g, ref-mm),
-// loaded unfiltered: each of the four texels about a direction tests the point against its own
+// tile `(f % 2, f / 2)` of `field_map`, each texel its reach (record m), loaded unfiltered: each
+// of the four texels about a direction tests the point against its own
 // reach, within `REACH_TOLERANCE_DIAGONALS` texel diagonals of turn times the point's distance
 // past it and never past the farthest of the four, and the results are weighted bilinearly
 // (`map_at`; `Map::lit` is the same read).
@@ -110,14 +110,15 @@ struct LookParams {
     // `FIELDS` fields of `PRINT_LANES` lanes: origin (world) and half-angle (rad); unit axis
     // (world) and how far its front has run (m), negative before it is thrown; the map's `u`
     // (world, unit) and the support's inner edge (rad, 0 on a cap and the sphere); the map's `v`
-    // (world, unit) and its zoom; the emission a reference-mm of strength gives (HP points per sr,
-    // world), the world's metres per record metre, and the longest reach (m).
-    prints: array<vec4<f32>, 20>,
+    // (world, unit) and its zoom; the emission its strength `S` gives (`ρ S / Ω`, HP points per sr,
+    // world), the world's metres per record metre, and the longest reach (m); its law (`law`): the
+    // kind of its terms, their two numbers and its strata `N`.
+    prints: array<vec4<f32>, 24>,
 }
 
 // `look::FIELDS` and the lanes a field takes.
 const FIELDS: i32 = 4;
-const PRINT_LANES: i32 = 5;
+const PRINT_LANES: i32 = 6;
 // `field::MAP_SIDE` and `field::MAP_TEXELS`, the map's texels a side inside and with its gutter.
 const MAP_SIDE: f32 = 256.0;
 const MAP_TEXELS: f32 = 258.0;
@@ -205,10 +206,10 @@ fn octahedral(local: vec3<f32>) -> vec2<f32> {
     return (vec2(1.0) - abs(p.yx)) * sign_not_zero(p.xy);
 }
 
-// Field `f`'s strength (ref-mm) lit along unit direction `dir` (world) at `r` world m from its
+// The share (0..1) of field `f` lit along unit direction `dir` (world) at `r` world m from its
 // origin, `scale` world m per record m: each of the four texels about the direction's map
-// coordinate, which the clamp holds inside the field's tile, gives its strength where `r` lies
-// within its own reach, and nothing past it, and the four are weighted bilinearly. A texel's
+// coordinate, which the clamp holds inside the field's tile, lights where `r` lies within its own
+// reach, and not past it, and the four are weighted bilinearly. A texel's
 // reach counts out to its tolerance past it (`REACH_TOLERANCE_DIAGONALS` texel diagonals of turn
 // times `r`, never past the farthest of the four), and `slack` world m past that. A reach is
 // compared per texel and never interpolated, so a shadow's depth is a texel's own: across a
@@ -224,22 +225,84 @@ fn map_at(f: i32, dir: vec3<f32>, r: f32, scale: f32, slack: f32) -> f32 {
     let low = min(floor(g), vec2(MAP_TEXELS - 2.0));
     let t = g - low;
     let at = vec2<i32>(low) + vec2(f % 2, f / 2) * i32(MAP_TEXELS);
-    let t00 = textureLoad(field_map, at, 0).xy;
-    let t10 = textureLoad(field_map, at + vec2(1, 0), 0).xy;
-    let t01 = textureLoad(field_map, at + vec2(0, 1), 0).xy;
-    let t11 = textureLoad(field_map, at + vec2(1, 1), 0).xy;
-    let reach = vec4(t00.x, t10.x, t01.x, t11.x) * scale;
+    let t00 = textureLoad(field_map, at, 0).x;
+    let t10 = textureLoad(field_map, at + vec2(1, 0), 0).x;
+    let t01 = textureLoad(field_map, at + vec2(0, 1), 0).x;
+    let t11 = textureLoad(field_map, at + vec2(1, 1), 0).x;
+    let reach = vec4(t00, t10, t01, t11) * scale;
     let farthest = max(max(reach.x, reach.y), max(reach.z, reach.w));
     let diagonal = OCTAHEDRAL_TURN * SQRT_2 * 2.0 * frame_v.w / MAP_SIDE;
     let tolerance = REACH_TOLERANCE_DIAGONALS * diagonal * r;
     let met = min(vec4(farthest), reach + vec4(tolerance)) + vec4(slack);
-    let lit = select(vec4(0.0), vec4(t00.y, t10.y, t01.y, t11.y), vec4(r) <= met);
+    let lit = select(vec4(0.0), vec4(1.0), vec4(r) <= met);
     return mix(mix(lit.x, lit.y, t.x), mix(lit.z, lit.w, t.x), t.y);
 }
 
-// Field `f`'s intensity at world point `p` (HP points per m²): `e s / r²` on its support and
-// within its front, `s` its map's strength lit at `p` (`map_at`), 0 elsewhere, past its longest
-// reach included; at its origin, once thrown, unbounded.
+// The ball's cap's share of the emission inside depth `t`, `λ²` `l2`: `1 − μ D³`,
+// `D² = 1 − λ² t(2 − t)`, held at zero past the rim. `look::cap_share`.
+fn cap_share(l2: f32, t: f32) -> f32 {
+    let d = sqrt(max(1.0 - l2 * (t * (2.0 - t)), 0.0));
+    return 1.0 - (1.0 - t) * (d * d * d);
+}
+
+// `(g, D)` of the ball over the whole sphere at depth `t`, ratio `lambda`, `c = 1 − λ²`:
+// `D = √(c + λ²μ²)`, `g = λμ + D`, behind the plate `c / (D − λμ)`.
+fn sphere_reach(lambda: f32, c: f32, t: f32) -> vec2<f32> {
+    let mu = 1.0 - t;
+    let d = sqrt(c + lambda * mu * (lambda * mu));
+    if mu >= 0.0 {
+        return vec2(lambda * mu + d, d);
+    }
+    return vec2(c / (d - lambda * mu), d);
+}
+
+// The ball's share over the whole sphere between depths `a ≤ b`, ratio `lambda` below 1:
+// `(b − a)(g_a + g_b)²(g_a² + g_b² + 2c) / (16(D_a + D_b))` (`sphere_reach`). `look::sphere_share`.
+fn sphere_share(lambda: f32, a: f32, b: f32) -> f32 {
+    let c = (1.0 - lambda) * (1.0 + lambda);
+    let at_a = sphere_reach(lambda, c, a);
+    let at_b = sphere_reach(lambda, c, b);
+    let sum = at_a.x + at_b.x;
+    return (b - a) * (sum * sum) * (at_a.x * at_a.x + at_b.x * at_b.x + 2.0 * c)
+        / (16.0 * (at_a.y + at_b.y));
+}
+
+// Field `f`'s law's weight along unit direction `dir` (world), its terms in lane 5 (x the kind: 1
+// the ball's cap, `λ²` and depth `w` in y and z; 2 the ball over the whole sphere, `λ` in y; 3 the
+// ring's band, its depths in y and z; w the strata `N`): at depth `t = ½|dir − axis|²` held to the
+// support, the law's weight averaged over the window one stratum wide about `t`,
+// `(t_hi − t_lo)/2 · share(a, b)/(b − a)`; the band's ½ throughout. At a stratum's centre it is the
+// record's `f_k`. The caller tests the support. `look::law`.
+fn law(f: i32, dir: vec3<f32>) -> f32 {
+    let base = PRINT_LANES * f;
+    let terms = look.prints[base + 5];
+    let kind = i32(terms.x + 0.5);
+    if (kind < 1 || kind > 3) || terms.w < 1.0 {
+        return 0.0;
+    }
+    if kind == 3 {
+        return 0.5;
+    }
+    let hi = select(2.0, terms.z, kind == 1);
+    let off = dir - look.prints[base + 1].xyz;
+    let t = clamp(0.5 * dot(off, off), 0.0, hi);
+    let half = 0.5 * hi / terms.w;
+    let a = max(t - half, 0.0);
+    let b = min(t + half, hi);
+    if b <= a {
+        return 0.0;
+    }
+    var share = sphere_share(terms.y, a, b);
+    if kind == 1 {
+        share = cap_share(terms.y, b) - cap_share(terms.y, a);
+    }
+    return 0.5 * hi * share / (b - a);
+}
+
+// Field `f`'s intensity at world point `p` (HP points per m²): `e w m / r²` on its support and
+// within its front, `w` its law's weight along `p`'s direction (`law`) and `m` the share its map
+// lights at `p` (`map_at`), 0 elsewhere, past its longest reach included; at its origin, once
+// thrown, unbounded.
 fn field_at(f: i32, p: vec3<f32>) -> f32 {
     let base = PRINT_LANES * f;
     let at = look.prints[base];
@@ -258,7 +321,7 @@ fn field_at(f: i32, p: vec3<f32>) -> f32 {
     if c > cos(look.prints[base + 2].w) || c < cos(at.w) {
         return 0.0;
     }
-    return map_at(f, dir, r, scale.y, 0.0) * scale.x / (r * r);
+    return map_at(f, dir, r, scale.y, 0.0) * law(f, dir) * scale.x / (r * r);
 }
 
 // The fields' summed intensity at world point `p` (HP points per m²): doses add, so the bands
@@ -290,7 +353,8 @@ fn inside(s: f32) -> f32 {
 // the presence over the pixel of the floor (x: the reduced and the knockout bands together) and
 // of the knockout band (y). A field covers the point where it lies on the field's support and
 // behind its front and, under the hard rule (`foot.z = 0`), faces the field's origin, each edge a
-// pixel wide, at the strength its map lights there `foot.y` past each texel's reach (`map_at`);
+// pixel wide, at its law's weight there (`law`) lit as its map lights it `foot.y` past each
+// texel's reach (`map_at`);
 // the witness rule (`foot.z = 1`) asks no facing. The covered fields' intensities add, and each
 // band's edge is a smoothstep a pixel wide in `log2` of the sum (`soft_step`). `look::painting`.
 // Called in uniform control flow: it takes derivatives.
@@ -316,7 +380,8 @@ fn footprint(p: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
         let hole = select(1e6, r * (theta - inner), inner > 0.0);
         let facing = select(dot(n, -dir), 1.0, look.foot.z > 0.5);
         let cover = inside(along.w - r) * inside(rim) * inside(hole) * inside(facing);
-        sum = sum + cover * map_at(f, dir, r, scale.y, look.foot.y) * scale.x / (r * r);
+        let lit = map_at(f, dir, r, scale.y, look.foot.y) * law(f, dir);
+        sum = sum + cover * lit * scale.x / (r * r);
     }
     // Below a 4096th of the floor the sum is nothing: its log stays finite for the derivative.
     let level = log2(max(sum, look.bands.x / 4096.0));

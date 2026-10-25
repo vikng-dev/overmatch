@@ -2,14 +2,14 @@
 //! is a spall cone or a burst's; its support is a cap about its axis out to its half-angle α, a
 //! ring's band from its inner angle out to α, or, for a ball whose rim is π, the whole sphere.
 //!
-//! The record samples the field at its directions, each with the reach and strength the record
-//! gives it. Between them the strength is the record's linear interpolation, and so is the reach
-//! wherever the directions about a point ended alike: inside one hard body, past one, or free of
-//! every body. Where they ended unlike, a shadow's edge lies between them, and the struck tank's
+//! The record samples the field at its directions, each with the reach the record gives it. Between
+//! them the reach is the record's linear interpolation wherever the directions about a point ended
+//! alike: inside one hard body, past one, or free of every body. Where they ended unlike, a shadow's edge lies between them, and the struck tank's
 //! hard bodies ([`HardBodies`], every non-witness ballistic primitive, posed as the record has the
 //! tank) place it: the reach follows the directions that ended as the point's own line would.
 //! [`Samples::at`] states that contract; the design narrative is design doc §5, "Potency colour"
-//! (`.agents/docs/design/armor-penetration-and-damage.md`).
+//! (`.agents/docs/design/armor-penetration-and-damage.md`). The map holds the reach alone: the
+//! strength along a direction is the field's law (`look::law`), not the record's interpolation.
 //!
 //! A cap's and a band's directions are triangulated on the polar disc `q = (cos φ, sin φ) · θ/α`
 //! (Delaunay), a band's triangles stopping at its inner edge, none spanning the hole; the sphere's
@@ -88,8 +88,8 @@ const SUPPORT_MARGIN_DIAGONALS: f32 = 2.0;
 pub const REACH_TOLERANCE_DIAGONALS: f32 = 2.0;
 
 /// A field's recorded directions as one function of direction, baked onto an octahedral map about
-/// the field's axis: [`MAP_TEXELS`]² texels, row by row, each the `(reach m, strength ref-mm)` the
-/// record gives along the texel's direction ([`Samples::at`]). The map covers the square of
+/// the field's axis: [`MAP_TEXELS`]² texels, row by row, each the reach (m) the record gives along
+/// the texel's direction ([`Samples::at`]). The map covers the square of
 /// octahedral coordinates `[−zoom, zoom]²`, the support's bounding square for a support short of
 /// the hemisphere and the whole octahedron (`zoom = 1`) otherwise, so the sphere's map has no pole
 /// and no rim: its only edge is the octahedron's fold, which the gutter wraps.
@@ -102,7 +102,7 @@ pub struct Map {
     /// The support's inner edge (rad off the axis): a band's near edge, 0 on a cap and the sphere.
     pub inner: f32,
     pub zoom: f32,
-    pub texels: Vec<Vec2>,
+    pub texels: Vec<f32>,
     /// The longest reach any texel holds (m): no direction of the field reaches past it.
     pub longest: f32,
 }
@@ -113,24 +113,24 @@ impl Map {
     /// without bodies, the record's interpolation alone.
     pub fn of(cone: &Cone, bodies: Option<&HardBodies>) -> Self {
         let (u, v) = cone.axis.any_orthonormal_pair();
-        let zoom = if cone.half_angle >= FRAC_PI_2 {
+        let zoom = if cone.half_angle() >= FRAC_PI_2 {
             1.0
         } else {
-            let (s, c) = cone.half_angle.sin_cos();
+            let (s, c) = cone.half_angle().sin_cos();
             s / (s + c)
         };
         let mut map = Self {
             axis: cone.axis,
             u,
             v,
-            half_angle: cone.half_angle,
-            inner: cone.inner,
+            half_angle: cone.half_angle(),
+            inner: cone.inner(),
             zoom,
             texels: Vec::new(),
             longest: 0.0,
         };
-        let samples = Samples::of(&map, cone.origin, cone.strength, &cone.rays, bodies);
-        let mut texels = vec![Vec2::ZERO; MAP_TEXELS * MAP_TEXELS];
+        let samples = Samples::of(&map, cone.origin, &cone.rays, bodies);
+        let mut texels = vec![0.0; MAP_TEXELS * MAP_TEXELS];
         // Rows go to the threads two at a time, as each frees, so a run of texels the guide
         // decides (a silhouette's rows) is shared out.
         let rows = 2;
@@ -157,7 +157,7 @@ impl Map {
                 });
             }
         });
-        map.longest = texels.iter().map(|texel| texel.x).fold(0.0, f32::max);
+        map.longest = texels.iter().copied().fold(0.0, f32::max);
         map.texels = texels;
         map
     }
@@ -206,7 +206,7 @@ impl Map {
     /// The four texels about unit `direction`'s map coordinate, `(i, j)`, `(i + 1, j)`,
     /// `(i, j + 1)` and `(i + 1, j + 1)`, the clamp holding them inside the map, and its place
     /// between them (0..1 along `i` and `j`).
-    fn footprint(&self, direction: Vec3) -> ([Vec2; 4], Vec2) {
+    fn footprint(&self, direction: Vec3) -> ([f32; 4], Vec2) {
         let top = (MAP_TEXELS - 1) as f32;
         let g = ((self.coordinate(direction) + 1.0) * 0.5 * MAP_SIDE as f32 + 0.5)
             .clamp(Vec2::ZERO, Vec2::splat(top));
@@ -219,18 +219,18 @@ impl Map {
         )
     }
 
-    /// The `(reach m, strength ref-mm)` along unit `direction`, bilinear between the four texels
-    /// about its map coordinate: the map's content between texels, which the tests read. The look
-    /// never blends a reach ([`Self::lit`]).
-    pub fn sample(&self, direction: Vec3) -> Vec2 {
+    /// The reach (m) along unit `direction`, bilinear between the four texels about its map
+    /// coordinate: the map's content between texels, which the tests read. The look never blends a
+    /// reach ([`Self::lit`]).
+    pub fn sample(&self, direction: Vec3) -> f32 {
         let ([a, b, c, d], t) = self.footprint(direction);
-        a.lerp(b, t.x).lerp(c.lerp(d, t.x), t.y)
+        let (below, above) = (a + (b - a) * t.x, c + (d - c) * t.x);
+        below + (above - below) * t.y
     }
 
-    /// The strength (ref-mm) lit along unit `direction` at `r` world m from the field's origin,
-    /// `scale` world m per record m: each of the four texels about its map coordinate gives its
-    /// strength where `r` lies within its own reach, and nothing past it, and the four are weighted
-    /// bilinearly. A texel's reach counts out to its tolerance past it
+    /// The share (0..1) of the field lit along unit `direction` at `r` world m from its origin,
+    /// `scale` world m per record m: each of the four texels about its map coordinate lights where
+    /// `r` lies within its own reach, and not past it, and the four are weighted bilinearly. A texel's reach counts out to its tolerance past it
     /// ([`REACH_TOLERANCE_DIAGONALS`]: up to that many [`Self::diagonal`]s times `r`, never past
     /// the farthest of the four), and `slack` world m past that. A reach is compared per texel and
     /// never interpolated, so across a silhouette a point behind the blocker, past the tolerance,
@@ -239,23 +239,23 @@ impl Map {
     /// (`pen_cam_look.wgsl`, `map_at`); this is the read it mirrors, held by the tests.
     pub fn lit(&self, direction: Vec3, r: f32, scale: f32, slack: f32) -> f32 {
         let (texels, t) = self.footprint(direction);
-        let reach = texels.map(|texel| texel.x * scale);
+        let reach = texels.map(|texel| texel * scale);
         let farthest = reach.into_iter().fold(0.0, f32::max);
         let tolerance = REACH_TOLERANCE_DIAGONALS * self.diagonal() * r;
         let [a, b, c, d] = std::array::from_fn(|k| {
             let met = farthest.min(reach[k] + tolerance) + slack;
-            if r <= met { texels[k].y } else { 0.0 }
+            if r <= met { 1.0 } else { 0.0 }
         });
         let (below, above) = (a + (b - a) * t.x, c + (d - c) * t.x);
         below + (above - below) * t.y
     }
 
-    /// The `(reach m, strength ref-mm)` along unit `direction`: [`Self::sample`] on the support,
-    /// zero off it, short of the inner edge or past the rim.
-    pub fn at(&self, direction: Vec3) -> Vec2 {
+    /// The reach (m) along unit `direction`: [`Self::sample`] on the support, zero off it, short
+    /// of the inner edge or past the rim.
+    pub fn at(&self, direction: Vec3) -> f32 {
         let theta = direction.dot(self.axis).clamp(-1.0, 1.0).acos();
         if theta < self.inner || theta > self.half_angle {
-            return Vec2::ZERO;
+            return 0.0;
         }
         self.sample(direction)
     }
@@ -272,32 +272,32 @@ pub fn tile(index: usize) -> UVec2 {
 }
 
 /// The first [`MAP_FIELDS`] of `maps` as one texture: field `k`'s map in tile [`tile`]`(k)`, each
-/// texel's reach (m) in red and strength (ref-mm) in green as half floats, loaded unfiltered
-/// ([`Map::lit`]); an unused tile holds zero.
+/// texel's reach (m) as a full float, the value [`Map::lit`] reads, loaded unfiltered; an unused
+/// tile holds zero.
 pub fn atlas(maps: &[Map]) -> Image {
-    let side = (ATLAS_TILES * MAP_TEXELS) as u32;
-    let mut image = Image::new_fill(
+    let side = ATLAS_TILES * MAP_TEXELS;
+    let mut reach = vec![0.0_f32; side * side];
+    for (index, map) in maps.iter().take(MAP_FIELDS).enumerate() {
+        let origin = tile(index);
+        for (k, &texel) in map.texels.iter().enumerate() {
+            let (x, y) = (
+                origin.x as usize + k % MAP_TEXELS,
+                origin.y as usize + k / MAP_TEXELS,
+            );
+            reach[y * side + x] = texel;
+        }
+    }
+    Image::new(
         Extent3d {
-            width: side,
-            height: side,
+            width: side as u32,
+            height: side as u32,
             depth_or_array_layers: 1,
         },
         TextureDimension::D2,
-        &[0; 4],
-        TextureFormat::Rg16Float,
+        reach.iter().flat_map(|texel| texel.to_le_bytes()).collect(),
+        TextureFormat::R32Float,
         RenderAssetUsages::default(),
-    );
-    for (index, map) in maps.iter().take(MAP_FIELDS).enumerate() {
-        let origin = tile(index);
-        for (k, texel) in map.texels.iter().enumerate() {
-            let at = origin + UVec2::new((k % MAP_TEXELS) as u32, (k / MAP_TEXELS) as u32);
-            let colour = Color::LinearRgba(LinearRgba::new(texel.x, texel.y, 0.0, 0.0));
-            image
-                .set_color_at(at.x, at.y, colour)
-                .expect("an Rg16Float texel inside the atlas");
-        }
-    }
-    image
+    )
 }
 
 /// The octahedral coordinate of unit `local` (z the axis): the upper hemisphere on the diamond
@@ -373,12 +373,12 @@ impl Ending {
     }
 }
 
-/// A field's record as one function of direction: its directions, each one's `(reach m, strength
-/// ref-mm)`, their triangulation, and with the struck tank's hard bodies, how each ended.
+/// A field's record as one function of direction: its directions, each one's reach (m), their
+/// triangulation, and with the struck tank's hard bodies, how each ended.
 struct Samples<'a> {
     origin: Vec3,
     directions: Vec<Vec3>,
-    values: Vec<Vec2>,
+    reaches: Vec<f32>,
     mesh: Triangulation,
     /// Each direction's triangles: where a point's search starts after the last point's triangle.
     incident: Vec<Vec<usize>>,
@@ -414,18 +414,9 @@ struct Corners {
 }
 
 impl<'a> Samples<'a> {
-    fn of(
-        map: &Map,
-        origin: Vec3,
-        strength: f32,
-        rays: &[Ray],
-        bodies: Option<&'a HardBodies>,
-    ) -> Self {
+    fn of(map: &Map, origin: Vec3, rays: &[Ray], bodies: Option<&'a HardBodies>) -> Self {
         let directions: Vec<Vec3> = rays.iter().map(|ray| ray.direction).collect();
-        let values = rays
-            .iter()
-            .map(|ray| Vec2::new(ray.reach, ray.weight * strength))
-            .collect();
+        let reaches = rays.iter().map(|ray| ray.reach).collect();
         let mesh = if map.whole_sphere() {
             Triangulation::Sphere {
                 faces: sphere_faces(&directions, map.axis),
@@ -488,7 +479,7 @@ impl<'a> Samples<'a> {
         Self {
             origin,
             directions,
-            values,
+            reaches,
             mesh,
             incident,
             endings,
@@ -496,24 +487,23 @@ impl<'a> Samples<'a> {
         }
     }
 
-    /// The `(reach m, strength ref-mm)` along unit `direction`. The strength is the record's
-    /// interpolation between the directions about it ([`Self::locate`]); so is the reach where
-    /// those directions ended alike (within one body, past one, or free of every body), the
+    /// The reach (m) along unit `direction`: the record's interpolation between the directions
+    /// about it ([`Self::locate`]) where those directions ended alike (within one body, past one, or free of every body), the
     /// record's own agreement, which the guide never overrides. Where they ended unlike, a shadow's
     /// edge lies between them, and the guide places it: the reach is the interpolation of the
     /// directions that ended like this one would, as the guide sees it (the same first body, or
     /// none), each a direction that ended within that body carrying its depth past the body's
     /// entry here, and every other its own reach; with none, the record's interpolation. So at a
     /// record direction the reach is the record's, a direction that passed a body included.
-    fn at(&self, direction: Vec3, cache: &mut usize) -> Vec2 {
+    fn at(&self, direction: Vec3, cache: &mut usize) -> f32 {
         let Some(corners) = self.locate(direction, cache) else {
-            return Vec2::ZERO;
+            return 0.0;
         };
         let blend = corners
             .index
             .iter()
             .zip(corners.weight.to_array())
-            .fold(Vec2::ZERO, |sum, (&i, w)| sum + self.values[i] * w);
+            .fold(0.0, |sum, (&i, w)| sum + self.reaches[i] * w);
         let Some(bodies) = self.bodies else {
             return blend;
         };
@@ -535,13 +525,12 @@ impl<'a> Samples<'a> {
             }
             let reach = match (ending, hit) {
                 (Ending::Within { depth, .. }, Some((entry, _))) => entry + depth,
-                _ => self.values[i].x,
+                _ => self.reaches[i],
             };
             sum += corners.weight[k] * reach;
             total += corners.weight[k];
         }
-        let reach = if total > 0.0 { sum / total } else { blend.x };
-        Vec2::new(reach, blend.y)
+        if total > 0.0 { sum / total } else { blend }
     }
 
     /// The triangles to try for a point after one in triangle `last`: that one, then those
@@ -829,6 +818,7 @@ pub(super) mod tests {
 
     use super::super::plan::Thrown;
     use super::*;
+    use crate::ballistics::spall_cone::FieldDescriptor;
 
     /// A fixture field's throw: at the line's start, at record time zero, its front at 1 m/s. These
     /// tests read a field's shape, never its timing. Fixture data.
@@ -878,19 +868,16 @@ pub(super) mod tests {
         AXIS * theta.cos() + (u * phi.cos() + v * phi.sin()) * theta.sin()
     }
 
-    /// A fixture field of `n` directions about [`AXIS`] over the support from `inner` to
-    /// `half_angle` (rad), strength 10 ref-mm, in equal-solid-angle strata (`cos θ` even across
-    /// the support, the azimuth turning by the golden angle), direction `k` reaching
-    /// `reach(k, direction)`, thrown with strength fraction `weight(direction)`. Fixture data.
+    /// A fixture field of law `field` over `n` directions about [`AXIS`], strength 10 ref-mm, in
+    /// equal-solid-angle strata (`cos θ` even across the support, the azimuth turning by the
+    /// golden angle), direction `k` reaching `reach(k, direction)`. Fixture data.
     pub(in super::super) fn fixture_field(
-        half_angle: f32,
-        inner: f32,
+        field: FieldDescriptor,
         n: usize,
         reach: impl Fn(usize, Vec3) -> f32,
-        weight: impl Fn(Vec3) -> f32,
     ) -> Cone {
         let golden = PI * (3.0 - 5.0_f32.sqrt());
-        let (near, far) = (inner.cos(), half_angle.cos());
+        let (near, far) = (field.inner_angle().cos(), field.half_angle().cos());
         let rays = (0..n)
             .map(|k| {
                 let c = near + (far - near) * (k as f32 + 0.5) / n as f32;
@@ -898,41 +885,33 @@ pub(super) mod tests {
                 Ray {
                     direction: d,
                     reach: reach(k, d),
-                    weight: weight(d),
                 }
             })
             .collect();
-        Cone::new(Vec3::ZERO, AXIS, half_angle, inner, 10.0, AT_ORIGIN, rays)
+        Cone::new(Vec3::ZERO, AXIS, field, n, 10.0, AT_ORIGIN, rays)
     }
 
-    /// A spall cone's cap, 25°, over 64 directions. Fixture data.
-    pub(in super::super) fn cap(
-        reach: impl Fn(usize, Vec3) -> f32,
-        weight: impl Fn(Vec3) -> f32,
-    ) -> Cone {
-        fixture_field(25.0_f32.to_radians(), 0.0, 64, reach, weight)
+    /// A spall cone's cap, 25° (a ball of `λ = 1 / sin 25°`), over 64 directions. Fixture data.
+    pub(in super::super) fn cap(reach: impl Fn(usize, Vec3) -> f32) -> Cone {
+        let ratio = 1.0 / 25.0_f32.to_radians().sin();
+        fixture_field(FieldDescriptor::ball(ratio), 64, reach)
     }
 
-    /// A ring's band, 56° to 76° off the axis (a ring of `λ = 0.45` and half-width 10°), over
-    /// 128 directions. Fixture data.
+    /// A ring's band of `λ = 0.45` and half-width 10°, 55.8° to 75.8° off the axis (DERIVED,
+    /// `atan(1/λ) ∓ 10°`), over 128 directions. Fixture data.
     pub(in super::super) fn band(reach: impl Fn(usize, Vec3) -> f32) -> Cone {
-        fixture_field(
-            76.0_f32.to_radians(),
-            56.0_f32.to_radians(),
-            128,
-            reach,
-            |_| 0.5,
-        )
+        let field = FieldDescriptor::ring(0.45, 10.0_f32.to_radians());
+        fixture_field(field, 128, reach)
     }
 
-    /// The whole sphere over 128 directions. Fixture data.
+    /// The whole sphere (a ball of `λ = 0`) over 128 directions. Fixture data.
     pub(in super::super) fn sphere(reach: impl Fn(usize, Vec3) -> f32) -> Cone {
-        fixture_field(PI, 0.0, 128, reach, |_| 0.5)
+        fixture_field(FieldDescriptor::ball(0.0), 128, reach)
     }
 
-    /// The map reads the record: a reach and a strength linear in the direction come back from a
-    /// bilinear read of the map at every direction well inside the directions' hull, and the read
-    /// at a texel's centre is that texel. The volume reads the record through it; a map read on
+    /// The map reads the record: a reach linear in the direction comes back from a bilinear read
+    /// of the map at every direction well inside the directions' hull, and the read at a texel's
+    /// centre is that texel. The volume reads the record through it; a map read on
     /// swapped axes, a wrong barycentric weight, a misplaced bilinear corner or a gutter off by a
     /// texel fails here. Fixture: a cap of 64 directions; directions within 18° of its 25° axis
     /// lie inside their hull; tolerance the bilinear read's curvature error over a 0.24° texel
@@ -940,23 +919,21 @@ pub(super) mod tests {
     #[test]
     fn the_map_reproduces_what_is_linear_in_it() {
         let reach = |d: Vec3| 2.0 + 0.6 * d.x - 0.4 * d.y;
-        let weight = |d: Vec3| 0.5 + 0.2 * d.y;
-        let cone = cap(|_, d| reach(d), weight);
+        let cone = cap(|_, d| reach(d));
         let map = Map::of(&cone, None);
         let mut checked = 0;
         for k in 0..18 {
             for j in 0..12 {
                 let d = direction((k as f32).to_radians(), j as f32 * TAU / 12.0);
-                let got = map.sample(d);
-                let want = Vec2::new(reach(d), 10.0 * weight(d));
-                assert!(got.distance(want) < 2e-3, "{d}: {got} against {want}");
+                let (got, want) = (map.sample(d), reach(d));
+                assert!((got - want).abs() < 2e-3, "{d}: {got} against {want}");
                 checked += 1;
             }
         }
         for (i, j) in [(1, 1), (129, 77), (200, 129)] {
             let d = map.texel_direction(i, j);
-            assert!(map.sample(d).distance(map.texels[j * MAP_TEXELS + i]) < 1e-4);
-            assert!(map.near_support(d) || map.texels[j * MAP_TEXELS + i] == Vec2::ZERO);
+            assert!((map.sample(d) - map.texels[j * MAP_TEXELS + i]).abs() < 1e-4);
+            assert!(map.near_support(d) || map.texels[j * MAP_TEXELS + i] == 0.0);
         }
         assert!(checked > 200);
     }
@@ -975,9 +952,9 @@ pub(super) mod tests {
             for j in 0..8 {
                 let value = map.at(direction(theta, j as f32 * TAU / 8.0));
                 if theta < map.inner || theta > map.half_angle {
-                    assert_eq!(value, Vec2::ZERO, "{k}.5°");
+                    assert_eq!(value, 0.0, "{k}.5°");
                 } else {
-                    assert!((value.x - 1.0).abs() < 1e-4, "{k}.5°: {value}");
+                    assert!((value - 1.0).abs() < 1e-4, "{k}.5°: {value}");
                 }
             }
         }
@@ -1008,7 +985,7 @@ pub(super) mod tests {
                 } else {
                     continue;
                 };
-                let got = map.texels[j * MAP_TEXELS + i].x;
+                let got = map.texels[j * MAP_TEXELS + i];
                 assert!(
                     (got - want).abs() < 1e-3,
                     "({i}, {j}): {got} against {want}"
@@ -1035,11 +1012,11 @@ pub(super) mod tests {
         let cone = sphere(|_, d| reach(d));
         let map = Map::of(&cone, None);
         assert_eq!(map.zoom, 1.0);
-        let antipode = map.sample(-AXIS).x;
+        let antipode = map.sample(-AXIS);
         assert!((antipode - reach(-AXIS)).abs() < 0.05, "{antipode}");
         for j in 0..24 {
             let d = direction(PI - 0.02, j as f32 * TAU / 24.0);
-            let got = map.sample(d).x;
+            let got = map.sample(d);
             assert!(
                 (got - antipode).abs() < 0.02,
                 "{d}: {got} against {antipode}"
@@ -1052,7 +1029,7 @@ pub(super) mod tests {
             let at = |x: f32| {
                 let local = unfold(wrap(Vec2::new(x, y)));
                 let (u, v) = AXIS.any_orthonormal_pair();
-                map.sample(u * local.x + v * local.y + AXIS * local.z).x
+                map.sample(u * local.x + v * local.y + AXIS * local.z)
             };
             let (inside, past) = (at(1.0 - 0.003), at(1.0 + 0.003));
             assert!(
@@ -1147,14 +1124,14 @@ pub(super) mod tests {
     /// interpolates across a silhouette draws the wavy blobs this replaces, and a read that blends
     /// the texels' reaches before testing a point against them carries the field past the plate
     /// to a depth no texel holds. Fixture: the plate and the wall of [`fixture_bodies`], the rod's
-    /// side away from the read; one strength throughout; points 1.2 and 2.9 times the plate's
+    /// side away from the read; points 1.2 and 2.9 times the plate's
     /// depth along a direction, past every plate texel's reach about it and its tolerance (under
     /// 3 cm there, [`REACH_TOLERANCE_DIAGONALS`]) and short of every wall texel's (DERIVED: the
     /// texels about a direction lie within half a degree of it).
     #[test]
     fn a_shadow_edge_is_the_bodys_silhouette() {
         let bodies = fixture_bodies();
-        let cone = cap(|_, d| guide(&bodies, d), |_| 0.5);
+        let cone = cap(|_, d| guide(&bodies, d));
         let guided = Map::of(&cone, Some(&bodies));
         let raw = Map::of(&cone, None);
         let texel = 4.0 * guided.zoom / MAP_SIDE as f32;
@@ -1172,15 +1149,16 @@ pub(super) mod tests {
                     continue;
                 }
                 let want = guide(&bodies, d);
-                let got = guided.sample(d).x;
+                let got = guided.sample(d);
                 assert!((got - want).abs() < 0.01, "{d}: {got} against {want}");
-                smeared += usize::from((raw.sample(d).x - want).abs() > 0.1);
+                smeared += usize::from((raw.sample(d) - want).abs() > 0.1);
                 checked += 1;
             }
         }
         assert!(checked > 100 && smeared > 10, "{checked} {smeared}");
-        // The look's read across the edge, the texels either side of it included.
-        let full = 0.5 * cone.strength;
+        // The look's read across the edge, the texels either side of it included: the whole field
+        // lit is a share of 1.
+        let full = 1.0;
         let (mut read, mut shared) = (0, 0);
         for k in 0..=200 {
             let off = (k as f32 - 100.0) * 0.01_f32.to_radians();
@@ -1237,17 +1215,17 @@ pub(super) mod tests {
         let away = AXIS * tilt.cos() + u * tilt.sin();
         let distance = 3.0;
         let plane = |d: Vec3| distance / d.dot(away);
-        let mut map = Map::of(&cap(|_, _| 1.0, |_| 0.5), None);
+        let mut map = Map::of(&cap(|_, _| 1.0), None);
         for j in 0..MAP_TEXELS {
             for i in 0..MAP_TEXELS {
                 let d = map.texel_direction(i, j);
                 let texel = &mut map.texels[j * MAP_TEXELS + i];
-                if texel.y > 0.0 {
-                    texel.x = plane(d);
+                if *texel > 0.0 {
+                    *texel = plane(d);
                 }
             }
         }
-        let full = 5.0;
+        let full = 1.0;
         let (mut checked, mut stepped) = (0, 0);
         for k in 0..60 {
             for j in 0..48 {
@@ -1262,7 +1240,7 @@ pub(super) mod tests {
                     "{d} at {r} m: {got} of {full}"
                 );
                 let (texels, _) = map.footprint(d);
-                stepped += usize::from(texels.iter().any(|texel| texel.x < r));
+                stepped += usize::from(texels.iter().any(|&texel| texel < r));
                 checked += 1;
             }
         }
@@ -1300,9 +1278,9 @@ pub(super) mod tests {
             &mut parts,
         );
         let bodies = HardBodies::new(parts.0, parts.1, parts.2);
-        let cone = cap(|_, d| guide(&bodies, d), |_| 0.5);
+        let cone = cap(|_, d| guide(&bodies, d));
         let map = Map::of(&cone, Some(&bodies));
-        let full = 0.5 * cone.strength;
+        let full = 1.0;
         let texel = 4.0 * map.zoom / MAP_SIDE as f32;
         let (mut across, mut within) = (0, 0);
         for k in 0..=200 {
@@ -1341,7 +1319,7 @@ pub(super) mod tests {
     #[test]
     fn agreeing_directions_are_never_overridden() {
         let bodies = fixture_bodies();
-        let cone = cap(|_, d| guide(&bodies, d), |_| 0.5);
+        let cone = cap(|_, d| guide(&bodies, d));
         let hits_rod = |d: Vec3| bodies.entry(Vec3::ZERO, d, GUIDE_REACH_M).unwrap().1 == 2;
         assert!(cone.rays.iter().all(|ray| !hits_rod(ray.direction)));
         let map = Map::of(&cone, Some(&bodies));
@@ -1349,7 +1327,7 @@ pub(super) mod tests {
         for k in 0..9 {
             let d = Vec3::new(-0.3 - 0.0125 * k as f32 - 0.0025, 0.0, -2.05).normalize();
             assert!(hits_rod(d));
-            let got = map.sample(d).x;
+            let got = map.sample(d);
             let wall = 3.0 / d.dot(AXIS);
             assert!(
                 (got - wall).abs() < 0.01,
@@ -1367,26 +1345,23 @@ pub(super) mod tests {
     #[test]
     fn a_passed_body_keeps_the_records_reach() {
         let bodies = fixture_bodies();
-        let through = cap(|_, _| 1.0, |_| 0.5)
+        let through = cap(|_, _| 1.0)
             .rays
             .iter()
             .position(|ray| ray.direction.x > 0.05)
             .expect("a direction under the plate");
-        let cone = cap(
-            |k, d| {
-                if k == through {
-                    3.0 / d.dot(AXIS)
-                } else {
-                    guide(&bodies, d)
-                }
-            },
-            |_| 0.5,
-        );
+        let cone = cap(|k, d| {
+            if k == through {
+                3.0 / d.dot(AXIS)
+            } else {
+                guide(&bodies, d)
+            }
+        });
         let ray = &cone.rays[through];
         let map = Map::of(&cone, Some(&bodies));
-        let samples = Samples::of(&map, Vec3::ZERO, cone.strength, &cone.rays, Some(&bodies));
+        let samples = Samples::of(&map, Vec3::ZERO, &cone.rays, Some(&bodies));
         assert_eq!(samples.endings[through], Ending::Past { body: 1 });
-        let got = samples.at(ray.direction, &mut 0).x;
+        let got = samples.at(ray.direction, &mut 0);
         assert!(
             (got - ray.reach).abs() < 1e-4,
             "{got} against {}",
@@ -1397,31 +1372,28 @@ pub(super) mod tests {
     /// A field with no directions bakes to zero: nothing is drawn of it.
     #[test]
     fn a_field_with_no_directions_bakes_to_zero() {
-        let cone = Cone::new(Vec3::ZERO, AXIS, 0.4, 0.0, 10.0, AT_ORIGIN, Vec::new());
+        let field = FieldDescriptor::ball(2.5);
+        let cone = Cone::new(Vec3::ZERO, AXIS, field, 0, 10.0, AT_ORIGIN, Vec::new());
         let map = Map::of(&cone, Some(&fixture_bodies()));
-        assert!(map.texels.iter().all(|t| *t == Vec2::ZERO));
+        assert!(map.texels.iter().all(|&t| t == 0.0));
     }
 
-    /// The atlas holds each field's map in its own tile, texel for texel as half floats, and
-    /// nothing else: the look's shader reads field `k` at [`tile`]`(k)`. A tile placed apart from
-    /// where the shader reads it draws one field's shadows in another.
+    /// The atlas holds each field's map in its own tile, texel for texel the reach [`Map::lit`]
+    /// reads, and nothing else: the look's shader reads field `k` at [`tile`]`(k)`. A tile placed
+    /// apart from where the shader reads it draws one field's shadows in another, and a reach
+    /// rounded on its way to the texture moves the shader's shadows off the CPU read's.
     #[test]
     fn the_atlas_holds_each_map_in_its_tile() {
-        let cones = [cap(|k, _| 1.0 + 0.01 * k as f32, |_| 0.5), band(|_, _| 2.0)];
+        let cones = [cap(|k, _| 1.0 + 0.01 * k as f32), band(|_, _| 2.0)];
         let maps = bake(&cones, None);
         let image = atlas(&maps);
-        assert_eq!(image.texture_descriptor.format, TextureFormat::Rg16Float);
+        assert_eq!(image.texture_descriptor.format, TextureFormat::R32Float);
         assert_eq!(image.width() as usize, 2 * MAP_TEXELS);
         for (k, map) in maps.iter().enumerate() {
             for (i, j) in [(0, 0), (130, 140), (MAP_TEXELS - 1, MAP_TEXELS - 1)] {
                 let at = tile(k) + UVec2::new(i as u32, j as u32);
-                let texel = image.get_color_at(at.x, at.y).unwrap().to_linear();
-                let want = map.texels[j * MAP_TEXELS + i];
-                let got = Vec2::new(texel.red, texel.green);
-                assert!(
-                    got.distance(want) < 2e-3 * want.length().max(1.0),
-                    "{k} {i} {j}"
-                );
+                let got = image.get_color_at(at.x, at.y).unwrap().to_linear().red;
+                assert_eq!(got, map.texels[j * MAP_TEXELS + i], "{k} {i} {j}");
             }
         }
         let empty = tile(3);

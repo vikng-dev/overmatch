@@ -332,11 +332,20 @@ reaches its floor at 1.0 m, just past its 0.79 m reach (DERIVED from the records
 band ends at a reach or a shadow of the struck tank's hard bodies, rarely at the floor, and its
 edges are theirs.
 
-The pen cam reads each field from a **direction map** (`src/damage_cam/pen_cam/field.rs`, `Map`):
-256² texels, octahedral about the field's axis and zoomed to its support, so the sphere has no
-pole and no rim, each texel holding the reach (record m) and strength (reference-mm) the record's
-directions give along it. The strength interpolates the directions about the texel, and so does
-the reach where they ended alike (inside one hard body, past one, or free). Where they ended
+A direction's strength is the field's law, read where the point lies
+(`src/damage_cam/pen_cam/look.rs`, `law`; the shader's `law`): `S` times the law's weight
+averaged over a window one stratum wide about the direction's depth `t = 1 − cos θ`, held to the
+support, `(t_hi − t_lo)/2 · share(a, b)/(b − a)`, `share` the law's closed-form share between the
+window's ends. At a stratum's centre the window is the stratum and the strength is the record's own
+`S f_k` (MEASURED over every shipped record: within 2.7·10⁻⁵ `S` in f32); between centres it runs
+continuously. The law's density read at a stratum's centre (`FieldDescriptor::weight_at`) is not
+the record's `f_k`: it lies up to 3.1·10⁻³ `S` off it (MEASURED), so the look takes the mean.
+
+The pen cam reads each field's reach from a **direction map** (`src/damage_cam/pen_cam/field.rs`,
+`Map`): 256² texels, octahedral about the field's axis and zoomed to its support, so the sphere
+has no pole and no rim, each texel holding the reach (record m) the record's directions give
+along it. The reach interpolates the directions about the texel where they ended alike (inside
+one hard body, past one, or free). Where they ended
 unlike, a shadow's edge lies between them: a ray cast against the struck tank's hard bodies,
 posed for the record, picks the directions that ended as the texel's own ray would, so the edge
 is the body's silhouette, never a curve interpolated across it. At a record direction the reach
@@ -353,8 +362,8 @@ field stops on reads inside to about 63° off square where the octahedral turn i
 at a cap's axis (DERIVED), with no texel-by-texel flips; a point deeper behind a body than
 the tolerance keeps its shadow, and a shadow's edge on a second body moves by at most one texel
 cell, only where that body lies within the tolerance of the one casting it (DERIVED). The cells
-themselves stay: where the four texels' results differ, across a shadow's edge or a step in
-strength, the weighted sum, and so a band's edge, follows the bilinear weights cell by cell, a
+themselves stay: where the four texels' results differ, across a shadow's edge, the weighted sum,
+and so a band's edge, follows the bilinear weights cell by cell, a
 stair-step a texel cell wide at close zoom that no tolerance moves (MEASURED: the same stair-step
 at 8 diagonals and at the farthest of the four). The fields draw as **one volume** (`assets/shaders/pen_cam_look.wgsl`, `volume`) on the
 back faces of a box about every field's reach: each eye ray is cut at the ends of every field's

@@ -20,6 +20,7 @@ use std::sync::{Arc, OnceLock};
 
 use super::field::{self, Map};
 use super::timeline::CornerKind;
+use crate::ballistics::spall_cone::FieldDescriptor;
 use crate::damage_cam::shapes::{HardBodies, TankShapes};
 use crate::damage_cam::{
     ConsequenceState, PenetrationReport, PlateClass, Role, RoundEnd, SpallCone,
@@ -280,10 +281,14 @@ pub struct Thrown {
 pub struct Cone {
     pub origin: Vec3,
     pub axis: Vec3,
-    /// Half-angle (rad): the support's rim, π for a field over the whole sphere.
-    pub half_angle: f32,
-    /// The strength `S` (ref-mm): a direction was thrown with `S` times its weight; zero on a
-    /// hand-authored clip.
+    /// The field's law and ratio ([`SpallCone::field`]): its support, and its strength along every
+    /// direction as the look evaluates it (`look::law`).
+    pub field: FieldDescriptor,
+    /// `N`, the strata the record threw it in: one direction each, those that never left its
+    /// origin included.
+    pub strata: usize,
+    /// The strength `S` (ref-mm): direction `k` was thrown with `S f_k`; zero on a hand-authored
+    /// clip.
     pub strength: f32,
     /// Where the line throws it, arc length.
     pub arc: f32,
@@ -296,19 +301,16 @@ pub struct Cone {
     /// A front with no finite positive speed (a leg with no time span) is whole once thrown.
     pub speed: f32,
     pub rays: Vec<Ray>,
-    /// The support's inner edge (rad off the axis): a ring's band starts there; 0 on a cap and the
-    /// sphere.
-    pub inner: f32,
 }
 
 impl Cone {
-    /// The cone of these parts, its support from `inner` to `half_angle` (rad) off its axis,
-    /// `thrown` as given.
+    /// The cone of these parts: `field` thrown in `strata` strata at strength `strength`, `thrown`
+    /// as given.
     pub fn new(
         origin: Vec3,
         axis: Vec3,
-        half_angle: f32,
-        inner: f32,
+        field: FieldDescriptor,
+        strata: usize,
         strength: f32,
         thrown: Thrown,
         rays: Vec<Ray>,
@@ -316,14 +318,26 @@ impl Cone {
         Self {
             origin,
             axis,
-            half_angle,
+            field,
+            strata,
             strength,
             arc: thrown.arc,
             t: thrown.t,
             speed: thrown.speed,
             rays,
-            inner,
         }
+    }
+
+    /// Half-angle (rad): the support's rim, π for a field over the whole sphere
+    /// ([`FieldDescriptor::half_angle`]).
+    pub fn half_angle(&self) -> f32 {
+        self.field.half_angle()
+    }
+
+    /// The support's inner edge (rad off the axis): a ring's band starts there; 0 on a cap and the
+    /// sphere ([`FieldDescriptor::inner_angle`]).
+    pub fn inner(&self) -> f32 {
+        self.field.inner_angle()
     }
 
     /// Record seconds its front takes to run `distance` (m) from its origin; none for a front with
@@ -367,12 +381,10 @@ pub struct BurstPlan {
     pub cone: Option<usize>,
 }
 
-/// One direction of a cone: unit direction, reach (m) and its weight `f_k`, the multiple of the
-/// cone's strength it was thrown with (about 0.84 on the axis of a 26° ball, DERIVED).
+/// One direction of a cone that left its origin: unit direction and reach (m).
 pub struct Ray {
     pub direction: Vec3,
     pub reach: f32,
-    pub weight: f32,
 }
 
 /// One component of the struck tank, by its name in the tank asset.
@@ -754,30 +766,22 @@ fn dosing_reach(field: &SpallCone, name: &str) -> Option<f32> {
 fn cone(cone: &SpallCone, line: &Polyline, speed: f32) -> Cone {
     let origin = Vec3::from(cone.origin);
     let axis = Vec3::from(cone.axis).normalize_or(Vec3::NEG_Z);
-    let half_angle = cone.field.half_angle();
     let rays = cone
         .fragments
         .iter()
         .filter_map(|fragment| {
             let span = Vec3::from(fragment.end) - origin;
-            let direction = span.try_normalize()?;
-            let weight = if cone.strength > 0.0 {
-                (fragment.strength / cone.strength).max(0.0)
-            } else {
-                cone.field.weight_at(f64::from(direction.dot(axis))) as f32
-            };
             Some(Ray {
-                direction,
+                direction: span.try_normalize()?,
                 reach: span.length(),
-                weight,
             })
         })
         .collect();
     Cone::new(
         origin,
         axis,
-        half_angle,
-        cone.field.inner_angle(),
+        cone.field,
+        cone.fragments.len(),
         cone.strength,
         Thrown {
             arc: line.arc_of(origin),

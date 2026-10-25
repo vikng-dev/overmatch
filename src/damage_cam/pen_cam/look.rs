@@ -61,6 +61,7 @@ use super::stage::{Stage, StageCamera};
 use super::timeline::{self, Condition, CornerKind};
 use super::view::Tier;
 use super::{Corner, Surface, WorldViewer};
+use crate::ballistics::spall_cone::{FieldDescriptor, Terms};
 use crate::damage_cam::Role;
 use crate::render_policy::CameraProfile;
 
@@ -120,7 +121,7 @@ const FOOTPRINT_REACH_SLACK_M: f32 = 0.01;
 /// (`every_record_fits_the_look`).
 const FIELDS: usize = MAP_FIELDS;
 /// One field's lanes ([`pack`]).
-const PRINT_LANES: usize = 5;
+const PRINT_LANES: usize = 6;
 
 /// The uniform block `pen_cam_look.wgsl` reads; its lanes are documented there.
 #[derive(ShaderType, Debug, Clone, Copy, Default, PartialEq)]
@@ -181,9 +182,10 @@ pub struct LookMaterial {
     pub hull_mask: Option<Handle<Image>>,
     #[texture(2)]
     pub part_mask: Option<Handle<Image>>,
-    /// The record's field maps ([`super::field::atlas`]), which the volume and the painting load
-    /// unfiltered; `None` on every other element, and where the record throws no field.
-    #[texture(3)]
+    /// The record's field maps ([`super::field::atlas`]), full floats, which the volume and the
+    /// painting load unfiltered; `None` on every other element, and where the record throws no
+    /// field.
+    #[texture(3, sample_type = "float", filterable = false)]
     pub field_map: Option<Handle<Image>>,
     pub blend: Blend,
     /// The depth bias a copy of a mesh needs to win the tie with the mesh it covers.
@@ -618,7 +620,8 @@ pub fn follow_pose(
 /// One field (a spall cone or a burst's) where the volume is taken, in world space: its origin, its
 /// map's frame (the unit axis, `u` and `v` across it, [`Map`]), its support's half-angle and inner
 /// edge (rad), its map's zoom, how far its front has run (m, negative before it is thrown), the
-/// world's metres per record metre, and its map's longest reach (record m).
+/// world's metres per record metre, its map's longest reach (record m), its strength `S`
+/// (reference-mm) and its law ([`law_lane`]).
 #[derive(Clone, Copy, Debug)]
 pub struct FieldPrint {
     pub origin: Vec3,
@@ -631,15 +634,18 @@ pub struct FieldPrint {
     pub front: f32,
     pub scale: f32,
     pub longest: f32,
+    pub strength: f32,
+    pub law: Vec4,
 }
 
 /// The first [`FIELDS`] of `prints` in the fields' lanes, [`PRINT_LANES`] a field, and how many:
 /// the origin (world) and half-angle; the unit axis (world) and the front (m); `u` and the inner
-/// edge; `v` and the map's zoom; and the emission a reference-mm of strength gives, `ρ / Ω`
+/// edge; `v` and the map's zoom; the emission its strength `S` gives, `ρ S / Ω`
 /// ([`Potency::emission`], `Ω` its support's solid angle) in world units (squared metres, whose
 /// intensity falls as the square of a world distance), the world's metres per record metre (the
-/// map holds record metres) and the longest reach (world m). Field `k` reads its map from the
-/// atlas's tile `k` ([`super::field::tile`]).
+/// map holds record metres) and the longest reach (world m); and its law ([`law_lane`]), whose
+/// weight along a direction ([`law`]) times that emission is the direction's. Field `k` reads its
+/// map from the atlas's tile `k` ([`super::field::tile`]).
 fn pack(prints: &[FieldPrint], potency: &Potency) -> ([Vec4; PRINT_LANES * FIELDS], usize) {
     let mut lanes = [Vec4::ZERO; PRINT_LANES * FIELDS];
     for (print, lane) in prints.iter().zip(lanes.chunks_mut(PRINT_LANES)) {
@@ -647,15 +653,102 @@ fn pack(prints: &[FieldPrint], potency: &Potency) -> ([Vec4; PRINT_LANES * FIELD
         lane[1] = print.axis.extend(print.front);
         lane[2] = print.u.extend(print.inner);
         lane[3] = print.v.extend(print.zoom);
-        let emission = potency.emission(1.0, print.inner, print.half_angle);
+        let emission = potency.emission(print.strength, print.inner, print.half_angle);
         lane[4] = Vec4::new(
             emission * print.scale * print.scale,
             print.scale,
             print.longest * print.scale,
             0.0,
         );
+        lane[5] = print.law;
     }
     (lanes, prints.len().min(FIELDS))
+}
+
+/// Field `field`'s law as the look evaluates it ([`law`]), thrown in `strata` strata: the kind of
+/// its terms (x: 1 the ball's cap, 2 the ball over the whole sphere, 3 the ring's band; 0 a
+/// descriptor outside the law's domain, which lights nothing), their numbers (y, z: the cap's
+/// `λ²` and depth `w`, the sphere's `λ`, the band's depths `t_lo` and `t_hi`;
+/// `spall_cone::Terms`) and `N` (w).
+pub fn law_lane(field: FieldDescriptor, strata: usize) -> Vec4 {
+    let n = strata as f32;
+    match field.terms() {
+        Ok(Terms::Cap { l2, w }) => Vec4::new(1.0, l2 as f32, w as f32, n),
+        Ok(Terms::Sphere { lambda }) => Vec4::new(2.0, lambda as f32, 0.0, n),
+        Ok(Terms::Band { lo, hi }) => Vec4::new(3.0, lo as f32, hi as f32, n),
+        Err(_) => Vec4::ZERO,
+    }
+}
+
+/// The weight of the law `lane` ([`law_lane`]) along a direction at depth `t = 1 − cos θ` off its
+/// axis, in f32 as `pen_cam_look.wgsl`'s `law` takes it: the law's weight averaged over the window
+/// one stratum wide (`Δ = (t_hi − t_lo) / N`) centred on `t` and held to the support,
+/// `(t_hi − t_lo)/2 · share(a, b)/(b − a)`, `share` the emission's share between depths `a` and
+/// `b`. At stratum `k`'s centre the window is the stratum and the weight is the stratum's `f_k`
+/// (`spall_cone::ConeShape::spread`), so a record direction's strength `S f_k` is the law's there;
+/// between centres it runs continuously. The band's share is linear in depth, so its weight is ½
+/// throughout. The support is the caller's to test: a depth off it reads its nearest edge's weight,
+/// as a painted edge a pixel past the rim reads it. Zero for no strata and for no law.
+pub fn law(lane: Vec4, t: f32) -> f32 {
+    let kind = lane.x.round() as i32;
+    let (lo, hi) = match kind {
+        1 => (0.0, lane.z),
+        2 => (0.0, 2.0),
+        3 => (lane.y, lane.z),
+        _ => return 0.0,
+    };
+    if lane.w < 1.0 {
+        return 0.0;
+    }
+    if kind == 3 {
+        return 0.5;
+    }
+    let t = t.clamp(lo, hi);
+    let half = 0.5 * (hi - lo) / lane.w;
+    let (a, b) = ((t - half).max(lo), (t + half).min(hi));
+    if b <= a {
+        return 0.0;
+    }
+    let share = if kind == 1 {
+        cap_share(lane.y, b) - cap_share(lane.y, a)
+    } else {
+        sphere_share(lane.y, a, b)
+    };
+    0.5 * (hi - lo) * share / (b - a)
+}
+
+/// The ball's cap's share of the emission inside depth `t`, `λ²` `l2`: `1 − μ D³`,
+/// `D² = 1 − λ² t(2 − t)`, held at zero past the rim (`spall_cone::Terms::stratum`).
+fn cap_share(l2: f32, t: f32) -> f32 {
+    let d = (1.0 - l2 * (t * (2.0 - t))).max(0.0).sqrt();
+    1.0 - (1.0 - t) * (d * d * d)
+}
+
+/// The ball's share over the whole sphere between depths `a ≤ b`, ratio `lambda` below 1: the
+/// density `g³/2` integrated, `(b − a)(g_a + g_b)²(g_a² + g_b² + 2c) / (16(D_a + D_b))`,
+/// `c = 1 − λ²`, `D = √(c + λ²μ²)`, `g = λμ + D`, behind the plate `c / (D − λμ)`
+/// (`spall_cone::Terms::stratum`).
+fn sphere_share(lambda: f32, a: f32, b: f32) -> f32 {
+    let c = (1.0 - lambda) * (1.0 + lambda);
+    let reach = |t: f32| {
+        let mu = 1.0 - t;
+        let d = (c + lambda * mu * (lambda * mu)).sqrt();
+        let g = if mu >= 0.0 {
+            lambda * mu + d
+        } else {
+            c / (d - lambda * mu)
+        };
+        (g, d)
+    };
+    let ((g_a, d_a), (g_b, d_b)) = (reach(a), reach(b));
+    let sum = g_a + g_b;
+    (b - a) * (sum * sum) * (g_a * g_a + g_b * g_b + 2.0 * c) / (16.0 * (d_a + d_b))
+}
+
+/// The depth `t = 1 − cos θ` of unit `direction` off unit `axis`, as `½ |direction − axis|²`, which
+/// keeps its digits near the axis where `1 − cos θ` cancels.
+pub fn depth(direction: Vec3, axis: Vec3) -> f32 {
+    0.5 * (direction - axis).length_squared()
 }
 
 /// The lanes the bands are drawn from: the floor and mid thresholds (HP points per m²), and the
@@ -698,9 +791,10 @@ pub fn paint_fields(
 
 /// The fields' summed intensity (HP points per m²) at world point `p`, as the volume samples it
 /// (`pen_cam_look.wgsl`, `intensity` and `field_at`): each of `prints`, whose maps are `maps`'
-/// alike, adds `ρ s / (Ω r²)` where `p` lies on its support and within its front, `s` the strength
-/// its map lights at `p` ([`Map::lit`]: each texel about `p`'s direction tested against its own
-/// reach), nothing past its longest reach; at its origin, once thrown, it is unbounded (`1e30`).
+/// alike, adds `ρ S w / (Ω r²)` where `p` lies on its support and within its front, `S w` the
+/// strength its law gives `p`'s direction ([`law`]), lit as its map lights `p` ([`Map::lit`]:
+/// each texel about `p`'s direction tested against its own reach), nothing past its longest
+/// reach; at its origin, once thrown, it is unbounded (`1e30`).
 /// Doses add, so the bands classify the sum, never a field's own. This is the sum the shader
 /// mirrors, held by the tests.
 #[cfg_attr(
@@ -730,7 +824,8 @@ pub fn intensity(prints: &[FieldPrint], maps: &[Map], potency: &Potency, p: Vec3
         }
         let local = Vec3::new(dir.dot(lane[2].truncate()), dir.dot(lane[3].truncate()), c);
         let direction = map.u * local.x + map.v * local.y + map.axis * local.z;
-        sum += map.lit(direction, r, lane[4].y, 0.0) * lane[4].x / (r * r);
+        let weight = law(lane[5], depth(dir, lane[1].truncate()));
+        sum += map.lit(direction, r, lane[4].y, 0.0) * weight * lane[4].x / (r * r);
     }
     sum
 }
@@ -738,9 +833,10 @@ pub fn intensity(prints: &[FieldPrint], maps: &[Map], potency: &Potency, p: Vec3
 /// The fields' summed intensity (HP points per m²) a component's surface is painted by at world
 /// point `p`, its unit normal `n` (world), under `rule`, as `pen_cam_look.wgsl`'s `footprint`
 /// sums it with every edge sharp: each of `prints` (maps `maps`, as [`intensity`] reads them) that
-/// covers `p` adds `ρ s / (Ω r²)`, `s` the strength its map lights at `p` within the rule's slack
-/// past each texel's reach ([`Map::lit`]). A field covers `p` where `p` lies on its support and
-/// within its front, and under [`Footprint::Hard`] where `n` faces its origin; under
+/// covers `p` adds `ρ S w / (Ω r²)`, `S w` the strength its law gives `p`'s direction ([`law`]),
+/// lit as its map lights `p` within the rule's slack past each texel's reach ([`Map::lit`]). A
+/// field covers `p` where `p` lies on its support and within its front, and under
+/// [`Footprint::Hard`] where `n` faces its origin; under
 /// [`Footprint::Witness`] whatever the facing, so a witness is painted exactly where the volume
 /// holds the field ([`intensity`]). The point takes the band of the sum ([`Potency::band`]). This
 /// is the sum the shader mirrors, held by the tests.
@@ -776,7 +872,8 @@ pub fn painting(
         }
         let local = Vec3::new(dir.dot(lane[2].truncate()), dir.dot(lane[3].truncate()), c);
         let direction = map.u * local.x + map.v * local.y + map.axis * local.z;
-        sum += map.lit(direction, r, lane[4].y, foot.y) * lane[4].x / (r * r);
+        let weight = law(lane[5], depth(dir, lane[1].truncate()));
+        sum += map.lit(direction, r, lane[4].y, foot.y) * weight * lane[4].x / (r * r);
     }
     sum
 }
@@ -1337,12 +1434,15 @@ mod tests {
             front: 3.0,
             scale: 2.0,
             longest: 1.5,
+            strength: 3.0,
+            law: law_lane(FieldDescriptor::ball(1.0 / 25.0_f32.to_radians().sin()), 64),
         }
     }
 
-    /// The colour reads no gain: the lanes the volume colours from carry the field's frame, its
-    /// emission per reference-mm `ρ / Ω` in world units (squared metres, whose intensity falls as
-    /// the square of a world distance), its scale and longest reach, the shipped thresholds and
+    /// The colour reads no gain: the lanes the volume colours from carry the field's frame, the
+    /// emission `ρ S / Ω` its strength gives in world units (squared metres, whose intensity falls
+    /// as the square of a world distance), its scale and longest reach, its law, the shipped
+    /// thresholds and
     /// each band's colour from the band law, and fading the volume, a base surface or a painted
     /// component moves its fade lane alone; the volume's extinction lengths scale with the stage. A
     /// painted component reads the same lanes, and no field without its maps. The colour promise
@@ -1366,14 +1466,15 @@ mod tests {
         assert_eq!(lane[3], print.v.extend(print.zoom));
         assert_eq!(
             lane[4].x,
-            4.0 * potency.emission(1.0, print.inner, print.half_angle)
+            4.0 * potency.emission(print.strength, print.inner, print.half_angle)
         );
         assert_eq!(
             lane[4].x,
-            4.0 * potency.rate / solid_angle(print.half_angle)
+            4.0 * (potency.rate * print.strength / solid_angle(print.half_angle))
         );
         assert_eq!(lane[4].y, print.scale);
         assert_eq!(lane[4].z, print.longest * print.scale);
+        assert_eq!(lane[5], print.law);
         assert!(
             params.prints[PRINT_LANES..]
                 .iter()
@@ -1464,9 +1565,9 @@ mod tests {
         assert_eq!(component_base(&masks, None).params.mode.z, 1.0);
     }
 
-    /// The print of `map`'s field from `origin` with its front at `front` (world m), `scale` world
-    /// metres per record metre.
-    fn print_of(map: &Map, origin: Vec3, front: f32, scale: f32) -> FieldPrint {
+    /// The print of `cone`, baked onto `map`, from `origin` with its front at `front` (world m),
+    /// `scale` world metres per record metre.
+    fn print_of(cone: &Cone, map: &Map, origin: Vec3, front: f32, scale: f32) -> FieldPrint {
         FieldPrint {
             origin,
             axis: map.axis,
@@ -1478,6 +1579,8 @@ mod tests {
             front,
             scale,
             longest: map.longest,
+            strength: cone.strength,
+            law: law_lane(cone.field, cone.strata),
         }
     }
 
@@ -1499,8 +1602,10 @@ mod tests {
     /// and the map's rounding.
     #[test]
     fn a_band_runs_its_iso_surfaces_chord() {
-        let map = Map::of(&sphere(|_, _| 2.0), None);
-        let strength = map.sample(Vec3::X).y;
+        let cone = sphere(|_, _| 2.0);
+        let map = Map::of(&cone, None);
+        let weight = law(law_lane(cone.field, cone.strata), depth(Vec3::X, map.axis));
+        let strength = cone.strength * weight;
         assert!((strength - 5.0).abs() < 1e-4 && (map.longest - 2.0).abs() < 1e-4);
         let (r_mid, r_floor, reach) = (1.0_f32, 1.6_f32, 2.0_f32);
         let rate = 1.0;
@@ -1514,7 +1619,7 @@ mod tests {
         let dir = Vec3::new(1.0, 0.2, -0.4).normalize();
         let across = dir.any_orthonormal_vector();
         for scale in [1.0, 2.0] {
-            let print = print_of(&map, Vec3::new(0.5, -1.0, 2.0), 10.0 * scale, scale);
+            let print = print_of(&cone, &map, Vec3::new(0.5, -1.0, 2.0), 10.0 * scale, scale);
             let prints = std::slice::from_ref(&print);
             let space = spacing(&print);
             assert_eq!(space, 2.0 * map.longest * scale / VOLUME_STEPS as f32);
@@ -1573,10 +1678,9 @@ mod tests {
     /// rounded at 6 m from the eye (DERIVED: f32 at 36 m² over a 4 cm radius).
     #[test]
     fn a_small_field_inside_a_wide_one_is_drawn() {
-        let wide_map = Map::of(&sphere(|_, _| 4.0), None);
-        let small_map = Map::of(&sphere(|_, _| 1.0), None);
-        let strength = wide_map.sample(Vec3::X).y;
-        assert!((small_map.sample(Vec3::X).y - strength).abs() < 1e-4);
+        let (wide_cone, small_cone) = (sphere(|_, _| 4.0), sphere(|_, _| 1.0));
+        let (wide_map, small_map) = (Map::of(&wide_cone, None), Map::of(&small_cone, None));
+        let strength = wide_cone.strength * law(law_lane(wide_cone.field, wide_cone.strata), 1.0);
         let k = strength / solid_angle(std::f32::consts::PI);
         let potency = Potency {
             rate: 1.0,
@@ -1585,7 +1689,7 @@ mod tests {
         };
         let maps = [wide_map.clone(), small_map.clone()];
         let dir = Vec3::new(1.0, 0.2, -0.4).normalize();
-        let wide = print_of(&wide_map, Vec3::new(0.5, -1.0, 2.0), 10.0, 1.0);
+        let wide = print_of(&wide_cone, &wide_map, Vec3::new(0.5, -1.0, 2.0), 10.0, 1.0);
         let eye = wide.origin - dir * 6.0 + dir.any_orthonormal_vector() * 1.5;
         let (near, far) = stretch(&wide, eye, dir).expect("the ray crosses the wide field");
         let steps = ((far - near) / spacing(&wide))
@@ -1600,7 +1704,8 @@ mod tests {
             assert!(room > 0.02, "the small ball spans a wide step: {step} m");
             for n in 0..16 {
                 let at = middle + room * (n as f32 / 7.5 - 1.0);
-                let prints = [wide, print_of(&small_map, eye + dir * at, front, 1.0)];
+                let small = print_of(&small_cone, &small_map, eye + dir * at, front, 1.0);
+                let prints = [wide, small];
                 let mut lengths = [0.0_f32; 3];
                 for (near, far, space) in schedule(&prints, eye, dir, 0.0, f32::MAX) {
                     march(
@@ -1632,12 +1737,13 @@ mod tests {
     /// either field's intensity there and whose floor at half it.
     #[test]
     fn doses_add_where_fields_overlap() {
-        let map = Map::of(&cap(|_, _| 3.0, |_| 1.0), None);
+        let cone = cap(|_, _| 3.0);
+        let map = Map::of(&cone, None);
         let maps = [map.clone(), map.clone()];
         let point = map.axis;
         let prints = [
-            print_of(&map, map.u * 0.1, 5.0, 1.0),
-            print_of(&map, -map.u * 0.1, 5.0, 1.0),
+            print_of(&cone, &map, map.u * 0.1, 5.0, 1.0),
+            print_of(&cone, &map, -map.u * 0.1, 5.0, 1.0),
         ];
         let mut potency = Potency {
             rate: 1.0,
@@ -1718,8 +1824,9 @@ mod tests {
     /// both fail here. Fixture: a 25° cap, every direction reaching 2 m, its front past the reach.
     #[test]
     fn a_crew_station_is_painted_on_any_face_inside_the_field() {
-        let map = Map::of(&cap(|_, _| 2.0, |_| 1.0), None);
-        let print = print_of(&map, Vec3::ZERO, 5.0, 1.0);
+        let cone = cap(|_, _| 2.0);
+        let map = Map::of(&cone, None);
+        let print = print_of(&cone, &map, Vec3::ZERO, 5.0, 1.0);
         let (prints, maps) = (std::slice::from_ref(&print), std::slice::from_ref(&map));
         let potency = Potency::shipped();
         let paint = |rule, p, n| painting(prints, maps, &potency, rule, p, n);
@@ -1775,8 +1882,9 @@ mod tests {
             &mut parts,
         );
         let bodies = HardBodies::new(parts.0, parts.1, parts.2);
-        let map = Map::of(&cap(|_, d| guide(&bodies, d), |_| 1.0), Some(&bodies));
-        let print = print_of(&map, Vec3::ZERO, 10.0, 1.0);
+        let cone = cap(|_, d| guide(&bodies, d));
+        let map = Map::of(&cone, Some(&bodies));
+        let print = print_of(&cone, &map, Vec3::ZERO, 10.0, 1.0);
         (map, print)
     }
 
@@ -1852,8 +1960,9 @@ mod tests {
 
     /// A field's stretch along an eye ray holds every point the field gives an intensity: the
     /// volume marches only its fields' stretches, so a point outside them is never sampled and its
-    /// band never drawn. Fixture: a 25° cap, a 120° cap (wider than the hemisphere, which no cone
-    /// bounds), a ring's band and the sphere, each direction's reach one of 0.8, 1.3 and 1.8 m, at
+    /// band never drawn. Fixture: a 25° cap; a ring's band of `λ = 1` and half-width 75°, from the
+    /// axis out to 120° (DERIVED, `45° ± 75°`, its near edge held at the axis), a cap wider than
+    /// the hemisphere, which no cone bounds; a ring's band of `λ = 0.45`; and the sphere, each direction's reach one of 0.8, 1.3 and 1.8 m, at
     /// twice the record's size, their fronts mid-run and past every reach; eye rays from eyes
     /// about each origin (on its axis both ways and across it) toward a grid of points about it,
     /// read every 5 mm. A stretch that takes the cone's far nappe for its own, or bounds a cap
@@ -1863,8 +1972,12 @@ mod tests {
     fn the_stretch_holds_every_point_of_its_field() {
         let reach = |k: usize, _: Vec3| [0.8, 1.3, 1.8][k % 3];
         let fields = [
-            cap(reach, |_| 1.0),
-            fixture_field(120.0_f32.to_radians(), 0.0, 128, reach, |_| 1.0),
+            cap(reach),
+            fixture_field(
+                FieldDescriptor::ring(1.0, 75.0_f32.to_radians()),
+                128,
+                reach,
+            ),
             band(reach),
             sphere(reach),
         ];
@@ -1875,7 +1988,7 @@ mod tests {
             let maps = std::slice::from_ref(&map);
             let mut met = 0;
             for front in [1.2 * scale, 10.0] {
-                let print = print_of(&map, Vec3::new(-0.3, 0.7, 0.2), front, scale);
+                let print = print_of(cone, &map, Vec3::new(-0.3, 0.7, 0.2), front, scale);
                 let prints = std::slice::from_ref(&print);
                 let eyes = [
                     map.axis,
@@ -1922,7 +2035,7 @@ mod tests {
     /// Every top-level item of the look's and the slice's shaders, `(file, item, digest)`: the
     /// FNV-1a fold of the item's text with comments and whitespace removed. MEASURED from the
     /// shaders the shipped frames were captured with.
-    const SHADER_PINS: [(&str, &str, u64); 29] = [
+    const SHADER_PINS: [(&str, &str, u64); 33] = [
         ("pen_cam_look.wgsl", "mode", 0xd884_58c8_42c2_833e),
         ("pen_cam_look.wgsl", "vertex", 0x0c5f_0c8e_ce2c_65f2),
         ("pen_cam_look.wgsl", "mask_at", 0x1d10_776f_dc3c_0e87),
@@ -1931,12 +2044,16 @@ mod tests {
         ("pen_cam_look.wgsl", "eye_ray", 0x8fbf_c6b6_664e_ae7b),
         ("pen_cam_look.wgsl", "sign_not_zero", 0x1679_03a6_bf5e_8900),
         ("pen_cam_look.wgsl", "octahedral", 0xee8d_db25_da07_f4ea),
-        ("pen_cam_look.wgsl", "map_at", 0x48a4_832c_eced_eaee),
-        ("pen_cam_look.wgsl", "field_at", 0x1b30_26d2_fe21_ca45),
+        ("pen_cam_look.wgsl", "map_at", 0x629a_57a1_7b7b_2c3f),
+        ("pen_cam_look.wgsl", "cap_share", 0x1bb7_0503_7b18_7581),
+        ("pen_cam_look.wgsl", "sphere_reach", 0x1f4b_6ef2_6075_2f53),
+        ("pen_cam_look.wgsl", "sphere_share", 0x6b86_7e7c_f36d_7a41),
+        ("pen_cam_look.wgsl", "law", 0x2210_7415_8a4f_970d),
+        ("pen_cam_look.wgsl", "field_at", 0x3b58_bc1c_ff29_2a81),
         ("pen_cam_look.wgsl", "intensity", 0xa1d0_858a_a0d0_eea1),
         ("pen_cam_look.wgsl", "soft_step", 0x05cd_e5fb_8619_f8d0),
         ("pen_cam_look.wgsl", "inside", 0xbe35_1ba6_c6e3_7355),
-        ("pen_cam_look.wgsl", "footprint", 0xae74_4998_9ac6_2efb),
+        ("pen_cam_look.wgsl", "footprint", 0x8a3a_cfe9_056b_431e),
         ("pen_cam_look.wgsl", "printed", 0xa3ef_69a5_13f1_8034),
         ("pen_cam_look.wgsl", "stretch", 0xf54b_5e9e_e1d2_8521),
         ("pen_cam_look.wgsl", "over", 0xbcd5_9d02_0fb0_72c6),
@@ -1947,7 +2064,7 @@ mod tests {
         ("pen_cam_look.wgsl", "volume", 0xab58_3d8f_98ae_99bf),
         ("pen_cam_look.wgsl", "lines", 0x5560_efe8_d460_738c),
         ("pen_cam_look.wgsl", "fragment", 0x025b_eb62_7e58_1499),
-        ("pen_cam_look.wgsl", MODULE_SCOPE, 0x4567_6605_9a12_3573),
+        ("pen_cam_look.wgsl", MODULE_SCOPE, 0x8823_ca0b_e7f3_7380),
         (
             "pen_cam_slice.wgsl",
             "behind_the_scene",
@@ -2042,7 +2159,9 @@ mod tests {
             moved.is_empty(),
             "the pen cam's shaders moved; the moved items' pins:\n{}\nRe-pin only after the Rust \
              mirrors are read against the new WGSL and pass (`potency::tests` for `soft_step`, \
-             `field::tests` for `octahedral` and `map_at` (`Map::lit`), the painting's tests \
+             `field::tests` for `octahedral` and `map_at` (`Map::lit`), \
+             `the_law_gives_each_record_direction_its_recorded_strength` for `law`, `cap_share`, \
+             `sphere_reach` and `sphere_share`, the painting's tests \
              (`painting`) for `footprint`, `inside` and `printed`, \
              `a_band_runs_its_iso_surfaces_chord` and `doses_add_where_fields_overlap` for \
              `field_at`, `intensity`, `crossing`, `step_over`, `spacing` and `march`, \
@@ -2146,11 +2265,12 @@ mod tests {
     /// sphere (a ball at rest, `λ = 0`), over a ring's band (fixture `λ = 0.45`, half-width 10°), at
     /// the hemisphere (`λ = 1`) and at the narrowest cone the law resolves (the largest ratio
     /// `FieldDescriptor::check` admits, about 9.5·10⁷, a half-angle of about 10⁻⁸ rad, DERIVED),
-    /// a direction's emission is finite and positive, its map ([`Map::of`]) is finite with a
-    /// positive zoom, and every lane [`LookMaterial::set_fields`] packs is finite. The shader's
-    /// volume takes its bands from those lanes; a solid angle that rounds to zero makes the
-    /// emission infinite and every band of the field undefined, and a zoom of zero reads every
-    /// direction off the map. Fixture strength and reach.
+    /// a field's emission is finite and positive, its law's weight ([`law`]) finite and positive
+    /// at every stratum's centre, its map ([`Map::of`]) finite with a positive zoom, and every lane
+    /// [`LookMaterial::set_fields`] packs is finite. The shader's volume takes its bands from
+    /// those lanes; a solid angle that rounds to zero makes the emission infinite and every band
+    /// of the field undefined, a law whose window rounds away draws nothing of the field, and a
+    /// zoom of zero reads every direction off the map. Fixture strength and reach.
     #[test]
     fn a_cone_packs_finite_lanes_across_the_law() {
         use super::super::plan::{Cone, Ray};
@@ -2183,26 +2303,35 @@ mod tests {
             let spread = ConeShape::shipped().spread(descriptor).unwrap();
             let rays = spread
                 .directions(Dir3::NEG_Z)
-                .map(|(direction, weight)| Ray {
+                .map(|(direction, _)| Ray {
                     direction: direction.into(),
                     reach,
-                    weight,
                 })
                 .collect();
             let cone = Cone::new(
                 Vec3::ZERO,
                 Vec3::NEG_Z,
-                descriptor.half_angle(),
-                descriptor.inner_angle(),
+                descriptor,
+                spread.directions_count(),
                 strength,
                 super::super::field::tests::AT_ORIGIN,
                 rays,
             );
-            let emission = potency.emission(strength, cone.inner, cone.half_angle);
+            let emission = potency.emission(strength, cone.inner(), cone.half_angle());
             assert!(
                 emission.is_finite() && emission > 0.0,
                 "λ = {ratio}: emission {emission}"
             );
+            let (lane, n) = (law_lane(descriptor, cone.strata), cone.strata);
+            let (lo, hi) = descriptor.terms().unwrap().support();
+            for k in 0..n {
+                let t = lo + (hi - lo) * (k as f64 + 0.5) / n as f64;
+                let weight = law(lane, t as f32);
+                assert!(
+                    weight.is_finite() && weight > 0.0,
+                    "λ = {ratio}: stratum {k} of {n} weighs {weight}"
+                );
+            }
             let map = Map::of(&cone, None);
             assert!(
                 map.zoom.is_finite() && map.zoom > 0.0,
@@ -2213,7 +2342,7 @@ mod tests {
                 map.longest.is_finite() && map.texels.iter().all(|t| t.is_finite()),
                 "λ = {ratio}: a texel is not finite"
             );
-            let print = print_of(&map, cone.origin, cone.max_reach(), 2.0);
+            let print = print_of(&cone, &map, cone.origin, cone.max_reach(), 2.0);
             let mut field = volume(&potency, &masks, CornerKind::Glass, None, Handle::default());
             field.set_fields(std::slice::from_ref(&print), &potency);
             let params = field.params;
@@ -2227,5 +2356,41 @@ mod tests {
                 assert!(lane.is_finite(), "λ = {ratio}: lane {k} is {lane}");
             }
         }
+    }
+
+    /// The law gives each record direction the strength the record threw it with: over every
+    /// field of every shipped record, at each stratum's centre depth `t_k` (the record's own
+    /// strata, in f64), the f32 law ([`law`]) times the field's strength `S` is direction `k`'s
+    /// recorded strength `S f_k`. The volume and the painting take a direction's strength from the
+    /// law alone, as the shader's `law` does, so the bands drawn along a record direction are the
+    /// record's dose. A law normalised apart from the spread's `f_k` (a window other than one
+    /// stratum wide, the support's half-width `(t_hi − t_lo)/2` dropped) or a cap whose share takes
+    /// another power of `D` than the ball law's (`BALL_EXPONENT`) fails here. Tolerance
+    /// `S (16 N + 2⁸) 2⁻²⁴` (DERIVED: the f32 share difference holds about ten roundings of
+    /// `2⁻²⁴`, and the window's `(t_hi − t_lo) / (2 (b − a)) = N/2` scales them; `2⁻¹⁶` the rest
+    /// of the arithmetic). MEASURED worst `2.7·10⁻⁵ S` at `N = 256` and `5.9·10⁻⁶ S` at `N = 64`,
+    /// against bounds of `2.6·10⁻⁴ S` and `7.6·10⁻⁵ S`.
+    #[test]
+    fn the_law_gives_each_record_direction_its_recorded_strength() {
+        let mut checked = 0;
+        for (name, report) in super::super::plan::tests::records() {
+            for field in report.fields() {
+                let n = field.fragments.len();
+                let lane = law_lane(field.field, n);
+                let (lo, hi) = field.field.terms().unwrap().support();
+                let tolerance = field.strength * (16.0 * n as f32 + 256.0) * f32::EPSILON / 2.0;
+                for (k, fragment) in field.fragments.iter().enumerate() {
+                    let t = lo + (hi - lo) * (k as f64 + 0.5) / n as f64;
+                    let got = field.strength * law(lane, t as f32);
+                    assert!(
+                        (got - fragment.strength).abs() <= tolerance,
+                        "{name}: direction {k} of {n} at {got} ref-mm, recorded {}",
+                        fragment.strength
+                    );
+                    checked += 1;
+                }
+            }
+        }
+        assert!(checked > 1000, "{checked} directions checked");
     }
 }
