@@ -67,7 +67,9 @@ use crate::camera::{
 };
 use crate::command::{Bindings, ButtonBinding, TankCommand};
 use crate::damage::TankKnockedOut;
-use crate::damage_cam::delivery::{ImpactPresence, ShotExplanations, StoredExplanation};
+use crate::damage_cam::delivery::{
+    ExplanationKey, ImpactPresence, ShotExplanations, StoredExplanation,
+};
 use crate::damage_cam::wire::TankLife;
 use crate::overlay::{Overlay, OverlaySet, Overlays};
 use crate::render_policy::CameraProfile;
@@ -620,7 +622,12 @@ pub(super) fn drive(
             .vehicle
             .as_deref()
             .and_then(|vehicle| slot.tank(vehicle, blueprint.as_deref()))
-            .map(|tank_asset| Arc::new(Plan::new(report, &tank_asset.shapes(&report.servo_deg))));
+            .map(|tank_asset| {
+                let mut plan = Plan::new(report, &tank_asset.shapes(&report.servo_deg));
+                let key = ExplanationKey::of(&record.stored.explanation);
+                rig.pictures.share(key, &mut plan);
+                Arc::new(plan)
+            });
         let beats = Beats {
             impact,
             shooter: false,

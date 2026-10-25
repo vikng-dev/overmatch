@@ -871,11 +871,11 @@ pub fn intensity(prints: &[FieldPrint], seen: &[Seen], potency: &Potency, p: Vec
 /// sums it with every edge sharp: each of `prints` (seen as `seen`, as [`intensity`] reads them)
 /// that covers `p` adds `ρ S w / (Ω r²)`, `S w` the strength its law gives `p`'s direction
 /// ([`law`]), lit as its picture lights `p` within the rule's slack past each texel's reach
-/// ([`super::picture::Picture::lit`]). A
-/// field covers `p` where `p` lies on its support and within its front, and under
-/// [`Footprint::Hard`] where `n` faces its origin; under
-/// [`Footprint::Witness`] whatever the facing, so a witness is painted exactly where the volume
-/// holds the field ([`intensity`]). The point takes the band of the sum ([`Potency::band`]). This
+/// ([`super::picture::Picture::lit`]). A field covers `p` where `p` lies on its support, within
+/// its front and within its longest reach and the rule's slack past it (a picture can reach past
+/// the record's longest direction between its directions, and the volume holds nothing there),
+/// and under [`Footprint::Hard`] where `n` faces its origin; under [`Footprint::Witness`] whatever
+/// the facing, so a witness is painted exactly where the volume holds the field ([`intensity`]). The point takes the band of the sum ([`Potency::band`]). This
 /// is the sum the shader mirrors, held by the tests.
 #[cfg_attr(
     not(test),
@@ -904,7 +904,7 @@ pub fn painting(
         let on_rim = lane[0].w >= PI || theta <= lane[0].w;
         let off_hole = lane[2].w <= 0.0 || theta >= lane[2].w;
         let facing = foot.z > 0.5 || n.dot(-dir) > 0.0;
-        if r > lane[1].w || !on_rim || !off_hole || !facing {
+        if r > lane[1].w.min(lane[4].z + foot.y) || !on_rim || !off_hole || !facing {
             continue;
         }
         let local = Vec3::new(dir.dot(lane[2].truncate()), dir.dot(lane[3].truncate()), c);
@@ -1369,7 +1369,7 @@ pub fn volume(
 mod tests {
     use bevy::camera::CameraProjection;
 
-    use super::super::picture::tests::{band, cap, fixture_field, plate_casters, sphere};
+    use super::super::picture::tests::{AXIS, band, cap, fixture_field, plate_casters, sphere};
     use super::super::picture::{Casters, Picture, REACH_TOLERANCE_DIAGONALS};
     use super::super::potency::solid_angle;
     use super::*;
@@ -1958,7 +1958,7 @@ mod tests {
     /// from. Fixture data.
     fn plate_field(thickness: f32) -> (Picture, FieldPrint, Casters) {
         let casters = plate_casters(thickness);
-        let cone = cap(|_, d| casters.reach(Vec3::ZERO, d));
+        let cone = cap(|_, d| casters.reach(Vec3::ZERO, AXIS, d));
         let picture = Picture::of(&cone, PITCH);
         let print = print_of(&cone, &picture, Vec3::ZERO, 10.0, 1.0);
         (picture, print, casters)
@@ -1978,7 +1978,7 @@ mod tests {
         let (picture, print, casters) = plate_field(thickness);
         let seen = [Seen {
             picture: &picture,
-            reach: &|d| casters.reach(Vec3::ZERO, d),
+            reach: &|d| casters.reach(Vec3::ZERO, AXIS, d),
         }];
         let prints = std::slice::from_ref(&print);
         let potency = Potency::shipped();
@@ -2012,6 +2012,54 @@ mod tests {
         );
     }
 
+    /// The painting ends at the field's longest recorded reach, as the volume does, a hard surface
+    /// counting as met within the rule's slack past it: where the picture reaches past the
+    /// record's longest direction (as it can between the directions), a surface facing the origin
+    /// beyond the longest reach is bare under either rule and the volume holds nothing there,
+    /// while one within the slack of it is painted under the hard rule. A painting capped at the
+    /// front alone draws the field on surfaces the volume leaves empty. Fixture: a 25° cap whose
+    /// every direction reached 1 m, its picture reaching 2 m, its front at 5 m; a direction 10°
+    /// off the axis.
+    #[test]
+    fn the_painting_ends_at_the_longest_reach_the_record_gives() {
+        let cone = cap(|_, _| 1.0);
+        let picture = Picture::of(&cone, PITCH);
+        let print = print_of(&cone, &picture, Vec3::ZERO, 5.0, 1.0);
+        let seen = [Seen {
+            picture: &picture,
+            reach: &|_| 2.0,
+        }];
+        let prints = std::slice::from_ref(&print);
+        let potency = Potency::shipped();
+        let d =
+            picture.axis * 10.0_f32.to_radians().cos() + picture.u * 10.0_f32.to_radians().sin();
+        let paint = |rule, r: f32| painting(prints, &seen, &potency, rule, d * r, -d);
+        let slack = Footprint::Hard.lane().y;
+        assert!(
+            slack > 0.0 && slack < 0.25,
+            "the fixture reads within the slack: {slack}"
+        );
+        for r in [1.25, 1.5, 1.9] {
+            assert_eq!(paint(Footprint::Hard, r), 0.0, "{r} m, hard");
+            assert_eq!(paint(Footprint::Witness, r), 0.0, "{r} m, witness");
+            assert_eq!(
+                intensity(prints, &seen, &potency, d * r),
+                0.0,
+                "{r} m, volume"
+            );
+        }
+        assert!(
+            paint(Footprint::Hard, 1.0 + 0.5 * slack) > 0.0,
+            "within the slack"
+        );
+        for rule in [Footprint::Hard, Footprint::Witness] {
+            assert!(
+                paint(rule, 0.9) > 0.0,
+                "{rule:?} short of the longest reach"
+            );
+        }
+    }
+
     /// A crew station behind a hard body is not painted: the field stops on the plate, so a
     /// station half a metre behind it, deep in its shadow, is bare on every face, while one in
     /// the open beside it at the same depth is painted. The witness rule paints what the volume
@@ -2023,7 +2071,7 @@ mod tests {
         let (picture, print, casters) = plate_field(0.1);
         let seen = [Seen {
             picture: &picture,
-            reach: &|d| casters.reach(Vec3::ZERO, d),
+            reach: &|d| casters.reach(Vec3::ZERO, AXIS, d),
         }];
         let prints = std::slice::from_ref(&print);
         let potency = Potency::shipped();
@@ -2051,7 +2099,7 @@ mod tests {
     /// The record wins: a field whose recorded directions all ended at its origin is drawn
     /// nowhere. Its picture holds no face, so neither the volume nor the painting lights a point
     /// about its origin under either rule, the origin included, whatever the casters reach there
-    /// ([`Casters::reach`], the GPU's rule), and the volume's box leaves it out
+    /// ([`Casters::reach`], the pictures' CPU mirror), and the volume's box leaves it out
     /// ([`field_bounds`]). A picture drawn from the casters alone fills the hull about such a
     /// field's origin with field the record never threw, and an origin lit at any front draws a
     /// point of it. Fixture: every such field of every shipped record (one at least), read at its
@@ -2073,7 +2121,7 @@ mod tests {
                     .hard()
                     .and_then(Casters::of)
                     .expect("the shipped records have their hard bodies");
-                let reach = |d: Vec3| casters.reach(cone.origin, d);
+                let reach = |d: Vec3| casters.reach(cone.origin, cone.axis, d);
                 let seen = [Seen {
                     picture,
                     reach: &reach,
@@ -2206,7 +2254,7 @@ mod tests {
         ("pen_cam_look.wgsl", "intensity", 0xa1d0_858a_a0d0_eea1),
         ("pen_cam_look.wgsl", "soft_step", 0x05cd_e5fb_8619_f8d0),
         ("pen_cam_look.wgsl", "inside", 0xbe35_1ba6_c6e3_7355),
-        ("pen_cam_look.wgsl", "footprint", 0x9d21_a38c_26f2_e206),
+        ("pen_cam_look.wgsl", "footprint", 0x0feb_6029_c26e_2427),
         ("pen_cam_look.wgsl", "printed", 0xa3ef_69a5_13f1_8034),
         ("pen_cam_look.wgsl", "stretch", 0xf54b_5e9e_e1d2_8521),
         ("pen_cam_look.wgsl", "over", 0xbcd5_9d02_0fb0_72c6),

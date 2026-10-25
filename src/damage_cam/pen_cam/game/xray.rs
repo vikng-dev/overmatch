@@ -64,7 +64,7 @@ use super::super::timeline::CornerKind;
 use super::super::view::{self, Tier};
 use super::NewMatch;
 use super::killcam::Victim;
-use super::{Recency, tank_asset};
+use super::{Recency, RecordPictures, tank_asset};
 use crate::bake::TankBlueprint;
 use crate::ballistics::ComponentHealth;
 use crate::command::Bindings;
@@ -403,6 +403,7 @@ pub(super) struct Stores<'w> {
     looks: ResMut<'w, Assets<LookMaterial>>,
     images: ResMut<'w, Assets<Image>>,
     jobs: ResMut<'w, PictureJobs>,
+    pictures: ResMut<'w, RecordPictures>,
 }
 
 /// What the x-ray is drawn through: the player's view mode, the kill cam and the player's camera.
@@ -544,8 +545,7 @@ pub(super) fn build(
         built.settle = dressed_now;
         return;
     }
-    let same_record = built.record == record;
-    if !same_record {
+    if built.record != record {
         // A record's first showing starts its clock; every later showing continues it.
         built.since = record.map_or(now, |key| *state.shown.entry(key).or_insert(now));
     }
@@ -560,8 +560,8 @@ pub(super) fn build(
         .map(|report| report.servo_deg.clone())
         .unwrap_or_default();
     let mut plan = plan(report, &built.live, &asset.shapes(&servo_deg));
-    if same_record {
-        plan.share_pictures(&built.plan);
+    if let Some(key) = record {
+        stores.pictures.share(key, &mut plan);
     }
     let round_material = if plan
         .burst
@@ -761,6 +761,7 @@ fn dress(
 pub(super) fn animate(
     time: Res<Time>,
     state: Res<XRayState>,
+    jobs: Res<PictureJobs>,
     knobs: Res<Knobs>,
     hulls: Query<&GlobalTransform>,
     mut glows: ResMut<Assets<GlowMaterial>>,
@@ -863,8 +864,11 @@ pub(super) fn animate(
     for (mark, material, mut visibility) in &mut marks {
         playing.mark(mark, material, &mut visibility, &mut glows);
     }
+    // The fields are drawn once their pictures are rendered.
     let hull = hulls.get(built.hull).ok();
-    let prints = hull.map(|hull| playing.prints(hull));
+    let prints = hull
+        .filter(|_| jobs.rendered(built.atlas.as_ref()))
+        .map(|hull| playing.prints(hull));
     for (look, mut visibility) in &mut volumes {
         playing.fields(look, &mut visibility, prints.as_deref(), &mut looks);
     }

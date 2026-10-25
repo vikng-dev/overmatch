@@ -35,7 +35,7 @@ mod killcam;
 mod xray;
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -47,6 +47,7 @@ pub(crate) use self::xray::scripted_xray_plugin;
 pub(crate) use self::xray::{XRay, XRayRelease, XRaySubject};
 use super::hud::{self, CornerImages, Glyphs};
 use super::look;
+use super::picture::Pictures;
 use super::plan::Plan;
 use super::stage::{self, Stage};
 use super::timeline::{self, CornerKind, Lineup};
@@ -88,6 +89,7 @@ pub(crate) struct PenCamSet;
 fn wire(app: &mut App) {
     super::presentation(app);
     app.init_resource::<Slot>()
+        .init_resource::<RecordPictures>()
         .init_resource::<XRay>()
         .init_resource::<XRaySubject>()
         .init_resource::<xray::XRayState>()
@@ -193,6 +195,27 @@ impl Recency {
     }
 }
 
+/// The pictures of every record a view's plan holds, by record: each plan a view builds of a
+/// record adopts the record's while any plan of it holds them ([`Plan::adopt_pictures`]), so the
+/// corner, the kill cam and the x-ray lay a record's pictures out once and render them into one
+/// atlas.
+#[derive(Resource, Default)]
+pub(crate) struct RecordPictures(HashMap<ExplanationKey, Weak<OnceLock<Arc<Pictures>>>>);
+
+impl RecordPictures {
+    /// Give `plan`, of record `key`, the record's pictures: those a plan of it holds, else its
+    /// own, kept for the next. Pictures no plan holds any more are forgotten.
+    fn share(&mut self, key: ExplanationKey, plan: &mut Plan) {
+        self.0.retain(|_, held| held.strong_count() > 0);
+        match self.0.get(&key).and_then(Weak::upgrade) {
+            Some(cell) => plan.adopt_pictures(cell),
+            None => {
+                self.0.insert(key, Arc::downgrade(plan.picture_cell()));
+            }
+        }
+    }
+}
+
 /// What the slot holds between frames.
 #[derive(Resource, Default)]
 pub(crate) struct Slot {
@@ -293,6 +316,7 @@ pub(crate) struct Rig<'w, 's> {
     stage: ResMut<'w, Stage>,
     corner: ResMut<'w, Corner>,
     exhibits: ResMut<'w, Exhibits>,
+    pictures: ResMut<'w, RecordPictures>,
     entities: Query<'w, 's, (Entity, Option<&'static ChildOf>), With<CornerRig>>,
     rigged: Query<'w, 's, (), With<CornerRig>>,
 }
@@ -480,7 +504,8 @@ fn drive(
         let Some(tank) = state.tank(&vehicle, blueprint) else {
             continue;
         };
-        let plan = Plan::new(&entry.report, &tank.shapes(&entry.report.servo_deg));
+        let mut plan = Plan::new(&entry.report, &tank.shapes(&entry.report.servo_deg));
+        rig.pictures.share(recency.key, &mut plan);
         let exhibit = Exhibit {
             servo_deg: entry.report.servo_deg.clone(),
             plan: Arc::new(plan),
@@ -1574,6 +1599,52 @@ mod tests {
         for mesh in meshes {
             assert!(wears_the_look(&mut app, mesh), "knocked out: {mesh:?}");
         }
+    }
+
+    /// The corner and the x-ray showing one record share its pictures: once both draw it, every
+    /// field volume of either reads one atlas and one job renders it. Two views laying a record's
+    /// pictures out apiece allocate it and render it twice. Fixture: the struck subject under the
+    /// player's shot, the corner admitted.
+    #[test]
+    fn the_corner_and_the_xray_share_one_atlas_of_a_record() {
+        let (mut app, ..) = struck_xray_app();
+        // The corner admitted before the shot lands: a change of admission forgets every record
+        // stored.
+        app.insert_resource(Settings::default());
+        step(&mut app);
+        stage_of(&mut app, OWN);
+        let (shot, _, vocabulary, _) = explained("s1_through_crew", 1200);
+        receive(&mut app, shot, &vocabulary);
+        press_x(&mut app);
+        let mut together = 0;
+        for _ in 0..(1.0 / STEP_S) as usize {
+            step(&mut app);
+            let mut volumes = app.world_mut().query_filtered::<
+                (&MeshMaterial3d<LookMaterial>, Has<xray::XRayItem>),
+                With<stage::FieldVolume>,
+            >();
+            let world = app.world();
+            let looks = world.resource::<Assets<LookMaterial>>();
+            let atlases: Vec<_> = volumes
+                .iter(world)
+                .filter_map(|(m, in_xray)| {
+                    Some((in_xray, looks.get(&m.0)?.pictures.as_ref()?.id()))
+                })
+                .collect();
+            if atlases.iter().any(|(x, _)| *x) && atlases.iter().any(|(x, _)| !*x) {
+                assert!(
+                    atlases.iter().all(|(_, id)| *id == atlases[0].1),
+                    "two atlases of one record: {atlases:?}"
+                );
+                let jobs = world.resource::<super::super::picture::PictureJobs>();
+                assert_eq!(jobs.queued(), 1, "the record rendered twice");
+                together += 1;
+            }
+        }
+        assert!(
+            together > 0,
+            "the corner and the x-ray never drew the record together"
+        );
     }
 
     /// A composition about to despawn the subject lets go of it: every dressed mesh back in exactly

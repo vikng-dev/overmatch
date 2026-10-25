@@ -377,11 +377,13 @@ fn inside(s: f32) -> f32 {
 
 // The fields' painting at world point `p` on a component's surface of unit normal `n` (world):
 // the presence over the pixel of the floor (x: the reduced and the knockout bands together) and
-// of the knockout band (y). A field covers the point where it lies on the field's support and
-// behind its front and, under the hard rule (`foot.z = 0`), faces the field's origin, each edge a
-// pixel wide, at its law's weight there (`law`) lit as its picture lights it `foot.y` past each
-// texel's reach (`picture_at`); the witness rule (`foot.z = 1`) asks no facing. The covered fields' intensities add, and each
-// band's edge is a smoothstep a pixel wide in `log2` of the sum (`soft_step`). `look::painting`.
+// of the knockout band (y). A field covers the point where it lies on the field's support, behind
+// its front and within its longest reach and `foot.y` past it (as the volume, `field_at`, holds
+// nothing past the longest reach) and, under the hard rule (`foot.z = 0`), faces the field's
+// origin, each edge a pixel wide, at its law's weight there (`law`) lit as its picture lights it
+// `foot.y` past each texel's reach (`picture_at`); the witness rule (`foot.z = 1`) asks no facing.
+// The covered fields' intensities add, and each band's edge is a smoothstep a pixel wide in `log2`
+// of the sum (`soft_step`). `look::painting`.
 // Called in uniform control flow: it takes derivatives.
 fn footprint(p: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
     var sum = 0.0;
@@ -398,13 +400,15 @@ fn footprint(p: vec3<f32>, n: vec3<f32>) -> vec2<f32> {
         let r = max(length(d), 1e-5);
         let dir = d / r;
         let theta = acos(clamp(dot(dir, along.xyz), -1.0, 1.0));
-        // Each edge as a signed distance, positive inside: short of the front (m), off the rim and
-        // short of the inner edge (m across the surface's direction, `r` times the angle), and the
-        // facing (the cosine of the origin off the normal, 1 under the witness rule).
+        // Each edge as a signed distance, positive inside: short of the front and of the longest
+        // reach and the slack past it (m), off the rim and short of the inner edge (m across the
+        // surface's direction, `r` times the angle), and the facing (the cosine of the origin off
+        // the normal, 1 under the witness rule).
         let rim = select(1e6, r * (at.w - theta), at.w < PI);
         let hole = select(1e6, r * (theta - inner), inner > 0.0);
         let facing = select(dot(n, -dir), 1.0, look.foot.z > 0.5);
-        let cover = inside(along.w - r) * inside(rim) * inside(hole) * inside(facing);
+        let reach = min(along.w, scale.z + look.foot.y);
+        let cover = inside(reach - r) * inside(rim) * inside(hole) * inside(facing);
         let lit = picture_at(f, dir, r, scale.y, look.foot.y) * law(f, dir);
         sum = sum + cover * lit * scale.x / (r * r);
     }

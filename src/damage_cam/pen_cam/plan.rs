@@ -45,9 +45,18 @@ pub const REACH_CALIBRES: f32 = 20.0;
 /// TUNED.
 pub const LINE_FLOOR: f32 = 0.35;
 
+/// A record's fields' depth pictures, laid out on the first read by any plan that holds them
+/// ([`Plan::pictures`]); every plan of the record holds the one ([`Plan::adopt_pictures`]).
+pub type PictureCell = Arc<OnceLock<Arc<Pictures>>>;
+
 /// The record, prepared for drawing.
 pub struct Plan {
+    /// The frame a view draws the plan in.
     pub kind: CornerKind,
+    /// The frame the record's verdict opens the corner in ([`CornerKind::of`]), whichever frame a
+    /// view draws the plan in: the pictures take their sightings from it
+    /// ([`super::stage::field_sightings`]), so every view of the record lays them out alike.
+    verdict_kind: CornerKind,
     /// Calibre (m): the shell's diameter and the scale of the trail, the rings and the framing.
     pub calibre: f32,
     pub line: Polyline,
@@ -80,7 +89,7 @@ pub struct Plan {
     /// asset's shapes.
     pub bodies: Option<Arc<HardBodies>>,
     /// The fields' depth pictures, laid out on first read ([`Self::pictures`]).
-    pictures: OnceLock<Arc<Pictures>>,
+    pictures: PictureCell,
 }
 
 /// The path as points with cumulative arc length, the record's time at each point and the
@@ -590,6 +599,7 @@ impl Plan {
         let normal = Vec3::from(report.impact.normal).normalize_or(Vec3::NEG_Z);
         Self {
             kind: CornerKind::of(verdict),
+            verdict_kind: CornerKind::of(verdict),
             calibre,
             start_arc: (contact_arc - reach(LEAD_M)).max(0.0),
             contact_arc,
@@ -606,7 +616,7 @@ impl Plan {
             boxes,
             tank_bounds: shapes.bounds(),
             bodies: shapes.hard().cloned(),
-            pictures: OnceLock::new(),
+            pictures: PictureCell::default(),
             line,
         }
     }
@@ -616,6 +626,7 @@ impl Plan {
     pub fn bare(shapes: &TankShapes, boxes: Vec<BoxPlan>) -> Self {
         Self {
             kind: CornerKind::Victim,
+            verdict_kind: CornerKind::Victim,
             calibre: 0.0,
             line: Polyline {
                 points: Vec::new(),
@@ -638,14 +649,14 @@ impl Plan {
             boxes,
             tank_bounds: shapes.bounds(),
             bodies: shapes.hard().cloned(),
-            pictures: OnceLock::new(),
+            pictures: PictureCell::default(),
         }
     }
 
     /// The fields' depth pictures, in [`Self::cones`]' order, from [`Self::bodies`], each at the
     /// pitch the corner's views of the record derive ([`super::stage::field_sightings`]): laid
-    /// out on the first read, then held, and rendered once, the first time a frame draws them
-    /// ([`Pictures::image`]).
+    /// out on the first read by any plan that holds them ([`Self::adopt_pictures`]), then held,
+    /// and rendered once, the first time a frame draws them ([`Pictures::image`]).
     pub fn pictures(&self) -> &Arc<Pictures> {
         self.pictures.get_or_init(|| {
             let sightings = if self.cones.is_empty() {
@@ -657,13 +668,21 @@ impl Plan {
         })
     }
 
-    /// Take `from`'s pictures, laid out or not, as this plan's: a plan of the same record has the
-    /// same pictures, so a replan of an unchanged record never lays them out or renders them
-    /// again.
-    pub fn share_pictures(&mut self, from: &Plan) {
-        if let Some(pictures) = from.pictures.get() {
-            self.pictures = OnceLock::from(pictures.clone());
-        }
+    /// The frame the record's verdict opens the corner in, whichever frame a view draws the plan
+    /// in.
+    pub fn verdict_kind(&self) -> CornerKind {
+        self.verdict_kind
+    }
+
+    /// This plan's pictures, laid out or not, for another plan of the record to adopt.
+    pub fn picture_cell(&self) -> &PictureCell {
+        &self.pictures
+    }
+
+    /// Take `cell`, another plan's of the same record, as this plan's pictures: the plans of a
+    /// record then lay its pictures out once and render them once, whichever reads them first.
+    pub fn adopt_pictures(&mut self, cell: PictureCell) {
+        self.pictures = cell;
     }
 
     /// Whether the record has the round leave the tank.

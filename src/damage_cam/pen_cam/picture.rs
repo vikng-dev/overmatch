@@ -11,13 +11,15 @@
 //! body ([`HardBodies`]), so a line from inside a body leaves it.
 //!
 //! The picture is the cube about the field's axis (frame `u`, `v`, the axis; [`FRAMES`]), each face
-//! cropped to the support ([`Crop`]) at the field's pitch (rad a texel, [`pitch_of`]). A record's
-//! faces share one atlas ([`Pictures`]), one `R32Float` texture rendered by
-//! `pen_cam_picture.wgsl` the first time a frame asks for it ([`Pictures::image`],
-//! [`PictureJobs`]); the record's corner and x-ray share it. The look reads it unfiltered
-//! (`pen_cam_look.wgsl`, `picture_at`): a point is tested against each of the four texels about
-//! its direction, each against its own reach within a tolerance ([`REACH_TOLERANCE_DIAGONALS`]),
-//! and the results weighed bilinearly; [`Picture::lit`] is the same read on the CPU.
+//! cropped to the support ([`Crop`]) at the field's pitch (rad a texel, [`pitch_of`] times
+//! [`PITCH_SCALE`]). A record's faces share one atlas ([`Pictures`]), one `R32Float` texture
+//! rendered by `pen_cam_picture.wgsl` the first time a frame asks for it ([`Pictures::image`],
+//! [`PictureJobs`]); every view of the record shares it (`game::RecordPictures`). A view keeps its
+//! fields off until the atlas's job has been encoded and submitted ([`PictureJobs::rendered`]):
+//! before then the atlas holds nothing. The look reads it unfiltered (`pen_cam_look.wgsl`,
+//! `picture_at`): a point is tested against each of the four texels about its direction, each
+//! against its own reach within a tolerance ([`REACH_TOLERANCE_DIAGONALS`]), and the results
+//! weighed bilinearly; [`Picture::lit`] is the same read on the CPU.
 //!
 //! The record wins: a field whose recorded directions all end at its origin holds no picture and
 //! is drawn nowhere ([`Picture::of`]). Design doc §5, "Potency colour"
@@ -108,8 +110,20 @@ const COARSEST_PITCH: f32 = 1.0 / 32.0;
 const MAX_SIDE: u32 = 8192;
 /// The factor every field's pitch grows by while a record's faces do not fit one atlas.
 const PITCH_GROWTH: f32 = 1.25;
+/// The pictures' detail: every field's pitch is [`pitch_of`]'s times this. At 1 a texel spans at
+/// most a pixel of the expanded 4K corner at the sampled sightings; at 2 it spans two (DERIVED),
+/// and the atlas holds a quarter of the texels (MEASURED: s14's 3361×8038 at 1, 1682×4024 at 2).
+/// TUNED.
+pub const PITCH_SCALE: f32 = 1.0;
 /// The atlas widths tried between the widest face and every face in one row.
 const WIDTH_STEPS: u32 = 32;
+
+/// The frame about unit `axis` a field's picture is drawn in: `u` and `v` across it
+/// (`u × v = axis`) and the axis.
+pub fn frame(axis: Vec3) -> [Vec3; 3] {
+    let (u, _) = axis.any_orthonormal_pair();
+    [u, axis.cross(u), axis]
+}
 
 /// The face of the cube about a field's axis unit `local` (across `u` and `v`, along the axis)
 /// lies on, its index in [`FRAMES`], and its tangent there. `pen_cam_look.wgsl`, `face_of`.
@@ -242,12 +256,12 @@ impl Picture {
     }
 
     fn with_cells(cone: &Cone, cells: &Cells, pitch: f32) -> Self {
-        let (u, _) = cone.axis.any_orthonormal_pair();
+        let [u, v, axis] = frame(cone.axis);
         Self {
             origin: cone.origin,
-            axis: cone.axis,
+            axis,
             u,
-            v: cone.axis.cross(u),
+            v,
             half_angle: cone.half_angle(),
             inner: cone.inner(),
             pitch,
@@ -301,8 +315,13 @@ impl Picture {
     /// past that, and the four are weighted bilinearly. A reach is compared per texel and never
     /// interpolated, so across a silhouette a point behind the blocker, past the tolerance, gets
     /// the open texels' share alone, the same at every depth out to the wall. An empty face lights
-    /// nothing. `pen_cam_look.wgsl`'s `picture_at` reads the atlas so; this is the read it
-    /// mirrors, held by the tests.
+    /// nothing. The four texels are always the direction's own face's (its crop runs a texel past
+    /// the face's edge), so a silhouette that crosses a face's edge is drawn from two grids, one
+    /// either side: it jogs there by at most 0.64 pitch across itself (MEASURED on this read over
+    /// 6,000 random seams, crossing angles and grid phases at two pitches), under a pixel of the
+    /// expanded 4K corner at the sightings at [`PITCH_SCALE`] 1 (DERIVED from [`pitch_of`]), so
+    /// the read blends no face with its neighbour. `pen_cam_look.wgsl`'s `picture_at` reads the
+    /// atlas so; this is the read it mirrors, held by the tests.
     pub fn lit(
         &self,
         local: Vec3,
@@ -414,10 +433,15 @@ impl Casters {
         (vertices, indices)
     }
 
-    /// Where along the line from `origin` along unit `direction` (record frame) the picture ends
-    /// (m): the nearest caster face it meets head-on past the near plane, which the GPU draws, or
-    /// the horizon's far side; 0 where the line misses the horizon. The pictures' CPU mirror,
-    /// held by the tests against the record and against the GPU's rule ([`CASTER_CULL`]).
+    /// Where along the line from `origin` along unit `direction` (record frame) the picture of a
+    /// field about unit `axis` ends (m): the nearest caster face it meets head-on
+    /// ([`CASTER_CULL`]) past the near plane, or the horizon's far side; 0 where the line misses
+    /// the horizon. The near plane lies [`NEAR_M`] along the forward of the face of the cube about
+    /// `axis` ([`frame`]) the direction lies on ([`face_of`]), so `NEAR_M` over its cosine along
+    /// the direction, as the GPU clips each face (`pen_cam_picture.wgsl`; a crop's one-texel
+    /// overhang past its face's edge is clipped along its own face's forward, which moves the near
+    /// plane there by at most `NEAR_M √3` pitch, DERIVED). The pictures' CPU mirror, held by the
+    /// tests against the record; no test reads the GPU's pictures back.
     #[cfg_attr(
         not(test),
         expect(
@@ -425,8 +449,11 @@ impl Casters {
             reason = "the GPU renders the pictures at runtime; this is the reach it mirrors, held by the tests"
         )
     )]
-    pub fn reach(&self, origin: Vec3, direction: Vec3) -> f32 {
-        let start = origin + direction * NEAR_M;
+    pub fn reach(&self, origin: Vec3, axis: Vec3, direction: Vec3) -> f32 {
+        let [u, v, axis] = frame(axis);
+        let local = Vec3::new(direction.dot(u), direction.dot(v), direction.dot(axis));
+        let near = NEAR_M / local.abs().max_element();
+        let start = origin + direction * near;
         let inverse = direction.recip();
         let (a, b) = ((self.lo - start) * inverse, (self.hi - start) * inverse);
         let (enter, leave) = (a.min(b).max_element(), a.max(b).min_element());
@@ -441,15 +468,17 @@ impl Casters {
             .bodies
             .cast(start, direction, leave, culling)
             .unwrap_or(leave);
-        hit.min(leave) + NEAR_M
+        hit.min(leave) + near
     }
 }
 
 /// Field `cone`'s pitch (rad a texel): over every `sightings` (a corner camera's pose and lens in
 /// the record frame, its lens fitted to [`REFERENCE_PX`]), at every point within view along every
 /// recorded direction ([`RAY_SAMPLES`] out to its reach), the angle one pixel spans there seen
-/// from the field's origin, the least of them, so a texel spans at most a pixel wherever the
-/// corner draws the field; [`COARSEST_PITCH`] at most.
+/// from the field's origin, the least of them; [`COARSEST_PITCH`] at most. A texel spans at most
+/// a pixel at those points alone: the sightings and the points are samples of what the corner
+/// draws, a point between them may take a finer pixel, and a record whose faces do not fit one
+/// atlas has every pitch grown ([`PITCH_GROWTH`]; none of the shipped records, MEASURED).
 pub fn pitch_of(cone: &Cone, sightings: &[(Transform, Projection)]) -> f32 {
     let mut pitch = COARSEST_PITCH;
     for (eye, lens) in sightings {
@@ -567,7 +596,8 @@ pub struct Pictures {
 impl Pictures {
     /// The pictures of `cones` from the struck tank's `bodies` (record frame; `None` without the
     /// tank asset's shapes, and nothing is drawn), each at the pitch `sightings` derive
-    /// ([`pitch_of`]), every pitch grown by [`PITCH_GROWTH`] until the faces fit one atlas.
+    /// ([`pitch_of`]) times [`PITCH_SCALE`], every pitch grown by [`PITCH_GROWTH`] until the faces
+    /// fit one atlas.
     pub fn of(
         cones: &[Cone],
         bodies: Option<&Arc<HardBodies>>,
@@ -575,7 +605,10 @@ impl Pictures {
     ) -> Self {
         let cones = &cones[..cones.len().min(PICTURE_FIELDS)];
         let cells: Vec<Cells> = cones.iter().map(Picture::cells).collect();
-        let mut pitches: Vec<f32> = cones.iter().map(|cone| pitch_of(cone, sightings)).collect();
+        let mut pitches: Vec<f32> = cones
+            .iter()
+            .map(|cone| pitch_of(cone, sightings) * PITCH_SCALE)
+            .collect();
         loop {
             let mut fields: Vec<Picture> = cones
                 .iter()
@@ -608,8 +641,8 @@ impl Pictures {
         }
     }
 
-    /// The atlas, its texels rendered by the time a frame draws with it ([`PictureJobs`]): the
-    /// one image while any handle to it lives, made anew and queued for rendering otherwise.
+    /// The atlas: the one image while any handle to it lives, made anew and queued for rendering
+    /// otherwise, its texels written once its job is submitted ([`PictureJobs::rendered`]).
     /// `None` without casters or without a face to draw.
     pub fn image(
         self: &Arc<Self>,
@@ -647,10 +680,60 @@ impl Pictures {
     }
 }
 
-/// The pictures waiting to be rendered, each into its atlas; a job leaves once rendered, or once
-/// nothing but it holds its atlas.
+/// The pictures waiting to be rendered, each into its atlas: a job waits until the render world
+/// has encoded and submitted it ([`render_jobs`]), is submitted once, and leaves once submitted,
+/// or once nothing but it holds its atlas ([`Self::retire`]).
 #[derive(Resource, Default)]
 pub struct PictureJobs(Vec<PictureJob>);
+
+impl PictureJobs {
+    /// Whether `atlas` may be read: no job of it waits to be submitted. Until then the atlas holds
+    /// nothing, and a view keeps the fields that read it off. No atlas waits on nothing.
+    pub fn rendered(&self, atlas: Option<&Handle<Image>>) -> bool {
+        atlas.is_none_or(|atlas| {
+            !self
+                .0
+                .iter()
+                .any(|job| job.image.id() == atlas.id() && !job.done.load(Ordering::Acquire))
+        })
+    }
+
+    /// The jobs the render world takes this frame: those not yet submitted.
+    fn waiting(&self) -> impl Iterator<Item = RenderPictureJob> + '_ {
+        self.0
+            .iter()
+            .filter(|job| !job.done.load(Ordering::Acquire))
+            .map(|job| RenderPictureJob {
+                image: job.image.id(),
+                pictures: job.pictures.clone(),
+                done: job.done.clone(),
+            })
+    }
+
+    /// Drop the jobs submitted, and those whose atlas nothing but the job holds: a record no view
+    /// shows any more is never rendered.
+    fn retire(&mut self) {
+        self.0.retain(|job| {
+            let held = matches!(&job.image, Handle::Strong(atlas) if Arc::strong_count(atlas) > 1);
+            held && !job.done.load(Ordering::Acquire)
+        });
+    }
+
+    /// Stand in for the render world, which has no GPU under test: every waiting job submitted, as
+    /// [`render_jobs`] marks one once [`encode`] has submitted it.
+    #[cfg(test)]
+    pub fn submit_all(&self) {
+        for job in &self.0 {
+            job.done.store(true, Ordering::Release);
+        }
+    }
+
+    /// The jobs held, submitted or not.
+    #[cfg(test)]
+    pub fn queued(&self) -> usize {
+        self.0.len()
+    }
+}
 
 struct PictureJob {
     image: Handle<Image>,
@@ -775,16 +858,7 @@ fn extract_jobs(mut render: ResMut<RenderPictureJobs>, jobs: Extract<Option<Res<
     let Some(jobs) = jobs.as_ref() else {
         return;
     };
-    render.0.extend(
-        jobs.0
-            .iter()
-            .filter(|job| !job.done.load(Ordering::Acquire))
-            .map(|job| RenderPictureJob {
-                image: job.image.id(),
-                pictures: job.pictures.clone(),
-                done: job.done.clone(),
-            }),
-    );
+    render.0.extend(jobs.waiting());
 }
 
 /// Render each waiting job's pictures into its atlas once the pipeline and the atlas's texture
@@ -936,12 +1010,8 @@ fn encode(
     queue.submit([encoder.finish()]);
 }
 
-/// Drop the jobs rendered, and those whose atlas nothing but the job holds.
 fn retire(mut jobs: ResMut<PictureJobs>) {
-    jobs.0.retain(|job| {
-        let held = matches!(&job.image, Handle::Strong(atlas) if Arc::strong_count(atlas) > 1);
-        held && !job.done.load(Ordering::Acquire)
-    });
+    jobs.retire();
 }
 
 /// The render world's half: the pipeline, the jobs' extraction and their rendering, before the
@@ -957,7 +1027,7 @@ pub(super) fn render(app: &mut App) {
         .add_systems(Render, render_jobs.in_set(RenderSystems::PrepareResources));
 }
 
-/// The main world's half: the jobs, retired once rendered.
+/// The main world's half: the jobs, retired once submitted.
 pub(super) fn jobs(app: &mut App) {
     app.init_resource::<PictureJobs>().add_systems(Last, retire);
 }
@@ -984,7 +1054,7 @@ pub(super) mod tests {
     const PRODUCTION_PITCH: f32 = 5.5e-4;
 
     /// The fixtures' axis and its frame, the picture's own.
-    const AXIS: Vec3 = Vec3::NEG_Z;
+    pub(in super::super) const AXIS: Vec3 = Vec3::NEG_Z;
 
     /// The unit direction `theta` (rad) off [`AXIS`] at azimuth `phi` from its frame's `u`.
     fn direction(theta: f32, phi: f32) -> Vec3 {
@@ -1188,26 +1258,26 @@ pub(super) mod tests {
         for k in 0..12 {
             let d = direction(0.3, k as f32 * TAU / 12.0);
             let wall = (3.0 - 1.01) / d.dot(AXIS);
-            let got = casters.reach(inside, d);
+            let got = casters.reach(inside, AXIS, d);
             assert!(
                 (got - wall).abs() < 1e-4,
                 "{d}: {got} against the wall's {wall}"
             );
         }
-        let up = casters.reach(inside, Vec3::Z);
+        let up = casters.reach(inside, AXIS, Vec3::Z);
         assert!((up - 0.01).abs() < 1e-4, "{up}: the horizon's top");
     }
 
-    /// The picture agrees with every recorded direction of every shipped record: along each
-    /// direction a fragment ended off its field's origin, the reach the casters give
-    /// ([`Casters::reach`], the GPU's rule) is the fragment's distance from the origin, within
-    /// 10⁻⁴ m (MEASURED worst 6.2·10⁻⁶ m over the shipped records). A field whose every fragment
-    /// ended at its origin is the record-wins case and is skipped here
-    /// (`a_field_the_record_stops_at_its_origin_draws_nothing`). The picture is the record's
-    /// outcome drawn between its directions; crew stations cast as hard bodies stop the fields that
-    /// run through them, and fail here.
+    /// The pictures' CPU mirror agrees with every recorded direction of every shipped record:
+    /// along each direction a fragment ended off its field's origin, the reach the casters give
+    /// ([`Casters::reach`], the GPU's clip and cull rule computed on the CPU) is the fragment's
+    /// distance from the origin, within 10⁻⁴ m. A field whose every fragment ended at its origin
+    /// is the record-wins case and is skipped here
+    /// (`a_field_the_record_stops_at_its_origin_draws_nothing`). Casters other than the record's
+    /// hard bodies (crew stations cast as hard bodies stop the fields that run through them) fail
+    /// here. This holds the mirror alone: no test reads the GPU's pictures back.
     #[test]
-    fn the_picture_agrees_with_every_recorded_direction() {
+    fn the_cpu_mirror_agrees_with_every_recorded_direction() {
         let (mut checked, mut fields) = (0, 0);
         for (name, report) in super::super::plan::tests::records() {
             let shapes = super::super::plan::tests::shapes(&report);
@@ -1223,7 +1293,8 @@ pub(super) mod tests {
                     let Some(d) = span.try_normalize() else {
                         continue;
                     };
-                    let (want, got) = (span.length(), casters.reach(origin, d));
+                    let axis = Vec3::from(field.axis).normalize_or(Vec3::NEG_Z);
+                    let (want, got) = (span.length(), casters.reach(origin, axis, d));
                     assert!(
                         (got - want).abs() <= 1e-4,
                         "{name} field {k}: {got} m against the record's {want} m along {d}"
@@ -1235,6 +1306,39 @@ pub(super) mod tests {
             }
         }
         assert!(checked > 1500 && fields > 20, "{checked} {fields}");
+    }
+
+    /// The near plane lies [`NEAR_M`] along each face's forward, as `pen_cam_picture.wgsl` clips:
+    /// a direction 40° off the axis lies on the axis's face and starts `NEAR_M / cos 40°` out, so
+    /// a plate whose near side lies 0.9 `NEAR_M` down the axis is passed (the line starts inside
+    /// it and leaves it unstopped) and one 1.1 `NEAR_M` down stops it at that side. A mirror that
+    /// starts `NEAR_M` out along the direction stops on the first plate, where the GPU's picture
+    /// runs on to the wall. Fixture: a plate 1 cm thick across the axis over a wall 3 m down.
+    #[test]
+    fn the_near_plane_lies_along_the_faces_forward() {
+        let d = direction(40.0_f32.to_radians(), 0.0);
+        let depth = d.dot(AXIS);
+        for (near_side, stopped) in [(0.9 * NEAR_M, false), (1.1 * NEAR_M, true)] {
+            let mut parts = (Vec::new(), Vec::new());
+            cuboid(
+                Vec3::new(-5.0, -5.0, -3.2),
+                Vec3::new(5.0, 5.0, -3.0),
+                &mut parts,
+            );
+            cuboid(
+                Vec3::new(-1.0, -1.0, -near_side - 0.01),
+                Vec3::new(1.0, 1.0, -near_side),
+                &mut parts,
+            );
+            let bodies = Arc::new(HardBodies::new(parts.0, parts.1));
+            let casters = Casters::of(&bodies).expect("the fixture has vertices");
+            let want = if stopped { near_side } else { 3.0 } / depth;
+            let got = casters.reach(Vec3::ZERO, AXIS, d);
+            assert!(
+                (got - want).abs() <= 1e-3 * want,
+                "plate {near_side} m down: {got} m against {want} m"
+            );
+        }
     }
 
     /// Every face's crop holds the support with the texels a read on it weighs: for every field of
@@ -1401,7 +1505,7 @@ pub(super) mod tests {
     fn a_point_a_bodys_thickness_behind_a_blocker_stays_outside() {
         let thickness = 0.003;
         let casters = plate_casters(thickness);
-        let reach = |d: Vec3| casters.reach(Vec3::ZERO, d);
+        let reach = |d: Vec3| casters.reach(Vec3::ZERO, AXIS, d);
         let picture = Picture::of(&cap(|_, d| reach(d)), PRODUCTION_PITCH);
         let full = 1.0;
         let (mut across, mut within, mut shared) = (0, 0, 0);
@@ -1438,13 +1542,13 @@ pub(super) mod tests {
         );
     }
 
-    /// The pictures are rendered once: every frame of a record and the x-ray beside the corner
-    /// read one atlas while any of them holds it, and one job renders it; once every holder lets
-    /// it go, the next ask makes and queues it anew. The atlas is the pass's render target and the
-    /// look's texture at the packed size, its texels left to the GPU. An atlas made per ask renders
-    /// the record again for each frame that draws it. Fixture: [`cap`] over [`plate_casters`].
+    /// A record's pictures keep one atlas while any view holds it: every ask reads the one image
+    /// and queues one job; once every holder lets it go and its job leaves, the next ask makes and
+    /// queues it anew. The atlas is the pass's render target and the look's texture at the packed
+    /// size, its texels left to the GPU. An atlas made per ask renders the record again for each
+    /// frame that draws it. Fixture: [`cap`] over [`plate_casters`].
     #[test]
-    fn the_pictures_are_rendered_once() {
+    fn the_atlas_is_cached_while_a_view_holds_it() {
         let casters = plate_casters(0.003);
         let pictures = Arc::new(Pictures::of(&[cap(|_, _| 2.0)], Some(&casters.bodies), &[]));
         let mut images = Assets::<Image>::default();
@@ -1462,8 +1566,49 @@ pub(super) mod tests {
         assert!(image.texture_descriptor.usage.contains(usage));
         assert!(image.data.is_none(), "the CPU writes the atlas's texels");
         drop((first, again));
-        jobs.0.clear();
+        jobs.retire();
         assert!(pictures.image(&mut images, &mut jobs).is_some());
         assert_eq!(jobs.0.len(), 1, "an atlas no one holds is not made anew");
+    }
+
+    /// A picture's job waits until submitted, is taken once, and leaves after: until the render
+    /// world submits it the atlas is not [`PictureJobs::rendered`] and the job is among those it
+    /// takes each frame ([`PictureJobs::waiting`]); once submitted the atlas is rendered, the job
+    /// is taken no more and retirement drops it. A job whose atlas no view holds any more leaves
+    /// unsubmitted. A view that reads an atlas before its job is submitted draws an empty picture;
+    /// a job taken after its submission renders the record again. The render world's half
+    /// (`render_jobs`, `encode`) needs a GPU and is not run here: [`PictureJobs::submit_all`]
+    /// stands in for it. Fixture: [`cap`] over [`plate_casters`].
+    #[test]
+    fn a_job_waits_until_submitted_and_leaves_after() {
+        let casters = plate_casters(0.003);
+        let pictures = Arc::new(Pictures::of(&[cap(|_, _| 2.0)], Some(&casters.bodies), &[]));
+        let mut images = Assets::<Image>::default();
+        let mut jobs = PictureJobs::default();
+        assert!(jobs.rendered(None), "no atlas waits on a job");
+        let atlas = pictures.image(&mut images, &mut jobs);
+        assert!(atlas.is_some(), "a field over casters is drawn");
+        assert!(
+            !jobs.rendered(atlas.as_ref()),
+            "the atlas reads before it is submitted"
+        );
+        jobs.retire();
+        assert_eq!(jobs.waiting().count(), 1, "a held job leaves unsubmitted");
+        jobs.submit_all();
+        assert!(
+            jobs.rendered(atlas.as_ref()),
+            "a submitted atlas still waits"
+        );
+        assert_eq!(jobs.waiting().count(), 0, "a submitted job is taken again");
+        jobs.retire();
+        assert!(jobs.0.is_empty(), "a submitted job stays");
+        assert!(jobs.rendered(atlas.as_ref()));
+
+        let replaced = Arc::new(Pictures::of(&[cap(|_, _| 1.5)], Some(&casters.bodies), &[]));
+        let pending = replaced.image(&mut images, &mut jobs);
+        assert_eq!(jobs.waiting().count(), 1);
+        drop(pending);
+        jobs.retire();
+        assert!(jobs.0.is_empty(), "a job no view holds is rendered");
     }
 }

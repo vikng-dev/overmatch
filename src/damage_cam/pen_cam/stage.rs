@@ -1455,7 +1455,7 @@ impl<'a> Playing<'a> {
 pub fn animate(
     corner: Res<Corner>,
     knobs: Res<Knobs>,
-    exhibits: Res<Exhibits>,
+    (exhibits, jobs): (Res<Exhibits>, Res<PictureJobs>),
     mut stage: ResMut<Stage>,
     hulls: Query<&GlobalTransform>,
     mut glows: ResMut<Assets<GlowMaterial>>,
@@ -1558,9 +1558,12 @@ pub fn animate(
     for (mark, material, mut visibility) in &mut marks {
         playing.mark(mark, material, &mut visibility, &mut glows);
     }
-    // The state fills rise along the hull's up, the tank's; the fields are taken in its frame.
+    // The state fills rise along the hull's up, the tank's; the fields are taken in its frame,
+    // and drawn once their pictures are rendered.
     let hull = stage.hull.and_then(|hull| hulls.get(hull).ok());
-    let prints = hull.map(|hull| playing.prints(hull));
+    let prints = hull
+        .filter(|_| jobs.rendered(stage.atlas.as_ref()))
+        .map(|hull| playing.prints(hull));
     for (look, mut visibility) in &mut volumes {
         playing.fields(look, &mut visibility, prints.as_deref(), &mut looks);
     }
@@ -1610,8 +1613,9 @@ pub fn animate(
 
 /// The views the corner draws `plan`'s fields from, each a camera's pose and lens in the record
 /// frame: the along-shot eye at every one of [`ORBIT_SAMPLES`] spins of a full turn (the glass,
-/// victim and damaged frames, the kill cam's lesson among them), and in a record shown in the
-/// slice the slice's eye in both its lenses. The fields' pictures take their pitch from these
+/// victim and damaged frames, the kill cam's lesson among them), and in a record its verdict
+/// opens in the slice ([`Plan::verdict_kind`], whichever frame a view draws it in) the slice's eye
+/// in both its lenses. The fields' pictures take their pitch from these
 /// ([`super::picture::pitch_of`]); the viewer's drag, the x-ray and the gunner's sight see the
 /// fields at the pitch these give.
 pub(super) fn field_sightings(plan: &Plan) -> Vec<(Transform, Projection)> {
@@ -1620,7 +1624,7 @@ pub(super) fn field_sightings(plan: &Plan) -> Vec<(Transform, Projection)> {
     let mut sightings: Vec<_> = (0..ORBIT_SAMPLES)
         .map(|k| along_shot(plan, Vec2::ZERO, turn * k as f32, far))
         .collect();
-    if plan.kind == CornerKind::Slice {
+    if plan.verdict_kind() == CornerKind::Slice {
         let stage = Stage {
             plane: Some(slice_plane(plan)),
             ..default()
@@ -3304,6 +3308,7 @@ mod tests {
                 let (mut app, placed) = staged(&library, &asset, index, kind, Vec3::ZERO);
                 let body = with_body(&mut app);
                 animated(&mut app);
+                app.world().resource::<PictureJobs>().submit_all();
                 app.world_mut()
                     .resource_mut::<Corner>()
                     .showing
@@ -3397,6 +3402,59 @@ mod tests {
             "{painted} painted, {glass} hull glass, {bare} bare"
         );
         assert_eq!(rules.len(), 2, "both rules painted: {rules:?}");
+    }
+
+    /// The fields wait for their pictures: until the atlas's job is submitted
+    /// ([`PictureJobs::rendered`]) the real [`animate`] at a record's hold keeps the volume hidden
+    /// and paints no surface; once it is submitted the volume shows and the components are
+    /// painted. Before the render world writes it the atlas holds nothing, and a view drawing the
+    /// fields from it then fails here. Fixture: the first record that throws a field, in the
+    /// glass.
+    #[test]
+    fn the_fields_wait_for_their_pictures() {
+        let library = Library::load();
+        let asset = TankAsset::load(&library.vehicle).unwrap();
+        let (index, record) = library
+            .records
+            .iter()
+            .enumerate()
+            .find(|(_, r)| !r.plan.cones.is_empty() && r.plan.kind != CornerKind::Ricochet)
+            .expect("a record throws a field");
+        let kind = CornerKind::Glass;
+        let (mut app, _) = staged(&library, &asset, index, kind, Vec3::ZERO);
+        animated(&mut app);
+        app.world_mut()
+            .resource_mut::<Corner>()
+            .showing
+            .as_mut()
+            .expect("a frame on show")
+            .c = pace(&record.plan, kind).hold_from;
+        let read = |app: &mut App| {
+            let world = app.world_mut();
+            let shown = world
+                .query_filtered::<&Visibility, With<FieldVolume>>()
+                .single(world)
+                .is_ok_and(|v| *v != Visibility::Hidden);
+            let painted = world
+                .resource::<Assets<LookMaterial>>()
+                .iter()
+                .filter(|(_, m)| m.params.fields.x > 0.0)
+                .count();
+            (shown, painted)
+        };
+        app.update();
+        assert_eq!(
+            read(&mut app),
+            (false, 0),
+            "the fields read an unsubmitted atlas"
+        );
+        app.world().resource::<PictureJobs>().submit_all();
+        app.update();
+        let (shown, painted) = read(&mut app);
+        assert!(
+            shown && painted > 1,
+            "submitted: shown {shown}, {painted} painted"
+        );
     }
 
     /// One body mesh per body tier beside `app`'s staged components, all wearing the components'

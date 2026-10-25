@@ -344,15 +344,21 @@ m) to the nearest face its direction meets head-on, so a line from inside a body
 direction that meets no body ends on the world-axis box about them. Crew stations are witnesses
 and never cast (ADR-0040). A field's colour is the law's intensity wherever its picture says it
 reaches: the law × the depth picture. The picture is the cube about the field's axis, each face
-cropped to the support, and a record's faces share one atlas, which the corner's frames and the
-x-ray read alike. A field's **pitch** (rad a texel) is the least angle one pixel of a 4K corner
-spans seen from its origin, over every point of its recorded directions the corner's along-shot
-eye sees at any spin, and the slice's in both lenses where the record is shown in the slice: so a
-texel spans at most a pixel of a 4K corner wherever those frames draw the field (DERIVED); the
-viewer's drag, the x-ray and the gunner's sight see the field at that pitch. The shipped records'
-finest is 5.5·10⁻⁴ rad (MEASURED). Over every recorded direction of every shipped record, the
-picture ends where the record's direction does to within 10⁻⁴ m (MEASURED: 1,728 directions in 21
-fields): a direction stops at the first hard body it enters. **The record wins**: a field whose
+cropped to the support, and a record's faces share one atlas: one per record, rendered once,
+which every view of the record reads (the corner's frames, the kill cam and the x-ray), each
+keeping its fields off until the atlas's rendering has been submitted. A field's **pitch** (rad a
+texel) is the least angle one pixel of a 4K corner spans seen from its origin, over 16 points
+along each recorded direction as the corner's along-shot eye sees them at 72 spins, and as the
+slice's eye sees them in both lenses where the record's verdict opens the slice, times a detail
+factor (`PITCH_SCALE`, 1; TUNED). So a texel spans at most a pixel of a 4K corner at those
+sampled points (DERIVED); a point between them may take a finer pixel, and a record whose faces
+outgrow the atlas has every pitch grown (none of the shipped records, MEASURED). The viewer's
+drag, the x-ray and the gunner's sight see the field at that pitch. The shipped records' finest
+is 5.5·10⁻⁴ rad (MEASURED). Over every recorded direction of every shipped record, the picture's
+CPU mirror (`Casters::reach`: the GPU's near plane, culling and horizon, computed on the CPU)
+ends where the record's direction does to within 10⁻⁴ m (MEASURED: 1,728 directions in 21
+fields): a direction stops at the first hard body it enters. No readback checks the GPU's
+picture against it. **The record wins**: a field whose
 recorded directions all ended at its origin (s16's burst at rest inside armour) is drawn nowhere,
 whatever its picture would hold. A point reads its field from the four texels about its
 direction, each testing the point against its own reach, the results weighted bilinearly: a
@@ -365,8 +371,11 @@ diagonal of a texel at the pitch, times `r` (`REACH_TOLERANCE_DIAGONALS`; the an
 the pitch, the factor TUNED). A surface the field stops on reads inside to at least 63° off square
 (DERIVED, tan⁻¹ 2), and a point deeper behind a body than the tolerance keeps its shadow. Where the
 four texels' results differ, across a shadow's edge, a band's edge follows the bilinear weights
-texel by texel: a stair-step at most a pixel of a 4K corner wide where the along-shot frames draw
-it (DERIVED from the pitch). The fields draw as **one volume** (`assets/shaders/pen_cam_look.wgsl`, `volume`) on the
+texel by texel: a stair-step at most a pixel of a 4K corner wide at the sampled points (DERIVED
+from the pitch at `PITCH_SCALE` 1). A direction reads its own face's texels alone (each face's
+crop runs a texel past its edge), so a shadow's edge that crosses from one face to the next jogs
+there by at most 0.64 pitch (MEASURED on the CPU read over 6,000 random seams), under a pixel of
+a 4K corner (DERIVED); the faces are not blended. The fields draw as **one volume** (`assets/shaders/pen_cam_look.wgsl`, `volume`) on the
 back faces of a box about every field's reach: each eye ray is cut at the ends of every field's
 stretch along it, each piece is sampled no farther apart than the smallest ball across in 48
 steps among the fields whose stretches hold it, so every field is sampled at its own size and a
@@ -379,8 +388,9 @@ are also **painted** on the components' surfaces (a playtest fork,
 `.agents/scratch/playtest-forks/field-footprints.md`): a point takes the band of the summed
 intensity there, at opacity 0.6 (TUNED), its band edges a pixel wide, by the rule its
 component's role gives. A hard component (every role but crew) is painted where a field meets
-it: on a face turned to the field's origin, on the support, inside the front, and within each
-texel's reach, its tolerance and 1 cm (TUNED). A crew station, a witness (ADR-0040), is painted
+it: on a face turned to the field's origin, on the support, inside the front, within each
+texel's reach, its tolerance and 1 cm (TUNED), and within the field's longest recorded reach and
+that 1 cm, where the volume ends. A crew station, a witness (ADR-0040), is painted
 wherever its surface lies inside a field, the volume's own test, whichever way the face turns, so
 its far faces read the field it stands in. The hull glass and every surface no component claims
 are never painted. The glass, victim and outside frames and the victim's x-ray paint; the slice
@@ -395,8 +405,8 @@ round's own model and the fields' volume, is ordered by depth among itself: a co
 round in front of a field hides it, a field in front of either blends over it. The fields'
 painting lies on a component's own surface (its mesh's, its state fill's), so it is ordered as the
 component is. The round keeps its own materials and is drawn whole, in the slice too. The fields' depth pictures
-are drawn off screen, once per record before a frame first reads them, and take no part in the
-order. Each layer is one surface deep. Every depth the
+are drawn off screen, once per record, read only once their drawing has been submitted, and take
+no part in the order. Each layer is one surface deep. Every depth the
 order compares is the eye depth, one convention in both projections: the distance from the eye in
 perspective, the distance along the camera's forward in orthographic. The outside view (a damaged
 tank seen whole) keeps the body in front and the volume unbounded. The trail and the rings are
