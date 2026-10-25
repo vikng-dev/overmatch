@@ -306,43 +306,56 @@ boxes in line both take nearly full strength); the emitted budget is.
 
 **Potency colour.** The pen cam colours a field by its potency, never by a display gain (decision
 record `.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md`,
-#8). Each of the `N` directions stands for `Ω_c / N` of the cone and deposits `s / N`, so a
-direction of strength `s` emits `ρ s / Ω_c` HP points per steradian (`ρ` = `hp_per_reference_mm`),
-and at distance `r` along it, inside the cone and short of its reach, the **local intensity** is
-`I = ρ s / (Ω_c r²)` HP points per m², zero past the reach; a thin unshadowed box of face `A` there
-takes `I · A` (resolver test `the_pen_cam_intensity_times_a_face_is_its_dose`). The thresholds are
-the classes' (`assets/ballistics/box_classes.ron`): **bright** `T_bright` = the hard class (300),
-**mid** `T_mid` = `crew_hp / crew_face_m2` (30 / 0.2 = 150, DERIVED; the ammo class coincides
-today, a data coincidence). The colour is one function of `I` alone (`ramp`, `Ramp` in
-`src/damage_cam/pen_cam/potency.rs`) on `u = log2(I / T_mid)`, which the inverse square makes
-linear in `log r`, so the colour runs evenly along a direction: the deep teal at `u ≤ −3` (an eighth
-of mid and below; the span TUNED), the field teal exactly at mid (`u = 0`), the near-white exactly
-at bright and above (`u = log2(T_bright / T_mid)`, 1 with the shipped classes, DERIVED), a monotone
-cubic between, so it is smooth and never falls as `I` rises. Along a direction the intensity
-reaches mid at `sqrt(ρ s / (Ω_c T_mid))` and bright at `sqrt(ρ s / (Ω_c T_bright))` from the origin,
-where that is short of the direction's reach; on the s1 record (`S` = 10.18 reference-mm through
-RHA) bright ends at 1.76 m and mid at 2.48 m along the axis direction (`s = 0.84 S`), and at
-1.36 m and 1.92 m where `s = S/2` (DERIVED), the crew knockout radii above. The
-promise, white is bright and teal is mid: a hard box whose face lies wholly at white has its pool
-emptied, and a crew station at the intended humanoid's face wholly at teal or whiter is knocked out.
-A box only partly inside the cone takes that intensity over that part alone, so a white patch on a
-box with HP left is no contradiction (s1's `Ammo_L_1`: one direction ends on it at 1.15 m, white,
-DERIVED from the record; 36 of its 72 HP points lost). The pen cam draws each cone as one
-translucent volume inside its reach surface (`src/damage_cam/pen_cam/field.rs`, `reach_mesh`;
-`assets/shaders/pen_cam_look.wgsl`, `volume`). Each sample along the eye ray's path inside the
-field weighs `w(I)`, a smoothstep in `u` from 0 at the ramp's dim end (`u = −3`) to 1 at mid
-(`u = 0`; `Rim` in `potency.rs`, anchors TUNED), and a pixel takes the weighted mean colour along
-the path at an opacity that climbs with the path's weighted length: the colour says the potency,
-the opacity the thickness, and the volume fades out toward the dim end instead of ending on its
-reach surface. Every surface the field met is tinted in the colour at its own point; nothing marks
-the cone's edge. Volume and surfaces read one disc baked from the record's directions. The
-calibration stays provisional until the scenarios re-recorded under the ball are seen (owner,
-2026-10-23, night).
+#8). Each of the `N` directions stands for `Ω / N` of the field's support (`Ω` its solid angle: a
+cap's, a ring's band's or the sphere's) and deposits `s / N`, so a direction of strength `s` emits
+`ρ s / Ω` HP points per steradian (`ρ` = `hp_per_reference_mm`), and at distance `r` along it, on
+the support and short of its reach, the **local intensity** is `I = ρ s / (Ω r²)` HP points per m²,
+zero past the reach; a thin unshadowed box of face `A` there takes `I · A` (resolver test
+`the_pen_cam_intensity_times_a_face_is_its_dose`). Doses add, so where fields overlap the bands
+classify the sum of their intensities. Three **potency bands**, parted at the classes' thresholds
+(`assets/ballistics/box_classes.ron`, `BoxClasses::potency_thresholds`): **knockout** at
+`I ≥ T_mid`, `T_mid = crew_hp / crew_face_m2` (30 / 0.2 = 150, DERIVED); **reduced** from `T_floor`
+up to it; **nothing** below `T_floor`, the least share of an HP point the sim's once-per-shot
+rounding counts (half a point: to nearest, ties away, `ballistics::least_counted_hp`) over the same
+face (0.5 / 0.2 = 2.5, DERIVED). The promise: a crew station whose face lies wholly in knockout is
+knocked out, one wholly in reduced has its pool dosed and not emptied, one wholly in nothing takes
+no HP point from the field. A box only partly inside a field takes that intensity over that part
+alone. Knockout takes the field teal and reduced the deep teal (`timeline::FIELD`, `FIELD_DIM`;
+relative luminance 0.50 and 0.12, DERIVED, so they part in every colour vision type), nothing no
+colour; neither is the state scale's red. Along a direction the intensity reaches mid at
+`sqrt(ρ s / (Ω T_mid))` and the floor `sqrt(T_mid / T_floor)` ≈ 7.7 times farther (DERIVED); s1's
+strongest direction (924 HP points per steradian) reaches mid at 2.48 m and the floor at 19 m,
+past every reach of the shipped records (5.2 m at most); the weakest field, s4's and s16's (2.5),
+reaches its floor at 1.0 m, just past its 0.79 m reach (DERIVED from the records). So the reduced
+band ends at a reach or a shadow of the struck tank's hard bodies, rarely at the floor, and its
+edges are theirs.
+
+The pen cam reads each field from a **direction map** (`src/damage_cam/pen_cam/field.rs`, `Map`):
+256² texels, octahedral about the field's axis and zoomed to its support, so the sphere has no
+pole and no rim, each texel holding the reach (record m) and strength (reference-mm) the record's
+directions give along it. The strength interpolates the directions about the texel, and so does
+the reach where they ended alike (inside one hard body, past one, or free). Where they ended
+unlike, a shadow's edge lies between them: a ray cast against the struck tank's hard bodies,
+posed for the record, picks the directions that ended as the texel's own ray would, so the edge
+is the body's silhouette, never a curve interpolated across it. At a record direction the reach
+is the record's, and a direction the record says passed a body keeps its reach. A record's maps
+share one atlas, baked once per record. The fields draw as **one volume**
+(`assets/shaders/pen_cam_look.wgsl`, `volume`) on the back faces of a box about every field's
+reach: each eye ray's stretches inside the fields, merged where they overlap, are sampled no
+farther apart than the widest field's ball across in 48 steps, and each threshold crossed between
+two samples is placed by 8 halvings, so a band's length along the ray is its iso-surface's chord
+and its edge on screen the iso-surface's silhouette, with no stair-steps and no noise. Each band
+takes its colour at an opacity that climbs with its length over its extinction length (knockout
+0.6 m, reduced 3 m, the whole at most 0.55; TUNED), the nearer laid over the farther. Every surface
+a field met takes the band of the summed intensity at its own point, its **footprint**, each edge
+a pixel wide. The volume and the footprints read the same maps. Mechanism and entry points:
+`src/damage_cam/pen_cam/look.rs`, module doc. The calibration stays provisional until the
+scenarios re-recorded under the ball are seen (owner, 2026-10-23, night).
 
 **Draw order.** Every x-ray view that draws the tank's body (the corner's glass frames, the kill
 cam's lesson, the victim's x-ray, the slice) draws the body, the main armour, external armour and
 detail, behind everything else. The scene, the components with their state fills and outlines, the
-round's own model and the fields' volumes, is ordered by depth among itself: a component or the
+round's own model and the fields' volume, is ordered by depth among itself: a component or the
 round in front of a field hides it, a field in front of either blends over it. The round keeps its
 own materials and is drawn whole, in the slice too. Each layer is one surface deep. Every depth the
 order compares is the eye depth, one convention in both projections: the distance from the eye in
