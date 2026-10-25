@@ -61,10 +61,16 @@ impl CornerKind {
         }
     }
 
-    /// The hold beat's length, from its start to the close: Ricochet 1.20, Slice 1.42, Damaged
-    /// 1.67, Glass 3.22, Victim 1.92 s (DERIVED from the frame minimums).
+    /// The hold beat's least length, from its start to the close, TUNED; a record that settles
+    /// early holds on to the frame's minimum.
     pub fn hold_s(self) -> f32 {
-        self.min_duration() - self.min_hold_from() - CLOSE_S
+        match self {
+            Self::Ricochet => 1.20,
+            Self::Slice => 1.42,
+            Self::Glass => 1.50,
+            Self::Damaged => 1.67,
+            Self::Victim => 1.92,
+        }
     }
 
     /// When the shell sets off from the drawn span's start, corner seconds: after the slice's cut
@@ -78,9 +84,9 @@ impl CornerKind {
 }
 
 /// Corner seconds per record second: the record's physical motion plays at this one multiple of
-/// its own time, so 1 ms of record shows for 0.2 s and an on-screen speed is a record speed over
+/// its own time, so 1 ms of record shows for 0.1 s and an on-screen speed is a record speed over
 /// this. TUNED.
-pub const REPLAY_SLOWDOWN: f32 = 200.0;
+pub const REPLAY_SLOWDOWN: f32 = 100.0;
 
 /// One record's corner times in one frame, corner seconds from the open: where its physical
 /// motion runs, set by the record (`super::stage::pace`), and the beats placed after it.
