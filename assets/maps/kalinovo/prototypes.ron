@@ -1,0 +1,18 @@
+// The game's prototype library for this map: what each prototype id the map's `level.json`
+// references resolves to. The level file's own `prototypes` block is the AUTHOR'S export record
+// (which glb, whether it shipped) and is rewritten on every export, so the game's reading of an id
+// lives here, beside it, keyed by the same ids. Metres at instance scale 1; the instance's own
+// uniform scale multiplies everything.
+//
+// `Building(min, max)`: an axis-aligned box in the prototype's local frame around the instance
+// origin; a `min.y` below zero is a skirt that sinks into the surface. A building is also a
+// `TerrainMap` block (the belts sense it).
+// `Fir(height_m, canopy_diameter_m)`: a graybox fir, a trunk cylinder over the full height and a
+// canopy cone; a trunk collider only, never a block.
+{
+    "house_proxy": Building(min: (-2.0, -0.5, -3.0), max: (2.0, 2.5, 3.0)),
+    "church_proxy": Building(min: (-15.0, -18.5, -7.5), max: (15.0, 18.5, 7.5)),
+    "fir_tree_01_a_LOD2": Fir(height_m: 18.96, canopy_diameter_m: 6.5),
+    "fir_tree_01_b_LOD2": Fir(height_m: 14.08, canopy_diameter_m: 5.8),
+    "fir_tree_01_c_LOD2": Fir(height_m: 14.55, canopy_diameter_m: 6.2),
+}

@@ -8,10 +8,13 @@
 //! derivation is order-fixed (instances sorted by their own `id` before placement) and pure f32,
 //! so client and server land on identical transforms.
 //!
-//! THE LIBRARY IS THE GAME'S, THE PLACEMENT IS THE MAP'S. [`PROTOTYPES`] is a code table keyed by
-//! the prototype id strings the file references; the file's own `prototypes` block — whose `asset`
-//! and `included` fields describe the author's shipping state, not ours — is never read. An
-//! instance naming an id the table does not carry is a broken ship and panics (ADR-0011).
+//! THE LIBRARY IS THE MAP'S DATA ([`crate::map`] module doc): each instance's prototype id resolves
+//! through the manifest's [`Prototype`] library, checked complete at parse, so nothing here can
+//! meet an id it does not know.
+//!
+//! EVERY INSTANCE KEEPS ITS IDENTITY: the file's own id and its ordinal in the id-sorted order ride
+//! on the spawned entity as [`MapInstance`], so anything that must name one instance to a peer —
+//! a tree's state on the wire — names it by a number both peers derived from the same bytes.
 //!
 //! THE FILE'S Y IS STALE (authored against an older sculpt): every instance is re-projected onto
 //! the live [`HeightGrid`] at its own XZ. Yaw and scale are taken as authored.
@@ -21,12 +24,25 @@
 //! authored course's boxes; a fir is a trunk cylinder collider only, never a block — the belts must
 //! not climb a trunk, and the hull collision is the honest interaction.
 
+use std::collections::BTreeMap;
+
 use avian3d::prelude::{Collider, CollisionLayers, LayerMask, RigidBody};
 use bevy::prelude::*;
 
 use crate::Layer;
-use crate::map::{InstanceRecord, MapManifest};
+use crate::map::{InstanceRecord, MapManifest, Prototype};
 use crate::terrain_grid::HeightGrid;
+
+/// One placed instance's identity, as the map gave it (module doc).
+#[derive(Component, Debug, Clone, PartialEq, Eq)]
+#[component(immutable)]
+pub(crate) struct MapInstance {
+    /// The file's own instance id.
+    pub(crate) id: String,
+    /// The instance's position in the id-sorted placement — the same number on every peer that
+    /// loaded the same manifest, which the map's content digest guarantees.
+    pub(crate) ordinal: u16,
+}
 
 /// Marks a scatter proxy's static collider — every house cuboid and fir trunk, and nothing else
 /// (the canopy cone is view-only geometry and carries no collider). Spawned in every composition,
@@ -46,123 +62,62 @@ const CANOPY_BASE_FRACTION: f32 = 0.2;
 /// squaring itself underflows, so the only thing it rejects is a quaternion with no direction in it.
 const MIN_ROTATION_LENGTH_SQ: f32 = 1.0e-12;
 
-/// The graybox shape one prototype id resolves to. Dimensions are metres at instance scale 1; the
-/// instance's own scale multiplies both the visual and the collider.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Proxy {
-    /// A building: an axis-aligned box in the prototype's local frame, `min`/`max` bounds around
-    /// the instance origin. A `min.y` below zero is a skirt that sinks into the surface.
-    Building { min: Vec3, max: Vec3 },
-    /// A fir: a trunk cylinder of [`TRUNK_RADIUS_M`] over the full `height_m`, and a canopy cone of
-    /// `canopy_diameter_m` reaching from [`CANOPY_BASE_FRACTION`] of that height to the apex.
-    Fir {
-        height_m: f32,
-        canopy_diameter_m: f32,
-    },
-}
-
-/// The graybox prototype library, keyed by the id the map references. Order is the lookup's only
-/// structure — [`Placement`] indexes into this table, so entries may be added but an existing
-/// entry's id and shape are what the shipped map resolves against.
-const PROTOTYPES: &[(&str, Proxy)] = &[
-    (
-        "house_proxy",
-        Proxy::Building {
-            min: Vec3::new(-2.0, -0.5, -3.0),
-            max: Vec3::new(2.0, 2.5, 3.0),
-        },
-    ),
-    (
-        "church_proxy",
-        Proxy::Building {
-            min: Vec3::new(-15.0, -18.5, -7.5),
-            max: Vec3::new(15.0, 18.5, 7.5),
-        },
-    ),
-    (
-        "fir_tree_01_a_LOD2",
-        Proxy::Fir {
-            height_m: 18.96,
-            canopy_diameter_m: 6.5,
-        },
-    ),
-    (
-        "fir_tree_01_b_LOD2",
-        Proxy::Fir {
-            height_m: 14.08,
-            canopy_diameter_m: 5.8,
-        },
-    ),
-    (
-        "fir_tree_01_c_LOD2",
-        Proxy::Fir {
-            height_m: 14.55,
-            canopy_diameter_m: 6.2,
-        },
-    ),
-];
-
-/// Index into [`PROTOTYPES`] for a prototype id.
-fn prototype_index(id: &str) -> Option<usize> {
-    PROTOTYPES.iter().position(|(name, _)| *name == id)
-}
-
-/// One parsed instance: the registry slot it resolves to and its authored pose MINUS the stale Y.
-struct Instance {
-    prototype: usize,
-    /// Authored world XZ. The file's Y never leaves [`parse`].
+/// One parsed instance: the prototype it resolves to and its authored pose MINUS the stale Y.
+struct Instance<'a> {
+    /// The prototype id, as the file references it — the view's mesh key.
+    prototype: &'a str,
+    shape: Prototype,
+    /// Authored world XZ. The file's Y never leaves [`resolve`].
     xz: Vec2,
     rotation: Quat,
     scale: Vec3,
     /// The file's own instance id — the sort key that fixes iteration order.
-    id: String,
+    id: &'a str,
 }
 
-/// One placed instance: its registry slot and its GROUND pose — the authored XZ and rotation, the
-/// Y re-sampled from the grid, the authored scale.
-#[derive(Debug, Clone, Copy, PartialEq)]
-struct Placement {
-    prototype: usize,
+/// One placed instance: its prototype, its identity and its GROUND pose — the authored XZ and
+/// rotation, the Y re-sampled from the grid, the authored scale.
+#[derive(Debug, Clone, PartialEq)]
+struct Placement<'a> {
+    prototype: &'a str,
+    shape: Prototype,
+    identity: MapInstance,
     pose: Transform,
 }
 
-impl Placement {
-    fn proxy(&self) -> Proxy {
-        PROTOTYPES[self.prototype].1
-    }
-
+impl Placement<'_> {
     /// A building's [`crate::world::TerrainMap`] block form: a unit cube posed and scaled (the
     /// Avian idiom `world::spawn_block` uses), its centre lifted off the ground pose by the
     /// prototype's own bounds. `None` for a fir — a trunk is not a block.
     fn block(&self) -> Option<Transform> {
-        match self.proxy() {
-            Proxy::Building { min, max } => Some(Transform {
-                translation: self.pose.translation
-                    + self.pose.rotation * ((min + max) * 0.5 * self.pose.scale),
-                rotation: self.pose.rotation,
-                scale: (max - min) * self.pose.scale,
-            }),
-            Proxy::Fir { .. } => None,
+        match self.shape {
+            Prototype::Building { min, max } => {
+                let (min, max) = (Vec3::from_array(min), Vec3::from_array(max));
+                Some(Transform {
+                    translation: self.pose.translation
+                        + self.pose.rotation * ((min + max) * 0.5 * self.pose.scale),
+                    rotation: self.pose.rotation,
+                    scale: (max - min) * self.pose.scale,
+                })
+            }
+            Prototype::Fir { .. } => None,
         }
     }
 }
 
-/// Resolve the manifest's instance records against the prototype registry and put them in
-/// ITERATION ORDER. Everything past the manifest's own shape check is ADR-0011 fail-fast: an
-/// unknown prototype id, a pose component that is not finite (a NaN reaches the solver as a NaN
-/// collider), or a rotation with no length to normalize is a broken ship and panics naming the
-/// instance.
-fn resolve(records: &[InstanceRecord]) -> Vec<Instance> {
-    let mut instances: Vec<Instance> = records
+/// Resolve the manifest's instance records against its prototype library and put them in
+/// ITERATION ORDER. Everything past the manifest's own checks is ADR-0011 fail-fast: a pose
+/// component that is not finite (a NaN reaches the solver as a NaN collider) or a rotation with no
+/// length to normalize is a broken ship and panics naming the instance.
+fn resolve<'a>(
+    records: &'a [InstanceRecord],
+    library: &BTreeMap<String, Prototype>,
+) -> Vec<Instance<'a>> {
+    let mut instances: Vec<Instance<'a>> = records
         .iter()
         .map(|raw| {
-            let prototype = prototype_index(&raw.prototype).unwrap_or_else(|| {
-                panic!(
-                    "scatter: instance {} references prototype {:?}, which the graybox registry \
-                     does not carry",
-                    raw.id, raw.prototype,
-                )
-            });
+            // `map::parse` already refused any id outside the library.
+            let shape = library[&raw.prototype];
             let translation = Vec3::from_array(raw.translation);
             let rotation = Quat::from_xyzw(
                 raw.rotation[0],
@@ -188,28 +143,40 @@ fn resolve(records: &[InstanceRecord]) -> Vec<Instance> {
                 raw.rotation,
             );
             Instance {
-                prototype,
+                prototype: &raw.prototype,
+                shape,
                 // The Y is DROPPED here, where the stale value cannot leak further.
                 xz: translation.xz(),
                 rotation: rotation.normalize(),
                 scale,
-                id: raw.id.clone(),
+                id: &raw.id,
             }
         })
         .collect();
     // The file's own ids are the fixed order every peer spawns in.
-    instances.sort_by(|a, b| a.id.cmp(&b.id));
+    instances.sort_by(|a, b| a.id.cmp(b.id));
+    assert!(
+        instances.len() <= usize::from(u16::MAX) + 1,
+        "scatter: {} instances, more than a MapInstance ordinal can name",
+        instances.len(),
+    );
     instances
 }
 
 /// Project every instance onto `grid`: the authored XZ and rotation kept, the Y taken from the
-/// surface under it. Pure and order-preserving, so two runs over the same file and grid produce
-/// the same list.
-fn place(instances: &[Instance], grid: &HeightGrid) -> Vec<Placement> {
+/// surface under it, the ordinal its position in the sorted list. Pure and order-preserving, so
+/// two runs over the same file and grid produce the same list.
+fn place<'a>(instances: &[Instance<'a>], grid: &HeightGrid) -> Vec<Placement<'a>> {
     instances
         .iter()
-        .map(|instance| Placement {
+        .enumerate()
+        .map(|(ordinal, instance)| Placement {
             prototype: instance.prototype,
+            shape: instance.shape,
+            identity: MapInstance {
+                id: instance.id.to_owned(),
+                ordinal: u16::try_from(ordinal).expect("resolve bounded the count"),
+            },
             pose: Transform {
                 translation: Vec3::new(
                     instance.xz.x,
@@ -228,31 +195,38 @@ fn place(instances: &[Instance], grid: &HeightGrid) -> Vec<Placement> {
 struct ScatterView {
     /// The unit cube every building box is a scaled copy of — the same encoding the block list uses.
     cube: Handle<Mesh>,
-    /// `(trunk, canopy)` per fir prototype, indexed like [`PROTOTYPES`]; `None` on a building slot.
-    fir: Vec<Option<(Handle<Mesh>, Handle<Mesh>)>>,
+    /// `(trunk, canopy)` per fir prototype, keyed by its id.
+    fir: BTreeMap<String, (Handle<Mesh>, Handle<Mesh>)>,
     wall: Handle<StandardMaterial>,
     bark: Handle<StandardMaterial>,
     needle: Handle<StandardMaterial>,
 }
 
 impl ScatterView {
-    fn new(meshes: &mut Assets<Mesh>, materials: &mut Assets<StandardMaterial>) -> Self {
+    fn new(
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+        library: &BTreeMap<String, Prototype>,
+    ) -> Self {
         Self {
             cube: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
-            fir: PROTOTYPES
+            fir: library
                 .iter()
-                .map(|(_, proxy)| match *proxy {
-                    Proxy::Fir {
+                .filter_map(|(id, shape)| match *shape {
+                    Prototype::Fir {
                         height_m,
                         canopy_diameter_m,
                     } => Some((
-                        meshes.add(Cylinder::new(TRUNK_RADIUS_M, height_m)),
-                        meshes.add(Cone {
-                            radius: canopy_diameter_m / 2.0,
-                            height: height_m * (1.0 - CANOPY_BASE_FRACTION),
-                        }),
+                        id.clone(),
+                        (
+                            meshes.add(Cylinder::new(TRUNK_RADIUS_M, height_m)),
+                            meshes.add(Cone {
+                                radius: canopy_diameter_m / 2.0,
+                                height: height_m * (1.0 - CANOPY_BASE_FRACTION),
+                            }),
+                        ),
                     )),
-                    Proxy::Building { .. } => None,
+                    Prototype::Building { .. } => None,
                 })
                 .collect(),
             wall: materials.add(Color::srgb(0.62, 0.58, 0.53)),
@@ -275,13 +249,13 @@ pub(crate) fn spawn(
     blocks: &mut Vec<Transform>,
     windowed: bool,
 ) {
-    let placements = place(&resolve(&manifest.instances), grid);
-    let view = windowed.then(|| ScatterView::new(meshes, materials));
+    let placements = place(&resolve(&manifest.instances, &manifest.prototypes), grid);
+    let view = windowed.then(|| ScatterView::new(meshes, materials, &manifest.prototypes));
     let statics = CollisionLayers::new([Layer::Terrain], LayerMask::ALL);
     let (mut buildings, mut firs) = (0usize, 0usize);
     for placement in &placements {
-        match placement.proxy() {
-            Proxy::Building { .. } => {
+        match placement.shape {
+            Prototype::Building { .. } => {
                 let block = placement
                     .block()
                     .expect("a building placement carries a block transform");
@@ -292,13 +266,14 @@ pub(crate) fn spawn(
                     Collider::cuboid(1.0, 1.0, 1.0),
                     statics,
                     ScatterProxy,
+                    placement.identity.clone(),
                 ));
                 if let Some(view) = &view {
                     entity.insert((Mesh3d(view.cube.clone()), MeshMaterial3d(view.wall.clone())));
                 }
                 buildings += 1;
             }
-            Proxy::Fir {
+            Prototype::Fir {
                 height_m,
                 canopy_diameter_m: _,
             } => {
@@ -317,11 +292,10 @@ pub(crate) fn spawn(
                     Collider::cylinder(TRUNK_RADIUS_M, height_m),
                     statics,
                     ScatterProxy,
+                    placement.identity.clone(),
                 ));
                 if let Some(view) = &view {
-                    let (trunk_mesh, canopy_mesh) = view.fir[placement.prototype]
-                        .as_ref()
-                        .expect("a fir prototype carries fir meshes");
+                    let (trunk_mesh, canopy_mesh) = &view.fir[placement.prototype];
                     entity.insert((
                         Mesh3d(trunk_mesh.clone()),
                         MeshMaterial3d(view.bark.clone()),
@@ -349,7 +323,7 @@ pub(crate) fn spawn(
 mod tests {
     use super::*;
 
-    use crate::map::tests::{shipped_assets, shipped_manifest};
+    use crate::map::tests::shipped_manifest;
 
     /// A tilted fixture surface: height rises with x and z, so a re-projection lands on a different
     /// Y at every XZ (a flat fixture would pass whatever the placement did with the file's Y).
@@ -362,14 +336,25 @@ mod tests {
         HeightGrid::new(samples.into(), size, crate::terrain_grid::FIXTURE_EXTENT)
     }
 
+    /// A one-building library (fixture data).
+    fn library() -> BTreeMap<String, Prototype> {
+        BTreeMap::from([(
+            "house_proxy".to_owned(),
+            Prototype::Building {
+                min: [-2.0, -0.5, -3.0],
+                max: [2.0, 2.5, 3.0],
+            },
+        )])
+    }
+
     /// One instance record of `prototype`, posed with a deliberately WRONG Y.
-    fn record(prototype: &str, xz: Vec2, stale_y: f32) -> InstanceRecord {
+    fn record(id: &str, xz: Vec2, stale_y: f32) -> InstanceRecord {
         InstanceRecord {
-            prototype: prototype.to_owned(),
+            prototype: "house_proxy".to_owned(),
             translation: [xz.x, stale_y, xz.y],
             rotation: [0.0, 0.0, 0.0, 1.0],
             scale: [1.0, 1.0, 1.0],
-            id: "a".to_owned(),
+            id: id.to_owned(),
         }
     }
 
@@ -380,12 +365,31 @@ mod tests {
         let grid = sloped_grid();
         let xz = Vec2::new(37.5, -112.25);
         let placed =
-            |stale_y: f32| place(&resolve(&[record("house_proxy", xz, stale_y)]), &grid)[0].pose;
+            |stale_y: f32| place(&resolve(&[record("a", xz, stale_y)], &library()), &grid)[0].pose;
         let pose = placed(-500.0);
         assert_eq!(pose.translation.x, xz.x);
         assert_eq!(pose.translation.z, xz.y);
         assert_eq!(pose.translation.y, grid.height_at(xz.x, xz.y));
         assert_eq!(placed(900.0), pose, "the authored Y must change nothing");
+    }
+
+    /// IDENTITY IS THE SORTED ORDER, NOT THE FILE'S: the ordinal an instance carries is its position
+    /// among the ids, whatever order the author exported them in, so two peers reading the same
+    /// bytes name the same instance by the same number. A mutant that numbered in file order would
+    /// hand `b` ordinal 0 here.
+    #[test]
+    fn ordinals_follow_the_id_order_whatever_the_file_order() {
+        let records = [
+            record("b", Vec2::ZERO, 0.0),
+            record("c", Vec2::X, 0.0),
+            record("a", Vec2::Y, 0.0),
+        ];
+        let placed = place(&resolve(&records, &library()), &sloped_grid());
+        let identities: Vec<(&str, u16)> = placed
+            .iter()
+            .map(|placement| (placement.identity.id.as_str(), placement.identity.ordinal))
+            .collect();
+        assert_eq!(identities, [("a", 0), ("b", 1), ("c", 2)]);
     }
 
     /// A zero quaternion is FINITE, so the pose check waves it through — and then `normalize`
@@ -395,41 +399,13 @@ mod tests {
     #[test]
     #[should_panic(expected = "which names no orientation")]
     fn a_rotation_with_no_length_panics() {
-        let mut raw = record("house_proxy", Vec2::ZERO, 0.0);
+        let mut raw = record("a", Vec2::ZERO, 0.0);
         raw.rotation = [0.0, 0.0, 0.0, 0.0];
-        resolve(&[raw]);
-    }
-
-    /// ADR-0011: a map naming a prototype the registry does not carry is a broken ship.
-    #[test]
-    #[should_panic(expected = "the graybox registry does not carry")]
-    fn an_unknown_prototype_panics() {
-        resolve(&[record("barn_proxy", Vec2::ZERO, 0.0)]);
-    }
-
-    /// The registry must cover the SHIPPED map — every prototype the file declares, not merely the
-    /// ones it happens to instance today (the church has zero instances and still must resolve).
-    #[test]
-    fn the_registry_covers_every_prototype_the_shipped_map_declares() {
-        let text = std::fs::read_to_string(crate::map::level_path(&shipped_assets()))
-            .expect("the shipped tree carries a level file");
-        let level: serde_json::Value =
-            serde_json::from_str(&text).expect("the shipped level file parses");
-        let declared = level["prototypes"]
-            .as_object()
-            .expect("the level file declares a prototype registry");
-        assert!(!declared.is_empty());
-        for id in declared.keys() {
-            assert!(
-                prototype_index(id).is_some(),
-                "the shipped map declares prototype {id:?}, which the graybox registry does not \
-                 carry",
-            );
-        }
+        resolve(&[raw], &library());
     }
 
     /// The spawn itself, in a real world: every building reaches the block list, every instance
-    /// gets a static collider, and a windowless composition spawns no mesh.
+    /// gets a static collider carrying its identity, and a windowless composition spawns no mesh.
     #[test]
     fn spawn_adds_a_collider_per_instance_and_a_block_per_building() {
         let mut app = App::new();
@@ -456,12 +432,45 @@ mod tests {
                 queue.apply(world);
             });
         });
-        assert_eq!(blocks.len(), 74, "one block per building, no fir");
+        let buildings = manifest
+            .instances
+            .iter()
+            .filter(|instance| {
+                matches!(
+                    manifest.prototypes[&instance.prototype],
+                    Prototype::Building { .. }
+                )
+            })
+            .count();
+        assert!(buildings > 0 && buildings < manifest.instances.len());
+        assert_eq!(blocks.len(), buildings, "one block per building, no fir");
         let colliders = world
             .query_filtered::<Entity, (With<Collider>, With<RigidBody>)>()
             .iter(world)
             .count();
-        assert_eq!(colliders, 709, "one static collider per instance");
+        assert_eq!(
+            colliders,
+            manifest.instances.len(),
+            "one static collider per instance"
+        );
+        let mut identities: Vec<(String, u16)> = world
+            .query::<&MapInstance>()
+            .iter(world)
+            .map(|instance| (instance.id.clone(), instance.ordinal))
+            .collect();
+        identities.sort();
+        assert_eq!(
+            identities.len(),
+            colliders,
+            "every collider carries its identity"
+        );
+        assert!(
+            identities
+                .iter()
+                .enumerate()
+                .all(|(k, (_, ordinal))| usize::from(*ordinal) == k),
+            "ordinals are the id order, dense from zero",
+        );
         // The view read casts against the marker, not against the terrain layer at large: a
         // collider without it is invisible to the scatter-hit effect, so the tag must be on ALL of
         // them and on nothing else.

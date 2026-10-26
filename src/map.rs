@@ -10,6 +10,13 @@
 //! [`MapManifest`]; the terrain decode takes its extent and heightmap from that resource and
 //! [`crate::scatter`] takes its instances from the same one. Nothing else opens the file.
 //!
+//! THE LIBRARY IS THE GAME'S, THE PLACEMENT IS THE MAP'S. What a prototype id the placement
+//! references MEANS to the game — a building's box, a fir's size — is `prototypes.ron` beside the
+//! manifest ([`PROTOTYPES_FILE`], [`Prototype`]), keyed by the ids the placement uses. The
+//! manifest's own `prototypes` block is the author's export record (which glb, whether it shipped)
+//! and is rewritten on every export; it is read only for its keys, so the library is checked
+//! against every id the author declared, instanced or not.
+//!
 //! THE MAP IS A COMPATIBILITY TERM. Nothing here replicates — both peers derive their terrain and
 //! their scatter from these bytes — so which map a process loaded belongs in the connect-time
 //! handshake beside the wire manifest. [`content_digest`] is what it enters as.
@@ -28,6 +35,7 @@
 //! because a peer silently falling back to flat while others load the map would desync the
 //! deterministic sim.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
@@ -46,6 +54,10 @@ const MAPS_DIR: &str = "maps";
 
 /// The manifest file inside a map's directory.
 const LEVEL_FILE: &str = "level.json";
+
+/// The game's prototype library inside a map's directory (module doc). REQUIRED beside a manifest:
+/// a placement whose ids resolve to nothing is present-but-broken (ADR-0011).
+const PROTOTYPES_FILE: &str = "prototypes.ron";
 
 /// Subdirectory of a map holding what WE generate from the authored data (the UI map image), as
 /// opposed to what the author shipped.
@@ -70,6 +82,11 @@ pub(crate) fn map_dir(root: &Path) -> PathBuf {
 /// The selected map's manifest.
 pub(crate) fn level_path(root: &Path) -> PathBuf {
     map_dir(root).join(LEVEL_FILE)
+}
+
+/// The selected map's prototype library.
+fn prototypes_path(root: &Path) -> PathBuf {
+    map_dir(root).join(PROTOTYPES_FILE)
 }
 
 /// An asset-server path (`/`-separated, relative to the asset root) into the selected map's own
@@ -105,6 +122,9 @@ pub(crate) struct MapManifest {
     pub(crate) masks_resolution: [u32; 2],
     /// The author's object placement, in file order.
     pub(crate) instances: Vec<InstanceRecord>,
+    /// The game's library, keyed by the ids the placement uses. Every instance's prototype and
+    /// every id the author's block declares resolves here; [`parse`] checked it.
+    pub(crate) prototypes: BTreeMap<String, Prototype>,
 }
 
 impl MapManifest {
@@ -126,6 +146,22 @@ impl MapManifest {
     }
 }
 
+/// What one prototype id resolves to (`prototypes.ron`, module doc). Metres at instance scale 1;
+/// the instance's own scale multiplies the collider as it does the visual.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) enum Prototype {
+    /// A building: an axis-aligned box in the prototype's local frame, `min`/`max` corners around
+    /// the instance origin. A `min.y` below zero is a skirt that sinks into the surface.
+    Building { min: [f32; 3], max: [f32; 3] },
+    /// A graybox fir: a trunk cylinder over the full `height_m` and a canopy cone
+    /// `canopy_diameter_m` wide ([`crate::scatter`] owns the trunk radius and the canopy's base).
+    Fir {
+        height_m: f32,
+        canopy_diameter_m: f32,
+    },
+}
+
 /// One instance record as authored. `rotation` is XYZW, `translation`/`scale` are XYZ.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 pub(crate) struct InstanceRecord {
@@ -138,13 +174,17 @@ pub(crate) struct InstanceRecord {
 }
 
 /// `level.json` as far as this crate reads it. Deliberately NOT `deny_unknown_fields`: the file
-/// also carries the author's prototype registry and per-asset shipping state, which describe their
-/// export rather than the world we build.
+/// also carries per-asset shipping state, which describes the author's export rather than the
+/// world we build.
 #[derive(serde::Deserialize)]
 struct LevelFile {
     coordinate_system: CoordinateSystem,
     terrain: TerrainBlock,
     instances: Vec<InstanceRecord>,
+    /// The author's prototype registry, read for its KEYS only (module doc). An export may omit
+    /// the block.
+    #[serde(default)]
+    prototypes: BTreeMap<String, serde::de::IgnoredAny>,
 }
 
 #[derive(serde::Deserialize)]
@@ -325,7 +365,16 @@ impl ExtentXz {
 pub(crate) fn load(root: &Path) -> Option<MapManifest> {
     let path = level_path(root);
     let text = read_manifest(&path)?;
-    Some(parse(&text, &path))
+    let library = read_prototypes(root);
+    Some(parse(&text, &library, &path))
+}
+
+/// The selected map's prototype library text. Only read beside a manifest that exists, so there is
+/// no absence to tolerate: any failure is present-but-broken and panics naming the path.
+fn read_prototypes(root: &Path) -> String {
+    let path = prototypes_path(root);
+    std::fs::read_to_string(&path)
+        .unwrap_or_else(|err| panic!("map: {} cannot be read: {err}", path.display()))
 }
 
 /// The manifest's text, or `None` when there is NO manifest.
@@ -366,9 +415,9 @@ const fn fnv1a_64(seed: u64, bytes: &[u8]) -> u64 {
     hash
 }
 
-/// The CONTENT digest of the world this process will build: the manifest's own bytes plus the bytes
-/// of the heightmap it names — the two files that decide the terrain and the scatter, neither of
-/// which crosses the wire.
+/// The CONTENT digest of the world this process will build: the manifest's own bytes, its prototype
+/// library's, and the bytes of the heightmap it names — the files that decide the terrain and the
+/// scatter, none of which crosses the wire.
 ///
 /// CONTENT, not the id: two peers can select the same map name over different files (a stale
 /// checkout, a half-pulled LFS object, a hand-edited `level.json`), and the id would happily agree
@@ -381,7 +430,8 @@ pub(crate) fn content_digest(root: &Path) -> u64 {
     let Some(text) = read_manifest(&path) else {
         return NO_MAP_DIGEST;
     };
-    let manifest = parse(&text, &path);
+    let library = read_prototypes(root);
+    let manifest = parse(&text, &library, &path);
     let heightmap = manifest.heightmap_path();
     let bytes = std::fs::read(&heightmap).unwrap_or_else(|err| {
         panic!(
@@ -391,25 +441,48 @@ pub(crate) fn content_digest(root: &Path) -> u64 {
             heightmap.display(),
         )
     });
-    digest_of(text.as_bytes(), &bytes)
+    digest_of(&[text.as_bytes(), library.as_bytes(), &bytes])
 }
 
-/// The fold itself, pure. Each file's LENGTH is folded before its bytes, so no two different pairs
-/// of files can shift bytes across the boundary into the same digest.
-fn digest_of(level: &[u8], heightmap: &[u8]) -> u64 {
-    let hash = fnv1a_64(DIGEST_SEED, b"overmatch-map-content-v1");
-    let hash = fnv1a_64(hash, &(level.len() as u64).to_le_bytes());
-    let hash = fnv1a_64(hash, level);
-    let hash = fnv1a_64(hash, &(heightmap.len() as u64).to_le_bytes());
-    fnv1a_64(hash, heightmap)
+/// The fold itself, pure. Each file's LENGTH is folded before its bytes, so no two different sets
+/// of files can shift bytes across a boundary into the same digest.
+fn digest_of(files: &[&[u8]]) -> u64 {
+    files.iter().fold(
+        fnv1a_64(DIGEST_SEED, b"overmatch-map-content-v2"),
+        |hash, bytes| {
+            let hash = fnv1a_64(hash, &(bytes.len() as u64).to_le_bytes());
+            fnv1a_64(hash, bytes)
+        },
+    )
 }
 
-/// Parse and check one manifest's text. `path` is where it came from — both the directory every
-/// asset name resolves against and the name every refusal carries.
-pub(crate) fn parse(text: &str, path: &Path) -> MapManifest {
+/// Parse and check one manifest's text against its prototype library's text. `path` is where the
+/// manifest came from — both the directory every asset name resolves against and the name every
+/// refusal carries.
+pub(crate) fn parse(text: &str, library: &str, path: &Path) -> MapManifest {
     let level: LevelFile = serde_json::from_str(text)
         .unwrap_or_else(|err| panic!("map: {} failed to parse: {err}", path.display()));
     level.coordinate_system.check(path);
+    let prototypes: BTreeMap<String, Prototype> = ron::from_str(library).unwrap_or_else(|err| {
+        panic!(
+            "map: {} failed to parse: {err}",
+            path.with_file_name(PROTOTYPES_FILE).display()
+        )
+    });
+    // Every id the placement uses AND every id the author declared must resolve (ADR-0011): a
+    // prototype with no instances today is one the next export may place.
+    for id in level
+        .instances
+        .iter()
+        .map(|instance| instance.prototype.as_str())
+        .chain(level.prototypes.keys().map(String::as_str))
+    {
+        assert!(
+            prototypes.contains_key(id),
+            "map: {} references prototype {id:?}, which {PROTOTYPES_FILE} does not carry",
+            path.display(),
+        );
+    }
     let heightmap = level.terrain.heightmap;
     let side_m = heightmap.world_extent_xz.side_m(path);
     let rows = heightmap.row_order(path);
@@ -443,6 +516,7 @@ pub(crate) fn parse(text: &str, path: &Path) -> MapManifest {
         masks: masks.asset,
         masks_resolution: masks.resolution,
         instances: level.instances,
+        prototypes,
     }
 }
 
@@ -497,9 +571,19 @@ pub(crate) mod tests {
     ) -> MapManifest {
         parse(
             &manifest_text(half_m, offset_m, scale_m, rows),
+            EMPTY_LIBRARY,
             Path::new("fixture/level.json"),
         )
     }
+
+    /// A library with nothing in it — enough for a placement with no instances.
+    const EMPTY_LIBRARY: &str = "{}";
+
+    /// A single-building library and a placement that uses it, for the resolution law.
+    const HOUSE_LIBRARY: &str =
+        r#"{"house": Building(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0))}"#;
+    const HOUSE_INSTANCE: &str = r#"{"prototype":"house","translation":[0,0,0],
+        "rotation":[0,0,0,1],"scale":[1,1,1],"id":"house_0001"}"#;
 
     /// THE MANIFEST IS THE MAP (`terrain_grid::decode_height_grid`): the shipped tree must carry
     /// one at the default id, it must parse and pass every check through the real loader, and the
@@ -572,7 +656,7 @@ pub(crate) mod tests {
     fn a_foreign_coordinate_system_panics() {
         let text =
             manifest_text(750.0, 0.0, 50.0, "+Z").replace(r#""up_axis":"+Y""#, r#""up_axis":"+Z""#);
-        parse(&text, Path::new("fixture/level.json"));
+        parse(&text, EMPTY_LIBRARY, Path::new("fixture/level.json"));
     }
 
     /// The rotation order is part of the frame — an XYZW reader given WXYZ places every object at a
@@ -582,7 +666,7 @@ pub(crate) mod tests {
     fn a_foreign_quaternion_order_panics() {
         let text =
             manifest_text(750.0, 0.0, 50.0, "+Z").replace("quaternion_xyzw", "quaternion_wxyz");
-        parse(&text, Path::new("fixture/level.json"));
+        parse(&text, EMPTY_LIBRARY, Path::new("fixture/level.json"));
     }
 
     /// `TerrainExtent` is one side spanning `[-half, +half]`: an off-centre square would be hung
@@ -595,7 +679,7 @@ pub(crate) mod tests {
             r#""minimum":[-750,-750],"maximum":[750,750]"#,
             r#""minimum":[-500,-750],"maximum":[1000,750]"#,
         );
-        parse(&text, Path::new("fixture/level.json"));
+        parse(&text, EMPTY_LIBRARY, Path::new("fixture/level.json"));
     }
 
     /// A non-square world has no single side length to hang the samples at.
@@ -603,7 +687,52 @@ pub(crate) mod tests {
     #[should_panic(expected = "the world is a square")]
     fn a_non_square_extent_panics() {
         let text = manifest_text(750.0, 0.0, 50.0, "+Z").replace("[750,750]", "[750,500]");
-        parse(&text, Path::new("fixture/level.json"));
+        parse(&text, EMPTY_LIBRARY, Path::new("fixture/level.json"));
+    }
+
+    /// THE LIBRARY COVERS THE PLACEMENT (module doc): an instance whose prototype the library does
+    /// not carry is present-but-broken, refused at parse rather than at spawn. Dropping the check
+    /// would let a placement load and panic later, in `scatter`, with the terrain already built.
+    #[test]
+    #[should_panic(
+        expected = "references prototype \"house\", which prototypes.ron does not carry"
+    )]
+    fn an_instance_outside_the_library_panics() {
+        let text = manifest_text(750.0, 0.0, 50.0, "+Z").replace(
+            r#""instances":[]"#,
+            &format!(r#""instances":[{HOUSE_INSTANCE}]"#),
+        );
+        parse(&text, EMPTY_LIBRARY, Path::new("fixture/level.json"));
+    }
+
+    /// The author's own registry is checked too, instanced or not: an id declared there is one the
+    /// next export may place, and the library must already answer for it.
+    #[test]
+    #[should_panic(expected = "references prototype \"barn\"")]
+    fn a_declared_but_uninstanced_prototype_outside_the_library_panics() {
+        let text = manifest_text(750.0, 0.0, 50.0, "+Z").replace(
+            r#""instances":[]"#,
+            r#""prototypes":{"barn":{"asset":"barn.glb","included":false}},"instances":[]"#,
+        );
+        parse(&text, HOUSE_LIBRARY, Path::new("fixture/level.json"));
+    }
+
+    /// A resolved instance reaches the manifest with its library entry beside it — the one
+    /// coupling `scatter` builds a body from.
+    #[test]
+    fn an_instance_resolves_to_its_library_entry() {
+        let text = manifest_text(750.0, 0.0, 50.0, "+Z").replace(
+            r#""instances":[]"#,
+            &format!(r#""instances":[{HOUSE_INSTANCE}]"#),
+        );
+        let manifest = parse(&text, HOUSE_LIBRARY, Path::new("fixture/level.json"));
+        assert_eq!(
+            manifest.prototypes[&manifest.instances[0].prototype],
+            Prototype::Building {
+                min: [-1.0, -0.5, -1.0],
+                max: [1.0, 2.0, 1.0],
+            },
+        );
     }
 
     /// The extent and the decode reach [`TerrainExtent`] as declared — the values every consumer's
@@ -641,19 +770,32 @@ pub(crate) mod tests {
         read_manifest(&map_dir(&shipped_assets()));
     }
 
-    /// THE COMPATIBILITY TERM. The digest is a function of the CONTENT of both files, each length-
-    /// delimited, so neither a one-byte edit to either nor a re-cut of the boundary between them
+    /// THE COMPATIBILITY TERM. The digest is a function of the CONTENT of every file, each length-
+    /// delimited, so neither a one-byte edit to any of them nor a re-cut of a boundary between two
     /// can leave it standing. This is what `net::protocol::protocol_id` folds into the handshake:
     /// two peers whose worlds differ must not be able to agree on a tag.
     #[test]
-    fn the_digest_moves_with_either_file() {
-        let base = digest_of(b"level", b"height");
-        assert_ne!(base, digest_of(b"levex", b"height"), "the manifest counts");
-        assert_ne!(base, digest_of(b"level", b"heighu"), "the heightmap counts");
+    fn the_digest_moves_with_any_file() {
+        let base = digest_of(&[b"level", b"library", b"height"]);
         assert_ne!(
-            digest_of(b"ab", b"cd"),
-            digest_of(b"abc", b"d"),
-            "the boundary between the two files is part of the digest",
+            base,
+            digest_of(&[b"levex", b"library", b"height"]),
+            "the manifest counts",
+        );
+        assert_ne!(
+            base,
+            digest_of(&[b"level", b"librarz", b"height"]),
+            "the prototype library counts",
+        );
+        assert_ne!(
+            base,
+            digest_of(&[b"level", b"library", b"heighu"]),
+            "the heightmap counts",
+        );
+        assert_ne!(
+            digest_of(&[b"ab", b"cd"]),
+            digest_of(&[b"abc", b"d"]),
+            "the boundary between two files is part of the digest",
         );
     }
 
@@ -683,7 +825,7 @@ pub(crate) mod tests {
             r#""column_increases_toward":"+X""#,
             r#""column_increases_toward":"-X""#,
         );
-        parse(&text, Path::new("fixture/level.json"));
+        parse(&text, EMPTY_LIBRARY, Path::new("fixture/level.json"));
     }
 
     /// Rows run along Z or the manifest is not describing this world at all.
@@ -692,6 +834,7 @@ pub(crate) mod tests {
     fn an_off_axis_row_direction_panics() {
         parse(
             &manifest_text(750.0, 0.0, 50.0, "+X"),
+            EMPTY_LIBRARY,
             Path::new("fixture/level.json"),
         );
     }
@@ -704,6 +847,6 @@ pub(crate) mod tests {
         // `-Z` rows put pixel (0, 0) at +Z; this one claims the opposite corner.
         let text = manifest_text(750.0, 0.0, 50.0, "-Z")
             .replace(r#""pixel_0_0":[-750,750]"#, r#""pixel_0_0":[-750,-750]"#);
-        parse(&text, Path::new("fixture/level.json"));
+        parse(&text, EMPTY_LIBRARY, Path::new("fixture/level.json"));
     }
 }
