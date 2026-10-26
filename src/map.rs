@@ -41,6 +41,7 @@ use std::path::{Path, PathBuf};
 use bevy::prelude::*;
 
 use crate::terrain_grid::{RowOrder, TerrainExtent};
+use crate::trees::TreeLibrary;
 
 /// The map loaded when nothing selects another.
 pub(crate) const DEFAULT_MAP_ID: &str = "kalinovo";
@@ -125,9 +126,21 @@ pub(crate) struct MapManifest {
     /// The game's library, keyed by the ids the placement uses. Every instance's prototype and
     /// every id the author's block declares resolves here; [`parse`] checked it.
     pub(crate) prototypes: BTreeMap<String, Prototype>,
+    /// Every tree asset a [`Prototype::Tree`] names, loaded and validated ([`load`]).
+    pub(crate) trees: TreeLibrary,
 }
 
 impl MapManifest {
+    /// The tree asset ids the library names, each once.
+    fn tree_assets(&self) -> impl Iterator<Item = &str> {
+        self.prototypes
+            .values()
+            .filter_map(|prototype| match prototype {
+                Prototype::Tree { asset } => Some(asset.as_str()),
+                Prototype::Building { .. } | Prototype::Fir { .. } => None,
+            })
+    }
+
     /// The declared heightmap's path.
     pub(crate) fn heightmap_path(&self) -> PathBuf {
         self.dir.join(&self.heightmap)
@@ -148,7 +161,7 @@ impl MapManifest {
 
 /// What one prototype id resolves to (`prototypes.ron`, module doc). Metres at instance scale 1;
 /// the instance's own scale multiplies the collider as it does the visual.
-#[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) enum Prototype {
     /// A building: an axis-aligned box in the prototype's local frame, `min`/`max` corners around
@@ -160,6 +173,8 @@ pub(crate) enum Prototype {
         height_m: f32,
         canopy_diameter_m: f32,
     },
+    /// A tree of the damage model ([`crate::trees`]): the asset `assets/trees/<asset>/`.
+    Tree { asset: String },
 }
 
 /// One instance record as authored. `rotation` is XYZW, `translation`/`scale` are XYZ.
@@ -366,7 +381,9 @@ pub(crate) fn load(root: &Path) -> Option<MapManifest> {
     let path = level_path(root);
     let text = read_manifest(&path)?;
     let library = read_prototypes(root);
-    Some(parse(&text, &library, &path))
+    let mut manifest = parse(&text, &library, &path);
+    manifest.trees = TreeLibrary::load(root, manifest.tree_assets());
+    Some(manifest)
 }
 
 /// The selected map's prototype library text. Only read beside a manifest that exists, so there is
@@ -416,8 +433,9 @@ const fn fnv1a_64(seed: u64, bytes: &[u8]) -> u64 {
 }
 
 /// The CONTENT digest of the world this process will build: the manifest's own bytes, its prototype
-/// library's, and the bytes of the heightmap it names — the files that decide the terrain and the
-/// scatter, none of which crosses the wire.
+/// library's, the bytes of the heightmap it names, and the species table and every tree asset the
+/// library names — the files that decide the terrain and the scatter, none of which crosses the
+/// wire.
 ///
 /// CONTENT, not the id: two peers can select the same map name over different files (a stale
 /// checkout, a half-pulled LFS object, a hand-edited `level.json`), and the id would happily agree
@@ -432,6 +450,7 @@ pub(crate) fn content_digest(root: &Path) -> u64 {
     };
     let library = read_prototypes(root);
     let manifest = parse(&text, &library, &path);
+    let trees = TreeLibrary::load(root, manifest.tree_assets());
     let heightmap = manifest.heightmap_path();
     let bytes = std::fs::read(&heightmap).unwrap_or_else(|err| {
         panic!(
@@ -441,7 +460,9 @@ pub(crate) fn content_digest(root: &Path) -> u64 {
             heightmap.display(),
         )
     });
-    digest_of(&[text.as_bytes(), library.as_bytes(), &bytes])
+    let mut files = vec![text.as_bytes(), library.as_bytes(), bytes.as_slice()];
+    files.extend(trees.texts());
+    digest_of(&files)
 }
 
 /// The fold itself, pure. Each file's LENGTH is folded before its bytes, so no two different sets
@@ -517,6 +538,7 @@ pub(crate) fn parse(text: &str, library: &str, path: &Path) -> MapManifest {
         masks_resolution: masks.resolution,
         instances: level.instances,
         prototypes,
+        trees: TreeLibrary::default(),
     }
 }
 
@@ -715,6 +737,20 @@ pub(crate) mod tests {
             r#""prototypes":{"barn":{"asset":"barn.glb","included":false}},"instances":[]"#,
         );
         parse(&text, HOUSE_LIBRARY, Path::new("fixture/level.json"));
+    }
+
+    /// A map that places a tree whose asset this tree does not carry is present-but-broken: the
+    /// loader panics naming the file rather than placing nothing there.
+    #[test]
+    #[should_panic(expected = "trees/no_such_tree/no_such_tree.tree.ron cannot be read")]
+    fn a_tree_asset_the_tree_does_not_carry_panics() {
+        let text = manifest_text(750.0, 0.0, 50.0, "+Z");
+        let manifest = parse(
+            &text,
+            r#"{"ghost": Tree(asset: "no_such_tree")}"#,
+            Path::new("fixture/level.json"),
+        );
+        TreeLibrary::load(&shipped_assets(), manifest.tree_assets());
     }
 
     /// A resolved instance reaches the manifest with its library entry beside it — the one

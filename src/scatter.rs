@@ -22,7 +22,9 @@
 //! Two contact laws, because a belt and a hull meet these differently: a building is a cuboid
 //! collider AND a [`crate::world::TerrainMap`] block, so the track field senses it exactly like the
 //! authored course's boxes; a fir is a trunk cylinder collider only, never a block — the belts must
-//! not climb a trunk, and the hull collision is the honest interaction.
+//! not climb a trunk, and the hull collision is the honest interaction. A tree of the damage model
+//! ([`crate::trees`]) is the fir's successor: a body the walk doses and a hull can fell, spawned
+//! there from its own data, never a block either.
 
 use std::collections::BTreeMap;
 
@@ -66,7 +68,7 @@ const MIN_ROTATION_LENGTH_SQ: f32 = 1.0e-12;
 struct Instance<'a> {
     /// The prototype id, as the file references it — the view's mesh key.
     prototype: &'a str,
-    shape: Prototype,
+    shape: &'a Prototype,
     /// Authored world XZ. The file's Y never leaves [`resolve`].
     xz: Vec2,
     rotation: Quat,
@@ -80,7 +82,7 @@ struct Instance<'a> {
 #[derive(Debug, Clone, PartialEq)]
 struct Placement<'a> {
     prototype: &'a str,
-    shape: Prototype,
+    shape: &'a Prototype,
     identity: MapInstance,
     pose: Transform,
 }
@@ -88,11 +90,11 @@ struct Placement<'a> {
 impl Placement<'_> {
     /// A building's [`crate::world::TerrainMap`] block form: a unit cube posed and scaled (the
     /// Avian idiom `world::spawn_block` uses), its centre lifted off the ground pose by the
-    /// prototype's own bounds. `None` for a fir — a trunk is not a block.
+    /// prototype's own bounds. `None` for a fir or a tree — a trunk is not a block.
     fn block(&self) -> Option<Transform> {
         match self.shape {
             Prototype::Building { min, max } => {
-                let (min, max) = (Vec3::from_array(min), Vec3::from_array(max));
+                let (min, max) = (Vec3::from_array(*min), Vec3::from_array(*max));
                 Some(Transform {
                     translation: self.pose.translation
                         + self.pose.rotation * ((min + max) * 0.5 * self.pose.scale),
@@ -100,7 +102,7 @@ impl Placement<'_> {
                     scale: (max - min) * self.pose.scale,
                 })
             }
-            Prototype::Fir { .. } => None,
+            Prototype::Fir { .. } | Prototype::Tree { .. } => None,
         }
     }
 }
@@ -111,13 +113,13 @@ impl Placement<'_> {
 /// length to normalize is a broken ship and panics naming the instance.
 fn resolve<'a>(
     records: &'a [InstanceRecord],
-    library: &BTreeMap<String, Prototype>,
+    library: &'a BTreeMap<String, Prototype>,
 ) -> Vec<Instance<'a>> {
     let mut instances: Vec<Instance<'a>> = records
         .iter()
         .map(|raw| {
             // `map::parse` already refused any id outside the library.
-            let shape = library[&raw.prototype];
+            let shape = &library[&raw.prototype];
             let translation = Vec3::from_array(raw.translation);
             let rotation = Quat::from_xyzw(
                 raw.rotation[0],
@@ -226,7 +228,7 @@ impl ScatterView {
                             }),
                         ),
                     )),
-                    Prototype::Building { .. } => None,
+                    Prototype::Building { .. } | Prototype::Tree { .. } => None,
                 })
                 .collect(),
             wall: materials.add(Color::srgb(0.62, 0.58, 0.53)),
@@ -238,8 +240,8 @@ impl ScatterView {
 
 /// Spawn the scatter into the world the grid describes, appending every building to `blocks` (the
 /// [`crate::world::TerrainMap`] list the analytic track field is built from). Colliders spawn in
-/// every composition; meshes only when `windowed` — the dedicated server draws nothing, exactly as
-/// it skips the terrain's render tiles.
+/// every composition; meshes and the trees' glb views only where `assets` offers a server to draw
+/// with — the dedicated server draws nothing, exactly as it skips the terrain's render tiles.
 pub(crate) fn spawn(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -247,14 +249,28 @@ pub(crate) fn spawn(
     manifest: &MapManifest,
     grid: &HeightGrid,
     blocks: &mut Vec<Transform>,
-    windowed: bool,
+    assets: Option<&AssetServer>,
 ) {
     let placements = place(&resolve(&manifest.instances, &manifest.prototypes), grid);
-    let view = windowed.then(|| ScatterView::new(meshes, materials, &manifest.prototypes));
+    let view = assets.map(|_| ScatterView::new(meshes, materials, &manifest.prototypes));
     let statics = CollisionLayers::new([Layer::Terrain], LayerMask::ALL);
-    let (mut buildings, mut firs) = (0usize, 0usize);
+    let (mut buildings, mut firs, mut trees) = (0usize, 0usize, 0usize);
     for placement in &placements {
         match placement.shape {
+            Prototype::Tree { asset } => {
+                let kind = manifest
+                    .trees
+                    .get(asset)
+                    .expect("map::load loaded every tree asset the library names");
+                crate::trees::spawn(
+                    commands,
+                    kind,
+                    placement.identity.clone(),
+                    placement.pose,
+                    assets,
+                );
+                trees += 1;
+            }
             Prototype::Building { .. } => {
                 let block = placement
                     .block()
@@ -277,7 +293,7 @@ pub(crate) fn spawn(
                 height_m,
                 canopy_diameter_m: _,
             } => {
-                let pose = placement.pose;
+                let (pose, height_m) = (placement.pose, *height_m);
                 // Both primitives are centred on their own origin, so each rides at its own centre
                 // height above the ground pose, scaled with the instance.
                 let at = |centre_m: f32| Transform {
@@ -314,7 +330,7 @@ pub(crate) fn spawn(
     }
     info!(
         "scatter: {} instances placed on the live surface — {buildings} buildings (also \
-         TerrainMap blocks), {firs} firs (trunk colliders only)",
+         TerrainMap blocks), {firs} graybox firs (trunk colliders only), {trees} trees",
         placements.len(),
     );
 }
@@ -338,13 +354,14 @@ mod tests {
 
     /// A one-building library (fixture data).
     fn library() -> BTreeMap<String, Prototype> {
-        BTreeMap::from([(
-            "house_proxy".to_owned(),
-            Prototype::Building {
-                min: [-2.0, -0.5, -3.0],
-                max: [2.0, 2.5, 3.0],
-            },
-        )])
+        BTreeMap::from([("house_proxy".to_owned(), house())])
+    }
+
+    fn house() -> Prototype {
+        Prototype::Building {
+            min: [-2.0, -0.5, -3.0],
+            max: [2.0, 2.5, 3.0],
+        }
     }
 
     /// One instance record of `prototype`, posed with a deliberately WRONG Y.
@@ -362,10 +379,10 @@ mod tests {
     /// own Y reaches nothing.
     #[test]
     fn placement_reprojects_onto_the_grid_and_ignores_the_authored_y() {
-        let grid = sloped_grid();
+        let (grid, library) = (sloped_grid(), library());
         let xz = Vec2::new(37.5, -112.25);
         let placed =
-            |stale_y: f32| place(&resolve(&[record("a", xz, stale_y)], &library()), &grid)[0].pose;
+            |stale_y: f32| place(&resolve(&[record("a", xz, stale_y)], &library), &grid)[0].pose;
         let pose = placed(-500.0);
         assert_eq!(pose.translation.x, xz.x);
         assert_eq!(pose.translation.z, xz.y);
@@ -384,7 +401,8 @@ mod tests {
             record("c", Vec2::X, 0.0),
             record("a", Vec2::Y, 0.0),
         ];
-        let placed = place(&resolve(&records, &library()), &sloped_grid());
+        let library = library();
+        let placed = place(&resolve(&records, &library), &sloped_grid());
         let identities: Vec<(&str, u16)> = placed
             .iter()
             .map(|placement| (placement.identity.id.as_str(), placement.identity.ordinal))
@@ -405,9 +423,11 @@ mod tests {
     }
 
     /// The spawn itself, in a real world: every building reaches the block list, every instance
-    /// gets a static collider carrying its identity, and a windowless composition spawns no mesh.
+    /// is one static body carrying its identity — a proxy collider for a building or a graybox
+    /// fir, a root with a collider per segment for a tree — and a windowless composition spawns
+    /// no mesh and no view.
     #[test]
-    fn spawn_adds_a_collider_per_instance_and_a_block_per_building() {
+    fn spawn_adds_a_body_per_instance_and_a_block_per_building() {
         let mut app = App::new();
         app.add_plugins(bevy::asset::AssetPlugin::default())
             .init_asset::<Mesh>()
@@ -427,31 +447,35 @@ mod tests {
                     &manifest,
                     &grid,
                     &mut blocks,
-                    false,
+                    None,
                 );
                 queue.apply(world);
             });
         });
-        let buildings = manifest
-            .instances
-            .iter()
-            .filter(|instance| {
-                matches!(
-                    manifest.prototypes[&instance.prototype],
-                    Prototype::Building { .. }
-                )
-            })
-            .count();
-        assert!(buildings > 0 && buildings < manifest.instances.len());
-        assert_eq!(blocks.len(), buildings, "one block per building, no fir");
-        let colliders = world
-            .query_filtered::<Entity, (With<Collider>, With<RigidBody>)>()
+        let (mut buildings, mut proxies, mut trees, mut segments) = (0, 0, 0, 0);
+        for instance in &manifest.instances {
+            match &manifest.prototypes[&instance.prototype] {
+                Prototype::Building { .. } => {
+                    buildings += 1;
+                    proxies += 1;
+                }
+                Prototype::Fir { .. } => proxies += 1,
+                Prototype::Tree { asset } => {
+                    trees += 1;
+                    segments += manifest.trees.get(asset).unwrap().segments.len();
+                }
+            }
+        }
+        assert!(buildings > 0 && trees > 0, "the shipped map places both");
+        assert_eq!(blocks.len(), buildings, "one block per building, no trunk");
+        let bodies = world
+            .query_filtered::<Entity, With<RigidBody>>()
             .iter(world)
             .count();
         assert_eq!(
-            colliders,
+            bodies,
             manifest.instances.len(),
-            "one static collider per instance"
+            "one static body per instance"
         );
         let mut identities: Vec<(String, u16)> = world
             .query::<&MapInstance>()
@@ -459,11 +483,7 @@ mod tests {
             .map(|instance| (instance.id.clone(), instance.ordinal))
             .collect();
         identities.sort();
-        assert_eq!(
-            identities.len(),
-            colliders,
-            "every collider carries its identity"
-        );
+        assert_eq!(identities.len(), bodies, "every body carries its identity");
         assert!(
             identities
                 .iter()
@@ -472,21 +492,30 @@ mod tests {
             "ordinals are the id order, dense from zero",
         );
         // The view read casts against the marker, not against the terrain layer at large: a
-        // collider without it is invisible to the scatter-hit effect, so the tag must be on ALL of
-        // them and on nothing else.
+        // proxy collider without it is invisible to the scatter-hit effect, so the tag is on every
+        // proxy and on no tree (the walk marks a tree's hits itself).
         let tagged = world
-            .query_filtered::<Entity, With<ScatterProxy>>()
+            .query_filtered::<Entity, (With<ScatterProxy>, With<Collider>)>()
             .iter(world)
             .count();
+        assert_eq!(tagged, proxies, "every proxy collider is a ScatterProxy");
+        let tree_roots = world
+            .query_filtered::<Entity, (With<crate::trees::TreeBody>, Without<ScatterProxy>)>()
+            .iter(world)
+            .count();
+        assert_eq!(tree_roots, trees, "one untagged root per tree");
+        let tree_colliders = world
+            .query_filtered::<Entity, (With<crate::trees::TreeSegment>, With<Collider>)>()
+            .iter(world)
+            .count();
+        assert_eq!(tree_colliders, segments, "one collider per tree segment");
         assert_eq!(
-            tagged, colliders,
-            "every scatter collider is a ScatterProxy"
+            world.query::<&Collider>().iter(world).count(),
+            proxies + segments,
+            "no other collider ships",
         );
-        let untagged = world
-            .query_filtered::<Entity, (With<Collider>, Without<ScatterProxy>)>()
-            .iter(world)
-            .count();
-        assert_eq!(untagged, 0, "no scatter collider ships untagged");
+        let views = world.query::<&crate::trees::TreeView>().iter(world).count();
+        assert_eq!(views, 0, "a windowless composition attaches no view");
         let meshes = world.query::<&Mesh3d>().iter(world).count();
         assert_eq!(meshes, 0, "a windowless composition draws nothing");
     }

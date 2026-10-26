@@ -205,5 +205,24 @@
         // crew line rate along the chord the shell's disc cut through it, and each spall
         // direction's strength entering it.
         "Flesh": Witness,
+        // The trees' trunks (`assets/trees/species.ron` names one of these per species). No
+        // penetration data: the factor is the wood's crushing strength along the grain over the
+        // reference steel's flow strength, scaled to the reference's 1000 — a strength ratio, the
+        // same reading the steels' DERIVED rows note, not a measured equivalence.
+        "Softwood": Hard(
+            resistance: Effective((40.0, Unknown("no penetration data; spruce/pine crushing
+                strength along the grain ~40 MPa over the reference flow strength ~1 GPa,
+                × 1000"))),
+            paintable: false,
+            debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
+            facts: None,
+        ),
+        "Hardwood": Hard(
+            resistance: Effective((55.0, Unknown("no penetration data; birch crushing strength
+                along the grain ~55 MPa over the reference flow strength ~1 GPa, × 1000"))),
+            paintable: false,
+            debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
+            facts: None,
+        ),
     },
 )

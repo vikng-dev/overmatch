@@ -523,6 +523,16 @@ impl ShotDose {
     }
 }
 
+/// The HP this shot has taken so far from pools that belong to a tank (a [`VolumeOf`] node): what
+/// a hit confirmation may count. A pool nothing owns — a tree's — is dosed the same way and
+/// counts for nothing here.
+fn owned_losses(dose: &ShotDose, owners: &Query<&VolumeOf>) -> u32 {
+    dose.losses()
+        .filter(|(volume, _)| owners.contains(*volume))
+        .map(|(_, lost)| lost)
+        .sum()
+}
+
 /// Mirror a travel direction about a surface normal — the specular deflection of a ricochet.
 fn reflect(dir: Dir3, normal: Dir3) -> Dir3 {
     let d = Vec3::from(dir);
@@ -831,6 +841,18 @@ pub(crate) struct ShellTerminal {
 pub(crate) struct ShellDamage {
     pub shot: ShotId,
     pub amount: u32,
+}
+
+/// A box whose HP pool this shot's dose emptied, raised by the authority's march in the tick the
+/// pool reached zero, with the context of the dose that did it: `at` is where the emptying mark
+/// lies (a crossing's entrance, a bounce's point, a burst's centre) and `along` the round's travel
+/// there, `None` for a field, which has no line. Whoever owns the pool reads its consequence off
+/// this — a tree its cut and fall direction — rather than polling the pool.
+#[derive(EntityEvent, Debug, Clone, Copy)]
+pub(crate) struct PoolEmptied {
+    pub(crate) entity: Entity,
+    pub(crate) at: Vec3,
+    pub(crate) along: Option<Vec3>,
 }
 
 /// Trigger-agnostic shell spawn seam used by guns and sandbox tools.
@@ -2046,6 +2068,7 @@ fn integrate_projectiles(
         }
 
         let (marks_from, emptied_from) = (shell.marks.log.len(), shell.dose.emptied().len());
+        let owned_before = owned_losses(shell.dose, &world.owners);
         let Some(step) = march_shell_step(
             &mut shell,
             &world,
@@ -2068,6 +2091,34 @@ fn integrate_projectiles(
                 &world.owners,
                 &health,
             );
+            // Each pool this step emptied, with the mark that did it: the last settle of the pool
+            // that took it to zero names the mark, and the mark says where and along what.
+            for &address in &shell.dose.emptied()[emptied_from..] {
+                let mark = shell
+                    .dose
+                    .settles(address)
+                    .iter()
+                    .rev()
+                    .find(|settle| settle.emptied())
+                    .and_then(|settle| shell.marks.log.get(settle.mark));
+                let (at, along) = match mark {
+                    Some(ArmourMark::Crossing {
+                        entrance, incoming, ..
+                    }) => (*entrance, Some(*incoming)),
+                    Some(ArmourMark::Bounce {
+                        position, incoming, ..
+                    }) => (*position, Some(*incoming)),
+                    Some(ArmourMark::Burst { at, .. }) => (*at, None),
+                    Some(ArmourMark::Wound { .. } | ArmourMark::Failed) | None => {
+                        (step.position, Some(Vec3::from(step.direction)))
+                    }
+                };
+                commands.trigger(PoolEmptied {
+                    entity: address,
+                    at,
+                    along,
+                });
+            }
         }
 
         // Reorient the shell to its travel direction so the mesh follows the (gravity-curved,
@@ -2078,16 +2129,21 @@ fn integrate_projectiles(
 
         // A state snapshot cannot preserve how many shots caused its resulting HP. Raise one discrete,
         // shot-attributed fact; `net::shot_transport` routes it reliably to the fire-time owner.
+        // Only HP taken from a tank's pools confirms a hit: a tree's pool is dosed the same way
+        // and must not read as "hit the enemy".
         if deposit
             && step.damage_dealt > 0
             && !damage_report.0
             && let Some(shot) = shot
         {
-            commands.trigger(ShellDamage {
-                shot: shot.0,
-                amount: step.damage_dealt,
-            });
-            damage_report.0 = true;
+            let amount = owned_losses(shell.dose, &world.owners) - owned_before;
+            if amount > 0 {
+                commands.trigger(ShellDamage {
+                    shot: shot.0,
+                    amount,
+                });
+                damage_report.0 = true;
+            }
         }
 
         if step.holding {

@@ -452,9 +452,10 @@ fn collect_trimesh(
 ///
 /// The trimesh phase cannot make this check — there is no cheap containment test on a mesh, and "no
 /// faces in reach" is the NORMAL reading of a corridor crossing the hollow interior of a hull. Its
-/// protection is the seed contract alone. Convex shapes are the sandbox slabs and carry no
-/// production armour, which is the reason to make this loud rather than permissive: nothing real
-/// depends on it staying quiet.
+/// protection is the seed contract alone. Convex shapes are the sandbox slabs and the trees' trunk
+/// segments (`crate::trees`), one solid per collider and never a compound, so the one entry/exit
+/// interval this collector reads is the whole truth of each; loud rather than permissive, because
+/// a corridor lost inside one of them is a sample the caller mislaid, not a hollow.
 #[expect(
     clippy::too_many_arguments,
     reason = "private kernel of `collect`; the alternative is a struct used exactly once"

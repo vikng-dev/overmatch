@@ -35,6 +35,7 @@ use crate::ballistics::{
     SanctionedShots, ShellDamage, Shot, ShotSource,
 };
 use crate::command::TankCommand;
+use crate::damage::VolumeOf;
 use crate::tank::{
     Muzzle, TankRoot, TankServos, Weapon, WeaponGate, WeaponGateState, WeaponIndex, WeaponRound,
 };
@@ -701,6 +702,9 @@ fn spawn_plate(app: &mut App) {
     // Steel: reference-mm of armor per metre of material (matches `sandbox::spawn_targets` and the
     // ballistics tests) — the plate's cost is then ≈ its thickness in mm.
     const STEEL: f32 = 1000.0;
+    // The plate stands in for a tank's armour, which always names its tank (`VolumeOf`): the
+    // authority confirms damage only to a pool a tank owns.
+    let owner = app.world_mut().spawn_empty().id();
     app.world_mut().spawn((
         // `Position`/`Rotation`, NOT `Transform`: the netcode physics configuration disables
         // avian's `PhysicsTransformPlugin` (`net::physics::physics_plugins`), so a `Transform`
@@ -714,6 +718,7 @@ fn spawn_plate(app: &mut App) {
             material: crate::ballistics::VolumeMaterial::fixture(STEEL),
             substance: "RHA".to_string(),
         },
+        VolumeOf(owner),
         // High enough that all scripted ricochet shocks lower HP without saturating. This makes every
         // shot generate one real authority-side `ShellDamage` while preserving the same bounce geometry.
         ComponentHealth {

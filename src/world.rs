@@ -546,7 +546,7 @@ fn spawn_environment(
                 &manifest,
                 &grid,
                 &mut blocks,
-                !windows.is_empty(),
+                (!windows.is_empty()).then_some(&*asset_server),
             );
         }
         commands.insert_resource(TerrainMap {

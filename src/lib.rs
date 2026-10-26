@@ -203,6 +203,9 @@ pub mod track;
 /// gear from the glb markers, and overlays the derived suspension/track geometry (cast shapes,
 /// route, contact) as live-tweakable gizmo layers on a hull that actually drives.
 pub mod track_sandbox;
+/// Trees in the game's damage model: a hard body with an HP pool and a state, built at spawn from
+/// `assets/trees/` data (the glb is the view), dosed by the union walk and felled at a segment.
+mod trees;
 /// The bundled UI typeface (Barlow Condensed): loads the two weights once and exposes them as a
 /// `ui_font::UiFonts` resource that every `Text`-spawning client plugin reads. Mounted by each
 /// windowed composition root; retires Bevy's ASCII-only default font.
@@ -564,6 +567,7 @@ impl Plugin for SimPlugin {
             // `ballistics::view_plugin`, which the client roots mount and the server never does.
             ballistics::sim_plugin,
             damage::plugin,
+            trees::sim_plugin,
             shooting::plugin,
             // The pen cam's records of the authority's main-gun hits, inert on a net client, and
             // the vocabulary both ends explain them in.

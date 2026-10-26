@@ -27,7 +27,7 @@
         crown_base_frac: 0.22,
         crown_width_frac: 0.11,
         whorl_spacing_m: 0.6,
-        fell_k: (2.0e5, Unknown("provisional: sized so a 0.40 m dbh trunk (threshold 1.3e4 N·s·m) falls to a hull ram of order 1e5 N·s at a 1 m lever and not to a crawl; set from Lane C's measured push/ram impulses")),
+        fell_k: (9.0e5, Derived("ram-impulses.md 2026-10-26: a tick's Σ impulse × lever MEASURED in track_sandbox at 64 Hz, 6 substeps — sustained push 13.3 kN·s·m, 5 km/h ram 105–108, 10 km/h 119–151, 20 km/h 248–303; at 9.0e5 N·s/m² a 0.50 m spruce (threshold 112 kN·s·m) holds a push and falls at 10 km/h, a 0.42 m one (67) falls at a 5 km/h bump")),
         hp: (1200, Unknown("provisional balance data; set so a 75 mm AP round through the trunk does not fell a mature spruce")),
     ),
     "scots_pine": Species(
@@ -41,7 +41,7 @@
         crown_base_frac: 0.55,
         crown_width_frac: 0.14,
         whorl_spacing_m: 0.9,
-        fell_k: (2.5e5, Unknown("provisional: a quarter above the spruce's for the taproot; set from Lane C's measured push/ram impulses")),
+        fell_k: (9.0e5, Derived("ram-impulses.md 2026-10-26: the spruce's; nothing measured separates the two conifers' root plates, so the same window applies")),
         hp: (1200, Unknown("provisional balance data; set so a 75 mm AP round through the trunk does not fell a mature pine")),
     ),
     "silver_birch": Species(
@@ -55,7 +55,7 @@
         crown_base_frac: 0.35,
         crown_width_frac: 0.16,
         whorl_spacing_m: 0.7,
-        fell_k: (1.5e5, Unknown("provisional: below the spruce's for the shallower root plate; set from Lane C's measured push/ram impulses")),
+        fell_k: (7.0e5, Derived("ram-impulses.md 2026-10-26: three quarters of the spruce's for the shallower root plate; a 0.20 m birch (threshold 5.6 kN·s·m) falls to the measured 13.3 kN·s·m push, a 0.40 m one (45) holds it and falls at a 5 km/h ram (105)")),
         hp: (700, Unknown("provisional balance data; set so a 75 mm AP round through the trunk does not fell a mature birch")),
     ),
 }
