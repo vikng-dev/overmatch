@@ -460,14 +460,21 @@ pub(crate) fn resting_tilt(
     hi
 }
 
-/// The world rotation that tilts an upright piece by `tilt` toward `(dx, dz)`: about the
-/// horizontal axis `(dz, 0, -dx)`, built from libm's half-angle trig rather than glam's.
-fn tilt_rotation(resting: &Resting) -> Quat {
-    let (s, c) = (
-        libm::sinf(0.5 * resting.tilt),
-        libm::cosf(0.5 * resting.tilt),
-    );
-    Quat::from_xyzw(resting.dz * s, 0.0, -resting.dx * s, c)
+/// The rotation that tilts the piece above a cut by `angle` toward `(dx, dz)` of `resting`, in
+/// the frame of a tree root turned by `root`: about the horizontal world axis `(dz, 0, -dx)`
+/// carried into that frame, libm's half-angle trig. Under the root it is the world tilt composed
+/// over the root's yaw, so a lying piece keeps the instance's yaw. The ONE source of a fallen
+/// piece's rotation: the sim's lying segments take it at the resting tilt ([`derive_state`]),
+/// the view's cut trunk node at each phase of the fall and at the resting tilt when it lands
+/// (`view::present_fall`), both under the root's `Transform` rotation with no rotation between
+/// (a segment is the root's child; the view's chain carries none, A5), so the two compose under
+/// the root (`Transform::mul_transform`) to the same rotation, bit for bit. Past the transforms
+/// the engines differ: avian's collider `Rotation` is the root's `Rotation` — derived from the
+/// spawn transform's affine — times this, normalized, and the renderer composes affines.
+pub(crate) fn fall_rotation(resting: &Resting, root: Quat, angle: f32) -> Quat {
+    let axis = root.inverse() * Vec3::new(resting.dz, 0.0, -resting.dx);
+    let (s, c) = (libm::sinf(0.5 * angle), libm::cosf(0.5 * angle));
+    Quat::from_xyzw(axis.x * s, axis.y * s, axis.z * s, c)
 }
 
 /// The collision filter of a standing segment: hulls contact it and rounds walk it.
@@ -484,16 +491,14 @@ fn lying_layers() -> CollisionLayers {
 /// Every peer derives the whole body from the state on every change of it (ADR-0016, A10),
 /// never from the body before: standing, every segment stands at its spawn height on
 /// [`standing_layers`] with the pool present and no resting pose or transition tick; down, the
-/// stump's segments
-/// stand the same and every segment from the cut up lies in the resting pose on
-/// [`lying_layers`], the pose is recorded and the pool is gone — what is down takes no more
+/// stump's segments stand the same and every segment from the cut up lies in the resting pose
+/// on [`lying_layers`], the pose is recorded and the pool is gone — what is down takes no more
 /// dose. A tree back to standing (a replaced ledger) or down at another cut derives exactly as
 /// one that never held the old state.
 ///
-/// The fall turns the piece rigidly about the pivot — the cut's bottom — so each lying segment
-/// keeps the instance's yaw under the tilt: its world rotation is `tilt × yaw`, its world offset
-/// from the base the pivot plus its height above the cut turned by the tilt alone (the pivot and
-/// the trunk's axis are vertical, which the yaw fixes).
+/// The fall turns the piece rigidly about the pivot — the cut's bottom, on the root's vertical
+/// axis — so in the root's frame each lying segment is turned by [`fall_rotation`] at the
+/// resting tilt and sits at the pivot plus its height above the cut, turned the same.
 fn derive_state(
     trees: Query<
         (
@@ -523,23 +528,22 @@ fn derive_state(
                     grid.height_at(x, z)
                 });
                 let (dx, dz) = azimuth(dir);
-                Some((usize::from(cut), Resting { tilt, dx, dz }))
+                let resting = Resting { tilt, dx, dz };
+                let turn = fall_rotation(&resting, transform.rotation, tilt);
+                Some((usize::from(cut), resting, turn))
             }
         };
-        let root_inv = transform.rotation.inverse();
         let mut k = 0;
         for &child in children {
             let Ok((mut local, layers)) = segments.get_mut(child) else {
                 continue;
             };
             let (pose, filter) = match fallen {
-                Some((cut, resting)) if k >= cut => {
-                    let tilt = tilt_rotation(&resting);
+                Some((cut, _, turn)) if k >= cut => {
                     let pivot = Vec3::Y * body.prefix[cut];
-                    let along = tilt * (Vec3::Y * (body.prefix[k] - body.prefix[cut]));
                     let pose = Transform {
-                        translation: root_inv * (pivot + along),
-                        rotation: root_inv * tilt * transform.rotation,
+                        translation: pivot + turn * (Vec3::Y * (body.prefix[k] - body.prefix[cut])),
+                        rotation: turn,
                         scale: Vec3::ONE,
                     };
                     (pose, lying_layers())
@@ -557,7 +561,7 @@ fn derive_state(
             k += 1;
         }
         match fallen {
-            Some((_, resting)) => {
+            Some((_, resting, _)) => {
                 commands
                     .entity(root)
                     .insert(resting)
@@ -1657,7 +1661,7 @@ pub(crate) mod tests {
     }
 
     /// A derive bed: the fixture tree spawned at `pose` on `grid`, the derive in `Update`.
-    fn derive_bed(grid: HeightGrid, pose: Transform) -> (App, Entity) {
+    pub(crate) fn derive_bed(grid: HeightGrid, pose: Transform) -> (App, Entity) {
         let mut app = App::new();
         app.insert_resource(grid);
         app.add_systems(Update, derive_state);
@@ -1683,7 +1687,7 @@ pub(crate) mod tests {
     }
 
     /// The segments' local transforms and filters, in segment order.
-    fn segments_of(app: &App, root: Entity) -> Vec<(Transform, CollisionLayers)> {
+    pub(crate) fn segments_of(app: &App, root: Entity) -> Vec<(Transform, CollisionLayers)> {
         let world = app.world();
         world
             .get::<Children>(root)
@@ -1812,43 +1816,45 @@ pub(crate) mod tests {
         );
     }
 
-    /// THE LYING PIECE KEEPS THE INSTANCE'S YAW (A1, P2d): the fall turns the stack rigidly, so a
-    /// lying segment's world rotation is the tilt composed over the yaw — its ring's own axes
-    /// turned by the yaw, then laid down — and its world offset from the base is the pivot plus
-    /// its height above the cut, tilted, which the yaw leaves alone. A derive composing the tilt
-    /// alone lays every ring down unturned, which the 12-gon makes observable.
+    /// THE FALL ROTATION IS THE WORLD TILT OVER THE YAW (A1): under a yawed root, the fall
+    /// rotation carries the root's up axis to the tilted direction `(dx sin a, cos a, dz sin a)`
+    /// and the root's ring axis `yaw × X` to that axis tilted the same — the ring's own axes
+    /// turned by the yaw, then laid down — so a lying piece keeps the instance's yaw. A rotation
+    /// built about the world axis without carrying it into the root's frame lays every ring down
+    /// unturned under the yaw, which the 12-gon makes observable. DERIVED bound: each compared
+    /// component is under a hundred roundings of unit-scale f32 values, each at most 2⁻²⁴ ≈ 6e-8,
+    /// so the two computations differ below 6e-6; 1e-5 is that with margin.
     #[test]
-    fn the_lying_piece_keeps_the_instances_yaw() {
+    fn the_fall_rotation_is_the_world_tilt_over_the_yaw() {
         let yaw = Quat::from_xyzw(0.0, libm::sinf(0.35), 0.0, libm::cosf(0.35));
-        let base = Vec3::new(5.0, 0.0, 5.0);
-        let (mut app, root) = derive_bed(
-            fixture_grid(|_, _| 0.0),
-            Transform {
-                translation: base,
-                rotation: yaw,
-                scale: Vec3::ONE,
-            },
-        );
-        *app.world_mut().get_mut::<TreeState>(root).unwrap() = TreeState::Down { cut: 1, dir: 0 };
-        app.update();
-        let resting = *app.world().get::<Resting>(root).expect("the pose");
-        let tilt = tilt_rotation(&resting);
-        let body = app.world().get::<TreeBody>(root).expect("the body").clone();
-        for (k, (local, _)) in segments_of(&app, root).into_iter().enumerate().skip(1) {
-            let world_rotation = yaw * local.rotation;
-            let world_offset = yaw * local.translation;
-            let h = body.prefix[k] - body.prefix[1];
-            let expected_offset = Vec3::Y * body.prefix[1] + tilt * (Vec3::Y * h);
-            assert!(
-                world_offset.abs_diff_eq(expected_offset, 1e-5),
-                "segment {k}: offset {world_offset} vs {expected_offset}"
-            );
-            let expected_x = tilt * (yaw * Vec3::X);
-            assert!(
-                (world_rotation * Vec3::X).abs_diff_eq(expected_x, 1e-5),
-                "segment {k}: ring axis {} vs {expected_x}",
-                world_rotation * Vec3::X
-            );
+        for dir in [0_u8, 64, 200] {
+            for angle in [0.3_f32, FRAC_PI_2, 1.7] {
+                let (dx, dz) = azimuth(dir);
+                let resting = Resting {
+                    tilt: angle,
+                    dx,
+                    dz,
+                };
+                let world = yaw * fall_rotation(&resting, yaw, angle);
+                let (s, c) = (libm::sinf(0.5 * angle), libm::cosf(0.5 * angle));
+                let tilt = Quat::from_xyzw(dz * s, 0.0, -dx * s, c);
+                let up = Vec3::new(
+                    dx * libm::sinf(angle),
+                    libm::cosf(angle),
+                    dz * libm::sinf(angle),
+                );
+                assert!(
+                    (world * Vec3::Y).abs_diff_eq(up, 1e-5),
+                    "dir {dir}, {angle} rad: up goes to {} for {up}",
+                    world * Vec3::Y
+                );
+                let ring = tilt * (yaw * Vec3::X);
+                assert!(
+                    (world * Vec3::X).abs_diff_eq(ring, 1e-5),
+                    "dir {dir}, {angle} rad: the ring axis goes to {} for {ring}",
+                    world * Vec3::X
+                );
+            }
         }
     }
 
@@ -1901,15 +1907,15 @@ pub(crate) mod tests {
             }
         }
         const PINNED: [(&str, u8, u64); 9] = [
-            ("flat", 0, 0xac0b18b7fefd6b24),
-            ("flat", 64, 0x08f5ee0d3d3a8a71),
-            ("flat", 200, 0x460aa21305fa361e),
-            ("slope", 0, 0xc08c70ac23803686),
-            ("slope", 64, 0xf9181f0d41a59396),
-            ("slope", 200, 0x232514d1a22c32ab),
-            ("edge", 0, 0x5e58ff7a20e38e37),
-            ("edge", 64, 0x4a4511140845b207),
-            ("edge", 200, 0xd9ddf29af434f66b),
+            ("flat", 0, 0xac6fffa0efcf2646),
+            ("flat", 64, 0xb54e527901b36078),
+            ("flat", 200, 0x883a6b667889c39a),
+            ("slope", 0, 0x6bb3658585200064),
+            ("slope", 64, 0xc093756d96f81e08),
+            ("slope", 200, 0x5dc081d11110a614),
+            ("edge", 0, 0x364f8ea69e370d27),
+            ("edge", 64, 0x5cd06b3c1f68bc21),
+            ("edge", 200, 0xd4fb70177b475810),
         ];
         let listing = rows
             .iter()
