@@ -1,7 +1,7 @@
 //! The map's object scatter: the authored placement of buildings and trees, out of the map's own
-//! manifest ([`crate::map`]), spawned as GRAYBOX proxies — a box per building, a trunk cylinder
-//! plus a canopy cone per fir — with static colliders on every composition, the dedicated server
-//! included.
+//! manifest ([`crate::map`]), spawned with static colliders on every composition, the dedicated
+//! server included — a building or a fir as a GRAYBOX proxy (a box per building, a trunk cylinder
+//! plus a canopy cone per fir), a tree of the damage model as its own body (below).
 //!
 //! SHARED DATA, NOT REPLICATION — the same stance the terrain takes: both binaries read the same
 //! shipped file and derive the same entities, so no scatter entity crosses the wire. The

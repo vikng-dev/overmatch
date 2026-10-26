@@ -477,8 +477,9 @@ fn collect_convex(
     // Parry is asked in world space, so this phase re-forms the world origin. It carries the world
     // grid's rounding with it, and that is acceptable HERE and nowhere else: convex shapes are the
     // sandbox slabs and the trees' trunk segments, no tank armour takes this path, and its own
-    // boundary probe already looks a millimetre behind the origin — four orders more slack than
-    // the rounding could ever be.
+    // boundary probe looks a millimetre behind the origin. The re-formed origin is off by at most
+    // 2⁻²⁴ of its distance from the world origin (DERIVED: 60 µm at 1 km), so the probe covers it
+    // while that distance is under 2²⁴ mm ≈ 16.8 km.
     let world_origin = corridor.anchor + corridor.origin;
 
     // Each boundary at its RAW `t`; the seed contract is applied once all are in.

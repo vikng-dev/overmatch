@@ -1,7 +1,8 @@
 //! The destruction ledger: one globally visible entity whose component lists every tree state
-//! transition the authority has made, replicated as diffs — a fall costs one entry on the wire, a
-//! late joiner receives the list once, and replicon's per-tick change scan touches one entity
-//! instead of one per tree.
+//! transition the authority has made, replicated as diffs — a client whose acknowledged ledger is
+//! within the last `Diffable::HISTORY_LEN` (64) appends receives only the entries past it, one
+//! further behind and a late joiner the whole list as a snapshot — and replicon's per-tick change
+//! scan touches one entity instead of one per tree.
 //!
 //! An entry is `(index, word, tick)`: the tree's `MapInstance.ordinal` (id-sorted, dense, bound
 //! into the map digest the handshake compares, so both peers number the same trees the same way
@@ -30,8 +31,10 @@ pub(crate) struct LedgerEntry {
     pub(crate) tick: u32,
 }
 
-/// Every transition so far, in authority order. Appended only through replicon's diff path, so
-/// the wire carries the appended entry and a fresh replica the whole list.
+/// Every transition so far, in authority order. Appended only through replicon's diff path,
+/// `Diffable::HISTORY_LEN` left at its default (64): a client acknowledged within the last 64
+/// appends receives the entries past its cursor, one further behind or freshly joined the whole
+/// list.
 #[derive(Component, Serialize, Deserialize, Debug, Default, Clone, PartialEq, Eq)]
 pub(crate) struct DestructionLedger(pub(crate) Vec<LedgerEntry>);
 
@@ -441,7 +444,7 @@ mod tests {
         );
     }
 
-    /// ANOTHER LEDGER IS ANOTHER AUTHORITY'S RECORD (P2b): a link's ledger fells tree A; the next
+    /// ANOTHER LEDGER IS ANOTHER AUTHORITY'S RECORD: a link's ledger fells tree A; the next
     /// link's ledger — a new entity of the same length — names only tree B. Tree A stands again
     /// (its tick, its pose and its lying transforms gone, its pool back) and tree B falls; a
     /// replica that remembers only a length skips B and leaves A down.

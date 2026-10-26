@@ -144,16 +144,18 @@ mod rounds;
 /// The armor ballistics sandbox (`bin/armor_sandbox`). Public so the binary can mount it; not part
 /// of `GamePlugin`.
 pub mod sandbox;
+/// The map's object scatter (the map's own `level.json`, resolved through its `prototypes.ron`
+/// library): authored building and tree placement, each instance carrying its map identity,
+/// spawned from shared data on both binaries rather than over the wire. A building is a graybox
+/// box with a static collider that joins `world::TerrainMap`'s block list; a graybox fir carries a
+/// trunk collider only; a damage-model tree is spawned by `trees` — a static root with an HP pool
+/// and a state, one frustum collider per segment.
+mod scatter;
 /// Player-facing graphics settings: the persisted model (`video.ron` in the platform config
 /// directory), the ONE reconciler that applies it to the rendering world, and the `Esc` settings
 /// page. Ships — NOT `dev_tools`-gated, and the only writer of the renderer's knobs. ONE mount per
 /// windowed root — `settings::plugin(PageEntry::…)` pulls in `render_scale`, the page and the page's
 /// entry declarer — and never the headless server.
-/// The map's object scatter (the map's own `level.json`, resolved through its `prototypes.ron`
-/// library): authored building and tree placement spawned as graybox proxies with static
-/// colliders, each carrying its map identity, from shared data on both binaries rather than over
-/// the wire. Buildings join `world::TerrainMap`'s block list; firs carry a trunk collider only.
-mod scatter;
 mod settings;
 /// Ship-facing view-layer audio: render-only subscribers to the device and `FireShell` seams (the
 /// trigger click and the 88's report) plus the RPM-driven engine loop every tank carries. Owns the
