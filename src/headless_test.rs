@@ -1759,17 +1759,23 @@ fn forest_tick_cost_bed() {
 
 /// THE LYING PIECE'S COLLIDERS LIE DOWN IN THE PHYSICS WORLD (A2, ADR-0016): a tree felled on the
 /// shipped terrain has, within a few ticks, its tip segment carried in avian's own bounds — the
-/// `ColliderAabb` its broad phase reads — along the fall and near the ground, and its stump's
+/// `ColliderAabb` its broad phase reads — where the body's own data puts it, and its stump's
 /// bounds where they stood; the segments between derive by the same law and are not read here.
-/// A static body's child collider whose bounds avian refreshed only at insert would leave the
-/// fallen trunk standing for every hull and round.
+/// Standing, the tip's bounds hold its bottom and top centres, `prefix[n-1]` and `prefix[n]` up
+/// the root's axis; down, they hold the same centres laid along the root's resting record — the
+/// pivot `prefix[cut]` up, then the height above the cut along `(dx sin t, cos t, dz sin t)` —
+/// and no longer the standing top. A static body's child collider whose bounds avian refreshed
+/// only at insert leaves the fallen trunk standing for every hull and round; a lying piece
+/// placed off its pivot lies outside its own record. Both red this.
 #[test]
 fn a_felled_trees_colliders_lie_down_in_the_physics_world() {
     use crate::map::Prototype;
-    use crate::trees::{TreeBody, TreeState};
+    use crate::trees::{Resting, TreeBody, TreeState};
     use avian3d::prelude::ColliderAabb;
 
     let shipped = crate::map::tests::shipped_manifest();
+    // Fixture selection: one tree kind the shipped map places. Every bound below is read from the
+    // spawned body's own data and its resting record, never from this kind's numbers.
     let kind = shipped
         .trees
         .get("fir_1")
@@ -1820,22 +1826,57 @@ fn a_felled_trees_colliders_lie_down_in_the_physics_world() {
             .filter_map(|child| world.get::<ColliderAabb>(child).copied())
             .collect()
     };
+    let prefix = app
+        .world()
+        .get::<TreeBody>(root)
+        .expect("the body")
+        .prefix
+        .clone();
+    let n = kind.segments.len();
+    // DERIVED tolerance: every coordinate read is under 256 m (asserted), where one f32 rounding
+    // is at most 2⁻¹⁷ m ≈ 7.6 µm; avian's vertex route and this one differ by a few roundings,
+    // far under the millimetre.
+    const TOLERANCE: f32 = 1.0e-3;
+    assert!(base.abs().max_element() + prefix[n] < 256.0);
+    let holds = |aabb: &ColliderAabb, point: Vec3| {
+        (aabb.min - Vec3::splat(TOLERANCE)).cmple(point).all()
+            && point.cmple(aabb.max + Vec3::splat(TOLERANCE)).all()
+    };
     let standing = bounds(&app);
-    assert_eq!(standing.len(), kind.segments.len());
-    let tip_standing = standing[standing.len() - 1];
-    assert!(
-        tip_standing.max.y > base.y + 10.0,
-        "standing: the tip segment's bounds are up the trunk: {tip_standing:?}"
-    );
-    *app.world_mut().get_mut::<TreeState>(root).unwrap() = TreeState::Down { cut: 1, dir: 0 };
+    assert_eq!(standing.len(), n);
+    let tip_standing = standing[n - 1];
+    let standing_top = base + Vec3::Y * prefix[n];
+    for point in [base + Vec3::Y * prefix[n - 1], standing_top] {
+        assert!(
+            holds(&tip_standing, point),
+            "standing: the tip segment's bounds {tip_standing:?} hold its centre {point}"
+        );
+    }
+    let cut = 1;
+    *app.world_mut().get_mut::<TreeState>(root).unwrap() = TreeState::Down { cut, dir: 0 };
     for _ in 0..3 {
         app.update();
     }
     let down = bounds(&app);
     assert_eq!(down[0], standing[0], "the stump's bounds stay");
-    let tip_down = down[down.len() - 1];
+    let tip_down = down[n - 1];
+    let resting = *app
+        .world()
+        .get::<Resting>(root)
+        .expect("the resting record");
+    let (sin, cos) = (libm::sinf(resting.tilt), libm::cosf(resting.tilt));
+    let laid = Vec3::new(resting.dx * sin, cos, resting.dz * sin);
+    for k in [n - 1, n] {
+        let point = base
+            + Vec3::Y * prefix[usize::from(cut)]
+            + laid * (prefix[k] - prefix[usize::from(cut)]);
+        assert!(
+            holds(&tip_down, point),
+            "down: the tip segment's bounds {tip_down:?} hold its laid centre {point}"
+        );
+    }
     assert!(
-        tip_down.max.y < tip_standing.max.y - 5.0 && tip_down.max.x > base.x + 5.0,
-        "down: the tip segment's bounds lie along +x near the ground: {tip_down:?}"
+        !holds(&tip_down, standing_top),
+        "down: the tip segment's bounds {tip_down:?} left the standing top {standing_top}"
     );
 }
