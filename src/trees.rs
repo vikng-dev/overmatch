@@ -482,7 +482,7 @@ fn lying_layers() -> CollisionLayers {
 /// keeps the instance's yaw under the tilt: its world rotation is `tilt × yaw`, its world offset
 /// from the base the pivot plus its height above the cut turned by the tilt alone (the pivot and
 /// the trunk's axis are vertical, which the yaw fixes).
-fn derive_state(
+pub(crate) fn derive_state(
     trees: Query<
         (
             Entity,
@@ -820,9 +820,10 @@ fn fell_on_ram(
     }
 }
 
-/// The sim half: the authority's state transitions. The emptying observer is mounted in every
-/// composition (a replica's march empties no pool, so it never fires on a client); the ram rule
-/// runs only where this process is the authority.
+/// The sim half: the authority's state transitions and the body derived from them. The emptying
+/// observer is mounted in every composition (a replica's march empties no pool, so it never
+/// fires on a client); the ram rule and the derive after it run only where this process is the
+/// authority — a replica derives in the frame its ledger lands (`net::destruction`).
 pub(crate) fn sim_plugin(app: &mut App) {
     app.add_observer(fell_on_pool_emptied)
         .configure_sets(
@@ -835,7 +836,9 @@ pub(crate) fn sim_plugin(app: &mut App) {
                 fell_on_ram
                     .in_set(TreeFallSet)
                     .run_if(not(resource_exists::<ClientReplica>)),
-                derive_state.after(TreeFallSet),
+                derive_state
+                    .after(TreeFallSet)
+                    .run_if(not(resource_exists::<ClientReplica>)),
             ),
         );
 }
@@ -1454,7 +1457,7 @@ pub(crate) mod tests {
     }
 
     /// An 11 × 11 fixture grid over `FIXTURE_EXTENT` (100 m cells) sampled from `height`.
-    fn fixture_grid(height: impl Fn(f32, f32) -> f32) -> HeightGrid {
+    pub(crate) fn fixture_grid(height: impl Fn(f32, f32) -> f32) -> HeightGrid {
         let size = 11_u32;
         let half = FIXTURE_EXTENT.half_extent();
         let step = FIXTURE_EXTENT.world_size_m / (size - 1) as f32;
