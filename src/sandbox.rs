@@ -29,7 +29,11 @@
 //! For in-engine captures (`dev_capture`) the range runs on an autopilot instead of the mouse:
 //! `OVERMATCH_RANGE_POSE=x,y,z,lx,ly,lz` stands the camera-gun at `x,y,z` looking at `lx,ly,lz`,
 //! and `OVERMATCH_RANGE_FIRE=<round>@<s>[,…]` fires the gun's round `<round>` (an index into its
-//! rounds) down the view axis at app second `<s>`. Either one leaves the cursor free.
+//! rounds) down the view axis at app second `<s>`. `OVERMATCH_RANGE_FLY=x,y,z,lx,ly,lz@<a>-<b>`
+//! moves the eye and the point looked at in a straight line from the pose's to these between app
+//! seconds `<a>` and `<b>`, then holds there; while it is set the app clock steps a fixed 1/30 s a
+//! frame, so a frame's pose and the shot's tick are the same in every run. Any one leaves the
+//! cursor free.
 
 use std::collections::HashSet;
 
@@ -786,32 +790,74 @@ fn fire_round(
     true
 }
 
-/// The capture autopilot (module doc): the camera-gun's pose, taken on the first frame, and the
-/// rounds still to fire with their app seconds, earliest first.
+/// The capture autopilot (module doc): the camera-gun's pose (eye and the point looked at), taken
+/// on the first frame, its flight, and the rounds still to fire with their app seconds, earliest
+/// first.
 #[derive(Resource)]
 struct Autopilot {
-    pose: Option<Transform>,
+    pose: Option<(Vec3, Vec3)>,
+    fly: Option<Flight>,
     fire: std::collections::VecDeque<(u8, f32)>,
 }
 
-/// Mount the [`Autopilot`] when either of its variables is set.
+/// The autopilot's flight: from the pose's eye and point looked at to `to`'s, between app seconds
+/// `from_s` and `to_s`.
+struct Flight {
+    from: (Vec3, Vec3),
+    to: (Vec3, Vec3),
+    from_s: f32,
+    to_s: f32,
+}
+
+impl Flight {
+    /// The camera's pose at app second `t`: held at either end outside the flight.
+    fn at(&self, t: f32) -> Transform {
+        let s = ((t - self.from_s) / (self.to_s - self.from_s).max(f32::EPSILON)).clamp(0.0, 1.0);
+        let (eye, look) = (
+            self.from.0.lerp(self.to.0, s),
+            self.from.1.lerp(self.to.1, s),
+        );
+        Transform::from_translation(eye).looking_at(look, Vec3::Y)
+    }
+}
+
+/// An eye and the point it looks at, `x,y,z,lx,ly,lz`.
+fn parse_pose(name: &str, pose: &str) -> Option<(Vec3, Vec3)> {
+    let v: Vec<f32> = pose
+        .split(',')
+        .filter_map(|v| v.trim().parse().ok())
+        .collect();
+    let [x, y, z, lx, ly, lz] = v[..] else {
+        warn!("{name}={pose}: expected x,y,z,lx,ly,lz");
+        return None;
+    };
+    Some((Vec3::new(x, y, z), Vec3::new(lx, ly, lz)))
+}
+
+/// Mount the [`Autopilot`] when any of its variables is set.
 fn autopilot_plugin(app: &mut App) {
     let pose = std::env::var("OVERMATCH_RANGE_POSE").ok();
     let fire = std::env::var("OVERMATCH_RANGE_FIRE").ok();
-    if pose.is_none() && fire.is_none() {
+    let fly = std::env::var("OVERMATCH_RANGE_FLY").ok();
+    if pose.is_none() && fire.is_none() && fly.is_none() {
         return;
     }
-    let pose = pose.and_then(|pose| {
-        let v: Vec<f32> = pose
-            .split(',')
-            .filter_map(|v| v.trim().parse().ok())
-            .collect();
-        let [x, y, z, lx, ly, lz] = v[..] else {
-            warn!("OVERMATCH_RANGE_POSE={pose}: expected x,y,z,lx,ly,lz");
-            return None;
-        };
-        Some(Transform::from_xyz(x, y, z).looking_at(Vec3::new(lx, ly, lz), Vec3::Y))
+    let pose = pose.and_then(|pose| parse_pose("OVERMATCH_RANGE_POSE", &pose));
+    let fly = fly.and_then(|fly| {
+        let (to, span) = fly.split_once('@')?;
+        let (from_s, to_s) = span.split_once('-')?;
+        Some(Flight {
+            from: pose?,
+            to: parse_pose("OVERMATCH_RANGE_FLY", to)?,
+            from_s: from_s.trim().parse().ok()?,
+            to_s: to_s.trim().parse().ok()?,
+        })
     });
+    if fly.is_some() {
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_nanos(33_333_333),
+        ));
+    }
     let mut shots: Vec<(u8, f32)> = fire
         .iter()
         .flat_map(|fire| fire.split(','))
@@ -821,16 +867,20 @@ fn autopilot_plugin(app: &mut App) {
         })
         .collect();
     shots.sort_by(|a, b| a.1.total_cmp(&b.1));
-    info!("armour sandbox: autopilot pose {pose:?}, fire {shots:?}");
+    info!(
+        "armour sandbox: autopilot pose {pose:?}, fly {:?}, fire {shots:?}",
+        fly.as_ref().map(|fly| (fly.to, fly.from_s, fly.to_s))
+    );
     app.insert_resource(Autopilot {
         pose,
+        fly,
         fire: shots.into(),
     })
     .add_systems(Update, drive_autopilot);
 }
 
-/// Stand the camera-gun at the autopilot's pose, then fire each round at its second, one per
-/// shot-clock tick.
+/// Stand the camera-gun at the autopilot's pose, fly it, then fire each round at its second, one
+/// per shot-clock tick.
 #[expect(
     clippy::too_many_arguments,
     reason = "the trigger's own inputs, as `fire` reads them, plus the clock and the autopilot"
@@ -846,8 +896,11 @@ fn drive_autopilot(
     mut commands: Commands,
 ) {
     let (camera, mut transform, &combatant) = camera.into_inner();
-    if let Some(pose) = pilot.pose.take() {
-        *transform = pose;
+    if let Some((eye, look)) = pilot.pose.take() {
+        *transform = Transform::from_translation(eye).looking_at(look, Vec3::Y);
+    }
+    if let Some(fly) = &pilot.fly {
+        *transform = fly.at(time.elapsed_secs());
     }
     let Some(&(round, at)) = pilot.fire.front() else {
         return;
