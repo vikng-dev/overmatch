@@ -798,6 +798,43 @@ fn cast_disc_segment(
     }
 }
 
+/// A test's rays through the live march's first-contact query ([`cast_disc_segment`]), each a
+/// disc of `radius` laid as a fresh shell's ([`resolve::layout`]): what [`probe_march`] records
+/// per run is the armour volume each ray reached first, `None` for open air or the ground.
+#[cfg(test)]
+#[derive(Resource, Default)]
+pub(crate) struct MarchProbe {
+    pub(crate) radius: f32,
+    pub(crate) rays: Vec<(Vec3, Dir3, f32)>,
+    pub(crate) reached: Vec<Vec<Option<Entity>>>,
+}
+
+/// Mounts [`probe_march`] in `FixedUpdate`, the march's schedule, with an empty [`MarchProbe`].
+#[cfg(test)]
+pub(crate) fn mount_march_probe(app: &mut App) {
+    app.init_resource::<MarchProbe>()
+        .add_systems(FixedUpdate, probe_march);
+}
+
+/// Casts every [`MarchProbe`] ray through the march's query against the world as a march in the
+/// same fixed tick reads it.
+#[cfg(test)]
+fn probe_march(world: ProjectileMarchWorld, mut probe: ResMut<MarchProbe>) {
+    let reached = probe
+        .rays
+        .iter()
+        .map(|&(origin, dir, max)| {
+            let frame = walk::DiscFrame::anchored(Vec3::from(dir)).expect("a probe's direction");
+            let offsets = resolve::layout(&frame, probe.radius);
+            match cast_disc_segment(&world, &offsets, origin, dir, max, &|_| true) {
+                Some(SegmentHit::Armor(hit)) => world.armour(hit.entity).map(|(volume, _)| volume),
+                _ => None,
+            }
+        })
+        .collect();
+    probe.reached.push(reached);
+}
+
 /// Whether a spent shell freezes in place — keeping its stuck mesh, tracer, and penetration marks
 /// for inspection — instead of despawning. The game despawns (default); the sandbox opts in.
 #[derive(Resource, Default)]

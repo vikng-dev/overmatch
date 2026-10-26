@@ -19,16 +19,26 @@
 //! ([`PoolEmptied`], at the dose's own entry height and direction) or when a ram's torque beats
 //! `fell_k × dbh³` — and every peer derives the rest from it: the body here, the glb and the
 //! fall's presentation in [`view`], which the sim never waits on.
+//!
+//! THE BODY IN THE PHYSICS WORLD. The body is derived and placed in avian's world — collider
+//! poses, bounds and the trees a spatial query walks — in the frame its state changes
+//! ([`derive_systems`]), so the first march after that frame, the next fixed tick's, reads the
+//! derived body. The authority derives after the tick's physics step: a transition a march makes
+//! is read by the march of the next tick, never by later shells of the same tick.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::f32::consts::{FRAC_PI_2, PI};
 use std::path::Path;
 use std::sync::Arc;
 
+use avian3d::collider_tree::{ColliderTrees, update_moved_collider_aabbs};
 use avian3d::prelude::{
-    Collider, CollisionLayers, ContactGraph, ContactPair, LayerMask, RigidBody,
+    Collider, ColliderTransform, CollisionLayers, ContactGraph, ContactPair, LayerMask, Position,
+    RigidBody, Rotation,
 };
 use avian3d::schedule::PhysicsSystems;
+use bevy::ecs::schedule::ScheduleConfigs;
+use bevy::ecs::system::ScheduleSystem;
 use bevy::prelude::*;
 
 use crate::Layer;
@@ -482,7 +492,7 @@ fn lying_layers() -> CollisionLayers {
 /// keeps the instance's yaw under the tilt: its world rotation is `tilt × yaw`, its world offset
 /// from the base the pivot plus its height above the cut turned by the tilt alone (the pivot and
 /// the trunk's axis are vertical, which the yaw fixes).
-pub(crate) fn derive_state(
+fn derive_state(
     trees: Query<
         (
             Entity,
@@ -562,6 +572,67 @@ pub(crate) fn derive_state(
             }
         }
     }
+}
+
+/// Every peer places a re-derived tree's segment colliders in the physics world in the frame the
+/// state changes: each segment's `ColliderTransform`, `Position` and `Rotation` take the values
+/// avian's propagation (`propagate_collider_transforms`) and child update
+/// (`update_child_collider_position`) compute from the derived transforms — the same expressions
+/// on the same inputs, so the next physics step rewrites the same bits. The `ColliderTransform`
+/// is written with them because lightyear rewrites every child collider's pose from it after
+/// each fixed loop (`LightyearAvianPlugin::update_child_collider_position`).
+fn place_segment_colliders(
+    trees: Query<
+        (&Transform, &Position, &Rotation, &Children),
+        (Changed<TreeState>, Without<TreeSegment>),
+    >,
+    mut segments: Query<
+        (
+            &Transform,
+            &mut ColliderTransform,
+            &mut Position,
+            &mut Rotation,
+        ),
+        With<TreeSegment>,
+    >,
+) {
+    for (root, body_position, body_rotation, children) in &trees {
+        let parent = ColliderTransform::from(*root);
+        for &child in children {
+            let Ok((local, mut collider, mut position, mut rotation)) = segments.get_mut(child)
+            else {
+                continue;
+            };
+            let local = ColliderTransform::from(*local);
+            let placed = ColliderTransform {
+                translation: parent.scale * local.translation,
+                rotation: local.rotation,
+                scale: parent.scale * local.scale,
+            };
+            collider.set_if_neq(placed);
+            position.set_if_neq(Position(
+                body_position.0 + body_rotation * placed.translation,
+            ));
+            rotation.set_if_neq((body_rotation.0 * placed.rotation.0).normalize().into());
+        }
+    }
+}
+
+/// The body derive as every peer schedules it: [`derive_state`], then
+/// [`place_segment_colliders`], then avian's own refit of moved colliders
+/// ([`update_moved_collider_aabbs`]: their bounds and the collider trees a spatial query walks)
+/// in any frame a tree's state changed. A march runs in `FixedUpdate`, before the physics step,
+/// so the march of the first fixed tick after the derive reads the derived body; without the
+/// placement it would read the pose of the last step, one tick behind the state.
+pub(crate) fn derive_systems() -> ScheduleConfigs<ScheduleSystem> {
+    (
+        derive_state,
+        place_segment_colliders,
+        update_moved_collider_aabbs::<Collider>
+            .run_if(resource_exists::<ColliderTrees>)
+            .run_if(any_match_filter::<(Changed<TreeState>, Without<TreeSegment>)>),
+    )
+        .chain()
 }
 
 /// The 12-gon the frustum colliders are hulled from: exact unit-circle points at 30° steps, pinned
@@ -836,7 +907,7 @@ pub(crate) fn sim_plugin(app: &mut App) {
                 fell_on_ram
                     .in_set(TreeFallSet)
                     .run_if(not(resource_exists::<ClientReplica>)),
-                derive_state
+                derive_systems()
                     .after(TreeFallSet)
                     .run_if(not(resource_exists::<ClientReplica>)),
             ),

@@ -20,7 +20,7 @@ use lightyear::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use crate::scatter::MapInstance;
-use crate::trees::{FallClock, Fell, TreeBody, TreeFallSet, TreeState, derive_state};
+use crate::trees::{FallClock, Fell, TreeBody, TreeFallSet, TreeState, derive_systems};
 
 /// One transition: which tree, what state, which authority tick.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,11 +69,12 @@ pub(super) fn install_client(app: &mut App) {
 /// The ledger's consumption and the body derive it orders, in `Update`: replicon receives in
 /// `PreUpdate` and the fixed loop runs before `Update`, so a replica deriving only in the fixed
 /// loop would leave a received fall's colliders standing until the next fixed tick — a frame
-/// that runs none leaves them standing a frame longer. Avian consumes the moved transforms at
-/// the next fixed tick either way; the presentation reads them this frame.
+/// that runs none leaves them standing a frame longer. The derive places the colliders in the
+/// physics world in this frame ([`derive_systems`]), so the march of the next fixed tick reads
+/// the received state; the presentation reads it this frame.
 pub(crate) fn install_apply(app: &mut App) {
     app.init_resource::<Applied>()
-        .add_systems(Update, (apply_ledger, derive_state).chain());
+        .add_systems(Update, (apply_ledger, derive_systems()).chain());
 }
 
 fn spawn_ledger(mut commands: Commands) {
@@ -186,11 +187,11 @@ fn publish_fall_clock(
 mod tests {
     use std::time::Duration;
 
-    use avian3d::prelude::{ColliderAabb, PhysicsPlugins};
+    use avian3d::prelude::{Position, Rotation};
     use bevy::time::TimeUpdateStrategy;
 
     use super::*;
-    use crate::ballistics::ComponentHealth;
+    use crate::ballistics::{ComponentHealth, MarchProbe, PoolEmptied};
     use crate::trees::Resting;
 
     /// What stands in for replicon's receive: entries landing on the ledger in `PreUpdate`.
@@ -206,23 +207,35 @@ mod tests {
         }
     }
 
-    /// A replica's composition: the real schedules, avian, the trees' sim half and the ledger's
-    /// apply, with the fixture grid and `trees` fixture trees on it, one per ordinal.
-    fn replica(trees: u16) -> (App, Vec<Entity>) {
+    /// The trees' sim half on the network's physics — avian as `net::physics` mounts it, and
+    /// lightyear's after-loop child collider update — with the fixture grid and `trees` fixture
+    /// trees on it, one per ordinal, each yawed 0.7 rad (fixture data: the placement composes a
+    /// turned root), and the march probe in `FixedUpdate`. A replica adds the ledger's apply and
+    /// its marker; the authority is the composition without them.
+    fn composed(replica: bool, trees: u16) -> (App, Vec<Entity>) {
         let mut app = App::new();
         app.add_plugins((
             MinimalPlugins,
             bevy::transform::TransformPlugin,
             AssetPlugin::default(),
-            PhysicsPlugins::default(),
+            super::super::physics::physics_plugins(),
+            super::super::physics::plugin,
             crate::trees::sim_plugin,
-            install_apply,
+            crate::ballistics::mount_march_probe,
         ))
         .init_asset::<Mesh>()
-        .init_resource::<crate::ClientReplica>()
-        .init_resource::<Incoming>()
         .insert_resource(crate::trees::tests::fixture_grid(|_, _| 0.0))
-        .add_systems(PreUpdate, receive);
+        .add_systems(
+            RunFixedMainLoop,
+            lightyear::avian3d::plugin::LightyearAvianPlugin::update_child_collider_position
+                .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
+        );
+        if replica {
+            app.add_plugins(install_apply)
+                .init_resource::<crate::ClientReplica>()
+                .init_resource::<Incoming>()
+                .add_systems(PreUpdate, receive);
+        }
         while app.plugins_state() == bevy::app::PluginsState::Adding {
             std::thread::sleep(Duration::from_millis(1));
         }
@@ -240,7 +253,8 @@ mod tests {
                     id: format!("fir_{ordinal}"),
                     ordinal,
                 },
-                Transform::from_xyz(0.0, 0.0, 20.0 * f32::from(ordinal)),
+                Transform::from_xyz(0.0, 0.0, 20.0 * f32::from(ordinal))
+                    .with_rotation(Quat::from_rotation_y(0.7)),
                 None,
             );
         }
@@ -254,37 +268,78 @@ mod tests {
         (app, roots.into_iter().map(|(_, entity)| entity).collect())
     }
 
-    /// The tip segment's bounds as avian holds them.
-    fn tip_bounds(app: &App, root: Entity) -> ColliderAabb {
+    fn replica(trees: u16) -> (App, Vec<Entity>) {
+        composed(true, trees)
+    }
+
+    /// Each frame advances virtual time by `micros`: 15 625 is one fixed tick at 64 Hz, 0 none.
+    fn frame_time(app: &mut App, micros: u64) {
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(
+            micros,
+        )));
+    }
+
+    /// Each segment's collider pose in avian's world, in segment order, as bit patterns.
+    fn placements(app: &App, root: Entity) -> Vec<[u32; 7]> {
         let world = app.world();
-        let tip = world
+        world
             .get::<Children>(root)
             .expect("segments")
             .iter()
-            .filter(|child| world.get::<ColliderAabb>(*child).is_some())
-            .last()
-            .expect("the tip");
-        *world.get::<ColliderAabb>(tip).unwrap()
+            .filter_map(|child| {
+                let position = world.get::<Position>(child)?.0;
+                let rotation = world.get::<Rotation>(child)?.0;
+                Some(
+                    [
+                        position.x, position.y, position.z, rotation.x, rotation.y, rotation.z,
+                        rotation.w,
+                    ]
+                    .map(f32::to_bits),
+                )
+            })
+            .collect()
     }
 
-    /// A RECEIVED FALL REACHES THE BODY IN THE FRAME IT LANDS, FIXED TICK OR NONE (P2c): an
-    /// entry arriving in `PreUpdate` of a frame that runs no fixed tick leaves `Update` with the
-    /// tree's state, its transition tick, its resting pose and its segments' lying transforms
-    /// all set; avian's bounds still stand, and the next fixed tick lays them down. A replica
-    /// deriving only in the fixed loop reds the first half.
+    /// Two probe rays against the fixture trunk at the origin, felled `Down { cut: 1, dir: 0 }`
+    /// on flat ground (fixture data; DERIVED: the 4 m piece above the cut reaches no ground by
+    /// 100°, so it lies at 90°, along +x at 2 m). The first crosses where segment 1 stood, 3 m up,
+    /// clear of the lying piece; the second comes down at x = 3 m onto segment 2 where it lies,
+    /// clear of the standing trunk. Each is the disc of an 88 mm round (fixture data), so the
+    /// probe takes the march's broad-phase test as well as its casts.
+    fn aim_probe(app: &mut App) {
+        let mut probe = app.world_mut().resource_mut::<MarchProbe>();
+        probe.radius = 0.044;
+        probe.rays = vec![
+            (Vec3::new(0.0, 3.0, -5.0), Dir3::Z, 10.0),
+            (Vec3::new(3.0, 10.0, 0.0), Dir3::NEG_Y, 20.0),
+        ];
+    }
+
+    /// A RECEIVED FALL REACHES THE BODY IN THE FRAME IT LANDS AND THE MARCH AT THE NEXT FIXED
+    /// TICK, WHETHER THAT FRAME RUNS A TICK OR NOT: an entry arriving in `PreUpdate` of a frame
+    /// that runs none leaves `Update` with the tree's state, its transition tick, its resting
+    /// pose and its segments' lying transforms all set, and the march of the next fixed tick —
+    /// the live first-contact query, through avian's collider trees — reads the lying piece. A
+    /// replica deriving only in the fixed loop reds the first half; one that leaves the colliders
+    /// to the next physics step reads the standing trunk in that march and reds the second. The
+    /// step that follows rewrites the placed collider poses bit for bit: the placement computes
+    /// what avian would, so the sim never sees two poses for one state.
     #[test]
-    fn a_received_fall_derives_in_its_own_frame_and_avian_follows_at_the_next_tick() {
+    fn a_received_fall_reaches_the_next_ticks_march() {
         let (mut app, roots) = replica(1);
+        aim_probe(&mut app);
         app.world_mut().spawn(DestructionLedger::default());
-        // Settle: avian takes its first look at the standing tree.
-        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(
-            15_625,
-        )));
+        frame_time(&mut app, 15_625);
         app.update();
         app.update();
-        let standing = tip_bounds(&app, roots[0]);
+        let settled = app.world().resource::<MarchProbe>().reached.clone();
+        assert_eq!(
+            settled.last(),
+            Some(&vec![Some(roots[0]), None]),
+            "the march reads the trunk standing"
+        );
         // The receive frame: no time passes, so no fixed tick runs.
-        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
+        frame_time(&mut app, 0);
         app.world_mut()
             .resource_mut::<Incoming>()
             .0
@@ -312,22 +367,79 @@ mod tests {
             .unwrap();
         let local = world.get::<Transform>(tip).unwrap();
         assert!(
-            local.translation.x > 1.9 && local.rotation != Quat::IDENTITY,
+            local.translation.xz().length() > 1.9 && local.rotation != Quat::IDENTITY,
             "the tip's transform lies, this frame: {local:?}"
         );
         assert_eq!(
-            tip_bounds(&app, roots[0]),
-            standing,
-            "avian has not run: its bounds still stand"
+            world.resource::<MarchProbe>().reached.len(),
+            settled.len(),
+            "the receive frame ran no fixed tick"
         );
-        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_micros(
-            15_625,
-        )));
+        let placed = placements(&app, roots[0]);
+        frame_time(&mut app, 15_625);
         app.update();
-        let down = tip_bounds(&app, roots[0]);
-        assert!(
-            down.max.y < standing.max.y - 1.5 && down.max.x > standing.max.x + 1.5,
-            "one fixed tick later avian's bounds lie along +x: {down:?} from {standing:?}"
+        assert_eq!(
+            app.world()
+                .resource::<MarchProbe>()
+                .reached
+                .get(settled.len()),
+            Some(&vec![None, Some(roots[0])]),
+            "the next tick's march reads the piece lying"
+        );
+        assert_eq!(
+            placements(&app, roots[0]),
+            placed,
+            "the physics step rewrites the placement's own bits"
+        );
+    }
+
+    /// THE AUTHORITY'S NEXT MARCH READS A FALL: a pool emptied in tick N (a dose's entry 3 m up
+    /// the fixture trunk, along +x) fells the tree in that tick; tick N's march, which reads the
+    /// body before the derive at the end of the tick, finds the trunk standing, and the march of
+    /// tick N + 1 — the live first-contact query, through avian's collider trees — reads the
+    /// lying piece. A derive that leaves the colliders to the next physics step reads the
+    /// standing trunk at N + 1 and reds this.
+    #[test]
+    fn the_authoritys_next_march_reads_a_fall() {
+        #[derive(Resource)]
+        struct Empty(Option<Entity>);
+
+        fn empty(mut pending: ResMut<Empty>, mut commands: Commands) {
+            if let Some(tree) = pending.0.take() {
+                commands.trigger(PoolEmptied {
+                    entity: tree,
+                    at: Vec3::new(0.0, 3.0, 0.0),
+                    along: Some(Vec3::X),
+                });
+            }
+        }
+
+        let (mut app, roots) = composed(false, 1);
+        aim_probe(&mut app);
+        app.insert_resource(Empty(None))
+            .add_systems(FixedPreUpdate, empty);
+        frame_time(&mut app, 15_625);
+        app.update();
+        app.update();
+        let before = app.world().resource::<MarchProbe>().reached.len();
+        app.world_mut().resource_mut::<Empty>().0 = Some(roots[0]);
+        app.update();
+        app.update();
+        let world = app.world();
+        assert_eq!(
+            world.get::<TreeState>(roots[0]),
+            Some(&TreeState::Down { cut: 1, dir: 0 })
+        );
+        let reached = &world.resource::<MarchProbe>().reached;
+        assert_eq!(
+            reached.get(before),
+            Some(&vec![Some(roots[0]), None]),
+            "tick N's march reads the trunk standing"
+        );
+        assert_eq!(
+            reached.get(before + 1),
+            Some(&vec![None, Some(roots[0])]),
+            "tick N + 1's march reads the piece lying"
         );
     }
 
