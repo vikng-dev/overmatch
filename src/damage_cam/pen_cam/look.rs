@@ -937,10 +937,12 @@ pub fn painting(
 /// show, as `pen_cam_look.wgsl`'s `visible` keeps it, `x ≥ y` where none: past the near plane of
 /// the camera whose `clip_from_world` the view hands the shader, where clip `z ≤ w` (Bevy's
 /// reversed depth, in a perspective view and an orthographic one alike: clip `z` is `w` on the
-/// near plane and exceeds it nearer the eye and behind it), on the kept side of `cut` (xyz the
-/// plane's unit normal toward the discarded side, w normal · a point on it) and short of the
-/// pixel's nearest scene surface `surface` (its eye depth, m). This is the clip the shader
-/// mirrors, held by the tests.
+/// near plane and exceeds it on the plane's eye side), the ray's one front bound, so an
+/// orthographic view with a negative near keeps depths behind its camera's plane; on the kept
+/// side of `cut` (xyz the plane's unit normal toward the discarded side, w normal · a point on
+/// it); and short of `surface`, the part mask's eye depth at the pixel (m) where the volume reads
+/// the mask, whose 0 holds no surface and ends nothing. This is the clip the shader mirrors, held
+/// by the tests.
 #[cfg(test)]
 pub fn visible(
     clip_from_world: Mat4,
@@ -953,8 +955,8 @@ pub fn visible(
         clip_from_world * eye.extend(1.0),
         clip_from_world * dir.extend(0.0),
     );
-    let mut seen = kept((0.0, 1e30), at.z - at.w, along.z - along.w);
-    if let Some(surface) = surface {
+    let mut seen = kept((-1e30, 1e30), at.z - at.w, along.z - along.w);
+    if let Some(surface) = surface.filter(|&depth| depth > 0.0) {
         seen.1 = seen.1.min(surface);
     }
     if let Some(cut) = cut {
@@ -1097,12 +1099,12 @@ pub fn strongest(params: &LookParams, top: f32, width: Vec2) -> Vec4 {
         .extend(knockout + reduced)
 }
 
-/// Field `print`'s stretch of the ray `eye + dir t` (`t ≥ 0`, `dir` unit), as `pen_cam_look.wgsl`'s
-/// `stretch` finds it: inside its ball out to its front or its longest reach, the nearer, and for a
-/// cap no wider than a hemisphere inside its cone too; `None` where the ray misses it. Every point
-/// the field holds on the ray lies within it, so the peak search, which samples only these
-/// stretches, leaves none of the field's points outside its range. This is the stretch the shader
-/// mirrors, held by the tests.
+/// Field `print`'s stretch of the line `eye + dir t` (`dir` unit, `t` of either sign: [`visible`]
+/// holds the ray's one front bound), as `pen_cam_look.wgsl`'s `stretch` finds it: inside its ball
+/// out to its front or its longest reach, the nearer, and for a cap no wider than a hemisphere
+/// inside its cone too; `None` where the line misses it. Every point the field holds on the line
+/// lies within it, so the peak search, which samples only these stretches, leaves none of the
+/// field's points outside its range. This is the stretch the shader mirrors, held by the tests.
 #[cfg(test)]
 pub fn stretch(print: &FieldPrint, eye: Vec3, dir: Vec3) -> Option<(f32, f32)> {
     let radius = print.front.min(print.longest * print.scale);
@@ -1167,7 +1169,6 @@ pub fn stretch(print: &FieldPrint, eye: Vec3, dir: Vec3) -> Option<(f32, f32)> {
             }
         }
     }
-    let lo = lo.max(0.0);
     (lo < hi).then_some((lo, hi))
 }
 
@@ -2511,9 +2512,9 @@ mod tests {
         ("pen_cam_look.wgsl", "inside", 0xbe35_1ba6_c6e3_7355),
         ("pen_cam_look.wgsl", "footprint", 0x0feb_6029_c26e_2427),
         ("pen_cam_look.wgsl", "printed", 0xa3ef_69a5_13f1_8034),
-        ("pen_cam_look.wgsl", "stretch", 0xf54b_5e9e_e1d2_8521),
+        ("pen_cam_look.wgsl", "stretch", 0xe48e_21f1_fcad_489a),
         ("pen_cam_look.wgsl", "kept", 0x84fb_64e5_5d35_095e),
-        ("pen_cam_look.wgsl", "visible", 0x078e_0f7b_a958_140b),
+        ("pen_cam_look.wgsl", "visible", 0xcbaa_89dc_4d54_dc8b),
         ("pen_cam_look.wgsl", "peak", 0x26f9_3c04_5a5a_a711),
         ("pen_cam_look.wgsl", "strongest", 0x79dc_6f4b_becf_2453),
         ("pen_cam_look.wgsl", "lines", 0x5560_efe8_d460_738c),
@@ -2631,8 +2632,11 @@ mod tests {
              `the_peak_search_finds_what_the_colour_needs` and \
              `a_small_field_inside_a_wide_one_is_drawn` and \
              `a_short_stretch_is_searched_in_full` for `peak`, \
-             `the_search_starts_at_the_near_plane` for `visible` and `kept`, \
-             `the_stretch_holds_every_point_of_its_field` for `stretch`, \
+             `the_search_starts_at_the_near_plane`, \
+             `the_near_plane_is_the_eye_ray_s_one_front_bound` and \
+             `the_visible_stretch_ends_at_the_surface_and_the_cut` for `visible` and `kept`, \
+             `the_stretch_holds_every_point_of_its_field` and \
+             `the_near_plane_is_the_eye_ray_s_one_front_bound` for `stretch`, \
              `the_pen_cam_intensity_times_a_face_is_its_dose` for the intensity's law, \
              `the_eye_depth_runs_forward_in_both_projections` for `eye_depth` and `eye_ray`) and \
              a hidden capture of every frame the moved items draw (`OVERMATCH_CAPTURE` over \
@@ -2730,16 +2734,18 @@ mod tests {
     /// The search starts at the camera's near plane: an eye ray's visible stretch ([`visible`])
     /// begins where the ray crosses the near plane of the camera that draws it, `near / cos θ`
     /// along a perspective ray `θ` off the forward and `near` along an orthographic one, and holds
-    /// nothing behind the eye; so a field whose origin lies between the eye and the near plane is
-    /// drawn by what lies past the plane alone. DERIVED fixture: near planes 0.1 m out on a camera
-    /// off every axis, rays 0° to 40° off its forward; [`lone_field`] at a 20th of the record's
-    /// size, its thresholds moved to a knockout radius of 0.02 m and a reduced radius of 0.08 m,
-    /// its origin 0.05 m ahead of the eye on the forward ray, whose visible points lie 0.05 m or
-    /// more from it, reduced, while the whole ray holds the origin, knockout. Tolerance: 1 mm
-    /// orthographic (DERIVED: there clip `z` and `w` both lie near 1 at the eye, so their
-    /// difference keeps `(far − near) 2⁻²³` m, 0.12 mm at the 1 km far), `10⁻⁵` m perspective.
-    /// The volume relies on it (`pen_cam_look.wgsl`, `visible`): a search from the eye seeds on
-    /// the hidden origin and colours the pixel knockout where no visible point is.
+    /// nothing nearer than the plane, whichever way the ray runs: the reversed ray keeps the same
+    /// points, at depths of minus that start and less. So a field whose origin lies between the
+    /// eye and the near plane is drawn by what lies past the plane alone. DERIVED fixture: near
+    /// planes 0.1 m out on a camera off every axis, rays 0° to 40° off its forward; [`lone_field`]
+    /// at a 20th of the record's size, its thresholds moved to a knockout radius of 0.02 m and a
+    /// reduced radius of 0.08 m, its origin 0.05 m ahead of the eye on the forward ray, whose
+    /// visible points lie 0.05 m or more from it, reduced, while the whole ray holds the origin,
+    /// knockout. Tolerance: 1 mm orthographic (DERIVED: there clip `z` and `w` both lie near 1 at
+    /// the eye, so their difference keeps `(far − near) 2⁻²³` m, 0.12 mm at the 1 km far),
+    /// `10⁻⁵` m perspective. The volume relies on it (`pen_cam_look.wgsl`, `visible`): a search
+    /// from the eye seeds on the hidden origin and colours the pixel knockout where no visible
+    /// point is.
     #[test]
     fn the_search_starts_at_the_near_plane() {
         let camera =
@@ -2778,8 +2784,9 @@ mod tests {
                 );
                 let (from, to) = visible(clip_from_world, eye, -dir, None, None);
                 assert!(
-                    from >= to,
-                    "{orthographic}, {off}: behind the eye, {from}..{to}"
+                    from <= -1e29 && (to + start).abs() < tolerance,
+                    "{orthographic}, {off}: reversed, {from}..{to}, not to {}",
+                    -start
                 );
             }
             let eye = camera.translation;
@@ -2810,6 +2817,98 @@ mod tests {
                 Band::Reduced,
                 "{orthographic}: {shown}"
             );
+        }
+    }
+
+    /// The near plane is the eye ray's one front bound: an orthographic view whose near is
+    /// negative keeps the depths between it and the camera's plane, which the eye ray starts on,
+    /// and the search draws a field there. DERIVED fixture: an orthographic camera off every axis,
+    /// its near 0.1 m behind its plane; [`lone_field`] at a 100th of the record's size, reaching
+    /// 0.02 m, its origin at eye depth −0.05 m on the forward ray, so the field lies at depths
+    /// −0.07 to −0.03 m and the ray through its origin reads knockout. Tolerance as
+    /// [`the_search_starts_at_the_near_plane`]'s orthographic one. The volume relies on it
+    /// (`pen_cam_look.wgsl`, `visible` and `stretch`): a search held to depths of 0 or more leaves
+    /// the field undrawn where the raster shows it.
+    #[test]
+    fn the_near_plane_is_the_eye_ray_s_one_front_bound() {
+        let camera =
+            Transform::from_xyz(3.0, 2.0, -4.0).looking_at(Vec3::new(-1.0, 0.5, 2.0), Vec3::Y);
+        let view_from_world = GlobalTransform::from(camera).to_matrix().inverse();
+        let (eye, forward, near) = (camera.translation, *camera.forward(), -0.1);
+        let clip_from_view = OrthographicProjection {
+            near,
+            ..OrthographicProjection::default_3d()
+        }
+        .get_clip_from_view();
+        let (from, to) = visible(clip_from_view * view_from_world, eye, forward, None, None);
+        assert!(
+            (from - near).abs() < 1e-3 && to >= 1e29,
+            "{from}..{to}, not from {near}"
+        );
+        let (print, picture, potency, _) = lone_field(eye - forward * 0.05, 1.0, 0.01);
+        let seen = [Seen {
+            picture: &picture,
+            reach: &|_| 2.0,
+        }];
+        let prints = std::slice::from_ref(&print);
+        let sum = |t: f32| intensity(prints, &seen, &potency, eye + forward * t);
+        let shown = peak(prints, &potency, eye, forward, from, to, sum);
+        assert_eq!(potency.band(shown), Band::Knockout, "{shown}");
+    }
+
+    /// The visible stretch ends at the pixel's nearest scene surface and at the cut, as the
+    /// shader's `visible` clips it: a part-mask depth ends the ray there and the mask's 0, where it
+    /// holds no surface, ends nothing; a cut keeps the side its normal points away from, ending a
+    /// ray that runs into the discarded side and starting one that runs out of it, and keeps all
+    /// or none of a ray parallel to it by the side its eye lies on. DERIVED fixture: a perspective
+    /// camera looking down `−Z`, near 0.1 m; rays 0° and 30° off its forward; a surface 2 m deep;
+    /// cut planes square to the forward 3 m ahead, either way, and planes through the forward 0.5
+    /// m either side of the eye, square to `Y`, which both rays run along. Tolerance `10⁻⁴` m.
+    /// The volume relies on it (`pen_cam_look.wgsl`, `visible`): a clip that takes an empty mask
+    /// pixel's 0 for a surface draws no field there, and a cut kept on the wrong side draws the
+    /// discarded half.
+    #[test]
+    fn the_visible_stretch_ends_at_the_surface_and_the_cut() {
+        let camera = Transform::from_xyz(3.0, 2.0, -4.0).looking_to(Vec3::NEG_Z, Vec3::Y);
+        let view_from_world = GlobalTransform::from(camera).to_matrix().inverse();
+        let (eye, forward, right) = (camera.translation, *camera.forward(), *camera.right());
+        let near = 0.1;
+        let clip_from_world =
+            PerspectiveProjection { near, ..default() }.get_clip_from_view() * view_from_world;
+        // The plane square to `normal` through the point `depth` ahead of the eye on the forward.
+        let ahead = |normal: Vec3, depth: f32| normal.extend(normal.dot(eye + forward * depth));
+        let beside = |side: f32| Vec3::Y.extend(Vec3::Y.dot(eye) + side);
+        for off in [0.0_f32, 30.0] {
+            let dir = forward * off.to_radians().cos() + right * off.to_radians().sin();
+            let (start, crossing) = (near / off.to_radians().cos(), 3.0 / off.to_radians().cos());
+            let open = Some((start, f32::INFINITY));
+            for (surface, cut, want) in [
+                (None, None, open),
+                (Some(0.0), None, open),
+                (Some(2.0), None, Some((start, 2.0))),
+                (None, Some(ahead(forward, 3.0)), Some((start, crossing))),
+                (
+                    None,
+                    Some(ahead(-forward, 3.0)),
+                    Some((crossing, f32::INFINITY)),
+                ),
+                (Some(2.0), Some(ahead(-forward, 3.0)), None),
+                (None, Some(beside(0.5)), open),
+                (None, Some(beside(-0.5)), None),
+            ] {
+                let (from, to) = visible(clip_from_world, eye, dir, surface, cut);
+                let held = match want {
+                    None => from >= to,
+                    Some((a, b)) if b.is_finite() => {
+                        (from - a).abs() < 1e-4 && (to - b).abs() < 1e-4
+                    }
+                    Some((a, _)) => (from - a).abs() < 1e-4 && to >= 1e29,
+                };
+                assert!(
+                    held,
+                    "{off}°, surface {surface:?}, cut {cut:?}: {from}..{to}, not {want:?}"
+                );
+            }
         }
     }
 

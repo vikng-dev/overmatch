@@ -396,22 +396,23 @@ pixel takes the colour of the strongest band the search finds on its eye ray, at
 opacity (knockout 0.5, reduced 0.2; TUNED), knockout over reduced over nothing. A knockout core
 reads inside its reduced shell, and a long run of the ray through a weak band never reads as dense
 as a short one through a strong band: no term depends on the ray's length inside a band. The
-ray's visible part starts at the camera's near plane, so a field's origin between the eye and that
-plane colours nothing, and ends at its pixel's nearest scene surface in the part mask and at the
-cut. Its **peak**, the greatest summed intensity the search finds along it, sets the colour. The
-search takes each field's point nearest its origin on its stretch; then each field's stretch in 64
-equal steps, ends included, however short the part mask or the cut leaves it; then 8
-golden-section steps about the best sample, one of its stretch's steps either side; it stops once
-the sum is past the mid's window, where the colour no longer changes. It skips no sample. A skip
-bounded by each field's greatest law weight over `r²` was not conservative: the law's f32
-evaluation can exceed its weight on the axis (MEASURED on the scalar f32 arithmetic: a cap of
-ratio 10 at `N = 65,536` strata, depth 1.503769·10⁻⁸, weighs 0.75390625 on its axis, 0.7568512
-with the skip's rounding margin and 0.7598202 off the axis). Searching every sample costs no time
-the instrument resolves: paired medians of +0.48, −0.71, −2.22 and +0.76 ms a frame over four
-runs of 25 frames, −0.12 ms their median (MEASURED, s14's glass frame at 4.5 s, 1920×1080, against
-the search that skipped). Each band's edge fades in density, never in thickness: its presence is a
-smoothstep in its held level, `log2` of the peak held to half an octave either side of its
-threshold, over one pixel's change of that held level, as the painting's edges fade.
+ray's visible part starts at the camera's near plane and at nothing else, so a field's origin
+between the eye and that plane colours nothing, and an orthographic view with a negative near draws
+what lies between that plane and its camera's; it ends at its pixel's nearest scene surface in the
+part mask and at the cut. Its **peak**, the greatest summed intensity the search finds along it,
+sets the colour. The search takes each field's point nearest its origin on its stretch; then each
+field's stretch in 64 equal steps, ends included, however short the part mask or the cut leaves it;
+then 8 golden-section steps about the best sample, one of its stretch's steps either side; it stops
+once the sum is past the mid's window, where the colour no longer changes. It skips no sample. A
+skip bounded by each field's greatest law weight over `r²` was not conservative: the law's f32
+evaluation can exceed its weight on the axis (MEASURED on the scalar f32 arithmetic: a cap of ratio
+10 at `N = 65,536` strata, depth 1.503769·10⁻⁸, weighs 0.75390625 on its axis, 0.7568512 with the
+skip's rounding margin and 0.7598202 off the axis). Searching every sample costs no time the
+instrument resolves: paired medians of +0.48, −0.71, −2.22 and +0.76 ms a frame over four runs of 25
+frames, −0.12 ms their median (MEASURED, s14's glass frame at 4.5 s, 1920×1080, against the search
+that skipped). Each band's edge fades in density, never in thickness: its presence is a smoothstep
+in its held level, `log2` of the peak held to half an octave either side of its threshold, over one
+pixel's change of that held level, as the painting's edges fade.
 
 How wide that fade runs on screen is a local estimate, not a promise. For an isolated field of one
 strength in every direction, under parallel eye rays and with a peak no clip moves, the peak falls

@@ -427,9 +427,10 @@ fn printed(rgb: vec3<f32>, print: vec2<f32>) -> vec3<f32> {
     return rgb * (1.0 - look.foot.x * print.x) + look.foot.x * bands;
 }
 
-// Field `f`'s stretch of the ray `eye + dir t` (t ≥ 0, `dir` unit): inside its ball out to its
-// front or its longest reach, the nearer, and for a cap no wider than a hemisphere inside its cone
-// too; empty (x ≥ y) where the ray misses it. `look::stretch`.
+// Field `f`'s stretch of the line `eye + dir t` (`dir` unit, `t` of either sign: `visible` holds
+// the ray's one front bound): inside its ball out to its front or its longest reach, the nearer,
+// and for a cap no wider than a hemisphere inside its cone too; empty (x ≥ y) where the line
+// misses it. `look::stretch`.
 fn stretch(f: i32, eye: vec3<f32>, dir: vec3<f32>) -> vec2<f32> {
     let base = PRINT_LANES * f;
     let at = look.prints[base];
@@ -497,7 +498,7 @@ fn stretch(f: i32, eye: vec3<f32>, dir: vec3<f32>) -> vec2<f32> {
             }
         }
     }
-    return vec2(max(lo, 0.0), hi);
+    return vec2(lo, hi);
 }
 
 // The depths `t` of `seen` (x, y) where `g0 + gd t ≤ 0`, one side of a plane the ray crosses at
@@ -516,13 +517,16 @@ fn kept(seen: vec2<f32>, g0: f32, gd: f32) -> vec2<f32> {
 // The stretch of the eye ray `eye + dir t` (`dir` unit, `t` the eye depth) a volume fragment at
 // mask pixel `p` can show, empty (x ≥ y) where none: past the camera's near plane, where clip
 // `z ≤ w` (Bevy's reversed depth, in a perspective view and an orthographic one alike: clip `z`
-// is `w` on the near plane and exceeds it nearer the eye and behind it), on the cut's kept side
-// (`mode.y = 1`: `plane · x ≤ w`) and, with `volume.w = 1`, short of the pixel's nearest scene
-// surface in the part mask. Both planes' sides are affine in `t`. `look::visible`.
+// is `w` on the near plane and exceeds it on the plane's eye side), the ray's one front bound, so
+// an orthographic view with a negative near keeps depths behind its camera's plane; on the cut's
+// kept side (`mode.y = 1`: `plane · x ≤ w`); and, with `volume.w = 1`, short of the pixel's
+// nearest scene surface in the part mask, whose 0 holds none (its write floors a surface's depth
+// at 10⁻⁴ m, so one at or behind an orthographic camera's plane ends the ray there). Both planes'
+// sides are affine in `t`. `look::visible`.
 fn visible(eye: vec3<f32>, dir: vec3<f32>, p: vec2<i32>) -> vec2<f32> {
     let clip_eye = view.clip_from_world * vec4(eye, 1.0);
     let clip_dir = view.clip_from_world * vec4(dir, 0.0);
-    var seen = kept(vec2(0.0, 1e30), clip_eye.z - clip_eye.w, clip_dir.z - clip_dir.w);
+    var seen = kept(vec2(-1e30, 1e30), clip_eye.z - clip_eye.w, clip_dir.z - clip_dir.w);
     if look.volume.w > 0.5 {
         let surface = mask_at(part_mask, p).a;
         if surface > 0.0 {
