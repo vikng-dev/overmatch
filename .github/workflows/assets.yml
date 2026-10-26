@@ -38,8 +38,11 @@ jobs:
   # source and compared with the tracked glb byte for byte.
   #
   # DISCOVERY, not a list — the one trio rule, sourced from `scripts/hooks/pushed_assets.sh`
-  # (`assets_trios`), so a second vehicle is gated by the rule that found the first and no path is
-  # written down here. Zero trios is a failure: a lane that verified nothing would report success.
+  # (`assets_trios`), so a second vehicle or a second tree is gated by the rule that found the
+  # first and no path is written down here. The trio's sheet names its build (`assets_trio_lane`):
+  # a `.tank.ron` goes through `scripts/tank/build.py`, a `.tree.ron` through
+  # `scripts/prop/build.py`. Zero trios is a failure: a lane that verified nothing would report
+  # success.
   #
   # It installs a foreign toolchain and pays a Blender launch plus a MEASURED minute of texture
   # encode per asset, and none of that belongs in front of clippy.
@@ -207,7 +210,13 @@ jobs:
           fi
           printf 'asset: %s\n' "${stems[@]}"
           for stem in "${stems[@]}"; do
-            python3 scripts/tank/build.py verify "${stem}.blend" \
+            lane=$(sh -c '. scripts/hooks/pushed_assets.sh; assets_trio_lane HEAD "$1"' lane "${stem}")
+            case "${lane}" in
+              tank) build=scripts/tank/build.py ;;
+              tree) build=scripts/prop/build.py ;;
+              *) echo "::error::${stem} is a trio of no lane this workflow dispatches (${lane})"; exit 1 ;;
+            esac
+            python3 "${build}" verify "${stem}.blend" \
               2>&1 | tee "${RUNNER_TEMP}/asset-reports/$(basename "${stem}").txt"
           done
 
@@ -222,7 +231,9 @@ jobs:
 
       # The derivation's laws, mutated one at a time on a real exported/baked pair; the door's own
       # chain and its refusals; the trio the build assembles and takes apart; the finding shape; the
-      # coverage table; and the assets lane's own discovery, selection and hydration.
+      # coverage table; the prop build's laws over the tracked tree trio and its mutants, with
+      # generation under the pinned Blender; and the assets lane's own discovery, selection and
+      # hydration.
       - name: The derivation, door and build suites
         if: steps.scope.outputs.affected == 'true'
         run: |
@@ -232,6 +243,7 @@ jobs:
           python3 scripts/tank/test_glb_ktx2.py
           python3 scripts/tank/test_build.py
           python3 scripts/tank/test_asset_door.py
+          python3 scripts/prop/test_prop.py
           sh scripts/hooks/test_pushed_assets.sh
 
       - name: The Rust consumer contract

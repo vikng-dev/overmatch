@@ -13,9 +13,11 @@
 # is the same two predicates asked over a range.
 #
 # The vocabulary is one word: a STEM. An asset is a sibling trio in one directory —
-# `<id>.blend`, `<id>.tank.ron`, `<id>.glb` — and the stem is their common path prefix,
-# `assets/tiger_1/tiger_1`, which names the whole trio and nothing else. No path is written down
-# anywhere in this file; a second vehicle is discovered by the same rule that found the first.
+# `<id>.blend`, a SHEET (`<id>.tank.ron` for a vehicle, `<id>.tree.ron` for a tree) and
+# `<id>.glb` — and the stem is their common path prefix, `assets/tiger_1/tiger_1` or
+# `assets/trees/fir_1/fir_1`, which names the whole trio and nothing else. The sheet's extension
+# names the build that verifies the trio (`assets_trio_lane`). No path is written down anywhere in
+# this file; a second vehicle or a second tree is discovered by the same rule that found the first.
 #
 # These live in their own file so the exercise script can source them and drive the real code.
 
@@ -49,25 +51,44 @@ assets_pushed_paths() {   # <local_sha> <remote_sha> <remote>
 # ── what the push holds ──────────────────────────────────────────────────────────────────────────
 
 # Every asset in one revision, as stems, sorted. The rule IS the trio: a `.blend` whose sibling
-# `.tank.ron` and `.glb` are both there too. A blend with no spec sheet (`assets/shell/`) is not an
-# asset, and a glb with no blend beside it is not one either; neither is discovered.
+# sheet (`.tank.ron` or `.tree.ron`) and `.glb` are both there too. A blend with no sheet
+# (`assets/shell/`) is not an asset, and a glb with no blend beside it is not one either; neither
+# is discovered.
 assets_trios() {   # <rev>
     git ls-tree -r --name-only "$1" | awk '
         /\.blend$/     { blend[substr($0, 1, length($0) - 6)] = 1; next }
         /\.tank\.ron$/ { sheet[substr($0, 1, length($0) - 9)] = 1; next }
+        /\.tree\.ron$/ { sheet[substr($0, 1, length($0) - 9)] = 1; next }
         /\.glb$/       { model[substr($0, 1, length($0) - 4)] = 1 }
         END { for (stem in blend) if (stem in sheet && stem in model) print stem }
     ' | LC_ALL=C sort
 }
 
-# Every blend a revision holds is at `assets/<id>/<id>.blend`, or the push is refused.
+# Which build verifies a trio: `tank` for a `.tank.ron` sheet, `tree` for a `.tree.ron` one. The
+# sheet's extension is the whole dispatch — no directory name is read — and a stem with neither
+# sheet is no trio, so it names no lane and the call fails.
+assets_trio_lane() {   # <rev> <stem>
+    if git cat-file -e "$1:$2.tank.ron" 2>/dev/null; then
+        printf 'tank\n'
+    elif git cat-file -e "$1:$2.tree.ron" 2>/dev/null; then
+        printf 'tree\n'
+    else
+        return 1
+    fi
+}
+
+# Every blend a revision holds is at `assets/<id>/<id>.blend` or `assets/trees/<id>/<id>.blend`,
+# or the push is refused.
 #
-# The canonical location is one directory under `assets/`, named by the directory it is in — the
-# shape the trio rule looks for and every derived path is cut from, and the shape
-# `assets/materials/materials.blend` already has. `.gitignore` cannot state that: its negation is
-# broad by construction (`!assets/*/*.blend` unignores `assets/tiger_1/scratch.blend` as readily as
-# the source beside it), and a pattern language with no backreference has no way to say "named after
-# its directory". So the law lives here, where it is executable, and the lane refuses a push
+# The canonical location is a directory named by the blend it holds — directly under `assets/` for
+# a vehicle (the shape `assets/materials/materials.blend` already has) and under `assets/trees/`
+# for a tree — the shapes the trio rule looks for and every derived path is cut from.
+# `assets/trees/` itself is the tree lane's directory, so `assets/trees/trees.blend` is not a
+# vehicle named after it. `.gitignore`
+# cannot state that: its negations are broad by construction (`!assets/*/*.blend` unignores
+# `assets/tiger_1/scratch.blend` as readily as the source beside it, `!/assets/trees/*/*.blend`
+# likewise one level down), and a pattern language with no backreference has no way to say "named
+# after its directory". So the law lives here, where it is executable, and the lane refuses a push
 # carrying a blend of any other shape rather than letting an authoring scratch file be tracked
 # forever as though it were a source.
 assets_blend_shape() {   # <rev>
@@ -75,22 +96,24 @@ assets_blend_shape() {   # <rev>
         /\.blend$/ {
             depth = split($0, part, "/")
             stem = substr(part[depth], 1, length(part[depth]) - 6)
-            if (depth != 3 || part[1] != "assets" || stem != part[2]) print
+            vehicle = depth == 3 && part[1] == "assets" && part[2] != "trees" && stem == part[2]
+            tree = depth == 4 && part[1] == "assets" && part[2] == "trees" && stem == part[3]
+            if (!vehicle && !tree) print
         }
     ')
     [ -n "$_stray" ] || return 0
     printf '\033[31m  a tracked blend is not a canonical source\033[0m — %s\n' \
-        "a tracked blend is exactly assets/<id>/<id>.blend" >&2
+        "a tracked blend is exactly assets/<id>/<id>.blend or assets/trees/<id>/<id>.blend" >&2
     printf '%s\n' "$_stray" | sed 's/^/    /' >&2
-    printf '  move it out of assets/<id>/, or name it after the directory it is in — every other\n' >&2
-    printf '  blend is authoring scratch, and .gitignore unignores this shape too broadly to say so\n' >&2
+    printf '  move it out of the asset directory, or name it after the directory it is in — every\n' >&2
+    printf '  other blend is authoring scratch, and .gitignore unignores these shapes too broadly to say so\n' >&2
     return 1
 }
 
 # The stems on stdin whose trio has a file in the changed set.
 assets_changed_trios() {   # <changed-paths-file>; stems on stdin
     while read -r _stem; do
-        if grep -qxF -e "$_stem.blend" -e "$_stem.tank.ron" -e "$_stem.glb" \
+        if grep -qxF -e "$_stem.blend" -e "$_stem.tank.ron" -e "$_stem.tree.ron" -e "$_stem.glb" \
                      -e "$_stem.sim.glb" -e "$_stem.lod.json" "$1"; then
             printf '%s\n' "$_stem"
         fi
@@ -120,13 +143,18 @@ assets_changed_trios() {   # <changed-paths-file>; stems on stdin
 # are in that list, and a push that moved one of them used to skip every `build.py verify` and ship
 # a trio the next verify would refuse.
 #
+# `scripts/prop/` and `assets/trees/species.ron` are the tree lane's half of the same list:
+# `scripts/prop/build.py`'s `PIPELINE_SOURCES` and the species table are what its `blend_digest`
+# hashes, so either moving stales every tree certificate; the whole directory is named rather than
+# the build's files because its suite (`test_prop.py`) runs in this lane and nowhere else.
+#
 # `src/map.rs` and the map manifests are here for the same reason one level out: `config.RIGHT_WALL_M`
 # is PARSED from `assets/maps/<DEFAULT_MAP_ID>/level.json` at import, and the wall decides where a
 # chain stops. A grown map is a different ladder, so it is a re-verification. The pattern takes every
 # map's `level.json` rather than resolving the default: which map is default is `src/map.rs`'s
 # answer, and this predicate refuses to be a second reader of it.
 assets_shared_surface() {   # changed paths on stdin
-    grep -qE '^(assets/materials/|assets/maps/[^/]+/level\.json$|scripts/toolchain\.py$|scripts/encode-tank-ktx2\.sh$|scripts/tank/(build|trio|chains|asset_door|glb_ktx2|report)\.py$|scripts/lod/(config|measure|generate)\.py$|\.agents/blender/export_tank\.py$|src/(bake|spec|exact|substances)|src/map\.rs$|src/bin/asset_verify\.rs$)'
+    grep -qE '^(assets/materials/|assets/maps/[^/]+/level\.json$|assets/trees/species\.ron$|scripts/toolchain\.py$|scripts/encode-tank-ktx2\.sh$|scripts/tank/(build|trio|chains|asset_door|glb_ktx2|report)\.py$|scripts/lod/(config|measure|generate)\.py$|scripts/prop/|\.agents/blender/export_tank\.py$|src/(bake|spec|exact|substances)|src/map\.rs$|src/bin/asset_verify\.rs$)'
 }
 
 # Whether a push rewires the contract in the crate root. Only a diff inside `src/lib.rs` that

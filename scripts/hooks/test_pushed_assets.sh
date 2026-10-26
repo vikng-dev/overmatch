@@ -188,6 +188,19 @@ commit "delete an asset file, and change code no verdict reads"
 DELETE_MIXED=$(at HEAD)
 git -C "$REPO" checkout -q "$MAIN"
 
+# A TREE, on a branch of its own: a trio whose sheet is a `.tree.ron`, one directory deeper than a
+# vehicle's, beside the species table the prop build reads. The revisions the rest of this file
+# reads are untouched.
+git -C "$REPO" checkout -q -b treelane "$TWO"
+pointer assets/trees/fir_1/fir_1.blend "fir blend v1" place
+write   assets/trees/fir_1/fir_1.tree.ron "TreeAsset(species: \"norway_spruce\")"
+pointer assets/trees/fir_1/fir_1.glb   "fir model v1" place
+write   assets/trees/fir_1/fir_1.lod.json "{}"
+write   assets/trees/species.ron "{}"
+commit "a tree"
+TREE=$(at HEAD)
+git -C "$REPO" checkout -q "$MAIN"
+
 # The remote, as this clone knows it: refs only, never a connection.
 git -C "$REPO" update-ref "refs/remotes/origin/$MAIN" "$BASE"
 
@@ -230,6 +243,20 @@ is "the list is sorted, byte by byte" \
 is "a stem names the source trio and the two artifacts the build publishes, and nothing else" \
    "5" "$(git -C "$REPO" ls-tree -r --name-only "$TWO" | grep -c '^assets/panther/panther\.')"
 
+is "a tree is a trio whose sheet is a .tree.ron, one directory deeper" \
+   "assets/panther/panther
+assets/tiger_1/tiger_1
+assets/trees/fir_1/fir_1" "$(assets_trios "$TREE")"
+
+is "a .tank.ron sheet names the tank build" \
+   "tank" "$(assets_trio_lane "$TREE" assets/tiger_1/tiger_1)"
+
+is "a .tree.ron sheet names the prop build" \
+   "tree" "$(assets_trio_lane "$TREE" assets/trees/fir_1/fir_1)"
+
+assets_trio_lane "$TREE" assets/shell/shell >/dev/null
+says "a stem with no sheet names no lane" no $?
+
 # ── selection: which trios a push must verify ────────────────────────────────────────────────────
 
 group "selection — assets_changed_trios"
@@ -260,6 +287,11 @@ is "the same path under another root is not the trio" \
 is "a path inside the trio's directory is not the trio" \
    "" "$(changed_of assets/tiger_1/notes.txt)"
 
+is "a tree whose sheet changed is selected" \
+   "assets/trees/fir_1/fir_1" \
+   "$(printf 'assets/trees/fir_1/fir_1.tree.ron\n' > "$SCRATCH/changed"
+      assets_trios "$TREE" | assets_changed_trios "$SCRATCH/changed")"
+
 group "selection — assets_shared_surface"
 
 surface() { printf '%s\n' "$1" | assets_shared_surface; }
@@ -286,7 +318,11 @@ for path in \
     src/spec.rs \
     src/exact.rs \
     src/substances.rs \
-    src/bin/asset_verify.rs
+    src/bin/asset_verify.rs \
+    scripts/prop/build.py \
+    scripts/prop/gen_tree.py \
+    scripts/prop/test_prop.py \
+    assets/trees/species.ron
 do
     surface "$path"
     says "$path moves every verdict" yes $?
@@ -312,6 +348,16 @@ uncovered=$(sed -n '/^SEARCH_SOURCES = (/,/^)$/p;/^PIPELINE_SOURCES = SEARCH_SOU
             done)
 is "the predicate covers every source blend_digest hashes" "" "$uncovered"
 
+# The same for the prop build, whose `PIPELINE_SOURCES` resolve relative to `scripts/prop/`.
+uncovered=$(sed -n '/^PIPELINE_SOURCES = (/,/^)$/p' "$_here/../prop/build.py" |
+            tr ',' '\n' | sed -n 's/^[^"]*"\([^"]*\)".*$/\1/p' |
+            while read -r _name; do
+                _path=$(printf 'scripts/prop/%s' "$_name" |
+                        sed -e ':a' -e 's![^/][^/]*/\.\./!!;ta' -e 's!^\./!!')
+                printf '%s\n' "$_path" | assets_shared_surface || printf '%s\n' "$_path"
+            done)
+is "…and every source the prop build's blend_digest hashes" "" "$uncovered"
+
 for path in \
     assets/tiger_1/tiger_1.glb \
     assets/tiger_1/tiger_1.blend \
@@ -320,6 +366,7 @@ for path in \
     src/lib.rs \
     scripts/tank/test_asset_door.py \
     scripts/lod/test_refusals.py \
+    assets/trees/fir_1/fir_1.tree.ron \
     README.md
 do
     surface "$path"
@@ -709,6 +756,40 @@ commit "the tree is canonical again"
 assets_blend_shape "$(at HEAD)" 2>/dev/null
 says "…and the revision that removes it passes again" yes $?
 
+# The tree shape, one directory deeper, on the tree branch.
+git -C "$REPO" checkout -q treelane
+assets_blend_shape "$TREE" 2>/dev/null
+says "a tree's source at assets/trees/<id>/<id>.blend is canonical" yes $?
+
+write assets/trees/fir_1/scratch.blend "an authoring scratch file, in a tree's directory"
+commit "a scratch blend beside a tree"
+assets_blend_shape "$(at HEAD)" 2>/dev/null
+says "a second blend in a tree's own directory refuses the push" no $?
+
+is "…naming the file" \
+   "yes" \
+   "$(assets_blend_shape "$(at HEAD)" 2>&1 >/dev/null |
+      grep -q 'assets/trees/fir_1/scratch.blend' && echo yes || echo no)"
+
+git rm -q assets/trees/fir_1/scratch.blend
+write assets/trees/trees.blend "a blend named for assets/trees/ itself"
+commit "a blend at the trees directory"
+assets_blend_shape "$(at HEAD)" 2>/dev/null
+says "assets/trees/ is the tree lane's directory, not a vehicle named trees" no $?
+
+git rm -q assets/trees/trees.blend
+write assets/trees/fir_1/backup/fir_1.blend "a backup, one directory too deep"
+commit "a blend under a subdirectory of a tree"
+assets_blend_shape "$(at HEAD)" 2>/dev/null
+says "a blend below assets/trees/<id>/ refuses the push" no $?
+
+git rm -q assets/trees/fir_1/backup/fir_1.blend
+write assets/other/fir_1/fir_1.blend "the tree shape, outside assets/trees/"
+commit "a tree-shaped blend outside assets/trees/"
+assets_blend_shape "$(at HEAD)" 2>/dev/null
+says "the tree shape outside assets/trees/ is not canonical" no $?
+git -C "$REPO" checkout -q "$MAIN"
+
 group "tracking — the repository's own .gitignore"
 
 IGNORE=$WORK/ignore
@@ -720,7 +801,9 @@ ignored() { git -C "$IGNORE" check-ignore -q "$1"; }
 for path in \
     assets/tiger_1/tiger_1.blend \
     assets/materials/materials.blend \
-    assets/panther/panther.blend
+    assets/panther/panther.blend \
+    assets/trees/fir_1/fir_1.blend \
+    assets/trees/birch_2/birch_2.blend
 do
     ignored "$path"
     says "$path is version-controlled" no $?
@@ -730,6 +813,9 @@ for path in \
     assets/tiger_1/tiger_1.blend1 \
     assets/tiger_1/tiger_1.blend.pre-weld.bak \
     assets/tiger_1/backup/tiger_1.blend \
+    assets/trees/fir_1/fir_1.blend1 \
+    assets/trees/fir_1/backup/fir_1.blend \
+    assets/other/fir_1/fir_1.blend \
     scratch/panther.blend \
     panther.blend
 do
