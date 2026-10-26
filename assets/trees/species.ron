@@ -3,9 +3,9 @@
 // the substance and the two thresholds.
 //
 // `height_m` and `dbh_m` are MATURE STAND ranges for the game's forest, metres. Sources are read
-// 2026-10-26; where the source gives a maximum-mature or record figure the game range sits below
-// it and the comment says so (DERIVED), where it gives a typical range the range is carried as
-// read (MEASURED from the source text).
+// 2026-10-26. A range carried as the source's typical range is MEASURED from the source text; a
+// range with a bound the source does not give — one sat below a maximum-mature or record figure,
+// or a lower bound chosen for a stand tree — is DERIVED, and the comment names the chosen bound.
 //
 // `crown_base_frac`, `crown_width_frac` and `whorl_spacing_m` are the generator's view-only look
 // parameters (placeholder era, chosen by eye): the live crown starts at that fraction of the
@@ -47,8 +47,9 @@
     "silver_birch": Species(
         // Wikipedia "Betula pendula": "typically reaches 15 to 25 m (49 to 82 ft) tall,
         // exceptionally up to 31 m (102 ft), with a slender trunk usually under 40 cm (1 ft 4 in)
-        // in diameter". MEASURED from the source text: the typical range as read, the diameter
-        // band under its 40 cm.
+        // in diameter". Height MEASURED from the source text, the typical range as read. Diameter
+        // DERIVED: the upper bound is the source's "under 40 cm"; the lower bound 0.20 m is a
+        // game choice for a mature stand tree, which the source does not give.
         height_m: (15.0, 25.0),
         dbh_m: (0.20, 0.40),
         substance: "Hardwood",

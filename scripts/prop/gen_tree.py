@@ -217,7 +217,9 @@ def main(argv) -> int:
             table, arguments.species, ", ".join(sorted(species))))
     row = species[arguments.species]
 
-    bpy.ops.wm.read_homefile(use_empty=True)
+    # The scene the tree is built into is the factory one, emptied: no startup file and no user
+    # preferences reach it, so nothing of this machine's configuration reaches the export.
+    bpy.ops.wm.read_homefile(use_empty=True, use_factory_startup=True)
     record = build(stem, arguments.species, arguments.seed, row)
     os.makedirs(os.path.dirname(out), exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=out)

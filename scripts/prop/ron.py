@@ -1,17 +1,18 @@
 """A reader for the RON subset the tree assets are written in.
 
-`assets/trees/species.ron` and every `<id>.tree.ron` are RON (the game's own format, read in Rust
-by `ron`). This reader covers what those two files use: line and block comments, the
-`#![enable(..)]` attribute line, strings, numbers, `true`/`false`, named structs `Name(a: 1)`,
-tuple structs `Name(1, "x")`, anonymous tuples `(1, 2)`, anonymous structs `(a: 1)`, lists and
-maps. It is not a RON implementation and refuses anything else by name.
+`assets/trees/species.ron`, every `<id>.tree.ron` and the substance registry
+`assets/materials/materials.ron` are RON (the game's own format, read in Rust by `ron`). This
+reader covers what those files use: line and block comments, the `#![enable(..)]` attribute line,
+strings, numbers, `true`/`false`, named structs `Name(a: 1)`, tuple structs `Name(1, "x")`, unit
+variants `Name`, anonymous tuples `(1, 2)`, anonymous structs `(a: 1)`, lists and maps. It is not
+a RON implementation and refuses anything else by name.
 
 Stdlib only, so the system interpreter (the build, the tests) and Blender's (the generator) both
 load it.
 
 Values map to Python as: string -> str, number -> int or float, bool -> bool, list -> list,
 map -> dict, anonymous tuple -> tuple, anonymous or named struct -> dict (a named one under
-`"__struct__": name`), tuple struct -> `(name, args)` as a `Call`.
+`"__struct__": name`), tuple struct -> `(name, args)` as a `Call`, unit variant -> `Call(name, ())`.
 """
 
 from __future__ import annotations
@@ -21,7 +22,8 @@ from typing import Any, List, NamedTuple
 
 
 class Call(NamedTuple):
-    """A tuple struct such as `Unknown("why")`: its name and its positional arguments."""
+    """A tuple struct such as `Unknown("why")`, or a unit variant such as `Witness` (no
+    arguments): its name and its positional arguments."""
 
     name: str
     args: tuple
@@ -92,8 +94,7 @@ class _Parser:
                 return False
             if self.peek() == ("punct", "("):
                 return self.call(text)
-            raise RonError("bare identifier {!r} is outside the subset (only true/false and "
-                           "`Name(..)` structs are read)".format(text))
+            return Call(text, ())
         if (kind, text) == ("punct", "("):
             return self.group(None)
         if (kind, text) == ("punct", "["):

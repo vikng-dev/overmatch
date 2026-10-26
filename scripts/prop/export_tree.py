@@ -23,7 +23,6 @@ import bpy
 
 _SCRIPTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, _SCRIPTS)
-sys.path.insert(0, os.path.join(_SCRIPTS, "tank"))
 
 import toolchain  # noqa: E402  — the paths above are what make this importable
 
