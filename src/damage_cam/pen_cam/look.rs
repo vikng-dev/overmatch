@@ -45,6 +45,7 @@
 //! Tiers come from the tank's data alone ([`Tier`]): main armour, external armour, component and
 //! detail, by the substance each mesh wears and the tank file's volume entries.
 
+#[cfg(test)]
 use std::f32::consts::PI;
 
 use bevy::camera::{Hdr, ImageRenderTarget, RenderTarget};
@@ -57,9 +58,13 @@ use bevy::shader::ShaderRef;
 use bevy::window::{PrimaryWindow, WindowRef};
 
 use super::material::Blend;
-use super::picture::{FACE_LANES, PICTURE_FIELDS, Seen};
+#[cfg(test)]
+use super::picture::Seen;
+use super::picture::{FACE_LANES, PICTURE_FIELDS};
 use super::plan::{BoxPlan, Cone};
-use super::potency::{Band, Potency, soft_step};
+#[cfg(test)]
+use super::potency::soft_step;
+use super::potency::{Band, Potency};
 use super::stage::{Stage, StageCamera};
 use super::timeline::{self, Condition, CornerKind};
 use super::view::Tier;
@@ -68,33 +73,33 @@ use crate::ballistics::spall_cone::{FieldDescriptor, Terms};
 use crate::damage_cam::Role;
 use crate::render_policy::CameraProfile;
 
-/// The volume's colour ([`strongest`]): each band's opacity, the knockout band's dense so its core
-/// reads solid, the reduced band's faint so the wide shell about it reads through; and how far
-/// (octaves of the peak) about its threshold a band's edge can fade. Within that window the edge
-/// spans one pixel's change in `log2` of the peak, as the painting's edges do; half an octave
-/// holds that change wherever the edge lies 4.1 px or more from its field's origin on screen
-/// (DERIVED: a field's peak on a ray falls as `1/d²` with the ray's distance `d` from its origin,
-/// so its `log2` changes `2/(n ln 2)` a pixel `n` px out, at most `√2` times that across a pixel's
-/// two axes, within the window's octave at `n ≥ 2√2/ln 2`). Past the window a band is wholly drawn
-/// or not, which bounds what the peak search must find ([`need`]). TUNED, as is every figure below
-/// that is not marked otherwise.
+/// The volume's colour (`pen_cam_look.wgsl`, `strongest`): each band's opacity, the knockout
+/// band's dense so its core reads solid, the reduced band's faint so the wide shell about it reads
+/// through; and how far (octaves of the peak) about its threshold a band's edge can fade. Within
+/// that window the edge fades over one pixel's change in its held level, as the painting's edges
+/// do, and over less where the level leaves the window within the pixel. Half an octave holds a
+/// pixel's change about 4.1 px or more from a field's origin on screen: a local estimate, DERIVED
+/// for an isolated field of one strength in every direction, under parallel eye rays, whose peak
+/// on the ray no clip moves (design doc §5, "Potency colour", which derives it and names where it
+/// fails). Past the window a band is wholly drawn or not, so the peak search stops past the mid's.
+/// TUNED, as is every figure below that is not marked otherwise.
 const KNOCKOUT_OPACITY: f32 = 0.5;
 const REDUCED_OPACITY: f32 = 0.2;
 const BAND_WINDOW_OCTAVES: f32 = 0.5;
-/// The peak search ([`peak`]): the equal steps each field's stretch is searched in, however
-/// short the clips leave it, and the golden-section steps about the best sample, which narrow its
-/// bracket of two steps to `0.618⁸`, about 2 % (DERIVED), at the section's ratio `(√5 − 1)/2`.
-/// `pen_cam_look.wgsl` declares all three. A stretch the part mask or the cut leaves short, or a
-/// chord near a ball's rim, is searched as finely as its length allows, so a shadow's lit sliver
-/// on it is found down to a step of its own length; steps of a fixed length cross such a stretch
-/// in one or two and stair-step the band's edge (design doc §5, "Potency colour").
+/// The peak search (`pen_cam_look.wgsl`, `peak`): the equal steps each field's stretch is
+/// searched in, however short the clips leave it, and the golden-section steps about the best
+/// sample, which narrow its bracket of two steps to `0.618⁸`, about 2 % (DERIVED), at the
+/// section's ratio `(√5 − 1)/2`. `pen_cam_look.wgsl` declares all three. A stretch the part mask
+/// or the cut leaves short, or a chord near a ball's rim, is searched as finely as its length
+/// allows, so a lit sliver on it a step of its own length wide holds a sample; steps of a fixed
+/// length cross such a stretch in one or two and stair-step the band's edge (design doc §5,
+/// "Potency colour").
+#[cfg(test)]
 const VOLUME_STEPS: usize = 64;
+#[cfg(test)]
 const VOLUME_REFINE: usize = 8;
+#[cfg(test)]
 const GOLDEN: f32 = 0.618_034;
-/// The margin a field's bound ([`bound`]) carries past its law's greatest weight, for the GPU's
-/// rounding of the law: a share's difference over a stratum loses a few ulps of a share near 1,
-/// about `N·2⁻²⁰` of the weight at `N` strata, `2⁻¹⁴` at 64 (DERIVED).
-const BOUND_MARGIN: f32 = 1.0 / 256.0;
 /// A volume sorts this far (m) nearer the eye than its mesh's centre, so it draws after every
 /// other translucent surface, the glass and the outlines included
 /// ([`super::material::OUTLINE_SORT_BIAS`]), and its colour reads unwashed by them.
@@ -691,11 +696,9 @@ pub struct FieldPrint {
 /// edge; `v` and the picture's pitch; the emission its strength `S` gives, `ρ S / Ω`
 /// ([`Potency::emission`], `Ω` its support's solid angle) in world units (squared metres, whose
 /// intensity falls as the square of a world distance), the world's metres per record metre (the
-/// picture holds record metres), the longest reach (world m) and its bound, that emission times
-/// its law's greatest weight (on its axis, [`law`] at depth 0) and [`BOUND_MARGIN`] ([`bound`]);
-/// its law ([`law_lane`]), whose weight along a direction ([`law`]) times that emission is the
-/// direction's; and its picture's
-/// faces, each face's crop and place in the record's atlas
+/// picture holds record metres) and the longest reach (world m); its law ([`law_lane`]), whose
+/// weight along a direction (`pen_cam_look.wgsl`, `law`) times that emission is the direction's;
+/// and its picture's faces, each face's crop and place in the record's atlas
 /// ([`super::picture::Picture::lanes`]).
 fn pack(prints: &[FieldPrint], potency: &Potency) -> ([Vec4; PRINT_LANES * FIELDS], usize) {
     let mut lanes = [Vec4::ZERO; PRINT_LANES * FIELDS];
@@ -704,14 +707,12 @@ fn pack(prints: &[FieldPrint], potency: &Potency) -> ([Vec4; PRINT_LANES * FIELD
         lane[1] = print.axis.extend(print.front);
         lane[2] = print.u.extend(print.inner);
         lane[3] = print.v.extend(print.pitch);
-        let emission = potency.emission(print.strength, print.inner, print.half_angle)
-            * print.scale
-            * print.scale;
+        let emission = potency.emission(print.strength, print.inner, print.half_angle);
         lane[4] = Vec4::new(
-            emission,
+            emission * print.scale * print.scale,
             print.scale,
             print.longest * print.scale,
-            emission * law(print.law, 0.0) * (1.0 + BOUND_MARGIN),
+            0.0,
         );
         lane[5] = print.law;
         lane[6..].copy_from_slice(&print.faces);
@@ -719,10 +720,10 @@ fn pack(prints: &[FieldPrint], potency: &Potency) -> ([Vec4; PRINT_LANES * FIELD
     (lanes, prints.len().min(FIELDS))
 }
 
-/// Field `field`'s law as the look evaluates it ([`law`]), thrown in `strata` strata: the kind of
-/// its terms (x: 1 the ball's cap, 2 the ball over the whole sphere, 3 the ring's band; 0 a
-/// descriptor outside the law's domain, which lights nothing), their numbers (y, z: the cap's
-/// `λ²` and depth `w`, the sphere's `λ`, the band's depths `t_lo` and `t_hi`;
+/// Field `field`'s law as the look evaluates it (`pen_cam_look.wgsl`, `law`), thrown in `strata`
+/// strata: the kind of its terms (x: 1 the ball's cap, 2 the ball over the whole sphere, 3 the
+/// ring's band; 0 a descriptor outside the law's domain, which lights nothing), their numbers (y,
+/// z: the cap's `λ²` and depth `w`, the sphere's `λ`, the band's depths `t_lo` and `t_hi`;
 /// `spall_cone::Terms`) and `N` (w).
 pub fn law_lane(field: FieldDescriptor, strata: usize) -> Vec4 {
     let n = strata as f32;
@@ -743,6 +744,7 @@ pub fn law_lane(field: FieldDescriptor, strata: usize) -> Vec4 {
 /// between centres it runs continuously. The band's share is linear in depth, so its weight is ½
 /// throughout. The support is the caller's to test: a depth off it reads its nearest edge's weight,
 /// as a painted edge a pixel past the rim reads it. Zero for no strata and for no law.
+#[cfg(test)]
 pub fn law(lane: Vec4, t: f32) -> f32 {
     let kind = lane.x.round() as i32;
     let (lo, hi) = match kind {
@@ -773,6 +775,7 @@ pub fn law(lane: Vec4, t: f32) -> f32 {
 
 /// The ball's cap's share of the emission inside depth `t`, `λ²` `l2`: `1 − μ D³`,
 /// `D² = 1 − λ² t(2 − t)`, held at zero past the rim (`spall_cone::Terms::stratum`).
+#[cfg(test)]
 fn cap_share(l2: f32, t: f32) -> f32 {
     let d = (1.0 - l2 * (t * (2.0 - t))).max(0.0).sqrt();
     1.0 - (1.0 - t) * (d * d * d)
@@ -782,6 +785,7 @@ fn cap_share(l2: f32, t: f32) -> f32 {
 /// density `g³/2` integrated, `(b − a)(g_a + g_b)²(g_a² + g_b² + 2c) / (16(D_a + D_b))`,
 /// `c = 1 − λ²`, `D = √(c + λ²μ²)`, `g = λμ + D`, behind the plate `c / (D − λμ)`
 /// (`spall_cone::Terms::stratum`).
+#[cfg(test)]
 fn sphere_share(lambda: f32, a: f32, b: f32) -> f32 {
     let c = (1.0 - lambda) * (1.0 + lambda);
     let reach = |t: f32| {
@@ -801,6 +805,7 @@ fn sphere_share(lambda: f32, a: f32, b: f32) -> f32 {
 
 /// The depth `t = 1 − cos θ` of unit `direction` off unit `axis`, as `½ |direction − axis|²`, which
 /// keeps its digits near the axis where `1 − cos θ` cancels.
+#[cfg(test)]
 pub fn depth(direction: Vec3, axis: Vec3) -> f32 {
     0.5 * (direction - axis).length_squared()
 }
@@ -853,13 +858,7 @@ pub fn paint_fields(
 /// and it adds nothing.
 /// Doses add, so the bands classify the sum, never a field's own. This is the sum the shader
 /// mirrors, held by the tests.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the look's shader sums the fields at runtime (`pen_cam_look.wgsl`, `intensity`); this is the sum it mirrors, held by the tests"
-    )
-)]
+#[cfg(test)]
 pub fn intensity(prints: &[FieldPrint], seen: &[Seen], potency: &Potency, p: Vec3) -> f32 {
     let (lanes, count) = pack(prints, potency);
     let mut sum = 0.0;
@@ -902,13 +901,7 @@ pub fn intensity(prints: &[FieldPrint], seen: &[Seen], potency: &Potency, p: Vec
 /// the facing, so a witness is painted exactly where the volume holds the field ([`intensity`]).
 /// The point takes the band of the sum ([`Potency::band`]). This is the sum the shader mirrors,
 /// held by the tests.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the look's shader paints the fields at runtime (`pen_cam_look.wgsl`, `footprint`); this is the sum it mirrors, held by the tests"
-    )
-)]
+#[cfg(test)]
 pub fn painting(
     prints: &[FieldPrint],
     seen: &[Seen],
@@ -940,79 +933,66 @@ pub fn painting(
     sum
 }
 
-/// The most `prints`' summed intensity (HP points per m²) can be at world point `p`, as
-/// `pen_cam_look.wgsl`'s `bound` takes it: each field whose ball (its radius the nearer of its
-/// front and its longest reach) holds `p` adds its bound ([`pack`]: its emission times its law's
-/// greatest weight, on its axis, and [`BOUND_MARGIN`]) over its squared distance from its origin;
-/// at its origin it is unbounded. A picture lights a point whole at most and the law's weight
-/// never grows off its axis, so no field gives `p` more ([`intensity`]).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the look's shader bounds its samples at runtime (`pen_cam_look.wgsl`, `bound`); this is the bound it mirrors, held by the tests"
-    )
-)]
-pub fn bound(prints: &[FieldPrint], potency: &Potency, p: Vec3) -> f32 {
-    let (lanes, count) = pack(prints, potency);
-    lanes
-        .chunks(PRINT_LANES)
-        .take(count)
-        .map(|lane| {
-            let r = (p - lane[0].truncate()).length();
-            if r < 1e-5 {
-                1e30
-            } else if r <= lane[1].w.min(lane[4].z) {
-                lane[4].w / (r * r)
-            } else {
-                0.0
-            }
-        })
-        .sum()
+/// The stretch of the eye ray `eye + dir t` (`dir` unit, `t` the eye depth) a volume fragment can
+/// show, as `pen_cam_look.wgsl`'s `visible` keeps it, `x ≥ y` where none: past the near plane of
+/// the camera whose `clip_from_world` the view hands the shader, where clip `z ≤ w` (Bevy's
+/// reversed depth, in a perspective view and an orthographic one alike: clip `z` is `w` on the
+/// near plane and exceeds it nearer the eye and behind it), on the kept side of `cut` (xyz the
+/// plane's unit normal toward the discarded side, w normal · a point on it) and short of the
+/// pixel's nearest scene surface `surface` (its eye depth, m). This is the clip the shader
+/// mirrors, held by the tests.
+#[cfg(test)]
+pub fn visible(
+    clip_from_world: Mat4,
+    eye: Vec3,
+    dir: Vec3,
+    surface: Option<f32>,
+    cut: Option<Vec4>,
+) -> (f32, f32) {
+    let (at, along) = (
+        clip_from_world * eye.extend(1.0),
+        clip_from_world * dir.extend(0.0),
+    );
+    let mut seen = kept((0.0, 1e30), at.z - at.w, along.z - along.w);
+    if let Some(surface) = surface {
+        seen.1 = seen.1.min(surface);
+    }
+    if let Some(cut) = cut {
+        let normal = cut.truncate();
+        seen = kept(seen, normal.dot(eye) - cut.w, normal.dot(dir));
+    }
+    seen
 }
 
-/// What a sample must exceed to change a pixel's colour ([`strongest`]), `best` the greatest
-/// summed intensity found so far on its eye ray, as `pen_cam_look.wgsl`'s `need` takes it: below
-/// the floor's window ([`BAND_WINDOW_OCTAVES`] about `potency`'s floor) the window's low end,
-/// between the floor's window and the mid's the mid's low end, inside a window `best` itself. A
-/// sum no higher leaves both held levels ([`levels`]) where `best` puts them.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the look's shader bounds its samples at runtime (`pen_cam_look.wgsl`, `need`); this is the need it mirrors, held by the tests"
-    )
-)]
-pub fn need(potency: &Potency, best: f32) -> f32 {
-    let window = BAND_WINDOW_OCTAVES.exp2();
-    if best < potency.floor / window {
-        potency.floor / window
-    } else if best >= potency.floor * window && best < potency.mid / window {
-        potency.mid / window
+/// The depths `t` of `seen` where `g0 + gd t ≤ 0`, one side of a plane a ray crosses at
+/// `t = −g0 / gd`, as `pen_cam_look.wgsl`'s `kept` takes them; `x ≥ y` where none is, the ray
+/// parallel to the plane on its far side.
+#[cfg(test)]
+fn kept(seen: (f32, f32), g0: f32, gd: f32) -> (f32, f32) {
+    if gd.abs() < 1e-8 {
+        if g0 > 0.0 { (1.0, 0.0) } else { seen }
+    } else if gd > 0.0 {
+        (seen.0, seen.1.min(-g0 / gd))
     } else {
-        best
+        (seen.0.max(-g0 / gd), seen.1)
     }
 }
 
-/// The greatest summed intensity on the eye ray `eye + dir t` over fields `prints`, kept to
-/// `[near, far]` (m along the ray), as `pen_cam_look.wgsl`'s `peak` finds it, `intensity` the sum
-/// at `t` ([`intensity`]). First each field's point nearest its origin on its stretch
-/// ([`stretch`]), where the field alone peaks unless its law or its picture moves the peak; then
-/// each stretch in [`VOLUME_STEPS`] equal steps however short the clips leave it, ends included,
-/// a sample skipped where its [`bound`] is no more than the colour [`need`]s; then
+/// The greatest summed intensity the search finds on the eye ray `eye + dir t` over fields
+/// `prints`, kept to `[near, far]` (m along the ray, the ray's visible stretch: [`visible`]), as
+/// `pen_cam_look.wgsl`'s `peak` finds it, `intensity` the sum at `t` ([`intensity`]). First each
+/// field's point nearest its origin on its stretch ([`stretch`]); then each stretch in
+/// [`VOLUME_STEPS`] equal steps however short the clips leave it, ends included; then
 /// [`VOLUME_REFINE`] golden-section steps about the best sample, one of its stretch's steps either
 /// side. It stops once the sum is [`BAND_WINDOW_OCTAVES`] past the mid, where the colour no longer
-/// changes. So each field's own peak is found however short a stretch of the ray its band holds,
-/// a peak the fields' sum takes between their origins to a refined step, and a lit sliver between
-/// shadows wherever it is a step of its stretch wide; a thinner one away from every such peak can
-/// still fall between samples. This is the search the shader mirrors, held by the tests.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the look's shader searches at runtime (`pen_cam_look.wgsl`, `peak`); this is the search it mirrors, held by the tests"
-    )
-)]
+/// changes. Every sample reads the sum where it lies, so the search never overstates the ray's
+/// greatest sum; it can understate it. A greatest sum at a field's nearest point is read there
+/// exactly. A lit or supported interval narrower than a step (a shadow's sliver, a narrow ring's
+/// band crossed near its rim) can fall between the samples and go unread, and the refinement is a
+/// heuristic, which takes one peak in its bracket and can settle on a lesser one than the bracket
+/// holds (design doc §5, "Potency colour"). This is the search the shader mirrors, held by the
+/// tests.
+#[cfg(test)]
 pub fn peak(
     prints: &[FieldPrint],
     potency: &Potency,
@@ -1038,25 +1018,25 @@ pub fn peak(
         let here = intensity(t);
         if here > best {
             (best, at, span) = (here, t, (hi - lo) / VOLUME_STEPS as f32);
+            if best >= done {
+                return best;
+            }
         }
     }
     for &(lo, hi, _) in &stretches {
         let step = (hi - lo) / VOLUME_STEPS as f32;
         for k in 0..=VOLUME_STEPS {
-            if best >= done {
-                return best;
-            }
             let t = lo + k as f32 * step;
-            if bound(prints, potency, eye + dir * t) <= need(potency, best) {
-                continue;
-            }
             let here = intensity(t);
             if here > best {
                 (best, at, span) = (here, t, step);
+                if best >= done {
+                    return best;
+                }
             }
         }
     }
-    if best <= 0.0 || best >= done {
+    if best <= 0.0 {
         return best;
     }
     let (mut left, mut right) = ((at - span).max(near), (at + span).min(far));
@@ -1084,14 +1064,9 @@ pub fn peak(
 /// The levels a pixel's bands are drawn from, as `pen_cam_look.wgsl`'s `strongest` holds them:
 /// `log2` of the peak `top` (a 4096th of the floor at least), held to each band's window,
 /// `params`' `volume.x` octaves about the floor (x) and about the mid (y). A peak past a window
-/// reads its end, so the colour no longer changes there ([`need`]).
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the look's shader holds the levels at runtime (`pen_cam_look.wgsl`, `strongest`); these are the levels it mirrors, held by the tests"
-    )
-)]
+/// reads its end, so the colour no longer changes there, and the search stops past the mid's
+/// ([`peak`]).
+#[cfg(test)]
 pub fn levels(params: &LookParams, top: f32) -> Vec2 {
     let level = top.max(params.bands.x / 4096.0).log2();
     let (low, high, half) = (
@@ -1112,13 +1087,7 @@ pub fn levels(params: &LookParams, top: f32) -> Vec2 {
 /// `width` each held level's change across the pixel (the shader's `fwidth`). The colour is the
 /// peak's alone: how far the ray runs in a band never counts. This is the colour the shader
 /// mirrors, held by the tests.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the look's shader colours the volume at runtime (`pen_cam_look.wgsl`, `strongest`); this is the colour it mirrors, held by the tests"
-    )
-)]
+#[cfg(test)]
 pub fn strongest(params: &LookParams, top: f32, width: Vec2) -> Vec4 {
     let held = levels(params, top);
     let low = soft_step(params.bands.x.log2(), width.x, held.x);
@@ -1132,14 +1101,9 @@ pub fn strongest(params: &LookParams, top: f32, width: Vec2) -> Vec4 {
 /// `stretch` finds it: inside its ball out to its front or its longest reach, the nearer, and for a
 /// cap no wider than a hemisphere inside its cone too; `None` where the ray misses it. Every point
 /// the field holds on the ray lies within it, so the peak search, which samples only these
-/// stretches, misses none. This is the stretch the shader mirrors, held by the tests.
-#[cfg_attr(
-    not(test),
-    expect(
-        dead_code,
-        reason = "the look's shader bounds its peak search at runtime (`pen_cam_look.wgsl`, `stretch`); this is the bound it mirrors, held by the tests"
-    )
-)]
+/// stretches, leaves none of the field's points outside its range. This is the stretch the shader
+/// mirrors, held by the tests.
+#[cfg(test)]
 pub fn stretch(print: &FieldPrint, eye: Vec3, dir: Vec3) -> Option<(f32, f32)> {
     let radius = print.front.min(print.longest * print.scale);
     if radius <= 0.0 {
@@ -1397,10 +1361,11 @@ pub fn component(b: &BoxPlan, kind: CornerKind, masks: &MaskSet) -> Option<LookM
 }
 
 /// The record's fields as one volume, drawn on the back faces of a box about every field's reach
-/// ([`field_bounds`]). Each fragment takes the strongest band the fields' summed intensity
-/// ([`intensity`]) reaches on the visible part of its eye ray ([`peak`], over the fields'
-/// stretches, [`stretch`]), in that band's colour at that band's opacity ([`strongest`]); how far
-/// the ray runs in the band never counts. The fields' lanes are set each frame
+/// ([`field_bounds`]). Each fragment takes the strongest band the search finds for the fields'
+/// summed intensity on the visible part of its eye ray, past the camera's near plane
+/// (`pen_cam_look.wgsl`: `intensity`, `visible`, `peak` over the fields' stretches, `stretch`), in
+/// that band's colour at that band's opacity (`strongest`); how far the ray runs in the band never
+/// counts. The fields' lanes are set each frame
 /// ([`LookMaterial::set_fields`]), and with them the atlas of the pictures they read. Straight
 /// alpha, sorted after every other translucent surface, drawn whatever stands in front and writing
 /// no depth ([`LookKey::depth`]). In a frame that draws the body behind ([`body_behind`]) the eye
@@ -1538,13 +1503,13 @@ mod tests {
 
     /// The colour reads no gain: the lanes the volume colours from carry the field's frame, the
     /// emission `ρ S / Ω` its strength gives in world units (squared metres, whose intensity falls
-    /// as the square of a world distance), its scale and longest reach, its bound, its law, the
-    /// shipped thresholds and each band's colour from the band law, and fading the volume, a base
-    /// surface or a painted component moves its fade lane alone; each band's opacity and the edges'
-    /// window are the volume's own, whatever the stage's scale. A painted component reads the same
-    /// lanes, and no field without its pictures. The colour promise relies on it: a display gain,
-    /// level or fade in a colouring lane, an opacity that follows the stage, or a painting packed
-    /// apart from the volume, fails here.
+    /// as the square of a world distance), its scale and longest reach, its law, the shipped
+    /// thresholds and each band's colour from the band law, and fading the volume, a base surface
+    /// or a painted component moves its fade lane alone; each band's opacity and the edges' window
+    /// are the volume's own, whatever the stage's scale. A painted component reads the same lanes,
+    /// and no field without its pictures. The colour promise relies on it: a display gain, level or
+    /// fade in a colouring lane, an opacity that follows the stage, or a painting packed apart from
+    /// the volume, fails here.
     #[test]
     fn the_colour_reads_no_gain() {
         let potency = Potency::shipped();
@@ -1571,10 +1536,6 @@ mod tests {
         );
         assert_eq!(lane[4].y, print.scale);
         assert_eq!(lane[4].z, print.longest * print.scale);
-        assert_eq!(
-            lane[4].w,
-            lane[4].x * law(print.law, 0.0) * (1.0 + BOUND_MARGIN)
-        );
         assert_eq!(lane[5], print.law);
         assert_eq!(lane[6..], print.faces);
         assert!(
@@ -1874,24 +1835,23 @@ mod tests {
         }
     }
 
-    /// The search finds what the colour needs: on every eye ray its peak's held levels
-    /// ([`levels`]) are those of the greatest sum on the ray, so where the fields' sum peaks
-    /// between their origins, away from either's nearest point, the colour is the sum's; and
-    /// neither the samples it skips ([`bound`], [`need`]) nor its stop past the mid's window moves
-    /// a held level. Fixture: two fields over the whole sphere of one strength 0.6 m apart, every
-    /// direction reaching 2 m, on a line 44° off the rays, so their nearest points on a ray lie
-    /// 43 cm apart (DERIVED) and the sum peaks between them; a fixture potency whose floor and mid
-    /// a lone field crosses at 1.2 m and 0.35 m; 625 eye rays on a 2.4 m square across the rays,
-    /// 102 of whose greatest sums lie inside a band's window (MEASURED; 100 held); the greatest sum
-    /// by a 2 mm scan refined by 40 golden-section steps. Tolerance: 10⁻³ octave (DERIVED: the
-    /// refined bracket, `0.618⁸` of two steps of a 4 m chord's 64th, leaves the best sample 2.7 mm
-    /// from the peak at most, where a sum of `1/r²` falls `(2.7 mm / r)²`, 1.2·10⁻⁴ octave at the
-    /// mid's 0.29 m; the search misses by 3·10⁻⁶ at most, MEASURED). A search that does not refine
-    /// its best sample reads a peak between two fields up to `(3.1 cm / r)²` low; one that skips a
-    /// sample the colour still needs, or stops at the mid itself, reads the window's level from a
-    /// field's nearest point. A shadow's edge is not this fixture's: the picture's texels comb it
-    /// into lit slivers about a texel wide, and the search reads the edge to within the comb's
-    /// spread, not to this tolerance (design doc §5, "Potency colour").
+    /// The search finds what the colour needs: on every eye ray its peak's held levels ([`levels`])
+    /// are those of the greatest sum on the ray, so where the fields' sum peaks between their
+    /// origins, away from either's nearest point, the colour is the sum's; and its stop past the
+    /// mid's window moves no held level. Fixture: two fields over the whole sphere of one strength
+    /// 0.6 m apart, every direction reaching 2 m, on a line 44° off the rays, so their nearest
+    /// points on a ray lie 43 cm apart (DERIVED) and the sum peaks between them; a fixture potency
+    /// whose floor and mid a lone field crosses at 1.2 m and 0.35 m; 625 eye rays on a 2.4 m square
+    /// across the rays, 102 of whose greatest sums lie inside a band's window (MEASURED; 100 held);
+    /// the greatest sum by a 2 mm scan refined by 40 golden-section steps. Tolerance: 10⁻³ octave
+    /// (DERIVED: the refined bracket, `0.618⁸` of two steps of a 4 m chord's 64th, leaves the best
+    /// sample 2.7 mm from the peak at most, where a sum of `1/r²` falls `(2.7 mm / r)²`, 1.2·10⁻⁴
+    /// octave at the mid's 0.29 m; the search misses by 3·10⁻⁶ at most, MEASURED). A search that
+    /// does not refine its best sample reads a peak between two fields up to `(3.1 cm / r)²` low;
+    /// one that stops at the mid itself reads the window's level from a field's nearest point. A
+    /// shadow's edge is not this fixture's: the picture's texels comb it into lit slivers about a
+    /// texel wide, and the search reads the edge to within the comb's spread, not to this tolerance
+    /// (design doc §5, "Potency colour").
     #[test]
     fn the_peak_search_finds_what_the_colour_needs() {
         let cone = sphere(|_, _| 2.0);
@@ -2449,60 +2409,6 @@ mod tests {
         assert!(stopped > 0, "no shipped record stops a field at its origin");
     }
 
-    /// A field's bound holds its intensity: no shipped field gives a point more than its bound
-    /// ([`bound`]: its emission times its law's weight on its axis, over its squared distance), so
-    /// the search, which skips a sample whose bound is no more than the colour needs ([`need`]),
-    /// skips none that could change it. Each field is read with its picture lit whole, the most a
-    /// picture lights. Fixture: every field of every shipped record that reaches, on its axis, 1°
-    /// and 4° off it at four azimuths, and at 400 directions over the sphere, 2 cm to 1.5 m out,
-    /// its front past them. A bound from the law's weight anywhere off the axis (its rim's, its
-    /// support's middle) falls short near the axis of every field whose law peaks there.
-    #[test]
-    fn a_field_s_bound_holds_its_intensity() {
-        let potency = Potency::shipped();
-        let golden = std::f32::consts::PI * (3.0 - 5.0_f32.sqrt());
-        let mut met = 0;
-        for (name, report) in super::super::plan::tests::records() {
-            let shapes = super::super::plan::tests::shapes(&report);
-            let plan = super::super::plan::Plan::new(&report, &shapes);
-            for (k, cone) in plan.cones.iter().enumerate() {
-                if cone.rays.is_empty() {
-                    continue;
-                }
-                let picture = Picture::of(cone, PITCH);
-                let seen = [Seen {
-                    picture: &picture,
-                    reach: &|_| 1e3,
-                }];
-                let print = print_of(cone, &picture, cone.origin, 10.0, 1.0);
-                let prints = std::slice::from_ref(&print);
-                let (u, v) = cone.axis.any_orthonormal_pair();
-                let near_axis = [0.0_f32, 1.0, 4.0].into_iter().flat_map(|off| {
-                    (0..4).map(move |n| {
-                        let (off, turn) =
-                            (off.to_radians(), n as f32 * std::f32::consts::FRAC_PI_2);
-                        cone.axis * off.cos() + (u * turn.cos() + v * turn.sin()) * off.sin()
-                    })
-                });
-                let over_sphere = (0..400).map(|i| {
-                    let z = 1.0 - 2.0 * (i as f32 + 0.5) / 400.0;
-                    Vec2::from_angle(i as f32 * golden).extend(0.0) * (1.0 - z * z).sqrt()
-                        + Vec3::Z * z
-                });
-                for d in near_axis.chain(over_sphere) {
-                    for r in [0.02, 0.1, 0.4, 1.0, 1.5] {
-                        let p = cone.origin + d * r;
-                        let here = intensity(prints, &seen, &potency, p);
-                        let most = bound(prints, &potency, p);
-                        assert!(here <= most, "{name} field {k} at {p}: {here} past {most}");
-                        met += usize::from(here > 0.0);
-                    }
-                }
-            }
-        }
-        assert!(met > 1000, "{met} points met");
-    }
-
     /// A field's stretch along an eye ray holds every point the field gives an intensity: the peak
     /// search samples only its fields' stretches, so a point outside them is never sampled and its
     /// band never drawn. Fixture: a 25° cap; a ring's band of `λ = 1` and half-width 75°, from the
@@ -2606,9 +2512,9 @@ mod tests {
         ("pen_cam_look.wgsl", "footprint", 0x0feb_6029_c26e_2427),
         ("pen_cam_look.wgsl", "printed", 0xa3ef_69a5_13f1_8034),
         ("pen_cam_look.wgsl", "stretch", 0xf54b_5e9e_e1d2_8521),
-        ("pen_cam_look.wgsl", "bound", 0x7802_4f8f_11d8_110b),
-        ("pen_cam_look.wgsl", "need", 0x3e8f_133e_7e3e_5cd0),
-        ("pen_cam_look.wgsl", "peak", 0xac79_daa2_0b37_552e),
+        ("pen_cam_look.wgsl", "kept", 0x84fb_64e5_5d35_095e),
+        ("pen_cam_look.wgsl", "visible", 0x078e_0f7b_a958_140b),
+        ("pen_cam_look.wgsl", "peak", 0x26f9_3c04_5a5a_a711),
         ("pen_cam_look.wgsl", "strongest", 0x79dc_6f4b_becf_2453),
         ("pen_cam_look.wgsl", "lines", 0x5560_efe8_d460_738c),
         ("pen_cam_look.wgsl", "fragment", 0x9d55_ef6b_1f16_a82f),
@@ -2724,8 +2630,8 @@ mod tests {
              `the_colour_counts_no_length_in_a_band` for `strongest`, \
              `the_peak_search_finds_what_the_colour_needs` and \
              `a_small_field_inside_a_wide_one_is_drawn` and \
-             `a_short_stretch_is_searched_in_full` for `peak` and `need`, \
-             `a_field_s_bound_holds_its_intensity` for `bound`, \
+             `a_short_stretch_is_searched_in_full` for `peak`, \
+             `the_search_starts_at_the_near_plane` for `visible` and `kept`, \
              `the_stretch_holds_every_point_of_its_field` for `stretch`, \
              `the_pen_cam_intensity_times_a_face_is_its_dose` for the intensity's law, \
              `the_eye_depth_runs_forward_in_both_projections` for `eye_depth` and `eye_ray`) and \
@@ -2818,6 +2724,92 @@ mod tests {
                     );
                 }
             }
+        }
+    }
+
+    /// The search starts at the camera's near plane: an eye ray's visible stretch ([`visible`])
+    /// begins where the ray crosses the near plane of the camera that draws it, `near / cos θ`
+    /// along a perspective ray `θ` off the forward and `near` along an orthographic one, and holds
+    /// nothing behind the eye; so a field whose origin lies between the eye and the near plane is
+    /// drawn by what lies past the plane alone. DERIVED fixture: near planes 0.1 m out on a camera
+    /// off every axis, rays 0° to 40° off its forward; [`lone_field`] at a 20th of the record's
+    /// size, its thresholds moved to a knockout radius of 0.02 m and a reduced radius of 0.08 m,
+    /// its origin 0.05 m ahead of the eye on the forward ray, whose visible points lie 0.05 m or
+    /// more from it, reduced, while the whole ray holds the origin, knockout. Tolerance: 1 mm
+    /// orthographic (DERIVED: there clip `z` and `w` both lie near 1 at the eye, so their
+    /// difference keeps `(far − near) 2⁻²³` m, 0.12 mm at the 1 km far), `10⁻⁵` m perspective.
+    /// The volume relies on it (`pen_cam_look.wgsl`, `visible`): a search from the eye seeds on
+    /// the hidden origin and colours the pixel knockout where no visible point is.
+    #[test]
+    fn the_search_starts_at_the_near_plane() {
+        let camera =
+            Transform::from_xyz(3.0, 2.0, -4.0).looking_at(Vec3::new(-1.0, 0.5, 2.0), Vec3::Y);
+        let view_from_world = GlobalTransform::from(camera).to_matrix().inverse();
+        let (forward, right) = (*camera.forward(), *camera.right());
+        let (near, scale) = (0.1, 0.05);
+        for (clip_from_view, orthographic) in [
+            (
+                OrthographicProjection {
+                    near,
+                    ..OrthographicProjection::default_3d()
+                }
+                .get_clip_from_view(),
+                true,
+            ),
+            (
+                PerspectiveProjection { near, ..default() }.get_clip_from_view(),
+                false,
+            ),
+        ] {
+            let clip_from_world = clip_from_view * view_from_world;
+            let tolerance = if orthographic { 1e-3 } else { 1e-5 };
+            for off in [0.0_f32, 20.0, 40.0] {
+                let (eye, dir, start) = if orthographic {
+                    (camera.translation + right * off / 10.0, forward, near)
+                } else {
+                    let off = off.to_radians();
+                    let dir = forward * off.cos() + right * off.sin();
+                    (camera.translation, dir, near / off.cos())
+                };
+                let (from, to) = visible(clip_from_world, eye, dir, None, None);
+                assert!(
+                    (from - start).abs() < tolerance && to >= 1e29,
+                    "{orthographic}, {off}: {from}..{to}, not from {start}"
+                );
+                let (from, to) = visible(clip_from_world, eye, -dir, None, None);
+                assert!(
+                    from >= to,
+                    "{orthographic}, {off}: behind the eye, {from}..{to}"
+                );
+            }
+            let eye = camera.translation;
+            let (print, picture, potency, _) = lone_field(eye + forward * 0.05, 1.0, scale);
+            // `lone_field`'s mid lies `scale` out: its sum `r` out is the mid times `(scale / r)²`.
+            let at = |r: f32| potency.mid * (scale / r).powi(2);
+            let potency = Potency {
+                floor: at(0.08),
+                mid: at(0.02),
+                ..potency
+            };
+            let seen = [Seen {
+                picture: &picture,
+                reach: &|_| 2.0,
+            }];
+            let prints = std::slice::from_ref(&print);
+            let sum = |t: f32| intensity(prints, &seen, &potency, eye + forward * t);
+            let whole = peak(prints, &potency, eye, forward, 0.0, f32::MAX, sum);
+            assert_eq!(
+                potency.band(whole),
+                Band::Knockout,
+                "{orthographic}: {whole}"
+            );
+            let (from, to) = visible(clip_from_world, eye, forward, None, None);
+            let shown = peak(prints, &potency, eye, forward, from, to, sum);
+            assert_eq!(
+                potency.band(shown),
+                Band::Reduced,
+                "{orthographic}: {shown}"
+            );
         }
     }
 

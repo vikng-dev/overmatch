@@ -85,7 +85,7 @@ impl Potency {
         not(test),
         expect(
             dead_code,
-            reason = "the look's shader parts the bands at runtime (`pen_cam_look.wgsl`, `step_over` and `footprint`); this is the law it applies, held by the tests"
+            reason = "the look's shader parts the bands at runtime (`pen_cam_look.wgsl`, `strongest` and `footprint`); this is the law it applies, held by the tests"
         )
     )]
     pub fn band(&self, intensity: f32) -> Band {

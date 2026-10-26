@@ -390,36 +390,57 @@ edge (DERIVED, the bilinear read; held over 6,000 seeded seams by
 at most a texel, under a pixel of the live target (DERIVED); MEASURED on the CPU read over 6,000
 random seams, the jog is at most 0.64 pitch.
 
-The fields draw as **one volume** (`assets/shaders/pen_cam_look.wgsl`, `peak` and `strongest`) on
-the back faces of a box about every field's reach, coloured by **density**: a pixel takes the
-colour of the strongest band its eye ray crosses, at that band's one opacity (knockout 0.5,
-reduced 0.2; TUNED), knockout over reduced over nothing. A knockout core reads inside its reduced
-shell, and a long run of the ray through a weak band never reads as dense as a short one through
-a strong band: no term depends on the ray's length inside a band. The ray's visible part ends at
-its pixel's nearest scene surface in the part mask, and at the cut. Its **peak**, the greatest
-summed intensity along it, sets the colour. The search takes each field's point nearest its
-origin on its stretch, where the field alone peaks unless its law or its picture moves the peak;
-then each field's stretch in 64 equal steps, ends included, however short the part mask or the
-cut leaves it; then 8 golden-section steps about the best sample, one of its stretch's steps
-either side. It skips a sample where a bound on the sum there (over the fields whose ball holds
-the point, each one's greatest law weight over `r²`) cannot lift the peak past what the colour
-still needs, and stops once the sum is past the mid's window, where the colour no longer
-changes. Each band's edge fades in density, never in thickness: its presence is a smoothstep in
-`log2` of the peak, held to half an octave either side of its threshold, over one pixel's change
-of that level, so the edge spans a pixel, as the painting's do. Half an octave holds a pixel's
-change wherever the edge lies 4.1 px or more from its field's origin on screen (DERIVED: a lone
-field's peak on a ray falls as `1/d²` with the ray's distance `d` from its origin, so its `log2`
-changes `2/(n ln 2)` a pixel `n` px out, at most `√2` times that across a pixel's two axes,
-within the window's octave at `n ≥ 2√2/ln 2`); nearer, the edge is harder.
+The fields draw as **one volume** (`assets/shaders/pen_cam_look.wgsl`, `visible`, `peak` and
+`strongest`) on the back faces of a box about every field's reach, coloured by **density**: a
+pixel takes the colour of the strongest band the search finds on its eye ray, at that band's one
+opacity (knockout 0.5, reduced 0.2; TUNED), knockout over reduced over nothing. A knockout core
+reads inside its reduced shell, and a long run of the ray through a weak band never reads as dense
+as a short one through a strong band: no term depends on the ray's length inside a band. The
+ray's visible part starts at the camera's near plane, so a field's origin between the eye and that
+plane colours nothing, and ends at its pixel's nearest scene surface in the part mask and at the
+cut. Its **peak**, the greatest summed intensity the search finds along it, sets the colour. The
+search takes each field's point nearest its origin on its stretch; then each field's stretch in 64
+equal steps, ends included, however short the part mask or the cut leaves it; then 8
+golden-section steps about the best sample, one of its stretch's steps either side; it stops once
+the sum is past the mid's window, where the colour no longer changes. It skips no sample. A skip
+bounded by each field's greatest law weight over `r²` was not conservative: the law's f32
+evaluation can exceed its weight on the axis (MEASURED on the scalar f32 arithmetic: a cap of
+ratio 10 at `N = 65,536` strata, depth 1.503769·10⁻⁸, weighs 0.75390625 on its axis, 0.7568512
+with the skip's rounding margin and 0.7598202 off the axis). Searching every sample costs no time
+the instrument resolves: paired medians of +0.48, −0.71, −2.22 and +0.76 ms a frame over four
+runs of 25 frames, −0.12 ms their median (MEASURED, s14's glass frame at 4.5 s, 1920×1080, against
+the search that skipped). Each band's edge fades in density, never in thickness: its presence is a
+smoothstep in its held level, `log2` of the peak held to half an octave either side of its
+threshold, over one pixel's change of that held level, as the painting's edges fade.
+
+How wide that fade runs on screen is a local estimate, not a promise. For an isolated field of one
+strength in every direction, under parallel eye rays and with a peak no clip moves, the peak falls
+as `1/d²` with the ray's distance `d` from the field's origin, so its `log2` changes `2/(n ln 2)`
+a pixel `n` px out, at most `√2` times that across a pixel's two axes (the sum `fwidth` takes),
+and half an octave either side holds a whole pixel's change from `n ≥ 2√2/ln 2`, 4.1 px (DERIVED);
+nearer, the level leaves the window within a pixel and the edge is harder. Holding the level
+narrows the fade as well: radial samples 4.1 and 3.1 px out differ by 0.807 octave, but by 0.5
+once held where the outer lies on the threshold (DERIVED). A field whose strength turns with
+direction, a support's edge, a front, the part mask, the cut or a shadow sets an edge the `1/d²`
+law does not describe, and the fade there follows that edge's own change across the pixel.
 
 The search never overstates: each sample is the sum where it lies, so a shadow it steps over
-never colours a pixel. It can understate where a band is a lit sliver between shadows: one a step
-of its stretch long or more is found; a thinner one away from every field's nearest point can
-fall between samples. A shadow's edge in a depth picture is such a comb, its texels lighting
-slivers about a texel wide, and the search reads the edge to within the comb's spread: 0.12
-octave at worst over 625 rays of a CPU fixture, two fields under a coned shadow (MEASURED). The
-count of steps is set on the image: s14's glass frame at 4.5 s, 1920×1080, its pixels whose
-largest channel differs by more than 8 from a search in 1,536 equal steps a stretch (MEASURED):
+never colours a pixel, and the refinement keeps the best sample and adds only sums it reads inside
+the visible part. It can understate. Any lit or supported interval narrower than a step can fall
+between the samples, whatever its band: a lit sliver between shadows, or a narrow support crossed
+near its edge. A ring's band of half-width 0.1° about 45°, reach 2 m, under an eye ray parallel
+to its axis 0.5 m off it, holds a 3.49 mm stretch of the ray against a 60.52 mm step; the nearest
+sample lies 45.924° off the axis and the nearest-point seed at 90°, off the support, so the search
+reads nothing where the ray crosses the field (DERIVED, a review fixture). The golden-section
+stage is a heuristic: neither the sum, its support nor the depth picture makes the sum unimodal in
+the bracket, so it can settle on a lesser peak than the bracket holds, and the bracket's shrink
+bounds no error in the peak's place. A shadow's edge in a depth picture is such a comb, its texels
+lighting slivers about a texel wide, and the search reads the edge to within the comb's spread:
+0.12 octave at worst over 625 rays of a CPU fixture, two fields under a coned shadow (MEASURED; a
+fixture's figure, no bound on what a shadow can hide). The count of steps is set on the image:
+s14's glass frame at 4.5 s, 1920×1080, its pixels whose largest channel differs by more than 8
+from a search in 1,536 equal steps a stretch (MEASURED; every row but the built one while the
+search still skipped samples by the bound above, which left 241 at 64 steps):
 
 | Search | Pixels off |
 |---|---|
@@ -427,7 +448,7 @@ largest channel differs by more than 8 from a search in 1,536 equal steps a stre
 | 48 steps a stretch, equal in the angle about the field's origin | 403 |
 | 96 steps a stretch, equal in that angle | 201 |
 | 48 equal steps a stretch | 325 |
-| **64 equal steps a stretch (built)** | **241** |
+| **64 equal steps a stretch (built)** | **245** |
 | 96 equal steps a stretch | 150 |
 | 384 equal steps along the whole ray | 169 |
 
