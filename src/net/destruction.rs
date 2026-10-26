@@ -55,6 +55,7 @@ pub(super) fn install_server(app: &mut App) {
 
 pub(super) fn install_client(app: &mut App) {
     app.init_resource::<Applied>()
+        .init_resource::<FallClock>()
         .add_systems(Update, (apply_ledger, publish_fall_clock));
 }
 

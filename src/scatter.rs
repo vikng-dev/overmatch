@@ -518,7 +518,10 @@ mod tests {
             proxies + segments,
             "no other collider ships",
         );
-        let views = world.query::<&crate::trees::TreeView>().iter(world).count();
+        let views = world
+            .query::<&crate::trees::view::TreeView>()
+            .iter(world)
+            .count();
         assert_eq!(views, 0, "a windowless composition attaches no view");
         let meshes = world.query::<&Mesh3d>().iter(world).count();
         assert_eq!(meshes, 0, "a windowless composition draws nothing");

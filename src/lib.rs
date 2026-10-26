@@ -649,6 +649,8 @@ impl Plugin for ClientPlugin {
             view::plugin,
             geometry_lod::view_plugin,
             ballistics::view_plugin,
+            // The trees' glb binding and fall presentation (view-only, ADR-0014).
+            trees::view::plugin,
         ));
         app.add_plugins(drive_hud::plugin);
         // The pen cam's shooter corner over the player's own hits (view-only; the store it reads
@@ -734,6 +736,8 @@ impl Plugin for NetClientPlugin {
             // The render half of ballistics (see `ClientPlugin`): the shell glb, the tracer streak
             // and hold visibility. `SimPlugin` mounts only the sim half.
             ballistics::view_plugin,
+            // The trees' glb binding and fall presentation (view-only, ADR-0014).
+            trees::view::plugin,
             drive_hud::plugin,
             // The render-policy resolver (see `ClientPlugin`) — every windowed root needs it, or
             // nothing that declares a scope or a profile is ever resolved. Down here rather than
