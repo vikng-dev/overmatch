@@ -51,7 +51,6 @@ use crate::terrain_grid::HeightGrid;
 use crate::{ClientReplica, ShotClock};
 
 pub(crate) mod view;
-pub(crate) use view::FallClock;
 
 /// Directory under the asset root holding the species table and one folder per tree asset.
 const TREES_DIR: &str = "trees";
@@ -389,6 +388,22 @@ pub(crate) struct Fell {
     pub(crate) tick: u32,
 }
 
+/// Presentation time in authority ticks: the interpolation cursor on a replica (the net client
+/// writes it), the sim tick plus the fixed step's overstep elsewhere. The authority's tick is a
+/// wrapping 32-bit count (`ShotClock`), so a phase is a wrapped signed difference.
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub(crate) struct FallClock {
+    pub(crate) tick: u32,
+    pub(crate) overstep: f64,
+}
+
+impl FallClock {
+    /// Fractional ticks since `since`, modulo the 32-bit timeline (negative before it).
+    pub(crate) fn since(self, since: u32) -> f64 {
+        f64::from(self.tick.wrapping_sub(since) as i32) + self.overstep
+    }
+}
+
 /// The set the authority's fall laws run in; the ledger publish and the body derive order after it.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct TreeFallSet;
@@ -688,15 +703,14 @@ pub(crate) fn azimuth_bin(x: f32, z: f32) -> u8 {
 
 /// Spawn one tree of `kind` at `pose` — the ground pose: the authored XZ, the grid's Y, the
 /// authored yaw and uniform scale. A tilted or non-uniformly scaled instance is refused (ADR-0011):
-/// the resting pose and the cut both read the trunk as upright. The glb view attaches only where
-/// `view` offers a server to load it with.
+/// the resting pose and the cut both read the trunk as upright. Returns the root; the body is
+/// whole without a view, which a composition that draws attaches under the root itself.
 pub(crate) fn spawn(
     commands: &mut Commands,
     kind: &Arc<TreeKind>,
     identity: MapInstance,
     pose: Transform,
-    view: Option<&AssetServer>,
-) {
+) -> Entity {
     let scale = pose.scale.x;
     assert!(
         pose.scale.y == scale && pose.scale.z == scale && scale > 0.0,
@@ -743,9 +757,7 @@ pub(crate) fn spawn(
             TreeSegment,
         ));
     }
-    if let Some(assets) = view {
-        view::attach(commands, root, kind, scale, assets);
-    }
+    root
 }
 
 /// A standing tree whose pool a dose emptied falls: at the dose's entry height (the segment that
@@ -1311,7 +1323,6 @@ pub(crate) mod tests {
                     ordinal,
                 },
                 Transform::from_xyz(0.0, 0.0, z),
-                None,
             );
             queue.apply(world);
             world
@@ -1476,7 +1487,7 @@ pub(crate) mod tests {
 
     /// The spawn builds the body the module doc describes: one root with the pool and the kind's
     /// volume — its material and substance — one frustum collider per segment on
-    /// `[Terrain, Armor]`, nothing on the root's scale, and no view where no server offers one.
+    /// `[Terrain, Armor]`, nothing on the root's scale, and no view — the sim spawns none.
     /// A root carrying another substance's volume, or a segment hulled as a cylinder at either
     /// ring's radius, reds this.
     #[test]
@@ -1498,7 +1509,6 @@ pub(crate) mod tests {
                 ordinal: 7,
             },
             pose,
-            None,
         );
         queue.apply(&mut world);
         let (root, body, health, transform) = world
@@ -1604,7 +1614,6 @@ pub(crate) mod tests {
                 ordinal: 0,
             },
             Transform::from_scale(Vec3::new(1.0, 1.5, 1.0)),
-            None,
         );
         queue.apply(&mut world);
     }
@@ -1624,7 +1633,6 @@ pub(crate) mod tests {
                 ordinal: 0,
             },
             Transform::from_scale(Vec3::splat(-1.0)),
-            None,
         );
         queue.apply(&mut world);
     }
@@ -1646,7 +1654,6 @@ pub(crate) mod tests {
             // Half a degree of lean: its up falls 3.8e-5 short of 1 (DERIVED: 1 − cos 0.5°),
             // 38 times `UPRIGHT_EPSILON`.
             Transform::from_rotation(Quat::from_rotation_x(0.5_f32.to_radians())),
-            None,
         );
         queue.apply(&mut world);
     }
@@ -1760,7 +1767,6 @@ pub(crate) mod tests {
                 ordinal: 0,
             },
             pose,
-            None,
         );
         queue.apply(app.world_mut());
         let root = app

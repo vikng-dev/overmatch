@@ -8035,7 +8035,6 @@ mod march_tests {
                 ordinal,
             },
             Transform::from_translation(base),
-            None,
         );
         queue.apply(world);
         world

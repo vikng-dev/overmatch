@@ -256,7 +256,6 @@ mod tests {
                 },
                 Transform::from_xyz(0.0, 0.0, 20.0 * f32::from(ordinal))
                     .with_rotation(Quat::from_rotation_y(0.7)),
-                None,
             );
         }
         queue.apply(world);

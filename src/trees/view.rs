@@ -8,32 +8,17 @@ use bevy::prelude::*;
 use bevy::transform::TransformSystems;
 use bevy::world_serialization::{WorldAssetRoot, WorldInstanceReady};
 
-use super::{Fell, Resting, TreeBody, TreeKind, TreeState, fall_rotation};
+use super::{FallClock, Fell, Resting, TreeBody, TreeKind, TreeState, fall_rotation};
 use crate::{ClientReplica, ShotClock};
 
 /// Marks the glb view's root, a child of the tree's root.
 #[derive(Component)]
 pub(crate) struct TreeView;
 
-/// Presentation time in authority ticks: the interpolation cursor on a replica (the net client
-/// writes it), the sim tick plus the fixed step's overstep elsewhere. The authority's tick is a
-/// wrapping 32-bit count (`ShotClock`), so a phase is a wrapped signed difference.
-#[derive(Resource, Debug, Default, Clone, Copy)]
-pub(crate) struct FallClock {
-    pub(crate) tick: u32,
-    pub(crate) overstep: f64,
-}
-
-impl FallClock {
-    /// Fractional ticks since `since`, modulo the 32-bit timeline (negative before it).
-    pub(crate) fn since(self, since: u32) -> f64 {
-        f64::from(self.tick.wrapping_sub(since) as i32) + self.overstep
-    }
-}
-
-/// Attach the glb view of `kind` under `root`, scaled by the instance's uniform `scale` and loaded
-/// through `assets`; bound to the body once its scene is ready.
-pub(super) fn attach(
+/// Attach the glb view of `kind` under the tree `root` spawned by [`super::spawn`], scaled by the
+/// instance's uniform `scale` and loaded through `assets`; bound to the body once its scene is
+/// ready. Called by a composition that draws, never by the sim.
+pub(crate) fn attach(
     commands: &mut Commands,
     root: Entity,
     kind: &TreeKind,

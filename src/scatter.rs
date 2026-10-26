@@ -262,13 +262,17 @@ pub(crate) fn spawn(
                     .trees
                     .get(asset)
                     .expect("map::load loaded every tree asset the library names");
-                crate::trees::spawn(
-                    commands,
-                    kind,
-                    placement.identity.clone(),
-                    placement.pose,
-                    assets,
-                );
+                let root =
+                    crate::trees::spawn(commands, kind, placement.identity.clone(), placement.pose);
+                if let Some(assets) = assets {
+                    crate::trees::view::attach(
+                        commands,
+                        root,
+                        kind,
+                        placement.pose.scale.x,
+                        assets,
+                    );
+                }
                 trees += 1;
             }
             Prototype::Building { .. } => {
@@ -422,19 +426,20 @@ mod tests {
         resolve(&[raw], &library());
     }
 
-    /// The spawn itself, in a real world: every building reaches the block list, every instance
-    /// is one static body carrying its identity — a proxy collider for a building or a graybox
-    /// fir, a root with a collider per segment for a tree — and a windowless composition spawns
-    /// no mesh and no view.
-    #[test]
-    fn spawn_adds_a_body_per_instance_and_a_block_per_building() {
+    /// `manifest` spawned on the sloped grid into a fresh app with an asset server, and the block
+    /// list it filled; `draw` hands the scatter that server, as a windowed composition does.
+    fn spawned(manifest: &MapManifest, draw: bool) -> (App, Vec<Transform>) {
         let mut app = App::new();
-        app.add_plugins(bevy::asset::AssetPlugin::default())
-            .init_asset::<Mesh>()
-            .init_asset::<StandardMaterial>();
+        app.add_plugins((
+            TaskPoolPlugin::default(),
+            bevy::asset::AssetPlugin::default(),
+        ))
+        .init_asset::<Mesh>()
+        .init_asset::<StandardMaterial>()
+        .init_asset::<bevy::world_serialization::WorldAsset>();
         let grid = sloped_grid();
-        let manifest = mixed_fixture_manifest();
         let mut blocks: Vec<Transform> = Vec::new();
+        let assets = draw.then(|| app.world().resource::<AssetServer>().clone());
         let world = app.world_mut();
         world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
             world.resource_scope(|world, mut materials: Mut<Assets<StandardMaterial>>| {
@@ -444,14 +449,26 @@ mod tests {
                     &mut commands,
                     &mut meshes,
                     &mut materials,
-                    &manifest,
+                    manifest,
                     &grid,
                     &mut blocks,
-                    None,
+                    assets.as_ref(),
                 );
                 queue.apply(world);
             });
         });
+        (app, blocks)
+    }
+
+    /// The spawn itself, in a real world: every building reaches the block list, every instance
+    /// is one static body carrying its identity — a proxy collider for a building or a graybox
+    /// fir, a root with a collider per segment for a tree — and a windowless composition spawns
+    /// no mesh and no view.
+    #[test]
+    fn spawn_adds_a_body_per_instance_and_a_block_per_building() {
+        let manifest = mixed_fixture_manifest();
+        let (mut app, blocks) = spawned(&manifest, false);
+        let world = app.world_mut();
         let (mut buildings, mut proxies, mut trees, mut segments) = (0, 0, 0, 0);
         for instance in &manifest.instances {
             match &manifest.prototypes[&instance.prototype] {
@@ -525,5 +542,41 @@ mod tests {
         assert_eq!(views, 0, "a windowless composition attaches no view");
         let meshes = world.query::<&Mesh3d>().iter(world).count();
         assert_eq!(meshes, 0, "a windowless composition draws nothing");
+    }
+
+    /// A COMPOSITION THAT DRAWS ATTACHES EACH TREE'S VIEW: the sim spawns a tree's body only, so
+    /// the scatter, handed an asset server, puts one glb view under each tree's root at that
+    /// instance's scale (the fixture's tree rescaled to 1.5, fixture data, so a view at unit
+    /// scale is told apart). A scatter that leaves the view to the sim, which spawns none, draws
+    /// no tree at all.
+    #[test]
+    fn a_drawing_composition_attaches_one_view_per_tree_at_its_scale() {
+        let mut manifest = mixed_fixture_manifest();
+        let mut trees = 0;
+        for instance in &mut manifest.instances {
+            if let Prototype::Tree { .. } = manifest.prototypes[&instance.prototype] {
+                instance.scale = [1.5; 3];
+                trees += 1;
+            }
+        }
+        let (mut app, _) = spawned(&manifest, true);
+        let world = app.world_mut();
+        let views: Vec<(Entity, Vec3)> = world
+            .query_filtered::<(&ChildOf, &Transform), With<crate::trees::view::TreeView>>()
+            .iter(world)
+            .map(|(parent, transform)| (parent.parent(), transform.scale))
+            .collect();
+        assert_eq!(views.len(), trees, "one view per tree");
+        for (root, scale) in views {
+            let body = world
+                .get::<crate::trees::TreeBody>(root)
+                .expect("a view hangs under its tree's root");
+            assert_eq!(
+                scale,
+                Vec3::splat(body.scale),
+                "the view is at the instance's scale"
+            );
+            assert_eq!(body.scale, 1.5);
+        }
     }
 }

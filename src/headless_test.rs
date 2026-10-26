@@ -1805,7 +1805,6 @@ fn a_felled_trees_colliders_lie_down_in_the_physics_world() {
                 ordinal: 0,
             },
             Transform::from_translation(base),
-            None,
         );
         queue.apply(world);
         world
