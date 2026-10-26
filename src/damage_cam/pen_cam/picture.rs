@@ -1,7 +1,7 @@
 //! A field's depth picture: from the field's origin, the reach to the struck tank's hard bodies
-//! along every direction of its support, rendered once per record on the GPU. A field is a spall
-//! cone or a burst's; its support is a cap about its axis out to its half-angle, a ring's band
-//! from its inner angle out to it, or, for a ball whose rim is π, the whole sphere.
+//! along every direction of its support, rendered on the GPU once per record and screen size. A
+//! field is a spall cone or a burst's; its support is a cap about its axis out to its half-angle,
+//! a ring's band from its inner angle out to it, or, for a ball whose rim is π, the whole sphere.
 //!
 //! The casters ([`Casters`]) are the struck tank's hard bodies ([`HardBodies`], every non-witness
 //! ballistic primitive, posed as the record has the tank) and the horizon: the world-axis box
@@ -11,12 +11,15 @@
 //! body ([`HardBodies`]), so a line from inside a body leaves it.
 //!
 //! The picture is the cube about the field's axis (frame `u`, `v`, the axis; [`FRAMES`]), each face
-//! cropped to the support ([`Crop`]) at the field's pitch (rad a texel, [`pitch_of`] times
-//! [`PITCH_SCALE`]). A record's faces share one atlas ([`Pictures`]), one `R32Float` texture
-//! rendered by `pen_cam_picture.wgsl` the first time a frame asks for it ([`Pictures::image`],
-//! [`PictureJobs`]); every view of the record shares it (`game::RecordPictures`). A view keeps its
-//! fields off until the atlas's job has been encoded and submitted ([`PictureJobs::rendered`]):
-//! before then the atlas holds nothing. The look reads it unfiltered (`pen_cam_look.wgsl`,
+//! cropped to the support ([`Crop`]) at the field's pitch (rad a texel, [`pitch_of`]), derived
+//! from the live size of the target a view draws the record into ([`PictureDetail`]). A record's
+//! faces share one atlas ([`Pictures`]), one `R32Float` texture rendered by
+//! `pen_cam_picture.wgsl` ([`Pictures::image`], [`PictureJobs`]); every view of the record shares
+//! it ([`RecordAtlas`], `game::RecordPictures`), laid out at the finest pitch any of them needs and
+//! laid out anew when what they ask changes. A view draws the newest pictures whose atlas's job
+//! has been encoded and submitted ([`PictureJobs::rendered`]): before then an atlas holds nothing,
+//! so a record's first pictures keep its fields off, and pictures laid out anew are drawn from the
+//! atlas before them until theirs is written. The look reads it unfiltered (`pen_cam_look.wgsl`,
 //! `picture_at`): a point is tested against each of the four texels about its direction, each
 //! against its own reach within a tolerance ([`REACH_TOLERANCE_DIAGONALS`]), and the results
 //! weighed bilinearly; [`Picture::lit`] is the same read on the CPU.
@@ -95,12 +98,14 @@ pub const FRAMES: [[Vec3; 3]; 6] = [
 ];
 /// The cells a face's tangent square is cut into to find the support on it ([`Crop`]).
 const CROP_GRID: usize = 128;
-/// The expanded corner's size (physical px) the pitch is derived at: a 4K window less the corner's
-/// insets (`hud`), the finest view the corner draws.
-const REFERENCE_PX: Vec2 = Vec2::new(
-    3840.0 - 2.0 * super::hud::INSET_PX,
-    2160.0 - 2.0 * super::hud::INSET_PX,
-);
+/// The step (physical px) a view's target size is rounded up to before a pitch is derived at it
+/// ([`detail_of`]). The rounded size is never less than the live one, so a texel spans at most a
+/// pixel of the live target at the sightings ([`pitch_of`]). A target that changes within its step
+/// lays nothing anew; one that crosses a step lays its records' pictures anew, once. At a fixed
+/// aspect the pitch goes as one over the target's height `h`, so the atlas holds at most
+/// `((h + step) / h)²` of the texels `h` itself needs (DERIVED: 12 % more at 1080 px, 6 % at
+/// 2160 px). TUNED.
+pub const DETAIL_STEP_PX: u32 = 64;
 /// The points along each recorded direction, out to its reach, a field's pitch is taken at.
 const RAY_SAMPLES: usize = 16;
 /// The pitch (rad) of a field no sighting sees. TUNED.
@@ -110,13 +115,26 @@ const COARSEST_PITCH: f32 = 1.0 / 32.0;
 const MAX_SIDE: u32 = 8192;
 /// The factor every field's pitch grows by while a record's faces do not fit one atlas.
 const PITCH_GROWTH: f32 = 1.25;
-/// The pictures' detail: every field's pitch is [`pitch_of`]'s times this. At 1 a texel spans at
-/// most a pixel of the expanded 4K corner at the sampled sightings; at 2 it spans two (DERIVED),
-/// and the atlas holds a quarter of the texels (MEASURED: s14's 3361×8038 at 1, 1682×4024 at 2).
-/// TUNED.
-pub const PITCH_SCALE: f32 = 1.0;
 /// The atlas widths tried between the widest face and every face in one row.
 const WIDTH_STEPS: u32 = 32;
+
+/// The detail a view drawing into a target of `size` (physical px) asks of its records'
+/// pictures: the size rounded up to [`DETAIL_STEP_PX`] on each side, a step at least.
+pub fn detail_of(size: UVec2) -> UVec2 {
+    let step = |px: u32| px.max(1).div_ceil(DETAIL_STEP_PX) * DETAIL_STEP_PX;
+    UVec2::new(step(size.x), step(size.y))
+}
+
+/// The detail each kind of view asks of the pictures this frame ([`detail_of`]): `corner`, the
+/// expanded corner's image, for a [`Surface::Corner`](super::Surface) record at whatever size the
+/// corner stands, so expanding it lays nothing anew; `world`, the battlefield camera's 3D pass,
+/// for the x-ray and a [`Surface::World`](super::Surface) record. Written by `hud::detail`; `None`
+/// until its target is known, and a view asks nothing then and draws no field.
+#[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
+pub struct PictureDetail {
+    pub corner: Option<UVec2>,
+    pub world: Option<UVec2>,
+}
 
 /// The frame about unit `axis` a field's picture is drawn in: `u` and `v` across it
 /// (`u × v = axis`) and the axis.
@@ -319,9 +337,9 @@ impl Picture {
     /// the face's edge), so a silhouette that crosses a face's edge is drawn from two grids, one
     /// either side: it jogs there by at most 0.64 pitch across itself (MEASURED on this read over
     /// 6,000 random seams, crossing angles and grid phases at two pitches), under a pixel of the
-    /// expanded 4K corner at the sightings at [`PITCH_SCALE`] 1 (DERIVED from [`pitch_of`]), so
-    /// the read blends no face with its neighbour. `pen_cam_look.wgsl`'s `picture_at` reads the
-    /// atlas so; this is the read it mirrors, held by the tests.
+    /// live target at the sightings (DERIVED from [`pitch_of`]), so the read blends no face with
+    /// its neighbour. `pen_cam_look.wgsl`'s `picture_at` reads the atlas so; this is the read it
+    /// mirrors, held by the tests.
     pub fn lit(
         &self,
         local: Vec3,
@@ -472,18 +490,20 @@ impl Casters {
     }
 }
 
-/// Field `cone`'s pitch (rad a texel): over every `sightings` (a corner camera's pose and lens in
-/// the record frame, its lens fitted to [`REFERENCE_PX`]), at every point within view along every
-/// recorded direction ([`RAY_SAMPLES`] out to its reach), the angle one pixel spans there seen
-/// from the field's origin, the least of them; [`COARSEST_PITCH`] at most. A texel spans at most
-/// a pixel at those points alone: the sightings and the points are samples of what the corner
-/// draws, a point between them may take a finer pixel, and a record whose faces do not fit one
-/// atlas has every pitch grown ([`PITCH_GROWTH`]; none of the shipped records, MEASURED).
-pub fn pitch_of(cone: &Cone, sightings: &[(Transform, Projection)]) -> f32 {
+/// Field `cone`'s pitch (rad a texel) for a view drawing into a target of `detail` (physical px,
+/// [`detail_of`]): over every `sightings` (a corner camera's pose and lens in the record frame, its
+/// lens fitted to `detail`), at every point within view along every recorded direction
+/// ([`RAY_SAMPLES`] out to its reach), the angle one pixel spans there seen from the field's
+/// origin, the least of them; [`COARSEST_PITCH`] at most. A texel spans at most a pixel at those
+/// points alone: the sightings and the points are samples of what the views draw, a point between
+/// them may take a finer pixel, and a record whose faces do not fit one atlas has every pitch grown
+/// ([`PITCH_GROWTH`]).
+pub fn pitch_of(cone: &Cone, sightings: &[(Transform, Projection)], detail: UVec2) -> f32 {
+    let size = detail.max(UVec2::ONE).as_vec2();
     let mut pitch = COARSEST_PITCH;
     for (eye, lens) in sightings {
         let mut lens = lens.clone();
-        lens.update(REFERENCE_PX.x, REFERENCE_PX.y);
+        lens.update(size.x, size.y);
         let clip_from_view = lens.get_clip_from_view();
         let clip_from_world = clip_from_view * eye.to_matrix().inverse();
         for ray in &cone.rays {
@@ -495,7 +515,7 @@ pub fn pitch_of(cone: &Cone, sightings: &[(Transform, Projection)]) -> f32 {
                     && clip.y.abs() <= clip.w
                     && (0.0..=clip.w).contains(&clip.z);
                 if seen && r > 0.0 {
-                    let pixel = 2.0 * clip.w / (clip_from_view.y_axis.y * REFERENCE_PX.y);
+                    let pixel = 2.0 * clip.w / (clip_from_view.y_axis.y * size.y);
                     pitch = pitch.min(pixel / r);
                 }
             }
@@ -588,6 +608,8 @@ fn skyline(sizes: &[UVec2], order: &[usize], width: u32) -> (Vec<UVec2>, UVec2) 
 pub struct Pictures {
     pub fields: Vec<Picture>,
     pub size: UVec2,
+    /// The details the pitches were derived at, ascending ([`Self::of`]).
+    pub details: Vec<UVec2>,
     casters: Option<Casters>,
     /// The atlas while any handle to it lives: every frame of the record reads the one image.
     image: Mutex<Weak<StrongHandle>>,
@@ -595,20 +617,29 @@ pub struct Pictures {
 
 impl Pictures {
     /// The pictures of `cones` from the struck tank's `bodies` (record frame; `None` without the
-    /// tank asset's shapes, and nothing is drawn), each at the pitch `sightings` derive
-    /// ([`pitch_of`]) times [`PITCH_SCALE`], every pitch grown by [`PITCH_GROWTH`] until the faces
-    /// fit one atlas.
+    /// tank asset's shapes, and nothing is drawn), each at the finest pitch `sightings` derive at
+    /// any of `details` ([`pitch_of`]; [`COARSEST_PITCH`] at none), every pitch grown by
+    /// [`PITCH_GROWTH`] until the faces fit one atlas.
     pub fn of(
         cones: &[Cone],
         bodies: Option<&Arc<HardBodies>>,
         sightings: &[(Transform, Projection)],
+        details: &[UVec2],
     ) -> Self {
         let cones = &cones[..cones.len().min(PICTURE_FIELDS)];
         let cells: Vec<Cells> = cones.iter().map(Picture::cells).collect();
         let mut pitches: Vec<f32> = cones
             .iter()
-            .map(|cone| pitch_of(cone, sightings) * PITCH_SCALE)
+            .map(|cone| {
+                details
+                    .iter()
+                    .map(|&detail| pitch_of(cone, sightings, detail))
+                    .fold(COARSEST_PITCH, f32::min)
+            })
             .collect();
+        let mut details = details.to_vec();
+        details.sort_by_key(|detail| (detail.x, detail.y));
+        details.dedup();
         loop {
             let mut fields: Vec<Picture> = cones
                 .iter()
@@ -631,6 +662,7 @@ impl Pictures {
                 return Self {
                     fields,
                     size,
+                    details,
                     casters: bodies.and_then(Casters::of),
                     image: Mutex::default(),
                 };
@@ -677,6 +709,116 @@ impl Pictures {
             done: Arc::default(),
         });
         Some(handle)
+    }
+}
+
+/// A record's depth pictures as its views draw them, one for every plan of the record
+/// (`Plan::adopt_pictures`): laid out at every detail the views showing the record ask
+/// ([`Self::show`]), so each field takes the finest pitch any of them needs at its own live size,
+/// and laid out anew when what they ask changes. A view draws the newest pictures whose atlas has
+/// been submitted ([`PictureJobs::rendered`]): pictures laid out anew are drawn from the atlas
+/// before them until theirs is written, so a change of size draws no frame without the fields.
+#[derive(Default)]
+pub struct RecordAtlas(Mutex<Laying>);
+
+#[derive(Default)]
+struct Laying {
+    /// Each view's ask while it shows the record: its token ([`ViewPictures`]) and its detail.
+    asks: Vec<(Weak<()>, UVec2)>,
+    /// The newest pictures whose atlas has been submitted.
+    drawn: Option<Arc<Pictures>>,
+    /// The pictures laid out at the details asked since, until their atlas has been submitted.
+    next: Option<Arc<Pictures>>,
+}
+
+impl RecordAtlas {
+    /// Show the record's pictures in `view`, which asks `detail` ([`detail_of`]): its ask renewed
+    /// and every ask whose view has let go dropped; the pictures laid out by `lay` at the details
+    /// asked where they differ from the newest pictures'; the next pictures drawn once their atlas
+    /// is submitted; `view` drawing the newest pictures whose atlas has been, and holding every
+    /// atlas still to be written so its job is kept.
+    pub fn show(
+        &self,
+        view: &mut ViewPictures,
+        detail: UVec2,
+        lay: impl FnOnce(&[UVec2]) -> Pictures,
+        images: &mut Assets<Image>,
+        jobs: &mut PictureJobs,
+    ) {
+        let Ok(mut laying) = self.0.lock() else {
+            return;
+        };
+        let token = Arc::downgrade(&view.token);
+        laying
+            .asks
+            .retain(|(held, _)| held.strong_count() > 0 && !held.ptr_eq(&token));
+        laying.asks.push((token, detail));
+        let mut details: Vec<UVec2> = laying.asks.iter().map(|&(_, detail)| detail).collect();
+        details.sort_by_key(|detail| (detail.x, detail.y));
+        details.dedup();
+        let next = laying.next.as_ref().map(|next| next.image(images, jobs));
+        if let Some(atlas) = next
+            && jobs.rendered(atlas.as_ref())
+        {
+            laying.drawn = laying.next.take();
+        }
+        let laid = |pictures: &Option<Arc<Pictures>>| {
+            pictures
+                .as_ref()
+                .is_some_and(|pictures| pictures.details == details)
+        };
+        if !laid(&laying.next) {
+            laying.next = if laid(&laying.drawn) {
+                None
+            } else {
+                let pictures = lay(&details);
+                debug!(
+                    "pen cam: a record's pictures laid out at {details:?}: atlas {}x{}",
+                    pictures.size.x, pictures.size.y
+                );
+                Some(Arc::new(pictures))
+            };
+        }
+        // The view's atlases are taken anew while it still holds last frame's: an atlas let go
+        // before it is taken again is allocated and rendered anew.
+        let (mut drawn, mut held) = (None, Vec::new());
+        if let Some(pictures) = &laying.drawn
+            && let Some(atlas) = pictures.image(images, jobs)
+        {
+            if jobs.rendered(Some(&atlas)) {
+                drawn = Some((pictures.clone(), atlas.clone()));
+            }
+            held.push(atlas);
+        }
+        if let Some(atlas) = laying
+            .next
+            .as_ref()
+            .and_then(|next| next.image(images, jobs))
+        {
+            held.push(atlas);
+        }
+        (view.drawn, view.held) = (drawn, held);
+    }
+}
+
+/// One view's hold on the record it shows ([`RecordAtlas::show`]): replaced when the view shows
+/// another record, which withdraws its ask from the one before.
+#[derive(Default)]
+pub struct ViewPictures {
+    /// The view's ask in the record's [`RecordAtlas`], withdrawn when this goes.
+    token: Arc<()>,
+    /// The pictures the view draws and their atlas, once submitted.
+    drawn: Option<(Arc<Pictures>, Handle<Image>)>,
+    /// The atlases kept for the view while they are drawn or written: the drawn pictures' and the
+    /// next's.
+    held: Vec<Handle<Image>>,
+}
+
+impl ViewPictures {
+    /// The pictures the view draws and the atlas they are read from; `None` before any is
+    /// written.
+    pub fn drawn(&self) -> Option<&(Arc<Pictures>, Handle<Image>)> {
+        self.drawn.as_ref()
     }
 }
 
@@ -1049,9 +1191,13 @@ pub(super) mod tests {
         speed: 1.0,
     };
 
-    /// A pitch near the one the shipped records derive (5.5·10⁻⁴ rad, MEASURED over their
-    /// sightings). Fixture data.
+    /// A pitch near the one the shipped records derive for an expanded 4K corner (5.5·10⁻⁴ rad,
+    /// MEASURED over their sightings). Fixture data.
     const PRODUCTION_PITCH: f32 = 5.5e-4;
+
+    /// The detail the tests lay a record's pictures out at: a 4K target's ([`detail_of`]).
+    /// Fixture data.
+    pub(in super::super) const DETAIL: UVec2 = UVec2::new(3840, 2176);
 
     /// The fixtures' axis and its frame, the picture's own.
     pub(in super::super) const AXIS: Vec3 = Vec3::NEG_Z;
@@ -1354,7 +1500,7 @@ pub(super) mod tests {
         for (_, report) in super::super::plan::tests::records() {
             let shapes = super::super::plan::tests::shapes(&report);
             let plan = super::super::plan::Plan::new(&report, &shapes);
-            let pictures = plan.pictures();
+            let pictures = plan.lay(&[DETAIL]);
             let pitches: Vec<f32> = pictures
                 .fields
                 .iter()
@@ -1409,7 +1555,7 @@ pub(super) mod tests {
         for (_, report) in super::super::plan::tests::records() {
             let shapes = super::super::plan::tests::shapes(&report);
             let plan = super::super::plan::Plan::new(&report, &shapes);
-            let pictures = plan.pictures();
+            let pictures = plan.lay(&[DETAIL]);
             let crops: Vec<Crop> = pictures.fields.iter().flat_map(|f| f.crops).collect();
             let rects: Vec<(UVec2, UVec2)> = crops
                 .iter()
@@ -1550,7 +1696,12 @@ pub(super) mod tests {
     #[test]
     fn the_atlas_is_cached_while_a_view_holds_it() {
         let casters = plate_casters(0.003);
-        let pictures = Arc::new(Pictures::of(&[cap(|_, _| 2.0)], Some(&casters.bodies), &[]));
+        let pictures = Arc::new(Pictures::of(
+            &[cap(|_, _| 2.0)],
+            Some(&casters.bodies),
+            &[],
+            &[],
+        ));
         let mut images = Assets::<Image>::default();
         let mut jobs = PictureJobs::default();
         let first = pictures.image(&mut images, &mut jobs);
@@ -1582,7 +1733,12 @@ pub(super) mod tests {
     #[test]
     fn a_job_waits_until_submitted_and_leaves_after() {
         let casters = plate_casters(0.003);
-        let pictures = Arc::new(Pictures::of(&[cap(|_, _| 2.0)], Some(&casters.bodies), &[]));
+        let pictures = Arc::new(Pictures::of(
+            &[cap(|_, _| 2.0)],
+            Some(&casters.bodies),
+            &[],
+            &[],
+        ));
         let mut images = Assets::<Image>::default();
         let mut jobs = PictureJobs::default();
         assert!(jobs.rendered(None), "no atlas waits on a job");
@@ -1604,11 +1760,209 @@ pub(super) mod tests {
         assert!(jobs.0.is_empty(), "a submitted job stays");
         assert!(jobs.rendered(atlas.as_ref()));
 
-        let replaced = Arc::new(Pictures::of(&[cap(|_, _| 1.5)], Some(&casters.bodies), &[]));
+        let replaced = Arc::new(Pictures::of(
+            &[cap(|_, _| 1.5)],
+            Some(&casters.bodies),
+            &[],
+            &[],
+        ));
         let pending = replaced.image(&mut images, &mut jobs);
         assert_eq!(jobs.waiting().count(), 1);
         drop(pending);
         jobs.retire();
         assert!(jobs.0.is_empty(), "a job no view holds is rendered");
+    }
+
+    /// A texel spans at most a pixel of the live target at the sightings, and no less: for every
+    /// field of every shipped record, a 1080p target's pitch is twice a 4K target's (their details
+    /// are of one aspect, one twice the other), [`COARSEST_PITCH`] at most, and its pictures hold a
+    /// quarter of the 4K pictures' texels and the little more the texel each crop runs past its
+    /// face's edge adds (MEASURED: the 4K pictures hold 3.985 times the 1080p ones'). A pitch
+    /// fixed at one reference size gives a 1080p target four times the texels it can show, or a 4K
+    /// target a texel of two pixels. Fixture: every shipped record.
+    #[test]
+    fn the_pitch_follows_the_targets_size() {
+        let (hd, uhd) = (
+            detail_of(UVec2::new(1920, 1080)),
+            detail_of(UVec2::new(3840, 2160)),
+        );
+        assert_eq!(uhd, 2 * hd, "the fixture's targets are not of one aspect");
+        let (mut fields, mut texels) = (0, [0_u64; 2]);
+        for (name, report) in super::super::plan::tests::records() {
+            let shapes = super::super::plan::tests::shapes(&report);
+            let plan = super::super::plan::Plan::new(&report, &shapes);
+            let sightings = super::super::stage::field_sightings(&plan);
+            for (k, cone) in plan.cones.iter().enumerate() {
+                if cone.rays.is_empty() {
+                    continue;
+                }
+                let [coarse, fine] = [hd, uhd].map(|detail| pitch_of(cone, &sightings, detail));
+                let want = (2.0 * fine).min(COARSEST_PITCH);
+                assert!(
+                    (coarse - want).abs() <= 1e-6 * want,
+                    "{name} field {k}: {coarse} rad at 1080p, {fine} rad at 4K"
+                );
+                if coarse < COARSEST_PITCH {
+                    texels[0] += Picture::of(cone, coarse).texels();
+                    texels[1] += Picture::of(cone, fine).texels();
+                    fields += 1;
+                }
+            }
+        }
+        let ratio = texels[1] as f64 / texels[0] as f64;
+        assert!(
+            fields > 0 && (3.9..=4.0).contains(&ratio),
+            "{fields} fields: 4K holds {ratio} times the 1080p texels"
+        );
+    }
+
+    /// A target that changes within its step lays nothing anew: a view whose target moves about
+    /// within one step of [`DETAIL_STEP_PX`] keeps the pictures laid out and rendered for its
+    /// first size, and a change across a step lays them out once more. A view that laid its
+    /// record's pictures out anew at every change of size renders the record again on every frame
+    /// of a window's drag. Fixture: [`cap`] over [`plate_casters`], targets about 1900×1000.
+    #[test]
+    fn a_change_of_size_within_a_step_lays_nothing_anew() {
+        let casters = plate_casters(0.003);
+        let cone = cap(|_, _| 2.0);
+        let lays = Cell::new(0);
+        let lay = |details: &[UVec2]| {
+            lays.set(lays.get() + 1);
+            Pictures::of(
+                std::slice::from_ref(&cone),
+                Some(&casters.bodies),
+                &[],
+                details,
+            )
+        };
+        let record = RecordAtlas::default();
+        let mut view = ViewPictures::default();
+        let (mut images, mut jobs) = (Assets::<Image>::default(), PictureJobs::default());
+        record.show(
+            &mut view,
+            detail_of(UVec2::new(1900, 1000)),
+            lay,
+            &mut images,
+            &mut jobs,
+        );
+        jobs.submit_all();
+        jobs.retire();
+        for (w, h) in [(1901, 1001), (1919, 1023), (1880, 990), (1900, 1000)] {
+            let detail = detail_of(UVec2::new(w, h));
+            record.show(&mut view, detail, lay, &mut images, &mut jobs);
+            assert_eq!(lays.get(), 1, "{w}×{h} laid the pictures out anew");
+            assert_eq!(jobs.queued(), 0, "{w}×{h} rendered the pictures anew");
+            assert!(view.drawn().is_some(), "{w}×{h} drew no pictures");
+        }
+        let detail = detail_of(UVec2::new(1921, 1000));
+        record.show(&mut view, detail, lay, &mut images, &mut jobs);
+        assert_eq!(lays.get(), 2, "a change across a step laid nothing anew");
+        assert_eq!(
+            jobs.queued(),
+            1,
+            "a change across a step rendered nothing anew"
+        );
+    }
+
+    /// Pictures laid out anew are drawn from the atlas before them until theirs is written:
+    /// across a change of size the view draws the old pictures from the old atlas in every frame
+    /// until the new atlas's job is submitted, then the new from the new, and lets the old go. A
+    /// record's first pictures are drawn in no frame before theirs is submitted. A view that let
+    /// the old atlas go when it laid out anew draws frames without the fields at every change of
+    /// size; one that drew the new pictures before submission reads an empty atlas. Fixture:
+    /// [`cap`] over [`plate_casters`], a 1080p target growing to 4K.
+    #[test]
+    fn pictures_laid_anew_are_drawn_from_the_old_atlas_until_written() {
+        let casters = plate_casters(0.003);
+        let cone = cap(|_, _| 2.0);
+        let lay = |details: &[UVec2]| {
+            Pictures::of(
+                std::slice::from_ref(&cone),
+                Some(&casters.bodies),
+                &[],
+                details,
+            )
+        };
+        let (small, large) = (
+            detail_of(UVec2::new(1920, 1080)),
+            detail_of(UVec2::new(3840, 2160)),
+        );
+        let record = RecordAtlas::default();
+        let mut view = ViewPictures::default();
+        let (mut images, mut jobs) = (Assets::<Image>::default(), PictureJobs::default());
+        record.show(&mut view, small, lay, &mut images, &mut jobs);
+        assert!(view.drawn().is_none(), "the first pictures drawn unwritten");
+        jobs.submit_all();
+        record.show(&mut view, small, lay, &mut images, &mut jobs);
+        let (old, old_atlas) = view.drawn().cloned().expect("the first pictures, written");
+        for frame in 0..3 {
+            record.show(&mut view, large, lay, &mut images, &mut jobs);
+            let (pictures, atlas) = view.drawn().expect("a frame without the fields");
+            assert!(
+                Arc::ptr_eq(pictures, &old) && *atlas == old_atlas,
+                "frame {frame}: the new pictures drawn unwritten"
+            );
+        }
+        jobs.submit_all();
+        record.show(&mut view, large, lay, &mut images, &mut jobs);
+        let (new, new_atlas) = view.drawn().cloned().expect("the new pictures, written");
+        assert_eq!(new.details, vec![large]);
+        assert_ne!(new_atlas, old_atlas);
+        assert!(
+            !view.held.contains(&old_atlas),
+            "the old atlas held past the new one's writing"
+        );
+    }
+
+    /// The views of a record take the finest pitch any of them needs at its own size: two plans
+    /// of one record, one asking a 1080p detail and the other a 4K one, draw one atlas laid out at
+    /// both, each field at the pitch the 4K detail gives; once the 4K view lets go, the other's
+    /// next frame lays the pictures out at its own detail alone. Views laying a record out each at
+    /// its own size render it twice; ones keeping a view's ask after it goes keep its texels.
+    /// Fixture: the first shipped record that throws a field.
+    #[test]
+    fn the_views_of_a_record_take_the_finest_pitch_any_needs() {
+        let (corner, mut xray) = super::super::plan::tests::records()
+            .into_iter()
+            .find_map(|(_, report)| {
+                let shapes = super::super::plan::tests::shapes(&report);
+                let plan = super::super::plan::Plan::new(&report, &shapes);
+                plan.cones
+                    .iter()
+                    .any(|cone| !cone.rays.is_empty())
+                    .then(|| (plan, super::super::plan::Plan::new(&report, &shapes)))
+            })
+            .expect("a record throws a field");
+        xray.adopt_pictures(corner.picture_cell().clone());
+        let (small, large) = (
+            detail_of(UVec2::new(1920, 1080)),
+            detail_of(UVec2::new(3840, 2160)),
+        );
+        let (mut a, mut b) = (ViewPictures::default(), ViewPictures::default());
+        let (mut images, mut jobs) = (Assets::<Image>::default(), PictureJobs::default());
+        for _ in 0..2 {
+            corner.show(&mut a, small, &mut images, &mut jobs);
+            xray.show(&mut b, large, &mut images, &mut jobs);
+            jobs.submit_all();
+        }
+        let (shared, atlas) = a.drawn().cloned().expect("the corner draws the pictures");
+        assert_eq!(
+            b.drawn().map(|(_, atlas)| atlas),
+            Some(&atlas),
+            "two atlases"
+        );
+        assert_eq!(shared.details, vec![small, large]);
+        let finest = corner.lay(&[large]);
+        let pitches = |pictures: &Pictures| -> Vec<f32> {
+            pictures.fields.iter().map(|field| field.pitch).collect()
+        };
+        assert_eq!(pitches(&shared), pitches(&finest), "not the finest pitch");
+        drop(b);
+        for _ in 0..2 {
+            corner.show(&mut a, small, &mut images, &mut jobs);
+            jobs.submit_all();
+        }
+        let (own, _) = a.drawn().expect("the corner draws the pictures");
+        assert_eq!(own.details, vec![small], "a view's ask kept after it went");
     }
 }

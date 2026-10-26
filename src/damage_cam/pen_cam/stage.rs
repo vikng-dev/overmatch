@@ -33,6 +33,7 @@
 //! in the game.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use bevy::camera::ScalingMode;
 use bevy::camera::{Hdr, RenderTarget};
@@ -43,7 +44,7 @@ use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldInstanceReady};
 
 use super::look::{self, FieldPrint, Footprint, Layer, LookMaterial, MaskSet, Masks};
 use super::material::{GlowMaterial, OutlineMaterial, SliceCut, SliceMaterial, SliceParams};
-use super::picture::PictureJobs;
+use super::picture::{PictureDetail, PictureJobs, Pictures, ViewPictures};
 use super::plan::{BoxPlan, BurstPlan, Plan, Reach};
 use super::potency::Potency;
 use super::timeline::{self, CornerKind};
@@ -219,9 +220,9 @@ pub struct Stage {
     masks: MaskSet,
     /// The round's own material, which a burst's pieces wear ([`shell_material`]).
     round_material: Handle<StandardMaterial>,
-    /// The built record's depth pictures ([`super::picture::Pictures::image`]), which its volume
-    /// and its painting read; `None` where it draws no field.
-    atlas: Option<Handle<Image>>,
+    /// The built record's depth pictures as the stage draws them ([`Plan::show`]), which its
+    /// volume, its state fills and its painting read; held while the stage shows the record.
+    pictures: ViewPictures,
     /// The materials of the tank's component meshes the built frame paints the fields on
     /// ([`look::Footprint::of_mesh`]); the state fills are painted beside them ([`Playing::fill`]).
     painted: Vec<Handle<LookMaterial>>,
@@ -440,7 +441,7 @@ pub struct StageRoundPose<'w, 's> {
 /// the camera drawing it: the inset's in the corner, the main camera's in the kill cam's lesson.
 #[expect(
     clippy::too_many_arguments,
-    reason = "rebuilds the stage from the corner, exhibits, view, round and the viewer's masks into the mesh and image stores and four material stores"
+    reason = "rebuilds the stage from the corner, exhibits, view, round and the viewer's masks into the mesh store and four material stores"
 )]
 pub fn rebuild(
     mut commands: Commands,
@@ -457,11 +458,7 @@ pub fn rebuild(
     mut outlines: ResMut<Assets<OutlineMaterial>>,
     standard: Res<Assets<StandardMaterial>>,
     mut slices: ResMut<Assets<SliceMaterial>>,
-    (mut looks, mut images, mut jobs): (
-        ResMut<Assets<LookMaterial>>,
-        ResMut<Assets<Image>>,
-        ResMut<PictureJobs>,
-    ),
+    mut looks: ResMut<Assets<LookMaterial>>,
     masks: Res<Masks>,
 ) {
     let key = corner.showing.map(|showing| StageKey {
@@ -475,10 +472,14 @@ pub fn rebuild(
     let Some(hull) = view.hull else {
         return;
     };
+    // Another record's showing withdraws the stage's ask of the pictures of the one before.
+    let record = |key: &Option<StageKey>| key.as_ref().map(|key| (key.turn, key.record));
+    if record(&stage.key) != record(&key) {
+        stage.pictures = ViewPictures::default();
+    }
     stage.key = key.clone();
     stage.stale = false;
     stage.hull = Some(hull);
-    stage.atlas = None;
     stage.painted.clear();
     let viewer = corner.showing.and_then(|showing| match showing.surface {
         super::Surface::Corner => stage.camera,
@@ -609,7 +610,7 @@ pub fn rebuild(
         .map(|(_, (material, _))| material)
         .collect();
 
-    stage.atlas = spawn_glass(
+    spawn_glass(
         &mut commands,
         &mut meshes,
         &mut glows,
@@ -621,8 +622,6 @@ pub fn rebuild(
         &components,
         LookCtx {
             looks: &mut looks,
-            images: &mut images,
-            jobs: &mut jobs,
             masks: &masks,
         },
         &stage.round_material,
@@ -668,13 +667,16 @@ pub(super) fn round_copies(
     }
 }
 
-/// What drawing a record in the base look needs: the material and image stores, the depth
-/// pictures waiting to be rendered, and the viewer's masks.
+/// What drawing a record in the base look needs: the material store and the viewer's masks.
 pub struct LookCtx<'a> {
     pub looks: &'a mut Assets<LookMaterial>,
-    pub images: &'a mut Assets<Image>,
-    pub jobs: &'a mut PictureJobs,
     pub masks: &'a MaskSet,
+}
+
+/// Whether frame `kind` draws `plan`'s fields: every frame but the ricochet's, where the record
+/// threw any. The volume is spawned and the pictures shown under the one condition.
+pub(super) fn draws_fields(plan: &Plan, kind: CornerKind) -> bool {
+    kind != CornerKind::Ricochet && look::field_bounds(&plan.cones).is_some()
 }
 
 /// Draw `plan`'s record over a tank in frame `kind`: the trail, the rings, the fields, a burst's
@@ -684,10 +686,8 @@ pub struct LookCtx<'a> {
 /// mesh. `clip` is the slice plane (unit normal toward the eye, a point on it) the fields and the
 /// pieces are cut by. The pieces wear `round_material`, the round's own ([`shell_material`]).
 /// Everything spawned carries `tag` — its owner's marker and the channel it draws on — and is
-/// hidden until [`Playing`] places it. Returns the atlas of the record's depth pictures
-/// ([`Plan::pictures`], [`super::picture::Pictures::image`]) its volume and the state fills'
-/// painting read, which the painted component meshes are to read too; `None` where the frame
-/// draws no field.
+/// hidden until [`Playing`] places it; the volume and the state fills read the record's depth
+/// pictures as the view draws them, set each frame ([`Playing::drawing`]).
 #[expect(
     clippy::too_many_arguments,
     reason = "draws one plan: the spawn sinks, the plan and its frame, the parent and clip, the components, the look, the round's material and the owner's tag are separate inputs"
@@ -705,7 +705,7 @@ pub fn spawn_glass(
     look_ctx: LookCtx,
     round_material: &Handle<StandardMaterial>,
     tag: impl Bundle + Clone,
-) -> Option<Handle<Image>> {
+) {
     // The trail, one cylinder per leg of the path from the drawn span's start; a round that left
     // trails on past the span behind the shell, and its last leg past the path's last node.
     let cylinder = meshes.add(Cylinder::new(0.5, 1.0));
@@ -795,15 +795,11 @@ pub fn spawn_glass(
         );
     }
 
-    // The fields: their depth pictures in one atlas, and one volume on the box about their reach,
-    // cut by the slice plane in the slice.
-    let mut atlas = None;
-    if kind != CornerKind::Ricochet
+    // The fields: one volume on the box about their reach, cut by the slice plane in the slice.
+    if draws_fields(plan, kind)
         && let Some((lo, hi)) = look::field_bounds(&plan.cones)
-        && let Some(pictures) = plan.pictures().image(look_ctx.images, look_ctx.jobs)
     {
-        atlas = Some(pictures.clone());
-        let mut material = look::volume(&Potency::shipped(), look_ctx.masks, kind, clip, pictures);
+        let mut material = look::volume(&Potency::shipped(), look_ctx.masks, kind, clip);
         material.set_fade(0.0);
         commands.spawn((
             Mesh3d(meshes.add(Cuboid::from_corners(lo, hi))),
@@ -858,7 +854,6 @@ pub fn spawn_glass(
             .map_or(Vec3::ZERO, |aabb| Vec3::from(aabb.center));
         let mut outline =
             OutlineMaterial::new(timeline::STATE_RED.into(), look::STATE_OUTLINE_PX, center);
-        fill.pictures = atlas.clone();
         fill.set_fade(0.0);
         outline.set_fade(0.0);
         let tint = || {
@@ -874,7 +869,6 @@ pub fn spawn_glass(
         commands.spawn((tint(), MeshMaterial3d(look_ctx.looks.add(fill))));
         commands.spawn((tint(), MeshMaterial3d(outlines.add(outline))));
     }
-    atlas
 }
 
 /// The ring a calibre across on a face, stretched along the line's track on it by
@@ -1145,6 +1139,8 @@ pub(super) struct Playing<'a> {
     kind: CornerKind,
     c: f32,
     reduce: bool,
+    /// The record's depth pictures as the view draws them and their atlas ([`Self::drawing`]).
+    pictures: Option<&'a (Arc<Pictures>, Handle<Image>)>,
     head: f32,
     share: Option<f32>,
     end: (f32, Vec3),
@@ -1161,6 +1157,7 @@ impl<'a> Playing<'a> {
             kind,
             c,
             reduce,
+            pictures: None,
             head,
             share,
             end,
@@ -1170,6 +1167,18 @@ impl<'a> Playing<'a> {
             playing.line_fade = playing.fade_from(kind.travel_start());
         }
         playing
+    }
+
+    /// The frame drawing its fields from `pictures` ([`ViewPictures::drawn`]): the prints
+    /// ([`Self::prints`]) and the atlas every field material reads are one layout. Without them it
+    /// draws no field.
+    pub(super) fn drawing(self, pictures: Option<&'a (Arc<Pictures>, Handle<Image>)>) -> Self {
+        Self { pictures, ..self }
+    }
+
+    /// The atlas the frame's fields are read from.
+    pub(super) fn atlas(&self) -> Option<&'a Handle<Image>> {
+        self.pictures.map(|(_, atlas)| atlas)
     }
 
     /// An element's fade-in from corner time `start`: short, longer under reduce motion.
@@ -1322,6 +1331,7 @@ impl<'a> Playing<'a> {
             return;
         };
         if let Some(mut m) = looks.get_mut(&look.0) {
+            m.pictures = self.atlas().cloned();
             m.set_fields(prints, &Potency::shipped());
             m.set_fade(fade);
         }
@@ -1332,16 +1342,19 @@ impl<'a> Playing<'a> {
     /// pitch and faces, its strength and law, and its front run out from the origin, or under
     /// reduce motion its longest reach once it is thrown and negative before. The volume
     /// ([`Self::fields`]) and the painting ([`look::paint_fields`], [`Self::fill`]) read the same.
-    pub(super) fn prints(&self, hull: &GlobalTransform) -> Vec<FieldPrint> {
+    /// `None` without the pictures ([`Self::drawing`]).
+    pub(super) fn prints(&self, hull: &GlobalTransform) -> Option<Vec<FieldPrint>> {
         let (plan, kind, c) = (self.plan, self.kind, self.c);
+        let (pictures, _) = self.pictures?;
         let linear = hull.affine().matrix3;
         let unit = |v: Vec3| {
             let v = linear * v;
             v / v.length().max(1e-6)
         };
-        plan.cones
+        let prints = plan
+            .cones
             .iter()
-            .zip(&plan.pictures().fields)
+            .zip(&pictures.fields)
             .enumerate()
             .map(|(index, (cone, picture))| {
                 let scale = (linear * picture.axis).length();
@@ -1370,7 +1383,8 @@ impl<'a> Playing<'a> {
                     law: look::law_lane(cone.field, cone.strata),
                 }
             })
-            .collect()
+            .collect();
+        Some(prints)
     }
 
     /// A component's state fill and its outline: risen along the up of the record frame `hull`
@@ -1417,6 +1431,7 @@ impl<'a> Playing<'a> {
             if let Some(condition) = condition {
                 m.set_condition(condition);
             }
+            m.pictures = self.atlas().cloned();
             m.set_fields(prints, &Potency::shipped());
             if let Some(hull) = hull {
                 let up = *hull.up();
@@ -1455,7 +1470,12 @@ impl<'a> Playing<'a> {
 pub fn animate(
     corner: Res<Corner>,
     knobs: Res<Knobs>,
-    (exhibits, jobs): (Res<Exhibits>, Res<PictureJobs>),
+    (exhibits, detail, mut images, mut jobs): (
+        Res<Exhibits>,
+        Res<PictureDetail>,
+        ResMut<Assets<Image>>,
+        ResMut<PictureJobs>,
+    ),
     mut stage: ResMut<Stage>,
     hulls: Query<&GlobalTransform>,
     mut glows: ResMut<Assets<GlowMaterial>>,
@@ -1536,7 +1556,18 @@ pub fn animate(
     let plan = &*exhibit.plan;
     let kind = showing.kind;
     let c = showing.c;
-    let playing = Playing::new(plan, kind, c, knobs.reduce_motion);
+    // The fields' pictures at the detail of the target the record is drawn into.
+    let detail = match showing.surface {
+        super::Surface::Corner => detail.corner,
+        super::Surface::World => detail.world,
+    };
+    if draws_fields(plan, kind)
+        && let Some(detail) = detail
+    {
+        plan.show(&mut stage.pictures, detail, &mut images, &mut jobs);
+    }
+    let drawn = stage.pictures.drawn().cloned();
+    let playing = Playing::new(plan, kind, c, knobs.reduce_motion).drawing(drawn.as_ref());
 
     match playing.shell() {
         Some(want) => {
@@ -1559,11 +1590,9 @@ pub fn animate(
         playing.mark(mark, material, &mut visibility, &mut glows);
     }
     // The state fills rise along the hull's up, the tank's; the fields are taken in its frame,
-    // and drawn once their pictures are rendered.
+    // and drawn once their pictures are written.
     let hull = stage.hull.and_then(|hull| hulls.get(hull).ok());
-    let prints = hull
-        .filter(|_| jobs.rendered(stage.atlas.as_ref()))
-        .map(|hull| playing.prints(hull));
+    let prints = hull.and_then(|hull| playing.prints(hull));
     for (look, mut visibility) in &mut volumes {
         playing.fields(look, &mut visibility, prints.as_deref(), &mut looks);
     }
@@ -1572,7 +1601,7 @@ pub fn animate(
             &mut looks,
             handle,
             prints.as_deref().unwrap_or_default(),
-            stage.atlas.as_ref(),
+            playing.atlas(),
         );
     }
     for (tint, outline, look, mut visibility) in &mut boxes {
@@ -1615,9 +1644,9 @@ pub fn animate(
 /// frame: the along-shot eye at every one of [`ORBIT_SAMPLES`] spins of a full turn (the glass,
 /// victim and damaged frames, the kill cam's lesson among them), and in a record its verdict
 /// opens in the slice ([`Plan::verdict_kind`], whichever frame a view draws it in) the slice's eye
-/// in both its lenses. The fields' pictures take their pitch from these
-/// ([`super::picture::pitch_of`]); the viewer's drag, the x-ray and the gunner's sight see the
-/// fields at the pitch these give.
+/// in both its lenses. The fields' pictures take their pitch from these, at the detail of each
+/// view that shows them ([`super::picture::pitch_of`]); the viewer's drag, the x-ray and the
+/// gunner's sight see the fields at the pitch these give.
 pub(super) fn field_sightings(plan: &Plan) -> Vec<(Transform, Projection)> {
     let far = shot_distance(plan, Vec2::ZERO);
     let turn = std::f32::consts::TAU / ORBIT_SAMPLES as f32;
@@ -1995,6 +2024,7 @@ mod tests {
     use super::super::demo::Library;
     use super::super::hud::ASPECT;
     use super::super::material::Blend;
+    use super::super::picture::tests::DETAIL;
     use super::super::plan::{LEAD_M, LEG_EPS_M};
     use super::super::timeline::Condition;
     use super::*;
@@ -3111,6 +3141,10 @@ mod tests {
             .insert_resource(Assets::<SliceMaterial>::default())
             .insert_resource(Assets::<LookMaterial>::default())
             .insert_resource(Assets::<Image>::default())
+            .insert_resource(PictureDetail {
+                corner: Some(DETAIL),
+                world: Some(DETAIL),
+            })
             .init_resource::<PictureJobs>()
             .init_resource::<Masks>()
             .add_systems(Update, rebuild);
@@ -3163,12 +3197,11 @@ mod tests {
         })
     }
 
-    /// Every record's fields as the real [`rebuild`] draws them, in every frame, the corner's and
-    /// the kill cam's lesson on the world alike: one volume, blended, on a box that holds every
-    /// field out to its longest reach, reading the record's depth pictures from their one atlas
-    /// ([`super::super::picture::Pictures::image`]); its bands parted at the shipped thresholds
-    /// and coloured from
-    /// the band law alone — the knockout band the field teal, the reduced band the deep teal, both
+    /// Every record's fields as the real [`rebuild`] and [`animate`] draw them at the record's hold,
+    /// in every frame, the corner's and the kill cam's lesson on the world alike: one volume,
+    /// blended, on a box that holds every field out to its longest reach, reading the record's
+    /// depth pictures from the one atlas the stage draws ([`ViewPictures::drawn`]); its bands
+    /// parted at the shipped thresholds and coloured from the band law alone — the knockout band the field teal, the reduced band the deep teal, both
     /// more blue than red and off the state scale, the knockout band the brighter — at one opacity
     /// across every record, so the colour says the band of the fields' summed intensity and
     /// nothing else. Outside the slice the volume is uncut; in the slice it is cut by the slice
@@ -3201,6 +3234,16 @@ mod tests {
                 (CornerKind::Glass, super::super::Surface::World),
             ] {
                 let (mut app, _) = staged_on(&library, &asset, index, kind, Vec3::X, surface);
+                animated(&mut app);
+                app.world_mut()
+                    .resource_mut::<Corner>()
+                    .showing
+                    .as_mut()
+                    .expect("a frame on show")
+                    .c = pace(&record.plan, kind).hold_from;
+                app.update();
+                app.world().resource::<PictureJobs>().submit_all();
+                app.update();
                 let world = app.world_mut();
                 let fields: Vec<(Handle<Mesh>, Transform, Handle<LookMaterial>)> = world
                     .query_filtered::<(&Mesh3d, &Transform, &MeshMaterial3d<LookMaterial>), With<FieldVolume>>()
@@ -3211,7 +3254,12 @@ mod tests {
                 let slice = kind == CornerKind::Slice;
                 let cut = world.resource::<Stage>().plane;
                 assert_eq!(cut.is_some(), slice, "{} {surface:?}", record.stem);
-                let pictures = record.plan.pictures();
+                let (pictures, atlas) = world
+                    .resource::<Stage>()
+                    .pictures
+                    .drawn()
+                    .cloned()
+                    .expect("the record's pictures, written");
                 assert_eq!(
                     pictures.fields.len(),
                     record.plan.cones.len(),
@@ -3243,7 +3291,11 @@ mod tests {
                         "{}",
                         record.stem
                     );
-                    let read = m.pictures.as_ref().and_then(|atlas| images.get(atlas));
+                    let read = m
+                        .pictures
+                        .as_ref()
+                        .filter(|read| **read == atlas)
+                        .and_then(|atlas| images.get(atlas));
                     assert!(
                         read.is_some_and(|image| image.size() == pictures.size
                             && image.texture_descriptor.format
@@ -3308,13 +3360,14 @@ mod tests {
                 let (mut app, placed) = staged(&library, &asset, index, kind, Vec3::ZERO);
                 let body = with_body(&mut app);
                 animated(&mut app);
-                app.world().resource::<PictureJobs>().submit_all();
                 app.world_mut()
                     .resource_mut::<Corner>()
                     .showing
                     .as_mut()
                     .expect("a frame on show")
                     .c = pace(plan, kind).hold_from;
+                app.update();
+                app.world().resource::<PictureJobs>().submit_all();
                 app.update();
                 let world = app.world_mut();
                 let volume = world

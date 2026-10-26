@@ -54,7 +54,7 @@ use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldInstanceReady};
 use super::super::Knobs;
 use super::super::look::{self, Footprint, Layer, LookMaterial, MaskNeed, MaskSet, Masks};
 use super::super::material::{GlowMaterial, OutlineMaterial};
-use super::super::picture::PictureJobs;
+use super::super::picture::{PictureDetail, PictureJobs, ViewPictures};
 use super::super::plan::{BoxPlan, Plan};
 use super::super::stage::{
     self, BoxTint, FieldVolume, LineSeg, LookCtx, MarkItem, Piece, Playing, SHELL_SCENE,
@@ -311,9 +311,9 @@ struct Built {
     /// One material per tier and painting rule the tank's meshes wear (a component's mesh paints
     /// by its component's role, [`Footprint::of_mesh`]), and the layer each is masked in.
     tiers: HashMap<(Tier, Option<Footprint>), (Handle<LookMaterial>, Layer)>,
-    /// The atlas of the record's depth pictures its volume reads, which the painted materials read
-    /// too ([`spawn_glass`]); `None` without a field.
-    atlas: Option<Handle<Image>>,
+    /// The record's depth pictures as the x-ray draws them ([`Plan::show`]), which its volume, its
+    /// state fills and its painted materials read; held while it shows the record.
+    pictures: ViewPictures,
     /// The masks' material, on every mask copy.
     mask: Handle<LookMaterial>,
     /// Meshes were dressed this frame: the record's elements are built again next frame, once
@@ -401,8 +401,6 @@ pub(super) struct Stores<'w> {
     glows: ResMut<'w, Assets<GlowMaterial>>,
     outlines: ResMut<'w, Assets<OutlineMaterial>>,
     looks: ResMut<'w, Assets<LookMaterial>>,
-    images: ResMut<'w, Assets<Image>>,
-    jobs: ResMut<'w, PictureJobs>,
     pictures: ResMut<'w, RecordPictures>,
 }
 
@@ -507,7 +505,7 @@ pub(super) fn build(
         since: now,
         plan: Arc::new(Plan::bare(&TankShapes::default(), Vec::new())),
         tiers: HashMap::new(),
-        atlas: None,
+        pictures: ViewPictures::default(),
         mask: stores.looks.add(look::hull_mask(set)),
         settle: false,
         rescan: false,
@@ -546,8 +544,10 @@ pub(super) fn build(
         return;
     }
     if built.record != record {
-        // A record's first showing starts its clock; every later showing continues it.
+        // A record's first showing starts its clock; every later showing continues it. Another
+        // record's showing withdraws the x-ray's ask of the pictures of the one before.
         built.since = record.map_or(now, |key| *state.shown.entry(key).or_insert(now));
+        built.pictures = ViewPictures::default();
     }
     built.record = record;
     built.live = live;
@@ -581,7 +581,7 @@ pub(super) fn build(
             .iter()
             .map(|(entity, dressed, mesh)| (entity, dressed.names.as_slice(), mesh.0.clone())),
     );
-    built.atlas = spawn_glass(
+    spawn_glass(
         &mut commands,
         &mut stores.meshes,
         &mut stores.glows,
@@ -593,8 +593,6 @@ pub(super) fn build(
         &components,
         LookCtx {
             looks: &mut stores.looks,
-            images: &mut stores.images,
-            jobs: &mut stores.jobs,
             masks: set,
         },
         &round_material,
@@ -760,8 +758,12 @@ fn dress(
 )]
 pub(super) fn animate(
     time: Res<Time>,
-    state: Res<XRayState>,
-    jobs: Res<PictureJobs>,
+    mut state: ResMut<XRayState>,
+    (detail, mut images, mut jobs): (
+        Res<PictureDetail>,
+        ResMut<Assets<Image>>,
+        ResMut<PictureJobs>,
+    ),
     knobs: Res<Knobs>,
     hulls: Query<&GlobalTransform>,
     mut glows: ResMut<Assets<GlowMaterial>>,
@@ -836,12 +838,22 @@ pub(super) fn animate(
         ),
     >,
 ) {
-    let Some(built) = state.built.as_ref() else {
+    let Some(built) = state.built.as_mut() else {
         return;
     };
+    // The fields' pictures at the detail of the battlefield camera, the x-ray's.
+    if stage::draws_fields(&built.plan, CornerKind::Victim)
+        && let Some(detail) = detail.world
+    {
+        built
+            .plan
+            .show(&mut built.pictures, detail, &mut images, &mut jobs);
+    }
+    let built = &*built;
     let hold_from = stage::pace(&built.plan, CornerKind::Victim).hold_from;
     let c = ((time.elapsed_secs_f64() - built.since) as f32).min(hold_from);
-    let playing = Playing::new(&built.plan, CornerKind::Victim, c, knobs.reduce_motion);
+    let playing = Playing::new(&built.plan, CornerKind::Victim, c, knobs.reduce_motion)
+        .drawing(built.pictures.drawn());
     for (mut pose, mut visibility) in &mut shell {
         match playing.shell() {
             Some(want) => {
@@ -864,11 +876,9 @@ pub(super) fn animate(
     for (mark, material, mut visibility) in &mut marks {
         playing.mark(mark, material, &mut visibility, &mut glows);
     }
-    // The fields are drawn once their pictures are rendered.
+    // The fields are drawn once their pictures are written.
     let hull = hulls.get(built.hull).ok();
-    let prints = hull
-        .filter(|_| jobs.rendered(built.atlas.as_ref()))
-        .map(|hull| playing.prints(hull));
+    let prints = hull.and_then(|hull| playing.prints(hull));
     for (look, mut visibility) in &mut volumes {
         playing.fields(look, &mut visibility, prints.as_deref(), &mut looks);
     }
@@ -878,7 +888,7 @@ pub(super) fn animate(
                 &mut looks,
                 handle,
                 prints.as_deref().unwrap_or_default(),
-                built.atlas.as_ref(),
+                playing.atlas(),
             );
         }
     }

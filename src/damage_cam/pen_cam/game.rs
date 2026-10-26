@@ -35,7 +35,7 @@ mod killcam;
 mod xray;
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::{Arc, OnceLock, Weak};
+use std::sync::{Arc, Weak};
 
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -47,7 +47,7 @@ pub(crate) use self::xray::scripted_xray_plugin;
 pub(crate) use self::xray::{XRay, XRayRelease, XRaySubject};
 use super::hud::{self, CornerImages, Glyphs};
 use super::look;
-use super::picture::Pictures;
+use super::picture::RecordAtlas;
 use super::plan::Plan;
 use super::stage::{self, Stage};
 use super::timeline::{self, CornerKind, Lineup};
@@ -197,10 +197,10 @@ impl Recency {
 
 /// The pictures of every record a view's plan holds, by record: each plan a view builds of a
 /// record adopts the record's while any plan of it holds them ([`Plan::adopt_pictures`]), so the
-/// corner, the kill cam and the x-ray lay a record's pictures out once and render them into one
-/// atlas.
+/// corner, the kill cam and the x-ray lay a record's pictures out as one, at the finest pitch any
+/// of them asks, and render them into one atlas.
 #[derive(Resource, Default)]
-pub(crate) struct RecordPictures(HashMap<ExplanationKey, Weak<OnceLock<Arc<Pictures>>>>);
+pub(crate) struct RecordPictures(HashMap<ExplanationKey, Weak<RecordAtlas>>);
 
 impl RecordPictures {
     /// Give `plan`, of record `key`, the record's pictures: those a plan of it holds, else its
@@ -650,6 +650,12 @@ mod tests {
             .insert(&Handle::<Image>::default(), Image::default())
             .unwrap();
         wire(&mut app);
+        // A 4K target's detail: the headless app has no window for the views to size it from.
+        let detail = Some(super::super::picture::tests::DETAIL);
+        app.insert_resource(super::super::picture::PictureDetail {
+            corner: detail,
+            world: detail,
+        });
         let player = app
             .world_mut()
             .spawn((SHOOTER, CombatantLife(0), Controlled))
@@ -1602,9 +1608,10 @@ mod tests {
     }
 
     /// The corner and the x-ray showing one record share its pictures: once both draw it, every
-    /// field volume of either reads one atlas and one job renders it. Two views laying a record's
-    /// pictures out apiece allocate it and render it twice. Fixture: the struck subject under the
-    /// player's shot, the corner admitted.
+    /// field volume of either reads one atlas, and no frame queues more than one job of it. Two
+    /// views laying a record's pictures out apiece allocate it and render it twice. Fixture: the
+    /// struck subject under the player's shot, the corner admitted, every job submitted at the end
+    /// of the frame that queued it.
     #[test]
     fn the_corner_and_the_xray_share_one_atlas_of_a_record() {
         let (mut app, ..) = struck_xray_app();
@@ -1619,6 +1626,9 @@ mod tests {
         let mut together = 0;
         for _ in 0..(1.0 / STEP_S) as usize {
             step(&mut app);
+            let jobs = app.world().resource::<super::super::picture::PictureJobs>();
+            assert!(jobs.queued() <= 1, "the record rendered twice");
+            jobs.submit_all();
             let mut volumes = app.world_mut().query_filtered::<
                 (&MeshMaterial3d<LookMaterial>, Has<xray::XRayItem>),
                 With<stage::FieldVolume>,
@@ -1636,8 +1646,6 @@ mod tests {
                     atlases.iter().all(|(_, id)| *id == atlases[0].1),
                     "two atlases of one record: {atlases:?}"
                 );
-                let jobs = world.resource::<super::super::picture::PictureJobs>();
-                assert_eq!(jobs.queued(), 1, "the record rendered twice");
                 together += 1;
             }
         }

@@ -15,10 +15,12 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use bevy::ui::DefaultUiCamera;
 
+use super::picture::{PictureDetail, detail_of};
 use super::stage::StageCamera;
 use super::timeline::{self, CornerKind};
 use super::{CornerRig, Knobs};
 use crate::overlay::Overlay;
+use crate::render_scale::RenderScale;
 
 pub(super) const INSET_PX: f32 = 16.0;
 const WIDTH_FRACTION: f32 = 0.30;
@@ -174,6 +176,43 @@ pub fn spawn_corner(commands: &mut Commands, images: &mut Assets<Image>) {
     commands.insert_resource(glyphs);
 }
 
+/// The expanded corner's size (logical px) in a target of `window` (logical px): the target less
+/// the insets.
+fn expanded(window: Vec2) -> Vec2 {
+    window - 2.0 * INSET_PX
+}
+
+/// The detail the views ask of the pictures ([`PictureDetail`]), from the target the UI lays out
+/// on, the window or a capture's image, which the battlefield camera draws into too: the expanded
+/// corner's image, sized as [`layout`] sizes it, and the target's physical size at the 3D pass's
+/// render scale ([`RenderScale`]; the corner's camera draws at its own). A target not yet resolved
+/// leaves the detail as it stands.
+pub fn detail(
+    ui: DefaultUiCamera,
+    cameras: Query<&Camera>,
+    render_scale: Option<Res<RenderScale>>,
+    mut detail: ResMut<PictureDetail>,
+) {
+    let Some(camera) = ui.get().and_then(|ui| cameras.get(ui).ok()) else {
+        return;
+    };
+    let (Some(window), Some(scale), Some(full)) = (
+        camera.logical_target_size(),
+        camera.target_scaling_factor(),
+        camera.physical_target_size(),
+    ) else {
+        return;
+    };
+    let corner = (expanded(window) * scale).round().max(Vec2::ONE).as_uvec2();
+    let world = render_scale
+        .and_then(|render_scale| render_scale.main_pass_size(full))
+        .unwrap_or(full);
+    detail.set_if_neq(PictureDetail {
+        corner: Some(detail_of(corner)),
+        world: Some(detail_of(world)),
+    });
+}
+
 /// Size the corner from the default UI camera's logical target width, (re)make its render images
 /// at that size in physical pixels, and point the stage camera at the live one; a replacement swaps
 /// them.
@@ -199,7 +238,7 @@ pub fn layout(
         return;
     };
     let (width, height) = if knobs.expanded {
-        (window.x - 2.0 * INSET_PX, window.y - 2.0 * INSET_PX)
+        expanded(window).into()
     } else {
         let width = (window.x * WIDTH_FRACTION).clamp(WIDTH_PX.0, WIDTH_PX.1);
         (width, width / ASPECT)

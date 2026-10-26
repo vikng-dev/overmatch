@@ -147,8 +147,9 @@ pub(super) fn materials(app: &mut App) {
     picture::render(app);
 }
 
-/// The presentation's resources, the depth pictures' jobs and the mask cameras' following, which a
-/// driver mounts once.
+/// The presentation's resources, the depth pictures' jobs, the detail the views ask of them
+/// ([`hud::detail`], in `PreUpdate`, so before every view draws) and the mask cameras' following,
+/// which a driver mounts once.
 ///
 /// The mask cameras copy their viewer's lens and pose ([`look::follow_lens`], [`look::follow_pose`]),
 /// so they run after every writer of either. The corner's viewer, the inset camera, is written
@@ -164,6 +165,8 @@ pub(super) fn presentation(app: &mut App) {
         .init_resource::<Knobs>()
         .init_resource::<look::Masks>()
         .init_resource::<look::MaskNeed>()
+        .init_resource::<picture::PictureDetail>()
+        .add_systems(PreUpdate, hud::detail)
         .add_systems(
             PostUpdate,
             (

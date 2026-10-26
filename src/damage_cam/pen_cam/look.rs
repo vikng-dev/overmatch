@@ -1335,12 +1335,12 @@ pub fn component(b: &BoxPlan, kind: CornerKind, masks: &MaskSet) -> Option<LookM
 }
 
 /// The record's fields as one volume, drawn on the back faces of a box about every field's reach
-/// ([`field_bounds`]), reading their pictures from `atlas`. From each fragment the eye ray's stretches
-/// inside the fields ([`stretch`]), cut at every stretch's ends ([`schedule`]), are marched back
-/// toward the eye ([`march`]), each sample the fields' summed intensity ([`intensity`]); each band
-/// takes its colour at an opacity that climbs with its length along the ray over its extinction
-/// length, the nearer laid over the farther, the whole at most [`VOLUME_OPACITY`]. The fields'
-/// lanes are set each frame ([`LookMaterial::set_fields`]). Straight alpha, sorted after every
+/// ([`field_bounds`]). From each fragment the eye ray's stretches inside the fields ([`stretch`]),
+/// cut at every stretch's ends ([`schedule`]), are marched back toward the eye ([`march`]), each
+/// sample the fields' summed intensity ([`intensity`]); each band takes its colour at an opacity
+/// that climbs with its length along the ray over its extinction length, the nearer laid over the
+/// farther, the whole at most [`VOLUME_OPACITY`]. The fields' lanes are set each frame
+/// ([`LookMaterial::set_fields`]), and with them the atlas of the pictures they read. Straight alpha, sorted after every
 /// other translucent surface, drawn whatever stands in front and writing no depth
 /// ([`LookKey::depth`]). In a frame that draws the body behind ([`body_behind`]) the march ends at
 /// its pixel's nearest scene surface in `masks`' part mask (`volume.w = 1`), so a component or the
@@ -1351,7 +1351,6 @@ pub fn volume(
     masks: &MaskSet,
     kind: CornerKind,
     cut: Option<(Vec3, Vec3)>,
-    atlas: Handle<Image>,
 ) -> LookMaterial {
     let mut m = LookMaterial::new(MODE_VOLUME, LinearRgba::BLACK, 0.0, Blend::Blended, masks);
     let [bands, knockout, reduced] = band_lanes(potency);
@@ -1360,7 +1359,6 @@ pub fn volume(
     m.params.reduced = reduced;
     m.params.volume.x = VOLUME_OPACITY;
     m.params.volume.w = body_behind(kind) as u8 as f32;
-    m.pictures = Some(atlas);
     m.set_cut(cut);
     m
 }
@@ -1369,7 +1367,9 @@ pub fn volume(
 mod tests {
     use bevy::camera::CameraProjection;
 
-    use super::super::picture::tests::{AXIS, band, cap, fixture_field, plate_casters, sphere};
+    use super::super::picture::tests::{
+        AXIS, DETAIL, band, cap, fixture_field, plate_casters, sphere,
+    };
     use super::super::picture::{Casters, Picture, REACH_TOLERANCE_DIAGONALS};
     use super::super::potency::solid_angle;
     use super::*;
@@ -1489,8 +1489,8 @@ mod tests {
         let masks = MaskSet::default();
         let atlas = Handle::<Image>::default();
         let print = fixture_print();
-        let mut field = volume(&potency, &masks, CornerKind::Glass, None, atlas.clone());
-        assert_eq!(field.pictures.as_ref(), Some(&atlas));
+        let mut field = volume(&potency, &masks, CornerKind::Glass, None);
+        field.pictures = Some(atlas.clone());
         field.set_fields(std::slice::from_ref(&print), &potency);
         let params = field.params;
         assert_eq!(params.fields.x, 1.0);
@@ -1577,7 +1577,7 @@ mod tests {
             CornerKind::Slice,
             CornerKind::Damaged,
         ] {
-            let m = volume(&potency, &masks, kind, None, Handle::default());
+            let m = volume(&potency, &masks, kind, None);
             assert_eq!(
                 LookKey::from(&m).depth(),
                 Some((CompareFunction::Always, false)),
@@ -2112,7 +2112,7 @@ mod tests {
         for (name, report) in super::super::plan::tests::records() {
             let shapes = super::super::plan::tests::shapes(&report);
             let plan = super::super::plan::Plan::new(&report, &shapes);
-            let pictures = plan.pictures();
+            let pictures = plan.lay(&[DETAIL]);
             for (k, (cone, picture)) in plan.cones.iter().zip(&pictures.fields).enumerate() {
                 if !cone.rays.is_empty() {
                     continue;
@@ -2555,7 +2555,7 @@ mod tests {
                 "λ = {ratio}: a face is not finite"
             );
             let print = print_of(&cone, &picture, cone.origin, cone.max_reach(), 2.0);
-            let mut field = volume(&potency, &masks, CornerKind::Glass, None, Handle::default());
+            let mut field = volume(&potency, &masks, CornerKind::Glass, None);
             field.set_fields(std::slice::from_ref(&print), &potency);
             let params = field.params;
             let lanes = params.prints[..PRINT_LANES].iter().chain([

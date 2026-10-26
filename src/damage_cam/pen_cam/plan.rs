@@ -16,9 +16,9 @@
 
 use bevy::prelude::*;
 
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
-use super::picture::Pictures;
+use super::picture::{PictureJobs, Pictures, RecordAtlas, ViewPictures};
 use super::timeline::CornerKind;
 use crate::ballistics::spall_cone::FieldDescriptor;
 use crate::damage_cam::shapes::{HardBodies, TankShapes};
@@ -44,10 +44,6 @@ pub const REACH_CALIBRES: f32 = 20.0;
 /// The line's brightness never falls below this: a diagram rule for legibility, not physics.
 /// TUNED.
 pub const LINE_FLOOR: f32 = 0.35;
-
-/// A record's fields' depth pictures, laid out on the first read by any plan that holds them
-/// ([`Plan::pictures`]); every plan of the record holds the one ([`Plan::adopt_pictures`]).
-pub type PictureCell = Arc<OnceLock<Arc<Pictures>>>;
 
 /// The record, prepared for drawing.
 pub struct Plan {
@@ -88,8 +84,9 @@ pub struct Plan {
     /// fields' depth pictures are rendered from ([`super::picture`]); `None` without the tank
     /// asset's shapes.
     pub bodies: Option<Arc<HardBodies>>,
-    /// The fields' depth pictures, laid out on first read ([`Self::pictures`]).
-    pictures: PictureCell,
+    /// The record's depth pictures as its views draw them ([`Self::show`]), the one every plan of
+    /// the record holds ([`Self::adopt_pictures`]).
+    pictures: Arc<RecordAtlas>,
 }
 
 /// The path as points with cumulative arc length, the record's time at each point and the
@@ -616,7 +613,7 @@ impl Plan {
             boxes,
             tank_bounds: shapes.bounds(),
             bodies: shapes.hard().cloned(),
-            pictures: PictureCell::default(),
+            pictures: Arc::default(),
             line,
         }
     }
@@ -649,23 +646,34 @@ impl Plan {
             boxes,
             tank_bounds: shapes.bounds(),
             bodies: shapes.hard().cloned(),
-            pictures: PictureCell::default(),
+            pictures: Arc::default(),
         }
     }
 
-    /// The fields' depth pictures, in [`Self::cones`]' order, from [`Self::bodies`], each at the
-    /// pitch the corner's views of the record derive ([`super::stage::field_sightings`]): laid
-    /// out on the first read by any plan that holds them ([`Self::adopt_pictures`]), then held,
-    /// and rendered once, the first time a frame draws them ([`Pictures::image`]).
-    pub fn pictures(&self) -> &Arc<Pictures> {
-        self.pictures.get_or_init(|| {
-            let sightings = if self.cones.is_empty() {
-                Vec::new()
-            } else {
-                super::stage::field_sightings(self)
-            };
-            Arc::new(Pictures::of(&self.cones, self.bodies.as_ref(), &sightings))
-        })
+    /// The fields' depth pictures, in [`Self::cones`]' order, from [`Self::bodies`], laid out at
+    /// `details` ([`Pictures::of`]) from the corner's sightings of the record
+    /// ([`super::stage::field_sightings`]).
+    pub fn lay(&self, details: &[UVec2]) -> Pictures {
+        let sightings = if self.cones.is_empty() {
+            Vec::new()
+        } else {
+            super::stage::field_sightings(self)
+        };
+        Pictures::of(&self.cones, self.bodies.as_ref(), &sightings, details)
+    }
+
+    /// Show the record's pictures in `view`, which asks `detail` of them
+    /// ([`RecordAtlas::show`]): every plan of the record lays them out and renders them as one
+    /// ([`Self::adopt_pictures`]).
+    pub fn show(
+        &self,
+        view: &mut ViewPictures,
+        detail: UVec2,
+        images: &mut Assets<Image>,
+        jobs: &mut PictureJobs,
+    ) {
+        self.pictures
+            .show(view, detail, |details| self.lay(details), images, jobs);
     }
 
     /// The frame the record's verdict opens the corner in, whichever frame a view draws the plan
@@ -674,14 +682,15 @@ impl Plan {
         self.verdict_kind
     }
 
-    /// This plan's pictures, laid out or not, for another plan of the record to adopt.
-    pub fn picture_cell(&self) -> &PictureCell {
+    /// This plan's pictures, for another plan of the record to adopt.
+    pub fn picture_cell(&self) -> &Arc<RecordAtlas> {
         &self.pictures
     }
 
     /// Take `cell`, another plan's of the same record, as this plan's pictures: the plans of a
-    /// record then lay its pictures out once and render them once, whichever reads them first.
-    pub fn adopt_pictures(&mut self, cell: PictureCell) {
+    /// record then lay its pictures out and render them as one, at the finest pitch any of their
+    /// views asks.
+    pub fn adopt_pictures(&mut self, cell: Arc<RecordAtlas>) {
         self.pictures = cell;
     }
 
