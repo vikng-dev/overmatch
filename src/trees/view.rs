@@ -136,51 +136,91 @@ fn fall_duration_s(fallen_length_m: f32) -> f32 {
     (0.08 * fallen_length_m).clamp(1.0, 3.0)
 }
 
-/// Present a fallen tree: the cut's trunk node turns about its own origin — the pivot, the
-/// chain's translations carry the piece above — from upright to the resting tilt over the fall's
-/// duration, phase read off [`FallClock`] against the transition tick (ADR-0037: the fall lands
-/// when the cursor crosses its tick, however late the entry arrived); the caps the cut reveals
-/// (A5: `cap_top` below the cut and `cap_bottom` of the cut) show. The sim never waits on this.
+/// Present a tree's state on its glb, from the state alone (ADR-0016): standing, every trunk node
+/// upright and every cap hidden; down, the cut's trunk node turns about its own origin — the
+/// pivot, the chain's translations carry the piece above — from upright to the resting tilt over
+/// the fall's duration, phase read off [`FallClock`] against the transition tick (ADR-0037: the
+/// fall lands when the cursor crosses its tick, however late the entry arrived), and of the caps
+/// exactly the pair the cut reveals (A5: `cap_top` below the cut and `cap_bottom` of the cut)
+/// shows. Written when the state, the body's resting pose or the bound view is new, and every
+/// frame while a fall runs; a view that binds to a tree in either state presents it on its first
+/// frame. The sim never waits on this.
 fn present_fall(
     clock: Res<FallClock>,
     step: Res<Time<Fixed>>,
     trees: Query<(
-        &TreeState,
+        Ref<TreeState>,
         &TreeBody,
-        &Fell,
-        &Resting,
+        Option<&Fell>,
+        Option<Ref<Resting>>,
         &Transform,
         &Children,
     )>,
-    views: Query<&TreeViewNodes>,
+    views: Query<Ref<TreeViewNodes>>,
     mut nodes: Query<(&mut Transform, &mut Visibility), Without<TreeBody>>,
 ) {
     let dt = step.timestep().as_secs_f32();
     for (state, body, fell, resting, transform, children) in &trees {
-        let TreeState::Down { cut, .. } = *state else {
-            continue;
-        };
         let Some(view) = children.iter().find_map(|child| views.get(child).ok()) else {
             continue;
         };
-        let cut = usize::from(cut);
-        let length = body.prefix[body.prefix.len() - 1] - body.prefix[cut];
-        let phase = (clock.since(fell.tick) as f32 * dt / fall_duration_s(length)).clamp(0.0, 1.0);
-        let axis = transform.rotation.inverse() * Vec3::new(resting.dz, 0.0, -resting.dx);
-        let angle = resting.tilt * phase * phase;
-        let (s, c) = (libm::sinf(0.5 * angle), libm::cosf(0.5 * angle));
-        if let Some(trunk) = view.trunks[cut]
-            && let Ok((mut local, _)) = nodes.get_mut(trunk)
-        {
-            local.rotation = Quat::from_xyzw(axis.x * s, axis.y * s, axis.z * s, c);
+        // The cut and its trunk's turn: none standing, none until the body's pose is derived.
+        let turned = match (*state, fell, resting.as_deref()) {
+            (TreeState::Down { cut, .. }, Some(fell), Some(resting)) => {
+                let cut = usize::from(cut);
+                let length = body.prefix[body.prefix.len() - 1] - body.prefix[cut];
+                let phase =
+                    (clock.since(fell.tick) as f32 * dt / fall_duration_s(length)).clamp(0.0, 1.0);
+                let axis = transform.rotation.inverse() * Vec3::new(resting.dz, 0.0, -resting.dx);
+                let angle = resting.tilt * phase * phase;
+                let (s, c) = (libm::sinf(0.5 * angle), libm::cosf(0.5 * angle));
+                Some((
+                    cut,
+                    Quat::from_xyzw(axis.x * s, axis.y * s, axis.z * s, c),
+                    phase,
+                ))
+            }
+            _ => None,
+        };
+        let fresh = state.is_changed()
+            || view.is_added()
+            || resting.as_ref().is_some_and(|resting| resting.is_changed());
+        if !fresh && !turned.is_some_and(|(_, _, phase)| phase < 1.0) {
+            continue;
         }
-        let revealed = [
-            cut.checked_sub(1).and_then(|below| view.caps_top[below]),
-            view.caps_bottom[cut],
-        ];
-        for cap in revealed.into_iter().flatten() {
-            if let Ok((_, mut visibility)) = nodes.get_mut(cap) {
-                visibility.set_if_neq(Visibility::Inherited);
+        for (k, trunk) in view.trunks.iter().enumerate() {
+            let rotation = match turned {
+                Some((cut, turn, _)) if k == cut => turn,
+                _ => Quat::IDENTITY,
+            };
+            if let Some(trunk) = trunk
+                && let Ok((mut local, _)) = nodes.get_mut(*trunk)
+                && local.rotation != rotation
+            {
+                local.rotation = rotation;
+            }
+        }
+        let cut = turned.map(|(cut, _, _)| cut);
+        let tops = view
+            .caps_top
+            .iter()
+            .enumerate()
+            .map(|(k, cap)| (cap, cut.is_some_and(|cut| k + 1 == cut)));
+        let bottoms = view
+            .caps_bottom
+            .iter()
+            .enumerate()
+            .map(|(k, cap)| (cap, cut == Some(k)));
+        for (cap, shown) in tops.chain(bottoms) {
+            if let Some(cap) = cap
+                && let Ok((_, mut visibility)) = nodes.get_mut(*cap)
+            {
+                let visibility_target = if shown {
+                    Visibility::Inherited
+                } else {
+                    Visibility::Hidden
+                };
+                visibility.set_if_neq(visibility_target);
             }
         }
     }
@@ -210,4 +250,137 @@ pub(crate) fn plugin(app: &mut App) {
             publish_sim_fall_clock.run_if(not(resource_exists::<ClientReplica>)),
         )
         .add_systems(PostUpdate, present_fall.before(TransformSystems::Propagate));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// THE GLB PRESENTS THE STATE AND NOTHING BEFORE IT: standing, every trunk node upright and
+    /// every cap hidden; down at a cut, that trunk node alone turned to the resting tilt (the fall
+    /// long landed) and exactly the cap pair the cut reveals shown; back to standing, upright and
+    /// hidden again; down at another cut, the old trunk upright and the old caps hidden. A
+    /// presentation that only reveals, only turns the current cut's node, or skips `Standing`
+    /// reds this.
+    #[test]
+    fn the_glb_presents_every_state_from_the_state() {
+        let mut app = App::new();
+        app.insert_resource(FallClock {
+            tick: 1000,
+            overstep: 0.0,
+        })
+        .insert_resource(Time::<Fixed>::from_hz(64.0))
+        .add_systems(Update, present_fall);
+        let world = app.world_mut();
+        let root = world
+            .spawn((
+                TreeState::Standing,
+                TreeBody::new(crate::trees::tests::fixture_kind(), 1.0),
+                Transform::IDENTITY,
+            ))
+            .id();
+        let view = world.spawn((ChildOf(root), Transform::IDENTITY)).id();
+        let node = |world: &mut World| {
+            world
+                .spawn((ChildOf(view), Transform::IDENTITY, Visibility::Inherited))
+                .id()
+        };
+        let trunks: Vec<Entity> = (0..3).map(|_| node(world)).collect();
+        let caps_top: Vec<Entity> = (0..3).map(|_| node(world)).collect();
+        let caps_bottom: Vec<Entity> = (0..3).map(|_| node(world)).collect();
+        world.entity_mut(view).insert(TreeViewNodes {
+            trunks: trunks.iter().copied().map(Some).collect(),
+            caps_top: caps_top.iter().copied().map(Some).collect(),
+            caps_bottom: caps_bottom.iter().copied().map(Some).collect(),
+        });
+        let shown = |app: &App, caps: &[Entity]| -> Vec<bool> {
+            caps.iter()
+                .map(|cap| app.world().get::<Visibility>(*cap) == Some(&Visibility::Inherited))
+                .collect()
+        };
+        let turned = |app: &App| -> Vec<bool> {
+            trunks
+                .iter()
+                .map(|trunk| {
+                    app.world().get::<Transform>(*trunk).unwrap().rotation != Quat::IDENTITY
+                })
+                .collect()
+        };
+        app.update();
+        assert_eq!(shown(&app, &caps_top), [false; 3], "standing: no cap");
+        assert_eq!(shown(&app, &caps_bottom), [false; 3]);
+        assert_eq!(turned(&app), [false; 3], "standing: upright");
+
+        let set = |app: &mut App, state: TreeState, resting: Option<Resting>| {
+            let mut tree = app.world_mut().entity_mut(root);
+            tree.insert(state);
+            match resting {
+                Some(resting) => {
+                    tree.insert((Fell { tick: 0 }, resting));
+                }
+                None => {
+                    tree.remove::<(Fell, Resting)>();
+                }
+            }
+            app.update();
+        };
+        let east = Resting {
+            tilt: 1.2,
+            dx: 1.0,
+            dz: 0.0,
+        };
+        set(&mut app, TreeState::Down { cut: 1, dir: 0 }, Some(east));
+        assert_eq!(turned(&app), [false, true, false], "cut 1: its trunk turns");
+        let turn = app.world().get::<Transform>(trunks[1]).unwrap().rotation;
+        assert!(
+            (turn * Vec3::Y).abs_diff_eq(Vec3::new(libm::sinf(1.2), libm::cosf(1.2), 0.0), 1e-5),
+            "the trunk's axis leans to +x by the tilt: {}",
+            turn * Vec3::Y
+        );
+        assert_eq!(
+            shown(&app, &caps_top),
+            [true, false, false],
+            "cap_top below the cut"
+        );
+        assert_eq!(
+            shown(&app, &caps_bottom),
+            [false, true, false],
+            "cap_bottom of the cut"
+        );
+
+        set(&mut app, TreeState::Standing, None);
+        assert_eq!(turned(&app), [false; 3], "standing again: upright");
+        assert_eq!(shown(&app, &caps_top), [false; 3], "standing again: no cap");
+        assert_eq!(shown(&app, &caps_bottom), [false; 3]);
+
+        set(
+            &mut app,
+            TreeState::Down { cut: 0, dir: 64 },
+            Some(Resting {
+                tilt: 1.0,
+                dx: 0.0,
+                dz: 1.0,
+            }),
+        );
+        assert_eq!(
+            turned(&app),
+            [true, false, false],
+            "cut 0: the first trunk turns"
+        );
+        assert_eq!(
+            shown(&app, &caps_top),
+            [false; 3],
+            "cut 0 reveals no cap_top"
+        );
+        assert_eq!(shown(&app, &caps_bottom), [true, false, false]);
+
+        set(&mut app, TreeState::Down { cut: 2, dir: 0 }, Some(east));
+        assert_eq!(
+            turned(&app),
+            [false, false, true],
+            "cut 2: the old trunk stands again"
+        );
+        assert_eq!(shown(&app, &caps_top), [false, true, false]);
+        assert_eq!(shown(&app, &caps_bottom), [false, false, true]);
+    }
 }

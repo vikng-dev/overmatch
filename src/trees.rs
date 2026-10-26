@@ -459,16 +459,42 @@ fn tilt_rotation(resting: &Resting) -> Quat {
     Quat::from_xyzw(resting.dz * s, 0.0, -resting.dx * s, c)
 }
 
-/// Every peer derives the body from the state (ADR-0016): a fallen tree's stump keeps its
-/// segments standing on `[Terrain, Armor]`, the lying piece comes to the resting tilt on
-/// `[Armor]` alone — a hard body for the walk, no longer an obstacle for a hull — and the pool is
-/// gone: what is down takes no more dose. Standing derives nothing beyond what spawn built.
+/// The collision filter of a standing segment: hulls contact it and rounds walk it.
+fn standing_layers() -> CollisionLayers {
+    CollisionLayers::new([Layer::Terrain, Layer::Armor], LayerMask::ALL)
+}
+
+/// The collision filter of a lying segment: a hard body for the walk, no longer an obstacle for
+/// a hull (A2).
+fn lying_layers() -> CollisionLayers {
+    CollisionLayers::new([Layer::Armor], LayerMask::NONE)
+}
+
+/// Every peer derives the whole body from the state on every change of it (ADR-0016, A10),
+/// never from the body before: standing, every segment stands at its spawn height on
+/// [`standing_layers`] with the pool present and no resting pose; down, the stump's segments
+/// stand the same and every segment from the cut up lies in the resting pose on
+/// [`lying_layers`], the pose is recorded and the pool is gone — what is down takes no more
+/// dose. A tree back to standing (a replaced ledger) or down at another cut derives exactly as
+/// one that never held the old state.
+///
+/// The fall turns the piece rigidly about the pivot — the cut's bottom — so each lying segment
+/// keeps the instance's yaw under the tilt: its world rotation is `tilt × yaw`, its world offset
+/// from the base the pivot plus its height above the cut turned by the tilt alone (the pivot and
+/// the trunk's axis are vertical, which the yaw fixes).
 fn derive_state(
     trees: Query<
-        (Entity, &TreeState, &TreeBody, &Transform, &Children),
+        (
+            Entity,
+            &TreeState,
+            &TreeBody,
+            &Transform,
+            &Children,
+            Has<ComponentHealth>,
+        ),
         (Changed<TreeState>, Without<TreeSegment>),
     >,
-    mut segments: Query<&mut Transform, With<TreeSegment>>,
+    mut segments: Query<(&mut Transform, &CollisionLayers), With<TreeSegment>>,
     grid: Option<Res<HeightGrid>>,
     mut commands: Commands,
 ) {
@@ -477,38 +503,64 @@ fn derive_state(
     let Some(grid) = grid else {
         return;
     };
-    for (root, state, body, transform, children) in &trees {
-        let TreeState::Down { cut, dir } = *state else {
-            continue;
+    for (root, state, body, transform, children, has_pool) in &trees {
+        let fallen = match *state {
+            TreeState::Standing => None,
+            TreeState::Down { cut, dir } => {
+                let tilt = resting_tilt(body, transform.translation, cut, dir, |x, z| {
+                    grid.height_at(x, z)
+                });
+                let (dx, dz) = azimuth(dir);
+                Some((usize::from(cut), Resting { tilt, dx, dz }))
+            }
         };
-        let tilt = resting_tilt(body, transform.translation, cut, dir, |x, z| {
-            grid.height_at(x, z)
-        });
-        let (dx, dz) = azimuth(dir);
-        let resting = Resting { tilt, dx, dz };
-        let rotation = tilt_rotation(&resting);
         let root_inv = transform.rotation.inverse();
-        let cut = usize::from(cut);
-        let pivot = Vec3::Y * body.prefix[cut];
         let mut k = 0;
         for &child in children {
-            let Ok(mut local) = segments.get_mut(child) else {
+            let Ok((mut local, layers)) = segments.get_mut(child) else {
                 continue;
             };
-            if k >= cut {
-                let along = rotation * Vec3::Y * (body.prefix[k] - body.prefix[cut]);
-                local.translation = root_inv * (pivot + along);
-                local.rotation = root_inv * rotation;
-                commands
-                    .entity(child)
-                    .insert(CollisionLayers::new([Layer::Armor], LayerMask::NONE));
+            let (pose, filter) = match fallen {
+                Some((cut, resting)) if k >= cut => {
+                    let tilt = tilt_rotation(&resting);
+                    let pivot = Vec3::Y * body.prefix[cut];
+                    let along = tilt * (Vec3::Y * (body.prefix[k] - body.prefix[cut]));
+                    let pose = Transform {
+                        translation: root_inv * (pivot + along),
+                        rotation: root_inv * tilt * transform.rotation,
+                        scale: Vec3::ONE,
+                    };
+                    (pose, lying_layers())
+                }
+                _ => (
+                    Transform::from_xyz(0.0, body.prefix[k], 0.0),
+                    standing_layers(),
+                ),
+            };
+            local.set_if_neq(pose);
+            // An immutable component: replaced only when the state moves it.
+            if *layers != filter {
+                commands.entity(child).insert(filter);
             }
             k += 1;
         }
-        commands
-            .entity(root)
-            .insert(resting)
-            .remove::<ComponentHealth>();
+        match fallen {
+            Some((_, resting)) => {
+                commands
+                    .entity(root)
+                    .insert(resting)
+                    .remove::<ComponentHealth>();
+            }
+            None => {
+                commands.entity(root).remove::<Resting>();
+                if !has_pool {
+                    commands.entity(root).insert(ComponentHealth {
+                        current: body.kind.hp,
+                        max: body.kind.hp,
+                    });
+                }
+            }
+        }
     }
 }
 
@@ -610,7 +662,7 @@ pub(crate) fn spawn(
             ChildOf(root),
             Transform::from_xyz(0.0, prefix[k], 0.0),
             segment_collider(segment, scale),
-            CollisionLayers::new([Layer::Terrain, Layer::Armor], LayerMask::ALL),
+            standing_layers(),
             TreeSegment,
         ));
     }
@@ -1493,27 +1545,21 @@ pub(crate) mod tests {
         }
     }
 
-    /// EVERY PEER DERIVES THE FALLEN BODY FROM THE STATE (ADR-0016, A2): once a tree is `Down`,
-    /// its stump segments keep their place and their `[Terrain, Armor]` layers, the lying piece's
-    /// segments leave the vertical onto `[Armor]` with no filters, the resting pose is recorded and
-    /// the pool is gone. A derive that forgets the layer swap, moves the stump, or leaves the pool
-    /// reds this.
-    #[test]
-    fn a_down_state_derives_the_lying_piece_and_drops_the_pool() {
+    /// A derive bed: the fixture tree spawned at `pose` on `grid`, the derive in `Update`.
+    fn derive_bed(grid: HeightGrid, pose: Transform) -> (App, Entity) {
         let mut app = App::new();
-        app.insert_resource(fixture_grid(|_, _| 0.0));
+        app.insert_resource(grid);
         app.add_systems(Update, derive_state);
-        let kind = fixture_kind();
         let mut queue = bevy::ecs::world::CommandQueue::default();
         let mut commands = Commands::new(&mut queue, app.world());
         spawn(
             &mut commands,
-            &kind,
+            &fixture_kind(),
             MapInstance {
                 id: "fir_0001".to_owned(),
                 ordinal: 0,
             },
-            Transform::from_xyz(5.0, 0.0, 5.0),
+            pose,
             None,
         );
         queue.apply(app.world_mut());
@@ -1522,13 +1568,56 @@ pub(crate) mod tests {
             .query_filtered::<Entity, With<TreeBody>>()
             .single(app.world())
             .expect("one root");
+        (app, root)
+    }
+
+    /// The segments' local transforms and filters, in segment order.
+    fn segments_of(app: &App, root: Entity) -> Vec<(Transform, CollisionLayers)> {
+        let world = app.world();
+        world
+            .get::<Children>(root)
+            .expect("segments")
+            .iter()
+            .filter_map(|child| {
+                Some((
+                    *world.get::<Transform>(child)?,
+                    *world.get::<CollisionLayers>(child)?,
+                ))
+            })
+            .collect()
+    }
+
+    /// EVERY PEER DERIVES THE WHOLE BODY FROM THE STATE, IN EVERY ORDER (ADR-0016, A2, A10):
+    /// down, the stump's segments keep their place and their standing filter, every segment from
+    /// the cut up leaves the vertical onto the lying filter, the resting pose is recorded and the
+    /// pool is gone; back to standing, every segment stands at its spawn height on the standing
+    /// filter, the pose is gone and the pool is back; down at another cut, the segments the new
+    /// cut spares stand again and the rest lie. A derive that skips `Standing`, touches only the
+    /// segments at and above the new cut, or leaves the pool or the pose from the state before
+    /// reds this.
+    #[test]
+    fn every_state_derives_the_whole_body_from_the_state() {
+        let (mut app, root) =
+            derive_bed(fixture_grid(|_, _| 0.0), Transform::from_xyz(5.0, 0.0, 5.0));
+        let spawned = segments_of(&app, root);
+        assert_eq!(spawned.len(), 3);
         app.update();
         assert!(
-            app.world().get::<ComponentHealth>(root).is_some(),
-            "standing: the pool stays"
+            app.world().get::<ComponentHealth>(root).is_some()
+                && app.world().get::<Resting>(root).is_none(),
+            "standing at spawn: the pool stays, no pose"
         );
-        *app.world_mut().get_mut::<TreeState>(root).unwrap() = TreeState::Down { cut: 1, dir: 0 };
-        app.update();
+        assert_eq!(
+            segments_of(&app, root),
+            spawned,
+            "standing derives the spawn"
+        );
+
+        let set = |app: &mut App, state: TreeState| {
+            *app.world_mut().get_mut::<TreeState>(root).unwrap() = state;
+            app.update();
+        };
+        set(&mut app, TreeState::Down { cut: 1, dir: 0 });
         assert!(
             app.world().get::<ComponentHealth>(root).is_none(),
             "down: no pool"
@@ -1538,36 +1627,177 @@ pub(crate) mod tests {
             .get::<Resting>(root)
             .expect("the resting pose is recorded");
         assert!(resting.tilt > 1.0 && (resting.dx, resting.dz) == (1.0, 0.0));
-        let mut segments: Vec<(Transform, CollisionLayers)> = app
-            .world_mut()
-            .query_filtered::<(&Transform, &CollisionLayers), With<TreeSegment>>()
-            .iter(app.world())
-            .map(|(transform, layers)| (*transform, *layers))
-            .collect();
-        segments.sort_by(|a, b| a.0.translation.y.total_cmp(&b.0.translation.y));
-        let standing = CollisionLayers::new([Layer::Terrain, Layer::Armor], LayerMask::ALL);
-        let lying = CollisionLayers::new([Layer::Armor], LayerMask::NONE);
+        let down_1 = segments_of(&app, root);
+        assert_eq!(down_1[0], spawned[0], "the stump stays");
         assert_eq!(
-            segments[0].0,
-            Transform::from_xyz(0.0, 0.0, 0.0),
-            "the stump stays"
-        );
-        assert_eq!(segments[0].1, standing);
-        assert_eq!(
-            segments[1].0.translation,
+            down_1[1].0.translation,
             Vec3::new(0.0, 2.0, 0.0),
             "the pivot segment turns in place"
         );
-        assert_eq!(segments[1].1, lying);
-        let top = segments[2].0.translation;
+        assert_eq!(down_1[1].1, lying_layers());
+        let top = down_1[2].0.translation;
         assert!(
             top.x > 1.9 && top.y < 2.2 && top.z.abs() < 1e-5,
             "the top segment lies toward +x: {top}"
         );
-        assert_eq!(segments[2].1, lying);
+        assert_eq!(down_1[2].1, lying_layers());
         assert!(
-            (segments[2].0.rotation * Vec3::Y).x > 0.99,
+            (down_1[2].0.rotation * Vec3::Y).x > 0.99,
             "the lying segment's axis points along the fall"
+        );
+
+        set(&mut app, TreeState::Standing);
+        assert_eq!(
+            segments_of(&app, root),
+            spawned,
+            "back to standing: every segment at its spawn pose and filter"
+        );
+        let pool = app
+            .world()
+            .get::<ComponentHealth>(root)
+            .expect("back to standing: the pool is back");
+        assert_eq!((pool.current, pool.max), (100, 100), "full");
+        assert!(
+            app.world().get::<Resting>(root).is_none(),
+            "no pose standing"
+        );
+
+        set(&mut app, TreeState::Down { cut: 2, dir: 64 });
+        let down_2 = segments_of(&app, root);
+        assert_eq!(&down_2[..2], &spawned[..2], "the two spared segments stand");
+        let tip = down_2[2].0.translation;
+        assert!(
+            tip.z > 0.0 || (down_2[2].0.rotation * Vec3::Y).z > 0.99,
+            "the tip lies toward +z: {:?}",
+            down_2[2].0
+        );
+        assert_eq!(down_2[2].1, lying_layers());
+
+        set(&mut app, TreeState::Down { cut: 0, dir: 128 });
+        let down_0 = segments_of(&app, root);
+        assert!(
+            down_0.iter().all(|(_, layers)| *layers == lying_layers()),
+            "cut 0: every segment lies"
+        );
+        assert!(
+            down_0
+                .iter()
+                .all(|(local, _)| (local.rotation * Vec3::Y).x < -0.99),
+            "cut 0: every segment's axis points toward -x: {down_0:?}"
+        );
+        assert_ne!(
+            down_0[1], down_2[1],
+            "the once-spared segment no longer stands"
+        );
+    }
+
+    /// THE LYING PIECE KEEPS THE INSTANCE'S YAW (A1, P2d): the fall turns the stack rigidly, so a
+    /// lying segment's world rotation is the tilt composed over the yaw — its ring's own axes
+    /// turned by the yaw, then laid down — and its world offset from the base is the pivot plus
+    /// its height above the cut, tilted, which the yaw leaves alone. A derive composing the tilt
+    /// alone lays every ring down unturned, which the 12-gon makes observable.
+    #[test]
+    fn the_lying_piece_keeps_the_instances_yaw() {
+        let yaw = Quat::from_xyzw(0.0, libm::sinf(0.35), 0.0, libm::cosf(0.35));
+        let base = Vec3::new(5.0, 0.0, 5.0);
+        let (mut app, root) = derive_bed(
+            fixture_grid(|_, _| 0.0),
+            Transform {
+                translation: base,
+                rotation: yaw,
+                scale: Vec3::ONE,
+            },
+        );
+        *app.world_mut().get_mut::<TreeState>(root).unwrap() = TreeState::Down { cut: 1, dir: 0 };
+        app.update();
+        let resting = *app.world().get::<Resting>(root).expect("the pose");
+        let tilt = tilt_rotation(&resting);
+        let body = app.world().get::<TreeBody>(root).expect("the body").clone();
+        for (k, (local, _)) in segments_of(&app, root).into_iter().enumerate().skip(1) {
+            let world_rotation = yaw * local.rotation;
+            let world_offset = yaw * local.translation;
+            let h = body.prefix[k] - body.prefix[1];
+            let expected_offset = Vec3::Y * body.prefix[1] + tilt * (Vec3::Y * h);
+            assert!(
+                world_offset.abs_diff_eq(expected_offset, 1e-5),
+                "segment {k}: offset {world_offset} vs {expected_offset}"
+            );
+            let expected_x = tilt * (yaw * Vec3::X);
+            assert!(
+                (world_rotation * Vec3::X).abs_diff_eq(expected_x, 1e-5),
+                "segment {k}: ring axis {} vs {expected_x}",
+                world_rotation * Vec3::X
+            );
+        }
+    }
+
+    /// THE LYING POSE IS PINNED TO THE BIT (A9): for every row of the tilt pins that touches the
+    /// terrain — the whole trunk, cut 0, on flat ground, on the slope and at the grid's edge, in
+    /// three bins — a yawed instance's three lying segments derive to these exact local transform
+    /// bits (translation and rotation, folded in segment order), on every platform: glam runs
+    /// scalar-math and the trig is libm's, so a peer that differs by one ulp has a different
+    /// world. Any change to the composition of the pose — the yaw dropped, the pivot moved, a
+    /// factor reordered — reds this; a tilt change reds the tilt pins first.
+    #[test]
+    fn the_lying_pose_is_pinned_to_the_bit() {
+        let yaw = Quat::from_xyzw(0.0, libm::sinf(0.35), 0.0, libm::cosf(0.35));
+        let slope = |x: f32, _: f32| x / 10.0;
+        let cases: [(&str, fn(f32, f32) -> f32, Vec3); 3] = [
+            ("flat", |_, _| 0.0, Vec3::ZERO),
+            ("slope", slope, Vec3::new(100.0, 10.0, 0.0)),
+            ("edge", slope, Vec3::new(499.0, 49.9, 0.0)),
+        ];
+        let fold =
+            |acc: u64, bits: u32| (acc ^ u64::from(bits)).wrapping_mul(0x0000_0100_0000_01b3);
+        let mut rows = Vec::new();
+        for (label, height, base) in cases {
+            for dir in [0_u8, 64, 200] {
+                let (mut app, root) = derive_bed(
+                    fixture_grid(height),
+                    Transform {
+                        translation: base,
+                        rotation: yaw,
+                        scale: Vec3::ONE,
+                    },
+                );
+                *app.world_mut().get_mut::<TreeState>(root).unwrap() =
+                    TreeState::Down { cut: 0, dir };
+                app.update();
+                let segments = segments_of(&app, root);
+                assert_eq!(segments.len(), 3);
+                let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+                for (local, _) in &segments {
+                    for value in local
+                        .translation
+                        .to_array()
+                        .into_iter()
+                        .chain(local.rotation.to_array())
+                    {
+                        digest = fold(digest, value.to_bits());
+                    }
+                }
+                rows.push((label, dir, digest));
+            }
+        }
+        const PINNED: [(&str, u8, u64); 9] = [
+            ("flat", 0, 0xac0b18b7fefd6b24),
+            ("flat", 64, 0x08f5ee0d3d3a8a71),
+            ("flat", 200, 0x460aa21305fa361e),
+            ("slope", 0, 0xc08c70ac23803686),
+            ("slope", 64, 0xf9181f0d41a59396),
+            ("slope", 200, 0x232514d1a22c32ab),
+            ("edge", 0, 0x5e58ff7a20e38e37),
+            ("edge", 64, 0x4a4511140845b207),
+            ("edge", 200, 0xd9ddf29af434f66b),
+        ];
+        let listing = rows
+            .iter()
+            .map(|(label, dir, digest)| format!("            ({label:?}, {dir}, {digest:#018x}),"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            rows, PINNED,
+            "the lying pose moved; the rows now read:\n{listing}"
         );
     }
 }
