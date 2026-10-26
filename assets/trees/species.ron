@@ -1,0 +1,59 @@
+// The tree species table (slice contract §3). Every tree asset names one of these keys; the
+// generator draws a tree's height and breast-height diameter from the ranges, the runtime reads
+// the substance and the two thresholds.
+//
+// `height_m` and `dbh_m` are MATURE STAND ranges for the game's forest, metres. Sources are read
+// 2026-10-26; where the source gives a maximum-mature or record figure the game range sits below
+// it and the comment says so (DERIVED), where it gives a typical range the range is carried as
+// read (MEASURED from the source text).
+//
+// `crown_base_frac`, `crown_width_frac` and `whorl_spacing_m` are the generator's view-only look
+// parameters (placeholder era, chosen by eye): the live crown starts at that fraction of the
+// height, its widest branch reaches that fraction of the height, and whorls sit that far apart at
+// the crown base. The sim reads none of them.
+//
+// `fell_k` and `hp` are `(value, Kind("why"))` pairs as in assets/materials/materials.ron; both are
+// Unknown placeholders until the runtime lane measures and sets them.
+{
+    "norway_spruce": Species(
+        // Wikipedia "Picea abies": "growing 35–55 m (115–180 ft) tall and with a trunk diameter of
+        // 1 to 1.5 m" — a well-grown mature maximum. DERIVED: a managed stand at rotation age is
+        // shorter and thinner, so the game range sits below it.
+        height_m: (25.0, 40.0),
+        dbh_m: (0.30, 0.60),
+        substance: "Softwood",
+        crown_base_frac: 0.22,
+        crown_width_frac: 0.11,
+        whorl_spacing_m: 0.6,
+        fell_k: (0.0, Unknown("set from Lane C's measured push/ram impulses")),
+        hp: (0.0, Unknown("balance data; set so a 75 mm AP round through the trunk does not fell a mature spruce")),
+    ),
+    "scots_pine": Species(
+        // Wikipedia "Scots pine": "Modern trees can grow up to 35 metres (115 feet) in height ...
+        // 1 m (3 ft 3 in) in trunk diameter when mature; exceptionally over 45 m (148 ft) tall and
+        // 1.7 m ... on very productive sites". DERIVED: the game range sits below the mature
+        // maximum, the diameter band at a stand tree's.
+        height_m: (20.0, 35.0),
+        dbh_m: (0.30, 0.65),
+        substance: "Softwood",
+        crown_base_frac: 0.55,
+        crown_width_frac: 0.14,
+        whorl_spacing_m: 0.9,
+        fell_k: (0.0, Unknown("set from Lane C's measured push/ram impulses")),
+        hp: (0.0, Unknown("balance data; set so a 75 mm AP round through the trunk does not fell a mature pine")),
+    ),
+    "silver_birch": Species(
+        // Wikipedia "Betula pendula": "typically reaches 15 to 25 m (49 to 82 ft) tall,
+        // exceptionally up to 31 m (102 ft), with a slender trunk usually under 40 cm (1 ft 4 in)
+        // in diameter". MEASURED from the source text: the typical range as read, the diameter
+        // band under its 40 cm.
+        height_m: (15.0, 25.0),
+        dbh_m: (0.20, 0.40),
+        substance: "Hardwood",
+        crown_base_frac: 0.35,
+        crown_width_frac: 0.16,
+        whorl_spacing_m: 0.7,
+        fell_k: (0.0, Unknown("set from Lane C's measured push/ram impulses")),
+        hp: (0.0, Unknown("balance data; set so a 75 mm AP round through the trunk does not fell a mature birch")),
+    ),
+}
