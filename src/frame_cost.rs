@@ -4,22 +4,33 @@
 //!
 //! RAW deltas, deliberately never averaged in-process: the frame-budget sweep's product signal is
 //! tail stutter (p95/p99/worst frame), which any smoothing destroys — percentiles are
-//! `scripts/perf/analyze.py`'s job. The measured quantity is exactly what bevy's own frame-time
-//! diagnostic measures — the `Time<Real>` delta (vendored
-//! bevy_diagnostic-0.19.0/src/frame_time_diagnostics_plugin.rs, `diagnostic_system`) — read
-//! directly instead of through `FrameTimeDiagnosticsPlugin`, whose `Diagnostic` history exists to
-//! smooth (`with_smoothing_factor` in its `build`) and adds nothing over the raw delta here.
+//! `scripts/perf/analyze.py`'s job.
+//!
+//! `frame_ms` is wall-clock: the time since the previous row, on a monotonic `Instant` the
+//! recorder takes itself in [`sample`]. It is not `Time<Real>`'s delta, the quantity bevy's own
+//! frame-time diagnostic reads (vendored bevy_diagnostic-0.19.1, `frame_time_diagnostics_plugin.rs`
+//! `diagnostic_system`): a manual `TimeUpdateStrategy` advances `Time<Real>` by its fixed step
+//! whatever the frame cost (vendored bevy_time-0.19.1/src/lib.rs, `time_system`), so under the
+//! armour sandbox's capture flight that delta is the flight's step on every frame. Under the
+//! default strategy both are the frame loop's period, read at different points of the frame
+//! (`Time<Real>` at the render world's `send_time`, this recorder in `Update`) — DERIVED from the
+//! source, not measured side by side.
+//!
+//! `t` is `Time<Real>`'s elapsed seconds, the clock the pen cam stamps its log marks on
+//! (`scripts/perf/pencam_cost.py` joins the two). Under a manual strategy it counts that
+//! strategy's seconds, not wall seconds: an equal `t` is the same frame of a flight in every run,
+//! and the analyzer's warmup and span are measured in those seconds.
 //!
 //! Rows go through the same [`JsonlSink`]/[`role_path`] discipline as the other `SPIKE_*`
-//! recorders. The first frame's delta is 0 by construction (`Time<Real>` has no previous update);
-//! it lands inside the warmup window every analysis discards, so it is written rather than
-//! special-cased. Off (zero cost — nothing registered) unless the env var is set. Windowed roots
-//! only: the headless server presents no frames.
+//! recorders. The first row's `frame_ms` is 0 by construction (no previous row); it lands inside
+//! the warmup window every analysis discards, so it is written rather than special-cased. Off
+//! (zero cost — nothing registered) unless the env var is set. Windowed roots only: the headless
+//! server presents no frames.
 //!
 //! # Validity signals (the anti-fiction half)
 //!
 //! A hidden or fully-occluded window's present returns `SurfaceError::Occluded`, nothing ever
-//! vsync-blocks, and the frame loop FREE-RUNS — `Time<Real>` rows keep flowing, every row-count
+//! vsync-blocks, and the frame loop FREE-RUNS — frame rows keep flowing, every row-count
 //! gate passes, and the numbers are fiction. The rows alone cannot distinguish that state, so this
 //! recorder emits extra signals for `scripts/perf/run-frame-sweep.sh` and
 //! `scripts/perf/analyze.py` to gate on. The occlusion one is above; the display one has a section
@@ -111,6 +122,7 @@
 //!   number that merely correlates with it. `scripts/perf/analyze.py` fails any measurement window
 //!   not covered by a surface row, covered by one that is not 2560x1440, or that resizes mid-window.
 
+use bevy::platform::time::Instant;
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowOccluded};
 use serde_json::json;
@@ -143,6 +155,8 @@ struct FrameCost {
     /// than in a `Local` because two systems need it: the one that RECORDS the transition and the
     /// one that tries to undo it ([`raise_when_occluded`]).
     occluded: bool,
+    /// When the previous frame row was sampled: the start of the next row's `frame_ms`.
+    last_sample: Option<Instant>,
 }
 
 /// Mount the per-frame recorder when `SPIKE_FRAME_COST` is set.
@@ -162,6 +176,7 @@ pub fn client_plugin(app: &mut App) {
     app.insert_resource(FrameCost {
         sink,
         occluded: false,
+        last_sample: None,
     });
     app.add_systems(Startup, park_and_pin);
     app.add_systems(
@@ -424,11 +439,17 @@ fn record_monitor(
     *last = Some(facts);
 }
 
-/// Append this frame's `{t, frame_ms}` row.
+/// Append this frame's `{t, frame_ms}` row: `frame_ms` is the wall-clock time since the previous
+/// row, never `Time<Real>`'s delta (module doc).
 fn sample(mut cost: ResMut<FrameCost>, time: Res<Time<Real>>) {
+    let now = Instant::now();
+    let frame_ms = cost
+        .last_sample
+        .replace(now)
+        .map_or(0.0, |last| now.duration_since(last).as_secs_f64() * 1000.0);
     cost.sink.write(&json!({
         "t": time.elapsed_secs_f64(),
-        "frame_ms": time.delta_secs_f64() * 1000.0,
+        "frame_ms": frame_ms,
     }));
 }
 
@@ -488,4 +509,63 @@ fn report_present_mode(
         settings.present_mode(*caps)
     );
     *reported = true;
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    use bevy::time::TimeUpdateStrategy;
+
+    use super::*;
+
+    /// `frame_ms` is the wall-clock time between frames, whatever step the app clock takes: the
+    /// armour sandbox's capture flight steps `Time<Real>` a fixed 1/30 s a frame, and a frame-cost
+    /// gate run under it reads these rows. A recorder that reads `Time<Real>`'s delta writes the
+    /// step, which here is far longer than the frame.
+    #[test]
+    fn frame_time_is_wall_clock_under_a_manual_time_step() {
+        const STEP: Duration = Duration::from_secs(10);
+        const FRAME: Duration = Duration::from_millis(20);
+        let path = std::env::temp_dir().join(format!(
+            "overmatch-frame-cost-{}-{}.jsonl",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_nanos()
+        ));
+        {
+            let mut app = App::new();
+            app.add_plugins(MinimalPlugins)
+                .insert_resource(TimeUpdateStrategy::ManualDuration(STEP))
+                .insert_resource(FrameCost {
+                    sink: JsonlSink::create(&path).expect("open the sink"),
+                    occluded: false,
+                    last_sample: None,
+                })
+                .add_systems(Update, sample);
+            app.update();
+            std::thread::sleep(FRAME);
+            app.update();
+        }
+        let rows = std::fs::read_to_string(&path).expect("read the rows");
+        let _ = std::fs::remove_file(&path);
+        let frame_ms: Vec<f64> = rows
+            .lines()
+            .map(|row| {
+                serde_json::from_str::<serde_json::Value>(row).expect("a JSON row")["frame_ms"]
+                    .as_f64()
+                    .expect("a frame_ms")
+            })
+            .collect();
+        let [_, frame_ms] = frame_ms[..] else {
+            panic!("two frame rows, got {frame_ms:?}");
+        };
+        let (frame, step) = (FRAME.as_secs_f64() * 1000.0, STEP.as_secs_f64() * 1000.0);
+        assert!(
+            (frame..step / 2.0).contains(&frame_ms),
+            "frame_ms {frame_ms} is not the {frame} ms slept (the app clock stepped {step} ms)"
+        );
+    }
 }

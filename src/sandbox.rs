@@ -386,6 +386,9 @@ pub fn plugin(app: &mut App) {
     #[cfg(feature = "dev_ui")]
     app.add_plugins(panel::plugin);
     autopilot_plugin(app);
+    // The per-frame wall-clock recorder (idle unless `SPIKE_FRAME_COST` is set): the frame cost of
+    // an autopilot capture, wall-clock under the flight's fixed step too.
+    app.add_plugins(crate::frame_cost::client_plugin);
 }
 
 fn spawn_camera(mut commands: Commands) {
