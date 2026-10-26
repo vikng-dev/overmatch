@@ -18,21 +18,15 @@
 //                 from `span.x` to `span.y` (world m) by `state.w` (the share lost) times the fade;
 //                 with `span.z = 0` (no known heights) the fill covers the mesh once the fade is on.
 //                 The fields' painting (`footprint`) lies over the fill.
-//   4 volume      the record's fields as one volume (`volume`), drawn on the back faces of a box
-//                 about every field's reach, whatever stands in front. The eye ray's stretch inside
-//                 each field (`stretch`: its ball out to its front or its longest reach, the
-//                 nearer, and a cap's cone), clipped to the cut's kept side and, with
-//                 `volume.w = 1`, short of the pixel's nearest scene surface in the part mask, is
-//                 cut at every stretch's ends, and each piece between two adjacent ends is marched
-//                 back toward the eye (`march`): samples of the fields' summed intensity
-//                 (`intensity`) no farther apart than the finest spacing (`spacing`: its ball
-//                 across over `VOLUME_STEPS`) of the fields whose stretches hold the piece, so
-//                 every field is sampled at its own spacing wherever it lies, each threshold
-//                 crossed between two samples placed by `VOLUME_REFINE` halvings
-//                 (`step_over`). Each piece in a band takes the band's colour (`knockout`,
-//                 `reduced`: rgb) at opacity `1 − exp(−length / w)`, laid over what lies behind it
-//                 (`over`); the pixel takes the result at `volume.x` times its opacity, times the
-//                 fade.
+//   4 volume      the record's fields as one volume, drawn on the back faces of a box about
+//                 every field's reach, whatever stands in front. A pixel takes the strongest band
+//                 the fields' summed intensity (`intensity`) reaches on the visible part of its eye
+//                 ray: the greatest sum over each field's stretch (`stretch`: its ball out to its
+//                 front or its longest reach, the nearer, and a cap's cone), clipped to the cut's
+//                 kept side and, with `volume.w = 1`, short of the pixel's nearest scene surface in
+//                 the part mask (`peak`), in that band's colour (`knockout`, `reduced`: rgb) at
+//                 that band's opacity (w), each band's edge a pixel wide in `log2` of the peak
+//                 (`strongest`), times the fade. How far the ray runs in a band never counts.
 //
 // The fields are painted on the components alone (`footprint`, `foot.x > 0`), in the bands of
 // their summed intensity at opacity `foot.x`, each band's edge a pixel wide; never on the body's
@@ -43,14 +37,14 @@
 // slack.
 //
 // In modes 0, 2 and 3, `mode.y = 1` discards what lies on `plane`'s normal side (the slice's cut);
-// the volume clips its march to the kept side.
+// the volume clips its eye rays to the kept side.
 //
 // Draw order (design doc §5, "Draw order"; `look.rs`, module doc): the body draws behind the
 // scene, the components, the round's model and the fields, ordered by depth among themselves; the
 // part mask holds the scene's surfaces, the components' and the round's. A body surface is
 // discarded wherever the part mask holds a scene surface, and the volume is drawn after the body
 // and over it; a component is opaque and depth-tested, as is the round in its own material, and
-// the volume's march ends at the nearest scene surface. Every depth read against a mask is the
+// the volume's eye ray ends at the nearest scene surface. Every depth read against a mask is the
 // eye depth (`eye_depth`): the distance from the eye in a perspective view, the distance along
 // the camera's forward from its plane in an orthographic one, the masks' own cameras sharing the
 // viewer's pose and lens.
@@ -104,11 +98,12 @@ struct LookParams {
     foot: vec4<f32>,
     // x: the floor threshold `T_floor`, y: the mid threshold `T_mid` (HP points per m²).
     bands: vec4<f32>,
-    // rgb: the knockout band's colour; w: its extinction length (m).
+    // rgb: the knockout band's colour; w: its opacity in the volume.
     knockout: vec4<f32>,
-    // rgb: the reduced band's colour; w: its extinction length (m).
+    // rgb: the reduced band's colour; w: its opacity in the volume.
     reduced: vec4<f32>,
-    // The volume: x its opacity at most, w bounded by the part mask's nearest scene surface (1).
+    // The volume: x how far (octaves) about its threshold a band's edge can fade, w bounded by the
+    // part mask's nearest scene surface (1).
     volume: vec4<f32>,
     // x: the fields drawn.
     fields: vec4<f32>,
@@ -116,8 +111,9 @@ struct LookParams {
     // (world) and how far its front has run (m), negative before it is thrown; the picture's `u`
     // (world, unit) and the support's inner edge (rad, 0 on a cap and the sphere); the picture's
     // `v` (world, unit) and its pitch (rad a texel); the emission its strength `S` gives
-    // (`ρ S / Ω`, HP points per sr, world), the world's metres per record metre, and the longest
-    // reach (m); its law (`law`): the kind of its terms, their two numbers and its strata `N`; and
+    // (`ρ S / Ω`, HP points per sr, world), the world's metres per record metre, the longest
+    // reach (m) and that emission times its law's greatest weight with a rounding margin
+    // (`bound`); its law (`law`): the kind of its terms, their two numbers and its strata `N`; and
     // the picture's six faces, two lanes each: the crop's tangent corner `x0, y1` and its size
     // (texels), and its place in `pictures` (texels).
     prints: array<vec4<f32>, 72>,
@@ -126,10 +122,12 @@ struct LookParams {
 // `look::FIELDS` and the lanes a field takes.
 const FIELDS: i32 = 4;
 const PRINT_LANES: i32 = 18;
-// `look::VOLUME_STEPS`, the steps across a field's ball and the most along a piece of the march,
-// and `look::VOLUME_REFINE`, the halvings that place a threshold's crossing between two samples.
-const VOLUME_STEPS: i32 = 48;
+// `look::VOLUME_STEPS`, the equal steps each field's stretch is searched in;
+// `look::VOLUME_REFINE`, the golden-section steps about the best sample (`peak`); and
+// `look::GOLDEN`, the golden section's ratio.
+const VOLUME_STEPS: i32 = 64;
 const VOLUME_REFINE: i32 = 8;
+const GOLDEN: f32 = 0.618034;
 // `picture::REACH_TOLERANCE_DIAGONALS`, how far past its own reach a texel counts a point: that
 // many texel diagonals (`√2` pitches) times the point's distance.
 const REACH_TOLERANCE_DIAGONALS: f32 = 2.0;
@@ -501,106 +499,62 @@ fn stretch(f: i32, eye: vec3<f32>, dir: vec3<f32>) -> vec2<f32> {
     return vec2(max(lo, 0.0), hi);
 }
 
-// A piece `span` (m) long in band `band` (0 nothing, 1 reduced, 2 knockout) laid over `acc`
-// (premultiplied rgb, a), nearer than all of it.
-fn over(acc: vec4<f32>, span: f32, band: i32) -> vec4<f32> {
-    if band == 0 || span <= 0.0 {
-        return acc;
-    }
-    let lane = select(look.reduced, look.knockout, band == 2);
-    let a = 1.0 - exp(-span / lane.w);
-    return vec4(lane.rgb * a + acc.rgb * (1.0 - a), a + acc.a * (1.0 - a));
-}
-
-// Where threshold `threshold` is crossed between `t_far` and `t_near` on the ray `eye + dir t`,
-// the far end above it if `far_above`, by `VOLUME_REFINE` halvings.
-fn crossing(eye: vec3<f32>, dir: vec3<f32>, t_far: f32, t_near: f32, threshold: f32, far_above: bool) -> f32 {
-    var a = t_far;
-    var b = t_near;
-    for (var j = 0; j < VOLUME_REFINE; j = j + 1) {
-        let between = 0.5 * (a + b);
-        if (intensity(eye + dir * between) >= threshold) == far_above {
-            a = between;
-        } else {
-            b = between;
+// The most the fields' summed intensity can be at world point `p` (HP points per m²): each field
+// whose ball holds `p` adds its bound (`prints[4].w`: its emission times its law's weight on its
+// axis, the law's greatest, and a margin past rounding) over its squared distance, which no
+// picture raises; at its origin, unbounded. `look::bound`.
+fn bound(p: vec3<f32>) -> f32 {
+    var sum = 0.0;
+    for (var f = 0; f < FIELDS; f = f + 1) {
+        if f32(f) >= look.fields.x {
+            break;
+        }
+        let base = PRINT_LANES * f;
+        let scale = look.prints[base + 4];
+        let r = length(p - look.prints[base].xyz);
+        if r < 1e-5 {
+            sum = sum + 1e30;
+        } else if r <= min(look.prints[base + 1].w, scale.z) {
+            sum = sum + scale.w / (r * r);
         }
     }
-    return 0.5 * (a + b);
+    return sum;
 }
 
-// One step of the march, from `t_far` (intensity `i_far`) back to `t_near` (`i_near`), laid over
-// `acc`: cut where each threshold the two samples lie apart on is crossed (`crossing`), each piece
-// in the band its side of each crossing holds. `look::march`.
-fn step_over(acc: vec4<f32>, eye: vec3<f32>, dir: vec3<f32>, t_far: f32, i_far: f32, t_near: f32, i_near: f32) -> vec4<f32> {
-    let f_far = i_far >= look.bands.x;
-    let f_near = i_near >= look.bands.x;
-    let m_far = i_far >= look.bands.y;
-    let m_near = i_near >= look.bands.y;
-    var c_f = t_near;
-    var c_m = t_near;
-    if f_far != f_near {
-        c_f = crossing(eye, dir, t_far, t_near, look.bands.x, f_far);
+// What a sample must exceed to change the pixel's colour (`strongest`), the greatest summed
+// intensity found so far `best`: below the floor's window (`volume.x` octaves about its
+// threshold) its low end, between the floor's window and the mid's the mid's low end, and inside
+// a window `best` itself. `look::need`.
+fn need(best: f32) -> f32 {
+    let window = exp2(look.volume.x);
+    if best < look.bands.x / window {
+        return look.bands.x / window;
     }
-    if m_far != m_near {
-        c_m = crossing(eye, dir, t_far, t_near, look.bands.y, m_far);
+    if best >= look.bands.x * window && best < look.bands.y / window {
+        return look.bands.y / window;
     }
-    var points = array<f32, 4>(t_far, max(c_f, c_m), min(c_f, c_m), t_near);
-    var out = acc;
-    for (var k = 0; k < 3; k = k + 1) {
-        let a = points[k];
-        let b = points[k + 1];
-        if a <= b {
-            continue;
-        }
-        let t = 0.5 * (a + b);
-        let f_in = select(f_far, f_near, f_far != f_near && t < c_f);
-        let m_in = select(m_far, m_near, m_far != m_near && t < c_m);
-        out = over(out, a - b, select(select(0, 1, f_in), 2, m_in));
-    }
-    return out;
+    return best;
 }
 
-// Field `f`'s spacing (m): its ball across in `VOLUME_STEPS` steps, its radius the nearer of its
-// front and its longest reach, as `stretch` bounds it. `look::spacing`.
-fn spacing(f: i32) -> f32 {
-    let base = PRINT_LANES * f;
-    return 2.0 * min(look.prints[base + 1].w, look.prints[base + 4].z) / f32(VOLUME_STEPS);
-}
-
-// The piece from `near` to `far` on the ray `eye + dir t` marched back toward the eye in equal
-// steps no longer than `space`, `VOLUME_STEPS` at most, laid over `acc`. `look::march`.
-fn march(acc: vec4<f32>, eye: vec3<f32>, dir: vec3<f32>, near: f32, far: f32, space: f32) -> vec4<f32> {
-    let steps = i32(clamp(ceil((far - near) / max(space, 1e-6)), 1.0, f32(VOLUME_STEPS)));
-    let step = (far - near) / f32(steps);
-    var out = acc;
-    var t_far = far;
-    var i_far = intensity(eye + dir * far);
-    for (var k = 1; k <= steps; k = k + 1) {
-        let t_near = far - f32(k) * step;
-        let i_near = intensity(eye + dir * t_near);
-        out = step_over(out, eye, dir, t_far, i_far, t_near, i_near);
-        t_far = t_near;
-        i_far = i_near;
-    }
-    return out;
-}
-
-// The fields' volume seen through `exit`, a point where the eye ray leaves the box about them, at
-// mask pixel `p`: each field's stretch of the ray, clipped to the cut's kept side and short of
-// the nearest scene surface, cut at every stretch's ends and marched far to near, each piece at
-// the finest spacing of the fields whose stretches hold it (`look::schedule`). A field's ends are
-// samples and its stretch is sampled at its own spacing or finer, so a small field never falls
-// between two samples of a wide one.
-fn volume(exit: vec3<f32>, p: vec2<i32>, fade: f32) -> vec4<f32> {
+// The greatest summed intensity (`intensity`) on the eye ray through `exit`, a point where it
+// leaves the box about the fields, at mask pixel `p`: over each field's stretch (`stretch`),
+// clipped to the cut's kept side and, with `volume.w = 1`, short of the pixel's nearest scene
+// surface in the part mask. Each field's point nearest its origin first, then its stretch in
+// `VOLUME_STEPS` equal steps however short the clips leave it, ends included, a sample skipped
+// where no field can lift the sum past what the colour needs (`bound`, `need`), then
+// `VOLUME_REFINE` golden-section steps about the best sample, one of its stretch's steps either
+// side; it stops once the sum is past the mid's window, where the colour no longer changes.
+// `look::peak`.
+fn peak(exit: vec3<f32>, p: vec2<i32>) -> f32 {
     // Depths along the ray are eye depths: `eye + dir t` lies at eye depth `t`.
     let dir = eye_ray(exit);
     let eye = exit - dir * eye_depth(exit);
     var near = 0.0;
     var far = 1e30;
     if look.volume.w > 0.5 {
-        let bound = mask_at(part_mask, p).a;
-        if bound > 0.0 {
-            far = bound;
+        let surface = mask_at(part_mask, p).a;
+        if surface > 0.0 {
+            far = surface;
         }
     }
     if look.mode.y > 0.5 {
@@ -609,7 +563,7 @@ fn volume(exit: vec3<f32>, p: vec2<i32>, fade: f32) -> vec4<f32> {
         let gd = dot(look.plane.xyz, dir);
         if abs(gd) < 1e-8 {
             if g0 > 0.0 {
-                discard;
+                return 0.0;
             }
         } else if gd > 0.0 {
             far = min(far, -g0 / gd);
@@ -617,12 +571,14 @@ fn volume(exit: vec3<f32>, p: vec2<i32>, fade: f32) -> vec4<f32> {
             near = max(near, -g0 / gd);
         }
     }
-    // Each field's stretch (empty, `lo > hi`, where the ray misses it) and every stretch's ends in
-    // order.
+    let done = look.bands.y * exp2(look.volume.x);
+    var best = 0.0;
+    var at = 0.0;
+    var span = 0.0;
+    // Each field's stretch (empty, `lo ≥ hi`, where the ray misses it) and its point nearest its
+    // origin.
     var lo = array<f32, 4>(1.0, 1.0, 1.0, 1.0);
     var hi = array<f32, 4>(0.0, 0.0, 0.0, 0.0);
-    var ends = array<f32, 8>(0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
-    var count = 0;
     for (var f = 0; f < FIELDS; f = f + 1) {
         if f32(f) >= look.fields.x {
             break;
@@ -635,41 +591,80 @@ fn volume(exit: vec3<f32>, p: vec2<i32>, fade: f32) -> vec4<f32> {
         }
         lo[f] = a;
         hi[f] = b;
-        for (var e = 0; e < 2; e = e + 1) {
-            let t = select(b, a, e == 0);
-            var k = count;
-            while k > 0 && ends[k - 1] > t {
-                ends[k] = ends[k - 1];
-                k = k - 1;
+        let t = clamp(dot(look.prints[PRINT_LANES * f].xyz - eye, dir), a, b);
+        let here = intensity(eye + dir * t);
+        if here > best {
+            best = here;
+            at = t;
+            span = (b - a) / f32(VOLUME_STEPS);
+        }
+    }
+    for (var f = 0; f < FIELDS; f = f + 1) {
+        if lo[f] >= hi[f] {
+            continue;
+        }
+        let step = (hi[f] - lo[f]) / f32(VOLUME_STEPS);
+        for (var k = 0; k <= VOLUME_STEPS; k = k + 1) {
+            if best >= done {
+                return best;
             }
-            ends[k] = t;
-            count = count + 1;
-        }
-    }
-    if count == 0 {
-        discard;
-    }
-    // Far to near, each piece between adjacent ends that a stretch holds, a sample counting every
-    // field once.
-    var acc = vec4(0.0);
-    for (var k = count - 1; k > 0; k = k - 1) {
-        let a = ends[k - 1];
-        let b = ends[k];
-        let mid = 0.5 * (a + b);
-        var space = 1e30;
-        for (var f = 0; f < FIELDS; f = f + 1) {
-            if lo[f] <= mid && mid <= hi[f] {
-                space = min(space, spacing(f));
+            let t = lo[f] + f32(k) * step;
+            if bound(eye + dir * t) <= need(best) {
+                continue;
+            }
+            let here = intensity(eye + dir * t);
+            if here > best {
+                best = here;
+                at = t;
+                span = step;
             }
         }
-        if a < b && space < 1e30 {
-            acc = march(acc, eye, dir, a, b, space);
+    }
+    if best <= 0.0 || best >= done {
+        return best;
+    }
+    var left = max(at - span, near);
+    var right = min(at + span, far);
+    var x1 = right - GOLDEN * (right - left);
+    var x2 = left + GOLDEN * (right - left);
+    var i1 = intensity(eye + dir * x1);
+    var i2 = intensity(eye + dir * x2);
+    for (var j = 0; j < VOLUME_REFINE; j = j + 1) {
+        if i1 < i2 {
+            left = x1;
+            x1 = x2;
+            i1 = i2;
+            x2 = left + GOLDEN * (right - left);
+            i2 = intensity(eye + dir * x2);
+        } else {
+            right = x2;
+            x2 = x1;
+            i2 = i1;
+            x1 = right - GOLDEN * (right - left);
+            i1 = intensity(eye + dir * x1);
         }
     }
-    if acc.a <= 0.0 {
-        discard;
-    }
-    return vec4(acc.rgb / acc.a, clamp(look.volume.x * acc.a * fade, 0.0, 1.0));
+    return max(best, max(i1, i2));
+}
+
+// The volume's colour at a pixel whose eye ray peaks at summed intensity `top` (`peak`),
+// premultiplied (rgb, a): its strongest band's colour (`knockout`, `reduced`: rgb) at that band's
+// opacity (w). Each band's presence rises across its threshold over one pixel's change in `log2`
+// of the peak (`soft_step`), the peak's level held to `volume.x` octaves about the threshold, so
+// the edge spans a pixel and nothing past the window changes the colour; a ray's length in a band
+// never counts. `look::strongest`. Called in uniform control flow: it takes derivatives.
+fn strongest(top: f32) -> vec4<f32> {
+    let level = log2(max(top, look.bands.x / 4096.0));
+    let low_at = log2(look.bands.x);
+    let high_at = log2(look.bands.y);
+    let held_low = clamp(level, low_at - look.volume.x, low_at + look.volume.x);
+    let held_high = clamp(level, high_at - look.volume.x, high_at + look.volume.x);
+    // The knockout band's presence is never above the floor's: its window lies wholly above.
+    let low = soft_step(low_at, fwidth(held_low), held_low);
+    let high = soft_step(high_at, fwidth(held_high), held_high);
+    let knockout = look.knockout.w * high;
+    let reduced = look.reduced.w * (low - high);
+    return vec4(look.knockout.rgb * knockout + look.reduced.rgb * reduced, knockout + reduced);
 }
 
 // A mask's edge at a pixel: 1 at a depth edge, 0.5 at a normal edge alone, 0 elsewhere.
@@ -731,7 +726,11 @@ fn fragment(in: LookVertexOutput) -> @location(0) vec4<f32> {
     let depth = eye_depth(in.world_position.xyz);
 
     if m == 4 {
-        return volume(in.world_position.xyz, vec2<i32>(pix), fade);
+        let colour = strongest(peak(in.world_position.xyz, vec2<i32>(pix)));
+        if colour.a <= 0.0 {
+            discard;
+        }
+        return vec4(colour.rgb / colour.a, clamp(colour.a * fade, 0.0, 1.0));
     }
     if look.mode.y > 0.5 && dot(look.plane.xyz, in.world_position.xyz) > look.plane.w {
         discard;

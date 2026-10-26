@@ -3210,8 +3210,9 @@ mod tests {
     /// depth pictures from the one atlas the stage draws ([`ViewPictures::drawn`]); its bands
     /// parted at the shipped thresholds and coloured from the band law alone — the knockout band
     /// the field teal, the reduced band the deep teal, both more blue than red and off the state
-    /// scale, the knockout band the brighter — at one opacity across every record, so the colour
-    /// says the band of the fields' summed intensity and nothing else. Outside the slice the volume
+    /// scale, the knockout band the brighter — each band at one opacity, its edge over one window,
+    /// across every record, so the colour says the band of the fields' summed intensity and nothing
+    /// else. Outside the slice the volume
     /// is uncut; in the slice it is cut by the slice plane. Where its frame draws the body behind,
     /// it is bounded by its viewer's part mask ([`the_x_ray_draws_the_body_behind`]). At least one
     /// record throws a field in each. A box short of a field's reach clips that field's far side; a
@@ -3222,7 +3223,7 @@ mod tests {
         let library = Library::load();
         let asset = TankAsset::load(&library.vehicle).unwrap();
         let (mut looked, mut sliced) = (0, 0);
-        let mut opacities: Vec<f32> = Vec::new();
+        let mut opacities: Vec<Vec3> = Vec::new();
         let potency = Potency::shipped();
         let luminance = |c: Vec3| c.dot(Vec3::new(0.2126, 0.7152, 0.0722));
         let colour = |band: Band| LinearRgba::from(band.colour().unwrap()).to_vec3();
@@ -3316,7 +3317,11 @@ mod tests {
                     }
                     let bounded = look::body_behind(kind) as u8 as f32;
                     assert_eq!(m.params.volume.w, bounded, "{}", record.stem);
-                    opacities.push(m.params.volume.x);
+                    opacities.push(Vec3::new(
+                        m.params.knockout.w,
+                        m.params.reduced.w,
+                        m.params.volume.x,
+                    ));
                     if slice {
                         sliced += 1;
                     } else {
@@ -3331,7 +3336,7 @@ mod tests {
         );
         assert!(
             opacities.iter().all(|o| *o == opacities[0]),
-            "a volume's opacity varies across the records: {opacities:?}"
+            "a volume's opacities or edge window vary across the records: {opacities:?}"
         );
     }
 

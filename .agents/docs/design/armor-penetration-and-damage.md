@@ -388,16 +388,55 @@ from one face to the next is drawn within half a texel of where it lies on eithe
 edge (DERIVED, the bilinear read; held over 6,000 seeded seams by
 `picture::tests::a_silhouette_across_a_faces_edge_jogs_by_at_most_a_texel`), so it jogs there by
 at most a texel, under a pixel of the live target (DERIVED); MEASURED on the CPU read over 6,000
-random seams, the jog is at most 0.64 pitch. The fields draw as **one volume** (`assets/shaders/pen_cam_look.wgsl`, `volume`) on the
-back faces of a box about every field's reach: each eye ray is cut at the ends of every field's
-stretch along it, each piece is sampled no farther apart than the smallest ball across in 48
-steps among the fields whose stretches hold it, so every field is sampled at its own size and a
-small field inside a wide one never falls between two samples, and each threshold crossed between
-two samples is placed by 8 halvings, so a band's length along the ray is its iso-surface's chord
-and its edge on screen the iso-surface's silhouette, with no stair-steps and no noise. Each band
-takes its colour at an opacity that climbs with its length over its extinction length (knockout
-0.6 m, reduced 3 m, the whole at most 0.55; TUNED), the nearer laid over the farther. The fields
-are also **painted** on the components' surfaces (a playtest fork,
+random seams, the jog is at most 0.64 pitch.
+
+The fields draw as **one volume** (`assets/shaders/pen_cam_look.wgsl`, `peak` and `strongest`) on
+the back faces of a box about every field's reach, coloured by **density**: a pixel takes the
+colour of the strongest band its eye ray crosses, at that band's one opacity (knockout 0.5,
+reduced 0.2; TUNED), knockout over reduced over nothing. A knockout core reads inside its reduced
+shell, and a long run of the ray through a weak band never reads as dense as a short one through
+a strong band: no term depends on the ray's length inside a band. The ray's visible part ends at
+its pixel's nearest scene surface in the part mask, and at the cut. Its **peak**, the greatest
+summed intensity along it, sets the colour. The search takes each field's point nearest its
+origin on its stretch, where the field alone peaks unless its law or its picture moves the peak;
+then each field's stretch in 64 equal steps, ends included, however short the part mask or the
+cut leaves it; then 8 golden-section steps about the best sample, one of its stretch's steps
+either side. It skips a sample where a bound on the sum there (over the fields whose ball holds
+the point, each one's greatest law weight over `r²`) cannot lift the peak past what the colour
+still needs, and stops once the sum is past the mid's window, where the colour no longer
+changes. Each band's edge fades in density, never in thickness: its presence is a smoothstep in
+`log2` of the peak, held to half an octave either side of its threshold, over one pixel's change
+of that level, so the edge spans a pixel, as the painting's do. Half an octave holds a pixel's
+change wherever the edge lies 4.1 px or more from its field's origin on screen (DERIVED: a lone
+field's peak on a ray falls as `1/d²` with the ray's distance `d` from its origin, so its `log2`
+changes `2/(n ln 2)` a pixel `n` px out, at most `√2` times that across a pixel's two axes,
+within the window's octave at `n ≥ 2√2/ln 2`); nearer, the edge is harder.
+
+The search never overstates: each sample is the sum where it lies, so a shadow it steps over
+never colours a pixel. It can understate where a band is a lit sliver between shadows: one a step
+of its stretch long or more is found; a thinner one away from every field's nearest point can
+fall between samples. A shadow's edge in a depth picture is such a comb, its texels lighting
+slivers about a texel wide, and the search reads the edge to within the comb's spread: 0.12
+octave at worst over 625 rays of a CPU fixture, two fields under a coned shadow (MEASURED). The
+count of steps is set on the image: s14's glass frame at 4.5 s, 1920×1080, its pixels whose
+largest channel differs by more than 8 from a search in 1,536 equal steps a stretch (MEASURED):
+
+| Search | Pixels off |
+|---|---|
+| steps of a fixed length, a ball's 48th, at most 48 a stretch | 1,566 |
+| 48 steps a stretch, equal in the angle about the field's origin | 403 |
+| 96 steps a stretch, equal in that angle | 201 |
+| 48 equal steps a stretch | 325 |
+| **64 equal steps a stretch (built)** | **241** |
+| 96 equal steps a stretch | 150 |
+| 384 equal steps along the whole ray | 169 |
+
+Steps of a fixed length stair-step a band's edge wherever it crosses a short stretch (a clip of
+the part mask, a chord near a ball's rim): they cross it in one or two, read its ends alone and
+step over the lit sliver between shadows there. Colouring by thickness drew the same stairs
+(MEASURED, s14's glass frame at 7680×4320).
+
+The fields are also **painted** on the components' surfaces (a playtest fork,
 `.agents/scratch/playtest-forks/field-footprints.md`): a point takes the band of the summed
 intensity there, at opacity 0.6 (TUNED), its band edges a pixel wide, by the rule its
 component's role gives. A hard component (every role but crew) is painted where a field meets
@@ -415,7 +454,8 @@ scenarios re-recorded under the ball are seen (owner, 2026-10-23, night).
 cam's lesson, the victim's x-ray, the slice) draws the body, the main armour, external armour and
 detail, behind everything else. The scene, the components with their state fills and outlines, the
 round's own model and the fields' volume, is ordered by depth among itself: a component or the
-round in front of a field hides it, a field in front of either blends over it. The fields'
+round in front of a field hides it, a field in front of either blends over it. The volume blends
+one colour a pixel, its strongest band's, over what lies behind it. The fields'
 painting lies on a component's own surface (its mesh's, its state fill's), so it is ordered as the
 component is. The round keeps its own materials and is drawn whole, in the slice too. The fields'
 depth pictures are drawn off screen, once per record and screen size, read only once their drawing
