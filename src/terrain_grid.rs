@@ -640,14 +640,21 @@ pub(crate) fn decode_height_grid(
     // probes' analytic ramps): decoding the shipped PNG over it would silently replace the
     // fixture. Product compositions never pre-insert one, so this branch is dev-only in practice.
     preset: Option<Res<HeightGrid>>,
+    // Likewise a manifest inserted before the first update is an explicit fixture map (the tick
+    // cost bed's variants of the shipped placement), read in place of the shipped file.
+    preset_manifest: Option<Res<crate::map::MapManifest>>,
 ) {
     if flat.is_some() {
         info!("terrain: ForceFlatWorld set — keeping the flat slab + authored course");
         return;
     }
     let root = crate::assets::asset_root();
-    let Some(manifest) = crate::map::load(&root) else {
-        return;
+    let manifest = match preset_manifest {
+        Some(preset) => preset.clone(),
+        None => match crate::map::load(&root) {
+            Some(manifest) => manifest,
+            None => return,
+        },
     };
     let extent = manifest.extent;
     let rows = manifest.rows;
