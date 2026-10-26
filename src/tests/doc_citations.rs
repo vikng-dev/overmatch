@@ -136,6 +136,13 @@ const ALLOWED_IDENTIFIERS: &[(&str, &str, &str)] = &[
         "F_FULLFSYNC",
         "macOS `fcntl` command, named as the durability step we deliberately do NOT take.",
     ),
+    (
+        "src/net/destruction.rs",
+        "HISTORY_LEN",
+        "`bevy_replicon::Diffable::HISTORY_LEN` (default 64): the diff history the ledger's \
+         `replicate_diff` keeps before falling back to a snapshot. The impl leaves it at the \
+         default, so the name appears only in the prose that states the bound.",
+    ),
     // ---- Deliberately named after deletion. -----------------------------------------------
     (
         "src/net/protocol.rs",
