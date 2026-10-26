@@ -131,13 +131,13 @@ def whorls(height_m: float, row: dict, rng: random.Random) -> List[dict]:
     return out
 
 
-def tree_ron(species: str, dbh_m: float, segment_rows: List[dict], header: str) -> str:
-    """`<id>.tree.ron` in the slice contract's shape, the header as a leading comment."""
+def tree_ron(species: str, segment_rows: List[dict], header: str) -> str:
+    """`<id>.tree.ron` in the slice contract's shape (A6: no `dbh_m`; the loader derives DBH
+    from the taper at 1.3 m), the header as a leading comment."""
     lines = ["// " + line for line in header.splitlines()]
     lines += [
         "TreeAsset(",
         '    species: "{}",'.format(species),
-        "    dbh_m: {},".format(dbh_m),
         "    segments: [",
     ]
     for row in segment_rows:

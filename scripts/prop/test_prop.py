@@ -62,6 +62,7 @@ class SpeciesTable(unittest.TestCase):
             self.assertIsInstance(row["substance"], str)
             for field in ("fell_k", "hp"):
                 value, kind = row[field]
+                self.assertGreater(value, 0, "{} {}: a placeholder is positive (A6)".format(key, field))
                 self.assertEqual(kind.name, "Unknown", "{} {} is a placeholder".format(key, field))
                 self.assertTrue(kind.args[0])
 
@@ -109,14 +110,24 @@ class TrackedTrio(unittest.TestCase):
                             for i, n in enumerate(js["nodes"]) if i in by_part["trunk"].values()))
 
     def test_fir_1_ron_matches_its_glb_and_is_a_realistic_spruce(self):
+        """The ron carries no dbh (A6); the loader derives it from the taper at 1.3 m, which is
+        done here the same way, and both it and the height must sit in the species' ranges."""
         js, _, tree, _, _ = tracked()
         table = ron.load(TABLE)
         self.assertEqual(build.ron_failures(tree, js, table), [])
+        self.assertNotIn("dbh_m", tree)
         height = sum(s["height_m"] for s in tree["segments"])
         lo, hi = table[tree["species"]]["height_m"]
         self.assertTrue(lo <= height <= hi, height)
+        z = 0.0
+        for segment in tree["segments"]:
+            if z <= plan.BREAST_HEIGHT_M < z + segment["height_m"]:
+                t = (plan.BREAST_HEIGHT_M - z) / segment["height_m"]
+                dbh = 2.0 * (segment["r_bottom_m"] + t * (segment["r_top_m"] - segment["r_bottom_m"]))
+                break
+            z += segment["height_m"]
         lo, hi = table[tree["species"]]["dbh_m"]
-        self.assertTrue(lo <= tree["dbh_m"] <= hi, tree["dbh_m"])
+        self.assertTrue(lo <= dbh <= hi, dbh)
 
     def test_fir_1_certificate_is_coherent_and_lod0_only(self):
         _, view_blob, _, ron_blob, cert = tracked()
@@ -187,6 +198,12 @@ class RonMutants(unittest.TestCase):
         tree["segments"][2]["r_top_m"] += 0.01
         failures = build.ron_failures(tree, self.js, self.table)
         self.assertTrue(any("one disc" in f for f in failures), failures)
+
+    def test_dbh_m_is_refused(self):
+        tree = copy.deepcopy(self.tree)
+        tree["dbh_m"] = 0.4
+        failures = build.ron_failures(tree, self.js, self.table)
+        self.assertTrue(any("dbh_m" in f and "A6" in f for f in failures), failures)
 
     def test_a_species_outside_the_table_is_refused(self):
         tree = copy.deepcopy(self.tree)

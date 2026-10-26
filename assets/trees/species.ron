@@ -12,8 +12,10 @@
 // height, its widest branch reaches that fraction of the height, and whorls sit that far apart at
 // the crown base. The sim reads none of them.
 //
-// `fell_k` and `hp` are `(value, Kind("why"))` pairs as in assets/materials/materials.ron; both are
-// Unknown placeholders until the runtime lane measures and sets them.
+// `fell_k` (N·s·m per m³ of dbh³, the ram threshold `impulse × lever ≥ fell_k × dbh³`) and `hp`
+// (the trunk's integer HP pool, species-fixed this slice) are `(value, Kind("why"))` pairs as in
+// assets/materials/materials.ron: positive provisional values under Unknown provenance (the loader
+// refuses a non-positive one), replaced when the runtime and measurement lanes set them.
 {
     "norway_spruce": Species(
         // Wikipedia "Picea abies": "growing 35–55 m (115–180 ft) tall and with a trunk diameter of
@@ -25,8 +27,8 @@
         crown_base_frac: 0.22,
         crown_width_frac: 0.11,
         whorl_spacing_m: 0.6,
-        fell_k: (0.0, Unknown("set from Lane C's measured push/ram impulses")),
-        hp: (0.0, Unknown("balance data; set so a 75 mm AP round through the trunk does not fell a mature spruce")),
+        fell_k: (2.0e5, Unknown("provisional: sized so a 0.40 m dbh trunk (threshold 1.3e4 N·s·m) falls to a hull ram of order 1e5 N·s at a 1 m lever and not to a crawl; set from Lane C's measured push/ram impulses")),
+        hp: (1200, Unknown("provisional balance data; set so a 75 mm AP round through the trunk does not fell a mature spruce")),
     ),
     "scots_pine": Species(
         // Wikipedia "Scots pine": "Modern trees can grow up to 35 metres (115 feet) in height ...
@@ -39,8 +41,8 @@
         crown_base_frac: 0.55,
         crown_width_frac: 0.14,
         whorl_spacing_m: 0.9,
-        fell_k: (0.0, Unknown("set from Lane C's measured push/ram impulses")),
-        hp: (0.0, Unknown("balance data; set so a 75 mm AP round through the trunk does not fell a mature pine")),
+        fell_k: (2.5e5, Unknown("provisional: a quarter above the spruce's for the taproot; set from Lane C's measured push/ram impulses")),
+        hp: (1200, Unknown("provisional balance data; set so a 75 mm AP round through the trunk does not fell a mature pine")),
     ),
     "silver_birch": Species(
         // Wikipedia "Betula pendula": "typically reaches 15 to 25 m (49 to 82 ft) tall,
@@ -53,7 +55,7 @@
         crown_base_frac: 0.35,
         crown_width_frac: 0.16,
         whorl_spacing_m: 0.7,
-        fell_k: (0.0, Unknown("set from Lane C's measured push/ram impulses")),
-        hp: (0.0, Unknown("balance data; set so a 75 mm AP round through the trunk does not fell a mature birch")),
+        fell_k: (1.5e5, Unknown("provisional: below the spruce's for the shallower root plate; set from Lane C's measured push/ram impulses")),
+        hp: (700, Unknown("provisional balance data; set so a 75 mm AP round through the trunk does not fell a mature birch")),
     ),
 }

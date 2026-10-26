@@ -21,14 +21,18 @@ WHAT `build` DOES, IN ORDER
 5. the certificate, in the tank's five-field shape;
 6. a STAGED publish: the glb lands, the certificate last.
 
-THE CERTIFICATE. Same five fields as the tank's so one reader serves both. `sim_glb_sha` hashes the
-tree's SIM ARTIFACT, which is the `.tree.ron` (the sim is built from it at spawn, ADR 0014; the glb
-is the view) — the field keeps its name for the shape's sake. `chains` is EMPTY: this build ships
-LOD0 only. The trunk's segments are a few dozen triangles each, under any rung's shed fraction,
-and the chain cutter has no border lock (ADR 0033 "no vertex/edge locks"), so independently
-collapsed segments could open their shared boundary loop; the canopy's cards have no positional
-deviation a certificate could honestly carry (ADR 0036 retired the only gate that measured them).
-A certificate with no chain renders at source detail (ADR 0035's benign case).
+THE CERTIFICATE. The tank's five fields with `sim_ron_sha` in `sim_glb_sha`'s place (contract
+amendment A13): a tree has no sim glb, its sim artifact is the `.tree.ron` the sim is built from at
+spawn (ADR 0014), and the field hashes those bytes. `chains` is EMPTY: this build ships LOD0 only.
+The trunk's segments are a few dozen triangles each, under any rung's shed fraction, and the chain
+cutter has no border lock (ADR 0033 "no vertex/edge locks"), so independently collapsed segments
+could open their shared boundary loop; the canopy ships one card density (A12, the card ladder is
+deferred). A certificate with no chain renders at source detail (ADR 0035's benign case).
+
+THE RON carries no `dbh_m` (A6): the loader derives DBH from the taper at 1.3 m, so a second
+statement of it here would be one that could disagree. The caps' meaning is the runtime's (A5): an
+interior cut k reveals `cap_top_{k-1}` and `cap_bottom_k`, cut 0 reveals `cap_bottom_0` only; this
+build only guarantees both discs exist per segment, flat, at its two ends.
 
 WHAT `verify` DOES: the trio's coherence (both hashes, the staleness digest, the five fields) and
 the two contracts over the TRACKED glb and ron, with no Blender. It writes nothing.
@@ -61,7 +65,7 @@ import toolchain  # noqa: E402
 MODES = ("build", "verify", "lint")
 EXPORT = os.path.join("scripts", "prop", "export_tree.py")
 SPECIES_TABLE = os.path.join("assets", "trees", "species.ron")
-CERTIFICATE_FIELDS = ("blend_digest", "view_glb_sha", "sim_glb_sha", "mesh_count", "chains")
+CERTIFICATE_FIELDS = ("blend_digest", "view_glb_sha", "sim_ron_sha", "mesh_count", "chains")
 PARTS = ("trunk", "cap_bottom", "cap_top", "canopy")
 
 #: What can move either artifact, hashed into `blend_digest` beside the inputs.
@@ -270,16 +274,17 @@ def ron_failures(tree, js: dict, species: dict) -> List[str]:
     failures = []
     if not isinstance(tree, dict) or tree.get("__struct__") != "TreeAsset":
         return ["the ron is not a TreeAsset"]
-    for field in ("species", "dbh_m", "segments"):
+    for field in ("species", "segments"):
         if field not in tree:
             failures.append("TreeAsset has no {}".format(field))
+    if "dbh_m" in tree:
+        failures.append("TreeAsset carries dbh_m, a field the contract dropped (A6): DBH is derived "
+                        "at load from the taper at 1.3 m")
     if failures:
         return failures
     if tree["species"] not in species:
         failures.append("species {!r} is not in the species table ({})".format(
             tree["species"], ", ".join(sorted(species))))
-    if not _finite_positive(tree["dbh_m"]):
-        failures.append("dbh_m {!r} is not a positive finite number of metres".format(tree["dbh_m"]))
     segments = tree["segments"]
     if not isinstance(segments, list) or not segments:
         return failures + ["segments is empty; a trunk is at least one segment"]
@@ -336,7 +341,7 @@ def certificate(digest: str, view_blob: bytes, ron_blob: bytes, mesh_count: int)
     return {
         "blend_digest": digest,
         "view_glb_sha": sha256_bytes(view_blob),
-        "sim_glb_sha": sha256_bytes(ron_blob),
+        "sim_ron_sha": sha256_bytes(ron_blob),
         "mesh_count": mesh_count,
         "chains": {},
     }
@@ -361,7 +366,7 @@ def coherence(cert, view_blob: bytes, ron_blob: bytes, digest: Optional[str]) ->
     if missing:
         return failures
     for field, blob, what in (("view_glb_sha", view_blob, "view glb"),
-                              ("sim_glb_sha", ron_blob, "tree ron")):
+                              ("sim_ron_sha", ron_blob, "tree ron")):
         actual = sha256_bytes(blob)
         if cert[field] != actual:
             failures.append("{} is {!r} and the {} hashes to {!r} — the trio is incoherent".format(
