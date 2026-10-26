@@ -136,15 +136,25 @@ fn fall_duration_s(fallen_length_m: f32) -> f32 {
     (0.08 * fallen_length_m).clamp(1.0, 3.0)
 }
 
+/// The cut trunk node's rotation in the tree root's frame — the chain between them carries no
+/// rotation (A5) — tilting the piece above by `angle` toward the fall direction of `resting`: about
+/// the horizontal world axis `(dz, 0, -dx)` carried into the root's frame, libm's half-angle trig.
+fn trunk_turn(resting: &Resting, root: Quat, angle: f32) -> Quat {
+    let axis = root.inverse() * Vec3::new(resting.dz, 0.0, -resting.dx);
+    let (s, c) = (libm::sinf(0.5 * angle), libm::cosf(0.5 * angle));
+    Quat::from_xyzw(axis.x * s, axis.y * s, axis.z * s, c)
+}
+
 /// Present a tree's state on its glb, from the state alone (ADR-0016): standing, every trunk node
 /// upright and every cap hidden; down, the cut's trunk node turns about its own origin — the
 /// pivot, the chain's translations carry the piece above — from upright to the resting tilt over
 /// the fall's duration, phase read off [`FallClock`] against the transition tick (ADR-0037: the
 /// fall lands when the cursor crosses its tick, however late the entry arrived), and of the caps
 /// exactly the pair the cut reveals (A5: `cap_top` below the cut and `cap_bottom` of the cut)
-/// shows. Written when the state, the body's resting pose or the bound view is new, and every
-/// frame while a fall runs; a view that binds to a tree in either state presents it on its first
-/// frame. The sim never waits on this.
+/// shows. Written when the state, the body's resting pose or the bound view is new, and on every
+/// frame the cut's trunk is not at the turn the clock derives — through the fall and on the frame
+/// it completes; a view that binds to a tree in either state presents it on its first frame. The
+/// sim never waits on this.
 fn present_fall(
     clock: Res<FallClock>,
     step: Res<Time<Fixed>>,
@@ -171,13 +181,9 @@ fn present_fall(
                 let length = body.prefix[body.prefix.len() - 1] - body.prefix[cut];
                 let phase =
                     (clock.since(fell.tick) as f32 * dt / fall_duration_s(length)).clamp(0.0, 1.0);
-                let axis = transform.rotation.inverse() * Vec3::new(resting.dz, 0.0, -resting.dx);
-                let angle = resting.tilt * phase * phase;
-                let (s, c) = (libm::sinf(0.5 * angle), libm::cosf(0.5 * angle));
                 Some((
                     cut,
-                    Quat::from_xyzw(axis.x * s, axis.y * s, axis.z * s, c),
-                    phase,
+                    trunk_turn(resting, transform.rotation, resting.tilt * phase * phase),
                 ))
             }
             _ => None,
@@ -185,12 +191,20 @@ fn present_fall(
         let fresh = state.is_changed()
             || view.is_added()
             || resting.as_ref().is_some_and(|resting| resting.is_changed());
-        if !fresh && !turned.is_some_and(|(_, _, phase)| phase < 1.0) {
+        // An unchanged tree is redrawn while its cut's trunk is not at the turn this frame derives:
+        // every frame of the fall, and the frame the phase completes, which writes the resting
+        // pose; at rest the two agree and the tree is skipped.
+        let behind = turned.is_some_and(|(cut, turn)| {
+            view.trunks[cut]
+                .and_then(|trunk| nodes.get(trunk).ok())
+                .is_some_and(|(local, _)| local.rotation != turn)
+        });
+        if !fresh && !behind {
             continue;
         }
         for (k, trunk) in view.trunks.iter().enumerate() {
             let rotation = match turned {
-                Some((cut, turn, _)) if k == cut => turn,
+                Some((cut, turn)) if k == cut => turn,
                 _ => Quat::IDENTITY,
             };
             if let Some(trunk) = trunk
@@ -200,7 +214,7 @@ fn present_fall(
                 local.rotation = rotation;
             }
         }
-        let cut = turned.map(|(cut, _, _)| cut);
+        let cut = turned.map(|(cut, _)| cut);
         let tops = view
             .caps_top
             .iter()
@@ -255,6 +269,79 @@ pub(crate) fn plugin(app: &mut App) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// THE FALL ENDS ON THE RESTING POSE: an unchanged tree whose clock advances from an
+    /// unfinished phase through the fall's end leaves its cut's trunk at exactly the turn of the
+    /// whole tilt — the bits the derive computes at rest, which the sim's lying piece shares. A
+    /// presentation that stops redrawing once the phase reaches one, before writing that frame's
+    /// pose, leaves the trunk short of the ground by `1 − phase²` of the tilt.
+    #[test]
+    fn a_fall_ends_on_the_resting_pose() {
+        let mut app = App::new();
+        app.insert_resource(FallClock {
+            tick: 0,
+            overstep: 0.0,
+        })
+        .insert_resource(Time::<Fixed>::from_hz(64.0))
+        .add_systems(Update, present_fall);
+        let resting = Resting {
+            tilt: 1.2,
+            dx: 1.0,
+            dz: 0.0,
+        };
+        let yaw = Quat::from_xyzw(0.0, libm::sinf(0.35), 0.0, libm::cosf(0.35));
+        let world = app.world_mut();
+        let root = world
+            .spawn((
+                TreeState::Down { cut: 1, dir: 0 },
+                Fell { tick: 0 },
+                resting,
+                TreeBody::new(crate::trees::tests::fixture_kind(), 1.0),
+                Transform::from_rotation(yaw),
+            ))
+            .id();
+        let view = world.spawn((ChildOf(root), Transform::IDENTITY)).id();
+        let trunks: Vec<Entity> = (0..3)
+            .map(|_| {
+                world
+                    .spawn((ChildOf(view), Transform::IDENTITY, Visibility::Inherited))
+                    .id()
+            })
+            .collect();
+        world.entity_mut(view).insert(TreeViewNodes {
+            trunks: trunks.iter().copied().map(Some).collect(),
+            caps_top: vec![None; 3],
+            caps_bottom: vec![None; 3],
+        });
+        let turn = |app: &App| app.world().get::<Transform>(trunks[1]).unwrap().rotation;
+        // The fixture's fallen piece is 4 m, a one-second fall: 64 ticks at 64 Hz (DERIVED).
+        let at = |app: &mut App, tick: u32| {
+            app.world_mut().resource_mut::<FallClock>().tick = tick;
+            app.update();
+        };
+        at(&mut app, 63);
+        let unfinished = turn(&app);
+        at(&mut app, 63);
+        assert_eq!(
+            turn(&app),
+            unfinished,
+            "a frame with no time passed redraws nothing"
+        );
+        at(&mut app, 64);
+        let rest = trunk_turn(&resting, yaw, resting.tilt);
+        assert_ne!(unfinished, rest, "63/64 of the fall is short of the rest");
+        assert_eq!(
+            turn(&app).to_array().map(f32::to_bits),
+            rest.to_array().map(f32::to_bits),
+            "the frame the phase completes writes the resting pose"
+        );
+        at(&mut app, 200);
+        assert_eq!(
+            turn(&app).to_array().map(f32::to_bits),
+            rest.to_array().map(f32::to_bits),
+            "and the trunk stays there"
+        );
+    }
 
     /// THE GLB PRESENTS THE STATE AND NOTHING BEFORE IT: standing, every trunk node upright and
     /// every cap hidden; down at a cut, that trunk node alone turned to the resting tilt (the fall
