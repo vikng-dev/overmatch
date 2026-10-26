@@ -924,7 +924,7 @@ pub(crate) fn sim_plugin(app: &mut App) {
 pub(crate) mod tests {
     use super::*;
     use crate::terrain_grid::FIXTURE_EXTENT;
-    use avian3d::prelude::{ColliderAabb, SimpleCollider};
+    use avian3d::prelude::SimpleCollider;
 
     /// A three-segment fixture trunk (fixture data): 2 m segments, radii 0.3 → 0.2 → 0.1 → 0.05.
     pub(crate) fn fixture_asset() -> TreeAsset {
@@ -1424,9 +1424,11 @@ pub(crate) mod tests {
         );
     }
 
-    /// The spawn builds the body the module doc describes: one root with the pool and the
-    /// volume, one segment collider per segment on `[Terrain, Armor]`, nothing on the root's
-    /// scale, and no view where no server offers one.
+    /// The spawn builds the body the module doc describes: one root with the pool and the kind's
+    /// volume — its material and substance — one frustum collider per segment on
+    /// `[Terrain, Armor]`, nothing on the root's scale, and no view where no server offers one.
+    /// A root carrying another substance's volume, or a segment hulled as a cylinder at either
+    /// ring's radius, reds this.
     #[test]
     fn spawn_builds_a_root_and_a_collider_per_segment() {
         let mut world = World::new();
@@ -1458,6 +1460,14 @@ pub(crate) mod tests {
             "the kind's dbh at scale 1.5"
         );
         assert_eq!((health.current, health.max), (100, 100));
+        let volume = world
+            .get::<BallisticVolume>(root)
+            .expect("the root's volume");
+        assert_eq!(
+            (volume.material, volume.substance.as_str()),
+            (kind.material, kind.substance.as_str()),
+            "the volume is the kind's"
+        );
         assert_eq!(transform.scale, Vec3::ONE);
         assert_eq!(transform.translation, pose.translation);
         assert_eq!(
@@ -1465,7 +1475,7 @@ pub(crate) mod tests {
             "the yaw is the instance's"
         );
         let standing = CollisionLayers::new([Layer::Terrain, Layer::Armor], LayerMask::ALL);
-        let mut segments: Vec<(Entity, f32, ColliderAabb)> = world
+        let mut segments: Vec<(Entity, f32, Collider)> = world
             .query_filtered::<
                 (&ChildOf, &Transform, &Collider, &CollisionLayers),
                 With<TreeSegment>,
@@ -1473,11 +1483,7 @@ pub(crate) mod tests {
             .iter(&world)
             .map(|(parent, transform, collider, layers)| {
                 assert_eq!(*layers, standing, "a standing segment stops hulls and rounds");
-                (
-                    parent.parent(),
-                    transform.translation.y,
-                    collider.aabb(Vec3::ZERO, Quat::IDENTITY),
-                )
+                (parent.parent(), transform.translation.y, collider.clone())
             })
             .collect();
         assert_eq!(segments.len(), 3);
@@ -1490,8 +1496,16 @@ pub(crate) mod tests {
             "segment bottoms at the scaled prefix sums"
         );
         // Each hull spans its frustum's wider ring and its scaled height from the segment's own
-        // origin: the ring table holds the four axis points, so the bounds are exact.
-        for ((_, _, aabb), segment) in segments.iter().zip(&kind.segments) {
+        // origin: the ring table holds the four axis points, so the bounds are exact. And each
+        // end has its own ring's radius: a tenth of a millimetre inside either end, a ray along Z
+        // past the 12-gon's +X vertex meets the hull a millimetre inside that ring's scaled
+        // radius and misses it a millimetre outside. DERIVED margin: that far in, the
+        // cross-section's radius is off the end ring's by `|r_bottom - r_top| × 1e-4 / height`,
+        // under 10 µm on this fixture.
+        const PROBE: f32 = 1.0e-3;
+        const INSIDE: f32 = 1.0e-4;
+        for ((_, _, collider), segment) in segments.iter().zip(&kind.segments) {
+            let aabb = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
             let r = segment.r_bottom_m.max(segment.r_top_m) * 1.5;
             let h = segment.height_m * 1.5;
             assert!(
@@ -1499,6 +1513,27 @@ pub(crate) mod tests {
                     && aabb.max.abs_diff_eq(Vec3::new(r, h, r), 1e-6),
                 "the hull is the scaled frustum: {aabb:?} for {segment:?}"
             );
+            for (y, ring) in [
+                (INSIDE, segment.r_bottom_m * 1.5),
+                (h - INSIDE, segment.r_top_m * 1.5),
+            ] {
+                let meets = |x: f32| {
+                    collider
+                        .cast_ray(
+                            Vec3::ZERO,
+                            Quat::IDENTITY,
+                            Vec3::new(x, y, -1.0),
+                            Vec3::Z,
+                            2.0,
+                            true,
+                        )
+                        .is_some()
+                };
+                assert!(
+                    meets(ring - PROBE) && !meets(ring + PROBE),
+                    "at {y} m the hull's radius is the ring's {ring}: {segment:?}"
+                );
+            }
         }
         assert_eq!(world.query::<&view::TreeView>().iter(&world).count(), 0);
     }
