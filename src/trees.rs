@@ -943,11 +943,11 @@ pub(crate) mod tests {
         assert!(err.contains("continuous"), "{err}");
     }
 
-    /// EVERY A6 REFUSAL IS A REFUSAL, NOT A CLAMP: a non-finite or non-positive dimension, an
-    /// unknown species, a non-positive pool or ram threshold, a trunk too short to read a breast
-    /// height, and more segments than the wire word's cut byte can name are each refused by name.
-    /// Any one of these laxed to a default — a NaN height carried, a zero HP pool spawned, a
-    /// 256th segment accepted — reds its row.
+    /// EVERY A6 REFUSAL IS A REFUSAL, NOT A CLAMP: an empty trunk, a non-finite or non-positive
+    /// dimension, an unknown species, a non-positive pool or ram threshold, a trunk too short to
+    /// read a breast height, and more segments than the wire word's cut byte can name are each
+    /// refused by name. Any one of these laxed to a default — a NaN height carried, a zero HP
+    /// pool spawned, a 256th segment accepted — reds its row.
     #[test]
     fn every_malformed_asset_or_species_is_refused_by_name() {
         let refusal = |asset: TreeAsset, table: BTreeMap<String, Species>| {
@@ -959,6 +959,9 @@ pub(crate) mod tests {
             )
             .expect_err("refused")
         };
+        let mut asset = fixture_asset();
+        asset.segments.clear();
+        assert!(refusal(asset, fixture_table()).contains("segments"));
         let mut asset = fixture_asset();
         asset.segments[0].height_m = f32::NAN;
         assert!(refusal(asset, fixture_table()).contains("dimension"));
@@ -1121,6 +1124,15 @@ pub(crate) mod tests {
             Ok(TreeState::Down { cut: 2, dir: 0 }),
             "the last segment is a legal cut"
         );
+    }
+
+    /// A cut the word's high byte cannot carry (`cut + 1` past a byte) has no encoding: the
+    /// authority never sets one — resolve bounds the segment count — so encoding it is a broken
+    /// invariant, not a wrapped word.
+    #[test]
+    #[should_panic(expected = "has no word")]
+    fn a_cut_past_the_word_has_no_encoding() {
+        let _ = TreeState::Down { cut: 255, dir: 0 }.encode();
     }
 
     /// THE RAM LAW READS A TANK BODY'S CONTACTS ON A STANDING TREE AND NOTHING ELSE: a pair whose
@@ -1435,6 +1447,26 @@ pub(crate) mod tests {
         queue.apply(&mut world);
     }
 
+    /// A negative scale is refused: it is uniform, but no trunk is built inside out.
+    #[test]
+    #[should_panic(expected = "scales uniformly")]
+    fn a_negative_scale_is_refused() {
+        let mut world = World::new();
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, &world);
+        spawn(
+            &mut commands,
+            &fixture_kind(),
+            MapInstance {
+                id: "fir_0001".to_owned(),
+                ordinal: 0,
+            },
+            Transform::from_scale(Vec3::splat(-1.0)),
+            None,
+        );
+        queue.apply(&mut world);
+    }
+
     /// A tilted instance is refused: the cut and the resting pose both read an upright trunk.
     #[test]
     #[should_panic(expected = "is tilted")]
@@ -1449,7 +1481,8 @@ pub(crate) mod tests {
                 id: "fir_0001".to_owned(),
                 ordinal: 0,
             },
-            // Half a degree: a lean the old loose gate (up.y > 0.9999, about 0.8°) let through.
+            // Half a degree of lean: its up falls 3.8e-5 short of 1 (DERIVED: 1 − cos 0.5°),
+            // 38 times `UPRIGHT_EPSILON`.
             Transform::from_rotation(Quat::from_rotation_x(0.5_f32.to_radians())),
             None,
         );
@@ -1473,10 +1506,11 @@ pub(crate) mod tests {
     /// THE RESTING TILT IS PINNED TO THE BIT (A9): the fixture trunk on flat ground, on a 10 %
     /// slope and at the grid's edge (where the oracle clamps), at every cut and three bins, must
     /// bisect to these exact f32 bits on every platform — the lying collider is sim state every
-    /// peer derives alone, so a peer that differs by one ulp has a different world. Any mutant of
-    /// the search reds this: a step fewer or more, the midpoint taken the other way, the sample's
-    /// radius offset dropped, platform trig in place of libm's, or the 100° fallback returning
-    /// anything but 90°.
+    /// peer derives alone, so a peer that differs by one ulp has a different world. The nine
+    /// cut-0 rows reach the terrain and pin the search itself: a step fewer or more, the midpoint
+    /// taken the other way, the sample's radius offset dropped or platform trig in place of
+    /// libm's reds them. The eighteen rows above the base reach nothing by 100° and pin only the
+    /// fallback's 90°; a reordering of the samples inside `any` is not observable here.
     #[test]
     fn the_resting_tilt_is_pinned_to_the_bit() {
         let body = TreeBody::new(fixture_kind(), 1.0);
@@ -1535,9 +1569,10 @@ pub(crate) mod tests {
             rows, PINNED,
             "the resting tilt moved; the rows now read:\n{listing}"
         );
-        // Flat ground, whole trunk: it lies just short of the horizontal, the tip's radius holding
-        // it off the surface. A piece cut above the base pivots at the cut's height and reaches
-        // nothing by 100°, so it takes the 90° fallback.
+        // Flat ground, whole trunk: it lies just short of the horizontal, held off the surface by
+        // the first boundary above the cut — the widest sample, 0.2 m at 2 m, touching at 84.3°
+        // (DERIVED: cos tilt = r / h) before the narrower ones. A piece cut above the base pivots
+        // at the cut's height and reaches nothing by 100°, so it takes the 90° fallback.
         for row in rows.iter().filter(|row| row.0 == "flat") {
             let tilt = f32::from_bits(row.3);
             if row.1 == 0 {

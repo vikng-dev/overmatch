@@ -1758,10 +1758,11 @@ fn forest_tick_cost_bed() {
 }
 
 /// THE LYING PIECE'S COLLIDERS LIE DOWN IN THE PHYSICS WORLD (A2, ADR-0016): a tree felled on the
-/// shipped terrain has, within a few ticks, every segment above the cut carried in avian's own
-/// bounds — the `ColliderAabb` its broad phase reads — along the fall and near the ground, and
-/// the stump's bounds where they stood. A static body's child collider whose bounds avian
-/// refreshed only at insert would leave the fallen trunk standing for every hull and round.
+/// shipped terrain has, within a few ticks, its tip segment carried in avian's own bounds — the
+/// `ColliderAabb` its broad phase reads — along the fall and near the ground, and its stump's
+/// bounds where they stood; the segments between derive by the same law and are not read here.
+/// A static body's child collider whose bounds avian refreshed only at insert would leave the
+/// fallen trunk standing for every hull and round.
 #[test]
 fn a_felled_trees_colliders_lie_down_in_the_physics_world() {
     use crate::map::Prototype;
