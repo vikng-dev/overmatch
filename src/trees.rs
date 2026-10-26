@@ -254,6 +254,58 @@ pub(crate) enum TreeState {
     },
 }
 
+impl TreeState {
+    /// The state's wire word: `Standing` is `0`, `Down { cut, dir }` is `((cut + 1) << 8) | dir`.
+    /// The `+ 1` keeps every `Down` word non-zero, so the high byte alone tells the two apart and
+    /// `Standing` has exactly one encoding.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "used once the ledger publish and the peer derive land"
+        )
+    )]
+    pub(crate) fn encode(self) -> u16 {
+        match self {
+            Self::Standing => 0,
+            Self::Down { cut, dir } => ((u16::from(cut) + 1) << 8) | u16::from(dir),
+        }
+    }
+
+    /// The inverse of [`Self::encode`] for a tree of `segments` segments; a word that no state
+    /// of that tree encodes to (`Standing` with direction bits, a cut at or past the last segment)
+    /// is refused rather than clamped, so a peer never derives a pose the authority did not set.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "used once the ledger publish and the peer derive land"
+        )
+    )]
+    pub(crate) fn decode(word: u16, segments: usize) -> Result<Self, String> {
+        let (high, dir) = (word >> 8, (word & 0xFF) as u8);
+        if high == 0 {
+            return if word == 0 {
+                Ok(Self::Standing)
+            } else {
+                Err(format!(
+                    "tree word {word:#06x}: standing with direction bits"
+                ))
+            };
+        }
+        let cut = high - 1;
+        if usize::from(cut) >= segments {
+            return Err(format!(
+                "tree word {word:#06x}: cut {cut} on a tree of {segments} segments"
+            ));
+        }
+        Ok(Self::Down {
+            cut: cut as u8,
+            dir,
+        })
+    }
+}
+
 /// A tree's body as spawned: its kind at the instance's uniform scale, every dimension here in
 /// world metres.
 #[derive(Component, Debug, Clone)]
@@ -714,6 +766,49 @@ pub(crate) mod tests {
         );
         assert_eq!(azimuth_bin(1.0, -0.02), 255);
         assert_eq!(azimuth_bin(0.0, 0.0), 0);
+    }
+
+    /// THE WIRE WORD IS A BIJECTION ONTO THE TREE'S STATES: every state of a tree of `n`
+    /// segments survives a round trip, `Standing` is the only word `0`, and the words no state
+    /// encodes to are refused, not clamped. A decoder that drops the `+ 1` maps `0x0100` to cut 1
+    /// (the round trip fails at cut 0); one that clamps the cut accepts `0x0400` on a 3-segment
+    /// tree; one that masks the high byte for `Standing` accepts `0x0040`. The peer-side derive
+    /// (ADR-0016) relies on a refused word never reaching a pose.
+    #[test]
+    fn the_wire_word_round_trips_every_state_and_refuses_the_rest() {
+        let segments = 3;
+        assert_eq!(TreeState::Standing.encode(), 0);
+        assert_eq!(TreeState::decode(0, segments), Ok(TreeState::Standing));
+        for cut in 0..segments as u8 {
+            for dir in [0u8, 1, 64, 255] {
+                let state = TreeState::Down { cut, dir };
+                let word = state.encode();
+                assert_eq!(word >> 8, u16::from(cut) + 1, "{state:?}");
+                assert_eq!(TreeState::decode(word, segments), Ok(state));
+            }
+        }
+        assert_eq!(
+            TreeState::Down { cut: 0, dir: 0 }.encode(),
+            0x0100,
+            "the first down word is the cut-0 word, never 0"
+        );
+        assert!(
+            TreeState::decode(0x0040, segments).is_err(),
+            "standing with dir bits"
+        );
+        assert!(
+            TreeState::decode(0x0400, segments).is_err(),
+            "cut == segments"
+        );
+        assert!(
+            TreeState::decode(0xFFFF, segments).is_err(),
+            "cut past any tree"
+        );
+        assert_eq!(
+            TreeState::decode(0x0300, segments),
+            Ok(TreeState::Down { cut: 2, dir: 0 }),
+            "the last segment is a legal cut"
+        );
     }
 
     /// THE DOSE DECIDES THE CUT AND THE DIRECTION: a line dose that empties the pool breaks the
