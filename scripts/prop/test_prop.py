@@ -36,6 +36,8 @@ import toolchain  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TABLE = os.path.join(ROOT, "assets", "trees", "species.ron")
+#: The provenance kinds a `(value, Kind("why"))` pair may carry, the registry's vocabulary.
+PROVENANCE_KINDS = ("Unknown", "Derived", "Measured")
 REGISTRY = os.environ.get("OVERMATCH_REGISTRY") or os.path.join(ROOT, build.REGISTRY)
 FIR = os.path.join(ROOT, "assets", "trees", "fir_1", "fir_1")
 BLENDER = toolchain.blender()
@@ -121,7 +123,7 @@ class SpeciesTable(unittest.TestCase):
     def test_every_row_is_in_the_contract_shape(self):
         """Class invariants over every row the table holds, so a fourth species is held to the
         same law and not to a list: ordered positive ranges a taper can be cut from, a substance
-        name, positive provisional thresholds under a stated Unknown, view parameters in range."""
+        name, positive thresholds under a stated provenance, view parameters in range."""
         table = ron.load(TABLE)
         self.assertTrue(table)
         for key, row in table.items():
@@ -135,9 +137,9 @@ class SpeciesTable(unittest.TestCase):
             self.assertIsInstance(row["substance"], str)
             for field in ("fell_k", "hp"):
                 value, kind = row[field]
-                self.assertGreater(value, 0, "{} {}: a placeholder is positive (A6)".format(key, field))
-                self.assertEqual(kind.name, "Unknown", "{} {} is a placeholder".format(key, field))
-                self.assertTrue(kind.args[0])
+                self.assertGreater(value, 0, "{} {}: a threshold is positive (A6)".format(key, field))
+                self.assertIn(kind.name, PROVENANCE_KINDS, "{} {} names its provenance".format(key, field))
+                self.assertTrue(kind.args[0], "{} {}: the provenance says why".format(key, field))
             self.assertIsInstance(row["hp"][0], int, key)
             self.assertTrue(0.0 < row["crown_base_frac"] < 1.0, key)
             self.assertGreater(row["crown_width_frac"], 0.0, key)
