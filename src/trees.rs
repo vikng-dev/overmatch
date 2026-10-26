@@ -1266,7 +1266,10 @@ pub(crate) mod tests {
     /// children with no body of their own, so a contact pair names the root and never the `Hull`
     /// node. In a physics world with the real schedule, a proxy driven into a standing trunk
     /// fells it along the push; a launched turret — a dynamic body of its own, no tank — driven
-    /// the same way does not. A law reading `Hull` off the pair's body fells neither.
+    /// the same way does not, though it touches the trunk and its contacts, read as the law
+    /// reads a tank's, carry the fell torque in one tick: only the body's identity spares the
+    /// tree. A law reading `Hull` off the pair's body fells neither; a turret that never reaches
+    /// its trunk leaves the tree standing for no reason the law gives, and reds this.
     /// DERIVED: 20 t stopped from 4 m/s is 80 kN·s; at the cube's half-metre of lever or more
     /// that is four times the fixture's 10.4 kN·s·m threshold.
     #[test]
@@ -1346,9 +1349,56 @@ pub(crate) mod tests {
         // The launched turret: a free body carrying its collider, no tank above it.
         let turret = body(&mut app, 20.0);
         app.world_mut().entity_mut(turret).insert(proxy);
+        let nudged_segments: Vec<Entity> = app
+            .world()
+            .get::<Children>(nudged)
+            .expect("segments")
+            .iter()
+            .collect();
+        let base_y = app
+            .world()
+            .get::<Transform>(nudged)
+            .expect("the root")
+            .translation
+            .y;
+        // Each tick: whether the turret touches a segment of its tree with a positive normal
+        // impulse, and the torque those contacts carry as the ram law reads a tank's.
+        let (mut touched, mut peak) = (false, 0.0_f32);
         for _ in 0..20 {
             app.update();
+            let graph = app.world().resource::<ContactGraph>();
+            let pairs: Vec<&ContactPair> = nudged_segments
+                .iter()
+                .filter_map(|segment| graph.get(turret, *segment))
+                .map(|(_, pair)| pair)
+                .filter(|pair| pair.is_touching())
+                .collect();
+            touched |= pairs
+                .iter()
+                .any(|pair| pair.total_normal_impulse_magnitude() > 0.0);
+            let contacts = ram_contacts(
+                pairs.into_iter(),
+                |collider| nudged_segments.contains(&collider).then_some(nudged),
+                |_| true,
+                |_| Some(base_y),
+            );
+            if let Some(contacts) = contacts.get(&nudged) {
+                peak = peak.max(ram_torque(contacts).0);
+            }
         }
+        let threshold = app
+            .world()
+            .get::<TreeBody>(nudged)
+            .expect("the body")
+            .fell_torque();
+        assert!(
+            touched,
+            "the turret touches its tree with a positive normal impulse"
+        );
+        assert!(
+            peak >= threshold,
+            "the turret's push carries the fell torque in one tick: {peak} N·s·m of {threshold}"
+        );
         assert_eq!(
             app.world().get::<TreeState>(rammed),
             Some(&TreeState::Down { cut: 0, dir: 0 }),
