@@ -1743,7 +1743,11 @@ fn apply_bounce(
     commands: &mut Commands,
 ) {
     if bounce.shock > 0.0 {
-        shell.dose.add(bounce.struck, bounce.shock);
+        let context = super::DoseContext::Line {
+            entry: bounce.position,
+            along: Vec3::from(bounce.incoming),
+        };
+        shell.dose.add(bounce.struck, bounce.shock, context);
     }
     if let Some(owner) = bounce.owner {
         apply_hit_impulse(bodies, owner, bounce.impulse, bounce.position);
@@ -1792,8 +1796,20 @@ fn apply_bite(
     commands: &mut Commands,
 ) {
     // Transit damage: every HP-bearing volume is charged for the material OF ITS OWN the round chewed
-    // (§13.2's damage law — no ownership, no priority, no argmax).
-    shell.dose.add_all(&bite.deposits);
+    // (§13.2's damage law — no ownership, no priority, no argmax), each deposit from the line's
+    // entry into its own volume.
+    let incoming = Vec3::from(bite.incoming);
+    shell.dose.add_all(&bite.deposits, |dose| {
+        let entry = bite
+            .volumes
+            .iter()
+            .find(|crossed| crossed.volume == dose.address)
+            .map_or(bite.entrance, |crossed| crossed.entry);
+        super::DoseContext::Line {
+            entry,
+            along: incoming,
+        }
+    });
 
     let (verdict, position, terminal_at) = match &bite.end {
         BiteEnd::Embedded { at, impulse, .. } => {

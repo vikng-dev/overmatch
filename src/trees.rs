@@ -802,7 +802,7 @@ pub(crate) fn spawn(
 /// A standing tree whose pool a dose emptied falls: at the dose's entry height (the segment that
 /// height lies in) and along the round's travel; a field (no direction) fells it whole, away from
 /// the field's centre. A tree already down ignores it.
-fn fell_on_pool_emptied(
+pub(crate) fn fell_on_pool_emptied(
     emptied: On<PoolEmptied>,
     mut trees: Query<(&mut TreeState, &TreeBody, &Transform)>,
     clock: Option<Res<ShotClock>>,
@@ -1010,6 +1010,28 @@ pub(crate) mod tests {
                 hp: Sourced(100),
             },
         )])
+    }
+
+    /// The fixture trunk as a kind of `substance` with an HP pool of `hp` — fixture data for the
+    /// march's tests, which need a trunk a round goes through and a pool a field alone empties.
+    pub(crate) fn fixture_kind_of(substance: &str, hp: u32) -> Arc<TreeKind> {
+        let table = BTreeMap::from([(
+            "fixture".to_owned(),
+            Species {
+                substance: substance.to_owned(),
+                fell_k: Sourced(1.0e5),
+                hp: Sourced(hp),
+            },
+        )]);
+        Arc::new(
+            TreeKind::resolve(
+                "fixture",
+                fixture_asset(),
+                &table,
+                SubstanceRegistry::shipped_static(),
+            )
+            .expect("the fixture trunk holds"),
+        )
     }
 
     pub(crate) fn fixture_kind() -> Arc<TreeKind> {

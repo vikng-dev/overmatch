@@ -815,8 +815,12 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
             .run_system_once(
                 move |mut shot: Query<&mut ShotDose>, mut health: Query<&mut ComponentHealth>| {
                     let mut shot = shot.single_mut().unwrap();
+                    let context = DoseContext::Line {
+                        entry: Vec3::ZERO,
+                        along: Vec3::NEG_Z,
+                    };
                     for amount in &amounts {
-                        shot.add(ammo, *amount);
+                        shot.add(ammo, *amount, context);
                     }
                     shot.settle(&mut health, true, mark);
                 },
