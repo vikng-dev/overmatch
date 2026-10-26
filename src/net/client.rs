@@ -687,6 +687,8 @@ pub fn run() {
     app.add_systems(FixedUpdate, age_sanctioned_shots);
     // The pen cam's explanations addressed to this player, and whether each impact is drawn.
     super::shot_explanation::install_client(&mut app);
+    // The destruction ledger's apply and the fall presentation's cursor clock.
+    super::destruction::install_client(&mut app);
     app.add_systems(
         FixedUpdate,
         apply_pending_recoil_kicks

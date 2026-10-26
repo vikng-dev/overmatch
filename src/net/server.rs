@@ -68,6 +68,7 @@ pub fn run() {
     });
     app.add_plugins(super::plugin);
     super::disclosure::install_server(&mut app);
+    super::destruction::install_server(&mut app);
     app.add_plugins(physics::physics_plugins());
     app.add_plugins(SimPlugin);
     app.add_plugins(crate::trace::server_plugin);

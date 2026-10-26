@@ -17,6 +17,8 @@ mod death_screen;
 #[cfg(test)]
 pub(crate) use death_screen::{mount_bare as mount_death_screen, shows_died};
 mod debug_hud;
+/// The destruction ledger: tree state transitions on one globally visible entity.
+mod destruction;
 mod diagnostics;
 mod disclosure;
 /// The interpolation buffer's edge: starvation instruments (always on) and the bounded

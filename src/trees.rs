@@ -20,25 +20,36 @@
 //! `fell_k × dbh³` — and every peer derives the rest from it.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::f32::consts::{FRAC_PI_2, PI};
 use std::path::Path;
 use std::sync::Arc;
 
 use avian3d::prelude::{Collider, CollisionLayers, Collisions, LayerMask, RigidBody};
 use avian3d::schedule::PhysicsSystems;
+use bevy::camera::visibility::VisibilityRange;
+use bevy::gltf::GltfExtras;
 use bevy::prelude::*;
-use bevy::world_serialization::WorldAssetRoot;
+use bevy::transform::TransformSystems;
+use bevy::world_serialization::{WorldAssetRoot, WorldInstanceReady};
 
 use crate::Layer;
 use crate::ballistics::{BallisticVolume, ComponentHealth, PoolEmptied, VolumeMaterial};
 use crate::provenance::Sourced;
 use crate::scatter::MapInstance;
 use crate::substances::SubstanceRegistry;
+use crate::terrain_grid::HeightGrid;
+use crate::{ClientReplica, ShotClock};
 
 /// Directory under the asset root holding the species table and one folder per tree asset.
 const TREES_DIR: &str = "trees";
 
 /// The species table's file name inside [`TREES_DIR`].
 const SPECIES_FILE: &str = "species.ron";
+
+/// How far below 1 an instance's up vector's Y may fall before the instance counts as tilted:
+/// float rounding of a pure yaw (a few ulps), never a real lean — the cut reads world heights
+/// against upright prefix sums, so a leaning trunk would cut at the wrong segment.
+const UPRIGHT_EPSILON: f32 = 1e-6;
 
 /// The height above the base the breast-height diameter is read at, metres at asset scale 1.
 pub(crate) const BREAST_HEIGHT_M: f32 = 1.3;
@@ -258,30 +269,22 @@ impl TreeState {
     /// The state's wire word: `Standing` is `0`, `Down { cut, dir }` is `((cut + 1) << 8) | dir`.
     /// The `+ 1` keeps every `Down` word non-zero, so the high byte alone tells the two apart and
     /// `Standing` has exactly one encoding.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "used once the ledger publish and the peer derive land"
-        )
-    )]
     pub(crate) fn encode(self) -> u16 {
         match self {
             Self::Standing => 0,
-            Self::Down { cut, dir } => ((u16::from(cut) + 1) << 8) | u16::from(dir),
+            Self::Down { cut, dir } => {
+                assert!(
+                    usize::from(cut) < MAX_SEGMENTS,
+                    "tree cut {cut} has no word: the high byte carries cut + 1"
+                );
+                ((u16::from(cut) + 1) << 8) | u16::from(dir)
+            }
         }
     }
 
     /// The inverse of [`Self::encode`] for a tree of `segments` segments; a word that no state
     /// of that tree encodes to (`Standing` with direction bits, a cut at or past the last segment)
     /// is refused rather than clamped, so a peer never derives a pose the authority did not set.
-    #[cfg_attr(
-        not(test),
-        expect(
-            dead_code,
-            reason = "used once the ledger publish and the peer derive land"
-        )
-    )]
     pub(crate) fn decode(word: u16, segments: usize) -> Result<Self, String> {
         let (high, dir) = (word >> 8, (word & 0xFF) as u8);
         if high == 0 {
@@ -316,6 +319,8 @@ pub(crate) struct TreeBody {
     pub(crate) prefix: Vec<f32>,
     /// Breast-height diameter: the kind's at the instance's scale.
     pub(crate) dbh_m: f32,
+    /// The instance's uniform scale, asset metres to world metres.
+    pub(crate) scale: f32,
 }
 
 impl TreeBody {
@@ -332,7 +337,13 @@ impl TreeBody {
             kind,
             prefix,
             dbh_m,
+            scale,
         }
+    }
+
+    /// The trunk's world radius `height` world metres above the base.
+    pub(crate) fn radius_at(&self, height: f32) -> f32 {
+        self.kind.radius_at(height / self.scale) * self.scale
     }
 
     /// The segment a point `height` world metres above the base lies in. A height on a boundary
@@ -359,6 +370,313 @@ pub(crate) struct TreeSegment;
 /// Marks the glb view's root, a child of the tree's root.
 #[derive(Component)]
 pub(crate) struct TreeView;
+
+/// The authority tick a tree's state last changed at (`ShotClock` units, the wire's `tick`).
+/// Inserted beside the `Down` state by whoever sets it — the authority's laws here, the ledger
+/// apply on a replica — so the presentation fuses the fall to the tick it happened at.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct Fell {
+    pub(crate) tick: u32,
+}
+
+/// The set the authority's fall laws run in; the ledger publish and the body derive order after it.
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct TreeFallSet;
+
+/// Presentation time in authority ticks: the interpolation cursor on a replica (the net client
+/// writes it), the sim tick plus the fixed step's overstep elsewhere. The authority's tick is a
+/// wrapping 32-bit count (`ShotClock`), so a phase is a wrapped signed difference.
+#[derive(Resource, Debug, Default, Clone, Copy)]
+pub(crate) struct FallClock {
+    pub(crate) tick: u32,
+    pub(crate) overstep: f64,
+}
+
+impl FallClock {
+    /// Fractional ticks since `since`, modulo the 32-bit timeline (negative before it).
+    pub(crate) fn since(self, since: u32) -> f64 {
+        f64::from(self.tick.wrapping_sub(since) as i32) + self.overstep
+    }
+}
+
+/// A fallen tree's resting pose, derived once from its state: the piece above `cut` lies tilted
+/// by `tilt` radians from upright toward the horizontal unit direction `(dx, dz)`.
+#[derive(Component, Debug, Clone, Copy, PartialEq)]
+pub(crate) struct Resting {
+    pub(crate) tilt: f32,
+    pub(crate) dx: f32,
+    pub(crate) dz: f32,
+}
+
+/// The largest tilt a fallen piece is searched over: past the horizontal by 10°, for a piece
+/// hanging over a downhill edge.
+const MAX_TILT: f32 = 100.0 * PI / 180.0;
+
+/// The bisection steps of the resting tilt: 24 halvings of [0°, 100°] resolve below 1e-5 rad.
+const TILT_STEPS: u32 = 24;
+
+/// The horizontal unit direction of azimuth bin `dir`, libm's trig so every peer gets the same
+/// bits.
+pub(crate) fn azimuth(dir: u8) -> (f32, f32) {
+    let theta = f32::from(dir) / AZIMUTH_BINS as f32 * std::f32::consts::TAU;
+    (libm::cosf(theta), libm::sinf(theta))
+}
+
+/// The tilt a fallen piece rests at: the smallest angle in [0°, 100°] at which any sample of the
+/// piece — each segment boundary above the cut and the tip, each offset downward by its local
+/// radius — reaches the terrain, by [`TILT_STEPS`] bisections in a fixed order; a piece touching
+/// nothing by 100° lies at 90°. Pure in its inputs (the body, the world base, the decoded state,
+/// the terrain oracle) and libm-only in its trig, so every peer and CI derive the same bits.
+pub(crate) fn resting_tilt(
+    body: &TreeBody,
+    base: Vec3,
+    cut: u8,
+    dir: u8,
+    height_at: impl Fn(f32, f32) -> f32,
+) -> f32 {
+    let cut = usize::from(cut);
+    let pivot = base + Vec3::Y * body.prefix[cut];
+    let (dx, dz) = azimuth(dir);
+    let touching = |tilt: f32| {
+        let (sin, cos) = (libm::sinf(tilt), libm::cosf(tilt));
+        (cut + 1..body.prefix.len()).any(|j| {
+            let h = body.prefix[j] - body.prefix[cut];
+            let r = body.radius_at(body.prefix[j]);
+            let x = pivot.x + dx * h * sin;
+            let y = pivot.y + h * cos - r;
+            let z = pivot.z + dz * h * sin;
+            y <= height_at(x, z)
+        })
+    };
+    if touching(0.0) {
+        return 0.0;
+    }
+    if !touching(MAX_TILT) {
+        return FRAC_PI_2;
+    }
+    let (mut lo, mut hi) = (0.0_f32, MAX_TILT);
+    for _ in 0..TILT_STEPS {
+        let mid = 0.5 * (lo + hi);
+        if touching(mid) {
+            hi = mid;
+        } else {
+            lo = mid;
+        }
+    }
+    hi
+}
+
+/// The world rotation that tilts an upright piece by `tilt` toward `(dx, dz)`: about the
+/// horizontal axis `(dz, 0, -dx)`, built from libm's half-angle trig rather than glam's.
+fn tilt_rotation(resting: &Resting) -> Quat {
+    let (s, c) = (
+        libm::sinf(0.5 * resting.tilt),
+        libm::cosf(0.5 * resting.tilt),
+    );
+    Quat::from_xyzw(resting.dz * s, 0.0, -resting.dx * s, c)
+}
+
+/// Every peer derives the body from the state (ADR-0016): a fallen tree's stump keeps its
+/// segments standing on `[Terrain, Armor]`, the lying piece comes to the resting tilt on
+/// `[Armor]` alone — a hard body for the walk, no longer an obstacle for a hull — and the pool is
+/// gone: what is down takes no more dose. Standing derives nothing beyond what spawn built.
+fn derive_state(
+    trees: Query<
+        (Entity, &TreeState, &TreeBody, &Transform, &Children),
+        (Changed<TreeState>, Without<TreeSegment>),
+    >,
+    mut segments: Query<&mut Transform, With<TreeSegment>>,
+    grid: Option<Res<HeightGrid>>,
+    mut commands: Commands,
+) {
+    // Trees are placed by the map whose grid this is; a composition without the grid (the flat
+    // slab) has no trees to derive.
+    let Some(grid) = grid else {
+        return;
+    };
+    for (root, state, body, transform, children) in &trees {
+        let TreeState::Down { cut, dir } = *state else {
+            continue;
+        };
+        let tilt = resting_tilt(body, transform.translation, cut, dir, |x, z| {
+            grid.height_at(x, z)
+        });
+        let (dx, dz) = azimuth(dir);
+        let resting = Resting { tilt, dx, dz };
+        let rotation = tilt_rotation(&resting);
+        let root_inv = transform.rotation.inverse();
+        let cut = usize::from(cut);
+        let pivot = Vec3::Y * body.prefix[cut];
+        let mut k = 0;
+        for &child in children {
+            let Ok(mut local) = segments.get_mut(child) else {
+                continue;
+            };
+            if k >= cut {
+                let along = rotation * Vec3::Y * (body.prefix[k] - body.prefix[cut]);
+                local.translation = root_inv * (pivot + along);
+                local.rotation = root_inv * rotation;
+                commands
+                    .entity(child)
+                    .insert(CollisionLayers::new([Layer::Armor], LayerMask::NONE));
+            }
+            k += 1;
+        }
+        commands
+            .entity(root)
+            .insert(resting)
+            .remove::<ComponentHealth>();
+    }
+}
+
+/// Which glb nodes present which part of the trunk, by segment: found once on attach from each
+/// node's extras (`tree_part`, `tree_segment`), the generator's contract.
+#[derive(Component, Debug, Default)]
+pub(crate) struct TreeViewNodes {
+    trunks: Vec<Option<Entity>>,
+    caps_top: Vec<Option<Entity>>,
+    caps_bottom: Vec<Option<Entity>>,
+}
+
+/// The per-node extras the generator writes.
+#[derive(serde::Deserialize)]
+struct PartExtras {
+    tree_part: String,
+    tree_segment: usize,
+}
+
+/// How far a tree's primitives draw. DERIVED: a 0.4 m trunk at 600 m subtends about 1 px at the
+/// gunner's 1× field; the frame-cost measurement (stage 5) decides whether this stays.
+const TREE_VIEW_RANGE_M: f32 = 600.0;
+
+/// Join an attached glb view to its tree: every cap hidden until a cut reveals it, every rendered
+/// primitive given its visibility range, and the nodes indexed by segment for the fall. The state
+/// is presented right after (`present_fall` reads the index the same frame it lands), so a view
+/// attaching to a tree already down shows it down.
+fn bind_tree_view(
+    ready: On<WorldInstanceReady>,
+    views: Query<&ChildOf, With<TreeView>>,
+    bodies: Query<&TreeBody>,
+    children: Query<&Children>,
+    extras: Query<&GltfExtras>,
+    meshes: Query<(), With<Mesh3d>>,
+    mut commands: Commands,
+) {
+    let Ok(parent) = views.get(ready.entity) else {
+        return;
+    };
+    let Ok(body) = bodies.get(parent.parent()) else {
+        return;
+    };
+    let n = body.kind.segments.len();
+    let mut nodes = TreeViewNodes {
+        trunks: vec![None; n],
+        caps_top: vec![None; n],
+        caps_bottom: vec![None; n],
+    };
+    for entity in children.iter_descendants(ready.entity) {
+        if meshes.contains(entity) {
+            commands
+                .entity(entity)
+                .insert(VisibilityRange::abrupt(0.0, TREE_VIEW_RANGE_M));
+        }
+        let Ok(extras) = extras.get(entity) else {
+            continue;
+        };
+        let Ok(part) = serde_json::from_str::<PartExtras>(&extras.value) else {
+            continue;
+        };
+        let k = part.tree_segment;
+        if k >= n {
+            continue;
+        }
+        match part.tree_part.as_str() {
+            "trunk" => nodes.trunks[k] = Some(entity),
+            "cap_top" => {
+                nodes.caps_top[k] = Some(entity);
+                commands.entity(entity).insert(Visibility::Hidden);
+            }
+            "cap_bottom" => {
+                nodes.caps_bottom[k] = Some(entity);
+                commands.entity(entity).insert(Visibility::Hidden);
+            }
+            _ => {}
+        }
+    }
+    commands.entity(ready.entity).insert(nodes);
+}
+
+/// The fall's duration, seconds: longer for a longer piece, within a watchable window.
+/// DERIVED (contract §6): 0.08 s per metre of fallen length, clamped to [1, 3] s.
+fn fall_duration_s(fallen_length_m: f32) -> f32 {
+    (0.08 * fallen_length_m).clamp(1.0, 3.0)
+}
+
+/// Present a fallen tree: the cut's trunk node turns about its own origin — the pivot, the
+/// chain's translations carry the piece above — from upright to the resting tilt over the fall's
+/// duration, phase read off [`FallClock`] against the transition tick (ADR-0037: the fall lands
+/// when the cursor crosses its tick, however late the entry arrived); the caps the cut reveals
+/// (A5: `cap_top` below the cut and `cap_bottom` of the cut) show. The sim never waits on this.
+fn present_fall(
+    clock: Res<FallClock>,
+    step: Res<Time<Fixed>>,
+    trees: Query<(
+        &TreeState,
+        &TreeBody,
+        &Fell,
+        &Resting,
+        &Transform,
+        &Children,
+    )>,
+    views: Query<&TreeViewNodes>,
+    mut nodes: Query<(&mut Transform, &mut Visibility), Without<TreeBody>>,
+) {
+    let dt = step.timestep().as_secs_f32();
+    for (state, body, fell, resting, transform, children) in &trees {
+        let TreeState::Down { cut, .. } = *state else {
+            continue;
+        };
+        let Some(view) = children.iter().find_map(|child| views.get(child).ok()) else {
+            continue;
+        };
+        let cut = usize::from(cut);
+        let length = body.prefix[body.prefix.len() - 1] - body.prefix[cut];
+        let phase = (clock.since(fell.tick) as f32 * dt / fall_duration_s(length)).clamp(0.0, 1.0);
+        let axis = transform.rotation.inverse() * Vec3::new(resting.dz, 0.0, -resting.dx);
+        let angle = resting.tilt * phase * phase;
+        let (s, c) = (libm::sinf(0.5 * angle), libm::cosf(0.5 * angle));
+        if let Some(trunk) = view.trunks[cut]
+            && let Ok((mut local, _)) = nodes.get_mut(trunk)
+        {
+            local.rotation = Quat::from_xyzw(axis.x * s, axis.y * s, axis.z * s, c);
+        }
+        let revealed = [
+            cut.checked_sub(1).and_then(|below| view.caps_top[below]),
+            view.caps_bottom[cut],
+        ];
+        for cap in revealed.into_iter().flatten() {
+            if let Ok((_, mut visibility)) = nodes.get_mut(cap) {
+                visibility.set_if_neq(Visibility::Inherited);
+            }
+        }
+    }
+}
+
+/// The authority's (and single-player's) presentation clock: the sim tick plus the fixed step's
+/// overstep. A replica's is the interpolation cursor, written by the net client instead.
+fn publish_sim_fall_clock(
+    tick: Option<Res<ShotClock>>,
+    step: Res<Time<Fixed>>,
+    mut clock: ResMut<FallClock>,
+) {
+    // A composition with no clock (the sandboxes, the headless sim) keeps its falls unkeyed, as
+    // its shells are.
+    let Some(tick) = tick else {
+        return;
+    };
+    clock.tick = tick.0;
+    clock.overstep = step.overstep_fraction_f64();
+}
 
 /// The 12-gon the frustum colliders are hulled from: exact unit-circle points at 30° steps, pinned
 /// as literals so every peer builds the same solid.
@@ -424,7 +742,7 @@ pub(crate) fn spawn(
         pose.scale,
     );
     assert!(
-        (pose.rotation * Vec3::Y).y > 0.9999,
+        (pose.rotation * Vec3::Y).y >= 1.0 - UPRIGHT_EPSILON,
         "trees: instance {} is tilted ({:?}); a tree stands upright",
         identity.id,
         pose.rotation,
@@ -464,14 +782,17 @@ pub(crate) fn spawn(
     }
     if let Some(assets) = view {
         let id = &kind.id;
-        commands.spawn((
-            ChildOf(root),
-            Transform::from_scale(Vec3::splat(scale)),
-            WorldAssetRoot(
-                assets.load(GltfAssetLabel::Scene(0).from_asset(format!("trees/{id}/{id}.glb"))),
-            ),
-            TreeView,
-        ));
+        commands
+            .spawn((
+                ChildOf(root),
+                Transform::from_scale(Vec3::splat(scale)),
+                WorldAssetRoot(
+                    assets
+                        .load(GltfAssetLabel::Scene(0).from_asset(format!("trees/{id}/{id}.glb"))),
+                ),
+                TreeView,
+            ))
+            .observe(bind_tree_view);
     }
 }
 
@@ -481,6 +802,8 @@ pub(crate) fn spawn(
 fn fell_on_pool_emptied(
     emptied: On<PoolEmptied>,
     mut trees: Query<(&mut TreeState, &TreeBody, &Transform)>,
+    clock: Option<Res<ShotClock>>,
+    mut commands: Commands,
 ) {
     let Ok((mut state, body, transform)) = trees.get_mut(emptied.entity) else {
         return;
@@ -497,6 +820,9 @@ fn fell_on_pool_emptied(
         cut,
         dir: azimuth_bin(along.x, along.z),
     };
+    commands.entity(emptied.entity).insert(Fell {
+        tick: clock.map_or(0, |clock| clock.0),
+    });
 }
 
 /// One hull–trunk contact as the ram law reads it: the solver's normal impulse (N·s), the
@@ -536,6 +862,8 @@ fn fell_on_ram(
     collisions: Collisions,
     segments: Query<&ChildOf, With<TreeSegment>>,
     mut trees: Query<(&mut TreeState, &TreeBody, &Transform)>,
+    clock: Option<Res<ShotClock>>,
+    mut commands: Commands,
 ) {
     let mut per_tree: BTreeMap<Entity, Vec<RamContact>> = BTreeMap::new();
     for pair in collisions.iter() {
@@ -581,6 +909,9 @@ fn fell_on_ram(
                 cut: 0,
                 dir: azimuth_bin(push.x, push.y),
             };
+            commands.entity(root).insert(Fell {
+                tick: clock.as_ref().map_or(0, |clock| clock.0),
+            });
         }
     }
 }
@@ -589,17 +920,32 @@ fn fell_on_ram(
 /// composition (a replica's march empties no pool, so it never fires on a client); the ram rule
 /// runs only where this process is the authority.
 pub(crate) fn sim_plugin(app: &mut App) {
-    app.add_observer(fell_on_pool_emptied).add_systems(
-        FixedPostUpdate,
-        fell_on_ram
-            .after(PhysicsSystems::Writeback)
-            .run_if(not(resource_exists::<crate::ClientReplica>)),
-    );
+    app.init_resource::<FallClock>()
+        .add_observer(fell_on_pool_emptied)
+        .configure_sets(
+            FixedPostUpdate,
+            TreeFallSet.after(PhysicsSystems::Writeback),
+        )
+        .add_systems(
+            FixedPostUpdate,
+            (
+                fell_on_ram
+                    .in_set(TreeFallSet)
+                    .run_if(not(resource_exists::<ClientReplica>)),
+                derive_state.after(TreeFallSet),
+            ),
+        )
+        .add_systems(
+            Update,
+            publish_sim_fall_clock.run_if(not(resource_exists::<ClientReplica>)),
+        )
+        .add_systems(PostUpdate, present_fall.before(TransformSystems::Propagate));
 }
 
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+    use crate::terrain_grid::FIXTURE_EXTENT;
 
     /// A three-segment fixture trunk (fixture data): 2 m segments, radii 0.3 → 0.2 → 0.1 → 0.05.
     pub(crate) fn fixture_asset() -> TreeAsset {
@@ -802,7 +1148,7 @@ pub(crate) mod tests {
         );
         assert!(
             TreeState::decode(0xFFFF, segments).is_err(),
-            "cut past any tree"
+            "cut 254 past this tree (legal only on a 255-segment one)"
         );
         assert_eq!(
             TreeState::decode(0x0300, segments),
@@ -818,6 +1164,7 @@ pub(crate) mod tests {
     fn an_emptied_pool_fells_the_tree_at_the_dose() {
         let mut world = World::new();
         world.add_observer(fell_on_pool_emptied);
+        world.insert_resource(ShotClock(7));
         let base = Vec3::new(10.0, 3.0, -4.0);
         let spawn = |world: &mut World| {
             world
@@ -834,9 +1181,15 @@ pub(crate) mod tests {
             at: base + Vec3::new(0.2, 2.5, 0.0),
             along: Some(Vec3::new(0.0, -0.3, 1.0)),
         });
+        world.flush();
         assert_eq!(
             world.get::<TreeState>(shot),
             Some(&TreeState::Down { cut: 1, dir: 64 }),
+        );
+        assert_eq!(
+            world.get::<Fell>(shot),
+            Some(&Fell { tick: 7 }),
+            "the transition carries the tick it happened at"
         );
 
         let burst = spawn(&mut world);
@@ -930,9 +1283,180 @@ pub(crate) mod tests {
                 id: "fir_0001".to_owned(),
                 ordinal: 0,
             },
-            Transform::from_rotation(Quat::from_rotation_x(0.1)),
+            // Half a degree: a lean the old loose gate (up.y > 0.9999, about 0.8°) let through.
+            Transform::from_rotation(Quat::from_rotation_x(0.5_f32.to_radians())),
             None,
         );
         queue.apply(&mut world);
+    }
+
+    /// An 11 × 11 fixture grid over `FIXTURE_EXTENT` (100 m cells) sampled from `height`.
+    fn fixture_grid(height: impl Fn(f32, f32) -> f32) -> HeightGrid {
+        let size = 11_u32;
+        let half = FIXTURE_EXTENT.half_extent();
+        let step = FIXTURE_EXTENT.world_size_m / (size - 1) as f32;
+        let height = &height;
+        let samples: Vec<f32> = (0..size)
+            .flat_map(|j| {
+                (0..size).map(move |i| height(-half + i as f32 * step, -half + j as f32 * step))
+            })
+            .collect();
+        HeightGrid::new(samples.into(), size, FIXTURE_EXTENT)
+    }
+
+    /// THE RESTING TILT IS PINNED TO THE BIT (A9): the fixture trunk on flat ground, on a 10 %
+    /// slope and at the grid's edge (where the oracle clamps), at every cut and three bins, must
+    /// bisect to these exact f32 bits on every platform — the lying collider is sim state every
+    /// peer derives alone, so a peer that differs by one ulp has a different world. Any mutant of
+    /// the search reds this: a step fewer or more, the midpoint taken the other way, the sample's
+    /// radius offset dropped, platform trig in place of libm's, or the 100° fallback returning
+    /// anything but 90°.
+    #[test]
+    fn the_resting_tilt_is_pinned_to_the_bit() {
+        let body = TreeBody::new(fixture_kind(), 1.0);
+        let slope = |x: f32, _: f32| x / 10.0;
+        let cases = [
+            ("flat", fixture_grid(|_, _| 0.0), Vec3::ZERO),
+            ("slope", fixture_grid(slope), Vec3::new(100.0, 10.0, 0.0)),
+            ("edge", fixture_grid(slope), Vec3::new(499.0, 49.9, 0.0)),
+        ];
+        let mut rows = Vec::new();
+        for (label, grid, base) in &cases {
+            for cut in [0_u8, 1, 2] {
+                for dir in [0_u8, 64, 200] {
+                    let tilt = resting_tilt(&body, *base, cut, dir, |x, z| grid.height_at(x, z));
+                    rows.push((*label, cut, dir, tilt.to_bits()));
+                }
+            }
+        }
+        const PINNED: [(&str, u8, u8, u32); 27] = [
+            ("flat", 0, 0, 0x3fbc3d92),
+            ("flat", 0, 64, 0x3fbc3d92),
+            ("flat", 0, 200, 0x3fbc3d92),
+            ("flat", 1, 0, 0x3fc90fdb),
+            ("flat", 1, 64, 0x3fc90fdb),
+            ("flat", 1, 200, 0x3fc90fdb),
+            ("flat", 2, 0, 0x3fc90fdb),
+            ("flat", 2, 64, 0x3fc90fdb),
+            ("flat", 2, 200, 0x3fc90fdb),
+            ("slope", 0, 0, 0x3faf8c01),
+            ("slope", 0, 64, 0x3fbc3d91),
+            ("slope", 0, 200, 0x3fb9bf04),
+            ("slope", 1, 0, 0x3fc90fdb),
+            ("slope", 1, 64, 0x3fc90fdb),
+            ("slope", 1, 200, 0x3fc90fdb),
+            ("slope", 2, 0, 0x3fc90fdb),
+            ("slope", 2, 64, 0x3fc90fdb),
+            ("slope", 2, 200, 0x3fc90fdb),
+            ("edge", 0, 0, 0x3fb5ca04),
+            ("edge", 0, 64, 0x3fbc3d97),
+            ("edge", 0, 200, 0x3fb9bf0a),
+            ("edge", 1, 0, 0x3fc90fdb),
+            ("edge", 1, 64, 0x3fc90fdb),
+            ("edge", 1, 200, 0x3fc90fdb),
+            ("edge", 2, 0, 0x3fc90fdb),
+            ("edge", 2, 64, 0x3fc90fdb),
+            ("edge", 2, 200, 0x3fc90fdb),
+        ];
+        let listing = rows
+            .iter()
+            .map(|(label, cut, dir, bits)| {
+                format!("            ({label:?}, {cut}, {dir}, {bits:#010x}),")
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(
+            rows, PINNED,
+            "the resting tilt moved; the rows now read:\n{listing}"
+        );
+        // Flat ground, whole trunk: it lies just short of the horizontal, the tip's radius holding
+        // it off the surface. A piece cut above the base pivots at the cut's height and reaches
+        // nothing by 100°, so it takes the 90° fallback.
+        for row in rows.iter().filter(|row| row.0 == "flat") {
+            let tilt = f32::from_bits(row.3);
+            if row.1 == 0 {
+                assert!(tilt > 80.0_f32.to_radians() && tilt < FRAC_PI_2, "{row:?}");
+            } else {
+                assert_eq!(tilt, FRAC_PI_2, "{row:?}");
+            }
+        }
+    }
+
+    /// EVERY PEER DERIVES THE FALLEN BODY FROM THE STATE (ADR-0016, A2): once a tree is `Down`,
+    /// its stump segments keep their place and their `[Terrain, Armor]` layers, the lying piece's
+    /// segments leave the vertical onto `[Armor]` with no filters, the resting pose is recorded and
+    /// the pool is gone. A derive that forgets the layer swap, moves the stump, or leaves the pool
+    /// reds this.
+    #[test]
+    fn a_down_state_derives_the_lying_piece_and_drops_the_pool() {
+        let mut app = App::new();
+        app.insert_resource(fixture_grid(|_, _| 0.0));
+        app.add_systems(Update, derive_state);
+        let kind = fixture_kind();
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, app.world());
+        spawn(
+            &mut commands,
+            &kind,
+            MapInstance {
+                id: "fir_0001".to_owned(),
+                ordinal: 0,
+            },
+            Transform::from_xyz(5.0, 0.0, 5.0),
+            None,
+        );
+        queue.apply(app.world_mut());
+        let root = app
+            .world_mut()
+            .query_filtered::<Entity, With<TreeBody>>()
+            .single(app.world())
+            .expect("one root");
+        app.update();
+        assert!(
+            app.world().get::<ComponentHealth>(root).is_some(),
+            "standing: the pool stays"
+        );
+        *app.world_mut().get_mut::<TreeState>(root).unwrap() = TreeState::Down { cut: 1, dir: 0 };
+        app.update();
+        assert!(
+            app.world().get::<ComponentHealth>(root).is_none(),
+            "down: no pool"
+        );
+        let resting = app
+            .world()
+            .get::<Resting>(root)
+            .expect("the resting pose is recorded");
+        assert!(resting.tilt > 1.0 && (resting.dx, resting.dz) == (1.0, 0.0));
+        let mut segments: Vec<(Transform, CollisionLayers)> = app
+            .world_mut()
+            .query_filtered::<(&Transform, &CollisionLayers), With<TreeSegment>>()
+            .iter(app.world())
+            .map(|(transform, layers)| (*transform, *layers))
+            .collect();
+        segments.sort_by(|a, b| a.0.translation.y.total_cmp(&b.0.translation.y));
+        let standing = CollisionLayers::new([Layer::Terrain, Layer::Armor], LayerMask::ALL);
+        let lying = CollisionLayers::new([Layer::Armor], LayerMask::NONE);
+        assert_eq!(
+            segments[0].0,
+            Transform::from_xyz(0.0, 0.0, 0.0),
+            "the stump stays"
+        );
+        assert_eq!(segments[0].1, standing);
+        assert_eq!(
+            segments[1].0.translation,
+            Vec3::new(0.0, 2.0, 0.0),
+            "the pivot segment turns in place"
+        );
+        assert_eq!(segments[1].1, lying);
+        let top = segments[2].0.translation;
+        assert!(
+            top.x > 1.9 && top.y < 2.2 && top.z.abs() < 1e-5,
+            "the top segment lies toward +x: {top}"
+        );
+        assert_eq!(segments[2].1, lying);
+        assert!(
+            (segments[2].0.rotation * Vec3::Y).x > 0.99,
+            "the lying segment's axis points along the fall"
+        );
     }
 }
