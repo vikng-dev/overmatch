@@ -16,13 +16,14 @@
 //! faces share one atlas ([`Pictures`]), one `R32Float` texture rendered by
 //! `pen_cam_picture.wgsl` ([`Pictures::image`], [`PictureJobs`]); every view of the record shares
 //! it ([`RecordAtlas`], `game::RecordPictures`), laid out at the finest pitch any of them needs and
-//! laid out anew when what they ask changes. A view draws the newest pictures whose atlas's job
-//! has been encoded and submitted ([`PictureJobs::rendered`]): before then an atlas holds nothing,
-//! so a record's first pictures keep its fields off, and pictures laid out anew are drawn from the
-//! atlas before them until theirs is written. The look reads it unfiltered (`pen_cam_look.wgsl`,
-//! `picture_at`): a point is tested against each of the four texels about its direction, each
-//! against its own reach within a tolerance ([`REACH_TOLERANCE_DIAGONALS`]), and the results
-//! weighed bilinearly; [`Picture::lit`] is the same read on the CPU.
+//! laid out anew, once a frame at most, when what they ask changes. A view draws the newest
+//! pictures whose atlas's job has been encoded and submitted ([`PictureJobs::rendered`]): before
+//! then an atlas holds nothing, so a record's first pictures keep its fields off, and pictures laid
+//! out anew are drawn from the atlas before them until theirs is written. The look reads it
+//! unfiltered (`pen_cam_look.wgsl`, `picture_at`): a point is tested against each of the four
+//! texels about its direction, each against its own reach within a tolerance
+//! ([`REACH_TOLERANCE_DIAGONALS`]), and the results weighed bilinearly; [`Picture::lit`] is the
+//! same read on the CPU.
 //!
 //! The record wins: a field whose recorded directions all end at its origin holds no picture and
 //! is drawn nowhere ([`Picture::of`]). Design doc §5, "Potency colour"
@@ -125,15 +126,17 @@ pub fn detail_of(size: UVec2) -> UVec2 {
     UVec2::new(step(size.x), step(size.y))
 }
 
-/// The detail each kind of view asks of the pictures this frame ([`detail_of`]): `corner`, the
-/// expanded corner's image, for a [`Surface::Corner`](super::Surface) record at whatever size the
-/// corner stands, so expanding it lays nothing anew; `world`, the battlefield camera's 3D pass,
-/// for the x-ray and a [`Surface::World`](super::Surface) record. Written by `hud::detail`; `None`
-/// until its target is known, and a view asks nothing then and draws no field.
+/// The detail each view asks of the pictures this frame ([`detail_of`]), from the camera that
+/// draws it (`hud::detail`): `corner`, the expanded corner's image, for a
+/// [`Surface::Corner`](super::Surface) record at whatever size the corner stands, so expanding it
+/// lays nothing anew; `world`, the 3D pass of the camera a [`Surface::World`](super::Surface)
+/// record is drawn on; `xray`, the x-ray's camera's. `None` until its camera is known, and a view
+/// asks nothing then and draws no field.
 #[derive(Resource, Default, Clone, Copy, PartialEq, Eq, Debug)]
 pub struct PictureDetail {
     pub corner: Option<UVec2>,
     pub world: Option<UVec2>,
+    pub xray: Option<UVec2>,
 }
 
 /// The frame about unit `axis` a field's picture is drawn in: `u` and `v` across it
@@ -334,12 +337,11 @@ impl Picture {
     /// interpolated, so across a silhouette a point behind the blocker, past the tolerance, gets
     /// the open texels' share alone, the same at every depth out to the wall. An empty face lights
     /// nothing. The four texels are always the direction's own face's (its crop runs a texel past
-    /// the face's edge), so a silhouette that crosses a face's edge is drawn from two grids, one
-    /// either side: it jogs there by at most 0.64 pitch across itself (MEASURED on this read over
-    /// 6,000 random seams, crossing angles and grid phases at two pitches), under a pixel of the
-    /// live target at the sightings (DERIVED from [`pitch_of`]), so the read blends no face with
-    /// its neighbour. `pen_cam_look.wgsl`'s `picture_at` reads the atlas so; this is the read it
-    /// mirrors, held by the tests.
+    /// the face's edge) and no face is blended with its neighbour: a silhouette across a face's
+    /// edge is drawn within half a texel of it on either side, so it jogs there by at most a
+    /// texel, under a pixel of the live target at the sightings ([`pitch_of`]; design doc §5,
+    /// "Potency colour"). `pen_cam_look.wgsl`'s `picture_at` reads the atlas so; this is the read
+    /// it mirrors, held by the tests.
     pub fn lit(
         &self,
         local: Vec3,
@@ -712,12 +714,17 @@ impl Pictures {
     }
 }
 
+/// How a record's pictures are laid out at the details its views ask ([`Pictures::of`] over the
+/// record's fields, its struck tank's bodies and its sightings): the first showing plan's.
+pub type Lay = Box<dyn Fn(&[UVec2]) -> Pictures + Send + Sync>;
+
 /// A record's depth pictures as its views draw them, one for every plan of the record
 /// (`Plan::adopt_pictures`): laid out at every detail the views showing the record ask
 /// ([`Self::show`]), so each field takes the finest pitch any of them needs at its own live size,
-/// and laid out anew when what they ask changes. A view draws the newest pictures whose atlas has
-/// been submitted ([`PictureJobs::rendered`]): pictures laid out anew are drawn from the atlas
-/// before them until theirs is written, so a change of size draws no frame without the fields.
+/// and laid out anew, once, at the end of a frame whose asks differ from the newest pictures'
+/// ([`PictureJobs::realize`]). A view draws the newest pictures whose atlas has been submitted
+/// ([`PictureJobs::rendered`]): pictures laid out anew are drawn from the atlas before them until
+/// theirs is written, so a change of size draws no frame without the fields.
 #[derive(Default)]
 pub struct RecordAtlas(Mutex<Laying>);
 
@@ -725,6 +732,7 @@ pub struct RecordAtlas(Mutex<Laying>);
 struct Laying {
     /// Each view's ask while it shows the record: its token ([`ViewPictures`]) and its detail.
     asks: Vec<(Weak<()>, UVec2)>,
+    lay: Option<Lay>,
     /// The newest pictures whose atlas has been submitted.
     drawn: Option<Arc<Pictures>>,
     /// The pictures laid out at the details asked since, until their atlas has been submitted.
@@ -733,15 +741,15 @@ struct Laying {
 
 impl RecordAtlas {
     /// Show the record's pictures in `view`, which asks `detail` ([`detail_of`]): its ask renewed
-    /// and every ask whose view has let go dropped; the pictures laid out by `lay` at the details
-    /// asked where they differ from the newest pictures'; the next pictures drawn once their atlas
-    /// is submitted; `view` drawing the newest pictures whose atlas has been, and holding every
-    /// atlas still to be written so its job is kept.
+    /// and the record left for the frame's end to lay out at every detail asked
+    /// ([`PictureJobs::realize`]), by `lay` where no view has given one yet; the next pictures
+    /// drawn once their atlas is submitted; `view` drawing the newest pictures whose atlas has
+    /// been, and holding every atlas still to be written so its job is kept.
     pub fn show(
-        &self,
+        self: &Arc<Self>,
         view: &mut ViewPictures,
         detail: UVec2,
-        lay: impl FnOnce(&[UVec2]) -> Pictures,
+        lay: impl FnOnce() -> Lay,
         images: &mut Assets<Image>,
         jobs: &mut PictureJobs,
     ) {
@@ -753,31 +761,15 @@ impl RecordAtlas {
             .asks
             .retain(|(held, _)| held.strong_count() > 0 && !held.ptr_eq(&token));
         laying.asks.push((token, detail));
-        let mut details: Vec<UVec2> = laying.asks.iter().map(|&(_, detail)| detail).collect();
-        details.sort_by_key(|detail| (detail.x, detail.y));
-        details.dedup();
+        laying.lay.get_or_insert_with(lay);
+        if !jobs.1.iter().any(|asked| Arc::ptr_eq(asked, self)) {
+            jobs.1.push(self.clone());
+        }
         let next = laying.next.as_ref().map(|next| next.image(images, jobs));
         if let Some(atlas) = next
             && jobs.rendered(atlas.as_ref())
         {
             laying.drawn = laying.next.take();
-        }
-        let laid = |pictures: &Option<Arc<Pictures>>| {
-            pictures
-                .as_ref()
-                .is_some_and(|pictures| pictures.details == details)
-        };
-        if !laid(&laying.next) {
-            laying.next = if laid(&laying.drawn) {
-                None
-            } else {
-                let pictures = lay(&details);
-                debug!(
-                    "pen cam: a record's pictures laid out at {details:?}: atlas {}x{}",
-                    pictures.size.x, pictures.size.y
-                );
-                Some(Arc::new(pictures))
-            };
         }
         // The view's atlases are taken anew while it still holds last frame's: an atlas let go
         // before it is taken again is allocated and rendered anew.
@@ -798,6 +790,44 @@ impl RecordAtlas {
             held.push(atlas);
         }
         (view.drawn, view.held) = (drawn, held);
+    }
+
+    /// Lay the pictures out at every detail a live view asks where the newest pictures' differ:
+    /// the next pictures, their atlas made and queued ([`Pictures::image`]), its job holding it
+    /// until the views take it the next frame. A next laid out at other details goes.
+    fn realize(&self, images: &mut Assets<Image>, jobs: &mut PictureJobs) {
+        let Ok(mut laying) = self.0.lock() else {
+            return;
+        };
+        let mut details: Vec<UVec2> = laying
+            .asks
+            .iter()
+            .filter(|(held, _)| held.strong_count() > 0)
+            .map(|&(_, detail)| detail)
+            .collect();
+        details.sort_by_key(|detail| (detail.x, detail.y));
+        details.dedup();
+        let laid = |pictures: &Option<Arc<Pictures>>| {
+            pictures
+                .as_ref()
+                .is_some_and(|pictures| pictures.details == details)
+        };
+        if laid(&laying.next) {
+            return;
+        }
+        laying.next = None;
+        if laid(&laying.drawn) {
+            return;
+        }
+        let Some(pictures) = laying.lay.as_ref().map(|lay| Arc::new(lay(&details))) else {
+            return;
+        };
+        debug!(
+            "pen cam: a record's pictures laid out at {details:?}: atlas {}x{}",
+            pictures.size.x, pictures.size.y
+        );
+        pictures.image(images, jobs);
+        laying.next = Some(pictures);
     }
 }
 
@@ -824,9 +854,10 @@ impl ViewPictures {
 
 /// The pictures waiting to be rendered, each into its atlas: a job waits until the render world
 /// has encoded and submitted it ([`render_jobs`]), is submitted once, and leaves once submitted,
-/// or once nothing but it holds its atlas ([`Self::retire`]).
+/// or once nothing but it holds its atlas ([`Self::retire`]). Beside them, the records a view
+/// asked this frame, laid out at its end ([`Self::realize`]).
 #[derive(Resource, Default)]
-pub struct PictureJobs(Vec<PictureJob>);
+pub struct PictureJobs(Vec<PictureJob>, Vec<Arc<RecordAtlas>>);
 
 impl PictureJobs {
     /// Whether `atlas` may be read: no job of it waits to be submitted. Until then the atlas holds
@@ -859,6 +890,15 @@ impl PictureJobs {
             let held = matches!(&job.image, Handle::Strong(atlas) if Arc::strong_count(atlas) > 1);
             held && !job.done.load(Ordering::Acquire)
         });
+    }
+
+    /// Lay out each record a view asked this frame ([`RecordAtlas::show`]), once every view has
+    /// asked: a record's views lay one layout out a frame between them, whatever order they ask
+    /// in.
+    fn realize(&mut self, images: &mut Assets<Image>) {
+        for record in std::mem::take(&mut self.1) {
+            record.realize(images, self);
+        }
     }
 
     /// Stand in for the render world, which has no GPU under test: every waiting job submitted, as
@@ -1156,6 +1196,10 @@ fn retire(mut jobs: ResMut<PictureJobs>) {
     jobs.retire();
 }
 
+fn realize(mut jobs: ResMut<PictureJobs>, mut images: ResMut<Assets<Image>>) {
+    jobs.realize(&mut images);
+}
+
 /// The render world's half: the pipeline, the jobs' extraction and their rendering, before the
 /// frame's own passes. Nothing without a renderer.
 pub(super) fn render(app: &mut App) {
@@ -1169,15 +1213,17 @@ pub(super) fn render(app: &mut App) {
         .add_systems(Render, render_jobs.in_set(RenderSystems::PrepareResources));
 }
 
-/// The main world's half: the jobs, retired once submitted.
+/// The main world's half: the jobs, retired once submitted, then the frame's asks laid out.
 pub(super) fn jobs(app: &mut App) {
-    app.init_resource::<PictureJobs>().add_systems(Last, retire);
+    app.init_resource::<PictureJobs>()
+        .add_systems(Last, (retire, realize).chain());
 }
 
 #[cfg(test)]
 pub(super) mod tests {
     use std::cell::Cell;
     use std::f32::consts::{FRAC_PI_2, TAU};
+    use std::sync::atomic::AtomicUsize;
 
     use super::super::plan::{Ray, Thrown};
     use super::*;
@@ -1500,7 +1546,7 @@ pub(super) mod tests {
         for (_, report) in super::super::plan::tests::records() {
             let shapes = super::super::plan::tests::shapes(&report);
             let plan = super::super::plan::Plan::new(&report, &shapes);
-            let pictures = plan.lay(&[DETAIL]);
+            let pictures = plan.lay()(&[DETAIL]);
             let pitches: Vec<f32> = pictures
                 .fields
                 .iter()
@@ -1555,7 +1601,7 @@ pub(super) mod tests {
         for (_, report) in super::super::plan::tests::records() {
             let shapes = super::super::plan::tests::shapes(&report);
             let plan = super::super::plan::Plan::new(&report, &shapes);
-            let pictures = plan.lay(&[DETAIL]);
+            let pictures = plan.lay()(&[DETAIL]);
             let crops: Vec<Crop> = pictures.fields.iter().flat_map(|f| f.crops).collect();
             let rects: Vec<(UVec2, UVec2)> = crops
                 .iter()
@@ -1688,6 +1734,17 @@ pub(super) mod tests {
         );
     }
 
+    /// The pictures of [`cap`] out to `reach` (m) over [`plate_casters`], at no sighting.
+    fn capped(reach: f32) -> Arc<Pictures> {
+        let casters = plate_casters(0.003);
+        Arc::new(Pictures::of(
+            &[cap(|_, _| reach)],
+            Some(&casters.bodies),
+            &[],
+            &[],
+        ))
+    }
+
     /// A record's pictures keep one atlas while any view holds it: every ask reads the one image
     /// and queues one job; once every holder lets it go and its job leaves, the next ask makes and
     /// queues it anew. The atlas is the pass's render target and the look's texture at the packed
@@ -1695,13 +1752,7 @@ pub(super) mod tests {
     /// frame that draws it. Fixture: [`cap`] over [`plate_casters`].
     #[test]
     fn the_atlas_is_cached_while_a_view_holds_it() {
-        let casters = plate_casters(0.003);
-        let pictures = Arc::new(Pictures::of(
-            &[cap(|_, _| 2.0)],
-            Some(&casters.bodies),
-            &[],
-            &[],
-        ));
+        let pictures = capped(2.0);
         let mut images = Assets::<Image>::default();
         let mut jobs = PictureJobs::default();
         let first = pictures.image(&mut images, &mut jobs);
@@ -1732,13 +1783,7 @@ pub(super) mod tests {
     /// stands in for it. Fixture: [`cap`] over [`plate_casters`].
     #[test]
     fn a_job_waits_until_submitted_and_leaves_after() {
-        let casters = plate_casters(0.003);
-        let pictures = Arc::new(Pictures::of(
-            &[cap(|_, _| 2.0)],
-            Some(&casters.bodies),
-            &[],
-            &[],
-        ));
+        let pictures = capped(2.0);
         let mut images = Assets::<Image>::default();
         let mut jobs = PictureJobs::default();
         assert!(jobs.rendered(None), "no atlas waits on a job");
@@ -1760,12 +1805,7 @@ pub(super) mod tests {
         assert!(jobs.0.is_empty(), "a submitted job stays");
         assert!(jobs.rendered(atlas.as_ref()));
 
-        let replaced = Arc::new(Pictures::of(
-            &[cap(|_, _| 1.5)],
-            Some(&casters.bodies),
-            &[],
-            &[],
-        ));
+        let replaced = capped(1.5);
         let pending = replaced.image(&mut images, &mut jobs);
         assert_eq!(jobs.waiting().count(), 1);
         drop(pending);
@@ -1816,6 +1856,107 @@ pub(super) mod tests {
         );
     }
 
+    /// The layout of `cone` over `casters` ([`Lay`]), each laying out counted in `lays`.
+    fn counted(
+        cone: &Cone,
+        casters: &Casters,
+        lays: &Arc<AtomicUsize>,
+    ) -> impl Fn() -> Lay + use<> {
+        let (cone, bodies, lays) = (cone.clone(), casters.bodies.clone(), lays.clone());
+        move || {
+            let (cone, bodies, lays) = (cone.clone(), bodies.clone(), lays.clone());
+            Box::new(move |details: &[UVec2]| {
+                lays.fetch_add(1, Ordering::Relaxed);
+                Pictures::of(std::slice::from_ref(&cone), Some(&bodies), &[], details)
+            })
+        }
+    }
+
+    /// A frame's end as [`jobs`] runs it: the jobs retired, then what the views asked laid out.
+    fn end_frame(images: &mut Assets<Image>, jobs: &mut PictureJobs) {
+        jobs.retire();
+        jobs.realize(images);
+    }
+
+    /// A silhouette across a face's edge is drawn from the two faces' own grids, never a blend of
+    /// them: on either side, out to the edge, the read's half-lit contour lies within half a texel
+    /// of the silhouette, across it in that face's tangent grid (DERIVED: four texels weighted
+    /// bilinearly put a step's half-way at most half a texel off it), so the silhouette jogs at
+    /// the edge by at most a texel. [`Picture::lit`] relies on the direction's own face
+    /// ([`face_of`]) and on its crop running a texel past the face's edge ([`Crop::of`]): a read
+    /// from another face's grid, or one clamped at its crop's edge, strays further. Fixture: a
+    /// whole-sphere field cut by a great circle, 6,000 seeded trials over every edge of the cube
+    /// from either side, the circle crossing the edge at 10° to 170°, read on a line along the
+    /// edge within a texel of it, at pitches about the production one (which set each grid's
+    /// phase against the edge).
+    #[test]
+    fn a_silhouette_across_a_faces_edge_jogs_by_at_most_a_texel() {
+        let cone = sphere(|_, _| 1.0);
+        let cells = Picture::cells(&cone);
+        let edges: Vec<(usize, usize)> = (0..6)
+            .flat_map(|face| (0..6).map(move |other| (face, other)))
+            .filter(|&(face, other)| FRAMES[face][2].dot(FRAMES[other][2]) == 0.0)
+            .collect();
+        assert_eq!(edges.len(), 24, "every edge, from either side");
+        let mut seed = 0x9E37_79B9_7F4A_7C15_u64;
+        let mut uniform = move |low: f32, high: f32| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            low + (high - low) * (seed >> 40) as f32 / (1_u64 << 24) as f32
+        };
+        for trial in 0..6000 {
+            let pitch = uniform(0.4e-3, 0.7e-3);
+            let picture = Picture::with_cells(&cone, &cells, pitch);
+            let (f, g) = edges[(uniform(0.0, 24.0) as usize).min(23)];
+            let along = FRAMES[f][2].cross(FRAMES[g][2]);
+            let w0 = uniform(-0.9, 0.9);
+            let s = (FRAMES[f][2] + FRAMES[g][2] + along * w0).normalize();
+            let edge = along.reject_from(s).normalize();
+            let psi = uniform(10.0, 170.0).to_radians();
+            let n = s
+                .cross(edge.cross(s) * psi.sin() + edge * psi.cos())
+                .normalize();
+            let blocked = |direction: Vec3| picture.local(direction).dot(n) > 0.0;
+            let reach = |direction: Vec3| if blocked(direction) { 0.5 } else { 5.0 };
+            let depth = uniform(1e-3, 1.0) * pitch;
+            let window = 8.0 * pitch * (2.0 + w0 * w0) / SQRT_2;
+            for (face, other) in [(f, g), (g, f)] {
+                let [right, up, forward] = FRAMES[face];
+                let point =
+                    |w: f32| (forward + FRAMES[other][2] * (1.0 - depth) + along * w).normalize();
+                let half = |w: f32| picture.lit(point(w), 1.0, 1.0, 0.0, &reach) - 0.5;
+                let ws: Vec<f32> = (0..=320)
+                    .map(|k| w0 - window + 2.0 * window * k as f32 / 320.0)
+                    .collect();
+                let crossing = ws.windows(2).find(|w| {
+                    let (a, b) = (half(w[0]), half(w[1]));
+                    a * b <= 0.0 && a != b
+                });
+                let Some(bracket) = crossing else {
+                    panic!("trial {trial}: no silhouette on face {face} by {other}");
+                };
+                let (mut lo, mut hi) = (bracket[0], bracket[1]);
+                let below = half(lo);
+                for _ in 0..30 {
+                    let mid = 0.5 * (lo + hi);
+                    if half(mid) * below > 0.0 {
+                        lo = mid;
+                    } else {
+                        hi = mid;
+                    }
+                }
+                let on = point(0.5 * (lo + hi));
+                let tangent = on / on.dot(forward);
+                let off = n.dot(tangent) / n.dot(right).hypot(n.dot(up)) / pitch;
+                assert!(
+                    off.abs() <= 0.5 + 1e-3,
+                    "trial {trial}: face {face} by {other} draws the silhouette {off} texels off"
+                );
+            }
+        }
+    }
+
     /// A target that changes within its step lays nothing anew: a view whose target moves about
     /// within one step of [`DETAIL_STEP_PX`] keeps the pictures laid out and rendered for its
     /// first size, and a change across a step lays them out once more. A view that laid its
@@ -1823,40 +1964,29 @@ pub(super) mod tests {
     /// of a window's drag. Fixture: [`cap`] over [`plate_casters`], targets about 1900×1000.
     #[test]
     fn a_change_of_size_within_a_step_lays_nothing_anew() {
-        let casters = plate_casters(0.003);
-        let cone = cap(|_, _| 2.0);
-        let lays = Cell::new(0);
-        let lay = |details: &[UVec2]| {
-            lays.set(lays.get() + 1);
-            Pictures::of(
-                std::slice::from_ref(&cone),
-                Some(&casters.bodies),
-                &[],
-                details,
-            )
-        };
-        let record = RecordAtlas::default();
+        let lays = Arc::new(AtomicUsize::new(0));
+        let lay = counted(&cap(|_, _| 2.0), &plate_casters(0.003), &lays);
+        let record = Arc::new(RecordAtlas::default());
         let mut view = ViewPictures::default();
         let (mut images, mut jobs) = (Assets::<Image>::default(), PictureJobs::default());
-        record.show(
-            &mut view,
-            detail_of(UVec2::new(1900, 1000)),
-            lay,
-            &mut images,
-            &mut jobs,
-        );
+        let detail = detail_of(UVec2::new(1900, 1000));
+        record.show(&mut view, detail, &lay, &mut images, &mut jobs);
+        end_frame(&mut images, &mut jobs);
         jobs.submit_all();
-        jobs.retire();
         for (w, h) in [(1901, 1001), (1919, 1023), (1880, 990), (1900, 1000)] {
             let detail = detail_of(UVec2::new(w, h));
-            record.show(&mut view, detail, lay, &mut images, &mut jobs);
-            assert_eq!(lays.get(), 1, "{w}×{h} laid the pictures out anew");
+            record.show(&mut view, detail, &lay, &mut images, &mut jobs);
+            end_frame(&mut images, &mut jobs);
+            let laid = lays.load(Ordering::Relaxed);
+            assert_eq!(laid, 1, "{w}×{h} laid the pictures out anew");
             assert_eq!(jobs.queued(), 0, "{w}×{h} rendered the pictures anew");
             assert!(view.drawn().is_some(), "{w}×{h} drew no pictures");
         }
         let detail = detail_of(UVec2::new(1921, 1000));
-        record.show(&mut view, detail, lay, &mut images, &mut jobs);
-        assert_eq!(lays.get(), 2, "a change across a step laid nothing anew");
+        record.show(&mut view, detail, &lay, &mut images, &mut jobs);
+        end_frame(&mut images, &mut jobs);
+        let laid = lays.load(Ordering::Relaxed);
+        assert_eq!(laid, 2, "a change across a step laid nothing anew");
         assert_eq!(
             jobs.queued(),
             1,
@@ -1873,38 +2003,33 @@ pub(super) mod tests {
     /// [`cap`] over [`plate_casters`], a 1080p target growing to 4K.
     #[test]
     fn pictures_laid_anew_are_drawn_from_the_old_atlas_until_written() {
-        let casters = plate_casters(0.003);
-        let cone = cap(|_, _| 2.0);
-        let lay = |details: &[UVec2]| {
-            Pictures::of(
-                std::slice::from_ref(&cone),
-                Some(&casters.bodies),
-                &[],
-                details,
-            )
-        };
+        let lay = counted(&cap(|_, _| 2.0), &plate_casters(0.003), &Arc::default());
         let (small, large) = (
             detail_of(UVec2::new(1920, 1080)),
             detail_of(UVec2::new(3840, 2160)),
         );
-        let record = RecordAtlas::default();
+        let record = Arc::new(RecordAtlas::default());
         let mut view = ViewPictures::default();
         let (mut images, mut jobs) = (Assets::<Image>::default(), PictureJobs::default());
-        record.show(&mut view, small, lay, &mut images, &mut jobs);
+        let mut frame = |detail, view: &mut ViewPictures, jobs: &mut PictureJobs| {
+            record.show(view, detail, &lay, &mut images, jobs);
+            end_frame(&mut images, jobs);
+        };
+        frame(small, &mut view, &mut jobs);
         assert!(view.drawn().is_none(), "the first pictures drawn unwritten");
         jobs.submit_all();
-        record.show(&mut view, small, lay, &mut images, &mut jobs);
+        frame(small, &mut view, &mut jobs);
         let (old, old_atlas) = view.drawn().cloned().expect("the first pictures, written");
-        for frame in 0..3 {
-            record.show(&mut view, large, lay, &mut images, &mut jobs);
+        for k in 0..3 {
+            frame(large, &mut view, &mut jobs);
             let (pictures, atlas) = view.drawn().expect("a frame without the fields");
             assert!(
                 Arc::ptr_eq(pictures, &old) && *atlas == old_atlas,
-                "frame {frame}: the new pictures drawn unwritten"
+                "frame {k}: the new pictures drawn unwritten"
             );
         }
         jobs.submit_all();
-        record.show(&mut view, large, lay, &mut images, &mut jobs);
+        frame(large, &mut view, &mut jobs);
         let (new, new_atlas) = view.drawn().cloned().expect("the new pictures, written");
         assert_eq!(new.details, vec![large]);
         assert_ne!(new_atlas, old_atlas);
@@ -1915,11 +2040,13 @@ pub(super) mod tests {
     }
 
     /// The views of a record take the finest pitch any of them needs at its own size: two plans
-    /// of one record, one asking a 1080p detail and the other a 4K one, draw one atlas laid out at
-    /// both, each field at the pitch the 4K detail gives; once the 4K view lets go, the other's
-    /// next frame lays the pictures out at its own detail alone. Views laying a record out each at
-    /// its own size render it twice; ones keeping a view's ask after it goes keep its texels.
-    /// Fixture: the first shipped record that throws a field.
+    /// of one record, one asking a 1080p detail and the other a 4K one in the same frame, lay one
+    /// atlas out at both, each field at the pitch the 4K detail gives, its one job the first
+    /// frame's only, and nothing but that atlas held once it is written; once the 4K view lets go,
+    /// the other's next frame lays the pictures out at its own detail alone. Views laying a record
+    /// out each at its own size render it twice; ones laying out on each ask render the first
+    /// view's layout too, superseded unseen; ones keeping a view's ask after it goes keep its
+    /// texels. Fixture: the first shipped record that throws a field.
     #[test]
     fn the_views_of_a_record_take_the_finest_pitch_any_needs() {
         let (corner, mut xray) = super::super::plan::tests::records()
@@ -1940,9 +2067,13 @@ pub(super) mod tests {
         );
         let (mut a, mut b) = (ViewPictures::default(), ViewPictures::default());
         let (mut images, mut jobs) = (Assets::<Image>::default(), PictureJobs::default());
-        for _ in 0..2 {
+        for frame in 0..2 {
             corner.show(&mut a, small, &mut images, &mut jobs);
             xray.show(&mut b, large, &mut images, &mut jobs);
+            end_frame(&mut images, &mut jobs);
+            if frame == 0 {
+                assert_eq!(jobs.queued(), 1, "a layout queued for each view");
+            }
             jobs.submit_all();
         }
         let (shared, atlas) = a.drawn().cloned().expect("the corner draws the pictures");
@@ -1952,7 +2083,21 @@ pub(super) mod tests {
             "two atlases"
         );
         assert_eq!(shared.details, vec![small, large]);
-        let finest = corner.lay(&[large]);
+        let laying = corner
+            .picture_cell()
+            .0
+            .lock()
+            .expect("the record's pictures");
+        assert!(
+            laying.next.is_none() && jobs.queued() == 0,
+            "a superseded layout kept"
+        );
+        drop(laying);
+        assert!(
+            [&a, &b].iter().all(|view| view.held == [atlas.clone()]),
+            "an atlas held beside the one drawn"
+        );
+        let finest = corner.lay()(&[large]);
         let pitches = |pictures: &Pictures| -> Vec<f32> {
             pictures.fields.iter().map(|field| field.pitch).collect()
         };
@@ -1960,6 +2105,7 @@ pub(super) mod tests {
         drop(b);
         for _ in 0..2 {
             corner.show(&mut a, small, &mut images, &mut jobs);
+            end_frame(&mut images, &mut jobs);
             jobs.submit_all();
         }
         let (own, _) = a.drawn().expect("the corner draws the pictures");

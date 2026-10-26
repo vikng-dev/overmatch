@@ -571,35 +571,45 @@ pub fn own(
     }
 }
 
-/// The physical viewport size and scale factor `camera` renders at this frame, read from the
-/// window or image `target` names as it stands now, as bevy's camera system will resolve them
-/// later in the frame: a window's physical size and scale factor, an image's size and the
-/// target's scale factor, a viewport clamped to the target. The camera's own cached values lag a
-/// retarget or resize by a frame; they are read only for a texture-view or colourless target.
-fn viewport_now(
+/// The physical size and scale factor of `camera`'s target this frame, read from the window or
+/// image `target` names as it stands now, as bevy's camera system will resolve them later in the
+/// frame: a window's physical size and scale factor, an image's size and the target's scale
+/// factor. The camera's own cached values lag a retarget or resize by a frame; they are read only
+/// for a texture-view or colourless target.
+pub(super) fn target_now(
     camera: &Camera,
     target: &RenderTarget,
     windows: &Query<&Window>,
     primary: Option<Entity>,
     images: &Assets<Image>,
 ) -> Option<(UVec2, f32)> {
-    let (size, scale) = match target {
+    match target {
         RenderTarget::Window(window) => {
             let entity = match window {
                 WindowRef::Primary => primary?,
                 WindowRef::Entity(entity) => *entity,
             };
             let window = windows.get(entity).ok()?;
-            (window.physical_size(), window.resolution.scale_factor())
+            Some((window.physical_size(), window.resolution.scale_factor()))
         }
-        RenderTarget::Image(image) => (images.get(&image.handle)?.size(), image.scale_factor),
-        RenderTarget::TextureView(_) | RenderTarget::None { .. } => {
-            return Some((
-                camera.physical_viewport_size()?,
-                camera.target_scaling_factor()?,
-            ));
-        }
-    };
+        RenderTarget::Image(image) => Some((images.get(&image.handle)?.size(), image.scale_factor)),
+        RenderTarget::TextureView(_) | RenderTarget::None { .. } => Some((
+            camera.physical_target_size()?,
+            camera.target_scaling_factor()?,
+        )),
+    }
+}
+
+/// The physical viewport size and scale factor `camera` renders at this frame
+/// ([`target_now`]): its viewport clamped to its target.
+pub(super) fn viewport_now(
+    camera: &Camera,
+    target: &RenderTarget,
+    windows: &Query<&Window>,
+    primary: Option<Entity>,
+    images: &Assets<Image>,
+) -> Option<(UVec2, f32)> {
+    let (size, scale) = target_now(camera, target, windows, primary, images)?;
     let size = camera
         .viewport
         .as_ref()
@@ -797,9 +807,9 @@ fn band_lanes(potency: &Potency) -> [Vec4; 3] {
 }
 
 /// The fields `prints` on the painted material `handle` ([`LookMaterial::is_painted`]), their
-/// pictures read from `atlas` ([`LookMaterial::set_fields`]; `None`, no field). The material is written
-/// only where that changes it, so a frame that holds still re-uploads none; one not painted is
-/// left as it is.
+/// pictures read from `atlas` ([`LookMaterial::set_fields`]; `None`, no field). The material is
+/// written only where that changes it, so a frame that holds still re-uploads none; one not painted
+/// is left as it is.
 pub fn paint_fields(
     looks: &mut Assets<LookMaterial>,
     handle: &Handle<LookMaterial>,
@@ -875,8 +885,9 @@ pub fn intensity(prints: &[FieldPrint], seen: &[Seen], potency: &Potency, p: Vec
 /// its front and within its longest reach and the rule's slack past it (a picture can reach past
 /// the record's longest direction between its directions, and the volume holds nothing there),
 /// and under [`Footprint::Hard`] where `n` faces its origin; under [`Footprint::Witness`] whatever
-/// the facing, so a witness is painted exactly where the volume holds the field ([`intensity`]). The point takes the band of the sum ([`Potency::band`]). This
-/// is the sum the shader mirrors, held by the tests.
+/// the facing, so a witness is painted exactly where the volume holds the field ([`intensity`]).
+/// The point takes the band of the sum ([`Potency::band`]). This is the sum the shader mirrors,
+/// held by the tests.
 #[cfg_attr(
     not(test),
     expect(
@@ -1340,12 +1351,13 @@ pub fn component(b: &BoxPlan, kind: CornerKind, masks: &MaskSet) -> Option<LookM
 /// sample the fields' summed intensity ([`intensity`]); each band takes its colour at an opacity
 /// that climbs with its length along the ray over its extinction length, the nearer laid over the
 /// farther, the whole at most [`VOLUME_OPACITY`]. The fields' lanes are set each frame
-/// ([`LookMaterial::set_fields`]), and with them the atlas of the pictures they read. Straight alpha, sorted after every
-/// other translucent surface, drawn whatever stands in front and writing no depth
-/// ([`LookKey::depth`]). In a frame that draws the body behind ([`body_behind`]) the march ends at
-/// its pixel's nearest scene surface in `masks`' part mask (`volume.w = 1`), so a component or the
-/// round in front of a field hides it; in the outside view it is drawn over the tank whole. `cut`
-/// by the slice plane (unit normal toward the discarded side, a point on it) it stops at the plane.
+/// ([`LookMaterial::set_fields`]), and with them the atlas of the pictures they read. Straight
+/// alpha, sorted after every other translucent surface, drawn whatever stands in front and writing
+/// no depth ([`LookKey::depth`]). In a frame that draws the body behind ([`body_behind`]) the march
+/// ends at its pixel's nearest scene surface in `masks`' part mask (`volume.w = 1`), so a component
+/// or the round in front of a field hides it; in the outside view it is drawn over the tank whole.
+/// `cut` by the slice plane (unit normal toward the discarded side, a point on it) it stops at the
+/// plane.
 pub fn volume(
     potency: &Potency,
     masks: &MaskSet,
@@ -2112,7 +2124,7 @@ mod tests {
         for (name, report) in super::super::plan::tests::records() {
             let shapes = super::super::plan::tests::shapes(&report);
             let plan = super::super::plan::Plan::new(&report, &shapes);
-            let pictures = plan.lay(&[DETAIL]);
+            let pictures = plan.lay()(&[DETAIL]);
             for (k, (cone, picture)) in plan.cones.iter().zip(&pictures.fields).enumerate() {
                 if !cone.rays.is_empty() {
                     continue;

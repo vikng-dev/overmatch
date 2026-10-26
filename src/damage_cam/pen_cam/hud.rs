@@ -14,15 +14,17 @@ use bevy::prelude::*;
 use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use bevy::ui::DefaultUiCamera;
+use bevy::window::PrimaryWindow;
 
+use super::look::{self, MaskNeed};
 use super::picture::{PictureDetail, detail_of};
 use super::stage::StageCamera;
 use super::timeline::{self, CornerKind};
-use super::{CornerRig, Knobs};
+use super::{CornerRig, Knobs, WorldViewer};
 use crate::overlay::Overlay;
-use crate::render_scale::RenderScale;
+use crate::render_scale::{NativeResolution, RenderScale};
 
-pub(super) const INSET_PX: f32 = 16.0;
+const INSET_PX: f32 = 16.0;
 const WIDTH_FRACTION: f32 = 0.30;
 const WIDTH_PX: (f32, f32) = (384.0, 640.0);
 /// The corner's width over its height.
@@ -182,35 +184,46 @@ fn expanded(window: Vec2) -> Vec2 {
     window - 2.0 * INSET_PX
 }
 
-/// The detail the views ask of the pictures ([`PictureDetail`]), from the target the UI lays out
-/// on, the window or a capture's image, which the battlefield camera draws into too: the expanded
-/// corner's image, sized as [`layout`] sizes it, and the target's physical size at the 3D pass's
-/// render scale ([`RenderScale`]; the corner's camera draws at its own). A target not yet resolved
-/// leaves the detail as it stands.
+/// The detail each view asks of the pictures ([`PictureDetail`]), from the camera that draws it,
+/// its target read as it stands this frame ([`look::target_now`]): the expanded corner's image in
+/// the default UI camera's target, sized as [`layout`] sizes it; the main pass of the camera a
+/// world-surface record is drawn on ([`WorldViewer`]) and of the x-ray's ([`MaskNeed`], so after
+/// the x-ray states it), each its viewport's physical size, at the render scale where its main
+/// pass runs at it ([`RenderScale`]: no viewport, not [`NativeResolution`]). A camera not resolved
+/// leaves its view's detail as it stands.
 pub fn detail(
     ui: DefaultUiCamera,
-    cameras: Query<&Camera>,
+    world: Query<Entity, With<WorldViewer>>,
+    xray: Res<MaskNeed>,
+    cameras: Query<(&Camera, &RenderTarget, Has<NativeResolution>)>,
+    (windows, primary, images): (
+        Query<&Window>,
+        Query<Entity, With<PrimaryWindow>>,
+        Res<Assets<Image>>,
+    ),
     render_scale: Option<Res<RenderScale>>,
     mut detail: ResMut<PictureDetail>,
 ) {
-    let Some(camera) = ui.get().and_then(|ui| cameras.get(ui).ok()) else {
-        return;
+    let primary = primary.single().ok();
+    let mut next = *detail;
+    if let Some((camera, target, _)) = ui.get().and_then(|ui| cameras.get(ui).ok())
+        && let Some((full, scale)) = look::target_now(camera, target, &windows, primary, &images)
+    {
+        let corner = expanded(full.as_vec2() / scale) * scale;
+        next.corner = Some(detail_of(corner.round().max(Vec2::ONE).as_uvec2()));
+    }
+    let main_pass = |viewer: Entity| {
+        let (camera, target, native) = cameras.get(viewer).ok()?;
+        let (size, _) = look::viewport_now(camera, target, &windows, primary, &images)?;
+        let scaled = render_scale
+            .as_deref()
+            .filter(|_| camera.viewport.is_none() && !native)
+            .and_then(|render_scale| render_scale.main_pass_size(size));
+        Some(detail_of(scaled.unwrap_or(size)))
     };
-    let (Some(window), Some(scale), Some(full)) = (
-        camera.logical_target_size(),
-        camera.target_scaling_factor(),
-        camera.physical_target_size(),
-    ) else {
-        return;
-    };
-    let corner = (expanded(window) * scale).round().max(Vec2::ONE).as_uvec2();
-    let world = render_scale
-        .and_then(|render_scale| render_scale.main_pass_size(full))
-        .unwrap_or(full);
-    detail.set_if_neq(PictureDetail {
-        corner: Some(detail_of(corner)),
-        world: Some(detail_of(world)),
-    });
+    next.world = world.single().ok().and_then(main_pass).or(next.world);
+    next.xray = xray.0.and_then(main_pass).or(next.xray);
+    detail.set_if_neq(next);
 }
 
 /// Size the corner from the default UI camera's logical target width, (re)make its render images

@@ -255,6 +255,10 @@ pub(super) struct XRayShell;
 #[derive(Resource, Default)]
 pub(super) struct XRayState {
     built: Option<Built>,
+    /// The record the x-ray showed, its clock, plan and pictures, from a build a new mask set or
+    /// hull frame took down to the one that dresses the tank again: kept so the record shows on
+    /// from the pictures it holds. Dropped with the x-ray.
+    kept: Option<(Option<ExplanationKey>, f64, Arc<Plan>, ViewPictures)>,
     /// App seconds each record first showed, for every record shown since the connection: a
     /// record's clock, kept across the x-ray's deactivations so it plays once, and per record
     /// because the store evicts by fire tick while [`latest`] picks by recency, so an older record
@@ -287,6 +291,19 @@ impl XRayState {
     #[cfg(test)]
     pub(super) fn record(&self) -> Option<ExplanationKey> {
         self.built.as_ref().and_then(|built| built.record)
+    }
+
+    /// The atlas the x-ray draws its record's fields from, while built and written.
+    #[cfg(test)]
+    pub(super) fn atlas(&self) -> Option<AssetId<Image>> {
+        let (_, atlas) = self.built.as_ref()?.pictures.drawn()?;
+        Some(atlas.id())
+    }
+
+    /// Take the x-ray down: it is built afresh, its record's pictures asked anew.
+    fn drop_built(&mut self) {
+        self.built = None;
+        self.kept = None;
     }
 
     /// Draw `shell` as the round's model, in place of the game's.
@@ -389,7 +406,7 @@ impl XRayRelease<'_, '_> {
     pub(crate) fn release(&mut self, commands: &mut Commands) {
         self.held.restore(commands);
         if let Some(state) = self.state.as_mut() {
-            state.built = None;
+            state.drop_built();
         }
     }
 }
@@ -439,15 +456,15 @@ pub(super) fn drive(
             .is_some_and(|built| Some(built.tank) != tank)
     {
         held.restore(&mut commands);
-        state.built = None;
+        state.drop_built();
     }
     need.set_if_neq(MaskNeed(viewer.filter(|_| active)));
 }
 
 /// Dress the subject tank and draw the record over it, once its camera has a mask set; afterwards
 /// keep it built: a mesh that lands late (a glb, a rung) is dressed as it appears, a new record or
-/// a live state change rebuilds the record's elements, a new mask set (a resize) rebuilds the
-/// whole x-ray.
+/// a live state change rebuilds the record's elements, a new mask set (a resize) or hull frame
+/// rebuilds the whole x-ray, the record shown on from the plan and pictures it held.
 #[expect(
     clippy::too_many_arguments,
     reason = "the x-ray's builder: the need and the masks, the clock, the record store, the blueprint, the subject, its own state, the asset server, the stores, the hierarchy and what it holds"
@@ -483,32 +500,38 @@ pub(super) fn build(
         return;
     };
     let hull = ViewNode::resolve(scene.view_nodes.get(rig.hull).ok(), rig.hull);
-    if state
+    if let Some(built) = state
         .built
-        .as_ref()
-        .is_some_and(|built| built.masks != *set || built.hull != hull)
+        .take_if(|built| built.masks != *set || built.hull != hull)
     {
         // The restore lands with this frame's commands; the next frame dresses afresh, every
         // mesh undressed by then.
         held.restore(&mut commands);
-        state.built = None;
+        state.kept = Some((built.record, built.since, built.plan, built.pictures));
         return;
     }
     let now = time.elapsed_secs_f64();
     let fresh = state.built.is_none();
-    let built = state.built.get_or_insert_with(|| Built {
-        tank,
-        hull,
-        masks: set.clone(),
-        record: None,
-        live: LiveState::default(),
-        since: now,
-        plan: Arc::new(Plan::bare(&TankShapes::default(), Vec::new())),
-        tiers: HashMap::new(),
-        pictures: ViewPictures::default(),
-        mask: stores.looks.add(look::hull_mask(set)),
-        settle: false,
-        rescan: false,
+    let kept = state.kept.take();
+    let built = state.built.get_or_insert_with(|| {
+        let (record, since, plan, pictures) = kept.unwrap_or_else(|| {
+            let bare = Plan::bare(&TankShapes::default(), Vec::new());
+            (None, now, Arc::new(bare), ViewPictures::default())
+        });
+        Built {
+            tank,
+            hull,
+            masks: set.clone(),
+            record,
+            live: LiveState::default(),
+            since,
+            plan,
+            tiers: HashMap::new(),
+            pictures,
+            mask: stores.looks.add(look::hull_mask(set)),
+            settle: false,
+            rescan: false,
+        }
     });
 
     // The tank's primitives, dressed as they stand or as they land.
@@ -643,10 +666,11 @@ pub(super) fn round_landed(
 }
 
 /// A new match: the store's keys start over, and so do the records shown. The x-ray as built
-/// forgets its record too, so the next build re-keys the clock even for the same key, and
-/// settles, so it redraws even with nothing left to draw.
+/// forgets its record too, and a rebuild's kept one goes, so the next build re-keys the clock even
+/// for the same key, and settles, so it redraws even with nothing left to draw.
 pub(super) fn forget_shown(_new: On<NewMatch>, mut state: ResMut<XRayState>) {
     state.shown.clear();
+    state.kept = None;
     if let Some(built) = &mut state.built {
         built.record = None;
         built.settle = true;
@@ -841,9 +865,9 @@ pub(super) fn animate(
     let Some(built) = state.built.as_mut() else {
         return;
     };
-    // The fields' pictures at the detail of the battlefield camera, the x-ray's.
-    if stage::draws_fields(&built.plan, CornerKind::Victim)
-        && let Some(detail) = detail.world
+    // The fields' pictures at the detail of the x-ray's camera.
+    if stage::field_box(&built.plan, CornerKind::Victim).is_some()
+        && let Some(detail) = detail.xray
     {
         built
             .plan

@@ -18,7 +18,7 @@ use bevy::prelude::*;
 
 use std::sync::Arc;
 
-use super::picture::{PictureJobs, Pictures, RecordAtlas, ViewPictures};
+use super::picture::{Lay, PICTURE_FIELDS, PictureJobs, Pictures, RecordAtlas, ViewPictures};
 use super::timeline::CornerKind;
 use crate::ballistics::spall_cone::FieldDescriptor;
 use crate::damage_cam::shapes::{HardBodies, TankShapes};
@@ -285,6 +285,7 @@ pub struct Thrown {
 
 /// One field as the record marched it: a spall cone, or a burst's field
 /// ([`PenetrationReport::fields`]).
+#[derive(Clone)]
 pub struct Cone {
     pub origin: Vec3,
     pub axis: Vec3,
@@ -389,6 +390,7 @@ pub struct BurstPlan {
 }
 
 /// One direction of a cone that left its origin: unit direction and reach (m).
+#[derive(Clone)]
 pub struct Ray {
     pub direction: Vec3,
     pub reach: f32,
@@ -650,16 +652,18 @@ impl Plan {
         }
     }
 
-    /// The fields' depth pictures, in [`Self::cones`]' order, from [`Self::bodies`], laid out at
-    /// `details` ([`Pictures::of`]) from the corner's sightings of the record
+    /// How the fields' depth pictures are laid out at the details asked ([`Pictures::of`]): in
+    /// [`Self::cones`]' order, from [`Self::bodies`], at the corner's sightings of the record
     /// ([`super::stage::field_sightings`]).
-    pub fn lay(&self, details: &[UVec2]) -> Pictures {
-        let sightings = if self.cones.is_empty() {
+    pub fn lay(&self) -> Lay {
+        let cones: Vec<Cone> = self.cones.iter().take(PICTURE_FIELDS).cloned().collect();
+        let bodies = self.bodies.clone();
+        let sightings = if cones.is_empty() {
             Vec::new()
         } else {
             super::stage::field_sightings(self)
         };
-        Pictures::of(&self.cones, self.bodies.as_ref(), &sightings, details)
+        Box::new(move |details| Pictures::of(&cones, bodies.as_ref(), &sightings, details))
     }
 
     /// Show the record's pictures in `view`, which asks `detail` of them
@@ -673,7 +677,7 @@ impl Plan {
         jobs: &mut PictureJobs,
     ) {
         self.pictures
-            .show(view, detail, |details| self.lay(details), images, jobs);
+            .show(view, detail, || self.lay(), images, jobs);
     }
 
     /// The frame the record's verdict opens the corner in, whichever frame a view draws the plan

@@ -147,9 +147,8 @@ pub(super) fn materials(app: &mut App) {
     picture::render(app);
 }
 
-/// The presentation's resources, the depth pictures' jobs, the detail the views ask of them
-/// ([`hud::detail`], in `PreUpdate`, so before every view draws) and the mask cameras' following,
-/// which a driver mounts once.
+/// The presentation's resources, the depth pictures' jobs and the mask cameras' following, which a
+/// driver mounts once.
 ///
 /// The mask cameras copy their viewer's lens and pose ([`look::follow_lens`], [`look::follow_pose`]),
 /// so they run after every writer of either. The corner's viewer, the inset camera, is written
@@ -166,7 +165,6 @@ pub(super) fn presentation(app: &mut App) {
         .init_resource::<look::Masks>()
         .init_resource::<look::MaskNeed>()
         .init_resource::<picture::PictureDetail>()
-        .add_systems(PreUpdate, hud::detail)
         .add_systems(
             PostUpdate,
             (
@@ -190,8 +188,9 @@ pub(super) fn presentation(app: &mut App) {
 /// The corner's drawing after its masks, in order, from [`Corner`] as its driver left it this
 /// frame: the stage, its animation and the corner's frame. A driver runs the corner's size and
 /// images (`hud::layout`) first, then [`look::own`], which gives every viewer that draws the base
-/// look this frame its masks — the corner's inset and the x-ray's camera alike — and then
-/// this; the game gates the corner's halves on its stage view, the x-ray draws beside them.
+/// look this frame its masks — the corner's inset and the x-ray's camera alike — then the
+/// detail each view asks of the pictures ([`hud::detail`]), and then this; the game gates the
+/// corner's halves on its stage view, the x-ray draws beside them.
 pub(super) fn present() -> ScheduleConfigs<ScheduleSystem> {
     (stage::rebuild, stage::animate, hud::animate)
         .chain()

@@ -112,6 +112,7 @@ fn wire(app: &mut App) {
                     .chain()
                     .run_if(resource_exists::<StageView>),
                 look::own,
+                hud::detail,
                 super::present().run_if(resource_exists::<StageView>),
                 xray::build,
                 xray::animate,
@@ -650,11 +651,10 @@ mod tests {
             .insert(&Handle::<Image>::default(), Image::default())
             .unwrap();
         wire(&mut app);
-        // A 4K target's detail: the headless app has no window for the views to size it from.
-        let detail = Some(super::super::picture::tests::DETAIL);
+        // A 4K corner's detail: the headless app has no window for the UI to size the corner in.
         app.insert_resource(super::super::picture::PictureDetail {
-            corner: detail,
-            world: detail,
+            corner: Some(super::super::picture::tests::DETAIL),
+            ..default()
         });
         let player = app
             .world_mut()
@@ -1653,6 +1653,78 @@ mod tests {
             together > 0,
             "the corner and the x-ray never drew the record together"
         );
+    }
+
+    /// A new mask set within the x-ray camera's detail step keeps the record's pictures: a resize
+    /// of the player's camera within one step of [`DETAIL_STEP_PX`], then a change of its scale
+    /// factor that leaves its pixels as they are, each rebuild the x-ray on a new set, its fields
+    /// drawn from the atlas they were drawn from before and no job queued. An x-ray that let its
+    /// plan and pictures go with its masks lays the record out and renders it again at every
+    /// frame of a window's drag. Fixture: the struck subject under the player's shot, the corner
+    /// closed, every job submitted at the end of the frame that queued it, its 64×32 camera
+    /// resized to 60×30, then at a scale factor of 2.
+    ///
+    /// [`DETAIL_STEP_PX`]: super::super::picture::DETAIL_STEP_PX
+    #[test]
+    fn a_new_mask_set_within_a_step_keeps_the_xrays_pictures() {
+        use bevy::camera::{ImageRenderTarget, RenderTarget};
+        use bevy::render::render_resource::TextureFormat;
+
+        let (mut app, ..) = struck_xray_app();
+        let (shot, _, vocabulary, _) = explained("s1_through_crew", 1200);
+        receive(&mut app, shot, &vocabulary);
+        press_x(&mut app);
+        let frame = |app: &mut App| {
+            step(app);
+            let jobs = app.world().resource::<super::super::picture::PictureJobs>();
+            let queued = jobs.queued();
+            jobs.submit_all();
+            queued
+        };
+        for _ in 0..10 {
+            frame(&mut app);
+        }
+        let atlas = app.world().resource::<xray::XRayState>().atlas();
+        assert!(atlas.is_some(), "the x-ray draws no fields");
+        let mut cameras = app
+            .world_mut()
+            .query_filtered::<Entity, With<crate::view::PlayerView>>();
+        let camera = cameras
+            .iter(app.world())
+            .next()
+            .expect("the player's camera");
+        let image = app
+            .world_mut()
+            .resource_mut::<Assets<Image>>()
+            .add(Image::new_target_texture(
+                60,
+                30,
+                TextureFormat::Rgba8UnormSrgb,
+                None,
+            ));
+        let set = |app: &App| {
+            let masks = app.world().resource::<Masks>();
+            masks.of(camera).map(|set| set.hull.clone())
+        };
+        for scale_factor in [1.0, 2.0] {
+            let before = set(&app);
+            app.world_mut()
+                .entity_mut(camera)
+                .insert(RenderTarget::Image(ImageRenderTarget {
+                    handle: image.clone(),
+                    scale_factor,
+                }));
+            for k in 0..5 {
+                let queued = frame(&mut app);
+                assert_eq!(queued, 0, "{scale_factor}x, frame {k}: rendered anew");
+            }
+            assert_ne!(set(&app), before, "{scale_factor}x: no new mask set");
+            assert_eq!(
+                app.world().resource::<xray::XRayState>().atlas(),
+                atlas,
+                "{scale_factor}x: the fields drawn from another atlas"
+            );
+        }
     }
 
     /// A composition about to despawn the subject lets go of it: every dressed mesh back in exactly

@@ -577,6 +577,7 @@ pub(super) fn sequence(app: &mut App) {
                 camera_writers(),
                 hud::layout,
                 look::own,
+                hud::detail,
                 super::present(),
                 world::animate,
                 labels,

@@ -346,9 +346,10 @@ and never cast (ADR-0040). A field's colour is the law's intensity wherever its 
 reaches: the law × the depth picture. The picture is the cube about the field's axis, each face
 cropped to the support, and a record's faces share one atlas, which every view of the record
 reads (the corner's frames, the kill cam and the x-ray). A field's **pitch** (rad a texel) is
-sized from the live screen, as LOD is: each view asks the detail of the target it draws into (the
-expanded corner's image for the corner; the battlefield camera's target at its render scale for
-the kill cam's lesson and the x-ray), and the pitch is the least angle one pixel of that detail
+sized from the live screen, as LOD is: each view asks the detail of what its camera draws, read
+as it stands that frame (the expanded corner's image for the corner; for the kill cam's lesson
+and the x-ray, the main pass of the camera that draws each, at the render scale where that pass
+runs at it), and the pitch is the least angle one pixel of that detail
 spans seen from the field's origin, over 16 points along each recorded direction as the corner's
 along-shot eye sees them at 72 spins, and as the slice's eye sees them in both lenses where the
 record's verdict opens the slice; where several views show a record, the finest any of them asks.
@@ -359,7 +360,8 @@ target rounded up to 64 px a side (`DETAIL_STEP_PX`; TUNED), so a window dragged
 lays nothing out anew, for at most ((h + 64)/h)² the texels (DERIVED: 12 % at 1080 rows, 6 % at
 2160). s14's atlas, the largest shipped, is 1618×3872 texels at a 1920×1080 target and 3335×7976
 at 3840×2160 (MEASURED, the expanded corner at a scale factor of 2). A change of the details asked
-lays the record's pictures out anew into a new atlas; its views draw the old atlas until the new
+lays the record's pictures out anew into a new atlas, once, at the end of the frame, whatever
+order its views asked in; its views draw the old atlas until the new
 one's rendering has been submitted, and a record's first pictures not before theirs, so no frame
 reads an unwritten atlas and none drops the fields across a resize. The viewer's drag, the x-ray and the gunner's sight see the field at that pitch. The
 shipped records' finest at a 4K target is 5.5·10⁻⁴ rad (MEASURED). Over every recorded direction
@@ -381,9 +383,12 @@ the pitch, the factor TUNED). A surface the field stops on reads inside to at le
 four texels' results differ, across a shadow's edge, a band's edge follows the bilinear weights
 texel by texel: a stair-step at most a pixel of the live target wide at the sampled points
 (DERIVED from the pitch). A direction reads its own face's texels alone (each face's
-crop runs a texel past its edge), so a shadow's edge that crosses from one face to the next jogs
-there by at most 0.64 pitch (MEASURED on the CPU read over 6,000 random seams), under a pixel of
-the live target (DERIVED); the faces are not blended. The fields draw as **one volume** (`assets/shaders/pen_cam_look.wgsl`, `volume`) on the
+crop runs a texel past its edge), and the faces are not blended: a shadow's edge that crosses
+from one face to the next is drawn within half a texel of where it lies on either side, out to the
+edge (DERIVED, the bilinear read; held over 6,000 seeded seams by
+`picture::tests::a_silhouette_across_a_faces_edge_jogs_by_at_most_a_texel`), so it jogs there by
+at most a texel, under a pixel of the live target (DERIVED); MEASURED on the CPU read over 6,000
+random seams, the jog is at most 0.64 pitch. The fields draw as **one volume** (`assets/shaders/pen_cam_look.wgsl`, `volume`) on the
 back faces of a box about every field's reach: each eye ray is cut at the ends of every field's
 stretch along it, each piece is sampled no farther apart than the smallest ball across in 48
 steps among the fields whose stretches hold it, so every field is sampled at its own size and a

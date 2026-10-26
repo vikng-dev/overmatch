@@ -673,10 +673,11 @@ pub struct LookCtx<'a> {
     pub masks: &'a MaskSet,
 }
 
-/// Whether frame `kind` draws `plan`'s fields: every frame but the ricochet's, where the record
-/// threw any. The volume is spawned and the pictures shown under the one condition.
-pub(super) fn draws_fields(plan: &Plan, kind: CornerKind) -> bool {
-    kind != CornerKind::Ricochet && look::field_bounds(&plan.cones).is_some()
+/// The box frame `kind` draws `plan`'s fields on ([`look::field_bounds`]): every frame's but the
+/// ricochet's, where the record threw any. The volume is spawned and the pictures shown under the
+/// one condition.
+pub(super) fn field_box(plan: &Plan, kind: CornerKind) -> Option<(Vec3, Vec3)> {
+    look::field_bounds(&plan.cones).filter(|_| kind != CornerKind::Ricochet)
 }
 
 /// Draw `plan`'s record over a tank in frame `kind`: the trail, the rings, the fields, a burst's
@@ -796,9 +797,7 @@ pub fn spawn_glass(
     }
 
     // The fields: one volume on the box about their reach, cut by the slice plane in the slice.
-    if draws_fields(plan, kind)
-        && let Some((lo, hi)) = look::field_bounds(&plan.cones)
-    {
+    if let Some((lo, hi)) = field_box(plan, kind) {
         let mut material = look::volume(&Potency::shipped(), look_ctx.masks, kind, clip);
         material.set_fade(0.0);
         commands.spawn((
@@ -1561,7 +1560,7 @@ pub fn animate(
         super::Surface::Corner => detail.corner,
         super::Surface::World => detail.world,
     };
-    if draws_fields(plan, kind)
+    if field_box(plan, kind).is_some()
         && let Some(detail) = detail
     {
         plan.show(&mut stage.pictures, detail, &mut images, &mut jobs);
@@ -3040,6 +3039,13 @@ mod tests {
             .spawn((Transform::IDENTITY, Visibility::Hidden, StageShell));
     }
 
+    /// [`animated`], the frame on show at `plan`'s hold in `kind`.
+    fn held(app: &mut App, plan: &Plan, kind: CornerKind) {
+        animated(app);
+        let mut corner = app.world_mut().resource_mut::<Corner>();
+        corner.showing.as_mut().expect("a frame on show").c = pace(plan, kind).hold_from;
+    }
+
     /// The stage over record `index` in frame `kind`, built by the real [`rebuild`] once: each of
     /// the tank's component shapes stands in for its view mesh, authored a metre back from where the
     /// record has it under a parent a metre forward along `offset`, so only the chain carries it into
@@ -3144,10 +3150,11 @@ mod tests {
             .insert_resource(PictureDetail {
                 corner: Some(DETAIL),
                 world: Some(DETAIL),
+                xray: None,
             })
-            .init_resource::<PictureJobs>()
             .init_resource::<Masks>()
             .add_systems(Update, rebuild);
+        super::super::picture::jobs(&mut app);
         app.update();
         (app, placed)
     }
@@ -3201,14 +3208,14 @@ mod tests {
     /// in every frame, the corner's and the kill cam's lesson on the world alike: one volume,
     /// blended, on a box that holds every field out to its longest reach, reading the record's
     /// depth pictures from the one atlas the stage draws ([`ViewPictures::drawn`]); its bands
-    /// parted at the shipped thresholds and coloured from the band law alone — the knockout band the field teal, the reduced band the deep teal, both
-    /// more blue than red and off the state scale, the knockout band the brighter — at one opacity
-    /// across every record, so the colour says the band of the fields' summed intensity and
-    /// nothing else. Outside the slice the volume is uncut; in the slice it is cut by the slice
-    /// plane. Where its frame draws the body behind, it is bounded by its viewer's part mask
-    /// ([`the_x_ray_draws_the_body_behind`]). At least one record throws a field in each. A box
-    /// short of a field's reach clips that field's far side; a volume per field draws an overlap
-    /// twice, in neither field's band.
+    /// parted at the shipped thresholds and coloured from the band law alone — the knockout band
+    /// the field teal, the reduced band the deep teal, both more blue than red and off the state
+    /// scale, the knockout band the brighter — at one opacity across every record, so the colour
+    /// says the band of the fields' summed intensity and nothing else. Outside the slice the volume
+    /// is uncut; in the slice it is cut by the slice plane. Where its frame draws the body behind,
+    /// it is bounded by its viewer's part mask ([`the_x_ray_draws_the_body_behind`]). At least one
+    /// record throws a field in each. A box short of a field's reach clips that field's far side; a
+    /// volume per field draws an overlap twice, in neither field's band.
     #[test]
     fn the_fields_are_one_volume_in_their_bands() {
         use super::super::potency::Band;
@@ -3234,13 +3241,7 @@ mod tests {
                 (CornerKind::Glass, super::super::Surface::World),
             ] {
                 let (mut app, _) = staged_on(&library, &asset, index, kind, Vec3::X, surface);
-                animated(&mut app);
-                app.world_mut()
-                    .resource_mut::<Corner>()
-                    .showing
-                    .as_mut()
-                    .expect("a frame on show")
-                    .c = pace(&record.plan, kind).hold_from;
+                held(&mut app, &record.plan, kind);
                 app.update();
                 app.world().resource::<PictureJobs>().submit_all();
                 app.update();
@@ -3343,8 +3344,8 @@ mod tests {
     /// carries no painting, no field lane and no picture. Every record that throws a field, in each
     /// frame that paints, with a body mesh of each body tier beside the components. The x-ray
     /// relies on it: painted hull glass covers the tank in the bands; a crew station painted hard
-    /// shows bare faces inside the field; a painted surface off the volume's pictures draws a field the
-    /// volume does not.
+    /// shows bare faces inside the field; a painted surface off the volume's pictures draws a field
+    /// the volume does not.
     #[test]
     fn the_fields_are_painted_on_the_components_alone() {
         let library = Library::load();
@@ -3359,13 +3360,7 @@ mod tests {
                 let at = format!("{} {kind:?}", record.stem);
                 let (mut app, placed) = staged(&library, &asset, index, kind, Vec3::ZERO);
                 let body = with_body(&mut app);
-                animated(&mut app);
-                app.world_mut()
-                    .resource_mut::<Corner>()
-                    .showing
-                    .as_mut()
-                    .expect("a frame on show")
-                    .c = pace(plan, kind).hold_from;
+                held(&mut app, plan, kind);
                 app.update();
                 app.world().resource::<PictureJobs>().submit_all();
                 app.update();
@@ -3475,13 +3470,7 @@ mod tests {
             .expect("a record throws a field");
         let kind = CornerKind::Glass;
         let (mut app, _) = staged(&library, &asset, index, kind, Vec3::ZERO);
-        animated(&mut app);
-        app.world_mut()
-            .resource_mut::<Corner>()
-            .showing
-            .as_mut()
-            .expect("a frame on show")
-            .c = pace(&record.plan, kind).hold_from;
+        held(&mut app, &record.plan, kind);
         let read = |app: &mut App| {
             let world = app.world_mut();
             let shown = world
