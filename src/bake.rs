@@ -750,8 +750,9 @@ fn extract_at_startup(mut commands: Commands) {
         .unwrap_or_else(|findings| {
         panic!(
             "bake: {} did not pass the consumer contract:\n{}\n\
-             bake resolves the glb via asset_root() (BEVY_ASSET_ROOT → CARGO_MANIFEST_DIR → exe dir; \
-             a macOS `.app` exe in Contents/MacOS resolves to Contents/Resources/assets). \
+             bake resolves the glb via asset_root() (BEVY_ASSET_ROOT → CARGO_MANIFEST_DIR → the \
+             manifest dir baked into a dev build → exe dir; a macOS `.app` exe in Contents/MacOS \
+             resolves to Contents/Resources/assets). \
              Resolved assets root: {}. If this path is wrong, the packaging layout and asset_root() \
              disagree — see crate::assets.",
             path.display(),

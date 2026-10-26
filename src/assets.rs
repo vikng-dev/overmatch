@@ -8,23 +8,28 @@ use std::path::{Path, PathBuf};
 /// testable. The macOS bug survived precisely because the rule lived only inside `std::env` reads
 /// and a `current_exe()` call, a shape nothing but a real `.app` ever exercised.
 ///
-/// Precedence mirrors Bevy's own [`FileAssetReader::get_base_path`] (`BEVY_ASSET_ROOT` →
-/// `CARGO_MANIFEST_DIR` → the executable's directory) so the bake and the asset server always land
-/// on the same tree, then resolves the platform bundle layout for the env-less packaged case:
+/// Precedence extends Bevy's own [`FileAssetReader::get_base_path`] (`BEVY_ASSET_ROOT` →
+/// `CARGO_MANIFEST_DIR` → the executable's directory) by one rung, so the bake and the asset server
+/// always land on the same tree: env root → runtime manifest dir → `baked_manifest_dir` (the
+/// manifest dir a dev-profile build captured at compile time, [`BAKED_MANIFEST_DIR`]) → the platform
+/// bundle layout for the env-less packaged case:
 /// - macOS `.app`: `exe_dir` = `<App>.app/Contents/MacOS` → the sibling `Contents/Resources/assets`
 ///   (where `scripts/package-macos.sh` copies them — see its `Contents/Resources/assets` line).
 /// - flat archive (Windows/Linux): binary and `assets/` extract into one folder → `exe_dir/assets`.
 ///
 /// Deliberately does no `is_dir()` probing and has no silent `"assets"`-in-cwd fallback: the path is
-/// resolved deterministically from the layout, and if it is wrong the bake panics naming it
-/// (ADR-0011 fail-fast) instead of quietly loading a different tree.
+/// resolved deterministically from the build and the layout, and if it is wrong the bake panics
+/// naming it (ADR-0011 fail-fast) instead of quietly loading a different tree.
 ///
 /// [`FileAssetReader::get_base_path`]: bevy::asset::io::file::FileAssetReader::get_base_path
-fn asset_root_from(exe_dir: &Path, manifest_dir: Option<&str>, env_root: Option<&str>) -> PathBuf {
+fn asset_root_from(
+    exe_dir: &Path,
+    manifest_dir: Option<&str>,
+    env_root: Option<&str>,
+    baked_manifest_dir: Option<&str>,
+) -> PathBuf {
     // `BEVY_ASSET_ROOT` wins over everything — the server image sets it
-    // (`.github/actions/server-image/Dockerfile`), and every test/harness run inherits it or
-    // `CARGO_MANIFEST_DIR`, which is why the exe-dir path below is only ever taken by a real
-    // double-clicked bundle.
+    // (`.github/actions/server-image/Dockerfile`), and every harness script sets it too.
     if let Some(root) = env_root {
         return Path::new(root).join("assets");
     }
@@ -33,8 +38,13 @@ fn asset_root_from(exe_dir: &Path, manifest_dir: Option<&str>, env_root: Option<
     if let Some(dir) = manifest_dir {
         return Path::new(dir).join("assets");
     }
-    // No env at all — the packaged, double-clicked case. macOS `.app`: the exe sits in
-    // `Contents/MacOS`, but assets ship one level over in `Contents/Resources/assets`.
+    // A dev-profile binary launched by hand (`target/debug/overmatch --offline`) has neither env
+    // var; its assets are the checkout that compiled it, not a directory beside the exe.
+    if let Some(dir) = baked_manifest_dir {
+        return Path::new(dir).join("assets");
+    }
+    // No env and nothing baked — a shipped build. macOS `.app`: the exe sits in `Contents/MacOS`,
+    // but assets ship one level over in `Contents/Resources/assets`.
     if exe_dir.ends_with("Contents/MacOS")
         && let Some(contents) = exe_dir.parent()
     {
@@ -43,6 +53,16 @@ fn asset_root_from(exe_dir: &Path, manifest_dir: Option<&str>, env_root: Option<
     // Flat archive: `assets/` is beside the binary.
     exe_dir.join("assets")
 }
+
+/// The checkout that compiled this binary, kept only by dev profiles. Every shipped binary is a
+/// release-derived profile (`scripts/package-macos.sh`, `scripts/build-linux.sh`,
+/// `.github/workflows/release.yml` all build `--release`), where `debug_assertions` is off, so a
+/// player's binary carries no build-machine path and resolves by layout alone.
+const BAKED_MANIFEST_DIR: Option<&str> = if cfg!(debug_assertions) {
+    Some(env!("CARGO_MANIFEST_DIR"))
+} else {
+    None
+};
 
 /// The `assets/` directory this process reads from — the thin env-reading wrapper over the pure
 /// [`asset_root_from`]. Used both as `AssetPlugin`'s `file_path` (`net::client`) and as the bake
@@ -58,6 +78,7 @@ pub(crate) fn asset_root() -> PathBuf {
         &exe_dir,
         std::env::var("CARGO_MANIFEST_DIR").ok().as_deref(),
         std::env::var("BEVY_ASSET_ROOT").ok().as_deref(),
+        BAKED_MANIFEST_DIR,
     )
 }
 
@@ -65,14 +86,16 @@ pub(crate) fn asset_root() -> PathBuf {
 mod tests {
     use super::*;
 
-    /// `BEVY_ASSET_ROOT` wins over a set `CARGO_MANIFEST_DIR` and over any exe layout — the
-    /// dedicated server relies on this (it sets `BEVY_ASSET_ROOT=/opt/overmatch-server`).
+    /// `BEVY_ASSET_ROOT` wins over a set `CARGO_MANIFEST_DIR`, over a baked manifest dir and over
+    /// any exe layout — the dedicated server relies on this (it sets
+    /// `BEVY_ASSET_ROOT=/opt/overmatch-server`).
     #[test]
     fn env_root_wins_over_everything() {
         let got = asset_root_from(
             Path::new("/App.app/Contents/MacOS"),
             Some("/repo"),
             Some("/opt/overmatch-server"),
+            Some("/build-machine/repo"),
         );
         assert_eq!(got, Path::new("/opt/overmatch-server/assets"));
     }
@@ -81,8 +104,26 @@ mod tests {
     /// and every `cargo test`/`cargo run`, which is why CI never hit the packaged-app bug.
     #[test]
     fn manifest_dir_when_no_env_root() {
-        let got = asset_root_from(Path::new("/repo/target/debug"), Some("/repo"), None);
+        let got = asset_root_from(Path::new("/repo/target/debug"), Some("/repo"), None, None);
         assert_eq!(got, Path::new("/repo/assets"));
+    }
+
+    /// A dev-profile binary launched by hand has no env at all; the baked manifest dir resolves it to
+    /// the checkout that compiled it, never to `target/debug/assets`. The runtime env still wins
+    /// when set, so `cargo run` from a worktree reads that worktree, not the baked one.
+    #[test]
+    fn baked_manifest_dir_when_launched_by_hand() {
+        let got = asset_root_from(Path::new("/repo/target/debug"), None, None, Some("/repo"));
+        assert_eq!(got, Path::new("/repo/assets"));
+        assert_ne!(got, Path::new("/repo/target/debug/assets"));
+
+        let got = asset_root_from(
+            Path::new("/wt/target/debug"),
+            Some("/wt"),
+            None,
+            Some("/repo"),
+        );
+        assert_eq!(got, Path::new("/wt/assets"));
     }
 
     /// THE REGRESSION GUARD for the v0.3.0-alpha.2 startup panic. A double-clicked macOS `.app` has
@@ -105,7 +146,7 @@ mod tests {
         std::fs::create_dir_all(&macos).unwrap();
         std::fs::create_dir_all(&resources_assets).unwrap();
 
-        let got = asset_root_from(&macos, None, None);
+        let got = asset_root_from(&macos, None, None, None);
         assert_eq!(got, resources_assets);
         // And explicitly NOT the exe-dir/assets path the buggy resolver produced.
         assert_ne!(got, macos.join("assets"));
@@ -118,7 +159,7 @@ mod tests {
     /// where the assets actually are.
     #[test]
     fn flat_layout_resolves_beside_exe() {
-        let got = asset_root_from(Path::new("/opt/overmatch"), None, None);
+        let got = asset_root_from(Path::new("/opt/overmatch"), None, None, None);
         assert_eq!(got, Path::new("/opt/overmatch/assets"));
     }
 }
