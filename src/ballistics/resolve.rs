@@ -1797,14 +1797,18 @@ fn apply_bite(
 ) {
     // Transit damage: every HP-bearing volume is charged for the material OF ITS OWN the round chewed
     // (§13.2's damage law — no ownership, no priority, no argmax), each deposit from the line's
-    // entry into its own volume.
+    // entry into its own volume. Every deposit has that entry: `walk::finish` builds the bite's
+    // deposits as Line doses only, each addressed to a volume present in the first event's
+    // encounters, and `volume_crossings` builds one crossing per Line deposit from the same
+    // encounters.
     let incoming = Vec3::from(bite.incoming);
     shell.dose.add_all(&bite.deposits, |dose| {
         let entry = bite
             .volumes
             .iter()
             .find(|crossed| crossed.volume == dose.address)
-            .map_or(bite.entrance, |crossed| crossed.entry);
+            .expect("a crossing per Line deposit, both from the first event's encounters")
+            .entry;
         super::DoseContext::Line {
             entry,
             along: incoming,
