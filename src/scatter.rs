@@ -339,7 +339,7 @@ pub(crate) fn spawn(
 mod tests {
     use super::*;
 
-    use crate::map::tests::shipped_manifest;
+    use crate::map::tests::mixed_fixture_manifest;
 
     /// A tilted fixture surface: height rises with x and z, so a re-projection lands on a different
     /// Y at every XZ (a flat fixture would pass whatever the placement did with the file's Y).
@@ -433,7 +433,7 @@ mod tests {
             .init_asset::<Mesh>()
             .init_asset::<StandardMaterial>();
         let grid = sloped_grid();
-        let manifest = shipped_manifest();
+        let manifest = mixed_fixture_manifest();
         let mut blocks: Vec<Transform> = Vec::new();
         let world = app.world_mut();
         world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
@@ -466,7 +466,11 @@ mod tests {
                 }
             }
         }
-        assert!(buildings > 0 && trees > 0, "the shipped map places both");
+        assert_eq!(
+            (buildings, proxies, trees),
+            (1, 2, 1),
+            "the fixture places a house, a graybox fir and a tree"
+        );
         assert_eq!(blocks.len(), buildings, "one block per building, no trunk");
         let bodies = world
             .query_filtered::<Entity, With<RigidBody>>()

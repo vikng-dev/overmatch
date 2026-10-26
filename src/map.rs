@@ -607,6 +607,30 @@ pub(crate) mod tests {
     const HOUSE_INSTANCE: &str = r#"{"prototype":"house","translation":[0,0,0],
         "rotation":[0,0,0,1],"scale":[1,1,1],"id":"house_0001"}"#;
 
+    /// One instance of every prototype kind — a house, a graybox fir and a tree of the damage
+    /// model, the tree read from the shipped assets — on the fixture extent: what a layer that
+    /// spawns a map asserts against, whatever the shipped map happens to place.
+    pub(crate) fn mixed_fixture_manifest() -> MapManifest {
+        const LIBRARY: &str = r#"{
+            "house": Building(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0)),
+            "fir_box": Fir(height_m: 14.0, canopy_diameter_m: 6.0),
+            "fir": Tree(asset: "fir_1"),
+        }"#;
+        const INSTANCES: &str = r#"{"prototype":"house","translation":[0,0,0],
+            "rotation":[0,0,0,1],"scale":[1,1,1],"id":"house_0001"},
+            {"prototype":"fir_box","translation":[20,0,0],
+            "rotation":[0,0,0,1],"scale":[1,1,1],"id":"fir_box_0001"},
+            {"prototype":"fir","translation":[0,0,20],
+            "rotation":[0,0,0,1],"scale":[1,1,1],"id":"fir_0001"}"#;
+        let text = manifest_text(500.0, 0.0, 100.0, "+Z").replace(
+            r#""instances":[]"#,
+            &format!(r#""instances":[{INSTANCES}]"#),
+        );
+        let mut manifest = parse(&text, LIBRARY, Path::new("fixture/level.json"));
+        manifest.trees = TreeLibrary::load(&shipped_assets(), ["fir_1"]);
+        manifest
+    }
+
     /// THE MANIFEST IS THE MAP (`terrain_grid::decode_height_grid`): the shipped tree must carry
     /// one at the default id, it must parse and pass every check through the real loader, and the
     /// heightmap it names must exist as more than an LFS pointer. A map half-shipped — a PNG with
@@ -832,6 +856,35 @@ pub(crate) mod tests {
             digest_of(&[b"ab", b"cd"]),
             digest_of(&[b"abc", b"d"]),
             "the boundary between two files is part of the digest",
+        );
+    }
+
+    /// THE DIGEST FOLDS THE TREES' TEXTS (the species table and every tree asset the map
+    /// places) after the three map files, in the library's order: two peers with one map and
+    /// one different tree segment integrate different walks and must not match. Dropping the
+    /// trees from the fold, or folding them in another order, reds this.
+    #[test]
+    fn the_digest_folds_the_tree_texts_after_the_map_files() {
+        let root = shipped_assets();
+        let path = level_path(&root);
+        let text = read_manifest(&path).expect("the shipped map");
+        let library = read_prototypes(&root);
+        let manifest = parse(&text, &library, &path);
+        let trees = TreeLibrary::load(&root, manifest.tree_assets());
+        let heightmap = std::fs::read(manifest.heightmap_path()).expect("the heightmap");
+        let map_files = vec![text.as_bytes(), library.as_bytes(), heightmap.as_slice()];
+        assert!(
+            trees.texts().count() >= 2,
+            "the shipped map places at least one tree: the species table and its asset"
+        );
+        let shipped = content_digest(&root);
+        assert_ne!(shipped, digest_of(&map_files), "the tree texts count");
+        let mut files = map_files;
+        files.extend(trees.texts());
+        assert_eq!(
+            shipped,
+            digest_of(&files),
+            "the fold is the map files then the trees"
         );
     }
 

@@ -975,6 +975,7 @@ pub(crate) fn sim_plugin(app: &mut App) {
 pub(crate) mod tests {
     use super::*;
     use crate::terrain_grid::FIXTURE_EXTENT;
+    use avian3d::prelude::{ColliderAabb, SimpleCollider};
 
     /// A three-segment fixture trunk (fixture data): 2 m segments, radii 0.3 → 0.2 → 0.1 → 0.05.
     pub(crate) fn fixture_asset() -> TreeAsset {
@@ -1046,6 +1047,48 @@ pub(crate) mod tests {
         )
         .expect_err("a step in the taper");
         assert!(err.contains("continuous"), "{err}");
+    }
+
+    /// EVERY A6 REFUSAL IS A REFUSAL, NOT A CLAMP: a non-finite or non-positive dimension, an
+    /// unknown species, a non-positive pool or ram threshold, a trunk too short to read a breast
+    /// height, and more segments than the wire word's cut byte can name are each refused by name.
+    /// Any one of these laxed to a default — a NaN height carried, a zero HP pool spawned, a
+    /// 256th segment accepted — reds its row.
+    #[test]
+    fn every_malformed_asset_or_species_is_refused_by_name() {
+        let refusal = |asset: TreeAsset, table: BTreeMap<String, Species>| {
+            TreeKind::resolve(
+                "fixture",
+                asset,
+                &table,
+                SubstanceRegistry::shipped_static(),
+            )
+            .expect_err("refused")
+        };
+        let mut asset = fixture_asset();
+        asset.segments[0].height_m = f32::NAN;
+        assert!(refusal(asset, fixture_table()).contains("dimension"));
+        let mut asset = fixture_asset();
+        asset.segments[2].r_top_m = 0.0;
+        assert!(refusal(asset, fixture_table()).contains("dimension"));
+        let mut asset = fixture_asset();
+        asset.species = "no_such_species".to_owned();
+        assert!(refusal(asset, fixture_table()).contains("species"));
+        let mut table = fixture_table();
+        table.get_mut("fixture").unwrap().hp = Sourced(0);
+        assert!(refusal(fixture_asset(), table).contains("hp"));
+        let mut table = fixture_table();
+        table.get_mut("fixture").unwrap().fell_k = Sourced(-1.0);
+        assert!(refusal(fixture_asset(), table).contains("fell_k"));
+        let mut asset = fixture_asset();
+        for segment in &mut asset.segments {
+            segment.height_m = 0.4;
+        }
+        assert!(refusal(asset, fixture_table()).contains("breast"));
+        let mut asset = fixture_asset();
+        let stub = asset.segments[2];
+        asset.segments = vec![stub; MAX_SEGMENTS + 1];
+        assert!(refusal(asset, fixture_table()).contains("segments"));
     }
 
     /// A species whose substance the registry does not carry, or carries as a witness, cannot
@@ -1330,21 +1373,68 @@ pub(crate) mod tests {
         assert_eq!((health.current, health.max), (100, 100));
         assert_eq!(transform.scale, Vec3::ONE);
         assert_eq!(transform.translation, pose.translation);
-        let segments: Vec<(Entity, f32)> = world
-            .query_filtered::<(&ChildOf, &Transform), (With<TreeSegment>, With<Collider>)>()
+        assert_eq!(
+            transform.rotation, pose.rotation,
+            "the yaw is the instance's"
+        );
+        let standing = CollisionLayers::new([Layer::Terrain, Layer::Armor], LayerMask::ALL);
+        let mut segments: Vec<(Entity, f32, ColliderAabb)> = world
+            .query_filtered::<
+                (&ChildOf, &Transform, &Collider, &CollisionLayers),
+                With<TreeSegment>,
+            >()
             .iter(&world)
-            .map(|(parent, transform)| (parent.parent(), transform.translation.y))
+            .map(|(parent, transform, collider, layers)| {
+                assert_eq!(*layers, standing, "a standing segment stops hulls and rounds");
+                (
+                    parent.parent(),
+                    transform.translation.y,
+                    collider.aabb(Vec3::ZERO, Quat::IDENTITY),
+                )
+            })
             .collect();
         assert_eq!(segments.len(), 3);
-        assert!(segments.iter().all(|(parent, _)| *parent == root));
-        let mut bottoms: Vec<f32> = segments.iter().map(|(_, y)| *y).collect();
-        bottoms.sort_by(f32::total_cmp);
+        assert!(segments.iter().all(|(parent, _, _)| *parent == root));
+        segments.sort_by(|a, b| a.1.total_cmp(&b.1));
+        let bottoms: Vec<f32> = segments.iter().map(|(_, y, _)| *y).collect();
         assert_eq!(
             bottoms,
             [0.0, 3.0, 6.0],
             "segment bottoms at the scaled prefix sums"
         );
+        // Each hull spans its frustum's wider ring and its scaled height from the segment's own
+        // origin: the ring table holds the four axis points, so the bounds are exact.
+        for ((_, _, aabb), segment) in segments.iter().zip(&kind.segments) {
+            let r = segment.r_bottom_m.max(segment.r_top_m) * 1.5;
+            let h = segment.height_m * 1.5;
+            assert!(
+                aabb.min.abs_diff_eq(Vec3::new(-r, 0.0, -r), 1e-6)
+                    && aabb.max.abs_diff_eq(Vec3::new(r, h, r), 1e-6),
+                "the hull is the scaled frustum: {aabb:?} for {segment:?}"
+            );
+        }
         assert_eq!(world.query::<&TreeView>().iter(&world).count(), 0);
+    }
+
+    /// A non-uniform scale is refused: one scalar multiplies every height and radius, so an
+    /// instance that stretches one axis has no body this module can build.
+    #[test]
+    #[should_panic(expected = "scales uniformly")]
+    fn a_non_uniform_scale_is_refused() {
+        let mut world = World::new();
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, &world);
+        spawn(
+            &mut commands,
+            &fixture_kind(),
+            MapInstance {
+                id: "fir_0001".to_owned(),
+                ordinal: 0,
+            },
+            Transform::from_scale(Vec3::new(1.0, 1.5, 1.0)),
+            None,
+        );
+        queue.apply(&mut world);
     }
 
     /// A tilted instance is refused: the cut and the resting pose both read an upright trunk.
