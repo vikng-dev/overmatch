@@ -139,8 +139,8 @@ pub struct TankShapes {
 }
 
 /// Every hard ballistic primitive of a tank, posed for one record, as one triangle mesh: the
-/// bodies a field's direction is spent in and stopped by (`ballistics::resolve::field_direction`),
-/// which a witness never is. Each primitive is one body, a closed shell wound outward (the manifold
+/// bodies a field's direction is stopped by, at the first it enters
+/// (`ballistics::resolve::field_direction`), which a witness never is. Each primitive is one body, a closed shell wound outward (the manifold
 /// gate's certificate), so a line enters a body through a face it meets head-on
 /// (`normal · direction < 0`) and leaves it through one it meets from behind. The mesh's bounding
 /// volume hierarchy is built on the first cast, so shapes that are never cast against cost none.

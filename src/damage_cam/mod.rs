@@ -316,8 +316,8 @@ pub struct Burst {
 /// One direction of a field.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct Fragment {
-    /// Where the direction's reach ended: inside the volume that exhausted it, or where it left
-    /// the struck tank.
+    /// Where the direction's reach ended: where it entered the first hard volume, which stops it,
+    /// or at the struck tank's horizon when it entered none.
     pub end: [f32; 3],
     /// The strength it was thrown with (reference-mm). Zero on a hand-authored clip.
     #[serde(default)]
