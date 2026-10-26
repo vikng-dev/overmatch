@@ -1756,3 +1756,85 @@ fn forest_tick_cost_bed() {
         eprintln!("forest tick cost: {row}");
     }
 }
+
+/// THE LYING PIECE'S COLLIDERS LIE DOWN IN THE PHYSICS WORLD (A2, ADR-0016): a tree felled on the
+/// shipped terrain has, within a few ticks, every segment above the cut carried in avian's own
+/// bounds — the `ColliderAabb` its broad phase reads — along the fall and near the ground, and
+/// the stump's bounds where they stood. A static body's child collider whose bounds avian
+/// refreshed only at insert would leave the fallen trunk standing for every hull and round.
+#[test]
+fn a_felled_trees_colliders_lie_down_in_the_physics_world() {
+    use crate::map::Prototype;
+    use crate::trees::{TreeBody, TreeState};
+    use avian3d::prelude::ColliderAabb;
+
+    let shipped = crate::map::tests::shipped_manifest();
+    let kind = shipped
+        .trees
+        .get("fir_1")
+        .expect("the shipped map's tree")
+        .clone();
+    let bare = {
+        let mut manifest = shipped;
+        let prototypes = manifest.prototypes.clone();
+        manifest
+            .instances
+            .retain(|instance| !matches!(prototypes[&instance.prototype], Prototype::Tree { .. }));
+        manifest
+    };
+    let grid = crate::terrain_grid::tests::shipped_grid();
+    let base = Vec3::new(40.0, grid.height_at(40.0, 40.0), 40.0);
+    let mut app = booted_sim_on_map(Some(grid), Some(bare));
+    start_fixed_clock(&mut app);
+    let root = {
+        let world = app.world_mut();
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, world);
+        crate::trees::spawn(
+            &mut commands,
+            &kind,
+            crate::scatter::MapInstance {
+                id: "fir_bed".to_owned(),
+                ordinal: 0,
+            },
+            Transform::from_translation(base),
+            None,
+        );
+        queue.apply(world);
+        world
+            .query_filtered::<Entity, With<TreeBody>>()
+            .single(world)
+            .expect("one tree")
+    };
+    for _ in 0..3 {
+        app.update();
+    }
+    // The segments in spawn order: bottom first.
+    let bounds = |app: &App| -> Vec<ColliderAabb> {
+        let world = app.world();
+        world
+            .get::<Children>(root)
+            .expect("segments")
+            .iter()
+            .filter_map(|child| world.get::<ColliderAabb>(child).copied())
+            .collect()
+    };
+    let standing = bounds(&app);
+    assert_eq!(standing.len(), kind.segments.len());
+    let tip_standing = standing[standing.len() - 1];
+    assert!(
+        tip_standing.max.y > base.y + 10.0,
+        "standing: the tip segment's bounds are up the trunk: {tip_standing:?}"
+    );
+    *app.world_mut().get_mut::<TreeState>(root).unwrap() = TreeState::Down { cut: 1, dir: 0 };
+    for _ in 0..3 {
+        app.update();
+    }
+    let down = bounds(&app);
+    assert_eq!(down[0], standing[0], "the stump's bounds stay");
+    let tip_down = down[down.len() - 1];
+    assert!(
+        tip_down.max.y < tip_standing.max.y - 5.0 && tip_down.max.x > base.x + 5.0,
+        "down: the tip segment's bounds lie along +x near the ground: {tip_down:?}"
+    );
+}
