@@ -398,16 +398,13 @@ mod tests {
         assert_eq!(shown(&app, &caps_bottom), [false; 3]);
         assert_eq!(turned(&app), [false; 3], "standing: upright");
 
+        // Standing again leaves the last tick and pose on the root: the derive that drops them is
+        // not mounted here, and the presentation reads the state first.
         let set = |app: &mut App, state: TreeState, resting: Option<Resting>| {
             let mut tree = app.world_mut().entity_mut(root);
             tree.insert(state);
-            match resting {
-                Some(resting) => {
-                    tree.insert((Fell { tick: 0 }, resting));
-                }
-                None => {
-                    tree.remove::<(Fell, Resting)>();
-                }
+            if let Some(resting) = resting {
+                tree.insert((Fell { tick: 0 }, resting));
             }
             app.update();
         };

@@ -111,9 +111,9 @@ fn publish_falls(
 /// Replica: apply every entry not yet applied to the tree its index names. A word no state of
 /// that tree encodes to is refused and logged, never clamped into a pose the authority did not
 /// set; an index no tree carries is a map mismatch the handshake should have refused. A ledger
-/// other than the one applied so far (another link's) first stands every tree back up, the
-/// transition tick with it, so a tree the new record never names stands and one it names falls
-/// as it says; the record is then consumed from its first entry.
+/// other than the one applied so far (another link's) first stands every tree back up — the
+/// derive then drops its pose and transition tick — so a tree the new record never names stands
+/// and one it names falls as it says; the record is then consumed from its first entry.
 fn apply_ledger(
     ledgers: Query<(Entity, &DestructionLedger)>,
     mut applied: ResMut<Applied>,
@@ -131,10 +131,8 @@ fn apply_ledger(
                 applied.entries
             );
         }
-        for (tree, _, _, mut state) in &mut trees {
-            if state.set_if_neq(TreeState::Standing) {
-                commands.entity(tree).remove::<Fell>();
-            }
+        for (_, _, _, mut state) in &mut trees {
+            state.set_if_neq(TreeState::Standing);
         }
         *applied = Applied {
             ledger: Some(ledger),

@@ -382,7 +382,8 @@ pub(crate) struct TreeSegment;
 
 /// The authority tick a tree's state last changed at (`ShotClock` units, the wire's `tick`).
 /// Inserted beside the `Down` state by whoever sets it — the authority's laws here, the ledger
-/// apply on a replica — so the presentation fuses the fall to the tick it happened at.
+/// apply on a replica — so the presentation fuses the fall to the tick it happened at; removed
+/// by [`derive_state`] when the state stands, as every derived marker is.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Fell {
     pub(crate) tick: u32,
@@ -482,7 +483,8 @@ fn lying_layers() -> CollisionLayers {
 
 /// Every peer derives the whole body from the state on every change of it (ADR-0016, A10),
 /// never from the body before: standing, every segment stands at its spawn height on
-/// [`standing_layers`] with the pool present and no resting pose; down, the stump's segments
+/// [`standing_layers`] with the pool present and no resting pose or transition tick; down, the
+/// stump's segments
 /// stand the same and every segment from the cut up lies in the resting pose on
 /// [`lying_layers`], the pose is recorded and the pool is gone — what is down takes no more
 /// dose. A tree back to standing (a replaced ledger) or down at another cut derives exactly as
@@ -562,7 +564,7 @@ fn derive_state(
                     .remove::<ComponentHealth>();
             }
             None => {
-                commands.entity(root).remove::<Resting>();
+                commands.entity(root).remove::<(Resting, Fell)>();
                 if !has_pool {
                     commands.entity(root).insert(ComponentHealth {
                         current: body.kind.hp,
@@ -1698,12 +1700,13 @@ pub(crate) mod tests {
 
     /// EVERY PEER DERIVES THE WHOLE BODY FROM THE STATE, IN EVERY ORDER (ADR-0016, A2, A10):
     /// down, the stump's segments keep their place and their standing filter, every segment from
-    /// the cut up leaves the vertical onto the lying filter, the resting pose is recorded and the
-    /// pool is gone; back to standing, every segment stands at its spawn height on the standing
-    /// filter, the pose is gone and the pool is back; down at another cut, the segments the new
-    /// cut spares stand again and the rest lie. A derive that skips `Standing`, touches only the
-    /// segments at and above the new cut, or leaves the pool or the pose from the state before
-    /// reds this.
+    /// the cut up leaves the vertical onto the lying filter, the resting pose is recorded, the
+    /// setter's transition tick stays and the pool is gone; back to standing, every segment
+    /// stands at its spawn height on the standing filter, the pose and the transition tick are
+    /// gone and the pool is back; down at another cut, the segments the new cut spares stand
+    /// again and the rest lie. A derive that skips `Standing`, touches only the segments at and
+    /// above the new cut, or leaves the pool, the pose or the tick from the state before reds
+    /// this.
     #[test]
     fn every_state_derives_the_whole_body_from_the_state() {
         let (mut app, root) =
@@ -1722,14 +1725,23 @@ pub(crate) mod tests {
             "standing derives the spawn"
         );
 
+        // As every setter does: a `Down` state lands with its transition tick.
         let set = |app: &mut App, state: TreeState| {
             *app.world_mut().get_mut::<TreeState>(root).unwrap() = state;
+            if let TreeState::Down { .. } = state {
+                app.world_mut().entity_mut(root).insert(Fell { tick: 7 });
+            }
             app.update();
         };
         set(&mut app, TreeState::Down { cut: 1, dir: 0 });
         assert!(
             app.world().get::<ComponentHealth>(root).is_none(),
             "down: no pool"
+        );
+        assert_eq!(
+            app.world().get::<Fell>(root),
+            Some(&Fell { tick: 7 }),
+            "down: the transition tick stays"
         );
         let resting = app
             .world()
@@ -1767,8 +1779,8 @@ pub(crate) mod tests {
             .expect("back to standing: the pool is back");
         assert_eq!((pool.current, pool.max), (100, 100), "full");
         assert!(
-            app.world().get::<Resting>(root).is_none(),
-            "no pose standing"
+            app.world().get::<Resting>(root).is_none() && app.world().get::<Fell>(root).is_none(),
+            "no pose and no transition tick standing"
         );
 
         set(&mut app, TreeState::Down { cut: 2, dir: 64 });
