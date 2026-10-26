@@ -204,8 +204,8 @@ pub(crate) fn collect(
                     out,
                 )?
             }
-            // The sandbox slabs. A convex solid is one closed surface by definition, so its shell
-            // id is `0` and there is nothing to look up.
+            // The sandbox slabs and the trees' trunk segments. A convex solid is one closed
+            // surface by definition, so its shell id is `0` and there is nothing to look up.
             _ => collect_convex(
                 collider,
                 position.0,
@@ -476,8 +476,9 @@ fn collect_convex(
     };
     // Parry is asked in world space, so this phase re-forms the world origin. It carries the world
     // grid's rounding with it, and that is acceptable HERE and nowhere else: convex shapes are the
-    // sandbox slabs, no production armour takes this path, and its own boundary probe already looks
-    // a millimetre behind the origin — four orders more slack than the rounding could ever be.
+    // sandbox slabs and the trees' trunk segments, no tank armour takes this path, and its own
+    // boundary probe already looks a millimetre behind the origin — four orders more slack than
+    // the rounding could ever be.
     let world_origin = corridor.anchor + corridor.origin;
 
     // Each boundary at its RAW `t`; the seed contract is applied once all are in.

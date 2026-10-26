@@ -191,14 +191,30 @@ pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint_for(
 /// connect: netcode encrypts the connect token under `protocol_id` (ADR-0018), so a client holding
 /// another map mints a token the server cannot decrypt and the request is dropped.
 ///
+/// The embedded substance registry (`materials.ron`) is folded too: every hard body's resistance
+/// — a tank's plates, a tree's trunk — resolves through it at load, so two builds embedding
+/// different registries integrate different walks over identical assets. The map digest cannot
+/// see it (the registry ships inside the binary, not beside it), and the pinned wire manifest
+/// does not (no type moves), so it enters here.
+///
 /// Computed once per process. The map's files cannot change under a running peer, and the heightmap
 /// is tens of megabytes.
 pub fn protocol_id() -> u64 {
     static ID: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *ID.get_or_init(|| {
         let digest = crate::map::content_digest(&crate::assets::asset_root());
-        fingerprint_field(PROTOCOL_FINGERPRINT, b"map_content", &digest.to_le_bytes())
+        handshake_tag(digest, crate::substances::MATERIALS_RON.as_bytes())
     })
+}
+
+/// [`PROTOCOL_FINGERPRINT`] folded with the world's content digest and the embedded registry.
+fn handshake_tag(map_digest: u64, materials: &[u8]) -> u64 {
+    let tag = fingerprint_field(
+        PROTOCOL_FINGERPRINT,
+        b"map_content",
+        &map_digest.to_le_bytes(),
+    );
+    fingerprint_field(tag, b"materials_ron", materials)
 }
 
 /// Fold the VERSION-INDEPENDENT wire manifest: surface, own-type graph, wire dependencies, and
@@ -1926,15 +1942,26 @@ mod tests {
             "the tag is stable per process"
         );
         // Sensitivity, through the production fold rather than a reimplementation of it: two maps
-        // are two tags.
-        let tag = |digest: u64| {
-            fingerprint_field(PROTOCOL_FINGERPRINT, b"map_content", &digest.to_le_bytes())
-        };
+        // are two tags, and so are two registries over one map — a build whose embedded
+        // `materials.ron` differs by one value resolves every hard body differently with every
+        // asset file identical, and must not connect.
+        let registry = crate::substances::MATERIALS_RON;
+        let tag = |digest: u64| handshake_tag(digest, registry.as_bytes());
         assert_ne!(tag(1), tag(2), "a different map must be a different tag");
         assert_eq!(
             tag(crate::map::content_digest(&crate::assets::asset_root())),
             protocol_id(),
-            "the tag must be the fold of THIS process's map",
+            "the tag must be the fold of THIS process's map and registry",
+        );
+        let edited = registry.replacen("26.2", "26.3", 1);
+        assert_ne!(
+            edited, registry,
+            "the fixture edit must land on a registry value"
+        );
+        assert_ne!(
+            handshake_tag(1, edited.as_bytes()),
+            tag(1),
+            "a registry value moved under identical assets: a different tag",
         );
     }
 

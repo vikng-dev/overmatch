@@ -24,7 +24,9 @@ use std::f32::consts::{FRAC_PI_2, PI};
 use std::path::Path;
 use std::sync::Arc;
 
-use avian3d::prelude::{Collider, CollisionLayers, Collisions, LayerMask, RigidBody};
+use avian3d::prelude::{
+    Collider, CollisionLayers, ContactGraph, ContactPair, LayerMask, RigidBody,
+};
 use avian3d::schedule::PhysicsSystems;
 use bevy::camera::visibility::VisibilityRange;
 use bevy::gltf::GltfExtras;
@@ -37,6 +39,7 @@ use crate::ballistics::{BallisticVolume, ComponentHealth, PoolEmptied, VolumeMat
 use crate::provenance::Sourced;
 use crate::scatter::MapInstance;
 use crate::substances::SubstanceRegistry;
+use crate::tank::Hull;
 use crate::terrain_grid::HeightGrid;
 use crate::{ClientReplica, ShotClock};
 
@@ -854,32 +857,32 @@ pub(crate) fn ram_torque(contacts: &[RamContact]) -> (f32, Vec2) {
         })
 }
 
-/// The authority's ram rule, read after the solver stored this tick's impulses: a standing tree
-/// whose trunk took its [`TreeBody::fell_torque`] of hull torque in one tick falls whole, along
-/// the push. The manifold normal runs from the pair's first collider to its second, so it points
-/// into the tree exactly when the tree is second.
-fn fell_on_ram(
-    collisions: Collisions,
-    segments: Query<&ChildOf, With<TreeSegment>>,
-    mut trees: Query<(&mut TreeState, &TreeBody, &Transform)>,
-    clock: Option<Res<ShotClock>>,
-    mut commands: Commands,
-) {
+/// The ram law's reading of one tick's contacts: for every ACTIVE touching pair between a trunk
+/// segment and a hull body, the solver's normal impulse (N·s) at its lever above the tree's base
+/// and its horizontal push into the tree, grouped by standing tree. Sleeping pairs are never read
+/// — their retained impulse is not this tick's — and only a hull pushes: a body that is not one (a
+/// tossed turret) rolls off a tree. The manifold normal runs from the pair's first collider to
+/// its second, so it points into the tree exactly when the tree's segment is the second.
+fn ram_contacts<'a>(
+    pairs: impl Iterator<Item = &'a ContactPair>,
+    segment_root: impl Fn(Entity) -> Option<Entity>,
+    is_hull: impl Fn(Entity) -> bool,
+    standing_base_y: impl Fn(Entity) -> Option<f32>,
+) -> BTreeMap<Entity, Vec<RamContact>> {
     let mut per_tree: BTreeMap<Entity, Vec<RamContact>> = BTreeMap::new();
-    for pair in collisions.iter() {
-        let (tree_first, root) = match (segments.get(pair.collider1), segments.get(pair.collider2))
-        {
-            (Ok(parent), Err(_)) => (true, parent.parent()),
-            (Err(_), Ok(parent)) => (false, parent.parent()),
-            _ => continue,
-        };
-        let Ok((state, _, transform)) = trees.get(root) else {
-            continue;
-        };
-        if *state != TreeState::Standing {
+    for pair in pairs {
+        let (tree_first, root, other) =
+            match (segment_root(pair.collider1), segment_root(pair.collider2)) {
+                (Some(root), None) => (true, root, pair.body2),
+                (None, Some(root)) => (false, root, pair.body1),
+                _ => continue,
+            };
+        if !other.is_some_and(&is_hull) {
             continue;
         }
-        let base_y = transform.translation.y;
+        let Some(base_y) = standing_base_y(root) else {
+            continue;
+        };
         let contacts = per_tree.entry(root).or_default();
         for manifold in &pair.manifolds {
             let into = if tree_first {
@@ -899,6 +902,32 @@ fn fell_on_ram(
             }
         }
     }
+    per_tree
+}
+
+/// The authority's ram rule, read after the solver stored this tick's impulses: a standing tree
+/// whose trunk took its [`TreeBody::fell_torque`] of hull torque in one tick falls whole, along
+/// the push ([`ram_contacts`] reads the contacts, [`ram_torque`] sums them).
+fn fell_on_ram(
+    graph: Res<ContactGraph>,
+    segments: Query<&ChildOf, With<TreeSegment>>,
+    hulls: Query<(), With<Hull>>,
+    mut trees: Query<(&mut TreeState, &TreeBody, &Transform)>,
+    clock: Option<Res<ShotClock>>,
+    mut commands: Commands,
+) {
+    let per_tree = ram_contacts(
+        graph.iter_active_touching(),
+        |collider| segments.get(collider).ok().map(ChildOf::parent),
+        |body| hulls.contains(body),
+        |root| {
+            trees
+                .get(root)
+                .ok()
+                .filter(|(state, _, _)| **state == TreeState::Standing)
+                .map(|(_, _, transform)| transform.translation.y)
+        },
+    );
     for (root, contacts) in per_tree {
         let (torque, push) = ram_torque(&contacts);
         let Ok((mut state, body, _)) = trees.get_mut(root) else {
@@ -1155,6 +1184,55 @@ pub(crate) mod tests {
             Ok(TreeState::Down { cut: 2, dir: 0 }),
             "the last segment is a legal cut"
         );
+    }
+
+    /// THE RAM LAW READS A HULL'S CONTACTS ON A STANDING TREE AND NOTHING ELSE: a pair whose
+    /// other body is not a hull (a tossed turret), a pair with no trunk segment, and any pair on
+    /// a tree no longer standing contribute nothing; a hull's point reads its impulse at its
+    /// height above the base, pushing along the manifold normal into the tree. Dropping the hull
+    /// check, the standing check or the normal's flip for a tree-first pair reds this.
+    #[test]
+    fn ram_contacts_read_hull_pairs_on_standing_trees_only() {
+        use avian3d::collision::contact_types::ContactId;
+        use avian3d::prelude::{ContactManifold, ContactPoint};
+        let mut world = World::new();
+        let mut entity = || world.spawn_empty().id();
+        let (tree, segment) = (entity(), entity());
+        let (hull, hull_collider) = (entity(), entity());
+        let (turret, turret_collider) = (entity(), entity());
+        let (other, other_collider) = (entity(), entity());
+        let pair = |c1, c2, b1, b2| {
+            let mut point =
+                ContactPoint::new(Vec3::ZERO, Vec3::ZERO, Vec3::new(0.0, 3.0, 0.0), 0.0);
+            point.normal_impulse = 10.0;
+            let mut pair = ContactPair::new(c1, c2, ContactId(0));
+            pair.body1 = Some(b1);
+            pair.body2 = Some(b2);
+            pair.manifolds = vec![ContactManifold::new([point], Vec3::X)];
+            pair
+        };
+        let pairs = [
+            pair(segment, hull_collider, tree, hull),
+            pair(turret_collider, segment, turret, tree),
+            pair(hull_collider, other_collider, hull, other),
+        ];
+        let segment_root = |collider| (collider == segment).then_some(tree);
+        let is_hull = |body| body == hull;
+        let read = ram_contacts(pairs.iter(), segment_root, is_hull, |root| {
+            (root == tree).then_some(1.0)
+        });
+        assert_eq!(read.len(), 1, "one tree pushed: {read:?}");
+        assert_eq!(
+            read[&tree],
+            vec![RamContact {
+                impulse: 10.0,
+                lever_m: 2.0,
+                push: Vec2::new(-1.0, 0.0),
+            }],
+            "the hull's point, 2 m above the base, pushing against the normal (tree first)",
+        );
+        let down = ram_contacts(pairs.iter(), segment_root, is_hull, |_| None);
+        assert!(down.is_empty(), "a tree not standing takes no push");
     }
 
     /// THE DOSE DECIDES THE CUT AND THE DIRECTION: a line dose that empties the pool breaks the

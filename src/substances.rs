@@ -45,7 +45,7 @@ use crate::provenance::Sourced;
 
 /// The shipped registry, embedded so the walk never depends on asset-server timing (the same reason
 /// [`crate::bake`] embeds the Tiger spec).
-const MATERIALS_RON: &str = include_str!("../assets/materials/materials.ron");
+pub(crate) const MATERIALS_RON: &str = include_str!("../assets/materials/materials.ron");
 
 /// Reference-mm per metre of the reference substance: the unit's definition (a millimetre of the
 /// reference steel is one reference-mm), not a measured number.

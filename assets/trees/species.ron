@@ -56,7 +56,7 @@
         crown_base_frac: 0.35,
         crown_width_frac: 0.16,
         whorl_spacing_m: 0.7,
-        fell_k: (7.0e5, Derived("ram-impulses.md 2026-10-26: three quarters of the spruce's for the shallower root plate; a 0.20 m birch (threshold 5.6 kN·s·m) falls to the measured 13.3 kN·s·m push, a 0.40 m one (45) holds it and falls at a 5 km/h ram (105)")),
+        fell_k: (7.0e5, Derived("ram-impulses.md 2026-10-26: seven ninths of the spruce's for the shallower root plate; a 0.20 m birch (threshold 5.6 kN·s·m) falls to the measured 13.3 kN·s·m push, a 0.40 m one (45) holds it and falls at a 5 km/h ram (105)")),
         hp: (700, Unknown("provisional balance data; set so a 75 mm AP round through the trunk does not fell a mature birch")),
     ),
 }

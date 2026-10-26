@@ -10,8 +10,8 @@
 // `Fir(height_m, canopy_diameter_m)`: a graybox fir, a trunk cylinder over the full height and a
 // canopy cone; a trunk collider only, never a block. The graybox the trees replaced, kept for the
 // frame-cost comparison: fir_tree_01_a/b/c were Fir(18.96, 6.5), Fir(14.08, 5.8), Fir(14.55, 6.2).
-// `Tree(asset)`: a tree of the damage model, `assets/trees/<asset>/`; a body per segment, never a
-// block.
+// `Tree(asset)`: a tree of the damage model, `assets/trees/<asset>/`; one static body with a
+// collider per segment, never a block.
 {
     "house_proxy": Building(min: (-2.0, -0.5, -3.0), max: (2.0, 2.5, 3.0)),
     "church_proxy": Building(min: (-15.0, -18.5, -7.5), max: (15.0, 18.5, 7.5)),
