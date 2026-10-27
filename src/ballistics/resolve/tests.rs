@@ -2340,24 +2340,17 @@ const TRUNK_STANDOFFS: [f32; 5] = [0.5, 2.0, 5.3, 9.7, 12.3];
 /// bite in and lay a positive chord into the trunk. A structured walk error instead stops the round
 /// dead at contact with no dose: the trunk becomes a wall.
 ///
-/// FAILS until the convex narrow phase is exact. `collect::collect_convex` reads a convex
-/// collider's entry and exit off parry's iterative GJK ray cast (`minkowski_ray_cast`,
-/// `parry3d-0.27.0/src/query/gjk/gjk.rs`), which stops on an absolute distance tolerance or a
-/// stall, not at the face. The hand-off partition (`walk::RayWalk::inside_at` against
-/// `collect::admit`) needs the entrance and the transit to place one face within its bands of each
-/// other (`walk::topology_band` and `collect::sitting_reach`, DERIVED: about 1e-5 m at 10 m).
-/// MEASURED on a 12-gon frustum of r 0.21 → 0.195 m, against an f64 clip of the same hull points,
-/// over 505 poses at 0.60–1.60 r from stand-offs of 0.5–12.3 m:
-///
-/// - entrance entries read up to 2.6e-4 m early. In 38 poses that put a seed's hand-off point
-///   between the read entry and the exact one: the seed declares the sample inside, the transit's
-///   own cast meets the entry ahead of its origin, and the walk refuses the second entry
-///   (`UnexpectedEntry`);
-/// - in 5, a sample passing 3e-5 m outside the 0° vertical edge (DERIVED from the hull points)
-///   reads an exit 1.3e-4 to 1.7e-4 m before an entry (`UnexpectedExit`);
-/// - in 1, a transit sample that misses the hull reads an entry and no exit (`IncompleteCorridor`).
+/// What it holds the convex narrow phase to: `collect::collect_convex` reads the hull through
+/// `collect::clip_convex`, one entry strictly before one exit or none, each at the exact plane
+/// parameter of a stored face. So the entrance and the transit corridors place a face within the
+/// hand-off band of each other (`walk::topology_band` with `collect::sitting_reach`, DERIVED:
+/// about 1e-5 m at 10 m), and the partition between the seed (`walk::RayWalk::inside_at`) and the
+/// corridor (`collect::admit`) counts every boundary once. An approximate reading that stops short
+/// of a face by more than that band puts a seed's hand-off point between its reading and the
+/// exact one, and the walk refuses the second entry (`UnexpectedEntry`); one that reads an exit
+/// before an entry at a vertical edge is `UnexpectedExit`; one that reads an entry with no exit is
+/// `IncompleteCorridor`. Each stops the round at contact with no dose.
 #[test]
-#[ignore = "fails until `collect::collect_convex` reads exact crossings, not parry's GJK cast"]
 fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
     let mut app = world_with_trimesh_plates(&[]);
     let tree = {

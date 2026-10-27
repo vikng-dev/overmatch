@@ -26,9 +26,11 @@
 //!   (`tank::spawn::insert_ballistic_volumes`). Traverses parry's BVH collecting every triangle the
 //!   ray crosses, and takes the normal from the triangle's WINDING, which is the mesh's real
 //!   orientation rather than a query artefact.
-//! - **Convex** — the sandbox/test slabs (`Collider::cuboid`). A convex solid presents exactly one
-//!   interval to a ray, so two casts settle it: forward for the entry, backward from the corridor's
-//!   far end for the exit. No production armour takes this path.
+//! - **Convex** — the sandbox slabs (`Collider::cuboid`) and the trees' trunk segments
+//!   (`Collider::convex_hull`). A convex solid presents exactly one interval to a ray, read by
+//!   clipping the ray against every face's half-space in f64: the latest face entered is the
+//!   entry, the earliest left is the exit, and an entry not strictly before its exit is a miss.
+//!   No production armour takes this path.
 //!
 //! # Never a partial list
 //!
@@ -72,8 +74,9 @@ const DETERMINANT_SLACK: f64 = 8.0 * f64::EPSILON;
 /// integers, at one and the same power of two.
 const RAY_SHIFT: i32 = 149;
 
-/// How far behind a corridor origin the convex narrow phase looks for the face the ray is sitting
-/// on. The march's own boundary nudge, so the two agree about what "just behind" means.
+/// How far behind a corridor origin an undeclared convex entry may lie and still be the face the
+/// ray is sitting on. The march's own boundary nudge, so the two agree about what "just behind"
+/// means.
 const BOUNDARY_PROBE: f32 = 1.0e-3;
 
 /// What the collector needs from the world. Borrowed rather than owned so the march can hand it the
@@ -161,7 +164,8 @@ pub(crate) fn collect(
         };
 
         let before = out.len();
-        match collider.shape_scaled().as_typed_shape() {
+        let shape = collider.shape_scaled().as_typed_shape();
+        match shape {
             TypedShape::TriMesh(mesh) => {
                 // SURFACE IDENTITY IS NOT OPTIONAL FOR ARMOUR. Without it the walk cannot tell two
                 // shells closing at one `t` from one shell claimed twice, and it must not guess —
@@ -207,8 +211,9 @@ pub(crate) fn collect(
             // The sandbox slabs and the trees' trunk segments. A convex solid is one closed
             // surface by definition, so its shell id is `0` and there is nothing to look up.
             _ => collect_convex(
-                collider,
-                position.0,
+                shape,
+                local_origin,
+                local_axis,
                 *rotation,
                 corridor,
                 node,
@@ -422,47 +427,55 @@ fn collect_trimesh(
     Ok(())
 }
 
-/// The one interval a convex solid presents.
+/// The one interval a convex solid presents, read exactly.
 ///
-/// Two casts, because a convex shape has exactly one entry and one exit and parry will happily give
-/// both: forward from the origin, and backward from the corridor's far end. Comparing them is also
-/// how "the ray started inside" is DETECTED rather than assumed — from inside, `solid: false` makes
-/// the forward cast return the same exit face the backward cast found, and the two `t` coincide.
+/// [`clip_convex`] reads the solid's entry and exit off its own faces: the latest face the ray
+/// enters and the earliest it leaves, each at the f64 plane parameter of the stored face. So the
+/// entrance corridor and a transit corridor restarted on its line place each face within the
+/// hand-off band of each other ([`sitting_reach`]), which the partition between the seed
+/// ([`super::walk::RayWalk::inside_at`]) and [`admit`] needs, and which an iterative cast that stops
+/// on a distance tolerance cannot promise. The line is the collider-local one [`collect`] hands
+/// every narrow phase, so a crossing is decided in the arithmetic the trimesh phase decides its own
+/// in, and a probe ([`Corridor::behind`]) reads the very line its start certifies.
 ///
-/// Normals are re-signed from the geometry (`entry opposes the ray, exit agrees`), which for a
-/// convex solid is exact and owes parry's normal convention nothing.
+/// Entry and exit are the shape's own outward faces, so the orientation is the geometry's and
+/// owes no query a convention: `entering` is the sign of the face's rate along the ray, the
+/// predicate that chose it.
 ///
-/// A probe ([`Corridor::behind`]) passes THROUGH its origin rather than starting there, so it casts
-/// from the origin both ways: whether the origin is inside is the same `solid: true` reading a
-/// corridor starting there makes, and an origin inside must find both boundaries within the probe.
+/// A probe passes THROUGH its origin rather than starting there: both boundaries are reported at
+/// `behind + t`, and an origin inside must find both within the probe.
 ///
 /// # Inside, undeclared, and unbounded is an ERROR
 ///
-/// A corridor can lie wholly INSIDE a convex solid: both `solid: true` probes answer zero, the
-/// backward boundary probe reaches no face, and there is nothing honest to report. Reporting nothing
-/// is not honest either — an empty corridor is what open air looks like, so the walk finds no
-/// material, [`super::walk::begin`] returns `Miss`, and the round flies through a solid volume at
-/// zero cost with no `Impact` raised at all. Free penetration, silent, and indistinguishable from
-/// armour that was never modelled.
+/// A corridor can begin INSIDE a convex solid with its entry far behind, and there is nothing
+/// honest to report then. Reporting nothing is not honest either — an empty corridor is what open
+/// air looks like, so the walk finds no material, [`super::walk::begin`] returns `Miss`, and the
+/// round flies through a solid volume at zero cost with no `Impact` raised at all. Free
+/// penetration, silent, and indistinguishable from armour that was never modelled.
 ///
-/// So it is a structured error. The seed contract is what carries containment legitimately: a sample
-/// that really is inside a volume arrives declared as such, read from a ray this module already
-/// walked. Undeclared containment means the caller lost track of where its samples are, and that is
-/// exactly the thing the walk refuses to infer its way past.
+/// So it is a structured error. The seed contract is what carries containment legitimately: a
+/// sample that really is inside a volume arrives declared as such, read from a ray this module
+/// already walked. Undeclared containment means the caller lost track of where its samples are,
+/// and that is exactly the thing the walk refuses to infer its way past. Within [`BOUNDARY_PROBE`]
+/// of the entry the sample is sitting on the face it just crossed, and the entry is reported at
+/// `t = 0`.
 ///
-/// The trimesh phase cannot make this check — there is no cheap containment test on a mesh, and "no
-/// faces in reach" is the NORMAL reading of a corridor crossing the hollow interior of a hull. Its
-/// protection is the seed contract alone. Convex shapes are the sandbox slabs and the trees' trunk
-/// segments (`crate::trees`), one solid per collider and never a compound, so the one entry/exit
-/// interval this collector reads is the whole truth of each; loud rather than permissive, because
-/// a corridor lost inside one of them is a sample the caller mislaid, not a hollow.
+/// The trimesh phase cannot make this check — there is no cheap containment test on a mesh, and
+/// "no faces in reach" is the NORMAL reading of a corridor crossing the hollow interior of a hull.
+/// Its protection is the seed contract alone. Convex shapes are the sandbox slabs and the trees'
+/// trunk segments (`crate::trees`), one solid per collider and never a compound, so the one
+/// entry/exit interval this collector reads is the whole truth of each; loud rather than
+/// permissive, because a corridor lost inside one of them is a sample the caller mislaid, not a
+/// hollow.
 #[expect(
     clippy::too_many_arguments,
     reason = "private kernel of `collect`; the alternative is a struct used exactly once"
 )]
 fn collect_convex(
-    collider: &Collider,
-    position: Vec3,
+    shape: TypedShape<'_>,
+    // Collider-local corridor origin and unit axis, as `collect` formed them.
+    origin: Vec3,
+    axis: Vec3,
     rotation: Rotation,
     corridor: &Corridor<'_>,
     node: Entity,
@@ -471,142 +484,79 @@ fn collect_convex(
     reach: f32,
     out: &mut Vec<FaceHit>,
 ) -> Result<(), WalkError> {
-    let Ok(axis) = Dir3::new(corridor.axis) else {
+    if Dir3::new(axis).is_err() {
+        return Ok(());
+    }
+    let failed = |reason| WalkError::CollectorFailed {
+        volume: node,
+        reason,
+    };
+    let Some(crossing) = clip_convex(shape, origin, axis).map_err(failed)? else {
         return Ok(());
     };
-    // Parry is asked in world space, so this phase re-forms the world origin. It carries the world
-    // grid's rounding with it, and that is acceptable HERE and nowhere else: convex shapes are the
-    // sandbox slabs and the trees' trunk segments, no tank armour takes this path, and its own
-    // boundary probe looks a millimetre behind the origin. The re-formed origin is off by at most
-    // 2⁻²⁴ of its distance from the world origin (DERIVED: 60 µm at 1 km), so the probe covers it
-    // while that distance is under 2²⁴ mm ≈ 16.8 km.
-    let world_origin = corridor.anchor + corridor.origin;
+    let (entry, exit) = (crossing.entry, crossing.exit);
 
-    // Each boundary at its RAW `t`; the seed contract is applied once all are in.
-    let mut found: Vec<(Boundary, FaceHit)> = Vec::new();
-    let mut push = |t: f64, normal: Vec3, entry: bool, face: u32| {
-        // Re-sign from the role, not from what the query returned.
-        let oriented = if (normal.dot(corridor.axis) < 0.0) == entry {
-            normal
-        } else {
-            -normal
-        };
+    // Each boundary at its RAW `t`; the seed contract is applied once both are in.
+    let mut found: Vec<(Boundary, FaceHit)> = Vec::with_capacity(2);
+    let mut push = |t: f64, face: ConvexFace, entering: bool| {
         found.push((
             Boundary {
                 t,
-                entry: Some(entry),
+                entry: Some(entering),
             },
             FaceHit {
                 volume: node,
                 primitive,
                 shell: 0,
-                contact: Contact::Face(face),
-                triangle: face,
+                contact: Contact::Face(face.face),
+                triangle: face.face,
                 t,
-                true_normal: oriented,
-                entering: entry,
+                // Back to world space: the solid's own outward normal, never re-signed.
+                true_normal: rotation * face.normal,
+                entering,
             },
         ));
     };
-    let cast = |from: Vec3, direction: Vec3, reach: f32, solid: bool| {
-        collider.cast_ray(position, rotation, from, direction, reach, solid)
-    };
 
     if corridor.behind > 0.0 {
-        // A probe through `world_origin`. Whether that point is inside is read by casts LEAVING it,
-        // the test a corridor starting there makes first; the interval's far boundaries come from
-        // casts re-formed at the probe's ends, outside the solid, where rounding moves no
-        // membership.
-        let behind = corridor.behind;
-        let ahead = corridor.length - behind;
-        let started_inside = |cast: Option<(f32, Vec3)>| cast.is_some_and(|(at, _)| at <= 0.0);
-        let forward = cast(world_origin, Vec3::from(axis), ahead, true);
-        let backward = cast(world_origin, -Vec3::from(axis), behind, true);
-        if started_inside(forward) || started_inside(backward) {
-            let (Some((entry, entry_normal)), Some((exit, exit_normal))) = (
-                cast(world_origin, -Vec3::from(axis), behind, false),
-                cast(world_origin, Vec3::from(axis), ahead, false),
-            ) else {
-                return Err(WalkError::CollectorFailed {
-                    volume: node,
-                    reason: "a probe through a convex volume does not reach its boundary",
-                });
-            };
-            push(f64::from(behind) - f64::from(entry), entry_normal, true, 0);
-            push(f64::from(behind) + f64::from(exit), exit_normal, false, 1);
-        } else if let Some((entry, entry_normal)) = forward {
-            push(f64::from(behind) + f64::from(entry), entry_normal, true, 0);
-            let far = world_origin + corridor.axis * ahead;
-            if let Some((exit, exit_normal)) = cast(far, -Vec3::from(axis), ahead, true) {
-                push(
-                    f64::from(corridor.length) - f64::from(exit),
-                    exit_normal,
-                    false,
-                    1,
-                );
-            }
-        } else if let Some((exit, exit_normal)) = backward {
-            let near = world_origin - corridor.axis * behind;
-            if let Some((entry, entry_normal)) = cast(near, Vec3::from(axis), behind, true) {
-                push(f64::from(entry), entry_normal, true, 0);
-            }
-            push(f64::from(behind) - f64::from(exit), exit_normal, false, 1);
+        let behind = f64::from(corridor.behind);
+        let ahead = f64::from(corridor.length - corridor.behind);
+        // The probe was sized to pass through every candidate: an origin inside the solid whose
+        // boundary lies past either end is a probe that does not reach it, never an interval
+        // declared from one side.
+        if entry.t <= 0.0 && exit.t >= 0.0 && (-entry.t > behind || exit.t > ahead) {
+            return Err(failed(
+                "a probe through a convex volume does not reach its boundary",
+            ));
         }
+        push(behind + entry.t, entry, true);
+        push(behind + exit.t, exit, false);
     } else {
-        // Both ends are probed with `solid: true`, and that is the whole trick.
-        //
-        // `solid: false` reports the EXIT when a ray begins inside a shape — so it cannot
-        // distinguish "began inside" from "grazed an edge" (entry and exit coincide out at
-        // distance), and it answers for the wrong face whenever a cast origin lands exactly ON a
-        // surface, which the corridor's own endpoints do constantly because they ARE face positions
-        // a previous walk computed. `solid: true` answers one unambiguous question instead: zero if
-        // the origin is within, otherwise the distance to the nearest surface.
-        let entry = cast(world_origin, Vec3::from(axis), corridor.length, true);
-        let far = world_origin + corridor.axis * corridor.length;
-        let exit = cast(far, -Vec3::from(axis), corridor.length, true);
-
-        match entry {
-            // The corridor BEGINS inside. The entry is behind the origin, so look for it there — the
-            // origin lands on a face constantly, and that face is the one the ray is sitting on.
-            // Anything deeper than this probe is not: that sample should have been seeded, and if it
-            // was not, the walk says so rather than this papering over it.
-            //
-            // The trimesh path needs none of this — its own kernel reports faces at negative `t`,
-            // and `admit` places them.
-            Some((distance, _)) if distance <= 0.0 => {
-                if !seeded {
-                    match cast(world_origin, -Vec3::from(axis), BOUNDARY_PROBE, false) {
-                        // At `t = 0` deliberately, NOT at `-behind`. This phase has already made
-                        // the "sitting on the face" judgement itself, and BOUNDED it: the probe
-                        // reaches one `BOUNDARY_PROBE` and no further, so nothing farther behind can
-                        // arrive here at all. `admit`'s clamp is the trimesh phase's bound, where no
-                        // such probe limits how far back a sloped face may be found.
-                        Some((_, normal)) => push(0.0, normal, true, 0),
-                        // Inside, undeclared, and the entry face is nowhere near — see the note
-                        // above. Silence here is free penetration, so this is where it stops.
-                        None => {
-                            return Err(WalkError::CollectorFailed {
-                                volume: node,
-                                reason: "a sample begins inside a convex volume it was not seeded \
-                                         for, with no entry face within the boundary probe",
-                            });
-                        }
-                    }
+        if entry.t <= 0.0 && exit.t > 0.0 {
+            // The corridor BEGINS inside. The entry is behind the origin, and only within the
+            // boundary probe is it the face the ray is sitting on: that one is reported at `t = 0`
+            // deliberately, NOT at its own parameter, because this phase has made the "sitting on
+            // the face" judgement itself and BOUNDED it. Anything deeper should have been seeded,
+            // and if it was not, the walk says so rather than this papering over it. `admit`'s
+            // clamp is the trimesh phase's bound, where no such probe limits how far back a sloped
+            // face may be found.
+            if !seeded {
+                if -entry.t <= f64::from(BOUNDARY_PROBE) {
+                    push(0.0, entry, true);
+                } else {
+                    return Err(failed(
+                        "a sample begins inside a convex volume it was not seeded for, with no \
+                         entry face within the boundary probe",
+                    ));
                 }
             }
-            Some((distance, normal)) => push(distance as f64, normal, true, 0),
-            None => {}
+        } else if entry.t > 0.0 {
+            push(entry.t, entry, true);
         }
-
-        match exit {
-            // The corridor ENDS inside. There is no exit to report, and inventing one is the whole
-            // defect class: the walk reports `IncompleteCorridor` and the driver extends.
-            Some((distance, _)) if distance <= 0.0 => {}
-            Some((distance, normal)) => {
-                push(corridor.length as f64 - distance as f64, normal, false, 1)
-            }
-            None => {}
-        }
+        // The exit at its raw parameter, for `admit` to place: ahead it is the corridor's, a hair
+        // behind the origin it is the seed's shell closing at `t = 0`, and farther behind it is
+        // already traversed. A solid wholly behind the origin presents no entry here.
+        push(exit.t, exit, false);
     }
     found.sort_by(|a, b| a.0.t.total_cmp(&b.0.t));
     let boundaries: Vec<Boundary> = found.iter().map(|(boundary, _)| *boundary).collect();
@@ -617,6 +567,150 @@ fn collect_convex(
         }
     }
     Ok(())
+}
+
+/// One boundary of the interval a convex solid presents to a ray.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ConvexFace {
+    /// Where the ray crosses the face's plane, from the corridor origin: the parameter the walk
+    /// orders and measures on, in f64 like every [`FaceHit::t`].
+    t: f64,
+    /// The face's index in the shape's stored order.
+    face: u32,
+    /// The face's outward unit normal, in the shape's local frame.
+    normal: Vec3,
+}
+
+/// The interval a convex solid presents to a ray: one entry strictly before one exit.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ConvexCrossing {
+    entry: ConvexFace,
+    exit: ConvexFace,
+}
+
+/// The ray clipped against a convex solid's faces, one half-space at a time.
+///
+/// A convex solid is the intersection of its faces' inner half-spaces, so along a ray it is one
+/// interval: the ENTRY is the latest crossing among the faces the ray enters, the EXIT the earliest
+/// among those it leaves, and the ray misses when the entry is not strictly before the exit. A
+/// touch at a vertex or along an edge, entry equal to exit, bounds no material — the reading the
+/// walk gives a tangent fan (`walk::canonical_crossings`). CLOSED: a ray in the plane of a face it
+/// is not outside of is inside, so a ray along an edge crosses with its full chord and one a hair
+/// outside the face misses.
+///
+/// f64 over the stored f32 points and normals, in one fixed order with no transcendental call:
+/// each product is exact, the three-term sums round twice and the quotient once, so the parameter
+/// is the stored plane's within rounding, and authority and replica read bit-identical parameters.
+/// The extremum is taken in stored face order with a strict comparison, so an exact tie is
+/// resolved the same way on every peer.
+struct ConvexClip {
+    origin: DVec3,
+    axis: DVec3,
+    entry: Option<ConvexFace>,
+    exit: Option<ConvexFace>,
+    /// A face the ray runs parallel to and outside of: a miss, whatever the other faces say.
+    missed: bool,
+}
+
+impl ConvexClip {
+    fn new(origin: Vec3, axis: Vec3) -> Self {
+        Self {
+            origin: origin.as_dvec3(),
+            axis: axis.as_dvec3(),
+            entry: None,
+            exit: None,
+            missed: false,
+        }
+    }
+
+    /// One face, as its outward unit normal through a point of its plane.
+    fn face(&mut self, face: u32, normal: Vec3, point: Vec3) {
+        let normal_exact = normal.as_dvec3();
+        // The origin's signed distance from the plane, positive outside, and the ray's rate across
+        // it, positive outward.
+        let offset = normal_exact.dot(self.origin - point.as_dvec3());
+        let rate = normal_exact.dot(self.axis);
+        if rate == 0.0 {
+            if offset > 0.0 {
+                self.missed = true;
+            }
+            return;
+        }
+        let candidate = ConvexFace {
+            t: -offset / rate,
+            face,
+            normal,
+        };
+        if rate < 0.0 {
+            if self.entry.is_none_or(|best| candidate.t > best.t) {
+                self.entry = Some(candidate);
+            }
+        } else if self.exit.is_none_or(|best| candidate.t < best.t) {
+            self.exit = Some(candidate);
+        }
+    }
+
+    /// The interval, or `None` for a miss. A bounded solid has a face the ray enters and one it
+    /// leaves in every direction, so lacking either is a broken shape, not a miss.
+    fn finish(self) -> Result<Option<ConvexCrossing>, &'static str> {
+        let (Some(entry), Some(exit)) = (self.entry, self.exit) else {
+            return Err("a convex candidate's faces do not close around the ray");
+        };
+        Ok((!self.missed && entry.t < exit.t).then_some(ConvexCrossing { entry, exit }))
+    }
+}
+
+/// Visit every face of a polyhedral convex shape as its outward unit normal through one of its
+/// vertices, in the shape's stored order: the half-spaces whose intersection is the solid.
+///
+/// A polyhedron's face plane is its stored normal through its first stored vertex, the plane
+/// parry's own `ConvexPolyhedron::check_geometry` holds the hull to. A cuboid's six faces are its
+/// axes at its half-extents. A shape without stored faces (a ball, a cylinder, a capsule) has no
+/// exact reading and is refused.
+fn convex_faces(
+    shape: TypedShape<'_>,
+    mut visit: impl FnMut(u32, Vec3, Vec3),
+) -> Result<(), &'static str> {
+    match shape {
+        TypedShape::Cuboid(cuboid) => {
+            let h = cuboid.half_extents;
+            let faces = [
+                (Vec3::X, h.x),
+                (Vec3::NEG_X, h.x),
+                (Vec3::Y, h.y),
+                (Vec3::NEG_Y, h.y),
+                (Vec3::Z, h.z),
+                (Vec3::NEG_Z, h.z),
+            ];
+            for (face, (normal, extent)) in faces.into_iter().enumerate() {
+                visit(face as u32, normal, normal * extent);
+            }
+        }
+        TypedShape::ConvexPolyhedron(hull) => {
+            let (points, adjacent) = (hull.points(), hull.vertices_adj_to_face());
+            for (face, stored) in hull.faces().iter().enumerate() {
+                let point = adjacent
+                    .get(stored.first_vertex_or_edge as usize)
+                    .and_then(|&vertex| points.get(vertex as usize))
+                    .ok_or("a convex polyhedron's face names no stored vertex")?;
+                visit(face as u32, stored.normal, *point);
+            }
+        }
+        _ => return Err("a convex candidate is neither a cuboid nor a convex polyhedron"),
+    }
+    Ok(())
+}
+
+/// The interval a convex solid presents to the ray `origin + t · axis`, in the shape's local
+/// frame — see [`ConvexClip`].
+fn clip_convex(
+    shape: TypedShape<'_>,
+    origin: Vec3,
+    axis: Vec3,
+) -> Result<Option<ConvexCrossing>, &'static str> {
+    let mut clip = ConvexClip::new(origin, axis);
+    convex_faces(shape, |face, normal, point| clip.face(face, normal, point))?;
+    clip.finish()
 }
 
 /// One boundary of one shell as a narrow phase found it, at its RAW `t`.
@@ -2455,5 +2549,417 @@ mod tests {
         assert!(!across.is_zero(), "a needle's cap is still a crossing");
         let t = numerator.to_f64() / across.to_f64();
         assert!((t - 0.5).abs() < 1.0e-9, "{t}");
+    }
+
+    // -----------------------------------------------------------------------------------------
+    // The convex clip
+    // -----------------------------------------------------------------------------------------
+
+    /// The 12-gon the test frustum is hulled from: unit-circle points at 30° steps, as literals
+    /// (fixture data).
+    const TWELVE_GON: [(f32, f32); 12] = [
+        (1.0, 0.0),
+        (0.866_025_4, 0.5),
+        (0.5, 0.866_025_4),
+        (0.0, 1.0),
+        (-0.5, 0.866_025_4),
+        (-0.866_025_4, 0.5),
+        (-1.0, 0.0),
+        (-0.866_025_4, -0.5),
+        (-0.5, -0.866_025_4),
+        (0.0, -1.0),
+        (0.5, -0.866_025_4),
+        (0.866_025_4, -0.5),
+    ];
+
+    /// The test frustum (fixture data): a 12-gon of radius `FRUSTUM_R_BOTTOM` at `y = 0` tapering
+    /// to `FRUSTUM_R_TOP` at `y = FRUSTUM_HEIGHT`, so its radius at height `y` is
+    /// `0.3 − 0.05 · y`.
+    const FRUSTUM_R_BOTTOM: f32 = 0.3;
+    const FRUSTUM_R_TOP: f32 = 0.2;
+    const FRUSTUM_HEIGHT: f32 = 2.0;
+
+    /// How far the hull's stored faces may sit from the ideal frustum: DERIVED from the f32 build.
+    /// The ring literals and the radii products round at `2^-24` of 0.3 m, under 2e-8 m, and a
+    /// stored unit normal is off the ideal by about `2^-24`, which moves a face plane by under
+    /// 1e-8 m across the 0.3 m radius; a crossing at 75° incidence reads that along the ray at
+    /// four times the size. Under 1e-7 m in all, so 1e-6 m holds with margin.
+    const FRUSTUM_BUILD_TOLERANCE: f64 = 1.0e-6;
+
+    /// A hair: the offset the edge, vertex and miss poses stand from a face. Eight f32 ULPs at
+    /// 1 m, so the stored origin keeps most of it.
+    const HAIR: f32 = 1.0e-6;
+
+    /// What a pose expects of the clip.
+    enum Expect {
+        /// A miss or a touch: nothing.
+        Miss,
+        /// These parameters, bit for bit.
+        Exactly(f64, f64),
+        /// A crossing of this chord, within the hull's build tolerance.
+        Chord(f64),
+        /// A crossing of a chord of the hair's size: positive and under twice the hair.
+        Sliver,
+    }
+
+    fn twelve_gon_frustum() -> Collider {
+        let points = TWELVE_GON
+            .iter()
+            .flat_map(|&(c, s)| {
+                [
+                    Vec3::new(FRUSTUM_R_BOTTOM * c, 0.0, FRUSTUM_R_BOTTOM * s),
+                    Vec3::new(FRUSTUM_R_TOP * c, FRUSTUM_HEIGHT, FRUSTUM_R_TOP * s),
+                ]
+            })
+            .collect();
+        Collider::convex_hull(points).expect("two rings of positive radius at distinct heights")
+    }
+
+    /// The clip of one collider's shape, as `(entry, exit)` parameters.
+    fn clip(collider: &Collider, origin: Vec3, axis: Vec3) -> Option<(f64, f64)> {
+        clip_convex(collider.shape_scaled().as_typed_shape(), origin, axis)
+            .expect("a polyhedral solid")
+            .map(|crossing| (crossing.entry.t, crossing.exit.t))
+    }
+
+    /// The cuboid's interval in SLAB form, the closed form the clip must reproduce bit for bit:
+    /// each axis the ray moves along is entered at one extent and left at the other, and an axis
+    /// it does not move along contains the ray or misses it outright.
+    fn slab_interval(half: Vec3, origin: Vec3, axis: Vec3) -> Option<(f64, f64)> {
+        let (mut entry, mut exit) = (f64::NEG_INFINITY, f64::INFINITY);
+        for k in 0..3 {
+            let (o, d, h) = (f64::from(origin[k]), f64::from(axis[k]), f64::from(half[k]));
+            if d == 0.0 {
+                if o.abs() > h {
+                    return None;
+                }
+                continue;
+            }
+            let (near, far) = ((-h - o) / d, (h - o) / d);
+            entry = entry.max(near.min(far));
+            exit = exit.min(near.max(far));
+        }
+        (entry < exit).then_some((entry, exit))
+    }
+
+    /// The same interval read from the shape's stored faces in exact integer arithmetic
+    /// ([`crate::exact`]), each parameter formed by one f64 division of two exact integers: the
+    /// reference the clip's f64 is held to. Returns the entry, the exit and the bound within which
+    /// the two readings agree, or `None` for a miss.
+    ///
+    /// The bound is DERIVED: the clip's three-term offset sum rounds twice, at most
+    /// `2 · 2^-53` of the sum of its terms' magnitudes, and its quotient once; the reference's two
+    /// conversions are each within `2^-52` and its division within `2^-53`. Eight ULP of the
+    /// parameter plus eight of the terms' spread over the rate covers both sides twice over.
+    fn exact_interval(collider: &Collider, origin: Vec3, axis: Vec3) -> Option<(f64, f64, f64)> {
+        let scaled = |v: Vec3| [v.x, v.y, v.z].map(|c| Int::from_f32_scaled(c, RAY_SHIFT));
+        let dot = |p: [Int; 3], q: [Int; 3]| p[0].mul(q[0]).add(p[1].mul(q[1])).add(p[2].mul(q[2]));
+        let (o, d) = (scaled(origin), scaled(axis));
+        let (mut entry, mut exit, mut missed) = (None, None, false);
+        convex_faces(
+            collider.shape_scaled().as_typed_shape(),
+            |_, normal, point| {
+                let (n, p) = (scaled(normal), scaled(point));
+                let numerator = dot(n, [p[0].sub(o[0]), p[1].sub(o[1]), p[2].sub(o[2])]);
+                let denominator = dot(n, d);
+                if denominator.is_zero() {
+                    // Parallel: outside when the plane lies behind the origin along its normal.
+                    missed |= numerator.signum() < 0;
+                    return;
+                }
+                let t = numerator.to_f64() / denominator.to_f64();
+                let spread: f64 = (0..3)
+                    .map(|k| {
+                        (f64::from(normal[k]) * (f64::from(origin[k]) - f64::from(point[k]))).abs()
+                    })
+                    .sum();
+                let bound = 8.0
+                    * f64::EPSILON
+                    * (t.abs() + spread / normal.as_dvec3().dot(axis.as_dvec3()).abs());
+                let entering = denominator.signum() < 0;
+                let slot: &mut Option<(f64, f64)> = if entering { &mut entry } else { &mut exit };
+                let better =
+                    slot.is_none_or(|(best, _)| if entering { t > best } else { t < best });
+                if better {
+                    *slot = Some((t, bound));
+                }
+            },
+        )
+        .expect("a polyhedral solid");
+        let (entry, entry_bound) = entry.expect("a face the ray enters");
+        let (exit, exit_bound) = exit.expect("a face the ray leaves");
+        (!missed && entry < exit).then_some((entry, exit, entry_bound.max(exit_bound)))
+    }
+
+    /// How far inside the IDEAL frustum a point lies: positive inside, zero on the surface,
+    /// negative outside. The cross-section at height `y` is the 12-gon of radius `0.3 − 0.05 y`,
+    /// whose facets' apothem is that radius times `cos 15°` along the twelve facet normals, and the
+    /// caps bound the height.
+    fn frustum_margin(point: DVec3) -> f64 {
+        let radius = f64::from(FRUSTUM_R_BOTTOM)
+            - (f64::from(FRUSTUM_R_BOTTOM) - f64::from(FRUSTUM_R_TOP)) * point.y
+                / f64::from(FRUSTUM_HEIGHT);
+        let apothem = radius * 15.0_f64.to_radians().cos();
+        let reach = (0..12)
+            .map(|k| {
+                let angle = (15.0 + 30.0 * f64::from(k)).to_radians();
+                point.x * angle.cos() + point.z * angle.sin()
+            })
+            .fold(f64::NEG_INFINITY, f64::max);
+        (apothem - reach)
+            .min(point.y)
+            .min(f64::from(FRUSTUM_HEIGHT) - point.y)
+    }
+
+    /// A CUBOID IS CLIPPED TO ITS SLAB INTERVAL BIT FOR BIT: the clip's entry and exit are the
+    /// closed-form `(±h − o) / d` of the faces that bound the ray, one entry strictly before one
+    /// exit or nothing, through the centre, a hair inside a vertex (a chord of the hair's size),
+    /// exactly through a vertex (a touch: nothing), along an edge a hair inside (the full chord)
+    /// or outside (nothing), parallel to a face a hair outside (nothing), and from inside (the
+    /// entry behind, the exit ahead). The clip is the only reading the walk has of a slab, so a
+    /// mutant that took f32, the wrong extremum, or an open boundary would hand the walk a wrong
+    /// chord or a touch as a crossing.
+    #[test]
+    fn a_cuboid_is_clipped_to_its_slab_interval_bit_for_bit() {
+        let half = Vec3::ONE;
+        let cuboid = Collider::cuboid(2.0, 2.0, 2.0);
+        let diagonal = Vec3::new(1.0, -1.0, 0.0).normalize();
+        let poses = [
+            (
+                "centre",
+                Vec3::new(0.2, -0.3, 5.0),
+                Vec3::NEG_Z,
+                Expect::Exactly(4.0, 6.0),
+            ),
+            // The line `x + y = 2` through the vertex (1, 1, 1): the +y entry and the +x exit at
+            // one parameter, a touch.
+            (
+                "vertex touch",
+                Vec3::new(-1.0, 3.0, 1.0),
+                diagonal,
+                Expect::Miss,
+            ),
+            // The line `x + y = 2 − 2 · HAIR` just under the top face: a corner cut, DERIVED as a
+            // chord of `2 · HAIR / cos 45°`, 2.8e-6 m.
+            (
+                "vertex hair inside",
+                Vec3::new(-1.0, 3.0 - 2.0 * HAIR, 1.0 - HAIR),
+                diagonal,
+                Expect::Sliver,
+            ),
+            (
+                "vertex hair outside",
+                Vec3::new(-1.0, 3.0 + 2.0 * HAIR, 1.0),
+                diagonal,
+                Expect::Miss,
+            ),
+            (
+                "edge hair inside",
+                Vec3::new(1.0 - HAIR, 1.0 - HAIR, 5.0),
+                Vec3::NEG_Z,
+                Expect::Exactly(4.0, 6.0),
+            ),
+            (
+                "edge hair outside",
+                Vec3::new(1.0 + HAIR, 1.0 - HAIR, 5.0),
+                Vec3::NEG_Z,
+                Expect::Miss,
+            ),
+            (
+                "face hair outside",
+                Vec3::new(0.0, 1.0 + HAIR, 5.0),
+                Vec3::NEG_Z,
+                Expect::Miss,
+            ),
+            (
+                "from inside",
+                Vec3::new(0.25, 0.5, -0.5),
+                Vec3::Z,
+                Expect::Exactly(-0.5, 1.5),
+            ),
+            // On the top face's plane and inside its outline: closed, so crossed.
+            (
+                "on a face",
+                Vec3::new(0.0, 1.0, 5.0),
+                Vec3::NEG_Z,
+                Expect::Exactly(4.0, 6.0),
+            ),
+        ];
+        for (pose, origin, axis, expected) in poses {
+            let read = clip(&cuboid, origin, axis);
+            assert_eq!(
+                read,
+                slab_interval(half, origin, axis),
+                "{pose}: the clip is the slab closed form, bit for bit"
+            );
+            match expected {
+                Expect::Miss => {
+                    assert_eq!(read, None, "{pose}: a miss or a touch bounds no material");
+                }
+                Expect::Exactly(entry, exit) => assert_eq!(read, Some((entry, exit)), "{pose}"),
+                Expect::Sliver => {
+                    let (entry, exit) = read.unwrap_or_else(|| panic!("{pose}: a crossing"));
+                    assert!(
+                        exit - entry > 0.0 && exit - entry < 4.0 * f64::from(HAIR),
+                        "{pose}: a hair inside a vertex is a chord of the hair's size, not {}",
+                        exit - entry
+                    );
+                }
+                Expect::Chord(_) => unreachable!("a cuboid's chords are exact"),
+            }
+        }
+    }
+
+    /// A 12-GON FRUSTUM IS CLIPPED TO ITS STORED FACES WITHIN f64 ROUNDING: the clip's entry and
+    /// exit agree with the exact integer reading of the same stored faces to within the rounding
+    /// the f64 arithmetic can lose, and both lie on the ideal frustum to within the hull's f32
+    /// build, through the centre, a hair inside a bottom vertex (a chord of the hair's size) or
+    /// outside it (nothing), along a slanted edge a hair inside (the edge's full length) or outside
+    /// (nothing), parallel to the top cap a hair above it and to a facet a hair outside it
+    /// (nothing), and from inside (the entry behind, the exit ahead). The trees' trunks are this
+    /// hull, and the walk's hand-off partition relies on the entrance and the transit reading one
+    /// face within a micron of each other: a mutant that read the faces approximately, clipped
+    /// against the wrong vertex's plane, or took the wrong extremum would put a seed's hand-off
+    /// between the two readings and fail the walk.
+    #[test]
+    fn a_twelve_gon_frustum_is_clipped_to_its_stored_faces_within_f64_rounding() {
+        let frustum = twelve_gon_frustum();
+        let hair = HAIR;
+        let tan_15 = 15.0_f64.to_radians().tan();
+        // The bottom vertex at 0° and the slanted edge rising from it to the top ring.
+        let corner = Vec3::new(FRUSTUM_R_BOTTOM, 0.0, 0.0);
+        let edge = Vec3::new(FRUSTUM_R_TOP - FRUSTUM_R_BOTTOM, FRUSTUM_HEIGHT, 0.0).normalize();
+        // Down through the corner at 45°, and the in-plane direction into the solid from it.
+        let down = Vec3::new(-1.0, -1.0, 0.0).normalize();
+        let inward = Vec3::new(-1.0, 1.0, 0.0).normalize();
+        // Along the facet between 0° and 30° at height 1, a hair outside its apothem.
+        let facet_normal = Vec3::new(
+            15.0_f32.to_radians().cos(),
+            0.0,
+            15.0_f32.to_radians().sin(),
+        );
+        let facet_tangent = Vec3::new(-facet_normal.z, 0.0, facet_normal.x);
+        // The frustum's radius at height 1, where the horizontal poses cross.
+        let radius_at_1 = FRUSTUM_R_BOTTOM - (FRUSTUM_R_BOTTOM - FRUSTUM_R_TOP) / FRUSTUM_HEIGHT;
+        let apothem_at_1 = radius_at_1 * 15.0_f32.to_radians().cos();
+        // A horizontal chord at height 1 across the 12-gon, DERIVED: twice `r(1) − z · tan 15°`
+        // between the facet at 15° and its opposite.
+        let chord_at_1 = |z: f64| 2.0 * (f64::from(radius_at_1) - z * tan_15);
+        let poses = [
+            (
+                "centre",
+                Vec3::new(10.0, 1.0, 0.1),
+                Vec3::NEG_X,
+                Expect::Chord(chord_at_1(0.1)),
+            ),
+            // A corner cut `HAIR` deep along the 45° diagonal: the facet rises at 0.05 against
+            // the cap, so the chord is DERIVED as `1.347 · HAIR`.
+            (
+                "vertex hair inside",
+                corner + inward * hair - down * 2.0,
+                down,
+                Expect::Sliver,
+            ),
+            (
+                "vertex hair outside",
+                corner - inward * hair - down * 2.0,
+                down,
+                Expect::Miss,
+            ),
+            // DERIVED: the slanted edge's length, `sqrt(0.1² + 2²)`, cap to cap.
+            (
+                "edge hair inside",
+                corner - Vec3::X * hair - edge,
+                edge,
+                Expect::Chord(
+                    f64::from(FRUSTUM_HEIGHT).hypot(f64::from(FRUSTUM_R_BOTTOM - FRUSTUM_R_TOP)),
+                ),
+            ),
+            (
+                "edge hair outside",
+                corner + Vec3::X * hair - edge,
+                edge,
+                Expect::Miss,
+            ),
+            (
+                "cap hair above",
+                Vec3::new(10.0, FRUSTUM_HEIGHT + hair, 0.0),
+                Vec3::NEG_X,
+                Expect::Miss,
+            ),
+            (
+                "facet hair outside",
+                facet_normal * (apothem_at_1 + hair) + Vec3::Y - facet_tangent * 2.0,
+                facet_tangent,
+                Expect::Miss,
+            ),
+            (
+                "from inside",
+                Vec3::new(0.05, 1.0, 0.02),
+                Vec3::NEG_X,
+                Expect::Chord(chord_at_1(0.02)),
+            ),
+        ];
+        for (pose, origin, axis, expected) in poses {
+            let read = clip(&frustum, origin, axis);
+            if matches!(expected, Expect::Miss) {
+                assert_eq!(read, None, "{pose}: a miss or a touch bounds no material");
+                assert_eq!(exact_interval(&frustum, origin, axis), None, "{pose}");
+                continue;
+            }
+            let (entry, exit) = read.unwrap_or_else(|| panic!("{pose}: a crossing"));
+            let (exact_entry, exact_exit, bound) =
+                exact_interval(&frustum, origin, axis).unwrap_or_else(|| panic!("{pose}"));
+            assert!(
+                (entry - exact_entry).abs() <= bound && (exit - exact_exit).abs() <= bound,
+                "{pose}: the clip reads the stored faces within f64 rounding: \
+                 ({entry}, {exit}) against ({exact_entry}, {exact_exit}), bound {bound}"
+            );
+            assert!(entry < exit, "{pose}: one entry strictly before one exit");
+            let at = |t: f64| origin.as_dvec3() + axis.as_dvec3() * t;
+            for (end, t) in [("entry", entry), ("exit", exit)] {
+                let margin = frustum_margin(at(t));
+                assert!(
+                    margin.abs() <= FRUSTUM_BUILD_TOLERANCE,
+                    "{pose}: the {end} lies on the ideal frustum, not {margin} m inside"
+                );
+            }
+            match expected {
+                Expect::Chord(chord) => assert!(
+                    ((exit - entry) - chord).abs() <= FRUSTUM_BUILD_TOLERANCE,
+                    "{pose}: the chord is the ideal frustum's {chord}, not {}",
+                    exit - entry
+                ),
+                Expect::Sliver => assert!(
+                    exit - entry > 0.0 && exit - entry < 2.0 * f64::from(hair),
+                    "{pose}: a hair inside a vertex is a chord of the hair's size, not {}",
+                    exit - entry
+                ),
+                Expect::Miss | Expect::Exactly(..) => unreachable!("handled above"),
+            }
+            if frustum_margin(origin.as_dvec3()) > 0.0 {
+                assert!(
+                    entry < 0.0 && exit > 0.0,
+                    "{pose}: from inside, the entry lies behind and the exit ahead"
+                );
+            }
+        }
+    }
+
+    /// A CONVEX CANDIDATE WITHOUT STORED FACES FAILS CLOSED: a shape the clip has no exact reading
+    /// of is a structured error, never a cast's approximation and never a silent miss. The driver
+    /// fails the round closed on it, the way it does on an uncertified trimesh.
+    #[test]
+    fn a_convex_candidate_without_stored_faces_fails_closed() {
+        let ball = Collider::sphere(1.0);
+        assert!(
+            clip_convex(
+                ball.shape_scaled().as_typed_shape(),
+                Vec3::Z * 5.0,
+                Vec3::NEG_Z
+            )
+            .is_err(),
+            "a ball has no stored faces to clip against"
+        );
     }
 }
