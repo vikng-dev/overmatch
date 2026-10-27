@@ -3,8 +3,8 @@
 // bound tank (`ballistics::pen_cam`). Positions are metres in the target's spawn frame: the tank
 // root at the origin, -Z its front, +Y up; a pose turns the tank under the shot. `verdict` is what
 // the shot earns on the bound tank today, checked on every run. `round` names a key of the round
-// registry (`assets/ballistics/rounds.ron`), whether or not the weapon lists it; the weapon's
-// default round fires when it is absent. The main gun's shots fire the solid Pzgr. 39, the fixture
+// registry (`assets/rounds/`) that the weapon's gun chambers, whether or not the mount stows it,
+// fired at the gun's muzzle speed for it; the mount's first stowed round fires when it is absent. The main gun's shots fire the solid Pzgr. 39, the fixture
 // round, unless they name another: s12 the sub-calibre round, s13-s16 the burst round as the ring
 // or the ball. Every shot is fixture data.
 [

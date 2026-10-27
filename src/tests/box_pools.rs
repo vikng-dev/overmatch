@@ -45,7 +45,7 @@ fn faces((lo, hi): (bevy::math::Vec3, bevy::math::Vec3)) -> [f32; 3] {
 /// ([`BoxClasses::crew_hp`]) and is exempt from class × face, and every other box with an HP pool
 /// holds a pool within ±[`TOLERANCE`] of its class's HP per m² times its mean face. A crewman is one
 /// entity across tanks, and the field's calibration (`assets/ballistics/spall_cone.ron`) and the
-/// crew line rate (`assets/ballistics/rounds.ron`) are set against the shared pool. The pen cam's
+/// crew line rate (the round files, `assets/rounds/`) are set against the shared pool. The pen cam's
 /// potency bands are calibrated in HP per m² of face and promise that a box of its class inside a
 /// band is knocked out; a pool above its class breaks that promise for the box (it survives a band
 /// that names its loss). A mutant pool, a crew pool that is not the shared one, a box whose

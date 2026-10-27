@@ -5,7 +5,10 @@
 //!
 //! A round has no muzzle speed of its own. [`RoundRegistry::get`] gives its [`RoundFacts`], and the
 //! gun that fires it gives it a speed ([`crate::guns`], through [`RoundFacts::fired_at`]): the
-//! resulting [`Round`] is the record the laws and the shot read.
+//! resulting [`Round`] is the record the laws and the shot read, and a reader takes it from the gun
+//! registry, never from here. Entry points: [`RoundRegistry::shipped`] (the round files embedded by
+//! `build.rs`'s index, [`crate::armaments_index::ROUND_FILES`], parsed once), `get`, `name` and
+//! `keys`.
 //!
 //! # A round file
 //!
@@ -178,7 +181,8 @@ struct PenetratorFile {
     caliber: Sourced<f32>,
 }
 
-/// What carries a round's penetrator to the plate.
+/// What carries a round's penetrator to the plate. Parsed and validated (a type has a carrier
+/// exactly when its rounds author a penetrator block) and read by no law yet.
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 enum Carrier {
     /// None: the round meets the plate whole.

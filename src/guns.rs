@@ -394,9 +394,9 @@ mod tests {
         nose_factor: 0.291_666_66,
     };
 
-    /// Fixture data: every shipped round as the single round registry resolved it before rounds,
-    /// round types and guns were split into their own files, read off that registry to the bit.
-    /// The split is a pure refactor exactly when every round read through its gun is this.
+    /// Fixture data: every shipped round's resolved record, to the bit — the values the laws, the
+    /// shot and every pinned digest are measured against, read off the shipped data. A data edit
+    /// that moves any of them moves the game's ballistics, and moves its pin here deliberately.
     const PINS: [(&str, Round); 5] = [
         (
             "7.9mm_AP",
@@ -495,13 +495,12 @@ mod tests {
     ];
 
     /// THE PURE-REFACTOR GATE. Every shipped round, read through the gun that fires it, is field for
-    /// field the record the single round registry gave before the split ([`PINS`], to the bit);
-    /// and so is every round the shipped tank stows, read through its mount's gun as spawn reads
-    /// it. The laws, the shot and every pinned digest read this record, so a mutant that moves any
-    /// row's muzzle speed, any type's or round's nose, a core, a crew line rate or a burst input
-    /// fails here.
+    /// field its pinned record ([`PINS`], to the bit); and so is every round the shipped tank
+    /// stows, read through its mount's gun as spawn reads it. The laws, the shot and every pinned
+    /// digest read this record, so a mutant that moves any row's muzzle speed, any type's or
+    /// round's nose, a core, a crew line rate or a burst input fails here.
     #[test]
-    fn every_round_reads_through_its_gun_as_the_single_registry_gave_it() {
+    fn every_round_reads_through_its_gun_bit_for_bit_as_pinned() {
         let guns = GunRegistry::shipped();
         let pinned: BTreeMap<&str, Round> = PINS.into_iter().collect();
         let shipped: Vec<&str> = RoundRegistry::shipped().keys().collect();

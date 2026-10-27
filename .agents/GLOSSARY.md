@@ -65,7 +65,7 @@ The tank body — the chassis the turret sits on, and the frame all aim math is 
 The rotating top; yaws to bear on the aim point.
 
 **Gun**:
-The gun mount — the elevation pivot and the (stationary) mantlet. Elevates in pitch.
+The gun mount — the elevation pivot and the (stationary) mantlet. Elevates in pitch. The rig node, not the gun model a mount names (**Gun** (model), Armaments).
 _Avoid_: barrel (that is a separate, recoiling node)
 
 **Gun barrel**:
@@ -307,6 +307,27 @@ _Avoid_: collision mesh (suggests the full visual mesh)
 **Compound collider**:
 Several convex proxies on one rigid body that together approximate a concave shape (e.g. the stepped hull front as 2–3 pieces). The only way to represent concavity for a dynamic body, which cannot use a single concave collider.
 
+## Armaments
+
+**Round**:
+One projectile as data, gun-independent: one file per round (`assets/rounds/<key>.round.ron`, the stem its key) stating its name, **round type**, core material, mass, calibre, **crew line rate**, and its penetrator and burst blocks where it has them. It states no muzzle speed: the gun that fires it gives it one (**ammunition table**).
+_Avoid_: shell for the data (the shell is the flying body the walk samples)
+
+**Round type**:
+A round's construction class and the shape proxy it implies (`assets/ballistics/round_types.ron`): its flight nose, its hit nose, and its carrier — none, kept or discarded (a sub-calibre round's penetrator rides one). Every round names one. The hit nose is the force law's; the flight nose and the carrier are read by no law yet.
+
+**Gun** (model):
+A gun model's chamber and mechanism, one file per gun (`assets/guns/<key>.gun.ron`), tank-independent: its mechanism (single-shot, or automatic at a cyclic rate), its report, and its **ammunition table**. Distinct from the rig's **Gun** node (Tank rig), the pivot a mount's gun rides.
+
+**Ammunition table**:
+A gun's list of every round it can chamber, each with the muzzle speed the gun gives that round — the one place a round gets a speed. A round no gun's table lists fails the load.
+
+**Mount**:
+A gun on a tank — an entry of the tank file's `weapons`, naming its gun by key: its trigger, its rig handles (muzzle, recoiling barrel), the crew that fire and load it, its reload or belt, its recoil response and its **stowage**. Not a separate entity.
+
+**Stowage**:
+The rounds a tank actually carries for a mount, and how many of each; the first is the round loaded at spawn. Every stowed round is one the mount's gun chambers, and a tank has no round it does not stow. The counts are read by no reserve yet.
+
 ## Armor & penetration
 
 (Model: `.agents/docs/design/armor-penetration-and-damage.md`.)
@@ -352,7 +373,7 @@ A substance kind with no resistance, worn only by crew: no layer of the walk, so
 _Avoid_: soft armour, flesh factor (a witness has no factor)
 
 **Crew line rate**:
-A round's dose to a witness per metre of chord (reference-mm/m, `rounds.ron` field `wound`, TUNED). Round data, never a material's.
+A round's dose to a witness per metre of chord (reference-mm/m, round file field `wound`, `assets/rounds/`, TUNED). Round data, never a material's.
 _Avoid_: wound rate (the code identifier keeps `wound` until a rename is decided)
 
 **Burst**:

@@ -53,8 +53,8 @@ struct Scenario {
     shows: String,
     /// One of the bound tank's weapons, by its name in the tank file.
     weapon: String,
-    /// The round fired, by its round registry key, whether or not the weapon lists it; the weapon's
-    /// default round when absent.
+    /// The round fired, by its round registry key, through the weapon's gun, whether or not the
+    /// mount stows it; the mount's first stowed round when absent.
     #[serde(default)]
     round: Option<String>,
     /// Striking speed (m/s); the round's muzzle speed when absent.

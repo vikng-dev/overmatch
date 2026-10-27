@@ -137,8 +137,8 @@ pub struct PenetrationReport {
     /// composed as [`crate::tank::servo_pose`] composes it. A servo the record does not name is
     /// at rest; a hand-authored clip names none.
     pub servo_deg: BTreeMap<String, f32>,
-    /// The round fired: a key in the round registry (`assets/ballistics/rounds.ron`). A synthetic
-    /// clip may name a round the registry does not hold.
+    /// The round fired: a key in the round registry (`assets/rounds/`). A synthetic clip may name a
+    /// round the registry does not hold.
     pub round: String,
     /// Who fired; `None` on a hand-authored clip.
     #[serde(default)]

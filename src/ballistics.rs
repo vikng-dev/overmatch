@@ -4526,8 +4526,8 @@ mod march_tests {
         caliber: 0.0079,
         nose_factor: 0.5,
     };
-    /// Fixture wound rate (reference-mm per metre of witness chord) for [`fixture_round`]: the
-    /// main-gun value `rounds.ron` tunes, a labelled fixture number.
+    /// Fixture crew line rate (reference-mm per metre of witness chord) for [`fixture_round`]: the
+    /// main-gun value the round files (`assets/rounds/`) tune, a labelled fixture number.
     pub(super) const FIXTURE_WOUND: f32 = 30.0;
 
     /// A full-calibre fixture round's flight state and its initial readout: [`fixture_round_with`]

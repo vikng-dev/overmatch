@@ -22,7 +22,7 @@ pub(crate) enum BurstShape {
     Ball,
 }
 
-/// A burst block as the round registry resolves it, with its core type's numbers.
+/// A burst block as the round registry resolves it, with its core substance's burst facts.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct BurstInputs {
     pub(crate) shape: BurstShape,

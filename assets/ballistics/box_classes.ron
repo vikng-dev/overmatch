@@ -28,7 +28,7 @@
         of every tank, revised if play shows it out of proportion to the tank's other pools. Crew
         is one shared entity across tanks, and the crew box is a placeholder for a humanoid
         shape, so its face is no basis for a pool. The field's calibration in spall_cone.ron and
-        the crew line rate in rounds.ron are set against it")),
+        the crew line rate in the round files (assets/rounds/) are set against it")),
     // The presented area (m²) the crew pool is set against: the mid threshold is
     // `crew_hp` over it. The crew box is a placeholder, so this is not its measured face.
     crew_face_m2: (0.2, Tuned("the intended humanoid's presented area, the face the field's

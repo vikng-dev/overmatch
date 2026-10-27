@@ -111,7 +111,7 @@ struct ShotParams {
 #[derive(Component)]
 struct RangeGun;
 
-/// The seed tank's primary weapon, every round it lists resolved in the shipped registry.
+/// The seed tank's primary weapon, every round it stows fired from its gun.
 fn seed_gun() -> Weapon {
     let sheet: spec::TankSpec =
         ron::de::from_str(SEED_SPEC).expect("the shipped spec sheet parses");
