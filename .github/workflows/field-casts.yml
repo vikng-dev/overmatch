@@ -12,7 +12,9 @@ on:
   workflow_dispatch:
   # Only a push that can move a cast: the compiler, the dependency graph, the patched crates, the
   # ballistics module whole (its root file included), the ballistics data the cone embeds
-  # (`spall_cone.rs` carries `assets/ballistics/spall_cone.ron` by `include_str!`), and this file.
+  # (`spall_cone.rs` carries `assets/ballistics/spall_cone.ron` by `include_str!`), the round the
+  # casts fire (its file, its type, the gun that gives it its speed, and `build.rs`, which embeds
+  # both directories), and this file.
   push:
     branches: [main]
     paths:
@@ -23,6 +25,9 @@ on:
       - 'src/ballistics.rs'
       - 'src/ballistics/**'
       - 'assets/ballistics/**'
+      - 'assets/rounds/**'
+      - 'assets/guns/**'
+      - 'build.rs'
       - '.github/workflows/field-casts.yml'
 
 # A newer run cancels an older one on the same ref: the casts are a measurement of the tree, so the

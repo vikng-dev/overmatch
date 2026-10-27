@@ -45,9 +45,9 @@ static L2_ROLE_COHERENCE: Check = Check {
     id: "L2.ROLE_COHERENCE",
     stage: Stage::Consumer,
     severity: Severity::Error,
-    law: "a mesh is either wholly a substance solid or wholly art; a declared collider is not \
-          armour and carries usable mesh data; every declared component and roadwheel is a \
-          ballistic node",
+    law: "a mesh is either wholly a substance solid or wholly art; a substance solid wears matter, \
+          never a burst core; a declared collider is not armour and carries usable mesh data; \
+          every declared component and roadwheel is a ballistic node",
 };
 static L2_WITNESS_ROLE: Check = Check {
     id: "L2.WITNESS_ROLE",
@@ -297,10 +297,15 @@ const TIGER_SPEC_RON: &str = include_str!("../assets/tiger_1/tiger_1.tank.ron");
 /// A node that mixes substance and non-substance primitives is REFUSED (see
 /// [`extract_tank_geometry`]): half-armour has no honest meaning here, and the shadow compare's
 /// whole-node mesh diff would quietly stop covering the uncaptured half.
-fn classify(
-    primitive: &gltf::Primitive,
+///
+/// `Some(Err(material))` is a primitive wearing a registry key that is no matter
+/// ([`crate::substances::Substance::matter`] is `None`: a burst core). Wearing the key declares a
+/// volume and the volume has nothing the walk reads, so the capture refuses it rather than read it
+/// as art.
+fn classify<'p>(
+    primitive: &gltf::Primitive<'p>,
     registry: &SubstanceRegistry,
-) -> Option<PrimitiveSubstance> {
+) -> Option<Result<PrimitiveSubstance, &'p str>> {
     // An unnamed material cannot be a registry key, so it cannot declare membership. (The coax MG's
     // physics-only meshes were exactly this case before the restructure.)
     let material = primitive.material().name()?;
@@ -309,11 +314,14 @@ fn classify(
     // source (a `.001` duplicate means the material-library link drifted from LINKED to appended,
     // and only the .blend can tell a linked datablock from a copy of one).
     let substance = registry.get(material).ok()?;
-    Some(PrimitiveSubstance {
+    let Some(matter) = substance.matter() else {
+        return Some(Err(material));
+    };
+    Some(Ok(PrimitiveSubstance {
         name: material.to_owned(),
         id: registry.id(material).ok()?,
-        matter: substance.matter(),
-    })
+        matter,
+    }))
 }
 
 /// The dynamic range a ballistic vertex coordinate is CERTIFIED in, as `(low, high)` magnitudes in
@@ -1145,10 +1153,20 @@ impl MeshCapture<'_> {
         let mut plain = 0usize;
         for primitive in mesh.primitives() {
             match classify(&primitive, self.registry) {
-                Some(substance) => {
+                Some(Ok(substance)) => {
                     ballistic += 1;
                     captured.push((primitive.index(), Some(substance)));
                 }
+                Some(Err(material)) => findings.push(Finding::new(
+                    &L2_ROLE_COHERENCE,
+                    Subject::node(name).element(format!("primitive {}", primitive.index())),
+                    format!(
+                        "wears `{material}`, a burst core: a registry key that states no \
+                         resistance and no witness role"
+                    ),
+                    "give the primitive a hard or witness substance — a burst core's facts are read \
+                     by a round's burst block, never by the walk",
+                )),
                 None => {
                     plain += 1;
                     if is_collider {
@@ -2188,7 +2206,7 @@ mod tests {
         let witness = registry
             .keys()
             .into_iter()
-            .find(|name| registry.get(name).is_ok_and(|s| s.hard().is_none()))
+            .find(|name| registry.get(name) == Ok(crate::substances::Substance::Witness))
             .expect("the shipped registry declares a witness substance");
         let seat = |material: &str| {
             Node::new("Seat")
@@ -2234,6 +2252,34 @@ mod tests {
             );
             assert_eq!(findings[0].subject.name, "Seat", "{id}");
         }
+    }
+
+    /// L2.ROLE_COHERENCE — a primitive wearing a burst core's key declares a volume the walk has
+    /// nothing to read for, so the capture refuses it by node. A mutant that reads it as art (a
+    /// plate that silently stops being armour) or hands it the walk as matter of any factor
+    /// certifies the vehicle and fails here.
+    #[test]
+    fn a_volume_wearing_a_burst_core_is_refused() {
+        let registry = SubstanceRegistry::shipped();
+        let core = registry
+            .keys()
+            .into_iter()
+            .find(|name| registry.get(name).is_ok_and(|s| s.burst().is_some()))
+            .expect("the shipped registry declares a burst core");
+        let (mut nodes, spec) = sound_vehicle();
+        nodes.push(
+            Node::new("Shield")
+                .child_of("Hull")
+                .holding(solid(core, [0.0, 3.0, 0.0])),
+        );
+        let findings = verify("burst-core-volume", &nodes, &spec);
+        assert_eq!(
+            refusals(&findings),
+            ["L2.ROLE_COHERENCE"],
+            "{}",
+            render(&findings)
+        );
+        assert_eq!(findings[0].subject.name, "Shield");
     }
 
     /// L2.PRIMITIVE_FORM — what the sim reads has to be there, and has to be triangles.

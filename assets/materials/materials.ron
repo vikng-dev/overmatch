@@ -5,12 +5,16 @@
 // datablock NAME is the join key; this file owns every scalar (design doc §12: no numbers in
 // the model, §13.7: substance is authored per-plate, paint is a runtime livery).
 //
-// Every entry is one of two KINDS (ADR-0040). `Hard(..)` is matter: a layer of the §13 walk that
+// Every entry is one of three KINDS. `Hard(..)` is matter (ADR-0040): a layer of the §13 walk that
 // resists the shell, is charged its spend and shadows the spall field. `Witness` is not matter: it
 // states no resistance (none, not zero), never enters the walk, and takes dose from what the hard
-// world sends through it — the shell's line at the ROUND's crew line rate (`wound`, `rounds.ron`),
-// each spall direction at its strength. A witness substance sits only on a crew volume and a crew volume wears
-// only a witness substance; the bake refuses a tank file that breaks either.
+// world sends through it — the shell's line at the ROUND's crew line rate (`wound`, a round file's
+// field), each spall direction at its strength. A witness substance sits only on a crew volume and a
+// crew volume wears only a witness substance; the bake refuses a tank file that breaks either.
+// `Burst(..)` is a burst core: it states the two facts a round's burst block reads (`density`,
+// kg/m³, and `speed_constant_mps`, the speed constant K in m/s, the sideways speed scale of the
+// burst's v_s) and nothing the walk reads, so no mesh wears it and the walk refuses a volume that
+// names it.
 //
 // `resistance` = how the substance resists a round's force law. Exactly one entry is `Reference`:
 // the reference steel, whose `facts` are the force law's reference constants and one metre of which
@@ -84,7 +88,8 @@
 // discussion 2026-08-06): exterior steels yes, interior substances no.
 //
 // THIS FILE IS THE CLASSIFIER (slice 3, 2026-08-07). A glTF primitive is a ballistic volume iff
-// its material name is a key here; per-node material_factor in the tank RON is gone. Adding a key
+// its material name is a key here, and the bake refuses one wearing a `Burst` key; per-node
+// material_factor in the tank RON is gone. Adding a key
 // makes every mesh wearing that material armour — and removing one silently un-declares them. What
 // SHOWS that is `L1.SOURCE_CENSUS`, which prints per-substance primitive counts against the
 // previous committed source: evidence for a human to read, never a pass condition. No test pins
@@ -176,7 +181,7 @@
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: None,
         ),
-        // A sub-calibre round's penetrator core (`rounds.ron`); no armour is made of it. Its facts
+        // A sub-calibre round's penetrator core (`assets/rounds/`); no armour is made of it. Its facts
         // are a modern 6 % cobalt cemented-carbide grade's, the class analogue: the wartime cores'
         // composition is not recorded here.
         "TungstenCarbide": Hard(
@@ -223,6 +228,11 @@
             paintable: false,
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: None,
+        ),
+        // The 8.8 cm Pzgr. 39's burst core, named by its burst block's `core_substance`.
+        "88mm_burst_core": Burst(
+            density: (1650.0, Derived("1.65 g/cm³: shape-law.md §4")),
+            speed_constant_mps: (2680.0, Derived("shape-law.md §4")),
         ),
     },
 )

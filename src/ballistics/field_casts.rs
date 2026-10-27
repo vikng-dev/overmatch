@@ -622,8 +622,8 @@ const FIXTURE_ROUND: &str = "88mm_AP";
 /// the casts' input digest carries one body and no burst, so a sub-calibre or burst round is
 /// refused here rather than pinned as its whole body.
 fn main_gun_round() -> (f32, f32, f32, f32, f32) {
-    let round = crate::rounds::RoundRegistry::shipped()
-        .get(FIXTURE_ROUND)
+    let round = crate::guns::GunRegistry::shipped()
+        .round_by_key(FIXTURE_ROUND)
         .unwrap_or_else(|err| panic!("the field casts' round: {err}"));
     assert_eq!(
         round.penetrator, round.body,

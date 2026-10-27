@@ -77,8 +77,8 @@ pub struct Weapon {
     pub report_clips: Vec<String>,
 }
 
-/// One round a weapon can load, resolved from the round registry (`assets/ballistics/rounds.ron`)
-/// at spawn.
+/// One round a weapon can load, resolved at spawn: its name from the round registry
+/// (`assets/rounds/`), the round itself fired from the gun that chambers it (`assets/guns/`).
 #[derive(Clone, Debug, PartialEq)]
 pub struct WeaponRound {
     /// The registry key: the data's handle, never shown to a player.
@@ -90,25 +90,28 @@ pub struct WeaponRound {
 }
 
 impl WeaponRound {
-    /// The shipped registry's round keyed `key`, or the registry's error naming it.
-    pub(crate) fn resolve(key: &str) -> Result<Self, crate::rounds::RoundError> {
-        let registry = crate::rounds::RoundRegistry::shipped();
+    /// The shipped round keyed `key`, fired from the one shipped gun that chambers it, or the
+    /// error naming it.
+    pub(crate) fn resolve(key: &str) -> Result<Self, crate::guns::GunError> {
+        let name = crate::rounds::RoundRegistry::shipped()
+            .name(key)
+            .map_err(crate::guns::GunError::Round)?;
         Ok(Self {
             key: key.to_owned(),
-            name: registry.name(key)?.to_owned(),
-            round: registry.get(key)?,
+            name: name.to_owned(),
+            round: crate::guns::GunRegistry::shipped().round_by_key(key)?,
         })
     }
 }
 
 impl Weapon {
-    /// The weapon `name` as `spec` authors it, every round resolved in the shipped registry, its
-    /// recoiling barrel `barrel`; an unknown round key is the registry's error naming it.
+    /// The weapon `name` as `spec` authors it, every round resolved through its gun, its
+    /// recoiling barrel `barrel`; a round key that resolves to no round is the error naming it.
     pub(crate) fn of_spec(
         name: &str,
         spec: &crate::spec::WeaponSpec,
         barrel: Option<Entity>,
-    ) -> Result<Self, crate::rounds::RoundError> {
+    ) -> Result<Self, crate::guns::GunError> {
         let rounds = spec
             .rounds
             .iter()

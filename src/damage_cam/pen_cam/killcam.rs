@@ -113,10 +113,13 @@ impl Killer {
                 .ok()
                 .map(|spec| spec.display_name)
         });
-        let registry = crate::rounds::RoundRegistry::shipped();
-        let round = registry
-            .get(round)
-            .and_then(|fired| Ok((registry.name(round)?.to_owned(), fired.muzzle_speed)))
+        let round = crate::rounds::RoundRegistry::shipped()
+            .name(round)
+            .map_err(crate::guns::GunError::Round)
+            .and_then(|name| {
+                let fired = crate::guns::GunRegistry::shipped().round_by_key(round)?;
+                Ok((name.to_owned(), fired.muzzle_speed))
+            })
             .inspect_err(|e| warn!("kill cam: the round {round}: {e}"))
             .ok();
         Self {

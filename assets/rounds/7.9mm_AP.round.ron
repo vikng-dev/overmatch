@@ -1,0 +1,18 @@
+// The file's fields are `src/rounds.rs`'s module doc.
+(
+    name: ("7.92 mm S.m.K.", Measured("Spitzgeschoss mit Kern, the German 7.92 mm steel-cored
+        armour-piercing bullet (panzerworld.com/german-ammunition-nomenclature;
+        en.wikipedia.org/wiki/7.92x94mm_Patronen). The best-attested match: this entry's mass and
+        speed are unsourced and not tied to it")),
+    round_type: ("AP", Measured("the S.m.K. is a steel-cored armour-piercing bullet
+        (panzerworld.com/german-ammunition-nomenclature)")),
+    core: ("GunSteel", Tuned("fixture label: a quenched-and-tempered alloy-steel core, Q7's
+        'hardened' belt; GunSteel carries that class's facts. The rigid regime reads no core
+        fact")),
+    mass: (0.0118, Unknown("no source recorded in the repo; settled by a cited munition table")),
+    caliber: (0.0079, Unknown("rounded from the 7.92 mm nominal designation; whether the bore or
+        the bullet diameter is meant is not recorded")),
+    wound: (10.0, Tuned("a rifle-calibre bullet empties the 30 HP crew pool at ~30 cm of chord
+        (3 / 0.30): one pass through a station leaves it reduced, two knock it out (crew-model
+        decision 2026-10-17)")),
+)

@@ -1,26 +1,51 @@
-//! The round registry (`assets/ballistics/rounds.ron`): every round a weapon can fire, keyed by
-//! key. A weapon names its rounds by those keys ([`crate::spec::WeaponSpec::rounds`]); a round
-//! states its display name, core material, nose geometry, mass, calibre, muzzle speed and crew line
-//! rate, and optionally its penetrator's mass and calibre, each with its provenance
-//! ([`crate::provenance`]). The key is the data's handle and is
-//! never shown to a player; the display name is ([`RoundRegistry::name`]).
+//! The round registry: every round, one file each (`assets/rounds/<key>.round.ron`, the file stem
+//! its key), gun-independent, resolved against the round-type table
+//! (`assets/ballistics/round_types.ron`) and the substance registry. The key is the data's handle
+//! and is never shown to a player; the display name is ([`RoundRegistry::name`]).
 //!
-//! Parsed once from the embedded file and validated at parse: a missing display name or one the
-//! shipped font does not draw whole ([`crate::ui_font::drawable`]), a core that is not a substance
-//! with material facts, a nose parameter outside its family's range, or a round outside the force
-//! law's domain, or a penetrator heavier or wider than its round, is a load error naming the round.
-//! What a round derives — its nose factor and its two bodies ([`RoundBody`]) — is computed here,
-//! once. A round flies as its whole `body` and meets the plate as its `penetrator`: the mechanism
-//! binds from the penetrator at spawn ([`crate::ballistics`]'s `Projectile`), synchronously and
-//! from data alone; drag and the shell's view read the body.
+//! A round has no muzzle speed of its own. [`RoundRegistry::get`] gives its [`RoundFacts`], and the
+//! gun that fires it gives it a speed ([`crate::guns`], through [`RoundFacts::fired_at`]): the
+//! resulting [`Round`] is the record the laws and the shot read.
 //!
-//! A round may carry a burst block naming a burst core type of the registry's `burst_cores`; its
-//! burst is derived here, once ([`crate::ballistics::burst::Burst::derived`]), and rides the round
-//! to the shot as the penetrator does. A round without the block is inert. The burst's story is
-//! design doc §5a, "The burst".
+//! # A round file
 //!
-//! The target structure (rounds name a core material and author their nose as geometry) is
-//! `.agents/scratch/damage-cam-2026-10-08/research/recommendation-solid-shot.md` Part 1 item 5.
+//! `name` is the round's historical designation, what a player reads; `round_type` a key of the
+//! round-type table; `core` a substance with material facts; `mass` (kg) and `caliber` (m) the whole
+//! round's; `wound` its crew line rate (ADR-0040): reference-mm of dose per metre of disc-mean chord
+//! the shell cuts through a crew box, balance data the hard walk never reads, scaled from the 30 HP
+//! crew pool (3 reference-mm, `ballistics::HP_PER_REFERENCE_MM`) so that a rate of `3 / L` empties
+//! the pool at a chord of `L` metres. Optionally:
+//!
+//! - `nose: Some((NoseShape, Kind))`: the round's own hit nose, for a round documented to differ
+//!   from its type's.
+//! - `penetrator: Some((mass, caliber))`: the part of a sub-calibre round that meets the plate, its
+//!   nose the round's. The round flies as its whole `body` (drag and the shell's view read it) and
+//!   meets the plate as its `penetrator` (the force law, the disc, overmatch and the cone's hole
+//!   read it); the mechanism binds from the penetrator at spawn ([`crate::ballistics`]'s
+//!   `Projectile`), synchronously and from data alone. A round without the block meets the plate
+//!   whole.
+//! - `burst: Some((core_substance, option, arming_spend, delay, core_mass, base_mass,
+//!   cavity_diameter))`: a substance-table key whose row states burst facts, the shape the burst
+//!   throws, the fuze's threshold (reference-mm spent in one body) and delay (s), the core's and the
+//!   base parts' masses (kg) and the cavity's diameter (m). The burst is derived here, once
+//!   ([`crate::ballistics::burst::Burst::derived`]), and rides the round to the shot; its story is
+//!   design doc §5a, "The burst". A round without the block is inert.
+//!
+//! Every value is authored `(value, Kind("source or reason"))` ([`crate::provenance`]); a value
+//! without one does not load. "Q7" in a provenance is the fixture-materials recommendation in
+//! `.agents/scratch/damage-cam-2026-10-08/research/hardness-anchor-free.md`, which collected no
+//! munition data: the rounds are labelled fixtures.
+//!
+//! # What loads
+//!
+//! Each a load error naming the round or the type: a display name the shipped font does not draw
+//! whole ([`crate::ui_font::drawable`]); a round type the table does not declare; a nose parameter
+//! outside its family's range, in a type's either nose or a round's override; a core that is not a
+//! substance with material facts; a penetrator heavier or wider than its round; a penetrator block
+//! on a round of a type without a carrier, or none on one with a carrier; a crew line rate that is
+//! not finite and positive; a burst block on a sub-calibre round, or one naming a substance without
+//! burst facts. The force law's domain needs a speed, so a gun's ammunition table checks it
+//! ([`RoundFacts::fired_at`]).
 
 use serde::Deserialize;
 use serde::de::{self, MapAccess, Visitor};
@@ -32,21 +57,21 @@ use crate::provenance::Sourced;
 use crate::spec::NoseShape;
 use crate::substances::{MaterialFacts, SubstanceRegistry};
 
-/// The shipped registry, embedded so a round is in hand synchronously wherever it is bound
-/// (ADR-0014: built from data, never from an asset).
-const ROUNDS_RON: &str = include_str!("../assets/ballistics/rounds.ron");
+/// The shipped round-type table, embedded as the round files are, so a round is in hand
+/// synchronously wherever it is bound (ADR-0014: built from data, never from an asset).
+const ROUND_TYPES_RON: &str = include_str!("../assets/ballistics/round_types.ron");
 
-/// One round, resolved and validated.
+/// One round fired from one gun, resolved and validated: the record the laws read.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Round {
-    /// The whole round as it flies: mass (kg), calibre (m) and the nose factor DERIVED from the
-    /// authored nose at load. Drag and the shell's view read it.
+    /// The whole round as it flies: mass (kg), calibre (m) and the nose factor DERIVED from its hit
+    /// nose at load. Drag and the shell's view read it.
     pub(crate) body: RoundBody,
     /// What meets the plate: the force law, the disc, overmatch and the cone's hole read it. The
     /// body's nose factor; mass and calibre no greater than the body's. Equal to `body` for a
     /// round authored without a penetrator block.
     pub(crate) penetrator: RoundBody,
-    /// m/s.
+    /// m/s: the speed the firing gun's ammunition table gives this round.
     pub(crate) muzzle_speed: f32,
     /// What the round's line does to a witness (crew): reference-mm of dose per metre of disc-mean
     /// chord through it (`ballistics::wound`). Finite and positive. Balance data, never read by the
@@ -60,17 +85,67 @@ pub(crate) struct Round {
     pub(crate) burst: Option<Burst>,
 }
 
+/// One round as its file and its type resolve it, before a gun gives it a muzzle speed: every
+/// field of [`Round`] but that one, validated as far as no speed is needed.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct RoundFacts {
+    /// The hit nose the factor is derived from; a domain refusal names it.
+    nose: NoseShape,
+    body: RoundBody,
+    penetrator: RoundBody,
+    wound: f32,
+    core: MaterialFacts,
+    pub(crate) burst: Option<Burst>,
+}
+
+impl RoundFacts {
+    /// The round fired at `muzzle_speed` (m/s), or why the capability law cannot state it there:
+    /// the body, the penetrator and a ring's nose piece each inside the law's domain at that speed
+    /// ([`round_in_domain`]), so a round outside it never reaches the march.
+    pub(crate) fn fired_at(&self, muzzle_speed: f32) -> Result<Round, String> {
+        round_in_domain(self.body, muzzle_speed).map_err(|reason| {
+            format!(
+                "the round (nose {:?}) is outside the capability law's domain: {reason}",
+                self.nose
+            )
+        })?;
+        round_in_domain(self.penetrator, muzzle_speed).map_err(|reason| {
+            format!("the penetrator is outside the capability law's domain: {reason}")
+        })?;
+        if let Some(Burst {
+            option: BurstOption::Ring { nose },
+            ..
+        }) = self.burst
+        {
+            round_in_domain(nose, muzzle_speed).map_err(|reason| {
+                format!("burst: the nose piece is outside the capability law's domain: {reason}")
+            })?;
+        }
+        Ok(Round {
+            body: self.body,
+            penetrator: self.penetrator,
+            muzzle_speed,
+            wound: self.wound,
+            core: self.core,
+            burst: self.burst,
+        })
+    }
+}
+
 /// One round as authored.
 #[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(rename = "Round", deny_unknown_fields)]
 struct RoundFile {
     /// What a player reads: the round's own designation.
     name: Sourced<String>,
+    /// A key of the round-type table.
+    round_type: Sourced<String>,
     core: Sourced<String>,
-    nose: Sourced<NoseShape>,
+    /// The round's own hit nose; absent, its type's.
+    #[serde(default)]
+    nose: Option<Sourced<NoseShape>>,
     mass: Sourced<f32>,
     caliber: Sourced<f32>,
-    muzzle_speed: Sourced<f32>,
     wound: Sourced<f32>,
     /// The part of a sub-calibre round that meets the plate; absent, the whole round does.
     #[serde(default)]
@@ -80,35 +155,19 @@ struct RoundFile {
     burst: Option<BurstFile>,
 }
 
-/// A burst block as authored: the core type it names, the field it throws, the fuze's threshold
-/// (reference-mm spent in one body) and delay (s), and the core's mass, the base parts' mass (kg)
-/// and the cavity's diameter (m).
+/// A burst block as authored: the substance its core is made of, the field it throws, the fuze's
+/// threshold (reference-mm spent in one body) and delay (s), and the core's mass, the base parts'
+/// mass (kg) and the cavity's diameter (m).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BurstFile {
-    core_type: Sourced<String>,
+    core_substance: Sourced<String>,
     option: Sourced<BurstShape>,
     arming_spend: Sourced<f32>,
     delay: Sourced<f32>,
     core_mass: Sourced<f64>,
     base_mass: Sourced<f64>,
     cavity_diameter: Sourced<f64>,
-}
-
-/// A burst core type as authored: its density (kg/m³) and speed constant `K` (m/s).
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CoreTypeFile {
-    density: Sourced<f64>,
-    speed_constant_mps: Sourced<f64>,
-}
-
-/// A burst core type, validated: density (kg/m³) and speed constant (m/s), each finite and
-/// positive.
-#[derive(Clone, Copy, Debug)]
-struct CoreType {
-    density: f64,
-    speed_constant: f64,
 }
 
 /// A penetrator as authored: its mass (kg) and calibre (m). Its nose is the round's.
@@ -119,24 +178,45 @@ struct PenetratorFile {
     caliber: Sourced<f32>,
 }
 
+/// What carries a round's penetrator to the plate.
+#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
+enum Carrier {
+    /// None: the round meets the plate whole.
+    None,
+    /// The penetrator reaches the plate inside its carrier.
+    Kept,
+    /// The carrier leaves the penetrator in flight.
+    Discarded,
+}
+
+/// A round type as authored: its shape proxy and its carrier. The flight nose and the carrier are
+/// validated here and read by no law yet: the flight nose waits for the drag form that reads it,
+/// the carrier for a drag that tells a kept carrier from a discarded one (#103 §3).
 #[derive(Deserialize)]
-#[serde(rename = "RoundRegistry", deny_unknown_fields)]
-struct RegistryFile {
-    rounds: KeyedMap<RoundFile>,
-    /// Burst core types by key; a burst block names one.
-    #[serde(default)]
-    burst_cores: KeyedMap<CoreTypeFile>,
+#[serde(deny_unknown_fields)]
+struct RoundTypeFile {
+    flight_nose: Sourced<NoseShape>,
+    hit_nose: Sourced<NoseShape>,
+    carrier: Sourced<Carrier>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename = "RoundTypes", deny_unknown_fields)]
+struct RoundTypesFile {
+    round_types: KeyedMap<RoundTypeFile>,
+}
+
+/// A round type, validated: the hit nose its rounds meet the plate with unless they override it,
+/// and its carrier, which decides whether its rounds author a penetrator block.
+#[derive(Clone, Copy, Debug)]
+struct RoundType {
+    hit_nose: NoseShape,
+    carrier: Carrier,
 }
 
 /// A table as authored, refusing a duplicated key at parse: serde's default map fill would keep
 /// the last of two entries of one key with nobody told.
-struct KeyedMap<T>(BTreeMap<String, T>);
-
-impl<T> Default for KeyedMap<T> {
-    fn default() -> Self {
-        Self(BTreeMap::new())
-    }
-}
+pub(crate) struct KeyedMap<T>(pub(crate) BTreeMap<String, T>);
 
 impl<'de, T: Deserialize<'de>> Deserialize<'de> for KeyedMap<T> {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -154,9 +234,8 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for KeyedMap<T> {
                 while let Some((name, entry)) = access.next_entry::<String, T>()? {
                     if out.contains_key(&name) {
                         return Err(de::Error::custom(format!(
-                            "{name:?} is declared twice — a weapon names its round, and a round \
-                             its burst core type, by this key, so a duplicate is two answers for \
-                             one name"
+                            "{name:?} is declared twice — the table is read by this key, so a \
+                             duplicate is two answers for one name"
                         )));
                     }
                     out.insert(name, entry);
@@ -172,8 +251,10 @@ impl<'de, T: Deserialize<'de>> Deserialize<'de> for KeyedMap<T> {
 /// Why a round registry, or a lookup in one, failed. Every arm names the offending text.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) enum RoundError {
-    /// The RON did not parse.
-    Parse(String),
+    /// A file did not parse: names the file.
+    Parse { file: String, err: String },
+    /// A round type parsed but is unusable: names the type and the reason.
+    InvalidType { round_type: String, reason: String },
     /// A round parsed but cannot be fired: names the round and the reason.
     Invalid { round: String, reason: String },
     /// A lookup named a round the registry does not carry; carries the registry's vocabulary.
@@ -183,24 +264,67 @@ pub(crate) enum RoundError {
 impl std::fmt::Display for RoundError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Parse(err) => write!(f, "rounds.ron failed to parse: {err}"),
+            Self::Parse { file, err } => write!(f, "{file} failed to parse: {err}"),
+            Self::InvalidType { round_type, reason } => {
+                write!(f, "round type {round_type:?}: {reason}")
+            }
             Self::Invalid { round, reason } => write!(f, "round {round:?}: {reason}"),
             Self::Unknown { name, known } => write!(
                 f,
-                "unknown round {name:?} — assets/ballistics/rounds.ron declares [{}]",
+                "unknown round {name:?} — assets/rounds/ holds [{}]",
                 known.join(", ")
             ),
         }
     }
 }
 
-/// Resolve one authored round against `substances` and the burst core types `cores` into the round
-/// and its display name, or say why it cannot be fired or shown.
+/// The nose parameter out of its family's range, as a refusal's reason, or `None` in range.
+fn nose_out_of_range(field: &str, nose: NoseShape) -> Option<String> {
+    match nose.parameter() {
+        Some((parameter, value, false)) => {
+            Some(format!("{field} {parameter} is out of range (got {value})"))
+        }
+        _ => None,
+    }
+}
+
+/// The authored round-type table, each type refused unless both its noses are in range.
+fn round_types(text: &str) -> Result<BTreeMap<String, RoundType>, RoundError> {
+    let file: RoundTypesFile = ron::de::from_str(text).map_err(|err| RoundError::Parse {
+        file: "assets/ballistics/round_types.ron".into(),
+        err: err.to_string(),
+    })?;
+    file.round_types
+        .0
+        .into_iter()
+        .map(|(key, row)| {
+            for (field, nose) in [
+                ("flight_nose", row.flight_nose.0),
+                ("hit_nose", row.hit_nose.0),
+            ] {
+                if let Some(reason) = nose_out_of_range(field, nose) {
+                    return Err(RoundError::InvalidType {
+                        round_type: key,
+                        reason,
+                    });
+                }
+            }
+            let round_type = RoundType {
+                hit_nose: row.hit_nose.0,
+                carrier: row.carrier.0,
+            };
+            Ok((key, round_type))
+        })
+        .collect()
+}
+
+/// Resolve one authored round against the round types `types` and `substances` into its facts and
+/// its display name, or say why it cannot be fired or shown.
 fn resolved(
     file: RoundFile,
+    types: &BTreeMap<String, RoundType>,
     substances: &SubstanceRegistry,
-    cores: &BTreeMap<String, CoreType>,
-) -> Result<(Round, String), String> {
+) -> Result<(RoundFacts, String), String> {
     let name = file.name.0;
     if crate::ui_font::drawable(&name).as_deref() != Some(name.as_str()) {
         return Err(format!(
@@ -208,6 +332,14 @@ fn resolved(
              what `killcam::card_lines` draws"
         ));
     }
+    let type_key = file.round_type.0;
+    let round_type = types.get(&type_key).ok_or_else(|| {
+        format!(
+            "round_type {type_key:?} is not a round type — assets/ballistics/round_types.ron \
+             declares [{}]",
+            types.keys().cloned().collect::<Vec<_>>().join(", ")
+        )
+    })?;
     let core_name = file.core.0;
     let core = substances
         .get(&core_name)
@@ -220,20 +352,28 @@ fn resolved(
                  metal, and its facts are what a deforming or eroding regime reads"
             )
         })?;
-    let nose = file.nose.0;
-    if let Some((parameter, value, false)) = nose.parameter() {
-        return Err(format!("nose {parameter} is out of range (got {value})"));
+    let nose = file.nose.map_or(round_type.hit_nose, |nose| nose.0);
+    if let Some(reason) = nose_out_of_range("nose", nose) {
+        return Err(reason);
     }
     let body = RoundBody {
         mass: file.mass.0,
         caliber: file.caliber.0,
         nose_factor: nose.factor(),
     };
-    let muzzle_speed = file.muzzle_speed.0;
-    round_in_domain(body, muzzle_speed).map_err(|reason| {
-        format!("the round (nose {nose:?}) is outside the capability law's domain: {reason}")
-    })?;
     let sub_calibre = file.penetrator.is_some();
+    if sub_calibre == (round_type.carrier == Carrier::None) {
+        return Err(format!(
+            "round type {type_key:?} has carrier {:?} and the round {} — a round meets the plate \
+             whole exactly when its type has no carrier",
+            round_type.carrier,
+            if sub_calibre {
+                "authors a penetrator block"
+            } else {
+                "authors no penetrator block"
+            }
+        ));
+    }
     let penetrator = match file.penetrator {
         None => body,
         Some(penetrator) => {
@@ -242,9 +382,6 @@ fn resolved(
                 caliber: penetrator.caliber.0,
                 nose_factor: body.nose_factor,
             };
-            round_in_domain(penetrator, muzzle_speed).map_err(|reason| {
-                format!("the penetrator is outside the capability law's domain: {reason}")
-            })?;
             for (field, part, whole) in [
                 ("mass", penetrator.mass, body.mass),
                 ("caliber", penetrator.caliber, body.caliber),
@@ -276,40 +413,38 @@ fn resolved(
             );
         }
         Some(block) => {
-            let key = block.core_type.0;
-            let core_type = cores.get(&key).ok_or_else(|| {
-                format!(
-                    "burst: unknown core type {key:?} — `burst_cores` declares [{}]",
-                    cores.keys().cloned().collect::<Vec<_>>().join(", ")
-                )
-            })?;
+            let key = block.core_substance.0;
+            let facts = substances
+                .get(&key)
+                .map_err(|err| format!("burst: core_substance: {err}"))?
+                .burst()
+                .ok_or_else(|| {
+                    format!(
+                        "burst: core_substance {key:?} states no burst facts — a burst core is a \
+                         `Burst` row of the substance table"
+                    )
+                })?;
             let inputs = BurstInputs {
                 shape: block.option.0,
                 arming_spend: block.arming_spend.0,
                 delay: block.delay.0,
                 core_mass: block.core_mass.0,
-                core_density: core_type.density,
-                speed_constant: core_type.speed_constant,
+                core_density: facts.density,
+                speed_constant: facts.speed_constant,
                 base_mass: block.base_mass.0,
                 cavity_diameter: block.cavity_diameter.0,
             };
-            let burst = Burst::derived(body, core.density, &inputs)
-                .map_err(|reason| format!("burst: {reason}"))?;
-            if let BurstOption::Ring { nose } = burst.option {
-                round_in_domain(nose, muzzle_speed).map_err(|reason| {
-                    format!(
-                        "burst: the nose piece is outside the capability law's domain: {reason}"
-                    )
-                })?;
-            }
-            Some(burst)
+            Some(
+                Burst::derived(body, core.density, &inputs)
+                    .map_err(|reason| format!("burst: {reason}"))?,
+            )
         }
     };
     Ok((
-        Round {
+        RoundFacts {
+            nose,
             body,
             penetrator,
-            muzzle_speed,
             wound,
             core,
             burst,
@@ -318,78 +453,69 @@ fn resolved(
     ))
 }
 
-/// The authored burst core types, each refused unless its density and speed constant are finite
-/// and positive.
-fn core_types(file: KeyedMap<CoreTypeFile>) -> Result<BTreeMap<String, CoreType>, RoundError> {
-    file.0
-        .into_iter()
-        .map(|(key, core)| {
-            let core_type = CoreType {
-                density: core.density.0,
-                speed_constant: core.speed_constant_mps.0,
-            };
-            for (field, value) in [
-                ("density", core_type.density),
-                ("speed_constant_mps", core_type.speed_constant),
-            ] {
-                if !value.is_finite() || value <= 0.0 {
-                    return Err(RoundError::Parse(format!(
-                        "burst core type {key:?}: {field} must be finite and positive (got \
-                         {value})"
-                    )));
-                }
-            }
-            Ok((key, core_type))
-        })
-        .collect()
-}
-
-/// The parsed, validated `rounds.ron`.
+/// The parsed, validated round files.
 #[derive(Clone, Debug)]
 pub(crate) struct RoundRegistry {
-    /// Each round and its display name, by key.
-    rounds: BTreeMap<String, (Round, String)>,
+    /// Each round's facts and display name, by key.
+    rounds: BTreeMap<String, (RoundFacts, String)>,
 }
 
 impl RoundRegistry {
-    /// Parse a registry from RON text, resolving every round's core against `substances`.
-    pub(crate) fn from_ron(text: &str, substances: &SubstanceRegistry) -> Result<Self, RoundError> {
-        let file: RegistryFile =
-            ron::de::from_str(text).map_err(|err| RoundError::Parse(err.to_string()))?;
-        let cores = core_types(file.burst_cores)?;
-        let rounds = file
-            .rounds
-            .0
-            .into_iter()
-            .map(|(name, round)| match resolved(round, substances, &cores) {
-                Ok(resolved) => Ok((name, resolved)),
-                Err(reason) => Err(RoundError::Invalid {
-                    round: name,
-                    reason,
-                }),
-            })
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
+    /// Parse a registry from round files `files` (`(key, RON text)`), resolving each round against
+    /// the round-type table `types` (RON text) and `substances`. A key given twice is refused.
+    pub(crate) fn from_files(
+        files: &[(&str, &str)],
+        types: &str,
+        substances: &SubstanceRegistry,
+    ) -> Result<Self, RoundError> {
+        let types = round_types(types)?;
+        let mut rounds = BTreeMap::new();
+        for &(key, text) in files {
+            let invalid = |reason: String| RoundError::Invalid {
+                round: key.to_owned(),
+                reason,
+            };
+            if rounds.contains_key(key) {
+                return Err(invalid(
+                    "declared twice — a file's stem is its round's key, so a duplicate is two \
+                     answers for one name"
+                        .into(),
+                ));
+            }
+            let file: RoundFile = ron::de::from_str(text).map_err(|err| RoundError::Parse {
+                file: format!("assets/rounds/{key}.round.ron"),
+                err: err.to_string(),
+            })?;
+            let round = resolved(file, &types, substances).map_err(invalid)?;
+            rounds.insert(key.to_owned(), round);
+        }
         Ok(Self { rounds })
     }
 
-    /// The shipped registry, parsed once against the shipped substances. Panics on a malformed
-    /// file: a broken authored contract is a build defect, as for the substance registry.
+    /// The shipped registry: every embedded round file ([`crate::armaments_index::ROUND_FILES`]),
+    /// parsed once against the shipped round types and substances. Panics on a malformed file: a
+    /// broken authored contract is a build defect, as for the substance registry.
     pub(crate) fn shipped() -> &'static Self {
         static REGISTRY: std::sync::LazyLock<RoundRegistry> = std::sync::LazyLock::new(|| {
-            RoundRegistry::from_ron(ROUNDS_RON, SubstanceRegistry::shipped_static())
-                .unwrap_or_else(|err| panic!("rounds: embedded rounds.ron is unusable: {err}"))
+            RoundRegistry::from_files(
+                crate::armaments_index::ROUND_FILES,
+                ROUND_TYPES_RON,
+                SubstanceRegistry::shipped_static(),
+            )
+            .unwrap_or_else(|err| panic!("rounds: the embedded round files are unusable: {err}"))
         });
         &REGISTRY
     }
 
-    /// The round named `name`; a hard error naming the name and the vocabulary, never a default.
-    pub(crate) fn get(&self, name: &str) -> Result<Round, RoundError> {
-        self.entry(name).map(|(round, _)| *round)
+    /// The facts of the round keyed `key`; a hard error naming the key and the vocabulary, never a
+    /// default.
+    pub(crate) fn get(&self, key: &str) -> Result<RoundFacts, RoundError> {
+        self.entry(key).map(|(round, _)| *round)
     }
 
-    /// The display name of the round keyed `name`; an error as [`Self::get`]'s, never the key.
-    pub(crate) fn name(&self, name: &str) -> Result<&str, RoundError> {
-        self.entry(name).map(|(_, shown)| shown.as_str())
+    /// The display name of the round keyed `key`; an error as [`Self::get`]'s, never the key.
+    pub(crate) fn name(&self, key: &str) -> Result<&str, RoundError> {
+        self.entry(key).map(|(_, shown)| shown.as_str())
     }
 
     /// Every round's key, in key order.
@@ -397,17 +523,25 @@ impl RoundRegistry {
         self.rounds.keys().map(String::as_str)
     }
 
-    fn entry(&self, name: &str) -> Result<&(Round, String), RoundError> {
-        self.rounds.get(name).ok_or_else(|| RoundError::Unknown {
-            name: name.to_string(),
+    fn entry(&self, key: &str) -> Result<&(RoundFacts, String), RoundError> {
+        self.rounds.get(key).ok_or_else(|| RoundError::Unknown {
+            name: key.to_string(),
             known: self.rounds.keys().cloned().collect(),
         })
     }
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// The fixture round-type table: a full-calibre type and a sub-calibre one. Fixture data.
+    pub(crate) const FIXTURE_TYPES: &str = r#"(round_types: {
+        "Fixture": (flight_nose: (Ogive(crh: 1.0), Tuned("fixture")),
+            hit_nose: (Ogive(crh: 1.0), Tuned("fixture")), carrier: (None, Tuned("fixture"))),
+        "Fixture sub-calibre": (flight_nose: (Ogive(crh: 1.0), Tuned("fixture")),
+            hit_nose: (Ogive(crh: 1.0), Tuned("fixture")), carrier: (Kept, Tuned("fixture"))),
+    })"#;
 
     /// `fields` as authored round fields, each with a fixture provenance.
     fn authored(fields: &[(&str, &str)]) -> String {
@@ -418,37 +552,36 @@ mod tests {
             .join(", ")
     }
 
-    /// A registry of one round whose fields are `fields`, each authored with a fixture provenance.
-    fn one(fields: &[(&str, &str)]) -> Result<RoundRegistry, RoundError> {
-        RoundRegistry::from_ron(
-            &format!(r#"(rounds: {{ "Probe": ({}) }})"#, authored(fields)),
-            SubstanceRegistry::shipped_static(),
-        )
-    }
-
-    /// The fixture round with a penetrator block of `mass` (kg) and `caliber` (m).
-    fn with_penetrator(mass: &str, caliber: &str) -> Result<RoundRegistry, RoundError> {
-        RoundRegistry::from_ron(
-            &format!(
-                r#"(rounds: {{ "Probe": ({}, penetrator: Some((mass: ({mass}, Tuned("fixture")),
-                    caliber: ({caliber}, Tuned("fixture"))))) }})"#,
-                authored(&FIXTURE)
-            ),
-            SubstanceRegistry::shipped_static(),
-        )
-    }
-
     /// The fixture round's fields: fixture data, not a shipped round.
-    const FIXTURE: [(&str, &str); 7] = [
+    pub(crate) const FIXTURE: [(&str, &str); 6] = [
         ("name", r#""Probe Mk. 1""#),
+        ("round_type", r#""Fixture""#),
         ("core", r#""GunSteel""#),
-        ("nose", "Ogive(crh: 1.0)"),
         ("mass", "5.0"),
         ("caliber", "0.05"),
-        ("muzzle_speed", "700.0"),
         ("wound", "20.0"),
     ];
 
+    /// The fixture round file, its fields `fields` authored, then `extra` verbatim.
+    pub(crate) fn file(fields: &[(&str, &str)], extra: &str) -> String {
+        format!("({}{extra})", authored(fields))
+    }
+
+    /// A registry of the one round `text`, keyed "Probe", over the fixture types.
+    fn load(text: &str) -> Result<RoundRegistry, RoundError> {
+        RoundRegistry::from_files(
+            &[("Probe", text)],
+            FIXTURE_TYPES,
+            SubstanceRegistry::shipped_static(),
+        )
+    }
+
+    /// A registry of one round whose fields are `fields`, each authored with a fixture provenance.
+    fn one(fields: &[(&str, &str)]) -> Result<RoundRegistry, RoundError> {
+        load(&file(fields, ""))
+    }
+
+    /// The fixture round with field `field` authored as `value`.
     fn with(field: &str, value: &str) -> Result<RoundRegistry, RoundError> {
         let fields = FIXTURE
             .iter()
@@ -457,17 +590,52 @@ mod tests {
         one(&fields)
     }
 
-    /// Every shipped round loads, and each binds a body inside the force law's domain with a core
-    /// that states its facts, and a display name of its own the font draws whole.
+    /// The fixture round, then `extra` verbatim.
+    fn with_extra(extra: &str) -> Result<RoundRegistry, RoundError> {
+        load(&file(&FIXTURE, extra))
+    }
+
+    /// The fixture round of the sub-calibre type, then `extra` verbatim.
+    fn sub_calibre(extra: &str) -> Result<RoundRegistry, RoundError> {
+        let fields = FIXTURE
+            .iter()
+            .map(|&(name, value)| {
+                if name == "round_type" {
+                    (name, r#""Fixture sub-calibre""#)
+                } else {
+                    (name, value)
+                }
+            })
+            .collect::<Vec<_>>();
+        load(&file(&fields, extra))
+    }
+
+    /// The fixture round of the sub-calibre type with a penetrator block of `mass` (kg) and
+    /// `caliber` (m).
+    fn with_penetrator(mass: &str, caliber: &str) -> Result<RoundRegistry, RoundError> {
+        sub_calibre(&format!(
+            r#", penetrator: Some((mass: ({mass}, Tuned("fixture")),
+                caliber: ({caliber}, Tuned("fixture"))))"#
+        ))
+    }
+
+    /// The fixture round's facts fired at the fixture speed, 700 m/s.
+    fn fired(registry: Result<RoundRegistry, RoundError>) -> Result<Round, String> {
+        registry
+            .map_err(|err| err.to_string())?
+            .get("Probe")
+            .map_err(|err| err.to_string())?
+            .fired_at(700.0)
+    }
+
+    /// Every shipped round loads, with a core that states its facts and a display name of its own
+    /// the font draws whole; whether each is inside the force law's domain is its gun's to check
+    /// (`guns`).
     #[test]
     fn the_shipped_rounds_load() {
         let registry = RoundRegistry::shipped();
         assert!(!registry.rounds.is_empty());
         for (name, (round, shown)) in &registry.rounds {
-            round_in_domain(round.body, round.muzzle_speed)
-                .unwrap_or_else(|reason| panic!("{name}: {reason}"));
-            round_in_domain(round.penetrator, round.muzzle_speed)
-                .unwrap_or_else(|reason| panic!("{name} penetrator: {reason}"));
             assert!(
                 round.penetrator.mass <= round.body.mass
                     && round.penetrator.caliber <= round.body.caliber,
@@ -542,7 +710,7 @@ mod tests {
     /// the penetrator to anything but the body, or that reads the block into the body, fails here.
     #[test]
     fn a_penetrator_is_the_body_unless_authored() {
-        let whole = with("mass", "5.0").unwrap().get("Probe").unwrap();
+        let whole = fired(with("mass", "5.0")).unwrap();
         for (penetrator, body) in [
             (whole.penetrator.mass, whole.body.mass),
             (whole.penetrator.caliber, whole.body.caliber),
@@ -551,10 +719,7 @@ mod tests {
             assert_eq!(penetrator.to_bits(), body.to_bits());
         }
 
-        let cored = with_penetrator("1.25", "0.02")
-            .unwrap()
-            .get("Probe")
-            .unwrap();
+        let cored = fired(with_penetrator("1.25", "0.02")).unwrap();
         assert_eq!(whole.body, cored.body, "the block must not move the body");
         assert_eq!(
             cored.penetrator,
@@ -566,18 +731,13 @@ mod tests {
         );
     }
 
-    /// A penetrator is part of the round it flies in: one heavier or wider than its round, or one
-    /// outside the force law's domain at the round's muzzle speed, is refused at parse naming the
-    /// round and the field; one as heavy and as wide as its round loads. The march reads the
-    /// penetrator at the plate and never re-checks it.
+    /// A penetrator is part of the round it flies in: one heavier or wider than its round is
+    /// refused at parse naming the round and the field, and one outside the force law's domain at
+    /// the round's muzzle speed is refused where a gun fires it; one as heavy and as wide as its
+    /// round loads. The march reads the penetrator at the plate and never re-checks it.
     #[test]
     fn a_penetrator_outside_its_round_or_the_law_s_domain_is_refused() {
-        for (mass, caliber, field) in [
-            ("5.01", "0.02", "mass"),
-            ("1.25", "0.0501", "caliber"),
-            ("0.0", "0.02", "mass"),
-            ("1.25", "NaN", "caliber"),
-        ] {
+        for (mass, caliber, field) in [("5.01", "0.02", "mass"), ("1.25", "0.0501", "caliber")] {
             let err = with_penetrator(mass, caliber).unwrap_err();
             assert!(
                 matches!(&err, RoundError::Invalid { round, reason }
@@ -585,58 +745,146 @@ mod tests {
                 "({mass}, {caliber}): {err}"
             );
         }
-        let flush = with_penetrator("5.0", "0.05")
-            .unwrap()
-            .get("Probe")
-            .unwrap();
+        for (mass, caliber, field) in [("0.0", "0.02", "mass"), ("1.25", "NaN", "caliber")] {
+            let err = fired(with_penetrator(mass, caliber)).unwrap_err();
+            assert!(
+                err.contains("penetrator") && err.contains(field),
+                "({mass}, {caliber}): {err}"
+            );
+        }
+        let flush = fired(with_penetrator("5.0", "0.05")).unwrap();
         assert_eq!(flush.penetrator, flush.body);
 
-        let stray = format!(
-            r#"(rounds: {{ "Probe": ({}, penetrator: Some((mass: (1.0, Tuned("x")),
-                caliber: (0.02, Tuned("x")), nose: (Flat, Tuned("x"))))) }})"#,
-            authored(&FIXTURE)
-        );
+        let stray = r#", penetrator: Some((mass: (1.0, Tuned("x")),
+            caliber: (0.02, Tuned("x")), nose: (Flat, Tuned("x"))))"#;
+        let err = sub_calibre(stray).expect_err("a penetrator states no nose of its own");
+        assert!(matches!(err, RoundError::Parse { .. }), "{err}");
+    }
+
+    /// A round type's carrier decides whether its rounds author a penetrator block: a round meets
+    /// the plate whole exactly when its type has no carrier. A full-calibre type's round with a
+    /// block, and a sub-calibre type's round without one, are refused naming the round, so the
+    /// type a round names can never contradict what the force law is handed at the plate.
+    #[test]
+    fn a_penetrator_block_is_authored_exactly_when_the_type_has_a_carrier() {
+        let err = with_extra(
+            r#", penetrator: Some((mass: (1.0, Tuned("x")), caliber: (0.02, Tuned("x"))))"#,
+        )
+        .unwrap_err();
         assert!(
-            RoundRegistry::from_ron(&stray, SubstanceRegistry::shipped_static()).is_err(),
-            "a penetrator states no nose of its own"
+            matches!(&err, RoundError::Invalid { round, reason }
+                if round == "Probe" && reason.contains("carrier") && reason.contains("None")),
+            "{err}"
+        );
+        let err = with("round_type", r#""Fixture sub-calibre""#).unwrap_err();
+        assert!(
+            matches!(&err, RoundError::Invalid { round, reason }
+                if round == "Probe" && reason.contains("carrier") && reason.contains("Kept")),
+            "{err}"
         );
     }
 
-    /// The fixture round with a burst block naming core type `core_type`, and a penetrator block
-    /// when `penetrator`. The block's numbers and the one core type are fixture data.
-    fn with_burst(core_type: &str, penetrator: bool) -> Result<RoundRegistry, RoundError> {
-        let penetrator = if penetrator {
-            r#", penetrator: Some((mass: (1.0, Tuned("x")), caliber: (0.02, Tuned("x"))))"#
-        } else {
-            ""
+    /// A round names a type the table declares, refused naming the round and the vocabulary
+    /// otherwise; a type with either nose out of its family's range is refused naming the type;
+    /// a carrier outside the closed set does not parse.
+    #[test]
+    fn a_round_type_is_declared_and_its_noses_in_range() {
+        let err = with("round_type", r#""Shrapnel""#).unwrap_err();
+        assert!(
+            matches!(&err, RoundError::Invalid { round, reason }
+                if round == "Probe" && reason.contains("Shrapnel") && reason.contains("Fixture")),
+            "{err}"
+        );
+        let types = |flight: &str, hit: &str, carrier: &str| {
+            format!(
+                r#"(round_types: {{ "Odd": (flight_nose: ({flight}, Tuned("x")),
+                    hit_nose: ({hit}, Tuned("x")), carrier: ({carrier}, Tuned("x"))) }})"#
+            )
         };
-        RoundRegistry::from_ron(
-            &format!(
-                r#"(rounds: {{ "Probe": ({}{penetrator}, burst: Some((
-                    core_type: ({core_type:?}, Tuned("x")), option: (Ring, Tuned("x")),
-                    arming_spend: (35.0, Tuned("x")), delay: (0.012, Tuned("x")),
-                    core_mass: (0.02, Tuned("x")), base_mass: (0.1, Tuned("x")),
-                    cavity_diameter: (0.02, Tuned("x"))))) }},
-                burst_cores: {{ "Fixture core": (density: (1650.0, Tuned("x")),
-                    speed_constant_mps: (2680.0, Tuned("x"))) }})"#,
-                authored(&FIXTURE)
-            ),
+        for (flight, hit, field) in [
+            ("Ogive(crh: 0.4)", "Flat", "flight_nose"),
+            ("Flat", "Cone(length_calibres: 0.0)", "hit_nose"),
+        ] {
+            let err = RoundRegistry::from_files(
+                &[],
+                &types(flight, hit, "None"),
+                SubstanceRegistry::shipped_static(),
+            )
+            .unwrap_err();
+            assert!(
+                matches!(&err, RoundError::InvalidType { round_type, reason }
+                    if round_type == "Odd" && reason.contains(field)),
+                "{err}"
+            );
+        }
+        let err = RoundRegistry::from_files(
+            &[],
+            &types("Flat", "Flat", "Sabot"),
             SubstanceRegistry::shipped_static(),
+        )
+        .unwrap_err();
+        assert!(matches!(err, RoundError::Parse { .. }), "{err}");
+    }
+
+    /// The fixture round with a burst block naming substance `core`, on the sub-calibre type with
+    /// a penetrator block when `penetrator`, over [`FIXTURE_SUBSTANCES`]. The block's numbers are
+    /// fixture data.
+    fn with_burst(core: &str, penetrator: bool) -> Result<RoundRegistry, RoundError> {
+        let (round_type, block) = if penetrator {
+            (
+                r#""Fixture sub-calibre""#,
+                r#", penetrator: Some((mass: (1.0, Tuned("x")), caliber: (0.02, Tuned("x"))))"#,
+            )
+        } else {
+            (r#""Fixture""#, "")
+        };
+        let fields = FIXTURE
+            .iter()
+            .map(|&(name, value)| {
+                (
+                    name,
+                    if name == "round_type" {
+                        round_type
+                    } else {
+                        value
+                    },
+                )
+            })
+            .collect::<Vec<_>>();
+        let extra = format!(
+            r#"{block}, burst: Some((
+                core_substance: ({core:?}, Tuned("x")), option: (Ring, Tuned("x")),
+                arming_spend: (35.0, Tuned("x")), delay: (0.012, Tuned("x")),
+                core_mass: (0.02, Tuned("x")), base_mass: (0.1, Tuned("x")),
+                cavity_diameter: (0.02, Tuned("x"))))"#
+        );
+        RoundRegistry::from_files(
+            &[("Probe", &file(&fields, &extra))],
+            FIXTURE_TYPES,
+            &SubstanceRegistry::from_ron(FIXTURE_SUBSTANCES).unwrap(),
         )
     }
 
+    /// A reference steel and one burst core, `"Fixture core"`: fixture data.
+    const FIXTURE_SUBSTANCES: &str = r#"(substances: {
+        "GunSteel": Hard(resistance: Reference, paintable: true,
+            debris_half_angle_deg: (26.2, Tuned("x")), facts: Some((
+                density: (7800.0, Tuned("x")), flow_strength: (1.18e9, Tuned("x")),
+                youngs_modulus: (190.0e9, Tuned("x")), poisson_ratio: (0.29, Tuned("x"))))),
+        "Fixture core": Burst(density: (1650.0, Tuned("x")),
+            speed_constant_mps: (2680.0, Tuned("x"))),
+    })"#;
+
     /// A burst block rides its round as the burst derived from the round's body, its body steel's
-    /// density and the core type it names; a round without one is inert. A block naming no
-    /// declared core type, or on a sub-calibre round, is refused naming the round, never read as
-    /// inert: a mutant that drops the block, or derives it from another density, fails here.
+    /// density and the burst facts of the substance it names; a round without one is inert. A
+    /// block naming no substance, one naming a substance without burst facts, or one on a
+    /// sub-calibre round, is refused naming the round, never read as inert: a mutant that drops
+    /// the block, or derives it from another density, fails here.
     #[test]
     fn a_burst_block_rides_its_round_or_is_refused() {
         let inert = with("mass", "5.0").unwrap().get("Probe").unwrap();
         assert_eq!(inert.burst, None);
-        let fused = with_burst("Fixture core", false)
-            .unwrap()
-            .get("Probe")
-            .unwrap();
+        let fused = fired(with_burst("Fixture core", false)).unwrap();
         let inputs = BurstInputs {
             shape: BurstShape::Ring,
             arming_spend: 35.0,
@@ -651,15 +899,16 @@ mod tests {
             fused.burst,
             Some(Burst::derived(fused.body, fused.core.density, &inputs).unwrap())
         );
-        for (core_type, penetrator, word) in [
-            ("Nope", false, "core type"),
+        for (core, penetrator, word) in [
+            ("Nope", false, "core_substance"),
+            ("GunSteel", false, "burst facts"),
             ("Fixture core", true, "penetrator"),
         ] {
-            let err = with_burst(core_type, penetrator).unwrap_err();
+            let err = with_burst(core, penetrator).unwrap_err();
             assert!(
                 matches!(&err, RoundError::Invalid { round, reason }
                     if round == "Probe" && reason.contains(word)),
-                "{core_type}, {penetrator}: {err}"
+                "{core}, {penetrator}: {err}"
             );
         }
     }
@@ -684,30 +933,37 @@ mod tests {
         }
     }
 
-    /// A value authored without provenance, a duplicated round and an unknown field do not load.
+    /// A value authored without provenance, a key given twice and an unknown field do not load, nor
+    /// does a muzzle speed: a round's speed is its gun's.
     #[test]
     fn malformed_files_do_not_load() {
-        let substances = SubstanceRegistry::shipped_static();
-        let bare = r#"(rounds: { "Probe": (name: ("Probe", Tuned("fixture")),
-            core: ("GunSteel", Tuned("fixture")),
-            nose: (Flat, Tuned("fixture")), mass: 5.0, caliber: (0.05, Tuned("fixture")),
-            muzzle_speed: (700.0, Tuned("fixture")), wound: (20.0, Tuned("fixture"))) })"#;
-        let err = RoundRegistry::from_ron(bare, substances).unwrap_err();
+        let bare = r#"(name: ("Probe", Tuned("fixture")), round_type: ("Fixture", Tuned("fixture")),
+            core: ("GunSteel", Tuned("fixture")), mass: 5.0, caliber: (0.05, Tuned("fixture")),
+            wound: (20.0, Tuned("fixture")))"#;
+        let err = load(bare).unwrap_err();
         assert!(err.to_string().contains("provenance"), "{err}");
 
-        let round = authored(&FIXTURE);
-        let twice = format!(r#"(rounds: {{ "Probe": ({round}), "Probe": ({round}) }})"#);
-        let err = RoundRegistry::from_ron(&twice, substances).unwrap_err();
+        let round = file(&FIXTURE, "");
+        let err = RoundRegistry::from_files(
+            &[("Probe", &round), ("Probe", &round)],
+            FIXTURE_TYPES,
+            SubstanceRegistry::shipped_static(),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("twice"), "{err}");
 
-        let stray = format!(r#"(rounds: {{ "Probe": ({round}, hardness: (3.0, Tuned("x"))) }})"#);
-        assert!(RoundRegistry::from_ron(&stray, substances).is_err());
+        for stray in [
+            r#", hardness: (3.0, Tuned("x"))"#,
+            r#", muzzle_speed: (700.0, Tuned("x"))"#,
+        ] {
+            assert!(with_extra(stray).is_err(), "{stray}");
+        }
     }
 
-    /// Each nose family derives its factor by its own formula (a hemisphere and a half-calibre
-    /// cone are `½`, DERIVED; a flat face `1`), a loaded round's body carries the factor DERIVED
-    /// from its authored nose, and a parameter outside the family's range is a load error naming
-    /// the round.
+    /// A round's nose factor is DERIVED from its type's hit nose, or from its own `nose` where it
+    /// authors one; each family derives its factor by its own formula (a hemisphere and a
+    /// half-calibre cone are `½`, DERIVED; a flat face `1`); and a parameter outside the family's
+    /// range is a load error naming the round.
     #[test]
     fn nose_shapes_derive_their_factor_and_reject_out_of_range_parameters() {
         let loaded = with("mass", "5.0").unwrap().get("Probe").unwrap();
@@ -715,6 +971,11 @@ mod tests {
             loaded.body.nose_factor,
             NoseShape::Ogive { crh: 1.0 }.factor()
         );
+        let own = with_extra(r#", nose: Some((Flat, Tuned("x")))"#)
+            .unwrap()
+            .get("Probe")
+            .unwrap();
+        assert_eq!(own.body.nose_factor, 1.0, "a round's own nose wins");
         for (shape, expected) in [
             (NoseShape::Ogive { crh: 0.5 }, 0.5),
             (
@@ -740,7 +1001,9 @@ mod tests {
             "Cap(radius_calibres: 0.4)",
             "Ogive(crh: NaN)",
         ] {
-            let err = with("nose", nose).unwrap_err().to_string();
+            let err = with_extra(&format!(r#", nose: Some(({nose}, Tuned("x")))"#))
+                .unwrap_err()
+                .to_string();
             assert!(
                 err.contains("Probe") && err.contains("nose"),
                 "{nose}: {err}"
@@ -749,18 +1012,16 @@ mod tests {
     }
 
     /// Extreme FINITE nose parameters: a round is accepted exactly when its derived factor and the
-    /// capability law's results stay in their finite valid domain, and an accepted factor is the
-    /// family's own formula, not an overflowed intermediate.
+    /// capability law's results stay in their finite valid domain at the fixture speed, and an
+    /// accepted factor is the family's own formula, not an overflowed intermediate.
     #[test]
     fn extreme_nose_parameters_are_accepted_only_inside_the_law_s_domain() {
-        let accepted = |nose: &str| match with("nose", nose) {
+        let accepted = |nose: &str| match fired(with_extra(&format!(
+            r#", nose: Some(({nose}, Tuned("x")))"#
+        ))) {
             Ok(_) => true,
             Err(err) => {
-                let err = err.to_string();
-                assert!(
-                    err.contains("Probe") && err.contains("nose"),
-                    "{nose}: {err}"
-                );
+                assert!(err.contains("nose"), "{nose}: {err}");
                 false
             }
         };

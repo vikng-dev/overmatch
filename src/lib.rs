@@ -9,6 +9,12 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 mod aim;
+/// The embedded armament files, written by `build.rs`: `ROUND_FILES` (`assets/rounds/`) and
+/// `GUN_FILES` (`assets/guns/`), each `(file stem, file text)` in byte order of the stem. The round
+/// and gun registries parse from these alone; no armament file is read at runtime.
+mod armaments_index {
+    include!(concat!(env!("OUT_DIR"), "/armaments_index.rs"));
+}
 /// The runtime asset-root resolver (`asset_root`) — where `assets/` lives, resolved once and shared
 /// by both `AssetPlugin` (`net::client`) and the tank bake (`bake`) so they never open different
 /// `.glb` files. Always compiled: `bake` builds under `--no-default-features`, where `net` is off.
@@ -73,6 +79,9 @@ mod frame_cost;
 /// single seam between what the build measured and what the renderer selects — no measurement is
 /// transcribed into Rust.
 mod geometry_lod;
+/// The gun registry (`assets/guns/`): every gun model and its ammunition table, the muzzle speed it
+/// fires each round it chambers at. A [`rounds::Round`] is a round fired from a gun.
+mod guns;
 /// The dedicated-server guard: boots `SimPlugin` headless (no GPU/window/winit) and drives the
 /// tank via `TankCommand` — fails first if sim code grows a hard render dependency.
 #[cfg(test)]
@@ -138,8 +147,10 @@ mod render_policy;
 /// itself (the one writer of its resource mounts the resource's owner), so it reaches every windowed
 /// root and no other.
 mod render_scale;
-/// The round registry (`assets/ballistics/rounds.ron`): every round a weapon can fire, with its
-/// core material, nose geometry, mass, calibre and muzzle speed, resolved and validated at parse.
+/// The round registry (`assets/rounds/`, one file per round) and the round-type table
+/// (`assets/ballistics/round_types.ron`): every round's core material, nose, mass, calibre, crew
+/// line rate and burst, resolved and validated at parse; its muzzle speed is the firing gun's
+/// ([`guns`]).
 mod rounds;
 /// The armor ballistics sandbox (`bin/armor_sandbox`). Public so the binary can mount it; not part
 /// of `GamePlugin`.

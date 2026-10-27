@@ -305,20 +305,25 @@ impl WeaponSpec {
         self.rounds.first().map_or("", String::as_str)
     }
 
-    /// The default round, resolved in the shipped round registry; an unknown key is an error naming
-    /// it. On a validated spec this is `Ok`.
+    /// The default round, fired from the shipped gun that chambers it
+    /// ([`crate::guns::GunRegistry::round_by_key`]); an unknown key is an error naming it. On a
+    /// validated spec this is `Ok`.
     #[cfg(test)]
-    pub(crate) fn resolved_round(&self) -> Result<crate::rounds::Round, crate::rounds::RoundError> {
-        crate::rounds::RoundRegistry::shipped().get(self.default_round_key())
+    pub(crate) fn resolved_round(&self) -> Result<crate::rounds::Round, crate::guns::GunError> {
+        crate::guns::GunRegistry::shipped().round_by_key(self.default_round_key())
     }
 
-    /// Every round in [`Self::rounds`], in order, resolved in the shipped round registry; the first
-    /// unknown key is an error naming it. On a validated spec this is `Ok`.
+    /// Every round in [`Self::rounds`], in order, each fired from the shipped gun that chambers it;
+    /// the first key that resolves to no round is an error naming it. On a validated spec this is
+    /// `Ok`.
     pub(crate) fn resolved_rounds(
         &self,
-    ) -> Result<Vec<crate::rounds::Round>, crate::rounds::RoundError> {
-        let registry = crate::rounds::RoundRegistry::shipped();
-        self.rounds.iter().map(|key| registry.get(key)).collect()
+    ) -> Result<Vec<crate::rounds::Round>, crate::guns::GunError> {
+        let guns = crate::guns::GunRegistry::shipped();
+        self.rounds
+            .iter()
+            .map(|key| guns.round_by_key(key))
+            .collect()
     }
 }
 

@@ -1,0 +1,14 @@
+// The 7.92 mm machine gun of the Tiger's coax and hull mounts.
+// The file's fields are `src/guns.rs`'s module doc.
+(
+    names: [
+        ("MG 34", Unknown("the machine gun the Tiger's mounts carry, an MG 34 in the tank's model
+            (assets/tiger_1/cc.txt); no armament table in the repo names it")),
+    ],
+    caliber: (0.00792, Measured("the gun's nominal 7.92 mm calibre designation, the cartridge of
+        the S.m.K. (panzerworld.com/german-ammunition-nomenclature)")),
+    ammunition: {
+        "7.9mm_AP": (muzzle_speed: (755.0, Unknown("no source recorded in the repo; settled by a
+            cited firing table"))),
+    },
+)
