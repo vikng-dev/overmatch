@@ -74,6 +74,26 @@ const DETERMINANT_SLACK: f64 = 8.0 * f64::EPSILON;
 /// integers, at one and the same power of two.
 const RAY_SHIFT: i32 = 149;
 
+/// The band within which a convex clip's f64 offset or rate cannot be told from zero, as a
+/// fraction of the sum of its three terms' magnitudes: `2^-50`.
+///
+/// DERIVED, with `u = 2^-53` the f64 unit roundoff. A term of the offset is a stored f32 normal
+/// component times the f64 difference of two f32 coordinates, so the difference rounds once and
+/// the product once, each within `u` of the term (the difference is exact only while the two
+/// coordinates lie within `2^29` of each other, DERIVED as f64's 53 bits less f32's 24, and
+/// nothing promises that); a term of the rate is one exact product of two f32. The sum
+/// `(a + b) + c` rounds twice, the first within
+/// `u · (|a| + |b|)`, the second within `u · (1 + u) · (|a| + |b| + |c|)`. In all the sum lies
+/// within `(4u + 6u²) · (|a| + |b| + |c|)` of the exact value, over the computed magnitudes, whose
+/// own two additions lose under `2u` of it; `8u` covers that twice over. No intermediate is
+/// subnormal: the smallest nonzero f32 is `2^-149`, so every nonzero product here is at least
+/// `2^-298` in magnitude, far above f64's gradual underflow, and the relative model holds
+/// throughout.
+///
+/// A bound on the rounding, NOT a tolerance: outside the band the f64 sign is the exact sign and
+/// the f64 quotient is the parameter; inside it, both are retaken in [`crate::exact`].
+const CLIP_SLACK: f64 = 4.0 * f64::EPSILON;
+
 /// How far behind a corridor origin an undeclared convex entry may lie and still be the face the
 /// ray is sitting on. The march's own boundary nudge, so the two agree about what "just behind"
 /// means.
@@ -521,9 +541,8 @@ fn collect_convex(
     if corridor.behind > 0.0 {
         let behind = f64::from(corridor.behind);
         let ahead = f64::from(corridor.length - corridor.behind);
-        // The probe was sized to pass through every candidate: an origin inside the solid whose
-        // boundary lies past either end is a probe that does not reach it, never an interval
-        // declared from one side.
+        // The probe spans every candidate: an origin inside the solid whose boundary lies past
+        // either end is a probe that does not reach it, never an interval declared from one side.
         if entry.t <= 0.0 && exit.t >= 0.0 && (-entry.t > behind || exit.t > ahead) {
             return Err(failed(
                 "a probe through a convex volume does not reach its boundary",
@@ -598,14 +617,21 @@ struct ConvexCrossing {
 /// is not outside of is inside, so a ray along an edge crosses with its full chord and one a hair
 /// outside the face misses.
 ///
-/// f64 over the stored f32 points and normals, in one fixed order with no transcendental call:
-/// each product is exact, the three-term sums round twice and the quotient once, so the parameter
-/// is the stored plane's within rounding, and authority and replica read bit-identical parameters.
-/// The extremum is taken in stored face order with a strict comparison, so an exact tie is
-/// resolved the same way on every peer.
+/// f64 over the stored f32 points and normals, in one fixed order with no transcendental call, so
+/// authority and replica read bit-identical parameters. Each face's offset and rate is a
+/// three-term sum whose rounding lies within [`CLIP_SLACK`] of its terms' magnitudes: beyond that
+/// band the f64 sign is the exact sign and the f64 quotient is the parameter; within it — a face
+/// the ray runs along, a plane the origin sits on — both are retaken in exact integer arithmetic
+/// ([`exact_face`]), which has no platform dependence, and the parameter is one f64 division of
+/// two conversions. The band is what keeps a face the ray crosses within `5e-19` rad of its plane
+/// (DERIVED: the regression fixture's) from being called parallel: read as parallel with the
+/// origin a hair outside it, that face would declare a miss, and a positive chord through a solid,
+/// with its dose, would be lost. The extremum is taken in stored face order with a strict
+/// comparison, so an exact tie is resolved the same way on every peer.
 struct ConvexClip {
-    origin: DVec3,
-    axis: DVec3,
+    /// The ray as stored: the f64 reading converts it, the exact reading scales it.
+    origin: Vec3,
+    axis: Vec3,
     entry: Option<ConvexFace>,
     exit: Option<ConvexFace>,
     /// A face the ray runs parallel to and outside of: a miss, whatever the other faces say.
@@ -615,8 +641,8 @@ struct ConvexClip {
 impl ConvexClip {
     fn new(origin: Vec3, axis: Vec3) -> Self {
         Self {
-            origin: origin.as_dvec3(),
-            axis: axis.as_dvec3(),
+            origin,
+            axis,
             entry: None,
             exit: None,
             missed: false,
@@ -625,23 +651,31 @@ impl ConvexClip {
 
     /// One face, as its outward unit normal through a point of its plane.
     fn face(&mut self, face: u32, normal: Vec3, point: Vec3) {
-        let normal_exact = normal.as_dvec3();
+        let n = normal.as_dvec3();
+        let (origin, axis) = (self.origin.as_dvec3(), self.axis.as_dvec3());
         // The origin's signed distance from the plane, positive outside, and the ray's rate across
-        // it, positive outward.
-        let offset = normal_exact.dot(self.origin - point.as_dvec3());
-        let rate = normal_exact.dot(self.axis);
-        if rate == 0.0 {
-            if offset > 0.0 {
-                self.missed = true;
+        // it, positive outward, each with the band its f64 reading is uncertain within.
+        let v = origin - point.as_dvec3();
+        let (offset, offset_band) = clip_sum(n.x * v.x, n.y * v.y, n.z * v.z);
+        let (rate, rate_band) = clip_sum(n.x * axis.x, n.y * axis.y, n.z * axis.z);
+        let (t, entering) = if rate.abs() > rate_band && offset.abs() > offset_band {
+            (-offset / rate, rate < 0.0)
+        } else {
+            // Inside either band the f64 cannot say whether the ray is parallel to the plane or
+            // the origin on it, so the exact reading says, and hands back the parameter the
+            // cancelled quotient could not.
+            let (numerator, denominator) = exact_face(self.origin, self.axis, normal, point);
+            if denominator.is_zero() {
+                self.missed |= numerator.signum() < 0;
+                return;
             }
-            return;
-        }
-        let candidate = ConvexFace {
-            t: -offset / rate,
-            face,
-            normal,
+            (
+                numerator.to_f64() / denominator.to_f64(),
+                denominator.signum() < 0,
+            )
         };
-        if rate < 0.0 {
+        let candidate = ConvexFace { t, face, normal };
+        if entering {
             if self.entry.is_none_or(|best| candidate.t > best.t) {
                 self.entry = Some(candidate);
             }
@@ -711,6 +745,27 @@ fn clip_convex(
     let mut clip = ConvexClip::new(origin, axis);
     convex_faces(shape, |face, normal, point| clip.face(face, normal, point))?;
     clip.finish()
+}
+
+/// `(a + b) + c` in that order, and the band within which that sum cannot be told from zero:
+/// [`CLIP_SLACK`] of the terms' magnitudes.
+fn clip_sum(a: f64, b: f64, c: f64) -> (f64, f64) {
+    ((a + b) + c, CLIP_SLACK * ((a.abs() + b.abs()) + c.abs()))
+}
+
+/// A face's plane crossing as an exact ratio, `(n · (point − origin), n · axis)` at
+/// [`RAY_SHIFT`]: the parameter is their quotient, the ray enters where the denominator is
+/// negative, and a zero denominator is the only parallel ray there is, outside the face iff the
+/// numerator is negative. Both are quadratic in the stored f32, at one power of two that cancels
+/// in the quotient.
+fn exact_face(origin: Vec3, axis: Vec3, normal: Vec3, point: Vec3) -> (Int, Int) {
+    let scaled = |v: Vec3| [v.x, v.y, v.z].map(|value| Int::from_f32_scaled(value, RAY_SHIFT));
+    let dot = |p: [Int; 3], q: [Int; 3]| p[0].mul(q[0]).add(p[1].mul(q[1])).add(p[2].mul(q[2]));
+    let (n, o, p, d) = (scaled(normal), scaled(origin), scaled(point), scaled(axis));
+    (
+        dot(n, [p[0].sub(o[0]), p[1].sub(o[1]), p[2].sub(o[2])]),
+        dot(n, d),
+    )
 }
 
 /// One boundary of one shell as a narrow phase found it, at its RAW `t`.
@@ -2615,11 +2670,15 @@ mod tests {
         Collider::convex_hull(points).expect("two rings of positive radius at distinct heights")
     }
 
-    /// The clip of one collider's shape, as `(entry, exit)` parameters.
-    fn clip(collider: &Collider, origin: Vec3, axis: Vec3) -> Option<(f64, f64)> {
+    /// The clip of one collider's shape: the faces it enters and leaves through.
+    fn crossing(collider: &Collider, origin: Vec3, axis: Vec3) -> Option<ConvexCrossing> {
         clip_convex(collider.shape_scaled().as_typed_shape(), origin, axis)
             .expect("a polyhedral solid")
-            .map(|crossing| (crossing.entry.t, crossing.exit.t))
+    }
+
+    /// The clip of one collider's shape, as `(entry, exit)` parameters.
+    fn clip(collider: &Collider, origin: Vec3, axis: Vec3) -> Option<(f64, f64)> {
+        crossing(collider, origin, axis).map(|crossing| (crossing.entry.t, crossing.exit.t))
     }
 
     /// The cuboid's interval in SLAB form, the closed form the clip must reproduce bit for bit:
@@ -2644,14 +2703,22 @@ mod tests {
 
     /// The same interval read from the shape's stored faces in exact integer arithmetic
     /// ([`crate::exact`]), each parameter formed by one f64 division of two exact integers: the
-    /// reference the clip's f64 is held to. Returns the entry, the exit and the bound within which
-    /// the two readings agree, or `None` for a miss.
+    /// reference the clip's f64 is held to. Returns the entry and the exit, each with the bound
+    /// within which the two readings of it agree, or `None` for a miss.
     ///
-    /// The bound is DERIVED: the clip's three-term offset sum rounds twice, at most
-    /// `2 · 2^-53` of the sum of its terms' magnitudes, and its quotient once; the reference's two
-    /// conversions are each within `2^-52` and its division within `2^-53`. Eight ULP of the
-    /// parameter plus eight of the terms' spread over the rate covers both sides twice over.
-    fn exact_interval(collider: &Collider, origin: Vec3, axis: Vec3) -> Option<(f64, f64, f64)> {
+    /// The bound is DERIVED, with `u = 2^-53`: the clip's offset is within `4u` per unit of its
+    /// terms' spread (each term's difference and product round once, the three-term sum twice),
+    /// its rate within `2u` per unit of its own spread, and the quotient `t = −offset / rate`
+    /// carries `(|Δoffset| + |t| · |Δrate|) / |rate|` of both plus one rounding; the reference's
+    /// two conversions are each within `2^-52` and its division within `u`. Sixteen `u` of the
+    /// parameter plus sixteen of the spreads over the EXACT rate covers both sides twice over,
+    /// and a face the clip reads exactly, inside its own band, coincides with the reference bit
+    /// for bit.
+    fn exact_interval(
+        collider: &Collider,
+        origin: Vec3,
+        axis: Vec3,
+    ) -> Option<((f64, f64), (f64, f64))> {
         let scaled = |v: Vec3| [v.x, v.y, v.z].map(|c| Int::from_f32_scaled(c, RAY_SHIFT));
         let dot = |p: [Int; 3], q: [Int; 3]| p[0].mul(q[0]).add(p[1].mul(q[1])).add(p[2].mul(q[2]));
         let (o, d) = (scaled(origin), scaled(axis));
@@ -2668,14 +2735,19 @@ mod tests {
                     return;
                 }
                 let t = numerator.to_f64() / denominator.to_f64();
-                let spread: f64 = (0..3)
-                    .map(|k| {
-                        (f64::from(normal[k]) * (f64::from(origin[k]) - f64::from(point[k]))).abs()
-                    })
-                    .sum();
+                let spread = |v: DVec3| {
+                    (0..3)
+                        .map(|k| (f64::from(normal[k]) * v[k]).abs())
+                        .sum::<f64>()
+                };
+                let offset_spread = spread(origin.as_dvec3() - point.as_dvec3());
+                let rate_spread = spread(axis.as_dvec3());
+                // The exact rate, unscaled: nonzero on every face that reaches here, where the
+                // clip's f64 rate may have cancelled to zero.
+                let rate = denominator.to_f64() * 2.0_f64.powi(-2 * RAY_SHIFT);
                 let bound = 8.0
                     * f64::EPSILON
-                    * (t.abs() + spread / normal.as_dvec3().dot(axis.as_dvec3()).abs());
+                    * (t.abs() + (offset_spread + t.abs() * rate_spread) / rate.abs());
                 let entering = denominator.signum() < 0;
                 let slot: &mut Option<(f64, f64)> = if entering { &mut entry } else { &mut exit };
                 let better =
@@ -2688,7 +2760,7 @@ mod tests {
         .expect("a polyhedral solid");
         let (entry, entry_bound) = entry.expect("a face the ray enters");
         let (exit, exit_bound) = exit.expect("a face the ray leaves");
-        (!missed && entry < exit).then_some((entry, exit, entry_bound.max(exit_bound)))
+        (!missed && entry < exit).then_some(((entry, entry_bound), (exit, exit_bound)))
     }
 
     /// How far inside the IDEAL frustum a point lies: positive inside, zero on the surface,
@@ -2709,6 +2781,57 @@ mod tests {
         (apothem - reach)
             .min(point.y)
             .min(f64::from(FRUSTUM_HEIGHT) - point.y)
+    }
+
+    /// The IDEAL frustum's fourteen planes as `(outward unit normal, point)`, enumerated from the
+    /// fixture constants alone and never through [`convex_faces`]: twelve facets whose normals sit
+    /// at `15° + 30°·k` around the axis, leaning by the taper so that `radial · p + taper · cos 15°
+    /// · y` is the apothem at `y = 0` all the way up, then the bottom cap and the top cap.
+    fn ideal_frustum_planes() -> [(DVec3, DVec3); 14] {
+        let (bottom, top, height) = (
+            f64::from(FRUSTUM_R_BOTTOM),
+            f64::from(FRUSTUM_R_TOP),
+            f64::from(FRUSTUM_HEIGHT),
+        );
+        let cos_15 = 15.0_f64.to_radians().cos();
+        let lean = (bottom - top) / height * cos_15;
+        let mut planes = [(DVec3::ZERO, DVec3::ZERO); 14];
+        for (k, plane) in planes.iter_mut().take(12).enumerate() {
+            let angle = (15.0 + 30.0 * k as f64).to_radians();
+            let radial = DVec3::new(angle.cos(), 0.0, angle.sin());
+            *plane = (
+                (radial + DVec3::Y * lean).normalize(),
+                radial * (bottom * cos_15),
+            );
+        }
+        planes[12] = (DVec3::NEG_Y, DVec3::ZERO);
+        planes[13] = (DVec3::Y, DVec3::Y * height);
+        planes
+    }
+
+    /// The interval the IDEAL frustum presents to a ray, clipped against
+    /// [`ideal_frustum_planes`] with its own extremum: the reference the stored hull's reading is
+    /// held to within [`FRUSTUM_BUILD_TOLERANCE`], sharing neither the clip's enumeration nor its
+    /// planes. `None` for a miss.
+    fn ideal_frustum_interval(origin: Vec3, axis: Vec3) -> Option<(f64, f64)> {
+        let (origin, axis) = (origin.as_dvec3(), axis.as_dvec3());
+        let (mut entry, mut exit) = (f64::NEG_INFINITY, f64::INFINITY);
+        for (normal, point) in ideal_frustum_planes() {
+            let (offset, rate) = (normal.dot(origin - point), normal.dot(axis));
+            if rate == 0.0 {
+                if offset > 0.0 {
+                    return None;
+                }
+                continue;
+            }
+            let t = -offset / rate;
+            if rate < 0.0 {
+                entry = entry.max(t);
+            } else {
+                exit = exit.min(t);
+            }
+        }
+        (entry < exit).then_some((entry, exit))
     }
 
     /// A CUBOID IS CLIPPED TO ITS SLAB INTERVAL BIT FOR BIT: the clip's entry and exit are the
@@ -2812,8 +2935,10 @@ mod tests {
 
     /// A 12-GON FRUSTUM IS CLIPPED TO ITS STORED FACES WITHIN f64 ROUNDING: the clip's entry and
     /// exit agree with the exact integer reading of the same stored faces to within the rounding
-    /// the f64 arithmetic can lose, and both lie on the ideal frustum to within the hull's f32
-    /// build, through the centre, a hair inside a bottom vertex (a chord of the hair's size) or
+    /// the f64 arithmetic can lose (`exact_interval`, which pins the f64 arithmetic), and both
+    /// are the ideal frustum's own, enumerated apart from the stored hull, to within the hull's
+    /// f32 build (`ideal_frustum_interval`, which pins the stored planes and their enumeration),
+    /// through the centre, a hair inside a bottom vertex (a chord of the hair's size) or
     /// outside it (nothing), along a slanted edge a hair inside (the edge's full length) or outside
     /// (nothing), parallel to the top cap a hair above it and to a facet a hair outside it
     /// (nothing), and from inside (the entry behind, the exit ahead). The trees' trunks are this
@@ -2905,15 +3030,30 @@ mod tests {
             if matches!(expected, Expect::Miss) {
                 assert_eq!(read, None, "{pose}: a miss or a touch bounds no material");
                 assert_eq!(exact_interval(&frustum, origin, axis), None, "{pose}");
+                assert_eq!(
+                    ideal_frustum_interval(origin, axis),
+                    None,
+                    "{pose}: the ideal frustum misses too"
+                );
                 continue;
             }
             let (entry, exit) = read.unwrap_or_else(|| panic!("{pose}: a crossing"));
-            let (exact_entry, exact_exit, bound) =
+            let ((exact_entry, entry_bound), (exact_exit, exit_bound)) =
                 exact_interval(&frustum, origin, axis).unwrap_or_else(|| panic!("{pose}"));
             assert!(
-                (entry - exact_entry).abs() <= bound && (exit - exact_exit).abs() <= bound,
+                (entry - exact_entry).abs() <= entry_bound
+                    && (exit - exact_exit).abs() <= exit_bound,
                 "{pose}: the clip reads the stored faces within f64 rounding: \
-                 ({entry}, {exit}) against ({exact_entry}, {exact_exit}), bound {bound}"
+                 ({entry}, {exit}) against ({exact_entry}, {exact_exit}), bounds \
+                 ({entry_bound}, {exit_bound})"
+            );
+            let (ideal_entry, ideal_exit) = ideal_frustum_interval(origin, axis)
+                .unwrap_or_else(|| panic!("{pose}: the ideal frustum is crossed"));
+            assert!(
+                (entry - ideal_entry).abs() <= FRUSTUM_BUILD_TOLERANCE
+                    && (exit - ideal_exit).abs() <= FRUSTUM_BUILD_TOLERANCE,
+                "{pose}: the stored hull's interval is the ideal frustum's within its build: \
+                 ({entry}, {exit}) against ({ideal_entry}, {ideal_exit})"
             );
             assert!(entry < exit, "{pose}: one entry strictly before one exit");
             let at = |t: f64| origin.as_dvec3() + axis.as_dvec3() * t;
@@ -2944,6 +3084,199 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// A FACE WHOSE f64 RATE CANCELS TO ZERO IS STILL CROSSED AT ITS EXACT PARAMETER: a ray a
+    /// hair outside a face's stored plane and within `5e-19` rad of it (DERIVED: the normal and
+    /// the axis share one component near `7e-10` and two of `1/√2` whose products cancel exactly,
+    /// so the tiny product is swallowed by the f64 sum) is entered through that face at the
+    /// parameter the exact integer reading of the same stored planes gives, `1/(2√2)` here
+    /// (DERIVED from the hull's geometry), and left at `1/√2`. A kernel that trusted the f64
+    /// rate's zero would call the face parallel and, the origin being outside it, declare a MISS:
+    /// a positive chord through a solid, and its dose, lost.
+    #[test]
+    fn a_face_whose_f64_rate_cancels_to_zero_is_still_crossed_at_its_exact_parameter() {
+        let tetrahedron = Collider::convex_hull(vec![
+            Vec3::new(0.0, 0.0, 0.0),
+            Vec3::new(1.0, 1.0, -1.0),
+            Vec3::new(-1.0, 0.0, 1.0e-9),
+            Vec3::new(0.0, -1.0, -1.0),
+        ])
+        .expect("four points in general position");
+        let origin = Vec3::new(2.5e-10, 0.0, 0.0);
+        let axis = Vec3::new(-1.0e-9, 1.0, -1.0).normalize();
+        let ((exact_entry, _), (exact_exit, exit_bound)) =
+            exact_interval(&tetrahedron, origin, axis).expect("the exact reading is a crossing");
+        assert!(
+            (exact_entry - 0.5 / std::f64::consts::SQRT_2).abs() <= 1.0e-7
+                && (exact_exit - 1.0 / std::f64::consts::SQRT_2).abs() <= 1.0e-7,
+            "the stored planes present the interval (1/(2√2), 1/√2), not \
+             ({exact_entry}, {exact_exit})"
+        );
+        let (entry, exit) =
+            clip(&tetrahedron, origin, axis).expect("a crossing, not a miss on a cancelled rate");
+        // The entry face lies inside the band, so the clip reads it by the reference's own
+        // integer arithmetic: the same bits, not merely within a bound the cancelled f64 rate
+        // would stretch past the whole chord.
+        assert_eq!(
+            entry.to_bits(),
+            exact_entry.to_bits(),
+            "the cancelled face's parameter is the exact reading's, bit for bit: {entry} against \
+             {exact_entry}"
+        );
+        assert!(
+            (exit - exact_exit).abs() <= exit_bound,
+            "the exit reads its stored face within f64 rounding: {exit} against {exact_exit}, \
+             bound {exit_bound}"
+        );
+    }
+
+    /// AN EXACT TIE KEEPS THE FIRST FACE IN STORED ORDER: from `(3, 3, 0)` along `(−1, −1, 0)`
+    /// the `+X` and `+Y` faces are entered at one bit-identical parameter (DERIVED: `2√2`) and the
+    /// `−X` and `−Y` faces left at one (DERIVED: `4√2`); the strict extremum comparisons keep the
+    /// first of each pair, face 0 with normal `+X` and face 1 with normal `−X`. The walk takes the
+    /// face it is handed as the contact and its normal as the true normal, so an inclusive
+    /// comparison, which keeps the LAST of a pair, would report a diagonal's crossing under a
+    /// different face and normal: one geometry, two readings.
+    #[test]
+    fn an_exact_tie_between_two_faces_keeps_the_first_in_stored_order() {
+        let cuboid = Collider::cuboid(2.0, 2.0, 2.0);
+        let origin = Vec3::new(3.0, 3.0, 0.0);
+        let axis = Vec3::new(-1.0, -1.0, 0.0).normalize();
+        assert_eq!(
+            axis.x, axis.y,
+            "the tie is exact: one rate across both faces"
+        );
+        let rate = f64::from(axis.x);
+        assert_eq!(
+            crossing(&cuboid, origin, axis),
+            Some(ConvexCrossing {
+                entry: ConvexFace {
+                    t: -2.0 / rate,
+                    face: 0,
+                    normal: Vec3::X,
+                },
+                exit: ConvexFace {
+                    t: -4.0 / rate,
+                    face: 1,
+                    normal: Vec3::NEG_X,
+                },
+            }),
+            "the first face of each tied pair, in stored order"
+        );
+    }
+
+    /// EVERY FACE OF A CUBOID IS ENUMERATED AND NAMED: an axial probe through the centre in each
+    /// of the six directions enters through the face it meets and leaves through the opposite
+    /// one, each reported by its stored index and outward normal. The slab reference and
+    /// `exact_interval` would both lose a face `convex_faces` omitted, the first by construction
+    /// and the second by sharing the enumeration; here the probe through the omitted face finds
+    /// the solid open around the ray, or names another face.
+    #[test]
+    fn a_cuboid_is_entered_and_left_through_each_of_its_six_named_faces() {
+        let cuboid = Collider::cuboid(2.0, 2.0, 2.0);
+        let normals = [
+            Vec3::X,
+            Vec3::NEG_X,
+            Vec3::Y,
+            Vec3::NEG_Y,
+            Vec3::Z,
+            Vec3::NEG_Z,
+        ];
+        // Travelling along `axis` enters the face facing against it and leaves its opposite.
+        let probes = [
+            (Vec3::NEG_X, 0, 1),
+            (Vec3::X, 1, 0),
+            (Vec3::NEG_Y, 2, 3),
+            (Vec3::Y, 3, 2),
+            (Vec3::NEG_Z, 4, 5),
+            (Vec3::Z, 5, 4),
+        ];
+        for (axis, entry_face, exit_face) in probes {
+            let crossing = crossing(&cuboid, -axis * 5.0, axis)
+                .unwrap_or_else(|| panic!("the probe along {axis} crosses the cuboid"));
+            assert_eq!(
+                crossing,
+                ConvexCrossing {
+                    entry: ConvexFace {
+                        t: 4.0,
+                        face: entry_face,
+                        normal: normals[entry_face as usize],
+                    },
+                    exit: ConvexFace {
+                        t: 6.0,
+                        face: exit_face,
+                        normal: normals[exit_face as usize],
+                    },
+                },
+                "the probe along {axis} names the faces it enters and leaves"
+            );
+        }
+    }
+
+    /// EVERY FACE OF THE 12-GON FRUSTUM IS ENUMERATED AND ORIENTED: the stored hull holds
+    /// fourteen faces, and fourteen probes, one inward through the centre of each facet at height
+    /// 1 and one through each cap, enter through fourteen DISTINCT stored faces whose normals are
+    /// the ideal planes' own within `1e-6` (DERIVED from the f32 build, as
+    /// `FRUSTUM_BUILD_TOLERANCE`), and leave through the opposite facet or the other cap. A face
+    /// `convex_faces` omitted would vanish from `exact_interval` as well, which shares the
+    /// enumeration; here its probe finds another face's normal, two probes one face, or the solid
+    /// open around the ray.
+    #[test]
+    fn a_twelve_gon_frustum_is_entered_through_each_of_its_fourteen_named_faces() {
+        let frustum = twelve_gon_frustum();
+        let stored_faces = match frustum.shape_scaled().as_typed_shape() {
+            TypedShape::ConvexPolyhedron(hull) => hull.faces().len(),
+            _ => unreachable!("a convex hull"),
+        };
+        assert_eq!(
+            stored_faces, 14,
+            "the fixture is the fourteen-face hull the probes cover"
+        );
+        let planes = ideal_frustum_planes();
+        let radius_at_1 = FRUSTUM_R_BOTTOM - (FRUSTUM_R_BOTTOM - FRUSTUM_R_TOP) / FRUSTUM_HEIGHT;
+        let apothem_at_1 = radius_at_1 * 15.0_f32.to_radians().cos();
+        let mut probes: Vec<(String, Vec3, Vec3, usize, usize)> = (0..12)
+            .map(|k| {
+                let angle = (15.0 + 30.0 * k as f32).to_radians();
+                let radial = Vec3::new(angle.cos(), 0.0, angle.sin());
+                (
+                    format!("facet {k}"),
+                    radial * (apothem_at_1 + 1.0) + Vec3::Y,
+                    -radial,
+                    k,
+                    (k + 6) % 12,
+                )
+            })
+            .collect();
+        probes.push(("top cap".into(), Vec3::Y * 5.0, Vec3::NEG_Y, 13, 12));
+        probes.push(("bottom cap".into(), Vec3::NEG_Y * 5.0, Vec3::Y, 12, 13));
+        let mut entered = Vec::with_capacity(14);
+        for (probe, origin, axis, ideal_entry, ideal_exit) in probes {
+            let crossing = crossing(&frustum, origin, axis)
+                .unwrap_or_else(|| panic!("{probe}: the probe crosses the frustum"));
+            for (end, face, ideal) in [
+                ("entry", crossing.entry, planes[ideal_entry].0),
+                ("exit", crossing.exit, planes[ideal_exit].0),
+            ] {
+                let off = (face.normal.as_dvec3() - ideal).length();
+                assert!(
+                    off <= 1.0e-6,
+                    "{probe}: the {end} face {} carries the ideal plane's normal, {} against \
+                     {ideal}, off by {off}",
+                    face.face,
+                    face.normal
+                );
+            }
+            entered.push(crossing.entry.face);
+        }
+        entered.sort_unstable();
+        entered.dedup();
+        assert_eq!(
+            entered.len(),
+            14,
+            "fourteen probes enter through fourteen distinct stored faces: {entered:?}"
+        );
     }
 
     /// A CONVEX CANDIDATE WITHOUT STORED FACES FAILS CLOSED: a shape the clip has no exact reading
