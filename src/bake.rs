@@ -916,9 +916,10 @@ pub fn verify_asset(glb: &Path, registry: Option<&Path>) -> Vec<Finding> {
 /// `L1.SPEC_REFERENCES` without Python learning its name — and `substance_keys` is the registry
 /// [`classify`] decides membership by. Both are already ordered by their producers.
 ///
-/// The document is also everything the tank build reads of the sheet: `scripts/tank/build.py`
-/// hashes it into `blend_digest` in place of the sheet's bytes, so a field it omits is one whose
-/// edits never make a trio stale. `spec_validates` is the verdict alone, not its message.
+/// The document is also everything the tank build's source pass reads of the sheet, in place of
+/// the sheet's bytes: a field it omits reaches no artifact byte, so its edits never move what
+/// `scripts/tank/build.py verify` re-exports and compares. `spec_validates` is the verdict alone,
+/// not its message.
 ///
 /// A sheet that does not parse is the same `L2.SPEC` refusal the consumer contract gives it: there
 /// is one report shape, and a canon generator that invented a second vocabulary would be a second

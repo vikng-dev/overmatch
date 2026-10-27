@@ -16,9 +16,9 @@
 # text beside a file placed by hand in the scratch repo's own object store — which is exactly what a
 # clone that committed an asset holds, and the only thing `assets_hydrate_file` ever reads.
 #
-# The exception is the shared-surface coverage case, which reads `scripts/tank/build.py`'s declared
-# `PIPELINE_SOURCES` out of this tree. It has to: the thing it proves is that the two lists agree,
-# and a synthetic copy of one of them would prove nothing about the pair that ships.
+# The exception is the shared-surface coverage cases, which read each build's declared
+# `PIPELINE_SOURCES` out of this tree. They have to: the thing they prove is that each list and its
+# lane agree, and a synthetic copy of one of them would prove nothing about the pair that ships.
 
 set -u
 
@@ -146,8 +146,8 @@ git -C "$REPO" add -A && git -C "$REPO" commit -q -m "merge side"
 MERGE=$(at HEAD)
 
 # THE LOD LANE'S LIBRARY MOVES, and no asset does — on a branch of its own so the revisions the rest
-# of this file reads are untouched. `scripts/lod/config.py` is inside `build.py`'s `PIPELINE_SOURCES`
-# and therefore inside every certificate's `blend_digest`: moving it stales every trio in the tree.
+# of this file reads are untouched. `scripts/lod/config.py` is inside `scripts/tank/build.py`'s
+# `PIPELINE_SOURCES`, so moving it re-verifies every tank trio.
 git -C "$REPO" checkout -q -b lodlane "$TWO"
 write scripts/lod/config.py "# the ladder's constants"
 commit "the ladder's constants move"
@@ -199,6 +199,24 @@ write   assets/trees/fir_1/fir_1.lod.json "{}"
 write   assets/trees/species.ron "{}"
 commit "a tree"
 TREE=$(at HEAD)
+git -C "$REPO" checkout -q "$MAIN"
+
+# THE LANES, on a branch of their own from the tree, so every range below runs over two tank trios
+# and one tree trio. One commit per kind of change, and each range is one commit long: a path only
+# the tree build reads, a path only the tank build reads, a path both read, and a trio's own file.
+git -C "$REPO" checkout -q -b lanes "$TREE"
+write assets/trees/species.ron "{ \"edited\": () }"
+commit "the species table moves"
+LANE_TREE=$(at HEAD)
+write scripts/lod/config.py "# the ladder's constants"
+commit "the ladder's constants move"
+LANE_TANK=$(at HEAD)
+write assets/materials/materials.ron "SubstanceRegistry(edited)"
+commit "the substance registry moves"
+LANE_BOTH=$(at HEAD)
+pointer assets/tiger_1/tiger_1.glb "tiger model, re-exported" place
+commit "re-export the tiger"
+LANE_TRIO=$(at HEAD)
 git -C "$REPO" checkout -q "$MAIN"
 
 # The remote, as this clone knows it: refs only, never a connection.
@@ -292,61 +310,60 @@ is "a tree whose sheet changed is selected" \
    "$(printf 'assets/trees/fir_1/fir_1.tree.ron\n' > "$SCRATCH/changed"
       assets_trios "$TREE" | assets_changed_trios "$SCRATCH/changed")"
 
-group "selection — assets_shared_surface"
+group "selection — assets_shared_lanes"
 
-surface() { printf '%s\n' "$1" | assets_shared_surface; }
+# The lanes a changed set moves, on one line: `tank`, `tree`, `tank tree`, or nothing.
+lanes() { printf '%s\n' "$1" | assets_shared_lanes | tr '\n' ' ' | sed 's/ $//'; }
 
-for path in \
-    assets/materials/materials.ron \
-    assets/materials/materials.blend \
-    scripts/toolchain.py \
-    scripts/encode-tank-ktx2.sh \
-    scripts/tank/asset_door.py \
-    scripts/tank/build.py \
-    scripts/tank/trio.py \
-    scripts/tank/chains.py \
-    scripts/tank/glb_ktx2.py \
-    scripts/tank/report.py \
-    scripts/lod/config.py \
-    scripts/lod/measure.py \
-    scripts/lod/generate.py \
-    assets/maps/kalinovo/level.json \
-    src/map.rs \
-    .agents/blender/export_tank.py \
-    src/bake.rs \
-    src/bake/embedding.rs \
-    src/spec.rs \
-    src/exact.rs \
-    src/substances.rs \
-    src/bin/asset_verify.rs \
-    scripts/prop/build.py \
-    scripts/prop/gen_tree.py \
-    scripts/prop/test_prop.py \
-    assets/trees/species.ron
-do
-    surface "$path"
-    says "$path moves every verdict" yes $?
-done
+while read -r path expected; do
+    is "$path selects the $expected lane(s)" "$expected" "$(lanes "$path")"
+done <<'ROWS'
+assets/materials/materials.ron tank tree
+assets/materials/materials.blend tank tree
+scripts/toolchain.py tank tree
+scripts/tank/report.py tank tree
+src/bake.rs tank tree
+src/bake/embedding.rs tank tree
+src/spec.rs tank tree
+src/exact.rs tank tree
+src/substances.rs tank tree
+src/bin/asset_verify.rs tank tree
+scripts/encode-tank-ktx2.sh tank
+scripts/tank/asset_door.py tank
+scripts/tank/build.py tank
+scripts/tank/trio.py tank
+scripts/tank/chains.py tank
+scripts/tank/glb_ktx2.py tank
+scripts/lod/config.py tank
+scripts/lod/measure.py tank
+scripts/lod/generate.py tank
+assets/maps/kalinovo/level.json tank
+src/map.rs tank
+.agents/blender/export_tank.py tank
+scripts/prop/build.py tree
+scripts/prop/gen_tree.py tree
+scripts/prop/test_prop.py tree
+assets/trees/species.ron tree
+ROWS
 
-# EVERY SOURCE THE BUILD DECLARES, READ OUT OF THE BUILD AND FED TO THE REAL PREDICATE. The one case
+# EVERY SOURCE A BUILD DECLARES, READ OUT OF THE BUILD AND FED TO THE REAL PREDICATE. The one case
 # in this file that reads THIS work tree rather than the scratch repository, and it has to: a list of
-# shared-surface paths kept by hand beside `build.py`'s own `PIPELINE_SOURCES` is a second list, and
-# the drift it had was real — the three `scripts/lod` sources `blend_digest` hashes were absent from
-# the pattern, so a push moving one of them staled every certificate and skipped every
-# `build.py verify`.
+# lane paths kept by hand beside a build's own `PIPELINE_SOURCES` is a second list, and a declared
+# source the lane pattern misses is a push that moves that build's output and verifies none of it.
 #
-# The names come out of `build.py` by TEXT rather than by import: importing it drags in numpy and the
-# whole door, and this suite is `sh` and git and nothing else.
+# The names come out of each build by TEXT rather than by import: importing one drags in numpy and
+# the whole door, and this suite is `sh` and git and nothing else.
 uncovered=$(sed -n '/^SEARCH_SOURCES = (/,/^)$/p;/^PIPELINE_SOURCES = SEARCH_SOURCES + (/,/^)$/p' \
                 "$_here/../tank/build.py" |
             tr ',' '\n' | sed -n 's/^[^"]*"\([^"]*\)".*$/\1/p' |
             while read -r _name; do
-                # Relative to `scripts/tank/`, where `sources_digest` resolves them.
+                # Relative to `scripts/tank/`, as the build declares them.
                 _path=$(printf 'scripts/tank/%s' "$_name" |
                         sed -e ':a' -e 's![^/][^/]*/\.\./!!;ta' -e 's!^\./!!')
-                printf '%s\n' "$_path" | assets_shared_surface || printf '%s\n' "$_path"
+                printf '%s\n' "$_path" | assets_shared_lanes | grep -qx tank ||
+                    printf '%s\n' "$_path"
             done)
-is "the predicate covers every source blend_digest hashes" "" "$uncovered"
+is "the tank lane covers every source scripts/tank/build.py declares" "" "$uncovered"
 
 # The same for the prop build, whose `PIPELINE_SOURCES` resolve relative to `scripts/prop/`.
 uncovered=$(sed -n '/^PIPELINE_SOURCES = (/,/^)$/p' "$_here/../prop/build.py" |
@@ -354,9 +371,10 @@ uncovered=$(sed -n '/^PIPELINE_SOURCES = (/,/^)$/p' "$_here/../prop/build.py" |
             while read -r _name; do
                 _path=$(printf 'scripts/prop/%s' "$_name" |
                         sed -e ':a' -e 's![^/][^/]*/\.\./!!;ta' -e 's!^\./!!')
-                printf '%s\n' "$_path" | assets_shared_surface || printf '%s\n' "$_path"
+                printf '%s\n' "$_path" | assets_shared_lanes | grep -qx tree ||
+                    printf '%s\n' "$_path"
             done)
-is "…and every source the prop build's blend_digest hashes" "" "$uncovered"
+is "…and the tree lane every source scripts/prop/build.py declares" "" "$uncovered"
 
 for path in \
     assets/tiger_1/tiger_1.glb \
@@ -369,13 +387,14 @@ for path in \
     assets/trees/fir_1/fir_1.tree.ron \
     README.md
 do
-    surface "$path"
-    says "$path moves no verdict of its own" no $?
+    printf '%s\n' "$path" | assets_shared_lanes >/dev/null
+    says "$path moves no lane of its own" no $?
 done
 
-is "one shared path in a long changed set is enough" \
-   "yes" "$(printf 'README.md\nsrc/net.rs\nsrc/substances.rs\nCargo.lock\n' |
-            assets_shared_surface && echo yes || echo no)"
+is "one shared path in a long changed set selects both lanes" \
+   "tank tree" "$(lanes "$(printf 'README.md\nsrc/net.rs\nsrc/substances.rs\nCargo.lock')")"
+is "a tank path and a tree path together select both lanes" \
+   "tank tree" "$(lanes "$(printf 'scripts/lod/config.py\nassets/trees/species.ron')")"
 
 group "selection — assets_lib_exposure"
 
@@ -463,10 +482,14 @@ is "…and says nothing either" \
    "" "$(printf 'refs/heads/x deadbeefdeadbeefdeadbeefdeadbeefdeadbeef refs/heads/x %s\n' "$TWO" |
          assets_push_targets origin "$SCRATCH" 2>&1 >/dev/null)"
 
-is "a push that moves the LOD lane's library verifies every trio" \
+is "a push that moves the LOD lane's library verifies every tank trio" \
    "refs/heads/lodlane $LOD_LANE assets/panther/panther shared-surface
 refs/heads/lodlane $LOD_LANE assets/tiger_1/tiger_1 shared-surface" \
    "$(targets "refs/heads/lodlane $LOD_LANE refs/heads/lodlane $TWO")"
+
+is "a push that moves only the tree lane verifies only the tree trio" \
+   "refs/heads/lanes $LANE_TREE assets/trees/fir_1/fir_1 shared-surface" \
+   "$(targets "refs/heads/lanes $LANE_TREE refs/heads/lanes $TREE")"
 
 is "a push that changed no trio and no shared surface verifies nothing" \
    "" "$(targets "refs/heads/main $PARTIAL refs/heads/main $BASE")"
@@ -566,6 +589,30 @@ is "…while the two-tree diff of the same pair does see the asset" \
    "assets/panther/panther.glb" \
    "$(git diff --name-only "$PANTHER" "$SIDE" | grep 'panther')"
 
+# WHAT A RANGE SELECTS: every trio of each lane it moves, and every trio it changes. Over the
+# `lanes` history, which holds two tank trios and one tree trio and moves one kind of path per commit.
+selects() {   # <base> <head>; the trios of <head> the range selects, on one line
+    assets_range_affected "$1" "$2" "$SCRATCH" >/dev/null 2>&1
+    assets_selected_trios "$2" "$SCRATCH/selection" | tr '\n' ' ' | sed 's/ $//'
+}
+
+is "a tree-only change selects only the tree trios" \
+   "assets/trees/fir_1/fir_1" "$(selects "$TREE" "$LANE_TREE")"
+
+is "a tank-lane path selects only the tank trios" \
+   "assets/panther/panther assets/tiger_1/tiger_1" "$(selects "$LANE_TREE" "$LANE_TANK")"
+
+is "a path both builds read selects every trio" \
+   "assets/panther/panther assets/tiger_1/tiger_1 assets/trees/fir_1/fir_1" \
+   "$(selects "$LANE_TANK" "$LANE_BOTH")"
+
+is "a changed trio alone selects that trio" \
+   "assets/tiger_1/tiger_1" "$(selects "$LANE_BOTH" "$LANE_TRIO")"
+
+is "a range it cannot know selects every trio" \
+   "assets/panther/panther assets/tiger_1/tiger_1 assets/trees/fir_1/fir_1" \
+   "$(selects "$ZERO" "$LANE_TRIO")"
+
 group "the CI gate — assets_ci_scope"
 
 scope() {   # <event> <base> <head>; prints the decision, writes $SCRATCH/github-output
@@ -584,14 +631,29 @@ is "a push whose range moves nothing a verdict reads is not" \
    "false" "$(scope push "$BASE" "$PARTIAL")"
 
 is "…and the step reads that decision off GITHUB_OUTPUT, not off stdout" \
-   "affected=false" "$(scope push "$BASE" "$PARTIAL" >/dev/null; cat "$SCRATCH/github-output")"
+   "affected=false" \
+   "$(scope push "$BASE" "$PARTIAL" >/dev/null; grep '^affected=' "$SCRATCH/github-output")"
 
-# A hand-started run is what bounds how long a defect the gate could not see survives (the weekly
-# cron that used to is retired), so it never consults a range at all — there is no baseline on a
-# dispatch, and it must not need one. `schedule` keeps answering the same way: no cron triggers CI
-# today, and the answer must not become "skip" if one is ever added back.
+# The `stems` multiline output, on one line: what the verify step loops over.
+stems_of() {
+    awk '/^stems<</ { end = substr($0, 8); on = 1; next } on && $0 == end { on = 0; next } on' \
+        "$SCRATCH/github-output" | tr '\n' ' ' | sed 's/ $//'
+}
+
+# The scratch repository's checkout is `$MERGE`, which holds both tank trios.
+is "…and hands the verify step the checkout's selected trios as the stems output" \
+   "assets/panther/panther" "$(scope push "$TWO" "$PANTHER" >/dev/null; stems_of)"
+
+# A hand-started run is what bounds how long a defect the gate could not see survives, so it never
+# consults a range at all — there is no baseline on a dispatch, and it must not need one.
+# `schedule` answers the same way: no cron triggers CI, and the answer must not become "skip" if one
+# is ever added.
 is "a hand-started run is affected with no range whatsoever" \
    "true" "$(scope workflow_dispatch "" "")"
+
+is "…and verifies every trio the checkout holds" \
+   "assets/panther/panther assets/tiger_1/tiger_1" \
+   "$(scope workflow_dispatch "" "" >/dev/null; stems_of)"
 
 is "a scheduled run would be too" \
    "true" "$(scope schedule "" "")"

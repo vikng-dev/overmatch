@@ -10,7 +10,7 @@
 # (`assets_pushed_commit`, `assets_pushed_paths`, `assets_push_targets`, `assets_hydrate`)
 # therefore have no caller today outside `test_pushed_assets.sh`, which still drives them: they are
 # what a lane that verifies only what a push CHANGED is built from, and the CI lane's own scoping
-# is the same two predicates asked over a range.
+# is the same predicates — the lanes and the trio rule — asked over a range.
 #
 # The vocabulary is one word: a STEM. An asset is a sibling trio in one directory —
 # `<id>.blend`, a SHEET (`<id>.tank.ron` for a vehicle, `<id>.tree.ron` for a tree) and
@@ -120,47 +120,69 @@ assets_changed_trios() {   # <changed-paths-file>; stems on stdin
     done
 }
 
-# Whether the changed set touches the surface EVERY asset's verdict is computed from: the shared
-# material library, the pinned toolchain, the source pass, the door, the finding shape, the encoder,
-# the derivation verifier, the LOD lane's production half, the world the ladder's right wall is cut
-# from, and the Rust consumer contract with the modules it certifies against.
-# `src/substances.rs` is in that list because it INTERPRETS the registry: it decides what the shared
-# material data means to the gate and hands the canon file its key list, so it moves every asset's
-# verdict exactly as `assets/materials/` does. `src/bin/asset_verify.rs` is in it because it is the
+# THE SHARED SURFACE: what a build reads besides a trio's own files, split by the build that reads
+# it. A path in a lane moving means that build now answers differently about bytes that did not
+# move, so every trio of that lane is re-verified; a path both builds read re-verifies both.
+#
+# Each path sits in the lane whose build READS it — an import, a subprocess, a file opened:
+#
+#   tank  `scripts/tank/{build,trio,chains,asset_door,glb_ktx2}.py` and `scripts/lod/{config,
+#         measure,generate}.py` (the build, its door and its search); `scripts/encode-tank-ktx2.sh`
+#         and `.agents/blender/export_tank.py` (the door's encoder and source pass); `src/map.rs`
+#         and every map's `level.json` (`scripts/lod/config.py` parses `RIGHT_WALL_M` from them).
+#   tree  `scripts/prop/` (the build, the exporter it runs in Blender, the generator, and
+#         `test_prop.py`, which runs in this lane and nowhere else) and `assets/trees/species.ron`
+#         (the build's species table).
+#   both  `assets/materials/` (the tank source links `materials.blend`, both builds read
+#         `materials.ron`); `scripts/toolchain.py` (both builds import it) and
+#         `scripts/tank/report.py` (`scripts/toolchain.py` imports it); the Rust consumer contract
+#         with the modules it certifies against, `src/{bake,spec,exact,substances}*` and
+#         `src/bin/asset_verify.rs`. The contract is in both by decision rather than by a read: only
+#         the tank door runs `asset_verify`, and a tree re-verify is the cheap direction to be wrong.
+#
+# FAIL TOWARD RUNNING: a path that cannot be placed in one lane belongs in both.
+#
+# `src/substances.rs` is in the contract because it INTERPRETS the registry: it decides what the
+# shared material data means to the gate and hands the canon file its key list, so it moves verdicts
+# exactly as `assets/materials/` does. `src/bin/asset_verify.rs` is in it because it is the
 # contract's EXECUTABLE surface: the adapter owns the exit status and the report the lane reads — a
-# push that moves only it changes every verdict while touching no law. Any of those moving means the
-# door now answers differently about bytes that did not move, so every discovered trio is
-# re-verified rather than none of them.
+# push that moves only it changes verdicts while touching no law.
 #
 # `src/lib.rs` is NOT in this list. The crate root is where the contract modules are wired into the
 # crate at all, but it is also the whole game's root and moves on nearly every refactor — as a path
-# it re-cut every asset for pushes that never went near the contract. It is read by CONTENT instead:
-# `assets_lib_exposure`, below.
+# it would re-cut every asset for pushes that never went near the contract. It is read by CONTENT
+# instead: `assets_lib_exposure`, below.
 #
-# THE LIST IS THE BUILD'S OWN DECLARED DEPENDENCIES, NOT A SEPARATE OPINION. `scripts/tank/build.py`
-# names them: `PIPELINE_SOURCES` is what `blend_digest` hashes, so anything in it moving makes every
-# tracked certificate STALE by the build's own arithmetic — `scripts/lod/{config,measure,generate}`
-# are in that list, and a push that moved one of them used to skip every `build.py verify` and ship
-# a trio the next verify would refuse.
+# THE LANES ARE THE BUILDS' OWN DECLARED DEPENDENCIES, NOT A SEPARATE OPINION. Each build's
+# `PIPELINE_SOURCES` names what can move its artifacts, and `test_pushed_assets.sh` holds every
+# entry of `scripts/tank/build.py`'s list to the tank lane and of `scripts/prop/build.py`'s to the
+# tree lane.
 #
-# `scripts/prop/` and `assets/trees/species.ron` are the tree lane's half of the same list:
-# `scripts/prop/build.py`'s `PIPELINE_SOURCES` and the species table are what its `blend_digest`
-# hashes, so either moving stales every tree certificate; the whole directory is named rather than
-# the build's files because its suite (`test_prop.py`) runs in this lane and nowhere else.
-#
-# `src/map.rs` and the map manifests are here for the same reason one level out: `config.RIGHT_WALL_M`
-# is PARSED from `assets/maps/<DEFAULT_MAP_ID>/level.json` at import, and the wall decides where a
-# chain stops. A grown map is a different ladder, so it is a re-verification. The pattern takes every
-# map's `level.json` rather than resolving the default: which map is default is `src/map.rs`'s
-# answer, and this predicate refuses to be a second reader of it.
-assets_shared_surface() {   # changed paths on stdin
-    grep -qE '^(assets/materials/|assets/maps/[^/]+/level\.json$|assets/trees/species\.ron$|scripts/toolchain\.py$|scripts/encode-tank-ktx2\.sh$|scripts/tank/(build|trio|chains|asset_door|glb_ktx2|report)\.py$|scripts/lod/(config|measure|generate)\.py$|scripts/prop/|\.agents/blender/export_tank\.py$|src/(bake|spec|exact|substances)|src/map\.rs$|src/bin/asset_verify\.rs$)'
+# The map pattern takes every map's `level.json` rather than resolving the default: which map is
+# default is `src/map.rs`'s answer, and this predicate refuses to be a second reader of it.
+ASSETS_SURFACE_TANK='^(assets/maps/[^/]+/level\.json$|scripts/encode-tank-ktx2\.sh$|scripts/tank/(build|trio|chains|asset_door|glb_ktx2)\.py$|scripts/lod/(config|measure|generate)\.py$|\.agents/blender/export_tank\.py$|src/map\.rs$)'
+ASSETS_SURFACE_TREE='^(scripts/prop/|assets/trees/species\.ron$)'
+ASSETS_SURFACE_BOTH='^(assets/materials/|scripts/toolchain\.py$|scripts/tank/report\.py$|src/(bake|spec|exact|substances)|src/bin/asset_verify\.rs$)'
+
+# The lanes whose shared surface the changed set moves, one per line, `tank` before `tree`. Exit 0
+# when it names one.
+assets_shared_lanes() {   # changed paths on stdin
+    _paths=$(cat)
+    if printf '%s\n' "$_paths" | grep -qE "$ASSETS_SURFACE_BOTH"; then
+        _lanes='tank tree'
+    else
+        _lanes=
+        if printf '%s\n' "$_paths" | grep -qE "$ASSETS_SURFACE_TANK"; then _lanes=tank; fi
+        if printf '%s\n' "$_paths" | grep -qE "$ASSETS_SURFACE_TREE"; then _lanes="$_lanes tree"; fi
+    fi
+    [ -n "$_lanes" ] || return 1
+    printf '%s\n' $_lanes
 }
 
 # Whether a push rewires the contract in the crate root. Only a diff inside `src/lib.rs` that
 # touches a declaration of one of the four certified modules is contract exposure — swapping
 # `mod bake;` for a cfg-gated or inline stub changes what the door's binary certifies against while
-# touching no path `assets_shared_surface` watches. Everything else lib.rs does is game code, and a
+# touching no path `assets_shared_lanes` watches. Everything else lib.rs does is game code, and a
 # change that BREAKS the exposure outright never reaches this lane: clippy compiles the contract
 # binary earlier in the same hook run.
 #
@@ -174,13 +196,40 @@ assets_lib_exposure() {   # <base> <head>; changed paths on stdin
         grep -qE '^[+-].*mod[[:space:]]+(bake|exact|spec|substances)[[:space:]]*[;{]'
 }
 
+# The lanes a changed set moves wholesale, one per line: both for a contract rewire in `src/lib.rs`
+# (the contract is in both lanes), else what `assets_shared_lanes` reads off the set.
+assets_moved_lanes() {   # <changed-paths-file> <base> <head>
+    if assets_lib_exposure "$2" "$3" < "$1"; then
+        printf 'tank\ntree\n'
+    else
+        assets_shared_lanes < "$1"
+    fi
+}
+
+# A SELECTION is a file of words, one per line: a lane (`tank`, `tree`), whose every trio is
+# selected, or a stem, which selects that trio. A canonical stem holds a `/` (`assets_blend_shape`)
+# and a lane word does not, so the two never meet.
+#
+# The trios of <rev> a selection names, sorted. A stem <rev> does not hold as a trio — one the range
+# deleted — names nothing to verify.
+assets_selected_trios() {   # <rev> <selection-file>
+    assets_trios "$1" | while read -r _stem; do
+        if grep -qxF -e "$_stem" "$2"; then
+            printf '%s\n' "$_stem"
+        elif _lane=$(assets_trio_lane "$1" "$_stem") && grep -qxF -e "$_lane" "$2"; then
+            printf '%s\n' "$_stem"
+        fi
+    done
+}
+
 # EVERY (revision, asset) pair a push must verify, one per line:
 #
 #     <local_ref> <local_sha> <stem> changed|shared-surface
 #
 # Reads git's own pre-push ref list on stdin — `<local_ref> <local_sha> <remote_ref> <remote_sha>`,
 # one line per ref and several at once when several refs are pushed. A ref being deleted, a sha
-# this clone cannot resolve, and a revision holding no trio at all each contribute no lines.
+# this clone cannot resolve, and a revision holding no trio at all each contribute no lines. A trio
+# whose lane the push moves is `shared-surface`; one it only changes is `changed`.
 #
 # The whole decision is here rather than in the hook's loop, so what the exercise script drives is
 # what the hook runs.
@@ -188,18 +237,19 @@ assets_push_targets() {   # <remote> <scratch-dir>; ref lines on stdin
     while read -r _local_ref _local_sha _remote_ref _remote_sha; do
         assets_pushed_commit "$_local_sha" || continue
         _changed=$2/changed.$_local_sha
+        _selection=$2/selection.$_local_sha
         assets_pushed_paths "$_local_sha" "$_remote_sha" "$1" > "$_changed"
-        if assets_shared_surface < "$_changed" ||
-           assets_lib_exposure "$_remote_sha" "$_local_sha" < "$_changed"; then
-            _stems=$(assets_trios "$_local_sha")
-            _why=shared-surface
-        else
-            _stems=$(assets_trios "$_local_sha" | assets_changed_trios "$_changed")
-            _why=changed
-        fi
-        [ -n "$_stems" ] || continue
-        printf '%s\n' "$_stems" |
+        {
+            assets_moved_lanes "$_changed" "$_remote_sha" "$_local_sha"
+            assets_trios "$_local_sha" | assets_changed_trios "$_changed"
+        } > "$_selection"
+        assets_selected_trios "$_local_sha" "$_selection" |
             while read -r _stem; do
+                if grep -qxF -e "$(assets_trio_lane "$_local_sha" "$_stem")" "$_selection"; then
+                    _why=shared-surface
+                else
+                    _why=changed
+                fi
                 printf '%s %s %s %s\n' "$_local_ref" "$_local_sha" "$_stem" "$_why"
             done
     done
@@ -207,17 +257,17 @@ assets_push_targets() {   # <remote> <scratch-dir>; ref lines on stdin
 
 # ── whether a range of revisions can have moved any verdict ──────────────────────────────────────
 
-# Whether anything an asset verdict is a function of changed between two revisions.
+# Whether anything an asset verdict is a function of changed between two revisions, and which.
 #
-# The SAME two predicates the per-push selection above uses — `assets_shared_surface` and the trio
-# rule — asked over a range instead of over one push's refs. What is answered here is only "is this
-# lane's work possibly affected", never "which trios": a lane that runs, runs whole.
+# The SAME predicates the per-push selection above uses — the lanes (`assets_moved_lanes`) and the
+# trio rule — asked over a range instead of over one push's refs. The answer is left as a selection
+# in `<scratch-dir>/selection`: every lane the range moves, and every trio it changes.
 #
 # FAIL TOWARD RUNNING. Every way of not knowing — a head this clone cannot resolve, a baseline that
 # is absent, all zeros (a branch's first push, a tag, a shallow clone) or unrelated to the head
-# after a force-push — answers YES and pays the 35 minutes. The opposite error is a lane that skips
-# the push which broke an asset and reports success, and a lane nobody can trust to have run is not
-# cheaper than one that runs.
+# after a force-push — answers YES, selects both lanes and pays the 35 minutes. The opposite error
+# is a lane that skips the push which broke an asset and reports success, and a lane nobody can
+# trust to have run is not cheaper than one that runs.
 #
 # The baseline is the MERGE BASE, not the raw baseline sha: a pull request's base branch moves under
 # it, and a two-tree diff against a moved base attributes other people's commits to this one. That
@@ -225,6 +275,7 @@ assets_push_targets() {   # <remote> <scratch-dir>; ref lines on stdin
 #
 # Prints one line saying which it was and why. Exit 0 = affected, 1 = not.
 assets_range_affected() {   # <base> <head> <scratch-dir>
+    printf 'tank\ntree\n' > "$3/selection"
     if ! assets_pushed_commit "${2:-}"; then
         printf 'assets ▸ affected: %s is not a commit this clone holds\n' "${2:-<empty>}"
         return 0
@@ -243,46 +294,50 @@ assets_range_affected() {   # <base> <head> <scratch-dir>
         printf 'assets ▸ affected: %s..%s cannot be diffed\n' "$_base" "$2"
         return 0
     }
-    if assets_shared_surface < "$_changed"; then
-        printf 'assets ▸ affected: %s..%s moves the shared surface every verdict is computed from\n' \
-            "$_base" "$2"
-        return 0
-    fi
-    if assets_lib_exposure "$_base" "$2" < "$_changed"; then
-        printf 'assets ▸ affected: %s..%s rewires the contract modules in src/lib.rs\n' \
-            "$_base" "$2"
-        return 0
-    fi
+    _lanes=$(assets_moved_lanes "$_changed" "$_base" "$2")
     # BOTH ENDPOINTS' trios. A range that DELETES an asset holds it at the baseline and nowhere in
     # the head, so a head-side listing drops the stem before selection and the lane never runs; the
     # deleted paths are in the diff, and the trio they belong to is in the baseline's list.
     _stems=$({ assets_trios "$_base"; assets_trios "$2"; } | LC_ALL=C sort -u |
              assets_changed_trios "$_changed")
-    if [ -n "$_stems" ]; then
-        printf 'assets ▸ affected: %s..%s changes %s\n' "$_base" "$2" \
-            "$(printf '%s' "$_stems" | tr '\n' ' ')"
-        return 0
+    {
+        [ -z "$_lanes" ] || printf '%s\n' "$_lanes"
+        [ -z "$_stems" ] || printf '%s\n' "$_stems"
+    } > "$3/selection"
+    if [ -z "$_lanes$_stems" ]; then
+        printf 'assets ▸ unaffected: %s..%s changes no asset trio and no shared surface (%s path(s))\n' \
+            "$_base" "$2" "$(wc -l < "$_changed" | tr -d ' ')"
+        return 1
     fi
-    printf 'assets ▸ unaffected: %s..%s changes no asset trio and no shared surface (%s path(s))\n' \
-        "$_base" "$2" "$(wc -l < "$_changed" | tr -d ' ')"
-    return 1
+    _why=
+    [ -z "$_lanes" ] ||
+        _why="moves the $(printf '%s' "$_lanes" | tr '\n' ' ' | sed 's/ $//; s/ / and /') shared surface"
+    [ -z "$_stems" ] || _why="${_why:+$_why; }changes $(printf '%s' "$_stems" | tr '\n' ' ')"
+    printf 'assets ▸ affected: %s..%s %s\n' "$_base" "$2" "$_why"
+    return 0
 }
 
 # The same decision, as the CI lane asks it: off the event, into `$GITHUB_OUTPUT`.
 #
 # A HAND-STARTED RUN IS ALWAYS AFFECTED, and that is what bounds the gate: a `workflow_dispatch`
-# re-cuts every trio from Blender whatever changed, which is the move before a release. (`schedule`
-# is still answered because the vocabulary costs nothing to keep, but no cron triggers CI any more
-# — it was retired 2026-08-16.) `GITHUB_EVENT_NAME` is empty outside a runner, where this file is
-# being driven by the suite over ranges it built itself.
+# selects both lanes, so it re-cuts every trio from Blender whatever changed, which is the move
+# before a release. (`schedule` is answered the same way; no cron triggers CI, and the answer must
+# not become "skip" if one is ever added.) `GITHUB_EVENT_NAME` is empty outside a runner, where this
+# file is being driven by the suite over ranges it built itself.
 #
-# It writes `affected=true|false` and nothing else, because a workflow step that decides anything is
-# a step no suite can run.
+# It writes `affected=true|false` and `stems`, the trios the verify step re-verifies, one per line
+# — the CHECKOUT's (`HEAD`) trios the selection names, because the checkout is what that step reads
+# off disk; on a pull request it is the merge commit, which holds the base's trios and the pull
+# request's. `stems` is a multiline output rather than a file path: one channel, the one `affected`
+# already uses and the suite already reads, and no file whose lifetime has to span two steps. Its
+# delimiter is drawn at random, so no line of the list can end it early. Nothing else is written,
+# because a workflow step that decides anything is a step no suite can run.
 assets_ci_scope() {   # env: GITHUB_EVENT_NAME, ASSETS_BASE, ASSETS_HEAD, GITHUB_OUTPUT
     _scratch=$(mktemp -d)
     case "${GITHUB_EVENT_NAME:-}" in
         schedule|workflow_dispatch)
             printf 'assets ▸ affected: a %s run verifies every asset\n' "$GITHUB_EVENT_NAME"
+            printf 'tank\ntree\n' > "$_scratch/selection"
             _affected=true ;;
         *)
             if assets_range_affected "${ASSETS_BASE:-}" "${ASSETS_HEAD:-}" "$_scratch"; then
@@ -291,8 +346,19 @@ assets_ci_scope() {   # env: GITHUB_EVENT_NAME, ASSETS_BASE, ASSETS_HEAD, GITHUB
                 _affected=false
             fi ;;
     esac
+    _stems=
+    [ "$_affected" = false ] || _stems=$(assets_selected_trios HEAD "$_scratch/selection")
     rm -rf "$_scratch"
-    [ -z "${GITHUB_OUTPUT:-}" ] || printf 'affected=%s\n' "$_affected" >> "$GITHUB_OUTPUT"
+    if [ -n "${GITHUB_OUTPUT:-}" ]; then
+        _end=assets_stems_$(od -An -N8 -tx1 /dev/urandom | tr -d ' \n')
+        {
+            printf 'affected=%s\n' "$_affected"
+            printf 'stems<<%s\n' "$_end"
+            [ -z "$_stems" ] || printf '%s\n' "$_stems"
+            printf '%s\n' "$_end"
+        } >> "$GITHUB_OUTPUT"
+    fi
+    [ -z "$_stems" ] || printf '%s\n' "$_stems" | sed 's/^/assets ▸ verify: /'
     printf '%s\n' "$_affected"
 }
 

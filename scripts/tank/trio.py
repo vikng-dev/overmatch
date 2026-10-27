@@ -3,7 +3,7 @@ verification takes apart.
 
     <id>.glb       the view artifact — scene, textures, and every rung as an additional mesh record
     <id>.sim.glb   the sim artifact — rung-0 geometry and material names, nothing else
-    <id>.lod.json  the certificate — five fields, nothing derivable
+    <id>.lod.json  the certificate — four fields, nothing derivable
 
 RUNG RECORDS ARE APPENDED, NEVER INTERLEAVED. Every rung mesh, accessor and bufferView lands after
 the last one the door wrote, so the door-owned prefix of the view glb keeps its indices, its
@@ -39,7 +39,7 @@ SIM_ATTRIBUTES = ("POSITION", "NORMAL")
 
 #: The certificate's whole schema (ADR 0035). A field outside this set is a second answer to a
 #: question one of these already answers.
-CERTIFICATE_FIELDS = ("blend_digest", "view_glb_sha", "sim_glb_sha", "mesh_count", "chains")
+CERTIFICATE_FIELDS = ("view_glb_sha", "sim_glb_sha", "mesh_count", "chains")
 
 #: What a certificate is named, relative to the tracked model.
 CERTIFICATE_SUFFIX = ".lod.json"
@@ -412,8 +412,8 @@ def chain_failures(name, chain):
     return failures
 
 
-def certificate(blend_digest, view_sha, sim_sha, mesh_count, chains):
-    """The five fields, in a fixed order, every chain row satisfying `chain_failures`."""
+def certificate(view_sha, sim_sha, mesh_count, chains):
+    """The four fields, in a fixed order, every chain row satisfying `chain_failures`."""
     ordered = {}
     for name in sorted(chains):
         rungs = chains[name]["rungs"]
@@ -429,7 +429,6 @@ def certificate(blend_digest, view_sha, sim_sha, mesh_count, chains):
             raise TrioError("; ".join(failures))
         ordered[name] = row
     return {
-        "blend_digest": blend_digest,
         "view_glb_sha": view_sha,
         "sim_glb_sha": sim_sha,
         "mesh_count": mesh_count,
@@ -444,7 +443,7 @@ def certificate_bytes(cert):
     return (json.dumps(cert, indent=2, sort_keys=False, allow_nan=False) + "\n").encode()
 
 
-def coherence(cert, view_blob, sim_blob, blend_digest=None, source_mesh_count=None):
+def coherence(cert, view_blob, sim_blob, source_mesh_count=None):
     """Every claim the certificate makes about the bytes beside it, as a list of named failures.
 
     HASH-LOUD, and that is what makes the staged publish safe: binaries land first and the
@@ -463,7 +462,7 @@ def coherence(cert, view_blob, sim_blob, blend_digest=None, source_mesh_count=No
     if missing:
         failures.append(f"the certificate has no {', '.join(missing)}")
     if extra:
-        failures.append(f"the certificate carries {', '.join(extra)}, which is not one of its five "
+        failures.append(f"the certificate carries {', '.join(extra)}, which is not one of its four "
                         f"fields")
     if missing:
         return failures
@@ -475,11 +474,6 @@ def coherence(cert, view_blob, sim_blob, blend_digest=None, source_mesh_count=No
                 f"{field} is {cert[field]!r} and the {what} artifact hashes to {actual!r} — the "
                 f"trio is incoherent, which is what an interrupted publish looks like"
             )
-    if blend_digest is not None and cert["blend_digest"] != blend_digest:
-        failures.append(
-            f"blend_digest is {cert['blend_digest']!r} and this source and configuration digest to "
-            f"{blend_digest!r} — the trio is stale"
-        )
     if source_mesh_count is not None and cert["mesh_count"] != source_mesh_count:
         failures.append(
             f"mesh_count is {cert['mesh_count']} and the source produces {source_mesh_count} mesh"

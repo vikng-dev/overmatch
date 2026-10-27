@@ -4,6 +4,8 @@ Status: ACCEPTED 2026-08-12. Amends ADR-0033 (packaging, seam granularity, trans
 0033's doctrine — the global octave grid, the gates, certification order, projection math,
 human-rate recompute — stands unchanged.
 
+Amended 2026-10-27: the certificate carries no `blend_digest`; staleness is `build.py verify`'s re-export compare.
+
 ## Decision
 
 One command per tank — the **build** (`scripts/tank/build.py`; the asset door becomes its
@@ -16,9 +18,9 @@ certification step). A `.blend` goes in; three shipped artifacts come out:
    geometry and material names (material = membership), no textures, no UVs, no rungs.
    The server loads only this; the client loads it for the ballistic walk — both sides
    walk identical accessor bytes by construction, not by convention.
-3. **`<id>.lod.json`** — the certificate, five fields, nothing derivable:
-   `blend_digest` (staleness vs current source+config), `view_glb_sha` + `sim_glb_sha`
-   (trio coherence), `mesh_count` (coverage tripwire), and `chains`: per unique source
+3. **`<id>.lod.json`** — the certificate, four fields, nothing derivable:
+   `view_glb_sha` + `sim_glb_sha` (trio coherence), `mesh_count` (coverage tripwire),
+   and `chains`: per unique source
    primitive, a bounding `radius_m` and ordered `rungs[{mesh, deviation_mm}]`, deviations
    strictly ascending. NO metre distances ship — the runtime derives switch distances from
    certified deviation × the active view profile (vfov, viewport height px, pixel budget)

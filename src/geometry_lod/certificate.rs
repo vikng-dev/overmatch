@@ -1,4 +1,4 @@
-//! The tank build's certificate, read as data — five fields, nothing derivable (ADR-0035).
+//! The tank build's certificate, read as data — four fields, nothing derivable (ADR-0035).
 //!
 //! NO METRE DISTANCES SHIP. The certificate carries a chain's bounding `radius_m` and its rungs'
 //! certified `deviation_mm`; the metres a [`VisibilityRange`] is written with are derived here,
@@ -39,13 +39,6 @@ use crate::view::ViewProfile;
 #[derive(Deserialize, Debug, Clone)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Certificate {
-    /// Staleness of the trio against the current `.blend` + `.tank.ron`. Recorded, not enforced
-    /// here: the source is untracked by policy and absent from a shipped install.
-    #[expect(
-        dead_code,
-        reason = "parsed so `deny_unknown_fields` accepts the certificate; nothing reads it"
-    )]
-    pub(crate) blend_digest: String,
     /// sha256 of `<id>.glb`.
     pub(crate) view_glb_sha: String,
     /// sha256 of `<id>.sim.glb`.
@@ -139,8 +132,8 @@ pub(crate) fn parse(text: &str, path: &Path) -> Certificate {
     let certificate: Certificate = serde_json::from_str(text).unwrap_or_else(|err| {
         panic!(
             "geometry_lod: the certificate {} is malformed ({err}). It carries exactly \
-             blend_digest, view_glb_sha, sim_glb_sha, mesh_count and chains — rebuild the trio \
-             rather than editing it",
+             view_glb_sha, sim_glb_sha, mesh_count and chains — rebuild the trio rather than \
+             editing it",
             path.display(),
         )
     });
@@ -342,7 +335,7 @@ mod tests {
         /// only the semantics are under test.
         fn certificate_with(&self, chain: &str) -> String {
             format!(
-                r#"{{"blend_digest": "b", "view_glb_sha": "{}", "sim_glb_sha": "{}",
+                r#"{{"view_glb_sha": "{}", "sim_glb_sha": "{}",
                     "mesh_count": 1, "chains": {{"M#0": {chain}}}}}"#,
                 sha256_file(&member_path(&self.root, "t", TrioMember::View)).unwrap(),
                 sha256_file(&member_path(&self.root, "t", TrioMember::Sim)).unwrap(),
@@ -402,12 +395,12 @@ mod tests {
         trio.read();
     }
 
-    /// A MALFORMED certificate — here, one field short of the five.
+    /// A MALFORMED certificate — here, one field short of the four.
     #[test]
     #[should_panic(expected = "is malformed")]
     fn a_malformed_certificate_aborts() {
         let trio = Trio::new("malformed");
-        trio.write_certificate(r#"{"blend_digest": "b", "mesh_count": 1}"#);
+        trio.write_certificate(r#"{"view_glb_sha": "v", "sim_glb_sha": "s", "mesh_count": 1}"#);
         trio.read();
     }
 

@@ -131,7 +131,7 @@ The guarantee is positional only. Silhouette IS covered (silhouette error is sur
 _Avoid_: export, generate (those are stages inside it, not the command)
 
 **Certificate** (`<id>.lod.json`):
-The per-tank record of what was measured — `blend_digest`, `view_glb_sha` + `sim_glb_sha`, `mesh_count`, and per source primitive a bounding `radius_m` with ordered `rungs[{mesh, deviation_mm}]`. Carries no metre distances: the runtime derives those from certified deviation and the active view profile.
+The per-tank record of what was measured — `view_glb_sha` + `sim_glb_sha`, `mesh_count`, and per source primitive a bounding `radius_m` with ordered `rungs[{mesh, deviation_mm}]`. Carries no metre distances: the runtime derives those from certified deviation and the active view profile. Carries no staleness field either: whether a trio is stale is `build.py verify`'s re-export compare.
 _Avoid_: manifest (the retired global `lod_manifest.json` was one; a certificate is per tank)
 
 **Sim artifact** (`<id>.sim.glb`):

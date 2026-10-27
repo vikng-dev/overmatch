@@ -20,17 +20,18 @@ WHAT `build` DOES, IN ORDER
    left in the cache under (digest, search fingerprint);
 4. the rungs appended to the candidate as additional mesh records — the view artifact;
 5. the byte-strip of that — the sim artifact;
-6. the five-field certificate;
+6. the four-field certificate;
 7. a STAGED publish: both binaries land, and the certificate last, so an interruption leaves a
    certificate naming bytes that are not there and every reader says so.
 
 WHAT `verify` DOES. The same door chain, and then: the tracked trio's own coherence — its two
-hashes, its staleness field, AND every constructive law its certificate body must satisfy — the
-tracked view glb with its certified rung records STRIPPED held against the rebuilt candidate by the
-door's own section-by-section comparison, the sim artifact re-derived from the tracked view glb and
-compared byte for byte, and `mesh_count` against the meshes the source actually produces. It writes
-nothing and it runs no search: a MEASUREMENT is re-derived by rebuilding, and what a verifier can
-hold a certificate to for free is its shape, its ordering and its coverage.
+hashes AND every constructive law its certificate body must satisfy — the tracked view glb with its
+certified rung records STRIPPED held against the rebuilt candidate by the door's own
+section-by-section comparison, the sim artifact re-derived from the tracked view glb and compared
+byte for byte, and `mesh_count` against the meshes the source actually produces. That comparison is
+the staleness check; `verify`'s docstring says what it does not reach. It writes nothing and it runs
+no search: a MEASUREMENT is re-derived by rebuilding, and what a verifier can hold a certificate to
+for free is its shape, its ordering and its coverage.
 
 Exit is non-zero exactly when a stage refused.
 """
@@ -51,17 +52,12 @@ from typing import Dict, List, Optional
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lod"))
-# Appended, not inserted: `scripts/prop/` holds a `build.py` of its own, and only its RON reader
-# is wanted here.
-sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prop"))
 
 import asset_door  # noqa: E402  — the paths above are what make these importable
 import config as CONFIG  # noqa: E402
 import glb_ktx2  # noqa: E402
 import measure  # noqa: E402
 import report  # noqa: E402
-import ron  # noqa: E402
-import toolchain  # noqa: E402
 import trio as TRIO  # noqa: E402
 from asset_door import Refused  # noqa: E402
 from report import Check, Finding, Severity, Stage, Subject, SubjectKind  # noqa: E402
@@ -82,11 +78,12 @@ SEARCH_SOURCES = (
     "chains.py", "../lod/config.py", "../lod/measure.py", "../lod/generate.py", "../toolchain.py",
 )
 
-#: What can move ANY of the three artifacts. `blend_digest` is taken over the source, what the build
-#: reads of the spec sheet and of the registry, the material library and this, which is what makes
-#: it the staleness check ADR 0035 asks for.
+#: What can move ANY of the three artifacts — the build's declared dependency list, relative to this
+#: directory. Read only by `scripts/hooks/test_pushed_assets.sh`, by text: its coverage row holds
+#: the CI lane's surface (`assets_shared_lanes`, `scripts/hooks/pushed_assets.sh`) to re-verify
+#: every tank trio when an entry moves.
 PIPELINE_SOURCES = SEARCH_SOURCES + (
-    "build.py", "trio.py", "asset_door.py", "glb_ktx2.py", "../prop/ron.py",
+    "build.py", "trio.py", "asset_door.py", "glb_ktx2.py",
     "../encode-tank-ktx2.sh", "../../.agents/blender/export_tank.py",
 )
 
@@ -116,9 +113,8 @@ TRIO_INCOHERENT = Check(
     stage=Stage.DERIVATION,
     severity=Severity.ERROR,
     law="the certificate names the bytes beside it: view_glb_sha and sim_glb_sha hash the tracked "
-        "binaries, blend_digest is this source and this pipeline, mesh_count is the number of "
-        "meshes the source produces, and every rung a chain names is a mesh record in the view "
-        "artifact no scene node references",
+        "binaries, mesh_count is the number of meshes the source produces, and every rung a chain "
+        "names is a mesh record in the view artifact no scene node references",
 )
 
 CACHE_CORRUPT = Check(
@@ -167,8 +163,7 @@ def resolved_ladder() -> dict:
     READS `src/map.rs` for the map id and that map's `level.json` for the world's extent, and the
     right wall it derives from them is where every chain terminates. A map whose extent grows moves
     `RIGHT_WALL_M` without touching one byte of config.py, so a fingerprint over the file alone
-    would reuse a cached ladder cut for a smaller world and leave `blend_digest` saying the trio is
-    current.
+    would reuse a cached ladder cut for a smaller world.
 
     So the fingerprint takes the VALUES. Every constant here is one the ladder, the stop rules or
     the gates consume, and this dict changes exactly when the search's inputs do.
@@ -202,97 +197,6 @@ def search_digest() -> str:
     return hashlib.sha256(
         (sources_digest(SEARCH_SOURCES) + ladder_digest()).encode()
     ).hexdigest()
-
-
-def material_library(blend: str) -> str:
-    """The material library the blend links its substance datablocks out of — `materials.blend`,
-    beside the registry in `assets/materials/`. Hashed whole: a linked datablock is whatever the
-    library holds under its name, the source pass holds the link to it (`L1.SUBSTANCE_IDENTITY`),
-    and nothing on this side of Blender can say which of the library's bytes an export reads."""
-    return os.path.join(os.path.dirname(asset_door.registry_of(blend)), "materials.blend")
-
-
-def material_names(gltf: dict) -> List[str]:
-    """The material names the document's primitives wear, each once, sorted: the names `classify`
-    (src/bake.rs) resolves against the registry. A primitive with no material, or an unnamed one,
-    wears no key and declares no membership, so it contributes none."""
-    materials = gltf.get("materials", [])
-    names = set()
-    for mesh in gltf.get("meshes", []):
-        for primitive in mesh.get("primitives", []):
-            index = primitive.get("material")
-            if isinstance(index, int) and 0 <= index < len(materials):
-                name = materials[index].get("name")
-                if isinstance(name, str):
-                    names.add(name)
-    return sorted(names)
-
-
-def _kind(value) -> str:
-    """The kind a registry row is declared under: the struct or variant name the reader kept."""
-    if isinstance(value, dict) and isinstance(value.get("__struct__"), str):
-        return value["__struct__"]
-    if isinstance(value, ron.Call):
-        return value.name
-    raise ron.RonError("a substance row that is no struct or variant: {!r}".format(value))
-
-
-def registry_projection(registry: str, names) -> bytes:
-    """What the bake reads of the substance registry for one model, and nothing else of it.
-
-    `classify` (src/bake.rs) resolves each name a primitive wears: whether it is a key of the
-    registry, and the KIND under it — `Hard` matter the walk reads, a `Witness` it does not, or a
-    `Burst` core the capture refuses — and the sim reads the same kind for the witness-role law.
-    Nothing of a row's numbers reaches an artifact; the game reads them at spawn. The registry's key
-    list, which a substance's id is a position in, is `spec_projection`'s `substance_keys`. So this
-    is one entry per name — `null` for a name that is no key, the kind's name otherwise — as JSON
-    with sorted keys and compact separators; a factor, a provenance, a comment or a key no primitive
-    wears is not in it. The registry is one the consumer contract has already accepted: the canon
-    (`spec_projection`) runs first in both modes and refuses an unreadable one as `door.registry`.
-    The release staleness check (#131) reads this same projection.
-    """
-    document = ron.load(registry)
-    rows = document.get("substances") if isinstance(document, dict) else None
-    if not isinstance(rows, dict):
-        raise ron.RonError("{} has no substances map".format(registry))
-    kinds = {name: _kind(rows[name]) if name in rows else None for name in names}
-    return json.dumps(kinds, sort_keys=True, separators=(",", ":")).encode()
-
-
-def spec_projection(spec: str, root: str, work: str, registry: str) -> bytes:
-    """What the build reads of the spec sheet, and nothing else of it.
-
-    The sheet reaches the artifacts only through `asset_verify --canon`: its typed node references,
-    the registry's substance keys, and whether `TankSpec::validate` accepts it. Everything else in
-    it — names, masses, gameplay tuning — is read by the game and never by this build, so hashing
-    the raw bytes made every gameplay edit a stale trio. Re-encoded with sorted keys so the hash
-    does not read the producer's whitespace; list order is the producer's canonical order.
-    """
-    with open(asset_door.canon_file(spec, root, work, registry), encoding="utf-8") as handle:
-        document = json.load(handle)
-    return json.dumps(document, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
-
-
-def blend_digest(blend: str, projection: bytes, substances: bytes) -> str:
-    """The staleness field: every input the build reads, and only what it reads of each.
-
-    The source's bytes, the material library's (`material_library`), the spec sheet's
-    `spec_projection`, the registry's `registry_projection`, the pipeline's own sources, the
-    resolved ladder, and the toolchain. A tank rebuilt from an unchanged blend under a changed
-    pipeline is a different tank, and a certificate that only hashed the blend would call it
-    current. `ladder_digest` is in it for the same reason it keys the cache — a world that grew
-    moves the right wall and therefore the chains, while every file this hashes is unchanged.
-    """
-    digest = hashlib.sha256()
-    for path in (blend, material_library(blend)):
-        digest.update(TRIO.sha256_file(path).encode())
-    for blob in (projection, substances):
-        digest.update(hashlib.sha256(blob).hexdigest().encode())
-    digest.update(sources_digest(PIPELINE_SOURCES).encode())
-    digest.update(ladder_digest().encode())
-    for _key, value in toolchain.ENVIRONMENT:
-        digest.update(value.encode())
-    return digest.hexdigest()
 
 
 def cache_root(root: str) -> str:
@@ -588,12 +492,8 @@ def build(blend: str, spec: str, glb: str, root: str, work: str, blender: str,
     with timeline.stage("assemble"):
         view_blob, mesh_count, chains = assemble(candidate_blob, rows, records, cache)
         sim_blob = TRIO.sim_bytes(view_blob, mesh_count)
-        registry = asset_door.registry_of(blend)
         cert = TRIO.certificate(
-            blend_digest(blend, spec_projection(spec, root, work, registry),
-                         registry_projection(registry, material_names(gltf))),
-            TRIO.sha256_bytes(view_blob), TRIO.sha256_bytes(sim_blob),
-            mesh_count, chains,
+            TRIO.sha256_bytes(view_blob), TRIO.sha256_bytes(sim_blob), mesh_count, chains,
         )
 
     with timeline.stage("publish"):
@@ -613,6 +513,19 @@ def build(blend: str, spec: str, glb: str, root: str, work: str, blender: str,
 
 def verify(blend: str, spec: str, glb: str, root: str, work: str, blender: str,
            timeline: Timeline) -> int:
+    """The tracked trio against what this source and this pipeline produce now.
+
+    STALENESS IS THE RE-EXPORT COMPARE. The candidate is cut afresh from the stored source by the
+    current pipeline under the pinned toolchain, so an input change that moves a byte of it — the
+    source, the material library it links, the spec sheet's canon, the pipeline's own code, a pin —
+    leaves the tracked view glb differing from it, and `compare` refuses. The prop build's `verify`
+    is the same law for a tree: its re-export is compared with the tracked glb byte for byte.
+
+    WHAT IT DOES NOT CATCH, by design. A changed LOD configuration or ladder leaves the committed
+    rungs honest — each rung's deviation is certified against the LOD0 it was cut from, and that
+    LOD0 is what the compare holds — but not re-cut. A changed species range leaves a committed tree
+    valid but not re-drawn. Both are re-cut by `build`, never flagged by `verify`.
+    """
     view_path, sim_path, cert_path = TRIO.paths(glb)
     findings: List[Finding] = []
     for path in (view_path, sim_path, cert_path):
@@ -630,19 +543,7 @@ def verify(blend: str, spec: str, glb: str, root: str, work: str, blender: str,
         cert = json.loads(handle.read().decode())
 
     with timeline.stage("certificate"):
-        registry = asset_door.registry_of(blend)
-        projection = spec_projection(spec, root, work, registry)
-        # The names come off the TRACKED view artifact: its rung records wear no material, so they
-        # are the candidate's own. One that is no glb is `coherence`'s finding, below.
-        try:
-            parsed = glb_ktx2.parse_glb(view_blob, os.path.relpath(view_path, root))
-            names = material_names(parsed[0])
-        except SystemExit:
-            names = []
-        failures = TRIO.coherence(
-            cert, view_blob, sim_blob,
-            blend_digest(blend, projection, registry_projection(registry, names)),
-        )
+        failures = TRIO.coherence(cert, view_blob, sim_blob)
         findings += [
             finding(TRIO_INCOHERENT, Subject(SubjectKind.FILE, os.path.relpath(cert_path, root)),
                     text, REBUILD)

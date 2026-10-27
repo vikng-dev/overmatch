@@ -21,7 +21,6 @@ import sys
 import tempfile
 import types
 import unittest
-from unittest import mock
 
 import numpy as np
 
@@ -48,17 +47,6 @@ import chains  # noqa: E402
 
 
 # ── fixtures ─────────────────────────────────────────────────────────────────────────────────────
-
-#: A spec projection in the canon document's shape, canonically encoded. Fixture data.
-PROJECTION = json.dumps(
-    {"node_references": [{"field": "volumes", "node": "Hull_Front"}],
-     "spec_validates": True, "substance_keys": ["Cast"]},
-    sort_keys=True, separators=(",", ":"),
-).encode()
-
-#: A registry projection in `registry_projection`'s shape, for the cases whose claims are about the
-#: ladder and not the registry. Fixture data.
-SUBSTANCES = json.dumps({"Cast": "Hard"}, sort_keys=True, separators=(",", ":")).encode()
 
 #: A substance registry in `assets/materials/materials.ron`'s shape: the three keys `document`'s
 #: primitives wear, and a witness no primitive wears. Fixture data: the rows carry numbers the bake
@@ -93,8 +81,8 @@ REGISTRY = b"""\
 
 def write_layout(root, stem):
     """`<root>/<stem>/<stem>.{blend,tank.ron}` beside `<root>/materials/materials.{blend,ron}` — the
-    asset layout `material_library` and `asset_door.registry_of` derive from — the registry the
-    fixture one and the rest a few placeholder bytes."""
+    asset layout `asset_door.registry_of` derives from — the registry the fixture one and the rest
+    a few placeholder bytes."""
     for parts, payload in (
         ((stem, stem + ".blend"), b"BLENDER-FI"),
         ((stem, stem + ".tank.ron"), b"TankSpec()"),
@@ -217,12 +205,6 @@ def parsed(blob):
     return glb_ktx2.parse_glb(blob, "<test>")
 
 
-def substances_of(root, view_blob):
-    """The layout's registry projected over the names a view document's primitives wear."""
-    return build.registry_projection(os.path.join(root, "materials", "materials.ron"),
-                                     build.material_names(parsed(view_blob)[0]))
-
-
 def cut_corpus():
     """A cache the way a worker leaves one: a directory per chain, its record beside its rungs.
 
@@ -256,9 +238,7 @@ def certificate_over(view_blob, rungs, chains=None):
                    "rungs": [{"mesh": name, "deviation_mm": 3.9 * (index + 1)}
                              for index, (name, _) in enumerate(rungs)]},
     }
-    cert = TRIO.certificate(
-        "blend-digest", TRIO.sha256_bytes(embedded), TRIO.sha256_bytes(sim), mesh_count, chains,
-    )
+    cert = TRIO.certificate(TRIO.sha256_bytes(embedded), TRIO.sha256_bytes(sim), mesh_count, chains)
     return embedded, sim, cert
 
 
@@ -438,59 +418,58 @@ class SimLaw(unittest.TestCase):
 # ── the certificate ──────────────────────────────────────────────────────────────────────────────
 
 class CertificateLaw(unittest.TestCase):
-    """Five fields, nothing derivable, and every claim held against the bytes beside it."""
+    """Four fields, nothing derivable, and every claim held against the bytes beside it."""
 
     def setUp(self):
         self.rungs = [("Hull#0_LOD1", rung(0.9)), ("Hull#0_LOD2", rung(0.8))]
         self.view, self.sim, self.cert = certificate_over(document(), self.rungs)
 
-    def test_the_schema_is_exactly_five_fields(self):
+    def test_the_schema_is_exactly_four_fields(self):
         self.assertEqual(list(self.cert), list(TRIO.CERTIFICATE_FIELDS))
 
     def test_a_coherent_trio_has_no_failures(self):
         self.assertEqual(
-            TRIO.coherence(self.cert, self.view, self.sim, "blend-digest", self.cert["mesh_count"]),
+            TRIO.coherence(self.cert, self.view, self.sim,
+                           source_mesh_count=self.cert["mesh_count"]),
             [],
         )
 
     def test_deviations_must_strictly_ascend(self):
         with self.assertRaises(TRIO.TrioError):
-            TRIO.certificate("d", "v", "s", 1, {"Hull#0": {"radius_m": 1.0, "rungs": [
+            TRIO.certificate("v", "s", 1, {"Hull#0": {"radius_m": 1.0, "rungs": [
                 {"mesh": "a", "deviation_mm": 4.0}, {"mesh": "b", "deviation_mm": 4.0},
             ]}})
 
     def test_a_chain_with_no_rungs_is_not_a_row(self):
-        cert = TRIO.certificate("d", "v", "s", 1, {"Hull#0": {"radius_m": 1.0, "rungs": []}})
+        cert = TRIO.certificate("v", "s", 1, {"Hull#0": {"radius_m": 1.0, "rungs": []}})
         self.assertEqual(cert["chains"], {})
 
-    def test_a_sixth_field_is_refused(self):
+    def test_a_fifth_field_is_refused(self):
         self.cert["schema_version"] = 2
         self.assertIn("schema_version", " ".join(TRIO.coherence(self.cert, self.view, self.sim)))
 
-    def test_each_of_the_three_digests_is_detected_when_tampered(self):
-        for field, expected in (("view_glb_sha", "view_glb_sha"), ("sim_glb_sha", "sim_glb_sha"),
-                                ("blend_digest", "blend_digest")):
+    def test_each_of_the_two_hashes_is_detected_when_tampered(self):
+        for field in ("view_glb_sha", "sim_glb_sha"):
             with self.subTest(field=field):
                 tampered = dict(self.cert, **{field: "0" * 64})
-                failures = TRIO.coherence(tampered, self.view, self.sim, "blend-digest")
-                self.assertTrue(any(expected in text for text in failures), failures)
+                failures = TRIO.coherence(tampered, self.view, self.sim)
+                self.assertTrue(any(field in text for text in failures), failures)
 
     def test_a_moved_binary_is_detected_even_when_the_certificate_is_untouched(self):
         moved = bytearray(self.view)
         moved[-1] = (moved[-1] + 1) % 256
-        failures = TRIO.coherence(self.cert, bytes(moved), self.sim, "blend-digest")
+        failures = TRIO.coherence(self.cert, bytes(moved), self.sim)
         self.assertTrue(any("view_glb_sha" in text for text in failures), failures)
 
     def test_mesh_count_fires_when_the_source_grows_a_mesh(self):
         failures = TRIO.coherence(
-            self.cert, self.view, self.sim, "blend-digest",
-            source_mesh_count=self.cert["mesh_count"] + 1,
+            self.cert, self.view, self.sim, source_mesh_count=self.cert["mesh_count"] + 1,
         )
         self.assertTrue(any("mesh_count" in text for text in failures), failures)
 
     def test_a_chain_naming_a_rung_the_view_does_not_hold_is_detected(self):
         self.cert["chains"]["Hull#0"]["rungs"][0]["mesh"] = "Hull#0_LOD9"
-        failures = TRIO.coherence(self.cert, self.view, self.sim, "blend-digest")
+        failures = TRIO.coherence(self.cert, self.view, self.sim)
         self.assertTrue(any("Hull#0_LOD9" in text for text in failures), failures)
 
     def test_a_node_reaching_into_the_rung_range_is_detected(self):
@@ -498,7 +477,7 @@ class CertificateLaw(unittest.TestCase):
         js["nodes"][0]["mesh"] = self.cert["mesh_count"]
         moved = glb_ktx2.glb_bytes(js, binary)
         cert = dict(self.cert, view_glb_sha=TRIO.sha256_bytes(moved))
-        failures = TRIO.coherence(cert, moved, self.sim, "blend-digest")
+        failures = TRIO.coherence(cert, moved, self.sim)
         self.assertTrue(any("the certificate declares" in text for text in failures), failures)
 
 
@@ -610,11 +589,11 @@ class CertificateBodyLaw(unittest.TestCase):
 
     def test_construction_refuses_what_verification_refuses(self):
         with self.assertRaises(TRIO.TrioError):
-            TRIO.certificate("d", "v", "s", 1, {"Hull#0": {"radius_m": 1.0, "rungs": [
+            TRIO.certificate("v", "s", 1, {"Hull#0": {"radius_m": 1.0, "rungs": [
                 {"mesh": "a", "deviation_mm": 4.0}, {"mesh": "b", "deviation_mm": float("nan")},
             ]}})
         with self.assertRaises(TRIO.TrioError):
-            TRIO.certificate("d", "v", "s", 1, {"Hull#0": {"radius_m": -1.0, "rungs": [
+            TRIO.certificate("v", "s", 1, {"Hull#0": {"radius_m": -1.0, "rungs": [
                 {"mesh": "a", "deviation_mm": 4.0},
             ]}})
 
@@ -736,17 +715,9 @@ class VerifyRefusals(unittest.TestCase):
         self.spec = os.path.join(self.dir, "testbed.tank.ron")
         write_layout(self.root, "testbed")
         self.glb = os.path.join(self.dir, "testbed.glb")
-        self.view, self.sim, cert = certificate_over(document(), [("Hull#0_LOD1", rung(0.9))])
-        # The projection is the canon document `asset_verify` emits; stubbed, because producing it
-        # is a cargo build and this suite runs without one. Its content is `bake.rs`'s own test.
-        stub = mock.patch.object(build, "spec_projection", lambda *_: PROJECTION)
-        stub.start()
-        self.addCleanup(stub.stop)
-        self.cert = dict(cert, blend_digest=build.blend_digest(
-            self.blend, PROJECTION, substances_of(self.root, self.view)))
+        self.view, self.sim, self.cert = certificate_over(document(), [("Hull#0_LOD1", rung(0.9))])
         TRIO.publish(self.glb, self.view, self.sim, self.cert)
         self.cert_path = TRIO.paths(self.glb)[2]
-        self.registry = os.path.join(self.root, "materials", "materials.ron")
 
     def land(self, cert):
         with open(self.cert_path, "wb") as handle:
@@ -799,169 +770,14 @@ class VerifyRefusals(unittest.TestCase):
         self.assertEqual(refused.stage, "trio")
         self.assertEqual({row.check.id for row in refused.findings}, {"build.trio-incoherent"})
 
-    def test_a_stale_source_is_caught_by_the_blend_digest(self):
-        with open(self.blend, "wb") as handle:
-            handle.write(b"BLENDER-FI-EDITED")
-        refused = self.refusal()
-        self.assertEqual(refused.stage, "certificate")
-        self.assertTrue(any("blend_digest" in row.evidence for row in refused.findings))
-
-    def test_a_moved_projection_is_caught_by_the_blend_digest(self):
-        with mock.patch.object(build, "spec_projection", lambda *_: PROJECTION + b" "):
-            refused = self.refusal()
-        self.assertEqual(refused.stage, "certificate")
-        self.assertTrue(any("blend_digest" in row.evidence for row in refused.findings))
-
-    def test_a_registry_edit_the_bake_reads_is_caught_by_the_blend_digest(self):
-        """The names are read off the TRACKED view artifact, rungs and all: a key one of its
-        primitives wears, gone from the registry, is a stale trio."""
-        with open(self.registry, "rb") as handle:
-            text = handle.read()
-        self.assertEqual(text.count(b'"Rubber": Hard('), 1)
-        with open(self.registry, "wb") as handle:
-            handle.write(text.replace(b'"Rubber": Hard(', b'"Rubber_renamed": Hard('))
-        refused = self.refusal()
-        self.assertEqual(refused.stage, "certificate")
-        self.assertTrue(any("blend_digest" in row.evidence for row in refused.findings))
-
-    def test_a_registry_edit_the_bake_does_not_read_passes_the_certificate(self):
-        """A comment on the registry leaves the trio current, through `verify` itself: the
-        certificate and the sim artifact pass and the door is reached. The door is stood in for,
-        because reaching it is the claim and running it is a Blender and a cargo build."""
-        with open(self.registry, "ab") as handle:
-            handle.write(b"// a comment the bake reads nothing of\n")
-        timeline = build.Timeline()
-        stand_in = mock.patch.object(build, "staged_candidate",
-                                     side_effect=build.Refused("door", []))
-        with stand_in, self.assertRaises(build.Refused) as raised:
-            build.verify(self.blend, self.spec, self.glb, self.dir,
-                         tempfile.mkdtemp(prefix="trio-verify-work-"), "blender", timeline)
-        self.assertEqual(raised.exception.stage, "door")
-        self.assertEqual([name for name, _ in timeline.rows],
-                         ["certificate", "sim artifact", "door (export chain)"])
-
     def test_an_unreadable_view_artifact_is_named_at_the_certificate(self):
-        """The names come off the view artifact before `coherence` reads it; one that is no glb
-        is `coherence`'s finding and not a crash on the way there."""
+        """A view artifact that is no glb is `coherence`'s finding, at the certificate, before
+        the sim stage decodes it — a named refusal, not a crash on the way there."""
         with open(TRIO.paths(self.glb)[0], "wb") as handle:
             handle.write(b"\0" * 64)
         refused = self.refusal()
         self.assertEqual(refused.stage, "certificate")
         self.assertTrue(any("cannot be read" in row.evidence for row in refused.findings))
-
-
-# ── what the staleness field reads ───────────────────────────────────────────────────────────────
-
-class StalenessInputs(unittest.TestCase):
-    """`blend_digest` moves exactly when an input the build reads does.
-
-    The spec sheet is read through its projection only, so a spec byte outside the projection is
-    not an input. The registry is read through `registry_projection` — for each name the model's
-    primitives wear, whether it is a key and the kind under it — so a factor, a provenance, a
-    comment or the row of a key no primitive wears is not an input either; the registry's KEY LIST
-    is the canon's `substance_keys` inside `spec_projection`, which these cases hold fixed. The
-    material library is read whole, so every byte of it is.
-    """
-
-    def setUp(self):
-        self.root = tempfile.mkdtemp(prefix="trio-staleness-")
-        write_layout(self.root, "testbed")
-        self.blend = os.path.join(self.root, "testbed", "testbed.blend")
-        self.registry = os.path.join(self.root, "materials", "materials.ron")
-        self.names = build.material_names(parsed(document())[0])
-        self.base = self.digest()
-
-    def digest(self, names=None):
-        return build.blend_digest(
-            self.blend, PROJECTION,
-            build.registry_projection(self.registry, self.names if names is None else names),
-        )
-
-    def edit(self, *parts):
-        with open(os.path.join(self.root, *parts), "ab") as handle:
-            handle.write(b"\n")
-
-    def with_registry(self, old, new, names=None):
-        """The digest over the fixture registry with one edit."""
-        self.assertEqual(REGISTRY.count(old), 1, old)
-        with open(self.registry, "wb") as handle:
-            handle.write(REGISTRY.replace(old, new))
-        return self.digest(names)
-
-    def test_the_spec_sheets_own_bytes_are_not_an_input(self):
-        self.edit("testbed", "testbed.tank.ron")
-        self.assertEqual(self.base, self.digest())
-
-    def test_a_moved_projection_moves_the_digest(self):
-        for moved in (PROJECTION.replace(b"Hull_Front", b"Hull_Glacis"),
-                      PROJECTION.replace(b"true", b"false")):
-            with self.subTest(projection=moved):
-                self.assertNotEqual(
-                    self.base,
-                    build.blend_digest(self.blend, moved,
-                                       build.registry_projection(self.registry, self.names)),
-                )
-
-    def test_the_material_library_is_read_whole(self):
-        self.edit("materials", "materials.blend")
-        self.assertNotEqual(self.base, self.digest())
-
-    def test_the_names_are_the_ones_the_primitives_wear(self):
-        """`classify` resolves the material a PRIMITIVE wears; a material record no primitive
-        references, or a primitive wearing none, declares no membership and is not a name."""
-        self.assertEqual(self.names, ["Ammunition", "RHA", "Rubber"])
-        js = parsed(document())[0]
-        js["materials"].append({"name": "Paint"})
-        del js["meshes"][0]["primitives"][0]["material"]
-        self.assertEqual(build.material_names(js), ["Ammunition", "Rubber"])
-
-    def test_a_registry_edit_the_bake_does_not_read_is_not_an_input(self):
-        """A row's numbers are the game's, read at spawn; the bake reads a worn key's kind and
-        nothing else of its row."""
-        for old, new in ((b"// Fixture data: the registry's shape.", b"// Restated."),
-                         (b"Effective((120.0,", b"Effective((121.0,"),
-                         (b'Unknown("fixture factor")', b'Measured("a datasheet")'),
-                         (b'Unknown("fixture factor"))),\n            paintable: false,',
-                          b'Unknown("fixture factor"))),\n            paintable: true,')):
-            with self.subTest(edit=old):
-                self.assertEqual(self.base, self.with_registry(old, new))
-
-    def test_a_worn_names_membership_is_an_input(self):
-        """Whether a name a primitive wears is a key decides whether the primitive is a volume or
-        art: the key leaving the registry, or a name that was no key joining it, moves the
-        digest."""
-        with self.subTest(edit="a worn key leaves"):
-            self.assertNotEqual(self.base,
-                                self.with_registry(b'"Rubber": Hard(', b'"Rubber_renamed": Hard('))
-        names = self.names + ["Paint"]
-        before = self.digest(names)
-        with self.subTest(edit="a worn name becomes a key"):
-            self.assertNotEqual(before, self.with_registry(
-                b'        "Flesh": Witness,\n',
-                b'        "Flesh": Witness,\n        "Paint": Witness,\n', names))
-
-    def test_a_worn_keys_kind_is_an_input(self):
-        """The kind is what the bake reads of a row: matter is walked, a witness is not, a burst
-        core is refused. One key under another kind is another model."""
-        for new in (b'"Rubber": Witness, "Rubber_was": Hard(',
-                    b'"Rubber": Burst(density: (1650.0, Unknown("fixture")), '
-                    b'speed_constant_mps: (2680.0, Unknown("fixture"))), "Rubber_was": Hard('):
-            with self.subTest(kind=new[:20]):
-                self.assertNotEqual(self.base, self.with_registry(b'"Rubber": Hard(', new))
-
-    def test_a_key_no_primitive_wears_changes_freely(self):
-        """The projection is over the names the model wears: another key's kind, numbers or
-        presence are not in it. Its presence IS in the canon's `substance_keys`, through
-        `spec_projection`; that is the key list's home, not this projection's."""
-        for old, new in ((b'"Flesh": Witness,',
-                          b'"Flesh": Hard(resistance: Reference, paintable: false),'),
-                         (b'        "Flesh": Witness,\n', b"")):
-            with self.subTest(edit=old):
-                self.assertEqual(self.base, self.with_registry(old, new))
-
-    def test_the_material_library_is_the_registrys_neighbour(self):
-        self.assertEqual(build.material_library(self.blend),
-                         os.path.join(self.root, "materials", "materials.blend"))
 
 
 # ── the work split ───────────────────────────────────────────────────────────────────────────────
@@ -998,7 +814,7 @@ class PartitionLaw(unittest.TestCase):
                          "shared geometry names the same rung records")
 
 
-# ── the fingerprint the cache and the staleness field are cut from ───────────────────────────────
+# ── the fingerprint the cache is keyed by ────────────────────────────────────────────────────────
 
 class FingerprintLaw(unittest.TestCase):
     """The fingerprint must move exactly when the search's inputs do.
@@ -1006,28 +822,21 @@ class FingerprintLaw(unittest.TestCase):
     `scripts/lod/config.py` is a file this hashes; the RIGHT WALL is a value that file reads out of
     `src/map.rs` and the map's own `level.json`. A world that grows moves every chain's termination
     without moving one byte of any file in `SEARCH_SOURCES`, so a fingerprint over the files alone
-    would hand back a cached ladder cut for a smaller world and call the trio current.
+    would hand back a cached ladder cut for a smaller world.
     """
 
-    def setUp(self):
-        self.blend = os.path.join(ROOT, "assets", "tiger_1", "tiger_1.blend")
-        if not os.path.isfile(self.blend):
-            self.skipTest("the tiger source is not hydrated")
-
     def moved(self, name, value):
-        """`(search digest, blend digest)` with one resolved constant replaced."""
+        """The search digest with one resolved constant replaced."""
         before = getattr(build.CONFIG, name)
         setattr(build.CONFIG, name, value)
         try:
-            return build.search_digest(), build.blend_digest(self.blend, PROJECTION, SUBSTANCES)
+            return build.search_digest()
         finally:
             setattr(build.CONFIG, name, before)
 
-    def test_the_right_wall_moves_both_the_cache_key_and_the_staleness_field(self):
-        base = (build.search_digest(), build.blend_digest(self.blend, PROJECTION, SUBSTANCES))
+    def test_the_right_wall_moves_the_cache_key(self):
         grown = self.moved("RIGHT_WALL_M", build.CONFIG.RIGHT_WALL_M * 2.0)
-        self.assertNotEqual(base[0], grown[0], "a grown world must MISS the cache")
-        self.assertNotEqual(base[1], grown[1], "a grown world must make the trio stale")
+        self.assertNotEqual(build.search_digest(), grown, "a grown world must MISS the cache")
 
     def test_every_live_input_the_ladder_reads_is_in_the_fingerprint(self):
         base = build.search_digest()
@@ -1044,24 +853,22 @@ class FingerprintLaw(unittest.TestCase):
             ("NORMAL_DIAGNOSTIC_SAMPLES", 20_001),
         ):
             with self.subTest(constant=name):
-                self.assertNotEqual(base, self.moved(name, value)[0])
+                self.assertNotEqual(base, self.moved(name, value))
 
     def test_a_moved_gate_threshold_moves_the_fingerprint(self):
         base = build.search_digest()
         gates = dict(build.CONFIG.GATES)
         gates["deviation_rel_tol_certify"] = gates["deviation_rel_tol_certify"] * 2.0
-        self.assertNotEqual(base, self.moved("GATES", gates)[0])
+        self.assertNotEqual(base, self.moved("GATES", gates))
 
     def test_a_moved_reference_view_moves_the_fingerprint(self):
         base = build.search_digest()
         view = dict(build.CONFIG.REFERENCE_VIEW)
         view["vfov_rad"] = view["vfov_rad"] * 2.0
-        self.assertNotEqual(base, self.moved("REFERENCE_VIEW", view)[0])
+        self.assertNotEqual(base, self.moved("REFERENCE_VIEW", view))
 
     def test_the_fingerprint_is_stable_when_nothing_moves(self):
         self.assertEqual(build.search_digest(), build.search_digest())
-        self.assertEqual(build.blend_digest(self.blend, PROJECTION, SUBSTANCES),
-                         build.blend_digest(self.blend, PROJECTION, SUBSTANCES))
 
     def test_a_non_finite_constant_cannot_be_fingerprinted_silently(self):
         with self.assertRaises(ValueError):

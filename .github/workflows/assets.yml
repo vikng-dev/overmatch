@@ -69,7 +69,9 @@ jobs:
 
       # The decision, and the whole of it, in a sourced shell file — a workflow step that decides
       # anything is a step no suite can run, which is how a broken one ships green.
-      # `scripts/hooks/test_pushed_assets.sh` drives this over synthetic ranges.
+      # `scripts/hooks/test_pushed_assets.sh` drives this over synthetic ranges. It answers twice:
+      # `affected`, which every step below is conditioned on, and `stems`, the trios the verify step
+      # re-cuts — each trio the range changes and every trio of a lane whose shared surface it moves.
       - name: Does this range touch an asset verdict
         id: scope
         env:
@@ -185,12 +187,15 @@ jobs:
           export OVERMATCH_BASISU="${HOME}/.cache/overmatch/basisu/basisu"
           python3 scripts/toolchain.py
 
-      # Every discovered trio, re-cut from its own stored source and compared with the tracked
-      # model under its certified rung records (ADR 0035).
+      # Every trio the scope step selected, re-cut from its own stored source and compared with the
+      # tracked model under its certified rung records (ADR 0035). The list arrives through `env`,
+      # so no stem is spliced into the script's text.
       # The reports are kept whole: warnings never fail this lane, and the artifact is where they
       # are read.
-      - name: Verify every asset through the build
+      - name: Verify the selected assets through the build
         if: steps.scope.outputs.affected == 'true'
+        env:
+          STEMS: ${{ steps.scope.outputs.stems }}
         run: |
           set -euo pipefail
           mkdir -p "${RUNNER_TEMP}/asset-reports"
@@ -200,15 +205,21 @@ jobs:
           # Every blend the commit holds is a canonical source, before any of them is verified: a
           # blend of another shape is one discovery would never look at again.
           sh -c '. scripts/hooks/pushed_assets.sh; assets_blend_shape HEAD'
-          stems=()
-          while IFS= read -r stem; do stems+=("$stem"); done < <(
-            sh -c '. scripts/hooks/pushed_assets.sh; assets_trios HEAD'
-          )
-          if [[ ${#stems[@]} -eq 0 ]]; then
+          # Zero trios in the checkout is a failure whatever was selected: a tree with no asset left
+          # in it is one this lane would certify nothing about and report success.
+          if [[ -z "$(sh -c '. scripts/hooks/pushed_assets.sh; assets_trios HEAD')" ]]; then
             echo "::error::No asset trio found — this lane would certify nothing and report success"
             exit 1
           fi
-          printf 'asset: %s\n' "${stems[@]}"
+          stems=()
+          while IFS= read -r stem; do
+            if [[ -n "${stem}" ]]; then stems+=("${stem}"); fi
+          done <<< "${STEMS}"
+          if [[ ${#stems[@]} -eq 0 ]]; then
+            echo "asset: the selection names no trio this checkout holds — nothing to re-cut"
+          else
+            printf 'asset: %s\n' "${stems[@]}"
+          fi
           for stem in "${stems[@]}"; do
             lane=$(sh -c '. scripts/hooks/pushed_assets.sh; assets_trio_lane HEAD "$1"' lane "${stem}")
             case "${lane}" in

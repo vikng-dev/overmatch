@@ -15,9 +15,10 @@ table, amendments A3, A5, A6, A12, A13); this module states only what it enforce
 Blender, custom properties as glTF extras) into this invocation's work directory; the three
 contracts below on the candidate; the certificate; a staged publish, the glb first and the
 certificate last. `lint` is the same without the publish. `verify` reads the TRACKED trio: its
-coherence (both hashes, the staleness digest, the five fields), the three contracts, and then the
-re-export of the blend compared byte for byte with the tracked glb — the tracked model must be
-what this source and this pipeline produce, as the tank verifier requires. It writes nothing.
+coherence (both hashes, the four fields), the three contracts, and then the re-export of the blend
+compared byte for byte with the tracked glb — the tracked model must be what this source and this
+pipeline produce, as the tank verifier requires. That compare is the staleness check; what it does
+not reach is stated once, in `scripts/tank/build.py`'s `verify`. It writes nothing.
 
 THE THREE CONTRACTS, each a list of named failures, empty on the pass:
 - `contract_failures`: the node tree. One root named `<id>`, identity, at the origin; every
@@ -39,7 +40,7 @@ THE THREE CONTRACTS, each a list of named failures, empty on the pass:
 Tolerances: `TOL_M` on metres (the glb stores float32, the ron four decimals), `NORMAL_TOL` on
 a unit normal's components.
 
-THE CERTIFICATE is the tank's five fields with `sim_ron_sha` in `sim_glb_sha`'s place (A13): a
+THE CERTIFICATE is the tank's four fields with `sim_ron_sha` in `sim_glb_sha`'s place (A13): a
 tree's sim artifact is the `.tree.ron` the sim is built from at spawn (ADR 0014), and the field
 hashes those bytes. `chains` is EMPTY, and that is a SCOPED EXCEPTION, not a measured outcome:
 ADR 0033 wants a generated ladder for every renderable mesh or an explicit unsupported verdict,
@@ -76,19 +77,16 @@ MODES = ("build", "verify", "lint")
 EXPORT = os.path.join("scripts", "prop", "export_tree.py")
 SPECIES_TABLE = os.path.join("assets", "trees", "species.ron")
 REGISTRY = os.path.join("assets", "materials", "materials.ron")
-CERTIFICATE_FIELDS = ("blend_digest", "view_glb_sha", "sim_ron_sha", "mesh_count", "chains")
+CERTIFICATE_FIELDS = ("view_glb_sha", "sim_ron_sha", "mesh_count", "chains")
 PARTS = ("trunk", "cap_bottom", "cap_top", "canopy")
 
 #: The wire word's cut index is a byte below the segment count (contract A3).
 MAX_SEGMENTS = 255
 
-#: The fields of a species row the generator reads — `plan.sample` and `plan.whorls`, the two
-#: readers `gen_tree.build` hands the row to — and so the fields the blend and its ron are a
-#: function of, beside the seed. `test_prop.py` holds the generator to exactly this set.
-GENERATOR_FIELDS = ("height_m", "dbh_m", "crown_base_frac", "crown_width_frac", "whorl_spacing_m")
-
-#: What can move either artifact, hashed into `blend_digest` beside the inputs. Relative to this
-#: directory; the hook suite reads the list by text to check the shared-surface predicate covers it.
+#: What can move either artifact — the build's declared dependency list, relative to this
+#: directory. Read only by `scripts/hooks/test_pushed_assets.sh`, by text: its coverage row holds
+#: the CI lane's surface (`assets_shared_lanes`, `scripts/hooks/pushed_assets.sh`) to re-verify
+#: every tree trio when an entry moves.
 PIPELINE_SOURCES = (
     "build.py",
     "export_tree.py",
@@ -219,48 +217,6 @@ def read(path: str) -> bytes:
 
 def repo_root() -> str:
     return os.path.dirname(_SCRIPTS)
-
-
-def sources_digest() -> str:
-    here = os.path.dirname(os.path.abspath(__file__))
-    digest = hashlib.sha256()
-    for name in PIPELINE_SOURCES:
-        digest.update(name.encode())
-        digest.update(read(os.path.join(here, name)))
-    return digest.hexdigest()
-
-
-def blend_digest(blend: str, tree_ron: str, table: str, registry: str) -> str:
-    """The staleness field: the source, the ron, what the build reads of the species table, the
-    pipeline, the pins.
-
-    The `.tree.ron` is hashed WHOLE. It is the sim artifact (the sim is built from it at spawn,
-    ADR 0014), and every field in it is read: `species` picks the row, each segment's three
-    dimensions are held against the glb here and read at load; the header is the generator's
-    record of the draw. The table is read through `species_projection`, so an edit to it outside
-    what the build reads of this tree's row leaves the trio current. The registry reaches the
-    digest only as the projection's verdict on the substance.
-    """
-    digest = hashlib.sha256()
-    for path in (blend, tree_ron):
-        digest.update(sha256_bytes(read(path)).encode())
-    projection = species_projection(table, species_of(tree_ron), substances(registry))
-    digest.update(sha256_bytes(projection).encode())
-    digest.update(sources_digest().encode())
-    for _key, value in toolchain.ENVIRONMENT:
-        digest.update(value.encode())
-    return digest.hexdigest()
-
-
-def species_of(tree_ron: str):
-    """The species key a `.tree.ron` names, or None when it names none; `Refused("ron")` when the
-    ron cannot be read. The contracts refuse a ron that names no species or no row; this only has to
-    be total, so the staleness field is cut before them."""
-    try:
-        tree = ron.load(tree_ron)
-    except (OSError, ron.RonError) as error:
-        raise Refused("ron", ["{}: {}".format(tree_ron, error)]) from error
-    return tree.get("species") if isinstance(tree, dict) else None
 
 
 def substances(registry: str) -> Set[str]:
@@ -451,46 +407,6 @@ def species_failures(key: str, row, registry: Set[str]) -> List[str]:
         failures.append("species {!r} names substance {!r}, which is not a key of the substance "
                         "registry ({})".format(key, substance, ", ".join(sorted(registry))))
     return failures
-
-
-def _canonical(value):
-    """A parsed RON value with every number a float, so a respelled literal is one input."""
-    if isinstance(value, bool) or value is None or isinstance(value, str):
-        return value
-    if isinstance(value, (int, float)):
-        return float(value)
-    if isinstance(value, (list, tuple)):
-        return [_canonical(item) for item in value]
-    if isinstance(value, dict):
-        return {key: _canonical(item) for key, item in value.items()}
-    return {"__call__": value.name, "args": [_canonical(item) for item in value.args]}
-
-
-def species_projection(table: str, key, registry: Set[str]) -> bytes:
-    """What the build reads of the species table for one tree, and nothing else of it.
-
-    The row under `key` reaches the artifacts through two readers: the generator, which draws the
-    tree from `GENERATOR_FIELDS`, and `species_failures`, whose verdict the build refuses on — the
-    thresholds `fell_k` and `hp` and the substance against the registry's keys are the runtime's to
-    read at spawn, and the build reads only that the verdict is empty. So the projection is those
-    fields by name, the substance, and the verdict: a threshold's value, its provenance, a comment
-    or a respelled literal is not in it. JSON with sorted keys, compact separators, no NaN, and
-    every number a float in Python's shortest round-trip `repr`, so `9.0e5` and `900000.0` are one
-    input. A row the table lacks projects as its verdict; `Refused("ron")` when the table cannot be
-    read. The release staleness check (#131) reads this same projection.
-    """
-    try:
-        species = ron.load(table)
-    except (OSError, ron.RonError) as error:
-        raise Refused("ron", ["{}: {}".format(table, error)]) from error
-    row = species.get(key) if isinstance(species, dict) else None
-    fields = row if isinstance(row, dict) else {}
-    document = {
-        "generator": {field: _canonical(fields.get(field)) for field in GENERATOR_FIELDS},
-        "substance": _canonical(fields.get("substance")),
-        "verdict": species_failures(key, row, registry),
-    }
-    return json.dumps(document, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
 def ron_failures(tree, js: dict, species: dict, registry: Set[str]) -> List[str]:
@@ -716,9 +632,8 @@ def _cap_failures(part: str, segment: int, row: dict, positions, normals) -> Lis
 
 # ── the certificate ──────────────────────────────────────────────────────────────────────────────
 
-def certificate(digest: str, view_blob: bytes, ron_blob: bytes, mesh_count: int) -> dict:
+def certificate(view_blob: bytes, ron_blob: bytes, mesh_count: int) -> dict:
     return {
-        "blend_digest": digest,
         "view_glb_sha": sha256_bytes(view_blob),
         "sim_ron_sha": sha256_bytes(ron_blob),
         "mesh_count": mesh_count,
@@ -730,7 +645,7 @@ def certificate_bytes(cert: dict) -> bytes:
     return (json.dumps(cert, indent=2, sort_keys=False, allow_nan=False) + "\n").encode()
 
 
-def coherence(cert, view_blob: bytes, ron_blob: bytes, digest: Optional[str]) -> List[str]:
+def coherence(cert, view_blob: bytes, ron_blob: bytes) -> List[str]:
     """Every claim the certificate makes about the bytes beside it, as named failures."""
     failures = []
     if not isinstance(cert, dict):
@@ -740,7 +655,7 @@ def coherence(cert, view_blob: bytes, ron_blob: bytes, digest: Optional[str]) ->
     if missing:
         failures.append("the certificate has no {}".format(", ".join(missing)))
     if extra:
-        failures.append("the certificate carries {}, which is not one of its five fields".format(
+        failures.append("the certificate carries {}, which is not one of its four fields".format(
             ", ".join(extra)))
     if missing:
         return failures
@@ -750,9 +665,6 @@ def coherence(cert, view_blob: bytes, ron_blob: bytes, digest: Optional[str]) ->
         if cert[field] != actual:
             failures.append("{} is {!r} and the {} hashes to {!r} — the trio is incoherent".format(
                 field, cert[field], what, actual))
-    if digest is not None and cert["blend_digest"] != digest:
-        failures.append("blend_digest is {!r} and this source and pipeline digest to {!r} — the "
-                        "trio is stale".format(cert["blend_digest"], digest))
     try:
         js, _ = parse_glb(view_blob)
     except ValueError as error:
@@ -852,8 +764,7 @@ def build(blend: str, root: str, work: str, blender: str, registry: str, publish
     if not publish:
         print("build ▸ lint certified", flush=True)
         return 0
-    cert = certificate(blend_digest(blend, tree_ron, table, registry), view_blob, read(tree_ron),
-                       len(js.get("meshes", [])))
+    cert = certificate(view_blob, read(tree_ron), len(js.get("meshes", [])))
     land(glb, view_blob)
     land(cert_path, certificate_bytes(cert))
     for path in (glb, tree_ron, cert_path):
@@ -877,7 +788,7 @@ def verify(blend: str, root: str, work: str, blender: str, registry: str) -> int
         cert = json.loads(read(cert_path).decode("utf-8"))
     except ValueError as error:
         raise Refused("certificate", ["{}: {}".format(cert_path, error)]) from error
-    failures = coherence(cert, view_blob, ron_blob, blend_digest(blend, tree_ron, table, registry))
+    failures = coherence(cert, view_blob, ron_blob)
     if failures:
         raise Refused("certificate", failures + [REBUILD])
     contracts(view_blob, tree_ron, table, registry, stem)

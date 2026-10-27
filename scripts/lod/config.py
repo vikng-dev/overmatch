@@ -3,8 +3,10 @@
 ADR 0033 (`.agents/docs/adr/0033-geometry-mipmapping-declarative-lod.md`) is the doctrine, as
 amended by ADR 0035 and ADR 0036; this file is their machine-readable half. Nothing downstream may
 hardcode a threshold: `generate.py`, `scripts/tank/chains.py` and the gates all read from here, and
-these bytes are hashed into the tank build's `blend_digest` (`scripts/tank/build.py`), so a chain
-cut under different constants is a stale trio rather than a silent one.
+the tank build keys its chain cache on these bytes and the values they resolve (`search_digest`,
+`scripts/tank/build.py`), so a chain cut under different constants is never reused. A tracked trio
+cut under older constants is re-cut by `build` and not flagged by `verify`, whose docstring says
+why.
 
 WHY A CONFIG AND NOT CONSTANTS AT THE POINT OF USE. The right wall is the example that forced it.
 It is a property of the WORLD (how far a camera can be from a surface), it will move when maps grow
@@ -134,10 +136,10 @@ WORLD_SIZE_M = map_world_size_m(MAP_ID)
 #: NORTH STAR: maps grow toward 5 km, and this file no longer has to be edited when one does. The
 #: side is PARSED from the shipped map manifest, which is what `crate::map` parses to build the
 #: grid, so a map that grows moves this wall by itself and the deeper rungs appear on the next
-#: build because the stop rule reads this number. The rebuild still has to happen deliberately, and
-#: two things force it: this file's bytes are inside the tank build's `blend_digest`, and
-#: `link_view`'s `the_shipped_corpus_reaches_the_worlds_far_corner` fails the build against the live
-#: grid. If a far plane or a fog cut-off is ever introduced it becomes the wall instead.
+#: build because the stop rule reads this number. The rebuild still has to happen deliberately:
+#: the chain cache keys on the resolved wall, so `build` re-cuts every chain, and nothing else
+#: forces it — `verify` holds the tracked LOD0, not the rungs, so a trio cut for a smaller world
+#: still verifies. If a far plane or a fog cut-off is ever introduced it becomes the wall instead.
 RIGHT_WALL_M = WORLD_SIZE_M * 2.0 ** 0.5
 
 
@@ -257,9 +259,8 @@ BLENDER_OVERRIDE_ENV = "OVERMATCH_LOD_ALLOW_BLENDER"
 
 #: WHAT HASHES THESE SOURCES: `scripts/tank/build.py`. Its `SEARCH_SOURCES` names
 #: `../lod/config.py`, `../lod/measure.py` and `../lod/generate.py` — this lane's whole production
-#: half — and keys the per-mesh chain cache on their digest; `PIPELINE_SOURCES` folds the same
-#: digest into every certificate's `blend_digest`. So "a corpus cut by code that is no longer here
-#: is stale" is enforced from there rather than restated here.
+#: half — and keys the per-mesh chain cache on their digest, so a chain cut by code that is no
+#: longer here is never reused; that is enforced from there rather than restated here.
 
 
 # ── the search's budget ──────────────────────────────────────────────────────────────────────────
