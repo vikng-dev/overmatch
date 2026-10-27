@@ -124,8 +124,10 @@ fn fall_duration_s(fallen_length_m: f32) -> f32 {
 /// Present a tree's state on its glb, from the state alone (ADR-0016): standing, every trunk node
 /// upright and every cap hidden; down, the cut's trunk node turns about its own origin — the
 /// pivot, the chain's translations carry the piece above — by [`fall_rotation`] from upright to
-/// the resting tilt, where it is the sim's lying segments' own rotation, over the fall's duration, phase read off [`FallClock`] against the transition tick (ADR-0037: the
-/// fall lands when the cursor crosses its tick, however late the entry arrived), and of the caps
+/// the resting tilt, where it is the sim's lying segments' own rotation, over the fall's
+/// duration, phase read off [`FallClock`] against the transition tick (ADR-0037: the fall STARTS
+/// when the cursor crosses its tick, however late the entry arrived, and completes
+/// [`fall_duration_s`] later), and of the caps
 /// exactly the pair the cut reveals (A5: `cap_top` below the cut and `cap_bottom` of the cut)
 /// shows. Written when the state, the body's resting pose or the bound view is new, and on every
 /// frame the cut's trunk is not at the turn the clock derives — through the fall and on the frame
