@@ -4,11 +4,11 @@ The single top-level authority on what this game is, where it stands, and what i
 
 ## Now
 
-Milestone: **core loop feature-complete** — map detail, a destructible and affectible world, sound, sky — then a Steam early-access build people can play, then the meta loop (Garage, Progression, more tanks).
+Milestone: **core loop feature-complete** — map detail, a destructible and affectible world, then a polish round (sound, sky) — then a Steam early-access build people can play, then the meta loop (Garage, Progression, more tanks).
 
-In flight: level design (external lane, below). Landed: the union-field walk with its 10⁶-ray fuzzer gate, geometry/terrain LOD, display settings, the rebuilt Tiger asset, and the one-command tank build — `scripts/tank/build.py` cuts a per-tank trio (view glb, sim glb, LOD certificate) and the server runs on the sim bytes (ADR-0035/0036, shipped v0.3.1).
+In flight: level design in-house, the damage-model and destruction epics on GitHub (#103, #106). Landed: the union-field walk with its 10⁶-ray fuzzer gate, geometry/terrain LOD, display settings, the rebuilt Tiger asset, and the one-command tank build — `scripts/tank/build.py` cuts a per-tank trio (view glb, sim glb, LOD certificate) and the server runs on the sim bytes (ADR-0035/0036, shipped v0.3.1).
 
-Next: coincident-shell refinement (unconditional fuzzer zero); Houdini map-pipeline direction session; building-destruction implementation research.
+Next: coincident-shell refinement (unconditional fuzzer zero); the next destruction slice (#106).
 
 ## Values
 
@@ -48,8 +48,8 @@ The client sends intent; the server simulates and confirms consequences (one tim
 - One authoritative world owns a complete Battle; distributed gameplay authority and world sharding are not target architecture.
 - There is no abstract spotting mechanic. If physical geometry, foliage, weather, and rendering allow a player to see a tank, distance alone does not hide it.
 - Terrain topology is simulation-static **today**: track marks, impact scars, scorch, dust, and shallow craters are **Surface evidence** with no gameplay effect. Whether ground deformation stays cosmetic scarring or becomes authoritative heightmap change is an open fork, settled by dedicated research at the world-detail milestone — not by whichever is easier when a crater is first drawn.
-- **Battlefield destruction is a core feature, not late polish.** Buildings must be destructible before early access; it changes collision, cover, line of sight, and traversal authoritatively, and implementation research is still pending. Fallen trees remain the first piece built.
-- **Level design is an external parallel lane:** a colleague authors maps through a Houdini export pipeline. We owe that lane its interface direction — what the pipeline must emit, and what the runtime guarantees about it.
+- **Battlefield destruction is a core feature, not late polish.** Buildings must be destructible before early access; it changes collision, cover, line of sight, and traversal authoritatively. Fallen trees are the first piece built; the rest is the destruction epic (#106).
+- **Level design is in-house:** maps and destruction assets are authored in Blender and procedurally; external tooling is watched, not a lane.
 
 Replication frequency, rendering LOD, occlusion, and interest management are optimizations. They must not silently become spotting or concealment rules.
 
