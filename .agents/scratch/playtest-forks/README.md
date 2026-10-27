@@ -290,7 +290,7 @@ drives forward and leaves nothing behind it; and whether either knocks out whole
 from one penetration. Watch where the stations knocked out lie relative to the line.
 
 **Revert cost.** Low — data: the order of the main gun's `rounds` in the tank file and each
-round's `option` in `assets/ballistics/rounds.ron`. Both laws stay in code and on the wire, so
+round's `option` in its file under `assets/rounds/`. Both laws stay in code and on the wire, so
 the loser's round leaves the list with no code change; the burst's potency, the ring's width and
 each law's `N` are the `burst` block of `assets/ballistics/spall_cone.ron`.
 
