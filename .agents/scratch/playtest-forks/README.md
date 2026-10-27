@@ -300,7 +300,7 @@ Code: `src/ballistics/burst.rs` (the fuze and the derived parts), `throw_burst` 
 
 ## F8 — A fallen tree's rest: scripted pose or simulated body
 
-**Status:** open · default built 2026-10-26 (slice 1), its ground-rest rework is GitHub #140 ·
+**Status:** open · default built 2026-10-26 (slice 1), its ground rest landed 2026-10-27 (#140) ·
 settles when trees must rest on tanks, other trees or buildings · the alternative is the stated
 destination (owner, 2026-10-27), the default is provisional
 
