@@ -75,7 +75,8 @@ def table_substances():
 
 
 def taper_dbh(segments) -> float:
-    """The loader's reading of DBH: the piecewise-linear taper at 1.3 m, doubled."""
+    """The loader's reading of DBH: the piecewise-linear taper at 1.3 m, doubled. `segments` are
+    rows carrying each segment's top radius, `plan.segments`' or `build.trunk_rows`'."""
     z = 0.0
     for segment in segments:
         if z <= plan.BREAST_HEIGHT_M < z + segment["height_m"]:
@@ -160,7 +161,9 @@ class SpeciesTable(unittest.TestCase):
 class Plan(unittest.TestCase):
     def test_segment_heights_sum_to_the_height_inside_the_band(self):
         """A cut snaps to a segment boundary, so the boundaries must tile the height exactly and
-        every segment must sit in the contract's 1.5–2 m band."""
+        every segment must sit in the contract's 1.5–2 m band. A row's top radius, which the
+        mesh's top ring is built at, is the next row's base, the one radius `tree_ron` writes
+        for that boundary; the taper never widens upward."""
         for height in (15.0, 18.37, 25.0, 27.02, 33.333, 40.0):
             rows = plan.segments(height, 0.4)
             self.assertAlmostEqual(sum(r["height_m"] for r in rows), round(height, 4), places=9)
@@ -223,7 +226,7 @@ class TrackedTrio(unittest.TestCase):
         lo, hi = table[trio.tree["species"]]["height_m"]
         self.assertTrue(lo <= height <= hi, height)
         lo, hi = table[trio.tree["species"]]["dbh_m"]
-        self.assertTrue(lo <= taper_dbh(trio.tree["segments"]) <= hi)
+        self.assertTrue(lo <= taper_dbh(build.trunk_rows(trio.tree)) <= hi)
 
     def test_fir_1_taper_encodes_the_seed_it_records(self):
         """The root records the seed; re-sampling the species with it gives the DBH the taper
@@ -232,7 +235,8 @@ class TrackedTrio(unittest.TestCase):
         root = trio.js["nodes"][build.root_node(trio.js)]["extras"]
         self.assertEqual(root["tree_species"], trio.tree["species"])
         sampled = plan.sample(ron.load(TABLE)[trio.tree["species"]], root["tree_seed"])
-        self.assertLessEqual(abs(taper_dbh(trio.tree["segments"]) - sampled["dbh_m"]), DBH_TOL_M)
+        self.assertLessEqual(abs(taper_dbh(build.trunk_rows(trio.tree)) - sampled["dbh_m"]),
+                             DBH_TOL_M)
         self.assertAlmostEqual(sum(s["height_m"] for s in trio.tree["segments"]),
                                sampled["height_m"], places=3)
 
@@ -240,7 +244,7 @@ class TrackedTrio(unittest.TestCase):
         """The stored vertices, not the node offsets: rings, caps and shared loops are read out
         of the BIN chunk against the ron's dimensions."""
         trio = tracked()
-        self.assertEqual(build.geometry_failures(trio.js, trio.binary, trio.tree["segments"]), [])
+        self.assertEqual(build.geometry_failures(trio.js, trio.binary, trio.tree), [])
         bottom = [p for p in positions_of(trio.js, trio.binary, "trunk_00") if abs(p[1]) < 1e-6]
         self.assertEqual(len(bottom), 12)
         self.assertAlmostEqual(max(math.hypot(x, z) for x, _, z in bottom),
@@ -384,10 +388,6 @@ class RonMutants(unittest.TestCase):
         self.tree["segments"][3]["height_m"] += 0.01
         self.assertNamed("trunk 4")
 
-    def test_radii_that_do_not_meet_are_refused(self):
-        self.tree["segments"][2]["r_top_m"] += 0.01
-        self.assertNamed("one disc")
-
     def test_dbh_m_is_refused(self):
         self.tree["dbh_m"] = 0.4
         self.assertNamed("dbh_m", "A6")
@@ -398,13 +398,12 @@ class RonMutants(unittest.TestCase):
 
     def test_a_segment_count_the_glb_lacks_is_refused(self):
         self.tree["segments"].append(dict(self.tree["segments"][-1]))
-        self.tree["segments"][-1]["r_bottom_m"] = self.tree["segments"][-2]["r_top_m"]
         self.assertNamed("trunk node")
 
     def test_more_segments_than_the_wire_word_holds_are_refused(self):
         last = self.tree["segments"][-1]
         while len(self.tree["segments"]) <= build.MAX_SEGMENTS:
-            self.tree["segments"].append(dict(last, r_bottom_m=last["r_top_m"]))
+            self.tree["segments"].append(dict(last))
         self.assertNamed("256 segments", "A3")
 
     def test_a_zero_hp_is_refused(self):
@@ -428,8 +427,11 @@ class RonMutants(unittest.TestCase):
         self.assertNamed("not a TreeAsset")
 
     def test_a_missing_field_is_refused(self):
-        del self.tree["segments"]
-        self.assertNamed("TreeAsset has no segments")
+        for field in ("species", "segments", "r_tip_m"):
+            with self.subTest(field=field):
+                self.tree = copy.deepcopy(tracked().tree)
+                del self.tree[field]
+                self.assertNamed("TreeAsset has no {}".format(field))
 
     def test_an_empty_trunk_is_refused(self):
         self.tree["segments"] = []
@@ -440,8 +442,12 @@ class RonMutants(unittest.TestCase):
         self.assertNamed("segment 2 is not a Segment")
 
     def test_a_non_positive_dimension_is_refused(self):
-        self.tree["segments"][2]["r_top_m"] = 0.0
-        self.assertNamed("segment 2 r_top_m is 0.0")
+        self.tree["segments"][2]["r_bottom_m"] = 0.0
+        self.assertNamed("segment 2 r_bottom_m is 0.0")
+
+    def test_a_non_positive_tip_radius_is_refused(self):
+        self.tree["r_tip_m"] = 0.0
+        self.assertNamed("r_tip_m is 0.0")
 
     def test_a_cap_top_the_ron_does_not_place_is_refused(self):
         self.js = copy.deepcopy(self.js)
@@ -460,20 +466,38 @@ class GeometryMutants(unittest.TestCase):
     def setUp(self):
         trio = tracked()
         self.js, self.binary = copy.deepcopy(trio.js), trio.binary
-        self.segments = copy.deepcopy(trio.tree["segments"])
+        self.tree = copy.deepcopy(trio.tree)
 
     def assertNamed(self, *words):
-        failures = build.geometry_failures(self.js, self.binary, self.segments)
+        failures = build.geometry_failures(self.js, self.binary, self.tree)
         self.assertTrue(any(all(w in f for w in words) for f in failures), (words, failures))
 
     def test_radii_ten_times_the_mesh_are_refused(self):
-        """The review's mutant: a ron whose radii all moved together passes continuity and every
-        node-offset check; only the stored rings refuse it."""
-        for segment in self.segments:
+        """A ron whose radii all moved together passes every ron check and every node-offset
+        check; only the stored rings refuse it, each naming the ron field it holds the ring to."""
+        for segment in self.tree["segments"]:
             segment["r_bottom_m"] *= 10.0
-            segment["r_top_m"] *= 10.0
-        self.assertNamed("trunk 0's bottom ring", "off the ron's r_bottom_m")
-        self.assertNamed("cap_top 3 reaches")
+        self.tree["r_tip_m"] *= 10.0
+        last = len(self.tree["segments"]) - 1
+        self.assertNamed("trunk 0's bottom ring", "off the ron's segment 0 r_bottom_m")
+        self.assertNamed("cap_top 3 reaches", "the ron's segment 4 r_bottom_m")
+        self.assertNamed("trunk {}'s top ring".format(last), "off the ron's r_tip_m")
+
+    def test_a_moved_inner_boundary_radius_is_refused_on_both_sides(self):
+        """Segment 4's `r_bottom_m` is the boundary segments 3 and 4 share, so moving it alone
+        reds both rings that meet there and the cap above segment 3: a top ring held to anything
+        but the next segment's `r_bottom_m` misses trunk 3's."""
+        self.tree["segments"][4]["r_bottom_m"] += 0.01
+        self.assertNamed("trunk 4's bottom ring", "segment 4 r_bottom_m")
+        self.assertNamed("trunk 3's top ring", "segment 4 r_bottom_m")
+        self.assertNamed("cap_top 3 reaches", "segment 4 r_bottom_m")
+
+    def test_a_moved_tip_radius_is_refused(self):
+        """`r_tip_m` is the last segment's top: its top ring and its cap_top are held to it."""
+        self.tree["r_tip_m"] += 0.01
+        last = len(self.tree["segments"]) - 1
+        self.assertNamed("trunk {}'s top ring".format(last), "r_tip_m")
+        self.assertNamed("cap_top {} reaches".format(last), "r_tip_m")
 
     def test_a_vertex_999_m_away_is_refused(self):
         self.binary = rewritten(self.js, self.binary, "trunk_03", "POSITION", 0, (999.0, 0.0, 0.0))
@@ -511,7 +535,7 @@ class GeometryMutants(unittest.TestCase):
     def test_a_missing_bin_chunk_is_refused(self):
         js, binary = build.parse_glb(glb_bytes(self.js, b""))
         self.assertEqual(binary, b"")
-        failures = build.geometry_failures(js, binary, self.segments)
+        failures = build.geometry_failures(js, binary, self.tree)
         self.assertTrue(any("BIN chunk holds 0" in f for f in failures), failures)
 
     def test_a_tilted_cap_is_refused(self):
@@ -687,7 +711,7 @@ class Generation(unittest.TestCase):
         tree = ron.parse(ron_blob.decode())
         self.assertEqual(build.contract_failures(js, "pine_3"), [])
         self.assertEqual(build.ron_failures(tree, js, ron.load(TABLE), table_substances()), [])
-        self.assertEqual(build.geometry_failures(js, binary, tree["segments"]), [])
+        self.assertEqual(build.geometry_failures(js, binary, tree), [])
 
 
 @unittest.skipIf(BLENDER.mismatch, "the pinned Blender is not here: {}".format(BLENDER))

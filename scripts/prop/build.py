@@ -26,17 +26,21 @@ THE THREE CONTRACTS, each a list of named failures, empty on the pass:
   on the parent's +Y axis and no rotation, scale or matrix (a fall is a rotation about a
   segment's origin); `trunk_00` at the root origin, `trunk_k` under `trunk_{k-1}`, two caps per
   segment, an optional canopy, each (part, segment) bound once.
-- `ron_failures`: the `.tree.ron` against the glb and the species table. A `TreeAsset` whose
-  species row is in the table with a positive `hp` and `fell_k` and a substance that is a key of
-  the substance registry (`assets/materials/materials.ron`, or `--registry`); at most 255
-  segments (the wire word's cut index, A3); positive finite dimensions; adjacent radii that meet;
-  no `dbh_m` (A6: DBH is derived at load from the taper at 1.3 m); segment heights that are the
-  chain's node offsets and the cap_top offsets, summing to the height the root records.
+- `ron_failures`: the `.tree.ron` against the glb and the species table. A `TreeAsset` of
+  `species`, `segments` (each `height_m` and `r_bottom_m`) and `r_tip_m`, which stores each
+  boundary radius once: a segment's top radius is the next segment's `r_bottom_m`, the last
+  segment's is `r_tip_m` (`trunk_rows`). Its species row is in the table with a positive `hp` and
+  `fell_k` and a substance that is a key of the substance registry
+  (`assets/materials/materials.ron`, or `--registry`); at most 255 segments (the wire word's cut
+  index, A3); positive finite segment dimensions and `r_tip_m`; no `dbh_m` (A6: DBH is derived at
+  load from the taper at 1.3 m); segment heights that are the chain's node offsets and the
+  cap_top offsets, summing to the height the root records.
 - `geometry_failures`: the stored vertices against the ron, decoded from the BIN chunk. Finite
   positions, triangle indices that address them, every vertex within the tree's height of its
-  node; a trunk as two flat rings at y = 0 and y = height_m with the ron's two radii; each cap a
-  flat disc on its plane reaching its ring's radius and facing out (cap_bottom -Y, cap_top +Y);
-  adjacent trunks sharing one boundary loop vertex for vertex.
+  node; a trunk as two flat rings, at y = 0 with its own `r_bottom_m` and at y = height_m with
+  its top radius (the next boundary's); each cap a flat disc on its plane reaching its ring's
+  radius and facing out (cap_bottom -Y, cap_top +Y); adjacent trunks sharing one boundary loop
+  vertex for vertex.
 Tolerances: `TOL_M` on metres (the glb stores float32, the ron four decimals), `NORMAL_TOL` on
 a unit normal's components.
 
@@ -415,7 +419,7 @@ def ron_failures(tree, js: dict, species: dict, registry: Set[str]) -> List[str]
     failures = []
     if not isinstance(tree, dict) or tree.get("__struct__") != "TreeAsset":
         return ["the ron is not a TreeAsset"]
-    for field in ("species", "segments"):
+    for field in ("species", "segments", "r_tip_m"):
         if field not in tree:
             failures.append("TreeAsset has no {}".format(field))
     if "dbh_m" in tree:
@@ -438,17 +442,13 @@ def ron_failures(tree, js: dict, species: dict, registry: Set[str]) -> List[str]
         if not isinstance(segment, dict) or segment.get("__struct__") != "Segment":
             failures.append("segment {} is not a Segment".format(index))
             continue
-        for field in ("height_m", "r_bottom_m", "r_top_m"):
+        for field in ("height_m", "r_bottom_m"):
             if not _finite_positive(segment.get(field)):
                 failures.append("segment {} {} is {!r}, not a positive finite number of "
                                 "metres".format(index, field, segment.get(field)))
-        if index > 0 and isinstance(segments[index - 1], dict):
-            below = segments[index - 1].get("r_top_m")
-            if _finite_positive(below) and _finite_positive(segment.get("r_bottom_m")) \
-                    and abs(below - segment["r_bottom_m"]) > TOL_M:
-                failures.append("segment {} r_bottom_m {} does not meet segment {} r_top_m {}; "
-                                "the caps at a boundary are one disc".format(
-                                    index, segment["r_bottom_m"], index - 1, below))
+    if not _finite_positive(tree["r_tip_m"]):
+        failures.append("r_tip_m is {!r}, not a positive finite number of metres".format(
+            tree["r_tip_m"]))
     if failures:
         return failures
 
@@ -542,9 +542,29 @@ def _ring_twins(ring_a, ring_b) -> int:
                if all(math.hypot(xa - xb, za - zb) > TOL_M for (xb, _, zb) in ring_b))
 
 
-def geometry_failures(js: dict, binary: bytes, segments: List[dict]) -> List[str]:
+def trunk_rows(tree: dict) -> List[dict]:
+    """The ron's trunk, base to tip, one row per segment: `{height_m, r_bottom_m, r_top_m,
+    bottom_field, top_field}`. A segment's top radius is the next segment's `r_bottom_m`, the last
+    segment's the tree's `r_tip_m`; the two `_field`s name where the ron stores each radius. Reads
+    a tree `ron_failures` passed."""
+    segments = tree["segments"]
+    rows = []
+    for index, segment in enumerate(segments):
+        if index + 1 < len(segments):
+            top, top_field = segments[index + 1]["r_bottom_m"], "segment {} r_bottom_m".format(
+                index + 1)
+        else:
+            top, top_field = tree["r_tip_m"], "r_tip_m"
+        rows.append({"height_m": segment["height_m"], "r_bottom_m": segment["r_bottom_m"],
+                     "r_top_m": top, "bottom_field": "segment {} r_bottom_m".format(index),
+                     "top_field": top_field})
+    return rows
+
+
+def geometry_failures(js: dict, binary: bytes, tree: dict) -> List[str]:
     """Every way the stored vertices disagree with the ron's trunk, run once the two other
-    contracts hold (it reads the segments as validated). Empty is the pass."""
+    contracts hold (it reads the tree as validated). Empty is the pass."""
+    segments = trunk_rows(tree)
     failures = []
     for number, buffer in enumerate(js.get("buffers", [])):
         if "uri" not in buffer and buffer.get("byteLength", 0) > len(binary):
@@ -587,15 +607,16 @@ def _trunk_failures(segment: int, row: dict, positions, rings) -> List[str]:
         failures.append("trunk {} has {} vertex(es) off its ring planes y = 0 and y = {}, the "
                         "first at y = {:.4f}".format(segment, len(stray), row["height_m"],
                                                      stray[0][1]))
-    for ring, radius, which in ((bottom, row["r_bottom_m"], "bottom"), (top, row["r_top_m"], "top")):
+    for ring, radius, field, which in ((bottom, row["r_bottom_m"], row["bottom_field"], "bottom"),
+                                       (top, row["r_top_m"], row["top_field"], "top")):
         if len(ring) < 3:
             failures.append("trunk {}'s {} ring has {} vertex(es); a ring is at least three".format(
                 segment, which, len(ring)))
             continue
         worst = max(abs(math.hypot(x, z) - radius) for x, _, z in ring)
         if worst > TOL_M:
-            failures.append("trunk {}'s {} ring is {:.4f} m off the ron's r_{}_m {} at its worst "
-                            "vertex".format(segment, which, worst, which, radius))
+            failures.append("trunk {}'s {} ring is {:.4f} m off the ron's {} {} at its worst "
+                            "vertex".format(segment, which, worst, field, radius))
     rings[segment] = (bottom, top)
     below = rings.get(segment - 1)
     if below is not None and len(bottom) >= 3 and len(below[1]) >= 3:
@@ -609,7 +630,8 @@ def _trunk_failures(segment: int, row: dict, positions, rings) -> List[str]:
 
 def _cap_failures(part: str, segment: int, row: dict, positions, normals) -> List[str]:
     failures = []
-    radius = row["r_bottom_m"] if part == "cap_bottom" else row["r_top_m"]
+    radius, field = ((row["r_bottom_m"], row["bottom_field"]) if part == "cap_bottom"
+                     else (row["r_top_m"], row["top_field"]))
     axis = -1.0 if part == "cap_bottom" else 1.0
     off_plane = max(abs(p[1]) for p in positions)
     if off_plane > TOL_M:
@@ -617,8 +639,8 @@ def _cap_failures(part: str, segment: int, row: dict, positions, normals) -> Lis
             part, segment, off_plane))
     rim = max(math.hypot(x, z) for x, _, z in positions)
     if abs(rim - radius) > TOL_M:
-        failures.append("{} {} reaches {:.4f} m and the ron's ring radius is {}".format(
-            part, segment, rim, radius))
+        failures.append("{} {} reaches {:.4f} m and the ron's {} is {}".format(
+            part, segment, rim, field, radius))
     if normals is None:
         failures.append("{} {} has no normals; the disc's facing is read from them".format(
             part, segment))
@@ -738,7 +760,7 @@ def contracts(view_blob: bytes, tree_ron: str, table: str, registry: str, stem: 
     failures = ron_failures(tree, js, species, substances(registry))
     if failures:
         raise Refused("ron", failures)
-    failures = geometry_failures(js, binary, tree["segments"])
+    failures = geometry_failures(js, binary, tree)
     if failures:
         raise Refused("geometry", failures)
     return js

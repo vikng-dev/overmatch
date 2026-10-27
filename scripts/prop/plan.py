@@ -64,22 +64,22 @@ def segments(height_m: float, dbh_m: float) -> List[Dict[str, float]]:
     """The trunk, bottom to top: `[{height_m, r_bottom_m, r_top_m}]`, segment 0 at the base.
 
     The heights are written to `DECIMALS` places and the last one takes the rounding remainder, so
-    their sum is `round_m(height_m)` exactly in decimal.
+    their sum is `round_m(height_m)` exactly in decimal. Each boundary's radius is computed once,
+    at the boundary's written height: a row's `r_top_m` is the next row's `r_bottom_m`, the last
+    row's is the tip's, so the mesh's top ring is the radius `tree_ron` writes for that boundary.
     """
     count = segment_count(height_m)
     length = height_m / count
-    out = []
-    z = 0.0
     total = round_m(height_m)
+    steps, boundaries = [], [0.0]
     for index in range(count):
-        step = round_m(length) if index < count - 1 else round_m(total - round_m(z))
-        out.append({
-            "height_m": step,
-            "r_bottom_m": round_m(radius_at(z, height_m, dbh_m)),
-            "r_top_m": round_m(radius_at(z + step, height_m, dbh_m)),
-        })
-        z = round_m(z + step)
-    return out
+        z = boundaries[-1]
+        step = round_m(length) if index < count - 1 else round_m(total - z)
+        steps.append(step)
+        boundaries.append(round_m(z + step))
+    radii = [round_m(radius_at(z, height_m, dbh_m)) for z in boundaries]
+    return [{"height_m": step, "r_bottom_m": radii[index], "r_top_m": radii[index + 1]}
+            for index, step in enumerate(steps)]
 
 
 def sample(row: dict, seed: int) -> dict:
@@ -133,7 +133,11 @@ def whorls(height_m: float, row: dict, rng: random.Random) -> List[dict]:
 
 def tree_ron(species: str, segment_rows: List[dict], header: str) -> str:
     """`<id>.tree.ron` in the slice contract's shape (A6: no `dbh_m`; the loader derives DBH
-    from the taper at 1.3 m), the header as a leading comment."""
+    from the taper at 1.3 m), the header as a leading comment.
+
+    Each boundary radius is written once: every segment's `r_bottom_m`, then the last row's
+    `r_top_m` as the tree's `r_tip_m`. The other rows' `r_top_m` are not written; `segments`
+    makes each the next row's `r_bottom_m`, which is what the loader reads as that top."""
     lines = ["// " + line for line in header.splitlines()]
     lines += [
         "TreeAsset(",
@@ -141,7 +145,12 @@ def tree_ron(species: str, segment_rows: List[dict], header: str) -> str:
         "    segments: [",
     ]
     for row in segment_rows:
-        lines.append("        Segment(height_m: {}, r_bottom_m: {}, r_top_m: {}),".format(
-            row["height_m"], row["r_bottom_m"], row["r_top_m"]))
-    lines += ["    ],", ")", ""]
+        lines.append("        Segment(height_m: {}, r_bottom_m: {}),".format(
+            row["height_m"], row["r_bottom_m"]))
+    lines += [
+        "    ],",
+        "    r_tip_m: {},".format(segment_rows[-1]["r_top_m"]),
+        ")",
+        "",
+    ]
     return "\n".join(lines)

@@ -2,10 +2,12 @@
 //! tanks push it, and it falls at a segment.
 //!
 //! A TREE IS DATA (ADR-0034). `assets/trees/<id>/<id>.tree.ron` ([`TreeAsset`]) is the trunk as a
-//! chain of tapered segments; `assets/trees/species.ron` ([`Species`]) is what the sim reads of a
-//! species: its substance, the HP pool and the ram threshold. Both are read once at startup into
-//! the map's [`TreeLibrary`] and validated there; every number the sim uses comes from them, the
-//! glb is the view (ADR-0014).
+//! chain of tapered segments, each boundary's radius stored once — every segment's base radius,
+//! then the tip's — so adjacent segments meet by construction and a segment's top radius is read
+//! through [`TreeKind::r_top_m`]; `assets/trees/species.ron` ([`Species`]) is what the sim reads
+//! of a species: its substance, the HP pool and the ram threshold. Both are read once at startup
+//! into the map's [`TreeLibrary`] and validated there; every number the sim uses comes from them,
+//! the glb is the view (ADR-0014).
 //!
 //! THE BODY. One static root per tree — the [`BallisticVolume`] of the species' substance and the
 //! HP pool, the way a module's pool is charged — and one child per segment with its own convex
@@ -73,22 +75,24 @@ const MAX_SEGMENTS: usize = 255;
 /// The fall azimuth's resolution: bins round the compass, from `+X` toward `+Z`.
 pub(crate) const AZIMUTH_BINS: u32 = 256;
 
-/// One trunk segment: a frustum `height_m` tall, `r_bottom_m` at its base and `r_top_m` at its
-/// top, metres at asset scale 1.
+/// One trunk segment: a frustum `height_m` tall with `r_bottom_m` at its base, metres at asset
+/// scale 1. Its top radius is the next segment's `r_bottom_m`, the last segment's the asset's
+/// `r_tip_m` ([`TreeKind::r_top_m`]).
 #[derive(Debug, Clone, Copy, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Segment {
     pub(crate) height_m: f32,
     pub(crate) r_bottom_m: f32,
-    pub(crate) r_top_m: f32,
 }
 
-/// `<id>.tree.ron`: the trunk, base to tip, and the species it belongs to.
+/// `<id>.tree.ron`: the trunk, base to tip, the radius at its tip, and the species it belongs to.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct TreeAsset {
     pub(crate) species: String,
     pub(crate) segments: Vec<Segment>,
+    /// The last segment's top radius, metres at asset scale 1.
+    pub(crate) r_tip_m: f32,
 }
 
 /// What the sim reads of a `species.ron` row. The row also carries the generator's look fields,
@@ -109,6 +113,9 @@ struct Species {
 pub(crate) struct TreeKind {
     pub(crate) id: String,
     pub(crate) segments: Vec<Segment>,
+    /// The last segment's top radius at asset scale 1; read a segment's top through
+    /// [`Self::r_top_m`].
+    r_tip_m: f32,
     pub(crate) material: VolumeMaterial,
     pub(crate) substance: String,
     pub(crate) fell_k: f32,
@@ -127,34 +134,27 @@ impl TreeKind {
         table: &BTreeMap<String, Species>,
         registry: &SubstanceRegistry,
     ) -> Result<Self, String> {
-        let TreeAsset { species, segments } = asset;
+        let TreeAsset {
+            species,
+            segments,
+            r_tip_m,
+        } = asset;
         if segments.is_empty() || segments.len() > MAX_SEGMENTS {
             return Err(format!(
                 "{} segments; a trunk has 1 to {MAX_SEGMENTS}",
                 segments.len()
             ));
         }
+        let positive = |v: f32| v.is_finite() && v > 0.0;
         for (k, segment) in segments.iter().enumerate() {
-            let positive = |v: f32| v.is_finite() && v > 0.0;
-            if !(positive(segment.height_m)
-                && positive(segment.r_bottom_m)
-                && positive(segment.r_top_m))
-            {
+            if !(positive(segment.height_m) && positive(segment.r_bottom_m)) {
                 return Err(format!(
                     "segment {k} has a non-positive dimension: {segment:?}"
                 ));
             }
-            if let Some(next) = segments.get(k + 1)
-                && segment.r_top_m != next.r_bottom_m
-            {
-                return Err(format!(
-                    "segment {k} tops at r {} and segment {} starts at r {}; the taper is \
-                     continuous",
-                    segment.r_top_m,
-                    k + 1,
-                    next.r_bottom_m,
-                ));
-            }
+        }
+        if !positive(r_tip_m) {
+            return Err(format!("r_tip_m {r_tip_m} is not a positive finite radius"));
         }
         let row = table
             .get(&species)
@@ -173,6 +173,7 @@ impl TreeKind {
         let mut kind = Self {
             id: id.to_owned(),
             segments,
+            r_tip_m,
             material,
             substance: row.substance.clone(),
             fell_k,
@@ -194,22 +195,28 @@ impl TreeKind {
         self.segments.iter().map(|segment| segment.height_m).sum()
     }
 
+    /// Segment `k`'s top radius at asset scale 1: the boundary it shares with segment `k + 1`,
+    /// whose `r_bottom_m` stores it, or the tip's `r_tip_m` above the last segment. The one
+    /// reading of a top radius, so a segment's top and its upper neighbour's base are one float.
+    pub(crate) fn r_top_m(&self, k: usize) -> f32 {
+        self.segments
+            .get(k + 1)
+            .map_or(self.r_tip_m, |next| next.r_bottom_m)
+    }
+
     /// The trunk's radius `height` metres above the base along the authored taper, at asset scale
     /// 1; the base radius below the base, the tip radius above the tip.
     pub(crate) fn radius_at(&self, height: f32) -> f32 {
         let mut bottom = 0.0;
-        for segment in &self.segments {
+        for (k, segment) in self.segments.iter().enumerate() {
             let top = bottom + segment.height_m;
             if height < top {
                 let t = ((height - bottom) / segment.height_m).clamp(0.0, 1.0);
-                return segment.r_bottom_m + (segment.r_top_m - segment.r_bottom_m) * t;
+                return segment.r_bottom_m + (self.r_top_m(k) - segment.r_bottom_m) * t;
             }
             bottom = top;
         }
-        self.segments
-            .last()
-            .expect("resolve refused an empty trunk")
-            .r_top_m
+        self.r_tip_m
     }
 }
 
@@ -767,12 +774,13 @@ const RING: [(f32, f32); 12] = [
     (0.866_025_4, -0.5),
 ];
 
-/// One segment's collider in its own frame: base ring at y = 0, top ring at the segment's height.
-fn segment_collider(segment: &Segment, scale: f32) -> Collider {
+/// Segment `k`'s collider in its own frame: base ring at y = 0, top ring at the segment's height.
+fn segment_collider(kind: &TreeKind, k: usize, scale: f32) -> Collider {
+    let segment = &kind.segments[k];
     let (height, r_bottom, r_top) = (
         segment.height_m * scale,
         segment.r_bottom_m * scale,
-        segment.r_top_m * scale,
+        kind.r_top_m(k) * scale,
     );
     let points: Vec<Vec3> = RING
         .iter()
@@ -842,11 +850,11 @@ pub(crate) fn spawn(
             body,
         ))
         .id();
-    for (k, segment) in kind.segments.iter().enumerate() {
+    for (k, &bottom) in prefix[..kind.segments.len()].iter().enumerate() {
         commands.spawn((
             ChildOf(root),
-            Transform::from_xyz(0.0, prefix[k], 0.0),
-            segment_collider(segment, scale),
+            Transform::from_xyz(0.0, bottom, 0.0),
+            segment_collider(kind, k, scale),
             standing_layers(),
             TreeSegment,
         ));
@@ -1040,19 +1048,17 @@ pub(crate) mod tests {
                 Segment {
                     height_m: 2.0,
                     r_bottom_m: 0.3,
-                    r_top_m: 0.2,
                 },
                 Segment {
                     height_m: 2.0,
                     r_bottom_m: 0.2,
-                    r_top_m: 0.1,
                 },
                 Segment {
                     height_m: 2.0,
                     r_bottom_m: 0.1,
-                    r_top_m: 0.05,
                 },
             ],
+            r_tip_m: 0.05,
         }
     }
 
@@ -1111,26 +1117,12 @@ pub(crate) mod tests {
         assert_eq!(kind.radius_at(9.0), 0.05, "past the tip: the tip radius");
     }
 
-    /// A taper with a step in it is two trunks, not one: refused at load (A6), never spawned.
-    #[test]
-    fn a_discontinuous_taper_is_refused() {
-        let mut asset = fixture_asset();
-        asset.segments[1].r_bottom_m = 0.25;
-        let err = TreeKind::resolve(
-            "fixture",
-            asset,
-            &fixture_table(),
-            SubstanceRegistry::shipped_static(),
-        )
-        .expect_err("a step in the taper");
-        assert!(err.contains("continuous"), "{err}");
-    }
-
     /// EVERY A6 REFUSAL IS A REFUSAL, NOT A CLAMP: an empty trunk, a non-finite or non-positive
-    /// dimension, an unknown species, a non-positive pool or ram threshold, a trunk too short to
-    /// read a breast height, and more segments than the wire word's cut byte can name are each
-    /// refused by name. Any one of these laxed to a default — a NaN height carried, a zero HP
-    /// pool spawned, a 256th segment accepted — reds its row.
+    /// segment dimension, a missing, non-positive or non-finite tip radius, an unknown species, a
+    /// non-positive pool or ram threshold, a trunk too short to read a breast height, and more
+    /// segments than the wire word's cut byte can name are each refused by name. Any one of these
+    /// laxed to a default — a NaN height carried, a zero or infinite tip spawned, a zero HP pool
+    /// spawned, a 256th segment accepted — reds its row.
     #[test]
     fn every_malformed_asset_or_species_is_refused_by_name() {
         let refusal = |asset: TreeAsset, table: BTreeMap<String, Species>| {
@@ -1149,8 +1141,19 @@ pub(crate) mod tests {
         asset.segments[0].height_m = f32::NAN;
         assert!(refusal(asset, fixture_table()).contains("dimension"));
         let mut asset = fixture_asset();
-        asset.segments[2].r_top_m = 0.0;
+        asset.segments[2].r_bottom_m = 0.0;
         assert!(refusal(asset, fixture_table()).contains("dimension"));
+        for r_tip_m in [0.0, f32::INFINITY] {
+            let mut asset = fixture_asset();
+            asset.r_tip_m = r_tip_m;
+            assert!(refusal(asset, fixture_table()).contains("r_tip_m"));
+        }
+        let missing = ron::from_str::<TreeAsset>(
+            r#"TreeAsset(species: "fixture", segments: [Segment(height_m: 2.0, r_bottom_m: 0.3)])"#,
+        )
+        .expect_err("a trunk without its tip radius")
+        .to_string();
+        assert!(missing.contains("r_tip_m"), "{missing}");
         let mut asset = fixture_asset();
         asset.species = "no_such_species".to_owned();
         assert!(refusal(asset, fixture_table()).contains("species"));
@@ -1658,9 +1661,10 @@ pub(crate) mod tests {
         // under 10 µm on this fixture.
         const PROBE: f32 = 1.0e-3;
         const INSIDE: f32 = 1.0e-4;
-        for ((_, _, collider), segment) in segments.iter().zip(&kind.segments) {
+        for (k, ((_, _, collider), segment)) in segments.iter().zip(&kind.segments).enumerate() {
+            let r_top_m = kind.r_top_m(k);
             let aabb = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
-            let r = segment.r_bottom_m.max(segment.r_top_m) * 1.5;
+            let r = segment.r_bottom_m.max(r_top_m) * 1.5;
             let h = segment.height_m * 1.5;
             assert!(
                 aabb.min.abs_diff_eq(Vec3::new(-r, 0.0, -r), 1e-6)
@@ -1669,7 +1673,7 @@ pub(crate) mod tests {
             );
             for (y, ring) in [
                 (INSIDE, segment.r_bottom_m * 1.5),
-                (h - INSIDE, segment.r_top_m * 1.5),
+                (h - INSIDE, r_top_m * 1.5),
             ] {
                 let meets = |x: f32| {
                     collider
