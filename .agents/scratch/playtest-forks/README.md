@@ -297,3 +297,41 @@ each law's `N` are the `burst` block of `assets/ballistics/spall_cone.ron`.
 **Lives in.** Design §5a, "The burst" (`.agents/docs/design/armor-penetration-and-damage.md`).
 Code: `src/ballistics/burst.rs` (the fuze and the derived parts), `throw_burst` and `burst_here` in
 `src/ballistics.rs`, `FieldLaw` and `BurstFields` in `src/ballistics/spall_cone.rs`.
+
+## F8 — A fallen tree's rest: scripted pose or simulated body
+
+**Status:** open · default built 2026-10-26 (slice 1), its ground-rest rework is GitHub #140 ·
+settles when trees must rest on tanks, other trees or buildings · the alternative is the stated
+destination (owner, 2026-10-27), the default is provisional
+
+**The question.** In the game's destruction model, what is authoritative about a fallen tree's
+rest: a pose every peer computes from the state word, or a settle the server simulates and
+replicates? It decides what a lying trunk can rest on, what the wire carries per fallen tree, and
+whether a fall can land on a tank.
+
+**Default — scripted.** The ledger word carries the cut segment and the fall's azimuth bin;
+every peer derives the rest pose as a pure function of the word, the body and the terrain
+(libm-only trig, one fixed order, the same bits everywhere): hinge about the cut to the first
+terrain contact, then the butt slides off the stump and the piece lies along the ground (#140).
+Nothing on the wire beyond the word; late join is the word; no settle window. A trunk rests on the
+terrain only and bridges a dip under it.
+
+**Alternative kept alive — the rigid body (the destination).** The cut piece becomes a dynamic
+body on the server with its segment colliders, falls under gravity, meets the stump, other trees,
+walls and tanks, settles and freezes to static; its transform is replicated like a hull's and
+interpolated on every client (ADR-0037: one timeline, so no peer reproduces the fall and none
+needs to). The ledger word stays for the HP pool and the lying segments; the pose comes from the
+transform. A tree can land on a tank, which resolves on the authority like every contact.
+
+**Why it's a playtest call.** Whether the scripted trunk reads false in play — bridging a dip,
+lying through a tank, never leaning — before the interaction layer is otherwise wanted; and
+whether a fall seen at interpolation delay reads fine. Watch where lying trunks look wrong.
+
+**Revert cost.** Medium — code, no data: the rest rule (`resting_tilt`, the lying branch of
+`derive_state`) is replaced by a body split at the cut, replication of its transform, a freeze on
+sleep, and the view bound to the transform instead of the scripted turn; the ledger word and the
+tree assets are untouched.
+
+**Lives in.** Code: `src/trees.rs` (`resting_tilt`, `derive_state`, `fall_rotation`),
+`src/trees/view.rs` (`present_fall`), `src/net/destruction.rs`. Tracker: #121 (the resolution),
+#140 (the scripted rework), epic #106.
