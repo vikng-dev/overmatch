@@ -1763,8 +1763,8 @@ fn forest_tick_cost_bed() {
 /// bounds where they stood; the segments between derive by the same law and are not read here.
 /// Standing, the tip's bounds hold its bottom and top centres, `prefix[n-1]` and `prefix[n]` up
 /// the root's axis; down, they hold the same centres laid along the root's resting record — the
-/// pivot `prefix[cut]` up, then the height above the cut along `(dx sin t, cos t, dz sin t)` —
-/// and no longer the standing top. A static body's child collider whose bounds avian refreshed
+/// record's seat, then the height above the cut along `(dx sin t, cos t, dz sin t)` — and no
+/// longer the standing top. A static body's child collider whose bounds avian refreshed
 /// only at insert leaves the fallen trunk standing for every hull and round; a lying piece
 /// placed off its pivot lies outside its own record. Both red this.
 #[test]
@@ -1866,9 +1866,7 @@ fn a_felled_trees_colliders_lie_down_in_the_physics_world() {
     let (sin, cos) = (libm::sinf(resting.tilt), libm::cosf(resting.tilt));
     let laid = Vec3::new(resting.dx * sin, cos, resting.dz * sin);
     for k in [n - 1, n] {
-        let point = base
-            + Vec3::Y * prefix[usize::from(cut)]
-            + laid * (prefix[k] - prefix[usize::from(cut)]);
+        let point = base + resting.seat + laid * (prefix[k] - prefix[usize::from(cut)]);
         assert!(
             holds(&tip_down, point),
             "down: the tip segment's bounds {tip_down:?} hold its laid centre {point}"

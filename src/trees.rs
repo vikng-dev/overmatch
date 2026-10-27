@@ -408,21 +408,44 @@ impl FallClock {
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct TreeFallSet;
 
-/// A fallen tree's resting pose, derived once from its state: the piece above `cut` lies tilted
-/// by `tilt` radians from upright toward the horizontal unit direction `(dx, dz)`.
+/// A fallen tree's resting pose, derived once from its state and the terrain: the piece above
+/// `cut` lies tilted by `tilt` radians from upright toward the horizontal unit direction
+/// `(dx, dz)`, turned about `seat` — the resting centre of its butt (the cut boundary), an
+/// offset from the tree's base in world axes. `hinge` is the tilt about the cut's bottom at
+/// which the piece first met the terrain, the first stage of the view's fall. A cut at the base
+/// keeps its butt at the base: `seat` is zero and `hinge == tilt`.
 #[derive(Component, Debug, Clone, Copy, PartialEq)]
 pub(crate) struct Resting {
+    pub(crate) hinge: f32,
     pub(crate) tilt: f32,
+    pub(crate) seat: Vec3,
     pub(crate) dx: f32,
     pub(crate) dz: f32,
 }
 
-/// The largest tilt a fallen piece is searched over: past the horizontal by 10°, for a piece
-/// hanging over a downhill edge.
+/// The largest tilt the hinge is searched over: past the horizontal by 10°, for a piece hanging
+/// over a downhill edge.
 const MAX_TILT: f32 = 100.0 * PI / 180.0;
 
-/// The bisection steps of the resting tilt: 24 halvings of [0°, 100°] resolve below 1e-5 rad.
-const TILT_STEPS: u32 = 24;
+/// The largest tilt a lying piece is searched over about its seat: a lying piece follows a slope
+/// of up to 45° downhill (DERIVED: 90° + 45°); past that the ground is an edge and the piece
+/// lies level over it — the scripted law does not slide, the rigid body will.
+const LYING_MAX_TILT: f32 = 135.0 * PI / 180.0;
+
+/// The step the tilt range is scanned at for the first contact. The scan can step over a
+/// terrain feature narrower than `step × distance` at a sample, and the bisection inside a
+/// bracket can still land one bracket late on one, so the step is set so the feature a piece
+/// could visibly rest on cannot be skipped at the tip of the longest piece the species table
+/// allows: 40 m (MEASURED: the tallest `height_m` bound in `assets/trees/species.ron`). 0.25°
+/// sweeps 0.17 m at 40 m (DERIVED: 40 × 0.25° in radians); the shipped grid's cell is 0.366 m
+/// (MEASURED: 4096 samples across 1500 m, `assets/maps/kalinovo/`), so a one-cell feature at
+/// that tip is wider than a step.
+const TILT_SCAN_STEP: f32 = 0.25 * PI / 180.0;
+
+/// The halvings that take a step-wide bracket below one f32 ulp at the angles in range (DERIVED:
+/// 0.25° is 4.4e-3 rad; 2^16 halvings reach 6.7e-8, under the 1.2e-7 ulp of an angle near
+/// 1 rad). Past the ulp a halving is a no-op, so the bisection stops at no progress.
+const TILT_STEPS: u32 = 16;
 
 /// The horizontal unit direction of azimuth bin `dir`, libm's trig so every peer gets the same
 /// bits.
@@ -431,48 +454,112 @@ pub(crate) fn azimuth(dir: u8) -> (f32, f32) {
     (libm::cosf(theta), libm::sinf(theta))
 }
 
-/// The tilt a fallen piece rests at: the smallest angle in [0°, 100°] at which any sample of the
-/// piece — each segment boundary above the cut and the tip, each offset downward by its local
-/// radius — reaches the terrain, by [`TILT_STEPS`] bisections in a fixed order; a piece touching
-/// nothing by 100° lies at 90°. Pure in its inputs (the body, the world base, the decoded state,
-/// the terrain oracle) and libm-only in its trig, so every peer and CI derive the same bits.
-pub(crate) fn resting_tilt(
-    body: &TreeBody,
-    base: Vec3,
-    cut: u8,
-    dir: u8,
-    height_at: impl Fn(f32, f32) -> f32,
-) -> f32 {
-    let cut = usize::from(cut);
-    let pivot = base + Vec3::Y * body.prefix[cut];
-    let (dx, dz) = azimuth(dir);
+/// The smallest tilt in `[0, max]` at which any sample of a piece turned about `pivot` toward
+/// `(dx, dz)` reaches the terrain: a sample `(h, r)` lies `h` along the piece's axis, lowered by
+/// `r`. Contact is not monotone in the tilt — a sample can touch a ridge at one tilt and clear
+/// it at a larger one, its height still dropping as it moves past the ridge onto lower ground —
+/// so the range is scanned at multiples of [`TILT_SCAN_STEP`] in increasing order (the range's
+/// end is a whole number of steps: 400 for [`MAX_TILT`], 540 for [`LYING_MAX_TILT`], DERIVED)
+/// and the first touching step brackets the contact, which [`TILT_STEPS`] halvings resolve to
+/// the bracket's touching end. Touching at zero is zero; touching at no step is `None`.
+fn first_contact(
+    pivot: Vec3,
+    samples: &[(f32, f32)],
+    (dx, dz): (f32, f32),
+    max: f32,
+    height_at: &impl Fn(f32, f32) -> f32,
+) -> Option<f32> {
     let touching = |tilt: f32| {
         let (sin, cos) = (libm::sinf(tilt), libm::cosf(tilt));
-        (cut + 1..body.prefix.len()).any(|j| {
-            let h = body.prefix[j] - body.prefix[cut];
-            let r = body.radius_at(body.prefix[j]);
+        samples.iter().any(|&(h, r)| {
             let x = pivot.x + dx * h * sin;
             let y = pivot.y + h * cos - r;
             let z = pivot.z + dz * h * sin;
             y <= height_at(x, z)
         })
     };
-    if touching(0.0) {
-        return 0.0;
+    let last = libm::roundf(max / TILT_SCAN_STEP) as u32;
+    let k = (0..=last).find(|&k| touching(k as f32 * TILT_SCAN_STEP))?;
+    if k == 0 {
+        return Some(0.0);
     }
-    if !touching(MAX_TILT) {
-        return FRAC_PI_2;
-    }
-    let (mut lo, mut hi) = (0.0_f32, MAX_TILT);
+    let (mut lo, mut hi) = ((k - 1) as f32 * TILT_SCAN_STEP, k as f32 * TILT_SCAN_STEP);
     for _ in 0..TILT_STEPS {
         let mid = 0.5 * (lo + hi);
+        if mid <= lo || mid >= hi {
+            break;
+        }
         if touching(mid) {
             hi = mid;
         } else {
             lo = mid;
         }
     }
-    hi
+    Some(hi)
+}
+
+/// The pose a fallen piece rests in, from the body, the world base, the decoded state and the
+/// terrain oracle. Pure in those inputs, libm-only in its trig and in one fixed order of
+/// evaluation, so every peer and CI derive the same bits. The samples are each segment boundary
+/// above the cut and the tip, each lowered by its local radius; the cut's own boundary is never
+/// one, and a sample's `xz` goes to the oracle as is (it clamps at the map's edge).
+///
+/// The hinge first: the piece turns about the cut's bottom on the root's axis until a sample
+/// first meets the terrain ([`first_contact`] over [`MAX_TILT`]; nothing reached by 100° lies
+/// level, at 90°). A cut at the base rests there, its butt at the base. For a cut above the base
+/// the butt slides off the stump and seats beside it on the fall's side, its edge against the
+/// stump's edge — `2r` along `(dx, dz)` for the cut's radius `r`, the stump's top and the butt
+/// being the same boundary (DERIVED) — with its centre `r` above the terrain there, and the
+/// piece turns about the seat until a sample first meets the terrain, over [`LYING_MAX_TILT`]
+/// (nothing reached lies level). On flat ground a sample `(h, r_s)` touches when
+/// `cos tilt = (r_s − r) / h` (DERIVED), so a tapered piece lies just past the horizontal.
+pub(crate) fn resting_pose(
+    body: &TreeBody,
+    base: Vec3,
+    cut: u8,
+    dir: u8,
+    height_at: impl Fn(f32, f32) -> f32,
+) -> Resting {
+    let cut = usize::from(cut);
+    let (dx, dz) = azimuth(dir);
+    let samples: Vec<(f32, f32)> = (cut + 1..body.prefix.len())
+        .map(|j| {
+            (
+                body.prefix[j] - body.prefix[cut],
+                body.radius_at(body.prefix[j]),
+            )
+        })
+        .collect();
+    let hinge = first_contact(
+        base + Vec3::Y * body.prefix[cut],
+        &samples,
+        (dx, dz),
+        MAX_TILT,
+        &height_at,
+    )
+    .unwrap_or(FRAC_PI_2);
+    if cut == 0 {
+        return Resting {
+            hinge,
+            tilt: hinge,
+            seat: Vec3::ZERO,
+            dx,
+            dz,
+        };
+    }
+    let r = body.radius_at(body.prefix[cut]);
+    let (sx, sz) = (dx * (2.0 * r), dz * (2.0 * r));
+    let sy = height_at(base.x + sx, base.z + sz) + r - base.y;
+    let seat = Vec3::new(sx, sy, sz);
+    let tilt = first_contact(base + seat, &samples, (dx, dz), LYING_MAX_TILT, &height_at)
+        .unwrap_or(FRAC_PI_2);
+    Resting {
+        hinge,
+        tilt,
+        seat,
+        dx,
+        dz,
+    }
 }
 
 /// The rotation that tilts the piece above a cut by `angle` toward `(dx, dz)` of `resting`, in
@@ -480,7 +567,7 @@ pub(crate) fn resting_tilt(
 /// carried into that frame, libm's half-angle trig. Under the root it is the world tilt composed
 /// over the root's yaw, so a lying piece keeps the instance's yaw. The ONE source of a fallen
 /// piece's rotation: the sim's lying segments take it at the resting tilt ([`derive_state`]),
-/// the view's cut trunk node at each phase of the fall and at the resting tilt when it lands
+/// the view's cut trunk node at each stage of the fall and at the resting tilt when it lands
 /// (`view::present_fall`), both under the root's `Transform` rotation with no rotation between
 /// (a segment is the root's child; the view's chain carries none, A5), so the two compose under
 /// the root (`Transform::mul_transform`) to the same rotation, bit for bit. Past the transforms
@@ -490,6 +577,14 @@ pub(crate) fn fall_rotation(resting: &Resting, root: Quat, angle: f32) -> Quat {
     let axis = root.inverse() * Vec3::new(resting.dz, 0.0, -resting.dx);
     let (s, c) = (libm::sinf(0.5 * angle), libm::cosf(0.5 * angle));
     Quat::from_xyzw(axis.x * s, axis.y * s, axis.z * s, c)
+}
+
+/// The seat of `resting` in the frame of a tree root turned by `root`, world metres: the pivot
+/// the sim's lying segments ([`derive_state`]) and the view's cut trunk node
+/// (`view::present_fall`) both turn about, taken from here by both so they compose the same
+/// bits. Zero for a zero seat.
+pub(crate) fn seat_in_root(resting: &Resting, root: Quat) -> Vec3 {
+    root.inverse() * resting.seat
 }
 
 /// The collision filter of a standing segment: hulls contact it and rounds walk it.
@@ -511,9 +606,10 @@ fn lying_layers() -> CollisionLayers {
 /// dose. A tree back to standing (a replaced ledger) or down at another cut derives exactly as
 /// one that never held the old state.
 ///
-/// The fall turns the piece rigidly about the pivot — the cut's bottom, on the root's vertical
-/// axis — so in the root's frame each lying segment is turned by [`fall_rotation`] at the
-/// resting tilt and sits at the pivot plus its height above the cut, turned the same.
+/// The lying piece is turned rigidly about the seat — the butt's resting centre, which is the
+/// cut's bottom only for a cut at the base — so in the root's frame each lying segment is turned
+/// by [`fall_rotation`] at the resting tilt and sits at the seat ([`seat_in_root`]) plus its
+/// height above the cut, turned the same.
 fn derive_state(
     trees: Query<
         (
@@ -539,13 +635,12 @@ fn derive_state(
         let fallen = match *state {
             TreeState::Standing => None,
             TreeState::Down { cut, dir } => {
-                let tilt = resting_tilt(body, transform.translation, cut, dir, |x, z| {
+                let resting = resting_pose(body, transform.translation, cut, dir, |x, z| {
                     grid.height_at(x, z)
                 });
-                let (dx, dz) = azimuth(dir);
-                let resting = Resting { tilt, dx, dz };
-                let turn = fall_rotation(&resting, transform.rotation, tilt);
-                Some((usize::from(cut), resting, turn))
+                let turn = fall_rotation(&resting, transform.rotation, resting.tilt);
+                let seat = seat_in_root(&resting, transform.rotation);
+                Some((usize::from(cut), resting, turn, seat))
             }
         };
         let mut k = 0;
@@ -554,10 +649,9 @@ fn derive_state(
                 continue;
             };
             let (pose, filter) = match fallen {
-                Some((cut, _, turn)) if k >= cut => {
-                    let pivot = Vec3::Y * body.prefix[cut];
+                Some((cut, _, turn, seat)) if k >= cut => {
                     let pose = Transform {
-                        translation: pivot + turn * (Vec3::Y * (body.prefix[k] - body.prefix[cut])),
+                        translation: seat + turn * (Vec3::Y * (body.prefix[k] - body.prefix[cut])),
                         rotation: turn,
                         scale: Vec3::ONE,
                     };
@@ -576,7 +670,7 @@ fn derive_state(
             k += 1;
         }
         match fallen {
-            Some((_, resting, _)) => {
+            Some((_, resting, _, _)) => {
                 commands
                     .entity(root)
                     .insert(resting)
@@ -1672,14 +1766,20 @@ pub(crate) mod tests {
         HeightGrid::new(samples.into(), size, FIXTURE_EXTENT)
     }
 
-    /// THE RESTING TILT IS PINNED TO THE BIT (A9): the fixture trunk on flat ground, on a 10 %
+    /// THE RESTING POSE IS PINNED TO THE BIT (A9): the fixture trunk on flat ground, on a 10 %
     /// slope and at the grid's edge (where the oracle clamps), at every cut and three bins, must
-    /// bisect to these exact f32 bits on every platform — the lying collider is sim state every
-    /// peer derives alone, so a peer that differs by one ulp has a different world. The nine
-    /// cut-0 rows reach the terrain and pin the search itself: a step fewer or more, the midpoint
-    /// taken the other way, the sample's radius offset dropped or platform trig in place of
-    /// libm's reds them. The eighteen rows above the base reach nothing by 100° and pin only the
-    /// fallback's 90°; a reordering of the samples inside `any` is not observable here.
+    /// derive to these exact f32 bits of the hinge, the tilt and the seat on every platform —
+    /// the lying collider is sim state every peer derives alone, so a peer that differs by one
+    /// ulp has a different world. The rows pin the scan's step and the halvings (a coarser or
+    /// finer step, a halving fewer or more, or the midpoint taken the other way lands on other
+    /// bits of the touching end), the sample's radius offset, libm's trig in place of the
+    /// platform's, the oracle's clamp at the edge, and the seat formula — `2r` beside the stump
+    /// along the bin, `r` above the terrain THERE (a seat read at the base's height moves every
+    /// slope and edge row above the base). The cut-0 rows reach the terrain about the cut and
+    /// pin the hinge search; the rows above the base reach nothing by 100° about the cut and pin
+    /// the fallback's 90° as the hinge, then the seat and the search about it. A reordering of
+    /// the samples inside `any` is not observable here. The pin is a platform-drift tripwire:
+    /// CI's Linux bits must match these macOS bits.
     #[test]
     fn the_resting_tilt_is_pinned_to_the_bit() {
         let body = TreeBody::new(fixture_kind(), 1.0);
@@ -1693,63 +1793,232 @@ pub(crate) mod tests {
         for (label, grid, base) in &cases {
             for cut in [0_u8, 1, 2] {
                 for dir in [0_u8, 64, 200] {
-                    let tilt = resting_tilt(&body, *base, cut, dir, |x, z| grid.height_at(x, z));
-                    rows.push((*label, cut, dir, tilt.to_bits()));
+                    let pose = resting_pose(&body, *base, cut, dir, |x, z| grid.height_at(x, z));
+                    rows.push((
+                        *label,
+                        cut,
+                        dir,
+                        pose.hinge.to_bits(),
+                        pose.tilt.to_bits(),
+                        pose.seat.to_array().map(f32::to_bits),
+                    ));
                 }
             }
         }
-        const PINNED: [(&str, u8, u8, u32); 27] = [
-            ("flat", 0, 0, 0x3fbc3d92),
-            ("flat", 0, 64, 0x3fbc3d92),
-            ("flat", 0, 200, 0x3fbc3d92),
-            ("flat", 1, 0, 0x3fc90fdb),
-            ("flat", 1, 64, 0x3fc90fdb),
-            ("flat", 1, 200, 0x3fc90fdb),
-            ("flat", 2, 0, 0x3fc90fdb),
-            ("flat", 2, 64, 0x3fc90fdb),
-            ("flat", 2, 200, 0x3fc90fdb),
-            ("slope", 0, 0, 0x3faf8c01),
-            ("slope", 0, 64, 0x3fbc3d91),
-            ("slope", 0, 200, 0x3fb9bf04),
-            ("slope", 1, 0, 0x3fc90fdb),
-            ("slope", 1, 64, 0x3fc90fdb),
-            ("slope", 1, 200, 0x3fc90fdb),
-            ("slope", 2, 0, 0x3fc90fdb),
-            ("slope", 2, 64, 0x3fc90fdb),
-            ("slope", 2, 200, 0x3fc90fdb),
-            ("edge", 0, 0, 0x3fb5ca04),
-            ("edge", 0, 64, 0x3fbc3d97),
-            ("edge", 0, 200, 0x3fb9bf0a),
-            ("edge", 1, 0, 0x3fc90fdb),
-            ("edge", 1, 64, 0x3fc90fdb),
-            ("edge", 1, 200, 0x3fc90fdb),
-            ("edge", 2, 0, 0x3fc90fdb),
-            ("edge", 2, 64, 0x3fc90fdb),
-            ("edge", 2, 200, 0x3fc90fdb),
+        #[rustfmt::skip]
+        const PINNED: [(&str, u8, u8, u32, u32, [u32; 3]); 27] = [
+            ("flat", 0, 0, 0x3fbc3d92, 0x3fbc3d92, [0x00000000, 0x00000000, 0x00000000]),
+            ("flat", 0, 64, 0x3fbc3d92, 0x3fbc3d92, [0x00000000, 0x00000000, 0x00000000]),
+            ("flat", 0, 200, 0x3fbc3d92, 0x3fbc3d92, [0x00000000, 0x00000000, 0x00000000]),
+            ("flat", 1, 0, 0x3fc90fdb, 0x3fcddcf2, [0x3ecccccd, 0x3e4ccccd, 0x00000000]),
+            ("flat", 1, 64, 0x3fc90fdb, 0x3fcddcf2, [0xb29630f2, 0x3e4ccccd, 0x3ecccccd]),
+            ("flat", 1, 200, 0x3fc90fdb, 0x3fcddcf2, [0x3d9fd16d, 0x3e4ccccd, 0xbec8dd65]),
+            ("flat", 2, 0, 0x3fc90fdb, 0x3fcc4324, [0x3e4ccccd, 0x3dcccccd, 0x00000000]),
+            ("flat", 2, 64, 0x3fc90fdb, 0x3fcc4324, [0xb21630f2, 0x3dcccccd, 0x3e4ccccd]),
+            ("flat", 2, 200, 0x3fc90fdb, 0x3fcc4324, [0x3d1fd16d, 0x3dcccccd, 0xbe48dd65]),
+            ("slope", 0, 0, 0x3faf8c01, 0x3faf8c01, [0x00000000, 0x00000000, 0x00000000]),
+            ("slope", 0, 64, 0x3fbc3d91, 0x3fbc3d91, [0x00000000, 0x00000000, 0x00000000]),
+            ("slope", 0, 200, 0x3fb9bf04, 0x3fb9bf04, [0x00000000, 0x00000000, 0x00000000]),
+            ("slope", 1, 0, 0x3fc90fdb, 0x3fc114e5, [0x3ecccccd, 0x3e75c300, 0x00000000]),
+            ("slope", 1, 64, 0x3fc90fdb, 0x3fcddcf0, [0xb29630f2, 0x3e4cccc0, 0x3ecccccd]),
+            ("slope", 1, 200, 0x3fc90fdb, 0x3fcb5d80, [0x3d9fd16d, 0x3e54c9c0, 0xbec8dd65]),
+            ("slope", 2, 0, 0x3fc90fdb, 0x3fbf7d30, [0x3e4ccccd, 0x3df5c200, 0x00000000]),
+            ("slope", 2, 64, 0x3fc90fdb, 0x3fcc4323, [0xb21630f2, 0x3dcccd00, 0x3e4ccccd]),
+            ("slope", 2, 200, 0x3fc90fdb, 0x3fc9c3d5, [0x3d1fd16d, 0x3dd4ca00, 0xbe48dd65]),
+            ("edge", 0, 0, 0x3fb5ca04, 0x3fb5ca04, [0x00000000, 0x00000000, 0x00000000]),
+            ("edge", 0, 64, 0x3fbc3d97, 0x3fbc3d97, [0x00000000, 0x00000000, 0x00000000]),
+            ("edge", 0, 200, 0x3fb9bf0a, 0x3fb9bf0a, [0x00000000, 0x00000000, 0x00000000]),
+            ("edge", 1, 0, 0x3fc90fdb, 0x3fcb9f4e, [0x3ecccccd, 0x3e75c300, 0x00000000]),
+            ("edge", 1, 64, 0x3fc90fdb, 0x3fcddcf1, [0xb29630f2, 0x3e4ccc00, 0x3ecccccd]),
+            ("edge", 1, 200, 0x3fc90fdb, 0x3fcb5d77, [0x3d9fd16d, 0x3e54c900, 0xbec8dd65]),
+            ("edge", 2, 0, 0x3fc90fdb, 0x3fc7243e, [0x3e4ccccd, 0x3df5c000, 0x00000000]),
+            ("edge", 2, 64, 0x3fc90fdb, 0x3fcc4319, [0xb21630f2, 0x3dccca00, 0x3e4ccccd]),
+            ("edge", 2, 200, 0x3fc90fdb, 0x3fc9c3c3, [0x3d1fd16d, 0x3dd4cc00, 0xbe48dd65]),
         ];
         let listing = rows
             .iter()
-            .map(|(label, cut, dir, bits)| {
-                format!("            ({label:?}, {cut}, {dir}, {bits:#010x}),")
+            .map(|(label, cut, dir, hinge, tilt, [sx, sy, sz])| {
+                format!(
+                    "            ({label:?}, {cut}, {dir}, {hinge:#010x}, {tilt:#010x}, \
+                     [{sx:#010x}, {sy:#010x}, {sz:#010x}]),"
+                )
             })
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(
             rows, PINNED,
-            "the resting tilt moved; the rows now read:\n{listing}"
+            "the resting pose moved; the rows now read:\n{listing}"
         );
         // Flat ground, whole trunk: it lies just short of the horizontal, held off the surface by
         // the first boundary above the cut — the widest sample, 0.2 m at 2 m, touching at 84.3°
-        // (DERIVED: cos tilt = r / h) before the narrower ones. A piece cut above the base pivots
-        // at the cut's height and reaches nothing by 100°, so it takes the 90° fallback.
+        // (DERIVED: cos tilt = r / h) before the narrower ones — and rests where it hinged, its
+        // butt at the base. A piece cut above the base hinges at the cut's height and reaches
+        // nothing by 100°, so its hinge is the 90° fallback; seated on the ground it lies just
+        // past the horizontal, its tip down (DERIVED: cos tilt = (r_tip − r) / h < 0).
         for row in rows.iter().filter(|row| row.0 == "flat") {
-            let tilt = f32::from_bits(row.3);
+            let (hinge, tilt) = (f32::from_bits(row.3), f32::from_bits(row.4));
+            let seat = Vec3::from_array(row.5.map(f32::from_bits));
             if row.1 == 0 {
                 assert!(tilt > 80.0_f32.to_radians() && tilt < FRAC_PI_2, "{row:?}");
+                assert!(hinge == tilt && seat == Vec3::ZERO, "{row:?}");
             } else {
-                assert_eq!(tilt, FRAC_PI_2, "{row:?}");
+                assert_eq!(hinge, FRAC_PI_2, "{row:?}");
+                assert!(tilt > FRAC_PI_2 && tilt < 95.0_f32.to_radians(), "{row:?}");
+                assert!(seat.y > 0.0 && seat.xz().length() > 0.0, "{row:?}");
             }
         }
+    }
+
+    /// The height a sample of the piece above `cut` rests above the terrain, per sample, in
+    /// the resting pose about the seat: negative is below the ground.
+    fn clearances(
+        body: &TreeBody,
+        base: Vec3,
+        cut: usize,
+        resting: &Resting,
+        height_at: impl Fn(f32, f32) -> f32,
+    ) -> Vec<f32> {
+        let pivot = base + resting.seat;
+        let (sin, cos) = (libm::sinf(resting.tilt), libm::cosf(resting.tilt));
+        (cut + 1..body.prefix.len())
+            .map(|j| {
+                let h = body.prefix[j] - body.prefix[cut];
+                let r = body.radius_at(body.prefix[j]);
+                let x = pivot.x + resting.dx * h * sin;
+                let y = pivot.y + h * cos - r;
+                let z = pivot.z + resting.dz * h * sin;
+                y - height_at(x, z)
+            })
+            .collect()
+    }
+
+    /// THE FIRST CONTACT IS THE ONE THE PIECE RESTS ON, not a later one: contact is not
+    /// monotone in the tilt, so a search that assumes it is lays the piece through a ridge. The
+    /// fixture trunk at cut 0 toward +X over flat ground with a 2.9 m shelf at `x` in
+    /// (2.5, 3.0): its 4 m boundary (r 0.1) passes over the shelf for tilts in (38.7°, 48.6°)
+    /// (DERIVED: `4 sin θ` in (2.5, 3.0)) and is on it from 41.4° (DERIVED:
+    /// `4 cos θ − 0.1 ≤ 2.9`); the flat contact is at 84.3°. The pose must rest in the shelf's
+    /// touching interval. A bisection of the whole range answers the flat contact and reds
+    /// this; so does a scan step coarser than the shelf's interval. One primitive serves the
+    /// hinge and the seat, so a cut at the base — whose tilt is its hinge — exercises both.
+    #[test]
+    fn the_first_contact_is_bracketed_not_bisected_through_a_ridge() {
+        let body = TreeBody::new(fixture_kind(), 1.0);
+        let shelf = |x: f32, _: f32| if x > 2.5 && x < 3.0 { 2.9 } else { 0.0 };
+        let pose = resting_pose(&body, Vec3::ZERO, 0, 0, shelf);
+        let lower = libm::acosf((2.9 + 0.1) / 4.0);
+        let upper = libm::asinf(3.0 / 4.0);
+        assert!(
+            pose.tilt >= lower - 1e-5 && pose.tilt < upper,
+            "ridge: tilt {}° ({:#010x}), the shelf's touching interval is [{}°, {}°)",
+            pose.tilt.to_degrees(),
+            pose.tilt.to_bits(),
+            lower.to_degrees(),
+            upper.to_degrees()
+        );
+        assert!(pose.hinge == pose.tilt && pose.seat == Vec3::ZERO);
+        let clearances = clearances(&body, Vec3::ZERO, 0, &pose, shelf);
+        assert!(
+            clearances[1].abs() < 1e-5 && clearances[2] > 1.0,
+            "the 4 m boundary rests on the shelf, the tip hangs past it: {clearances:?}"
+        );
+    }
+
+    /// THE BUTT SEATS BESIDE THE STUMP, ON THE GROUND: for a cut above the base on flat ground,
+    /// in three bins, the seat is exactly `(dx × 2r, r, dz × 2r)` for the cut's radius `r` (the
+    /// butt's edge against the stump's edge, its centre a radius above the terrain), and the
+    /// piece lies about it just past the horizontal: on flat ground a sample `(h, r_s)` touches
+    /// at `cos tilt = (r_s − r) / h` and the smallest such tilt wins — the tip's, 92.15° at
+    /// cut 1 (h 4, r 0.05 against r 0.2) before the 2 m boundary's 92.87°, and 91.43° at cut 2
+    /// (h 2, r 0.05 against r 0.1) (DERIVED). Generic on every case: no sample lies below the
+    /// terrain and one lies on it, within the search's resolution — the piece rests ON the
+    /// ground, never in it (DERIVED resolution: the bracket ends under one ulp of the angle,
+    /// 2.4e-7 rad at 2 rad, times the 4 m lever is 1e-6 m; 1e-5 is that with margin). A seat
+    /// at `r` beside the stump, or at the stump's height, or a tilt that stops at the hinge's
+    /// 90°, reds this.
+    #[test]
+    fn the_butt_seats_beside_the_stump_on_the_ground() {
+        let body = TreeBody::new(fixture_kind(), 1.0);
+        let flat = |_: f32, _: f32| 0.0;
+        let base = Vec3::new(5.0, 0.0, -3.0);
+        for (cut, derived_deg) in [(1_u8, 92.149_1_f32), (2, 91.432_5)] {
+            let r = body.radius_at(body.prefix[usize::from(cut)]);
+            for dir in [0_u8, 64, 200] {
+                let pose = resting_pose(&body, base, cut, dir, flat);
+                let (dx, dz) = azimuth(dir);
+                assert_eq!(
+                    pose.seat.to_array().map(f32::to_bits),
+                    [dx * (2.0 * r), r, dz * (2.0 * r)].map(f32::to_bits),
+                    "cut {cut} dir {dir}: the seat {:?}",
+                    pose.seat
+                );
+                assert!(
+                    (pose.tilt.to_degrees() - derived_deg).abs() < 1e-3,
+                    "cut {cut} dir {dir}: tilt {}° for {derived_deg}°",
+                    pose.tilt.to_degrees()
+                );
+                assert_eq!(pose.hinge, FRAC_PI_2, "nothing reached about the cut");
+                let clearances = clearances(&body, base, usize::from(cut), &pose, flat);
+                let lowest = clearances.iter().copied().fold(f32::INFINITY, f32::min);
+                assert!(
+                    lowest.abs() < 1e-5,
+                    "cut {cut} dir {dir}: the lowest sample rests on the ground: {clearances:?}"
+                );
+            }
+        }
+    }
+
+    /// THE HINGE IS THE FIRST CONTACT ABOUT THE CUT, THE SEAT BESIDE IT: a cut above the base
+    /// whose tip reaches a 45° slope rising along the fall (`height = x`, dir 0, cut 1) hinges
+    /// at 65.2° (DERIVED: the tip, h 4 lowered 0.05 from the cut's 2 m, meets `y = x` where
+    /// `2 + 4 cos θ − 0.05 = 4 sin θ`; the 2 m boundary's contact is later, at 87.2°), and the
+    /// seat beside the stump sits on the slope, `2r` out and `2r + r` up; on flat ground at
+    /// cut 1 nothing is reached by 100° and the hinge is exactly the 90° fallback. A seat on a
+    /// ledge higher than the stump's top (a 3 m step beside the tree) is above the cut's bottom,
+    /// so the butt drops nothing: the view's second stage takes its floor duration from that. A
+    /// hinge searched about the seat, or a seat read at the base's height, reds this.
+    #[test]
+    fn the_hinge_is_the_first_contact_about_the_cut() {
+        let body = TreeBody::new(fixture_kind(), 1.0);
+        let slope = |x: f32, _: f32| x;
+        let uphill = resting_pose(&body, Vec3::ZERO, 1, 0, slope);
+        assert!(
+            (uphill.hinge.to_degrees() - 65.164).abs() < 1e-2,
+            "the hinge on the slope: {}°",
+            uphill.hinge.to_degrees()
+        );
+        let r = body.radius_at(body.prefix[1]);
+        assert_eq!(
+            uphill.seat,
+            Vec3::new(2.0 * r, 2.0 * r + r, 0.0),
+            "the seat on the slope"
+        );
+        assert!(
+            uphill.tilt < uphill.hinge && uphill.tilt > 45.0_f32.to_radians(),
+            "seated, the piece lies up the slope, steeper than 45°: {}°",
+            uphill.tilt.to_degrees()
+        );
+        let flat = resting_pose(&body, Vec3::ZERO, 1, 0, |_, _| 0.0);
+        assert_eq!(flat.hinge, FRAC_PI_2, "nothing reached by 100°");
+        let ledge = resting_pose(
+            &body,
+            Vec3::ZERO,
+            1,
+            0,
+            |x, _| if x > 0.1 { 3.0 } else { 0.0 },
+        );
+        assert!(
+            ledge.seat.y >= body.prefix[1],
+            "the seat on the ledge, {}, is no lower than the stump's top, {}",
+            ledge.seat.y,
+            body.prefix[1]
+        );
+        assert!(
+            ledge.hinge < FRAC_PI_2 && ledge.tilt > FRAC_PI_2,
+            "hinged on the ledge's top at {}°, lying on it at {}°",
+            ledge.hinge.to_degrees(),
+            ledge.tilt.to_degrees()
+        );
     }
 
     /// A derive bed: the fixture tree spawned at `pose` on `grid`, the derive in `Update`.
@@ -1795,13 +2064,14 @@ pub(crate) mod tests {
 
     /// EVERY PEER DERIVES THE WHOLE BODY FROM THE STATE, IN EVERY ORDER (ADR-0016, A2, A10):
     /// down, the stump's segments keep their place and their standing filter, every segment from
-    /// the cut up leaves the vertical onto the lying filter, the resting pose is recorded, the
-    /// setter's transition tick stays and the pool is gone; back to standing, every segment
+    /// the cut up leaves the vertical onto the lying filter — the cut's segment at the recorded
+    /// seat beside the stump, the ones above it along the fall — the resting pose is recorded,
+    /// the setter's transition tick stays and the pool is gone; back to standing, every segment
     /// stands at its spawn height on the standing filter, the pose and the transition tick are
     /// gone and the pool is back; down at another cut, the segments the new cut spares stand
     /// again and the rest lie. A derive that skips `Standing`, touches only the segments at and
-    /// above the new cut, or leaves the pool, the pose or the tick from the state before reds
-    /// this.
+    /// above the new cut, turns the piece about the stump's top instead of the seat, or leaves
+    /// the pool, the pose or the tick from the state before reds this.
     #[test]
     fn every_state_derives_the_whole_body_from_the_state() {
         let (mut app, root) =
@@ -1846,9 +2116,13 @@ pub(crate) mod tests {
         let down_1 = segments_of(&app, root);
         assert_eq!(down_1[0], spawned[0], "the stump stays");
         assert_eq!(
-            down_1[1].0.translation,
-            Vec3::new(0.0, 2.0, 0.0),
-            "the pivot segment turns in place"
+            down_1[1].0.translation, resting.seat,
+            "the cut's segment turns about the seat (the root is unturned)"
+        );
+        assert!(
+            resting.seat.x > 0.0 && resting.seat.y > 0.0 && resting.seat.y < 2.0,
+            "the seat is beside the stump, on the ground, below the stump's top: {}",
+            resting.seat
         );
         assert_eq!(down_1[1].1, lying_layers());
         let top = down_1[2].0.translation;
@@ -1922,7 +2196,9 @@ pub(crate) mod tests {
             for angle in [0.3_f32, FRAC_PI_2, 1.7] {
                 let (dx, dz) = azimuth(dir);
                 let resting = Resting {
+                    hinge: angle,
                     tilt: angle,
+                    seat: Vec3::ZERO,
                     dx,
                     dz,
                 };
@@ -1949,13 +2225,15 @@ pub(crate) mod tests {
         }
     }
 
-    /// THE LYING POSE IS PINNED TO THE BIT (A9): for every row of the tilt pins that touches the
-    /// terrain — the whole trunk, cut 0, on flat ground, on the slope and at the grid's edge, in
-    /// three bins — a yawed instance's three lying segments derive to these exact local transform
-    /// bits (translation and rotation, folded in segment order), on every platform: glam runs
-    /// scalar-math and the trig is libm's, so a peer that differs by one ulp has a different
-    /// world. Any change to the composition of the pose — the yaw dropped, the pivot moved, a
-    /// factor reordered — reds this; a tilt change reds the tilt pins first.
+    /// THE LYING POSE IS PINNED TO THE BIT (A9): on flat ground, on the slope and at the grid's
+    /// edge, in three bins, a yawed instance's lying segments derive to these exact local
+    /// transform bits (translation and rotation, folded in segment order) — the whole trunk at
+    /// cut 0, turned about the base, and the piece above cut 1, turned about its seat carried
+    /// into the root's frame — on every platform: glam runs scalar-math and the trig is libm's,
+    /// so a peer that differs by one ulp has a different world. Any change to the composition
+    /// of the pose — the yaw dropped, the seat not carried under the yaw, the pivot put back
+    /// on the stump, a factor reordered — reds this; a change to the search or the seat reds
+    /// the pose pins first.
     #[test]
     fn the_lying_pose_is_pinned_to_the_bit() {
         let yaw = Quat::from_xyzw(0.0, libm::sinf(0.35), 0.0, libm::cosf(0.35));
@@ -1969,48 +2247,61 @@ pub(crate) mod tests {
             |acc: u64, bits: u32| (acc ^ u64::from(bits)).wrapping_mul(0x0000_0100_0000_01b3);
         let mut rows = Vec::new();
         for (label, height, base) in cases {
-            for dir in [0_u8, 64, 200] {
-                let (mut app, root) = derive_bed(
-                    fixture_grid(height),
-                    Transform {
-                        translation: base,
-                        rotation: yaw,
-                        scale: Vec3::ONE,
-                    },
-                );
-                *app.world_mut().get_mut::<TreeState>(root).unwrap() =
-                    TreeState::Down { cut: 0, dir };
-                app.update();
-                let segments = segments_of(&app, root);
-                assert_eq!(segments.len(), 3);
-                let mut digest = 0xcbf2_9ce4_8422_2325_u64;
-                for (local, _) in &segments {
-                    for value in local
-                        .translation
-                        .to_array()
-                        .into_iter()
-                        .chain(local.rotation.to_array())
-                    {
-                        digest = fold(digest, value.to_bits());
+            for cut in [0_u8, 1] {
+                for dir in [0_u8, 64, 200] {
+                    let (mut app, root) = derive_bed(
+                        fixture_grid(height),
+                        Transform {
+                            translation: base,
+                            rotation: yaw,
+                            scale: Vec3::ONE,
+                        },
+                    );
+                    *app.world_mut().get_mut::<TreeState>(root).unwrap() =
+                        TreeState::Down { cut, dir };
+                    app.update();
+                    let segments = segments_of(&app, root);
+                    assert_eq!(segments.len(), 3);
+                    let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+                    for (local, _) in &segments[usize::from(cut)..] {
+                        for value in local
+                            .translation
+                            .to_array()
+                            .into_iter()
+                            .chain(local.rotation.to_array())
+                        {
+                            digest = fold(digest, value.to_bits());
+                        }
                     }
+                    rows.push((label, cut, dir, digest));
                 }
-                rows.push((label, dir, digest));
             }
         }
-        const PINNED: [(&str, u8, u64); 9] = [
-            ("flat", 0, 0xac6fffa0efcf2646),
-            ("flat", 64, 0xb54e527901b36078),
-            ("flat", 200, 0x883a6b667889c39a),
-            ("slope", 0, 0x6bb3658585200064),
-            ("slope", 64, 0xc093756d96f81e08),
-            ("slope", 200, 0x5dc081d11110a614),
-            ("edge", 0, 0x364f8ea69e370d27),
-            ("edge", 64, 0x5cd06b3c1f68bc21),
-            ("edge", 200, 0xd4fb70177b475810),
+        const PINNED: [(&str, u8, u8, u64); 18] = [
+            ("flat", 0, 0, 0xac6fffa0efcf2646),
+            ("flat", 0, 64, 0xb54e527901b36078),
+            ("flat", 0, 200, 0x883a6b667889c39a),
+            ("flat", 1, 0, 0x10aaf2ccf734387e),
+            ("flat", 1, 64, 0xd05a4cd6beae4604),
+            ("flat", 1, 200, 0x3a448554fb539f86),
+            ("slope", 0, 0, 0x6bb3658585200064),
+            ("slope", 0, 64, 0xc093756d96f81e08),
+            ("slope", 0, 200, 0x5dc081d11110a614),
+            ("slope", 1, 0, 0x6a8f163c5f1ff04a),
+            ("slope", 1, 64, 0x41d246947c6254c9),
+            ("slope", 1, 200, 0xaf65f1b33313a071),
+            ("edge", 0, 0, 0x364f8ea69e370d27),
+            ("edge", 0, 64, 0x5cd06b3c1f68bc21),
+            ("edge", 0, 200, 0xd4fb70177b475810),
+            ("edge", 1, 0, 0x38dcd8bf2606a450),
+            ("edge", 1, 64, 0x9c8e6c0aeafa2b67),
+            ("edge", 1, 200, 0x768f4fd11abf373f),
         ];
         let listing = rows
             .iter()
-            .map(|(label, dir, digest)| format!("            ({label:?}, {dir}, {digest:#018x}),"))
+            .map(|(label, cut, dir, digest)| {
+                format!("            ({label:?}, {cut}, {dir}, {digest:#018x}),")
+            })
             .collect::<Vec<_>>()
             .join("\n");
         assert_eq!(
