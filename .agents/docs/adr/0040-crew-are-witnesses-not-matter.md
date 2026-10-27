@@ -19,7 +19,7 @@ A substance is one of two kinds, each under its own law.
   - **the field:** each spall direction entering the box doses it at its strength there × its
     share, as a `Field` deposit, and continues to the first hard body.
 
-The crew line rate is round data (`rounds.ron` `wound`, reference-mm per metre of chord, TUNED). Dose units,
+The crew line rate is round data (the round file's `wound`, `assets/rounds/<key>.round.ron`, reference-mm per metre of chord, TUNED). Dose units,
 HP pools, the once-per-box rounding and the `ShotDose` tally are the hard world's. A witness
 substance sits only on a crew-role volume and a crew-role volume wears only a witness substance;
 the bake refuses a tank file that breaks either, naming the node.

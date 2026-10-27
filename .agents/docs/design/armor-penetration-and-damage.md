@@ -120,7 +120,7 @@ march, per volume crossed:
    weakly constrained by the available plate data. The fixture rounds at muzzle carry about
    115 reference-mm (main gun, 773 m/s) and 14.5 reference-mm (machine gun, 755 m/s), DERIVED.
    The nose factor `N` is the frictionless nose factor of the cavity-expansion form, in `(0, 1]`.
-   It is **round data authored as geometry**: each round in `assets/ballistics/rounds.ron` carries
+   It is **round data authored as geometry**: each round file (`assets/rounds/<key>.round.ron`) carries
    a required `nose` (parameters in calibres), and `N` is derived once at load
    (`spec::NoseShape::factor`) — `Ogive(crh: ψ)`, `ψ ≥ 0.5`: `N = (8ψ − 1) / (24ψ²)`;
    `Cone(length_calibres: φ)`, `φ > 0`: `N = 1 / (1 + 4φ²)`; `Cap(radius_calibres: φ)`,
@@ -533,7 +533,7 @@ built as rounds on the main gun's selector (playtest fork F7); the loser leaves 
 play. Brief: `.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/brief-4b-aphe-sim.md`,
 its round data from `tiger-ammo-history.md`, its fuze's delay and arming threshold from
 `burst-delay-history.md` and its speed law from `shape-law.md` §4 beside it. A round without a
-burst block (`assets/ballistics/rounds.ron`) is inert; a sub-calibre round carries none.
+burst block (in the round file, `assets/rounds/<key>.round.ron`) is inert; a sub-calibre round carries none.
 
 **The trigger.** The shell's fuze is built at spawn from its round's burst block (ADR-0014) and
 advanced by the authority's march alone; a replica's march decides no crossing, so its fuze never
@@ -687,7 +687,7 @@ resolved the shot, each witness box takes:
 - **the line:** `chord × wound`, `chord` the disc-mean chord the shell's legs cut through it (the
   walk's own k-sample disc, §13.5, each sample that misses counting zero; a leg ends at the rest
   point of a shell stopped inside it), `wound` the **round's** crew line rate (reference-mm per metre,
-  `rounds.ron`, TUNED);
+  the round file, TUNED);
 - **the field:** each spall direction entering it, at its strength there × its share (§5).
 
 Both go through the same `ShotDose` tally, units and once-per-box rounding as a hard box's, and a
