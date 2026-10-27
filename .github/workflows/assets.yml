@@ -1,6 +1,6 @@
 name: Assets
 
-# THE ASSET DOOR, over every trio the commit holds, with the toolchain the door pins. Its own
+# THE ASSET DOOR, over the trios a push selects, with the toolchain the door pins. Its own
 # workflow and its own required context (`assets`), apart from `ci.yml`: it judges a push's RANGE,
 # where every lane there judges the tree, so a later run never covers an earlier one here.
 
@@ -34,7 +34,7 @@ jobs:
   # THE ONLY PLACE THE DOOR RUNS. The local pre-push hook is the git-lfs upload and nothing else,
   # so this lane is not a backstop for a cheaper local one — it is the verdict. The commit's own
   # rules meet the commit's own bytes: the checkout is the pushed tree, `git lfs pull` hydrates the
-  # pointers into real blends and models, and every discovered asset is re-cut from its stored
+  # pointers into real blends and models, and every selected asset is re-cut from its stored
   # source and compared with the tracked glb byte for byte.
   #
   # DISCOVERY, not a list — the one trio rule, sourced from `scripts/hooks/pushed_assets.sh`
@@ -139,6 +139,17 @@ jobs:
           path: ~/.cache/overmatch/blender
           key: blender-${{ env.OVERMATCH_BLENDER_VERSION }}-${{ env.OVERMATCH_BLENDER_BUILD }}
 
+      # The texture encoder's content cache (`scripts/encode-tank-ktx2.sh`): an entry is one image
+      # under one role, flag list and encoder, so a stale entry cannot be read. Restored from the
+      # newest run; saved again only when a source blend moves.
+      - name: Cache the encoded textures
+        if: steps.scope.outputs.affected == 'true'
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/overmatch/ktx2
+          key: ktx2-${{ hashFiles('assets/**/*.blend') }}
+          restore-keys: ktx2-
+
       - name: Install the pinned Blender
         if: steps.scope.outputs.affected == 'true' && steps.blender-cache.outputs.cache-hit != 'true'
         run: |
@@ -183,6 +194,7 @@ jobs:
           set -euo pipefail
           echo "OVERMATCH_BLENDER=${HOME}/.cache/overmatch/blender/blender" >> "${GITHUB_ENV}"
           echo "OVERMATCH_BASISU=${HOME}/.cache/overmatch/basisu/basisu" >> "${GITHUB_ENV}"
+          echo "OVERMATCH_KTX2_CACHE=${HOME}/.cache/overmatch/ktx2" >> "${GITHUB_ENV}"
           export OVERMATCH_BLENDER="${HOME}/.cache/overmatch/blender/blender"
           export OVERMATCH_BASISU="${HOME}/.cache/overmatch/basisu/basisu"
           python3 scripts/toolchain.py
@@ -252,6 +264,7 @@ jobs:
           python3 scripts/tank/test_report.py
           python3 scripts/tank/test_refusals.py
           python3 scripts/tank/test_glb_ktx2.py
+          sh scripts/tank/test_ktx2_cache.sh
           python3 scripts/tank/test_build.py
           python3 scripts/tank/test_asset_door.py
           python3 scripts/prop/test_prop.py
