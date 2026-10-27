@@ -1111,12 +1111,15 @@ impl TankSpec {
     /// The rejections and their failure modes:
     /// - `Automatic { belt_size: 0 }` — a permanently dry belt: the swap timer is only armed *inside*
     ///   `fire()`, which a dry belt blocks, so the weapon can never fire *or* swap. Bricked.
-    /// - `Automatic { rpm: <= 0.0 }` — the cyclic interval is `60.0 / rpm`: `0.0` arms an infinite
-    ///   (never-elapsing) reload, negative arms a nonsense one.
     /// - `Automatic { belt_swap_secs: < 0.0 }` / `Single { reload_secs: < 0.0 }` — a negative timer.
+    /// - A mount whose fire mode and its gun's mechanism disagree (a belt on a single-shot gun, a
+    ///   `tracer_every` on a single-shot mount, none on a belt): `fire_cycle` refuses the pair.
+    ///
+    /// The gun's own numbers are the gun registry's to refuse (`crate::guns`): a cyclic rate that is
+    /// not finite and positive never loads, so `60 / cyclic_rpm` is always a real interval here.
     ///
     /// Deliberately NOT rejected (documented so a future editor does not "tighten" them into bugs):
-    /// - `Automatic { tracer_every: 0 }` — a legal tracerless "stealth belt" (spec doc + `tracer_round`
+    /// - `tracer_every: 0` on a belt mount — a legal tracerless "stealth belt" (`tracer_round`
     ///   short-circuits on `0`, so there is no divide/modulo-by-zero); never traces, by design.
     /// - `belt_swap_secs == 0.0` / `reload_secs == 0.0` — a degenerate instant reload, not bricked
     ///   (the belt refills / the gun readies immediately); left legal.

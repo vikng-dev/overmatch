@@ -84,12 +84,12 @@
 //     block) would sit ~100; declare the vehicle's date to settle it. Transmission shares
 //     the substance for now (denser gear mass — split only if the sandbox ever cares).
 //
-// `paintable` = whether the runtime livery composes onto this substance (§ paint-scheme
-// discussion 2026-08-06): exterior steels yes, interior substances no.
+// `paintable` = whether the runtime livery composes onto this substance: exterior steels yes,
+// interior substances no.
 //
-// THIS FILE IS THE CLASSIFIER (slice 3, 2026-08-07). A glTF primitive is a ballistic volume iff
-// its material name is a key here, and the bake refuses one wearing a `Burst` key; per-node
-// material_factor in the tank RON is gone. Adding a key
+// THIS FILE IS THE CLASSIFIER. A glTF primitive is a ballistic volume iff its material name is a
+// key here, and the bake refuses one wearing a `Burst` key; the tank RON carries no per-node
+// material factor. Adding a key
 // makes every mesh wearing that material armour — and removing one silently un-declares them. What
 // SHOWS that is `L1.SOURCE_CENSUS`, which prints per-substance primitive counts against the
 // previous committed source: evidence for a human to read, never a pass condition. No test pins
