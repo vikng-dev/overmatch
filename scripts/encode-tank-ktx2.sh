@@ -100,14 +100,69 @@ trap cleanup EXIT
 # role each image plays in the materials that sample it. Roles drive the encoder flags below.
 python3 scripts/tank/glb_ktx2.py unpack "$IN" "$WORK"
 
-# The encode is the ~60 s the caller has to sit through, and it is the only phase with a countable
+# An uncached encode is the slow phase the caller sits through, and the only phase with a countable
 # unit of work. Announcing the total here lets the GUI adapter — which reads the door's stdout line
-# by line — turn the `ktx2  ▸` lines below into a real percentage instead of a guess.
+# by line — turn the `ktx2  ▸` lines below into a real percentage instead of a guess. A cache hit
+# prints its `ktx2  ▸` line too, so the count reaches the total either way.
 echo "images ▸ $(grep -c '[^[:space:]]' "$WORK/roles.txt") to encode"
 
+# ── cache ────────────────────────────────────────────────────────────────────────────────────────
+# One encode is a pure function of four inputs, and the key is a sha256 over exactly those four:
+#   source   the image file's bytes;
+#   role     the colour role. Each role's flags already differ, and the role is hashed beside them
+#            so a role-dependent step outside the argument list can never share an entry;
+#   args     the full basisu argument list minus the two paths — the role's flags and the common
+#            ones, read from the same "$@" the invocation passes, so a flag cannot reach the encoder
+#            without reaching the key;
+#   encoder  the first line of `basisu -version`, because another version is other bytes.
+# Each field is length-prefixed, so no field can run into the next. This script's own bytes are not
+# in the key: a comment edit is not a different encode, and a flag edit already moves `args`.
+# Outputs are byte-identical hit or miss — `build.py verify` byte-compares the re-export against
+# the committed glb, which already relies on one basisu version and argument list being
+# deterministic, and the key carries both.
+#
+# Entries are `<key>.ktx2` and nothing else is ever read. A miss publishes by writing a dot-file in
+# the cache dir and renaming it onto its key: two bakes can run at once (see the work dir), and a
+# rename inside one directory is atomic, so a reader sees a whole entry or none. A failed encode
+# publishes nothing. A cache that cannot be written turns itself off with one line and the bake
+# encodes uncached; it never fails the bake.
+CACHE="${OVERMATCH_KTX2_CACHE:-${XDG_CACHE_HOME:-$HOME/.cache}/overmatch/ktx2}"
+ENCODER="$("$BASISU" -version 2>/dev/null | sed -n 1p)"
+if [ -z "$ENCODER" ]; then
+    echo "cache ▸ off — \`$BASISU -version\` names no encoder to key on; encoding every image"
+    CACHE=""
+elif ! { mkdir -p "$CACHE" && probe="$(mktemp "$CACHE/.probe.XXXXXXXX")" && rm -f "$probe"; } \
+        2>/dev/null; then
+    echo "cache ▸ off — cannot create or write $CACHE; encoding every image"
+    CACHE=""
+fi
+
+cache_key() {   # <source file> <role> <encoder> <basisu args...>
+    python3 -c '
+import hashlib, json, sys
+source, role, encoder, *args = sys.argv[1:]
+digest = hashlib.sha256()
+with open(source, "rb") as handle:
+    fields = (("source", handle.read()), ("role", role.encode()),
+              ("args", json.dumps(args).encode()), ("encoder", encoder.encode()))
+for name, value in fields:
+    digest.update(b"%s %d\n" % (name.encode(), len(value)) + value)
+print(digest.hexdigest())
+' "$@"
+}
+
+cache_publish() {   # <encoded file> <key>
+    tmp="$(mktemp "$CACHE/.$2.XXXXXXXX" 2>/dev/null)" && cp "$1" "$tmp" 2>/dev/null &&
+        mv -f "$tmp" "$CACHE/$2.ktx2" 2>/dev/null && return 0
+    [ -z "$tmp" ] || rm -f "$tmp"
+    echo "cache ▸ off — cannot write $CACHE; encoding the remaining images uncached"
+    CACHE=""
+}
+
 # ── encode ───────────────────────────────────────────────────────────────────────────────────────
-# One basisu invocation per image. `roles.txt` lines are: <index> <role> <file>.
+# One basisu invocation per uncached image. `roles.txt` lines are: <index> <role> <file>.
 while read -r idx role file; do
+    src="$WORK/src/$file"
     out="$WORK/ktx2/$idx.ktx2"
     case "$role" in
         # COLOUR — sRGB metrics (basisu's default) and sRGB-correct mip filtering: `-mip_srgb`
@@ -127,9 +182,18 @@ while read -r idx role file; do
             set -- -uastc -uastc_level 2 -linear -mip_linear ;;
         *) echo "unknown role: $role" >&2; exit 1 ;;
     esac
-    "$BASISU" "$@" -ktx2 -ktx2_zstandard_level 9 -mipmap \
-        -file "$WORK/src/$file" -output_file "$out" >"$WORK/ktx2/$idx.log" 2>&1 ||
+    # Every encoding flag lives in "$@" from here on; the key hashes that list, and the invocation
+    # adds nothing to it but the two paths.
+    set -- "$@" -ktx2 -ktx2_zstandard_level 9 -mipmap
+    key=""
+    [ -z "$CACHE" ] || key="$(cache_key "$src" "$role" "$ENCODER" "$@")"
+    if [ -n "$key" ] && cp "$CACHE/$key.ktx2" "$out" 2>/dev/null; then
+        echo "ktx2  ▸ [$idx] $role $(basename "$file") — cached"
+        continue
+    fi
+    "$BASISU" "$@" -file "$src" -output_file "$out" >"$WORK/ktx2/$idx.log" 2>&1 ||
         { echo "basisu failed on image $idx ($file) — see $WORK/ktx2/$idx.log" >&2; exit 1; }
+    [ -z "$CACHE" ] || cache_publish "$out" "$key"
     echo "ktx2  ▸ [$idx] $role $(basename "$file") — $(du -h "$out" | cut -f1)"
 done < "$WORK/roles.txt"
 
