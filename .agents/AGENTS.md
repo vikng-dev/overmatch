@@ -2,11 +2,11 @@
 
 ### Issue tracker
 
-Issues and PRDs live as local markdown files under `.agents/scratch/<feature>/`. See `.agents/docs/issue-tracker.md`.
+Issues live on GitHub (`vikng-dev/overmatch`, public): epics are parent issues labelled `epic`, tasks are their native sub-issues, dependencies are native "blocked by" edges. See `.agents/docs/issue-tracker.md`. The skills themselves are vendored under `.claude/skills/`.
 
 ### Triage labels
 
-Five canonical triage roles, using the default label strings. See `.agents/docs/triage-labels.md`.
+Five canonical triage roles as GitHub labels with the default strings, plus `bug`/`enhancement`, `epic` and `wayfinder:*`. See `.agents/docs/triage-labels.md`.
 
 ### Domain docs
 
