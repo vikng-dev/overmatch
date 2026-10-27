@@ -1770,10 +1770,13 @@ pub(crate) mod tests {
     /// slope and at the grid's edge (where the oracle clamps), at every cut and three bins, must
     /// derive to these exact f32 bits of the hinge, the tilt and the seat on every platform —
     /// the lying collider is sim state every peer derives alone, so a peer that differs by one
-    /// ulp has a different world. The rows pin the scan's step and the halvings (a coarser or
-    /// finer step, a halving fewer or more, or the midpoint taken the other way lands on other
-    /// bits of the touching end), the sample's radius offset, libm's trig in place of the
-    /// platform's, the oracle's clamp at the edge, and the seat formula — `2r` beside the stump
+    /// ulp has a different world. The rows pin the pose's bits. A tilt is the touching end of
+    /// the bracket the scan finds, bisected to adjacent floats: a halving past that is a no-op,
+    /// and where contact is monotone it is the float a bisection of the whole range reaches too,
+    /// so the cut-0 rows carry that bisection's bits and the ridge test, not these rows, tells
+    /// the scan from it. What moves a row: the midpoint taken the other way (the bracket's far
+    /// end comes back), the sample's radius offset dropped, the platform's trig in place of
+    /// libm's, the oracle's clamp at the edge, and the seat formula — `2r` beside the stump
     /// along the bin, `r` above the terrain THERE (a seat read at the base's height moves every
     /// slope and edge row above the base). The cut-0 rows reach the terrain about the cut and
     /// pin the hinge search; the rows above the base reach nothing by 100° about the cut and pin

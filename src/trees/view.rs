@@ -477,8 +477,12 @@ mod tests {
     /// derive computes at rest, which the sim's lying piece shares. A seat no lower than the
     /// stump's top drops nothing, and B takes its 0.2 s floor. A presentation that stops
     /// redrawing once a phase reaches one, before writing that frame's pose, leaves the node
-    /// short of the rest; one that moves the origin during A, or ends B at
-    /// `hinge + (tilt − hinge)` instead of the tilt itself (an ulp off in general), reds this.
+    /// short of the rest; one that moves the origin during A reds this, and one that ends B at
+    /// `hinge + (tilt − hinge)` instead of the tilt itself reds the third case, whose pair —
+    /// hinge 90°, tilt 0.3 rad, fixture data — is a DERIVED f32 counterexample: that sum reads
+    /// one ulp above 0.3. Mid-B the origin drops with `phase²` and the turn runs linearly from
+    /// the hinge to the tilt, read off the tick count independently of the presentation's own
+    /// arithmetic; a linear drop, a quadratic turn or a reversed trajectory reds that frame.
     #[test]
     fn a_fall_ends_on_the_resting_pose() {
         let yaw = Quat::from_xyzw(0.0, libm::sinf(0.35), 0.0, libm::cosf(0.35));
@@ -486,11 +490,12 @@ mod tests {
         // The fixture's piece above cut 1 is 4 m, a one-second stage A: 64 ticks at 64 Hz
         // (DERIVED). Its butt drops 1.8 m from the stump's 2 m top to a seat 0.2 m up in
         // 0.606 s, 38.8 ticks (DERIVED: sqrt(2 × 1.8 / 9.81)); a seat 2.5 m up drops nothing,
-        // 0.2 s, 12.8 ticks.
-        for (seat_y, b_ticks) in [(0.2_f32, 39_u32), (2.5, 13)] {
+        // 0.2 s, 12.8 ticks. The third case is the first with the rounding-sensitive tilt.
+        for (seat_y, b_ticks, tilt) in [(0.2_f32, 39_u32, 1.6_f32), (2.5, 13, 1.6), (0.2, 39, 0.3)]
+        {
             let resting = Resting {
                 hinge: FRAC_PI_2,
-                tilt: 1.6,
+                tilt,
                 seat: Vec3::new(0.4, seat_y, 0.0),
                 dx: 1.0,
                 dz: 0.0,
@@ -569,14 +574,23 @@ mod tests {
             assert_eq!(node(&app).translation, standing[1]);
             at(&mut app, 64 + b_ticks / 2);
             let mid_b = node(&app);
+            let drop = (body.prefix[1] - seat_y).max(0.0);
+            let slide = ((64 + b_ticks / 2) as f32 / 64.0 - 1.0) / slide_duration_s(drop);
+            let dropped = standing[1] + (rest - standing[1]) * (slide * slide);
+            let turning = fall_rotation(
+                &resting,
+                yaw,
+                resting.hinge + (resting.tilt - resting.hinge) * slide,
+            );
             assert!(
-                mid_b.translation != standing[1] && mid_b.translation != rest,
-                "stage B: the origin is on its way to the seat: {}",
+                mid_b.translation.abs_diff_eq(dropped, 1e-5),
+                "seat {seat_y}: stage B drops the origin with phase²: {} for {dropped}",
                 mid_b.translation
             );
             assert!(
-                mid_b.rotation != hinge_turn && mid_b.rotation != rest_turn,
-                "stage B: a turn between the hinge and the tilt"
+                mid_b.rotation.abs_diff_eq(turning, 1e-5),
+                "seat {seat_y}: stage B turns linearly from the hinge to the tilt: {} for {turning}",
+                mid_b.rotation
             );
             at(&mut app, 64 + b_ticks - 1);
             assert_ne!(
