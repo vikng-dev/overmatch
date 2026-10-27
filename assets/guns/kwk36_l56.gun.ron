@@ -1,4 +1,5 @@
-// The 8.8 cm KwK 36: every round it chambers and the muzzle speed it fires each at.
+// The 8.8 cm KwK 36: every round it chambers and the muzzle speed it fires each at, its
+// single-shot mechanism and its report.
 // The file's fields are `src/guns.rs`'s module doc.
 (
     names: [
@@ -15,4 +16,15 @@
         "88mm_APCR": (muzzle_speed: (930.0, Measured("Jentz & Doyle, Tiger I Heavy Tank 1942-45,
             Osprey New Vanguard 5 (1993), p.17"))),
     },
+    // One round per trigger edge; the reload is the mount's.
+    mechanism: Single,
+    // Five takes of the 88's report, one rolled per round (never the same take twice in a row).
+    // The list is the gun's sound: adding a take is a line here, and a gun with no takes is silent.
+    report_clips: [
+        "sfx/explosion/88_cannon_1.ogg",
+        "sfx/explosion/88_cannon_2.ogg",
+        "sfx/explosion/88_cannon_3.ogg",
+        "sfx/explosion/88_cannon_4.ogg",
+        "sfx/explosion/88_cannon_5.ogg",
+    ],
 )

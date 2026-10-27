@@ -636,7 +636,7 @@ fn recover_unannounced_rounds(
                 // The round's belt phase died with the announcement; a recovered round
                 // presents traced — the visible arm of the self-heal.
                 tracer: true,
-                mechanism: weapon.fire_mode.mechanism(),
+                mechanism: weapon.fire_cycle.mechanism(),
                 shooter: ShotSource {
                     tank: root,
                     weapon: slot,
@@ -1634,7 +1634,7 @@ mod tests {
                 rounds: ["88mm_AP", "88mm_APCR"]
                     .map(|key| crate::tank::WeaponRound::resolve(key).expect("a shipped round"))
                     .to_vec(),
-                fire_mode: crate::spec::FireMode::Single { reload_secs: 6.0 },
+                fire_cycle: crate::spec::FireCycle::Single { reload_secs: 6.0 },
                 recoil: None,
                 barrel: None,
                 fire: vec![],

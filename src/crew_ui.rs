@@ -10,7 +10,7 @@ use crate::damage::{
     TankVolumes, VolumeFacets, VolumeOf, capability_effectiveness, evaluate, part_qualities,
 };
 use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
-use crate::spec::{FireMode, ViewKind};
+use crate::spec::{FireCycle, ViewKind};
 use crate::tank::{
     Controlled, TankRoot, TankViews, Weapon, WeaponIndex, WeaponLoad, WeaponLoads, WeaponRound,
 };
@@ -107,13 +107,13 @@ pub(crate) fn spawn_status_panel(mut commands: Commands, fonts: Res<UiFonts>) {
 /// tease a reload or swap countdown (a dead gun's ready deadline advances to preserve its remaining
 /// work, so the derived countdown would otherwise stick forever).
 fn weapon_status(
-    fire_mode: FireMode,
+    fire_cycle: FireCycle,
     no_fire: bool,
     remaining_secs: f32,
     belt_remaining: u32,
 ) -> String {
-    match fire_mode {
-        FireMode::Single { .. } => {
+    match fire_cycle {
+        FireCycle::Single { .. } => {
             if no_fire {
                 "no-fire".to_string()
             } else if remaining_secs > 0.0 {
@@ -122,7 +122,7 @@ fn weapon_status(
                 "READY".to_string()
             }
         }
-        FireMode::Automatic { .. } => {
+        FireCycle::Automatic { .. } => {
             if no_fire {
                 "no-fire".to_string()
             } else if belt_remaining == 0 {
@@ -235,7 +235,7 @@ fn update_status_panel(
                 state.remaining_ticks(weapon_clock.0) as f32 * fixed_time.timestep().as_secs_f32();
             let no_fire = evaluate(&weapon.fire, &quality) <= 0.0;
             let status = weapon_status(
-                weapon.fire_mode,
+                weapon.fire_cycle,
                 no_fire,
                 remaining_secs,
                 state.belt_remaining,
@@ -402,13 +402,13 @@ fn update_crew_bar(
 mod tests {
     use super::*;
 
-    const AUTO: FireMode = FireMode::Automatic {
-        rpm: 750.0,
+    const AUTO: FireCycle = FireCycle::Automatic {
+        cyclic_rpm: 750.0,
         belt_size: 150,
         belt_swap_secs: 3.5,
         tracer_every: 5,
     };
-    const SINGLE: FireMode = FireMode::Single { reload_secs: 3.0 };
+    const SINGLE: FireCycle = FireCycle::Single { reload_secs: 3.0 };
 
     /// The crew-gate/no-fire state wins over every timer readout, in BOTH fire modes: a weapon that
     /// can't fire reads `no-fire`, never a (frozen) reload or swap countdown. This is the regression

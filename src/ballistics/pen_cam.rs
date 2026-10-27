@@ -175,7 +175,7 @@ fn record_edited(
         .as_deref()
         .unwrap_or_else(|| weapon.default_round_key());
     let round = crate::guns::GunRegistry::shipped()
-        .round_by_key(key)
+        .round(&weapon.gun, key)
         .unwrap_or_else(|err| panic!("{}: {err}", scenario.name));
     let body = round.body;
     let speed = scenario.speed.unwrap_or(round.muzzle_speed);

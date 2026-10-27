@@ -773,7 +773,7 @@ fn fire_round(
         &loaded.round,
         transform.translation,
         transform.forward(),
-        gun.fire_mode.mechanism(),
+        gun.fire_cycle.mechanism(),
         true,
         Some(ShotSource {
             tank: camera,

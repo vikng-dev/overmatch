@@ -4,22 +4,29 @@
 //! round fired from a gun, and nowhere else does a round get a speed.
 //!
 //! Entry points: [`GunRegistry::shipped`] (embedded, parsed once), [`GunRegistry::round`] (a round
-//! through the gun that fires it) and [`GunRegistry::round_by_key`] (a round through the one gun
-//! whose table lists it, for a reader that holds a round key and no gun).
+//! through the gun that fires it), [`GunRegistry::gun`] (a gun's mechanism and report) and
+//! [`GunRegistry::round_by_key`] (a round through the one gun whose table lists it, for a reader
+//! that holds a round key and no gun).
 //!
 //! # A gun file
 //!
 //! `names`: the gun's display designations, several where one tube was named for several cradles;
-//! `caliber`: its nominal calibre (m); `ammunition`: `{ "<round key>": (muzzle_speed: (m/s, Kind)) }`.
-//! The names and the calibre are validated and read by nothing yet. Every value is authored
+//! `caliber`: its nominal calibre (m); `ammunition`: `{ "<round key>": (muzzle_speed: (m/s, Kind)) }`;
+//! `mechanism`: `Single` (one round per trigger edge) or `Automatic(cyclic_rpm: (rpm, Kind))` (a
+//! belt fired on a held trigger, one round every 60/rpm s); `report_clips`: the gun's report takes
+//! (asset-relative paths, one rolled per round fired; `[]` is a silent gun, a decision). The names
+//! and the calibre are validated and read by nothing yet. Every number is authored
 //! `(value, Kind("source or reason"))` ([`crate::provenance`]); a value without one does not load.
+//! A tank's mount names its gun ([`crate::spec::WeaponSpec::gun`]): the mount's reload or belt joins
+//! the gun's mechanism there.
 //!
 //! # What loads
 //!
 //! Each a load error naming the gun: no name, or one the shipped font does not draw whole; a calibre
-//! not finite and positive; an empty ammunition table, or one naming a round twice; a row naming no
-//! round; a row whose round the force law cannot state at its speed ([`RoundFacts::fired_at`]). And
-//! for the registry as a whole: a round no gun's table lists, which no shot could ever fire.
+//! not finite and positive; a cyclic rate not finite and positive; an empty ammunition table, or one
+//! naming a round twice; a row naming no round; a row whose round the force law cannot state at its
+//! speed ([`RoundFacts::fired_at`]). And for the registry as a whole: a round no gun's table lists,
+//! which no shot could ever fire.
 //!
 //! [`RoundFacts::fired_at`]: crate::rounds::RoundFacts::fired_at
 
@@ -28,6 +35,7 @@ use std::collections::BTreeMap;
 
 use crate::provenance::Sourced;
 use crate::rounds::{KeyedMap, Round, RoundError, RoundRegistry};
+use crate::spec::FireMechanism;
 
 /// One gun as authored.
 #[derive(Deserialize)]
@@ -36,6 +44,40 @@ struct GunFile {
     names: Vec<Sourced<String>>,
     caliber: Sourced<f32>,
     ammunition: KeyedMap<AmmunitionFile>,
+    mechanism: MechanismFile,
+    report_clips: Vec<String>,
+}
+
+/// A gun's mechanism as authored.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+enum MechanismFile {
+    Single,
+    Automatic {
+        /// Rounds per minute.
+        cyclic_rpm: Sourced<f32>,
+    },
+}
+
+/// A gun's mechanism, validated. A mount's fire mode is of the same family
+/// ([`crate::spec::WeaponSpec::fire_cycle`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Mechanism {
+    /// One round per trigger edge; the reload is the mount's.
+    Single,
+    /// A belt fired on a held trigger, one round every `60 / cyclic_rpm` s — pure mechanism, never
+    /// gated on crew; the belt is the mount's.
+    Automatic { cyclic_rpm: f32 },
+}
+
+impl Mechanism {
+    /// The family a mount's fire mode must share.
+    pub(crate) fn family(self) -> FireMechanism {
+        match self {
+            Self::Single => FireMechanism::Single,
+            Self::Automatic { .. } => FireMechanism::Automatic,
+        }
+    }
 }
 
 /// One row of a gun's ammunition table as authored.
@@ -46,10 +88,24 @@ struct AmmunitionFile {
     muzzle_speed: Sourced<f32>,
 }
 
-/// One gun, validated: each round its table lists, fired at the speed the table gives it.
+/// One gun, validated: each round its table lists, fired at the speed the table gives it, its
+/// mechanism and its report.
 #[derive(Clone, Debug)]
-struct Gun {
+pub(crate) struct Gun {
     ammunition: BTreeMap<String, Round>,
+    mechanism: Mechanism,
+    report_clips: Vec<String>,
+}
+
+impl Gun {
+    pub(crate) fn mechanism(&self) -> Mechanism {
+        self.mechanism
+    }
+
+    /// The report takes, asset-relative; empty for a silent gun.
+    pub(crate) fn report_clips(&self) -> &[String] {
+        &self.report_clips
+    }
 }
 
 /// Why a gun registry, or a lookup in one, failed. Every arm names the offending text.
@@ -129,6 +185,20 @@ fn resolved(file: GunFile, rounds: &RoundRegistry) -> Result<Gun, String> {
             "caliber must be finite and positive (got {caliber})"
         ));
     }
+    let mechanism = match file.mechanism {
+        MechanismFile::Single => Mechanism::Single,
+        MechanismFile::Automatic {
+            cyclic_rpm: Sourced(cyclic_rpm),
+        } => {
+            if !cyclic_rpm.is_finite() || cyclic_rpm <= 0.0 {
+                return Err(format!(
+                    "Automatic.cyclic_rpm must be finite and positive (the cyclic interval is \
+                     60/rpm; got {cyclic_rpm})"
+                ));
+            }
+            Mechanism::Automatic { cyclic_rpm }
+        }
+    };
     if file.ammunition.0.is_empty() {
         return Err("the ammunition table is empty — a gun chambers at least one round".into());
     }
@@ -147,7 +217,11 @@ fn resolved(file: GunFile, rounds: &RoundRegistry) -> Result<Gun, String> {
             Ok((key, round))
         })
         .collect::<Result<_, String>>()?;
-    Ok(Gun { ammunition })
+    Ok(Gun {
+        ammunition,
+        mechanism,
+        report_clips: file.report_clips,
+    })
 }
 
 /// The parsed, validated gun files.
@@ -213,17 +287,18 @@ impl GunRegistry {
         &REGISTRY
     }
 
+    /// The gun keyed `gun`, or the error naming it.
+    pub(crate) fn gun(&self, gun: &str) -> Result<&Gun, GunError> {
+        self.guns.get(gun).ok_or_else(|| GunError::Unknown {
+            name: gun.to_owned(),
+            known: self.guns.keys().cloned().collect(),
+        })
+    }
+
     /// Round `round` fired from gun `gun`, at the speed its ammunition table gives it; a hard error
     /// naming an unknown gun, an unknown round, or a round the gun does not chamber.
     pub(crate) fn round(&self, gun: &str, round: &str) -> Result<Round, GunError> {
-        let table = &self
-            .guns
-            .get(gun)
-            .ok_or_else(|| GunError::Unknown {
-                name: gun.to_owned(),
-                known: self.guns.keys().cloned().collect(),
-            })?
-            .ammunition;
+        let table = &self.gun(gun)?.ammunition;
         table.get(round).copied().ok_or_else(|| {
             if self.rounds.iter().any(|key| key == round) {
                 GunError::NotChambered {
@@ -283,9 +358,14 @@ mod tests {
             .expect("the fixture rounds load")
     }
 
-    /// A gun file of name `name`, calibre `caliber` and ammunition `rows` (`(round, speed)`), each
-    /// value with a fixture provenance.
+    /// A gun file of name `name`, calibre `caliber` and ammunition `rows` (`(round, speed)`), a
+    /// single-shot silent gun, each value with a fixture provenance.
     fn gun_file(name: &str, caliber: &str, rows: &[(&str, &str)]) -> String {
+        gun_file_with(name, caliber, rows, "Single")
+    }
+
+    /// [`gun_file`] with mechanism `mechanism` as authored.
+    fn gun_file_with(name: &str, caliber: &str, rows: &[(&str, &str)], mechanism: &str) -> String {
         let rows = rows
             .iter()
             .map(|(round, speed)| {
@@ -295,7 +375,7 @@ mod tests {
             .join(", ");
         format!(
             r#"(names: [({name:?}, Tuned("fixture"))], caliber: ({caliber}, Tuned("fixture")),
-                ammunition: {{ {rows} }})"#
+                ammunition: {{ {rows} }}, mechanism: {mechanism}, report_clips: [])"#
         )
     }
 
@@ -416,9 +496,10 @@ mod tests {
 
     /// THE PURE-REFACTOR GATE. Every shipped round, read through the gun that fires it, is field for
     /// field the record the single round registry gave before the split ([`PINS`], to the bit);
-    /// and so is every round the shipped tank's mounts load, read as spawn reads it. The laws,
-    /// the shot and every pinned digest read this record, so a mutant that moves any row's muzzle
-    /// speed, any type's or round's nose, a core, a crew line rate or a burst input fails here.
+    /// and so is every round the shipped tank stows, read through its mount's gun as spawn reads
+    /// it. The laws, the shot and every pinned digest read this record, so a mutant that moves any
+    /// row's muzzle speed, any type's or round's nose, a core, a crew line rate or a burst input
+    /// fails here.
     #[test]
     fn every_round_reads_through_its_gun_as_the_single_registry_gave_it() {
         let guns = GunRegistry::shipped();
@@ -442,19 +523,26 @@ mod tests {
             let rounds = weapon
                 .resolved_rounds()
                 .unwrap_or_else(|err| panic!("{mount}: {err}"));
-            assert_eq!(rounds.len(), weapon.rounds.len(), "{mount}");
-            for (key, round) in weapon.rounds.iter().zip(rounds) {
+            assert_eq!(rounds.len(), weapon.stowage.len(), "{mount}");
+            for (stowed, round) in weapon.stowage.iter().zip(rounds) {
+                let key = stowed.round.as_str();
                 let pin = pinned
-                    .get(key.as_str())
+                    .get(key)
                     .unwrap_or_else(|| panic!("{mount}: {key} is not pinned"));
                 assert_eq!(&round, pin, "{mount}: {key}");
+                assert_eq!(
+                    guns.round(&weapon.gun, key).as_ref(),
+                    Ok(pin),
+                    "{mount}: {key}"
+                );
             }
         }
     }
 
     /// Every shipped gun loads, every shipped round is chambered by exactly one of them, and every
     /// row of every table is inside the force law's domain (`fired_at`, at load). A mutant that
-    /// lets a round no gun lists load leaves it with no speed, a shot nothing can fire.
+    /// lets a round no gun lists load leaves it with no speed, a shot nothing can fire. Every
+    /// report take names an `.ogg`: the sound loader resolves the path verbatim.
     #[test]
     fn every_shipped_round_is_chambered_by_one_shipped_gun() {
         let guns = GunRegistry::shipped();
@@ -462,6 +550,14 @@ mod tests {
         for key in RoundRegistry::shipped().keys() {
             guns.round_by_key(key)
                 .unwrap_or_else(|err| panic!("{key}: {err}"));
+        }
+        for (key, gun) in &guns.guns {
+            for clip in gun.report_clips() {
+                assert!(
+                    clip.ends_with(".ogg"),
+                    "gun {key:?}: report clip `{clip}` must name an .ogg"
+                );
+            }
         }
     }
 
@@ -484,18 +580,24 @@ mod tests {
     }
 
     /// Each refusal of one gun file names the gun and the field: no name or an undrawable one, a
-    /// calibre not finite and positive, an empty table, a row naming no round, a round outside
-    /// the force law's domain at its speed, a speed without provenance and a round listed twice.
-    /// Every one would otherwise hand the shot a round it cannot state, or a gun nobody can show.
+    /// calibre not finite and positive, a cyclic rate not finite and positive, an empty table, a row
+    /// naming no round, a round outside the force law's domain at its speed, a speed or a cyclic
+    /// rate without provenance and a round listed twice. Every one would otherwise hand the shot a
+    /// round it cannot state, a belt with no cyclic interval, or a gun nobody can show.
     #[test]
     fn a_gun_that_cannot_fire_or_be_shown_is_refused() {
         let rounds = fixture_rounds(&["Probe"]);
         let load = |text: String| GunRegistry::from_files(&[("Gun", &text)], &rounds);
         load(gun_file("Gun Mk. 1", "0.05", &[("Probe", "700.0")])).expect("the fixture gun loads");
+        let belt =
+            |mechanism: &str| gun_file_with("Gun Mk. 1", "0.05", &[("Probe", "700.0")], mechanism);
+        load(belt(r#"Automatic(cyclic_rpm: (600.0, Tuned("x")))"#))
+            .expect("the fixture belt gun loads");
         for (text, word) in [
             (
                 r#"(names: [], caliber: (0.05, Tuned("x")),
-                    ammunition: { "Probe": (muzzle_speed: (700.0, Tuned("x"))) })"#
+                    ammunition: { "Probe": (muzzle_speed: (700.0, Tuned("x"))) },
+                    mechanism: Single, report_clips: [])"#
                     .to_owned(),
                 "names",
             ),
@@ -515,6 +617,14 @@ mod tests {
             (gun_file("Gun Mk. 1", "0.05", &[("Nope", "700.0")]), "Nope"),
             (gun_file("Gun Mk. 1", "0.05", &[("Probe", "0.0")]), "speed"),
             (gun_file("Gun Mk. 1", "0.05", &[("Probe", "NaN")]), "speed"),
+            (
+                belt(r#"Automatic(cyclic_rpm: (0.0, Tuned("x")))"#),
+                "cyclic_rpm",
+            ),
+            (
+                belt(r#"Automatic(cyclic_rpm: (NaN, Tuned("x")))"#),
+                "cyclic_rpm",
+            ),
         ] {
             let err = load(text).unwrap_err();
             assert!(
@@ -526,17 +636,22 @@ mod tests {
         for (text, word) in [
             (
                 r#"(names: [("Gun Mk. 1", Tuned("x"))], caliber: (0.05, Tuned("x")),
-                    ammunition: { "Probe": (muzzle_speed: 700.0) })"#,
+                    ammunition: { "Probe": (muzzle_speed: 700.0) }, mechanism: Single,
+                    report_clips: [])"#
+                    .to_owned(),
                 "provenance",
             ),
+            (belt("Automatic(cyclic_rpm: 600.0)"), "provenance"),
             (
                 r#"(names: [("Gun Mk. 1", Tuned("x"))], caliber: (0.05, Tuned("x")),
                     ammunition: { "Probe": (muzzle_speed: (700.0, Tuned("x"))),
-                                  "Probe": (muzzle_speed: (710.0, Tuned("x"))) })"#,
+                                  "Probe": (muzzle_speed: (710.0, Tuned("x"))) },
+                    mechanism: Single, report_clips: [])"#
+                    .to_owned(),
                 "twice",
             ),
         ] {
-            let err = load(text.to_owned()).unwrap_err();
+            let err = load(text).unwrap_err();
             assert!(
                 matches!(&err, GunError::Parse { gun, err } if gun == "Gun" && err.contains(word)),
                 "{word}: {err}"

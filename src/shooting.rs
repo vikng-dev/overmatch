@@ -1,4 +1,4 @@
-//! The player's gun control: fire per each weapon's [`FireMode`] (a `Single`'s click → one shell
+//! The player's gun control: fire per each weapon's [`FireCycle`] (a `Single`'s click → one shell
 //! plus a crew-gated reload; an `Automatic`'s held trigger → cyclic fire off a finite belt, with a
 //! crew-gated belt swap when it runs dry), raising a `ballistics::FireShell` per round, and recoil
 //! the barrel. The trajectory itself lives in `ballistics` — this module owns only what makes it
@@ -13,7 +13,7 @@ use bevy::prelude::*;
 use crate::ballistics::{FireShell, ShotSource};
 use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::{TankVolumes, VolumeFacets, requirement_met};
-use crate::spec::{FireMode, Trigger};
+use crate::spec::{FireCycle, Trigger};
 use crate::state::{AppState, GameplaySet, SimPhase};
 use crate::tank::{
     Muzzle, Tank, TankRoot, TankSim, Weapon, WeaponGate, WeaponIndex, WeaponLoads, rig_world_pose,
@@ -70,7 +70,7 @@ pub(crate) fn kick_recoil(sim: &mut TankSim, slot: usize, weapon: &Weapon) {
 }
 
 /// Whether the `rounds_fired`-th round down a belt with cadence `tracer_every` is a tracer. Pure
-/// belt arithmetic (see [`crate::spec::FireMode::Automatic`]'s `tracer_every` — only the
+/// belt arithmetic (see [`crate::spec::FireCycle::Automatic`]'s `tracer_every` — only the
 /// `Automatic` arm of [`fire`] calls this; a `Single`'s round always traces): every
 /// `tracer_every`-th round traces, counting the belt from the first round (index 0). `1` = every
 /// round; `5` = rounds 0, 5, 10, … (one-in-five); `0` = a tracerless belt, never. Both the server
@@ -131,7 +131,7 @@ fn duration_ticks(seconds: f32, timestep: Duration) -> u32 {
     u32::try_from(ticks).expect("authored weapon delay exceeds u32 ticks")
 }
 
-/// Mature every weapon's absolute readiness deadline, with the crew gate applied per [`FireMode`]:
+/// Mature every weapon's absolute readiness deadline, with the crew gate applied per [`FireCycle`]:
 ///
 /// * `Single`: unmet `load` advances `ready_tick` one-for-one, preserving the remaining reload.
 /// * `Automatic`, belt has rounds: the cyclic deadline matures without a crew gate.
@@ -161,8 +161,8 @@ fn tick_weapon_gate(
         if state.ready_tick.is_none() {
             continue;
         }
-        match weapon.fire_mode {
-            FireMode::Single { .. } => {
+        match weapon.fire_cycle {
+            FireCycle::Single { .. } => {
                 if requirement_met(tank_volumes, &weapon.load, &volumes) {
                     state.resume(now);
                     if state.deadline_reached(now) {
@@ -172,7 +172,7 @@ fn tick_weapon_gate(
                     state.pause(now);
                 }
             }
-            FireMode::Automatic { belt_size, .. } => {
+            FireCycle::Automatic { belt_size, .. } => {
                 if state.belt_remaining > 0 {
                     if state.deadline_reached(now) {
                         state.ready_tick = None;
@@ -192,11 +192,11 @@ fn tick_weapon_gate(
 }
 
 /// Fire each tank's weapons whose trigger its command holds this tick — THE one fire system, a
-/// `match` on [`FireMode`] per weapon, never per-mechanism systems (the schedule edges above are
+/// `match` on [`FireCycle`] per weapon, never per-mechanism systems (the schedule edges above are
 /// determinism-load-bearing and must stay singular). `Trigger` is pure input ROUTING (which
 /// command field the weapon reads); the input *semantics* come from the mode: a `Single` weapon
 /// consumes a latched click edge (`fire_primary`-style, one tick per click), an `Automatic` reads
-/// a held level and cycles at 60/rpm from a finite belt. Each weapon fires from its *own* muzzle
+/// a held level and cycles at the gun's 60/rpm from a finite belt. Each weapon fires from its *own* muzzle
 /// and ballistics, gated by its `fire` requirement + fire timer (+ belt for an `Automatic`) — the
 /// gate lives here in the sim, where the server will enforce it, not in the input path.
 #[expect(
@@ -255,9 +255,9 @@ fn fire(
             .and_then(|gate| gate.weapons.get(slot.0))
             .is_some_and(|w| {
                 w.is_ready()
-                    && match weapon.fire_mode {
-                        FireMode::Single { .. } => true,
-                        FireMode::Automatic { .. } => w.belt_remaining > 0,
+                    && match weapon.fire_cycle {
+                        FireCycle::Single { .. } => true,
+                        FireCycle::Automatic { .. } => w.belt_remaining > 0,
                     }
             });
         if !triggered || !ready || !requirement_met(tank_volumes, &weapon.fire, &volumes) {
@@ -304,9 +304,9 @@ fn fire(
         let tracer = if let Ok(mut sim) = sims.get_mut(root.0) {
             match sim.weapons.get_mut(slot.0) {
                 Some(state) => {
-                    let is_tracer = match weapon.fire_mode {
-                        FireMode::Single { .. } => true,
-                        FireMode::Automatic { tracer_every, .. } => {
+                    let is_tracer = match weapon.fire_cycle {
+                        FireCycle::Single { .. } => true,
+                        FireCycle::Automatic { tracer_every, .. } => {
                             tracer_round(state.rounds_fired, tracer_every)
                         }
                     };
@@ -344,7 +344,7 @@ fn fire(
                 &fired.round,
                 muzzle_position,
                 bore,
-                weapon.fire_mode.mechanism(),
+                weapon.fire_cycle.mechanism(),
                 tracer,
                 // This shell belongs to a tank: name its root, the firing weapon slot and the round
                 // so the net server can broadcast the cosmetic tracer and the barrel-recoil cause to
@@ -378,10 +378,10 @@ fn fire(
         if let Ok(mut gate) = gates.get_mut(root.0)
             && let Some(state) = gate.weapons.get_mut(slot.0)
         {
-            let delay_secs = match weapon.fire_mode {
-                FireMode::Single { reload_secs } => reload_secs,
-                FireMode::Automatic {
-                    rpm,
+            let delay_secs = match weapon.fire_cycle {
+                FireCycle::Single { reload_secs } => reload_secs,
+                FireCycle::Automatic {
+                    cyclic_rpm,
                     belt_swap_secs,
                     ..
                 } => {
@@ -389,7 +389,7 @@ fn fire(
                     if state.belt_remaining == 0 {
                         belt_swap_secs
                     } else {
-                        60.0 / rpm
+                        60.0 / cyclic_rpm
                     }
                 }
             };
@@ -476,20 +476,20 @@ mod tests {
     use super::{advance_weapon_clock, fire, plugin, tick_weapon_gate, tracer_round};
     use crate::command::{RoundSelect, RoundStep, TankCommand};
     use crate::damage::{CrewStation, Dead, Group, Part, Requirement, VolumeOf};
-    use crate::spec::{FireMode, Trigger};
+    use crate::spec::{FireCycle, Trigger};
     use crate::tank::{
         Muzzle, Tank, TankRoot, TankSim, Weapon, WeaponGate, WeaponGateState, WeaponIndex,
         WeaponLoad, WeaponLoads, WeaponRound, WeaponState,
     };
 
-    /// The belt-fed test mode: 600 rpm = a 0.1 s cyclic interval, a 2-round belt, a 1 s swap.
-    const MG_MODE: FireMode = FireMode::Automatic {
-        rpm: 600.0,
+    /// The belt-fed test cycle: 600 rpm = a 0.1 s cyclic interval, a 2-round belt, a 1 s swap.
+    const MG_CYCLE: FireCycle = FireCycle::Automatic {
+        cyclic_rpm: 600.0,
         belt_size: 2,
         belt_swap_secs: 1.0,
         tracer_every: 5,
     };
-    const MAIN_GUN_MODE: FireMode = FireMode::Single { reload_secs: 0.5 };
+    const MAIN_GUN_CYCLE: FireCycle = FireCycle::Single { reload_secs: 0.5 };
 
     /// The absolute gate's tick arithmetic never wraps: deadlines compare in numeric order (a
     /// deadline at `u32::MAX` is not reached at tick 0), the last tick is reachable, no deadline is
@@ -580,7 +580,7 @@ mod tests {
                     weapons: vec![WeaponState::default()],
                 },
                 WeaponGate {
-                    weapons: vec![WeaponGateState::for_mode(&MG_MODE)],
+                    weapons: vec![WeaponGateState::for_cycle(&MG_CYCLE)],
                 },
                 WeaponLoads {
                     weapons: vec![WeaponLoad::default()],
@@ -598,7 +598,7 @@ mod tests {
             Weapon {
                 name: "MG".into(),
                 rounds: vec![WeaponRound::resolve("7.9mm_AP").expect("a shipped round")],
-                fire_mode: MG_MODE,
+                fire_cycle: MG_CYCLE,
                 recoil: None,
                 barrel: None,
                 fire: Vec::new(),
@@ -624,7 +624,7 @@ mod tests {
                     weapons: vec![WeaponState::default()],
                 },
                 WeaponGate {
-                    weapons: vec![WeaponGateState::for_mode(&MAIN_GUN_MODE)],
+                    weapons: vec![WeaponGateState::for_cycle(&MAIN_GUN_CYCLE)],
                 },
                 WeaponLoads {
                     weapons: vec![WeaponLoad::default()],
@@ -644,7 +644,7 @@ mod tests {
                 rounds: ["88mm_AP", "88mm_APCR"]
                     .map(|key| WeaponRound::resolve(key).expect("a shipped round"))
                     .into(),
-                fire_mode: MAIN_GUN_MODE,
+                fire_cycle: MAIN_GUN_CYCLE,
                 recoil: None,
                 barrel: None,
                 fire: Vec::new(),

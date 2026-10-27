@@ -1,4 +1,4 @@
-// The 7.92 mm machine gun of the Tiger's coax and hull mounts.
+// The 7.92 mm machine gun of the Tiger's coax and hull mounts: belt-fed, its belt the mount's.
 // The file's fields are `src/guns.rs`'s module doc.
 (
     names: [
@@ -11,4 +11,9 @@
         "7.9mm_AP": (muzzle_speed: (755.0, Unknown("no source recorded in the repo; settled by a
             cited firing table"))),
     },
+    // A belt fired on a held trigger: 750 rpm is the 0.08 s cyclic interval, never gated on crew.
+    mechanism: Automatic(cyclic_rpm: (750.0, Unknown("no source recorded in the repo; settled by a
+        cited rate of fire"))),
+    // No MG recording in the library yet: silent until one is cut and listed here.
+    report_clips: [],
 )

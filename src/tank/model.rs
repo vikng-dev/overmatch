@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize};
 use super::servo::ServoState;
 use crate::command::TankCommand;
 use crate::damage::Requirement;
-use crate::spec::{FireMode, RecoilSpec, Trigger, ViewKind};
+use crate::spec::{FireCycle, RecoilSpec, Trigger, ViewKind};
 use crate::track::sim::{TrackContacts, TrackDrive, TrackGrip};
 
 #[derive(Component)]
@@ -63,8 +63,9 @@ pub struct Weapon {
     /// Every round the weapon can load, in authored order; index 0 is the default. A slot's
     /// [`WeaponLoad`] and a fired round's `ShotSource::round` index this list.
     pub rounds: Vec<WeaponRound>,
-    /// Reload/cyclic mechanism and its edge-versus-level input semantics.
-    pub fire_mode: FireMode,
+    /// The mount's reload or belt joined with its gun's mechanism, and with them the
+    /// edge-versus-level input semantics.
+    pub fire_cycle: FireCycle,
     pub recoil: Option<RecoilSpec>,
     pub barrel: Option<Entity>,
     /// Damage/crew gates for firing and loading.
@@ -72,7 +73,7 @@ pub struct Weapon {
     pub load: Requirement,
     /// Command channel for this weapon; independent of its mechanism.
     pub trigger: Trigger,
-    /// Authored report clips (asset-relative paths); empty = a silent weapon. `sfx` rolls one per
+    /// The gun's report clips (asset-relative paths); empty = a silent weapon. `sfx` rolls one per
     /// round off this list.
     pub report_clips: Vec<String>,
 }
@@ -90,8 +91,21 @@ pub struct WeaponRound {
 }
 
 impl WeaponRound {
+    /// The shipped round keyed `key`, fired from the shipped gun `gun`, or the error naming either.
+    pub(crate) fn fired_from(gun: &str, key: &str) -> Result<Self, crate::guns::GunError> {
+        let name = crate::rounds::RoundRegistry::shipped()
+            .name(key)
+            .map_err(crate::guns::GunError::Round)?;
+        Ok(Self {
+            key: key.to_owned(),
+            name: name.to_owned(),
+            round: crate::guns::GunRegistry::shipped().round(gun, key)?,
+        })
+    }
+
     /// The shipped round keyed `key`, fired from the one shipped gun that chambers it, or the
     /// error naming it.
+    #[cfg(test)]
     pub(crate) fn resolve(key: &str) -> Result<Self, crate::guns::GunError> {
         let name = crate::rounds::RoundRegistry::shipped()
             .name(key)
@@ -105,37 +119,44 @@ impl WeaponRound {
 }
 
 impl Weapon {
-    /// The weapon `name` as `spec` authors it, every round resolved through its gun, its
-    /// recoiling barrel `barrel`; a round key that resolves to no round is the error naming it.
+    /// The weapon `name` as `spec` authors it: every stowed round fired from the mount's gun, the
+    /// mount's fire mode joined with the gun's mechanism, the gun's report, its recoiling barrel
+    /// `barrel`. An error names what does not resolve; on a validated spec this is `Ok`.
     pub(crate) fn of_spec(
         name: &str,
         spec: &crate::spec::WeaponSpec,
         barrel: Option<Entity>,
-    ) -> Result<Self, crate::guns::GunError> {
+    ) -> Result<Self, String> {
         let rounds = spec
-            .rounds
+            .stowage
             .iter()
-            .map(|key| WeaponRound::resolve(key))
-            .collect::<Result<Vec<_>, _>>()?;
+            .map(|stowed| WeaponRound::fired_from(&spec.gun, &stowed.round))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| err.to_string())?;
+        let report_clips = crate::guns::GunRegistry::shipped()
+            .gun(&spec.gun)
+            .map_err(|err| err.to_string())?
+            .report_clips()
+            .to_vec();
         Ok(Self {
             name: name.to_owned(),
             rounds,
-            fire_mode: spec.fire_mode,
+            fire_cycle: spec.fire_cycle()?,
             recoil: spec.recoil.clone(),
             barrel,
             fire: spec.fire.clone(),
             load: spec.load.clone(),
             trigger: spec.trigger,
-            report_clips: spec.report_clips.clone(),
+            report_clips,
         })
     }
 
     /// Whether `state` is a load in progress: a `Single` reloading, an `Automatic` with a dry belt
     /// awaiting its swap. The window in which [`WeaponLoad::loaded`] follows the selection.
     pub fn is_loading(&self, state: WeaponGateState) -> bool {
-        match self.fire_mode {
-            FireMode::Single { .. } => !state.is_ready(),
-            FireMode::Automatic { .. } => state.belt_remaining == 0,
+        match self.fire_cycle {
+            FireCycle::Single { .. } => !state.is_ready(),
+            FireCycle::Automatic { .. } => state.belt_remaining == 0,
         }
     }
 }
@@ -188,7 +209,7 @@ pub struct WeaponState {
 
 /// One weapon's complete fire-eligibility state. `ready_tick` is an absolute simulation deadline:
 /// `None` with no pause means loaded/ready, while `Some(tick)` means cyclic, single reload, or belt
-/// swap according to the weapon's authored [`FireMode`] and `belt_remaining`. `paused_at_tick`
+/// swap according to the weapon's [`FireCycle`] and `belt_remaining`. `paused_at_tick`
 /// freezes crew work without changing this component again until work resumes; there is no per-tick
 /// countdown.
 ///
@@ -207,13 +228,13 @@ impl WeaponGateState {
     const EXHAUSTED_TICK: u32 = u32::MAX;
 
     /// Loaded spawn state; automatic weapons start with a full belt.
-    pub fn for_mode(mode: &FireMode) -> Self {
+    pub fn for_cycle(cycle: &FireCycle) -> Self {
         Self {
             ready_tick: None,
             paused_at_tick: None,
-            belt_remaining: match mode {
-                FireMode::Single { .. } => 0,
-                FireMode::Automatic { belt_size, .. } => *belt_size,
+            belt_remaining: match cycle {
+                FireCycle::Single { .. } => 0,
+                FireCycle::Automatic { belt_size, .. } => *belt_size,
             },
         }
     }

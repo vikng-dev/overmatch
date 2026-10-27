@@ -335,58 +335,67 @@ TankSpec(
         (node: "Wheel_R_7", side: Right),
     ],
     weapons: {
-        // fire_mode is the mechanism: the 88 is Single (one round per click, crew-gated reload —
-        // and no belt fields to author); the 7.9 mm MGs are Automatic (held trigger, 750 rpm =
-        // the 0.08 s cyclic interval, a 150-round belt drum over an infinite reserve, ~3.5 s
-        // crew-gated belt swap when dry, one-in-five tracer belt).
+        // Each mount names its gun (assets/guns/), whose ammunition table gives every stowed round
+        // its muzzle speed and whose mechanism the mount's fire_mode shares: the 88 is Single (one
+        // round per click, crew-gated reload, no belt to author); the 7.9 mm MGs are Automatic
+        // (held trigger at the gun's cyclic rate, a 150-round belt drum over an infinite reserve,
+        // ~3.5 s crew-gated belt swap when dry, a one-in-five tracer belt). The gun carries the
+        // report.
         "MainGun": (
             trigger: Primary,
             muzzle: "Main_Gun_Muzzle",
             barrel: "Main_Gun_Recoil",
-            // The rounds it loads: keys in assets/ballistics/rounds.ron, which states each one's
-            // core, nose, mass, calibre and muzzle speed with their provenance. The first is the
-            // round it spawns loaded with; the crew selects among them, and a selection takes
-            // effect at the next load. The ring and the ball are the two burst shapes of the
-            // owner's comparison (playtest fork F7); the loser leaves the list after play.
-            rounds: ["88mm_APHE_ring", "88mm_APHE_ball", "88mm_APCR"],
+            gun: "kwk36_l56",
+            // The rounds it carries and how many: keys in assets/rounds/, each one's speed the
+            // gun's. The first is the round it spawns loaded with; the crew selects among them,
+            // and a selection takes effect at the next load. The counts are read by nothing yet
+            // (the reserve is infinite).
+            stowage: [
+                (round: "88mm_APHE_ring", count: (82, Unknown("the commonly reported 92-round 8.8 cm
+                    load less the sub-calibre rounds; no stowage table in the repo, and the
+                    load's high-explosive share is not modelled; settled by a cited stowage
+                    table"))),
+                (round: "88mm_APCR", count: (10, Unknown("a placeholder share of the commonly
+                    reported 92-round 8.8 cm load; no stowage table in the repo; settled by a cited
+                    issue scale"))),
+            ],
             fire_mode: Single(reload_secs: 3.0),
             recoil: (kick: 14.0, stiffness: 90.0, damping: 14.0),
             fire: [Gunner, Breech, GunBarrel],
             load: [Loader, Breech],
-            // Five takes of the 88's report, one rolled per round (never the same take twice in
-            // a row). The list is the weapon's sound: adding a take is a line here, and a weapon
-            // with no takes is silent.
-            report_clips: [
-                "sfx/explosion/88_cannon_1.ogg",
-                "sfx/explosion/88_cannon_2.ogg",
-                "sfx/explosion/88_cannon_3.ogg",
-                "sfx/explosion/88_cannon_4.ogg",
-                "sfx/explosion/88_cannon_5.ogg",
-            ],
         ),
         "Coax": (
             trigger: Secondary,
             muzzle: "Coax_MG_Muzzle",
             barrel: "Coax_MG_Recoil",
-            rounds: ["7.9mm_AP"],
-            fire_mode: Automatic(rpm: 750.0, belt_size: 150, belt_swap_secs: 3.5, tracer_every: 5),
+            gun: "mg34",
+            stowage: [
+                (round: "7.9mm_AP", count: (2400, Unknown("half the commonly reported 4,800-round
+                    7.92 mm load (32 belt bags of 150) shared by the two machine guns; no stowage
+                    table in the repo; settled by a cited stowage table"))),
+            ],
+            fire_mode: Automatic(belt_size: 150, belt_swap_secs: 3.5),
+            tracer_every: 5,
             recoil: (kick: 3.0, stiffness: 240.0, damping: 18.0),
             fire: [Backup([(1.0, [Gunner]), (1.0, [Loader])]), CoaxMgBarrel],
             load: [Backup([(1.0, [Gunner]), (1.0, [Loader])])],
-            // No MG recording in the library yet — silent until one is cut and listed here.
-            report_clips: [],
         ),
         "HullMG": (
             trigger: Secondary,
             muzzle: "Hull_MG_Muzzle",
             barrel: "Hull_MG_Recoil",
-            rounds: ["7.9mm_AP"],
-            fire_mode: Automatic(rpm: 750.0, belt_size: 150, belt_swap_secs: 3.5, tracer_every: 5),
+            gun: "mg34",
+            stowage: [
+                (round: "7.9mm_AP", count: (2400, Unknown("half the commonly reported 4,800-round
+                    7.92 mm load (32 belt bags of 150) shared by the two machine guns; no stowage
+                    table in the repo; settled by a cited stowage table"))),
+            ],
+            fire_mode: Automatic(belt_size: 150, belt_swap_secs: 3.5),
+            tracer_every: 5,
             recoil: (kick: 3.0, stiffness: 240.0, damping: 18.0),
             fire: [BowGunner, BowMgBarrel],
             // Same rule as the coax: the swap needs the gun's crew.
             load: [BowGunner],
-            report_clips: [],
         ),
     },
     views: {

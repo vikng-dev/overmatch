@@ -114,7 +114,7 @@ fn expected(app: &App, camera: Entity, index: u8, speed: f32, tick: u32) -> Fire
         penetrator_caliber: round.penetrator.caliber,
         penetrator_mass: round.penetrator.mass,
         wound: round.wound,
-        mechanism: gun.fire_mode.mechanism(),
+        mechanism: gun.fire_cycle.mechanism(),
         tracer: true,
         source: Some((camera, 0, index)),
         shot: Some(ShotId {

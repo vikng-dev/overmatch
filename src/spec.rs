@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
 use crate::damage::{Capability, CrewStation, FunctionRole, Requirement};
+use crate::guns::{GunError, GunRegistry, Mechanism};
+use crate::provenance::Sourced;
 use crate::tank::{ServoSpec, Tank};
 use crate::track::transmission::{ShiftAddressing, TransmissionAuthoring, TransmissionParams};
 
@@ -206,33 +208,64 @@ impl NoseShape {
     }
 }
 
-/// A weapon's fire *mechanism* — single-shot with a per-round reload, or belt-fed automatic. An
-/// enum, not optional fields on `WeaponSpec`, so invalid combos are unrepresentable (ADR-0010/0011):
-/// the 88 cannot author a `tracer_every` it never consults, an MG cannot omit its belt. Extensible
-/// by design — a future overheat model adds fields to `Automatic` (deferred).
+/// A mount's half of its fire *mechanism* — the single-shot reload, or the belt. An enum, not
+/// optional fields on `WeaponSpec`, so invalid combos are unrepresentable (ADR-0010/0011): the 88
+/// cannot author a belt it never consults, an MG cannot omit its belt. Its family is the mount's
+/// gun's [`Mechanism`], which carries the cyclic rate; [`WeaponSpec::fire_cycle`] joins the two.
+/// Extensible by design — a future overheat model adds fields to `Automatic` (deferred).
 #[derive(Deserialize, Clone, Copy, PartialEq, Debug)]
 #[serde(deny_unknown_fields)]
 pub enum FireMode {
     /// One round per trigger *edge* (the click), then a crew-gated reload of `reload_secs` — the
-    /// 88's mechanism. Every round is its own "belt": the shot always traces (its visual is the
-    /// shell scene, not a streak).
+    /// 88's mechanism.
     Single { reload_secs: f32 },
-    /// Belt-fed cyclic fire on a held trigger *level*. `rpm` sets the cyclic interval (60/rpm s
-    /// between rounds — pure mechanism, NEVER crew-gated: a dead loader does not slow a working
-    /// action). The belt is finite (`belt_size` rounds, tracked as sim state in
-    /// [`crate::tank::WeaponGateState::belt_remaining`]) over an INFINITE reserve (no stowed-ammo
-    /// inventory — owner call 2026-07-12): running dry automatically starts a belt swap of
+    /// Belt-fed fire on a held trigger *level*, at the gun's cyclic rate. The belt is finite
+    /// (`belt_size` rounds, tracked as sim state in
+    /// [`crate::tank::WeaponGateState::belt_remaining`]) over an INFINITE reserve (a stowage count
+    /// is read by no reserve yet): running dry automatically starts a belt swap of
     /// `belt_swap_secs`, and the *swap* is what the weapon's `load` requirement gates, same as the
-    /// 88's reload. `tracer_every` is the belt's composition (real belts are loaded e.g.
-    /// 4-ball-1-tracer), NOT a VFX knob: every `tracer_every`-th round down the belt traces
-    /// (`5` = one-in-five, `0` = a tracerless stealth belt — never traces). The seed of the
-    /// belt-customization feature; a future load-out UI edits these same fields.
+    /// 88's reload. The belt's tracer mix is the mount's [`WeaponSpec::tracer_every`].
+    Automatic { belt_size: u32, belt_swap_secs: f32 },
+}
+
+/// A mount's fire mechanism joined with its gun's ([`WeaponSpec::fire_cycle`]): what the fire
+/// system runs, built at spawn from data. The mount's fire mode and its gun's mechanism are of one
+/// family by construction.
+#[derive(Clone, Copy, PartialEq, Debug)]
+pub enum FireCycle {
+    /// [`FireMode::Single`]: one round per trigger edge, then a crew-gated reload of
+    /// `reload_secs`. Every round traces (its visual is the shell scene, not a streak).
+    Single { reload_secs: f32 },
+    /// [`FireMode::Automatic`] at the gun's `cyclic_rpm`: one round every `60 / cyclic_rpm` s (pure
+    /// mechanism, NEVER crew-gated: a knocked-out loader does not slow a working action),
+    /// `belt_size` rounds a belt, a crew-gated swap of `belt_swap_secs` when it runs dry, and every
+    /// `tracer_every`-th round down the belt a tracer (`0` = a tracerless belt, never traces).
     Automatic {
-        rpm: f32,
+        cyclic_rpm: f32,
         belt_size: u32,
         belt_swap_secs: f32,
         tracer_every: u32,
     },
+}
+
+impl FireCycle {
+    pub fn mechanism(self) -> FireMechanism {
+        match self {
+            Self::Single { .. } => FireMechanism::Single,
+            Self::Automatic { .. } => FireMechanism::Automatic,
+        }
+    }
+}
+
+/// One round a mount stows: its key and how many the tank carries for the mount.
+#[derive(Deserialize, Clone, Debug)]
+#[serde(deny_unknown_fields)]
+pub struct StowageEntry {
+    /// A key of the round registry (`assets/rounds/`) that the mount's gun chambers.
+    pub round: String,
+    /// Rounds carried, at least one. `validate()` reads it; nothing else does yet — the reserve is
+    /// infinite.
+    pub(crate) count: Sourced<u32>,
 }
 
 /// The mechanism category a fired round carries across the simulation and network seams.
@@ -266,16 +299,25 @@ pub struct WeaponSpec {
     /// Recoiling barrel node, if the weapon reciprocates; omitted → no recoil (e.g. a coax).
     #[serde(default)]
     pub barrel: Option<String>,
-    /// The rounds this weapon can load, in order: keys in the round registry
-    /// (`assets/ballistics/rounds.ron`), which states each one's core, nose, mass, calibre and muzzle
-    /// speed ([`Self::resolved_rounds`]). The first is the default — the round the weapon spawns
-    /// loaded with and selected. `validate()` refuses an empty list, a key named twice, an unknown
-    /// key, and more than [`MAX_WEAPON_ROUNDS`] (a round is addressed by its `u8` index here, on the
-    /// command and on the fire event).
-    pub rounds: Vec<String>,
-    /// The fire mechanism: single-shot reload or belt-fed automatic. Required (no code default,
-    /// ADR-0011) — a weapon with an unstated mechanism is an authoring omission.
+    /// The mount's gun: a key of the gun registry (`assets/guns/`), whose ammunition table gives
+    /// every stowed round its muzzle speed, whose mechanism [`Self::fire_mode`] shares, and whose
+    /// report the weapon plays.
+    pub gun: String,
+    /// The rounds the tank carries for this mount, in order, and how many of each, each fired from
+    /// [`Self::gun`] ([`Self::resolved_rounds`]). The first is the default — the round the weapon
+    /// spawns loaded with and selected; the crew selects among them. `validate()` refuses an empty
+    /// list, a round stowed twice, a count of zero, a round no registry carries or the gun does not
+    /// chamber, and more than [`MAX_WEAPON_ROUNDS`] (a round is addressed by its `u8` index here,
+    /// on the command and on the fire event).
+    pub stowage: Vec<StowageEntry>,
+    /// The mount's half of the fire mechanism: single-shot reload or belt. Required (no code
+    /// default, ADR-0011) — a weapon with an unstated mechanism is an authoring omission.
     pub fire_mode: FireMode,
+    /// A belt's composition, authored exactly when [`Self::fire_mode`] is `Automatic`: every
+    /// `tracer_every`-th round down the belt traces (`5` = one in five, `0` = a tracerless belt).
+    /// NOT a VFX knob — real belts are loaded e.g. four ball, one tracer.
+    #[serde(default)]
+    pub tracer_every: Option<u32>,
     /// Recoil spring, present iff `barrel` is. Authored alongside it.
     #[serde(default)]
     pub recoil: Option<RecoilSpec>,
@@ -288,42 +330,151 @@ pub struct WeaponSpec {
     /// per-weapon successor to the old global `Load`. Empty = always loading.
     #[serde(default)]
     pub load: Requirement,
-    /// Report clips (asset-relative paths), one rolled per round fired. An EXPLICIT list — no glob,
-    /// no name derivation — and required authoring: `[]` is a silent weapon, which is a decision,
-    /// not an omission.
-    pub report_clips: Vec<String>,
 }
 
 /// The most rounds one weapon can list: its round index travels as a `u8`.
 pub(crate) const MAX_WEAPON_ROUNDS: usize = u8::MAX as usize + 1;
 
 impl WeaponSpec {
-    /// The key of the default round, the first of [`Self::rounds`]; `""` (no registry key) on an
-    /// empty list, which `validate()` refuses.
+    /// The key of the default round, the first stowed; `""` (no registry key) on an empty
+    /// stowage, which `validate()` refuses.
     #[cfg(test)]
     pub(crate) fn default_round_key(&self) -> &str {
-        self.rounds.first().map_or("", String::as_str)
+        self.stowage
+            .first()
+            .map_or("", |stowed| stowed.round.as_str())
     }
 
-    /// The default round, fired from the shipped gun that chambers it
-    /// ([`crate::guns::GunRegistry::round_by_key`]); an unknown key is an error naming it. On a
-    /// validated spec this is `Ok`.
+    /// The default round, fired from [`Self::gun`]; an unknown gun or round, or one the gun does not
+    /// chamber, is an error naming it. On a validated spec this is `Ok`.
     #[cfg(test)]
-    pub(crate) fn resolved_round(&self) -> Result<crate::rounds::Round, crate::guns::GunError> {
-        crate::guns::GunRegistry::shipped().round_by_key(self.default_round_key())
+    pub(crate) fn resolved_round(&self) -> Result<crate::rounds::Round, GunError> {
+        GunRegistry::shipped().round(&self.gun, self.default_round_key())
     }
 
-    /// Every round in [`Self::rounds`], in order, each fired from the shipped gun that chambers it;
-    /// the first key that resolves to no round is an error naming it. On a validated spec this is
-    /// `Ok`.
-    pub(crate) fn resolved_rounds(
-        &self,
-    ) -> Result<Vec<crate::rounds::Round>, crate::guns::GunError> {
-        let guns = crate::guns::GunRegistry::shipped();
-        self.rounds
+    /// Every stowed round, in order, fired from [`Self::gun`]; the first that resolves to no round
+    /// is an error naming it. On a validated spec this is `Ok`.
+    pub(crate) fn resolved_rounds(&self) -> Result<Vec<crate::rounds::Round>, GunError> {
+        let guns = GunRegistry::shipped();
+        self.stowage
             .iter()
-            .map(|key| guns.round_by_key(key))
+            .map(|stowed| guns.round(&self.gun, &stowed.round))
             .collect()
+    }
+
+    /// Why the mount cannot spawn or fire, if it cannot: [`TankSpec::validate`]'s mount rules (the
+    /// stowage, the gun, the fire mode against the gun's mechanism, the tracer mix, the timers).
+    fn checked(&self) -> Result<(), String> {
+        if self.stowage.is_empty() {
+            return Err(
+                "stowage is empty — a mount stows at least one round, the one it spawns \
+                        loaded with"
+                    .into(),
+            );
+        }
+        if self.stowage.len() > MAX_WEAPON_ROUNDS {
+            return Err(format!(
+                "{} rounds stowed, at most {MAX_WEAPON_ROUNDS}",
+                self.stowage.len()
+            ));
+        }
+        if let Some((index, key)) = self
+            .stowage
+            .iter()
+            .map(|stowed| &stowed.round)
+            .enumerate()
+            .find(|(index, key)| {
+                self.stowage[..*index]
+                    .iter()
+                    .any(|earlier| &earlier.round == *key)
+            })
+        {
+            return Err(format!(
+                "round {key:?} is stowed twice (again at index {index}) — a selection steps through \
+                 the stowage, so a duplicate is one round under two indices"
+            ));
+        }
+        if let Some(stowed) = self.stowage.iter().find(|stowed| stowed.count.0 == 0) {
+            return Err(format!(
+                "round {:?} is stowed with a count of 0 — a stowed round is one the tank carries",
+                stowed.round
+            ));
+        }
+        let cycle = self.fire_cycle()?;
+        self.resolved_rounds().map_err(|err| err.to_string())?;
+        match cycle {
+            FireCycle::Single { reload_secs } => {
+                if reload_secs < 0.0 {
+                    return Err(format!(
+                        "Single.reload_secs must be >= 0 (got {reload_secs})"
+                    ));
+                }
+            }
+            // A tracer_every of 0 is legal: a tracerless belt. The cyclic rate is the gun's,
+            // refused at the gun's load when it is not finite and positive.
+            FireCycle::Automatic {
+                belt_size,
+                belt_swap_secs,
+                ..
+            } => {
+                if belt_size == 0 {
+                    return Err(
+                        "Automatic.belt_size must be > 0 (a 0-round belt can never fire or \
+                                swap)"
+                            .into(),
+                    );
+                }
+                if belt_swap_secs < 0.0 {
+                    return Err(format!(
+                        "Automatic.belt_swap_secs must be >= 0 (got {belt_swap_secs})"
+                    ));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The mount's fire mode joined with its gun's mechanism and its belt's tracer mix; an error
+    /// naming what disagrees: a gun no registry carries, a fire mode of another family than the
+    /// gun's mechanism, a `tracer_every` on a single-shot mount or none on a belt. On a validated
+    /// spec this is `Ok`.
+    pub(crate) fn fire_cycle(&self) -> Result<FireCycle, String> {
+        let gun = GunRegistry::shipped()
+            .gun(&self.gun)
+            .map_err(|err| err.to_string())?;
+        match (self.fire_mode, gun.mechanism(), self.tracer_every) {
+            (FireMode::Single { reload_secs }, Mechanism::Single, None) => {
+                Ok(FireCycle::Single { reload_secs })
+            }
+            (
+                FireMode::Automatic {
+                    belt_size,
+                    belt_swap_secs,
+                },
+                Mechanism::Automatic { cyclic_rpm },
+                Some(tracer_every),
+            ) => Ok(FireCycle::Automatic {
+                cyclic_rpm,
+                belt_size,
+                belt_swap_secs,
+                tracer_every,
+            }),
+            (FireMode::Single { .. }, Mechanism::Single, Some(_)) => Err(
+                "tracer_every is a belt's tracer mix, and a Single mount fires no belt".to_owned(),
+            ),
+            (FireMode::Automatic { .. }, Mechanism::Automatic { .. }, None) => Err(
+                "tracer_every is missing — an Automatic mount's belt states its tracer mix (0 = a \
+                 tracerless belt)"
+                    .to_owned(),
+            ),
+            (mode, mechanism, _) => Err(format!(
+                "fire_mode is {:?} and gun {:?} is {:?} — a mount's fire mode is of its gun's \
+                 mechanism family",
+                mode.mechanism(),
+                self.gun,
+                mechanism.family()
+            )),
+        }
     }
 }
 
@@ -1104,72 +1255,8 @@ impl TankSpec {
             }
         }
         for (name, weapon) in &self.weapons {
-            if weapon.rounds.is_empty() {
-                return Err(format!(
-                    "weapon `{name}`: rounds is empty — a weapon loads at least one round"
-                )
-                .into());
-            }
-            if weapon.rounds.len() > MAX_WEAPON_ROUNDS {
-                return Err(format!(
-                    "weapon `{name}`: {} rounds listed, at most {MAX_WEAPON_ROUNDS}",
-                    weapon.rounds.len()
-                )
-                .into());
-            }
-            if let Some((index, key)) = weapon
-                .rounds
-                .iter()
-                .enumerate()
-                .find(|(index, key)| weapon.rounds[..*index].contains(key))
-            {
-                return Err(format!(
-                    "weapon `{name}`: round {key:?} is listed twice (again at index {index}) — a \
-                     selection steps through the list, so a duplicate is one round under two \
-                     indices"
-                )
-                .into());
-            }
-            if let Err(err) = weapon.resolved_rounds() {
+            if let Err(err) = weapon.checked() {
                 return Err(format!("weapon `{name}`: {err}").into());
-            }
-            match weapon.fire_mode {
-                FireMode::Single { reload_secs } => {
-                    if reload_secs < 0.0 {
-                        return Err(format!(
-                            "weapon `{name}`: Single.reload_secs must be >= 0 (got {reload_secs})"
-                        )
-                        .into());
-                    }
-                }
-                FireMode::Automatic {
-                    rpm,
-                    belt_size,
-                    belt_swap_secs,
-                    tracer_every: _, // 0 is legal (tracerless stealth belt) — see the doc above.
-                } => {
-                    if belt_size == 0 {
-                        return Err(format!(
-                            "weapon `{name}`: Automatic.belt_size must be > 0 (a 0-round belt can \
-                             never fire or swap)"
-                        )
-                        .into());
-                    }
-                    if rpm <= 0.0 {
-                        return Err(format!(
-                            "weapon `{name}`: Automatic.rpm must be > 0 (the cyclic interval is \
-                             60/rpm; got {rpm})"
-                        )
-                        .into());
-                    }
-                    if belt_swap_secs < 0.0 {
-                        return Err(format!(
-                            "weapon `{name}`: Automatic.belt_swap_secs must be >= 0 (got \
-                             {belt_swap_secs})"
-                        )
-                        .into());
-                    }
-                }
             }
         }
         // Every view's FOV is a DIVISOR downstream, not merely a camera setting: both LOD ladders
@@ -1424,12 +1511,6 @@ mod tests {
                 weapon.barrel.is_some(),
                 "weapon `{name}`: the recoil spring is authored iff the recoiling barrel is"
             );
-            for clip in &weapon.report_clips {
-                assert!(
-                    clip.ends_with(".ogg"),
-                    "weapon `{name}`: report clip `{clip}` must name an .ogg"
-                );
-            }
         }
 
         // The gunner's view node is how the binder finds the gunner's chain for the rig.
@@ -1570,19 +1651,23 @@ TankSpec(
             trigger: Primary,
             muzzle: "Cannon_Muzzle",
             barrel: "Cannon_Recoil",
-            rounds: ["88mm_AP", "88mm_APCR"],
+            gun: "kwk36_l56",
+            stowage: [
+                (round: "88mm_AP", count: (40, Tuned("fixture"))),
+                (round: "88mm_APCR", count: (10, Tuned("fixture"))),
+            ],
             fire_mode: Single(reload_secs: 3.0),
             recoil: (kick: 10.0, stiffness: 90.0, damping: 14.0),
             fire: [Gunner, Breech],
             load: [Gunner],
-            report_clips: ["sfx/fixture/report.ogg"],
         ),
         "MG": (
             trigger: Secondary,
             muzzle: "MG_Muzzle",
-            rounds: ["7.9mm_AP"],
-            fire_mode: Automatic(rpm: 600.0, belt_size: 100, belt_swap_secs: 3.0, tracer_every: 5),
-            report_clips: [],
+            gun: "mg34",
+            stowage: [(round: "7.9mm_AP", count: (1000, Tuned("fixture")))],
+            fire_mode: Automatic(belt_size: 100, belt_swap_secs: 3.0),
+            tracer_every: 5,
         ),
     },
     views: {
@@ -1728,33 +1813,139 @@ TankSpec(
         }
     }
 
-    /// A weapon's round list loads only whole: every key in the registry, none twice, at least
-    /// one, at most [`MAX_WEAPON_ROUNDS`]; the error names the weapon and what is wrong. Spawn binds
-    /// every listed round and the selector and the fire event address them by `u8` index, so a list
-    /// that slips through panics mid-spawn or puts one round under two indices. The unknown key sits
-    /// second, so a check of the default round alone does not pass. A round's own validity is the
-    /// registry's ([`crate::rounds`]).
+    /// The fixture sheet with its `base` mount cloned as "Phantom" and edited by `edit`, validated;
+    /// the error as text.
+    fn with_phantom(base: &str, edit: impl FnOnce(&mut WeaponSpec)) -> Result<(), String> {
+        let mut spec = fixture();
+        let mut weapon = spec.weapons[base].clone();
+        edit(&mut weapon);
+        spec.weapons.insert("Phantom".to_string(), weapon);
+        spec.validate().map_err(|err| err.to_string())
+    }
+
+    /// `rounds` as stowage, `count` of each, with a fixture provenance.
+    fn stowage(rounds: &[&str], count: u32) -> Vec<StowageEntry> {
+        rounds
+            .iter()
+            .map(|round| StowageEntry {
+                round: (*round).to_owned(),
+                count: Sourced(count),
+            })
+            .collect()
+    }
+
+    /// A mount's stowage loads only whole: none twice, none of count zero, at most
+    /// [`MAX_WEAPON_ROUNDS`]; the error names the mount and what is wrong. Spawn binds every
+    /// stowed round and the selector and the fire event address them by `u8` index, so a list that
+    /// slips through panics mid-spawn or puts one round under two indices. A round's own validity is
+    /// the registry's ([`crate::rounds`]), its speed the gun's ([`crate::guns`]).
     #[test]
-    fn a_weapon_s_round_list_is_validated_whole() {
-        let with_rounds = |rounds: Vec<&str>| {
-            let mut spec = fixture();
-            let mut weapon = spec.weapons["MG"].clone();
-            weapon.rounds = rounds.into_iter().map(str::to_string).collect();
-            spec.weapons.insert("Phantom".to_string(), weapon);
-            spec.validate().map_err(|err| err.to_string())
+    fn a_mount_s_stowage_is_validated_whole() {
+        let with_stowage = |rounds: &[&str], count: u32| {
+            with_phantom("Cannon", |weapon| weapon.stowage = stowage(rounds, count))
         };
-        with_rounds(vec!["7.9mm_AP", "88mm_AP"]).expect("known, distinct keys load");
-        for (rounds, named) in [
-            (vec!["7.9mm_AP", "Unobtainium"], "Unobtainium"),
-            (vec!["7.9mm_AP", "88mm_AP", "7.9mm_AP"], "7.9mm_AP"),
-            (Vec::new(), "empty"),
-            (vec!["7.9mm_AP"; MAX_WEAPON_ROUNDS + 1], "at most"),
+        with_stowage(&["88mm_AP", "88mm_APHE_ball"], 1).expect("known, distinct keys load");
+        for (rounds, count, named) in [
+            (vec!["88mm_AP", "88mm_APCR", "88mm_AP"], 1, "88mm_AP"),
+            (vec!["88mm_AP"], 0, "count of 0"),
+            (vec!["88mm_AP"; MAX_WEAPON_ROUNDS + 1], 1, "at most"),
         ] {
-            let shown = format!("{:?}", &rounds[..rounds.len().min(3)]);
-            let err = with_rounds(rounds).expect_err(&shown);
+            let shown = format!("{:?} x{count}", &rounds[..rounds.len().min(3)]);
+            let err = with_stowage(&rounds, count).expect_err(&shown);
             assert!(
                 err.contains("Phantom") && err.contains(named),
                 "{shown}: {err}"
+            );
+        }
+    }
+
+    /// A mount stows at least one round: spawn loads the first ([`WeaponSpec::default_round_key`]), and
+    /// the selector and the range table read it, so an empty stowage leaves a weapon with nothing
+    /// to load.
+    #[test]
+    fn a_mount_with_empty_stowage_is_refused() {
+        let err = with_phantom("Cannon", |weapon| weapon.stowage.clear()).unwrap_err();
+        assert!(err.contains("Phantom") && err.contains("empty"), "{err}");
+    }
+
+    /// A mount names a gun the gun registry carries: spawn fires every round through it
+    /// (`Weapon::of_spec`) and the fire system runs its mechanism, so a dangling key would panic
+    /// mid-spawn instead of failing the load.
+    #[test]
+    fn a_mount_naming_no_gun_is_refused() {
+        let err = with_phantom("Cannon", |weapon| weapon.gun = "Unobtainium".into()).unwrap_err();
+        assert!(
+            err.contains("Phantom") && err.contains("Unobtainium") && err.contains("gun"),
+            "{err}"
+        );
+    }
+
+    /// Every stowed round is a key of the round registry: spawn names each on the selector and
+    /// fires it. The unknown key sits second, so a check of the default round alone does not pass.
+    #[test]
+    fn a_stowed_round_no_registry_carries_is_refused() {
+        let err = with_phantom("Cannon", |weapon| {
+            weapon.stowage = stowage(&["88mm_AP", "Unobtainium"], 1);
+        })
+        .unwrap_err();
+        assert!(
+            err.contains("Phantom") && err.contains("Unobtainium"),
+            "{err}"
+        );
+    }
+
+    /// A mount stows only rounds its gun's ammunition table lists: the table gives a stowed round
+    /// its muzzle speed, so a round the gun does not chamber has none to fire at. The round sits
+    /// second, so a check of the default round alone does not pass.
+    #[test]
+    fn a_stowed_round_its_gun_does_not_chamber_is_refused() {
+        let err = with_phantom("Cannon", |weapon| {
+            weapon.stowage = stowage(&["88mm_AP", "7.9mm_AP"], 1);
+        })
+        .unwrap_err();
+        assert!(
+            err.contains("Phantom") && err.contains("7.9mm_AP") && err.contains("kwk36_l56"),
+            "{err}"
+        );
+    }
+
+    /// A mount's fire mode is of its gun's mechanism family: the fire system runs the joined cycle
+    /// ([`WeaponSpec::fire_cycle`]), and a belt on a single-shot gun has no cyclic rate to run at,
+    /// a reload on a belt-fed one no belt. Both crossings are refused.
+    #[test]
+    fn a_mount_whose_fire_mode_is_not_its_gun_s_family_is_refused() {
+        for (base, fire_mode, tracer_every) in [
+            (
+                "Cannon",
+                FireMode::Automatic {
+                    belt_size: 10,
+                    belt_swap_secs: 3.0,
+                },
+                Some(5),
+            ),
+            ("MG", FireMode::Single { reload_secs: 1.0 }, None),
+        ] {
+            let err = with_phantom(base, |weapon| {
+                weapon.fire_mode = fire_mode;
+                weapon.tracer_every = tracer_every;
+            })
+            .unwrap_err();
+            assert!(
+                err.contains("Phantom") && err.contains("fire_mode") && err.contains("family"),
+                "{base}: {err}"
+            );
+        }
+    }
+
+    /// A belt's tracer mix is authored exactly on a belt mount: the fire system decides each
+    /// belt round's tracer from it, and a single-shot mount has no belt for one to describe.
+    #[test]
+    fn a_tracer_mix_is_authored_exactly_on_a_belt_mount() {
+        for (base, tracer_every) in [("Cannon", Some(5)), ("MG", None)] {
+            let err = with_phantom(base, |weapon| weapon.tracer_every = tracer_every).unwrap_err();
+            assert!(
+                err.contains("Phantom") && err.contains("tracer_every"),
+                "{base}: {err}"
             );
         }
     }
@@ -1765,10 +1956,15 @@ TankSpec(
     /// dead gun discovered mid-match.
     #[test]
     fn validate_rejects_bricked_fire_modes() {
-        // Swap one bad weapon at a time into an otherwise-valid sheet.
+        // Swap one bad weapon at a time into an otherwise-valid sheet: a single-shot mode on the
+        // single-shot mount's gun, a belt on the belt-fed one's.
         let with_weapon = |name: &str, mode: FireMode| {
             let mut spec = fixture();
-            let mut weapon = spec.weapons["MG"].clone();
+            let base = match mode {
+                FireMode::Single { .. } => "Cannon",
+                FireMode::Automatic { .. } => "MG",
+            };
+            let mut weapon = spec.weapons[base].clone();
             weapon.fire_mode = mode;
             spec.weapons.insert(name.to_string(), weapon);
             spec
@@ -1778,10 +1974,8 @@ TankSpec(
         let bad = with_weapon(
             "Bricked",
             FireMode::Automatic {
-                rpm: 750.0,
                 belt_size: 0,
                 belt_swap_secs: 3.5,
-                tracer_every: 5,
             },
         );
         let err = bad.validate().unwrap_err().to_string();
@@ -1790,29 +1984,12 @@ TankSpec(
             "{err}"
         );
 
-        // rpm == 0.0: infinite cyclic interval.
-        let err = with_weapon(
-            "ZeroRpm",
-            FireMode::Automatic {
-                rpm: 0.0,
-                belt_size: 150,
-                belt_swap_secs: 3.5,
-                tracer_every: 5,
-            },
-        )
-        .validate()
-        .unwrap_err()
-        .to_string();
-        assert!(err.contains("ZeroRpm") && err.contains("rpm"), "{err}");
-
         // Negative belt-swap timer.
         let err = with_weapon(
             "NegSwap",
             FireMode::Automatic {
-                rpm: 750.0,
                 belt_size: 150,
                 belt_swap_secs: -1.0,
-                tracer_every: 5,
             },
         )
         .validate()
@@ -1863,18 +2040,20 @@ TankSpec(
         }
 
         // Legal edges: a tracerless stealth belt (tracer_every: 0) and instant reloads pass.
+        let mut stealth = with_weapon(
+            "Stealth",
+            FireMode::Automatic {
+                belt_size: 150,
+                belt_swap_secs: 0.0,
+            },
+        );
+        stealth
+            .weapons
+            .get_mut("Stealth")
+            .expect("the stealth mount")
+            .tracer_every = Some(0);
         assert!(
-            with_weapon(
-                "Stealth",
-                FireMode::Automatic {
-                    rpm: 750.0,
-                    belt_size: 150,
-                    belt_swap_secs: 0.0,
-                    tracer_every: 0,
-                },
-            )
-            .validate()
-            .is_ok(),
+            stealth.validate().is_ok(),
             "tracer_every: 0 is a legal tracerless belt; belt_swap_secs: 0 is a legal instant refill"
         );
         assert!(

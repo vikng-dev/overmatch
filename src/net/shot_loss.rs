@@ -141,7 +141,7 @@ fn arm_fixture_weapons(add: On<Add, NetTank>, mut commands: Commands) {
             Weapon {
                 name: format!("fixture {slot}"),
                 rounds: rounds.clone(),
-                fire_mode: crate::spec::FireMode::Single { reload_secs: 1.0 },
+                fire_cycle: crate::spec::FireCycle::Single { reload_secs: 1.0 },
                 recoil: None,
                 barrel: None,
                 fire: Vec::new(),

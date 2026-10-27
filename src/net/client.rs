@@ -2785,7 +2785,7 @@ mod tests {
             "the stamp names Lightyear's delayed input-buffer tick",
         );
     }
-    use crate::spec::{FireMode, RecoilSpec, Trigger};
+    use crate::spec::{FireCycle, RecoilSpec, Trigger};
     use crate::tank::WeaponState;
 
     /// A one-weapon `Weapon` config with the given `recoil` spec and `barrel` node — the only two
@@ -2794,7 +2794,7 @@ mod tests {
         Weapon {
             name: "MainGun".into(),
             rounds: vec![crate::tank::WeaponRound::resolve("88mm_AP").expect("a shipped round")],
-            fire_mode: FireMode::Single { reload_secs: 8.0 },
+            fire_cycle: FireCycle::Single { reload_secs: 8.0 },
             recoil,
             barrel,
             fire: Vec::new(),

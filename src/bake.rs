@@ -2042,10 +2042,10 @@ mod tests {
         trigger: Primary,
         muzzle: "Muzzle",
         barrel: "Recoil",
-        rounds: ["88mm_AP"],
+        gun: "kwk36_l56",
+        stowage: [(round: "88mm_AP", count: (1, Tuned("fixture")))],
         fire_mode: Single(reload_secs: 1.0),
         recoil: (kick: 1.0, stiffness: 1.0, damping: 1.0),
-        report_clips: [],
     )},
     views: {Gunner: (node: "Sight", optics: Magnified(magnification: 2.0, field_deg: 30.0))},"#,
         );
