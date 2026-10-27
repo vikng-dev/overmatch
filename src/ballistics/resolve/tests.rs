@@ -2315,3 +2315,159 @@ fn a_direction_does_not_dose_the_volume_its_throw_leaves() {
     assert_eq!(dose_to(&doses, boxes[1]), 0.0, "stopped in the first box");
     assert_eq!(end, Vec3::ZERO, "stopped at the throw point");
 }
+
+// ---------------------------------------------------------------------------------------------
+// A certified convex body is crossed or missed, never a walk failure
+// ---------------------------------------------------------------------------------------------
+
+/// Where the off-centre discs strike the fixture trunk, and its radius there: DERIVED from the
+/// fixture's first segment, 0.3 m tapering to 0.2 m over 2 m (`trees::tests::fixture_asset`).
+const TRUNK_SHOT_HEIGHT: f32 = 1.0;
+const TRUNK_RADIUS_AT_SHOT: f32 = 0.25;
+
+/// Stand-offs from a march step's anchor to the trunk: up to one tick's travel, DERIVED as
+/// 800 m/s × 15.625 ms = 12.5 m. The anchor's distance sets the scale every corridor parameter is
+/// rounded at, so the sweep covers the range a step can start from.
+const TRUNK_STANDOFFS: [f32; 5] = [0.5, 2.0, 5.3, 9.7, 12.3];
+
+/// A CERTIFIED CONVEX BODY IS CROSSED WITH A CHORD AT ANY OFFSET AND INCIDENCE (the game's damage
+/// model: a trunk is one HP pool, and the line's chord through it is its dose).
+///
+/// The trees' own 12-gon frustum collider (`trees::spawn`) struck off-centre by the fixture 88's
+/// disc: one disc wholly outboard of the 12-gon's 30° vertex, which meets only the facet whose
+/// normal stands 75° off the line of fire, and discs at 0.70–1.10 of the trunk's radius toward its
+/// 0° vertex. Every disc meets the trunk, and the fixture round overmatches a trunk, so each must
+/// bite in and lay a positive chord into the trunk. A structured walk error instead stops the round
+/// dead at contact with no dose: the trunk becomes a wall.
+///
+/// FAILS until the convex narrow phase is exact. `collect::collect_convex` reads a convex
+/// collider's entry and exit off parry's iterative GJK ray cast (`minkowski_ray_cast`,
+/// `parry3d-0.27.0/src/query/gjk/gjk.rs`), which stops on an absolute distance tolerance or a
+/// stall, not at the face. The hand-off partition (`walk::RayWalk::inside_at` against
+/// `collect::admit`) needs the entrance and the transit to place one face within its bands of each
+/// other (`walk::topology_band` and `collect::sitting_reach`, DERIVED: about 1e-5 m at 10 m).
+/// MEASURED on a 12-gon frustum of r 0.21 → 0.195 m, against an f64 clip of the same hull points,
+/// over 505 poses at 0.60–1.60 r from stand-offs of 0.5–12.3 m:
+///
+/// - entrance entries read up to 2.6e-4 m early. In 38 poses that put a seed's hand-off point
+///   between the read entry and the exact one: the seed declares the sample inside, the transit's
+///   own cast meets the entry ahead of its origin, and the walk refuses the second entry
+///   (`UnexpectedEntry`);
+/// - in 5, a sample passing 3e-5 m outside the 0° vertical edge (DERIVED from the hull points)
+///   reads an exit 1.3e-4 to 1.7e-4 m before an entry (`UnexpectedExit`);
+/// - in 1, a transit sample that misses the hull reads an entry and no exit (`IncompleteCorridor`).
+#[test]
+#[ignore = "fails until `collect::collect_convex` reads exact crossings, not parry's GJK cast"]
+fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
+    let mut app = world_with_trimesh_plates(&[]);
+    let tree = {
+        let world = app.world_mut();
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, world);
+        let tree = crate::trees::spawn(
+            &mut commands,
+            &crate::trees::tests::fixture_kind_of("Softwood", 100),
+            crate::scatter::MapInstance {
+                id: "trunk".to_owned(),
+                ordinal: 0,
+            },
+            Transform::IDENTITY,
+        );
+        queue.apply(world);
+        tree
+    };
+    for _ in 0..8 {
+        app.update();
+    }
+
+    let radius = ROUND.caliber * 0.5;
+    // Wholly outboard of the 30° vertex by 2 mm, so the disc meets the 75° facet alone.
+    let graze = (
+        "75° graze".to_owned(),
+        30.0_f32.to_radians().cos() * TRUNK_RADIUS_AT_SHOT + radius + 0.002,
+    );
+    let offsets = [0.70, 0.80, 0.90, 0.95, 1.00, 1.05, 1.10]
+        .map(|frac: f32| (format!("{frac:.2} r"), frac * TRUNK_RADIUS_AT_SHOT));
+    let direction = Vec3::NEG_Z;
+    let mut failures = Vec::new();
+    for (pose, x) in std::iter::once(graze).chain(offsets) {
+        for standoff in TRUNK_STANDOFFS {
+            let origin = Vec3::new(x, TRUNK_SHOT_HEIGHT, standoff);
+            let chord = app
+                .world_mut()
+                .run_system_once(
+                    move |world: ProjectileMarchWorld,
+                          colliders: Query<(
+                        &'static Position,
+                        &'static Rotation,
+                        &'static Collider,
+                        Option<&'static BallisticSurfaces>,
+                    )>| {
+                        let context = ResolveContext {
+                            world: &world,
+                            colliders: &colliders,
+                            deposit: false,
+                            laws: WalkLaws::default(),
+                        };
+                        let frame = DiscFrame::anchored(direction).expect("a real direction");
+                        let entrance = closing_walk(
+                            &context,
+                            &|_| true,
+                            origin,
+                            Vec3::ZERO,
+                            direction,
+                            frame,
+                            radius,
+                            &[],
+                            standoff + ENTRANCE_SPAN,
+                        )?;
+                        let shot = Shot {
+                            caliber: ROUND.caliber,
+                        };
+                        let Begin::Transit(request) = walk::begin(&entrance, &shot, &context.laws)
+                        else {
+                            return Ok(None);
+                        };
+                        let transit = closing_walk(
+                            &context,
+                            &|_| true,
+                            request.anchor,
+                            request.origin,
+                            request.axis,
+                            request.frame,
+                            request.radius,
+                            &request.seeds,
+                            ENTRANCE_SPAN,
+                        )?;
+                        let round = bound(ROUND);
+                        let plan = walk::finish(
+                            &transit,
+                            &request,
+                            &round,
+                            round.at(SPEED),
+                            &LIMITS,
+                            &context.laws,
+                        )?;
+                        Ok::<_, WalkError>(plan.deposits.iter().find_map(
+                            |dose| match dose.source {
+                                DoseSource::Line { chord } if dose.address == tree => Some(chord),
+                                _ => None,
+                            },
+                        ))
+                    },
+                )
+                .expect("the probe system runs");
+            match chord {
+                Ok(Some(chord)) if chord > 0.0 => {}
+                other => failures.push(format!("{pose}, stand-off {standoff} m: {other:?}")),
+            }
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "every disc that meets the trunk crosses it with a positive chord; {} of {} did not:\n{}",
+        failures.len(),
+        8 * TRUNK_STANDOFFS.len(),
+        failures.join("\n"),
+    );
+}
