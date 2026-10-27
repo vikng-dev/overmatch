@@ -56,15 +56,50 @@ PROJECTION = json.dumps(
     sort_keys=True, separators=(",", ":"),
 ).encode()
 
+#: A registry projection in `registry_projection`'s shape, for the cases whose claims are about the
+#: ladder and not the registry. Fixture data.
+SUBSTANCES = json.dumps({"Cast": "Hard"}, sort_keys=True, separators=(",", ":")).encode()
+
+#: A substance registry in `assets/materials/materials.ron`'s shape: the three keys `document`'s
+#: primitives wear, and a witness no primitive wears. Fixture data: the rows carry numbers the bake
+#: reads nothing of.
+REGISTRY = b"""\
+// Fixture data: the registry's shape.
+(
+    substances: {
+        "RHA": Hard(
+            resistance: Reference,
+            paintable: true,
+            debris_half_angle_deg: (26.2, Unknown("fixture")),
+            facts: None,
+        ),
+        "Rubber": Hard(
+            resistance: Effective((120.0, Unknown("fixture factor"))),
+            paintable: false,
+            debris_half_angle_deg: (26.2, Unknown("fixture")),
+            facts: None,
+        ),
+        "Ammunition": Hard(
+            resistance: Effective((400.0, Unknown("fixture"))),
+            paintable: false,
+            debris_half_angle_deg: (26.2, Unknown("fixture")),
+            facts: None,
+        ),
+        "Flesh": Witness,
+    },
+)
+"""
+
 
 def write_layout(root, stem):
     """`<root>/<stem>/<stem>.{blend,tank.ron}` beside `<root>/materials/materials.{blend,ron}` — the
-    asset layout `material_sources` derives from — each holding a few placeholder bytes."""
+    asset layout `material_library` and `asset_door.registry_of` derive from — the registry the
+    fixture one and the rest a few placeholder bytes."""
     for parts, payload in (
         ((stem, stem + ".blend"), b"BLENDER-FI"),
         ((stem, stem + ".tank.ron"), b"TankSpec()"),
         (("materials", "materials.blend"), b"BLENDER-MATERIALS"),
-        (("materials", "materials.ron"), b"SubstanceRegistry()"),
+        (("materials", "materials.ron"), REGISTRY),
     ):
         path = os.path.join(root, *parts)
         os.makedirs(os.path.dirname(path), exist_ok=True)
@@ -180,6 +215,12 @@ def rung(scale=1.0):
 
 def parsed(blob):
     return glb_ktx2.parse_glb(blob, "<test>")
+
+
+def substances_of(root, view_blob):
+    """The layout's registry projected over the names a view document's primitives wear."""
+    return build.registry_projection(os.path.join(root, "materials", "materials.ron"),
+                                     build.material_names(parsed(view_blob)[0]))
 
 
 def cut_corpus():
@@ -701,9 +742,11 @@ class VerifyRefusals(unittest.TestCase):
         stub = mock.patch.object(build, "spec_projection", lambda *_: PROJECTION)
         stub.start()
         self.addCleanup(stub.stop)
-        self.cert = dict(cert, blend_digest=build.blend_digest(self.blend, PROJECTION))
+        self.cert = dict(cert, blend_digest=build.blend_digest(
+            self.blend, PROJECTION, substances_of(self.root, self.view)))
         TRIO.publish(self.glb, self.view, self.sim, self.cert)
         self.cert_path = TRIO.paths(self.glb)[2]
+        self.registry = os.path.join(self.root, "materials", "materials.ron")
 
     def land(self, cert):
         with open(self.cert_path, "wb") as handle:
@@ -769,6 +812,43 @@ class VerifyRefusals(unittest.TestCase):
         self.assertEqual(refused.stage, "certificate")
         self.assertTrue(any("blend_digest" in row.evidence for row in refused.findings))
 
+    def test_a_registry_edit_the_bake_reads_is_caught_by_the_blend_digest(self):
+        """The names are read off the TRACKED view artifact, rungs and all: a key one of its
+        primitives wears, gone from the registry, is a stale trio."""
+        with open(self.registry, "rb") as handle:
+            text = handle.read()
+        self.assertEqual(text.count(b'"Rubber": Hard('), 1)
+        with open(self.registry, "wb") as handle:
+            handle.write(text.replace(b'"Rubber": Hard(', b'"Rubber_renamed": Hard('))
+        refused = self.refusal()
+        self.assertEqual(refused.stage, "certificate")
+        self.assertTrue(any("blend_digest" in row.evidence for row in refused.findings))
+
+    def test_a_registry_edit_the_bake_does_not_read_passes_the_certificate(self):
+        """A comment on the registry leaves the trio current, through `verify` itself: the
+        certificate and the sim artifact pass and the door is reached. The door is stood in for,
+        because reaching it is the claim and running it is a Blender and a cargo build."""
+        with open(self.registry, "ab") as handle:
+            handle.write(b"// a comment the bake reads nothing of\n")
+        timeline = build.Timeline()
+        stand_in = mock.patch.object(build, "staged_candidate",
+                                     side_effect=build.Refused("door", []))
+        with stand_in, self.assertRaises(build.Refused) as raised:
+            build.verify(self.blend, self.spec, self.glb, self.dir,
+                         tempfile.mkdtemp(prefix="trio-verify-work-"), "blender", timeline)
+        self.assertEqual(raised.exception.stage, "door")
+        self.assertEqual([name for name, _ in timeline.rows],
+                         ["certificate", "sim artifact", "door (export chain)"])
+
+    def test_an_unreadable_view_artifact_is_named_at_the_certificate(self):
+        """The names come off the view artifact before `coherence` reads it; one that is no glb
+        is `coherence`'s finding and not a crash on the way there."""
+        with open(TRIO.paths(self.glb)[0], "wb") as handle:
+            handle.write(b"\0" * 64)
+        refused = self.refusal()
+        self.assertEqual(refused.stage, "certificate")
+        self.assertTrue(any("cannot be read" in row.evidence for row in refused.findings))
+
 
 # ── what the staleness field reads ───────────────────────────────────────────────────────────────
 
@@ -776,42 +856,112 @@ class StalenessInputs(unittest.TestCase):
     """`blend_digest` moves exactly when an input the build reads does.
 
     The spec sheet is read through its projection only, so a spec byte outside the projection is
-    not an input; the material library and the registry are read whole, so every byte of either is.
+    not an input. The registry is read through `registry_projection` — for each name the model's
+    primitives wear, whether it is a key and the kind under it — so a factor, a provenance, a
+    comment or the row of a key no primitive wears is not an input either; the registry's KEY LIST
+    is the canon's `substance_keys` inside `spec_projection`, which these cases hold fixed. The
+    material library is read whole, so every byte of it is.
     """
 
     def setUp(self):
         self.root = tempfile.mkdtemp(prefix="trio-staleness-")
         write_layout(self.root, "testbed")
         self.blend = os.path.join(self.root, "testbed", "testbed.blend")
-        self.base = build.blend_digest(self.blend, PROJECTION)
+        self.registry = os.path.join(self.root, "materials", "materials.ron")
+        self.names = build.material_names(parsed(document())[0])
+        self.base = self.digest()
+
+    def digest(self, names=None):
+        return build.blend_digest(
+            self.blend, PROJECTION,
+            build.registry_projection(self.registry, self.names if names is None else names),
+        )
 
     def edit(self, *parts):
         with open(os.path.join(self.root, *parts), "ab") as handle:
             handle.write(b"\n")
 
+    def with_registry(self, old, new, names=None):
+        """The digest over the fixture registry with one edit."""
+        self.assertEqual(REGISTRY.count(old), 1, old)
+        with open(self.registry, "wb") as handle:
+            handle.write(REGISTRY.replace(old, new))
+        return self.digest(names)
+
     def test_the_spec_sheets_own_bytes_are_not_an_input(self):
         self.edit("testbed", "testbed.tank.ron")
-        self.assertEqual(self.base, build.blend_digest(self.blend, PROJECTION))
+        self.assertEqual(self.base, self.digest())
 
     def test_a_moved_projection_moves_the_digest(self):
         for moved in (PROJECTION.replace(b"Hull_Front", b"Hull_Glacis"),
                       PROJECTION.replace(b"true", b"false")):
             with self.subTest(projection=moved):
-                self.assertNotEqual(self.base, build.blend_digest(self.blend, moved))
+                self.assertNotEqual(
+                    self.base,
+                    build.blend_digest(self.blend, moved,
+                                       build.registry_projection(self.registry, self.names)),
+                )
 
-    def test_every_material_source_is_an_input(self):
-        for name in ("materials.blend", "materials.ron"):
-            with self.subTest(source=name):
-                before = build.blend_digest(self.blend, PROJECTION)
-                self.edit("materials", name)
-                self.assertNotEqual(before, build.blend_digest(self.blend, PROJECTION))
+    def test_the_material_library_is_read_whole(self):
+        self.edit("materials", "materials.blend")
+        self.assertNotEqual(self.base, self.digest())
 
-    def test_the_material_sources_are_the_registrys_neighbours(self):
-        self.assertEqual(
-            build.material_sources(self.blend),
-            (os.path.join(self.root, "materials", "materials.blend"),
-             os.path.join(self.root, "materials", "materials.ron")),
-        )
+    def test_the_names_are_the_ones_the_primitives_wear(self):
+        """`classify` resolves the material a PRIMITIVE wears; a material record no primitive
+        references, or a primitive wearing none, declares no membership and is not a name."""
+        self.assertEqual(self.names, ["Ammunition", "RHA", "Rubber"])
+        js = parsed(document())[0]
+        js["materials"].append({"name": "Paint"})
+        del js["meshes"][0]["primitives"][0]["material"]
+        self.assertEqual(build.material_names(js), ["Ammunition", "Rubber"])
+
+    def test_a_registry_edit_the_bake_does_not_read_is_not_an_input(self):
+        """A row's numbers are the game's, read at spawn; the bake reads a worn key's kind and
+        nothing else of its row."""
+        for old, new in ((b"// Fixture data: the registry's shape.", b"// Restated."),
+                         (b"Effective((120.0,", b"Effective((121.0,"),
+                         (b'Unknown("fixture factor")', b'Measured("a datasheet")'),
+                         (b'Unknown("fixture factor"))),\n            paintable: false,',
+                          b'Unknown("fixture factor"))),\n            paintable: true,')):
+            with self.subTest(edit=old):
+                self.assertEqual(self.base, self.with_registry(old, new))
+
+    def test_a_worn_names_membership_is_an_input(self):
+        """Whether a name a primitive wears is a key decides whether the primitive is a volume or
+        art: the key leaving the registry, or a name that was no key joining it, moves the
+        digest."""
+        with self.subTest(edit="a worn key leaves"):
+            self.assertNotEqual(self.base,
+                                self.with_registry(b'"Rubber": Hard(', b'"Rubber_renamed": Hard('))
+        names = self.names + ["Paint"]
+        before = self.digest(names)
+        with self.subTest(edit="a worn name becomes a key"):
+            self.assertNotEqual(before, self.with_registry(
+                b'        "Flesh": Witness,\n',
+                b'        "Flesh": Witness,\n        "Paint": Witness,\n', names))
+
+    def test_a_worn_keys_kind_is_an_input(self):
+        """The kind is what the bake reads of a row: matter is walked, a witness is not, a burst
+        core is refused. One key under another kind is another model."""
+        for new in (b'"Rubber": Witness, "Rubber_was": Hard(',
+                    b'"Rubber": Burst(density: (1650.0, Unknown("fixture")), '
+                    b'speed_constant_mps: (2680.0, Unknown("fixture"))), "Rubber_was": Hard('):
+            with self.subTest(kind=new[:20]):
+                self.assertNotEqual(self.base, self.with_registry(b'"Rubber": Hard(', new))
+
+    def test_a_key_no_primitive_wears_changes_freely(self):
+        """The projection is over the names the model wears: another key's kind, numbers or
+        presence are not in it. Its presence IS in the canon's `substance_keys`, through
+        `spec_projection`; that is the key list's home, not this projection's."""
+        for old, new in ((b'"Flesh": Witness,',
+                          b'"Flesh": Hard(resistance: Reference, paintable: false),'),
+                         (b'        "Flesh": Witness,\n', b"")):
+            with self.subTest(edit=old):
+                self.assertEqual(self.base, self.with_registry(old, new))
+
+    def test_the_material_library_is_the_registrys_neighbour(self):
+        self.assertEqual(build.material_library(self.blend),
+                         os.path.join(self.root, "materials", "materials.blend"))
 
 
 # ── the work split ───────────────────────────────────────────────────────────────────────────────
@@ -869,12 +1019,12 @@ class FingerprintLaw(unittest.TestCase):
         before = getattr(build.CONFIG, name)
         setattr(build.CONFIG, name, value)
         try:
-            return build.search_digest(), build.blend_digest(self.blend, PROJECTION)
+            return build.search_digest(), build.blend_digest(self.blend, PROJECTION, SUBSTANCES)
         finally:
             setattr(build.CONFIG, name, before)
 
     def test_the_right_wall_moves_both_the_cache_key_and_the_staleness_field(self):
-        base = (build.search_digest(), build.blend_digest(self.blend, PROJECTION))
+        base = (build.search_digest(), build.blend_digest(self.blend, PROJECTION, SUBSTANCES))
         grown = self.moved("RIGHT_WALL_M", build.CONFIG.RIGHT_WALL_M * 2.0)
         self.assertNotEqual(base[0], grown[0], "a grown world must MISS the cache")
         self.assertNotEqual(base[1], grown[1], "a grown world must make the trio stale")
@@ -910,8 +1060,8 @@ class FingerprintLaw(unittest.TestCase):
 
     def test_the_fingerprint_is_stable_when_nothing_moves(self):
         self.assertEqual(build.search_digest(), build.search_digest())
-        self.assertEqual(build.blend_digest(self.blend, PROJECTION),
-                         build.blend_digest(self.blend, PROJECTION))
+        self.assertEqual(build.blend_digest(self.blend, PROJECTION, SUBSTANCES),
+                         build.blend_digest(self.blend, PROJECTION, SUBSTANCES))
 
     def test_a_non_finite_constant_cannot_be_fingerprinted_silently(self):
         with self.assertRaises(ValueError):

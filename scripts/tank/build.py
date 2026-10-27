@@ -51,12 +51,16 @@ from typing import Dict, List, Optional
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "lod"))
+# Appended, not inserted: `scripts/prop/` holds a `build.py` of its own, and only its RON reader
+# is wanted here.
+sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "prop"))
 
 import asset_door  # noqa: E402  — the paths above are what make these importable
 import config as CONFIG  # noqa: E402
 import glb_ktx2  # noqa: E402
 import measure  # noqa: E402
 import report  # noqa: E402
+import ron  # noqa: E402
 import toolchain  # noqa: E402
 import trio as TRIO  # noqa: E402
 from asset_door import Refused  # noqa: E402
@@ -79,11 +83,11 @@ SEARCH_SOURCES = (
 )
 
 #: What can move ANY of the three artifacts. `blend_digest` is taken over the source, what the build
-#: reads of the spec sheet, the materials and this, which is what makes it the staleness check ADR
-#: 0035 asks for.
+#: reads of the spec sheet and of the registry, the material library and this, which is what makes
+#: it the staleness check ADR 0035 asks for.
 PIPELINE_SOURCES = SEARCH_SOURCES + (
-    "build.py", "trio.py", "asset_door.py", "glb_ktx2.py", "../encode-tank-ktx2.sh",
-    "../../.agents/blender/export_tank.py",
+    "build.py", "trio.py", "asset_door.py", "glb_ktx2.py", "../prop/ron.py",
+    "../encode-tank-ktx2.sh", "../../.agents/blender/export_tank.py",
 )
 
 #: What a cut chain's record is called inside its own cache directory — `chains.RECORD`, restated
@@ -200,12 +204,59 @@ def search_digest() -> str:
     ).hexdigest()
 
 
-def material_sources(blend: str) -> tuple:
-    """The material library the blend links its substances out of, and the substance registry the
-    door reads the asset against — both beside each other in `assets/materials/`. Either one moves
-    the view artifact's bytes, and neither is the asset's own file."""
-    registry = asset_door.registry_of(blend)
-    return (os.path.join(os.path.dirname(registry), "materials.blend"), registry)
+def material_library(blend: str) -> str:
+    """The material library the blend links its substance datablocks out of — `materials.blend`,
+    beside the registry in `assets/materials/`. Hashed whole: a linked datablock is whatever the
+    library holds under its name, the source pass holds the link to it (`L1.SUBSTANCE_IDENTITY`),
+    and nothing on this side of Blender can say which of the library's bytes an export reads."""
+    return os.path.join(os.path.dirname(asset_door.registry_of(blend)), "materials.blend")
+
+
+def material_names(gltf: dict) -> List[str]:
+    """The material names the document's primitives wear, each once, sorted: the names `classify`
+    (src/bake.rs) resolves against the registry. A primitive with no material, or an unnamed one,
+    wears no key and declares no membership, so it contributes none."""
+    materials = gltf.get("materials", [])
+    names = set()
+    for mesh in gltf.get("meshes", []):
+        for primitive in mesh.get("primitives", []):
+            index = primitive.get("material")
+            if isinstance(index, int) and 0 <= index < len(materials):
+                name = materials[index].get("name")
+                if isinstance(name, str):
+                    names.add(name)
+    return sorted(names)
+
+
+def _kind(value) -> str:
+    """The kind a registry row is declared under: the struct or variant name the reader kept."""
+    if isinstance(value, dict) and isinstance(value.get("__struct__"), str):
+        return value["__struct__"]
+    if isinstance(value, ron.Call):
+        return value.name
+    raise ron.RonError("a substance row that is no struct or variant: {!r}".format(value))
+
+
+def registry_projection(registry: str, names) -> bytes:
+    """What the bake reads of the substance registry for one model, and nothing else of it.
+
+    `classify` (src/bake.rs) resolves each name a primitive wears: whether it is a key of the
+    registry, and the KIND under it — `Hard` matter the walk reads, a `Witness` it does not, or a
+    `Burst` core the capture refuses — and the sim reads the same kind for the witness-role law.
+    Nothing of a row's numbers reaches an artifact; the game reads them at spawn. The registry's key
+    list, which a substance's id is a position in, is `spec_projection`'s `substance_keys`. So this
+    is one entry per name — `null` for a name that is no key, the kind's name otherwise — as JSON
+    with sorted keys and compact separators; a factor, a provenance, a comment or a key no primitive
+    wears is not in it. The registry is one the consumer contract has already accepted: the canon
+    (`spec_projection`) runs first in both modes and refuses an unreadable one as `door.registry`.
+    The release staleness check (#131) reads this same projection.
+    """
+    document = ron.load(registry)
+    rows = document.get("substances") if isinstance(document, dict) else None
+    if not isinstance(rows, dict):
+        raise ron.RonError("{} has no substances map".format(registry))
+    kinds = {name: _kind(rows[name]) if name in rows else None for name in names}
+    return json.dumps(kinds, sort_keys=True, separators=(",", ":")).encode()
 
 
 def spec_projection(spec: str, root: str, work: str, registry: str) -> bytes:
@@ -222,20 +273,21 @@ def spec_projection(spec: str, root: str, work: str, registry: str) -> bytes:
     return json.dumps(document, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
 
 
-def blend_digest(blend: str, projection: bytes) -> str:
+def blend_digest(blend: str, projection: bytes, substances: bytes) -> str:
     """The staleness field: every input the build reads, and only what it reads of each.
 
-    The source's bytes, the spec sheet's `spec_projection`, the material library and the registry
-    (`material_sources`), the pipeline's own sources, the resolved ladder, and the toolchain. A tank
-    rebuilt from an unchanged blend under a changed pipeline is a different tank, and a certificate
-    that only hashed the blend would call it current. `ladder_digest` is in it for the same reason
-    it keys the cache — a world that grew moves the right wall and therefore the chains, while every
-    file this hashes is unchanged.
+    The source's bytes, the material library's (`material_library`), the spec sheet's
+    `spec_projection`, the registry's `registry_projection`, the pipeline's own sources, the
+    resolved ladder, and the toolchain. A tank rebuilt from an unchanged blend under a changed
+    pipeline is a different tank, and a certificate that only hashed the blend would call it
+    current. `ladder_digest` is in it for the same reason it keys the cache — a world that grew
+    moves the right wall and therefore the chains, while every file this hashes is unchanged.
     """
     digest = hashlib.sha256()
-    for path in (blend,) + material_sources(blend):
+    for path in (blend, material_library(blend)):
         digest.update(TRIO.sha256_file(path).encode())
-    digest.update(hashlib.sha256(projection).hexdigest().encode())
+    for blob in (projection, substances):
+        digest.update(hashlib.sha256(blob).hexdigest().encode())
     digest.update(sources_digest(PIPELINE_SOURCES).encode())
     digest.update(ladder_digest().encode())
     for _key, value in toolchain.ENVIRONMENT:
@@ -536,8 +588,10 @@ def build(blend: str, spec: str, glb: str, root: str, work: str, blender: str,
     with timeline.stage("assemble"):
         view_blob, mesh_count, chains = assemble(candidate_blob, rows, records, cache)
         sim_blob = TRIO.sim_bytes(view_blob, mesh_count)
+        registry = asset_door.registry_of(blend)
         cert = TRIO.certificate(
-            blend_digest(blend, spec_projection(spec, root, work, asset_door.registry_of(blend))),
+            blend_digest(blend, spec_projection(spec, root, work, registry),
+                         registry_projection(registry, material_names(gltf))),
             TRIO.sha256_bytes(view_blob), TRIO.sha256_bytes(sim_blob),
             mesh_count, chains,
         )
@@ -576,8 +630,19 @@ def verify(blend: str, spec: str, glb: str, root: str, work: str, blender: str,
         cert = json.loads(handle.read().decode())
 
     with timeline.stage("certificate"):
-        projection = spec_projection(spec, root, work, asset_door.registry_of(blend))
-        failures = TRIO.coherence(cert, view_blob, sim_blob, blend_digest(blend, projection))
+        registry = asset_door.registry_of(blend)
+        projection = spec_projection(spec, root, work, registry)
+        # The names come off the TRACKED view artifact: its rung records wear no material, so they
+        # are the candidate's own. One that is no glb is `coherence`'s finding, below.
+        try:
+            parsed = glb_ktx2.parse_glb(view_blob, os.path.relpath(view_path, root))
+            names = material_names(parsed[0])
+        except SystemExit:
+            names = []
+        failures = TRIO.coherence(
+            cert, view_blob, sim_blob,
+            blend_digest(blend, projection, registry_projection(registry, names)),
+        )
         findings += [
             finding(TRIO_INCOHERENT, Subject(SubjectKind.FILE, os.path.relpath(cert_path, root)),
                     text, REBUILD)

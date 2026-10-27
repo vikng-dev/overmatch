@@ -14,6 +14,7 @@ verifier's re-export are what they prove, and nothing else can stand in.
 `assets/materials/materials.ron` by default.
 """
 
+import ast
 import copy
 import json
 import math
@@ -248,7 +249,7 @@ class TrackedTrio(unittest.TestCase):
 
     def test_fir_1_certificate_is_coherent_and_lod0_only(self):
         trio = tracked()
-        digest = build.blend_digest(FIR + ".blend", FIR + ".tree.ron", TABLE)
+        digest = build.blend_digest(FIR + ".blend", FIR + ".tree.ron", TABLE, REGISTRY)
         self.assertEqual(build.coherence(trio.cert, trio.view, trio.ron, digest), [])
         self.assertEqual(trio.cert["chains"], {})
 
@@ -659,6 +660,185 @@ class CertificateMutants(unittest.TestCase):
                             for f in build.coherence(cert, view, self.ron, None)))
 
 
+# ── what the staleness field reads ───────────────────────────────────────────────────────────────
+
+#: A species table of one row in the tracked table's shape — a comment, ranges, provenance pairs,
+#: an e-notation literal. Fixture data: a row the cases edit, not a species.
+FIXTURE_TABLE = """\
+// Fixture data: the species table's shape, one row.
+{
+    "fixture_spruce": Species(
+        // A comment the build reads nothing of.
+        height_m: (25.0, 40.0),
+        dbh_m: (0.30, 0.60),
+        substance: "Softwood",
+        crown_base_frac: 0.22,
+        crown_width_frac: 0.11,
+        whorl_spacing_m: 0.6,
+        fell_k: (9.0e5, Unknown("fixture fell_k")),
+        hp: (1200, Unknown("fixture hp")),
+    ),
+}
+"""
+
+#: A tree naming the fixture row. Fixture data.
+FIXTURE_TREE_RON = """\
+// Fixture data: a tree of the fixture species.
+TreeAsset(
+    species: "fixture_spruce",
+    segments: [
+        Segment(height_m: 1.0, r_bottom_m: 0.2, r_top_m: 0.1),
+    ],
+)
+"""
+
+FIXTURE_REGISTRY = '(substances: {"Softwood": Hard(), "Hardwood": Hard()})\n'
+
+
+class RecordingRow(dict):
+    """A species row that records the fields read of it by name and refuses to be read any other
+    way: a reader that iterated it would read fields no projection by name covers."""
+
+    def __init__(self, row):
+        super().__init__(row)
+        self.read = set()
+
+    def __getitem__(self, key):
+        self.read.add(key)
+        return super().__getitem__(key)
+
+    def get(self, key, default=None):
+        self.read.add(key)
+        return super().get(key, default)
+
+    def __contains__(self, key):
+        self.read.add(key)
+        return super().__contains__(key)
+
+    def __iter__(self):
+        raise AssertionError("the generator reads a row by field name, never whole")
+
+    keys = items = values = __iter__
+
+
+class StalenessInputs(unittest.TestCase):
+    """`blend_digest` moves exactly when an input the build reads does.
+
+    The species table is read through `species_projection` only — the generator's inputs, the row's
+    substance and its verdict — so a threshold, a provenance or a comment is not an input. The
+    `.tree.ron` is the sim artifact and is read whole, so every byte of it is. The fixture is a
+    one-row table and a tree naming it, beside a registry of two keys.
+    """
+
+    def setUp(self):
+        self.work = tempfile.mkdtemp(prefix="prop-staleness-")
+        self.addCleanup(shutil.rmtree, self.work)
+        self.blend = os.path.join(self.work, "fixture.blend")
+        self.tree_ron = os.path.join(self.work, "fixture.tree.ron")
+        self.table = os.path.join(self.work, "species.ron")
+        self.registry = os.path.join(self.work, "registry.ron")
+        for path, text in ((self.blend, "BLENDER-FIXTURE"), (self.tree_ron, FIXTURE_TREE_RON),
+                           (self.table, FIXTURE_TABLE), (self.registry, FIXTURE_REGISTRY)):
+            with open(path, "w", encoding="utf-8") as handle:
+                handle.write(text)
+        self.base = self.digest()
+
+    def digest(self):
+        return build.blend_digest(self.blend, self.tree_ron, self.table, self.registry)
+
+    def with_table(self, old, new):
+        """The digest over the fixture table with one edit."""
+        self.assertEqual(FIXTURE_TABLE.count(old), 1, old)
+        with open(self.table, "w", encoding="utf-8") as handle:
+            handle.write(FIXTURE_TABLE.replace(old, new))
+        return self.digest()
+
+    def test_a_threshold_or_its_provenance_is_not_an_input(self):
+        """The runtime reads `hp` and `fell_k` at spawn; the build reads only that each is
+        positive. A retune or a restated provenance leaves every tree current."""
+        for old, new in (("hp: (1200,", "hp: (1300,"),
+                         ("fell_k: (9.0e5,", "fell_k: (8.5e5,"),
+                         ('Unknown("fixture hp")', 'Measured("a stand count")')):
+            with self.subTest(edit=old):
+                self.assertEqual(self.base, self.with_table(old, new))
+
+    def test_a_comment_or_a_respelled_literal_is_not_an_input(self):
+        """The projection is over values, canonically encoded: the table's text is not read."""
+        for old, new in (("// A comment the build reads nothing of.", "// Another comment."),
+                         ("whorl_spacing_m: 0.6,", "whorl_spacing_m: 0.60,"),
+                         ("height_m: (25.0, 40.0)", "height_m: (25.0,40.0)"),
+                         ("fell_k: (9.0e5,", "fell_k: (900000.0,")):
+            with self.subTest(edit=old):
+                self.assertEqual(self.base, self.with_table(old, new))
+
+    def test_every_generator_input_is_an_input(self):
+        """A field the generator draws the tree from moves the digest. The cases are held to
+        `GENERATOR_FIELDS`, so a field that joins the list joins them."""
+        edits = {
+            "height_m": ("height_m: (25.0, 40.0)", "height_m: (26.0, 40.0)"),
+            "dbh_m": ("dbh_m: (0.30, 0.60)", "dbh_m: (0.30, 0.65)"),
+            "crown_base_frac": ("crown_base_frac: 0.22", "crown_base_frac: 0.25"),
+            "crown_width_frac": ("crown_width_frac: 0.11", "crown_width_frac: 0.12"),
+            "whorl_spacing_m": ("whorl_spacing_m: 0.6,", "whorl_spacing_m: 0.8,"),
+        }
+        self.assertEqual(set(edits), set(build.GENERATOR_FIELDS))
+        for field, (old, new) in edits.items():
+            with self.subTest(field=field):
+                self.assertNotEqual(self.base, self.with_table(old, new))
+
+    def test_the_substance_is_an_input(self):
+        """The substance is the key the runtime reads the tree's matter by: another key, both of
+        them in the registry, is another tree."""
+        self.assertNotEqual(self.base,
+                            self.with_table('substance: "Softwood"', 'substance: "Hardwood"'))
+
+    def test_a_row_the_build_refuses_is_an_input(self):
+        """The verdict is in the projection: a threshold the build refuses, or a substance the
+        registry lacks, changes what the build reads even where the value itself is not read. A
+        species the table lacks projects as its verdict rather than failing to project."""
+        for old, new in (("hp: (1200,", "hp: (0,"),
+                         ('substance: "Softwood"', 'substance: "Plastic"')):
+            with self.subTest(edit=old):
+                self.assertNotEqual(self.base, self.with_table(old, new))
+        self.assertIn(b"not a Species row",
+                      build.species_projection(self.table, "nobody", {"Softwood"}))
+
+    def test_the_tree_ron_is_read_whole(self):
+        """The ron is the sim artifact: every byte of it, the header included, is an input."""
+        with open(self.tree_ron, "a", encoding="utf-8") as handle:
+            handle.write("// restated\n")
+        self.assertNotEqual(self.base, self.digest())
+
+    def test_an_unreadable_table_is_refused_by_name(self):
+        with open(self.table, "w", encoding="utf-8") as handle:
+            handle.write("{ not ron")
+        with self.assertRaises(build.Refused) as caught:
+            self.digest()
+        self.assertEqual(caught.exception.stage, "ron")
+
+    def test_the_generator_reads_exactly_the_projected_fields(self):
+        """`GENERATOR_FIELDS` is complete by construction: every `row` in `gen_tree.py` is an
+        argument of `plan.sample`, `plan.whorls` or `build`, which hands it to those two, and the
+        two read exactly these fields by name. A field either grew to read would be recorded here
+        and missing from the projection."""
+        row = RecordingRow(ron.load(TABLE)["norway_spruce"])
+        sampled = plan.sample(row, 1)
+        plan.whorls(sampled["height_m"], row, sampled["rng"])
+        self.assertEqual(row.read, set(build.GENERATOR_FIELDS))
+
+        with open(os.path.join(ROOT, "scripts", "prop", "gen_tree.py"), encoding="utf-8") as handle:
+            module = ast.parse(handle.read())
+        parents = {child: node for node in ast.walk(module) for child in ast.iter_child_nodes(node)}
+        readers = set()
+        for node in ast.walk(module):
+            if isinstance(node, ast.Name) and node.id == "row" and isinstance(node.ctx, ast.Load):
+                call = parents[node]
+                self.assertIsInstance(call, ast.Call, ast.unparse(call))
+                self.assertIn(node, call.args, ast.unparse(call))
+                readers.add(ast.unparse(call.func))
+        self.assertEqual(readers, {"plan.sample", "plan.whorls", "build"})
+
+
 # ── generation, export and the verifier, in Blender ──────────────────────────────────────────────
 
 @unittest.skipIf(BLENDER.mismatch, "the pinned Blender is not here: {}".format(BLENDER))
@@ -731,8 +911,9 @@ class Verifier(unittest.TestCase):
         js, _ = build.parse_glb(view)
         self.assertEqual(build.contract_failures(js, "fir_1"), [])
         build.land(os.path.join(self.work, "fir_1.glb"), view)
-        cert = build.certificate(build.blend_digest(self.blend, self.blend[:-6] + ".tree.ron", TABLE),
-                                 view, trio.ron, len(js["meshes"]))
+        cert = build.certificate(
+            build.blend_digest(self.blend, self.blend[:-6] + ".tree.ron", TABLE, self.registry),
+            view, trio.ron, len(js["meshes"]))
         build.land(os.path.join(self.work, "fir_1.lod.json"), build.certificate_bytes(cert))
         with self.assertRaises(build.Refused) as caught:
             self.verify()
