@@ -19,6 +19,7 @@ use super::protocol::{
 use super::{diagnostics, harness, open_gameplay_gate, physics, spawn_map};
 use crate::command::{ConsumeCommandEdges, TankCommand};
 use crate::damage::TankKnockedOut;
+use crate::hull_marks::HullMarks;
 use crate::state::GameplaySet;
 // The spawn-height rule and its constants live in `terrain_grid`: ONE rule for every spawn path in
 // every composition (see `terrain_grid::spawn_surface_height`), so the offline duel, the lanes, the
@@ -76,6 +77,8 @@ pub fn run() {
     app.add_plugins(crate::shot_trace::server_plugin);
     super::shot_transport::install_server(&mut app);
     super::shot_explanation::install_server(&mut app);
+    // Every strike's hull mark, recorded on the struck root and replicated by diff.
+    super::hull_marks::install_server(&mut app);
     // Authority must reject input targets not controlled by their sending client.
     app.add_input_validator(authorize_controlled_targets::<NativeStateSequence<TankCommand>>);
     // Lightyear visibility hooks require `ReplicationSender` on each remote link.
@@ -692,6 +695,8 @@ fn spawn_player_tank(
                 Replicate::to_clients(NetworkTarget::All),
             ),
             (
+                // Born empty in the spawn bundle, public, appended by diff.
+                HullMarks::default(),
                 // Clients build their own local skeleton; replicate only root state.
                 DisableReplicateHierarchy,
                 // ONE TIMELINE: every client interpolates every hull, the owner's included — the
@@ -785,6 +790,7 @@ fn spawn_bot_entity(
             (
                 NetTankStatus::Active,
                 LaunchedTurretPose::default(),
+                HullMarks::default(),
                 CombatDisclosure::hidden(),
                 Replicate::to_clients(NetworkTarget::All),
             ),

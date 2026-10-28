@@ -599,6 +599,8 @@ fn spawn_tank(
             Name::new(name.to_string()),
             RigidBody::Dynamic,
             identity(index),
+            // The hull marks the local authority records (`hull_marks::offline_plugin`).
+            crate::hull_marks::HullMarks::default(),
         ),
     );
     if controlled {

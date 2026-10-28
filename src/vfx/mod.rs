@@ -7,6 +7,8 @@ use bevy::prelude::*;
 
 pub(crate) mod billboard;
 mod ember;
+/// The decals that draw each vehicle's replicated hull marks.
+mod hull_marks;
 mod impact;
 mod muzzle;
 mod prewarm;
@@ -33,6 +35,7 @@ pub fn plugin(app: &mut App) {
         tracer::plugin,
         // The scatter-crossing read: rides `impact`'s terrain effects, so it mounts after it.
         scatter_hit::plugin,
+        hull_marks::plugin,
     ));
     // The prewarm rig wants the OTHER modules' preloaded assets (it warms the exact mesh/material
     // combinations they will draw), so its spawn orders after their Startup setups.
@@ -42,7 +45,8 @@ pub fn plugin(app: &mut App) {
             .after(muzzle::setup_muzzle_assets)
             .after(trail::setup_trail_assets)
             .after(impact::setup_impact_assets)
-            .after(ember::setup_ember_assets),
+            .after(ember::setup_ember_assets)
+            .after(hull_marks::build_materials),
     );
     app.add_systems(
         Update,

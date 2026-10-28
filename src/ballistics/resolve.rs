@@ -54,7 +54,8 @@ use super::walk::{
 use super::{
     ArmourMark, BallisticSurfaces, ComponentHealth, CrossingEnd, Impact, ImpactOutcome,
     ImpactSurface, MARCH_EPS, MarchingShell, PenetrationEvent, ProjectileMarchWorld, ShellRicochet,
-    ShellTerminal, TerminalVerdict, VolumeCrossing, apply_hit_impulse, throw_spall_cone,
+    ShellStrike, ShellTerminal, TerminalVerdict, Verdict, VolumeCrossing, apply_hit_impulse,
+    throw_spall_cone,
 };
 
 #[cfg(test)]
@@ -1131,6 +1132,8 @@ pub(crate) struct Bite {
     /// Where the round punched in: the struck face.
     pub entrance: Vec3,
     pub normal: Vec3,
+    /// The volume owning the entrance face.
+    pub struck: Entity,
     /// Entrance coverage η.
     pub coverage: f32,
     pub overmatched: bool,
@@ -1457,6 +1460,7 @@ fn bite(
         speed_in,
         volumes,
         normal: plan.entrance.normal,
+        struck,
         coverage: plan.entrance.coverage,
         overmatched: plan.entrance.overmatched,
         owner: owner(struck),
@@ -1784,12 +1788,23 @@ fn apply_bounce(
     if let Some(shot) = shell.shot
         && !*terminal_emitted
     {
+        let sequence = (shell.marks.ricochets.len() - 1) as u32;
         commands.trigger(ShellRicochet {
             shot: shot.0,
             origin: bounce.position,
             direction: Vec3::from(bounce.direction),
             speed: bounce.speed,
-            sequence: (shell.marks.ricochets.len() - 1) as u32,
+            sequence,
+        });
+        commands.trigger(ShellStrike {
+            shot: shot.0,
+            sequence,
+            struck: bounce.struck,
+            at: bounce.position,
+            normal: bounce.normal,
+            incoming: Vec3::from(bounce.incoming),
+            caliber: shell.projectile.caliber(),
+            verdict: Verdict::Ricochet,
         });
     }
 }
@@ -1889,12 +1904,23 @@ fn apply_bite(
     {
         *terminal_emitted = true;
         shell.terminal_report.0 = true;
+        let after_bounces = shell.marks.ricochets.len() as u32;
         commands.trigger(ShellTerminal {
             shot: shot.0,
             position: terminal_at,
             normal: bite.normal,
             verdict,
-            after_bounces: shell.marks.ricochets.len() as u32,
+            after_bounces,
+        });
+        commands.trigger(ShellStrike {
+            shot: shot.0,
+            sequence: after_bounces,
+            struck: bite.struck,
+            at: bite.entrance,
+            normal: bite.normal,
+            incoming: Vec3::from(bite.incoming),
+            caliber: shell.projectile.caliber(),
+            verdict: verdict.into(),
         });
     }
 }

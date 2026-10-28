@@ -39,8 +39,8 @@ impl PrewarmRig {
 }
 
 /// Spawn the warm-up set: the shell scene + one billboard per blend mode + one trail ribbon + one
-/// impact puff. Ordered after the other vfx Startup setups (see `vfx::plugin`) so their preloaded
-/// assets exist.
+/// impact puff + one hull-mark decal per kind. Ordered after the other vfx Startup setups (see
+/// `vfx::plugin`) so their preloaded assets exist.
 #[expect(
     clippy::too_many_arguments,
     reason = "warms every vfx pipeline: one parameter per asset set and store"
@@ -132,6 +132,17 @@ pub(super) fn spawn_prewarm_rig(
         NotShadowCaster,
         NotShadowReceiver,
     ));
+
+    // One forward decal per hull-mark kind: each kind's material is its own pipeline permutation,
+    // and the first hit would otherwise compile it.
+    let marks = commands
+        .spawn((
+            PrewarmRig::new(),
+            Transform::from_translation(PREWARM_POSITION),
+            Visibility::default(),
+        ))
+        .id();
+    super::hull_marks::spawn_prewarm(&mut commands, marks);
 }
 
 /// As the warm-up shell scene instantiates, stamp `NoFrustumCulling` (+ shadow opt-outs) onto its

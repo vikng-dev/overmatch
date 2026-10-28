@@ -1044,6 +1044,33 @@ pub(crate) struct ShellTerminal {
     pub after_bounces: u32,
 }
 
+/// What a keyed shot did at a body's outer face, in the game's damage model: each bounce before
+/// its terminal, then the terminal's entrance — the same faces [`ShellRicochet`] and
+/// [`ShellTerminal`] report, with the struck volume, the round's travel and its calibre beside the
+/// verdict. Raised wherever the march runs; the authority's cosmetic record (`hull_marks`) is its
+/// one reader, and nothing in the simulation reads it.
+#[derive(Event, Clone, Copy, Debug)]
+pub(crate) struct ShellStrike {
+    pub shot: ShotId,
+    /// The strike's ordinal within its shot: a bounce's [`ShellRicochet::sequence`], the terminal's
+    /// [`ShellTerminal::after_bounces`], so no two strikes of one shot share it.
+    pub sequence: u32,
+    /// The volume owning the struck face.
+    pub struck: Entity,
+    /// Where the round met the face (WORLD): a bounce's contact point, a terminal's entrance — the
+    /// face, never an embed point inside the material.
+    pub at: Vec3,
+    /// The struck face's outward normal (WORLD).
+    pub normal: Vec3,
+    /// The round's direction of travel as it met the face (WORLD, unit).
+    pub incoming: Vec3,
+    /// The flying body's calibre (m), the value [`Impact::caliber`] carries.
+    pub caliber: f32,
+    /// What the round did at the face: `Ricochet` for a bounce, `Stopped` or `Through` for a
+    /// terminal.
+    pub verdict: Verdict,
+}
+
 /// Authority-only report that a keyed shot first took a shown HP point from a tank's pool
 /// ([`ShotDose::shown_losses`]), so the shooter's hit marker follows what the struck tank shows.
 /// [`DamageReport`] emits it at most once; the private wire receipt intentionally carries no HP
@@ -2198,7 +2225,8 @@ struct MarchingShell<'a, 'w> {
     readout: &'a mut Mut<'w, ShellReadout>,
     spall: &'a mut Mut<'w, SpallMarks>,
     dose: &'a mut Mut<'w, ShotDose>,
-    /// The shell's network identity, when it has one. `None` for SP and sandbox shells.
+    /// The shell's network identity, when it has one: `None` where no shot clock runs (the
+    /// sandboxes); single-player keys its rounds (`damage_cam::delivery::offline_plugin`).
     shot: Option<&'a Shot>,
     /// The tank that fired this shell, read ONLY to exclude its own volumes from the march.
     source: Option<&'a ShotSource>,

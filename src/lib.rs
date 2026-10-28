@@ -89,6 +89,10 @@ mod headless_test;
 /// The shared tank-state HUD (world-anchored capability/crew/damage readouts). Mounted by both
 /// `GamePlugin` and the sandbox; each reprojects through the camera it declared `view::PlayerView`.
 mod hud;
+/// Hull marks, the visual layer of the game's damage model: the authority's per-vehicle record of
+/// the scratches, dents and holes rounds leave, replicated to every client. The decals that draw
+/// it are `vfx::hull_marks`.
+mod hull_marks;
 /// `OVERMATCH_LOD_SHOWCASE=1`: a flat map, the player at one edge, and a clamped PAIR of Tigers at
 /// every switch distance in the shoe LOD chain — the two meshes the pipeline's rendered-difference
 /// gate compared, side by side, at the range it compared them. A dev eyeball harness for a gate
@@ -808,6 +812,8 @@ impl Plugin for GamePlugin {
             ClientPlugin,
             // The shot clock, and each pen cam record explained to the player without a hop.
             damage_cam::delivery::offline_plugin,
+            // The local sim is the authority: its strikes mark the hulls directly.
+            hull_marks::offline_plugin,
             // Passive jitter-trace recorder (frame + tick rows; no net extras in this build). Idle
             // unless `SPIKE_TRACE` is set.
             trace::sp_plugin,
@@ -915,6 +921,8 @@ pub fn run_offline() {
     app.add_plugins((
         tank::scenario::offline_target_fires_plugin,
         damage_cam::pen_cam::game::scripted_xray_plugin,
+        // Strikes the parked target and holds the camera on each mark (`OVERMATCH_HULL_MARKS_DEMO`).
+        hull_marks::demo::offline_plugin,
     ));
     app.run();
 }

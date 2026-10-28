@@ -192,6 +192,8 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// drives its wall with), and a bounce's shock enters `WireDose::line` at the energy rate: a
 /// REV 36 client would read the strengths in the wrong units and part its potency bands at a rate
 /// per reference-mm.
+/// REV 37 is unshipped, so the game's cosmetic hull marks ride it: every tank root carries
+/// public `HullMarks` (`hull_marks`), replicated by diff. Surface and own-type graph move.
 pub const PROTOCOL_REV: u32 = 37;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
@@ -893,6 +895,7 @@ const WIRE_SURFACE: &[&str] = &[
     "NetTankStatus",
     "LaunchedTurretPose",
     "DestructionLedger",
+    "HullMarks",
     // Message channels (`Name|Mode|Direction`), followed by their message types.
     "FireChannel|UnorderedUnreliable|ServerToClient",
     "OutcomeChannel|UnorderedReliable|ServerToClient",
@@ -920,7 +923,7 @@ const WIRE_SURFACE: &[&str] = &[
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0xe49d_85fe_dfc6_1280;
+const WIRE_SURFACE_HASH: u64 = 0xdfd4_bdc7_0e93_9ad9;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -957,7 +960,7 @@ const WIRE_SURFACE_HASH: u64 = 0xe49d_85fe_dfc6_1280;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x0598_4b6f_529c_a101;
+const WIRE_TYPES_HASH: u64 = 0xfd26_ea9f_952a_250e;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -995,6 +998,10 @@ pub(crate) fn plugin(app: &mut App) {
     // The destruction ledger (one world entity): appended entries ride as diffs, a late joiner
     // takes the list once.
     app.component::<super::destruction::DestructionLedger>()
+        .replicate_diff();
+    // Each tank root's hull marks, public (ADR-0039): new marks ride as diffs, a late joiner takes
+    // the held set once.
+    app.component::<crate::hull_marks::HullMarks>()
         .replicate_diff();
 
     // Automatic-fire visuals may be lost or reordered. Application ShotId dedup and bounded copies
@@ -1615,6 +1622,9 @@ mod tests {
         ("src/net/protocol.rs", "LaunchedTurretPose"),
         ("src/net/destruction.rs", "DestructionLedger"),
         ("src/net/destruction.rs", "LedgerEntry"),
+        ("src/hull_marks.rs", "HullMarks"),
+        ("src/hull_marks.rs", "HullMark"),
+        ("src/hull_marks.rs", "MarkKind"),
         ("src/net/protocol.rs", "FireChannel"),
         ("src/net/protocol.rs", "OutcomeChannel"),
         ("src/net/protocol.rs", "DamageChannel"),
