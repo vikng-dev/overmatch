@@ -1045,6 +1045,123 @@ mod tests {
         assert!(world.take_uploads().is_empty());
     }
 
+    /// Manual headless CPU measurement of contact, resampling, history, rasterization, mip
+    /// rebuilds and upload packing at 30 synthetic tanks under pivot. The renderer and ECS
+    /// query overhead are excluded; no GPU timing or frame-budget assertion is implied.
+    #[test]
+    #[ignore = "manual headless CPU measurement; run with --ignored --nocapture"]
+    fn thirty_tank_pivot_cpu_and_upload_measurement() {
+        use crate::terrain_grid::{HeightGrid, TerrainExtent};
+        use crate::track_prints::stamper::{ShoeMemory, contact};
+        use bevy::math::{Affine3A, Quat};
+        use bevy::prelude::Entity;
+        use std::sync::Arc;
+        use std::time::Instant;
+        let frames: usize = std::env::var("OVERMATCH_PRINT_BENCH_FRAMES")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(180);
+        assert!(frames > 0);
+        let grid = HeightGrid::new(
+            vec![0.0; 1025 * 1025].into(),
+            1025,
+            TerrainExtent {
+                world_size_m: 1500.0,
+                height_offset_m: 0.0,
+                height_span_m: 1.0,
+            },
+        );
+        let shoes = vec![ClearanceStamp::pooled(&sole(), NEAR_TEXEL_M)];
+        for (layout, spacing) in [("clustered", 12.0), ("dispersed", 200.0)] {
+            let mut memory: Vec<_> = (0..30).map(|_| ShoeMemory::default()).collect();
+            let mut log = StampLog::default();
+            let mut near = NearStore::default();
+            let mut world = WorldStore::new(1500.0, WORLD_SIDE);
+            near.recentre(Vec2::ZERO, &log, &shoes, &LAW);
+            let cold_bytes: usize = near.take_uploads().iter().map(|u| u.data.len()).sum();
+            let mut times = Vec::new();
+            let mut bytes = Vec::new();
+            for frame in 0..frames {
+                let start = Instant::now();
+                let yaw = frame as f32 * 0.018; // ASSUMED 1.08 rad/s at 60 Hz.
+                for (tank, memory) in memory.iter_mut().enumerate() {
+                    let centre = (Vec2::new((tank % 6) as f32, (tank / 6) as f32)
+                        - Vec2::new(2.5, 2.0))
+                        * spacing;
+                    for side in 0..2 {
+                        for k in 0..27 {
+                            let local = Vec2::new(
+                                if side == 0 { -1.4 } else { 1.4 },
+                                (k as f32 - 13.0) * 0.13,
+                            ); // Synthetic fixture geometry.
+                            let at = centre + Vec2::from_angle(-yaw).rotate(local);
+                            let pose = Affine3A::from_rotation_translation(
+                                Quat::from_rotation_y(yaw),
+                                Vec3::new(at.x, 0.0, at.y),
+                            );
+                            let c = contact(
+                                pose,
+                                shoes[0].bounds(false),
+                                shoes[0].datum_y(),
+                                LAW.contact_m,
+                                |p| Some(grid.height_at(p.x, p.y)),
+                            )
+                            .unwrap();
+                            let id = Entity::from_raw_u32((side * 27 + k + 1) as u32).unwrap();
+                            if let Some(sweep) = memory.observe(id, &c) {
+                                for c in sweep {
+                                    let entry =
+                                        StampEntry::new(c.datum, c.yaw, c.lift, c.tilt, 0, false);
+                                    log.push(entry, &shoes, &LAW);
+                                    near.stamp(&entry, &shoes, &LAW);
+                                    world.stamp(&entry, &shoes, &LAW);
+                                }
+                            }
+                        }
+                    }
+                }
+                let mut uploads = near.take_uploads();
+                uploads.extend(world.take_uploads());
+                bytes.push(uploads.iter().map(|u| u.data.len()).sum::<usize>());
+                // flush converts Vec payloads into shared extraction buffers too.
+                for upload in uploads {
+                    std::hint::black_box(Arc::<[u8]>::from(upload.data));
+                }
+                times.push(start.elapsed().as_secs_f64() * 1000.0);
+            }
+            times.sort_by(f64::total_cmp);
+            let history_bytes: usize = log
+                .cells
+                .values()
+                .map(|c| {
+                    c.entries.capacity() * std::mem::size_of::<StampEntry>()
+                        + match &c.checkpoint {
+                            Checkpoint::Empty => 0,
+                            Checkpoint::Runs(r) => std::mem::size_of_val(&**r),
+                            Checkpoint::Raw(r) => std::mem::size_of_val(&**r),
+                        }
+                })
+                .sum();
+            eprintln!(
+                "MEASURED {layout}, {frames} frames, 30 x 54 grounded shoes: mean {:.3} ms, p95 {:.3} ms, max {:.3} ms; uploads mean {} B, max {} B, cold {} B; history payload {} B in {} cells, logical stamps {}",
+                times.iter().sum::<f64>() / frames as f64,
+                times[(frames - 1) * 95 / 100],
+                times[frames - 1],
+                bytes.iter().sum::<usize>() / frames,
+                bytes.iter().max().unwrap(),
+                cold_bytes,
+                history_bytes,
+                log.cells.len(),
+                log.len()
+            );
+            assert!(log.cells.values().all(|c| c.entries.len() < LOG_BATCH));
+            assert!(
+                near.take_uploads().is_empty() && world.take_uploads().is_empty(),
+                "upload packing consumes dirtiness exactly once"
+            );
+        }
+    }
+
     /// The world layer's GPU copy is rebuilt up the WHOLE mip chain over the tiles a track touched,
     /// each level the rounded mean of the one below, and nothing is sent twice. A level the rebuild
     /// skipped would keep showing the ground untrodden at the range that level is sampled at.

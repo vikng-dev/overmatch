@@ -330,17 +330,20 @@ fn stamp_shoes(
                 law.contact_m,
                 ground,
             ) else {
+                tank.memory.airborne(link);
                 continue;
             };
-            if tank.memory.observe(link, &contact) {
-                laid.push(StampEntry::new(
-                    contact.datum,
-                    contact.yaw,
-                    contact.lift,
-                    contact.tilt,
-                    0,
-                    mirrored,
-                ));
+            if let Some(sweep) = tank.memory.observe(link, &contact) {
+                laid.extend(sweep.map(|contact| {
+                    StampEntry::new(
+                        contact.datum,
+                        contact.yaw,
+                        contact.lift,
+                        contact.tilt,
+                        0,
+                        mirrored,
+                    )
+                }));
             }
         }
     }

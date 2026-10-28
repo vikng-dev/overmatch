@@ -103,38 +103,67 @@ pub(crate) fn contact(
     })
 }
 
-/// Where one shoe was last stamped.
-#[derive(Clone, Copy, Debug)]
-struct Placed {
-    datum: Vec2,
-    yaw: f32,
+/// A continuous grounded movement, sampled at no more than half a near texel of sole motion.
+/// Interpolated contacts retain lift and tilt, and take the shortest turn through the yaw seam.
+pub(crate) struct ShoeSweep {
+    from: ShoeContact,
+    to: ShoeContact,
+    turn: f32,
+    step: u32,
+    steps: u32,
 }
 
-/// Where each shoe of one tank was last stamped.
+impl Iterator for ShoeSweep {
+    type Item = ShoeContact;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.step == self.steps {
+            return None;
+        }
+        self.step += 1;
+        let t = self.step as f32 / self.steps as f32;
+        Some(ShoeContact {
+            datum: self.from.datum.lerp(self.to.datum, t),
+            yaw: self.from.yaw + self.turn * t,
+            lift: self.from.lift + (self.to.lift - self.from.lift) * t,
+            tilt: self.from.tilt.lerp(self.to.tilt, t),
+            reach: self.to.reach,
+        })
+    }
+}
+
+/// The last stamped contact of every continuously grounded shoe of one tank.
 #[derive(Default)]
-pub(crate) struct ShoeMemory(HashMap<Entity, Placed>);
+pub(crate) struct ShoeMemory(HashMap<Entity, ShoeContact>);
 
 impl ShoeMemory {
-    /// Whether `shoe`, grounded at `contact`, is stamped now: its first contact, or a move of its
-    /// sole beyond [`MOVE_TEXELS`] of a texel since its last stamp. Remembered when it is.
-    pub(crate) fn observe(&mut self, shoe: Entity, contact: &ShoeContact) -> bool {
-        let moved = self.0.get(&shoe).is_none_or(|placed| {
-            let turn = (contact.yaw - placed.yaw + std::f32::consts::PI)
-                .rem_euclid(std::f32::consts::TAU)
-                - std::f32::consts::PI;
-            placed.datum.distance(contact.datum) + turn.abs() * contact.reach
-                > MOVE_TEXELS * NEAR_TEXEL_M
-        });
-        if moved {
-            self.0.insert(
-                shoe,
-                Placed {
-                    datum: contact.datum,
-                    yaw: contact.yaw,
-                },
-            );
+    /// First contact, or the sweep since the last stamp once the sole moved more than
+    /// [`MOVE_TEXELS`] of a texel. Subsampling motion keeps sliding prints continuous even
+    /// when a frame moves a shoe farther than its own length.
+    pub(crate) fn observe(&mut self, shoe: Entity, contact: &ShoeContact) -> Option<ShoeSweep> {
+        let from = self.0.get(&shoe).copied().unwrap_or(*contact);
+        let turn = (contact.yaw - from.yaw + std::f32::consts::PI)
+            .rem_euclid(std::f32::consts::TAU)
+            - std::f32::consts::PI;
+        let motion = from.datum.distance(contact.datum) + turn.abs() * contact.reach;
+        let spacing = MOVE_TEXELS * NEAR_TEXEL_M;
+        if self.0.contains_key(&shoe) && motion <= spacing {
+            return None;
         }
-        moved
+        self.0.insert(shoe, *contact);
+        Some(ShoeSweep {
+            from,
+            to: *contact,
+            turn,
+            step: 0,
+            steps: (motion / spacing).ceil().max(1.0) as u32,
+        })
+    }
+
+    /// An airborne shoe begins a new contact episode when it next touches down. Never draw
+    /// a sweep through the air, or along the return run, between those episodes.
+    pub(crate) fn airborne(&mut self, shoe: Entity) {
+        self.0.remove(&shoe);
     }
 
     /// Forget every shoe: a teleport or a respawn, after which no stamp is a move from the last.
@@ -194,7 +223,7 @@ mod tests {
                 for (id, pose) in patch(hull_z, x) {
                     let contact = contact(pose, (LOW, HIGH), 0.0, CONTACT_M, flat)
                         .expect("lies on the ground");
-                    if memory.observe(entity(id), &contact) {
+                    if memory.observe(entity(id), &contact).is_some() {
                         stamps[side] += 1;
                     }
                 }
@@ -231,7 +260,10 @@ mod tests {
         };
         for (id, pose) in shoes(0.0).into_iter().enumerate() {
             let contact = contact(pose, (LOW, HIGH), 0.0, CONTACT_M, flat).expect("grounded");
-            assert!(memory.observe(entity(id as u32), &contact), "first contact");
+            assert!(
+                memory.observe(entity(id as u32), &contact).is_some(),
+                "first contact"
+            );
         }
         let mut stamped = vec![false; shoes(0.0).len()];
         let mut turn = 0.0;
@@ -239,7 +271,7 @@ mod tests {
             turn += 0.002;
             for (id, pose) in shoes(turn).into_iter().enumerate() {
                 let contact = contact(pose, (LOW, HIGH), 0.0, CONTACT_M, flat).expect("grounded");
-                stamped[id] |= memory.observe(entity(id as u32), &contact);
+                stamped[id] |= memory.observe(entity(id as u32), &contact).is_some();
             }
         }
         assert!(
@@ -252,6 +284,60 @@ mod tests {
                 .map(|(i, _)| i)
                 .collect::<Vec<_>>(),
         );
+    }
+
+    /// Sliding must cover the whole path between frames for the store rasterizer. A rule
+    /// emitting only the final pose leaves gaps once a frame's slide exceeds the shoe length.
+    #[test]
+    fn fast_sliding_is_sampled_without_gaps() {
+        let shoe = Entity::from_raw_u32(1).unwrap();
+        let mut memory = ShoeMemory::default();
+        let start = contact(lying(Vec2::ZERO, 0.0), (LOW, HIGH), 0.0, CONTACT_M, flat).unwrap();
+        assert_eq!(memory.observe(shoe, &start).unwrap().count(), 1);
+        let end = contact(
+            lying(Vec2::new(0.0, 0.5), 0.2),
+            (LOW, HIGH),
+            0.0,
+            CONTACT_M,
+            flat,
+        )
+        .unwrap();
+        let mut previous = start;
+        let mut count = 0;
+        for next in memory.observe(shoe, &end).unwrap() {
+            let sole_motion =
+                previous.datum.distance(next.datum) + (next.yaw - previous.yaw).abs() * next.reach;
+            assert!(sole_motion <= MOVE_TEXELS * NEAR_TEXEL_M + 1e-6);
+            previous = next;
+            count += 1;
+        }
+        assert!(count > 2, "the intervening path must be stamped");
+        assert_eq!(previous.datum, end.datum);
+        assert!((previous.yaw - end.yaw).abs() < 1e-6);
+    }
+
+    /// Airborne episodes and root snaps must never connect old ground to the next touchdown.
+    /// The print consumer needs exactly one initial pose after either discontinuity.
+    #[test]
+    fn airborne_and_reset_contacts_never_sweep_from_old_ground() {
+        let shoe = Entity::from_raw_u32(1).unwrap();
+        let mut memory = ShoeMemory::default();
+        let at = |z| {
+            contact(
+                lying(Vec2::new(0.0, z), 0.0),
+                (LOW, HIGH),
+                0.0,
+                CONTACT_M,
+                flat,
+            )
+            .unwrap()
+        };
+        assert_eq!(memory.observe(shoe, &at(0.0)).unwrap().count(), 1);
+        memory.airborne(shoe);
+        assert_eq!(memory.observe(shoe, &at(2.0)).unwrap().count(), 1);
+        assert!(memory.observe(shoe, &at(2.0)).is_none());
+        memory.reset();
+        assert_eq!(memory.observe(shoe, &at(-20.0)).unwrap().count(), 1);
     }
 
     /// A sole off the ground, facing up, or parked far below it is no contact; one tilted onto
