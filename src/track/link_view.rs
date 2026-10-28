@@ -320,6 +320,12 @@ impl LinkTemplate {
         *self.frame.get(side)
     }
 
+    /// The authored shoe on `side`, at full detail whatever rung the belts draw: the right side is
+    /// the glb's own mesh, the left its [`mirrored_mesh`].
+    pub(crate) fn shoe_mesh(&self, side: Side) -> &Handle<Mesh> {
+        self.mesh.get(side)
+    }
+
     /// The mesh one rung draws on `side`: `0` is the authored shoe, `1 + i` the chain's rung `i`.
     /// A rung past the chain's floor draws the floor — a pin ([`ShoeBelt::pin`]) is the only source
     /// of one, and a clamped belt showing the coarsest shoe it has beats one showing none.
@@ -365,6 +371,20 @@ pub(crate) struct LinkFrame {
     origin: Vec3,
 }
 
+impl LinkFrame {
+    /// A mesh-local point in the canonical frame: `x` lateral, `y` toward the inner face, `z`
+    /// longitudinal, the origin on the pin line at the shoe's lateral centre.
+    pub(crate) fn mesh_to_canonical(&self, point: Vec3) -> Vec3 {
+        self.correction * (point - self.origin)
+    }
+
+    /// The canonical frame in mesh space: composed after a shoe entity's own transform, it places
+    /// the canonical frame where [`link_transform`] put the shoe.
+    pub(crate) fn canonical_to_mesh(&self) -> bevy::math::Affine3A {
+        bevy::math::Affine3A::from_rotation_translation(self.correction.inverse(), self.origin)
+    }
+}
+
 /// Marker on a pooled link instance, so a consumer's `Transform`/`Visibility` query cannot reach
 /// anything else — and so the sandbox's `mesh_layers` mesh tagger can exclude the shoe pool (the
 /// instances are nameless children of the hull, and without this marker they would fall through to
@@ -394,6 +414,11 @@ impl ShoeBelt {
     /// the one thing in the tree that overrides the selection.
     pub(crate) fn pin(&mut self, rung: usize) {
         self.pin = Some(rung);
+    }
+
+    /// Which side's shoes hang from this belt.
+    pub(crate) fn side(&self) -> Side {
+        self.side
     }
 }
 

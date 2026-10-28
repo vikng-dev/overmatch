@@ -1879,3 +1879,44 @@ fn a_felled_trees_colliders_lie_down_in_the_physics_world() {
         "down: the tip segment's bounds {tip_down:?} left the standing top {standing_top}"
     );
 }
+
+/// ADR-0014, SERVER-COMPOSITION HONESTY for the track prints (the game's cosmetic terrain marks):
+/// the dedicated server's composition, on the shipped map's height grid with its tanks driving,
+/// builds none of them — no stores, no stamp log, no upload queue. `world::spawn_environment`'s
+/// heightmap branch is shared with the clients and builds the prints beside the ground's material,
+/// so the window gate there and the track view owning the mount are what keep them off the server:
+/// a mount moved into a shared plugin, or a store built outside the gate, fails here. The control
+/// mounts the prints' plugin on a bare host, so the check cannot pass by looking for nothing.
+#[test]
+fn a_server_composition_builds_no_track_prints() {
+    let mut control = headless_shell();
+    control.add_plugins(crate::track_prints::plugin);
+    finish_plugins(&mut control);
+    assert!(
+        crate::track_prints::composed(control.world()),
+        "the prints' plugin leaves a footprint the check can see",
+    );
+
+    let grid = crate::terrain_grid::tests::shipped_grid();
+    let mut app = booted_sim_on(Some(grid));
+    start_fixed_clock(&mut app);
+    for _ in 0..64 {
+        let world = app.world_mut();
+        for mut command in world
+            .query_filtered::<&mut TankCommand, With<Controlled>>()
+            .iter_mut(world)
+        {
+            command.throttle = 1.0;
+        }
+        app.update();
+    }
+    assert!(
+        app.world()
+            .contains_resource::<crate::terrain_grid::HeightGrid>(),
+        "the heightmap world is the branch under test",
+    );
+    assert!(
+        !crate::track_prints::composed(app.world()),
+        "the server composition built track prints",
+    );
+}

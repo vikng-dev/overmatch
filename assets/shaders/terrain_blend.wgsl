@@ -5,7 +5,14 @@
 // DERIVATIVES ARE TAKEN ONCE, UP FRONT. A layer whose weight is zero is not sampled, and that
 // branch is not uniform across the quad — so every layer fetch is `textureSampleGrad` with
 // gradients computed outside the branch. `textureSample`'s implicit derivatives are undefined
-// under non-uniform control flow and would cost the skip its licence.
+// under non-uniform control flow and would cost the skip its licence. The prints' near store is
+// read only near the eye, so it is read at level 0 (`textureSampleLevel`), which needs none.
+//
+// TRACK PRINTS (`src/track_prints.rs`). Each pack's response (depth, albedo gain, roughness gain)
+// is blended by the same final weights as the packs. The world layer's trodden coverage darkens
+// and roughens everywhere; inside the near store's window a sole's clearance over the ground
+// becomes a depth, `max(0, depth − clearance)`, whose gradient bends the normal. The near store
+// fades out at its window's edge and where a texel shrinks below a couple of pixels.
 
 #import bevy_pbr::{
     forward_io::{VertexOutput, FragmentOutput},
@@ -25,6 +32,17 @@ struct TerrainBlendParams {
     blend_law: vec4<f32>,
     // x: macro-tint periods per metre, y: macro-tint amplitude. zw: unused.
     macro_tint: vec4<f32>,
+    // Per slot (x the base, yzw the layers): print depth (m), albedo gain, roughness gain.
+    print_depth: vec4<f32>,
+    print_albedo: vec4<f32>,
+    print_roughness: vec4<f32>,
+    // The near store: xy its window's low corner (world XZ, m), z its side (m), w its texel (m).
+    print_near: vec4<f32>,
+    // World XZ to world-layer UV: uv = world.xz * xy + zw.
+    print_world: vec4<f32>,
+    // x: the clearance range the near press spans (m), y: window fade (m), z/w: pixels per texel
+    // at which the near normal is gone / whole.
+    print_law: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> blend: TerrainBlendParams;
@@ -36,6 +54,11 @@ struct TerrainBlendParams {
 @group(#{MATERIAL_BIND_GROUP}) @binding(106) var layer_arm_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(107) var masks_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(108) var masks_sampler: sampler;
+// The prints' stores. No samplers of their own: the near store wraps, so it is read through the
+// layer albedo's repeating sampler; the world layer is stretched once, like the mask, and read
+// through the mask's.
+@group(#{MATERIAL_BIND_GROUP}) @binding(109) var print_near_texture: texture_2d<f32>;
+@group(#{MATERIAL_BIND_GROUP}) @binding(110) var print_world_texture: texture_2d<f32>;
 
 // Layers, and layers plus the base pack. The mask has three channels; index 0 of the weight set is
 // always the base.
@@ -67,6 +90,26 @@ fn macro_noise(p: vec2<f32>) -> f32 {
     );
 }
 
+// How much the prints' near store speaks at world XZ `p`, 0..1: whole inside its window and where
+// a texel spans enough pixels, fading to nothing at the window's edge and as a texel shrinks below
+// a couple of pixels, where its gradient would alias. `ddx`/`ddy` are `p`'s screen derivatives.
+fn near_weight(p: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> f32 {
+    let half = 0.5 * blend.print_near.z;
+    let centre = blend.print_near.xy + vec2(half);
+    let inside = half - max(abs(p.x - centre.x), abs(p.y - centre.y));
+    let window = saturate(inside / blend.print_law.y);
+    let px_per_texel = blend.print_near.w / max(max(length(ddx), length(ddy)), 1e-6);
+    let detail = saturate(
+        (px_per_texel - blend.print_law.z) / (blend.print_law.w - blend.print_law.z));
+    return window * detail;
+}
+
+// How far the ground sinks (m) under a near-store press `press`, on ground whose blended print
+// depth is `depth`: a sole clearing the ground by `(1 − press) × range` sinks it by what is left.
+fn sunk(press: f32, depth: f32) -> f32 {
+    return max(depth - (1.0 - press) * blend.print_law.x, 0.0);
+}
+
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     // The base pack, through the whole standard path: its albedo, its normal map resolved against
@@ -79,6 +122,17 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         in.world_position.xz * blend.mask_map.xy + blend.mask_map.zw,
     ).rgb;
     let painted = array<f32, LAYERS>(mask.r, mask.g, mask.b);
+
+    // The prints' world layer: what share of this ground a sole has covered. Uniform control
+    // flow, so its implicit derivatives pick the mip; the near store's are taken here too.
+    let world_xz = in.world_position.xz;
+    let ddx_xz = dpdx(world_xz);
+    let ddy_xz = dpdy(world_xz);
+    let trodden = textureSample(
+        print_world_texture,
+        masks_sampler,
+        world_xz * blend.print_world.xy + blend.print_world.zw,
+    ).r;
 
     // The material's own FACTORS, before the base pack's maps were multiplied into them
     // (`pbr_input.material` already carries that product). Every layer is multiplied by the same
@@ -153,6 +207,10 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     var blended_normal = vec3(0.0);
     var blended_occlusion = 0.0;
     var blended_roughness = 0.0;
+    // The packs' print responses, by the same weights.
+    var print_depth = 0.0;
+    var print_albedo = 0.0;
+    var print_roughness = 0.0;
     for (var i = 0u; i < SLOTS; i++) {
         let weight = weights[i] / total;
         blended_albedo += albedo[i] * weight;
@@ -160,6 +218,9 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         blended_normal += normal[i] * weight;
         blended_occlusion += occlusion[i] * weight;
         blended_roughness += roughness[i] * weight;
+        print_depth += blend.print_depth[i] * weight;
+        print_albedo += blend.print_albedo[i] * weight;
+        print_roughness += blend.print_roughness[i] * weight;
     }
 
     // THE MACRO TINT. Every pack repeats at its own authored metres, and a repeat is caught by its
@@ -176,8 +237,40 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let macro_signed = macro_field * (2.0 / MACRO_PEAK) - 1.0;
     blended_albedo *= 1.0 + blend.macro_tint.y * macro_signed;
 
+    // TRACK PRINTS. Far from the eye the world layer's coverage is all there is; inside the near
+    // store its sharp footprint takes over, and the depth's gradient tilts the normal.
+    let near = near_weight(world_xz, ddx_xz, ddy_xz);
+    var footprint = trodden;
+    var depth_slope = vec3(0.0);
+    if near > 0.0 {
+        let uv = world_xz / blend.print_near.z;
+        let texel_uv = blend.print_near.w / blend.print_near.z;
+        let here = textureSampleLevel(print_near_texture, layer_albedo_sampler, uv, 0.0).rg;
+        let east = textureSampleLevel(
+            print_near_texture, layer_albedo_sampler, uv + vec2(texel_uv, 0.0), 0.0).r;
+        let west = textureSampleLevel(
+            print_near_texture, layer_albedo_sampler, uv - vec2(texel_uv, 0.0), 0.0).r;
+        let north = textureSampleLevel(
+            print_near_texture, layer_albedo_sampler, uv + vec2(0.0, texel_uv), 0.0).r;
+        let south = textureSampleLevel(
+            print_near_texture, layer_albedo_sampler, uv - vec2(0.0, texel_uv), 0.0).r;
+        // d(depth)/dx and d(depth)/dz, world space: the surface DESCENDS toward a deeper texel.
+        let gradient = vec2(
+            sunk(east, print_depth) - sunk(west, print_depth),
+            sunk(north, print_depth) - sunk(south, print_depth),
+        ) / (2.0 * blend.print_near.w);
+        depth_slope = vec3(gradient.x, 0.0, gradient.y) * near;
+        footprint = mix(trodden, here.g, near);
+    }
+    blended_albedo *= mix(1.0, print_albedo, footprint);
+    blended_roughness *= mix(1.0, print_roughness, footprint);
+    // Mikkelsen's surface gradient: the ground's height is `−depth`, so its normal leans along
+    // the depth's gradient, projected into the surface's own plane.
+    let surface_normal = normalize(blended_normal);
+    let leaned = surface_normal + depth_slope - surface_normal * dot(surface_normal, depth_slope);
+
     pbr_input.material.base_color = vec4(blended_albedo, pbr_input.material.base_color.a);
-    pbr_input.N = normalize(blended_normal);
+    pbr_input.N = normalize(leaned);
     pbr_input.diffuse_occlusion = vec3(blended_occlusion);
     pbr_input.material.perceptual_roughness = blended_roughness;
     // Metallic is not blended: the material's metallic factor is hard zero, so every pack's B

@@ -214,6 +214,10 @@ mod trace;
 /// The track model's pure core (route/oracle/wrap math) — consumed by the sandbox lab and, in
 /// phase A, the game's track view. See `.agents/docs/design/track-model/architecture.md`.
 pub mod track;
+/// Track prints in the ground: cosmetic terrain marks stamped from every grounded shoe of the
+/// conformed belt view, stored around the camera and over the map, and drawn by the ground's
+/// shader. View only (ADR-0014), client-local, mounted by the track view. See the module doc.
+mod track_prints;
 /// The track-model sandbox (`bin/track_sandbox`) — the single dev tool for the track/suspension
 /// work, having absorbed the retired suspension editor. Public so the binary can mount it; not part
 /// of `GamePlugin`. Tiger-only: it loads the real blueprint (geometry + spec), derives the running
@@ -925,6 +929,9 @@ pub fn run_offline() {
     // The game's cosmetic hull-mark demo fabricates marks and takes the camera in dev builds.
     #[cfg(all(feature = "dev_tools", debug_assertions))]
     app.add_plugins(hull_marks::demo::offline_plugin);
+    // The game's cosmetic track-print demo drives the player's tank and takes the camera.
+    #[cfg(all(feature = "dev_tools", debug_assertions))]
+    app.add_plugins(track_prints::demo::offline_plugin);
     app.run();
 }
 

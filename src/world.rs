@@ -352,13 +352,15 @@ fn report_failed_terrain_map(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "spawns the environment: three asset stores, terrain, map, window, view profile and loader"
+    reason = "spawns the environment: four asset stores, terrain, map, window, view profile and loader"
 )]
 fn spawn_environment(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut terrain_materials: ResMut<Assets<crate::terrain_blend::TerrainMaterial>>,
+    // The track prints' two stores, which the ground's material reads (`track_prints`).
+    mut images: ResMut<Assets<Image>>,
     grid: Option<Res<crate::terrain_grid::HeightGrid>>,
     // The one parse of the map's manifest (`terrain_grid::decode_height_grid` publishes it), which
     // the scatter's placement is read out of.
@@ -477,6 +479,7 @@ fn spawn_environment(
                 layer_arm.id(),
                 masks.id(),
             ]));
+            let prints = crate::track_prints::images(&mut images);
             let material = terrain_materials.add(crate::terrain_blend::TerrainMaterial {
                 base: StandardMaterial {
                     base_color_texture: Some(diffuse),
@@ -506,8 +509,17 @@ fn spawn_environment(
                     layer_normal,
                     layer_arm,
                     masks,
+                    prints_near: prints.near.clone(),
+                    prints_world: prints.world.clone(),
                 },
             });
+            // The world layer spans the square the material's `print_world` lane maps it over.
+            crate::track_prints::install(
+                &mut commands,
+                prints,
+                material.clone(),
+                manifest.extent.world_size_m,
+            );
             info!(
                 "terrain surface: base pack every {} m, masks {} at {:?}, blend layers {}",
                 crate::terrain_grid::TEXTURE_TILE_M,

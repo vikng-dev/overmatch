@@ -60,6 +60,9 @@ pub fn view_plugin(app: &mut App) {
             .before(TransformSystems::Propagate),
     );
     app.add_systems(PostUpdate, drive_track_views.in_set(TrackViewSet));
+    // The prints the drawn belts lay in the ground: they read the shoes this view places, so they
+    // are composed wherever it is, and nowhere else.
+    app.add_plugins(crate::track_prints::plugin);
 }
 
 /// Presented-phase heal frequency (rad/s) — settle ≈ 4.7/ω ≈ 1.2 s.
