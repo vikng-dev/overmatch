@@ -27,8 +27,9 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use crate::hull_marks::MarkKind;
 
-/// Texels on a side of every map, a visual tuning choice. DERIVED: with an 8.8 cm nominal
-/// radius, the hole's quad is 0.59 m wide, giving about 440 texels per metre of surface.
+/// Texels on a side of every map. ASSUMED: a look to tune; at 256 a mark keeps a texel per screen
+/// pixel down to about a metre's viewing distance for an 8.8 cm hole (DERIVED: the hole's quad is
+/// 0.29 m, so 256 texels span it at ~870 per metre).
 pub(crate) const SIZE: usize = 256;
 
 /// Noise seeds per kind.
@@ -42,12 +43,13 @@ pub(crate) struct MarkMaps {
     pub(crate) depth: Image,
 }
 
-/// The core's nominal radius in the square, scaled to one calibre by the view. The quad is then
-/// `2 / HOLE_CORE` calibres on a side (DERIVED from the square spanning two units).
+/// The core's radius in the square. The square spans two units, the quad's side, so the core is
+/// `HOLE_CORE` sides across: [`footprint`]'s quad of `1 / HOLE_CORE` calibres puts one calibre
+/// across the core, the lip and the rings outside it (DERIVED: 3.3 calibres, 0.29 m at 88 mm).
 const HOLE_CORE: f32 = 0.30;
-/// A dent's bowl radius in the square, as [`HOLE_CORE`].
+/// A dent's bowl radius in the square, as [`HOLE_CORE`]: the bowl is one calibre across.
 const DENT_BOWL: f32 = 0.36;
-/// A scratch's half-width at its widest, as [`HOLE_CORE`].
+/// A scratch's half-width at its widest, as [`HOLE_CORE`]: the gouge is one calibre wide.
 const SCRATCH_WIDTH: f32 = 0.32;
 
 /// The deepest each profile goes, in the square's units: what white means in its depth map.
@@ -64,11 +66,13 @@ const CORE: Vec3 = Vec3::new(0.012, 0.011, 0.010);
 const PAINT_EDGE: Vec3 = Vec3::new(0.035, 0.034, 0.030);
 
 /// The decal's footprint per kind, in calibres: x along the shot (before the stretch), y across it.
+/// Each kind's shape — a hole's core, a dent's bowl, a scratch's gouge at its widest — is one
+/// calibre across (issue 124: the hole's diameter is the calibre).
 pub(crate) fn footprint(kind: MarkKind) -> Vec2 {
     let across = match kind {
-        MarkKind::Hole => 2.0 / HOLE_CORE,
-        MarkKind::Dent => 2.0 / DENT_BOWL,
-        MarkKind::Scratch => 2.0 / SCRATCH_WIDTH,
+        MarkKind::Hole => 1.0 / HOLE_CORE,
+        MarkKind::Dent => 1.0 / DENT_BOWL,
+        MarkKind::Scratch => 1.0 / SCRATCH_WIDTH,
     };
     Vec2::splat(across)
 }
@@ -434,19 +438,36 @@ fn image(level0: Vec<u8>, channels: usize, format: TextureFormat) -> Image {
 mod tests {
     use super::*;
 
-    /// The game's cosmetic hull marks use calibre as their nominal radius (issue 124).
-    /// The view scales the unit quad by `footprint`, so a normalized profile radius spans half
-    /// that scale. Treating calibre as the diameter draws every kind at half the requested size.
+    /// A hole's core is one calibre across, the lip and rings outside it (issue 124: an 88 mm
+    /// round leaves a core about 88 mm across). Measured end to end, for every variant: the core's
+    /// texels in the generated depth map (the deepest, white), on the 1 × 1 decal quad the view
+    /// poses for a square-on 88 mm mark, give the core's area and so its diameter. A viewer reads
+    /// the round's size off its hole; a mutant that takes the calibre as the core's radius draws
+    /// it twice as wide, and one that scales the pose apart from the profile moves it too.
     #[test]
-    fn calibre_is_the_nominal_profile_radius() {
-        for (kind, radius) in [
-            (MarkKind::Hole, HOLE_CORE),
-            (MarkKind::Dent, DENT_BOWL),
-            (MarkKind::Scratch, SCRATCH_WIDTH),
-        ] {
+    fn a_holes_core_is_one_calibre_across() {
+        use crate::hull_marks::HullMark;
+        // Fixture data: an 88 mm round, square on to a face whose outward normal is +Y.
+        let caliber = 0.088;
+        let mark = HullMark::pack(
+            MarkKind::Hole,
+            0,
+            Vec3::ZERO,
+            Vec3::NEG_Y,
+            Vec3::Y,
+            caliber,
+            0,
+        )
+        .unwrap();
+        let quad = super::super::pose(&mark).frame.scale;
+        let texel_area = quad.x * quad.z / (SIZE * SIZE) as f32;
+        for variant in 0..VARIANTS {
+            let depth = generate(MarkKind::Hole, variant).depth.data.unwrap();
+            let core = depth[..SIZE * SIZE].iter().filter(|&&d| d == 255).count();
+            let across = 2.0 * (core as f32 * texel_area / std::f32::consts::PI).sqrt();
             assert!(
-                (radius * footprint(kind).y * 0.5 - 1.0).abs() < 1e-6,
-                "{kind:?}"
+                (across / caliber - 1.0).abs() < 0.05,
+                "variant {variant}: the core is {across} m across on a {quad} quad"
             );
         }
     }

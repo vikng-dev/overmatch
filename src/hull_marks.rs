@@ -15,7 +15,7 @@
 //! [`SimParts`] names, sorted), the impact segment in that part's frame (the round came along
 //! `along` and met the face at `at`), the face normal in the same frame, the round's calibre and a
 //! roll seed hashed from the shot. Marks ride the part they were made on, so a turret mark turns
-//! with the turret.
+//! with the turret. Rounds below [`MIN_MARK_CALIBER_MM`] leave no mark.
 //!
 //! # Who mounts what
 //!
@@ -41,6 +41,15 @@ use crate::tank::{SimParts, rig_world_pose};
 
 /// The marks one vehicle keeps: the newest this many. ASSUMED: the owner's "about 50".
 pub(crate) const MARK_CAP: usize = 50;
+
+/// The smallest calibre that leaves a mark, whole millimetres as [`HullMark::caliber_mm`] holds
+/// it. Machine-gun rounds, below it, leave none, because of [`MARK_CAP`]: one belt on a hull
+/// would turn the whole record over in about 4 s (DERIVED: the shipped machine gun's 750 rpm
+/// cyclic is 12.5 rounds a second, and 50 / 12.5 = 4), dropping every main-gun mark the vehicle
+/// holds. Issue 144 brings them back under a cap of their own. The value matches the tracer
+/// display's cutoff (`ballistics::TRACER_MAX_CALIBER`), but the cap sets this one: neither moves
+/// with the other.
+pub(crate) const MIN_MARK_CALIBER_MM: u8 = 20;
 
 /// The longest a mark stretches along the shot, as a multiple of its round footprint. A cylinder
 /// of radius r meeting a plate at obliquity θ cuts an ellipse r × r / cos θ (DERIVED: 2.0× at
@@ -148,7 +157,7 @@ impl HullMark {
             at: [mm(at.x)?, mm(at.y)?, mm(at.z)?],
             along: snorm(along)?,
             normal: snorm(normal)?,
-            caliber_mm: (caliber * 1000.0).round().clamp(1.0, 255.0) as u8,
+            caliber_mm: caliber_mm(caliber),
             seed,
         })
     }
@@ -172,6 +181,11 @@ impl HullMark {
     pub(crate) fn caliber(&self) -> f32 {
         f32::from(self.caliber_mm) * 0.001
     }
+}
+
+/// A calibre in metres as [`HullMark::caliber_mm`] holds it: whole millimetres, 1–255.
+fn caliber_mm(caliber: f32) -> u8 {
+    (caliber * 1000.0).round().clamp(1.0, 255.0) as u8
 }
 
 /// A packed unit vector back to unit length. `pack` never writes a zero vector; `Y` stands in for
@@ -265,11 +279,14 @@ pub(crate) struct MarkBuilder<'w, 's> {
 }
 
 impl MarkBuilder<'_, '_> {
-    /// The vehicle root a strike marks, and its mark. `None` when the verdict leaves no mark,
-    /// the struck volume is not a part of a root that keeps marks
-    /// (a tree, a turret thrown clear of its hull), or the point does not pack.
+    /// The vehicle root a strike marks, and its mark. `None` when the verdict leaves no mark, the
+    /// round is below [`MIN_MARK_CALIBER_MM`], the struck volume is not a part of a root that
+    /// keeps marks (a tree, a turret thrown clear of its hull), or the point does not pack.
     pub(crate) fn mark(&self, strike: &ShellStrike) -> Option<(Entity, HullMark)> {
         let kind = MarkKind::of(strike.verdict)?;
+        if caliber_mm(strike.caliber) < MIN_MARK_CALIBER_MM {
+            return None;
+        }
         let root = self.owners.get(strike.struck).ok()?.tank();
         let (parts, position, rotation) = self.roots.get(root).ok()?;
         // The struck entity is the volume's node, or one substance's collider under it.
@@ -540,18 +557,24 @@ pub(crate) mod tests {
         assert_eq!(mark.caliber_mm, 88);
     }
 
-    /// The game's cosmetic hull marks follow the verdict at every calibre. Viewers rely on
-    /// small-calibre ricochets remaining visible; a tracer-display cutoff must not discard them.
+    /// A round below [`MIN_MARK_CALIBER_MM`] leaves no mark whatever its verdict, and a 20 mm
+    /// round leaves one. The cap relies on it: one machine-gun belt would otherwise turn the whole
+    /// [`MARK_CAP`] over in about 4 s and drop every main-gun mark the vehicle holds. A mutant
+    /// that drops the threshold lets a belt flood the record; one that raises it past 20 mm takes
+    /// an autocannon's marks away.
     #[test]
-    fn small_calibre_strikes_still_mark_the_hull() {
+    fn rounds_below_20_mm_leave_no_mark() {
         let mut app = App::new();
         app.add_plugins(offline_plugin);
         let fixture = fixture_in(app.world_mut());
         let at = plate_in_world(app.world(), &fixture).transform_point(Vec3::ZERO);
-        for verdict in [Verdict::Ricochet, Verdict::Stopped, Verdict::Through] {
-            let mut hit = strike(fixture.collider, at, verdict);
-            hit.caliber = 0.008; // Fixture data, below the tracer-display cutoff.
-            app.world_mut().trigger(hit);
+        // Fixture data: a rifle-calibre round, one just under the threshold, one at it.
+        for caliber in [0.0079, 0.019, 0.020] {
+            for verdict in [Verdict::Ricochet, Verdict::Stopped, Verdict::Through] {
+                let mut hit = strike(fixture.collider, at, verdict);
+                hit.caliber = caliber;
+                app.world_mut().trigger(hit);
+            }
         }
         let record = app.world().get::<HullMarks>(fixture.root).unwrap();
         let marks: Vec<_> = record
@@ -561,9 +584,9 @@ pub(crate) mod tests {
         assert_eq!(
             marks,
             [
-                (MarkKind::Scratch, 8),
-                (MarkKind::Dent, 8),
-                (MarkKind::Hole, 8)
+                (MarkKind::Scratch, 20),
+                (MarkKind::Dent, 20),
+                (MarkKind::Hole, 20)
             ],
         );
     }
