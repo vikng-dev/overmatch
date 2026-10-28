@@ -27,10 +27,10 @@
 //!   read it); the mechanism binds from the penetrator at spawn ([`crate::ballistics`]'s
 //!   `Projectile`), synchronously and from data alone. A round without the block meets the plate
 //!   whole.
-//! - `burst: Some((core_substance, option, arming_spend, delay, core_mass, base_mass,
-//!   cavity_diameter))`: a substance-table key whose row states burst facts, the shape the burst
-//!   throws, the fuze's threshold (reference-mm spent in one body) and delay (s), the core's and the
-//!   base parts' masses (kg) and the cavity's diameter (m). The burst is derived here, once
+//! - `burst: Some((core_substance, arming_spend, delay, core_mass, base_mass, cavity_diameter))`: a
+//!   substance-table key whose row states burst facts, the fuze's threshold (reference-mm spent in
+//!   one body) and delay (s), the core's and the base parts' masses (kg) and the cavity's diameter
+//!   (m). Every burst is a ring. The burst is derived here, once
 //!   ([`crate::ballistics::burst::Burst::derived`]), and rides the round to the shot; its story is
 //!   design doc §5a, "The burst". A round without the block is inert.
 //!
@@ -54,7 +54,7 @@ use serde::Deserialize;
 use serde::de::{self, MapAccess, Visitor};
 use std::collections::BTreeMap;
 
-use crate::ballistics::burst::{Burst, BurstInputs, BurstOption, BurstShape};
+use crate::ballistics::burst::{Burst, BurstInputs};
 use crate::ballistics::{RoundBody, round_in_domain};
 use crate::provenance::Sourced;
 use crate::spec::NoseShape;
@@ -103,7 +103,7 @@ pub(crate) struct RoundFacts {
 
 impl RoundFacts {
     /// The round fired at `muzzle_speed` (m/s), or why the capability law cannot state it there:
-    /// the body, the penetrator and a ring's nose piece each inside the law's domain at that speed
+    /// the body, the penetrator and a burst's nose piece each inside the law's domain at that speed
     /// ([`round_in_domain`]), so a round outside it never reaches the march.
     pub(crate) fn fired_at(&self, muzzle_speed: f32) -> Result<Round, String> {
         round_in_domain(self.body, muzzle_speed).map_err(|reason| {
@@ -115,11 +115,7 @@ impl RoundFacts {
         round_in_domain(self.penetrator, muzzle_speed).map_err(|reason| {
             format!("the penetrator is outside the capability law's domain: {reason}")
         })?;
-        if let Some(Burst {
-            option: BurstOption::Ring { nose },
-            ..
-        }) = self.burst
-        {
+        if let Some(Burst { nose, .. }) = self.burst {
             round_in_domain(nose, muzzle_speed).map_err(|reason| {
                 format!("burst: the nose piece is outside the capability law's domain: {reason}")
             })?;
@@ -158,14 +154,13 @@ struct RoundFile {
     burst: Option<BurstFile>,
 }
 
-/// A burst block as authored: the substance its core is made of, the field it throws, the fuze's
-/// threshold (reference-mm spent in one body) and delay (s), and the core's mass, the base parts'
-/// mass (kg) and the cavity's diameter (m).
+/// A burst block as authored: the substance its core is made of, the fuze's threshold
+/// (reference-mm spent in one body) and delay (s), and the core's mass, the base parts' mass (kg)
+/// and the cavity's diameter (m). It names no shape: every burst is a ring.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BurstFile {
     core_substance: Sourced<String>,
-    option: Sourced<BurstShape>,
     arming_spend: Sourced<f32>,
     delay: Sourced<f32>,
     core_mass: Sourced<f64>,
@@ -425,11 +420,10 @@ fn resolved(
                 .ok_or_else(|| {
                     format!(
                         "burst: core_substance {key:?} states no burst facts — a burst core is a \
-                         `Burst` row of the substance table"
+                         substance whose row states `burst: Some(..)`"
                     )
                 })?;
             let inputs = BurstInputs {
-                shape: block.option.0,
                 arming_spend: block.arming_spend.0,
                 delay: block.delay.0,
                 core_mass: block.core_mass.0,
@@ -857,7 +851,7 @@ pub(crate) mod tests {
             .collect::<Vec<_>>();
         let extra = format!(
             r#"{block}, burst: Some((
-                core_substance: ({core:?}, Tuned("x")), option: (Ring, Tuned("x")),
+                core_substance: ({core:?}, Tuned("x")),
                 arming_spend: (35.0, Tuned("x")), delay: (0.012, Tuned("x")),
                 core_mass: (0.02, Tuned("x")), base_mass: (0.1, Tuned("x")),
                 cavity_diameter: (0.02, Tuned("x"))))"#
@@ -869,28 +863,32 @@ pub(crate) mod tests {
         )
     }
 
-    /// A reference steel and one burst core, `"Fixture core"`: fixture data.
+    /// A reference steel, one burst core worn by no volume, `"Fixture core"`, and one hard
+    /// substance that is a burst core too, `"Fixture hard core"`: fixture data.
     const FIXTURE_SUBSTANCES: &str = r#"(substances: {
         "GunSteel": Hard(resistance: Reference, paintable: true,
             debris_half_angle_deg: (26.2, Tuned("x")), facts: Some((
                 density: (7800.0, Tuned("x")), flow_strength: (1.18e9, Tuned("x")),
                 youngs_modulus: (190.0e9, Tuned("x")), poisson_ratio: (0.29, Tuned("x"))))),
-        "Fixture core": Burst(density: (1650.0, Tuned("x")),
-            speed_constant_mps: (2680.0, Tuned("x"))),
+        "Fixture core": Unworn(burst: Some((density: (1650.0, Tuned("x")),
+            speed_constant_mps: (2680.0, Tuned("x"))))),
+        "Fixture hard core": Hard(resistance: Effective((200.0, Tuned("x"))), paintable: false,
+            debris_half_angle_deg: (26.2, Tuned("x")), facts: None,
+            burst: Some((density: (1650.0, Tuned("x")),
+                speed_constant_mps: (2680.0, Tuned("x"))))),
     })"#;
 
     /// A burst block rides its round as the burst derived from the round's body, its body steel's
-    /// density and the burst facts of the substance it names; a round without one is inert. A
-    /// block naming no substance, one naming a substance without burst facts, or one on a
-    /// sub-calibre round, is refused naming the round, never read as inert: a mutant that drops
-    /// the block, or derives it from another density, fails here.
+    /// density and the burst facts of the substance it names, whether that row is worn by no
+    /// volume or is hard matter too; a round without one is inert. A block naming no substance,
+    /// one naming a substance without burst facts, or one on a sub-calibre round, is refused naming
+    /// the round, never read as inert: a mutant that drops the block, or derives it from another
+    /// density, fails here. A block naming a burst shape does not parse: every burst is a ring.
     #[test]
     fn a_burst_block_rides_its_round_or_is_refused() {
         let inert = with("mass", "5.0").unwrap().get("Probe").unwrap();
         assert_eq!(inert.burst, None);
-        let fused = fired(with_burst("Fixture core", false)).unwrap();
         let inputs = BurstInputs {
-            shape: BurstShape::Ring,
             arming_spend: 35.0,
             delay: 0.012,
             core_mass: 0.02,
@@ -899,10 +897,28 @@ pub(crate) mod tests {
             base_mass: 0.1,
             cavity_diameter: 0.02,
         };
-        assert_eq!(
-            fused.burst,
-            Some(Burst::derived(fused.body, fused.core.density, &inputs).unwrap())
+        for core in ["Fixture core", "Fixture hard core"] {
+            let fused = fired(with_burst(core, false)).unwrap();
+            assert_eq!(
+                fused.burst,
+                Some(Burst::derived(fused.body, fused.core.density, &inputs).unwrap()),
+                "{core}"
+            );
+        }
+        let shaped = file(
+            &FIXTURE,
+            r#", burst: Some((core_substance: ("Fixture core", Tuned("x")),
+                option: (Ring, Tuned("x")), arming_spend: (35.0, Tuned("x")),
+                delay: (0.012, Tuned("x")), core_mass: (0.02, Tuned("x")),
+                base_mass: (0.1, Tuned("x")), cavity_diameter: (0.02, Tuned("x")))))"#,
         );
+        let err = RoundRegistry::from_files(
+            &[("Probe", &shaped)],
+            FIXTURE_TYPES,
+            &SubstanceRegistry::from_ron(FIXTURE_SUBSTANCES).unwrap(),
+        )
+        .expect_err("a burst block names no shape");
+        assert!(matches!(err, RoundError::Parse { .. }), "{err}");
         for (core, penetrator, word) in [
             ("Nope", false, "core_substance"),
             ("GunSteel", false, "burst facts"),

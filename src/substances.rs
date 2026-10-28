@@ -15,14 +15,20 @@
 //!
 //! # Three kinds of substance
 //!
-//! A [`Substance`] is [`Substance::Hard`], [`Substance::Witness`] or [`Substance::Burst`], and the
+//! A [`Substance`] is [`Substance::Hard`], [`Substance::Witness`] or [`Substance::Unworn`], and the
 //! kind decides which law reads it (ADR-0040). Hard matter is a layer of the §13 walk: it resists
 //! the shell, is charged the shell's spend and shadows the spall field. A witness has no resistance
 //! — not a zero one, none — so nothing can hand it to the walk; it takes dose from what the hard
-//! world sent through it (`ballistics::wound`). Crew are the witnesses. A burst core states only
-//! the [`BurstFacts`] a round's burst block reads ([`crate::rounds`]): it is no volume's substance,
-//! [`SubstanceRegistry::hard`] refuses it and [`Substance::matter`] has no answer for it, so the
-//! walk fails closed on a volume that names it.
+//! world sent through it (`ballistics::wound`). Crew are the witnesses. An unworn substance is no
+//! volume's: it states only facts a round reads, [`SubstanceRegistry::hard`] refuses it and
+//! [`Substance::matter`] has no answer for it, so the walk fails closed on a volume that names it.
+//!
+//! # Burst facts
+//!
+//! A burst core is any substance whose row states [`BurstFacts`] (`burst: Some(..)`), the facts a
+//! round's burst block reads ([`crate::rounds`]). They are an optional field of a row, beside what
+//! its kind states: an unworn row states them alone (and states nothing else, so it must state
+//! them), and a hard row may state them too ([`Substance::burst`]).
 //!
 //! # What a hard entry states
 //!
@@ -154,16 +160,17 @@ impl SubstanceId {
     }
 }
 
-/// One substance's entry: matter the walk resists with, a witness the walk never sees, or a burst
-/// core no volume wears.
+/// One substance's entry: matter the walk resists with, a witness the walk never sees, or a
+/// substance no volume wears.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Substance {
     /// A layer of the walk.
     Hard(HardSubstance),
     /// Takes dose from what passes through it. No resistance, no facts, no livery.
     Witness,
-    /// A round's burst core: the facts its burst block reads, nothing the walk reads.
-    Burst(BurstFacts),
+    /// Worn by no volume: it states only facts a round reads, nothing the walk reads. Its burst
+    /// facts are always stated (checked at parse): a row that states nothing is no substance.
+    Unworn { burst: Option<BurstFacts> },
 }
 
 /// A hard substance's entry.
@@ -179,6 +186,9 @@ pub struct HardSubstance {
     pub debris_ratio: f32,
     /// The substance's material facts, or `None` where none are sourced.
     pub facts: Option<MaterialFacts>,
+    /// The facts a round's burst block reads where the substance is a burst core too, or `None`.
+    /// The walk never reads them.
+    pub burst: Option<BurstFacts>,
 }
 
 impl HardSubstance {
@@ -193,15 +203,15 @@ impl HardSubstance {
 }
 
 impl Substance {
-    /// The hard entry, or `None` for a witness or a burst core.
+    /// The hard entry, or `None` for a witness or an unworn substance.
     pub fn hard(&self) -> Option<&HardSubstance> {
         match self {
             Self::Hard(hard) => Some(hard),
-            Self::Witness | Self::Burst(_) => None,
+            Self::Witness | Self::Unworn { .. } => None,
         }
     }
 
-    /// The kind as a ballistic primitive carries it, or `None` for a burst core, which no
+    /// The kind as a ballistic primitive carries it, or `None` for an unworn substance, which no
     /// primitive wears.
     pub fn matter(&self) -> Option<Matter> {
         match self {
@@ -210,15 +220,17 @@ impl Substance {
                 debris_ratio: hard.debris_ratio,
             }),
             Self::Witness => Some(Matter::Witness),
-            Self::Burst(_) => None,
+            Self::Unworn { .. } => None,
         }
     }
 
-    /// A burst core's facts, or `None` for matter and witnesses.
+    /// The burst facts its row states, of a hard or an unworn substance; `None` where it states
+    /// none, and for a witness, which states nothing.
     pub fn burst(&self) -> Option<BurstFacts> {
         match self {
-            Self::Burst(facts) => Some(*facts),
-            Self::Hard(_) | Self::Witness => None,
+            Self::Hard(hard) => hard.burst,
+            Self::Unworn { burst } => *burst,
+            Self::Witness => None,
         }
     }
 }
@@ -236,9 +248,11 @@ pub enum Matter {
     Witness,
 }
 
-/// One entry as authored: `Hard(..)` or `Burst(..)` with every number carrying its provenance
+/// One entry as authored: `Hard(..)` or `Unworn(..)` with every number carrying its provenance
 /// ([`crate::provenance`]), or a bare `Witness`. `paintable` is a livery flag, not a number, and
 /// carries none; the reference's resistance is the unit's definition and carries none either.
+/// A hard row's `burst` is optional, absent read as `None`; an unworn row authors it, as it states
+/// nothing else.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 enum SubstanceFile {
@@ -248,12 +262,30 @@ enum SubstanceFile {
         /// Degrees, converted once at parse ([`debris_ratio`]).
         debris_half_angle_deg: Sourced<f64>,
         facts: Option<FactsFile>,
+        #[serde(default)]
+        burst: Option<BurstFile>,
     },
     Witness,
-    Burst {
-        density: Sourced<f64>,
-        speed_constant_mps: Sourced<f64>,
+    Unworn {
+        burst: Option<BurstFile>,
     },
+}
+
+/// A burst core's facts as authored: density (kg/m³) and the speed constant `K` (m/s).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BurstFile {
+    density: Sourced<f64>,
+    speed_constant_mps: Sourced<f64>,
+}
+
+impl BurstFile {
+    fn facts(self) -> BurstFacts {
+        BurstFacts {
+            density: self.density.0,
+            speed_constant: self.speed_constant_mps.0,
+        }
+    }
 }
 
 #[derive(Deserialize)]
@@ -300,6 +332,7 @@ fn converted(name: &str, file: SubstanceFile) -> Result<Substance, String> {
             paintable,
             debris_half_angle_deg,
             facts,
+            burst,
         } => Substance::Hard(HardSubstance {
             resistance: match resistance {
                 ResistanceFile::Reference => Resistance::Reference,
@@ -313,15 +346,12 @@ fn converted(name: &str, file: SubstanceFile) -> Result<Substance, String> {
                 youngs_modulus: facts.youngs_modulus.0,
                 poisson_ratio: facts.poisson_ratio.0,
             }),
+            burst: burst.map(BurstFile::facts),
         }),
         SubstanceFile::Witness => Substance::Witness,
-        SubstanceFile::Burst {
-            density,
-            speed_constant_mps,
-        } => Substance::Burst(BurstFacts {
-            density: density.0,
-            speed_constant: speed_constant_mps.0,
-        }),
+        SubstanceFile::Unworn { burst } => Substance::Unworn {
+            burst: burst.map(BurstFile::facts),
+        },
     })
 }
 
@@ -389,27 +419,37 @@ impl<'de> Deserialize<'de> for SubstanceMap {
     }
 }
 
-/// One entry's own validity, with `-0.0` canonicalized. A witness states nothing to check; a burst
-/// core's two facts are each finite and positive.
+/// One entry's own validity, with `-0.0` canonicalized. A witness states nothing to check; burst
+/// facts, wherever stated, are each finite and positive; an unworn row states them, or it states
+/// nothing at all.
 fn checked(name: &str, substance: Substance) -> Result<Substance, String> {
+    if let Some(facts) = substance.burst() {
+        checked_burst(name, facts)?;
+    }
     match substance {
         Substance::Hard(hard) => checked_hard(name, hard).map(Substance::Hard),
         Substance::Witness => Ok(Substance::Witness),
-        Substance::Burst(facts) => {
-            for (field, value) in [
-                ("density", facts.density),
-                ("speed_constant_mps", facts.speed_constant),
-            ] {
-                if !value.is_finite() || value <= 0.0 {
-                    return Err(format!(
-                        "substance {name:?}: burst core {field} must be finite and positive (got \
-                         {value})"
-                    ));
-                }
-            }
-            Ok(Substance::Burst(facts))
+        Substance::Unworn { burst: None } => Err(format!(
+            "substance {name:?} is worn by no volume and states no burst facts — a row no volume \
+             wears and no round reads is no substance"
+        )),
+        unworn @ Substance::Unworn { .. } => Ok(unworn),
+    }
+}
+
+/// A burst core's two facts, each finite and positive.
+fn checked_burst(name: &str, facts: BurstFacts) -> Result<(), String> {
+    for (field, value) in [
+        ("density", facts.density),
+        ("speed_constant_mps", facts.speed_constant),
+    ] {
+        if !value.is_finite() || value <= 0.0 {
+            return Err(format!(
+                "substance {name:?}: burst {field} must be finite and positive (got {value})"
+            ));
         }
     }
+    Ok(())
 }
 
 fn checked_hard(name: &str, substance: HardSubstance) -> Result<HardSubstance, String> {
@@ -468,8 +508,8 @@ pub enum SubstanceError {
     Unknown { name: String, known: Vec<String> },
     /// A hard-world lookup named a witness, which carries no resistance to read.
     Witness { name: String },
-    /// A hard-world lookup named a burst core, which carries no resistance to read.
-    Burst { name: String },
+    /// A hard-world lookup named an unworn substance, which carries no resistance to read.
+    Unworn { name: String },
 }
 
 impl std::fmt::Display for SubstanceError {
@@ -489,10 +529,10 @@ impl std::fmt::Display for SubstanceError {
                 "substance {name:?} is a witness: it states no resistance and is never a layer of \
                  the walk"
             ),
-            Self::Burst { name } => write!(
+            Self::Unworn { name } => write!(
                 f,
-                "substance {name:?} is a burst core: it states no resistance and is never a layer \
-                 of the walk"
+                "substance {name:?} is worn by no volume: it states no resistance and is never a \
+                 layer of the walk"
             ),
         }
     }
@@ -569,13 +609,14 @@ impl SubstanceRegistry {
         })
     }
 
-    /// The hard substance named `name` — hard error on an unknown name, a witness or a burst core.
+    /// The hard substance named `name` — hard error on an unknown name, a witness or an unworn
+    /// substance.
     pub fn hard(&self, name: &str) -> Result<HardSubstance, SubstanceError> {
         let name = name.to_string();
         match self.get(&name)? {
             Substance::Hard(hard) => Ok(hard),
             Substance::Witness => Err(SubstanceError::Witness { name }),
-            Substance::Burst(_) => Err(SubstanceError::Burst { name }),
+            Substance::Unworn { .. } => Err(SubstanceError::Unworn { name }),
         }
     }
 
@@ -623,7 +664,10 @@ mod tests {
     /// The expected entries that are witnesses.
     const WITNESSES: [&str; 1] = ["Flesh"];
 
-    /// The expected entries that are burst cores; every entry neither this nor a witness is hard.
+    /// The expected entries worn by no volume; every entry neither this nor a witness is hard.
+    const UNWORN: [&str; 1] = ["88mm_burst_core"];
+
+    /// The expected entries that state burst facts, whatever their kind.
     const BURST_CORES: [&str; 1] = ["88mm_burst_core"];
 
     /// A minimal valid registry around one extra entry, for the refusal tests.
@@ -657,17 +701,22 @@ mod tests {
                     WITNESSES.contains(&name),
                     "{name} is a witness the library does not expect"
                 ),
-                Substance::Burst(_) => assert!(
-                    BURST_CORES.contains(&name),
-                    "{name} is a burst core the library does not expect"
+                Substance::Unworn { .. } => assert!(
+                    UNWORN.contains(&name),
+                    "{name} is an unworn substance the library does not expect"
                 ),
             }
+            assert_eq!(
+                substance.burst().is_some(),
+                BURST_CORES.contains(&name),
+                "{name}: burst facts"
+            );
         }
         for name in WITNESSES {
             assert_eq!(registry.get(name).unwrap(), Substance::Witness, "{name}");
         }
-        for name in BURST_CORES {
-            assert!(registry.get(name).unwrap().burst().is_some(), "{name}");
+        for name in UNWORN {
+            assert_eq!(registry.get(name).unwrap().matter(), None, "{name}");
         }
     }
 
@@ -696,17 +745,18 @@ mod tests {
         assert!(matches!(only, SubstanceError::Reference(_)), "{only}");
     }
 
-    /// A burst core states its two facts and nothing the walk reads: the walk's resistance lookup
-    /// ([`SubstanceRegistry::hard`], which `ballistics::walk::VolumeMaterial::of` reads for every
-    /// volume) refuses it by name, and it is no primitive's matter, so a volume that names it fails
-    /// closed instead of joining the walk. A fact out of its domain, or without provenance, and a
-    /// resistance on a burst core do not load. A mutant that hands a burst core to the walk as hard
-    /// matter of any factor, or as a witness, fails here.
+    /// A burst core worn by no volume states its two facts and nothing the walk reads: the walk's
+    /// resistance lookup ([`SubstanceRegistry::hard`], which `ballistics::walk::VolumeMaterial::of`
+    /// reads for every volume) refuses it by name, and it is no primitive's matter, so a volume
+    /// that names it fails closed instead of joining the walk. An unworn row stating no burst facts,
+    /// a fact out of its domain or without provenance, and a resistance on an unworn row do not
+    /// load. A mutant that hands an unworn substance to the walk as hard matter of any factor, or as
+    /// a witness, or that reads an unworn row stating nothing as a substance, fails here.
     #[test]
-    fn a_burst_core_is_refused_by_the_walk_and_states_only_its_facts() {
+    fn an_unworn_burst_core_is_refused_by_the_walk_and_states_only_its_facts() {
         let entry = |density: &str| {
             with(&format!(
-                r#""Core": Burst(density: ({density}, Tuned("fixture")), speed_constant_mps: (2680.0, Tuned("fixture"))),"#
+                r#""Core": Unworn(burst: Some((density: ({density}, Tuned("fixture")), speed_constant_mps: (2680.0, Tuned("fixture"))))),"#
             ))
         };
         let registry = SubstanceRegistry::from_ron(&entry("1650.0")).expect("a burst core parses");
@@ -722,15 +772,15 @@ mod tests {
         assert!(core.hard().is_none());
         let refused = registry
             .hard("Core")
-            .expect_err("the walk reads no burst core");
+            .expect_err("the walk reads no unworn substance");
         assert_eq!(
             refused,
-            SubstanceError::Burst {
+            SubstanceError::Unworn {
                 name: "Core".into()
             }
         );
         let walked = crate::ballistics::VolumeMaterial::of(&registry, "Core")
-            .expect_err("a volume naming a burst core fails closed");
+            .expect_err("a volume naming an unworn substance fails closed");
         assert!(walked.to_string().contains("Core"), "{walked}");
         assert_eq!(registry.get("Ref").unwrap().burst(), None);
 
@@ -741,13 +791,65 @@ mod tests {
                 "{density}: {err}"
             );
         }
+        let empty = r#""Core": Unworn(burst: None),"#;
+        let err = SubstanceRegistry::from_ron(&with(empty)).expect_err(empty);
+        assert!(
+            err.to_string().contains("Core") && err.to_string().contains("no burst facts"),
+            "{empty}: {err}"
+        );
         for refused in [
-            r#""Core": Burst(density: 1650.0, speed_constant_mps: (2680.0, Tuned("fixture"))),"#,
-            r#""Core": Burst(density: (1650.0, Tuned("fixture")), speed_constant_mps: (2680.0, Tuned("fixture")), resistance: Reference),"#,
+            r#""Core": Unworn(burst: Some((density: 1650.0, speed_constant_mps: (2680.0, Tuned("fixture"))))),"#,
+            r#""Core": Unworn(burst: Some((density: (1650.0, Tuned("fixture")), speed_constant_mps: (2680.0, Tuned("fixture")))), resistance: Reference),"#,
         ] {
             let err = SubstanceRegistry::from_ron(&with(refused)).expect_err(refused);
             assert!(matches!(err, SubstanceError::Parse(_)), "{err}");
         }
+    }
+
+    /// Burst facts are an optional field of a hard row too: a hard substance that states them is a
+    /// burst core a round's block may name, and stays matter the walk reads at its own factor,
+    /// unchanged by them; a hard row without them states none. Its burst facts are checked as an
+    /// unworn row's are. A mutant that drops a hard row's burst facts, or lets them move what the
+    /// walk reads, fails here.
+    #[test]
+    fn a_hard_row_may_state_burst_facts_too() {
+        let hard = |burst: &str| {
+            with(&format!(
+                r#""Filler": Hard(resistance: Effective((200.0, Tuned("fixture"))), paintable: false, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None{burst}),"#
+            ))
+        };
+        let plain = SubstanceRegistry::from_ron(&hard("")).expect("a hard row without burst facts");
+        let both = SubstanceRegistry::from_ron(&hard(
+            r#", burst: Some((density: (1650.0, Tuned("fixture")), speed_constant_mps: (2680.0, Tuned("fixture"))))"#,
+        ))
+        .expect("a hard row with burst facts");
+        assert_eq!(plain.get("Filler").unwrap().burst(), None);
+        assert_eq!(
+            both.get("Filler").unwrap().burst(),
+            Some(BurstFacts {
+                density: 1650.0,
+                speed_constant: 2680.0,
+            })
+        );
+        assert_eq!(
+            both.get("Filler").unwrap().matter(),
+            plain.get("Filler").unwrap().matter()
+        );
+        assert_eq!(
+            both.get("Filler").unwrap().matter(),
+            Some(Matter::Hard {
+                factor: 200.0,
+                debris_ratio: plain.hard("Filler").unwrap().debris_ratio,
+            })
+        );
+        let err = SubstanceRegistry::from_ron(&hard(
+            r#", burst: Some((density: (1650.0, Tuned("fixture")), speed_constant_mps: (0.0, Tuned("fixture"))))"#,
+        ))
+        .expect_err("a speed constant of zero");
+        assert!(
+            err.to_string().contains("Filler") && err.to_string().contains("speed_constant_mps"),
+            "{err}"
+        );
     }
 
     #[test]

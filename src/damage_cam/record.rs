@@ -562,17 +562,14 @@ fn timeline(
             // The round's flight to the burst point, at the speed of the exit or bounce that last
             // started the burst trigger's delay: the speed the trigger counts that path at, so the
             // burst lies the delay after that exit (a round at rest there waits the mark's
-            // `after` on top). The ball ends the flight there; the ring's nose piece flies on at
-            // the carried speed.
+            // `after` on top). The nose piece flies on at the carried speed; a round at rest ends
+            // there.
             ArmourMark::Burst {
-                at,
-                speed: carried,
-                nose,
-                ..
+                at, speed: carried, ..
             } => {
                 legs.push((*at, speed, index));
                 last = *at;
-                flying &= nose.is_some() && *carried > 0.0;
+                flying &= *carried > 0.0;
                 if *carried > 0.0 {
                     speed = *carried;
                 }
@@ -970,12 +967,13 @@ impl<'a> Ledger<'a> {
     /// Mark `index`, the round's burst at `at` (WORLD) at the carried `speed`, `after` seconds past
     /// the round reaching `at`, at the greatest sideways speed `sideways`, its nose piece's mass
     /// `nose` and its field `thrown` (`None` where it threw none): the burst with its field's
-    /// deposits, and the round's end there when nothing flies on from a burst in flight.
+    /// deposits. It sets no end: the nose piece flies on from a burst in flight, and a round at
+    /// rest has ended where it rests.
     fn burst(
         &mut self,
         index: usize,
         (at, speed, after, sideways): (Vec3, f32, f32, f32),
-        nose: Option<f32>,
+        nose: f32,
         thrown: Option<&BurstField>,
     ) {
         let on = self.on;
@@ -985,9 +983,6 @@ impl<'a> Ledger<'a> {
             self.field(index, t, throw, &burst.rays)
         });
         let point = on.struck.point(index, at);
-        if nose.is_none() && speed > 0.0 {
-            self.end = Some(RoundEnd::Burst { at: point });
-        }
         self.burst = Some(Burst {
             t,
             point,

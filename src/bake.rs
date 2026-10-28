@@ -46,7 +46,7 @@ static L2_ROLE_COHERENCE: Check = Check {
     stage: Stage::Consumer,
     severity: Severity::Error,
     law: "a mesh is either wholly a substance solid or wholly art; a substance solid wears matter, \
-          never a burst core; a declared collider is not armour and carries usable mesh data; \
+          never an unworn substance; a declared collider is not armour and carries usable mesh data; \
           every declared component and roadwheel is a ballistic node",
 };
 static L2_WITNESS_ROLE: Check = Check {
@@ -299,7 +299,7 @@ const TIGER_SPEC_RON: &str = include_str!("../assets/tiger_1/tiger_1.tank.ron");
 /// whole-node mesh diff would quietly stop covering the uncaptured half.
 ///
 /// `Some(Err(material))` is a primitive wearing a registry key that is no matter
-/// ([`crate::substances::Substance::matter`] is `None`: a burst core). Wearing the key declares a
+/// ([`crate::substances::Substance::matter`] is `None`: an unworn substance). Wearing the key declares a
 /// volume and the volume has nothing the walk reads, so the capture refuses it rather than read it
 /// as art.
 fn classify<'p>(
@@ -1162,11 +1162,11 @@ impl MeshCapture<'_> {
                     &L2_ROLE_COHERENCE,
                     Subject::node(name).element(format!("primitive {}", primitive.index())),
                     format!(
-                        "wears `{material}`, a burst core: a registry key that states no \
-                         resistance and no witness role"
+                        "wears `{material}`, a substance no volume wears: a registry key that \
+                         states no resistance and no witness role"
                     ),
-                    "give the primitive a hard or witness substance — a burst core's facts are read \
-                     by a round's burst block, never by the walk",
+                    "give the primitive a hard or witness substance — an unworn substance's facts \
+                     are read by a round, never by the walk",
                 )),
                 None => {
                     plain += 1;
@@ -2255,18 +2255,18 @@ mod tests {
         }
     }
 
-    /// L2.ROLE_COHERENCE — a primitive wearing a burst core's key declares a volume the walk has
-    /// nothing to read for, so the capture refuses it by node. A mutant that reads it as art (a
-    /// plate that silently stops being armour) or hands it the walk as matter of any factor
-    /// certifies the vehicle and fails here.
+    /// L2.ROLE_COHERENCE — a primitive wearing an unworn substance's key (the shipped burst core)
+    /// declares a volume the walk has nothing to read for, so the capture refuses it by node. A
+    /// mutant that reads it as art (a plate that silently stops being armour) or hands it the walk
+    /// as matter of any factor certifies the vehicle and fails here.
     #[test]
-    fn a_volume_wearing_a_burst_core_is_refused() {
+    fn a_volume_wearing_an_unworn_substance_is_refused() {
         let registry = SubstanceRegistry::shipped();
         let core = registry
             .keys()
             .into_iter()
-            .find(|name| registry.get(name).is_ok_and(|s| s.burst().is_some()))
-            .expect("the shipped registry declares a burst core");
+            .find(|name| registry.get(name).is_ok_and(|s| s.matter().is_none()))
+            .expect("the shipped registry declares an unworn substance");
         let (mut nodes, spec) = sound_vehicle();
         nodes.push(
             Node::new("Shield")

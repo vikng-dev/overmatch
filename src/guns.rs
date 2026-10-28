@@ -346,7 +346,7 @@ impl GunRegistry {
 mod tests {
     use super::*;
     use crate::ballistics::RoundBody;
-    use crate::ballistics::burst::{Burst, BurstOption};
+    use crate::ballistics::burst::Burst;
     use crate::rounds::tests::{FIXTURE, FIXTURE_TYPES, file};
     use crate::substances::{MaterialFacts, SubstanceRegistry};
 
@@ -397,7 +397,7 @@ mod tests {
     /// Fixture data: every shipped round's resolved record, to the bit — the values the laws, the
     /// shot and every pinned digest are measured against, read off the shipped data. A data edit
     /// that moves any of them moves the game's ballistics, and moves its pin here deliberately.
-    const PINS: [(&str, Round); 5] = [
+    const PINS: [(&str, Round); 4] = [
         (
             "7.9mm_AP",
             Round {
@@ -453,23 +453,6 @@ mod tests {
             },
         ),
         (
-            "88mm_APHE_ball",
-            Round {
-                body: PZGR_39,
-                penetrator: PZGR_39,
-                muzzle_speed: 773.0,
-                wound: 30.0,
-                core: GUN_STEEL,
-                burst: Some(Burst {
-                    arming_spend: 35.0,
-                    delay: 0.0015,
-                    option: BurstOption::Ball,
-                    sideways_speed: 205.849_56,
-                    energy: 214_836.39,
-                }),
-            },
-        ),
-        (
             "88mm_APHE_ring",
             Round {
                 body: PZGR_39,
@@ -480,12 +463,10 @@ mod tests {
                 burst: Some(Burst {
                     arming_spend: 35.0,
                     delay: 0.0015,
-                    option: BurstOption::Ring {
-                        nose: RoundBody {
-                            mass: 8.370_217,
-                            caliber: 0.088,
-                            nose_factor: 0.291_666_66,
-                        },
+                    nose: RoundBody {
+                        mass: 8.370_217,
+                        caliber: 0.088,
+                        nose_factor: 0.291_666_66,
                     },
                     sideways_speed: 541.4819,
                     energy: 211_073.97,

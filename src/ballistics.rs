@@ -1291,9 +1291,8 @@ pub enum ArmourMark {
     /// A walk that failed closed: the round stopped at contact with no crossing resolved.
     Failed,
     /// The round's fuze ran out at `at` (design doc §5a, "The burst"), the round travelling at
-    /// `speed` (zero for a round at rest). `nose` is the mass (kg) of the ring's nose piece, which
-    /// flies on from `at` unless the round was at rest; `None` under the ball, which ends the round
-    /// here.
+    /// `speed` (zero for a round at rest). `nose` is the mass (kg) of the nose piece, which flies
+    /// on from `at` unless the round was at rest.
     Burst {
         at: Vec3,
         speed: f32,
@@ -1303,7 +1302,7 @@ pub enum ArmourMark {
         after: f32,
         /// The burst's greatest sideways speed `v_s` (m/s), its round's ([`burst::Burst`]).
         sideways: f32,
-        nose: Option<f32>,
+        nose: f32,
         /// The tank whose body armed or last restarted the fuze: the tank the field walks.
         tank: Option<Entity>,
     },
@@ -1386,8 +1385,8 @@ pub struct SpallCone {
 pub struct BurstField {
     pub origin: Vec3,
     pub axis: Dir3,
-    /// The burst law and ratio its directions were weighted by: the round's burst shape at the
-    /// carried speed (its [`ArmourMark::Burst`]'s) over the burst's greatest sideways speed.
+    /// The burst law and ratio its directions were weighted by: the ring at the carried speed (its
+    /// [`ArmourMark::Burst`]'s) over the burst's greatest sideways speed.
     pub field: spall_cone::FieldDescriptor,
     /// The strength `S` (reference-mm) the directions were thrown with: direction `k` carries
     /// `S·f_k`, and the field emits `S/2` in all.
@@ -2831,8 +2830,8 @@ fn march_shell_step(
     // `looking_to` is degenerate for a round travelling straight down, and the sampling basis is sim
     // state that must not read a view detail.
     let previous = Dir3::new(shell.projectile.velocity).unwrap_or(dir);
-    // A ring burst swaps the round for its nose piece mid-step ([`burst_here`]); the disc keeps its
-    // radius, the nose being the round's calibre.
+    // A burst in flight swaps the round for its nose piece mid-step ([`burst_here`]); the disc keeps
+    // its radius, the nose being the round's calibre.
     let radius = resolve::disc_radius(shell.projectile.body().caliber);
     let context = resolve::ResolveContext {
         world,
@@ -3199,9 +3198,9 @@ fn burst_ahead(
 
 /// AUTHORITY: burst an armed round where `flight` stands, travelling at `speed` (zero at rest, the
 /// delay's remainder then waited out where it lies): log its [`ArmourMark::Burst`] and settle its
-/// doses at that mark. Under the ball the round ends;
-/// under the ring its nose piece flies on as the shell's round, inert, unless the round is at
-/// rest. Returns whether the round ended and the HP removed; an unarmed fuze does nothing.
+/// doses at that mark. Its nose piece flies on as the shell's round, inert, unless the round is at
+/// rest, which ends it. Returns whether the round ended and the HP removed; an unarmed fuze does
+/// nothing.
 fn burst_here(
     shell: &mut MarchingShell,
     context: &resolve::ResolveContext<'_, '_, '_>,
@@ -3218,41 +3217,30 @@ fn burst_here(
         shell.projectile.fuze.delay_left().unwrap_or(0.0)
     };
     shell.projectile.fuze = burst::Fuze::Inert;
-    let (shape, nose) = match burst.option {
-        burst::BurstOption::Ring { nose } => (burst::BurstShape::Ring, Some(nose)),
-        burst::BurstOption::Ball => (burst::BurstShape::Ball, None),
-    };
+    let nose = burst.nose;
     shell.marks.log.push(ArmourMark::Burst {
         at: flight.position,
         speed,
         after,
         sideways: burst.sideways_speed,
-        nose: nose.map(|nose| nose.mass),
+        nose: nose.mass,
         tank,
     });
     shell.path.points.push(flight.position);
-    throw_burst(
-        shell,
-        context,
-        &burst,
-        shape,
-        tank,
-        flight,
-        speed,
-        &|volume| health.contains(volume),
-    );
+    throw_burst(shell, context, &burst, tank, flight, speed, &|volume| {
+        health.contains(volume)
+    });
     let removed = shell
         .dose
         .settle(health, context.deposit, shell.marks.log.len() - 1);
-    let ended = match nose {
-        Some(nose) if speed > 0.0 => {
-            let projectile = &mut **shell.projectile;
-            projectile.round = bound(nose);
-            projectile.mass = nose.mass;
-            projectile.drag_k = drag_k(projectile.caliber, nose.mass);
-            false
-        }
-        _ => true,
+    let ended = if speed > 0.0 {
+        let projectile = &mut **shell.projectile;
+        projectile.round = bound(nose);
+        projectile.mass = nose.mass;
+        projectile.drag_k = drag_k(projectile.caliber, nose.mass);
+        false
+    } else {
+        true
     };
     (ended, removed)
 }
@@ -3714,20 +3702,14 @@ fn resolve_replica_armor_contact(
 /// stands, about its direction, at the carried `speed`, recording it as the shell's
 /// [`SpallMarks::burst`] and adding its doses to the shot's [`ShotDose`]. Its strength `S` is the
 /// burst's driven-mass energy at the burst fields' rate ([`spall_cone::BurstFields::strength`]),
-/// its field the burst's `shape` at ratio `speed / v_s` ([`spall_cone::BurstFields::field`]),
-/// walked through the volumes of `tank`, the fuze's, leaving none. A field whose emission converts
-/// to no HP point is not thrown, as a cone's is not ([`throw_spall_cone`]); one outside its law's
-/// domain throws nothing and logs why.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the burst's throw: the shell, the world, the burst and its shape, its tank, where it \
-              stands and how fast, and which volumes hold a pool"
-)]
+/// its field the ring at ratio `speed / v_s` ([`spall_cone::BurstFields::field`]), walked through
+/// the volumes of `tank`, the fuze's, leaving none. A field whose emission converts to no HP point
+/// is not thrown, as a cone's is not ([`throw_spall_cone`]); one outside its law's domain throws
+/// nothing and logs why.
 fn throw_burst(
     shell: &mut MarchingShell,
     context: &resolve::ResolveContext<'_, '_, '_>,
     burst: &burst::Burst,
-    shape: burst::BurstShape,
     tank: Option<Entity>,
     flight: &resolve::Flight,
     speed: f32,
@@ -3749,7 +3731,7 @@ fn throw_burst(
         shell.spall.gated += 1;
         return;
     }
-    let (field, law) = fields.field(shape, speed / burst.sideways_speed);
+    let (field, law) = fields.field(speed / burst.sideways_speed);
     let spread = match law.spread(field) {
         Ok(spread) => spread,
         Err(error) => {
@@ -8234,12 +8216,14 @@ mod march_tests {
             Vec3::new(0.0, 0.0, -5.0),
             0,
         );
-        // Fixture burst: arms on any body, bursts 4 ms past the exit (3.2 m at 800 m/s), inside the
-        // ball law's domain at ratio 0.4; its tree stands 2 m past the burst, 0.6 m off the axis,
-        // with a pool the armed-on tree's own exit cone cannot empty (DERIVED: that cone's
-        // strength is its 14 reference-mm spend at a softwood rear factor of 40 over the
-        // reference 1000, under 0.6 reference-mm, so under 20 HP at the field's 70 per
-        // reference-mm) and the 1 MJ burst's field empties from any one direction.
+        // Fixture burst: arms on any body, bursts 4 ms past the exit (3.2 m at 800 m/s), its ring
+        // at ratio about 3.3 (the carried speed over 240 m/s) a band 7–27° off the axis about 17°
+        // (DERIVED, at the shipped 10° half-width); its tree stands 2 m past the burst, 0.6 m off
+        // the axis (17°, DERIVED), clear of the nose piece flying on along the line, with a pool
+        // the armed-on tree's own exit cone cannot empty (DERIVED: that cone's strength is its
+        // 14 reference-mm spend at a softwood rear factor of 40 over the reference 1000, under
+        // 0.6 reference-mm, so under 20 HP at the field's 70 per reference-mm) and the 1 MJ
+        // burst's field empties from any one direction.
         let exit = Vec3::new(0.0, 2.5, -5.0 - TRUNK_RADIUS_AT_2_5_M);
         let centre = exit + Vec3::NEG_Z * 3.2;
         let base = Vec3::new(0.6, 0.0, centre.z - 2.0);
@@ -8249,8 +8233,11 @@ mod march_tests {
         projectile.fuze = burst::Fuze::of(Some(burst::Burst {
             arming_spend: 1.0,
             delay: 0.004,
-            option: burst::BurstOption::Ball,
-            sideways_speed: 2000.0,
+            nose: RoundBody {
+                mass: 0.5 * FIXTURE_88.mass,
+                ..FIXTURE_88
+            },
+            sideways_speed: 240.0,
             energy: 1.0e6,
         }));
         march_round(

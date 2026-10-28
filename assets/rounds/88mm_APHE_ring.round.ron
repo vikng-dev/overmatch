@@ -1,11 +1,12 @@
-// The 8.8 cm Pzgr. 39 bursting as the ring: the Pzgr. 39's body with its burst core. DERIVED at
-// load from the data below and the body's GunSteel density: a cavity of 36.4 cm³ and 36.3 mm
-// length; a wall of 1.440 kg and a nose of 8.370 kg; v_s 541.5 m/s (the wall driven) and 211.1 kJ
-// of driven-mass energy. No source gives the nose's mass: DERIVED, provisional.
+// The 8.8 cm Pzgr. 39 with its burst core, bursting as every burst round does, as the ring: the
+// Pzgr. 39's body with its burst core. DERIVED at load from the data below and the body's GunSteel
+// density: a cavity of 36.4 cm³ and 36.3 mm length; a wall of 1.440 kg and a nose of 8.370 kg;
+// v_s 541.5 m/s (the wall driven) and 211.1 kJ of driven-mass energy. No source gives the nose's
+// mass: DERIVED, provisional.
 // The file's fields are `src/rounds.rs`'s module doc.
 (
-    name: ("8.8 cm Pzgr. 39 ring", Tuned("the owner's comparison (brief 4b): the 8.8 cm Pzgr. 39
-        bursting as the ring")),
+    name: ("8.8 cm Pzgr. 39 ring", Tuned("the 8.8 cm Pzgr. 39 bursting as the ring; the suffix sets
+        it apart from the solid fixture round of the same designation, 88mm_AP")),
     round_type: ("APCBC", Measured("the Pzgr. 39 is the 8.8 cm KwK 36's APCBC round:
         en.wikipedia.org/wiki/8.8_cm_KwK_36, ammunition table")),
     core: ("GunSteel", Tuned("the Pzgr. 39's fixture body steel")),
@@ -17,8 +18,6 @@
     burst: Some((
         core_substance: ("88mm_burst_core", Measured("the round's burst core:
             tiger-ammo-history.md")),
-        option: (Ring, Tuned("the owner's comparison (brief 4b): the wall becomes a band, the nose
-            piece flies on")),
         arming_spend: (35.0, Measured("the reference-mm the round spends in one body to arm the
             fuze, read as the 35 mm of plate of about 115 kg per square mm the Bd.Z. 5127 arms on,
             perforated at normal impact, values for 1000 m (L.Dv. 487, March 1943, page 487_21):

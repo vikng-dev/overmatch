@@ -464,8 +464,8 @@ const COST_DIRECTIONS: [usize; 4] = [24, 64, 128, 256];
 
 /// The server cost of one burst field's throw at each of [`BURST_COST_DIRECTIONS`] (ignored; run
 /// it on demand). The first scenario's line is fired with every burst round of the registry, its
-/// march timed with both burst laws at `N` directions and at one; the throw's cost is the
-/// difference, scaled from `N − 1` to `N` directions, the best of [`COST_RUNS`] runs.
+/// march timed with the ring at `N` directions and at one; the throw's cost is the difference,
+/// scaled from `N − 1` to `N` directions, the best of [`COST_RUNS`] runs.
 /// `cargo test --release --lib --features dev_tools pen_cam::burst_law_cost -- --ignored --nocapture`
 #[test]
 #[ignore = "a measurement, run on demand"]
@@ -485,7 +485,7 @@ fn burst_law_cost() {
         let best = |directions: usize| {
             (0..COST_RUNS)
                 .map(|_| {
-                    let fields = spall_cone::BurstFields::shipped_at(directions, directions);
+                    let fields = spall_cone::BurstFields::shipped_at(directions);
                     record_edited(&scenario, None, |app| {
                         app.insert_resource(spall_cone::BurstLaw(fields));
                     })
@@ -1362,14 +1362,10 @@ fn the_muzzle_is_read_before_the_globals_catch_up() {
 // The burst on generic fixtures (design doc §5a, "The burst")
 // ---------------------------------------------------------------------------------------------
 
-/// The fixture 88 carrying a burst of `shape` ([`burst::fixture_inputs`]).
-fn fixture_burst(shape: burst::BurstShape) -> burst::Burst {
-    burst::Burst::derived(
-        FIXTURE_88,
-        burst::FIXTURE_STEEL,
-        &burst::fixture_inputs(shape),
-    )
-    .expect("the fixture burst derives")
+/// The fixture 88 carrying a burst ([`burst::fixture_inputs`]).
+fn fixture_burst() -> burst::Burst {
+    burst::Burst::derived(FIXTURE_88, burst::FIXTURE_STEEL, &burst::fixture_inputs())
+        .expect("the fixture burst derives")
 }
 
 /// [`fixture_fire`] down the head-on line through tank 0's `volumes`, the round fused by `fuze`.
@@ -1394,7 +1390,7 @@ fn crossing_ends(log: &[ArmourMark]) -> Vec<CrossingEnd> {
 }
 
 /// Every burst in the log: where, at what speed, and the nose piece's mass.
-fn bursts(log: &[ArmourMark]) -> Vec<(Vec3, f32, Option<f32>)> {
+fn bursts(log: &[ArmourMark]) -> Vec<(Vec3, f32, f32)> {
     log.iter()
         .filter_map(|mark| match mark {
             ArmourMark::Burst {
@@ -1418,63 +1414,49 @@ fn exit_of(end: CrossingEnd) -> (Vec3, f32) {
 const BURST_TOLERANCE: f32 = 1.0e-3;
 
 /// An armed round bursts `exit speed × delay` of path past the exit of the body that armed it: the
-/// field's origin, and for the ring the nose piece's start. The ball ends the round there; the ring's
-/// nose flies on from there at the burst's speed as an inert round of the derived nose mass and the
-/// round's calibre and nose, nothing else of the round. A mutant that counts the delay from the
-/// entrance, flies the nose at the whole round's mass, or lets the ball fly on fails here. The 50 mm
-/// plate spends 50 reference-mm across, over the fixture threshold (fixture data).
+/// field's origin and the nose piece's start. The nose flies on from there at the burst's speed as
+/// an inert round of the derived nose mass and the round's calibre and nose, nothing else of the
+/// round. A mutant that counts the delay from the entrance, flies the nose at the whole round's
+/// mass, or ends the round at a burst in flight fails here. The 50 mm plate spends 50 reference-mm
+/// across, over the fixture threshold (fixture data).
 #[test]
 fn an_armed_round_bursts_its_delay_past_the_arming_exit() {
-    for shape in [burst::BurstShape::Ball, burst::BurstShape::Ring] {
-        let burst = fixture_burst(shape);
-        let fired = fire_fused(
-            &[plate("front", THIN, 0.0, Kind::Main)],
-            burst::Fuze::of(Some(burst)),
-        );
-        let ends = crossing_ends(&fired.log);
-        assert_eq!(ends.len(), 1, "{shape:?}: one crossing");
-        let (exit, exit_speed) = exit_of(ends[0]);
-        let found = bursts(&fired.log);
-        assert_eq!(found.len(), 1, "{shape:?}: one burst");
-        let (at, speed, nose) = found[0];
-        let past = at.distance(exit);
-        assert!(
-            (past - exit_speed * burst.delay).abs() < BURST_TOLERANCE,
-            "{shape:?}: the burst lies {past} m past the exit, not {} m",
-            exit_speed * burst.delay
-        );
-        assert!(
-            speed > 0.0 && speed <= exit_speed,
-            "{shape:?}: it bursts in flight, at {speed} m/s"
-        );
-        match burst.option {
-            burst::BurstOption::Ball => {
-                assert_eq!(nose, None, "the ball leaves no nose piece");
-                assert!(
-                    matches!(fired.log.last(), Some(ArmourMark::Burst { .. })),
-                    "the ball ends the round at the burst"
-                );
-                assert_eq!(fired.flying, None, "the ball ends the round");
-                assert!(fired.at.distance(at) < BURST_TOLERANCE, "{}", fired.at);
-            }
-            burst::BurstOption::Ring { nose: piece } => {
-                assert_eq!(nose, Some(piece.mass), "the mark carries the nose's mass");
-                assert_eq!(
-                    piece,
-                    RoundBody {
-                        mass: piece.mass,
-                        ..FIXTURE_88
-                    }
-                );
-                assert!(piece.mass < FIXTURE_88.mass);
-                let (body, mass, fuze) = fired.flying.expect("the ring's nose flies on");
-                assert_eq!(body, piece, "the nose flies as its own body");
-                assert_eq!(mass, piece.mass, "the nose carries its own mass");
-                assert_eq!(fuze, burst::Fuze::Inert, "the nose bursts no more");
-                assert!(fired.at.z < at.z, "the nose flies on past the burst");
-            }
+    let burst = fixture_burst();
+    let fired = fire_fused(
+        &[plate("front", THIN, 0.0, Kind::Main)],
+        burst::Fuze::of(Some(burst)),
+    );
+    let ends = crossing_ends(&fired.log);
+    assert_eq!(ends.len(), 1, "one crossing");
+    let (exit, exit_speed) = exit_of(ends[0]);
+    let found = bursts(&fired.log);
+    assert_eq!(found.len(), 1, "one burst");
+    let (at, speed, nose) = found[0];
+    let past = at.distance(exit);
+    assert!(
+        (past - exit_speed * burst.delay).abs() < BURST_TOLERANCE,
+        "the burst lies {past} m past the exit, not {} m",
+        exit_speed * burst.delay
+    );
+    assert!(
+        speed > 0.0 && speed <= exit_speed,
+        "it bursts in flight, at {speed} m/s"
+    );
+    let piece = burst.nose;
+    assert_eq!(nose, piece.mass, "the mark carries the nose's mass");
+    assert_eq!(
+        piece,
+        RoundBody {
+            mass: piece.mass,
+            ..FIXTURE_88
         }
-    }
+    );
+    assert!(piece.mass < FIXTURE_88.mass);
+    let (body, mass, fuze) = fired.flying.expect("the nose flies on");
+    assert_eq!(body, piece, "the nose flies as its own body");
+    assert_eq!(mass, piece.mass, "the nose carries its own mass");
+    assert_eq!(fuze, burst::Fuze::Inert, "the nose bursts no more");
+    assert!(fired.at.z < at.z, "the nose flies on past the burst");
 }
 
 /// A body whose spend is under the threshold leaves the round unarmed, and a round without a burst
@@ -1483,7 +1465,7 @@ fn an_armed_round_bursts_its_delay_past_the_arming_exit() {
 /// the fixture threshold (fixture data).
 #[test]
 fn an_unarmed_or_inert_round_flies_on_as_a_solid_shot() {
-    let burst = fixture_burst(burst::BurstShape::Ball);
+    let burst = fixture_burst();
     for (thickness, fuze) in [
         (0.02, burst::Fuze::of(Some(burst))),
         (THIN, burst::Fuze::Inert),
@@ -1514,7 +1496,7 @@ fn an_unarmed_or_inert_round_flies_on_as_a_solid_shot() {
 /// threshold, and its place inside the first delay are fixture data.
 #[test]
 fn a_body_met_before_the_burst_restarts_the_delay() {
-    let burst = fixture_burst(burst::BurstShape::Ball);
+    let burst = fixture_burst();
     let fired = fire_fused(
         &[
             plate("front", THIN, 0.0, Kind::Main),
@@ -1561,7 +1543,7 @@ fn a_delay_run_out_between_bodies_bursts_where_the_crossing_hands_back() {
         plate("back", THIN, -THIN - 0.2, Kind::Main),
     ]
     .map(|volume| (volume, 0, Quat::IDENTITY));
-    let shipped = fixture_burst(burst::BurstShape::Ball);
+    let shipped = fixture_burst();
     for (delay, due) in [(1.0e-4, true), (shipped.delay, false)] {
         let burst = burst::Burst { delay, ..shipped };
         let fired = fixture_fire(&volumes, from, Vec3::NEG_Z, 0, |projectile| {
@@ -1604,84 +1586,80 @@ fn a_delay_run_out_between_bodies_bursts_where_the_crossing_hands_back() {
 
 /// An armed round stopped before its delay ends bursts where it rests, at no speed, when the delay
 /// ends: the delay's seconds less the path from the arming exit to the rest point at the exit's
-/// speed, after the record has it arrive there. The ring then throws no nose piece on, and either
-/// ends the round. The back plate stands 1.7 m behind the front, a crossing of its own, then behind
-/// a 200 mm soft box filling the space from the front, one crossing that exits the front and rests
-/// in the back; the 500 mm plate stops the fixture 88 inside the delay (fixture data). A mutant that drops the burst of a round at rest, flies a nose on from it, times
-/// it on arrival, or flies none of the path to the rest point in either crossing fails here.
+/// speed, after the record has it arrive there. It throws no nose piece on, and the round ends. The
+/// back plate stands 1.7 m behind the front, a crossing of its own, then behind a 200 mm soft box
+/// filling the space from the front, one crossing that exits the front and rests in the back; the
+/// 500 mm plate stops the fixture 88 inside the delay (fixture data). A mutant that drops the burst
+/// of a round at rest, flies a nose on from it, times it on arrival, or flies none of the path to
+/// the rest point in either crossing fails here.
 #[test]
 fn an_armed_round_at_rest_bursts_where_it_rests() {
-    for shape in [burst::BurstShape::Ball, burst::BurstShape::Ring] {
-        let burst = fixture_burst(shape);
-        // The front plate's exit speed, read where its crossing ends there.
-        let mut exit_speed = None;
-        let front = plate("front", THIN, 0.0, Kind::Main);
-        let soft_box = plate("soft box", 0.2, -0.5 * THIN - 0.1, Kind::Box(100_000));
-        for (volumes, crossings) in [
-            (vec![front, plate("back", THICK, -2.0, Kind::Main)], 2),
-            (
-                vec![
-                    front,
-                    soft_box,
-                    plate("back", THICK, -0.5 * THIN - 0.2 - 0.5 * THICK, Kind::Main),
-                ],
-                1,
-            ),
-        ] {
-            let fired = fire_fused(&volumes, burst::Fuze::of(Some(burst)));
-            let ends = crossing_ends(&fired.log);
-            assert_eq!(ends.len(), crossings, "{shape:?}: {ends:?}");
-            let rest = match ends.last() {
-                Some(CrossingEnd::Rest { at }) => *at,
-                other => panic!("{shape:?}: the back plate stops the round: {other:?}"),
-            };
-            if let CrossingEnd::Exit { speed, .. } = ends[0] {
-                exit_speed = Some(speed);
-            }
-            let exit_speed = exit_speed.expect("the far back plate is fired first");
-            let exit = fired
-                .log
-                .iter()
-                .flat_map(|mark| match mark {
-                    ArmourMark::Crossing { volumes, .. } => volumes.as_slice(),
-                    _ => &[],
-                })
-                .find(|crossed| fired.names[&crossed.volume] == "front")
-                .expect("the round crosses the front plate")
-                .end;
-            let found = bursts(&fired.log);
-            assert_eq!(found.len(), 1, "{shape:?}");
-            let (at, speed, _) = found[0];
-            assert_eq!(speed, 0.0, "{shape:?}: at rest");
-            assert!(
-                at.distance(rest) < BURST_TOLERANCE,
-                "{shape:?}: {at} vs {rest}"
-            );
-            let left = burst.delay - rest.distance(exit) / exit_speed;
-            let after = fired
-                .log
-                .iter()
-                .find_map(|mark| match mark {
-                    ArmourMark::Burst { after, .. } => Some(*after),
-                    _ => None,
-                })
-                .expect("the burst's mark");
-            assert!(left > 0.0, "{shape:?}: it stops inside the delay");
-            assert!(
-                (after - left).abs() < BURST_TOLERANCE / exit_speed,
-                "{shape:?}, {crossings} crossings: it waits {after} s, not {left} s"
-            );
-            let recorded = fired.report.burst.as_ref().expect("the record's burst");
-            let arrived = fired.report.path.last().expect("a path").t;
-            assert!(
-                (recorded.t - (arrived + after)).abs() < 1.0e-6,
-                "{shape:?}: recorded at {} s, arrived at {arrived} s",
-                recorded.t
-            );
-            assert_eq!(fired.flying, None, "{shape:?}: nothing flies on");
-            let field = fired.burst.expect("the burst throws its field").field;
-            assert_eq!(field.ratio, 0.0, "{shape:?}: thrown at rest");
+    let burst = fixture_burst();
+    // The front plate's exit speed, read where its crossing ends there.
+    let mut exit_speed = None;
+    let front = plate("front", THIN, 0.0, Kind::Main);
+    let soft_box = plate("soft box", 0.2, -0.5 * THIN - 0.1, Kind::Box(100_000));
+    for (volumes, crossings) in [
+        (vec![front, plate("back", THICK, -2.0, Kind::Main)], 2),
+        (
+            vec![
+                front,
+                soft_box,
+                plate("back", THICK, -0.5 * THIN - 0.2 - 0.5 * THICK, Kind::Main),
+            ],
+            1,
+        ),
+    ] {
+        let fired = fire_fused(&volumes, burst::Fuze::of(Some(burst)));
+        let ends = crossing_ends(&fired.log);
+        assert_eq!(ends.len(), crossings, "{ends:?}");
+        let rest = match ends.last() {
+            Some(CrossingEnd::Rest { at }) => *at,
+            other => panic!("the back plate stops the round: {other:?}"),
+        };
+        if let CrossingEnd::Exit { speed, .. } = ends[0] {
+            exit_speed = Some(speed);
         }
+        let exit_speed = exit_speed.expect("the far back plate is fired first");
+        let exit = fired
+            .log
+            .iter()
+            .flat_map(|mark| match mark {
+                ArmourMark::Crossing { volumes, .. } => volumes.as_slice(),
+                _ => &[],
+            })
+            .find(|crossed| fired.names[&crossed.volume] == "front")
+            .expect("the round crosses the front plate")
+            .end;
+        let found = bursts(&fired.log);
+        assert_eq!(found.len(), 1);
+        let (at, speed, _) = found[0];
+        assert_eq!(speed, 0.0, "at rest");
+        assert!(at.distance(rest) < BURST_TOLERANCE, "{at} vs {rest}");
+        let left = burst.delay - rest.distance(exit) / exit_speed;
+        let after = fired
+            .log
+            .iter()
+            .find_map(|mark| match mark {
+                ArmourMark::Burst { after, .. } => Some(*after),
+                _ => None,
+            })
+            .expect("the burst's mark");
+        assert!(left > 0.0, "it stops inside the delay");
+        assert!(
+            (after - left).abs() < BURST_TOLERANCE / exit_speed,
+            "{crossings} crossings: it waits {after} s, not {left} s"
+        );
+        let recorded = fired.report.burst.as_ref().expect("the record's burst");
+        let arrived = fired.report.path.last().expect("a path").t;
+        assert!(
+            (recorded.t - (arrived + after)).abs() < 1.0e-6,
+            "recorded at {} s, arrived at {arrived} s",
+            recorded.t
+        );
+        assert_eq!(fired.flying, None, "nothing flies on");
+        let field = fired.burst.expect("the burst throws its field").field;
+        assert_eq!(field.ratio, 0.0, "thrown at rest");
     }
 }
 
@@ -1707,7 +1685,7 @@ fn a_ground_stop_counts_its_approach_whatever_the_step() {
         Vec3::new(0.0, 1.0, 0.0),
         Kind::Main,
     );
-    let burst = fixture_burst(burst::BurstShape::Ball);
+    let burst = fixture_burst();
     // The first step past the ground, ending inside the deck's crossing, and ending between deck
     // and ground: 12.8 m, 3.0 m and 3.5 m of travel from 4 m up (fixture data).
     let fired: Vec<(Vec3, f32, f32, f32)> = [
@@ -1803,14 +1781,14 @@ fn a_ground_stop_counts_its_approach_whatever_the_step() {
 }
 
 /// A round that rests in a body it entered obliquely throws its burst about the direction it
-/// travelled in that body, the entrance's bend and not the way in: the ring spins its band about
-/// it. The 500 mm back plate is turned 40° about `Y` (fixture data), so the entrance bends the
+/// travelled in that body, the entrance's bend and not the way in: the band spins about it. The
+/// 500 mm back plate is turned 40° about `Y` (fixture data), so the entrance bends the
 /// round off its way in before it stops; the bend must exceed 10 mrad for the check to tell the two
 /// apart, and 1 mrad is the tolerance. A mutant that keeps the way in as the stopped round's
 /// direction fails here.
 #[test]
 fn a_round_at_rest_bursts_about_the_direction_it_stopped_along() {
-    let burst = fixture_burst(burst::BurstShape::Ring);
+    let burst = fixture_burst();
     let turn = Quat::from_rotation_y(40.0_f32.to_radians());
     let fired = fixture_fire(
         &[
@@ -1856,55 +1834,50 @@ fn a_round_at_rest_bursts_about_the_direction_it_stopped_along() {
 }
 
 /// A burst throws its field from the burst point about the flight direction, at the carried speed:
-/// its strength is the burst's driven-mass energy at the shipped rate, its field the round's burst
-/// shape at `λ = v_c / v_s`, and direction `k` of the shape's `N` carries `S·f_k` of that field's
-/// spread, to the bit. A mutant that throws from the exit, at the exit speed, at `v_s / v_c`, at
-/// another strength or under the other shape fails here; the record and the pen cam rely on it.
+/// its strength is the burst's driven-mass energy at the shipped rate, its field the ring at
+/// `λ = v_c / v_s`, and direction `k` of the ring's `N` carries `S·f_k` of that field's spread, to
+/// the bit. A mutant that throws from the exit, at the exit speed, at `v_s / v_c`, at another
+/// strength or under another law fails here; the record and the pen cam rely on it.
 #[test]
 fn a_burst_throws_its_field_from_where_it_bursts() {
     let fields = spall_cone::BurstFields::shipped();
-    for shape in [burst::BurstShape::Ball, burst::BurstShape::Ring] {
-        let burst = fixture_burst(shape);
-        let fired = fire_fused(
-            &[plate("front", THIN, 0.0, Kind::Main)],
-            burst::Fuze::of(Some(burst)),
-        );
-        let (at, speed, _) = bursts(&fired.log)[0];
-        let thrown = fired.burst.expect("the burst throws its field");
-        assert_eq!(thrown.origin, at, "{shape:?}: from the burst point");
-        assert!(
-            thrown.axis.dot(Vec3::NEG_Z) > 0.9999,
-            "{shape:?}: about the flight direction, {:?}",
-            thrown.axis
-        );
-        assert_eq!(thrown.strength, fields.strength(burst.energy), "{shape:?}");
-        let (field, law) = fields.field(shape, speed / burst.sideways_speed);
-        assert_eq!(thrown.field, field, "{shape:?}");
-        let spread = law.spread(field).unwrap();
-        assert_eq!(thrown.rays.len(), spread.directions_count(), "{shape:?}");
-        for (ray, [.., weight]) in thrown.rays.iter().zip(spread.strata()) {
-            assert_eq!(ray.strength, thrown.strength * weight, "{shape:?}");
-        }
+    let burst = fixture_burst();
+    let fired = fire_fused(
+        &[plate("front", THIN, 0.0, Kind::Main)],
+        burst::Fuze::of(Some(burst)),
+    );
+    let (at, speed, _) = bursts(&fired.log)[0];
+    let thrown = fired.burst.expect("the burst throws its field");
+    assert_eq!(thrown.origin, at, "from the burst point");
+    assert!(
+        thrown.axis.dot(Vec3::NEG_Z) > 0.9999,
+        "about the flight direction, {:?}",
+        thrown.axis
+    );
+    assert_eq!(thrown.strength, fields.strength(burst.energy));
+    let (field, law) = fields.field(speed / burst.sideways_speed);
+    assert!(matches!(field.law, spall_cone::FieldLaw::Ring { .. }));
+    assert_eq!(thrown.field, field);
+    let spread = law.spread(field).unwrap();
+    assert_eq!(thrown.rays.len(), spread.directions_count());
+    for (ray, [.., weight]) in thrown.rays.iter().zip(spread.strata()) {
+        assert_eq!(ray.strength, thrown.strength * weight);
     }
 }
 
-/// A burst of `shape` fired through the fixture's 50 mm front plate with crew boxes at `angles`
-/// off the flight axis, each named, 0.4 m on a side with a 30 HP pool, 1.5 m from the burst point
-/// toward `+Y` (fixture data): the shot, and the burst's point and carried speed. `angles` is given
-/// the field's brightest angle, the ball's axis or the ring's band centre `atan(v_s / v_c)`, first
-/// measured with no box present; the boxes move no burst.
+/// A burst fired through the fixture's 50 mm front plate with crew boxes at `angles` off the
+/// flight axis, each named, 0.4 m on a side with a 30 HP pool, 1.5 m from the burst point toward
+/// `+Y` (fixture data): the shot, and the burst's point and carried speed. `angles` is given the
+/// field's brightest angle, the band centre `atan(v_s / v_c)`, first measured with no box present;
+/// the boxes move no burst.
 fn fire_burst_at_boxes(
-    shape: burst::BurstShape,
     angles: impl Fn(f32) -> Vec<(&'static str, f32)>,
 ) -> (FixtureFired, Vec3, f32) {
-    let burst = fixture_burst(shape);
+    let burst = fixture_burst();
     let front = plate("front", THIN, 0.0, Kind::Main);
     let probe = fire_fused(&[front], burst::Fuze::of(Some(burst)));
     let (at, speed, _) = bursts(&probe.log)[0];
-    let brightest = match shape {
-        burst::BurstShape::Ball => 0.0,
-        burst::BurstShape::Ring => (burst.sideways_speed / speed).atan(),
-    };
+    let brightest = (burst.sideways_speed / speed).atan();
     let mut volumes = vec![front];
     for (name, angle) in angles(brightest) {
         let centre = at + 1.5 * (Vec3::NEG_Z * angle.cos() + Vec3::Y * angle.sin());
@@ -1914,123 +1887,99 @@ fn fire_burst_at_boxes(
     let moved = bursts(&fired.log)[0].0.distance(at);
     assert!(
         moved < BURST_TOLERANCE,
-        "{shape:?}: the boxes move the burst {moved} m"
+        "the boxes move the burst {moved} m"
     );
     (fired, at, speed)
 }
 
-/// The field leans with the carried speed: the burst doses a crew box where it is brightest (the
-/// ball's axis; the ring's band centre, `atan(v_s / v_c)` off it), and none past its rim, behind
-/// the burst at 150° from the axis. A mutant that inverts the ratio throws the ball over the whole
-/// sphere and moves the ring's band, and fails here. The plate's cone reaches both boxes, so the
-/// burst's own rays are read.
+/// The field leans with the carried speed: the burst doses a crew box where it is brightest, the
+/// band centre `atan(v_s / v_c)` off the axis, and none past its rim, behind the burst at 150° from
+/// the axis. A mutant that inverts the ratio moves the band, and fails here. The plate's cone
+/// reaches both boxes, so the burst's own rays are read.
 #[test]
 fn the_burst_field_leans_with_the_carried_speed() {
-    for shape in [burst::BurstShape::Ball, burst::BurstShape::Ring] {
-        let (fired, ..) = fire_burst_at_boxes(shape, |brightest| {
-            vec![("lit", brightest), ("behind", 150.0_f32.to_radians())]
-        });
-        let thrown = fired.burst.expect("the burst throws its field");
-        let dosed: Vec<&str> = thrown
-            .rays
-            .iter()
-            .flat_map(|ray| &ray.doses)
-            .map(|(volume, _)| fired.names[volume].as_str())
-            .collect();
-        assert!(dosed.contains(&"lit"), "{shape:?}: {dosed:?}");
-        assert!(!dosed.contains(&"behind"), "{shape:?}: {dosed:?}");
-    }
+    let (fired, ..) = fire_burst_at_boxes(|brightest| {
+        vec![("lit", brightest), ("behind", 150.0_f32.to_radians())]
+    });
+    let thrown = fired.burst.expect("the burst throws its field");
+    let dosed: Vec<&str> = thrown
+        .rays
+        .iter()
+        .flat_map(|ray| &ray.doses)
+        .map(|(volume, _)| fired.names[volume].as_str())
+        .collect();
+    assert!(dosed.contains(&"lit"), "{dosed:?}");
+    assert!(!dosed.contains(&"behind"), "{dosed:?}");
 }
 
 /// The record carries the burst as the march threw it: its point on the path, the carried speed,
-/// the round's sideways speed `v_s` (the pen cam's burst front), the ring's nose piece's mass, and
-/// its field with every direction's strength and doses, in the hull frame; a box's field dose sums
-/// its hits from every field, the burst's after the cones', and a box the burst empties is lost at
-/// the burst's time. The ball ends the round at the burst
-/// point; the ring's nose piece runs the path on past it. A mutant that leaves the burst's
-/// deposits out of the ledger, the field out of the record, or the ring's round ending at the
-/// burst fails here; the wire and the pen cam read the record.
+/// the round's sideways speed `v_s` (the pen cam's burst front), the nose piece's mass, and its
+/// field with every direction's strength and doses, in the hull frame; a box's field dose sums its
+/// hits from every field, the burst's after the cones', and a box the burst empties is lost at the
+/// burst's time. The nose piece runs the path on past the burst point. A mutant that leaves the
+/// burst's deposits out of the ledger, the field out of the record, or the round's path ending at
+/// the burst fails here; the wire and the pen cam read the record.
 #[test]
 fn the_record_carries_the_burst() {
-    for shape in [burst::BurstShape::Ball, burst::BurstShape::Ring] {
-        let (fired, at, speed) = fire_burst_at_boxes(shape, |brightest| vec![("lit", brightest)]);
-        let report = &fired.report;
-        crate::damage_cam::tests::assert_self_consistent("fixture", report);
-        assert_eq!(report.unresolved(), Vec::<String>::new(), "{shape:?}");
-        let recorded = report.burst.as_ref().expect("the record carries the burst");
-        assert_eq!(recorded.speed_mps, speed, "{shape:?}");
-        assert_eq!(
-            recorded.sideways_mps,
-            fixture_burst(shape).sideways_speed,
-            "{shape:?}"
-        );
-        assert_eq!(recorded.nose_kg, bursts(&fired.log)[0].2, "{shape:?}");
-        // The fixture tank's hull stands at the world origin, unturned.
-        assert!(
-            Vec3::from(recorded.point).distance(at) < 1.0e-6,
-            "{shape:?}"
-        );
-        let thrown = fired.burst.as_ref().expect("the burst throws its field");
-        let field = recorded
-            .field
-            .as_ref()
-            .expect("the record carries its field");
-        assert_eq!(field.field, thrown.field, "{shape:?}");
-        assert_eq!(field.strength, thrown.strength, "{shape:?}");
-        assert_eq!(field.fragments.len(), thrown.rays.len(), "{shape:?}");
-        for (fragment, ray) in field.fragments.iter().zip(&thrown.rays) {
-            assert_eq!(fragment.strength, ray.strength, "{shape:?}");
-            let hits: Vec<(&str, f32)> = fragment
-                .hits
-                .iter()
-                .map(|hit| (hit.volume.as_str(), hit.damage))
-                .collect();
-            let doses: Vec<(&str, f32)> = ray
-                .doses
-                .iter()
-                .map(|(volume, dose)| (fired.names[volume].as_str(), *dose))
-                .collect();
-            assert_eq!(hits, doses, "{shape:?}");
-        }
-        let lit = report
+    let (fired, at, speed) = fire_burst_at_boxes(|brightest| vec![("lit", brightest)]);
+    let report = &fired.report;
+    crate::damage_cam::tests::assert_self_consistent("fixture", report);
+    assert_eq!(report.unresolved(), Vec::<String>::new());
+    let recorded = report.burst.as_ref().expect("the record carries the burst");
+    assert_eq!(recorded.speed_mps, speed);
+    assert_eq!(recorded.sideways_mps, fixture_burst().sideways_speed);
+    assert_eq!(recorded.nose_kg, bursts(&fired.log)[0].2);
+    assert_eq!(recorded.nose_kg, fixture_burst().nose.mass);
+    // The fixture tank's hull stands at the world origin, unturned.
+    assert!(Vec3::from(recorded.point).distance(at) < 1.0e-6);
+    let thrown = fired.burst.as_ref().expect("the burst throws its field");
+    let field = recorded
+        .field
+        .as_ref()
+        .expect("the record carries its field");
+    assert_eq!(field.field, thrown.field);
+    assert_eq!(field.strength, thrown.strength);
+    assert_eq!(field.fragments.len(), thrown.rays.len());
+    for (fragment, ray) in field.fragments.iter().zip(&thrown.rays) {
+        assert_eq!(fragment.strength, ray.strength);
+        let hits: Vec<(&str, f32)> = fragment
+            .hits
+            .iter()
+            .map(|hit| (hit.volume.as_str(), hit.damage))
+            .collect();
+        let doses: Vec<(&str, f32)> = ray
             .doses
             .iter()
-            .find(|dose| dose.volume == "lit")
-            .expect("the burst doses the lit box");
-        let hits = report
-            .fields()
-            .flat_map(|cone| &cone.fragments)
-            .flat_map(|fragment| &fragment.hits)
-            .filter(|hit| hit.volume == "lit")
-            .fold(0.0, |sum, hit| sum + hit.damage);
-        assert_eq!(lit.field, hits, "{shape:?}");
-        let emptied = report
-            .consequences
-            .iter()
-            .find(|consequence| consequence.volume == "lit")
-            .expect("the burst knocks out the lit box");
-        assert_eq!(emptied.t, recorded.t, "{shape:?}: at the burst");
-        match shape {
-            burst::BurstShape::Ball => {
-                assert_eq!(report.end, RoundEnd::Burst { at: recorded.point })
-            }
-            burst::BurstShape::Ring => {
-                assert!(
-                    !matches!(report.end, RoundEnd::Burst { .. }),
-                    "{:?}",
-                    report.end
-                );
-                let last = Vec3::from(report.path.last().unwrap().point);
-                assert!(last.z < at.z, "the nose runs the path on: {last}");
-            }
-        }
+            .map(|(volume, dose)| (fired.names[volume].as_str(), *dose))
+            .collect();
+        assert_eq!(hits, doses);
     }
+    let lit = report
+        .doses
+        .iter()
+        .find(|dose| dose.volume == "lit")
+        .expect("the burst doses the lit box");
+    let hits = report
+        .fields()
+        .flat_map(|cone| &cone.fragments)
+        .flat_map(|fragment| &fragment.hits)
+        .filter(|hit| hit.volume == "lit")
+        .fold(0.0, |sum, hit| sum + hit.damage);
+    assert_eq!(lit.field, hits);
+    let emptied = report
+        .consequences
+        .iter()
+        .find(|consequence| consequence.volume == "lit")
+        .expect("the burst knocks out the lit box");
+    assert_eq!(emptied.t, recorded.t, "at the burst");
+    let last = Vec3::from(report.path.last().unwrap().point);
+    assert!(last.z < at.z, "the nose runs the path on: {last}");
 }
 
 /// The record's clock keeps the burst trigger's: a burst in flight lies the delay after the exit
 /// that started it, the record timing that leg at the exit's speed as the trigger counts its path,
-/// and the ring's nose piece flies its open air from the burst at the carried speed it starts at.
-/// The fixture's delay is raised to 0.04 s so the drag met over it sets the carried speed under the
+/// and the nose piece flies its open air from the burst at the carried speed it starts at. The
+/// fixture's delay is raised to 0.04 s so the drag met over it sets the carried speed under the
 /// exit speed, and the nose piece's leg to the next point of the path is metres long, each by more
 /// than ten tolerances (fixture data). A mutant that times the leg to the burst at the carried
 /// speed records the burst late by `delay × (v_exit / v_c − 1)`; one that flies the nose piece on
@@ -2040,52 +1989,48 @@ fn the_record_times_the_burst_at_the_triggers_speeds() {
     // Seconds of f32 rounding in two path times near 0.1 s and one leg's length over its speed: a
     // few ulps of 7.5e-9 s (DERIVED).
     const CLOCK_TOLERANCE: f32 = 1.0e-7;
-    for shape in [burst::BurstShape::Ball, burst::BurstShape::Ring] {
-        let burst = burst::Burst {
-            delay: 0.04,
-            ..fixture_burst(shape)
-        };
-        let fired = fire_fused(
-            &[plate("front", THIN, 0.0, Kind::Main)],
-            burst::Fuze::of(Some(burst)),
-        );
-        let (exit, exit_speed) = exit_of(crossing_ends(&fired.log)[0]);
-        let (_, carried, _) = bursts(&fired.log)[0];
-        // The fuze's path sum may lie BURST_TOLERANCE off the straight leg the record times.
-        let tolerance = BURST_TOLERANCE / exit_speed;
-        assert!(
-            burst.delay * (exit_speed / carried - 1.0) > 10.0 * tolerance,
-            "{shape:?}: the drag leaves {carried} m/s of {exit_speed} m/s"
-        );
-        let report = &fired.report;
-        let node = |point: Vec3| {
-            report
-                .path
-                .iter()
-                .position(|node| Vec3::from(node.point).distance(point) < 1.0e-6)
-                .unwrap_or_else(|| panic!("{shape:?}: no path node at {point}"))
-        };
-        let recorded = report.burst.as_ref().expect("the record's burst");
-        let exited = report.path[node(exit)].t;
-        assert!(
-            (recorded.t - exited - burst.delay).abs() < tolerance,
-            "{shape:?}: recorded {} s after the exit, not {} s",
-            recorded.t - exited,
-            burst.delay
-        );
-        if shape == burst::BurstShape::Ring {
-            let at = node(Vec3::from(recorded.point));
-            let (from, to) = (report.path[at], report.path[at + 1]);
-            let length = Vec3::from(to.point).distance(Vec3::from(from.point));
-            assert!(
-                length * (1.0 / carried - 1.0 / exit_speed) > 10.0 * CLOCK_TOLERANCE,
-                "the nose piece's leg is {length} m"
-            );
-            assert!(
-                (to.t - from.t - length / carried).abs() < CLOCK_TOLERANCE,
-                "{shape:?}: the nose piece flies {length} m in {} s, not at {carried} m/s",
-                to.t - from.t
-            );
-        }
-    }
+    let burst = burst::Burst {
+        delay: 0.04,
+        ..fixture_burst()
+    };
+    let fired = fire_fused(
+        &[plate("front", THIN, 0.0, Kind::Main)],
+        burst::Fuze::of(Some(burst)),
+    );
+    let (exit, exit_speed) = exit_of(crossing_ends(&fired.log)[0]);
+    let (_, carried, _) = bursts(&fired.log)[0];
+    // The fuze's path sum may lie BURST_TOLERANCE off the straight leg the record times.
+    let tolerance = BURST_TOLERANCE / exit_speed;
+    assert!(
+        burst.delay * (exit_speed / carried - 1.0) > 10.0 * tolerance,
+        "the drag leaves {carried} m/s of {exit_speed} m/s"
+    );
+    let report = &fired.report;
+    let node = |point: Vec3| {
+        report
+            .path
+            .iter()
+            .position(|node| Vec3::from(node.point).distance(point) < 1.0e-6)
+            .unwrap_or_else(|| panic!("no path node at {point}"))
+    };
+    let recorded = report.burst.as_ref().expect("the record's burst");
+    let exited = report.path[node(exit)].t;
+    assert!(
+        (recorded.t - exited - burst.delay).abs() < tolerance,
+        "recorded {} s after the exit, not {} s",
+        recorded.t - exited,
+        burst.delay
+    );
+    let at = node(Vec3::from(recorded.point));
+    let (from, to) = (report.path[at], report.path[at + 1]);
+    let length = Vec3::from(to.point).distance(Vec3::from(from.point));
+    assert!(
+        length * (1.0 / carried - 1.0 / exit_speed) > 10.0 * CLOCK_TOLERANCE,
+        "the nose piece's leg is {length} m"
+    );
+    assert!(
+        (to.t - from.t - length / carried).abs() < CLOCK_TOLERANCE,
+        "the nose piece flies {length} m in {} s, not at {carried} m/s",
+        to.t - from.t
+    );
 }

@@ -120,11 +120,6 @@ pub const PLAYLIST: &[Entry] = &[
         victim: false,
     },
     Entry {
-        label: "S14 burst round, ball: one lobe ahead, the round ends at the burst",
-        shots: &[("s14_ball_through_crew", 0.0)],
-        victim: false,
-    },
-    Entry {
         label: "S16 burst at rest in the hull side, the plate stops its field",
         shots: &[("s16_restart_at_rest", 0.0)],
         victim: false,

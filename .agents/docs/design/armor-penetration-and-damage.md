@@ -243,8 +243,8 @@ law (a ball of speeds), not data: another profile is another law. A cone's `λ` 
 substance's (**Data**), so its half-angle is the exit material's. A cone carries its law and `λ` as
 its **field descriptor** (a law id and one `f32`) in the shot record and on the wire, and the
 client rebuilds every direction and weight from it (`src/damage_cam/wire.rs`); a ratio below 1, a
-field over the whole sphere, is the same law's closed form, which only a burst's ball reaches
-(§5a). The on-axis weight is half the centre weight `(1 + 3λ²)(1 − cos α)`: through RHA (26.2°) the axis
+field over the whole sphere, is the same law's closed form, which no shipped field reaches (a plate
+exit's `λ` is at least 1, and every burst is a ring, §5a). The on-axis weight is half the centre weight `(1 + 3λ²)(1 − cos α)`: through RHA (26.2°) the axis
 direction carries about `0.84 S` and the outermost of 64 about `0.05 S`, so an on-axis box takes
 about 1.7× what an even profile gave it, one near the rim a graze, one at an average spot the same
 (DERIVED). The even/linear dial (playtest fork F6) retired with it.
@@ -366,8 +366,9 @@ between them may take a finer pixel, and a record whose faces outgrow the 8192-t
 every pitch grown (none of the shipped records at a 4K target, MEASURED). A view's detail is its
 target rounded up to 64 px a side (`DETAIL_STEP_PX`; TUNED), so a window dragged within a step
 lays nothing out anew, for at most ((h + 64)/h)² the texels (DERIVED: 12 % at 1080 rows, 6 % at
-2160). s14's atlas, the largest shipped, is 1618×3872 texels at a 1920×1080 target and 3335×7976
-at 3840×2160 (MEASURED, the expanded corner at a scale factor of 2). A change of the details asked
+2160). s14's atlas, then the largest shipped (the burst's ball, a record retired with it, as are
+the s14 frames measured below), was 1618×3872 texels at a 1920×1080 target and 3335×7976 at
+3840×2160 (MEASURED, the expanded corner at a scale factor of 2). A change of the details asked
 lays the record's pictures out anew into a new atlas, once, at the end of the frame, whatever
 order its views asked in; its views draw the old atlas until the new
 one's rendering has been submitted, and a record's first pictures not before theirs, so no frame
@@ -536,9 +537,9 @@ round's fuze and field are §5a.
 
 A burst round carries a burst core in its body. A body thick enough arms its fuze, the fuze runs a
 delay, and where the delay runs out the round bursts and throws a field from that point about its
-flight direction. The owner compares two shapes of that field, the **ring** and the **ball**, both
-built as rounds on the main gun's selector (playtest fork F7); the loser leaves the list after
-play. Brief: `.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/brief-4b-aphe-sim.md`,
+flight direction. That field is the **ring**, for every burst round: playtest fork F7 compared it
+with the **ball** as two rounds on the main gun's selector and closed for the ring (2026-10-27),
+and the burst's ball retired from the data and the code (#115). Brief: `.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/brief-4b-aphe-sim.md`,
 its round data from `tiger-ammo-history.md`, its fuze's delay and arming threshold from
 `burst-delay-history.md` and its speed law from `shape-law.md` §4 beside it. A round without a
 burst block (in the round file, `assets/rounds/<key>.round.ron`) is inert; a sub-calibre round carries none.
@@ -567,11 +568,11 @@ failed closed) bursts where it lies, at carried speed zero, when the delay's rem
 left at the speed the delay started at) runs out: the record times the burst then, and the march
 settles its doses in the tick the round stopped.
 
-**The parts and the two shapes.** A round's parts are DERIVED at load from its body (mass `m`,
-calibre `d`, its body steel's density from `materials.ron`) and its burst block (core mass `C`, its
-core type's density `ρ_c` and speed constant `K`, the base parts' mass `B`, the cavity's diameter
-`d_c`): the **cavity** is a cylinder of the core's volume `C / ρ_c` and diameter `d_c` just forward
-of the base parts; the **wall** is the steel annulus around it over its length, outer diameter `d`;
+**The parts and the ring.** A round's parts are DERIVED at load from its body (mass `m`, calibre
+`d`, its body steel's density from `materials.ron`) and its burst block (core mass `C`, its core
+substance's density `ρ_c` and speed constant `K`, the `burst` facts of the `materials.ron` row the
+block names, the base parts' mass `B`, the cavity's diameter `d_c`): the **cavity** is a cylinder
+of the core's volume `C / ρ_c` and diameter `d_c` just forward of the base parts; the **wall** is the steel annulus around it over its length, outer diameter `d`;
 the **nose** is the rest, `m − wall − B − C`. A burst gives a driven mass `M` the greatest sideways
 speed `v_s = K (M / C + ½)^−½` (`shape-law.md` §4), DERIVED per round and never authored, and the
 field's ratio is `λ = v_c / v_s`, `v_c` the carried speed.
@@ -584,16 +585,14 @@ field's ratio is `λ = v_c / v_s`, `v_c` the carried speed.
   crew line rate the round's. It meets the world as any round's penetrator does (§3: the disc,
   overmatch, the force law, its own line and its own spall cones). A ring that bursts at rest
   throws its band and nothing flies on.
-- **Ball.** The round less its core is driven: one lobe under the ball law (§5, **Profile**), a
-  cone of half-angle `asin(1/λ)` for `λ ≥ 1`, the whole sphere leaning forward below it. There the
-  share inside `θ` is `F = (1 + λ − μg)(2 + λ − λ² + λμg)/4`, `g = λμ + D`, continuous at `λ = 1`
-  and the even sphere at `λ = 0`; one density covers every `λ`,
-  `p_Ω = (max(t₊, 0)³ − max(t₋, 0)³)/(4π)`, `t± = λμ ± D`, zero where `D² < 0`. The round ends at
-  the burst.
+- **Retired: the ball.** The round less its core driven as one lobe under the ball law (§5,
+  **Profile**), the whole sphere below `λ = 1`, the round ending at the burst: F7's other shape.
+  A round's burst block names no shape, and the field law keeps the ball for the plate exit's
+  cone alone (§5).
 
-Under both, every plate exit reached before the burst threw its spall cone as a solid shot's does,
-and nothing of the round goes on past the burst but the ring's nose piece. The shipped 8.8 cm
-Pzgr. 39 body (10.2 kg, 88 mm, GunSteel at 7800 kg/m³) with its burst block (`C` 0.060 kg MEASURED,
+Every plate exit reached before the burst throws its spall cone as a solid shot's does, and nothing
+of the round goes on past the burst but the nose piece. The shipped 8.8 cm Pzgr. 39 body (10.2 kg,
+88 mm, GunSteel at 7800 kg/m³) with its burst block (`C` 0.060 kg MEASURED,
 `ρ_c` 1650 kg/m³ DERIVED, `K` 2680 m/s DERIVED, `B` 0.33 kg MEASURED, `d_c` 35.7 mm TUNED,
 provisional) gives, DERIVED:
 
@@ -603,72 +602,68 @@ provisional) gives, DERIVED:
 | wall | 1.440 kg |
 | nose (no source gives it: provisional) | 8.370 kg |
 | ring: `v_s`, `½ M v_s²` | 541.5 m/s, 211.1 kJ |
-| ball: `v_s`, `½ M v_s²` | 205.8 m/s, 214.8 kJ |
 
 **The field.** Thrown from the burst point about the round's flight direction at strength
 `S = r_E · ½ M v_s²` (reference-mm, `r_E` = `reference_mm_per_kj`), emitting `S/2` in all; a burst
-is no plate exit, so neither `κ` nor the hole term applies. Its `N` directions sample the law's
-support in equal-solid-angle strata (the band, the cap or the sphere) weighted by their strata's
-exact shares, so it emits `S/2` at every `N` (§5, **Sampling**). They march, shadow and dose as a
+is no plate exit, so neither `κ` nor the hole term applies. Its `N` directions sample the band in
+equal-solid-angle strata weighted by their strata's exact shares, so it emits `S/2` at every `N`
+(§5, **Sampling**). They march, shadow and dose as a
 cone's do (§5, **Shadowing and reach**, **Walk**, **Dose**) through the volumes of the tank whose
 body armed or last restarted the fuze, leaving none, behind the HP quantum gate, and convert at
 the field's rate (`hp_per_reference_mm`, 70). The record and the wire carry the law (the ring's
 with its half-width) and the ratio as the field descriptor, and a decoder rebuilds the directions
-from it. Data: the `burst` block of `assets/ballistics/spall_cone.ron` holds `r_E`, `h` and each
-law's `N`, with their provenance and the throw's MEASURED cost at 64, 256 and 684 directions.
+from it. Data: the `burst` block of `assets/ballistics/spall_cone.ron` holds `r_E`, `h` and the
+ring's `N`, with their provenance and the throw's MEASURED cost at 64, 256 and 684 directions.
 
-**Potency.** Ring and ball carry nearly the same energy (211.1 against 214.8 kJ): they differ in
-where the potency goes, not how much there is. `r_E` = 1.0 per kJ (TUNED, provisional) is set so a
-crew box of a 0.2 m² mean face (a seated crew member's), wholly inside the ball at rest 2.0 m from
-the burst, has its 30 HP pool emptied. A thin unshadowed box of face `A` wholly inside a field,
-where the field is `b` times as bright as an even sphere's (`b = 4π p_Ω`), has the knockout radius
-`R = sqrt(ρ (S/2) A b / (4π pool))`, `ρ` = 70; a module's follows from its own authored pool and
-face (§6). DERIVED, at rest and at s1's carried speed (244.6 m/s), for the crew at 0.2 m² (the seed
-tank's crew box, MEASURED at 0.2033 m², reaches each 0.8 % farther, DERIVED):
+**Potency.** `r_E` = 1.0 per kJ (TUNED, provisional) was set against an even sphere at rest, the
+retired ball's (214.8 kJ, the round less its core driven, DERIVED): a crew box of a 0.2 m² mean face
+(a seated crew member's), wholly inside it 2.0 m from the burst, has its 30 HP pool emptied. The
+ring drives nearly the same energy (211.1 kJ, DERIVED) into its band alone. A thin unshadowed box
+of face `A` wholly inside a field, where the field is `b` times as bright as an even sphere's
+(`b = 4π p_Ω`), has the knockout radius `R = sqrt(ρ (S/2) A b / (4π pool))`, `ρ` = 70; a module's
+follows from its own authored pool and face (§6). DERIVED, at rest and at s1's carried speed
+(244.6 m/s), for the crew at 0.2 m² (the seed tank's crew box, MEASURED at 0.2033 m², reaches each
+0.8 % farther, DERIVED):
 
 | field | where | `b` | crew (0.2 m²) |
 |---|---|---|---|
-| ball at rest | anywhere | 1 | 2.00 m |
+| even sphere at rest (the `r_E` reference) | anywhere | 1 | 2.00 m |
 | ring at rest | in the band, 80–100° | 5.76 | 4.75 m |
-| ball at 244.6 m/s (`λ` 1.188, rim 57.3°) | on the axis | 10.47 | 6.46 m |
 | ring at 244.6 m/s (`λ` 0.452, band 55.7–75.7°) | in the band | 6.32 | 4.98 m |
 
 **The record.** The shot record carries the burst (`damage_cam::Burst`): when (the path reaching the
 burst point, its last leg timed at the speed the burst trigger counts it at, so a burst in flight
 lies the delay after the exit that last started it; for a round at rest, the delay's remainder after
-it stopped there), the burst point, the carried speed, the ring's nose piece's mass, and the field
-as a cone record (absent when the HP quantum gate held it). The ball's record ends `Burst`; the
-ring's path runs on with the nose piece's line to its own end, its open air timed at the carried
-speed. A struck tank's record stays open while a fuze that tank armed runs, so a burst past its last
-body lands in it. The wire round-trips the burst; its 256 directions add 0.3–2.1 KB to a message
-(MEASURED, `src/damage_cam/wire.rs`). The pen cam draws the burst field as it draws a plate cone
-(`src/damage_cam/pen_cam/picture.rs`): thrown when the shell's nose reaches the burst point on the
-corner's clock, its front running out each direction's reach, over the law's support alone. The ring
-reads as a band about the line with nothing drawn inside its near edge; the ball as a cap ahead, or
-the whole sphere, closed with no seam. The ball's line ends at the burst point, where the shell
-rests at the end; the ring's runs on with the nose piece. A box the burst doses is reached when the
+it stopped there), the burst point, the carried speed, the nose piece's mass, and the field as a
+cone record (absent when the HP quantum gate held it). The path runs on with the nose piece's line
+to its own end, its open air timed at the carried speed. A struck tank's record stays open while a
+fuze that tank armed runs, so a burst past its last body lands in it. The wire round-trips the
+burst; its 256 directions add 0.3–0.9 KB to a message (MEASURED, `src/damage_cam/wire.rs`). The pen
+cam draws the burst field as it draws a plate cone (`src/damage_cam/pen_cam/picture.rs`): thrown
+when the shell's nose reaches the burst point on the corner's clock, its front running out each
+direction's reach, over the band alone. It reads as a band about the line with nothing drawn inside
+its near edge, and the line runs on with the nose piece. A box the burst doses is reached when the
 first field that dosed it, a plate cone's or the burst's, reaches it.
 
 **Scenarios** (`assets/dev/pen_cam/`, fixture data; each record's `shows` says what it shows).
-s13 and s14 fly s1's line with the ring and the ball: the upper front plate arms the fuze, and the
-round bursts 0.37 m past its exit at 244.6 m/s, short of the driver's station. The ring's band
-empties the HP pools of the bow gunner, the transmission and two ammunition racks, and its nose
-piece flies on through the driver's station to the rear plate. The ball's lobe empties those of
-the commander, the gunner, the loader, the engine and three ammunition racks, and the round ends
-short of the driver. In both the plate's cone knocks out the driver, as in s1, which empties no
-other HP pool and leaves the gunner and the commander reduced. s15 flies s6's line with the ball:
-no body holds the arming spend, so its record is s6's. s16 flies s4's line with the ball: the road
-wheel arms the fuze, its rubber and far disc restart the delay, and the round stops 20.7 mm into
-the lower hull side and bursts at rest there; every direction starts inside that plate, which
-stops it, so the field doses nothing (MEASURED, from the records).
+s13 flies s1's line with the burst round: the upper front plate arms the fuze, and the round bursts
+0.37 m past its exit at 244.6 m/s, short of the driver's station. The band's dose empties the HP
+pools of the bow gunner, the transmission and two ammunition racks, and the nose piece flies on
+through the driver's station to the rear plate. The plate's cone knocks out the driver, as in s1,
+which empties no other HP pool and leaves the gunner and the commander reduced. s15 flies s6's
+line with the burst round: no body holds the arming spend, so its record is s6's. s16 flies s4's
+line with the burst round: the road wheel arms the fuze, its rubber and far disc restart the delay,
+and the round stops 20.7 mm into the lower hull side and bursts at rest there, a flat band with no
+nose piece to fly on; every direction starts inside that plate, which stops it, so the field doses
+nothing (MEASURED, from the records).
 
 **Class invariants** (tests hold them for any round and tank; fixture numbers are fixture data).
 The fuze arms only at the threshold; the delay runs from the exit and restarts at a later body or
 a bounce; the burst lies the carried speed times the delay past the exit; a round at rest bursts
 where it rests after the remainder; a round no body arms, or without a burst block, flies as a
-solid shot. The ball's and the ring's weights emit `S/2` at every `N` the data allows, `λ < 1`
-included; the ring's directions lie in its band; the ball's field leans forward with the carried
-speed. The ball ends the round; the ring's nose piece flies on at the derived mass and nothing else
+solid shot. The ring's weights emit `S/2` at every `N` the data allows, `λ < 1` included; its
+directions lie in its band, centred `atan(1/λ)` off the axis, so the field leans forward with the
+carried speed. The nose piece flies on at the derived mass from a burst in flight, and nothing else
 does. The parts sum to the round, and a burst that leaves no nose is refused. The record and the
 wire round-trip a burst.
 

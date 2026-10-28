@@ -1,40 +1,30 @@
 //! A burst round's derived burst ([`Burst::derived`]) and the fuze the march advances per shell
-//! ([`Fuze`]). The burst's story — the trigger, the ring and the ball, the derived masses and
-//! speeds — is design doc §5a, "The burst" (`.agents/docs/design/armor-penetration-and-damage.md`);
-//! the march that runs the fuze and throws the burst's field is the parent module's.
+//! ([`Fuze`]). Every burst is a ring: the wall around the burst core is driven as a band about the
+//! flight axis, and the nose piece flies on. The burst's story — the trigger, the ring, the derived
+//! masses and speeds — is design doc §5a, "The burst"
+//! (`.agents/docs/design/armor-penetration-and-damage.md`); the march that runs the fuze and throws
+//! the burst's field is the parent module's.
 //!
 //! Units: masses kg, lengths m, speeds m/s, the delay s, the arming threshold reference-mm, the
 //! energy J. Everything here is derived once, at load, in f64 with IEEE `+`, `−`, `×`, `/` and
 //! `sqrt` alone, and stored in f32, so a round's burst is the same bits on every target.
 
 use bevy::prelude::Entity;
-use serde::Deserialize;
 
 use super::RoundBody;
-
-/// Which field a burst throws, and what of the round goes on past it.
-#[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum BurstShape {
-    /// The wall around the burst core becomes a band about the flight axis; the nose piece flies
-    /// on along the line.
-    Ring,
-    /// One lobe of the whole round less its core; nothing flies on.
-    Ball,
-}
 
 /// A burst block as the round registry resolves it, with its core substance's burst facts.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct BurstInputs {
-    pub(crate) shape: BurstShape,
     /// Reference-mm the round must spend in one body to arm.
     pub(crate) arming_spend: f32,
     /// Seconds from the arming body's exit to the burst.
     pub(crate) delay: f32,
     /// The burst core's mass `C`.
     pub(crate) core_mass: f64,
-    /// The core type's density (kg/m³).
+    /// The core substance's density (kg/m³).
     pub(crate) core_density: f64,
-    /// The core type's speed constant `K`.
+    /// The core substance's speed constant `K`.
     pub(crate) speed_constant: f64,
     /// The parts at the base, behind the cavity.
     pub(crate) base_mass: f64,
@@ -88,16 +78,6 @@ impl Parts {
     }
 }
 
-/// What a burst throws and leaves.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) enum BurstOption {
-    /// The band; `nose` flies on from the burst point through the march as a round of its own,
-    /// its mass the derived nose's, its calibre and nose factor the round's.
-    Ring { nose: RoundBody },
-    /// The lobe; the round ends at the burst point.
-    Ball,
-}
-
 /// A round's burst, derived at load from its burst block.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Burst {
@@ -105,9 +85,11 @@ pub(crate) struct Burst {
     pub(crate) arming_spend: f32,
     /// Seconds from the exit of the body that armed or last restarted the fuze to the burst.
     pub(crate) delay: f32,
-    pub(crate) option: BurstOption,
-    /// `v_s = K · (M / C + ½)^−½`, the greatest sideways speed the burst gives its driven mass `M`:
-    /// the wall under the ring, the round less its core under the ball.
+    /// The nose piece, which flies on from a burst in flight through the march as a round of its
+    /// own: its mass the derived nose's, its calibre and nose factor the round's.
+    pub(crate) nose: RoundBody,
+    /// `v_s = K · (M / C + ½)^−½`, the greatest sideways speed the burst gives its driven mass `M`,
+    /// the wall.
     pub(crate) sideways_speed: f32,
     /// `½ M v_s²` (J), the driven mass's kinetic energy across the burst: what the burst's
     /// potency is scaled from.
@@ -145,23 +127,15 @@ impl Burst {
             }
         }
         let parts = Parts::of(round, steel_density, inputs)?;
-        let (driven, option) = match inputs.shape {
-            BurstShape::Ring => (
-                parts.wall_mass,
-                BurstOption::Ring {
-                    nose: RoundBody {
-                        mass: parts.nose_mass as f32,
-                        ..round
-                    },
-                },
-            ),
-            BurstShape::Ball => (round.mass as f64 - inputs.core_mass, BurstOption::Ball),
-        };
+        let driven = parts.wall_mass;
         let sideways_speed = inputs.speed_constant / (driven / inputs.core_mass + 0.5).sqrt();
         Ok(Self {
             arming_spend: inputs.arming_spend,
             delay: inputs.delay,
-            option,
+            nose: RoundBody {
+                mass: parts.nose_mass as f32,
+                ..round
+            },
             sideways_speed: sideways_speed as f32,
             energy: (0.5 * driven * sideways_speed * sideways_speed) as f32,
         })
@@ -172,7 +146,7 @@ impl Burst {
 /// march alone. A replica's march decides no crossing, so its fuze never arms.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Fuze {
-    /// No burst ahead: a round without a burst block, or the ring's nose piece.
+    /// No burst ahead: a round without a burst block, or a nose piece flying on from its burst.
     Inert,
     /// Not yet armed: no body's spend has reached the threshold.
     Unarmed(Burst),
@@ -276,12 +250,11 @@ impl Fuze {
 #[cfg(test)]
 pub(super) const FIXTURE_STEEL: f64 = 7800.0;
 
-/// A burst block of `shape` whose numbers are fixture data of the shipped rounds' magnitude, but for
-/// a delay long enough that the fixtures' bodies, metres apart, lie inside it.
+/// A burst block whose numbers are fixture data of the shipped rounds' magnitude, but for a delay
+/// long enough that the fixtures' bodies, metres apart, lie inside it.
 #[cfg(test)]
-pub(super) fn fixture_inputs(shape: BurstShape) -> BurstInputs {
+pub(super) fn fixture_inputs() -> BurstInputs {
     BurstInputs {
-        shape,
         arming_spend: 35.0,
         delay: 0.012,
         core_mass: 0.06,
@@ -299,29 +272,29 @@ mod tests {
     const STEEL: f64 = FIXTURE_STEEL;
 
     /// A fixture round of 10 kg and 88 mm under [`fixture_inputs`].
-    fn fixture(shape: BurstShape) -> (RoundBody, BurstInputs) {
+    fn fixture() -> (RoundBody, BurstInputs) {
         (
             RoundBody {
                 mass: 10.0,
                 caliber: 0.088,
                 nose_factor: 0.5,
             },
-            fixture_inputs(shape),
+            fixture_inputs(),
         )
     }
 
     fn burst() -> Burst {
-        let (round, inputs) = fixture(BurstShape::Ball);
+        let (round, inputs) = fixture();
         Burst::derived(round, STEEL, &inputs).unwrap()
     }
 
     /// The parts account for the whole round: wall, nose, base and core sum to its mass, and the
-    /// cavity holds the core's volume. The ring's nose piece, which the march flies on as, reads
-    /// the nose mass with the round's calibre and nose; a mutant that drops a part from the
-    /// subtraction, or flies the nose at another mass, fails here.
+    /// cavity holds the core's volume. The nose piece, which the march flies on as, reads the nose
+    /// mass with the round's calibre and nose; a mutant that drops a part from the subtraction, or
+    /// flies the nose at another mass, fails here.
     #[test]
     fn the_parts_sum_to_the_round() {
-        let (round, inputs) = fixture(BurstShape::Ring);
+        let (round, inputs) = fixture();
         let parts = Parts::of(round, STEEL, &inputs).unwrap();
         let sum = parts.wall_mass + parts.nose_mass + inputs.base_mass + inputs.core_mass;
         assert!((sum - round.mass as f64).abs() < 1e-12, "{sum}");
@@ -332,48 +305,34 @@ mod tests {
         assert!((cavity * inputs.core_density - inputs.core_mass).abs() < 1e-15);
         let burst = Burst::derived(round, STEEL, &inputs).unwrap();
         assert_eq!(
-            burst.option,
-            BurstOption::Ring {
-                nose: RoundBody {
-                    mass: parts.nose_mass as f32,
-                    ..round
-                }
+            burst.nose,
+            RoundBody {
+                mass: parts.nose_mass as f32,
+                ..round
             }
         );
     }
 
-    /// `v_s = K (M/C + ½)^−½` with `M` the wall under the ring and the round less its core under
-    /// the ball, and the energy `½ M v_s²`: the burst's field ratio and its potency read both.
+    /// `v_s = K (M/C + ½)^−½` with `M` the wall, and the energy `½ M v_s²`: the burst's field ratio
+    /// and its potency read both. A mutant that drives another mass than the wall fails here.
     #[test]
     fn the_sideways_speed_follows_the_driven_mass() {
-        for shape in [BurstShape::Ring, BurstShape::Ball] {
-            let (round, inputs) = fixture(shape);
-            let parts = Parts::of(round, STEEL, &inputs).unwrap();
-            let driven = match shape {
-                BurstShape::Ring => parts.wall_mass,
-                BurstShape::Ball => round.mass as f64 - inputs.core_mass,
-            };
-            let burst = Burst::derived(round, STEEL, &inputs).unwrap();
-            let speed = inputs.speed_constant * (driven / inputs.core_mass + 0.5).powf(-0.5);
-            assert!(
-                (burst.sideways_speed as f64 - speed).abs() < 1e-3,
-                "{shape:?}"
-            );
-            let energy = 0.5 * driven * speed * speed;
-            assert!(
-                (burst.energy as f64 / energy - 1.0).abs() < 1e-6,
-                "{shape:?}"
-            );
-        }
+        let (round, inputs) = fixture();
+        let driven = Parts::of(round, STEEL, &inputs).unwrap().wall_mass;
+        let burst = Burst::derived(round, STEEL, &inputs).unwrap();
+        let speed = inputs.speed_constant * (driven / inputs.core_mass + 0.5).powf(-0.5);
+        assert!((burst.sideways_speed as f64 - speed).abs() < 1e-3);
+        let energy = 0.5 * driven * speed * speed;
+        assert!((burst.energy as f64 / energy - 1.0).abs() < 1e-6);
     }
 
     /// A cavity as wide as the round, and parts heavier than the round, are refused at load.
     #[test]
     fn a_burst_without_a_nose_is_refused() {
-        let (round, mut inputs) = fixture(BurstShape::Ring);
+        let (round, mut inputs) = fixture();
         inputs.cavity_diameter = 0.088;
         assert!(Burst::derived(round, STEEL, &inputs).is_err());
-        let (round, mut inputs) = fixture(BurstShape::Ball);
+        let (round, mut inputs) = fixture();
         inputs.base_mass = 9.0;
         assert!(Burst::derived(round, STEEL, &inputs).is_err());
     }

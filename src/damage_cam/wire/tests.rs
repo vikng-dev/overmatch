@@ -231,8 +231,7 @@ fn assert_round_trip(name: &str, decoded: &PenetrationReport, recorded: &Penetra
     }
 
     match (&decoded.end, &recorded.end) {
-        (RoundEnd::Left { at: d }, RoundEnd::Left { at: r })
-        | (RoundEnd::Burst { at: d }, RoundEnd::Burst { at: r }) => assert_point(name, *d, *r),
+        (RoundEnd::Left { at: d }, RoundEnd::Left { at: r }) => assert_point(name, *d, *r),
         (d, r) => assert_eq!(d, r, "{name}"),
     }
 

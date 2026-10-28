@@ -15,10 +15,11 @@
 //! `D = √(1 − λ²(1 − μ²))`, `m` = [`BALL_EXPONENT`]: the field is brightest on the axis and falls to
 //! zero at the rim `α = asin(1/λ)`. A plate exit's `λ` is its rear layer's substance's
 //! (`crate::substances::HardSubstance::debris_ratio`), at least 1, so the half-angle is the exit
-//! material's. A burst's ball may run below `λ = 1` (design doc §5a, "The burst"), where it fills
-//! the whole sphere: `F = (1 + λ − μg)(2 + λ − λ² + λμg)/4`, `g = λμ + D`, the `m = 3` law's
-//! closed form, uniform at `λ = 0`. Under [`FieldLaw::Ring`], a burst's ring, the field is uniform
-//! over the band `θ_c ∓ h` about `θ_c = atan(1/λ)`, its near edge held at the axis.
+//! material's. The law also holds below `λ = 1`, where it fills the whole sphere:
+//! `F = (1 + λ − μg)(2 + λ − λ² + λμg)/4`, `g = λμ + D`, the `m = 3` law's closed form, uniform at
+//! `λ = 0`; no shipped field is thrown there, a plate exit's `λ` being at least 1. Under
+//! [`FieldLaw::Ring`], a burst's field (design doc §5a, "The burst"), the field is uniform over the
+//! band `θ_c ∓ h` about `θ_c = atan(1/λ)`, its near edge held at the axis.
 //!
 //! # Directions
 //!
@@ -44,7 +45,6 @@
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use super::burst::BurstShape;
 use crate::provenance::Sourced;
 
 /// The shipped shape, embedded so a throw never waits on the asset server (ADR-0014: built from
@@ -337,12 +337,11 @@ struct BurstFile {
     reference_mm_per_kj: Sourced<f32>,
     ring_half_width_deg: Sourced<f32>,
     ring_directions: Sourced<usize>,
-    ball_directions: Sourced<usize>,
 }
 
 /// A burst's field, validated (design doc §5a, "The burst"): its strength per kJ of its driven
-/// mass's energy, the ring's half-width, and the shape each burst law is thrown in, sampled by its
-/// own direction count and passing as the spall cone's directions do.
+/// mass's energy, the ring's half-width, and the shape the ring is thrown in, sampled by its own
+/// direction count and passing as the spall cone's directions do.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct BurstFields {
     /// Reference-mm of strength `S` per kJ of `½ M v_s²`; finite, positive and normal.
@@ -350,7 +349,6 @@ pub(crate) struct BurstFields {
     /// The ring's half-width `h` (rad), in `(0, π/2)`.
     ring_half_width: f32,
     ring: ConeShape,
-    ball: ConeShape,
 }
 
 /// The burst fields a world's march throws, in place of the shipped ones: inserted by a world that
@@ -362,14 +360,14 @@ impl BurstFields {
     /// Parse and validate a shape file's burst block.
     pub(crate) fn from_ron(text: &str) -> Result<Self, String> {
         let file: ShapeFile = ron::de::from_str(text).map_err(|err| err.to_string())?;
-        let (ring, ball) = (file.burst.ring_directions.0, file.burst.ball_directions.0);
-        Self::from_file(&file, ring, ball)
+        let ring = file.burst.ring_directions.0;
+        Self::from_file(&file, ring)
     }
 
-    /// Validate `file`'s burst block, its ring sampled by `ring` strata and its ball by `ball`:
-    /// refuses a potency rate that is not finite, positive and normal, a half-width outside
-    /// `(0°, 90°)` and a direction count outside the shape's domain, naming the field.
-    fn from_file(file: &ShapeFile, ring: usize, ball: usize) -> Result<Self, String> {
+    /// Validate `file`'s burst block, its ring sampled by `ring` strata: refuses a potency rate
+    /// that is not finite, positive and normal, a half-width outside `(0°, 90°)` and a direction
+    /// count outside the shape's domain, naming the field.
+    fn from_file(file: &ShapeFile, ring: usize) -> Result<Self, String> {
         let burst = &file.burst;
         let reference_mm_per_kj = burst.reference_mm_per_kj.0;
         if !reference_mm_per_kj.is_normal() || reference_mm_per_kj < 0.0 {
@@ -384,23 +382,20 @@ impl BurstFields {
                 "burst.ring_half_width_deg must lie in (0, 90) (got {degrees})"
             ));
         }
-        let shape = |directions: usize, field: &str| {
-            ConeShape::new(file.axis.0, directions).map_err(|err| format!("burst.{field}: {err}"))
-        };
         Ok(Self {
             reference_mm_per_kj,
             ring_half_width: (degrees as f64).to_radians() as f32,
-            ring: shape(ring, "ring_directions")?,
-            ball: shape(ball, "ball_directions")?,
+            ring: ConeShape::new(file.axis.0, ring)
+                .map_err(|err| format!("burst.ring_directions: {err}"))?,
         })
     }
 
-    /// The shipped burst fields with the ring sampled by `ring` strata and the ball by `ball` in
-    /// place of their own counts: a probe of how the throw's cost scales with `N`.
+    /// The shipped burst fields with the ring sampled by `ring` strata in place of its own count:
+    /// a probe of how the throw's cost scales with `N`.
     #[cfg(test)]
-    pub(crate) fn shipped_at(ring: usize, ball: usize) -> Self {
+    pub(crate) fn shipped_at(ring: usize) -> Self {
         let file: ShapeFile = ron::de::from_str(SPALL_CONE_RON).expect("the shipped shape parses");
-        Self::from_file(&file, ring, ball)
+        Self::from_file(&file, ring)
             .expect("the shipped burst fields validate at any direction count")
     }
 
@@ -421,30 +416,19 @@ impl BurstFields {
         (energy as f64 / 1000.0 * self.reference_mm_per_kj as f64) as f32
     }
 
-    /// The ring's shape and the ball's.
-    pub(crate) fn shapes(&self) -> [&ConeShape; 2] {
-        [&self.ring, &self.ball]
+    /// The shape every burst field is thrown in, the ring's: a decoder rebuilds a burst field's
+    /// directions from it.
+    pub(crate) fn shape(&self) -> &ConeShape {
+        &self.ring
     }
 
-    /// The shape a burst field of descriptor `field` was thrown in: the ring's for a ring, the
-    /// ball's for a ball. A decoder rebuilds the field's directions from it.
-    pub(crate) fn shape_of(&self, field: FieldDescriptor) -> &ConeShape {
-        match field.law {
-            FieldLaw::Ring { .. } => &self.ring,
-            FieldLaw::Ball => &self.ball,
-        }
-    }
-
-    /// The field a burst of `shape` throws at ratio `ratio` (its carried speed over its greatest
-    /// sideways speed), and the shape it is thrown in.
-    pub(crate) fn field(&self, shape: BurstShape, ratio: f32) -> (FieldDescriptor, &ConeShape) {
-        match shape {
-            BurstShape::Ring => (
-                FieldDescriptor::ring(ratio, self.ring_half_width),
-                &self.ring,
-            ),
-            BurstShape::Ball => (FieldDescriptor::ball(ratio), &self.ball),
-        }
+    /// The field a burst throws at ratio `ratio` (its carried speed over its greatest sideways
+    /// speed), the ring at the shipped half-width, and the shape it is thrown in.
+    pub(crate) fn field(&self, ratio: f32) -> (FieldDescriptor, &ConeShape) {
+        (
+            FieldDescriptor::ring(ratio, self.ring_half_width),
+            &self.ring,
+        )
     }
 }
 
@@ -743,8 +727,8 @@ mod tests {
     /// cones. Fixture data.
     const RATIOS: [f32; 7] = [1.0, 1.05, 1.5, 2.27, 4.0, 100.0, 1.0e4];
 
-    /// Ratios below 1, where the ball fills the whole sphere: at rest, a burst's ring and ball at
-    /// a slow carried speed, and just under the hemisphere. Fixture data.
+    /// Ratios below 1, where the ball fills the whole sphere: at rest, slow, and just under the
+    /// hemisphere. Fixture data.
     const SPHERE_RATIOS: [f32; 5] = [0.0, 0.3, 0.45, 0.9, 0.999];
 
     /// Ring descriptors `(λ, h°)`: at rest, slow, near the band's edge reaching the axis, past it,
@@ -797,8 +781,7 @@ mod tests {
 
     /// A fixture burst block.
     const BURST: &str = r#"burst: (reference_mm_per_kj: (1.0, Tuned("fixture")),
-        ring_half_width_deg: (10.0, Tuned("fixture")), ring_directions: (24, Tuned("fixture")),
-        ball_directions: (32, Tuned("fixture")))"#;
+        ring_half_width_deg: (10.0, Tuned("fixture")), ring_directions: (24, Tuned("fixture")))"#;
 
     /// A fixture shape file whose burst block's fields are `fields`.
     fn burst_file(fields: &str) -> String {
@@ -874,10 +857,6 @@ mod tests {
                 r#"ring_directions: (24, Tuned("fixture"))"#,
                 "ring_directions: 24",
             ),
-            (
-                r#"ball_directions: (32, Tuned("fixture"))"#,
-                "ball_directions: 32",
-            ),
         ] {
             let bare = sourced.replacen(value, bare, 1);
             assert_ne!(bare, sourced, "{value}");
@@ -903,39 +882,44 @@ mod tests {
         assert!(error.contains("hp_per_reference_mm"), "{error}");
     }
 
-    /// A burst block is read from the file: its counts sample the ring's and the ball's shapes, its
-    /// half-width the ring's field, its rate the strength `energy/1000 × rate`; the shipped one is
-    /// the shipped file's. A rate that is zero, negative, subnormal or not finite, a half-width
-    /// outside `(0°, 90°)` and a direction count outside `1..=MAX_DIRECTIONS` are refused at parse
-    /// naming the field: a burst's strength scales by the rate, and the ring's law refuses such a
-    /// band at the first throw.
+    /// A burst block is read from the file: its count samples the ring's shape, every burst
+    /// field's, its half-width the ring's field, its rate the strength `energy/1000 × rate`; the
+    /// shipped one is the shipped file's. A rate that is zero, negative, subnormal or not finite, a
+    /// half-width outside `(0°, 90°)` and a direction count outside `1..=MAX_DIRECTIONS` are
+    /// refused at parse naming the field: a burst's strength scales by the rate, and the ring's law
+    /// refuses such a band at the first throw. A count for another burst shape is no field of the
+    /// block: every burst is a ring.
     #[test]
     fn a_burst_block_is_read_and_its_domain_is_refused() {
         let read = BurstFields::from_ron(&burst_file(
             r#"reference_mm_per_kj: (2.0, Tuned("fixture")),
-            ring_half_width_deg: (30.0, Tuned("fixture")), ring_directions: (24, Tuned("fixture")),
-            ball_directions: (32, Tuned("fixture"))"#,
+            ring_half_width_deg: (30.0, Tuned("fixture")), ring_directions: (24, Tuned("fixture"))"#,
         ))
         .unwrap();
         assert_eq!(read.strength(150_000.0), 300.0);
-        let (ring, shape) = read.field(BurstShape::Ring, 0.5);
+        let (ring, shape) = read.field(0.5);
         assert_eq!(
             ring,
             FieldDescriptor::ring(0.5, (30.0_f64).to_radians() as f32)
         );
         assert_eq!(shape.directions_count(), 24);
-        let (ball, shape) = read.field(BurstShape::Ball, 0.5);
-        assert_eq!(ball, FieldDescriptor::ball(0.5));
-        assert_eq!(shape.directions_count(), 32);
+        assert_eq!(read.shape(), shape);
         assert_eq!(
             BurstFields::shipped(),
             &BurstFields::from_ron(SPALL_CONE_RON).unwrap()
         );
         let sourced = burst_file(
             r#"reference_mm_per_kj: (1.0, Tuned("fixture")),
-            ring_half_width_deg: (10.0, Tuned("fixture")), ring_directions: (24, Tuned("fixture")),
-            ball_directions: (32, Tuned("fixture"))"#,
+            ring_half_width_deg: (10.0, Tuned("fixture")), ring_directions: (24, Tuned("fixture"))"#,
         );
+        let ball = sourced.replacen(
+            r#"ring_directions: (24, Tuned("fixture"))"#,
+            r#"ring_directions: (24, Tuned("fixture")), ball_directions: (32, Tuned("fixture"))"#,
+            1,
+        );
+        assert_ne!(ball, sourced);
+        let error = BurstFields::from_ron(&ball).expect_err("a ball's count is no burst datum");
+        assert!(error.contains("ball_directions"), "{error}");
         for (value, refused, field) in [
             (
                 "(1.0",
@@ -948,7 +932,6 @@ mod tests {
                 "ring_half_width_deg",
             ),
             ("(24", ["(0", "(65537"].as_slice(), "ring_directions"),
-            ("(32", ["(0", "(65537"].as_slice(), "ball_directions"),
         ] {
             for refused in refused {
                 let text = sourced.replacen(
@@ -1111,7 +1094,8 @@ mod tests {
     /// is uniform at rest (`λ = 0`, every `f_k` ½) and reaches straight back (the last stratum's
     /// midpoint is half a stratum, `1/N` in `μ`, short of `μ = −1`). At `λ → 1⁻` the share inside
     /// each stratum edge meets the cap's `1 − μ⁴`, so the law is continuous across the hemisphere.
-    /// A burst's ball below 1, and its knockout radius at rest, rely on it.
+    /// The wire's decoder rebuilds any ball descriptor by this law, and its fingerprint folds a
+    /// probe below 1 (`damage_cam::wire`'s `FINGERPRINT_FIELDS`).
     #[test]
     fn below_a_ratio_of_one_the_ball_fills_the_sphere() {
         for ratio in [0.3, 0.45, 0.9] {

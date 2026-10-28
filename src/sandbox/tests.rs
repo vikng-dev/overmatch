@@ -233,7 +233,7 @@ fn a_shot_met_a_tank_by_its_log() {
         speed: 0.0,
         after: 0.0,
         sideways: 0.0,
-        nose: None,
+        nose: 0.0,
         tank,
     };
     let wound = ArmourMark::Wound {

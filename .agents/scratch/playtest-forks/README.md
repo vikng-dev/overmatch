@@ -265,38 +265,42 @@ the even profile the ball replaced: `.agents/scratch/damage-cam-2026-10-08/demo/
 
 ## F7 — Burst shape: the ring or the ball
 
-**Status:** open · both built 2026-10-24 as rounds on the main gun's selector · settles in the
-damage feel pass
+**Status:** settled 2026-10-27 (owner, epic #103 §5): the ring · the burst's ball retired from
+the data and the code 2026-10-28 (#115)
 
 **The question.** In the game's damage model, a burst round's fuze arms in a thick enough plate,
 runs its delay from that body's exit and bursts, throwing a field from the burst point about its
 flight direction. How does that field spread? It decides which crew stations and modules a
 penetration with a burst knocks out, and whether the shot's line goes on past the burst point.
 
-**Default — the ring** (listed first, so a tank spawns loaded with it). The wall around the
-burst core becomes a band about the flight axis, centred `atan(v_s / v_c)` off it (`v_c` the
-carried speed, `v_s` the wall's greatest sideways speed, 541.5 m/s on the 8.8 cm Pzgr. 39,
-DERIVED), half-width 10° (TUNED, provisional); the nose piece (8.370 kg, DERIVED) flies on along
-the line as an inert round of its own.
+**Settled — the ring.** Every burst round bursts as the ring. The wall around the burst core
+becomes a band about the flight axis, centred `atan(v_s / v_c)` off it (`v_c` the carried speed,
+`v_s` the wall's greatest sideways speed, 541.5 m/s on the 8.8 cm Pzgr. 39, DERIVED), half-width
+10° (TUNED, provisional); the nose piece (8.370 kg, DERIVED) flies on along the line as an inert
+round of its own. A round's burst block names no shape, and the ring's own law (its width, its
+potency) stays provisional data, outside this fork.
 
-**Alternative kept alive — the ball.** The round less its core is driven as one lobe at
-`λ = v_c / v_s` (`v_s` 205.8 m/s, DERIVED): a forward cone above `λ = 1`, the whole sphere below,
-brightest on the axis; nothing flies on. Its driven-mass energy is about the ring's (214.8 against
-211.1 kJ, DERIVED), so the two differ in where the burst's potency goes, not how much there is.
+**Retired.**
+- **The ball** — the round less its core driven as one lobe at `λ = v_c / v_s` (`v_s` 205.8 m/s,
+  DERIVED): a forward cone above `λ = 1`, the whole sphere below, brightest on the axis; nothing
+  flew on. Its driven-mass energy was about the ring's (214.8 against 211.1 kJ, DERIVED), so the
+  two differed in where the burst's potency went, not how much there was. Its round
+  (`88mm_APHE_ball`), its `ball_directions` count, its scenario record (s14) and the record's
+  burst end (`RoundEnd::Burst`, `WireEnd::Burst`) left with it. The ball law itself stays: every
+  plate exit's spall cone is thrown with it (F6).
 
-**Why it's a playtest call.** The comparison the owner asked for: whether a band that reaches the
+**Why it was a playtest call.** The comparison the owner asked for: whether a band that reaches the
 stations beside the line, with the nose piece continuing down it, reads better than a lobe that
 drives forward and leaves nothing behind it; and whether either knocks out whole crews too often
-from one penetration. Watch where the stations knocked out lie relative to the line.
+from one penetration.
 
-**Revert cost.** Low — data: the order of the main gun's `rounds` in the tank file and each
-round's `option` in its file under `assets/rounds/`. Both laws stay in code and on the wire, so
-the loser's round leaves the list with no code change; the burst's potency, the ring's width and
-each law's `N` are the `burst` block of `assets/ballistics/spall_cone.ron`.
+**Revert cost.** One commit: reverting `damage model: every burst is a ring; the burst's ball
+retires and burst facts are an optional substance field` restores the ball's round, its
+`option`, its direction count, its record and the burst end on the wire (a protocol revision).
 
 **Lives in.** Design §5a, "The burst" (`.agents/docs/design/armor-penetration-and-damage.md`).
 Code: `src/ballistics/burst.rs` (the fuze and the derived parts), `throw_burst` and `burst_here` in
-`src/ballistics.rs`, `FieldLaw` and `BurstFields` in `src/ballistics/spall_cone.rs`.
+`src/ballistics.rs`, `BurstFields` in `src/ballistics/spall_cone.rs`.
 
 ## F8 — A fallen tree's rest: scripted pose or simulated body
 

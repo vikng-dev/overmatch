@@ -9,8 +9,6 @@
     ammunition: {
         "88mm_APHE_ring": (muzzle_speed: (773.0, Measured("Jentz & Doyle, Tiger I Heavy Tank
             1942-45, Osprey New Vanguard 5 (1993), p.17"))),
-        "88mm_APHE_ball": (muzzle_speed: (773.0, Measured("Jentz & Doyle, Tiger I Heavy Tank
-            1942-45, Osprey New Vanguard 5 (1993), p.17"))),
         "88mm_AP": (muzzle_speed: (773.0, Measured("Jentz & Doyle, Tiger I Heavy Tank 1942-45,
             Osprey New Vanguard 5 (1993), p.17"))),
         "88mm_APCR": (muzzle_speed: (930.0, Measured("Jentz & Doyle, Tiger I Heavy Tank 1942-45,

@@ -7,7 +7,7 @@
 //!
 //! No name rides the wire. [`ShotVocabulary`] maps every name a record holds (vehicle file, servo,
 //! volume — armour, external armour and component alike —, weapon, round) to an index, and holds
-//! the shapes the client rebuilds each ray's direction from: the spall cone's and each burst law's.
+//! the shapes the client rebuilds each ray's direction from: the spall cone's and the burst's.
 //! Both ends build it from data: each vehicle's tank file and sim artifact, the round registry, the
 //! cone shape and the burst fields. What a
 //! component is (role, HP pool, function) and an armour volume's class are read from the vocabulary
@@ -39,7 +39,7 @@
 //!
 //! A ray's direction and strength are not carried. A cone carries its field descriptor, its law (a
 //! ring's with its half-width) and its ratio `λ` (`spall_cone::FieldDescriptor`), and the client
-//! spreads the vocabulary's shape by it (a burst's field: the burst shape of its law), rebuilding
+//! spreads the vocabulary's shape by it (a burst's field: the burst's shape, the ring's), rebuilding
 //! each stratum and weight to the bit (`spall_cone` module doc, "Determinism");
 //! the encoder refuses a cone whose rays' strengths are not `S·f_k` under its descriptor to the bit, or
 //! whose half-angle is not the descriptor's. A ray's direction is its stratum about the cone's
@@ -83,10 +83,9 @@
 //! | s10_gun_barrel_struck | 913 | 870 | 696 | 2 | 128 | 64 | 348 | – |
 //! | s11_mg_barrel_struck | 188 | 144 | 0 | 0 | 0 | 0 | – | – |
 //! | s12_apcr_through_crew | 921 | 891 | 588 | 1 | 64 | 75 | 588 | – |
-//! | s13_ring_through_crew | 1869 | 1843 | 588 | 1 | 64 | 75 | 588 | 903 |
-//! | s14_ball_through_crew | 3044 | 3023 | 588 | 1 | 64 | 75 | 588 | 2092 |
+//! | s13_ring_through_crew | 1868 | 1842 | 588 | 1 | 64 | 75 | 588 | 902 |
 //! | s15_unarmed_overpen | 555 | 509 | 309 | 2 | 128 | 0 | 154 | – |
-//! | s16_restart_at_rest | 1068 | 1022 | 465 | 3 | 192 | 0 | 155 | 302 |
+//! | s16_restart_at_rest | 1075 | 1029 | 465 | 3 | 192 | 0 | 155 | 309 |
 //!
 //! The DERIVED estimate `41 + 2 + 2N` per cone (171 B at N = 64) counts a cone's metadata, its
 //! field descriptor's law byte and `f32` ratio among it, and its reaches; a cone that reaches no
@@ -95,9 +94,9 @@
 //! palette index, a varint each) and each distinct dose four. Under the ball every direction is
 //! thrown at its own strength, so nearly every hit's dose is distinct: a cone that lights the
 //! fighting compartment measures 460–590 B, and every recorded message without a burst stays under
-//! 0.95 KB. A burst's field at its 256 directions adds 300 B where no direction leaves the burst
-//! point (s16) and 0.9–2.1 KB where its directions reach the compartment's boxes, so the largest
-//! recorded message is 3.0 KB.
+//! 0.95 KB. A burst's field at its 256 directions adds about 310 B where no direction leaves the
+//! burst point (s16) and 0.9 KB where its band reaches the compartment's boxes (s13), so the
+//! largest recorded message is 1.9 KB.
 
 use std::collections::BTreeMap;
 
@@ -431,14 +430,11 @@ impl ShotVocabulary {
             hash = fingerprint_field(hash, b"round", round.as_bytes());
         }
         hash = fold_cone(hash, &self.cone, BALL_EXPONENT);
-        for shape in self.burst.shapes() {
-            hash = fold_cone(
-                fingerprint_field(hash, b"burst_shape", &[]),
-                shape,
-                BALL_EXPONENT,
-            );
-        }
-        hash
+        fold_cone(
+            fingerprint_field(hash, b"burst_shape", &[]),
+            self.burst.shape(),
+            BALL_EXPONENT,
+        )
     }
 
     fn vehicle(&self, file: &str) -> Result<u16, CodecError> {
@@ -763,14 +759,14 @@ struct WireCone {
 }
 
 /// A burst: when and where, the carried and the greatest sideways speed, the nose piece's mass, and
-/// its field, a cone under the vocabulary's burst shape of its law.
+/// its field, a cone in the vocabulary's burst shape, the ring's.
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 struct WireBurst {
     t: i32,
     point: Mm,
     speed_mps: f32,
     sideways_mps: f32,
-    nose_kg: Option<f32>,
+    nose_kg: f32,
     field: Option<WireCone>,
 }
 
@@ -788,7 +784,6 @@ enum WireEnd {
     /// At rest in a volume; `None` where the march named none.
     Rest(Option<u16>),
     Left(Mm),
-    Burst(Mm),
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
@@ -1009,9 +1004,7 @@ fn encode(vocabulary: &ShotVocabulary, report: &PenetrationReport) -> Result<Rec
                 field: burst
                     .field
                     .as_ref()
-                    .map(|field| {
-                        encode_cone(vocabulary.burst.shape_of(field.field), vehicle, field)
-                    })
+                    .map(|field| encode_cone(vocabulary.burst.shape(), vehicle, field))
                     .transpose()?,
             })
         })
@@ -1020,7 +1013,6 @@ fn encode(vocabulary: &ShotVocabulary, report: &PenetrationReport) -> Result<Rec
         RoundEnd::Rest { volume } if volume.is_empty() => WireEnd::Rest(None),
         RoundEnd::Rest { volume } => WireEnd::Rest(Some(vehicle.volume(volume)?)),
         RoundEnd::Left { at } => WireEnd::Left(Mm::of(*at)?),
-        RoundEnd::Burst { at } => WireEnd::Burst(Mm::of(*at)?),
     };
     for consequence in &report.consequences {
         if !report
@@ -1243,11 +1235,12 @@ fn finite(record: &Record) -> Result<(), CodecError> {
                     .chain(cone.doses.iter().copied())
             }),
     )
-    .chain(record.burst.iter().flat_map(|burst| {
-        [burst.speed_mps, burst.sideways_mps]
-            .into_iter()
-            .chain(burst.nose_kg)
-    }))
+    .chain(
+        record
+            .burst
+            .iter()
+            .flat_map(|burst| [burst.speed_mps, burst.sideways_mps, burst.nose_kg]),
+    )
     .chain(record.doses.iter().flat_map(|dose| [dose.line, dose.field]));
     for value in values {
         if !value.is_finite() {
@@ -1336,9 +1329,7 @@ fn decode(vocabulary: &ShotVocabulary, record: &Record) -> Result<PenetrationRep
                 field: burst
                     .field
                     .as_ref()
-                    .map(|field| {
-                        decode_cone(vocabulary.burst.shape_of(field.field), vehicle, field)
-                    })
+                    .map(|field| decode_cone(vocabulary.burst.shape(), vehicle, field))
                     .transpose()?,
             })
         })
@@ -1351,7 +1342,6 @@ fn decode(vocabulary: &ShotVocabulary, record: &Record) -> Result<PenetrationRep
             volume: name(*volume)?,
         },
         WireEnd::Left(at) => RoundEnd::Left { at: at.point() },
-        WireEnd::Burst(at) => RoundEnd::Burst { at: at.point() },
     };
     let mut doses = Vec::with_capacity(record.doses.len());
     let mut consequences = Vec::new();

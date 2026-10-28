@@ -5,8 +5,8 @@
 // the shot earns on the bound tank today, checked on every run. `round` names a key of the round
 // registry (`assets/rounds/`) that the weapon's gun chambers, whether or not the mount stows it,
 // fired at the gun's muzzle speed for it; the mount's first stowed round fires when it is absent. The main gun's shots fire the solid Pzgr. 39, the fixture
-// round, unless they name another: s12 the sub-calibre round, s13-s16 the burst round as the ring
-// or the ball. Every shot is fixture data.
+// round, unless they name another: s12 the sub-calibre round, s13, s15 and s16 the burst round,
+// which bursts as the ring. Every shot is fixture data.
 [
     (
         name: "s1_through_crew",
@@ -135,28 +135,19 @@
         verdict: Penetration,
     ),
     (
-        name: "s14_ball_through_crew",
-        shows: "s1's line fired with the 88's burst round as the ball: it bursts where s13's does, and its forward lobe, within 57 degrees of the line, empties the HP pools of the commander, the gunner, the loader, the engine and three ammunition racks; the round ends at the burst, short of the driver's station, and the plate's cone knocks out the driver as in s1",
-        weapon: "MainGun",
-        round: "88mm_APHE_ball",
-        from: (-0.57, 1.45, -6.5),
-        toward: (-0.57, 1.45, 0.0),
-        verdict: Penetration,
-    ),
-    (
         name: "s15_unarmed_overpen",
-        shows: "s6's line fired with the 88's burst round as the ball: neither the deck nor the floor holds the 35 reference-mm that arms the fuze, so the round flies through as s6's solid shot does, its record s6's but for the round",
+        shows: "s6's line fired with the 88's burst round: neither the deck nor the floor holds the 35 reference-mm that arms the fuze, so the round flies through as s6's solid shot does, its record s6's but for the round",
         weapon: "MainGun",
-        round: "88mm_APHE_ball",
+        round: "88mm_APHE_ring",
         from: (1.2, 5.0, 2.4),
         toward: (1.2, 1.5, 2.4),
         verdict: Penetration,
     ),
     (
         name: "s16_restart_at_rest",
-        shows: "s4's line fired with the 88's burst round as the ball: the road wheel's first disc arms the fuze, its rubber and far disc restart the delay, and the lower hull side stops the round 21 mm in; it bursts at rest there when the delay ends, and the plate around it stops every direction of its field",
+        shows: "s4's line fired with the 88's burst round: the road wheel's first disc arms the fuze, its rubber and far disc restart the delay, and the lower hull side stops the round 21 mm in; it bursts at rest there when the delay ends, a flat band about the line with no nose piece to fly on, and the plate around it stops every direction of its field",
         weapon: "MainGun",
-        round: "88mm_APHE_ball",
+        round: "88mm_APHE_ring",
         from: (-5.0, 0.8, -0.8),
         toward: (0.0, 0.8, -0.8),
         verdict: NonPen,

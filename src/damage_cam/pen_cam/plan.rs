@@ -386,9 +386,9 @@ impl Cone {
 pub struct BurstPlan {
     /// The record time (s) it burst ([`crate::damage_cam::Burst::t`]).
     pub t: f32,
-    /// The nose piece's share of the round's mass where one flies on: a ring's nose mass over the
-    /// round's ([`crate::damage_cam::Projectile::mass_kg`]), from a burst in flight. `None` under
-    /// the ball and for a round that burst at rest, where nothing flies on.
+    /// The nose piece's share of the round's mass where one flies on: its mass over the round's
+    /// ([`crate::damage_cam::Projectile::mass_kg`]), from a burst in flight. `None` for a round
+    /// that burst at rest, where nothing flies on.
     pub nose: Option<f32>,
     /// Its field's index in [`Plan::cones`], where it threw one.
     pub cone: Option<usize>,
@@ -483,7 +483,7 @@ impl Plan {
         let calibre = report.projectile.caliber_mm * 1.0e-3;
         let reach = |metres: f32| metres.min(REACH_CALIBRES * calibre);
         let left_at = match &report.end {
-            RoundEnd::Rest { .. } | RoundEnd::Burst { .. } => None,
+            RoundEnd::Rest { .. } => None,
             RoundEnd::Left { at } => {
                 let at = Vec3::from(*at);
                 Some((at, line.arc_of(at)))
@@ -530,9 +530,9 @@ impl Plan {
         // A nose piece flies on only from a burst in flight: one at rest has no flight to fly on.
         let burst = report.burst.as_ref().map(|b| BurstPlan {
             t: b.t,
-            nose: b.nose_kg.filter(|_| b.speed_mps > 0.0).map(|kg| {
+            nose: (b.speed_mps > 0.0).then(|| {
                 if mass > 0.0 {
-                    (kg / mass).min(1.0)
+                    (b.nose_kg / mass).min(1.0)
                 } else {
                     1.0
                 }

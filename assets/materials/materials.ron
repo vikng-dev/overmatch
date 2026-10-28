@@ -11,10 +11,13 @@
 // world sends through it — the shell's line at the ROUND's crew line rate (`wound`, a round file's
 // field), each spall direction at its strength. A witness substance sits only on a crew volume and a
 // crew volume wears only a witness substance; the bake refuses a tank file that breaks either.
-// `Burst(..)` is a burst core: it states the two facts a round's burst block reads (`density`,
-// kg/m³, and `speed_constant_mps`, the speed constant K in m/s, the sideways speed scale of the
-// burst's v_s) and nothing the walk reads, so no mesh wears it and the walk refuses a volume that
-// names it.
+// `Unworn(..)` is worn by no mesh: it states only facts a round reads and nothing the walk reads,
+// so the walk refuses a volume that names it.
+//
+// `burst` = a burst core's facts, the two a round's burst block reads when it names this entry as
+// its `core_substance` (`density`, kg/m³, and `speed_constant_mps`, the speed constant K in m/s,
+// the sideways speed scale of the burst's v_s). An optional field: a `Hard(..)` entry may state it
+// beside its resistance, and an `Unworn(..)` entry states it alone.
 //
 // `resistance` = how the substance resists a round's force law. Exactly one entry is `Reference`:
 // the reference steel, whose `facts` are the force law's reference constants and one metre of which
@@ -88,7 +91,7 @@
 // interior substances no.
 //
 // THIS FILE IS THE CLASSIFIER. A glTF primitive is a ballistic volume iff its material name is a
-// key here, and the bake refuses one wearing a `Burst` key; the tank RON carries no per-node
+// key here, and the bake refuses one wearing an `Unworn` key; the tank RON carries no per-node
 // material factor. Adding a key
 // makes every mesh wearing that material armour — and removing one silently un-declares them. What
 // SHOWS that is `L1.SOURCE_CENSUS`, which prints per-substance primitive counts against the
@@ -230,9 +233,11 @@
             facts: None,
         ),
         // The 8.8 cm Pzgr. 39's burst core, named by its burst block's `core_substance`.
-        "88mm_burst_core": Burst(
-            density: (1650.0, Derived("1.65 g/cm³: shape-law.md §4")),
-            speed_constant_mps: (2680.0, Derived("shape-law.md §4")),
+        "88mm_burst_core": Unworn(
+            burst: Some((
+                density: (1650.0, Derived("1.65 g/cm³: shape-law.md §4")),
+                speed_constant_mps: (2680.0, Derived("shape-law.md §4")),
+            )),
         ),
     },
 )

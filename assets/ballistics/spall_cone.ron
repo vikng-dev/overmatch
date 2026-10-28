@@ -66,34 +66,31 @@
     // A burst's field (design doc §5a, "The burst"): thrown from the burst point about the round's
     // flight direction, its ratio the carried speed over the burst's greatest sideways speed v_s,
     // through the struck tank's volumes, passing as the spall cone's directions do, its dose
-    // converting at `hp_per_reference_mm`. The ring and the ball are the two burst shapes a round's
-    // burst block names (`assets/rounds/`).
+    // converting at `hp_per_reference_mm`. Every burst is a ring: the wall around the burst core
+    // is driven as a band about the flight axis, and the nose piece flies on.
     burst: (
         // The burst's strength S (reference-mm) per kJ of its driven mass's kinetic energy
-        // ½ M v_s² (the wall under the ring, the round less its core under the ball); the field
-        // emits S/2 in all.
-        reference_mm_per_kj: (1.0, Tuned("provisional: a crew box presenting a 0.2 m² face (a
-            seated crew member's) fully inside the ball at rest, 2.0 m from the burst, has its 30
-            HP pool (box_classes.ron) emptied. DERIVED: at rest the ball is uniform over the
-            sphere, so the box catches A/(4πR²) of the emission E = S/2, and its knockout radius is
-            R = sqrt(E A × 70 / (30 × 4π)); R = 2.0 m needs E = 107.7 reference-mm, S = 215.4,
-            against the shipped ball round's 214.8 kJ: 1.003 per kJ, rounded to 1.0, R = 2.00 m")),
+        // ½ M v_s², M the wall; the field emits S/2 in all.
+        reference_mm_per_kj: (1.0, Tuned("provisional: set against an even sphere at rest, the
+            burst's ball until playtest fork F7 retired it: a crew box presenting a 0.2 m² face (a seated
+            crew member's) fully inside it, 2.0 m from the burst, has its 30 HP pool
+            emptied. DERIVED: the box catches A/(4πR²) of the emission E = S/2, and its knockout
+            radius is R = sqrt(E A × 70 / (30 × 4π)); R = 2.0 m needs E = 107.7 reference-mm,
+            S = 215.4, against the 214.8 kJ that ball drove (the 8.8 cm Pzgr. 39 less its core):
+            1.003 per kJ, rounded to 1.0. The ring at rest is 5.76 times as bright in its band,
+            R = 4.75 m (design doc §5a, DERIVED)")),
         // h (degrees): the ring spans θ_c − h to θ_c + h of polar angle from the flight axis,
         // θ_c = atan(1/λ), uniform over that band; its near edge is held at the axis.
         ring_half_width_deg: (10.0, Tuned("provisional (owner's brief 4b): the band the wall's
             fragments leave in, one datum for every ring")),
-        // N for each burst law, as `directions` is for the cone: the emitted total is S/2 at every
-        // N, so N sets how finely a box's dose is resolved, never how much the burst carries. One
+        // N for the ring, as `directions` is for the cone: the emitted total is S/2 at every N, so
+        // N sets how finely a box's dose is resolved, never how much the burst carries. One
         // throw's cost MEASURED 2026-10-24 by ballistics::pen_cam::burst_law_cost (release, macOS
-        // arm64, best of 9, s1's line fired with each burst round). At rest each direction
-        // carries S/2 × 70 / N HP points of dose (DERIVED, the field uniform over its support).
+        // arm64, best of 9, s1's line fired with the burst round). At rest each direction carries
+        // S/2 × 70 / N HP points of dose (DERIVED, the field uniform over its support).
         ring_directions: (256, Tuned("provisional, flagged for the owner: the cost against the
             resolution. The ring's throw: 0.50 ms at N = 64, 1.47 at 256, 4.01 at 684; at rest
             115, 29 and 11 HP points per direction (S = 211.1), so at 256 one direction is about
-            one crew pool")),
-        ball_directions: (256, Tuned("provisional, flagged for the owner: the cost against the
-            resolution. The ball's throw: 0.41 ms at N = 64, 0.99 at 256, 3.26 at 684; at rest
-            117, 29 and 11 HP points per direction (S = 214.8), so at 256 one direction is about
             one crew pool")),
     ),
 )

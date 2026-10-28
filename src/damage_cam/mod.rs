@@ -195,9 +195,6 @@ pub enum RoundEnd {
     /// It left the struck tank at `at`, a point of the path: the far end of its last crossing, or
     /// the face of its last bounce. The path runs on past it.
     Left { at: [f32; 3] },
-    /// It burst in flight at `at`, the path's last point, and nothing flew on: the ball
-    /// ([`Burst`]).
-    Burst { at: [f32; 3] },
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -304,12 +301,12 @@ pub struct Burst {
     /// The greatest sideways speed `v_s` (m/s) the burst gives its driven mass: the round's,
     /// DERIVED at load from its burst block (`ballistics::burst::Burst::sideways_speed`).
     pub sideways_mps: f32,
-    /// The ring's nose piece's mass (kg), which flies on along the line from the burst point
-    /// unless the round was at rest; `None` under the ball.
-    pub nose_kg: Option<f32>,
-    /// The field thrown from the burst point about the round's flight direction, the burst shape's
-    /// law at ratio carried speed over greatest sideways speed; `None` where its emission was below
-    /// the HP quantum and it was not thrown.
+    /// The nose piece's mass (kg), which flies on along the line from the burst point unless the
+    /// round was at rest.
+    pub nose_kg: f32,
+    /// The field thrown from the burst point about the round's flight direction, the ring at ratio
+    /// carried speed over greatest sideways speed; `None` where its emission was below the HP
+    /// quantum and it was not thrown.
     pub field: Option<SpallCone>,
 }
 
@@ -584,7 +581,8 @@ pub(crate) mod tests {
     /// perforating shell on until it embeds or leaves the vehicle, so an embed holds the path's
     /// end and a perforated last plate has it beyond the exit. A deflection leg that ends the path
     /// (a ricochet's, or a bounce after the last plate) is unconstrained. A burst lies on the path
-    /// and its field is thrown from it; a round that burst in flight ends there, under the ball.
+    /// and its field is thrown from it; a burst in flight is not the path's end, its nose piece's
+    /// line running on past it.
     pub(crate) fn assert_self_consistent(file: &str, report: &PenetrationReport) {
         let cited = report
             .fields()
@@ -623,18 +621,16 @@ pub(crate) mod tests {
                     "{file}: where it left, {at:?}, is not a point of its path"
                 );
             }
-            RoundEnd::Burst { at } => {
-                let burst = report
-                    .burst
-                    .as_ref()
-                    .expect("a round that burst has a burst");
-                assert_eq!(burst.nose_kg, None, "{file}: nothing flies on from the end");
-                assert_eq!(burst.point, *at, "{file}: it ends where it burst");
-                let last = report.path.last().map(|p| p.point);
-                assert_eq!(last, Some(*at), "{file}: the path ends at the burst");
-            }
         }
         if let Some(burst) = &report.burst {
+            if burst.speed_mps > 0.0 {
+                let last = report.path.last().map(|p| p.point);
+                assert_ne!(
+                    last,
+                    Some(burst.point),
+                    "{file}: the nose piece runs the path on past a burst in flight"
+                );
+            }
             let on_path = report
                 .path
                 .iter()

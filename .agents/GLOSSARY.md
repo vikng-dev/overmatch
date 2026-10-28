@@ -381,7 +381,7 @@ A burst round's fuze running out: armed by a body whose spend reaches its thresh
 _Avoid_: detonation, explosion (the game state is the burst and its field)
 
 **Fragment cone** (burst field):
-The field a **burst** throws from its burst point about the round's flight direction, carrying the round's velocity forward: the **ring** (the wall around the burst core as a band, the nose piece flying on) or the **ball** (one lobe of the round less its core, a cone at speed and the whole sphere when slow), the two shapes of playtest fork F7. Code and records call it the burst field. Law: design doc §5a.
+The field a **burst** throws from its burst point about the round's flight direction, carrying the round's velocity forward: the **ring**, the wall around the burst core driven as a band, the nose piece flying on. Every burst throws the ring (playtest fork F7, closed; the burst's ball retired). Code and records call it the burst field. Law: design doc §5a.
 
 **Blast sphere**:
 The field of a blast or shockwave, even in every direction. Not built.

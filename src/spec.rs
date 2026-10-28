@@ -1847,7 +1847,7 @@ TankSpec(
         let with_stowage = |rounds: &[&str], count: u32| {
             with_phantom("Cannon", |weapon| weapon.stowage = stowage(rounds, count))
         };
-        with_stowage(&["88mm_AP", "88mm_APHE_ball"], 1).expect("known, distinct keys load");
+        with_stowage(&["88mm_AP", "88mm_APHE_ring"], 1).expect("known, distinct keys load");
         for (rounds, count, named) in [
             (vec!["88mm_AP", "88mm_APCR", "88mm_AP"], 1, "88mm_AP"),
             (vec!["88mm_AP"], 0, "count of 0"),

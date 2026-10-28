@@ -1042,8 +1042,8 @@ fn burst_start(plan: &Plan, kind: CornerKind, burst: &BurstPlan, reduce: bool) -
 
 /// The share of the shell model's length drawn at corner time `c`, `None` while none is: the
 /// whole model from the travel start; from a burst on ([`burst_start`]) only the nose piece where
-/// one flies on, at its share of the round ([`BurstPlan::nose`]), and nothing where none does (the
-/// ball, a round that burst at rest). A round the record has leave the tank runs on past its
+/// one flies on, at its share of the round ([`BurstPlan::nose`]), and nothing where none does (a
+/// round that burst at rest). A round the record has leave the tank runs on past its
 /// path's last node ([`head_arc`]) and no frame follows it, so nothing hides it in flight: its
 /// bound is the play's end, the corner's or the lesson's (the x-ray's clock stops at the hold, and
 /// the shell with it). Under reduce motion a round that left is never drawn, since it would stand
@@ -2172,7 +2172,7 @@ mod tests {
                 RoundEnd::Left { .. } => {
                     assert!(shell_share(plan, kind, to, true).is_none(), "{name}");
                 }
-                RoundEnd::Rest { .. } | RoundEnd::Burst { .. } => {
+                RoundEnd::Rest { .. } => {
                     // The whole shell, or what of it a burst left flying.
                     let left = match &record.report.burst {
                         Some(_) => flies_on(&record.report),
@@ -2373,15 +2373,11 @@ mod tests {
         assert!(bounces > 0, "a record bounces");
     }
 
-    /// The share of the round the record has fly on from its burst, read off the record: a ring's
-    /// nose mass over the round's, from a burst in flight; none under the ball or from a round
-    /// that burst at rest.
+    /// The share of the round the record has fly on from its burst, read off the record: the nose
+    /// mass over the round's, from a burst in flight; none from a round that burst at rest.
     fn flies_on(report: &PenetrationReport) -> Option<f32> {
         let burst = report.burst.as_ref()?;
-        burst
-            .nose_kg
-            .filter(|_| burst.speed_mps > 0.0)
-            .map(|kg| kg / report.projectile.mass_kg)
+        (burst.speed_mps > 0.0).then(|| burst.nose_kg / report.projectile.mass_kg)
     }
 
     /// Whether two drawn shares are the same, to f32 rounding.
@@ -2392,18 +2388,18 @@ mod tests {
         }
     }
 
-    /// From the corner time the record bursts on, the shell is drawn only as what flies on: under
-    /// the ball, and for a round that burst at rest, nothing; under a ring in flight its nose
-    /// piece, the model's front at the nose's share of the round's mass read off the record, its
-    /// nose on the line where the record's clock has it, parked at the path's end. Before the
-    /// burst the whole model is drawn. The corner, the lesson and the x-ray place the shell by
-    /// this. The library holds a ball, a round that burst at rest and a ring whose path runs on
-    /// past its burst point by more than a model length (fixture data), so neither a shell drawn
-    /// whole to the end, a nose piece drawn full length, nor one parked at the burst point passes.
+    /// From the corner time the record bursts on, the shell is drawn only as what flies on: for a
+    /// round that burst at rest, nothing; from a burst in flight its nose piece, the model's front
+    /// at the nose's share of the round's mass read off the record, its nose on the line where the
+    /// record's clock has it, parked at the path's end. Before the burst the whole model is drawn.
+    /// The corner, the lesson and the x-ray place the shell by this. The library holds a round that
+    /// burst at rest and one whose path runs on past its burst point by more than a model length
+    /// (fixture data), so neither a shell drawn whole to the end, a nose piece drawn full length,
+    /// nor one parked at the burst point passes.
     #[test]
     fn a_burst_draws_only_what_flies_on() {
         let library = Library::load();
-        let (mut balls, mut at_rest, mut rings) = (0, 0, 0);
+        let (mut at_rest, mut flying) = (0, 0);
         for record in &library.records {
             let Some(burst) = &record.report.burst else {
                 continue;
@@ -2457,19 +2453,18 @@ mod tests {
                 }
             }
             match flies_on {
-                None if burst.speed_mps > 0.0 => balls += 1,
                 None => at_rest += 1,
                 Some(share) => {
                     assert!(share < 1.0, "{name}: the nose piece is the whole round");
                     if last.distance(Vec3::from(burst.point)) > shell_length(plan) {
-                        rings += 1;
+                        flying += 1;
                     }
                 }
             }
         }
         assert!(
-            balls > 0 && at_rest > 0 && rings > 0,
-            "{balls} balls, {at_rest} at rest, {rings} rings flying on"
+            at_rest > 0 && flying > 0,
+            "{at_rest} at rest, {flying} nose pieces flying on"
         );
     }
 

@@ -438,57 +438,54 @@ fn a_shell_despawned_after_the_shot_keeps_its_record() {
 }
 
 /// An armed round's record stays open while the fuze the struck tank armed runs, though the round
-/// is clear of the tank: it holds the burst wherever the delay ends, the ball's off a shell the
-/// march despawned at the burst, the ring's while its nose piece flies on. The fixture 88 at
-/// 800 m/s arms in the 50 mm plate and, on a 50 ms delay (fixture data), flies clear of the tank
-/// for 3 ticks and bursts about 26 m past its last box (DERIVED from the fixture data); the tank
-/// is given a tank's mass so the hit's impulse leaves it in place. A mutant that finishes the
-/// record once the round is clear, or drops the burst's field from a spent shell's logs, fails
-/// here.
+/// is clear of the tank: it holds the burst wherever the delay ends, while its nose piece flies on.
+/// The fixture 88 at 800 m/s arms in the 50 mm plate and, on a 50 ms delay (fixture data), flies
+/// clear of the tank for 3 ticks and bursts about 26 m past its last box (DERIVED from the fixture
+/// data); the tank is given a tank's mass so the hit's impulse leaves it in place. A mutant that
+/// finishes the record once the round is clear, or drops the burst's field from the shell's logs,
+/// fails here.
 #[test]
 fn an_armed_round_keeps_its_record_open_until_it_bursts() {
-    for shape in [burst::BurstShape::Ball, burst::BurstShape::Ring] {
-        let mut app = recording_world(false);
-        let (root, _) = tank(
-            &mut app,
-            Vec3::ZERO,
-            0.0,
-            Vec3::ZERO,
-            &plated(DEEP, Kind::Crew(DEEP)),
-        );
-        app.world_mut().entity_mut(root).insert((
-            Mass(50_000.0),
-            AngularInertia::new(Vec3::splat(1.0e5)),
-            NoAutoMass,
-            NoAutoAngularInertia,
-        ));
-        settle(&mut app);
-        let inputs = burst::BurstInputs {
-            delay: 0.05,
-            ..burst::fixture_inputs(shape)
-        };
-        let burst = burst::Burst::derived(FIXTURE_88, burst::FIXTURE_STEEL, &inputs).unwrap();
-        let from = Vec3::new(0.0, 0.0, 30.0);
-        fire_round(
-            &mut app,
-            from,
-            Dir3::NEG_Z,
-            FireMechanism::Single,
-            None,
-            Some(burst),
-        );
-        let mut recorded = run(&mut app, 12);
-        assert_eq!(recorded.len(), 1, "{shape:?}: one record");
-        let report = recorded.pop().unwrap().report;
-        let held = report.burst.expect("the record holds the burst");
-        assert!(
-            held.point[2] < -20.0,
-            "{shape:?}: it burst clear of the tank, at {:?}",
-            held.point
-        );
-        assert!(held.field.is_some(), "{shape:?}: with its field");
-        assert!(app.world().resource::<ShotRecorder>().is_idle());
-    }
+    let mut app = recording_world(false);
+    let (root, _) = tank(
+        &mut app,
+        Vec3::ZERO,
+        0.0,
+        Vec3::ZERO,
+        &plated(DEEP, Kind::Crew(DEEP)),
+    );
+    app.world_mut().entity_mut(root).insert((
+        Mass(50_000.0),
+        AngularInertia::new(Vec3::splat(1.0e5)),
+        NoAutoMass,
+        NoAutoAngularInertia,
+    ));
+    settle(&mut app);
+    let inputs = burst::BurstInputs {
+        delay: 0.05,
+        ..burst::fixture_inputs()
+    };
+    let burst = burst::Burst::derived(FIXTURE_88, burst::FIXTURE_STEEL, &inputs).unwrap();
+    let from = Vec3::new(0.0, 0.0, 30.0);
+    fire_round(
+        &mut app,
+        from,
+        Dir3::NEG_Z,
+        FireMechanism::Single,
+        None,
+        Some(burst),
+    );
+    let mut recorded = run(&mut app, 12);
+    assert_eq!(recorded.len(), 1, "one record");
+    let report = recorded.pop().unwrap().report;
+    let held = report.burst.expect("the record holds the burst");
+    assert!(
+        held.point[2] < -20.0,
+        "it burst clear of the tank, at {:?}",
+        held.point
+    );
+    assert!(held.field.is_some(), "with its field");
+    assert!(app.world().resource::<ShotRecorder>().is_idle());
 }
 
 /// Two rounds in one tick into a tank with one crewman: the round whose own deposition emptied the

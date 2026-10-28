@@ -166,7 +166,12 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// REV 34 (the fallen tree): the destruction ledger, one globally visible entity whose
 /// [`DestructionLedger`](super::destruction::DestructionLedger) lists every tree state transition
 /// as `(index, word, tick)` and replicates by diff. Surface and own-type graph move.
-pub const PROTOCOL_REV: u32 = 34;
+///
+/// REV 35 (every burst is a ring, playtest fork F7 closed): a record's burst always names the nose
+/// piece's mass (`WireBurst::nose_kg` loses its `Option`), and no round ends at a burst
+/// (`WireEnd::Burst` leaves, the ball's end). The field law keeps the ball, which every plate
+/// exit's cone is thrown with. Own-type graph and REV move.
+pub const PROTOCOL_REV: u32 = 35;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -926,7 +931,7 @@ const WIRE_SURFACE_HASH: u64 = 0xe49d_85fe_dfc6_1280;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xc81a_492d_2280_e1b2;
+const WIRE_TYPES_HASH: u64 = 0xe055_c872_79f8_26d2;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
