@@ -365,11 +365,11 @@ Deflection off a too-steep face without entering — spawns a new path segment a
 When a shell's caliber greatly exceeds a volume's thickness along its normal, suppressing ricochet and slope. The game's namesake, but one modifier among many — not the centre of the model.
 
 **Field**:
-The umbrella term for a dose field thrown by a cause, whatever its shape: strength over directions from an origin, stopped by the hard bodies it meets, dosing the boxes it reaches. Named in use by cause and shape: **spall cone**, **fragment cone**, **blast sphere**.
+The umbrella term for a dose field thrown by a cause, whatever its shape: strength over directions from an origin, stopped by the hard bodies it meets, dosing the boxes it reaches. Its strength is energy (J), a share of the energy its cause lost or drove, and each box it reaches takes HP from that energy at the one **energy-to-HP rate**. Named in use by cause and shape: **spall cone**, **fragment cone**, **blast sphere**.
 _Avoid_: cloud (implies an amorphous shape; older records use it to mean a field)
 
 **Spall cone** (spall):
-The field of fragments thrown from a body exit when a round perforates — brightest on its axis and fading to nothing at its rim (the ball law), its half-angle the exit layer's material's, each direction stopped by the first hard body it meets — dosing every box it reaches. Its strength comes from the spend at that exit and the exit material's debris competence; its law is design doc §5 (`.agents/docs/design/armor-penetration-and-damage.md`).
+The field of fragments thrown from a body exit when a round perforates — brightest on its axis and fading to nothing at its rim (the ball law), its half-angle the exit layer's material's, each direction stopped by the first hard body it meets — dosing every box it reaches. Its strength is one fixed share of the kinetic energy the round lost crossing the body it left, the energy a **line dose** reads, so a round that loses more there throws a stronger cone; its law is design doc §5 (`.agents/docs/design/armor-penetration-and-damage.md`).
 _Avoid_: spalling, fragmentation, frag, spall cloud (the noun is spall; the emitter is the spall cone)
 
 **Witness**:
@@ -377,8 +377,15 @@ A substance kind with no resistance, worn only by crew: no layer of the walk, so
 _Avoid_: soft armour, flesh factor (a witness has no factor)
 
 **Crew line rate**:
-A round's dose to a witness per metre of chord (reference-mm/m, round file field `wound`, `assets/rounds/`, TUNED). Round data, never a material's.
+A round's dose to a witness per unit of chord (round file field `wound`, `assets/rounds/`, TUNED): HP points per decimetre of chord, so 30 empties the 30 HP crew pool over 10 cm. The code keeps it as reference-mm per metre converted at 10 HP points per reference-mm, the same number; that unit names no armour. Round data, never a material's.
 _Avoid_: wound rate (the code identifier keeps `wound` until a rename is decided)
+
+**Dose**:
+What a line, cone, burst or bounce deposits into a box's HP pool in the game's damage model: HP, from the energy the round lost — the line's energy lost in a hard pool, a bounce's energy lost at the face it struck, each field direction's share of the energy its source lost — at the one **energy-to-HP rate**. A crew station's line dose alone is its chord × the round's **crew line rate**. A box's dose from one shot is summed and converted to **pool units** once. Law: design doc §§5–6.
+_Avoid_: a dose in reference-mm (reference-mm is a penetration and armour readout, never a dose)
+
+**Energy-to-HP rate**:
+The joules of energy lost per HP point, one rate for every dose but a crew station's chord, a tank's modules, a tree's trunk and every field alike (`joules_per_hp`, `assets/ballistics/energy_dose.ron`, TUNED). Each pool's authored HP alone says how sturdy it is.
 
 **Line dose**:
 What a round deposits along its path in the game's damage model: into a hard pool, the kinetic energy it loses there, shared among overlapping volumes at that depth and converted at one **energy-to-HP rate** for every hard pool; a stopped round deposits all its remaining energy. Into a witness, the chord times the round's **crew line rate**.

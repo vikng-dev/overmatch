@@ -77,581 +77,581 @@
                 ratio: 2.2649755,
             ),
             half_angle_deg: 26.2,
-            strength: 21.705767,
+            strength: 1946429.5,
             fragments: [
                 (
                     end: (0.33898258, 1.4032946, 2.6206007),
-                    strength: 18.164003,
+                    strength: 1628827.6,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.28381255,
+                            damage: 25450.432,
                         ),
                     ],
                 ),
                 (
                     end: (0.3296528, 1.3985028, 2.6206007),
-                    strength: 17.940346,
+                    strength: 1608771.5,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.2803179,
+                            damage: 25137.055,
                         ),
                     ],
                 ),
                 (
                     end: (0.3356943, 1.4124742, 2.6206007),
-                    strength: 17.716997,
+                    strength: 1588743.1,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.27682808,
+                            damage: 24824.111,
                         ),
                     ],
                 ),
                 (
                     end: (0.34148026, 1.3946924, 2.6206007),
-                    strength: 17.493937,
+                    strength: 1568740.4,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.27334276,
+                            damage: 24511.568,
                         ),
                     ],
                 ),
                 (
                     end: (0.32269, 1.4054642, 2.6206007),
-                    strength: 17.271147,
+                    strength: 1548762.1,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.26986167,
+                            damage: 24199.408,
                         ),
                     ],
                 ),
                 (
                     end: (0.34642506, 1.4106307, 2.6206007),
-                    strength: 17.04861,
+                    strength: 1528806.5,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.26638454,
+                            damage: 23887.602,
                         ),
                     ],
                 ),
                 (
                     end: (0.33104134, 1.3889832, 2.6206007),
-                    strength: 16.826307,
+                    strength: 1508871.9,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.26291105,
+                            damage: 23576.123,
                         ),
                     ],
                 ),
                 (
                     end: (0.32746792, 1.4175963, 2.6206007),
-                    strength: 16.60422,
+                    strength: 1488956.6,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.25944093,
+                            damage: 23264.947,
                         ),
                     ],
                 ),
                 (
                     end: (0.35082912, 1.3974628, 2.6206007),
-                    strength: 16.382326,
+                    strength: 1469058.5,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.25597385,
+                            damage: 22954.04,
                         ),
                     ],
                 ),
                 (
                     end: (0.3181839, 1.396411, 2.6206007),
-                    strength: 16.1606,
+                    strength: 1449175.8,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.2525094,
+                            damage: 22643.371,
                         ),
                     ],
                 ),
                 (
                     end: (0.34297657, 1.4205818, 2.6206007),
-                    strength: 15.939025,
+                    strength: 1429306.3,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.24904726,
+                            damage: 22332.91,
                         ),
                     ],
                 ),
                 (
                     end: (0.3408041, 1.3844275, 2.6206007),
-                    strength: 15.717574,
+                    strength: 1409448.0,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.2455871,
+                            damage: 22022.625,
                         ),
                     ],
                 ),
                 (
                     end: (0.31677818, 1.4138088, 2.6206007),
-                    strength: 15.4962225,
+                    strength: 1389598.6,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.24212848,
+                            damage: 21712.479,
                         ),
                     ],
                 ),
                 (
                     end: (0.98135185, 1.6732502, -0.73507166),
-                    strength: 15.274942,
+                    strength: 1369755.8,
                     hits: [
                         (
                             volume: "Ammo_R_0",
-                            damage: 0.23867097,
+                            damage: 21402.434,
                         ),
                     ],
                 ),
                 (
                     end: (0.3220272, 1.385005, 2.6206007),
-                    strength: 15.053707,
+                    strength: 1349916.8,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.23521417,
+                            damage: 21092.45,
                         ),
                     ],
                 ),
                 (
                     end: (0.33187866, 1.426538, 2.6206007),
-                    strength: 14.832486,
+                    strength: 1330079.3,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.2317576,
+                            damage: 20782.488,
                         ),
                     ],
                 ),
                 (
                     end: (0.97500515, 0.92977095, -1.3106804),
-                    strength: 14.61125,
+                    strength: 1310240.1,
                     hits: [],
                 ),
                 (
                     end: (0.31005096, 1.4022865, 2.6206007),
-                    strength: 14.389966,
+                    strength: 1290396.9,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.22484322,
+                            damage: 20162.451,
                         ),
                     ],
                 ),
                 (
                     end: (0.60339165, 1.7559304, 1.0287933),
-                    strength: 14.168599,
+                    strength: 1270546.1,
                     hits: [],
                 ),
                 (
                     end: (0.3336897, 1.377347, 2.6206007),
-                    strength: 13.947111,
+                    strength: 1250684.6,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.21792361,
+                            damage: 19541.947,
                         ),
                     ],
                 ),
                 (
                     end: (0.3174858, 1.4241714, 2.6206007),
-                    strength: 13.725466,
+                    strength: 1230809.0,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.2144604,
+                            damage: 19231.39,
                         ),
                     ],
                 ),
                 (
                     end: (1.0220575, 1.3938694, -0.063887596),
-                    strength: 13.503622,
+                    strength: 1210915.4,
                     hits: [
                         (
                             volume: "Ammo_R_0",
-                            damage: 0.2109941,
+                            damage: 18920.553,
                         ),
                     ],
                 ),
                 (
                     end: (0.31172943, 1.3871932, 2.6206007),
-                    strength: 13.281534,
+                    strength: 1191000.1,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.20752397,
+                            damage: 18609.377,
                         ),
                     ],
                 ),
                 (
                     end: (0.3412819, 1.4317222, 2.6206007),
-                    strength: 13.059158,
+                    strength: 1171058.9,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.20404935,
+                            damage: 18297.795,
                         ),
                     ],
                 ),
                 (
                     end: (0.34941006, 1.3779368, 2.6206007),
-                    strength: 12.836443,
+                    strength: 1151087.3,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.20056942,
+                            damage: 17985.738,
                         ),
                     ],
                 ),
                 (
                     end: (0.30589104, 1.4125714, 2.6206007),
-                    strength: 12.6133375,
+                    strength: 1131080.6,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.1970834,
+                            damage: 17673.135,
                         ),
                     ],
                 ),
                 (
                     end: (0.9381237, 1.7794023, 0.35142136),
-                    strength: 12.389784,
+                    strength: 1111033.8,
                     hits: [],
                 ),
                 (
                     end: (0.32284832, 1.3745236, 2.6206007),
-                    strength: 12.165722,
+                    strength: 1090941.4,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.1900894,
+                            damage: 17045.959,
                         ),
                     ],
                 ),
                 (
                     end: (0.32391834, 1.433816, 2.6206007),
-                    strength: 11.94109,
+                    strength: 1070797.9,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.18657953,
+                            damage: 16731.217,
                         ),
                     ],
                 ),
                 (
                     end: (0.97500515, 1.1211252, 0.26705503),
-                    strength: 11.715814,
+                    strength: 1050596.6,
                     hits: [],
                 ),
                 (
                     end: (0.3026638, 1.3948216, 2.6206007),
-                    strength: 11.489824,
+                    strength: 1030331.4,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.1795285,
+                            damage: 16098.928,
                         ),
                     ],
                 ),
                 (
                     end: (0.5305052, 1.7794032, 1.5133772),
-                    strength: 11.263037,
+                    strength: 1009994.56,
                     hits: [],
                 ),
                 (
                     end: (0.3406391, 1.3698215, 2.6206007),
-                    strength: 11.035365,
+                    strength: 989578.5,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.17242758,
+                            damage: 15462.164,
                         ),
                     ],
                 ),
                 (
                     end: (0.30691624, 1.4249883, 2.6206007),
-                    strength: 10.806715,
+                    strength: 969074.6,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.16885492,
+                            damage: 15141.791,
                         ),
                     ],
                 ),
                 (
                     end: (0.98135185, 1.5232472, 0.7368612),
-                    strength: 10.576984,
+                    strength: 948473.94,
                     hits: [
                         (
                             volume: "Ammo_R_1",
-                            damage: 0.16526538,
+                            damage: 14819.905,
                         ),
                     ],
                 ),
                 (
                     end: (0.31049824, 1.3769388, 2.6206007),
-                    strength: 10.346062,
+                    strength: 927766.3,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.16165721,
+                            damage: 14496.349,
                         ),
                     ],
                 ),
                 (
                     end: (0.33506966, 1.4403691, 2.6206007),
-                    strength: 10.113824,
+                    strength: 906940.75,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.1580285,
+                            damage: 14170.949,
                         ),
                     ],
                 ),
                 (
                     end: (0.97500515, 0.729656, -0.16239595),
-                    strength: 9.880137,
+                    strength: 885985.3,
                     hits: [],
                 ),
                 (
                     end: (0.2970295, 1.4068332, 2.6206007),
-                    strength: 9.6448555,
+                    strength: 864886.8,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.15070087,
+                            damage: 13513.856,
                         ),
                     ],
                 ),
                 (
                     end: (0.7431793, 1.7794027, 1.265677),
-                    strength: 9.407815,
+                    strength: 843630.56,
                     hits: [],
                 ),
                 (
                     end: (0.32802773, 1.3655734, 2.6206007),
-                    strength: 9.168838,
+                    strength: 822200.6,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.14326309,
+                            damage: 12846.885,
                         ),
                     ],
                 ),
                 (
                     end: (0.3136406, 1.4370899, 2.6206007),
-                    strength: 8.927722,
+                    strength: 800579.0,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.13949566,
+                            damage: 12509.047,
                         ),
                     ],
                 ),
                 (
                     end: (1.2334986, 1.2255692, 0.17585659),
-                    strength: 8.684244,
+                    strength: 778745.56,
                     hits: [],
                 ),
                 (
                     end: (0.29897118, 1.3848825, 2.6206007),
-                    strength: 8.438155,
+                    strength: 756677.94,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.13184617,
+                            damage: 11823.093,
                         ),
                     ],
                 ),
                 (
                     end: (0.3492298, 1.4419851, 2.6206007),
-                    strength: 8.189171,
+                    strength: 734350.6,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.1279558,
+                            damage: 11474.229,
                         ),
                     ],
                 ),
                 (
                     end: (0.3502407, 1.3655605, 2.6206007),
-                    strength: 7.936971,
+                    strength: 711735.0,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.124015175,
+                            damage: 11120.859,
                         ),
                     ],
                 ),
                 (
                     end: (0.29654503, 1.4215016, 2.6206007),
-                    strength: 7.681188,
+                    strength: 688798.1,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.120018564,
+                            damage: 10762.471,
                         ),
                     ],
                 ),
                 (
                     end: (0.98135185, 1.6668487, 1.0046635),
-                    strength: 7.4213996,
+                    strength: 665502.0,
                     hits: [
                         (
                             volume: "Ammo_R_1",
-                            damage: 0.11595937,
+                            damage: 10398.469,
                         ),
                     ],
                 ),
                 (
                     end: (0.313385, 1.3666058, 2.6206007),
-                    strength: 7.157117,
+                    strength: 641802.9,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.11182995,
+                            damage: 10028.17,
                         ),
                     ],
                 ),
                 (
                     end: (0.32563782, 1.4464006, 2.6206007),
-                    strength: 6.8877683,
+                    strength: 617649.44,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.10762138,
+                            damage: 9650.772,
                         ),
                     ],
                 ),
                 (
                     end: (0.97500515, 0.98445797, 0.7589941),
-                    strength: 6.6126776,
+                    strength: 592981.2,
                     hits: [],
                 ),
                 (
                     end: (0.29057598, 1.3978028, 2.6206007),
-                    strength: 6.331036,
+                    strength: 567725.44,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.09892244,
+                            damage: 8870.71,
                         ),
                     ],
                 ),
                 (
                     end: (0.61002254, 1.7794032, 1.6971536),
-                    strength: 6.041867,
+                    strength: 541794.6,
                     hits: [],
                 ),
                 (
                     end: (0.33651543, 1.3586679, 2.6206007),
-                    strength: 5.743967,
+                    strength: 515080.94,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.089749485,
+                            damage: 8048.1396,
                         ),
                     ],
                 ),
                 (
                     end: (0.30217648, 1.4365268, 2.6206007),
-                    strength: 5.435834,
+                    strength: 487449.6,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.084934905,
+                            damage: 7616.4,
                         ),
                     ],
                 ),
                 (
                     end: (0.9813528, 1.4157624, 1.2184672),
-                    strength: 5.1155424,
+                    strength: 458728.0,
                     hits: [
                         (
                             volume: "Ammo_R_1",
-                            damage: 0.07993035,
+                            damage: 7167.625,
                         ),
                     ],
                 ),
                 (
                     end: (0.29893684, 1.3736057, 2.6206007),
-                    strength: 4.7805705,
+                    strength: 428689.94,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.074696414,
+                            damage: 6698.2803,
                         ),
                     ],
                 ),
                 (
                     end: (0.34151077, 1.4507737, 2.6206007),
-                    strength: 4.4274955,
+                    strength: 397028.5,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.06917962,
+                            damage: 6203.5703,
                         ),
                     ],
                 ),
                 (
                     end: (0.97500515, 0.4849794, 0.06734562),
-                    strength: 4.051482,
+                    strength: 363310.1,
                     hits: [],
                 ),
                 (
                     end: (0.2873211, 1.414279, 2.6206007),
-                    strength: 3.6453016,
+                    strength: 326886.5,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.056957837,
+                            damage: 5107.6016,
                         ),
                     ],
                 ),
                 (
                     end: (0.89467144, 1.7794027, 1.3089814),
-                    strength: 3.1972685,
+                    strength: 286709.88,
                     hits: [],
                 ),
                 (
                     end: (0.31991768, 1.357141, 2.6206007),
-                    strength: 2.6860833,
+                    strength: 240870.17,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.04197005,
+                            damage: 3763.5964,
                         ),
                     ],
                 ),
                 (
                     end: (0.3139124, 1.4493175, 2.6206007),
-                    strength: 2.0636592,
+                    strength: 185055.3,
                     hits: [
                         (
                             volume: "Engine",
-                            damage: 0.032244675,
+                            damage: 2891.489,
                         ),
                     ],
                 ),
                 (
                     end: (0.97559357, 1.1664534, 1.2179899),
-                    strength: 1.1232154,
+                    strength: 100722.52,
                     hits: [],
                 ),
             ],
@@ -664,28 +664,28 @@
         (
             volume: "Ammo_R_0",
             line: 0.0,
-            field: 31.476555,
-            taken: 31477,
+            field: 13.440995,
+            taken: 13441,
             entered: None,
         ),
         (
             volume: "Ammo_R_1",
             line: 0.0,
-            field: 25.280857,
-            taken: 25281,
+            field: 10.795333,
+            taken: 10795,
             entered: None,
         ),
         (
             volume: "Engine",
             line: 275.80475,
-            field: 579.1897,
+            field: 247.32332,
             taken: 336000,
             entered: Some((0.32767582, 1.402462, 2.491294)),
         ),
     ],
     consequences: [
         (
-            t: 0.0001357384,
+            t: 0.0007107188,
             volume: "Engine",
             state: Lost,
             function: Some("Engine"),

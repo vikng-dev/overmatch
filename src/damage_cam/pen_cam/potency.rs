@@ -1,8 +1,8 @@
 //! The pen cam's potency bands: a field's local intensity at a point, and the band that intensity
 //! falls in ([`Band`]). Pure functions of the record's field (a spall cone or a burst's), the
-//! shipped data (the field's rate, `assets/ballistics/spall_cone.ron`; the crew pool,
-//! `assets/ballistics/box_classes.ron`), the display's whole point (`ballistics::least_shown_hp`),
-//! and the struck tank's crew face.
+//! shipped data (the energy rate every dose converts at, `assets/ballistics/energy_dose.ron`; the
+//! crew pool, `assets/ballistics/box_classes.ron`), the display's whole point
+//! (`ballistics::least_shown_hp`), and the struck tank's crew face.
 //! The law, its thresholds and its promise are design doc §5, "Potency colour"
 //! (`.agents/docs/design/armor-penetration-and-damage.md`).
 //!
@@ -13,7 +13,8 @@
 //! bands at the thresholds the plan hands it, and a plan whose tank has no crew station has no
 //! potency and draws no field.
 //!
-//! Units: a direction's strength `s` in reference-mm; the rate `ρ` in HP points per reference-mm;
+//! Units: a direction's strength `s` in joules, the record's own; the rate `ρ` in HP points per
+//! joule, the one energy rate's inverse, so the bands read the strength the sim's dose reads;
 //! the emission `e = ρ s / Ω` in HP points per steradian, `Ω` the solid angle of the field's
 //! support (a cap, a ring's band or the whole sphere); the intensity `I = e / r²` and the
 //! thresholds in HP points per m²; radii in metres. Nothing here reads a display gain, a level or a
@@ -25,13 +26,14 @@ use bevy::prelude::*;
 
 use super::timeline;
 use crate::ballistics::box_classes::BoxClasses;
-use crate::ballistics::spall_cone;
+use crate::ballistics::energy_dose;
 use crate::damage_cam::shapes::TankShapes;
 
-/// The field's rate and a tank's band thresholds.
+/// The rate a field's strength converts at and a tank's band thresholds.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Potency {
-    /// `ρ`, HP points per reference-mm of field dose.
+    /// `ρ`, HP points per joule of field dose: `1 / joules_per_hp`, the rate the sim converts every
+    /// field deposit at.
     pub rate: f32,
     /// The floor and mid thresholds, HP points per m² ([`Band`]).
     pub floor: f32,
@@ -64,21 +66,17 @@ impl Band {
 }
 
 impl Potency {
-    /// The potency of the tank `shapes` holds: the shipped crew pool and field rate over its crew
+    /// The potency of the tank `shapes` holds: the shipped crew pool and energy rate over its crew
     /// face ([`TankShapes::crew_face`]); `None` for a tank with no crew station, whose bands would
     /// promise nothing. Panics on a malformed data file, as its parse does.
     pub fn of_tank(shapes: &TankShapes) -> Option<Self> {
         shapes.crew_face().map(Self::of_crew_face)
     }
 
-    /// The shipped crew pool and field rate over crew stations of mean face `crew_face` (m²,
+    /// The shipped crew pool and energy rate over crew stations of mean face `crew_face` (m²,
     /// positive and finite).
     pub fn of_crew_face(crew_face: f32) -> Self {
-        Self::of(
-            BoxClasses::shipped(),
-            crew_face,
-            spall_cone::hp_per_reference_mm() as f32,
-        )
+        Self::of(BoxClasses::shipped(), crew_face, hp_per_joule())
     }
 
     /// The thresholds `classes` part the bands at over crew stations of mean face `crew_face` (m²),
@@ -105,7 +103,7 @@ impl Potency {
     }
 
     /// The emission `e = ρ s / Ω` (HP points per steradian) of a direction of strength `strength`
-    /// (reference-mm) in a field whose support lies from `inner` to `half_angle` (rad) off its
+    /// (J) in a field whose support lies from `inner` to `half_angle` (rad) off its
     /// axis, `Ω = Ω(half_angle) − Ω(inner)` ([`solid_angle`]; a cap's and the sphere's `inner` is
     /// 0, whose solid angle is exactly 0): each of the field's `N` directions stands for `Ω / N` of
     /// its support and deposits `s / N`, so `e` is its dose per steradian.
@@ -135,6 +133,12 @@ impl Potency {
     pub fn lanes(&self) -> Vec4 {
         Vec4::new(self.floor, self.mid, 0.0, 0.0)
     }
+}
+
+/// `ρ`, the HP points one joule of field dose is worth: the inverse of the one energy rate
+/// (`energy_dose::joules_per_hp`), in f64 and cast once.
+pub(crate) fn hp_per_joule() -> f32 {
+    (1.0 / energy_dose::joules_per_hp()) as f32
 }
 
 /// The solid angle `Ω_c = 2π (1 − cos α) = 4π sin²(α/2)` (sr) of a cone of half-angle
@@ -190,7 +194,7 @@ mod tests {
     /// The bands part at the crew pool and the least dose a full pool shows a lost point at, each
     /// over the struck tank's crew face as its sim geometry has it, never at the look's own
     /// numbers: fixture 120 and 3.998 HP points per m² over 0.25 m²; the bound tank's over its crew
-    /// face (0.2033 m², MEASURED: 147.5 and 4.92, DERIVED), the rate the field's calibration; and a
+    /// face (0.2033 m², MEASURED: 147.5 and 4.92, DERIVED), the rate the energy rate's inverse; and a
     /// tank with no crew station has no bands. The band promise relies on it; a threshold authored
     /// in the look or over a face held in data, a floor dropped to zero, one read as half a point,
     /// or bands for a tank with no crew station fails here.
@@ -210,7 +214,8 @@ mod tests {
         let share = crate::ballistics::least_shown_hp() as f32 / classes.crew_hp() as f32;
         assert!((bound.floor / bound.mid - share).abs() < 1e-6 * share);
         assert!(bound.floor > 0.0 && bound.floor < bound.mid);
-        assert_eq!(bound.rate, spall_cone::hp_per_reference_mm() as f32);
+        assert_eq!(bound.rate, hp_per_joule());
+        assert_eq!(bound.rate, (1.0 / energy_dose::joules_per_hp()) as f32);
         assert_eq!(bound.lanes(), Vec4::new(bound.floor, bound.mid, 0.0, 0.0));
         assert_eq!(Potency::of_tank(&TankShapes::default()), None);
     }

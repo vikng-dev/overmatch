@@ -2,8 +2,10 @@
 // at the muzzle the core reads about 180 reference-mm against the Pzgr. 39's about 115 (DERIVED
 // from the force law with the shipped RHA facts; read as its whole body it would be about 112), a
 // ratio of 1.57 against the record's about 1.4 (Jentz & Doyle: more at the muzzle, less behind the
-// plate), and its cone's hole term is (35.7 / 88)² = 0.165 (DERIVED). Still provisional: the
-// core's nose is the round's, a labelled fixture, and the rigid rule reads no fact of the core.
+// plate). Its cone is a share of the energy the core loses at a plate, so it is weaker than the
+// Pzgr. 39's: the lighter core loses about a fifth of what that round loses through the same
+// plate (s12 against s1, MEASURED from the records). Still provisional: the core's nose is the
+// round's, a labelled fixture, and the rigid rule reads no fact of the core.
 // The file's fields are `src/rounds.rs`'s module doc.
 (
     name: ("8.8 cm Pzgr. 40", Measured("the 8.8 cm KwK 36's APCR round; Jentz & Doyle, Tiger I

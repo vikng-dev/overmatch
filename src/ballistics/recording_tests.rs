@@ -780,7 +780,7 @@ fn a_round_that_strikes_a_tank_again_records_each_encounter() {
 /// An emptying is timed at the deposit that took the pool's last point, though another round
 /// drained the pool between the shot's marks: the shot doses an ammunition box at one mark, the
 /// pool is drained, and at the next mark a spall cone's dose empties it before the line reaches
-/// it. Fixture log and doses (reference-mm), hull frame = world.
+/// it. Fixture log and doses (J), hull frame = world.
 #[test]
 fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
     use crate::damage_cam::record::{self, HullFrame, ShotFacts, ShotLog, StruckTank};
@@ -799,10 +799,10 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
         .id();
     let plate = world.spawn((Name::new("plate"), VolumeOf(tank))).id();
     let shell = world.spawn(ShotDose::default()).id();
-    // The line's energy (J) for 40 points at mark 0; 2 reference-mm by the cone and the line's
-    // energy for 30 points at mark 1, each taken into the tally at its source's rate.
+    // The line's energy (J) for 40 points at mark 0; the cone's energy for 20 points and the line's
+    // for 30 at mark 1, each taken into the tally at the one energy rate.
     let joules = |points: f32| points * super::energy_dose::joules_per_hp() as f32;
-    let (line_0, cone, line_1) = (joules(40.0), 2.0, joules(30.0));
+    let (line_0, cone, line_1) = (joules(40.0), joules(20.0), joules(30.0));
     let dose = |world: &mut World, units: Vec<u64>, mark: usize| {
         world
             .run_system_once(
@@ -826,7 +826,11 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
         .get_mut::<ComponentHealth>(ammo)
         .unwrap()
         .set_held(10 * POOL_UNITS_PER_HP);
-    dose(&mut world, vec![field_units(cone), energy_units(line_1)], 1);
+    dose(
+        &mut world,
+        vec![energy_units(cone), energy_units(line_1)],
+        1,
+    );
     assert!(world.get::<ComponentHealth>(ammo).unwrap().is_empty());
 
     let crossing =
@@ -875,6 +879,7 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
         axis: Dir3::NEG_Z,
         field: super::spall_cone::FieldDescriptor::ball(2.0),
         spend: 100.0,
+        energy: joules(100.0),
         entry_speed: SPEED,
         exit_speed: SPEED,
         strength: cone,

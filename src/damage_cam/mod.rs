@@ -284,8 +284,8 @@ pub struct SpallCone {
     /// The field's rim ([`crate::ballistics::spall_cone::FieldDescriptor::half_angle`]), in
     /// degrees.
     pub half_angle_deg: f32,
-    /// The strength `S` (reference-mm): direction `k` was thrown with `S·f_k`, and the cone emits
-    /// `S/2` in all. Zero on a hand-authored clip.
+    /// The strength `S` (J): direction `k` was thrown with `S·f_k`, and the cone emits `S/2` in
+    /// all. Zero on a hand-authored clip.
     #[serde(default)]
     pub strength: f32,
     pub fragments: Vec<Fragment>,
@@ -347,7 +347,7 @@ pub struct Fragment {
     /// Where the direction's reach ended: where it entered the first hard volume, which stops it,
     /// or at the struck tank's horizon when it entered none.
     pub end: [f32; 3],
-    /// The strength it was thrown with (reference-mm). Zero on a hand-authored clip.
+    /// The strength it was thrown with (J). Zero on a hand-authored clip.
     #[serde(default)]
     pub strength: f32,
     /// Boxes it dosed, in flight order; empty for a direction that dosed nothing.
@@ -358,15 +358,15 @@ pub struct Fragment {
 pub struct FragmentHit {
     /// A [`ComponentState::name`].
     pub volume: String,
-    /// Dose, reference-mm.
+    /// Dose, J: the direction's strength times its share of the field.
     pub damage: f32,
 }
 
 /// One box's dose from the shot, in HP points before the box's one conversion: the line's (a hard
-/// box's energy at the energy rate, a crew station's chord at the round's crew line rate, a
-/// bounce's shock included) and the fields' (the spall cones' and a burst's, at the field's HP per
-/// reference-mm, [`crate::ballistics::field_units`]); and the pool units it lost, the sum of the
-/// two converted once to pool units and capped at what its pool held.
+/// box's energy and a bounce's shock at the energy rate, a crew station's chord at the round's
+/// crew line rate) and the fields' (the spall cones' and a burst's energy at the energy rate,
+/// [`crate::ballistics::energy_units`]); and the pool units it lost, the sum of the two converted
+/// once to pool units and capped at what its pool held.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct BoxDose {
     /// A [`ComponentState::name`].

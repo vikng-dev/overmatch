@@ -674,7 +674,7 @@ pub fn follow_pose(
 /// support's half-angle and inner edge (rad), its picture's pitch (rad a texel) and its faces'
 /// lanes ([`super::picture::Picture::lanes`]), how far its front has run (m, negative before it
 /// is thrown), the world's metres per record metre, its longest reach (record m), its strength
-/// `S` (reference-mm) and its law ([`law_lane`]).
+/// `S` (J) and its law ([`law_lane`]).
 #[derive(Clone, Copy, Debug)]
 pub struct FieldPrint {
     pub origin: Vec3,

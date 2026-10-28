@@ -169,10 +169,6 @@ pub(crate) const DISC_MIN_CALIBER: f32 = 0.020;
 /// fall below zero reference-mm — exhausted, and nothing more.
 const LIMITS: Limits = Limits { rest: 0.0 };
 
-/// Shock a glancing bounce jars into an exposed component: impact energy × squareness. Armour has no
-/// HP and shrugs it off.
-const SHOCK_K: f32 = 0.045;
-
 /// The disc radius a round of `caliber` samples at — zero below [`DISC_MIN_CALIBER`].
 pub(crate) fn disc_radius(caliber: f32) -> f32 {
     if caliber >= DISC_MIN_CALIBER {
@@ -621,7 +617,7 @@ pub(crate) fn field_presence(
 /// admits (the struck tank's), from its ordered presence ([`field_presence`]): where the hard world
 /// stops it ([`first_solid`]), then the witnesses along it ([`super::wound::entries`]).
 ///
-/// `strength` (reference-mm) is constant along the direction. It stops where it enters the first
+/// `strength` (J) is constant along the direction. It stops where it enters the first
 /// volume: one it starts inside it enters at `at`, except one of `exited`, the volumes the throw
 /// leaves, which it has not entered while it is still leaving them. That volume, when it `is_box`
 /// (an HP-bearing one), takes `strength × weight`, never scaled by its own factor; armour takes
@@ -1089,8 +1085,10 @@ pub(crate) struct Bounce {
     pub struck: Entity,
     /// The rigid body owning `struck`, which takes the momentum exchange.
     pub owner: Option<Entity>,
-    /// HP the bounce jars into the struck component before that component's own floor: impact
-    /// energy × squareness ([`SHOCK_K`]). Armour has no HP and shrugs it off.
+    /// The dose the bounce jars into the struck component, joules: the kinetic energy the round
+    /// lost at the bounce, `½ m (v_in² − v_out²)`, `m` the mass that meets the plate, as a line
+    /// dose is the energy lost crossing a box. It converts at the energy rate. Armour has no HP
+    /// and shrugs it off.
     pub shock: f32,
     pub direction: Dir3,
     /// Speed retained (m/s).
@@ -1269,7 +1267,6 @@ pub(crate) fn decide(
         contact + ENTRANCE_SPAN,
     )?;
     let state_in = round.at(speed);
-    let capability_in = round.reference_mm(state_in) as f32;
     let shot = Shot {
         caliber: body.caliber,
     };
@@ -1323,7 +1320,7 @@ pub(crate) fn decide(
                 coverage: read.coverage,
                 struck,
                 owner: owner(struck),
-                shock: SHOCK_K * capability_in * libm::cosf(read.incidence),
+                shock: (round.energy(state_in) - round.energy(round.at(bled))).max(0.0) as f32,
                 direction: out,
                 speed: bled,
                 incoming: dir,
@@ -1748,7 +1745,7 @@ fn apply_bounce(
             entry: bounce.position,
             along: Vec3::from(bounce.incoming),
         };
-        shell.dose.add(bounce.struck, bounce.shock, context);
+        shell.dose.add_energy(bounce.struck, bounce.shock, context);
     }
     if let Some(owner) = bounce.owner {
         apply_hit_impulse(bodies, owner, bounce.impulse, bounce.position);

@@ -1967,7 +1967,7 @@ fn the_record_carries_the_burst() {
         .flat_map(|cone| &cone.fragments)
         .flat_map(|fragment| &fragment.hits)
         .filter(|hit| hit.volume == "lit")
-        .map(|hit| field_units(hit.damage))
+        .map(|hit| energy_units(hit.damage))
         .sum();
     assert_eq!(lit.field, hp_before_rounding(hits));
     let emptied = report

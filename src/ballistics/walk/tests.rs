@@ -1733,14 +1733,9 @@ fn debris_table(entries: &[(u32, SubstanceId, f32, f32)]) -> VolumeTable {
 
 /// The spall sources of a head-on 88 at [`AP_88_CAPABILITY`] through `slabs`.
 fn spall_through(volumes: &VolumeTable, slabs: &[Slab]) -> Vec<SpallSource> {
-    spall_through_shot(volumes, slabs, &AP_88)
-}
-
-/// The spall sources of a head-on `shot` at [`AP_88_CAPABILITY`] through `slabs`.
-fn spall_through_shot(volumes: &VolumeTable, slabs: &[Slab], shot: &Shot) -> Vec<SpallSource> {
     let laws = WalkLaws::default();
     let walked = walk_disc(&entrance_disc(slabs, 3.0), volumes, &laws).unwrap();
-    let request = transit_request(&walked, shot, &laws);
+    let request = transit_request(&walked, &AP_88, &laws);
     let transit = walk_disc(&transit_disc(&request, slabs, 3.0), volumes, &laws).unwrap();
     finish_at(&transit, &request, AP_88_CAPABILITY, &laws)
         .unwrap()
@@ -1776,60 +1771,87 @@ fn equal_factor_plates_in_contact_throw_one_cone_with_the_summed_spend() {
         };
         assert_eq!(cone.strength(), plate.strength());
         assert_eq!(cone.spend, plate.spend);
+        assert_eq!(cone.energy, plate.energy);
         assert_eq!(cone.entry_speed, plate.entry_speed);
         assert_eq!(cone.exit_speed, plate.exit_speed);
     }
 }
 
-/// κ: a body's strength is `spend × (v_exit / v_entry)²` scaled by the factor of its last layer
-/// before the exit over the reference: unscaled to the bit where that layer is the reference, in
-/// proportion for any other, and a softer layer the body began with does not lower it. Read at a
-/// hole of the reference calibre, so the area term is 1. Fixture stacks, 50 mm plates head-on; 800
-/// is a fixture factor.
+/// THE CONE'S STRENGTH IS A SHARE OF THE ENERGY LOST. For one plate, every round's cone has the
+/// strength `share × ½ m (v_entry² − v_exit²)`, the kinetic energy the round lost crossing it, and
+/// a round that loses more energy there throws the stronger cone, whatever its mass, calibre or
+/// speed: the strengths order as the energies lost. Fixture bodies and speeds, all perforating one
+/// 50 mm fixture plate of the reference factor head-on, at a fixture share. A strength read from
+/// the spend, the speed ratio, the exit material's factor or the hole's calibre fails here; the
+/// throw's pool quantum gate, every cone's potency and the pen cam's bands rest on it.
 #[test]
-fn the_strength_scales_by_the_exit_layers_factor_over_the_reference() {
-    let rha = SubstanceId::fixture(REFERENCE_FACTOR);
-    let mild = SubstanceId::fixture(800.0);
-    let strength_of = |cone: &SpallSource| {
-        let ratio = cone.exit_speed / cone.entry_speed;
-        (
-            cone.spend * ratio * ratio,
-            cone.strength_against(cone.caliber),
-        )
-    };
-    for (substance, factor) in [(rha, REFERENCE_FACTOR), (mild, 800.0)] {
-        let table = substance_table(&[(1, substance, factor)]);
-        let cones = spall_through(&table, &[Slab::at(1, 0, 0.5, -AXIS, 0.05)]);
-        let [cone] = cones.as_slice() else {
-            panic!("one cone: {cones:?}");
-        };
-        assert_eq!(cone.rear_factor, factor);
-        let (bare, strength) = strength_of(cone);
-        assert!(bare > 0.0);
-        if factor == REFERENCE_FACTOR {
-            assert_eq!(strength.to_bits(), bare.to_bits(), "κ = 1 keeps the bits");
-        } else {
-            assert!((strength / bare - factor / REFERENCE_FACTOR).abs() < 1.0e-6);
-        }
+fn a_round_that_loses_more_energy_at_a_plate_throws_a_stronger_cone() {
+    const SHARE: f32 = 0.6;
+    let laws = WalkLaws::default();
+    let table = substance_table(&[(1, SubstanceId::fixture(REFERENCE_FACTOR), REFERENCE_FACTOR)]);
+    let slabs = [Slab::at(1, 0, 0.5, -AXIS, 0.05)];
+    let walked = walk_disc(&entrance_disc(&slabs, 3.0), &table, &laws).unwrap();
+    let request = transit_request(&walked, &AP_88, &laws);
+    let transit = walk_disc(&transit_disc(&request, &slabs, 3.0), &table, &laws).unwrap();
+    // (mass kg, calibre m, speed m/s): fixture rounds, a heavy slow one and a light fast one among
+    // them; each reads more than the plate's 50 reference-mm.
+    let rounds = [
+        (10.2, 0.088, 800.0),
+        (10.2, 0.088, 600.0),
+        (6.8, 0.075, 900.0),
+        (1.9, 0.036, 1100.0),
+        (20.0, 0.122, 700.0),
+    ];
+    let mut cones: Vec<(f64, f32)> = rounds
+        .iter()
+        .map(|&(mass, caliber, speed)| {
+            let body = super::super::RoundBody {
+                mass,
+                caliber,
+                nose_factor: 0.5,
+            };
+            let round = SolidShot::bind(body, SubstanceRegistry::shipped_static());
+            let plan = finish(
+                &transit,
+                &request,
+                &round,
+                round.at(speed),
+                &Limits { rest: 0.0 },
+                &laws,
+            )
+            .unwrap();
+            assert!(
+                matches!(plan.outcome, Outcome::Perforated { .. }),
+                "{mass} kg"
+            );
+            let [cone] = plan.spall.as_slice() else {
+                panic!("one cone: {:?}", plan.spall);
+            };
+            let (v_in, v_out) = (cone.entry_speed as f64, cone.exit_speed as f64);
+            let lost = 0.5 * mass as f64 * (v_in * v_in - v_out * v_out);
+            let strength = cone.strength_at(SHARE);
+            assert!(
+                (strength as f64 / (SHARE as f64 * lost) - 1.0).abs() < 1.0e-5,
+                "{mass} kg at {speed} m/s: S = {strength} J against {lost} J lost"
+            );
+            (lost, strength)
+        })
+        .collect();
+    cones.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for pair in cones.windows(2) {
+        assert!(
+            pair[0].0 < pair[1].0,
+            "the fixture energies differ: {pair:?}"
+        );
+        assert!(
+            pair[0].1 < pair[1].1,
+            "more energy lost, a stronger cone: {pair:?}"
+        );
     }
-    let table = substance_table(&[(1, mild, 800.0), (2, rha, REFERENCE_FACTOR)]);
-    let cones = spall_through(
-        &table,
-        &[
-            Slab::at(1, 0, 0.5, -AXIS, 0.05),
-            Slab::at(2, 1, 0.55, -AXIS, 0.05),
-        ],
-    );
-    let [cone] = cones.as_slice() else {
-        panic!("a step up continues the body: {cones:?}");
-    };
-    assert_eq!(cone.rear_factor, REFERENCE_FACTOR);
-    let (bare, strength) = strength_of(cone);
-    assert_eq!(strength.to_bits(), bare.to_bits());
 }
 
-/// The cone's ratio, and so its half-angle, is its rear layer's substance's, the layer
-/// [`SpallSource::rear_factor`] reads: a body of a softer front and a harder rear in contact, of
+/// The cone's ratio, and so its half-angle, is its rear layer's substance's, the layer the members'
+/// [`ExitMember::rear_factor`] picks: a body of a softer front and a harder rear in contact, of
 /// different debris ratios, throws one cone at the rear's ratio whichever way the ratios run, and a
 /// plate of either alone throws at its own. A ratio read from the front layer, the greater of the
 /// body's, or one global ratio fails here; the throw's field descriptor rests on it. Fixture
@@ -1853,7 +1875,6 @@ fn the_cone_ratio_is_the_rear_layers_substance() {
         let [cone] = cones.as_slice() else {
             panic!("a step up continues the body: {cones:?}");
         };
-        assert_eq!(cone.rear_factor, REFERENCE_FACTOR);
         assert_eq!(cone.debris_ratio, hard_ratio, "the rear layer's ratio");
         for row in rows {
             let alone = spall_through(
@@ -1869,62 +1890,6 @@ fn the_cone_ratio_is_the_rear_layers_substance() {
             );
         }
     }
-}
-
-/// The cone's budget goes with the hole's area: two bodies alike but for the calibre of the shot
-/// that left them throw strengths in the ratio `(d₁ / d₂)²` against any reference, and a hole of
-/// the reference calibre leaves `spend × κ × ratio²` unscaled to the bit, whatever the reference.
-/// The hole is the shot's: [`finish`] carries [`Shot::caliber`] into every source, and
-/// [`SpallSource::strength`] reads the reference from the cone's data. Calibres and references are
-/// fixture data, both shots short of overmatch on the 50 mm fixture plate. A linear area term, a
-/// hole read from anywhere but the shot, or a reference fixed in the law fails here; every record
-/// of a round at the reference calibre rests on the unscaled case.
-#[test]
-fn the_strength_goes_with_the_hole_area() {
-    let rha = SubstanceId::fixture(REFERENCE_FACTOR);
-    let table = substance_table(&[(1, rha, REFERENCE_FACTOR)]);
-    let slabs = [Slab::at(1, 0, 0.5, -AXIS, 0.05)];
-    let cone_of = |caliber: f32| {
-        let cones = spall_through_shot(&table, &slabs, &Shot { caliber });
-        let [cone] = cones.as_slice() else {
-            panic!("one cone: {cones:?}");
-        };
-        cone.clone()
-    };
-    let (wide, narrow) = (cone_of(0.088), cone_of(0.022));
-    assert_eq!((wide.caliber, narrow.caliber), (0.088, 0.022));
-    assert_eq!(
-        SpallSource {
-            caliber: wide.caliber,
-            ..narrow.clone()
-        },
-        wide,
-        "the shot's calibre moves the hole and nothing else of the source"
-    );
-    let ratio = wide.exit_speed / wide.entry_speed;
-    let unscaled = wide.spend * ratio * ratio;
-    assert!(unscaled > 0.0);
-    for reference in [0.022, 0.05, 0.088] {
-        let at = SpallSource {
-            caliber: reference,
-            ..wide.clone()
-        };
-        assert_eq!(
-            at.strength_against(reference).to_bits(),
-            unscaled.to_bits(),
-            "a hole of the reference calibre {reference} is unscaled"
-        );
-        let area = narrow.strength_against(reference) / wide.strength_against(reference);
-        assert!(
-            (area - (0.022f32 / 0.088).powi(2)).abs() < 1.0e-6,
-            "against {reference}: {area}"
-        );
-    }
-    assert_eq!(
-        wide.strength().to_bits(),
-        wide.strength_against(crate::ballistics::spall_cone::reference_calibre())
-            .to_bits()
-    );
 }
 
 /// Only a step into softer material or air throws; a step into harder or equal material continues

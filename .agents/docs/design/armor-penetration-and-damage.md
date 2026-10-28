@@ -142,7 +142,7 @@ march, per volume crossed:
    no wider than the round; without one the round is its own penetrator, bit for bit. Flight reads
    the flying body: the whole round for a kept carrier, the penetrator for a discarded one
    (§3a). Everything at the plate reads the penetrator: the disc the shell samples the world with,
-   overmatch, this law and the cone's hole (§5). The momentum a hit or a bounce delivers is the
+   overmatch, this law, the line's energy and the cone's (§5, §6). The momentum a hit or a bounce delivers is the
    flying body's: a kept carrier stops at the plate with its penetrator; a discarded carrier
    contributes none. Penetration stays rigid: the penetrator's
    material is named (`core`) and read by no law. The 88's Pzgr. 40 reads about 180
@@ -223,41 +223,45 @@ decision record `.agents/scratch/damage-cam-2026-10-08/product/in-battle/owner-d
 ("The dose model"), evidence in `research/cloud-falloff.md`, `research/cloud-angle-deep.md` and
 `research/codex-cloud-angle/verdict.md` beside it.
 
-**Which steps throw.** A cone is thrown at every **body exit** the round reaches, sized by that
-exit's own spend and speeds, whatever the round does afterwards. A body is a maximal stretch of
+**Which steps throw.** A cone is thrown at every **body exit** the round reaches, sized by the
+energy the round lost across that body alone (**Strength**), whatever the round does afterwards. A body is a maximal stretch of
 hard material along the path (a witness, §6, is no material of the walk) (welded voids inside it included) over which no layer resists less than
 the one before it. It exits where the next medium resists less — a lower factor, or air — and the
 next body starts there. A step to an equal or higher factor continues the body without a throw,
 whatever the substances: plates of equal factor in contact are one plate and throw once at the far
-face with their summed spend (owner, 2026-10-12), and a step up into harder material adds what is
+face with the energy lost across both (owner, 2026-10-12), and a step up into harder material adds what is
 crossed behind it to the same body, since no softer step intervened. Exits reached before the round
 stops still throw; the body the round stops inside throws nothing. A bounce throws nothing.
 
-**The pool quantum gate.** A cone whose whole emission `S/2` converts to no pool unit (below half
-a thousandth of an HP point, §6) is not thrown: no direction is walked and nothing is recorded
-(owner, 2026-10-17; at the pool's quantum since pools keep fractions, issue 142). `S/2` is the most
-any one box can take from a cone — every direction doses a box at most once, and the directions'
-weights emit `S/2` (**Sampling**) — so a gated cone could not have cost any pool a unit. The gate
-adds no constant: it is the pool's quantum. A gate at the whole point would drop doses a pool
-accumulates.
+**The pool quantum gate.** A cone whose whole emission `S/2` converts to no pool unit at the
+energy rate (below half a thousandth of an HP point, §6) is not thrown: no direction is walked and
+nothing is recorded (owner, 2026-10-17; at the pool's quantum since pools keep fractions, issue
+142). `S/2` is the most any one box can take from a cone — every direction doses a box at most
+once, and the directions' weights emit `S/2` (**Sampling**) — so a gated cone could not have cost
+any pool a unit. The gate adds no constant: it is the pool's quantum. A gate at the whole point
+would drop doses a pool accumulates.
 
-**Strength.** `S = spend × κ × (v_exit / v_entry)² × (d / d_ref)²` (reference-mm; the cone emits
-`S/2` in all, **Sampling**).
-`spend` is what the round's mechanism spent crossing that body (its readout drop, η-weighted by
-the disc); `v_entry`, `v_exit` are the round's speeds entering and leaving it. `κ = f_rear / f_ref`
-is the debris competence of the exit material (owner, 2026-10-17): `f_rear` the resistance factor
-of the body's last layer before the exit — its highest, since a body never steps down — and
-`f_ref` the reference factor (RHA, 1000). κ is exactly 1 for the reference, so a steel exit's `S`
-keeps its bits; every other material scales by its own data, and soft bodies fall to noise on
-their own (`.agents/scratch/damage-cam-2026-10-08/research/debris-strength-law.md`). A
-barely-through round has a small energy ratio. `(d / d_ref)²` is the **hole term** (owner,
-2026-10-23): the cone's budget goes with the area of the hole, `d` the calibre of the round's
-penetrator (§3) and `d_ref` the calibre the field's rate was set against (`reference_calibre_m`
-in `assets/ballistics/spall_cone.ron`, 88 mm, TUNED). The exponent 2 is the law (a plug's mass
-goes with its area), not data. The term is exactly 1 at the reference calibre (`x / x` is 1 in
-IEEE arithmetic), so a reference-calibre cone keeps its bits; two rounds of different width
-through one plate throw different cones. DERIVED: the Pzgr. 40's 35.7 mm core gives 0.165, a
-7.9 mm machine-gun round 0.0081.
+**Strength** (issue 116, owner 2026-10-28, provisional: the simplest model). `S = η_E × ΔE`
+(joules; the cone emits `S/2` in all, **Sampling**). `ΔE` is the kinetic energy the round lost
+crossing the body, `½ m (v_entry² − v_exit²)`, `m` the mass that meets the plate (a sub-calibre
+round's core, §3): each stretch of the body's energy drop shared among the disc's samples as its
+spend is, summed over the samples that reached the exit, the energy the line's dose reads (§6).
+`η_E` is one fixed share for every cone (`energy_share` in `assets/ballistics/spall_cone.ron`,
+TUNED 0.88, provisional). Whatever the round, the plate or the exit material, a round that loses
+more energy at a plate throws the stronger cone, and one that loses none throws none. No term
+reads the exit material's factor, the hole's calibre or the speed ratio: the debris competence κ,
+the hole term `(d / d_ref)²` and the reference calibre retired with the law they belonged to,
+`S = spend × κ × (v_exit / v_entry)² × (d / d_ref)²` in reference-mm. The share was set so that
+the reference case throws the cone that law gave it: the reference 88 mm APCBC round at its
+773 m/s muzzle speed, perforating its reference plate (100 mm of reference steel at normal impact,
+ASSUMED), loses 2.70 MJ and leaves at 259.7 m/s, where the retired law's 11.29 reference-mm
+emitted 395 HP points (DERIVED in `spall_cone.ron`). Away from that case the two laws part. A thin
+plate takes little energy and throws a weak cone. A barely perforating round, which the retired
+law's speed ratio silenced, throws the strongest cone a plate gives: all it lost there. A soft body
+is weak because a round loses little crossing it, not by a factor of its own. MEASURED from the
+re-recorded scenarios: s1's cone is 2.40 MJ, emitting 400 HP points against the retired law's 362
+(+11 %); s12's tungsten-carbide core loses about a fifth of the energy s1's round loses at the
+same plate and throws 0.19 of s1's cone, where the hole term gave it 0.62.
 
 **Profile — the ball law** (owner, 2026-10-23, night; decision record
 `.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md`, the law
@@ -313,31 +317,28 @@ any other volume has entered it at the throw point.
 
 **Dose.** A box's dose from one cone is `D_b = (1/N) Σ s_i` over the directions that dose it — a
 hard box those stopped in it, a witness every one entering it short of its stop — each direction
-dosing a box once, in the count unit (reference-mm), never scaled by the box's own factor; armour
-(no count) takes nothing. Doses go through the addressed `Dose` effect, like the line's. A box's
-dose from the whole shot (the line, a bounce's shock and every cone) converts to pool units once,
-on its total (§6). Every field deposit, to a hard box and a witness alike, enters that total at the
-field's own calibration (`hp_per_reference_mm` in `spall_cone.ron`, TUNED 70 HP points per
-reference-mm against the 10 a bounce's shock and a witness's chord convert at; a hard box's line
-dose is energy, at the energy rate, §6) and nothing on the line or a bounce's shock does; `S` stays in
-reference-mm, so the calibration sets every cone's potency at once and the pool quantum gate tests
-`S/2` at it. A box of face `A` fully inside the cone, `θ` off its axis, has the knockout radius
-`R = sqrt(2 f(θ) E A / (pool Ω_c))`, `E = S/2`, `Ω_c = 2π(1 − cos α)` and `f(θ)` the ball's weight
-there (½ averaged over the cone). A bigger box is a bigger target: it takes more of the cone's
-directions, and nothing scales its pool to match (§6). On a weak ordinary perforation through RHA,
-for the 30 HP crew pool at a seated crew member's 0.2 m² mean face, the face the rate is set
-against, it is about 1.9 m at an average spot and 2.5 m on the axis (DERIVED in `spall_cone.ron`);
-the seed tank's crew box, 0.4 × 0.3 × 0.7 m and MEASURED at a 0.2033 m² mean face, moves each
-radius out by under 1 % (DERIVED: `sqrt(0.2033 / 0.2)` = 1.008). The rate stays 70 under the ball
-(owner, 2026-10-23, night): lowering it to hold the on-axis radius would weaken every cone. Dose
-summed over boxes is not conserved (a direction doses every witness it enters short of its stop as
+dosing a box once, in joules, never scaled by the box's own factor; armour (no count) takes
+nothing. Doses go through the addressed `Dose` effect, like the line's. A box's dose from the whole
+shot (the line, a bounce's shock and every cone) converts to pool units once, on its total (§6).
+Every field deposit, to a hard box and a witness alike, enters that total at the one energy-to-HP
+rate every dose of energy converts at (`joules_per_hp` in `energy_dose.ron`, TUNED 3000 J per
+point, §6), so the share alone sets every cone's potency, and the pool quantum gate tests `S/2` at
+that rate. A box of face `A` fully inside the cone, `θ` off its axis, has the knockout radius
+`R = sqrt(2 f(θ) E A / (pool Ω_c))`, `E = S/2` in HP points, `Ω_c = 2π(1 − cos α)` and `f(θ)` the
+ball's weight there (½ averaged over the cone). A bigger box is a bigger target: it takes more of
+the cone's directions, and nothing scales its pool to match (§6). On the reference cone through
+RHA (`E` = 396.5 HP points), for the 30 HP crew pool at a seated crew member's 0.2 m² mean face,
+it is about 2.0 m at an average spot and 2.6 m on the axis (DERIVED in `spall_cone.ron`); the seed
+tank's crew box, 0.4 × 0.3 × 0.7 m and MEASURED at a 0.2033 m² mean face, moves each radius out by
+under 1 % (DERIVED: `sqrt(0.2033 / 0.2)` = 1.008). Dose summed over boxes is not conserved (a direction doses every witness it enters short of its stop as
 well as the hard box that stops it); the emitted budget is.
 
 **Potency colour.** The pen cam colours a field by its potency, never by a display gain (decision
 record `.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md`,
 #8). Each of the `N` directions stands for `Ω / N` of the field's support (`Ω` its solid angle: a
 cap's, a ring's band's or the sphere's) and deposits `s / N`, so a direction of strength `s` emits
-`ρ s / Ω` HP points per steradian (`ρ` = `hp_per_reference_mm`), and at distance `r` along it, on
+`ρ s / Ω` HP points per steradian (`ρ` = `1 / joules_per_hp`, the HP points a joule of the
+record's strength converts to, the sim's own rate), and at distance `r` along it, on
 the support and short of its reach, the **local intensity** is `I = ρ s / (Ω r²)` HP points per m²,
 zero past the reach; a thin unshadowed box of face `A` there takes `I · A` (resolver test
 `the_pen_cam_intensity_times_a_face_is_its_dose`). Doses add, so where fields overlap the bands
@@ -361,11 +362,11 @@ alone. Knockout takes the field teal and reduced the deep teal (`timeline::FIELD
 relative luminance 0.50 and 0.12, DERIVED, so they part in every colour vision type), nothing no
 colour; neither is the state scale's red. Along a direction the intensity reaches mid at
 `sqrt(ρ s / (Ω T_mid))` and the floor `sqrt(T_mid / T_floor)` ≈ 5.5 times farther (DERIVED); s1's
-strongest direction (924 HP points per steradian) reaches mid at 2.50 m and the floor at 13.7 m,
-past every reach of the shipped records (5.2 m at most); the weakest field, s4's and s16's (2.5),
-reaches its floor at 0.71 m, short of its 0.79 m reach (DERIVED from the records). So the reduced
-band mostly ends at a reach or a shadow of the struck tank's hard bodies, and its edges are
-theirs; only the weakest fields end at the floor.
+strongest direction (1,038 HP points per steradian) reaches mid at 2.65 m and the floor at 14.5 m,
+past every reach of the shipped records (5.2 m at most); the weakest field, the road wheel's
+rubber cone in s4 and s16 (11.5), reaches its floor at 1.5 m, past its 0.79 m reach (DERIVED from
+the records). So the reduced band ends at a reach or a shadow of the struck tank's hard bodies,
+rarely at the floor, and its edges are theirs.
 
 A direction's strength is the field's law, read where the point lies
 (`src/damage_cam/pen_cam/look.rs`, `law`; the shader's `law`): `S` times the law's weight
@@ -527,12 +528,12 @@ perspective, the distance along the camera's forward in orthographic. The outsid
 tank seen whole) keeps the body in front and the volume unbounded. The trail and the rings are
 outside the order. Mechanism and entry points: `src/damage_cam/pen_cam/look.rs`, module doc.
 
-**Data.** The axis rule and `N` live in `assets/ballistics/spall_cone.ron`, parsed
-and validated while the app is built (ADR-0014: built from data, synchronously). A cone's ratio is
+**Data.** The axis rule, `N` and the energy share live in `assets/ballistics/spall_cone.ron`,
+parsed and validated while the app is built (ADR-0014: built from data, synchronously). A cone's ratio is
 its exit layer's substance's: every hard substance authors `debris_half_angle_deg`
 (`assets/materials/materials.ron`, `λ = 1/sin α`), refused at load outside `(0°, 90°]`. The exit
-layer is the one `κ` reads, the body's last before the exit; where volumes overlap in it, the cone
-takes the one of highest factor, the larger ratio between equals. RHA's 26.2° is the constant-angle
+layer is the body's last before the exit; where volumes overlap in it, the cone takes the one of
+highest factor, the larger ratio between equals. RHA's 26.2° is the constant-angle
 fit of the MEASURED Qi et al. 2026 normal-impact debris extents (shots 5 and 6, `shape-law.md`
 §2.1–2.2); those are 97 % contours, so the ball's rim may sit up to about 2° wider. Every other hard
 substance authors RHA's value as Unknown until its own extent is measured. A spread whose rim's
@@ -544,8 +545,10 @@ half-angle settled by this; `.agents/scratch/playtest-forks/README.md`).
 Exact emission `S/2` at every N from 1 to 1024 and every ratio from 1 to 10⁴; under the ball at a
 fixture ratio: resolution stability; homogeneity in `S`; inverse square for an unshadowed thin box;
 factor independence of a box's own dose; shadowing monotone (adding a volume never raises a dose).
-κ is 1 to the bit for the reference and proportional otherwise; a cone below the pool quantum is
-not thrown; a shot's dose to a box is converted to pool units once on its total. A direction stops at the first volume
+A cone's strength is the share of the energy its round lost across the body, and of two rounds
+through one plate the one that loses more energy throws the stronger cone, whatever its mass,
+calibre or speed; a cone below the pool quantum is not thrown; a shot's dose to a box is converted
+to pool units once on its total. A direction stops at the first volume
 it enters, a box there taking its whole strength, armour nothing and shielding what lies behind;
 a plate thinner than any nudge stops it; it is neither stopped nor dosed by a volume its throw
 leaves, and has entered any other it starts inside at the throw point. The ball's weights are its
@@ -635,30 +638,35 @@ provisional) gives, DERIVED:
 | ring: `v_s`, `½ M v_s²` | 541.5 m/s, 211.1 kJ |
 
 **The field.** Thrown from the burst point about the round's flight direction at strength
-`S = r_E · ½ M v_s²` (reference-mm, `r_E` = `reference_mm_per_kj`), emitting `S/2` in all; a burst
-is no plate exit, so neither `κ` nor the hole term applies. Its `N` directions sample the band in
+`S = η_B · ½ M v_s²` (joules, `η_B` the burst block's `energy_share`), emitting `S/2` in all; a
+burst is no plate exit, so the cone's share does not apply. Its `N` directions sample the band in
 equal-solid-angle strata weighted by their strata's exact shares, so it emits `S/2` at every `N`
 (§5, **Sampling**). They march, shadow and dose as a
 cone's do (§5, **Shadowing and reach**, **Walk**, **Dose**) through the volumes of the tank whose
 body armed or last restarted the fuze, leaving none, behind the pool quantum gate, and convert at
-the field's rate (`hp_per_reference_mm`, 70). The record and the wire carry the law (the ring's
+the energy rate every dose of energy converts at (§6). The record and the wire carry the law (the ring's
 with its half-width) and the ratio as the field descriptor, and a decoder rebuilds the directions
-from it. Data: the `burst` block of `assets/ballistics/spall_cone.ron` holds `r_E`, `h` and the
+from it. Data: the `burst` block of `assets/ballistics/spall_cone.ron` holds `η_B`, `h` and the
 ring's `N`, with their provenance and the throw's MEASURED cost at 64, 256 and 684 directions.
 
-**Potency.** `r_E` = 1.0 per kJ (TUNED, provisional) was set against an even sphere at rest, the
+**Potency.** `η_B` = 210 (TUNED, provisional) was set against an even sphere at rest, the
 retired ball's (214.8 kJ, the round less its core driven, DERIVED): a crew box of a 0.2 m² mean face
-(a seated crew member's), wholly inside it 2.0 m from the burst, has its 30 HP pool emptied. The
+(a seated crew member's), wholly inside it 2.0 m from the burst, has its 30 HP pool emptied. It is
+the 1.0 reference-mm per kJ the burst was first set at, restated in joules at the 70 HP points per
+reference-mm that field rate converted at and 3000 J per HP point (DERIVED: 0.07 HP points per J ×
+3000 = 210), so every burst keeps its potency. It is above 1 because it was set against an HP
+target, not against the energy the wall carries. The
 ring drives nearly the same energy (211.1 kJ, DERIVED) into its band alone. A thin unshadowed box
 of face `A` wholly inside a field, where the field is `b` times as bright as an even sphere's
-(`b = 4π p_Ω`), has the knockout radius `R = sqrt(ρ (S/2) A b / (4π pool))`, `ρ` = 70; a module's
+(`b = 4π p_Ω`), has the knockout radius `R = sqrt(ρ (S/2) A b / (4π pool))`, `ρ` =
+`1 / joules_per_hp`; a module's
 follows from its own authored pool and face (§6). DERIVED, at rest and at s1's carried speed
 (244.6 m/s), for the crew at 0.2 m² (the seed tank's crew box, MEASURED at 0.2033 m², reaches each
 0.8 % farther, DERIVED):
 
 | field | where | `b` | crew (0.2 m²) |
 |---|---|---|---|
-| even sphere at rest (the `r_E` reference) | anywhere | 1 | 2.00 m |
+| even sphere at rest (the `η_B` reference) | anywhere | 1 | 2.00 m |
 | ring at rest | in the band, 80–100° | 5.76 | 4.75 m |
 | ring at 244.6 m/s (`λ` 0.452, band 55.7–75.7°) | in the band | 6.32 | 4.98 m |
 
@@ -669,7 +677,7 @@ it stopped there), the burst point, the carried speed, the nose piece's mass, an
 cone record (absent when the pool quantum gate held it). The path runs on with the nose piece's line
 to its own end, its open air timed at the carried speed. A struck tank's record stays open while a
 fuze that tank armed runs, so a burst past its last body lands in it. The wire round-trips the
-burst; its 256 directions add 0.3–1.2 KB to a message (MEASURED, `src/damage_cam/wire.rs`). The pen
+burst; its 256 directions add 0.3–1.3 KB to a message (MEASURED, `src/damage_cam/wire.rs`). The pen
 cam draws the burst field as it draws a plate cone (`src/damage_cam/pen_cam/picture.rs`): thrown
 when the shell's nose reaches the burst point on the corner's clock, its front running out each
 direction's reach, over the band alone. It reads as a band about the line with nothing drawn inside
@@ -710,10 +718,10 @@ a pool derived from class × volume is deferred to tank #2, if hand-authoring pr
 The field needs no such rule: a bigger box is a bigger target, crossed by more of a field's
 directions, so it takes more dose (§5). A crew box is person-sized, one shared size within a tank
 (the seed tank's 0.4 × 0.3 × 0.7 m, a 0.2033 m² mean face, MEASURED from its sim geometry), close to
-the 0.2 m² face the field's calibration is set against (§5), and the pen cam's potency bands are
+the 0.2 m² face the fields' knockout radii are quoted at (§5), and the pen cam's potency bands are
 read from it (§5, "Potency colour"). A spall cone doses it by the strength reaching it (§5); the
 **main penetrator transiting** a hard module deposits the energy it lost crossing it; a bounce
-jars the face it struck.
+deposits the energy the round lost there into the face it struck.
 
 **The energy dose** (issue 113, decided 2026-10-28, provisional; owner direction: keep it simple).
 A hard box's line dose is the kinetic energy the round lost crossing it, `½ m (v_in² − v_out²)`,
@@ -741,9 +749,18 @@ Under the energy dose (MEASURED 2026-10-28,
 (466 710 J) and the machine-gun round 1 HP (2 872 J, all it had): 2 shots against 240 to empty the
 shipped fir.
 
-A witness's chord and a bounce's shock are still authored in reference-mm, one HP point per 0.1
-reference-mm (`ballistics::HP_PER_REFERENCE_MM`, a unit with Resolution provenance, not a balance
-value); a field deposit converts at the field's calibration (§5).
+**Every dose of energy follows one rule** (issue 116, decided 2026-10-28, provisional). A bounce's
+shock is the energy the round lost at the bounce, `½ m (v_in² − v_out²)` at the ricochet's bleed,
+and a field deposit is a share of the energy its source lost or drove (§5, §5a): both convert at
+the same rate as the line, so a joule is worth the same HP whatever put it there. The shock this
+replaced was `0.045 × the round's readout × cos(incidence)` reference-mm at 10 HP points each: the
+88 at 773 m/s bouncing with its whole disc now deals 1.95 MJ, 650 HP points, to an exposed
+component it bounces off, against at most 18 under that law, a bounce needing more than 70° of
+incidence (DERIVED from the force law, the 0.6 bleed and the 1.221 rad ricochet angle); armour takes
+none, and no recorded scenario bounces off a component. A witness's chord
+alone keeps its own unit, one HP point per 0.1 reference-mm (`ballistics::HP_PER_REFERENCE_MM`, a
+unit with Resolution provenance, not a balance value), the round's crew line rate its whole
+scale.
 
 **Trees are just wood.** Every trunk is one substance, `Wood` (`materials.ron`), and one pool:
 the wood row's HP per metre of breast-height diameter times the tree's own diameter, rounded, at
@@ -753,8 +770,8 @@ least one point (`hp_per_m` in `assets/trees/wood.ron`, TUNED 600). The shipped 
 threshold `fell_k` is the wood row's too. A species is the generator's look and ranges only: a
 player cannot tell that a round lost a little more speed in one species than another, while trunk
 thickness is simple and visible. Out of scope, built only if play shows them missed: wood bending
-a round less than steel, per-round-type ricochet and normalization, and the field's dose and drag
-form under the energy law (epic #103).
+a round less than steel, per-round-type ricochet and normalization, and the drag form under the
+energy law (epic #103); the field's dose is under it (§5).
 
 **Witnesses** (ADR-0040) are dosed by a law of their own. A witness substance has no resistance and
 is no layer of the walk (§13), so the shell and the field cross it as air. Once the hard world has
@@ -1562,6 +1579,7 @@ unresisted — a known, deliberate gap, not an oversight.
   module at a 71° graze, ~0.4 at 88°), a bullet graze barely registers (~0.1), and armor (no HP) takes
   nothing. Completes the gun-barrel damage story (direct = knockout, graze = chip, fragment = energy-
   scaled). `SHOCK_K` is a sandbox knob. Not yet drawn distinctly (HP labels show the effect).
+  (Superseded 2026-10-28, #116: the shock is the energy the round lost at the bounce, §6.)
 - **Volume data → RON (composition) cut (2026-06-28):** retired the prefix-keyed `material_factor`/
   `component_hp` functions; the per-tank `volumes` RON map is now the source of truth. `VolumeSpec`
   = `material_factor` + optional `hp` facet (composition, not a `kind` enum — §12). `on_tank_ready`

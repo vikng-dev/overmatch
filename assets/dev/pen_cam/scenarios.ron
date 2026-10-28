@@ -118,7 +118,7 @@
     ),
     (
         name: "s12_apcr_through_crew",
-        shows: "s1's line fired with the 88's sub-calibre round: it flies whole and meets the plate as its tungsten-carbide core, which leaves the driver's front plate faster than s1's round through a hole a sixth the area, so its cone is weaker and leaves the gunner and the commander reduced; the driver is knocked out, and the core stops deeper in the rear plate",
+        shows: "s1's line fired with the 88's sub-calibre round: it flies whole and meets the plate as its tungsten-carbide core, which leaves the driver's front plate faster than s1's round, having lost about a fifth of the energy s1's round lost there, so its cone is weaker and leaves the gunner and the commander reduced; the driver is knocked out, and the core stops deeper in the rear plate",
         weapon: "MainGun",
         round: "88mm_APCR",
         from: (-0.57, 1.45, -6.5),

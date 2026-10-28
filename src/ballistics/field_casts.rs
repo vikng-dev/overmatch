@@ -22,12 +22,12 @@
 //!
 //! and, at spawn pose in a fresh world each, `shot`: the fixture main-gun round ([`FIXTURE_ROUND`])
 //! fired through the real march along fixture lines ([`SHOTS`]), so the pin covers a whole shot end
-//! to end — body-exit
-//! detection, the mechanism's spends and speeds, each cone's strength and axis, and its walks. A shot
-//! record digests every penetration event, every cone (origin, axis, field, half-angle; its
-//! source's spend, entry and exit speeds and strength `S`, each as raw bits, so a source parameter
-//! that moves no direction's end and no HP still moves the record; and each direction's end and
-//! whether it dosed), and the pool units every named box holds after the shot.
+//! to end — body-exit detection, the mechanism's spends, energies and speeds, each cone's strength
+//! and axis, and its walks. A shot record digests every penetration event, every cone (origin,
+//! axis, field, half-angle; its source's spend, energy lost, entry and exit speeds and strength
+//! `S`, each as raw bits, so a source parameter that moves no direction's end and no HP still
+//! moves the record; and each direction's end and whether it dosed), and the pool units every
+//! named box holds after the shot.
 //!
 //! Each ray goes through two paths:
 //!
@@ -35,7 +35,7 @@
 //!    strength: the progress of the ray's origin, then every layer as its `[start, end)` and the
 //!    volumes present over it (stable identity and factor);
 //! 2. [`resolve::field_direction`] itself, through the probe tank's volumes: the ray's end and
-//!    every dose it addresses (box and amount, in reference-mm) are recorded, and each box's dose
+//!    every dose it addresses (box and amount, J) are recorded, and each box's dose
 //!    accumulates in f32 in ray order;
 //! 3. the witness pass's line ([`super::wound::line`]) along the ray, on a fixture disc at a
 //!    fixture wound rate: every witness's chord and raw dose, before any rounding to HP.
@@ -82,7 +82,7 @@ const LINE_WOUND: f32 = 30.0;
 const LINE_REACH: f32 = 20.0;
 
 /// The digest of every line of `field_casts.pinned`, MEASURED on macOS arm64 (the test profile).
-const PINNED_TOTAL: u64 = 0x2c9d_ed3a_a879_467f;
+const PINNED_TOTAL: u64 = 0xcdc7_068e_a730_9437;
 
 const PINNED: &str = include_str!("field_casts.pinned");
 
@@ -103,7 +103,7 @@ const SHOTS: [(&str, Vec3, Vec3); 6] = [
     ("right-rear", Vec3::new(6.0, 1.3, 1.0), Vec3::NEG_X),
 ];
 
-/// Fixture strength `S` (reference-mm): a lattice, graze or box ray carries it whole, a cone
+/// Fixture strength `S` (J): a lattice, graze or box ray carries it whole, a cone
 /// direction `S·f_k`. Fixture data.
 const STRENGTH: f32 = 30.0;
 
@@ -697,7 +697,13 @@ fn shot(label: &str, local_origin: Vec3, local_direction: Vec3) -> Record {
         bits(&mut output, cone.field.ratio);
         output.push(' ');
         bits(&mut output, cone.field.half_angle());
-        for value in [cone.spend, cone.entry_speed, cone.exit_speed, cone.strength] {
+        for value in [
+            cone.spend,
+            cone.energy,
+            cone.entry_speed,
+            cone.exit_speed,
+            cone.strength,
+        ] {
             output.push(' ');
             bits(&mut output, value);
         }

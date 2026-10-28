@@ -39,6 +39,11 @@ pub(crate) trait Mechanism {
 
     /// The round's speed (m/s) in `state`.
     fn speed(&self, state: Self::State) -> f64;
+
+    /// The kinetic energy (J) the round carries in `state`, `½ m v²`, `m` the mass that meets the
+    /// plate: what a crossing's energy lost is measured from, the line's dose and a spall cone's
+    /// strength alike.
+    fn energy(&self, state: Self::State) -> f64;
 }
 
 /// The limits an advance must respect.
@@ -100,8 +105,10 @@ pub(crate) enum Effect {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Dose {
     pub address: Entity,
-    /// Joules for a [`DoseSource::Line`] dose (the energy the round lost in the box), reference-mm
-    /// for a [`DoseSource::Field`] dose.
+    /// Joules, for either source: a [`DoseSource::Line`] dose is the energy the round lost in the
+    /// box, a [`DoseSource::Field`] dose a direction's strength (a share of the energy its source
+    /// lost) times its share of the field. Both convert at the one energy rate
+    /// ([`super::energy_units`]).
     pub amount: f32,
     pub source: DoseSource,
 }
@@ -318,6 +325,10 @@ impl Mechanism for SolidShot {
     fn speed(&self, state: SolidShotState) -> f64 {
         state.speed
     }
+
+    fn energy(&self, state: SolidShotState) -> f64 {
+        0.5 * self.body.mass as f64 * state.speed * state.speed
+    }
 }
 
 /// THE UNION-FIELD OVERLAP RULE: what one sample is resisted by where several volumes are present
@@ -387,6 +398,10 @@ impl<M: Mechanism> Mechanism for OvermatchProjection<'_, M> {
 
     fn speed(&self, state: M::State) -> f64 {
         self.inner.speed(state)
+    }
+
+    fn energy(&self, state: M::State) -> f64 {
+        self.inner.energy(state)
     }
 }
 

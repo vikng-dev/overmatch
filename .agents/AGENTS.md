@@ -64,8 +64,8 @@ model, and uses these approved terms (definitions in `.agents/GLOSSARY.md`):
 | **reduced** | a partial state: HP left, capability possibly lowered |
 | **potency** | how much a round, cone or burst can do |
 | **knockout radius** | the distance from the source within which a field empties a given HP pool |
-| **dose** | what a line, cone or burst deposits, in reference-mm; HP = dose × a rate |
-| **crew line rate** | a round's dose to a crew box per metre of chord (code: `wound`) |
+| **dose** | what a line, cone, burst or bounce deposits: HP, from the energy the round lost, at one energy-to-HP rate (a crew box's line: chord × crew line rate). Reference-mm is a penetration and armour readout, never a dose |
+| **crew line rate** | a round's dose to a crew box per unit of chord (code: `wound`) |
 | **field**, **spall cone**, **fragment cone**, **blast sphere**, **burst** | per the glossary |
 
 Crew are HP pools at stations; never describe bodily harm. Code identifiers keep their names

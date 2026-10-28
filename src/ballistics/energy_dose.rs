@@ -1,8 +1,8 @@
 //! The energy-to-HP rate of the game's damage model, read from `assets/ballistics/energy_dose.ron`:
-//! the joules of energy a round loses in a hard pool per HP point that pool loses
-//! ([`joules_per_hp`]). One rate for every hard pool, a tank's modules and a tree's trunk alike;
-//! [`super::energy_units`] converts a line dose with it. Crew (witnesses) and fields convert at
-//! their own rates. Design doc §6.
+//! the joules of energy a dose carries per HP point its pool loses ([`joules_per_hp`]). One rate for
+//! every dose of energy — a hard pool's line dose, a bounce's shock and every field deposit, a tank's
+//! modules and a tree's trunk alike; [`super::energy_units`] converts with it. A crew station's line
+//! dose alone (its chord at the round's crew line rate) converts at its own. Design doc §§5–6.
 
 use serde::Deserialize;
 

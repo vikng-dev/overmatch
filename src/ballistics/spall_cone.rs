@@ -1,11 +1,18 @@
 //! The spall cone's shape — its axis rule and the directions it is sampled by —, the field law
-//! that weights those directions and sets the cone's half-angle ([`FieldDescriptor`]), the field's
-//! calibration, its HP points per reference-mm ([`hp_per_reference_mm`]) and the calibre that rate
-//! was set against ([`reference_calibre`]), and a burst's field data ([`BurstFields`]), read from
-//! `assets/ballistics/spall_cone.ron`.
+//! that weights those directions and sets the cone's half-angle ([`FieldDescriptor`]), the cone's
+//! strength per joule of the energy its round lost across the body it left ([`energy_share`]), and
+//! a burst's field data ([`BurstFields`]), read from `assets/ballistics/spall_cone.ron`.
 //! The law the shape serves — strength, profile, shadowing, dose — is design doc §5
 //! (`.agents/docs/design/armor-penetration-and-damage.md`); the throw that applies it is
 //! `throw_spall_cone` in the parent module, and a world may throw another shape ([`SpallLaw`]).
+//!
+//! # Units
+//!
+//! A field's strength `S` is energy, in joules: a cone's is [`energy_share`] of the kinetic energy
+//! its round lost across the body it left (`walk::SpallSource::strength`), a burst's
+//! [`BurstFields::strength`] of its driven mass's. Every field deposit is joules too, and turns
+//! into HP points at the one energy-to-HP rate every hard pool's line dose converts at
+//! (`energy_dose::joules_per_hp`, through `ballistics::energy_units`).
 //!
 //! # The field law
 //!
@@ -325,8 +332,7 @@ pub(crate) enum AxisRule {
 struct ShapeFile {
     axis: Sourced<AxisRule>,
     directions: Sourced<usize>,
-    hp_per_reference_mm: Sourced<u64>,
-    reference_calibre_m: Sourced<f32>,
+    energy_share: Sourced<f32>,
     burst: BurstFile,
 }
 
@@ -334,18 +340,18 @@ struct ShapeFile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BurstFile {
-    reference_mm_per_kj: Sourced<f32>,
+    energy_share: Sourced<f32>,
     ring_half_width_deg: Sourced<f32>,
     ring_directions: Sourced<usize>,
 }
 
-/// A burst's field, validated (design doc §5a, "The burst"): its strength per kJ of its driven
+/// A burst's field, validated (design doc §5a, "The burst"): its strength per joule of its driven
 /// mass's energy, the ring's half-width, and the shape the ring is thrown in, sampled by its own
 /// direction count and passing as the spall cone's directions do.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct BurstFields {
-    /// Reference-mm of strength `S` per kJ of `½ M v_s²`; finite, positive and normal.
-    reference_mm_per_kj: f32,
+    /// Joules of strength `S` per joule of `½ M v_s²`; finite, positive and normal.
+    energy_share: f32,
     /// The ring's half-width `h` (rad), in `(0, π/2)`.
     ring_half_width: f32,
     ring: ConeShape,
@@ -364,16 +370,15 @@ impl BurstFields {
         Self::from_file(&file, ring)
     }
 
-    /// Validate `file`'s burst block, its ring sampled by `ring` strata: refuses a potency rate
+    /// Validate `file`'s burst block, its ring sampled by `ring` strata: refuses an energy share
     /// that is not finite, positive and normal, a half-width outside `(0°, 90°)` and a direction
     /// count outside the shape's domain, naming the field.
     fn from_file(file: &ShapeFile, ring: usize) -> Result<Self, String> {
         let burst = &file.burst;
-        let reference_mm_per_kj = burst.reference_mm_per_kj.0;
-        if !reference_mm_per_kj.is_normal() || reference_mm_per_kj < 0.0 {
+        let energy_share = burst.energy_share.0;
+        if !energy_share.is_normal() || energy_share < 0.0 {
             return Err(format!(
-                "burst.reference_mm_per_kj must be finite, positive and normal (got \
-                 {reference_mm_per_kj})"
+                "burst.energy_share must be finite, positive and normal (got {energy_share})"
             ));
         }
         let degrees = burst.ring_half_width_deg.0;
@@ -383,7 +388,7 @@ impl BurstFields {
             ));
         }
         Ok(Self {
-            reference_mm_per_kj,
+            energy_share,
             ring_half_width: (degrees as f64).to_radians() as f32,
             ring: ConeShape::new(file.axis.0, ring)
                 .map_err(|err| format!("burst.ring_directions: {err}"))?,
@@ -410,10 +415,10 @@ impl BurstFields {
         &FIELDS
     }
 
-    /// The strength `S` (reference-mm) of a burst whose driven mass carries `energy` J across it:
-    /// `energy / 1000 × reference_mm_per_kj`, in f64, so the same bits on every target.
+    /// The strength `S` (J) of a burst whose driven mass carries `energy` J across it:
+    /// `energy × energy_share`, one f64 product cast once, so the same bits on every target.
     pub(crate) fn strength(&self, energy: f32) -> f32 {
-        (energy as f64 / 1000.0 * self.reference_mm_per_kj as f64) as f32
+        (energy as f64 * self.energy_share as f64) as f32
     }
 
     /// The shape every burst field is thrown in, the ring's: a decoder rebuilds a burst field's
@@ -432,61 +437,35 @@ impl BurstFields {
     }
 }
 
-/// The field's calibration as parsed: the two numbers every cone's dose is scaled by.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct Calibration {
-    /// HP points per reference-mm of field dose; at least 1.
-    hp_per_reference_mm: u64,
-    /// The calibre (m) the rate was set against; finite, positive and normal.
-    reference_calibre: f32,
-}
-
-/// The shipped calibration, parsed once. Panics on a malformed file, as [`ConeShape::shipped`]
-/// does; [`super::sim_plugin`] reads it while the app is built.
-fn shipped_calibration() -> Calibration {
-    static CALIBRATION: std::sync::LazyLock<Calibration> = std::sync::LazyLock::new(|| {
-        calibration_from_ron(SPALL_CONE_RON).unwrap_or_else(|err| {
-            panic!("spall cone: embedded spall_cone.ron's calibration is unusable: {err}")
+/// The cone's strength per joule of the kinetic energy its round lost across the body it left,
+/// parsed once. Panics on a malformed file, as [`ConeShape::shipped`] does; [`super::sim_plugin`]
+/// reads it while the app is built.
+///
+/// A cone's strength `S` (J) is this share of that energy ([`super::walk::SpallSource::strength`]),
+/// and the cone emits `S/2` ([`EMITTED_SHARE`]); its deposits convert at the energy rate every hard
+/// pool's line dose converts at ([`super::energy_units`]). It sets the potency of every cone at once
+/// and nothing else: the shape and the field law both conserve a cone's emitted total.
+pub(crate) fn energy_share() -> f32 {
+    static SHARE: std::sync::LazyLock<f32> = std::sync::LazyLock::new(|| {
+        energy_share_from_ron(SPALL_CONE_RON).unwrap_or_else(|err| {
+            panic!("spall cone: embedded spall_cone.ron's energy share is unusable: {err}")
         })
     });
-    *CALIBRATION
+    *SHARE
 }
 
-/// The field's HP points per reference-mm of field dose, where a witness's chord and a bounce's
-/// shock convert at [`super::HP_PER_REFERENCE_MM`] (a hard box's line dose is energy, at
-/// [`super::energy_dose::joules_per_hp`]). A field deposit of `d` reference-mm enters a box's
-/// per-shot dose at `d × this / HP_PER_REFERENCE_MM` ([`super::field_units`]); a cone's strength
-/// `S` stays in reference-mm.
-pub(crate) fn hp_per_reference_mm() -> u64 {
-    shipped_calibration().hp_per_reference_mm
-}
-
-/// The calibre `d_ref` (m) the field's rate was set against: a cone's strength goes as the hole's
-/// area, `(d / d_ref)²` of a hole of calibre `d` ([`super::walk::SpallSource::strength`]), so a
-/// round of this calibre throws its cone unscaled.
-pub(crate) fn reference_calibre() -> f32 {
-    shipped_calibration().reference_calibre
-}
-
-/// Parse a shape file's calibration, refusing a rate of zero (a field that converts to no HP point
-/// is no field) and a reference calibre that is not finite, positive and normal (a cone's strength
-/// divides by it).
-fn calibration_from_ron(text: &str) -> Result<Calibration, String> {
+/// Parse a shape file's cone energy share, refusing one that is not finite, positive and normal: a
+/// zero share would switch every cone off through the pool quantum gate, and a negative one would
+/// throw negative strengths.
+fn energy_share_from_ron(text: &str) -> Result<f32, String> {
     let file: ShapeFile = ron::de::from_str(text).map_err(|err| err.to_string())?;
-    let hp_per_reference_mm = match file.hp_per_reference_mm.0 {
-        0 => return Err("hp_per_reference_mm must be at least 1 (got 0)".into()),
-        rate => rate,
-    };
-    let reference_calibre = file.reference_calibre_m.0;
-    if !reference_calibre.is_normal() || reference_calibre < 0.0 {
+    let share = file.energy_share.0;
+    if !share.is_normal() || share < 0.0 {
         return Err(format!(
-            "reference_calibre_m must be finite, positive and normal (got {reference_calibre})"
+            "energy_share must be finite, positive and normal (got {share})"
         ));
     }
-    Ok(Calibration {
-        hp_per_reference_mm,
-        reference_calibre,
-    })
+    Ok(share)
 }
 
 /// One direction of a cone in the cone's own frame: `cos θ`, the two lateral components
@@ -771,25 +750,23 @@ mod tests {
         spread.strata().map(|[.., f]| f as f64).collect()
     }
 
-    /// A fixture shape file whose first fields are `fields`.
+    /// A fixture shape file whose first fields are `fields`, its cone's energy share 0.5.
     fn file(fields: &str) -> String {
         format!(
             r#"({fields}, directions: (24, Resolution("fixture")),
-            hp_per_reference_mm: (70, Tuned("fixture")),
-            reference_calibre_m: (0.088, Tuned("fixture")), {BURST})"#
+            energy_share: (0.5, Tuned("fixture")), {BURST})"#
         )
     }
 
-    /// A fixture burst block.
-    const BURST: &str = r#"burst: (reference_mm_per_kj: (1.0, Tuned("fixture")),
+    /// A fixture burst block, its energy share 1.0.
+    const BURST: &str = r#"burst: (energy_share: (1.0, Tuned("fixture")),
         ring_half_width_deg: (10.0, Tuned("fixture")), ring_directions: (24, Tuned("fixture")))"#;
 
-    /// A fixture shape file whose burst block's fields are `fields`.
+    /// A fixture shape file whose burst block's fields are `fields`, its cone's energy share 0.5.
     fn burst_file(fields: &str) -> String {
         format!(
             r#"(axis: (ExitDirection, Tuned("fixture")), directions: (24, Resolution("fixture")),
-            hp_per_reference_mm: (70, Tuned("fixture")),
-            reference_calibre_m: (0.088, Tuned("fixture")), burst: ({fields}))"#
+            energy_share: (0.5, Tuned("fixture")), burst: ({fields}))"#
         )
     }
 
@@ -815,20 +792,14 @@ mod tests {
         }
     }
 
-    /// A shape value authored without its provenance is refused at parse, the calibration's and
-    /// the burst block's too.
+    /// A shape value authored without its provenance is refused at parse, the cone's energy share
+    /// and the burst block's values too.
     #[test]
     fn a_shape_value_without_provenance_is_refused() {
         let sourced = file(r#"axis: (ExitDirection, Tuned("fixture"))"#);
         assert!(ConeShape::from_ron(&sourced).is_ok());
         assert!(BurstFields::from_ron(&sourced).is_ok());
-        assert_eq!(
-            calibration_from_ron(&sourced),
-            Ok(Calibration {
-                hp_per_reference_mm: 70,
-                reference_calibre: 0.088,
-            })
-        );
+        assert_eq!(energy_share_from_ron(&sourced), Ok(0.5));
         for (value, bare) in [
             (
                 r#"axis: (ExitDirection, Tuned("fixture"))"#,
@@ -839,16 +810,12 @@ mod tests {
                 "directions: 24",
             ),
             (
-                r#"hp_per_reference_mm: (70, Tuned("fixture"))"#,
-                "hp_per_reference_mm: 70",
+                r#"energy_share: (0.5, Tuned("fixture"))"#,
+                "energy_share: 0.5",
             ),
             (
-                r#"reference_calibre_m: (0.088, Tuned("fixture"))"#,
-                "reference_calibre_m: 0.088",
-            ),
-            (
-                r#"reference_mm_per_kj: (1.0, Tuned("fixture"))"#,
-                "reference_mm_per_kj: 1.0",
+                r#"energy_share: (1.0, Tuned("fixture"))"#,
+                "energy_share: 1.0",
             ),
             (
                 r#"ring_half_width_deg: (10.0, Tuned("fixture"))"#,
@@ -863,41 +830,53 @@ mod tests {
             assert_ne!(bare, sourced, "{value}");
             let error = ConeShape::from_ron(&bare).expect_err(&bare);
             assert!(error.contains("provenance"), "{bare}: {error}");
-            let error = calibration_from_ron(&bare).expect_err(&bare);
+            let error = energy_share_from_ron(&bare).expect_err(&bare);
             assert!(error.contains("provenance"), "{bare}: {error}");
             let error = BurstFields::from_ron(&bare).expect_err(&bare);
             assert!(error.contains("provenance"), "{bare}: {error}");
         }
     }
 
-    /// A calibration of zero HP points per reference-mm is refused at parse, naming the field: a
-    /// zero rate would silently switch every cone off through the pool quantum gate.
+    /// The cone's energy share is the file's: a shape file's value is what the parse carries, and
+    /// the shipped one is the shipped file's. One that is zero, negative, subnormal or not finite
+    /// is refused at parse naming the field: every cone's strength is that share of the energy its
+    /// round lost, so a zero would silently switch every cone off through the pool quantum gate and
+    /// a negative one throw negative strengths.
     #[test]
-    fn a_zero_field_calibration_is_refused() {
-        let zero = file(r#"axis: (ExitDirection, Tuned("fixture"))"#).replacen(
-            "hp_per_reference_mm: (70",
-            "hp_per_reference_mm: (0",
-            1,
+    fn the_cone_energy_share_is_read_from_the_file_and_must_be_positive() {
+        let with = |share: &str| {
+            file(r#"axis: (ExitDirection, Tuned("fixture"))"#).replacen(
+                "energy_share: (0.5",
+                &format!("energy_share: ({share}"),
+                1,
+            )
+        };
+        assert_eq!(energy_share_from_ron(&with("2.5")), Ok(2.5));
+        assert_eq!(
+            energy_share(),
+            energy_share_from_ron(SPALL_CONE_RON).unwrap()
         );
-        let error = calibration_from_ron(&zero).expect_err("a zero rate is refused");
-        assert!(error.contains("hp_per_reference_mm"), "{error}");
+        for share in ["0.0", "-0.5", "1.0e-40", "NaN", "inf"] {
+            let error = energy_share_from_ron(&with(share)).expect_err(share);
+            assert!(error.contains("energy_share"), "{share}: {error}");
+        }
     }
 
     /// A burst block is read from the file: its count samples the ring's shape, every burst
-    /// field's, its half-width the ring's field, its rate the strength `energy/1000 × rate`; the
-    /// shipped one is the shipped file's. A rate that is zero, negative, subnormal or not finite, a
-    /// half-width outside `(0°, 90°)` and a direction count outside `1..=MAX_DIRECTIONS` are
-    /// refused at parse naming the field: a burst's strength scales by the rate, and the ring's law
-    /// refuses such a band at the first throw. A count for another burst shape is no field of the
-    /// block: every burst is a ring.
+    /// field's, its half-width the ring's field, its energy share the strength
+    /// `energy × energy_share`; the shipped one is the shipped file's. A share that is zero,
+    /// negative, subnormal or not finite, a half-width outside `(0°, 90°)` and a direction count
+    /// outside `1..=MAX_DIRECTIONS` are refused at parse naming the field: a burst's strength
+    /// scales by the share, and the ring's law refuses such a band at the first throw. A count for
+    /// another burst shape is no field of the block: every burst is a ring.
     #[test]
     fn a_burst_block_is_read_and_its_domain_is_refused() {
         let read = BurstFields::from_ron(&burst_file(
-            r#"reference_mm_per_kj: (2.0, Tuned("fixture")),
+            r#"energy_share: (2.0, Tuned("fixture")),
             ring_half_width_deg: (30.0, Tuned("fixture")), ring_directions: (24, Tuned("fixture"))"#,
         ))
         .unwrap();
-        assert_eq!(read.strength(150_000.0), 300.0);
+        assert_eq!(read.strength(150_000.0), 300_000.0);
         let (ring, shape) = read.field(0.5);
         assert_eq!(
             ring,
@@ -910,7 +889,7 @@ mod tests {
             &BurstFields::from_ron(SPALL_CONE_RON).unwrap()
         );
         let sourced = burst_file(
-            r#"reference_mm_per_kj: (1.0, Tuned("fixture")),
+            r#"energy_share: (1.0, Tuned("fixture")),
             ring_half_width_deg: (10.0, Tuned("fixture")), ring_directions: (24, Tuned("fixture"))"#,
         );
         let ball = sourced.replacen(
@@ -925,7 +904,7 @@ mod tests {
             (
                 "(1.0",
                 ["(0.0", "(-1.0", "(1.0e-40", "(NaN", "(inf"].as_slice(),
-                "reference_mm_per_kj",
+                "energy_share",
             ),
             (
                 "(10.0",
@@ -944,35 +923,6 @@ mod tests {
                 let error = BurstFields::from_ron(&text).expect_err(&text);
                 assert!(error.contains(field), "{field} {refused}: {error}");
             }
-        }
-    }
-
-    /// The reference calibre is the file's: a shape file's value is what the calibration carries,
-    /// and the shipped one is the shipped file's. One that is zero, negative, subnormal or not
-    /// finite is refused at parse naming the field: every cone's strength divides by it.
-    #[test]
-    fn the_reference_calibre_is_read_from_the_file_and_must_be_positive() {
-        let with = |reference: &str| {
-            file(r#"axis: (ExitDirection, Tuned("fixture"))"#).replacen(
-                "reference_calibre_m: (0.088",
-                &format!("reference_calibre_m: ({reference}"),
-                1,
-            )
-        };
-        let read = calibration_from_ron(&with("0.05")).unwrap();
-        assert_eq!(read.reference_calibre, 0.05);
-        assert_eq!(
-            reference_calibre(),
-            calibration_from_ron(SPALL_CONE_RON)
-                .unwrap()
-                .reference_calibre
-        );
-        for reference in ["0.0", "-0.088", "1.0e-40", "NaN", "inf"] {
-            let error = calibration_from_ron(&with(reference)).expect_err(reference);
-            assert!(
-                error.contains("reference_calibre_m"),
-                "{reference}: {error}"
-            );
         }
     }
 
@@ -1021,8 +971,8 @@ mod tests {
 
     /// CLASS INVARIANT 1, EXACT EMISSION: with nothing in the field, `(1/N) Σ f_k = ½` to float
     /// precision at every `N`, under the ball at every `λ`, above and below 1, and under every
-    /// ring, so a field emits `S/2` whatever its width and resolution. The field's calibration
-    /// (`hp_per_reference_mm`), the burst's potency and the throw's HP-quantum gate rely on it.
+    /// ring, so a field emits `S/2` whatever its width and resolution. The cone's and the burst's
+    /// energy shares (their potency) and the throw's HP-quantum gate rely on it.
     /// Sampling the density at each stratum's midpoint in place of the stratum's share fails at
     /// small `N`; a dropped `N/2` fails everywhere.
     #[test]

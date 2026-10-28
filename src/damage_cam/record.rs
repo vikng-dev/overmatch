@@ -45,7 +45,7 @@ use crate::ballistics::spall_cone::FieldDescriptor;
 use crate::ballistics::{
     ArmourMark, BallisticVolume, BurstField, ComponentHealth, CrossingEnd, ExternalArmour,
     PenetrationMarks, ShellPath, ShotDose, SpallMarks, SpallRay, VolumeCrossing, dose_units,
-    energy_units, field_units, hp_before_rounding, pool_units_of,
+    energy_units, hp_before_rounding, pool_units_of,
 };
 use crate::damage::{Ammo, CrewStation, FunctionRole, VolumeOf};
 use crate::tank::{
@@ -826,9 +826,9 @@ pub(crate) fn report_from(
 }
 
 /// One deposit on a component: `(volume, units, t, mark)`, its dose in the dose units the shot's
-/// tally took it in (a hard box's line at the energy rate, a witness's chord and a bounce's shock
-/// at the reference-mm rate, a field at its own: [`ShotDose`]) and `mark` the armour mark that
-/// dealt it.
+/// tally took it in (a hard box's line, a bounce's shock and a field at the energy rate, a
+/// witness's chord at the reference-mm rate: [`ShotDose`]) and `mark` the armour mark that dealt
+/// it.
 type Deposit = (Entity, u64, f32, usize);
 
 /// What [`report_from`] reads each mark of an encounter against: the struck tank, the path's timed
@@ -916,7 +916,7 @@ impl<'a> Ledger<'a> {
             volume: name_of(on.world, volume),
         });
         if class_of(on.world, volume) == VolumeClass::Box {
-            self.line.push((volume, dose_units(shock), t, index));
+            self.line.push((volume, energy_units(shock), t, index));
             self.entered.push((volume, t, position, index));
         }
         self.end = Some(RoundEnd::Left {
@@ -1029,7 +1029,7 @@ impl<'a> Ledger<'a> {
             .map(|ray| {
                 let doses = ray.doses.iter().filter(|(volume, _)| on.owned(*volume));
                 for &(volume, dose) in doses.clone() {
-                    self.field.push((volume, field_units(dose), t, index));
+                    self.field.push((volume, energy_units(dose), t, index));
                 }
                 Fragment {
                     end: on.struck.point(index, ray.end),

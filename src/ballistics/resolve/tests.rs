@@ -1932,20 +1932,27 @@ fn a_cone_doses_the_struck_tank_alone() {
 }
 
 /// THE POOL QUANTUM GATE: a body exit whose cone's whole emission `S/2` converts to no pool unit
-/// (`ballistics::pool_units_of`, the quantum a pool keeps) at the field's rate `r` (HP points per
-/// reference-mm, `spall_cone::hp_per_reference_mm`) is not thrown — no direction walked, no cone
-/// recorded, the crossing counting none — and one above it is, however far below a whole point:
-/// a pool keeps every pool unit, so a gate at a point would drop a dose the pool accumulates.
-/// Fixture: an 88 through `0.3/r` m of a factor-1 slab (spend ≈ `0.3/r` reference-mm, κ = 0.001,
-/// so `S/2` ≈ `1.5e-4/r` reference-mm, 0.15 of a pool unit at `r`, DERIVED), through ten times
-/// that slab at factor 10 (`S/2` ≈ 0.15 of a point, below the display's whole point, DERIVED),
-/// and through 20 mm of steel.
+/// (`ballistics::pool_units_of`, the quantum a pool keeps) at the energy rate is not thrown — no
+/// direction walked, no cone recorded, the crossing counting none — and one above it is, however
+/// far below a whole point: a pool keeps every pool unit, so a gate at a point would drop a dose
+/// the pool accumulates. Fixture: an 88 at 800 m/s through a factor-10 slab as thick as the
+/// readout drop at which it loses `0.3 / share` HP points' worth of energy, so `S/2` is about 0.15
+/// of a point, below the display's whole point (DERIVED from the force law, the slab about 3 mm at
+/// the shipped share); through the same slab at a thousandth of the factor, so it spends and loses
+/// a thousandth as much (the energy drop is linear in so small a readout drop) and `S/2` is about
+/// 0.15 of a pool unit (DERIVED); and through 20 mm of steel.
 #[test]
 fn a_cone_below_the_pool_quantum_is_not_thrown() {
-    let slab = 0.3 / crate::ballistics::spall_cone::hp_per_reference_mm() as f32;
+    let lost = 0.3 * crate::ballistics::energy_dose::joules_per_hp()
+        / crate::ballistics::spall_cone::energy_share() as f64;
+    let v_in = 800.0f32;
+    let v_out = ((v_in as f64).powi(2) - 2.0 * lost / FIXTURE_88.mass as f64).sqrt() as f32;
+    // Reference-mm over the factor's reference-mm per metre.
+    let slab = (capability(FIXTURE_88, v_in) - capability(FIXTURE_88, v_out)) / 10.0;
+    let unit_factor = 10.0 / crate::ballistics::POOL_UNITS_PER_HP as f32;
     for (thickness, factor, thrown) in [
-        (slab, 1.0, false),
-        (10.0 * slab, 10.0, true),
+        (slab, unit_factor, false),
+        (slab, 10.0, true),
         (0.02, STEEL, true),
     ] {
         let mut app = world_with_trimesh_plates(&[]);
@@ -1983,6 +1990,64 @@ fn a_cone_below_the_pool_quantum_is_not_thrown() {
                 .iter()
                 .map(|cone| cone.strength)
                 .collect::<Vec<_>>()
+        );
+    }
+}
+
+/// A BOUNCE'S SHOCK IS THE ENERGY THE ROUND LOST AT IT: the dose a bounce jars into the face it
+/// struck is `½ m (v_in² − v_out²)` joules, `m` the mass that meets the plate, as a line dose is
+/// the energy lost crossing a box, so it converts at the one energy rate; a round that loses more
+/// at the bounce jars the face harder. Fixture rounds of different mass and speed graze one
+/// HP-bearing slab at 75°, past the ricochet angle and too thick for any of them to overmatch. A
+/// shock read from the readout, the incidence or a constant fails here; the record's line dose for
+/// a bounce and every dose of energy converting at one rate rely on it.
+#[test]
+fn a_bounces_shock_is_the_energy_the_round_lost_there() {
+    let mut shocks: Vec<(f64, f32)> = [
+        (FIXTURE_MG, 755.0),
+        (FIXTURE_MG, 500.0),
+        (FIXTURE_88, 800.0),
+    ]
+    .into_iter()
+    .map(|(body, speed)| {
+        let mut gate = world_with_trimesh_plates(&[]);
+        let rotation = Quat::from_rotation_z(75.0_f32.to_radians());
+        let normal = rotation * Vec3::Y;
+        volume(
+            &mut gate,
+            Vec3::new(3.0, 0.4, 3.0),
+            Transform::from_translation(Vec3::new(DROP_FROM.x, 1.0, DROP_FROM.z) - normal * 0.2)
+                .with_rotation(rotation),
+            STEEL * 0.1,
+            Some(1000),
+        );
+        for _ in 0..8 {
+            gate.update();
+        }
+        let flown = driven(&mut gate, body, speed);
+        let Some(Decision::Bounce(bounce)) = flown.decisions.first() else {
+            panic!(
+                "{} kg at {speed} m/s bounces: {:?}",
+                body.mass,
+                impacts_of(&flown)
+            );
+        };
+        let (v_in, v_out) = (bounce.speed_in as f64, bounce.speed as f64);
+        let lost = 0.5 * body.mass as f64 * (v_in * v_in - v_out * v_out);
+        assert!(
+            (bounce.shock as f64 / lost - 1.0).abs() < 1.0e-5,
+            "{} kg at {speed} m/s: shock {} J against {lost} J lost",
+            body.mass,
+            bounce.shock
+        );
+        (lost, bounce.shock)
+    })
+    .collect();
+    shocks.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for pair in shocks.windows(2) {
+        assert!(
+            pair[0].1 < pair[1].1,
+            "more energy lost, a harder jar: {pair:?}"
         );
     }
 }

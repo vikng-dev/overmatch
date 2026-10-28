@@ -1,19 +1,21 @@
-// The energy-to-HP rate of the game's damage model: how a round's line dose to a hard pool turns into
-// HP points. Read by `src/ballistics/energy_dose.rs`, embedded and parsed once, validated at parse.
+// The energy-to-HP rate of the game's damage model: how every dose of energy turns into HP points.
+// Read by `src/ballistics/energy_dose.rs`, embedded and parsed once, validated at parse.
 //
 // A hard pool's line dose is the kinetic energy the round lost crossing it, ½ m (v_in² − v_out²),
 // shared among the volumes present at each depth by their cost (chord × factor); a round
-// that comes to rest inside it deals all it had left. One rate covers every hard pool, a tank's
-// modules and a tree's trunk alike: a pool's authored HP alone says how sturdy it is. Crew are
-// witnesses and keep their own law (the round's crew line rate, `wound` in `assets/rounds/`), and
-// a field converts at its own calibration (`assets/ballistics/spall_cone.ron`). The law is design
-// doc §6, `.agents/docs/design/armor-penetration-and-damage.md`.
+// that comes to rest inside it deals all it had left. A bounce's shock is the energy the round lost
+// at the face it struck, and a field's deposits are shares of the energy its source lost or drove
+// (`assets/ballistics/spall_cone.ron`). One rate covers all of them, a tank's modules and a tree's
+// trunk alike, a hard pool and a crew station alike for a field: a pool's authored HP alone says
+// how sturdy it is. A crew station's line dose alone keeps its own law (the round's crew line
+// rate, `wound` in `assets/rounds/`). The law is design doc §§5–6,
+// `.agents/docs/design/armor-penetration-and-damage.md`.
 //
 // PROVENANCE: every value is authored `(value, Kind("source or reason"))`, Kind one of Measured,
 // Derived, Tuned, Resolution, Unknown (`src/provenance.rs`); a value without one does not load.
 (
-    // Joules of energy lost per HP point. A box's line dose of E joules is E / this HP points, summed
-    // with its other doses of the shot and rounded once.
+    // Joules of energy lost per HP point. A box's dose of E joules is E / this HP points, summed
+    // with its other doses of the shot and converted to pool units once.
     joules_per_hp: (3000.0, Tuned("provisional (issue 113): the pools authored under the
         reference-mm line law keep their scale for the main gun. That law charged 10 HP per
         reference-mm; the reference 88 mm APCBC round (10.2 kg, nose factor 7/24) at its 773 m/s

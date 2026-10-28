@@ -16,6 +16,6 @@
     crew_hp: (30, Tuned("owner decision 2026-10-23, kept 2026-10-28 (#104), provisional: one pool
         for every crew station of every tank, revised if play shows it out of proportion to the
         tank's other pools. Crew is one shared entity across tanks, and the pool has no relation to
-        the crew box's size. The field's calibration in spall_cone.ron and the crew line rate in
+        the crew box's size. The fields' energy shares in spall_cone.ron and the crew line rate in
         the round files (assets/rounds/) are set against it")),
 )

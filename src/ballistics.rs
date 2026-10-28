@@ -37,10 +37,10 @@ mod mechanism;
 pub(crate) mod burst;
 
 /// The spall cone's shape data (half-angle, axis rule and the directions it is sampled by) and its
-/// calibration, the field's HP points per reference-mm.
+/// strength's share of the energy its round lost at the plate.
 pub(crate) mod spall_cone;
 
-/// The energy-to-HP rate a hard box's line dose converts at: joules per HP point.
+/// The energy-to-HP rate every dose of energy converts at: joules per HP point.
 pub(crate) mod energy_dose;
 
 /// The game's damage model: the shared authored crew HP pool and geometry-based pen cam bands.
@@ -343,11 +343,11 @@ pub(crate) fn round_in_domain(round: RoundBody, speed: f32) -> Result<(), String
     Ok(())
 }
 
-/// HP points per reference-mm of a dose authored in reference-mm (a bounce's shock, a witness's
-/// chord at the round's crew line rate): one HP point is 0.1 reference-mm (design doc §6).
-/// RESOLUTION: a unit, not a balance value. A hard box's line dose is energy and converts at the
-/// energy rate ([`energy_dose::joules_per_hp`], [`energy_units`]); the field at its own calibrated
-/// rate ([`spall_cone::hp_per_reference_mm`], [`field_units`]).
+/// HP points per reference-mm of the one dose still authored in reference-mm, a witness's chord at
+/// the round's crew line rate: one HP point is 0.1 reference-mm (design doc §6). RESOLUTION: a
+/// unit, not a balance value. Every other dose is energy and converts at the one energy rate
+/// ([`energy_dose::joules_per_hp`], [`energy_units`]): a hard box's line dose, a bounce's shock and
+/// every field deposit.
 pub(crate) const HP_PER_REFERENCE_MM: u64 = 10;
 
 /// Fixed-point dose units per reference-mm. Every dose contribution is quantized to whole units
@@ -394,23 +394,14 @@ pub(crate) fn dose_units(dose: f32) -> u64 {
     (f64::from(dose) * DOSE_UNITS_PER_REFERENCE_MM as f64).round() as u64
 }
 
-/// One FIELD dose contribution of `dose` reference-mm in the dose units a box's total is kept in:
-/// [`dose_units`] scaled by the field's HP points per reference-mm over the line's
-/// ([`spall_cone::hp_per_reference_mm`] / [`HP_PER_REFERENCE_MM`]), in integer arithmetic, so a
-/// box's per-shot total stays an integer sum, the same in every order. Every field deposit enters
-/// a total through this (a hard box's cone dose and a witness's alike); nothing on the line does.
-/// The deposit is quantized before it is scaled, so it converts to the same units wherever it is
-/// summed (the shot's tally, the pen cam record's emptying deposit). The product saturates.
-pub(crate) fn field_units(dose: f32) -> u64 {
-    dose_units(dose).saturating_mul(spall_cone::hp_per_reference_mm()) / HP_PER_REFERENCE_MM
-}
-
-/// One hard LINE dose contribution of `energy` joules in the dose units a box's total is kept in:
-/// the HP points the energy rate gives it ([`energy_dose::joules_per_hp`]) in units of
+/// One ENERGY dose contribution of `energy` joules in the dose units a box's total is kept in: the
+/// HP points the energy rate gives it ([`energy_dose::joules_per_hp`]) in units of
 /// [`DOSE_UNITS_PER_HP`], widened to f64 (exact), one IEEE division and multiply and a round to
-/// nearest, ties away from zero, so it is the same on every target. Every line deposit into a hard
-/// box enters a total through this; a witness's chord dose and a bounce's shock do not. A negative
-/// or NaN energy is none; the cast saturates.
+/// nearest, ties away from zero, so it is the same on every target. Every dose but a witness's
+/// chord enters a total through this: a hard box's line deposit, a bounce's shock and every field
+/// deposit (a hard box's and a witness's alike), so one joule is worth the same HP whatever put it
+/// there. A deposit converts to the same units wherever it is summed (the shot's tally, the pen cam
+/// record's emptying deposit). A negative or NaN energy is none; the cast saturates.
 pub(crate) fn energy_units(energy: f32) -> u64 {
     (f64::from(energy) / energy_dose::joules_per_hp() * DOSE_UNITS_PER_HP as f64).round() as u64
 }
@@ -449,9 +440,9 @@ pub(crate) fn least_shown_hp() -> f64 {
     (DOSE_UNITS_PER_HP - DOSE_UNITS_PER_POOL_UNIT / 2) as f64 / DOSE_UNITS_PER_HP as f64
 }
 
-/// The pool units one dose of `dose` reference-mm (a shock, a witness's chord) converts to:
-/// [`dose_units`] then [`pool_units_of`], the conversion a box's per-shot total takes. A negative
-/// or NaN dose converts to none.
+/// The pool units one dose of `dose` reference-mm (a witness's chord) converts to: [`dose_units`]
+/// then [`pool_units_of`], the conversion a box's per-shot total takes. A negative or NaN dose
+/// converts to none.
 #[cfg(test)]
 pub(crate) fn pool_units(dose: f32) -> u32 {
     pool_units_of(dose_units(dose))
@@ -460,13 +451,14 @@ pub(crate) fn pool_units(dose: f32) -> u32 {
 /// One shot's dose to each box it has reached, in whole dose units ([`dose_units`]), the pool units
 /// already taken for it and the pool units its pool actually lost. A box loses
 /// `pool_units_of(total)` over the shot, its total from the line, a bounce's shock and every spall
-/// cone summed first: each contribution quantized (a hard box's line deposit at the energy rate,
-/// [`energy_units`]; a field deposit at the field's rate, [`field_units`]), the integers summed,
-/// the sum converted to pool units once per box per shot, never per direction or per source, and
-/// never dependent on the order the contributions arrive in. No whole-point rounding happens here:
-/// a pool keeps every pool unit a shot takes, so doses below a point accumulate across shots.
-/// [`Self::settle`] takes what the running total has added since it last ran, so the pool falls as
-/// the shot goes and lands on the converted total when it ends.
+/// cone summed first: each contribution quantized (an energy, a hard box's line deposit, a shock or
+/// a field deposit, at the energy rate, [`energy_units`]; a witness's chord at
+/// [`HP_PER_REFERENCE_MM`], [`dose_units`]), the integers summed, the sum converted to pool units
+/// once per box per shot, never per direction or per source, and never dependent on the order the
+/// contributions arrive in. No whole-point rounding happens here: a pool keeps every pool unit a
+/// shot takes, so doses below a point accumulate across shots. [`Self::settle`] takes what the
+/// running total has added since it last ran, so the pool falls as the shot goes and lands on the
+/// converted total when it ends.
 ///
 /// Every figure here is this shot's own, never a difference of pool HP: a march step resolves one
 /// shell whole before the next, and one settle closes each armour mark, so what a shell finds in a
@@ -538,9 +530,16 @@ impl Settle {
 }
 
 impl ShotDose {
-    /// Add `amount` reference-mm on the line to `address`'s dose, from `context`.
+    /// Add `amount` reference-mm on the line (a witness's chord dose) to `address`'s dose, from
+    /// `context`.
     fn add(&mut self, address: Entity, amount: f32, context: DoseContext) {
         self.add_units(address, dose_units(amount), context);
+    }
+
+    /// Add `energy` joules (a bounce's shock) to `address`'s dose at the energy rate
+    /// ([`energy_units`]), from `context`.
+    fn add_energy(&mut self, address: Entity, energy: f32, context: DoseContext) {
+        self.add_units(address, energy_units(energy), context);
     }
 
     /// Add `units` dose units to `address`'s dose, from `context`.
@@ -580,20 +579,15 @@ impl ShotDose {
         }
     }
 
-    /// Add every dose of `doses`: a line dose (joules) at the energy rate ([`energy_units`]), a
-    /// field dose (reference-mm) at the field's HP per reference-mm ([`field_units`]); `context`
-    /// names where each came from.
+    /// Add every dose of `doses`, a line dose and a field dose alike joules at the energy rate
+    /// ([`energy_units`]); `context` names where each came from.
     fn add_all(
         &mut self,
         doses: &[mechanism::Dose],
         context: impl Fn(&mechanism::Dose) -> DoseContext,
     ) {
         for dose in doses {
-            let units = match dose.source {
-                mechanism::DoseSource::Line { .. } => energy_units(dose.amount),
-                mechanism::DoseSource::Field => field_units(dose.amount),
-            };
-            self.add_units(dose.address, units, context(dose));
+            self.add_units(dose.address, energy_units(dose.amount), context(dose));
         }
     }
 
@@ -1468,7 +1462,8 @@ pub enum ArmourMark {
         speed_out: f32,
         /// The volume owning the struck face.
         struck: Entity,
-        /// HP the bounce jarred into `struck` before its floor; armour has no pool and takes none.
+        /// The dose the bounce jarred into `struck`, joules: the kinetic energy the round lost at
+        /// the bounce. Armour has no pool and takes none.
         shock: f32,
     },
     /// Entered the material: came to rest inside it or out the far side.
@@ -1545,15 +1540,15 @@ pub struct VolumeCrossing {
 /// body it met, or the struck tank's horizon when it met none), and the boxes it dosed.
 pub struct SpallRay {
     pub end: Vec3,
-    /// The strength (reference-mm) the direction was thrown with: the cone's `S` times its profile.
+    /// The strength (J) the direction was thrown with: the cone's `S` times its profile.
     pub strength: f32,
-    /// The doses it addressed (volume, reference-mm), in entry order.
+    /// The doses it addressed (volume, J), in entry order.
     pub doses: Vec<(Entity, f32)>,
 }
 
 /// One spall cone — the field thrown from a body exit (design doc §5): origin, axis and field
-/// describe its shape; `spend`, the speeds and `strength` are its source's ([`walk::SpallSource`]);
-/// `rays` are its directions as marched, in stratum order.
+/// describe its shape; `spend`, `energy`, the speeds and `strength` are its source's
+/// ([`walk::SpallSource`]); `rays` are its directions as marched, in stratum order.
 #[cfg_attr(
     not(test),
     expect(
@@ -1567,14 +1562,16 @@ pub struct SpallCone {
     /// The field law and ratio its directions were weighted by: its exit layer's substance's.
     /// Its rim, the cone's half-angle, is [`spall_cone::FieldDescriptor::half_angle`].
     pub field: spall_cone::FieldDescriptor,
-    /// Reference-mm the round spent across the body it left.
+    /// Reference-mm the round spent across the body it left: a readout.
     pub spend: f32,
+    /// The kinetic energy (J) the round lost across the body it left.
+    pub energy: f32,
     /// m/s where the round entered the body.
     pub entry_speed: f32,
     /// m/s where it left it.
     pub exit_speed: f32,
-    /// The strength `S` (reference-mm) the directions were thrown with: direction `k` carries
-    /// `S·f_k`, and the cone emits `S/2` in all.
+    /// The strength `S` (J) the directions were thrown with, the cone's share of `energy`:
+    /// direction `k` carries `S·f_k`, and the cone emits `S/2` in all.
     pub strength: f32,
     pub rays: Vec<SpallRay>,
 }
@@ -1587,8 +1584,8 @@ pub struct BurstField {
     /// The burst law and ratio its directions were weighted by: the ring at the carried speed (its
     /// [`ArmourMark::Burst`]'s) over the burst's greatest sideways speed.
     pub field: spall_cone::FieldDescriptor,
-    /// The strength `S` (reference-mm) the directions were thrown with: direction `k` carries
-    /// `S·f_k`, and the field emits `S/2` in all.
+    /// The strength `S` (J) the directions were thrown with: direction `k` carries `S·f_k`, and
+    /// the field emits `S/2` in all.
     pub strength: f32,
     pub rays: Vec<SpallRay>,
 }
@@ -1779,11 +1776,11 @@ const MG_SHORTCIRCUIT_CALIBER_MAX: f32 = 0.020;
 /// builds no mesh or material, and writes no `Visibility` — a shell born here is a bare simulation
 /// entity, and [`view::plugin`] (client roots only) is what dresses one.
 pub fn sim_plugin(app: &mut App) {
-    // The spall cone's shape, its calibration and a burst's field are authored data: parsed and
+    // The spall cone's shape, its energy share and a burst's field are authored data: parsed and
     // validated here, while the app is built, so a malformed file stops startup rather than the
     // first throw.
     spall_cone::ConeShape::shipped();
-    spall_cone::hp_per_reference_mm();
+    spall_cone::energy_share();
     spall_cone::BurstFields::shipped();
     // The game's damage model validates the shared crew HP pool and hard-pool energy rate at startup.
     box_classes::BoxClasses::shipped();
@@ -3904,8 +3901,8 @@ fn resolve_replica_armor_contact(
 
 /// AUTHORITY: throw an armed round's burst field (design doc §5a, "The burst") from where `flight`
 /// stands, about its direction, at the carried `speed`, recording it as the shell's
-/// [`SpallMarks::burst`] and adding its doses to the shot's [`ShotDose`]. Its strength `S` is the
-/// burst's driven-mass energy at the burst fields' rate ([`spall_cone::BurstFields::strength`]),
+/// [`SpallMarks::burst`] and adding its doses to the shot's [`ShotDose`]. Its strength `S` (J) is
+/// the burst fields' share of its driven-mass energy ([`spall_cone::BurstFields::strength`]),
 /// its field the ring at ratio `speed / v_s` ([`spall_cone::BurstFields::field`]), walked through
 /// the volumes of `tank`, the fuze's, leaving none. A field whose emission converts to no pool unit
 /// is not thrown, as a cone's is not ([`throw_spall_cone`]); one outside its law's domain throws
@@ -3931,7 +3928,7 @@ fn throw_burst(
         tank,
         exited: &[],
     };
-    if pool_units_of(field_units(throw.strength * spall_cone::EMITTED_SHARE)) == 0 {
+    if pool_units_of(energy_units(throw.strength * spall_cone::EMITTED_SHARE)) == 0 {
         shell.spall.gated += 1;
         return;
     }
@@ -3956,7 +3953,7 @@ fn throw_burst(
     });
 }
 
-/// One field's throw: where from, about what axis, at what strength (reference-mm), through the
+/// One field's throw: where from, about what axis, at what strength (J), through the
 /// volumes of which tank, and leaving which volumes (a body exit's), which a direction starting
 /// inside one does not enter there.
 struct FieldThrow<'a> {
@@ -4050,14 +4047,14 @@ fn walk_field(
 /// Throw the spall cone of one body exit, appending it to the shell's record and its doses to the
 /// shot's [`ShotDose`] (design doc §5). Returns whether it was thrown.
 ///
-/// Strength `S` is [`walk::SpallSource::strength`], in reference-mm. A cone whose whole emission
-/// `S/2` converts to no pool unit at the field's rate ([`field_units`], the rate every one of its
-/// doses converts at; [`pool_units_of`], the quantum a pool keeps) is not thrown: no direction is
-/// walked and nothing is recorded. `S/2` is the most one box can take from it, since every
-/// direction doses a box at most once and the field's weights emit `S/2` in all
-/// ([`spall_cone::EMITTED_SHARE`]). Otherwise the cone is spread by the
-/// ball law at the source's ratio ([`walk::SpallSource::debris_ratio`]): direction `k` of the
-/// spread ([`spall_cone::Spread`]) carries `S·f_k` and stands for `1/N` of the cone, walked
+/// Strength `S` is [`walk::SpallSource::strength`], in joules: the cone's share of the energy the
+/// round lost across the body. A cone whose whole emission `S/2` converts to no pool unit at the
+/// energy rate ([`energy_units`], the rate every one of its doses converts at; [`pool_units_of`],
+/// the quantum a pool keeps) is not thrown: no direction is walked and nothing is recorded. `S/2`
+/// is the most one box can take from it, since every direction doses a box at most once and the
+/// field's weights emit `S/2` in all ([`spall_cone::EMITTED_SHARE`]). Otherwise the cone is spread
+/// by the ball law at the source's ratio ([`walk::SpallSource::debris_ratio`]): direction `k` of
+/// the spread ([`spall_cone::Spread`]) carries `S·f_k` and stands for `1/N` of the cone, walked
 /// through the volumes of `tank`, the struck tank, alone ([`walk_field`]). A ratio outside the
 /// law's domain throws nothing and logs why; substances refuse one at load, so only a fixture
 /// reaches it.
@@ -4075,7 +4072,7 @@ fn throw_spall_cone(
         .as_deref()
         .map_or(spall_cone::ConeShape::shipped(), |law| &law.0);
     let strength = source.strength();
-    if pool_units_of(field_units(strength * spall_cone::EMITTED_SHARE)) == 0 {
+    if pool_units_of(energy_units(strength * spall_cone::EMITTED_SHARE)) == 0 {
         spall.gated += 1;
         return false;
     }
@@ -4103,6 +4100,7 @@ fn throw_spall_cone(
         axis: throw.axis,
         field: spread.field(),
         spend: source.spend,
+        energy: source.energy,
         entry_speed: source.entry_speed,
         exit_speed: source.exit_speed,
         strength,
@@ -4241,8 +4239,8 @@ mod tests {
 
     /// The game's damage model keeps fractions: shots whose dose is each below half an HP point
     /// accumulate in the pool and eventually empty it, and the pool shows full until a whole point
-    /// is gone. Each fixture shot doses 0.47 HP points (a 0.047 reference-mm shock) into a 3-point
-    /// pool, every shot its own [`ShotDose`]. A per-shot rounding to whole points (which takes none
+    /// is gone. Each fixture shot doses 0.47 HP points (a 0.047 reference-mm chord dose) into a
+    /// 3-point pool, every shot its own [`ShotDose`]. A per-shot rounding to whole points (which takes none
     /// of each and never empties the pool), a display that rounds down or to nearest (which shows a
     /// lost point after the first or second shot), or an emptying short of the whole pool fails
     /// here. Every view reads [`ComponentHealth::shown`] and relies on it.
@@ -4413,14 +4411,14 @@ mod tests {
         assert_eq!(shown_after(units - 1), 30);
     }
 
-    /// EACH SOURCE CONVERTS AT ITS OWN RATE: a field deposit at the field's HP points per
-    /// reference-mm ([`spall_cone::hp_per_reference_mm`]); a hard box's line deposit, joules, at
-    /// the energy rate ([`energy_dose::joules_per_hp`]); a bounce's shock and a witness's chord
-    /// dose at [`HP_PER_REFERENCE_MM`]; mixed deposits sum as whole dose units, in either order,
-    /// before the one conversion. The pool quantum gate and the pen cam's reading of which boxes a
-    /// cone knocks out rely on every field deposit converting at the field's rate, and every hard
-    /// pool on its line dose converting at the one energy rate. Fixture doses: 1 reference-mm in
-    /// the field and the shock, two HP points' worth of joules on the line.
+    /// EVERY JOULE CONVERTS AT ONE RATE: a field deposit, a hard box's line deposit and a bounce's
+    /// shock, each joules, at the energy rate ([`energy_dose::joules_per_hp`]), so the same energy
+    /// is the same HP whatever put it there; a witness's chord dose at [`HP_PER_REFERENCE_MM`];
+    /// mixed deposits sum as whole dose units, in either order, before the one conversion. The
+    /// pool quantum gate and the pen cam's reading of which boxes a cone knocks out rely on every
+    /// field deposit converting at the rate its strength's units are read at, and every hard pool
+    /// on its dose converting at the one energy rate. Fixture doses: three, two and one HP points'
+    /// worth of joules in the field, on the line and in the shock, and 1 reference-mm of chord dose.
     #[test]
     fn each_dose_converts_at_its_sources_rate() {
         use mechanism::{Dose, DoseSource};
@@ -4438,27 +4436,42 @@ mod tests {
             amount,
             source: DoseSource::Field,
         };
-        let points = |doses: &[Dose], shocks: &[f32]| -> u32 {
+        let points = |doses: &[Dose], shocks: &[f32], chords: &[f32]| -> u32 {
             let mut shot = ShotDose::default();
             shot.add_all(doses, |_| FIXTURE_CONTEXT);
             for shock in shocks {
-                shot.add(target, *shock, FIXTURE_CONTEXT);
+                shot.add_energy(target, *shock, FIXTURE_CONTEXT);
+            }
+            for chord in chords {
+                shot.add(target, *chord, FIXTURE_CONTEXT);
             }
             shown_points(pool_units_of(shot.tallies[0].units))
         };
-        let field_rate = u32::try_from(spall_cone::hp_per_reference_mm()).unwrap();
-        let shock_rate = u32::try_from(HP_PER_REFERENCE_MM).unwrap();
-        let two_points = (2.0 * energy_dose::joules_per_hp()) as f32;
-        assert_eq!(points(&[field(1.0)], &[]), field_rate, "a field deposit");
-        assert_eq!(points(&[line(two_points)], &[]), 2, "a line deposit");
-        assert_eq!(points(&[], &[1.0]), shock_rate, "a shock or a chord dose");
+        let joules = |points: f64| (points * energy_dose::joules_per_hp()) as f32;
+        let chord_rate = u32::try_from(HP_PER_REFERENCE_MM).unwrap();
         assert_eq!(
-            points(&[field(1.0), line(two_points)], &[1.0]),
-            field_rate + 2 + shock_rate
+            points(&[field(joules(3.0))], &[], &[]),
+            3,
+            "a field deposit"
+        );
+        assert_eq!(points(&[line(joules(2.0))], &[], &[]), 2, "a line deposit");
+        assert_eq!(points(&[], &[joules(1.0)], &[]), 1, "a shock");
+        assert_eq!(points(&[], &[], &[1.0]), chord_rate, "a chord dose");
+        assert_eq!(
+            points(
+                &[field(joules(3.0)), line(joules(2.0))],
+                &[joules(1.0)],
+                &[1.0]
+            ),
+            3 + 2 + 1 + chord_rate
         );
         assert_eq!(
-            points(&[line(two_points), field(1.0)], &[1.0]),
-            field_rate + 2 + shock_rate
+            points(
+                &[line(joules(2.0)), field(joules(3.0))],
+                &[joules(1.0)],
+                &[1.0]
+            ),
+            3 + 2 + 1 + chord_rate
         );
     }
 
@@ -8550,10 +8563,11 @@ mod march_tests {
         // at ratio about 3.3 (the carried speed over 240 m/s) a band 7–27° off the axis about 17°
         // (DERIVED, at the shipped 10° half-width); its tree stands 2 m past the burst, 0.6 m off
         // the axis (17°, DERIVED), clear of the nose piece flying on along the line, with a pool
-        // the armed-on tree's own exit cone cannot empty (DERIVED: that cone's strength is its
-        // 14 reference-mm spend at a wood rear factor of 40 over the reference 1000, under
-        // 0.6 reference-mm, so under 20 HP at the field's 70 per reference-mm) and the 1 MJ
-        // burst's field empties from any one direction.
+        // the armed-on tree's own exit cone cannot empty (DERIVED: the round loses about 0.43 MJ
+        // crossing the trunk's 14 reference-mm, so that cone emits about 64 HP points over its
+        // whole 26° cone, of which the beside trunk, 5.2 m from the exit and 0.6 m off its axis,
+        // catches roughly a seventh, near 9 HP points) and the 1 MJ burst's field empties from
+        // any one direction.
         let exit = Vec3::new(0.0, 2.5, -5.0 - TRUNK_RADIUS_AT_2_5_M);
         let centre = exit + Vec3::NEG_Z * 3.2;
         let base = Vec3::new(0.6, 0.0, centre.z - 2.0);

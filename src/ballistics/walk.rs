@@ -76,7 +76,7 @@ use super::mechanism::{
     Control, Dose, DoseSource, Effect, Geometry, Limits, Mechanism, OvermatchProjection,
     overlap_factor,
 };
-use crate::substances::{REFERENCE_FACTOR, SubstanceError, SubstanceId, SubstanceRegistry};
+use crate::substances::{SubstanceError, SubstanceId, SubstanceRegistry};
 
 #[cfg(test)]
 mod tests;
@@ -1795,14 +1795,18 @@ pub struct SpallSource {
     pub exited: Vec<Entity>,
     /// Reference-mm the mechanism spent across this body: its readout drop over the body's
     /// stretches, each stretch's drop shared among the samples by the factor each was resisted by,
-    /// summed over the reached members.
+    /// summed over the reached members. A readout (a burst fuze arms on it), not the cone's
+    /// strength.
     pub spend: f32,
-    /// `f_rear`: the factor of the body's last layer before the exit, the highest over the reached
-    /// members ([`ExitMember::rear_factor`]).
-    pub rear_factor: f32,
-    /// `λ`, the field law's ratio of the cone thrown here: the debris ratio of the rear layer
-    /// [`Self::rear_factor`] reads, the member with the highest factor's, the greatest ratio on a
-    /// tie ([`ExitMember::debris_ratio`]).
+    /// The kinetic energy (J) the round lost across this body: its energy drop over the body's
+    /// stretches, `½ m (v_before² − v_after²)` with `m` the mass that meets the plate
+    /// ([`super::mechanism::Mechanism::energy`]), each stretch's drop shared among the samples as
+    /// the spend's is, summed over the reached members. Across a body the whole disc crosses it is
+    /// `½ m (v_entry² − v_exit²)`, the energy the line's dose deals the body's volumes.
+    pub energy: f32,
+    /// `λ`, the field law's ratio of the cone thrown here: the debris ratio of the body's last layer
+    /// before the exit, the reached member's of the highest rear factor, the greatest ratio on a
+    /// tie ([`ExitMember::rear_factor`], [`ExitMember::debris_ratio`]).
     pub debris_ratio: f32,
     /// The round's speed (m/s) where the earliest member entered the body.
     pub entry_speed: f32,
@@ -1810,35 +1814,21 @@ pub struct SpallSource {
     pub exit_speed: f32,
     /// Fraction of the disc whose ray reached this exit.
     pub coverage: f32,
-    /// The calibre (m) of the hole: the shot's ([`Shot::caliber`]), the penetrator's for a
-    /// sub-calibre round.
-    pub caliber: f32,
 }
 
 impl SpallSource {
-    /// The cone's strength against the shipped reference calibre
-    /// ([`super::spall_cone::reference_calibre`]); [`Self::strength_against`] states the law.
+    /// The cone's strength at the shipped energy share ([`super::spall_cone::energy_share`]);
+    /// [`Self::strength_at`] states the law.
     pub fn strength(&self) -> f32 {
-        self.strength_against(super::spall_cone::reference_calibre())
+        self.strength_at(super::spall_cone::energy_share())
     }
 
-    /// The cone's strength `S = spend × κ × (v_exit / v_entry)² × (d / d_ref)²`
-    /// (reference-mm), `κ = f_rear / f_ref` ([`Self::rear_factor`] over [`REFERENCE_FACTOR`]), `d`
-    /// the hole's calibre ([`Self::caliber`]) and `d_ref` = `reference` (m): the spend at the exit,
-    /// scaled by how competent the exit material's debris is against the reference steel, by the
-    /// fraction of the round's kinetic energy left across the body, and by the hole's area against
-    /// the reference's. κ is exactly 1 for a body whose last layer is the reference and the area
-    /// term exactly 1 for a hole of the reference calibre (`d / d = 1` in IEEE), so such a body's
-    /// strength is `spend × ratio²` to the bit. Zero for a round that entered at rest.
-    pub(crate) fn strength_against(&self, reference: f32) -> f32 {
-        if self.entry_speed > 0.0 {
-            let ratio = self.exit_speed / self.entry_speed;
-            let kappa = self.rear_factor / REFERENCE_FACTOR;
-            let hole = self.caliber / reference;
-            self.spend * kappa * ratio * ratio * hole * hole
-        } else {
-            0.0
-        }
+    /// The cone's strength `S = share × energy` (J): `share` of the kinetic energy the round lost
+    /// across the body ([`Self::energy`]), one IEEE f32 product. Whatever the round, the plate or
+    /// the exit material, a round that loses more energy across a body throws a stronger cone,
+    /// and one that loses none throws none.
+    pub(crate) fn strength_at(&self, share: f32) -> f32 {
+        share * self.energy
     }
 }
 
@@ -2734,9 +2724,6 @@ pub struct TransitRequest {
     /// The spawn-anchored basis, parallel-transported onto the bent axis. Never re-derived.
     pub frame: DiscFrame,
     pub radius: f32,
-    /// The shot's calibre ([`Shot::caliber`]): the hole each spall source of the crossing is
-    /// thrown from.
-    pub caliber: f32,
     /// k — the corridor supplied to [`finish`] must sample the disc the same way.
     pub samples: usize,
     /// The entities the entrance crossing engaged, sorted. [`finish`] checks the supplied corridor's
@@ -2856,7 +2843,6 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Begin {
         origin: handoff,
         frame: entrance.frame.transport(entrance.axis, Vec3::from(bent)),
         radius: entrance.radius,
-        caliber: shot.caliber,
         samples: entrance.samples(),
         entrance_entities,
         entrance_primitives: event.primitives.clone(),
@@ -3053,7 +3039,6 @@ pub(crate) fn finish<M: Mechanism>(
         advanced.stop,
         transit.axis,
         transit.samples(),
-        request.caliber,
     );
 
     Ok(ResolutionPlan {
@@ -3186,8 +3171,9 @@ fn advance_through<M: Mechanism>(
 /// throws nothing. Body boundaries are run ends or factor drops on their sample, each a change of
 /// substance set, so they are interfaces and every stretch lies wholly inside or wholly outside a
 /// member's body: a stretch belongs to it
-/// when its midpoint does. A stretch's readout drop is shared among its samples by the factor each
-/// was resisted by — the share the rigid force law gives each sample of the disc-mean force.
+/// when its midpoint does. A stretch's readout drop, and its energy drop alike, is shared among its
+/// samples by the factor each was resisted by — the share the rigid force law gives each sample of
+/// the disc-mean force.
 fn spall_sources<M: Mechanism>(
     mechanism: &M,
     exits: &[BodyExit],
@@ -3196,13 +3182,15 @@ fn spall_sources<M: Mechanism>(
     direction: Vec3,
     // k: the disc's sample count.
     disc: usize,
-    // The hole's calibre (m).
-    caliber: f32,
 ) -> Vec<SpallSource> {
-    let disc_spend: Vec<f64> = stretches
+    // Each stretch's `(readout drop, energy drop)` over the whole disc.
+    let disc_drops: Vec<(f64, f64)> = stretches
         .iter()
         .map(|stretch| {
-            mechanism.reference_mm(stretch.before) - mechanism.reference_mm(stretch.after)
+            (
+                mechanism.reference_mm(stretch.before) - mechanism.reference_mm(stretch.after),
+                mechanism.energy(stretch.before) - mechanism.energy(stretch.after),
+            )
         })
         .collect();
     let mut out = Vec::new();
@@ -3215,9 +3203,9 @@ fn spall_sources<M: Mechanism>(
         if reached.is_empty() {
             continue;
         }
-        let mut spend = 0.0f64;
+        let (mut spend, mut energy) = (0.0f64, 0.0f64);
         for member in &reached {
-            for (stretch, drop) in stretches.iter().zip(&disc_spend) {
+            for (stretch, (drop, lost)) in stretches.iter().zip(&disc_drops) {
                 let mid = 0.5 * (stretch.start + stretch.end);
                 if !(member.start <= mid && mid < member.end) {
                     continue;
@@ -3230,6 +3218,7 @@ fn spall_sources<M: Mechanism>(
                     .map_or(0.0, |(_, f)| *f as f64);
                 if total > 0.0 {
                     spend += drop * own / total;
+                    energy += lost * own / total;
                 }
             }
         }
@@ -3273,10 +3262,7 @@ fn spall_sources<M: Mechanism>(
             substances: exit.substances.clone(),
             exited: exited.into_iter().collect(),
             spend: spend as f32,
-            rear_factor: reached
-                .iter()
-                .map(|member| member.rear_factor)
-                .fold(0.0, f32::max),
+            energy: energy as f32,
             debris_ratio: reached
                 .iter()
                 .map(|member| (member.rear_factor, member.debris_ratio))
@@ -3285,7 +3271,6 @@ fn spall_sources<M: Mechanism>(
             entry_speed: mechanism.speed(entry) as f32,
             exit_speed: mechanism.speed(exit_state) as f32,
             coverage: (count as f64 / disc as f64) as f32,
-            caliber,
         });
     }
     out.sort_by(|a, b| a.t.total_cmp(&b.t));

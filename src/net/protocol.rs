@@ -179,14 +179,19 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// from its own data, and peers on opposite sides would fly one shot on different drag and range
 /// tables even though the drag change adds no wire fields.
 ///
-/// REV 37 (the game's damage model keeps fractional pools): [`VolumeSnapshot`]'s `held` (was
-/// `hp`), a record's `WireComponent::held` (was `hp`) and `WireDose::taken` (was `lost`) carry pool
-/// units (`ballistics::POOL_UNITS_PER_HP`, a thousandth of an HP point) instead of whole points.
-/// Postcard writes a renamed `u32` the same, so a REV 36 peer would read every pool a thousand
-/// times fuller: own-type graph and REV move. `WireDose` gains `shown_taken`, the shown HP points
-/// the shot took counted settle by settle, sent where another round dosed the pool between the
-/// shot's marks and what it held at the shot less `taken` does not give them. Own-type graph
-/// moves.
+/// REV 37 (the game's damage model keeps fractional pools, and every field's strength is energy):
+/// [`VolumeSnapshot`]'s `held` (was `hp`), a record's `WireComponent::held` (was `hp`) and
+/// `WireDose::taken` (was `lost`) carry pool units (`ballistics::POOL_UNITS_PER_HP`, a thousandth
+/// of an HP point) instead of whole points. Postcard writes a renamed `u32` the same, so a REV 36
+/// peer would read every pool a thousand times fuller: own-type graph and REV move. `WireDose`
+/// gains `shown_taken`, the shown HP points the shot took counted settle by settle, sent where
+/// another round dosed the pool between the shot's marks and what it held at the shot less `taken`
+/// does not give them. Own-type graph moves. In the same revision `WireCone::strength` and every
+/// hit dose of a cone's palette carry joules instead of reference-mm (a spall cone's strength a
+/// share of the energy its round lost at the plate, a burst's scaled from the energy its explosive
+/// drives its wall with), and a bounce's shock enters `WireDose::line` at the energy rate: a
+/// REV 36 client would read the strengths in the wrong units and part its potency bands at a rate
+/// per reference-mm.
 pub const PROTOCOL_REV: u32 = 37;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
@@ -1951,15 +1956,18 @@ mod tests {
         );
     }
 
-    /// The game's damage model sends box doses in HP points before conversion, and every pool
-    /// figure (a crew snapshot's, a record's) in pool units. Reference-mm record doses used the
-    /// same scalar types through REV 35, and whole-point pools through REV 36, so the protocol
-    /// revision must separate each meaning even when the wire bytes are laid out the same; the pen
-    /// cam, the damage panel and the HUD's cues rely on it. A unit change that forgets the bump
-    /// fails here.
+    /// The game's damage model sends box doses in HP points before conversion, field strengths and
+    /// hit doses in joules, and every pool figure (a crew snapshot's, a record's) in pool units.
+    /// Reference-mm record doses used the same scalar types through REV 35, and whole-point pools
+    /// and reference-mm field strengths through REV 36, so the protocol revision must separate each
+    /// meaning even when the wire bytes are laid out the same; the pen cam's bands, the damage panel
+    /// and the HUD's cues rely on it. A unit change that forgets the bump fails here.
     #[test]
     fn every_dose_and_pool_unit_uses_a_distinct_protocol() {
-        for (rev, what) in [(35, "reference-mm record doses"), (36, "whole-point pools")] {
+        for (rev, what) in [
+            (35, "reference-mm record doses"),
+            (36, "whole-point pools and reference-mm field strengths"),
+        ] {
             let older = protocol_fingerprint_for(
                 WIRE_SURFACE_HASH,
                 WIRE_TYPES_HASH,
