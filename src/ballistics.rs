@@ -8621,6 +8621,66 @@ mod march_tests {
         );
     }
 
+    /// A CHORD ACROSS A SEGMENT SEAM CHARGES BOTH LOCAL POOLS AND CONSERVES ENERGY (the game's
+    /// damage model, issue 149): an oblique line crosses the fixture trunk's base and middle
+    /// segments, in either travel order. Each pool takes its own recorded line dose at the one
+    /// energy rate; together those doses equal the round's kinetic energy drop, and the top
+    /// segment stays full. Local breaks rely on both addresses surviving collection and settlement.
+    /// A shared root address, charging only the entrance segment, or charging the whole crossing
+    /// to both segments reds this. Fixture data: pools large enough that neither empties.
+    #[test]
+    fn a_chord_across_two_segments_charges_each_pool_its_own_energy() {
+        use crate::trees::tests::fixture_kind_of;
+        for direction in [Vec3::new(0.0, 0.6, -0.8), Vec3::new(0.0, -0.6, 0.8)] {
+            let mut app = tree_world();
+            let base = Vec3::new(0.0, 0.0, -5.0);
+            let tree = spawn_tree(&mut app, &fixture_kind_of("Wood", 100_000), base, 0);
+            settle(&mut app);
+            march_round(
+                &mut app,
+                fixture_round(FIXTURE_88, direction * 800.0),
+                base + Vec3::Y * 2.0 - direction * 2.0,
+                direction,
+                3,
+            );
+            let pools = segment_pools(&app, tree);
+            let world = app.world_mut();
+            let segments = world.get::<Children>(tree).unwrap();
+            let addresses = [segments[0], segments[1]];
+            let marks = world.query::<&PenetrationMarks>().single(world).unwrap();
+            let [
+                ArmourMark::Crossing {
+                    speed_in,
+                    volumes,
+                    end: CrossingEnd::Exit { speed, .. },
+                    ..
+                },
+            ] = marks.log.as_slice()
+            else {
+                panic!("one continuous crossing of the seam: {:?}", marks.log);
+            };
+            assert_eq!(volumes.len(), 2, "both segments retain their own address");
+            for (k, address) in addresses.into_iter().enumerate() {
+                let crossed = volumes.iter().find(|v| v.volume == address).unwrap();
+                assert!(crossed.chord > 0.0 && crossed.energy > 0.0);
+                assert_eq!(
+                    pools[k].capacity() - pools[k].held(),
+                    pool_units_of(energy_units(crossed.energy)),
+                    "segment {k} takes only its own line dose, direction {direction:?}"
+                );
+            }
+            let lost = 0.5
+                * f64::from(FIXTURE_88.mass)
+                * (f64::from(*speed_in).powi(2) - f64::from(*speed).powi(2));
+            let deposited: f64 = volumes.iter().map(|v| f64::from(v.energy)).sum();
+            assert!(
+                (deposited / lost - 1.0).abs() < 1e-5,
+                "the segment doses sum to the kinetic energy drop: {deposited} vs {lost}"
+            );
+            assert_eq!(pools[2].held(), pools[2].capacity(), "the top stays full");
+        }
+    }
+
     /// The fixture trunk's near face at 2.5 m up, on a line down -Z through its axis: DERIVED from
     /// the taper (0.2 m to 0.1 m over the second 2 m segment, 0.175 m at 0.5 m in).
     const TRUNK_RADIUS_AT_2_5_M: f32 = 0.175;
