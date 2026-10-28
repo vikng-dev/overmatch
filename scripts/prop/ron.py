@@ -1,8 +1,7 @@
 """A reader for the RON subset the tree assets are written in.
 
-`assets/trees/species.ron`, every `<id>.tree.ron` and the substance registry
-`assets/materials/materials.ron` are RON (the game's own format, read in Rust by `ron`). This
-reader covers what those files use: line and block comments, the `#![enable(..)]` attribute line,
+`assets/trees/species.ron` and every `<id>.tree.ron` are RON (the game's own format, read in Rust
+by `ron`). This reader covers what those files use: line and block comments, the `#![enable(..)]` attribute line,
 strings, numbers, `true`/`false`, named structs `Name(a: 1)`, tuple structs `Name(1, "x")`, unit
 variants `Name`, anonymous tuples `(1, 2)`, anonymous structs `(a: 1)`, lists and maps. It is not
 a RON implementation and refuses anything else by name.

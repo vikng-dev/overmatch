@@ -53,20 +53,13 @@
     doses: [
         (
             volume: "Hull_MG_Barrel",
-            line: 14.092362,
+            line: 1.0847467,
             field: 0.0,
-            lost: 4,
+            lost: 1,
             entered: Some((0.5790005, 1.6069431, -2.3500004)),
         ),
     ],
-    consequences: [
-        (
-            t: 0.0,
-            volume: "Hull_MG_Barrel",
-            state: Lost,
-            function: Some("BowMgBarrel"),
-        ),
-    ],
+    consequences: [],
     components: [
         (
             name: "Ammo_L_0",

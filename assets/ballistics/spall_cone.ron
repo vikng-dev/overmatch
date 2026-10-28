@@ -36,8 +36,9 @@
         reference-mm). The count changes how finely a box's dose is resolved, never the emitted
         total")),
 
-    // The field's calibration: HP points per reference-mm of field dose, where the line converts
-    // at `ballistics::HP_PER_REFERENCE_MM`. A field deposit of d reference-mm enters a box's
+    // The field's calibration: HP points per reference-mm of field dose, where a witness's chord
+    // and a bounce's shock convert at `ballistics::HP_PER_REFERENCE_MM` (a hard box's line dose is
+    // energy, at `energy_dose.ron`'s rate). A field deposit of d reference-mm enters a box's
     // per-shot dose as d × this / that, in whole dose units; the cone's strength S stays in
     // reference-mm. It sets the potency of every cone at once and nothing else: the shape and the
     // field law both conserve a cone's emitted total.

@@ -2005,7 +2005,8 @@ fn only_a_softer_step_throws() {
 }
 
 /// Enough capability and the same stack perforates: full cost spent, the crewman charged for HIS
-/// chord at HIS factor (§13.2's damage law — no ownership, no argmax), and the exit throws spall.
+/// chord at HIS factor (§13.2's damage law — no ownership, no argmax), the doses the energy the
+/// round lost, the crewman's the energy lost in him, and the exit throws spall.
 #[test]
 fn a_perforation_charges_every_entity_for_its_own_material() {
     let laws = WalkLaws::default();
@@ -2027,18 +2028,38 @@ fn a_perforation_charges_every_entity_for_its_own_material() {
         .find(|d| d.address == volume(2))
         .expect("the crewman transited must be charged");
     assert!((crew.line_chord().unwrap() - 0.3).abs() < 1.0e-3);
+    let cost = |dose: &Dose| match dose.source {
+        DoseSource::Line { cost, .. } => cost,
+        DoseSource::Field => panic!("a line dose"),
+    };
     assert!(
-        (crew.amount - 3.0).abs() < 0.05,
-        "flesh charges its own factor"
+        (cost(crew) - 3.0).abs() < 0.05,
+        "the crewman's cost is his own factor's"
+    );
+    let (round, state) = solid(AP_88_CAPABILITY);
+    let lost = 0.5 * round.body().mass as f64 * (state.speed.powi(2) - plan.state.speed.powi(2));
+    let dealt: f64 = plan.deposits.iter().map(|dose| dose.amount as f64).sum();
+    assert!(
+        (dealt / lost - 1.0).abs() < 1.0e-5,
+        "the doses are the energy lost: {dealt} J against {lost} J"
     );
     assert!(!plan.spall.is_empty());
+    // The crewman is crossed after the plate, at the plate's exit speed: his dose is what the
+    // round lost behind it, never his cost's share of the whole crossing's energy.
+    let behind = plan.spall[0].exit_speed as f64;
+    let his = 0.5 * round.body().mass as f64 * (behind.powi(2) - plan.state.speed.powi(2));
+    assert!(
+        (crew.amount as f64 / his - 1.0).abs() < 1.0e-3,
+        "the crewman's dose is the energy lost in him: {} J against {his} J",
+        crew.amount
+    );
 }
 
 /// Overmatch charges the PERPENDICULAR projection rather than the oblique chord (§4: it cannot
 /// present its slope to a round that dwarfs it) — and the projection reaches every CONSEQUENCE.
-/// A spall source's spend is the mechanism's readout drop and §6 defines transit damage from the
-/// cost paid, so a projection that stopped at `cost_spent` would spend 15 while throwing spall and
-/// depositing damage for 30.
+/// A spall source's spend is the mechanism's readout drop and §6 doses the energy the round lost,
+/// so a projection that stopped at `cost_spent` would spend 15 while throwing spall for 30 and
+/// dosing the energy of 30.
 #[test]
 fn overmatch_charges_the_perpendicular_projection_everywhere() {
     let laws = WalkLaws::default();
@@ -2067,9 +2088,15 @@ fn overmatch_charges_the_perpendicular_projection_everywhere() {
         exit.spend
     );
     let deposit = &plan.deposits[0];
+    let DoseSource::Line { cost, .. } = deposit.source else {
+        panic!("a line dose: {deposit:?}");
+    };
+    assert!((cost - 15.0).abs() < 0.2, "deposit cost {cost}");
+    let (round, state) = solid(AP_88_CAPABILITY);
+    let lost = 0.5 * round.body().mass * (state.speed.powi(2) - plan.state.speed.powi(2)) as f32;
     assert!(
-        (deposit.amount - 15.0).abs() < 0.2,
-        "deposit {}",
+        (deposit.amount / lost - 1.0).abs() < 1.0e-4,
+        "the projected crossing deals the energy it took: {} J against {lost} J",
         deposit.amount
     );
     assert!(
@@ -3293,7 +3320,8 @@ fn scalar_outcome(
 /// plates — abutting, overlapping, at random obliquity, overmatched or not — and random
 /// capabilities, the solid-shot mechanism advancing through the ordered encounters matches the
 /// scalar path ([`scalar_outcome`]) to float precision: the same verdict, the rest point, the
-/// residual speed, the reference-mm spent and every deposit. Every number is fixture data.
+/// residual speed, the reference-mm spent and every deposit's chord and cost; and the deposits'
+/// doses sum to the energy the round lost. Every number is fixture data.
 ///
 /// Every case is accounted for. A case is not compared in exactly two classes: the entrance
 /// decides no transit (a ricochet: neither path advances anything), or the crossing's cost lies
@@ -3419,9 +3447,9 @@ fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
         let deposits: BTreeMap<Entity, (f64, f64)> = new
             .deposits
             .iter()
-            .map(|deposit| {
-                let chord = deposit.line_chord().expect("a line dose");
-                (deposit.address, (chord as f64, deposit.amount as f64))
+            .map(|deposit| match deposit.source {
+                DoseSource::Line { chord, cost } => (deposit.address, (chord as f64, cost as f64)),
+                DoseSource::Field => panic!("case {case}: a field dose on the line"),
             })
             .collect();
         assert_eq!(
@@ -3436,6 +3464,14 @@ fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
                 "case {case}: {entity:?} dosed ({chord}, {cost}) against ({old_chord}, {old_cost})"
             );
         }
+        // The doses are the energy the round lost, all of it on a rest: each an f32 of its f64
+        // share, so they sum to it within a few f32 roundings.
+        let dealt: f64 = new.deposits.iter().map(|dose| dose.amount as f64).sum();
+        let lost = 0.5 * body.mass as f64 * (state.speed.powi(2) - new.state.speed.powi(2));
+        assert!(
+            (dealt - lost).abs() <= 1.0e-6 * lost + 1.0e-3,
+            "case {case}: the doses deal {dealt} J of the {lost} J lost"
+        );
     }
     assert_eq!(
         compared + ricochets + knife_edges,
@@ -3503,7 +3539,7 @@ fn a_same_substance_seam_does_not_change_the_outcome() {
     let outcome = |encounters: &[Encounter]| {
         let advanced =
             advance_through(&round, state, encounters, &Limits { rest: 0.0 }, &geometry).unwrap();
-        let chords: Vec<f64> = advanced.doses.values().map(|(chord, _)| *chord).collect();
+        let chords: Vec<f64> = advanced.doses.values().map(|line| line.chord).collect();
         (advanced.stop, advanced.state.speed, chords)
     };
     let unsplit = outcome(&[stretch(0.0, length, true, &[(1, steel)])]);
@@ -3528,6 +3564,128 @@ fn a_same_substance_seam_does_not_change_the_outcome() {
         (None, 0.0, vec![length, length]),
         "duplicated in the same substance: both copies are dosed, neither owns the chord"
     );
+}
+
+/// The game's damage model gives each touching hard pool the energy lost at its own depths.
+/// The walk joins same-substance encounters to keep force-law outcomes seam independent; pooling
+/// energy across that seam would give equal layers equal dose despite the falling speed. The HP
+/// tally and the pen cam rely on the addressed doses. All dimensions, speeds and limits are fixture
+/// data; the second case stops in the rear pool with a positive readout remainder.
+#[test]
+fn touching_pools_receive_the_energy_lost_at_their_own_depths() {
+    let body = super::super::RoundBody {
+        mass: 10.2,
+        caliber: 0.088,
+        nose_factor: 0.5,
+    };
+    let round = SolidShot::bind(body, SubstanceRegistry::shipped_static());
+    let geometry = Geometry {
+        axis: AXIS,
+        entrance_normal: -AXIS,
+    };
+    for (speed, rear_length, rest) in [(800.0, 0.02, 0.0), (450.0, 0.08, 5.0)] {
+        let state = round.at(speed);
+        let limits = Limits { rest };
+        let seam = 0.02;
+        let end = seam + rear_length;
+        let front = stretch(0.0, seam, true, &[(1, REFERENCE_FACTOR)]);
+        let rear = stretch(seam, end, false, &[(2, REFERENCE_FACTOR)]);
+        let first = round.advance(state, &front, &limits, &geometry);
+        assert_eq!(first.control, Control::Continue);
+        let second = round.advance(first.state, &rear, &limits, &geometry);
+        let joined = advance_through(&round, state, &[front, rear], &limits, &geometry).unwrap();
+        let whole = round.advance(
+            state,
+            &stretch(0.0, end, true, &[(1, REFERENCE_FACTOR)]),
+            &limits,
+            &geometry,
+        );
+        assert_eq!(
+            joined.state, whole.state,
+            "the seam cannot change the advance"
+        );
+        let front_energy =
+            0.5 * body.mass as f64 * (state.speed.powi(2) - first.state.speed.powi(2));
+        let rear_energy = 0.5
+            * body.mass as f64
+            * (first.state.speed.powi(2)
+                - if second.control == Control::Stop {
+                    0.0
+                } else {
+                    second.state.speed.powi(2)
+                });
+        for (index, expected) in [(1, front_energy), (2, rear_energy)] {
+            let actual = joined.doses[&volume(index)].energy;
+            assert!(
+                (actual / expected - 1.0).abs() < 1.0e-10,
+                "{speed} m/s, pool {index}: {actual} J against its own {expected} J"
+            );
+        }
+        if rest > 0.0 {
+            assert!(joined.stop.is_some());
+            assert!(
+                joined.state.speed > 0.0,
+                "the fixture leaves a readout remainder"
+            );
+            let total: f64 = joined.doses.values().map(|line| line.energy).sum();
+            assert!(
+                (total / (0.5 * body.mass as f64 * state.speed.powi(2)) - 1.0).abs() < 1.0e-12,
+                "the stopped round's remainder belongs to the rear pool exactly once"
+            );
+        }
+    }
+}
+
+/// The game's damage model shares energy only among hard pools present at the same depth. A
+/// second pool overlapping the front half of a slab takes half that half's energy, while the
+/// slab keeps the rear half's whole dose. A whole-encounter cost split sends rear energy into the
+/// already-left pool; the HP tally and pen cam would both misattribute it. All inputs are fixture
+/// data, and the unchanged force-law advance supplies the energy at the overlap's boundary.
+#[test]
+fn partial_overlaps_share_only_the_energy_lost_while_both_are_present() {
+    let body = super::super::RoundBody {
+        mass: 10.2,
+        caliber: 0.088,
+        nose_factor: 0.5,
+    };
+    let round = SolidShot::bind(body, SubstanceRegistry::shipped_static());
+    let state = round.at(800.0);
+    let limits = Limits { rest: 0.0 };
+    let geometry = Geometry {
+        axis: AXIS,
+        entrance_normal: -AXIS,
+    };
+    let first = round.advance(
+        state,
+        &stretch(0.0, 0.02, true, &[(1, REFERENCE_FACTOR)]),
+        &limits,
+        &geometry,
+    );
+    let joined = advance_through(
+        &round,
+        state,
+        &[
+            stretch(
+                0.0,
+                0.02,
+                true,
+                &[(1, REFERENCE_FACTOR), (2, REFERENCE_FACTOR)],
+            ),
+            stretch(0.02, 0.04, false, &[(1, REFERENCE_FACTOR)]),
+        ],
+        &limits,
+        &geometry,
+    )
+    .unwrap();
+    let front = 0.5 * body.mass as f64 * (state.speed.powi(2) - first.state.speed.powi(2));
+    let rear = 0.5 * body.mass as f64 * (first.state.speed.powi(2) - joined.state.speed.powi(2));
+    for (index, expected) in [(1, 0.5 * front + rear), (2, 0.5 * front)] {
+        let actual = joined.doses[&volume(index)].energy;
+        assert!(
+            (actual / expected - 1.0).abs() < 1.0e-10,
+            "pool {index}: {actual} J against its own {expected} J"
+        );
+    }
 }
 
 /// SEQUENTIAL LAYERS ARE ORDERED, NEVER REDUCED. Two plates of different substances in sequence

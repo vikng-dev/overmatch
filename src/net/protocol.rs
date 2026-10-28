@@ -171,7 +171,11 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// piece's mass (`WireBurst::nose_kg` loses its `Option`), and no round ends at a burst
 /// (`WireEnd::Burst` leaves, the ball's end). The field law keeps the ball, which every plate
 /// exit's cone is thrown with. Own-type graph and REV move.
-pub const PROTOCOL_REV: u32 = 35;
+///
+/// REV 36 (the game's damage model uses energy dose): `WireDose::line` and `field` carry HP
+/// points before rounding instead of reference-mm. The scalar types stay unchanged, but a REV 35
+/// client would read those values in the wrong units, so the protocol fingerprint must differ.
+pub const PROTOCOL_REV: u32 = 36;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -1927,6 +1931,25 @@ mod tests {
                 &changed_crate,
             ),
             "the crate version must change the handshake",
+        );
+    }
+
+    /// The game's damage model sends box doses in HP points before rounding. Reference-mm
+    /// records used the same scalar types through REV 35, so the protocol revision must separate
+    /// the two meanings even when the wire type graph is unchanged; the pen cam relies on it.
+    #[test]
+    fn hp_dose_records_use_a_distinct_protocol_from_reference_mm_records() {
+        let reference_mm_records = protocol_fingerprint_for(
+            WIRE_SURFACE_HASH,
+            WIRE_TYPES_HASH,
+            WIRE_DEP_AVIAN3D,
+            WIRE_DEP_LIGHTYEAR,
+            35,
+            env!("CARGO_PKG_VERSION"),
+        );
+        assert_ne!(
+            PROTOCOL_FINGERPRINT, reference_mm_records,
+            "HP and reference-mm record consumers must not share a protocol"
         );
     }
 

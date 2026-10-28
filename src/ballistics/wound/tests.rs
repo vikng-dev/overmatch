@@ -208,7 +208,11 @@ fn the_line_dose_is_the_chord_times_the_wound_rate() {
         let crossed = crossed[0];
         assert_eq!(crossed.cost, crossed.chord * WOUND, "dose = chord × wound");
         let line = dose(&fired, "crewman").map_or(0.0, |dose| dose.line);
-        assert_eq!(line, crossed.cost, "the record's line is the pass's dose");
+        assert_eq!(
+            line,
+            crate::ballistics::hp_before_rounding(crate::ballistics::dose_units(crossed.cost)),
+            "the record's line is the pass's dose, in HP points at the reference-mm rate"
+        );
         crossed.chord
     };
     let (shallow, deep) = (pass(0.3, 0.0), pass(0.6, 0.0));

@@ -288,7 +288,8 @@ dosing a box once, in the count unit (reference-mm), never scaled by the box's o
 dose from the whole shot (the line, a bounce's shock and every cone) becomes whole HP points once,
 on its total (§6). Every field deposit, to a hard box and a witness alike, enters that total at the
 field's own calibration (`hp_per_reference_mm` in `spall_cone.ron`, TUNED 70 HP points per
-reference-mm against the line's 10) and nothing on the line or a bounce's shock does; `S` stays in
+reference-mm against the 10 a bounce's shock and a witness's chord convert at; a hard box's line
+dose is energy, at the energy rate, §6) and nothing on the line or a bounce's shock does; `S` stays in
 reference-mm, so the calibration sets every cone's potency at once and the HP quantum gate tests
 `S/2` at it. A box of face `A` fully inside the cone, `θ` off its axis, has the knockout radius
 `R = sqrt(2 f(θ) E A / (pool Ω_c))`, `E = S/2`, `Ω_c = 2π(1 − cos α)` and `f(θ)` the ball's weight
@@ -680,11 +681,50 @@ The field needs no such rule: a bigger box is a bigger target, crossed by more o
 directions, so it takes more dose (§5). A crew box is person-sized, one shared size within a tank
 (the seed tank's 0.4 × 0.3 × 0.7 m, a 0.2033 m² mean face, MEASURED from its sim geometry), close to
 the 0.2 m² face the field's calibration is set against (§5), and the pen cam's potency bands are
-read from it (§5, "Potency colour"). One
-point is 0.1 reference-mm of line dose (`ballistics::HP_PER_REFERENCE_MM`, a unit with Resolution
-provenance, not a balance value); a field deposit converts at the field's calibration (§5). A spall
-cone doses it by the strength reaching it (§5); the **main penetrator transiting** a hard module
-deposits what it spent crossing it; a bounce jars the face it struck.
+read from it (§5, "Potency colour"). A spall cone doses it by the strength reaching it (§5); the
+**main penetrator transiting** a hard module deposits the energy it lost crossing it; a bounce
+jars the face it struck.
+
+**The energy dose** (issue 113, decided 2026-10-28, provisional; owner direction: keep it simple).
+A hard box's line dose is the kinetic energy the round lost crossing it, `½ m (v_in² − v_out²)`,
+`m` the mass that meets the plate (a sub-calibre round's core); a round that comes to rest in it
+deals all it had left, `½ m v_in²`. The energy lost between consecutive volume boundaries is shared
+among the volumes present there by their cost, chord × factor, so the doses sum to the energy
+the round lost and an overlap resisted once still doses each of its volumes (§13.2). A seam
+between touching volumes of one substance does not change the force-law advance; each volume
+still takes the energy lost at its own depths, never a length share of the whole crossing.
+**One rate** turns energy into HP for every hard pool, a tank's modules and a tree's trunk alike:
+`joules_per_hp` in `assets/ballistics/energy_dose.ron`, TUNED 3000 J per point. It keeps the scale
+the pools were authored at for the main gun: the reference-mm law charged 10 HP per reference-mm,
+and the reference 88 mm APCBC round at its 773 m/s muzzle speed loses about 3090 J per 0.1 mm of
+reference steel (DERIVED from the force law, §3). Each pool's authored HP alone says how sturdy it
+is; a slower or smaller round deals less per reference-mm crossed. Reference-mm stays a readout —
+of a round's capability and of a chord, the steel it is worth — and is no hard box's dose.
+
+The law it replaced charged chord × factor, the thickness defeated, whatever the round: an 88 and a
+rifle round dealt the same HP through the same chord. MEASURED 2026-10-27
+(`.agents/scratch/destruction-2026-10-26/shot-dose-measurement.md`): a perforating 88 dealt 155 HP
+through a 0.40 m spruce at its base, 8 shots to empty a 1200 HP pool, while a machine-gun round
+that came to rest dealt its whole capability, so the belt felled a tree faster than the main gun.
+Under the energy dose (MEASURED 2026-10-28,
+`.agents/scratch/damage-model-2026-10-28/energy-dose-results.md`) the 88 deals 156 HP there
+(466 710 J) and the machine-gun round 1 HP (2 872 J, all it had): 2 shots against 240 to empty the
+shipped fir.
+
+A witness's chord and a bounce's shock are still authored in reference-mm, one HP point per 0.1
+reference-mm (`ballistics::HP_PER_REFERENCE_MM`, a unit with Resolution provenance, not a balance
+value); a field deposit converts at the field's calibration (§5).
+
+**Trees are just wood.** Every trunk is one substance, `Wood` (`materials.ron`), and one pool:
+the wood row's HP per metre of breast-height diameter times the tree's own diameter, rounded, at
+least one point (`hp_per_m` in `assets/trees/wood.ron`, TUNED 600). The shipped fir's 0.40 m holds
+240 HP: it survives one centred 75 mm APCBC round through its base (115–126 HP from two fixture
+75 mm bodies at 790 and 925 m/s, MEASURED) and is emptied by the second centred 88. The ram
+threshold `fell_k` is the wood row's too. A species is the generator's look and ranges only: a
+player cannot tell that a round lost a little more speed in one species than another, while trunk
+thickness is simple and visible. Out of scope, built only if play shows them missed: wood bending
+a round less than steel, per-round-type ricochet and normalization, and the field's dose and drag
+form under the energy law (epic #103).
 
 **Witnesses** (ADR-0040) are dosed by a law of their own. A witness substance has no resistance and
 is no layer of the walk (§13), so the shell and the field cross it as air. Once the hard world has
@@ -1124,12 +1164,15 @@ plates behave exactly as their boolean union, without ever building the merged m
 is the special case of `max` over {absent, factor}; "steel beats rubber" is `1000 ≫ 50`, a
 consequence rather than a rule. A witness (§6) contributes no factor: it is no part of the field.
 
-**Damage law:** every HP-bearing hard volume deposits transit damage **over its own presence
-chords, at its own factor** — no ownership, no priority, no argmax. "A shell hurts you in
-proportion to the material *of yours* it chewed." The error a component clipped into armor
-introduces is bounded by `overlap_depth × its_factor`, and is only reachable if the shell actually
-penetrated that deep — at which point it was hitting the component anyway. Two modules overlapping
-each other: both deposit, cost charged once, nothing needs to win. A witness is dosed over its own
+**Damage law:** every HP-bearing hard volume is costed **over its own presence chords, at its own
+factor** — no ownership, no priority, no argmax — and takes that cost's share of the energy the
+round lost at those depths (§6, the energy dose). Sequential pools take their own energy loss;
+only volumes present at the same depths share a dose. The error a component clipped into armor
+introduces is bounded by its share of the energy lost over `overlap_depth`, and is only reachable
+if the shell actually penetrated
+that deep — at which point it was hitting the component anyway. Two modules overlapping each
+other: both deposit, the round slowed once, the energy it lost shared between them, nothing needs
+to win. A witness is dosed over its own
 chord by its own law (§6), so two crew overlapping each other, or a crewman overlapping a wall,
 each take their whole chord and charge the shell nothing.
 

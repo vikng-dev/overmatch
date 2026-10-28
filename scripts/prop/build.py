@@ -29,12 +29,12 @@ THE THREE CONTRACTS, each a list of named failures, empty on the pass:
 - `ron_failures`: the `.tree.ron` against the glb and the species table. A `TreeAsset` of
   `species`, `segments` (each `height_m` and `r_bottom_m`) and `r_tip_m`, which stores each
   boundary radius once: a segment's top radius is the next segment's `r_bottom_m`, the last
-  segment's is `r_tip_m` (`trunk_rows`). Its species row is in the table with a positive `hp` and
-  `fell_k` and a substance that is a key of the substance registry
-  (`assets/materials/materials.ron`, or `--registry`); at most 255 segments (the wire word's cut
-  index, A3); positive finite segment dimensions and `r_tip_m`; no `dbh_m` (A6: DBH is derived at
-  load from the taper at 1.3 m); segment heights that are the chain's node offsets and the
-  cap_top offsets, summing to the height the root records.
+  segment's is `r_tip_m` (`trunk_rows`). Its species is a `Species` row of the table, which the
+  sim reads no value of: every tree's substance, HP pool and ram threshold are the wood row's
+  (`assets/trees/wood.ron`, loaded and refused by the runtime, not a trio's to certify); at most
+  255 segments (the wire word's cut index, A3); positive finite segment dimensions and `r_tip_m`;
+  no `dbh_m` (A6: DBH is derived at load from the taper at 1.3 m); segment heights that are the
+  chain's node offsets and the cap_top offsets, summing to the height the root records.
 - `geometry_failures`: the stored vertices against the ron, decoded from the BIN chunk. Finite
   positions, triangle indices that address them, every vertex within the tree's height of its
   node; a trunk as two flat rings, at y = 0 with its own `r_bottom_m` and at y = height_m with
@@ -68,7 +68,7 @@ import struct
 import subprocess
 import sys
 import tempfile
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Optional, Tuple
 
 _SCRIPTS = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -80,7 +80,6 @@ import toolchain  # noqa: E402
 MODES = ("build", "verify", "lint")
 EXPORT = os.path.join("scripts", "prop", "export_tree.py")
 SPECIES_TABLE = os.path.join("assets", "trees", "species.ron")
-REGISTRY = os.path.join("assets", "materials", "materials.ron")
 CERTIFICATE_FIELDS = ("view_glb_sha", "sim_ron_sha", "mesh_count", "chains")
 PARTS = ("trunk", "cap_bottom", "cap_top", "canopy")
 
@@ -221,17 +220,6 @@ def read(path: str) -> bytes:
 
 def repo_root() -> str:
     return os.path.dirname(_SCRIPTS)
-
-
-def substances(registry: str) -> Set[str]:
-    """The substance keys of the registry; `Refused` when it cannot be read as one."""
-    try:
-        document = ron.load(registry)
-    except (OSError, ron.RonError) as error:
-        raise Refused("registry", ["{}: {}".format(registry, error)]) from error
-    if not isinstance(document, dict) or not isinstance(document.get("substances"), dict):
-        raise Refused("registry", ["{} has no substances map".format(registry)])
-    return set(document["substances"])
 
 
 # ── the node contract ────────────────────────────────────────────────────────────────────────────
@@ -392,30 +380,16 @@ def _pair_value(pair):
     return pair[0] if isinstance(pair, tuple) and len(pair) == 2 else pair
 
 
-def species_failures(key: str, row, registry: Set[str]) -> List[str]:
-    """What the runtime reads off a species row, checked before it is built from: the two
-    thresholds positive (the loader refuses a non-positive one), `hp` an integer pool, the
-    substance a key of the registry."""
-    if not isinstance(row, dict):
+def species_failures(key: str, row) -> List[str]:
+    """The row a tree's species names, checked before it is built from: a `Species` row. The sim
+    reads none of its values, so none is checked here."""
+    if not isinstance(row, dict) or row.get("__struct__") != "Species":
         return ["species {!r} is not a Species row".format(key)]
-    failures = []
-    fell_k = _pair_value(row.get("fell_k"))
-    if not _finite_positive(fell_k):
-        failures.append("species {!r} fell_k is {!r}, not a positive finite number".format(
-            key, fell_k))
-    hp = _pair_value(row.get("hp"))
-    if not (isinstance(hp, int) and not isinstance(hp, bool) and hp > 0):
-        failures.append("species {!r} hp is {!r}, not a positive integer".format(key, hp))
-    substance = row.get("substance")
-    if not isinstance(substance, str) or substance not in registry:
-        failures.append("species {!r} names substance {!r}, which is not a key of the substance "
-                        "registry ({})".format(key, substance, ", ".join(sorted(registry))))
-    return failures
+    return []
 
 
-def ron_failures(tree, js: dict, species: dict, registry: Set[str]) -> List[str]:
-    """Every claim the `.tree.ron` makes that the glb, the species table or the substance registry
-    does not bear out."""
+def ron_failures(tree, js: dict, species: dict) -> List[str]:
+    """Every claim the `.tree.ron` makes that the glb or the species table does not bear out."""
     failures = []
     if not isinstance(tree, dict) or tree.get("__struct__") != "TreeAsset":
         return ["the ron is not a TreeAsset"]
@@ -431,7 +405,7 @@ def ron_failures(tree, js: dict, species: dict, registry: Set[str]) -> List[str]
         failures.append("species {!r} is not in the species table ({})".format(
             tree["species"], ", ".join(sorted(species))))
     else:
-        failures += species_failures(tree["species"], species[tree["species"]], registry)
+        failures += species_failures(tree["species"], species[tree["species"]])
     segments = tree["segments"]
     if not isinstance(segments, list) or not segments:
         return failures + ["segments is empty; a trunk is at least one segment"]
@@ -743,7 +717,7 @@ def export(blend: str, root: str, work: str, blender: str) -> bytes:
     return read(candidate)
 
 
-def contracts(view_blob: bytes, tree_ron: str, table: str, registry: str, stem: str) -> dict:
+def contracts(view_blob: bytes, tree_ron: str, table: str, stem: str) -> dict:
     """The three contracts over one candidate; the parsed glb JSON when they hold."""
     try:
         js, binary = parse_glb(view_blob)
@@ -757,7 +731,7 @@ def contracts(view_blob: bytes, tree_ron: str, table: str, registry: str, stem: 
         species = ron.load(table)
     except (OSError, ron.RonError) as error:
         raise Refused("ron", ["{}: {}".format(tree_ron, error)]) from error
-    failures = ron_failures(tree, js, species, substances(registry))
+    failures = ron_failures(tree, js, species)
     if failures:
         raise Refused("ron", failures)
     failures = geometry_failures(js, binary, tree)
@@ -766,7 +740,7 @@ def contracts(view_blob: bytes, tree_ron: str, table: str, registry: str, stem: 
     return js
 
 
-def build(blend: str, root: str, work: str, blender: str, registry: str, publish: bool) -> int:
+def build(blend: str, root: str, work: str, blender: str, publish: bool) -> int:
     glb, tree_ron, cert_path = paths(blend)
     stem = os.path.basename(blend)[:-len(".blend")]
     table = os.path.join(root, SPECIES_TABLE)
@@ -776,7 +750,7 @@ def build(blend: str, root: str, work: str, blender: str, registry: str, publish
     print("build ▸ export", flush=True)
     view_blob = export(blend, root, work, blender)
     print("build ▸ contracts", flush=True)
-    js = contracts(view_blob, tree_ron, table, registry, stem)
+    js = contracts(view_blob, tree_ron, table, stem)
     by_part = tree_nodes(js)
     print("build ▸ {} segment(s), {} canopy node(s), {} mesh(es), {} triangle-bearing "
           "primitive(s)".format(len(by_part["trunk"]), len(by_part["canopy"]),
@@ -798,7 +772,7 @@ def build(blend: str, root: str, work: str, blender: str, registry: str, publish
     return 0
 
 
-def verify(blend: str, root: str, work: str, blender: str, registry: str) -> int:
+def verify(blend: str, root: str, work: str, blender: str) -> int:
     glb, tree_ron, cert_path = paths(blend)
     stem = os.path.basename(blend)[:-len(".blend")]
     table = os.path.join(root, SPECIES_TABLE)
@@ -813,7 +787,7 @@ def verify(blend: str, root: str, work: str, blender: str, registry: str) -> int
     failures = coherence(cert, view_blob, ron_blob)
     if failures:
         raise Refused("certificate", failures + [REBUILD])
-    contracts(view_blob, tree_ron, table, registry, stem)
+    contracts(view_blob, tree_ron, table, stem)
     print("build ▸ re-export", flush=True)
     candidate = export(blend, root, work, blender)
     if candidate != view_blob:
@@ -833,20 +807,15 @@ def parse(argv: Optional[List[str]] = None):
     parser = argparse.ArgumentParser(prog="build.py", allow_abbrev=False)
     parser.add_argument("mode", choices=MODES)
     parser.add_argument("blend", help="assets/trees/<id>/<id>.blend — the generator's output")
-    parser.add_argument("--registry", default=None,
-                        help="the substance registry a species' substance must be a key of; "
-                             "assets/materials/materials.ron by default. A lane verifying another "
-                             "revision passes that revision's.")
     return parser.parse_args(argv)
 
 
-def run(mode: str, blend: str, registry: Optional[str] = None) -> int:
+def run(mode: str, blend: str) -> int:
     blend = os.path.abspath(blend)
     if not blend.endswith(".blend"):
         print("build ▸ {} is not a .blend".format(blend), flush=True)
         return 1
     root = repo_root()
-    registry = os.path.abspath(registry) if registry else os.path.join(root, REGISTRY)
     try:
         program = toolchain.blender()
         wrong = toolchain.finding(program)
@@ -854,8 +823,8 @@ def run(mode: str, blend: str, registry: Optional[str] = None) -> int:
             raise Refused("toolchain", [wrong.evidence, wrong.repair])
         with tempfile.TemporaryDirectory(prefix="prop-build-") as work:
             if mode == "verify":
-                return verify(blend, root, work, program.binary, registry)
-            return build(blend, root, work, program.binary, registry, publish=mode == "build")
+                return verify(blend, root, work, program.binary)
+            return build(blend, root, work, program.binary, publish=mode == "build")
     except Refused as refusal:
         for line in refusal.failures:
             print("  - {}".format(line), flush=True)
@@ -867,7 +836,7 @@ def run(mode: str, blend: str, registry: Optional[str] = None) -> int:
 
 def main() -> int:
     arguments = parse()
-    return run(arguments.mode, arguments.blend, arguments.registry)
+    return run(arguments.mode, arguments.blend)
 
 
 if __name__ == "__main__":

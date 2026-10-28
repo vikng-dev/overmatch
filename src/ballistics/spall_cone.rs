@@ -452,10 +452,11 @@ fn shipped_calibration() -> Calibration {
     *CALIBRATION
 }
 
-/// The field's HP points per reference-mm of field dose, where the line converts at
-/// [`super::HP_PER_REFERENCE_MM`]. A field deposit of `d` reference-mm enters a box's per-shot dose
-/// at `d × this / HP_PER_REFERENCE_MM` ([`super::field_units`]); a cone's strength `S` stays in
-/// reference-mm.
+/// The field's HP points per reference-mm of field dose, where a witness's chord and a bounce's
+/// shock convert at [`super::HP_PER_REFERENCE_MM`] (a hard box's line dose is energy, at
+/// [`super::energy_dose::joules_per_hp`]). A field deposit of `d` reference-mm enters a box's
+/// per-shot dose at `d × this / HP_PER_REFERENCE_MM` ([`super::field_units`]); a cone's strength
+/// `S` stays in reference-mm.
 pub(crate) fn hp_per_reference_mm() -> u64 {
     shipped_calibration().hp_per_reference_mm
 }

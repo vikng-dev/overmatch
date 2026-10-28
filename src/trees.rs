@@ -4,17 +4,20 @@
 //! A TREE IS DATA (ADR-0034). `assets/trees/<id>/<id>.tree.ron` ([`TreeAsset`]) is the trunk as a
 //! chain of tapered segments, each boundary's radius stored once — every segment's base radius,
 //! then the tip's — so adjacent segments meet by construction and a segment's top radius is read
-//! through [`TreeKind::r_top_m`]; `assets/trees/species.ron` ([`Species`]) is what the sim reads
-//! of a species: its substance, the HP pool and the ram threshold. Both are read once at startup
-//! into the map's [`TreeLibrary`] and validated there; every number the sim uses comes from them,
-//! the glb is the view (ADR-0014).
+//! through [`TreeKind::r_top_m`]. TREES ARE JUST WOOD: `assets/trees/wood.ron` ([`Wood`]) is what
+//! the sim reads of every tree — the wood substance, the HP per metre of breast-height diameter and
+//! the ram threshold — and `assets/trees/species.ron` only names the species an asset may claim
+//! (the generator's look and ranges; the sim reads no value of a row). All three are read once at
+//! startup into the map's [`TreeLibrary`] and validated there; every number the sim uses comes from
+//! them, the glb is the view (ADR-0014).
 //!
-//! THE BODY. One static root per tree — the [`BallisticVolume`] of the species' substance and the
-//! HP pool, the way a module's pool is charged — and one child per segment with its own convex
-//! frustum collider (two 12-gon rings) on `[Terrain, Armor]` with filters `ALL`: hulls contact it
-//! and the union walk charges chord × factor and doses the pool. Never a compound: the walk's
-//! convex collector reads one solid per collider. The instance's uniform scale is applied to the
-//! dimensions at spawn and the root's own scale is one.
+//! THE BODY. One static root per tree — the [`BallisticVolume`] of the wood and the HP pool its
+//! diameter gives ([`TreeBody::hp`]), the way a module's pool is charged — and one child per
+//! segment with its own convex frustum collider (two 12-gon rings) on `[Terrain, Armor]` with
+//! filters `ALL`: hulls contact it and the union walk slows the round by chord × factor and doses
+//! the pool the energy it lost. Never a compound: the walk's convex collector reads one solid per
+//! collider. The instance's uniform scale is applied to the dimensions at spawn and the root's own
+//! scale is one.
 //!
 //! THE STATE. [`TreeState`] is `Standing` or `Down { cut, dir }`: the segment the trunk broke at
 //! and the fall azimuth's bin. The authority sets it once — when the pool empties
@@ -54,11 +57,15 @@ use crate::{ClientReplica, ShotClock};
 
 pub(crate) mod view;
 
-/// Directory under the asset root holding the species table and one folder per tree asset.
+/// Directory under the asset root holding the species table, the wood row and one folder per tree
+/// asset.
 const TREES_DIR: &str = "trees";
 
 /// The species table's file name inside [`TREES_DIR`].
 const SPECIES_FILE: &str = "species.ron";
+
+/// The wood row's file name inside [`TREES_DIR`].
+const WOOD_FILE: &str = "wood.ron";
 
 /// How far below 1 an instance's up vector's Y may fall before the instance counts as tilted:
 /// float rounding of a pure yaw (a few ulps), never a real lean — the cut reads world heights
@@ -95,20 +102,25 @@ pub(crate) struct TreeAsset {
     pub(crate) r_tip_m: f32,
 }
 
-/// What the sim reads of a `species.ron` row. The row also carries the generator's look fields,
-/// which are not read here.
+/// The species table as the sim reads it: the species an asset may name. A row's values are the
+/// generator's (look and ranges) and are not read here.
+type SpeciesTable = BTreeMap<String, serde::de::IgnoredAny>;
+
+/// `wood.ron`: what the sim reads of every tree, whatever its species.
 #[derive(Debug, Clone, PartialEq, serde::Deserialize)]
-struct Species {
+#[serde(deny_unknown_fields)]
+struct Wood {
+    /// The trunk's substance, a hard key of the substance registry.
     substance: String,
+    /// The trunk's HP pool per metre of breast-height diameter.
+    hp_per_m: Sourced<f32>,
     /// The ram threshold's constant, N·s/m²: a tick's `Σ impulse × lever` fells the trunk at
     /// `fell_k × dbh³`.
     fell_k: Sourced<f32>,
-    /// The trunk's HP pool, species-fixed.
-    hp: Sourced<u32>,
 }
 
-/// One tree asset resolved against its species and the substance registry, validated: what every
-/// instance of it spawns from.
+/// One tree asset resolved against the species table, the wood row and the substance registry,
+/// validated: what every instance of it spawns from.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct TreeKind {
     pub(crate) id: String,
@@ -119,7 +131,8 @@ pub(crate) struct TreeKind {
     pub(crate) material: VolumeMaterial,
     pub(crate) substance: String,
     pub(crate) fell_k: f32,
-    pub(crate) hp: u32,
+    /// HP points per metre of breast-height diameter ([`TreeBody::hp`]).
+    pub(crate) hp_per_m: f32,
     /// Breast-height diameter at asset scale 1, metres: twice the taper's radius at
     /// [`BREAST_HEIGHT_M`] (DERIVED at load).
     pub(crate) dbh_m: f32,
@@ -131,7 +144,8 @@ impl TreeKind {
     fn resolve(
         id: &str,
         asset: TreeAsset,
-        table: &BTreeMap<String, Species>,
+        table: &SpeciesTable,
+        wood: &Wood,
         registry: &SubstanceRegistry,
     ) -> Result<Self, String> {
         let TreeAsset {
@@ -156,28 +170,25 @@ impl TreeKind {
         if !positive(r_tip_m) {
             return Err(format!("r_tip_m {r_tip_m} is not a positive finite radius"));
         }
-        let row = table
-            .get(&species)
-            .ok_or_else(|| format!("species {species:?} is not in {SPECIES_FILE}"))?;
-        let material = VolumeMaterial::of(registry, &row.substance)
-            .map_err(|err| format!("species {species:?} substance: {err}"))?;
-        let (fell_k, hp) = (row.fell_k.0, row.hp.0);
-        if !(fell_k.is_finite() && fell_k > 0.0) {
-            return Err(format!(
-                "species {species:?} fell_k {fell_k} is not positive"
-            ));
+        if !table.contains_key(&species) {
+            return Err(format!("species {species:?} is not in {SPECIES_FILE}"));
         }
-        if hp == 0 {
-            return Err(format!("species {species:?} hp is zero"));
+        let material = VolumeMaterial::of(registry, &wood.substance)
+            .map_err(|err| format!("{WOOD_FILE} substance: {err}"))?;
+        let (fell_k, hp_per_m) = (wood.fell_k.0, wood.hp_per_m.0);
+        for (name, value) in [("fell_k", fell_k), ("hp_per_m", hp_per_m)] {
+            if !positive(value) {
+                return Err(format!("{WOOD_FILE} {name} {value} is not positive"));
+            }
         }
         let mut kind = Self {
             id: id.to_owned(),
             segments,
             r_tip_m,
             material,
-            substance: row.substance.clone(),
+            substance: wood.substance.clone(),
             fell_k,
-            hp,
+            hp_per_m,
             dbh_m: 0.0,
         };
         if kind.height_m() <= BREAST_HEIGHT_M {
@@ -224,8 +235,8 @@ impl TreeKind {
 #[derive(Debug, Clone, PartialEq, Default)]
 pub(crate) struct TreeLibrary {
     kinds: BTreeMap<String, Arc<TreeKind>>,
-    /// The texts the kinds were read from — the species table first, then each asset in id order
-    /// — for the map's content digest.
+    /// The texts the kinds were read from — the species table, the wood row, then each asset in id
+    /// order — for the map's content digest.
     texts: Vec<String>,
 }
 
@@ -244,18 +255,22 @@ impl TreeLibrary {
         };
         let species_path = root.join(TREES_DIR).join(SPECIES_FILE);
         let species_text = read(&species_path);
-        let table: BTreeMap<String, Species> = ron::from_str(&species_text).unwrap_or_else(|err| {
+        let table: SpeciesTable = ron::from_str(&species_text).unwrap_or_else(|err| {
             panic!("trees: {} failed to parse: {err}", species_path.display())
         });
+        let wood_path = root.join(TREES_DIR).join(WOOD_FILE);
+        let wood_text = read(&wood_path);
+        let wood: Wood = ron::from_str(&wood_text)
+            .unwrap_or_else(|err| panic!("trees: {} failed to parse: {err}", wood_path.display()));
         let registry = SubstanceRegistry::shipped_static();
-        let mut texts = vec![species_text];
+        let mut texts = vec![species_text, wood_text];
         let mut kinds = BTreeMap::new();
         for id in ids {
             let path = root.join(TREES_DIR).join(id).join(format!("{id}.tree.ron"));
             let text = read(&path);
             let asset: TreeAsset = ron::from_str(&text)
                 .unwrap_or_else(|err| panic!("trees: {} failed to parse: {err}", path.display()));
-            let kind = TreeKind::resolve(id, asset, &table, registry)
+            let kind = TreeKind::resolve(id, asset, &table, &wood, registry)
                 .unwrap_or_else(|err| panic!("trees: {}: {err}", path.display()));
             texts.push(text);
             kinds.insert(id.to_owned(), Arc::new(kind));
@@ -379,6 +394,13 @@ impl TreeBody {
     /// The torque (N·s·m per tick) a ram must put on the trunk to fell it: `fell_k × dbh³`.
     pub(crate) fn fell_torque(&self) -> f32 {
         self.kind.fell_k * self.dbh_m * self.dbh_m * self.dbh_m
+    }
+
+    /// The trunk's HP pool: the wood's HP per metre of diameter times this instance's breast-height
+    /// diameter, rounded to the nearest point (one f32 multiply and `roundf`, the same on every
+    /// target), and at least one point: a pool of none would never empty.
+    pub(crate) fn hp(&self) -> u32 {
+        (libm::roundf(self.kind.hp_per_m * self.dbh_m) as u32).max(1)
     }
 }
 
@@ -687,8 +709,8 @@ fn derive_state(
                 commands.entity(root).remove::<(Resting, Fell)>();
                 if !has_pool {
                     commands.entity(root).insert(ComponentHealth {
-                        current: body.kind.hp,
-                        max: body.kind.hp,
+                        current: body.hp(),
+                        max: body.hp(),
                     });
                 }
             }
@@ -828,6 +850,7 @@ pub(crate) fn spawn(
     );
     let body = TreeBody::new(kind.clone(), scale);
     let prefix = body.prefix.clone();
+    let hp = body.hp();
     let root = commands
         .spawn((
             Name::new(format!("tree {}", identity.id)),
@@ -842,8 +865,8 @@ pub(crate) fn spawn(
                 substance: kind.substance.clone(),
             },
             ComponentHealth {
-                current: kind.hp,
-                max: kind.hp,
+                current: hp,
+                max: hp,
             },
             TreeState::Standing,
             identity,
@@ -1062,48 +1085,54 @@ pub(crate) mod tests {
         }
     }
 
-    fn fixture_table() -> BTreeMap<String, Species> {
-        BTreeMap::from([(
-            "fixture".to_owned(),
-            Species {
-                substance: "RHA".to_owned(),
-                fell_k: Sourced(1.0e5),
-                hp: Sourced(100),
-            },
-        )])
+    fn fixture_table() -> SpeciesTable {
+        BTreeMap::from([("fixture".to_owned(), serde::de::IgnoredAny)])
     }
 
-    /// The fixture trunk as a kind of `substance` with an HP pool of `hp` — fixture data for the
-    /// march's tests, which need a trunk a round goes through and a pool a field alone empties.
-    pub(crate) fn fixture_kind_of(substance: &str, hp: u32) -> Arc<TreeKind> {
-        let table = BTreeMap::from([(
-            "fixture".to_owned(),
-            Species {
-                substance: substance.to_owned(),
-                fell_k: Sourced(1.0e5),
-                hp: Sourced(hp),
-            },
-        )]);
-        Arc::new(
-            TreeKind::resolve(
-                "fixture",
-                fixture_asset(),
-                &table,
-                SubstanceRegistry::shipped_static(),
-            )
-            .expect("the fixture trunk holds"),
+    /// The fixture wood (fixture data): RHA, 200 HP per metre of diameter, so the fixture trunk's
+    /// 0.47 m holds 94 points at scale 1.
+    fn fixture_wood() -> Wood {
+        Wood {
+            substance: "RHA".to_owned(),
+            hp_per_m: Sourced(200.0),
+            fell_k: Sourced(1.0e5),
+        }
+    }
+
+    fn resolve(asset: TreeAsset, table: &SpeciesTable, wood: &Wood) -> Result<TreeKind, String> {
+        TreeKind::resolve(
+            "fixture",
+            asset,
+            table,
+            wood,
+            SubstanceRegistry::shipped_static(),
         )
+    }
+
+    /// The fixture trunk of `substance` whose pool holds `hp` points at scale 1 — fixture data for
+    /// the march's tests, which need a trunk a round goes through and a pool a field alone empties.
+    /// Its HP per metre is `hp` over the fixture's diameter, so [`TreeBody::hp`] reads `hp` back.
+    pub(crate) fn fixture_kind_of(substance: &str, hp: u32) -> Arc<TreeKind> {
+        let wood = Wood {
+            substance: substance.to_owned(),
+            ..fixture_wood()
+        };
+        let mut kind =
+            resolve(fixture_asset(), &fixture_table(), &wood).expect("the fixture trunk holds");
+        kind.hp_per_m = hp as f32 / kind.dbh_m;
+        let kind = Arc::new(kind);
+        assert_eq!(
+            TreeBody::new(kind.clone(), 1.0).hp(),
+            hp,
+            "the fixture pool"
+        );
+        kind
     }
 
     pub(crate) fn fixture_kind() -> Arc<TreeKind> {
         Arc::new(
-            TreeKind::resolve(
-                "fixture",
-                fixture_asset(),
-                &fixture_table(),
-                SubstanceRegistry::shipped_static(),
-            )
-            .expect("the fixture trunk holds"),
+            resolve(fixture_asset(), &fixture_table(), &fixture_wood())
+                .expect("the fixture trunk holds"),
         )
     }
 
@@ -1119,34 +1148,28 @@ pub(crate) mod tests {
 
     /// EVERY A6 REFUSAL IS A REFUSAL, NOT A CLAMP: an empty trunk, a non-finite or non-positive
     /// segment dimension, a missing, non-positive or non-finite tip radius, an unknown species, a
-    /// non-positive pool or ram threshold, a trunk too short to read a breast height, and more
-    /// segments than the wire word's cut byte can name are each refused by name. Any one of these
-    /// laxed to a default — a NaN height carried, a zero or infinite tip spawned, a zero HP pool
-    /// spawned, a 256th segment accepted — reds its row.
+    /// wood row whose HP per metre or ram threshold is not positive, a trunk too short to read a
+    /// breast height, and more segments than the wire word's cut byte can name are each refused by
+    /// name. Any one of these laxed to a default — a NaN height carried, a zero or infinite tip
+    /// spawned, a pool of no HP per metre spawned, a 256th segment accepted — reds its row.
     #[test]
-    fn every_malformed_asset_or_species_is_refused_by_name() {
-        let refusal = |asset: TreeAsset, table: BTreeMap<String, Species>| {
-            TreeKind::resolve(
-                "fixture",
-                asset,
-                &table,
-                SubstanceRegistry::shipped_static(),
-            )
-            .expect_err("refused")
+    fn every_malformed_asset_or_wood_row_is_refused_by_name() {
+        let refusal = |asset: TreeAsset, wood: Wood| {
+            resolve(asset, &fixture_table(), &wood).expect_err("refused")
         };
         let mut asset = fixture_asset();
         asset.segments.clear();
-        assert!(refusal(asset, fixture_table()).contains("segments"));
+        assert!(refusal(asset, fixture_wood()).contains("segments"));
         let mut asset = fixture_asset();
         asset.segments[0].height_m = f32::NAN;
-        assert!(refusal(asset, fixture_table()).contains("dimension"));
+        assert!(refusal(asset, fixture_wood()).contains("dimension"));
         let mut asset = fixture_asset();
         asset.segments[2].r_bottom_m = 0.0;
-        assert!(refusal(asset, fixture_table()).contains("dimension"));
+        assert!(refusal(asset, fixture_wood()).contains("dimension"));
         for r_tip_m in [0.0, f32::INFINITY] {
             let mut asset = fixture_asset();
             asset.r_tip_m = r_tip_m;
-            assert!(refusal(asset, fixture_table()).contains("r_tip_m"));
+            assert!(refusal(asset, fixture_wood()).contains("r_tip_m"));
         }
         let missing = ron::from_str::<TreeAsset>(
             r#"TreeAsset(species: "fixture", segments: [Segment(height_m: 2.0, r_bottom_m: 0.3)])"#,
@@ -1156,39 +1179,56 @@ pub(crate) mod tests {
         assert!(missing.contains("r_tip_m"), "{missing}");
         let mut asset = fixture_asset();
         asset.species = "no_such_species".to_owned();
-        assert!(refusal(asset, fixture_table()).contains("species"));
-        let mut table = fixture_table();
-        table.get_mut("fixture").unwrap().hp = Sourced(0);
-        assert!(refusal(fixture_asset(), table).contains("hp"));
-        let mut table = fixture_table();
-        table.get_mut("fixture").unwrap().fell_k = Sourced(-1.0);
-        assert!(refusal(fixture_asset(), table).contains("fell_k"));
+        assert!(refusal(asset, fixture_wood()).contains("species"));
+        for hp_per_m in [0.0, -1.0, f32::NAN] {
+            let wood = Wood {
+                hp_per_m: Sourced(hp_per_m),
+                ..fixture_wood()
+            };
+            assert!(refusal(fixture_asset(), wood).contains("hp_per_m"));
+        }
+        let wood = Wood {
+            fell_k: Sourced(-1.0),
+            ..fixture_wood()
+        };
+        assert!(refusal(fixture_asset(), wood).contains("fell_k"));
         let mut asset = fixture_asset();
         for segment in &mut asset.segments {
             segment.height_m = 0.4;
         }
-        assert!(refusal(asset, fixture_table()).contains("breast"));
+        assert!(refusal(asset, fixture_wood()).contains("breast"));
         let mut asset = fixture_asset();
         let stub = asset.segments[2];
         asset.segments = vec![stub; MAX_SEGMENTS + 1];
-        assert!(refusal(asset, fixture_table()).contains("segments"));
+        assert!(refusal(asset, fixture_wood()).contains("segments"));
     }
 
-    /// A species whose substance the registry does not carry, or carries as a witness, cannot
-    /// be a layer of the walk: refused at load.
+    /// A wood row whose substance the registry does not carry, or carries as a witness, cannot be
+    /// a layer of the walk: refused at load.
     #[test]
     fn an_unknown_or_witness_substance_is_refused() {
         for substance in ["Balsa", "Flesh"] {
-            let mut table = fixture_table();
-            table.get_mut("fixture").unwrap().substance = substance.to_owned();
-            TreeKind::resolve(
-                "fixture",
-                fixture_asset(),
-                &table,
-                SubstanceRegistry::shipped_static(),
-            )
-            .expect_err(substance);
+            let wood = Wood {
+                substance: substance.to_owned(),
+                ..fixture_wood()
+            };
+            resolve(fixture_asset(), &fixture_table(), &wood).expect_err(substance);
         }
+    }
+
+    /// THE TRUNK'S POOL FOLLOWS ITS THICKNESS: the wood's HP per metre times the instance's
+    /// breast-height diameter, rounded to the nearest point, and never below one. The fixture
+    /// trunk's 0.47 m at 200 HP per metre holds 94 points at scale 1 and 188 at scale 2; a mutant
+    /// reading the asset's diameter instead of the instance's holds 94 at both, one keeping a fixed
+    /// pool holds the same at every scale, and one truncating reads 93 at scale 0.9975 (93.77). A
+    /// pool of no points would never empty, so a sliver of a trunk still holds one.
+    #[test]
+    fn the_trunk_pool_is_the_wood_rate_times_the_diameter() {
+        let hp = |scale: f32| TreeBody::new(fixture_kind(), scale).hp();
+        assert_eq!(hp(1.0), 94);
+        assert_eq!(hp(2.0), 188);
+        assert_eq!(hp(0.9975), 94, "rounded to the nearest point");
+        assert_eq!(hp(1.0e-4), 1, "never below one point");
     }
 
     /// THE BOUNDARY BELONGS TO THE UPPER SEGMENT (A1), at the instance's scale: a scale-2 fixture
@@ -1242,7 +1282,7 @@ pub(crate) mod tests {
         );
     }
 
-    /// The threshold is the species constant times the CUBE of the breast-height diameter at the
+    /// The threshold is the wood's constant times the CUBE of the breast-height diameter at the
     /// instance's scale: doubling the scale raises it eightfold (a mutant squaring it: fourfold).
     #[test]
     fn the_fell_torque_is_fell_k_times_dbh_cubed() {
@@ -1616,7 +1656,11 @@ pub(crate) mod tests {
             (body.dbh_m - 0.705).abs() < 1e-6,
             "the kind's dbh at scale 1.5"
         );
-        assert_eq!((health.current, health.max), (100, 100));
+        assert_eq!(
+            (health.current, health.max),
+            (141, 141),
+            "the wood's 200 HP per metre at the instance's 0.705 m (DERIVED, fixture data)"
+        );
         let volume = world
             .get::<BallisticVolume>(root)
             .expect("the root's volume");
@@ -2153,7 +2197,11 @@ pub(crate) mod tests {
             .world()
             .get::<ComponentHealth>(root)
             .expect("back to standing: the pool is back");
-        assert_eq!((pool.current, pool.max), (100, 100), "full");
+        assert_eq!(
+            (pool.current, pool.max),
+            (94, 94),
+            "full: the fixture wood's 200 HP per metre at 0.47 m"
+        );
         assert!(
             app.world().get::<Resting>(root).is_none() && app.world().get::<Fell>(root).is_none(),
             "no pose and no transition tick standing"

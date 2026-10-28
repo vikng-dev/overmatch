@@ -1,6 +1,8 @@
 // The tree species table (slice contract §3). Every tree asset names one of these keys; the
-// generator draws a tree's height and breast-height diameter from the ranges, the runtime reads
-// the substance and the two thresholds.
+// generator draws a tree's height and breast-height diameter from the ranges and builds its look
+// from the view parameters. The sim reads no value of a row: every tree's substance, HP pool and
+// ram threshold are the wood row's (`assets/trees/wood.ron`), so no damage value is keyed by
+// species.
 //
 // `height_m` and `dbh_m` are MATURE STAND ranges for the game's forest, metres. Sources are read
 // 2026-10-26. A range carried as the source's typical range is MEASURED from the source text; a
@@ -11,11 +13,6 @@
 // parameters (placeholder era, chosen by eye): the live crown starts at that fraction of the
 // height, its widest branch reaches that fraction of the height, and whorls sit that far apart at
 // the crown base. The sim reads none of them.
-//
-// `fell_k` (N·s·m per m³ of dbh³, the ram threshold `impulse × lever ≥ fell_k × dbh³`) and `hp`
-// (the trunk's integer HP pool, species-fixed this slice) are `(value, Kind("why"))` pairs as in
-// assets/materials/materials.ron: positive provisional values under Unknown provenance (the loader
-// refuses a non-positive one), replaced when the runtime and measurement lanes set them.
 {
     "norway_spruce": Species(
         // Wikipedia "Picea abies": "growing 35–55 m (115–180 ft) tall and with a trunk diameter of
@@ -23,12 +20,9 @@
         // shorter and thinner, so the game range sits below it.
         height_m: (25.0, 40.0),
         dbh_m: (0.30, 0.60),
-        substance: "Softwood",
         crown_base_frac: 0.22,
         crown_width_frac: 0.11,
         whorl_spacing_m: 0.6,
-        fell_k: (9.0e5, Derived("ram-impulses.md 2026-10-26: a tick's Σ impulse × lever MEASURED in track_sandbox at 64 Hz, 6 substeps — sustained push 13.3 kN·s·m, 5 km/h ram 105–108, 10 km/h 119–151, 20 km/h 248–303; at 9.0e5 N·s/m² a 0.50 m spruce (threshold 112 kN·s·m) holds a push and falls at 10 km/h, a 0.42 m one (67) falls at a 5 km/h bump")),
-        hp: (1200, Unknown("provisional balance data; set so a 75 mm AP round through the trunk does not fell a mature spruce")),
     ),
     "scots_pine": Species(
         // Wikipedia "Scots pine": "Modern trees can grow up to 35 metres (115 feet) in height ...
@@ -37,12 +31,9 @@
         // maximum, the diameter band at a stand tree's.
         height_m: (20.0, 35.0),
         dbh_m: (0.30, 0.65),
-        substance: "Softwood",
         crown_base_frac: 0.55,
         crown_width_frac: 0.14,
         whorl_spacing_m: 0.9,
-        fell_k: (9.0e5, Derived("ram-impulses.md 2026-10-26: the spruce's; nothing measured separates the two conifers' root plates, so the same window applies")),
-        hp: (1200, Unknown("provisional balance data; set so a 75 mm AP round through the trunk does not fell a mature pine")),
     ),
     "silver_birch": Species(
         // Wikipedia "Betula pendula": "typically reaches 15 to 25 m (49 to 82 ft) tall,
@@ -52,11 +43,8 @@
         // game choice for a mature stand tree, which the source does not give.
         height_m: (15.0, 25.0),
         dbh_m: (0.20, 0.40),
-        substance: "Hardwood",
         crown_base_frac: 0.35,
         crown_width_frac: 0.16,
         whorl_spacing_m: 0.7,
-        fell_k: (7.0e5, Derived("ram-impulses.md 2026-10-26: seven ninths of the spruce's for the shallower root plate; a 0.20 m birch (threshold 5.6 kN·s·m) falls to the measured 13.3 kN·s·m push, a 0.40 m one (45) holds it and falls at a 5 km/h ram (105)")),
-        hp: (700, Unknown("provisional balance data; set so a 75 mm AP round through the trunk does not fell a mature birch")),
     ),
 }

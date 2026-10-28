@@ -203,6 +203,7 @@ fn a_shot_met_a_tank_by_its_log() {
         end: Vec3::X,
         chord: 0.1,
         cost: 10.0,
+        energy: 30_000.0,
         perforated: true,
     };
     let bounce = |struck: Entity| ArmourMark::Bounce {

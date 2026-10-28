@@ -433,9 +433,9 @@ const fn fnv1a_64(seed: u64, bytes: &[u8]) -> u64 {
 }
 
 /// The CONTENT digest of the world this process will build: the manifest's own bytes, its prototype
-/// library's, the bytes of the heightmap it names, and the species table and every tree asset the
-/// library names — the files that decide the terrain and the scatter, none of which crosses the
-/// wire.
+/// library's, the bytes of the heightmap it names, and the species table, the wood row and every
+/// tree asset the library names — the files that decide the terrain and the scatter, none of which
+/// crosses the wire.
 ///
 /// CONTENT, not the id: two peers can select the same map name over different files (a stale
 /// checkout, a half-pulled LFS object, a hand-edited `level.json`), and the id would happily agree
@@ -859,10 +859,11 @@ pub(crate) mod tests {
         );
     }
 
-    /// THE DIGEST FOLDS THE TREES' TEXTS (the species table and every tree asset the map
-    /// places) after the three map files, in the library's order: two peers with one map and
-    /// one different tree segment integrate different walks and must not match. Dropping the
-    /// trees from the fold, or folding them in another order, reds this.
+    /// THE DIGEST FOLDS THE TREES' TEXTS (the species table, the wood row and every tree asset
+    /// the map places) after the three map files, in the library's order: two peers with one map
+    /// and one different tree segment integrate different walks, and two with one different wood
+    /// row build different pools, so neither pair may match. Dropping the trees or the wood row
+    /// from the fold, or folding them in another order, reds this.
     #[test]
     fn the_digest_folds_the_tree_texts_after_the_map_files() {
         let root = shipped_assets();
@@ -874,8 +875,13 @@ pub(crate) mod tests {
         let heightmap = std::fs::read(manifest.heightmap_path()).expect("the heightmap");
         let map_files = vec![text.as_bytes(), library.as_bytes(), heightmap.as_slice()];
         assert!(
-            trees.texts().count() >= 2,
-            "the shipped map places at least one tree: the species table and its asset"
+            trees.texts().count() >= 3,
+            "the shipped map places a tree: the species table, the wood row and its asset"
+        );
+        let wood = std::fs::read(root.join("trees/wood.ron")).expect("the wood row");
+        assert!(
+            trees.texts().any(|text| text == wood.as_slice()),
+            "the wood row is folded"
         );
         let shipped = content_digest(&root);
         assert_ne!(shipped, digest_of(&map_files), "the tree texts count");

@@ -1502,7 +1502,7 @@ fn volume_crossings(
     deposits
         .iter()
         .filter_map(|dose| {
-            let DoseSource::Line { chord } = dose.source else {
+            let DoseSource::Line { chord, cost } = dose.source else {
                 return None;
             };
             let &(start, end) = spans.get(&dose.address)?;
@@ -1512,7 +1512,8 @@ fn volume_crossings(
                 entry: at(start),
                 end: at(if perforated { end } else { rest.unwrap_or(end) }),
                 chord,
-                cost: dose.amount,
+                cost,
+                energy: dose.amount,
                 perforated,
             })
         })

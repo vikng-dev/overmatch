@@ -1,0 +1,29 @@
+// The wood row of the game's damage model: what the sim reads of every tree, whatever its species.
+// Read by `src/trees.rs` once at startup with the species table, which holds only a species' look
+// and its generation ranges: a player cannot tell one species' wood from another's, and trunk
+// thickness is visible, so no damage value is keyed by species.
+//
+// `substance` is the trunk's substance, a hard key of `assets/materials/materials.ron`.
+// `hp_per_m` is the trunk's HP pool per metre of its breast-height diameter (the instance's, scale
+// applied): a trunk of diameter d has `round(hp_per_m × d)` HP points, at least one. The pool takes
+// the energy a round loses crossing the trunk at the one energy-to-HP rate every hard pool shares
+// (`assets/ballistics/energy_dose.ron`).
+// `fell_k` (N·s/m², per m³ of dbh³) is the ram threshold's constant: a tick's
+// `Σ impulse × lever ≥ fell_k × dbh³` fells the trunk.
+//
+// PROVENANCE: every number is authored `(value, Kind("source or reason"))`, Kind one of Measured,
+// Derived, Tuned, Resolution, Unknown (`src/provenance.rs`); a value without one does not load. The
+// loader refuses a non-positive one.
+Wood(
+    substance: "Wood",
+    hp_per_m: (600.0, Tuned("provisional (issue 113): the shipped fir (fir_1, dbh 0.40 m) holds
+        240 HP, so it survives one centred 75 mm APCBC round through its base (115 and 126 HP
+        from a fixture 6.8 kg body at 790 and 925 m/s) and is emptied by the second of the 88 mm
+        APCBC's (156 HP), while the machine gun's round deals 1 HP: doses MEASURED at the
+        one energy rate, .agents/scratch/damage-model-2026-10-28/energy-dose-results.md")),
+    fell_k: (9.0e5, Derived("ram-impulses.md 2026-10-26: a tick's Σ impulse × lever MEASURED in
+        track_sandbox at 64 Hz, 6 substeps — sustained push 13.3 kN·s·m, 5 km/h ram 105–108,
+        10 km/h 119–151, 20 km/h 248–303; at 9.0e5 N·s/m² a 0.50 m trunk (threshold 112 kN·s·m)
+        holds a push and falls at 10 km/h, a 0.42 m one (67) falls at a 5 km/h bump. Measured on
+        a spruce; one value for all wood")),
+)

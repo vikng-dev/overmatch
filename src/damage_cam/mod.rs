@@ -357,10 +357,11 @@ pub struct FragmentHit {
     pub damage: f32,
 }
 
-/// One box's dose from the shot (reference-mm): the line's, a bounce's shock included, and the
-/// fields' (the spall cones' and a burst's); and the HP points it lost, the sum of the two rounded
-/// once, the field's at its own HP per reference-mm ([`crate::ballistics::field_units`]), and
-/// capped at the HP it had.
+/// One box's dose from the shot, in HP points before the box's one rounding: the line's (a hard
+/// box's energy at the energy rate, a crew station's chord at the round's crew line rate, a
+/// bounce's shock included) and the fields' (the spall cones' and a burst's, at the field's HP per
+/// reference-mm, [`crate::ballistics::field_units`]); and the HP points it lost, the sum of the two
+/// rounded once and capped at the HP it had.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct BoxDose {
     /// A [`ComponentState::name`].
@@ -568,8 +569,9 @@ pub(crate) mod tests {
         }
     }
 
-    /// A record's path is dosed only where a box lost HP: a dose that rounded to no point leaves
-    /// the box's record but no [`PathStep::Dosed`]. Fixture doses (reference-mm).
+    /// In the game's damage model a record's path is dosed only where a box lost HP: a dose that
+    /// rounded to no point leaves the box's record but no [`PathStep::Dosed`]. Fixture doses are
+    /// HP points before rounding.
     #[test]
     fn a_record_is_dosed_only_where_hp_was_lost() {
         let mut report = delivery::tests::report("s1_through_crew");

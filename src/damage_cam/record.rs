@@ -41,8 +41,8 @@ use crate::ballistics::SpallCone as ThrownCone;
 use crate::ballistics::spall_cone::FieldDescriptor;
 use crate::ballistics::{
     ArmourMark, BallisticVolume, BurstField, ComponentHealth, CrossingEnd, ExternalArmour,
-    PenetrationMarks, ShellPath, ShotDose, SpallMarks, SpallRay, TRANSIT_K, VolumeCrossing,
-    dose_units, field_units, hp_of_units,
+    PenetrationMarks, ShellPath, ShotDose, SpallMarks, SpallRay, VolumeCrossing, dose_units,
+    energy_units, field_units, hp_before_rounding, hp_of_units,
 };
 use crate::damage::{Ammo, CrewStation, FunctionRole, VolumeOf};
 use crate::tank::{
@@ -807,9 +807,11 @@ pub(crate) fn report_from(
     })
 }
 
-/// One deposit on a component: `(volume, dose, t, mark)`, its dose in reference-mm and `mark` the
-/// armour mark that dealt it.
-type Deposit = (Entity, f32, f32, usize);
+/// One deposit on a component: `(volume, units, t, mark)`, its dose in the dose units the shot's
+/// tally took it in (a hard box's line at the energy rate, a witness's chord and a bounce's shock
+/// at the reference-mm rate, a field at its own: [`ShotDose`]) and `mark` the armour mark that
+/// dealt it.
+type Deposit = (Entity, u64, f32, usize);
 
 /// What [`report_from`] reads each mark of an encounter against: the struck tank, the path's timed
 /// nodes, and `tail`, the first mark past the encounter's last hard one ([`wound_tail`]).
@@ -896,7 +898,7 @@ impl<'a> Ledger<'a> {
             volume: name_of(on.world, volume),
         });
         if class_of(on.world, volume) == VolumeClass::Box {
-            self.line.push((volume, shock, t, index));
+            self.line.push((volume, dose_units(shock), t, index));
             self.entered.push((volume, t, position, index));
         }
         self.end = Some(RoundEnd::Left {
@@ -929,7 +931,7 @@ impl<'a> Ledger<'a> {
             let class = class_of(on.world, crossed.volume);
             if class == VolumeClass::Box {
                 self.line
-                    .push((crossed.volume, crossed.cost * TRANSIT_K, t, index));
+                    .push((crossed.volume, energy_units(crossed.energy), t, index));
                 self.entered.push((crossed.volume, t, crossed.entry, index));
                 continue;
             }
@@ -1009,7 +1011,7 @@ impl<'a> Ledger<'a> {
             .map(|ray| {
                 let doses = ray.doses.iter().filter(|(volume, _)| on.owned(*volume));
                 for &(volume, dose) in doses.clone() {
-                    self.field.push((volume, dose, t, index));
+                    self.field.push((volume, field_units(dose), t, index));
                 }
                 Fragment {
                     end: on.struck.point(index, ray.end),
@@ -1038,10 +1040,12 @@ impl<'a> Ledger<'a> {
     /// witness the struck tank owns, and past the hard world the round's end.
     fn wound(&mut self, index: usize, volumes: &[VolumeCrossing]) {
         let on = self.on;
-        // The witness law's dose as it stands: no hard-world scale applies to it.
+        // The witness law's dose as it stands, in reference-mm: the energy rate is the hard
+        // world's.
         for crossed in volumes.iter().filter(|crossed| on.owned(crossed.volume)) {
             let t = on.time_at(crossed.entry);
-            self.line.push((crossed.volume, crossed.cost, t, index));
+            self.line
+                .push((crossed.volume, dose_units(crossed.cost), t, index));
             self.entered.push((crossed.volume, t, crossed.entry, index));
         }
         // Past the hard world, the round ends where it last left a witness, or at rest inside the
@@ -1133,7 +1137,8 @@ fn outcomes(
             .filter(|(volume, ..)| volume == entity)
             .min_by(|a, b| a.1.total_cmp(&b.1))
             .map(|&(_, _, point, mark)| struck.point(mark, point));
-        let sum = |list: &[Deposit]| list.iter().fold(0.0, |sum, (_, dose, ..)| sum + dose);
+        let sum =
+            |list: &[Deposit]| hp_before_rounding(list.iter().map(|&(_, units, ..)| units).sum());
         doses.push(BoxDose {
             volume: state.name.clone(),
             line: sum(&from_line),
@@ -1147,15 +1152,11 @@ fn outcomes(
                 .find(|settle| settle.mark >= struck.from && settle.emptied())
         });
         if let Some(emptying) = emptying {
-            // Each deposit in the units the shot's tally took it in: the field's at its own rate.
+            // Each deposit in the units the shot's tally took it in.
             let mut landed: Vec<(u64, f32, usize)> = from_line
                 .into_iter()
-                .map(|(_, dose, t, mark)| (dose_units(dose), t, mark))
-                .chain(
-                    from_field
-                        .into_iter()
-                        .map(|(_, dose, t, mark)| (field_units(dose), t, mark)),
-                )
+                .chain(from_field)
+                .map(|(_, units, t, mark)| (units, t, mark))
                 .filter(|&(.., mark)| mark == emptying.mark)
                 .collect();
             landed.sort_by(|a, b| a.1.total_cmp(&b.1));
@@ -1297,6 +1298,7 @@ mod tests {
                     },
                     chord: if deep { 0.2 } else { 0.1 },
                     cost: 100.0,
+                    energy: 300_000.0,
                     perforated: !deep,
                 },
                 VolumeCrossing {
@@ -1305,6 +1307,7 @@ mod tests {
                     end: rest,
                     chord: 0.05,
                     cost: 50.0,
+                    energy: 150_000.0,
                     perforated: false,
                 },
             ],

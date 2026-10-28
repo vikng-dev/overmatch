@@ -411,10 +411,9 @@ fn agree(name: &str, body: RoundBody, speed: f32, build: impl Fn(&mut App) -> En
         })
         .flatten()
         .filter(|dose| dose.address == gate_target)
-        .fold(0.0, |total, dose| {
-            total + dose.amount * crate::ballistics::TRANSIT_K
-        });
-    let admitted = pool > 0 && crate::ballistics::hp_points(transit) > 0;
+        .fold(0.0, |total, dose| total + dose.amount);
+    let admitted =
+        pool > 0 && crate::ballistics::hp_of_units(crate::ballistics::energy_units(transit)) > 0;
     let shock = flown.decisions.iter().any(|decision| {
         matches!(decision, Decision::Bounce(bounce)
             if gate.world().get::<ComponentHealth>(bounce.struck).is_some())
@@ -2360,7 +2359,7 @@ fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
         let mut commands = Commands::new(&mut queue, world);
         let tree = crate::trees::spawn(
             &mut commands,
-            &crate::trees::tests::fixture_kind_of("Softwood", 100),
+            &crate::trees::tests::fixture_kind_of("Wood", 100),
             crate::scatter::MapInstance {
                 id: "trunk".to_owned(),
                 ordinal: 0,
@@ -2444,7 +2443,9 @@ fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
                         )?;
                         Ok::<_, WalkError>(plan.deposits.iter().find_map(
                             |dose| match dose.source {
-                                DoseSource::Line { chord } if dose.address == tree => Some(chord),
+                                DoseSource::Line { chord, .. } if dose.address == tree => {
+                                    Some(chord)
+                                }
                                 _ => None,
                             },
                         ))

@@ -1,0 +1,41 @@
+Subject: the game's damage model. All values below are MEASURED on macOS arm64, edit profile,
+rebased onto c4fce0c with per-depth energy allocation. Fixture bodies are labelled fixture.
+
+MEASURE|kind|segments 15|height 27.020|dbh 0.4000|hp 240|hp_per_m 600|substance Wood|joules_per_hp 3000
+MEASURE|head|round|h|off_frac|events|chord_m|cost_refmm|energy_J|v_in|v_out|hp_shot1|shots|emptied|state
+MEASURE|row|88mm_AP|1.0|0.00|through|0.3882|15.53|466710|763.8|701.3|156|2|true|Down { cut: 0, dir: 192 }
+MEASURE|row|88mm_AP|1.0|0.50|through|0.3199|12.80|386052|763.8|712.5|129|2|true|Down { cut: 0, dir: 192 }
+MEASURE|row|88mm_AP|10.0|0.00|through|0.2715|10.86|328522|763.8|720.4|110|3|true|Down { cut: 5, dir: 192 }
+MEASURE|row|88mm_AP|10.0|0.50|through|0.2224|8.90|269822|763.8|728.3|90|3|true|Down { cut: 5, dir: 192 }
+MEASURE|row|88mm_AP|20.0|0.00|through|0.1222|4.89|149023|763.8|744.4|50|5|true|Down { cut: 11, dir: 192 }
+MEASURE|row|88mm_AP|20.0|0.50|through|0.0899|3.60|109883|763.8|749.6|37|7|true|Down { cut: 11, dir: 192 }
+MEASURE|row|88mm_APHE_ring|1.0|0.00|through|0.3882|15.53|466710|763.8|701.3|156|2|true|Down { cut: 0, dir: 192 }
+MEASURE|row|88mm_APHE_ring|1.0|0.50|through|0.3199|12.80|386052|763.8|712.5|129|2|true|Down { cut: 0, dir: 192 }
+MEASURE|row|88mm_APHE_ring|10.0|0.00|through|0.2715|10.86|328522|763.8|720.4|110|3|true|Down { cut: 5, dir: 192 }
+MEASURE|row|88mm_APHE_ring|10.0|0.50|through|0.2224|8.90|269822|763.8|728.3|90|3|true|Down { cut: 5, dir: 192 }
+MEASURE|row|88mm_APHE_ring|20.0|0.00|through|0.1222|4.89|149023|763.8|744.4|50|5|true|Down { cut: 11, dir: 192 }
+MEASURE|row|88mm_APHE_ring|20.0|0.50|through|0.0899|3.60|109883|763.8|749.6|37|7|true|Down { cut: 11, dir: 192 }
+MEASURE|row|88mm_APCR|1.0|0.00|through|0.3974|15.90|87894|915.2|864.0|29|9|true|Down { cut: 0, dir: 192 }
+MEASURE|row|88mm_APCR|1.0|0.50|through|0.3564|14.25|78968|915.2|869.3|26|10|true|Down { cut: 0, dir: 192 }
+MEASURE|row|88mm_APCR|10.0|0.00|through|0.2807|11.23|62428|915.2|879.1|21|12|true|Down { cut: 5, dir: 192 }
+MEASURE|row|88mm_APCR|10.0|0.50|through|0.2322|9.29|51763|915.2|885.4|17|15|true|Down { cut: 5, dir: 192 }
+MEASURE|row|88mm_APCR|20.0|0.00|through|0.1353|5.41|30301|915.2|897.8|10|24|true|Down { cut: 11, dir: 192 }
+MEASURE|row|88mm_APCR|20.0|0.50|through|0.1112|4.45|24929|915.2|900.9|8|30|true|Down { cut: 11, dir: 192 }
+MEASURE|row|7.9mm_AP|1.0|0.00|rest|0.3184|12.74|2872|697.8|0.0|1|240|true|Down { cut: 0, dir: 192 }
+MEASURE|row|7.9mm_AP|1.0|0.50|rest|0.3184|12.74|2872|697.8|0.0|1|240|true|Down { cut: 0, dir: 192 }
+MEASURE|row|7.9mm_AP|10.0|0.00|through|0.2840|11.36|2616|697.8|208.6|1|240|true|Down { cut: 5, dir: 192 }
+MEASURE|row|7.9mm_AP|10.0|0.50|through|0.2529|10.12|2375|697.8|290.4|1|240|true|Down { cut: 5, dir: 192 }
+MEASURE|row|7.9mm_AP|20.0|0.00|through|0.1399|5.59|1409|697.8|498.0|0|5|false|Standing
+MEASURE|row|7.9mm_AP|20.0|0.50|through|0.1246|4.98|1268|697.8|521.5|0|5|false|Standing
+MEASURE|row|fixture_75mm_APCBC@790|1.0|0.00|through|0.3905|15.62|344047|779.5|711.7|115|3|true|Down { cut: 0, dir: 192 }
+MEASURE|row|fixture_75mm_APCBC@790|1.0|0.50|through|0.3227|12.91|285441|779.5|723.7|95|3|true|Down { cut: 0, dir: 192 }
+MEASURE|row|fixture_75mm_APCBC@790|10.0|0.00|through|0.2738|10.95|242928|779.5|732.3|81|3|true|Down { cut: 5, dir: 192 }
+MEASURE|row|fixture_75mm_APCBC@790|10.0|0.50|through|0.2252|9.01|200387|779.5|740.8|67|4|true|Down { cut: 5, dir: 192 }
+MEASURE|row|fixture_75mm_APCBC@790|20.0|0.00|through|0.1279|5.11|114417|779.5|757.6|38|7|true|Down { cut: 11, dir: 192 }
+MEASURE|row|fixture_75mm_APCBC@790|20.0|0.50|through|0.0927|3.71|83101|779.5|763.7|28|9|true|Down { cut: 11, dir: 192 }
+MEASURE|row|fixture_75mm_APCBC@925|1.0|0.00|through|0.3905|15.62|379058|913.5|850.3|126|2|true|Down { cut: 0, dir: 192 }
+MEASURE|row|fixture_75mm_APCBC@925|1.0|0.50|through|0.3227|12.91|314487|913.5|861.4|105|3|true|Down { cut: 0, dir: 192 }
+MEASURE|row|fixture_75mm_APCBC@925|10.0|0.00|through|0.2738|10.95|267646|913.5|869.4|89|3|true|Down { cut: 5, dir: 192 }
+MEASURE|row|fixture_75mm_APCBC@925|10.0|0.50|through|0.2252|9.01|220775|913.5|877.3|74|4|true|Down { cut: 5, dir: 192 }
+MEASURE|row|fixture_75mm_APCBC@925|20.0|0.00|through|0.1278|5.11|126053|913.5|893.0|42|6|true|Down { cut: 11, dir: 192 }
+MEASURE|row|fixture_75mm_APCBC@925|20.0|0.50|through|0.0927|3.71|91544|913.5|898.7|31|8|true|Down { cut: 11, dir: 192 }

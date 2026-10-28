@@ -113,10 +113,11 @@ impl TryFrom<VolumeEntry> for VolumeSpec {
 /// model" survives — a plate's resistance is now a property of what it is made of, stated once.
 #[derive(Clone)]
 pub struct ComponentSpec {
-    /// HP pool, in whole HP points (`ballistics::HP_PER_REFERENCE_MM`: one point is 0.1
-    /// reference-mm of line dose). A crew station's is the shared crew pool
-    /// (`ballistics::box_classes::BoxClasses::crew_hp`), never authored in a tank file; every other
-    /// component's is authored. Depleting it is what "damaged" means for this component; the
+    /// HP pool, in whole HP points (a hard box's line dose converts at
+    /// `ballistics::energy_dose::joules_per_hp`, a crew station's chord and a bounce's shock at
+    /// `ballistics::HP_PER_REFERENCE_MM`, 0.1 reference-mm a point). A crew station's is the
+    /// shared crew pool (`ballistics::box_classes::BoxClasses::crew_hp`), never authored in a
+    /// tank file; every other component's is authored. Depleting it is what "damaged" means for this component; the
     /// consequences of reaching zero come from the facets below.
     pub hp: u32,
     /// Crew station served by this volume.

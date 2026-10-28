@@ -256,6 +256,7 @@ pub(crate) fn line(
                     end,
                     chord,
                     cost: chord * wound,
+                    energy: 0.0,
                     perforated: left,
                 }),
             }

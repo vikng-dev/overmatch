@@ -1932,7 +1932,7 @@ pub struct EntityShare {
     pub factor: f32,
     /// Disc-mean chord (m): the entity's covered chords summed over samples, divided by k.
     pub chord: f32,
-    /// Disc-mean cost (reference-mm) — `chord × factor`, §13.2's damage law.
+    /// Disc-mean readout cost (reference-mm), `chord × factor`; the game's hard-pool dose is energy.
     pub cost: f32,
     /// Fraction of the disc that met this entity at all.
     pub coverage: f32,
@@ -2889,7 +2889,7 @@ pub struct ResolutionPlan<S> {
     /// Reference-mm spent — the readout of the state in, less the readout of the state out.
     pub cost_spent: f32,
     /// The line's doses, one per volume it put a positive chord into, summed over the crossing in
-    /// volume order ([`DoseSource::Line`]).
+    /// volume order ([`DoseSource::Line`]): each the energy the round lost in that volume, joules.
     ///
     /// Damage attribution is per-presence and needs no arbitration (§13.2: no ownership, no
     /// priority, no argmax). The IMPULSE does, when a crossing's presence set spans several rigid
@@ -3035,12 +3035,13 @@ pub(crate) fn finish<M: Mechanism>(
     let deposits = advanced
         .doses
         .into_iter()
-        .filter(|(_, (chord, _))| *chord as f32 > 0.0)
-        .map(|(address, (chord, amount))| Dose {
+        .filter(|(_, line)| line.chord as f32 > 0.0)
+        .map(|(address, line)| Dose {
             address,
-            amount: amount as f32,
+            amount: line.energy as f32,
             source: DoseSource::Line {
-                chord: chord as f32,
+                chord: line.chord as f32,
+                cost: line.cost as f32,
             },
         })
         .collect();
@@ -3065,13 +3066,22 @@ pub(crate) fn finish<M: Mechanism>(
     })
 }
 
+/// One volume's line over a crossing, summed over the encounters: the disc-mean chord (m), its
+/// readout cost (reference-mm) and the energy the round lost in it (J), the dose.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct LineSum {
+    chord: f64,
+    cost: f64,
+    energy: f64,
+}
+
 /// Where a mechanism's run through a crossing ended.
 struct Advanced<S> {
     state: S,
     /// Progress at which it came to rest; `None` when it crossed every encounter.
     stop: Option<f64>,
-    /// Per addressed volume, the summed line `(chord, amount)`.
-    doses: BTreeMap<Entity, (f64, f64)>,
+    /// Per addressed volume, its summed line.
+    doses: BTreeMap<Entity, LineSum>,
     /// Every encounter the mechanism advanced through, in order.
     stretches: Vec<Stretch<S>>,
 }
@@ -3109,7 +3119,7 @@ fn advance_through<M: Mechanism>(
     limits: &Limits,
     geometry: &Geometry,
 ) -> Result<Advanced<M::State>, WalkError> {
-    let mut doses: BTreeMap<Entity, (f64, f64)> = BTreeMap::new();
+    let mut doses: BTreeMap<Entity, LineSum> = BTreeMap::new();
     let mut stretches: Vec<Stretch<M::State>> = Vec::new();
     for encounter in one_substance_runs(encounters) {
         let encounter = &*encounter;
@@ -3121,11 +3131,13 @@ fn advance_through<M: Mechanism>(
                 Effect::Line {
                     address,
                     chord,
-                    amount,
+                    cost,
+                    energy,
                 } => {
-                    let slot = doses.entry(address).or_insert((0.0, 0.0));
-                    slot.0 += chord;
-                    slot.1 += amount;
+                    let slot = doses.entry(address).or_default();
+                    slot.chord += chord;
+                    slot.cost += cost;
+                    slot.energy += energy;
                 }
             }
         }

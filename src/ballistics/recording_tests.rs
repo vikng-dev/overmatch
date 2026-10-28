@@ -805,9 +805,11 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
         .id();
     let plate = world.spawn((Name::new("plate"), VolumeOf(tank))).id();
     let shell = world.spawn(ShotDose::default()).id();
-    // 4 reference-mm (40 points) at mark 0; 2 by the cone and 3 by the line at mark 1.
-    let (line_0, cone, line_1) = (4.0, 2.0, 3.0);
-    let dose = |world: &mut World, amounts: Vec<f32>, mark: usize| {
+    // The line's energy (J) for 40 points at mark 0; 2 reference-mm by the cone and the line's
+    // energy for 30 points at mark 1, each taken into the tally at its source's rate.
+    let joules = |points: f32| points * super::energy_dose::joules_per_hp() as f32;
+    let (line_0, cone, line_1) = (joules(40.0), 2.0, joules(30.0));
+    let dose = |world: &mut World, units: Vec<u64>, mark: usize| {
         world
             .run_system_once(
                 move |mut shot: Query<&mut ShotDose>, mut health: Query<&mut ComponentHealth>| {
@@ -816,18 +818,18 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
                         entry: Vec3::ZERO,
                         along: Vec3::NEG_Z,
                     };
-                    for amount in &amounts {
-                        shot.add(ammo, *amount, context);
+                    for units in &units {
+                        shot.add_units(ammo, *units, context);
                     }
                     shot.settle(&mut health, true, mark);
                 },
             )
             .unwrap();
     };
-    dose(&mut world, vec![line_0], 0);
+    dose(&mut world, vec![energy_units(line_0)], 0);
     // Another round leaves 10 of the 60 points.
     world.get_mut::<ComponentHealth>(ammo).unwrap().current = 10;
-    dose(&mut world, vec![cone, line_1], 1);
+    dose(&mut world, vec![field_units(cone), energy_units(line_1)], 1);
     assert_eq!(world.get::<ComponentHealth>(ammo).unwrap().current, 0);
 
     let crossing =
@@ -844,12 +846,13 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
             },
             cones,
         };
-    let through = |volume, entry: Vec3, end: Vec3, cost| VolumeCrossing {
+    let through = |volume, entry: Vec3, end: Vec3, energy| VolumeCrossing {
         volume,
         entry,
         end,
         chord: entry.distance(end),
-        cost,
+        cost: 1000.0 * entry.distance(end),
+        energy,
         perforated: true,
     };
     let z = |z: f32| Vec3::new(0.0, 0.0, z);
@@ -863,7 +866,7 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
         crossing(
             z(5.0),
             vec![
-                through(plate, z(5.0), z(4.9), 100.0),
+                through(plate, z(5.0), z(4.9), joules(100.0)),
                 through(ammo, z(4.0), z(3.0), line_1),
             ],
             z(3.0),

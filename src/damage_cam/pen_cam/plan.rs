@@ -415,7 +415,8 @@ pub struct BoxPlan {
     pub count: u32,
     /// Its HP points at the shot.
     pub hp: u32,
-    /// The line's and the fields' dose to it (ref-mm).
+    /// The line's and the fields' dose to it (HP points before rounding,
+    /// [`crate::damage_cam::BoxDose`]).
     pub line: f32,
     pub field: f32,
     /// The HP points the shot took from it.

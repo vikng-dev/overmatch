@@ -81,7 +81,7 @@
 //! | s8b_mg_stopped | 186 | 140 | 0 | 0 | 0 | 0 | – | – |
 //! | s9_breech_and_loader | 785 | 750 | 503 | 1 | 64 | 56 | 503 | – |
 //! | s10_gun_barrel_struck | 913 | 870 | 696 | 2 | 128 | 64 | 348 | – |
-//! | s11_mg_barrel_struck | 188 | 144 | 0 | 0 | 0 | 0 | – | – |
+//! | s11_mg_barrel_struck | 186 | 142 | 0 | 0 | 0 | 0 | – | – |
 //! | s12_apcr_through_crew | 889 | 859 | 565 | 1 | 64 | 66 | 565 | – |
 //! | s13_ring_through_crew | 2167 | 2141 | 565 | 1 | 64 | 66 | 565 | 1233 |
 //! | s15_unarmed_overpen | 555 | 509 | 309 | 2 | 128 | 0 | 154 | – |
@@ -789,6 +789,7 @@ enum WireEnd {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 struct WireDose {
     volume: u16,
+    /// The game's damage model: HP points before rounding, as in `BoxDose`.
     line: f32,
     field: f32,
     lost: u32,

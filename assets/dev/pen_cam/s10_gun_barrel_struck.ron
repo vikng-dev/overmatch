@@ -1052,8 +1052,8 @@
     doses: [
         (
             volume: "Main_Gun_Barrel",
-            line: 24.6366,
-            field: 5.5286703,
+            line: 245.0312,
+            field: 387.007,
             lost: 250,
             entered: Some((-0.07029343, 2.1952024, -4.0)),
         ),

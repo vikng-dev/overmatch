@@ -27,6 +27,10 @@ _Avoid_: hit marker (that names one disposable presentation)
 **Battlefield destruction**:
 An authority-owned change to a placed world object that alters gameplay during a Battle, such as a fallen tree or breached wall.
 
+**Wood row**:
+The shared values of every tree in the game's damage model: its wood substance, HP per metre of breast-height diameter, and ram threshold. A trunk's HP follows its diameter; **species** supplies only appearance and generation ranges.
+_Avoid_: species HP, softwood, hardwood (one wood for every tree)
+
 **Surface evidence**:
 Visual-only traces of action on an otherwise simulation-static surface, such as track marks, impact scars, scorch, dust, and shallow visual craters.
 _Avoid_: terrain deformation (surface evidence does not change ground collision or traversal)
@@ -376,6 +380,10 @@ _Avoid_: soft armour, flesh factor (a witness has no factor)
 A round's dose to a witness per metre of chord (reference-mm/m, round file field `wound`, `assets/rounds/`, TUNED). Round data, never a material's.
 _Avoid_: wound rate (the code identifier keeps `wound` until a rename is decided)
 
+**Line dose**:
+What a round deposits along its path in the game's damage model: into a hard pool, the kinetic energy it loses there, shared among overlapping volumes at that depth and converted at one **energy-to-HP rate** for every hard pool; a stopped round deposits all its remaining energy. Into a witness, the chord times the round's **crew line rate**.
+_Avoid_: transit damage; cost (the chord's reference-mm readout, chord × factor, is never a dose)
+
 **Burst**:
 A burst round's fuze running out: armed by a body whose spend reaches its threshold, after a delay counted as path from that body's exit (restarted by every body met after it), the round bursts at the burst point and throws its **fragment cone** there, or bursts at rest where it stopped first. Law: design doc §5a.
 _Avoid_: detonation, explosion (the game state is the burst and its field)
@@ -411,7 +419,7 @@ Detonation of an ammunition volume when its HP pool is emptied — every crew HP
 _Avoid_: ammo rack explosion, detonation (reserve detonation for HE)
 
 **Union field**:
-The material-factor field along a shot's path: at every point, the **max** `material_factor` over the volumes covering it. Cost is its integral, so shared space is charged exactly once, authoring order cannot matter, and adding a volume never lowers protection. Damage stays per-presence — every HP-bearing volume deposits over its own chords, at its own factor, with no ownership.
+The material-factor field along a shot's path: at every point, the **max** `material_factor` over the volumes covering it. Cost is its integral, so shared space is charged exactly once, authoring order cannot matter, and adding a volume never lowers protection. In the game's damage model, line dose follows the energy lost at each depth, shared among the hard volumes present there without ownership.
 _Avoid_: CSG merge, boolean union of the meshes (the union is evaluated lazily on the ray; no merged mesh exists)
 
 **Walk**:

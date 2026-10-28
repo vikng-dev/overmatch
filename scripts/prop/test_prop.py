@@ -9,9 +9,6 @@ the species row, the certificate — and asserting the refusal names it. The tra
 re-read what the pipeline wrote and add the independent assertions (DBH, ranges, census). The
 cases that need Blender say so and skip without the pinned one: generation, export and the
 verifier's re-export are what they prove, and nothing else can stand in.
-
-`OVERMATCH_REGISTRY` names the substance registry the one registry case reads; the repository's
-`assets/materials/materials.ron` by default.
 """
 
 import copy
@@ -36,14 +33,18 @@ import toolchain  # noqa: E402
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TABLE = os.path.join(ROOT, "assets", "trees", "species.ron")
-#: The provenance kinds a `(value, Kind("why"))` pair may carry, the registry's vocabulary.
-PROVENANCE_KINDS = ("Unknown", "Derived", "Measured")
-REGISTRY = os.environ.get("OVERMATCH_REGISTRY") or os.path.join(ROOT, build.REGISTRY)
 FIR = os.path.join(ROOT, "assets", "trees", "fir_1", "fir_1")
 BLENDER = toolchain.blender()
 
 #: The species the slice contract (§3) names; the table may hold more.
 CONTRACT_SPECIES = {"norway_spruce", "scots_pine", "silver_birch"}
+
+#: Every field a species row holds: its generation ranges and its look. No damage value is keyed by
+#: species — a tree's substance, HP pool and ram threshold are the wood row's
+#: (`assets/trees/wood.ron`) — so a row carrying one more field is a damage value the sim would
+#: silently ignore.
+SPECIES_FIELDS = {"__struct__", "height_m", "dbh_m", "crown_base_frac", "crown_width_frac",
+                  "whorl_spacing_m"}
 
 #: How far the DBH read off the taper at 1.3 m may sit from the sampled one, metres. DERIVED from
 #: two sources of error: each ring radius is written to four decimals (at most 0.1 mm on a
@@ -66,12 +67,6 @@ def tracked() -> types.SimpleNamespace:
 
 def node(js, name):
     return next(n for n in js["nodes"] if n.get("name") == name)
-
-
-def table_substances():
-    """The substances the table names — what the registry holds once the runtime lane's rows
-    land; the contract cases that are not about the registry read this."""
-    return {row["substance"] for row in ron.load(TABLE).values()}
 
 
 def taper_dbh(segments) -> float:
@@ -123,37 +118,24 @@ class SpeciesTable(unittest.TestCase):
 
     def test_every_row_is_in_the_contract_shape(self):
         """Class invariants over every row the table holds, so a fourth species is held to the
-        same law and not to a list: ordered positive ranges a taper can be cut from, a substance
-        name, positive thresholds under a stated provenance, view parameters in range."""
+        same law and not to a list: ordered positive ranges a taper can be cut from, view
+        parameters in range, and exactly the look and range fields — no damage value is keyed by
+        species, so a row that grew an `hp`, a `fell_k` or a `substance` again reds here."""
         table = ron.load(TABLE)
         self.assertTrue(table)
         for key, row in table.items():
             self.assertEqual(row["__struct__"], "Species", key)
+            self.assertEqual(set(row), SPECIES_FIELDS, key)
             for field in ("height_m", "dbh_m"):
                 lo, hi = row[field]
                 self.assertLess(0.0, lo, key)
                 self.assertLess(lo, hi, key)
             self.assertGreater(row["height_m"][0], 2.0 * plan.BREAST_HEIGHT_M,
                                "{}: the taper is cut from breast height".format(key))
-            self.assertIsInstance(row["substance"], str)
-            for field in ("fell_k", "hp"):
-                value, kind = row[field]
-                self.assertGreater(value, 0, "{} {}: a threshold is positive (A6)".format(key, field))
-                self.assertIn(kind.name, PROVENANCE_KINDS, "{} {} names its provenance".format(key, field))
-                self.assertTrue(kind.args[0], "{} {}: the provenance says why".format(key, field))
-            self.assertIsInstance(row["hp"][0], int, key)
             self.assertTrue(0.0 < row["crown_base_frac"] < 1.0, key)
             self.assertGreater(row["crown_width_frac"], 0.0, key)
             self.assertGreater(row["whorl_spacing_m"], 0.0, key)
-            self.assertEqual(build.species_failures(key, row, {row["substance"]}), [])
-
-    def test_every_substance_is_a_registry_key(self):
-        """A species' substance is read out of the registry at spawn; one the registry lacks is a
-        tree with no matter."""
-        registry = build.substances(REGISTRY)
-        for key, row in ron.load(TABLE).items():
-            self.assertIn(row["substance"], registry,
-                          "{}: not a key of {}".format(key, os.path.relpath(REGISTRY, ROOT)))
+            self.assertEqual(build.species_failures(key, row), [])
 
 
 # ── the plan ─────────────────────────────────────────────────────────────────────────────────────
@@ -220,7 +202,7 @@ class TrackedTrio(unittest.TestCase):
         the DBH read off the taper sit in the species' ranges."""
         trio = tracked()
         table = ron.load(TABLE)
-        self.assertEqual(build.ron_failures(trio.tree, trio.js, table, table_substances()), [])
+        self.assertEqual(build.ron_failures(trio.tree, trio.js, table), [])
         self.assertNotIn("dbh_m", trio.tree)
         height = sum(s["height_m"] for s in trio.tree["segments"])
         lo, hi = table[trio.tree["species"]]["height_m"]
@@ -378,10 +360,9 @@ class RonMutants(unittest.TestCase):
         trio = tracked()
         self.js, self.tree = trio.js, copy.deepcopy(trio.tree)
         self.table = ron.load(TABLE)
-        self.registry = table_substances()
 
     def assertNamed(self, *words):
-        failures = build.ron_failures(self.tree, self.js, self.table, self.registry)
+        failures = build.ron_failures(self.tree, self.js, self.table)
         self.assertTrue(any(all(w in f for w in words) for f in failures), (words, failures))
 
     def test_a_height_the_chain_does_not_place_is_refused(self):
@@ -406,21 +387,9 @@ class RonMutants(unittest.TestCase):
             self.tree["segments"].append(dict(last))
         self.assertNamed("256 segments", "A3")
 
-    def test_a_zero_hp_is_refused(self):
-        self.table[self.tree["species"]]["hp"] = (0, ron.Call("Unknown", ("placeholder",)))
-        self.assertNamed("hp is 0")
-
-    def test_a_negative_fell_k_is_refused(self):
-        self.table[self.tree["species"]]["fell_k"] = (-2.0e5, ron.Call("Unknown", ("placeholder",)))
-        self.assertNamed("fell_k is -200000.0")
-
-    def test_a_substance_the_registry_lacks_is_refused(self):
-        self.registry = {"RHA"}
-        self.assertNamed("not a key of the substance registry", "RHA")
-
-    def test_a_substance_that_is_no_name_is_refused(self):
-        self.table[self.tree["species"]]["substance"] = 7
-        self.assertNamed("substance 7")
+    def test_a_species_that_is_no_species_row_is_refused(self):
+        self.table[self.tree["species"]]["__struct__"] = "Wood"
+        self.assertNamed("is not a Species row")
 
     def test_a_document_that_is_no_tree_asset_is_refused(self):
         self.tree["__struct__"] = "TankSpec"
@@ -710,14 +679,14 @@ class Generation(unittest.TestCase):
         js, binary = build.parse_glb(view)
         tree = ron.parse(ron_blob.decode())
         self.assertEqual(build.contract_failures(js, "pine_3"), [])
-        self.assertEqual(build.ron_failures(tree, js, ron.load(TABLE), table_substances()), [])
+        self.assertEqual(build.ron_failures(tree, js, ron.load(TABLE)), [])
         self.assertEqual(build.geometry_failures(js, binary, tree), [])
 
 
 @unittest.skipIf(BLENDER.mismatch, "the pinned Blender is not here: {}".format(BLENDER))
 class Verifier(unittest.TestCase):
-    """`verify` over a copy of the tracked trio, with a registry that holds the table's
-    substances so the cases are about the re-export and nothing else."""
+    """`verify` over a copy of the tracked trio, so the cases are about the re-export and nothing
+    else."""
 
     def setUp(self):
         self.work = tempfile.mkdtemp(prefix="prop-verify-")
@@ -725,14 +694,10 @@ class Verifier(unittest.TestCase):
         self.blend = os.path.join(self.work, "fir_1.blend")
         for suffix in (".blend", ".glb", ".tree.ron", ".lod.json"):
             shutil.copyfile(FIR + suffix, os.path.join(self.work, "fir_1" + suffix))
-        self.registry = os.path.join(self.work, "registry.ron")
-        with open(self.registry, "w", encoding="utf-8") as handle:
-            handle.write("(substances: {" + ", ".join(
-                '"{}": Hard()'.format(name) for name in sorted(table_substances())) + "})\n")
 
     def verify(self):
         with tempfile.TemporaryDirectory() as scratch:
-            return build.verify(self.blend, ROOT, scratch, BLENDER.binary, self.registry)
+            return build.verify(self.blend, ROOT, scratch, BLENDER.binary)
 
     def test_the_tracked_trio_is_its_blend_s_own_export(self):
         self.assertEqual(self.verify(), 0)

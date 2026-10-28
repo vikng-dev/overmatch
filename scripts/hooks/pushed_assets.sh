@@ -133,8 +133,10 @@ assets_changed_trios() {   # <changed-paths-file>; stems on stdin
 #   tree  `scripts/prop/` (the build, the exporter it runs in Blender, the generator, and
 #         `test_prop.py`, which runs in this lane and nowhere else) and `assets/trees/species.ron`
 #         (the build's species table).
-#   both  `assets/materials/` (the tank source links `materials.blend`, both builds read
-#         `materials.ron`); `scripts/toolchain.py` (both builds import it) and
+#   both  `assets/materials/` (the tank source links `materials.blend` and the tank build reads
+#         `materials.ron`; the tree build reads neither, and the library stays in both as the
+#         contract does, a tree re-verify being the cheap direction to be wrong);
+#         `scripts/toolchain.py` (both builds import it) and
 #         `scripts/tank/report.py` (`scripts/toolchain.py` imports it); the Rust consumer contract
 #         with the modules it certifies against, `src/{bake,spec,exact,substances}*` and
 #         `src/bin/asset_verify.rs`. The contract is in both by decision rather than by a read: only
