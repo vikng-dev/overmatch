@@ -345,7 +345,7 @@ fn stamp_shoes(
         }
     }
     for entry in laid {
-        log.push(entry, shoe);
+        log.push(entry, shoes, law);
         near.stamp(&entry, shoes, law);
         world.stamp(&entry, shoes, law);
     }

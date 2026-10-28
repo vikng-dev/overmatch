@@ -56,8 +56,10 @@ pub(crate) const WORLD_SIDE: u32 = 4096;
 /// The upload tile: a store is written to the GPU in squares of this many texels (fewer at a mip
 /// level smaller than one).
 const TILE: u32 = 64;
-/// The log's index cell, m. ASSUMED: a few shoe lengths, small next to a recentre strip.
-const LOG_CELL_M: f32 = 8.0;
+/// Near texels per log cell axis. ASSUMED: 6 m cells, aligned to the global raster.
+const LOG_CELL_SIDE: i32 = 128;
+/// Pending stamps per cell before exact raster compaction. ASSUMED: at most 8 KiB.
+const LOG_BATCH: usize = 512;
 /// Samples per world-texel axis. DERIVED: on a 1500 m map their 4.58 cm spacing is
 /// below the near texel's 4.69 cm, so near-scale footprints survive downsampling.
 const WORLD_SAMPLES: u32 = 8;
@@ -255,53 +257,218 @@ impl Span {
     }
 }
 
-/// Every stamp laid this battle, in the order laid, indexed by the [`LOG_CELL_M`] cells their
-/// world boxes touch.
+/// Spatial stamp history. Each cell retains a bounded batch of operations and an exact
+/// near-resolution checkpoint of earlier operations. MAX composition is associative, so
+/// compaction loses neither detail nor persistence. Shoe bakes and the print law are immutable
+/// while this history exists. Memory grows with visited area, never with repeat visits.
 #[derive(Default)]
 pub(crate) struct StampLog {
-    entries: Vec<StampEntry>,
-    cells: HashMap<IVec2, Vec<u32>>,
+    count: usize,
+    cells: HashMap<IVec2, LogCell>,
 }
 
-impl StampLog {
-    pub(crate) fn push(&mut self, entry: StampEntry, shoe: &ClearanceStamp) {
-        let index = self.entries.len() as u32;
-        self.entries.push(entry);
-        let (low, high) = entry.world_bounds(shoe);
-        let (low, high) = (Self::cell(low), Self::cell(high));
-        for j in low.y..=high.y {
-            for i in low.x..=high.x {
-                self.cells.entry(IVec2::new(i, j)).or_default().push(index);
+#[derive(Default)]
+struct LogCell {
+    entries: Vec<StampEntry>,
+    checkpoint: Checkpoint,
+}
+
+/// Exclusive end of a row-major run, and its value. DERIVED: a cell has 16384 texels,
+/// so an end fits in u16. Raw storage bounds incompressible checkpoints to 32 KiB.
+struct Run {
+    end: u16,
+    value: [u8; 2],
+}
+
+#[derive(Default)]
+enum Checkpoint {
+    #[default]
+    Empty,
+    Runs(Box<[Run]>),
+    Raw(Box<[[u8; 2]]>),
+}
+
+impl Checkpoint {
+    fn visit(&self, mut put: impl FnMut(usize, [u8; 2])) {
+        match self {
+            Self::Empty => {}
+            Self::Raw(texels) => {
+                for (i, &value) in texels.iter().enumerate() {
+                    if value != [0, 0] {
+                        put(i, value);
+                    }
+                }
             }
-        }
-    }
-
-    fn cell(world: Vec2) -> IVec2 {
-        (world / LOG_CELL_M).floor().as_ivec2()
-    }
-
-    /// The stamps whose world boxes may touch the box from `low` to `high`, each once, in log
-    /// order.
-    pub(crate) fn near(&self, low: Vec2, high: Vec2) -> Vec<StampEntry> {
-        let (low, high) = (Self::cell(low), Self::cell(high));
-        let mut found: Vec<u32> = Vec::new();
-        for j in low.y..=high.y {
-            for i in low.x..=high.x {
-                if let Some(indices) = self.cells.get(&IVec2::new(i, j)) {
-                    found.extend_from_slice(indices);
+            Self::Runs(runs) => {
+                let mut start = 0;
+                for run in runs {
+                    if run.value != [0, 0] {
+                        for i in start..usize::from(run.end) {
+                            put(i, run.value);
+                        }
+                    }
+                    start = usize::from(run.end);
                 }
             }
         }
-        found.sort_unstable();
-        found.dedup();
-        found
-            .into_iter()
-            .map(|index| self.entries[index as usize])
-            .collect()
+    }
+
+    fn packed(texels: Vec<[u8; 2]>) -> Self {
+        if texels.iter().all(|&value| value == [0, 0]) {
+            return Self::Empty;
+        }
+        let mut runs: Vec<Run> = Vec::new();
+        for (i, &value) in texels.iter().enumerate() {
+            if let Some(last) = runs.last_mut()
+                && last.value == value
+            {
+                last.end = (i + 1) as u16;
+            } else {
+                runs.push(Run {
+                    end: (i + 1) as u16,
+                    value,
+                });
+            }
+        }
+        if runs.len() * std::mem::size_of::<Run>() >= texels.len() * 2 {
+            Self::Raw(texels.into_boxed_slice())
+        } else {
+            Self::Runs(runs.into_boxed_slice())
+        }
+    }
+}
+
+impl LogCell {
+    fn compact(&mut self, span: Span, shoes: &[ClearanceStamp], law: &PrintLaw) {
+        let mut texels = vec![[0, 0]; (LOG_CELL_SIDE * LOG_CELL_SIDE) as usize];
+        self.checkpoint.visit(|i, value| texels[i] = value);
+        for entry in &self.entries {
+            let Some(shoe) = shoes.get(entry.shoe()) else {
+                continue;
+            };
+            raster(entry, shoe, law, span, |g, value| {
+                let c = g - span.min;
+                let texel = &mut texels[(c.y * LOG_CELL_SIDE + c.x) as usize];
+                *texel = [texel[0].max(value[0]), texel[1].max(value[1])];
+            });
+        }
+        self.entries.clear();
+        self.checkpoint = Checkpoint::packed(texels);
+    }
+}
+
+impl StampLog {
+    pub(crate) fn push(&mut self, entry: StampEntry, shoes: &[ClearanceStamp], law: &PrintLaw) {
+        let Some(shoe) = shoes.get(entry.shoe()) else {
+            return;
+        };
+        self.count += 1;
+        let (low, high) = entry.world_bounds(shoe);
+        let span = Span::covering(low, high, NEAR_TEXEL_M);
+        if span.min.x >= span.max.x || span.min.y >= span.max.y {
+            return;
+        }
+        let (low, high) = (
+            span.min.div_euclid(IVec2::splat(LOG_CELL_SIDE)),
+            (span.max - 1).div_euclid(IVec2::splat(LOG_CELL_SIDE)),
+        );
+        for j in low.y..=high.y {
+            for i in low.x..=high.x {
+                let key = IVec2::new(i, j);
+                let cell = self.cells.entry(key).or_default();
+                cell.entries.push(entry);
+                if cell.entries.len() == LOG_BATCH {
+                    let min = key * LOG_CELL_SIDE;
+                    cell.compact(
+                        Span {
+                            min,
+                            max: min + LOG_CELL_SIDE,
+                        },
+                        shoes,
+                        law,
+                    );
+                }
+            }
+        }
+    }
+
+    /// Reproduce the exact near raster in `span`, from checkpoints plus pending operations.
+    fn draw(
+        &self,
+        span: Span,
+        shoes: &[ClearanceStamp],
+        law: &PrintLaw,
+        mut put: impl FnMut(IVec2, [u8; 2]),
+    ) {
+        let low = span.min.div_euclid(IVec2::splat(LOG_CELL_SIDE));
+        let high = (span.max - 1).div_euclid(IVec2::splat(LOG_CELL_SIDE));
+        for j in low.y..=high.y {
+            for i in low.x..=high.x {
+                let key = IVec2::new(i, j);
+                let Some(cell) = self.cells.get(&key) else {
+                    continue;
+                };
+                let min = key * LOG_CELL_SIDE;
+                let Some(clip) = span.intersect(Span {
+                    min,
+                    max: min + LOG_CELL_SIDE,
+                }) else {
+                    continue;
+                };
+                cell.checkpoint.visit(|index, value| {
+                    let g = min
+                        + IVec2::new(index as i32 % LOG_CELL_SIDE, index as i32 / LOG_CELL_SIDE);
+                    if g.x >= clip.min.x
+                        && g.x < clip.max.x
+                        && g.y >= clip.min.y
+                        && g.y < clip.max.y
+                    {
+                        put(g, value);
+                    }
+                });
+                for entry in &cell.entries {
+                    if let Some(shoe) = shoes.get(entry.shoe()) {
+                        raster(entry, shoe, law, clip, &mut put);
+                    }
+                }
+            }
+        }
     }
 
     pub(crate) fn len(&self) -> usize {
-        self.entries.len()
+        self.count
+    }
+}
+
+/// The one near-grid raster law, shared by live stamps and history checkpoints. It samples
+/// global texel centres, so clipping a draw into cells or recentre strips cannot change it.
+fn raster(
+    entry: &StampEntry,
+    shoe: &ClearanceStamp,
+    law: &PrintLaw,
+    clip: Span,
+    mut put: impl FnMut(IVec2, [u8; 2]),
+) {
+    let (low, high) = entry.world_bounds(shoe);
+    let Some(span) = Span::covering(low, high, NEAR_TEXEL_M).intersect(clip) else {
+        return;
+    };
+    let axes = entry.axes();
+    for j in span.min.y..span.max.y {
+        for i in span.min.x..span.max.x {
+            let g = IVec2::new(i, j);
+            let world = (g.as_vec2() + 0.5) * NEAR_TEXEL_M;
+            let Some((clearance, footprint)) = entry.at(shoe, world, law, axes) else {
+                continue;
+            };
+            let value = [
+                press(clearance, law.range_m),
+                if footprint { 255 } else { 0 },
+            ];
+            if value != [0, 0] {
+                put(g, value);
+            }
+        }
     }
 }
 
@@ -391,40 +558,22 @@ impl NearStore {
     }
 
     fn draw(&mut self, entry: &StampEntry, shoes: &[ClearanceStamp], law: &PrintLaw, clip: Span) {
-        let Some(shoe) = shoes.get(entry.shoe()) else {
-            return;
-        };
-        let (low, high) = entry.world_bounds(shoe);
-        let Some(span) = Span::covering(low, high, NEAR_TEXEL_M).intersect(clip) else {
-            return;
-        };
-        let axes = entry.axes();
-        for j in span.min.y..span.max.y {
-            for i in span.min.x..span.max.x {
-                let g = IVec2::new(i, j);
-                let world = (g.as_vec2() + 0.5) * NEAR_TEXEL_M;
-                let Some((clearance, footprint)) = entry.at(shoe, world, law, axes) else {
-                    continue;
-                };
-                let written = [
-                    press(clearance, law.range_m),
-                    if footprint { 255 } else { 0 },
-                ];
-                if written == [0, 0] {
-                    continue;
-                }
-                let (index, storage) = Self::slot(g);
-                let texel = &mut self.texels[index];
-                let merged = [texel[0].max(written[0]), texel[1].max(written[1])];
-                if merged != *texel {
-                    *texel = merged;
-                    self.mark(storage);
-                }
-            }
+        if let Some(shoe) = shoes.get(entry.shoe()) {
+            raster(entry, shoe, law, clip, |g, value| self.merge(g, value));
         }
     }
 
-    /// Clear `span` (inside the window) and draw every logged stamp over it.
+    fn merge(&mut self, g: IVec2, value: [u8; 2]) {
+        let (index, storage) = Self::slot(g);
+        let texel = &mut self.texels[index];
+        let merged = [texel[0].max(value[0]), texel[1].max(value[1])];
+        if merged != *texel {
+            *texel = merged;
+            self.mark(storage);
+        }
+    }
+
+    /// Clear `span` (inside the window) and restore its exact raster from spatial history.
     fn redraw(&mut self, span: Span, log: &StampLog, shoes: &[ClearanceStamp], law: &PrintLaw) {
         for j in span.min.y..span.max.y {
             for i in span.min.x..span.max.x {
@@ -433,11 +582,7 @@ impl NearStore {
                 self.mark(storage);
             }
         }
-        let low = span.min.as_vec2() * NEAR_TEXEL_M;
-        let high = span.max.as_vec2() * NEAR_TEXEL_M;
-        for entry in log.near(low, high) {
-            self.draw(&entry, shoes, law, span);
-        }
+        log.draw(span, shoes, law, |g, value| self.merge(g, value));
     }
 
     /// Follow the eye at world XZ `eye`: once it has wandered more than [`RECENTRE_SLACK`] from
@@ -757,7 +902,7 @@ mod tests {
         assert!(store.recentre(a, &log, &shoes, &LAW));
         let lay = |entries: Vec<StampEntry>, log: &mut StampLog, store: &mut NearStore| {
             for entry in entries {
-                log.push(entry, &shoes[0]);
+                log.push(entry, &shoes, &LAW);
                 store.stamp(&entry, &shoes, &LAW);
             }
         };
@@ -784,6 +929,57 @@ mod tests {
         assert!(
             printed > 10_000,
             "the window holds prints to compare: {printed}"
+        );
+    }
+
+    /// Recentre relies on exact history even after repeated pivots. Checkpointing must bound
+    /// pending operations per cell without losing older pixels, including across negative cell
+    /// boundaries; an immortal entry vector or replaying only the latest batch fails here.
+    #[test]
+    fn compacted_history_is_spatially_bounded_and_replays_every_texel() {
+        let shoes = vec![ClearanceStamp::pooled(&sole(), NEAR_TEXEL_M)];
+        let mut log = StampLog::default();
+        let mut direct = NearStore::default();
+        direct.recentre(Vec2::ZERO, &log, &shoes, &LAW);
+        for entry in
+            scatter(Vec2::splat(-6.0), 1.0, 4096, 3)
+                .into_iter()
+                .chain(std::iter::repeat_n(
+                    StampEntry::new(Vec2::splat(-6.0), 0.4, 0.0, Vec2::ZERO, 0, false),
+                    8192,
+                ))
+        {
+            log.push(entry, &shoes, &LAW);
+            direct.stamp(&entry, &shoes, &LAW);
+        }
+        assert!(
+            log.cells
+                .values()
+                .any(|cell| !matches!(cell.checkpoint, Checkpoint::Empty))
+        );
+        assert!(
+            log.cells
+                .values()
+                .all(|cell| cell.entries.len() < LOG_BATCH)
+        );
+        let mut restored = NearStore::default();
+        restored.recentre(Vec2::ZERO, &log, &shoes, &LAW);
+        assert_eq!(
+            direct.texels, restored.texels,
+            "compaction preserves all historical near pixels"
+        );
+        restored.recentre(Vec2::splat(200.0), &log, &shoes, &LAW);
+        restored.recentre(Vec2::ZERO, &log, &shoes, &LAW);
+        assert_eq!(
+            direct.texels, restored.texels,
+            "the torus restores compacted history after a full eviction"
+        );
+        let noisy: Vec<_> = (0..LOG_CELL_SIDE * LOG_CELL_SIDE)
+            .map(|i| [(i % 2) as u8, 255])
+            .collect();
+        assert!(
+            matches!(Checkpoint::packed(noisy), Checkpoint::Raw(_)),
+            "incompressible checkpoints cannot grow beyond raw cell storage"
         );
     }
 
