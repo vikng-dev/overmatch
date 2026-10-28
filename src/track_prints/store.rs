@@ -56,10 +56,15 @@ pub(crate) const WORLD_SIDE: u32 = 4096;
 /// The upload tile: a store is written to the GPU in squares of this many texels (fewer at a mip
 /// level smaller than one).
 const TILE: u32 = 64;
+/// World upload/rebuild tile side. ASSUMED: stamps touch only a few coarse texels,
+/// so rebuilding 64² mip texels per touched tile would dominate the 30-tank pivot cost.
+/// Sample-mask allocation remains in 64² tiles, independently of update granularity.
+const WORLD_UPLOAD_TILE: u32 = 8;
 /// Near texels per log cell axis. ASSUMED: 6 m cells, aligned to the global raster.
 const LOG_CELL_SIDE: i32 = 128;
-/// Pending stamps per cell before exact raster compaction. ASSUMED: at most 8 KiB.
-const LOG_BATCH: usize = 512;
+/// Raw history cells kept active. ASSUMED cache size; DERIVED raw payload cap 8 MiB.
+/// Cold cells remain exact compressed checkpoints, never evicted history.
+const ACTIVE_LOG_CELLS: usize = 256;
 /// Samples per world-texel axis. DERIVED: on a 1500 m map their 4.58 cm spacing is
 /// below the near texel's 4.69 cm, so near-scale footprints survive downsampling.
 const WORLD_SAMPLES: u32 = 8;
@@ -257,20 +262,22 @@ impl Span {
     }
 }
 
-/// Spatial stamp history. Each cell retains a bounded batch of operations and an exact
-/// near-resolution checkpoint of earlier operations. MAX composition is associative, so
-/// compaction loses neither detail nor persistence. Shoe bakes and the print law are immutable
-/// while this history exists. Memory grows with visited area, never with repeat visits.
+/// Spatial stamp history, checkpointed on the global near raster. Hot cells stay raw in a
+/// bounded cache; cold cells are compressed when they leave it. MAX composition is associative,
+/// so checkpoints lose neither detail nor persistence. Shoe bakes and the print law are
+/// immutable while history exists. Memory grows with visited area, never with repeat visits.
 #[derive(Default)]
 pub(crate) struct StampLog {
     count: usize,
     cells: HashMap<IVec2, LogCell>,
+    active: Vec<IVec2>,
 }
 
 #[derive(Default)]
 struct LogCell {
-    entries: Vec<StampEntry>,
     checkpoint: Checkpoint,
+    last: usize,
+    active: bool,
 }
 
 /// Exclusive end of a row-major run, and its value. DERIVED: a cell has 16384 texels,
@@ -313,6 +320,18 @@ impl Checkpoint {
         }
     }
 
+    fn raw(&mut self) -> &mut [[u8; 2]] {
+        if !matches!(self, Self::Raw(_)) {
+            let mut texels = vec![[0, 0]; (LOG_CELL_SIDE * LOG_CELL_SIDE) as usize];
+            self.visit(|i, value| texels[i] = value);
+            *self = Self::Raw(texels.into_boxed_slice());
+        }
+        let Self::Raw(texels) = self else {
+            unreachable!("converted to raw");
+        };
+        texels
+    }
+
     fn packed(texels: Vec<[u8; 2]>) -> Self {
         if texels.iter().all(|&value| value == [0, 0]) {
             return Self::Empty;
@@ -338,25 +357,6 @@ impl Checkpoint {
     }
 }
 
-impl LogCell {
-    fn compact(&mut self, span: Span, shoes: &[ClearanceStamp], law: &PrintLaw) {
-        let mut texels = vec![[0, 0]; (LOG_CELL_SIDE * LOG_CELL_SIDE) as usize];
-        self.checkpoint.visit(|i, value| texels[i] = value);
-        for entry in &self.entries {
-            let Some(shoe) = shoes.get(entry.shoe()) else {
-                continue;
-            };
-            raster(entry, shoe, law, span, |g, value| {
-                let c = g - span.min;
-                let texel = &mut texels[(c.y * LOG_CELL_SIDE + c.x) as usize];
-                *texel = [texel[0].max(value[0]), texel[1].max(value[1])];
-            });
-        }
-        self.entries.clear();
-        self.checkpoint = Checkpoint::packed(texels);
-    }
-}
-
 impl StampLog {
     pub(crate) fn push(&mut self, entry: StampEntry, shoes: &[ClearanceStamp], law: &PrintLaw) {
         let Some(shoe) = shoes.get(entry.shoe()) else {
@@ -375,31 +375,54 @@ impl StampLog {
         for j in low.y..=high.y {
             for i in low.x..=high.x {
                 let key = IVec2::new(i, j);
-                let cell = self.cells.entry(key).or_default();
-                cell.entries.push(entry);
-                if cell.entries.len() == LOG_BATCH {
-                    let min = key * LOG_CELL_SIDE;
-                    cell.compact(
-                        Span {
-                            min,
-                            max: min + LOG_CELL_SIDE,
-                        },
-                        shoes,
-                        law,
-                    );
-                }
+                self.activate(key);
+                let cell = self.cells.get_mut(&key).expect("activated history cell");
+                cell.last = self.count;
+                let texels = cell.checkpoint.raw();
+                let min = key * LOG_CELL_SIDE;
+                raster(
+                    &entry,
+                    shoe,
+                    law,
+                    Span {
+                        min,
+                        max: min + LOG_CELL_SIDE,
+                    },
+                    |g, value| {
+                        let c = g - min;
+                        let texel = &mut texels[(c.y * LOG_CELL_SIDE + c.x) as usize];
+                        *texel = [texel[0].max(value[0]), texel[1].max(value[1])];
+                    },
+                );
             }
         }
     }
 
-    /// Reproduce the exact near raster in `span`, from checkpoints plus pending operations.
-    fn draw(
-        &self,
-        span: Span,
-        shoes: &[ClearanceStamp],
-        law: &PrintLaw,
-        mut put: impl FnMut(IVec2, [u8; 2]),
-    ) {
+    /// Activate a cell for incremental writes. Compression happens only on cache turnover,
+    /// avoiding periodic whole-cell recompression spikes while tanks pivot over the same ground.
+    fn activate(&mut self, key: IVec2) {
+        if self.cells.get(&key).is_some_and(|cell| cell.active) {
+            return;
+        }
+        if self.active.len() == ACTIVE_LOG_CELLS {
+            let oldest = (0..self.active.len())
+                .min_by_key(|&i| self.cells[&self.active[i]].last)
+                .expect("a full cache");
+            let cold = self.active.swap_remove(oldest);
+            let cell = self.cells.get_mut(&cold).expect("active history cell");
+            if let Checkpoint::Raw(texels) = std::mem::take(&mut cell.checkpoint) {
+                cell.checkpoint = Checkpoint::packed(texels.into_vec());
+            }
+            cell.active = false;
+        }
+        let cell = self.cells.entry(key).or_default();
+        cell.checkpoint.raw();
+        cell.active = true;
+        self.active.push(key);
+    }
+
+    /// Reproduce the exact historical near raster in `span`, independent of cache residency.
+    fn draw(&self, span: Span, mut put: impl FnMut(IVec2, [u8; 2])) {
         let low = span.min.div_euclid(IVec2::splat(LOG_CELL_SIDE));
         let high = (span.max - 1).div_euclid(IVec2::splat(LOG_CELL_SIDE));
         for j in low.y..=high.y {
@@ -426,11 +449,6 @@ impl StampLog {
                         put(g, value);
                     }
                 });
-                for entry in &cell.entries {
-                    if let Some(shoe) = shoes.get(entry.shoe()) {
-                        raster(entry, shoe, law, clip, &mut put);
-                    }
-                }
             }
         }
     }
@@ -574,27 +592,25 @@ impl NearStore {
     }
 
     /// Clear `span` (inside the window) and restore its exact raster from spatial history.
-    fn redraw(&mut self, span: Span, log: &StampLog, shoes: &[ClearanceStamp], law: &PrintLaw) {
+    fn redraw(&mut self, span: Span, log: &StampLog) {
         for j in span.min.y..span.max.y {
             for i in span.min.x..span.max.x {
                 let (index, storage) = Self::slot(IVec2::new(i, j));
-                self.texels[index] = [0, 0];
-                self.mark(storage);
+                // Unchanged zero texels already match the GPU, including its zero-initialized
+                // image at startup. Only clearing an old print needs an upload.
+                if self.texels[index] != [0, 0] {
+                    self.texels[index] = [0, 0];
+                    self.mark(storage);
+                }
             }
         }
-        log.draw(span, shoes, law, |g, value| self.merge(g, value));
+        log.draw(span, |g, value| self.merge(g, value));
     }
 
     /// Follow the eye at world XZ `eye`: once it has wandered more than [`RECENTRE_SLACK`] from
     /// the window's centre (or on the first call), move the window onto it and redraw the texels
     /// that entered. Whether the window moved.
-    pub(crate) fn recentre(
-        &mut self,
-        eye: Vec2,
-        log: &StampLog,
-        shoes: &[ClearanceStamp],
-        law: &PrintLaw,
-    ) -> bool {
+    pub(crate) fn recentre(&mut self, eye: Vec2, log: &StampLog) -> bool {
         let half = NEAR_SIDE as i32 / 2;
         let eye = (eye / NEAR_TEXEL_M).floor().as_ivec2();
         if let Some(origin) = self.origin
@@ -613,7 +629,7 @@ impl NearStore {
         };
         self.origin = Some(origin);
         for span in entered {
-            self.redraw(span, log, shoes, law);
+            self.redraw(span, log);
         }
         true
     }
@@ -664,7 +680,8 @@ pub(crate) struct WorldStore {
 impl WorldStore {
     /// A world layer of `side`² texels over the square of `size_m` centred on the origin.
     pub(crate) fn new(size_m: f32, side: u32) -> Self {
-        let tiles = side.div_ceil(TILE) as usize;
+        let mask_tiles = side.div_ceil(TILE) as usize;
+        let upload_tiles = side.div_ceil(WORLD_UPLOAD_TILE) as usize;
         let mips = (1..Self::levels_of(side))
             .map(|k| vec![0; ((side >> k) * (side >> k)) as usize])
             .collect();
@@ -672,9 +689,9 @@ impl WorldStore {
             origin_m: Vec2::splat(-0.5 * size_m),
             texel_m: size_m / side as f32,
             side,
-            masks: vec![None; tiles * tiles],
+            masks: vec![None; mask_tiles * mask_tiles],
             mips,
-            dirty: vec![false; tiles * tiles],
+            dirty: vec![false; upload_tiles * upload_tiles],
         }
     }
 
@@ -735,7 +752,9 @@ impl WorldStore {
                 let bit = 1_u64 << ((sj % WORLD_SAMPLES) * WORLD_SAMPLES + si % WORLD_SAMPLES);
                 if *mask & bit == 0 {
                     *mask |= bit;
-                    self.dirty[tile_index] = true;
+                    let upload_tiles = self.side.div_ceil(WORLD_UPLOAD_TILE);
+                    self.dirty[((j / WORLD_UPLOAD_TILE) * upload_tiles + i / WORLD_UPLOAD_TILE)
+                        as usize] = true;
                 }
             }
         }
@@ -744,7 +763,7 @@ impl WorldStore {
     /// The level-0 tiles written since the last call and every mip tile above them, rebuilt and as
     /// uploads, finest level first.
     pub(crate) fn take_uploads(&mut self) -> Vec<Upload> {
-        let tiles = self.side.div_ceil(TILE);
+        let tiles = self.side.div_ceil(WORLD_UPLOAD_TILE);
         let mut dirty: Vec<UVec2> = self
             .dirty
             .iter_mut()
@@ -757,7 +776,7 @@ impl WorldStore {
         let mut out = Vec::new();
         for level in 0..self.levels() {
             let side = self.side >> level;
-            let tile = TILE.min(side);
+            let tile = WORLD_UPLOAD_TILE.min(side);
             if level > 0 {
                 for t in &mut dirty {
                     *t /= 2;
@@ -899,7 +918,7 @@ mod tests {
         let mut log = StampLog::default();
         let mut store = NearStore::default();
         let (a, b) = (Vec2::new(10.0, -20.0), Vec2::new(70.0, 15.0));
-        assert!(store.recentre(a, &log, &shoes, &LAW));
+        assert!(store.recentre(a, &log));
         let lay = |entries: Vec<StampEntry>, log: &mut StampLog, store: &mut NearStore| {
             for entry in entries {
                 log.push(entry, &shoes, &LAW);
@@ -907,15 +926,12 @@ mod tests {
             }
         };
         lay(scatter((a + b) * 0.5, 60.0, 3000, 1), &mut log, &mut store);
-        assert!(
-            store.recentre(b, &log, &shoes, &LAW),
-            "the eye left the slack"
-        );
+        assert!(store.recentre(b, &log), "the eye left the slack");
         lay(scatter((a + b) * 0.5, 60.0, 3000, 2), &mut log, &mut store);
-        assert!(store.recentre(a, &log, &shoes, &LAW), "and came back");
+        assert!(store.recentre(a, &log), "and came back");
 
         let mut fresh = NearStore::default();
-        fresh.recentre(a, &log, &shoes, &LAW);
+        fresh.recentre(a, &log);
         let window = store.window().expect("placed");
         assert_eq!(Some(window), fresh.window());
         let mut printed = 0;
@@ -933,14 +949,14 @@ mod tests {
     }
 
     /// Recentre relies on exact history even after repeated pivots. Checkpointing must bound
-    /// pending operations per cell without losing older pixels, including across negative cell
-    /// boundaries; an immortal entry vector or replaying only the latest batch fails here.
+    /// hot raw cells without losing older pixels, including across negative cell boundaries;
+    /// an immortal entry vector or discarding cold checkpoints fails here.
     #[test]
     fn compacted_history_is_spatially_bounded_and_replays_every_texel() {
         let shoes = vec![ClearanceStamp::pooled(&sole(), NEAR_TEXEL_M)];
         let mut log = StampLog::default();
         let mut direct = NearStore::default();
-        direct.recentre(Vec2::ZERO, &log, &shoes, &LAW);
+        direct.recentre(Vec2::ZERO, &log);
         for entry in
             scatter(Vec2::splat(-6.0), 1.0, 4096, 3)
                 .into_iter()
@@ -952,27 +968,43 @@ mod tests {
             log.push(entry, &shoes, &LAW);
             direct.stamp(&entry, &shoes, &LAW);
         }
+        for k in 0..ACTIVE_LOG_CELLS + 1 {
+            let at = Vec2::new(
+                200.0 + (k % 20) as f32 * 12.0,
+                200.0 + (k / 20) as f32 * 12.0,
+            );
+            log.push(
+                StampEntry::new(at, 0.0, 0.0, Vec2::ZERO, 0, false),
+                &shoes,
+                &LAW,
+            );
+        }
         assert!(
             log.cells
                 .values()
-                .any(|cell| !matches!(cell.checkpoint, Checkpoint::Empty))
+                .any(|cell| matches!(cell.checkpoint, Checkpoint::Runs(_)))
         );
-        assert!(
-            log.cells
-                .values()
-                .all(|cell| cell.entries.len() < LOG_BATCH)
-        );
+        assert!(log.active.len() <= ACTIVE_LOG_CELLS);
         let mut restored = NearStore::default();
-        restored.recentre(Vec2::ZERO, &log, &shoes, &LAW);
+        restored.recentre(Vec2::ZERO, &log);
         assert_eq!(
             direct.texels, restored.texels,
             "compaction preserves all historical near pixels"
         );
-        restored.recentre(Vec2::splat(200.0), &log, &shoes, &LAW);
-        restored.recentre(Vec2::ZERO, &log, &shoes, &LAW);
+        restored.recentre(Vec2::splat(200.0), &log);
+        restored.recentre(Vec2::ZERO, &log);
         assert_eq!(
             direct.texels, restored.texels,
             "the torus restores compacted history after a full eviction"
+        );
+        let new_entry = StampEntry::new(Vec2::new(-5.4, -6.1), 0.7, 0.01, Vec2::ZERO, 0, false);
+        log.push(new_entry, &shoes, &LAW);
+        direct.stamp(&new_entry, &shoes, &LAW);
+        let mut reactivated = NearStore::default();
+        reactivated.recentre(Vec2::ZERO, &log);
+        assert_eq!(
+            direct.texels, reactivated.texels,
+            "reactivation must merge new stamps without clearing cold historical pixels"
         );
         let noisy: Vec<_> = (0..LOG_CELL_SIDE * LOG_CELL_SIDE)
             .map(|i| [(i % 2) as u8, 255])
@@ -980,6 +1012,35 @@ mod tests {
         assert!(
             matches!(Checkpoint::packed(noisy), Checkpoint::Raw(_)),
             "incompressible checkpoints cannot grow beyond raw cell storage"
+        );
+    }
+
+    /// Dirty tiles represent actual GPU changes. Empty startup/recentres need no upload,
+    /// while a wrapped old print must upload its cleared texels or it becomes a ghost mark.
+    #[test]
+    fn recentre_uploads_only_changed_texels_and_clears_old_prints() {
+        let shoes = vec![ClearanceStamp::pooled(&sole(), NEAR_TEXEL_M)];
+        let mut near = NearStore::default();
+        let log = StampLog::default();
+        near.recentre(Vec2::ZERO, &log);
+        assert!(
+            near.take_uploads().is_empty(),
+            "wgpu initializes the print image to zero"
+        );
+        let entry = StampEntry::new(Vec2::ZERO, 0.0, 0.0, Vec2::ZERO, 0, false);
+        near.stamp(&entry, &shoes, &LAW);
+        assert!(!near.take_uploads().is_empty());
+        near.recentre(Vec2::splat(200.0), &log);
+        let clear = near.take_uploads();
+        assert!(
+            !clear.is_empty(),
+            "old nonzero storage slots must be cleared on the GPU"
+        );
+        assert!(clear.iter().all(|u| u.data.iter().all(|&b| b == 0)));
+        near.recentre(Vec2::ZERO, &log);
+        assert!(
+            near.take_uploads().is_empty(),
+            "already zero slots need no repeated clear"
         );
     }
 
@@ -992,7 +1053,7 @@ mod tests {
         let deep = StampEntry::new(Vec2::new(1.05, 1.0), 0.3, 0.0, Vec2::ZERO, 0, false);
         let draw = |order: &[StampEntry]| {
             let mut store = NearStore::default();
-            store.recentre(Vec2::ZERO, &StampLog::default(), &shoes, &LAW);
+            store.recentre(Vec2::ZERO, &StampLog::default());
             for entry in order {
                 store.stamp(entry, &shoes, &LAW);
             }
@@ -1077,7 +1138,7 @@ mod tests {
             let mut log = StampLog::default();
             let mut near = NearStore::default();
             let mut world = WorldStore::new(1500.0, WORLD_SIDE);
-            near.recentre(Vec2::ZERO, &log, &shoes, &LAW);
+            near.recentre(Vec2::ZERO, &log);
             let cold_bytes: usize = near.take_uploads().iter().map(|u| u.data.len()).sum();
             let mut times = Vec::new();
             let mut bytes = Vec::new();
@@ -1133,13 +1194,10 @@ mod tests {
             let history_bytes: usize = log
                 .cells
                 .values()
-                .map(|c| {
-                    c.entries.capacity() * std::mem::size_of::<StampEntry>()
-                        + match &c.checkpoint {
-                            Checkpoint::Empty => 0,
-                            Checkpoint::Runs(r) => std::mem::size_of_val(&**r),
-                            Checkpoint::Raw(r) => std::mem::size_of_val(&**r),
-                        }
+                .map(|c| match &c.checkpoint {
+                    Checkpoint::Empty => 0,
+                    Checkpoint::Runs(r) => std::mem::size_of_val(&**r),
+                    Checkpoint::Raw(r) => std::mem::size_of_val(&**r),
                 })
                 .sum();
             eprintln!(
@@ -1154,7 +1212,7 @@ mod tests {
                 log.cells.len(),
                 log.len()
             );
-            assert!(log.cells.values().all(|c| c.entries.len() < LOG_BATCH));
+            assert!(log.active.len() <= ACTIVE_LOG_CELLS);
             assert!(
                 near.take_uploads().is_empty() && world.take_uploads().is_empty(),
                 "upload packing consumes dirtiness exactly once"
@@ -1175,10 +1233,18 @@ mod tests {
             world.stamp(&entry, &shoes, &LAW);
         }
         let uploads = world.take_uploads();
+        assert!(
+            uploads.iter().any(|u| u.level == 0),
+            "the new footprint is uploaded"
+        );
+        let unique: std::collections::BTreeSet<_> = uploads
+            .iter()
+            .map(|u| (u.level, u.origin.x, u.origin.y))
+            .collect();
         assert_eq!(
-            uploads.iter().filter(|u| u.level == 0).count(),
-            1,
-            "one level-0 tile holds the whole track",
+            unique.len(),
+            uploads.len(),
+            "each dirty tile is uploaded once per mip"
         );
         let levels: std::collections::BTreeSet<u32> = uploads.iter().map(|u| u.level).collect();
         assert_eq!(levels, (0..world.levels()).collect(), "every level is sent");

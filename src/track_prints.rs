@@ -359,15 +359,9 @@ fn follow_eye(mut prints: ResMut<TrackPrints>, eye: Query<&GlobalTransform, With
     let Ok(eye) = eye.single() else {
         return;
     };
-    let TrackPrints {
-        law,
-        shoes,
-        log,
-        near,
-        ..
-    } = &mut *prints;
+    let TrackPrints { log, near, .. } = &mut *prints;
     let eye = eye.translation();
-    if near.recentre(Vec2::new(eye.x, eye.z), log, shoes, law) {
+    if near.recentre(Vec2::new(eye.x, eye.z), log) {
         debug!(
             "track prints: near window recentred at {:?} over {} logged stamps",
             near.origin_m(),
