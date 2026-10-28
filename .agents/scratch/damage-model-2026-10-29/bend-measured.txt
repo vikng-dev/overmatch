@@ -1,7 +1,8 @@
 # The 88 mm rounds' bend across the shipped fir_1 trunk in the game's damage model. MEASURED,
 # macOS arm64, edit profile, by bend-measure.rs. bend_yaw_deg: the horizontal angle between the
 # direction at entry and the direction past the trunk; bend_3d_deg: the full angle.
-# BEFORE: lane base 931fe7e, the entry bend independent of the substance.
+# bend_3d_deg uses atan2(|a x b|, a . b) to retain small bends.
+# BEFORE: resistance share set to 1, equivalent to the lane-base 931fe7e bend law.
 BEND|kind|height 27.020|dbh 0.4000|substance Wood
 BEND|head|round|h|off_frac|events|incid_deg|overm|bend_yaw_deg|bend_3d_deg
 BEND|row|88mm_AP|1.0|0.00|through|1.22|true|-0.236|0.243
@@ -10,10 +11,10 @@ BEND|row|88mm_AP|1.0|0.85|through|50.87|true|-7.826|7.826
 BEND|row|88mm_AP|5.0|0.00|through|3.55|true|0.708|0.710
 BEND|row|88mm_AP|5.0|0.50|through|28.82|true|-5.764|5.764
 BEND|row|88mm_AP|5.0|0.85|through|50.87|true|-7.826|7.826
-BEND|row|88mm_AP|10.0|0.00|through|3.55|true|0.708|0.710
+BEND|row|88mm_AP|10.0|0.00|through|3.55|true|0.708|0.711
 BEND|row|88mm_AP|10.0|0.50|through|28.82|true|-5.764|5.764
 BEND|row|88mm_AP|10.0|0.85|through|45.00|true|-5.538|5.539
-BEND|row|88mm_AP|15.0|0.00|through|1.23|true|-0.236|0.246
+BEND|row|88mm_AP|15.0|0.00|through|1.23|true|-0.236|0.247
 BEND|row|88mm_AP|15.0|0.50|through|30.88|true|-6.176|6.177
 BEND|row|88mm_AP|15.0|0.85|through|37.63|true|-4.631|4.632
 BEND|row|88mm_AP|20.0|0.00|through|1.43|true|-0.269|0.286
@@ -25,10 +26,10 @@ BEND|row|88mm_APHE_ring|1.0|0.85|through|50.87|true|-7.826|7.826
 BEND|row|88mm_APHE_ring|5.0|0.00|through|3.55|true|0.708|0.710
 BEND|row|88mm_APHE_ring|5.0|0.50|through|28.82|true|-5.764|5.764
 BEND|row|88mm_APHE_ring|5.0|0.85|through|50.87|true|-7.826|7.826
-BEND|row|88mm_APHE_ring|10.0|0.00|through|3.55|true|0.708|0.710
+BEND|row|88mm_APHE_ring|10.0|0.00|through|3.55|true|0.708|0.711
 BEND|row|88mm_APHE_ring|10.0|0.50|through|28.82|true|-5.764|5.764
 BEND|row|88mm_APHE_ring|10.0|0.85|through|45.00|true|-5.538|5.539
-BEND|row|88mm_APHE_ring|15.0|0.00|through|1.23|true|-0.236|0.246
+BEND|row|88mm_APHE_ring|15.0|0.00|through|1.23|true|-0.236|0.247
 BEND|row|88mm_APHE_ring|15.0|0.50|through|30.88|true|-6.176|6.177
 BEND|row|88mm_APHE_ring|15.0|0.85|through|37.63|true|-4.631|4.632
 BEND|row|88mm_APHE_ring|20.0|0.00|through|1.43|true|-0.269|0.286
@@ -46,54 +47,54 @@ BEND|row|88mm_APCR|10.0|0.85|through|56.46|true|-11.292|11.292
 BEND|row|88mm_APCR|15.0|0.00|through|3.56|true|-0.708|0.712
 BEND|row|88mm_APCR|15.0|0.50|through|28.82|true|-5.764|5.764
 BEND|row|88mm_APCR|15.0|0.85|through|54.90|true|-10.134|10.135
-BEND|row|88mm_APCR|20.0|0.00|through|1.26|true|-0.236|0.253
+BEND|row|88mm_APCR|20.0|0.00|through|1.26|true|-0.236|0.252
 BEND|row|88mm_APCR|20.0|0.50|through|28.82|true|-5.764|5.764
 BEND|row|88mm_APCR|20.0|0.85|through|50.87|true|-7.825|7.826
 # AFTER: the entry bend times the entrance factor over 1000; the trunk is Wood, factor 40.
 BEND|kind|height 27.020|dbh 0.4000|substance Wood
 BEND|head|round|h|off_frac|events|incid_deg|overm|bend_yaw_deg|bend_3d_deg
-BEND|row|88mm_AP|1.0|0.00|through|1.22|true|-0.009|0.000
-BEND|row|88mm_AP|1.0|0.50|through|28.82|true|-0.231|0.230
-BEND|row|88mm_AP|1.0|0.85|through|50.87|true|-0.313|0.312
+BEND|row|88mm_AP|1.0|0.00|through|1.22|true|-0.009|0.010
+BEND|row|88mm_AP|1.0|0.50|through|28.82|true|-0.231|0.231
+BEND|row|88mm_AP|1.0|0.85|through|50.87|true|-0.313|0.313
 BEND|row|88mm_AP|5.0|0.00|through|3.55|true|0.028|0.028
 BEND|row|88mm_AP|5.0|0.50|through|28.82|true|-0.231|0.231
 BEND|row|88mm_AP|5.0|0.85|through|50.87|true|-0.313|0.313
-BEND|row|88mm_AP|10.0|0.00|through|3.55|true|0.028|0.020
+BEND|row|88mm_AP|10.0|0.00|through|3.55|true|0.028|0.028
 BEND|row|88mm_AP|10.0|0.50|through|28.82|true|-0.231|0.231
-BEND|row|88mm_AP|10.0|0.85|through|45.00|true|-0.222|0.221
-BEND|row|88mm_AP|15.0|0.00|through|1.23|true|-0.009|0.000
+BEND|row|88mm_AP|10.0|0.85|through|45.00|true|-0.222|0.222
+BEND|row|88mm_AP|15.0|0.00|through|1.23|true|-0.009|0.010
 BEND|row|88mm_AP|15.0|0.50|through|30.88|true|-0.247|0.247
 BEND|row|88mm_AP|15.0|0.85|through|37.63|true|-0.185|0.185
-BEND|row|88mm_AP|20.0|0.00|through|1.43|true|-0.011|0.000
-BEND|row|88mm_AP|20.0|0.50|through|15.01|true|-0.092|0.093
-BEND|row|88mm_AP|20.0|0.85|through|33.83|true|-0.167|0.166
-BEND|row|88mm_APHE_ring|1.0|0.00|through|1.22|true|-0.009|0.000
-BEND|row|88mm_APHE_ring|1.0|0.50|through|28.82|true|-0.231|0.230
-BEND|row|88mm_APHE_ring|1.0|0.85|through|50.87|true|-0.313|0.312
+BEND|row|88mm_AP|20.0|0.00|through|1.43|true|-0.011|0.011
+BEND|row|88mm_AP|20.0|0.50|through|15.01|true|-0.092|0.092
+BEND|row|88mm_AP|20.0|0.85|through|33.83|true|-0.167|0.167
+BEND|row|88mm_APHE_ring|1.0|0.00|through|1.22|true|-0.009|0.010
+BEND|row|88mm_APHE_ring|1.0|0.50|through|28.82|true|-0.231|0.231
+BEND|row|88mm_APHE_ring|1.0|0.85|through|50.87|true|-0.313|0.313
 BEND|row|88mm_APHE_ring|5.0|0.00|through|3.55|true|0.028|0.028
 BEND|row|88mm_APHE_ring|5.0|0.50|through|28.82|true|-0.231|0.231
 BEND|row|88mm_APHE_ring|5.0|0.85|through|50.87|true|-0.313|0.313
-BEND|row|88mm_APHE_ring|10.0|0.00|through|3.55|true|0.028|0.020
+BEND|row|88mm_APHE_ring|10.0|0.00|through|3.55|true|0.028|0.028
 BEND|row|88mm_APHE_ring|10.0|0.50|through|28.82|true|-0.231|0.231
-BEND|row|88mm_APHE_ring|10.0|0.85|through|45.00|true|-0.222|0.221
-BEND|row|88mm_APHE_ring|15.0|0.00|through|1.23|true|-0.009|0.000
+BEND|row|88mm_APHE_ring|10.0|0.85|through|45.00|true|-0.222|0.222
+BEND|row|88mm_APHE_ring|15.0|0.00|through|1.23|true|-0.009|0.010
 BEND|row|88mm_APHE_ring|15.0|0.50|through|30.88|true|-0.247|0.247
 BEND|row|88mm_APHE_ring|15.0|0.85|through|37.63|true|-0.185|0.185
-BEND|row|88mm_APHE_ring|20.0|0.00|through|1.43|true|-0.011|0.000
-BEND|row|88mm_APHE_ring|20.0|0.50|through|15.01|true|-0.092|0.093
-BEND|row|88mm_APHE_ring|20.0|0.85|through|33.83|true|-0.167|0.166
-BEND|row|88mm_APCR|1.0|0.00|through|1.22|false|-0.009|0.000
+BEND|row|88mm_APHE_ring|20.0|0.00|through|1.43|true|-0.011|0.011
+BEND|row|88mm_APHE_ring|20.0|0.50|through|15.01|true|-0.092|0.092
+BEND|row|88mm_APHE_ring|20.0|0.85|through|33.83|true|-0.167|0.167
+BEND|row|88mm_APCR|1.0|0.00|through|1.22|false|-0.009|0.010
 BEND|row|88mm_APCR|1.0|0.50|through|28.82|false|-0.231|0.231
 BEND|row|88mm_APCR|1.0|0.85|through|56.46|true|-0.452|0.452
-BEND|row|88mm_APCR|5.0|0.00|through|3.55|false|0.028|0.020
-BEND|row|88mm_APCR|5.0|0.50|through|28.82|true|-0.231|0.230
+BEND|row|88mm_APCR|5.0|0.00|through|3.55|false|0.028|0.028
+BEND|row|88mm_APCR|5.0|0.50|through|28.82|true|-0.231|0.231
 BEND|row|88mm_APCR|5.0|0.85|through|56.46|true|-0.452|0.452
-BEND|row|88mm_APCR|10.0|0.00|through|3.56|true|0.028|0.020
+BEND|row|88mm_APCR|10.0|0.00|through|3.56|true|0.028|0.028
 BEND|row|88mm_APCR|10.0|0.50|through|28.82|true|-0.231|0.231
 BEND|row|88mm_APCR|10.0|0.85|through|56.46|true|-0.452|0.452
 BEND|row|88mm_APCR|15.0|0.00|through|3.56|true|-0.028|0.028
 BEND|row|88mm_APCR|15.0|0.50|through|28.82|true|-0.231|0.231
 BEND|row|88mm_APCR|15.0|0.85|through|54.90|true|-0.405|0.405
-BEND|row|88mm_APCR|20.0|0.00|through|1.26|true|-0.009|0.000
+BEND|row|88mm_APCR|20.0|0.00|through|1.26|true|-0.009|0.010
 BEND|row|88mm_APCR|20.0|0.50|through|28.82|true|-0.231|0.231
 BEND|row|88mm_APCR|20.0|0.85|through|50.87|true|-0.313|0.313

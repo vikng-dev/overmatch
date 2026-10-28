@@ -194,9 +194,10 @@ fn tree_bend_measure() {
                 let (yaw, full) = match (read.incoming, read.outgoing) {
                     (Some(a), Some(b)) => {
                         let yaw = |v: Vec3| v.x.atan2(-v.z);
+                        // atan2 retains the small bends that an f32 arccosine rounds away.
                         (
                             format!("{:.3}", (yaw(b) - yaw(a)).to_degrees()),
-                            format!("{:.3}", a.angle_between(b).to_degrees()),
+                            format!("{:.3}", a.cross(b).length().atan2(a.dot(b)).to_degrees()),
                         )
                     }
                     _ => ("-".to_owned(), "-".to_owned()),
