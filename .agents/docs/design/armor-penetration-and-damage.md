@@ -803,14 +803,21 @@ A witness's chord alone keeps its own unit, one HP point per 0.1 reference-mm
 (`ballistics::HP_PER_REFERENCE_MM`, a unit with Resolution provenance, not a balance value), the
 round's crew line rate its whole scale.
 
-**Trees are just wood.** Every trunk is one substance, `Wood` (`materials.ron`), and one pool:
-the wood row's HP per metre of breast-height diameter times the tree's own diameter, rounded, at
-least one point (`hp_per_m` in `assets/trees/wood.ron`, TUNED 600). The shipped fir's 0.40 m holds
-240 HP: it survives one centred 75 mm APCBC round through its base (115–126 HP from two fixture
-75 mm bodies at 790 and 925 m/s, MEASURED) and is emptied by the second centred 88. The ram
-threshold `fell_k` is the wood row's too. A species is the generator's look and ranges only: a
-player cannot tell that a round lost a little more speed in one species than another, while trunk
-thickness is simple and visible. A round entering a trunk turns by the wood's share of the
+**Trees are just wood.** Every trunk is one substance, `Wood` (`materials.ron`), and every trunk
+segment is a volume with a pool of its own (issue 149, decided 2026-10-29): the wood row's HP per
+square metre times the segment's cross-section at mid-height, `π r²` for `r` the mean of its end
+radii at the instance's scale, rounded, at least one point (`hp_per_m2` in
+`assets/trees/wood.ron`, TUNED 1500). A dose charges the segments it crosses, each the energy lost
+at its own depths; the segment whose pool empties is where the tree breaks, so only the hits at
+that height count toward that break, and a tree breaks once. The pool grows with the square of
+the diameter while a line's dose grows with its chord, so thin wood breaks in fewer shots: the
+88 mm APCBC breaks the shipped fir's base (193 HP, 0.405 m) at the second centred shot, its
+0.29 m section 10 m up and its 0.13 m top 20 m up at the first, and a 0.2 m young tree or a
+0.1 m sapling at the first; the machine gun breaks the sapling in 34 centred hits and the fir's
+base in 187 (MEASURED, `.agents/scratch/damage-model-2026-10-29/segment-pools-results.md`). The
+ram threshold `fell_k` is the wood row's too, against the breast-height diameter. A species is
+the generator's look and ranges only: a player cannot tell that a round lost a little more speed
+in one species than another, while trunk thickness is simple and visible. A round entering a trunk turns by the wood's share of the
 reference resistance, 4 % of the reference steel's bend (§13.5). Out of scope, built only if play
 shows them missed: per-round-type ricochet and normalization, and the drag form under the energy
 law (epic #103); the field's dose is under it (§5).
@@ -849,7 +856,8 @@ point would put the 0.483 HP hit at 1.04 % (MEASURED with the flight-nose drag).
 Per-shot rounding to whole points took nothing from the 0.48 HP hit, so the belt never felled the
 fir high on the trunk, while a hit at the base took a whole point: whether the machine gun worked
 depended on where it hit. Kept whole, every hit counts where it lands. MEASURED hits to fell the
-fir (`.agents/scratch/damage-model-2026-10-28/fractional-pools-measured.txt`): 232 at 1 m
+fir under its one 240 HP pool, before trunk segments had pools of their own
+(`.agents/scratch/damage-model-2026-10-28/fractional-pools-measured.txt`): 232 at 1 m
 centred (240 under the rounding), 268 at 10 m, 497 at 20 m centred and 553 at 20 m half a radius
 off (never under the rounding); the 88mm_AP's cells keep their 2 to 7 hits.
 

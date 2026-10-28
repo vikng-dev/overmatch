@@ -2548,7 +2548,7 @@ const TRUNK_RADIUS_AT_SHOT: f32 = 0.25;
 const TRUNK_STANDOFFS: [f32; 5] = [0.5, 2.0, 5.3, 9.7, 12.3];
 
 /// A CERTIFIED CONVEX BODY IS CROSSED WITH A CHORD AT ANY OFFSET AND INCIDENCE (the game's damage
-/// model: a trunk is one HP pool, and the line's chord through it is its dose).
+/// model: a trunk segment is one HP pool, and the line's chord through it carries its dose).
 ///
 /// The trees' own 12-gon frustum collider (`trees::spawn`) struck off-centre by the fixture 88's
 /// disc: one disc wholly outboard of the 12-gon's 30° vertex, which meets only the facet whose
@@ -2570,7 +2570,7 @@ const TRUNK_STANDOFFS: [f32; 5] = [0.5, 2.0, 5.3, 9.7, 12.3];
 #[test]
 fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
     let mut app = world_with_trimesh_plates(&[]);
-    let tree = {
+    let segment = {
         let world = app.world_mut();
         let mut queue = bevy::ecs::world::CommandQueue::default();
         let mut commands = Commands::new(&mut queue, world);
@@ -2584,7 +2584,8 @@ fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
             Transform::IDENTITY,
         );
         queue.apply(world);
-        tree
+        // The segment the shot height lies in: the first, 0 to 2 m up.
+        world.get::<Children>(tree).expect("segments")[0]
     };
     for _ in 0..8 {
         app.update();
@@ -2660,7 +2661,7 @@ fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
                         )?;
                         Ok::<_, WalkError>(plan.deposits.iter().find_map(
                             |dose| match dose.source {
-                                DoseSource::Line { chord, .. } if dose.address == tree => {
+                                DoseSource::Line { chord, .. } if dose.address == segment => {
                                     Some(chord)
                                 }
                                 _ => None,

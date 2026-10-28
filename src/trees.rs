@@ -1,29 +1,32 @@
-//! Trees in the game's damage model: a hard body with an HP pool and a state. Game rounds dose it,
-//! tanks push it, and it falls at a segment.
+//! Trees in the game's damage model: a hard body of segments, each with its own HP pool, and a
+//! state. Game rounds dose it, tanks push it, and it falls at a segment.
 //!
 //! A TREE IS DATA (ADR-0034). `assets/trees/<id>/<id>.tree.ron` ([`TreeAsset`]) is the trunk as a
 //! chain of tapered segments, each boundary's radius stored once — every segment's base radius,
 //! then the tip's — so adjacent segments meet by construction and a segment's top radius is read
 //! through [`TreeKind::r_top_m`]. TREES ARE JUST WOOD: `assets/trees/wood.ron` ([`Wood`]) is what
-//! the sim reads of every tree — the wood substance, the HP per metre of breast-height diameter and
-//! the ram threshold — and `assets/trees/species.ron` only names the species an asset may claim
-//! (the generator's look and ranges; the sim reads no value of a row). All three are read once at
-//! startup into the map's [`TreeLibrary`] and validated there; every number the sim uses comes from
-//! them, the glb is the view (ADR-0014).
+//! the sim reads of every tree — the wood substance, the HP per square metre of a segment's
+//! cross-section and the ram threshold — and `assets/trees/species.ron` only names the species an
+//! asset may claim (the generator's look and ranges; the sim reads no value of a row). All three
+//! are read once at startup into the map's [`TreeLibrary`] and validated there; every number the
+//! sim uses comes from them, the glb is the view (ADR-0014).
 //!
-//! THE BODY. One static root per tree — the [`BallisticVolume`] of the wood and the HP pool its
-//! diameter gives ([`TreeBody::hp`]), the way a module's pool is charged — and one child per
-//! segment with its own convex frustum collider (two 12-gon rings) on `[Terrain, Armor]` with
-//! filters `ALL`: hulls contact it and the union walk slows the round by chord × factor and doses
-//! the pool the energy it lost. Never a compound: the walk's convex collector reads one solid per
-//! collider. The instance's uniform scale is applied to the dimensions at spawn and the root's own
-//! scale is one.
+//! THE BODY. One static root per tree, carrying the state, and one child per segment
+//! ([`TreeSegment`]): its own convex frustum collider (two 12-gon rings) on `[Terrain, Armor]`
+//! with filters `ALL`, its own [`BallisticVolume`] of the wood and its own HP pool
+//! ([`TreeBody::segment_hp`]: the wood's HP per square metre × the segment's cross-section at
+//! mid-height), charged the way a module's pool is. Hulls contact a segment; the union walk slows
+//! the round by chord × factor and doses each segment the energy the round lost at that segment's
+//! depths, so a dose charges only the segments it crosses. Never a compound: the walk's convex
+//! collector reads one solid per collider. The instance's uniform scale is applied to the
+//! dimensions at spawn and the root's own scale is one.
 //!
 //! THE STATE. [`TreeState`] is `Standing` or `Down { cut, dir }`: the segment the trunk broke at
-//! and the fall azimuth's bin. The authority sets it once — when the pool empties
-//! ([`PoolEmptied`], at the dose's own entry height and direction) or when a ram's torque beats
-//! `fell_k × dbh³` — and every peer derives the rest from it: the body here, the glb and the
-//! fall's presentation in [`view`], which the sim never waits on.
+//! and the fall azimuth's bin. The authority sets it once — when a segment's pool empties
+//! ([`PoolEmptied`]: the cut is that segment, the direction the dose's own) or when a ram's
+//! torque beats `fell_k × dbh³` — and every peer derives the rest from it: the body here, the glb
+//! and the fall's presentation in [`view`], which the sim never waits on. One break per tree: a
+//! tree that is down holds no pool.
 //!
 //! THE BODY IN THE PHYSICS WORLD. The body is derived and placed in avian's world — collider
 //! poses, bounds and the trees a spatial query walks — in the frame its state changes
@@ -68,8 +71,8 @@ const SPECIES_FILE: &str = "species.ron";
 const WOOD_FILE: &str = "wood.ron";
 
 /// How far below 1 an instance's up vector's Y may fall before the instance counts as tilted:
-/// float rounding of a pure yaw (a few ulps), never a real lean — the cut reads world heights
-/// against upright prefix sums, so a leaning trunk would cut at the wrong segment.
+/// float rounding of a pure yaw (a few ulps), never a real lean — the resting pose reads the
+/// trunk's heights as upright prefix sums, so a leaning trunk would lie where it never stood.
 const UPRIGHT_EPSILON: f32 = 1e-6;
 
 /// The height above the base the breast-height diameter is read at, metres at asset scale 1.
@@ -112,8 +115,8 @@ type SpeciesTable = BTreeMap<String, serde::de::IgnoredAny>;
 struct Wood {
     /// The trunk's substance, a hard key of the substance registry.
     substance: String,
-    /// The trunk's HP pool per metre of breast-height diameter.
-    hp_per_m: Sourced<f32>,
+    /// A segment's HP pool per square metre of its mid-height cross-section.
+    hp_per_m2: Sourced<f32>,
     /// The ram threshold's constant, N·s/m²: a tick's `Σ impulse × lever` fells the trunk at
     /// `fell_k × dbh³`.
     fell_k: Sourced<f32>,
@@ -131,8 +134,9 @@ pub(crate) struct TreeKind {
     pub(crate) material: VolumeMaterial,
     pub(crate) substance: String,
     pub(crate) fell_k: f32,
-    /// HP points per metre of breast-height diameter ([`TreeBody::hp`]).
-    pub(crate) hp_per_m: f32,
+    /// HP points per square metre of a segment's mid-height cross-section
+    /// ([`TreeBody::segment_hp`]).
+    pub(crate) hp_per_m2: f32,
     /// Breast-height diameter at asset scale 1, metres: twice the taper's radius at
     /// [`BREAST_HEIGHT_M`] (DERIVED at load).
     pub(crate) dbh_m: f32,
@@ -175,8 +179,8 @@ impl TreeKind {
         }
         let material = VolumeMaterial::of(registry, &wood.substance)
             .map_err(|err| format!("{WOOD_FILE} substance: {err}"))?;
-        let (fell_k, hp_per_m) = (wood.fell_k.0, wood.hp_per_m.0);
-        for (name, value) in [("fell_k", fell_k), ("hp_per_m", hp_per_m)] {
+        let (fell_k, hp_per_m2) = (wood.fell_k.0, wood.hp_per_m2.0);
+        for (name, value) in [("fell_k", fell_k), ("hp_per_m2", hp_per_m2)] {
             if !positive(value) {
                 return Err(format!("{WOOD_FILE} {name} {value} is not positive"));
             }
@@ -188,7 +192,7 @@ impl TreeKind {
             material,
             substance: wood.substance.clone(),
             fell_k,
-            hp_per_m,
+            hp_per_m2,
             dbh_m: 0.0,
         };
         if kind.height_m() <= BREAST_HEIGHT_M {
@@ -380,35 +384,30 @@ impl TreeBody {
         self.kind.radius_at(height / self.scale) * self.scale
     }
 
-    /// The segment a point `height` world metres above the base lies in. A height on a boundary
-    /// belongs to the UPPER segment; below the base is the first, past the tip the last.
-    pub(crate) fn cut_at(&self, height: f32) -> u8 {
-        let n = self.prefix.len() - 1;
-        let above = self.prefix[1..n]
-            .iter()
-            .filter(|&&bottom| height >= bottom)
-            .count();
-        u8::try_from(above).expect("resolve bounded the segment count")
-    }
-
     /// The torque (N·s·m per tick) a ram must put on the trunk to fell it: `fell_k × dbh³`.
     pub(crate) fn fell_torque(&self) -> f32 {
         self.kind.fell_k * self.dbh_m * self.dbh_m * self.dbh_m
     }
 
-    /// The trunk's HP pool, in whole points: the wood's HP per metre of diameter times this
-    /// instance's breast-height diameter, rounded to the nearest point (one f32 multiply and
-    /// `roundf`, the same on every target), at least one point (a pool of none would never empty)
-    /// and at most [`crate::ballistics::MAX_POOL_POINTS`] (the most a pool holds).
-    pub(crate) fn hp(&self) -> u32 {
-        (libm::roundf(self.kind.hp_per_m * self.dbh_m) as u32)
+    /// Segment `k`'s HP pool, in whole points: the wood's HP per square metre times the
+    /// segment's cross-section at mid-height, `π r²` for `r` the mean of its two end radii at this
+    /// instance's scale (the taper is linear along a segment, so that is its radius halfway up).
+    /// Rounded to the nearest point (f32 multiplies and `roundf` in one fixed order, the same on
+    /// every target), at least one point (a pool of none would never empty) and at most
+    /// [`crate::ballistics::MAX_POOL_POINTS`] (the most a pool holds). The area makes a pool grow
+    /// with the square of the diameter while a line's dose grows with its chord, so a thinner
+    /// segment empties in fewer equal shots.
+    pub(crate) fn segment_hp(&self, k: usize) -> u32 {
+        let r = 0.5 * (self.kind.segments[k].r_bottom_m + self.kind.r_top_m(k)) * self.scale;
+        (libm::roundf(self.kind.hp_per_m2 * PI * r * r) as u32)
             .clamp(1, crate::ballistics::MAX_POOL_POINTS)
     }
 }
 
-/// Marks a segment's collider entity, a child of the tree's root.
-#[derive(Component)]
-pub(crate) struct TreeSegment;
+/// Marks a segment's collider entity, a child of the tree's root, with the segment's index from
+/// the base: the cut a fall at this segment carries.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TreeSegment(pub(crate) u8);
 
 /// The authority tick a tree's state last changed at (`ShotClock` units, the wire's `tick`).
 /// Inserted beside the `Down` state by whoever sets it — the authority's laws here, the ledger
@@ -631,11 +630,12 @@ fn lying_layers() -> CollisionLayers {
 
 /// Every peer derives the whole body from the state on every change of it (ADR-0016, A10),
 /// never from the body before: standing, every segment stands at its spawn height on
-/// [`standing_layers`] with the pool present and no resting pose or transition tick; down, the
-/// stump's segments stand the same and every segment from the cut up lies in the resting pose
-/// on [`lying_layers`], the pose is recorded and the pool is gone — what is down takes no more
-/// dose. A tree back to standing (a replaced ledger) or down at another cut derives exactly as
-/// one that never held the old state.
+/// [`standing_layers`] with its pool present (a full one where it had none) and the root holds
+/// no resting pose or transition tick; down, the stump's segments stand the same and every
+/// segment from the cut up lies in the resting pose on [`lying_layers`], the pose is recorded
+/// and every segment's pool is gone — one break per tree, so what is down, stump included, takes
+/// no more dose. A tree back to standing (a replaced ledger) or down at another cut derives
+/// exactly as one that never held the old state.
 ///
 /// The lying piece is turned rigidly about the seat — the butt's resting centre, which is the
 /// cut's bottom only for a cut at the base — so in the root's frame each lying segment is turned
@@ -643,17 +643,15 @@ fn lying_layers() -> CollisionLayers {
 /// height above the cut, turned the same.
 fn derive_state(
     trees: Query<
-        (
-            Entity,
-            &TreeState,
-            &TreeBody,
-            &Transform,
-            &Children,
-            Has<ComponentHealth>,
-        ),
+        (Entity, &TreeState, &TreeBody, &Transform, &Children),
         (Changed<TreeState>, Without<TreeSegment>),
     >,
-    mut segments: Query<(&mut Transform, &CollisionLayers), With<TreeSegment>>,
+    mut segments: Query<(
+        &TreeSegment,
+        &mut Transform,
+        &CollisionLayers,
+        Has<ComponentHealth>,
+    )>,
     grid: Option<Res<HeightGrid>>,
     mut commands: Commands,
 ) {
@@ -662,7 +660,7 @@ fn derive_state(
     let Some(grid) = grid else {
         return;
     };
-    for (root, state, body, transform, children, has_pool) in &trees {
+    for (root, state, body, transform, children) in &trees {
         let fallen = match *state {
             TreeState::Standing => None,
             TreeState::Down { cut, dir } => {
@@ -674,11 +672,11 @@ fn derive_state(
                 Some((usize::from(cut), resting, turn, seat))
             }
         };
-        let mut k = 0;
         for &child in children {
-            let Ok((mut local, layers)) = segments.get_mut(child) else {
+            let Ok((&TreeSegment(k), mut local, layers, has_pool)) = segments.get_mut(child) else {
                 continue;
             };
+            let k = usize::from(k);
             let (pose, filter) = match fallen {
                 Some((cut, _, turn, seat)) if k >= cut => {
                     let pose = Transform {
@@ -698,22 +696,24 @@ fn derive_state(
             if *layers != filter {
                 commands.entity(child).insert(filter);
             }
-            k += 1;
+            match fallen {
+                Some(_) if has_pool => {
+                    commands.entity(child).remove::<ComponentHealth>();
+                }
+                None if !has_pool => {
+                    commands
+                        .entity(child)
+                        .insert(ComponentHealth::full(body.segment_hp(k)));
+                }
+                _ => {}
+            }
         }
         match fallen {
             Some((_, resting, _, _)) => {
-                commands
-                    .entity(root)
-                    .insert(resting)
-                    .remove::<ComponentHealth>();
+                commands.entity(root).insert(resting);
             }
             None => {
                 commands.entity(root).remove::<(Resting, Fell)>();
-                if !has_pool {
-                    commands
-                        .entity(root)
-                        .insert(ComponentHealth::full(body.hp()));
-                }
             }
         }
     }
@@ -828,8 +828,9 @@ pub(crate) fn azimuth_bin(x: f32, z: f32) -> u8 {
 
 /// Spawn one tree of `kind` at `pose` — the ground pose: the authored XZ, the grid's Y, the
 /// authored yaw and uniform scale. A tilted or non-uniformly scaled instance is refused (ADR-0011):
-/// the resting pose and the cut both read the trunk as upright. Returns the root; the body is
-/// whole without a view, which a composition that draws attaches under the root itself.
+/// the resting pose reads the trunk as upright. Every segment's pool is built here, full, from
+/// the data (ADR-0014). Returns the root; the body is whole without a view, which a composition
+/// that draws attaches under the root itself.
 pub(crate) fn spawn(
     commands: &mut Commands,
     kind: &Arc<TreeKind>,
@@ -850,8 +851,9 @@ pub(crate) fn spawn(
         pose.rotation,
     );
     let body = TreeBody::new(kind.clone(), scale);
-    let prefix = body.prefix.clone();
-    let hp = body.hp();
+    let segments: Vec<(f32, u32)> = (0..kind.segments.len())
+        .map(|k| (body.prefix[k], body.segment_hp(k)))
+        .collect();
     let root = commands
         .spawn((
             Name::new(format!("tree {}", identity.id)),
@@ -861,53 +863,54 @@ pub(crate) fn spawn(
                 scale: Vec3::ONE,
             },
             RigidBody::Static,
-            BallisticVolume {
-                material: kind.material,
-                substance: kind.substance.clone(),
-            },
-            ComponentHealth::full(hp),
             TreeState::Standing,
             identity,
             body,
         ))
         .id();
-    for (k, &bottom) in prefix[..kind.segments.len()].iter().enumerate() {
+    for (k, (bottom, hp)) in segments.into_iter().enumerate() {
         commands.spawn((
             ChildOf(root),
             Transform::from_xyz(0.0, bottom, 0.0),
             segment_collider(kind, k, scale),
             standing_layers(),
-            TreeSegment,
+            BallisticVolume {
+                material: kind.material,
+                substance: kind.substance.clone(),
+            },
+            ComponentHealth::full(hp),
+            TreeSegment(u8::try_from(k).expect("resolve bounded the segment count")),
         ));
     }
     root
 }
 
-/// A standing tree whose pool a dose emptied falls: at the dose's entry height (the segment that
-/// height lies in) and along the round's travel; a field (no direction) fells it whole, away from
-/// the field's centre. A tree already down ignores it.
+/// A standing tree one of whose segments a dose emptied falls, broken at THAT segment — only the
+/// doses that segment took count toward its break — along the round's travel, or for a field (no
+/// direction) away from the field's centre. A tree already down ignores it.
 pub(crate) fn fell_on_pool_emptied(
     emptied: On<PoolEmptied>,
-    mut trees: Query<(&mut TreeState, &TreeBody, &Transform)>,
+    segments: Query<(&TreeSegment, &ChildOf)>,
+    mut trees: Query<(&mut TreeState, &Transform)>,
     clock: Option<Res<ShotClock>>,
     mut commands: Commands,
 ) {
-    let Ok((mut state, body, transform)) = trees.get_mut(emptied.entity) else {
+    let Ok((&TreeSegment(cut), parent)) = segments.get(emptied.entity) else {
+        return;
+    };
+    let root = parent.parent();
+    let Ok((mut state, transform)) = trees.get_mut(root) else {
         return;
     };
     if *state != TreeState::Standing {
         return;
     }
-    let base = transform.translation;
-    let (cut, along) = match emptied.along {
-        Some(along) => (body.cut_at(emptied.at.y - base.y), along),
-        None => (0, base - emptied.at),
-    };
+    let along = emptied.along.unwrap_or(transform.translation - emptied.at);
     *state = TreeState::Down {
         cut,
         dir: azimuth_bin(along.x, along.z),
     };
-    commands.entity(emptied.entity).insert(Fell {
+    commands.entity(root).insert(Fell {
         tick: clock.map_or(0, |clock| clock.0),
     });
 }
@@ -1087,12 +1090,13 @@ pub(crate) mod tests {
         BTreeMap::from([("fixture".to_owned(), serde::de::IgnoredAny)])
     }
 
-    /// The fixture wood (fixture data): RHA, 200 HP per metre of diameter, so the fixture trunk's
-    /// 0.47 m holds 94 points at scale 1.
+    /// The fixture wood (fixture data): RHA, 1000 HP per square metre, so the fixture trunk's
+    /// segments hold 196, 71 and 18 points at scale 1 (DERIVED: `1000 π r²` at the mid-height
+    /// radii 0.25, 0.15 and 0.075 m, rounded).
     fn fixture_wood() -> Wood {
         Wood {
             substance: "RHA".to_owned(),
-            hp_per_m: Sourced(200.0),
+            hp_per_m2: Sourced(1000.0),
             fell_k: Sourced(1.0e5),
         }
     }
@@ -1107,9 +1111,11 @@ pub(crate) mod tests {
         )
     }
 
-    /// The fixture trunk of `substance` whose pool holds `hp` points at scale 1 — fixture data for
-    /// the march's tests, which need a trunk a round goes through and a pool a field alone empties.
-    /// Its HP per metre is `hp` over the fixture's diameter, so [`TreeBody::hp`] reads `hp` back.
+    /// The fixture trunk of `substance` whose middle segment — 2 to 4 m up, where the march's
+    /// tests strike — holds `hp` points at scale 1: fixture data for tests that need a trunk a
+    /// round goes through and a pool a given dose empties. Its HP per square metre is `hp` over
+    /// that segment's mid-height cross-section, so [`TreeBody::segment_hp`] reads `hp` back there;
+    /// the wider segment below holds about 2.8 times as much, the narrower one above a quarter.
     pub(crate) fn fixture_kind_of(substance: &str, hp: u32) -> Arc<TreeKind> {
         let wood = Wood {
             substance: substance.to_owned(),
@@ -1117,10 +1123,11 @@ pub(crate) mod tests {
         };
         let mut kind =
             resolve(fixture_asset(), &fixture_table(), &wood).expect("the fixture trunk holds");
-        kind.hp_per_m = hp as f32 / kind.dbh_m;
+        let r = 0.5 * (kind.segments[1].r_bottom_m + kind.r_top_m(1));
+        kind.hp_per_m2 = hp as f32 / (PI * r * r);
         let kind = Arc::new(kind);
         assert_eq!(
-            TreeBody::new(kind.clone(), 1.0).hp(),
+            TreeBody::new(kind.clone(), 1.0).segment_hp(1),
             hp,
             "the fixture pool"
         );
@@ -1146,10 +1153,11 @@ pub(crate) mod tests {
 
     /// EVERY A6 REFUSAL IS A REFUSAL, NOT A CLAMP: an empty trunk, a non-finite or non-positive
     /// segment dimension, a missing, non-positive or non-finite tip radius, an unknown species, a
-    /// wood row whose HP per metre or ram threshold is not positive, a trunk too short to read a
-    /// breast height, and more segments than the wire word's cut byte can name are each refused by
-    /// name. Any one of these laxed to a default — a NaN height carried, a zero or infinite tip
-    /// spawned, a pool of no HP per metre spawned, a 256th segment accepted — reds its row.
+    /// wood row whose HP per square metre or ram threshold is not positive, a trunk too short to
+    /// read a breast height, and more segments than the wire word's cut byte can name are each
+    /// refused by name. Any one of these laxed to a default — a NaN height carried, a zero or
+    /// infinite tip spawned, a pool of no HP per square metre spawned, a 256th segment accepted —
+    /// reds its row.
     #[test]
     fn every_malformed_asset_or_wood_row_is_refused_by_name() {
         let refusal = |asset: TreeAsset, wood: Wood| {
@@ -1178,12 +1186,12 @@ pub(crate) mod tests {
         let mut asset = fixture_asset();
         asset.species = "no_such_species".to_owned();
         assert!(refusal(asset, fixture_wood()).contains("species"));
-        for hp_per_m in [0.0, -1.0, f32::NAN] {
+        for hp_per_m2 in [0.0, -1.0, f32::NAN] {
             let wood = Wood {
-                hp_per_m: Sourced(hp_per_m),
+                hp_per_m2: Sourced(hp_per_m2),
                 ..fixture_wood()
             };
-            assert!(refusal(fixture_asset(), wood).contains("hp_per_m"));
+            assert!(refusal(fixture_asset(), wood).contains("hp_per_m2"));
         }
         let wood = Wood {
             fell_k: Sourced(-1.0),
@@ -1214,38 +1222,25 @@ pub(crate) mod tests {
         }
     }
 
-    /// THE TRUNK'S POOL FOLLOWS ITS THICKNESS: the wood's HP per metre times the instance's
-    /// breast-height diameter, rounded to the nearest point, and never below one. The fixture
-    /// trunk's 0.47 m at 200 HP per metre holds 94 points at scale 1 and 188 at scale 2; a mutant
-    /// reading the asset's diameter instead of the instance's holds 94 at both, one keeping a fixed
-    /// pool holds the same at every scale, and one truncating reads 93 at scale 0.9975 (93.77). A
-    /// pool of no points would never empty, so a sliver of a trunk still holds one.
+    /// EACH SEGMENT'S POOL IS THE WOOD'S RATE TIMES ITS OWN CROSS-SECTION: `hp_per_m2 × π r²` for
+    /// `r` the segment's mid-height radius at the instance's scale, rounded to the nearest point
+    /// and never below one. The fixture's segments at 1000 HP per square metre hold 196, 71 and
+    /// 18 points at scale 1 (DERIVED: r 0.25, 0.15, 0.075 m) and four times that, 785, 283 and
+    /// 71, at scale 2 (DERIVED: 785.4, 282.7, 70.7). A mutant sizing every segment by one
+    /// diameter holds one value three times; one reading the bottom radius gives the base 283;
+    /// one linear in the diameter doubles with the scale instead of quadrupling; one ignoring the
+    /// instance's scale reads the same at both; one truncating reads 70 for the middle segment at
+    /// scale 1 (70.69). A pool of no points would never empty, so a sliver of a trunk still holds
+    /// one in every segment. The tree's HP pools — what equal shots must empty — rely on this.
     #[test]
-    fn the_trunk_pool_is_the_wood_rate_times_the_diameter() {
-        let hp = |scale: f32| TreeBody::new(fixture_kind(), scale).hp();
-        assert_eq!(hp(1.0), 94);
-        assert_eq!(hp(2.0), 188);
-        assert_eq!(hp(0.9975), 94, "rounded to the nearest point");
-        assert_eq!(hp(1.0e-4), 1, "never below one point");
-    }
-
-    /// THE BOUNDARY BELONGS TO THE UPPER SEGMENT (A1), at the instance's scale: a scale-2 fixture
-    /// has its segment bottoms at 0, 4 and 8 m. A mutant comparing with `>` would put 4.0 in
-    /// segment 0; one ignoring the scale would put 5.0 in segment 2.
-    #[test]
-    fn the_cut_is_the_segment_the_height_lies_in() {
-        let body = TreeBody::new(fixture_kind(), 2.0);
-        assert_eq!(body.prefix, [0.0, 4.0, 8.0, 12.0]);
-        assert!(
-            (body.dbh_m - 0.94).abs() < 1e-6,
-            "dbh scales with the instance"
-        );
-        assert_eq!(body.cut_at(-0.5), 0);
-        assert_eq!(body.cut_at(3.99), 0);
-        assert_eq!(body.cut_at(4.0), 1);
-        assert_eq!(body.cut_at(5.0), 1);
-        assert_eq!(body.cut_at(8.0), 2);
-        assert_eq!(body.cut_at(40.0), 2);
+    fn each_segment_pool_is_the_wood_rate_times_its_cross_section() {
+        let pools = |scale: f32| {
+            let body = TreeBody::new(fixture_kind(), scale);
+            (0..3).map(|k| body.segment_hp(k)).collect::<Vec<_>>()
+        };
+        assert_eq!(pools(1.0), [196, 71, 18]);
+        assert_eq!(pools(2.0), [785, 283, 71]);
+        assert_eq!(pools(1.0e-4), [1, 1, 1], "never below one point");
     }
 
     /// THE TORQUE IS IMPULSE × LEVER, SUMMED ONCE: 50 N·s at 0.5 m and 50 N·s at 2.0 m read
@@ -1561,70 +1556,82 @@ pub(crate) mod tests {
         );
     }
 
-    /// THE DOSE DECIDES THE CUT AND THE DIRECTION: a line dose that empties the pool breaks the
-    /// trunk at the segment its entry height lies in and fells it along the round's travel; a
-    /// field dose fells it whole, away from the centre; a tree already down keeps its state.
+    /// THE FALL CUTS AT THE SEGMENT THAT EMPTIED: a segment whose pool a line empties breaks the
+    /// trunk at that segment and fells it along the round's travel; one a field empties breaks it
+    /// there too, away from the field's centre; a tree already down keeps its state whatever
+    /// segment empties next. Each emptying names a point in ANOTHER segment's height range, so a
+    /// mutant reading the cut off the dose's height (the base for the line, segment 2 for the
+    /// field), or one felling a field's tree whole at the base, reds this. The break rule — only
+    /// the doses a segment took count toward its break — relies on it.
     #[test]
-    fn an_emptied_pool_fells_the_tree_at_the_dose() {
+    fn the_fall_cuts_at_the_segment_that_emptied() {
         let mut world = World::new();
         world.add_observer(fell_on_pool_emptied);
         world.insert_resource(ShotClock(7));
         let base = Vec3::new(10.0, 3.0, -4.0);
-        let spawn = |world: &mut World| {
-            world
+        let spawn = |world: &mut World| -> Vec<Entity> {
+            let root = world
                 .spawn((
                     TreeState::Standing,
                     TreeBody::new(fixture_kind(), 1.0),
                     Transform::from_translation(base),
                 ))
-                .id()
+                .id();
+            (0..3)
+                .map(|k| world.spawn((ChildOf(root), TreeSegment(k))).id())
+                .collect()
         };
+        let root = |world: &World, segment: Entity| world.get::<ChildOf>(segment).unwrap().parent();
         let shot = spawn(&mut world);
         world.trigger(PoolEmptied {
-            entity: shot,
-            at: base + Vec3::new(0.2, 2.5, 0.0),
+            entity: shot[2],
+            at: base + Vec3::new(0.2, 0.5, 0.0),
             along: Some(Vec3::new(0.0, -0.3, 1.0)),
         });
         world.flush();
+        let shot_root = root(&world, shot[2]);
         assert_eq!(
-            world.get::<TreeState>(shot),
-            Some(&TreeState::Down { cut: 1, dir: 64 }),
+            world.get::<TreeState>(shot_root),
+            Some(&TreeState::Down { cut: 2, dir: 64 }),
+            "the emptied segment, down the line"
         );
         assert_eq!(
-            world.get::<Fell>(shot),
+            world.get::<Fell>(shot_root),
             Some(&Fell { tick: 7 }),
             "the transition carries the tick it happened at"
         );
 
         let burst = spawn(&mut world);
         world.trigger(PoolEmptied {
-            entity: burst,
-            at: base + Vec3::new(5.0, 0.5, 0.0),
+            entity: burst[1],
+            at: base + Vec3::new(5.0, 4.5, 0.0),
             along: None,
         });
         assert_eq!(
-            world.get::<TreeState>(burst),
-            Some(&TreeState::Down { cut: 0, dir: 128 }),
-            "a field fells the whole trunk away from its centre",
+            world.get::<TreeState>(root(&world, burst[1])),
+            Some(&TreeState::Down { cut: 1, dir: 128 }),
+            "a field breaks the emptied segment, away from its centre",
         );
 
         world.trigger(PoolEmptied {
-            entity: shot,
-            at: base + Vec3::new(0.0, 5.0, 0.0),
+            entity: shot[0],
+            at: base + Vec3::new(0.0, 1.0, 0.0),
             along: Some(Vec3::X),
         });
         assert_eq!(
-            world.get::<TreeState>(shot),
-            Some(&TreeState::Down { cut: 1, dir: 64 }),
+            world.get::<TreeState>(shot_root),
+            Some(&TreeState::Down { cut: 2, dir: 64 }),
             "a tree already down keeps its state",
         );
     }
 
-    /// The spawn builds the body the module doc describes: one root with the pool and the kind's
-    /// volume — its material and substance — one frustum collider per segment on
-    /// `[Terrain, Armor]`, nothing on the root's scale, and no view — the sim spawns none.
-    /// A root carrying another substance's volume, or a segment hulled as a cylinder at either
-    /// ring's radius, reds this.
+    /// The spawn builds the body the module doc describes: one root with the state and no volume
+    /// or pool of its own, nothing on its scale; one child per segment, in order from the base,
+    /// with a frustum collider on `[Terrain, Armor]`, the kind's volume — its material and
+    /// substance — and a full pool of its own cross-section's points; and no view — the sim
+    /// spawns none. A segment carrying another substance's volume or another segment's pool, a
+    /// pool left on the root (a dose the walk charges to no segment), or a segment hulled as a
+    /// cylinder at either ring's radius, reds this.
     #[test]
     fn spawn_builds_a_root_and_a_collider_per_segment() {
         let mut world = World::new();
@@ -1646,26 +1653,18 @@ pub(crate) mod tests {
             pose,
         );
         queue.apply(&mut world);
-        let (root, body, health, transform) = world
-            .query::<(Entity, &TreeBody, &ComponentHealth, &Transform)>()
+        let (root, body, transform) = world
+            .query::<(Entity, &TreeBody, &Transform)>()
             .single(&world)
             .expect("one root");
         assert!(
             (body.dbh_m - 0.705).abs() < 1e-6,
             "the kind's dbh at scale 1.5"
         );
-        assert_eq!(
-            (health.shown(), health.points(), health.held()),
-            (141, 141, 141 * crate::ballistics::POOL_UNITS_PER_HP),
-            "the wood's 200 HP per metre at the instance's 0.705 m (DERIVED, fixture data)"
-        );
-        let volume = world
-            .get::<BallisticVolume>(root)
-            .expect("the root's volume");
-        assert_eq!(
-            (volume.material, volume.substance.as_str()),
-            (kind.material, kind.substance.as_str()),
-            "the volume is the kind's"
+        assert!(
+            world.get::<ComponentHealth>(root).is_none()
+                && world.get::<BallisticVolume>(root).is_none(),
+            "the root holds no pool and is no volume"
         );
         assert_eq!(transform.scale, Vec3::ONE);
         assert_eq!(transform.translation, pose.translation);
@@ -1675,15 +1674,47 @@ pub(crate) mod tests {
         );
         let standing = CollisionLayers::new([Layer::Terrain, Layer::Armor], LayerMask::ALL);
         let mut segments: Vec<(Entity, f32, Collider)> = world
-            .query_filtered::<
-                (&ChildOf, &Transform, &Collider, &CollisionLayers),
-                With<TreeSegment>,
-            >()
+            .query::<(
+                &TreeSegment,
+                &ChildOf,
+                &Transform,
+                &Collider,
+                &CollisionLayers,
+                &BallisticVolume,
+                &ComponentHealth,
+            )>()
             .iter(&world)
-            .map(|(parent, transform, collider, layers)| {
-                assert_eq!(*layers, standing, "a standing segment stops hulls and rounds");
-                (parent.parent(), transform.translation.y, collider.clone())
-            })
+            .map(
+                |(&TreeSegment(k), parent, transform, collider, layers, volume, pool)| {
+                    assert_eq!(
+                        *layers, standing,
+                        "a standing segment stops hulls and rounds"
+                    );
+                    assert_eq!(
+                        (volume.material, volume.substance.as_str()),
+                        (kind.material, kind.substance.as_str()),
+                        "segment {k}'s volume is the kind's"
+                    );
+                    // DERIVED, fixture data: 1000 π r² at the mid-height radii 0.375, 0.225 and
+                    // 0.1125 m (the fixture's at scale 1.5): 441.8, 159.0, 39.8.
+                    let points = [442, 159, 40][usize::from(k)];
+                    assert_eq!(
+                        (pool.shown(), pool.points(), pool.held()),
+                        (
+                            points,
+                            points,
+                            points * crate::ballistics::POOL_UNITS_PER_HP
+                        ),
+                        "segment {k}'s pool, full"
+                    );
+                    assert_eq!(
+                        transform.translation.y,
+                        [0.0, 3.0, 6.0][usize::from(k)],
+                        "segment {k} stands at its own bottom"
+                    );
+                    (parent.parent(), transform.translation.y, collider.clone())
+                },
+            )
             .collect();
         assert_eq!(segments.len(), 3);
         assert!(segments.iter().all(|(parent, _, _)| *parent == root));
@@ -1694,6 +1725,13 @@ pub(crate) mod tests {
             [0.0, 3.0, 6.0],
             "segment bottoms at the scaled prefix sums"
         );
+        let indices: Vec<u8> = world
+            .get::<Children>(root)
+            .expect("segments")
+            .iter()
+            .map(|child| world.get::<TreeSegment>(child).expect("a segment").0)
+            .collect();
+        assert_eq!(indices, [0, 1, 2], "the children in order from the base");
         // Each hull spans its frustum's wider ring and its scaled height from the segment's own
         // origin: the ring table holds the four axis points, so the bounds are exact. And each
         // end has its own ring's radius: a tenth of a millimetre inside either end, a ray along Z
@@ -1777,7 +1815,7 @@ pub(crate) mod tests {
         queue.apply(&mut world);
     }
 
-    /// A tilted instance is refused: the cut and the resting pose both read an upright trunk.
+    /// A tilted instance is refused: the resting pose reads an upright trunk.
     #[test]
     #[should_panic(expected = "is tilted")]
     fn a_tilted_instance_is_refused() {
@@ -2115,23 +2153,35 @@ pub(crate) mod tests {
     /// down, the stump's segments keep their place and their standing filter, every segment from
     /// the cut up leaves the vertical onto the lying filter — the cut's segment at the recorded
     /// seat beside the stump, the ones above it along the fall — the resting pose is recorded,
-    /// the setter's transition tick stays and the pool is gone; back to standing, every segment
-    /// stands at its spawn height on the standing filter, the pose and the transition tick are
-    /// gone and the pool is back; down at another cut, the segments the new cut spares stand
-    /// again and the rest lie. A derive that skips `Standing`, touches only the segments at and
-    /// above the new cut, turns the piece about the stump's top instead of the seat, or leaves
-    /// the pool, the pose or the tick from the state before reds this.
+    /// the setter's transition tick stays and every segment's pool is gone, the stump's too;
+    /// back to standing, every segment stands at its spawn height on the standing filter, the
+    /// pose and the transition tick are gone and every segment's own pool is back, full; down at
+    /// another cut, the segments the new cut spares stand again and the rest lie. A derive that
+    /// skips `Standing`, touches only the segments at and above the new cut, turns the piece
+    /// about the stump's top instead of the seat, leaves a pool on the stump, or leaves a pool,
+    /// the pose or the tick from the state before reds this.
     #[test]
     fn every_state_derives_the_whole_body_from_the_state() {
         let (mut app, root) =
             derive_bed(fixture_grid(|_, _| 0.0), Transform::from_xyz(5.0, 0.0, 5.0));
         let spawned = segments_of(&app, root);
         assert_eq!(spawned.len(), 3);
+        let pools = |app: &App| -> Vec<Option<ComponentHealth>> {
+            let world = app.world();
+            world
+                .get::<Children>(root)
+                .expect("segments")
+                .iter()
+                .map(|child| world.get::<ComponentHealth>(child).copied())
+                .collect()
+        };
+        let full: Vec<Option<ComponentHealth>> = [196, 71, 18]
+            .map(|points| Some(ComponentHealth::full(points)))
+            .into();
         app.update();
         assert!(
-            app.world().get::<ComponentHealth>(root).is_some()
-                && app.world().get::<Resting>(root).is_none(),
-            "standing at spawn: the pool stays, no pose"
+            pools(&app) == full && app.world().get::<Resting>(root).is_none(),
+            "standing at spawn: every segment's pool stays, no pose"
         );
         assert_eq!(
             segments_of(&app, root),
@@ -2148,9 +2198,10 @@ pub(crate) mod tests {
             app.update();
         };
         set(&mut app, TreeState::Down { cut: 1, dir: 0 });
-        assert!(
-            app.world().get::<ComponentHealth>(root).is_none(),
-            "down: no pool"
+        assert_eq!(
+            pools(&app),
+            [None; 3],
+            "down: no pool, the stump's included"
         );
         assert_eq!(
             app.world().get::<Fell>(root),
@@ -2191,14 +2242,11 @@ pub(crate) mod tests {
             spawned,
             "back to standing: every segment at its spawn pose and filter"
         );
-        let pool = app
-            .world()
-            .get::<ComponentHealth>(root)
-            .expect("back to standing: the pool is back");
         assert_eq!(
-            (pool.shown(), pool.points(), pool.held()),
-            (94, 94, 94 * crate::ballistics::POOL_UNITS_PER_HP),
-            "full: the fixture wood's 200 HP per metre at 0.47 m"
+            pools(&app),
+            full,
+            "back to standing: every segment's own pool is back, full (the fixture wood's 1000 HP \
+             per square metre)"
         );
         assert!(
             app.world().get::<Resting>(root).is_none() && app.world().get::<Fell>(root).is_none(),

@@ -166,8 +166,8 @@ pub mod sandbox;
 /// library): authored building and tree placement, each instance carrying its map identity,
 /// spawned from shared data on both binaries rather than over the wire. A building is a graybox
 /// box with a static collider that joins `world::TerrainMap`'s block list; a graybox fir carries a
-/// trunk collider only; a damage-model tree is spawned by `trees` — a static root with an HP pool
-/// and a state, one frustum collider per segment.
+/// trunk collider only; a damage-model tree is spawned by `trees` — a static root with a state,
+/// one frustum collider per segment, each segment with its own HP pool.
 mod scatter;
 /// Player-facing graphics settings: the persisted model (`video.ron` in the platform config
 /// directory), the ONE reconciler that applies it to the rendering world, and the `Esc` settings
@@ -227,8 +227,9 @@ mod track_prints;
 /// gear from the glb markers, and overlays the derived suspension/track geometry (cast shapes,
 /// route, contact) as live-tweakable gizmo layers on a hull that actually drives.
 pub mod track_sandbox;
-/// Trees in the game's damage model: a hard body with an HP pool and a state, built at spawn from
-/// `assets/trees/` data (the glb is the view), dosed by the union walk and felled at a segment.
+/// Trees in the game's damage model: a hard body of segments, each with its own HP pool, and a
+/// state, built at spawn from `assets/trees/` data (the glb is the view), dosed by the union walk
+/// and felled at the segment whose pool empties.
 mod trees;
 /// The bundled UI typeface (Barlow Condensed): loads the two weights once and exposes them as a
 /// `ui_font::UiFonts` resource that every `Text`-spawning client plugin reads. Mounted by each

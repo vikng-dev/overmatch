@@ -8507,13 +8507,118 @@ mod march_tests {
         }
     }
 
-    /// Where and along what `tree`'s pool was emptied; panics naming every emptying if it was not.
+    /// Where and along what the first of `tree`'s segment pools to empty was emptied; panics
+    /// naming every emptying if none was.
     fn emptied(app: &App, tree: Entity) -> (Vec3, Option<Vec3>) {
-        let log = &app.world().resource::<EmptiedLog>().0;
+        let world = app.world();
+        let log = &world.resource::<EmptiedLog>().0;
         log.iter()
-            .find(|(entity, ..)| *entity == tree)
+            .find(|(entity, ..)| {
+                world
+                    .get::<ChildOf>(*entity)
+                    .is_some_and(|parent| parent.parent() == tree)
+            })
             .map(|&(_, at, along)| (at, along))
-            .unwrap_or_else(|| panic!("{tree:?} was not emptied; emptied: {log:?}"))
+            .unwrap_or_else(|| panic!("no segment of {tree:?} was emptied; emptied: {log:?}"))
+    }
+
+    /// `tree`'s segment pools, from the base.
+    fn segment_pools(app: &App, tree: Entity) -> Vec<ComponentHealth> {
+        let world = app.world();
+        world
+            .get::<Children>(tree)
+            .expect("segments")
+            .iter()
+            .map(|segment| *world.get::<ComponentHealth>(segment).expect("a pool"))
+            .collect()
+    }
+
+    /// Identical fixture 88 rounds fired level down -Z at `height` up the axis of `tree` until it
+    /// falls; how many it took, or `None` if `cap` did not fell it.
+    fn shots_to_fell(app: &mut App, tree: Entity, height: f32, cap: usize) -> Option<usize> {
+        let base = app.world().get::<Transform>(tree).unwrap().translation;
+        (1..=cap).find(|_| {
+            march_round(
+                app,
+                fixture_round(FIXTURE_88, Vec3::NEG_Z * 800.0),
+                base + Vec3::new(0.0, height, 7.0),
+                Vec3::NEG_Z,
+                8,
+            );
+            app.world().get::<crate::trees::TreeState>(tree)
+                != Some(&crate::trees::TreeState::Standing)
+        })
+    }
+
+    /// WITH EQUAL SHOTS, A THINNER SEGMENT EMPTIES IN FEWER OF THEM THAN A THICKER ONE (the game's
+    /// damage model, issue 149): identical rounds centred on the fixture trunk's wide base
+    /// segment (mid-height radius 0.25 m) and on its narrow top one (0.075 m), each on a tree of
+    /// its own, fell the top in fewer shots, and each tree breaks at the segment it was shot in.
+    /// A segment's pool grows with its cross-section and a line's dose with its chord, so the
+    /// shots grow with the diameter. One pool for the whole tree takes MORE shots up the thin top
+    /// (its chord is shorter, its pool the same); pools linear in the diameter take about as many
+    /// shots at either. Fixture data: the middle segment holds 200 points, so the base holds 556
+    /// and the top 50 (DERIVED); the fixture 88 deals about 200 HP through the base and about 50
+    /// through the top (DERIVED at about 410 HP per metre of wood chord at 800 m/s).
+    #[test]
+    fn a_thinner_segment_empties_in_fewer_equal_shots() {
+        use crate::trees::{TreeState, tests::fixture_kind_of};
+        let mut app = tree_world();
+        let kind = fixture_kind_of("Wood", 200);
+        let thick = spawn_tree(&mut app, &kind, Vec3::new(0.0, 0.0, -5.0), 0);
+        let thin = spawn_tree(&mut app, &kind, Vec3::new(3.0, 0.0, -5.0), 1);
+        settle(&mut app);
+        let at_base = shots_to_fell(&mut app, thick, 1.0, 20).expect("the base breaks");
+        let at_top = shots_to_fell(&mut app, thin, 5.0, 20).expect("the top breaks");
+        assert!(
+            at_top < at_base,
+            "the thin top takes fewer shots: {at_top} at the top, {at_base} at the base"
+        );
+        assert!(
+            matches!(
+                app.world().get::<TreeState>(thick),
+                Some(TreeState::Down { cut: 0, .. })
+            ) && matches!(
+                app.world().get::<TreeState>(thin),
+                Some(TreeState::Down { cut: 2, .. })
+            ),
+            "each breaks where it was shot"
+        );
+    }
+
+    /// A DOSE TO ONE SEGMENT NEVER REDUCES ANOTHER SEGMENT'S POOL (the game's damage model, issue
+    /// 149): a round through the fixture trunk's middle segment, 3 m up and a metre clear of
+    /// both its boundaries, takes from that segment's pool alone; the segments below and above
+    /// stay full. The break rule relies on it — only the hits at a height count toward the break
+    /// there. A dose charged to the tree as a whole, or shared out along the trunk, reds this.
+    /// Fixture data: pools large enough that no shot empties one.
+    #[test]
+    fn a_dose_to_one_segment_never_reduces_another() {
+        use crate::trees::tests::fixture_kind_of;
+        let mut app = tree_world();
+        let tree = spawn_tree(
+            &mut app,
+            &fixture_kind_of("Wood", 100_000),
+            Vec3::new(0.0, 0.0, -5.0),
+            0,
+        );
+        settle(&mut app);
+        march_round(
+            &mut app,
+            fixture_round(FIXTURE_88, Vec3::NEG_Z * 800.0),
+            Vec3::new(0.0, 3.0, 2.0),
+            Vec3::NEG_Z,
+            8,
+        );
+        let pools = segment_pools(&app, tree);
+        assert!(
+            pools[1].held() < pools[1].capacity(),
+            "the struck segment took the dose: {pools:?}"
+        );
+        assert!(
+            pools[0].held() == pools[0].capacity() && pools[2].held() == pools[2].capacity(),
+            "the segments below and above are untouched: {pools:?}"
+        );
     }
 
     /// The fixture trunk's near face at 2.5 m up, on a line down -Z through its axis: DERIVED from
@@ -8609,13 +8714,13 @@ mod march_tests {
         }
     }
 
-    /// A TREE A CONE ALONE EMPTIES FALLS WHOLE, AWAY FROM THE APEX: a tree beside the line, inside
-    /// the cone a plate's exit throws, is emptied by a field deposit — no line, the apex as its
-    /// origin — and falls from its base away from the apex. A mutant reading the crossing's
-    /// entrance gives it the plate's entrance and the line's direction: a cut up the trunk, down
-    /// the line.
+    /// A TREE A CONE ALONE EMPTIES BREAKS THERE, AWAY FROM THE APEX: a tree beside the line, inside
+    /// the cone a plate's exit throws, has a segment emptied by a field deposit — no line, the
+    /// apex as its origin — and breaks at that segment, falling away from the apex. A mutant
+    /// reading the crossing's entrance gives it the plate's entrance and the line's direction,
+    /// down the line; one felling a field's tree whole cuts it at the base.
     #[test]
-    fn a_tree_a_cone_alone_empties_falls_whole_away_from_the_apex() {
+    fn a_tree_a_cone_alone_empties_breaks_there_away_from_the_apex() {
         use crate::trees::{TreeState, azimuth_bin, tests::fixture_kind_of};
         let mut app = tree_world();
         // A thin steel plate across the line; its exit throws the cone.
@@ -8629,7 +8734,8 @@ mod march_tests {
                 substance: "RHA".to_string(),
             },
         ));
-        // A pool of one point (fixture data): any deposit of the field empties it.
+        // The middle segment, 2 to 4 m up at the apex's height, holds one point (fixture data):
+        // any deposit of the field empties it; the base segment holds three.
         let base = Vec3::new(0.6, 0.0, -7.0);
         let tree = spawn_tree(&mut app, &fixture_kind_of("Wood", 1), base, 0);
         settle(&mut app);
@@ -8650,18 +8756,18 @@ mod march_tests {
         assert_eq!(
             app.world().get::<TreeState>(tree),
             Some(&TreeState::Down {
-                cut: 0,
+                cut: 1,
                 dir: azimuth_bin(base.x - at.x, base.z - at.z),
             }),
-            "whole, away from the apex"
+            "at the emptied segment, away from the apex"
         );
     }
 
     /// THE BURST PATH IS UNCHANGED: a round armed on one tree bursts past its exit, and a tree
-    /// beside the burst, emptied by the field alone, falls whole away from the burst's centre,
-    /// while the armed-on tree keeps its own line entry.
+    /// beside the burst, a segment of it emptied by the field alone, breaks at that segment away
+    /// from the burst's centre, while the armed-on tree keeps its own line entry.
     #[test]
-    fn a_burst_fells_a_neighbouring_tree_whole_from_its_centre() {
+    fn a_burst_breaks_a_neighbouring_tree_where_it_emptied_away_from_its_centre() {
         use crate::trees::{TreeState, azimuth_bin, tests::fixture_kind_of};
         let mut app = tree_world();
         let armed_on = spawn_tree(
@@ -8673,12 +8779,13 @@ mod march_tests {
         // Fixture burst: arms on any body, bursts 4 ms past the exit (3.2 m at 800 m/s), its ring
         // at ratio about 3.3 (the carried speed over 240 m/s) a band 7–27° off the axis about 17°
         // (DERIVED, at the shipped 10° half-width); its tree stands 2 m past the burst, 0.6 m off
-        // the axis (17°, DERIVED), clear of the nose piece flying on along the line, with a pool
-        // the armed-on tree's own exit cone cannot empty (DERIVED: the round loses about 0.43 MJ
-        // crossing the trunk's 14 reference-mm, so that cone emits about 64 HP points over its
-        // whole 26° cone, of which the beside trunk, 5.2 m from the exit and 0.6 m off its axis,
-        // catches roughly a seventh, near 9 HP points) and the 1 MJ burst's field empties from
-        // any one direction.
+        // the axis (17°, DERIVED), clear of the nose piece flying on along the line, its middle
+        // segment (2 to 4 m up, at the burst's height) holding a pool the armed-on tree's own
+        // exit cone cannot empty (DERIVED: the round loses about 0.43 MJ crossing the trunk's 14
+        // reference-mm, so that cone emits about 64 HP points over its whole 26° cone, of which
+        // the beside trunk, 5.2 m from the exit and 0.6 m off its axis, catches roughly a
+        // seventh, near 9 HP points, below the top segment's 4 m bottom) and the 1 MJ burst's
+        // field empties from any one direction.
         let exit = Vec3::new(0.0, 2.5, -5.0 - TRUNK_RADIUS_AT_2_5_M);
         let centre = exit + Vec3::NEG_Z * 3.2;
         let base = Vec3::new(0.6, 0.0, centre.z - 2.0);
@@ -8726,10 +8833,10 @@ mod march_tests {
         assert_eq!(
             app.world().get::<TreeState>(beside),
             Some(&TreeState::Down {
-                cut: 0,
+                cut: 1,
                 dir: azimuth_bin(base.x - at.x, base.z - at.z),
             }),
-            "whole, away from the centre"
+            "at the emptied segment, away from the centre"
         );
     }
 }

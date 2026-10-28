@@ -28,7 +28,7 @@ _Avoid_: hit marker (that names one disposable presentation)
 An authority-owned change to a placed world object that alters gameplay during a Battle, such as a fallen tree or breached wall.
 
 **Wood row**:
-The shared values of every tree in the game's damage model: its wood substance, HP per metre of breast-height diameter, and ram threshold. A trunk's HP follows its diameter; **species** supplies only appearance and generation ranges.
+The shared values of every tree in the game's damage model: its wood substance, HP per square metre of a trunk segment's cross-section, and ram threshold. Each trunk segment has its own HP pool, the rate × its cross-section at mid-height, so a pool follows the square of the segment's diameter; the tree breaks at the segment whose pool is emptied. **Species** supplies only appearance and generation ranges.
 _Avoid_: species HP, softwood, hardwood (one wood for every tree)
 
 **Surface evidence**:

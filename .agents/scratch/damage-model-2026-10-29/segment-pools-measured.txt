@@ -1,0 +1,54 @@
+MEASURE|tree|mature|scale 1|height 27.020|dbh 0.4000|hp_per_m2 1500|joules_per_hp 3000|pools 0:0.4049m=193 1:0.3824m=172 2:0.3595m=152 3:0.3363m=133 4:0.3127m=115 5:0.2887m=98 6:0.2641m=82 7:0.2389m=67 8:0.2131m=53 9:0.1864m=41 10:0.1587m=30 11:0.1297m=20 12:0.0989m=12 13:0.0653m=5 14:0.0438m=2
+MEASURE|tree|young|scale 0.5|height 13.510|dbh 0.2000|hp_per_m2 1500|joules_per_hp 3000|pools 0:0.2025m=48 1:0.1912m=43 2:0.1797m=38 3:0.1682m=33 4:0.1564m=29 5:0.1443m=25 6:0.1321m=21 7:0.1195m=17 8:0.1066m=13 9:0.0932m=10 10:0.0794m=7 11:0.0649m=5 12:0.0494m=3 13:0.0327m=1 14:0.0219m=1
+MEASURE|tree|sapling|scale 0.25|height 6.755|dbh 0.1000|hp_per_m2 1500|joules_per_hp 3000|pools 0:0.1012m=12 1:0.0956m=11 2:0.0899m=10 3:0.0841m=8 4:0.0782m=7 5:0.0722m=6 6:0.0660m=5 7:0.0597m=4 8:0.0533m=3 9:0.0466m=3 10:0.0397m=2 11:0.0324m=1 12:0.0247m=1 13:0.0163m=1 14:0.0110m=1
+MEASURE|head|tree|round|h|off_frac|segment|pool|events|chord_m|energy_J|v_in|v_out|hp_shot1|shots|state
+MEASURE|row|mature|88mm_AP|1.000|0.00|0|193|through[0]|0.3883|468142|768.0|705.7|156.047|2|Down { cut: 0, dir: 192 }
+MEASURE|row|mature|88mm_AP|1.000|0.50|0|193|through[0]|0.2891|350468|768.0|721.9|116.823|2|Down { cut: 0, dir: 192 }
+MEASURE|row|mature|88mm_AP|10.000|0.00|5|98|through[5]|0.2716|329489|768.0|724.7|98.000|1|Down { cut: 5, dir: 192 }
+MEASURE|row|mature|88mm_AP|10.000|0.50|5|98|through[5]|0.2005|244277|768.0|736.1|81.426|2|Down { cut: 5, dir: 192 }
+MEASURE|row|mature|88mm_AP|20.000|0.00|11|20|through[11]|0.1222|149484|768.0|748.7|20.000|1|Down { cut: 11, dir: 192 }
+MEASURE|row|mature|88mm_AP|20.000|0.50|11|20|through[11]|0.0882|108127|768.0|754.1|20.000|1|Down { cut: 11, dir: 192 }
+MEASURE|row|young|88mm_AP|0.450|0.00|0|48|through[0]|0.1871|228063|768.0|738.3|48.000|1|Down { cut: 0, dir: 192 }
+MEASURE|row|young|88mm_AP|0.450|0.50|0|48|through[0]|0.1231|150602|768.0|748.5|48.000|1|Down { cut: 0, dir: 192 }
+MEASURE|row|sapling|88mm_AP|0.225|0.00|0|12|through[0]|0.0731|89652|768.0|756.5|12.000|1|Down { cut: 0, dir: 192 }
+MEASURE|row|sapling|88mm_AP|0.225|0.50|0|12|through[0]|0.0546|67007|768.0|759.4|12.000|1|Down { cut: 0, dir: 192 }
+MEASURE|row|mature|88mm_APCR|1.000|0.00|0|193|through[0]|0.3975|87914|915.2|864.0|29.305|7|Down { cut: 0, dir: 192 }
+MEASURE|row|mature|88mm_APCR|1.000|0.50|0|193|through[0]|0.3418|75806|915.2|871.2|25.269|8|Down { cut: 0, dir: 192 }
+MEASURE|row|mature|88mm_APCR|10.000|0.00|5|98|through[5]|0.2807|62428|915.2|879.1|20.809|5|Down { cut: 5, dir: 192 }
+MEASURE|row|mature|88mm_APCR|10.000|0.50|5|98|through[5]|0.2116|47211|915.2|888.0|15.737|7|Down { cut: 5, dir: 192 }
+MEASURE|row|mature|88mm_APCR|20.000|0.00|11|20|through[11]|0.1353|30306|915.2|897.8|10.102|2|Down { cut: 11, dir: 192 }
+MEASURE|row|mature|88mm_APCR|20.000|0.50|11|20|through[11]|0.1004|22519|915.2|902.3|7.506|3|Down { cut: 11, dir: 192 }
+MEASURE|row|young|88mm_APCR|0.450|0.00|0|48|through[0]|0.1962|43815|915.2|890.0|14.605|4|Down { cut: 0, dir: 192 }
+MEASURE|row|young|88mm_APCR|0.450|0.50|0|48|through[0]|0.1468|32857|915.2|896.4|10.952|5|Down { cut: 0, dir: 192 }
+MEASURE|row|sapling|88mm_APCR|0.225|0.00|0|12|through[0]|0.0950|21320|915.2|903.0|7.107|2|Down { cut: 0, dir: 192 }
+MEASURE|row|sapling|88mm_APCR|0.225|0.50|0|12|through[0]|0.0697|15648|915.2|906.3|5.216|3|Down { cut: 0, dir: 192 }
+MEASURE|row|mature|7.9mm_AP|1.000|0.00|0|193|rest[0]|0.3398|3111|726.2|0.0|1.037|187|Down { cut: 0, dir: 192 }
+MEASURE|row|mature|7.9mm_AP|1.000|0.50|0|193|rest[0]|0.3398|3111|726.2|0.0|1.037|187|Down { cut: 0, dir: 192 }
+MEASURE|row|mature|7.9mm_AP|10.000|0.00|5|98|through[5]|0.2874|2716|726.2|258.7|0.905|109|Down { cut: 5, dir: 192 }
+MEASURE|row|mature|7.9mm_AP|10.000|0.50|5|98|through[5]|0.2492|2411|726.2|344.4|0.804|122|Down { cut: 5, dir: 192 }
+MEASURE|row|mature|7.9mm_AP|20.000|0.00|11|20|through[11]|0.1415|1465|726.2|528.2|0.488|41|Down { cut: 11, dir: 192 }
+MEASURE|row|mature|7.9mm_AP|20.000|0.50|11|20|through[11]|0.1227|1285|726.2|556.3|0.428|47|Down { cut: 11, dir: 192 }
+MEASURE|row|young|7.9mm_AP|0.450|0.00|0|48|through[0]|0.2024|2016|726.2|430.8|0.672|72|Down { cut: 0, dir: 192 }
+MEASURE|row|young|7.9mm_AP|0.450|0.50|0|48|through[0]|0.1755|1778|726.2|475.4|0.593|81|Down { cut: 0, dir: 192 }
+MEASURE|row|sapling|7.9mm_AP|0.225|0.00|0|12|through[0]|0.1012|1075|726.2|587.5|0.358|34|Down { cut: 0, dir: 192 }
+MEASURE|row|sapling|7.9mm_AP|0.225|0.50|0|12|through[0]|0.0878|940|726.2|606.6|0.313|39|Down { cut: 0, dir: 192 }
+MEASURE|row|mature|fixture_75mm_APCBC@790|1.000|0.00|0|193|through[0]|0.3905|345362|784.8|717.1|115.121|2|Down { cut: 0, dir: 192 }
+MEASURE|row|mature|fixture_75mm_APCBC@790|1.000|0.50|0|193|through[0]|0.2919|259607|784.8|734.5|86.536|3|Down { cut: 0, dir: 192 }
+MEASURE|row|mature|fixture_75mm_APCBC@790|10.000|0.00|5|98|through[5]|0.2738|243824|784.8|737.7|81.275|2|Down { cut: 5, dir: 192 }
+MEASURE|row|mature|fixture_75mm_APCBC@790|10.000|0.50|5|98|through[5]|0.2033|181776|784.8|749.9|60.592|2|Down { cut: 5, dir: 192 }
+MEASURE|row|mature|fixture_75mm_APCBC@790|20.000|0.00|11|20|through[11]|0.1279|114855|784.8|762.9|20.000|1|Down { cut: 11, dir: 192 }
+MEASURE|row|mature|fixture_75mm_APCBC@790|20.000|0.50|11|20|through[11]|0.0822|73991|784.8|770.8|20.000|1|Down { cut: 11, dir: 192 }
+MEASURE|row|young|fixture_75mm_APCBC@790|0.450|0.00|0|48|through[0]|0.1894|169464|784.8|752.3|48.000|1|Down { cut: 0, dir: 192 }
+MEASURE|row|young|fixture_75mm_APCBC@790|0.450|0.50|0|48|through[0]|0.1357|121824|784.8|761.6|40.608|2|Down { cut: 0, dir: 192 }
+MEASURE|row|sapling|fixture_75mm_APCBC@790|0.225|0.00|0|12|through[0]|0.0806|72587|784.8|771.0|12.000|1|Down { cut: 0, dir: 192 }
+MEASURE|row|sapling|fixture_75mm_APCBC@790|0.225|0.50|0|12|through[0]|0.0597|53827|784.8|774.6|12.000|1|Down { cut: 0, dir: 192 }
+MEASURE|row|mature|fixture_75mm_APCBC@925|1.000|0.00|0|193|through[0]|0.3905|380740|919.3|856.2|126.913|2|Down { cut: 0, dir: 192 }
+MEASURE|row|mature|fixture_75mm_APCBC@925|1.000|0.50|0|193|through[0]|0.2919|286198|919.3|872.3|95.399|3|Down { cut: 0, dir: 192 }
+MEASURE|row|mature|fixture_75mm_APCBC@925|10.000|0.00|5|98|through[5]|0.2738|268799|919.3|875.2|89.600|2|Down { cut: 5, dir: 192 }
+MEASURE|row|mature|fixture_75mm_APCBC@925|10.000|0.50|5|98|through[5]|0.2033|200393|919.3|886.6|66.798|2|Down { cut: 5, dir: 192 }
+MEASURE|row|mature|fixture_75mm_APCBC@925|20.000|0.00|11|20|through[11]|0.1279|126614|919.3|898.8|20.000|1|Down { cut: 11, dir: 192 }
+MEASURE|row|mature|fixture_75mm_APCBC@925|20.000|0.50|11|20|through[11]|0.0821|81560|919.3|906.1|20.000|1|Down { cut: 11, dir: 192 }
+MEASURE|row|young|fixture_75mm_APCBC@925|0.450|0.00|0|48|through[0]|0.1894|186821|919.3|888.9|48.000|1|Down { cut: 0, dir: 192 }
+MEASURE|row|young|fixture_75mm_APCBC@925|0.450|0.50|0|48|through[0]|0.1357|134298|919.3|897.5|44.766|2|Down { cut: 0, dir: 192 }
+MEASURE|row|sapling|fixture_75mm_APCBC@925|0.225|0.00|0|12|through[0]|0.0806|80016|919.3|906.4|12.000|1|Down { cut: 0, dir: 192 }
+MEASURE|row|sapling|fixture_75mm_APCBC@925|0.225|0.50|0|12|through[0]|0.0597|59335|919.3|909.7|12.000|1|Down { cut: 0, dir: 192 }

@@ -9,7 +9,7 @@
 //! or never match), `TreeState::encode`'s word, and the authority tick of the transition, which
 //! the fall presentation fuses to the interpolation cursor (ADR-0037). The replica decodes the
 //! word against its own copy of the tree and refuses one that names no state of it; everything
-//! else about a fallen tree — colliders, pool, pose, view — it derives (ADR-0016).
+//! else about a fallen tree — colliders, pools, pose, view — it derives (ADR-0016).
 
 use std::collections::HashMap;
 
@@ -300,6 +300,11 @@ mod tests {
             .collect()
     }
 
+    /// Segment `k` of `root`: the armour volume a march reaches on that part of the trunk.
+    fn segment(app: &App, root: Entity, k: usize) -> Entity {
+        app.world().get::<Children>(root).expect("segments")[k]
+    }
+
     /// Two probe rays against the fixture trunk at the origin, felled `Down { cut: 1, dir: 0 }`
     /// on flat ground (fixture data; DERIVED: the 4 m piece above the cut reaches no ground by
     /// 100°, so it lies at 90°, along +x at 2 m). The first crosses where segment 1 stood, 3 m up,
@@ -333,9 +338,10 @@ mod tests {
         app.update();
         app.update();
         let settled = app.world().resource::<MarchProbe>().reached.clone();
+        let (standing, lying) = (segment(&app, roots[0], 1), segment(&app, roots[0], 2));
         assert_eq!(
             settled.last(),
-            Some(&vec![Some(roots[0]), None]),
+            Some(&vec![Some(standing), None]),
             "the march reads the trunk standing"
         );
         // The receive frame: no time passes, so no fixed tick runs.
@@ -383,7 +389,7 @@ mod tests {
                 .resource::<MarchProbe>()
                 .reached
                 .get(settled.len()),
-            Some(&vec![None, Some(roots[0])]),
+            Some(&vec![None, Some(lying)]),
             "the next tick's march reads the piece lying"
         );
         assert_eq!(
@@ -393,9 +399,10 @@ mod tests {
         );
     }
 
-    /// THE AUTHORITY'S NEXT MARCH READS A FALL: a pool emptied in tick N (a dose's entry 3 m up
-    /// the fixture trunk, along +x) fells the tree in that tick; tick N's march, which reads the
-    /// body before the derive at the end of the tick, finds the trunk standing, and the march of
+    /// THE AUTHORITY'S NEXT MARCH READS A FALL: a segment's pool emptied in tick N (segment 1's,
+    /// 3 m up the fixture trunk, along +x) fells the tree at that segment in that tick; tick N's
+    /// march, which reads the body before the derive at the end of the tick, finds the trunk
+    /// standing, and the march of
     /// tick N + 1 — the live first-contact query, through avian's collider trees — reads the
     /// lying piece. A derive that leaves the colliders to the next physics step reads the
     /// standing trunk at N + 1 and reds this.
@@ -405,9 +412,9 @@ mod tests {
         struct Empty(Option<Entity>);
 
         fn empty(mut pending: ResMut<Empty>, mut commands: Commands) {
-            if let Some(tree) = pending.0.take() {
+            if let Some(segment) = pending.0.take() {
                 commands.trigger(PoolEmptied {
-                    entity: tree,
+                    entity: segment,
                     at: Vec3::new(0.0, 3.0, 0.0),
                     along: Some(Vec3::X),
                 });
@@ -422,7 +429,8 @@ mod tests {
         app.update();
         app.update();
         let before = app.world().resource::<MarchProbe>().reached.len();
-        app.world_mut().resource_mut::<Empty>().0 = Some(roots[0]);
+        let (standing, lying) = (segment(&app, roots[0], 1), segment(&app, roots[0], 2));
+        app.world_mut().resource_mut::<Empty>().0 = Some(standing);
         app.update();
         app.update();
         let world = app.world();
@@ -433,20 +441,20 @@ mod tests {
         let reached = &world.resource::<MarchProbe>().reached;
         assert_eq!(
             reached.get(before),
-            Some(&vec![Some(roots[0]), None]),
+            Some(&vec![Some(standing), None]),
             "tick N's march reads the trunk standing"
         );
         assert_eq!(
             reached.get(before + 1),
-            Some(&vec![None, Some(roots[0])]),
+            Some(&vec![None, Some(lying)]),
             "tick N + 1's march reads the piece lying"
         );
     }
 
     /// ANOTHER LEDGER IS ANOTHER AUTHORITY'S RECORD: a link's ledger fells tree A; the next
     /// link's ledger — a new entity of the same length — names only tree B. Tree A stands again
-    /// (its tick, its pose and its lying transforms gone, its pool back) and tree B falls; a
-    /// replica that remembers only a length skips B and leaves A down.
+    /// (its tick, its pose and its lying transforms gone, its segment pools back) and tree B
+    /// falls; a replica that remembers only a length skips B and leaves A down.
     #[test]
     fn a_replaced_ledger_stands_every_tree_it_does_not_name() {
         let (mut app, roots) = replica(2);
@@ -497,8 +505,12 @@ mod tests {
             "A's tick and pose are gone"
         );
         assert!(
-            world.get::<ComponentHealth>(roots[0]).is_some(),
-            "A's pool is back"
+            world
+                .get::<Children>(roots[0])
+                .unwrap()
+                .iter()
+                .all(|segment| world.get::<ComponentHealth>(segment).is_some()),
+            "A's segment pools are back"
         );
         assert_eq!(
             spawned(&app, roots[0]),
