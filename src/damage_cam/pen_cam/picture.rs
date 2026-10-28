@@ -1254,7 +1254,7 @@ pub(super) mod tests {
         AXIS * theta.cos() + (u * phi.cos() + v * phi.sin()) * theta.sin()
     }
 
-    /// A fixture field of law `field` over `n` directions about [`AXIS`], strength 10 ref-mm, in
+    /// A fixture field of law `field` over `n` directions about [`AXIS`], strength 10 J, in
     /// equal-solid-angle strata (`cos θ` even across the support, the azimuth turning by the
     /// golden angle), direction `k` reaching `reach(k, direction)`. Fixture data.
     pub(in super::super) fn fixture_field(

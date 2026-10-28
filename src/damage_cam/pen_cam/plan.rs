@@ -300,8 +300,7 @@ pub struct Cone {
     /// `N`, the strata the record threw it in: one direction each, those that never left its
     /// origin included.
     pub strata: usize,
-    /// The strength `S` (ref-mm): direction `k` was thrown with `S f_k`; zero on a hand-authored
-    /// clip.
+    /// The strength `S` (J): direction `k` was thrown with `S f_k`; zero on a hand-authored clip.
     pub strength: f32,
     /// Where the line throws it, arc length.
     pub arc: f32,

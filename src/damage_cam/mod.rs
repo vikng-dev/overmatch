@@ -14,9 +14,9 @@
 //!
 //! Frame: hull-local — origin at the hull root node, the glb's axes (`-Z` forward, `+Y` up, `+X`
 //! right). Units: metres for positions, unit vectors for directions, seconds for `t` measured from
-//! first contact (the approach is negative), degrees for angles, millimetres for armour, reference
-//! millimetres for a field's strengths and its fragments' doses, kilograms and metres per second
-//! for the projectile, HP points before conversion for a box's dose ([`BoxDose`]), whole HP points
+//! first contact (the approach is negative), degrees for angles, millimetres for armour, joules
+//! for a field's strengths and its fragments' doses, kilograms and metres per second for the
+//! projectile, HP points before conversion for a box's dose ([`BoxDose`]), whole HP points
 //! for a pool's size, and pool units (`ballistics::POOL_UNITS_PER_HP` per point) for what a pool
 //! held and what the shot took: the sim's own figures, never rounded to points. Every view rounds
 //! them the one way ([`crate::ballistics::shown_points`]).

@@ -1688,7 +1688,7 @@ mod tests {
         }
     }
 
-    /// Fixture: one field over the whole sphere, every direction reaching 2 m at 5 ref-mm, so its
+    /// Fixture: one field over the whole sphere, every direction reaching 2 m at 5 J, so its
     /// intensity falls as `1/r²` out to its reach, from `origin`; the fixture potency whose mid and
     /// floor it crosses at 1 m and 1.6 m; and the volume's lanes in that potency.
     fn lone_field(
@@ -3071,7 +3071,7 @@ mod tests {
                     let got = field.strength * law(lane, t as f32);
                     assert!(
                         (got - fragment.strength).abs() <= tolerance,
-                        "{name}: direction {k} of {n} at {got} ref-mm, recorded {}",
+                        "{name}: direction {k} of {n} at {got} J, recorded {}",
                         fragment.strength
                     );
                     checked += 1;

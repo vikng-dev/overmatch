@@ -762,7 +762,10 @@ the same rate as the line, so a joule is worth the same HP whatever put it there
 replaced was `0.045 × the round's readout × cos(incidence)` reference-mm at 10 HP points each: the
 88 at 773 m/s bouncing with its whole disc now deals 1.95 MJ, 650 HP points, to an exposed
 component it bounces off, against at most 18 under that law, a bounce needing more than 70° of
-incidence (DERIVED from the force law, the 0.6 bleed and the 1.221 rad ricochet angle); armour takes
+incidence (DERIVED from the force law, the 0.6 bleed and the 1.221 rad ricochet angle). MEASURED
+through the march, the fixture 88 fired at 773 m/s strikes a 0.4 m steel slab with a pool at
+771.25 m/s, leaves at 462.75 and jars 1.9415 MJ into it, 647.2 HP points, the same at 72°, 75°,
+80° and 85°: the bleed is one ratio, so a graze deals what a squarer bounce does. Armour takes
 none, and no recorded scenario bounces off a component. A witness's chord
 alone keeps its own unit, one HP point per 0.1 reference-mm (`ballistics::HP_PER_REFERENCE_MM`, a
 unit with Resolution provenance, not a balance value), the round's crew line rate its whole
