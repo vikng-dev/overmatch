@@ -91,10 +91,10 @@ const MACRO_PEAK: f32 = 1.5;
 // the ground fully. ASSUMED: the darkening fades in with the first half of a link's press, so a
 // fresh print does not pop dark before it sinks.
 const FOOTPRINT_GAIN: f32 = 2.0;
-// The parallax march: at least and at most this many steps, each at most half a near texel of
-// lateral travel, so a grazing view takes more of them. ASSUMED.
+// The parallax march's step limits. ASSUMED minimum; DERIVED maximum: the tuning panel's
+// 0.3 m depth cap at PARALLAX_MIN_DOWN spans at most 6 m, or 256 half-texel steps.
 const PARALLAX_STEPS_MIN: f32 = 4.0;
-const PARALLAX_STEPS_MAX: f32 = 32.0;
+const PARALLAX_STEPS_MAX: f32 = 256.0;
 // The least depth per unit of view ray the march accepts: views flatter than about 3° to the ground
 // march as if at 3°. ASSUMED.
 const PARALLAX_MIN_DOWN: f32 = 0.05;
@@ -145,8 +145,21 @@ fn print_depth(ground: vec4<f32>, kpa: f32) -> f32 {
 
 // The near store at world XZ `p`: R the press, G the ground pressure over its full scale.
 fn near_texel(p: vec2<f32>) -> vec2<f32> {
+    // Repeating addresses the torus, not another copy of the world. A grazing march can leave
+    // the resident window; its wrapped storage there belongs to unrelated ground.
+    let local = p - blend.print_near.xy;
+    if any(local < vec2(0.0)) || any(local >= vec2(blend.print_near.z)) {
+        return vec2(0.0);
+    }
     return textureSampleLevel(
         print_near_texture, layer_albedo_sampler, p / blend.print_near.z, 0.0).rg;
+}
+
+// World-space ray motion per metre of VERTICAL print depth. The depth law and the belt sink
+// lower the height field vertically; on a sloped plane its normal separation is N.y * depth.
+// Keeping the entire ray vector makes the UV's XZ and the PBR position the same landing.
+fn vertical_depth_ray(direction: vec3<f32>, normal: vec3<f32>, normal_speed: f32) -> vec3<f32> {
+    return direction * (normal.y / normal_speed);
 }
 
 // How far (m) the ground is sunk at world XZ `p`, on ground of print weights `ground`.
@@ -182,7 +195,7 @@ fn relief_weight(distance: f32) -> f32 {
 
 // The parallax march: from world XZ `p` on the surface, down the view ray whose surface-plane
 // motion per metre of depth is `lateral`, to where it meets the sunk ground (depth scaled by
-// `scale`). Returns the depth (m, along the surface normal) it lands at; the landing's surface-plane
+// `scale`). Returns the vertical depth (m) it lands at; the landing's world-XZ
 // point is `p + lateral * depth`. `bound` is the deepest the ground can be here.
 fn parallax_depth(
     p: vec2<f32>, lateral: vec2<f32>, ground: vec4<f32>, scale: f32, bound: f32,
@@ -215,6 +228,7 @@ fn parallax_depth(
 // marched toward the sun, whose surface-plane motion per metre of rise is `lateral`, until the ray
 // leaves the rut. Where the ground there is sunk less than the ray is deep, the ground stands over
 // the ray and shades it, softly; a rut's open floor, sunk as deep as the ray, does not.
+// `scale` fades both the relief height and the shadow strength to lighting only.
 fn sun_visibility(
     p: vec2<f32>, depth: f32, lateral: vec2<f32>, ground: vec4<f32>, scale: f32,
 ) -> f32 {
@@ -225,7 +239,7 @@ fn sun_visibility(
         let h = sunk_at(p + lateral * rise, ground) * scale;
         occluded = max(occluded, ((depth - rise) - h) / softness);
     }
-    return 1.0 - saturate(occluded);
+    return 1.0 - scale * saturate(occluded);
 }
 
 // The sun's direct light as `apply_pbr_lighting` adds it for `pbr_input`, shadow map and exposure
@@ -307,6 +321,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let geometric_normal = normalize(in.world_normal);
     var landed_xz = world_xz;
     var landed_depth = 0.0;
+    var landed_offset = vec3(0.0);
     var sun = 1.0;
     var footprint = trodden;
     var depth_slope = vec3(0.0);
@@ -314,19 +329,20 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         let relief = near * relief_weight(distance(view_bindings::view.world_position, in.world_position.xyz));
         let bound = dot(ground, blend.print_cap) * relief;
         if blend.print_relief.x >= 0.5 && bound > 1e-4 {
-            // The view ray into the surface; per metre of depth along the normal, how far it moves
-            // across the surface's plane.
+            // The view ray into the vertically lowered height field.
             let into = normalize(in.world_position.xyz - view_bindings::view.world_position);
             let down = max(-dot(into, geometric_normal), PARALLAX_MIN_DOWN);
-            let lateral = (into / down + geometric_normal).xz;
+            let ray = vertical_depth_ray(into, geometric_normal, down);
+            let lateral = ray.xz;
             landed_depth = parallax_depth(world_xz, lateral, ground, relief, bound);
-            landed_xz = world_xz + lateral * landed_depth;
+            landed_offset = ray * landed_depth;
+            landed_xz = world_xz + landed_offset.xz;
             if blend.print_relief.x >= 1.5 && landed_depth > 0.0
                 && view_bindings::lights.n_directional_lights > 0u {
                 let to_sun = view_bindings::lights.directional_lights[0].direction_to_light;
                 let rise = dot(to_sun, geometric_normal);
                 if rise > SUN_MIN_SINE {
-                    let sun_lateral = (to_sun / rise - geometric_normal).xz;
+                    let sun_lateral = vertical_depth_ray(to_sun, geometric_normal, rise).xz;
                     sun = sun_visibility(landed_xz, landed_depth, sun_lateral, ground, relief);
                 }
             }
@@ -344,13 +360,13 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         footprint = mix(trodden, saturate(here.r * FOOTPRINT_GAIN), near);
     }
 
-    // The surface as the view meets it: moved across the plane to where the ray landed and down
-    // the normal by the depth there, before the standard input samples the base pack.
+    // The surface as the view meets it, on the view ray, before the standard input samples the
+    // base pack. The UV and the PBR position share the landing's actual XZ.
     var landed = in;
     let shift = landed_xz - world_xz;
     landed.uv = in.uv + shift * blend.layer_uv_scale.w;
     landed.world_position = vec4(
-        in.world_position.xyz + vec3(shift.x, 0.0, shift.y) - geometric_normal * landed_depth,
+        in.world_position.xyz + landed_offset,
         in.world_position.w,
     );
 

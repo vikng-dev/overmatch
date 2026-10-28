@@ -28,7 +28,7 @@ use crate::tank::{Roadwheel, Tank, TrackSide, ViewNode};
 
 use super::gear_phase::{gear_spin_transform, spin_angle, sprocket_tooth_tip, tooth_angle};
 use super::link_view::{self, LinkFrame, LinkTemplate};
-use super::oracle::TerrainOracle;
+use super::oracle::{BlockField, TerrainOracle};
 use super::rig_geom::RigGeom;
 use super::shadow_proxy::{self, ProxyMode, ProxySide, ProxyStep};
 use super::side::Side;
@@ -103,19 +103,20 @@ fn presented_phase(previous: Option<f64>, sim: f64, speed: f32, dt: f32) -> f64 
     carried + (sim - carried) * heal
 }
 
-/// The ground the drawn belt fits: `ground` lowered by `depth_m`, the print depth the ground's
-/// shader draws under the tank (`track_prints::PrintDepths::full_press_m`). A vertical translation
-/// of the whole surface, so a probe's penetration into the lowered ground is the original's at the
-/// point `depth_m` above it. View only: the sim's oracle is the unlowered `ground`.
-struct Sunk<'a, O> {
-    ground: &'a O,
-    depth_m: f32,
+/// The ground the drawn belt fits: each probe reads its own ground's print depth, limited by the
+/// suspension's droop travel. Sampling at the hull centre would give both belts the same sink
+/// when they straddle two ground types. View only: the sim's oracle is the unlowered `ground`.
+struct Sunk<'a, F> {
+    ground: &'a BlockField,
+    depth_m: F,
+    max_sink_m: f32,
 }
 
-impl<O: TerrainOracle> TerrainOracle for Sunk<'_, O> {
+impl<F: Fn(Vec2) -> f32> TerrainOracle for Sunk<'_, F> {
     fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
+        let depth = (self.depth_m)(station.xz()).clamp(0.0, self.max_sink_m);
         self.ground
-            .depth_along(station + Vec3::Y * self.depth_m, out, reach)
+            .depth_along_lowered_ground(station, out, reach, depth)
     }
 }
 
@@ -666,15 +667,13 @@ fn drive_track_views(
         // by the depth the ground's shader draws this tank's print at, under a full press, so the
         // track sits in its own rut instead of riding the undisturbed surface above it. The sim,
         // the oracle and the collider read the ground as it is.
-        let sink_m = match (&depths, pressure_kpa) {
-            (Some(depths), Some(kpa)) => {
-                depths.full_press_m(Vec2::new(root.translation.x, root.translation.z), kpa)
-            }
-            _ => 0.0,
-        };
         let field = &Sunk {
             ground,
-            depth_m: sink_m,
+            depth_m: |xz| match (&depths, pressure_kpa) {
+                (Some(depths), Some(kpa)) => depths.full_press_m(xz, kpa),
+                _ => 0.0,
+            },
+            max_sink_m: gear.max_droop(),
         };
 
         // Belt phase from the SIM (phase B): a simulated hull's `TrackDrive` written by the
@@ -870,6 +869,70 @@ fn drive_track_views(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A flat heightmap at zero with optional raised blocks, synthetic fixture geometry.
+    fn print_ground(blocks: Vec<super::super::oracle::TerrainBlock>) -> BlockField {
+        let grid = crate::terrain_grid::HeightGrid::new(
+            vec![0.0; 9].into(),
+            3,
+            crate::terrain_grid::TerrainExtent {
+                world_size_m: 20.0,
+                height_offset_m: 0.0,
+                height_span_m: 1.0,
+            },
+        );
+        BlockField::new(blocks).with_height(Some(grid))
+    }
+
+    /// The view's terrain probes must sink by the ground beneath each belt, bounded by suspension
+    /// droop. A hull-centre lookup gives both sides the same depth at a ground-type boundary; an
+    /// unbounded offset lets the wrap conform below the wheels' reachable ground.
+    #[test]
+    fn belt_sink_samples_each_probe_and_stops_at_droop_travel() {
+        let ground = print_ground(Vec::new());
+        let sunk = Sunk {
+            ground: &ground,
+            depth_m: |xz: Vec2| if xz.x < 0.0 { 0.02 } else { 0.15 },
+            max_sink_m: 0.06, // Synthetic suspension travel, m.
+        };
+        for (x, expected) in [(-1.0, -0.02), (1.0, -0.06)] {
+            let depth = sunk.depth_along(Vec3::new(x, 0.0, 0.0), Vec3::NEG_Y, 0.5);
+            assert!(
+                (depth - expected).abs() < 1e-6,
+                "probe at x={x}: its own ground depth, capped by droop: {depth}"
+            );
+        }
+    }
+
+    /// Cosmetic print depth belongs to the heightmap's terrain shader. The belt must retain
+    /// contact with an obstacle's unprinted top while it sinks into soil beside it; translating
+    /// the whole oracle instead makes the wheels and wrap visibly enter that solid obstacle.
+    #[test]
+    fn belt_sink_lowers_printed_terrain_and_leaves_obstacles_at_their_drawn_height() {
+        let ground = print_ground(vec![super::super::oracle::TerrainBlock::new(
+            Vec3::Y * 0.5,
+            Quat::IDENTITY,
+            Vec3::ONE,
+        )]);
+        let sunk = Sunk {
+            ground: &ground,
+            depth_m: |_| 0.06,
+            max_sink_m: 0.1,
+        };
+        let obstacle = Vec3::Y;
+        assert_eq!(
+            sunk.depth_along(obstacle, Vec3::NEG_Y, 0.5),
+            ground.depth_along(obstacle, Vec3::NEG_Y, 0.5),
+            "the obstacle's top never sinks"
+        );
+        let soil = Vec3::X * 2.0;
+        assert!((sunk.depth_along(soil, Vec3::NEG_Y, 0.5) + 0.06).abs() < 1e-6);
+        assert_eq!(
+            ground.depth_along(soil, Vec3::NEG_Y, 0.5),
+            0.0,
+            "sim ground"
+        );
+    }
 
     /// A 120 fps render frame — faster than the 64 Hz sample rate, which is the whole problem.
     const DT: f32 = 1.0 / 120.0;

@@ -190,16 +190,19 @@ mod tests {
         let table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
         for (name, ground) in &table.types {
             let print = ground.print;
-            if print.softness_mm_per_kpa <= 0.0 {
+            if print.softness_mm_per_kpa <= 0.0 || print.depth_cap_mm <= 0.0 {
                 continue;
             }
-            let (light, heavy) = (20.0, 40.0);
+            // Both witnesses must be below this ground's cap: a valid live-tuned table may
+            // saturate at either of the fixed pressures a fixture happened to choose.
+            let cap_kpa = print.depth_cap_mm / print.softness_mm_per_kpa;
+            let (light, heavy) = (0.25 * cap_kpa, 0.5 * cap_kpa);
             assert!(
                 print.depth_m(heavy) > print.depth_m(light),
                 "{name}: {heavy} kPa prints deeper than {light} kPa"
             );
             assert!(
-                (print.depth_m(1.0e6) - print.depth_cap_mm / 1000.0).abs() < 1e-6,
+                (print.depth_m(2.0 * cap_kpa) - print.depth_cap_mm / 1000.0).abs() < 1e-6,
                 "{name}: the cap holds any pressure"
             );
         }

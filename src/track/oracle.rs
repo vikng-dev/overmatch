@@ -338,8 +338,18 @@ impl BlockField {
     }
 }
 
-impl TerrainOracle for BlockField {
-    fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
+impl BlockField {
+    /// The view's cosmetic print sink lowers only the heightmap ground term. Authored blocks
+    /// have no terrain shader and retain their original surface; translating the entire oracle
+    /// would sink belts into buildings and obstacles as though those surfaces had printed too.
+    /// The simulation calls this with zero lowering through [`TerrainOracle`].
+    pub(crate) fn depth_along_lowered_ground(
+        &self,
+        station: Vec3,
+        out: Vec3,
+        reach: f32,
+        lowering_m: f32,
+    ) -> f32 {
         // Anything past one reach beyond the station is deep clearance — contact profiles only
         // need the sign + slope there.
         let t_max = 2.0 * reach;
@@ -372,11 +382,12 @@ impl TerrainOracle for BlockField {
         // no ground at all, so the oracle agrees with the parry collider instead of feeling the
         // clamped phantom ground `height_at` extends for placement queries.
         if let Some(grid) = &self.height {
-            if grid.contains_xz(origin.x, origin.z)
-                && origin.y <= grid.height_at(origin.x, origin.z)
+            let ground_origin = origin + Vec3::Y * lowering_m;
+            if grid.contains_xz(ground_origin.x, ground_origin.z)
+                && ground_origin.y <= grid.height_at(ground_origin.x, ground_origin.z)
             {
                 buried = true;
-            } else if let Some(hit) = grid.cast_ray(origin, out, t_max) {
+            } else if let Some(hit) = grid.cast_ray(ground_origin, out, t_max) {
                 t = t.min(hit.t);
             }
         }
@@ -384,6 +395,12 @@ impl TerrainOracle for BlockField {
             return reach;
         }
         reach - t
+    }
+}
+
+impl TerrainOracle for BlockField {
+    fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
+        self.depth_along_lowered_ground(station, out, reach, 0.0)
     }
 }
 

@@ -260,7 +260,7 @@ pub(crate) struct TerrainBlend {
     #[texture(107)]
     #[sampler(108)]
     pub masks: Handle<Image>,
-    /// The track prints' near store ([`crate::track_prints`]): R the press, G the footprint, in a
+    /// The track prints' near store ([`crate::track_prints`]): R the press, G the ground pressure, in a
     /// window that wraps. NO SAMPLER OF ITS OWN: the shader reads it through the layer albedo's
     /// repeating sampler, because every sampler the material declares counts against the 16 a
     /// stage that Metal and DX12 resource-binding tier 1 allow.
@@ -335,6 +335,9 @@ pub(crate) fn layer_census() -> String {
 pub(crate) fn plugin(app: &mut App) {
     app.add_plugins(MaterialPlugin::<TerrainMaterial>::default());
 }
+
+#[cfg(test)]
+mod relief_tests;
 
 #[cfg(test)]
 mod tests {

@@ -682,6 +682,29 @@ mod tests {
         }
     }
 
+    /// Old settings files must select SUN SHADOW at 30 m, and every relief/range row choice must
+    /// survive the persistence seam. Comparing only with Settings::default would silently approve
+    /// a changed default, while checking only one non-default misses enum tokens a player can save.
+    #[test]
+    fn track_print_settings_keep_the_fixed_defaults_and_every_saved_choice() {
+        let Parsed::Ok(loaded) = parse("()") else {
+            panic!("an older file without print settings loads");
+        };
+        assert_eq!(loaded.track_prints, TrackPrintRelief::SunShadow);
+        assert_eq!(loaded.track_print_range.metres(), 30.0);
+        for relief in TrackPrintRelief::ORDER {
+            for range in TrackPrintRange::ORDER {
+                let settings = Settings {
+                    track_prints: relief,
+                    track_print_range: range,
+                    ..Settings::default()
+                };
+                let text = ron::ser::to_string_pretty(&settings, pretty_config()).unwrap();
+                assert_eq!(parse(&text), Parsed::Ok(settings), "{text}");
+            }
+        }
+    }
+
     /// **The forward/backward-compatibility contract**, which is what lets the research-pending
     /// entries land as plain new fields. A file missing a key loads it at its default; a file
     /// carrying a key this build has never heard of is ignored, not rejected.
