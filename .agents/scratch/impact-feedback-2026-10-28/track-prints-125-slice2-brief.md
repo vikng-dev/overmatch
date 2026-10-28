@@ -1,74 +1,86 @@
-# Brief: track prints, slice 2: prints that read as depth (#125)
+# Brief: track prints, slice 2: ground types, depth that reads, frame cost (#125)
 
 You are an implementer lane for Overmatch, a Bevy 0.19 / Rust 1.98 video game. You work in a leased bay
 (your worktree) and commit on its `lane/…` branch. Read `AGENTS.md` first; it is the rulebook. The subject
 is cosmetic terrain marks, view only, and not the damage model.
 
+Another builder is doing this same task independently in another bay, as a one-time comparison. Don't look
+for its work and don't coordinate with it. Build your best version.
+
 ## Read first
 
 - The slice-1 brief, `track-prints-125-brief.md`, and its code on main: `src/track_prints/`,
-  `src/terrain_blend.rs` and `assets/shaders/terrain_blend.wgsl`.
+  `src/terrain_blend.rs`, `assets/shaders/terrain_blend.wgsl`.
+- The review of slice 1, `track-prints-125-review.md`, including its ignored bench
+  `thirty_tank_pivot_cpu_and_upload_measurement`.
 - `track-prints-approaches.md` §4: POM, the sun march, and the belt float.
-- `track-prints-ground-stamping.md` §1 and §4.
 
-All three notes are in `.agents/scratch/impact-feedback-2026-10-28/`.
+All of these are in `.agents/scratch/impact-feedback-2026-10-28/`.
 
 ## What the owner saw in play
 
-- **Too shallow.** On the base ground, which covers most of the map, prints are nearly invisible. A
-  57-tonne machine should print clearly on this soil.
-- **Links pop in.** Each link appears fully pressed the moment it is stamped. At slow speed it should press
-  in gradually.
+- **Too shallow.** On the base ground, which covers most of the map, prints are nearly invisible.
+- **Links pop in.** Each link appears fully pressed the moment it is stamped.
 - **Flat at low angles.** No parallax yet.
 
 ## Decided (fixed)
 
 Don't reverse these. If you disagree, flag it in your report.
 
-1. **Grousers bite fully into soil.** On soil the grousers sink all the way in, and the plate sinks by the
-   pack's depth on top of that. The load concentrates on the grousers until the plate bears, which is why
-   the slice-1 rule printed only grouser tips.
-   - Each pack gets a bite share in data: 1 on soil, 0 on rigid ground such as road or rock.
-   - Raise the firm packs' starting depths so the full footprint reads clearly at 10–30 m. Label every
-     value ASSUMED, with provenance.
-2. **Live tuning in the offline game.** The owner tunes each pack's print response by eye while playing,
+1. **A ground-type table, from squishy mud to hard concrete, as data.**
+   - Each ground type carries:
+     - softness: print depth per unit of ground pressure;
+     - a depth cap;
+     - darkening;
+     - a roughness change.
+   - Each terrain pack names its ground type.
+   - Later the table will also drive handling (grip, rolling resistance, sinking). Don't add those fields
+     now, but give the table a shape that can grow them.
+   - Starting values are ASSUMED, with provenance. Choose them so the full footprint reads clearly at
+     10–30 m on today's four packs.
+2. **Depth is a simple proxy: one number per tank per ground type.**
+   - Depth = softness × the tank's ground pressure (mass over track footprint area, both read from tank
+     data), capped by the ground type.
+   - No per-contact load and no weight distribution.
+   - The baked link shape stays, and supplies the pattern.
+   - On any ground with a nonzero depth, the whole footprint reads, pattern included. Concrete prints no
+     depth.
+3. **Live tuning in the offline game.** The owner adjusts the ground-type values by eye while playing,
    through whatever the repo already supports: a `dev_ui` panel or hot-reloaded data. The chosen values
    persist in data.
-3. **Gradual press.** A link's print deepens with its load.
-   - Its depth ramps from zero at touchdown to full once the first road wheel has rolled over it, using the
-     view's real road-wheel positions.
-   - The link is re-stamped as the ramp grows, and the store keeps the deepest value, so a print only ever
-     deepens.
-   - Keep stamp counts bounded at speed and under pivot, and report the MEASURED rates as slice 1 did.
-4. **Parallax and the sun march** inside the near store, per approaches note §4:
-   - offset the UV and the world position before `pbr_input_from_standard_material`, so every pack shifts
-     together;
-   - use `textureSampleLevel` inside the loops;
-   - adapt the step count at grazing angles;
-   - march 4–8 taps toward the fixed sun for the shadow inside the rut;
-   - fade to normal-only by about 50 m (ASSUMED).
-5. **A view-only belt sink.** The conformed belt reads the near store's CPU mirror, so the track doesn't
-   hover over its own deep rut (approaches note §4, "Belts"). The simulation, the oracle and the collider
-   stay untouched (ADR-0014).
-6. **Frame cost.** The review measured the stamper's CPU work at 30 pivoting tanks at 4.25–6.22 ms mean and
-   5.12–8.29 ms p95 per frame, in the edit profile. See `track-prints-125-review.md` and its ignored bench
-   `thirty_tank_pivot_cpu_and_upload_measurement`.
-   - **Target:** bring the dispersed layout to at most 1 ms mean and 2 ms p95, with the gradual press
-     included (an ASSUMED budget), and report both layouts MEASURED on the same bench.
-   - **Allowed:** you may reverse slice 1's CPU-raster decision and stamp on the GPU instead, per approaches
-     note §4, if that is what it takes. Culling (for example, far tanks feed only the world layer) is also
-     yours to choose.
-7. **A drivable start for the owner.** Add a dev-only way to start a normal, drivable offline game at a
-   chosen spot, for example a spawn-at environment variable, so the owner can drive on mud or sand by hand.
-   The screenshot demo stays a separate script.
+4. **Press: fade in over one link.**
+   - A link's depth ramps from 0 to 100% while the tank travels one link pitch after that link touched
+     down.
+   - Use a few re-stamps per link at most.
+   - The store keeps the deepest value, so a print only ever deepens.
+5. **Parallax and the sun march** inside the near store, per approaches note §4. They ship as a graphics
+   setting in the existing display settings: lighting only, parallax, or parallax with the sun's shadow,
+   plus the distance they're drawn to.
+   - Offset the UV and the world position before `pbr_input_from_standard_material`.
+   - Use `textureSampleLevel` inside the loops.
+   - Adapt the step count at grazing angles.
+   - Fade to lighting only at the set distance.
+6. **Frame cost.** The review measured the stamper's CPU work at 4.25–6.22 ms mean and 5.12–8.29 ms p95
+   per frame, with 30 pivoting tanks in the edit profile.
+   - **Find what costs** and fix it.
+   - **Target:** the dispersed layout at no more than 1 ms mean and 2 ms p95, press included (an ASSUMED
+     budget). Report both layouts MEASURED on the same bench, before and after.
+   - **Allowed:** you may stamp on the GPU instead, reversing slice 1's CPU-raster decision, if that is what
+     it takes. You may simplify the review's history and world-layer machinery, keeping correctness on the
+     recentre.
+7. **A view-only belt sink.** The drawn track lowers into its own deep rut. The simulation, the oracle and
+   the collider stay untouched (ADR-0014).
+8. **A drivable start for the owner.** Add a dev-only way to start a normal, drivable offline game at a
+   chosen spot, so the owner can drive on mud or sand by hand. The screenshot demo stays a separate script.
 
 ## Tests
 
 Each test names the invariant it protects:
 
-- with bite 1, a firm pack prints the full footprint; with bite 0, it prints no depth;
-- a pressed link's depth never decreases while its load ramp grows;
-- stamp counts stay bounded at speed;
+- higher ground pressure prints deeper on the same ground type, with no tank name in the test;
+- concrete prints no depth;
+- the press ramps monotonically over one pitch;
+- stamp counts stay bounded at speed and under pivot;
 - the belt sink reads the same depth the shader draws;
 - the server builds none of it (ADR-0014);
 - no tank name appears in any law (ADR-0034).
@@ -77,18 +89,10 @@ Each test names the invariant it protects:
 
 Hidden window only (`visible: false`). Never take the screen; a crash dialog counts.
 
-Capture three spots, saving each PNG as `.agents/scratch/impact-feedback-2026-10-28/track-prints-s2-*.png`:
-- mud;
-- sand;
-- a spot where the base pack dominates.
-
-For each spot, take:
-- a low-angle shot of a straight drive and a pivot at about 10 m;
-- three frames of the gradual press at slow speed.
-
-Report no GPU cost as MEASURED, because a hidden window is occluded.
-
-Give the owner a launch command for the drivable start.
+Capture three spots, mud, sand and the base pack, at about 10 m: a low-angle shot of a straight drive and a
+pivot at each setting level. Save each PNG under `.agents/scratch/impact-feedback-2026-10-28/` with a
+prefix naming your bay, for example `bay1-track-prints-s2-*.png`. Report no GPU cost as MEASURED, because
+a hidden window is occluded.
 
 ## Rules
 
@@ -104,7 +108,7 @@ Give the owner a launch command for the drivable start.
 - **Label numbers** MEASURED, DERIVED or ASSUMED.
 - **Headless only.** Never print `~/.config/overmatch/*`, `.git/config` or `.lfsconfig` values.
 - **Spawn no subagents,** and don't run `codex`.
-- **Commit** with the trailer `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`. Don't push.
+- **Commit** with the `Co-Authored-By` trailer your dispatch prompt names. Don't push.
 - **Before you end your turn,** commit everything and leave no live shell.
 - **Don't ask questions:** decide, and state the decision in your report.
 
@@ -113,13 +117,15 @@ Give the owner a launch command for the drivable start.
 No more than 15 lines:
 
 - the commits;
-- the bite and depth values;
+- the ground-type table and its values;
+- the depth for the fixture tank on each pack (DERIVED);
 - the live-tuning route;
-- the press ramp and the MEASURED stamp rates;
-- the POM step counts and fade;
+- the press;
+- the settings levels;
+- the frame cost before and after (MEASURED);
 - the belt sink;
 - the drivable-start command;
-- the test list;
-- the capture paths;
+- the tests;
+- the captures;
 - the gate results;
 - the decisions you made.
