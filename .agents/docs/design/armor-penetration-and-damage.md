@@ -638,7 +638,7 @@ it stopped there), the burst point, the carried speed, the nose piece's mass, an
 cone record (absent when the HP quantum gate held it). The path runs on with the nose piece's line
 to its own end, its open air timed at the carried speed. A struck tank's record stays open while a
 fuze that tank armed runs, so a burst past its last body lands in it. The wire round-trips the
-burst; its 256 directions add 0.3–0.9 KB to a message (MEASURED, `src/damage_cam/wire.rs`). The pen
+burst; its 256 directions add 0.3–1.2 KB to a message (MEASURED, `src/damage_cam/wire.rs`). The pen
 cam draws the burst field as it draws a plate cone (`src/damage_cam/pen_cam/picture.rs`): thrown
 when the shell's nose reaches the burst point on the corner's clock, its front running out each
 direction's reach, over the band alone. It reads as a band about the line with nothing drawn inside

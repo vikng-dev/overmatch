@@ -446,6 +446,99 @@ fn a_cone_off_its_law_is_refused() {
     assert!(explanation.decode(&vocabulary).is_err());
 }
 
+/// In the game's damage model every burst field is a ring. Reweighting a recorded burst with
+/// a valid ball descriptor must not let the authority encode the retired option; ordinary plate
+/// cones still use that law. The pen cam relies on the codec enforcing the cause's law as well as
+/// each ray's weight.
+#[test]
+fn a_burst_ball_is_refused_by_the_encoder() {
+    let records = records();
+    let vocabulary = vocabulary(&records);
+    let (_, report) = records
+        .iter()
+        .find(|(_, report)| {
+            report
+                .burst
+                .as_ref()
+                .is_some_and(|burst| burst.field.is_some())
+        })
+        .expect("a recorded burst field");
+    let mut report = report.clone();
+    let cone = report.burst.as_mut().unwrap().field.as_mut().unwrap();
+    cone.field = FieldDescriptor::ball(cone.field.ratio);
+    cone.half_angle_deg = cone.field.half_angle().to_degrees();
+    let spread = vocabulary.burst.shape().spread(cone.field).unwrap();
+    for (fragment, [.., weight]) in cone.fragments.iter_mut().zip(spread.strata()) {
+        fragment.strength = cone.strength * weight;
+    }
+    let error = BuiltExplanation::build(&vocabulary, &recorded(&report))
+        .expect_err("a burst cannot carry the ball law");
+    assert!(error.to_string().contains("burst"), "{error}");
+}
+
+/// In the game's damage model a received burst cannot select the ball law even when its ratio
+/// and ray count are valid. Otherwise the client reconstructs the retired field from a ring
+/// record's reaches. The decoder guards the pen cam independently of the authority's encoder.
+#[test]
+fn a_burst_ball_is_refused_by_the_decoder() {
+    let records = records();
+    let vocabulary = vocabulary(&records);
+    let (_, report) = records
+        .iter()
+        .find(|(_, report)| {
+            report
+                .burst
+                .as_ref()
+                .is_some_and(|burst| burst.field.is_some())
+        })
+        .expect("a recorded burst field");
+    let mut explanation = BuiltExplanation::build(&vocabulary, &recorded(report))
+        .unwrap()
+        .full;
+    let cone = explanation
+        .record
+        .burst
+        .as_mut()
+        .unwrap()
+        .field
+        .as_mut()
+        .unwrap();
+    cone.field = FieldDescriptor::ball(cone.field.ratio);
+    let error = explanation
+        .decode(&vocabulary)
+        .expect_err("a received burst cannot carry the ball law");
+    assert!(error.to_string().contains("burst"), "{error}");
+}
+
+/// In the game's damage model local scenario records obey the same ring-only burst invariant as
+/// network explanations. A hand-edited record must not bring the retired ball back into the demo.
+#[test]
+fn a_burst_ball_is_refused_by_the_record_parser() {
+    let records = records();
+    let (_, report) = records
+        .iter()
+        .find(|(_, report)| {
+            report
+                .burst
+                .as_ref()
+                .is_some_and(|burst| burst.field.is_some())
+        })
+        .expect("a recorded burst field");
+    let mut report = report.clone();
+    let text = ron::ser::to_string(&report).unwrap();
+    assert_eq!(PenetrationReport::from_ron(&text).unwrap(), report);
+    let cone = report.burst.as_mut().unwrap().field.as_mut().unwrap();
+    cone.field = FieldDescriptor::ball(cone.field.ratio);
+    let text = ron::ser::to_string(&report).unwrap();
+    assert!(
+        PenetrationReport::from_ron(&text).is_err(),
+        "a local record cannot select the ball law for a burst"
+    );
+    report.burst.as_mut().unwrap().field = None;
+    let text = ron::ser::to_string(&report).unwrap();
+    assert_eq!(PenetrationReport::from_ron(&text).unwrap(), report);
+}
+
 /// The fingerprint folds the law a decoder spreads a cone by: another exponent of the ball, or
 /// another direction count, folds another, so a client whose law differs refuses an explanation
 /// rather than rebuild other weights from the same descriptor.

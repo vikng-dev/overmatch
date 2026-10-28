@@ -307,7 +307,33 @@ pub struct Burst {
     /// The field thrown from the burst point about the round's flight direction, the ring at ratio
     /// carried speed over greatest sideways speed; `None` where its emission was below the HP
     /// quantum and it was not thrown.
+    #[serde(default, deserialize_with = "deserialize_burst_field")]
     pub field: Option<SpallCone>,
+}
+
+/// In the game's damage model the field's cause restricts its law: every burst is a ring, while
+/// plate exits keep the ball. Both local records and the wire enforce this before presentation.
+pub(crate) fn check_burst_field(
+    field: crate::ballistics::spall_cone::FieldDescriptor,
+) -> Result<(), &'static str> {
+    if matches!(
+        field.law,
+        crate::ballistics::spall_cone::FieldLaw::Ring { .. }
+    ) {
+        Ok(())
+    } else {
+        Err("a burst field must use the ring law")
+    }
+}
+
+fn deserialize_burst_field<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<SpallCone>, D::Error> {
+    let field = Option::<SpallCone>::deserialize(deserializer)?;
+    if let Some(cone) = &field {
+        check_burst_field(cone.field).map_err(serde::de::Error::custom)?;
+    }
+    Ok(field)
 }
 
 /// One direction of a field.

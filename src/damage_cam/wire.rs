@@ -70,7 +70,7 @@
 //!
 //! | scenario | total B | shooter B | fields B | cones | rays | hits | B per cone | burst B |
 //! |---|---|---|---|---|---|---|---|---|
-//! | s1_through_crew | 921 | 891 | 588 | 1 | 64 | 75 | 588 | – |
+//! | s1_through_crew | 889 | 859 | 565 | 1 | 64 | 66 | 565 | – |
 //! | s2_stopped_mantlet | 188 | 142 | 0 | 0 | 0 | 0 | – | – |
 //! | s3_ricochet | 194 | 148 | 0 | 0 | 0 | 0 | – | – |
 //! | s4_spaced_then_stopped | 758 | 712 | 465 | 3 | 192 | 0 | 155 | – |
@@ -79,11 +79,11 @@
 //! | s7_engine_shadow | 721 | 682 | 466 | 1 | 64 | 51 | 466 | – |
 //! | s8a_mg_ricochet | 194 | 148 | 0 | 0 | 0 | 0 | – | – |
 //! | s8b_mg_stopped | 186 | 140 | 0 | 0 | 0 | 0 | – | – |
-//! | s9_breech_and_loader | 758 | 723 | 476 | 1 | 64 | 47 | 476 | – |
+//! | s9_breech_and_loader | 785 | 750 | 503 | 1 | 64 | 56 | 503 | – |
 //! | s10_gun_barrel_struck | 913 | 870 | 696 | 2 | 128 | 64 | 348 | – |
 //! | s11_mg_barrel_struck | 188 | 144 | 0 | 0 | 0 | 0 | – | – |
-//! | s12_apcr_through_crew | 921 | 891 | 588 | 1 | 64 | 75 | 588 | – |
-//! | s13_ring_through_crew | 1868 | 1842 | 588 | 1 | 64 | 75 | 588 | 902 |
+//! | s12_apcr_through_crew | 889 | 859 | 565 | 1 | 64 | 66 | 565 | – |
+//! | s13_ring_through_crew | 2167 | 2141 | 565 | 1 | 64 | 66 | 565 | 1233 |
 //! | s15_unarmed_overpen | 555 | 509 | 309 | 2 | 128 | 0 | 154 | – |
 //! | s16_restart_at_rest | 1075 | 1029 | 465 | 3 | 192 | 0 | 155 | 309 |
 //!
@@ -95,8 +95,8 @@
 //! thrown at its own strength, so nearly every hit's dose is distinct: a cone that lights the
 //! fighting compartment measures 460–590 B, and every recorded message without a burst stays under
 //! 0.95 KB. A burst's field at its 256 directions adds about 310 B where no direction leaves the
-//! burst point (s16) and 0.9 KB where its band reaches the compartment's boxes (s13), so the
-//! largest recorded message is 1.9 KB.
+//! burst point (s16) and 1.2 KB where its band reaches the compartment's boxes (s13), so the
+//! largest recorded message is 2.2 KB.
 
 use std::collections::BTreeMap;
 
@@ -1004,7 +1004,11 @@ fn encode(vocabulary: &ShotVocabulary, report: &PenetrationReport) -> Result<Rec
                 field: burst
                     .field
                     .as_ref()
-                    .map(|field| encode_cone(vocabulary.burst.shape(), vehicle, field))
+                    .map(|field| {
+                        super::check_burst_field(field.field)
+                            .map_err(|why| CodecError(why.into()))?;
+                        encode_cone(vocabulary.burst.shape(), vehicle, field)
+                    })
                     .transpose()?,
             })
         })
@@ -1329,7 +1333,11 @@ fn decode(vocabulary: &ShotVocabulary, record: &Record) -> Result<PenetrationRep
                 field: burst
                     .field
                     .as_ref()
-                    .map(|field| decode_cone(vocabulary.burst.shape(), vehicle, field))
+                    .map(|field| {
+                        super::check_burst_field(field.field)
+                            .map_err(|why| CodecError(why.into()))?;
+                        decode_cone(vocabulary.burst.shape(), vehicle, field)
+                    })
                     .transpose()?,
             })
         })
