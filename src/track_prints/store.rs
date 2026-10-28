@@ -26,7 +26,7 @@
 //!
 //! # The world layer
 //!
-//! [`WORLD_SIDE`]² texels over the map's square. A texel keeps which of its `2 × 2` sample points
+//! [`WORLD_SIDE`]² texels over the map's square. A texel keeps which of its `8 × 8` sample points
 //! a grounded sole has covered, and the GPU copy carries the covered fraction with a full mip chain
 //! the CPU builds tile by tile. Union, not sum: a track laid over and over stays one track.
 
@@ -58,8 +58,9 @@ pub(crate) const WORLD_SIDE: u32 = 4096;
 const TILE: u32 = 64;
 /// The log's index cell, m. ASSUMED: a few shoe lengths, small next to a recentre strip.
 const LOG_CELL_M: f32 = 8.0;
-/// The world layer's coverage per number of covered sample points.
-const COVERED: [u8; 5] = [0, 64, 128, 191, 255];
+/// Samples per world-texel axis. DERIVED: on a 1500 m map their 4.58 cm spacing is
+/// below the near texel's 4.69 cm, so near-scale footprints survive downsampling.
+const WORLD_SAMPLES: u32 = 8;
 
 /// How stamps turn into store texels.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -142,8 +143,7 @@ impl StampEntry {
     }
 
     /// Canonical `(x, z)` of world XZ `world`.
-    fn canonical(&self, world: Vec2) -> Vec2 {
-        let (across, along) = self.axes();
+    fn canonical(&self, world: Vec2, (across, along): (Vec2, Vec2)) -> Vec2 {
         let d = world - self.datum();
         Vec2::new(d.dot(across), d.dot(along))
     }
@@ -175,8 +175,14 @@ impl StampEntry {
     /// At world XZ `world`: the sole's clearance over the ground, m, and whether the point is
     /// footprint (under the sole, where its plane lies on the ground). `None` off the sole and
     /// over an opening.
-    fn at(&self, shoe: &ClearanceStamp, world: Vec2, law: &PrintLaw) -> Option<(f32, bool)> {
-        let c = self.canonical(world);
+    fn at(
+        &self,
+        shoe: &ClearanceStamp,
+        world: Vec2,
+        law: &PrintLaw,
+        axes: (Vec2, Vec2),
+    ) -> Option<(f32, bool)> {
+        let c = self.canonical(world, axes);
         let height = shoe.height(c.x, c.y, self.mirrored());
         if height >= OPEN_M {
             return None;
@@ -392,11 +398,12 @@ impl NearStore {
         let Some(span) = Span::covering(low, high, NEAR_TEXEL_M).intersect(clip) else {
             return;
         };
+        let axes = entry.axes();
         for j in span.min.y..span.max.y {
             for i in span.min.x..span.max.x {
                 let g = IVec2::new(i, j);
                 let world = (g.as_vec2() + 0.5) * NEAR_TEXEL_M;
-                let Some((clearance, footprint)) = entry.at(shoe, world, law) else {
+                let Some((clearance, footprint)) = entry.at(shoe, world, law, axes) else {
                     continue;
                 };
                 let written = [
@@ -500,8 +507,9 @@ pub(crate) struct WorldStore {
     origin_m: Vec2,
     texel_m: f32,
     side: u32,
-    /// Level 0: the `2 × 2` sample points of each texel a sole has covered, one bit each.
-    masks: Vec<u8>,
+    /// Level 0: the 8 × 8 footprint samples of each texel, one bit each. Tiles are
+    /// allocated only when printed; empty map area costs one optional pointer per tile.
+    masks: Vec<Option<Box<[u64]>>>,
     /// Levels 1 and up, coverage in 1/255: `mips[k − 1]` is level `k`.
     mips: Vec<Vec<u8>>,
     /// Level-0 tiles written since the last [`Self::take_uploads`].
@@ -519,7 +527,7 @@ impl WorldStore {
             origin_m: Vec2::splat(-0.5 * size_m),
             texel_m: size_m / side as f32,
             side,
-            masks: vec![0; (side * side) as usize],
+            masks: vec![None; tiles * tiles],
             mips,
             dirty: vec![false; tiles * tiles],
         }
@@ -537,7 +545,11 @@ impl WorldStore {
     /// Coverage of texel `(i, j)` at mip `level`, in 1/255.
     pub(crate) fn coverage(&self, level: u32, i: u32, j: u32) -> u8 {
         if level == 0 {
-            COVERED[self.masks[(j * self.side + i) as usize].count_ones() as usize]
+            let tiles = self.side.div_ceil(TILE);
+            let bits = self.masks[((j / TILE) * tiles + i / TILE) as usize]
+                .as_ref()
+                .map_or(0, |tile| tile[((j % TILE) * TILE + i % TILE) as usize]);
+            ((bits.count_ones() * 255 + 32) / 64) as u8
         } else {
             self.mips[level as usize - 1][(j * (self.side >> level) + i) as usize]
         }
@@ -549,33 +561,36 @@ impl WorldStore {
             return;
         };
         let (low, high) = entry.world_bounds(shoe);
-        let to_texel = |w: Vec2| ((w - self.origin_m) / self.texel_m).floor().as_ivec2();
-        let last = self.side as i32 - 1;
-        let (low, high) = (
-            to_texel(low).clamp(IVec2::ZERO, IVec2::splat(last)),
-            to_texel(high).clamp(IVec2::ZERO, IVec2::splat(last)),
-        );
+        let sample_m = self.texel_m / WORLD_SAMPLES as f32;
+        let Some(span) = Span::covering(low - self.origin_m, high - self.origin_m, sample_m)
+            .intersect(Span {
+                min: IVec2::ZERO,
+                max: IVec2::splat((self.side * WORLD_SAMPLES) as i32),
+            })
+        else {
+            return;
+        };
+        let axes = entry.axes();
         let tiles = self.side.div_ceil(TILE);
-        for j in low.y..=high.y {
-            for i in low.x..=high.x {
-                let mut bits = 0_u8;
-                for (bit, offset) in [(0.25, 0.25), (0.75, 0.25), (0.25, 0.75), (0.75, 0.75)]
-                    .into_iter()
-                    .enumerate()
+        for sj in span.min.y..span.max.y {
+            for si in span.min.x..span.max.x {
+                let world = self.origin_m + (Vec2::new(si as f32, sj as f32) + 0.5) * sample_m;
+                if !entry
+                    .at(shoe, world, law, axes)
+                    .is_some_and(|(_, footprint)| footprint)
                 {
-                    let world = self.origin_m
-                        + (Vec2::new(i as f32, j as f32) + Vec2::from(offset)) * self.texel_m;
-                    if entry
-                        .at(shoe, world, law)
-                        .is_some_and(|(_, footprint)| footprint)
-                    {
-                        bits |= 1 << bit;
-                    }
+                    continue;
                 }
-                let mask = &mut self.masks[(j as u32 * self.side + i as u32) as usize];
-                if *mask | bits != *mask {
-                    *mask |= bits;
-                    self.dirty[((j as u32 / TILE) * tiles + i as u32 / TILE) as usize] = true;
+                let (si, sj) = (si as u32, sj as u32);
+                let (i, j) = (si / WORLD_SAMPLES, sj / WORLD_SAMPLES);
+                let tile_index = ((j / TILE) * tiles + i / TILE) as usize;
+                let tile = self.masks[tile_index]
+                    .get_or_insert_with(|| vec![0; (TILE * TILE) as usize].into_boxed_slice());
+                let mask = &mut tile[((j % TILE) * TILE + i % TILE) as usize];
+                let bit = 1_u64 << ((sj % WORLD_SAMPLES) * WORLD_SAMPLES + si % WORLD_SAMPLES);
+                if *mask & bit == 0 {
+                    *mask |= bit;
+                    self.dirty[tile_index] = true;
                 }
             }
         }
@@ -701,7 +716,7 @@ mod tests {
             );
             assert!(
                 entry
-                    .at(&shoe, edge, &LAW)
+                    .at(&shoe, edge, &LAW, entry.axes())
                     .is_some_and(|(_, footprint)| footprint)
             );
         }
@@ -795,6 +810,43 @@ mod tests {
             [255, 255],
             "the deep sole rests on the ground there"
         );
+    }
+
+    /// World coverage must retain a sole visible in the near store at every sample phase.
+    /// Four samples per world texel can miss a complete shoe, making it vanish at the seam.
+    #[test]
+    fn the_world_layer_retains_a_footprint_between_coarse_samples() {
+        let shoes = vec![ClearanceStamp::pooled(&sole(), NEAR_TEXEL_M)];
+        let mut world = WorldStore::new(1500.0, WORLD_SIDE);
+        for phase in 0..8 {
+            let datum = Vec2::new(phase as f32 * 2.0, phase as f32 * world.texel_m / 8.0);
+            let entry = StampEntry::new(datum, 0.0, 0.0, Vec2::ZERO, 0, false);
+            world.stamp(&entry, &shoes, &LAW);
+            let cell = ((datum - world.origin_m) / world.texel_m)
+                .floor()
+                .as_uvec2();
+            let covered: u32 = (cell.y - 1..=cell.y + 1)
+                .flat_map(|j| (cell.x - 2..=cell.x + 2).map(move |i| (i, j)))
+                .map(|(i, j)| u32::from(world.coverage(0, i, j)))
+                .sum();
+            assert!(
+                covered > 0,
+                "phase {phase}: a grounded shoe cannot disappear in the world layer"
+            );
+        }
+        let uploads = world.take_uploads();
+        assert!(!uploads.is_empty());
+        let before: Vec<_> = world.masks.clone();
+        world.stamp(
+            &StampEntry::new(Vec2::ZERO, 0.0, 0.0, Vec2::ZERO, 0, false),
+            &shoes,
+            &LAW,
+        );
+        assert_eq!(
+            world.masks, before,
+            "overprinting is union, not accumulated darkness"
+        );
+        assert!(world.take_uploads().is_empty());
     }
 
     /// The world layer's GPU copy is rebuilt up the WHOLE mip chain over the tiles a track touched,
