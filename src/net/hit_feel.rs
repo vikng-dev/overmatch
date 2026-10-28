@@ -45,9 +45,12 @@ pub(super) struct LocalHitConfirmed {
     pub damage_tick: u32,
 }
 
-/// Remembered health and occupant identity. Occupant changes distinguish crew moves from damage.
+/// Remembered shown health and occupant identity. Occupant changes distinguish crew moves from
+/// damage.
 #[derive(Clone, Copy, PartialEq)]
 struct SlotMemory {
+    /// The HP points the pool shows ([`crate::ballistics::shown_points`]), so the flash follows the
+    /// display: a dose the pool keeps short of a whole point raises nothing.
     hp: u32,
     occupant: Option<CrewStation>,
 }
@@ -57,13 +60,14 @@ struct SlotMemory {
 struct HealthMemory(Vec<SlotMemory>);
 
 /// The per-volume [`SlotMemory`] vector out of the atomic [`NetCrew`] snapshot, in the SAME
-/// [`health_bearing_volumes`] order the server published — the value hit-feel diffs for drops. Carries
-/// each seat's occupant (`crew.home`) alongside HP so a personnel move can be told from damage.
+/// [`health_bearing_volumes`] order the server published — the shown points hit-feel diffs for
+/// drops. Carries each seat's occupant (`crew.home`) alongside HP so a personnel move can be told
+/// from damage.
 fn slot_memory(net: &NetCrew) -> Vec<SlotMemory> {
     net.volumes
         .iter()
         .map(|v| SlotMemory {
-            hp: v.hp,
+            hp: crate::ballistics::shown_points(v.held),
             occupant: v.crew.map(|c| c.home),
         })
         .collect()
@@ -338,6 +342,29 @@ mod tests {
         );
         // HP is whole points: the smallest drop there is, one point, is a hit.
         assert_eq!(worst_drop(&modules(&[100]), &modules(&[99])), Some((0, 1)));
+    }
+
+    /// The damage flash follows the display: a snapshot whose pool fell short of a whole point
+    /// shows the same points and raises nothing, and the snapshot that takes it past one raises a
+    /// one-point drop. The player relies on it: a flash with no point shown lost is a hit the HUD
+    /// cannot explain. A memory of raw pool units, or one rounded to nearest, fails here. Fixture
+    /// pool: 30 HP points.
+    #[test]
+    fn a_drop_short_of_a_whole_point_raises_no_flash() {
+        use crate::ballistics::POOL_UNITS_PER_HP;
+        let net = |held: u32| NetCrew {
+            volumes: vec![super::super::protocol::VolumeSnapshot { held, crew: None }],
+            swap: None,
+        };
+        let full = slot_memory(&net(30 * POOL_UNITS_PER_HP));
+        let short = slot_memory(&net(30 * POOL_UNITS_PER_HP - 600));
+        assert_eq!(worst_drop(&full, &short), None, "0.6 points shows full");
+        let past = slot_memory(&net(29 * POOL_UNITS_PER_HP - 1));
+        assert_eq!(
+            worst_drop(&short, &past),
+            Some((0, 1)),
+            "past a whole point"
+        );
     }
 
     #[test]

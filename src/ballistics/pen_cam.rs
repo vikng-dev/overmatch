@@ -133,7 +133,7 @@ fn record_scenario(scenario: &Scenario) -> PenetrationReport {
 }
 
 /// [`record_scenario`] under `law`'s cones (the shipped shape's when `None`), the wall time (s) its
-/// march steps took, and the cones its body exits did not throw, below the HP quantum
+/// march steps took, and the cones its body exits did not throw, below the pool quantum
 /// ([`SpallMarks::gated`]).
 fn record_timed(
     scenario: &Scenario,
@@ -412,7 +412,7 @@ fn bless_scenarios() {
 }
 
 /// The server cost of one cone throw under the shipped law at each of [`COST_DIRECTIONS`]
-/// (ignored; run it on demand), and the cones the HP quantum kept from being thrown. Each
+/// (ignored; run it on demand), and the cones the pool quantum kept from being thrown. Each
 /// penetrating scenario's march steps are timed under the shipped shape at `N` directions and at
 /// one; the throw's cost is the difference over the cones thrown, scaled from `N − 1` to `N`
 /// directions. The best of [`COST_RUNS`] runs is taken.
@@ -455,7 +455,7 @@ fn spall_law_cost() {
         gated += kept;
     }
     println!(
-        "across {} scenarios: {thrown} cones thrown, {gated} below the HP quantum not thrown",
+        "across {} scenarios: {thrown} cones thrown, {gated} below the pool quantum not thrown",
         scenarios().len()
     );
 }
@@ -639,10 +639,7 @@ pub(super) fn fixture_tanks(volumes: &[(FixtureVolume, usize, Quat)]) -> (App, V
                 },
                 WitnessSurface,
                 VolumeOf(tanks[owner]),
-                ComponentHealth {
-                    current: hp,
-                    max: hp,
-                },
+                ComponentHealth::full(hp),
             ));
             continue;
         }
@@ -669,10 +666,7 @@ pub(super) fn fixture_tanks(volumes: &[(FixtureVolume, usize, Quat)]) -> (App, V
                 volume.insert(ExternalArmour);
             }
             Kind::Box(hp) | Kind::SteelBox(hp) => {
-                volume.insert(ComponentHealth {
-                    current: hp,
-                    max: hp,
-                });
+                volume.insert(ComponentHealth::full(hp));
             }
         }
     }
@@ -964,7 +958,11 @@ fn a_penetration_with_no_dose_is_a_penetration() {
     assert!(report.doses.is_empty(), "{:?}", report.doses);
     assert_eq!(report.components.len(), 1, "the box is recorded");
     assert_eq!(report.components[0].count, 30);
-    assert_eq!(report.components[0].hp, 30, "whole at the shot");
+    assert_eq!(
+        report.components[0].held,
+        30 * POOL_UNITS_PER_HP,
+        "whole at the shot"
+    );
 }
 
 /// A box on the line takes the line's dose and the spall cone's, and the record names both.

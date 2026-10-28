@@ -33,7 +33,7 @@
 //! | field reach | `u16` mm, `u16::MAX` marking a `u32` in the cone's overflow list | 0.5 mm |
 //! | a ray's end | the cone's origin plus its direction times its reach | [`end_bound`]: 1.4 mm plus 1.8e-4 of the reach |
 //! | doses, strengths, chord, cost, speed, calibre, mass | `f32` | exact |
-//! | HP at the shot, HP lost | `u32` | exact |
+//! | what a pool held at the shot, what the shot took | `u32` pool units | exact |
 //! | plate factor | cost over chord, derived | four f32 ulps, relative |
 //! | incidence | `f32`, the record's own: an f32 `acos` of the decoded directions is off by 0.04° near normal impact (MEASURED) | exact |
 //!
@@ -52,10 +52,10 @@
 //!
 //! The shooter's projection holds no component this shot's doses do not name: an unreached
 //! component draws as neutral layout from tank data, so no HP of it, and nothing that depends on
-//! it, leaves the authority toward the shooter. A reached component carries its HP at the shot and
-//! what it lost, the record of what the shot found. The kill and its reason are public (every
-//! client reads them in the tank status), so the attribution rides every projection. The victim
-//! gets its own tank's full record; a killed victim also gets the kill cam's lesson
+//! it, leaves the authority toward the shooter. A reached component carries what its pool held at
+//! the shot and what it lost, the record of what the shot found. The kill and its reason are
+//! public (every client reads them in the tank status), so the attribution rides every projection.
+//! The victim gets its own tank's full record; a killed victim also gets the kill cam's lesson
 //! ([`Audience`]). A combatant in both roles gets one message, the victim's: a round is
 //! transparent to the tank that fired it, so the two meet only when a round fired by one life
 //! strikes the combatant's next.
@@ -70,22 +70,22 @@
 //!
 //! | scenario | total B | shooter B | fields B | cones | rays | hits | B per cone | burst B |
 //! |---|---|---|---|---|---|---|---|---|
-//! | s1_through_crew | 889 | 859 | 565 | 1 | 64 | 66 | 565 | – |
-//! | s2_stopped_mantlet | 188 | 142 | 0 | 0 | 0 | 0 | – | – |
-//! | s3_ricochet | 194 | 148 | 0 | 0 | 0 | 0 | – | – |
-//! | s4_spaced_then_stopped | 758 | 712 | 465 | 3 | 192 | 0 | 155 | – |
-//! | s5_oblique_through | 777 | 733 | 539 | 1 | 64 | 64 | 539 | – |
-//! | s6_overpen | 555 | 509 | 309 | 2 | 128 | 0 | 154 | – |
-//! | s7_engine_shadow | 721 | 682 | 466 | 1 | 64 | 51 | 466 | – |
-//! | s8a_mg_ricochet | 194 | 148 | 0 | 0 | 0 | 0 | – | – |
-//! | s8b_mg_stopped | 186 | 140 | 0 | 0 | 0 | 0 | – | – |
-//! | s9_breech_and_loader | 785 | 750 | 503 | 1 | 64 | 56 | 503 | – |
-//! | s10_gun_barrel_struck | 913 | 870 | 696 | 2 | 128 | 64 | 348 | – |
-//! | s11_mg_barrel_struck | 186 | 142 | 0 | 0 | 0 | 0 | – | – |
-//! | s12_apcr_through_crew | 889 | 859 | 565 | 1 | 64 | 66 | 565 | – |
-//! | s13_ring_through_crew | 2167 | 2141 | 565 | 1 | 64 | 66 | 565 | 1233 |
-//! | s15_unarmed_overpen | 555 | 509 | 309 | 2 | 128 | 0 | 154 | – |
-//! | s16_restart_at_rest | 1075 | 1029 | 465 | 3 | 192 | 0 | 155 | 309 |
+//! | s1_through_crew | 931 | 883 | 565 | 1 | 64 | 66 | 565 | – |
+//! | s2_stopped_mantlet | 218 | 142 | 0 | 0 | 0 | 0 | – | – |
+//! | s3_ricochet | 224 | 148 | 0 | 0 | 0 | 0 | – | – |
+//! | s4_spaced_then_stopped | 788 | 712 | 465 | 3 | 192 | 0 | 155 | – |
+//! | s5_oblique_through | 809 | 737 | 539 | 1 | 64 | 64 | 539 | – |
+//! | s6_overpen | 585 | 509 | 309 | 2 | 128 | 0 | 154 | – |
+//! | s7_engine_shadow | 756 | 692 | 466 | 1 | 64 | 51 | 466 | – |
+//! | s8a_mg_ricochet | 224 | 148 | 0 | 0 | 0 | 0 | – | – |
+//! | s8b_mg_stopped | 216 | 140 | 0 | 0 | 0 | 0 | – | – |
+//! | s9_breech_and_loader | 823 | 767 | 503 | 1 | 64 | 56 | 503 | – |
+//! | s10_gun_barrel_struck | 944 | 872 | 696 | 2 | 128 | 64 | 348 | – |
+//! | s11_mg_barrel_struck | 217 | 144 | 0 | 0 | 0 | 0 | – | – |
+//! | s12_apcr_through_crew | 929 | 881 | 565 | 1 | 64 | 66 | 565 | – |
+//! | s13_ring_through_crew | 2243 | 2203 | 565 | 1 | 64 | 66 | 565 | 1263 |
+//! | s15_unarmed_overpen | 585 | 509 | 309 | 2 | 128 | 0 | 154 | – |
+//! | s16_restart_at_rest | 1105 | 1029 | 465 | 3 | 192 | 0 | 155 | 309 |
 //!
 //! The DERIVED estimate `41 + 2 + 2N` per cone (171 B at N = 64) counts a cone's metadata, its
 //! field descriptor's law byte and `f32` ratio among it, and its reaches; a cone that reaches no
@@ -95,7 +95,7 @@
 //! thrown at its own strength, so nearly every hit's dose is distinct: a cone that lights the
 //! fighting compartment measures 460–590 B, and every recorded message without a burst stays under
 //! 0.95 KB. A burst's field at its 256 directions adds about 310 B where no direction leaves the
-//! burst point (s16) and 1.2 KB where its band reaches the compartment's boxes (s13), so the
+//! burst point (s16) and 1.3 KB where its band reaches the compartment's boxes (s13), so the
 //! largest recorded message is 2.2 KB.
 
 use std::collections::BTreeMap;
@@ -789,10 +789,11 @@ enum WireEnd {
 #[derive(Serialize, Deserialize, Clone, Debug, PartialEq)]
 struct WireDose {
     volume: u16,
-    /// The game's damage model: HP points before rounding, as in `BoxDose`.
+    /// The game's damage model: HP points before conversion, as in `BoxDose`.
     line: f32,
     field: f32,
-    lost: u32,
+    /// Pool units the shot took, as in `BoxDose`.
+    taken: u32,
     entered: Option<Mm>,
     /// When the shot emptied it, and what that cost.
     emptied: Option<(i32, ConsequenceState)>,
@@ -801,8 +802,8 @@ struct WireDose {
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, PartialEq)]
 struct WireComponent {
     volume: u16,
-    /// HP at the shot.
-    hp: u32,
+    /// Pool units its pool held at the shot.
+    held: u32,
 }
 
 // --- Build and project ----------------------------------------------------------------------------
@@ -1050,7 +1051,7 @@ fn encode(vocabulary: &ShotVocabulary, report: &PenetrationReport) -> Result<Rec
             }
             Ok(WireComponent {
                 volume,
-                hp: component.hp,
+                held: component.held,
             })
         })
         .collect::<Result<_, _>>()?;
@@ -1109,7 +1110,7 @@ fn encode_dose(
         volume,
         line: dose.line,
         field: dose.field,
-        lost: dose.lost,
+        taken: dose.taken,
         entered: dose.entered.map(Mm::of).transpose()?,
         emptied,
     })
@@ -1360,7 +1361,7 @@ fn decode(vocabulary: &ShotVocabulary, record: &Record) -> Result<PenetrationRep
             volume: name.to_owned(),
             line: dose.line,
             field: dose.field,
-            lost: dose.lost,
+            taken: dose.taken,
             entered: dose.entered.map(Mm::point),
         });
         if let Some((t, state)) = dose.emptied {
@@ -1382,7 +1383,7 @@ fn decode(vocabulary: &ShotVocabulary, record: &Record) -> Result<PenetrationRep
                 name: name.to_owned(),
                 role,
                 count,
-                hp: component.hp,
+                held: component.held,
             })
         })
         .collect::<Result<_, CodecError>>()?;

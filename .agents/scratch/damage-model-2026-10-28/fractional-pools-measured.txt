@@ -1,0 +1,32 @@
+# Pools keep fractions (issue 142): rounds against the shipped fir_1, MEASURED (macOS arm64, edit
+# profile) on main 0423184 (energy dose, flight-nose drag) with pools in pool units. The game's
+# damage model; a tree is one HP pool. Produced by energy-dose-measure.rs (beside this file)
+# narrowed to 88mm_AP and 7.9mm_AP, heights 1/10/20/25 m and offsets 0/0.5/0.9 of the local
+# radius, with hp_shot1 printed as the pool units the first hit took over 1000.
+# shots: identical hits until the pool empties (cap 2000).
+MEASURE|kind|segments 15|height 27.020|dbh 0.4000|hp 240|hp_per_m 600|substance Wood|joules_per_hp 3000
+MEASURE|head|round|h|off_frac|events|chord_m|cost_refmm|energy_J|v_in|v_out|hp_shot1|shots|emptied|state
+MEASURE|row|88mm_AP|1.0|0.00|through|0.3882|15.53|468070|768.0|705.7|156.023|2|true|Down { cut: 0, dir: 192 }
+MEASURE|row|88mm_AP|1.0|0.50|through|0.3199|12.80|387177|768.0|716.9|129.059|2|true|Down { cut: 0, dir: 192 }
+MEASURE|row|88mm_AP|1.0|0.90|through|0.1051|4.21|128725|768.0|751.4|42.908|6|true|Down { cut: 0, dir: 192 }
+MEASURE|row|88mm_AP|10.0|0.00|through|0.2715|10.86|329479|768.0|724.7|109.826|3|true|Down { cut: 5, dir: 192 }
+MEASURE|row|88mm_AP|10.0|0.50|through|0.2224|8.90|270608|768.0|732.6|90.203|3|true|Down { cut: 5, dir: 192 }
+MEASURE|row|88mm_AP|10.0|0.90|through|0.0762|3.05|93492|768.0|756.0|31.164|8|true|Down { cut: 5, dir: 192 }
+MEASURE|row|88mm_AP|20.0|0.00|through|0.1222|4.89|149456|768.0|748.7|49.819|5|true|Down { cut: 11, dir: 192 }
+MEASURE|row|88mm_AP|20.0|0.50|through|0.0899|3.60|110202|768.0|753.8|36.734|7|true|Down { cut: 11, dir: 192 }
+MEASURE|row|88mm_AP|20.0|0.90|through|0.0490|1.96|60119|768.0|760.3|20.04|12|true|Down { cut: 11, dir: 192 }
+MEASURE|row|88mm_AP|25.0|0.00|through|0.0186|0.75|22923|768.0|765.1|7.641|32|true|Down { cut: 13, dir: 192 }
+MEASURE|row|88mm_AP|25.0|0.50|through|0.0170|0.68|20942|768.0|765.3|6.981|35|true|Down { cut: 13, dir: 192 }
+MEASURE|row|88mm_AP|25.0|0.90|through|0.0197|0.79|24251|768.0|764.9|8.084|30|true|Down { cut: 13, dir: 192 }
+MEASURE|row|7.9mm_AP|1.0|0.00|rest|0.3398|13.59|3111|726.2|0.0|1.037|232|true|Down { cut: 0, dir: 192 }
+MEASURE|row|7.9mm_AP|1.0|0.50|rest|0.3398|13.59|3111|726.2|0.0|1.037|232|true|Down { cut: 0, dir: 192 }
+MEASURE|row|7.9mm_AP|1.0|0.90|through|0.1199|4.80|1258|726.2|560.4|0.419|573|true|Down { cut: 0, dir: 192 }
+MEASURE|row|7.9mm_AP|10.0|0.00|through|0.2839|11.36|2690|726.2|267.3|0.897|268|true|Down { cut: 5, dir: 192 }
+MEASURE|row|7.9mm_AP|10.0|0.50|through|0.2529|10.12|2442|726.2|336.8|0.814|295|true|Down { cut: 5, dir: 192 }
+MEASURE|row|7.9mm_AP|10.0|0.90|through|0.0854|3.42|916|726.2|609.9|0.305|787|true|Down { cut: 5, dir: 192 }
+MEASURE|row|7.9mm_AP|20.0|0.00|through|0.1399|5.59|1449|726.2|530.8|0.483|497|true|Down { cut: 11, dir: 192 }
+MEASURE|row|7.9mm_AP|20.0|0.50|through|0.1246|4.98|1303|726.2|553.5|0.434|553|true|Down { cut: 11, dir: 192 }
+MEASURE|row|7.9mm_AP|20.0|0.90|through|0.0422|1.69|465|726.2|669.7|0.155|1549|true|Down { cut: 11, dir: 192 }
+MEASURE|row|7.9mm_AP|25.0|0.00|through|0.0502|2.01|551|726.2|658.7|0.184|1305|true|Down { cut: 13, dir: 192 }
+MEASURE|row|7.9mm_AP|25.0|0.50|through|0.0448|1.79|493|726.2|666.2|0.164|1464|true|Down { cut: 13, dir: 192 }
+MEASURE|row|7.9mm_AP|25.0|0.90|through|0.0156|0.62|175|726.2|705.4|0.058|2000|false|Standing

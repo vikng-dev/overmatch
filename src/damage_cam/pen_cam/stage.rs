@@ -2670,7 +2670,7 @@ mod tests {
     /// most [`PIECES_MAX`], each hidden until played, all on one mesh and the stage's round
     /// material ([`shell_material`]): never a mesh or a material per piece. A field whose every
     /// direction ended where it was thrown (a round that burst at rest inside a plate) throws none.
-    /// A burst settles its corner even without a field (one below the HP quantum throws none):
+    /// A burst settles its corner even without a field (one below the pool quantum throws none):
     /// the hold never comes before the shell breaks up, so the x-ray, whose clock stops at the
     /// hold, never freezes the whole shell. Mutant: the settle counting a burst only through its
     /// field.
@@ -3855,7 +3855,7 @@ mod tests {
                     .iter()
                     .position(|component| !report.doses.iter().any(|d| d.volume == component.name));
                 if let Some(index) = undosed {
-                    report.components[index].hp = 0;
+                    report.components[index].held = 0;
                 }
                 (stem, report)
             })

@@ -6,16 +6,19 @@
 //! its own.
 //!
 //! The record carries no geometry. It holds the shot's inputs (round, origin, shooter, struck
-//! vehicle, every servo's angle), the struck tank's state at the shot (each component's hit points,
-//! so a part already lost reads zero), and the authority's outcome against that one tank (path,
-//! verdict, how the round's flight ended, dose and fate per component), every volume named. A
-//! component's shape is the tank asset's, resolved by name and posed by the record's servo angles
+//! vehicle, every servo's angle), the struck tank's state at the shot (what each component's pool
+//! held, so a part already lost reads zero), and the authority's outcome against that one tank
+//! (path, verdict, how the round's flight ended, dose and fate per component), every volume named.
+//! A component's shape is the tank asset's, resolved by name and posed by the record's servo angles
 //! ([`shapes`]).
 //!
 //! Frame: hull-local — origin at the hull root node, the glb's axes (`-Z` forward, `+Y` up, `+X`
 //! right). Units: metres for positions, unit vectors for directions, seconds for `t` measured from
 //! first contact (the approach is negative), degrees for angles, millimetres for armour, reference
-//! millimetres for doses, strengths and counts, kilograms and metres per second for the projectile.
+//! millimetres for doses, strengths and counts, kilograms and metres per second for the projectile,
+//! whole HP points for a pool's size, and pool units (`ballistics::POOL_UNITS_PER_HP` per point)
+//! for what a pool held and what the shot took: the sim's own figures, never rounded to points.
+//! Every view rounds them the one way ([`crate::ballistics::shown_points`]).
 //! `synthetic` marks a report whose numbers were authored, not simulated; [`wire`] never sends one.
 
 pub(crate) mod delivery;
@@ -43,11 +46,11 @@ pub enum ShotVerdict {
     /// The round perforated armour, whatever happened after: it stopped in a far plate, left the
     /// tank, or cost no HP.
     Penetration,
-    /// No penetration, and a component lost HP: its dose from the line, the spall cones and a
-    /// bounce's shock, rounded once per box per shot, came to at least one point. An exposed
-    /// component, or a barrel clipped on the way into armour.
+    /// No penetration, and a component shows a lost HP point: its dose from the line, the spall
+    /// cones and a bounce's shock took its pool past a whole point ([`PathStep::Dosed`]). An
+    /// exposed component, or a barrel clipped on the way into armour.
     Damaged,
-    /// No penetration, no HP lost, and the round bounced away.
+    /// No penetration, no shown HP point lost, and the round bounced away.
     Ricochet,
     /// Everything else: stopped by armour or external armour, or through external armour alone
     /// and flown on.
@@ -77,9 +80,10 @@ pub enum PathStep {
         perforated_armour: bool,
         rested: bool,
     },
-    /// A component of the struck tank lost HP to the shot: its dose rounded once per box per shot
-    /// ([`crate::ballistics::ShotDose`]) came to at least one point and its pool had it. A dose
-    /// that rounds to none changed nothing in the game and is not this step.
+    /// A component of the struck tank shows a lost HP point to the shot: what the shot took from
+    /// its pool ([`crate::ballistics::ShotDose`]) took it past a whole point, as every view shows a
+    /// pool ([`crate::ballistics::shown_lost`]). A dose that leaves every shown point in place is
+    /// kept in the pool, shows nothing, and is not this step.
     Dosed,
     /// A walk that failed closed: an error, never a pen cam.
     Failed,
@@ -357,19 +361,19 @@ pub struct FragmentHit {
     pub damage: f32,
 }
 
-/// One box's dose from the shot, in HP points before the box's one rounding: the line's (a hard
+/// One box's dose from the shot, in HP points before the box's one conversion: the line's (a hard
 /// box's energy at the energy rate, a crew station's chord at the round's crew line rate, a
 /// bounce's shock included) and the fields' (the spall cones' and a burst's, at the field's HP per
-/// reference-mm, [`crate::ballistics::field_units`]); and the HP points it lost, the sum of the two
-/// rounded once and capped at the HP it had.
+/// reference-mm, [`crate::ballistics::field_units`]); and the pool units it lost, the sum of the
+/// two converted once to pool units and capped at what its pool held.
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
 pub struct BoxDose {
     /// A [`ComponentState::name`].
     pub volume: String,
     pub line: f32,
     pub field: f32,
-    /// HP points the shot took from it.
-    pub lost: u32,
+    /// Pool units (`ballistics::POOL_UNITS_PER_HP` per HP point) the shot took from it.
+    pub taken: u32,
     /// Where the line first reached it: its entry, or the face it bounced off. `None` when only a
     /// field did.
     #[serde(default)]
@@ -401,8 +405,21 @@ pub struct ComponentState {
     pub role: Role,
     /// Its HP pool, in whole HP points: the points that disable it.
     pub count: u32,
-    /// Its HP points at the shot; zero for a part already lost.
-    pub hp: u32,
+    /// The pool units (`ballistics::POOL_UNITS_PER_HP` per HP point) its pool held at the shot;
+    /// zero for a part already lost.
+    pub held: u32,
+}
+
+impl ComponentState {
+    /// The HP points it showed at the shot ([`crate::ballistics::shown_points`]).
+    pub fn shown(&self) -> u32 {
+        crate::ballistics::shown_points(self.held)
+    }
+
+    /// The shown HP points it loses to `taken` pool units ([`crate::ballistics::shown_lost`]).
+    pub fn shown_lost(&self, taken: u32) -> u32 {
+        crate::ballistics::shown_lost(self.held, taken)
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -467,8 +484,8 @@ impl PenetrationReport {
     }
 
     /// The record's path as the verdict reads it: its plates and bounces in time order, each
-    /// plate a crossing of its own, then one [`PathStep::Dosed`] when any box lost HP. A plate
-    /// without an exit is where the round rested.
+    /// plate a crossing of its own, then one [`PathStep::Dosed`] when any box shows a lost HP point
+    /// ([`ComponentState::shown_lost`]). A plate without an exit is where the round rested.
     pub fn steps(&self) -> Vec<PathStep> {
         let mut steps: Vec<(f32, PathStep)> = self
             .plates
@@ -487,7 +504,10 @@ impl PenetrationReport {
             )
             .collect();
         steps.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let dosed = self.doses.iter().any(|dose| dose.lost > 0);
+        let dosed = self.doses.iter().any(|dose| {
+            self.component(&dose.volume)
+                .is_some_and(|component| component.shown_lost(dose.taken) > 0)
+        });
         steps
             .into_iter()
             .map(|(_, step)| step)
@@ -569,26 +589,41 @@ pub(crate) mod tests {
         }
     }
 
-    /// In the game's damage model a record's path is dosed only where a box lost HP: a dose that
-    /// rounded to no point leaves the box's record but no [`PathStep::Dosed`]. Fixture doses are
-    /// HP points before rounding.
+    /// In the game's damage model a record's path is dosed only where a box shows a lost HP point,
+    /// as every view shows its pool: a dose its pool keeps short of a whole point leaves the box's
+    /// record but no [`PathStep::Dosed`], and one that takes a pool already short of a point past
+    /// it is the step. The verdict follows the display, so a mutant reading the raw pool units
+    /// (or rounding them to nearest) fails here. Fixture pool: 30 HP points.
     #[test]
-    fn a_record_is_dosed_only_where_hp_was_lost() {
+    fn a_record_is_dosed_only_where_a_point_shows_lost() {
+        use crate::ballistics::POOL_UNITS_PER_HP;
         let mut report = delivery::tests::report("s1_through_crew");
         report.plates.clear();
         report.ricochets.clear();
-        let dose = |lost| BoxDose {
+        let full = 30 * POOL_UNITS_PER_HP;
+        report.components.push(ComponentState {
+            name: "fixture box".to_owned(),
+            role: Role::Module,
+            count: 30,
+            held: full,
+        });
+        let dose = |taken| BoxDose {
             volume: "fixture box".to_owned(),
-            line: 0.04,
+            line: 0.9,
             field: 0.0,
-            lost,
+            taken,
             entered: None,
         };
-        report.doses = vec![dose(0)];
-        assert_eq!(report.steps(), Vec::new());
+        report.doses = vec![dose(POOL_UNITS_PER_HP - 1)];
+        assert_eq!(report.steps(), Vec::new(), "0.999 points shows none");
         assert_eq!(ShotVerdict::of_path(&report.steps()), None);
-        report.doses.push(dose(1));
-        assert_eq!(report.steps(), vec![PathStep::Dosed]);
+        report.components.last_mut().unwrap().held = full - POOL_UNITS_PER_HP / 2;
+        report.doses = vec![dose(POOL_UNITS_PER_HP / 2 + 1)];
+        assert_eq!(
+            report.steps(),
+            vec![PathStep::Dosed],
+            "a pool short of half a point, taken past its whole point"
+        );
         assert_eq!(
             ShotVerdict::of_path(&report.steps()),
             Some(ShotVerdict::Damaged)

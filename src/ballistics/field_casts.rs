@@ -27,7 +27,7 @@
 //! record digests every penetration event, every cone (origin, axis, field, half-angle; its
 //! source's spend, entry and exit speeds and strength `S`, each as raw bits, so a source parameter
 //! that moves no direction's end and no HP still moves the record; and each direction's end and
-//! whether it dosed), and every named box's HP points after the shot.
+//! whether it dosed), and the pool units every named box holds after the shot.
 //!
 //! Each ray goes through two paths:
 //!
@@ -82,7 +82,7 @@ const LINE_WOUND: f32 = 30.0;
 const LINE_REACH: f32 = 20.0;
 
 /// The digest of every line of `field_casts.pinned`, MEASURED on macOS arm64 (the test profile).
-const PINNED_TOTAL: u64 = 0x93a3_49a3_9111_0f17;
+const PINNED_TOTAL: u64 = 0x2c9d_ed3a_a879_467f;
 
 const PINNED: &str = include_str!("field_casts.pinned");
 
@@ -712,11 +712,11 @@ fn shot(label: &str, local_origin: Vec3, local_direction: Vec3) -> Record {
         .world_mut()
         .query::<(&Name, &ComponentHealth)>()
         .iter(app.world())
-        .map(|(name, hp)| (name.as_str().to_owned(), hp.current))
+        .map(|(name, hp)| (name.as_str().to_owned(), hp.held()))
         .collect();
     health.sort();
-    for (name, current) in health {
-        let _ = write!(output, " {name}={current}");
+    for (name, held) in health {
+        let _ = write!(output, " {name}={held}");
     }
     Record {
         label: format!("shot/{label}"),

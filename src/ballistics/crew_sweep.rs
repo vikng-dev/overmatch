@@ -353,7 +353,7 @@ fn main_round(app: &App) -> crate::rounds::Round {
 fn restore(app: &mut App) {
     let world = app.world_mut();
     for mut health in world.query::<&mut ComponentHealth>().iter_mut(world) {
-        health.current = health.max;
+        health.refill();
     }
 }
 
@@ -391,10 +391,12 @@ fn fire_one(app: &mut App, round: &crate::rounds::Round, origin: Vec3, direction
         .query::<(&CrewStation, &ComponentHealth)>()
         .iter(world)
         .map(|(station, health)| {
-            let outcome = match health.current {
-                0 => Outcome::Dead,
-                current if current < health.max => Outcome::Wounded,
-                _ => Outcome::Untouched,
+            let outcome = if health.is_empty() {
+                Outcome::Dead
+            } else if health.held() < health.capacity() {
+                Outcome::Wounded
+            } else {
+                Outcome::Untouched
             };
             (*station, outcome)
         })
@@ -403,7 +405,7 @@ fn fire_one(app: &mut App, round: &crate::rounds::Round, origin: Vec3, direction
     let cooked = world
         .query_filtered::<&ComponentHealth, With<crate::damage::Ammo>>()
         .iter(world)
-        .any(|health| health.current == 0);
+        .any(|health| health.is_empty());
     let verdict = ShotVerdict::of_path(&record::path_steps(world, shell, Some(tank)));
     world.despawn(shell);
     Hit {
@@ -649,8 +651,8 @@ fn sweep(aim: Aim) {
         println!("\nreplaced law, N = {REPLACED_DIRECTIONS}: the first pen cam scenario's doses");
         for dose in &check.doses {
             println!(
-                "  {:<14} line {:<12} field {:<12} lost {}",
-                dose.volume, dose.line, dose.field, dose.lost
+                "  {:<14} line {:<12} field {:<12} taken {}",
+                dose.volume, dose.line, dose.field, dose.taken
             );
         }
     }

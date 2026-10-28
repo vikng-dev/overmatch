@@ -8,12 +8,14 @@
 //! against and reads the logs through `report_from`.
 //!
 //! A report covers one encounter of the shell with the struck tank, its marks and settles from the
-//! encounter's first mark on (the whole flight, for a capture). A component's HP at the shot is what
-//! the encounter's first settle of its pool found there ([`ShotDose::settles`]), and one it never
-//! reached reads the HP the struck tank's capture holds. What it lost, whether the shot emptied it
-//! and the deposit that did are the shot's own settles, never a difference of pool HP, so a shot
-//! overlapping another reads only its own loss, and another round draining the pool between the
-//! shot's marks moves the emptying to the deposit that actually took the last point.
+//! encounter's first mark on (the whole flight, for a capture). What a component's pool held at the
+//! shot is what the encounter's first settle of its pool found there ([`ShotDose::settles`]), and
+//! one it never reached reads what the struck tank's capture holds. What it lost, whether the shot
+//! emptied it and the deposit that did are the shot's own settles, never a difference of pool
+//! readings, so a shot overlapping another reads only its own loss, and another round draining the
+//! pool between the shot's marks moves the emptying to the deposit that actually took the last
+//! pool unit. Every pool figure is in pool units, as the sim keeps it; the path's
+//! [`PathStep::Dosed`] reads the shown points the views read ([`crate::ballistics::shown_lost`]).
 //!
 //! Nothing here decides anything the march did not: the verdict is [`ShotVerdict::of_path`] over
 //! the logged path, plate classes come from the volumes' components, the round's end is the last
@@ -42,7 +44,7 @@ use crate::ballistics::spall_cone::FieldDescriptor;
 use crate::ballistics::{
     ArmourMark, BallisticVolume, BurstField, ComponentHealth, CrossingEnd, ExternalArmour,
     PenetrationMarks, ShellPath, ShotDose, SpallMarks, SpallRay, VolumeCrossing, dose_units,
-    energy_units, field_units, hp_before_rounding, hp_of_units,
+    energy_units, field_units, hp_before_rounding, pool_units_of,
 };
 use crate::damage::{Ammo, CrewStation, FunctionRole, VolumeOf};
 use crate::tank::{
@@ -95,7 +97,7 @@ impl HullFrame {
 }
 
 /// The struck tank at the shot: the first mark of the shell's encounter with it, the hull frame each
-/// of the shell's marks was resolved in, its servos' angles and its components' HP.
+/// of the shell's marks was resolved in, its servos' angles and what its components' pools held.
 pub struct StruckTank {
     tank: Entity,
     /// The encounter's first mark: the report reads the shell's marks and settles from it on.
@@ -105,7 +107,7 @@ pub struct StruckTank {
     frames: Vec<(usize, HullFrame)>,
     /// Every servo's angle (degrees), by node name.
     servo_deg: BTreeMap<String, f32>,
-    /// Every component the tank owns and its HP.
+    /// Every component the tank owns and the pool units its pool held.
     boxes: Vec<(Entity, u32)>,
 }
 
@@ -119,7 +121,7 @@ impl StruckTank {
         let boxes = owned
             .iter(world)
             .filter(|(_, owner, _)| owner.tank() == tank)
-            .map(|(entity, _, hp)| (entity, hp.current))
+            .map(|(entity, _, hp)| (entity, hp.held()))
             .collect();
         Some(Self {
             tank,
@@ -255,8 +257,8 @@ pub(crate) fn servo_angles(world: &mut World, tank: Entity) -> BTreeMap<String, 
 
 /// The path `shell` took through `tank` (every tank, for `None`), as the verdict reads it: its
 /// bounces off and crossings of the tank's volumes and every walk that failed closed, in march
-/// order, then one [`PathStep::Dosed`] when one of the tank's components lost HP to the shot
-/// ([`ShotDose::losses`], the shot's per-box tally rounded once).
+/// order, then one [`PathStep::Dosed`] when one of the tank's components shows a lost HP point to
+/// the shot ([`shown_lost_from`]).
 pub fn path_steps(world: &World, shell: Entity, tank: Option<Entity>) -> Vec<PathStep> {
     let Some(marks) = world.get::<PenetrationMarks>(shell) else {
         return Vec::new();
@@ -302,7 +304,7 @@ fn steps_of(
     }
     let dosed = dose.is_some_and(|dose| {
         dose.losses().any(|(volume, _)| {
-            lost_from(dose, volume, from) > 0
+            shown_lost_from(dose, volume, from) > 0
                 && class_of(world, volume) == VolumeClass::Box
                 && tank.is_none_or(|tank| owned_by(world, volume, tank))
         })
@@ -313,13 +315,29 @@ fn steps_of(
     steps
 }
 
-/// The HP `volume`'s pool lost to the shot's settles from mark `from` on.
+/// The pool units `volume`'s pool lost to the shot's settles from mark `from` on.
 fn lost_from(dose: &ShotDose, volume: Entity, from: usize) -> u32 {
     dose.settles(volume)
         .iter()
         .filter(|settle| settle.mark >= from)
         .map(|settle| settle.lost)
         .sum()
+}
+
+/// The shown HP points `volume`'s pool lost to the shot's settles from mark `from` on, as its
+/// record shows them: what the first of those settles found ([`components`]'s `held`) less what
+/// they took ([`lost_from`], the record's `taken`), through the display rule
+/// ([`crate::ballistics::shown_lost`]). The record's own path ([`PenetrationReport::steps`]) reads
+/// the same two figures the same way, so both read one verdict.
+fn shown_lost_from(dose: &ShotDose, volume: Entity, from: usize) -> u32 {
+    let Some(first) = dose
+        .settles(volume)
+        .iter()
+        .find(|settle| settle.mark >= from)
+    else {
+        return 0;
+    };
+    crate::ballistics::shown_lost(first.held, lost_from(dose, volume, from))
 }
 
 /// One tank's part of a crossing, whose volumes may belong to several tanks where hulls overlap:
@@ -1070,8 +1088,9 @@ impl<'a> Ledger<'a> {
     }
 }
 
-/// The struck tank's components by name, each at its HP at the shot: what the encounter's first
-/// settle of its pool found there ([`ShotDose::settles`]), the tank's captured HP elsewhere.
+/// The struck tank's components by name, each at what its pool held at the shot: what the
+/// encounter's first settle of its pool found there ([`ShotDose::settles`]), the tank's capture
+/// elsewhere.
 fn components(
     world: &World,
     struck: &StruckTank,
@@ -1081,7 +1100,7 @@ fn components(
         .boxes
         .iter()
         .filter_map(|&(entity, captured)| {
-            let max = world.get::<ComponentHealth>(entity)?.max;
+            let points = world.get::<ComponentHealth>(entity)?.points();
             let found = dose.and_then(|dose| {
                 dose.settles(entity)
                     .iter()
@@ -1093,8 +1112,8 @@ fn components(
                 ComponentState {
                     name: name_of(world, entity),
                     role: role_of(world, entity),
-                    count: max,
-                    hp: found.unwrap_or(captured),
+                    count: points,
+                    held: found.unwrap_or(captured),
                 },
             ))
         })
@@ -1105,11 +1124,11 @@ fn components(
 
 /// Each component's dose from the encounter and, for one it emptied, its consequence, timed at the
 /// deposit that emptied it. `line` and `field` list the encounter's deposits, `entered` the
-/// `(volume, t, point, mark)` where the line reached a component (WORLD). The HP lost and the
-/// emptying are the shot's own settles from the encounter's first mark on ([`ShotDose::settles`]).
-/// A mark's deposits, its line and its cones, all land before its one settle, so within a mark HP
-/// has no order; the emptying deposit is the first, in path time, whose running total reaches what
-/// the box held at the mark.
+/// `(volume, t, point, mark)` where the line reached a component (WORLD). The pool units lost and
+/// the emptying are the shot's own settles from the encounter's first mark on
+/// ([`ShotDose::settles`]). A mark's deposits, its line and its cones, all land before its one
+/// settle, so within a mark the pool has no order; the emptying deposit is the first, in path time,
+/// whose running total reaches what the box held at the mark.
 fn outcomes(
     world: &World,
     struck: &StruckTank,
@@ -1143,7 +1162,7 @@ fn outcomes(
             volume: state.name.clone(),
             line: sum(&from_line),
             field: sum(&from_field),
-            lost: dose.map_or(0, |dose| lost_from(dose, *entity, struck.from)),
+            taken: dose.map_or(0, |dose| lost_from(dose, *entity, struck.from)),
             entered: first_entry,
         });
         let emptying = dose.and_then(|dose| {
@@ -1160,13 +1179,13 @@ fn outcomes(
                 .filter(|&(.., mark)| mark == emptying.mark)
                 .collect();
             landed.sort_by(|a, b| a.1.total_cmp(&b.1));
-            let taken_before = hp_of_units(emptying.units_before);
+            let taken_before = pool_units_of(emptying.units_before);
             let mut total = emptying.units_before;
             let t = landed
                 .iter()
                 .find(|(units, ..)| {
                     total += units;
-                    hp_of_units(total) - taken_before >= emptying.held
+                    pool_units_of(total) - taken_before >= emptying.held
                 })
                 .or(landed.last())
                 .map_or(0.0, |&(_, t, _)| t);

@@ -997,7 +997,8 @@ pub(crate) fn scripted_xray_plugin(app: &mut App) {
     app.add_systems(Update, scripted(from, to).before(toggle));
 }
 
-/// One health-bearing volume of the subject tank as its replicated state stands.
+/// One health-bearing volume of the subject tank as its replicated state stands: its shown HP
+/// points and its pool's size, in whole points.
 #[derive(Clone, Debug, PartialEq)]
 struct LiveBox {
     name: String,
@@ -1007,9 +1008,9 @@ struct LiveBox {
     dead: bool,
 }
 
-/// Every health-bearing volume of the subject tank, in the tank's volume order: its HP points
-/// (`ComponentHealth`, which `NetCrew` writes on a network client) and whether its crew member is
-/// knocked out (`Dead`).
+/// Every health-bearing volume of the subject tank, in the tank's volume order: the HP points it
+/// shows (`ComponentHealth::shown`, of the pool `NetCrew` writes on a network client), its pool's
+/// size, and whether its crew member is knocked out (`Dead`).
 #[derive(Clone, Debug, Default, PartialEq)]
 pub(super) struct LiveState(Vec<LiveBox>);
 
@@ -1040,8 +1041,8 @@ impl LiveState {
                     } else {
                         Role::Module
                     },
-                    current: volume.health.current,
-                    max: volume.health.max,
+                    current: volume.health.shown(),
+                    max: volume.health.points(),
                     dead: volume.dead,
                 })
                 .collect(),
@@ -1189,7 +1190,7 @@ mod tests {
             .collect()
     }
 
-    /// The live state of `record`'s components as they stood at its shot.
+    /// The live state of `record`'s components as they stood at its shot, as shown.
     fn standing(record: &PenetrationReport) -> LiveState {
         LiveState(
             record
@@ -1198,7 +1199,7 @@ mod tests {
                 .map(|component| LiveBox {
                     name: component.name.clone(),
                     role: component.role,
-                    current: component.hp,
+                    current: component.shown(),
                     max: component.count,
                     dead: false,
                 })
@@ -1206,17 +1207,17 @@ mod tests {
         )
     }
 
-    /// The live state of `record`'s components as its shot left them: their HP points at the shot
-    /// less the points it took.
+    /// The live state of `record`'s components as its shot left them: what each pool held at the
+    /// shot less what the shot took, as shown.
     fn after_shot(record: &PenetrationReport) -> LiveState {
         let mut live = standing(record);
-        for b in &mut live.0 {
+        for (b, component) in live.0.iter_mut().zip(&record.components) {
             let taken = record
                 .doses
                 .iter()
                 .find(|dose| dose.volume == b.name)
-                .map_or(0, |dose| dose.lost);
-            b.current = b.current.saturating_sub(taken);
+                .map_or(0, |dose| dose.taken);
+            b.current -= component.shown_lost(taken);
         }
         live
     }
@@ -1272,10 +1273,10 @@ mod tests {
         for (stem, record, shapes) in records() {
             let mut rewritten = record.clone();
             for component in &mut rewritten.components {
-                component.hp = 0;
+                component.held = 0;
             }
             for dose in &mut rewritten.doses {
-                dose.lost += 1;
+                dose.taken += crate::ballistics::POOL_UNITS_PER_HP;
             }
             rewritten.consequences.clear();
             let shot = after_shot(&record);
@@ -1355,7 +1356,7 @@ mod tests {
             let mut older = record.clone();
             for component in &mut older.components {
                 if let Some(l) = live.0.iter().find(|l| l.name == component.name) {
-                    component.hp = l.current / 2;
+                    component.held = l.current / 2 * crate::ballistics::POOL_UNITS_PER_HP;
                 }
             }
             let plan = plan(Some(&older), &live, &shapes);

@@ -396,11 +396,13 @@ impl TreeBody {
         self.kind.fell_k * self.dbh_m * self.dbh_m * self.dbh_m
     }
 
-    /// The trunk's HP pool: the wood's HP per metre of diameter times this instance's breast-height
-    /// diameter, rounded to the nearest point (one f32 multiply and `roundf`, the same on every
-    /// target), and at least one point: a pool of none would never empty.
+    /// The trunk's HP pool, in whole points: the wood's HP per metre of diameter times this
+    /// instance's breast-height diameter, rounded to the nearest point (one f32 multiply and
+    /// `roundf`, the same on every target), at least one point (a pool of none would never empty)
+    /// and at most [`crate::ballistics::MAX_POOL_POINTS`] (the most a pool holds).
     pub(crate) fn hp(&self) -> u32 {
-        (libm::roundf(self.kind.hp_per_m * self.dbh_m) as u32).max(1)
+        (libm::roundf(self.kind.hp_per_m * self.dbh_m) as u32)
+            .clamp(1, crate::ballistics::MAX_POOL_POINTS)
     }
 }
 
@@ -708,10 +710,9 @@ fn derive_state(
             None => {
                 commands.entity(root).remove::<(Resting, Fell)>();
                 if !has_pool {
-                    commands.entity(root).insert(ComponentHealth {
-                        current: body.hp(),
-                        max: body.hp(),
-                    });
+                    commands
+                        .entity(root)
+                        .insert(ComponentHealth::full(body.hp()));
                 }
             }
         }
@@ -864,10 +865,7 @@ pub(crate) fn spawn(
                 material: kind.material,
                 substance: kind.substance.clone(),
             },
-            ComponentHealth {
-                current: hp,
-                max: hp,
-            },
+            ComponentHealth::full(hp),
             TreeState::Standing,
             identity,
             body,
@@ -1657,8 +1655,8 @@ pub(crate) mod tests {
             "the kind's dbh at scale 1.5"
         );
         assert_eq!(
-            (health.current, health.max),
-            (141, 141),
+            (health.shown(), health.points(), health.held()),
+            (141, 141, 141 * crate::ballistics::POOL_UNITS_PER_HP),
             "the wood's 200 HP per metre at the instance's 0.705 m (DERIVED, fixture data)"
         );
         let volume = world
@@ -2198,8 +2196,8 @@ pub(crate) mod tests {
             .get::<ComponentHealth>(root)
             .expect("back to standing: the pool is back");
         assert_eq!(
-            (pool.current, pool.max),
-            (94, 94),
+            (pool.shown(), pool.points(), pool.held()),
+            (94, 94, 94 * crate::ballistics::POOL_UNITS_PER_HP),
             "full: the fixture wood's 200 HP per metre at 0.47 m"
         );
         assert!(

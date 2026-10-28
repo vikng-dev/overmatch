@@ -339,7 +339,7 @@ fn a_leg_into_open_air_doses_and_settles_its_witness() {
     );
     let crewman_dose = dose(&fired, "crewman").expect("the witness is dosed");
     assert!(
-        crewman_dose.line > 0.0 && crewman_dose.lost > 0,
+        crewman_dose.line > 0.0 && crewman_dose.taken > 0,
         "{crewman_dose:?}"
     );
 }
@@ -378,7 +378,7 @@ fn an_automatic_round_wounds_a_witness_in_the_open() {
     }
     let crewman_dose = dose(&fired, "crewman").expect("the witness is dosed");
     assert!(
-        crewman_dose.line > 0.0 && crewman_dose.lost > 0,
+        crewman_dose.line > 0.0 && crewman_dose.taken > 0,
         "{crewman_dose:?}"
     );
 }
@@ -399,7 +399,7 @@ fn a_witness_struck_alone_has_a_report() {
     assert_eq!(report.impact.verdict, ShotVerdict::Damaged);
     let crewman_dose = dose(&fired, "crewman").expect("the witness's deposit is recorded");
     assert!(
-        crewman_dose.line > 0.0 && crewman_dose.lost > 0,
+        crewman_dose.line > 0.0 && crewman_dose.taken > 0,
         "{crewman_dose:?}"
     );
     // The crewman's faces along the line: z = -0.9 in, z = -1.5 out (fixture geometry).

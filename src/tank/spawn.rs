@@ -697,13 +697,7 @@ fn insert_ballistic_volumes(
                     entity.insert(function);
                 }
                 // Damageable (module/crew/ammo): an HP pool the march depletes.
-                entity.insert((
-                    ComponentVolume,
-                    ComponentHealth {
-                        current: volume.hp,
-                        max: volume.hp,
-                    },
-                ));
+                entity.insert((ComponentVolume, ComponentHealth::full(volume.hp)));
             } else {
                 // Pure armour: resists + shadows spall, nothing to lose.
                 entity.insert(ArmorVolume);

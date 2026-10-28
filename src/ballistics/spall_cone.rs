@@ -871,7 +871,7 @@ mod tests {
     }
 
     /// A calibration of zero HP points per reference-mm is refused at parse, naming the field: a
-    /// zero rate would silently switch every cone off through the HP quantum gate.
+    /// zero rate would silently switch every cone off through the pool quantum gate.
     #[test]
     fn a_zero_field_calibration_is_refused() {
         let zero = file(r#"axis: (ExitDirection, Tuned("fixture"))"#).replacen(

@@ -238,8 +238,8 @@ fn assert_round_trip(name: &str, decoded: &PenetrationReport, recorded: &Penetra
     assert_eq!(decoded.doses.len(), recorded.doses.len(), "{name}");
     for (d, r) in decoded.doses.iter().zip(&recorded.doses) {
         assert_eq!(
-            (&d.volume, d.line, d.field, d.lost),
-            (&r.volume, r.line, r.field, r.lost),
+            (&d.volume, d.line, d.field, d.taken),
+            (&r.volume, r.line, r.field, r.taken),
             "{name}"
         );
         assert_eq!(d.entered.is_some(), r.entered.is_some(), "{name}");
@@ -638,7 +638,7 @@ fn the_shooter_learns_nothing_of_an_unreached_component() {
                 .iter()
                 .any(|dose| dose.volume == component.name)
             {
-                component.hp /= 2;
+                component.held /= 2;
                 perturbed_any |= component.count > 1;
             }
         }

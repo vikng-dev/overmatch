@@ -408,8 +408,8 @@ fn tick_swaps(
             commands.entity(tank).remove::<PendingSwap>();
             continue;
         };
-        let occ_a = (*ca, ha.current, ha.max, da.is_some());
-        let occ_b = (*cb, hb.current, hb.max, db.is_some());
+        let occ_a = (*ca, *ha, da.is_some());
+        let occ_b = (*cb, *hb, db.is_some());
         place_occupant(&mut commands, swap.a, occ_b);
         place_occupant(&mut commands, swap.b, occ_a);
         commands.entity(tank).remove::<PendingSwap>();
@@ -421,10 +421,10 @@ fn tick_swaps(
 fn place_occupant(
     commands: &mut Commands,
     seat: Entity,
-    (crewman, current, max, dead): (Crewman, u32, u32, bool),
+    (crewman, health, dead): (Crewman, ComponentHealth, bool),
 ) {
     let mut e = commands.entity(seat);
-    e.insert((crewman, ComponentHealth { current, max }));
+    e.insert((crewman, health));
     if dead {
         e.insert(Dead);
     } else {
@@ -469,8 +469,8 @@ pub fn capability_effectiveness(
 /// The live quality of each [`Part`] on a tank — the shared core behind *every* requirement check
 /// (a tank-wide [`Capability`], a servo's slew gate, a weapon's fire/load gate): resolve once per
 /// tank, then [`evaluate`] any number of requirements against it. Living crew → competence (native
-/// 1.0 / foreign degraded); intact module (HP > 0) → 1.0 (graded damage layers in later); absent
-/// → 0. Duplicate parts (two volumes of one station) take the best.
+/// 1.0 / foreign degraded); intact module (its pool not emptied) → 1.0 (graded damage layers in
+/// later); absent → 0. Duplicate parts (two volumes of one station) take the best.
 pub fn part_qualities(
     tank_volumes: &TankVolumes,
     volumes: &Query<VolumeFacets>,
@@ -488,7 +488,7 @@ pub fn part_qualities(
             *q = q.max(competence(home, *role));
         }
         if let (Some(func), Some(hp)) = (facets.function, facets.health)
-            && hp.current > 0
+            && !hp.is_empty()
         {
             let q = quality.entry(Part::from(*func)).or_insert(0.0);
             *q = q.max(1.0);
@@ -585,7 +585,7 @@ fn process_cookoffs(
     mut commands: Commands,
 ) {
     for (ammo_entity, hp, owner) in &ammo {
-        if hp.current > 0 {
+        if !hp.is_empty() {
             continue;
         }
         commands.entity(ammo_entity).insert(CookedOff);
@@ -594,7 +594,7 @@ fn process_cookoffs(
         });
         for (crew_owner, mut crew_hp) in &mut crew {
             if crew_owner.tank() == owner.tank() {
-                crew_hp.current = 0;
+                crew_hp.drain();
             }
         }
     }
@@ -670,7 +670,7 @@ fn kill_crew(
     mut commands: Commands,
 ) {
     for (entity, hp) in &crew {
-        if hp.current == 0 {
+        if hp.is_empty() {
             commands.entity(entity).insert(Dead);
         }
     }

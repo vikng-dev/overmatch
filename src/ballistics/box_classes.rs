@@ -32,8 +32,9 @@ pub(crate) struct BoxClasses {
 /// The pen cam's potency band thresholds, HP points per m² of a crew station's face.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PotencyThresholds {
-    /// The least counted share of one HP point ([`crate::ballistics::least_counted_hp`]) over the
-    /// crew face: a crew station's face wholly below it takes a total that converts to none.
+    /// The least dose a full pool shows a lost point at ([`crate::ballistics::least_shown_hp`],
+    /// the display's whole point) over the crew face: a full crew station whose face lies wholly
+    /// below it shows no lost point.
     pub(crate) floor: f32,
     /// The crew pool over the crew face: a crew station's face wholly at or above it is knocked
     /// out.
@@ -41,7 +42,8 @@ pub(crate) struct PotencyThresholds {
 }
 
 impl BoxClasses {
-    /// Parse and validate a class file, refusing a crew pool of zero (a station with no pool).
+    /// Parse and validate a class file, refusing a crew pool of zero (a station with no pool) or
+    /// past [`crate::ballistics::MAX_POOL_POINTS`] (one no pool holds).
     pub(crate) fn from_ron(text: &str) -> Result<Self, String> {
         let file: ClassFile = ron::de::from_str(text).map_err(|err| err.to_string())?;
         let classes = Self {
@@ -49,6 +51,13 @@ impl BoxClasses {
         };
         if classes.crew_hp == 0 {
             return Err("crew_hp must be at least 1 (got 0)".to_owned());
+        }
+        if classes.crew_hp > crate::ballistics::MAX_POOL_POINTS {
+            return Err(format!(
+                "crew_hp must be at most {} (got {})",
+                crate::ballistics::MAX_POOL_POINTS,
+                classes.crew_hp
+            ));
         }
         Ok(classes)
     }
@@ -70,11 +79,11 @@ impl BoxClasses {
     }
 
     /// The thresholds the pen cam's potency bands part at for crew stations of mean face
-    /// `crew_face` (m², positive and finite): the crew pool and the least counted share of an HP
-    /// point, each over it.
+    /// `crew_face` (m², positive and finite): the crew pool and the least dose a full pool shows a
+    /// lost point at, each over it.
     pub(crate) fn potency_thresholds(&self, crew_face: f32) -> PotencyThresholds {
         PotencyThresholds {
-            floor: crate::ballistics::least_counted_hp() as f32 / crew_face,
+            floor: crate::ballistics::least_shown_hp() as f32 / crew_face,
             mid: self.crew_hp as f32 / crew_face,
         }
     }
@@ -90,8 +99,9 @@ mod tests {
     }
 
     /// A value authored without its provenance, an unknown entry (a retired per-m² class or crew
-    /// face among them) or a zero crew pool is refused at parse, naming what is wrong. A pool or a
-    /// face read from this file again, or a station left with no pool, fails here.
+    /// face among them), a zero crew pool or one no pool holds is refused at parse, naming what is
+    /// wrong. A pool or a face read from this file again, a station left with no pool, or one
+    /// saturated silently, fails here.
     #[test]
     fn a_malformed_class_file_is_refused() {
         let classes = BoxClasses::from_ron(&file("")).expect("a sourced file parses");
@@ -108,21 +118,26 @@ mod tests {
         let error = BoxClasses::from_ron(&file("").replace("(30", "(0"))
             .expect_err("a zero pool is refused");
         assert!(error.contains("crew_hp"), "{error}");
+        let past = (crate::ballistics::MAX_POOL_POINTS + 1).to_string();
+        let error = BoxClasses::from_ron(&file("").replace("30", &past))
+            .expect_err("a pool no pool holds is refused");
+        assert!(error.contains("crew_hp"), "{error}");
     }
 
-    /// The potency thresholds are the crew pool and the sim's rounding edge over the face asked
-    /// for (fixture data: 30 HP over 0.25 m² is 120 HP per m², half a point over it 2). The pen
-    /// cam's band promise relies on both; a threshold over any other face, or a floor read as a
-    /// whole HP point, fails here.
+    /// The potency thresholds are the crew pool and the display's edge over the face asked for
+    /// (fixture data: 30 HP over 0.25 m² is 120 HP per m², the least shown dose, 0.9995 of a point,
+    /// over it 3.998). The pen cam's band promise relies on both; a threshold over any other face,
+    /// or a floor read as half a point or as the sim's pool quantum, fails here.
     #[test]
     fn the_potency_thresholds_are_the_crew_pool_over_the_face() {
         let classes = BoxClasses::from_ron(&file("")).unwrap();
         assert_eq!(
             classes.potency_thresholds(0.25),
             PotencyThresholds {
-                floor: 2.0,
+                floor: crate::ballistics::least_shown_hp() as f32 / 0.25,
                 mid: 120.0
             }
         );
+        assert!((classes.potency_thresholds(0.25).floor - 3.998).abs() < 1e-6);
     }
 }

@@ -551,7 +551,7 @@ mod tests {
     /// data: a 0.5 m slab of factor 40 that the heavy body perforates and the light one stops in.
     #[test]
     fn a_line_dose_is_the_energy_lost_and_a_stopped_round_deals_what_it_had_left() {
-        use crate::ballistics::{energy_units, hp_of_units};
+        use crate::ballistics::{energy_units, pool_units_of};
         let registry = SubstanceRegistry::shipped_static();
         let light_body = RoundBody {
             mass: 0.0118,
@@ -588,7 +588,7 @@ mod tests {
             "a stopped round deals what it had left"
         );
         let hp =
-            |advance: &Advance<SolidShotState>| hp_of_units(energy_units(energy(advance) as f32));
+            |advance: &Advance<SolidShotState>| pool_units_of(energy_units(energy(advance) as f32));
         assert!(energy(&through) > energy(&stopped));
         assert!(
             hp(&through) > hp(&stopped) && hp(&stopped) > 0,

@@ -233,11 +233,13 @@ face with their summed spend (owner, 2026-10-12), and a step up into harder mate
 crossed behind it to the same body, since no softer step intervened. Exits reached before the round
 stops still throw; the body the round stops inside throws nothing. A bounce throws nothing.
 
-**The HP quantum gate.** A cone whose whole emission `S/2` converts to no HP point (below half a
-point, §6) is not thrown: no direction is walked and nothing is recorded (owner, 2026-10-17). `S/2`
-is the most any one box can take from a cone — every direction doses a box at most once, and the
-directions' weights emit `S/2` (**Sampling**) — so a gated cone could not have cost any box a
-point. The gate adds no constant: it is the HP quantum.
+**The pool quantum gate.** A cone whose whole emission `S/2` converts to no pool unit (below half
+a thousandth of an HP point, §6) is not thrown: no direction is walked and nothing is recorded
+(owner, 2026-10-17; at the pool's quantum since pools keep fractions, issue 142). `S/2` is the most
+any one box can take from a cone — every direction doses a box at most once, and the directions'
+weights emit `S/2` (**Sampling**) — so a gated cone could not have cost any pool a unit. The gate
+adds no constant: it is the pool's quantum. A gate at the whole point would drop doses a pool
+accumulates.
 
 **Strength.** `S = spend × κ × (v_exit / v_entry)² × (d / d_ref)²` (reference-mm; the cone emits
 `S/2` in all, **Sampling**).
@@ -313,12 +315,12 @@ any other volume has entered it at the throw point.
 hard box those stopped in it, a witness every one entering it short of its stop — each direction
 dosing a box once, in the count unit (reference-mm), never scaled by the box's own factor; armour
 (no count) takes nothing. Doses go through the addressed `Dose` effect, like the line's. A box's
-dose from the whole shot (the line, a bounce's shock and every cone) becomes whole HP points once,
+dose from the whole shot (the line, a bounce's shock and every cone) converts to pool units once,
 on its total (§6). Every field deposit, to a hard box and a witness alike, enters that total at the
 field's own calibration (`hp_per_reference_mm` in `spall_cone.ron`, TUNED 70 HP points per
 reference-mm against the 10 a bounce's shock and a witness's chord convert at; a hard box's line
 dose is energy, at the energy rate, §6) and nothing on the line or a bounce's shock does; `S` stays in
-reference-mm, so the calibration sets every cone's potency at once and the HP quantum gate tests
+reference-mm, so the calibration sets every cone's potency at once and the pool quantum gate tests
 `S/2` at it. A box of face `A` fully inside the cone, `θ` off its axis, has the knockout radius
 `R = sqrt(2 f(θ) E A / (pool Ω_c))`, `E = S/2`, `Ω_c = 2π(1 − cos α)` and `f(θ)` the ball's weight
 there (½ averaged over the cone). A bigger box is a bigger target: it takes more of the cone's
@@ -345,25 +347,25 @@ struck tank's own crew boxes (`BoxClasses::potency_thresholds`): **knockout** at
 and `A_crew` the mean face of the struck tank's crew boxes at rest in its sim geometry, the mean of
 the three axis-aligned face areas of each box's bounds (`TankShapes::crew_face`; the seed tank's
 0.2033 m², MEASURED, so 30 / 0.2033 = 147.5, DERIVED); **reduced** from `T_floor` up to it;
-**nothing** below `T_floor`, the least share of an HP point the sim's once-per-shot rounding counts
-(half a point: to nearest, ties away, `ballistics::least_counted_hp`) over the same face
-(0.5 / 0.2033 = 2.46, DERIVED). The face is read from the geometry and authored nowhere else, so
-the bands follow the boxes they describe. The game's damage model authors one shared crew box
-size within a tank, so the thresholds describe each station alike; a plan with no crew box has
-no bands and draws no field. The promise: a crew station whose face lies wholly in
-knockout is knocked out; one wholly in reduced has its pool dosed and usually not emptied, for the
-rounding tips it at the band's top, from `T_mid − T_floor` (145.1, DERIVED), where its face's total
-(29.5 HP points) rounds to the whole pool; one wholly in nothing takes no HP point from the
-field. A box only partly inside a field takes that intensity over that part
+**nothing** below `T_floor`, the display's whole point over the same face: the least dose a full
+pool shows a lost point at (§6, **Shown health**), half a pool unit short of a point
+(`ballistics::least_shown_hp`, 0.9995; 0.9995 / 0.2033 = 4.92, DERIVED). The face is read from
+the geometry and authored nowhere else, so the bands follow the boxes they describe. The game's
+damage model authors one shared crew box size within a tank, so the thresholds describe each
+station alike; a plan with no crew box has no bands and draws no field. The promise, for a full
+pool: a crew station whose face lies wholly in knockout is knocked out; one wholly in reduced
+shows a lost point and keeps its pool, short of the last half pool unit below `T_mid`, which
+converts to the whole pool; one wholly in nothing shows no lost point, though its pool keeps the
+dose. A box only partly inside a field takes that intensity over that part
 alone. Knockout takes the field teal and reduced the deep teal (`timeline::FIELD`, `FIELD_DIM`;
 relative luminance 0.50 and 0.12, DERIVED, so they part in every colour vision type), nothing no
 colour; neither is the state scale's red. Along a direction the intensity reaches mid at
-`sqrt(ρ s / (Ω T_mid))` and the floor `sqrt(T_mid / T_floor)` ≈ 7.7 times farther (DERIVED); s1's
-strongest direction (924 HP points per steradian) reaches mid at 2.50 m and the floor at 19 m,
+`sqrt(ρ s / (Ω T_mid))` and the floor `sqrt(T_mid / T_floor)` ≈ 5.5 times farther (DERIVED); s1's
+strongest direction (924 HP points per steradian) reaches mid at 2.50 m and the floor at 13.7 m,
 past every reach of the shipped records (5.2 m at most); the weakest field, s4's and s16's (2.5),
-reaches its floor at 1.0 m, just past its 0.79 m reach (DERIVED from the records). So the reduced
-band ends at a reach or a shadow of the struck tank's hard bodies, rarely at the floor, and its
-edges are theirs.
+reaches its floor at 0.71 m, short of its 0.79 m reach (DERIVED from the records). So the reduced
+band mostly ends at a reach or a shadow of the struck tank's hard bodies, and its edges are
+theirs; only the weakest fields end at the floor.
 
 A direction's strength is the field's law, read where the point lies
 (`src/damage_cam/pen_cam/look.rs`, `law`; the shader's `law`): `S` times the law's weight
@@ -542,8 +544,8 @@ half-angle settled by this; `.agents/scratch/playtest-forks/README.md`).
 Exact emission `S/2` at every N from 1 to 1024 and every ratio from 1 to 10⁴; under the ball at a
 fixture ratio: resolution stability; homogeneity in `S`; inverse square for an unshadowed thin box;
 factor independence of a box's own dose; shadowing monotone (adding a volume never raises a dose).
-κ is 1 to the bit for the reference and proportional otherwise; a cone below the HP quantum is not
-thrown; a shot's dose to a box is rounded once on its total. A direction stops at the first volume
+κ is 1 to the bit for the reference and proportional otherwise; a cone below the pool quantum is
+not thrown; a shot's dose to a box is converted to pool units once on its total. A direction stops at the first volume
 it enters, a box there taking its whole strength, armour nothing and shielding what lies behind;
 a plate thinner than any nudge stops it; it is neither stopped nor dosed by a volume its throw
 leaves, and has entered any other it starts inside at the throw point. The ball's weights are its
@@ -638,7 +640,7 @@ is no plate exit, so neither `κ` nor the hole term applies. Its `N` directions 
 equal-solid-angle strata weighted by their strata's exact shares, so it emits `S/2` at every `N`
 (§5, **Sampling**). They march, shadow and dose as a
 cone's do (§5, **Shadowing and reach**, **Walk**, **Dose**) through the volumes of the tank whose
-body armed or last restarted the fuze, leaving none, behind the HP quantum gate, and convert at
+body armed or last restarted the fuze, leaving none, behind the pool quantum gate, and convert at
 the field's rate (`hp_per_reference_mm`, 70). The record and the wire carry the law (the ring's
 with its half-width) and the ratio as the field descriptor, and a decoder rebuilds the directions
 from it. Data: the `burst` block of `assets/ballistics/spall_cone.ron` holds `r_E`, `h` and the
@@ -664,7 +666,7 @@ follows from its own authored pool and face (§6). DERIVED, at rest and at s1's 
 burst point, its last leg timed at the speed the burst trigger counts it at, so a burst in flight
 lies the delay after the exit that last started it; for a round at rest, the delay's remainder after
 it stopped there), the burst point, the carried speed, the nose piece's mass, and the field as a
-cone record (absent when the HP quantum gate held it). The path runs on with the nose piece's line
+cone record (absent when the pool quantum gate held it). The path runs on with the nose piece's line
 to its own end, its open air timed at the carried speed. A struck tank's record stays open while a
 fuze that tank armed runs, so a burst past its last body lands in it. The wire round-trips the
 burst; its 256 directions add 0.3–1.2 KB to a message (MEASURED, `src/damage_cam/wire.rs`). The pen
@@ -764,14 +766,41 @@ resolved the shot, each witness box takes:
   the round file, TUNED);
 - **the field:** each spall direction entering it, at its strength there × its share (§5).
 
-Both go through the same `ShotDose` tally, units and once-per-box rounding as a hard box's, and a
-mark's deposits all land before its one settle. Crew carry a witness substance and only crew do,
-refused at bake otherwise. A box's dose from **one shot**
-— the line, a bounce's shock and every cone, summed — is converted once, rounded to the nearest
-point (ties away from zero, IEEE `roundToIntegralTiesToAway`, no transcendental), never per
-direction and never per source; the pool stops at zero. HP falls as the shot is resolved, each
-step taking what the rounded running total has gained, so it lands on the rounded total when the
-shot ends. HP replicates as whole points.
+Both go through the same `ShotDose` tally, units and once-per-box conversion as a hard box's, and
+a mark's deposits all land before its one settle. Crew carry a witness substance and only crew do,
+refused at bake otherwise.
+
+**Pools keep fractions** (Yan, 2026-10-28, issue 142). A pool's size is whole HP points, as data
+authors it; what it holds is a fixed-point integer of **pool units**, a thousandth of a point
+(`ballistics::POOL_UNITS_PER_HP`). A box's dose from **one shot** — the line, a bounce's shock and
+every cone, summed in exact integer dose units — converts to pool units once, to the nearest unit
+(ties away from zero, integer arithmetic), never per direction and never per source, and is taken
+whole: no fraction of a point is dropped, so doses below a point accumulate across shots and
+eventually empty the pool. The pool stops at zero, and is emptied, the component knocked out,
+exactly when what it holds reaches zero. It falls as the shot is resolved, each step taking what
+the converted running total has gained, so it lands on the converted total when the shot ends.
+Pools replicate, and records carry them, in pool units: deterministic on the wire, never rounded
+there. The resolution keeps a single machine-gun hit's dose within 1 %: a dose loses at most half
+a unit, 0.0005 HP, so every dose from 0.05 HP up keeps 1 % (DERIVED); on the shipped mature fir
+(240 HP) the machine gun's hits run from 1.037 HP at the base to 0.483 HP centred 20 m up (kept
+within 0.10 %) and 0.058 HP in a 0.9-radius graze 25 m up (within 0.86 %), and a hundredth of a
+point would put the 0.483 HP hit at 1.04 % (MEASURED with the flight-nose drag). A u32 pool holds
+4 294 967 points (`MAX_POOL_POINTS`); a tank or class file authoring more is refused.
+
+Per-shot rounding to whole points took nothing from the 0.48 HP hit, so the belt never felled the
+fir high on the trunk, while a hit at the base took a whole point: whether the machine gun worked
+depended on where it hit. Kept whole, every hit counts where it lands. MEASURED hits to fell the
+fir (`.agents/scratch/damage-model-2026-10-28/fractional-pools-measured.txt`): 232 at 1 m
+centred (240 under the rounding), 268 at 10 m, 497 at 20 m centred and 553 at 20 m half a radius
+off (never under the rounding); the 88mm_AP's cells keep their 2 to 7 hits.
+
+**Shown health.** Only the display rounds: every view of a pool (the HUD's damage flash and hit
+marker, the damage panel, the pen cam) shows whole points, rounded up (`ballistics::shown_points`).
+A pool that has lost 0.8 HP shows full and is not painted damaged; it shows damage once a whole
+point is gone, and shows none exactly when it is emptied. The pen cam's verdict and path follow
+the display: a component is dosed (`PathStep::Dosed`) only where the shot took a shown point,
+read from what its pool held at the shot and what the shot took (`ballistics::shown_lost`); a
+shot's hit confirmation counts shown points.
 This is *local function state*, not a global health bar. A tank is knocked out at zero active
 crew, a cook-off taking precedence (`knockout_from_counts`, `src/damage.rs`); crew < 2 is the
 kept alternative, playtest fork F2.

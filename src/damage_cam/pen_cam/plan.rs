@@ -413,13 +413,16 @@ pub struct BoxPlan {
     pub heights: Option<(f32, f32)>,
     /// Its HP pool (HP points): the points that disable it whole.
     pub count: u32,
-    /// Its HP points at the shot.
+    /// The HP points it showed at the shot ([`crate::damage_cam::ComponentState::shown`]): every
+    /// view of a pool shows whole points, rounded up.
     pub hp: u32,
-    /// The line's and the fields' dose to it (HP points before rounding,
+    /// The line's and the fields' dose to it (HP points before conversion,
     /// [`crate::damage_cam::BoxDose`]).
     pub line: f32,
     pub field: f32,
-    /// The HP points the shot took from it.
+    /// The shown HP points the shot took from it
+    /// ([`crate::damage_cam::ComponentState::shown_lost`]): none while its pool keeps the dose
+    /// short of a whole point.
     pub lost_hp: u32,
     /// When the picture reaches it: the earliest, in record time, of the line entering it where the
     /// record has it enter and each dosing field's front arriving ([`Reach::Cone`]), the line first
@@ -447,7 +450,7 @@ impl BoxPlan {
         self.line + self.field
     }
 
-    /// The shot took HP from it: what the shooter's views draw on the state scale.
+    /// The shot took a shown HP point from it: what the shooter's views draw on the state scale.
     pub fn struck(&self) -> bool {
         self.lost_hp > 0
     }
@@ -545,8 +548,8 @@ impl Plan {
             .iter()
             .map(|component| {
                 let dose = report.doses.iter().find(|d| d.volume == component.name);
-                let (line_dose, field_dose, lost_hp) =
-                    dose.map_or((0.0, 0.0, 0), |d| (d.line, d.field, d.lost));
+                let (line_dose, field_dose, taken) =
+                    dose.map_or((0.0, 0.0, 0), |d| (d.line, d.field, d.taken));
                 let shape = shapes.get(&component.name);
                 let center = shape.map(|shape| shape.center());
                 let heights = shape.map(|shape| {
@@ -578,17 +581,17 @@ impl Plan {
                         .reduce(|first, next| if next.0 < first.0 { next } else { first })
                         .map_or(Reach::Line(contact_arc), |(_, reach)| reach)
                 });
-                let lost_before = component.count > 0 && component.hp == 0;
+                let lost_before = component.count > 0 && component.held == 0;
                 BoxPlan {
                     name: component.name.clone(),
                     role: component.role,
                     center,
                     heights,
                     count: component.count,
-                    hp: component.hp,
+                    hp: component.shown(),
                     line: line_dose,
                     field: field_dose,
-                    lost_hp,
+                    lost_hp: component.shown_lost(taken),
                     reached_at,
                     lost: lost_before
                         || report.consequences.iter().any(|c| {

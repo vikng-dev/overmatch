@@ -12,13 +12,13 @@
 //!
 //! A recorded shell is born with its [`ShotRecording`]. After each march step the shell notes every
 //! tank its new marks touch ([`MarchRecorder::note`]): an encounter opened has the tank's
-//! components' HP taken there, and each tick that logs marks on it opens a hull frame.
+//! components' pools read there, and each tick that logs marks on it opens a hull frame.
 //! [`pose_struck`] fills those frames in the same tick from the pose the march's colliders were
 //! placed at, before the damage consequences can detach a turret. A shell that despawns hands its
 //! logs to the [`ShotRecorder`] ([`keep_spent`]), so a record never depends on how long the shell
 //! lives.
 //!
-//! The record's HP figures are the shot's own ([`crate::ballistics::ShotDose`], see
+//! The record's pool figures are the shot's own ([`crate::ballistics::ShotDose`], see
 //! [`super::record`]). A tank's death is the shot's when its own deposition emptied the box that
 //! decided it, in the same tick ([`attribute_kills`]): for a cookoff the first ammunition box
 //! emptied that tick, for crew loss the last crew station, in deposition order across every shell
@@ -142,7 +142,7 @@ struct Struck {
     contact_tick: u32,
     /// The encounter's first mark.
     from: usize,
-    /// Its components and their HP when the encounter opened.
+    /// Its components and the pool units each held when the encounter opened.
     boxes: Vec<(Entity, u32)>,
     /// `(first mark, hull frame)` per tick that logged marks on it; `None` until posed.
     frames: Vec<(usize, Option<HullFrame>)>,
@@ -246,7 +246,7 @@ impl MarchRecorder<'_, '_> {
                             .get(tank)
                             .into_iter()
                             .flat_map(|volumes| volumes.iter())
-                            .filter_map(|volume| Some((volume, health.get(volume).ok()?.current)))
+                            .filter_map(|volume| Some((volume, health.get(volume).ok()?.held())))
                             .collect();
                         recording.struck.push(Struck {
                             tank,

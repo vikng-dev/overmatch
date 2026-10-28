@@ -30,9 +30,12 @@ const STEEL: f32 = 1000.0;
 const SOFT: f32 = 10.0;
 /// A 50 mm steel plate the fixture 88 perforates.
 const THIN: f32 = 0.05;
-/// An HP pool no fixture shot empties, and one any shot that reaches it empties.
+/// An HP pool no fixture shot empties, and one any shot that reaches it empties (HP points).
 const DEEP: u32 = 100_000;
 const ONE: u32 = 1;
+/// The same pools full, in the pool units a pool and a record keep.
+const DEEP_UNITS: u32 = DEEP * POOL_UNITS_PER_HP;
+const ONE_UNITS: u32 = ONE * POOL_UNITS_PER_HP;
 
 #[derive(Clone, Copy)]
 enum Kind {
@@ -119,22 +122,10 @@ fn tank(
             match kind {
                 Kind::Plate => {}
                 Kind::Crew(hp) => {
-                    volume.insert((
-                        ComponentHealth {
-                            current: hp,
-                            max: hp,
-                        },
-                        CrewStation::Gunner,
-                    ));
+                    volume.insert((ComponentHealth::full(hp), CrewStation::Gunner));
                 }
                 Kind::Ammo(hp) => {
-                    volume.insert((
-                        ComponentHealth {
-                            current: hp,
-                            max: hp,
-                        },
-                        Ammo,
-                    ));
+                    volume.insert((ComponentHealth::full(hp), Ammo));
                 }
             }
             volume.id()
@@ -241,27 +232,28 @@ fn run(app: &mut App, ticks: usize) -> Vec<RecordedShot> {
     recorded
 }
 
+/// The pool units `volume`'s pool holds.
 fn hp(app: &App, volume: Entity) -> u32 {
-    app.world().get::<ComponentHealth>(volume).unwrap().current
+    app.world().get::<ComponentHealth>(volume).unwrap().held()
 }
 
-/// `report`'s loss on the component named `name`.
+/// `report`'s loss on the component named `name`, in pool units.
 fn lost(report: &PenetrationReport, name: &str) -> u32 {
     report
         .doses
         .iter()
         .find(|dose| dose.volume == name)
-        .map_or(0, |dose| dose.lost)
+        .map_or(0, |dose| dose.taken)
 }
 
-/// `report`'s HP at the shot for the component named `name`.
+/// What `report` has the pool of the component named `name` hold at the shot, in pool units.
 fn at_shot(report: &PenetrationReport, name: &str) -> u32 {
     report
         .components
         .iter()
         .find(|component| component.name == name)
         .unwrap()
-        .hp
+        .held
 }
 
 /// Two rounds into one tank in one tick: each record holds only its own loss, its HP at the shot is
@@ -282,7 +274,7 @@ fn overlapping_shots_each_record_only_their_own_loss() {
     let recorded = run(&mut app, 8);
     assert_eq!(recorded.len(), 2, "one record per round");
     for (name, volume) in [("crew", volumes[1]), ("rear", volumes[2])] {
-        let drop = DEEP - hp(&app, volume);
+        let drop = DEEP_UNITS - hp(&app, volume);
         let losses: Vec<u32> = recorded
             .iter()
             .map(|shot| lost(&shot.report, name))
@@ -302,12 +294,12 @@ fn overlapping_shots_each_record_only_their_own_loss() {
             .collect();
         let (first, second) = if found[0] > found[1] { (0, 1) } else { (1, 0) };
         assert_eq!(
-            found[first], DEEP,
+            found[first], DEEP_UNITS,
             "{name}: the first round found the full pool"
         );
         assert_eq!(
             found[second],
-            DEEP - losses[first],
+            DEEP_UNITS - losses[first],
             "{name}: the second found what the first left"
         );
     }
@@ -348,8 +340,12 @@ fn a_path_through_two_tanks_records_each() {
         assert_eq!(shot.report.impact.verdict, ShotVerdict::Penetration);
         assert_eq!(shot.report.components.len(), 2, "its own two components");
         for (name, volume) in [("crew", volumes[1]), ("rear", volumes[2])] {
-            assert_eq!(lost(&shot.report, name), DEEP - hp(&app, volume), "{name}");
-            assert_eq!(at_shot(&shot.report, name), DEEP, "{name}");
+            assert_eq!(
+                lost(&shot.report, name),
+                DEEP_UNITS - hp(&app, volume),
+                "{name}"
+            );
+            assert_eq!(at_shot(&shot.report, name), DEEP_UNITS, "{name}");
         }
     }
     let outcome = |tank| {
@@ -405,7 +401,7 @@ fn a_shell_despawned_after_the_shot_keeps_its_record() {
         let mut recorded = run(&mut app, 8);
         assert_eq!(recorded.len(), 1, "one record");
         let report = recorded.pop().unwrap().report;
-        assert_eq!(lost(&report, "crew"), DEEP - hp(&app, volumes[1]));
+        assert_eq!(lost(&report, "crew"), DEEP_UNITS - hp(&app, volumes[1]));
         assert!(app.world().resource::<ShotRecorder>().is_idle());
         report
     };
@@ -525,7 +521,7 @@ fn the_killing_shot_alone_is_attributed() {
     assert_eq!(killer.killed, Some(KnockoutReason::CrewLoss));
     assert_eq!(
         lost(killer, "crew"),
-        ONE,
+        ONE_UNITS,
         "the killer emptied the crew station"
     );
     assert!(
@@ -578,7 +574,7 @@ fn automatic_fire_records_nothing() {
         FireMechanism::Automatic,
     );
     assert!(run(&mut app, 8).is_empty());
-    assert!(hp(&app, volumes[1]) < DEEP, "the round struck");
+    assert!(hp(&app, volumes[1]) < DEEP_UNITS, "the round struck");
 }
 
 /// A net client records nothing: no shell carries a recording and no record is emitted.
@@ -762,11 +758,11 @@ fn a_round_that_strikes_a_tank_again_records_each_encounter() {
     );
     assert_eq!(
         at_shot(second, "front"),
-        DEEP - lost(first, "front"),
+        DEEP_UNITS - lost(first, "front"),
         "the second encounter found what the first left"
     );
     assert!(lost(second, "rear") > 0);
-    assert_eq!((lost(first, "ammo"), lost(second, "ammo")), (0, ONE));
+    assert_eq!((lost(first, "ammo"), lost(second, "ammo")), (0, ONE_UNITS));
 
     assert_eq!(first.killed, None);
     assert_eq!(second.killed, Some(KnockoutReason::Cookoff));
@@ -797,10 +793,7 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
         .spawn((
             Name::new("ammo"),
             VolumeOf(tank),
-            ComponentHealth {
-                current: 100,
-                max: 100,
-            },
+            ComponentHealth::full(100),
             Ammo,
         ))
         .id();
@@ -829,9 +822,12 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
     };
     dose(&mut world, vec![energy_units(line_0)], 0);
     // Another round leaves 10 of the 60 points.
-    world.get_mut::<ComponentHealth>(ammo).unwrap().current = 10;
+    world
+        .get_mut::<ComponentHealth>(ammo)
+        .unwrap()
+        .set_held(10 * POOL_UNITS_PER_HP);
     dose(&mut world, vec![field_units(cone), energy_units(line_1)], 1);
-    assert_eq!(world.get::<ComponentHealth>(ammo).unwrap().current, 0);
+    assert!(world.get::<ComponentHealth>(ammo).unwrap().is_empty());
 
     let crossing =
         |entrance: Vec3, volumes: Vec<VolumeCrossing>, exit: Vec3, cones| ArmourMark::Crossing {
@@ -893,7 +889,7 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
         0,
         vec![(0, HullFrame::posed(Vec3::ZERO, Quat::IDENTITY))],
         BTreeMap::new(),
-        vec![(ammo, 100)],
+        vec![(ammo, 100 * POOL_UNITS_PER_HP)],
     );
     let facts = ShotFacts {
         launch: z(20.0),
@@ -913,7 +909,11 @@ fn an_emptying_is_timed_at_the_deposit_that_emptied_the_pool() {
         &facts,
     )
     .unwrap();
-    assert_eq!(lost(&report, "ammo"), 50, "40, then the 10 left");
+    assert_eq!(
+        lost(&report, "ammo"),
+        50 * POOL_UNITS_PER_HP,
+        "40, then the 10 left"
+    );
     let [cookoff] = report.consequences.as_slice() else {
         panic!("one consequence: {:?}", report.consequences);
     };

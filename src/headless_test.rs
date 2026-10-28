@@ -1611,7 +1611,7 @@ fn a_main_gun_round_damages_a_tank_on_the_shipped_map() {
         world
             .query::<&ComponentHealth>()
             .iter(world)
-            .map(|health| health.current)
+            .map(|health| health.held())
             .sum()
     };
     let before = total_hp(&mut app);

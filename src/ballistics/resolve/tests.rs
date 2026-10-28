@@ -266,10 +266,7 @@ fn volume_of(
         },
     ));
     if let Some(hp) = hp {
-        entity.insert(ComponentHealth {
-            current: hp,
-            max: hp,
-        });
+        entity.insert(ComponentHealth::full(hp));
     }
     entity.id()
 }
@@ -391,7 +388,7 @@ fn agree(name: &str, body: RoundBody, speed: f32, build: impl Fn(&mut App) -> En
         .world()
         .get::<ComponentHealth>(target)
         .expect("the target carries HP");
-    let damaged = hp.current < hp.max;
+    let damaged = hp.held() < hp.capacity();
 
     let mut gate = world_with_trimesh_plates(&[]);
     let gate_target = build(&mut gate);
@@ -405,7 +402,7 @@ fn agree(name: &str, body: RoundBody, speed: f32, build: impl Fn(&mut App) -> En
         .world()
         .get::<ComponentHealth>(gate_target)
         .expect("the target carries HP")
-        .current;
+        .held();
     let transit = flown
         .decisions
         .iter()
@@ -417,7 +414,7 @@ fn agree(name: &str, body: RoundBody, speed: f32, build: impl Fn(&mut App) -> En
         .filter(|dose| dose.address == gate_target)
         .fold(0.0, |total, dose| total + dose.amount);
     let admitted =
-        pool > 0 && crate::ballistics::hp_of_units(crate::ballistics::energy_units(transit)) > 0;
+        pool > 0 && crate::ballistics::pool_units_of(crate::ballistics::energy_units(transit)) > 0;
     let shock = flown.decisions.iter().any(|decision| {
         matches!(decision, Decision::Bounce(bounce)
             if gate.world().get::<ComponentHealth>(bounce.struck).is_some())
@@ -1635,8 +1632,9 @@ const FIELD: FieldDescriptor = FieldDescriptor {
 };
 /// Fixture direction count where the resolution is not the point.
 const FIELD_N: usize = 96;
-/// HP of every fixture box: above any dose below, so no dose is clamped away.
-const FIELD_HP: u32 = 10_000_000;
+/// HP of every fixture box: above any dose below, so no dose is clamped away, and within
+/// [`crate::ballistics::MAX_POOL_POINTS`].
+const FIELD_HP: u32 = 1_000_000;
 
 /// A fixture world built by `build`, stepped so its colliders are queryable; returns the boxes
 /// `build` names, in order.
@@ -1911,9 +1909,16 @@ fn a_cone_doses_the_struck_tank_alone() {
     let shell = spawn_round(&mut app, FIXTURE_88, DROP_FROM, Vec3::NEG_Y * 800.0);
     app.update();
 
-    let hp = |entity: Entity| app.world().get::<ComponentHealth>(entity).unwrap().current;
-    assert!(hp(own) < 1000, "the struck tank's box is dosed");
-    assert_eq!(hp(foreign), 1000, "another tank's box is not");
+    let hp = |entity: Entity| *app.world().get::<ComponentHealth>(entity).unwrap();
+    assert!(
+        hp(own).held() < hp(own).capacity(),
+        "the struck tank's box is dosed"
+    );
+    assert_eq!(
+        hp(foreign).held(),
+        hp(foreign).capacity(),
+        "another tank's box is not"
+    );
     let marks = app
         .world()
         .get::<SpallMarks>(shell)
@@ -1926,15 +1931,23 @@ fn a_cone_doses_the_struck_tank_alone() {
     );
 }
 
-/// THE HP QUANTUM GATE: a body exit whose cone's whole emission `S/2` converts to no HP point at
-/// the field's rate `r` (HP points per reference-mm, `spall_cone::hp_per_reference_mm`) is not
-/// thrown — no direction walked, no cone recorded, the crossing counting none — and one above it
-/// is. Fixture: an 88 through `3/r` m of a factor-10 slab (spend ≈ `30/r` reference-mm, κ = 0.01,
-/// so `S/2` ≈ `0.15/r` reference-mm, 0.15 of a point at `r`, DERIVED) and through 20 mm of steel.
+/// THE POOL QUANTUM GATE: a body exit whose cone's whole emission `S/2` converts to no pool unit
+/// (`ballistics::pool_units_of`, the quantum a pool keeps) at the field's rate `r` (HP points per
+/// reference-mm, `spall_cone::hp_per_reference_mm`) is not thrown — no direction walked, no cone
+/// recorded, the crossing counting none — and one above it is, however far below a whole point:
+/// a pool keeps every pool unit, so a gate at a point would drop a dose the pool accumulates.
+/// Fixture: an 88 through `0.3/r` m of a factor-1 slab (spend ≈ `0.3/r` reference-mm, κ = 0.001,
+/// so `S/2` ≈ `1.5e-4/r` reference-mm, 0.15 of a pool unit at `r`, DERIVED), through ten times
+/// that slab at factor 10 (`S/2` ≈ 0.15 of a point, below the display's whole point, DERIVED),
+/// and through 20 mm of steel.
 #[test]
-fn a_cone_below_the_hp_quantum_is_not_thrown() {
-    let slab = 3.0 / crate::ballistics::spall_cone::hp_per_reference_mm() as f32;
-    for (thickness, factor, thrown) in [(slab, 10.0, false), (0.02, STEEL, true)] {
+fn a_cone_below_the_pool_quantum_is_not_thrown() {
+    let slab = 0.3 / crate::ballistics::spall_cone::hp_per_reference_mm() as f32;
+    for (thickness, factor, thrown) in [
+        (slab, 1.0, false),
+        (10.0 * slab, 10.0, true),
+        (0.02, STEEL, true),
+    ] {
         let mut app = world_with_trimesh_plates(&[]);
         volume(
             &mut app,
@@ -2133,7 +2146,8 @@ fn a_cone_doses_a_box_only_an_unreached_member_leaves() {
         "every direction starts inside B, never left, and doses it ({} directions)",
         cone.rays.len()
     );
-    assert!(app.world().get::<ComponentHealth>(b).unwrap().current < FIELD_HP);
+    let b = app.world().get::<ComponentHealth>(b).unwrap();
+    assert!(b.held() < b.capacity());
 }
 
 /// Where the fixture walks of [`slab_layers`] start, behind the throw point (m), as

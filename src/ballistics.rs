@@ -344,26 +344,48 @@ pub(crate) fn round_in_domain(round: RoundBody, speed: f32) -> Result<(), String
 }
 
 /// HP points per reference-mm of a dose authored in reference-mm (a bounce's shock, a witness's
-/// chord at the round's crew line rate): one HP point is 0.1 reference-mm, the quantum a box's dose
-/// from one shot is rounded to (design doc §6). RESOLUTION: a unit, not a balance value. A hard
-/// box's line dose is energy and converts at the energy rate ([`energy_dose::joules_per_hp`],
-/// [`energy_units`]); the field at its own calibrated rate ([`spall_cone::hp_per_reference_mm`],
-/// [`field_units`]).
+/// chord at the round's crew line rate): one HP point is 0.1 reference-mm (design doc §6).
+/// RESOLUTION: a unit, not a balance value. A hard box's line dose is energy and converts at the
+/// energy rate ([`energy_dose::joules_per_hp`], [`energy_units`]); the field at its own calibrated
+/// rate ([`spall_cone::hp_per_reference_mm`], [`field_units`]).
 pub(crate) const HP_PER_REFERENCE_MM: u64 = 10;
 
 /// Fixed-point dose units per reference-mm. Every dose contribution is quantized to whole units
 /// before it is summed, so a box's per-shot total is an integer sum: the same for every order its
 /// contributions arrive in. RESOLUTION: 1 unit = 1e-9 reference-mm = 1e-8 HP point, finer than an
 /// f32 dose's own spacing from 0.01 reference-mm up (ulp(0.01) = 9.3e-10, DERIVED), so quantizing
-/// costs no more than the f32 dose already did. Decimal, so the HP quantum is exactly
-/// [`DOSE_UNITS_PER_HP`] units and a tie is an exact integer. A u64 total holds 1.8e10
-/// reference-mm, 1.8e11 HP points (DERIVED). An energy dose enters in the same units through its
-/// HP points ([`energy_units`]).
+/// costs no more than the f32 dose already did. Decimal, so an HP point is exactly
+/// [`DOSE_UNITS_PER_HP`] units and a pool unit exactly [`DOSE_UNITS_PER_POOL_UNIT`], and a tie is
+/// an exact integer. A u64 total holds 1.8e10 reference-mm, 1.8e11 HP points (DERIVED). An energy
+/// dose enters in the same units through its HP points ([`energy_units`]).
 pub(crate) const DOSE_UNITS_PER_REFERENCE_MM: u64 = 1_000_000_000;
 
 /// Dose units per HP point: [`DOSE_UNITS_PER_REFERENCE_MM`] / [`HP_PER_REFERENCE_MM`], exact.
 const DOSE_UNITS_PER_HP: u64 = DOSE_UNITS_PER_REFERENCE_MM / HP_PER_REFERENCE_MM;
 const _: () = assert!(DOSE_UNITS_PER_HP * HP_PER_REFERENCE_MM == DOSE_UNITS_PER_REFERENCE_MM);
+
+/// Pool units per HP point: what an HP pool holds ([`ComponentHealth`]), every settle of a shot's
+/// dose and every pool figure a record or the wire carries are whole pool units, a thousandth of a
+/// point. A box's dose from one shot converts to pool units once ([`pool_units_of`]), so no
+/// fraction of a point is dropped and doses below a point accumulate in the pool. Only the display
+/// rounds to whole points ([`shown_points`]).
+///
+/// RESOLUTION: a shot's dose loses at most half a unit, 0.0005 HP, to the conversion, so every
+/// dose of 0.05 HP or more keeps 1 % (DERIVED), the bound a single machine-gun hit is kept to. The
+/// machine gun's hits on a mature fir run from 1.04 HP at the base to 0.48 HP high on the trunk,
+/// kept within 0.10 %, and 0.058 HP in a graze near its top, within 0.86 % (MEASURED,
+/// `.agents/scratch/damage-model-2026-10-28/fractional-pools-measured.txt`). A hundredth of a
+/// point would put the 0.48 HP hit at 1.04 %. Decimal, so a pool unit is exactly
+/// [`DOSE_UNITS_PER_POOL_UNIT`] dose units. A u32 pool holds [`MAX_POOL_POINTS`] points.
+pub const POOL_UNITS_PER_HP: u32 = 1_000;
+
+/// The largest pool a u32 of pool units holds, in whole HP points: 4 294 967 (DERIVED). A tank
+/// file or a class file authoring a larger pool is refused at parse.
+pub const MAX_POOL_POINTS: u32 = u32::MAX / POOL_UNITS_PER_HP;
+
+/// Dose units per pool unit: [`DOSE_UNITS_PER_HP`] / [`POOL_UNITS_PER_HP`], exact.
+const DOSE_UNITS_PER_POOL_UNIT: u64 = DOSE_UNITS_PER_HP / POOL_UNITS_PER_HP as u64;
+const _: () = assert!(DOSE_UNITS_PER_POOL_UNIT * POOL_UNITS_PER_HP as u64 == DOSE_UNITS_PER_HP);
 
 /// One dose contribution of `dose` reference-mm in whole dose units: widened to f64 (exact), one
 /// IEEE multiply and a round to nearest, ties away from zero, so it is the same on every target. A
@@ -393,41 +415,58 @@ pub(crate) fn energy_units(energy: f32) -> u64 {
     (f64::from(energy) / energy_dose::joules_per_hp() * DOSE_UNITS_PER_HP as f64).round() as u64
 }
 
-/// The whole HP points `units` dose units convert to, rounded to nearest, ties away from zero.
-pub(crate) fn hp_of_units(units: u64) -> u32 {
-    let points =
-        units / DOSE_UNITS_PER_HP + u64::from(units % DOSE_UNITS_PER_HP >= DOSE_UNITS_PER_HP / 2);
-    u32::try_from(points).unwrap_or(u32::MAX)
+/// The pool units ([`POOL_UNITS_PER_HP`]) `units` dose units convert to, rounded to nearest, ties
+/// away from zero, in integer arithmetic; saturating.
+pub(crate) fn pool_units_of(units: u64) -> u32 {
+    let pool = units / DOSE_UNITS_PER_POOL_UNIT
+        + u64::from(units % DOSE_UNITS_PER_POOL_UNIT >= DOSE_UNITS_PER_POOL_UNIT / 2);
+    u32::try_from(pool).unwrap_or(u32::MAX)
 }
 
-/// The HP points `units` dose units carry before any rounding: what a record shows of a dose.
+/// The HP points `units` dose units carry, unrounded: what a record shows of a dose.
 pub(crate) fn hp_before_rounding(units: u64) -> f32 {
     (units as f64 / DOSE_UNITS_PER_HP as f64) as f32
 }
 
-/// The least share of one HP point a box's per-shot total converts to a whole point at
-/// ([`hp_of_units`]: to nearest, ties away from zero): a total below it converts to none.
-pub(crate) fn least_counted_hp() -> f64 {
-    (DOSE_UNITS_PER_HP / 2) as f64 / DOSE_UNITS_PER_HP as f64
+/// The HP points a pool holding `held` pool units shows: whole points, rounded up. The one display
+/// rule every view of a pool reads (the HUD's cues, the damage panel, the pen cam): a pool short
+/// of one whole point lost shows full, and shows damaged only once a whole point is gone; a pool
+/// shows none only when it is emptied, at the same instant the sim knocks it out.
+pub fn shown_points(held: u32) -> u32 {
+    held.div_ceil(POOL_UNITS_PER_HP)
 }
 
-/// The whole HP points one dose of `dose` reference-mm (a shock, a witness's chord) converts to:
-/// [`dose_units`] then [`hp_of_units`], the rounding a box's per-shot total takes. A negative or
-/// NaN dose converts to none.
+/// The shown points ([`shown_points`]) a pool holding `held` pool units loses when `taken` of them
+/// are taken: what every view counts as a point lost. Taking past empty takes what was held.
+pub fn shown_lost(held: u32, taken: u32) -> u32 {
+    shown_points(held) - shown_points(held.saturating_sub(taken))
+}
+
+/// The least dose, in HP points, a full pool shows a lost point at: the dose whose pool units
+/// ([`pool_units_of`]) reach one whole point ([`shown_points`]), half a pool unit short of a point.
+/// A dose below it leaves a full pool showing full.
+pub(crate) fn least_shown_hp() -> f64 {
+    (DOSE_UNITS_PER_HP - DOSE_UNITS_PER_POOL_UNIT / 2) as f64 / DOSE_UNITS_PER_HP as f64
+}
+
+/// The pool units one dose of `dose` reference-mm (a shock, a witness's chord) converts to:
+/// [`dose_units`] then [`pool_units_of`], the conversion a box's per-shot total takes. A negative
+/// or NaN dose converts to none.
 #[cfg(test)]
-pub(crate) fn hp_points(dose: f32) -> u32 {
-    hp_of_units(dose_units(dose))
+pub(crate) fn pool_units(dose: f32) -> u32 {
+    pool_units_of(dose_units(dose))
 }
 
-/// One shot's dose to each box it has reached, in whole dose units ([`dose_units`]), the HP points
-/// already taken for it and the HP its pool actually lost. A box loses `hp_of_units(total)` over the
-/// shot, its total from the line, a bounce's shock and every spall cone summed first: each
-/// contribution quantized (a hard box's line deposit at the energy rate, [`energy_units`]; a field
-/// deposit at the field's rate, [`field_units`]), the integers
-/// summed, the sum rounded once per box per shot, never per direction or per source, and never
-/// dependent on the order the contributions arrive in.
-/// [`Self::settle`] takes what the running total has added since it last ran, so HP falls as the
-/// shot goes and lands on the rounded total when it ends.
+/// One shot's dose to each box it has reached, in whole dose units ([`dose_units`]), the pool units
+/// already taken for it and the pool units its pool actually lost. A box loses
+/// `pool_units_of(total)` over the shot, its total from the line, a bounce's shock and every spall
+/// cone summed first: each contribution quantized (a hard box's line deposit at the energy rate,
+/// [`energy_units`]; a field deposit at the field's rate, [`field_units`]), the integers summed,
+/// the sum converted to pool units once per box per shot, never per direction or per source, and
+/// never dependent on the order the contributions arrive in. No whole-point rounding happens here:
+/// a pool keeps every pool unit a shot takes, so doses below a point accumulate across shots.
+/// [`Self::settle`] takes what the running total has added since it last ran, so the pool falls as
+/// the shot goes and lands on the converted total when it ends.
 ///
 /// Every figure here is this shot's own, never a difference of pool HP: a march step resolves one
 /// shell whole before the next, and one settle closes each armour mark, so what a shell finds in a
@@ -442,8 +481,9 @@ pub(crate) struct ShotDose {
     emptied: Vec<Entity>,
 }
 
-/// A box's running dose this shot (dose units), the units its last settle took HP for, whether a
-/// dose has been added since, and each settle that took a dose of its pool (authority only).
+/// A box's running dose this shot (dose units), the dose units its last settle took pool units
+/// for, whether a dose has been added since, and each settle that took a dose of its pool
+/// (authority only).
 struct BoxTally {
     address: Entity,
     units: u64,
@@ -471,11 +511,11 @@ struct Landed {
 }
 
 /// One settle of a box's pool for a mark that dosed it: the armour mark it closed (its index in the
-/// shell's log), the HP the pool held before it, this shot's dose units on the box before that
-/// mark, the HP the pool lost, and how many of the box's deposits had landed by then. Every
-/// deposit of that mark is the shot's own and lands between the two pool readings, so the deposit
-/// that emptied a pool is the first of the mark's, in path order, whose running total from
-/// `units_before` takes `held` points ([`ShotDose::emptier`]).
+/// shell's log), the pool units the pool held before it, this shot's dose units on the box before
+/// that mark, the pool units the pool lost, and how many of the box's deposits had landed by then.
+/// Every deposit of that mark is the shot's own and lands between the two pool readings, so the
+/// deposit that emptied a pool is the first of the mark's, in path order, whose running total from
+/// `units_before` takes `held` pool units ([`ShotDose::emptier`]).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Settle {
     pub mark: usize,
@@ -489,6 +529,11 @@ impl Settle {
     /// This settle took the pool to zero.
     pub(crate) fn emptied(&self) -> bool {
         self.lost > 0 && self.lost == self.held
+    }
+
+    /// The shown points ([`shown_lost`]) this settle took from the pool.
+    pub(crate) fn shown_lost(&self) -> u32 {
+        shown_lost(self.held, self.lost)
     }
 }
 
@@ -553,8 +598,9 @@ impl ShotDose {
     }
 
     /// Close armour mark `mark` (its index in the shell's log): take from each box's HP pool the
-    /// points its rounded total has gained since the last settle, floored at zero, and return the HP
-    /// removed. A box with no HP pool takes nothing. Only authority writes HP (`deposit`).
+    /// pool units its converted total has gained since the last settle, floored at zero, and return
+    /// the pool units removed. A box with no HP pool takes nothing. Only authority writes a pool
+    /// (`deposit`).
     fn settle(
         &mut self,
         health: &mut Query<&mut ComponentHealth>,
@@ -568,16 +614,15 @@ impl ShotDose {
         for entry in &mut self.tallies {
             let fresh = std::mem::take(&mut entry.fresh);
             let units_before = std::mem::replace(&mut entry.settled, entry.units);
-            let due = hp_of_units(entry.units).saturating_sub(hp_of_units(units_before));
+            let due = pool_units_of(entry.units).saturating_sub(pool_units_of(units_before));
             if !fresh && due == 0 {
                 continue;
             }
             let Ok(mut hp) = health.get_mut(entry.address) else {
                 continue;
             };
-            let held = hp.current;
-            let lost = due.min(held);
-            hp.current -= lost;
+            let held = hp.held();
+            let lost = hp.take(due);
             removed += lost;
             entry.settles.push(Settle {
                 mark,
@@ -586,19 +631,29 @@ impl ShotDose {
                 lost,
                 deposited: entry.deposits.len(),
             });
-            if lost > 0 && hp.current == 0 {
+            if lost > 0 && hp.is_empty() {
                 self.emptied.push(entry.address);
             }
         }
         removed
     }
 
-    /// Each box this shot has reached and the HP its pool has lost to the shot so far: zero for one
-    /// with no HP pool or one already empty, and for every box where HP is not deposited (a
-    /// replica).
+    /// Each box this shot has reached and the pool units its pool has lost to the shot so far: zero
+    /// for one with no HP pool or one already empty, and for every box where a pool is not written
+    /// (a replica).
     pub(crate) fn losses(&self) -> impl Iterator<Item = (Entity, u32)> + '_ {
         self.tallies.iter().map(|entry| {
             let lost = entry.settles.iter().map(|settle| settle.lost).sum();
+            (entry.address, lost)
+        })
+    }
+
+    /// Each box this shot has reached and the shown points ([`Settle::shown_lost`]) its settles
+    /// took: what a view counts as lost to the shot. A settle short of a whole point shows none
+    /// until a later one, of this shot or another, takes the pool past it.
+    pub(crate) fn shown_losses(&self) -> impl Iterator<Item = (Entity, u32)> + '_ {
+        self.tallies.iter().map(|entry| {
+            let lost = entry.settles.iter().map(Settle::shown_lost).sum();
             (entry.address, lost)
         })
     }
@@ -619,8 +674,8 @@ impl ShotDose {
 
     /// Where the deposit that emptied `address`'s pool came from, by the rule the pen cam's record
     /// applies to the marks: of the emptying settle's own deposits in path order, the first whose
-    /// running total from the settle's `units_before` takes the HP the pool held, else the last of
-    /// them. `None` for a pool this shot did not empty.
+    /// running total from the settle's `units_before` takes the pool units the pool held, else the
+    /// last of them. `None` for a pool this shot did not empty.
     pub(crate) fn emptier(&self, address: Entity) -> Option<DoseContext> {
         let entry = self.tallies.iter().find(|entry| entry.address == address)?;
         let (k, settle) = entry
@@ -633,23 +688,24 @@ impl ShotDose {
             .checked_sub(1)
             .map_or(0, |previous| entry.settles[previous].deposited);
         let own = &entry.deposits[from..settle.deposited];
-        let taken_before = hp_of_units(settle.units_before);
+        let taken_before = pool_units_of(settle.units_before);
         let mut total = settle.units_before;
         own.iter()
             .find(|landed| {
                 total = total.saturating_add(landed.units);
-                hp_of_units(total) - taken_before >= settle.held
+                pool_units_of(total) - taken_before >= settle.held
             })
             .or(own.last())
             .map(|landed| landed.context)
     }
 }
 
-/// The HP this shot has taken so far from pools that belong to a tank (a [`VolumeOf`] node): what
-/// a hit confirmation may count. A pool nothing owns — a tree's — is dosed the same way and
-/// counts for nothing here.
+/// The shown points ([`ShotDose::shown_losses`]) this shot has taken so far from pools that belong
+/// to a tank (a [`VolumeOf`] node): what a hit confirmation counts, so the shooter's marker follows
+/// the struck tank's display. A pool nothing owns — a tree's — is dosed the same way and counts for
+/// nothing here.
 fn owned_losses(dose: &ShotDose, owners: &Query<&VolumeOf>) -> u32 {
-    dose.losses()
+    dose.shown_losses()
         .filter(|(volume, _)| owners.contains(*volume))
         .map(|(_, lost)| lost)
         .sum()
@@ -994,11 +1050,14 @@ pub(crate) struct ShellTerminal {
     pub after_bounces: u32,
 }
 
-/// Authority-only report that a keyed shot first lowered an HP pool. [`DamageReport`] emits it at
-/// most once; the private wire receipt intentionally carries no HP amount.
+/// Authority-only report that a keyed shot first took a shown HP point from a tank's pool
+/// ([`ShotDose::shown_losses`]), so the shooter's hit marker follows what the struck tank shows.
+/// [`DamageReport`] emits it at most once; the private wire receipt intentionally carries no HP
+/// amount.
 #[derive(Event)]
 pub(crate) struct ShellDamage {
     pub shot: ShotId,
+    /// The shown HP points this step took from the tank's pools.
     pub amount: u32,
 }
 
@@ -1289,15 +1348,87 @@ pub struct ExternalArmour;
 #[derive(Component)]
 pub struct ComponentVolume;
 
-/// A component's HP pool (crew/module/ammo, a tree's trunk), in whole HP points. A shot takes from
-/// it its dose rounded once per box per shot ([`ShotDose`]): the energy the main penetrator lost
-/// crossing it (a crew station: its chord at the round's crew line rate), a bounce's shock, and
-/// each spall cone direction entering it (design §§5–6). `current` stops at 0; what an emptied pool
-/// does (a cook-off, a station out of action, a module knocked out, a tree down) is the owner's.
-#[derive(Component)]
+/// A component's HP pool (crew/module/ammo, a tree's trunk): its size in whole HP points, as data
+/// authors it, and what it holds in pool units ([`POOL_UNITS_PER_HP`] per point). A shot takes from
+/// it its dose converted to pool units once per box per shot ([`ShotDose`]): the energy the main
+/// penetrator lost crossing it (a crew station: its chord at the round's crew line rate), a
+/// bounce's shock, and each spall cone direction entering it (design §§5–6). No fraction of a point
+/// is dropped, so doses below a point accumulate; the pool is emptied when what it holds reaches
+/// zero, and stops there. What an emptied pool does (a cook-off, a station out of action, a module
+/// knocked out, a tree down) is the owner's. Every view reads [`Self::shown`], never what it holds.
+#[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 pub struct ComponentHealth {
-    pub current: u32,
-    pub max: u32,
+    /// Pool units held, at most `points × POOL_UNITS_PER_HP`.
+    held: u32,
+    /// The pool's size, in whole HP points, at most [`MAX_POOL_POINTS`].
+    points: u32,
+}
+
+impl ComponentHealth {
+    /// A full pool of `points` whole HP points; a size past [`MAX_POOL_POINTS`] (which every parse
+    /// refuses) saturates there.
+    pub fn full(points: u32) -> Self {
+        let points = points.min(MAX_POOL_POINTS);
+        Self {
+            held: points * POOL_UNITS_PER_HP,
+            points,
+        }
+    }
+
+    /// A pool of `points` whole HP points holding `held` pool units, at most full.
+    #[cfg(test)]
+    pub fn holding(points: u32, held: u32) -> Self {
+        let mut pool = Self::full(points);
+        pool.set_held(held);
+        pool
+    }
+
+    /// The pool's size, in whole HP points.
+    pub fn points(&self) -> u32 {
+        self.points
+    }
+
+    /// The pool units it holds.
+    pub fn held(&self) -> u32 {
+        self.held
+    }
+
+    /// The pool units it holds when full.
+    pub fn capacity(&self) -> u32 {
+        self.points * POOL_UNITS_PER_HP
+    }
+
+    /// It holds nothing: the HP pool emptied, its station or module knocked out.
+    pub fn is_empty(&self) -> bool {
+        self.held == 0
+    }
+
+    /// The HP points it shows ([`shown_points`]): whole points, rounded up.
+    pub fn shown(&self) -> u32 {
+        shown_points(self.held)
+    }
+
+    /// Take up to `units` pool units, stopping at empty; returns the pool units taken.
+    pub fn take(&mut self, units: u32) -> u32 {
+        let taken = units.min(self.held);
+        self.held -= taken;
+        taken
+    }
+
+    /// Empty it at once.
+    pub fn drain(&mut self) {
+        self.held = 0;
+    }
+
+    /// Fill it.
+    pub fn refill(&mut self) {
+        self.held = self.capacity();
+    }
+
+    /// Hold `held` pool units, at most full: a replica writing the authority's state.
+    pub fn set_held(&mut self, held: u32) {
+        self.held = held.min(self.capacity());
+    }
 }
 
 /// One crossing of a ballistic volume by the penetrator: where it entered and exited the solid.
@@ -1469,7 +1600,7 @@ pub struct SpallMarks {
     pub cones: Vec<SpallCone>,
     /// The round's burst field, once it has burst and thrown one.
     pub burst: Option<BurstField>,
-    /// Fields reached whose emission was below the HP quantum and not thrown: body exits' cones
+    /// Fields reached whose emission was below the pool quantum and not thrown: body exits' cones
     /// and a burst's.
     pub gated: usize,
 }
@@ -2089,7 +2220,8 @@ struct MarchStep {
     /// The shell froze at armor contact awaiting its authority verdict — distinct from `stopped`,
     /// which despawns.
     holding: bool,
-    /// HP the authority actually removed this step, across every crossing and every spall fragment.
+    /// Pool units the authority actually removed this step, across every crossing and every spall
+    /// fragment.
     damage_dealt: u32,
 }
 
@@ -2282,8 +2414,9 @@ fn integrate_projectiles(
 
         // A state snapshot cannot preserve how many shots caused its resulting HP. Raise one discrete,
         // shot-attributed fact; `net::shot_transport` routes it reliably to the fire-time owner.
-        // Only HP taken from a tank's pools confirms a hit: a tree's pool is dosed the same way
-        // and must not read as "hit the enemy".
+        // Only a shown point taken from a tank's pools confirms a hit, so the marker follows the
+        // struck tank's display: a tree's pool is dosed the same way and must not read as "hit the
+        // enemy".
         if deposit
             && step.damage_dealt > 0
             && !damage_report.0
@@ -3774,7 +3907,7 @@ fn resolve_replica_armor_contact(
 /// [`SpallMarks::burst`] and adding its doses to the shot's [`ShotDose`]. Its strength `S` is the
 /// burst's driven-mass energy at the burst fields' rate ([`spall_cone::BurstFields::strength`]),
 /// its field the ring at ratio `speed / v_s` ([`spall_cone::BurstFields::field`]), walked through
-/// the volumes of `tank`, the fuze's, leaving none. A field whose emission converts to no HP point
+/// the volumes of `tank`, the fuze's, leaving none. A field whose emission converts to no pool unit
 /// is not thrown, as a cone's is not ([`throw_spall_cone`]); one outside its law's domain throws
 /// nothing and logs why.
 fn throw_burst(
@@ -3798,7 +3931,7 @@ fn throw_burst(
         tank,
         exited: &[],
     };
-    if hp_of_units(field_units(throw.strength * spall_cone::EMITTED_SHARE)) == 0 {
+    if pool_units_of(field_units(throw.strength * spall_cone::EMITTED_SHARE)) == 0 {
         shell.spall.gated += 1;
         return;
     }
@@ -3918,10 +4051,11 @@ fn walk_field(
 /// shot's [`ShotDose`] (design doc §5). Returns whether it was thrown.
 ///
 /// Strength `S` is [`walk::SpallSource::strength`], in reference-mm. A cone whose whole emission
-/// `S/2` converts to no HP point at the field's rate ([`field_units`], the rate every one of its
-/// doses converts at) is not thrown: no direction is walked and nothing is recorded. `S/2` is the
-/// most one box can take from it, since every direction doses a box at most once and the field's
-/// weights emit `S/2` in all ([`spall_cone::EMITTED_SHARE`]). Otherwise the cone is spread by the
+/// `S/2` converts to no pool unit at the field's rate ([`field_units`], the rate every one of its
+/// doses converts at; [`pool_units_of`], the quantum a pool keeps) is not thrown: no direction is
+/// walked and nothing is recorded. `S/2` is the most one box can take from it, since every
+/// direction doses a box at most once and the field's weights emit `S/2` in all
+/// ([`spall_cone::EMITTED_SHARE`]). Otherwise the cone is spread by the
 /// ball law at the source's ratio ([`walk::SpallSource::debris_ratio`]): direction `k` of the
 /// spread ([`spall_cone::Spread`]) carries `S·f_k` and stands for `1/N` of the cone, walked
 /// through the volumes of `tank`, the struck tank, alone ([`walk_field`]). A ratio outside the
@@ -3941,7 +4075,7 @@ fn throw_spall_cone(
         .as_deref()
         .map_or(spall_cone::ConeShape::shipped(), |law| &law.0);
     let strength = source.strength();
-    if hp_of_units(field_units(strength * spall_cone::EMITTED_SHARE)) == 0 {
+    if pool_units_of(field_units(strength * spall_cone::EMITTED_SHARE)) == 0 {
         spall.gated += 1;
         return false;
     }
@@ -4004,35 +4138,30 @@ mod tests {
         along: Vec3::NEG_Z,
     };
 
-    /// A dose converts to the nearest whole HP point, ties away from zero; none for a negative or
-    /// NaN dose.
+    /// A dose converts to the nearest pool unit, ties away from zero; none for a negative or NaN
+    /// dose. Fixture doses (reference-mm, 10 HP points each).
     #[test]
-    fn a_dose_converts_to_the_nearest_hp_point() {
-        assert_eq!(hp_points(0.0), 0);
-        assert_eq!(hp_points(0.04), 0);
+    fn a_dose_converts_to_the_nearest_pool_unit() {
+        assert_eq!(pool_units(0.0), 0);
+        assert_eq!(pool_units(0.000_04), 0, "0.4 of a unit");
         assert_eq!(
-            hp_points(0.25),
-            3,
-            "2.5 points, a tie, round away from zero"
+            pool_units(0.000_05),
+            1,
+            "half a unit, a tie, rounds away from zero"
         );
-        assert_eq!(hp_points(3.0), 30);
-        assert_eq!(hp_points(-1.0), 0);
-        assert_eq!(hp_points(f32::NAN), 0);
+        assert_eq!(pool_units(3.0), 30 * POOL_UNITS_PER_HP);
+        assert_eq!(pool_units(-1.0), 0);
+        assert_eq!(pool_units(f32::NAN), 0);
     }
 
-    /// A box loses its shot's dose rounded once on its total: doses each below half a point add up
-    /// before they are rounded, a settle mid-shot takes only what the rounded total has gained
-    /// since the last, and the pool stops at zero. Fixture doses (reference-mm).
+    /// A box loses its shot's dose converted once on its total: doses each below half a pool unit
+    /// add up before they are converted, a settle mid-shot takes only what the converted total has
+    /// gained since the last, and the pool stops at zero. Fixture doses (reference-mm).
     #[test]
-    fn a_shots_dose_is_rounded_once_per_box() {
+    fn a_shots_dose_is_converted_once_per_box() {
         use bevy::ecs::system::RunSystemOnce;
         let mut world = World::new();
-        let target = world
-            .spawn(ComponentHealth {
-                current: 30,
-                max: 30,
-            })
-            .id();
+        let target = world.spawn(ComponentHealth::full(30)).id();
         world.spawn(ShotDose::default());
         let dose = |world: &mut World, amounts: &[f32]| -> u32 {
             let amounts = amounts.to_vec();
@@ -4049,20 +4178,67 @@ mod tests {
                 )
                 .unwrap()
         };
+        let full = 30 * POOL_UNITS_PER_HP;
         assert_eq!(
-            dose(&mut world, &[0.04; 10]),
+            dose(&mut world, &[0.000_04; 10]),
             4,
-            "ten 0.4-point doses take 4 points"
+            "ten 0.4-unit doses take 4 units"
         );
         assert_eq!(
-            dose(&mut world, &[0.03]),
+            dose(&mut world, &[0.000_03]),
             0,
-            "4.3 points rounds to the 4 taken"
+            "4.3 units converts to the 4 taken"
         );
-        assert_eq!(dose(&mut world, &[0.03]), 1, "4.6 points rounds to 5");
-        assert_eq!(world.get::<ComponentHealth>(target).unwrap().current, 25);
-        assert_eq!(dose(&mut world, &[100.0]), 25, "the pool stops at zero");
-        assert_eq!(world.get::<ComponentHealth>(target).unwrap().current, 0);
+        assert_eq!(dose(&mut world, &[0.000_03]), 1, "4.6 units converts to 5");
+        assert_eq!(
+            world.get::<ComponentHealth>(target).unwrap().held(),
+            full - 5
+        );
+        assert_eq!(
+            dose(&mut world, &[100.0]),
+            full - 5,
+            "the pool stops at zero"
+        );
+        assert!(world.get::<ComponentHealth>(target).unwrap().is_empty());
+    }
+
+    /// The game's damage model keeps fractions: shots whose dose is each below half an HP point
+    /// accumulate in the pool and eventually empty it, and the pool shows full until a whole point
+    /// is gone. Each fixture shot doses 0.47 HP points (a 0.047 reference-mm shock) into a 3-point
+    /// pool, every shot its own [`ShotDose`]. A per-shot rounding to whole points (which takes none
+    /// of each and never empties the pool), a display that rounds down or to nearest (which shows a
+    /// lost point after the first or second shot), or an emptying short of the whole pool fails
+    /// here. Every view reads [`ComponentHealth::shown`] and relies on it.
+    #[test]
+    fn doses_below_half_a_point_accumulate_and_show_only_whole_points() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let target = world.spawn(ComponentHealth::full(3)).id();
+        let shoot = |world: &mut World| -> bool {
+            world
+                .run_system_once(move |mut health: Query<&mut ComponentHealth>| {
+                    let mut shot = ShotDose::default();
+                    shot.add(target, 0.047, FIXTURE_CONTEXT);
+                    shot.settle(&mut health, true, 0);
+                    shot.emptied().contains(&target)
+                })
+                .unwrap()
+        };
+        // 0.47 points a shot: 3 / 0.47 = 6.4, so the seventh empties it (DERIVED).
+        let shown = [3, 3, 2, 2, 1, 1, 0];
+        for (shot, shown) in shown.into_iter().enumerate() {
+            let emptied = shoot(&mut world);
+            let pool = *world.get::<ComponentHealth>(target).unwrap();
+            assert_eq!(pool.shown(), shown, "after shot {}", shot + 1);
+            assert_eq!(emptied, shot == 6, "shot {} empties it", shot + 1);
+            assert_eq!(pool.is_empty(), shot == 6, "after shot {}", shot + 1);
+        }
+        let short = ComponentHealth::holding(3, 3 * POOL_UNITS_PER_HP - 999);
+        assert_eq!(
+            (short.shown(), short.points()),
+            (3, 3),
+            "0.999 points lost shows undamaged"
+        );
     }
 
     /// The deposit that empties a pool is the one whose running sum, in the settlement that
@@ -4079,12 +4255,7 @@ mod tests {
         let field = DoseContext::Field { origin: Vec3::X };
         let pool = || {
             let mut world = World::new();
-            let target = world
-                .spawn(ComponentHealth {
-                    current: 10,
-                    max: 10,
-                })
-                .id();
+            let target = world.spawn(ComponentHealth::full(10)).id();
             world.spawn(ShotDose::default());
             (world, target)
         };
@@ -4129,10 +4300,10 @@ mod tests {
         );
     }
 
-    /// A box's HP lost depends only on the multiset of its contributions, never their order:
-    /// several cones' rays summed forward, reversed, sorted either way, interleaved and shuffled
-    /// take the same points, including totals beside a rounding tie. Fixture doses (reference-mm),
-    /// each cone 256 equal rays.
+    /// What a box's pool loses depends only on the multiset of its contributions, never their
+    /// order: several cones' rays summed forward, reversed, sorted either way, interleaved and
+    /// shuffled take the same pool units, including totals beside a conversion tie. Fixture doses
+    /// (reference-mm), each cone 256 equal rays.
     #[test]
     fn a_boxs_hp_lost_is_independent_of_the_order_of_its_doses() {
         let target = Entity::from_raw_u32(1).unwrap();
@@ -4142,7 +4313,7 @@ mod tests {
             for amount in amounts {
                 shot.add(target, *amount, FIXTURE_CONTEXT);
             }
-            hp_of_units(shot.tallies[0].units)
+            pool_units_of(shot.tallies[0].units)
         };
         let shot_sets: [Vec<Vec<f32>>; 4] = [
             vec![cone(0.05), cone(0.1)],
@@ -4181,32 +4352,38 @@ mod tests {
             }
         }
         assert_eq!(
-            hp_of_units(3 * DOSE_UNITS_PER_HP / 2),
+            pool_units_of(3 * DOSE_UNITS_PER_POOL_UNIT / 2),
             2,
-            "1.5 points, a tie, rounds away from zero"
+            "1.5 units, a tie, rounds away from zero"
         );
-        assert_eq!(hp_of_units(3 * DOSE_UNITS_PER_HP / 2 - 1), 1);
+        assert_eq!(pool_units_of(3 * DOSE_UNITS_PER_POOL_UNIT / 2 - 1), 1);
     }
 
-    /// The least counted share is the rounding's own edge: a total of that share of one HP point
-    /// converts to one point and a unit less to none. The pen cam's floor band
-    /// (`pen_cam::potency::Potency::floor`) is that share over the crew face and relies on it; a
-    /// share read as a whole point, or as a truncating rounding's, fails here.
+    /// The least shown dose is the display's own edge: a full pool dosed that share of one HP point
+    /// shows a lost point, and a dose unit less shows full. The pen cam's floor band
+    /// (`pen_cam::potency::Potency::floor`) is that dose over the crew face and relies on it; a
+    /// floor read as the sim's quantum, as half a point, or as a whole point the conversion's half
+    /// unit undercuts, fails here. Fixture pool: 30 HP points.
     #[test]
-    fn the_least_counted_hp_is_the_roundings_edge() {
-        let units = (least_counted_hp() * DOSE_UNITS_PER_HP as f64).round() as u64;
-        assert_eq!(hp_of_units(units), 1);
-        assert_eq!(hp_of_units(units - 1), 0);
+    fn the_least_shown_hp_is_the_displays_edge() {
+        let units = (least_shown_hp() * DOSE_UNITS_PER_HP as f64).round() as u64;
+        let shown_after = |units: u64| {
+            let mut pool = ComponentHealth::full(30);
+            pool.take(pool_units_of(units));
+            pool.shown()
+        };
+        assert_eq!(shown_after(units), 29);
+        assert_eq!(shown_after(units - 1), 30);
     }
 
     /// EACH SOURCE CONVERTS AT ITS OWN RATE: a field deposit at the field's HP points per
     /// reference-mm ([`spall_cone::hp_per_reference_mm`]); a hard box's line deposit, joules, at
     /// the energy rate ([`energy_dose::joules_per_hp`]); a bounce's shock and a witness's chord
     /// dose at [`HP_PER_REFERENCE_MM`]; mixed deposits sum as whole dose units, in either order,
-    /// before the one rounding. The HP quantum gate and the pen cam's reading of which boxes a cone knocks out
-    /// rely on every field deposit converting at the field's rate, and every hard pool on its line
-    /// dose converting at the one energy rate. Fixture doses: 1 reference-mm in the field and the
-    /// shock, two HP points' worth of joules on the line.
+    /// before the one conversion. The pool quantum gate and the pen cam's reading of which boxes a
+    /// cone knocks out rely on every field deposit converting at the field's rate, and every hard
+    /// pool on its line dose converting at the one energy rate. Fixture doses: 1 reference-mm in
+    /// the field and the shock, two HP points' worth of joules on the line.
     #[test]
     fn each_dose_converts_at_its_sources_rate() {
         use mechanism::{Dose, DoseSource};
@@ -4230,7 +4407,7 @@ mod tests {
             for shock in shocks {
                 shot.add(target, *shock, FIXTURE_CONTEXT);
             }
-            hp_of_units(shot.tallies[0].units)
+            shown_points(pool_units_of(shot.tallies[0].units))
         };
         let field_rate = u32::try_from(spall_cone::hp_per_reference_mm()).unwrap();
         let shock_rate = u32::try_from(HP_PER_REFERENCE_MM).unwrap();
@@ -4985,7 +5162,7 @@ mod march_tests {
 
         // The components belong to a tank: only HP taken from a tank's pools confirms a hit.
         let tank = app.world_mut().spawn_empty().id();
-        let spawn_component = |app: &mut App, z: f32, current: u32| {
+        let spawn_component = |app: &mut App, z: f32, held: u32| {
             app.world_mut()
                 .spawn((
                     Transform::from_translation(Vec3::new(0.0, 2.0, z)),
@@ -4996,14 +5173,14 @@ mod march_tests {
                         material: walk::VolumeMaterial::fixture(1.0),
                         substance: "RHA".to_string(),
                     },
-                    ComponentHealth { current, max: 1000 },
+                    ComponentHealth::holding(1000, held),
                     VolumeOf(tank),
                 ))
                 .id()
         };
         let spent = spawn_component(&mut app, -20.0, 0);
-        let first_live = spawn_component(&mut app, -40.0, 1000);
-        let second_live = spawn_component(&mut app, -60.0, 1000);
+        let first_live = spawn_component(&mut app, -40.0, 1000 * POOL_UNITS_PER_HP);
+        let second_live = spawn_component(&mut app, -60.0, 1000 * POOL_UNITS_PER_HP);
         for _ in 0..8 {
             app.update();
         }
@@ -5047,11 +5224,11 @@ mod march_tests {
         for _ in 0..8 {
             app.update();
         }
-        let health = |entity| app.world().get::<ComponentHealth>(entity).unwrap().current;
+        let health = |entity| app.world().get::<ComponentHealth>(entity).unwrap().shown();
         assert_eq!(health(spent), 0, "zero HP cannot produce a fake decrease");
         assert!(
             health(first_live) < 1000,
-            "the first live component took damage"
+            "the first live component shows damage"
         );
         assert!(
             health(second_live) < 1000,

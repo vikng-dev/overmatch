@@ -54,7 +54,7 @@ const OBSERVER_CLIENT_ID: u64 = 2;
 /// Fixed, match-local test identity inserted synchronously with the server-side shooter spawn.
 const SHOOTER_COMBATANT: CombatantId = CombatantId(1);
 /// Non-default owner-private snapshots prove the disclosure filter, rather than mere component setup.
-const OWNER_SNAPSHOT_HP: u32 = 73;
+const OWNER_SNAPSHOT_HELD: u32 = 73;
 const OWNER_BELT: u32 = 17;
 
 /// Shots fired by the scripted run: both delivery classes, alternating.
@@ -426,7 +426,7 @@ fn spawn_owned_shooter(
                 SHOOTER_COMBATANT,
                 NetCrew {
                     volumes: vec![VolumeSnapshot {
-                        hp: OWNER_SNAPSHOT_HP,
+                        held: OWNER_SNAPSHOT_HELD,
                         crew: None,
                     }],
                     swap: None,
@@ -724,10 +724,7 @@ fn spawn_plate(app: &mut App) {
         VolumeOf(owner),
         // High enough that all scripted ricochet shocks lower HP without saturating. This makes every
         // shot generate one real authority-side `ShellDamage` while preserving the same bounce geometry.
-        ComponentHealth {
-            current: 100_000,
-            max: 100_000,
-        },
+        ComponentHealth::full(100_000),
     ));
 }
 
@@ -1163,7 +1160,7 @@ fn every_shot_spawns_exactly_one_shell_under_ten_percent_loss() {
         .any(|(crew, gate)| {
             crew.volumes
                 == [VolumeSnapshot {
-                    hp: OWNER_SNAPSHOT_HP,
+                    held: OWNER_SNAPSHOT_HELD,
                     crew: None,
                 }]
                 && crew.swap.is_none()

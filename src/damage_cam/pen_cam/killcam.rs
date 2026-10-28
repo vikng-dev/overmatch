@@ -146,7 +146,7 @@ pub fn knockout(report: &PenetrationReport) -> Option<KnockoutReason> {
         .collect();
     let living = crew
         .iter()
-        .filter(|component| component.hp > 0 && !lost(&component.name))
+        .filter(|component| component.held > 0 && !lost(&component.name))
         .count();
     let cooked = report
         .consequences

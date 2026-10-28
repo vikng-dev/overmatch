@@ -1153,10 +1153,7 @@ mod tests {
         for component in report("s9_breech_and_loader").components {
             app.world_mut().spawn((
                 Name::new(component.name),
-                crate::ballistics::ComponentHealth {
-                    current: component.count,
-                    max: component.count,
-                },
+                crate::ballistics::ComponentHealth::full(component.count),
                 crate::damage::VolumeOf(player),
             ));
         }
@@ -1433,9 +1430,9 @@ mod tests {
                 let mut volumes = world.query::<&mut crate::ballistics::ComponentHealth>();
                 let mut health = volumes
                     .iter_mut(world)
-                    .find(|health| health.max > 1)
+                    .find(|health| health.points() > 1)
                     .expect("fixture data: a component with a pool to lose points of");
-                health.current -= 1;
+                health.take(crate::ballistics::POOL_UNITS_PER_HP);
             }
             let originals: Vec<AssetId<StandardMaterial>> = meshes
                 .iter()
@@ -1562,10 +1559,7 @@ mod tests {
         for component in fixture.components {
             world.spawn((
                 Name::new(component.name),
-                crate::ballistics::ComponentHealth {
-                    current: component.count,
-                    max: component.count,
-                },
+                crate::ballistics::ComponentHealth::full(component.count),
                 crate::damage::VolumeOf(target),
             ));
         }
@@ -1897,9 +1891,9 @@ mod tests {
             let mut volumes = world.query::<&mut crate::ballistics::ComponentHealth>();
             let mut health = volumes
                 .iter_mut(world)
-                .find(|health| health.max > 1)
+                .find(|health| health.points() > 1)
                 .expect("fixture data: a component with a pool to lose points of");
-            health.current -= 1;
+            health.take(crate::ballistics::POOL_UNITS_PER_HP);
         }
         run(&mut app, 0.1);
         assert_ne!(pools(&app), before, "the live loss reaches the x-ray");

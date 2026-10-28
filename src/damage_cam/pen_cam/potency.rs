@@ -1,7 +1,8 @@
 //! The pen cam's potency bands: a field's local intensity at a point, and the band that intensity
 //! falls in ([`Band`]). Pure functions of the record's field (a spall cone or a burst's), the
 //! shipped data (the field's rate, `assets/ballistics/spall_cone.ron`; the crew pool,
-//! `assets/ballistics/box_classes.ron`), the sim's HP rounding, and the struck tank's crew face.
+//! `assets/ballistics/box_classes.ron`), the display's whole point (`ballistics::least_shown_hp`),
+//! and the struck tank's crew face.
 //! The law, its thresholds and its promise are design doc §5, "Potency colour"
 //! (`.agents/docs/design/armor-penetration-and-damage.md`).
 //!
@@ -40,10 +41,11 @@ pub struct Potency {
 /// Where an intensity falls, for a crew station presenting its face wholly at it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Band {
-    /// Below the floor: the dose its face takes rounds to no HP point.
+    /// Below the floor: a full pool keeps the dose its face takes and shows no lost point.
     Nothing,
-    /// From the floor up to mid: its pool is dosed, and usually not emptied; from `mid − floor` up
-    /// its face's total rounds to the whole pool.
+    /// From the floor up to mid: a full pool shows a lost point and is not emptied, short of the
+    /// last half pool unit below mid, which converts to the whole pool
+    /// (`ballistics::pool_units_of`).
     Reduced,
     /// At or above mid: its HP pool is emptied.
     Knockout,
@@ -179,23 +181,24 @@ mod tests {
     use super::*;
 
     /// A fixture potency: a 30 HP crew pool, apart from the shipped one, over a 0.25 m² crew face,
-    /// so 120 and 2 HP points per m² (DERIVED).
+    /// so 120 and 3.998 HP points per m² (DERIVED).
     fn fixture() -> Potency {
         let classes = BoxClasses::from_ron(r#"(crew_hp: (30, Tuned("fixture")))"#).unwrap();
         Potency::of(&classes, 0.25, 70.0)
     }
 
-    /// The bands part at the crew pool and the sim's least counted share of an HP point, each over
-    /// the struck tank's crew face as its sim geometry has it, never at the look's own numbers:
-    /// fixture 120 and 2 HP points per m² over 0.25 m²; the bound tank's over its crew face
-    /// (0.2033 m², MEASURED: 147.5 and 2.46, DERIVED), the rate the field's calibration; and a
+    /// The bands part at the crew pool and the least dose a full pool shows a lost point at, each
+    /// over the struck tank's crew face as its sim geometry has it, never at the look's own
+    /// numbers: fixture 120 and 3.998 HP points per m² over 0.25 m²; the bound tank's over its crew
+    /// face (0.2033 m², MEASURED: 147.5 and 4.92, DERIVED), the rate the field's calibration; and a
     /// tank with no crew station has no bands. The band promise relies on it; a threshold authored
-    /// in the look or over a face held in data, a floor dropped to zero, one read as a whole HP
-    /// point, or bands for a tank with no crew station fails here.
+    /// in the look or over a face held in data, a floor dropped to zero, one read as half a point,
+    /// or bands for a tank with no crew station fails here.
     #[test]
     fn the_thresholds_read_the_crew_pool_over_the_tanks_crew_face() {
         let fixture = fixture();
-        assert_eq!((fixture.floor, fixture.mid), (2.0, 120.0));
+        assert_eq!(fixture.mid, 120.0);
+        assert!((fixture.floor - 3.998).abs() < 1e-6, "{}", fixture.floor);
         let asset = crate::damage_cam::shapes::TankAsset::load(crate::tank::TIGER_SPEC_PATH)
             .expect("the bound tank loads");
         let face = asset.crew_face().expect("the bound tank has crew");
@@ -204,7 +207,7 @@ mod tests {
         assert_eq!(bound.mid, classes.potency_thresholds(face).mid);
         assert_eq!(bound.floor, classes.potency_thresholds(face).floor);
         assert_eq!(bound.mid, classes.crew_hp() as f32 / face);
-        let share = crate::ballistics::least_counted_hp() as f32 / classes.crew_hp() as f32;
+        let share = crate::ballistics::least_shown_hp() as f32 / classes.crew_hp() as f32;
         assert!((bound.floor / bound.mid - share).abs() < 1e-6 * share);
         assert!(bound.floor > 0.0 && bound.floor < bound.mid);
         assert_eq!(bound.rate, spall_cone::hp_per_reference_mm() as f32);

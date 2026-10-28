@@ -178,7 +178,13 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// REV 36 is unshipped, so the flight-nose drag form rides it: a replica builds the fired round
 /// from its own data, and peers on opposite sides would fly one shot on different drag and range
 /// tables even though the drag change adds no wire fields.
-pub const PROTOCOL_REV: u32 = 36;
+///
+/// REV 37 (the game's damage model keeps fractional pools): [`VolumeSnapshot`]'s `held` (was
+/// `hp`), a record's `WireComponent::held` (was `hp`) and `WireDose::taken` (was `lost`) carry pool
+/// units (`ballistics::POOL_UNITS_PER_HP`, a thousandth of an HP point) instead of whole points.
+/// Postcard writes a renamed `u32` the same, so a REV 36 peer would read every pool a thousand
+/// times fuller: own-type graph and REV move.
+pub const PROTOCOL_REV: u32 = 37;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -300,8 +306,10 @@ pub struct CrewSnapshot {
 /// One health-bearing volume and, for crew seats, its occupant facts.
 #[derive(Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct VolumeSnapshot {
-    /// The volume's live `ComponentHealth.current`, in whole HP points.
-    pub hp: u32,
+    /// What the volume's pool holds (`ComponentHealth::held`), in pool units
+    /// (`ballistics::POOL_UNITS_PER_HP` per HP point): the sim's own figure, which a view rounds
+    /// (`ComponentHealth::shown`).
+    pub held: u32,
     /// The occupant facts for a crew seat; `None` for a module or ammo volume.
     pub crew: Option<CrewSnapshot>,
 }
@@ -581,10 +589,13 @@ fn publish_net_crew(
                 .iter()
                 .map(|&v| {
                     let Ok(src) = sources.get(v) else {
-                        return VolumeSnapshot { hp: 0, crew: None };
+                        return VolumeSnapshot {
+                            held: 0,
+                            crew: None,
+                        };
                     };
                     VolumeSnapshot {
-                        hp: src.health.current,
+                        held: src.health.held(),
                         // A crew seat carries its occupant's home (defaulting to the seat before any
                         // backfill) and the authority's monotonic aliveness.
                         crew: src.crew.map(|seat| CrewSnapshot {
@@ -641,7 +652,7 @@ fn apply_net_crew(
             let Ok(mut sink) = volumes.get_mut(volume) else {
                 continue;
             };
-            sink.health.current = snap.hp;
+            sink.health.set_held(snap.held);
             if let Some(crew) = snap.crew {
                 if let Some(mut crewman) = sink.crewman
                     && crewman.home != crew.home
@@ -938,7 +949,7 @@ const WIRE_SURFACE_HASH: u64 = 0xe49d_85fe_dfc6_1280;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xe055_c872_79f8_26d2;
+const WIRE_TYPES_HASH: u64 = 0xb439_5beb_27c1_6d11;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1937,23 +1948,28 @@ mod tests {
         );
     }
 
-    /// The game's damage model sends box doses in HP points before rounding. Reference-mm
-    /// records used the same scalar types through REV 35, so the protocol revision must separate
-    /// the two meanings even when the wire type graph is unchanged; the pen cam relies on it.
+    /// The game's damage model sends box doses in HP points before conversion, and every pool
+    /// figure (a crew snapshot's, a record's) in pool units. Reference-mm record doses used the
+    /// same scalar types through REV 35, and whole-point pools through REV 36, so the protocol
+    /// revision must separate each meaning even when the wire bytes are laid out the same; the pen
+    /// cam, the damage panel and the HUD's cues rely on it. A unit change that forgets the bump
+    /// fails here.
     #[test]
-    fn hp_dose_records_use_a_distinct_protocol_from_reference_mm_records() {
-        let reference_mm_records = protocol_fingerprint_for(
-            WIRE_SURFACE_HASH,
-            WIRE_TYPES_HASH,
-            WIRE_DEP_AVIAN3D,
-            WIRE_DEP_LIGHTYEAR,
-            35,
-            env!("CARGO_PKG_VERSION"),
-        );
-        assert_ne!(
-            PROTOCOL_FINGERPRINT, reference_mm_records,
-            "HP and reference-mm record consumers must not share a protocol"
-        );
+    fn every_dose_and_pool_unit_uses_a_distinct_protocol() {
+        for (rev, what) in [(35, "reference-mm record doses"), (36, "whole-point pools")] {
+            let older = protocol_fingerprint_for(
+                WIRE_SURFACE_HASH,
+                WIRE_TYPES_HASH,
+                WIRE_DEP_AVIAN3D,
+                WIRE_DEP_LIGHTYEAR,
+                rev,
+                env!("CARGO_PKG_VERSION"),
+            );
+            assert_ne!(
+                PROTOCOL_FINGERPRINT, older,
+                "a consumer of {what} must not share a protocol"
+            );
+        }
     }
 
     /// THE WORLD IS PART OF THE HANDSHAKE. The tag both endpoints hand netcode is not the wire
@@ -2250,7 +2266,8 @@ mod tests {
         use crate::ballistics::ComponentHealth;
         use crate::damage::{Crewman, Dead, VolumeOf};
 
-        const FULL: u32 = 1000;
+        const POINTS: u32 = 1000;
+        const FULL: u32 = POINTS * crate::ballistics::POOL_UNITS_PER_HP;
 
         let mut world = World::new();
 
@@ -2263,14 +2280,14 @@ mod tests {
                 NetCrew {
                     volumes: vec![
                         VolumeSnapshot {
-                            hp: FULL,
+                            held: FULL,
                             crew: Some(CrewSnapshot {
                                 home: CrewStation::Gunner,
                                 dead: false,
                             }),
                         },
                         VolumeSnapshot {
-                            hp: 0,
+                            held: 0,
                             crew: Some(CrewSnapshot {
                                 home: CrewStation::Loader,
                                 dead: true,
@@ -2291,10 +2308,7 @@ mod tests {
                 Crewman {
                     home: CrewStation::Loader,
                 },
-                ComponentHealth {
-                    current: FULL,
-                    max: FULL,
-                },
+                ComponentHealth::full(POINTS),
                 Dead,
                 VolumeOf(root),
             ))
@@ -2309,10 +2323,7 @@ mod tests {
                 Crewman {
                     home: CrewStation::Gunner,
                 },
-                ComponentHealth {
-                    current: 0,
-                    max: FULL,
-                },
+                ComponentHealth::holding(POINTS, 0),
                 Dead,
                 VolumeOf(root),
             ))
@@ -2322,7 +2333,7 @@ mod tests {
 
         // Seat A is the live Gunner again: HP restored, occupant home restored, `Dead` cleared.
         assert_eq!(
-            world.get::<ComponentHealth>(seat_a).unwrap().current,
+            world.get::<ComponentHealth>(seat_a).unwrap().held(),
             FULL,
             "seat A keeps the authoritative full HP",
         );

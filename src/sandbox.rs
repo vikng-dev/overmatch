@@ -1016,7 +1016,7 @@ fn clear_shots(
     }
     // Reset accumulated component damage so the next shot reads against a fresh target.
     for mut hp in &mut health {
-        hp.current = hp.max;
+        hp.refill();
     }
     for entity in &dead {
         commands.entity(entity).remove::<Dead>();

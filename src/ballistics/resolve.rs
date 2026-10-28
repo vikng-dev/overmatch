@@ -1846,7 +1846,7 @@ fn apply_bite(
         }
     };
     // Every exit the round reached throws, whether it then stopped or went on, unless its cone is
-    // below the HP quantum.
+    // below the pool quantum.
     let mut cones = 0;
     for source in &bite.spall {
         if throw_spall_cone(shell.spall, shell.dose, source, bite.owner, context, is_box) {

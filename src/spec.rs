@@ -1130,13 +1130,22 @@ impl TankSpec {
     /// - `belt_swap_secs == 0.0` / `reload_secs == 0.0` — a degenerate instant reload, not bricked
     ///   (the belt refills / the gun readies immediately); left legal.
     pub fn validate(&self) -> Result<(), BevyError> {
-        // Components: an HP pool of zero is a component that is dead on arrival.
+        // Components: an HP pool of zero is a component that is dead on arrival, and one past
+        // `MAX_POOL_POINTS` is one no pool holds in pool units.
         for (node, volume) in &self.volumes {
             let Some(volume) = volume.component() else {
                 continue;
             };
             if volume.hp == 0 {
                 return Err(format!("component `{node}`: hp must be > 0 (got 0)").into());
+            }
+            if volume.hp > crate::ballistics::MAX_POOL_POINTS {
+                return Err(format!(
+                    "component `{node}`: hp must be at most {} (got {})",
+                    crate::ballistics::MAX_POOL_POINTS,
+                    volume.hp
+                )
+                .into());
             }
         }
         // The two explicit node-list declarations that replaced the name scans. Both are required
