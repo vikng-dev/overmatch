@@ -990,6 +990,110 @@ fn a_box_behind_a_perforated_plate_is_dosed_by_line_and_cone() {
     assert!(!report.spall.is_empty(), "the plate's exit throws a cone");
 }
 
+/// THE GAME'S DAMAGE MODEL: A CONE NEVER DOSES THE BODY THAT THREW IT. A hollow body with an HP
+/// pool, perforated through both walls, takes its line dose alone: the energy the round lost in
+/// its near wall is that line dose, counted once, so the cone the near wall throws doses nothing
+/// where it meets the same body's far wall, which still stops it as armour does. A box beyond the
+/// near wall, inside its cone and off the line, still takes the cone. Every hollow component's HP
+/// pool relies on it: a cone dosing its own body counts the same energy twice and can empty a pool
+/// the line alone leaves reduced. A cone that doses its own body, passes through that body's far
+/// wall, or doses nothing beyond fails it. Fixture data: two 20 mm steel walls 1 m apart, one
+/// volume and one pool, and a soft box between them beside the line.
+#[test]
+fn a_body_that_throws_a_cone_takes_only_its_line_dose() {
+    const WALL: f32 = 0.02;
+    const GAP: f32 = 1.0;
+    let volumes = [
+        (
+            plate("hollow", WALL, 0.0, Kind::SteelBox(100_000)),
+            0,
+            Quat::IDENTITY,
+        ),
+        (
+            (
+                "beyond",
+                Vec3::splat(0.2),
+                Vec3::new(0.2, 2.0, -0.5),
+                Kind::Box(100_000),
+            ),
+            0,
+            Quat::IDENTITY,
+        ),
+    ];
+    let fired = fixture_fire_with(
+        &volumes,
+        LINE_FROM,
+        Vec3::NEG_Z * 800.0,
+        0,
+        FIXTURE_88,
+        |_| {},
+        |app| {
+            // The far wall: a second collider of the hollow body's own volume.
+            let world = app.world_mut();
+            let hollow = world
+                .query::<(Entity, &Name)>()
+                .iter(world)
+                .find(|(_, name)| name.as_str() == "hollow")
+                .map(|(entity, _)| entity)
+                .expect("the hollow body is spawned");
+            world.spawn((
+                Transform::from_xyz(0.0, 0.0, -GAP),
+                Collider::cuboid(FACE, FACE, WALL),
+                CollisionLayers::new([crate::Layer::Armor], LayerMask::ALL),
+                ChildOf(hollow),
+            ));
+            for _ in 0..8 {
+                app.update();
+            }
+        },
+    );
+    let report = fired.report;
+    let dose = |name: &str| {
+        report
+            .doses
+            .iter()
+            .find(|dose| dose.volume == name)
+            .unwrap_or_else(|| panic!("{name} is dosed: {:?}", report.doses))
+    };
+    let hollow = dose("hollow");
+    assert!(
+        hollow.line > 0.0 && hollow.field == 0.0,
+        "the body that threw the cone takes its line dose alone: {hollow:?}"
+    );
+    let beyond = dose("beyond");
+    assert!(
+        beyond.line == 0.0 && beyond.field > 0.0,
+        "the box beyond the near wall takes the cone: {beyond:?}"
+    );
+    let far_face = -GAP + 0.5 * WALL;
+    let near = report.spall.first().expect("the near wall throws a cone");
+    assert!(
+        near.origin[2] > far_face,
+        "the first cone is the near wall's: {:?}",
+        near.origin
+    );
+    let stopped = near
+        .fragments
+        .iter()
+        .filter(|fragment| fragment.hits.is_empty())
+        .inspect(|fragment| {
+            assert!(
+                (fragment.end[2] - far_face).abs() < 1.0e-3,
+                "a direction that doses nothing stops at the body's own far wall: {:?}",
+                fragment.end
+            );
+        })
+        .count();
+    assert!(stopped > 0, "the near cone meets the far wall");
+    assert!(
+        near.fragments
+            .iter()
+            .flat_map(|fragment| &fragment.hits)
+            .all(|hit| hit.volume == "beyond"),
+        "the near cone doses only what lies beyond its body"
+    );
+}
+
 /// A record is stated in the struck hull's frame: one shot through a plate into a box behind it,
 /// fired at a fixture tank at two hull poses, moved and turned with the tank, records the same
 /// verdict, plates, components, path and muzzle. The hull is its own entity, so the frame comes

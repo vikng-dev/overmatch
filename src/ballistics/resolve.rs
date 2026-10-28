@@ -620,10 +620,13 @@ pub(crate) fn field_presence(
 /// `strength` (J) is constant along the direction. It stops where it enters the first
 /// volume: one it starts inside it enters at `at`, except one of `exited`, the volumes the throw
 /// leaves, which it has not entered while it is still leaving them. That volume, when it `is_box`
-/// (an HP-bearing one), takes `strength × weight`, never scaled by its own factor; armour takes
-/// nothing; nothing beyond is reached. A direction that enters no volume (`exited` ones it is
-/// leaving aside) ends at the struck tank's [`horizon`], so its reach does not depend on what
-/// witnesses lie along it. A direction of no positive strength doses nothing.
+/// (an HP-bearing one) and is not one of `exited`, takes `strength × weight`, never scaled by its
+/// own factor; armour takes nothing; nothing beyond is reached. A volume of `exited` is the body
+/// that threw the field, whose share of the energy the line has already dosed: met again further
+/// along (the far wall of a hollow body), it stops the direction as armour does and takes nothing.
+/// A direction that enters no volume (`exited` ones it is leaving aside) ends at the struck tank's
+/// [`horizon`], so its reach does not depend on what witnesses lie along it. A direction of no
+/// positive strength doses nothing.
 ///
 /// Every volume above is hard: a witness (ADR-0040) is never a layer of the presence, so it neither
 /// stops nor shadows. Each witness `within` admits that the direction's line enters short of where
@@ -736,9 +739,10 @@ fn horizon(
 
 /// Where a direction walked over `layers`, from the progress `start` of its throw point, stops
 /// ([`field_direction`]): the progress at which it enters the first volume that is not one of
-/// `exited` it is still leaving, and the first of the volumes it enters there that `is_box`.
-/// `None` when it enters none. Layers that end at or before `start` lie behind the throw point and
-/// take no part.
+/// `exited` it is still leaving, and the first of the volumes it enters there that `is_box` and is
+/// not one of `exited`, the body that threw the field, which is no box to its own field. `None`
+/// when it enters none. Layers that end at or before `start` lie behind the throw point and take
+/// no part.
 fn first_solid(
     layers: &[walk::Layer],
     start: f64,
@@ -756,7 +760,10 @@ fn first_solid(
             .collect();
         if !entered.is_empty() {
             let at = layer.start.max(start);
-            return Some((at, entered.into_iter().find(|volume| is_box(*volume))));
+            let dosed = entered
+                .into_iter()
+                .find(|volume| is_box(*volume) && !exited.contains(volume));
+            return Some((at, dosed));
         }
     }
     None

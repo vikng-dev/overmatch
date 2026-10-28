@@ -369,7 +369,7 @@ The umbrella term for a dose field thrown by a cause, whatever its shape: streng
 _Avoid_: cloud (implies an amorphous shape; older records use it to mean a field)
 
 **Spall cone** (spall):
-The field of fragments thrown from a body exit when a round perforates — brightest on its axis and fading to nothing at its rim (the ball law), its half-angle the exit layer's material's, each direction stopped by the first hard body it meets — dosing every box it reaches. Its strength is one fixed share of the kinetic energy the round lost crossing the body it left, the energy a **line dose** reads, so a round that loses more there throws a stronger cone; its law is design doc §5 (`.agents/docs/design/armor-penetration-and-damage.md`).
+The field of fragments thrown from a body exit when a round perforates — brightest on its axis and fading to nothing at its rim (the ball law), its half-angle the exit layer's material's, each direction stopped by the first hard body it meets — dosing every box it reaches but the body it left, which the line has already dosed with the energy the round lost there. Its strength is one fixed share of the kinetic energy the round lost crossing the body it left, the energy a **line dose** reads, so a round that loses more there throws a stronger cone; its law is design doc §5 (`.agents/docs/design/armor-penetration-and-damage.md`).
 _Avoid_: spalling, fragmentation, frag, spall cloud (the noun is spall; the emitter is the spall cone)
 
 **Witness**:

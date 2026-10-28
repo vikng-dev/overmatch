@@ -299,7 +299,14 @@ cone's `μ_k`, `sin θ_k` and `f_k` are built from its `λ` with IEEE arithmetic
 their bits match on every shipped target and a decoder rebuilds them from the descriptor.
 
 **Shadowing and reach.** A direction's strength is constant in air — no drag, no range — and it
-doses only the struck tank's boxes (hitting another tank is a preserved alternative). **Full
+doses only the struck tank's boxes (hitting another tank is a preserved alternative), and **never
+the body that threw it** (issue 143, 2026-10-28, provisional: the simplest model). The volumes its
+exit leaves, recognised by identity (**Walk**), took the energy the round lost there as their line
+dose, and that energy is counted once, on the line: a direction that meets one of them again, as at
+a hollow body's far wall, stops there as at armour and takes nothing. The cone doses only what lies
+beyond its body. MEASURED from the re-recorded scenarios: s10's gun barrel takes its 245.18 HP line
+dose alone, where its near wall's cone added 56.34 HP and emptied the 250 HP pool, so it is reduced,
+not knocked out; no other scenario's doses moved. **Full
 shadowing** (owner, 2026-10-17): a direction stops at the first hard body it enters. Armour takes
 nothing and stops it, a hard box takes its whole strength and stops it, so whatever hard body lies
 first shields everything behind it, whatever its material; a direction that enters none ends where

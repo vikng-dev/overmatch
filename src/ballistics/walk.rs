@@ -1788,10 +1788,12 @@ pub struct SpallSource {
     pub direction: Vec3,
     /// The substances of the body exited, in id order.
     pub substances: Vec<SubstanceId>,
-    /// The volumes the reached members' exits leave ([`ExitMember::exited`]), in entity order. The
-    /// surface the cone is thrown from is theirs, so a direction that starts inside one of them has
-    /// not entered it, and does not dose it there. A volume only an unreached member leaves is not
-    /// among them: the round never left it, and a direction starting inside it enters it there.
+    /// The volumes the reached members' exits leave ([`ExitMember::exited`]), in entity order: the
+    /// body that throws the cone. The surface the cone is thrown from is theirs, so a direction
+    /// that starts inside one of them has not entered it there, and the cone never doses one of
+    /// them anywhere, since the line has dosed them the energy its strength is a share of. A volume
+    /// only an unreached member leaves is not among them: the round never left it, and a direction
+    /// starting inside it enters it there.
     pub exited: Vec<Entity>,
     /// Reference-mm the mechanism spent across this body: its readout drop over the body's
     /// stretches, each stretch's drop shared among the samples by the factor each was resisted by,

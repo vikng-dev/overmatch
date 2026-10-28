@@ -3957,7 +3957,8 @@ fn throw_burst(
 
 /// One field's throw: where from, about what axis, at what strength (J), through the
 /// volumes of which tank, and leaving which volumes (a body exit's), which a direction starting
-/// inside one does not enter there.
+/// inside one does not enter there and which no direction doses anywhere
+/// ([`resolve::field_direction`]).
 struct FieldThrow<'a> {
     origin: Vec3,
     axis: Dir3,
@@ -4057,7 +4058,9 @@ fn walk_field(
 /// field's weights emit `S/2` in all ([`spall_cone::EMITTED_SHARE`]). Otherwise the cone is spread
 /// by the ball law at the source's ratio ([`walk::SpallSource::debris_ratio`]): direction `k` of
 /// the spread ([`spall_cone::Spread`]) carries `S·f_k` and stands for `1/N` of the cone, walked
-/// through the volumes of `tank`, the struck tank, alone ([`walk_field`]). A ratio outside the
+/// through the volumes of `tank`, the struck tank, alone ([`walk_field`]). It never doses the body
+/// that threw it, the volumes the exit leaves ([`walk::SpallSource::exited`]): the energy the
+/// round lost there is their line dose, counted once. A ratio outside the
 /// law's domain throws nothing and logs why; substances refuse one at load, so only a fixture
 /// reaches it.
 fn throw_spall_cone(
