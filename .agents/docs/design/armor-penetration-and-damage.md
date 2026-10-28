@@ -319,9 +319,9 @@ the three axis-aligned face areas of each box's bounds (`TankShapes::crew_face`;
 **nothing** below `T_floor`, the least share of an HP point the sim's once-per-shot rounding counts
 (half a point: to nearest, ties away, `ballistics::least_counted_hp`) over the same face
 (0.5 / 0.2033 = 2.46, DERIVED). The face is read from the geometry and authored nowhere else, so
-the bands follow the boxes they describe; every crew box of a tank presents one mean face
-(`src/tests/crew_faces.rs`), so the thresholds hold for each station alike, and a plan with no
-crew box has no bands and draws no field. The promise: a crew station whose face lies wholly in
+the bands follow the boxes they describe. The game's damage model authors one shared crew box
+size within a tank, so the thresholds describe each station alike; a plan with no crew box has
+no bands and draws no field. The promise: a crew station whose face lies wholly in
 knockout is knocked out; one wholly in reduced has its pool dosed and usually not emptied, for the
 rounding tips it at the band's top, from `T_mid − T_floor` (145.1, DERIVED), where its face's total
 (29.5 HP points) rounds to the whole pool; one wholly in nothing takes no HP point from the

@@ -8,7 +8,6 @@
 
 mod bevy_ktx2_uastc_fallback;
 mod bevy_shadow_view_render_layers;
-mod crew_faces;
 mod determinism_deps;
 mod doc_citations;
 mod flow_boundary;

@@ -349,9 +349,9 @@ impl TankShapes {
 /// The mean face (m²) of the crew stations of the tank `spec` names over `geometry`, the face the
 /// pen cam's potency bands for that tank are read from (`pen_cam::potency`): each crew station's
 /// box with every servo at rest, its mean face ([`ComponentShape::mean_face`]) in the record's
-/// frame, averaged over the stations. Every tank asset's crew boxes present one face
-/// (`src/tests/crew_faces.rs`), so the mean is each station's. `None` without a crew station whose
-/// box resolves to a positive face.
+/// frame, averaged over the stations. The game's damage model authors one shared crew box size
+/// within a tank, so the mean represents each station. `None` without a crew station whose box
+/// resolves to a positive face.
 fn crew_face(geometry: &TankGeometry, spec: &TankSpec) -> Option<f32> {
     let poses = posed_nodes(geometry, |_| None);
     let hull_from_root = geometry

@@ -39,7 +39,7 @@ pub(crate) mod burst;
 /// calibration, the field's HP points per reference-mm.
 pub(crate) mod spall_cone;
 
-/// The sturdiness classes HP pools are authored from: HP points per m² of a box's mean face.
+/// The game's damage model: the shared authored crew HP pool and geometry-based pen cam bands.
 pub(crate) mod box_classes;
 
 /// The §13 walk driven against the live world: corridor collection, the staged `begin`/`finish`, and
@@ -1587,7 +1587,7 @@ pub fn sim_plugin(app: &mut App) {
     spall_cone::ConeShape::shipped();
     spall_cone::hp_per_reference_mm();
     spall_cone::BurstFields::shipped();
-    // So are the sturdiness classes the tank files' pools are authored from.
+    // The game's damage model also validates the shared crew HP pool at startup.
     box_classes::BoxClasses::shipped();
     app.init_resource::<RetainSpentShells>()
         .init_resource::<MarchMode>()
