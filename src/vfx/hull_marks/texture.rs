@@ -27,9 +27,8 @@ use bevy::render::render_resource::{Extent3d, TextureDimension, TextureFormat};
 
 use crate::hull_marks::MarkKind;
 
-/// Texels on a side of every map. ASSUMED: a look to tune; at 256 a mark keeps a texel per screen
-/// pixel down to about a metre's viewing distance for an 8.8 cm hole (DERIVED: the hole's quad is
-/// 0.29 m, so 256 texels span it at ~880 px per metre).
+/// Texels on a side of every map, a visual tuning choice. DERIVED: with an 8.8 cm nominal
+/// radius, the hole's quad is 0.59 m wide, giving about 440 texels per metre of surface.
 pub(crate) const SIZE: usize = 256;
 
 /// Noise seeds per kind.
@@ -43,8 +42,8 @@ pub(crate) struct MarkMaps {
     pub(crate) depth: Image,
 }
 
-/// The core's radius in the square: a hole's rim, the round's calibre across. The quad is then
-/// `1 / HOLE_CORE` calibres on a side.
+/// The core's nominal radius in the square, scaled to one calibre by the view. The quad is then
+/// `2 / HOLE_CORE` calibres on a side (DERIVED from the square spanning two units).
 const HOLE_CORE: f32 = 0.30;
 /// A dent's bowl radius in the square, as [`HOLE_CORE`].
 const DENT_BOWL: f32 = 0.36;
@@ -67,9 +66,9 @@ const PAINT_EDGE: Vec3 = Vec3::new(0.035, 0.034, 0.030);
 /// The decal's footprint per kind, in calibres: x along the shot (before the stretch), y across it.
 pub(crate) fn footprint(kind: MarkKind) -> Vec2 {
     let across = match kind {
-        MarkKind::Hole => 1.0 / HOLE_CORE,
-        MarkKind::Dent => 1.0 / DENT_BOWL,
-        MarkKind::Scratch => 1.0 / SCRATCH_WIDTH,
+        MarkKind::Hole => 2.0 / HOLE_CORE,
+        MarkKind::Dent => 2.0 / DENT_BOWL,
+        MarkKind::Scratch => 2.0 / SCRATCH_WIDTH,
     };
     Vec2::splat(across)
 }
@@ -434,6 +433,23 @@ fn image(level0: Vec<u8>, channels: usize, format: TextureFormat) -> Image {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The game's cosmetic hull marks use calibre as their nominal radius (issue 124).
+    /// The view scales the unit quad by `footprint`, so a normalized profile radius spans half
+    /// that scale. Treating calibre as the diameter draws every kind at half the requested size.
+    #[test]
+    fn calibre_is_the_nominal_profile_radius() {
+        for (kind, radius) in [
+            (MarkKind::Hole, HOLE_CORE),
+            (MarkKind::Dent, DENT_BOWL),
+            (MarkKind::Scratch, SCRATCH_WIDTH),
+        ] {
+            assert!(
+                (radius * footprint(kind).y * 0.5 - 1.0).abs() < 1e-6,
+                "{kind:?}"
+            );
+        }
+    }
 
     /// Each kind's maps carry the whole mip chain the descriptor declares, and each profile draws
     /// something and leaves its border clear: the decal's quad edge must never show (bevy's forward

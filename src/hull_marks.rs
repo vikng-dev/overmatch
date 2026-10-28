@@ -25,7 +25,7 @@
 //! [`MarkBuilder`]. The view — decals, textures, the client's diff — is `vfx::hull_marks`, mounted
 //! by every windowed composition.
 
-#[cfg(feature = "dev_tools")]
+#[cfg(all(feature = "dev_tools", debug_assertions))]
 pub(crate) mod demo;
 
 use std::collections::VecDeque;
@@ -35,7 +35,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
-use crate::ballistics::{ShellStrike, TRACER_MAX_CALIBER, Verdict};
+use crate::ballistics::{ShellStrike, Verdict};
 use crate::damage::VolumeOf;
 use crate::tank::{SimParts, rig_world_pose};
 
@@ -265,16 +265,11 @@ pub(crate) struct MarkBuilder<'w, 's> {
 }
 
 impl MarkBuilder<'_, '_> {
-    /// The vehicle root a strike marks, and its mark. `None` when the verdict leaves no mark, the
-    /// round is below [`TRACER_MAX_CALIBER`] (a machine-gun belt turns the record over faster
-    /// than anything reads it: DERIVED, the shipped MG's 750 rpm cyclic replaces all
-    /// [`MARK_CAP`] marks in 4 s), the struck volume is not a part of a root that keeps marks
+    /// The vehicle root a strike marks, and its mark. `None` when the verdict leaves no mark,
+    /// the struck volume is not a part of a root that keeps marks
     /// (a tree, a turret thrown clear of its hull), or the point does not pack.
     pub(crate) fn mark(&self, strike: &ShellStrike) -> Option<(Entity, HullMark)> {
         let kind = MarkKind::of(strike.verdict)?;
-        if strike.caliber < TRACER_MAX_CALIBER {
-            return None;
-        }
         let root = self.owners.get(strike.struck).ok()?.tank();
         let (parts, position, rotation) = self.roots.get(root).ok()?;
         // The struck entity is the volume's node, or one substance's collider under it.
@@ -543,5 +538,53 @@ pub(crate) mod tests {
         assert!(mark.normal().angle_between(to_plate * hit.normal) < 0.01);
         assert!(mark.along().angle_between(to_plate * hit.incoming) < 0.01);
         assert_eq!(mark.caliber_mm, 88);
+    }
+
+    /// The game's cosmetic hull marks follow the verdict at every calibre. Viewers rely on
+    /// small-calibre ricochets remaining visible; a tracer-display cutoff must not discard them.
+    #[test]
+    fn small_calibre_strikes_still_mark_the_hull() {
+        let mut app = App::new();
+        app.add_plugins(offline_plugin);
+        let fixture = fixture_in(app.world_mut());
+        let at = plate_in_world(app.world(), &fixture).transform_point(Vec3::ZERO);
+        for verdict in [Verdict::Ricochet, Verdict::Stopped, Verdict::Through] {
+            let mut hit = strike(fixture.collider, at, verdict);
+            hit.caliber = 0.008; // Fixture data, below the tracer-display cutoff.
+            app.world_mut().trigger(hit);
+        }
+        let record = app.world().get::<HullMarks>(fixture.root).unwrap();
+        let marks: Vec<_> = record
+            .iter()
+            .map(|(_, mark)| (mark.kind, mark.caliber_mm))
+            .collect();
+        assert_eq!(
+            marks,
+            [
+                (MarkKind::Scratch, 8),
+                (MarkKind::Dent, 8),
+                (MarkKind::Hole, 8)
+            ],
+        );
+    }
+
+    /// The game's cosmetic hull-mark demo can fabricate marks and take the camera. Release
+    /// builds retain the default `dev_tools` feature, so that feature alone cannot guard it.
+    /// This source-boundary tripwire checks both the module and its offline mount without
+    /// compiling a second copy of the engine under the release profile.
+    #[test]
+    fn the_demo_is_excluded_from_release_even_with_dev_tools() {
+        let compact = |source: &str| source.split_whitespace().collect::<String>();
+        let guard = "#[cfg(all(feature=\"dev_tools\",debug_assertions))]";
+        assert!(
+            compact(include_str!("hull_marks.rs")).contains(&format!("{guard}pub(crate)moddemo;")),
+            "the demo module must be absent from release builds",
+        );
+        assert!(
+            compact(include_str!("lib.rs")).contains(&format!(
+                "{guard}app.add_plugins(hull_marks::demo::offline_plugin);"
+            )),
+            "the offline demo mount must have the same release boundary",
+        );
     }
 }

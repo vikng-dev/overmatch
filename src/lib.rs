@@ -921,9 +921,10 @@ pub fn run_offline() {
     app.add_plugins((
         tank::scenario::offline_target_fires_plugin,
         damage_cam::pen_cam::game::scripted_xray_plugin,
-        // Strikes the parked target and holds the camera on each mark (`OVERMATCH_HULL_MARKS_DEMO`).
-        hull_marks::demo::offline_plugin,
     ));
+    // The game's cosmetic hull-mark demo fabricates marks and takes the camera in dev builds.
+    #[cfg(all(feature = "dev_tools", debug_assertions))]
+    app.add_plugins(hull_marks::demo::offline_plugin);
     app.run();
 }
 

@@ -1044,16 +1044,15 @@ pub(crate) struct ShellTerminal {
     pub after_bounces: u32,
 }
 
-/// What a keyed shot did at a body's outer face, in the game's damage model: each bounce before
-/// its terminal, then the terminal's entrance — the same faces [`ShellRicochet`] and
-/// [`ShellTerminal`] report, with the struck volume, the round's travel and its calibre beside the
-/// verdict. Raised wherever the march runs; the authority's cosmetic record (`hull_marks`) is its
-/// one reader, and nothing in the simulation reads it.
+/// What a keyed shot did at each resolved face, in the game's damage model: the struck volume,
+/// the travel and calibre beside the verdict. Independent of the first-terminal receipt, since
+/// the authority can reach further vehicles afterward. Raised wherever the march runs; the
+/// authority's cosmetic record (`hull_marks`) is its one reader, and the simulation never reads it.
 #[derive(Event, Clone, Copy, Debug)]
 pub(crate) struct ShellStrike {
     pub shot: ShotId,
-    /// The strike's ordinal within its shot: a bounce's [`ShellRicochet::sequence`], the terminal's
-    /// [`ShellTerminal::after_bounces`], so no two strikes of one shot share it.
+    /// The strike's ordinal in [`PenetrationMarks::log`], so no two resolved faces of one shot
+    /// share it, including faces reached after the first terminal.
     pub sequence: u32,
     /// The volume owning the struck face.
     pub struck: Entity,
@@ -6750,6 +6749,85 @@ mod march_tests {
             "the authority resolves the perforation and then the backstop embed (got {})",
             impacts.len()
         );
+    }
+
+    /// The game's cosmetic hull marks belong to every vehicle whose face the shot reaches.
+    /// The shot's first-terminal receipt must not suppress a later vehicle's mark, even across
+    /// ticks. Distinct fixture part names also exercise the recorder's data-driven part lookup.
+    #[test]
+    fn hull_marks_reach_a_second_vehicle_after_the_first_terminal() {
+        use crate::damage::VolumeOf;
+        use crate::hull_marks::{HullMarks, MarkKind};
+        use crate::tank::SimParts;
+
+        for distance in [-2.0, -30.0] {
+            for (yaw, thickness, second_kind) in [
+                (0.0, 0.5, MarkKind::Dent),
+                (75f32.to_radians(), 0.1, MarkKind::Scratch),
+            ] {
+                // Fixture data: a thin first face, then a thick face, square or at a ricochet angle.
+                let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, 0.0));
+                crate::hull_marks::offline_plugin(&mut app);
+                app.init_resource::<TerminalLog>()
+                    .add_observer(capture_terminal);
+                let first = app
+                    .world_mut()
+                    .query_filtered::<Entity, With<BallisticVolume>>()
+                    .single(app.world())
+                    .unwrap();
+                let second = app
+                    .world_mut()
+                    .spawn((
+                        Transform::from_xyz(0.0, 2.0, distance)
+                            .with_rotation(Quat::from_rotation_y(yaw)),
+                        RigidBody::Static,
+                        Collider::cuboid(3.0, 3.0, thickness),
+                        CollisionLayers::new([Layer::Armor], LayerMask::ALL),
+                        BallisticVolume {
+                            material: walk::VolumeMaterial::fixture(STEEL),
+                            substance: "RHA".to_string(),
+                        },
+                    ))
+                    .id();
+                let mut roots = Vec::new();
+                for (part, name) in [(first, "Face_A"), (second, "Panel_Z")] {
+                    let root = app
+                        .world_mut()
+                        .spawn((
+                            Transform::IDENTITY,
+                            Position(Vec3::ZERO),
+                            Rotation::IDENTITY,
+                            HullMarks::default(),
+                            SimParts(std::collections::HashMap::from([(name.to_owned(), part)])),
+                        ))
+                        .id();
+                    app.world_mut().entity_mut(part).insert((
+                        Name::new(name),
+                        VolumeOf(root),
+                        ChildOf(root),
+                    ));
+                    roots.push(root);
+                }
+                settle(&mut app);
+                spawn_headon_shell(&mut app, a_shot());
+                for _ in 0..8 {
+                    app.update();
+                }
+                assert_eq!(app.world().resource::<TerminalLog>().0.len(), 1);
+                for (root, kind) in roots.into_iter().zip([MarkKind::Hole, second_kind]) {
+                    let record = app.world().get::<HullMarks>(root).unwrap();
+                    let marks: Vec<_> = record
+                        .iter()
+                        .map(|(_, mark)| (mark.part, mark.kind))
+                        .collect();
+                    assert_eq!(
+                        marks,
+                        [(0, kind)],
+                        "each reached vehicle keeps its own face mark"
+                    );
+                }
+            }
+        }
     }
 
     /// HELD SHELL + CONFIRM: the full honest armor read, at the server's position, on receipt — the

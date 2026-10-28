@@ -1785,20 +1785,19 @@ fn apply_bounce(
         shock: bounce.shock,
     });
     shell.path.points.push(bounce.position);
-    if let Some(shot) = shell.shot
-        && !*terminal_emitted
-    {
-        let sequence = (shell.marks.ricochets.len() - 1) as u32;
-        commands.trigger(ShellRicochet {
-            shot: shot.0,
-            origin: bounce.position,
-            direction: Vec3::from(bounce.direction),
-            speed: bounce.speed,
-            sequence,
-        });
+    if let Some(shot) = shell.shot {
+        if !*terminal_emitted {
+            commands.trigger(ShellRicochet {
+                shot: shot.0,
+                origin: bounce.position,
+                direction: Vec3::from(bounce.direction),
+                speed: bounce.speed,
+                sequence: (shell.marks.ricochets.len() - 1) as u32,
+            });
+        }
         commands.trigger(ShellStrike {
             shot: shot.0,
-            sequence,
+            sequence: (shell.marks.log.len() - 1) as u32,
             struck: bounce.struck,
             at: bounce.position,
             normal: bounce.normal,
@@ -1899,22 +1898,21 @@ fn apply_bite(
         surface: ImpactSurface::Armor,
         outcome: verdict.into(),
     });
-    if let Some(shot) = shell.shot
-        && !*terminal_emitted
-    {
-        *terminal_emitted = true;
-        shell.terminal_report.0 = true;
-        let after_bounces = shell.marks.ricochets.len() as u32;
-        commands.trigger(ShellTerminal {
-            shot: shot.0,
-            position: terminal_at,
-            normal: bite.normal,
-            verdict,
-            after_bounces,
-        });
+    if let Some(shot) = shell.shot {
+        if !*terminal_emitted {
+            *terminal_emitted = true;
+            shell.terminal_report.0 = true;
+            commands.trigger(ShellTerminal {
+                shot: shot.0,
+                position: terminal_at,
+                normal: bite.normal,
+                verdict,
+                after_bounces: shell.marks.ricochets.len() as u32,
+            });
+        }
         commands.trigger(ShellStrike {
             shot: shot.0,
-            sequence: after_bounces,
+            sequence: (shell.marks.log.len() - 1) as u32,
             struck: bite.struck,
             at: bite.entrance,
             normal: bite.normal,
