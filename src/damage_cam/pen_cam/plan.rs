@@ -516,7 +516,7 @@ impl Plan {
         // A spall cone is thrown where its crossing ends, a node of the path, and its front runs at
         // the speed of the leg leaving that node. Its origin, the mean of the exits the round's
         // disc reached, stands off the node across the path and may project inside the crossing
-        // (0.7 mm short of it in s4, MEASURED), so the node is the one nearest the origin, never
+        // (0.6 mm short of it in s4, MEASURED), so the node is the one nearest the origin, never
         // the leg its projection falls on. Invariant: an origin lies nearer its own node than any
         // other, so within half the crossing's chord of it and half the leg leaving it.
         let spall = report.spall.iter().map(|c| {

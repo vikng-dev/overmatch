@@ -443,12 +443,15 @@ pub struct WalkLaws {
     /// speed a bounce keeps is no knob: it is the striking speed's share along the surface
     /// ([`Begin::Ricochet`]).
     pub ricochet_angle: f32,
-    /// Share of the incidence angle the round straightens toward the normal as it bites in.
+    /// Share of the incidence angle the round straightens toward the normal as it bites into the
+    /// reference substance; [`begin`] scales it by the entrance substance's share of
+    /// [`rha_reference`](Self::rha_reference).
     pub normalization: f32,
     /// Overmatch when caliber ≥ this × the crossing's factor-weighted perpendicular thickness.
     pub overmatch_ratio: f32,
     /// Reference-mm per metre of the reference substance (RHA), the divisor turning a cost back
-    /// into steel-equivalent METRES so it can be compared against a caliber.
+    /// into steel-equivalent METRES so it can be compared against a caliber, and a factor into the
+    /// entry bend's resistance share.
     pub rha_reference: f32,
     // NO `significant_step` knob. §13's "meaningful factor step" is still an open tab, and a
     // declared-but-unread knob is a false affordance — it advertises a lever whose default is
@@ -1947,6 +1950,9 @@ pub struct DiscEvent {
     /// §13.5's ratified rule hands the whole momentum exchange to. Taken from the sample that
     /// touched FIRST, ties broken by sample index.
     pub entrance_volume: Entity,
+    /// The entrance volume's factor (reference-mm per metre of chord): the resistance of the
+    /// substance the round bites into, which the entry bend reads ([`begin`]).
+    pub entrance_factor: f32,
     /// Every primitive this crossing touched, sorted — the identity half of the transit check.
     pub primitives: Vec<PrimitiveKey>,
     /// `(1/k) Σᵢ costᵢ` (reference-mm) — automatically `η × mean covered chord cost`. A readout:
@@ -2239,7 +2245,7 @@ fn build_event(
         let first = &walks[sample].runs[runs[0]];
         let last = &walks[sample].runs[runs[runs.len() - 1]];
         if first.start < start {
-            entrance_volume = Some(first.entry_volume);
+            entrance_volume = Some((sample, first.entry_volume));
         }
         start = start.min(first.start);
         end = end.max(last.end);
@@ -2287,7 +2293,7 @@ fn build_event(
     primitives.sort();
     primitives.dedup();
 
-    let Some(entrance_volume) = entrance_volume else {
+    let Some((entrance_sample, entrance_volume)) = entrance_volume else {
         // Defensive: a cluster is built from at least one welded run, and every run names the
         // volume whose shell opens it. A stand-in entity here would be an event with no owner,
         // spending capability and marking a penetration against nothing.
@@ -2296,10 +2302,22 @@ fn build_event(
             reason: "a disc crossing cluster holds no run",
         });
     };
+    // Defensive: a run's entry volume is read off its sample's own intervals, and that sample's
+    // presence lists every volume with an interval.
+    let entrance_factor = walks[entrance_sample]
+        .presence
+        .iter()
+        .find(|presence| presence.entity == entrance_volume)
+        .map(|presence| presence.factor)
+        .ok_or(WalkError::BadCorridor {
+            sample: entrance_sample,
+            reason: "the entrance volume has no presence on the sample that touched it",
+        })?;
     Ok(DiscEvent {
         start,
         end,
         entrance_volume,
+        entrance_factor,
         primitives,
         entry_normal,
         entry_position,
@@ -2808,12 +2826,16 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Begin {
     }
 
     // Normalize: a modest bend toward the inward normal as it bites in, scaled by η on the same
-    // ruling — a barely-engaged entry is barely bent. Overmatch does not bend it further; it cancels
-    // the SLOPE COST instead (charged in `finish`).
+    // ruling — a barely-engaged entry is barely bent — and by the entrance substance's resistance
+    // over the reference's, so a substance that resists a round less turns it less. The reference
+    // substance's share is exactly 1, so its bend is `η × normalization × incidence` to the bit. The
+    // share is unclamped: a substance declared above the reference would bend a round further.
+    // Overmatch adds no bend; it cancels the SLOPE COST instead (charged in `finish`).
+    let resistance_share = event.entrance_factor / laws.rha_reference;
     let bent = super::bend_toward(
         axis,
         -surface,
-        event.coverage * laws.normalization * incidence,
+        event.coverage * laws.normalization * incidence * resistance_share,
     );
 
     // The handoff plane is the mean entrance surface; the transit ray is the DISC AXIS crossing it.

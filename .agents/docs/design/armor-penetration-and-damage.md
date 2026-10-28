@@ -706,7 +706,7 @@ through the driver's station to the rear plate. The plate's cone knocks out the 
 which empties no other HP pool and leaves the gunner and the commander reduced. s15 flies s6's
 line with the burst round: no body holds the arming spend, so its record is s6's. s16 flies s4's
 line with the burst round: the road wheel arms the fuze, its rubber and far disc restart the delay,
-and the round stops 20.7 mm into the lower hull side and bursts at rest there, a flat band with no
+and the round stops 21.5 mm into the lower hull side and bursts at rest there, a flat band with no
 nose piece to fly on; every direction starts inside that plate, which stops it, so the field doses
 nothing (MEASURED, from the records).
 
@@ -810,9 +810,10 @@ least one point (`hp_per_m` in `assets/trees/wood.ron`, TUNED 600). The shipped 
 75 mm bodies at 790 and 925 m/s, MEASURED) and is emptied by the second centred 88. The ram
 threshold `fell_k` is the wood row's too. A species is the generator's look and ranges only: a
 player cannot tell that a round lost a little more speed in one species than another, while trunk
-thickness is simple and visible. Out of scope, built only if play shows them missed: wood bending
-a round less than steel, per-round-type ricochet and normalization, and the drag form under the
-energy law (epic #103); the field's dose is under it (§5).
+thickness is simple and visible. A round entering a trunk turns by the wood's share of the
+reference resistance, 4 % of the reference steel's bend (§13.5). Out of scope, built only if play
+shows them missed: per-round-type ricochet and normalization, and the drag form under the energy
+law (epic #103); the field's dose is under it (§5).
 
 **Witnesses** (ADR-0040) are dosed by a law of their own. A witness substance has no resistance and
 is no layer of the walk (§13), so the shell and the field cross it as air. Once the hard world has
@@ -1409,6 +1410,9 @@ samples. Per event:
   flight. Continuity is the
   point — 1mm of aim must never flip the outcome between "flies past" and "full bounce". Whether
   a bounce happens at all stays with the factor-weighted overmatch law (mass/velocity live there).
+  Normalization also scales by the entrance volume's resistance over the reference's
+  (`factor / 1000`): the reference steel bends a round `η × normalization × incidence`, wood at 40
+  bends it 4 % as far.
 - **Transit:** `cost = (1/k) Σᵢ costᵢ`, each sample's cost its union-max-factor chord integral,
   uncovered samples contributing 0 — automatically `η × mean covered chord cost`, where
   **η = the covered fraction, the engagement fraction**. Spend against capability unchanged.

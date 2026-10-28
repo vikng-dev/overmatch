@@ -1363,6 +1363,58 @@ fn partial_coverage_scales_the_normalization_bend() {
     );
 }
 
+/// The entry bend scales with the entrance substance's resistance over the reference's: the same
+/// round at the same incidence turns `factor / rha_reference` as far, and off the reference
+/// substance exactly `η × normalization × incidence`, bit for bit. The bend reads the substance the
+/// round bites into, not the hardest one behind it. A mutant that drops the share bends a trunk as
+/// hard as armour; one that reads the crossing's hardest factor bends a soft facing as the plate
+/// behind it. Every trunk crossing and every non-reference armour entry relies on it.
+#[test]
+fn the_entry_bend_scales_with_the_entrance_resistance() {
+    let laws = WalkLaws::default();
+    // 45°, inside the ricochet threshold so the round bites in.
+    let normal = Vec3::new(0.0, 1.0, -1.0).normalize();
+    let facing = Slab::at(1, 0, 0.5, normal, 0.02);
+    let backing = Slab::at(2, 0, 0.52, normal, 0.02);
+    let enter = |slabs: &[Slab], volumes: &VolumeTable| {
+        let walked = walk_disc(&entrance_disc(slabs, 2.0), volumes, &laws).unwrap();
+        (transit_request(&walked, &AP_88, &laws), walked)
+    };
+    // The turn from the incoming axis, as `atan2(|a × b|, a · b)`: an arccosine loses the small
+    // bends a soft substance gives.
+    let turn = |axis: Vec3| AXIS.cross(axis).length().atan2(AXIS.dot(axis));
+
+    let (reference, walked) = enter(&[facing], &table(&[(1, laws.rha_reference)]));
+    let event = &walked.events[0];
+    let unscaled = super::super::bend_toward(
+        Dir3::new(walked.axis).unwrap(),
+        -Dir3::new(event.entry_normal).unwrap(),
+        event.coverage * laws.normalization * reference.entrance.incidence,
+    );
+    assert_eq!(reference.axis.to_array(), Vec3::from(unscaled).to_array());
+    let reference_turn = turn(reference.axis);
+
+    for factor in [40.0, 150.0, 800.0] {
+        let share = factor / laws.rha_reference;
+        let (softer, _) = enter(&[facing], &table(&[(1, factor)]));
+        assert_eq!(softer.entrance.incidence, reference.entrance.incidence);
+        let softer_turn = turn(softer.axis);
+        assert!(
+            (softer_turn - share * reference_turn).abs() < 1.0e-3 * share * reference_turn,
+            "factor {factor}: turned {softer_turn}, expected {}",
+            share * reference_turn
+        );
+
+        // The same soft facing over a reference plate, one welded crossing: still the facing's.
+        let (faced, faced_walk) = enter(
+            &[facing, backing],
+            &table(&[(1, factor), (2, laws.rha_reference)]),
+        );
+        assert_eq!(faced_walk.events.len(), 1, "one welded crossing");
+        assert_eq!(faced.axis.to_array(), softer.axis.to_array());
+    }
+}
+
 /// The transit ray is anchored on the DISC AXIS, never on the covered-sample centroid — a centroid
 /// would drag the shell's line of flight sideways toward whatever part of the disc touched geometry,
 /// which is the lateral asymmetry §13.5 rules out (re-affirmed 2026-08-07).

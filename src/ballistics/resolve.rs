@@ -816,8 +816,9 @@ impl Flight {
     /// the bend since, in the plane of the bend (DERIVED: 0.12 % narrower for a 2.8° drop, 13.4 %
     /// at 30°, 50 % at 60°, a line at 90°). A perforation's starts are no square disc at all —
     /// staggered at the entrance plane, then bent — and that footprint can be WIDER than the
-    /// calibre, and stays so into later ticks (DERIVED: full coverage at 60° incidence bends 12°
-    /// under the default normalization, a width factor of `cos 12° + tan 60° · sin 12° ≈ 1.338`).
+    /// calibre, and stays so into later ticks (DERIVED: full coverage at 60° incidence into the
+    /// reference substance bends 12° under the default normalization, a width factor of
+    /// `cos 12° + tan 60° · sin 12° ≈ 1.338`; no substance is declared above the reference).
     /// Slow rounds and steep lobs need the starts transported along per-sample paths instead.
     #[expect(
         clippy::too_many_arguments,

@@ -641,9 +641,11 @@ fn a_record_is_stated_in_the_frame_the_march_resolved() {
 /// A round that leaves a tank and strikes it again off another tank's armour: each encounter is its
 /// own record of the one shot, their losses partition the shot's loss on the tank, and a knockout
 /// the second encounter dealt is that encounter's. Fixture geometry: the round crosses the struck
-/// tank's front box, glances off a thick plate on a second tank 6 m to its side at ~78° incidence
+/// tank's front box, glances off a thick plate on a second tank 6 m to its side at ~75° incidence
 /// (past the ricochet angle), and comes back across the struck tank's rear box and the ammunition
-/// behind it, clear of the struck tank's bounds for over a tick in between.
+/// behind it, clear of the struck tank's bounds for over a tick in between. The front box's soft
+/// substance turns the round a hundredth of a reference plate's bend, so the return crosses the
+/// tank's axis about 45 m behind the front box (DERIVED: 2 × 6 m / tan 15°).
 #[test]
 fn a_round_that_strikes_a_tank_again_records_each_encounter() {
     let mut app = recording_world(false);
@@ -660,8 +662,8 @@ fn a_round_that_strikes_a_tank_again_records_each_encounter() {
                 Vec3::ZERO,
                 Kind::Crew(DEEP),
             ),
-            wide("rear", -56.0, Kind::Crew(DEEP)),
-            wide("ammo", -57.0, Kind::Ammo(ONE)),
+            wide("rear", -45.0, Kind::Crew(DEEP)),
+            wide("ammo", -46.0, Kind::Ammo(ONE)),
         ],
     );
     // Held in place: its soft volumes weigh next to nothing, so the first hit's impulse would throw

@@ -80,7 +80,7 @@
 //! | s8a_mg_ricochet | 224 | 148 | 0 | 0 | 0 | 0 | – | – |
 //! | s8b_mg_stopped | 216 | 140 | 0 | 0 | 0 | 0 | – | – |
 //! | s9_breech_and_loader | 826 | 770 | 503 | 1 | 64 | 56 | 503 | – |
-//! | s10_gun_barrel_struck | 946 | 874 | 696 | 2 | 128 | 64 | 348 | – |
+//! | s10_gun_barrel_struck | 495 | 423 | 248 | 2 | 128 | 0 | 124 | – |
 //! | s11_mg_barrel_struck | 218 | 145 | 0 | 0 | 0 | 0 | – | – |
 //! | s12_apcr_through_crew | 934 | 886 | 565 | 1 | 64 | 66 | 565 | – |
 //! | s13_ring_through_crew | 2252 | 2212 | 565 | 1 | 64 | 66 | 565 | 1263 |
@@ -89,7 +89,7 @@
 //!
 //! The DERIVED estimate `41 + 2 + 2N` per cone (171 B at N = 64) counts a cone's metadata, its
 //! field descriptor's law byte and `f32` ratio among it, and its reaches; a cone that reaches no
-//! component measures 154–155 B on average per scenario (a reach under 128 mm takes one varint
+//! component measures 124–155 B on average per scenario (a reach under 128 mm takes one varint
 //! byte, one of 16.4 m or more three). Each hit adds about three bytes (ray skip, volume, dose
 //! palette index, a varint each) and each distinct dose four. Under the ball every direction is
 //! thrown at its own strength, so nearly every hit's dose is distinct: a cone that lights the
