@@ -49,6 +49,14 @@ impl ComponentShape {
         }
     }
 
+    /// Its mean face (m²): the mean of the three axis-aligned face areas of its bounds
+    /// ([`Self::bounds`]), so a face of the record's frame, which moves with its pose.
+    pub fn mean_face(&self) -> f32 {
+        let (lo, hi) = self.bounds();
+        let e = hi - lo;
+        (e.x * e.y + e.y * e.z + e.z * e.x) / 3.0
+    }
+
     /// The centre of its vertices' bounds.
     pub fn center(&self) -> Vec3 {
         let (lo, hi) = self.bounds();
@@ -114,6 +122,11 @@ impl TankAsset {
         &self.spec
     }
 
+    /// Its crew stations' mean face (m², [`crew_face`]), whatever any servo's angle.
+    pub fn crew_face(&self) -> Option<f32> {
+        crew_face(&self.geometry, &self.spec)
+    }
+
     /// The name a player reads for this vehicle.
     pub fn display_name(&self) -> &str {
         &self.spec.display_name
@@ -136,6 +149,8 @@ pub struct TankShapes {
     /// (armour and components alike) as posed; `None` when the geometry holds none.
     bounds: Option<(Vec3, Vec3)>,
     hard: Option<Arc<HardBodies>>,
+    /// Its crew stations' mean face at rest ([`crew_face`]).
+    crew_face: Option<f32>,
 }
 
 /// Every hard ballistic primitive of a tank, posed for one record, as one triangle mesh: the
@@ -215,11 +230,15 @@ impl TankShapes {
             .iter()
             .filter(|(_, volume)| volume.component().is_some())
             .map(|(name, _)| name.as_str());
-        Self::posed(geometry, components, |name| {
+        let posed = Self::posed(geometry, components, |name| {
             let servo = spec.servos.get(name)?;
             let angle = servo_deg.get(name).copied().unwrap_or(0.0).to_radians();
             Some((servo.role(), angle))
-        })
+        });
+        Self {
+            crew_face: crew_face(geometry, spec),
+            ..posed
+        }
     }
 
     /// The shapes of `components`, each node named by `servo` (its role and angle, radians) turned.
@@ -292,6 +311,7 @@ impl TankShapes {
             by_name,
             bounds,
             hard,
+            crew_face: None,
         }
     }
 
@@ -306,6 +326,12 @@ impl TankShapes {
         self.bounds
     }
 
+    /// Its crew stations' mean face (m², [`crew_face`]): read at rest, so the same at every pose;
+    /// `None` for a tank with no crew station, and for shapes read from no tank.
+    pub fn crew_face(&self) -> Option<f32> {
+        self.crew_face
+    }
+
     /// The shape of the component the record names `name`.
     pub fn get(&self, name: &str) -> Option<&ComponentShape> {
         self.by_name.get(name)
@@ -318,6 +344,43 @@ impl TankShapes {
             .iter()
             .map(|(name, shape)| (name.as_str(), shape))
     }
+}
+
+/// The mean face (m²) of the crew stations of the tank `spec` names over `geometry`, the face the
+/// pen cam's potency bands for that tank are read from (`pen_cam::potency`): each crew station's
+/// box with every servo at rest, its mean face ([`ComponentShape::mean_face`]) in the record's
+/// frame, averaged over the stations. Every tank asset's crew boxes present one face
+/// (`src/tests/crew_faces.rs`), so the mean is each station's. `None` without a crew station whose
+/// box resolves to a positive face.
+fn crew_face(geometry: &TankGeometry, spec: &TankSpec) -> Option<f32> {
+    let poses = posed_nodes(geometry, |_| None);
+    let hull_from_root = geometry
+        .by_name
+        .get(HULL_NODE)
+        .map_or(Affine3A::IDENTITY, |&hull| poses[hull].inverse());
+    let faces: Vec<f32> = spec
+        .volumes
+        .iter()
+        .filter(|(_, volume)| volume.component().is_some_and(|c| c.crew.is_some()))
+        .filter_map(|(name, _)| {
+            let &index = geometry.by_name.get(name)?;
+            let to_record = hull_from_root * poses[index];
+            let positions = geometry.nodes[index]
+                .primitives
+                .iter()
+                .filter(|primitive| primitive.substance.is_some())
+                .flat_map(|primitive| &primitive.positions)
+                .map(|p| to_record.transform_point3(Vec3::from(*p)))
+                .collect();
+            let shape = ComponentShape {
+                positions,
+                indices: Vec::new(),
+            };
+            Some(shape.mean_face())
+        })
+        .collect();
+    let face = faces.iter().sum::<f32>() / faces.len() as f32;
+    (face.is_finite() && face > 0.0).then_some(face)
 }
 
 /// Every node's root-relative pose with each servo `servo` names turned to its angle: the

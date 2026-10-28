@@ -292,10 +292,12 @@ reference-mm against the line's 10) and nothing on the line or a bounce's shock 
 reference-mm, so the calibration sets every cone's potency at once and the HP quantum gate tests
 `S/2` at it. A box of face `A` fully inside the cone, `θ` off its axis, has the knockout radius
 `R = sqrt(2 f(θ) E A / (pool Ω_c))`, `E = S/2`, `Ω_c = 2π(1 − cos α)` and `f(θ)` the ball's weight
-there (½ averaged over the cone): the same for every box of a class whose pool is class × `A` (§6).
-On a weak ordinary perforation through RHA, for the 30 HP crew pool at the intended humanoid's 0.2
-m² face, it is about 1.9 m at an average spot and 2.5 m on the axis, 3.1 m and 4.0 m at the
-placeholder crew box's 0.516 m² (DERIVED in `spall_cone.ron`). The rate stays 70 under the ball
+there (½ averaged over the cone). A bigger box is a bigger target: it takes more of the cone's
+directions, and nothing scales its pool to match (§6). On a weak ordinary perforation through RHA,
+for the 30 HP crew pool at a seated crew member's 0.2 m² mean face, the face the rate is set
+against, it is about 1.9 m at an average spot and 2.5 m on the axis (DERIVED in `spall_cone.ron`);
+the seed tank's crew box, 0.4 × 0.3 × 0.7 m and MEASURED at a 0.2033 m² mean face, moves each
+radius out by under 1 % (DERIVED: `sqrt(0.2033 / 0.2)` = 1.008). The rate stays 70 under the ball
 (owner, 2026-10-23, night): lowering it to hold the on-axis radius would weaken every cone. Dose
 summed over boxes is not conserved (a direction doses every witness it enters short of its stop as
 well as the hard box that stops it); the emitted budget is.
@@ -308,21 +310,27 @@ cap's, a ring's band's or the sphere's) and deposits `s / N`, so a direction of 
 the support and short of its reach, the **local intensity** is `I = ρ s / (Ω r²)` HP points per m²,
 zero past the reach; a thin unshadowed box of face `A` there takes `I · A` (resolver test
 `the_pen_cam_intensity_times_a_face_is_its_dose`). Doses add, so where fields overlap the bands
-classify the sum of their intensities. Three **potency bands**, parted at the classes' thresholds
-(`assets/ballistics/box_classes.ron`, `BoxClasses::potency_thresholds`): **knockout** at
-`I ≥ T_mid`, `T_mid = crew_hp / crew_face_m2` (30 / 0.2 = 150, DERIVED); **reduced** from `T_floor`
-up to it; **nothing** below `T_floor`, the least share of an HP point the sim's once-per-shot
-rounding counts (half a point: to nearest, ties away, `ballistics::least_counted_hp`) over the same
-face (0.5 / 0.2 = 2.5, DERIVED). The promise: a crew station whose face lies wholly in knockout is
-knocked out; one wholly in reduced has its pool dosed and usually not emptied, for the rounding
-tips it at the band's top, from `T_mid − T_floor` (147.5, DERIVED), where its face's total
+classify the sum of their intensities. Three **potency bands**, parted at thresholds of the
+struck tank's own crew boxes (`BoxClasses::potency_thresholds`): **knockout** at `I ≥ T_mid`,
+`T_mid = crew_hp / A_crew`, `crew_hp` the shared crew pool (`assets/ballistics/box_classes.ron`)
+and `A_crew` the mean face of the struck tank's crew boxes at rest in its sim geometry, the mean of
+the three axis-aligned face areas of each box's bounds (`TankShapes::crew_face`; the seed tank's
+0.2033 m², MEASURED, so 30 / 0.2033 = 147.5, DERIVED); **reduced** from `T_floor` up to it;
+**nothing** below `T_floor`, the least share of an HP point the sim's once-per-shot rounding counts
+(half a point: to nearest, ties away, `ballistics::least_counted_hp`) over the same face
+(0.5 / 0.2033 = 2.46, DERIVED). The face is read from the geometry and authored nowhere else, so
+the bands follow the boxes they describe; every crew box of a tank presents one mean face
+(`src/tests/crew_faces.rs`), so the thresholds hold for each station alike, and a plan with no
+crew box has no bands and draws no field. The promise: a crew station whose face lies wholly in
+knockout is knocked out; one wholly in reduced has its pool dosed and usually not emptied, for the
+rounding tips it at the band's top, from `T_mid − T_floor` (145.1, DERIVED), where its face's total
 (29.5 HP points) rounds to the whole pool; one wholly in nothing takes no HP point from the
 field. A box only partly inside a field takes that intensity over that part
 alone. Knockout takes the field teal and reduced the deep teal (`timeline::FIELD`, `FIELD_DIM`;
 relative luminance 0.50 and 0.12, DERIVED, so they part in every colour vision type), nothing no
 colour; neither is the state scale's red. Along a direction the intensity reaches mid at
 `sqrt(ρ s / (Ω T_mid))` and the floor `sqrt(T_mid / T_floor)` ≈ 7.7 times farther (DERIVED); s1's
-strongest direction (924 HP points per steradian) reaches mid at 2.48 m and the floor at 19 m,
+strongest direction (924 HP points per steradian) reaches mid at 2.50 m and the floor at 19 m,
 past every reach of the shipped records (5.2 m at most); the weakest field, s4's and s16's (2.5),
 reaches its floor at 1.0 m, just past its 0.79 m reach (DERIVED from the records). So the reduced
 band ends at a reach or a shadow of the struck tank's hard bodies, rarely at the floor, and its
@@ -611,19 +619,19 @@ law's `N`, with their provenance and the throw's MEASURED cost at 64, 256 and 68
 
 **Potency.** Ring and ball carry nearly the same energy (211.1 against 214.8 kJ): they differ in
 where the potency goes, not how much there is. `r_E` = 1.0 per kJ (TUNED, provisional) is set so a
-crew box at the crew pool's 0.2 m² face, wholly inside the ball at rest 2.0 m from the burst, has
-its 30 HP pool emptied. A thin unshadowed box of face `A` wholly inside a field, where the field is
-`b` times as bright as an even sphere's (`b = 4π p_Ω`), has the knockout radius
-`R = sqrt(ρ (S/2) A b / (4π pool))`, `ρ` = 70; its pool is its class × `A` (§6), so a hard module's
-radius is the crew's over `√2` (300 HP per m² against the crew's 150). DERIVED, at rest and at
-s1's carried speed (244.6 m/s):
+crew box of a 0.2 m² mean face (a seated crew member's), wholly inside the ball at rest 2.0 m from
+the burst, has its 30 HP pool emptied. A thin unshadowed box of face `A` wholly inside a field,
+where the field is `b` times as bright as an even sphere's (`b = 4π p_Ω`), has the knockout radius
+`R = sqrt(ρ (S/2) A b / (4π pool))`, `ρ` = 70; a module's follows from its own authored pool and
+face (§6). DERIVED, at rest and at s1's carried speed (244.6 m/s), for the crew at 0.2 m² (the seed
+tank's crew box, MEASURED at 0.2033 m², reaches each 0.8 % farther, DERIVED):
 
-| field | where | `b` | crew (0.2 m²) | hard module |
-|---|---|---|---|---|
-| ball at rest | anywhere | 1 | 2.00 m | 1.41 m |
-| ring at rest | in the band, 80–100° | 5.76 | 4.75 m | 3.36 m |
-| ball at 244.6 m/s (`λ` 1.188, rim 57.3°) | on the axis | 10.47 | 6.46 m | 4.57 m |
-| ring at 244.6 m/s (`λ` 0.452, band 55.7–75.7°) | in the band | 6.32 | 4.98 m | 3.52 m |
+| field | where | `b` | crew (0.2 m²) |
+|---|---|---|---|
+| ball at rest | anywhere | 1 | 2.00 m |
+| ring at rest | in the band, 80–100° | 5.76 | 4.75 m |
+| ball at 244.6 m/s (`λ` 1.188, rim 57.3°) | on the axis | 10.47 | 6.46 m |
+| ring at 244.6 m/s (`λ` 0.452, band 55.7–75.7°) | in the band | 6.32 | 4.98 m |
 
 **The record.** The shot record carries the burst (`damage_cam::Burst`): when (the path reaching the
 burst point, its last leg timed at the speed the burst trigger counts it at, so a burst in flight
@@ -645,14 +653,14 @@ first field that dosed it, a plate cone's or the burst's, reaches it.
 s13 and s14 fly s1's line with the ring and the ball: the upper front plate arms the fuze, and the
 round bursts 0.37 m past its exit at 244.6 m/s, short of the driver's station. The ring's band
 empties the HP pools of the bow gunner, the transmission and two ammunition racks, and its nose
-piece flies on through the driver's and the gunner's stations to the rear plate. The ball's lobe
-empties those of the commander, the loader, the engine and three ammunition racks, and the round
-ends short of the driver. In both the plate's cone knocks out the driver and the gunner, as in s1,
-which empties no other HP pool. s15 flies s6's line with the ball: no body holds the arming spend,
-so its record is s6's. s16 flies s4's line with the ball: the road wheel arms the fuze, its rubber
-and far disc restart the delay, and the round stops 20.7 mm into the lower hull side and bursts at
-rest there; every direction starts inside that plate, which stops it, so the field doses nothing
-(MEASURED, from the records).
+piece flies on through the driver's station to the rear plate. The ball's lobe empties those of
+the commander, the gunner, the loader, the engine and three ammunition racks, and the round ends
+short of the driver. In both the plate's cone knocks out the driver, as in s1, which empties no
+other HP pool and leaves the gunner and the commander reduced. s15 flies s6's line with the ball:
+no body holds the arming spend, so its record is s6's. s16 flies s4's line with the ball: the road
+wheel arms the fuze, its rubber and far disc restart the delay, and the round stops 20.7 mm into
+the lower hull side and bursts at rest there; every direction starts inside that plate, which
+stops it, so the field doses nothing (MEASURED, from the records).
 
 **Class invariants** (tests hold them for any round and tank; fixture numbers are fixture data).
 The fuze arms only at the threshold; the delay runs from the exit and restarts at a later body or
@@ -669,12 +677,15 @@ wire round-trip a burst.
 
 Every component has its own **HP pool** in whole **HP points**. A crew station's is the one shared
 crew pool (30 HP, TUNED, provisional, `assets/ballistics/box_classes.ron`), which a tank file
-cannot author: a crewman is one entity across tanks, and the crew box is a placeholder for a
-humanoid shape. Every other pool is authored as an integer in the tank data, its sturdiness class
-(HP points per m², same file, TUNED) times the box's mean face, the mean of the three axis-aligned
-face areas of its bounds (an engine 336 on the seed tank, DERIVED); `src/tests/box_pools.rs` holds
-every tank asset to both, which the field's calibration (§5) and the pen cam's potency colour rely
-on. One
+cannot author: a crewman is one entity across tanks, and the pool has no relation to the size of
+the crew box. Every other pool is a plain integer authored by hand in the tank data (`hp` in
+`<tank>.tank.ron`), tuned in play; no class rate or size rule derives it (owner, 2026-10-28, #104;
+a pool derived from class × volume is deferred to tank #2, if hand-authoring proves inconsistent).
+The field needs no such rule: a bigger box is a bigger target, crossed by more of a field's
+directions, so it takes more dose (§5). A crew box is person-sized, one shared size within a tank
+(the seed tank's 0.4 × 0.3 × 0.7 m, a 0.2033 m² mean face, MEASURED from its sim geometry), close to
+the 0.2 m² face the field's calibration is set against (§5), and the pen cam's potency bands are
+read from it (§5, "Potency colour"). One
 point is 0.1 reference-mm of line dose (`ballistics::HP_PER_REFERENCE_MM`, a unit with Resolution
 provenance, not a balance value); a field deposit converts at the field's calibration (§5). A spall
 cone doses it by the strength reaching it (§5); the **main penetrator transiting** a hard module

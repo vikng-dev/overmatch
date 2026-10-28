@@ -548,7 +548,7 @@ pub fn rebuild(
                 let role = roles.get(&entity).copied();
                 let rule = Footprint::of_mesh(mesh.tier, role);
                 let entry = tier_materials.entry((mesh.tier, rule)).or_insert_with(|| {
-                    let draw = look::hull(mesh.tier, role, &masks);
+                    let draw = look::hull(mesh.tier, role, &masks, plan.potency.as_ref());
                     (looks.add(draw.material), draw.layer)
                 });
                 let (material, layer) = (entry.0.clone(), entry.1);
@@ -674,10 +674,12 @@ pub struct LookCtx<'a> {
 }
 
 /// The box frame `kind` draws `plan`'s fields on ([`look::field_bounds`]): every frame's but the
-/// ricochet's, where the record threw any. The volume is spawned and the pictures shown under the
-/// one condition.
+/// ricochet's, where the record threw any and its struck tank has a potency ([`Plan::potency`]:
+/// with no crew station its bands would promise nothing). The volume is spawned and the pictures
+/// shown under the one condition.
 pub(super) fn field_box(plan: &Plan, kind: CornerKind) -> Option<(Vec3, Vec3)> {
-    look::field_bounds(&plan.cones).filter(|_| kind != CornerKind::Ricochet)
+    look::field_bounds(&plan.cones)
+        .filter(|_| kind != CornerKind::Ricochet && plan.potency.is_some())
 }
 
 /// Draw `plan`'s record over a tank in frame `kind`: the trail, the rings, the fields, a burst's
@@ -797,8 +799,8 @@ pub fn spawn_glass(
     }
 
     // The fields: one volume on the box about their reach, cut by the slice plane in the slice.
-    if let Some((lo, hi)) = field_box(plan, kind) {
-        let mut material = look::volume(&Potency::shipped(), look_ctx.masks, kind, clip);
+    if let (Some((lo, hi)), Some(potency)) = (field_box(plan, kind), &plan.potency) {
+        let mut material = look::volume(potency, look_ctx.masks, kind, clip);
         material.set_fade(0.0);
         commands.spawn((
             Mesh3d(meshes.add(Cuboid::from_corners(lo, hi))),
@@ -843,7 +845,7 @@ pub fn spawn_glass(
     for component in components {
         let index = component.index;
         let b = &plan.boxes[index];
-        let Some(mut fill) = look::component(b, kind, look_ctx.masks) else {
+        let Some(mut fill) = look::component(b, kind, look_ctx.masks, plan.potency.as_ref()) else {
             continue;
         };
         use bevy::camera::primitives::MeshAabb;
@@ -1175,6 +1177,11 @@ impl<'a> Playing<'a> {
         Self { pictures, ..self }
     }
 
+    /// The struck tank's potency, the frame's fields' rate and thresholds ([`Plan::potency`]).
+    pub(super) fn potency(&self) -> Option<&'a Potency> {
+        self.plan.potency.as_ref()
+    }
+
     /// The atlas the frame's fields are read from.
     pub(super) fn atlas(&self) -> Option<&'a Handle<Image>> {
         self.pictures.map(|(_, atlas)| atlas)
@@ -1331,7 +1338,9 @@ impl<'a> Playing<'a> {
         };
         if let Some(mut m) = looks.get_mut(&look.0) {
             m.pictures = self.atlas().cloned();
-            m.set_fields(prints, &Potency::shipped());
+            if let Some(potency) = &plan.potency {
+                m.set_fields(prints, potency);
+            }
             m.set_fade(fade);
         }
         visibility.set_if_neq(Visibility::Inherited);
@@ -1431,7 +1440,9 @@ impl<'a> Playing<'a> {
                 m.set_condition(condition);
             }
             m.pictures = self.atlas().cloned();
-            m.set_fields(prints, &Potency::shipped());
+            if let Some(potency) = &self.plan.potency {
+                m.set_fields(prints, potency);
+            }
             if let Some(hull) = hull {
                 let up = *hull.up();
                 let height = |y: f32| hull.transform_point(Vec3::Y * y).dot(up);
@@ -1601,6 +1612,7 @@ pub fn animate(
             handle,
             prints.as_deref().unwrap_or_default(),
             playing.atlas(),
+            playing.potency(),
         );
     }
     for (tint, outline, look, mut visibility) in &mut boxes {
@@ -3208,12 +3220,12 @@ mod tests {
     /// in every frame, the corner's and the kill cam's lesson on the world alike: one volume,
     /// blended, on a box that holds every field out to its longest reach, reading the record's
     /// depth pictures from the one atlas the stage draws ([`ViewPictures::drawn`]); its bands
-    /// parted at the shipped thresholds and coloured from the band law alone — the knockout band
-    /// the field teal, the reduced band the deep teal, both more blue than red and off the state
-    /// scale, the knockout band the brighter — each band at one opacity, its edge over one window,
-    /// across every record, so the colour says the band of the fields' summed intensity and nothing
-    /// else. Outside the slice the volume
-    /// is uncut; in the slice it is cut by the slice plane. Where its frame draws the body behind,
+    /// parted at the struck tank's thresholds and coloured from the band law alone — the knockout
+    /// band the field teal, the reduced band the deep teal, both more blue than red and off the
+    /// state scale, the knockout band the brighter — each band at one opacity, its edge over one
+    /// window, across every record, so the colour says the band of the fields' summed intensity
+    /// and nothing else. Outside the slice the volume is uncut; in the slice it is cut by the
+    /// slice plane. Where its frame draws the body behind,
     /// it is bounded by its viewer's part mask ([`the_x_ray_draws_the_body_behind`]). At least one
     /// record throws a field in each. A box short of a field's reach clips that field's far side; a
     /// volume per field draws an overlap twice, in neither field's band.
@@ -3224,7 +3236,7 @@ mod tests {
         let asset = TankAsset::load(&library.vehicle).unwrap();
         let (mut looked, mut sliced) = (0, 0);
         let mut opacities: Vec<Vec3> = Vec::new();
-        let potency = Potency::shipped();
+        let potency = Potency::bound();
         let luminance = |c: Vec3| c.dot(Vec3::new(0.2126, 0.7152, 0.0722));
         let colour = |band: Band| LinearRgba::from(band.colour().unwrap()).to_vec3();
         let (knockout, reduced) = (colour(Band::Knockout), colour(Band::Reduced));
@@ -3868,7 +3880,8 @@ mod tests {
         let masks = MaskSet::default();
         let mut looks = Assets::<LookMaterial>::default();
         let mut outlines = Assets::<OutlineMaterial>::default();
-        let look = MeshMaterial3d(looks.add(look::component(&plan.boxes[index], kind, &masks)?));
+        let fill = look::component(&plan.boxes[index], kind, &masks, plan.potency.as_ref())?;
+        let look = MeshMaterial3d(looks.add(fill));
         let outline = MeshMaterial3d(outlines.add(OutlineMaterial::new(
             timeline::STATE_RED.into(),
             look::STATE_OUTLINE_PX,

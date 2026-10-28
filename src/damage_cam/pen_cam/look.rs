@@ -312,10 +312,11 @@ impl LookMaterial {
         self.params.state.w = condition.fill();
     }
 
-    /// The fields' painting by `rule` ([`Footprint::lane`]) in the shipped bands' thresholds and
-    /// colours ([`band_lanes`]); the fields themselves come each frame ([`Self::set_fields`]).
-    fn paint(&mut self, rule: Footprint) {
-        let [bands, knockout, reduced] = band_lanes(&Potency::shipped());
+    /// The fields' painting by `rule` ([`Footprint::lane`]) in the bands' thresholds `potency`
+    /// parts them at, the struck tank's, and their colours ([`band_lanes`]); the fields themselves
+    /// come each frame ([`Self::set_fields`]).
+    fn paint(&mut self, rule: Footprint, potency: &Potency) {
+        let [bands, knockout, reduced] = band_lanes(potency);
         self.params.foot = rule.lane();
         self.params.bands = bands;
         self.params.knockout = knockout;
@@ -826,21 +827,24 @@ fn band_lanes(potency: &Potency) -> [Vec4; 3] {
 }
 
 /// The fields `prints` on the painted material `handle` ([`LookMaterial::is_painted`]), their
-/// pictures read from `atlas` ([`LookMaterial::set_fields`]; `None`, no field). The material is
-/// written only where that changes it, so a frame that holds still re-uploads none; one not painted
-/// is left as it is.
+/// pictures read from `atlas` ([`LookMaterial::set_fields`]; `None`, no field) and their emission
+/// at `potency`'s rate (the plan's; `None`, a plan with no potency, leaves the material as it is).
+/// The material is written only where that changes it, so a frame that holds still re-uploads
+/// none; one not painted is left as it is.
 pub fn paint_fields(
     looks: &mut Assets<LookMaterial>,
     handle: &Handle<LookMaterial>,
     prints: &[FieldPrint],
     atlas: Option<&Handle<Image>>,
+    potency: Option<&Potency>,
 ) {
-    let Some(material) = looks.get(handle).filter(|m| m.is_painted()) else {
+    let (Some(material), Some(potency)) = (looks.get(handle).filter(|m| m.is_painted()), potency)
+    else {
         return;
     };
     let mut want = material.clone();
     want.pictures = atlas.cloned();
-    want.set_fields(prints, &Potency::shipped());
+    want.set_fields(prints, potency);
     if (want.params != material.params || want.pictures != material.pictures)
         && let Some(mut material) = looks.get_mut(handle)
     {
@@ -1259,12 +1263,18 @@ impl Footprint {
 }
 
 /// How a tank mesh of tier `tier` is drawn in the base look; a component's mesh, `role` its
-/// component's, painted by its rule ([`Footprint::of_mesh`]).
-pub fn hull(tier: Tier, role: Option<Role>, masks: &MaskSet) -> HullDraw {
+/// component's, painted by its rule ([`Footprint::of_mesh`]) in the bands of `potency`, the
+/// tank's ([`super::plan::Plan::potency`]); with none, unpainted.
+pub fn hull(
+    tier: Tier,
+    role: Option<Role>,
+    masks: &MaskSet,
+    potency: Option<&Potency>,
+) -> HullDraw {
     let layer = Layer::of(tier);
     let material = match layer {
         Layer::Body => base(masks),
-        Layer::Scene => component_base(masks, Footprint::of_mesh(tier, role)),
+        Layer::Scene => component_base(masks, Footprint::of_mesh(tier, role).zip(potency)),
     };
     HullDraw { material, layer }
 }
@@ -1288,17 +1298,17 @@ fn base(masks: &MaskSet) -> LookMaterial {
 }
 
 /// The base look's material for every component mesh: the untouched grey, opaque, in the body's
-/// edge colour, tested against the part mask (`mode.z = 1`), painted by `rule` (`None`: not
-/// painted). A struck component's fill covers it.
-fn component_base(masks: &MaskSet, rule: Option<Footprint>) -> LookMaterial {
+/// edge colour, tested against the part mask (`mode.z = 1`), painted by a rule in a potency's
+/// bands (`None`: not painted). A struck component's fill covers it.
+fn component_base(masks: &MaskSet, painting: Option<(Footprint, &Potency)>) -> LookMaterial {
     let mut material = base(masks);
     let grey = LinearRgba::from(timeline::STATE_UNTOUCHED);
     material.params.color = Vec4::new(grey.red, grey.green, grey.blue, BASE_COMPONENT_ALPHA);
     material.params.shade.x = BASE_COMPONENT_FACE_SHARE;
     material.params.mode.z = 1.0;
     material.blend = Blend::Opaque;
-    if let Some(rule) = rule {
-        material.paint(rule);
+    if let Some((rule, potency)) = painting {
+        material.paint(rule, potency);
     }
     material
 }
@@ -1342,12 +1352,18 @@ fn state(condition: Condition, masks: &MaskSet) -> LookMaterial {
 }
 
 /// Component `b`'s fill in frame `kind`, in any look: the state scale ([`state`]) at its state
-/// once the shot has dosed it, painted by its role's rule ([`Footprint::of`]), drawn under a
+/// once the shot has dosed it, painted by its role's rule ([`Footprint::of`]) in the bands of
+/// `potency`, the plan's (with none, unpainted), drawn under a
 /// [`timeline::STATE_RED`] outline [`STATE_OUTLINE_PX`] wide; `None` where it is not drawn. The
 /// shooter's frames (the glass frame and the outside view) draw a component this shot took HP
 /// from, and no other, so no earlier damage reaches the shooter; the victim's x-ray draws every
 /// component with any of its pool gone.
-pub fn component(b: &BoxPlan, kind: CornerKind, masks: &MaskSet) -> Option<LookMaterial> {
+pub fn component(
+    b: &BoxPlan,
+    kind: CornerKind,
+    masks: &MaskSet,
+    potency: Option<&Potency>,
+) -> Option<LookMaterial> {
     let settled = condition(b, 1.0)?;
     let drawn = match kind {
         CornerKind::Glass | CornerKind::Damaged => b.struck(),
@@ -1356,7 +1372,9 @@ pub fn component(b: &BoxPlan, kind: CornerKind, masks: &MaskSet) -> Option<LookM
     };
     drawn.then(|| {
         let mut fill = state(settled, masks);
-        fill.paint(Footprint::of(b.role));
+        if let Some(potency) = potency {
+            fill.paint(Footprint::of(b.role), potency);
+        }
         fill
     })
 }
@@ -1504,7 +1522,7 @@ mod tests {
 
     /// The colour reads no gain: the lanes the volume colours from carry the field's frame, the
     /// emission `ρ S / Ω` its strength gives in world units (squared metres, whose intensity falls
-    /// as the square of a world distance), its scale and longest reach, its law, the shipped
+    /// as the square of a world distance), its scale and longest reach, its law, the tank's
     /// thresholds and each band's colour from the band law, and fading the volume, a base surface
     /// or a painted component moves its fade lane alone; each band's opacity and the edges' window
     /// are the volume's own, whatever the stage's scale. A painted component reads the same lanes,
@@ -1513,7 +1531,7 @@ mod tests {
     /// the volume, fails here.
     #[test]
     fn the_colour_reads_no_gain() {
-        let potency = Potency::shipped();
+        let potency = Potency::bound();
         let masks = MaskSet::default();
         let atlas = Handle::<Image>::default();
         let print = fixture_print();
@@ -1571,7 +1589,7 @@ mod tests {
 
         // A painted component draws the fields' bands from the volume's lanes, and no field
         // without its pictures.
-        let mut painted = component_base(&masks, Some(Footprint::Hard));
+        let mut painted = component_base(&masks, Some((Footprint::Hard, &potency)));
         painted.set_fields(std::slice::from_ref(&print), &potency);
         assert_eq!(painted.params.fields.x, 0.0);
         painted.pictures = Some(atlas);
@@ -1611,7 +1629,7 @@ mod tests {
     /// and the eye depth mirrored ([`the_eye_depth_runs_forward_in_both_projections`]).
     #[test]
     fn the_body_draws_behind_the_scene() {
-        let potency = Potency::shipped();
+        let potency = Potency::bound();
         let masks = MaskSet::default();
         for kind in [
             CornerKind::Glass,
@@ -1633,7 +1651,7 @@ mod tests {
         for m in [
             base(&masks),
             component_base(&masks, None),
-            component_base(&masks, Some(Footprint::Hard)),
+            component_base(&masks, Some((Footprint::Hard, &potency))),
             hull_mask(&masks),
             state(Condition::Dead, &masks),
         ] {
@@ -2119,10 +2137,14 @@ mod tests {
     /// that draws one; a body mesh is never painted, whatever role is named for it, nor a
     /// component's mesh that no component of the record claims. ADR-0040 relies on it: crew under
     /// the hard rule leaves the faces of a station a field passes through bare where they turn from
-    /// its origin, and a hard component under the witness rule is painted through its own body.
+    /// its origin, and a hard component under the witness rule is painted through its own body. A
+    /// painted material carries its tank's thresholds, and a tank with no potency (no crew station)
+    /// paints nothing: a painted surface with no thresholds would part its bands at zero.
     #[test]
     fn a_crew_station_is_painted_as_a_witness_and_nothing_else_is() {
         let masks = MaskSet::default();
+        let potency = Potency::bound();
+        let tank = Some(&potency);
         for role in [Role::Crew, Role::Module, Role::Ammo, Role::Engine] {
             // A role added to `Role` fails to compile here until it is listed above.
             match role {
@@ -2130,20 +2152,30 @@ mod tests {
             }
             let rule = Footprint::of(role);
             assert_eq!(rule == Footprint::Witness, role == Role::Crew, "{role:?}");
-            let base = hull(Tier::Component, Some(role), &masks).material;
+            let base = hull(Tier::Component, Some(role), &masks, tank).material;
             assert_eq!(base.params.foot, rule.lane(), "{role:?}");
+            assert_eq!(base.params.bands, potency.lanes(), "{role:?}");
+            let crewless = hull(Tier::Component, Some(role), &masks, None).material;
+            assert!(!crewless.is_painted(), "{role:?}");
             for tier in [Tier::Armour, Tier::External, Tier::Detail] {
                 assert_eq!(Footprint::of_mesh(tier, Some(role)), None, "{tier:?}");
-                let body = hull(tier, Some(role), &masks).material;
+                let body = hull(tier, Some(role), &masks, tank).material;
                 assert!(!body.is_painted(), "{role:?} {tier:?}");
             }
             let b = struck_box(role);
             for kind in [CornerKind::Glass, CornerKind::Victim, CornerKind::Damaged] {
-                let fill = component(&b, kind, &masks).expect("a struck component is drawn");
+                let fill = component(&b, kind, &masks, tank).expect("a struck component is drawn");
                 assert_eq!(fill.params.foot, rule.lane(), "{role:?} {kind:?}");
+                assert_eq!(fill.params.bands, potency.lanes(), "{role:?} {kind:?}");
+                let crewless = component(&b, kind, &masks, None).expect("drawn without a potency");
+                assert!(!crewless.is_painted(), "{role:?} {kind:?}");
             }
         }
-        assert!(!hull(Tier::Component, None, &masks).material.is_painted());
+        assert!(
+            !hull(Tier::Component, None, &masks, tank)
+                .material
+                .is_painted()
+        );
         assert_eq!(Footprint::Witness.lane().z, 1.0);
         assert_eq!(Footprint::Hard.lane().z, 0.0);
     }
@@ -2166,7 +2198,7 @@ mod tests {
         }];
         let print = print_of(&cone, &picture, Vec3::ZERO, 5.0, 1.0);
         let prints = std::slice::from_ref(&print);
-        let potency = Potency::shipped();
+        let potency = Potency::bound();
         let paint = |rule, p, n| painting(prints, &seen, &potency, rule, p, n);
         let p = picture.axis;
         let held = intensity(prints, &seen, &potency, p);
@@ -2238,7 +2270,7 @@ mod tests {
             reach: &|d| casters.reach(Vec3::ZERO, AXIS, d),
         }];
         let prints = std::slice::from_ref(&print);
-        let potency = Potency::shipped();
+        let potency = Potency::bound();
         let paint = |rule, p, n| painting(prints, &seen, &potency, rule, p, n);
         // The plate's faces: toward the origin, and away from it behind.
         let (toward, away) = (-picture.axis, picture.axis);
@@ -2287,7 +2319,7 @@ mod tests {
             reach: &|_| 2.0,
         }];
         let prints = std::slice::from_ref(&print);
-        let potency = Potency::shipped();
+        let potency = Potency::bound();
         let d =
             picture.axis * 10.0_f32.to_radians().cos() + picture.u * 10.0_f32.to_radians().sin();
         let paint = |rule, r: f32| painting(prints, &seen, &potency, rule, d * r, -d);
@@ -2331,7 +2363,7 @@ mod tests {
             reach: &|d| casters.reach(Vec3::ZERO, AXIS, d),
         }];
         let prints = std::slice::from_ref(&print);
-        let potency = Potency::shipped();
+        let potency = Potency::bound();
         let paint = |p, n| painting(prints, &seen, &potency, Footprint::Witness, p, n);
         let normals = [
             picture.axis,
@@ -2363,7 +2395,7 @@ mod tests {
     /// origin and at 200 directions 2 cm to 1 m out, its front past them.
     #[test]
     fn a_field_the_record_stops_at_its_origin_draws_nothing() {
-        let potency = Potency::shipped();
+        let potency = Potency::bound();
         let golden = std::f32::consts::PI * (3.0 - 5.0_f32.sqrt());
         let mut stopped = 0;
         for (name, report) in super::super::plan::tests::records() {
@@ -2434,7 +2466,7 @@ mod tests {
             band(reach),
             sphere(reach),
         ];
-        let potency = Potency::shipped();
+        let potency = Potency::bound();
         let scale = 2.0;
         for cone in &fields {
             let picture = Picture::of(cone, PITCH);
@@ -2941,7 +2973,7 @@ mod tests {
         }
         let top = f32::from_bits(lo);
         assert!(top > 1.0e7, "the law resolves ratios up to {top}");
-        let potency = Potency::shipped();
+        let potency = Potency::bound();
         let masks = MaskSet::default();
         let (strength, reach) = (10.0, 2.0);
         let fields = [

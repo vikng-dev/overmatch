@@ -50,23 +50,26 @@ is in `src/substances.rs` (the kinds), `src/ballistics/wound.rs` (the witness pa
 - One perforation doses every crew station in the cone, and nobody hides behind a comrade.
   Modules still shield. The field converts at its own calibration (`spall_cone.ron`), set so a
   station fully inside the cone's knockout radius — about 2 m from the hole for a weak ordinary
-  perforation at the intended humanoid's 0.2 m² face, 3.2 m at the placeholder crew box's
-  (DERIVED) — is knocked out; a station the cone's dim edge grazes keeps HP, reduced.
+  perforation at a seated crew member's 0.2 m² mean face, the person-sized crew box's (DERIVED) —
+  is knocked out; a station the cone's dim edge grazes keeps HP, reduced.
 - Caliber reaches a crew pool only through the round's crew line rate.
 - The dials are data: the crew line rate per round, the shared crew pool (30 HP, TUNED,
   provisional, `box_classes.ron`; no tank file authors it), the field's HP per reference-mm, and
-  the cone's strength and direction count. Every other HP pool is its sturdiness class times the
-  box's mean face (#2 and #3 in
+  the cone's strength and direction count (#2 in
   `.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md`;
-  design doc §5, §6).
+  design doc §5). Every other HP pool is authored by hand in the tank file (design doc §6).
 - A crew exit throws no cone, and a fragment's reach surface in the pen cam ends only on hard
   bodies.
 - Crew consequences are unchanged (stations, backfill, the knockout rule of playtest fork F2).
   They remain the place for crew-only ideas such as a reduced state with an effect.
 
-**Amended 2026-10-23.** The field's own calibration, the shared crew pool and the class × face
-pools above replaced the first version's reading, under which the field left a station reduced
-and only the line knocked it out.
+**Amended 2026-10-23.** The field's own calibration, the shared crew pool and class × face pools
+replaced the first version's reading, under which the field left a station reduced and only the
+line knocked it out.
+
+**Amended 2026-10-28** (#104). Pools other than crew are hand-authored numbers in the tank file;
+the class × face rule retired. The crew box became person-sized, so the field's calibration face
+is the box's own.
 
 ## Rejected
 

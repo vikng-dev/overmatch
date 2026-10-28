@@ -1,8 +1,16 @@
 //! The pen cam's potency bands: a field's local intensity at a point, and the band that intensity
-//! falls in ([`Band`]). Pure functions of the record's field (a spall cone or a burst's) and the
-//! shipped data: the field's rate (`assets/ballistics/spall_cone.ron`), the crew pool and face
-//! (`assets/ballistics/box_classes.ron`) and the sim's HP rounding. The law, its thresholds and its
-//! promise are design doc §5, "Potency colour" (`.agents/docs/design/armor-penetration-and-damage.md`).
+//! falls in ([`Band`]). Pure functions of the record's field (a spall cone or a burst's), the
+//! shipped data (the field's rate, `assets/ballistics/spall_cone.ron`; the crew pool,
+//! `assets/ballistics/box_classes.ron`), the sim's HP rounding, and the struck tank's crew face.
+//! The law, its thresholds and its promise are design doc §5, "Potency colour"
+//! (`.agents/docs/design/armor-penetration-and-damage.md`).
+//!
+//! The crew face is the struck tank's own: the mean face of its crew boxes at rest, read from its
+//! sim geometry ([`TankShapes::crew_face`]), the one place a crew box's size is stated; no data
+//! file authors a face and nothing corrects one. So a potency belongs to a tank, not to the game:
+//! a plan carries its struck tank's ([`Potency::of_tank`], `Plan::potency`), the look parts its
+//! bands at the thresholds the plan hands it, and a plan whose tank has no crew station has no
+//! potency and draws no field.
 //!
 //! Units: a direction's strength `s` in reference-mm; the rate `ρ` in HP points per reference-mm;
 //! the emission `e = ρ s / Ω` in HP points per steradian, `Ω` the solid angle of the field's
@@ -17,8 +25,9 @@ use bevy::prelude::*;
 use super::timeline;
 use crate::ballistics::box_classes::BoxClasses;
 use crate::ballistics::spall_cone;
+use crate::damage_cam::shapes::TankShapes;
 
-/// The field's rate and the band thresholds, as the shipped data states them.
+/// The field's rate and a tank's band thresholds.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Potency {
     /// `ρ`, HP points per reference-mm of field dose.
@@ -53,22 +62,44 @@ impl Band {
 }
 
 impl Potency {
-    /// The shipped rate and thresholds. Panics on a malformed data file, as its parse does.
-    pub fn shipped() -> Self {
+    /// The potency of the tank `shapes` holds: the shipped crew pool and field rate over its crew
+    /// face ([`TankShapes::crew_face`]); `None` for a tank with no crew station, whose bands would
+    /// promise nothing. Panics on a malformed data file, as its parse does.
+    pub fn of_tank(shapes: &TankShapes) -> Option<Self> {
+        shapes.crew_face().map(Self::of_crew_face)
+    }
+
+    /// The shipped crew pool and field rate over crew stations of mean face `crew_face` (m²,
+    /// positive and finite).
+    pub fn of_crew_face(crew_face: f32) -> Self {
         Self::of(
             BoxClasses::shipped(),
+            crew_face,
             spall_cone::hp_per_reference_mm() as f32,
         )
     }
 
-    /// The thresholds `classes` part the bands at, and the field rate `rate`.
-    pub fn of(classes: &BoxClasses, rate: f32) -> Self {
-        let thresholds = classes.potency_thresholds();
+    /// The thresholds `classes` part the bands at over crew stations of mean face `crew_face` (m²),
+    /// and the field rate `rate`.
+    pub(crate) fn of(classes: &BoxClasses, crew_face: f32, rate: f32) -> Self {
+        let thresholds = classes.potency_thresholds(crew_face);
         Self {
             rate,
             floor: thresholds.floor,
             mid: thresholds.mid,
         }
+    }
+
+    /// The bound tank's potency (`tank::TIGER_SPEC_PATH`, the fixture tank), the one every plan of
+    /// its records carries: for the tests that read the shipped bands.
+    #[cfg(test)]
+    pub fn bound() -> Self {
+        static BOUND: std::sync::LazyLock<Potency> = std::sync::LazyLock::new(|| {
+            let asset = crate::damage_cam::shapes::TankAsset::load(crate::tank::TIGER_SPEC_PATH)
+                .expect("the bound tank loads");
+            Potency::of_tank(&asset.shapes(&Default::default())).expect("the bound tank has crew")
+        });
+        *BOUND
     }
 
     /// The emission `e = ρ s / Ω` (HP points per steradian) of a direction of strength `strength`
@@ -147,46 +178,48 @@ pub fn soft_step(edge: f32, width: f32, x: f32) -> f32 {
 mod tests {
     use super::*;
 
-    /// Fixture classes: 30 HP set against 0.25 m², the classes apart from the shipped ones.
-    fn fixture_classes() -> BoxClasses {
-        BoxClasses::from_ron(
-            r#"(crew_hp: (30, Tuned("fixture")), crew_face_m2: (0.25, Tuned("fixture")),
-                ammo: (200, Tuned("fixture")), hard: (300, Tuned("fixture")))"#,
-        )
-        .unwrap()
+    /// A fixture potency: a 30 HP crew pool, apart from the shipped one, over a 0.25 m² crew face,
+    /// so 120 and 2 HP points per m² (DERIVED).
+    fn fixture() -> Potency {
+        let classes = BoxClasses::from_ron(r#"(crew_hp: (30, Tuned("fixture")))"#).unwrap();
+        Potency::of(&classes, 0.25, 70.0)
     }
 
-    /// The bands part at the classes' thresholds, never the look's own: mid the crew pool over its
-    /// face, the floor the sim's least counted share of an HP point over the same face (fixture:
-    /// 120 and 2 HP points per m²; shipped: 150 and 2.5, DERIVED), the rate the field's
-    /// calibration. The band promise relies on it; a threshold authored in the look (the shipped
-    /// 150 hard-coded), a floor dropped to zero, or one read as a whole HP point fails here.
+    /// The bands part at the crew pool and the sim's least counted share of an HP point, each over
+    /// the struck tank's crew face as its sim geometry has it, never at the look's own numbers:
+    /// fixture 120 and 2 HP points per m² over 0.25 m²; the bound tank's over its crew face
+    /// (0.2033 m², MEASURED: 147.5 and 2.46, DERIVED), the rate the field's calibration; and a
+    /// tank with no crew station has no bands. The band promise relies on it; a threshold authored
+    /// in the look or over a face held in data, a floor dropped to zero, one read as a whole HP
+    /// point, or bands for a tank with no crew station fails here.
     #[test]
-    fn the_thresholds_read_the_classes() {
-        let fixture = Potency::of(&fixture_classes(), 70.0);
+    fn the_thresholds_read_the_crew_pool_over_the_tanks_crew_face() {
+        let fixture = fixture();
         assert_eq!((fixture.floor, fixture.mid), (2.0, 120.0));
-        let shipped = Potency::shipped();
+        let asset = crate::damage_cam::shapes::TankAsset::load(crate::tank::TIGER_SPEC_PATH)
+            .expect("the bound tank loads");
+        let face = asset.crew_face().expect("the bound tank has crew");
+        let bound = Potency::bound();
         let classes = BoxClasses::shipped();
-        assert_eq!(shipped.mid, classes.potency_thresholds().mid);
-        assert_eq!(shipped.floor, classes.potency_thresholds().floor);
+        assert_eq!(bound.mid, classes.potency_thresholds(face).mid);
+        assert_eq!(bound.floor, classes.potency_thresholds(face).floor);
+        assert_eq!(bound.mid, classes.crew_hp() as f32 / face);
         let share = crate::ballistics::least_counted_hp() as f32 / classes.crew_hp() as f32;
-        assert!((shipped.floor / shipped.mid - share).abs() < 1e-6 * share);
-        assert!(shipped.floor > 0.0 && shipped.floor < shipped.mid);
-        assert_eq!(shipped.rate, spall_cone::hp_per_reference_mm() as f32);
-        assert_eq!(
-            shipped.lanes(),
-            Vec4::new(shipped.floor, shipped.mid, 0.0, 0.0)
-        );
+        assert!((bound.floor / bound.mid - share).abs() < 1e-6 * share);
+        assert!(bound.floor > 0.0 && bound.floor < bound.mid);
+        assert_eq!(bound.rate, spall_cone::hp_per_reference_mm() as f32);
+        assert_eq!(bound.lanes(), Vec4::new(bound.floor, bound.mid, 0.0, 0.0));
+        assert_eq!(Potency::of_tank(&TankShapes::default()), None);
     }
 
     /// Three bands, each from its threshold up: nothing below the floor, reduced from the floor
-    /// to mid, knockout at mid and above, over the shipped thresholds and the fixture's. Nothing
-    /// takes no colour; the two bands take the field's two teals, apart in luminance so they part
-    /// in every colour vision type, and neither is on the state scale's red. A dropped floor, a
-    /// band boundary off its threshold, or one colour for both bands fails here.
+    /// to mid, knockout at mid and above, over the bound tank's thresholds and the fixture's.
+    /// Nothing takes no colour; the two bands take the field's two teals, apart in luminance so
+    /// they part in every colour vision type, and neither is on the state scale's red. A dropped
+    /// floor, a band boundary off its threshold, or one colour for both bands fails here.
     #[test]
     fn three_bands_part_at_the_thresholds() {
-        for potency in [Potency::shipped(), Potency::of(&fixture_classes(), 70.0)] {
+        for potency in [Potency::bound(), fixture()] {
             let (floor, mid) = (potency.floor, potency.mid);
             for (intensity, want) in [
                 (0.0, Band::Nothing),

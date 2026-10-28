@@ -1784,7 +1784,6 @@ fn an_unshadowed_dose_falls_as_the_inverse_square() {
 #[test]
 fn the_pen_cam_intensity_times_a_face_is_its_dose() {
     use crate::damage_cam::pen_cam::potency::{Potency, intensity};
-    let potency = Potency::shipped();
     let ring = FieldDescriptor::ring(0.45, 10.0_f32.to_radians());
     let middle = libm::atan2(1.0, 0.45) as f32;
     let fields = [
@@ -1792,6 +1791,8 @@ fn the_pen_cam_intensity_times_a_face_is_its_dose() {
         (ring, Vec3::new(middle.sin(), -middle.cos(), 0.0), 0.2),
     ];
     for (field, face, side) in fields {
+        // The shipped rate; the fixture square's face sets only the thresholds, unread here.
+        let potency = Potency::of_crew_face(side * side);
         let spread = ConeShape::new(AxisRule::ExitDirection, 16384)
             .unwrap()
             .spread(field)

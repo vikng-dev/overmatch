@@ -43,19 +43,19 @@
     // field law both conserve a cone's emitted total.
     hp_per_reference_mm: (70, Tuned("owner decision 2026-10-23 (#2 in
         .agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md):
-        the 30 HP crew pool (box_classes.ron) with a 0.2 m² face, the intended humanoid's
-        presented area, is emptied within about 2 m of the hole on the recorded s1 cone, a weak
-        ordinary perforation; kept at 70 under the ball law (owner decision 2026-10-23, night, same
+        the 30 HP crew pool (box_classes.ron) at a 0.2 m² mean face, a seated crew member's and
+        so a crew box's in a tank's sim geometry, is emptied within about 2 m of the hole on the
+        recorded s1 cone, a weak ordinary perforation; kept at 70 under the ball law (owner
+        decision 2026-10-23, night, same
         file), which keeps every cone's emitted total and moves its potency toward the axis.
         DERIVED: a box of face A at distance R fully inside a cone of half-angle α, at angle θ off
         its axis, catches 2 f(θ) A / (R² Ω_c) of its emission E = S/2, Ω_c = 2π(1 − cos α) and
         f(θ) the ball's weight there (½ averaged over the cone), so its knockout radius is
         R = sqrt(2 f(θ) E A / (pool Ω_c)). On the s1 cone (S/2 = 5.09 reference-mm through RHA,
         α = 26.2°, Ω_c = 0.646 sr) that is 1.92 m at an average spot and 2.49 m on the axis
-        (f = 0.842), against 0.73 m and 0.94 m at the line's 10 HP per reference-mm. The
-        placeholder crew box's MEASURED 0.516 m² mean face gives about 3.1 m and 4.0 m (DERIVED)
-        until the humanoid shape lands. A box whose pool is its class × A has
-        R = sqrt(2 f(θ) E / (class Ω_c)), the same for every box of its class")),
+        (f = 0.842), against 0.73 m and 0.94 m at the line's 10 HP per reference-mm. The seed
+        tank's crew box, 0.4 × 0.3 × 0.7 m at a MEASURED 0.2033 m² mean face, gives 1.93 m and
+        2.51 m (DERIVED)")),
 
     // d_ref (m), the calibre `hp_per_reference_mm` was set against. A cone's strength goes as the
     // area of the hole its round's penetrator made, (d / d_ref)² of a hole of calibre d (design
@@ -72,10 +72,10 @@
         // The burst's strength S (reference-mm) per kJ of its driven mass's kinetic energy
         // ½ M v_s² (the wall under the ring, the round less its core under the ball); the field
         // emits S/2 in all.
-        reference_mm_per_kj: (1.0, Tuned("provisional: a crew box presenting the crew pool's 0.2 m²
-            face (box_classes.ron) fully inside the ball at rest, 2.0 m from the burst, has its 30
-            HP pool emptied. DERIVED: at rest the ball is uniform over the sphere, so the box
-            catches A/(4πR²) of the emission E = S/2, and its knockout radius is
+        reference_mm_per_kj: (1.0, Tuned("provisional: a crew box presenting a 0.2 m² face (a
+            seated crew member's) fully inside the ball at rest, 2.0 m from the burst, has its 30
+            HP pool (box_classes.ron) emptied. DERIVED: at rest the ball is uniform over the
+            sphere, so the box catches A/(4πR²) of the emission E = S/2, and its knockout radius is
             R = sqrt(E A × 70 / (30 × 4π)); R = 2.0 m needs E = 107.7 reference-mm, S = 215.4,
             against the shipped ball round's 214.8 kJ: 1.003 per kJ, rounded to 1.0, R = 2.00 m")),
         // h (degrees): the ring spans θ_c − h to θ_c + h of polar angle from the flight axis,

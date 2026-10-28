@@ -245,20 +245,14 @@ TankSpec(
         // hp is in whole HP points: the line's dose converts at ballistics::HP_PER_REFERENCE_MM,
         // the field's at assets/ballistics/spall_cone.ron's calibration. A crew station authors
         // no hp: its pool is the shared crew pool (assets/ballistics/box_classes.ron). Every other
-        // pool is its class (same file) × the box's mean face, the mean of the three axis-aligned
-        // face areas of its bounds in the sim geometry, rounded to a whole point
-        // (src/tests/box_pools.rs holds it within ±25 %). Each such group names its class and
-        // both faces, DERIVED from the sim geometry at rest; the least face is the edge-on one.
+        // pool is authored here by hand and tuned in play; no rule ties it to the box's size.
         // --- Modules (hp = integrity; the substance carries resistance, independently) ---
-        // hard, 300 HP per m². Engine: mean face 1.119 m², least 0.880.
-        // Transmission: mean 1.598, least 0.841. Breech: mean 0.472, least 0.197.
-        // Main_Gun_Barrel: mean 0.835, least 0.087.
         "Engine":           (hp: 336, function: Engine),
         "Transmission":     (hp: 479, function: Transmission),
         "Breech":           (hp: 142, function: Breech),
         "Main_Gun_Barrel":  (hp: 250, function: GunBarrel),
         // Each MG barrel serves its own weapon's barrel function, which that weapon's fire gate
-        // names, as the main gun's does. hard, 300 HP per m²: mean face 0.0123 m², least 0.0010.
+        // names, as the main gun's does.
         "Coax_MG_Barrel":   (hp:   4, function: CoaxMgBarrel),
         "Hull_MG_Barrel":   (hp:   4, function: BowMgBarrel),
         // --- Crew --- the shared crew pool; an hp here does not load.
@@ -268,7 +262,6 @@ TankSpec(
         "Driver":           (crew: Driver),
         "BowGunner":        (crew: BowGunner),
         // --- Ammunition (ammo: true means cookoff when its HP pool empties) ---
-        // ammo, 150 HP per m²: mean face 0.479 m², least 0.268.
         "Ammo_L_0":         (hp:  72, ammo: true),
         "Ammo_L_1":         (hp:  72, ammo: true),
         "Ammo_R_0":         (hp:  72, ammo: true),
@@ -276,8 +269,7 @@ TankSpec(
         // --- Smoke launchers: damageable, deliberately INERT. They carry an hp pool so the round
         // that shears one off is recorded, and no `function`, because nothing fires them yet. The
         // facet is the seam the smoke-discharger work binds to; until then losing one costs the
-        // vehicle nothing. hard, 300 HP per m². 0 and 5: mean face 0.0452 m², least 0.0303.
-        // 1 and 4: mean 0.0436, least 0.0283. 2 and 3: mean 0.0355, least 0.0188.
+        // vehicle nothing.
         "Smoke_Launcher_0": (hp:  14),
         "Smoke_Launcher_1": (hp:  13),
         "Smoke_Launcher_2": (hp:  11),

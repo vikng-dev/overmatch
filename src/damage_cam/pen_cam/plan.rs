@@ -19,6 +19,7 @@ use bevy::prelude::*;
 use std::sync::Arc;
 
 use super::picture::{Lay, PICTURE_FIELDS, PictureJobs, Pictures, RecordAtlas, ViewPictures};
+use super::potency::Potency;
 use super::timeline::CornerKind;
 use crate::ballistics::spall_cone::FieldDescriptor;
 use crate::damage_cam::shapes::{HardBodies, TankShapes};
@@ -84,6 +85,10 @@ pub struct Plan {
     /// fields' depth pictures are rendered from ([`super::picture`]); `None` without the tank
     /// asset's shapes.
     pub bodies: Option<Arc<HardBodies>>,
+    /// The struck tank's potency ([`Potency::of_tank`]): the thresholds its fields' bands part at.
+    /// `None` without the tank asset's shapes or for a tank with no crew station, and then no
+    /// field is drawn ([`super::stage::field_box`]).
+    pub(crate) potency: Option<Potency>,
     /// The record's depth pictures as its views draw them ([`Self::show`]), the one every plan of
     /// the record holds ([`Self::adopt_pictures`]).
     pictures: Arc<RecordAtlas>,
@@ -615,6 +620,7 @@ impl Plan {
             boxes,
             tank_bounds: shapes.bounds(),
             bodies: shapes.hard().cloned(),
+            potency: Potency::of_tank(shapes),
             pictures: Arc::default(),
             line,
         }
@@ -648,6 +654,7 @@ impl Plan {
             boxes,
             tank_bounds: shapes.bounds(),
             bodies: shapes.hard().cloned(),
+            potency: Potency::of_tank(shapes),
             pictures: Arc::default(),
         }
     }

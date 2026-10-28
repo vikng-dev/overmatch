@@ -56,6 +56,7 @@ use super::super::look::{self, Footprint, Layer, LookMaterial, MaskNeed, MaskSet
 use super::super::material::{GlowMaterial, OutlineMaterial};
 use super::super::picture::{PictureDetail, PictureJobs, ViewPictures};
 use super::super::plan::{BoxPlan, Plan};
+use super::super::potency::Potency;
 use super::super::stage::{
     self, BoxTint, FieldVolume, LineSeg, LookCtx, MarkItem, Piece, Playing, SHELL_SCENE,
     component_meshes, mask_copy, round_copies, spawn_glass,
@@ -545,7 +546,7 @@ pub(super) fn build(
         let (dressed, skipped) = dress(
             &mut commands,
             tank,
-            asset.spec(),
+            &asset,
             &live,
             built,
             &mut stores.looks,
@@ -678,8 +679,9 @@ pub(super) fn forget_shown(_new: On<NewMatch>, mut state: ResMut<XRayState>) {
 }
 
 /// Dress every undressed render primitive under `root` in its tier's look, a component's painted
-/// by the role `live` gives its component ([`LiveState::role_of`]), against `built`'s masks, with
-/// a mask copy under it: whether any was, and whether one was left for the LOD
+/// by the role `live` gives its component ([`LiveState::role_of`]) in the bands of the tank
+/// `asset`'s potency ([`Potency::of_crew_face`] of [`TankAsset::crew_face`]), against `built`'s
+/// masks, with a mask copy under it: whether any was, and whether one was left for the LOD
 /// ladder's scan — a glTF primitive the ladder has not scanned yet (it binds the primitive's rungs
 /// off the handle this would take), which the next frame looks at again; under
 /// [`SourceDetailOnly`] no ladder scans, and every primitive is dressed as it lands. Left as they
@@ -687,18 +689,20 @@ pub(super) fn forget_shown(_new: On<NewMatch>, mut state: ResMut<XRayState>) {
 /// proxy, and the x-ray's own meshes.
 #[expect(
     clippy::too_many_arguments,
-    reason = "dresses one tank: the command sink, the tank, its spec and live state, the build, the material store and the hierarchy and held reads are separate inputs"
+    reason = "dresses one tank: the command sink, the tank, its asset and live state, the build, the material store and the hierarchy and held reads are separate inputs"
 )]
 fn dress(
     commands: &mut Commands,
     root: Entity,
-    spec: &crate::spec::TankSpec,
+    asset: &TankAsset,
     live: &LiveState,
     built: &mut Built,
     looks: &mut Assets<LookMaterial>,
     scene: &Hierarchy,
     held: &Held,
 ) -> (bool, bool) {
+    let spec = asset.spec();
+    let potency = asset.crew_face().map(Potency::of_crew_face);
     let mut any = false;
     let mut skipped = false;
     for entity in scene.children.iter_descendants(root) {
@@ -746,7 +750,7 @@ fn dress(
             .tiers
             .entry((tier, Footprint::of_mesh(tier, role)))
             .or_insert_with(|| {
-                let draw = look::hull(tier, role, &built.masks);
+                let draw = look::hull(tier, role, &built.masks, potency.as_ref());
                 (looks.add(draw.material), draw.layer)
             })
             .clone();
@@ -913,6 +917,7 @@ pub(super) fn animate(
                 handle,
                 prints.as_deref().unwrap_or_default(),
                 playing.atlas(),
+                playing.potency(),
             );
         }
     }
