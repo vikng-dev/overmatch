@@ -82,7 +82,7 @@ const LINE_WOUND: f32 = 30.0;
 const LINE_REACH: f32 = 20.0;
 
 /// The digest of every line of `field_casts.pinned`, MEASURED on macOS arm64 (the test profile).
-const PINNED_TOTAL: u64 = 0x3fcb_36a1_c368_a17a;
+const PINNED_TOTAL: u64 = 0x93a3_49a3_9111_0f17;
 
 const PINNED: &str = include_str!("field_casts.pinned");
 
@@ -562,16 +562,16 @@ fn shot_world() -> App {
     app
 }
 
-/// Spawn one keyed round of `round` (`(caliber, mass, nose_factor, speed, wound)`) at a tank-local
-/// origin along a tank-local direction, ready for the march. The tank spawns unrotated at
+/// Spawn one keyed round of `round` (`(caliber, mass, nose_factor, speed, wound, drag_k)`) at a
+/// tank-local origin along a tank-local direction, ready for the march. The tank spawns unrotated at
 /// [`PROBE_TANK_AT`], so tank-local to world is that translation alone.
 fn spawn_shot_round(
     app: &mut App,
     local_origin: Vec3,
     local_direction: Vec3,
-    round: (f32, f32, f32, f32, f32),
+    round: (f32, f32, f32, f32, f32, f32),
 ) -> Entity {
-    let (caliber, mass, nose_factor, speed, wound) = round;
+    let (caliber, mass, nose_factor, speed, wound, drag_k) = round;
     let origin = PROBE_TANK_AT + local_origin;
     let direction = local_direction.normalize();
     let body = RoundBody {
@@ -587,7 +587,7 @@ fn spawn_shot_round(
                 caliber,
                 mass,
                 wound,
-                drag_k: drag_k(caliber, mass),
+                drag_k,
                 fuze: burst::Fuze::Inert,
                 disc: walk::DiscFrame::anchored(direction).expect("a shot fires along a real axis"),
                 continuation: None,
@@ -618,10 +618,10 @@ fn spawn_shot_round(
 /// solid shot's cones; a round off the selector stays here as the fixture.
 const FIXTURE_ROUND: &str = "88mm_AP";
 
-/// `(caliber, mass, nose_factor, speed, wound)` of [`FIXTURE_ROUND`]. A full-calibre inert round:
+/// `(caliber, mass, nose_factor, speed, wound, drag_k)` of [`FIXTURE_ROUND`]. A full-calibre inert round:
 /// the casts' input digest carries one body and no burst, so a sub-calibre or burst round is
 /// refused here rather than pinned as its whole body.
-fn main_gun_round() -> (f32, f32, f32, f32, f32) {
+fn main_gun_round() -> (f32, f32, f32, f32, f32, f32) {
     let round = crate::guns::GunRegistry::shipped()
         .round_by_key(FIXTURE_ROUND)
         .unwrap_or_else(|err| panic!("the field casts' round: {err}"));
@@ -636,6 +636,7 @@ fn main_gun_round() -> (f32, f32, f32, f32, f32) {
         round.body.nose_factor,
         round.muzzle_speed,
         round.wound,
+        round.drag_k,
     )
 }
 
@@ -652,7 +653,7 @@ fn shot(label: &str, local_origin: Vec3, local_direction: Vec3) -> Record {
     bits3(&mut input, local_origin);
     input.push(' ');
     bits3(&mut input, local_direction);
-    for value in [round.0, round.1, round.2, round.3, round.4] {
+    for value in [round.0, round.1, round.2, round.3, round.4, round.5] {
         input.push(' ');
         bits(&mut input, value);
     }

@@ -65,6 +65,7 @@ mod tests {
             speed: 755.0,
             caliber: 0.0079,
             mass: 0.0118,
+            drag_k: crate::ballistics::fixture_drag_k(0.0079, 0.0118),
             nose_factor: 0.5,
             penetrator_caliber: 0.0079,
             penetrator_mass: 0.0118,

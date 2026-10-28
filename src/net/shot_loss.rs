@@ -105,6 +105,7 @@ fn scripted_shell(
         speed,
         caliber: body.caliber,
         mass: body.mass,
+        drag_k: crate::ballistics::fixture_drag_k(body.caliber, body.mass),
         nose_factor: body.nose_factor,
         penetrator_caliber: body.caliber,
         penetrator_mass: body.mass,
@@ -128,7 +129,9 @@ fn arm_fixture_weapons(add: On<Add, NetTank>, mut commands: Commands) {
             let mut fixture = WeaponRound::resolve("88mm_AP").expect("a shipped round");
             fixture.round.muzzle_speed = speed;
             fixture.round.body = body;
+            fixture.round.flying = body;
             fixture.round.penetrator = body;
+            fixture.round.drag_k = crate::ballistics::fixture_drag_k(body.caliber, body.mass);
             fixture.round.wound = wound;
             fixture
         })

@@ -5,10 +5,16 @@
 // for one whose carrier leaves it in flight. A round of a type with a carrier authors a penetrator
 // block, and a round of a type without one does not.
 //
+// The flight nose is what drag reads: the drag form is a base share plus a nose share × the flight
+// nose's factor (`ballistics::drag_form`), so a pointed flight nose keeps more speed downrange. A
+// ballistic-capped type flies on its cap's pointed nose and meets the plate with the blunt nose
+// under it. Flight and hit proxies are authored independently; the AP row keeps its fixture hit
+// nose while assuming a pointed flight nose. The carrier decides which body flies: the
+// whole round, or the penetrator where the carrier is discarded.
+//
 // The hit nose is what the force law reads: a round's nose factor is DERIVED from it at load,
-// unless the round overrides it with a `nose` of its own. The flight nose and the carrier are read
-// by no law yet: the flight nose waits for the drag form that reads it (#103 §3), the carrier for
-// a drag that tells a kept carrier from a discarded one.
+// unless the round overrides it with a `nose` of its own. A round's override is of its hit nose
+// alone; it flies on its type's flight nose.
 //
 // PROVENANCE: every value is authored `(value, Kind("source or reason"))` (`src/provenance.rs`);
 // a value without one does not load.
@@ -16,16 +22,16 @@
     round_types: {
         // Armour-piercing, capped and ballistic-capped.
         "APCBC": (
-            flight_nose: (Ogive(crh: 1.0), Tuned("the flight nose equals the hit nose until the
-                drag form reads it (#103 §3)")),
+            flight_nose: (Ogive(crh: 4.0), Tuned("owner-accepted starting point 2026-10-28: the
+                ballistic cap's pointed ogive over the blunt hit nose")),
             hit_nose: (Ogive(crh: 1.0), Tuned("labelled fixture value: the Pzgr. 39's blunt ogive
                 of 1 crh")),
             carrier: (None, Derived("a full-calibre round: the whole round meets the plate")),
         ),
         // Armour-piercing, composite rigid: a hard core in a light full-calibre body.
         "APCR": (
-            flight_nose: (Ogive(crh: 1.0), Tuned("the flight nose equals the hit nose until the
-                drag form reads it (#103 §3)")),
+            flight_nose: (Ogive(crh: 1.0), Tuned("no ballistic cap in this table: the round flies
+                on its hit nose, the drag form's blunt anchor")),
             hit_nose: (Ogive(crh: 1.0), Tuned("labelled fixture value: the Pzgr. 39's blunt ogive
                 of 1 crh")),
             carrier: (Kept, Derived("the core reaches the plate inside its full-calibre body: the
@@ -33,10 +39,11 @@
         ),
         // Armour-piercing small-arms bullet.
         "AP": (
-            flight_nose: (Cap(radius_calibres: 0.5), Tuned("the flight nose equals the hit nose
-                until the drag form reads it (#103 §3)")),
-            hit_nose: (Cap(radius_calibres: 0.5), Tuned("labelled fixture value: round-nosed, a
-                hemispherical cap")),
+            flight_nose: (Ogive(crh: 6.0), Tuned("a pointed rifle bullet: a 6-crh tangent ogive,
+                ASSUMED as a typical spitzer's, its nose 2.4 calibres long (DERIVED); no source in
+                the repo states the bullet's ogive")),
+            hit_nose: (Cap(radius_calibres: 0.5), Tuned("labelled fixture value: a hemispherical
+                cap")),
             carrier: (None, Derived("a full-calibre bullet: the whole round meets the plate")),
         ),
     },

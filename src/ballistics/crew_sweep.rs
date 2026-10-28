@@ -361,10 +361,11 @@ fn restore(app: &mut App) {
 fn fire_one(app: &mut App, round: &crate::rounds::Round, origin: Vec3, direction: Vec3) -> Hit {
     let tank = app.world().resource::<super::fuzz::ProbeTank>().0;
     let (mut projectile, readout) = march_tests::fixture_round_with(
-        round.body,
+        round.flying,
         round.penetrator,
         direction * round.muzzle_speed,
     );
+    projectile.drag_k = round.drag_k;
     projectile.wound = round.wound;
     let shell = app
         .world_mut()

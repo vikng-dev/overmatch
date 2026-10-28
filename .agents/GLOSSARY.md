@@ -318,7 +318,7 @@ One projectile as data, gun-independent: one file per round (`assets/rounds/<key
 _Avoid_: shell for the data (the shell is the flying body the walk samples)
 
 **Round type**:
-A round's construction class and the shape proxy it implies (`assets/ballistics/round_types.ron`): its flight nose, its hit nose, and its carrier — none, kept or discarded (a sub-calibre round's penetrator rides one). Every round names one. The hit nose is the force law's; the flight nose and the carrier are read by no law yet.
+A round's construction class and the shape proxy it implies (`assets/ballistics/round_types.ron`): its flight nose, its hit nose, and its carrier — none, kept or discarded (a sub-calibre round's penetrator rides one). Every round names one. The hit nose is the force law's; the flight nose is drag's (a ballistic-capped type flies on its cap's pointed nose and meets the plate with the blunt one under it); the carrier decides which body flies, the whole round or, where the carrier is discarded, the penetrator.
 
 **Gun** (model):
 A gun model's chamber and mechanism, one file per gun (`assets/guns/<key>.gun.ron`), tank-independent: its mechanism (single-shot, or automatic at a cyclic rate), its report, and its **ammunition table**. Distinct from the rig's **Gun** node (Tank rig), the pivot a mount's gun rides.

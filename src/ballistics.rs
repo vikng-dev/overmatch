@@ -11,6 +11,7 @@ use serde_json::json;
 
 use crate::damage::{DamageConsequences, VolumeOf, hit_ancestor};
 use crate::damage_cam::recorder::{MarchRecorder, ShotRecorder, ShotRecording};
+use crate::spec::NoseShape;
 use crate::state::{GameplaySet, SimPhase};
 use crate::terrain_grid::HeightGrid;
 use crate::{ClientReplica, Layer, ShotClock, ShotId};
@@ -115,12 +116,54 @@ const GRAVITY: Vec3 = Vec3::new(0.0, -9.81, 0.0);
 /// World-floor height (m). Shells below it have left the playable world and are culled.
 const KILL_FLOOR: f32 = -100.0;
 
-/// Tunable form constant for the quadratic air-drag model `dv/dt = −k·v²`.
-const DRAG_FORM: f32 = 0.263;
+/// Form units per unit drag coefficient: a round of calibre `d` and mass `m` under the drag force
+/// `½ ρ C_d (π d² / 4) v²` decelerates at `k v²`, `k = C_d · ρπ/8 · d² / m`, so a form ([`drag_k`])
+/// is a drag coefficient × ρπ/8. ρ = 1.225 kg/m³, sea-level air, ASSUMED: one air everywhere. The
+/// value is 0.4811 (DERIVED).
+const FORM_PER_DRAG_COEFFICIENT: f64 = 1.225 * std::f64::consts::PI / 8.0;
 
-/// A shell's quadratic-drag coefficient `k` (1/m), shared with the range table.
-pub fn drag_k(caliber: f32, mass: f32) -> f32 {
-    DRAG_FORM * caliber * caliber / mass
+/// The nose the blunt anchor is stated on: a tangent ogive of 1 crh, nose factor 7/24 (DERIVED,
+/// [`NoseShape::factor`]).
+const BLUNT_ANCHOR_NOSE: NoseShape = NoseShape::Ogive { crh: 1.0 };
+
+/// TUNED anchor, provisional: the form of a round on [`BLUNT_ANCHOR_NOSE`], 0.263, a drag
+/// coefficient of 0.547 (DERIVED: 0.263 / 0.4811). Hand-set on the 88 mm 10.2 kg round, whose `k` it
+/// makes 2.0e-4 1/m (DERIVED); a round whose flight nose is its blunt hit nose flies on it.
+const BLUNT_ANCHOR_FORM: f64 = 0.263;
+
+/// TUNED anchor, provisional: the base share of the form, what a round flies on whatever its nose.
+/// A drag coefficient of 0.20, ASSUMED (base drag plus skin friction at shell speeds), so 0.0962
+/// form units (DERIVED: 0.20 × 0.4811).
+const BASE_FORM: f64 = 0.20 * FORM_PER_DRAG_COEFFICIENT;
+
+/// The nose share of the form per unit nose factor: 0.5718 form units, a drag coefficient of 1.189
+/// (DERIVED: (0.263 − 0.0962) / (7/24), the share that puts [`BLUNT_ANCHOR_NOSE`] on
+/// [`BLUNT_ANCHOR_FORM`]).
+const NOSE_FORM: f64 = (BLUNT_ANCHOR_FORM - BASE_FORM) / BLUNT_ANCHOR_NOSE.factor_f64();
+
+/// The drag form of a round flying on `flight_nose` (form units, the drag coefficient × ρπ/8 of
+/// [`FORM_PER_DRAG_COEFFICIENT`]): the base share plus the nose share × the nose's factor
+/// ([`NoseShape::factor`], the factor the force law reads off a hit nose). A pointed nose flies on
+/// less; [`BLUNT_ANCHOR_NOSE`] flies on [`BLUNT_ANCHOR_FORM`] to the bit. In f64 and cast once, so
+/// the cast rounds the form and not the factor. No Mach dependence, an accepted stand-in: a round
+/// flies on one form at every speed (in flat fire the shipped rifle bullet stays supersonic to
+/// about 1.2 km and every shipped 88 mm round past 3.5 km, DERIVED from their drag).
+pub(crate) fn drag_form(flight_nose: NoseShape) -> f32 {
+    (BASE_FORM + NOSE_FORM * flight_nose.factor_f64()) as f32
+}
+
+/// A shell's quadratic-drag coefficient `k` (1/m) for the model `dv/dt = −k·v²`: `form` ×
+/// `caliber²` / `mass`, of the body that flies ([`crate::rounds::Round::drag_k`]). The live shell
+/// and the range table read the same value, so the aim solution and the flight bleed speed alike.
+pub fn drag_k(form: f32, caliber: f32, mass: f32) -> f32 {
+    form * caliber * caliber / mass
+}
+
+/// The drag coefficient of a fixture round of `caliber` (m) and `mass` (kg) flying on
+/// [`BLUNT_ANCHOR_NOSE`]: the flight every test fixture flies, fixture data.
+#[cfg(test)]
+pub(crate) fn fixture_drag_k(caliber: f32, mass: f32) -> f32 {
+    drag_k(drag_form(BLUNT_ANCHOR_NOSE), caliber, mass)
 }
 
 /// One free-flight integration step shared by the live march and range table.
@@ -978,10 +1021,13 @@ pub struct FireShell {
     pub origin: Vec3,
     pub direction: Dir3,
     pub speed: f32,
-    /// The whole round's calibre (m): drag and the shell's view read it.
+    /// The flying body's calibre (m): the shell's view and its impacts read it.
     pub caliber: f32,
-    /// The whole round's mass (kg): drag reads it.
+    /// The flying body's mass (kg): the momentum a hit or a bounce delivers reads it.
     pub mass: f32,
+    /// The round's quadratic-drag coefficient (1/m) ([`crate::rounds::Round::drag_k`]): what the
+    /// flight, the catch-up and the range table step with.
+    pub drag_k: f32,
     /// Nose factor (dimensionless, `0 < N ≤ 1`) of the round and its penetrator, read by the
     /// capability law.
     pub nose_factor: f32,
@@ -1026,9 +1072,10 @@ impl FireShell {
             origin,
             direction,
             speed: round.muzzle_speed,
-            caliber: round.body.caliber,
-            mass: round.body.mass,
-            nose_factor: round.body.nose_factor,
+            caliber: round.flying.caliber,
+            mass: round.flying.mass,
+            drag_k: round.drag_k,
+            nose_factor: round.flying.nose_factor,
             penetrator_caliber: round.penetrator.caliber,
             penetrator_mass: round.penetrator.mass,
             wound: round.wound,
@@ -1052,16 +1099,16 @@ pub(crate) struct Projectile {
     /// data and the substance registry ([`mechanism::SolidShot::bind`]) — data, never an asset.
     /// The disc, overmatch, the force law and the cone's hole read its body.
     round: mechanism::SolidShot,
-    /// The whole round's calibre (m): what the shell's view and its impacts are sized by.
+    /// The flying body's calibre (m): what the shell's view and its impacts are sized by.
     caliber: f32,
-    /// The whole round's mass (kg): the momentum a hit or a bounce delivers is the whole round's,
-    /// its body stopping at the plate with its penetrator.
+    /// The flying body's mass (kg): a kept carrier stops at the plate with its penetrator;
+    /// a discarded carrier contributes no momentum.
     mass: f32,
     /// Reference-mm of dose per metre of chord the round's line cuts through a witness (ADR-0040).
     /// Read only by the witness pass; the hard walk never sees it.
     wound: f32,
-    /// Quadratic-drag coefficient (1/m), from the whole round's sectional density at spawn (see
-    /// [`drag_k`]).
+    /// Quadratic-drag coefficient (1/m), the fired round's ([`FireShell::drag_k`]) at spawn; a
+    /// burst's nose piece keeps the round's form at its own mass.
     drag_k: f32,
     /// The round's fuze, built at spawn from its fire data ([`burst::Fuze::of`]) and advanced by
     /// the authority's march alone: SIM state, never on the wire.
@@ -1090,7 +1137,7 @@ pub(crate) struct Projectile {
 }
 
 impl Projectile {
-    /// The whole round's caliber (m) — the same value [`Impact::caliber`] carries, read by view
+    /// The flying body's caliber (m) — the same value [`Impact::caliber`] carries, read by view
     /// code that sizes an effect off a shell in flight rather than off a landed impact.
     pub(crate) fn caliber(&self) -> f32 {
         self.caliber
@@ -1700,7 +1747,7 @@ fn on_fire_shell(
         }
         return;
     }
-    let drag = drag_k(fire.caliber, fire.mass);
+    let drag = fire.drag_k;
     let dt = fixed_time.timestep().as_secs_f32();
     let (mut position, velocity, mut points) = fast_forward_shell(
         fire.origin,
@@ -3258,8 +3305,10 @@ fn burst_here(
     let ended = if speed > 0.0 {
         let projectile = &mut **shell.projectile;
         projectile.round = bound(nose);
+        // `k` is the form × calibre² / mass: at the round's calibre and form, it scales as
+        // 1 / mass.
+        projectile.drag_k *= projectile.mass / nose.mass;
         projectile.mass = nose.mass;
-        projectile.drag_k = drag_k(projectile.caliber, nose.mass);
         false
     } else {
         true
@@ -4309,7 +4358,6 @@ mod tests {
     /// the law and cannot be tripped by arithmetic.
     #[test]
     fn capability_law_speed_exponent_is_the_dimensionless_law_s() {
-        use crate::spec::NoseShape;
         const H: f32 = 1.0e-2;
         const TOLERANCE: f64 = 1.0e-3;
         let mut noses: Vec<f32> = LAW_ROUNDS.iter().map(|round| round.nose_factor).collect();
@@ -4412,12 +4460,30 @@ mod tests {
         }
     }
 
+    /// The drag form is stated on its two anchors: the blunt anchor nose flies on the blunt anchor
+    /// form to the bit, so a round whose flight nose is that nose, and every fixture
+    /// ([`fixture_drag_k`]), flies on it; and the base share is the floor a nose approaches as its
+    /// factor goes to zero. A mutant that moves the nose share off the anchor, or drops the base
+    /// share, fails here.
+    #[test]
+    fn the_drag_form_is_stated_on_its_anchors() {
+        assert_eq!(
+            drag_form(BLUNT_ANCHOR_NOSE).to_bits(),
+            (BLUNT_ANCHOR_FORM as f32).to_bits()
+        );
+        let needle = drag_form(NoseShape::Ogive { crh: 1.0e6 });
+        assert!(
+            (needle as f64 / BASE_FORM - 1.0).abs() < 1.0e-5,
+            "a 1e6-crh ogive flies on {needle}, the base share is {BASE_FORM}"
+        );
+    }
+
     /// Drag only slows a shell — never speeds it up or reverses it — and gravity always pulls the
     /// vertical component down. Guards the analytic drag step against a sign or stability slip.
     #[test]
     fn freeflight_step_bleeds_speed_and_falls() {
         let v0 = Vec3::new(700.0, 0.0, 0.0);
-        let v1 = freeflight_step(v0, drag_k(0.088, 10.2), 0.01);
+        let v1 = freeflight_step(v0, fixture_drag_k(0.088, 10.2), 0.01);
         assert!(v1.length() < v0.length(), "drag must reduce speed");
         assert!(v1.y < 0.0, "gravity must pull the shell down");
     }
@@ -4433,7 +4499,7 @@ mod tests {
     fn fast_forward_matches_single_tick_advances() {
         let origin = Vec3::new(1.0, 50.0, -3.0);
         let v0 = Vec3::new(600.0, 20.0, 0.0);
-        let k = drag_k(0.088, 10.2);
+        let k = fixture_drag_k(0.088, 10.2);
         let dt = 1.0 / 64.0;
         for n in [0, 7] {
             let mut vel = v0;
@@ -4547,7 +4613,8 @@ mod march_tests {
     }
 
     /// The flight state and initial readout of a fixture round that flies as `body` and meets the
-    /// plate as `penetrator`, built as `on_fire_shell` builds them: drag from the body, the
+    /// plate as `penetrator`, built as `on_fire_shell` builds them: the body's drag on the fixture
+    /// form ([`fixture_drag_k`]; a caller firing a shipped round sets the round's own), the
     /// mechanism and the readout from the penetrator, so the readout the march starts from is the
     /// capability of what it marches.
     pub(super) fn fixture_round_with(
@@ -4563,7 +4630,7 @@ mod march_tests {
                 caliber: body.caliber,
                 mass: body.mass,
                 wound: FIXTURE_WOUND,
-                drag_k: drag_k(body.caliber, body.mass),
+                drag_k: fixture_drag_k(body.caliber, body.mass),
                 fuze: burst::Fuze::Inert,
                 // Anchored on THIS round's fire direction, exactly as `on_fire_shell` would.
                 disc: test_disc(velocity.normalize()),
@@ -4697,70 +4764,65 @@ mod march_tests {
         app.world().resource::<ImpactLog>().0.clone()
     }
 
-    /// The momentum a hit delivers is the whole round's, whatever meets the plate: the body stops
-    /// at the plate with its penetrator. A sub-calibre fixture round embedding in a thick plate
-    /// moves the authority body by `mass × speed / M`, the whole round's momentum, not the core's.
-    /// The hull shock a hit gives relies on it; a mutant that delivers the penetrator's momentum
-    /// fails here.
+    /// The game's damage model: a kept carrier delivers the assembly's momentum and a discarded
+    /// one only the penetrator's. Hull shock relies on the flying mass at the fire-to-march seam.
+    /// Both fixture cores stop in the plate, so a mutant retaining the discarded carrier's mass
+    /// delivers four times the expected impulse (DERIVED from the fixture masses).
     #[test]
-    fn a_hit_delivers_the_whole_round_s_momentum() {
-        const CORE: RoundBody = RoundBody {
-            mass: 2.0,
-            caliber: 0.04,
-            nose_factor: FIXTURE_88.nose_factor,
-        };
+    fn a_hit_delivers_only_the_flying_body_s_momentum() {
         const SPEED: f32 = 900.0;
         const BODY_MASS: f32 = 100.0;
-        // 400 mm of reference steel: the whole 88 (about 148 reference-mm at 900 m/s) and the core
-        // (about 141) both embed (DERIVED), so the whole momentum lands in the plate's body.
-        let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.4), Vec3::new(0.0, 2.0, 0.0));
-        let body = app
-            .world_mut()
-            .spawn((
-                RigidBody::Dynamic,
-                Transform::default(),
-                Mass(BODY_MASS),
-                AngularInertia::new(Vec3::splat(50.0)),
-                NoAutoMass,
-                NoAutoAngularInertia,
-                GravityScale(0.0),
-            ))
-            .id();
-        let mut plates = app
-            .world_mut()
-            .query_filtered::<Entity, With<BallisticVolume>>();
-        let plate = plates.single(app.world()).expect("one plate");
-        app.world_mut().entity_mut(plate).insert(VolumeOf(body));
-        app.update();
-
-        fire_with(
-            &mut app,
-            FIXTURE_88,
-            CORE,
-            Vec3::new(0.0, 2.0, 2.0),
-            Vec3::NEG_Z,
-            SPEED,
-        );
-        for _ in 0..2 {
+        let core = r#", penetrator: Some((mass: (1.25, Tuned("fixture")),
+            caliber: (0.02, Tuned("fixture"))))"#;
+        for (carrier, flying_mass) in [("Kept", 5.0), ("Discarded", 1.25)] {
+            let mut round = crate::rounds::tests::of_type(carrier, "5.0", "0.05", core);
+            round.muzzle_speed = SPEED;
+            // Fixture plate: thicker than the core's capability at the fixture muzzle speed.
+            let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.4), Vec3::new(0.0, 2.0, 0.0));
+            app.add_observer(on_fire_shell);
+            let body = app
+                .world_mut()
+                .spawn((
+                    RigidBody::Dynamic,
+                    Transform::default(),
+                    Mass(BODY_MASS),
+                    AngularInertia::new(Vec3::splat(50.0)),
+                    NoAutoMass,
+                    NoAutoAngularInertia,
+                    GravityScale(0.0),
+                ))
+                .id();
+            let mut plates = app
+                .world_mut()
+                .query_filtered::<Entity, With<BallisticVolume>>();
+            let plate = plates.single(app.world()).expect("one plate");
+            app.world_mut().entity_mut(plate).insert(VolumeOf(body));
             app.update();
+            app.world_mut().trigger(FireShell::of_round(
+                &round,
+                Vec3::new(0.0, 2.0, 2.0),
+                Dir3::NEG_Z,
+                crate::spec::FireMechanism::Single,
+                true,
+                None,
+                None,
+            ));
+            for _ in 0..2 {
+                app.update();
+            }
+            let delivered = app
+                .world()
+                .get::<LinearVelocity>(body)
+                .expect("dynamic body has linear velocity")
+                .0
+                .length()
+                * BODY_MASS;
+            let expected = flying_mass * SPEED;
+            assert!(
+                (delivered / expected - 1.0).abs() < 0.02,
+                "{carrier}: delivered {delivered} N·s against the flying body's {expected}"
+            );
         }
-        let delivered = app
-            .world()
-            .get::<LinearVelocity>(body)
-            .expect("dynamic body has linear velocity")
-            .0
-            .length()
-            * BODY_MASS;
-        let whole = FIXTURE_88.mass * SPEED;
-        assert!(
-            (delivered / whole - 1.0).abs() < 0.02,
-            "delivered {delivered} N·s against the whole round's {whole}"
-        );
-        assert!(
-            (delivered - CORE.mass * SPEED).abs() > 0.5 * whole,
-            "the core's momentum alone would be {}",
-            CORE.mass * SPEED
-        );
     }
 
     /// A volume crossing transfers momentum to its authority-owned tank body, while a replica keeps
@@ -5105,6 +5167,7 @@ mod march_tests {
             speed: 800.0,
             caliber: FIXTURE_88.caliber,
             mass: FIXTURE_88.mass,
+            drag_k: fixture_drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
             nose_factor: FIXTURE_88.nose_factor,
             penetrator_caliber: FIXTURE_88.caliber,
             penetrator_mass: FIXTURE_88.mass,
@@ -5148,6 +5211,7 @@ mod march_tests {
             speed: 800.0,
             caliber: FIXTURE_88.caliber,
             mass: FIXTURE_88.mass,
+            drag_k: fixture_drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
             nose_factor: FIXTURE_88.nose_factor,
             penetrator_caliber: FIXTURE_88.caliber,
             penetrator_mass: FIXTURE_88.mass,
@@ -5173,13 +5237,14 @@ mod march_tests {
         );
     }
 
-    /// A sub-calibre round flies as its whole body and meets the plate as its penetrator: the shell
-    /// [`on_fire_shell`] spawns from a fire whose penetrator differs from its body binds the
+    /// A sub-calibre round flies on its fire's drag and meets the plate as its penetrator: the
+    /// shell [`on_fire_shell`] spawns from a fire whose penetrator differs from its body binds the
     /// penetrator's mechanism (the disc, overmatch and the cone's hole read its calibre), starts
-    /// its readout at the penetrator's capability at the muzzle, drags as the whole body, and is
-    /// sized for the view as the whole body. Every role's shell of a sub-calibre round is spawned
-    /// here. The core is fixture data inside the 88 fixture body. A mutant that binds the body, or
-    /// drags the penetrator, fails here.
+    /// its readout at the penetrator's capability at the muzzle, steps the drag coefficient the
+    /// fire carries (which body flies is the round registry's to decide, `rounds`), and is sized
+    /// for the view as the whole body. Every role's shell of a sub-calibre round is spawned here.
+    /// The core and the drag are fixture data. A mutant that binds the body, or re-derives the
+    /// drag from either body, fails here.
     #[test]
     fn a_fired_shell_flies_as_its_body_and_meets_the_plate_as_its_penetrator() {
         const CORE: RoundBody = RoundBody {
@@ -5188,6 +5253,8 @@ mod march_tests {
             nose_factor: FIXTURE_88.nose_factor,
         };
         const SPEED: f32 = 900.0;
+        /// Neither body's drag on the fixture form: fixture data.
+        const DRAG: f32 = 3.0e-4;
         let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, -50.0));
         app.add_observer(on_fire_shell);
         app.world_mut().trigger(FireShell {
@@ -5196,6 +5263,7 @@ mod march_tests {
             speed: SPEED,
             caliber: FIXTURE_88.caliber,
             mass: FIXTURE_88.mass,
+            drag_k: DRAG,
             nose_factor: FIXTURE_88.nose_factor,
             penetrator_caliber: CORE.caliber,
             penetrator_mass: CORE.mass,
@@ -5221,11 +5289,12 @@ mod march_tests {
         assert_eq!(readout.capability, capability(CORE, SPEED));
         assert_ne!(readout.capability, capability(FIXTURE_88, SPEED));
         assert_eq!(
-            projectile.drag_k,
-            drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
-            "the whole round flies"
+            projectile.drag_k, DRAG,
+            "the shell flies on its fire's drag"
         );
-        assert_ne!(projectile.drag_k, drag_k(CORE.caliber, CORE.mass));
+        for body in [FIXTURE_88, CORE] {
+            assert_ne!(DRAG, fixture_drag_k(body.caliber, body.mass));
+        }
         assert_eq!(projectile.caliber(), FIXTURE_88.caliber);
     }
 
@@ -5287,6 +5356,7 @@ mod march_tests {
             speed: 800.0,
             caliber: FIXTURE_88.caliber,
             mass: FIXTURE_88.mass,
+            drag_k: fixture_drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
             nose_factor: FIXTURE_88.nose_factor,
             penetrator_caliber: FIXTURE_88.caliber,
             penetrator_mass: FIXTURE_88.mass,
@@ -5402,6 +5472,7 @@ mod march_tests {
             speed: 800.0,
             caliber: FIXTURE_88.caliber,
             mass: FIXTURE_88.mass,
+            drag_k: fixture_drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
             nose_factor: FIXTURE_88.nose_factor,
             penetrator_caliber: FIXTURE_88.caliber,
             penetrator_mass: FIXTURE_88.mass,
@@ -5845,7 +5916,7 @@ mod march_tests {
             let (caught_up, velocity, _) = fast_forward_shell(
                 bounce.origin,
                 bounce.direction.normalize() * bounce.speed,
-                drag_k(0.088, 10.2),
+                fixture_drag_k(0.088, 10.2),
                 dt,
                 HELD_EXTRA,
             );
@@ -7176,7 +7247,7 @@ mod march_tests {
         // The tick's travel is the shared advance's speed × dt; place the round so that what is left
         // after the plate (`budget − approach − thickness`) is half the march's nudge.
         let velocity = Vec3::NEG_Z * 800.0;
-        let stepped = freeflight_step(velocity, drag_k(body.caliber, body.mass), DT);
+        let stepped = freeflight_step(velocity, fixture_drag_k(body.caliber, body.mass), DT);
         let budget = stepped.length() * DT;
         let origin = Vec3::new(far.x, far.y, face + (budget - plate.z - 0.5 * MARCH_EPS));
         spawn_round(&mut app, body, origin, velocity);
@@ -7262,7 +7333,7 @@ mod march_tests {
         let (caught_up, _, _) = fast_forward_shell(
             origin,
             Vec3::X,
-            drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
+            fixture_drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
             0.016,
             flown as u32,
         );
@@ -7536,7 +7607,11 @@ mod march_tests {
     fn a_bent_fresh_sweep_starts_on_ground_the_last_sweep_cleared() {
         const DT: f32 = 0.016;
         let velocity = Vec3::Z * 0.272;
-        let stepped = freeflight_step(velocity, drag_k(FIXTURE_88.caliber, FIXTURE_88.mass), DT);
+        let stepped = freeflight_step(
+            velocity,
+            fixture_drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
+            DT,
+        );
         let bend = stepped.angle_between(velocity).to_degrees();
         assert!(
             (29.0..31.0).contains(&bend),
@@ -7578,7 +7653,11 @@ mod march_tests {
     fn a_near_reversal_starts_its_samples_where_the_last_sweep_left_them() {
         const DT: f32 = 0.016;
         let velocity = Vec3::new(0.01, 0.08, 0.0);
-        let stepped = freeflight_step(velocity, drag_k(FIXTURE_88.caliber, FIXTURE_88.mass), DT);
+        let stepped = freeflight_step(
+            velocity,
+            fixture_drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
+            DT,
+        );
         assert!(
             stepped.dot(velocity) < 0.0,
             "the fixture turns the travel past a right angle in one tick",
@@ -7609,7 +7688,11 @@ mod march_tests {
         let incidence = 60.0_f32.to_radians();
         let dir = Vec3::new(incidence.sin(), 0.0, -incidence.cos());
         let velocity = dir * 800.0;
-        let stepped = freeflight_step(velocity, drag_k(FIXTURE_88.caliber, FIXTURE_88.mass), DT);
+        let stepped = freeflight_step(
+            velocity,
+            fixture_drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
+            DT,
+        );
         let budget = stepped.length() * DT;
         let face = Vec3::new(0.0, 2.0, 0.51);
         // The plate never changes, so each stand-off re-spawns only the round.
@@ -7815,7 +7898,7 @@ mod march_tests {
         let start = Vec3::new(0.0, 2.0, 2.0);
         let dt = 0.016_f32;
         // The budget the march works from: this tick's velocity after gravity and drag, times dt.
-        let stepped = freeflight_step(Vec3::NEG_Z * 800.0, drag_k(0.088, 10.2), dt);
+        let stepped = freeflight_step(Vec3::NEG_Z * 800.0, fixture_drag_k(0.088, 10.2), dt);
         let budget = stepped.length() * dt;
 
         for degrees in [0.0_f32, 40.0, 72.0] {
@@ -7890,8 +7973,13 @@ mod march_tests {
     fn a_miss_flies_the_whole_corridor_it_examined() {
         let start = Vec3::new(0.0, 2.0, 2.0);
         let dt = 0.016_f32;
-        let (free_flight, _, _) =
-            fast_forward_shell(start, Vec3::NEG_Z * 800.0, drag_k(0.088, 10.2), dt, 1);
+        let (free_flight, _, _) = fast_forward_shell(
+            start,
+            Vec3::NEG_Z * 800.0,
+            fixture_drag_k(0.088, 10.2),
+            dt,
+            1,
+        );
 
         let mut app = world_with_plate(Vec3::splat(0.01), Vec3::new(0.0, -500.0, 0.0));
         app.world_mut().spawn((

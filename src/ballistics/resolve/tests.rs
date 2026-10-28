@@ -221,7 +221,7 @@ fn every_entry_is_owned_once_across_the_hand_off() {
 use crate::ballistics::fuzz::{self, Drive};
 use crate::ballistics::march_tests::{FIXTURE_88, FIXTURE_MG, spawn_round};
 use crate::ballistics::{
-    ComponentHealth, RetainSpentShells, SpallMarks, Verdict, drag_k, freeflight_step,
+    ComponentHealth, RetainSpentShells, SpallMarks, Verdict, fixture_drag_k, freeflight_step,
 };
 
 /// The fixture tick the plate worlds step by (`march_tests::plate_world`'s manual 16 ms).
@@ -276,7 +276,11 @@ fn volume_of(
 
 /// The speed and travel budget the runtime march flies its first tick with, from the shared advance.
 fn first_tick(body: RoundBody, speed: f32) -> (f32, f32) {
-    let stepped = freeflight_step(Vec3::NEG_Y * speed, drag_k(body.caliber, body.mass), DT);
+    let stepped = freeflight_step(
+        Vec3::NEG_Y * speed,
+        fixture_drag_k(body.caliber, body.mass),
+        DT,
+    );
     let speed = stepped.length();
     (speed, speed * DT)
 }
@@ -675,7 +679,7 @@ fn the_runtime_and_the_gate_decide_the_same_crossings() {
 fn a_budget_short_of_the_crossing_terminates_before_the_target() {
     let stepped = freeflight_step(
         Vec3::NEG_Y * 755.0,
-        drag_k(FIXTURE_MG.caliber, FIXTURE_MG.mass),
+        fixture_drag_k(FIXTURE_MG.caliber, FIXTURE_MG.mass),
         DT,
     );
     assert_eq!(
@@ -718,7 +722,7 @@ fn a_budget_short_of_the_crossing_terminates_before_the_target() {
 fn an_exact_budget_crossing_terminates_before_the_target() {
     let stepped = freeflight_step(
         Vec3::NEG_Y * 755.0,
-        drag_k(FIXTURE_MG.caliber, FIXTURE_MG.mass),
+        fixture_drag_k(FIXTURE_MG.caliber, FIXTURE_MG.mass),
         DT,
     );
     assert_eq!(

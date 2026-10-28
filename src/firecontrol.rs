@@ -17,7 +17,7 @@
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
 
-use crate::ballistics::{drag_k, freeflight_step};
+use crate::ballistics::freeflight_step;
 use crate::command::{TankDeviceSet, gather_commands};
 use crate::flow::MatchResourceExt;
 use crate::sight::in_gunner;
@@ -51,21 +51,21 @@ pub struct RangeTable {
 impl RangeTable {
     /// Build by sweeping launch angles, simulating each shot with `ballistics`' flight kernel, and
     /// keeping `(range, angle)` along the rising (direct-fire) branch — so the predicted range matches
-    /// where the live shell lands. Stops at the weapon's max range (where range stops increasing) or
-    /// the engagement envelope.
-    pub fn for_weapon(speed: f32, caliber: f32, mass: f32) -> Self {
+    /// where the live shell lands. `drag_k` (1/m) is the round's own
+    /// ([`crate::rounds::Round::drag_k`]), the value its shell flies on. Stops at the weapon's max
+    /// range (where range stops increasing) or the engagement envelope.
+    pub fn for_weapon(speed: f32, drag_k: f32) -> Self {
         const DT: f32 = 0.005;
         const ANGLE_STEP: f32 = 0.000_2; // ~0.01° — fine range resolution near flat fire
         const MAX_ANGLE: f32 = std::f32::consts::FRAC_PI_4; // past 45° range only falls
         const MAX_RANGE: f32 = 5_000.0; // engagement envelope; the 88 reaches it, the coax peaks first
         const MAX_TIME: f32 = 30.0; // flight-time guard against a degenerate near-vertical shot
 
-        let k = drag_k(caliber, mass);
         let mut points = Vec::new();
         let mut angle = 0.0;
         let mut last_range = f32::NEG_INFINITY;
         while angle <= MAX_ANGLE {
-            if let Some(range) = simulate_range(speed, angle, k, DT, MAX_TIME) {
+            if let Some(range) = simulate_range(speed, angle, drag_k, DT, MAX_TIME) {
                 if range < last_range {
                     break; // past the max-range angle — keep only the direct-fire branch
                 }
@@ -196,12 +196,14 @@ fn adjust_range(scroll: Res<AccumulatedMouseScroll>, mut ranging: ResMut<Ranging
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ballistics::fixture_drag_k;
 
+    /// Fixture rounds on one fixture form, so the coax's lob is its sectional density's alone.
     fn main_gun() -> RangeTable {
-        RangeTable::for_weapon(773.0, 0.088, 10.2) // 88 mm, 10.2 kg
+        RangeTable::for_weapon(773.0, fixture_drag_k(0.088, 10.2)) // 88 mm, 10.2 kg
     }
     fn coax() -> RangeTable {
-        RangeTable::for_weapon(755.0, 0.0079, 0.0118) // 7.9 mm, 11.8 g
+        RangeTable::for_weapon(755.0, fixture_drag_k(0.0079, 0.0118)) // 7.9 mm, 11.8 g
     }
 
     /// The table inverts its own forward simulation: a shell fired at `superelevation(R)` lands at R.
@@ -210,7 +212,7 @@ mod tests {
     #[test]
     fn superelevation_round_trips_to_range() {
         let table = main_gun();
-        let k = drag_k(0.088, 10.2);
+        let k = fixture_drag_k(0.088, 10.2);
         for &range in &[400.0_f32, 800.0, 1500.0, 2000.0] {
             let theta = table.superelevation(range);
             let landed = simulate_range(773.0, theta, k, 0.005, 30.0).unwrap();
@@ -218,6 +220,37 @@ mod tests {
                 (landed - range).abs() < range * 0.02 + 5.0,
                 "dialed {range} m, shell landed {landed} m"
             );
+        }
+    }
+
+    /// The game's damage model: the dial uses the same flight-nose drag as the fired shell,
+    /// including a discarded carrier. The player's range skill relies on the existing range
+    /// tolerance at the live march's fixture timestep, not just the table's finer sweep step.
+    #[test]
+    fn dialed_range_agrees_with_each_flight_nose_and_carrier() {
+        let core = r#", penetrator: Some((mass: (1.25, Tuned("fixture")),
+            caliber: (0.02, Tuned("fixture"))))"#;
+        for (kind, extra) in [("Blunt", ""), ("Capped", ""), ("Discarded", core)] {
+            let round = crate::rounds::tests::of_type(kind, "5.0", "0.05", extra);
+            let table = RangeTable::for_weapon(round.muzzle_speed, round.drag_k);
+            let fire = crate::ballistics::FireShell::of_round(
+                &round,
+                Vec3::ZERO,
+                Dir3::X,
+                crate::spec::FireMechanism::Single,
+                false,
+                None,
+                None,
+            );
+            for range in [400.0_f32, 800.0, 1500.0, 2000.0] {
+                let angle = table.superelevation(range);
+                let landed = simulate_range(fire.speed, angle, fire.drag_k, 0.016, 30.0)
+                    .expect("the fixture reaches the target plane");
+                assert!(
+                    (landed - range).abs() < range * 0.02 + 5.0,
+                    "{kind}: dialed {range} m, shell landed {landed} m"
+                );
+            }
         }
     }
 

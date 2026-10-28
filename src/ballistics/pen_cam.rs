@@ -177,12 +177,13 @@ fn record_edited(
     let round = crate::guns::GunRegistry::shipped()
         .round(&weapon.gun, key)
         .unwrap_or_else(|err| panic!("{}: {err}", scenario.name));
-    let body = round.body;
+    let body = round.flying;
     let speed = scenario.speed.unwrap_or(round.muzzle_speed);
     let origin = PROBE_TANK_AT + scenario.from;
     let direction = (scenario.toward - scenario.from).normalize();
     let struck = StruckTank::capture(app.world_mut(), tank).expect("the tank has a rig");
     let (mut projectile, readout) = fixture_round_with(body, round.penetrator, direction * speed);
+    projectile.drag_k = round.drag_k;
     projectile.wound = round.wound;
     projectile.fuze = super::burst::Fuze::of(round.burst);
     let shell = app
@@ -1535,7 +1536,11 @@ fn a_body_met_before_the_burst_restarts_the_delay() {
 fn a_delay_run_out_between_bodies_bursts_where_the_crossing_hands_back() {
     let dt = STEP.as_secs_f32();
     let velocity = Vec3::NEG_Z * 800.0;
-    let step = freeflight_step(velocity, drag_k(FIXTURE_88.caliber, FIXTURE_88.mass), dt);
+    let step = freeflight_step(
+        velocity,
+        fixture_drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
+        dt,
+    );
     let from = LINE_FROM.with_z(0.5 * THIN + step.length() * dt - 0.15);
     let volumes = [
         plate("front", THIN, 0.0, Kind::Main),

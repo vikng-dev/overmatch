@@ -172,7 +172,13 @@ impl NoseShape {
     /// past ~1e19, where the factor itself is still representable. The round registry rejects a factor
     /// the cast leaves subnormal or zero.
     pub fn factor(self) -> f32 {
-        let factor = match self {
+        self.factor_f64() as f32
+    }
+
+    /// [`Self::factor`] before its cast, for a law that combines the factor with other terms in
+    /// f64 and casts its own result once (the drag form, `ballistics::drag_form`).
+    pub(crate) const fn factor_f64(self) -> f64 {
+        match self {
             Self::Ogive { crh } => {
                 let crh = crh as f64;
                 (8.0 * crh - 1.0) / (24.0 * crh * crh)
@@ -186,8 +192,7 @@ impl NoseShape {
                 1.0 - 1.0 / (8.0 * radius * radius)
             }
             Self::Flat => 1.0,
-        };
-        factor as f32
+        }
     }
 
     /// The variant's parameter and whether it lies in the variant's range, or `None` for `Flat`.

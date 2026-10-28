@@ -136,14 +136,15 @@ march, per volume crossed:
    composes, because a crossing spends reference-mm and the inverse is exact. A crossing whose
    limit speed is `v_l` leaves `v_r² = (v² − v_l²) / (1 + k v_l² / a)`.
 
-   **A sub-calibre round flies whole and meets the plate as its penetrator** (owner, 2026-10-23;
+   **A sub-calibre round meets the plate as its penetrator** (owner, 2026-10-23;
    `.agents/scratch/damage-cam-2026-10-08/research/ap-aphe-2026-10-23/decision-2026-10-23.md` #4).
    A round may author a `penetrator` (mass and calibre; its nose is the round's), no heavier and
    no wider than the round; without one the round is its own penetrator, bit for bit. Flight reads
-   the whole round: drag (`drag_k`) and the shell's view. Everything at the plate reads the
-   penetrator: the disc the shell samples the world with, overmatch, this law and the cone's hole
-   (§5). The momentum a hit or a bounce delivers is the whole round's: the body stops at the plate
-   with its penetrator. Penetration stays rigid: the penetrator's
+   the flying body: the whole round for a kept carrier, the penetrator for a discarded one
+   (§3a). Everything at the plate reads the penetrator: the disc the shell samples the world with,
+   overmatch, this law and the cone's hole (§5). The momentum a hit or a bounce delivers is the
+   flying body's: a kept carrier stops at the plate with its penetrator; a discarded carrier
+   contributes none. Penetration stays rigid: the penetrator's
    material is named (`core`) and read by no law. The 88's Pzgr. 40 reads about 180
    reference-mm at the muzzle (930 m/s) as its 1.93 kg, 35.7 mm core, against about 112 as its
    whole 7.3 kg body and the Pzgr. 39's about 115 (DERIVED, shipped RHA facts); the record gives
@@ -162,6 +163,33 @@ Properties:
   (ricochet). A segment can leave one tank and strike another (skip off a glacis into a neighbour).
 - **Deliberate omission:** *shatter* (penetration going non-monotonic at extreme velocity against
   hard armor) is out of the slice.
+
+### 3a. Flight-nose drag
+
+Subject: the game's damage model; game state only. Issue 114 keeps the quadratic flight law
+`dv/dt = -k v²`, with `k = form × calibre² / mass` (1/m), and changes the form to
+`base + nose_share × flight_nose.factor()`. The shape factor is the same generic geometry
+function the hit nose uses. No law reads a round type's name. The range table, live flight and
+network catch-up all read the one coefficient resolved at load.
+
+The TUNED blunt anchor retains form **0.263** on a **1-crh ogive**, the previous hand-set
+**88 mm, 10.2 kg** fixture (anchor data). The TUNED base share assumes drag coefficient **0.20**
+(ASSUMED); at uniform air density **1.225 kg/m³** (ASSUMED), this is **0.0962** form units
+(DERIVED, coefficient × density × pi / 8). The nose share is **0.5718** form units (DERIVED from
+those anchors and the blunt factor **7/24**). The blunt form is preserved to the bit; the
+coefficient has no speed dependence. These are provisional game tuning anchors.
+
+The data gives APCBC a **4-crh** flight ogive over its **1-crh** hit ogive (TUNED, accepted
+starting point); AP keeps its fixture hit nose and flies on a **6-crh** ogive (ASSUMED typical
+pointed bullet, not a measured shape). APCR retains its blunt flight nose and kept carrier.
+Flight and hit proxies are independent data; a round's own nose override changes only the hit
+proxy. A discarded carrier resolves the runtime flying body to its penetrator for drag, visual
+size and delivered momentum. The launched assembly remains available for recoil and domain
+validation: a carrier discarded after launch still contributes to the firing impulse.
+
+Both the energy dose (§6) and flight-nose drag ride unshipped protocol REV 36: peers must agree
+on dose units and trajectories. The scenario recorder and field-cast tool regenerate their
+pins from the combined simulation, while the guns gate checks every resolved round field.
 
 ## 4. Boundary interaction — the decision tree at each face
 

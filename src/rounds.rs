@@ -22,17 +22,24 @@
 //! - `nose: Some((NoseShape, Kind))`: the round's own hit nose, for a round documented to differ
 //!   from its type's.
 //! - `penetrator: Some((mass, caliber))`: the part of a sub-calibre round that meets the plate, its
-//!   nose the round's. The round flies as its whole `body` (drag and the shell's view read it) and
-//!   meets the plate as its `penetrator` (the force law, the disc, overmatch and the cone's hole
-//!   read it); the mechanism binds from the penetrator at spawn ([`crate::ballistics`]'s
-//!   `Projectile`), synchronously and from data alone. A round without the block meets the plate
-//!   whole.
+//!   nose the round's. The round is sized and shown as its `flying` body and meets the plate as its
+//!   `penetrator` (the force law, the disc, overmatch and the cone's hole read it); the mechanism
+//!   binds from the penetrator at spawn ([`crate::ballistics`]'s `Projectile`), synchronously and
+//!   from data alone. A round without the block meets the plate whole.
 //! - `burst: Some((core_substance, arming_spend, delay, core_mass, base_mass, cavity_diameter))`: a
 //!   substance-table key whose row states burst facts, the fuze's threshold (reference-mm spent in
 //!   one body) and delay (s), the core's and the base parts' masses (kg) and the cavity's diameter
 //!   (m). Every burst is a ring. The burst is derived here, once
 //!   ([`crate::ballistics::burst::Burst::derived`]), and rides the round to the shot; its story is
 //!   design doc §5a, "The burst". A round without the block is inert.
+//!
+//! # How a round flies
+//!
+//! Drag reads the round type's flight nose, never the round's hit nose: a ballistic-capped type
+//! flies on a pointed nose and meets the plate with a blunt one. The flying body is the whole round,
+//! or the penetrator where the type's carrier is discarded in flight; [`Round::drag_k`] is
+//! [`crate::ballistics::drag_form`] of the flight nose × that body's calibre² / mass, DERIVED at
+//! load. The shell and the sight's range table both read it.
 //!
 //! Every value is authored `(value, Kind("source or reason"))` ([`crate::provenance`]); a value
 //! without one does not load. "Q7" in a provenance is the fixture-materials recommendation in
@@ -67,15 +74,22 @@ const ROUND_TYPES_RON: &str = include_str!("../assets/ballistics/round_types.ron
 /// One round fired from one gun, resolved and validated: the record the laws read.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Round {
-    /// The whole round as it flies: mass (kg), calibre (m) and the nose factor DERIVED from its hit
-    /// nose at load. Drag and the shell's view read it.
+    /// The game's damage model: the launched assembly, including any carrier. Mass (kg), calibre
+    /// (m) and the nose factor DERIVED from its hit nose at load. Gun recoil reads this mass before
+    /// a discarded carrier leaves the assembly.
     pub(crate) body: RoundBody,
+    /// The flying body: the assembly for a kept carrier, the penetrator for a discarded one.
+    /// Drag, the shell's view and the momentum a hit delivers read it.
+    pub(crate) flying: RoundBody,
     /// What meets the plate: the force law, the disc, overmatch and the cone's hole read it. The
     /// body's nose factor; mass and calibre no greater than the body's. Equal to `body` for a
     /// round authored without a penetrator block.
     pub(crate) penetrator: RoundBody,
     /// m/s: the speed the firing gun's ammunition table gives this round.
     pub(crate) muzzle_speed: f32,
+    /// The quadratic-drag coefficient (1/m) the round flies on, DERIVED at load from its type's
+    /// flight nose and its flying body (module doc, "How a round flies").
+    pub(crate) drag_k: f32,
     /// What the round's line does to a witness (crew): reference-mm of dose per metre of disc-mean
     /// chord through it (`ballistics::wound`). Finite and positive. Balance data, never read by the
     /// hard walk.
@@ -88,14 +102,17 @@ pub(crate) struct Round {
     pub(crate) burst: Option<Burst>,
 }
 
-/// One round as its file and its type resolve it, before a gun gives it a muzzle speed: every
-/// field of [`Round`] but that one, validated as far as no speed is needed.
+/// One round as its file and its type resolve it, before a gun gives it a muzzle speed: its
+/// authored assembly and every field of [`Round`] but speed, validated as far as no speed is needed.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct RoundFacts {
     /// The hit nose the factor is derived from; a domain refusal names it.
     nose: NoseShape,
+    /// The authored assembly, including any carrier, for domain validation.
     body: RoundBody,
+    flying: RoundBody,
     penetrator: RoundBody,
+    drag_k: f32,
     wound: f32,
     core: MaterialFacts,
     pub(crate) burst: Option<Burst>,
@@ -122,8 +139,10 @@ impl RoundFacts {
         }
         Ok(Round {
             body: self.body,
+            flying: self.flying,
             penetrator: self.penetrator,
             muzzle_speed,
+            drag_k: self.drag_k,
             wound: self.wound,
             core: self.core,
             burst: self.burst,
@@ -176,21 +195,19 @@ struct PenetratorFile {
     caliber: Sourced<f32>,
 }
 
-/// What carries a round's penetrator to the plate. Parsed and validated (a type has a carrier
-/// exactly when its rounds author a penetrator block) and read by no law yet.
+/// What carries a round's penetrator to the plate. A type has a carrier exactly when its rounds
+/// author a penetrator block; drag reads which body flies.
 #[derive(Deserialize, Clone, Copy, Debug, PartialEq, Eq)]
 enum Carrier {
     /// None: the round meets the plate whole.
     None,
-    /// The penetrator reaches the plate inside its carrier.
+    /// The penetrator reaches the plate inside its carrier: the whole round flies.
     Kept,
-    /// The carrier leaves the penetrator in flight.
+    /// The carrier leaves the penetrator in flight: the penetrator flies.
     Discarded,
 }
 
-/// A round type as authored: its shape proxy and its carrier. The flight nose and the carrier are
-/// validated here and read by no law yet: the flight nose waits for the drag form that reads it,
-/// the carrier for a drag that tells a kept carrier from a discarded one (#103 §3).
+/// A round type as authored: its shape proxy and its carrier.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RoundTypeFile {
@@ -205,10 +222,12 @@ struct RoundTypesFile {
     round_types: KeyedMap<RoundTypeFile>,
 }
 
-/// A round type, validated: the hit nose its rounds meet the plate with unless they override it,
-/// and its carrier, which decides whether its rounds author a penetrator block.
+/// A round type, validated: the nose its rounds fly on, the hit nose they meet the plate with
+/// unless they override it, and its carrier, which decides whether its rounds author a penetrator
+/// block and which body flies.
 #[derive(Clone, Copy, Debug)]
 struct RoundType {
+    flight_nose: NoseShape,
     hit_nose: NoseShape,
     carrier: Carrier,
 }
@@ -309,6 +328,7 @@ fn round_types(text: &str) -> Result<BTreeMap<String, RoundType>, RoundError> {
                 }
             }
             let round_type = RoundType {
+                flight_nose: row.flight_nose.0,
                 hit_nose: row.hit_nose.0,
                 carrier: row.carrier.0,
             };
@@ -395,6 +415,15 @@ fn resolved(
             penetrator
         }
     };
+    let flying = match round_type.carrier {
+        Carrier::Discarded => penetrator,
+        Carrier::None | Carrier::Kept => body,
+    };
+    let drag_k = crate::ballistics::drag_k(
+        crate::ballistics::drag_form(round_type.flight_nose),
+        flying.caliber,
+        flying.mass,
+    );
     let wound = file.wound.0;
     if !wound.is_finite() || wound <= 0.0 {
         return Err(format!(
@@ -442,7 +471,9 @@ fn resolved(
         RoundFacts {
             nose,
             body,
+            flying,
             penetrator,
+            drag_k,
             wound,
             core,
             burst,
@@ -757,6 +788,116 @@ pub(crate) mod tests {
             caliber: (0.02, Tuned("x")), nose: (Flat, Tuned("x"))))"#;
         let err = sub_calibre(stray).expect_err("a penetrator states no nose of its own");
         assert!(matches!(err, RoundError::Parse { .. }), "{err}");
+    }
+
+    /// The drag tests' round types: one flying on its blunt hit nose, one capped (a pointed flight
+    /// nose over the same blunt hit nose), and a sub-calibre type of each carrier. Fixture data.
+    const DRAG_TYPES: &str = r#"(round_types: {
+        "Blunt": (flight_nose: (Ogive(crh: 1.0), Tuned("fixture")),
+            hit_nose: (Ogive(crh: 1.0), Tuned("fixture")), carrier: (None, Tuned("fixture"))),
+        "Capped": (flight_nose: (Ogive(crh: 4.0), Tuned("fixture")),
+            hit_nose: (Ogive(crh: 1.0), Tuned("fixture")), carrier: (None, Tuned("fixture"))),
+        "Kept": (flight_nose: (Ogive(crh: 1.0), Tuned("fixture")),
+            hit_nose: (Ogive(crh: 1.0), Tuned("fixture")), carrier: (Kept, Tuned("fixture"))),
+        "Discarded": (flight_nose: (Ogive(crh: 1.0), Tuned("fixture")),
+            hit_nose: (Ogive(crh: 1.0), Tuned("fixture")), carrier: (Discarded, Tuned("fixture"))),
+    })"#;
+
+    /// The fixture round of type `round_type` over [`DRAG_TYPES`], of `mass` (kg) and `caliber`
+    /// (m), then `extra` verbatim, fired at the fixture speed.
+    pub(crate) fn of_type(round_type: &str, mass: &str, caliber: &str, extra: &str) -> Round {
+        let round_type = format!("{round_type:?}");
+        let fields = FIXTURE
+            .iter()
+            .map(|&(name, value)| match name {
+                "round_type" => (name, round_type.as_str()),
+                "mass" => (name, mass),
+                "caliber" => (name, caliber),
+                _ => (name, value),
+            })
+            .collect::<Vec<_>>();
+        fired(RoundRegistry::from_files(
+            &[("Probe", &file(&fields, extra))],
+            DRAG_TYPES,
+            SubstanceRegistry::shipped_static(),
+        ))
+        .unwrap()
+    }
+
+    /// A round's speed (m/s) after `range` metres of flat flight from `speed`, stepped by the
+    /// shared flight kernel on its drag.
+    fn speed_at(round: &Round, speed: f32, range: f32) -> f32 {
+        let (mut position, mut velocity) = (0.0, bevy::math::Vec3::X * speed);
+        while position < range {
+            velocity = crate::ballistics::freeflight_step(velocity, round.drag_k, 1.0 / 64.0);
+            position += velocity.x / 64.0;
+        }
+        velocity.length()
+    }
+
+    /// Drag reads a round type's flight nose and the plate its hit nose. Of two rounds of equal
+    /// calibre and mass, the one whose type flies on a pointed nose keeps more speed at 1000 m than
+    /// the one flying on a blunt nose, and both meet the plate with the same blunt hit nose. The
+    /// sight's range table and the potency a round arrives with both rest on this. A mutant that
+    /// drags on the hit nose, or meets the plate with the flight nose, fails here.
+    #[test]
+    fn a_pointed_flight_nose_keeps_more_speed_and_meets_the_plate_with_the_hit_nose() {
+        let blunt = of_type("Blunt", "5.0", "0.05", "");
+        let capped = of_type("Capped", "5.0", "0.05", "");
+        let (blunt_speed, capped_speed) = (
+            speed_at(&blunt, 700.0, 1000.0),
+            speed_at(&capped, 700.0, 1000.0),
+        );
+        assert!(
+            capped_speed > blunt_speed,
+            "pointed {capped_speed} m/s vs blunt {blunt_speed} m/s at 1000 m"
+        );
+        assert_eq!(
+            capped.penetrator, blunt.penetrator,
+            "both meet the plate with the one blunt hit nose"
+        );
+    }
+
+    /// A kept carrier flies whole and a discarded one leaves its penetrator flying alone: the
+    /// discarded round drags as a full-calibre round of its penetrator's mass and calibre, the kept
+    /// one as a full-calibre round of its own. A mutant that flies the whole round past a discarded
+    /// carrier, or the core inside a kept one, fails here. The live shell's impulse and view must
+    /// also read the flying body: a discarded carrier contributes neither mass nor calibre.
+    #[test]
+    fn a_discarded_carrier_leaves_the_penetrator_flying() {
+        let core = r#", penetrator: Some((mass: (1.25, Tuned("fixture")),
+            caliber: (0.02, Tuned("fixture"))))"#;
+        let kept = of_type("Kept", "5.0", "0.05", core);
+        let discarded = of_type("Discarded", "5.0", "0.05", core);
+        assert_eq!(kept.drag_k, of_type("Blunt", "5.0", "0.05", "").drag_k);
+        assert_eq!(
+            discarded.drag_k,
+            of_type("Blunt", "1.25", "0.02", "").drag_k
+        );
+        assert_ne!(kept.drag_k, discarded.drag_k);
+        assert_eq!(
+            discarded.body, kept.body,
+            "launch recoil reads the assembly before either carrier leaves it"
+        );
+        for (round, expected) in [(kept, kept.body), (discarded, discarded.penetrator)] {
+            let fire = crate::ballistics::FireShell::of_round(
+                &round,
+                bevy::math::Vec3::ZERO,
+                bevy::math::Dir3::X,
+                crate::spec::FireMechanism::Single,
+                false,
+                None,
+                None,
+            );
+            assert_eq!(
+                fire.mass, expected.mass,
+                "only the flying mass delivers momentum"
+            );
+            assert_eq!(
+                fire.caliber, expected.caliber,
+                "the view sizes the flying body"
+            );
+        }
     }
 
     /// A round type's carrier decides whether its rounds author a penetrator block: a round meets

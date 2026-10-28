@@ -175,6 +175,9 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// REV 36 (the game's damage model uses energy dose): `WireDose::line` and `field` carry HP
 /// points before rounding instead of reference-mm. The scalar types stay unchanged, but a REV 35
 /// client would read those values in the wrong units, so the protocol fingerprint must differ.
+/// REV 36 is unshipped, so the flight-nose drag form rides it: a replica builds the fired round
+/// from its own data, and peers on opposite sides would fly one shot on different drag and range
+/// tables even though the drag change adds no wire fields.
 pub const PROTOCOL_REV: u32 = 36;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This

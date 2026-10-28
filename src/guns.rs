@@ -406,12 +406,18 @@ mod tests {
                     caliber: 0.0079,
                     nose_factor: 0.5,
                 },
+                flying: RoundBody {
+                    mass: 0.0118,
+                    caliber: 0.0079,
+                    nose_factor: 0.5,
+                },
                 penetrator: RoundBody {
                     mass: 0.0118,
                     caliber: 0.0079,
                     nose_factor: 0.5,
                 },
                 muzzle_speed: 755.0,
+                drag_k: 6.733_864e-4,
                 wound: 10.0,
                 core: GUN_STEEL,
                 burst: None,
@@ -421,8 +427,10 @@ mod tests {
             "88mm_AP",
             Round {
                 body: PZGR_39,
+                flying: PZGR_39,
                 penetrator: PZGR_39,
                 muzzle_speed: 773.0,
+                drag_k: 1.080_940_9e-4,
                 wound: 30.0,
                 core: GUN_STEEL,
                 burst: None,
@@ -436,12 +444,18 @@ mod tests {
                     caliber: 0.088,
                     nose_factor: 0.291_666_66,
                 },
+                flying: RoundBody {
+                    mass: 7.3,
+                    caliber: 0.088,
+                    nose_factor: 0.291_666_66,
+                },
                 penetrator: RoundBody {
                     mass: 1.93,
                     caliber: 0.0357,
                     nose_factor: 0.291_666_66,
                 },
                 muzzle_speed: 930.0,
+                drag_k: 2.789_961_6e-4,
                 wound: 30.0,
                 core: MaterialFacts {
                     density: 14900.0,
@@ -456,8 +470,10 @@ mod tests {
             "88mm_APHE_ring",
             Round {
                 body: PZGR_39,
+                flying: PZGR_39,
                 penetrator: PZGR_39,
                 muzzle_speed: 773.0,
+                drag_k: 1.080_940_9e-4,
                 wound: 30.0,
                 core: GUN_STEEL,
                 burst: Some(Burst {

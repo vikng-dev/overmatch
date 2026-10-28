@@ -596,11 +596,7 @@ fn insert_weapons(
         });
         // The sight's range table is graduated for the default round.
         let default = &weapon_component.rounds[0].round;
-        let range_table = RangeTable::for_weapon(
-            default.muzzle_speed,
-            default.body.caliber,
-            default.body.mass,
-        );
+        let range_table = RangeTable::for_weapon(default.muzzle_speed, default.drag_k);
         commands.entity(muzzle).insert((
             Muzzle,
             TankRoot(root),

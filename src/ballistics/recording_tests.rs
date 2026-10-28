@@ -208,6 +208,7 @@ fn fire_round(
         speed: SPEED,
         caliber: FIXTURE_88.caliber,
         mass: FIXTURE_88.mass,
+        drag_k: crate::ballistics::fixture_drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
         nose_factor: FIXTURE_88.nose_factor,
         penetrator_caliber: FIXTURE_88.caliber,
         penetrator_mass: FIXTURE_88.mass,
