@@ -359,7 +359,7 @@ _Avoid_: penetration value, pen (it changes shot-to-shot as velocity bleeds)
 The penetrator's path bending toward the surface normal as it enters a volume, shortening its line-of-sight path.
 
 **Ricochet**:
-Deflection off a too-steep face without entering — spawns a new path segment and bleeds velocity, no penetration. Suppressed by overmatch.
+Deflection off a too-steep face without entering — spawns a new path segment, no penetration. In the game's damage model the shell keeps its speed along the face (`v sin θ`, θ from the normal) and loses the motion pointed into it, restitution 0: a struck box with an HP pool takes that energy, `½ m (v cos θ)²`, as its dose; armour takes none. Suppressed by overmatch.
 
 **Overmatch**:
 When a shell's caliber greatly exceeds a volume's thickness along its normal, suppressing ricochet and slope. The game's namesake, but one modifier among many — not the centre of the model.
@@ -381,7 +381,7 @@ A round's dose to a witness per unit of chord (round file field `wound`, `assets
 _Avoid_: wound rate (the code identifier keeps `wound` until a rename is decided)
 
 **Dose**:
-What a line, cone, burst or bounce deposits into a box's HP pool in the game's damage model: HP, from energy — the line's energy lost in a hard pool, a bounce's energy lost at the face it struck, a spall cone direction's share of the energy its round lost at the plate, a burst field direction's of the energy its explosive drives the wall with — at the one **energy-to-HP rate**. A crew station's line dose alone is its chord × the round's **crew line rate**. A box's dose from one shot is summed and converted to **pool units** once. Law: design doc §§5–6.
+What a line, cone, burst or bounce deposits into a box's HP pool in the game's damage model: HP, from energy — the line's energy lost in a hard pool, a bounce's energy lost at the face it struck (the energy of the motion pointed into it), a spall cone direction's share of the energy its round lost at the plate, a burst field direction's of the energy its explosive drives the wall with — at the one **energy-to-HP rate**. A crew station's line dose alone is its chord × the round's **crew line rate**. A box's dose from one shot is summed and converted to **pool units** once. Law: design doc §§5–6.
 _Avoid_: a dose in reference-mm (reference-mm is a penetration and armour readout, never a dose)
 
 **Energy-to-HP rate**:
@@ -442,7 +442,7 @@ How one sample ray is resolved: collect *all* crossings, pair them per volume in
 _Avoid_: march (that is the shell's flight through the world; the walk is what happens inside one crossing)
 
 **Shell** (as a sampled disc):
-The projectile as a caliber-wide body rather than a line: k sample rays (the axis plus a ring at `caliber/2`) each walked, then aggregated. Every scalar the point model consumed becomes an area aggregate — the mean entry normal `n̄`, and the covered fraction **η**, which scales cost, ricochet bleed and deflection angle alike. A fragment is this same primitive at r→0, k=1.
+The projectile as a caliber-wide body rather than a line: k sample rays (the axis plus a ring at `caliber/2`) each walked, then aggregated. Every scalar the point model consumed becomes an area aggregate — the mean entry normal `n̄`, and the covered fraction **η**, which scales cost, the speed a ricochet loses and its deflection angle alike. A fragment is this same primitive at r→0, k=1.
 
 **η** (engagement fraction):
 The fraction of a shell's disc covered by material at a crossing. η = 1 is a fully-buried hit, η = 0 flies free, and everything between is continuous — which is what makes a graze a partial ricochet, an MG port a graded weakspot, and a weakspot caliber-gated without any authored weakspot data.

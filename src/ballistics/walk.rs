@@ -439,11 +439,10 @@ pub struct WalkLaws {
     /// which a round both declines to ricochet and still presents a resolvable chord. The reach it
     /// implies is never the operative bound — the residual is.
     pub event_secant_cap: f32,
-    /// Past this incidence (rad, from the surface normal) an un-overmatched round ricochets.
+    /// Past this incidence (rad, from the surface normal) an un-overmatched round ricochets. The
+    /// speed a bounce keeps is no knob: it is the striking speed's share along the surface
+    /// ([`Begin::Ricochet`]).
     pub ricochet_angle: f32,
-    /// Speed retained through a FULLY covered ricochet. Partial coverage bleeds proportionally less
-    /// (§13.5: "a graze IS a partial ricochet").
-    pub ricochet_bleed: f32,
     /// Share of the incidence angle the round straightens toward the normal as it bites in.
     pub normalization: f32,
     /// Overmatch when caliber ≥ this × the crossing's factor-weighted perpendicular thickness.
@@ -484,7 +483,6 @@ impl Default for WalkLaws {
             // Carried verbatim from the serial resolver so slice 2 is a resolution change, not a
             // retune.
             ricochet_angle: 1.221,
-            ricochet_bleed: 0.6,
             normalization: 0.2,
             overmatch_ratio: 3.0,
             rha_reference: 1000.0,
@@ -2671,7 +2669,11 @@ pub enum Begin {
         /// 2026-08-07): only the deflection MAGNITUDE ships. The mean lateral offset of the covered
         /// samples is the ready-made kick direction whenever it is wanted.
         direction: Vec3,
-        /// Speed retained. FULL bleed at η = 1, none at η → 0 — a graze IS a partial ricochet.
+        /// Share of the striking speed retained. At η = 1 it is the share along the surface,
+        /// `sin θ` (`θ` the incidence from `n̄`): the shell keeps its sliding speed and loses the
+        /// motion pointed into the face, restitution 0, so the energy it loses there is
+        /// `½ m (v cos θ)²`. η blends it from 1 (η → 0, nothing lost) to that, as it blends the
+        /// direction — a graze IS a partial ricochet.
         speed_scale: f32,
     },
     /// It bit in. The caller must now collect the transit corridor along `request.axis`.
@@ -2773,9 +2775,9 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Begin {
         return Begin::Miss;
     };
 
-    // η scales the deflection ANGLE as well as the bleed (§13.5, RULED 2026-08-07). A graze that
-    // turned the round as hard as a square bounce made 1 mm of aim the difference between "flies
-    // past" and "full bounce" — the cliff the disc primitive exists to remove.
+    // η scales the deflection ANGLE as well as the speed lost (§13.5). A graze that turned the
+    // round as hard as a square bounce made 1 mm of aim the difference between "flies past" and
+    // "full bounce" — the cliff the disc primitive exists to remove.
     let blend_by_coverage = |from: Dir3, toward: Dir3, coverage: f32| {
         super::bend_toward(
             from,
@@ -2794,10 +2796,14 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Begin {
         } else {
             blend_by_coverage(axis, specular, event.coverage)
         };
+        // `sin θ` as the striking direction's part along the surface, `√(1 − (axis · n̄)²)`: an
+        // IEEE square root rather than the sine of the read incidence, so the share is the same on
+        // every target.
+        let sliding = (1.0 - along_normal * along_normal).max(0.0).sqrt();
         return Begin::Ricochet {
             entrance: read,
             direction: Vec3::from(direction),
-            speed_scale: 1.0 - event.coverage * (1.0 - laws.ricochet_bleed),
+            speed_scale: 1.0 - event.coverage * (1.0 - sliding),
         };
     }
 

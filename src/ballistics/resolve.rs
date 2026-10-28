@@ -1080,8 +1080,8 @@ impl Leg {
     }
 }
 
-/// A deflection off the entrance face (§4). The deflection ANGLE and the bleed both already carry η
-/// from the core (§13.5) — a graze is a partial ricochet in direction as well as in speed.
+/// A deflection off the entrance face (§4). The deflection ANGLE and the speed lost both already
+/// carry η from the core (§13.5) — a graze is a partial ricochet in direction as well as in speed.
 #[derive(Clone, Debug)]
 pub(crate) struct Bounce {
     pub position: Vec3,
@@ -1094,11 +1094,14 @@ pub(crate) struct Bounce {
     pub owner: Option<Entity>,
     /// The dose the bounce jars into the struck component, joules: the kinetic energy the round
     /// lost at the bounce, `½ m (v_in² − v_out²)`, `m` the mass that meets the plate, as a line
-    /// dose is the energy lost crossing a box. It converts at the energy rate. Armour has no HP
-    /// and shrugs it off.
+    /// dose is the energy lost crossing a box. At full coverage the round keeps its speed along the
+    /// face ([`Self::speed`]), so this is the energy of the motion pointed into the face,
+    /// `½ m (v_in cos θ)²`, `θ` the incidence from `normal`. It converts at the energy rate. Armour
+    /// has no HP and shrugs it off.
     pub shock: f32,
     pub direction: Dir3,
-    /// Speed retained (m/s).
+    /// Speed retained (m/s): at full coverage the striking speed's part along the face,
+    /// `v_in sin θ`, restitution 0 ([`walk::Begin::Ricochet`]).
     pub speed: f32,
     /// Direction of travel and speed (m/s) at contact.
     pub incoming: Dir3,
@@ -1309,7 +1312,7 @@ pub(crate) fn decide(
             let struck = entrance.events[0].entrance_volume;
             let position = anchor + read.position;
             let out = Dir3::new(direction).unwrap_or(dir);
-            let bled = speed * speed_scale;
+            let kept = speed * speed_scale;
             let approach = (read.position - from).dot(Vec3::from(dir)).max(0.0);
             // Each sample's way in ends on the mean entrance surface, as a transit's handoff does.
             let mut way_in = Leg::to_plane(
@@ -1327,12 +1330,12 @@ pub(crate) fn decide(
                 coverage: read.coverage,
                 struck,
                 owner: owner(struck),
-                shock: (round.energy(state_in) - round.energy(round.at(bled))).max(0.0) as f32,
+                shock: (round.energy(state_in) - round.energy(round.at(kept))).max(0.0) as f32,
                 direction: out,
-                speed: bled,
+                speed: kept,
                 incoming: dir,
                 speed_in: speed,
-                impulse: mass * (v_in - Vec3::from(out) * bled),
+                impulse: mass * (v_in - Vec3::from(out) * kept),
                 travel: approach + MARCH_EPS,
                 resume: position + read.normal * radius + out * MARCH_EPS,
                 approach: way_in,

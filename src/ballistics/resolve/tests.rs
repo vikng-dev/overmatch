@@ -1994,6 +1994,46 @@ fn a_cone_below_the_pool_quantum_is_not_thrown() {
     }
 }
 
+/// One fixture shot falling onto a wide HP-bearing slab `thickness` metres thick of `factor`
+/// reference-mm per metre, its top face through `y = 1` under [`DROP_FROM`], tilted about `Z` so
+/// the round strikes it at `incidence` (rad) from the face's normal: the driven flight and the slab.
+/// It is 12 m along the tilt, so the line through a 0.4 m slab at up to 85° (4.6 m, DERIVED) ends
+/// on its far face: a line out of its side would read a thinner plate, and overmatch it.
+fn shot_onto_slab(
+    body: RoundBody,
+    speed: f32,
+    incidence: f32,
+    thickness: f32,
+    factor: f32,
+) -> (Drive, Entity) {
+    let mut gate = world_with_trimesh_plates(&[]);
+    let rotation = Quat::from_rotation_z(incidence);
+    let normal = rotation * Vec3::Y;
+    let slab = volume(
+        &mut gate,
+        Vec3::new(12.0, thickness, 3.0),
+        Transform::from_translation(
+            Vec3::new(DROP_FROM.x, 1.0, DROP_FROM.z) - normal * (0.5 * thickness),
+        )
+        .with_rotation(rotation),
+        factor,
+        Some(1000),
+    );
+    for _ in 0..8 {
+        gate.update();
+    }
+    (driven(&mut gate, body, speed), slab)
+}
+
+/// The bounce a flight made at its first contact; a flight that did anything else is a broken
+/// fixture.
+fn first_bounce(flown: &Drive) -> &Bounce {
+    match flown.decisions.first() {
+        Some(Decision::Bounce(bounce)) => bounce,
+        _ => panic!("the round bounces first: {:?}", impacts_of(flown)),
+    }
+}
+
 /// A BOUNCE'S SHOCK IS THE ENERGY THE ROUND LOST AT IT: the dose a bounce jars into the face it
 /// struck is `½ m (v_in² − v_out²)` joules, `m` the mass that meets the plate, as a line dose is
 /// the energy lost crossing a box, so it converts at the one energy rate; a round that loses more
@@ -2010,28 +2050,8 @@ fn a_bounces_shock_is_the_energy_the_round_lost_there() {
     ]
     .into_iter()
     .map(|(body, speed)| {
-        let mut gate = world_with_trimesh_plates(&[]);
-        let rotation = Quat::from_rotation_z(75.0_f32.to_radians());
-        let normal = rotation * Vec3::Y;
-        volume(
-            &mut gate,
-            Vec3::new(3.0, 0.4, 3.0),
-            Transform::from_translation(Vec3::new(DROP_FROM.x, 1.0, DROP_FROM.z) - normal * 0.2)
-                .with_rotation(rotation),
-            STEEL * 0.1,
-            Some(1000),
-        );
-        for _ in 0..8 {
-            gate.update();
-        }
-        let flown = driven(&mut gate, body, speed);
-        let Some(Decision::Bounce(bounce)) = flown.decisions.first() else {
-            panic!(
-                "{} kg at {speed} m/s bounces: {:?}",
-                body.mass,
-                impacts_of(&flown)
-            );
-        };
+        let (flown, _) = shot_onto_slab(body, speed, 75.0_f32.to_radians(), 0.4, STEEL * 0.1);
+        let bounce = first_bounce(&flown);
         let (v_in, v_out) = (bounce.speed_in as f64, bounce.speed as f64);
         let lost = 0.5 * body.mass as f64 * (v_in * v_in - v_out * v_out);
         assert!(
@@ -2050,6 +2070,120 @@ fn a_bounces_shock_is_the_energy_the_round_lost_there() {
             "more energy lost, a harder jar: {pair:?}"
         );
     }
+}
+
+/// A BOUNCE DOSES THE ENERGY POINTED INTO THE FACE: the round keeps its speed along the face it
+/// struck and loses the rest, restitution 0, so a full-coverage bounce jars `½ m (v_in cos θ)²`
+/// joules into that face, `θ` the incidence from its normal — the dose falls as `cos² θ`, and a
+/// shallower graze deals less. The fixture 88 grazes one HP-bearing slab at 72°, 75°, 80° and 85°
+/// (fixture data), past the ricochet angle and too thick to overmatch. A bounce that charged a
+/// fixed share of the striking energy (a speed bleed), or the energy along the face, fails here; a
+/// struck module's bounce dose in play, and its scale against a perforation's, rely on it.
+#[test]
+fn a_bounce_doses_the_energy_pointed_into_the_face() {
+    let mut doses: Vec<(f32, f32)> = Vec::new();
+    for degrees in [72.0_f32, 75.0, 80.0, 85.0] {
+        let (flown, _) = shot_onto_slab(FIXTURE_88, 773.0, degrees.to_radians(), 0.4, STEEL * 0.1);
+        let bounce = first_bounce(&flown);
+        assert_eq!(
+            bounce.coverage, 1.0,
+            "{degrees}°: the graze covers the disc"
+        );
+        let into_face =
+            f64::from(bounce.speed_in) * f64::from(bounce.incoming.dot(bounce.normal).abs());
+        let expected = 0.5 * f64::from(FIXTURE_88.mass) * into_face * into_face;
+        assert!(
+            (f64::from(bounce.shock) / expected - 1.0).abs() < 1.0e-4,
+            "{degrees}°: shock {} J against ½ m (v cos θ)² = {expected} J",
+            bounce.shock
+        );
+        println!(
+            "{degrees}°: in {} m/s, out {} m/s, dose {} J = {} HP",
+            bounce.speed_in,
+            bounce.speed,
+            bounce.shock,
+            f64::from(bounce.shock) / crate::ballistics::energy_dose::joules_per_hp()
+        );
+        doses.push((degrees, bounce.shock));
+    }
+    for pair in doses.windows(2) {
+        assert!(
+            pair[1].1 < pair[0].1,
+            "a shallower graze deals less: {pair:?}"
+        );
+    }
+}
+
+/// A BOUNCE KEEPS THE SPEED ALONG THE FACE: a full-coverage bounce leaves at the striking
+/// velocity's part along the face it struck, `|v_in − (v_in · n̄) n̄| = v_in sin θ`, whatever the
+/// round's mass, its speed or the incidence. Two fixture rounds graze one slab at three incidences
+/// past the ricochet angle (fixture data). A speed retained by a constant share (a bleed), by the
+/// round, or kept whole fails here; the flight after a bounce, its fuze and the next surface it
+/// meets rely on it.
+#[test]
+fn a_bounce_keeps_the_speed_along_the_face() {
+    for (body, speed) in [(FIXTURE_88, 773.0), (FIXTURE_MG, 755.0)] {
+        for degrees in [72.0_f32, 78.0, 85.0] {
+            let (flown, _) = shot_onto_slab(body, speed, degrees.to_radians(), 0.4, STEEL * 0.1);
+            let bounce = first_bounce(&flown);
+            assert_eq!(
+                bounce.coverage, 1.0,
+                "{degrees}°: the graze covers the disc"
+            );
+            let v_in = Vec3::from(bounce.incoming) * bounce.speed_in;
+            let along_face = (v_in - bounce.normal * v_in.dot(bounce.normal)).length();
+            assert!(
+                (bounce.speed - along_face).abs() <= 1.0e-5 * bounce.speed_in,
+                "{} kg at {degrees}°: left at {} m/s, the speed along the face is {along_face}",
+                body.mass,
+                bounce.speed
+            );
+        }
+    }
+}
+
+/// A BOUNCE AT THE RICOCHET ANGLE DOSES LESS THAN PERFORATING THE PART: the most a bounce can jar
+/// into a part is just past the ricochet angle, where `cos² θ` is largest, and for the fixture 88 at
+/// 773 m/s there it is below the line dose the same round deals perforating the same part square
+/// on. The part is the thinnest steel slab the round cannot overmatch, `1.1 × caliber ÷
+/// overmatch_ratio` along its normal: of every steel part that can bounce the round at all, it
+/// is the cheapest to perforate, and a thicker one only takes more energy from the line (DERIVED
+/// from the force law). Fixture data. A bounce that charged a fixed share of the striking energy
+/// fails here; a part's pool, sized against what perforating it deals, relies on a glance dealing
+/// less.
+#[test]
+fn a_bounce_at_the_ricochet_angle_doses_less_than_perforating_the_part() {
+    let laws = WalkLaws::default();
+    let thickness = 1.1 * FIXTURE_88.caliber / laws.overmatch_ratio;
+    let (square, part) = shot_onto_slab(FIXTURE_88, 773.0, 0.0, thickness, STEEL);
+    let Some(Decision::Bite(bite)) = square.decisions.first() else {
+        panic!("square on, the round bites: {:?}", impacts_of(&square));
+    };
+    assert!(
+        matches!(bite.end, BiteEnd::Perforated { .. }),
+        "the round perforates the part square on"
+    );
+    let perforation: f32 = bite
+        .deposits
+        .iter()
+        .filter(|dose| dose.address == part)
+        .map(|dose| dose.amount)
+        .sum();
+
+    let (graze, part) = shot_onto_slab(
+        FIXTURE_88,
+        773.0,
+        laws.ricochet_angle + 0.01,
+        thickness,
+        STEEL,
+    );
+    let bounce = first_bounce(&graze);
+    assert_eq!(bounce.struck, part);
+    assert!(
+        bounce.shock > 0.0 && bounce.shock < perforation,
+        "a bounce at the ricochet angle jars {} J against {perforation} J perforating the part",
+        bounce.shock
+    );
 }
 
 /// A plate exit's cone is spread by its rear layer's substance's field: two steel plates in

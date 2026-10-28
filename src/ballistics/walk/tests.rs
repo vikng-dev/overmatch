@@ -1254,11 +1254,13 @@ fn a_lightly_covered_plate_is_not_thin_enough_to_overmatch() {
     }
 }
 
-/// §13.5 (RULED 2026-08-07): η scales the DEFLECTION ANGLE as well as the bleed. A graze is a
-/// partial ricochet in direction too, so 1 mm of aim can never flip the outcome between "flies past"
-/// and "full bounce".
+/// §13.5: η scales the DEFLECTION ANGLE as well as the speed lost. A graze is a partial ricochet in
+/// direction too, so 1 mm of aim can never flip the outcome between "flies past" and "full bounce".
+/// At η = 1 the round keeps the striking direction's part along the surface, `√(1 − (axis · n̄)²)`;
+/// below it, the speed retained blends from 1 toward that by η, as the turn does toward the
+/// reflection. A retained share read from a constant, or not blended by η, fails here.
 #[test]
-fn partial_coverage_scales_the_deflection_angle_and_the_bleed() {
+fn partial_coverage_scales_the_deflection_angle_and_the_speed_lost() {
     let laws = WalkLaws::default();
     let volumes = table(&[(1, 1000.0)]);
     let normal = Vec3::new(0.0, 0.97, -0.242).normalize();
@@ -1282,10 +1284,15 @@ fn partial_coverage_scales_the_deflection_angle_and_the_bleed() {
         Dir3::new(full.events[0].entry_normal).unwrap(),
     ));
     assert_eq!(full_direction.to_array(), specular.to_array());
-    assert!((full_scale - laws.ricochet_bleed).abs() < 1.0e-6);
+    let along_normal = AXIS.dot(full.events[0].entry_normal);
+    let sliding = (1.0 - along_normal * along_normal).sqrt();
+    assert!(
+        (full_scale - sliding).abs() < 1.0e-6,
+        "{full_scale} against {sliding}"
+    );
     let full_turn = AXIS.angle_between(full_direction);
 
-    // Partial coverage turns the round proportionally less, and bleeds proportionally less.
+    // Partial coverage turns the round proportionally less, and loses proportionally less speed.
     let mut previous_turn = full_turn;
     for stride in [2usize, 4, 6] {
         let partial = disc_along(Vec3::ZERO, AXIS, frame, 0.044, 2.0, &steel, |index| {
@@ -1306,7 +1313,7 @@ fn partial_coverage_scales_the_deflection_angle_and_the_bleed() {
                     coverage * full_turn
                 );
                 assert!(turn < previous_turn, "less coverage must turn it less");
-                let expected = 1.0 - coverage * (1.0 - laws.ricochet_bleed);
+                let expected = 1.0 - coverage * (1.0 - sliding);
                 assert!((speed_scale - expected).abs() < 1.0e-5, "{speed_scale}");
                 previous_turn = turn;
             }

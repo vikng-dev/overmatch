@@ -206,8 +206,9 @@ When the path reaches a volume's face:
    **one modifier among many — not the centerpiece.** Don't over-build it.
 3. **Ricochet** — if not overmatched and impact angle exceeds the **per-shell-type ricochet
    threshold** (a fixed constant for now; we have one shell): **deflect** — spawn a new path segment
-   off the face, bleed velocity, do *not* enter. **No spall on ricochet** for now (spall is an
-   exit/perforation event only — §5).
+   off the face, do *not* enter. The shell keeps its speed along the face, `v sin θ`, and loses the
+   motion pointed into it (restitution 0; the bounce's dose, §6). **No spall on ricochet** for now
+   (spall is an exit/perforation event only — §5).
 4. **Otherwise** — **normalize** (bend the path toward the normal), enter, and march the geometric
    LOS cost; perforate→exit (spall) or embed.
 
@@ -734,7 +735,8 @@ directions, so it takes more dose (§5). A crew box is person-sized, one shared 
 the 0.2 m² face the fields' knockout radii are quoted at (§5), and the pen cam's potency bands are
 read from it (§5, "Potency colour"). A spall cone doses it by the strength reaching it (§5); the
 **main penetrator transiting** a hard module deposits the energy it lost crossing it; a bounce
-deposits the energy the round lost there into the face it struck.
+deposits the energy the round lost there, the motion pointed into the face, into the face it
+struck.
 
 **The energy dose** (issue 113, decided 2026-10-28, provisional; owner direction: keep it simple).
 A hard box's line dose is the kinetic energy the round lost crossing it, `½ m (v_in² − v_out²)`,
@@ -763,20 +765,43 @@ Under the energy dose (MEASURED 2026-10-28,
 shipped fir.
 
 **Every dose of energy follows one rule** (issue 116, decided 2026-10-28, provisional). A bounce's
-shock is the energy the round lost at the bounce, `½ m (v_in² − v_out²)` at the ricochet's bleed,
-and a field deposit is a share of the energy its source lost or drove (§5, §5a): both convert at
-the same rate as the line, so a joule is worth the same HP whatever put it there. The shock this
-replaced was `0.045 × the round's readout × cos(incidence)` reference-mm at 10 HP points each: the
-88 at 773 m/s bouncing with its whole disc now deals 1.95 MJ, 650 HP points, to an exposed
-component it bounces off, against at most 18 under that law, a bounce needing more than 70° of
-incidence (DERIVED from the force law, the 0.6 bleed and the 1.221 rad ricochet angle). MEASURED
-through the march, the fixture 88 fired at 773 m/s strikes a 0.4 m steel slab with a pool at
-771.25 m/s, leaves at 462.75 and jars 1.9415 MJ into it, 647.2 HP points, the same at 72°, 75°,
-80° and 85°: the bleed is one ratio, so a graze deals what a squarer bounce does. Armour takes
-none, and no recorded scenario bounces off a component. A witness's chord
-alone keeps its own unit, one HP point per 0.1 reference-mm (`ballistics::HP_PER_REFERENCE_MM`, a
-unit with Resolution provenance, not a balance value), the round's crew line rate its whole
-scale.
+shock is the energy the round lost at the bounce, `½ m (v_in² − v_out²)`, and a field deposit is a
+share of the energy its source lost or drove (§5, §5a): both convert at the same rate as the line,
+so a joule is worth the same HP whatever put it there. The shock this replaced was
+`0.045 × the round's readout × cos(incidence)` reference-mm at 10 HP points each, at most 18 for
+the 88.
+
+**A bounce deals only the energy pointed into the face** (issue 145, decided 2026-10-28,
+provisional). The striking velocity splits into its part along the struck face's normal and its
+part along the face. The shell keeps the sliding part: it leaves at `v sin θ`, `θ` the incidence
+from the normal, along the existing exit direction (the reflection, blended by η, §13.5). It loses
+the rest, restitution 0, so the energy it loses there, the shock, is `½ m (v cos θ)²`, and a
+struck box with a pool takes it at the one rate; armour takes none. Under partial coverage the
+speed retained blends from all of it toward `sin θ` by η, as the direction does (§13.5), and the
+shock is still the energy lost. This retired the fixed ricochet bleed, 0.6 of the speed kept
+whatever the angle, under which the fixture 88 fired at 773 m/s struck a 0.4 m steel slab with a
+pool at 771.25 m/s, left at 462.75 and jarred 1.9415 MJ, 647.2 HP points, into it at any graze from
+72° to 85° (MEASURED), more than its penetration of a gun barrel (245 HP). MEASURED through the
+march under this law (`resolve::tests::a_bounce_doses_the_energy_pointed_into_the_face`), the same
+shot:
+
+| incidence | leaves at (m/s) | shock (J) | HP points | DERIVED HP |
+|---|---|---|---|---|
+| 72° | 733.50 | 289 686 | 96.6 | 97 |
+| 75° | 744.97 | 203 215 | 67.7 | 68 |
+| 80° | 759.53 | 91 475 | 30.5 | 31 |
+| 85° | 768.32 | 23 044 | 7.7 | 8 |
+
+The most a bounce can deal is just past the ricochet angle, `cos² 1.221` of the striking energy
+(0.118 of it, about 119 HP for the 88 at 771 m/s, DERIVED), and it is below what perforating the
+thinnest steel part the round cannot overmatch deals
+(`resolve::tests::a_bounce_at_the_ricochet_angle_doses_less_than_perforating_the_part`). No
+recorded scenario bounces off a component; the two recorded bounces (s3, s8a) keep their
+verdicts and leave faster.
+
+A witness's chord alone keeps its own unit, one HP point per 0.1 reference-mm
+(`ballistics::HP_PER_REFERENCE_MM`, a unit with Resolution provenance, not a balance value), the
+round's crew line rate its whole scale.
 
 **Trees are just wood.** Every trunk is one substance, `Wood` (`materials.ron`), and one pool:
 the wood row's HP per metre of breast-height diameter times the tree's own diameter, rounded, at
@@ -1376,10 +1401,12 @@ samples. Per event:
   Incidence, the ricochet test, normalization, and overmatch (§13.3, factor-weighted) consume `n̄`
   unchanged. This also *repairs* the point model: a point normal at an edge or on curved cast is
   degenerate (today's `unwrap_or(-dir)`); the patch average is smooth everywhere — corners average
-  to their bisector. **Ricochet bleed, impulse exchange, AND the deflection angle scale by η**
-  (RULED 2026-08-07 — angle scaling added): the outgoing direction blends from the incoming ray
-  toward the full-ricochet direction by η, and normalization on penetrating entries scales the
-  same way. η = 1 is the classic bounce; η → 0 fades to undisturbed flight. Continuity is the
+  to their bisector. **The speed a ricochet loses, impulse exchange, AND the deflection angle
+  scale by η** (RULED 2026-08-07 — angle scaling added): the outgoing direction blends from the
+  incoming ray toward the full-ricochet direction by η, the speed retained blends from all of it
+  toward the share along the face, `1 − η (1 − sin θ)` (issue 145; §6), and normalization on
+  penetrating entries scales the same way. η = 1 is the classic bounce; η → 0 fades to undisturbed
+  flight. Continuity is the
   point — 1mm of aim must never flip the outcome between "flies past" and "full bounce". Whether
   a bounce happens at all stays with the factor-weighted overmatch law (mass/velocity live there).
 - **Transit:** `cost = (1/k) Σᵢ costᵢ`, each sample's cost its union-max-factor chord integral,
@@ -1402,7 +1429,7 @@ none survive — recorded so they aren't re-invented):
   slit, the plate-edge graze, and the mantlet MG port are just different (η, n̄) pairs; the
   geometry around the axis is the fact, indifferent to how steel is partitioned into meshes.
 - *Scrape thresholds* — an edge skim's covered samples see ~90° incidence on `n̄`, so the
-  **existing ricochet law** fires with η-scaled bleed *and deflection*: a graze IS a partial
+  **existing ricochet law** fires with η-scaled speed loss *and deflection*: a graze IS a partial
   ricochet. Continuous, no cliff, no lottery.
 - *Nearest-contact re-aim / capsule shapecast* — the aggregates are the resolution; the "capsule"
   is implemented as the sub-ray ring itself (same raycast machinery, same determinism posture, no
@@ -1595,7 +1622,8 @@ unresisted — a known, deliberate gap, not an oversight.
   module at a 71° graze, ~0.4 at 88°), a bullet graze barely registers (~0.1), and armor (no HP) takes
   nothing. Completes the gun-barrel damage story (direct = knockout, graze = chip, fragment = energy-
   scaled). `SHOCK_K` is a sandbox knob. Not yet drawn distinctly (HP labels show the effect).
-  (Superseded 2026-10-28, #116: the shock is the energy the round lost at the bounce, §6.)
+  (Superseded 2026-10-28, #116 and #145: the shock is the energy the round lost at the bounce,
+  the motion pointed into the face, §6.)
 - **Volume data → RON (composition) cut (2026-06-28):** retired the prefix-keyed `material_factor`/
   `component_hp` functions; the per-tank `volumes` RON map is now the source of truth. `VolumeSpec`
   = `material_factor` + optional `hp` facet (composition, not a `kind` enum — §12). `on_tank_ready`
