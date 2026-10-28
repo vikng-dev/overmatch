@@ -997,3 +997,96 @@ fn a_record_names_the_struck_life_its_ticks_and_the_hull_pose() {
         (0, 0)
     );
 }
+
+/// In the game's damage model a record counts the shown points its shot took settle by settle, as
+/// the authority's hit confirmation does ([`ShotDose::shown_losses`]), though another round dosed
+/// the pool between the shot's marks: the shot's second settle takes the pool from 3 shown points
+/// to 2, so the record is dosed and carries the point. The pen cam's verdict relies on it to agree
+/// with the hit marker; a record that reads what the first settle found less the shot's whole take
+/// (3000 less 800 pool units, still 3 shown) loses the point and the verdict. Fixture: a 3-point
+/// pool, the shot dosing 0.4 HP at each of two marks and another round 0.4 HP between them.
+#[test]
+fn interleaved_fractional_doses_record_the_shown_point_the_shot_took() {
+    use crate::damage_cam::record::{self, HullFrame, ShotFacts, ShotLog, StruckTank};
+    use bevy::ecs::system::RunSystemOnce;
+    use std::collections::BTreeMap;
+
+    let mut world = World::new();
+    let tank = world.spawn_empty().id();
+    let target = world
+        .spawn((
+            Name::new("fixture box"),
+            VolumeOf(tank),
+            ComponentHealth::full(3),
+        ))
+        .id();
+    let shell = world.spawn(ShotDose::default()).id();
+    for mark in 0..2 {
+        world
+            .run_system_once(
+                move |mut shots: Query<&mut ShotDose>, mut health: Query<&mut ComponentHealth>| {
+                    let mut shot = shots.single_mut().unwrap();
+                    shot.add(
+                        target,
+                        0.04,
+                        DoseContext::Line {
+                            entry: Vec3::ZERO,
+                            along: Vec3::NEG_Z,
+                        },
+                    );
+                    shot.settle(&mut health, true, mark);
+                },
+            )
+            .unwrap();
+        if mark == 0 {
+            world.get_mut::<ComponentHealth>(target).unwrap().take(400);
+        }
+    }
+    let shot = world.get::<ShotDose>(shell).unwrap();
+    assert_eq!(shot.shown_losses().collect::<Vec<_>>(), vec![(target, 1)]);
+    let marks: Vec<_> = (0..2)
+        .map(|mark| {
+            let entry = Vec3::new(0.0, 0.0, -(mark as f32));
+            ArmourMark::Wound {
+                incoming: Vec3::NEG_Z,
+                speed: SPEED,
+                volumes: vec![VolumeCrossing {
+                    volume: target,
+                    entry,
+                    end: entry + Vec3::NEG_Z * 0.4,
+                    chord: 0.4,
+                    cost: 0.04,
+                    energy: 0.0,
+                    perforated: true,
+                }],
+            }
+        })
+        .collect();
+    let struck = StruckTank::recorded(
+        tank,
+        0,
+        vec![(0, HullFrame::posed(Vec3::ZERO, Quat::IDENTITY))],
+        BTreeMap::new(),
+        vec![(target, 3 * POOL_UNITS_PER_HP)],
+    );
+    let report = record::report_from(
+        &world,
+        &struck,
+        &ShotLog {
+            marks: &marks,
+            cones: &[],
+            burst: None,
+            path: &[Vec3::Z, Vec3::NEG_Z * 1.4],
+            dose: Some(shot),
+        },
+        &ShotFacts {
+            launch: Vec3::Z,
+            ..ShotFacts::default()
+        },
+    )
+    .expect("the shot took a shown point, so its path is dosed and it has a record");
+    assert_eq!(report.steps(), vec![crate::damage_cam::PathStep::Dosed]);
+    assert_eq!(report.impact.verdict, ShotVerdict::Damaged);
+    assert_eq!(lost(&report, "fixture box"), 800);
+    assert_eq!(report.doses[0].shown_taken, Some(1));
+}

@@ -238,8 +238,8 @@ fn assert_round_trip(name: &str, decoded: &PenetrationReport, recorded: &Penetra
     assert_eq!(decoded.doses.len(), recorded.doses.len(), "{name}");
     for (d, r) in decoded.doses.iter().zip(&recorded.doses) {
         assert_eq!(
-            (&d.volume, d.line, d.field, d.taken),
-            (&r.volume, r.line, r.field, r.taken),
+            (&d.volume, d.line, d.field, d.taken, d.shown_taken),
+            (&r.volume, r.line, r.field, r.taken, r.shown_taken),
             "{name}"
         );
         assert_eq!(d.entered.is_some(), r.entered.is_some(), "{name}");
@@ -913,5 +913,32 @@ fn incidence_is_the_records_near_normal_impact() {
                 "{normal} {off_deg}°"
             );
         }
+    }
+}
+
+/// In the game's damage model a record's settle-by-settle shown points (`BoxDose::shown_taken`)
+/// cross the wire unchanged, and the decoded path reads them as the sent one does. The client's
+/// pen cam relies on it where another round dosed a pool between the shot's marks; a codec that
+/// drops the field re-derives the loss from what the pool held and what the shot took, and
+/// erases or invents a shown point. Fixture: a record's first dose carrying none and one point.
+#[test]
+fn interleaved_shown_losses_survive_the_wire() {
+    let records = records();
+    let vocabulary = vocabulary(&records);
+    let (name, report) = records
+        .iter()
+        .find(|(_, report)| !report.doses.is_empty())
+        .unwrap();
+    for shown in [0, 1] {
+        let mut report = report.clone();
+        report.doses[0].shown_taken = Some(shown);
+        let component = report.component(&report.doses[0].volume).unwrap();
+        assert_eq!(report.doses[0].shown_lost(component), shown);
+        let built = BuiltExplanation::build(&vocabulary, &recorded(&report)).unwrap();
+        let bytes = postcard::to_allocvec(&built.full).unwrap();
+        let received: ShotExplanation = postcard::from_bytes(&bytes).unwrap();
+        let decoded = received.decode(&vocabulary).unwrap();
+        assert_round_trip(name, &decoded, &report);
+        assert_eq!(decoded.steps(), report.steps());
     }
 }

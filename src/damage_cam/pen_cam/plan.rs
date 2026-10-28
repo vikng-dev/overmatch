@@ -421,7 +421,7 @@ pub struct BoxPlan {
     pub line: f32,
     pub field: f32,
     /// The shown HP points the shot took from it
-    /// ([`crate::damage_cam::ComponentState::shown_lost`]): none while its pool keeps the dose
+    /// ([`crate::damage_cam::BoxDose::shown_lost`]): none while its pool keeps the dose
     /// short of a whole point.
     pub lost_hp: u32,
     /// When the picture reaches it: the earliest, in record time, of the line entering it where the
@@ -548,8 +548,7 @@ impl Plan {
             .iter()
             .map(|component| {
                 let dose = report.doses.iter().find(|d| d.volume == component.name);
-                let (line_dose, field_dose, taken) =
-                    dose.map_or((0.0, 0.0, 0), |d| (d.line, d.field, d.taken));
+                let (line_dose, field_dose) = dose.map_or((0.0, 0.0), |d| (d.line, d.field));
                 let shape = shapes.get(&component.name);
                 let center = shape.map(|shape| shape.center());
                 let heights = shape.map(|shape| {
@@ -591,7 +590,7 @@ impl Plan {
                     hp: component.shown(),
                     line: line_dose,
                     field: field_dose,
-                    lost_hp: component.shown_lost(taken),
+                    lost_hp: dose.map_or(0, |dose| dose.shown_lost(component)),
                     reached_at,
                     lost: lost_before
                         || report.consequences.iter().any(|c| {

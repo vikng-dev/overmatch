@@ -606,7 +606,7 @@ impl ShotDose {
         health: &mut Query<&mut ComponentHealth>,
         deposit: bool,
         mark: usize,
-    ) -> u32 {
+    ) -> u64 {
         if !deposit {
             return 0;
         }
@@ -623,7 +623,7 @@ impl ShotDose {
             };
             let held = hp.held();
             let lost = hp.take(due);
-            removed += lost;
+            removed += u64::from(lost);
             entry.settles.push(Settle {
                 mark,
                 held,
@@ -2222,7 +2222,7 @@ struct MarchStep {
     holding: bool,
     /// Pool units the authority actually removed this step, across every crossing and every spall
     /// fragment.
-    damage_dealt: u32,
+    damage_dealt: u64,
 }
 
 /// What a replica shell does at an armor contact its own march found (see
@@ -2921,7 +2921,7 @@ fn resume_from_catch_up(
 
 /// AUTHORITY: the witness pass over `legs` (ADR-0040, [`wound::line`]), through the witnesses
 /// `admit` keeps. Doses each witness the line put a chord into, logs one [`ArmourMark::Wound`] and
-/// settles it at its own index; returns the HP removed. A replica takes nothing.
+/// settles it at its own index; returns the pool units removed. A replica takes nothing.
 ///
 /// The hard world is already resolved when this runs and nothing here reaches back into it, so a
 /// witness walk that fails closed doses nothing and leaves the round's flight as it was.
@@ -2932,7 +2932,7 @@ fn wound_legs(
     legs: &[resolve::Leg],
     speed: f32,
     health: &mut Query<&mut ComponentHealth>,
-) -> u32 {
+) -> u64 {
     if !context.deposit {
         return 0;
     }
@@ -3352,14 +3352,14 @@ fn stop_at(shell: &mut MarchingShell, flight: &mut resolve::Flight, entry: Vec3,
 /// AUTHORITY: advance the fuze ([`advance_fuze`]) and the flight over a decided crossing. A delay
 /// that ran out inside the crossing bursts where the crossing hands the flight back, at the speed it
 /// hands back, whatever is left of the step's budget ([`burst_here`]). Returns whether the round
-/// ended, at rest or in the burst, and the HP the burst removed.
+/// ended, at rest or in the burst, and the pool units the burst removed.
 fn follow_crossing(
     shell: &mut MarchingShell,
     context: &resolve::ResolveContext<'_, '_, '_>,
     flight: &mut resolve::Flight,
     decision: resolve::Decision,
     health: &mut Query<&mut ComponentHealth>,
-) -> (bool, u32) {
+) -> (bool, u64) {
     advance_fuze(&mut shell.projectile.fuze, &decision);
     if flight.follow(decision) {
         return (true, 0);
@@ -3372,7 +3372,7 @@ fn follow_crossing(
 
 /// AUTHORITY: fly the round `metres` of open path, where its fuze runs out, with the witness pass
 /// over that leg, and burst there at the flight's speed ([`burst_here`]). Returns whether the round
-/// ended, and the HP removed.
+/// ended, and the pool units removed.
 fn burst_ahead(
     shell: &mut MarchingShell,
     context: &resolve::ResolveContext<'_, '_, '_>,
@@ -3380,7 +3380,7 @@ fn burst_ahead(
     budget: &mut resolve::Budget,
     metres: f32,
     health: &mut Query<&mut ComponentHealth>,
-) -> (bool, u32) {
+) -> (bool, u64) {
     let (owners, parents) = (&context.world.owners, &context.world.parents);
     let shooter = shell.source.map(|source| source.tank);
     let not_own = |entity: Entity| not_own_volume(entity, shooter, owners, parents);
@@ -3401,15 +3401,15 @@ fn burst_ahead(
 /// AUTHORITY: burst an armed round where `flight` stands, travelling at `speed` (zero at rest, the
 /// delay's remainder then waited out where it lies): log its [`ArmourMark::Burst`] and settle its
 /// doses at that mark. Its nose piece flies on as the shell's round, inert, unless the round is at
-/// rest, which ends it. Returns whether the round ended and the HP removed; an unarmed fuze does
-/// nothing.
+/// rest, which ends it. Returns whether the round ended and the pool units removed; an unarmed
+/// fuze does nothing.
 fn burst_here(
     shell: &mut MarchingShell,
     context: &resolve::ResolveContext<'_, '_, '_>,
     flight: &resolve::Flight,
     speed: f32,
     health: &mut Query<&mut ComponentHealth>,
-) -> (bool, u32) {
+) -> (bool, u64) {
     let Some((burst, tank)) = shell.projectile.fuze.armed() else {
         return (false, 0);
     };
@@ -4163,7 +4163,7 @@ mod tests {
         let mut world = World::new();
         let target = world.spawn(ComponentHealth::full(30)).id();
         world.spawn(ShotDose::default());
-        let dose = |world: &mut World, amounts: &[f32]| -> u32 {
+        let dose = |world: &mut World, amounts: &[f32]| -> u64 {
             let amounts = amounts.to_vec();
             world
                 .run_system_once(
@@ -4196,10 +4196,47 @@ mod tests {
         );
         assert_eq!(
             dose(&mut world, &[100.0]),
-            full - 5,
+            u64::from(full - 5),
             "the pool stops at zero"
         );
         assert!(world.get::<ComponentHealth>(target).unwrap().is_empty());
+    }
+
+    /// In the game's damage model a settle returns the pool units it removed from every box it
+    /// took from, so the sum is wider than one pool: two pools at the largest size a tank file may
+    /// author ([`MAX_POOL_POINTS`]), each losing just over half the u32 range in one settle,
+    /// remove one unit more than a u32 holds (DERIVED). The march's hit-confirmation gate
+    /// (`MarchStep::damage_dealt`) reads that sum; a u32 sum panics here under overflow checks and
+    /// wraps in release. Fixture: the two pools and their doses.
+    #[test]
+    fn a_settle_can_remove_more_units_than_one_pool_can_hold() {
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        let targets = [
+            world.spawn(ComponentHealth::full(MAX_POOL_POINTS)).id(),
+            world.spawn(ComponentHealth::full(MAX_POOL_POINTS)).id(),
+        ];
+        let each = u32::MAX / 2 + 1;
+        let removed = world
+            .run_system_once(move |mut health: Query<&mut ComponentHealth>| {
+                let mut shot = ShotDose::default();
+                for target in targets {
+                    shot.add_units(
+                        target,
+                        u64::from(each) * DOSE_UNITS_PER_POOL_UNIT,
+                        FIXTURE_CONTEXT,
+                    );
+                }
+                shot.settle(&mut health, true, 0)
+            })
+            .unwrap();
+        assert_eq!(removed, 2 * u64::from(each));
+        for target in targets {
+            assert_eq!(
+                world.get::<ComponentHealth>(target).unwrap().held(),
+                MAX_POOL_POINTS * POOL_UNITS_PER_HP - each
+            );
+        }
     }
 
     /// The game's damage model keeps fractions: shots whose dose is each below half an HP point

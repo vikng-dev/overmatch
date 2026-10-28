@@ -15,7 +15,8 @@
 //! readings, so a shot overlapping another reads only its own loss, and another round draining the
 //! pool between the shot's marks moves the emptying to the deposit that actually took the last
 //! pool unit. Every pool figure is in pool units, as the sim keeps it; the path's
-//! [`PathStep::Dosed`] reads the shown points the views read ([`crate::ballistics::shown_lost`]).
+//! [`PathStep::Dosed`] reads the shown points the views read ([`crate::ballistics::shown_lost`]),
+//! counted settle by settle as the hit confirmation counts them (`shown_lost_from`).
 //!
 //! Nothing here decides anything the march did not: the verdict is [`ShotVerdict::of_path`] over
 //! the logged path, plate classes come from the volumes' components, the round's end is the last
@@ -324,20 +325,19 @@ fn lost_from(dose: &ShotDose, volume: Entity, from: usize) -> u32 {
         .sum()
 }
 
-/// The shown HP points `volume`'s pool lost to the shot's settles from mark `from` on, as its
-/// record shows them: what the first of those settles found ([`components`]'s `held`) less what
-/// they took ([`lost_from`], the record's `taken`), through the display rule
-/// ([`crate::ballistics::shown_lost`]). The record's own path ([`PenetrationReport::steps`]) reads
-/// the same two figures the same way, so both read one verdict.
+/// The game's damage model: the shown HP points `volume`'s pool lost to the shot's settles from
+/// mark `from` on, each settle read against what it found there
+/// ([`crate::ballistics::Settle::shown_lost`]), as the authority's hit confirmation counts them
+/// ([`ShotDose::shown_losses`]). Another round dosing the pool between two of the shot's marks
+/// moves what the next settle finds, so what the first settle found less the shot's whole take
+/// can lend the shot a point the other round crossed, or miss one the shot crossed. Where the two
+/// readings differ the record carries this sum ([`BoxDose::shown_taken`]).
 fn shown_lost_from(dose: &ShotDose, volume: Entity, from: usize) -> u32 {
-    let Some(first) = dose
-        .settles(volume)
+    dose.settles(volume)
         .iter()
-        .find(|settle| settle.mark >= from)
-    else {
-        return 0;
-    };
-    crate::ballistics::shown_lost(first.held, lost_from(dose, volume, from))
+        .filter(|settle| settle.mark >= from)
+        .map(crate::ballistics::Settle::shown_lost)
+        .sum()
 }
 
 /// One tank's part of a crossing, whose volumes may belong to several tanks where hulls overlap:
@@ -1158,11 +1158,14 @@ fn outcomes(
             .map(|&(_, _, point, mark)| struck.point(mark, point));
         let sum =
             |list: &[Deposit]| hp_before_rounding(list.iter().map(|&(_, units, ..)| units).sum());
+        let taken = dose.map_or(0, |dose| lost_from(dose, *entity, struck.from));
+        let shown = dose.map_or(0, |dose| shown_lost_from(dose, *entity, struck.from));
         doses.push(BoxDose {
             volume: state.name.clone(),
             line: sum(&from_line),
             field: sum(&from_field),
-            taken: dose.map_or(0, |dose| lost_from(dose, *entity, struck.from)),
+            taken,
+            shown_taken: (shown != state.shown_lost(taken)).then_some(shown),
             entered: first_entry,
         });
         let emptying = dose.and_then(|dose| {

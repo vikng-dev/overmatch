@@ -1207,17 +1207,16 @@ mod tests {
         )
     }
 
-    /// The live state of `record`'s components as its shot left them: what each pool held at the
-    /// shot less what the shot took, as shown.
+    /// The live state of `record`'s components as its shot left them: the points each showed at
+    /// the shot less the shown points the shot took ([`crate::damage_cam::BoxDose::shown_lost`]).
     fn after_shot(record: &PenetrationReport) -> LiveState {
         let mut live = standing(record);
         for (b, component) in live.0.iter_mut().zip(&record.components) {
-            let taken = record
+            b.current -= record
                 .doses
                 .iter()
                 .find(|dose| dose.volume == b.name)
-                .map_or(0, |dose| dose.taken);
-            b.current -= component.shown_lost(taken);
+                .map_or(0, |dose| dose.shown_lost(component));
         }
         live
     }

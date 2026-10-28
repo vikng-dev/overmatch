@@ -799,8 +799,13 @@ marker, the damage panel, the pen cam) shows whole points, rounded up (`ballisti
 A pool that has lost 0.8 HP shows full and is not painted damaged; it shows damage once a whole
 point is gone, and shows none exactly when it is emptied. The pen cam's verdict and path follow
 the display: a component is dosed (`PathStep::Dosed`) only where the shot took a shown point,
-read from what its pool held at the shot and what the shot took (`ballistics::shown_lost`); a
-shot's hit confirmation counts shown points.
+and a shot's hit confirmation counts shown points. Both count them settle by settle, each against
+what the pool held at that mark (`ballistics::Settle::shown_lost`): another round dosing the pool
+between two of the shot's marks then neither lends the shot a point it crossed nor hides one the
+shot crossed, which what the pool held at the shot less the shot's whole take can do (a 3-point
+pool dosed 0.4 HP by the shot, 0.4 HP by another round, 0.4 HP by the shot again shows its point
+lost at the shot's second mark, DERIVED). A record carries that count where the two readings
+differ (`BoxDose::shown_taken`).
 This is *local function state*, not a global health bar. A tank is knocked out at zero active
 crew, a cook-off taking precedence (`knockout_from_counts`, `src/damage.rs`); crew < 2 is the
 kept alternative, playtest fork F2.

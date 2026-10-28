@@ -70,20 +70,20 @@
 //!
 //! | scenario | total B | shooter B | fields B | cones | rays | hits | B per cone | burst B |
 //! |---|---|---|---|---|---|---|---|---|
-//! | s1_through_crew | 931 | 883 | 565 | 1 | 64 | 66 | 565 | – |
+//! | s1_through_crew | 938 | 890 | 565 | 1 | 64 | 66 | 565 | – |
 //! | s2_stopped_mantlet | 218 | 142 | 0 | 0 | 0 | 0 | – | – |
 //! | s3_ricochet | 224 | 148 | 0 | 0 | 0 | 0 | – | – |
 //! | s4_spaced_then_stopped | 788 | 712 | 465 | 3 | 192 | 0 | 155 | – |
-//! | s5_oblique_through | 809 | 737 | 539 | 1 | 64 | 64 | 539 | – |
+//! | s5_oblique_through | 810 | 738 | 539 | 1 | 64 | 64 | 539 | – |
 //! | s6_overpen | 585 | 509 | 309 | 2 | 128 | 0 | 154 | – |
-//! | s7_engine_shadow | 756 | 692 | 466 | 1 | 64 | 51 | 466 | – |
+//! | s7_engine_shadow | 759 | 695 | 466 | 1 | 64 | 51 | 466 | – |
 //! | s8a_mg_ricochet | 224 | 148 | 0 | 0 | 0 | 0 | – | – |
 //! | s8b_mg_stopped | 216 | 140 | 0 | 0 | 0 | 0 | – | – |
-//! | s9_breech_and_loader | 823 | 767 | 503 | 1 | 64 | 56 | 503 | – |
-//! | s10_gun_barrel_struck | 944 | 872 | 696 | 2 | 128 | 64 | 348 | – |
-//! | s11_mg_barrel_struck | 217 | 144 | 0 | 0 | 0 | 0 | – | – |
-//! | s12_apcr_through_crew | 929 | 881 | 565 | 1 | 64 | 66 | 565 | – |
-//! | s13_ring_through_crew | 2243 | 2203 | 565 | 1 | 64 | 66 | 565 | 1263 |
+//! | s9_breech_and_loader | 828 | 772 | 503 | 1 | 64 | 56 | 503 | – |
+//! | s10_gun_barrel_struck | 945 | 873 | 696 | 2 | 128 | 64 | 348 | – |
+//! | s11_mg_barrel_struck | 218 | 145 | 0 | 0 | 0 | 0 | – | – |
+//! | s12_apcr_through_crew | 936 | 888 | 565 | 1 | 64 | 66 | 565 | – |
+//! | s13_ring_through_crew | 2252 | 2212 | 565 | 1 | 64 | 66 | 565 | 1263 |
 //! | s15_unarmed_overpen | 585 | 509 | 309 | 2 | 128 | 0 | 154 | – |
 //! | s16_restart_at_rest | 1105 | 1029 | 465 | 3 | 192 | 0 | 155 | 309 |
 //!
@@ -794,6 +794,9 @@ struct WireDose {
     field: f32,
     /// Pool units the shot took, as in `BoxDose`.
     taken: u32,
+    /// The game's damage model: the shown HP points the shot took, as in `BoxDose`; `None` where
+    /// what the pool held at the shot less `taken` gives them.
+    shown_taken: Option<u32>,
     entered: Option<Mm>,
     /// When the shot emptied it, and what that cost.
     emptied: Option<(i32, ConsequenceState)>,
@@ -1111,6 +1114,7 @@ fn encode_dose(
         line: dose.line,
         field: dose.field,
         taken: dose.taken,
+        shown_taken: dose.shown_taken,
         entered: dose.entered.map(Mm::of).transpose()?,
         emptied,
     })
@@ -1362,6 +1366,7 @@ fn decode(vocabulary: &ShotVocabulary, record: &Record) -> Result<PenetrationRep
             line: dose.line,
             field: dose.field,
             taken: dose.taken,
+            shown_taken: dose.shown_taken,
             entered: dose.entered.map(Mm::point),
         });
         if let Some((t, state)) = dose.emptied {

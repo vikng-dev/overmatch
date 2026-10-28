@@ -183,7 +183,10 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// `hp`), a record's `WireComponent::held` (was `hp`) and `WireDose::taken` (was `lost`) carry pool
 /// units (`ballistics::POOL_UNITS_PER_HP`, a thousandth of an HP point) instead of whole points.
 /// Postcard writes a renamed `u32` the same, so a REV 36 peer would read every pool a thousand
-/// times fuller: own-type graph and REV move.
+/// times fuller: own-type graph and REV move. `WireDose` gains `shown_taken`, the shown HP points
+/// the shot took counted settle by settle, sent where another round dosed the pool between the
+/// shot's marks and what it held at the shot less `taken` does not give them. Own-type graph
+/// moves.
 pub const PROTOCOL_REV: u32 = 37;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
@@ -949,7 +952,7 @@ const WIRE_SURFACE_HASH: u64 = 0xe49d_85fe_dfc6_1280;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xb439_5beb_27c1_6d11;
+const WIRE_TYPES_HASH: u64 = 0x0598_4b6f_529c_a101;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can

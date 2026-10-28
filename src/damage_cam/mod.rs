@@ -15,10 +15,11 @@
 //! Frame: hull-local — origin at the hull root node, the glb's axes (`-Z` forward, `+Y` up, `+X`
 //! right). Units: metres for positions, unit vectors for directions, seconds for `t` measured from
 //! first contact (the approach is negative), degrees for angles, millimetres for armour, reference
-//! millimetres for doses, strengths and counts, kilograms and metres per second for the projectile,
-//! whole HP points for a pool's size, and pool units (`ballistics::POOL_UNITS_PER_HP` per point)
-//! for what a pool held and what the shot took: the sim's own figures, never rounded to points.
-//! Every view rounds them the one way ([`crate::ballistics::shown_points`]).
+//! millimetres for a field's strengths and its fragments' doses, kilograms and metres per second
+//! for the projectile, HP points before conversion for a box's dose ([`BoxDose`]), whole HP points
+//! for a pool's size, and pool units (`ballistics::POOL_UNITS_PER_HP` per point) for what a pool
+//! held and what the shot took: the sim's own figures, never rounded to points. Every view rounds
+//! them the one way ([`crate::ballistics::shown_points`]).
 //! `synthetic` marks a report whose numbers were authored, not simulated; [`wire`] never sends one.
 
 pub(crate) mod delivery;
@@ -34,9 +35,9 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 /// The pen cam's verdict on a whole shot against one tank, read from the path the authority
-/// resolved: its crossings, its bounces and the HP they cost the tank's components. The first
-/// variant whose rule holds is the verdict, in declaration order. A pen cam exists only for a hit on
-/// a player's tank.
+/// resolved: its crossings, its bounces and the shown HP points they took from the tank's
+/// components ([`PathStep::Dosed`]). The first variant whose rule holds is the verdict, in
+/// declaration order. A pen cam exists only for a hit on a player's tank.
 ///
 /// Armour is a volume that is neither a component (an hp pool) nor external armour
 /// ([`crate::spec::VolumeSpec::External`]): perforating a skirt or a road wheel is not perforating
@@ -80,9 +81,9 @@ pub enum PathStep {
         perforated_armour: bool,
         rested: bool,
     },
-    /// A component of the struck tank shows a lost HP point to the shot: what the shot took from
-    /// its pool ([`crate::ballistics::ShotDose`]) took it past a whole point, as every view shows a
-    /// pool ([`crate::ballistics::shown_lost`]). A dose that leaves every shown point in place is
+    /// A component of the struck tank shows a lost HP point to the shot: one of the shot's settles
+    /// of its pool ([`crate::ballistics::ShotDose`]) took it past a whole point, as every view
+    /// shows a pool ([`BoxDose::shown_lost`]). A dose that leaves every shown point in place is
     /// kept in the pool, shows nothing, and is not this step.
     Dosed,
     /// A walk that failed closed: an error, never a pen cam.
@@ -374,10 +375,27 @@ pub struct BoxDose {
     pub field: f32,
     /// Pool units (`ballistics::POOL_UNITS_PER_HP` per HP point) the shot took from it.
     pub taken: u32,
+    /// The game's damage model: the shown HP points the shot took from it, counted settle by
+    /// settle, where what its pool held at the shot ([`ComponentState::held`]) less `taken` does
+    /// not give them: another round dosed the pool between two of the shot's marks. `None` where
+    /// it does, which is every record of a shot no other round overlapped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shown_taken: Option<u32>,
     /// Where the line first reached it: its entry, or the face it bounced off. `None` when only a
     /// field did.
     #[serde(default)]
     pub entered: Option<[f32; 3]>,
+}
+
+impl BoxDose {
+    /// The game's damage model: the shown HP points the shot took from `component`, its record's
+    /// state at the shot: [`Self::shown_taken`] where the record carries it, else what its pool
+    /// held less `taken` through the display rule ([`ComponentState::shown_lost`]). Every view of
+    /// a record's loss reads this one figure.
+    pub fn shown_lost(&self, component: &ComponentState) -> u32 {
+        self.shown_taken
+            .unwrap_or_else(|| component.shown_lost(self.taken))
+    }
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone, PartialEq)]
@@ -485,7 +503,7 @@ impl PenetrationReport {
 
     /// The record's path as the verdict reads it: its plates and bounces in time order, each
     /// plate a crossing of its own, then one [`PathStep::Dosed`] when any box shows a lost HP point
-    /// ([`ComponentState::shown_lost`]). A plate without an exit is where the round rested.
+    /// ([`BoxDose::shown_lost`]). A plate without an exit is where the round rested.
     pub fn steps(&self) -> Vec<PathStep> {
         let mut steps: Vec<(f32, PathStep)> = self
             .plates
@@ -506,7 +524,7 @@ impl PenetrationReport {
         steps.sort_by(|a, b| a.0.total_cmp(&b.0));
         let dosed = self.doses.iter().any(|dose| {
             self.component(&dose.volume)
-                .is_some_and(|component| component.shown_lost(dose.taken) > 0)
+                .is_some_and(|component| dose.shown_lost(component) > 0)
         });
         steps
             .into_iter()
@@ -612,6 +630,7 @@ pub(crate) mod tests {
             line: 0.9,
             field: 0.0,
             taken,
+            shown_taken: None,
             entered: None,
         };
         report.doses = vec![dose(POOL_UNITS_PER_HP - 1)];

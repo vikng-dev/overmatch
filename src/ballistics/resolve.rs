@@ -1698,7 +1698,7 @@ pub(super) fn volume_table(
 }
 
 /// Apply a decision's consequences on the runtime: HP, impulses, the shell's marks and path, spall,
-/// and the impact and authority events. Returns the HP actually removed.
+/// and the impact and authority events. Returns the pool units actually removed.
 ///
 /// Transit doses, a bounce's shock, the impulses and the events all come out of the
 /// [`Decision`]. Spall does NOT: the decision carries each spall source, but the cone's directions
@@ -1715,7 +1715,7 @@ pub(crate) fn apply(
     health: &mut Query<&mut ComponentHealth>,
     bodies: &mut Query<Forces>,
     commands: &mut Commands,
-) -> u32 {
+) -> u64 {
     match decision {
         Decision::Clear { .. } => return 0,
         Decision::Bounce(bounce) => {

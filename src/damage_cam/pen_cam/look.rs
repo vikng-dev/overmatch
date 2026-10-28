@@ -1355,9 +1355,10 @@ fn state(condition: Condition, masks: &MaskSet) -> LookMaterial {
 /// once the shot has dosed it, painted by its role's rule ([`Footprint::of`]) in the bands of
 /// `potency`, the plan's (with none, unpainted), drawn under a
 /// [`timeline::STATE_RED`] outline [`STATE_OUTLINE_PX`] wide; `None` where it is not drawn. The
-/// shooter's frames (the glass frame and the outside view) draw a component this shot took HP
-/// from, and no other, so no earlier damage reaches the shooter; the victim's x-ray draws every
-/// component with any of its pool gone.
+/// shooter's frames (the glass frame and the outside view) draw a component this shot took a
+/// shown HP point from ([`BoxPlan::struck`]), and no other, so no earlier damage reaches the
+/// shooter; the victim's x-ray draws every component showing a point gone, a pool kept short of a
+/// whole point showing full.
 pub fn component(
     b: &BoxPlan,
     kind: CornerKind,
