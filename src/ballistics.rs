@@ -3902,8 +3902,10 @@ fn resolve_replica_armor_contact(
 /// AUTHORITY: throw an armed round's burst field (design doc §5a, "The burst") from where `flight`
 /// stands, about its direction, at the carried `speed`, recording it as the shell's
 /// [`SpallMarks::burst`] and adding its doses to the shot's [`ShotDose`]. Its strength `S` (J) is
-/// the burst fields' share of its driven-mass energy ([`spall_cone::BurstFields::strength`]),
-/// its field the ring at ratio `speed / v_s` ([`spall_cone::BurstFields::field`]), walked through
+/// its own driven energy, what its explosive gives the wall ([`burst::Burst::energy`]), times the
+/// burst fields' factor ([`spall_cone::BurstFields::strength`]): nothing the round lost reaching
+/// `flight` enters it. Its field is the ring at ratio `speed / v_s`
+/// ([`spall_cone::BurstFields::field`]), walked through
 /// the volumes of `tank`, the fuze's, leaving none. A field whose emission converts to no pool unit
 /// is not thrown, as a cone's is not ([`throw_spall_cone`]); one outside its law's domain throws
 /// nothing and logs why.

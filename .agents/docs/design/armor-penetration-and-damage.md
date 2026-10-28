@@ -638,8 +638,10 @@ provisional) gives, DERIVED:
 | ring: `v_s`, `½ M v_s²` | 541.5 m/s, 211.1 kJ |
 
 **The field.** Thrown from the burst point about the round's flight direction at strength
-`S = η_B · ½ M v_s²` (joules, `η_B` the burst block's `energy_share`), emitting `S/2` in all; a
-burst is no plate exit, so the cone's share does not apply. Its `N` directions sample the band in
+`S = η_B · ½ M v_s²` (joules, `η_B` the burst block's `driven_energy_factor`), emitting `S/2` in
+all: the field carries its own driven energy, the kinetic energy its explosive gives the wall
+(`Burst::energy`, DERIVED at load), and nothing the round lost reaching the burst point. A burst is
+no plate exit, so the cone's share does not apply. Its `N` directions sample the band in
 equal-solid-angle strata weighted by their strata's exact shares, so it emits `S/2` at every `N`
 (§5, **Sampling**). They march, shadow and dose as a
 cone's do (§5, **Shadowing and reach**, **Walk**, **Dose**) through the volumes of the tank whose
@@ -654,8 +656,12 @@ retired ball's (214.8 kJ, the round less its core driven, DERIVED): a crew box o
 (a seated crew member's), wholly inside it 2.0 m from the burst, has its 30 HP pool emptied. It is
 the 1.0 reference-mm per kJ the burst was first set at, restated in joules at the 70 HP points per
 reference-mm that field rate converted at and 3000 J per HP point (DERIVED: 0.07 HP points per J ×
-3000 = 210), so every burst keeps its potency. It is above 1 because it was set against an HP
-target, not against the energy the wall carries. The
+3000 = 210), so every burst keeps its potency (MEASURED: s13's box doses from the ring alone match
+the reference-mm law's to f32 rounding, 346.2932 against 346.29324 HP points for `Ammo_R_0`). It
+is far above 1 because it was set against an HP target, not against the energy the wall carries:
+the ring emits 105 times its driven energy. A field that carried only its driven energy (`η_B` = 2,
+emitting `½ M v_s²`) would emit 70.4 HP points from the shipped ring's 211.1 kJ against 7388, a
+knockout radius 10.2 times shorter (DERIVED); flagged for the owner. The
 ring drives nearly the same energy (211.1 kJ, DERIVED) into its band alone. A thin unshadowed box
 of face `A` wholly inside a field, where the field is `b` times as bright as an even sphere's
 (`b = 4π p_Ω`), has the knockout radius `R = sqrt(ρ (S/2) A b / (4π pool))`, `ρ` =

@@ -65,19 +65,28 @@
     // converting at `energy_dose.ron`'s rate. Every burst is a ring: the wall around the burst
     // core is driven as a band about the flight axis, and the nose piece flies on.
     burst: (
-        // The burst's strength S (J) per joule of its driven mass's kinetic energy ½ M v_s², M the
-        // wall; the field emits S/2 in all.
-        energy_share: (210.0, Tuned("provisional, flagged for the owner: the burst's potency set
-            against an HP target, not against the energy its wall carries, so the share is above
-            1. DERIVED to keep every burst's potency: 1.0 reference-mm per kJ at 70 HP points per
-            reference-mm is 0.07 HP points per J, × 3000 J per HP = 210. That rate was set
+        // The burst's strength S (J) per joule of its own driven energy: the kinetic energy its
+        // explosive gives the wall, ½ M v_s², M the wall and v_s the greatest sideways speed, DERIVED
+        // per round at load (`Burst::energy`, `src/ballistics/burst.rs`). The field carries that
+        // energy times this factor and emits S/2 in all; nothing the round lost reaching the burst
+        // point enters it, since a burst's energy comes from its explosive. At 1 the field would
+        // carry its driven energy and nothing more; the factor that keeps every shipped burst as
+        // strong as it was is far from 1.
+        driven_energy_factor: (210.0, Tuned("provisional, flagged for the owner: the burst's
+            potency set against an HP target, not against the energy its wall carries, so the
+            factor is far above 1: the ring emits 105 times its driven energy. DERIVED to keep
+            every burst's potency: 1.0 reference-mm per kJ of driven energy at 70 HP points per
+            reference-mm is 0.07 HP points per J, × 3000 J per HP = 210 J of strength per J
+            driven, the same HP from every burst. That rate was set
             against an even sphere at rest, the burst's ball until playtest fork F7 retired it: a
             crew box presenting a 0.2 m² face (a seated crew member's) fully inside it, 2.0 m from
             the burst, has its 30 HP pool emptied. DERIVED: the box catches A/(4πR²) of the
             emission E = S/2, and its knockout radius is R = sqrt(E A / (30 × 4π)), E in HP
             points; R = 2.0 m needs E = 7540 HP points against the 214.8 kJ that ball drove (the
             8.8 cm Pzgr. 39 less its core). The ring at rest is 5.76 times as bright in its band,
-            R = 4.75 m (design doc §5a, DERIVED)")),
+            R = 4.75 m (design doc §5a, DERIVED). A field that carried only its driven energy
+            (factor 2, emitting ½ M v_s²) would emit 70.4 HP points from the shipped ring's
+            211.1 kJ against 7388 at 210 (DERIVED), a knockout radius 10.2 times shorter")),
         // h (degrees): the ring spans θ_c − h to θ_c + h of polar angle from the flight axis,
         // θ_c = atan(1/λ), uniform over that band; its near edge is held at the axis.
         ring_half_width_deg: (10.0, Tuned("provisional (owner's brief 4b): the band the wall's

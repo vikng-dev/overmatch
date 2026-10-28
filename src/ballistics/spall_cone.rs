@@ -9,8 +9,10 @@
 //! # Units
 //!
 //! A field's strength `S` is energy, in joules: a cone's is [`energy_share`] of the kinetic energy
-//! its round lost across the body it left (`walk::SpallSource::strength`), a burst's
-//! [`BurstFields::strength`] of its driven mass's. Every field deposit is joules too, and turns
+//! its round lost across the body it left (`walk::SpallSource::strength`); a burst's is its own
+//! driven energy, the kinetic energy its explosive gives the wall (`burst::Burst::energy`), times
+//! the burst block's factor ([`BurstFields::strength`]), nothing the round lost entering it. Every
+//! field deposit is joules too, and turns
 //! into HP points at the one energy-to-HP rate every hard pool's line dose converts at
 //! (`energy_dose::joules_per_hp`, through `ballistics::energy_units`).
 //!
@@ -340,18 +342,19 @@ struct ShapeFile {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BurstFile {
-    energy_share: Sourced<f32>,
+    driven_energy_factor: Sourced<f32>,
     ring_half_width_deg: Sourced<f32>,
     ring_directions: Sourced<usize>,
 }
 
 /// A burst's field, validated (design doc §5a, "The burst"): its strength per joule of its driven
-/// mass's energy, the ring's half-width, and the shape the ring is thrown in, sampled by its own
+/// energy, the ring's half-width, and the shape the ring is thrown in, sampled by its own
 /// direction count and passing as the spall cone's directions do.
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct BurstFields {
-    /// Joules of strength `S` per joule of `½ M v_s²`; finite, positive and normal.
-    energy_share: f32,
+    /// Joules of strength `S` per joule of the driven energy `½ M v_s²`; finite, positive and
+    /// normal.
+    driven_energy_factor: f32,
     /// The ring's half-width `h` (rad), in `(0, π/2)`.
     ring_half_width: f32,
     ring: ConeShape,
@@ -370,15 +373,15 @@ impl BurstFields {
         Self::from_file(&file, ring)
     }
 
-    /// Validate `file`'s burst block, its ring sampled by `ring` strata: refuses an energy share
-    /// that is not finite, positive and normal, a half-width outside `(0°, 90°)` and a direction
+    /// Validate `file`'s burst block, its ring sampled by `ring` strata: refuses a driven-energy
+    /// factor that is not finite, positive and normal, a half-width outside `(0°, 90°)` and a direction
     /// count outside the shape's domain, naming the field.
     fn from_file(file: &ShapeFile, ring: usize) -> Result<Self, String> {
         let burst = &file.burst;
-        let energy_share = burst.energy_share.0;
-        if !energy_share.is_normal() || energy_share < 0.0 {
+        let factor = burst.driven_energy_factor.0;
+        if !factor.is_normal() || factor < 0.0 {
             return Err(format!(
-                "burst.energy_share must be finite, positive and normal (got {energy_share})"
+                "burst.driven_energy_factor must be finite, positive and normal (got {factor})"
             ));
         }
         let degrees = burst.ring_half_width_deg.0;
@@ -388,7 +391,7 @@ impl BurstFields {
             ));
         }
         Ok(Self {
-            energy_share,
+            driven_energy_factor: factor,
             ring_half_width: (degrees as f64).to_radians() as f32,
             ring: ConeShape::new(file.axis.0, ring)
                 .map_err(|err| format!("burst.ring_directions: {err}"))?,
@@ -415,10 +418,12 @@ impl BurstFields {
         &FIELDS
     }
 
-    /// The strength `S` (J) of a burst whose driven mass carries `energy` J across it:
-    /// `energy × energy_share`, one f64 product cast once, so the same bits on every target.
+    /// The strength `S` (J) of a burst whose explosive drives its wall with `energy` J, the
+    /// driven energy `½ M v_s²` (`burst::Burst::energy`): `energy × driven_energy_factor`, one f64
+    /// product cast once, so the same bits on every target. The field carries its own driven
+    /// energy, never a share of what the round lost reaching the burst point.
     pub(crate) fn strength(&self, energy: f32) -> f32 {
-        (energy as f64 * self.energy_share as f64) as f32
+        (energy as f64 * self.driven_energy_factor as f64) as f32
     }
 
     /// The shape every burst field is thrown in, the ring's: a decoder rebuilds a burst field's
@@ -758,8 +763,8 @@ mod tests {
         )
     }
 
-    /// A fixture burst block, its energy share 1.0.
-    const BURST: &str = r#"burst: (energy_share: (1.0, Tuned("fixture")),
+    /// A fixture burst block, its driven-energy factor 1.0.
+    const BURST: &str = r#"burst: (driven_energy_factor: (1.0, Tuned("fixture")),
         ring_half_width_deg: (10.0, Tuned("fixture")), ring_directions: (24, Tuned("fixture")))"#;
 
     /// A fixture shape file whose burst block's fields are `fields`, its cone's energy share 0.5.
@@ -814,8 +819,8 @@ mod tests {
                 "energy_share: 0.5",
             ),
             (
-                r#"energy_share: (1.0, Tuned("fixture"))"#,
-                "energy_share: 1.0",
+                r#"driven_energy_factor: (1.0, Tuned("fixture"))"#,
+                "driven_energy_factor: 1.0",
             ),
             (
                 r#"ring_half_width_deg: (10.0, Tuned("fixture"))"#,
@@ -863,16 +868,16 @@ mod tests {
     }
 
     /// A burst block is read from the file: its count samples the ring's shape, every burst
-    /// field's, its half-width the ring's field, its energy share the strength
-    /// `energy × energy_share`; the shipped one is the shipped file's. A share that is zero,
-    /// negative, subnormal or not finite, a half-width outside `(0°, 90°)` and a direction count
-    /// outside `1..=MAX_DIRECTIONS` are refused at parse naming the field: a burst's strength
-    /// scales by the share, and the ring's law refuses such a band at the first throw. A count for
+    /// field's, its half-width the ring's field, its driven-energy factor the strength
+    /// `energy × driven_energy_factor`; the shipped one is the shipped file's. A factor that is
+    /// zero, negative, subnormal or not finite, a half-width outside `(0°, 90°)` and a direction
+    /// count outside `1..=MAX_DIRECTIONS` are refused at parse naming the field: a burst's
+    /// strength scales by the factor, and the ring's law refuses such a band at the first throw. A count for
     /// another burst shape is no field of the block: every burst is a ring.
     #[test]
     fn a_burst_block_is_read_and_its_domain_is_refused() {
         let read = BurstFields::from_ron(&burst_file(
-            r#"energy_share: (2.0, Tuned("fixture")),
+            r#"driven_energy_factor: (2.0, Tuned("fixture")),
             ring_half_width_deg: (30.0, Tuned("fixture")), ring_directions: (24, Tuned("fixture"))"#,
         ))
         .unwrap();
@@ -889,7 +894,7 @@ mod tests {
             &BurstFields::from_ron(SPALL_CONE_RON).unwrap()
         );
         let sourced = burst_file(
-            r#"energy_share: (1.0, Tuned("fixture")),
+            r#"driven_energy_factor: (1.0, Tuned("fixture")),
             ring_half_width_deg: (10.0, Tuned("fixture")), ring_directions: (24, Tuned("fixture"))"#,
         );
         let ball = sourced.replacen(
@@ -904,7 +909,7 @@ mod tests {
             (
                 "(1.0",
                 ["(0.0", "(-1.0", "(1.0e-40", "(NaN", "(inf"].as_slice(),
-                "energy_share",
+                "driven_energy_factor",
             ),
             (
                 "(10.0",

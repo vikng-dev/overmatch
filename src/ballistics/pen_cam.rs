@@ -1837,10 +1837,11 @@ fn a_round_at_rest_bursts_about_the_direction_it_stopped_along() {
 }
 
 /// A burst throws its field from the burst point about the flight direction, at the carried speed:
-/// its strength is the burst's driven-mass energy at the shipped rate, its field the ring at
+/// its strength is the burst's driven energy times the shipped factor, its field the ring at
 /// `λ = v_c / v_s`, and direction `k` of the ring's `N` carries `S·f_k` of that field's spread, to
 /// the bit. A mutant that throws from the exit, at the exit speed, at `v_s / v_c`, at another
-/// strength or under another law fails here; the record and the pen cam rely on it.
+/// strength (a share of the energy the round lost at the plate among them) or under another law
+/// fails here; the record and the pen cam rely on it.
 #[test]
 fn a_burst_throws_its_field_from_where_it_bursts() {
     let fields = spall_cone::BurstFields::shipped();

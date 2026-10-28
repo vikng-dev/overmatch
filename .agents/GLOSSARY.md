@@ -381,7 +381,7 @@ A round's dose to a witness per unit of chord (round file field `wound`, `assets
 _Avoid_: wound rate (the code identifier keeps `wound` until a rename is decided)
 
 **Dose**:
-What a line, cone, burst or bounce deposits into a box's HP pool in the game's damage model: HP, from the energy the round lost — the line's energy lost in a hard pool, a bounce's energy lost at the face it struck, each field direction's share of the energy its source lost — at the one **energy-to-HP rate**. A crew station's line dose alone is its chord × the round's **crew line rate**. A box's dose from one shot is summed and converted to **pool units** once. Law: design doc §§5–6.
+What a line, cone, burst or bounce deposits into a box's HP pool in the game's damage model: HP, from energy — the line's energy lost in a hard pool, a bounce's energy lost at the face it struck, a spall cone direction's share of the energy its round lost at the plate, a burst field direction's of the energy its explosive drives the wall with — at the one **energy-to-HP rate**. A crew station's line dose alone is its chord × the round's **crew line rate**. A box's dose from one shot is summed and converted to **pool units** once. Law: design doc §§5–6.
 _Avoid_: a dose in reference-mm (reference-mm is a penetration and armour readout, never a dose)
 
 **Energy-to-HP rate**:
