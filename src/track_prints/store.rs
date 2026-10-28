@@ -83,7 +83,7 @@ pub(crate) struct StampEntry {
     yaw: u16,
     /// The underside plane's clearance at the canonical origin, 1/4096 m.
     lift: i16,
-    /// The plane's slope across (`x`) and along (`z`) the shoe, 1/256 m per m.
+    /// The plane's slope across (`x`) and along (`z`) the shoe, 1/64 m per m.
     tilt: [i8; 2],
     /// Bit 0: the shoe is the mirror of its stamp (the left track).
     flags: u8,
@@ -93,7 +93,9 @@ pub(crate) struct StampEntry {
 
 const YAW_UNITS: f32 = 65536.0 / std::f32::consts::TAU;
 const LIFT_UNITS: f32 = 4096.0;
-const TILT_UNITS: f32 = 256.0;
+// DERIVED: the range must include sin(60°), the largest shoe tilt accepted by the
+// stamper on flat ground, plus the ground's own slope; 1/64 spans almost ±2 m/m.
+const TILT_UNITS: f32 = 64.0;
 const MIRRORED: u8 = 1;
 
 impl StampEntry {
@@ -662,6 +664,48 @@ mod tests {
         range_m: 0.15,
         contact_m: 0.03,
     };
+
+    /// The stores must retain the grounded edge of a tilted shoe. Clipping an accepted
+    /// contact's slope while keeping its lift raises that edge and erases its footprint.
+    #[test]
+    fn encoded_tilt_preserves_an_accepted_edge_contact() {
+        use bevy::math::{Affine3A, Quat};
+        let shoe = ClearanceStamp::pooled(&sole(), NEAR_TEXEL_M);
+        let bounds = shoe.bounds(false);
+        for degrees in [-55.0_f32, -45.0, 45.0, 55.0] {
+            let angle = degrees.to_radians();
+            let pose = Affine3A::from_rotation_translation(
+                Quat::from_rotation_z(angle),
+                Vec3::Y * bounds.1.x * angle.sin().abs(),
+            );
+            let contact = crate::track_prints::stamper::contact(
+                pose,
+                bounds,
+                shoe.datum_y(),
+                LAW.contact_m,
+                |_| Some(0.0),
+            )
+            .expect("one edge rests on the ground");
+            let entry = StampEntry::new(
+                contact.datum,
+                contact.yaw,
+                contact.lift,
+                contact.tilt,
+                0,
+                false,
+            );
+            let edge = Vec2::new(-angle.signum() * (bounds.1.x - 0.01), 0.0);
+            assert!(
+                entry.plane(edge).abs() < LAW.contact_m,
+                "the encoded {degrees} degree contact retains its grounded edge"
+            );
+            assert!(
+                entry
+                    .at(&shoe, edge, &LAW)
+                    .is_some_and(|(_, footprint)| footprint)
+            );
+        }
+    }
 
     /// A deterministic scatter of stamps over `±spread` m around `centre`, fixture data.
     fn scatter(centre: Vec2, spread: f32, count: u32, seed: u32) -> Vec<StampEntry> {
