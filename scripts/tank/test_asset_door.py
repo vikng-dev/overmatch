@@ -21,6 +21,8 @@ a case can assert between them. `TheSideDoorIsClosed` is that law held as a fact
 The two stages with no defect a fixture can carry — an encoder that fails, and a consumer contract
 that refuses the BAKED bytes after the raw ones passed — are reached by putting a stub earlier on
 PATH. What that injects is the stage's exit code, which is exactly the door's contract with it.
+Each door invocation gets an empty texture cache: neither the caller's cache nor a case's setup
+encode may bypass the encoder whose failure the refusal case injects.
 """
 
 import hashlib
@@ -78,12 +80,20 @@ def trio(name, defect="none"):
     return os.path.join(directory, "assets", "testbed", "testbed.blend")
 
 
+def run_door(arguments, env=None):
+    """Run the CLI or staging driver with an empty cache, including after a setup encode."""
+    with tempfile.TemporaryDirectory(prefix="ktx2-", dir=_WORK) as cache:
+        environment = dict(os.environ, **(env or {}))
+        environment["OVERMATCH_KTX2_CACHE"] = cache
+        return subprocess.run(
+            [sys.executable] + arguments, cwd=ROOT, text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=environment,
+        )
+
+
 def door(mode, blend, env=None, *extra):
     """One door invocation, as anyone would run it. Returns `(exit code, everything printed)`."""
-    result = subprocess.run(
-        [sys.executable, DOOR, mode, blend] + list(extra), cwd=ROOT, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=dict(os.environ, **(env or {})),
-    )
+    result = run_door([DOOR, mode, blend] + list(extra), env)
     return (result.returncode, result.stdout)
 
 
@@ -107,10 +117,7 @@ def stage(blend, env=None):
         "import sys; sys.path.insert(0, {!r}); import asset_door; "
         "sys.exit(asset_door.door('export', {!r}, stage_to={!r}))"
     ).format(os.path.dirname(DOOR), blend, staged)
-    result = subprocess.run(
-        [sys.executable, "-c", driver], cwd=ROOT, text=True,
-        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, env=dict(os.environ, **(env or {})),
-    )
+    result = run_door(["-c", driver], env)
     return (result.returncode, result.stdout, staged)
 
 
