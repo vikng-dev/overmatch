@@ -475,8 +475,8 @@ forward.
 
 ### C4. Commit to the working branch; never push
 
-Small commits on the branch you were given. No pushes, no tags, no PRs, no `git checkout`,
-`restore`, `stash` or `clean` — other agents may be working in the same tree.
+Small commits on your lane branch, in your bay. No pushes, no tags, no PRs, never `git stash`. What
+git may do inside a bay and in the main checkout is AGENTS.md's (Hard rules).
 
 ### C5. Distinguishing simplification from churn
 

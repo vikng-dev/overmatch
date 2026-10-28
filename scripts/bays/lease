@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# lease — take a free bay for a lane, recycled to main's tip on `lane/<lane>`, and print its path.
+#
+# Usage: scripts/bays/lease <lane>
+#
+# Stdout is one line, the bay's absolute path (the WorktreeCreate hook hands it to Claude Code);
+# everything else goes to stderr. Exits 1 when no bay is free, naming each bay's holder. The pool's
+# invariants and mechanics: lib.sh.
+set -euo pipefail
+# shellcheck source-path=SCRIPTDIR source=lib.sh
+. "$(dirname "$0")/lib.sh"
+bays_locked "$@"
+
+[[ $# -eq 1 ]] || die "usage: scripts/bays/lease <lane>"
+lane=$1
+git check-ref-format --branch "lane/$lane" >/dev/null 2>&1 || die "'lane/$lane' is not a branch name"
+
+git -C "$bays_here" rev-parse -q --verify refs/heads/main >/dev/null || die "this repository has no main branch"
+checked_out=$(git -C "$bays_here" worktree list --porcelain |
+  awk -v b="branch refs/heads/lane/$lane" '/^worktree /{w = substr($0, 10)} $0 == b {print w}')
+[[ -z $checked_out ]] || die "lane/$lane is already checked out in $checked_out"
+
+# A lane branch holding commits main lacks is a lane's work; `switch -C` would drop it.
+if git -C "$bays_here" rev-parse -q --verify "refs/heads/lane/$lane" >/dev/null; then
+  ahead=$(git -C "$bays_here" rev-list --count "main..refs/heads/lane/$lane")
+  [[ $ahead -eq 0 ]] || die "lane/$lane holds $ahead commit(s) main lacks; merge it, or lease under another name"
+fi
+
+# A bay with no directory yet is created detached at main, then recycled like any other.
+create() {
+  echo "lease: creating $1" >&2
+  GIT_LFS_SKIP_SMUDGE=1 git -C "$bays_here" worktree add -q --detach "$1" main >&2
+}
+
+# Put a clean bay on `lane/<lane>` at main's tip. Every step is checked: under `if !` bash does not
+# stop a function at a failed command, and a clean after a failed switch would act on the old lane.
+recycle() {
+  local bay=$1 built wanted
+  built=$(git -C "$bay" rev-parse -q --verify HEAD:Cargo.lock) || built=
+  wanted=$(git -C "$bays_here" rev-parse -q --verify main:Cargo.lock) || wanted=
+  GIT_LFS_SKIP_SMUDGE=1 git -C "$bay" switch -q -C "lane/$lane" main >&2 || return 1
+  git -C "$bay" clean -q -ffdx -e /target >&2 || return 1
+  git -C "$bay" lfs checkout >/dev/null 2>&1 || echo "lease: git lfs checkout failed in $bay; LFS assets may be pointer files" >&2
+  if [[ $built != "$wanted" && -e $bay/target ]]; then
+    echo "lease: Cargo.lock moved since $(basename "$bay") last built; deleting its target/ so serial-cargo re-warms it from main" >&2
+    rm -rf "$bay/target" || return 1
+  fi
+}
+
+taken=()
+for n in $(seq 1 "$BAYS_COUNT"); do
+  bay=$(bay_path "$n")
+  if [[ ! -e $bay ]] && ! create "$bay"; then
+    taken+=("bay-$n: could not be created")
+    continue
+  fi
+  if ! admin=$(bay_admin "$bay"); then
+    taken+=("bay-$n: $bay is not a worktree of this repository")
+    continue
+  fi
+  if [[ -f $admin/bay-lease ]]; then
+    read -r holder since <"$admin/bay-lease"
+    taken+=("bay-$n: leased to $holder for $(bay_age "$since")")
+    continue
+  fi
+  dirt=$(bay_dirt "$bay")
+  if [[ -n $dirt ]]; then
+    taken+=("bay-$n: free, but holds $(wc -l <<<"$dirt" | tr -d ' ') uncommitted path(s); release --force after a look")
+    continue
+  fi
+  if ! recycle "$bay"; then
+    taken+=("bay-$n: could not be recycled (see git's message above)")
+    continue
+  fi
+  printf '%s %s\n' "$lane" "$(date +%s)" >"$admin/bay-lease"
+  echo "lease: bay-$n to $lane on lane/$lane at main $(git -C "$bay" rev-parse --short HEAD)" >&2
+  echo "$bay"
+  exit 0
+done
+
+{
+  echo "lease: no bay free for $lane; all $BAYS_COUNT are taken:"
+  printf '  %s\n' "${taken[@]}"
+  echo "A lane gets a bay when the orchestrator releases one (scripts/bays/release <bay>)."
+} >&2
+exit 1

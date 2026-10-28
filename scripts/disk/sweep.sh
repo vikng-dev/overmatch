@@ -19,6 +19,13 @@
 #   incremental, a 9.8 min cold rebuild). The ceiling therefore sits above the incremental steady
 #   state the reaper above bounds, and the reaper runs first.
 #
+# A bay (`.claude/worktrees/bay-N`, scripts/bays/lib.sh) is never swept. Its incremental cache is
+# what the pool exists to keep: reaping a day-idle bay's incremental directory would make its next
+# lane pay a from-scratch compile of this crate. What bounds a bay instead: agent builds use one
+# feature set (AGENTS.md), so its incremental directories stay few and rustc collects old sessions
+# inside each, and a lease deletes the whole target/ whenever main's Cargo.lock differs from the
+# bay's. `scripts/bays/status` names the bays; delete a bay's target/ by hand to reclaim it.
+#
 # Runs only while a Claude Code session is running: that is when builds happen and disk fills, and an
 # idle box has nothing to reap. Run by launchd every 6 h (com.overmatch.target-sweep.plist) or by
 # hand:  scripts/disk/sweep.sh   (FORCE=1 skips the session check)
@@ -36,6 +43,12 @@ git -C "$MAIN" worktree list --porcelain | sed -n 's/^worktree //p' | while read
   if [ ! -d "$dir/target" ]; then
     continue
   fi
+  case "$dir" in
+    "$MAIN"/.claude/worktrees/bay-[0-9]*)
+      echo "  kept  $dir  (a bay: its warm target/ is never swept)"
+      continue
+      ;;
+  esac
   before=$(du -sh "$dir/target" 2>/dev/null | cut -f1)
   find "$dir/target" -path '*/deps/*.rcgu.o' -mmin +720 -delete 2>/dev/null
   find "$dir/target" -mindepth 3 -maxdepth 3 -type d -path '*/incremental/*' -mmin +1440 2>/dev/null \

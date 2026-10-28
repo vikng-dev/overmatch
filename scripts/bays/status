@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+# status — one line per bay: holder, branch, commits ahead of main, lease age, clean or dirty, and
+# any `git worktree lock` on it (Claude Code holds one while an agent it started runs there).
+#
+# Usage: scripts/bays/status
+#
+# Read-only and lock-free, so it never waits behind a lease. The pool's invariants: lib.sh.
+set -euo pipefail
+# shellcheck source-path=SCRIPTDIR source=lib.sh
+. "$(dirname "$0")/lib.sh"
+
+locks=$(git -C "$bays_here" worktree list --porcelain |
+  awk '/^worktree /{w = substr($0, 10)} /^locked/{r = substr($0, 8); print w "\t" (r == "" ? "(no reason)" : r)}')
+
+printf '%-6s %-28s %-36s %6s %7s  %s\n' BAY HOLDER BRANCH AHEAD AGE STATE
+for n in $(seq 1 "$BAYS_COUNT"); do
+  bay=$(bay_path "$n")
+  if [[ ! -e $bay ]]; then
+    printf '%-6s %s\n' "bay-$n" "(not created; the next lease that reaches it creates it)"
+    continue
+  fi
+  if ! admin=$(bay_admin "$bay"); then
+    printf '%-6s %s\n' "bay-$n" "(not a worktree of this repository: $bay)"
+    continue
+  fi
+  holder=free age=-
+  if [[ -f $admin/bay-lease ]]; then
+    read -r holder since <"$admin/bay-lease"
+    age=$(bay_age "$since")
+  fi
+  branch=$(git -C "$bay" symbolic-ref -q --short HEAD) || branch="(detached $(git -C "$bay" rev-parse --short HEAD))"
+  ahead=$(git -C "$bay" rev-list --count main..HEAD)
+  dirt=$(bay_dirt "$bay")
+  state=clean
+  [[ -z $dirt ]] || state="DIRTY ($(wc -l <<<"$dirt" | tr -d ' ') paths)"
+  lock=$(awk -F'\t' -v p="$bay" '$1 == p {print $2}' <<<"$locks")
+  [[ -z $lock ]] || state="$state; git-locked: $lock"
+  printf '%-6s %-28s %-36s %6s %7s  %s\n' "bay-$n" "$holder" "$branch" "$ahead" "$age" "$state"
+done

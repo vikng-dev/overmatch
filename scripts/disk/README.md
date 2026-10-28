@@ -14,7 +14,8 @@ fleet footprint was debuginfo, 37 GB of it our own crate's `.o` files):
 ## Files
 
 - `sweep.sh` — the reapers and `cargo sweep --maxsize 40GB` over the main checkout and every
-  `git worktree list` entry. Safe to run by hand any time (`FORCE=1` skips the session check).
+  `git worktree list` entry except the bays (`scripts/bays/`), whose warm `target/` is never
+  swept. Safe to run by hand any time (`FORCE=1` skips the session check).
 - `com.overmatch.target-sweep.plist` — launchd user agent that runs `sweep.sh` every 6 h while a
   Claude Code session is running. Logs to `/tmp/overmatch-target-sweep.log`.
 

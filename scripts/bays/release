@@ -1,0 +1,50 @@
+#!/usr/bin/env bash
+# release — free a bay: detach its HEAD, so `lane/<lane>` keeps its commits and can be merged and
+# deleted, and drop its lease record.
+#
+# Usage: scripts/bays/release [--force] <bay>        <bay>: bay-2, 2, or the bay's path
+#
+# Refuses (exit 1) while the bay holds uncommitted changes or untracked files. `--force` is the
+# orchestrator's alone, after it has looked: it first commits that work to
+# `refs/bays/salvage/bay-N-<time>` (git's own hooks skipped), and only then clears the bay. Releasing
+# a free, clean bay is a no-op. The pool's invariants and mechanics: lib.sh.
+set -euo pipefail
+# shellcheck source-path=SCRIPTDIR source=lib.sh
+. "$(dirname "$0")/lib.sh"
+bays_locked "$@"
+
+force=0
+if [[ ${1:-} == --force ]]; then
+  force=1
+  shift
+fi
+[[ $# -eq 1 ]] || die "usage: scripts/bays/release [--force] <bay>"
+bay=$(bay_resolve "$1") || die "'$1' is not a bay (bay-1..bay-$BAYS_COUNT under $bays_pool)"
+name=$(basename "$bay")
+admin=$(bay_admin "$bay") || die "$bay is not a worktree of this repository"
+
+holder=free
+[[ -f $admin/bay-lease ]] && read -r holder _ <"$admin/bay-lease"
+
+dirt=$(bay_dirt "$bay")
+if [[ -n $dirt ]]; then
+  if ((!force)); then
+    {
+      echo "release: $name ($holder) holds uncommitted work; commit it on its lane branch first:"
+      printf '%s\n' "$dirt" | sed 's/^/  /'
+    } >&2
+    exit 1
+  fi
+  ref=refs/bays/salvage/$name-$(date +%Y%m%d-%H%M%S)
+  git -C "$bay" add -A >&2
+  tree=$(git -C "$bay" write-tree)
+  commit=$(git -C "$bay" commit-tree "$tree" -p HEAD -m "salvage: $name, holder $holder, at release --force")
+  git -C "$bay" update-ref "$ref" "$commit"
+  git -C "$bay" reset -q --hard HEAD >&2
+  git -C "$bay" clean -q -ffd -e /target >&2
+  echo "release: $name's uncommitted work is saved at $ref" >&2
+fi
+
+git -C "$bay" switch -q --detach >&2
+rm -f "$admin/bay-lease"
+echo "release: $name free (was $holder; HEAD detached at $(git -C "$bay" rev-parse --short HEAD))" >&2
