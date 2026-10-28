@@ -18,6 +18,9 @@
 #   2. A dirty bay is never recycled, and `release` refuses it without --force; --force saves the
 #      work to refs/bays/salvage/ before it clears the bay.
 #      Mutants: the dirt check dropped from lease or from release; --force clearing with no salvage.
+#      Salvage also keeps staged and working versions reachable, never overwrites an earlier
+#      snapshot, and refuses nested repositories whose work a superproject tree cannot contain.
+#      Mutants: stage over the real index; timestamp-only refs; save a gitlink then delete its repo.
 #   3. A lease recycles to main's tip, and never resets a lane branch holding commits main lacks.
 #      Mutants: the switch targets the bay's old HEAD instead of main; the ahead check dropped.
 #   4. Concurrent leases never share a bay.
@@ -200,6 +203,70 @@ commit_in "$REPO" "dependency bump"
 pl=$(lease l)
 is "main's Cargo.lock moved: the target is deleted" no "$(exists "$pl/target")"
 release_all
+
+# Forced release must preserve both versions of a partially staged file for the orchestrator.
+group "forced release: staged and working copies"
+ps=$(lease staged-copy)
+echo staged-version >"$ps/README"
+git -C "$ps" add README
+echo working-version >"$ps/README"
+release --force bay-1
+says "a partially staged bay can be salvaged" yes $?
+staged_saved=no
+working_saved=no
+while IFS= read -r saved; do
+  content=$(git -C "$REPO" show "$saved:README" 2>/dev/null)
+  [[ $content == staged-version ]] && staged_saved=yes
+  [[ $content == working-version ]] && working_saved=yes
+done < <(git -C "$REPO" rev-list --all)
+is "the staged version remains reachable after salvage" yes "$staged_saved"
+is "the working version remains reachable after salvage" yes "$working_saved"
+
+# The orchestrator may salvage successive lanes within one clock tick; neither ref may overwrite.
+group "forced release: repeated timestamp"
+mkdir -p "$WORK/bin"
+cat >"$WORK/bin/date" <<'DATE'
+#!/bin/bash
+if [[ ${1:-} == +%Y%m%d-%H%M%S ]]; then echo 20000101-000000; else /bin/date "$@"; fi
+DATE
+chmod +x "$WORK/bin/date"
+for version in first second; do
+  pc=$(lease "salvage-$version")
+  echo "$version" >"$pc/recovered.txt"
+  PATH="$WORK/bin:$PATH" release --force bay-1
+  says "salvage $version succeeds" yes $?
+done
+first_saved=no
+second_saved=no
+while IFS= read -r saved; do
+  content=$(git -C "$REPO" show "$saved:recovered.txt" 2>/dev/null)
+  [[ $content == first ]] && first_saved=yes
+  [[ $content == second ]] && second_saved=yes
+done < <(git -C "$REPO" rev-list --all)
+is "the first salvage remains reachable after the second" yes "$first_saved"
+is "the second salvage is reachable" yes "$second_saved"
+
+# A superproject tree records only a gitlink, not the nested repository's files or objects.
+group "forced release: embedded repository"
+pn=$(lease nested-repo)
+git init -q "$pn/nested"
+echo nested-work >"$pn/nested/work.txt"
+commit_in "$pn/nested" "nested work"
+echo nested-unsaved >>"$pn/nested/work.txt"
+echo nested-index >"$pn/README"
+git -C "$pn" add README
+echo nested-working >"$pn/README"
+release --force bay-1
+says "force refuses work that a superproject snapshot cannot save" no $?
+is "the embedded repository and unsaved work survive" "nested-work nested-unsaved" \
+  "$(tr '\n' ' ' <"$pn/nested/work.txt" 2>/dev/null | sed 's/ $//')"
+is "the refused bay stays leased" nested-repo "$(leased_to bay-1)"
+is "refusal preserves the lane's original index" nested-index "$(git -C "$pn" show :README)"
+is "refusal preserves the lane's working copy" nested-working "$(cat "$pn/README")"
+# Fixture cleanup is safe only after the preservation assertions above.
+rm -rf "$pn/nested"
+git -C "$pn" restore --source=HEAD --staged --worktree README
+release bay-1
 
 # ── 6. the Claude Code hooks keep the harness's contract ─────────────────────────────────────────
 

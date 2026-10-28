@@ -6,8 +6,10 @@
 #
 # Refuses (exit 1) while the bay holds uncommitted changes or untracked files. `--force` is the
 # orchestrator's alone, after it has looked: it first commits that work to
-# `refs/bays/salvage/bay-N-<time>` (git's own hooks skipped), and only then clears the bay. Releasing
-# a free, clean bay is a no-op. The pool's invariants and mechanics: lib.sh.
+# a unique `refs/bays/salvage/bay-N-<time>-<id>` (git's own hooks skipped). Its parent saves the
+# index separately from the working copy. Embedded repositories and submodules cannot be saved
+# by a superproject commit, so --force refuses them. Only then is the bay cleared. Releasing a
+# free, clean bay is a no-op. The pool's invariants and mechanics: lib.sh.
 set -euo pipefail
 # shellcheck source-path=SCRIPTDIR source=lib.sh
 . "$(dirname "$0")/lib.sh"
@@ -35,11 +37,25 @@ if [[ -n $dirt ]]; then
     } >&2
     exit 1
   fi
-  ref=refs/bays/salvage/$name-$(date +%Y%m%d-%H%M%S)
-  git -C "$bay" add -A >&2
-  tree=$(git -C "$bay" write-tree)
-  commit=$(git -C "$bay" commit-tree "$tree" -p HEAD -m "salvage: $name, holder $holder, at release --force")
-  git -C "$bay" update-ref "$ref" "$commit"
+  # A private index leaves the lane's staging intact if snapshotting fails. The two trees can
+  # differ for a partially staged file; both must be reachable before reset touches either copy.
+  scratch=$(mktemp -d "$admin/bay-salvage.XXXXXX")
+  trap 'rm -rf "$scratch"' EXIT
+  index_tree=$(git -C "$bay" write-tree)
+  GIT_INDEX_FILE=$scratch/index git -C "$bay" read-tree "$index_tree"
+  GIT_INDEX_FILE=$scratch/index git -C "$bay" add -A >&2
+  tree=$(GIT_INDEX_FILE=$scratch/index git -C "$bay" write-tree)
+  # A gitlink retains only an object ID in another repository; clean -ff would delete that
+  # repository's object database and uncommitted files. Fail before changing the real index.
+  for snapshot in "$index_tree" "$tree"; do
+    gitlinks=$(git -C "$bay" ls-tree -r "$snapshot" | awk '$1 == "160000" {print}')
+    [[ -z $gitlinks ]] || die "$name contains embedded repositories or submodules; save their work separately before release"
+  done
+  index_commit=$(git -C "$bay" commit-tree "$index_tree" -p HEAD -m "salvage: $name, holder $holder, staged work at release --force")
+  commit=$(git -C "$bay" commit-tree "$tree" -p "$index_commit" -m "salvage: $name, holder $holder, working copy at release --force")
+  ref=refs/bays/salvage/$name-$(date +%Y%m%d-%H%M%S)-${scratch##*.}
+  # Creation only: even a name collision must not replace an earlier salvage.
+  git -C "$bay" update-ref "$ref" "$commit" ""
   git -C "$bay" reset -q --hard HEAD >&2
   git -C "$bay" clean -q -ffd -e /target >&2
   echo "release: $name's uncommitted work is saved at $ref" >&2

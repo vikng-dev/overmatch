@@ -22,8 +22,10 @@
 #   2. Work is never destroyed. A bay with uncommitted changes or untracked files (`git status
 #      --porcelain --untracked-files=all` non-empty; target/ is ignored, so a build never counts)
 #      is never recycled, and `release` refuses it. `release --force`, the orchestrator's call
-#      after it has looked, first commits that work to `refs/bays/salvage/bay-N-<time>` and only
-#      then clears it. Ignored files other than target/ are scratch by the repository's own
+#      after it has looked, first commits that work to `refs/bays/salvage/bay-N-<time>-<id>` and only
+#      then clears it. The ref is unique, its parent preserves the index, and nested repositories
+#      or submodules are refused because a superproject tree cannot save their contents.
+#      Ignored files other than target/ are scratch by the repository's own
 #      definition and go at recycle.
 #   3. A lease recycles to main's tip: `git switch -C lane/<lane> main`, then
 #      `git clean -ffdx -e /target`. git rewrites only the files that differ, so every other file
