@@ -1,6 +1,6 @@
 {
-  "view_glb_sha": "270156e9c3e6d3af4b88cf45a56d16b91bb2fab2013d30b9eefed7f460b6c623",
-  "sim_glb_sha": "83fcf5b8f32c522e093ea44406da93ee31cb8ce3ad94813cae66219c4f028206",
+  "view_glb_sha": "5d391fea79cb220885bc647709351b858ec4d2917238920d48ca6663b7be0436",
+  "sim_glb_sha": "c133972dfc74c21a1bf1f19fd44f1120222d21eb994b750e9b09c1491ffcdd91",
   "mesh_count": 58,
   "chains": {
     "Ammo_L_0#0": {
@@ -40,15 +40,11 @@
       ]
     },
     "BowGunner#0": {
-      "radius_m": 0.650744,
+      "radius_m": 0.430116,
       "rungs": [
         {
-          "mesh": "BowGunner#0_LOD6",
-          "deviation_mm": 110.901982
-        },
-        {
           "mesh": "BowGunner#0_LOD7",
-          "deviation_mm": 228.569737
+          "deviation_mm": 192.191511
         }
       ]
     },
@@ -96,15 +92,11 @@
       ]
     },
     "Commander#0": {
-      "radius_m": 0.650744,
+      "radius_m": 0.430116,
       "rungs": [
         {
-          "mesh": "Commander#0_LOD6",
-          "deviation_mm": 109.050853
-        },
-        {
-          "mesh": "Commander#0_LOD7",
-          "deviation_mm": 228.569686
+          "mesh": "BowGunner#0_LOD7",
+          "deviation_mm": 192.191511
         }
       ]
     },
@@ -134,15 +126,11 @@
       ]
     },
     "Driver#0": {
-      "radius_m": 0.650744,
+      "radius_m": 0.430116,
       "rungs": [
         {
-          "mesh": "Driver#0_LOD6",
-          "deviation_mm": 109.05081
-        },
-        {
-          "mesh": "Driver#0_LOD7",
-          "deviation_mm": 228.903284
+          "mesh": "BowGunner#0_LOD7",
+          "deviation_mm": 192.191511
         }
       ]
     },
@@ -194,15 +182,11 @@
       ]
     },
     "Gunner#0": {
-      "radius_m": 0.650744,
+      "radius_m": 0.430116,
       "rungs": [
         {
-          "mesh": "Gunner#0_LOD6",
-          "deviation_mm": 109.050853
-        },
-        {
-          "mesh": "Gunner#0_LOD7",
-          "deviation_mm": 228.903324
+          "mesh": "BowGunner#0_LOD7",
+          "deviation_mm": 192.191511
         }
       ]
     },
@@ -595,15 +579,11 @@
       ]
     },
     "Loader#0": {
-      "radius_m": 0.650744,
+      "radius_m": 0.430116,
       "rungs": [
         {
-          "mesh": "Loader#0_LOD6",
-          "deviation_mm": 109.050784
-        },
-        {
-          "mesh": "Loader#0_LOD7",
-          "deviation_mm": 228.569736
+          "mesh": "BowGunner#0_LOD7",
+          "deviation_mm": 192.191511
         }
       ]
     },

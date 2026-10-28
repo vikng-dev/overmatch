@@ -91,7 +91,7 @@
     ),
     (
         name: "s9_breech_and_loader",
-        shows: "the turret traversed 30 degrees: an 88 through its side knocks out two boxes, the breech and the loader station",
+        shows: "the turret traversed 30 degrees: an 88 through its side knocks out two boxes, the breech and the gunner station, and leaves the loader station reduced",
         weapon: "MainGun",
         round: "88mm_AP",
         from: (-4.0, 2.0, -0.5),
@@ -118,7 +118,7 @@
     ),
     (
         name: "s12_apcr_through_crew",
-        shows: "s1's line fired with the 88's sub-calibre round: it flies whole and meets the plate as its tungsten-carbide core, which leaves the driver's front plate faster than s1's round through a hole a sixth the area, so its cone is weaker; the gunner's HP pool, reduced by the cone, is emptied by the core's line, and the core stops deeper in the rear plate",
+        shows: "s1's line fired with the 88's sub-calibre round: it flies whole and meets the plate as its tungsten-carbide core, which leaves the driver's front plate faster than s1's round through a hole a sixth the area, so its cone is weaker and leaves the gunner and the commander reduced; the driver is knocked out, and the core stops deeper in the rear plate",
         weapon: "MainGun",
         round: "88mm_APCR",
         from: (-0.57, 1.45, -6.5),
@@ -127,7 +127,7 @@
     ),
     (
         name: "s13_ring_through_crew",
-        shows: "s1's line fired with the 88's burst round as the ring: the driver's front plate arms the fuze, and the round bursts 0.37 m past its exit at 245 m/s, short of the driver's station, where the band 56-76 degrees off the line empties the HP pools of the bow gunner, the transmission and two ammunition racks; the nose piece flies on through the driver's and the gunner's stations and stops in the rear plate, and the driver and the gunner are knocked out as in s1",
+        shows: "s1's line fired with the 88's burst round as the ring: the driver's front plate arms the fuze, and the round bursts 0.37 m past its exit at 245 m/s, short of the driver's station, where the band 56-76 degrees off the line empties the HP pools of the bow gunner, the transmission and two ammunition racks; the nose piece flies on through the driver's station and stops in the rear plate, and the driver is knocked out and the gunner reduced as in s1",
         weapon: "MainGun",
         round: "88mm_APHE_ring",
         from: (-0.57, 1.45, -6.5),
@@ -136,7 +136,7 @@
     ),
     (
         name: "s14_ball_through_crew",
-        shows: "s1's line fired with the 88's burst round as the ball: it bursts where s13's does, and its forward lobe, within 57 degrees of the line, empties the HP pools of the commander, the loader, the engine and three ammunition racks; the round ends at the burst, short of the driver's station, and the plate's cone knocks out the driver and the gunner as in s1",
+        shows: "s1's line fired with the 88's burst round as the ball: it bursts where s13's does, and its forward lobe, within 57 degrees of the line, empties the HP pools of the commander, the gunner, the loader, the engine and three ammunition racks; the round ends at the burst, short of the driver's station, and the plate's cone knocks out the driver as in s1",
         weapon: "MainGun",
         round: "88mm_APHE_ball",
         from: (-0.57, 1.45, -6.5),
