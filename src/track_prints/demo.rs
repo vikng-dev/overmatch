@@ -7,6 +7,11 @@
 //! forced through [`super::ReliefOverride`]) for `OVERMATCH_CAPTURE` stills. Every phase boundary is
 //! logged with its app time.
 //!
+//! `OVERMATCH_TRACK_PRINTS_DEMO_HOLD=drive|pivot` replaces the views' level cycle: the camera holds
+//! that one view for good and nothing overrides the player's relief setting, the scene of the frame
+//! cost measurement (`scripts/perf/run-track-prints-cost.sh`). The hold's start is logged on the
+//! `Time<Real>` clock the frame stream (`crate::frame_cost`) stamps its rows on.
+//!
 //! The three spots on the shipped map, with a hidden window (fixture data: stretches where one
 //! pack dominates the mask, the same spots `OVERMATCH_START` names):
 //!
@@ -20,13 +25,15 @@
 //! ```
 //!
 //! Mounted only by the offline composition (`run_offline`): nothing it writes leaves the process.
+//! Compiled into dev builds, and into an optimized one only under the `track_prints_demo` feature,
+//! which no shipped build enables.
 
 use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
 
 use crate::camera::{CameraCaptive, CaptiveCameraPlaced};
 use crate::command::TankCommand;
-use crate::settings::TrackPrintRelief;
+use crate::settings::{Settings, TrackPrintRelief};
 use crate::tank::{Controlled, Tank};
 use crate::view::PlayerView;
 
@@ -116,6 +123,20 @@ impl Phase {
             _ => None,
         }
     }
+
+    /// The phase shown at app second `t`: the scripted one, with `hold` standing in for every view.
+    fn shown(t: f32, hold: Option<Phase>) -> Self {
+        match (Phase::at(t), hold) {
+            (Phase::DriveView(_) | Phase::PivotView(_), Some(held)) => held,
+            (scripted, _) => scripted,
+        }
+    }
+
+    /// The relief level the shown phase forces: none while a view is held, so the player's own
+    /// setting is what the material draws.
+    fn forced_relief(self, hold: Option<Phase>) -> Option<TrackPrintRelief> {
+        if hold.is_some() { None } else { self.relief() }
+    }
 }
 
 #[derive(Resource)]
@@ -125,6 +146,8 @@ struct Demo {
     heading: f32,
     /// The pivot's steer.
     pivot_steer: f32,
+    /// The view held for good in place of the level cycle, at the player's own relief setting.
+    hold: Option<Phase>,
     phase: Phase,
     /// The tank's ground position at the start of the drive, the pivot and the exit.
     drive_from: Option<Vec3>,
@@ -149,18 +172,31 @@ pub(crate) fn offline_plugin(app: &mut App) {
             return;
         }
     };
-    info!("track prints demo: armed at ({x}, {z}) heading {heading}°, set down at {PLACE_AT_S} s");
+    let hold = match crate::env_value("OVERMATCH_TRACK_PRINTS_DEMO_HOLD").as_deref() {
+        None => None,
+        Some("drive") => Some(Phase::DriveView(0)),
+        Some("pivot") => Some(Phase::PivotView(0)),
+        Some(other) => {
+            warn!("track prints demo: want a hold of drive or pivot, got {other:?} — not armed");
+            return;
+        }
+    };
+    info!(
+        "track prints demo: armed at ({x}, {z}) heading {heading}°, set down at {PLACE_AT_S} s, \
+         hold {hold:?}"
+    );
     app.insert_resource(Demo {
         at: Vec2::new(x, z),
         heading: heading.to_radians(),
         pivot_steer,
+        hold,
         phase: Phase::Wait,
         drive_from: None,
         pivot: None,
         exit_from: None,
         exit_to: None,
     })
-    .add_systems(Update, (place, follow).chain())
+    .add_systems(Update, (place, follow, report_hold).chain())
     .add_systems(
         RunFixedMainLoop,
         drive
@@ -206,7 +242,7 @@ fn place(
 }
 
 /// Track the phase, note where the tank stands at each boundary the camera aims from, and force
-/// each view's relief level.
+/// each view's relief level unless a view is held.
 fn follow(
     time: Res<Time>,
     mut demo: ResMut<Demo>,
@@ -218,7 +254,7 @@ fn follow(
     if demo.phase == Phase::Wait {
         return;
     }
-    let now = Phase::at(time.elapsed_secs());
+    let now = Phase::shown(time.elapsed_secs(), demo.hold);
     if now == demo.phase {
         return;
     }
@@ -231,10 +267,10 @@ fn follow(
         Phase::Pivot => demo.pivot = Some(at),
         Phase::Exit => demo.exit_from = Some(at),
         Phase::Rest => demo.exit_to = Some(at),
-        Phase::DriveView(0) => *captive = CameraCaptive(true),
+        Phase::DriveView(_) | Phase::PivotView(_) => *captive = CameraCaptive(true),
         _ => {}
     }
-    if let Some(relief) = now.relief() {
+    if let Some(relief) = now.forced_relief(demo.hold) {
         commands.insert_resource(ReliefOverride(relief));
     }
     info!(
@@ -243,6 +279,31 @@ fn follow(
         prints.map_or(0, |prints| prints.stores.log.len()),
     );
     demo.phase = now;
+}
+
+/// Log, once, the held view's start on the frame stream's clock, the relief and range the player's
+/// settings give it, and the stamps laid by then: the frame-cost runner's proof of its scene.
+fn report_hold(
+    demo: Res<Demo>,
+    real: Res<Time<Real>>,
+    settings: Option<Res<Settings>>,
+    prints: Option<Res<super::TrackPrints>>,
+    mut reported: Local<bool>,
+) {
+    if *reported || demo.hold != Some(demo.phase) {
+        return;
+    }
+    let settings = settings.map(|settings| *settings).unwrap_or_default();
+    info!(
+        "track prints demo: holding {:?} from real t={:.2}s at the player's relief {:?}, range \
+         {:?}, {} stamps logged",
+        demo.phase,
+        real.elapsed_secs_f64(),
+        settings.track_prints,
+        settings.track_print_range,
+        prints.map_or(0, |prints| prints.stores.log.len()),
+    );
+    *reported = true;
 }
 
 /// Drive the player's tank through the phase's command, over whatever the devices wrote. A stop
@@ -315,4 +376,37 @@ fn hold_camera(
         + Vec3::new(back.x, 0.0, back.y) * slant * elevation.cos()
         + Vec3::Y * slant * elevation.sin();
     *camera = Transform::from_translation(eye).looking_at(ground, Vec3::Y);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The frame-cost runner measures the player's relief setting on a scene that must not change
+    /// under it: with a view held, every second after the run shows that one view and no level is
+    /// forced, while the run that lays the prints is the unheld script's, second for second.
+    #[test]
+    fn a_held_view_stands_for_good_and_forces_no_level() {
+        let held = Phase::PivotView(0);
+        let mut views = 0;
+        for tenth in 0..3_000 {
+            let t = tenth as f32 / 10.0;
+            let scripted = Phase::at(t);
+            let shown = Phase::shown(t, Some(held));
+            assert_eq!(shown.forced_relief(Some(held)), None, "t={t}");
+            match scripted {
+                Phase::DriveView(_) | Phase::PivotView(_) => {
+                    assert_eq!(shown, held, "t={t}");
+                    views += 1;
+                }
+                _ => assert_eq!(shown, scripted, "t={t}"),
+            }
+        }
+        assert!(views > 0, "the script never reached its views");
+        assert_eq!(
+            Phase::at(300.0).forced_relief(None),
+            TrackPrintRelief::ORDER.last().copied(),
+            "unheld, the last view keeps the last level",
+        );
+    }
 }
