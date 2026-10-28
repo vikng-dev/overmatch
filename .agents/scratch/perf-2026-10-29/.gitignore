@@ -1,0 +1,3 @@
+# The measured binary with its frozen asset root, and the runs' raw streams: local, never committed.
+bin/
+runs/
