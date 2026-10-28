@@ -58,7 +58,7 @@ use super::displays::DisplayLadder;
 use super::{
     DebugPanel, FrameCap, KillCam, MsaaLevel, PenCamCorner, PixelBudget, PresentCaps, ReduceMotion,
     RenderScaleLevel, SaveSettings, Settings, ShadowCascades, ShadowDistance, ShadowResolution,
-    UiScalePercent, VsyncMode, WindowModeSetting,
+    TrackPrintRange, TrackPrintRelief, UiScalePercent, VsyncMode, WindowModeSetting,
 };
 use crate::ui_font::{MODAL_BG, TEXT, TEXT_DIM, UiFonts};
 
@@ -108,6 +108,10 @@ enum Row {
     /// the change applies on the next casting frame, same as the resolution row's pattern of
     /// staying interactive whatever the distance says.
     ShadowCascades,
+    /// How the track prints' relief is drawn — see `settings::TrackPrintRelief`.
+    TrackPrints,
+    /// How far that relief reaches — see `settings::TrackPrintRange`.
+    TrackPrintRange,
     Msaa,
     /// Capability-gated: only the rungs the surface's probe reported are offered ([`PresentCaps`]).
     VSync,
@@ -133,7 +137,7 @@ enum RowKind {
 }
 
 impl Row {
-    const ORDER: [Row; 15] = [
+    const ORDER: [Row; 17] = [
         Row::RenderScale,
         Row::LodPixelBudget,
         Row::WindowMode,
@@ -141,6 +145,8 @@ impl Row {
         Row::ShadowDistance,
         Row::ShadowResolution,
         Row::ShadowCascades,
+        Row::TrackPrints,
+        Row::TrackPrintRange,
         Row::Msaa,
         Row::VSync,
         Row::FrameCap,
@@ -163,6 +169,8 @@ impl Row {
             // label's job is to say what the number buys, not to name its unit twice.
             Row::ShadowResolution => "SHADOW QUALITY",
             Row::ShadowCascades => "SHADOW CASCADES",
+            Row::TrackPrints => "TRACK PRINTS",
+            Row::TrackPrintRange => "TRACK PRINT RANGE",
             Row::Msaa => "ANTI-ALIASING",
             Row::VSync => "VSYNC",
             Row::FrameCap => "FRAME CAP",
@@ -225,6 +233,16 @@ impl Row {
             Row::ShadowCascades => {
                 "How many slices the shadow distance is split into. \
                  Fewer is cheaper but blockier up close."
+            }
+            // Says what every level keeps, because that is what a player lowering it worries
+            // about: the trail is still there, only its depth is drawn more cheaply.
+            Row::TrackPrints => {
+                "How track prints show their depth: lit only, with parallax, or with parallax \
+                 and the sun's shadow in the rut. Every level keeps the trail."
+            }
+            Row::TrackPrintRange => {
+                "How far from you track prints keep their parallax depth. Beyond it they are lit \
+                 only. Farther costs more."
             }
             Row::Msaa => "Smooths jagged edges. The cheapest setting to drop for more frames.",
             Row::VSync => {
@@ -317,6 +335,8 @@ impl Row {
             Row::ShadowDistance => settings.shadow_distance.label().to_string(),
             Row::ShadowResolution => settings.shadow_resolution.label().to_string(),
             Row::ShadowCascades => settings.shadow_cascades.label().to_string(),
+            Row::TrackPrints => settings.track_prints.label().to_string(),
+            Row::TrackPrintRange => settings.track_print_range.label().to_string(),
             Row::Msaa => settings.msaa.label().to_string(),
             Row::VSync => settings.vsync.label().to_string(),
             Row::FrameCap => settings.frame_cap.label(),
@@ -363,6 +383,14 @@ impl Row {
             Row::ShadowCascades => {
                 settings.shadow_cascades =
                     step_in(&ShadowCascades::ORDER, settings.shadow_cascades, delta);
+            }
+            Row::TrackPrints => {
+                settings.track_prints =
+                    step_in(&TrackPrintRelief::ORDER, settings.track_prints, delta);
+            }
+            Row::TrackPrintRange => {
+                settings.track_print_range =
+                    step_in(&TrackPrintRange::ORDER, settings.track_print_range, delta);
             }
             Row::Msaa => settings.msaa = step_in(&MsaaLevel::ORDER, settings.msaa, delta),
             Row::VSync => {

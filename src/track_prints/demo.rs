@@ -1,20 +1,22 @@
-//! `OVERMATCH_TRACK_PRINTS_DEMO=<x>,<z>,<heading°>[,<steer>]`, a dev capture of the track prints (cosmetic
-//! terrain marks) on the offline route. At [`PLACE_AT_S`] the player's tank is set down at world
-//! XZ `(x, z)`, its travel heading `heading°` from `+Z` toward `+X`; once settled it drives
-//! straight, stops, pivots on the spot at `steer` (default 1, right), stops, and drives out of
-//! the pivot. The camera is then
-//! held on the pivot point from about 10 m, then from about 30 m, for `OVERMATCH_CAPTURE` stills.
-//! Every phase boundary is logged with its app time.
+//! `OVERMATCH_TRACK_PRINTS_DEMO=<x>,<z>,<heading°>[,<steer>]`, a dev capture of the track prints
+//! (cosmetic terrain marks) on the offline route. At [`PLACE_AT_S`] the player's tank is set down at
+//! world XZ `(x, z)`, its travel heading `heading°` from `+Z` toward `+X`; once settled it drives
+//! straight, stops, pivots on the spot at `steer` (default 1, right), stops, and drives out of the
+//! pivot. The camera is then held low, about 10 m off, first on the straight drive's track and then
+//! on the pivot, each at the three relief levels in turn ([`crate::settings::TrackPrintRelief`],
+//! forced through [`super::ReliefOverride`]) for `OVERMATCH_CAPTURE` stills. Every phase boundary is
+//! logged with its app time.
 //!
-//! The mud and sand runs on the shipped map, with a hidden window (fixture data: spots where the
-//! mask's lowland or slope channel dominates for 30 m along the heading, picked off
-//! `terrain_masks.png`):
+//! The three spots on the shipped map, with a hidden window (fixture data: stretches where one
+//! pack dominates the mask, the same spots `OVERMATCH_START` names):
 //!
 //! ```text
 //! OVERMATCH_OFFLINE=1 SPIKE_SIM_WINDOWED=1 OVERMATCH_TRACK_PRINTS_DEMO=599.9,-599.9,195 \
-//!   OVERMATCH_CAPTURE=<dir>/track-prints-mud.png OVERMATCH_CAPTURE_AT=38.5,41.5 \
+//!   OVERMATCH_CAPTURE=<dir>/bay1-track-prints-s2-mud.png \
+//!   OVERMATCH_CAPTURE_AT=38.5,40.5,42.5,44.5,46.5,48.5 \
 //!   OVERMATCH_CAPTURE_UI=0 OVERMATCH_CAPTURE_GIZMOS=0 target/debug/overmatch
 //! OVERMATCH_TRACK_PRINTS_DEMO=302.5,542.7,315,-1   (sand, same otherwise)
+//! OVERMATCH_TRACK_PRINTS_DEMO=70,-20,90            (the base pack)
 //! ```
 //!
 //! Mounted only by the offline composition (`run_offline`): nothing it writes leaves the process.
@@ -24,8 +26,11 @@ use bevy::prelude::*;
 
 use crate::camera::{CameraCaptive, CaptiveCameraPlaced};
 use crate::command::TankCommand;
+use crate::settings::TrackPrintRelief;
 use crate::tank::{Controlled, Tank};
 use crate::view::PlayerView;
+
+use super::ReliefOverride;
 
 /// When the tank is set down, app seconds: the duel has spawned by then (TUNED).
 const PLACE_AT_S: f32 = 10.0;
@@ -37,13 +42,16 @@ const STOP_S: f32 = 3.0;
 const PIVOT_S: f32 = 7.0;
 const EXIT_S: f32 = 4.0;
 const REST_S: f32 = 1.0;
-const VIEW_S: f32 = 3.0;
+/// How long each view holds each relief level, s: the capture lands 1.5 s into it, after the
+/// material has taken the level.
+const HOLD_S: f32 = 2.0;
 /// The speed a stop brakes down to, m/s: above the box's reversal speed, so the brake never turns
 /// into reverse (TUNED).
 const BRAKE_ABOVE_MPS: f32 = 0.6;
-/// The camera's two stands off the pivot point: slant distance, m, and elevation, degrees.
-const NEAR_VIEW: (f32, f32) = (10.0, 25.0);
-const FAR_VIEW: (f32, f32) = (30.0, 11.0);
+/// The two low views: slant distance, m, and elevation, degrees. ASSUMED: about 10 m off, low
+/// enough that a rut's far wall and its shadow read.
+const DRIVE_VIEW: (f32, f32) = (10.0, 12.0);
+const PIVOT_VIEW: (f32, f32) = (10.0, 14.0);
 /// How far the camera stands off the incoming track's line, degrees, away from the exit side.
 const VIEW_ASIDE_DEG: f32 = 30.0;
 
@@ -57,8 +65,10 @@ enum Phase {
     Halt,
     Exit,
     Rest,
-    Near,
-    Far,
+    /// The straight drive's track, at relief level `.0`.
+    DriveView(usize),
+    /// The pivot, at relief level `.0`.
+    PivotView(usize),
 }
 
 impl Phase {
@@ -73,14 +83,19 @@ impl Phase {
             (Phase::Halt, STOP_S),
             (Phase::Exit, EXIT_S),
             (Phase::Rest, REST_S),
-            (Phase::Near, VIEW_S),
         ] {
             end += length;
             if t < end {
                 return phase;
             }
         }
-        Phase::Far
+        let levels = TrackPrintRelief::ORDER.len();
+        let hold = ((t - end) / HOLD_S) as usize;
+        if hold < levels {
+            Phase::DriveView(hold)
+        } else {
+            Phase::PivotView((hold - levels).min(levels - 1))
+        }
     }
 
     /// The driver's `(throttle, steer)`, pivoting at `pivot`.
@@ -89,6 +104,16 @@ impl Phase {
             Phase::Drive | Phase::Exit => (1.0, 0.0),
             Phase::Pivot => (0.0, pivot),
             _ => (0.0, 0.0),
+        }
+    }
+
+    /// The relief level a view phase forces.
+    fn relief(self) -> Option<TrackPrintRelief> {
+        match self {
+            Phase::DriveView(level) | Phase::PivotView(level) => {
+                TrackPrintRelief::ORDER.get(level).copied()
+            }
+            _ => None,
         }
     }
 }
@@ -180,13 +205,15 @@ fn place(
     );
 }
 
-/// Track the phase and note where the tank stands at each boundary that the camera aims from.
+/// Track the phase, note where the tank stands at each boundary the camera aims from, and force
+/// each view's relief level.
 fn follow(
     time: Res<Time>,
     mut demo: ResMut<Demo>,
     tank: Query<&GlobalTransform, (With<Tank>, With<Controlled>)>,
     mut captive: ResMut<CameraCaptive>,
     prints: Option<Res<super::TrackPrints>>,
+    mut commands: Commands,
 ) {
     if demo.phase == Phase::Wait {
         return;
@@ -204,13 +231,16 @@ fn follow(
         Phase::Pivot => demo.pivot = Some(at),
         Phase::Exit => demo.exit_from = Some(at),
         Phase::Rest => demo.exit_to = Some(at),
-        Phase::Near => *captive = CameraCaptive(true),
+        Phase::DriveView(0) => *captive = CameraCaptive(true),
         _ => {}
+    }
+    if let Some(relief) = now.relief() {
+        commands.insert_resource(ReliefOverride(relief));
     }
     info!(
         "track prints demo: {now:?} from t={:.2}s, tank at {at:.2}, {} stamps logged",
         time.elapsed_secs(),
-        prints.map_or(0, |prints| prints.log.len()),
+        prints.map_or(0, |prints| prints.stores.log.len()),
     );
     demo.phase = now;
 }
@@ -226,25 +256,22 @@ fn drive(
     for (mut command, velocity, rotation) in &mut tanks {
         // The hull faces its own −Z.
         let ahead = velocity.0.dot(rotation.0 * Vec3::NEG_Z);
+        // Every phase that does not drive brakes, so the tank holds still under the views.
         command.throttle = match demo.phase {
-            Phase::Stop | Phase::Halt if ahead.abs() > BRAKE_ABOVE_MPS => -ahead.signum(),
+            Phase::Drive | Phase::Exit | Phase::Pivot => throttle,
+            _ if ahead.abs() > BRAKE_ABOVE_MPS => -ahead.signum(),
             _ => throttle,
         };
         command.steer = steer;
     }
 }
 
-/// Hold the player's camera on the pivot point, near then far.
+/// Hold the player's camera low on the straight drive's track, then on the pivot.
 fn hold_camera(
     demo: Res<Demo>,
     grid: Option<Res<crate::terrain_grid::HeightGrid>>,
     mut camera: Query<&mut Transform, With<PlayerView>>,
 ) {
-    let (slant, elevation) = match demo.phase {
-        Phase::Near => NEAR_VIEW,
-        Phase::Far => FAR_VIEW,
-        _ => return,
-    };
     let (Some(from), Some(pivot), Some(exit_from), Some(exit_to), Ok(mut camera)) = (
         demo.drive_from,
         demo.pivot,
@@ -257,13 +284,33 @@ fn hold_camera(
     let flat = |v: Vec3| Vec2::new(v.x, v.z).normalize_or_zero();
     let incoming = flat(pivot - from);
     let outgoing = flat(exit_to - exit_from);
-    // Behind the pivot along the incoming track, turned away from the side the exit leaves by.
+    // The side the exit leaves by; the camera stands on the other.
     let exit_side = (outgoing - incoming * outgoing.dot(incoming)).normalize_or_zero();
-    let aside = VIEW_ASIDE_DEG.to_radians();
-    let back = -incoming * aside.cos() - exit_side * aside.sin();
+    let ((slant, elevation), target, back) = match demo.phase {
+        // Across the drive's track from the exit side's far flank, looking at the middle of the run.
+        Phase::DriveView(_) => {
+            let middle = from.lerp(pivot, 0.5);
+            let aside = VIEW_ASIDE_DEG.to_radians();
+            (
+                DRIVE_VIEW,
+                middle,
+                -exit_side * aside.cos() - incoming * aside.sin(),
+            )
+        }
+        // Behind the pivot along the incoming track, turned away from the side the exit leaves by.
+        Phase::PivotView(_) => {
+            let aside = VIEW_ASIDE_DEG.to_radians();
+            (
+                PIVOT_VIEW,
+                pivot,
+                -incoming * aside.cos() - exit_side * aside.sin(),
+            )
+        }
+        _ => return,
+    };
     let elevation = elevation.to_radians();
-    let ground_y = grid.map_or(0.0, |grid| grid.height_at(pivot.x, pivot.z));
-    let ground = Vec3::new(pivot.x, ground_y, pivot.z);
+    let ground_y = grid.map_or(0.0, |grid| grid.height_at(target.x, target.z));
+    let ground = Vec3::new(target.x, ground_y, target.z);
     let eye = ground
         + Vec3::new(back.x, 0.0, back.y) * slant * elevation.cos()
         + Vec3::Y * slant * elevation.sin();

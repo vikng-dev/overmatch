@@ -1,38 +1,53 @@
-//! The prints' stores, all CPU-side: the stamp log every store is redrawn from, the near store
-//! around the camera, and the world layer over the whole map. Each GPU texture is a copy of a store
-//! here, written tile by tile ([`Upload`]); nothing is ever read back.
+//! The prints' stores (cosmetic terrain marks, view only), all CPU-side: the HISTORY every store is
+//! read from, the near store's GPU copy around the camera, and the world layer over the whole map.
+//! Each GPU texture is written tile by tile ([`Upload`]); nothing is ever read back.
 //!
 //! # A stamp, at one point of ground
 //!
 //! A [`StampEntry`] places a shoe's pooled underside ([`ClearanceStamp`]) on the ground: its datum
-//! point and heading in world XZ, and the plane its underside makes with the ground under it, as a
-//! lift at the canonical origin and a tilt across and along the shoe. At a world point the shoe's
-//! underside clears the ground by the underside's own height there plus the plane's: that
-//! CLEARANCE is what the stores keep, and a pack whose print depth is `D` sinks the ground by
-//! `max(0, D − clearance)` (`terrain_blend.wgsl`). The plane is normalized at the stamper so a
+//! point and heading in world XZ, the plane its underside makes with the ground under it (a lift at
+//! the canonical origin and a tilt across and along the shoe), how far into its press the link is,
+//! and the ground pressure of the tank that laid it. The plane is normalised at the stamper so a
 //! grounded shoe touches at its lowest corner (`super::stamper`).
+//!
+//! Where the plane lies within [`PrintLaw::contact_m`] of the ground the sole rests there: that is
+//! the FOOTPRINT. Inside it the shoe's clearance `c` (the underside's height over its datum plus the
+//! plane) sets the PATTERN, `1 − c / pattern_range`, so a grouser prints deeper than the plate
+//! behind it and the whole footprint prints on every soft ground. The press scales the pattern from
+//! nothing at touchdown to all of it one pitch of travel later. A texel stores two bytes:
+//!
+//! * R — pattern × press, in 1/255: the share of the ground's print depth this point sinks by;
+//! * G — the tank's ground pressure, in [`KPA_PER_UNIT`]: zero off every footprint.
+//!
+//! Both combine by MAX, which is order-free, so any set of stamps draws the same texels in any
+//! order and in any pieces, and a print only ever deepens. The shader turns a texel into a depth:
+//! the ground's `softness × pressure`, capped, times R (`terrain_blend::print_depth_m`).
+//!
+//! # The history
+//!
+//! [`StampLog`]: the global near-resolution raster ([`NEAR_TEXEL_M`]), kept in [`CELL`]² cells. A
+//! stamp is rasterised ONCE, into the history; the near store and the world layer are fed from the
+//! texels it changed. Hot cells stay raw in a bounded cache; cold cells are run-length coded when
+//! they leave it. Memory grows with visited area, never with repeat visits.
 //!
 //! # The near store
 //!
-//! [`NEAR_SIDE`]² texels of [`NEAR_TEXEL_M`], two bytes each: R the PRESS, `1 − clearance /
-//! range` ([`PrintLaw::range_m`]), so zero means no print and the largest press is the deepest
-//! print; G the FOOTPRINT, full wherever a grounded shoe's sole lay. Both combine by MAX, which is
-//! order-free, so any set of stamps draws the same texels in any order and in any pieces.
-//!
-//! It is TOROIDAL: global texel `g` lives at storage `g mod side`, and the window it currently
-//! holds, [`NearStore::window`], follows the camera in steps of [`RECENTRE_STEP`]. A recentre
-//! clears the texels that entered the window and redraws them from the log, so the store is always
-//! exactly what a fresh draw of the log over the window gives.
+//! [`NEAR_SIDE`]² texels on the GPU, TOROIDAL: global texel `g` lives at storage `g mod side`. The
+//! window it holds follows the eye in whole cells ([`NearStore::recentre`]), so a history cell is
+//! always one contiguous square of the GPU copy and the near store keeps no CPU texels of its own:
+//! its uploads are read straight out of the history. A recentre uploads each cell that entered
+//! (and clears a stale square only where the GPU still holds old marks), so the GPU copy is always
+//! exactly the history over the window.
 //!
 //! # The world layer
 //!
-//! [`WORLD_SIDE`]² texels over the map's square. A texel keeps which of its `8 × 8` sample points
-//! a grounded sole has covered, and the GPU copy carries the covered fraction with a full mip chain
-//! the CPU builds tile by tile. Union, not sum: a track laid over and over stays one track.
-
-use std::collections::HashMap;
+//! [`WORLD_SIDE`]² texels over the map's square. A world texel counts the near texels inside it
+//! that a footprint has reached, and its GPU copy carries that count over the texel's near-texel
+//! total, with a full mip chain the CPU builds tile by tile. Union, not sum: a near texel enters the
+//! count once, the frame its G channel leaves zero, so a track laid over and over stays one track.
 
 use bevy::math::{IVec2, UVec2, Vec2};
+use bevy::platform::collections::HashMap;
 
 use super::stamp::{ClearanceStamp, OPEN_M};
 
@@ -43,44 +58,44 @@ pub(crate) const NEAR_SIDE: u32 = 2048;
 pub(crate) const NEAR_SPAN_M: f32 = 96.0;
 /// The near store's texel, m: DERIVED, 4.6875 cm.
 pub(crate) const NEAR_TEXEL_M: f32 = NEAR_SPAN_M / NEAR_SIDE as f32;
-/// Texels the window moves by, at least, when it recentres: the window's origin is always a
-/// multiple of this. ASSUMED: 6 m, a strip small enough to redraw in a frame.
-pub(crate) const RECENTRE_STEP: i32 = 128;
+/// Near texels per history cell side, and the step the near window moves by: the window is
+/// always `NEAR_SIDE / CELL` whole cells across. ASSUMED: 6 m, a strip small enough to upload in a
+/// frame.
+pub(crate) const CELL: i32 = 128;
 /// How far the eye may wander from the window's centre, in texels along either axis, before the
 /// window recentres. Above the step, so an eye on a step boundary does not flap. ASSUMED: 9 m,
 /// which leaves 39 m of the window ahead of the eye in every direction.
-pub(crate) const RECENTRE_SLACK: i32 = 192;
+const RECENTRE_SLACK: i32 = 192;
 /// Texels across the world layer. DERIVED from the approaches note's §4 starting point: 0.37 m
 /// on the shipped 1500 m map.
 pub(crate) const WORLD_SIDE: u32 = 4096;
-/// The upload tile: a store is written to the GPU in squares of this many texels (fewer at a mip
-/// level smaller than one).
-const TILE: u32 = 64;
-/// World upload/rebuild tile side. ASSUMED: stamps touch only a few coarse texels,
-/// so rebuilding 64² mip texels per touched tile would dominate the 30-tank pivot cost.
-/// Sample-mask allocation remains in 64² tiles, independently of update granularity.
+/// The near store's upload tile, texels: a cell goes to the GPU as `2 × 2` of them.
+const NEAR_TILE: i32 = 64;
+/// Near upload tiles per cell side.
+const TILES_PER_CELL: i32 = CELL / NEAR_TILE;
+/// World upload/rebuild tile side. ASSUMED: stamps touch only a few world texels, so rebuilding
+/// larger squares up the mip chain per touched tile would dominate a pivot's cost.
 const WORLD_UPLOAD_TILE: u32 = 8;
-/// Near texels per log cell axis. ASSUMED: 6 m cells, aligned to the global raster.
-const LOG_CELL_SIDE: i32 = 128;
-/// Raw history cells kept active. ASSUMED cache size; DERIVED raw payload cap 8 MiB.
-/// Cold cells remain exact compressed checkpoints, never evicted history.
-const ACTIVE_LOG_CELLS: usize = 256;
-/// Samples per world-texel axis. DERIVED: on a 1500 m map their 4.58 cm spacing is
-/// below the near texel's 4.69 cm, so near-scale footprints survive downsampling.
-const WORLD_SAMPLES: u32 = 8;
+/// World count-tile side: counts are allocated in squares of this many texels, only where printed.
+const WORLD_COUNT_TILE: u32 = 64;
+/// Raw history cells kept hot. ASSUMED cache size; DERIVED raw payload cap 8 MiB. Cold cells remain
+/// exact compressed checkpoints, never evicted history.
+const ACTIVE_CELLS: usize = 256;
+/// Ground pressure per unit of a texel's G channel, kPa: 1, so a byte spans 1–255 kPa, every tank.
+pub(crate) const KPA_PER_UNIT: f32 = 1.0;
 
 /// How stamps turn into store texels.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct PrintLaw {
-    /// The clearance the near store's press spans, m: a point a sole clears by this much or more
-    /// prints on no pack. The deepest print any pack takes, so no pack's print is clipped.
-    pub(crate) range_m: f32,
+    /// The clearance over which the pattern falls from full to none, m: a point of the sole that
+    /// clears the ground by `c` prints `1 − c / pattern_range_m` of the ground's depth.
+    pub(crate) pattern_range_m: f32,
     /// How far a sole's plane may clear the ground and still lie on it, m: the footprint's edge,
     /// and the stamper's test for a grounded shoe.
     pub(crate) contact_m: f32,
 }
 
-/// One stamp in the log: 16 bytes.
+/// One stamp, as the stamper hands it over.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct StampEntry {
     /// World XZ of the shoe's datum point: its canonical origin at the underside's lowest height.
@@ -97,6 +112,10 @@ pub(crate) struct StampEntry {
     flags: u8,
     /// Which shoe stamp: an index into the stamps the stores are drawn with.
     shoe: u8,
+    /// How far into its press the link is, 1/255: the share of its pattern it prints.
+    press: u8,
+    /// The ground pressure of the tank that laid it, in [`KPA_PER_UNIT`].
+    pressure: u8,
 }
 
 const YAW_UNITS: f32 = 65536.0 / std::f32::consts::TAU;
@@ -106,28 +125,39 @@ const LIFT_UNITS: f32 = 4096.0;
 const TILT_UNITS: f32 = 64.0;
 const MIRRORED: u8 = 1;
 
+/// The canonical placement a stamp is drawn with: datum, heading, underside plane, shoe.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Placement {
+    /// World XZ of the datum point.
+    pub(crate) datum: Vec2,
+    /// Heading of the canonical `+z`, rad from `+Z` toward `+X`.
+    pub(crate) yaw: f32,
+    /// The underside plane `lift + tilt · (x, z)` over the ground, in canonical `(x, z)`.
+    pub(crate) lift: f32,
+    pub(crate) tilt: Vec2,
+    /// Which shoe stamp, and whether it is read mirrored.
+    pub(crate) shoe: u8,
+    pub(crate) mirrored: bool,
+}
+
 impl StampEntry {
-    /// A stamp of shoe `shoe` with its datum at world `datum`, its canonical `+z` heading `yaw`
-    /// (rad from `+Z` toward `+X`), and its underside plane `lift + tilt · (x, z)` over the ground.
-    pub(crate) fn new(
-        datum: Vec2,
-        yaw: f32,
-        lift: f32,
-        tilt: Vec2,
-        shoe: u8,
-        mirrored: bool,
-    ) -> Self {
-        let tilt = tilt * TILT_UNITS;
+    /// A stamp of `placement`, `press` (0..1) of the way into its press, laid by a tank whose ground
+    /// pressure is `pressure_kpa`.
+    pub(crate) fn new(placement: Placement, press: f32, pressure_kpa: f32) -> Self {
+        let tilt = placement.tilt * TILT_UNITS;
         Self {
-            x: datum.x,
-            z: datum.y,
-            yaw: (yaw.rem_euclid(std::f32::consts::TAU) * YAW_UNITS).round() as u32 as u16,
-            lift: (lift * LIFT_UNITS)
+            x: placement.datum.x,
+            z: placement.datum.y,
+            // A turn is 65536 units, so wrapping the integer to 16 bits wraps the heading.
+            yaw: (placement.yaw * YAW_UNITS).round() as i32 as u16,
+            lift: (placement.lift * LIFT_UNITS)
                 .round()
                 .clamp(f32::from(i16::MIN), f32::from(i16::MAX)) as i16,
             tilt: [tilt.x, tilt.y].map(|t| t.round().clamp(-127.0, 127.0) as i8),
-            flags: if mirrored { MIRRORED } else { 0 },
-            shoe,
+            flags: if placement.mirrored { MIRRORED } else { 0 },
+            shoe: placement.shoe,
+            press: (press.clamp(0.0, 1.0) * 255.0).round() as u8,
+            pressure: (pressure_kpa / KPA_PER_UNIT).round().clamp(1.0, 255.0) as u8,
         }
     }
 
@@ -143,16 +173,15 @@ impl StampEntry {
         usize::from(self.shoe)
     }
 
+    /// The share of its pattern this stamp prints, 0..1.
+    pub(crate) fn press(&self) -> f32 {
+        f32::from(self.press) / 255.0
+    }
+
     /// The shoe's canonical `x` and `z` axes in world XZ.
     fn axes(&self) -> (Vec2, Vec2) {
         let (sin, cos) = (f32::from(self.yaw) / YAW_UNITS).sin_cos();
         (Vec2::new(cos, -sin), Vec2::new(sin, cos))
-    }
-
-    /// Canonical `(x, z)` of world XZ `world`.
-    fn canonical(&self, world: Vec2, (across, along): (Vec2, Vec2)) -> Vec2 {
-        let d = world - self.datum();
-        Vec2::new(d.dot(across), d.dot(along))
     }
 
     /// The underside plane's clearance at canonical `c`, m.
@@ -162,9 +191,18 @@ impl StampEntry {
     }
 
     /// The world XZ box the shoe's stamp covers: low, high.
+    #[cfg(test)]
     pub(crate) fn world_bounds(&self, shoe: &ClearanceStamp) -> (Vec2, Vec2) {
+        self.world_bounds_along(shoe, self.axes())
+    }
+
+    /// The world XZ box the shoe's stamp covers, low and high, with its axes already in hand.
+    fn world_bounds_along(
+        &self,
+        shoe: &ClearanceStamp,
+        (across, along): (Vec2, Vec2),
+    ) -> (Vec2, Vec2) {
         let (low, high) = shoe.bounds(self.mirrored());
-        let (across, along) = self.axes();
         [
             Vec2::new(low.x, low.y),
             Vec2::new(high.x, low.y),
@@ -179,29 +217,23 @@ impl StampEntry {
         )
     }
 
-    /// At world XZ `world`: the sole's clearance over the ground, m, and whether the point is
-    /// footprint (under the sole, where its plane lies on the ground). `None` off the sole and
-    /// over an opening.
-    fn at(
-        &self,
-        shoe: &ClearanceStamp,
-        world: Vec2,
-        law: &PrintLaw,
-        axes: (Vec2, Vec2),
-    ) -> Option<(f32, bool)> {
-        let c = self.canonical(world, axes);
+    /// The texel this stamp writes at world XZ `world`, `[R, G]`; `None` off the footprint, over an
+    /// opening, and where the pattern prints nothing. The raster's law at one point, which
+    /// [`Raster`] evaluates incrementally.
+    #[cfg(test)]
+    fn texel_at(&self, shoe: &ClearanceStamp, world: Vec2, law: &PrintLaw) -> Option<[u8; 2]> {
+        let (across, along) = self.axes();
+        let d = world - self.datum();
+        let c = Vec2::new(d.dot(across), d.dot(along));
         let height = shoe.height(c.x, c.y, self.mirrored());
-        if height >= OPEN_M {
+        let plane = self.plane(c);
+        if height >= OPEN_M || plane > law.contact_m {
             return None;
         }
-        let plane = self.plane(c);
-        Some((height + plane, plane <= law.contact_m))
+        let pattern = (1.0 - (height + plane) / law.pattern_range_m).clamp(0.0, 1.0);
+        let r = (self.press() * pattern * 255.0).round() as u8;
+        (r > 0).then_some([r, self.pressure])
     }
-}
-
-/// The press a clearance stores: `1 − clearance / range`, clamped, in 1/255.
-fn press(clearance: f32, range_m: f32) -> u8 {
-    ((1.0 - clearance / range_m).clamp(0.0, 1.0) * 255.0).round() as u8
 }
 
 /// A half-open texel rectangle, `min` included, `max` excluded.
@@ -220,52 +252,204 @@ impl Span {
         (span.min.x < span.max.x && span.min.y < span.max.y).then_some(span)
     }
 
-    /// The texels of `self` outside `other`, as at most four disjoint spans.
-    fn minus(self, other: Self) -> Vec<Self> {
-        let Some(shared) = self.intersect(other) else {
-            return vec![self];
-        };
-        let mut out = Vec::with_capacity(4);
-        if self.min.x < shared.min.x {
-            out.push(Self {
-                min: self.min,
-                max: IVec2::new(shared.min.x, self.max.y),
-            });
-        }
-        if shared.max.x < self.max.x {
-            out.push(Self {
-                min: IVec2::new(shared.max.x, self.min.y),
-                max: self.max,
-            });
-        }
-        if self.min.y < shared.min.y {
-            out.push(Self {
-                min: IVec2::new(shared.min.x, self.min.y),
-                max: IVec2::new(shared.max.x, shared.min.y),
-            });
-        }
-        if shared.max.y < self.max.y {
-            out.push(Self {
-                min: IVec2::new(shared.min.x, shared.max.y),
-                max: IVec2::new(shared.max.x, self.max.y),
-            });
-        }
-        out
-    }
-
     /// The texels of `texel_m` whose centres a world box from `low` to `high` holds.
     fn covering(low: Vec2, high: Vec2, texel_m: f32) -> Self {
+        // Scalar on purpose: the vector `ceil` and `floor` go through `libm` in this build.
+        let first = |at: f32| (at / texel_m - 0.5).ceil() as i32;
+        let end = |at: f32| (at / texel_m - 0.5).floor() as i32 + 1;
         Self {
-            min: (low / texel_m - 0.5).ceil().as_ivec2(),
-            max: (high / texel_m - 0.5).floor().as_ivec2() + 1,
+            min: IVec2::new(first(low.x), first(low.y)),
+            max: IVec2::new(end(high.x), end(high.y)),
         }
+    }
+
+    fn contains(&self, g: IVec2) -> bool {
+        g.x >= self.min.x && g.x < self.max.x && g.y >= self.min.y && g.y < self.max.y
     }
 }
 
-/// Spatial stamp history, checkpointed on the global near raster. Hot cells stay raw in a
-/// bounded cache; cold cells are compressed when they leave it. MAX composition is associative,
-/// so checkpoints lose neither detail nor persistence. Shoe bakes and the print law are
-/// immutable while history exists. Memory grows with visited area, never with repeat visits.
+/// One stamp laid on the global near raster: every per-texel quantity is an affine function of the
+/// texel's index relative to `base`, so the raster walks it by additions. `u`, `v` index the pooled
+/// grid in cells (the mirror folded in), `plane` is the underside plane's clearance, each as
+/// `[at base, per column, per row]`.
+struct Raster<'a> {
+    heights: &'a [f32],
+    width: i32,
+    height: i32,
+    span: Span,
+    base: IVec2,
+    u: [f32; 3],
+    v: [f32; 3],
+    plane: [f32; 3],
+    /// Per pooled-grid axis, the columns of row `j` inside it, `[lo, lo per row, hi, hi per row]`
+    /// (inclusive, padded by [`ROW_PAD`]); `None` where the axis is constant along a row, which
+    /// is checked per row instead.
+    strips: [Option<[f32; 4]>; 2],
+    /// The press in 1/255, and how much of it a metre of clearance takes away.
+    full: f32,
+    per_metre: f32,
+    pressure: u8,
+    contact_m: f32,
+}
+
+/// How far, in columns, a row's analytic interval is widened, so a rounding at its ends never drops
+/// a texel; the per-texel test decides. DERIVED: far above the `f32` error of the interval (about
+/// 1e-6 of a column at the stamp's extent), far below a column.
+const ROW_PAD: f32 = 1e-3;
+
+impl<'a> Raster<'a> {
+    fn new(entry: &StampEntry, shoe: &'a ClearanceStamp, law: &PrintLaw) -> Option<Self> {
+        if entry.press == 0 {
+            return None;
+        }
+        let axes = entry.axes();
+        let (low, high) = entry.world_bounds_along(shoe, axes);
+        let span = Span::covering(low, high, NEAR_TEXEL_M);
+        if span.min.x >= span.max.x || span.min.y >= span.max.y {
+            return None;
+        }
+        let (origin, cell_m, size, heights) = shoe.grid();
+        let (across, along) = axes;
+        let base = span.min;
+        // Canonical coordinates of texel `base + (i, j)`'s centre: `c0 + i·ci + j·cj`.
+        let d0 = (base.as_vec2() + 0.5) * NEAR_TEXEL_M - entry.datum();
+        let c0 = Vec2::new(d0.dot(across), d0.dot(along));
+        let ci = Vec2::new(across.x, along.x) * NEAR_TEXEL_M;
+        let cj = Vec2::new(across.y, along.y) * NEAR_TEXEL_M;
+        let mirror = if entry.mirrored() { -1.0 } else { 1.0 };
+        let u = [
+            (mirror * c0.x - origin.x) / cell_m,
+            mirror * ci.x / cell_m,
+            mirror * cj.x / cell_m,
+        ];
+        let v = [(c0.y - origin.y) / cell_m, ci.y / cell_m, cj.y / cell_m];
+        // Along a row, `0 ≤ a0 + a2·j + a1·i < extent` holds for `i` between two bounds, each
+        // linear in `j`.
+        let strip = |a: [f32; 3], extent: f32| {
+            (a[1].abs() > 1e-6).then(|| {
+                let r = 1.0 / a[1];
+                let (b0, b1, per_row) = (-a[0] * r, (extent - a[0]) * r, -a[2] * r);
+                let (lo, hi) = if r > 0.0 { (b0, b1) } else { (b1, b0) };
+                [lo - ROW_PAD, per_row, hi + ROW_PAD, per_row]
+            })
+        };
+        let full = entry.press() * 255.0;
+        let tilt = |c: Vec2| entry.plane(c) - entry.plane(Vec2::ZERO);
+        Some(Self {
+            heights,
+            width: size.x as i32,
+            height: size.y as i32,
+            span,
+            base,
+            strips: [strip(u, size.x as f32), strip(v, size.y as f32)],
+            u,
+            v,
+            plane: [entry.plane(c0), tilt(ci), tilt(cj)],
+            full,
+            per_metre: full / law.pattern_range_m,
+            pressure: entry.pressure,
+            contact_m: law.contact_m,
+        })
+    }
+
+    /// Merge this stamp into `texels`, the history cell whose low corner is global texel `min`,
+    /// over `clip` (inside that cell). Returns the cell's changed upload tiles as bits, and counts
+    /// each texel whose footprint channel left zero into `world`.
+    ///
+    /// Written as plain scalar loops over locals: this is the prints' hot loop, and the edit
+    /// profile builds the crate at `opt-level = 1`, where iterator adapters and closures are not
+    /// flattened away.
+    fn draw(&self, texels: &mut [[u8; 2]], min: IVec2, clip: Span, world: &mut WorldStore) -> u8 {
+        let [u0, u1, u2] = self.u;
+        let [v0, v1, v2] = self.v;
+        let [p0, p1, p2] = self.plane;
+        let (width, height) = (self.width, self.height);
+        let (wf, hf) = (width as f32, height as f32);
+        let (full, per_metre, contact_m, pressure) =
+            (self.full, self.per_metre, self.contact_m, self.pressure);
+        let heights = self.heights;
+        let mut changed = 0_u8;
+        for gj in clip.min.y..clip.max.y {
+            let j = gj - self.base.y;
+            let jf = j as f32;
+            // The row's columns on the pooled grid: inside both axes' strips.
+            let mut lo = (clip.min.x - self.base.x) as f32;
+            let mut hi = (clip.max.x - self.base.x - 1) as f32;
+            match self.strips[0] {
+                Some([lo0, lo_j, hi0, hi_j]) => {
+                    lo = lo.max(lo0 + lo_j * jf);
+                    hi = hi.min(hi0 + hi_j * jf);
+                }
+                None => {
+                    let at = u0 + u2 * jf;
+                    if !(at >= 0.0 && at < wf) {
+                        continue;
+                    }
+                }
+            }
+            match self.strips[1] {
+                Some([lo0, lo_j, hi0, hi_j]) => {
+                    lo = lo.max(lo0 + lo_j * jf);
+                    hi = hi.min(hi0 + hi_j * jf);
+                }
+                None => {
+                    let at = v0 + v2 * jf;
+                    if !(at >= 0.0 && at < hf) {
+                        continue;
+                    }
+                }
+            }
+            if hi < lo {
+                continue;
+            }
+            let (first, end) = (lo.ceil() as i32, hi.floor() as i32 + 1);
+            let (u_row, v_row, p_row) = (u0 + u2 * jf, v0 + v2 * jf, p0 + p2 * jf);
+            let local_j = gj - min.y;
+            // Global column `base.x + i` is local column `i + shift`.
+            let shift = self.base.x - min.x;
+            let row = local_j * CELL + shift;
+            let (mut first_changed, mut last_changed) = (i32::MAX, i32::MIN);
+            for i in first..end {
+                let fi = i as f32;
+                let (u, v) = (u_row + u1 * fi, v_row + v1 * fi);
+                if u < 0.0 || v < 0.0 || u >= wf || v >= hf {
+                    continue;
+                }
+                let lift = heights[(v as i32 * width + u as i32) as usize];
+                let plane = p_row + p1 * fi;
+                if lift >= OPEN_M || plane > contact_m {
+                    continue;
+                }
+                // The pattern, `1 − clearance / range`, times the press, in 1/255.
+                let r = (full - (lift + plane) * per_metre + 0.5).clamp(0.0, 255.0) as u8;
+                if r == 0 {
+                    continue;
+                }
+                let texel = &mut texels[(row + i) as usize];
+                let [old_r, old_g] = *texel;
+                if r <= old_r && pressure <= old_g {
+                    continue;
+                }
+                *texel = [old_r.max(r), old_g.max(pressure)];
+                first_changed = first_changed.min(i);
+                last_changed = i;
+                if old_g == 0 {
+                    world.reach(IVec2::new(i + shift, local_j) + min);
+                }
+            }
+            if first_changed <= last_changed {
+                let tile_row = (local_j / NEAR_TILE) * TILES_PER_CELL;
+                for tile in (first_changed + shift) / NEAR_TILE..=(last_changed + shift) / NEAR_TILE
+                {
+                    changed |= 1 << (tile_row + tile);
+                }
+            }
+        }
+        changed
+    }
+}
+
+/// Spatial stamp history, checkpointed on the global near raster ([module doc](self)).
 #[derive(Default)]
 pub(crate) struct StampLog {
     count: usize,
@@ -322,7 +506,7 @@ impl Checkpoint {
 
     fn raw(&mut self) -> &mut [[u8; 2]] {
         if !matches!(self, Self::Raw(_)) {
-            let mut texels = vec![[0, 0]; (LOG_CELL_SIDE * LOG_CELL_SIDE) as usize];
+            let mut texels = vec![[0, 0]; (CELL * CELL) as usize];
             self.visit(|i, value| texels[i] = value);
             *self = Self::Raw(texels.into_boxed_slice());
         }
@@ -358,94 +542,63 @@ impl Checkpoint {
 }
 
 impl StampLog {
-    pub(crate) fn push(&mut self, entry: StampEntry, shoes: &[ClearanceStamp], law: &PrintLaw) {
-        let Some(shoe) = shoes.get(entry.shoe()) else {
-            return;
+    /// The raw texels of cell `key`, made hot. Compression happens only on cache turnover, so a
+    /// pivot over the same ground never recompresses a cell it keeps writing.
+    fn hot(&mut self, key: IVec2) -> &mut LogCell {
+        if !self.cells.get(&key).is_some_and(|cell| cell.active) {
+            if self.active.len() == ACTIVE_CELLS {
+                let oldest = (0..self.active.len())
+                    .min_by_key(|&i| self.cells[&self.active[i]].last)
+                    .expect("a full cache");
+                let cold = self.active.swap_remove(oldest);
+                let cell = self.cells.get_mut(&cold).expect("active history cell");
+                if let Checkpoint::Raw(texels) = std::mem::take(&mut cell.checkpoint) {
+                    cell.checkpoint = Checkpoint::packed(texels.into_vec());
+                }
+                cell.active = false;
+            }
+            let cell = self.cells.entry(key).or_default();
+            cell.checkpoint.raw();
+            cell.active = true;
+            self.active.push(key);
+        }
+        let cell = self.cells.get_mut(&key).expect("a hot history cell");
+        cell.last = self.count;
+        cell
+    }
+
+    /// Copy cell `key`'s texels into `out` (row-major, [`CELL`]²). `false`, with `out` untouched,
+    /// where nothing was ever printed.
+    fn copy_cell(&self, key: IVec2, out: &mut [[u8; 2]]) -> bool {
+        let Some(cell) = self.cells.get(&key) else {
+            return false;
         };
-        self.count += 1;
-        let (low, high) = entry.world_bounds(shoe);
-        let span = Span::covering(low, high, NEAR_TEXEL_M);
-        if span.min.x >= span.max.x || span.min.y >= span.max.y {
-            return;
-        }
-        let (low, high) = (
-            span.min.div_euclid(IVec2::splat(LOG_CELL_SIDE)),
-            (span.max - 1).div_euclid(IVec2::splat(LOG_CELL_SIDE)),
-        );
-        for j in low.y..=high.y {
-            for i in low.x..=high.x {
-                let key = IVec2::new(i, j);
-                self.activate(key);
-                let cell = self.cells.get_mut(&key).expect("activated history cell");
-                cell.last = self.count;
-                let texels = cell.checkpoint.raw();
-                let min = key * LOG_CELL_SIDE;
-                raster(
-                    &entry,
-                    shoe,
-                    law,
-                    Span {
-                        min,
-                        max: min + LOG_CELL_SIDE,
-                    },
-                    |g, value| {
-                        let c = g - min;
-                        let texel = &mut texels[(c.y * LOG_CELL_SIDE + c.x) as usize];
-                        *texel = [texel[0].max(value[0]), texel[1].max(value[1])];
-                    },
-                );
+        match &cell.checkpoint {
+            Checkpoint::Empty => return false,
+            Checkpoint::Raw(texels) => out.copy_from_slice(texels),
+            checkpoint => {
+                out.fill([0, 0]);
+                checkpoint.visit(|i, value| out[i] = value);
             }
         }
+        true
     }
 
-    /// Activate a cell for incremental writes. Compression happens only on cache turnover,
-    /// avoiding periodic whole-cell recompression spikes while tanks pivot over the same ground.
-    fn activate(&mut self, key: IVec2) {
-        if self.cells.get(&key).is_some_and(|cell| cell.active) {
-            return;
-        }
-        if self.active.len() == ACTIVE_LOG_CELLS {
-            let oldest = (0..self.active.len())
-                .min_by_key(|&i| self.cells[&self.active[i]].last)
-                .expect("a full cache");
-            let cold = self.active.swap_remove(oldest);
-            let cell = self.cells.get_mut(&cold).expect("active history cell");
-            if let Checkpoint::Raw(texels) = std::mem::take(&mut cell.checkpoint) {
-                cell.checkpoint = Checkpoint::packed(texels.into_vec());
-            }
-            cell.active = false;
-        }
-        let cell = self.cells.entry(key).or_default();
-        cell.checkpoint.raw();
-        cell.active = true;
-        self.active.push(key);
-    }
-
-    /// Reproduce the exact historical near raster in `span`, independent of cache residency.
+    /// The historical texels in `span`, independent of cache residency.
+    #[cfg(test)]
     fn draw(&self, span: Span, mut put: impl FnMut(IVec2, [u8; 2])) {
-        let low = span.min.div_euclid(IVec2::splat(LOG_CELL_SIDE));
-        let high = (span.max - 1).div_euclid(IVec2::splat(LOG_CELL_SIDE));
+        let low = span.min.div_euclid(IVec2::splat(CELL));
+        let high = (span.max - 1).div_euclid(IVec2::splat(CELL));
         for j in low.y..=high.y {
             for i in low.x..=high.x {
                 let key = IVec2::new(i, j);
                 let Some(cell) = self.cells.get(&key) else {
                     continue;
                 };
-                let min = key * LOG_CELL_SIDE;
-                let Some(clip) = span.intersect(Span {
-                    min,
-                    max: min + LOG_CELL_SIDE,
-                }) else {
-                    continue;
-                };
+                let min = key * CELL;
                 cell.checkpoint.visit(|index, value| {
-                    let g = min
-                        + IVec2::new(index as i32 % LOG_CELL_SIDE, index as i32 / LOG_CELL_SIDE);
-                    if g.x >= clip.min.x
-                        && g.x < clip.max.x
-                        && g.y >= clip.min.y
-                        && g.y < clip.max.y
-                    {
+                    let g = min + IVec2::new(index as i32 % CELL, index as i32 / CELL);
+                    if span.contains(g) {
                         put(g, value);
                     }
                 });
@@ -453,40 +606,9 @@ impl StampLog {
         }
     }
 
+    /// Stamps laid so far.
     pub(crate) fn len(&self) -> usize {
         self.count
-    }
-}
-
-/// The one near-grid raster law, shared by live stamps and history checkpoints. It samples
-/// global texel centres, so clipping a draw into cells or recentre strips cannot change it.
-fn raster(
-    entry: &StampEntry,
-    shoe: &ClearanceStamp,
-    law: &PrintLaw,
-    clip: Span,
-    mut put: impl FnMut(IVec2, [u8; 2]),
-) {
-    let (low, high) = entry.world_bounds(shoe);
-    let Some(span) = Span::covering(low, high, NEAR_TEXEL_M).intersect(clip) else {
-        return;
-    };
-    let axes = entry.axes();
-    for j in span.min.y..span.max.y {
-        for i in span.min.x..span.max.x {
-            let g = IVec2::new(i, j);
-            let world = (g.as_vec2() + 0.5) * NEAR_TEXEL_M;
-            let Some((clearance, footprint)) = entry.at(shoe, world, law, axes) else {
-                continue;
-            };
-            let value = [
-                press(clearance, law.range_m),
-                if footprint { 255 } else { 0 },
-            ];
-            if value != [0, 0] {
-                put(g, value);
-            }
-        }
     }
 }
 
@@ -516,23 +638,26 @@ pub(crate) struct Upload {
     pub(crate) data: Vec<u8>,
 }
 
-/// The near store ([module doc](self)).
+/// The near store ([module doc](self)): which cells the GPU copy holds, which of their tiles wait
+/// for an upload, and where the GPU copy may still hold marks.
 pub(crate) struct NearStore {
-    /// The window's low corner in global texels; `None` before the first placement.
+    /// The window's low corner in global texels, a multiple of [`CELL`]; `None` before the first
+    /// placement.
     origin: Option<IVec2>,
-    /// `[press, footprint]` per storage texel.
-    texels: Vec<[u8; 2]>,
-    /// Storage tiles written since the last [`Self::take_uploads`].
-    dirty: Vec<bool>,
+    /// History cells in the window whose upload tiles changed, as tile bits.
+    dirty: HashMap<IVec2, u8>,
+    /// Per storage upload tile: whether the GPU copy may hold a nonzero texel there. Zero-initialised
+    /// by wgpu, so all false at startup.
+    gpu_nonzero: Vec<bool>,
 }
 
 impl Default for NearStore {
     fn default() -> Self {
-        let tiles = (NEAR_SIDE / TILE) as usize;
+        let tiles = (NEAR_SIDE as i32 / NEAR_TILE) as usize;
         Self {
             origin: None,
-            texels: vec![[0, 0]; (NEAR_SIDE * NEAR_SIDE) as usize],
-            dirty: vec![false; tiles * tiles],
+            dirty: HashMap::default(),
+            gpu_nonzero: vec![false; tiles * tiles],
         }
     }
 }
@@ -551,66 +676,22 @@ impl NearStore {
         self.origin.map(|origin| origin.as_vec2() * NEAR_TEXEL_M)
     }
 
-    fn slot(g: IVec2) -> (usize, UVec2) {
-        let side = NEAR_SIDE as i32;
-        let s = UVec2::new(g.x.rem_euclid(side) as u32, g.y.rem_euclid(side) as u32);
-        ((s.y * NEAR_SIDE + s.x) as usize, s)
+    fn holds(&self, key: IVec2) -> bool {
+        self.window()
+            .is_some_and(|window| window.contains(key * CELL))
     }
 
-    fn mark(&mut self, storage: UVec2) {
-        let tiles = NEAR_SIDE / TILE;
-        self.dirty[((storage.y / TILE) * tiles + storage.x / TILE) as usize] = true;
-    }
-
-    /// The texel at global `g`, as stored: meaningful only inside [`Self::window`].
-    #[cfg(test)]
-    pub(crate) fn texel(&self, g: IVec2) -> [u8; 2] {
-        self.texels[Self::slot(g).0]
-    }
-
-    /// Draw one stamp into the window.
-    pub(crate) fn stamp(&mut self, entry: &StampEntry, shoes: &[ClearanceStamp], law: &PrintLaw) {
-        if let Some(window) = self.window() {
-            self.draw(entry, shoes, law, window);
+    /// Note that cell `key`'s tiles `bits` changed.
+    fn mark(&mut self, key: IVec2, bits: u8) {
+        if bits != 0 && self.holds(key) {
+            *self.dirty.entry(key).or_default() |= bits;
         }
     }
 
-    fn draw(&mut self, entry: &StampEntry, shoes: &[ClearanceStamp], law: &PrintLaw, clip: Span) {
-        if let Some(shoe) = shoes.get(entry.shoe()) {
-            raster(entry, shoe, law, clip, |g, value| self.merge(g, value));
-        }
-    }
-
-    fn merge(&mut self, g: IVec2, value: [u8; 2]) {
-        let (index, storage) = Self::slot(g);
-        let texel = &mut self.texels[index];
-        let merged = [texel[0].max(value[0]), texel[1].max(value[1])];
-        if merged != *texel {
-            *texel = merged;
-            self.mark(storage);
-        }
-    }
-
-    /// Clear `span` (inside the window) and restore its exact raster from spatial history.
-    fn redraw(&mut self, span: Span, log: &StampLog) {
-        for j in span.min.y..span.max.y {
-            for i in span.min.x..span.max.x {
-                let (index, storage) = Self::slot(IVec2::new(i, j));
-                // Unchanged zero texels already match the GPU, including its zero-initialized
-                // image at startup. Only clearing an old print needs an upload.
-                if self.texels[index] != [0, 0] {
-                    self.texels[index] = [0, 0];
-                    self.mark(storage);
-                }
-            }
-        }
-        log.draw(span, |g, value| self.merge(g, value));
-    }
-
-    /// Follow the eye at world XZ `eye`: once it has wandered more than [`RECENTRE_SLACK`] from
-    /// the window's centre (or on the first call), move the window onto it and redraw the texels
-    /// that entered. Whether the window moved.
-    pub(crate) fn recentre(&mut self, eye: Vec2, log: &StampLog) -> bool {
+    /// Follow the eye at world XZ `eye`: once it has wandered more than [`RECENTRE_SLACK`] from the
+    /// window's centre (or on the first call), move the window onto it in whole cells, and queue
+    /// every cell that entered. Whether the window moved.
+    fn recentre(&mut self, eye: Vec2) -> bool {
         let half = NEAR_SIDE as i32 / 2;
         let eye = (eye / NEAR_TEXEL_M).floor().as_ivec2();
         if let Some(origin) = self.origin
@@ -618,45 +699,66 @@ impl NearStore {
         {
             return false;
         }
-        let origin = (eye - half).div_euclid(IVec2::splat(RECENTRE_STEP)) * RECENTRE_STEP;
-        let window = Span {
-            min: origin,
-            max: origin + NEAR_SIDE as i32,
-        };
-        let entered = match self.window() {
-            Some(old) => window.minus(old),
-            None => vec![window],
-        };
+        let old = self.window();
+        let origin = (eye - half).div_euclid(IVec2::splat(CELL)) * CELL;
         self.origin = Some(origin);
-        for span in entered {
-            self.redraw(span, log);
+        let cells = NEAR_SIDE as i32 / CELL;
+        let all = (1 << (TILES_PER_CELL * TILES_PER_CELL)) - 1;
+        for j in 0..cells {
+            for i in 0..cells {
+                let key = origin / CELL + IVec2::new(i, j);
+                if !old.is_some_and(|old| old.contains(key * CELL)) {
+                    self.dirty.insert(key, all);
+                }
+            }
         }
         true
     }
 
-    /// The tiles written since the last call, as uploads of the GPU copy's single level.
-    pub(crate) fn take_uploads(&mut self) -> Vec<Upload> {
-        let tiles = NEAR_SIDE / TILE;
+    /// The tiles written since the last call, read out of `log`, as uploads of the GPU copy's
+    /// single level. A tile whose history is empty is sent only where the GPU may still hold an old
+    /// mark there, as zeros.
+    fn take_uploads(&mut self, log: &StampLog) -> Vec<Upload> {
         let mut out = Vec::new();
-        for (index, dirty) in self.dirty.iter_mut().enumerate() {
-            if !std::mem::take(dirty) {
+        if self.dirty.is_empty() {
+            return out;
+        }
+        let mut cell = vec![[0_u8; 2]; (CELL * CELL) as usize];
+        let tiles = NEAR_SIDE as i32 / NEAR_TILE;
+        for (key, bits) in std::mem::take(&mut self.dirty) {
+            if !self.holds(key) {
                 continue;
             }
-            let tile = UVec2::new(index as u32 % tiles, index as u32 / tiles) * TILE;
-            let mut data = Vec::with_capacity((TILE * TILE * 2) as usize);
-            for j in tile.y..tile.y + TILE {
-                let row = (j * NEAR_SIDE + tile.x) as usize;
-                for texel in &self.texels[row..row + TILE as usize] {
-                    data.extend_from_slice(texel);
-                }
+            if !log.copy_cell(key, &mut cell) {
+                cell.fill([0, 0]);
             }
-            out.push(Upload {
-                store: Store::Near,
-                level: 0,
-                origin: tile,
-                size: UVec2::splat(TILE),
-                data,
-            });
+            for tile in 0..TILES_PER_CELL * TILES_PER_CELL {
+                if bits & (1 << tile) == 0 {
+                    continue;
+                }
+                let at = IVec2::new(tile % TILES_PER_CELL, tile / TILES_PER_CELL) * NEAR_TILE;
+                let storage = (key * CELL + at).rem_euclid(IVec2::splat(NEAR_SIDE as i32));
+                let slot = ((storage.y / NEAR_TILE) * tiles + storage.x / NEAR_TILE) as usize;
+                let mut data = Vec::with_capacity((NEAR_TILE * NEAR_TILE * 2) as usize);
+                for row in at.y..at.y + NEAR_TILE {
+                    let start = (row * CELL + at.x) as usize;
+                    for texel in &cell[start..start + NEAR_TILE as usize] {
+                        data.extend_from_slice(texel);
+                    }
+                }
+                let nonzero = data.iter().any(|&b| b != 0);
+                if !nonzero && !self.gpu_nonzero[slot] {
+                    continue;
+                }
+                self.gpu_nonzero[slot] = nonzero;
+                out.push(Upload {
+                    store: Store::Near,
+                    level: 0,
+                    origin: storage.as_uvec2(),
+                    size: UVec2::splat(NEAR_TILE as u32),
+                    data,
+                });
+            }
         }
         out
     }
@@ -664,34 +766,59 @@ impl NearStore {
 
 /// The world layer ([module doc](self)).
 pub(crate) struct WorldStore {
-    /// World XZ of texel `(0, 0)`'s low corner.
-    origin_m: Vec2,
-    texel_m: f32,
     side: u32,
-    /// Level 0: the 8 × 8 footprint samples of each texel, one bit each. Tiles are
-    /// allocated only when printed; empty map area costs one optional pointer per tile.
-    masks: Vec<Option<Box<[u64]>>>,
+    /// The world texel (along either axis) the near texel `near_min + k` falls in, or `u16::MAX`
+    /// off the map. The map is a square centred on the origin, so one table serves both axes.
+    near_to_world: Vec<u16>,
+    near_min: i32,
+    /// Near texel centres inside world texel `k` along an axis: a world texel holds
+    /// `per_axis[i] × per_axis[j]` of them.
+    per_axis: Vec<u8>,
+    /// Level 0: footprint near texels counted per world texel, in [`WORLD_COUNT_TILE`]² tiles
+    /// allocated only where printed.
+    counts: Vec<Option<Box<[u8]>>>,
     /// Levels 1 and up, coverage in 1/255: `mips[k − 1]` is level `k`.
     mips: Vec<Vec<u8>>,
-    /// Level-0 tiles written since the last [`Self::take_uploads`].
+    /// Level-0 upload tiles written since the last [`Self::take_uploads`]: a flag per tile, and the
+    /// flagged tiles as a list, so a frame's work is the tiles it touched and never the whole map.
     dirty: Vec<bool>,
+    dirty_tiles: Vec<UVec2>,
 }
 
 impl WorldStore {
     /// A world layer of `side`² texels over the square of `size_m` centred on the origin.
     pub(crate) fn new(size_m: f32, side: u32) -> Self {
-        let mask_tiles = side.div_ceil(TILE) as usize;
+        let texel_m = f64::from(size_m) / f64::from(side);
+        let origin_m = -0.5 * f64::from(size_m);
+        let near_m = f64::from(NEAR_TEXEL_M);
+        let near_min = (origin_m / near_m).floor() as i32 - 1;
+        let near_max = (-origin_m / near_m).ceil() as i32 + 1;
+        let mut per_axis = vec![0_u8; side as usize];
+        let near_to_world = (near_min..near_max)
+            .map(|g| {
+                let w = (((f64::from(g) + 0.5) * near_m - origin_m) / texel_m).floor();
+                if (0.0..f64::from(side)).contains(&w) {
+                    per_axis[w as usize] += 1;
+                    w as u16
+                } else {
+                    u16::MAX
+                }
+            })
+            .collect();
+        let count_tiles = side.div_ceil(WORLD_COUNT_TILE) as usize;
         let upload_tiles = side.div_ceil(WORLD_UPLOAD_TILE) as usize;
         let mips = (1..Self::levels_of(side))
             .map(|k| vec![0; ((side >> k) * (side >> k)) as usize])
             .collect();
         Self {
-            origin_m: Vec2::splat(-0.5 * size_m),
-            texel_m: size_m / side as f32,
             side,
-            masks: vec![None; mask_tiles * mask_tiles],
+            near_to_world,
+            near_min,
+            per_axis,
+            counts: vec![None; count_tiles * count_tiles],
             mips,
             dirty: vec![false; upload_tiles * upload_tiles],
+            dirty_tiles: Vec::new(),
         }
     }
 
@@ -704,75 +831,69 @@ impl WorldStore {
         Self::levels_of(self.side)
     }
 
+    /// The world texel holding near texel `g`'s centre, if it is on the map.
+    fn world_of(&self, g: IVec2) -> Option<UVec2> {
+        let at = |g: i32| {
+            self.near_to_world
+                .get(usize::try_from(g - self.near_min).ok()?)
+                .copied()
+                .filter(|&w| w != u16::MAX)
+        };
+        Some(UVec2::new(u32::from(at(g.x)?), u32::from(at(g.y)?)))
+    }
+
+    /// Near texel `g` became footprint: count it into its world texel.
+    fn reach(&mut self, g: IVec2) {
+        let Some(w) = self.world_of(g) else {
+            return;
+        };
+        let tiles = self.side.div_ceil(WORLD_COUNT_TILE);
+        let tile = self.counts
+            [((w.y / WORLD_COUNT_TILE) * tiles + w.x / WORLD_COUNT_TILE) as usize]
+            .get_or_insert_with(|| {
+                vec![0; (WORLD_COUNT_TILE * WORLD_COUNT_TILE) as usize].into_boxed_slice()
+            });
+        let count = &mut tile
+            [((w.y % WORLD_COUNT_TILE) * WORLD_COUNT_TILE + w.x % WORLD_COUNT_TILE) as usize];
+        *count = count.saturating_add(1);
+        let upload_tiles = self.side.div_ceil(WORLD_UPLOAD_TILE);
+        let tile = w / WORLD_UPLOAD_TILE;
+        let flag = &mut self.dirty[(tile.y * upload_tiles + tile.x) as usize];
+        if !std::mem::replace(flag, true) {
+            self.dirty_tiles.push(tile);
+        }
+    }
+
     /// Coverage of texel `(i, j)` at mip `level`, in 1/255.
     pub(crate) fn coverage(&self, level: u32, i: u32, j: u32) -> u8 {
         if level == 0 {
-            let tiles = self.side.div_ceil(TILE);
-            let bits = self.masks[((j / TILE) * tiles + i / TILE) as usize]
+            let tiles = self.side.div_ceil(WORLD_COUNT_TILE);
+            let count = self.counts
+                [((j / WORLD_COUNT_TILE) * tiles + i / WORLD_COUNT_TILE) as usize]
                 .as_ref()
-                .map_or(0, |tile| tile[((j % TILE) * TILE + i % TILE) as usize]);
-            ((bits.count_ones() * 255 + 32) / 64) as u8
+                .map_or(0, |tile| {
+                    tile[((j % WORLD_COUNT_TILE) * WORLD_COUNT_TILE + i % WORLD_COUNT_TILE)
+                        as usize]
+                });
+            let total = u32::from(self.per_axis[i as usize]) * u32::from(self.per_axis[j as usize]);
+            if total == 0 {
+                return 0;
+            }
+            ((u32::from(count) * 255 + total / 2) / total).min(255) as u8
         } else {
             self.mips[level as usize - 1][(j * (self.side >> level) + i) as usize]
         }
     }
 
-    /// Draw one stamp's footprint.
-    pub(crate) fn stamp(&mut self, entry: &StampEntry, shoes: &[ClearanceStamp], law: &PrintLaw) {
-        let Some(shoe) = shoes.get(entry.shoe()) else {
-            return;
-        };
-        let (low, high) = entry.world_bounds(shoe);
-        let sample_m = self.texel_m / WORLD_SAMPLES as f32;
-        let Some(span) = Span::covering(low - self.origin_m, high - self.origin_m, sample_m)
-            .intersect(Span {
-                min: IVec2::ZERO,
-                max: IVec2::splat((self.side * WORLD_SAMPLES) as i32),
-            })
-        else {
-            return;
-        };
-        let axes = entry.axes();
-        let tiles = self.side.div_ceil(TILE);
-        for sj in span.min.y..span.max.y {
-            for si in span.min.x..span.max.x {
-                let world = self.origin_m + (Vec2::new(si as f32, sj as f32) + 0.5) * sample_m;
-                if !entry
-                    .at(shoe, world, law, axes)
-                    .is_some_and(|(_, footprint)| footprint)
-                {
-                    continue;
-                }
-                let (si, sj) = (si as u32, sj as u32);
-                let (i, j) = (si / WORLD_SAMPLES, sj / WORLD_SAMPLES);
-                let tile_index = ((j / TILE) * tiles + i / TILE) as usize;
-                let tile = self.masks[tile_index]
-                    .get_or_insert_with(|| vec![0; (TILE * TILE) as usize].into_boxed_slice());
-                let mask = &mut tile[((j % TILE) * TILE + i % TILE) as usize];
-                let bit = 1_u64 << ((sj % WORLD_SAMPLES) * WORLD_SAMPLES + si % WORLD_SAMPLES);
-                if *mask & bit == 0 {
-                    *mask |= bit;
-                    let upload_tiles = self.side.div_ceil(WORLD_UPLOAD_TILE);
-                    self.dirty[((j / WORLD_UPLOAD_TILE) * upload_tiles + i / WORLD_UPLOAD_TILE)
-                        as usize] = true;
-                }
-            }
-        }
-    }
-
     /// The level-0 tiles written since the last call and every mip tile above them, rebuilt and as
     /// uploads, finest level first.
-    pub(crate) fn take_uploads(&mut self) -> Vec<Upload> {
+    fn take_uploads(&mut self) -> Vec<Upload> {
         let tiles = self.side.div_ceil(WORLD_UPLOAD_TILE);
-        let mut dirty: Vec<UVec2> = self
-            .dirty
-            .iter_mut()
-            .enumerate()
-            .filter_map(|(index, dirty)| {
-                std::mem::take(dirty)
-                    .then(|| UVec2::new(index as u32 % tiles, index as u32 / tiles))
-            })
-            .collect();
+        let mut dirty = std::mem::take(&mut self.dirty_tiles);
+        for t in &dirty {
+            self.dirty[(t.y * tiles + t.x) as usize] = false;
+        }
+        dirty.sort_unstable_by_key(|t| (t.y, t.x));
         let mut out = Vec::new();
         for level in 0..self.levels() {
             let side = self.side >> level;
@@ -823,6 +944,67 @@ impl WorldStore {
     }
 }
 
+/// The three stores together: every stamp goes through [`Self::stamp`], every frame's GPU writes
+/// come out of [`Self::take_uploads`].
+pub(crate) struct PrintStores {
+    pub(crate) log: StampLog,
+    pub(crate) near: NearStore,
+    pub(crate) world: WorldStore,
+}
+
+impl PrintStores {
+    /// Empty stores for a map of side `world_size_m`, its world layer `world_side`² texels.
+    pub(crate) fn new(world_size_m: f32, world_side: u32) -> Self {
+        Self {
+            log: StampLog::default(),
+            near: NearStore::default(),
+            world: WorldStore::new(world_size_m, world_side),
+        }
+    }
+
+    /// Lay one stamp: rasterise it once into the history, and feed what it changed to the near
+    /// store's uploads and the world layer's counts.
+    pub(crate) fn stamp(&mut self, entry: &StampEntry, shoes: &[ClearanceStamp], law: &PrintLaw) {
+        let Some(shoe) = shoes.get(entry.shoe()) else {
+            return;
+        };
+        self.log.count += 1;
+        let Some(raster) = Raster::new(entry, shoe, law) else {
+            return;
+        };
+        let low = raster.span.min.div_euclid(IVec2::splat(CELL));
+        let high = (raster.span.max - 1).div_euclid(IVec2::splat(CELL));
+        for j in low.y..=high.y {
+            for i in low.x..=high.x {
+                let key = IVec2::new(i, j);
+                let min = key * CELL;
+                let Some(clip) = raster.span.intersect(Span {
+                    min,
+                    max: min + CELL,
+                }) else {
+                    continue;
+                };
+                let cell = self.log.hot(key);
+                let texels = cell.checkpoint.raw();
+                let changed = raster.draw(texels, min, clip, &mut self.world);
+                self.near.mark(key, changed);
+            }
+        }
+    }
+
+    /// Keep the near window on the eye at world XZ `eye`. Whether it moved.
+    pub(crate) fn recentre(&mut self, eye: Vec2) -> bool {
+        self.near.recentre(eye)
+    }
+
+    /// Every GPU write since the last call: the near store's changed tiles, then the world layer's.
+    pub(crate) fn take_uploads(&mut self) -> Vec<Upload> {
+        let mut uploads = self.near.take_uploads(&self.log);
+        uploads.extend(self.world.take_uploads());
+        uploads
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -840,9 +1022,82 @@ mod tests {
     }
 
     const LAW: PrintLaw = PrintLaw {
-        range_m: 0.15,
+        pattern_range_m: 0.10,
         contact_m: 0.03,
     };
+
+    /// Fixture ground pressure, kPa.
+    const KPA: f32 = 100.0;
+
+    fn entry(datum: Vec2, yaw: f32, lift: f32, tilt: Vec2, mirrored: bool) -> StampEntry {
+        StampEntry::new(
+            Placement {
+                datum,
+                yaw,
+                lift,
+                tilt,
+                shoe: 0,
+                mirrored,
+            },
+            1.0,
+            KPA,
+        )
+    }
+
+    /// The GPU copies as the uploads leave them: what the shader would read.
+    struct Gpu {
+        near: Vec<[u8; 2]>,
+        world: Vec<Vec<u8>>,
+    }
+
+    impl Gpu {
+        fn new(world_side: u32) -> Self {
+            Self {
+                near: vec![[0, 0]; (NEAR_SIDE * NEAR_SIDE) as usize],
+                world: (0..=world_side.ilog2())
+                    .map(|k| vec![0; ((world_side >> k) * (world_side >> k)) as usize])
+                    .collect(),
+            }
+        }
+
+        fn apply(&mut self, uploads: &[Upload], world_side: u32) {
+            for upload in uploads {
+                for j in 0..upload.size.y {
+                    for i in 0..upload.size.x {
+                        let (x, y) = (upload.origin.x + i, upload.origin.y + j);
+                        let k = (j * upload.size.x + i) as usize;
+                        match upload.store {
+                            Store::Near => {
+                                self.near[(y * NEAR_SIDE + x) as usize] =
+                                    [upload.data[2 * k], upload.data[2 * k + 1]];
+                            }
+                            Store::World => {
+                                let side = world_side >> upload.level;
+                                self.world[upload.level as usize][(y * side + x) as usize] =
+                                    upload.data[k];
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        fn near_at(&self, g: IVec2) -> [u8; 2] {
+            let s = g.rem_euclid(IVec2::splat(NEAR_SIDE as i32));
+            self.near[(s.y as u32 * NEAR_SIDE + s.x as u32) as usize]
+        }
+    }
+
+    /// Stores over a fixture map, with their GPU copies.
+    fn stores() -> (PrintStores, Gpu) {
+        (PrintStores::new(1500.0, WORLD_SIDE), Gpu::new(WORLD_SIDE))
+    }
+
+    fn flush(stores: &mut PrintStores, gpu: &mut Gpu) -> Vec<Upload> {
+        let uploads = stores.take_uploads();
+        gpu.apply(&uploads, WORLD_SIDE);
+        uploads
+    }
 
     /// The stores must retain the grounded edge of a tilted shoe. Clipping an accepted
     /// contact's slope while keeping its lift raises that edge and erases its footprint.
@@ -865,12 +1120,11 @@ mod tests {
                 |_| Some(0.0),
             )
             .expect("one edge rests on the ground");
-            let entry = StampEntry::new(
+            let entry = entry(
                 contact.datum,
                 contact.yaw,
                 contact.lift,
                 contact.tilt,
-                0,
                 false,
             );
             let edge = Vec2::new(-angle.signum() * (bounds.1.x - 0.01), 0.0);
@@ -878,11 +1132,51 @@ mod tests {
                 entry.plane(edge).abs() < LAW.contact_m,
                 "the encoded {degrees} degree contact retains its grounded edge"
             );
-            assert!(
-                entry
-                    .at(&shoe, edge, &LAW, entry.axes())
-                    .is_some_and(|(_, footprint)| footprint)
-            );
+            assert!(entry.texel_at(&shoe, edge, &LAW).is_some());
+        }
+    }
+
+    /// THE RASTER IS THE POINT LAW. The incremental row walk must write exactly the texels the
+    /// law gives at their centres, for every heading, mirror and tilt: a walk whose row interval
+    /// clipped a texel, or whose increments drifted from the law, would print a shoe with ragged
+    /// ends that the recentre test, comparing the store with itself, cannot see.
+    #[test]
+    fn the_row_walk_writes_what_the_point_law_gives() {
+        let shoes = vec![ClearanceStamp::pooled(&sole(), NEAR_TEXEL_M)];
+        for (k, (yaw, tilt, mirrored)) in [
+            (0.0, Vec2::ZERO, false),
+            (0.3, Vec2::new(0.05, -0.02), true),
+            (1.9, Vec2::new(-0.1, 0.04), false),
+            (std::f32::consts::FRAC_PI_2, Vec2::ZERO, true),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let (mut stores, _) = stores();
+            let entry = entry(Vec2::new(-3.1, 7.7 + k as f32), yaw, 0.002, tilt, mirrored);
+            stores.stamp(&entry, &shoes, &LAW);
+            let (low, high) = entry.world_bounds(&shoes[0]);
+            let span = Span::covering(low - 0.2, high + 0.2, NEAR_TEXEL_M);
+            let mut drawn: HashMap<IVec2, [u8; 2]> = HashMap::default();
+            stores.log.draw(span, |g, value| {
+                drawn.insert(g, value);
+            });
+            let mut printed = 0;
+            for j in span.min.y..span.max.y {
+                for i in span.min.x..span.max.x {
+                    let g = IVec2::new(i, j);
+                    let world = (g.as_vec2() + 0.5) * NEAR_TEXEL_M;
+                    let want = entry.texel_at(&shoes[0], world, &LAW).unwrap_or([0, 0]);
+                    let got = drawn.get(&g).copied().unwrap_or([0, 0]);
+                    // The walk adds where the point law multiplies; a rounding apart at most.
+                    assert!(
+                        want[0].abs_diff(got[0]) <= 1 && (want[1] == 0) == (got[1] == 0),
+                        "case {k}, texel {g}: law {want:?}, walk {got:?}"
+                    );
+                    printed += usize::from(got != [0, 0]);
+                }
+            }
+            assert!(printed > 30, "case {k} prints a sole: {printed} texels");
         }
     }
 
@@ -900,215 +1194,319 @@ mod tests {
                 let datum = centre + (Vec2::new(next(), next()) * 2.0 - 1.0) * spread;
                 let yaw = next() * std::f32::consts::TAU;
                 let tilt = (Vec2::new(next(), next()) - 0.5) * 0.2;
-                StampEntry::new(datum, yaw, 0.01 * next(), tilt, 0, next() < 0.5)
+                StampEntry::new(
+                    Placement {
+                        datum,
+                        yaw,
+                        lift: 0.01 * next(),
+                        tilt,
+                        shoe: 0,
+                        mirrored: next() < 0.5,
+                    },
+                    0.25 + 0.75 * next(),
+                    40.0 + 200.0 * next(),
+                )
             })
             .collect()
     }
 
-    /// THE RECENTRE'S CONTRACT: the near store is always what a fresh draw of the log over its
-    /// window gives. Stamps land while the window sits at A, the eye leaves for B (most of the way
-    /// across the window, so a strip of A survives and the rest is redrawn) where more stamps land,
-    /// and comes back. Every texel of the window must then equal a store placed at A for the
-    /// first time over the same log, which is what a recentre that forgot to clear the entering
-    /// strip, cleared the wrong slot of the torus, or skipped a stamp straddling a strip's edge
-    /// would break. The stamps straddle both windows and the strip edges by construction.
-    #[test]
-    fn a_recentre_away_and_back_redraws_what_a_fresh_store_holds() {
-        let shoes = vec![ClearanceStamp::pooled(&sole(), NEAR_TEXEL_M)];
-        let mut log = StampLog::default();
-        let mut store = NearStore::default();
-        let (a, b) = (Vec2::new(10.0, -20.0), Vec2::new(70.0, 15.0));
-        assert!(store.recentre(a, &log));
-        let lay = |entries: Vec<StampEntry>, log: &mut StampLog, store: &mut NearStore| {
-            for entry in entries {
-                log.push(entry, &shoes, &LAW);
-                store.stamp(&entry, &shoes, &LAW);
-            }
-        };
-        lay(scatter((a + b) * 0.5, 60.0, 3000, 1), &mut log, &mut store);
-        assert!(store.recentre(b, &log), "the eye left the slack");
-        lay(scatter((a + b) * 0.5, 60.0, 3000, 2), &mut log, &mut store);
-        assert!(store.recentre(a, &log), "and came back");
-
-        let mut fresh = NearStore::default();
-        fresh.recentre(a, &log);
-        let window = store.window().expect("placed");
-        assert_eq!(Some(window), fresh.window());
+    /// Every texel of the window, as the GPU holds it, against the history.
+    fn assert_gpu_is_history(stores: &PrintStores, gpu: &Gpu) -> usize {
+        let window = stores.near.window().expect("placed");
+        let mut history: HashMap<IVec2, [u8; 2]> = HashMap::default();
+        stores.log.draw(window, |g, value| {
+            history.insert(g, value);
+        });
         let mut printed = 0;
         for j in window.min.y..window.max.y {
             for i in window.min.x..window.max.x {
                 let g = IVec2::new(i, j);
-                assert_eq!(store.texel(g), fresh.texel(g), "texel {g}");
-                printed += usize::from(store.texel(g) != [0, 0]);
+                let want = history.get(&g).copied().unwrap_or([0, 0]);
+                assert_eq!(gpu.near_at(g), want, "texel {g}");
+                printed += usize::from(want != [0, 0]);
             }
         }
+        printed
+    }
+
+    /// THE RECENTRE'S CONTRACT: the near store's GPU copy is always exactly the history over its
+    /// window. Stamps land while the window sits at A, the eye leaves for B (most of the way across
+    /// the window, so a strip of A survives and the rest is replaced) where more stamps land, and
+    /// comes back. Every texel of the GPU copy must then equal the history, and equal what a fresh
+    /// store placed at A uploads: a recentre that forgot to clear the entering cells, cleared the
+    /// wrong slot of the torus, or skipped a cell whose old marks needed zeroing breaks one or the
+    /// other. The stamps straddle both windows and the cell edges by construction.
+    #[test]
+    fn a_recentre_away_and_back_holds_the_history_over_the_window() {
+        let shoes = vec![ClearanceStamp::pooled(&sole(), NEAR_TEXEL_M)];
+        let (mut stores, mut gpu) = stores();
+        let (a, b) = (Vec2::new(10.0, -20.0), Vec2::new(70.0, 15.0));
+        assert!(stores.recentre(a));
+        for entry in scatter((a + b) * 0.5, 60.0, 3000, 1) {
+            stores.stamp(&entry, &shoes, &LAW);
+        }
+        flush(&mut stores, &mut gpu);
+        assert!(stores.recentre(b), "the eye left the slack");
+        flush(&mut stores, &mut gpu);
+        assert_gpu_is_history(&stores, &gpu);
+        for entry in scatter((a + b) * 0.5, 60.0, 3000, 2) {
+            stores.stamp(&entry, &shoes, &LAW);
+        }
+        flush(&mut stores, &mut gpu);
+        assert!(stores.recentre(a), "and came back");
+        flush(&mut stores, &mut gpu);
+        let printed = assert_gpu_is_history(&stores, &gpu);
         assert!(
             printed > 10_000,
             "the window holds prints to compare: {printed}"
         );
+
+        let mut fresh = Gpu::new(WORLD_SIDE);
+        let mut placed = NearStore::default();
+        placed.recentre(a);
+        fresh.apply(&placed.take_uploads(&stores.log), WORLD_SIDE);
+        assert_eq!(
+            fresh.near, gpu.near,
+            "a fresh store uploads the same window"
+        );
     }
 
     /// Recentre relies on exact history even after repeated pivots. Checkpointing must bound
-    /// hot raw cells without losing older pixels, including across negative cell boundaries;
+    /// hot raw cells without losing older texels, including across negative cell boundaries;
     /// an immortal entry vector or discarding cold checkpoints fails here.
     #[test]
     fn compacted_history_is_spatially_bounded_and_replays_every_texel() {
         let shoes = vec![ClearanceStamp::pooled(&sole(), NEAR_TEXEL_M)];
-        let mut log = StampLog::default();
-        let mut direct = NearStore::default();
-        direct.recentre(Vec2::ZERO, &log);
+        let (mut stores, mut gpu) = stores();
+        stores.recentre(Vec2::ZERO);
         for entry in
             scatter(Vec2::splat(-6.0), 1.0, 4096, 3)
                 .into_iter()
                 .chain(std::iter::repeat_n(
-                    StampEntry::new(Vec2::splat(-6.0), 0.4, 0.0, Vec2::ZERO, 0, false),
+                    entry(Vec2::splat(-6.0), 0.4, 0.0, Vec2::ZERO, false),
                     8192,
                 ))
         {
-            log.push(entry, &shoes, &LAW);
-            direct.stamp(&entry, &shoes, &LAW);
+            stores.stamp(&entry, &shoes, &LAW);
         }
-        for k in 0..ACTIVE_LOG_CELLS + 1 {
+        flush(&mut stores, &mut gpu);
+        let direct = gpu.near.clone();
+        for k in 0..ACTIVE_CELLS + 1 {
             let at = Vec2::new(
                 200.0 + (k % 20) as f32 * 12.0,
                 200.0 + (k / 20) as f32 * 12.0,
             );
-            log.push(
-                StampEntry::new(at, 0.0, 0.0, Vec2::ZERO, 0, false),
-                &shoes,
-                &LAW,
-            );
+            stores.stamp(&entry(at, 0.0, 0.0, Vec2::ZERO, false), &shoes, &LAW);
         }
         assert!(
-            log.cells
+            stores
+                .log
+                .cells
                 .values()
                 .any(|cell| matches!(cell.checkpoint, Checkpoint::Runs(_)))
         );
-        assert!(log.active.len() <= ACTIVE_LOG_CELLS);
-        let mut restored = NearStore::default();
-        restored.recentre(Vec2::ZERO, &log);
+        assert!(stores.log.active.len() <= ACTIVE_CELLS);
+        stores.recentre(Vec2::splat(200.0));
+        flush(&mut stores, &mut gpu);
+        stores.recentre(Vec2::ZERO);
+        flush(&mut stores, &mut gpu);
         assert_eq!(
-            direct.texels, restored.texels,
-            "compaction preserves all historical near pixels"
-        );
-        restored.recentre(Vec2::splat(200.0), &log);
-        restored.recentre(Vec2::ZERO, &log);
-        assert_eq!(
-            direct.texels, restored.texels,
+            direct, gpu.near,
             "the torus restores compacted history after a full eviction"
         );
-        let new_entry = StampEntry::new(Vec2::new(-5.4, -6.1), 0.7, 0.01, Vec2::ZERO, 0, false);
-        log.push(new_entry, &shoes, &LAW);
-        direct.stamp(&new_entry, &shoes, &LAW);
-        let mut reactivated = NearStore::default();
-        reactivated.recentre(Vec2::ZERO, &log);
-        assert_eq!(
-            direct.texels, reactivated.texels,
-            "reactivation must merge new stamps without clearing cold historical pixels"
-        );
-        let noisy: Vec<_> = (0..LOG_CELL_SIDE * LOG_CELL_SIDE)
-            .map(|i| [(i % 2) as u8, 255])
-            .collect();
+        let new_entry = entry(Vec2::new(-5.4, -6.1), 0.7, 0.01, Vec2::ZERO, false);
+        stores.stamp(&new_entry, &shoes, &LAW);
+        flush(&mut stores, &mut gpu);
+        assert_gpu_is_history(&stores, &gpu);
+        let noisy: Vec<_> = (0..CELL * CELL).map(|i| [(i % 2) as u8, 255]).collect();
         assert!(
             matches!(Checkpoint::packed(noisy), Checkpoint::Raw(_)),
             "incompressible checkpoints cannot grow beyond raw cell storage"
         );
     }
 
-    /// Dirty tiles represent actual GPU changes. Empty startup/recentres need no upload,
-    /// while a wrapped old print must upload its cleared texels or it becomes a ghost mark.
+    /// Uploads are the GPU's actual changes. An empty startup or recentre sends nothing (wgpu
+    /// zero-initialises the image), while an old print the window wraps away from must be cleared,
+    /// or it becomes a ghost mark at the slot's new place; and a slot cleared once is not cleared
+    /// again.
     #[test]
-    fn recentre_uploads_only_changed_texels_and_clears_old_prints() {
+    fn recentre_uploads_only_changed_tiles_and_clears_old_prints() {
         let shoes = vec![ClearanceStamp::pooled(&sole(), NEAR_TEXEL_M)];
-        let mut near = NearStore::default();
-        let log = StampLog::default();
-        near.recentre(Vec2::ZERO, &log);
+        let (mut stores, mut gpu) = stores();
+        stores.recentre(Vec2::ZERO);
         assert!(
-            near.take_uploads().is_empty(),
+            flush(&mut stores, &mut gpu).is_empty(),
             "wgpu initializes the print image to zero"
         );
-        let entry = StampEntry::new(Vec2::ZERO, 0.0, 0.0, Vec2::ZERO, 0, false);
-        near.stamp(&entry, &shoes, &LAW);
-        assert!(!near.take_uploads().is_empty());
-        near.recentre(Vec2::splat(200.0), &log);
-        let clear = near.take_uploads();
+        stores.stamp(
+            &entry(Vec2::ZERO, 0.0, 0.0, Vec2::ZERO, false),
+            &shoes,
+            &LAW,
+        );
+        assert!(!flush(&mut stores, &mut gpu).is_empty());
+        stores.recentre(Vec2::splat(200.0));
+        let clear: Vec<_> = flush(&mut stores, &mut gpu)
+            .into_iter()
+            .filter(|u| u.store == Store::Near)
+            .collect();
         assert!(
             !clear.is_empty(),
             "old nonzero storage slots must be cleared on the GPU"
         );
         assert!(clear.iter().all(|u| u.data.iter().all(|&b| b == 0)));
-        near.recentre(Vec2::ZERO, &log);
+        stores.recentre(Vec2::ZERO);
+        let back = flush(&mut stores, &mut gpu);
         assert!(
-            near.take_uploads().is_empty(),
-            "already zero slots need no repeated clear"
+            back.iter().all(|u| u.data.iter().any(|&b| b != 0)),
+            "coming back re-sends the print, and no slot is cleared twice"
         );
+        assert_gpu_is_history(&stores, &gpu);
     }
 
-    /// The press and the footprint are MAX-combined, so a stamp laid twice changes nothing, and the
-    /// near store holds the deepest of two overlapping prints whatever order they arrive in.
+    /// The press and the pressure are MAX-combined, so a stamp laid twice changes nothing, the
+    /// store holds the deepest of two overlapping prints whatever order they arrive in, and a
+    /// stamp further into its press only ever deepens a print.
     #[test]
     fn overlapping_stamps_keep_the_deepest_in_any_order() {
         let shoes = vec![ClearanceStamp::pooled(&sole(), NEAR_TEXEL_M)];
-        let shallow = StampEntry::new(Vec2::new(1.0, 1.0), 0.3, 0.05, Vec2::ZERO, 0, false);
-        let deep = StampEntry::new(Vec2::new(1.05, 1.0), 0.3, 0.0, Vec2::ZERO, 0, false);
+        let shallow = entry(Vec2::new(1.0, 1.0), 0.3, 0.02, Vec2::ZERO, false);
+        let deep = entry(Vec2::new(1.05, 1.0), 0.3, 0.0, Vec2::ZERO, false);
         let draw = |order: &[StampEntry]| {
-            let mut store = NearStore::default();
-            store.recentre(Vec2::ZERO, &StampLog::default());
+            let (mut stores, mut gpu) = stores();
+            stores.recentre(Vec2::ZERO);
             for entry in order {
-                store.stamp(entry, &shoes, &LAW);
+                stores.stamp(entry, &shoes, &LAW);
             }
-            store
+            flush(&mut stores, &mut gpu);
+            gpu
         };
         let (one, other) = (draw(&[shallow, deep, deep]), draw(&[deep, shallow]));
         let g = (Vec2::new(1.05, 1.0) / NEAR_TEXEL_M).floor().as_ivec2();
-        assert_eq!(one.texel(g), other.texel(g));
+        assert_eq!(one.near_at(g), other.near_at(g));
         assert_eq!(
-            one.texel(g),
-            [255, 255],
-            "the deep sole rests on the ground there"
+            one.near_at(g),
+            [255, KPA as u8],
+            "the deep sole rests on the ground there, fully pressed"
         );
+        let half = StampEntry::new(
+            Placement {
+                datum: Vec2::new(1.05, 1.0),
+                yaw: 0.3,
+                lift: 0.0,
+                tilt: Vec2::ZERO,
+                shoe: 0,
+                mirrored: false,
+            },
+            0.5,
+            KPA,
+        );
+        assert_eq!(draw(&[half]).near_at(g)[0], 128, "half pressed");
+        assert_eq!(draw(&[deep, half]).near_at(g)[0], 255, "never shallower");
     }
 
-    /// World coverage must retain a sole visible in the near store at every sample phase.
-    /// Four samples per world texel can miss a complete shoe, making it vanish at the seam.
+    /// The world layer counts a near footprint texel once, at every sample phase: a sole visible
+    /// in the near store never vanishes from the world layer, and overprinting a track is union,
+    /// not accumulated darkness.
     #[test]
-    fn the_world_layer_retains_a_footprint_between_coarse_samples() {
+    fn the_world_layer_counts_each_footprint_texel_once() {
         let shoes = vec![ClearanceStamp::pooled(&sole(), NEAR_TEXEL_M)];
-        let mut world = WorldStore::new(1500.0, WORLD_SIDE);
+        let (mut stores, mut gpu) = stores();
+        let texel_m = 1500.0 / WORLD_SIDE as f32;
         for phase in 0..8 {
-            let datum = Vec2::new(phase as f32 * 2.0, phase as f32 * world.texel_m / 8.0);
-            let entry = StampEntry::new(datum, 0.0, 0.0, Vec2::ZERO, 0, false);
-            world.stamp(&entry, &shoes, &LAW);
-            let cell = ((datum - world.origin_m) / world.texel_m)
-                .floor()
-                .as_uvec2();
+            let datum = Vec2::new(phase as f32 * 2.0, phase as f32 * texel_m / 8.0);
+            stores.stamp(&entry(datum, 0.0, 0.0, Vec2::ZERO, false), &shoes, &LAW);
+            let cell = ((datum + 750.0) / texel_m).floor().as_uvec2();
             let covered: u32 = (cell.y - 1..=cell.y + 1)
                 .flat_map(|j| (cell.x - 2..=cell.x + 2).map(move |i| (i, j)))
-                .map(|(i, j)| u32::from(world.coverage(0, i, j)))
+                .map(|(i, j)| u32::from(stores.world.coverage(0, i, j)))
                 .sum();
             assert!(
                 covered > 0,
                 "phase {phase}: a grounded shoe cannot disappear in the world layer"
             );
         }
-        let uploads = world.take_uploads();
-        assert!(!uploads.is_empty());
-        let before: Vec<_> = world.masks.clone();
-        world.stamp(
-            &StampEntry::new(Vec2::ZERO, 0.0, 0.0, Vec2::ZERO, 0, false),
+        assert!(!flush(&mut stores, &mut gpu).is_empty());
+        let before: Vec<_> = stores.world.counts.clone();
+        stores.stamp(
+            &entry(Vec2::ZERO, 0.0, 0.0, Vec2::ZERO, false),
             &shoes,
             &LAW,
         );
         assert_eq!(
-            world.masks, before,
+            stores.world.counts, before,
             "overprinting is union, not accumulated darkness"
         );
-        assert!(world.take_uploads().is_empty());
+        assert!(stores.take_uploads().is_empty());
+        for w in 0..WORLD_SIDE {
+            assert!(
+                (7..=8).contains(&stores.world.per_axis[w as usize]),
+                "world texel {w} holds 7 or 8 near texels along an axis"
+            );
+        }
     }
 
-    /// Manual headless CPU measurement of contact, resampling, history, rasterization, mip
-    /// rebuilds and upload packing at 30 synthetic tanks under pivot. The renderer and ECS
-    /// query overhead are excluded; no GPU timing or frame-budget assertion is implied.
+    /// The world layer's GPU copy is rebuilt up the WHOLE mip chain over the tiles a track touched,
+    /// each level the rounded mean of the one below, and nothing is sent twice. A level the rebuild
+    /// skipped would keep showing the ground untrodden at the range that level is sampled at.
+    #[test]
+    fn the_world_layer_mips_carry_a_track_up_the_chain() {
+        let shoes = vec![ClearanceStamp::pooled(&sole(), NEAR_TEXEL_M)];
+        let mut stores = PrintStores::new(64.0, 256);
+        for k in 0..40 {
+            let along = Vec2::new(-20.0, -28.0 + 0.13 * k as f32);
+            stores.stamp(&entry(along, 0.0, 0.0, Vec2::ZERO, false), &shoes, &LAW);
+        }
+        let uploads = stores.take_uploads();
+        assert!(
+            uploads
+                .iter()
+                .any(|u| u.store == Store::World && u.level == 0),
+            "the new footprint is uploaded"
+        );
+        let world: Vec<_> = uploads.iter().filter(|u| u.store == Store::World).collect();
+        let unique: std::collections::BTreeSet<_> = world
+            .iter()
+            .map(|u| (u.level, u.origin.x, u.origin.y))
+            .collect();
+        assert_eq!(
+            unique.len(),
+            world.len(),
+            "each dirty tile is uploaded once per mip"
+        );
+        let levels: std::collections::BTreeSet<u32> = world.iter().map(|u| u.level).collect();
+        assert_eq!(
+            levels,
+            (0..stores.world.levels()).collect(),
+            "every level is sent"
+        );
+        let (i, j) = (48 / 2, 26 / 2);
+        assert!(
+            stores.world.coverage(1, i, j) > 0,
+            "the track shows at level 1"
+        );
+        for level in 1..stores.world.levels() {
+            let (i, j) = (i >> (level - 1), j >> (level - 1));
+            let below: u32 = [(0, 0), (1, 0), (0, 1), (1, 1)]
+                .into_iter()
+                .map(|(di, dj)| u32::from(stores.world.coverage(level - 1, 2 * i + di, 2 * j + dj)))
+                .sum();
+            assert_eq!(
+                u32::from(stores.world.coverage(level, i, j)),
+                (below + 2) / 4,
+                "level {level} is the mean of level {}",
+                level - 1,
+            );
+        }
+        assert!(
+            stores.take_uploads().is_empty(),
+            "nothing new, nothing sent"
+        );
+    }
+
+    /// Manual headless CPU measurement of contact, resampling, the press, history, the raster,
+    /// world counts, mip rebuilds and upload packing at 30 synthetic tanks under pivot. The
+    /// renderer and ECS query overhead are excluded; no GPU timing or frame-budget assertion is
+    /// implied.
     #[test]
     #[ignore = "manual headless CPU measurement; run with --ignored --nocapture"]
     fn thirty_tank_pivot_cpu_and_upload_measurement() {
@@ -1133,15 +1531,18 @@ mod tests {
             },
         );
         let shoes = vec![ClearanceStamp::pooled(&sole(), NEAR_TEXEL_M)];
+        // Synthetic fixture geometry: the link pitch the press ramps over.
+        let pitch = 0.13;
         for (layout, spacing) in [("clustered", 12.0), ("dispersed", 200.0)] {
             let mut memory: Vec<_> = (0..30).map(|_| ShoeMemory::default()).collect();
-            let mut log = StampLog::default();
-            let mut near = NearStore::default();
-            let mut world = WorldStore::new(1500.0, WORLD_SIDE);
-            near.recentre(Vec2::ZERO, &log);
-            let cold_bytes: usize = near.take_uploads().iter().map(|u| u.data.len()).sum();
+            let mut stores = PrintStores::new(1500.0, WORLD_SIDE);
+            stores.recentre(Vec2::ZERO);
+            let cold_bytes: usize = stores.take_uploads().iter().map(|u| u.data.len()).sum();
             let mut times = Vec::new();
             let mut bytes = Vec::new();
+            // Per phase, summed over the run: contacts and the press, stamping, uploads.
+            let mut phases = [0.0_f64; 3];
+            let mut laid = Vec::new();
             for frame in 0..frames {
                 let start = Instant::now();
                 let yaw = frame as f32 * 0.018; // ASSUMED 1.08 rad/s at 60 Hz.
@@ -1169,29 +1570,39 @@ mod tests {
                             )
                             .unwrap();
                             let id = Entity::from_raw_u32((side * 27 + k + 1) as u32).unwrap();
-                            if let Some(sweep) = memory.observe(id, &c) {
-                                for c in sweep {
-                                    let entry =
-                                        StampEntry::new(c.datum, c.yaw, c.lift, c.tilt, 0, false);
-                                    log.push(entry, &shoes, &LAW);
-                                    near.stamp(&entry, &shoes, &LAW);
-                                    world.stamp(&entry, &shoes, &LAW);
-                                }
+                            let hull_local = Vec3::new(local.x, 0.0, local.y);
+                            if let Some(sweep) = memory.observe(id, &c, hull_local, pitch) {
+                                laid.extend(sweep.map(|(c, press)| {
+                                    StampEntry::new(c.placement(0, false), press, KPA)
+                                }));
                             }
                         }
                     }
                 }
-                let mut uploads = near.take_uploads();
-                uploads.extend(world.take_uploads());
+                let contacts = Instant::now();
+                for entry in laid.drain(..) {
+                    stores.stamp(&entry, &shoes, &LAW);
+                }
+                let stamped = Instant::now();
+                let uploads = stores.take_uploads();
                 bytes.push(uploads.iter().map(|u| u.data.len()).sum::<usize>());
                 // flush converts Vec payloads into shared extraction buffers too.
                 for upload in uploads {
                     std::hint::black_box(Arc::<[u8]>::from(upload.data));
                 }
-                times.push(start.elapsed().as_secs_f64() * 1000.0);
+                let done = Instant::now();
+                for (phase, (from, to)) in
+                    phases
+                        .iter_mut()
+                        .zip([(start, contacts), (contacts, stamped), (stamped, done)])
+                {
+                    *phase += (to - from).as_secs_f64() * 1000.0;
+                }
+                times.push((done - start).as_secs_f64() * 1000.0);
             }
             times.sort_by(f64::total_cmp);
-            let history_bytes: usize = log
+            let history_bytes: usize = stores
+                .log
                 .cells
                 .values()
                 .map(|c| match &c.checkpoint {
@@ -1209,60 +1620,19 @@ mod tests {
                 bytes.iter().max().unwrap(),
                 cold_bytes,
                 history_bytes,
-                log.cells.len(),
-                log.len()
+                stores.log.cells.len(),
+                stores.log.len()
             );
-            assert!(log.active.len() <= ACTIVE_LOG_CELLS);
+            let [contacts, stamping, uploads] = phases.map(|total| total / frames as f64);
+            eprintln!(
+                "MEASURED {layout} phase means: contacts and press {contacts:.3} ms, stamping \
+                 {stamping:.3} ms, uploads {uploads:.3} ms"
+            );
+            assert!(stores.log.active.len() <= ACTIVE_CELLS);
             assert!(
-                near.take_uploads().is_empty() && world.take_uploads().is_empty(),
+                stores.take_uploads().is_empty(),
                 "upload packing consumes dirtiness exactly once"
             );
         }
-    }
-
-    /// The world layer's GPU copy is rebuilt up the WHOLE mip chain over the tiles a track touched,
-    /// each level the rounded mean of the one below, and nothing is sent twice. A level the rebuild
-    /// skipped would keep showing the ground untrodden at the range that level is sampled at.
-    #[test]
-    fn the_world_layer_mips_carry_a_track_up_the_chain() {
-        let shoes = vec![ClearanceStamp::pooled(&sole(), NEAR_TEXEL_M)];
-        let mut world = WorldStore::new(64.0, 256);
-        for k in 0..40 {
-            let along = Vec2::new(-20.0, -28.0 + 0.13 * k as f32);
-            let entry = StampEntry::new(along, 0.0, 0.0, Vec2::ZERO, 0, false);
-            world.stamp(&entry, &shoes, &LAW);
-        }
-        let uploads = world.take_uploads();
-        assert!(
-            uploads.iter().any(|u| u.level == 0),
-            "the new footprint is uploaded"
-        );
-        let unique: std::collections::BTreeSet<_> = uploads
-            .iter()
-            .map(|u| (u.level, u.origin.x, u.origin.y))
-            .collect();
-        assert_eq!(
-            unique.len(),
-            uploads.len(),
-            "each dirty tile is uploaded once per mip"
-        );
-        let levels: std::collections::BTreeSet<u32> = uploads.iter().map(|u| u.level).collect();
-        assert_eq!(levels, (0..world.levels()).collect(), "every level is sent");
-        let (i, j) = (48 / 2, 26 / 2);
-        assert!(world.coverage(1, i, j) > 0, "the track shows at level 1");
-        for level in 1..world.levels() {
-            let (i, j) = (i >> (level - 1), j >> (level - 1));
-            let below: u32 = [(0, 0), (1, 0), (0, 1), (1, 1)]
-                .into_iter()
-                .map(|(di, dj)| u32::from(world.coverage(level - 1, 2 * i + di, 2 * j + dj)))
-                .sum();
-            assert_eq!(
-                u32::from(world.coverage(level, i, j)),
-                (below + 2) / 4,
-                "level {level} is the mean of level {}",
-                level - 1,
-            );
-        }
-        assert!(world.take_uploads().is_empty(), "nothing new, nothing sent");
     }
 }

@@ -1,0 +1,55 @@
+// The ground-type table (`src/ground_types.rs`): how each kind of ground takes a track print, the
+// game's cosmetic terrain marks. Each terrain pack names its type (`src/terrain_blend.rs`).
+//
+//   softness_mm_per_kpa  print depth per unit of the tank's ground pressure, mm per kPa
+//   depth_cap_mm         the deepest print this ground takes, mm
+//   darkening            the share of albedo a print takes away, 0..1
+//   roughness_gain       roughness multiplier under a sole; below 1 reads wet
+//
+// Every value is ASSUMED: ordered by the Bekker fits in the ground-stamping note's §2, dirt and
+// gravel raised so a print reads at 10-30 m, then tuned by eye in play (`track_prints::tuning`).
+// The module doc of `src/ground_types.rs` carries the provenance.
+(
+    types: {
+        "concrete": (
+            print: (
+                softness_mm_per_kpa: 0.0,
+                depth_cap_mm: 0.0,
+                darkening: 0.05,
+                roughness_gain: 1.0,
+            ),
+        ),
+        "dirt": (
+            print: (
+                softness_mm_per_kpa: 0.5,
+                depth_cap_mm: 70.0,
+                darkening: 0.2,
+                roughness_gain: 0.9,
+            ),
+        ),
+        "gravel": (
+            print: (
+                softness_mm_per_kpa: 0.45,
+                depth_cap_mm: 60.0,
+                darkening: 0.2,
+                roughness_gain: 1.0,
+            ),
+        ),
+        "mud": (
+            print: (
+                softness_mm_per_kpa: 1.6,
+                depth_cap_mm: 150.0,
+                darkening: 0.3,
+                roughness_gain: 0.6,
+            ),
+        ),
+        "sand": (
+            print: (
+                softness_mm_per_kpa: 0.8,
+                depth_cap_mm: 120.0,
+                darkening: 0.12,
+                roughness_gain: 0.9,
+            ),
+        ),
+    },
+)

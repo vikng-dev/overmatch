@@ -28,6 +28,7 @@ use crate::tank::{Roadwheel, Tank, TrackSide, ViewNode};
 
 use super::gear_phase::{gear_spin_transform, spin_angle, sprocket_tooth_tip, tooth_angle};
 use super::link_view::{self, LinkFrame, LinkTemplate};
+use super::oracle::TerrainOracle;
 use super::rig_geom::RigGeom;
 use super::shadow_proxy::{self, ProxyMode, ProxySide, ProxyStep};
 use super::side::Side;
@@ -100,6 +101,22 @@ fn presented_phase(previous: Option<f64>, sim: f64, speed: f32, dt: f32) -> f64 
     let carried = previous + f64::from(speed) * f64::from(dt);
     let heal = 1.0 - f64::from(-PHASE_HEAL_OMEGA * dt).exp();
     carried + (sim - carried) * heal
+}
+
+/// The ground the drawn belt fits: `ground` lowered by `depth_m`, the print depth the ground's
+/// shader draws under the tank (`track_prints::PrintDepths::full_press_m`). A vertical translation
+/// of the whole surface, so a probe's penetration into the lowered ground is the original's at the
+/// point `depth_m` above it. View only: the sim's oracle is the unlowered `ground`.
+struct Sunk<'a, O> {
+    ground: &'a O,
+    depth_m: f32,
+}
+
+impl<O: TerrainOracle> TerrainOracle for Sunk<'_, O> {
+    fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
+        self.ground
+            .depth_along(station + Vec3::Y * self.depth_m, out, reach)
+    }
 }
 
 /// Downward terrain-probe reach (m) — for the wrap's conform and the view wheel lift.
@@ -598,10 +615,20 @@ fn drive_track_views(
     // The caster swap's one write: `VisualScope::PROXIED_CASTER` onto this side's shoes, on the
     // frame its ribbon first exists. Runs once per side per bind, never per frame.
     mut commands: Commands,
+    // The belt sink: the depth the ground's shader draws a print at, and the running gear the
+    // tank's ground pressure is read from. Absent without a printed world, where nothing sinks.
+    sink: (
+        Option<Res<crate::track_prints::PrintDepths>>,
+        Option<Res<RigGeom>>,
+    ),
 ) {
-    let Some(field) = track.field.as_ref() else {
+    let Some(ground) = track.field.as_ref() else {
         return;
     };
+    let (depths, geom) = sink;
+    let pressure_kpa = geom
+        .as_deref()
+        .map(crate::track_prints::tank_ground_pressure_kpa);
     let dt = time.delta_secs();
     if dt <= 0.0 {
         return;
@@ -634,6 +661,21 @@ fn drive_track_views(
         }
         rig.prev_affine = Some(affine);
         rig.field_revision = track.revision;
+
+        // THE BELT SINK (view only, ADR-0014): the drawn belt and its wheels fit a ground lowered
+        // by the depth the ground's shader draws this tank's print at, under a full press, so the
+        // track sits in its own rut instead of riding the undisturbed surface above it. The sim,
+        // the oracle and the collider read the ground as it is.
+        let sink_m = match (&depths, pressure_kpa) {
+            (Some(depths), Some(kpa)) => {
+                depths.full_press_m(Vec2::new(root.translation.x, root.translation.z), kpa)
+            }
+            _ => 0.0,
+        };
+        let field = &Sunk {
+            ground,
+            depth_m: sink_m,
+        };
 
         // Belt phase from the SIM (phase B): a simulated hull's `TrackDrive` written by the
         // fixed tick (SP), a replicated hull's INTERPOLATED one (MP — every hull, own included;

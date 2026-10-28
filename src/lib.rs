@@ -79,6 +79,9 @@ mod frame_cost;
 /// single seam between what the build measured and what the renderer selects — no measurement is
 /// transcribed into Rust.
 mod geometry_lod;
+/// The ground-type table (`assets/terrain/ground_types.ron`): each kind of ground the terrain packs
+/// name, and how it takes a track print. Data; see the module doc.
+mod ground_types;
 /// The gun registry (`assets/guns/`): every gun model and its ammunition table, the muzzle speed it
 /// fires each round it chambers at. A [`rounds::Round`] is a round fired from a gun.
 mod guns;
@@ -932,6 +935,9 @@ pub fn run_offline() {
     // The game's cosmetic track-print demo drives the player's tank and takes the camera.
     #[cfg(all(feature = "dev_tools", debug_assertions))]
     app.add_plugins(track_prints::demo::offline_plugin);
+    // The ground-type tuning panel, shown while paused; egui compiles only into `dev_ui` builds.
+    #[cfg(feature = "dev_ui")]
+    app.add_plugins(track_prints::tuning::offline_plugin);
     app.run();
 }
 

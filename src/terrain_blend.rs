@@ -31,16 +31,20 @@
 //!
 //! # Track prints
 //!
-//! Each pack answers a track print ([`crate::track_prints`]) its own way, from its
-//! [`PrintResponse`]: how deep a shoe sinks into it, and how its albedo and roughness change where a
-//! sole lay. The shader blends the four responses by the same final weights it blends the packs
-//! by, so the print follows whatever ground is visible and nothing senses the ground per stamp.
+//! Each pack names its ground type ([`BlendLayer::ground`], [`BASE_GROUND`]), and the ground-type
+//! table ([`crate::ground_types`]) says how that ground takes a track print
+//! ([`crate::track_prints`], cosmetic terrain marks): its softness and depth cap, and how its albedo
+//! and roughness change where a sole lay. The shader blends the four responses by the map's PAINTED
+//! weights ([`print_weights`]), not by the AO-biased weights it blends the packs' looks by, so the
+//! CPU can reproduce the depth it draws ([`print_depth_m`]): the drawn belt sinks by that depth
+//! (`track::view`), and nothing senses the ground per stamp.
 
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
 use bevy::render::render_resource::{AsBindGroup, ShaderType};
 use bevy::shader::ShaderRef;
 
+use crate::ground_types::{GroundTypes, PrintResponse};
 use crate::map::MapManifest;
 use crate::terrain_grid::{RowOrder, TEXTURE_TILE_M, TerrainExtent};
 
@@ -49,32 +53,12 @@ use crate::terrain_grid::{RowOrder, TEXTURE_TILE_M, TerrainExtent};
 /// the blend law's constants).
 pub(crate) type TerrainMaterial = ExtendedMaterial<StandardMaterial, TerrainBlend>;
 
-/// How a pack answers a track print: how far a resting shoe sinks below the drawn surface, and the
-/// gains its albedo and roughness take under a sole. Data: every pack's lives beside its contract.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct PrintResponse {
-    /// m. A point of a sole whose underside clears the drawn surface by `c` sinks it by
-    /// `max(0, depth − c)`, so a shallow print takes only a shoe's protruding parts.
-    pub(crate) depth_m: f32,
-    /// Albedo multiplier where a sole lay.
-    pub(crate) albedo: f32,
-    /// Roughness multiplier where a sole lay: below 1 reads wet.
-    pub(crate) roughness: f32,
-}
-
-/// The BASE pack's print response (`coast_sand_rocks_02`, sand strewn with stones), read as the
-/// ground-stamping note's GRAVEL row. Every value ASSUMED (§2 of
-/// `.agents/scratch/impact-feedback-2026-10-28/track-prints-ground-stamping.md`): the depth is that
-/// row's authored curve, 150 kPa at 1 cm with exponent 1.10, DERIVED at a 57 t, 0.70 × 3.60 m
-/// footprint's 111 kPa; the look is its "broad scuffing", a slight darkening.
-pub(crate) const BASE_PRINT: PrintResponse = PrintResponse {
-    depth_m: 0.0076,
-    albedo: 0.88,
-    roughness: 1.0,
-};
+/// The ground type the BASE pack (`coast_sand_rocks_02`, sand strewn with stones) is: the
+/// ground-stamping note's GRAVEL row, a key into [`crate::ground_types::GroundTypes`].
+pub(crate) const BASE_GROUND: &str = "gravel";
 
 /// One blended layer's contract: which pack it is, the real-world metres that pack was authored
-/// at, and how it answers a track print.
+/// at, and which ground type it is.
 pub(crate) struct BlendLayer {
     /// The Poly Haven pack — the folder under `assets/terrain/` whose `cc.txt` carries the
     /// attribution and the authored size below. Names the layer; nothing parses it.
@@ -82,9 +66,9 @@ pub(crate) struct BlendLayer {
     /// Metres per texture repeat, as the scan declares (`dimensions`, millimetres). The layer's UV
     /// scale is derived from it and from nothing else.
     pub(crate) authored_m: f32,
-    /// How the pack takes a track print. ASSUMED, from the ground-stamping note's §2 table (see
-    /// [`BASE_PRINT`] for the footprint the depths are DERIVED at).
-    pub(crate) print: PrintResponse,
+    /// The ground type the pack is: a key into [`crate::ground_types::GroundTypes`], which says how
+    /// it takes a track print.
+    pub(crate) ground: &'static str,
 }
 
 impl BlendLayer {
@@ -103,56 +87,68 @@ pub(crate) const BLEND_LAYERS: [BlendLayer; 3] = [
     BlendLayer {
         pack: "dirt_aerial_03",
         authored_m: 25.0,
-        // FIRM DIRT: the sandy-loam fit (Wong, via NASA TM-20250006958 Table 1), 5.9 mm DERIVED;
-        // "close-range pattern and roughness changes".
-        print: PrintResponse {
-            depth_m: 0.0059,
-            albedo: 0.85,
-            roughness: 0.95,
-        },
+        ground: "dirt",
     },
     // G — slopes: where land slides, exposing sand and soil.
     BlendLayer {
         pack: "coast_sand_05",
         authored_m: 25.0,
-        // SAND: the dry-sand fit, 92 mm DERIVED; the broken crust darkens a little.
-        print: PrintResponse {
-            depth_m: 0.092,
-            albedo: 0.9,
-            roughness: 0.9,
-        },
+        ground: "sand",
     },
     // B — lowlands: swampy, marshy, moist.
     BlendLayer {
         pack: "aerial_mud_1",
         authored_m: 8.0,
-        // SOFT MUD: the heavy-clay fit's 1.5 m rejected, held at the note's 0.15 m visual cap;
-        // "glossy/dark disturbed floor".
-        print: PrintResponse {
-            depth_m: 0.15,
-            albedo: 0.7,
-            roughness: 0.6,
-        },
+        ground: "mud",
     },
 ];
 
 /// Every pack's print response in the shader's slot order: the base, then [`BLEND_LAYERS`].
-fn print_responses() -> [PrintResponse; 4] {
+pub(crate) fn print_responses(table: &GroundTypes) -> [PrintResponse; 4] {
     [
-        BASE_PRINT,
-        BLEND_LAYERS[0].print,
-        BLEND_LAYERS[1].print,
-        BLEND_LAYERS[2].print,
+        table.get(BASE_GROUND).print,
+        table.get(BLEND_LAYERS[0].ground).print,
+        table.get(BLEND_LAYERS[1].ground).print,
+        table.get(BLEND_LAYERS[2].ground).print,
     ]
 }
 
-/// The deepest print any pack takes, m: the clearance range the prints' near store spans, so no
-/// pack's print is clipped by the store.
-pub(crate) fn print_range_m() -> f32 {
-    print_responses()
-        .iter()
-        .map(|response| response.depth_m)
-        .fold(0.0, f32::max)
+/// The material's print lanes for `table`, per slot (`x` the base pack, `yzw` the layers):
+/// softness (m per kPa), depth cap (m), albedo gain and roughness gain.
+pub(crate) fn print_lanes(table: &GroundTypes) -> [Vec4; 4] {
+    let responses = print_responses(table);
+    let lane = |of: fn(&PrintResponse) -> f32| Vec4::from_array(responses.map(|p| of(&p)));
+    [
+        lane(|p| p.softness_mm_per_kpa / 1000.0),
+        lane(|p| p.depth_cap_mm / 1000.0),
+        lane(PrintResponse::albedo_gain),
+        lane(|p| p.roughness_gain),
+    ]
+}
+
+/// Write `table`'s print lanes into `params`.
+pub(crate) fn set_print_lanes(params: &mut TerrainBlendParams, table: &GroundTypes) {
+    let [softness, cap, albedo, roughness] = print_lanes(table);
+    params.print_softness = softness;
+    params.print_cap = cap;
+    params.print_albedo = albedo;
+    params.print_roughness = roughness;
+}
+
+/// The print's ground weights from the mask's painted weights `mask` (R recesses, G slopes,
+/// B lowlands), in slot order: the base pack where the mask is silent, each layer by its painted
+/// weight, normalised. `terrain_blend.wgsl`'s `print_weights` is this law, line for line.
+pub(crate) fn print_weights(mask: Vec3) -> Vec4 {
+    let base = 1.0 - (mask.x + mask.y + mask.z).clamp(0.0, 1.0);
+    let weights = Vec4::new(base, mask.x, mask.y, mask.z).max(Vec4::ZERO);
+    weights / weights.element_sum().max(1e-6)
+}
+
+/// The print depth (m) a full press reaches under a ground pressure of `kpa` (kPa), on ground of
+/// print weights `weights` ([`print_weights`]), from the material's own lanes: each slot's
+/// `softness × pressure`, capped, blended. `terrain_blend.wgsl`'s `print_depth` is this law.
+pub(crate) fn print_depth_m(params: &TerrainBlendParams, weights: Vec4, kpa: f32) -> f32 {
+    weights.dot(params.print_cap.min(params.print_softness * kpa))
 }
 
 /// Albedo of every layer, as one KTX2 2D array (UASTC 4x4 + zstd, full mip chain, 2048² per
@@ -204,7 +200,8 @@ const _: () = assert!(MACRO_PERIOD_M > 2.0 * TEXTURE_TILE_M);
 /// home of every number the blend law uses.
 #[derive(ShaderType, Reflect, Debug, Clone, Default)]
 pub(crate) struct TerrainBlendParams {
-    /// `xyz`: each layer's [`BlendLayer::uv_scale`] over the mesh's own UV. `w`: unused.
+    /// `xyz`: each layer's [`BlendLayer::uv_scale`] over the mesh's own UV. `w`: the mesh's UV per
+    /// world metre (`1 / `[`TEXTURE_TILE_M`]), which moves the UV with a parallax offset.
     pub layer_uv_scale: Vec4,
     /// World XZ to mask UV: `uv = world.xz * xy + zw`. Carries the map's extent AND the row order
     /// its mask image was exported in (a `-Z` image has a negative `y`), so the mask lands on the
@@ -215,20 +212,28 @@ pub(crate) struct TerrainBlendParams {
     /// `x`: periods per metre (`1 / `[`MACRO_PERIOD_M`]), `y`: [`MACRO_AMPLITUDE`], `zw`: unused.
     /// World-space, so it rides no UV set and no pack's authored size.
     pub macro_tint: Vec4,
-    /// Per slot (`x` the base pack, `yzw` the layers): [`PrintResponse::depth_m`].
-    pub print_depth: Vec4,
-    /// Per slot: [`PrintResponse::albedo`].
+    /// Per slot (`x` the base pack, `yzw` the layers), from the ground type the pack names: print
+    /// depth per kPa of ground pressure, m ([`PrintResponse::softness_mm_per_kpa`]).
+    pub print_softness: Vec4,
+    /// Per slot: the deepest print, m ([`PrintResponse::depth_cap_mm`]).
+    pub print_cap: Vec4,
+    /// Per slot: the albedo multiplier where a sole lay ([`PrintResponse::albedo_gain`]).
     pub print_albedo: Vec4,
-    /// Per slot: [`PrintResponse::roughness`].
+    /// Per slot: [`PrintResponse::roughness_gain`].
     pub print_roughness: Vec4,
     /// The prints' near store: `xy` its window's low corner in world XZ (m), `z` its side (m), `w`
     /// its texel (m) — [`crate::track_prints::near_params`], rewritten when the window moves.
     pub print_near: Vec4,
     /// World XZ to the prints' world-layer UV: `uv = world.xz * xy + zw`.
     pub print_world: Vec4,
-    /// `x` the clearance range the near store spans (m), `y` its window fade (m), `zw` the pixels
-    /// per texel at which its normal is gone and whole ([`crate::track_prints::law_params`]).
+    /// `x` the ground pressure (kPa) a full G channel of the near store stands for, `y` its window
+    /// fade (m), `zw` the pixels per texel at which its normal is gone and whole
+    /// ([`crate::track_prints::law_params`]).
     pub print_law: Vec4,
+    /// How the prints' relief is drawn ([`crate::track_prints::relief_params`]): `x` the level
+    /// (0 lighting only, 1 parallax, 2 parallax with the sun's shadow), `y` the distance (m) relief
+    /// reaches, `z` the distance over which it fades to lighting only (m).
+    pub print_relief: Vec4,
 }
 
 /// The terrain blend's half of [`TerrainMaterial`]: the three layer arrays, the map's weight mask,
@@ -286,28 +291,27 @@ pub(crate) fn mask_map(extent: TerrainExtent, rows: RowOrder) -> Vec4 {
 }
 
 /// The material's parameters for the map being drawn: per-layer UV scales from the pack contracts,
-/// the mask mapping from the manifest, the blend law's constants, and the packs' print responses
-/// with the prints' stores as they start.
-pub(crate) fn params(manifest: &MapManifest) -> TerrainBlendParams {
-    let prints = print_responses();
-    let lanes = |of: fn(&PrintResponse) -> f32| Vec4::from_array(prints.map(|p| of(&p)));
-    TerrainBlendParams {
+/// the mask mapping from the manifest, the blend law's constants, and each pack's ground type's
+/// print response from `ground`, with the prints' stores as they start.
+pub(crate) fn params(manifest: &MapManifest, ground: &GroundTypes) -> TerrainBlendParams {
+    let mut params = TerrainBlendParams {
         layer_uv_scale: Vec4::new(
             BLEND_LAYERS[0].uv_scale(),
             BLEND_LAYERS[1].uv_scale(),
             BLEND_LAYERS[2].uv_scale(),
-            0.0,
+            1.0 / TEXTURE_TILE_M,
         ),
         mask_map: mask_map(manifest.extent, manifest.rows),
         blend_law: Vec4::new(AO_BIAS, BLEND_WINDOW, SKIP_WEIGHT, 0.0),
         macro_tint: Vec4::new(1.0 / MACRO_PERIOD_M, MACRO_AMPLITUDE, 0.0, 0.0),
-        print_depth: lanes(|p| p.depth_m),
-        print_albedo: lanes(|p| p.albedo),
-        print_roughness: lanes(|p| p.roughness),
         print_near: crate::track_prints::near_params(Vec2::ZERO),
         print_world: crate::track_prints::world_params(manifest.extent.world_size_m),
-        print_law: crate::track_prints::law_params(print_range_m()),
-    }
+        print_law: crate::track_prints::law_params(),
+        print_relief: crate::track_prints::relief_params(Default::default(), Default::default()),
+        ..default()
+    };
+    set_print_lanes(&mut params, ground);
+    params
 }
 
 /// The layer roster for the boot log: which pack each array slice is, the metres its contract
@@ -396,6 +400,51 @@ mod tests {
                  dimension = \"2d_array\" binding cannot be satisfied",
             );
         }
+    }
+
+    /// EACH PACK NAMES A GROUND TYPE THE TABLE HAS, and its print lanes are that type's: the base
+    /// pack in slot `x`, the layers in mask-channel order. A pack naming a missing type aborts the
+    /// ground's build at load, and a lane read from the wrong slot would print one pack's depth
+    /// under another's look.
+    #[test]
+    fn every_pack_takes_its_named_ground_types_print() {
+        let table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
+        let [softness, cap, albedo, roughness] = print_lanes(&table);
+        let names = [
+            BASE_GROUND,
+            BLEND_LAYERS[0].ground,
+            BLEND_LAYERS[1].ground,
+            BLEND_LAYERS[2].ground,
+        ];
+        for (slot, name) in names.into_iter().enumerate() {
+            let print = table.get(name).print;
+            assert_eq!(softness[slot], print.softness_mm_per_kpa / 1000.0, "{name}");
+            assert_eq!(cap[slot], print.depth_cap_mm / 1000.0, "{name}");
+            assert_eq!(albedo[slot], print.albedo_gain(), "{name}");
+            assert_eq!(roughness[slot], print.roughness_gain, "{name}");
+        }
+    }
+
+    /// THE PRINT'S GROUND WEIGHTS ARE A PARTITION OF THE PAINTED MASK: they sum to one, a silent
+    /// mask is all base pack, a fully painted channel is all its layer, and an over-painted texel
+    /// shares between its layers. A sum other than one would scale every depth the belt sinks by.
+    #[test]
+    fn the_print_weights_partition_the_painted_mask() {
+        for mask in [
+            Vec3::ZERO,
+            Vec3::new(0.2, 0.0, 0.0),
+            Vec3::new(0.0, 1.0, 0.0),
+            Vec3::new(0.3, 0.9, 0.6),
+        ] {
+            let weights = print_weights(mask);
+            assert!(
+                (weights.element_sum() - 1.0).abs() < 1e-6,
+                "{mask}: {weights}"
+            );
+            assert!(weights.min_element() >= 0.0, "{mask}: {weights}");
+        }
+        assert_eq!(print_weights(Vec3::ZERO), Vec4::X, "silent: the base pack");
+        assert_eq!(print_weights(Vec3::Y), Vec4::Z, "the slopes' layer alone");
     }
 
     /// The mask is stretched ONCE over the map's square, and its rows run the way the manifest

@@ -258,8 +258,17 @@ impl ClearanceStamp {
         self.datum_y
     }
 
+    /// The pooled grid as the stores' raster walks it: the canonical `(x, z)` of cell `(0, 0)`'s
+    /// low corner, the cell side (m), the cells across and along, and the row-major heights
+    /// ([`OPEN_M`] over an opening). Unmirrored: a mirrored read negates canonical `x` first.
+    pub(crate) fn grid(&self) -> (Vec2, f32, UVec2, &[f32]) {
+        (self.origin, self.cell_m, self.size, &self.height)
+    }
+
     /// The underside's height over the datum at canonical `(x, z)`, m: [`OPEN_M`] over an opening
-    /// and off the stamp. A `mirrored` read is the reflected shoe's, at `(−x, z)` of this one.
+    /// and off the stamp. A `mirrored` read is the reflected shoe's, at `(−x, z)` of this one. The
+    /// point law the stores' raster walks incrementally (`store::Raster`).
+    #[cfg(test)]
     pub(crate) fn height(&self, x: f32, z: f32, mirrored: bool) -> f32 {
         let x = if mirrored { -x } else { x };
         let local = (Vec2::new(x, z) - self.origin) / self.cell_m;

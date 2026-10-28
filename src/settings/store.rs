@@ -437,7 +437,7 @@ mod tests {
     use crate::settings::{
         DebugPanel, DisplaySelection, FrameCap, KillCam, MsaaLevel, PenCamCorner, PixelBudget,
         ReduceMotion, RenderScaleLevel, ShadowCascades, ShadowDistance, ShadowResolution,
-        UiScalePercent, VsyncMode, WindowModeSetting,
+        TrackPrintRange, TrackPrintRelief, UiScalePercent, VsyncMode, WindowModeSetting,
     };
 
     /// Each platform lands on its own convention — and NEVER beside the executable, which is
@@ -667,6 +667,8 @@ mod tests {
                 pen_cam_corner: PenCamCorner::ThroughOnly,
                 kill_cam: KillCam::Off,
                 reduce_motion: ReduceMotion::On,
+                track_prints: TrackPrintRelief::Lighting,
+                track_print_range: TrackPrintRange::Near,
             },
             // The FAST rung — the value the retired bool field could not carry, i.e. the whole
             // reason the key moved.
@@ -884,6 +886,8 @@ mod tests {
             pen_cam_corner: PenCamCorner::Off,
             kill_cam: KillCam::Off,
             reduce_motion: ReduceMotion::On,
+            track_prints: TrackPrintRelief::Parallax,
+            track_print_range: TrackPrintRange::Farthest,
         };
         assert!(save(Some(&path), &wanted), "the save must land");
         let reloaded = load(Some(&path));

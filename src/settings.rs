@@ -920,6 +920,86 @@ impl ReduceMotion {
     }
 }
 
+/// How the track prints' relief is drawn (cosmetic terrain marks, `track_prints`): lighting only
+/// (the depth bends the ground's normal), parallax (the ground's texture shifts with the depth, so
+/// a rut reads at low angles), or parallax with the sun's shadow marched across the rut. Every
+/// level darkens and roughens the trodden ground the same; only the relief's cost differs, and only
+/// on print pixels within [`TrackPrintRange`]. Read by `track_prints::sync_material`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub(crate) enum TrackPrintRelief {
+    Lighting,
+    Parallax,
+    #[default]
+    SunShadow,
+}
+
+impl TrackPrintRelief {
+    pub(crate) const ORDER: [TrackPrintRelief; 3] = [
+        TrackPrintRelief::Lighting,
+        TrackPrintRelief::Parallax,
+        TrackPrintRelief::SunShadow,
+    ];
+
+    /// ASCII only — it reaches `Text`.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            TrackPrintRelief::Lighting => "LIGHTING",
+            TrackPrintRelief::Parallax => "PARALLAX",
+            TrackPrintRelief::SunShadow => "SUN SHADOW",
+        }
+    }
+
+    /// The level the shader branches on: 0 lighting only, 1 parallax, 2 parallax and sun.
+    pub(crate) const fn level(self) -> u8 {
+        match self {
+            TrackPrintRelief::Lighting => 0,
+            TrackPrintRelief::Parallax => 1,
+            TrackPrintRelief::SunShadow => 2,
+        }
+    }
+}
+
+/// How far from the eye the track prints' relief is drawn before it fades to lighting only. The
+/// near store reaches at least 39 m ahead of the eye in every direction (`track_prints::store`), so
+/// the longest rung is the store's own reach. Read by `track_prints::sync_material`.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub(crate) enum TrackPrintRange {
+    Near,
+    Middle,
+    #[default]
+    Far,
+    Farthest,
+}
+
+impl TrackPrintRange {
+    pub(crate) const ORDER: [TrackPrintRange; 4] = [
+        TrackPrintRange::Near,
+        TrackPrintRange::Middle,
+        TrackPrintRange::Far,
+        TrackPrintRange::Farthest,
+    ];
+
+    /// The distance, m. ASSUMED: 30 m by default, the far end of the range a print must read at.
+    pub(crate) const fn metres(self) -> f32 {
+        match self {
+            TrackPrintRange::Near => 10.0,
+            TrackPrintRange::Middle => 20.0,
+            TrackPrintRange::Far => 30.0,
+            TrackPrintRange::Farthest => 40.0,
+        }
+    }
+
+    /// ASCII only — it reaches `Text`.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            TrackPrintRange::Near => "10 M",
+            TrackPrintRange::Middle => "20 M",
+            TrackPrintRange::Far => "30 M",
+            TrackPrintRange::Farthest => "40 M",
+        }
+    }
+}
+
 /// Which monitor the window is put on — the row that stops a two-display machine opening the game
 /// wherever the window manager last felt like.
 ///
@@ -1624,6 +1704,12 @@ pub(crate) struct Settings {
     /// See [`ReduceMotion`].
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) reduce_motion: ReduceMotion,
+    /// See [`TrackPrintRelief`].
+    #[serde(skip_serializing_if = "is_default")]
+    pub(crate) track_prints: TrackPrintRelief,
+    /// See [`TrackPrintRange`].
+    #[serde(skip_serializing_if = "is_default")]
+    pub(crate) track_print_range: TrackPrintRange,
 }
 
 impl Default for Settings {
@@ -1646,6 +1732,8 @@ impl Default for Settings {
             pen_cam_corner: PenCamCorner::default(),
             kill_cam: KillCam::default(),
             reduce_motion: ReduceMotion::default(),
+            track_prints: TrackPrintRelief::default(),
+            track_print_range: TrackPrintRange::default(),
         }
     }
 }

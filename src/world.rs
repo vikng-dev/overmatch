@@ -479,6 +479,9 @@ fn spawn_environment(
                 layer_arm.id(),
                 masks.id(),
             ]));
+            // The ground-type table every pack's print response is read from; the prints keep it
+            // as a resource, the one the owner tunes live (`track_prints::tuning`).
+            let ground = crate::ground_types::GroundTypes::load_shipped();
             let prints = crate::track_prints::images(&mut images);
             let material = terrain_materials.add(crate::terrain_blend::TerrainMaterial {
                 base: StandardMaterial {
@@ -504,11 +507,11 @@ fn spawn_environment(
                     ..default()
                 },
                 extension: crate::terrain_blend::TerrainBlend {
-                    params: crate::terrain_blend::params(manifest),
+                    params: crate::terrain_blend::params(manifest, &ground),
                     layer_albedo,
                     layer_normal,
                     layer_arm,
-                    masks,
+                    masks: masks.clone(),
                     prints_near: prints.near.clone(),
                     prints_world: prints.world.clone(),
                 },
@@ -518,7 +521,9 @@ fn spawn_environment(
                 &mut commands,
                 prints,
                 material.clone(),
+                masks,
                 manifest.extent.world_size_m,
+                ground,
             );
             info!(
                 "terrain surface: base pack every {} m, masks {} at {:?}, blend layers {}",

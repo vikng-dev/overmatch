@@ -22,6 +22,52 @@ pub fn sp_spawn_plugin(app: &mut App) {
     }
 }
 
+/// Named start spots on the shipped map, fixture data for the owner's hand-driving of the track
+/// prints (cosmetic terrain marks): `(name, x, z, heading°)`, each a stretch where one ground type's
+/// pack dominates the painted mask for 20–30 m along the heading (read off `terrain_masks.png`).
+const START_SPOTS: [(&str, f32, f32, f32); 3] = [
+    ("mud", 599.9, -599.9, 195.0),
+    ("sand", 302.5, 542.7, 315.0),
+    ("base", 70.0, -20.0, 90.0),
+];
+
+/// The dev start lever, `OVERMATCH_START=<x>,<z>[,<heading°>]` or `OVERMATCH_START=<spot>` (one of
+/// [`START_SPOTS`]): a normal, drivable offline game whose player tank spawns there, heading
+/// `heading°` from `+Z` toward `+X`, rather than at the duel. World XZ and radians out. Unset, or
+/// unreadable (logged), is every normal run; a dev lever on the offline path only, like
+/// [`target_ahead`].
+pub(crate) fn start_spot() -> Option<(Vec2, f32)> {
+    if !cfg!(feature = "dev_tools") {
+        return None;
+    }
+    let spec = std::env::var("OVERMATCH_START").ok()?;
+    let named = START_SPOTS
+        .iter()
+        .find(|(name, ..)| name.eq_ignore_ascii_case(spec.trim()))
+        .map(|&(_, x, z, heading)| (Vec2::new(x, z), heading));
+    let parsed = || {
+        let parts: Vec<f32> = spec
+            .split(',')
+            .map(|part| part.trim().parse().ok())
+            .collect::<Option<_>>()?;
+        match parts[..] {
+            [x, z] => Some((Vec2::new(x, z), 0.0)),
+            [x, z, heading] => Some((Vec2::new(x, z), heading)),
+            _ => None,
+        }
+    };
+    let Some((at, heading)) = named.or_else(parsed) else {
+        warn!(
+            "OVERMATCH_START: want <x>,<z>[,<heading°>] or one of {:?}, got {spec:?} — the duel's \
+             spawn stands",
+            START_SPOTS.map(|(name, ..)| name)
+        );
+        return None;
+    };
+    info!("OVERMATCH_START: the player's tank spawns at {at} heading {heading}°");
+    Some((at, heading.to_radians()))
+}
+
 /// Is this process running the target-ahead placement (`OVERMATCH_TARGET_AHEAD=1`)?
 ///
 /// A dev lever on the offline path only, for captures of the player's own hits (the pen cam's
@@ -388,11 +434,17 @@ fn spawn_tank_when_loaded(
     } else {
         (Quat::from_rotation_z(0.7), Quat::IDENTITY)
     };
+    // The player's own spawn, moved by the dev start lever when it is set.
+    let (a_at, a_turn) = match start_spot() {
+        // The hull faces its own −Z: a turn of `heading + π` about Y points it along the heading.
+        Some((at, heading)) => (at, Quat::from_rotation_y(heading + std::f32::consts::PI)),
+        None => (duel[0], a_turn),
+    };
     spawn_tank(
         &mut commands,
         content,
         pending.presentation(),
-        Transform::from_translation(crate::terrain_grid::spawn_pos(grid, duel[0]))
+        Transform::from_translation(crate::terrain_grid::spawn_pos(grid, a_at))
             .with_rotation(a_turn),
         "Tiger I (A)",
         0,

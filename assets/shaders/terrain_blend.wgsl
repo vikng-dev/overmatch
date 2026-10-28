@@ -6,13 +6,19 @@
 // branch is not uniform across the quad — so every layer fetch is `textureSampleGrad` with
 // gradients computed outside the branch. `textureSample`'s implicit derivatives are undefined
 // under non-uniform control flow and would cost the skip its licence. The prints' near store is
-// read only near the eye, so it is read at level 0 (`textureSampleLevel`), which needs none.
+// read only near the eye, so it is read at level 0 (`textureSampleLevel`), which needs none — and
+// which is the only kind of read its loops may make.
 //
-// TRACK PRINTS (`src/track_prints.rs`). Each pack's response (depth, albedo gain, roughness gain)
-// is blended by the same final weights as the packs. The world layer's trodden coverage darkens
-// and roughens everywhere; inside the near store's window a sole's clearance over the ground
-// becomes a depth, `max(0, depth − clearance)`, whose gradient bends the normal. The near store
-// fades out at its window's edge and where a texel shrinks below a couple of pixels.
+// TRACK PRINTS (`src/track_prints.rs`, cosmetic terrain marks). Each pack names a ground type
+// (`src/ground_types.rs`), and the prints read the ground by the map's PAINTED weights
+// (`print_weights`), which the CPU reproduces for the belt sink. A near-store texel holds a press
+// (R: the sole's pattern times how far into its press the link is) and the laying tank's ground
+// pressure (G); its depth is the ground's `softness × pressure`, capped, times R (`print_depth`).
+// The world layer's trodden coverage darkens and roughens everywhere; inside the near store's
+// window the depth's gradient bends the normal, and up to the player's relief distance the view
+// ray is marched into the depth (parallax), and from where it lands toward the sun (the rut's
+// self-shadow). Both offset the UV and the world position BEFORE the standard PBR input is built,
+// so the base pack and the layers shift together.
 
 #import bevy_pbr::{
     forward_io::{VertexOutput, FragmentOutput},
@@ -21,10 +27,15 @@
     pbr_functions,
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
     pbr_types,
+    mesh_types,
+    mesh_view_bindings as view_bindings,
+    mesh_view_types,
+    lighting,
+    shadows,
 }
 
 struct TerrainBlendParams {
-    // xyz: each layer's UV multiplier over the mesh's own UV. w: unused.
+    // xyz: each layer's UV multiplier over the mesh's own UV. w: the mesh's UV per world metre.
     layer_uv_scale: vec4<f32>,
     // World XZ to mask UV: uv = world.xz * xy + zw.
     mask_map: vec4<f32>,
@@ -32,17 +43,22 @@ struct TerrainBlendParams {
     blend_law: vec4<f32>,
     // x: macro-tint periods per metre, y: macro-tint amplitude. zw: unused.
     macro_tint: vec4<f32>,
-    // Per slot (x the base, yzw the layers): print depth (m), albedo gain, roughness gain.
-    print_depth: vec4<f32>,
+    // Per slot (x the base, yzw the layers), the ground type each pack names: print depth per kPa
+    // of ground pressure (m), depth cap (m), albedo gain, roughness gain.
+    print_softness: vec4<f32>,
+    print_cap: vec4<f32>,
     print_albedo: vec4<f32>,
     print_roughness: vec4<f32>,
     // The near store: xy its window's low corner (world XZ, m), z its side (m), w its texel (m).
     print_near: vec4<f32>,
     // World XZ to world-layer UV: uv = world.xz * xy + zw.
     print_world: vec4<f32>,
-    // x: the clearance range the near press spans (m), y: window fade (m), z/w: pixels per texel
-    // at which the near normal is gone / whole.
+    // x: the ground pressure (kPa) a full G channel stands for, y: window fade (m), z/w: pixels per
+    // texel at which the near normal is gone / whole.
     print_law: vec4<f32>,
+    // x: relief level (0 lighting only, 1 parallax, 2 parallax and the sun's shadow), y: the
+    // distance relief reaches (m), z: the distance it fades to lighting only over (m).
+    print_relief: vec4<f32>,
 }
 
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> blend: TerrainBlendParams;
@@ -71,6 +87,28 @@ const MACRO_OCTAVE_RATIO: f32 = 2.7;
 // Peak of the two-octave sum: the octaves are 1 and 1/2, each in 0..1.
 const MACRO_PEAK: f32 = 1.5;
 
+// How much of a print's press reads as fully trodden: a press of half or more darkens and roughens
+// the ground fully. ASSUMED: the darkening fades in with the first half of a link's press, so a
+// fresh print does not pop dark before it sinks.
+const FOOTPRINT_GAIN: f32 = 2.0;
+// The parallax march: at least and at most this many steps, each at most half a near texel of
+// lateral travel, so a grazing view takes more of them. ASSUMED.
+const PARALLAX_STEPS_MIN: f32 = 4.0;
+const PARALLAX_STEPS_MAX: f32 = 32.0;
+// The least depth per unit of view ray the march accepts: views flatter than about 3° to the ground
+// march as if at 3°. ASSUMED.
+const PARALLAX_MIN_DOWN: f32 = 0.05;
+// The sun march's steps, from where the view ray lands up out of the rut toward the sun. ASSUMED,
+// within the approaches note's 4–8.
+const SUN_STEPS: u32 = 6u;
+// How deep (as a share of the landing depth, m at least) the ground must stand over the sun ray to
+// shade it fully: the shadow's soft edge. ASSUMED.
+const SUN_SOFTNESS_SHARE: f32 = 0.25;
+const SUN_SOFTNESS_MIN_M: f32 = 0.003;
+// The sun lower than this over the ground's own plane (its sine) casts no rut shadow: the plane's
+// own lighting already has it dark. ASSUMED.
+const SUN_MIN_SINE: f32 = 0.02;
+
 // One lattice corner's value, in 0..1.
 fn macro_hash(cell: vec2<f32>) -> f32 {
     return fract(sin(dot(cell, vec2(127.1, 311.7))) * 43758.5453123);
@@ -90,49 +128,235 @@ fn macro_noise(p: vec2<f32>) -> f32 {
     );
 }
 
+// The print's ground weights from the mask's painted weights, in slot order: the base pack where
+// the mask is silent, each layer by its painted weight, normalised. `terrain_blend::print_weights`
+// is this law, line for line, for the belt sink.
+fn print_weights(mask: vec3<f32>) -> vec4<f32> {
+    let base = 1.0 - saturate(mask.r + mask.g + mask.b);
+    let weights = max(vec4(base, mask.r, mask.g, mask.b), vec4(0.0));
+    return weights / max(dot(weights, vec4(1.0)), 1e-6);
+}
+
+// The depth (m) a full press reaches under a ground pressure of `kpa`, on ground of print weights
+// `ground`: each slot's `softness × pressure`, capped, blended. `terrain_blend::print_depth_m`.
+fn print_depth(ground: vec4<f32>, kpa: f32) -> f32 {
+    return dot(ground, min(blend.print_cap, blend.print_softness * kpa));
+}
+
+// The near store at world XZ `p`: R the press, G the ground pressure over its full scale.
+fn near_texel(p: vec2<f32>) -> vec2<f32> {
+    return textureSampleLevel(
+        print_near_texture, layer_albedo_sampler, p / blend.print_near.z, 0.0).rg;
+}
+
+// How far (m) the ground is sunk at world XZ `p`, on ground of print weights `ground`.
+fn sunk_at(p: vec2<f32>, ground: vec4<f32>) -> f32 {
+    let texel = near_texel(p);
+    return print_depth(ground, texel.g * blend.print_law.x) * texel.r;
+}
+
 // How much the prints' near store speaks at world XZ `p`, 0..1: whole inside its window and where
 // a texel spans enough pixels, fading to nothing at the window's edge and as a texel shrinks below
-// a couple of pixels, where its gradient would alias. `ddx`/`ddy` are `p`'s screen derivatives.
+// a couple of pixels, where its gradient would alias. `ddx`/`ddy` are `p`'s screen derivatives. A
+// pixel's size is its footprint's AREA, not its long axis: at a low view a pixel stretches far
+// along the ground and stays narrow across it, and the long axis would fade a print 10 m off.
 fn near_weight(p: vec2<f32>, ddx: vec2<f32>, ddy: vec2<f32>) -> f32 {
     let half = 0.5 * blend.print_near.z;
     let centre = blend.print_near.xy + vec2(half);
     let inside = half - max(abs(p.x - centre.x), abs(p.y - centre.y));
     let window = saturate(inside / blend.print_law.y);
-    let px_per_texel = blend.print_near.w / max(max(length(ddx), length(ddy)), 1e-6);
+    let pixel_m = sqrt(abs(ddx.x * ddy.y - ddx.y * ddy.x));
+    let px_per_texel = blend.print_near.w / max(pixel_m, 1e-6);
     let detail = saturate(
         (px_per_texel - blend.print_law.z) / (blend.print_law.w - blend.print_law.z));
     return window * detail;
 }
 
-// How far the ground sinks (m) under a near-store press `press`, on ground whose blended print
-// depth is `depth`: a sole clearing the ground by `(1 − press) × range` sinks it by what is left.
-fn sunk(press: f32, depth: f32) -> f32 {
-    return max(depth - (1.0 - press) * blend.print_law.x, 0.0);
+// How much of the prints' relief (parallax and the sun) is drawn at `distance` m from the eye:
+// whole up to the player's distance less its fade, nothing beyond it.
+fn relief_weight(distance: f32) -> f32 {
+    let reach = blend.print_relief.y;
+    let fade = max(blend.print_relief.z, 1e-3);
+    return saturate((reach - distance) / fade);
+}
+
+// The parallax march: from world XZ `p` on the surface, down the view ray whose surface-plane
+// motion per metre of depth is `lateral`, to where it meets the sunk ground (depth scaled by
+// `scale`). Returns the depth (m, along the surface normal) it lands at; the landing's surface-plane
+// point is `p + lateral * depth`. `bound` is the deepest the ground can be here.
+fn parallax_depth(
+    p: vec2<f32>, lateral: vec2<f32>, ground: vec4<f32>, scale: f32, bound: f32,
+) -> f32 {
+    var h_prev = sunk_at(p, ground) * scale;
+    if h_prev <= 0.0 {
+        return 0.0;
+    }
+    let travel = length(lateral) * bound / (0.5 * blend.print_near.w);
+    let steps = clamp(ceil(travel), PARALLAX_STEPS_MIN, PARALLAX_STEPS_MAX);
+    let dz = bound / steps;
+    var z_prev = 0.0;
+    for (var i = 1.0; i <= steps; i += 1.0) {
+        let z = dz * i;
+        let h = sunk_at(p + lateral * z, ground) * scale;
+        if z >= h {
+            // Between the last step above the ground and this one below it, where the two lines
+            // cross.
+            let above = h_prev - z_prev;
+            let below = z - h;
+            return mix(z_prev, z, above / max(above + below, 1e-6));
+        }
+        z_prev = z;
+        h_prev = h;
+    }
+    return bound;
+}
+
+// The sun's visibility (0..1) at the landing: world XZ `p` on the surface plane at depth `depth`,
+// marched toward the sun, whose surface-plane motion per metre of rise is `lateral`, until the ray
+// leaves the rut. Where the ground there is sunk less than the ray is deep, the ground stands over
+// the ray and shades it, softly; a rut's open floor, sunk as deep as the ray, does not.
+fn sun_visibility(
+    p: vec2<f32>, depth: f32, lateral: vec2<f32>, ground: vec4<f32>, scale: f32,
+) -> f32 {
+    let softness = max(depth * SUN_SOFTNESS_SHARE, SUN_SOFTNESS_MIN_M);
+    var occluded = 0.0;
+    for (var k = 1u; k <= SUN_STEPS; k++) {
+        let rise = depth * f32(k) / f32(SUN_STEPS);
+        let h = sunk_at(p + lateral * rise, ground) * scale;
+        occluded = max(occluded, ((depth - rise) - h) / softness);
+    }
+    return 1.0 - saturate(occluded);
+}
+
+// The sun's direct light as `apply_pbr_lighting` adds it for `pbr_input`, shadow map and exposure
+// included: what a rut's self-shadow takes away. The sun is the scene's first directional light;
+// the terrain material enables neither clearcoat nor anisotropy, so the base layer is the input.
+fn sun_direct(pbr_input: pbr_types::PbrInput) -> vec3<f32> {
+    if view_bindings::lights.n_directional_lights == 0u {
+        return vec3(0.0);
+    }
+    let base = pbr_input.material.base_color.rgb;
+    let metallic = pbr_input.material.metallic;
+    let perceptual_roughness = pbr_input.material.perceptual_roughness;
+    let NdotV = max(dot(pbr_input.N, pbr_input.V), 0.0001);
+    var input: lighting::LightingInput;
+    input.layers[lighting::LAYER_BASE].NdotV = NdotV;
+    input.layers[lighting::LAYER_BASE].N = pbr_input.N;
+    input.layers[lighting::LAYER_BASE].R = reflect(-pbr_input.V, pbr_input.N);
+    input.layers[lighting::LAYER_BASE].perceptual_roughness = perceptual_roughness;
+    input.layers[lighting::LAYER_BASE].roughness =
+        lighting::perceptualRoughnessToRoughness(perceptual_roughness);
+    input.P = pbr_input.world_position.xyz;
+    input.V = pbr_input.V;
+    input.diffuse_color = pbr_functions::calculate_diffuse_color(
+        base,
+        metallic,
+        pbr_input.material.specular_transmission,
+        pbr_input.material.diffuse_transmission,
+    );
+    input.metallic = metallic;
+    input.F0_dielectric = pbr_functions::calculate_F0_dielectric(pbr_input.material.reflectance);
+    input.F0_metallic = base;
+    input.F_ab = lighting::F_AB(perceptual_roughness, NdotV);
+    var shadow = 1.0;
+    if (pbr_input.flags & mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u
+        && (view_bindings::lights.directional_lights[0].flags
+            & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
+        let view_z = dot(vec4<f32>(
+            view_bindings::view.view_from_world[0].z,
+            view_bindings::view.view_from_world[1].z,
+            view_bindings::view.view_from_world[2].z,
+            view_bindings::view.view_from_world[3].z
+        ), pbr_input.world_position);
+        shadow = shadows::fetch_directional_shadow(
+            0u, pbr_input.world_position, pbr_input.world_normal, view_z, pbr_input.frag_coord.xy);
+    }
+    return lighting::directional_light(0u, &input, true) * shadow * view_bindings::view.exposure;
 }
 
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
-    // The base pack, through the whole standard path: its albedo, its normal map resolved against
-    // the mesh tangents, its ARM, and every non-texture material parameter.
-    var pbr_input = pbr_input_from_standard_material(in, is_front);
+    // Derivatives of the surface as the mesh draws it, before any print moves it: continuous across
+    // a rut's edge, where the moved UV is not.
+    let world_xz = in.world_position.xz;
+    let ddx_xz = dpdx(world_xz);
+    let ddy_xz = dpdy(world_xz);
+    let ddx_uv = dpdx(in.uv);
+    let ddy_uv = dpdy(in.uv);
 
     let mask = textureSample(
         masks_texture,
         masks_sampler,
-        in.world_position.xz * blend.mask_map.xy + blend.mask_map.zw,
+        world_xz * blend.mask_map.xy + blend.mask_map.zw,
     ).rgb;
     let painted = array<f32, LAYERS>(mask.r, mask.g, mask.b);
+    let ground = print_weights(mask);
 
     // The prints' world layer: what share of this ground a sole has covered. Uniform control
-    // flow, so its implicit derivatives pick the mip; the near store's are taken here too.
-    let world_xz = in.world_position.xz;
-    let ddx_xz = dpdx(world_xz);
-    let ddy_xz = dpdy(world_xz);
+    // flow, so its implicit derivatives pick the mip.
     let trodden = textureSample(
         print_world_texture,
         masks_sampler,
         world_xz * blend.print_world.xy + blend.print_world.zw,
     ).r;
+
+    // TRACK PRINTS. Far from the eye the world layer's coverage is all there is; inside the near
+    // store its sharp footprint takes over, its depth's gradient tilts the normal, and within the
+    // relief distance the view lands on the sunk ground and the sun is marched across the rut.
+    let near = near_weight(world_xz, ddx_xz, ddy_xz);
+    let geometric_normal = normalize(in.world_normal);
+    var landed_xz = world_xz;
+    var landed_depth = 0.0;
+    var sun = 1.0;
+    var footprint = trodden;
+    var depth_slope = vec3(0.0);
+    if near > 0.0 {
+        let relief = near * relief_weight(distance(view_bindings::view.world_position, in.world_position.xyz));
+        let bound = dot(ground, blend.print_cap) * relief;
+        if blend.print_relief.x >= 0.5 && bound > 1e-4 {
+            // The view ray into the surface; per metre of depth along the normal, how far it moves
+            // across the surface's plane.
+            let into = normalize(in.world_position.xyz - view_bindings::view.world_position);
+            let down = max(-dot(into, geometric_normal), PARALLAX_MIN_DOWN);
+            let lateral = (into / down + geometric_normal).xz;
+            landed_depth = parallax_depth(world_xz, lateral, ground, relief, bound);
+            landed_xz = world_xz + lateral * landed_depth;
+            if blend.print_relief.x >= 1.5 && landed_depth > 0.0
+                && view_bindings::lights.n_directional_lights > 0u {
+                let to_sun = view_bindings::lights.directional_lights[0].direction_to_light;
+                let rise = dot(to_sun, geometric_normal);
+                if rise > SUN_MIN_SINE {
+                    let sun_lateral = (to_sun / rise - geometric_normal).xz;
+                    sun = sun_visibility(landed_xz, landed_depth, sun_lateral, ground, relief);
+                }
+            }
+        }
+        let texel_m = blend.print_near.w;
+        let here = near_texel(landed_xz);
+        // d(depth)/dx and d(depth)/dz, world space: the surface DESCENDS toward a deeper texel.
+        let gradient = vec2(
+            sunk_at(landed_xz + vec2(texel_m, 0.0), ground)
+                - sunk_at(landed_xz - vec2(texel_m, 0.0), ground),
+            sunk_at(landed_xz + vec2(0.0, texel_m), ground)
+                - sunk_at(landed_xz - vec2(0.0, texel_m), ground),
+        ) / (2.0 * texel_m);
+        depth_slope = vec3(gradient.x, 0.0, gradient.y) * near;
+        footprint = mix(trodden, saturate(here.r * FOOTPRINT_GAIN), near);
+    }
+
+    // The surface as the view meets it: moved across the plane to where the ray landed and down
+    // the normal by the depth there, before the standard input samples the base pack.
+    var landed = in;
+    let shift = landed_xz - world_xz;
+    landed.uv = in.uv + shift * blend.layer_uv_scale.w;
+    landed.world_position = vec4(
+        in.world_position.xyz + vec3(shift.x, 0.0, shift.y) - geometric_normal * landed_depth,
+        in.world_position.w,
+    );
+
+    // The base pack, through the whole standard path: its albedo, its normal map resolved against
+    // the mesh tangents, its ARM, and every non-texture material parameter.
+    var pbr_input = pbr_input_from_standard_material(landed, is_front);
 
     // The material's own FACTORS, before the base pack's maps were multiplied into them
     // (`pbr_input.material` already carries that product). Every layer is multiplied by the same
@@ -140,8 +364,6 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let base_color_factor = pbr_bindings::material.base_color.rgb;
     let roughness_factor = pbr_bindings::material.perceptual_roughness;
 
-    let ddx_uv = dpdx(in.uv);
-    let ddy_uv = dpdy(in.uv);
     let double_sided = (pbr_input.material.flags
         & pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
     let TBN = pbr_functions::calculate_tbn_mikktspace(pbr_input.world_normal, in.world_tangent);
@@ -170,7 +392,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
             continue;
         }
         let scale = blend.layer_uv_scale[i];
-        let uv = in.uv * scale;
+        let uv = landed.uv * scale;
         let ddx = ddx_uv * scale;
         let ddy = ddy_uv * scale;
         let slot = i + 1u;
@@ -207,10 +429,6 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     var blended_normal = vec3(0.0);
     var blended_occlusion = 0.0;
     var blended_roughness = 0.0;
-    // The packs' print responses, by the same weights.
-    var print_depth = 0.0;
-    var print_albedo = 0.0;
-    var print_roughness = 0.0;
     for (var i = 0u; i < SLOTS; i++) {
         let weight = weights[i] / total;
         blended_albedo += albedo[i] * weight;
@@ -218,9 +436,6 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         blended_normal += normal[i] * weight;
         blended_occlusion += occlusion[i] * weight;
         blended_roughness += roughness[i] * weight;
-        print_depth += blend.print_depth[i] * weight;
-        print_albedo += blend.print_albedo[i] * weight;
-        print_roughness += blend.print_roughness[i] * weight;
     }
 
     // THE MACRO TINT. Every pack repeats at its own authored metres, and a repeat is caught by its
@@ -237,33 +452,9 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     let macro_signed = macro_field * (2.0 / MACRO_PEAK) - 1.0;
     blended_albedo *= 1.0 + blend.macro_tint.y * macro_signed;
 
-    // TRACK PRINTS. Far from the eye the world layer's coverage is all there is; inside the near
-    // store its sharp footprint takes over, and the depth's gradient tilts the normal.
-    let near = near_weight(world_xz, ddx_xz, ddy_xz);
-    var footprint = trodden;
-    var depth_slope = vec3(0.0);
-    if near > 0.0 {
-        let uv = world_xz / blend.print_near.z;
-        let texel_uv = blend.print_near.w / blend.print_near.z;
-        let here = textureSampleLevel(print_near_texture, layer_albedo_sampler, uv, 0.0).rg;
-        let east = textureSampleLevel(
-            print_near_texture, layer_albedo_sampler, uv + vec2(texel_uv, 0.0), 0.0).r;
-        let west = textureSampleLevel(
-            print_near_texture, layer_albedo_sampler, uv - vec2(texel_uv, 0.0), 0.0).r;
-        let north = textureSampleLevel(
-            print_near_texture, layer_albedo_sampler, uv + vec2(0.0, texel_uv), 0.0).r;
-        let south = textureSampleLevel(
-            print_near_texture, layer_albedo_sampler, uv - vec2(0.0, texel_uv), 0.0).r;
-        // d(depth)/dx and d(depth)/dz, world space: the surface DESCENDS toward a deeper texel.
-        let gradient = vec2(
-            sunk(east, print_depth) - sunk(west, print_depth),
-            sunk(north, print_depth) - sunk(south, print_depth),
-        ) / (2.0 * blend.print_near.w);
-        depth_slope = vec3(gradient.x, 0.0, gradient.y) * near;
-        footprint = mix(trodden, here.g, near);
-    }
-    blended_albedo *= mix(1.0, print_albedo, footprint);
-    blended_roughness *= mix(1.0, print_roughness, footprint);
+    // The trodden ground's look, by the same painted weights as its depth.
+    blended_albedo *= mix(1.0, dot(ground, blend.print_albedo), footprint);
+    blended_roughness *= mix(1.0, dot(ground, blend.print_roughness), footprint);
     // Mikkelsen's surface gradient: the ground's height is `−depth`, so its normal leans along
     // the depth's gradient, projected into the surface's own plane.
     let surface_normal = normalize(blended_normal);
@@ -280,6 +471,11 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 
     var out: FragmentOutput;
     out.color = apply_pbr_lighting(pbr_input);
+    // The rut's self-shadow takes the sun's direct light, and only the sun's, where the ground
+    // stands over the ray to it.
+    if sun < 1.0 {
+        out.color = vec4(out.color.rgb - (1.0 - sun) * sun_direct(pbr_input), out.color.a);
+    }
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
     return out;
 }
