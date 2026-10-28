@@ -45,6 +45,9 @@ setopt null_glob
 
 OUT="${1:?usage: run-forest-cost.sh <out-dir> [condition ...]}"
 shift
+# Absolute, because the cones condition passes `$OUT/root-cones` as BEVY_ASSET_ROOT and the client
+# resolves a relative root against itself a second time.
+[[ "$OUT" == /* ]] || OUT="$PWD/$OUT"
 REPO="$(cd "$(dirname "$0")/../.." && pwd)"
 BIN="${BIN:-target/release}"
 [[ "$BIN" == /* ]] || BIN="$REPO/$BIN"
