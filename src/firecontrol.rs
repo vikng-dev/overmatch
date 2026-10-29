@@ -5,17 +5,20 @@
 //! does (`aim::commit_aim`, `sight::drive_gunner_aim`), and the gunner optic depresses its view by the
 //! same angle so the reticle holds the target while the barrel rides above it.
 //!
-//! With air drag there is no closed form, so this is the real-world *range table*: at spawn we fire the
-//! weapon's trajectory — off `ballistics`' shared flight kernel, so the solution matches the actual
-//! shell — at a sweep of launch angles, record where each lands, and invert that to a `range → angle`
-//! lookup. Each weapon gets its own; the draggy coax needs far more lob than the 88 at equal range,
-//! which *is* the per-ammo ballistic scale on a real sight.
+//! With air drag there is no closed form, so this is the real-world *range table*: we fire the
+//! round's trajectory — off `ballistics`' shared flight kernel, so the solution matches the actual
+//! shell — at a sweep of launch angles, record where each lands, and invert that to a
+//! `range → angle` lookup. Each round gets its own, swept once per process and shared by every weapon
+//! that fires it; the draggy coax needs far more lob than the 88 at equal range, which *is* the
+//! per-ammo ballistic scale on a real sight.
 //!
 //! Deep module: a small interface (`RangeTable::superelevation`, `Ranging`, `lob`) over the
 //! sweep / invert / interpolate inside.
 
 use bevy::input::mouse::AccumulatedMouseScroll;
 use bevy::prelude::*;
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 
 use crate::ballistics::freeflight_step;
 use crate::command::{TankDeviceSet, gather_commands};
@@ -38,23 +41,37 @@ impl Default for Ranging {
 }
 
 /// A weapon's precomputed range table: ascending `(range_m, superelevation_rad)` rows. Built once per
-/// weapon at spawn (the trajectory is fixed) and stored on its muzzle; the aim commit looks up the
-/// dialed range to lob the aim point. Each weapon has its own — the coax out-lobs the 88 at equal
-/// range, the per-ammo ballistic scale.
+/// speed/drag bit pattern and shared on weapon muzzles at spawn; the aim commit looks up the
+/// dialed range to lob the aim point.
 #[derive(Component)]
 pub struct RangeTable {
     /// `(range, superelevation)`, ascending by range. Monotonic by construction: only the rising
     /// (direct-fire) branch is kept, so a binary-free linear scan interpolates cleanly.
-    points: Vec<(f32, f32)>,
+    points: Arc<[(f32, f32)]>,
 }
 
 impl RangeTable {
+    /// Resolve synchronously from round data. The process-wide cache retains immutable rows across
+    /// worlds and spawns; neither asset readiness nor tank identity affects the solution.
+    pub fn for_weapon(speed: f32, drag_k: f32) -> Self {
+        static TABLES: LazyLock<Mutex<HashMap<(u32, u32), Arc<[(f32, f32)]>>>> =
+            LazyLock::new(|| Mutex::new(HashMap::new()));
+        let mut tables = TABLES.lock().expect("range table cache lock poisoned");
+        // Hold the lock through the sweep so concurrent spawns also build each key only once.
+        let points = tables
+            .entry((speed.to_bits(), drag_k.to_bits()))
+            .or_insert_with(|| Self::sweep(speed, drag_k).points);
+        Self {
+            points: Arc::clone(points),
+        }
+    }
+
     /// Build by sweeping launch angles, simulating each shot with `ballistics`' flight kernel, and
     /// keeping `(range, angle)` along the rising (direct-fire) branch — so the predicted range matches
     /// where the live shell lands. `drag_k` (1/m) is the round's own
     /// ([`crate::rounds::Round::drag_k`]), the value its shell flies on. Stops at the weapon's max
     /// range (where range stops increasing) or the engagement envelope.
-    pub fn for_weapon(speed: f32, drag_k: f32) -> Self {
+    fn sweep(speed: f32, drag_k: f32) -> Self {
         const DT: f32 = 0.005;
         const ANGLE_STEP: f32 = 0.000_2; // ~0.01° — fine range resolution near flat fire
         const MAX_ANGLE: f32 = std::f32::consts::FRAC_PI_4; // past 45° range only falls
@@ -77,7 +94,9 @@ impl RangeTable {
             }
             angle += ANGLE_STEP;
         }
-        Self { points }
+        Self {
+            points: points.into(),
+        }
     }
 
     /// Superelevation (rad) to lob over the line of sight for a target at `range` (m). Linear
@@ -106,7 +125,7 @@ impl RangeTable {
     #[cfg(test)]
     pub(crate) fn test_fixed(theta: f32) -> Self {
         Self {
-            points: vec![(0.0, theta)],
+            points: Arc::from([(0.0, theta)]),
         }
     }
 
@@ -116,7 +135,7 @@ impl RangeTable {
     #[cfg(test)]
     pub(crate) fn test_rows(rows: &[(f32, f32)]) -> Self {
         Self {
-            points: rows.to_vec(),
+            points: Arc::from(rows),
         }
     }
 }
@@ -197,6 +216,28 @@ fn adjust_range(scroll: Res<AccumulatedMouseScroll>, mut ranging: ResMut<Ranging
 mod tests {
     use super::*;
     use crate::ballistics::fixture_drag_k;
+
+    /// The aim commit's lookup relies on cached rows preserving every fresh sweep bit for each
+    /// speed/drag key, while repeated spawns share the same rows.
+    #[test]
+    fn cached_rows_are_bit_identical_to_fresh_sweep_for_aim_commit() {
+        // Fixture data: vary speed and drag independently to exercise both key fields.
+        for (speed, drag_k) in [(700.0_f32, 0.0001_f32), (710.0, 0.0001), (700.0, 0.0002)] {
+            let first = RangeTable::for_weapon(speed, drag_k);
+            let cached = RangeTable::for_weapon(speed, drag_k);
+            let fresh = RangeTable::sweep(speed, drag_k);
+            assert!(Arc::ptr_eq(&first.points, &cached.points));
+            assert!(!fresh.points.is_empty());
+            assert_eq!(cached.points.len(), fresh.points.len());
+            for (cached_row, fresh_row) in cached.points.iter().zip(fresh.points.iter()) {
+                assert_eq!(
+                    (cached_row.0.to_bits(), cached_row.1.to_bits()),
+                    (fresh_row.0.to_bits(), fresh_row.1.to_bits()),
+                    "aim commit rows differ for speed={speed}, drag_k={drag_k}"
+                );
+            }
+        }
+    }
 
     /// Fixture rounds on one fixture form, so the coax's lob is its sectional density's alone.
     fn main_gun() -> RangeTable {
