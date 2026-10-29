@@ -7,9 +7,17 @@
 #
 # The runner sets, before `frame_run_begin`: OUT, REPO, BIN (the directory holding `overmatch`),
 # ASSET_ROOT (the directory holding `assets/`), SMOKE, WARMUP_S, DURATION_S, COOLDOWN_S, MIN_ROWS,
-# STARTUP_GRACE_S, and the CONDITIONS array (recorded in the manifest). It may define
-# `condition_gates <cond> <log> <stream>`: its own gates, run after the shared ones and before the
-# condition's receipt, failing through `frame_run_invalid`.
+# STARTUP_GRACE_S, and the CONDITIONS array (recorded in the manifest). It may set, before sourcing,
+# FRAME_RUN_CLIENT_ARGS: the client's arguments after the binary (default `(--offline)`; the online
+# runner's client takes none). It may define, all optional, each failing through `frame_run_invalid`:
+#   condition_gates <cond> <log> <stream>          its own gates, after the shared ones and before
+#                                                  the condition's receipt;
+#   condition_launched <cond> <log> <stream>       right after the client starts (CLIENT_PID set);
+#   condition_poll <cond> <log> <stream> <span_s>  on every poll once the stream has rows, with its
+#                                                  span on the app clock, before the span check —
+#                                                  the window's edges are WARMUP_S and
+#                                                  WARMUP_S+DURATION_S of span;
+#   run_cleanup                                    on exit, after the client is reaped.
 #
 # OFFSCREEN=1 (read from the environment, for every runner) is the mode that takes nobody's screen:
 # a hidden window whose cameras render into a 2560x1440 image at scale factor 2, the visible
@@ -29,6 +37,7 @@ SMOKE_RELAX=()
 [[ -n "$SMOKE" ]] && SMOKE_RELAX=(--occluded-ok --display-ok --surface-ok --undrawn-ok)
 CLIENT="$BIN/overmatch"
 CLIENT_PID=""
+(( ${+FRAME_RUN_CLIENT_ARGS} )) || FRAME_RUN_CLIENT_ARGS=(--offline)
 
 frame_run_invalid() {
   echo "$1 INVALID: $2" >&2
@@ -43,16 +52,24 @@ FRAME_RUN_T_PAT='s/.*"t"[[:space:]]*:[[:space:]]*\([0-9.eE+-]*\).*/\1/p'
 frame_run_t_first() { head -n1 "$1" 2>/dev/null | sed -n "$FRAME_RUN_T_PAT"; }
 frame_run_t_last() { tail -n1 "$1" 2>/dev/null | sed -n "$FRAME_RUN_T_PAT"; }
 
+# Idempotent: it can run from a signal trap and then again from the EXIT trap.
 frame_run_cleanup() {
   [[ -n "$CLIENT_PID" ]] && kill "$CLIENT_PID" 2>/dev/null || true
   [[ -n "$CLIENT_PID" ]] && wait "$CLIENT_PID" 2>/dev/null || true
+  CLIENT_PID=""
+  if (( $+functions[run_cleanup] )); then
+    run_cleanup || true
+  fi
 }
 # Set here, at the sourcing script's top level: zsh scopes an EXIT trap set inside a function to
-# that function. A signal trap that RETURNS resumes the script in zsh — route INT/TERM through exit
-# so the EXIT trap does the cleanup exactly once and the script actually terminates.
+# that function. A signal trap that RETURNS resumes the script in zsh, so INT/TERM end in `exit` —
+# but an `exit` from a signal trap that fired inside a function runs NO EXIT trap, and a runner
+# spends its conditions inside `frame_run_condition` (MEASURED 2026-10-30: a TERMed runner exited
+# 143 and its client ran on, orphaned). So the signal traps clean up themselves. A terminal's
+# Ctrl-C hid this: the client is in the same process group and takes the SIGINT too.
 trap frame_run_cleanup EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
+trap 'frame_run_cleanup; exit 130' INT
+trap 'frame_run_cleanup; exit 143' TERM
 
 # Refusals, the out dir, the traps, the smoke marker and the manifest's provenance header.
 frame_run_begin() {
@@ -110,7 +127,7 @@ EOF
       echo "presentation gates: occlusion-free measurement window + one >=100000 mHz monitor + a 2560x1440 surface throughout + the 3D camera drew on >=99% of measured frames + effective present mode Immediate, frame cap off"
     fi
     echo "conditions: ${CONDITIONS[*]}"
-    echo "binary: $CLIENT  $(stat -f 'mtime=%Sm size=%z' "$CLIENT")"
+    echo "binary: $CLIENT ${FRAME_RUN_CLIENT_ARGS[*]}  $(stat -f 'mtime=%Sm size=%z' "$CLIENT")"
     echo "host: $(uname -m) $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -p)"
   } >"$OUT/manifest.txt"
 }
@@ -140,8 +157,11 @@ frame_run_condition() {
   [[ -n "$OFFSCREEN" ]] && extra=(-u SPIKE_SIM_VISIBLE SPIKE_SIM_WINDOWED=1 SPIKE_FRAME_COST_OFFSCREEN=1)
   env "${extra[@]}" \
     OVERMATCH_CONFIG_DIR="$cfg" SPIKE_FRAME_COST="$OUT/$cond.jsonl" BEVY_ASSET_ROOT="$ASSET_ROOT" \
-    "$@" "$CLIENT" --offline >"$log" 2>&1 &
+    "$@" "$CLIENT" "${FRAME_RUN_CLIENT_ARGS[@]}" >"$log" 2>&1 &
   CLIENT_PID=$!
+  if (( $+functions[condition_launched] )); then
+    condition_launched "$cond" "$log" "$stream"
+  fi
 
   # Run the condition until the STREAM spans warmup+duration on its own clock — `t` is
   # app-elapsed time, so process startup (asset load, shader compilation, window creation; >10 s
@@ -166,6 +186,9 @@ frame_run_condition() {
     # A torn last line simply fails the extraction and this poll waits another second.
     t_first="$(frame_run_t_first "$stream")"
     t_last="$(frame_run_t_last "$stream")"
+    if [[ -n "$t_first" && -n "$t_last" ]] && (( $+functions[condition_poll] )); then
+      condition_poll "$cond" "$log" "$stream" "$(( t_last - t_first ))"
+    fi
     if [[ -n "$t_first" && -n "$t_last" ]] && (( t_last - t_first >= WARMUP_S + DURATION_S )); then
       span_ok=1
       break
