@@ -36,11 +36,12 @@ QUARTER_SURFACE = {"surface_w": 1280, "surface_h": 720}
 
 
 def frames(seconds: float, hz: float = 120.0, start: float = 0.0) -> list[dict]:
-    """A healthy frame stream: `seconds` of rows at a steady `hz`."""
+    """A healthy frame stream: `seconds` of rows at a steady `hz`, the 3D camera drawing each one."""
     step = 1.0 / hz
     count = int(seconds * hz)
     return [
-        {"t": start + index * step, "frame_ms": step * 1000.0} for index in range(count + 1)
+        {"t": start + index * step, "frame_ms": step * 1000.0, "drawn": index}
+        for index in range(count + 1)
     ]
 
 
@@ -76,6 +77,7 @@ class GateTestCase(unittest.TestCase):
             kwargs.get("occluded_ok", False),
             kwargs.get("display_ok", False),
             kwargs.get("surface_ok", False),
+            kwargs.get("undrawn_ok", False),
         )
 
     def reject(self, rows: list[dict], **kwargs) -> str:
@@ -214,6 +216,86 @@ class SurfaceGateTests(GateTestCase):
         with_rows = self.check(self.surface({"t": 0.5, **FULL_SURFACE}, {"t": 3.5, **FULL_SURFACE}))
         without = self.check(self.surface({"t": 0.5, **FULL_SURFACE}), name="bare")
         self.assertEqual(len(with_rows), len(without))
+
+
+def with_drawn(rows: list[dict], drawn) -> list[dict]:
+    """`rows` with each frame row's `drawn` replaced by `drawn(row)`; the key dropped on None."""
+    out = []
+    for row in rows:
+        if "frame_ms" in row:
+            row = {key: value for key, value in row.items() if key != "drawn"}
+            value = drawn(row)
+            if value is not None:
+                row["drawn"] = value
+        out.append(row)
+    return out
+
+
+class DrawnGateTests(GateTestCase):
+    """The occluded-from-birth failure class: no occlusion message, a correct monitor and surface,
+    and a 3D camera that never draws. MEASURED: 5.86 ms against 14.65 ms for the same binary
+    (focus-gap-diagnosis.md). The drawn count is the only positive proof of drawing, so a mutant that
+    skips or loosens this gate lets that fiction straight into the tables."""
+
+    def test_a_camera_that_never_drew_fails_and_names_the_class(self) -> None:
+        message = self.reject(with_drawn(healthy(), lambda row: 0))
+        self.assertIn("drew on 0 of", message)
+        self.assertIn("no render work", message)
+
+    def test_a_camera_that_stops_drawing_mid_window_fails(self) -> None:
+        # Drew until t=4 s of a window spanning 2..6 s: half the window is render-free.
+        rows = with_drawn(healthy(), lambda row: int(min(row["t"], 4.0) * 120))
+        message = self.reject(rows)
+        self.assertIn("drew on", message)
+
+    def test_a_count_that_lags_the_rows_by_a_frame_or_two_passes(self) -> None:
+        # Pipelined rendering: the row reads the count a frame or two behind. The rate is unchanged.
+        rows = with_drawn(healthy(), lambda row: max(0, round(row["t"] * 120) - 2))
+        self.assertGreater(len(self.check(rows)), 400)
+
+    def test_rows_without_a_drawn_count_fail_as_unproven(self) -> None:
+        message = self.reject(with_drawn(healthy(), lambda row: None))
+        self.assertIn("without a `drawn` count", message)
+
+    def test_undrawn_ok_relaxes_the_gate_for_the_runner_s_hidden_smoke_window(self) -> None:
+        rows = with_drawn(healthy(), lambda row: 0)
+        self.assertGreater(len(self.check(rows, undrawn_ok=True)), 400)
+
+
+OFFSCREEN_SURFACE = {**FULL_SURFACE, "offscreen": True}
+
+
+class OffscreenTests(GateTestCase):
+    """Offscreen mode: the cameras render into an image and nothing is presented, so the display and
+    occlusion gates have no subject; the surface and drawn gates still decide validity."""
+
+    def offscreen(self, *extra: dict, seconds: float = 6.0) -> list[dict]:
+        """A healthy offscreen stream: no monitor row, an offscreen surface row, every frame drawn."""
+        return frames(seconds) + [{"t": 0.5, **OFFSCREEN_SURFACE}, *extra]
+
+    def test_a_healthy_offscreen_stream_passes_without_a_monitor_row(self) -> None:
+        self.assertGreater(len(self.check(self.offscreen())), 400)
+
+    def test_an_occlusion_row_does_not_fail_an_offscreen_stream(self) -> None:
+        # The hidden window can report occlusion; it presents nothing either way.
+        rows = self.offscreen({"t": 3.0, "occluded": True})
+        self.assertGreater(len(self.check(rows)), 400)
+
+    def test_an_offscreen_stream_at_the_wrong_size_still_fails(self) -> None:
+        rows = frames(6.0) + [{"t": 0.5, **QUARTER_SURFACE, "offscreen": True}]
+        message = self.reject(rows)
+        self.assertIn("1280x720", message)
+
+    def test_an_offscreen_stream_that_never_drew_still_fails(self) -> None:
+        message = self.reject(with_drawn(self.offscreen(), lambda row: 0))
+        self.assertIn("drew on 0 of", message)
+
+    def test_a_window_stream_keeps_the_display_gate(self) -> None:
+        # Only rows that SAY offscreen relax the presentation gates: the same stream with a window
+        # surface row and no monitor row is the hidden-window fiction, and fails.
+        rows = frames(6.0) + [{"t": 0.5, **FULL_SURFACE}]
+        message = self.reject(rows)
+        self.assertIn("no monitor row", message)
 
 
 if __name__ == "__main__":

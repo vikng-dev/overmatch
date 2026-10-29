@@ -4,11 +4,11 @@
 # ///
 """Summarize frame-budget sweep streams from `SPIKE_FRAME_COST` JSONL (src/frame_cost.rs).
 
-Consumes the raw one-row-per-frame `{t, frame_ms}` streams `scripts/perf/run-frame-sweep.sh`
+Consumes the raw one-row-per-frame `{t, frame_ms, drawn}` streams `scripts/perf/run-frame-sweep.sh`
 captures (one file per ladder condition; the recorder interleaves `{t, occluded}` rows on every
 window-occlusion transition, `{t, monitor, refresh_mhz, primary}` rows whenever the presenting
-monitor resolves or changes, and `{t, surface_w, surface_h}` rows whenever the physical surface
-size does) and prints:
+monitor resolves or changes, and `{t, surface_w, surface_h[, offscreen]}` rows whenever the
+physical surface size does) and prints:
   * per-condition p50/p95/p99/worst frame ms, with fps-equivalents and % of the 16.67 ms
     (60 fps) and 8.33 ms (120 fps) budgets;
   * a delta table against the ladder's baseline condition.
@@ -39,13 +39,24 @@ capture masquerades as a real measurement":
     another surface size measures a different machine — and the same 1280x720 logical window is
     1280x720 physical on the scale-1.0 external panel against 2560x1440 on the scale-2.0 built-in
     one, a 4x difference in pixels that no other gate here can see.
+  * unless --undrawn-ok: every frame row in the measurement window carries `drawn`, the render
+    world's count of frames in which the 3D camera held a view target, and it advances on at least
+    DRAWN_MIN_FRACTION of the window's frames. This is the one POSITIVE gate: a window occluded
+    from birth sends no occlusion message and passes every gate above while its 3D camera draws
+    nothing (.agents/scratch/perf-2026-10-29/focus-gap-diagnosis.md). (--undrawn-ok is SMOKE
+    mode's: its hidden window never draws.)
+
+An OFFSCREEN stream (`SPIKE_FRAME_COST_OFFSCREEN`, src/frame_cost.rs) is one whose surface rows in
+force over the measurement window all carry `offscreen: true`: its cameras render into an image at
+the expected surface size and nothing is presented. The display and occlusion gates have no subject
+there and are skipped; the surface and drawn gates apply unchanged.
 
 --validate-only runs exactly these gates and prints one OK line per stream, no tables — the
 runner's per-condition gate, so runner and analyzer cannot drift apart on what "valid" means.
 
 Usage:
     uv run scripts/perf/analyze.py [--warmup-s 10] [--min-rows 400] \
-        [--expected-duration-s 60] [--occluded-ok] [--display-ok] [--surface-ok] \
+        [--expected-duration-s 60] [--occluded-ok] [--display-ok] [--surface-ok] [--undrawn-ok] \
         [--validate-only] [--baseline m350-2] out/m350-2.client.jsonl out/off-30.client.jsonl ...
 
 Condition names are file basenames minus `.client.jsonl`/`.jsonl`.
@@ -77,6 +88,11 @@ MIN_REFRESH_MHZ = 100_000
 # external panel is scale 1.0, so a window born there is 1280x720 physical: a QUARTER of the pixels,
 # which reads as a ladder that is uniformly ~3x too fast while the refresh gate passes.
 EXPECTED_SURFACE = (2560, 1440)
+# The share of the measurement window's frames on which the 3D camera must have drawn. MEASURED on
+# offscreen runs: the count advances on every frame, so the slack only absorbs the frame or two that
+# pipelined rendering puts the render world behind the row that reads it. A window that stops
+# drawing for even 1% of the measurement fails.
+DRAWN_MIN_FRACTION = 0.99
 
 
 def fail(msg: str) -> NoReturn:
@@ -128,24 +144,32 @@ class MonitorRow(NamedTuple):
 
 
 class SurfaceRow(NamedTuple):
-    """One `{t, surface_w, surface_h}` row: the physical size of the presented surface, from when."""
+    """One `{t, surface_w, surface_h[, offscreen]}` row: the physical size of the surface the 3D
+    camera renders into, from when. `offscreen` marks an image target that is never presented."""
 
     t: float
     width: int
     height: int
+    offscreen: bool = False
 
     def size(self) -> tuple[int, int]:
         return (self.width, self.height)
 
     def describe(self) -> str:
-        return f"{self.width}x{self.height} physical"
+        return f"{self.width}x{self.height} physical{' offscreen' if self.offscreen else ''}"
+
+
+class FrameRow(NamedTuple):
+    """One `{t, frame_ms, drawn}` row. `drawn` is None on a stream from a binary that predates it."""
+
+    t: float
+    ms: float
+    drawn: int | None
 
 
 def parse_rows(
     path: Path,
-) -> tuple[
-    list[tuple[float, float]], list[tuple[float, bool]], list[MonitorRow], list[SurfaceRow]
-]:
+) -> tuple[list[FrameRow], list[tuple[float, bool]], list[MonitorRow], list[SurfaceRow]]:
     """Split a stream into frame, occlusion, monitor and surface rows, enforcing monotonic time.
 
     Monotonicity is a validity gate, not pedantry: `t` is one process's `Time<Real>` elapsed
@@ -159,7 +183,7 @@ def parse_rows(
     its terminating newline. Any unparseable row that IS newline-terminated sits in the middle of
     the stream, which no kill can produce, so it fails loud.
     """
-    frames: list[tuple[float, float]] = []
+    frames: list[FrameRow] = []
     occlusions: list[tuple[float, bool]] = []
     monitors: list[MonitorRow] = []
     surfaces: list[SurfaceRow] = []
@@ -191,11 +215,16 @@ def parse_rows(
                 kind = "surface"
             else:
                 kind = "frame"
-            parsed: tuple[float, float] | tuple[float, bool] | MonitorRow | SurfaceRow
+            parsed: FrameRow | tuple[float, bool] | MonitorRow | SurfaceRow
             if kind == "occluded":
                 parsed = (t, bool(row["occluded"]))
             elif kind == "surface":
-                parsed = SurfaceRow(t, int(row["surface_w"]), int(row["surface_h"]))
+                parsed = SurfaceRow(
+                    t,
+                    int(row["surface_w"]),
+                    int(row["surface_h"]),
+                    bool(row.get("offscreen", False)),
+                )
             elif kind == "monitor":
                 refresh = row["refresh_mhz"]
                 name = row["monitor"]
@@ -206,7 +235,8 @@ def parse_rows(
                     bool(row["primary"]),
                 )
             else:
-                parsed = (t, float(row["frame_ms"]))
+                drawn = row.get("drawn")
+                parsed = FrameRow(t, float(row["frame_ms"]), None if drawn is None else int(drawn))
         except (json.JSONDecodeError, KeyError, TypeError, ValueError) as err:
             fail(f"{path}:{lineno} unparseable row ({err})")
         if last_t is not None and t < last_t:
@@ -347,6 +377,32 @@ def check_display(path: Path, monitors: list[MonitorRow], window_start: float) -
         )
 
 
+def check_drawn(path: Path, window: list[FrameRow]) -> None:
+    """Fail unless the 3D camera drew on at least DRAWN_MIN_FRACTION of the window's frames.
+
+    The count is cumulative, so its advance across the window over the window's frame intervals is
+    the drawn share; a window too short to have an interval is left to the row-count gate.
+    """
+    missing = [row for row in window if row.drawn is None]
+    if missing:
+        fail(
+            f"{path}: frame rows without a `drawn` count from t={missing[0].t:.1f}s — nothing proves "
+            "the 3D camera drew these frames, and a window that never drew passes every other gate "
+            "here. Old binary?"
+        )
+    if len(window) < 2:
+        return
+    intervals = len(window) - 1
+    advanced = window[-1].drawn - window[0].drawn
+    if advanced < DRAWN_MIN_FRACTION * intervals:
+        fail(
+            f"{path}: the 3D camera drew on {advanced} of the measurement window's {intervals} "
+            f"frames ({100.0 * advanced / intervals:.1f}%, needs {100.0 * DRAWN_MIN_FRACTION:g}%) — "
+            "the rest are a frame loop with no render work, the fiction a window occluded from "
+            "birth produces without any occlusion message"
+        )
+
+
 def load_stream(
     path: Path,
     warmup_s: float,
@@ -355,6 +411,7 @@ def load_stream(
     occluded_ok: bool,
     display_ok: bool,
     surface_ok: bool,
+    undrawn_ok: bool = False,
 ) -> list[float]:
     if not path.is_file():
         fail(f"{path} does not exist")
@@ -365,7 +422,7 @@ def load_stream(
     # seconds cover asset load, shader compilation and the settle after spawn. Every row shape
     # carries the same clock, so the bounds are taken across all of them.
     stamps = (
-        [t for t, _ in frames]
+        [row.t for row in frames]
         + [t for t, _ in occlusions]
         + [row.t for row in monitors]
         + [row.t for row in surfaces]
@@ -382,11 +439,21 @@ def load_stream(
                 "— the process died or stalled early; row count alone cannot see this"
             )
     window_start = t_first + warmup_s
-    if not display_ok:
+    in_force = states_in_window(surfaces, window_start)
+    offscreen = bool(in_force) and all(row.offscreen for row in in_force)
+    if offscreen:
+        print(
+            f"note: {path} rendered offscreen — nothing was presented, so the display and "
+            "occlusion gates do not apply",
+            file=sys.stderr,
+        )
+    if not display_ok and not offscreen:
         check_display(path, monitors, window_start)
     if not surface_ok:
         check_surface(path, surfaces, window_start)
-    if not occluded_ok:
+    if not undrawn_ok:
+        check_drawn(path, [row for row in frames if row.t - t_first >= warmup_s])
+    if not occluded_ok and not offscreen:
         for start, end in occluded_intervals(occlusions, t_first, t_last):
             if end > window_start:
                 fail(
@@ -395,7 +462,7 @@ def load_stream(
                     "occluded surface presents nothing and the frame loop free-runs; these "
                     "frame times are fiction"
                 )
-    kept = [ms for t, ms in frames if t - t_first >= warmup_s]
+    kept = [row.ms for row in frames if row.t - t_first >= warmup_s]
     if len(kept) < min_rows:
         fail(
             f"{path}: {len(kept)} post-warmup rows < required {min_rows} "
@@ -432,6 +499,11 @@ def main() -> int:
         f"{EXPECTED_SURFACE[1]} physical; SMOKE mode only)",
     )
     parser.add_argument(
+        "--undrawn-ok",
+        action="store_true",
+        help="skip the drawn-frames gate (SMOKE mode only: a hidden window's 3D camera never draws)",
+    )
+    parser.add_argument(
         "--validate-only",
         action="store_true",
         help="run the validity gates and print OK per stream; no tables",
@@ -456,6 +528,7 @@ def main() -> int:
             args.occluded_ok,
             args.display_ok,
             args.surface_ok,
+            args.undrawn_ok,
         )
         conditions[name] = {label: pct(kept, q) for label, q in STATS}
         counts[name] = len(kept)

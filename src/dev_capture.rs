@@ -157,7 +157,7 @@ fn frame_path(path: &Path, at: f32, frames: usize) -> PathBuf {
 
 /// Create the primary window hidden. `WindowPlugin` has spawned the entity by now and `bevy_winit`
 /// reads `visible` when it creates the OS window, which is after every plugin's build.
-fn hide_window(app: &mut App) {
+pub(crate) fn hide_window(app: &mut App) {
     let world = app.world_mut();
     let mut windows = world.query_filtered::<&mut Window, With<PrimaryWindow>>();
     let Ok(mut window) = windows.single_mut(world) else {
@@ -232,11 +232,35 @@ fn retarget(
     cameras: &mut Query<(Entity, &Camera, &mut RenderTarget, Has<IsDefaultUiCamera>)>,
     size: UVec2,
 ) -> ImageRenderTarget {
+    let target = offscreen_target(images, size, SCALE_FACTOR);
+    let moved = retarget_to(commands, cameras, &target);
+    info!(
+        "capture: {moved} camera(s) retargeted to a {}x{} image",
+        size.x, size.y
+    );
+    target
+}
+
+/// A render-target image of `size` physical pixels whose UI lays out at `size / scale_factor`.
+pub(crate) fn offscreen_target(
+    images: &mut Assets<Image>,
+    size: UVec2,
+    scale_factor: f32,
+) -> ImageRenderTarget {
     let image = Image::new_target_texture(size.x, size.y, TextureFormat::Rgba8UnormSrgb, None);
-    let target = ImageRenderTarget {
+    ImageRenderTarget {
         handle: images.add(image),
-        scale_factor: SCALE_FACTOR,
-    };
+        scale_factor,
+    }
+}
+
+/// [`retarget`] onto an existing `target`; returns how many cameras moved. Cameras already off the
+/// window are left alone, so calling it every frame moves each camera once, when it first appears.
+pub(crate) fn retarget_to(
+    commands: &mut Commands,
+    cameras: &mut Query<(Entity, &Camera, &mut RenderTarget, Has<IsDefaultUiCamera>)>,
+    target: &ImageRenderTarget,
+) -> usize {
     let mut moved = 0;
     let mut ui_camera: Option<(isize, Entity)> = None;
     let mut marked = false;
@@ -256,11 +280,7 @@ fn retarget(
     {
         commands.entity(entity).insert(IsDefaultUiCamera);
     }
-    info!(
-        "capture: {moved} camera(s) retargeted to a {}x{} image",
-        size.x, size.y
-    );
-    target
+    moved
 }
 
 #[cfg(test)]

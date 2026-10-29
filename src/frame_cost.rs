@@ -121,9 +121,42 @@
 //!   `physical_target_size`, so the recorded number is the one that costs GPU time rather than a
 //!   number that merely correlates with it. `scripts/perf/analyze.py` fails any measurement window
 //!   not covered by a surface row, covered by one that is not 2560x1440, or that resizes mid-window.
+//!
+//! # Drawn frames: the positive proof
+//!
+//! Every signal above is NEGATIVE: an occlusion message, a wrong monitor, a wrong surface. A window
+//! occluded from birth emits none of them, its surface is `Occluded`, bevy acquires no swapchain
+//! texture, `prepare_view_targets` gives the 3D camera no `ViewTarget`, and the camera is skipped: a
+//! frame loop with no render work whose rows pass every negative gate (MEASURED,
+//! `.agents/scratch/perf-2026-10-29/focus-gap-diagnosis.md`). So a render-world system counts the
+//! frames in which a `Camera3d` view holds a `ViewTarget` ([`count_drawn`]), and every frame row
+//! carries the running count as `drawn`; the analyzer fails a measurement window whose `drawn` does
+//! not advance on nearly every frame row. The count crosses worlds through an `Arc<AtomicU64>`.
+//! Pipelined rendering runs the render world a frame behind, so a row reads the count as of an
+//! earlier frame: that shifts the window by a frame and changes no rate.
+//!
+//! # Offscreen mode (`SPIKE_FRAME_COST_OFFSCREEN=1`)
+//!
+//! Rendering cost measured without anyone's screen. The window is hidden (the runner also sets
+//! `SPIKE_SIM_WINDOWED=1`, which `run_offline` reads before the window exists), and every
+//! window-targeting camera is pointed, from its first frame, at one image of [`SURFACE_LOGICAL`]
+//! logical pixels at scale factor [`OFFSCREEN_SCALE_FACTOR`]: 2560x1440 physical, the visible
+//! harness's surface. Nothing is presented, so the presentation signals have no subject: the window
+//! is never parked, pinned, raised or asked for its monitor. The surface rows read the 3D camera's
+//! own target size and carry `offscreen: true`, which makes the analyzer skip the display and
+//! occlusion gates and keep the surface and drawn ones. MEASURED with the `OVERMATCH_CAPTURE`
+//! retarget this mode reuses: within 0.1 ms p50 of visible runs of the same binary at 2 tanks, and
+//! 0.7 ms at 30 (`focus-gap-diagnosis.md`). It omits the compositor's share of a visible frame.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+use bevy::camera::{Camera3d, ImageRenderTarget, RenderTarget};
 use bevy::platform::time::Instant;
 use bevy::prelude::*;
+use bevy::render::view::{ViewTarget, prepare_view_targets};
+use bevy::render::{Render, RenderApp, RenderSystems};
+use bevy::ui::IsDefaultUiCamera;
 use bevy::window::{PrimaryWindow, WindowOccluded};
 use serde_json::json;
 
@@ -146,6 +179,21 @@ const MONITOR_POLL_S: f64 = 1.0;
 /// PHYSICAL surface it becomes: 2560x1440 on the built-in panel's scale factor of 2, which is what
 /// `scripts/perf/analyze.py` gates on and what every dataset this sweep compares against measured.
 const SURFACE_LOGICAL: Vec2 = Vec2::new(1280.0, 720.0);
+
+/// The offscreen image's scale factor: the built-in panel's, so [`SURFACE_LOGICAL`] becomes the same
+/// 2560x1440 physical surface the visible harness gates on, and the UI lays out at the same size.
+const OFFSCREEN_SCALE_FACTOR: f32 = 2.0;
+
+/// Frames in which a `Camera3d` view held a `ViewTarget`, counted in the render world and read in
+/// the main one (module doc, drawn frames).
+#[derive(Resource, Clone, Default)]
+struct DrawnFrames(Arc<AtomicU64>);
+
+/// Offscreen mode's render target, created on the first frame; the resource's presence is the mode.
+#[derive(Resource)]
+struct Offscreen {
+    target: Option<ImageRenderTarget>,
+}
 
 /// Open frame-cost sink, present only when recording is armed.
 #[derive(Resource)]
@@ -178,6 +226,38 @@ pub fn client_plugin(app: &mut App) {
         occluded: false,
         last_sample: None,
     });
+    let drawn = DrawnFrames::default();
+    app.insert_resource(drawn.clone());
+    if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+        render_app.insert_resource(drawn).add_systems(
+            Render,
+            count_drawn
+                .in_set(RenderSystems::Prepare)
+                .after(prepare_view_targets),
+        );
+    }
+    if crate::env_flag("SPIKE_FRAME_COST_OFFSCREEN", false) {
+        let size = SURFACE_LOGICAL * OFFSCREEN_SCALE_FACTOR;
+        info!(
+            "frame_cost: offscreen: hidden window, cameras render into a {}x{} image at scale \
+             {OFFSCREEN_SCALE_FACTOR}",
+            size.x, size.y,
+        );
+        crate::dev_capture::hide_window(app);
+        app.insert_resource(Offscreen { target: None });
+        app.add_systems(
+            Update,
+            (
+                hold_offscreen_target,
+                sample,
+                record_occlusion,
+                record_surface,
+                report_present_mode,
+            )
+                .chain(),
+        );
+        return;
+    }
     app.add_systems(Startup, park_and_pin);
     app.add_systems(
         Update,
@@ -195,6 +275,35 @@ pub fn client_plugin(app: &mut App) {
         )
             .chain(),
     );
+}
+
+/// Render world: count this frame as drawn when a `Camera3d` view holds a `ViewTarget` (module doc,
+/// drawn frames). After `prepare_view_targets`, which inserts or removes that component each frame.
+fn count_drawn(drawn: Res<DrawnFrames>, views: Query<(), (With<Camera3d>, With<ViewTarget>)>) {
+    if !views.is_empty() {
+        drawn.0.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Offscreen mode: point every window-targeting camera at the one offscreen image, every frame, so a
+/// camera spawned late (a view switch, an inset) moves on its first frame like the rest.
+fn hold_offscreen_target(
+    mut commands: Commands,
+    mut offscreen: ResMut<Offscreen>,
+    mut images: ResMut<Assets<Image>>,
+    mut cameras: Query<(Entity, &Camera, &mut RenderTarget, Has<IsDefaultUiCamera>)>,
+) {
+    let target = offscreen.target.get_or_insert_with(|| {
+        crate::dev_capture::offscreen_target(
+            &mut images,
+            (SURFACE_LOGICAL * OFFSCREEN_SCALE_FACTOR).as_uvec2(),
+            OFFSCREEN_SCALE_FACTOR,
+        )
+    });
+    let moved = crate::dev_capture::retarget_to(&mut commands, &mut cameras, target);
+    if moved > 0 {
+        info!("frame_cost: {moved} camera(s) retargeted to the offscreen image");
+    }
 }
 
 /// Move the primary window onto the primary display and pin its logical size, once, at startup —
@@ -310,46 +419,84 @@ fn raise_when_occluded(
 /// `physical_target_size` (which is what `render_scale`'s "the 3D main pass fills the … target" line
 /// prints). A row sourced from the OS could agree with the panel while the renderer quietly drew a
 /// quarter of it, which is the exact failure this gate exists to catch.
+///
+/// In offscreen mode there is no presented surface, so the row is the size of the 3D camera's target
+/// instead ([`offscreen_surface`]), marked `offscreen: true`.
 fn record_surface(
     mut cost: ResMut<FrameCost>,
     time: Res<Time<Real>>,
     mut last: Local<Option<UVec2>>,
     mut next_poll_s: Local<f64>,
     windows: Query<&Window, With<PrimaryWindow>>,
+    offscreen: Option<Res<Offscreen>>,
+    cameras: Query<(&Camera, &RenderTarget), With<Camera3d>>,
 ) {
     let t = time.elapsed_secs_f64();
     if t < *next_poll_s {
         return;
     }
     *next_poll_s = t + MONITOR_POLL_S;
-    let Ok(window) = windows.single() else {
+    let resolved = match &offscreen {
+        Some(offscreen) => offscreen_surface(offscreen, &cameras),
+        None => windows.single().ok().map(|window| {
+            let size = window.resolution.physical_size();
+            let message = format!(
+                "frame_cost: surface {}x{} physical ({}x{} logical at scale {})",
+                size.x,
+                size.y,
+                window.resolution.width(),
+                window.resolution.height(),
+                window.resolution.scale_factor(),
+            );
+            (size, message)
+        }),
+    };
+    let Some((size, message)) = resolved else {
         return;
     };
-    let size = window.resolution.physical_size();
     if *last == Some(size) {
         return;
     }
     // A resize AFTER the first observation is the operator-error case (a dragged edge, a monitor
     // move that re-scaled the surface) and is loud; the first observation is just provenance.
-    let message = format!(
-        "frame_cost: surface {}x{} physical ({}x{} logical at scale {})",
-        size.x,
-        size.y,
-        window.resolution.width(),
-        window.resolution.height(),
-        window.resolution.scale_factor(),
-    );
     if last.is_some() {
         warn!("{message} — CHANGED at t={t:.3}s");
     } else {
         info!("{message} at t={t:.3}s");
     }
-    cost.sink.write(&json!({
+    let mut row = json!({
         "t": t,
         "surface_w": size.x,
         "surface_h": size.y,
-    }));
+    });
+    if offscreen.is_some() {
+        row["offscreen"] = json!(true);
+    }
+    cost.sink.write(&row);
     *last = Some(size);
+}
+
+/// Offscreen mode's surface: the physical target size of the lowest-order full-frame `Camera3d`
+/// rendering into the offscreen image, which is the camera `render_scale` reports on. None until the
+/// image exists and the camera's target info has followed the retarget.
+fn offscreen_surface(
+    offscreen: &Offscreen,
+    cameras: &Query<(&Camera, &RenderTarget), With<Camera3d>>,
+) -> Option<(UVec2, String)> {
+    let target = offscreen.target.as_ref()?;
+    let (camera, _) = cameras
+        .iter()
+        .filter(|(camera, render_target)| {
+            camera.viewport.is_none()
+                && matches!(render_target, RenderTarget::Image(image) if image == target)
+        })
+        .min_by_key(|(camera, _)| camera.order)?;
+    let size = camera.physical_target_size()?;
+    let message = format!(
+        "frame_cost: surface {}x{} physical (offscreen image at scale {})",
+        size.x, size.y, target.scale_factor,
+    );
+    Some((size, message))
 }
 
 /// The presenting panel's identity, as recorded — the tuple the analyzer gates on, so "changed" is
@@ -439,9 +586,10 @@ fn record_monitor(
     *last = Some(facts);
 }
 
-/// Append this frame's `{t, frame_ms}` row: `frame_ms` is the wall-clock time since the previous
-/// row, never `Time<Real>`'s delta (module doc).
-fn sample(mut cost: ResMut<FrameCost>, time: Res<Time<Real>>) {
+/// Append this frame's `{t, frame_ms, drawn}` row: `frame_ms` is the wall-clock time since the
+/// previous row, never `Time<Real>`'s delta, and `drawn` the render world's running count of frames
+/// the 3D camera drew (module doc).
+fn sample(mut cost: ResMut<FrameCost>, time: Res<Time<Real>>, drawn: Res<DrawnFrames>) {
     let now = Instant::now();
     let frame_ms = cost
         .last_sample
@@ -450,6 +598,7 @@ fn sample(mut cost: ResMut<FrameCost>, time: Res<Time<Real>>) {
     cost.sink.write(&json!({
         "t": time.elapsed_secs_f64(),
         "frame_ms": frame_ms,
+        "drawn": drawn.0.load(Ordering::Relaxed),
     }));
 }
 
@@ -544,6 +693,7 @@ mod tests {
                     occluded: false,
                     last_sample: None,
                 })
+                .init_resource::<DrawnFrames>()
                 .add_systems(Update, sample);
             app.update();
             std::thread::sleep(FRAME);

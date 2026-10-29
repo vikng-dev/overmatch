@@ -10,13 +10,23 @@
 # STARTUP_GRACE_S, and the CONDITIONS array (recorded in the manifest). It may define
 # `condition_gates <cond> <log> <stream>`: its own gates, run after the shared ones and before the
 # condition's receipt, failing through `frame_run_invalid`.
+#
+# OFFSCREEN=1 (read from the environment, for every runner) is the mode that takes nobody's screen:
+# a hidden window whose cameras render into a 2560x1440 image at scale factor 2, the visible
+# harness's surface, with nothing presented (`SPIKE_FRAME_COST_OFFSCREEN`, src/frame_cost.rs). Its
+# numbers are measurements, not SMOKE fiction: every frame row proves the 3D camera drew, and the
+# analyzer gates on that and on the surface size. It omits only the compositor's share of a visible
+# frame (MEASURED within 0.1 ms p50 at 2 tanks, 0.7 ms at 30; focus-gap-diagnosis.md). The display
+# and occlusion gates have no subject offscreen, and the analyzer skips them on a stream whose
+# surface rows say offscreen.
+OFFSCREEN="${OFFSCREEN:-}"
 
 # The analyzer's presentation-gate relaxations, as an ARRAY. zsh does not word-split an unquoted
 # parameter expansion, so the obvious `${SMOKE:+--occluded-ok --display-ok --surface-ok}` reaches
 # argparse as ONE argument and every smoke run dies on "--occluded-ok --display-ok --surface-ok
 # does not exist". Real mode never noticed: there the expansion is empty.
 SMOKE_RELAX=()
-[[ -n "$SMOKE" ]] && SMOKE_RELAX=(--occluded-ok --display-ok --surface-ok)
+[[ -n "$SMOKE" ]] && SMOKE_RELAX=(--occluded-ok --display-ok --surface-ok --undrawn-ok)
 CLIENT="$BIN/overmatch"
 CLIENT_PID=""
 
@@ -46,10 +56,14 @@ trap 'exit 143' TERM
 
 # Refusals, the out dir, the traps, the smoke marker and the manifest's provenance header.
 frame_run_begin() {
+  if [[ -n "$SMOKE" && -n "$OFFSCREEN" ]]; then
+    echo "REFUSING: SMOKE and OFFSCREEN are both set — pick plumbing fiction or an offscreen measurement" >&2
+    exit 1
+  fi
   # A real run with the hidden-capture env exported would inherit it into every child, the window
   # would never be shown, and every gate below would happily pass on free-run fiction. Refuse rather
   # than silently scrub: an operator who exported it should decide whether they meant SMOKE=1.
-  if [[ -z "$SMOKE" && -n "${SPIKE_SIM_WINDOWED:-}" ]]; then
+  if [[ -z "$SMOKE" && -z "$OFFSCREEN" && -n "${SPIKE_SIM_WINDOWED:-}" ]]; then
     echo "REFUSING real run: SPIKE_SIM_WINDOWED is exported — a hidden window free-runs and every" >&2
     echo "number would be fiction. unset it, or run SMOKE=1 for loudly-marked plumbing validation." >&2
     exit 1
@@ -80,11 +94,21 @@ EOF
   {
     echo "runner commit: $(git -C "$REPO" rev-parse HEAD)$(git -C "$REPO" diff --quiet HEAD 2>/dev/null || echo ' (dirty)')"
     [[ -f "$BIN/BUILD.txt" ]] && sed 's/^/binary build: /' "$BIN/BUILD.txt"
-    echo "mode: $([[ -n "$SMOKE" ]] && echo 'SMOKE / PLUMBING-ONLY (hidden window — every number is free-run fiction)' || echo 'real (visible window)')"
+    if [[ -n "$SMOKE" ]]; then
+      echo "mode: SMOKE / PLUMBING-ONLY (hidden window — every number is free-run fiction)"
+    elif [[ -n "$OFFSCREEN" ]]; then
+      echo "mode: offscreen (hidden window; the cameras render into a 2560x1440 image at scale 2; nothing presented)"
+    else
+      echo "mode: real (visible window)"
+    fi
     echo "duration_s: $DURATION_S  warmup_s: $WARMUP_S  cooldown_s: $COOLDOWN_S  min_rows: $MIN_ROWS  bin: $BIN  asset_root: $ASSET_ROOT"
-    echo "presentation gates: $([[ -n "$SMOKE" ]] \
-      && echo 'RELAXED — occlusion, display, surface and effective-present-mode gates SKIPPED (hidden window by design)' \
-      || echo 'occlusion-free measurement window + one >=100000 mHz monitor + a 2560x1440 surface throughout + effective present mode Immediate, frame cap off')"
+    if [[ -n "$SMOKE" ]]; then
+      echo "presentation gates: RELAXED — occlusion, display, surface, drawn-frames and effective-present-mode gates SKIPPED (hidden window by design)"
+    elif [[ -n "$OFFSCREEN" ]]; then
+      echo "presentation gates: offscreen — a 2560x1440 offscreen target throughout + the 3D camera drew on >=99% of measured frames + frame cap off; display and occlusion n/a (nothing presented)"
+    else
+      echo "presentation gates: occlusion-free measurement window + one >=100000 mHz monitor + a 2560x1440 surface throughout + the 3D camera drew on >=99% of measured frames + effective present mode Immediate, frame cap off"
+    fi
     echo "conditions: ${CONDITIONS[*]}"
     echo "binary: $CLIENT  $(stat -f 'mtime=%Sm size=%z' "$CLIENT")"
     echo "host: $(uname -m) $(sysctl -n machdep.cpu.brand_string 2>/dev/null || uname -p)"
@@ -109,9 +133,11 @@ frame_run_condition() {
   echo "== $cond: ${fields} $* (${WARMUP_S}s warmup + ${DURATION_S}s measure) =="
   # Real mode SCRUBS the hidden-capture env pair from the child even though the refusal already
   # caught an exported SPIKE_SIM_WINDOWED — belt and suspenders, because run_offline's hidden mode
-  # silently activating is exactly the free-run fiction a capture must never emit.
-  local extra=(-u SPIKE_SIM_WINDOWED -u SPIKE_SIM_VISIBLE)
-  [[ -n "$SMOKE" ]] && extra=(SPIKE_SIM_WINDOWED=1)
+  # silently activating is exactly the free-run fiction a capture must never emit. `env` takes its
+  # `-u` options before any assignment.
+  local extra=(-u SPIKE_SIM_WINDOWED -u SPIKE_SIM_VISIBLE -u SPIKE_FRAME_COST_OFFSCREEN)
+  [[ -n "$SMOKE" ]] && extra=(-u SPIKE_SIM_VISIBLE -u SPIKE_FRAME_COST_OFFSCREEN SPIKE_SIM_WINDOWED=1)
+  [[ -n "$OFFSCREEN" ]] && extra=(-u SPIKE_SIM_VISIBLE SPIKE_SIM_WINDOWED=1 SPIKE_FRAME_COST_OFFSCREEN=1)
   env "${extra[@]}" \
     OVERMATCH_CONFIG_DIR="$cfg" SPIKE_FRAME_COST="$OUT/$cond.jsonl" BEVY_ASSET_ROOT="$ASSET_ROOT" \
     "$@" "$CLIENT" --offline >"$log" 2>&1 &
@@ -154,7 +180,11 @@ frame_run_condition() {
   # or produced a short/occluded stream is NOT evidence. Fail loud.
   [[ -f "$stream" ]] || frame_run_invalid "$cond" "no frame stream at $stream (SPIKE_FRAME_COST never armed?)"
   grep -q "settings: loaded $cfg/video.ron" "$log" || frame_run_invalid "$cond" "injected settings were not loaded (see $log)"
-  if [[ -z "$SMOKE" ]]; then
+  if [[ -n "$OFFSCREEN" ]]; then
+    # Offscreen nothing is presented, so no present mode paces the loop; a frame cap still would.
+    grep -qE "frame_cost: effective present mode [A-Za-z]+, frame cap off" "$log" \
+      || frame_run_invalid "$cond" "no proof the run was uncapped — expected 'frame_cost: effective present mode …, frame cap off' (see $log)"
+  elif [[ -z "$SMOKE" ]]; then
     # Uncapped-run proof: the client states the post-probe EFFECTIVE mode (src/frame_cost.rs);
     # only Immediate + frame cap off is a real free-of-display-pacing run. The settings-loaded
     # grep above only proves the file PARSED — normalize_vsync can still have resolved Off to On.
@@ -168,11 +198,11 @@ frame_run_condition() {
     fi
   fi
   # Stream-shape gates, shared with the final analysis pass (--validate-only runs the same code):
-  # monotonic time, full warmup+duration SPAN, MIN_ROWS, and (real mode) no occluded interval
-  # overlapping the measurement window, plus a fast-enough single monitor and a full-size surface
-  # covering all of it. SMOKE relaxes all three presentation gates: its window is hidden, so it
-  # neither occludes honestly nor resolves a monitor or a real surface, and its numbers are
-  # declared fiction.
+  # monotonic time, full warmup+duration SPAN, MIN_ROWS, a 3D camera that drew on (nearly) every
+  # measured frame, and (real mode) no occluded interval overlapping the measurement window, plus a
+  # fast-enough single monitor and a full-size surface covering all of it. SMOKE relaxes every
+  # presentation gate: its window is hidden, so it neither occludes honestly, resolves a monitor or a
+  # real surface, nor draws, and its numbers are declared fiction.
   ( cd "$REPO" && uv run scripts/perf/analyze.py --validate-only --warmup-s "$WARMUP_S" \
       --min-rows "$MIN_ROWS" --expected-duration-s "$DURATION_S" \
       "${SMOKE_RELAX[@]}" "$stream" ) \
@@ -181,11 +211,14 @@ frame_run_condition() {
     condition_gates "$cond" "$log" "$stream"
   fi
   # A window that is never shown (behind a locked screen, for one) sends no occlusion message and its
-  # 3D camera never draws, so every stream gate above passes on a frame loop that renders nothing.
-  # The renderer's own `render scale:` line and an observed `occluded=false` prove the camera drew.
+  # 3D camera never draws, so the negative stream gates pass on a frame loop that renders nothing.
+  # The analyzer's drawn-frames gate above covers every frame; these two once-per-run log lines are
+  # the stopgap that predates it, kept beside it.
   if [[ -z "${SMOKE:-}" ]]; then
     grep -q 'render scale: ' "$log" \
       || frame_run_invalid "$cond" "the 3D camera never rendered (no 'render scale:' line); was the window ever shown? (see $log)"
+  fi
+  if [[ -z "${SMOKE:-}" && -z "$OFFSCREEN" ]]; then
     grep -q 'occluded=false' "$log" \
       || frame_run_invalid "$cond" "the window never reported itself visible (no 'occluded=false') (see $log)"
   fi
