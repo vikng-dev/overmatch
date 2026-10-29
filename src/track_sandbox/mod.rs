@@ -36,8 +36,8 @@
 use avian3d::prelude::{
     AngularInertia, AngularVelocity, CoefficientCombine, Collider, CollisionLayers, Forces,
     Friction, LayerMask, LinearVelocity, Mass, NoAutoAngularInertia, NoAutoCenterOfMass,
-    NoAutoMass, Physics, PhysicsDebugPlugin, PhysicsGizmos, PhysicsInterpolationPlugin,
-    PhysicsPlugins, PhysicsTime, ReadRigidBodyForces, RigidBody, WriteRigidBodyForces,
+    NoAutoMass, Physics, PhysicsDebugPlugin, PhysicsGizmos, PhysicsTime, ReadRigidBodyForces,
+    RigidBody, WriteRigidBodyForces,
 };
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
@@ -342,7 +342,7 @@ pub fn plugin(app: &mut App) {
         // overlay camera for the on-top state. Independent of `RigGeom` — it tags scene meshes as
         // they land, so it self-noops until the glb instantiates.
         .add_plugins(mesh_layers::plugin)
-        .add_plugins(PhysicsPlugins::default().set(PhysicsInterpolationPlugin::interpolate_all()))
+        .add_plugins(crate::offline_physics())
         // Registers the `PhysicsGizmos` group for the collider-wireframe layer; starts disabled in
         // `configure_collider_gizmos`.
         .add_plugins(PhysicsDebugPlugin)
@@ -1283,7 +1283,7 @@ fn build_rig(
             // The glb child renders the tank; the hull's own `Visibility` is what the `1` layer
             // toggles, and it needs to exist here for that inheritance to reach the model.
             Visibility::default(),
-            RigidBody::Dynamic,
+            crate::eased_dynamic_body(),
             CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
             // The backstop colliders are *penetration stops only* — ALL tangential surface physics
             // (traction, grinding-climb, skid) belongs to the belt. Avian colliders default to

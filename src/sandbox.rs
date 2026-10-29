@@ -37,9 +37,7 @@
 
 use std::collections::HashSet;
 
-use avian3d::prelude::{
-    Collider, CollisionLayers, LayerMask, PhysicsInterpolationPlugin, PhysicsPlugins, RigidBody,
-};
+use avian3d::prelude::{Collider, CollisionLayers, LayerMask, RigidBody};
 use bevy::ecs::system::SystemParam;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
@@ -254,7 +252,7 @@ pub fn plugin(app: &mut App) {
     // The sandbox's own App composition — physics + the shared shell mechanic + a battlefield to
     // hit. Deliberately omits driving, aim, the game cameras, sight, and shooting.
     app.add_plugins((
-        PhysicsPlugins::default().set(PhysicsInterpolationPlugin::interpolate_all()),
+        crate::offline_physics(),
         // This is a WINDOWED root on `DefaultPlugins`, so it is on bevy's deadlocking exit path
         // exactly like the game is: without this, quitting the sandbox wedges the process instead
         // of ending it (see `crate::quit`).

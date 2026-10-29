@@ -12,7 +12,7 @@
 
 use avian3d::prelude::{
     AngularInertia, AngularVelocity, LinearVelocity, Mass, NoAutoAngularInertia, NoAutoMass,
-    Position, RigidBody, Rotation,
+    Position, Rotation,
 };
 use bevy::ecs::query::QueryData;
 use bevy::ecs::system::SystemParam;
@@ -642,7 +642,7 @@ fn launch_turrets_on_cookoff(
                     Position(pose.translation),
                     Rotation(pose.rotation),
                     pose,
-                    RigidBody::Dynamic,
+                    crate::eased_dynamic_body(),
                     Mass(TURRET_MASS),
                     AngularInertia::from_shape(&Cuboid::new(3.0, 1.2, 2.4), TURRET_MASS),
                     NoAutoMass,

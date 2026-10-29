@@ -41,15 +41,26 @@ fn assert_tank_state_at_add(
         Has<TankCommand>,
         Has<crate::track::sim::TrackDrive>,
         Option<&crate::track::sim::TrackGripElements>,
+        (
+            Has<avian3d::prelude::TranslationInterpolation>,
+            Has<avian3d::prelude::RotationInterpolation>,
+        ),
     )>,
     blueprint: Option<Res<TankBlueprint>>,
 ) {
-    let (command, drive, elements) = tanks
+    let (command, drive, elements, eased) = tanks
         .get(add.entity)
         .expect("a newly added Tank must still exist during its observer");
     assert!(
         command && drive,
         "TankCommand and TrackDrive must exist in the same insertion that adds Tank",
+    );
+    // The offline physics eases only the bodies that opt in (`crate::offline_physics`): a scenario
+    // tank is born an `eased_dynamic_body`, or the drawn hull steps at the fixed rate.
+    assert_eq!(
+        eased,
+        (true, true),
+        "a scenario tank must be born with translation and rotation easing",
     );
     // The REV-14 fixed-size invariant at its source: every Tank is born with element slabs
     // pre-sized `link_count * 3` — never an empty vector awaiting a first-tick resize.
@@ -127,9 +138,11 @@ fn headless_app_on(world: Option<crate::terrain_grid::HeightGrid>) -> App {
         }
     }
     // Physics + the SP spawn scenario are composition-root choices (see lib.rs SimPlugin note);
-    // this exercises the single-player-shaped boot, headless.
+    // this exercises the single-player-shaped boot, headless. Without render easing: the scenario's
+    // tanks still carry their easing components, which no system reads here, so every reader sees
+    // the fixed-step pose the gates are stated in.
     app.add_plugins((
-        avian3d::prelude::PhysicsPlugins::default(),
+        crate::offline_physics().disable::<avian3d::prelude::PhysicsInterpolationPlugin>(),
         SimPlugin,
         crate::tank::sp_spawn_plugin,
     ))

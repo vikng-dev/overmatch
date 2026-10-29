@@ -1625,6 +1625,77 @@ pub(crate) mod tests {
         );
     }
 
+    /// A static map body is not eased: under the offline compositions' physics
+    /// ([`crate::offline_physics`]) a standing tree, the map's largest static population, takes no
+    /// transform write between state changes, so its root, collider and view nodes stay out of
+    /// transform propagation and render extraction. Breaks if the offline physics eases every
+    /// rigid body again (`PhysicsInterpolationPlugin::interpolate_all()`), which rewrites a static
+    /// root's pose every fixed step and frame.
+    #[test]
+    fn a_static_map_body_is_not_eased() {
+        use bevy::time::TimeUpdateStrategy;
+        use std::time::Duration;
+
+        #[derive(Resource, Default)]
+        struct Dirty(usize, usize);
+        fn audit(
+            local: Query<(), Changed<Transform>>,
+            global: Query<(), Changed<GlobalTransform>>,
+            mut dirty: ResMut<Dirty>,
+        ) {
+            *dirty = Dirty(local.iter().count(), global.iter().count());
+        }
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::transform::TransformPlugin,
+            // Avian's collider cache reads `AssetEvent<Mesh>`.
+            AssetPlugin::default(),
+            crate::offline_physics(),
+        ))
+        .init_asset::<Mesh>()
+        // 10 ms frames against the 64 Hz fixed step: frames end between fixed steps, where an
+        // eased body would be written.
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            10,
+        )))
+        .init_resource::<Dirty>()
+        .add_systems(Last, audit);
+        while app.plugins_state() == bevy::app::PluginsState::Adding {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        app.finish();
+        app.cleanup();
+        let world = app.world_mut();
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, world);
+        let root = spawn(
+            &mut commands,
+            &fixture_kind(),
+            MapInstance {
+                id: "static-fixture".to_owned(),
+                ordinal: 0,
+            },
+            Transform::from_xyz(1.0, 2.0, 3.0).with_rotation(Quat::from_rotation_y(0.7)),
+        );
+        // A view subtree beneath the real spawned body, as the glb is attached in the client.
+        let view = commands.spawn((ChildOf(root), Transform::IDENTITY)).id();
+        commands.spawn((ChildOf(view), Transform::from_xyz(0.0, 1.0, 0.0)));
+        queue.apply(world);
+        for _ in 0..8 {
+            app.update();
+        }
+        for _ in 0..8 {
+            app.update();
+            let dirty = app.world().resource::<Dirty>();
+            assert_eq!(
+                (dirty.0, dirty.1),
+                (0, 0),
+                "a standing tree's transforms (local, global) changed with no state change"
+            );
+        }
+    }
+
     /// The spawn builds the body the module doc describes: one root with the state and no volume
     /// or pool of its own, nothing on its scale; one child per segment, in order from the base,
     /// with a frustum collider on `[Terrain, Armor]`, the kind's volume — its material and

@@ -1,6 +1,5 @@
 use std::f32::consts::FRAC_PI_2;
 
-use avian3d::prelude::RigidBody;
 use bevy::prelude::*;
 
 use super::model::{Controlled, Tank};
@@ -611,7 +610,7 @@ fn spawn_lod_showcase(
                 Transform::from_translation(crate::terrain_grid::spawn_pos(grid, tank.xz))
                     .with_rotation(tank.yaw),
                 Name::new(tank.name),
-                RigidBody::Dynamic,
+                crate::eased_dynamic_body(),
                 identity(index),
             ),
         );
@@ -649,7 +648,7 @@ fn spawn_tank(
         (
             transform,
             Name::new(name.to_string()),
-            RigidBody::Dynamic,
+            crate::eased_dynamic_body(),
             identity(index),
             // The hull marks the local authority records (`hull_marks::offline_plugin`).
             crate::hull_marks::HullMarks::default(),

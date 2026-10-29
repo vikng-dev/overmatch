@@ -172,7 +172,10 @@ pub(crate) fn restore_servo_truth(
         let Some(state) = state else {
             continue;
         };
-        transform.rotation = servo_rotation(spec, rest, state.current);
+        let rotation = servo_rotation(spec, rest, state.current);
+        if transform.rotation != rotation {
+            transform.rotation = rotation;
+        }
     }
 }
 
@@ -261,7 +264,10 @@ pub(crate) fn drive_servos(
         }
 
         // The sim node always carries fixed-step truth; smoothing writes the view tree only.
-        transform.rotation = servo_rotation(spec, rest, state.current);
+        let rotation = servo_rotation(spec, rest, state.current);
+        if transform.rotation != rotation {
+            transform.rotation = rotation;
+        }
     }
 }
 

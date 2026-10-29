@@ -774,7 +774,7 @@ fn drive_track_views(
                 &side.links,
                 |link, pose| {
                     if let (Some(pose), Ok(mut tr)) = (pose, views.get_mut(link)) {
-                        *tr = pose;
+                        tr.set_if_neq(pose);
                     }
                 },
             );
@@ -832,8 +832,12 @@ fn drive_track_views(
                 if let Ok(mut tr) = views.get_mut(wheel.view) {
                     let roll_r = wheel.radius - rig.pin_to_inner;
                     let spin = Quat::from_rotation_x(spin_angle(phases[si], roll_r));
-                    tr.translation = wheel.pivot + Vec3::Y * wheel.dy;
-                    tr.rotation = wheel.rest_rotation * spin;
+                    let pose = Transform {
+                        translation: wheel.pivot + Vec3::Y * wheel.dy,
+                        rotation: wheel.rest_rotation * spin,
+                        ..*tr
+                    };
+                    tr.set_if_neq(pose);
                 }
             }
             // The sprocket and idler both carry their own axle-origin translation, so they are

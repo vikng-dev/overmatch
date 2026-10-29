@@ -463,7 +463,10 @@ fn apply_recoil(
             state.recoil_velocity = 0.0;
         }
         // Recoil rides back along the bore (+local Z), measured from the rest position.
-        transform.translation = params.rest + Vec3::Z * state.recoil_offset;
+        let translation = params.rest + Vec3::Z * state.recoil_offset;
+        if transform.translation != translation {
+            transform.translation = translation;
+        }
     }
 }
 

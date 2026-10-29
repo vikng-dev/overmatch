@@ -4,7 +4,9 @@
 //! Direct-simulation sandboxes are analytical tools, not alternate player runtimes. See
 //! `.agents/PRODUCT.md` and ADR-0024 for the current product topology.
 
-use avian3d::prelude::{PhysicsInterpolationPlugin, PhysicsLayer, PhysicsPlugins};
+use avian3d::prelude::{
+    PhysicsLayer, PhysicsPlugins, RigidBody, RotationInterpolation, TranslationInterpolation,
+};
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -476,6 +478,77 @@ mod offline_feel_tests {
     }
 }
 
+#[cfg(test)]
+mod easing_tests {
+    use super::*;
+    use avian3d::prelude::{
+        AngularInertia, AngularVelocity, Gravity, LinearVelocity, Mass, Position, Rotation,
+    };
+    use bevy::time::TimeUpdateStrategy;
+    use std::time::Duration;
+
+    /// A moving tank is still eased: a body spawned as an [`eased_dynamic_body`] under
+    /// [`offline_physics`] is drawn between its last two fixed poses, behind the latest one, in
+    /// both translation and rotation. The scenario's tanks and a launched turret rely on it for
+    /// smooth motion between fixed steps; dropping the interpolation plugin from the composition,
+    /// or either easing component from the bundle, draws the body on its fixed pose instead.
+    #[test]
+    fn a_moving_eased_body_is_drawn_behind_its_latest_fixed_pose() {
+        let mut app = App::new();
+        app.add_plugins((
+            MinimalPlugins,
+            bevy::transform::TransformPlugin,
+            // Avian's collider cache reads `AssetEvent<Mesh>`.
+            AssetPlugin::default(),
+            offline_physics(),
+        ))
+        .init_asset::<Mesh>()
+        .insert_resource(Gravity::ZERO)
+        // 10 ms frames against the 64 Hz fixed step: frames end between fixed steps.
+        .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_millis(
+            10,
+        )));
+        while app.plugins_state() == bevy::app::PluginsState::Adding {
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        app.finish();
+        app.cleanup();
+        let body = app
+            .world_mut()
+            .spawn((
+                Transform::default(),
+                eased_dynamic_body(),
+                Mass(1.0),
+                AngularInertia::from_shape(&Cuboid::new(1.0, 1.0, 1.0), 1.0),
+                LinearVelocity(Vec3::X * 10.0),
+                AngularVelocity(Vec3::Y),
+            ))
+            .id();
+        for _ in 0..20 {
+            app.update();
+        }
+        for _ in 0..16 {
+            app.update();
+            let world = app.world();
+            let drawn = world.get::<Transform>(body).unwrap();
+            let (position, rotation) = (
+                world.get::<Position>(body).unwrap().0,
+                world.get::<Rotation>(body).unwrap().0,
+            );
+            // One fixed step's travel at 10 m/s and 64 Hz, plus rounding.
+            let lag = position.x - drawn.translation.x;
+            assert!(
+                lag > 0.0 && lag <= 10.0 / 64.0 + 1e-4,
+                "the drawn pose must lie within one step behind the fixed pose (lag {lag} m)"
+            );
+            assert!(
+                drawn.rotation.to_euler(EulerRot::YXZ).0 < rotation.to_euler(EulerRot::YXZ).0,
+                "the drawn yaw must lag the fixed pose's"
+            );
+        }
+    }
+}
+
 /// Marks a network-client replica. Ballistics uses it to suppress authority-only damage and impulse
 /// writes while retaining cosmetic flight and impacts.
 #[derive(Resource, Default)]
@@ -558,8 +631,8 @@ impl Plugin for SimPlugin {
     fn build(&self, app: &mut App) {
         // NOTE: physics (avian `PhysicsPlugins`) is deliberately NOT mounted here — its
         // configuration is the one thing that legitimately differs per composition root:
-        // single-player wants `PhysicsInterpolationPlugin::interpolate_all()` (ADR-0004), the
-        // networked bins must disable exactly that plugin for `LightyearAvianPlugin` (spike log,
+        // single-player eases only the bodies that opt in ([`offline_physics`]), the networked
+        // bins must disable avian's interpolation plugin for `LightyearAvianPlugin` (spike log,
         // increment 5). The composition root (GamePlugin / the net bins) owns the choice.
         app.add_plugins((
             state::sim_plugin,
@@ -800,6 +873,29 @@ impl Plugin for NetClientPlugin {
     }
 }
 
+/// The physics every offline composition mounts: the game and both dev sandboxes. Avian's
+/// interpolation plugin keeps its default, which eases no body that has not opted in, and the one
+/// opt-in is [`eased_dynamic_body`]. A body that never moves therefore takes no easing write. The
+/// rejected alternative, `PhysicsInterpolationPlugin::interpolate_all()`, eases every `RigidBody`:
+/// it rewrote each static map body's `Transform` every fixed step and frame, which re-propagated
+/// its whole hierarchy and re-sent its hidden meshes through render extraction
+/// (`.agents/scratch/perf-2026-10-29/bookkeeping-diagnosis.md`).
+pub(crate) fn offline_physics() -> bevy::app::PluginGroupBuilder {
+    PhysicsPlugins::default().build()
+}
+
+/// A dynamic rigid body whose drawn pose is eased between fixed steps, translation and rotation,
+/// under [`offline_physics`]. Every body that moves in an offline composition takes it in the
+/// insertion that makes it dynamic. Inert in the networked compositions, which mount no easing
+/// plugin.
+pub(crate) fn eased_dynamic_body() -> (RigidBody, TranslationInterpolation, RotationInterpolation) {
+    (
+        RigidBody::Dynamic,
+        TranslationInterpolation,
+        RotationInterpolation,
+    )
+}
+
 /// Every gameplay feature, composed — the single-player configuration: the full sim plus the
 /// local client, one app, no netcode. Add to an `App` that already has the runtime plugins.
 pub struct GamePlugin;
@@ -807,9 +903,8 @@ pub struct GamePlugin;
 impl Plugin for GamePlugin {
     fn build(&self, app: &mut App) {
         app.add_plugins((
-            // The single-player physics choice: bodies render at an interpolated pose between
-            // fixed steps (ADR-0004). The networked bins mount lightyear's config instead.
-            PhysicsPlugins::default().set(PhysicsInterpolationPlugin::interpolate_all()),
+            // The single-player physics choice. The networked bins mount lightyear's config instead.
+            offline_physics(),
             SimPlugin,
             // The single-player scenario: two-tank duel spawn, first tank controlled.
             tank::sp_spawn_plugin,
