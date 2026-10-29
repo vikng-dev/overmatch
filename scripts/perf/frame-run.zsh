@@ -180,6 +180,15 @@ frame_run_condition() {
   if (( $+functions[condition_gates] )); then
     condition_gates "$cond" "$log" "$stream"
   fi
+  # A window that is never shown (behind a locked screen, for one) sends no occlusion message and its
+  # 3D camera never draws, so every stream gate above passes on a frame loop that renders nothing.
+  # The renderer's own `render scale:` line and an observed `occluded=false` prove the camera drew.
+  if [[ -z "${SMOKE:-}" ]]; then
+    grep -q 'render scale: ' "$log" \
+      || frame_run_invalid "$cond" "the 3D camera never rendered (no 'render scale:' line); was the window ever shown? (see $log)"
+    grep -q 'occluded=false' "$log" \
+      || frame_run_invalid "$cond" "the window never reported itself visible (no 'occluded=false') (see $log)"
+  fi
 
   # Presentation provenance into the manifest: the effective mode line verbatim, plus how many
   # occlusion transitions the client observed (0 on a clean visible run after the initial show),

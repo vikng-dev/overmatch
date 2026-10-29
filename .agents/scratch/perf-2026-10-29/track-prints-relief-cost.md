@@ -1,3 +1,5 @@
+> **INVALID (found 2026-10-29, `focus-gap-diagnosis.md`).** These runs' window was never shown (the screen was locked overnight), so the 3D camera never drew. Every frame time below is the game loop without rendering, and "the relief is free" is NOT established. The gate that missed it is fixed in `scripts/perf/frame-run.zsh`. Re-measure.
+
 # Track-print relief levels: frame cost (issue 125)
 
 MEASURED on 2026-10-29, Apple M4.

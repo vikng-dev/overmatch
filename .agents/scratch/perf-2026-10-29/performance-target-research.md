@@ -230,12 +230,12 @@ Why AWS only gives A/B throughput deltas:
 
 | Quantity | Value | When | Label | Source |
 |---|---|---|---|---|
-| Duel (2 tanks), cones baseline: p50 / p95 / p99 | 4.64 / 7.29 / 8.56 ms | 2026-10-29, `49f0982` | MEASURED | `destruction-2026-10-26/forest-frame-cost-2026-10-29.md` |
+| Duel (2 tanks), cones baseline: p50 / p95 / p99 | 4.64 / 7.29 / 8.56 ms | 2026-10-29, `49f0982` | MEASURED, but WITHOUT RENDERING (the window never drew; `focus-gap-diagnosis.md`). The rendered duel is 14.59 ms p50 (`sweep-30-2026-10-29.md`) | `destruction-2026-10-26/forest-frame-cost-2026-10-29.md` |
 | Duel with 635 segmented trees | 5.72 / 8.78 / 9.88 ms | same | MEASURED | same |
 | Forest view, cones / trees (p50) | 4.51 / 5.24 ms | same | MEASURED | same |
 | Trees − cones, p50 / p95 | forest +0.73 / +1.31; duel +1.09 / +1.49 ms | same | MEASURED | same |
 | Whole sim tick, headless, test profile, 2 idle tanks: 243 / 878 / 9,768 colliders | 1,056 / 1,174 / 2,255 µs p50 | 2026-10-26 | MEASURED | `codex-lane-b-stage-3-5/verdict.md`; `src/headless_test.rs:1686` |
-| Track-print relief, SUN SHADOW against LIGHTING | ≤ +0.05 ms p50 (frames at 5.33–5.64 ms) | 2026-10-29 | MEASURED | `track-prints-relief-cost.md` |
+| Track-print relief, SUN SHADOW against LIGHTING | INVALID: the window never drew (`focus-gap-diagnosis.md`) | 2026-10-29 | — | `track-prints-relief-cost.md` |
 | 30 tanks (2 + 28 idle probes), near placement, shipped shadows | 14.30–14.57 ms p50; p99 28.9–30.5 | 2026-08-13, `df080ff` | MEASURED | `shadow-caster-share-2026-08-13.md` |
 | Same, shadows off | 11.19–11.32 ms p50 | same | MEASURED | same |
 | Sun shadow cost at 30 tanks: total / tank casters / envelope + terrain | 3.22 ± 0.10 / 1.14 ± 0.25 / 2.08 ± 0.35 ms | same | DERIVED from MEASURED | same |

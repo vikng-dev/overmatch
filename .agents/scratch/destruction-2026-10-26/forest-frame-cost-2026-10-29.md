@@ -1,3 +1,5 @@
+> **CORRECTION (2026-10-29, `.agents/scratch/perf-2026-10-29/focus-gap-diagnosis.md`).** These runs' window was never shown, so the 3D camera never drew: nothing was rendered in any condition. The deltas below therefore measure CPU work without rendering only (the simulation, including the collider cost that #150 targets). The reading "drawing the trees costs about the same as the cones" is NOT established; the forest's rendering cost is unmeasured. The gate that missed it is fixed in `scripts/perf/frame-run.zsh`.
+
 # Forest frame cost: segmented trees against graybox cones (issue 123)
 
 MEASURED on 2026-10-29, Apple M4.
