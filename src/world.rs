@@ -207,15 +207,21 @@ fn sky_cubemap() -> Image {
 /// to a region. Doing it in `world` (rather than at each camera's spawn) is what keeps the game and
 /// the armor sandbox honestly identical, and it costs nothing where there is no camera: the
 /// dedicated server never matches this query, so it never even builds the cubemap.
+///
+/// A frame-cost ablation (`SPIKE_ABLATE=env_light`, `render_cost`) leaves every view unlit by it.
 fn attach_environment_light(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
     mut sky: Local<Option<Handle<Image>>>,
+    ablate: Option<Res<crate::render_cost::Ablate>>,
     views: Query<
         (Entity, Option<&CameraProfile>),
         (With<Camera3d>, Without<GeneratedEnvironmentMapLight>),
     >,
 ) {
+    if ablate.is_some_and(|ablate| ablate.env_light) {
+        return;
+    }
     let mut views = views
         .iter()
         .filter(|(_, profile)| profile.is_none_or(|profile| profile.draws_battlefield()))

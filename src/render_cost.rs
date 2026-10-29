@@ -37,16 +37,257 @@
 //!
 //! Off (zero cost — nothing registered) unless the env var is set. Client-only: the headless
 //! server has no render app.
+//!
+//! # Two frame-cost ablation instruments, each off unless its env var is set
+//!
+//! * **`SPIKE_PHASE_COUNTS=1`**: every [`PHASE_COUNT_PERIOD_S`], one `phase_census:` log line per
+//!   view per 3D phase (opaque, alpha mask, transparent, both prepasses, shadow), and one per phase
+//!   with its `indirect_draws`: the indirect draw commands batched for it this frame, over all its
+//!   views. Bevy batches binned phases into multidraw sets, whose bins it keeps private, so the
+//!   per-view lines count sets, and the per-phase total is the draw count: Metal has no native
+//!   multi-draw-indirect, and wgpu-hal encodes one indirect draw per command on the CPU (vendored
+//!   wgpu-hal-29.0.4/src/metal/command.rs, `draw_indexed_indirect`). Sorted phases draw one item
+//!   per command. Read after the phases are batched, in `PrepareBindGroups`.
+//! * **`SPIKE_ABLATE=<feature>[,<feature>…]`**: render features removed, to measure what each costs
+//!   by difference. `bloom` and `depth_prepass` remove those components from every `Camera3d`;
+//!   `env_light` stops `world` from giving views the sky's generated environment light, whose
+//!   filter passes run every frame; `ui` hides every UI root, which removes the UI's extraction and
+//!   drawing but not its layout. An unknown name panics at boot, so a typo cannot read as a free
+//!   feature. Never part of a shipped measurement: the picture changes.
 
+use std::any::TypeId;
 use std::collections::{BTreeMap, HashMap};
 
+use bevy::camera::visibility::VisibilitySystems;
+use bevy::core_pipeline::core_3d::{AlphaMask3d, Opaque3d, Transparent3d};
+use bevy::core_pipeline::prepass::{AlphaMask3dPrepass, DepthPrepass, Opaque3dPrepass};
 use bevy::diagnostic::DiagnosticsStore;
+use bevy::pbr::Shadow;
 use bevy::platform::time::Instant;
+use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
+use bevy::render::batching::gpu_preprocessing::IndirectParametersBuffers;
 use bevy::render::diagnostic::RenderDiagnosticsPlugin;
+use bevy::render::render_phase::{
+    BinnedPhaseItem, BinnedRenderPhase, SortedPhaseItem, ViewBinnedRenderPhases,
+    ViewSortedRenderPhases,
+};
+use bevy::render::view::RetainedViewEntity;
+use bevy::render::{Render, RenderApp, RenderSystems};
 use serde_json::json;
 
 use crate::trace::{JsonlSink, role_path};
+
+/// Seconds between `phase_census:` reports: the census is a step function of the scene, so a few
+/// lines per run are enough and the log stays readable.
+const PHASE_COUNT_PERIOD_S: f64 = 5.0;
+
+/// Render features removed by `SPIKE_ABLATE` (module doc). Read by `world::attach_environment_light`
+/// for `env_light`; the other fields act here.
+#[derive(Resource, Clone, Copy, Default, Debug)]
+pub(crate) struct Ablate {
+    bloom: bool,
+    pub(crate) env_light: bool,
+    depth_prepass: bool,
+    ui: bool,
+}
+
+impl Ablate {
+    /// A comma-separated feature list; `Err` names the first unknown feature.
+    fn parse(list: &str) -> Result<Self, String> {
+        let mut ablate = Self::default();
+        for name in list
+            .split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+        {
+            match name {
+                "bloom" => ablate.bloom = true,
+                "env_light" => ablate.env_light = true,
+                "depth_prepass" => ablate.depth_prepass = true,
+                "ui" => ablate.ui = true,
+                unknown => return Err(unknown.to_owned()),
+            }
+        }
+        Ok(ablate)
+    }
+}
+
+/// Mount the two ablation instruments of the module doc, each only when its env var is set.
+fn ablation_instruments(app: &mut App) {
+    if let Some(list) = crate::env_value("SPIKE_ABLATE") {
+        let ablate = Ablate::parse(&list).unwrap_or_else(|unknown| {
+            panic!(
+                "SPIKE_ABLATE: unknown feature {unknown:?} (known: bloom, env_light, \
+                 depth_prepass, ui)"
+            )
+        });
+        info!("render_cost: ablating {ablate:?}");
+        app.insert_resource(ablate)
+            .add_systems(Update, ablate_camera_features)
+            .add_systems(
+                PostUpdate,
+                ablate_ui.before(VisibilitySystems::VisibilityPropagate),
+            );
+    }
+    if crate::env_flag("SPIKE_PHASE_COUNTS", false)
+        && let Some(render_app) = app.get_sub_app_mut(RenderApp)
+    {
+        render_app.add_systems(
+            Render,
+            log_phase_census.in_set(RenderSystems::PrepareBindGroups),
+        );
+    }
+}
+
+fn ablate_camera_features(
+    mut commands: Commands,
+    ablate: Res<Ablate>,
+    cameras: Query<(Entity, Has<Bloom>, Has<DepthPrepass>), With<Camera3d>>,
+) {
+    for (camera, bloom, depth_prepass) in &cameras {
+        if ablate.bloom && bloom {
+            commands.entity(camera).remove::<Bloom>();
+        }
+        if ablate.depth_prepass && depth_prepass {
+            commands.entity(camera).remove::<DepthPrepass>();
+        }
+    }
+}
+
+/// After every `Update` writer of a UI root's `Visibility` and before it propagates.
+fn ablate_ui(
+    ablate: Res<Ablate>,
+    mut roots: Query<&mut Visibility, (With<Node>, Without<ChildOf>)>,
+) {
+    if !ablate.ui {
+        return;
+    }
+    for mut visibility in &mut roots {
+        visibility.set_if_neq(Visibility::Hidden);
+    }
+}
+
+/// Render world: the `phase_census:` lines of the module doc.
+fn log_phase_census(
+    mut next_s: Local<Option<Instant>>,
+    (opaque, alpha_mask, opaque_prepass, alpha_mask_prepass, shadow): (
+        Option<Res<ViewBinnedRenderPhases<Opaque3d>>>,
+        Option<Res<ViewBinnedRenderPhases<AlphaMask3d>>>,
+        Option<Res<ViewBinnedRenderPhases<Opaque3dPrepass>>>,
+        Option<Res<ViewBinnedRenderPhases<AlphaMask3dPrepass>>>,
+        Option<Res<ViewBinnedRenderPhases<Shadow>>>,
+    ),
+    transparent: Option<Res<ViewSortedRenderPhases<Transparent3d>>>,
+    indirect: Option<Res<IndirectParametersBuffers>>,
+) {
+    let now = Instant::now();
+    if next_s.is_some_and(|next| now < next) {
+        return;
+    }
+    *next_s = Some(now + core::time::Duration::from_secs_f64(PHASE_COUNT_PERIOD_S));
+    log_binned("opaque", opaque.as_deref());
+    log_binned("alpha_mask", alpha_mask.as_deref());
+    log_sorted("transparent", transparent.as_deref());
+    log_binned("opaque_prepass", opaque_prepass.as_deref());
+    log_binned("alpha_mask_prepass", alpha_mask_prepass.as_deref());
+    log_binned("shadow", shadow.as_deref());
+    let indirect = indirect.as_deref();
+    log_indirect::<Opaque3d>("opaque", indirect);
+    log_indirect::<AlphaMask3d>("alpha_mask", indirect);
+    log_indirect::<Opaque3dPrepass>("opaque_prepass", indirect);
+    log_indirect::<AlphaMask3dPrepass>("alpha_mask_prepass", indirect);
+    log_indirect::<Shadow>("shadow", indirect);
+}
+
+/// One phase's indirect draw commands this frame, all views together (module doc).
+fn log_indirect<P: 'static>(phase: &str, buffers: Option<&IndirectParametersBuffers>) {
+    let Some(buffers) = buffers.and_then(|buffers| buffers.buffers.get(&TypeId::of::<P>())) else {
+        return;
+    };
+    info!(
+        "phase_census: {phase} all_views indirect_draws={} (indexed {}, non-indexed {})",
+        buffers.indexed.batch_count() + buffers.non_indexed.batch_count(),
+        buffers.indexed.batch_count(),
+        buffers.non_indexed.batch_count(),
+    );
+}
+
+/// `light/camera/subview` for a shadow view, `camera/-/0` for a camera's own view.
+fn view_label(view: &RetainedViewEntity) -> String {
+    format!(
+        "{}/{}/{}",
+        view.main_entity.id(),
+        view.auxiliary_entity.id(),
+        view.subview_index
+    )
+}
+
+fn log_binned<BPI: BinnedPhaseItem>(phase: &str, phases: Option<&ViewBinnedRenderPhases<BPI>>) {
+    let Some(phases) = phases else {
+        return;
+    };
+    let mut lines: Vec<String> = phases
+        .0
+        .iter()
+        .map(|(view, binned)| census_line(phase, view, binned))
+        .collect();
+    lines.sort();
+    for line in lines {
+        info!("{line}");
+    }
+}
+
+fn census_line<BPI: BinnedPhaseItem>(
+    phase: &str,
+    view: &RetainedViewEntity,
+    binned: &BinnedRenderPhase<BPI>,
+) -> String {
+    let bins = binned.batchable_meshes.len();
+    let instances: usize = binned
+        .batchable_meshes
+        .values()
+        .map(|bin| bin.entities().len())
+        .sum();
+    let unbatchable: usize = binned
+        .unbatchable_meshes
+        .values()
+        .map(|set| set.entities.len())
+        .sum();
+    let non_mesh: usize = binned
+        .non_mesh_items
+        .values()
+        .map(|set| set.entities.len())
+        .sum();
+    let multidraw_sets = binned.multidrawable_meshes.len();
+    format!(
+        "phase_census: {phase} view={} draws={} bins={bins} instances={instances} \
+         unbatchable={unbatchable} non_mesh={non_mesh} multidraw_sets={multidraw_sets}",
+        view_label(view),
+        bins + unbatchable + non_mesh + multidraw_sets,
+    )
+}
+
+fn log_sorted<SPI: SortedPhaseItem>(phase: &str, phases: Option<&ViewSortedRenderPhases<SPI>>) {
+    let Some(phases) = phases else {
+        return;
+    };
+    let mut lines: Vec<String> = phases
+        .0
+        .iter()
+        .map(|(view, sorted)| {
+            format!(
+                "phase_census: {phase} view={} draws={}",
+                view_label(view),
+                sorted.items.len()
+            )
+        })
+        .collect();
+    lines.sort();
+    for line in lines {
+        info!("{line}");
+    }
+}
 
 /// Seconds between sample windows. Freshness math sets the ceiling, not file size: bevy retains
 /// only the newest 120 measurements per diagnostic, so the window must stay under 120 frames or
@@ -69,8 +310,9 @@ struct RenderCost {
 }
 
 /// Windowed client: mount the render diagnostics recorder and the JSONL sampler when
-/// `SPIKE_RENDER_COST` is set.
+/// `SPIKE_RENDER_COST` is set, and each ablation instrument of the module doc when its own is.
 pub fn client_plugin(app: &mut App) {
+    ablation_instruments(app);
     let Some(path) = crate::env_value("SPIKE_RENDER_COST") else {
         return;
     };
@@ -177,6 +419,20 @@ mod tests {
             });
         }
         diagnostic
+    }
+
+    /// An ablation names exactly the features it removes, and a misspelt one is an error: a feature
+    /// list that silently dropped an unknown name would price that feature at zero, and the night
+    /// battery reads every `SPIKE_ABLATE` condition as the cost of the named feature.
+    #[test]
+    fn ablation_list_parses_known_features_and_rejects_unknown_ones() {
+        let ablate = Ablate::parse("bloom, env_light,,ui").expect("known features");
+        assert!(ablate.bloom && ablate.env_light && ablate.ui && !ablate.depth_prepass);
+        assert_eq!(
+            Ablate::parse("bloom,envlight").unwrap_err(),
+            "envlight",
+            "a misspelt feature must be named, not ignored"
+        );
     }
 
     #[test]
