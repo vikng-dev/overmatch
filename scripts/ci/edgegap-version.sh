@@ -19,6 +19,10 @@
 #   EDGEGAP_API      default https://api.edgegap.com
 #   EDGEGAP_APP      default Overmatch (the Worker's `EDGEGAP_APP`)
 #   EDGEGAP_DRY_RUN  when set, print the create and update bodies and exit; no token, no network.
+#   EDGEGAP_MAX_DURATION  minutes, 1–1440, default 1440 (below). A lower cap is for a profiling
+#                    version only — e.g. `0.6.1-profile` at 120, the Edgegap-side backstop for
+#                    scripts/edgegap/session.sh, whose deployments nothing else ends (no per-deployment
+#                    duration exists in Edgegap's deploy APIs). Never lower it on a version players join.
 set -euo pipefail
 
 version="${1:?version}"
@@ -26,12 +30,18 @@ image="${2:?image, e.g. ghcr.io/vikng-dev/overmatch-server}"
 tag="${3:?tag}"
 api="${EDGEGAP_API:-https://api.edgegap.com}"
 app="${EDGEGAP_APP:-Overmatch}"
+max_duration="${EDGEGAP_MAX_DURATION:-1440}"
+if ! [[ "${max_duration}" =~ ^[0-9]+$ ]] || ((max_duration < 1 || max_duration > 1440)); then
+  echo "::error::EDGEGAP_MAX_DURATION must be 1–1440 minutes, got '${max_duration}'"
+  exit 1
+fi
+max_duration=$((10#${max_duration}))
 
 # `game` is the Worker's `EDGEGAP_PORT_NAME`; 5888 is the server's fixed listen port. `to_check`
 # off is the setting the risk test connected through (risk-test.md).
 #
-# max_duration 1440 min — Edgegap ends every deployment this long after its start, occupied or
-# not. Behind the Worker's per-minute orphan sweep it is the last defence, for when the Worker is
+# max_duration 1440 min (the default; EDGEGAP_MAX_DURATION) — Edgegap ends every deployment this
+# long after its start, occupied or not. Behind the Worker's per-minute orphan sweep it is the last defence, for when the Worker is
 # down; it also cuts a server still occupied at 24 h (its players Join again into a fresh one; there
 # is no graceful recycle before the cap). A leak costs at most 1440 × $0.00115/vCPU-min ≈ $1.66 per
 # vCPU (DERIVED, list price).
@@ -41,14 +51,15 @@ app="${EDGEGAP_APP:-Overmatch}"
 #
 # 1 vCPU / 1 GB: MEASURED ~55 MiB resident with 2 clients (risk-test.md); 10 players unmeasured.
 body="$(jq -n \
-  --arg image "${image#*/}" --arg registry "${image%%/*}" --arg tag "${tag}" '{
+  --arg image "${image#*/}" --arg registry "${image%%/*}" --arg tag "${tag}" \
+  --argjson max_duration "${max_duration}" '{
     is_active: true,
     docker_repository: $registry,
     docker_image: $image,
     docker_tag: $tag,
     req_cpu: 1024,
     req_memory: 1024,
-    max_duration: 1440,
+    max_duration: $max_duration,
     time_to_deploy: 60,
     verify_image: true,
     ports: [{port: 5888, protocol: "UDP", name: "game", to_check: false}],
