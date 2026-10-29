@@ -48,6 +48,8 @@ mod protocol;
 mod rig;
 // `pub(crate)` for its spawn POINTS — see the note on `tank::scenario`.
 pub(crate) mod server;
+/// The dedicated server's periodic stats line on stdout (`OVERMATCH_SERVER_STATS_S`).
+mod server_stats;
 /// The pen cam's explanations: the authority's per-recipient send, the client's store.
 mod shot_explanation;
 /// Real-UDP, loss-injected shot-transport integration tests.

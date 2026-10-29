@@ -57,6 +57,13 @@ pub fn run() {
             std::process::exit(2);
         }
     };
+    let bind = match bind_ip(std::env::var("OVERMATCH_SERVER_BIND").ok().as_deref()) {
+        Ok(bind) => bind,
+        Err(err) => {
+            eprintln!("overmatch-server: fatal: {err}");
+            std::process::exit(2);
+        }
+    };
     let mut app = App::new();
     app.add_plugins(crate::gpu_less_default_plugins(None))
         // Headless composition needs its own application runner.
@@ -74,6 +81,7 @@ pub fn run() {
     app.add_plugins(SimPlugin);
     app.add_plugins(crate::trace::server_plugin);
     app.add_plugins(crate::cost::server_plugin);
+    super::server_stats::install(&mut app);
     app.add_plugins(crate::shot_trace::server_plugin);
     super::shot_transport::install_server(&mut app);
     super::shot_explanation::install_server(&mut app);
@@ -89,13 +97,13 @@ pub fn run() {
         .spawn((
             Name::new("Server"),
             netcode_server(hosted.as_ref()),
-            LocalAddr(SocketAddr::new(Ipv4Addr::UNSPECIFIED.into(), PORT)),
+            LocalAddr(SocketAddr::new(bind.into(), PORT)),
             ServerUdpIo::default(),
         ))
         .id();
     app.add_systems(Startup, move |mut commands: Commands| {
         commands.trigger(Start { entity: server });
-        info!("server: starting, listening on 0.0.0.0:{PORT}");
+        info!("server: starting, listening on {bind}:{PORT}");
     });
     // The SIM load: the spec sheet only. The dedicated server opens no view artifact — no scene,
     // no textures, no rungs (ADR-0035); the walk's geometry arrives through `bake`'s extraction of
@@ -105,6 +113,9 @@ pub fn run() {
     app.init_resource::<SpawnLane>();
     app.init_resource::<SpawnOverrides>();
     app.init_resource::<CombatantIds>();
+    app.insert_resource(BotCount::from_value(
+        std::env::var("OVERMATCH_BOT").ok().as_deref(),
+    ));
 
     app.add_systems(
         Update,
@@ -114,7 +125,7 @@ pub fn run() {
             // in `Last` every frame (the same rule `grip::answer_resync_requests` follows in `Update`).
             receive_spawn_points,
             spawn_pending_tanks,
-            spawn_bot,
+            spawn_bots,
             schedule_bot_respawn,
             respawn_dead_bots,
             open_gameplay_gate,
@@ -141,6 +152,19 @@ pub fn run() {
     app.run();
     if let Some(hosting) = hosting {
         hosting.finish();
+    }
+}
+
+/// The address the UDP socket binds, from `OVERMATCH_SERVER_BIND`: every interface unless an IPv4
+/// address is named. `127.0.0.1` keeps a local run off the network, and so out of the host
+/// firewall's way. A value that is not an address is refused at launch rather than widened to
+/// every interface.
+fn bind_ip(value: Option<&str>) -> Result<Ipv4Addr, String> {
+    match value.map(str::trim) {
+        None | Some("") => Ok(Ipv4Addr::UNSPECIFIED),
+        Some(value) => value
+            .parse()
+            .map_err(|_| format!("OVERMATCH_SERVER_BIND={value} is not an IPv4 address")),
     }
 }
 
@@ -171,13 +195,13 @@ pub(super) fn netcode_server(hosted: Option<&HostedConfig>) -> NetcodeServer {
 struct PendingClients(Vec<(Entity, PeerId)>);
 
 /// Match-local combatant identities. `next` is never reused; player links retain their id across
-/// respawn and the optional bot retains its one id across its timed respawns. `lives` counts each
-/// combatant's spawns, the next [`CombatantLife`] to hand out.
+/// respawn, and each bot, keyed by its index, retains its id across its timed respawns. `lives`
+/// counts each combatant's spawns, the next [`CombatantLife`] to hand out.
 #[derive(Resource, Default)]
 struct CombatantIds {
     next: u64,
     players: bevy::platform::collections::HashMap<Entity, CombatantId>,
-    bot: Option<CombatantId>,
+    bots: bevy::platform::collections::HashMap<u32, CombatantId>,
     lives: bevy::platform::collections::HashMap<CombatantId, u32>,
 }
 
@@ -198,12 +222,12 @@ impl CombatantIds {
         id
     }
 
-    fn bot(&mut self) -> CombatantId {
-        if let Some(id) = self.bot {
-            return id;
+    fn bot(&mut self, index: u32) -> CombatantId {
+        if let Some(id) = self.bots.get(&index) {
+            return *id;
         }
         let id = self.allocate();
-        self.bot = Some(id);
+        self.bots.insert(index, id);
         id
     }
 
@@ -715,54 +739,75 @@ fn spawn_player_tank(
     root
 }
 
-/// Marker for the ownerless test-bot tank ([`spawn_bot`]) — scopes [`drive_bot`] to it, and keeps
-/// it out of every other tank query the server runs.
-#[derive(Component)]
-struct Bot;
+/// An ownerless test-bot tank ([`spawn_bots`]) — scopes [`drive_bot`] to it, and keeps it out of
+/// every other tank query the server runs. `home` is the XZ it spawns and respawns at.
+#[derive(Component, Clone, Copy)]
+struct Bot {
+    home: Vec2,
+}
 
-/// The bot's home spawn POINT — horizontal, like every spawn definition (the old flat-pad
+/// Bot 0's home spawn POINT — horizontal, like every spawn definition (the old flat-pad
 /// `(0, 12)`). Its Y is sampled at spawn time by the shared rule; the fixed `y = 2` pose it used to
 /// carry measured 113.65 m underground once the heightmap world landed.
 pub(crate) const BOT_SPAWN_XZ: Vec2 = Vec2::new(0.0, 12.0);
 
-/// The bot's spawn pose: home XZ resolved against the live surface like every other spawn.
-fn bot_spawn_pos(height: Option<&crate::terrain_grid::HeightGrid>) -> Vec3 {
-    spawn_pos(height, BOT_SPAWN_XZ)
+/// Bot `index`'s home: the player lanes' fan-out ([`lane_spawn_xz`]) around [`BOT_SPAWN_XZ`], so
+/// bot 0 keeps the one bot's home and no two bots share a point.
+fn bot_home_xz(index: u32) -> Vec2 {
+    lane_spawn_xz(BOT_SPAWN_XZ, index)
 }
 
-/// Spawn the optional ownerless interpolation-test bot once.
-fn spawn_bot(
+/// How many bots `OVERMATCH_BOT` asks for. Unset: none. A number: that many. Present without a
+/// number (`OVERMATCH_BOT=`, `OVERMATCH_BOT=on`): the one bot the bare lever has always meant.
+#[derive(Resource, Clone, Copy, Debug, PartialEq)]
+struct BotCount(u32);
+
+impl BotCount {
+    fn from_value(value: Option<&str>) -> Self {
+        Self(value.map_or(0, |value| value.trim().parse().unwrap_or(1)))
+    }
+}
+
+/// Spawn the [`BotCount`] ownerless bots once, each at its own [`bot_home_xz`].
+fn spawn_bots(
     mut spawned: Local<bool>,
+    count: Res<BotCount>,
     assets: Res<PendingTankAssets>,
     source: TankSimSource,
     mut combatants: ResMut<CombatantIds>,
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
     mut commands: Commands,
 ) {
-    // `is_err()` = the var is unset: present (even empty, e.g. `OVERMATCH_BOT=`) counts as on.
-    if *spawned || std::env::var("OVERMATCH_BOT").is_err() {
+    if *spawned || count.0 == 0 {
         return;
     }
     let Some(content) = source.get() else {
         return;
     };
     *spawned = true;
-    let pos = bot_spawn_pos(height.as_deref());
-    let combatant = combatants.bot();
-    let life = combatants.life(combatant);
-    let root = spawn_bot_entity(&mut commands, &assets, content, combatant, life, pos);
-    info!(
-        "server: spawned circling bot tank {root} (OVERMATCH_BOT) at ({:.1}, {:.1}, {:.1})",
-        pos.x, pos.y, pos.z
-    );
+    for index in 0..count.0 {
+        let bot = Bot {
+            home: bot_home_xz(index),
+        };
+        let pos = spawn_pos(height.as_deref(), bot.home);
+        let combatant = combatants.bot(index);
+        let life = combatants.life(combatant);
+        let root = spawn_bot_entity(&mut commands, &assets, content, bot, combatant, life, pos);
+        info!(
+            "server: spawned circling bot {index} tank {root} (OVERMATCH_BOT) at ({:.1}, {:.1}, {:.1})",
+            pos.x, pos.y, pos.z
+        );
+    }
 }
 
-/// Construct the ownerless bot used by both initial spawn and respawn. `spawn_pos` comes from
-/// [`bot_spawn_pos`] at both call sites — footprint-lifted onto the terrain, never a constant.
+/// Construct an ownerless bot, for both initial spawn and respawn. `spawn_pos` is `bot.home`
+/// resolved by `terrain_grid::spawn_pos` at both call sites — footprint-lifted onto the terrain,
+/// never a constant.
 fn spawn_bot_entity(
     commands: &mut Commands,
     assets: &PendingTankAssets,
     content: TankContent<'_>,
+    bot: Bot,
     combatant: CombatantId,
     life: CombatantLife,
     spawn_pos: Vec3,
@@ -774,7 +819,7 @@ fn spawn_bot_entity(
         (
             (
                 Name::new("Bot"),
-                Bot,
+                bot,
                 // Name is not replicated; NetBot identifies it to the client HUD.
                 super::protocol::NetBot,
                 NetTank,
@@ -821,10 +866,10 @@ fn schedule_bot_respawn(
     }
 }
 
-/// When a scheduled [`BotRespawnAt`] comes due, sweep the dead bot and spawn a fresh one at the same
-/// pose through the same blueprint-backed constructor.
+/// When a scheduled [`BotRespawnAt`] comes due, sweep the knocked-out bot and spawn a fresh one at
+/// its own home through the same blueprint-backed constructor.
 fn respawn_dead_bots(
-    dead: Query<(Entity, &BotRespawnAt, &Rig, &CombatantId), With<Bot>>,
+    dead: Query<(Entity, &BotRespawnAt, &Rig, &CombatantId, &Bot)>,
     assets: Res<PendingTankAssets>,
     source: TankSimSource,
     time: Res<Time<Virtual>>,
@@ -837,10 +882,10 @@ fn respawn_dead_bots(
     // root: if the bot cooked off, `damage::launch_turrets_on_cookoff` stripped the turret's
     // `ChildOf` and made it a free body, so it is NOT a descendant of the root and the recursive
     // root despawn below would miss it — leaking one launched turret per respawn.
-    let due: Vec<(Entity, Entity, CombatantId)> = dead
+    let due: Vec<(Entity, Entity, CombatantId, Bot)> = dead
         .iter()
-        .filter(|(_, at, _, _)| now >= at.0)
-        .map(|(root, _, rig, combatant)| (root, rig.turret, *combatant))
+        .filter(|(_, at, _, _, _)| now >= at.0)
+        .map(|(root, _, rig, combatant, bot)| (root, rig.turret, *combatant, *bot))
         .collect();
     if due.is_empty() {
         return;
@@ -848,7 +893,7 @@ fn respawn_dead_bots(
     let Some(content) = source.get() else {
         return;
     };
-    for (root, turret, combatant) in due {
+    for (root, turret, combatant, bot) in due {
         // Recursive despawn sweeps the root and its attached rig (children + relationship targets).
         commands.entity(root).despawn();
         // The launched turret, if it detached on cookoff. `try_despawn` is a silent no-op when the
@@ -859,9 +904,10 @@ fn respawn_dead_bots(
             &mut commands,
             &assets,
             content,
+            bot,
             combatant,
             combatants.life(combatant),
-            bot_spawn_pos(height.as_deref()),
+            spawn_pos(height.as_deref(), bot.home),
         );
         info!("server: respawned bot as {fresh} (was {root})");
     }
@@ -1034,12 +1080,13 @@ fn drive_bot(mut bots: Query<&mut TankCommand, With<Bot>>) {
     }
 }
 
-/// Log commands received through Lightyear's input buffer.
+/// Log commands received through Lightyear's input buffer. `debug!`: it fires every fixed tick for
+/// every driving or firing client.
 fn log_tank_commands(states: Query<(Entity, &ActionState<TankCommand>)>) {
     for (entity, state) in &states {
         let cmd = &state.0;
         if cmd.throttle != 0.0 || cmd.fire_primary {
-            info!(
+            debug!(
                 "server: {entity} command: throttle={} steer={} fire_primary={}",
                 cmd.throttle, cmd.steer, cmd.fire_primary
             );
@@ -1060,7 +1107,7 @@ mod tests {
         let mut world = World::new();
         let mut ids = CombatantIds::default();
         let player = ids.player(world.spawn_empty().id());
-        let bot = ids.bot();
+        let bot = ids.bot(0);
         assert_eq!(ids.life(player), CombatantLife(0));
         assert_eq!(ids.life(player), CombatantLife(1));
         assert_eq!(ids.life(bot), CombatantLife(0));
@@ -1077,8 +1124,9 @@ mod tests {
         let first_life = ids.player(player_a);
         let respawn = ids.player(player_a);
         let other_player = ids.player(player_b);
-        let bot_first_life = ids.bot();
-        let bot_respawn = ids.bot();
+        let bot_first_life = ids.bot(0);
+        let bot_respawn = ids.bot(0);
+        let other_bot = ids.bot(1);
 
         assert_ne!(first_life, CombatantId(0));
         assert_eq!(
@@ -1087,11 +1135,92 @@ mod tests {
         );
         assert_eq!(
             bot_first_life, bot_respawn,
-            "the bot keeps its match identity on respawn"
+            "a bot keeps its match identity on respawn"
         );
         assert_ne!(first_life, other_player);
         assert_ne!(first_life, bot_first_life);
         assert_ne!(other_player, bot_first_life);
+        assert_ne!(bot_first_life, other_bot, "each bot is its own combatant");
+    }
+
+    /// Unset binds every interface, as every host has; a named address binds only it; a typo is
+    /// refused, since widening it to every interface would expose the run it was meant to keep
+    /// local.
+    #[test]
+    fn the_bind_lever_names_one_address_or_refuses() {
+        assert_eq!(bind_ip(None), Ok(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(bind_ip(Some("")), Ok(Ipv4Addr::UNSPECIFIED));
+        assert_eq!(bind_ip(Some("127.0.0.1")), Ok(Ipv4Addr::LOCALHOST));
+        assert!(bind_ip(Some("localhost")).is_err());
+    }
+
+    /// `OVERMATCH_BOT`'s readings. A mutant that reads a bare lever as zero silently drops the one
+    /// bot every existing harness asks for; one that ignores the number caps the load at one tank.
+    #[test]
+    fn the_bot_lever_is_a_count_and_bare_means_one() {
+        assert_eq!(BotCount::from_value(None), BotCount(0));
+        assert_eq!(BotCount::from_value(Some("")), BotCount(1));
+        assert_eq!(BotCount::from_value(Some("on")), BotCount(1));
+        assert_eq!(BotCount::from_value(Some("1")), BotCount(1));
+        assert_eq!(BotCount::from_value(Some(" 4 ")), BotCount(4));
+        assert_eq!(BotCount::from_value(Some("0")), BotCount(0));
+    }
+
+    /// N bots are N complete tanks: one spawn pass builds every one from the blueprint, each its own
+    /// combatant at its own home, bot 0 at the one bot's home; a later pass adds none. The server's
+    /// load test reads its tank count off this lever, so a mutant that spawns one bot, or stacks
+    /// them on one point, measures a different server than the one asked for.
+    ///
+    /// Fixture data: the shipped Tiger, the one tank in the tree.
+    #[test]
+    fn n_bots_spawn_n_tanks_each_its_own_combatant_at_its_own_home() {
+        use std::sync::Arc;
+
+        let root = crate::assets::asset_root();
+        let spec_ron = std::fs::read_to_string(root.join(crate::tank::TIGER_SPEC_PATH))
+            .expect("the shipped spec sheet");
+        let asset = crate::bake::certify_asset(
+            &root.join(crate::tank::TIGER_SIM_GLB_PATH),
+            &spec_ron,
+            &crate::substances::SubstanceRegistry::shipped(),
+        )
+        .unwrap_or_else(|_| panic!("the shipped sim artifact certifies"));
+        let mut app = App::new();
+        app.insert_resource(crate::bake::TankBlueprint {
+            file: crate::tank::TIGER_SPEC_PATH.to_owned(),
+            geometry: Arc::new(asset.geometry),
+            spec: Arc::new(asset.spec),
+        })
+        .insert_resource(PendingTankAssets {
+            spec: Handle::default(),
+            scene: None,
+        })
+        .insert_resource(BotCount(4))
+        .init_resource::<CombatantIds>()
+        .add_systems(Update, spawn_bots);
+        app.update();
+        app.update();
+
+        let world = app.world_mut();
+        let bots: Vec<(Vec2, CombatantId)> = world
+            .query_filtered::<(&Bot, &CombatantId), With<crate::tank::Tank>>()
+            .iter(world)
+            .map(|(bot, combatant)| (bot.home, *combatant))
+            .collect();
+        assert_eq!(bots.len(), 4, "OVERMATCH_BOT=4 is four bot tanks");
+        for (i, (home, combatant)) in bots.iter().enumerate() {
+            for (other_home, other_combatant) in &bots[i + 1..] {
+                assert!(
+                    home.distance(*other_home) >= SPAWN_OCCUPIED_RADIUS_M,
+                    "two bots spawn within one tank's occupancy: {home} and {other_home}",
+                );
+                assert_ne!(combatant, other_combatant, "two bots share a combatant");
+            }
+        }
+        assert!(
+            bots.iter().any(|(home, _)| *home == BOT_SPAWN_XZ),
+            "bot 0 keeps the one bot's home",
+        );
     }
 
     /// An in-bounds request passes through untouched; an out-of-bounds one is CLAMPED into the
@@ -1150,14 +1279,15 @@ mod tests {
     fn every_netcode_spawn_point_lands_above_the_shipped_terrain() {
         use crate::terrain_grid::tests::{assert_spawn_clears_terrain, shipped_grid};
         let grid = shipped_grid();
-        assert_spawn_clears_terrain(&grid, "interpolation bot", BOT_SPAWN_XZ);
-        // Lanes fan out from the origin; 8 covers far more clients than a match holds.
+        // Lanes fan out from the origin and the bots' homes from theirs; 8 covers far more clients
+        // than a match holds.
         for lane in 0..8 {
             assert_spawn_clears_terrain(
                 &grid,
                 &format!("server lane {lane}"),
                 lane_spawn_xz(Vec2::ZERO, lane),
             );
+            assert_spawn_clears_terrain(&grid, &format!("bot {lane}"), bot_home_xz(lane));
         }
         // The extremes a spawn-map click can reach, which the authority clamps to before resolving.
         let limit = spawn_map::spawn_limit(grid.half_extent());
@@ -1380,7 +1510,7 @@ mod tests {
         );
         // No grid = the flat-slab world: y = 2 exactly, for players and the bot alike.
         assert_eq!(spawn_surface_height(None, Vec2::ZERO), 0.0);
-        assert_eq!(bot_spawn_pos(None), Vec3::new(0.0, 2.0, 12.0));
+        assert_eq!(spawn_pos(None, bot_home_xz(0)), Vec3::new(0.0, 2.0, 12.0));
         let harness = Vec3::new(3.0, 0.42, -7.0);
         assert_eq!(
             lane_spawn_pos(Some(harness), 0, Some(&grid)),

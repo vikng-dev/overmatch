@@ -44,10 +44,11 @@ mod camera;
 /// The command layer: device reads → player bindings → per-tank serializable `TankCommand`. The
 /// seam authoritative multiplayer hangs off; sim modules consume commands, never devices.
 mod command;
-/// The per-fixed-tick sim-COST recorder (`SPIKE_COST_TRACE=<path>`): an env-gated JSONL log of
-/// FixedUpdate tick time, the `ballistics::integrate_projectiles` share of it, and entity/projectile
-/// counts — the reusable measurement rig for the machine-gun-march cost spike. Off (zero cost) unless
-/// the env var is set; registered on the net server and client composition roots.
+/// The fixed-tick wall clock and the per-fixed-tick sim-COST recorder (`SPIKE_COST_TRACE=<path>`): an
+/// env-gated JSONL log of FixedUpdate tick time, the `ballistics::integrate_projectiles` share of it,
+/// and entity/projectile counts — the reusable measurement rig for the machine-gun-march cost spike.
+/// The clock also feeds the server's stats line. Off (zero cost) unless a consumer arms it;
+/// registered on the net server and client composition roots.
 mod cost;
 /// The controlled tank's crew bar + swap input — a shared piece of the fixed player UI, mounted by
 /// both `GamePlugin` and the sandbox (each scoped to the `Controlled` tank).

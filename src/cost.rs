@@ -1,6 +1,10 @@
-//! Optional fixed-schedule cost recorder, enabled by `SPIKE_COST_TRACE`.
+//! The fixed-tick wall clock, and its optional JSONL recorder enabled by `SPIKE_COST_TRACE`.
 //!
-//! It writes role-qualified JSONL rows for the complete fixed schedule and projectile-march share.
+//! [`TickClock`] brackets the complete fixed schedule and the projectile-march share of it. It is
+//! armed by whichever consumer asks first ([`arm_tick_clock`]): the JSONL rows here, or the
+//! server's stats line (`net::server_stats`). Each consumer reads [`TickClock::closed`] after
+//! [`TickClosed`], so every reader sees the one measurement.
+//!
 //! `scripts/cost/analyze.py` consumes the rows.
 //! Invariant: use a distinct base path from `SPIKE_TRACE`; both recorders otherwise open the same
 //! role-qualified file independently.
@@ -14,28 +18,83 @@ use crate::ballistics::Projectile;
 use crate::tank::Tank;
 use crate::trace::{JsonlSink, role_path};
 
-/// Open cost sink and per-tick accumulator, present only when tracing is armed.
-#[derive(Resource)]
-pub(crate) struct CostTrace {
-    sink: JsonlSink,
-    /// Monotone recorder tick index and warmup gate.
-    tick: u64,
-    /// Ticks to skip before writing rows.
-    warmup: u64,
+/// The fixed-tick timer, present only while some consumer has armed it.
+#[derive(Resource, Default)]
+pub(crate) struct TickClock {
     /// `Instant` captured at `FixedFirst` this tick; the whole-schedule timer's start.
-    tick_start: Option<Instant>,
+    start: Option<Instant>,
     /// Accumulated `integrate_projectiles` wall micros this tick.
     march_us: f64,
     /// Number of projectile-march calls this tick.
     march_calls: u32,
+    /// The tick [`close_tick`] closed this `FixedLast`; `None` when no tick was opened.
+    closed: Option<TickCost>,
 }
 
-impl CostTrace {
+/// One closed fixed tick.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct TickCost {
+    /// Wall micros from `FixedFirst` to `FixedLast`.
+    pub(crate) us: f64,
+    /// The projectile-march share of `us`.
+    march_us: f64,
+    march_calls: u32,
+}
+
+impl TickClock {
     /// Attribute projectile-march wall micros to the current tick.
     pub(crate) fn record_march(&mut self, us: f64) {
         self.march_us += us;
         self.march_calls += 1;
     }
+
+    /// The tick closed this `FixedLast`, for a reader ordered after [`TickClosed`].
+    pub(crate) fn closed(&self) -> Option<TickCost> {
+        self.closed
+    }
+}
+
+/// The `FixedLast` set holding the clock's close; every reader of [`TickClock::closed`] runs after
+/// it.
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+pub(crate) struct TickClosed;
+
+/// Arm the clock. Idempotent, so each consumer arms it without knowing about the others.
+pub(crate) fn arm_tick_clock(app: &mut App) {
+    if app.world().contains_resource::<TickClock>() {
+        return;
+    }
+    app.init_resource::<TickClock>();
+    // Invariant: `FixedFirst` and `FixedLast` bracket only the complete fixed schedule.
+    app.add_systems(FixedFirst, open_tick);
+    app.add_systems(FixedLast, close_tick.in_set(TickClosed));
+}
+
+/// `FixedFirst`: open the per-tick timer and clear the march accumulator.
+fn open_tick(mut clock: ResMut<TickClock>) {
+    clock.start = Some(Instant::now());
+    clock.march_us = 0.0;
+    clock.march_calls = 0;
+}
+
+/// `FixedLast`: capture the elapsed time before any reader samples counts.
+fn close_tick(mut clock: ResMut<TickClock>) {
+    let closed = clock.start.take().map(|start| TickCost {
+        us: start.elapsed().as_secs_f64() * 1.0e6,
+        march_us: clock.march_us,
+        march_calls: clock.march_calls,
+    });
+    clock.closed = closed;
+}
+
+/// Open JSONL sink and its warmup gate, present only when the recorder is armed.
+#[derive(Resource)]
+struct CostTrace {
+    sink: JsonlSink,
+    /// Monotone recorder tick index and warmup gate.
+    tick: u64,
+    /// Ticks to skip before writing rows.
+    warmup: u64,
 }
 
 /// Open the role-qualified sink and register recorder systems when tracing is armed.
@@ -60,14 +119,10 @@ fn install(app: &mut App, role: &'static str) -> bool {
         sink,
         tick: 0,
         warmup,
-        tick_start: None,
-        march_us: 0.0,
-        march_calls: 0,
     });
+    arm_tick_clock(app);
     app.add_systems(Startup, write_meta);
-    // Invariant: `FixedFirst` and `FixedLast` bracket only the complete fixed schedule.
-    app.add_systems(FixedFirst, open_tick);
-    app.add_systems(FixedLast, close_tick);
+    app.add_systems(FixedLast, write_tick.after(TickClosed));
     true
 }
 
@@ -88,26 +143,17 @@ fn write_meta(mut cost: ResMut<CostTrace>, fixed: Res<Time<Fixed>>, role: Res<Co
 #[derive(Resource)]
 struct CostRole(&'static str);
 
-/// `FixedFirst`, first: open the per-tick timer and clear the march accumulator.
-fn open_tick(mut cost: ResMut<CostTrace>) {
-    cost.tick_start = Some(Instant::now());
-    cost.march_us = 0.0;
-    cost.march_calls = 0;
-}
-
-/// `FixedLast`: capture elapsed time before sampling counts and writing past warmup.
-fn close_tick(
+/// `FixedLast`, after the clock closes: sample counts and write the row past warmup.
+fn write_tick(
     mut cost: ResMut<CostTrace>,
+    clock: Res<TickClock>,
     projectiles: Query<(), With<Projectile>>,
     tanks: Query<(), With<Tank>>,
     all: Query<Entity>,
 ) {
-    let Some(start) = cost.tick_start.take() else {
+    let Some(closed) = clock.closed() else {
         return;
     };
-    let us = start.elapsed().as_secs_f64() * 1.0e6;
-    let march_us = cost.march_us;
-    let march_calls = cost.march_calls;
     let tick = cost.tick;
     cost.tick += 1;
     if tick < cost.warmup {
@@ -119,9 +165,9 @@ fn close_tick(
     let row = json!({
         "k": "tick",
         "t": tick,
-        "us": us,
-        "mus": march_us,
-        "mc": march_calls,
+        "us": closed.us,
+        "mus": closed.march_us,
+        "mc": closed.march_calls,
         "np": np,
         "nt": nt,
         "ne": ne,

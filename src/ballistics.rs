@@ -2311,9 +2311,10 @@ fn integrate_projectiles(
     net: ProjectileMarchNet,
     // EXPERIMENTAL cost-attribution A/B lever (`SPIKE_MG_SHORTCIRCUIT`, default off — see the type).
     shortcircuit: Res<MgShortCircuit>,
-    // Sim-cost recorder attribution sink (`SPIKE_COST_TRACE`): absent unless the recorder is armed, so
-    // an unmeasured run pays only the `Option` check. This system's whole wall-time is stamped into it.
-    mut cost: Option<ResMut<crate::cost::CostTrace>>,
+    // The fixed-tick clock (`SPIKE_COST_TRACE`, or the server stats line): absent unless a consumer
+    // armed it, so an unmeasured run pays only the `Option` check. This system's whole wall-time is
+    // stamped into it.
+    mut cost: Option<ResMut<crate::cost::TickClock>>,
     // Shot-lifecycle recorder sink (`SPIKE_SHOT_TRACE`): absent unless armed, same `Option` discipline
     // as the cost sink above. Every row below is client-side (`!deposit`) — this is the CONSUMING half
     // of a shot's life (contact → hold → re-seed / terminal / dissolve), the half whose timings size
@@ -2327,8 +2328,8 @@ fn integrate_projectiles(
         sanctioned,
         shot_clock,
     } = net;
-    // March-cost attribution timer (`SPIKE_COST_TRACE`): only sampled when the recorder is armed, so an
-    // unmeasured run never touches the clock. Covers the whole march (query iteration + every cast).
+    // March-cost attribution timer: only sampled when the tick clock is armed, so an unmeasured run
+    // never touches the clock. Covers the whole march (query iteration + every cast).
     let march_t0 = cost.as_ref().map(|_| Instant::now());
     let dt = time.delta_secs();
     // Authority = not a replica: only then does a hit actually mutate health here.
@@ -2493,8 +2494,8 @@ fn integrate_projectiles(
         }
     }
 
-    // Attribute this system's whole wall-time to the current fixed tick (`SPIKE_COST_TRACE`). Inert
-    // (both `Option`s empty) unless the recorder is armed.
+    // Attribute this system's whole wall-time to the current fixed tick. Inert (both `Option`s
+    // empty) unless the tick clock is armed.
     if let (Some(cost), Some(t0)) = (cost.as_mut(), march_t0) {
         cost.record_march(t0.elapsed().as_secs_f64() * 1.0e6);
     }

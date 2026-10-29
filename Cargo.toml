@@ -66,6 +66,13 @@ bevy_replicon = "0.44"
 # server image nor the client needs a system CA store or OpenSSL; `gzip` (a default) is off.
 ureq = { version = "3.3", default-features = false, features = ["rustls"] }
 
+# Already in the tree through mio, socket2, getrandom and others (same locked version — this adds no
+# compiled crate);
+# named directly only by `net::server_stats`, which reads the process's CPU time (`getrusage`) and,
+# on macOS, its resident size (`proc_pidinfo`) for the server's stats line.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # The Objective-C runtime's own C declarations. Already in the tree through winit's `objc2` (same
 # locked version — this adds no compiled crate); named directly only by `quit::terminate`, which
 # installs one `applicationShouldTerminate:` method on winit's delegate class.
