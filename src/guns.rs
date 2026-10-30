@@ -491,7 +491,7 @@ mod tests {
                     sideways_speed: 534.38837,
                     energy: 397_738.22,
                     core_mass: 0.113,
-                    blast: 0.0,
+                    blast: 75_053.78,
                 }),
             },
         ),
