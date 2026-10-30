@@ -454,38 +454,43 @@ pub(crate) enum MapTiling {
     Stretched,
 }
 
+/// The sampler a surface image is read through: [`MapTiling`] addressing, trilinear filtering
+/// across the mip chain, and [`SURFACE_ANISOTROPY`] taps.
+pub(crate) fn surface_sampler(tiling: MapTiling) -> bevy::image::ImageSamplerDescriptor {
+    use bevy::image::{ImageAddressMode, ImageSamplerDescriptor};
+    let address_mode = match tiling {
+        MapTiling::Repeat => ImageAddressMode::Repeat,
+        MapTiling::Stretched => ImageAddressMode::ClampToEdge,
+    };
+    let mut sampler = ImageSamplerDescriptor {
+        address_mode_u: address_mode,
+        address_mode_v: address_mode,
+        ..ImageSamplerDescriptor::default()
+    };
+    // Sets the three filters to Linear as well — wgpu REQUIRES that for anisotropy > 1.
+    sampler.set_anisotropic_filter(SURFACE_ANISOTROPY);
+    sampler
+}
+
 /// Load one surface image (a terrain or building pack's map, or a mask) with the sampler its role
-/// needs: [`MapTiling`] addressing, trilinear filtering across the mip chain, and anisotropy. Async
-/// load is fine — this is pure view (ADR-0014), nothing sim-side reads it — but a FAILED load is
-/// fatal, so every caller holds its maps' ids for a reporter ([`report_failed_terrain_map`],
-/// `building_surface`'s). The sampler is orthogonal to the container: the same descriptor rides
-/// the KTX2 maps exactly as it rode the PNGs.
+/// needs ([`surface_sampler`]). Async load is fine — this is pure view (ADR-0014), nothing sim-side
+/// reads it — but a FAILED load is fatal, so every caller holds its maps' ids for a reporter
+/// ([`report_failed_terrain_map`], `building_surface`'s). The sampler is orthogonal to the
+/// container: the same descriptor rides the KTX2 maps exactly as it rode the PNGs.
 pub(crate) fn surface_map(
     asset_server: &AssetServer,
     path: &str,
     encoding: MapEncoding,
     tiling: MapTiling,
 ) -> Handle<Image> {
-    use bevy::image::{
-        ImageAddressMode, ImageLoaderSettings, ImageSampler, ImageSamplerDescriptor,
-    };
+    use bevy::image::{ImageLoaderSettings, ImageSampler};
     let is_srgb = matches!(encoding, MapEncoding::Srgb);
-    let address_mode = match tiling {
-        MapTiling::Repeat => ImageAddressMode::Repeat,
-        MapTiling::Stretched => ImageAddressMode::ClampToEdge,
-    };
+    let sampler = surface_sampler(tiling);
     asset_server
         .load_builder()
         .with_settings(move |settings: &mut ImageLoaderSettings| {
             settings.is_srgb = is_srgb;
-            let mut sampler = ImageSamplerDescriptor {
-                address_mode_u: address_mode,
-                address_mode_v: address_mode,
-                ..ImageSamplerDescriptor::default()
-            };
-            // Sets the three filters to Linear as well — wgpu REQUIRES that for anisotropy > 1.
-            sampler.set_anisotropic_filter(SURFACE_ANISOTROPY);
-            settings.sampler = ImageSampler::Descriptor(sampler);
+            settings.sampler = ImageSampler::Descriptor(sampler.clone());
         })
         .load(path.to_owned())
 }

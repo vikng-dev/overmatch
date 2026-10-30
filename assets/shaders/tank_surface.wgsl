@@ -50,7 +50,10 @@ struct RestFrame {
 @group(#{MATERIAL_BIND_GROUP}) @binding(100) var<uniform> surface: TankSurfaceParams;
 @group(#{MATERIAL_BIND_GROUP}) @binding(101) var visual_albedo: texture_2d<f32>;
 // The one sampler of the extension (repeat, trilinear, anisotropic): every map and the pattern read
-// through it. Every sampler a material declares counts against the 16 a stage gets on Metal.
+// through it. Bevy takes it from the image at 101, which is always bound: the visual's albedo, or a
+// stand-in carrying the same sampler where the surface draws none (`src/tank_surface.rs`). Every
+// sampler a material declares counts against the 16 a stage gets (MEASURED: wgpu's default
+// `max_samplers_per_shader_stage`, wgpu-types 29 `limits.rs`).
 @group(#{MATERIAL_BIND_GROUP}) @binding(102) var surface_sampler: sampler;
 @group(#{MATERIAL_BIND_GROUP}) @binding(103) var visual_normal: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(104) var visual_arm: texture_2d<f32>;

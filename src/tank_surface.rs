@@ -34,14 +34,17 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use bevy::asset::AssetLoadFailedEvent;
+use bevy::asset::{AssetLoadFailedEvent, RenderAssetUsages};
 use bevy::ecs::system::SystemParam;
 use bevy::gltf::GltfMaterialName;
+use bevy::image::ImageSampler;
 use bevy::math::Affine3A;
 use bevy::mesh::MeshTag;
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
-use bevy::render::render_resource::{AsBindGroup, ShaderType};
+use bevy::render::render_resource::{
+    AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat,
+};
 use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldInstanceReady};
@@ -50,7 +53,7 @@ use serde::de::{self, Deserializer, MapAccess, Visitor};
 
 use crate::provenance::Sourced;
 use crate::substances::SubstanceRegistry;
-use crate::world::{MapEncoding, MapTiling, surface_map};
+use crate::world::{MapEncoding, MapTiling, surface_map, surface_sampler};
 
 /// A tank's drawn surface: bevy's `StandardMaterial` carrying the lighting parameters and, for a
 /// flat visual, its look; extended with [`TankSurface`] (the visual's maps, the livery, the rest
@@ -336,11 +339,14 @@ pub(crate) struct TankSurfaceParams {
 
 /// The surface half of [`TankSurfaceMaterial`]. Bindings start at 100, bevy's convention for a
 /// material extension. One sampler for every map and the pattern: each sampler a material declares
-/// counts against the 16 a stage gets on Metal.
+/// counts against the 16 a stage gets (MEASURED: wgpu's default `max_samplers_per_shader_stage`).
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 pub(crate) struct TankSurface {
     #[uniform(100)]
     pub params: TankSurfaceParams,
+    /// The visual's albedo where the surface shows it, else [`SurfaceVehicles`]'s stand-in. Bevy
+    /// binds the image's own sampler beside it, so this binding always holds an image carrying the
+    /// repeating surface sampler: left empty, bevy's fallback would clamp every map and the pattern.
     #[texture(101)]
     #[sampler(102)]
     pub visual_albedo: Option<Handle<Image>>,
@@ -398,12 +404,14 @@ struct VisualMaps {
 }
 
 /// The surface material for the glb material `original`, of visual `visual`, under `livery`.
+/// `stand_in` is [`SurfaceVehicles`]'s: binding 101 holds it where no albedo is drawn.
 fn surface_material(
     original: &StandardMaterial,
     visual: &Visual,
     maps: Option<VisualMaps>,
     livery: &Livery,
     pattern: Option<Handle<Image>>,
+    stand_in: &Handle<Image>,
     rest_frames: Handle<ShaderBuffer>,
 ) -> TankSurfaceMaterial {
     // The glb material keeps its pipeline-shaping state (culling, sidedness, alpha mode); its maps
@@ -471,7 +479,7 @@ fn surface_material(
         base,
         extension: TankSurface {
             params,
-            visual_albedo: maps.as_ref().map(|maps| maps.albedo.clone()),
+            visual_albedo: Some(maps.as_ref().map_or(stand_in, |maps| &maps.albedo).clone()),
             visual_normal: maps.as_ref().map(|maps| maps.normal.clone()),
             visual_arm: maps.map(|maps| maps.arm),
             camo_pattern,
@@ -494,13 +502,40 @@ struct Vehicle {
 }
 
 /// Every vehicle dressed so far, by its view scene, and the maps loaded for them.
-#[derive(Resource, Default)]
+#[derive(Resource)]
 pub(crate) struct SurfaceVehicles {
     vehicles: HashMap<AssetId<WorldAsset>, Vehicle>,
     maps: HashMap<String, VisualMaps>,
     pattern: Option<Handle<Image>>,
     /// Every map and pattern loaded, held by id for [`report_failed_surface_map`].
     required: HashSet<AssetId<Image>>,
+    /// A 1×1 white image carrying the surface sampler ([`surface_sampler`]): what binding 101
+    /// holds where the surface draws no albedo, so the sampler beside it still repeats.
+    stand_in: Handle<Image>,
+}
+
+impl FromWorld for SurfaceVehicles {
+    fn from_world(world: &mut World) -> Self {
+        let mut stand_in = Image::new_fill(
+            Extent3d {
+                width: 1,
+                height: 1,
+                depth_or_array_layers: 1,
+            },
+            TextureDimension::D2,
+            &[255; 4],
+            TextureFormat::Rgba8Unorm,
+            RenderAssetUsages::RENDER_WORLD,
+        );
+        stand_in.sampler = ImageSampler::Descriptor(surface_sampler(MapTiling::Repeat));
+        Self {
+            vehicles: HashMap::new(),
+            maps: HashMap::new(),
+            pattern: None,
+            required: HashSet::new(),
+            stand_in: world.resource_mut::<Assets<Image>>().add(stand_in),
+        }
+    }
 }
 
 /// The rest frame of `primitive` under view root `root`: its own transform, then each ancestor's
@@ -696,7 +731,15 @@ impl Dress<'_, '_> {
         let pattern = self.pattern();
         let base = self.standard.get(original).cloned().unwrap_or_default();
         let rest_frames = self.vehicles.vehicles[&scene].rest_frames.clone();
-        let made = surface_material(&base, visual, maps, &self.data.livery, pattern, rest_frames);
+        let made = surface_material(
+            &base,
+            visual,
+            maps,
+            &self.data.livery,
+            pattern,
+            &self.vehicles.stand_in,
+            rest_frames,
+        );
         let handle = self.surfaces.add(made);
         self.vehicles
             .vehicles
@@ -928,6 +971,54 @@ mod tests {
             .insert_resource(shipped())
             .init_resource::<SurfaceVehicles>();
         app
+    }
+
+    /// EVERY SURFACE READS THROUGH A REPEATING SAMPLER. Bevy binds binding 101's image's own sampler
+    /// at 102, the one every map and the pattern read through; with 101 empty it binds its fallback's,
+    /// which clamps, and a flat visual's camouflage smears its edge texels past the first repeat. So
+    /// a surface whose visual has no maps binds the stand-in at 101, and the stand-in carries the
+    /// repeating surface sampler. A mutant leaving 101 empty for a flat visual, or a stand-in that
+    /// clamps, fails here.
+    #[test]
+    fn a_flat_visual_binds_the_stand_in_and_its_repeating_sampler() {
+        let mut app = dress_app();
+        let world = app.world_mut();
+        let stand_in = world.resource::<SurfaceVehicles>().stand_in.clone();
+        let image = world
+            .resource::<Assets<Image>>()
+            .get(&stand_in)
+            .expect("the stand-in is in the store");
+        assert_eq!(
+            image.sampler,
+            ImageSampler::Descriptor(surface_sampler(MapTiling::Repeat))
+        );
+        let flat = Visual::Flat {
+            colour: Sourced(Srgb([0x20, 0x20, 0x20])),
+            roughness: Sourced(0.5),
+            metallic: Sourced(0.0),
+            takes_paint: true,
+        };
+        let livery = Livery::parse(
+            r##"(paint: (colour: ("#9A8952", Tuned("fixture")), sheen: (0.1, Tuned("fixture"))),
+                camouflage: Some((pattern: "p", metres_per_repeat: (4.0, Tuned("fixture")),
+                colours: [("#4B573E", Tuned("fixture"))])))"##,
+        )
+        .expect("the fixture livery parses");
+        let made = surface_material(
+            &StandardMaterial::default(),
+            &flat,
+            None,
+            &livery,
+            Some(Handle::default()),
+            &stand_in,
+            Handle::default(),
+        );
+        assert_ne!(
+            made.extension.params.flags & FLAG_CAMO,
+            0,
+            "camouflage drawn"
+        );
+        assert_eq!(made.extension.visual_albedo, Some(stand_in));
     }
 
     /// One vehicle's view as a scene lands it: a root with two nodes, the outer moved, the inner
