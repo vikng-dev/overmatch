@@ -19,7 +19,8 @@
 #
 # Useful levers: `msaa:`, `render_scale:`, `shadow_distance:`, `shadow_cascades:`,
 # `shadow_resolution:`, `track_prints:` (video.ron, src/settings.rs); OVERMATCH_PROBE_TANKS;
-# SPIKE_ABLATE=bloom,env_light,depth_prepass,ui and SPIKE_PHASE_COUNTS=1 (src/render_cost.rs).
+# SPIKE_ABLATE=bloom,env_light,depth_prepass,depth_copy,ui and SPIKE_PHASE_COUNTS=1
+#   (src/render_cost.rs; depth_copy = bevy's own depth prepass instead of the main-pass copy).
 # Caster exclusions (instruments, not product settings): SPIKE_ABLATE=terrain-casters,
 #   tree-casters,house-casters,tank-casters (comma-separated; each removes only that class's casting).
 # Independent stock controls (environment assignments in the third condition field):

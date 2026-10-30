@@ -24,9 +24,10 @@
 //!   retargeted.
 //!
 //! * `OVERMATCH_CAPTURE_STEP_S=<s>` — a positive, fixed virtual frame step for reproducible
-//!   comparisons. It also seeds the view RNG (cosmetic effect variation, otherwise seeded from the
-//!   wall clock) with [`VIEW_SEED`], so two runs draw the same effects. Asset loading still runs
-//!   asynchronously, so capture after the scene is ready.
+//!   comparisons. Asset loading still runs asynchronously, so capture after the scene is ready.
+//!
+//! Every capture run seeds the view RNG (cosmetic effect variation, otherwise seeded from the wall
+//! clock) with [`VIEW_SEED`], so two runs draw the same effects.
 //! * `OVERMATCH_CAPTURE_FOLLOW=<x>,<y>,<z>` — hold the camera at this world-space offset from
 //!   the controlled tank, looking at its root, for close belt comparisons.
 //! * `OVERMATCH_CAPTURE_SETTINGS=<tab>` — hold the settings page open on that tab (`video` or
@@ -38,6 +39,13 @@
 //!   after app second `s`, the standing tree of that map instance falls broken at segment `cut`
 //!   toward azimuth bin `dir bin`, exactly as a law sets it ([`offline_fell_plugin`]; the offline
 //!   root alone mounts it).
+//! * `OVERMATCH_CAPTURE_IMPACT=<x>,<z>,<calibre m>@<s>[;…]` — on the first frame at or after app
+//!   second `s`, a round of that calibre strikes the terrain under world `x,z`: the view's impact
+//!   read (dust, smoke, the ground mark) is raised there with no round flown and no shot recorded
+//!   ([`offline_impact_plugin`]; the offline root alone mounts it).
+//!
+//! A capture run draws the view's cosmetic randomness (sprite roll, scale jitter, flipbook start)
+//! from one fixed seed, so two runs of one scenario on a fixed step draw the same sprites.
 //!
 //! The process exits once every frame is on disk, with a failure code if any is missing.
 //!
@@ -78,8 +86,10 @@ const WARM_UP: f32 = 1.0;
 const SIGHT_LEAD: f32 = 2.0;
 /// Seconds after the last frame's time by which it must be on disk, or the run exits failed.
 const GRACE: f32 = 3.0;
-/// The view RNG's seed under a fixed frame step; any constant serves.
+/// The view RNG's seed in a capture run: any fixed value.
 const VIEW_SEED: u64 = 0x5EED;
+/// Height a capture impact's ground probe starts from, world metres. ASSUMED above any terrain.
+const IMPACT_PROBE_TOP_M: f32 = 1000.0;
 
 #[derive(Resource)]
 struct Capture {
@@ -116,6 +126,8 @@ pub fn plugin(app: &mut App) {
         size.y
     );
     hide_window(app);
+    // The effects plugin only `init_resource`s the RNG, so this seed holds in either mount order.
+    app.insert_resource(crate::vfx::ViewRng::seeded(VIEW_SEED));
     if let Some(step) = std::env::var("OVERMATCH_CAPTURE_STEP_S")
         .ok()
         .and_then(|s| s.parse::<f64>().ok())
@@ -124,8 +136,6 @@ pub fn plugin(app: &mut App) {
         app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
             std::time::Duration::from_secs_f64(step),
         ));
-        // The effects plugin only `init_resource`s the RNG, so this seed holds in either mount order.
-        app.insert_resource(crate::vfx::ViewRng::seeded(VIEW_SEED));
     }
     if let Some(offset) = std::env::var("OVERMATCH_CAPTURE_FOLLOW")
         .ok()
@@ -303,6 +313,90 @@ fn fell_on_cue(
         cue.cut,
         cue.dir
     );
+}
+
+/// One `OVERMATCH_CAPTURE_IMPACT` strike.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct ImpactCue {
+    at: f32,
+    x: f32,
+    z: f32,
+    caliber: f32,
+}
+
+/// The strikes not yet raised.
+#[derive(Resource, Debug)]
+struct ImpactCues(Vec<ImpactCue>);
+
+/// `<x>,<z>,<calibre m>@<s>` entries separated by `;`, every number finite and the calibre
+/// positive; `None` when any entry is malformed.
+fn parse_impacts(s: &str) -> Option<Vec<ImpactCue>> {
+    s.split(';')
+        .map(|entry| {
+            let (point, at) = entry.split_once('@')?;
+            let numbers: Vec<f32> = point
+                .split(',')
+                .map(|n| n.trim().parse().ok())
+                .collect::<Option<_>>()?;
+            let [x, z, caliber] = numbers[..] else {
+                return None;
+            };
+            let at: f32 = at.trim().parse().ok()?;
+            ([x, z, caliber, at].iter().all(|n| n.is_finite()) && caliber > 0.0)
+                .then_some(ImpactCue { at, x, z, caliber })
+        })
+        .collect()
+}
+
+/// The capture's terrain-impact lever, mounted by the offline root only, where the impact seam has
+/// no replica reading it. Inert unless both `OVERMATCH_CAPTURE` and `OVERMATCH_CAPTURE_IMPACT` are
+/// set.
+pub(crate) fn offline_impact_plugin(app: &mut App) {
+    if std::env::var_os("OVERMATCH_CAPTURE").is_none() {
+        return;
+    }
+    let Ok(raw) = std::env::var("OVERMATCH_CAPTURE_IMPACT") else {
+        return;
+    };
+    let Some(cues) = parse_impacts(&raw) else {
+        warn!("capture: OVERMATCH_CAPTURE_IMPACT={raw:?} is not <x>,<z>,<calibre m>@<s>[;…]");
+        return;
+    };
+    info!("capture: impacts {cues:?}");
+    app.insert_resource(ImpactCues(cues))
+        .add_systems(Update, raise_impacts);
+}
+
+/// Raise each due strike on the ground under its point, with the ground's normal there.
+fn raise_impacts(
+    time: Res<Time>,
+    mut cues: ResMut<ImpactCues>,
+    spatial: avian3d::prelude::SpatialQuery,
+    mut commands: Commands,
+) {
+    let now = time.elapsed_secs();
+    let filter = avian3d::prelude::SpatialQueryFilter::from_mask(crate::Layer::Terrain);
+    cues.0.retain(|cue| {
+        if cue.at > now {
+            return true;
+        }
+        let origin = Vec3::new(cue.x, IMPACT_PROBE_TOP_M, cue.z);
+        match spatial.cast_ray(origin, Dir3::NEG_Y, 2.0 * IMPACT_PROBE_TOP_M, true, &filter) {
+            Some(hit) => {
+                let position = origin - Vec3::Y * hit.distance;
+                info!("capture: impact at {position} ({now:.4} s)");
+                commands.trigger(crate::ballistics::Impact {
+                    position,
+                    normal: hit.normal,
+                    caliber: cue.caliber,
+                    surface: crate::ballistics::ImpactSurface::Terrain,
+                    outcome: crate::ballistics::ImpactOutcome::Struck,
+                });
+            }
+            None => warn!("capture: no terrain under {cue:?}"),
+        }
+        false
+    });
 }
 
 /// Apps rewrite their UI roots' `Visibility` from `Update`; this runs after them and before the
@@ -567,6 +661,39 @@ mod tests {
             "fir,10,3,-1",
         ] {
             assert_eq!(parse_fell(refused), None, "{refused}");
+        }
+    }
+
+    /// An impact cue is a ground point, a positive calibre and a second; one bad entry refuses the
+    /// whole list rather than raising some of the strikes asked for.
+    #[test]
+    fn impact_cues_are_points_calibres_and_seconds() {
+        assert_eq!(
+            parse_impacts("-400, -430,0.088@17.5;1,2,0.0079@18"),
+            Some(vec![
+                ImpactCue {
+                    at: 17.5,
+                    x: -400.0,
+                    z: -430.0,
+                    caliber: 0.088,
+                },
+                ImpactCue {
+                    at: 18.0,
+                    x: 1.0,
+                    z: 2.0,
+                    caliber: 0.0079,
+                },
+            ])
+        );
+        for refused in [
+            "",
+            "1,2,0.088",
+            "1,2@3",
+            "1,2,0@3",
+            "1,2,0.088@inf",
+            "1,2,0.088@3;x",
+        ] {
+            assert_eq!(parse_impacts(refused), None, "{refused}");
         }
     }
 

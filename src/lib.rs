@@ -172,6 +172,10 @@ pub mod sandbox;
 /// trunk collider only; a damage-model tree is spawned by `trees` — a static root with a state,
 /// one frustum collider per segment, each segment with its own HP pool.
 mod scatter;
+/// The scene depth the player's camera serves its soft-edged sprites and hull marks: the camera's
+/// own main-pass depth, copied into bevy's prepass depth texture after the opaque pass, so no depth
+/// prepass draws the scene a second time. Mounted by `camera`, which spawns its marker.
+mod scene_depth;
 /// Player-facing graphics settings: the persisted model (`video.ron` in the platform config
 /// directory), the ONE reconciler that applies it to the rendering world, and the `Esc` settings
 /// page. Ships — NOT `dev_tools`-gated, and the only writer of the renderer's knobs. ONE mount per
@@ -997,8 +1001,13 @@ pub fn run_offline() {
     }
     app.add_plugins(GamePlugin);
     // Documentation frames; inert without `OVERMATCH_CAPTURE`. The tree-fall cue writes the
-    // authority's tree state, so this root, the only one with no replica, alone mounts it.
-    app.add_plugins((dev_capture::plugin, dev_capture::offline_fell_plugin));
+    // authority's tree state and the impact cue raises the impact seam with no shot behind it, so
+    // this root, the only one with no replica, alone mounts them.
+    app.add_plugins((
+        dev_capture::plugin,
+        dev_capture::offline_fell_plugin,
+        dev_capture::offline_impact_plugin,
+    ));
     // The offline transmission feel test (phase 2.5): an EXPLICIT override of the spec's
     // declared architecture (which is authoritative and mandatory since REV 14), seeded to
     // the Tiger's own L600 so a bare offline boot matches the shipped spec. `T` cycles

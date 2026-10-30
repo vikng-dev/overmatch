@@ -1,0 +1,51 @@
+{
+ "marks-00018.0000s.png": {
+  "pixels": 1440000,
+  "differing": 0,
+  "over_8": 0,
+  "max_channel_delta": 0,
+  "mean_channel_delta": 0.0
+ },
+ "marks-00021.0000s.png": {
+  "pixels": 1440000,
+  "differing": 0,
+  "over_8": 0,
+  "max_channel_delta": 0,
+  "mean_channel_delta": 0.0
+ },
+ "marks-00024.0000s.png": {
+  "pixels": 1440000,
+  "differing": 0,
+  "over_8": 0,
+  "max_channel_delta": 0,
+  "mean_channel_delta": 0.0
+ },
+ "scene-00016.0000s.png": {
+  "pixels": 1440000,
+  "differing": 0,
+  "over_8": 0,
+  "max_channel_delta": 0,
+  "mean_channel_delta": 0.0
+ },
+ "scene-00017.0800s.png": {
+  "pixels": 1440000,
+  "differing": 0,
+  "over_8": 0,
+  "max_channel_delta": 0,
+  "mean_channel_delta": 0.0
+ },
+ "scene-00017.2000s.png": {
+  "pixels": 1440000,
+  "differing": 0,
+  "over_8": 0,
+  "max_channel_delta": 0,
+  "mean_channel_delta": 0.0
+ },
+ "scene-00017.4500s.png": {
+  "pixels": 1440000,
+  "differing": 0,
+  "over_8": 0,
+  "max_channel_delta": 0,
+  "mean_channel_delta": 0.0
+ }
+}

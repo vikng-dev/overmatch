@@ -32,7 +32,6 @@
 use avian3d::prelude::{PhysicsSystems, SpatialQuery};
 use bevy::camera::visibility::VisibilitySystems;
 use bevy::camera::{CameraUpdateSystems, Hdr};
-use bevy::core_pipeline::prepass::DepthPrepass;
 use bevy::input::mouse::{AccumulatedMouseMotion, AccumulatedMouseScroll};
 use bevy::math::Affine3A;
 use bevy::post_process::bloom::Bloom;
@@ -198,6 +197,8 @@ pub(crate) fn orbit_pivot(tank_transform: &Transform, turret_local: Vec3) -> Vec
 }
 
 pub fn plugin(app: &mut App) {
+    // The owner of the camera's `MainPassDepth`, mounted by the module that spawns it.
+    app.add_plugins(crate::scene_depth::plugin);
     app.insert_resource(CameraFollow(true))
         .init_resource::<TurretPivot>()
         .init_resource::<CameraCaptive>()
@@ -323,11 +324,11 @@ fn spawn_camera(mut commands: Commands) {
         // Tracer emissive values require HDR and bloom to produce the intended highlight.
         Hdr,
         Bloom::NATURAL,
-        // The opaque geometry's depth, one pass ahead of the main pass — the scene depth the VFX
-        // billboards read for their soft-particle fade (`assets/shaders/vfx_billboard.wgsl`).
-        // Without this component the shader's DEPTH_PREPASS def is absent and every sprite is
-        // hard-edged again; the translucent sprites themselves opt out of writing to it.
-        DepthPrepass,
+        // The scene depth the VFX billboards' soft-particle fade and the hull marks' decals read,
+        // copied from this camera's main pass rather than drawn by a prepass (`scene_depth`). It
+        // requires `DepthPrepass`, without which the DEPTH_PREPASS shader def is absent: every
+        // sprite is hard-edged and no hull mark draws.
+        crate::scene_depth::MainPassDepth,
         Transform::from_xyz(10.0, 7.0, -7.0).looking_at(Vec3::new(10.0, 1.0, 5.0), Vec3::Y),
         OrbitCamera {
             zoom: 0.0,

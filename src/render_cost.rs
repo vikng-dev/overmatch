@@ -50,6 +50,9 @@
 //!   per command. Read after the phases are batched, in `PrepareBindGroups`.
 //! * **`SPIKE_ABLATE=<feature>[,<feature>…]`**: render features removed, to measure what each costs
 //!   by difference. `bloom` and `depth_prepass` remove those components from every `Camera3d`;
+//!   `depth_copy` removes `scene_depth::MainPassDepth`, so the camera's scene depth is drawn by
+//!   bevy's own depth prepass again instead of copied from its main pass (the A/B for that copy;
+//!   the picture is meant to stay the same, and it is chosen before the first frame renders);
 //!   `env_light` stops `world` from filtering the sky's environment light and giving it to views;
 //!   `ui` hides every UI root, which removes the UI's extraction and drawing but not its layout. An
 //!   unknown name panics at boot, so a typo cannot read as a free feature. Never part of a shipped
@@ -82,6 +85,7 @@ use bevy::render::view::RetainedViewEntity;
 use bevy::render::{Render, RenderApp, RenderSystems};
 use serde_json::json;
 
+use crate::scene_depth::MainPassDepth;
 use crate::trace::{JsonlSink, role_path};
 
 /// Seconds between `phase_census:` reports: the census is a step function of the scene, so a few
@@ -95,6 +99,7 @@ pub(crate) struct Ablate {
     bloom: bool,
     pub(crate) env_light: bool,
     depth_prepass: bool,
+    depth_copy: bool,
     ui: bool,
     terrain_casters: bool,
     tree_casters: bool,
@@ -115,6 +120,7 @@ impl Ablate {
                 "bloom" => ablate.bloom = true,
                 "env_light" => ablate.env_light = true,
                 "depth_prepass" => ablate.depth_prepass = true,
+                "depth_copy" => ablate.depth_copy = true,
                 "ui" => ablate.ui = true,
                 "terrain-casters" => ablate.terrain_casters = true,
                 "tree-casters" => ablate.tree_casters = true,
@@ -253,7 +259,8 @@ fn ablation_instruments(app: &mut App) {
         let ablate = Ablate::parse(&list).unwrap_or_else(|unknown| {
             panic!(
                 "SPIKE_ABLATE: unknown feature {unknown:?} (known: bloom, env_light, \
-                 depth_prepass, ui, terrain-casters, tree-casters, house-casters, tank-casters)"
+                 depth_prepass, depth_copy, ui, terrain-casters, tree-casters, house-casters, \
+                 tank-casters)"
             )
         });
         info!("render_cost: ablating {ablate:?}");
@@ -274,17 +281,23 @@ fn ablation_instruments(app: &mut App) {
     }
 }
 
+/// `depth_copy` relies on running in the first `Update`, after the `Startup` that spawns the camera
+/// and before the first extraction: the render world must never see the marker leave a camera it
+/// has drawn (`scene_depth`, "Chosen at boot").
 fn ablate_camera_features(
     mut commands: Commands,
     ablate: Res<Ablate>,
-    cameras: Query<(Entity, Has<Bloom>, Has<DepthPrepass>), With<Camera3d>>,
+    cameras: Query<(Entity, Has<Bloom>, Has<DepthPrepass>, Has<MainPassDepth>), With<Camera3d>>,
 ) {
-    for (camera, bloom, depth_prepass) in &cameras {
+    for (camera, bloom, depth_prepass, depth_copy) in &cameras {
         if ablate.bloom && bloom {
             commands.entity(camera).remove::<Bloom>();
         }
         if ablate.depth_prepass && depth_prepass {
             commands.entity(camera).remove::<DepthPrepass>();
+        }
+        if ablate.depth_copy && depth_copy {
+            commands.entity(camera).remove::<MainPassDepth>();
         }
     }
 }
@@ -676,6 +689,9 @@ mod tests {
     fn ablation_list_parses_known_features_and_rejects_unknown_ones() {
         let ablate = Ablate::parse("bloom, env_light,,ui").expect("known features");
         assert!(ablate.bloom && ablate.env_light && ablate.ui && !ablate.depth_prepass);
+        assert!(!ablate.depth_copy);
+        let ablate = Ablate::parse("depth_copy").expect("known feature");
+        assert!(ablate.depth_copy && !ablate.depth_prepass);
         assert_eq!(
             Ablate::parse("bloom,envlight").unwrap_err(),
             "envlight",
