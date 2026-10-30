@@ -1,0 +1,492 @@
+{
+  "far/belts-00012.5000s.png": {
+    "baseline_control": {
+      "pixels_differing": 2364,
+      "pixels_over_8": 283,
+      "max_channel_delta": 90
+    },
+    "candidate_control": {
+      "pixels_differing": 0,
+      "pixels_over_8": 0,
+      "max_channel_delta": 0
+    },
+    "closest_cross": {
+      "pixels_differing": 2830,
+      "pixels_over_8": 412,
+      "max_channel_delta": 124
+    },
+    "pairs": {
+      "before-before2": {
+        "pixels_differing": 2364,
+        "pixels_over_8": 283,
+        "max_channel_delta": 90
+      },
+      "before-after": {
+        "pixels_differing": 2880,
+        "pixels_over_8": 603,
+        "max_channel_delta": 125
+      },
+      "before-after2": {
+        "pixels_differing": 2880,
+        "pixels_over_8": 603,
+        "max_channel_delta": 125
+      },
+      "before2-after": {
+        "pixels_differing": 2830,
+        "pixels_over_8": 412,
+        "max_channel_delta": 124
+      },
+      "before2-after2": {
+        "pixels_differing": 2830,
+        "pixels_over_8": 412,
+        "max_channel_delta": 124
+      },
+      "after-after2": {
+        "pixels_differing": 0,
+        "pixels_over_8": 0,
+        "max_channel_delta": 0
+      }
+    }
+  },
+  "far/belts-00014.0000s.png": {
+    "baseline_control": {
+      "pixels_differing": 4331,
+      "pixels_over_8": 271,
+      "max_channel_delta": 117
+    },
+    "candidate_control": {
+      "pixels_differing": 0,
+      "pixels_over_8": 0,
+      "max_channel_delta": 0
+    },
+    "closest_cross": {
+      "pixels_differing": 8322,
+      "pixels_over_8": 575,
+      "max_channel_delta": 154
+    },
+    "pairs": {
+      "before-before2": {
+        "pixels_differing": 4331,
+        "pixels_over_8": 271,
+        "max_channel_delta": 117
+      },
+      "before-after": {
+        "pixels_differing": 11283,
+        "pixels_over_8": 731,
+        "max_channel_delta": 154
+      },
+      "before-after2": {
+        "pixels_differing": 11283,
+        "pixels_over_8": 731,
+        "max_channel_delta": 154
+      },
+      "before2-after": {
+        "pixels_differing": 8322,
+        "pixels_over_8": 575,
+        "max_channel_delta": 154
+      },
+      "before2-after2": {
+        "pixels_differing": 8322,
+        "pixels_over_8": 575,
+        "max_channel_delta": 154
+      },
+      "after-after2": {
+        "pixels_differing": 0,
+        "pixels_over_8": 0,
+        "max_channel_delta": 0
+      }
+    }
+  },
+  "mid/belts-00012.5000s.png": {
+    "baseline_control": {
+      "pixels_differing": 6745,
+      "pixels_over_8": 1865,
+      "max_channel_delta": 112
+    },
+    "candidate_control": {
+      "pixels_differing": 0,
+      "pixels_over_8": 0,
+      "max_channel_delta": 0
+    },
+    "closest_cross": {
+      "pixels_differing": 3,
+      "pixels_over_8": 0,
+      "max_channel_delta": 1
+    },
+    "pairs": {
+      "before-before2": {
+        "pixels_differing": 6745,
+        "pixels_over_8": 1865,
+        "max_channel_delta": 112
+      },
+      "before-after": {
+        "pixels_differing": 6745,
+        "pixels_over_8": 1865,
+        "max_channel_delta": 112
+      },
+      "before-after2": {
+        "pixels_differing": 6745,
+        "pixels_over_8": 1865,
+        "max_channel_delta": 112
+      },
+      "before2-after": {
+        "pixels_differing": 3,
+        "pixels_over_8": 0,
+        "max_channel_delta": 1
+      },
+      "before2-after2": {
+        "pixels_differing": 3,
+        "pixels_over_8": 0,
+        "max_channel_delta": 1
+      },
+      "after-after2": {
+        "pixels_differing": 0,
+        "pixels_over_8": 0,
+        "max_channel_delta": 0
+      }
+    }
+  },
+  "mid/belts-00014.0000s.png": {
+    "baseline_control": {
+      "pixels_differing": 19139,
+      "pixels_over_8": 2148,
+      "max_channel_delta": 130
+    },
+    "candidate_control": {
+      "pixels_differing": 0,
+      "pixels_over_8": 0,
+      "max_channel_delta": 0
+    },
+    "closest_cross": {
+      "pixels_differing": 8,
+      "pixels_over_8": 1,
+      "max_channel_delta": 10
+    },
+    "pairs": {
+      "before-before2": {
+        "pixels_differing": 19139,
+        "pixels_over_8": 2148,
+        "max_channel_delta": 130
+      },
+      "before-after": {
+        "pixels_differing": 19138,
+        "pixels_over_8": 2148,
+        "max_channel_delta": 130
+      },
+      "before-after2": {
+        "pixels_differing": 19138,
+        "pixels_over_8": 2148,
+        "max_channel_delta": 130
+      },
+      "before2-after": {
+        "pixels_differing": 8,
+        "pixels_over_8": 1,
+        "max_channel_delta": 10
+      },
+      "before2-after2": {
+        "pixels_differing": 8,
+        "pixels_over_8": 1,
+        "max_channel_delta": 10
+      },
+      "after-after2": {
+        "pixels_differing": 0,
+        "pixels_over_8": 0,
+        "max_channel_delta": 0
+      }
+    }
+  },
+  "near/belts-00012.5000s.png": {
+    "baseline_control": {
+      "pixels_differing": 54493,
+      "pixels_over_8": 5320,
+      "max_channel_delta": 79
+    },
+    "candidate_control": {
+      "pixels_differing": 0,
+      "pixels_over_8": 0,
+      "max_channel_delta": 0
+    },
+    "closest_cross": {
+      "pixels_differing": 306,
+      "pixels_over_8": 4,
+      "max_channel_delta": 15
+    },
+    "pairs": {
+      "before-before2": {
+        "pixels_differing": 54493,
+        "pixels_over_8": 5320,
+        "max_channel_delta": 79
+      },
+      "before-after": {
+        "pixels_differing": 54512,
+        "pixels_over_8": 5318,
+        "max_channel_delta": 79
+      },
+      "before-after2": {
+        "pixels_differing": 54512,
+        "pixels_over_8": 5318,
+        "max_channel_delta": 79
+      },
+      "before2-after": {
+        "pixels_differing": 306,
+        "pixels_over_8": 4,
+        "max_channel_delta": 15
+      },
+      "before2-after2": {
+        "pixels_differing": 306,
+        "pixels_over_8": 4,
+        "max_channel_delta": 15
+      },
+      "after-after2": {
+        "pixels_differing": 0,
+        "pixels_over_8": 0,
+        "max_channel_delta": 0
+      }
+    }
+  },
+  "near/belts-00014.0000s.png": {
+    "baseline_control": {
+      "pixels_differing": 84837,
+      "pixels_over_8": 8415,
+      "max_channel_delta": 106
+    },
+    "candidate_control": {
+      "pixels_differing": 0,
+      "pixels_over_8": 0,
+      "max_channel_delta": 0
+    },
+    "closest_cross": {
+      "pixels_differing": 217,
+      "pixels_over_8": 5,
+      "max_channel_delta": 11
+    },
+    "pairs": {
+      "before-before2": {
+        "pixels_differing": 84837,
+        "pixels_over_8": 8415,
+        "max_channel_delta": 106
+      },
+      "before-after": {
+        "pixels_differing": 84825,
+        "pixels_over_8": 8414,
+        "max_channel_delta": 106
+      },
+      "before-after2": {
+        "pixels_differing": 84825,
+        "pixels_over_8": 8414,
+        "max_channel_delta": 106
+      },
+      "before2-after": {
+        "pixels_differing": 217,
+        "pixels_over_8": 5,
+        "max_channel_delta": 11
+      },
+      "before2-after2": {
+        "pixels_differing": 217,
+        "pixels_over_8": 5,
+        "max_channel_delta": 11
+      },
+      "after-after2": {
+        "pixels_differing": 0,
+        "pixels_over_8": 0,
+        "max_channel_delta": 0
+      }
+    }
+  },
+  "printed/belts-00012.5000s.png": {
+    "baseline_control": {
+      "pixels_differing": 68934,
+      "pixels_over_8": 6770,
+      "max_channel_delta": 112
+    },
+    "candidate_control": {
+      "pixels_differing": 0,
+      "pixels_over_8": 0,
+      "max_channel_delta": 0
+    },
+    "closest_cross": {
+      "pixels_differing": 423,
+      "pixels_over_8": 5,
+      "max_channel_delta": 23
+    },
+    "pairs": {
+      "before-before2": {
+        "pixels_differing": 68934,
+        "pixels_over_8": 6770,
+        "max_channel_delta": 112
+      },
+      "before-after": {
+        "pixels_differing": 68938,
+        "pixels_over_8": 6771,
+        "max_channel_delta": 112
+      },
+      "before-after2": {
+        "pixels_differing": 68938,
+        "pixels_over_8": 6771,
+        "max_channel_delta": 112
+      },
+      "before2-after": {
+        "pixels_differing": 423,
+        "pixels_over_8": 5,
+        "max_channel_delta": 23
+      },
+      "before2-after2": {
+        "pixels_differing": 423,
+        "pixels_over_8": 5,
+        "max_channel_delta": 23
+      },
+      "after-after2": {
+        "pixels_differing": 0,
+        "pixels_over_8": 0,
+        "max_channel_delta": 0
+      }
+    }
+  },
+  "printed/belts-00016.0000s.png": {
+    "baseline_control": {
+      "pixels_differing": 53914,
+      "pixels_over_8": 4840,
+      "max_channel_delta": 93
+    },
+    "candidate_control": {
+      "pixels_differing": 0,
+      "pixels_over_8": 0,
+      "max_channel_delta": 0
+    },
+    "closest_cross": {
+      "pixels_differing": 276,
+      "pixels_over_8": 0,
+      "max_channel_delta": 8
+    },
+    "pairs": {
+      "before-before2": {
+        "pixels_differing": 53914,
+        "pixels_over_8": 4840,
+        "max_channel_delta": 93
+      },
+      "before-after": {
+        "pixels_differing": 53921,
+        "pixels_over_8": 4842,
+        "max_channel_delta": 93
+      },
+      "before-after2": {
+        "pixels_differing": 53921,
+        "pixels_over_8": 4842,
+        "max_channel_delta": 93
+      },
+      "before2-after": {
+        "pixels_differing": 276,
+        "pixels_over_8": 0,
+        "max_channel_delta": 8
+      },
+      "before2-after2": {
+        "pixels_differing": 276,
+        "pixels_over_8": 0,
+        "max_channel_delta": 8
+      },
+      "after-after2": {
+        "pixels_differing": 0,
+        "pixels_over_8": 0,
+        "max_channel_delta": 0
+      }
+    }
+  },
+  "xray/belts-00012.5000s.png": {
+    "baseline_control": {
+      "pixels_differing": 20725,
+      "pixels_over_8": 1763,
+      "max_channel_delta": 78
+    },
+    "candidate_control": {
+      "pixels_differing": 0,
+      "pixels_over_8": 0,
+      "max_channel_delta": 0
+    },
+    "closest_cross": {
+      "pixels_differing": 636,
+      "pixels_over_8": 12,
+      "max_channel_delta": 31
+    },
+    "pairs": {
+      "before-before2": {
+        "pixels_differing": 20725,
+        "pixels_over_8": 1763,
+        "max_channel_delta": 78
+      },
+      "before-after": {
+        "pixels_differing": 20795,
+        "pixels_over_8": 1762,
+        "max_channel_delta": 78
+      },
+      "before-after2": {
+        "pixels_differing": 20795,
+        "pixels_over_8": 1762,
+        "max_channel_delta": 78
+      },
+      "before2-after": {
+        "pixels_differing": 636,
+        "pixels_over_8": 12,
+        "max_channel_delta": 31
+      },
+      "before2-after2": {
+        "pixels_differing": 636,
+        "pixels_over_8": 12,
+        "max_channel_delta": 31
+      },
+      "after-after2": {
+        "pixels_differing": 0,
+        "pixels_over_8": 0,
+        "max_channel_delta": 0
+      }
+    }
+  },
+  "xray/belts-00014.0000s.png": {
+    "baseline_control": {
+      "pixels_differing": 25609,
+      "pixels_over_8": 1901,
+      "max_channel_delta": 89
+    },
+    "candidate_control": {
+      "pixels_differing": 0,
+      "pixels_over_8": 0,
+      "max_channel_delta": 0
+    },
+    "closest_cross": {
+      "pixels_differing": 549,
+      "pixels_over_8": 8,
+      "max_channel_delta": 40
+    },
+    "pairs": {
+      "before-before2": {
+        "pixels_differing": 25609,
+        "pixels_over_8": 1901,
+        "max_channel_delta": 89
+      },
+      "before-after": {
+        "pixels_differing": 25726,
+        "pixels_over_8": 1901,
+        "max_channel_delta": 89
+      },
+      "before-after2": {
+        "pixels_differing": 25726,
+        "pixels_over_8": 1901,
+        "max_channel_delta": 89
+      },
+      "before2-after": {
+        "pixels_differing": 549,
+        "pixels_over_8": 8,
+        "max_channel_delta": 40
+      },
+      "before2-after2": {
+        "pixels_differing": 549,
+        "pixels_over_8": 8,
+        "max_channel_delta": 40
+      },
+      "after-after2": {
+        "pixels_differing": 0,
+        "pixels_over_8": 0,
+        "max_channel_delta": 0
+      }
+    }
+  }
+}
