@@ -23,6 +23,10 @@
 #                    version only — e.g. `0.6.1-profile` at 120, the Edgegap-side backstop for
 #                    scripts/edgegap/session.sh, whose deployments nothing else ends (no per-deployment
 #                    duration exists in Edgegap's deploy APIs). Never lower it on a version players join.
+#   EDGEGAP_REQ_CPU  vCPU units, 1024 = 1 vCPU, default 1024. A larger size is for a profiling version
+#                    only (e.g. `0.7.0-alpha.2-2vcpu` at 2048), deployed by name through
+#                    scripts/edgegap/session.sh; the Worker never picks it, since no client reports that
+#                    version name.
 set -euo pipefail
 
 version="${1:?version}"
@@ -36,6 +40,12 @@ if ! [[ "${max_duration}" =~ ^[0-9]+$ ]] || ((max_duration < 1 || max_duration >
   exit 1
 fi
 max_duration=$((10#${max_duration}))
+req_cpu="${EDGEGAP_REQ_CPU:-1024}"
+if ! [[ "${req_cpu}" =~ ^[0-9]+$ ]] || ((req_cpu < 256 || req_cpu > 8192)); then
+  echo "::error::EDGEGAP_REQ_CPU must be 256–8192 vCPU units, got '${req_cpu}'"
+  exit 1
+fi
+req_cpu=$((10#${req_cpu}))
 
 # `game` is the Worker's `EDGEGAP_PORT_NAME`; 5888 is the server's fixed listen port. `to_check`
 # off is the setting the risk test connected through (risk-test.md).
@@ -52,12 +62,12 @@ max_duration=$((10#${max_duration}))
 # 1 vCPU / 1 GB: MEASURED ~55 MiB resident with 2 clients (risk-test.md); 10 players unmeasured.
 body="$(jq -n \
   --arg image "${image#*/}" --arg registry "${image%%/*}" --arg tag "${tag}" \
-  --argjson max_duration "${max_duration}" '{
+  --argjson max_duration "${max_duration}" --argjson req_cpu "${req_cpu}" '{
     is_active: true,
     docker_repository: $registry,
     docker_image: $image,
     docker_tag: $tag,
-    req_cpu: 1024,
+    req_cpu: $req_cpu,
     req_memory: 1024,
     max_duration: $max_duration,
     time_to_deploy: 60,
