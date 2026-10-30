@@ -12,8 +12,12 @@
 // frame-cost comparison: fir_tree_01_a/b/c were Fir(18.96, 6.5), Fir(14.08, 5.8), Fir(14.55, 6.2).
 // `Tree(asset)`: a tree of the damage model, `assets/trees/<asset>/`; one static body with a
 // collider per segment, never a block.
+// `Structure(asset)`: a building of the destruction model, `assets/buildings/<asset>/`, baked by
+// the asset tools; one static body with a collider per element (pier, sill, lintel, gable, wall
+// plate, roof plane), never a block. `house_proxy` was `Building(min: (-2.0, -0.5, -3.0), max:
+// (2.0, 2.5, 3.0))`, and `house_1` keeps that box's footprint and skirt.
 {
-    "house_proxy": Building(min: (-2.0, -0.5, -3.0), max: (2.0, 2.5, 3.0)),
+    "house_proxy": Structure(asset: "house_1"),
     "church_proxy": Building(min: (-15.0, -18.5, -7.5), max: (15.0, 18.5, 7.5)),
     "fir_tree_01_a_LOD2": Tree(asset: "fir_1"),
     "fir_tree_01_b_LOD2": Tree(asset: "fir_1"),

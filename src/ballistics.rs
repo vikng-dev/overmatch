@@ -8760,6 +8760,63 @@ mod march_tests {
     /// the taper (0.2 m to 0.1 m over the second 2 m segment, 0.175 m at 0.5 m in).
     const TRUNK_RADIUS_AT_2_5_M: f32 = 0.175;
 
+    /// A shipped house, `house_1`, standing with its ground point at the origin in a bare march
+    /// world: every element a collider of its own substance, as the scatter spawns it.
+    fn house_world() -> App {
+        let mut app = bare_world(false);
+        let kind = crate::buildings::tests::shipped_house();
+        let world = app.world_mut();
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, world);
+        crate::buildings::spawn(
+            &mut commands,
+            &kind,
+            crate::scatter::MapInstance {
+                id: "fixture_house".to_owned(),
+                ordinal: 0,
+            },
+            Transform::IDENTITY,
+        );
+        queue.apply(world);
+        settle(&mut app);
+        app
+    }
+
+    /// A BRICK WALL IS MATTER THE EXISTING WALK CROSSES (the game's environment destruction
+    /// model): a fixture 88 at 800 m/s, square onto the shipped house's east wall through a pier
+    /// 1 m over the ground, enters at the wall's outer face and comes out the far side, while the
+    /// same round at 100 m/s comes to rest inside the wall. The wall stops or passes a round by its chord
+    /// and the shipped brick row alone; a wall the march ignored (no armour layer, no volume)
+    /// gives no impact at all, and one charged as steel stops the fast round too.
+    #[test]
+    fn a_brick_wall_is_perforated_by_a_fast_round_and_stops_a_slow_one() {
+        // The east wall's outer face is x = 2 m; its first pier spans z 2 to 3 m (house_1's spec).
+        let origin = Vec3::new(10.0, 1.0, 2.5);
+        // The wall's inner face is x = 1.75 m.
+        let fast = fire_and_capture(&mut house_world(), origin, Vec3::NEG_X, 800.0);
+        let through = fast.first().expect("800 m/s: the wall was never struck");
+        assert_eq!(
+            (through.surface, through.verdict),
+            (ImpactSurface::Armor, Verdict::Through)
+        );
+        assert!(
+            (through.position.x - 2.0).abs() < 0.01,
+            "800 m/s: struck at the outer face, not {}",
+            through.position
+        );
+        let slow = fire_and_capture(&mut house_world(), origin, Vec3::NEG_X, 100.0);
+        let stopped = slow.first().expect("100 m/s: the wall was never struck");
+        assert_eq!(
+            (stopped.surface, stopped.verdict),
+            (ImpactSurface::Armor, Verdict::Stopped)
+        );
+        assert!(
+            stopped.position.x > 1.75 && stopped.position.x < 2.0,
+            "100 m/s: at rest inside the wall, not at {}",
+            stopped.position
+        );
+    }
+
     /// A LINE EMPTYING NAMES THE BOX'S OWN ENTRY (the game's damage model, ADR-0016): a round
     /// through a pool-less slab welded to a tree — one crossing — empties the tree at the line's
     /// entry into THE TREE, along its travel, and the tree falls at that height along the line. A

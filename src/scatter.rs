@@ -1,9 +1,9 @@
 //! The map's object scatter: the authored placement of buildings and trees, out of the map's own
 //! manifest ([`crate::map`]), spawned with static colliders on every composition, the dedicated
-//! server included — a building or a fir as a GRAYBOX proxy (a box per building, a trunk cylinder
-//! plus a canopy cone per fir), a tree of the damage model as its own body (below). A building's
-//! box is drawn in brick under a timber roof ([`crate::building_surface`]), its shape still the
-//! collider's.
+//! server included — a graybox building or fir as a GRAYBOX proxy (a box per building, a trunk
+//! cylinder plus a canopy cone per fir), a tree or a building of the damage model as its own body
+//! (below). A graybox building's box is drawn in brick under a timber roof
+//! ([`crate::building_surface`]), its shape still the collider's.
 //!
 //! SHARED DATA, NOT REPLICATION — the same stance the terrain takes: both binaries read the same
 //! shipped file and derive the same entities, so no scatter entity crosses the wire. The
@@ -21,12 +21,15 @@
 //! THE FILE'S Y IS STALE (authored against an older sculpt): every instance is re-projected onto
 //! the live [`HeightGrid`] at its own XZ. Yaw and scale are taken as authored.
 //!
-//! Two contact laws, because a belt and a hull meet these differently: a building is a cuboid
-//! collider AND a [`crate::world::TerrainMap`] block, so the track field senses it exactly like the
-//! authored course's boxes; a fir is a trunk cylinder collider only, never a block — the belts must
-//! not climb a trunk, and the hull collision is the honest interaction. A tree of the damage model
-//! ([`crate::trees`]) is the fir's successor: a body the walk doses and a hull can fell, spawned
-//! there from its own data, never a block either.
+//! Two contact laws, because a belt and a hull meet these differently: a graybox building is a
+//! cuboid collider AND a [`crate::world::TerrainMap`] block, so the track field senses it exactly
+//! like the authored course's boxes; a fir is a trunk cylinder collider only, never a block — the
+//! belts must not climb a trunk, and the hull collision is the honest interaction. A tree of the
+//! damage model ([`crate::trees`]) is the fir's successor: a body the walk doses and a hull can
+//! fell, spawned there from its own data, never a block either. A building of the destruction
+//! model ([`crate::buildings`]) is the graybox building's successor: its walls are hull colliders
+//! and matter the walk crosses, never a block (playtest fork F9), and its bounds join the spawn
+//! obstacles instead.
 
 use std::collections::BTreeMap;
 
@@ -105,7 +108,7 @@ impl Placement<'_> {
                     scale: (max - min) * self.pose.scale,
                 })
             }
-            Prototype::Fir { .. } | Prototype::Tree { .. } => None,
+            Prototype::Fir { .. } | Prototype::Tree { .. } | Prototype::Structure { .. } => None,
         }
     }
 }
@@ -235,7 +238,9 @@ impl ScatterView {
                             crate::building_surface::ridge_axis(min, max),
                         )),
                     )),
-                    Prototype::Fir { .. } | Prototype::Tree { .. } => None,
+                    Prototype::Fir { .. }
+                    | Prototype::Tree { .. }
+                    | Prototype::Structure { .. } => None,
                 })
                 .collect(),
             fir: library
@@ -254,7 +259,9 @@ impl ScatterView {
                             }),
                         ),
                     )),
-                    Prototype::Building { .. } | Prototype::Tree { .. } => None,
+                    Prototype::Building { .. }
+                    | Prototype::Tree { .. }
+                    | Prototype::Structure { .. } => None,
                 })
                 .collect(),
             surface: crate::building_surface::material(
@@ -268,10 +275,12 @@ impl ScatterView {
     }
 }
 
-/// Spawn the scatter into the world the grid describes, appending every building to `blocks` (the
-/// [`crate::world::TerrainMap`] list the analytic track field is built from). Colliders spawn in
-/// every composition; meshes and the trees' glb views only where `view_assets` offers a server to
-/// draw with — the dedicated server draws nothing, exactly as it skips the terrain's render tiles.
+/// Spawn the scatter into the world the grid describes, appending every graybox building to
+/// `blocks` (the [`crate::world::TerrainMap`] list the analytic track field is built from), and
+/// return every building of the destruction model's bounds in that list's encoding: the spawn
+/// obstacles ([`crate::world::SpawnObstacles`]), never the track field's. Colliders spawn in every
+/// composition; meshes and the trees' glb views only where `view_assets` offers a server to draw
+/// with — the dedicated server draws nothing, exactly as it skips the terrain's render tiles.
 pub(crate) fn spawn(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -280,16 +289,26 @@ pub(crate) fn spawn(
     grid: &HeightGrid,
     blocks: &mut Vec<Transform>,
     mut view_assets: Option<ViewAssets<'_>>,
-) {
+) -> Vec<Transform> {
     let placements = place(&resolve(&manifest.instances, &manifest.prototypes), grid);
     let view = view_assets
         .as_mut()
         .map(|assets| ScatterView::new(commands, meshes, materials, assets, &manifest.prototypes));
     let assets = view_assets.map(|assets| assets.server);
     let statics = CollisionLayers::new([Layer::Terrain], LayerMask::ALL);
-    let (mut buildings, mut firs, mut trees) = (0usize, 0usize, 0usize);
+    let (mut buildings, mut firs, mut trees, mut structures) = (0usize, 0usize, 0usize, 0usize);
+    let mut obstacles = Vec::new();
     for placement in &placements {
         match placement.shape {
+            Prototype::Structure { asset } => {
+                let kind = manifest
+                    .buildings
+                    .get(asset)
+                    .expect("map::load loaded every building asset the library names");
+                crate::buildings::spawn(commands, kind, placement.identity.clone(), placement.pose);
+                obstacles.push(crate::buildings::footprint(kind, placement.pose));
+                structures += 1;
+            }
             Prototype::Tree { asset } => {
                 let kind = manifest
                     .trees
@@ -372,10 +391,12 @@ pub(crate) fn spawn(
         }
     }
     info!(
-        "scatter: {} instances placed on the live surface — {buildings} buildings (also \
-         TerrainMap blocks), {firs} graybox firs (trunk colliders only), {trees} trees",
+        "scatter: {} instances placed on the live surface — {buildings} graybox buildings (also \
+         TerrainMap blocks), {structures} buildings (a collider per element), {firs} graybox firs \
+         (trunk colliders only), {trees} trees",
         placements.len(),
     );
+    obstacles
 }
 
 #[cfg(test)]
@@ -465,9 +486,10 @@ mod tests {
         resolve(&[raw], &library());
     }
 
-    /// `manifest` spawned on the sloped grid into a fresh app with an asset server, and the block
-    /// list it filled; `draw` hands the scatter that server, as a windowed composition does.
-    fn spawned(manifest: &MapManifest, draw: bool) -> (App, Vec<Transform>) {
+    /// `manifest` spawned on the sloped grid into a fresh app with an asset server, the block list
+    /// it filled and the obstacles it returned; `draw` hands the scatter that server, as a windowed
+    /// composition does.
+    fn spawned(manifest: &MapManifest, draw: bool) -> (App, Vec<Transform>, Vec<Transform>) {
         let mut app = App::new();
         app.add_plugins((
             TaskPoolPlugin::default(),
@@ -480,6 +502,7 @@ mod tests {
         .init_asset::<bevy::world_serialization::WorldAsset>();
         let grid = sloped_grid();
         let mut blocks: Vec<Transform> = Vec::new();
+        let mut obstacles: Vec<Transform> = Vec::new();
         let server = draw.then(|| app.world().resource::<AssetServer>().clone());
         let world = app.world_mut();
         world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
@@ -487,7 +510,7 @@ mod tests {
                 world.resource_scope(|world, mut buildings: Mut<Assets<BuildingMaterial>>| {
                     let mut queue = bevy::ecs::world::CommandQueue::default();
                     let mut commands = Commands::new(&mut queue, world);
-                    spawn(
+                    obstacles = spawn(
                         &mut commands,
                         &mut meshes,
                         &mut materials,
@@ -503,7 +526,7 @@ mod tests {
                 });
             });
         });
-        (app, blocks)
+        (app, blocks, obstacles)
     }
 
     /// EVERY BUILDING WEARS THE ONE MATERIAL, the draw-count invariant the brick-and-timber surface
@@ -528,7 +551,7 @@ mod tests {
         second.translation[0] += 30.0;
         second.scale = [0.6; 3];
         manifest.instances.push(second);
-        let (mut app, blocks) = spawned(&manifest, true);
+        let (mut app, blocks, _) = spawned(&manifest, true);
         assert_eq!(blocks.len(), 2, "both houses are blocks");
         let world = app.world_mut();
         let drawn: Vec<(AssetId<Mesh>, AssetId<BuildingMaterial>)> = world
@@ -545,16 +568,19 @@ mod tests {
         );
     }
 
-    /// The spawn itself, in a real world: every building reaches the block list, every instance
-    /// is one static body carrying its identity — a proxy collider for a building or a graybox
-    /// fir, a root with a collider per segment for a tree — and a windowless composition spawns
-    /// no mesh and no view.
+    /// The spawn itself, in a real world: every graybox building reaches the block list and every
+    /// building of the destruction model the obstacles alone, every instance is one static body
+    /// carrying its identity — a proxy collider for a graybox building or fir, a root with a
+    /// collider per segment for a tree and one per element for a building — and a windowless
+    /// composition spawns no mesh and no view. A structure that entered the block list would hand
+    /// the belts a wall to climb (playtest fork F9).
     #[test]
     fn spawn_adds_a_body_per_instance_and_a_block_per_building() {
         let manifest = mixed_fixture_manifest();
-        let (mut app, blocks) = spawned(&manifest, false);
+        let (mut app, blocks, obstacles) = spawned(&manifest, false);
         let world = app.world_mut();
         let (mut buildings, mut proxies, mut trees, mut segments) = (0, 0, 0, 0);
+        let (mut structures, mut elements) = (0, 0);
         for instance in &manifest.instances {
             match &manifest.prototypes[&instance.prototype] {
                 Prototype::Building { .. } => {
@@ -566,8 +592,14 @@ mod tests {
                     trees += 1;
                     segments += manifest.trees.get(asset).unwrap().segments.len();
                 }
+                Prototype::Structure { asset } => {
+                    structures += 1;
+                    elements += manifest.buildings.get(asset).unwrap().asset.elements.len();
+                }
             }
         }
+        assert_eq!(structures, 1, "the fixture places a building");
+        assert_eq!(obstacles.len(), structures, "one obstacle per building");
         assert_eq!(
             (buildings, proxies, trees),
             (1, 2, 1),
@@ -615,9 +647,17 @@ mod tests {
             .iter(world)
             .count();
         assert_eq!(tree_colliders, segments, "one collider per tree segment");
+        let element_colliders = world
+            .query_filtered::<Entity, (With<crate::buildings::BuildingElement>, With<Collider>)>()
+            .iter(world)
+            .count();
+        assert_eq!(
+            element_colliders, elements,
+            "one collider per building element"
+        );
         assert_eq!(
             world.query::<&Collider>().iter(world).count(),
-            proxies + segments,
+            proxies + segments + elements,
             "no other collider ships",
         );
         let views = world
@@ -644,7 +684,7 @@ mod tests {
                 trees += 1;
             }
         }
-        let (mut app, _) = spawned(&manifest, true);
+        let (mut app, _, _) = spawned(&manifest, true);
         let world = app.world_mut();
         let views: Vec<(Entity, Vec3)> = world
             .query_filtered::<(&ChildOf, &Transform), With<crate::trees::view::TreeView>>()

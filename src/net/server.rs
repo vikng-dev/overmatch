@@ -32,7 +32,7 @@ use crate::terrain_grid::spawn_pos;
 // The spawn selector reads the world's standing geometry through the SAME encoding the analytic
 // track field is built from (`world::TerrainMap` blocks → `TerrainBlock`), so the two cannot drift.
 use crate::track::oracle::TerrainBlock;
-use crate::world::TerrainMap;
+use crate::world::{SpawnObstacles, TerrainMap};
 use crate::{CombatantId, CombatantLife, SimPlugin};
 
 const PORT: u16 = 5888;
@@ -960,7 +960,7 @@ struct BotRespawnAt(f32);
 /// guarantee `respawn_dead_bots` relies on.
 #[expect(
     clippy::too_many_arguments,
-    reason = "a respawn sweep spanning dead tanks, remotes, occupancy, assets, sim source, spawn lane, overrides, terrain and ids"
+    reason = "a respawn sweep spanning dead tanks, remotes, occupancy, assets, sim source, spawn lane, overrides, terrain, obstacles and ids"
 )]
 fn respawn_player_tanks(
     dead: Query<(Entity, &TankCommand, &ControlledBy, &CombatantId), With<TankKnockedOut>>,
@@ -974,9 +974,11 @@ fn respawn_player_tanks(
     overrides: Res<SpawnOverrides>,
     // The authority's own ground truth for spawn-map placement; absent in the flat-slab world.
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
-    // The world's standing geometry (the scatter's buildings): occupancy an override spawn checks
+    // The world's standing geometry (the scatter's graybox buildings, as blocks, and its
+    // buildings of the destruction model, as obstacles): occupancy an override spawn checks
     // against exactly like a live tank. Absent in bare test worlds.
     map: Option<Res<TerrainMap>>,
+    obstacles: Option<Res<SpawnObstacles>>,
     mut combatants: ResMut<CombatantIds>,
     mut commands: Commands,
 ) {
@@ -1009,6 +1011,14 @@ fn respawn_player_tanks(
     // Roots being swept this pass are NOT occupancy: their colliders despawn in the same command
     // flush the fresh tanks spawn in.
     let sweeping: Vec<Entity> = requests.iter().map(|(root, ..)| *root).collect();
+    // What stands on the map, in the block encoding: the terrain blocks, then the buildings' bounds.
+    let standing: Vec<Transform> = map
+        .as_ref()
+        .map_or(&[][..], |map| &map.blocks)
+        .iter()
+        .chain(obstacles.as_ref().map_or(&[][..], |obstacles| &obstacles.0))
+        .copied()
+        .collect();
     // Occupancy also includes the spots ALREADY HANDED OUT this pass: two clients respawning onto
     // the same click in the same tick would otherwise both read the pre-pass world and overlap.
     let mut placed_this_pass: Vec<Vec2> = Vec::new();
@@ -1028,7 +1038,7 @@ fn respawn_player_tanks(
                     spawn_map::world_half_extent(height.as_deref()),
                     xz,
                     &occupied,
-                    map.as_ref().map_or(&[][..], |map| &map.blocks),
+                    &standing,
                     height.as_deref(),
                 ) {
                     Some((spot, nudged)) => {
@@ -1422,6 +1432,29 @@ mod tests {
             block_footprint(&house, None).expect("a house stands on the map"),
             spot,
         ));
+    }
+
+    /// A HOUSE OF THE DESTRUCTION MODEL STILL REFUSES A SPAWN INSIDE IT: its walls are no terrain
+    /// block (playtest fork F9), so its bounds stand in the spawn obstacles, and a request at the
+    /// shipped house's centre (scaled 1.3 and yawed, fixture data) is nudged clear of them. A
+    /// world that dropped the houses from spawn avoidance with the blocks lands a tank inside one.
+    #[test]
+    fn a_spawn_inside_a_house_of_the_destruction_model_is_refused() {
+        let half = crate::terrain_grid::FIXTURE_EXTENT.half_extent();
+        let desired = Vec2::new(-120.0, 64.0);
+        let pose = Transform::from_xyz(desired.x, 0.0, desired.y)
+            .with_rotation(Quat::from_rotation_y(0.4))
+            .with_scale(Vec3::splat(1.3));
+        let house = crate::buildings::footprint(&crate::buildings::tests::shipped_house(), pose);
+        let walls = block_footprint(&house, None).expect("a house stands on the map");
+        assert!(
+            footprint_denies(walls, desired),
+            "the house covers its own centre"
+        );
+        let (spot, nudged) =
+            resolve_free_spawn_xz(half, desired, &[], &[house], None).expect("a ring is free");
+        assert!(nudged);
+        assert!(!footprint_denies(walls, spot));
     }
 
     /// The ring tables are what their doc claims: per-ring count `max(8, ceil(2πr / 8 m))` (so

@@ -339,3 +339,41 @@ tree assets are untouched.
 **Lives in.** Code: `src/trees.rs` (`resting_tilt`, `derive_state`, `fall_rotation`),
 `src/trees/view.rs` (`present_fall`), `src/net/destruction.rs`. Tracker: #121 (the resolution),
 #140 (the scripted rework), epic #106.
+
+## F9 — A house's walls: a hull obstacle or a climbable block
+
+**Status:** open · default built 2026-10-30 (#182, slice 2 of building destruction) · settles when
+tanks drive at houses in play, and before the breach law (B2) lands
+
+Subject: Overmatch's environment destruction model, game state only.
+
+**The question.** How does a tank's running gear meet a house's intact wall: as a hull collider
+only, or as a block the track field senses and the belts can climb? It decides whether a tank
+noses into a wall and stops, or rides up onto it like a ramp, and whether the inside of a hollow
+house is ground a tank can stand on.
+
+**Default — hull colliders only.** A house is its elements (piers, sills, lintels, gables, wall
+plates, roof planes), each a static convex collider on `[Terrain, Armor]` with a `BallisticVolume`;
+none enters the `TerrainMap` block list, so the analytic track field never senses a wall and the
+floor inside is the terrain. The hull's own collision is the interaction, as a tree trunk's is.
+Spawn avoidance keeps refusing a spawn inside a house through each house's bounding box
+(`world::SpawnObstacles`), outside the track field.
+
+**Alternative kept alive — the walls as blocks.** Each element also enters `TerrainMap` as its
+own posed box (a pier, a sill and a lintel are boxes already; a gable and a roof plane would want
+their bounding box, or stay hull-only), so the belts sense a wall and climb its top edge where the
+hull allows, the way they climb the authored course's slabs. The graybox did this with the whole
+house as one block, which made a house a plateau a tank could mount.
+
+**Why it's a playtest call.** Whether a tank meeting a brick wall reads right when it stops hard
+(hull) or when its tracks start to ride up the wall before the hull meets it (block). Watch for
+tanks wedged against a wall with no way back, and for tracks visibly sinking into a sill or
+climbing a 2.5 m wall.
+
+**Revert cost.** Low: the scatter's structure arm pushes each element's box into the block list
+(code only; the building RON already carries every element's prism), and spawn avoidance then
+reads them there.
+
+**Lives in.** Code: `src/scatter.rs` (the structure arm), `src/buildings.rs` (`spawn`),
+`src/world.rs` (`SpawnObstacles`), `src/net/server.rs` (`resolve_free_spawn_xz`). Tracker: #182,
+epic #106.

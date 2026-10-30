@@ -1010,6 +1010,16 @@ mod tests {
                     );
                     buildings.push((xz, reach.length() * instance.scale[0]));
                 }
+                Some(Prototype::Structure { asset }) => {
+                    let (min, max) = manifest
+                        .buildings
+                        .get(asset)
+                        .expect("the manifest loads every building it places")
+                        .bounds();
+                    let reach =
+                        Vec2::new(min.x.abs().max(max.x.abs()), min.z.abs().max(max.z.abs()));
+                    buildings.push((xz, reach.length() * instance.scale[0]));
+                }
                 None => {}
             }
         }

@@ -40,6 +40,7 @@ use std::path::{Path, PathBuf};
 
 use bevy::prelude::*;
 
+use crate::buildings::BuildingLibrary;
 use crate::terrain_grid::{RowOrder, TerrainExtent};
 use crate::trees::TreeLibrary;
 
@@ -128,6 +129,8 @@ pub(crate) struct MapManifest {
     pub(crate) prototypes: BTreeMap<String, Prototype>,
     /// Every tree asset a [`Prototype::Tree`] names, loaded and validated ([`load`]).
     pub(crate) trees: TreeLibrary,
+    /// Every building asset a [`Prototype::Structure`] names, loaded and validated ([`load`]).
+    pub(crate) buildings: BuildingLibrary,
 }
 
 impl MapManifest {
@@ -137,7 +140,19 @@ impl MapManifest {
             .values()
             .filter_map(|prototype| match prototype {
                 Prototype::Tree { asset } => Some(asset.as_str()),
-                Prototype::Building { .. } | Prototype::Fir { .. } => None,
+                Prototype::Building { .. }
+                | Prototype::Fir { .. }
+                | Prototype::Structure { .. } => None,
+            })
+    }
+
+    /// The building asset ids the library names, each once.
+    fn structure_assets(&self) -> impl Iterator<Item = &str> {
+        self.prototypes
+            .values()
+            .filter_map(|prototype| match prototype {
+                Prototype::Structure { asset } => Some(asset.as_str()),
+                Prototype::Building { .. } | Prototype::Fir { .. } | Prototype::Tree { .. } => None,
             })
     }
 
@@ -175,6 +190,9 @@ pub(crate) enum Prototype {
     },
     /// A tree of the damage model ([`crate::trees`]): the asset `assets/trees/<asset>/`.
     Tree { asset: String },
+    /// A building of the destruction model ([`crate::buildings`]): the asset
+    /// `assets/buildings/<asset>/<asset>.building.ron`, its walls and roof matter.
+    Structure { asset: String },
 }
 
 /// One instance record as authored. `rotation` is XYZW, `translation`/`scale` are XYZ.
@@ -383,6 +401,7 @@ pub(crate) fn load(root: &Path) -> Option<MapManifest> {
     let library = read_prototypes(root);
     let mut manifest = parse(&text, &library, &path);
     manifest.trees = TreeLibrary::load(root, manifest.tree_assets());
+    manifest.buildings = BuildingLibrary::load(root, manifest.structure_assets());
     Some(manifest)
 }
 
@@ -433,9 +452,9 @@ const fn fnv1a_64(seed: u64, bytes: &[u8]) -> u64 {
 }
 
 /// The CONTENT digest of the world this process will build: the manifest's own bytes, its prototype
-/// library's, the bytes of the heightmap it names, and the species table, the wood row and every
-/// tree asset the library names — the files that decide the terrain and the scatter, none of which
-/// crosses the wire.
+/// library's, the bytes of the heightmap it names, the species table, the wood row and every tree
+/// asset the library names, then every building asset it names — the files that decide the terrain
+/// and the scatter, none of which crosses the wire.
 ///
 /// CONTENT, not the id: two peers can select the same map name over different files (a stale
 /// checkout, a half-pulled LFS object, a hand-edited `level.json`), and the id would happily agree
@@ -451,6 +470,7 @@ pub(crate) fn content_digest(root: &Path) -> u64 {
     let library = read_prototypes(root);
     let manifest = parse(&text, &library, &path);
     let trees = TreeLibrary::load(root, manifest.tree_assets());
+    let buildings = BuildingLibrary::load(root, manifest.structure_assets());
     let heightmap = manifest.heightmap_path();
     let bytes = std::fs::read(&heightmap).unwrap_or_else(|err| {
         panic!(
@@ -462,6 +482,7 @@ pub(crate) fn content_digest(root: &Path) -> u64 {
     });
     let mut files = vec![text.as_bytes(), library.as_bytes(), bytes.as_slice()];
     files.extend(trees.texts());
+    files.extend(buildings.texts());
     digest_of(&files)
 }
 
@@ -539,6 +560,7 @@ pub(crate) fn parse(text: &str, library: &str, path: &Path) -> MapManifest {
         instances: level.instances,
         prototypes,
         trees: TreeLibrary::default(),
+        buildings: BuildingLibrary::default(),
     }
 }
 
@@ -607,27 +629,32 @@ pub(crate) mod tests {
     const HOUSE_INSTANCE: &str = r#"{"prototype":"house","translation":[0,0,0],
         "rotation":[0,0,0,1],"scale":[1,1,1],"id":"house_0001"}"#;
 
-    /// One instance of every prototype kind — a house, a graybox fir and a tree of the damage
-    /// model, the tree read from the shipped assets — on the fixture extent: what a layer that
-    /// spawns a map asserts against, whatever the shipped map happens to place.
+    /// One instance of every prototype kind — a graybox house, a graybox fir, a tree of the damage
+    /// model and a building of the destruction model, the last two read from the shipped assets —
+    /// on the fixture extent: what a layer that spawns a map asserts against, whatever the shipped
+    /// map happens to place.
     pub(crate) fn mixed_fixture_manifest() -> MapManifest {
         const LIBRARY: &str = r#"{
             "house": Building(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0)),
             "fir_box": Fir(height_m: 14.0, canopy_diameter_m: 6.0),
             "fir": Tree(asset: "fir_1"),
+            "brick": Structure(asset: "house_1"),
         }"#;
         const INSTANCES: &str = r#"{"prototype":"house","translation":[0,0,0],
             "rotation":[0,0,0,1],"scale":[1,1,1],"id":"house_0001"},
             {"prototype":"fir_box","translation":[20,0,0],
             "rotation":[0,0,0,1],"scale":[1,1,1],"id":"fir_box_0001"},
             {"prototype":"fir","translation":[0,0,20],
-            "rotation":[0,0,0,1],"scale":[1,1,1],"id":"fir_0001"}"#;
+            "rotation":[0,0,0,1],"scale":[1,1,1],"id":"fir_0001"},
+            {"prototype":"brick","translation":[0,0,-20],
+            "rotation":[0,0,0,1],"scale":[1,1,1],"id":"brick_0001"}"#;
         let text = manifest_text(500.0, 0.0, 100.0, "+Z").replace(
             r#""instances":[]"#,
             &format!(r#""instances":[{INSTANCES}]"#),
         );
         let mut manifest = parse(&text, LIBRARY, Path::new("fixture/level.json"));
         manifest.trees = TreeLibrary::load(&shipped_assets(), ["fir_1"]);
+        manifest.buildings = BuildingLibrary::load(&shipped_assets(), ["house_1"]);
         manifest
     }
 
@@ -860,18 +887,20 @@ pub(crate) mod tests {
     }
 
     /// THE DIGEST FOLDS THE TREES' TEXTS (the species table, the wood row and every tree asset
-    /// the map places) after the three map files, in the library's order: two peers with one map
-    /// and one different tree segment integrate different walks, and two with one different wood
-    /// row build different pools, so neither pair may match. Dropping the trees or the wood row
-    /// from the fold, or folding them in another order, reds this.
+    /// the map places) after the three map files, in the library's order, then every building
+    /// asset's: two peers with one map and one different tree segment integrate different walks,
+    /// two with one different wood row build different pools, and two with one different wall
+    /// element stop different rounds, so no such pair may match. Dropping the trees, the wood row
+    /// or the buildings from the fold, or folding them in another order, reds this.
     #[test]
-    fn the_digest_folds_the_tree_texts_after_the_map_files() {
+    fn the_digest_folds_the_tree_and_building_texts_after_the_map_files() {
         let root = shipped_assets();
         let path = level_path(&root);
         let text = read_manifest(&path).expect("the shipped map");
         let library = read_prototypes(&root);
         let manifest = parse(&text, &library, &path);
         let trees = TreeLibrary::load(&root, manifest.tree_assets());
+        let buildings = BuildingLibrary::load(&root, manifest.structure_assets());
         let heightmap = std::fs::read(manifest.heightmap_path()).expect("the heightmap");
         let map_files = vec![text.as_bytes(), library.as_bytes(), heightmap.as_slice()];
         assert!(
@@ -885,12 +914,20 @@ pub(crate) mod tests {
         );
         let shipped = content_digest(&root);
         assert_ne!(shipped, digest_of(&map_files), "the tree texts count");
+        let house = std::fs::read(root.join("buildings/house_1/house_1.building.ron"))
+            .expect("the shipped house");
+        assert!(
+            buildings.texts().any(|text| text == house.as_slice()),
+            "the shipped map places a building and its file is folded"
+        );
         let mut files = map_files;
         files.extend(trees.texts());
+        assert_ne!(shipped, digest_of(&files), "the building texts count");
+        files.extend(buildings.texts());
         assert_eq!(
             shipped,
             digest_of(&files),
-            "the fold is the map files then the trees"
+            "the fold is the map files, then the trees, then the buildings"
         );
     }
 

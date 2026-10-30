@@ -29,6 +29,13 @@ pub struct TerrainMap {
     pub blocks: Vec<Transform>,
 }
 
+/// What stands on the map without being terrain: each building's bounds in the [`TerrainMap`]
+/// block encoding (a unit cube posed and scaled; `crate::buildings::footprint`). Never part of the
+/// track field, so no belt senses it; spawn avoidance refuses a spawn inside one exactly as inside
+/// a standing block (`net::server`).
+#[derive(Resource, Default)]
+pub struct SpawnObstacles(pub Vec<Transform>);
+
 /// Side length of the (square) ground plane, in metres — the fallback world's extent
 /// (`terrain_grid::FIXTURE_EXTENT`), which is what the spawn map's UV mapping and the authority's
 /// spawn clamp resolve against when no heightmap decoded.
@@ -733,13 +740,16 @@ fn spawn_environment(
                 },
             );
         }
-        // The map's object scatter (`scatter`): graybox proxies posed from the shipped level file
+        // The map's object scatter (`scatter`): proxies and bodies posed from the shipped level file
         // onto THIS grid, colliders on every composition and meshes only where there is a window.
-        // Appended to `blocks` before the resource is inserted, so a building enters the analytic
-        // track field through the same list the authored course's cuboids do. The showcase world is
-        // excluded for the reason its grid is flat: scenery in front of the thing being looked at.
+        // A graybox building is appended to `blocks` before the resource is inserted, so it enters
+        // the analytic track field through the same list the authored course's cuboids do; a
+        // building of the destruction model comes back as a spawn obstacle instead. The showcase
+        // world is excluded for the reason its grid is flat: scenery in front of the thing being
+        // looked at.
+        let mut obstacles = Vec::new();
         if let Some(manifest) = manifest.filter(|_| !crate::lod_showcase::enabled()) {
-            crate::scatter::spawn(
+            obstacles = crate::scatter::spawn(
                 &mut commands,
                 &mut meshes,
                 &mut materials,
@@ -756,6 +766,7 @@ fn spawn_environment(
             revision: 0,
             blocks,
         });
+        commands.insert_resource(SpawnObstacles(obstacles));
         return;
     }
 
