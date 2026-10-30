@@ -14,7 +14,7 @@
 #   scripts/edgegap/session.sh stop-all-profile                   # every `profile-` deployment, then 0 left
 #
 # Subcommands (stdout carries only the machine-readable answer; progress goes to stderr):
-#   deploy <version> [--city C]... [--bots N] [--stats-s S] [--debris V] [--env K=V]... [--max-min M]
+#   deploy <version> [--city C]... [--bots N] [--stats-s S] [--debris V] [--threads N] [--env K=V]... [--max-min M]
 #       POST /v1/deploy with a `profile-<utc>-<hex>` tag and a city filter, falling back through the
 #       cities (default: Singapore Tokyo Mumbai, or $EDGEGAP_CITIES) on a refusal or an ERROR
 #       deployment, until one turns READY. Arms the watchdog the moment an id exists. Prints the id.
@@ -24,6 +24,9 @@
 #       --debris V  sets the debris stress lever ($DEBRIS_LEVER, default OVERMATCH_DEBRIS_STRESS) to
 #                   V, `<pieces>:<period_s>[:<live_cap>[:<frozen_cap>]]` (src/net/debris_stress.rs);
 #                   `off` or absent: unset. A server older than the lever ignores it.
+#       --threads N sets the server's task-pool thread lever ($THREADS_LEVER, default
+#                   OVERMATCH_SERVER_THREADS) to N, a positive integer (src/net/server_host.rs);
+#                   `default` or absent: unset. A server older than the lever ignores it.
 #       --env K=V   any other server env var.
 #       --max-min M the watchdog's limit in minutes (default 90, or $EDGEGAP_PROFILE_MAX_MIN).
 #   status <id> [--json]    one line: phase, ip:port, city, seconds since READY, Edgegap max_duration.
@@ -79,6 +82,7 @@ contract="$here/../../backend/contract/server-env.json"
 STATS_LEVER="${STATS_LEVER:-OVERMATCH_SERVER_STATS_S}"
 BOT_LEVER="${BOT_LEVER:-OVERMATCH_BOT}"
 DEBRIS_LEVER="${DEBRIS_LEVER:-OVERMATCH_DEBRIS_STRESS}"
+THREADS_LEVER="${THREADS_LEVER:-OVERMATCH_SERVER_THREADS}"
 TAG_PREFIX="profile-"
 
 say() { printf '%s\n' "$*" >&2; }
@@ -407,15 +411,16 @@ find_by_tag() {
 }
 
 cmd_deploy() {
-  local version="${1:?usage: deploy <version> [--city C]... [--bots N] [--stats-s S] [--debris V] [--env K=V]... [--max-min M]}"
+  local version="${1:?usage: deploy <version> [--city C]... [--bots N] [--stats-s S] [--debris V] [--threads N] [--env K=V]... [--max-min M]}"
   shift
-  local cities=() envs=() bots=0 stats_s=1 debris=off max_min="${EDGEGAP_PROFILE_MAX_MIN:-90}" ready_wait="${EDGEGAP_READY_WAIT_S:-120}"
+  local cities=() envs=() bots=0 stats_s=1 debris=off threads=default max_min="${EDGEGAP_PROFILE_MAX_MIN:-90}" ready_wait="${EDGEGAP_READY_WAIT_S:-120}"
   while (($# > 0)); do
     case "$1" in
       --city) cities+=("${2:?--city needs a name}"); shift 2 ;;
       --bots) bots="${2:?--bots needs a count}"; shift 2 ;;
       --stats-s) stats_s="${2:?--stats-s needs seconds}"; shift 2 ;;
       --debris) debris="${2:?--debris needs a value or off}"; shift 2 ;;
+      --threads) threads="${2:?--threads needs a count or default}"; shift 2 ;;
       --env) envs+=("${2:?--env needs K=V}"); shift 2 ;;
       --max-min) max_min="${2:?--max-min needs minutes}"; shift 2 ;;
       *) die "deploy: unknown argument '$1'" ;;
@@ -430,9 +435,12 @@ cmd_deploy() {
   # ERROR: refused here instead.
   [[ "$debris" == off || "$debris" =~ ^[0-9]+:[0-9]+(\.[0-9]+)?(:[0-9]+){0,2}$ ]] ||
     die "--debris wants <pieces>:<period_s>[:<live_cap>[:<frozen_cap>]] or off, got '$debris'"
+  [[ "$threads" == default || "$threads" =~ ^[1-9][0-9]*$ ]] ||
+    die "--threads wants a positive integer or default, got '$threads'"
   ((bots > 0)) && envs+=("$BOT_LEVER=$bots")
   ((stats_s > 0)) && envs+=("$STATS_LEVER=$stats_s")
   [[ "$debris" != off ]] && envs+=("$DEBRIS_LEVER=$debris")
+  [[ "$threads" != default ]] && envs+=("$THREADS_LEVER=$threads")
 
   # The hosted contract's keys are refused: any one of them flips the server into hosted mode (or
   # half of it), which a scripted client cannot join.

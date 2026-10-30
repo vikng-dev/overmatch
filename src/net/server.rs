@@ -64,10 +64,24 @@ pub fn run() {
             std::process::exit(2);
         }
     };
+    let threads = match super::server_host::ThreadsLever::from_env() {
+        Ok(threads) => threads,
+        Err(err) => {
+            eprintln!("overmatch-server: fatal: {err}");
+            std::process::exit(2);
+        }
+    };
+    let mut plugins = crate::gpu_less_default_plugins(None);
+    if let Some(threads) = &threads {
+        plugins = plugins.set(TaskPoolPlugin {
+            task_pool_options: TaskPoolOptions::with_num_threads(threads.0),
+        });
+    }
     let mut app = App::new();
-    app.add_plugins(crate::gpu_less_default_plugins(None))
+    app.add_plugins(plugins)
         // Headless composition needs its own application runner.
         .add_plugins(ScheduleRunnerPlugin::run_loop(FRAME));
+    super::server_host::log_startup(threads.as_ref());
     // No `CompressedImageFormatSupport` here, unlike `headless_test.rs`: every texture on the
     // server's asset allowlist (`.github/actions/build-server/action.yml`) is png, and the UASTC
     // KTX2 sits behind plugins this root does not mount — `load_tank_sim_assets` opens no scene.

@@ -20,10 +20,13 @@
 //!   the wall time from before replicon's `ServerSystems::Send` (the change scan and serialisation)
 //!   to after lightyear's `LinkSystems::Send` (the socket flush), null when none ran. It is a
 //!   bracket, so it also holds any unordered `PostUpdate` system the executor ran inside it;
+//! - `throttled_usec`, `nr_throttled`: the container's CPU-quota throttling over the period, from
+//!   the cgroup's `cpu.stat` (microseconds throttled, enforcement periods throttled); null off
+//!   Linux or where the file is unreadable;
 //! - `debris`: present only while the debris stress lever is armed (`net::debris_stress`): its
 //!   `live` and `frozen` pieces at the line, and its cumulative counts.
 //!
-//! `cpu_pct` and `rss_mb` are null where the platform gives no reading.
+//! `cpu_pct`, `rss_mb` and the throttle fields are null where the platform gives no reading.
 //!
 //! The tick wall time is the cost recorder's measurement ([`crate::cost::TickClock`]), never a
 //! second timer. `physics_us` sits inside it; `send_us` runs after the fixed loop, outside it.
@@ -44,6 +47,7 @@ use lightyear::prelude::server::ClientOf;
 use serde_json::{Value, json};
 
 use super::debris_stress::DebrisCensus;
+use super::server_host::{Throttle, read_throttle};
 use crate::ballistics::Projectile;
 use crate::cost::{TickClock, TickClosed, arm_tick_clock};
 use crate::tank::Tank;
@@ -73,6 +77,7 @@ pub(super) fn install(app: &mut App) {
         physics: TickWindow::default(),
         send: TickWindow::default(),
         cpu_at_start: process_cpu(),
+        throttle_at_start: read_throttle(),
     });
     app.init_resource::<PhaseStarts>();
     app.add_systems(FixedLast, record_tick.after(TickClosed));
@@ -117,6 +122,8 @@ struct ServerStats {
     send: TickWindow,
     /// The process's CPU time when the current period opened.
     cpu_at_start: Option<Duration>,
+    /// The cgroup's throttle counters when the current period opened.
+    throttle_at_start: Option<Throttle>,
 }
 
 /// The open phase brackets' starts.
@@ -211,6 +218,8 @@ struct Snapshot {
     entities: usize,
     cpu_pct: Option<f64>,
     rss_bytes: Option<u64>,
+    /// The period's throttling, when the cgroup reports it.
+    throttled: Option<Throttle>,
 }
 
 /// One decimal: the line is read by eye as well as parsed.
@@ -248,6 +257,8 @@ fn stats_line(snapshot: &Snapshot) -> String {
         "rss_mb": snapshot.rss_bytes.map(|bytes| tenth(bytes as f64 / (1024.0 * 1024.0))),
         "physics_us": percentiles(snapshot.physics.as_ref()),
         "send_us": percentiles(snapshot.send.as_ref()),
+        "throttled_usec": snapshot.throttled.map(|t| t.throttled_usec),
+        "nr_throttled": snapshot.throttled.map(|t| t.nr_throttled),
     });
     if let Some(debris) = &snapshot.debris {
         body["debris"] = debris.clone();
@@ -301,6 +312,11 @@ fn emit_line(
         .zip(stats.cpu_at_start)
         .map(|(now, then)| now.saturating_sub(then).as_secs_f64() / elapsed.as_secs_f64() * 100.0);
     stats.cpu_at_start = cpu;
+    let throttle = read_throttle();
+    let throttled = throttle
+        .zip(stats.throttle_at_start)
+        .map(|(now, then)| now.since(then));
+    stats.throttle_at_start = throttle;
     let snapshot = Snapshot {
         elapsed,
         budget_us,
@@ -314,6 +330,7 @@ fn emit_line(
         entities: all.iter().count(),
         cpu_pct,
         rss_bytes: resident_bytes(),
+        throttled,
     };
     println!("{}", stats_line(&snapshot));
 }
@@ -484,6 +501,10 @@ mod tests {
             entities: 1_234,
             cpu_pct: Some(37.56),
             rss_bytes: Some(200 * 1024 * 1024),
+            throttled: Some(Throttle {
+                nr_throttled: 3,
+                throttled_usec: 45_000,
+            }),
         };
         let line = stats_line(&full);
         let json = line
@@ -508,6 +529,8 @@ mod tests {
                 "rss_mb": 200.0,
                 "physics_us": {"p50": 301.0, "p95": 455.0, "max": 900.0},
                 "send_us": {"p50": 120.0, "p95": 180.1, "max": 250.0},
+                "throttled_usec": 45000,
+                "nr_throttled": 3,
                 "debris": {"live": 35, "frozen": 140},
             })
         );
@@ -519,6 +542,7 @@ mod tests {
             debris: None,
             cpu_pct: None,
             rss_bytes: None,
+            throttled: None,
             ..full
         };
         let value: Value =
@@ -530,6 +554,8 @@ mod tests {
         assert_eq!(value["rss_mb"], Value::Null);
         assert_eq!(value["physics_us"], Value::Null);
         assert_eq!(value["send_us"], Value::Null);
+        assert_eq!(value["throttled_usec"], Value::Null);
+        assert_eq!(value["nr_throttled"], Value::Null);
         assert!(
             value.get("debris").is_none(),
             "an unarmed debris lever adds no key, so a production line is unchanged by it"

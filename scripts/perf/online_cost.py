@@ -260,6 +260,8 @@ STRESS_COLUMNS = [
     ("send_p95", "send_us.p95", "median"),
     ("cpu_pct", "cpu_pct", "median"),
     ("overruns", "overruns", "median"),
+    ("thr_us", "throttled_usec", "median"),
+    ("thr_n", "nr_throttled", "median"),
     ("live", "debris.live", "median"),
     ("live_max", "debris.live", "max"),
     ("frozen_max", "debris.frozen", "max"),
