@@ -23,6 +23,10 @@
 //!   comparisons; asset loading still runs asynchronously, so capture after the scene is ready.
 //! * `OVERMATCH_CAPTURE_FOLLOW=<x>,<y>,<z>` — hold the camera at this world-space offset from
 //!   the controlled tank, looking at its root, for close belt comparisons.
+//! * `OVERMATCH_CAPTURE_SETTINGS=<tab>` — hold the settings page open on that tab (`video` or
+//!   `gameplay`), its first row selected, on a root that mounts the page. The values it shows are
+//!   the run's `video.ron`; point `OVERMATCH_CONFIG_DIR` at a scratch directory to stage them
+//!   without touching the player's own.
 //!
 //! The process exits once every frame is on disk, with a failure code if any is missing.
 //!
@@ -143,6 +147,14 @@ pub fn plugin(app: &mut App) {
             .after(crate::camera::CaptiveCameraPlaced)
             .before(TransformSystems::Propagate),
         );
+    }
+    if let Ok(tab) = std::env::var("OVERMATCH_CAPTURE_SETTINGS") {
+        match crate::settings::CapturePage::named(&tab) {
+            Some(page) => {
+                app.insert_resource(page);
+            }
+            None => panic!("OVERMATCH_CAPTURE_SETTINGS={tab}: no settings tab has that name"),
+        }
     }
     app.insert_resource(Capture {
         path: path.into(),

@@ -1,5 +1,7 @@
-//! The player-facing settings page: a titled card of rows — `LABEL  < VALUE >` steppers for the
-//! enum ladders, `LABEL  [====----] VALUE` sliders for the scalar ones.
+//! The player-facing settings page: a titled card with a tab strip and one tab's rows —
+//! `LABEL  < VALUE >` steppers for the enum ladders, `LABEL  [====----] VALUE` sliders for the
+//! scalar ones. Two tabs ([`Tab`]): VIDEO (display and graphics) and GAMEPLAY. A tab exists only
+//! once it has rows.
 //!
 //! Player-facing, NOT `dev_tools`-gated. View + input only — it writes [`Settings`] and asks for a
 //! save; the reconcile is `settings::apply_settings`'s job.
@@ -24,14 +26,16 @@
 //! Keyboard and mouse, because the cursor is released under either surface and both are things a
 //! player will reach for:
 //!
-//! * `Up`/`Down` — move the selection, SKIPPING disabled rows (the frame cap while vsync is not
-//!   OFF). `W`/`S` are deliberately NOT bound: they drive the tank, and a settings page that also
-//!   reads the drive keys teaches the wrong reflex.
+//! * `Up`/`Down` — move the selection through the open tab's rows, SKIPPING disabled rows (the
+//!   frame cap while vsync is not OFF). `Up` from the tab's first row selects the tab strip itself.
+//!   `W`/`S` are deliberately NOT bound: they drive the tank, and a settings page that also reads
+//!   the drive keys teaches the wrong reflex.
 //! * `Left`/`Right` — change the selected row's value: one ladder rung on a stepper, one stop on a
-//!   slider.
+//!   slider. On the tab strip they switch tabs, so the strip is walked exactly like a stepper row
+//!   and the page needs no key beyond the arrows (`Tab` swaps the possessed tank in single-player).
 //! * Mouse — hover selects; the `<` `>` glyphs are REAL affordances (visible, hover-highlighted,
 //!   clickable — the invisible click-the-half-of-the-row scheme they replace was pure mystery
-//!   meat); a slider's track is click-to-set and drag-to-scrub.
+//!   meat); a slider's track is click-to-set and drag-to-scrub; a tab's name is click-to-open.
 //!
 //! **Hit testing is `bevy_picking`'s, not ours.** `UiPickingPlugin` ships inside `UiPlugin`, so the
 //! backend already walks `UiStack` against every node on this card whether we ask or not; the page
@@ -76,13 +80,45 @@ pub(super) struct SettingsPageVisible(bool);
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(super) struct DeclareSettingsPage;
 
-/// Which row of the page a line is. The order here IS the on-screen order.
+/// The page's tabs, in on-screen order. Page state, never saved: the page opens on the tab it was
+/// last left on this session, VIDEO at launch.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+enum Tab {
+    /// Display and graphics: what the window shows and what a frame costs.
+    #[default]
+    Video,
+    /// How the game shows the player's own hits and knockout, plus the online debug card.
+    Gameplay,
+}
+
+impl Tab {
+    const ORDER: [Tab; 2] = [Tab::Video, Tab::Gameplay];
+
+    /// ASCII only — it reaches `Text`.
+    const fn label(self) -> &'static str {
+        match self {
+            Tab::Video => "VIDEO",
+            Tab::Gameplay => "GAMEPLAY",
+        }
+    }
+
+    /// This tab's rows in on-screen order: [`Row::ORDER`] filtered by [`Row::tab`].
+    fn rows(self) -> impl Iterator<Item = Row> {
+        Row::ORDER.into_iter().filter(move |row| row.tab() == self)
+    }
+}
+
+/// The footer hint while the tab strip is selected. ASCII only — it reaches `Text`.
+const TAB_STRIP_HINT: &str = "Left and right switch tabs. VIDEO holds display and graphics; \
+     GAMEPLAY holds the pen cam, the kill cam and the debug panel.";
+
+/// Which row of the page a line is. The order here IS the on-screen order within each tab.
 ///
 /// **The extension point**: add a variant, add it to [`Row::ORDER`], give it arms in
-/// [`Row::label`] / [`Row::hint`] / [`Row::value`] / [`Row::step`] (and, for a scalar,
-/// [`Row::kind`] + the two slider-fraction arms). Nothing else in this file, and nothing outside
-/// it, needs to change — the card lays out from `ORDER`, and `Settings` already accepts new fields
-/// without a migration (see the `settings` module doc).
+/// [`Row::tab`] / [`Row::label`] / [`Row::hint`] / [`Row::value`] / [`Row::step`] (and, for a
+/// scalar, [`Row::kind`] + the two slider-fraction arms). Nothing else in this file, and nothing
+/// outside it, needs to change — the card lays out from `ORDER`, and `Settings` already accepts new
+/// fields without a migration (see the `settings` module doc).
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
 enum Row {
     RenderScale,
@@ -151,11 +187,32 @@ impl Row {
         Row::VSync,
         Row::FrameCap,
         Row::UiScale,
-        Row::DebugPanel,
         Row::PenCamCorner,
         Row::KillCam,
         Row::ReduceMotion,
+        Row::DebugPanel,
     ];
+
+    /// The tab the row is drawn on. Exhaustive rather than defaulted, so a new row cannot land on a
+    /// tab by accident.
+    const fn tab(self) -> Tab {
+        match self {
+            Row::RenderScale
+            | Row::LodPixelBudget
+            | Row::WindowMode
+            | Row::Display
+            | Row::ShadowDistance
+            | Row::ShadowResolution
+            | Row::ShadowCascades
+            | Row::TrackPrints
+            | Row::TrackPrintRange
+            | Row::Msaa
+            | Row::VSync
+            | Row::FrameCap
+            | Row::UiScale => Tab::Video,
+            Row::PenCamCorner | Row::KillCam | Row::ReduceMotion | Row::DebugPanel => Tab::Gameplay,
+        }
+    }
 
     /// The row's name. ASCII only — it reaches `Text`.
     const fn label(self) -> &'static str {
@@ -481,46 +538,93 @@ fn ladder_at_fraction<T: Copy>(order: &[T], fraction: f32) -> T {
     order[index.min(last)]
 }
 
-/// The selected row index into [`Row::ORDER`]. Only ever moved through [`Selection::step`] /
-/// [`Selection::select`] and read through [`Selection::row`], so the clamp lives in one place
-/// instead of at each of the five sites that used to hand-roll it.
-#[derive(Resource, Default)]
-struct Selection(usize);
+/// The selected line: the tab strip, or one row.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Line {
+    Tabs,
+    Row(Row),
+}
 
-impl Selection {
-    /// The last valid index. `Row::ORDER` is a non-empty array literal, so this cannot underflow.
-    const LAST: usize = Row::ORDER.len() - 1;
+/// Where the page is: the open tab and the selected line. One resource, because the invariant
+/// between the two — **a selected row is always on the open tab** — is kept by these methods
+/// rather than by every caller: the tab changes only through [`Page::switch`] / [`Page::open`],
+/// which move the selection to the strip, and a row is selected only through [`Page::step`] /
+/// [`Page::select`], which refuse a row of another tab.
+#[derive(Resource, Clone, Copy, PartialEq, Eq, Debug)]
+struct Page {
+    tab: Tab,
+    line: Line,
+}
 
-    /// Move the selection one row at a time in `delta`'s direction, SKIPPING rows `enabled`
-    /// refuses, saturating at the ends — "hold down" stops at the last enabled row rather than
-    /// jumping back to the top, and a disabled row is never landed on.
+impl Default for Page {
+    /// The first row of the default tab — `the_tabs_partition_the_rows` pins that `ORDER[0]` is on
+    /// it.
+    fn default() -> Self {
+        Self {
+            tab: Tab::default(),
+            line: Line::Row(Row::ORDER[0]),
+        }
+    }
+}
+
+impl Page {
+    /// The selected row, or `None` while the tab strip is selected.
+    fn row(self) -> Option<Row> {
+        match self.line {
+            Line::Tabs => None,
+            Line::Row(row) => Some(row),
+        }
+    }
+
+    /// Move the selection one line in `delta`'s direction through the open tab's rows, SKIPPING
+    /// rows `enabled` refuses, saturating at the bottom — "hold down" stops at the last enabled row
+    /// rather than jumping back to the top, and a disabled row is never landed on. Running off the
+    /// top lands on the tab strip, which is the line above every tab's first row.
     fn step(&mut self, delta: i32, enabled: impl Fn(Row) -> bool) {
         let direction = delta.signum();
         if direction == 0 {
             return;
         }
-        let mut index = self.0 as i32;
+        let selectable = |row: Row| row.tab() == self.tab && enabled(row);
+        let mut index = match self.line {
+            Line::Tabs if direction < 0 => return,
+            Line::Tabs => -1,
+            Line::Row(row) => row.index() as i32,
+        };
         loop {
             index += direction;
-            if index < 0 || index > Self::LAST as i32 {
-                return; // Ran off the end without finding an enabled row: stay put.
+            if index < 0 {
+                self.line = Line::Tabs;
+                return;
             }
-            if enabled(Row::ORDER[index as usize]) {
-                self.0 = index as usize;
+            let Some(&row) = Row::ORDER.get(index as usize) else {
+                return; // Ran off the bottom without finding a selectable row: stay put.
+            };
+            if selectable(row) {
+                self.line = Line::Row(row);
                 return;
             }
         }
     }
 
-    /// Point the selection at a specific row — what a mouse hover does.
+    /// Point the selection at a specific row — what a mouse hover does. A row of another tab is
+    /// hidden and cannot be hovered; refusing it here keeps the invariant independent of that.
     fn select(&mut self, row: Row) {
-        self.0 = row.index();
+        if row.tab() == self.tab {
+            self.line = Line::Row(row);
+        }
     }
 
-    /// The selected row. Clamped on READ as well, so a stale index (a row removed from `ORDER`
-    /// between frames) resolves to the last row instead of panicking on an out-of-bounds index.
-    fn row(&self) -> Row {
-        Row::ORDER[self.0.min(Self::LAST)]
+    /// Switch tabs by `delta` places, saturating at both ends like every row, with the strip
+    /// selected — what `Left`/`Right` do on the strip.
+    fn switch(&mut self, delta: i32) {
+        self.open(step_in(&Tab::ORDER, self.tab, delta));
+    }
+
+    /// Open `tab` with the strip selected — what a click on a tab's name does.
+    fn open(&mut self, tab: Tab) {
+        self.tab = tab;
+        self.line = Line::Tabs;
     }
 }
 
@@ -528,10 +632,32 @@ impl Selection {
 #[derive(Component)]
 pub(crate) struct SettingsCard;
 
-/// The clipped, scrollable box the rows live in — everything between the title and the hint slot.
-/// Carries the [`ScrollPosition`] that [`scroll_rows`] drives.
+/// The clipped, scrollable box the rows live in — everything between the tab strip and the hint
+/// slot. Carries the [`ScrollPosition`] that [`scroll_rows`] drives.
 #[derive(Component)]
 struct RowViewport;
+
+/// The tab strip's whole line: selectable like a row ([`Line::Tabs`]), highlighted like one.
+#[derive(Component)]
+struct TabStrip;
+
+/// A tab's clickable area on the strip: its name and the bar under it.
+#[derive(Component, Clone, Copy)]
+struct TabLabel(Tab);
+
+/// A tab's name text, inside its [`TabLabel`]: lit while its tab is open or it is hovered.
+#[derive(Component)]
+struct TabName(Tab);
+
+/// The bar under a tab's name, filled while that tab is open.
+#[derive(Component)]
+struct TabMarker(Tab);
+
+/// One tab's rows, inside [`RowViewport`]. A closed tab's panel is `Display::None` (out of the
+/// layout, so the viewport scrolls only the open tab) and `Visibility::Hidden` (so picking, which
+/// skips anything not inherited-visible, cannot hover or click a row it does not show).
+#[derive(Component)]
+struct TabPanel(Tab);
 
 /// The `LABEL` text of a row — carried so a disabled row can dim its label.
 #[derive(Component)]
@@ -654,6 +780,9 @@ const STEPPER_VALUE_WELL_PX: f32 = 110.0;
 /// 512 px interior, so no stepper row has to give up width for it.
 const DISPLAY_VALUE_WELL_PX: f32 = 190.0;
 const SLIDER_VALUE_WELL_PX: f32 = 64.0;
+/// The space between two tab names, and the height of the bar under the open one.
+const TAB_GAP_PX: f32 = 24.0;
+const TAB_MARKER_HEIGHT_PX: f32 = 2.0;
 
 /// The footer hint's type block, and the FIXED slot it is drawn into.
 ///
@@ -693,10 +822,9 @@ const HINT_SLOT_HEIGHT_PX: f32 = HINT_LINE_HEIGHT_PX * 2.0;
 const CARD_WIDTH_PX: f32 = 560.0;
 const CARD_PADDING_PX: f32 = 24.0;
 
-/// The gap between the card's own children AND between the rows inside [`RowViewport`]. One
-/// constant because the rows used to be direct children of the card and inherited this value; when
-/// they moved into the viewport, two `row_gap`s that happened to agree would have been two numbers
-/// free to drift into a visible seam at the top and bottom of the scrolling list.
+/// The gap between the card's own children AND between the rows inside each [`TabPanel`]. One
+/// constant, because two `row_gap`s that happened to agree would be two numbers free to drift into
+/// a visible seam at the top and bottom of the scrolling list.
 const CARD_ROW_GAP_PX: f32 = 6.0;
 
 /// How much of the window height the card may occupy before its row list starts scrolling.
@@ -729,7 +857,7 @@ pub(super) fn plugin(app: &mut App) {
     // because this page is the only thing that reads them.
     app.add_plugins(super::displays::plugin)
         .init_resource::<SettingsPageVisible>()
-        .init_resource::<Selection>()
+        .init_resource::<Page>()
         .init_resource::<SliderDrag>()
         .add_systems(Startup, spawn_page)
         // The click path is a `bevy_picking` observer, which runs in `PreUpdate` — ahead of
@@ -738,13 +866,15 @@ pub(super) fn plugin(app: &mut App) {
         .add_systems(
             Update,
             (
+                // First, so a capture's pin overrides whatever the root's declarer just wrote.
+                pin_for_capture.run_if(resource_exists::<CapturePage>),
                 // Input first, then the refresh reads the same frame's result — so a keypress
                 // repaints immediately instead of one frame late.
                 (keyboard_input, mouse_input),
                 // After the input, so the selection this follows is the one the arrow key just
                 // moved rather than last frame's.
                 scroll_rows,
-                refresh_page,
+                (refresh_page, refresh_tabs),
             )
                 .chain()
                 // After the declarer so open/close is THIS frame's truth (see
@@ -784,11 +914,42 @@ pub(super) fn declare_from_pause_state(
     ));
 }
 
+/// Holds the page open on one tab, its first row selected, whatever the pause surface declares —
+/// the capture lever `dev_capture` inserts for `OVERMATCH_CAPTURE_SETTINGS`. Nothing else inserts
+/// it, so a shipped run never sees it.
+#[derive(Resource, Clone, Copy, Debug)]
+pub(crate) struct CapturePage(Tab);
+
+impl CapturePage {
+    /// The tab whose label is `name`, any case.
+    pub(crate) fn named(name: &str) -> Option<Self> {
+        Tab::ORDER
+            .into_iter()
+            .find(|tab| tab.label().eq_ignore_ascii_case(name.trim()))
+            .map(Self)
+    }
+}
+
+/// [`CapturePage`]'s system. Writes the tab once, so the page is otherwise left as the player's
+/// input would leave it.
+fn pin_for_capture(
+    pin: Res<CapturePage>,
+    mut visible: ResMut<SettingsPageVisible>,
+    mut page: ResMut<Page>,
+) {
+    visible.set_if_neq(SettingsPageVisible(true));
+    if page.tab != pin.0 {
+        page.open(pin.0);
+        page.step(1, |_| true);
+    }
+}
+
 fn spawn_page(
     mut commands: Commands,
     fonts: Res<UiFonts>,
     settings: Res<Settings>,
     ladder: Res<DisplayLadder>,
+    page: Res<Page>,
 ) {
     // A full-screen, centring wrapper holding the card — the same shape `ui_font::spawn_overlay`
     // uses, so the page centres itself without depending on a parent container that neither pause
@@ -850,17 +1011,16 @@ fn spawn_page(
                         },
                     ));
 
-                    // The scrolling viewport. Every row lives inside it; nothing else does.
+                    spawn_tab_strip(card, &fonts, page.tab);
+
+                    // The scrolling viewport. Every row lives inside it, in its tab's panel;
+                    // nothing else does.
                     card.spawn((
                         RowViewport,
                         ScrollPosition::default(),
                         Node {
                             width: Val::Percent(100.0),
                             flex_direction: FlexDirection::Column,
-                            // The card's own `row_gap` spaces the title/viewport/hint/legend; this
-                            // one spaces the rows, at the value they had when they were direct
-                            // children of the card.
-                            row_gap: Val::Px(CARD_ROW_GAP_PX),
                             overflow: Overflow::scroll_y(),
                             // Load-bearing: a flex item's default `min_height: auto` is its CONTENT
                             // height, so without this the viewport refuses to shrink, the card
@@ -870,8 +1030,31 @@ fn spawn_page(
                         },
                     ))
                     .with_children(|viewport| {
-                        for row in Row::ORDER {
-                            spawn_row(viewport, &fonts, &settings, &ladder, row);
+                        for tab in Tab::ORDER {
+                            let open = tab == page.tab;
+                            viewport
+                                .spawn((
+                                    TabPanel(tab),
+                                    Node {
+                                        width: Val::Percent(100.0),
+                                        flex_direction: FlexDirection::Column,
+                                        // The card's own `row_gap` spaces the title, strip,
+                                        // viewport, hint and legend; this one spaces the rows, at
+                                        // the same value so the two cannot drift into a seam.
+                                        row_gap: Val::Px(CARD_ROW_GAP_PX),
+                                        // The panel is the content the viewport scrolls, so it
+                                        // must keep its full height rather than shrink into it.
+                                        flex_shrink: 0.0,
+                                        display: panel_display(open),
+                                        ..default()
+                                    },
+                                    panel_visibility(open),
+                                ))
+                                .with_children(|panel| {
+                                    for row in tab.rows() {
+                                        spawn_row(panel, &fonts, &settings, &ladder, row);
+                                    }
+                                });
                         }
                     });
 
@@ -926,6 +1109,86 @@ fn spawn_page(
                     ));
                 });
         });
+}
+
+/// The tab strip: every tab's name in one line, the open one lit and underlined. The strip is a
+/// selectable line of its own ([`Line::Tabs`]), padded and highlighted like a row, so it reads as
+/// one more stop on the arrow-key walk.
+fn spawn_tab_strip(card: &mut ChildSpawnerCommands, fonts: &UiFonts, open: Tab) {
+    card.spawn((
+        TabStrip,
+        // Opts the strip into picking's hover tracking, like a row line — see [`mouse_input`].
+        Hovered::default(),
+        Node {
+            width: Val::Percent(100.0),
+            align_items: AlignItems::Center,
+            column_gap: Val::Px(TAB_GAP_PX),
+            padding: UiRect::axes(Val::Px(10.0), Val::Px(7.0)),
+            border_radius: BorderRadius::all(Val::Px(4.0)),
+            // Fixed furniture, like the title: see the title's `flex_shrink`.
+            flex_shrink: 0.0,
+            ..default()
+        },
+        BackgroundColor(ROW_BG),
+    ))
+    .with_children(|strip| {
+        for tab in Tab::ORDER {
+            strip
+                .spawn((
+                    TabLabel(tab),
+                    Node {
+                        flex_direction: FlexDirection::Column,
+                        row_gap: Val::Px(3.0),
+                        ..default()
+                    },
+                ))
+                .with_children(|label| {
+                    label.spawn((
+                        TabName(tab),
+                        // Lights the name under the pointer, like an arrow glyph.
+                        Hovered::default(),
+                        Text::new(tab.label()),
+                        TextFont {
+                            // SemiBold: a tab name is an affordance, like the arrows.
+                            font: fonts.hud.clone().into(),
+                            font_size: FontSize::Px(18.0),
+                            ..default()
+                        },
+                        TextColor(if tab == open { TEXT } else { TEXT_DIM }),
+                    ));
+                    label.spawn((
+                        TabMarker(tab),
+                        Node {
+                            width: Val::Percent(100.0),
+                            height: Val::Px(TAB_MARKER_HEIGHT_PX),
+                            ..default()
+                        },
+                        BackgroundColor(marker_color(tab == open)),
+                    ));
+                });
+        }
+    });
+}
+
+/// A tab panel's layout: in the flow while open, out of it while closed.
+const fn panel_display(open: bool) -> Display {
+    if open { Display::Flex } else { Display::None }
+}
+
+/// A tab panel's visibility — see [`TabPanel`] for why a closed panel is hidden as well as
+/// removed from layout.
+const fn panel_visibility(open: bool) -> Visibility {
+    if open {
+        Visibility::Inherited
+    } else {
+        Visibility::Hidden
+    }
+}
+
+/// The bar under a tab's name: the slider fill's colour under the open tab, nothing under the
+/// others.
+const fn marker_color(open: bool) -> Color {
+    if open { SLIDER_FILL_COLOR } else { Color::NONE }
 }
 
 /// One row: `LABEL` on the left; on the right either `< VALUE >` (stepper) or `[track] VALUE`
@@ -1097,37 +1360,42 @@ fn keyboard_input(
     keys: Res<ButtonInput<KeyCode>>,
     caps: Res<PresentCaps>,
     ladder: Res<DisplayLadder>,
-    mut selection: ResMut<Selection>,
+    mut page: ResMut<Page>,
     mut settings: ResMut<Settings>,
     mut save: MessageWriter<SaveSettings>,
 ) {
     if !visible.0 {
         return;
     }
-    // Guarded rather than stepped by zero every frame: `Selection` is a `ResMut`, and a write is a
+    // Guarded rather than stepped by zero every frame: `Page` is a `ResMut`, and a write is a
     // change-tick bump even when the value lands where it already was.
     let move_by = i32::from(keys.just_pressed(KeyCode::ArrowDown))
         - i32::from(keys.just_pressed(KeyCode::ArrowUp));
     if move_by != 0 {
         let current = *settings;
-        selection.step(move_by, |row| row.enabled(&current, *caps));
+        page.step(move_by, |row| row.enabled(&current, *caps));
     }
     let delta = i32::from(keys.just_pressed(KeyCode::ArrowRight))
         - i32::from(keys.just_pressed(KeyCode::ArrowLeft));
-    if delta != 0 && selection.row().enabled(&settings, *caps) {
-        change_row(
-            selection.row(),
-            delta,
-            &mut settings,
-            &mut save,
-            *caps,
-            &ladder,
-        );
+    if delta == 0 {
+        return;
+    }
+    match page.line {
+        Line::Tabs => {
+            let mut next = *page;
+            next.switch(delta);
+            page.set_if_neq(next);
+        }
+        Line::Row(row) if row.enabled(&settings, *caps) => {
+            change_row(row, delta, &mut settings, &mut save, *caps, &ladder);
+        }
+        Line::Row(_) => {}
     }
 }
 
 /// Every click the page takes: an arrow steps its row, a slider's track sets the value there and
-/// GRABS itself for [`mouse_input`] to scrub until the button comes up.
+/// GRABS itself for [`mouse_input`] to scrub until the button comes up, and a tab's name opens that
+/// tab.
 ///
 /// One observer rather than a hand-ordered pair of loops is what makes "the arrow inside the row
 /// wins over the row" a fact of the hierarchy: picking targets the DEEPEST node under the cursor and
@@ -1141,16 +1409,17 @@ fn keyboard_input(
 /// [`track_fraction`] for why the cursor has to be the PHYSICAL one to match it.
 #[expect(
     clippy::too_many_arguments,
-    reason = "an observer spanning arrows, tracks, window, capabilities, ladder, selection, drag, settings and save"
+    reason = "an observer spanning arrows, tracks, tabs, window, capabilities, ladder, page, drag, settings and save"
 )]
 fn page_pressed(
     mut press: On<Pointer<Press>>,
     arrows: Query<&ArrowGlyph>,
     tracks: Query<(&SliderTrack, &ComputedNode, &UiGlobalTransform)>,
+    tabs: Query<&TabLabel>,
     window: Option<Single<&Window, With<PrimaryWindow>>>,
     caps: Res<PresentCaps>,
     ladder: Res<DisplayLadder>,
-    mut selection: ResMut<Selection>,
+    mut page: ResMut<Page>,
     mut drag: ResMut<SliderDrag>,
     mut settings: ResMut<Settings>,
     mut save: MessageWriter<SaveSettings>,
@@ -1174,11 +1443,18 @@ fn page_pressed(
             return;
         }
         let Some(cursor) = cursor else { return };
-        selection.select(track.0);
+        page.select(track.0);
         let active = ActiveDrag::grab(track.0, node, transform);
         drag.0 = Some(active);
         // No save here — the release path in `mouse_input` writes the file once per drag.
         scrub(active, cursor.x, &mut settings);
+    } else if let Ok(tab) = tabs.get(press.entity) {
+        press.propagate(false);
+        if press.button == PointerButton::Primary {
+            let mut next = *page;
+            next.open(tab.0);
+            page.set_if_neq(next);
+        }
     }
 }
 
@@ -1212,16 +1488,17 @@ fn scrub(active: ActiveDrag, cursor_x: f32, settings: &mut ResMut<Settings>) {
 /// pixels, not to the window-logical pixels a pointer reports.
 #[expect(
     clippy::too_many_arguments,
-    reason = "a system spanning page visibility, buttons, window, hovered rows, capabilities, ladder, selection, drag, settings and save"
+    reason = "a system spanning page visibility, buttons, window, hovered rows and strip, capabilities, ladder, page, drag, settings and save"
 )]
 fn mouse_input(
     visible: Res<SettingsPageVisible>,
     buttons: Res<ButtonInput<MouseButton>>,
     window: Option<Single<&Window, With<PrimaryWindow>>>,
     rows: Query<(&RowLine, &Hovered), Changed<Hovered>>,
+    strip: Query<&Hovered, (With<TabStrip>, Changed<Hovered>)>,
     caps: Res<PresentCaps>,
     ladder: Res<DisplayLadder>,
-    mut selection: ResMut<Selection>,
+    mut page: ResMut<Page>,
     mut drag: ResMut<SliderDrag>,
     mut settings: ResMut<Settings>,
     mut save: MessageWriter<SaveSettings>,
@@ -1249,8 +1526,11 @@ fn mouse_input(
     // which row the hint is describing.
     for (line, hovered) in &rows {
         if hovered.get() && line.0.enabled(&settings, *caps) {
-            selection.select(line.0);
+            page.select(line.0);
         }
+    }
+    if strip.iter().any(Hovered::get) {
+        page.line = Line::Tabs;
     }
 }
 
@@ -1351,7 +1631,7 @@ fn wheel_delta_css(unit: bevy::input::mouse::MouseScrollUnit, y: f32, to_css: f3
 fn scroll_rows(
     visible: Res<SettingsPageVisible>,
     mut wheel: MessageReader<bevy::input::mouse::MouseWheel>,
-    selection: Res<Selection>,
+    page: Res<Page>,
     viewport: Option<
         Single<(&ComputedNode, &UiGlobalTransform, &mut ScrollPosition), With<RowViewport>>,
     >,
@@ -1377,9 +1657,11 @@ fn scroll_rows(
     }
 
     // Then the selection, which wins: it is applied last, so a wheel that scrolled the selected row
-    // off screen is immediately undone rather than fighting the next arrow press.
-    let selected = selection.row();
-    if let Some((_, row_node, row_transform)) = rows.iter().find(|(line, _, _)| line.0 == selected)
+    // off screen is immediately undone rather than fighting the next arrow press. The tab strip is
+    // above the viewport, so selecting it asks nothing of the scroll.
+    if let Some(selected) = page.row()
+        && let Some((_, row_node, row_transform)) =
+            rows.iter().find(|(line, _, _)| line.0 == selected)
     {
         let view_half = node.size().y / 2.0;
         let row_half = row_node.size().y / 2.0;
@@ -1420,7 +1702,7 @@ fn refresh_page(
     // The greying reads the EFFECTIVE vsync rung, not the stored one — see [`Row::enabled`].
     caps: Res<PresentCaps>,
     ladder: Res<DisplayLadder>,
-    selection: Res<Selection>,
+    page: Res<Page>,
     // A scrubbing hand is not pointing at anything: an arrow the cursor crosses mid-drag must not
     // light up, the same way hover does not move the selection then.
     drag: Res<SliderDrag>,
@@ -1465,7 +1747,7 @@ fn refresh_page(
         return;
     }
 
-    let selected = selection.row();
+    let selected = page.row();
     for (value, mut text, mut color) in &mut values {
         let rendered = value.0.value(&settings, &ladder);
         if text.0 != rendered {
@@ -1500,17 +1782,62 @@ fn refresh_page(
         }));
     }
     for (line, mut background) in &mut lines {
-        background.set_if_neq(BackgroundColor(if line.0 == selected {
+        background.set_if_neq(BackgroundColor(if selected == Some(line.0) {
             ROW_BG_SELECTED
         } else {
             ROW_BG
         }));
     }
     if let Ok(mut hint) = hint.single_mut() {
-        let rendered = selected.hint();
+        let rendered = selected.map_or(TAB_STRIP_HINT, Row::hint);
         if hint.0 != rendered {
             hint.0 = rendered.to_string();
         }
+    }
+}
+
+/// The tab strip's half of [`refresh_page`]: the open tab's panel in the layout and every other one
+/// out of it, the names lit while open or hovered, the bar under the open tab, and the strip's own
+/// selection highlight. Runs only while the page is up, like that system.
+fn refresh_tabs(
+    visible: Res<SettingsPageVisible>,
+    page: Res<Page>,
+    // A scrubbing hand is not pointing at anything — see `refresh_page`.
+    drag: Res<SliderDrag>,
+    mut panels: Query<(&TabPanel, &mut Node, &mut Visibility)>,
+    mut names: Query<(&TabName, &Hovered, &mut TextColor)>,
+    mut markers: Query<(&TabMarker, &mut BackgroundColor), Without<TabStrip>>,
+    mut strip: Query<&mut BackgroundColor, (With<TabStrip>, Without<TabMarker>)>,
+) {
+    if !visible.0 {
+        return;
+    }
+    for (panel, mut node, mut visibility) in &mut panels {
+        let open = panel.0 == page.tab;
+        let display = panel_display(open);
+        // Guarded by hand: a `Node` write re-lays out the whole card.
+        if node.display != display {
+            node.display = display;
+        }
+        visibility.set_if_neq(panel_visibility(open));
+    }
+    for (name, hovered, mut color) in &mut names {
+        let hovered = hovered.get() && drag.0.is_none();
+        color.set_if_neq(TextColor(if name.0 == page.tab || hovered {
+            TEXT
+        } else {
+            TEXT_DIM
+        }));
+    }
+    for (marker, mut color) in &mut markers {
+        color.set_if_neq(BackgroundColor(marker_color(marker.0 == page.tab)));
+    }
+    for mut background in &mut strip {
+        background.set_if_neq(BackgroundColor(if page.line == Line::Tabs {
+            ROW_BG_SELECTED
+        } else {
+            ROW_BG
+        }));
     }
 }
 
@@ -1676,27 +2003,30 @@ mod tests {
         }
     }
 
-    /// The selection walk skips disabled rows in BOTH directions, saturates at both ends, and
-    /// resolves a stale index. With the
-    /// default settings (vsync ON) the frame-cap row is a hole in the ladder: walking down from
+    /// The selection walk skips disabled rows in BOTH directions and saturates at the bottom. With
+    /// the default settings (vsync ON) the frame-cap row is a hole in the ladder: walking down from
     /// VSYNC lands on UI SCALE, walking back up from UI SCALE lands on VSYNC.
     #[test]
     fn the_selection_skips_disabled_rows() {
         let settings = Settings::default();
         assert_eq!(settings.vsync, VsyncMode::On, "the premise: cap disabled");
         let enabled = |row: Row| row.enabled(&settings, ALL_RUNGS);
+        let on = |row: Row| Page {
+            tab: row.tab(),
+            line: Line::Row(row),
+        };
 
-        let mut selection = Selection(Row::VSync.index());
-        selection.step(1, enabled);
+        let mut page = on(Row::VSync);
+        page.step(1, enabled);
         assert_eq!(
-            selection.row(),
-            Row::UiScale,
+            page.row(),
+            Some(Row::UiScale),
             "down from VSYNC must skip the disabled FRAME CAP"
         );
-        selection.step(-1, enabled);
+        page.step(-1, enabled);
         assert_eq!(
-            selection.row(),
-            Row::VSync,
+            page.row(),
+            Some(Row::VSync),
             "up from UI SCALE must skip it too"
         );
 
@@ -1705,26 +2035,129 @@ mod tests {
             vsync: VsyncMode::Off,
             ..default()
         };
-        let mut selection = Selection(Row::VSync.index());
-        selection.step(1, |row| row.enabled(&armed, ALL_RUNGS));
-        assert_eq!(selection.row(), Row::FrameCap);
+        let mut page = on(Row::VSync);
+        page.step(1, |row| row.enabled(&armed, ALL_RUNGS));
+        assert_eq!(page.row(), Some(Row::FrameCap));
 
-        // The walk saturates at both ends, never wrapping, and a stale index (a row removed from
-        // ORDER between frames) resolves rather than panicking.
+        // Holding down stops at the open tab's last row, never wrapping and never crossing into
+        // the next tab's rows.
+        for tab in Tab::ORDER {
+            let last = tab.rows().last().expect("every tab has rows");
+            let mut page = Page {
+                tab,
+                line: Line::Tabs,
+            };
+            for _ in 0..Row::ORDER.len() * 2 {
+                page.step(1, |_| true);
+            }
+            assert_eq!(
+                page.row(),
+                Some(last),
+                "{tab:?}: holding down must stop at the tab's last row",
+            );
+        }
+    }
+
+    /// **Every row is on exactly one tab, and no tab is empty.** The page lays each tab out from
+    /// [`Tab::rows`], so a row on no tab would never be drawn, and an empty tab is a tab the owner
+    /// ruled out (AUDIO and CONTROLS arrive with their rows). GAMEPLAY is pinned by name: those
+    /// four rows are the owner's split, and the rest is VIDEO.
+    #[test]
+    fn the_tabs_partition_the_rows() {
+        for tab in Tab::ORDER {
+            assert!(tab.rows().next().is_some(), "{tab:?} has no rows");
+        }
+        let drawn: usize = Tab::ORDER.iter().map(|tab| tab.rows().count()).sum();
+        assert_eq!(drawn, Row::ORDER.len(), "a row is on no tab, or on two");
+        assert_eq!(
+            Tab::Gameplay.rows().collect::<Vec<_>>(),
+            [
+                Row::PenCamCorner,
+                Row::KillCam,
+                Row::ReduceMotion,
+                Row::DebugPanel
+            ],
+        );
+        assert_eq!(
+            Row::ORDER[0].tab(),
+            Tab::default(),
+            "the default selection (`Page::default`) must be on the default tab",
+        );
+        assert_eq!(Page::default().row(), Some(Row::ORDER[0]));
+    }
+
+    /// **The tab strip is walked with the arrows, like a row.** `Up` from a tab's first row selects
+    /// the strip, `Left`/`Right` there switch tabs (saturating, like every row), and `Down` enters
+    /// the open tab's first row. A row of a closed tab can never be selected, by the walk or by
+    /// [`Page::select`] — the hint would describe a row the player cannot see.
+    #[test]
+    fn the_tab_strip_is_the_line_above_every_tab() {
         let all = |_: Row| true;
-        let last = *Row::ORDER.last().expect("the page has rows");
-        let mut selection = Selection::default();
-        selection.step(-1, all);
-        assert_eq!(selection.row(), Row::ORDER[0], "the top row stays put");
-        for _ in 0..Row::ORDER.len() * 2 {
-            selection.step(1, all);
+        let mut page = Page::default();
+        page.step(-1, all);
+        assert_eq!(
+            page.line,
+            Line::Tabs,
+            "up from the first row reaches the strip"
+        );
+        page.step(-1, all);
+        assert_eq!(page.line, Line::Tabs, "the strip is the top: up stays put");
+
+        page.switch(-1);
+        assert_eq!(page.tab, Tab::Video, "the first tab saturates");
+        for _ in 0..Tab::ORDER.len() * 2 {
+            page.switch(1);
         }
         assert_eq!(
-            selection.row(),
-            last,
-            "holding down must stop at the last row, never wrap to the first",
+            page.tab,
+            Tab::Gameplay,
+            "the last tab saturates, never wraps"
         );
-        assert_eq!(Selection(usize::MAX).row(), last);
+        assert_eq!(page.line, Line::Tabs, "switching keeps the strip selected");
+
+        page.step(1, all);
+        assert_eq!(page.row(), Tab::Gameplay.rows().next());
+        let mut walked = vec![page.row()];
+        for _ in 0..Row::ORDER.len() {
+            page.step(1, all);
+            walked.push(page.row());
+        }
+        assert!(
+            walked
+                .iter()
+                .flatten()
+                .all(|row| row.tab() == Tab::Gameplay),
+            "the walk left the open tab: {walked:?}",
+        );
+
+        page.select(Row::Msaa);
+        assert_ne!(
+            page.row(),
+            Some(Row::Msaa),
+            "a closed tab's row must not be selectable"
+        );
+        page.open(Tab::Video);
+        assert_eq!(
+            page,
+            Page {
+                tab: Tab::Video,
+                line: Line::Tabs
+            }
+        );
+        page.select(Row::Msaa);
+        assert_eq!(page.row(), Some(Row::Msaa));
+    }
+
+    /// The capture lever names a tab by its label, in any case, and nothing else.
+    #[test]
+    fn a_capture_names_a_tab_by_its_label() {
+        for tab in Tab::ORDER {
+            assert_eq!(
+                CapturePage::named(&tab.label().to_lowercase()).map(|pin| pin.0),
+                Some(tab),
+            );
+        }
+        assert!(CapturePage::named("audio").is_none());
     }
 
     /// The slider mapping round-trips through the Row API for every ladder stop of every slider
@@ -2001,10 +2434,93 @@ mod tests {
             "a press on the MSAA row's `>` must step it — the mouse is not reaching the page",
         );
         assert_eq!(
-            app.world().resource::<Selection>().row(),
-            Row::Msaa,
+            app.world().resource::<Page>().row(),
+            Some(Row::Msaa),
             "and the hovered row must be the selected one, so the footer hint agrees with the hand",
         );
+    }
+
+    /// Where `entity` laid out, as the location a pointer at its centre reports. Physical px, and
+    /// the headless window is scale factor 1, so this doubles as the LOGICAL position.
+    fn pointer_on(app: &mut App, entity: Entity) -> bevy::picking::pointer::Location {
+        let world = app.world_mut();
+        let at = world
+            .get::<UiGlobalTransform>(entity)
+            .expect("a laid-out UI node")
+            .translation;
+        let mut windows = world.query_filtered::<Entity, With<PrimaryWindow>>();
+        let window = windows.single(world).expect("the harness made one window");
+        bevy::picking::pointer::Location {
+            target: bevy::camera::RenderTarget::Window(bevy::window::WindowRef::Primary)
+                .normalize(Some(window))
+                .expect("the primary window is a render target"),
+            position: at,
+        }
+    }
+
+    /// A primary-button click at `location`: a move frame first, because a press is only routed
+    /// to what the previous frame's hover map says is under the pointer.
+    fn click(app: &mut App, location: bevy::picking::pointer::Location) {
+        use bevy::picking::pointer::{PointerAction, PointerId, PointerInput};
+        app.world_mut().write_message(PointerInput::new(
+            PointerId::Mouse,
+            location.clone(),
+            PointerAction::Move { delta: Vec2::ZERO },
+        ));
+        app.update();
+        app.world_mut().write_message(PointerInput::new(
+            PointerId::Mouse,
+            location,
+            PointerAction::Press(PointerButton::Primary),
+        ));
+        app.update();
+    }
+
+    /// **A click on a tab's name opens it, and only the open tab's rows can be seen or picked.**
+    ///
+    /// Through the real picking chain, like the arrow test above, because a dead tab strip fails
+    /// the same silent way a dead arrow does. The closed tab's rows must be out of picking too
+    /// (`InheritedVisibility` false), or a click on empty space could step a row the player cannot
+    /// see.
+    #[test]
+    fn a_picked_press_on_a_tab_opens_it_and_hides_the_others() {
+        let mut app = headless_card_app(1.0);
+        app.insert_resource(SettingsPageVisible(true));
+        settle_with_font(&mut app);
+
+        let gameplay = {
+            let world = app.world_mut();
+            let mut names = world.query::<(Entity, &TabLabel)>();
+            names
+                .iter(world)
+                .find(|(_, label)| label.0 == Tab::Gameplay)
+                .map(|(entity, _)| entity)
+                .expect("the strip spawns a GAMEPLAY name")
+        };
+        let location = pointer_on(&mut app, gameplay);
+        click(&mut app, location);
+        app.update();
+
+        let page = *app.world().resource::<Page>();
+        assert_eq!(
+            page,
+            Page {
+                tab: Tab::Gameplay,
+                line: Line::Tabs
+            },
+            "a press on GAMEPLAY must open it — the mouse is not reaching the strip",
+        );
+        let world = app.world_mut();
+        let mut lines = world.query::<(&RowLine, &InheritedVisibility)>();
+        for (line, visibility) in lines.iter(world) {
+            assert_eq!(
+                visibility.get(),
+                line.0.tab() == Tab::Gameplay,
+                "{:?} on {:?}: only the open tab's rows may be visible to the eye and to picking",
+                line.0,
+                line.0.tab(),
+            );
+        }
     }
 
     /// **How tall the whole card actually is**, in the PHYSICAL pixels `ComputedNode` reports —
@@ -2050,7 +2566,11 @@ mod tests {
     /// Whether the selected row is fully inside the viewport's rect — the contract
     /// [`scroll_rows`] exists to keep. Both rects are physical, straight off the layout.
     fn selected_row_is_visible(app: &mut App) -> bool {
-        let selected = app.world().resource::<Selection>().row();
+        let selected = app
+            .world()
+            .resource::<Page>()
+            .row()
+            .expect("a row is selected");
         let world = app.world_mut();
         let mut viewports =
             world.query_filtered::<(&ComputedNode, &UiGlobalTransform), With<RowViewport>>();
@@ -2087,27 +2607,31 @@ mod tests {
         let (view, content, _) = viewport_state(&mut app);
         assert!(
             content > view + 1.0,
-            "the premise: in a 400 px window the {} rows must overflow the {view:.1} px viewport \
-             (content {content:.1} px), or this test proves nothing",
-            Row::ORDER.len(),
+            "the premise: in a 400 px window the {} VIDEO rows must overflow the {view:.1} px \
+             viewport (content {content:.1} px), or this test proves nothing",
+            Tab::Video.rows().count(),
         );
 
-        let indices = (0..Row::ORDER.len()).chain((0..Row::ORDER.len()).rev());
-        for index in indices {
-            app.world_mut().resource_mut::<Selection>().0 = index;
-            // `scroll_rows` corrects against the PREVIOUS frame's layout, so the fix lands on the
-            // next pass; a couple of pumps is convergence, not patience.
-            for _ in 0..4 {
-                app.update();
-                if selected_row_is_visible(&mut app) {
-                    break;
+        for tab in Tab::ORDER {
+            let rows: Vec<Row> = tab.rows().collect();
+            for &row in rows.iter().chain(rows.iter().rev()) {
+                *app.world_mut().resource_mut::<Page>() = Page {
+                    tab,
+                    line: Line::Row(row),
+                };
+                // `scroll_rows` corrects against the PREVIOUS frame's layout, so the fix lands on
+                // the next pass; a couple of pumps is convergence, not patience.
+                for _ in 0..4 {
+                    app.update();
+                    if selected_row_is_visible(&mut app) {
+                        break;
+                    }
                 }
+                assert!(
+                    selected_row_is_visible(&mut app),
+                    "{row:?} on {tab:?} never scrolled into the viewport",
+                );
             }
-            assert!(
-                selected_row_is_visible(&mut app),
-                "{:?} (index {index}) never scrolled into the viewport",
-                Row::ORDER[index],
-            );
         }
     }
 
@@ -2126,7 +2650,7 @@ mod tests {
         settle_with_font(&mut app);
         // Park the selection on the first row so its own follow-correction pins the top, and the
         // wheel is the only thing moving the list.
-        app.world_mut().resource_mut::<Selection>().0 = 0;
+        *app.world_mut().resource_mut::<Page>() = Page::default();
         app.update();
         let window = {
             let world = app.world_mut();
@@ -2161,7 +2685,8 @@ mod tests {
         // Far past the end: the clamp is the content overflow, not infinity. The overflow is read
         // in the SAME breath as the offset it bounds, because that is what the clamp is a statement
         // about — the card the player is looking at now, not the one measured twenty frames ago.
-        app.world_mut().resource_mut::<Selection>().0 = Row::ORDER.len() - 1;
+        app.world_mut().resource_mut::<Page>().line =
+            Line::Row(Tab::Video.rows().last().expect("VIDEO has rows"));
         spin(&mut app, -1.0, 50);
         let (view, content, bottom) = viewport_state(&mut app);
         let overflow = content - view;
@@ -2174,7 +2699,7 @@ mod tests {
         assert!(bottom > 0.0, "the bottom of the list is not the top");
 
         // And back, in one wheel travel rather than in however many notches were banked above.
-        app.world_mut().resource_mut::<Selection>().0 = 0;
+        *app.world_mut().resource_mut::<Page>() = Page::default();
         spin(&mut app, 1.0, 50);
         let (_, _, back) = viewport_state(&mut app);
         assert_eq!(back, 0.0, "wheel-up must reach the top again");

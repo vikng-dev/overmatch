@@ -85,6 +85,9 @@ mod store;
 /// The page itself. Private to this module: composition roots reach it only through [`plugin`],
 /// which is what makes mounting the page without its entry declarer unrepresentable.
 mod ui;
+/// The capture lever that holds the page open on one tab (`dev_capture`'s
+/// `OVERMATCH_CAPTURE_SETTINGS`).
+pub(crate) use ui::CapturePage;
 /// The page's root, which the UI-ownership audit counts as an owner (`net::ui_ownership`).
 #[cfg(test)]
 pub(crate) use ui::SettingsCard;
