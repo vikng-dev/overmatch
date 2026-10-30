@@ -1200,8 +1200,8 @@ it. Do not write engine code from memory.
 >   which no `ends_with`/prefix scan survives anywhere in the bind path.
 >
 > Legibility in Blender comes from collections + the substances' distinct viewport colors (a free
-> x-ray), not from names. Paint is a **runtime livery** composed onto `paintable` substances —
-> never a material assignment in the source.
+> x-ray), not from names. Paint is a **runtime livery** composed onto every surface whose
+> material's visual takes paint (`tank-surfaces.md`) — never a material assignment in the source.
 
 - **Ballistic volumes are named nodes parented to their rig part** (Hull / Turret / Gun), inheriting
   its motion exactly like `*_Collider` (ADR-0008). Turret armor parents under `Turret`.

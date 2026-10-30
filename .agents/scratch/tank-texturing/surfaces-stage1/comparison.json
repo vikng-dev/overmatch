@@ -1,0 +1,58 @@
+{
+  "close": {
+    "pixels": 2073600,
+    "differing": 1513432,
+    "over_8": 338635,
+    "over_32": 272340,
+    "max_channel_delta": 138,
+    "mean_channel_delta": 6.7279
+  },
+  "duel": {
+    "pixels": 2073600,
+    "differing": 256444,
+    "over_8": 54977,
+    "over_32": 50325,
+    "max_channel_delta": 124,
+    "mean_channel_delta": 0.8863
+  },
+  "macro": {
+    "pixels": 2073600,
+    "differing": 1990253,
+    "over_8": 1513803,
+    "over_32": 1455211,
+    "max_channel_delta": 158,
+    "mean_channel_delta": 29.512
+  },
+  "mid": {
+    "pixels": 2073600,
+    "differing": 456708,
+    "over_8": 42623,
+    "over_32": 34684,
+    "max_channel_delta": 126,
+    "mean_channel_delta": 0.7915
+  },
+  "sandbox_close": {
+    "pixels": 2073600,
+    "differing": 0,
+    "over_8": 0,
+    "over_32": 0,
+    "max_channel_delta": 0,
+    "mean_channel_delta": 0.0
+  },
+  "sandbox_mid": {
+    "pixels": 2073600,
+    "differing": 0,
+    "over_8": 0,
+    "over_32": 0,
+    "max_channel_delta": 0,
+    "mean_channel_delta": 0.0
+  },
+  "side": {
+    "pixels": 2073600,
+    "differing": 1179801,
+    "over_8": 480536,
+    "over_32": 416783,
+    "max_channel_delta": 134,
+    "mean_channel_delta": 7.3321
+  }
+}
