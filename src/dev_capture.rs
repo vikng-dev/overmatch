@@ -19,6 +19,11 @@
 //! * `OVERMATCH_CAPTURE_GIZMOS=0` — disable the default gizmo group when the cameras are
 //!   retargeted.
 //!
+//! * `OVERMATCH_CAPTURE_STEP_S=<s>` — a positive, fixed virtual frame step for reproducible
+//!   comparisons; asset loading still runs asynchronously, so capture after the scene is ready.
+//! * `OVERMATCH_CAPTURE_FOLLOW=<x>,<y>,<z>` — hold the camera at this world-space offset from
+//!   the controlled tank, looking at its root, for close belt comparisons.
+//!
 //! The process exits once every frame is on disk, with a failure code if any is missing.
 //!
 //! # Invariant: a capture run shows no window
@@ -94,6 +99,51 @@ pub fn plugin(app: &mut App) {
         size.y
     );
     hide_window(app);
+    if let Some(step) = std::env::var("OVERMATCH_CAPTURE_STEP_S")
+        .ok()
+        .and_then(|s| s.parse::<f64>().ok())
+        .filter(|s| s.is_finite() && *s > 0.0)
+    {
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_secs_f64(step),
+        ));
+    }
+    if let Some(offset) = std::env::var("OVERMATCH_CAPTURE_FOLLOW")
+        .ok()
+        .and_then(|s| {
+            let values: Vec<f32> = s
+                .split(',')
+                .map(str::parse)
+                .collect::<Result<_, _>>()
+                .ok()?;
+            let [x, y, z] = values.as_slice() else {
+                return None;
+            };
+            Some(Vec3::new(*x, *y, *z))
+        })
+    {
+        app.add_systems(
+            PostUpdate,
+            (move |tanks: Query<&Transform, With<crate::tank::Controlled>>,
+                   mut cameras: Query<
+                &mut Transform,
+                (
+                    With<crate::view::PlayerView>,
+                    Without<crate::tank::Controlled>,
+                ),
+            >| {
+                if let Ok(tank) = tanks.single() {
+                    for mut camera in &mut cameras {
+                        *camera = Transform::from_translation(tank.translation + offset)
+                            .looking_at(tank.translation, Vec3::Y);
+                    }
+                }
+            })
+            .after(crate::camera::OrbitCameraSet)
+            .after(crate::camera::CaptiveCameraPlaced)
+            .before(TransformSystems::Propagate),
+        );
+    }
     app.insert_resource(Capture {
         path: path.into(),
         at,

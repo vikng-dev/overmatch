@@ -1,0 +1,47 @@
+{
+  "tolerance": 8,
+  "crop": [
+    235,
+    225,
+    1065,
+    460
+  ],
+  "frames": {
+    "belts-00012.5000s.png": {
+      "whole_frame": {
+        "pixels": 921600,
+        "max_channel_delta": 56,
+        "mean_channel_delta": 0.003645109953703704,
+        "p99_pixel_delta": 0.0,
+        "pixels_over_tolerance": 52,
+        "percent_within_tolerance": 99.99435763888889
+      },
+      "belt_rectangle": {
+        "pixels": 195050,
+        "max_channel_delta": 56,
+        "mean_channel_delta": 0.0172229342903529,
+        "p99_pixel_delta": 1.0,
+        "pixels_over_tolerance": 52,
+        "percent_within_tolerance": 99.97334016918738
+      }
+    },
+    "belts-00014.0000s.png": {
+      "whole_frame": {
+        "pixels": 921600,
+        "max_channel_delta": 100,
+        "mean_channel_delta": 0.1274171730324074,
+        "p99_pixel_delta": 4.0,
+        "pixels_over_tolerance": 4039,
+        "percent_within_tolerance": 99.56174045138889
+      },
+      "belt_rectangle": {
+        "pixels": 195050,
+        "max_channel_delta": 100,
+        "mean_channel_delta": 0.5976279586430829,
+        "p99_pixel_delta": 13.0,
+        "pixels_over_tolerance": 4039,
+        "percent_within_tolerance": 97.92924891053576
+      }
+    }
+  }
+}

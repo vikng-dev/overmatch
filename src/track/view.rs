@@ -13,9 +13,9 @@
 //! drawn belt at the sim's belt SPEED between sim samples so it does not step against a hull the
 //! renderer moves continuously). The filter state is client-local cosmetic memory, so a tank's
 //! drawn belt is not a pure function of replicated pose + phase — which is fine, it is view-layer
-//! juice, and every rotating part still reads ONE phase, so the tooth lock holds. It is cheap enough
-//! (~56 µs/tank/frame) that every tank gets it — no tier policy (architecture §6); tiers by
-//! projected link pitch return only if tank counts ever demand them.
+//! juice, and every rotating part still reads ONE phase, so the tooth lock holds. Raw directional
+//! contacts are cached on unchanged inputs and refreshed on the sim clock while moving. Only the
+//! contact targets interpolate; wheel and wrap filters and belt phase advance every render frame.
 
 use avian3d::prelude::PhysicsSystems;
 use bevy::math::{Affine3A, Vec2};
@@ -165,6 +165,85 @@ struct TrackRig {
     /// Last frame's presented affine — the snap detector's previous frame. `None` = cold start.
     prev_affine: Option<Affine3A>,
     field_revision: Option<u64>,
+    fit_dependencies: Option<FitDependencies>,
+    fit_tick: Option<std::time::Duration>,
+    fit_affine: Option<Affine3A>,
+    contacts: [wrap::ContactCache; 2],
+}
+
+impl TrackRig {
+    /// A contact sample reads the presented pose, coalescing any fixed steps since the last
+    /// render. Discontinuities and non-pose dependencies discard both target histories.
+    fn begin_contact_frame(
+        &mut self,
+        affine: Affine3A,
+        dependencies: FitDependencies,
+        tick: std::time::Duration,
+        snapped: bool,
+    ) -> (bool, bool) {
+        if snapped || self.fit_dependencies.as_ref() != Some(&dependencies) {
+            self.contacts = Default::default();
+            self.fit_affine = None;
+            for side in &mut self.sides {
+                for wheel in &mut side.wheels {
+                    wheel.target = Default::default();
+                }
+            }
+        }
+        self.fit_dependencies = Some(dependencies);
+        // PostUpdate reads the presented hull after writeback. Several fixed steps in one render
+        // frame coalesce into the latest target; frames between steps never cast moving fit rays.
+        let refresh = self.fit_tick != Some(tick);
+        let wheel_changed = self.fit_affine != Some(affine);
+        if refresh || self.fit_affine.is_none() {
+            self.fit_tick = Some(tick);
+            self.fit_affine = Some(affine);
+        }
+        (refresh, wheel_changed)
+    }
+}
+
+/// Every non-pose input to the exact contact queries. Rig geometry is immutable for a bind;
+/// reinstance constructs a fresh rig. Resource changes invalidate targets even on a parked hull.
+#[derive(PartialEq)]
+struct FitDependencies {
+    terrain: Option<u64>,
+    print: Option<u32>,
+    pressure: Option<f32>,
+    gear: u32,
+    blueprint: u32,
+}
+
+#[derive(Default)]
+struct ContactTarget {
+    previous: f32,
+    current: Option<f32>,
+}
+
+impl ContactTarget {
+    fn sample(
+        &mut self,
+        refresh: bool,
+        changed: bool,
+        alpha: f32,
+        probe: impl FnOnce() -> f32,
+    ) -> f32 {
+        match self.current {
+            None => {
+                let value = probe();
+                self.previous = value;
+                self.current = Some(value);
+            }
+            Some(value) if refresh => {
+                self.previous = value;
+                if changed {
+                    self.current = Some(probe());
+                }
+            }
+            _ => {}
+        }
+        self.previous + (self.current.unwrap() - self.previous) * alpha
+    }
 }
 
 struct RigSide {
@@ -231,6 +310,7 @@ struct RigWheel {
     /// Cosmetic lift state.
     dy: f32,
     dvel: f32,
+    target: ContactTarget,
     /// The GLB view node lift + spin write to (never the sim entity).
     view: Entity,
 }
@@ -432,6 +512,7 @@ fn bind_track_rigs(
                     radius,
                     dy: 0.0,
                     dvel: 0.0,
+                    target: Default::default(),
                     view,
                 })
                 .collect()
@@ -494,6 +575,10 @@ fn bind_track_rigs(
             sides,
             prev_affine: None,
             field_revision: None,
+            fit_dependencies: None,
+            fit_tick: None,
+            fit_affine: None,
+            contacts: Default::default(),
         });
     }
 }
@@ -601,6 +686,7 @@ fn attach_shadow_proxies(
 )]
 fn drive_track_views(
     time: Res<Time>,
+    fixed: Res<Time<Fixed>>,
     track: Res<TrackField>,
     // The wheel-travel band: `TrackGear` carries the loop-clamped droop (its travel knots' peak),
     // the blueprint spec carries the bump stop. Both are single-blueprint globals today, read
@@ -660,6 +746,16 @@ fn drive_track_views(
             }
             rig.presented_phase = [None; 2];
         }
+        let dependencies = FitDependencies {
+            terrain: track.revision,
+            print: depths.as_ref().map(|d| d.last_changed().get()),
+            pressure: pressure_kpa,
+            gear: gear.last_changed().get(),
+            blueprint: blueprint.last_changed().get(),
+        };
+        let (refresh, wheel_changed) =
+            rig.begin_contact_frame(affine, dependencies, fixed.elapsed(), snapped);
+        let alpha = fixed.overstep_fraction();
         rig.prev_affine = Some(affine);
         rig.field_revision = track.revision;
 
@@ -712,7 +808,9 @@ fn drive_track_views(
         for side in &mut rig.sides {
             for wheel in &mut side.wheels {
                 wparams.reach = wheel.radius + gear.face_offset();
-                let target = wheel_lift_target(field, &affine, down, wheel.pivot, &wparams);
+                let target = wheel.target.sample(refresh, wheel_changed, alpha, || {
+                    wheel_lift_target(field, &affine, down, wheel.pivot, &wparams)
+                });
                 if snapped {
                     wheel.dy = target;
                     wheel.dvel = 0.0;
@@ -757,7 +855,14 @@ fn drive_track_views(
             }),
         };
         // Both feel tiers are unconditional — parameter-free laws, so there is nothing to dial.
-        let out = wrap::step(&input, field, &mut rig.wrap);
+        let out = wrap::step_cached(
+            &input,
+            field,
+            &mut rig.wrap,
+            &mut rig.contacts,
+            refresh,
+            alpha,
+        );
 
         for (si, side) in rig.sides.iter_mut().enumerate() {
             // The SHOES, on this frame's drawn pin joints: link `i` spans joint `i` → `i+1`, its
@@ -873,6 +978,236 @@ fn drive_track_views(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Invariant: once pose, terrain/print inputs and wheel articulation settle, the view emits
+    /// no fit rays. Match-scale rendering relies on that reuse; shoes, phase and the filters must
+    /// still advance. ASSUMED fixture geometry and cadence below are independent of tank assets.
+    #[test]
+    fn settled_tank_fit_casts_zero_rays_while_phase_and_filters_continue() {
+        use std::cell::Cell;
+        struct Counted {
+            field: BlockField,
+            rays: Cell<usize>,
+        }
+        impl TerrainOracle for Counted {
+            fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
+                self.rays.set(self.rays.get() + 1);
+                self.field.depth_along(station, out, reach)
+            }
+        }
+        let field = Counted {
+            field: print_ground(vec![super::super::oracle::TerrainBlock::new(
+                Vec3::new(0.0, 0.03, 0.8),
+                Quat::IDENTITY,
+                Vec3::new(3.0, 0.06, 0.2),
+            )]),
+            rays: Cell::new(0),
+        };
+        let affine = Affine3A::from_translation(Vec3::Y * 0.5);
+        let params = WheelParams {
+            reach: 0.5,
+            ease_omega: WHEEL_LIFT_RISE_OMEGA,
+            max_lift: 0.2,
+            max_droop: 0.15,
+            lateral_stations: WHEEL_DISC_STATIONS,
+            probe_reach: PROBE_REACH,
+        };
+        let mut target = ContactTarget::default();
+        let (mut dy, mut dvel) = (0.0, 0.0);
+        let mut states = Default::default();
+        let mut reference_states = Default::default();
+        let mut contacts = Default::default();
+        let mut first_joints = Vec::new();
+        for frame in 0..768 {
+            let refresh = frame % 2 == 0;
+            let alpha = if refresh { 0.0 } else { 0.5 };
+            let lift = target.sample(refresh, false, alpha, || {
+                wheel_lift_target(&field, &affine, Vec3::NEG_Y, Vec3::ZERO, &params)
+            });
+            wheel_lift_step(&mut dy, &mut dvel, lift, 1.0 / 128.0, &params);
+            let circles = [
+                (Vec2::new(2.0, 0.0), 0.5),
+                (Vec2::new(0.0, dy), 0.48),
+                (Vec2::new(-2.0, 0.0), 0.5),
+            ];
+            let input = wrap::WrapInput {
+                dt: 1.0 / 128.0,
+                affine,
+                belt_len: 11.5,
+                count: 80,
+                pitch: 11.5 / 80.0,
+                thickness: 0.04,
+                probe_reach: PROBE_REACH,
+                reference: false,
+                sides: [-1.0, 1.0].map(|plane_x| wrap::WrapSideInput {
+                    circles: &circles,
+                    plane_x,
+                    lateral_stations: [-0.2, 0.0, 0.2],
+                    phase: frame as f64 * 0.001,
+                }),
+            };
+            let out = wrap::step_cached(&input, &field, &mut states, &mut contacts, refresh, alpha);
+            if frame == 511 {
+                assert!(
+                    field.rays.get() > 0,
+                    "the cold fit must exercise the exact oracle"
+                );
+                field.rays.set(0);
+                first_joints = out[0].joints.clone();
+            }
+            if frame >= 512 {
+                assert_eq!(
+                    field.rays.get(),
+                    0,
+                    "settled view fit recast on frame {frame}"
+                );
+                // The reference's own probes are excluded from the cache's ray count.
+                let raw = wrap::step(&input, &field.field, &mut reference_states);
+                if frame == 767 {
+                    assert_ne!(first_joints, out[0].joints, "phase must keep scrolling");
+                    for si in 0..2 {
+                        for (a, b) in out[si].joints.iter().zip(&raw[si].joints) {
+                            assert!(
+                                a.distance(*b) < 1e-5,
+                                "parked shape must match the exact fit"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Invariant: a moving wheel refreshes only on the sim clock, interpolates its raw target,
+    /// and finishes the blend when it stops. Render-rate wheel filtering relies on continuous
+    /// targets; a cold/reseeded contact must adopt the exact probe immediately.
+    #[test]
+    fn moving_contact_targets_interpolate_without_render_frame_probes() {
+        let mut target = ContactTarget::default();
+        assert_eq!(target.sample(false, false, 0.5, || 0.0), 0.0);
+        assert_eq!(target.sample(true, true, 0.0, || 0.1), 0.0);
+        assert_eq!(
+            target.sample(false, true, 0.5, || panic!("between ticks")),
+            0.05
+        );
+        assert_eq!(
+            target.sample(true, false, 0.0, || panic!("unchanged pose")),
+            0.1
+        );
+        assert_eq!(target.sample(false, false, 0.5, || panic!("settled")), 0.1);
+    }
+
+    /// Invariant: moving wrap probes follow the sim clock even as render geometry articulates;
+    /// a terrain/print reseed must discard old targets immediately. Belt clearance and print
+    /// consumers rely on that boundary. ASSUMED synthetic geometry/cadence, independent of assets.
+    #[test]
+    fn moving_wrap_contacts_wait_for_ticks_and_reseed_without_stale_depths() {
+        use std::cell::Cell;
+        struct Counted(Cell<usize>);
+        impl TerrainOracle for Counted {
+            fn depth_along(&self, station: Vec3, out: Vec3, _: f32) -> f32 {
+                self.0.set(self.0.get() + 1);
+                if out.y < -0.2 {
+                    -station.y / -out.y
+                } else {
+                    0.0
+                }
+            }
+        }
+        let oracle = Counted(Cell::new(0));
+        let mut circles = [
+            (Vec2::new(2.0, 0.0), 0.5),
+            (Vec2::ZERO, 0.48),
+            (Vec2::new(-2.0, 0.0), 0.5),
+        ];
+        let mut states = Default::default();
+        let mut contacts = Default::default();
+        fn input(circles: &[(Vec2, f32)], affine: Affine3A) -> wrap::WrapInput<'_> {
+            wrap::WrapInput {
+                dt: 1.0 / 128.0,
+                affine,
+                belt_len: 11.5,
+                count: 80,
+                pitch: 11.5 / 80.0,
+                thickness: 0.04,
+                probe_reach: PROBE_REACH,
+                reference: false,
+                sides: [-1.0, 1.0].map(|plane_x| wrap::WrapSideInput {
+                    circles,
+                    plane_x,
+                    lateral_stations: [-0.2, 0.0, 0.2],
+                    phase: 0.0,
+                }),
+            }
+        }
+        let start = Affine3A::from_translation(Vec3::Y * 0.5);
+        wrap::step_cached(
+            &input(&circles, start),
+            &oracle,
+            &mut states,
+            &mut contacts,
+            true,
+            0.0,
+        );
+        assert!(oracle.0.replace(0) > 0);
+        // Articulation can change the route's station count between contact samples.
+        circles[1].0.y = -0.1;
+        let moved = Affine3A::from_translation(Vec3::new(0.0, 0.45, 0.02));
+        wrap::step_cached(
+            &input(&circles, moved),
+            &oracle,
+            &mut states,
+            &mut contacts,
+            false,
+            0.5,
+        );
+        assert_eq!(
+            oracle.0.get(),
+            0,
+            "a render frame must reuse the sampled depth profiles"
+        );
+        wrap::step_cached(
+            &input(&circles, moved),
+            &oracle,
+            &mut states,
+            &mut contacts,
+            true,
+            0.0,
+        );
+        assert!(
+            oracle.0.replace(0) > 0,
+            "the next sim tick must refresh changed contacts"
+        );
+        wrap::step_cached(
+            &input(&circles, moved),
+            &oracle,
+            &mut states,
+            &mut contacts,
+            false,
+            0.5,
+        );
+        assert_eq!(oracle.0.get(), 0);
+        let frame = input(&circles, moved);
+        let reseeded = wrap::step_cached(
+            &frame,
+            &oracle,
+            &mut Default::default(),
+            &mut Default::default(),
+            false,
+            0.0,
+        );
+        assert!(
+            oracle.0.get() > 0,
+            "invalidated targets refresh even between ticks"
+        );
+        let exact = wrap::step(&frame, &oracle, &mut Default::default());
+        for si in 0..2 {
+            assert_eq!(
+                reseeded[si].joints, exact[si].joints,
+                "reseed must adopt exact contacts"
+            );
+        }
+    }
 
     /// A flat heightmap at zero with optional raised blocks, synthetic fixture geometry.
     fn print_ground(blocks: Vec<super::super::oracle::TerrainBlock>) -> BlockField {

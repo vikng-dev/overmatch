@@ -1,12 +1,10 @@
 //! The **kinematic wrap** track view (architecture §3) — the shared, promoted implementation the
 //! game's `view` plugin and the sandbox both run.
 //!
-//! The belt path is *fitted* around the articulated running-gear circles every frame as a pure
-//! function of pose, terrain, and belt phase: a taut convex wrap of the circles, a terrain conform
-//! on a dense resample of the bottom run, and a budgeted sag on the top run — then the closed loop
-//! resampled at the material link pitch. Nothing about the drawn track is simulated: wrong-side
-//! capture, compression zigzag, teleport transients and solver divergence are unrepresentable
-//! because there is no solver state to capture, buckle, stale, or diverge.
+//! The belt path is fitted around articulated running-gear circles: a taut convex wrap, terrain
+//! conform on a dense lower run, and budgeted sag on the return run. [`step`] reads exact contacts
+//! immediately; [`step_cached`] retains and interpolates raw directional contacts between samples.
+//! Both apply the same filters and running-gear clearance clamp before sampling material joints.
 //!
 //! Two "feel" tiers layer a self-healing FILTER over that stateless core, ALWAYS on: a hull-frame
 //! temporal ease on the conform depth ([`ConformEase`]) and a 1-DOF spring on the sag budget
@@ -142,10 +140,8 @@ pub struct WrapSideOutput {
 /// Fit both sides' belts around the articulated circles for one frame. Advances each side's filter
 /// state in place; returns the drawn joints (and, on request, the reference loop) per side.
 ///
-/// Allocation: each call builds a handful of transient `Vec`s per side (the resampled stations, the
-/// per-station normals/depths, the drawn joints). At the measured ~56 µs/tank/frame this is fine;
-/// if a future many-tank tier ever wants it, these are the obvious buffer-reuse candidates (thread a
-/// scratch pool through the caller). Deliberately NOT done now — YAGNI.
+/// This uncached entry point is the sandbox/reference path. The game's view uses [`step_cached`]
+/// to separate terrain probes from render-rate filters and phase sampling.
 pub fn step<O: TerrainOracle>(
     input: &WrapInput,
     oracle: &O,
@@ -175,6 +171,18 @@ fn side_step<O: TerrainOracle>(
         side.lateral_stations,
         circles,
     );
+    finish_side(input, si, &rb, &rb.widened, st)
+}
+
+fn finish_side(
+    input: &WrapInput,
+    si: usize,
+    rb: &RawBelly,
+    depths: &[f32],
+    st: &mut WrapState,
+) -> WrapSideOutput {
+    let side = &input.sides[si];
+    let circles = side.circles;
     let chord = rb.idler_up.distance(rb.sprocket_up);
 
     // The taut (unconformed) reference loop — a diagnostic layer, unaffected by the filters. Opt-in
@@ -197,8 +205,8 @@ fn side_step<O: TerrainOracle>(
     // The eased depths replace the raw ones both in the drawn belly AND in the length budget below,
     // so the top run stays consistent with what is drawn.
     let zs: Vec<f32> = rb.stations.iter().map(|p| p.x).collect();
-    let eased = st.ease.ease(&zs, &rb.widened, &rb.ground, input.dt);
-    let conformed = conformed_pts(&rb, &eased, circles);
+    let eased = st.ease.ease(&zs, depths, &rb.ground, input.dt);
+    let conformed = conformed_pts(rb, &eased, circles);
 
     // Close with the budgeted sag. FEEL TIER 2 — slack spring: the sag budget is the leftover belt
     // length (from the EASED belly, so the tiers compose), spring-tracked so the return run eases
@@ -493,6 +501,108 @@ impl SlackSpring {
     }
 }
 
+/// View-local contact memory. The caller resets it when terrain, print response or immutable
+/// rig parameters change. Phase is deliberately absent: it scrolls over the fitted route.
+#[derive(Default)]
+pub(crate) struct ContactCache {
+    geometry: Option<RawBelly>,
+    circles: Vec<(Vec2, f32)>,
+    sampled_circles: Vec<(Vec2, f32)>,
+    affine: Option<Affine3A>,
+    previous: DepthProfile,
+    current: DepthProfile,
+}
+
+#[derive(Default, Clone)]
+struct DepthProfile {
+    fractions: Vec<f32>,
+    depths: Vec<f32>,
+}
+
+impl DepthProfile {
+    fn at(&self, fraction: f32) -> f32 {
+        let hi = self.fractions.partition_point(|s| *s < fraction);
+        if hi == 0 {
+            return self.depths[0];
+        }
+        if hi == self.fractions.len() {
+            return *self.depths.last().unwrap();
+        }
+        let lo = hi - 1;
+        let t = (fraction - self.fractions[lo])
+            / (self.fractions[hi] - self.fractions[lo]).max(f32::EPSILON);
+        self.depths[lo] + (self.depths[hi] - self.depths[lo]) * t
+    }
+}
+
+/// Refresh exact directional contacts at most once per presented sim tick; interpolate raw
+/// depths, then evolve filters, enforce current wheel clearance and sample phase every frame.
+/// `refresh` advances sample history even if the inputs are unchanged, completing the last blend.
+pub(crate) fn step_cached<O: TerrainOracle>(
+    input: &WrapInput,
+    oracle: &O,
+    state: &mut [WrapState; 2],
+    caches: &mut [ContactCache; 2],
+    refresh: bool,
+    alpha: f32,
+) -> [WrapSideOutput; 2] {
+    std::array::from_fn(|si| {
+        let side = &input.sides[si];
+        let cache = &mut caches[si];
+        if cache.geometry.is_none() || cache.circles != side.circles {
+            cache.geometry = Some(belly_geometry(side.circles));
+            cache.circles.clear();
+            cache.circles.extend_from_slice(side.circles);
+        }
+        let rb = cache.geometry.as_ref().unwrap();
+        let cold = cache.affine.is_none();
+        if refresh || cold {
+            cache
+                .previous
+                .fractions
+                .clone_from(&cache.current.fractions);
+            cache.previous.depths.clone_from(&cache.current.depths);
+            if cold || cache.affine != Some(input.affine) || cache.sampled_circles != side.circles {
+                cache.current = DepthProfile {
+                    fractions: rb.fractions.clone(),
+                    depths: probe_belly(
+                        oracle,
+                        &input.affine,
+                        side.plane_x,
+                        input.thickness,
+                        input.probe_reach,
+                        side.lateral_stations,
+                        rb,
+                    ),
+                };
+                cache.affine = Some(input.affine);
+                cache.sampled_circles.clear();
+                cache.sampled_circles.extend_from_slice(side.circles);
+            }
+            if cold {
+                cache.previous = cache.current.clone();
+            }
+        }
+        let previous_matches = cache.previous.fractions == rb.fractions;
+        let current_matches = cache.current.fractions == rb.fractions;
+        let depths: Vec<f32> = rb
+            .fractions
+            .iter()
+            .enumerate()
+            .map(|(i, &s)| {
+                // Equal geometry takes the exact raw value, without a resampling round trip.
+                let sample = |p: &DepthProfile, matches| {
+                    if matches { p.depths[i] } else { p.at(s) }
+                };
+                let from = sample(&cache.previous, previous_matches);
+                let to = sample(&cache.current, current_matches);
+                from + (to - from) * alpha
+            })
+            .collect();
+        finish_side(input, si, rb, &depths, &mut state[si])
+    })
+}
+
 /// The taut wrap + terrain-conform of one side — the reference path, the dense conform stations,
 /// their outward normals and raw conform depths. Pure geometry + field probes, no temporal state:
 /// the belly-memory ease is applied by the caller.
@@ -508,6 +618,9 @@ struct RawBelly {
     /// Per-station: is this a genuinely ground-facing BELLY station (may carry z-keyed memory)?
     /// `outs[i].y < −`[`GROUND_FACING_EPS`] — the arcs and top run are `false`.
     ground: Vec<bool>,
+    /// Normalized distance along the lower route, including the end arcs. This is geometric
+    /// correspondence across articulated routes, independent of their station counts.
+    fractions: Vec<f32>,
     idler_up: Vec2,
     sprocket_up: Vec2,
 }
@@ -525,6 +638,20 @@ fn raw_belly<O: TerrainOracle>(
     lateral_stations: [f32; 3],
     circles: &[(Vec2, f32)],
 ) -> RawBelly {
+    let mut rb = belly_geometry(circles);
+    rb.widened = probe_belly(
+        oracle,
+        affine,
+        plane_x,
+        thickness,
+        probe_reach,
+        lateral_stations,
+        &rb,
+    );
+    rb
+}
+
+fn belly_geometry(circles: &[(Vec2, f32)]) -> RawBelly {
     // The taut bottom polyline, sprocket_up → front arc → tangents/arcs → idler_up — the shared
     // envelope walk, sunk RAW (no dedupe: the conform resample rides the walk's own spacing).
     let (sprocket_c, sprocket_r) = circles[0];
@@ -547,6 +674,40 @@ fn raw_belly<O: TerrainOracle>(
             Vec2::new(tan.y, -tan.x)
         })
         .collect();
+    let ground = outs.iter().map(|o| o.y < -GROUND_FACING_EPS).collect();
+    let mut distance = 0.0;
+    let mut fractions = vec![0.0];
+    for pair in stations.windows(2) {
+        distance += pair[0].distance(pair[1]);
+        fractions.push(distance);
+    }
+    for s in &mut fractions {
+        *s /= distance.max(f32::EPSILON);
+    }
+    RawBelly {
+        taut,
+        stations,
+        outs,
+        ground,
+        fractions,
+        widened: Vec::new(),
+        idler_up,
+        sprocket_up,
+    }
+}
+
+fn probe_belly<O: TerrainOracle>(
+    oracle: &O,
+    affine: &Affine3A,
+    plane_x: f32,
+    thickness: f32,
+    probe_reach: f32,
+    lateral_stations: [f32; 3],
+    rb: &RawBelly,
+) -> Vec<f32> {
+    let stations = &rb.stations;
+    let outs = &rb.outs;
+    let m = stations.len();
     let lat_axis = affine.transform_vector3(Vec3::X);
     let depths: Vec<f32> = (0..m)
         .map(|i| {
@@ -572,25 +733,13 @@ fn raw_belly<O: TerrainOracle>(
     // pin clears the edge, then articulates down over the next. Reproduce it on the displacement
     // field: a ±1-station max filter (the overhang; never sinks a lift) — the triangular smooth (the
     // articulation rounding) is applied in [`conformed_pts`] after the ease.
-    let widened: Vec<f32> = (0..m)
+    (0..m)
         .map(|i| {
             depths[i.saturating_sub(1)]
                 .max(depths[i])
                 .max(depths[(i + 1).min(m - 1)])
         })
-        .collect();
-    // Belly participation: only stations whose hull-frame outward normal points genuinely DOWN
-    // carry z-keyed memory. The end arcs fold z, so their sideways/up faces are excluded.
-    let ground: Vec<bool> = outs.iter().map(|o| o.y < -GROUND_FACING_EPS).collect();
-    RawBelly {
-        taut,
-        stations,
-        outs,
-        widened,
-        ground,
-        idler_up,
-        sprocket_up,
-    }
+        .collect()
 }
 
 /// Displace one side's conform stations by the eased depths (the ±1 overhang was already applied in
