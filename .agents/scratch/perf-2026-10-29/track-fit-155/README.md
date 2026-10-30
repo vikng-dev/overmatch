@@ -7,6 +7,15 @@ after physics writeback, so the query uses the presented hull pose. Multiple fix
 render coalesce into its latest sample. Wheel, belly and slack filters, material phase, shoe placement
 and the phase-sampled shadow ribbon continue at render cadence.
 
+Each rig keeps the fixed-clock `elapsed` stamps of its two latest contact samples (`ContactClock`,
+`src/track/view.rs`). A frame's blend cursor is `elapsed + overstep - timestep`, which lies between
+those stamps; ticks that pass before one render frame widen the span between them, and the view
+still probes only the latest presented pose. DERIVED bound: a target is at most one tick older than
+the presented pose at any frame rate. Where consecutive samples are one tick apart (every render
+rate at or above the tick rate) the weight equals `Time<Fixed>::overstep_fraction` bit for bit.
+A cold or reseeded target adopts the current probe whole. Terrain revision changes reseed through
+the snap path, so terrain is not a separate fit dependency.
+
 Depth profiles interpolate by normalized distance along the lower route, including its end arcs;
 articulation can change the route's station count. The final clearance clamp uses the current circles.
 Terrain swaps and pose snaps reseed filters and contacts. Print-response and rig-input changes reseed
@@ -34,6 +43,25 @@ samples. The moving-target tests check interpolation, no between-tick probes, ch
 and immediate exact reseeding. Existing wrap tests retain the swept-crest and shoe/wheel clearance gates.
 
 No frame-time measurements or A/B/B/A runs were taken. The owner runs performance pricing.
+
+## Fixed-clock timing proof
+
+`contact_targets_lag_at_most_one_tick_below_tick_rate` and `..._above_tick_rate` (`view.rs`) run a
+wheel target and both wrap caches on one rig clock over ground that rises uniformly with presented
+time, so every blended target decodes to the presented time of the pose it stands for. The named
+invariant is the product cost #155 promises: the belt follows the ground at most one tick late.
+ASSUMED cadences against `64` Hz ticks: `32` fps, `20` fps and a `5/47/11` ms hitch cycle below the
+tick rate; `120` and `128` fps above it, where the weight must also equal `overstep_fraction` bit for
+bit. MEASURED with the weight still `overstep_fraction`: the below-rate test fails at the first
+advancing `32` fps frame, wheel target `0.03125 s` late against the DERIVED one-tick limit
+`0.015625 s`. MEASURED with the fixed-tick blend: both pass, as do all `154` `track::` tests
+(the existing view, wrap and shadow-proxy tests among them) and the `22` `track_prints` tests.
+
+Capture parity: at the stills' `128` Hz step every frame advances at most one tick, so consecutive
+samples are one tick apart and every weight equals the original `overstep_fraction` bit for bit (the
+above-rate test checks that cadence); before the first tick a cold clock's single sample is the whole
+blend under either weight. Targets, filters and pixels are therefore those of the committed stills
+(DERIVED); no new captures were taken.
 
 ## Capture provenance and reproduction
 

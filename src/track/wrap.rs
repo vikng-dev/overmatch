@@ -74,6 +74,12 @@ impl WrapState {
         self.ease.reset();
         self.spring.reset();
     }
+
+    /// The belly memory's eased conform depth at side-plane `z`.
+    #[cfg(test)]
+    pub(crate) fn eased_depth(&self, z: f32) -> f32 {
+        self.ease.sample(z)
+    }
 }
 
 /// One side's per-frame geometry inputs.
@@ -538,6 +544,7 @@ impl DepthProfile {
 /// Refresh exact directional contacts at most once per presented sim tick; interpolate raw
 /// depths, then evolve filters, enforce current wheel clearance and sample phase every frame.
 /// `refresh` advances sample history even if the inputs are unchanged, completing the last blend.
+/// `alpha` weights the previous sample's depths toward the current sample's.
 pub(crate) fn step_cached<O: TerrainOracle>(
     input: &WrapInput,
     oracle: &O,

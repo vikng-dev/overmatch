@@ -166,7 +166,7 @@ struct TrackRig {
     prev_affine: Option<Affine3A>,
     field_revision: Option<u64>,
     fit_dependencies: Option<FitDependencies>,
-    fit_tick: Option<std::time::Duration>,
+    contact_clock: ContactClock,
     fit_affine: Option<Affine3A>,
     contacts: [wrap::ContactCache; 2],
 }
@@ -178,9 +178,9 @@ impl TrackRig {
         &mut self,
         affine: Affine3A,
         dependencies: FitDependencies,
-        tick: std::time::Duration,
+        refresh: bool,
         snapped: bool,
-    ) -> (bool, bool) {
+    ) -> bool {
         if snapped || self.fit_dependencies.as_ref() != Some(&dependencies) {
             self.contacts = Default::default();
             self.fit_affine = None;
@@ -193,25 +193,60 @@ impl TrackRig {
         self.fit_dependencies = Some(dependencies);
         // PostUpdate reads the presented hull after writeback. Several fixed steps in one render
         // frame coalesce into the latest target; frames between steps never cast moving fit rays.
-        let refresh = self.fit_tick != Some(tick);
         let wheel_changed = self.fit_affine != Some(affine);
         if refresh || self.fit_affine.is_none() {
-            self.fit_tick = Some(tick);
             self.fit_affine = Some(affine);
         }
-        (refresh, wheel_changed)
+        wheel_changed
     }
 }
 
-/// Every non-pose input to the exact contact queries. Rig geometry is immutable for a bind;
-/// reinstance constructs a fresh rig. Resource changes invalidate targets even on a parked hull.
+/// Every non-pose input to the exact contact queries besides terrain, whose revision change is
+/// a snap and already discards the targets. Rig geometry is immutable for a bind; reinstance
+/// constructs a fresh rig. Resource changes invalidate targets even on a parked hull.
 #[derive(PartialEq)]
 struct FitDependencies {
-    terrain: Option<u64>,
     print: Option<u32>,
     pressure: Option<f32>,
     gear: u32,
     blueprint: u32,
+}
+
+/// Where a presented frame falls between the two latest contact samples, on the fixed clock.
+///
+/// A sample is taken on the first render frame after the fixed clock advances, from that frame's
+/// presented pose, and stamped with the clock's `elapsed`. Ticks that pass before one render frame
+/// coalesce into one sample, so two stamps can be several ticks apart. The blend cursor trails the
+/// frame's fixed time, `elapsed + overstep`, by one `timestep`. It lies between the two stamps
+/// because `elapsed` advances in whole timesteps and Bevy's fixed loop leaves
+/// `overstep < timestep`; a stamp never postdates the pose it was probed from. So a target is at
+/// most one tick older than the presented pose at any frame rate (DERIVED). With stamps one tick
+/// apart the weight is `Time::<Fixed>::overstep_fraction` exactly.
+#[derive(Default)]
+struct ContactClock {
+    previous: std::time::Duration,
+    current: Option<std::time::Duration>,
+}
+
+impl ContactClock {
+    /// `(refresh, alpha)`: whether this frame takes a new sample, and the blend weight from the
+    /// previous sample's value toward the current one's.
+    fn advance(&mut self, fixed: &Time<Fixed>) -> (bool, f32) {
+        let tick = fixed.elapsed();
+        let refresh = self.current != Some(tick);
+        if refresh {
+            self.previous = self.current.unwrap_or(tick);
+            self.current = Some(tick);
+        }
+        // One sample (a cold clock, or a fixed clock that stepped back) is the whole blend.
+        let span = tick.saturating_sub(self.previous);
+        if span.is_zero() {
+            return (refresh, 1.0);
+        }
+        let cursor = (tick + fixed.overstep()).saturating_sub(fixed.timestep());
+        let alpha = cursor.saturating_sub(self.previous).as_secs_f32() / span.as_secs_f32();
+        (refresh, alpha.min(1.0))
+    }
 }
 
 #[derive(Default)]
@@ -576,7 +611,7 @@ fn bind_track_rigs(
             prev_affine: None,
             field_revision: None,
             fit_dependencies: None,
-            fit_tick: None,
+            contact_clock: Default::default(),
             fit_affine: None,
             contacts: Default::default(),
         });
@@ -748,15 +783,13 @@ fn drive_track_views(
             rig.presented_phase = [None; 2];
         }
         let dependencies = FitDependencies {
-            terrain: track.revision,
             print: depths.as_ref().map(|d| d.last_changed().get()),
             pressure: pressure_kpa,
             gear: gear.last_changed().get(),
             blueprint: blueprint.last_changed().get(),
         };
-        let (refresh, wheel_changed) =
-            rig.begin_contact_frame(affine, dependencies, fixed.elapsed(), snapped);
-        let alpha = fixed.overstep_fraction();
+        let (refresh, alpha) = rig.contact_clock.advance(&fixed);
+        let wheel_changed = rig.begin_contact_frame(affine, dependencies, refresh, snapped);
         rig.prev_affine = Some(affine);
         rig.field_revision = track.revision;
 
@@ -1073,7 +1106,7 @@ mod tests {
                     prev_affine: None,
                     field_revision: None,
                     fit_dependencies: None,
-                    fit_tick: None,
+                    contact_clock: Default::default(),
                     fit_affine: None,
                     contacts: Default::default(),
                 },
@@ -1350,6 +1383,135 @@ mod tests {
                 "reseed must adopt exact contacts"
             );
         }
+    }
+
+    /// Invariant: the belt follows the ground at most one tick late, the product cost #155
+    /// promises, even when one render frame coalesces several fixed ticks. A cursor that trails
+    /// the previous render frame instead of one tick breaks it. ASSUMED cadences: 32 fps (two
+    /// ticks a frame), 20 fps (three or four) and a hitching 5/47/11 ms cycle (none to three).
+    #[test]
+    fn contact_targets_lag_at_most_one_tick_below_tick_rate() {
+        for cycle in [&[1.0 / 32.0][..], &[1.0 / 20.0], &[0.005, 0.047, 0.011]] {
+            follow_rising_ground(&render_frames(cycle));
+        }
+    }
+
+    /// Invariant: above the tick rate consecutive samples are one tick apart, so the blend weight
+    /// is Bevy's overstep fraction bit for bit and the targets stay at most one tick late. The
+    /// committed track-fit stills rely on that identity at their 128 Hz capture step. ASSUMED
+    /// cadences: 120 and 128 fps.
+    #[test]
+    fn contact_targets_lag_at_most_one_tick_above_tick_rate() {
+        for cycle in [&[1.0 / 120.0][..], &[1.0 / 128.0]] {
+            let frames = render_frames(cycle);
+            let alphas = follow_rising_ground(&frames);
+            for (fixed, alpha) in frames.iter().zip(alphas) {
+                // Before the first tick the clock holds one sample, which is the whole blend.
+                if fixed.elapsed() > std::time::Duration::ZERO {
+                    assert_eq!(
+                        alpha.to_bits(),
+                        fixed.overstep_fraction().to_bits(),
+                        "blend weight at {:?} + {:?}",
+                        fixed.elapsed(),
+                        fixed.overstep()
+                    );
+                }
+            }
+        }
+    }
+
+    /// One second (ASSUMED span) of render frames cycling the given frame durations in seconds,
+    /// each paired with the 64 Hz fixed clock as Bevy's `run_fixed_main_schedule` leaves it:
+    /// whole timesteps expended into `elapsed`, the remainder kept as overstep.
+    fn render_frames(cycle: &[f64]) -> Vec<Time<Fixed>> {
+        let mut fixed = Time::<Fixed>::default();
+        let mut frames = vec![fixed];
+        for &frame_s in cycle.iter().cycle() {
+            fixed.accumulate_overstep(std::time::Duration::from_secs_f64(frame_s));
+            while fixed.overstep() >= fixed.timestep() {
+                let step = fixed.timestep();
+                fixed.discard_overstep(step);
+                fixed.advance_by(step);
+            }
+            if (fixed.elapsed() + fixed.overstep()).as_secs_f64() > 1.0 {
+                return frames;
+            }
+            frames.push(fixed);
+        }
+        unreachable!("a non-empty cycle repeats until the span ends")
+    }
+
+    /// Runs a wheel target and both wrap contact caches through `frames` on one rig clock, over
+    /// ground that rises uniformly with presented time (`elapsed + overstep`): each blended target
+    /// then decodes to the presented time of the pose it stands for. Asserts every target's age
+    /// is at most one tick and returns each frame's blend weight. ASSUMED synthetic geometry,
+    /// independent of tank assets.
+    fn follow_rising_ground(frames: &[Time<Fixed>]) -> Vec<f32> {
+        use std::cell::Cell;
+        struct Rising(Cell<f32>);
+        impl TerrainOracle for Rising {
+            fn depth_along(&self, _: Vec3, _: Vec3, _: f32) -> f32 {
+                self.0.get()
+            }
+        }
+        // ASSUMED rise rate (m/s): one second of it stays inside the probe reach.
+        const RISE: f32 = 0.1;
+        // ASSUMED decoding tolerance (s): f32 rounding, far below the extra tick of a late cursor.
+        const TOLERANCE_S: f32 = 1e-5;
+        // Front to rear is increasing z, so the bottom run's outward normals face the ground.
+        let circles = [
+            (Vec2::new(-2.0, 0.0), 0.5),
+            (Vec2::ZERO, 0.48),
+            (Vec2::new(2.0, 0.0), 0.5),
+        ];
+        let ground = Rising(Cell::new(0.0));
+        let mut clock = ContactClock::default();
+        let mut wheel = ContactTarget::default();
+        let mut states: [wrap::WrapState; 2] = Default::default();
+        let mut contacts = Default::default();
+        frames
+            .iter()
+            .map(|fixed| {
+                let presented = (fixed.elapsed() + fixed.overstep()).as_secs_f32();
+                ground.0.set(RISE * presented);
+                let (refresh, alpha) = clock.advance(fixed);
+                let lift = wheel.sample(refresh, true, alpha, || RISE * presented);
+                let input = wrap::WrapInput {
+                    // ASSUMED filter step: rising ground takes the belly ease's instant rise.
+                    dt: 1.0 / 64.0,
+                    affine: Affine3A::from_translation(Vec3::Z * presented),
+                    belt_len: 11.5,
+                    count: 80,
+                    pitch: 11.5 / 80.0,
+                    thickness: 0.04,
+                    probe_reach: PROBE_REACH,
+                    reference: false,
+                    sides: [-1.0, 1.0].map(|plane_x| wrap::WrapSideInput {
+                        circles: &circles,
+                        plane_x,
+                        lateral_stations: [-0.2, 0.0, 0.2],
+                        phase: 0.0,
+                    }),
+                };
+                wrap::step_cached(&input, &ground, &mut states, &mut contacts, refresh, alpha);
+                let tick = fixed.timestep().as_secs_f32();
+                // Mid-span between the road wheel and the idler: a ground-facing belly station.
+                let belly = [0, 1].map(|si| states[si].eased_depth(1.0));
+                for (what, target) in [
+                    ("wheel", lift),
+                    ("left belly", belly[0]),
+                    ("right belly", belly[1]),
+                ] {
+                    let age = presented - target / RISE;
+                    assert!(
+                        age <= tick + TOLERANCE_S,
+                        "{what} target {age} s behind the presented pose at {presented} s; \
+                         one tick is {tick} s"
+                    );
+                }
+                alpha
+            })
+            .collect()
     }
 
     /// A flat heightmap at zero with optional raised blocks, synthetic fixture geometry.
