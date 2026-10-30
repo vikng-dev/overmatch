@@ -161,12 +161,6 @@ pub(crate) enum Visual {
 }
 
 impl Visual {
-    fn takes_paint(&self) -> bool {
-        match self {
-            Self::Maps { takes_paint, .. } | Self::Flat { takes_paint, .. } => *takes_paint,
-        }
-    }
-
     /// The entry's own validity: a named pack, a positive repeat, factors in `0..=1`.
     fn checked(&self, key: &str) -> Result<(), String> {
         let unit = |field: &str, value: f32| {
@@ -283,12 +277,12 @@ impl Livery {
         }
         Ok(livery)
     }
+}
 
-    /// The camouflage pattern's path, relative to the asset root.
-    fn pattern_path(&self) -> Option<String> {
-        self.camouflage
-            .as_ref()
-            .map(|camouflage| format!("materials/camouflage/{}.ktx2", camouflage.pattern))
+impl Camouflage {
+    /// The pattern's path, relative to the asset root.
+    fn path(&self) -> String {
+        format!("materials/camouflage/{}.ktx2", self.pattern)
     }
 }
 
@@ -395,28 +389,64 @@ impl RestRow {
     }
 }
 
-/// A visual's maps, loaded once: its normal and ARM, and its albedo where the surface draws it.
-/// Paint covers the albedo whole, so a visual that takes paint never loads it.
+/// A pack's relief: its normal and ARM maps, which show under paint and without, and its scale.
 #[derive(Clone)]
-struct VisualMaps {
-    albedo: Option<Handle<Image>>,
+struct Relief {
     normal: Handle<Image>,
     arm: Handle<Image>,
+    /// One over the visual's `metres_per_repeat`.
+    repeats_per_metre: f32,
 }
 
-/// The surface material for the glb material `original`, of visual `visual`, under `livery`.
-/// `stand_in` is [`SurfaceVehicles`]'s: binding 101 holds it where no albedo is drawn.
+/// A library visual with the images it binds: the visual's half of a surface.
+#[derive(Clone)]
+enum Look {
+    /// The livery's paint over the visual. A pack's relief shows through; paint covers its albedo
+    /// whole, so the albedo is never loaded. A flat visual brings no relief.
+    Painted(Option<Relief>),
+    /// A pack's own albedo over its relief.
+    Pack {
+        albedo: Handle<Image>,
+        relief: Relief,
+    },
+    /// A flat visual's own colour and factors.
+    Flat {
+        colour: Srgb,
+        roughness: f32,
+        metallic: f32,
+    },
+}
+
+/// The livery as a painted surface binds it: the paint, and the camouflage with its pattern.
+#[derive(Clone)]
+struct Coat {
+    /// rgb: the paint, linear. a: its perceptual roughness, `1 − sheen`.
+    paint: Vec4,
+    camouflage: Option<CamouflageCoat>,
+}
+
+/// A livery's camouflage with its pattern loaded.
+#[derive(Clone)]
+struct CamouflageCoat {
+    /// For the pattern's R, G and B coverage in turn: the colour, linear rgb; a: 1 where the livery
+    /// names that colour.
+    colours: [Vec4; CAMO_COLOURS],
+    /// One over the camouflage's `metres_per_repeat`.
+    repeats_per_metre: f32,
+    pattern: Handle<Image>,
+}
+
+/// The surface material for the glb material `original`, of `look`, under `coat`. `stand_in` is
+/// [`SurfaceVehicles`]'s: binding 101 holds it where no albedo is drawn.
 fn surface_material(
     original: &StandardMaterial,
-    visual: &Visual,
-    maps: Option<VisualMaps>,
-    livery: &Livery,
-    pattern: Option<Handle<Image>>,
+    look: &Look,
+    coat: &Coat,
     stand_in: &Handle<Image>,
     rest_frames: Handle<ShaderBuffer>,
 ) -> TankSurfaceMaterial {
     // The glb material keeps its pipeline-shaping state (culling, sidedness, alpha mode); its maps
-    // and factors give way to the visual's.
+    // and factors give way to the visual's. Factors of 1 pass the maps and the paint through.
     let mut base = original.clone();
     base.base_color_texture = None;
     base.normal_map_texture = None;
@@ -424,70 +454,54 @@ fn surface_material(
     base.occlusion_texture = None;
     base.emissive_texture = None;
     base.uv_transform = default();
-    let mut flags = 0;
-    let mut visual_scale = 0.0;
-    match visual {
-        Visual::Maps {
-            metres_per_repeat, ..
-        } => {
-            // Factors of 1 pass the maps through.
-            base.base_color = Color::WHITE;
-            base.perceptual_roughness = 1.0;
-            base.metallic = 1.0;
-            visual_scale = 1.0 / metres_per_repeat.0;
-            flags |= FLAG_MAPS;
+    base.base_color = Color::WHITE;
+    base.perceptual_roughness = 1.0;
+    base.metallic = 1.0;
+    let mut params = TankSurfaceParams::default();
+    let mut albedo = stand_in;
+    let mut camo_pattern = None;
+    let relief = match look {
+        Look::Painted(relief) => {
+            params.flags |= FLAG_PAINT;
+            params.paint = coat.paint;
+            if let Some(camouflage) = &coat.camouflage {
+                [params.camo_r, params.camo_g, params.camo_b] = camouflage.colours;
+                params.scale.y = camouflage.repeats_per_metre;
+                params.flags |= FLAG_CAMO;
+                camo_pattern = Some(camouflage.pattern.clone());
+            }
+            relief.as_ref()
         }
-        Visual::Flat {
+        Look::Pack {
+            albedo: pack,
+            relief,
+        } => {
+            albedo = pack;
+            Some(relief)
+        }
+        Look::Flat {
             colour,
             roughness,
             metallic,
-            ..
         } => {
-            let [r, g, b] = colour.0.0;
+            let [r, g, b] = colour.0;
             base.base_color = Color::srgb_u8(r, g, b);
-            base.perceptual_roughness = roughness.0;
-            base.metallic = metallic.0;
+            base.perceptual_roughness = *roughness;
+            base.metallic = *metallic;
+            None
         }
-    }
-    let paint = &livery.paint;
-    let mut params = TankSurfaceParams {
-        paint: paint.colour.0.linear().extend(1.0 - paint.sheen.0),
-        scale: Vec4::new(visual_scale, 0.0, 0.0, 0.0),
-        ..default()
     };
-    if visual.takes_paint() {
-        flags |= FLAG_PAINT;
+    if let Some(relief) = relief {
+        params.scale.x = relief.repeats_per_metre;
+        params.flags |= FLAG_MAPS;
     }
-    let mut camo_pattern = None;
-    if let (Some(camouflage), Some(pattern)) = (&livery.camouflage, pattern)
-        && visual.takes_paint()
-    {
-        let colour = |k: usize| {
-            camouflage
-                .colours
-                .get(k)
-                .map_or(Vec4::ZERO, |colour| colour.0.linear().extend(1.0))
-        };
-        params.camo_r = colour(0);
-        params.camo_g = colour(1);
-        params.camo_b = colour(2);
-        params.scale.y = 1.0 / camouflage.metres_per_repeat.0;
-        flags |= FLAG_CAMO;
-        camo_pattern = Some(pattern);
-    }
-    params.flags = flags;
     TankSurfaceMaterial {
         base,
         extension: TankSurface {
             params,
-            visual_albedo: Some(
-                maps.as_ref()
-                    .and_then(|maps| maps.albedo.as_ref())
-                    .unwrap_or(stand_in)
-                    .clone(),
-            ),
-            visual_normal: maps.as_ref().map(|maps| maps.normal.clone()),
-            visual_arm: maps.map(|maps| maps.arm),
+            visual_albedo: Some(albedo.clone()),
+            visual_normal: relief.map(|relief| relief.normal.clone()),
+            visual_arm: relief.map(|relief| relief.arm.clone()),
             camo_pattern,
             rest_frames,
         },
@@ -507,13 +521,14 @@ struct Vehicle {
     materials: HashMap<AssetId<StandardMaterial>, Handle<TankSurfaceMaterial>>,
 }
 
-/// Every vehicle dressed so far, by its view scene, and the maps loaded for them.
+/// Every vehicle dressed so far, by its view scene, and the looks and the coat made for them.
 #[derive(Resource)]
 pub(crate) struct SurfaceVehicles {
     vehicles: HashMap<AssetId<WorldAsset>, Vehicle>,
-    /// By pack, and whether the visual takes paint.
-    maps: HashMap<(String, bool), VisualMaps>,
-    pattern: Option<Handle<Image>>,
+    /// Each library visual's look, by its key, its maps loaded on first use.
+    looks: HashMap<String, Look>,
+    /// The livery's coat, its pattern loaded on first use.
+    coat: Option<Coat>,
     /// Every map and pattern loaded, held by id for [`report_failed_surface_map`].
     required: HashSet<AssetId<Image>>,
     /// A 1×1 white image carrying the surface sampler ([`surface_sampler`]): what binding 101
@@ -537,8 +552,8 @@ impl FromWorld for SurfaceVehicles {
         stand_in.sampler = ImageSampler::Descriptor(surface_sampler(MapTiling::Repeat));
         Self {
             vehicles: HashMap::new(),
-            maps: HashMap::new(),
-            pattern: None,
+            looks: HashMap::new(),
+            coat: None,
             required: HashSet::new(),
             stand_in: world.resource_mut::<Assets<Image>>().add(stand_in),
         }
@@ -642,8 +657,8 @@ impl Dress<'_, '_> {
             .unwrap_or_default();
         let articulated = |name: &str| articulated.contains(name);
 
-        // Every primitive whose material names a visual, with the visual.
-        let worn: Vec<(Entity, Handle<StandardMaterial>, Visual)> = self
+        // Every primitive whose material names a visual, with the visual's key.
+        let worn: Vec<(Entity, Handle<StandardMaterial>, &str)> = self
             .tree
             .children
             .iter_descendants(root)
@@ -651,13 +666,13 @@ impl Dress<'_, '_> {
                 let (material, name) = self.tree.primitives.get(entity).ok()?;
                 let name = name.0.as_str();
                 let visual = registry.visual(name)?;
-                let visual = self.data.library.get(visual).unwrap_or_else(|| {
+                if self.data.library.get(visual).is_none() {
                     panic!(
                         "tank surface: material {name:?} names visual {visual:?}, which \
                          {VISUALS_PATH} does not carry"
-                    )
-                });
-                Some((entity, material.0.clone(), visual.clone()))
+                    );
+                }
+                Some((entity, material.0.clone(), visual))
             })
             .collect();
         if worn.is_empty() {
@@ -710,7 +725,7 @@ impl Dress<'_, '_> {
         }
 
         for (entity, original, visual) in worn {
-            let handle = self.material(scene, &original, &visual);
+            let handle = self.material(scene, &original, visual);
             let path = node_path(entity, root, &self.tree.parents, &self.tree.names);
             let vehicle = &self.vehicles.vehicles[&scene];
             let row = vehicle.rows.get(&path).copied().unwrap_or(0);
@@ -721,34 +736,22 @@ impl Dress<'_, '_> {
         }
     }
 
-    /// The vehicle's surface material for glb material `original`, made on first sight.
+    /// The vehicle's surface material for glb material `original`, of library visual `visual`,
+    /// made on first sight.
     fn material(
         &mut self,
         scene: AssetId<WorldAsset>,
         original: &Handle<StandardMaterial>,
-        visual: &Visual,
+        visual: &str,
     ) -> Handle<TankSurfaceMaterial> {
         if let Some(handle) = self.vehicles.vehicles[&scene].materials.get(&original.id()) {
             return handle.clone();
         }
-        let maps = match visual {
-            Visual::Maps {
-                maps, takes_paint, ..
-            } => Some(self.maps(maps, *takes_paint)),
-            Visual::Flat { .. } => None,
-        };
-        let pattern = self.pattern();
+        let look = self.look(visual);
+        let coat = self.coat();
         let base = self.standard.get(original).cloned().unwrap_or_default();
         let rest_frames = self.vehicles.vehicles[&scene].rest_frames.clone();
-        let made = surface_material(
-            &base,
-            visual,
-            maps,
-            &self.data.livery,
-            pattern,
-            &self.vehicles.stand_in,
-            rest_frames,
-        );
+        let made = surface_material(&base, &look, &coat, &self.vehicles.stand_in, rest_frames);
         let handle = self.surfaces.add(made);
         self.vehicles
             .vehicles
@@ -759,42 +762,101 @@ impl Dress<'_, '_> {
         handle
     }
 
-    /// A pack's maps, loaded on first use: its albedo only where `takes_paint` is false.
-    fn maps(&mut self, maps: &str, takes_paint: bool) -> VisualMaps {
-        let key = (maps.to_owned(), takes_paint);
-        if let Some(loaded) = self.vehicles.maps.get(&key) {
-            return loaded.clone();
+    /// The look of library visual `key`, its maps loaded on first use.
+    fn look(&mut self, key: &str) -> Look {
+        if let Some(look) = self.vehicles.looks.get(key) {
+            return look.clone();
         }
-        let load = |map: &str, encoding| {
-            surface_map(
-                &self.server,
-                &format!("{maps}_{map}.ktx2"),
-                encoding,
-                MapTiling::Repeat,
-            )
+        let visual = self
+            .data
+            .library
+            .get(key)
+            .expect("the dress checks every worn visual");
+        let look = match visual {
+            Visual::Maps {
+                maps,
+                metres_per_repeat,
+                takes_paint,
+            } => {
+                let load = |map: &str, encoding| {
+                    surface_map(
+                        &self.server,
+                        &format!("{maps}_{map}.ktx2"),
+                        encoding,
+                        MapTiling::Repeat,
+                    )
+                };
+                let relief = Relief {
+                    normal: load("nor_gl", MapEncoding::Linear),
+                    arm: load("arm", MapEncoding::Linear),
+                    repeats_per_metre: 1.0 / metres_per_repeat.0,
+                };
+                let albedo = (!takes_paint).then(|| load("diff", MapEncoding::Srgb));
+                let required = &mut self.vehicles.required;
+                required.extend([relief.normal.id(), relief.arm.id()]);
+                required.extend(albedo.as_ref().map(Handle::id));
+                match albedo {
+                    Some(albedo) => Look::Pack { albedo, relief },
+                    None => Look::Painted(Some(relief)),
+                }
+            }
+            Visual::Flat {
+                takes_paint: true, ..
+            } => Look::Painted(None),
+            Visual::Flat {
+                colour,
+                roughness,
+                metallic,
+                takes_paint: false,
+            } => Look::Flat {
+                colour: colour.0,
+                roughness: roughness.0,
+                metallic: metallic.0,
+            },
         };
-        let loaded = VisualMaps {
-            albedo: (!takes_paint).then(|| load("diff", MapEncoding::Srgb)),
-            normal: load("nor_gl", MapEncoding::Linear),
-            arm: load("arm", MapEncoding::Linear),
-        };
-        let required = &mut self.vehicles.required;
-        required.extend([loaded.normal.id(), loaded.arm.id()]);
-        required.extend(loaded.albedo.as_ref().map(Handle::id));
-        self.vehicles.maps.insert(key, loaded.clone());
-        loaded
+        self.vehicles.looks.insert(key.to_owned(), look.clone());
+        look
     }
 
-    /// The livery's camouflage pattern, loaded on first use; `None` without camouflage.
-    fn pattern(&mut self) -> Option<Handle<Image>> {
-        if self.vehicles.pattern.is_none()
-            && let Some(path) = self.data.livery.pattern_path()
-        {
-            let pattern = surface_map(&self.server, &path, MapEncoding::Linear, MapTiling::Repeat);
-            self.vehicles.required.insert(pattern.id());
-            self.vehicles.pattern = Some(pattern);
+    /// The livery's coat, its camouflage pattern loaded on first use.
+    fn coat(&mut self) -> Coat {
+        if let Some(coat) = &self.vehicles.coat {
+            return coat.clone();
         }
-        self.vehicles.pattern.clone()
+        let livery = &self.data.livery;
+        let camouflage = livery.camouflage.as_ref().map(|camouflage| {
+            let mut colours = [Vec4::ZERO; CAMO_COLOURS];
+            for (slot, colour) in colours.iter_mut().zip(&camouflage.colours) {
+                *slot = colour.0.linear().extend(1.0);
+            }
+            CamouflageCoat {
+                colours,
+                repeats_per_metre: 1.0 / camouflage.metres_per_repeat.0,
+                pattern: surface_map(
+                    &self.server,
+                    &camouflage.path(),
+                    MapEncoding::Linear,
+                    MapTiling::Repeat,
+                ),
+            }
+        });
+        let required = &mut self.vehicles.required;
+        required.extend(
+            camouflage
+                .as_ref()
+                .map(|camouflage| camouflage.pattern.id()),
+        );
+        let coat = Coat {
+            paint: livery
+                .paint
+                .colour
+                .0
+                .linear()
+                .extend(1.0 - livery.paint.sheen.0),
+            camouflage,
+        };
+        self.vehicles.coat = Some(coat.clone());
+        coat
     }
 }
 
@@ -875,7 +937,12 @@ mod tests {
                 files.push((format!("{maps}_arm.ktx2"), false));
             }
         }
-        files.extend(data.livery.pattern_path().map(|path| (path, false)));
+        files.extend(
+            data.livery
+                .camouflage
+                .as_ref()
+                .map(|camo| (camo.path(), false)),
+        );
         assert!(files.len() > 3, "the library ships packs");
         for (path, is_srgb) in files {
             let full = crate::assets::asset_root().join(&path);
@@ -967,7 +1034,7 @@ mod tests {
             r##"(paint: (colour: ("#9A8952", Tuned("fixture")), sheen: (0.1, Tuned("fixture"))), camouflage: None)"##,
         )
         .expect("a livery without camouflage parses");
-        assert_eq!(plain.pattern_path(), None);
+        assert!(plain.camouflage.is_none());
     }
 
     /// The app the dress runs in: the asset stores it writes, the shipped data, no render app.
@@ -1003,24 +1070,18 @@ mod tests {
             image.sampler,
             ImageSampler::Descriptor(surface_sampler(MapTiling::Repeat))
         );
-        let flat = Visual::Flat {
-            colour: Sourced(Srgb([0x20, 0x20, 0x20])),
-            roughness: Sourced(0.5),
-            metallic: Sourced(0.0),
-            takes_paint: true,
+        let coat = Coat {
+            paint: Vec4::ONE,
+            camouflage: Some(CamouflageCoat {
+                colours: [Vec4::ONE; CAMO_COLOURS],
+                repeats_per_metre: 0.25,
+                pattern: Handle::default(),
+            }),
         };
-        let livery = Livery::parse(
-            r##"(paint: (colour: ("#9A8952", Tuned("fixture")), sheen: (0.1, Tuned("fixture"))),
-                camouflage: Some((pattern: "p", metres_per_repeat: (4.0, Tuned("fixture")),
-                colours: [("#4B573E", Tuned("fixture"))])))"##,
-        )
-        .expect("the fixture livery parses");
         let made = surface_material(
             &StandardMaterial::default(),
-            &flat,
-            None,
-            &livery,
-            Some(Handle::default()),
+            &Look::Painted(None),
+            &coat,
             &stand_in,
             Handle::default(),
         );
@@ -1033,20 +1094,38 @@ mod tests {
     }
 
     /// A PAINTED VISUAL LOADS NO ALBEDO. The shader samples a pack's albedo only where no paint
-    /// covers it, so a visual that takes paint loads its normal and ARM alone, and its surface binds
-    /// the stand-in at 101; a bare visual loads all three. A mutant loading every albedo, or none,
-    /// fails here.
+    /// covers it, so a pack that takes paint looks [`Look::Painted`] with its normal and ARM alone,
+    /// and its surface binds the stand-in at 101; a bare pack loads all three, and a flat visual
+    /// that takes paint loads nothing. A mutant loading every albedo, or none, fails here.
     #[test]
     fn a_painted_visual_loads_its_relief_and_no_albedo() {
         let mut app = dress_app();
-        let [painted, bare] = app
+        let pack = |key: &str, takes_paint: bool| {
+            format!(
+                r#""{key}": Maps(maps: "fixture/pack", metres_per_repeat: (0.5, Tuned("fixture")), takes_paint: {takes_paint}),"#
+            )
+        };
+        let flat = r##""flat": Flat(colour: ("#202020", Tuned("fixture")), roughness: (0.5, Tuned("fixture")), metallic: (0.0, Tuned("fixture")), takes_paint: true),"##;
+        app.world_mut().resource_mut::<SurfaceData>().library = VisualLibrary::parse(&format!(
+            "(visuals: {{ {} {} {flat} }})",
+            pack("painted", true),
+            pack("bare", false),
+        ))
+        .expect("the fixture library parses");
+        let looks = app
             .world_mut()
             .run_system_once(|mut dress: Dress| {
-                [true, false].map(|takes_paint| dress.maps("fixture/pack", takes_paint))
+                ["painted", "bare", "flat"].map(|key| dress.look(key))
             })
-            .expect("the maps load");
-        assert!(painted.albedo.is_none(), "paint covers the albedo");
-        assert!(bare.albedo.is_some(), "a bare visual draws its albedo");
+            .expect("the looks load");
+        let [
+            Look::Painted(Some(painted)),
+            Look::Pack { relief: bare, .. },
+            Look::Painted(None),
+        ] = &looks
+        else {
+            panic!("a painted pack, a bare pack and a painted flat visual look as such");
+        };
         assert_eq!(painted.normal, bare.normal, "one relief, loaded once");
         let required = &app.world().resource::<SurfaceVehicles>().required;
         assert_eq!(
