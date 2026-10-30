@@ -57,12 +57,14 @@ TankSpec(
     display_name: "Testbed",
     mass: 1000.0,
     inertia_extents: (2.0, 1.0, 3.0),
+    turret: (mass: 100.0, inertia_extents: (1.0, 1.0, 1.0)),
     track: (
         link_count: 8,
         link_mass: 10.0,
         hinge_torque: 1.0,
         link_angle: (inward_deg: 20.0, outward_deg: 10.0),
-        sprocket: (teeth: 9),
+        sprocket: (teeth: 9, nodes: (left: "Sprocket_L", right: "Sprocket_R")),
+        idler: (nodes: (left: "Idler_L", right: "Idler_R")),
         powertrain: (
             max_speed: 10.0,
             power: 100000.0,

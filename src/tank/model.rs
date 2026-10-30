@@ -12,6 +12,16 @@ use crate::track::sim::{TrackContacts, TrackDrive, TrackGrip};
 #[derive(Component)]
 pub struct Turret;
 
+/// The turret's rigid-body data, built at spawn from the sheet's `turret` block, so the launch
+/// reads it from the entity rather than from the asset.
+#[derive(Component, Clone, Copy)]
+pub struct TurretBody {
+    /// Mass (kg).
+    pub mass: f32,
+    /// Full box dimensions (m) standing in for the angular-inertia distribution.
+    pub inertia_extents: Vec3,
+}
+
 #[derive(Component)]
 pub struct Gun;
 

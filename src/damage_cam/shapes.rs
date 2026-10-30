@@ -480,7 +480,7 @@ mod tests {
     /// over the tank file's own entries.
     #[test]
     fn every_component_resolves_to_its_real_mesh() {
-        let asset = TankAsset::load(crate::tank::TIGER_SPEC_PATH).unwrap();
+        let asset = TankAsset::load(crate::tank::TANK_SPEC_PATH).unwrap();
         let rest = asset.shapes(&BTreeMap::new());
         for (name, volume) in &asset.spec.volumes {
             if volume.component().is_none() {
@@ -497,7 +497,7 @@ mod tests {
     /// where it was; at least one servo carries a component.
     #[test]
     fn each_servo_turns_the_components_under_it_about_its_own_rest_frame() {
-        let asset = TankAsset::load(crate::tank::TIGER_SPEC_PATH).unwrap();
+        let asset = TankAsset::load(crate::tank::TANK_SPEC_PATH).unwrap();
         let geometry = &asset.geometry;
         let rest = asset.shapes(&BTreeMap::new());
         let mut carried = 0;

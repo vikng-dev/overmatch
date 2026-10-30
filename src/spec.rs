@@ -596,6 +596,8 @@ pub struct TrackSpec {
     /// construction, and two numbers that must agree are one number. Its centre (and every other
     /// running-gear circle) is measured off the glb markers (see [`crate::track::rig_geom`]).
     pub sprocket: SprocketSpec,
+    /// Idler: the model nodes of its two meshes. Its circle is measured off the glb markers.
+    pub idler: IdlerSpec,
     /// The drivetrain spinning this track (phase B — the locomotion sim IS the track model).
     pub powertrain: PowertrainSpec,
     /// The ride model — the contact-envelope law derives its spring rate and damping from
@@ -923,12 +925,55 @@ impl SuspensionSpec {
     }
 }
 
-/// See [`TrackSpec::sprocket`]. Tooth count only — the sprocket's centre and pitch radius are
-/// measured/derived off the glb markers, never authored.
-#[derive(Deserialize, Clone, Copy)]
+/// See [`TrackSpec::sprocket`]. Tooth count and the two view nodes — the sprocket's centre and
+/// pitch radius are measured/derived off the glb markers, never authored.
+#[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SprocketSpec {
     pub teeth: u32,
+    /// The model nodes of the two sprocket meshes, one per side: the view nodes the belt's tooth
+    /// lock turns.
+    pub nodes: SideNodes,
+}
+
+/// See [`TrackSpec::idler`].
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct IdlerSpec {
+    pub nodes: SideNodes,
+}
+
+/// The turret's rigid-body data for the free flight after a cook-off launch (the damage model's
+/// launched-turret consequence). Mirrors the hull's [`TankSpec::mass`] and
+/// [`TankSpec::inertia_extents`].
+#[derive(Deserialize, Clone, Copy)]
+#[serde(deny_unknown_fields)]
+pub struct TurretSpec {
+    /// Mass (kg) of the turret with everything it carries.
+    pub mass: f32,
+    /// Full box dimensions (x, y, z metres) approximating its angular-inertia distribution.
+    pub inertia_extents: (f32, f32, f32),
+}
+
+/// One model node name per track side.
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct SideNodes {
+    pub left: String,
+    pub right: String,
+}
+
+impl SideNodes {
+    /// The side index the track view uses, `0` left and `1` right; `None` for any other name.
+    pub fn side_of(&self, name: &str) -> Option<usize> {
+        if name == self.left {
+            Some(0)
+        } else if name == self.right {
+            Some(1)
+        } else {
+            None
+        }
+    }
 }
 
 /// How far one pin joint may fold, per DIRECTION — a fact about the shoe, not a feel knob.
@@ -968,6 +1013,9 @@ pub struct TankSpec {
     pub mass: f32,
     /// Hull box full dimensions (x, y, z metres) approximating the angular-inertia distribution.
     pub inertia_extents: (f32, f32, f32),
+    /// The turret as a free body once a cook-off blows it off: its own mass and inertia box, which
+    /// the hull's `mass` / `inertia_extents` do not describe.
+    pub turret: TurretSpec,
     /// Continuous-track running gear, material loop, powertrain, and contact law — the
     /// locomotion spec (phase B: the track model IS the driving sim) and the track view's
     /// per-vehicle data.
@@ -1213,6 +1261,33 @@ impl TankSpec {
         }
         if t.sprocket.teeth == 0 {
             return Err("track.sprocket.teeth must be > 0".into());
+        }
+        let turret = &self.turret;
+        for (what, value) in [
+            ("turret.mass", turret.mass),
+            ("turret.inertia_extents.0", turret.inertia_extents.0),
+            ("turret.inertia_extents.1", turret.inertia_extents.1),
+            ("turret.inertia_extents.2", turret.inertia_extents.2),
+        ] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(format!("{what} must be finite and > 0 (got {value})").into());
+            }
+        }
+        // Four view nodes the belt binds by name: a blank or repeated one binds two roles to one
+        // node, or none.
+        let gear = [
+            &t.sprocket.nodes.left,
+            &t.sprocket.nodes.right,
+            &t.idler.nodes.left,
+            &t.idler.nodes.right,
+        ];
+        for (i, name) in gear.iter().enumerate() {
+            if name.is_empty() || gear[..i].contains(name) {
+                return Err(format!(
+                    "track.sprocket/idler nodes must be four distinct non-empty names (got `{name}`)"
+                )
+                .into());
+            }
         }
         // Both hinge stops are MAGNITUDES, so both must be positive; 90° is the ceiling because a
         // joint that folds further has already buried the next shoe in this one on any real track.
@@ -1628,12 +1703,14 @@ TankSpec(
     display_name: "Fixture",
     mass: 30_000.0,
     inertia_extents: (3.0, 2.0, 6.0),
+    turret: (mass: 5_000.0, inertia_extents: (2.0, 1.0, 2.0)),
     track: (
         link_count: 80,
         link_mass: 20.0,
         hinge_torque: 30.0,
         link_angle: (inward_deg: 40.0, outward_deg: 18.0),
-        sprocket: (teeth: 16),
+        sprocket: (teeth: 16, nodes: (left: "Sprocket_L", right: "Sprocket_R")),
+        idler: (nodes: (left: "Idler_L", right: "Idler_R")),
         powertrain: (
             max_speed: 8.0,
             power: 200_000.0,
@@ -1776,6 +1853,36 @@ TankSpec(
         fixture()
             .validate()
             .expect("the mutation fixture must be valid before any mutation");
+    }
+
+    /// The belt binds its sprocket and idler view nodes by the sheet's names, so two roles on one
+    /// node (or a blank) must be refused, and `side_of` must map each declared name to its side.
+    #[test]
+    fn running_gear_nodes_are_four_distinct_names() {
+        let mut spec = fixture();
+        spec.track.idler.nodes.left = spec.track.sprocket.nodes.right.clone();
+        assert!(spec.validate().is_err());
+        let mut spec = fixture();
+        spec.track.idler.nodes.right = String::new();
+        assert!(spec.validate().is_err());
+        let spec = fixture();
+        assert_eq!(spec.track.sprocket.nodes.side_of("Sprocket_L"), Some(0));
+        assert_eq!(spec.track.sprocket.nodes.side_of("Sprocket_R"), Some(1));
+        assert_eq!(spec.track.sprocket.nodes.side_of("Idler_L"), None);
+        assert_eq!(spec.track.idler.nodes.side_of("Idler_R"), Some(1));
+    }
+
+    /// FIXTURE DATA (the shipped sheet): the node names the belt bound by literal before they
+    /// moved into the sheet.
+    #[test]
+    fn the_shipped_sheet_declares_the_running_gear_nodes_once_bound_by_literal() {
+        let spec: TankSpec = ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron"))
+            .expect("the shipped sheet parses");
+        let t = &spec.track;
+        assert_eq!(t.sprocket.nodes.left, "Sprocket_L");
+        assert_eq!(t.sprocket.nodes.right, "Sprocket_R");
+        assert_eq!(t.idler.nodes.left, "Idler_L");
+        assert_eq!(t.idler.nodes.right, "Idler_R");
     }
 
     /// **A view frames the field it authors, and the magnification is not a term in it.** Both

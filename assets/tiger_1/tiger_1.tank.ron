@@ -4,6 +4,10 @@ TankSpec(
     display_name: "Tiger I",
     mass: 57_000.0,
     inertia_extents: (3.0, 2.0, 6.3),
+    // The turret as the free body a cook-off launch makes of it: its mass (kg) and the full
+    // dimensions (m) of the box standing in for its angular-inertia distribution. ASSUMED
+    // round figures; no source read.
+    turret: ( mass: 8_000.0, inertia_extents: (3.0, 1.2, 2.4) ),
     // Continuous track (track architecture §7). link_count 97 = the marker-derived window's
     // lowest SPRING-limited count (window 96..97 at ride_frequency 1.2 Hz): full suspension
     // travel with the minimum slack that permits it — playtest-confirmed 2026-07-24. The real
@@ -40,7 +44,9 @@ TankSpec(
         // sprocket centre and every other running-gear circle are measured off the glb too.
         // Reductions absorb the radius (speeds are anchored), so the tooth count is feel-neutral
         // for the transmission.
-        sprocket: ( teeth: 20 ),
+        sprocket: ( teeth: 20, nodes: ( left: "Sprocket_L", right: "Sprocket_R" ) ),
+        // The idler meshes' view nodes, one per side.
+        idler: ( nodes: ( left: "Idler_L", right: "Idler_R" ) ),
         // Phase-B locomotion: the SANDBOX force law scaled to the Tiger (the retired raycast
         // sim was a placeholder — nothing structural carries over). Stiff sandbox governor;
         // the contact-envelope law derives its spring/damper from `suspension` below (same

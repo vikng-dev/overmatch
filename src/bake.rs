@@ -753,7 +753,7 @@ fn extract_at_startup(mut commands: Commands) {
     // travels with it. The server opens this file and no other; the client opens it too, so both
     // sides walk identical accessor bytes by construction. `geometry_lod` has already fingerprinted
     // it against the certificate by the time this runs.
-    let path = root.join(crate::tank::TIGER_SIM_GLB_PATH);
+    let path = root.join(crate::tank::TANK_SIM_GLB_PATH);
     let asset = certify_asset(&path, TIGER_SPEC_RON, &SubstanceRegistry::shipped())
         .unwrap_or_else(|findings| {
         panic!(
@@ -782,7 +782,7 @@ fn extract_at_startup(mut commands: Commands) {
     );
 
     commands.insert_resource(TankBlueprint {
-        file: crate::tank::TIGER_SPEC_PATH.to_owned(),
+        file: crate::tank::TANK_SPEC_PATH.to_owned(),
         geometry: Arc::new(asset.geometry),
         spec: Arc::new(asset.spec),
     });
@@ -1841,8 +1841,8 @@ mod tests {
                 .collect()
         };
 
-        let sim = root.join(crate::tank::TIGER_SIM_GLB_PATH);
-        let view = root.join(crate::tank::TIGER_GLB_PATH);
+        let sim = root.join(crate::tank::TANK_SIM_GLB_PATH);
+        let view = root.join(crate::tank::TANK_GLB_PATH);
         assert_eq!(
             fingerprint(&extract(&sim)),
             fingerprint(&extract(&sim)),

@@ -425,12 +425,10 @@ fn bind_track_rigs(
                 let si = (wheel.side == TrackSide::Right) as usize;
                 side_wheels[si].push((transform.translation, transform.rotation, view.0));
             } else if let Ok(name) = names.get(entity) {
-                match name.as_str() {
-                    "Sprocket_L" => sprocket_view[0] = Some(entity),
-                    "Sprocket_R" => sprocket_view[1] = Some(entity),
-                    "Idler_L" => idler_view[0] = Some(entity),
-                    "Idler_R" => idler_view[1] = Some(entity),
-                    _ => {}
+                if let Some(side) = spec.sprocket.nodes.side_of(name) {
+                    sprocket_view[side] = Some(entity);
+                } else if let Some(side) = spec.idler.nodes.side_of(name) {
+                    idler_view[side] = Some(entity);
                 }
             }
         }

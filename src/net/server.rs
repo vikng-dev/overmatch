@@ -1205,17 +1205,17 @@ mod tests {
         use std::sync::Arc;
 
         let root = crate::assets::asset_root();
-        let spec_ron = std::fs::read_to_string(root.join(crate::tank::TIGER_SPEC_PATH))
+        let spec_ron = std::fs::read_to_string(root.join(crate::tank::TANK_SPEC_PATH))
             .expect("the shipped spec sheet");
         let asset = crate::bake::certify_asset(
-            &root.join(crate::tank::TIGER_SIM_GLB_PATH),
+            &root.join(crate::tank::TANK_SIM_GLB_PATH),
             &spec_ron,
             &crate::substances::SubstanceRegistry::shipped(),
         )
         .unwrap_or_else(|_| panic!("the shipped sim artifact certifies"));
         let mut app = App::new();
         app.insert_resource(crate::bake::TankBlueprint {
-            file: crate::tank::TIGER_SPEC_PATH.to_owned(),
+            file: crate::tank::TANK_SPEC_PATH.to_owned(),
             geometry: Arc::new(asset.geometry),
             spec: Arc::new(asset.spec),
         })

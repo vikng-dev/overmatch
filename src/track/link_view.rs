@@ -1316,7 +1316,7 @@ mod tests {
     /// through `geometry_lod`.
     fn shoe_chain() -> crate::geometry_lod::Chain {
         let root = crate::assets::asset_root();
-        crate::geometry_lod::certificate::load(&root, crate::geometry_lod::TIGER_ID)
+        crate::geometry_lod::certificate::load(&root, crate::geometry_lod::TANK_ID)
             .chains
             .remove(&shoe_chain_key())
             .expect("the shipped certificate names the shoe's chain")
@@ -2148,7 +2148,7 @@ mod tests {
     fn shipped_reduced_shoe(glb: &str) -> Mesh {
         let path = crate::geometry_lod::certificate::member_path(
             &crate::assets::asset_root(),
-            crate::geometry_lod::TIGER_ID,
+            crate::geometry_lod::TANK_ID,
             crate::geometry_lod::TrioMember::View,
         );
         let gltf::Gltf { document, mut blob } =
@@ -2680,7 +2680,7 @@ mod tests {
     fn the_shipped_template_is_authored_at_unit_scale() {
         use bevy::math::Mat4;
 
-        let path = crate::assets::asset_root().join(crate::tank::TIGER_GLB_PATH);
+        let path = crate::assets::asset_root().join(crate::tank::TANK_GLB_PATH);
         let gltf::Gltf { document, .. } = gltf::Gltf::open(&path).expect("the Tiger glb opens");
         let scene = document.scenes().next().expect("the glb carries a scene");
         let mut stack: Vec<(gltf::Node, Mat4)> =

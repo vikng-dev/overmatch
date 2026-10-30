@@ -516,8 +516,8 @@ struct PendingTarget(TankPresentation);
 /// The seed tank's presentation, the target the next [`spawn_target_from_blueprint`] builds.
 fn pending_target(asset_server: &AssetServer) -> PendingTarget {
     PendingTarget(TankPresentation::new(
-        Some(asset_server.load(GltfAssetLabel::Scene(0).from_asset(crate::tank::TIGER_GLB_PATH))),
-        asset_server.load(crate::tank::TIGER_SPEC_PATH),
+        Some(asset_server.load(GltfAssetLabel::Scene(0).from_asset(crate::tank::TANK_GLB_PATH))),
+        asset_server.load(crate::tank::TANK_SPEC_PATH),
     ))
 }
 

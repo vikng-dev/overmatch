@@ -210,7 +210,7 @@ fn record_edited(
     let facts = ShotFacts {
         shooter: Some(Shooter {
             name: FIXTURE_SHOOTER.to_owned(),
-            vehicle: crate::tank::TIGER_SPEC_PATH.to_owned(),
+            vehicle: crate::tank::TANK_SPEC_PATH.to_owned(),
         }),
         launch: origin,
         muzzle: scenario.muzzle.map(|muzzle| PROBE_TANK_AT + muzzle),
@@ -218,7 +218,7 @@ fn record_edited(
         caliber_mm: body.caliber * 1000.0,
         mass_kg: body.mass,
         round: key.to_owned(),
-        vehicle: Some(crate::tank::TIGER_SPEC_PATH.to_owned()),
+        vehicle: Some(crate::tank::TANK_SPEC_PATH.to_owned()),
     };
     let gated = app
         .world()
@@ -293,7 +293,7 @@ fn an_elevated_gun_shot_draws_the_barrel_where_the_path_crosses_it() {
         .world()
         .get::<GlobalTransform>(rig.hull)
         .expect("a posed hull");
-    let asset = TankAsset::load(crate::tank::TIGER_SPEC_PATH).expect("the bound tank loads");
+    let asset = TankAsset::load(crate::tank::TANK_SPEC_PATH).expect("the bound tank loads");
     let at_rest = asset.shapes(&BTreeMap::new());
     let elevated = asset.shapes(&BTreeMap::from([(gun.clone(), ELEVATION_DEG)]));
     let spec = app

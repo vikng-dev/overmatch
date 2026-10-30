@@ -13,7 +13,7 @@ use crate::bake::TankBlueprint;
 use crate::command::TankCommand;
 use crate::spec::TankSpec;
 use crate::state::AppState;
-use crate::tank::{Controlled, PendingTankAssets, TIGER_GLB_PATH, Tank};
+use crate::tank::{Controlled, PendingTankAssets, TANK_GLB_PATH, Tank};
 
 /// Backstop only — NOT a performance budget. With the boots serialized (see [`BOOT_LEASE`]) a boot
 /// has the whole box to itself, so it finishes in seconds; this bound exists purely so a genuine
@@ -223,7 +223,7 @@ fn boot_diagnosis(app: &App, elapsed: Duration) -> String {
 
     // Size on disk catches the other way this can break: a Git LFS **pointer file** (~130 bytes of
     // text) instead of the 65 MB model, which is what a checkout without `lfs: true` leaves behind.
-    let glb = crate::assets::asset_root().join(TIGER_GLB_PATH);
+    let glb = crate::assets::asset_root().join(TANK_GLB_PATH);
     let glb_report = match std::fs::metadata(&glb) {
         Ok(m) if m.len() < 1024 => format!(
             "{} — {} bytes: THIS IS A GIT LFS POINTER, not the model (checkout without `lfs: true`)",

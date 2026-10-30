@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::ballistics::ComponentHealth;
 use crate::command::{ConsumeCommandEdges, CrewSwap, TankCommand};
 use crate::state::GameplaySet;
-use crate::tank::{Controlled, Rig, ServoCommand, ServoIndex, ServoSpec, Tank, Turret};
+use crate::tank::{Controlled, Rig, ServoCommand, ServoIndex, ServoSpec, Tank, Turret, TurretBody};
 
 /// Semantic ownership: a ballistic volume belongs to a tank for gameplay aggregation. This is
 /// separate from `ChildOf`, which remains the model/transform hierarchy.
@@ -611,13 +611,16 @@ fn launch_turrets_on_cookoff(
     // turret via `net::protocol::LaunchedTurretPose`. This whole chain is already gated authority-only
     // at the plugin (`Without` `ClientReplica`), so no per-system replica guard is needed here.
     cooked_ammo: Query<&VolumeOf, (With<CookedOff>, Added<CookedOff>)>,
-    turrets: Query<(Entity, &GlobalTransform), (With<Turret>, Without<LaunchedTurret>)>,
+    turrets: Query<
+        (Entity, &GlobalTransform, &TurretBody),
+        (With<Turret>, Without<LaunchedTurret>),
+    >,
     parents: Query<&ChildOf>,
     mut commands: Commands,
 ) {
     for ammo_owner in &cooked_ammo {
         let tank = ammo_owner.tank();
-        for (turret, global) in &turrets {
+        for (turret, global, body) in &turrets {
             if !is_descendant_of(turret, tank, &parents) {
                 continue;
             }
@@ -625,7 +628,6 @@ fn launch_turrets_on_cookoff(
             let up = Vec3::from(global.up());
             let right = Vec3::from(global.right());
             let forward = Vec3::from(global.forward());
-            const TURRET_MASS: f32 = 8_000.0;
             // Detach FIRST, then insert the free body — in one command batch so `ChildOf` is gone
             // before avian's `RigidBody` on-add hook (`init_physics_transform`) fires. That hook
             // runs at command-flush time via `DeferredWorld`, and if `ChildOf` is still present it
@@ -643,8 +645,15 @@ fn launch_turrets_on_cookoff(
                     Rotation(pose.rotation),
                     pose,
                     crate::eased_dynamic_body(),
-                    Mass(TURRET_MASS),
-                    AngularInertia::from_shape(&Cuboid::new(3.0, 1.2, 2.4), TURRET_MASS),
+                    Mass(body.mass),
+                    AngularInertia::from_shape(
+                        &Cuboid::new(
+                            body.inertia_extents.x,
+                            body.inertia_extents.y,
+                            body.inertia_extents.z,
+                        ),
+                        body.mass,
+                    ),
                     NoAutoMass,
                     NoAutoAngularInertia,
                     LinearVelocity(up * 14.0 + forward * 3.0),
@@ -785,5 +794,49 @@ mod tests {
             vec![Part::Loader],
         )]))];
         assert!((evaluate(&req, &q(&[(Part::Loader, 0.6)])) - 0.6).abs() < 1e-6);
+    }
+
+    /// The launched turret's rigid body is whatever its own `TurretBody` says: mass and the box
+    /// its inertia is taken over. A launch that carried a constant would hand the second tank the
+    /// first one's turret.
+    #[test]
+    fn a_launched_turret_takes_its_mass_and_inertia_from_its_body_data() {
+        use super::*;
+        let mut app = App::new();
+        app.add_systems(Update, launch_turrets_on_cookoff);
+        let tank = app.world_mut().spawn_empty().id();
+        app.world_mut().spawn((VolumeOf(tank), CookedOff));
+        let extents = Vec3::new(2.0, 1.5, 3.0);
+        let turret = app
+            .world_mut()
+            .spawn((
+                Turret,
+                TurretBody {
+                    mass: 1234.0,
+                    inertia_extents: extents,
+                },
+                ChildOf(tank),
+                GlobalTransform::default(),
+            ))
+            .id();
+        app.update();
+        let world = app.world();
+        assert!(world.get::<LaunchedTurret>(turret).is_some());
+        assert_eq!(world.get::<Mass>(turret).unwrap().0, 1234.0);
+        let expected = AngularInertia::from_shape(&Cuboid::new(2.0, 1.5, 3.0), 1234.0);
+        assert_eq!(
+            world.get::<AngularInertia>(turret).unwrap().tensor(),
+            expected.tensor()
+        );
+    }
+
+    /// FIXTURE DATA (the shipped sheet): the launched turret's mass and inertia box before they
+    /// moved out of the launch system (8 000 kg over a 3.0 x 1.2 x 2.4 m box).
+    #[test]
+    fn the_shipped_sheet_carries_the_turret_the_launch_once_hard_coded() {
+        let spec: crate::spec::TankSpec =
+            ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron")).unwrap();
+        assert_eq!(spec.turret.mass, 8_000.0);
+        assert_eq!(spec.turret.inertia_extents, (3.0, 1.2, 2.4));
     }
 }

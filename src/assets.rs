@@ -64,6 +64,33 @@ const BAKED_MANIFEST_DIR: Option<&str> = if cfg!(debug_assertions) {
     None
 };
 
+/// THE SELECTION: the id of the one tank this build spawns. The tank's trio lives at
+/// `assets/<id>/<id>.{glb,sim.glb,tank.ron,lod.json}`; every path in the program is derived from
+/// this id by [`tank_file!`], so choosing another vehicle is this literal and nothing else. It is
+/// a macro, not a `const`, because `concat!` takes only literals and the paths are `const`.
+macro_rules! tank_id {
+    () => {
+        "tiger_1"
+    };
+}
+
+/// `<id>/<id><suffix>` for the selected tank, as the asset server addresses it.
+macro_rules! tank_file {
+    ($suffix:literal) => {
+        concat!(
+            $crate::assets::tank_id!(),
+            "/",
+            $crate::assets::tank_id!(),
+            $suffix
+        )
+    };
+}
+
+pub(crate) use {tank_file, tank_id};
+
+/// The selected tank's asset id.
+pub(crate) const TANK_ID: &str = tank_id!();
+
 /// The `assets/` directory this process reads from — the thin env-reading wrapper over the pure
 /// [`asset_root_from`]. Used both as `AssetPlugin`'s `file_path` (`net::client`) and as the bake
 /// extractor's glb base (`bake::extract_at_startup`), so the two never disagree on which file they
@@ -85,6 +112,18 @@ pub(crate) fn asset_root() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// FIXTURE DATA (the shipped tank): the id and the trio paths the program derives. Every
+    /// consumer reaches the files only through these, so a wrong suffix or a dropped `<id>/`
+    /// directory fails here and not at a missing-file panic.
+    #[test]
+    fn the_selected_tank_derives_its_trio_paths() {
+        assert_eq!(TANK_ID, "tiger_1");
+        assert_eq!(tank_file!(".glb"), "tiger_1/tiger_1.glb");
+        assert_eq!(tank_file!(".sim.glb"), "tiger_1/tiger_1.sim.glb");
+        assert_eq!(tank_file!(".tank.ron"), "tiger_1/tiger_1.tank.ron");
+        assert_eq!(tank_file!(".lod.json"), "tiger_1/tiger_1.lod.json");
+    }
 
     /// `BEVY_ASSET_ROOT` wins over a set `CARGO_MANIFEST_DIR`, over a baked manifest dir and over
     /// any exe layout — the dedicated server relies on this (it sets

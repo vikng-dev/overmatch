@@ -11,8 +11,8 @@ use bevy::prelude::*;
 use super::integrity::authored_attachment;
 use super::model::{
     EngineSound, Gun, GunBarrel, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot, TankServos, TankSim,
-    TankViews, TrackSide, Turret, ViewConfig, Weapon, WeaponGate, WeaponGateState, WeaponIndex,
-    WeaponLoad, WeaponLoads, WeaponState,
+    TankViews, TrackSide, Turret, TurretBody, ViewConfig, Weapon, WeaponGate, WeaponGateState,
+    WeaponIndex, WeaponLoad, WeaponLoads, WeaponState,
 };
 use super::servo::{RemoteServos, ServoCommand, ServoIndex, ServoRest, ServoRole, ServoSpec};
 use super::view::{SimParts, bind_tank_view};
@@ -57,11 +57,11 @@ impl PendingTankAssets {
             ),
             _ => false,
         };
-        resolved(TIGER_SPEC_PATH, asset_server.load_state(&self.spec))
+        resolved(TANK_SPEC_PATH, asset_server.load_state(&self.spec))
             && self
                 .scene
                 .as_ref()
-                .is_none_or(|scene| resolved(TIGER_GLB_PATH, asset_server.load_state(scene)))
+                .is_none_or(|scene| resolved(TANK_GLB_PATH, asset_server.load_state(scene)))
     }
 
     /// Clone handles for a root; the spec handle remains available to presentation validation.
@@ -107,15 +107,15 @@ impl TankPresentation {
 
 /// The VIEW artifact — scene, textures and every certified rung. The presentation loader's file,
 /// and no simulation's (ADR-0035).
-pub(crate) const TIGER_GLB_PATH: &str = "tiger_1/tiger_1.glb";
+pub(crate) const TANK_GLB_PATH: &str = crate::assets::tank_file!(".glb");
 
 /// The SIM artifact — rung-0 geometry and material names, no textures, no UVs, no rungs. The ONE
 /// file the ballistic/armour walk is extracted from, on the dedicated server and on the client
 /// alike, so both sides walk identical accessor bytes by construction rather than by convention.
-pub(crate) const TIGER_SIM_GLB_PATH: &str = "tiger_1/tiger_1.sim.glb";
+pub(crate) const TANK_SIM_GLB_PATH: &str = crate::assets::tank_file!(".sim.glb");
 
 /// The spec sheet beside them.
-pub(crate) const TIGER_SPEC_PATH: &str = "tiger_1/tiger_1.tank.ron";
+pub(crate) const TANK_SPEC_PATH: &str = crate::assets::tank_file!(".tank.ron");
 
 /// Synchronous construction data. This source never reads Bevy asset readiness.
 #[derive(SystemParam)]
@@ -153,8 +153,8 @@ impl<'a> TankContent<'a> {
 /// The windowed compositions' load: the spec sheet and the view artifact's scene.
 pub(crate) fn load_tank_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(PendingTankAssets {
-        spec: asset_server.load(TIGER_SPEC_PATH),
-        scene: Some(asset_server.load(GltfAssetLabel::Scene(0).from_asset(TIGER_GLB_PATH))),
+        spec: asset_server.load(TANK_SPEC_PATH),
+        scene: Some(asset_server.load(GltfAssetLabel::Scene(0).from_asset(TANK_GLB_PATH))),
     });
 }
 
@@ -162,7 +162,7 @@ pub(crate) fn load_tank_assets(mut commands: Commands, asset_server: Res<AssetSe
 /// server through `bake`'s startup extraction, not through the asset server.
 pub(crate) fn load_tank_sim_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
     commands.insert_resource(PendingTankAssets {
-        spec: asset_server.load(TIGER_SPEC_PATH),
+        spec: asset_server.load(TANK_SPEC_PATH),
         scene: None,
     });
 }
@@ -1003,7 +1003,14 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
     let muzzle = entity_at(nodes.primary_muzzle);
     commands.entity(hull).insert(Hull);
     commands.entity(gun).insert(Gun);
-    commands.entity(turret).insert(Turret);
+    let (tx, ty, tz) = spec.turret.inertia_extents;
+    commands.entity(turret).insert((
+        Turret,
+        TurretBody {
+            mass: spec.turret.mass,
+            inertia_extents: Vec3::new(tx, ty, tz),
+        },
+    ));
 
     insert_root_components(
         commands,

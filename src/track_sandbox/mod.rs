@@ -1118,7 +1118,7 @@ fn rig_unbuilt(geom: Option<Res<RigGeom>>, blueprint: Option<Res<TankBlueprint>>
 /// every question the view glb did — and this tool exists to reproduce the sim, so it must read
 /// what the sim reads.
 fn tiger_sim_glb() -> std::path::PathBuf {
-    crate::assets::asset_root().join(crate::tank::TIGER_SIM_GLB_PATH)
+    crate::assets::asset_root().join(crate::tank::TANK_SIM_GLB_PATH)
 }
 
 /// Build the whole rig, ONCE, the frame the blueprint becomes visible: derive [`RigGeom`], spawn the
@@ -1308,7 +1308,7 @@ fn build_rig(
             parent.spawn((
                 WorldAssetRoot(
                     asset_server
-                        .load(GltfAssetLabel::Scene(0).from_asset(crate::tank::TIGER_GLB_PATH)),
+                        .load(GltfAssetLabel::Scene(0).from_asset(crate::tank::TANK_GLB_PATH)),
                 ),
                 Transform::IDENTITY,
                 Visibility::default(),

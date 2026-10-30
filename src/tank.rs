@@ -28,8 +28,8 @@ pub(crate) use model::rig_world_pose;
 )]
 pub use model::{
     Controlled, EngineSound, Hull, Muzzle, Rig, Roadwheel, Tank, TankRoot, TankServos, TankSim,
-    TankViews, TrackSide, Turret, ViewConfig, Weapon, WeaponGate, WeaponGateState, WeaponIndex,
-    WeaponLoad, WeaponLoads, WeaponRound,
+    TankViews, TrackSide, Turret, TurretBody, ViewConfig, Weapon, WeaponGate, WeaponGateState,
+    WeaponIndex, WeaponLoad, WeaponLoads, WeaponRound,
 };
 pub use scenario::{client_plugin, sp_spawn_plugin};
 pub(crate) use servo::RemoteServos;
@@ -40,11 +40,11 @@ pub use servo::{
 };
 #[cfg(test)]
 pub(crate) use servo::{ServoRest, drive_servos, restore_servo_truth};
-pub(crate) use spawn::TIGER_SPEC_PATH;
+pub(crate) use spawn::TANK_SPEC_PATH;
 #[cfg(any(feature = "bitprobe", feature = "dev_tools", test))]
 pub(crate) use spawn::spawn_headless_tank;
 pub(crate) use spawn::{
-    PendingTankAssets, TIGER_GLB_PATH, TIGER_SIM_GLB_PATH, TankContent, TankPresentation,
+    PendingTankAssets, TANK_GLB_PATH, TANK_SIM_GLB_PATH, TankContent, TankPresentation,
     TankSimSource, attach_replicated_tank_body, load_tank_assets, load_tank_sim_assets,
     spawn_complete_tank,
 };

@@ -189,12 +189,14 @@ TankSpec(
     display_name: \"Fixture\",
     mass: 1.0,
     inertia_extents: (1.0, 1.0, 1.0),
+    turret: (mass: 1.0, inertia_extents: (1.0, 1.0, 1.0)),
     track: (
         link_count: 3,
         link_mass: 1.0,
         hinge_torque: 1.0,
         link_angle: (inward_deg: 40.0, outward_deg: 18.0),
-        sprocket: (teeth: 1),
+        sprocket: (teeth: 1, nodes: (left: \"Sprocket_L\", right: \"Sprocket_R\")),
+        idler: (nodes: (left: \"Idler_L\", right: \"Idler_R\")),
         powertrain: (
             max_speed: 1.0,
             power: 1.0,

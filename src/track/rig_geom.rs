@@ -804,7 +804,7 @@ pub(crate) fn tiger_spec() -> crate::spec::TankSpec {
 /// helpers would be two things to keep in step.
 #[cfg(test)]
 pub(crate) fn tiger_rig() -> RigGeom {
-    let glb = crate::assets::asset_root().join(crate::tank::TIGER_SIM_GLB_PATH);
+    let glb = crate::assets::asset_root().join(crate::tank::TANK_SIM_GLB_PATH);
     let spec = tiger_spec();
     let geometry = crate::bake::extract_tank_geometry(
         &glb,
@@ -814,7 +814,7 @@ pub(crate) fn tiger_rig() -> RigGeom {
     .expect("the Tiger glb extracts");
     let (teeth, link_count) = (spec.track.sprocket.teeth, spec.track.link_count);
     let blueprint = TankBlueprint {
-        file: crate::tank::TIGER_SPEC_PATH.to_owned(),
+        file: crate::tank::TANK_SPEC_PATH.to_owned(),
         geometry: std::sync::Arc::new(geometry),
         spec: std::sync::Arc::new(spec),
     };

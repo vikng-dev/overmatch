@@ -734,7 +734,7 @@ mod spawn_contract_tests {
 
         let mut app = App::new();
         app.insert_resource(TankBlueprint {
-            file: crate::tank::TIGER_SPEC_PATH.to_owned(),
+            file: crate::tank::TANK_SPEC_PATH.to_owned(),
             geometry: Arc::new(geometry),
             spec: Arc::new(spec),
         })

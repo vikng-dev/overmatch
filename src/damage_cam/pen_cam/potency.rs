@@ -90,12 +90,12 @@ impl Potency {
         }
     }
 
-    /// The bound tank's potency (`tank::TIGER_SPEC_PATH`, the fixture tank), the one every plan of
+    /// The bound tank's potency (`tank::TANK_SPEC_PATH`, the fixture tank), the one every plan of
     /// its records carries: for the tests that read the shipped bands.
     #[cfg(test)]
     pub fn bound() -> Self {
         static BOUND: std::sync::LazyLock<Potency> = std::sync::LazyLock::new(|| {
-            let asset = crate::damage_cam::shapes::TankAsset::load(crate::tank::TIGER_SPEC_PATH)
+            let asset = crate::damage_cam::shapes::TankAsset::load(crate::tank::TANK_SPEC_PATH)
                 .expect("the bound tank loads");
             Potency::of_tank(&asset.shapes(&Default::default())).expect("the bound tank has crew")
         });
@@ -203,7 +203,7 @@ mod tests {
         let fixture = fixture();
         assert_eq!(fixture.mid, 120.0);
         assert!((fixture.floor - 3.998).abs() < 1e-6, "{}", fixture.floor);
-        let asset = crate::damage_cam::shapes::TankAsset::load(crate::tank::TIGER_SPEC_PATH)
+        let asset = crate::damage_cam::shapes::TankAsset::load(crate::tank::TANK_SPEC_PATH)
             .expect("the bound tank loads");
         let face = asset.crew_face().expect("the bound tank has crew");
         let bound = Potency::bound();

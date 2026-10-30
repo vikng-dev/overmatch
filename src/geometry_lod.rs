@@ -61,8 +61,9 @@ pub(crate) use certificate::{Chain, TrioMember};
 
 use crate::view::ViewProfile;
 
-/// The shipped tank's asset id. The trio lives at `assets/<id>/<id>.{glb,sim.glb,lod.json}`.
-pub(crate) const TIGER_ID: &str = "tiger_1";
+/// The selected tank's asset id ([`crate::assets::TANK_ID`]). The trio lives at
+/// `assets/<id>/<id>.{glb,sim.glb,lod.json}`.
+pub(crate) use crate::assets::TANK_ID;
 
 /// The certificate key of one source primitive: `<meshName>#<primitiveIndex>`.
 pub(crate) fn chain_key(mesh: &str, primitive: usize) -> String {
@@ -172,8 +173,8 @@ pub(crate) fn view_plugin(app: &mut App) {
 /// a panic in every build, naming the file.
 pub(crate) fn load_certificate(mut commands: Commands) {
     let root = crate::assets::asset_root();
-    let certificate = certificate::load(&root, TIGER_ID);
-    certificate::verify_member(&certificate, &root, TIGER_ID, TrioMember::Sim);
+    let certificate = certificate::load(&root, TANK_ID);
+    certificate::verify_member(&certificate, &root, TANK_ID, TrioMember::Sim);
     info!(
         "geometry_lod: certificate loaded — {} chain(s) over {} scene mesh(es), sim artifact \
          verified",
@@ -186,7 +187,7 @@ pub(crate) fn load_certificate(mut commands: Commands) {
 /// Fingerprint the view artifact. Only a composition that renders opens it.
 fn verify_view_artifact(certificate: Res<TankCertificate>) {
     let root = crate::assets::asset_root();
-    certificate::verify_member(&certificate.0, &root, TIGER_ID, TrioMember::View);
+    certificate::verify_member(&certificate.0, &root, TANK_ID, TrioMember::View);
 }
 
 /// The whole-glTF handle the rung meshes are read from — the SAME file the scene is instantiated
@@ -202,7 +203,7 @@ fn request_tank_gltf(mut commands: Commands, asset_server: Res<AssetServer>) {
 
 /// `<id>/<id><suffix>` as the asset server addresses it.
 pub(crate) fn certificate_glb_path(member: TrioMember) -> String {
-    format!("{TIGER_ID}/{TIGER_ID}{}", member.suffix())
+    format!("{TANK_ID}/{TANK_ID}{}", member.suffix())
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -525,8 +526,8 @@ mod tests {
     #[test]
     fn every_shipped_rung_record_carries_tangents() {
         let root = crate::assets::asset_root();
-        let certificate = certificate::load(&root, TIGER_ID);
-        let path = certificate::member_path(&root, TIGER_ID, TrioMember::View);
+        let certificate = certificate::load(&root, TANK_ID);
+        let path = certificate::member_path(&root, TANK_ID, TrioMember::View);
         let gltf::Gltf { document, .. } = gltf::Gltf::open(&path).expect("the view glb opens");
         let named: std::collections::HashMap<&str, gltf::Mesh> = document
             .meshes()
