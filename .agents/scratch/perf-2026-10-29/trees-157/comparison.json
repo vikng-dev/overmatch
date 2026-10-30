@@ -1,0 +1,101 @@
+{
+  "tolerance": 8,
+  "crop": [
+    443,
+    40,
+    1280,
+    680
+  ],
+  "frames": {
+    "fall-00009.5000s.png": {
+      "whole_frame": {
+        "pixels": 921600,
+        "max_channel_delta": 61,
+        "mean_channel_delta": 0.00046657986111111113,
+        "p99_pixel_delta": 0.0,
+        "pixels_over_tolerance": 9,
+        "percent_within_tolerance": 99.9990234375
+      },
+      "belt_rectangle": {
+        "pixels": 535680,
+        "max_channel_delta": 61,
+        "mean_channel_delta": 0.0007299133811230586,
+        "p99_pixel_delta": 0.0,
+        "pixels_over_tolerance": 9,
+        "percent_within_tolerance": 99.99831989247312
+      }
+    },
+    "fall-00010.0000s.png": {
+      "whole_frame": {
+        "pixels": 921600,
+        "max_channel_delta": 61,
+        "mean_channel_delta": 0.00044053819444444446,
+        "p99_pixel_delta": 0.0,
+        "pixels_over_tolerance": 9,
+        "percent_within_tolerance": 99.9990234375
+      },
+      "belt_rectangle": {
+        "pixels": 535680,
+        "max_channel_delta": 61,
+        "mean_channel_delta": 0.000685110513739546,
+        "p99_pixel_delta": 0.0,
+        "pixels_over_tolerance": 9,
+        "percent_within_tolerance": 99.99831989247312
+      }
+    },
+    "fall-00011.0000s.png": {
+      "whole_frame": {
+        "pixels": 921600,
+        "max_channel_delta": 63,
+        "mean_channel_delta": 0.00046947337962962964,
+        "p99_pixel_delta": 0.0,
+        "pixels_over_tolerance": 9,
+        "percent_within_tolerance": 99.9990234375
+      },
+      "belt_rectangle": {
+        "pixels": 535680,
+        "max_channel_delta": 63,
+        "mean_channel_delta": 0.0007342692154520111,
+        "p99_pixel_delta": 0.0,
+        "pixels_over_tolerance": 9,
+        "percent_within_tolerance": 99.99831989247312
+      }
+    },
+    "fall-00014.0000s.png": {
+      "whole_frame": {
+        "pixels": 921600,
+        "max_channel_delta": 63,
+        "mean_channel_delta": 0.00048647280092592595,
+        "p99_pixel_delta": 0.0,
+        "pixels_over_tolerance": 7,
+        "percent_within_tolerance": 99.9992404513889
+      },
+      "belt_rectangle": {
+        "pixels": 535680,
+        "max_channel_delta": 63,
+        "mean_channel_delta": 0.0007641377937076862,
+        "p99_pixel_delta": 0.0,
+        "pixels_over_tolerance": 7,
+        "percent_within_tolerance": 99.9986932497013
+      }
+    },
+    "forest.png": {
+      "whole_frame": {
+        "pixels": 921600,
+        "max_channel_delta": 81,
+        "mean_channel_delta": 0.00040617766203703703,
+        "p99_pixel_delta": 0.0,
+        "pixels_over_tolerance": 5,
+        "percent_within_tolerance": 99.99945746527777
+      },
+      "belt_rectangle": {
+        "pixels": 535680,
+        "max_channel_delta": 10,
+        "mean_channel_delta": 0.00022650338510553565,
+        "p99_pixel_delta": 0.0,
+        "pixels_over_tolerance": 1,
+        "percent_within_tolerance": 99.9998133213859
+      }
+    }
+  }
+}

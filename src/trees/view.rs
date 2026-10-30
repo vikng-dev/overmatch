@@ -1,7 +1,22 @@
-//! The tree's view: the glb a tree's root carries as a child, bound to the body by the
-//! generator's node extras, and the fall presented on it from the state and its transition tick
-//! (ADR-0014: the sim never waits on this; ADR-0016: the presentation derives from the state).
+//! The tree's view, under the tree's root (ADR-0014: the sim never waits on it; ADR-0016: it
+//! derives from the state).
+//!
+//! TWO REPRESENTATIONS. A standing tree draws its kind's standing meshes: every glb primitive
+//! outside a cut cap, merged in the view root's frame, one mesh per material (trunk and canopy for
+//! the shipped kinds) and shared by every tree of the kind, so the renderer instances them. A tree
+//! that is down draws the glb's segmented hierarchy, cut caps included, rebuilt from the kind's
+//! [`TreeTemplate`] in the frame its state leaves `Standing` ([`draw_trees`]), and the fall is
+//! presented on it from the state and its transition tick ([`present_fall`]). A tree standing
+//! again draws its standing meshes again; a settled tree keeps the segmented hierarchy.
+//!
+//! THE TEMPLATE. Read once per kind off one hidden, unparented instance of the kind's glb scene
+//! ([`read_template`]), bound to the trunk by the generator's node extras (`tree_part`,
+//! `tree_segment`), then despawned. A view drawn before its kind's template is read draws nothing
+//! until it is.
 
+use std::collections::{BTreeSet, HashMap};
+
+use bevy::app::SceneSpawnerSystems;
 use bevy::camera::visibility::VisibilityRange;
 use bevy::gltf::GltfExtras;
 use bevy::prelude::*;
@@ -11,13 +26,24 @@ use bevy::world_serialization::{WorldAssetRoot, WorldInstanceReady};
 use super::{FallClock, Fell, Resting, TreeBody, TreeKind, TreeState, fall_rotation, seat_in_root};
 use crate::{ClientReplica, ShotClock};
 
-/// Marks the glb view's root, a child of the tree's root.
+/// Marks a tree's view root, a child of the tree's root at the instance's uniform scale: every
+/// mesh the tree draws hangs under it.
 #[derive(Component)]
+#[require(Transform, Visibility)]
 pub(crate) struct TreeView;
 
-/// Attach the glb view of `kind` under the tree `root` spawned by [`super::spawn`], scaled by the
-/// instance's uniform `scale` and loaded through `assets`; bound to the body once its scene is
-/// ready. Called by a composition that draws, never by the sim.
+/// The representation a view draws; absent until its kind's template is read.
+#[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
+enum Drawn {
+    /// The kind's standing meshes.
+    Standing,
+    /// The glb's segmented hierarchy, indexed by [`TreeViewNodes`].
+    Segmented,
+}
+
+/// Attach the view of `kind` under the tree `root` spawned by [`super::spawn`], at the instance's
+/// uniform `scale`; the kind's template loads through `assets` on its first attach. Called by a
+/// composition that draws, never by the sim.
 pub(crate) fn attach(
     commands: &mut Commands,
     root: Entity,
@@ -25,31 +51,105 @@ pub(crate) fn attach(
     scale: f32,
     assets: &AssetServer,
 ) {
-    let id = &kind.id;
-    commands
-        .spawn((
-            ChildOf(root),
-            Transform::from_scale(Vec3::splat(scale)),
-            WorldAssetRoot(
-                assets.load(GltfAssetLabel::Scene(0).from_asset(format!("trees/{id}/{id}.glb"))),
-            ),
-            TreeView,
-            crate::render_cost::CasterClass::Tree,
-        ))
-        .observe(bind_tree_view);
+    // The root is the view's parent: visibility inherits through it.
+    commands.entity(root).insert(Visibility::default());
+    commands.spawn((
+        ChildOf(root),
+        Transform::from_scale(Vec3::splat(scale)),
+        TreeView,
+        crate::render_cost::CasterClass::Tree,
+    ));
+    let (id, assets) = (kind.id.clone(), assets.clone());
+    commands.queue(move |world: &mut World| request_template(world, id, &assets));
 }
 
-/// Which glb nodes present which part of the trunk, by segment: found once on attach from each
-/// node's extras (`tree_part`, `tree_segment`), the generator's contract.
-#[derive(Component, Debug, Default)]
-pub(crate) struct TreeViewNodes {
-    trunks: Vec<Option<Entity>>,
-    /// Each trunk node's translation in its parent's frame as the glb binds it, asset metres:
-    /// where the node stands, which the cut's node leaves during a fall and every node returns
-    /// to when the tree stands again. Captured once at bind, never read back off the node.
-    standing: Vec<Vec3>,
-    caps_top: Vec<Option<Entity>>,
-    caps_bottom: Vec<Option<Entity>>,
+/// Every tree kind's view template by kind id: `None` while its glb loads.
+#[derive(Resource, Default)]
+pub(crate) struct TreeTemplates(HashMap<String, Option<TreeTemplate>>);
+
+/// The hidden glb instance a kind's template is read from, by kind id.
+#[derive(Component)]
+struct TreeViewSource(String);
+
+/// Start reading kind `id`'s template unless it is read or loading: one hidden, unparented instance
+/// of the kind's glb scene, read and despawned once it is ready ([`read_template`]).
+fn request_template(world: &mut World, id: String, assets: &AssetServer) {
+    {
+        let mut templates = world.get_resource_or_init::<TreeTemplates>();
+        if templates.0.contains_key(&id) {
+            return;
+        }
+        templates.0.insert(id.clone(), None);
+    }
+    let scene = assets.load(GltfAssetLabel::Scene(0).from_asset(format!("trees/{id}/{id}.glb")));
+    world
+        .spawn((
+            WorldAssetRoot(scene),
+            Visibility::Hidden,
+            TreeViewSource(id),
+        ))
+        .observe(read_template);
+}
+
+/// Which part of the trunk a glb node presents, by the generator's `tree_part`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Part {
+    Trunk,
+    CapTop,
+    CapBottom,
+    /// Any other part (the canopy): drawn standing and down, never indexed.
+    Other,
+}
+
+/// One entity of the kind's scene instance, as the segmented view rebuilds it.
+#[derive(Debug, Clone)]
+struct TemplateNode {
+    /// The node it hangs under, an index below its own; `None` under the view root.
+    parent: Option<usize>,
+    transform: Transform,
+    name: Option<Name>,
+    /// The generator's `(tree_part, tree_segment)`, on the node that carries the extras.
+    part: Option<(Part, usize)>,
+    mesh: Option<(Handle<Mesh>, Option<Handle<StandardMaterial>>)>,
+}
+
+/// A kind's view: its scene's entities parent first, and its standing meshes with their
+/// materials — `None` where the primitives cannot merge, and the kind's trees draw segmented
+/// throughout.
+pub(crate) struct TreeTemplate {
+    nodes: Vec<TemplateNode>,
+    standing: Option<Vec<(Handle<Mesh>, Option<Handle<StandardMaterial>>)>>,
+}
+
+impl TreeTemplate {
+    /// The template of `nodes`, its standing meshes merged ([`standing_meshes`]) and added to
+    /// `meshes`; a merge that fails is logged against kind `id`.
+    fn new(id: &str, nodes: Vec<TemplateNode>, meshes: &mut Assets<Mesh>) -> Self {
+        let standing = match standing_meshes(&nodes, meshes) {
+            Ok(merged) => {
+                info!(
+                    "trees: {id}'s view read — a standing tree draws {} merged meshes, a fallen one \
+                     {} entities of which {} draw",
+                    merged.len(),
+                    nodes.len(),
+                    nodes.iter().filter(|node| node.mesh.is_some()).count()
+                );
+                Some(
+                    merged
+                        .into_iter()
+                        .map(|(mesh, material)| (meshes.add(mesh), material))
+                        .collect(),
+                )
+            }
+            Err(why) => {
+                error!(
+                    "trees: {id}'s standing meshes do not merge ({why}); its trees draw segmented"
+                );
+                None
+            }
+        };
+        Self { nodes, standing }
+    }
 }
 
 /// The per-node extras the generator writes.
@@ -59,69 +159,261 @@ struct PartExtras {
     tree_segment: usize,
 }
 
-/// How far a tree's primitives draw. DERIVED: a 0.4 m trunk at 600 m subtends about 1 px at the
-/// gunner's 1× field; the frame-cost measurement (stage 5) decides whether this stays.
-const TREE_VIEW_RANGE_M: f32 = 600.0;
-
-/// Join an attached glb view to its tree: every cap hidden until a cut reveals it, every rendered
-/// primitive given its visibility range, and the nodes indexed by segment for the fall. The state
-/// is presented right after (`present_fall` reads the index the same frame it lands), so a view
-/// attaching to a tree already down shows it down.
-fn bind_tree_view(
+/// Read a kind's template off its ready scene instance, parent first, and despawn the instance.
+fn read_template(
     ready: On<WorldInstanceReady>,
-    views: Query<&ChildOf, With<TreeView>>,
-    bodies: Query<&TreeBody>,
+    sources: Query<&TreeViewSource>,
     children: Query<&Children>,
-    parts: Query<(&GltfExtras, &Transform)>,
-    meshes: Query<(), With<Mesh3d>>,
+    entities: Query<(
+        Option<&Transform>,
+        Option<&Name>,
+        Option<&GltfExtras>,
+        Option<&Mesh3d>,
+        Option<&MeshMaterial3d<StandardMaterial>>,
+    )>,
+    mut meshes: ResMut<Assets<Mesh>>,
+    mut templates: ResMut<TreeTemplates>,
     mut commands: Commands,
 ) {
-    let Ok(parent) = views.get(ready.entity) else {
+    let Ok(TreeViewSource(id)) = sources.get(ready.entity) else {
         return;
     };
-    let Ok(body) = bodies.get(parent.parent()) else {
+    // Breadth first, so every entity follows its parent.
+    let mut order: Vec<(Entity, Option<usize>)> = children
+        .get(ready.entity)
+        .map(|top| top.iter().map(|entity| (entity, None)).collect())
+        .unwrap_or_default();
+    let mut k = 0;
+    while k < order.len() {
+        if let Ok(below) = children.get(order[k].0) {
+            order.extend(below.iter().map(|entity| (entity, Some(k))));
+        }
+        k += 1;
+    }
+    let nodes = order
+        .into_iter()
+        .map(|(entity, parent)| {
+            let (transform, name, extras, mesh, material) =
+                entities.get(entity).unwrap_or_default();
+            let part = extras
+                .and_then(|extras| serde_json::from_str::<PartExtras>(&extras.value).ok())
+                .map(|extras| {
+                    let part = match extras.tree_part.as_str() {
+                        "trunk" => Part::Trunk,
+                        "cap_top" => Part::CapTop,
+                        "cap_bottom" => Part::CapBottom,
+                        _ => Part::Other,
+                    };
+                    (part, extras.tree_segment)
+                });
+            TemplateNode {
+                parent,
+                transform: transform.copied().unwrap_or_default(),
+                name: name.cloned(),
+                part,
+                mesh: mesh
+                    .map(|mesh| (mesh.0.clone(), material.map(|material| material.0.clone()))),
+            }
+        })
+        .collect();
+    let template = TreeTemplate::new(id, nodes, &mut meshes);
+    templates.0.insert(id.clone(), Some(template));
+    commands.entity(ready.entity).despawn();
+}
+
+/// The standing view's meshes and their materials: every mesh node outside a cap — a node whose
+/// own or nearest marked ancestor's part is a cap — moved into the view root's frame by its
+/// transforms composed down from the view root ([`Mesh::try_transformed_by`]), and merged in node
+/// order with the others of its material, its indices offset past the vertices before it. Under
+/// a composition with no rotation and unit scale — the generator's nesting is translations only —
+/// a position is its own plus that translation, and normals, UVs and every other attribute are
+/// copied bit for bit.
+fn standing_meshes(
+    nodes: &[TemplateNode],
+    meshes: &Assets<Mesh>,
+) -> Result<Vec<(Mesh, Option<Handle<StandardMaterial>>)>, String> {
+    let mut chain: Vec<(Transform, Option<Part>)> = Vec::with_capacity(nodes.len());
+    let mut merged: Vec<(Mesh, Option<Handle<StandardMaterial>>)> = Vec::new();
+    for node in nodes {
+        let (above, above_part) = node
+            .parent
+            .map_or((Transform::IDENTITY, None), |p| chain[p]);
+        let at = above.mul_transform(node.transform);
+        let part = node.part.map(|(part, _)| part).or(above_part);
+        chain.push((at, part));
+        let Some((handle, material)) = &node.mesh else {
+            continue;
+        };
+        if matches!(part, Some(Part::CapTop | Part::CapBottom)) {
+            continue;
+        }
+        let mesh = meshes
+            .get(handle)
+            .ok_or_else(|| format!("{:?}'s mesh is not loaded", node.name))?
+            .clone()
+            .try_transformed_by(at)
+            .map_err(|err| err.to_string())?;
+        match merged.iter_mut().find(|(_, other)| other == material) {
+            Some((into, _)) => append(into, &mesh)?,
+            None => merged.push((mesh, material.clone())),
+        }
+    }
+    Ok(merged)
+}
+
+/// Append `mesh` to `into` ([`Mesh::merge`]) when nothing is lost: the same topology, the same
+/// vertex attributes (a merge drops one side's extra attribute) and indices on both or neither.
+fn append(into: &mut Mesh, mesh: &Mesh) -> Result<(), String> {
+    let ids = |mesh: &Mesh| -> Result<BTreeSet<_>, String> {
+        Ok(mesh
+            .try_attributes()
+            .map_err(|err| err.to_string())?
+            .map(|(attribute, _)| attribute.id)
+            .collect())
+    };
+    let indexed = |mesh: &Mesh| -> Result<bool, String> {
+        Ok(mesh
+            .try_indices_option()
+            .map_err(|err| err.to_string())?
+            .is_some())
+    };
+    if ids(into)? != ids(mesh)? || indexed(into)? != indexed(mesh)? {
+        return Err("primitives with different vertex attributes or indexing".to_owned());
+    }
+    into.merge(mesh).map_err(|err| err.to_string())
+}
+
+/// Which glb nodes present which part of the trunk, by segment: indexed when the segmented
+/// hierarchy is built, from each node's extras.
+#[derive(Component, Debug, Default)]
+pub(crate) struct TreeViewNodes {
+    trunks: Vec<Option<Entity>>,
+    /// Each trunk node's translation in its parent's frame as the glb binds it, asset metres:
+    /// where the node stands, which the cut's node leaves during a fall and every node returns
+    /// to when the tree stands again. Taken from the template, never read back off the node.
+    standing: Vec<Vec3>,
+    caps_top: Vec<Option<Entity>>,
+    caps_bottom: Vec<Option<Entity>>,
+}
+
+/// How far a tree's meshes draw, measured to each mesh entity's origin. DERIVED: a 0.4 m trunk at
+/// 600 m subtends about 1 px at the gunner's 1× field; the frame-cost measurement (stage 5)
+/// decides whether this stays.
+const TREE_VIEW_RANGE_M: f32 = 600.0;
+
+/// Draw each tree's representation from its state: the kind's standing meshes while it stands,
+/// the segmented hierarchy otherwise. A tree whose state leaves `Standing` is redrawn in that
+/// frame, so [`present_fall`] poses the new hierarchy before it renders: the first frame down is
+/// the standing tree at the fall's start, and nothing pops. A view waiting on its kind's template
+/// draws in the frame the template is read. In `SpawnScene`, after the scene spawner: after every
+/// state writer (the laws in `FixedPostUpdate`, a replica's ledger in `Update`) and before
+/// `PostUpdate`, whose render policy resolves the new meshes in the same frame.
+fn draw_trees(
+    templates: Res<TreeTemplates>,
+    changed: Query<&Children, (Changed<TreeState>, With<TreeBody>)>,
+    pending: Query<(Entity, &ChildOf), (With<TreeView>, Without<Drawn>)>,
+    drawn: Query<(Entity, &ChildOf, &Drawn), With<TreeView>>,
+    trees: Query<(&TreeState, &TreeBody)>,
+    mut commands: Commands,
+) {
+    let waiting = pending
+        .iter()
+        .map(|(view, parent)| (view, parent.parent(), None));
+    let moved = changed
+        .iter()
+        .flat_map(|children| children.iter().filter_map(|child| drawn.get(child).ok()))
+        .map(|(view, parent, drawn)| (view, parent.parent(), Some(*drawn)));
+    for (view, root, now) in waiting.chain(moved) {
+        let Ok((state, body)) = trees.get(root) else {
+            continue;
+        };
+        let Some(Some(template)) = templates.0.get(&body.kind.id) else {
+            continue;
+        };
+        let want = if *state == TreeState::Standing && template.standing.is_some() {
+            Drawn::Standing
+        } else {
+            Drawn::Segmented
+        };
+        if now != Some(want) {
+            draw(
+                &mut commands,
+                view,
+                want,
+                template,
+                body.kind.segments.len(),
+            );
+        }
+    }
+}
+
+/// Replace whatever `view` draws with `want` from `template`, for a trunk of `segments`.
+fn draw(
+    commands: &mut Commands,
+    view: Entity,
+    want: Drawn,
+    template: &TreeTemplate,
+    segments: usize,
+) {
+    commands
+        .entity(view)
+        .despawn_related::<Children>()
+        .remove::<TreeViewNodes>()
+        .insert(want);
+    let range = VisibilityRange::abrupt(0.0, TREE_VIEW_RANGE_M);
+    if want == Drawn::Standing {
+        for (mesh, material) in template.standing.iter().flatten() {
+            let mut entity = commands.spawn((
+                ChildOf(view),
+                Transform::IDENTITY,
+                Mesh3d(mesh.clone()),
+                range.clone(),
+            ));
+            if let Some(material) = material {
+                entity.insert(MeshMaterial3d(material.clone()));
+            }
+        }
         return;
+    }
+    let mut index = TreeViewNodes {
+        trunks: vec![None; segments],
+        standing: vec![Vec3::ZERO; segments],
+        caps_top: vec![None; segments],
+        caps_bottom: vec![None; segments],
     };
-    let n = body.kind.segments.len();
-    let mut nodes = TreeViewNodes {
-        trunks: vec![None; n],
-        standing: vec![Vec3::ZERO; n],
-        caps_top: vec![None; n],
-        caps_bottom: vec![None; n],
-    };
-    for entity in children.iter_descendants(ready.entity) {
-        if meshes.contains(entity) {
-            commands
-                .entity(entity)
-                .insert(VisibilityRange::abrupt(0.0, TREE_VIEW_RANGE_M));
+    let mut spawned: Vec<Entity> = Vec::with_capacity(template.nodes.len());
+    for node in &template.nodes {
+        let parent = node.parent.map_or(view, |p| spawned[p]);
+        let mut entity = commands.spawn((ChildOf(parent), node.transform, Visibility::Inherited));
+        if let Some(name) = &node.name {
+            entity.insert(name.clone());
         }
-        let Ok((extras, local)) = parts.get(entity) else {
-            continue;
-        };
-        let Ok(part) = serde_json::from_str::<PartExtras>(&extras.value) else {
-            continue;
-        };
-        let k = part.tree_segment;
-        if k >= n {
-            continue;
+        if let Some((mesh, material)) = &node.mesh {
+            entity.insert((Mesh3d(mesh.clone()), range.clone()));
+            if let Some(material) = material {
+                entity.insert(MeshMaterial3d(material.clone()));
+            }
         }
-        match part.tree_part.as_str() {
-            "trunk" => {
-                nodes.trunks[k] = Some(entity);
-                nodes.standing[k] = local.translation;
+        let id = entity.id();
+        match node.part {
+            Some((Part::Trunk, k)) if k < segments => {
+                index.trunks[k] = Some(id);
+                index.standing[k] = node.transform.translation;
             }
-            "cap_top" => {
-                nodes.caps_top[k] = Some(entity);
-                commands.entity(entity).insert(Visibility::Hidden);
+            // Every cap is hidden until a cut reveals it.
+            Some((Part::CapTop, k)) if k < segments => {
+                index.caps_top[k] = Some(id);
+                entity.insert(Visibility::Hidden);
             }
-            "cap_bottom" => {
-                nodes.caps_bottom[k] = Some(entity);
-                commands.entity(entity).insert(Visibility::Hidden);
+            Some((Part::CapBottom, k)) if k < segments => {
+                index.caps_bottom[k] = Some(id);
+                entity.insert(Visibility::Hidden);
             }
             _ => {}
         }
+        spawned.push(id);
     }
-    commands.entity(ready.entity).insert(nodes);
+    commands.entity(view).insert(index);
 }
 
 /// The fall's duration, seconds: longer for a longer piece, within a watchable window.
@@ -175,20 +467,21 @@ fn fall_pose(
     )
 }
 
-/// Present a tree's state on its glb, from the state alone (ADR-0016): standing, every trunk node
-/// upright at its bound translation and every cap hidden; down, the cut's trunk node — the
-/// chain's translations carry the piece above — falls in two stages ([`fall_pose`]): it turns
-/// about its own origin by [`fall_rotation`] from upright to the hinge, then its origin drops to
-/// the seat while it turns on to the resting tilt, where its rotation is the sim's lying
+/// Present a tree's state on its segmented hierarchy, from the state alone (ADR-0016): standing,
+/// every trunk node upright at its bound translation and every cap hidden; down, the cut's trunk
+/// node — the chain's translations carry the piece above — falls in two stages ([`fall_pose`]):
+/// it turns about its own origin by [`fall_rotation`] from upright to the hinge, then its origin
+/// drops to the seat while it turns on to the resting tilt, where its rotation is the sim's lying
 /// segments' own and its origin the seat. The time is read off [`FallClock`] against the
 /// transition tick (ADR-0037: the fall STARTS when the cursor crosses its tick, however late the
 /// entry arrived, and completes [`fall_duration_s`] and then, above the base,
 /// [`slide_duration_s`] later), and of the caps exactly the pair the cut reveals (A5: `cap_top`
 /// below the cut and `cap_bottom` of the cut) shows. Written when the state, the body's resting
-/// pose or the bound view is new, and on every frame the cut's trunk is not at the turn and the
-/// translation the clock derives — through the fall and on the frame it completes; a view that
-/// binds to a tree in either state presents it on its first frame, a tree long down with both
-/// stages complete. The sim never waits on this.
+/// pose or the built hierarchy is new, and on every frame the cut's trunk is not at the turn and
+/// the translation the clock derives — through the fall and on the frame it completes; a
+/// hierarchy built for a tree in either state is presented in the frame it is built, a tree long
+/// down with both stages complete. A tree drawing its standing meshes has no hierarchy and is
+/// skipped. The sim never waits on this.
 fn present_fall(
     clock: Res<FallClock>,
     step: Res<Time<Fixed>>,
@@ -304,12 +597,18 @@ fn publish_sim_fall_clock(
     clock.overstep = step.overstep_fraction_f64();
 }
 
-/// The view half, mounted by the windowed roots: the presentation clock and the fall on the glb.
+/// The view half, mounted by the windowed roots: the presentation clock, each tree's
+/// representation, and the fall on the segmented hierarchy.
 pub(crate) fn plugin(app: &mut App) {
     app.init_resource::<FallClock>()
+        .init_resource::<TreeTemplates>()
         .add_systems(
             Update,
             publish_sim_fall_clock.run_if(not(resource_exists::<ClientReplica>)),
+        )
+        .add_systems(
+            SpawnScene,
+            draw_trees.after(SceneSpawnerSystems::WorldInstanceSpawn),
         )
         .add_systems(PostUpdate, present_fall.before(TransformSystems::Propagate));
 }
@@ -318,6 +617,7 @@ pub(crate) fn plugin(app: &mut App) {
 mod tests {
     use super::*;
     use crate::trees::tests::{derive_bed, fixture_grid, fixture_kind, segments_of};
+    use bevy::mesh::VertexAttributeValues;
     use std::f32::consts::FRAC_PI_2;
 
     /// The fixture's view under a tree root at `pose` (the root's own transform, unit scale) in
@@ -771,5 +1071,321 @@ mod tests {
         );
         assert_eq!(shown(&app, &caps_top), [false, true, false]);
         assert_eq!(shown(&app, &caps_bottom), [false, false, true]);
+    }
+
+    /// One template node at `translation` under `parent`, with `part` and a drawn `mesh`.
+    fn node(
+        parent: Option<usize>,
+        translation: Vec3,
+        part: Option<(Part, usize)>,
+        mesh: Option<(Handle<Mesh>, &Handle<StandardMaterial>)>,
+    ) -> TemplateNode {
+        TemplateNode {
+            parent,
+            transform: Transform::from_translation(translation),
+            name: None,
+            part,
+            mesh: mesh.map(|(mesh, material)| (mesh, Some(material.clone()))),
+        }
+    }
+
+    /// The fixture kind's scene as the template reads it (fixture data, the generator's nesting):
+    /// a root node; under it the three trunk nodes chained bottom-up, each 2 m above its parent
+    /// but the first; under each its trunk primitive (bark), its two cap nodes with a primitive
+    /// each (cut wood), the top one at the segment's top, and above the base a canopy node with a
+    /// primitive (needles). Every primitive's mesh differs from the others, so a merge that drops,
+    /// repeats or reorders one reds a comparison. Returns the nodes; the bark and needle
+    /// primitives in node order, each with its height above the root as the nesting states it;
+    /// and the bark and needle materials.
+    fn fixture_nodes(
+        meshes: &mut Assets<Mesh>,
+        materials: &mut Assets<StandardMaterial>,
+    ) -> (
+        Vec<TemplateNode>,
+        [Vec<(Handle<Mesh>, f32)>; 2],
+        [Handle<StandardMaterial>; 2],
+    ) {
+        let [bark, needles, wood] =
+            [0.1, 0.5, 0.9].map(|grey| materials.add(Color::srgb(grey, grey, grey)));
+        let mut nodes = vec![node(None, Vec3::ZERO, None, None)];
+        let (mut trunks, mut canopy) = (Vec::new(), Vec::new());
+        let mut below = 0;
+        for k in 0..3 {
+            let lift = if k == 0 { 0.0 } else { 2.0 };
+            let height = 2.0 * k as f32;
+            nodes.push(node(
+                Some(below),
+                Vec3::Y * lift,
+                Some((Part::Trunk, k)),
+                None,
+            ));
+            let trunk = nodes.len() - 1;
+            let mesh = meshes.add(Cylinder::new(0.3 - 0.1 * k as f32, 2.0));
+            trunks.push((mesh.clone(), height));
+            nodes.push(node(Some(trunk), Vec3::ZERO, None, Some((mesh, &bark))));
+            for (part, at) in [(Part::CapBottom, 0.0), (Part::CapTop, 2.0)] {
+                nodes.push(node(Some(trunk), Vec3::Y * at, Some((part, k)), None));
+                let cap = nodes.len() - 1;
+                let mesh = meshes.add(Circle::new(0.25 - 0.05 * k as f32));
+                nodes.push(node(Some(cap), Vec3::ZERO, None, Some((mesh, &wood))));
+            }
+            if k > 0 {
+                let mesh = meshes.add(Cone::new(1.0 + k as f32, 2.0));
+                canopy.push((mesh.clone(), height));
+                nodes.push(node(
+                    Some(trunk),
+                    Vec3::ZERO,
+                    Some((Part::Other, k)),
+                    Some((mesh, &needles)),
+                ));
+            }
+            below = trunk;
+        }
+        (nodes, [trunks, canopy], [bark, needles])
+    }
+
+    fn float3(mesh: &Mesh, attribute: bevy::mesh::MeshVertexAttribute) -> Vec<[f32; 3]> {
+        match mesh.attribute(attribute) {
+            Some(VertexAttributeValues::Float32x3(values)) => values.clone(),
+            other => panic!("{attribute:?}: {other:?}"),
+        }
+    }
+
+    fn uvs(mesh: &Mesh) -> Vec<[f32; 2]> {
+        match mesh.attribute(Mesh::ATTRIBUTE_UV_0) {
+            Some(VertexAttributeValues::Float32x2(values)) => values.clone(),
+            other => panic!("uv: {other:?}"),
+        }
+    }
+
+    fn bits<const N: usize>(values: &[[f32; N]]) -> Vec<[u32; N]> {
+        values.iter().map(|value| value.map(f32::to_bits)).collect()
+    }
+
+    /// THE STANDING MESHES ARE THE STANDING PRIMITIVES, BIT FOR BIT: the template's standing view
+    /// is one mesh per material in first-use order — bark, then needles, no cut wood — and each is
+    /// its material's primitives in node order, every position its own lifted by its node's
+    /// height (stated by the fixture, not composed by the code under test), every normal and UV
+    /// its own, every index its own offset past the vertices before it. A merge that skips a
+    /// node's transform, takes in a cap, reorders the primitives or drops an attribute reds this,
+    /// and the standing tree would not look as its segments do.
+    #[test]
+    fn the_standing_meshes_are_the_standing_primitives_bit_for_bit() {
+        let mut meshes = Assets::<Mesh>::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+        let (nodes, parts, [bark, needles]) = fixture_nodes(&mut meshes, &mut materials);
+        let merged = standing_meshes(&nodes, &meshes).expect("the fixture merges");
+        assert_eq!(
+            merged
+                .iter()
+                .map(|(_, material)| material.clone())
+                .collect::<Vec<_>>(),
+            [Some(bark), Some(needles)],
+            "one mesh per standing material"
+        );
+        for ((mesh, _), parts) in merged.iter().zip(&parts) {
+            let (mut positions, mut normals, mut uv, mut indices) =
+                (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+            for (handle, height) in parts {
+                let part = meshes.get(handle).unwrap();
+                let offset = positions.len() as u32;
+                positions.extend(
+                    float3(part, Mesh::ATTRIBUTE_POSITION)
+                        .iter()
+                        .map(|[x, y, z]| [*x, *y + height, *z]),
+                );
+                normals.extend(float3(part, Mesh::ATTRIBUTE_NORMAL));
+                uv.extend(uvs(part));
+                indices.extend(part.indices().unwrap().iter().map(|i| i as u32 + offset));
+            }
+            assert_eq!(
+                bits(&float3(mesh, Mesh::ATTRIBUTE_POSITION)),
+                bits(&positions)
+            );
+            assert_eq!(bits(&float3(mesh, Mesh::ATTRIBUTE_NORMAL)), bits(&normals));
+            assert_eq!(bits(&uvs(mesh)), bits(&uv));
+            assert_eq!(
+                mesh.indices()
+                    .unwrap()
+                    .iter()
+                    .map(|i| i as u32)
+                    .collect::<Vec<_>>(),
+                indices
+            );
+        }
+    }
+
+    /// The fixture view bed: the view plugin's own schedule over the fixture kind's template,
+    /// read, at fall clock tick 1000. Returns the app, the template's standing meshes and its
+    /// node count with a mesh.
+    fn view_bed() -> (
+        App,
+        Vec<(Handle<Mesh>, Option<Handle<StandardMaterial>>)>,
+        usize,
+    ) {
+        let mut meshes = Assets::<Mesh>::default();
+        let mut materials = Assets::<StandardMaterial>::default();
+        let (nodes, _, _) = fixture_nodes(&mut meshes, &mut materials);
+        let drawn = nodes.iter().filter(|node| node.mesh.is_some()).count();
+        let template = TreeTemplate::new("fixture", nodes, &mut meshes);
+        let standing = template.standing.clone().expect("the fixture merges");
+        let mut app = App::new();
+        app.add_plugins(plugin)
+            .insert_resource(FallClock {
+                tick: 1000,
+                overstep: 0.0,
+            })
+            .insert_resource(Time::<Fixed>::from_hz(64.0))
+            .insert_resource(TreeTemplates(HashMap::from([(
+                fixture_kind().id.clone(),
+                Some(template),
+            )])));
+        (app, standing, drawn)
+    }
+
+    /// A standing fixture tree at `scale` with its view attached: its root and view.
+    fn spawn_tree(app: &mut App, scale: f32) -> (Entity, Entity) {
+        let world = app.world_mut();
+        let root = world
+            .spawn((
+                TreeState::Standing,
+                TreeBody::new(fixture_kind(), scale),
+                Transform::IDENTITY,
+            ))
+            .id();
+        let view = world
+            .spawn((
+                ChildOf(root),
+                Transform::from_scale(Vec3::splat(scale)),
+                TreeView,
+            ))
+            .id();
+        (root, view)
+    }
+
+    /// Every mesh entity under `root`, as its mesh and material, in hierarchy order.
+    fn meshes_under(
+        app: &mut App,
+        root: Entity,
+    ) -> Vec<(Handle<Mesh>, Option<Handle<StandardMaterial>>)> {
+        let world = app.world_mut();
+        let mut drawn = world.query::<(&Mesh3d, Option<&MeshMaterial3d<StandardMaterial>>)>();
+        // Breadth first from the root, each entity's children in their order.
+        let mut below = vec![root];
+        let mut k = 0;
+        while k < below.len() {
+            if let Some(children) = world.get::<Children>(below[k]) {
+                below.extend(children.iter());
+            }
+            k += 1;
+        }
+        below
+            .into_iter()
+            .filter_map(|entity| drawn.get(world, entity).ok())
+            .map(|(mesh, material)| (mesh.0.clone(), material.map(|material| material.0.clone())))
+            .collect()
+    }
+
+    /// A STANDING TREE IS TWO MESH ENTITIES, SHARED BY ITS KIND: once its kind's template is read,
+    /// a standing tree draws exactly one mesh entity per material of the kind's standing
+    /// primitives — two for the fixture, trunk and canopy, as for the shipped fir — and every tree
+    /// of the kind, whatever its scale, draws the same mesh and material handles. The forest's
+    /// frame cost relies on the count (#157: a standing fir drew 27 of its glb's 57 primitives as
+    /// entities), and the renderer's instancing on the sharing, which batches only equal handles.
+    /// A view that draws the glb's segments while standing, shows a cap, or merges per tree reds
+    /// this.
+    #[test]
+    fn a_standing_tree_is_two_mesh_entities_shared_by_its_kind() {
+        let (mut app, standing, _) = view_bed();
+        assert_eq!(standing.len(), 2, "trunk and canopy");
+        let trees = [1.0, 1.5].map(|scale| spawn_tree(&mut app, scale));
+        app.update();
+        for (root, view) in trees {
+            assert_eq!(meshes_under(&mut app, root), standing);
+            assert!(app.world().get::<TreeViewNodes>(view).is_none());
+        }
+    }
+
+    /// THE FIRST FALL BUILDS THE SEGMENTED VIEW IN ITS OWN FRAME: in the one update whose state
+    /// leaves `Standing`, the standing meshes go and every node of the template is spawned under
+    /// the view, its every primitive drawn, indexed and presented in that frame. With the clock at
+    /// the transition's tick every trunk node stands upright at its bound translation, so that
+    /// frame draws the standing geometry and nothing pops, while exactly the cut's cap pair shows.
+    /// The fall then runs on those same entities, and the tree standing again draws its two
+    /// standing meshes. A swap a frame late, a hierarchy rebuilt every frame, or a presentation
+    /// before the build reds this.
+    #[test]
+    fn the_first_fall_builds_the_segmented_view_in_its_frame() {
+        let (mut app, standing, drawn) = view_bed();
+        let (root, view) = spawn_tree(&mut app, 1.0);
+        app.update();
+        assert_eq!(meshes_under(&mut app, root), standing);
+
+        app.world_mut().entity_mut(root).insert((
+            TreeState::Down { cut: 1, dir: 0 },
+            Fell { tick: 1000 },
+            Resting {
+                hinge: FRAC_PI_2,
+                tilt: 1.2,
+                seat: Vec3::new(0.4, 0.2, 0.0),
+                dx: 1.0,
+                dz: 0.0,
+            },
+        ));
+        app.update();
+        let segments = meshes_under(&mut app, root);
+        assert_eq!(segments.len(), drawn, "every primitive drawn");
+        assert!(
+            standing.iter().all(|mesh| !segments.contains(mesh)),
+            "no standing mesh left"
+        );
+        let world = app.world();
+        let index = world
+            .get::<TreeViewNodes>(view)
+            .expect("indexed in the frame");
+        let trunks: Vec<Entity> = index.trunks.iter().map(|trunk| trunk.unwrap()).collect();
+        for (k, trunk) in trunks.iter().enumerate() {
+            let local = world.get::<Transform>(*trunk).unwrap();
+            assert_eq!(local.rotation, Quat::IDENTITY, "trunk {k}: upright");
+            assert_eq!(local.translation, index.standing[k], "trunk {k}: in place");
+        }
+        let shown = |caps: &[Option<Entity>]| -> Vec<bool> {
+            caps.iter()
+                .map(|cap| world.get::<Visibility>(cap.unwrap()) == Some(&Visibility::Inherited))
+                .collect()
+        };
+        assert_eq!(
+            shown(&index.caps_top),
+            [true, false, false],
+            "cap_top below the cut"
+        );
+        assert_eq!(
+            shown(&index.caps_bottom),
+            [false, true, false],
+            "cap_bottom of the cut"
+        );
+
+        app.world_mut().resource_mut::<FallClock>().tick = 1032;
+        app.update();
+        let index = app.world().get::<TreeViewNodes>(view).unwrap();
+        assert_eq!(
+            index
+                .trunks
+                .iter()
+                .map(|trunk| trunk.unwrap())
+                .collect::<Vec<_>>(),
+            trunks,
+            "the fall runs on the hierarchy it built"
+        );
+        assert_ne!(
+            app.world().get::<Transform>(trunks[1]).unwrap().rotation,
+            Quat::IDENTITY,
+            "the cut's trunk turns"
+        );
+
+        app.world_mut().entity_mut(root).insert(TreeState::Standing);
+        app.update();
+        assert_eq!(meshes_under(&mut app, root), standing, "standing again");
+        assert!(app.world().get::<TreeViewNodes>(view).is_none());
     }
 }
