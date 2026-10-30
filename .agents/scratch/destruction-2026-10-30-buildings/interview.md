@@ -297,6 +297,13 @@ collapse check first gains the wall's weight (precompression and the work to tip
 momentum share that ejected brick carries away, from physics, untuned. A Codex review of the whole wall
 model runs in parallel.
 
+**Wall model version 2 (Yan, 2026-10-30: "sounds good"), #189.** After Codex's review
+(`codex-review-2026-10-30.md`): one written design in `.agents/docs/design/wall-destruction.md`
+(loads, sub-chunk holes, a structural calculation with gravity, hand-off to physics, one energy and
+momentum budget, spall as ejecta, supported settlement), then a test-range prototype of blast pressure
+and the structural calculation against handbook cases, after #188 lands. #188 keeps building the
+structure underneath with today's laws.
+
 ## Open
 
 - Settlement: whether tanks climb or push rubble, and whether rubble persists all match or is capped.
