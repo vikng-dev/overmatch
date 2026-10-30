@@ -41,8 +41,10 @@
 //! Crashing a multiplayer authority is too strong a response; a stopped shell and a rate-limited
 //! warning is not.
 
+use std::cell::OnceCell;
+
 use avian3d::parry::shape::TypedShape;
-use avian3d::prelude::{Collider, Forces, Position, Rotation, SimpleCollider};
+use avian3d::prelude::{Collider, ColliderAabb, Forces, Position, Rotation, SimpleCollider};
 use bevy::prelude::*;
 
 use super::collect::{self, Corridor};
@@ -482,6 +484,124 @@ pub(crate) fn certified(
     })
 }
 
+/// The colliders one field throw can reach, read from the broad phase once for all of its
+/// directions ([`field_direction`]): every collider the throw admits whose broad-phase bounds
+/// ([`ColliderAabb`]) meet a region holding every box a direction's queries sweep, kept in the
+/// order a query sorts its candidates in.
+///
+/// A direction's candidates are the kept colliders whose bounds meet its own swept box: the test
+/// avian's AABB query applies to each collider of a tree leaf it reaches. The query of the region
+/// reaches every collider a query of a box inside it reaches, and a query of that box reaches
+/// every collider whose bounds meet it, because a collider tree's node bounds hold its leaves'
+/// (enlarged) bounds and a leaf's hold its colliders' [`ColliderAabb`]s (avian's
+/// `EnlargedAabb::update` keeps the enlarged bounds around the tight ones). So each direction reads
+/// exactly the colliders, in the order, that a query of its own box returns.
+pub(crate) struct FieldReach {
+    /// Armour colliders (a [`ProjectileMarchWorld::armour`] ancestor) the throw admits.
+    hard: Vec<Reached>,
+    /// Witness colliders the throw admits, with their witness node.
+    witnesses: Vec<(Entity, Entity, ColliderAabb)>,
+    /// The union of the pose bounds of the hard colliders within [`MAX_CORRIDOR`] of the throw
+    /// point ([`horizon`]), read on first use: it does not depend on the direction.
+    union: OnceCell<(Vec3, Vec3)>,
+}
+
+/// One armour collider of a [`FieldReach`].
+struct Reached {
+    node: Entity,
+    collider: Entity,
+    broad: ColliderAabb,
+    /// Its bounds at its pose, `None` when it has no resolved pose; read on first use.
+    bounds: OnceCell<Option<ColliderAabb>>,
+}
+
+impl Reached {
+    fn bounds(&self, context: &ResolveContext<'_, '_, '_>) -> Option<ColliderAabb> {
+        *self.bounds.get_or_init(|| {
+            context
+                .colliders
+                .get(self.collider)
+                .ok()
+                .map(|(position, rotation, collider, _)| collider.aabb(position.0, *rotation))
+        })
+    }
+}
+
+impl FieldReach {
+    /// The reach of a field thrown from `at`. A direction's queries sweep at most [`MAX_CORRIDOR`]
+    /// from `at` along a unit axis, or the cube of that half-side about it ([`horizon`]), so the
+    /// cube a metre wider holds every one of their boxes, the metre covering the rounding.
+    pub(crate) fn of_throw(
+        context: &ResolveContext<'_, '_, '_>,
+        admit: &dyn Fn(Entity) -> bool,
+        at: Vec3,
+    ) -> Self {
+        let half = Vec3::splat(MAX_CORRIDOR + 1.0);
+        Self::within(
+            context,
+            admit,
+            ColliderAabb::from_min_max(at - half, at + half),
+        )
+    }
+
+    /// The colliders `admit` keeps whose broad-phase bounds meet `region`.
+    pub(crate) fn within(
+        context: &ResolveContext<'_, '_, '_>,
+        admit: &dyn Fn(Entity) -> bool,
+        region: ColliderAabb,
+    ) -> Self {
+        let world = context.world;
+        let (mut hard, mut witnesses) = (Vec::new(), Vec::new());
+        world
+            .spatial
+            .aabb_intersections_with_aabb_callback(region, |entity| {
+                let Ok(&broad) = world.aabbs.get(entity) else {
+                    return true;
+                };
+                if let Some((node, _)) = world.armour(entity) {
+                    if admit(entity) {
+                        hard.push(Reached {
+                            node,
+                            collider: entity,
+                            broad,
+                            bounds: OnceCell::new(),
+                        });
+                    }
+                } else if world.witness_surfaces.contains(entity)
+                    && admit(entity)
+                    && let Some((node, _)) =
+                        super::hit_ancestor(entity, &world.witnesses, &world.parents)
+                {
+                    witnesses.push((node, entity, broad));
+                }
+                true
+            });
+        hard.sort_unstable_by_key(|reached| (reached.node, reached.collider));
+        witnesses.sort_unstable_by_key(|&(node, collider, _)| (node, collider));
+        Self {
+            hard,
+            witnesses,
+            union: OnceCell::new(),
+        }
+    }
+
+    /// The armour colliders whose broad-phase bounds meet `swept`.
+    fn hard_meeting(&self, swept: ColliderAabb) -> impl Iterator<Item = &Reached> {
+        self.hard
+            .iter()
+            .filter(move |reached| reached.broad.intersects(&swept))
+    }
+
+    /// The witness colliders whose broad-phase bounds meet `swept`, as `(witness, collider)`.
+    pub(super) fn witnesses_meeting(&self, swept: ColliderAabb) -> Vec<(Entity, Entity)> {
+        self.witnesses
+            .iter()
+            .filter(|(_, _, broad)| broad.intersects(&swept))
+            .map(|&(node, collider, _)| (node, collider))
+            .collect()
+    }
+}
+
 /// One direction of a field, walked ([`field_direction`]).
 #[derive(Clone, Debug, PartialEq)]
 pub(crate) struct FieldRay {
@@ -496,9 +616,9 @@ pub(crate) struct FieldRay {
 }
 
 /// The ordered presence along one direction of a field thrown from the world point `at`: the
-/// volumes `within` admits (the struck tank's), walked from outside all of their bounds through
-/// `at` to the far side of them, with nothing declared. Returns the walk and the progress of `at`
-/// along it.
+/// volumes the throw admits (the struck tank's, its [`FieldReach`]), walked from outside all of
+/// their bounds through `at` to the far side of them, with nothing declared. Returns the walk and
+/// the progress of `at` along it.
 ///
 /// The same collector and pairing walk as any corridor ([`walk::walk_ray`]), so its layers carry
 /// every volume present along the ray in order, nested and overlapping ones included, and what the
@@ -510,7 +630,7 @@ pub(crate) struct FieldRay {
 /// A walk longer than [`MAX_CORRIDOR`] is [`WalkError::UncertifiedStart`].
 pub(crate) fn field_presence(
     context: &ResolveContext<'_, '_, '_>,
-    within: &dyn Fn(Entity) -> bool,
+    field: &FieldReach,
     at: Vec3,
     dir: Dir3,
 ) -> Result<Option<(f64, walk::RayWalk)>, WalkError> {
@@ -535,21 +655,20 @@ pub(crate) fn field_presence(
     };
     let mut near = Vec::new();
     let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
-    for (node, primitive) in candidates(context, within, at, axis, MAX_CORRIDOR, 0.0) {
-        let Ok((position, rotation, collider, _)) = context.colliders.get(primitive) else {
+    for reached in field.hard_meeting(collect::swept_aabb(at, axis, MAX_CORRIDOR, 0.0)) {
+        let Some(bounds) = reached.bounds(context) else {
             return Err(WalkError::CollectorFailed {
-                volume: node,
+                volume: reached.node,
                 reason: "a candidate collider has no resolved pose",
             });
         };
-        let bounds = collider.aabb(position.0, *rotation);
         let (min, max) = (bounds.min - at - margin, bounds.max - at + margin);
         if meets(min, max).is_none_or(|(_, leave)| leave < 0.0) {
             continue;
         }
         lo = lo.min(min);
         hi = hi.max(max);
-        near.push((node, primitive));
+        near.push((reached.node, reached.collider));
     }
     if near.is_empty() {
         return Ok(None);
@@ -614,9 +733,10 @@ pub(crate) fn field_presence(
     Ok(Some((behind as f64, walked)))
 }
 
-/// March one direction of a field thrown from the world point `at` through the volumes `within`
-/// admits (the struck tank's), from its ordered presence ([`field_presence`]): where the hard world
-/// stops it ([`first_solid`]), then the witnesses along it ([`super::wound::entries`]).
+/// March one direction of a field thrown from the world point `at` through the volumes its throw
+/// admits (the struck tank's, `field`), from its ordered presence ([`field_presence`]): where the
+/// hard world stops it ([`first_solid`]), then the witnesses along it
+/// ([`super::wound::entries_in`]).
 ///
 /// `strength` (J) is constant along the direction. It stops where it enters the first
 /// volume: one it starts inside it enters at `at`, except one of `exited`, the volumes the throw
@@ -630,7 +750,7 @@ pub(crate) fn field_presence(
 /// positive strength doses nothing.
 ///
 /// Every volume above is hard: a witness (ADR-0040) is never a layer of the presence, so it neither
-/// stops nor shadows. Each witness `within` admits that the direction's line enters short of where
+/// stops nor shadows. Each witness the throw admits that the direction's line enters short of where
 /// it stopped takes `strength × weight`, once, the arithmetic of a hard box's dose (a witness
 /// holding `at` is entered there). `end` and the hard dose are what they would be with no witness
 /// present. The doses are in entry order, a hard box before a witness entered at the same point. A
@@ -647,7 +767,7 @@ pub(crate) fn field_presence(
 )]
 pub(crate) fn field_direction(
     context: &ResolveContext<'_, '_, '_>,
-    within: &dyn Fn(Entity) -> bool,
+    field: &FieldReach,
     is_box: &dyn Fn(Entity) -> bool,
     exited: &[Entity],
     at: Vec3,
@@ -655,7 +775,7 @@ pub(crate) fn field_direction(
     strength: f32,
     weight: f32,
 ) -> Result<FieldRay, WalkError> {
-    let (start, stop) = match field_presence(context, within, at, dir)? {
+    let (start, stop) = match field_presence(context, field, at, dir)? {
         None => (0.0, None),
         Some((start, walked)) => (start, first_solid(&walked.layers, start, exited, is_box)),
     };
@@ -675,14 +795,14 @@ pub(crate) fn field_direction(
                 .into_iter()
                 .collect::<Vec<(f64, Dose)>>(),
         ),
-        None => (horizon(context, within, at, dir), f64::INFINITY, Vec::new()),
+        None => (horizon(context, field, at, dir), f64::INFINITY, Vec::new()),
     };
     let ahead = if reach.is_finite() {
         (reach - start) as f32
     } else {
         MAX_CORRIDOR
     };
-    let witness_error = match super::wound::entries(context, within, at, dir, ahead) {
+    let witness_error = match super::wound::entries_in(context, field, at, dir, ahead) {
         Ok(entered) => {
             for (witness, t) in entered {
                 let t = start + t;
@@ -703,22 +823,23 @@ pub(crate) fn field_direction(
 }
 
 /// The struck tank's horizon along a field direction thrown from `at`: where the line leaves the
-/// union of the bounds of every hard collider `within` admits within [`MAX_CORRIDOR`] of `at`;
-/// `at` itself where there is none or the union lies behind it. Witnesses take no part.
-fn horizon(
-    context: &ResolveContext<'_, '_, '_>,
-    within: &dyn Fn(Entity) -> bool,
-    at: Vec3,
-    dir: Dir3,
-) -> Vec3 {
-    let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
-    for (_, primitive) in candidates(context, within, at, Vec3::from(dir), 0.0, MAX_CORRIDOR) {
-        if let Ok((position, rotation, collider, _)) = context.colliders.get(primitive) {
-            let bounds = collider.aabb(position.0, *rotation);
+/// union of the bounds of every hard collider the throw admits within [`MAX_CORRIDOR`] of `at`
+/// (its [`FieldReach`], built for `at`); `at` itself where there is none or the union lies behind
+/// it. Witnesses take no part. The union does not depend on the direction, so a throw reads it
+/// once.
+fn horizon(context: &ResolveContext<'_, '_, '_>, field: &FieldReach, at: Vec3, dir: Dir3) -> Vec3 {
+    let (lo, hi) = *field.union.get_or_init(|| {
+        let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
+        let cube = collect::swept_aabb(at, Vec3::from(dir), 0.0, MAX_CORRIDOR);
+        for bounds in field
+            .hard_meeting(cube)
+            .filter_map(|reached| reached.bounds(context))
+        {
             lo = lo.min(bounds.min);
             hi = hi.max(bounds.max);
         }
-    }
+        (lo, hi)
+    });
     let (mut enter, mut leave) = (f32::NEG_INFINITY, f32::INFINITY);
     for i in 0..3 {
         if dir[i] == 0.0 {

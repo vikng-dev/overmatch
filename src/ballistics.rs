@@ -3,7 +3,9 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use avian3d::prelude::{Collider, Forces, Position, Rotation, SpatialQuery, SpatialQueryFilter};
+use avian3d::prelude::{
+    Collider, ColliderAabb, Forces, Position, Rotation, SpatialQuery, SpatialQueryFilter,
+};
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 // `shot_trace::record` only evaluates its closure when tracing is armed.
@@ -2175,6 +2177,9 @@ struct ProjectileMarchNet<'w> {
 #[derive(SystemParam)]
 struct ProjectileMarchWorld<'w, 's> {
     spatial: SpatialQuery<'w, 's>,
+    // Each collider's broad-phase bounds, the ones `spatial`'s AABB queries test a reached leaf
+    // against: a field throw reads its candidates from them ([`resolve::FieldReach`]).
+    aabbs: Query<'w, 's, &'static ColliderAabb>,
     volumes: Query<'w, 's, &'static BallisticVolume>,
     owners: Query<'w, 's, &'static VolumeOf>,
     parents: Query<'w, 's, &'static ChildOf>,
@@ -4115,6 +4120,7 @@ fn walk_field(
             .volume_of(collider)
             .is_some_and(|node| world.owners.get(node).ok().map(VolumeOf::tank) == throw.tank)
     };
+    let reach = resolve::FieldReach::of_throw(context, &within, throw.origin);
     let mut rays = Vec::with_capacity(spread.directions_count());
     let mut failed: Option<(usize, walk::WalkError)> = None;
     let mut unwitnessed: Option<(usize, walk::WalkError)> = None;
@@ -4122,7 +4128,7 @@ fn walk_field(
         let thrown = throw.strength * profile;
         let walked = resolve::field_direction(
             context,
-            &within,
+            &reach,
             is_box,
             throw.exited,
             throw.origin,

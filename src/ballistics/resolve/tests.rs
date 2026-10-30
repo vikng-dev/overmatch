@@ -1608,7 +1608,7 @@ fn field_rays(
                     .map(|&(origin, dir, strength)| {
                         field_direction(
                             &context,
-                            &within,
+                            &FieldReach::of_throw(&context, &within, origin),
                             &|volume| health.contains(volume),
                             &exited,
                             origin,

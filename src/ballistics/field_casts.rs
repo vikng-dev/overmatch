@@ -451,7 +451,8 @@ fn cast_pose(app: &mut App, layout: &Layout, pose: Pose) -> Vec<Record> {
 
                     // 1. The ordered presence the direction is walked over.
                     let mut output = String::new();
-                    match resolve::field_presence(&context, &within, ray.origin, ray.dir) {
+                    let reach = resolve::FieldReach::of_throw(&context, &within, ray.origin);
+                    match resolve::field_presence(&context, &reach, ray.origin, ray.dir) {
                         Ok(None) => output.push_str("clear"),
                         Ok(Some((start, walked))) => {
                             bits64(&mut output, start);
@@ -478,7 +479,7 @@ fn cast_pose(app: &mut App, layout: &Layout, pose: Pose) -> Vec<Record> {
                     // 2. The sim's field walk and the doses it addresses.
                     let cast = resolve::field_direction(
                         &context,
-                        &within,
+                        &reach,
                         &|volume| health.contains(volume),
                         &[],
                         ray.origin,

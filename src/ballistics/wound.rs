@@ -19,7 +19,7 @@ use avian3d::prelude::SimpleCollider;
 use bevy::prelude::*;
 
 use super::collect::{self, Corridor};
-use super::resolve::{Leg, MAX_CORRIDOR, PROBE_MARGIN, ResolveContext};
+use super::resolve::{FieldReach, Leg, MAX_CORRIDOR, PROBE_MARGIN, ResolveContext};
 use super::walk::{self, WalkError, WitnessSpans};
 use super::{VolumeCrossing, hit_ancestor};
 
@@ -275,8 +275,27 @@ pub(crate) fn entries(
     dir: Dir3,
     reach: f32,
 ) -> Result<Vec<(Entity, f64)>, WalkError> {
+    let swept = collect::swept_aabb(at, Vec3::from(dir), reach, 0.0);
+    entries_in(
+        context,
+        &FieldReach::within(context, admit, swept),
+        at,
+        dir,
+        reach,
+    )
+}
+
+/// [`entries`] for one direction of a throw, its witnesses read from the throw's `field`, which
+/// must hold every collider whose bounds meet the direction's swept box.
+pub(crate) fn entries_in(
+    context: &ResolveContext<'_, '_, '_>,
+    field: &FieldReach,
+    at: Vec3,
+    dir: Dir3,
+    reach: f32,
+) -> Result<Vec<(Entity, f64)>, WalkError> {
     let axis = Vec3::from(dir);
-    let near = candidates(context, admit, at, axis, reach, 0.0);
+    let near = field.witnesses_meeting(collect::swept_aabb(at, axis, reach, 0.0));
     if near.is_empty() {
         return Ok(Vec::new());
     }
