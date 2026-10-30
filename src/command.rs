@@ -32,6 +32,8 @@ pub struct TankCommand {
     pub crew_swap: Option<CrewSwap>,
     /// Round-selection edge, validated against the weapon's round list by simulation authority.
     pub select_round: Option<RoundSelect>,
+    /// The game's damage model: toggle the selected round type's fuze mode, addressed by weapon.
+    pub toggle_fuze: Option<u8>,
     /// Respawn edge; authority validates that this tank is knocked out.
     pub respawn: bool,
     /// Tick this command was authored for.
@@ -49,6 +51,7 @@ impl TankCommand {
         self.fire_primary = false;
         self.crew_swap = None;
         self.select_round = None;
+        self.toggle_fuze = None;
         self.respawn = false;
     }
 
@@ -65,7 +68,11 @@ impl TankCommand {
     /// the edge set lives in exactly one place. [`consume_edges`] uses it to skip the mutable
     /// touch (and its change-detection churn) on a command with no edge to clear.
     pub fn has_edge(&self) -> bool {
-        self.fire_primary || self.crew_swap.is_some() || self.select_round.is_some() || self.respawn
+        self.fire_primary
+            || self.crew_swap.is_some()
+            || self.select_round.is_some()
+            || self.toggle_fuze.is_some()
+            || self.respawn
     }
 
     /// The command of a tank whose death flow owns the device ([`DeviceOwner`]): the respawn edge
@@ -200,6 +207,7 @@ pub struct Bindings {
     /// through its round list ([`RoundSelect`]); the selection is loaded at the next load.
     pub round_next: ButtonBinding,
     pub round_previous: ButtonBinding,
+    pub fuze_mode: ButtonBinding,
 }
 
 /// Who the player's device speaks for.
@@ -349,6 +357,8 @@ impl Default for Bindings {
             // TUNED: the round selector's keys.
             round_next: ButtonBinding::Key(KeyCode::KeyE),
             round_previous: ButtonBinding::Key(KeyCode::KeyQ),
+            // ASSUMED minimal fuze-mode binding.
+            fuze_mode: ButtonBinding::Key(KeyCode::KeyV),
         }
     }
 }
@@ -533,20 +543,26 @@ fn select_round_input(
     mut tanks: Query<(Entity, &mut TankCommand), With<Controlled>>,
     weapons: Query<(&Weapon, &WeaponIndex, &TankRoot), With<Muzzle>>,
 ) {
+    let toggle = bindings.fuze_mode.just_pressed(&keys, &mouse);
     let step = match (
         bindings.round_next.just_pressed(&keys, &mouse),
         bindings.round_previous.just_pressed(&keys, &mouse),
     ) {
-        (true, false) => RoundStep::Next,
-        (false, true) => RoundStep::Previous,
-        _ => return,
+        (true, false) => Some(RoundStep::Next),
+        (false, true) => Some(RoundStep::Previous),
+        _ => None,
     };
     for (tank, mut command) in &mut tanks {
         let primary = weapons.iter().find_map(|(weapon, slot, root)| {
             (root.0 == tank && weapon.trigger == Trigger::Primary).then_some(slot.0)
         });
         if let Some(weapon) = primary.and_then(|slot| u8::try_from(slot).ok()) {
-            command.select_round = Some(RoundSelect { weapon, step });
+            if let Some(step) = step {
+                command.select_round = Some(RoundSelect { weapon, step });
+            }
+            if toggle {
+                command.toggle_fuze = Some(weapon);
+            }
         }
     }
 }
@@ -590,7 +606,7 @@ mod tests {
     #[test]
     fn clear_edges_resets_every_edge_has_edge_reports() {
         // Each latched-edge variant in isolation: has_edge true, then clear_edges makes it false.
-        let edges: [fn(&mut TankCommand); 4] = [
+        let edges: [fn(&mut TankCommand); 5] = [
             |c| c.fire_primary = true,
             |c| c.crew_swap = Some(CrewSwap::Start(CrewStation::Gunner, CrewStation::Loader)),
             |c| {
@@ -599,6 +615,7 @@ mod tests {
                     step: RoundStep::Next,
                 })
             },
+            |c| c.toggle_fuze = Some(0),
             |c| c.respawn = true,
         ];
         for set_edge in edges {
@@ -622,6 +639,7 @@ mod tests {
                 weapon: 1,
                 step: RoundStep::Previous,
             }),
+            toggle_fuze: Some(0),
             respawn: true,
             for_tick: 0,
         };

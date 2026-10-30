@@ -111,6 +111,7 @@ fn scripted_shell(
         penetrator_mass: body.mass,
         wound,
         burst: None,
+        fuze_mode: 0,
         mechanism,
         tracer: true,
         shot_origin: FireShellOrigin::Local,

@@ -458,6 +458,7 @@ fn queue_fire(
         combatant,
         weapon,
         round: source.round,
+        fuze_mode: fire.fuze_mode,
         fire_tick: Tick(shot.fire_tick),
     };
     crate::shot_trace::record(&mut shot_trace, "fire", timeline.tick().0, shot, || {
@@ -909,6 +910,7 @@ mod tests {
             combatant: crate::CombatantId(combatant),
             weapon,
             round: 0,
+            fuze_mode: 0,
             fire_tick: Tick(tick),
         })
     }
@@ -926,6 +928,72 @@ mod tests {
             bounce_tick: Tick(tick),
             sequence: 0,
         })
+    }
+
+    /// The game's damage model: the authority's fire event carries the fuze mode the shell was
+    /// fired in, through the real wire codec, and the receiver binds its own copy of the round in
+    /// that mode, its burst on that mode's delay; a mode index the fuze does not list binds no
+    /// round. A replica relies on this to fly the shot the authority fired: a mutant that wrote
+    /// the default mode, or bound a refused index to the default, gives the two ends different
+    /// bursts.
+    #[test]
+    fn a_fire_event_carries_the_fired_fuze_mode() {
+        const TICK: u16 = 40;
+        let rounds = ["88mm_APHE_ring", "88mm_HE"]
+            .map(|key| crate::tank::WeaponRound::resolve(key).expect("a shipped round"));
+        let fuzed = &rounds[1];
+        let picked = crate::command::RoundStep::Next
+            .apply(fuzed.round.fuze_mode, fuzed.fuze_modes().len())
+            .unwrap();
+        let picked_delay = fuzed.fuze_modes()[usize::from(picked)].delay_s;
+
+        let mut world = World::new();
+        let mut timeline = LocalTimeline::default();
+        timeline.apply_delta(TICK.into());
+        world.insert_resource(timeline);
+        world.init_resource::<ShotTransport>();
+        world.init_resource::<ShotTransportMetrics>();
+        world.add_observer(queue_fire);
+        let combatant = crate::CombatantId(3);
+        let tank = world.spawn(combatant).id();
+        world.trigger(FireShell::of_round(
+            &fuzed.in_mode(picked).expect("a listed mode"),
+            Vec3::ZERO,
+            Dir3::NEG_Z,
+            FireMechanism::Single,
+            true,
+            Some(crate::ballistics::ShotSource {
+                tank,
+                weapon: 0,
+                round: 1,
+            }),
+            Some(crate::ShotId {
+                combatant,
+                weapon: 0,
+                fire_tick: TICK.into(),
+            }),
+        ));
+        let queued = world.resource::<ShotTransport>().reliable_public.front();
+        let Some(FireVisualFact::Fire(sent)) = queued else {
+            panic!("the authority queues one fire event");
+        };
+        let bytes = postcard::to_allocvec(sent).expect("postcard encodes the event");
+        let received: FireEvent = postcard::from_bytes(&bytes).expect("postcard decodes it");
+        assert_eq!(received.fuze_mode, picked);
+        let bound = rounds[usize::from(received.round)]
+            .in_mode(received.fuze_mode)
+            .expect("the receiver binds the fired mode");
+        assert_eq!(bound.burst.map(|burst| burst.delay), Some(picked_delay));
+        let unlisted = u8::try_from(fuzed.fuze_modes().len()).unwrap();
+        assert_eq!(
+            fuzed.in_mode(unlisted),
+            None,
+            "an unlisted mode binds no round"
+        );
+        assert_eq!(fuzed.in_mode(u8::MAX), None);
+        assert_eq!(rounds[0].in_mode(1), None, "past a one-mode fuze's list");
+        let inert = crate::tank::WeaponRound::resolve("88mm_AP").expect("a shipped round");
+        assert!(inert.in_mode(0).is_some() && inert.in_mode(1).is_none());
     }
 
     #[test]

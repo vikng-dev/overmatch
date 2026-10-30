@@ -247,5 +247,15 @@
                 speed_constant_mps: (2680.0, Derived("shape-law.md §4")),
             )),
         ),
+        // The 8.8 cm Sprgr. L/4.5's filler, poured amatol 60/40 (TM53 p.445), named by its burst
+        // block's `core_substance`. The research note gives neither burst fact.
+        "Amatol60_40": Unworn(
+            burst: Some((
+                density: (1600.0, Tuned("ASSUMED poured amatol 60/40, kg/m³; no source in
+                    .agents/scratch/rounds-research/kwk36-rounds-2026-10-30.md gives it")),
+                speed_constant_mps: (2400.0, Tuned("ASSUMED, below the Pzgr. 39 core's 2680 m/s:
+                    amatol is the weaker filler; no source in the research note gives it")),
+            )),
+        ),
     },
 )

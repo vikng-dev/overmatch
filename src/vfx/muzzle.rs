@@ -1101,6 +1101,7 @@ mod tests {
             penetrator_mass: 10.2,
             wound: 30.0,
             burst: None,
+            fuze_mode: 0,
             mechanism: if caliber <= MG_CALIBER {
                 crate::spec::FireMechanism::Automatic
             } else {

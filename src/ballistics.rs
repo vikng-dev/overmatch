@@ -1120,6 +1120,7 @@ pub struct FireShell {
     pub wound: f32,
     /// The round's burst ([`crate::rounds::Round::burst`]); `None` for an inert round.
     pub burst: Option<burst::Burst>,
+    pub fuze_mode: u8,
     /// Fire mechanism at the source.
     pub mechanism: crate::spec::FireMechanism,
     /// Firing source for self-exclusion and authority attribution.
@@ -1159,6 +1160,7 @@ impl FireShell {
             penetrator_mass: round.penetrator.mass,
             wound: round.wound,
             burst: round.burst,
+            fuze_mode: round.fuze_mode,
             mechanism,
             tracer,
             shooter,
@@ -2992,6 +2994,11 @@ fn wound_legs(
 /// ricochets (too oblique) or is crossed (normalize → spend cost → perforate or embed) — and keep
 /// marching the leftover budget along the new direction. Returns `None` for a degenerate zero
 /// velocity, which leaves the shell untouched this tick.
+#[expect(
+    clippy::too_many_lines,
+    reason = "one ordered loop: open air, ground, an impact fuze, the crossing and its continuation \
+              share the flight and the step's budget"
+)]
 fn march_shell_step(
     shell: &mut MarchingShell,
     world: &ProjectileMarchWorld,
@@ -3029,6 +3036,7 @@ fn march_shell_step(
         return None;
     };
     let speed = stepped.length();
+    shell.projectile.fuze.at_speed(speed);
     let mut budget = world.step_budget(speed * dt);
     let mut stopped = false;
     // Set when an observer shell freezes at armor contact to await its bounce keyframe (see the
@@ -3141,6 +3149,14 @@ fn march_shell_step(
                 let entry = origin + dir * distance;
                 let leg = resolve::Leg::new(origin, dir, distance, &flight.sample_offsets(radius));
                 damage_dealt += wound_legs(shell, &context, &not_own, &[leg], speed, health);
+                // AUTHORITY: the ground stops the round dead, with no chord to resist it over, so
+                // its resisting force is DERIVED unbounded: it functions every impact fuze.
+                if deposit {
+                    shell
+                        .projectile
+                        .fuze
+                        .entered(f64::INFINITY, speed, None, distance);
+                }
                 strike_ground(shell, entry, normal, shortcircuit, tick);
                 stop_at(shell, &mut flight, entry, distance);
                 stopped = true;
@@ -3184,6 +3200,24 @@ fn march_shell_step(
                     }
                 }
             }
+        }
+
+        if let Some((ended, removed)) = function_on_contact(
+            shell,
+            &context,
+            &not_own,
+            &mut flight,
+            &mut budget,
+            contact,
+            health,
+        ) {
+            damage_dealt += removed;
+            if ended {
+                stopped = true;
+                break;
+            }
+            bent = true;
+            continue;
         }
 
         // The §13 union walk: decide the crossing from the flight as it stands, apply its
@@ -3339,6 +3373,40 @@ fn launch(
     })
 }
 
+/// AUTHORITY: an unarmed `Impact` fuze reads the body the flight meets `contact` metres ahead
+/// ([`resolve::entry_force`]) and functions on it ([`burst::Fuze::entered`]). A delay that runs out
+/// by the contact bursts there, before the crossing ([`burst_ahead`]). Returns, when it burst,
+/// whether the round ended and the pool units removed; `None` leaves the crossing to the walk.
+fn function_on_contact(
+    shell: &mut MarchingShell,
+    context: &resolve::ResolveContext<'_, '_, '_>,
+    not_own: &dyn Fn(Entity) -> bool,
+    flight: &mut resolve::Flight,
+    budget: &mut resolve::Budget,
+    contact: f32,
+    health: &mut Query<&mut ComponentHealth>,
+) -> Option<(bool, u64)> {
+    let burst::Fuze::Unarmed(burst::Burst {
+        trigger: crate::rounds::fuze::Trigger::Impact { .. },
+        ..
+    }) = shell.projectile.fuze
+    else {
+        return None;
+    };
+    // A walk that cannot read the entrance leaves the fuze unarmed; the crossing's own walk then
+    // fails closed on the same corridor.
+    let (force, owner) =
+        resolve::entry_force(context, not_own, &shell.projectile.round, flight, contact)
+            .ok()
+            .flatten()?;
+    shell
+        .projectile
+        .fuze
+        .entered(force, flight.speed, owner, contact);
+    shell.projectile.fuze.due_within(contact)?;
+    Some(burst_ahead(shell, context, flight, budget, contact, health))
+}
+
 /// AUTHORITY: advance the fuze over a decided crossing (design doc §5a, "The trigger"). The count
 /// runs over every metre of the crossing's path. A corridor found clear is open path. A bounce
 /// flies its way in, then meets a body: an armed fuze restarts from it. A bite flies from the
@@ -3389,6 +3457,7 @@ fn follow_crossing(
     if flight.follow(decision) {
         return (true, 0);
     }
+    shell.projectile.fuze.at_speed(flight.speed);
     if shell.projectile.fuze.due_within(0.0).is_some() {
         return burst_here(shell, context, flight, flight.speed, health);
     }
@@ -4910,7 +4979,7 @@ mod march_tests {
     /// SIM ONLY — the server's composition. A shell here is born bare, which is what almost every
     /// gate in this module wants; the ones that assert on what a round is DRAWN as use
     /// [`view_world_with_plate`] instead.
-    fn world_with_plate(size: Vec3, at: Vec3) -> App {
+    pub(super) fn world_with_plate(size: Vec3, at: Vec3) -> App {
         plate_world(size, at, false)
     }
 
@@ -5433,6 +5502,7 @@ mod march_tests {
             penetrator_mass: FIXTURE_88.mass,
             wound: 30.0,
             burst: None,
+            fuze_mode: 0,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: None,
             tracer: true,
@@ -5477,6 +5547,7 @@ mod march_tests {
             penetrator_mass: FIXTURE_88.mass,
             wound: 30.0,
             burst: None,
+            fuze_mode: 0,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: Some(ShotSource {
                 tank: shooter,
@@ -5529,6 +5600,7 @@ mod march_tests {
             penetrator_mass: CORE.mass,
             wound: FIXTURE_WOUND,
             burst: None,
+            fuze_mode: 0,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: None,
             tracer: true,
@@ -5622,6 +5694,7 @@ mod march_tests {
             penetrator_mass: FIXTURE_88.mass,
             wound: 30.0,
             burst: None,
+            fuze_mode: 0,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: None,
             tracer: true,
@@ -5738,6 +5811,7 @@ mod march_tests {
             penetrator_mass: FIXTURE_88.mass,
             wound: 30.0,
             burst: None,
+            fuze_mode: 0,
             mechanism: crate::spec::FireMechanism::Single,
             shooter: None,
             tracer: true,
@@ -7045,7 +7119,7 @@ mod march_tests {
 
     /// A flat [`HeightGrid`] at `height` metres spanning the world square (raw meters, like the
     /// production resource).
-    fn flat_grid(height: f32) -> HeightGrid {
+    pub(super) fn flat_grid(height: f32) -> HeightGrid {
         let size = 33usize;
         HeightGrid::new(
             vec![height; size * size].into(),
@@ -8854,7 +8928,7 @@ mod march_tests {
         settle(&mut app);
         let (mut projectile, readout) = fixture_round(FIXTURE_88, Vec3::NEG_Z * 800.0);
         projectile.fuze = burst::Fuze::of(Some(burst::Burst {
-            arming_spend: 1.0,
+            trigger: crate::rounds::fuze::Trigger::SpendExit { arming_spend: 1.0 },
             delay: 0.004,
             nose: RoundBody {
                 mass: 0.5 * FIXTURE_88.mass,
@@ -8901,3 +8975,6 @@ mod march_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod fuze_tests;

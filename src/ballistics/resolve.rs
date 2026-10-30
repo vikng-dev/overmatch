@@ -1230,6 +1230,54 @@ pub(crate) struct ResolveContext<'a, 'w, 's> {
     pub laws: WalkLaws,
 }
 
+/// The game's damage model: the resisting force (N, the force law's dE/dx in J/m) the struck body
+/// puts on `round` at first contact, and the tank that owns it; what an impact fuze reads
+/// ([`super::burst::Fuze::entered`]). The force is the disc mean of the entrance walk's first
+/// occupied encounter, each sample's factor read by the union law the advance reads
+/// ([`super::mechanism::overlap_factor`]), so a rim sample off the body pulls the mean down. `None`
+/// when the flight has no established disc or the walk meets nothing.
+pub(crate) fn entry_force(
+    context: &ResolveContext<'_, '_, '_>,
+    not_own: &dyn Fn(Entity) -> bool,
+    round: &SolidShot,
+    flight: &Flight,
+    contact: f32,
+) -> Result<Option<(f64, Option<Entity>)>, WalkError> {
+    let Some(interior) = &flight.continuation else {
+        return Ok(None);
+    };
+    let entrance = closing_walk(
+        context,
+        not_own,
+        interior.anchor,
+        interior.origin,
+        Vec3::from(flight.direction),
+        flight.frame,
+        disc_radius(round.body().caliber),
+        &interior.seeds,
+        contact + ENTRANCE_SPAN,
+    )?;
+    let Some(event) = entrance.events.first() else {
+        return Ok(None);
+    };
+    let Some(encounter) = event.encounters.first() else {
+        return Ok(None);
+    };
+    let factor = encounter
+        .samples
+        .iter()
+        .map(|sample| super::mechanism::overlap_factor(&sample.present) as f64)
+        .sum::<f64>()
+        / encounter.disc as f64;
+    let owner = context
+        .world
+        .owners
+        .get(event.entrance_volume)
+        .ok()
+        .map(|owner| owner.tank());
+    Ok(Some((round.resisting_force(flight.speed, factor), owner)))
+}
+
 /// Decide one crossing of the union field from first contact, with no consequence applied:
 /// corridor closure, the entrance read ([`walk::begin`]), the transit collection along the bend,
 /// [`walk::finish`] advancing the round's bound mechanism, the residual speed, the travel and the

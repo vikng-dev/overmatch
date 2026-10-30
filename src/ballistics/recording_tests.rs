@@ -205,6 +205,7 @@ fn fire_round(
         penetrator_mass: FIXTURE_88.mass,
         wound: 30.0,
         burst,
+        fuze_mode: 0,
         mechanism,
         shooter: Some(ShotSource {
             tank: shooter,

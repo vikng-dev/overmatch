@@ -659,16 +659,17 @@ mod tests {
         "Wood",
         "Brick",
         "88mm_burst_core",
+        "Amatol60_40",
     ];
 
     /// The expected entries that are witnesses.
     const WITNESSES: [&str; 1] = ["Flesh"];
 
     /// The expected entries worn by no volume; every entry neither this nor a witness is hard.
-    const UNWORN: [&str; 1] = ["88mm_burst_core"];
+    const UNWORN: [&str; 2] = ["88mm_burst_core", "Amatol60_40"];
 
     /// The expected entries that state burst facts, whatever their kind.
-    const BURST_CORES: [&str; 1] = ["88mm_burst_core"];
+    const BURST_CORES: [&str; 2] = ["88mm_burst_core", "Amatol60_40"];
 
     /// A minimal valid registry around one extra entry, for the refusal tests.
     fn with(extra: &str) -> String {

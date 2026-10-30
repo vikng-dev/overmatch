@@ -86,34 +86,63 @@ pub struct WeaponRound {
     pub key: String,
     /// The registry's display name, drawn whole by the shipped font.
     pub name: String,
-    /// The body the force law binds, the muzzle speed and the wound rate.
+    /// The body the force law binds, the muzzle speed and the wound rate, its burst set to the
+    /// fuze's default mode.
     pub(crate) round: crate::rounds::Round,
+    /// The round's fuze as authored, whose modes the crew picks among; `None` for an inert round.
+    pub(crate) fuze: Option<crate::rounds::fuze::Spec>,
 }
 
 impl WeaponRound {
+    /// The round as fired in fuze mode `index`: its burst carries that mode's delay. `None` for an
+    /// index its fuze does not list, and for any index but 0 on an inert round: the server's and
+    /// the receiver's bound check on a mode index, never a fallback to the default.
+    pub(crate) fn in_mode(&self, index: u8) -> Option<crate::rounds::Round> {
+        let mut round = self.round;
+        match (&self.fuze, round.burst.as_mut()) {
+            (Some(fuze), Some(burst)) => burst.delay = fuze.delay_s(index)?,
+            (None, None) if index == 0 => {}
+            _ => return None,
+        }
+        round.fuze_mode = index;
+        Some(round)
+    }
+
+    /// The modes the crew can pick among: the fuze's list, empty for an inert round.
+    pub(crate) fn fuze_modes(&self) -> &[crate::rounds::fuze::Mode] {
+        self.fuze.as_ref().map_or(&[], |fuze| &fuze.modes)
+    }
+
     /// The shipped round keyed `key`, fired from the shipped gun `gun`, or the error naming either.
     pub(crate) fn fired_from(gun: &str, key: &str) -> Result<Self, crate::guns::GunError> {
-        let name = crate::rounds::RoundRegistry::shipped()
-            .name(key)
-            .map_err(crate::guns::GunError::Round)?;
-        Ok(Self {
-            key: key.to_owned(),
-            name: name.to_owned(),
-            round: crate::guns::GunRegistry::shipped().round(gun, key)?,
-        })
+        Self::named(key, |guns| guns.round(gun, key))
     }
 
     /// The shipped round keyed `key`, fired from the one shipped gun that chambers it, or the
-    /// error naming it.
+    /// error naming it: the handle the tests and the dev capture's shot cue fire by.
     #[cfg(test)]
     pub(crate) fn resolve(key: &str) -> Result<Self, crate::guns::GunError> {
-        let name = crate::rounds::RoundRegistry::shipped()
-            .name(key)
-            .map_err(crate::guns::GunError::Round)?;
+        Self::named(key, |guns| guns.round_by_key(key))
+    }
+
+    /// The round keyed `key`, named and fuzed by the round registry, fired as `round` gives it.
+    fn named(
+        key: &str,
+        round: impl FnOnce(
+            &crate::guns::GunRegistry,
+        ) -> Result<crate::rounds::Round, crate::guns::GunError>,
+    ) -> Result<Self, crate::guns::GunError> {
+        let registry = crate::rounds::RoundRegistry::shipped();
+        let name = registry.name(key).map_err(crate::guns::GunError::Round)?;
+        let fuze = registry
+            .get(key)
+            .map_err(crate::guns::GunError::Round)?
+            .fuze;
         Ok(Self {
             key: key.to_owned(),
             name: name.to_owned(),
-            round: crate::guns::GunRegistry::shipped().round_by_key(key)?,
+            round: round(crate::guns::GunRegistry::shipped())?,
+            fuze,
         })
     }
 }
@@ -321,10 +350,55 @@ pub struct WeaponGate {
 /// chambered round — a ready `Single`, a belt with rounds left — is fired as it was loaded,
 /// whatever is selected after. A selection made while a reload has not completed applies to that
 /// reload; one made in the tick a reload completes waits for the next load.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+///
+/// The fuze mode is read when the round is fired, not when it is loaded
+/// ([`WeaponLoad::fuze_mode`]).
+#[derive(Clone, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
 pub struct WeaponLoad {
     pub loaded: u8,
     pub selected: u8,
+    /// The fuze mode the crew picked for each round type, by index into [`Weapon::rounds`], each an
+    /// index into that round's fuze modes. Empty until the crew first toggles a mode: a type with
+    /// no entry is on its fuze's default mode.
+    pub fuze_modes: Vec<u8>,
+}
+
+impl WeaponLoad {
+    /// The fuze mode of round `index` of `rounds`: the crew's pick, or the round's default mode
+    /// while there is none. `None` for an index past the list.
+    pub fn fuze_mode(&self, rounds: &[WeaponRound], index: u8) -> Option<u8> {
+        let round = rounds.get(usize::from(index))?;
+        Some(
+            self.fuze_modes
+                .get(usize::from(index))
+                .copied()
+                .unwrap_or(round.round.fuze_mode),
+        )
+    }
+
+    /// Step round `index`'s fuze mode to the next in its fuze's list, wrapping. A round whose fuze
+    /// lists one mode or none, and an index past the list, have nothing to toggle.
+    pub(crate) fn toggle_fuze(&mut self, rounds: &[WeaponRound], index: u8) {
+        let Some(round) = rounds.get(usize::from(index)) else {
+            return;
+        };
+        let count = round.fuze_modes().len();
+        let Some(next) = self
+            .fuze_mode(rounds, index)
+            .and_then(|mode| crate::command::RoundStep::Next.apply(mode, count))
+            .filter(|_| count > 1)
+        else {
+            return;
+        };
+        if self.fuze_modes.len() != rounds.len() {
+            // Every type's mode made explicit, each on what it reads as now.
+            self.fuze_modes = (0..=u8::MAX)
+                .take(rounds.len())
+                .map(|i| self.fuze_mode(rounds, i).unwrap_or_default())
+                .collect();
+        }
+        self.fuze_modes[usize::from(index)] = next;
+    }
 }
 
 /// The round choice for every weapon slot, in the name-sorted slot order of [`WeaponGate`]. Built at

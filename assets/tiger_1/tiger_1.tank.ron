@@ -348,13 +348,15 @@ TankSpec(
             // and a selection takes effect at the next load. The counts are read by nothing yet
             // (the reserve is infinite).
             stowage: [
-                (round: "88mm_APHE_ring", count: (82, Unknown("the commonly reported 92-round 8.8 cm
-                    load less the sub-calibre rounds; no stowage table in the repo, and the
-                    load's high-explosive share is not modelled; settled by a cited stowage
-                    table"))),
-                (round: "88mm_APCR", count: (10, Unknown("a placeholder share of the commonly
-                    reported 92-round 8.8 cm load; no stowage table in the repo; settled by a cited
-                    issue scale"))),
+                // The 92-round load in the 1943 North Africa mix, most carried first: M.I.10
+                // A/M564 via Brit43 pp.91-92 gives 66 % APCBC, 25 % HE and 9 % AP 40, and Brit43's
+                // own arithmetic 61, 23 and 8 of 92. Fixture data, read by nothing yet.
+                (round: "88mm_APHE_ring", count: (61, Measured("CITED Brit43 pp.91-92: 61 APCBC of
+                    92, 66 %"))),
+                (round: "88mm_HE", count: (23, Measured("CITED Brit43 pp.91-92: 23 HE of 92,
+                    25 %"))),
+                (round: "88mm_APCR", count: (8, Measured("CITED Brit43 pp.91-92: 8 AP 40 of 92,
+                    9 %"))),
             ],
             fire_mode: Single(reload_secs: 3.0),
             recoil: (kick: 14.0, stiffness: 90.0, damping: 14.0),

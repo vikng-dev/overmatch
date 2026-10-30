@@ -197,7 +197,12 @@ use crate::{CombatantId, CombatantLife, ShotId};
 ///
 /// REV 38: the debris stress lever's carriers (`debris_stress::DebrisPose`), one replicated pose
 /// per server-simulated fragment. Surface and own-type graph move.
-pub const PROTOCOL_REV: u32 = 38;
+///
+/// REV 39 (the game's damage model picks a fuze mode): `TankCommand` gains the `toggle_fuze` edge,
+/// each `WeaponLoad` the crew's fuze mode per round type, and [`FireEvent`] the fired round's mode
+/// index, which the receiver binds the round in ([`crate::tank::WeaponRound::in_mode`]). Own-type
+/// graph and REV move.
+pub const PROTOCOL_REV: u32 = 39;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -377,6 +382,9 @@ pub struct FireEvent {
     /// The fired round's index in that weapon's `Weapon::rounds`, the list every role binds from the
     /// same tank data; receipt code bounds-checks it.
     pub round: u8,
+    /// The fired round's fuze mode, its index in that round's authored fuze modes (0 for an inert
+    /// round); receipt binds the round in it and refuses an index the fuze does not list.
+    pub fuze_mode: u8,
     /// Authority tick used to derive the stable `ShotId` and fast-forward the cosmetic shell to the
     /// receiver's predicted present. The receiver bounds its accepted age.
     pub fire_tick: Tick,
@@ -964,7 +972,7 @@ const WIRE_SURFACE_HASH: u64 = 0xbe3d_4f3e_28b2_3b35;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xa1e5_6ee2_347a_5400;
+const WIRE_TYPES_HASH: u64 = 0xfa2f_67ca_6bb5_efc8;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -2090,6 +2098,7 @@ mod tests {
                 weapon: 0,
                 step: crate::command::RoundStep::Next,
             }),
+            toggle_fuze: Some(0),
             respawn: true,
             for_tick: 0,
         };
@@ -2123,6 +2132,7 @@ mod tests {
             assert!(!cmd.fire_primary, "fire edge cleared ({lag})");
             assert_eq!(cmd.crew_swap, None, "crew-swap edge cleared ({lag})");
             assert_eq!(cmd.select_round, None, "round-select edge cleared ({lag})");
+            assert_eq!(cmd.toggle_fuze, None, "fuze-toggle edge cleared ({lag})");
             assert!(!cmd.respawn, "respawn edge cleared ({lag})");
         }
     }

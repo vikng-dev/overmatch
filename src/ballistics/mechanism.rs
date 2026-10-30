@@ -182,6 +182,15 @@ impl SolidShot {
         }
     }
 
+    /// The game's damage model: DERIVED entry resisting force dE/dx (J/m = N), using the same
+    /// factor and bound terms as `advance`; no finite-difference chord or stopping cutoff.
+    pub(crate) fn resisting_force(&self, speed: f32, factor: f64) -> f64 {
+        f64::from(self.body.mass) / (2.0 * self.scale)
+            * (1.0 / self.inertia + f64::from(speed).powi(2))
+            * factor
+            / f64::from(REFERENCE_FACTOR)
+    }
+
     /// The force law's potential `ln(1 + k v² / a)` at `speed`, by `libm` (see
     /// [`super::capability_of`]).
     fn potential(&self, speed: f64) -> f64 {

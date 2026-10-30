@@ -1929,9 +1929,10 @@ pub(super) struct FireShooters<'w, 's> {
 
 impl FireShooters<'_, '_> {
     /// The fire's shooter root and the round that root's weapon slot lists at `event.round`, bound
-    /// from this replica's own tank data. `None` defers the fire: the root is missing or ambiguous,
-    /// or its weapon slot or round index is not on this replica — an index the tank data lacks
-    /// never resolves and expires with [`PendingFireEvents::TTL_TICKS`].
+    /// from this replica's own tank data, in the event's fuze mode. `None` defers the fire: the root
+    /// is missing or ambiguous, or its weapon slot, round index or fuze mode is not on this replica
+    /// — an index the tank data lacks never resolves and expires with
+    /// [`PendingFireEvents::TTL_TICKS`].
     fn resolve(&self, event: &FireEvent) -> Option<(Entity, crate::rounds::Round)> {
         let ShooterResolution::Resolved(shooter) = resolve_shooter(event, &self.tanks) else {
             return None;
@@ -1941,7 +1942,7 @@ impl FireShooters<'_, '_> {
             .iter()
             .find(|(_, slot, root)| root.0 == shooter && slot.0 == usize::from(event.weapon))?;
         let fired = weapon.rounds.get(usize::from(event.round))?;
-        Some((shooter, fired.round))
+        Some((shooter, fired.in_mode(event.fuze_mode)?))
     }
 }
 
@@ -3056,6 +3057,7 @@ mod tests {
             combatant: CombatantId(combatant),
             weapon: 0,
             round: 0,
+            fuze_mode: 0,
             fire_tick: Tick(tick),
         }
     }

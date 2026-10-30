@@ -1585,7 +1585,7 @@ fn an_unarmed_or_inert_round_flies_on_as_a_solid_shot() {
             })
             .sum();
         if fuze != burst::Fuze::Inert {
-            assert!(spent < burst.arming_spend, "the fixture spends {spent}");
+            assert!(spent < 35.0, "the fixture spends {spent}");
         }
         assert_eq!(bursts(&fired.log), [], "{thickness} m plate");
         let (_, _, left) = fired.flying.expect("the round flies on");

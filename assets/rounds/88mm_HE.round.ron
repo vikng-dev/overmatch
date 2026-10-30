@@ -1,0 +1,43 @@
+// The 8.8 cm Sprgr. L/4.5, the KwK 36's high-explosive round, with its nose fuze A.Z. 23/28, in
+// the game's damage model: it bursts as every burst round does, as the ring, with today's fragment
+// cone; a blast with no direction is a later slice. Source keys (TM53, Brit43, E9-369A, HEA12) and
+// where the sources disagree: .agents/scratch/rounds-research/kwk36-rounds-2026-10-30.md. Its
+// muzzle speed is the gun's (assets/guns/kwk36_l56.gun.ron). No source gives the casing, so the
+// cavity and the base parts are ASSUMED, and with them the DERIVED nose piece, which flies on from
+// a burst in flight as the ring law has every nose piece do.
+// The file's fields are `src/rounds.rs`'s module doc.
+(
+    name: ("8.8 cm Sprgr. L/4.5", Measured("CITED TM53 pp.444-445")),
+    round_type: ("HE", Measured("CITED TM53 pp.444-445: high-explosive shell")),
+    core: ("GunSteel", Tuned("ASSUMED: the shell body as the fixture body steel; no source gives
+        its steel")),
+    mass: (9.30, Derived("CITED TM53 p.445: 20.5 lb loaded and fuzed = 9.30 kg; chosen over
+        Brit43 pp.91-92's 20.3 lb (9.21 kg), TM53 being the entry that names the Kw.K. 36")),
+    caliber: (0.088, Measured("the gun's nominal 8.8 cm calibre designation")),
+    wound: (30.0, Tuned("ASSUMED: the Pzgr. 39's main-gun crew line rate, for the shell's own line
+        before it bursts and its nose piece's after")),
+    fuze: Some((
+        position: (Nose, Measured("CITED TM53 p.445: A.Z. 23/28, nose")),
+        trigger: (Impact(sensitivity_n: 30.0), Derived("CITED HEA12 p.8: the A.Z. 23/28's graze
+            spring fires at 99-106 oz, 2.8-3.0 kgf, 27-29 N DERIVED, rounded to 30 N and taken as
+            the fuze's sensitivity (owner, interview 2026-10-30, Fuze modes). Any solid body's
+            resisting force at contact, DERIVED in the MN range for a wooden board at 820 m/s,
+            exceeds it; E9-369A pars.65c,70a: small branches can set the fuze off")),
+        modes: [
+            (name: ("instant", Measured("CITED E9-369A par.65: o.V., instantaneous")),
+                delay_s: (0.0, Measured("CITED E9-369A par.65: instantaneous"))),
+            (name: ("delay", Measured("CITED E9-369A par.65: m.V., with delay")),
+                delay_s: (0.1, Measured("CITED HEA12 p.8: v.(0,1) stamped on the fuze; chosen over
+                    E9-369A par.65's 0.11 s, the stamp being the fuze's own"))),
+        ],
+        default_mode: ("instant", Measured("CITED E9-369A par.65: shipped set to o.V.")),
+    )),
+    burst: Some((
+        core_substance: ("Amatol60_40", Measured("CITED TM53 p.445: amatol 60/40, poured")),
+        core_mass: (0.9072, Derived("CITED TM53 p.445: 2 lb = 0.9072 kg (0.4536 kg/lb); chosen
+            over Brit43 pp.91-92's 1.9 lb cast amatol (0.86 kg) with the shell's mass")),
+        base_mass: (0.3, Tuned("ASSUMED: the base parts behind the cavity; no source gives them")),
+        cavity_diameter: (0.065, Tuned("ASSUMED: no source gives the cavity; with the core it
+            DERIVES a 0.171 m cavity, about two calibres")),
+    )),
+)

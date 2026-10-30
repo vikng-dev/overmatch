@@ -138,15 +138,25 @@ fn weapon_status(
 }
 
 /// One weapon's round readout: the loaded round's display name, and the selected round's while it
-/// waits for the next load. `None` for a weapon that lists one round — it has no choice to show.
-fn round_line(weapon_name: &str, rounds: &[WeaponRound], load: WeaponLoad) -> Option<String> {
-    if rounds.len() < 2 {
+/// waits for the next load, each with its fuze mode's name in brackets when its fuze lists more
+/// than one mode. `None` for a weapon with nothing to choose: one round, with one fuze mode or none.
+fn round_line(weapon_name: &str, rounds: &[WeaponRound], load: &WeaponLoad) -> Option<String> {
+    let pickable = |round: &WeaponRound| round.fuze_modes().len() > 1;
+    if rounds.len() < 2 && !rounds.iter().any(pickable) {
         return None;
     }
     let name = |index: u8| {
-        rounds
-            .get(usize::from(index))
-            .map_or("-", |round| round.name.as_str())
+        let Some(round) = rounds.get(usize::from(index)) else {
+            return "-".to_owned();
+        };
+        let mode = load
+            .fuze_mode(rounds, index)
+            .and_then(|mode| round.fuze_modes().get(usize::from(mode)))
+            .filter(|_| pickable(round));
+        match mode {
+            Some(mode) => format!("{} [{}]", round.name, mode.name),
+            None => round.name.clone(),
+        }
     };
     let mut line = format!("{weapon_name} round: {}", name(load.loaded));
     if load.selected != load.loaded {
@@ -244,7 +254,7 @@ fn update_status_panel(
                 .get(root.0)
                 .ok()
                 .and_then(|loads| loads.weapons.get(slot.0))
-                .and_then(|&load| round_line(&weapon.name, &weapon.rounds, load));
+                .and_then(|load| round_line(&weapon.name, &weapon.rounds, load));
             (
                 weapon.name.to_string(),
                 format!("{} {}", weapon.name, status),
@@ -423,6 +433,44 @@ mod tests {
         assert_eq!(weapon_status(SINGLE, true, 1.4, 0), "no-fire");
     }
 
+    /// The game's damage model: the readout names the fuze mode the next shot fires with, the
+    /// crew's pick or the default before any, and only for a round whose fuze lists more than one
+    /// mode; a weapon with one such round still shows its line. The crew steers the toggle by it: a
+    /// mutant that showed the default after a pick, bracketed a one-mode fuze, or hid the line of a
+    /// one-round weapon with a mode to pick would show the crew a setting the round does not carry.
+    #[test]
+    fn the_readout_names_a_pickable_fuze_mode() {
+        let round = |key: &str| WeaponRound::resolve(key).expect("a shipped round");
+        let rounds = [round("88mm_APHE_ring"), round("88mm_HE")];
+        let (one_mode, two_modes) = (&rounds[0].name, &rounds[1].name);
+        assert_eq!(rounds[0].fuze_modes().len(), 1, "fixture: a one-mode fuze");
+        let modes = rounds[1].fuze_modes();
+        let line = |load: WeaponLoad| round_line("Gun", &rounds, &load);
+        assert_eq!(
+            line(WeaponLoad {
+                loaded: 0,
+                selected: 1,
+                ..default()
+            }),
+            Some(format!(
+                "Gun round: {one_mode}   next: {two_modes} [{}]",
+                modes[usize::from(rounds[1].round.fuze_mode)].name
+            )),
+        );
+        assert_eq!(
+            line(WeaponLoad {
+                loaded: 1,
+                selected: 1,
+                fuze_modes: vec![0, 1],
+            }),
+            Some(format!("Gun round: {two_modes} [{}]", modes[1].name)),
+        );
+        assert!(
+            round_line("Gun", &rounds[1..], &WeaponLoad::default()).is_some(),
+            "a one-round weapon with a mode to pick shows its line"
+        );
+    }
+
     /// The round readout a player steers the selector by: a weapon with a choice names the loaded
     /// round, and names the selection only while it differs, i.e. while it waits for the next load.
     /// A mutant that showed the selection as loaded would tell the player a round is chambered
@@ -436,9 +484,10 @@ mod tests {
             round_line(
                 "Gun",
                 &choice,
-                WeaponLoad {
+                &WeaponLoad {
                     loaded: 0,
-                    selected: 0
+                    selected: 0,
+                    fuze_modes: Vec::new(),
                 }
             ),
             Some(format!("Gun round: {first}")),
@@ -447,9 +496,10 @@ mod tests {
             round_line(
                 "Gun",
                 &choice,
-                WeaponLoad {
+                &WeaponLoad {
                     loaded: 0,
-                    selected: 1
+                    selected: 1,
+                    fuze_modes: Vec::new(),
                 }
             ),
             Some(format!("Gun round: {first}   next: {second}")),
@@ -458,9 +508,10 @@ mod tests {
             round_line(
                 "Gun",
                 &choice[..1],
-                WeaponLoad {
+                &WeaponLoad {
                     loaded: 0,
-                    selected: 0
+                    selected: 0,
+                    fuze_modes: Vec::new(),
                 }
             ),
             None,

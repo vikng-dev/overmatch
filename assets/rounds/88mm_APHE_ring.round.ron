@@ -15,17 +15,24 @@
     caliber: (0.088, Measured("the gun's nominal 8.8 cm calibre designation")),
     wound: (30.0, Tuned("the Pzgr. 39's main-gun rate, kept by the nose piece past the burst: the
         30 HP crew pool is emptied at ~10 cm of chord (3 / 0.10)")),
+    fuze: Some((
+        position: (Base, Measured("CITED TM53 p.448: base fuze Bd.Z. 5103 or 5103/1")),
+        trigger: (SpendExit(arming_spend: 35.0), Measured("the reference-mm the round spends in one
+            body to arm the fuze, read as the 35 mm of plate of about 115 kg per square mm the
+            Bd.Z. 5127 arms on, perforated at normal impact, values for 1000 m (L.Dv. 487, March
+            1943, page 487_21): burst-delay-history.md")),
+        modes: [
+            (name: ("delay", Tuned("the fuze's one mode; a name the HUD would draw")),
+                delay_s: (0.0015, Derived("the midpoint of the 1-2 ms within which the Bd.Z. 5127
+                bursts after the round's deceleration ends (L.Dv. 487, March 1943, page 487_21).
+                The 5127 is the Pzgr. 39/1's and 39/43's fuze; no time is found for this round's
+                own Bd.Z. 5103: burst-delay-history.md"))),
+        ],
+        default_mode: ("delay", Tuned("the fuze's one mode")),
+    )),
     burst: Some((
         core_substance: ("88mm_burst_core", Measured("the round's burst core:
             tiger-ammo-history.md")),
-        arming_spend: (35.0, Measured("the reference-mm the round spends in one body to arm the
-            fuze, read as the 35 mm of plate of about 115 kg per square mm the Bd.Z. 5127 arms on,
-            perforated at normal impact, values for 1000 m (L.Dv. 487, March 1943, page 487_21):
-            burst-delay-history.md")),
-        delay: (0.0015, Derived("the midpoint of the 1-2 ms within which the Bd.Z. 5127 bursts
-            after the round's deceleration ends (L.Dv. 487, March 1943, page 487_21). The 5127 is
-            the Pzgr. 39/1's and 39/43's fuze; no time is found for this round's own Bd.Z. 5103:
-            burst-delay-history.md")),
         core_mass: (0.060, Measured("range 0.059-0.064 kg: tiger-ammo-history.md")),
         base_mass: (0.33, Measured("the trigger and trace element at the base, range 0.319-0.333
             kg: tiger-ammo-history.md")),

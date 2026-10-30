@@ -6,19 +6,20 @@
 //! the burst's field is the parent module's.
 //!
 //! Units: masses kg, lengths m, speeds m/s, the delay s, the arming threshold reference-mm, the
-//! energy J. Everything here is derived once, at load, in f64 with IEEE `+`, `−`, `×`, `/` and
+//! impact sensitivity N, the energy J. Everything here is derived once, at load, in f64 with IEEE `+`, `−`, `×`, `/` and
 //! `sqrt` alone, and stored in f32, so a round's burst is the same bits on every target.
 
 use bevy::prelude::Entity;
 
 use super::RoundBody;
+use crate::rounds::fuze::Trigger;
 
 /// A burst block as the round registry resolves it, with its core substance's burst facts.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct BurstInputs {
-    /// Reference-mm the round must spend in one body to arm.
-    pub(crate) arming_spend: f32,
-    /// Seconds from the arming body's exit to the burst.
+    /// What functions the fuze: the selected fuze's trigger.
+    pub(crate) trigger: Trigger,
+    /// Seconds from functioning to the burst: the selected mode's delay.
     pub(crate) delay: f32,
     /// The burst core's mass `C`.
     pub(crate) core_mass: f64,
@@ -81,9 +82,10 @@ impl Parts {
 /// A round's burst, derived at load from its burst block.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Burst {
-    /// Reference-mm one body's spend must reach to arm the fuze.
-    pub(crate) arming_spend: f32,
-    /// Seconds from the exit of the body that armed or last restarted the fuze to the burst.
+    /// What functions the fuze ([`Fuze`]).
+    pub(crate) trigger: Trigger,
+    /// Seconds from functioning to the burst: from the arming exit for `SpendExit`, from contact
+    /// for `Impact`. [`crate::tank::WeaponRound::in_mode`] sets it to the fired mode's.
     pub(crate) delay: f32,
     /// The nose piece, which flies on from a burst in flight through the march as a round of its
     /// own: its mass the derived nose's, its calibre and nose factor the round's.
@@ -116,10 +118,11 @@ impl Burst {
                 return Err(format!("{field} must be finite and positive (got {value})"));
             }
         }
-        for (field, value) in [
-            ("arming spend", inputs.arming_spend),
-            ("delay", inputs.delay),
-        ] {
+        let threshold = match inputs.trigger {
+            Trigger::SpendExit { arming_spend } => arming_spend,
+            Trigger::Impact { sensitivity_n } => sensitivity_n,
+        };
+        for (field, value) in [("fuze threshold", threshold), ("delay", inputs.delay)] {
             if !value.is_finite() || value < 0.0 {
                 return Err(format!(
                     "{field} must be finite and not negative (got {value})"
@@ -130,7 +133,7 @@ impl Burst {
         let driven = parts.wall_mass;
         let sideways_speed = inputs.speed_constant / (driven / inputs.core_mass + 0.5).sqrt();
         Ok(Self {
-            arming_spend: inputs.arming_spend,
+            trigger: inputs.trigger,
             delay: inputs.delay,
             nose: RoundBody {
                 mass: parts.nose_mass as f32,
@@ -148,13 +151,17 @@ impl Burst {
 pub(crate) enum Fuze {
     /// No burst ahead: a round without a burst block, or a nose piece flying on from its burst.
     Inert,
-    /// Not yet armed: no body's spend has reached the threshold.
+    /// Not yet functioning: no body has met the trigger (`Trigger`).
     Unarmed(Burst),
-    /// Armed: the round bursts after `remaining` more metres of path, unless a body met first
-    /// restarts the delay. At or below zero the delay has run out and the burst is due where the
-    /// round stands: nothing restarts it. `speed` is the speed the delay started at, which turns
-    /// those metres into the delay's seconds left. `tank` owns the body that armed or last
-    /// restarted it, and is the tank the burst's field walks.
+    /// Armed: the round bursts after `remaining` more metres of path. At or below zero the delay
+    /// has run out and the burst is due where the round stands: nothing restarts it. `speed` is
+    /// the speed the count is kept at, which turns those metres into the delay's seconds left.
+    /// `tank` owns the body that armed the fuze or last restarted it, and is the tank the burst's
+    /// field walks.
+    ///
+    /// The two triggers keep the count differently. `SpendExit` counts metres from the speed it
+    /// armed at, and a body met before the burst restarts it. `Impact` counts seconds: a change of
+    /// speed rescales the metres left ([`Fuze::at_speed`]), and no later body restarts it.
     Armed {
         burst: Burst,
         remaining: f32,
@@ -170,15 +177,24 @@ impl Fuze {
     }
 
     /// The round left a body it spent `spend` reference-mm across, at `speed`, the body owned by
-    /// `tank`. An unarmed fuze arms when `spend` reaches the threshold; an armed one whose delay
-    /// still runs restarts whatever the spend. Either way the burst then lies `speed × delay`
-    /// metres of path past this exit. A delay that has run out is not restarted.
+    /// `tank`. An unarmed `SpendExit` fuze arms when `spend` reaches its threshold; an armed one
+    /// whose delay still runs restarts whatever the spend. Either way the burst then lies
+    /// `speed × delay` metres of path past this exit. A delay that has run out is not restarted,
+    /// and an exit neither arms nor restarts an `Impact` fuze.
     pub(crate) fn exited(&mut self, spend: f32, speed: f32, tank: Option<Entity>) {
         let burst = match *self {
             Self::Inert => return,
-            Self::Unarmed(burst) if spend < burst.arming_spend => return,
+            Self::Unarmed(burst) | Self::Armed { burst, .. }
+                if matches!(burst.trigger, Trigger::Impact { .. }) =>
+            {
+                return;
+            }
+            Self::Unarmed(burst) => match burst.trigger {
+                Trigger::SpendExit { arming_spend } if spend < arming_spend => return,
+                _ => burst,
+            },
             Self::Armed { remaining, .. } if remaining <= 0.0 => return,
-            Self::Unarmed(burst) | Self::Armed { burst, .. } => burst,
+            Self::Armed { burst, .. } => burst,
         };
         *self = Self::Armed {
             burst,
@@ -188,14 +204,16 @@ impl Fuze {
         };
     }
 
-    /// The round bounced off a face of `tank`'s, leaving at `speed`: a body met, so an armed fuze
-    /// whose delay still runs restarts from the bounce. An unarmed fuze stays unarmed: a bounce
-    /// spends nothing. A delay that has run out is not restarted.
+    /// The round bounced off a face of `tank`'s, leaving at `speed`: a body met, so an armed
+    /// `SpendExit` fuze whose delay still runs restarts from the bounce. An unarmed fuze stays
+    /// unarmed: a bounce spends nothing. A delay that has run out is not restarted, and a bounce
+    /// never restarts an `Impact` fuze.
     pub(crate) fn bounced(&mut self, speed: f32, tank: Option<Entity>) {
         if let Self::Armed {
             burst, remaining, ..
         } = *self
             && remaining > 0.0
+            && matches!(burst.trigger, Trigger::SpendExit { .. })
         {
             *self = Self::Armed {
                 burst,
@@ -203,6 +221,49 @@ impl Fuze {
                 speed,
                 tank,
             };
+        }
+    }
+
+    /// The round meets a body `approach` metres of path ahead, which resists it with `force_n`
+    /// newtons (the walk's dE/dx at entry) at `speed`, the body owned by `tank`. An unarmed
+    /// `Impact` fuze functions when the force reaches its sensitivity: the burst then lies
+    /// `speed × delay` metres past the contact, so `approach + speed × delay` from where the round
+    /// stands. Any other fuze is left as it is: an `Impact` fuze functions once.
+    pub(crate) fn entered(
+        &mut self,
+        force_n: f64,
+        speed: f32,
+        tank: Option<Entity>,
+        approach: f32,
+    ) {
+        if let Self::Unarmed(burst) = *self
+            && let Trigger::Impact { sensitivity_n } = burst.trigger
+            && force_n >= f64::from(sensitivity_n)
+        {
+            *self = Self::Armed {
+                burst,
+                remaining: approach + speed * burst.delay,
+                speed,
+                tank,
+            };
+        }
+    }
+
+    /// The round now flies at `next` m/s: an armed `Impact` fuze rescales its metres left so the
+    /// seconds left are unchanged. A `SpendExit` count is metres and is left as it is.
+    pub(crate) fn at_speed(&mut self, next: f32) {
+        if let Self::Armed {
+            burst,
+            remaining,
+            speed,
+            ..
+        } = self
+            && matches!(burst.trigger, Trigger::Impact { .. })
+            && *speed > 0.0
+            && next > 0.0
+        {
+            *remaining = (*remaining / *speed) * next;
+            *speed = next;
         }
     }
 
@@ -255,7 +316,7 @@ pub(super) const FIXTURE_STEEL: f64 = 7800.0;
 #[cfg(test)]
 pub(super) fn fixture_inputs() -> BurstInputs {
     BurstInputs {
-        arming_spend: 35.0,
+        trigger: Trigger::SpendExit { arming_spend: 35.0 },
         delay: 0.012,
         core_mass: 0.06,
         core_density: 1650.0,
@@ -345,10 +406,10 @@ mod tests {
     fn the_fuze_arms_at_the_threshold() {
         let burst = burst();
         let mut fuze = Fuze::of(Some(burst));
-        fuze.exited(burst.arming_spend.next_down(), 300.0, None);
+        fuze.exited(35.0_f32.next_down(), 300.0, None);
         assert_eq!(fuze, Fuze::Unarmed(burst));
         assert_eq!(fuze.due_within(f32::MAX), None);
-        fuze.exited(burst.arming_spend, 300.0, None);
+        fuze.exited(35.0_f32, 300.0, None);
         assert_eq!(fuze.due_within(f32::MAX), Some(300.0 * burst.delay));
         let mut inert = Fuze::of(None);
         inert.exited(1.0e6, 300.0, None);
@@ -363,7 +424,7 @@ mod tests {
     fn a_body_met_restarts_the_delay() {
         let burst = burst();
         let mut fuze = Fuze::of(Some(burst));
-        fuze.exited(burst.arming_spend * 2.0, 250.0, None);
+        fuze.exited(35.0_f32 * 2.0, 250.0, None);
         let full = 250.0 * burst.delay;
         fuze.flown(1.0);
         assert_eq!(fuze.due_within(full - 1.0), Some(full - 1.0));
@@ -385,11 +446,11 @@ mod tests {
     fn a_delay_run_out_is_not_restarted() {
         let burst = burst();
         let mut fuze = Fuze::of(Some(burst));
-        fuze.exited(burst.arming_spend, 250.0, None);
+        fuze.exited(35.0_f32, 250.0, None);
         fuze.flown(250.0 * burst.delay);
         assert_eq!(fuze.due_within(0.0), Some(0.0), "due at zero");
         let due = fuze;
-        fuze.exited(burst.arming_spend * 2.0, 200.0, Some(Entity::PLACEHOLDER));
+        fuze.exited(35.0_f32 * 2.0, 200.0, Some(Entity::PLACEHOLDER));
         assert_eq!(fuze, due, "an exit restarts no due delay");
         fuze.bounced(100.0, Some(Entity::PLACEHOLDER));
         assert_eq!(fuze, due, "nor does a bounce");

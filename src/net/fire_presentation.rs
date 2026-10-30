@@ -1183,6 +1183,7 @@ mod tests {
             penetrator_mass: 0.0118,
             wound: 10.0,
             burst: None,
+            fuze_mode: 0,
             mechanism: crate::spec::FireMechanism::Automatic,
             shooter: None,
             tracer: true,
@@ -1244,10 +1245,12 @@ mod tests {
                         crate::tank::WeaponLoad {
                             loaded: 1,
                             selected: 1,
+                            fuze_modes: Vec::new(),
                         },
                         crate::tank::WeaponLoad {
                             loaded: 0,
                             selected: 0,
+                            fuze_modes: Vec::new(),
                         },
                     ],
                 },
@@ -1300,6 +1303,7 @@ mod tests {
             weapons: vec![crate::tank::WeaponLoad {
                 loaded: 0,
                 selected: 1,
+                fuze_modes: Vec::new(),
             }],
         });
         // The first fold reads the arrived load and confirms nothing.

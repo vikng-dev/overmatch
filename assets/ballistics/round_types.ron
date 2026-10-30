@@ -20,6 +20,13 @@
 // a value without one does not load.
 (
     round_types: {
+        // High-explosive, full calibre, a nose fuze in its ogive.
+        "HE": (
+            flight_nose: (Ogive(crh: 4.0), Tuned("ASSUMED: the APCBC's ogive; no source in the
+                research note gives the shell's nose")),
+            hit_nose: (Ogive(crh: 4.0), Tuned("ASSUMED: the flight nose; no cap")),
+            carrier: (None, Derived("full-calibre round")),
+        ),
         // Armour-piercing, capped and ballistic-capped.
         "APCBC": (
             flight_nose: (Ogive(crh: 4.0), Tuned("owner-accepted starting point 2026-10-28: the

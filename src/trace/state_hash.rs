@@ -211,6 +211,10 @@ pub(super) fn hash_tank_state(state: &TankState) -> TankStateHash {
         for load in &loads.weapons {
             hrl.write_u8(load.loaded);
             hrl.write_u8(load.selected);
+            hrl.write_u32(load.fuze_modes.len() as u32);
+            for &mode in &load.fuze_modes {
+                hrl.write_u8(mode);
+            }
         }
     }
     for weapon in &sim.weapons {
@@ -357,6 +361,7 @@ fn test_weapon_loads() -> WeaponLoads {
         weapons: vec![crate::tank::WeaponLoad {
             loaded: 0,
             selected: 0,
+            fuze_modes: Vec::new(),
         }],
     }
 }
@@ -614,8 +619,11 @@ mod tests {
                 with_loads.trn
             )
         );
-        let steps: [fn(&mut crate::tank::WeaponLoad); 2] =
-            [|load| load.selected += 1, |load| load.loaded += 1];
+        let steps: [fn(&mut crate::tank::WeaponLoad); 3] = [
+            |load| load.selected += 1,
+            |load| load.loaded += 1,
+            |load| load.fuze_modes.push(1),
+        ];
         for step in steps {
             let mut loads = test_weapon_loads();
             step(&mut loads.weapons[0]);

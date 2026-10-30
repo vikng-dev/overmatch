@@ -397,7 +397,7 @@ mod tests {
     /// Fixture data: every shipped round's resolved record, to the bit — the values the laws, the
     /// shot and every pinned digest are measured against, read off the shipped data. A data edit
     /// that moves any of them moves the game's ballistics, and moves its pin here deliberately.
-    const PINS: [(&str, Round); 4] = [
+    const PINS: [(&str, Round); 5] = [
         (
             "7.9mm_AP",
             Round {
@@ -421,6 +421,7 @@ mod tests {
                 wound: 10.0,
                 core: GUN_STEEL,
                 burst: None,
+                fuze_mode: 0,
             },
         ),
         (
@@ -434,6 +435,7 @@ mod tests {
                 wound: 30.0,
                 core: GUN_STEEL,
                 burst: None,
+                fuze_mode: 0,
             },
         ),
         (
@@ -464,6 +466,7 @@ mod tests {
                     poisson_ratio: 0.21,
                 },
                 burst: None,
+                fuze_mode: 0,
             },
         ),
         (
@@ -476,8 +479,9 @@ mod tests {
                 drag_k: 1.080_940_9e-4,
                 wound: 30.0,
                 core: GUN_STEEL,
+                fuze_mode: 0,
                 burst: Some(Burst {
-                    arming_spend: 35.0,
+                    trigger: crate::rounds::fuze::Trigger::SpendExit { arming_spend: 35.0 },
                     delay: 0.0015,
                     nose: RoundBody {
                         mass: 8.370_217,
@@ -486,6 +490,44 @@ mod tests {
                     },
                     sideways_speed: 541.4819,
                     energy: 211_073.97,
+                }),
+            },
+        ),
+        (
+            "88mm_HE",
+            Round {
+                body: RoundBody {
+                    mass: 9.30,
+                    caliber: 0.088,
+                    nose_factor: 0.080_729_164,
+                },
+                flying: RoundBody {
+                    mass: 9.30,
+                    caliber: 0.088,
+                    nose_factor: 0.080_729_164,
+                },
+                penetrator: RoundBody {
+                    mass: 9.30,
+                    caliber: 0.088,
+                    nose_factor: 0.080_729_164,
+                },
+                muzzle_speed: 820.0,
+                drag_k: 1.185_548_1e-4,
+                wound: 30.0,
+                core: GUN_STEEL,
+                fuze_mode: 0,
+                burst: Some(Burst {
+                    trigger: crate::rounds::fuze::Trigger::Impact {
+                        sensitivity_n: 30.0,
+                    },
+                    delay: 0.0,
+                    nose: RoundBody {
+                        mass: 4.409_219_3,
+                        caliber: 0.088,
+                        nose_factor: 0.080_729_164,
+                    },
+                    sideways_speed: 1123.8556,
+                    energy: 2326276.0,
                 }),
             },
         ),

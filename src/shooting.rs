@@ -271,7 +271,11 @@ fn fire(
             .and_then(|loads| loads.weapons.get(slot.0))
             .and_then(|load| {
                 let fired = weapon.rounds.get(usize::from(load.loaded))?;
-                Some((load.loaded, fired))
+                // The fuze mode is read now, at fire time, so a toggle after loading still applies
+                // to the chambered round; whether it may is a gameplay question still open. A mode
+                // the round's fuze does not list holds the shot.
+                let mode = load.fuze_mode(&weapon.rounds, load.loaded)?;
+                Some((load.loaded, fired.in_mode(mode)?))
             })
         else {
             continue;
@@ -341,7 +345,7 @@ fn fire(
         // Hand off to ballistics: fire the chambered round down the bore at its muzzle speed.
         if !fused_echo {
             commands.trigger(FireShell::of_round(
-                &fired.round,
+                &fired,
                 muzzle_position,
                 bore,
                 weapon.fire_cycle.mechanism(),
@@ -370,7 +374,7 @@ fn fire(
         // pitches the nose up (gun climb), not just shoves the hull back. Each weapon kicks by its
         // own momentum, so the MGs barely register.
         if let Ok(forces) = bodies.get_mut(root.0) {
-            let impulse = recoil_impulse(bore, fired.round.body.mass, fired.round.muzzle_speed);
+            let impulse = recoil_impulse(bore, fired.body.mass, fired.muzzle_speed);
             apply_explicit_impulse(forces, impulse, muzzle_position);
         }
         // Arm an absolute deadline per mechanism. `Single`: crew-gated reload. `Automatic`: consume
@@ -405,8 +409,9 @@ fn fire(
 /// authority only: a client reads the replicated [`WeaponLoads`] and never writes it.
 ///
 /// The edge steps the addressed slot's `selected` through the weapon's round list, wrapping; an edge
-/// naming no weapon slot of the tank changes nothing. Then every slot whose weapon is loading takes
-/// `loaded = selected`. Chained after [`fire`]: a shot in this tick fired the round chambered before
+/// naming no weapon slot of the tank changes nothing. The fuze toggle then steps the selected
+/// round's fuze mode ([`crate::tank::WeaponLoad::toggle_fuze`]). Then every slot whose weapon is
+/// loading takes `loaded = selected`. Chained after [`fire`]: a shot in this tick fired the round chambered before
 /// the edge, and the reload it armed loads the selection.
 fn apply_round_selection(
     mut tanks: Query<(&TankCommand, &WeaponGate, &mut WeaponLoads), With<Tank>>,
@@ -416,22 +421,25 @@ fn apply_round_selection(
         let Ok((command, gate, mut loads)) = tanks.get_mut(root.0) else {
             continue;
         };
-        let (Some(&state), Some(&load)) = (gate.weapons.get(slot.0), loads.weapons.get(slot.0))
+        let (Some(&state), Some(load)) = (gate.weapons.get(slot.0), loads.weapons.get(slot.0))
         else {
             continue;
         };
-        let mut next = load;
+        let mut next = load.clone();
         if let Some(select) = command.select_round
             && usize::from(select.weapon) == slot.0
             && let Some(selected) = select.step.apply(load.selected, weapon.rounds.len())
         {
             next.selected = selected;
         }
+        if command.toggle_fuze == u8::try_from(slot.0).ok() {
+            next.toggle_fuze(&weapon.rounds, next.selected);
+        }
         if weapon.is_loading(state) {
             next.loaded = next.selected;
         }
         // Written only on a change: an unchanged choice must not re-replicate.
-        if next != load {
+        if next != *load {
             loads.weapons[slot.0] = next;
         }
     }
@@ -730,6 +738,7 @@ mod tests {
             .get::<WeaponLoads>(root)
             .expect("loads on root")
             .weapons[0]
+            .clone()
     }
 
     fn advance(world: &mut World, ticks: u32) {
@@ -738,6 +747,84 @@ mod tests {
             clock.0 = clock.0.saturating_add(1);
             world.run_system_once(tick_weapon_gate).unwrap();
         }
+    }
+
+    /// Each fired shell's fuze mode and its burst's delay (s).
+    #[derive(Resource, Default)]
+    struct FiredFuzes(Vec<(u8, Option<f32>)>);
+
+    fn record_fired_fuze(fire: On<crate::ballistics::FireShell>, mut fired: ResMut<FiredFuzes>) {
+        fired
+            .0
+            .push((fire.fuze_mode, fire.burst.map(|burst| burst.delay)));
+    }
+
+    /// The game's damage model, on the authority's systems: the fuze toggle steps the SELECTED
+    /// round type's mode and no other, a one-mode type has nothing to toggle, and the shot fires
+    /// the chambered type in the mode picked for it, read at fire time, with that mode's delay in
+    /// its burst. A mode the round's fuze does not list holds the shot and spends no readiness:
+    /// the server's bound check, which the fire event's mode index relies on.
+    #[test]
+    fn the_fuze_toggle_picks_the_mode_a_shot_fires_with() {
+        let mut world = test_world();
+        world.init_resource::<FiredFuzes>();
+        world.add_observer(record_fired_fuze);
+        let root = spawn_main_gun_rig(&mut world);
+        let muzzle = world
+            .query_filtered::<Entity, With<Muzzle>>()
+            .single(&world)
+            .unwrap();
+        let rounds: Vec<_> = ["88mm_APHE_ring", "88mm_HE"]
+            .map(|key| WeaponRound::resolve(key).unwrap())
+            .into();
+        let (one_mode, two_modes) = (&rounds[0], &rounds[1]);
+        assert_eq!(one_mode.fuze_modes().len(), 1, "fixture: a one-mode fuze");
+        let picked = crate::command::RoundStep::Next
+            .apply(two_modes.round.fuze_mode, two_modes.fuze_modes().len())
+            .unwrap();
+        let picked_delay = two_modes.fuze_modes()[usize::from(picked)].delay_s;
+        let defaults = [one_mode.round.fuze_mode, two_modes.round.fuze_mode];
+        world.get_mut::<Weapon>(muzzle).unwrap().rounds = rounds;
+
+        world.get_mut::<WeaponLoads>(root).unwrap().weapons[0].selected = 1;
+        world.get_mut::<TankCommand>(root).unwrap().toggle_fuze = Some(0);
+        world.run_system_once(super::apply_round_selection).unwrap();
+        assert_eq!(load_state(&world, root).fuze_modes, [defaults[0], picked]);
+        assert_eq!(
+            load_state(&world, root).loaded,
+            0,
+            "a ready chamber keeps its type"
+        );
+        world.get_mut::<WeaponLoads>(root).unwrap().weapons[0].selected = 0;
+        world.run_system_once(super::apply_round_selection).unwrap();
+        assert_eq!(
+            load_state(&world, root).fuze_modes,
+            [defaults[0], picked],
+            "a one-mode type has nothing to toggle"
+        );
+        world.get_mut::<TankCommand>(root).unwrap().toggle_fuze = None;
+
+        {
+            let mut loads = world.get_mut::<WeaponLoads>(root).unwrap();
+            loads.weapons[0].loaded = 1;
+            loads.weapons[0].fuze_modes[1] = u8::MAX;
+        }
+        world.run_system_once(fire).unwrap();
+        assert!(
+            world.resource::<FiredFuzes>().0.is_empty(),
+            "an unlisted mode holds the shot"
+        );
+        assert!(
+            gate_state(&world, root).is_ready(),
+            "a held shot spends no readiness"
+        );
+        world.get_mut::<WeaponLoads>(root).unwrap().weapons[0].fuze_modes[1] = picked;
+        world.run_system_once(fire).unwrap();
+        assert_eq!(
+            world.resource::<FiredFuzes>().0,
+            [(picked, Some(picked_delay))],
+            "the shot carries the picked mode and its delay"
+        );
     }
 
     /// The determinism-relevant belt lifecycle, on the real systems: firing walks the belt down,
@@ -1125,7 +1212,11 @@ mod tests {
                 .muzzle_speed
         });
         assert_ne!(speeds[0], speeds[1], "the fixture's rounds must differ");
-        let load = |loaded, selected| WeaponLoad { loaded, selected };
+        let load = |loaded, selected| WeaponLoad {
+            loaded,
+            selected,
+            ..default()
+        };
 
         gun_tick(&mut app, root, false, Some(RoundStep::Next));
         assert_eq!(
@@ -1210,6 +1301,7 @@ mod tests {
             .weapons[0] = WeaponLoad {
             loaded: 1,
             selected: 1,
+            fuze_modes: Vec::new(),
         };
         idle_until_the_reload_completes_next(&mut app, root);
         gun_tick(&mut app, root, true, None);

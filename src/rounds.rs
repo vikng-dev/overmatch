@@ -26,12 +26,17 @@
 //!   `penetrator` (the force law, the disc, overmatch and the cone's hole read it); the mechanism
 //!   binds from the penetrator at spawn ([`crate::ballistics`]'s `Projectile`), synchronously and
 //!   from data alone. A round without the block meets the plate whole.
-//! - `burst: Some((core_substance, arming_spend, delay, core_mass, base_mass, cavity_diameter))`: a
-//!   substance-table key whose row states burst facts, the fuze's threshold (reference-mm spent in
-//!   one body) and delay (s), the core's and the base parts' masses (kg) and the cavity's diameter
-//!   (m). Every burst is a ring. The burst is derived here, once
+//! - `fuze: Some((position, trigger, modes, default_mode))`: what sets the burst off
+//!   ([`fuze`]). `position` is `Nose` or `Base`. `trigger` is `SpendExit(arming_spend: …)`, the
+//!   reference-mm spent in one body and then left, or `Impact(sensitivity_n: …)`, the resisting
+//!   force (N) at contact. `modes` is the ordered list of `(name, delay_s)` the crew picks among,
+//!   `default_mode` the name of the one a round is loaded with. Every value is sourced.
+//! - `burst: Some((core_substance, core_mass, base_mass, cavity_diameter))`: a substance-table key
+//!   whose row states burst facts, the core's and the base parts' masses (kg) and the cavity's
+//!   diameter (m). Every burst is a ring. The burst is derived here, once, at the default mode
 //!   ([`crate::ballistics::burst::Burst::derived`]), and rides the round to the shot; its story is
-//!   design doc §5a, "The burst". A round without the block is inert.
+//!   design doc §5a, "The burst". A round without the block is inert. A burst and a fuze are
+//!   authored together.
 //!
 //! # How a round flies
 //!
@@ -67,6 +72,8 @@ use crate::provenance::Sourced;
 use crate::spec::NoseShape;
 use crate::substances::{MaterialFacts, SubstanceRegistry};
 
+pub(crate) mod fuze;
+
 /// The shipped round-type table, embedded as the round files are, so a round is in hand
 /// synchronously wherever it is bound (ADR-0014: built from data, never from an asset).
 const ROUND_TYPES_RON: &str = include_str!("../assets/ballistics/round_types.ron");
@@ -98,13 +105,17 @@ pub(crate) struct Round {
     /// them; a regime that deforms or erodes the round reads them.
     pub(crate) core: MaterialFacts,
     /// The round's burst, derived from its burst block and its body steel (`core`'s density);
-    /// `None` for an inert round.
+    /// `None` for an inert round. Its trigger and delay are the fuze mode `fuze_mode`'s.
     pub(crate) burst: Option<Burst>,
+    /// The index of the fuze mode the burst is set to, in the round's authored `modes`; the
+    /// file's `default_mode` until [`crate::tank::WeaponRound::in_mode`] picks another. 0 for an
+    /// inert round.
+    pub(crate) fuze_mode: u8,
 }
 
 /// One round as its file and its type resolve it, before a gun gives it a muzzle speed: its
 /// authored assembly and every field of [`Round`] but speed, validated as far as no speed is needed.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub(crate) struct RoundFacts {
     /// The hit nose the factor is derived from; a domain refusal names it.
     nose: NoseShape,
@@ -116,6 +127,7 @@ pub(crate) struct RoundFacts {
     wound: f32,
     core: MaterialFacts,
     pub(crate) burst: Option<Burst>,
+    pub(crate) fuze: Option<fuze::Spec>,
 }
 
 impl RoundFacts {
@@ -146,6 +158,7 @@ impl RoundFacts {
             wound: self.wound,
             core: self.core,
             burst: self.burst,
+            fuze_mode: self.fuze.as_ref().map_or(0, |f| f.default_mode),
         })
     }
 }
@@ -168,20 +181,21 @@ struct RoundFile {
     /// The part of a sub-calibre round that meets the plate; absent, the whole round does.
     #[serde(default)]
     penetrator: Option<PenetratorFile>,
-    /// The round's burst core and fuze; absent, the round is inert.
+    /// The round's burst core; absent, the round is inert.
     #[serde(default)]
     burst: Option<BurstFile>,
+    /// What sets the burst off; authored with the burst and only with it.
+    #[serde(default)]
+    fuze: Option<fuze::File>,
 }
 
-/// A burst block as authored: the substance its core is made of, the fuze's threshold
-/// (reference-mm spent in one body) and delay (s), and the core's mass, the base parts' mass (kg)
-/// and the cavity's diameter (m). It names no shape: every burst is a ring.
+/// A burst block as authored: the substance its core is made of, the core's mass, the base parts'
+/// mass (kg) and the cavity's diameter (m). It names no shape: every burst is a ring. What sets it
+/// off is the round's fuze block.
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BurstFile {
     core_substance: Sourced<String>,
-    arming_spend: Sourced<f32>,
-    delay: Sourced<f32>,
     core_mass: Sourced<f64>,
     base_mass: Sourced<f64>,
     cavity_diameter: Sourced<f64>,
@@ -431,16 +445,28 @@ fn resolved(
              dose per metre of chord the round's line deals a witness"
         ));
     }
-    let burst = match file.burst {
-        None => None,
-        Some(_) if sub_calibre => {
+    let fuze = file
+        .fuze
+        .map(fuze::File::resolve)
+        .transpose()
+        .map_err(|reason| format!("fuze: {reason}"))?;
+    let burst = match (file.burst, &fuze) {
+        (None, None) => None,
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(
+                "a burst block and a fuze block are authored together — the fuze is what \
+                 sets the burst off, and a fuze with no burst sets off nothing"
+                    .into(),
+            );
+        }
+        (Some(_), Some(_)) if sub_calibre => {
             return Err(
                 "a round with a penetrator block carries no burst block — the burst's parts are \
                  derived from a full-calibre body"
                     .into(),
             );
         }
-        Some(block) => {
+        (Some(block), Some(fuze)) => {
             let key = block.core_substance.0;
             let facts = substances
                 .get(&key)
@@ -453,8 +479,8 @@ fn resolved(
                     )
                 })?;
             let inputs = BurstInputs {
-                arming_spend: block.arming_spend.0,
-                delay: block.delay.0,
+                trigger: fuze.trigger,
+                delay: fuze.default_delay_s(),
                 core_mass: block.core_mass.0,
                 core_density: facts.density,
                 speed_constant: facts.speed_constant,
@@ -477,6 +503,7 @@ fn resolved(
             wound,
             core,
             burst,
+            fuze,
         },
         name,
     ))
@@ -539,7 +566,7 @@ impl RoundRegistry {
     /// The facts of the round keyed `key`; a hard error naming the key and the vocabulary, never a
     /// default.
     pub(crate) fn get(&self, key: &str) -> Result<RoundFacts, RoundError> {
-        self.entry(key).map(|(round, _)| *round)
+        self.entry(key).map(|(round, _)| round.clone())
     }
 
     /// The display name of the round keyed `key`; an error as [`Self::get`]'s, never the key.
@@ -691,7 +718,7 @@ pub(crate) mod tests {
         );
         let unnamed: Vec<_> = FIXTURE
             .iter()
-            .copied()
+            .cloned()
             .filter(|(field, _)| *field != "name")
             .collect();
         let err = one(&unnamed).unwrap_err().to_string();
@@ -720,7 +747,7 @@ pub(crate) mod tests {
         }
         let unwounding: Vec<_> = FIXTURE
             .iter()
-            .copied()
+            .cloned()
             .filter(|(field, _)| *field != "wound")
             .collect();
         assert!(
@@ -991,9 +1018,12 @@ pub(crate) mod tests {
             })
             .collect::<Vec<_>>();
         let extra = format!(
-            r#"{block}, burst: Some((
+            r#"{block}, fuze: Some((position: (Base, Tuned("x")),
+                trigger: (SpendExit(arming_spend: 35.0), Tuned("x")),
+                modes: [(name: ("delay", Tuned("x")), delay_s: (0.012, Tuned("x")))],
+                default_mode: ("delay", Tuned("x")))), burst: Some((
                 core_substance: ({core:?}, Tuned("x")),
-                arming_spend: (35.0, Tuned("x")), delay: (0.012, Tuned("x")),
+
                 core_mass: (0.02, Tuned("x")), base_mass: (0.1, Tuned("x")),
                 cavity_diameter: (0.02, Tuned("x"))))"#
         );
@@ -1030,7 +1060,7 @@ pub(crate) mod tests {
         let inert = with("mass", "5.0").unwrap().get("Probe").unwrap();
         assert_eq!(inert.burst, None);
         let inputs = BurstInputs {
-            arming_spend: 35.0,
+            trigger: fuze::Trigger::SpendExit { arming_spend: 35.0 },
             delay: 0.012,
             core_mass: 0.02,
             core_density: 1650.0,
