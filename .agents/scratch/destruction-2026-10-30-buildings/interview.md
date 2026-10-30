@@ -288,10 +288,19 @@ from wall to rubble, moving or still: a round meets a falling or resting chunk a
 timeline (ADR-0037) every player sees the round meet the chunk where the server resolved it, so the
 choice carries no sync caveat. The server simulates falling pieces, with a cap.
 
+**Spall scales with the exited material's strength, tanks included (Yan, 2026-10-30: "the spall makes
+sense").** Relative to today: cast armour 0.9×, mild steel 0.8×, a stowed shell 0.2×, the engine block
+0.15×; rolled armour and gun steel unchanged (DERIVED from `materials.ron` strengths).
+
+**Collapse and explosion push ship in the first game slice (Yan, 2026-10-30: yes), #188.** The
+collapse check first gains the wall's weight (precompression and the work to tip past balance) and the
+momentum share that ejected brick carries away, from physics, untuned. A Codex review of the whole wall
+model runs in parallel.
+
 ## Open
 
 - Settlement: whether tanks climb or push rubble, and whether rubble persists all match or is capped.
   Candidate from the stress harness: freeze to static after 0.5 s still and not touching a tank; a tank
   thaws what it touches; live cap 256.
-- The three gaps above (partial crush, layered cut, the wall's own mass in the structural check).
+- Two of the three gaps above (partial crush, layered cut); the wall's weight is in #188.
 - The ram law.
