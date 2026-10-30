@@ -36,6 +36,13 @@
 //     ρ / ρ_ref ≈ 1.898.
 //   Cast armour has no sourced row.
 //
+// `bulk` = the bulk facts of a non-metal (density kg/m³, mode I fracture toughness K_IC Pa·√m): the
+// building bake reads the density for each chunk's mass; no law reads the toughness yet. Optional,
+// absent read as `None`, and never stated beside `facts` (each states a density). A non-metal's
+// effective factor is its compressive (crushing) strength over the reference flow strength
+// (~1 GPa), × 1000: a strength ratio, the reading the steels' DERIVED rows note, not a measured
+// penetration equivalence.
+//
 // `debris_half_angle_deg` = the half-angle α (degrees) of the spall cone a body exit through this
 // substance throws, the rim of its debris field: a constant of the material, not of the exit's
 // speed. Converted once at parse to the field law's ratio λ = 1/sin α (design doc §5); refused
@@ -225,12 +232,22 @@
             paintable: false,
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: None,
+            bulk: Some((
+                density: (448.0, Derived("red spruce specific gravity 0.40 at 12 % moisture (oven-dry
+                    mass over volume at 12 %; USDA FPL Wood Handbook, FPL-GTR-190, 2010, Table 5-3a,
+                    read in a third-party copy of the chapter) × 1000 kg/m³ × 1.12 for the moisture
+                    mass")),
+                toughness: (4.2e5, Measured("red spruce, mode I, TL system, 420 kPa·√m: USDA FPL
+                    Wood Handbook, FPL-GTR-190, 2010, Table 5-10, read in a third-party copy of the
+                    chapter. The handbook's mode I range is 220–550 kPa·√m")),
+            )),
         ),
-        // Fired clay brick, worn only by the armour sandbox's wall prototype
-        // (`src/sandbox/wall.rs`). No penetration data: the factor is the brick unit's compressive
-        // strength over the reference steel's flow strength, scaled to the reference's 1000 — the
-        // strength ratio Wood's row reads, not a measured equivalence. The unit, not the masonry
-        // assemblage (12 MPa with Type N mortar): a round's line crosses brick far more than mortar.
+        // Fired clay brick: every building's masonry (`assets/buildings/<id>/<id>.building.ron`
+        // names it) and the armour sandbox's wall prototype (`src/sandbox/wall.rs`). No
+        // penetration data: the factor is the brick unit's compressive strength over the reference
+        // steel's flow strength, scaled to the reference's 1000 — the strength ratio Wood's row
+        // reads, not a measured equivalence. The unit, not the masonry assemblage (12 MPa with
+        // Type N mortar): a round's line crosses brick far more than mortar.
         "Brick": Hard(
             resistance: Effective((36.5, Unknown("no penetration data; molded solid clay brick mean
                 unit compressive strength 36.5 MPa (s.d. 12.6; extruded 77.9), Brick Industry
@@ -239,6 +256,16 @@
             paintable: false,
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: None,
+            bulk: Some((
+                density: (1845.0, Measured("London stock brick, Engineering ToolBox 'Bricks -
+                    Densities' (read, secondary; the wall prototype's value,
+                    .agents/scratch/destruction-2026-10-30-buildings/wall-prototype/README.md).
+                    Range 1765–2165 kg/m³, red facings to engineering")),
+                toughness: (4.9e5, Derived("midpoint of 0.33–0.65 MPa·√m, solid bricks in
+                    three-point bending, notch depth 1/6 to 4/6 (MEASURED: Xiao & Shrive, 'Masonry
+                    Fracture Mechanics Three Point Bending Test of Brick', 9th Canadian Masonry
+                    Symposium, Table 4, read)")),
+            )),
         ),
         // The 8.8 cm Pzgr. 39's burst core, named by its burst block's `core_substance`.
         "88mm_burst_core": Unworn(

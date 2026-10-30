@@ -1,0 +1,62 @@
+// The generator's input for `house_1`, the village house: one storey of solid brick under a gable
+// roof of timber boards, hollow inside. `bake-buildings` turns it into
+// `assets/buildings/house_1/house_1.building.ron`. Metres in the building frame (`+Y` up, the origin
+// on the ground point, the ridge along `Z`); heights in brick courses from the foundation.
+//
+// The footprint is `prototypes.ron`'s former `house_proxy` box, 4 m by 6 m, and its 0.45 m skirt
+// below the ground point carries over as the foundation depth (6 courses).
+House(
+    id: "house_1",
+    // Outer faces: `X` across the gable span, `Z` along the ridge.
+    width_m: 4.0,
+    length_m: 6.0,
+    // One brick's length: a one-brick wall.
+    wall_thickness_m: 0.25,
+    // GOST 530 single-format brick, 250 × 120 × 65 mm, laid in 10 mm joints: a course is 65 + 10
+    // mm, a stretcher's module along the face 250 + 10 mm.
+    course_m: 0.075,
+    module_m: 0.26,
+    foundation_courses: 6,
+    // The eaves: the long walls' top, 2.475 m above the ground point.
+    eaves_course: 39,
+    // Roof pitch as rise over run, 3 : 4 (36.87°, a 3-4-5 triangle, so every slope is a ratio and
+    // no angle is taken): the wall plate's outer face height, the boards' width up the slope and
+    // their thickness, the boards per slope (2.8 m of slope: 0.24 m of eaves overhang) and the
+    // overhang past each gable.
+    pitch: (3, 4),
+    plate_height_m: 0.10,
+    board_width_m: 0.2,
+    board_thickness_m: 0.05,
+    boards_per_slope: 14,
+    gable_overhang_m: 0.3,
+    // Openings per wall, `u` along the wall in its own frame (east and west: `u` = −z and +z; north
+    // and south: `u` = +x and −x), heights in courses from the foundation. Windows 1.0 m wide from
+    // 0.9 m to 2.025 m over the ground point; the door 0.9 m wide from the ground point up.
+    walls: (
+        east: [
+            (u: (-2.0, -1.0), courses: (18, 33)),
+            (u: (-0.45, 0.45), courses: (6, 33)),
+            (u: (1.0, 2.0), courses: (18, 33)),
+        ],
+        west: [
+            (u: (-1.5, -0.5), courses: (18, 33)),
+            (u: (0.5, 1.5), courses: (18, 33)),
+        ],
+        north: [(u: (-0.5, 0.5), courses: (18, 33))],
+        south: [(u: (-0.5, 0.5), courses: (18, 33))],
+    ),
+    // The fracture bake's cut rule (`tools/src/buildings/fracture.rs`).
+    cuts: (
+        // Chunk rows, in courses: every row boundary is a bed joint.
+        row_courses: 3,
+        // The chance a cut leaves its head joint for a crack through bricks, and how far each end
+        // of that crack may move off the joint.
+        crack_chance: 0.2,
+        crack_shift_m: 0.09,
+        // The narrowest a chunk may be at a row's top or bottom.
+        min_width_m: 0.08,
+        // Timber pieces' lengths along their grain: roof boards, then wall plates.
+        board_piece_m: (0.9, 1.6),
+        plate_piece_m: (1.2, 2.0),
+    ),
+)

@@ -11,6 +11,8 @@
 
 use std::path::{Path, PathBuf};
 
+pub mod buildings;
+
 /// The repository's root: the game's manifest directory, one above this package's.
 pub fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))

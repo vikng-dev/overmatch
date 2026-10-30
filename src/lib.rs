@@ -43,6 +43,9 @@ mod branding;
 /// The scatter buildings' surface: brick walls and a timber roof mapped in metres on every face,
 /// through one `ExtendedMaterial` every building shares. View-only. See the module doc.
 mod building_surface;
+/// Buildings in the game's destruction model, as data: `buildings::schema` is the
+/// `<id>.building.ron` format the asset tools write and the game reads. Public for the tools.
+pub mod buildings;
 mod camera;
 /// The command layer: device reads → player bindings → per-tank serializable `TankCommand`. The
 /// seam authoritative multiplayer hangs off; sim modules consume commands, never devices.

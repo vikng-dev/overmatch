@@ -34,6 +34,9 @@
 //!
 //! - [`MaterialFacts`]: density, flow strength, Young's modulus and Poisson's ratio, for a substance
 //!   that is a structural metal with a sourced row. `None` where no fact is known — never a guess.
+//! - [`BulkFacts`]: density and fracture toughness, for a non-metal with a sourced row (brick,
+//!   timber). A row states either these or [`MaterialFacts`], never both, so its density is stated
+//!   once ([`HardSubstance::density`]).
 //! - [`Resistance`]: how a round's force law is resisted. Exactly one entry is the
 //!   [`Resistance::Reference`] — the reference steel, whose facts ARE the force law's reference
 //!   constants and whose millimetre is the reference-mm. Every other entry DECLARES its effective
@@ -118,6 +121,16 @@ impl MaterialFacts {
     }
 }
 
+/// The bulk facts of a non-metal: what a building's bake reads (a chunk's mass) and what a later
+/// crack law will read. SI units.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BulkFacts {
+    /// kg/m³.
+    pub density: f64,
+    /// Mode I fracture toughness `K_IC`, Pa·√m. No law reads it yet.
+    pub toughness: f64,
+}
+
 /// What a round's burst block reads of the substance its burst core is made of. SI units.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BurstFacts {
@@ -186,6 +199,9 @@ pub struct HardSubstance {
     pub debris_ratio: f32,
     /// The substance's material facts, or `None` where none are sourced.
     pub facts: Option<MaterialFacts>,
+    /// A non-metal's bulk facts, or `None` where none are sourced. Never stated beside
+    /// [`Self::facts`] (checked at parse).
+    pub bulk: Option<BulkFacts>,
     /// The facts a round's burst block reads where the substance is a burst core too, or `None`.
     /// The walk never reads them.
     pub burst: Option<BurstFacts>,
@@ -199,6 +215,13 @@ impl HardSubstance {
             Resistance::Reference => REFERENCE_FACTOR,
             Resistance::Effective(factor) => factor,
         }
+    }
+
+    /// kg/m³, from whichever facts the row states, or `None` where it states neither.
+    pub fn density(&self) -> Option<f64> {
+        self.facts
+            .map(|facts| facts.density)
+            .or(self.bulk.map(|bulk| bulk.density))
     }
 }
 
@@ -263,6 +286,8 @@ enum SubstanceFile {
         debris_half_angle_deg: Sourced<f64>,
         facts: Option<FactsFile>,
         #[serde(default)]
+        bulk: Option<BulkFile>,
+        #[serde(default)]
         burst: Option<BurstFile>,
     },
     Witness,
@@ -286,6 +311,14 @@ impl BurstFile {
             speed_constant: self.speed_constant_mps.0,
         }
     }
+}
+
+/// A non-metal's bulk facts as authored: density (kg/m³) and fracture toughness (Pa·√m).
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BulkFile {
+    density: Sourced<f64>,
+    toughness: Sourced<f64>,
 }
 
 #[derive(Deserialize)]
@@ -332,6 +365,7 @@ fn converted(name: &str, file: SubstanceFile) -> Result<Substance, String> {
             paintable,
             debris_half_angle_deg,
             facts,
+            bulk,
             burst,
         } => Substance::Hard(HardSubstance {
             resistance: match resistance {
@@ -345,6 +379,10 @@ fn converted(name: &str, file: SubstanceFile) -> Result<Substance, String> {
                 flow_strength: facts.flow_strength.0,
                 youngs_modulus: facts.youngs_modulus.0,
                 poisson_ratio: facts.poisson_ratio.0,
+            }),
+            bulk: bulk.map(|bulk| BulkFacts {
+                density: bulk.density.0,
+                toughness: bulk.toughness.0,
             }),
             burst: burst.map(BurstFile::facts),
         }),
@@ -453,6 +491,21 @@ fn checked_burst(name: &str, facts: BurstFacts) -> Result<(), String> {
 }
 
 fn checked_hard(name: &str, substance: HardSubstance) -> Result<HardSubstance, String> {
+    if let Some(bulk) = &substance.bulk {
+        if substance.facts.is_some() {
+            return Err(format!(
+                "substance {name:?} states both material facts and bulk facts — each states a \
+                 density, and a row states its density once"
+            ));
+        }
+        for (field, value) in [("density", bulk.density), ("toughness", bulk.toughness)] {
+            if !value.is_finite() || value <= 0.0 {
+                return Err(format!(
+                    "substance {name:?}: bulk {field} must be finite and positive (got {value})"
+                ));
+            }
+        }
+    }
     if let Some(facts) = &substance.facts {
         facts.validate().map_err(|reason| {
             format!("substance {name:?} has unusable material facts: {reason}")
@@ -718,6 +771,37 @@ mod tests {
         }
         for name in UNWORN {
             assert_eq!(registry.get(name).unwrap().matter(), None, "{name}");
+        }
+    }
+
+    /// A ROW STATES ITS DENSITY ONCE: bulk facts give a non-metal its density, which the building
+    /// bake reads for every chunk's mass, and a row stating them beside material facts (each with a
+    /// density) is refused, as is a bulk fact out of its domain. A mutant reading the density off
+    /// the wrong block, or letting two densities stand, fails here.
+    #[test]
+    fn bulk_facts_state_a_non_metal_s_density_once() {
+        let bulk = r#"bulk: Some((density: (1800.0, Tuned("fixture")), toughness: (5.0e5, Tuned("fixture"))))"#;
+        let row = |extra: &str| {
+            with(&format!(
+                r#""Clay": Hard(resistance: Effective((20.0, Tuned("fixture"))), paintable: false, debris_half_angle_deg: (26.2, Tuned("fixture")), {extra}),"#
+            ))
+        };
+        let registry = SubstanceRegistry::from_ron(&row(&format!("facts: None, {bulk}")))
+            .expect("a non-metal with bulk facts parses");
+        assert_eq!(registry.hard("Clay").unwrap().density(), Some(1800.0));
+        assert_eq!(registry.hard("Ref").unwrap().density(), Some(7850.0));
+        let bare = SubstanceRegistry::from_ron(&row("facts: None")).unwrap();
+        assert_eq!(bare.hard("Clay").unwrap().density(), None);
+        let both = format!(
+            r#"facts: Some((density: (7850.0, Tuned("f")), flow_strength: (1.0e9, Tuned("f")), youngs_modulus: (205.0e9, Tuned("f")), poisson_ratio: (0.29, Tuned("f")))), {bulk}"#
+        );
+        for refused in [
+            both,
+            format!("facts: None, {}", bulk.replace("1800.0", "0.0")),
+            format!("facts: None, {}", bulk.replace("5.0e5", "-1.0")),
+        ] {
+            let err = SubstanceRegistry::from_ron(&row(&refused)).expect_err(&refused);
+            assert!(matches!(err, SubstanceError::Parse(_)), "{err}");
         }
     }
 
