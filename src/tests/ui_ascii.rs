@@ -57,6 +57,8 @@ const BARLOW_TEXT_FILES: &[&str] = &[
     // string rather than written here, which is why it carries a sanitizer.
     "src/settings/displays.rs",
     "src/settings/ui.rs",
+    // The tier names the PRESET row renders.
+    "src/settings/preset.rs",
     "src/sight/reticle.rs",
     "src/damage_cam/pen_cam/killcam.rs",
     "src/damage_cam/pen_cam/game/killcam.rs",

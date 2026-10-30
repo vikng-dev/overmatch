@@ -75,6 +75,9 @@ mod displays;
 /// The end-of-frame frame-rate limiter — armed only by [`VsyncMode::Off`] plus a non-off
 /// [`FrameCap`]. Pure std timing; see its doc for the coarse-sleep-then-spin shape.
 mod limiter;
+/// The graphics presets: the one tier -> values table, and the PRESET row's label derived from
+/// it. Never persisted — only the rows a preset writes are; see its doc.
+mod preset;
 /// The one-shot present-mode capability probe: creates a throwaway wgpu surface for the primary
 /// window IN THE RENDER WORLD, reads `Surface::get_capabilities().present_modes`, and shuttles the
 /// result into the main-world [`PresentCaps`]. Probe, don't guess — no `cfg(target_os)` anywhere.
@@ -2848,10 +2851,13 @@ mod tests {
             .init_resource::<LodPixelBudget>()
             .init_resource::<WindowPlacement>()
             .add_systems(Update, apply_settings);
+        // `Msaa` is spelled out because `bevy_render` registers it as `Camera`'s required component,
+        // and this bare app mounts no render plugin; without it no camera matches the query.
         let battlefield = app
             .world_mut()
             .spawn((
                 Camera3d::default(),
+                Msaa::default(),
                 Bloom::NATURAL,
                 CameraProfile::BattlefieldThirdPerson,
             ))
@@ -2860,6 +2866,7 @@ mod tests {
             .world_mut()
             .spawn((
                 Camera3d::default(),
+                Msaa::default(),
                 Bloom::NATURAL,
                 CameraProfile::PenCamInset,
             ))

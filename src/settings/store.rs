@@ -727,10 +727,10 @@ mod tests {
             "absent vsync takes the default"
         );
 
-        // Genuinely unknown keys (the V2 display fields graduated to known ones, so these are the
-        // next candidates a future build might write).
+        // Genuinely unknown keys (the V2 display fields and bloom graduated to known ones, so these
+        // are the next candidates a future build might write).
         let Parsed::Ok(unknown) =
-            parse("(shadow_distance: M350, bloom: On, motion_blur: 2, hdr_output: true)")
+            parse("(shadow_distance: M350, film_grain: On, motion_blur: 2, hdr_output: true)")
         else {
             panic!("keys this build does not know must be skipped, not abort the parse");
         };

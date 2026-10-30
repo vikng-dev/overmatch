@@ -59,6 +59,7 @@ use bevy::ui::{ComputedNode, Overflow, ScrollPosition, UiGlobalTransform};
 use bevy::window::PrimaryWindow;
 
 use super::displays::DisplayLadder;
+use super::preset::Preset;
 use super::{
     BloomLevel, DebugPanel, FrameCap, KillCam, MsaaLevel, PenCamCorner, PixelBudget, PresentCaps,
     ReduceMotion, RenderScaleLevel, SaveSettings, Settings, ShadowCascades, ShadowDistance,
@@ -122,6 +123,9 @@ const TAB_STRIP_HINT: &str = "Left and right switch tabs. VIDEO holds display an
 /// fields without a migration (see the `settings` module doc).
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug)]
 enum Row {
+    /// LOW to ULTRA: writes every row directly below it at once, and reads CUSTOM whenever their
+    /// values match no tier — see `settings::preset`. Heads VIDEO, its rows beneath it.
+    Preset,
     RenderScale,
     /// The LOD screen-space error budget, in pixels. Beside render scale because they are the two
     /// rows that trade picture for frames by drawing LESS, rather than by drawing it differently.
@@ -176,18 +180,22 @@ enum RowKind {
 }
 
 impl Row {
-    const ORDER: [Row; 18] = [
+    const ORDER: [Row; 19] = [
+        Row::Preset,
+        // The rows the preset drives, directly beneath it — the PRESET hint says so, and
+        // `the_rows_a_preset_drives_sit_directly_below_it` pins it.
         Row::RenderScale,
         Row::LodPixelBudget,
-        Row::WindowMode,
-        Row::Display,
         Row::ShadowDistance,
         Row::ShadowResolution,
         Row::ShadowCascades,
-        Row::TrackPrints,
-        Row::TrackPrintRange,
         Row::Msaa,
         Row::Bloom,
+        Row::TrackPrints,
+        Row::TrackPrintRange,
+        // Display rows: no preset touches them.
+        Row::WindowMode,
+        Row::Display,
         Row::VSync,
         Row::FrameCap,
         Row::UiScale,
@@ -201,7 +209,8 @@ impl Row {
     /// tab by accident.
     const fn tab(self) -> Tab {
         match self {
-            Row::RenderScale
+            Row::Preset
+            | Row::RenderScale
             | Row::LodPixelBudget
             | Row::WindowMode
             | Row::Display
@@ -222,6 +231,7 @@ impl Row {
     /// The row's name. ASCII only — it reaches `Text`.
     const fn label(self) -> &'static str {
         match self {
+            Row::Preset => "PRESET",
             Row::RenderScale => "RENDER SCALE",
             Row::LodPixelBudget => "DETAIL BUDGET",
             Row::WindowMode => "WINDOW MODE",
@@ -249,6 +259,13 @@ impl Row {
     /// ASCII plus the verified typographic set only — it reaches `Text`.
     const fn hint(self) -> &'static str {
         match self {
+            // Names what it leaves alone, because a preset that moved the window or the frame cap
+            // would be the surprise. "nine" is `preset::DRIVEN_ROWS`, all directly below this row
+            // (`the_rows_a_preset_drives_sit_directly_below_it`).
+            Row::Preset => {
+                "Sets the nine rows below it at once; editing one reads CUSTOM. \
+                 Window, display, vsync, frame cap and UI scale are never touched."
+            }
             // Says what it does NOT touch, because that is the surprising half: the crosshair, the
             // range dial and every label stay pin-sharp while the world softens. The MSAA advice is
             // the one honest limit a player can act on (the multisample resolve is full-res
@@ -397,6 +414,9 @@ impl Row {
     /// renders the DISPLAY a rung names rather than the rung's position in a list.
     fn value(self, settings: &Settings, ladder: &DisplayLadder) -> String {
         match self {
+            Row::Preset => Preset::of(settings)
+                .map_or("CUSTOM", Preset::label)
+                .to_string(),
             Row::RenderScale => settings.render_scale.label().to_string(),
             Row::LodPixelBudget => settings.lod_pixel_budget.label(),
             Row::WindowMode => settings.window_mode.label().to_string(),
@@ -430,6 +450,7 @@ impl Row {
     /// and a two-display machine never steps onto a third display.
     fn step(self, settings: &mut Settings, delta: i32, caps: PresentCaps, ladder: &DisplayLadder) {
         match self {
+            Row::Preset => Preset::step(settings, delta),
             Row::RenderScale => {
                 settings.render_scale =
                     step_in(&RenderScaleLevel::ORDER, settings.render_scale, delta);
@@ -2160,6 +2181,101 @@ mod tests {
         );
         page.select(Row::Msaa);
         assert_eq!(page.row(), Some(Row::Msaa));
+    }
+
+    /// **Editing any driven row reads CUSTOM by itself, and editing any other row never moves the
+    /// label** — through [`Row::step`], the path every key and click takes. From each tier, every
+    /// row is stepped one rung both ways: a row that changed the driven values must read CUSTOM (or
+    /// the tier whose table it happens to land on exactly), and a row that did not must still read
+    /// the tier. No stored preset exists to go stale; this is the derivation doing it.
+    #[test]
+    fn editing_a_driven_row_reads_custom_and_any_other_row_keeps_the_tier() {
+        use super::super::preset::Look;
+
+        for tier in Preset::ORDER {
+            let mut base = Settings::default();
+            tier.apply(&mut base);
+            assert_eq!(Row::Preset.value(&base, &unlearned()), tier.label());
+            for row in Row::ORDER.into_iter().filter(|row| *row != Row::Preset) {
+                for delta in [-1, 1] {
+                    let mut edited = base;
+                    row.step(&mut edited, delta, ALL_RUNGS, &unlearned());
+                    let label = Row::Preset.value(&edited, &unlearned());
+                    let look = Look::of(&edited);
+                    if look == Look::of(&base) {
+                        assert_eq!(
+                            label,
+                            tier.label(),
+                            "{row:?} {delta}: not a preset row, but it moved the label",
+                        );
+                        continue;
+                    }
+                    let matching = Preset::ORDER.into_iter().find(|t| t.look() == look);
+                    assert_eq!(
+                        label,
+                        matching.map_or("CUSTOM", Preset::label),
+                        "{row:?} {delta} from {tier:?}",
+                    );
+                }
+            }
+        }
+        // And the row itself: a step from a tier lands on the next tier, all of its rows at once.
+        let mut settings = Settings::default();
+        Preset::ORDER[0].apply(&mut settings);
+        Row::Preset.step(&mut settings, 1, ALL_RUNGS, &unlearned());
+        assert_eq!(Look::of(&settings), Preset::ORDER[1].look());
+    }
+
+    /// **Nothing hidden: every value a preset drives has its own row, and those rows sit directly
+    /// below PRESET** — which is what its hint promises. A row is found to be driven by stepping it
+    /// and watching [`Look::ranks`] move, so the test names no row: each driven row moves exactly
+    /// one of the driven values, and together they move all of them.
+    #[test]
+    fn the_rows_a_preset_drives_sit_directly_below_it() {
+        use super::super::preset::{DRIVEN_ROWS, Look};
+
+        let base = Settings::default();
+        let mut covered = [false; DRIVEN_ROWS];
+        let mut driven = Vec::new();
+        for row in Row::ORDER.into_iter().filter(|row| *row != Row::Preset) {
+            let mut moves = false;
+            for delta in [-1, 1] {
+                let mut edited = base;
+                row.step(&mut edited, delta, ALL_RUNGS, &unlearned());
+                let (before, after) = (Look::of(&base).ranks(), Look::of(&edited).ranks());
+                let changed: Vec<usize> = (0..DRIVEN_ROWS)
+                    .filter(|&i| before[i] != after[i])
+                    .collect();
+                assert!(
+                    changed.len() <= 1,
+                    "{row:?} moves driven values {changed:?}"
+                );
+                for value in changed {
+                    covered[value] = true;
+                    moves = true;
+                }
+            }
+            if moves {
+                driven.push(row);
+            }
+        }
+        assert!(
+            covered.iter().all(|value| *value),
+            "a preset drives a value no row shows: {covered:?}",
+        );
+        let mut video = Tab::Video.rows();
+        assert_eq!(video.next(), Some(Row::Preset), "PRESET heads VIDEO");
+        let below: Vec<Row> = video.take(driven.len()).collect();
+        assert_eq!(
+            driven, below,
+            "the driven rows must sit directly below PRESET"
+        );
+        assert_eq!(
+            driven.len(),
+            DRIVEN_ROWS,
+            "one row per driven value — and the PRESET hint says \"nine rows\"",
+        );
+        assert_eq!(DRIVEN_ROWS, 9, "the PRESET hint says \"nine rows\"");
     }
 
     /// The capture lever names a tab by its label, in any case, and nothing else.
