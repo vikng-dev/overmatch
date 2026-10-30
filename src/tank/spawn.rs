@@ -844,10 +844,10 @@ fn insert_ballistic_volumes(
     }
 }
 
-/// Collision proxies: a convex hull per captured primitive on the Vehicle layer.
-/// [`MeshGeometry::convex_hull_collider`](crate::bake::MeshGeometry::convex_hull_collider) is
-/// exactly avian's `ConvexHullFromMesh` (it ignores indices — design §7.1). Collision-only:
-/// contributes no mass (the root authors its own).
+/// Collision proxies: one convex hull per loose part of each captured primitive, on the Vehicle
+/// layer ([`MeshGeometry::convex_hull_colliders`](crate::bake::MeshGeometry::convex_hull_colliders)).
+/// Every part is a child collider of the proxy's node entity, so all parts of a proxy ride the
+/// same body. Collision-only: contributes no mass (the root authors its own).
 fn insert_collision_proxies(
     commands: &mut Commands,
     geometry: &TankGeometry,
@@ -861,24 +861,33 @@ fn insert_collision_proxies(
             node.name
         );
         for primitive in &node.primitives {
-            let collider = primitive.convex_hull_collider().unwrap_or_else(|| {
-                panic!(
-                    "collision proxy `{}` has a degenerate hull source",
-                    node.name
-                )
-            });
-            commands.spawn((
-                ChildOf(entity_at(index)),
-                // ADR-0015 shields this authored local pose from position sync.
-                authored_attachment(Transform::IDENTITY),
-                collider,
-                CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
-                // Penetration backstops ONLY: the analytic belt model owns ALL tangential
-                // ground physics (phase B). Avian's default friction on these hulls would
-                // silently add grip/wall-climb beneath it.
-                Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
-            ));
+            spawn_proxy_parts(commands, entity_at(index), &node.name, primitive);
         }
+    }
+}
+
+/// One child collider under `parent` per loose part of `primitive`.
+fn spawn_proxy_parts(
+    commands: &mut Commands,
+    parent: Entity,
+    node_name: &str,
+    primitive: &crate::bake::MeshGeometry,
+) {
+    let colliders = primitive
+        .convex_hull_colliders()
+        .unwrap_or_else(|| panic!("collision proxy `{node_name}` has a degenerate hull source"));
+    for collider in colliders {
+        commands.spawn((
+            ChildOf(parent),
+            // ADR-0015 shields this authored local pose from position sync.
+            authored_attachment(Transform::IDENTITY),
+            collider,
+            CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
+            // Penetration backstops ONLY: the analytic belt model owns ALL tangential
+            // ground physics (phase B). Avian's default friction on these hulls would
+            // silently add grip/wall-climb beneath it.
+            Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
+        ));
     }
 }
 
@@ -1051,4 +1060,47 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
              buffer it was authored in and reaches the world through an unscaled hierarchy"
         );
     });
+}
+
+#[cfg(test)]
+mod proxy_tests {
+    use super::*;
+    use crate::bake::MeshGeometry;
+
+    fn tetra(offset: f32) -> MeshGeometry {
+        MeshGeometry {
+            positions: vec![
+                [offset, 0.0, 0.0],
+                [offset + 1.0, 0.0, 0.0],
+                [offset, 1.0, 0.0],
+                [offset, 0.0, 1.0],
+            ],
+            indices: vec![0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3],
+            substance: None,
+            certificate: None,
+        }
+    }
+
+    /// Invariant: every loose part of one proxy primitive is a child collider of the same node
+    /// entity, so the parts move as one body. The tank body's collision shape relies on it.
+    #[test]
+    fn the_parts_of_one_proxy_share_one_parent() {
+        let mut primitive = tetra(0.0);
+        let far = tetra(5.0);
+        primitive.positions.extend(far.positions);
+        primitive.indices.extend(far.indices.iter().map(|i| i + 4));
+
+        let mut world = World::new();
+        let node = world.spawn_empty().id();
+        let mut commands = world.commands();
+        spawn_proxy_parts(&mut commands, node, "proxy", &primitive);
+        world.flush();
+
+        let parents: Vec<Entity> = world
+            .query::<(&avian3d::prelude::Collider, &ChildOf)>()
+            .iter(&world)
+            .map(|(_, child_of)| child_of.parent())
+            .collect();
+        assert_eq!(parents, vec![node, node]);
+    }
 }

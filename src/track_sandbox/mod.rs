@@ -1317,8 +1317,8 @@ fn build_rig(
             // Solid-body collision (walls, hard bottoming): the ASSET'S OWN authored proxies — the
             // `*_Collider` nodes the artist modelled, declared in the tank RON's `colliders` and turned
             // into convex hulls exactly the way `tank::spawn::assemble_tank_body` turns them (same
-            // `MeshGeometry::convex_hull_collider` over the same node-local POSITION buffers, which
-            // is precisely what avian's `ConvexHullFromMesh` does). Identical construction is the
+            // `MeshGeometry::convex_hull_colliders` over the same node-local POSITION buffers, one
+            // hull per loose part). Identical construction is the
             // point, not tidiness: if the lab rig's collision shape differed from the shipped tank's,
             // a feel verdict taken here would not be a verdict about the game.
             //
@@ -1328,31 +1328,33 @@ fn build_rig(
             for &index in &blueprint.geometry.collision_proxies {
                 let node = &blueprint.geometry.nodes[index];
                 for primitive in &node.primitives {
-                    let collider = primitive.convex_hull_collider().unwrap_or_else(|| {
+                    let colliders = primitive.convex_hull_colliders().unwrap_or_else(|| {
                         panic!(
                             "collision proxy `{}` has a degenerate hull source",
                             node.name
                         )
                     });
-                    parent.spawn((
-                        collider,
-                        // FLATTENED to a hull-local pose instead of hung under a node entity. The
-                        // game parents each proxy to its own glb node and lets avian's
-                        // `ColliderTransform` compose the chain (which is how a scaled ancestor gets
-                        // its scale onto the shape); the sandbox has no node hierarchy — the glb
-                        // child above is a render-only `WorldAssetRoot` — so the baked root-relative
-                        // pose is used directly. That is exact while the chain carries no scale
-                        // (it doesn't: `Hull`→`Hull_Collider` and `Hull`→`Turret_Yaw`→
-                        // `Turret_Collider` are all identity TRS), and `refuse_scaled_proxy` below
-                        // makes a future scaled proxy loud instead of silently mis-sized. The turret
-                        // proxy is frozen at its rest yaw, which is what the sandbox wants: there is
-                        // no turret to traverse here.
-                        Transform::from_translation(node.root_position)
-                            .with_rotation(node.root_rotation),
-                        CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
-                        // Frictionless, like every backstop here — see the hull comment above.
-                        Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
-                    ));
+                    for collider in colliders {
+                        parent.spawn((
+                            collider,
+                            // FLATTENED to a hull-local pose instead of hung under a node entity. The
+                            // game parents each proxy to its own glb node and lets avian's
+                            // `ColliderTransform` compose the chain (which is how a scaled ancestor gets
+                            // its scale onto the shape); the sandbox has no node hierarchy — the glb
+                            // child above is a render-only `WorldAssetRoot` — so the baked root-relative
+                            // pose is used directly. That is exact while the chain carries no scale
+                            // (it doesn't: `Hull`→`Hull_Collider` and `Hull`→`Turret_Yaw`→
+                            // `Turret_Collider` are all identity TRS), and `refuse_scaled_proxy` below
+                            // makes a future scaled proxy loud instead of silently mis-sized. The turret
+                            // proxy is frozen at its rest yaw, which is what the sandbox wants: there is
+                            // no turret to traverse here.
+                            Transform::from_translation(node.root_position)
+                                .with_rotation(node.root_rotation),
+                            CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
+                            // Frictionless, like every backstop here — see the hull comment above.
+                            Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
+                        ));
+                    }
                 }
             }
 

@@ -306,7 +306,7 @@ TankSpec(
         "Wheel_R_6":        (external: true),
         "Wheel_R_7":        (external: true),
     },
-    // Collision proxies (convex hull, Vehicle layer) — DECLARED, replacing the `*_Collider` suffix
+    // Collision proxies (one convex hull per loose part, Vehicle layer) — DECLARED, replacing the `*_Collider` suffix
     // scan. The suffix survives as a name because it reads well in Blender; nothing parses it.
     colliders: ["Hull_Collider", "Turret_Collider"],
     // Shadow proxies: beyond the caster switch range each casts the shadow of the rigid node it is

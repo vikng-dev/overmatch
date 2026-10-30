@@ -191,10 +191,62 @@ pub(crate) struct PrimitiveSubstance {
 }
 
 impl MeshGeometry {
-    /// Build the convex-hull collider consumed by both the game and the track sandbox.
-    pub(crate) fn convex_hull_collider(&self) -> Option<Collider> {
-        let points = self.positions.iter().copied().map(Vec3::from).collect();
-        Collider::convex_hull(points)
+    /// One convex hull per loose part of the primitive, consumed by both the game and the track
+    /// sandbox. A loose part is a connected component of the triangle mesh after welding by exact
+    /// position ([`weld`]): glTF splits a vertex wherever the normal or UV differs, so connectivity
+    /// by index would cut a flat-shaded box into six quads. Vertices no triangle references belong
+    /// to no part; a triangle indexing past the POSITION buffer is dropped.
+    ///
+    /// `None` when the primitive has no part or any part has no hull (avian's `convex_hull`
+    /// refuses a degenerate point set).
+    pub(crate) fn convex_hull_colliders(&self) -> Option<Vec<Collider>> {
+        let (welded, _) = weld(&self.positions);
+        let mut parent: Vec<u32> = (0..welded.len() as u32).collect();
+        fn find(parent: &mut [u32], mut id: u32) -> u32 {
+            while parent[id as usize] != id {
+                parent[id as usize] = parent[parent[id as usize] as usize];
+                id = parent[id as usize];
+            }
+            id
+        }
+        // Union by welded id; the root of a set is its smallest id, so parts come out in
+        // first-occurrence order of their vertices, deterministically.
+        let mut referenced: HashSet<u32> = HashSet::new();
+        for triangle in self.indices.as_chunks::<3>().0 {
+            let Some(ids) = triangle
+                .iter()
+                .map(|&corner| welded.get(corner as usize).copied())
+                .collect::<Option<Vec<u32>>>()
+            else {
+                continue;
+            };
+            referenced.extend(ids.iter().copied());
+            let roots = [
+                find(&mut parent, ids[0]),
+                find(&mut parent, ids[1]),
+                find(&mut parent, ids[2]),
+            ];
+            let low = roots[0].min(roots[1]).min(roots[2]);
+            for root in roots {
+                parent[root as usize] = low;
+            }
+        }
+        let mut parts: BTreeMap<u32, Vec<Vec3>> = BTreeMap::new();
+        let mut seen: HashSet<u32> = HashSet::new();
+        for (vertex, &id) in welded.iter().enumerate() {
+            if !referenced.contains(&id) || !seen.insert(id) {
+                continue;
+            }
+            let root = find(&mut parent, id);
+            parts
+                .entry(root)
+                .or_default()
+                .push(Vec3::from(self.positions[vertex]));
+        }
+        if parts.is_empty() {
+            return None;
+        }
+        parts.into_values().map(Collider::convex_hull).collect()
     }
 }
 
@@ -2806,5 +2858,111 @@ mod tests {
             has_error(&findings),
             "an error makes the exit status non-zero"
         );
+    }
+
+    /// An axis-aligned box `[lo, hi]` as a flat-shaded glTF primitive does: 24 vertices, four per
+    /// face, each face its own quad, so no two faces share a vertex index.
+    fn flat_box(lo: Vec3, hi: Vec3) -> (Vec<[f32; 3]>, Vec<u32>) {
+        let c = |x: bool, y: bool, z: bool| {
+            [
+                if x { hi.x } else { lo.x },
+                if y { hi.y } else { lo.y },
+                if z { hi.z } else { lo.z },
+            ]
+        };
+        let faces = [
+            [
+                c(false, false, false),
+                c(false, true, false),
+                c(false, true, true),
+                c(false, false, true),
+            ],
+            [
+                c(true, false, false),
+                c(true, false, true),
+                c(true, true, true),
+                c(true, true, false),
+            ],
+            [
+                c(false, false, false),
+                c(false, false, true),
+                c(true, false, true),
+                c(true, false, false),
+            ],
+            [
+                c(false, true, false),
+                c(true, true, false),
+                c(true, true, true),
+                c(false, true, true),
+            ],
+            [
+                c(false, false, false),
+                c(true, false, false),
+                c(true, true, false),
+                c(false, true, false),
+            ],
+            [
+                c(false, false, true),
+                c(false, true, true),
+                c(true, true, true),
+                c(true, false, true),
+            ],
+        ];
+        let mut positions = Vec::new();
+        let mut indices = Vec::new();
+        for face in faces {
+            let base = positions.len() as u32;
+            positions.extend(face);
+            indices.extend([base, base + 1, base + 2, base, base + 2, base + 3]);
+        }
+        (positions, indices)
+    }
+
+    fn proxy(boxes: &[(Vec3, Vec3)]) -> MeshGeometry {
+        let mut positions = Vec::new();
+        let mut indices = Vec::new();
+        for &(lo, hi) in boxes {
+            let (p, i) = flat_box(lo, hi);
+            let base = positions.len() as u32;
+            positions.extend(p);
+            indices.extend(i.into_iter().map(|index| index + base));
+        }
+        MeshGeometry {
+            positions,
+            indices,
+            substance: None,
+            certificate: None,
+        }
+    }
+
+    /// Invariant: a collision proxy is one hull per loose part, so the collision shape of a part
+    /// pair keeps the space between them (the notch a single hull would fill). Relied on by the
+    /// tank body's collision proxies, which author a notched silhouette as two convex parts.
+    #[test]
+    fn two_disjoint_boxes_make_two_hulls_and_the_notch_is_outside_both() {
+        let primitive = proxy(&[
+            (Vec3::ZERO, Vec3::ONE),
+            (Vec3::new(2.0, 0.0, 0.0), Vec3::new(3.0, 1.0, 1.0)),
+        ]);
+        let hulls = primitive.convex_hull_colliders().expect("two valid parts");
+        assert_eq!(hulls.len(), 2);
+        let notch = Vec3::new(1.5, 0.5, 0.5);
+        assert!(
+            hulls
+                .iter()
+                .all(|hull| !hull.contains_point(Vec3::ZERO, Quat::IDENTITY, notch))
+        );
+        assert!(hulls[0].contains_point(Vec3::ZERO, Quat::IDENTITY, Vec3::splat(0.5)));
+        assert!(hulls[1].contains_point(Vec3::ZERO, Quat::IDENTITY, Vec3::new(2.5, 0.5, 0.5)));
+    }
+
+    /// Invariant: connectivity is by welded position, not by index. glTF splits a vertex wherever
+    /// the normal differs, so a flat-shaded box is six index-disconnected quads and must still be
+    /// exactly one part.
+    #[test]
+    fn one_flat_shaded_box_is_one_hull() {
+        let primitive = proxy(&[(Vec3::ZERO, Vec3::ONE)]);
+        assert_eq!(primitive.positions.len(), 24);
+        assert_eq!(primitive.convex_hull_colliders().expect("a box").len(), 1);
     }
 }
