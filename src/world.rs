@@ -406,50 +406,54 @@ pub fn plugin(app: &mut App) {
     // composition because `spawn_environment` writes its asset collection on every composition:
     // the plugin's render half is behind the render app, which the dedicated server does not have.
     app.add_plugins(crate::terrain_blend::plugin);
+    // The scatter buildings' material, which `spawn_environment` takes for the same reason.
+    app.add_plugins(crate::building_surface::plugin);
     // The terrain LOD ladder's adaptive half: the levels are generated in `spawn_environment`
     // above, and this keeps their switch distances honest as the optic toggles and the window
     // resizes. Inert until a ladder exists, so the dedicated server pays nothing.
     app.add_plugins(crate::terrain_lod::plugin);
 }
 
-/// How a terrain surface map's bytes must be interpreted at LOAD time — the one texture decision
-/// that cannot be corrected downstream (the sampler hands the shader whatever the GPU format says).
-/// The diffuse carries COLOUR and is authored in sRGB; the normal and ARM maps carry DATA — a
-/// tangent-space direction, and three material scalars — and an sRGB transfer applied to those
-/// bends every direction and every roughness value.
+/// How a surface map's bytes (a terrain or building pack's, or a mask's) must be interpreted at LOAD
+/// time — the one texture decision that cannot be corrected downstream (the sampler hands the
+/// shader whatever the GPU format says). The diffuse carries COLOUR and is authored in sRGB; the
+/// normal and ARM maps carry DATA — a tangent-space direction, and three material scalars — and an
+/// sRGB transfer applied to those bends every direction and every roughness value.
 ///
 /// Still ours to state even though the maps are KTX2: bevy does NOT read the container's transfer
 /// function for a UASTC payload — `is_srgb` is what picks the sRGB variant of the transcode target
 /// (`Astc { channel: UnormSrgb }` / `Bc7RgbaUnormSrgb` vs the plain `Unorm` forms).
 #[derive(Clone, Copy)]
-enum MapEncoding {
+pub(crate) enum MapEncoding {
     Srgb,
     Linear,
 }
 
-/// Anisotropic-filter taps for the ground. The terrain is the one surface always seen at grazing
-/// angles out to the horizon, which is exactly the case isotropic filtering blurs; 8 is the usual
-/// quality/cost knee (16 costs more for little visible gain at this texel density). Only meaningful
-/// because the maps carry mip chains — anisotropy is a rule for choosing among mip levels, so on
-/// the old single-level PNGs it cost sampling work and bought nothing.
-const TERRAIN_ANISOTROPY: u16 = 8;
+/// Anisotropic-filter taps for every surface map. The terrain is the one surface always seen at
+/// grazing angles out to the horizon, which is exactly the case isotropic filtering blurs, and a
+/// building's wall is met at the same angles along a street; 8 is the usual quality/cost knee (16
+/// costs more for little visible gain at this texel density). Only meaningful because the maps
+/// carry mip chains — anisotropy is a rule for choosing among mip levels, so on the old
+/// single-level PNGs it cost sampling work and bought nothing.
+const SURFACE_ANISOTROPY: u16 = 8;
 
-/// How a terrain image is addressed outside `0..1`. A surface pack TILES — bevy's default clamps,
+/// How a surface image is addressed outside `0..1`. A surface pack TILES — bevy's default clamps,
 /// which would smear the first [`crate::terrain_grid::TEXTURE_TILE_M`] tile across the whole map.
 /// A weight mask is STRETCHED over the world square exactly once, so it must clamp instead: with
 /// repeat addressing its opposite edges would bleed into each other at the map's border.
 #[derive(Clone, Copy)]
-enum MapTiling {
+pub(crate) enum MapTiling {
     Repeat,
     Stretched,
 }
 
-/// Load one terrain image with the sampler its role needs: [`MapTiling`] addressing, trilinear
-/// filtering across the mip chain, and anisotropy. Async load is fine — this is pure view
-/// (ADR-0014), nothing sim-side reads it — but a FAILED load is fatal
-/// ([`report_failed_terrain_map`]). The sampler is orthogonal to the container: the same descriptor
-/// rides the KTX2 maps exactly as it rode the PNGs.
-fn terrain_map(
+/// Load one surface image (a terrain or building pack's map, or a mask) with the sampler its role
+/// needs: [`MapTiling`] addressing, trilinear filtering across the mip chain, and anisotropy. Async
+/// load is fine — this is pure view (ADR-0014), nothing sim-side reads it — but a FAILED load is
+/// fatal, so every caller holds its maps' ids for a reporter ([`report_failed_terrain_map`],
+/// `building_surface`'s). The sampler is orthogonal to the container: the same descriptor rides
+/// the KTX2 maps exactly as it rode the PNGs.
+pub(crate) fn surface_map(
     asset_server: &AssetServer,
     path: &str,
     encoding: MapEncoding,
@@ -473,7 +477,7 @@ fn terrain_map(
                 ..ImageSamplerDescriptor::default()
             };
             // Sets the three filters to Linear as well — wgpu REQUIRES that for anisotropy > 1.
-            sampler.set_anisotropic_filter(TERRAIN_ANISOTROPY);
+            sampler.set_anisotropic_filter(SURFACE_ANISOTROPY);
             settings.sampler = ImageSampler::Descriptor(sampler);
         })
         .load(path.to_owned())
@@ -509,7 +513,7 @@ fn report_failed_terrain_map(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "spawns the environment: four asset stores, terrain, map, window, view profile, loader \
+    reason = "spawns the environment: five asset stores, terrain, map, window, view profile, loader \
               and the ablation lever"
 )]
 fn spawn_environment(
@@ -517,6 +521,8 @@ fn spawn_environment(
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     mut terrain_materials: ResMut<Assets<crate::terrain_blend::TerrainMaterial>>,
+    // The scatter buildings' one shared material (`building_surface`).
+    mut building_materials: ResMut<Assets<crate::building_surface::BuildingMaterial>>,
     // The track prints' two stores, which the ground's material reads (`track_prints`).
     mut images: ResMut<Assets<Image>>,
     grid: Option<Res<crate::terrain_grid::HeightGrid>>,
@@ -586,19 +592,19 @@ fn spawn_environment(
                 .expect("a decoded height grid comes from a parsed manifest");
             // The BASE ground surface pack (Poly Haven, CC0 — see the pack folder's `cc.txt`),
             // world-space tiled by the mesh's UVs every `terrain_grid::TEXTURE_TILE_M`.
-            let diffuse = terrain_map(
+            let diffuse = surface_map(
                 &asset_server,
                 crate::terrain_grid::TEXTURE_PATH,
                 MapEncoding::Srgb,
                 MapTiling::Repeat,
             );
-            let normal = terrain_map(
+            let normal = surface_map(
                 &asset_server,
                 crate::terrain_grid::NORMAL_PATH,
                 MapEncoding::Linear,
                 MapTiling::Repeat,
             );
-            let arm = terrain_map(
+            let arm = surface_map(
                 &asset_server,
                 crate::terrain_grid::ARM_PATH,
                 MapEncoding::Linear,
@@ -606,25 +612,25 @@ fn spawn_environment(
             );
             // The three BLENDED packs, one 2D array per map type, plus the map's own weight mask
             // (`terrain_blend` — layer order is the mask's channel order).
-            let layer_albedo = terrain_map(
+            let layer_albedo = surface_map(
                 &asset_server,
                 crate::terrain_blend::LAYER_TEXTURE_PATH,
                 MapEncoding::Srgb,
                 MapTiling::Repeat,
             );
-            let layer_normal = terrain_map(
+            let layer_normal = surface_map(
                 &asset_server,
                 crate::terrain_blend::LAYER_NORMAL_PATH,
                 MapEncoding::Linear,
                 MapTiling::Repeat,
             );
-            let layer_arm = terrain_map(
+            let layer_arm = surface_map(
                 &asset_server,
                 crate::terrain_blend::LAYER_ARM_PATH,
                 MapEncoding::Linear,
                 MapTiling::Repeat,
             );
-            let masks = terrain_map(
+            let masks = surface_map(
                 &asset_server,
                 &manifest.masks_asset(),
                 MapEncoding::Linear,
@@ -740,7 +746,10 @@ fn spawn_environment(
                 &manifest,
                 &grid,
                 &mut blocks,
-                (!windows.is_empty()).then_some(&*asset_server),
+                (!windows.is_empty()).then(|| crate::scatter::ViewAssets {
+                    server: &asset_server,
+                    building_materials: &mut building_materials,
+                }),
             );
         }
         commands.insert_resource(TerrainMap {

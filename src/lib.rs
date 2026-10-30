@@ -40,6 +40,9 @@ mod bitprobe;
 #[cfg(feature = "bitprobe")]
 pub use bitprobe::run_bitprobe;
 mod branding;
+/// The scatter buildings' surface: brick walls and a timber roof mapped in metres on every face,
+/// through one `ExtendedMaterial` every building shares. View-only. See the module doc.
+mod building_surface;
 mod camera;
 /// The command layer: device reads → player bindings → per-tank serializable `TankCommand`. The
 /// seam authoritative multiplayer hangs off; sim modules consume commands, never devices.

@@ -1,0 +1,10 @@
+"dark_planks" (https://polyhaven.com/a/dark_planks) by Poly Haven (Rob Tuytel) is licensed under CC0 (https://creativecommons.org/publicdomain/zero/1.0/).
+
+AUTHORED SCALE: 2 x 2 m (Poly Haven `dimensions: [2000, 2000]` mm). Part of the pack's contract:
+whatever binds it must repeat every 2 m, or every board renders at the wrong size. See
+`building_surface::ROOF`. At 1024², that is 512 px/m.
+
+THE SCATTER BUILDINGS' ROOFS — `building_surface::BuildingSurface` binds these three files, swapped
+in on each building box's top face, the boards running along the box's longer horizontal side.
+Shipped as KTX2 (UASTC 4x4 + zstd supercompression, full mip chain) at 1024², cut from the pack's
+2k masters by `scripts/encode-terrain-ktx2.sh dark_planks`.

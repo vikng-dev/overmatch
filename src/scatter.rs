@@ -1,7 +1,9 @@
 //! The map's object scatter: the authored placement of buildings and trees, out of the map's own
 //! manifest ([`crate::map`]), spawned with static colliders on every composition, the dedicated
 //! server included — a building or a fir as a GRAYBOX proxy (a box per building, a trunk cylinder
-//! plus a canopy cone per fir), a tree of the damage model as its own body (below).
+//! plus a canopy cone per fir), a tree of the damage model as its own body (below). A building's
+//! box is drawn in brick under a timber roof ([`crate::building_surface`]), its shape still the
+//! collider's.
 //!
 //! SHARED DATA, NOT REPLICATION — the same stance the terrain takes: both binaries read the same
 //! shipped file and derive the same entities, so no scatter entity crosses the wire. The
@@ -32,6 +34,7 @@ use avian3d::prelude::{Collider, CollisionLayers, LayerMask, RigidBody};
 use bevy::prelude::*;
 
 use crate::Layer;
+use crate::building_surface::BuildingMaterial;
 use crate::map::{InstanceRecord, MapManifest, Prototype};
 use crate::terrain_grid::HeightGrid;
 
@@ -192,26 +195,49 @@ fn place<'a>(instances: &[Instance<'a>], grid: &HeightGrid) -> Vec<Placement<'a>
         .collect()
 }
 
+/// What a composition that draws hands the scatter: the server the trees' glb views and the
+/// buildings' maps load through, and the store the buildings' one material goes into.
+pub(crate) struct ViewAssets<'a> {
+    pub(crate) server: &'a AssetServer,
+    pub(crate) building_materials: &'a mut Assets<BuildingMaterial>,
+}
+
 /// The view-side handles, built ONCE per world: one mesh per prototype, cloned per instance, and
-/// one flat material per surface. Only built where there is a window to draw into.
+/// one material per surface. Only built where there is a window to draw into.
 struct ScatterView {
-    /// The unit cube every building box is a scaled copy of — the same encoding the block list uses.
-    cube: Handle<Mesh>,
+    /// The unit cube per building prototype, keyed by its id: the cube the block transform scales,
+    /// the same encoding the block list uses, its faces framed for the building surface
+    /// ([`crate::building_surface::unit_box`]).
+    building: BTreeMap<String, Handle<Mesh>>,
     /// `(trunk, canopy)` per fir prototype, keyed by its id.
     fir: BTreeMap<String, (Handle<Mesh>, Handle<Mesh>)>,
-    wall: Handle<StandardMaterial>,
+    /// The ONE material every building wears: no instance gets its own, so the buildings batch.
+    surface: Handle<BuildingMaterial>,
     bark: Handle<StandardMaterial>,
     needle: Handle<StandardMaterial>,
 }
 
 impl ScatterView {
     fn new(
+        commands: &mut Commands,
         meshes: &mut Assets<Mesh>,
         materials: &mut Assets<StandardMaterial>,
+        assets: &mut ViewAssets<'_>,
         library: &BTreeMap<String, Prototype>,
     ) -> Self {
         Self {
-            cube: meshes.add(Cuboid::new(1.0, 1.0, 1.0)),
+            building: library
+                .iter()
+                .filter_map(|(id, shape)| match *shape {
+                    Prototype::Building { min, max } => Some((
+                        id.clone(),
+                        meshes.add(crate::building_surface::unit_box(
+                            crate::building_surface::ridge_axis(min, max),
+                        )),
+                    )),
+                    Prototype::Fir { .. } | Prototype::Tree { .. } => None,
+                })
+                .collect(),
             fir: library
                 .iter()
                 .filter_map(|(id, shape)| match *shape {
@@ -231,7 +257,11 @@ impl ScatterView {
                     Prototype::Building { .. } | Prototype::Tree { .. } => None,
                 })
                 .collect(),
-            wall: materials.add(Color::srgb(0.62, 0.58, 0.53)),
+            surface: crate::building_surface::material(
+                commands,
+                assets.server,
+                assets.building_materials,
+            ),
             bark: materials.add(Color::srgb(0.26, 0.19, 0.13)),
             needle: materials.add(Color::srgb(0.11, 0.21, 0.13)),
         }
@@ -240,8 +270,8 @@ impl ScatterView {
 
 /// Spawn the scatter into the world the grid describes, appending every building to `blocks` (the
 /// [`crate::world::TerrainMap`] list the analytic track field is built from). Colliders spawn in
-/// every composition; meshes and the trees' glb views only where `assets` offers a server to draw
-/// with — the dedicated server draws nothing, exactly as it skips the terrain's render tiles.
+/// every composition; meshes and the trees' glb views only where `view_assets` offers a server to
+/// draw with — the dedicated server draws nothing, exactly as it skips the terrain's render tiles.
 pub(crate) fn spawn(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
@@ -249,10 +279,13 @@ pub(crate) fn spawn(
     manifest: &MapManifest,
     grid: &HeightGrid,
     blocks: &mut Vec<Transform>,
-    assets: Option<&AssetServer>,
+    mut view_assets: Option<ViewAssets<'_>>,
 ) {
     let placements = place(&resolve(&manifest.instances, &manifest.prototypes), grid);
-    let view = assets.map(|_| ScatterView::new(meshes, materials, &manifest.prototypes));
+    let view = view_assets
+        .as_mut()
+        .map(|assets| ScatterView::new(commands, meshes, materials, assets, &manifest.prototypes));
+    let assets = view_assets.map(|assets| assets.server);
     let statics = CollisionLayers::new([Layer::Terrain], LayerMask::ALL);
     let (mut buildings, mut firs, mut trees) = (0usize, 0usize, 0usize);
     for placement in &placements {
@@ -290,8 +323,8 @@ pub(crate) fn spawn(
                 ));
                 if let Some(view) = &view {
                     entity.insert((
-                        Mesh3d(view.cube.clone()),
-                        MeshMaterial3d(view.wall.clone()),
+                        Mesh3d(view.building[placement.prototype].clone()),
+                        MeshMaterial3d(view.surface.clone()),
                         crate::render_cost::CasterClass::House,
                     ));
                 }
@@ -441,29 +474,75 @@ mod tests {
             bevy::asset::AssetPlugin::default(),
         ))
         .init_asset::<Mesh>()
+        .init_asset::<Image>()
         .init_asset::<StandardMaterial>()
+        .init_asset::<BuildingMaterial>()
         .init_asset::<bevy::world_serialization::WorldAsset>();
         let grid = sloped_grid();
         let mut blocks: Vec<Transform> = Vec::new();
-        let assets = draw.then(|| app.world().resource::<AssetServer>().clone());
+        let server = draw.then(|| app.world().resource::<AssetServer>().clone());
         let world = app.world_mut();
         world.resource_scope(|world, mut meshes: Mut<Assets<Mesh>>| {
             world.resource_scope(|world, mut materials: Mut<Assets<StandardMaterial>>| {
-                let mut queue = bevy::ecs::world::CommandQueue::default();
-                let mut commands = Commands::new(&mut queue, world);
-                spawn(
-                    &mut commands,
-                    &mut meshes,
-                    &mut materials,
-                    manifest,
-                    &grid,
-                    &mut blocks,
-                    assets.as_ref(),
-                );
-                queue.apply(world);
+                world.resource_scope(|world, mut buildings: Mut<Assets<BuildingMaterial>>| {
+                    let mut queue = bevy::ecs::world::CommandQueue::default();
+                    let mut commands = Commands::new(&mut queue, world);
+                    spawn(
+                        &mut commands,
+                        &mut meshes,
+                        &mut materials,
+                        manifest,
+                        &grid,
+                        &mut blocks,
+                        server.as_ref().map(|server| ViewAssets {
+                            server,
+                            building_materials: &mut buildings,
+                        }),
+                    );
+                    queue.apply(world);
+                });
             });
         });
         (app, blocks)
+    }
+
+    /// EVERY BUILDING WEARS THE ONE MATERIAL, the draw-count invariant the brick-and-timber surface
+    /// rides on: a second house — another id, another scale (fixture data) — draws with the first
+    /// one's mesh and material handles, and the world holds one building material in all. A view
+    /// that minted either per instance would split the buildings into a draw each.
+    #[test]
+    fn every_building_draws_with_one_mesh_and_one_material() {
+        let mut manifest = mixed_fixture_manifest();
+        let mut second = manifest
+            .instances
+            .iter()
+            .find(|instance| {
+                matches!(
+                    manifest.prototypes[&instance.prototype],
+                    Prototype::Building { .. }
+                )
+            })
+            .expect("the fixture places a house")
+            .clone();
+        second.id = "house_0002".to_owned();
+        second.translation[0] += 30.0;
+        second.scale = [0.6; 3];
+        manifest.instances.push(second);
+        let (mut app, blocks) = spawned(&manifest, true);
+        assert_eq!(blocks.len(), 2, "both houses are blocks");
+        let world = app.world_mut();
+        let drawn: Vec<(AssetId<Mesh>, AssetId<BuildingMaterial>)> = world
+            .query::<(&Mesh3d, &MeshMaterial3d<BuildingMaterial>)>()
+            .iter(world)
+            .map(|(mesh, material)| (mesh.id(), material.id()))
+            .collect();
+        assert_eq!(drawn.len(), 2, "both houses draw");
+        assert_eq!(drawn[0], drawn[1], "one mesh and one material for both");
+        assert_eq!(
+            world.resource::<Assets<BuildingMaterial>>().len(),
+            1,
+            "one building material in the world",
+        );
     }
 
     /// The spawn itself, in a real world: every building reaches the block list, every instance

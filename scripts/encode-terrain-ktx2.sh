@@ -1,6 +1,7 @@
 #!/bin/sh
-# encode-terrain-ktx2.sh — re-encode the terrain surface packs into the KTX2 files the game
-# actually ships (`assets/terrain/<pack>/<pack>_*.ktx2` and `assets/terrain/blend/blend_*.ktx2`).
+# encode-terrain-ktx2.sh — re-encode the surface packs into the KTX2 files the game actually ships:
+# the terrain's (`assets/terrain/<pack>/<pack>_*.ktx2`, `assets/terrain/blend/blend_*.ktx2`) and
+# the scatter buildings' (`assets/buildings/<pack>/<pack>_*.ktx2`).
 #
 # WHY KTX2 AND NOT PNG/JPG: bevy's PNG/JPG loaders produce a texture with ONE mip level. A 4k
 # ground texture tiled every 8 m, sampled at grazing angles across the whole horizon, then misses
@@ -8,8 +9,8 @@
 # GPU block compression (UASTC 4x4, transcoded at load to ASTC 4x4 on Apple Silicon / BC7 on
 # desktop GPUs — both 8 bpp, vs 32 bpp for the uncompressed RGBA8 upload).
 #
-# SOURCES stay OUT of the repo (they are 4k lossless masters, ~200 MB): this script fetches them
-# from Poly Haven's CDN into $TERRAIN_SRC (default ~/Downloads/overmatch-terrain-src) and reuses
+# SOURCES stay OUT of the repo (they are lossless masters, ~200 MB): this script fetches them from
+# Poly Haven's CDN into $TERRAIN_SRC (default ~/Downloads/overmatch-terrain-src) and reuses
 # whatever is already there. Everything is CC0 — see each pack's `cc.txt` in the asset folder.
 #
 #   usage: scripts/encode-terrain-ktx2.sh [pack | blend ...]   (default: everything below)
@@ -21,13 +22,19 @@
 # nine separate bindings do not fit beside bevy's PBR bind group, three array bindings do. Naming
 # any layer pack selects `blend`, since a layer cannot be cut on its own.
 #
-#   pack                  albedo file  res
-#   coast_sand_rocks_02   diff         4096   ACTIVE base — bound by `terrain_grid::TEXTURE_PATH`
-#   dirt_aerial_03        diff         2048   blend layer 0 (recesses)
-#   coast_sand_05         diff         2048   blend layer 1 (slopes)
-#   aerial_mud_1          diff         2048   blend layer 2 (lowlands)
-#   brown_mud_leaves_01   diff         2048   staged — nothing loads it
-#   rocks_ground_02       col          2048   staged — nothing loads it
+#   pack                  albedo file  res   source
+#   coast_sand_rocks_02   diff         4096  4k  ACTIVE base — bound by `terrain_grid::TEXTURE_PATH`
+#   dirt_aerial_03        diff         2048  4k  blend layer 0 (recesses)
+#   coast_sand_05         diff         2048  4k  blend layer 1 (slopes)
+#   aerial_mud_1          diff         2048  4k  blend layer 2 (lowlands)
+#   brown_mud_leaves_01   diff         2048  4k  staged — nothing loads it
+#   rocks_ground_02       col          2048  4k  staged — nothing loads it
+#   brick_wall_006        diff         1024  2k  building walls — `building_surface::WALL`
+#   dark_planks           diff         1024  2k  building roofs — `building_surface::ROOF`
+#
+# A building pack is cut at 1024², from 2k masters: a house face spans metres, not a horizon, and
+# the LOW preset's GPU is a GTX 1650-class part. Two master texels per shipped texel is all the
+# resample's filter uses.
 set -e
 cd "$(git rev-parse --show-toplevel)"
 
@@ -40,17 +47,39 @@ LAYER_PACKS="dirt_aerial_03 coast_sand_05 aerial_mud_1"
 BLEND_DIR="assets/terrain/blend"
 BLEND_RES=2048
 
-TARGETS="${*:-coast_sand_rocks_02 brown_mud_leaves_01 rocks_ground_02 blend}"
+# The scatter buildings' packs: standalone maps into `assets/buildings/<pack>/`.
+BUILDING_PACKS="brick_wall_006 dark_planks"
+
+TARGETS="${*:-coast_sand_rocks_02 brown_mud_leaves_01 rocks_ground_02 blend $BUILDING_PACKS}"
 
 command -v basisu >/dev/null || { echo "need basisu: brew install basis_universal" >&2; exit 1; }
 mkdir -p "$SRC"
 
+# Is $1 one of the scatter buildings' packs?
+is_building() {
+    case " $BUILDING_PACKS " in
+        *" $1 "*) return 0 ;;
+        *)        return 1 ;;
+    esac
+}
+
+# The master resolution a pack is cut from (see the table above).
+source_res_of() {
+    if is_building "$1"; then echo 2k; else echo 4k; fi
+}
+
+# A source map's path in $SRC. $1 = pack, $2 = map, $3 = extension.
+source_of() {
+    echo "$SRC/$1_$2_$(source_res_of "$1").$3"
+}
+
 # Fetch a source map into $SRC if it is not already there. $1 = pack, $2 = map, $3 = extension.
 fetch() {
-    file="$1_$2_4k.$3"
+    master="$(source_res_of "$1")"
+    file="$1_$2_$master.$3"
     [ -f "$SRC/$file" ] && return 0
     echo "fetch ▸ $file"
-    curl -sSf --max-time 900 -o "$SRC/$file" "$CDN/$3/4k/$1/$file"
+    curl -sSf --max-time 900 -o "$SRC/$file" "$CDN/$3/$master/$1/$file"
 }
 
 # Poly Haven ships some packs' data maps as 16-BIT PNGs. Bevy would upload those as Rgba16Unorm
@@ -71,13 +100,13 @@ albedo_of() {
     esac
 }
 
-# Pull a pack's three 4k masters down and normalize their bit depth.
+# Pull a pack's three masters down and normalize their bit depth.
 stage_sources() {
     fetch "$1" "$(albedo_of "$1")" jpg
     fetch "$1" nor_gl png
     fetch "$1" arm png
-    to_8bit "$SRC/$1_nor_gl_4k.png"
-    to_8bit "$SRC/$1_arm_4k.png"
+    to_8bit "$(source_of "$1" nor_gl png)"
+    to_8bit "$(source_of "$1" arm png)"
 }
 
 # Cut one KTX2. $1 = map kind (albedo | nor_gl | arm), $2 = side in texels, $3 = output path, rest
@@ -117,17 +146,21 @@ encode() {
 # One pack, three standalone maps in its own folder.
 encode_pack() {
     pack="$1"
+    out="assets/terrain/$pack"
     case "$pack" in
         coast_sand_rocks_02) res=4096 ;;
         *)                   res=2048 ;;
     esac
+    if is_building "$pack"; then
+        out="assets/buildings/$pack"
+        res=1024
+    fi
     albedo="$(albedo_of "$pack")"
-    out="assets/terrain/$pack"
     mkdir -p "$out"
     stage_sources "$pack"
-    encode albedo "$res" "$out/${pack}_${albedo}.ktx2" "$SRC/${pack}_${albedo}_4k.jpg"
-    encode nor_gl "$res" "$out/${pack}_nor_gl.ktx2" "$SRC/${pack}_nor_gl_4k.png"
-    encode arm "$res" "$out/${pack}_arm.ktx2" "$SRC/${pack}_arm_4k.png"
+    encode albedo "$res" "$out/${pack}_${albedo}.ktx2" "$(source_of "$pack" "$albedo" jpg)"
+    encode nor_gl "$res" "$out/${pack}_nor_gl.ktx2" "$(source_of "$pack" nor_gl png)"
+    encode arm "$res" "$out/${pack}_arm.ktx2" "$(source_of "$pack" arm png)"
     echo "ktx2  ▸ $pack at ${res}² — $(du -ch "$out"/*.ktx2 | tail -1 | cut -f1)"
 }
 
@@ -139,9 +172,9 @@ encode_blend() {
     arm_sources=""
     for pack in $LAYER_PACKS; do
         stage_sources "$pack"
-        albedo_sources="$albedo_sources $SRC/${pack}_$(albedo_of "$pack")_4k.jpg"
-        nor_sources="$nor_sources $SRC/${pack}_nor_gl_4k.png"
-        arm_sources="$arm_sources $SRC/${pack}_arm_4k.png"
+        albedo_sources="$albedo_sources $(source_of "$pack" "$(albedo_of "$pack")" jpg)"
+        nor_sources="$nor_sources $(source_of "$pack" nor_gl png)"
+        arm_sources="$arm_sources $(source_of "$pack" arm png)"
     done
     # shellcheck disable=SC2086
     encode albedo "$BLEND_RES" "$BLEND_DIR/blend_diff.ktx2" $albedo_sources
@@ -161,7 +194,10 @@ for target in $TARGETS; do
     esac
     case "$target" in
         coast_sand_rocks_02|brown_mud_leaves_01|rocks_ground_02) packs="$packs $target" ;;
-        *) echo "unknown target: $target" >&2; exit 1 ;;
+        *)
+            is_building "$target" || { echo "unknown target: $target" >&2; exit 1; }
+            packs="$packs $target"
+            ;;
     esac
 done
 for pack in $packs; do

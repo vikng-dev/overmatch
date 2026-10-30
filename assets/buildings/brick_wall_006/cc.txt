@@ -1,0 +1,10 @@
+"brick_wall_006" (https://polyhaven.com/a/brick_wall_006) by Poly Haven (Jan Burghardt) is licensed under CC0 (https://creativecommons.org/publicdomain/zero/1.0/).
+
+AUTHORED SCALE: 3 x 3 m (Poly Haven `dimensions: [3000, 3000]` mm). Part of the pack's contract:
+whatever binds it must repeat every 3 m, or every brick renders at the wrong size. See
+`building_surface::WALL`. At 1024², that is 341 px/m.
+
+THE SCATTER BUILDINGS' WALLS — the standard half of `building_surface::BuildingMaterial` binds
+these three files, on every face of every building box. Shipped as KTX2 (UASTC 4x4 + zstd
+supercompression, full mip chain) at 1024², cut from the pack's 2k masters by
+`scripts/encode-terrain-ktx2.sh brick_wall_006`.

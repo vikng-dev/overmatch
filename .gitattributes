@@ -20,3 +20,6 @@ assets/terrain/**/*.ktx2 filter=lfs diff=lfs merge=lfs -text
 assets/maps/**/*.png filter=lfs diff=lfs merge=lfs -text
 assets/maps/**/*.jpg filter=lfs diff=lfs merge=lfs -text
 assets/maps/**/*.ktx2 filter=lfs diff=lfs merge=lfs -text
+# Buildings: the scatter buildings' surface packs, one folder per pack, same layout and encoder as a
+# terrain pack (assets/buildings/<pack>/<pack>_{diff,nor_gl,arm}.ktx2).
+assets/buildings/**/*.ktx2 filter=lfs diff=lfs merge=lfs -text
