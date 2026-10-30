@@ -304,6 +304,15 @@ momentum budget, spall as ejecta, supported settlement), then a test-range proto
 and the structural calculation against handbook cases, after #188 lands. #188 keeps building the
 structure underneath with today's laws.
 
+**A hole is a negative volume, drawn only (Yan, 2026-10-31: yes; "skipping negatives in ballistics
+is not worth it").** A shot's channel, and an HE crater's dish, is stored as a shape in a per-chunk hole
+list and carried in the record; the chunk's geometry and collider never change. The wall's shader stops
+drawing the surface inside it and draws the hole's inner wall instead, shadow pass included, so the hole
+is seen through. Rounds, mass and the structural calculation ignore holes: a later round meets the whole
+chunk. A cap on holes per chunk crumbles the chunk past it. Holes the size of a chunk or more stay
+today's dust and fall. Replaces the version 2 design's "small-hole fidelity" recommendation (sub-chunk
+perforations through shared geometry).
+
 ## Open
 
 - Settlement: whether tanks climb or push rubble, and whether rubble persists all match or is capped.
