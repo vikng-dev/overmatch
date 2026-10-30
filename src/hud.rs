@@ -10,6 +10,7 @@ use crate::net::NetBot;
 
 use crate::camera::GunnerCameraPlaced;
 use crate::flow::{Flow, FlowScoped, InMatchSystems};
+use crate::spec::{TankSpec, TankSpecHandle};
 use crate::tank::Tank;
 use crate::ui_font::{UiFonts, set_text};
 use crate::view::PlayerView;
@@ -70,7 +71,16 @@ fn spawn_labels(mut commands: Commands, fonts: Res<UiFonts>) {
 /// tank's aggregate status is the fixed corner panel's (`crew_ui::update_status_panel`).
 fn update_tank_nameplates(
     camera: Single<(&Camera, &GlobalTransform), With<PlayerView>>,
-    tanks: Query<(Entity, &GlobalTransform, Option<&Name>), With<Tank>>,
+    tanks: Query<
+        (
+            Entity,
+            &GlobalTransform,
+            Option<&Name>,
+            Option<&TankSpecHandle>,
+        ),
+        With<Tank>,
+    >,
+    specs: Res<Assets<TankSpec>>,
     // A bot carries the replicated `NetBot` marker (`Name` doesn't ride the wire), so its nameplate
     // is prefixed `[BOT]`.
     bots: Query<(), With<NetBot>>,
@@ -80,16 +90,21 @@ fn update_tank_nameplates(
     let (camera, cam_transform) = *camera;
     let mut tanks = tanks.iter();
     for (mut node, mut text, mut visibility) in &mut labels {
-        let Some((entity, transform, name)) = tanks.next() else {
+        let Some((entity, transform, name, spec)) = tanks.next() else {
             visibility.set_if_neq(Visibility::Hidden);
             continue;
         };
         let world_point = transform.translation() + Vec3::Y * 4.4;
         match camera.world_to_viewport(cam_transform, world_point) {
             Ok(screen) => {
-                // A tank without a `Name` (the tank's data supplies it) gets no plate rather than
+                // `Name` does not ride the wire, so a replicated tank's label is its spec sheet's
+                // `display_name`; a tank with neither (spec still loading) gets no plate rather than
                 // an invented label.
-                let Some(name) = name else {
+                let label = name.map(Name::as_str).or_else(|| {
+                    spec.and_then(|handle| specs.get(&handle.0))
+                        .map(|spec| spec.display_name.as_str())
+                });
+                let Some(label) = label else {
                     visibility.set_if_neq(Visibility::Hidden);
                     continue;
                 };
@@ -99,7 +114,7 @@ fn update_tank_nameplates(
                 if bots.get(entity).is_ok() {
                     scratch.push_str("[BOT] ");
                 }
-                scratch.push_str(name.as_str());
+                scratch.push_str(label);
                 set_text(text.reborrow(), &scratch);
                 visibility.set_if_neq(Visibility::Visible);
             }
@@ -134,6 +149,7 @@ mod tests {
     #[test]
     fn nameplate_text_written_only_on_change_but_position_follows_every_frame() {
         let mut world = World::new();
+        world.init_resource::<Assets<TankSpec>>();
         world.init_resource::<TextChanges>();
         world.spawn((
             Camera {
@@ -202,10 +218,11 @@ mod tests {
         assert_eq!(world.get::<Text>(plate).unwrap().0, "Renamed");
     }
 
-    /// A tank with no `Name` gets no plate: the label comes from the tank's data, never a literal.
+    /// A tank with neither `Name` nor spec data gets no plate: the label comes from data, never a literal.
     #[test]
-    fn unnamed_tank_gets_no_plate() {
+    fn unnamed_tank_without_spec_gets_no_plate() {
         let mut world = World::new();
+        world.init_resource::<Assets<TankSpec>>();
         world.spawn((
             Camera {
                 computed: ComputedCameraValues {
@@ -234,5 +251,56 @@ mod tests {
         schedule.add_systems(update_tank_nameplates);
         schedule.run(&mut world);
         assert_eq!(*world.get::<Visibility>(plate).unwrap(), Visibility::Hidden);
+    }
+
+    /// A replicated tank carries no `Name` (it does not ride the wire) but does carry its spec
+    /// handle: the plate reads the spec sheet's `display_name`, bots prefixed `[BOT]`. Online
+    /// nameplates rely on this.
+    #[test]
+    fn nameless_tank_shows_its_spec_display_name() {
+        let mut world = World::new();
+        world.init_resource::<Assets<TankSpec>>();
+        world.spawn((
+            Camera {
+                computed: ComputedCameraValues {
+                    clip_from_view: Mat4::perspective_infinite_reverse_rh(1.0, 16.0 / 9.0, 0.1),
+                    target_info: Some(RenderTargetInfo {
+                        physical_size: UVec2::new(1280, 720),
+                        scale_factor: 1.0,
+                    }),
+                    ..default()
+                },
+                ..default()
+            },
+            PlayerView,
+            GlobalTransform::default(),
+        ));
+        let mut spec: TankSpec =
+            ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron"))
+                .expect("the shipped sheet parses");
+        spec.display_name = "Fixture Display".to_string();
+        let handle = world.resource_mut::<Assets<TankSpec>>().add(spec);
+        world.spawn((
+            Tank,
+            NetBot,
+            TankSpecHandle(handle),
+            GlobalTransform::from_xyz(0.0, 0.0, -30.0),
+        ));
+        let plate = world
+            .spawn((
+                TankNameplate,
+                Text::new(""),
+                Node::default(),
+                Visibility::Hidden,
+            ))
+            .id();
+        let mut schedule = Schedule::default();
+        schedule.add_systems(update_tank_nameplates);
+        schedule.run(&mut world);
+        assert_eq!(world.get::<Text>(plate).unwrap().0, "[BOT] Fixture Display");
+        assert_eq!(
+            *world.get::<Visibility>(plate).unwrap(),
+            Visibility::Visible
+        );
     }
 }
