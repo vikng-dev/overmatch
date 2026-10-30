@@ -9,6 +9,7 @@
 /// The counting global allocator a zero-allocation test reads.
 pub(crate) mod alloc_count;
 mod avian_body_query_gap;
+mod avian_child_pose_churn;
 mod bevy_ktx2_uastc_fallback;
 mod bevy_mesh_removal_lifecycle;
 mod bevy_shadow_view_render_layers;

@@ -112,12 +112,6 @@ use std::path::{Path, PathBuf};
 const ALLOWED_IDENTIFIERS: &[(&str, &str, &str)] = &[
     // ---- Owned by another codebase. -------------------------------------------------------
     (
-        "src/debris.rs",
-        "AABB_MARGIN",
-        "avian3d 0.7.0's private broad-phase margin, 0.05 m (`collider_tree/update.rs`); the wake \
-         margin is derived from it.",
-    ),
-    (
         "src/net/walls.rs",
         "HISTORY_LEN",
         "bevy_replicon 0.44's `Diffable::HISTORY_LEN`, default 64 (`shared/replication/diff.rs`); \
