@@ -120,7 +120,6 @@ impl WeaponRound {
 
     /// The shipped round keyed `key`, fired from the one shipped gun that chambers it, or the
     /// error naming it: the handle the tests and the dev capture's shot cue fire by.
-    #[cfg(test)]
     pub(crate) fn resolve(key: &str) -> Result<Self, crate::guns::GunError> {
         Self::named(key, |guns| guns.round_by_key(key))
     }

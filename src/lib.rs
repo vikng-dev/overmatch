@@ -1016,6 +1016,7 @@ pub fn run_offline() {
         dev_capture::plugin,
         dev_capture::offline_fell_plugin,
         dev_capture::offline_impact_plugin,
+        dev_capture::offline_shot_plugin,
     ));
     // The offline transmission feel test (phase 2.5): an EXPLICIT override of the spec's
     // declared architecture (which is authoritative and mandatory since REV 14), seeded to

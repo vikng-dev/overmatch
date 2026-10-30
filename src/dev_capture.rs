@@ -44,6 +44,10 @@
 //!   second `s`, a round of that calibre strikes the terrain under world `x,z`: the view's impact
 //!   read (dust, smoke, the ground mark) is raised there with no round flown and no shot recorded
 //!   ([`offline_impact_plugin`]; the offline root alone mounts it).
+//! * `OVERMATCH_CAPTURE_SHOT=<round key>,<fuze mode index>,tree|ground@<s>` — on the first frame
+//!   at or after app second `s`, that shipped round, in that fuze mode, is fired at a real tree or
+//!   at the ground beside it, and the frames are timed from its burst, the first two seconds after
+//!   it ([`offline_shot_plugin`]; the offline root alone mounts it).
 //!
 //! A capture run draws the view's cosmetic randomness (sprite roll, scale jitter, flipbook start)
 //! from one fixed seed, so two runs of one scenario on a fixed step draw the same sprites.
@@ -71,6 +75,9 @@
 //! not. It is written in `PreStartup`, after every plugin has built — `AudioPlugin` inserts its own
 //! `GlobalVolume` at build — and before any audio sink exists (bevy reads the global volume when
 //! it creates a sink), so no mount order of this plugin lets a capture make a sound.
+
+mod fuze;
+pub(crate) use fuze::offline_shot_plugin;
 
 use std::path::{Path, PathBuf};
 
@@ -524,6 +531,7 @@ pub(crate) fn hide_window(app: &mut App) {
     reason = "a dev capture spanning time, its state, images, cameras, gizmo config, sight mode and exit"
 )]
 fn capture(
+    shot_ready: Option<Res<fuze::ShotReady>>,
     mut commands: Commands,
     time: Res<Time>,
     mut cap: ResMut<Capture>,
@@ -533,7 +541,17 @@ fn capture(
     mode: Option<ResMut<SightMode>>,
     mut exit: MessageWriter<AppExit>,
 ) {
-    let t = time.elapsed_secs();
+    // Under a shot cue the frames are timed from the burst, which no app second predicts: the first
+    // is taken `WARM_UP` + 1 s after it, the target retargeted `WARM_UP` before that.
+    let t = if let Some(ready) = shot_ready {
+        let Some(at) = ready.0 else {
+            return;
+        };
+        time.elapsed_secs() - at + cap.at[0] - WARM_UP - 1.0
+    } else {
+        time.elapsed_secs()
+    };
+
     let first = cap.at[0];
     if cap.sight && !cap.switched && t >= first - SIGHT_LEAD {
         if let Some(mut mode) = mode {
