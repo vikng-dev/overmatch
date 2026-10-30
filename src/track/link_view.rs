@@ -210,6 +210,9 @@ pub(crate) fn template_plugin(app: &mut App) {
             // (`crate::view`: no default view). A frame without it is a frame with no shoes yet,
             // not a frame of shoes bound against a guess.
             bind_link_template
+                // Template switch distances must use this frame's composed view profile,
+                // including a newly applied pixel budget or capture target height.
+                .after(crate::geometry_lod::compose_view_profile)
                 .run_if(resource_exists::<RigGeom>)
                 .run_if(resource_exists::<ViewProfile>)
                 .run_if(not(resource_exists::<LinkTemplate>)),

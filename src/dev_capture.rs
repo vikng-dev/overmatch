@@ -25,6 +25,7 @@
 //!
 //! * `OVERMATCH_CAPTURE_STEP_S=<s>` — a positive, fixed virtual frame step for reproducible
 //!   comparisons. Asset loading still runs asynchronously, so capture after the scene is ready.
+//! * `OVERMATCH_CAPTURE_AMBIGUITIES=1` — report Update and PostUpdate schedule ambiguities.
 //!
 //! Every capture run seeds the view RNG (cosmetic effect variation, otherwise seeded from the wall
 //! clock) with [`VIEW_SEED`], so two runs draw the same effects.
@@ -119,6 +120,17 @@ pub fn plugin(app: &mut App) {
     let Some(path) = std::env::var_os("OVERMATCH_CAPTURE") else {
         return;
     };
+    if std::env::var("OVERMATCH_CAPTURE_AMBIGUITIES").as_deref() == Ok("1") {
+        use bevy::ecs::schedule::{LogLevel, ScheduleBuildSettings, ScheduleLabel};
+        for label in [Update.intern(), PostUpdate.intern()] {
+            app.edit_schedule(label, |schedule| {
+                schedule.set_build_settings(ScheduleBuildSettings {
+                    ambiguity_detection: LogLevel::Warn,
+                    ..schedule.get_build_settings()
+                });
+            });
+        }
+    }
     let at = parse_times(&std::env::var("OVERMATCH_CAPTURE_AT").unwrap_or_default());
     let sight = std::env::var("OVERMATCH_CAPTURE_SIGHT").as_deref() == Ok("1");
     let size = std::env::var("OVERMATCH_CAPTURE_SIZE")

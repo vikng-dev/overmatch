@@ -36,7 +36,7 @@
 //!
 //! # One reader, many consumers
 //!
-//! [`ViewFacts`] is the only thing in the tree that reads a `Projection`, a `Window` and
+//! [`ViewFacts`] is the only thing in the tree that reads a `Projection`, its render target and
 //! `render_scale::RenderScale` to answer "what does the player's view look like right now". Both
 //! LOD ladders — `terrain_lod`'s tiles and `geometry_lod`'s certified chains — are CONSUMERS of it.
 //! They were two independent readers of the same three components until they disagreed about the
@@ -55,6 +55,7 @@
 //! optic toggle — and the field carries a relative dead band ([`FOV_HYSTERESIS`]) so a dragged
 //! magnification slider cannot mint a slot per frame.
 
+use bevy::camera::RenderTarget;
 use bevy::ecs::error::BevyError;
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -333,7 +334,7 @@ impl ViewProfile {
 /// startup frames where a composition legitimately has no camera, and nothing here may `return`
 /// silently.
 ///
-/// The window is the PRIMARY one — bevy's own declaration of the window a composition presents —
+/// A window-backed view reads the PRIMARY window — the window the composition presents —
 /// for the same reason the camera is the declared view. An absent one is not an error and not a new
 /// fact either: it is an absent HEIGHT, so a session that has facts HOLDS them and a session that
 /// has none stays without.
@@ -342,24 +343,35 @@ impl ViewProfile {
 /// that nothing else touches it.
 pub(crate) fn track_view_facts(
     mut commands: Commands,
-    views: Query<&Projection, With<PlayerView>>,
+    views: Query<(&Projection, Option<&RenderTarget>), With<PlayerView>>,
     window: Query<&Window, With<PrimaryWindow>>,
+    images: Option<Res<Assets<Image>>>,
     scale: Option<Res<crate::render_scale::RenderScale>>,
     facts: Option<ResMut<ViewFacts>>,
 ) -> Result<(), BevyError> {
     // `single()` answers a QUERY-SHAPE question ("is there exactly one row?"); the count restates
     // its failure as the domain fact this reader actually needs.
-    let Ok(projection) = views.single() else {
+    let Ok((projection, target)) = views.single() else {
         return Err(ViewError::resolving(views.iter().count()).into());
     };
     let Projection::Perspective(projection) = projection else {
         return Err(ViewError::UnsupportedProjection.into());
     };
-    let measured = ViewFacts::rendered_height_px(window.single().ok(), scale.as_deref());
+    // An image-backed view selects geometry for that image's physical pixels. The hidden
+    // window's size can differ from its offscreen target and cannot define this view's LOD.
+    let measured = match target {
+        Some(RenderTarget::Image(target)) => images
+            .as_deref()
+            .and_then(|images| images.get(&target.handle))
+            .map_or(0.0, |image| {
+                image.height() as f32 * scale.as_deref().map_or(1.0, |scale| scale.0)
+            }),
+        _ => ViewFacts::rendered_height_px(window.single().ok(), scale.as_deref()),
+    };
     let held = facts.as_deref().copied();
     let wanted = match held {
-        // AN ABSENT WINDOW IS AN ABSENT HEIGHT, AND AN ABSENT HEIGHT IS HELD. Zero primary windows
-        // (a surface torn down at exit under `ExitCondition::DontExit`) or an unsized one reads as
+        // AN ABSENT TARGET HEIGHT IS HELD. A missing image, zero primary windows
+        // (a surface torn down at exit under `ExitCondition::DontExit`) or an unsized window reads as
         // `0.0`, and settling on any stand-in for it would overwrite a measured 1440 or 2160 — every
         // switch distance short by the ratio, coarse geometry NEARER the eye than its certificate,
         // the one direction LOD must not fail in.
@@ -407,7 +419,11 @@ pub(crate) fn track_view_facts(
 pub(crate) fn plugin(app: &mut App) {
     app.add_systems(
         Update,
-        track_view_facts.run_if(any_with_component::<PlayerView>),
+        // LOD facts must consume this frame's applied render scale and window mode; both
+        // geometry ladders derive their distances from these facts in the same Update.
+        track_view_facts
+            .after(crate::settings::ApplySettings)
+            .run_if(any_with_component::<PlayerView>),
     );
 }
 
@@ -571,6 +587,52 @@ mod tests {
     /// The live facts, or their absence — the whole of what a consumer can see.
     fn facts_of(app: &App) -> Option<ViewFacts> {
         app.world().get_resource::<ViewFacts>().copied()
+    }
+
+    /// Both LOD ladders must select for the pixels actually drawn. A hidden window with a
+    /// different backing scale must not change a tank's mesh when the image target is unchanged.
+    #[test]
+    fn an_offscreen_view_measures_its_image_instead_of_the_hidden_window() {
+        // ASSUMED fixture dimensions and scale; the invariant is target independence from window.
+        let (mut app, camera, window) = declared_view_app(std::f32::consts::FRAC_PI_4, 1440);
+        let mut images = Assets::<Image>::default();
+        let target = crate::dev_capture::offscreen_target(&mut images, UVec2::new(1280, 720), 2.0);
+        app.insert_resource(images)
+            .insert_resource(crate::render_scale::RenderScale(0.5));
+        app.world_mut()
+            .entity_mut(camera)
+            .insert(RenderTarget::Image(target));
+        app.update();
+        let wanted = measured(std::f32::consts::FRAC_PI_4, 360.0);
+        assert_eq!(facts_of(&app), Some(wanted));
+        resize(app.world_mut(), window, 720);
+        app.update();
+        assert_eq!(facts_of(&app), Some(wanted));
+    }
+
+    /// Settings must be fresh before LOD facts read the render scale. Ambiguity detection makes
+    /// removing the production order fail even if the executor happens to pick the desired order.
+    #[test]
+    fn lod_facts_read_the_current_frames_applied_settings() {
+        use bevy::ecs::schedule::{LogLevel, ScheduleBuildSettings};
+
+        fn apply(mut scale: ResMut<crate::render_scale::RenderScale>) {
+            scale.0 = 0.5; // ASSUMED fixture scale.
+        }
+        let (mut app, _, _) = declared_view_app(std::f32::consts::FRAC_PI_4, 1440);
+        app.insert_resource(crate::render_scale::RenderScale(1.0))
+            .add_systems(Update, apply.in_set(crate::settings::ApplySettings))
+            .edit_schedule(Update, |schedule| {
+                schedule.set_build_settings(ScheduleBuildSettings {
+                    ambiguity_detection: LogLevel::Error,
+                    ..default()
+                });
+            });
+        app.update();
+        assert_eq!(
+            facts_of(&app),
+            Some(measured(std::f32::consts::FRAC_PI_4, 720.0))
+        );
     }
 
     /// DECLARING THE VIEW MAKES A CAMERA. `PlayerView` requires `Camera3d`, so "the marker is on

@@ -1,0 +1,21 @@
+MEASURED regression sensitivity (intentional, uncommitted mutation):
+- Remove ApplySettings -> track_view_facts.
+- Remove compose_view_profile -> bind_link_template.
+- Restore the window-only height read.
+
+Command (build and test binary both inside the serial-cargo lock):
+OVERMATCH_CARGO_LOCK_WAIT_S=10800 scripts/serial-cargo test --lib --features dev_ui,bitprobe view::tests
+
+MEASURED: 51 passed, 3 failed. The failures were:
+- presented_tank_parts_have_ordered_producers_and_consumers:
+  unordered producer/consumer: bind_link_template / compose_view_profile
+- an_offscreen_view_measures_its_image_instead_of_the_hidden_window:
+  observed fixture height 720 px, expected fixture height 360 px
+- lod_facts_read_the_current_frames_applied_settings:
+  schedule ambiguity: apply (ApplySettings) / track_view_facts, RenderScale conflict
+
+The source was restored after this run. The earlier fixed-source run passed all 54 targeted tests.
+Final gates and parity are recorded in README.md.
+
+MEASURED final source: formatting and CI clippy passed; 54 view tests, 6 capture tests and
+1 asset-upload freshness test passed. Final full-frame parity: 0 differing pixels in both stills.

@@ -1,0 +1,6 @@
+2026-10-30T10:20:34.250449Z  WARN bevy_ecs::schedule::schedule: Update schedule built successfully, however: 211 pairs of systems with conflicting data access have indeterminate execution order. Consider adding `before`, `after`, or `ambiguous_with` relationships between these:
+2026-10-30T10:20:34.251505Z  INFO overmatch::view: view: 0.7854 rad × 720 px — every LOD ladder reselects
+2026-10-30T10:20:34.254916Z  INFO overmatch::geometry_lod: geometry_lod: view profile → 0.7854 rad × 720 px at 1.00 px budget, bands rewritten
+2026-10-30T10:20:34.263874Z  WARN bevy_ecs::schedule::schedule: PostUpdate schedule built successfully, however: 197 pairs of systems with conflicting data access have indeterminate execution order. Consider adding `before`, `after`, or `ambiguous_with` relationships between these:
+2026-10-30T10:20:40.202232Z  INFO bevy_render::view::window::screenshot: Screenshot saved to /tmp/ambiguity-178-flipped/near/belts-00012.5000s.png
+2026-10-30T10:20:41.111538Z  INFO bevy_render::view::window::screenshot: Screenshot saved to /tmp/ambiguity-178-flipped/near/belts-00014.0000s.png

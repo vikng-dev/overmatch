@@ -1018,6 +1018,83 @@ mod tests {
     use super::super::link_view::LinkFrame;
     use super::*;
 
+    /// Tank-part presentation consumes fresh view facts, then writes running gear before globals
+    /// and belt upload consume it. Audit the production registrations without running a renderer;
+    /// removing a required order must expose the conflicting pair regardless of executor order.
+    #[test]
+    fn presented_tank_parts_have_ordered_producers_and_consumers() {
+        use bevy::ecs::schedule::{LogLevel, ScheduleBuildSettings, ScheduleLabel};
+
+        let mut app = App::new();
+        app.add_plugins((
+            TaskPoolPlugin::default(),
+            AssetPlugin::default(),
+            TransformPlugin,
+        ))
+        .add_plugins((
+            crate::view::plugin,
+            crate::geometry_lod::view_plugin,
+            view_plugin,
+        ));
+        for label in [Update.intern(), PostUpdate.intern()] {
+            app.world_mut().schedule_scope(label, |world, schedule| {
+                schedule.set_build_settings(ScheduleBuildSettings {
+                    ambiguity_detection: LogLevel::Warn,
+                    use_shortnames: true,
+                    report_sets: false,
+                    ..default()
+                });
+                schedule
+                    .initialize(world)
+                    .expect("presentation schedule builds");
+                let graph = schedule.graph();
+                let names: std::collections::HashMap<_, _> = schedule
+                    .systems()
+                    .expect("initialized schedule")
+                    .map(|(key, system)| (key, system.name().shortname().to_string()))
+                    .collect();
+                for (a, b, _) in graph.conflicting_systems().iter() {
+                    let (a, b) = (&names[a], &names[b]);
+                    let pair = [a.as_str(), b.as_str()];
+                    let contains = |name| pair.contains(&name);
+                    assert!(
+                        !(contains("bind_link_template") && contains("compose_view_profile")
+                            || contains("drive_track_views")
+                                && (contains("upload_belt_frames")
+                                    || contains("mark_dirty_trees")
+                                    || contains("propagate_parent_transforms")
+                                    || contains("sync_simple_transforms"))),
+                        "presented tank part has an unordered producer/consumer: {a} / {b}"
+                    );
+                }
+                // Conflict detection rejects a missing edge; the built topological order also
+                // rejects a reversed edge, where the consumer would read the previous value.
+                let order: Vec<_> = schedule
+                    .systems()
+                    .expect("initialized schedule")
+                    .map(|(_, system)| system.name().shortname().to_string())
+                    .collect();
+                let required: &[(&str, &str)] = if label == Update.intern() {
+                    &[("compose_view_profile", "bind_link_template")]
+                } else {
+                    &[
+                        ("drive_track_views", "upload_belt_frames"),
+                        ("drive_track_views", "mark_dirty_trees"),
+                        ("mark_dirty_trees", "propagate_parent_transforms"),
+                        ("propagate_parent_transforms", "sync_simple_transforms"),
+                    ]
+                };
+                for &(producer, consumer) in required {
+                    let index = |name| order.iter().position(|system| system == name).expect(name);
+                    assert!(
+                        index(producer) < index(consumer),
+                        "{producer} must produce this frame's value before {consumer} reads it"
+                    );
+                }
+            });
+        }
+    }
+
     /// Invariant: an exactly settled, standing tank writes no belt table, wheel transform or ribbon
     /// asset, and a moving belt writes its tables and NO per-link transform: the only transforms
     /// the view writes are the running gear's. Transform propagation, the belt upload and render

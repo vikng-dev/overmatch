@@ -1,0 +1,104 @@
+Update (MEASURED, production offline capture):
+ -- bind_link_template and clamp_tracer_streaks
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- bind_link_template and age_billboards
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- bind_link_template and sync_view_barrels
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- bind_link_template and interpolate_servos
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- bind_link_template and integrate_projectiles (in set GameplaySet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- bind_link_template and reaim_orbit_on_optic_exit (in set GameplaySet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- bind_link_template and prepare_stage (in sets (layout, pose_stage, prepare_stage), PenCamSet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- bind_link_template and compose_view_profile
+    conflict on: ["overmatch::view::ViewProfile"]
+ -- bind_link_template and pose_stage (in sets (layout, pose_stage, prepare_stage), PenCamSet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- bind_link_template and animate (in sets (animate, animate, rebuild), PenCamSet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- bind_link_template and animate (in set PenCamSet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- read_scatter_crossings and sync_view_barrels
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- read_scatter_crossings and interpolate_servos
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- clamp_tracer_streaks and sync_view_barrels
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- clamp_tracer_streaks and interpolate_servos
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- clamp_tracer_streaks and bind_track_rigs
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- age_billboards and sync_view_barrels
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- age_billboards and interpolate_servos
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- age_billboards and bind_track_rigs
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- track_view_facts and observe_window_placement
+    conflict on: ["bevy_window::window::Window"]
+ -- track_view_facts and apply_settings (in set ApplySettings)
+    conflict on: ["bevy_window::window::Window", "overmatch::render_scale::RenderScale"]
+ -- capture_turret_pivot and sync_view_barrels
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- capture_turret_pivot and interpolate_servos
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- spawn_tank_when_loaded and compose_view_profile
+    conflict on: ["overmatch::view::ViewProfile"]
+ -- sync_view_barrels and interpolate_servos
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- sync_view_barrels and bind_track_rigs
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- sync_view_barrels and drive (in sets KillCamGateSet, PenCamSet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- sync_view_barrels and integrate_projectiles (in set GameplaySet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- sync_view_barrels and commit_aim (in sets AimCommit, GameplaySet, PlayerInputSet, TankDeviceSet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- sync_view_barrels and reaim_orbit_on_optic_exit (in set GameplaySet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- sync_view_barrels and prepare_stage (in sets (layout, pose_stage, prepare_stage), PenCamSet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- sync_view_barrels and pose_stage (in sets (layout, pose_stage, prepare_stage), PenCamSet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- sync_view_barrels and animate (in sets (animate, animate, rebuild), PenCamSet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- sync_view_barrels and animate (in set PenCamSet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- interpolate_servos and bind_track_rigs
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- interpolate_servos and drive (in sets KillCamGateSet, PenCamSet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- interpolate_servos and integrate_projectiles (in set GameplaySet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- interpolate_servos and commit_aim (in sets AimCommit, GameplaySet, PlayerInputSet, TankDeviceSet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- interpolate_servos and reaim_orbit_on_optic_exit (in set GameplaySet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- interpolate_servos and prepare_stage (in sets (layout, pose_stage, prepare_stage), PenCamSet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- interpolate_servos and pose_stage (in sets (layout, pose_stage, prepare_stage), PenCamSet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- interpolate_servos and animate (in sets (animate, animate, rebuild), PenCamSet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- interpolate_servos and animate (in set PenCamSet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- apply_settings (in set ApplySettings) and compose_view_profile
+    conflict on: ["overmatch::settings::LodPixelBudget"]
+PostUpdate (MEASURED, production offline capture):
+ -- place (in set CaptiveCameraPlaced) and drive_track_views (in set TrackViewSet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- drive_track_views (in set TrackViewSet) and orbit_look (in sets GameplaySet, PlayerInputSet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- drive_track_views (in set TrackViewSet) and run_egui_context_pass_loop_system (in set EndPass)
+    conflict on: bevy_ecs::world::World
+ -- drive_track_views (in set TrackViewSet) and face_billboards
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- drive_track_views (in set TrackViewSet) and hold_camera (in set CaptiveCameraPlaced)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- drive_track_views (in set TrackViewSet) and orbit_camera (in sets GameplaySet, OrbitCameraSet)
+    conflict on: ["bevy_transform::components::transform::Transform"]
+ -- drive_track_views (in set TrackViewSet) and present_fall
+    conflict on: ["bevy_transform::components::transform::Transform"]

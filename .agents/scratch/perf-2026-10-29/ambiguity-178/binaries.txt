@@ -1,0 +1,3 @@
+SHA-256, MEASURED:
+shipped upload edge: 41ecffcac2df5e3942f4490e4ea4a5b7a61b204171378521094fe7b9a568a514
+local edge removed: 0ee8ea8aadc2833a2050f18d00958d850d028937b71b5c21922f9c4db28244a9

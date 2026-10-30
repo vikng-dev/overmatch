@@ -1,0 +1,57 @@
+PostUpdate mask-copy pose writer (MEASURED, production offline capture):
+ -- debug_render_colliders (in set (debug_render_islands, debug_render_shapecasts, debug_render_raycasts, debug_render_constraint<SphericalJoint, 2>, debug_render_constraint<RevoluteJoint, 2>, debug_render_constraint<DistanceJoint, 2>, debug_render_constraint<PrismaticJoint, 2>, debug_render_constraint<FixedJoint, 2>, debug_render_contacts, debug_render_colliders, debug_render_bvh, debug_render_aabbs, debug_render_axes)) and follow_pose
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- debug_render_axes (in set (debug_render_islands, debug_render_shapecasts, debug_render_raycasts, debug_render_constraint<SphericalJoint, 2>, debug_render_constraint<RevoluteJoint, 2>, debug_render_constraint<DistanceJoint, 2>, debug_render_constraint<PrismaticJoint, 2>, debug_render_constraint<FixedJoint, 2>, debug_render_contacts, debug_render_colliders, debug_render_bvh, debug_render_aabbs, debug_render_axes)) and follow_pose
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- update_trails and follow_pose
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform", "bevy_transform::components::transform::Transform"]
+ -- follow_pose and select_belt_rungs (in set ShoeRungSelected)
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and update_tank_nameplates (in set InMatchSystems)
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and update_optic_mask (in sets GameplaySet, InMatchSystems)
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and update_ranging_reticle (in sets GameplaySet, InMatchSystems)
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and update_intent_reticle (in sets GameplaySet, InMatchSystems)
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and update_aim_indicator (in sets GameplaySet, InMatchSystems)
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform", "bevy_transform::components::transform::Transform"]
+ -- follow_pose and update_bore_indicator (in sets GameplaySet, InMatchSystems)
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and stamp_shoes (in set TrackPrintsSet)
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and debug_render_constraint<DistanceJoint, 2> (in set (debug_render_islands, debug_render_shapecasts, debug_render_raycasts, debug_render_constraint<SphericalJoint, 2>, debug_render_constraint<RevoluteJoint, 2>, debug_render_constraint<DistanceJoint, 2>, debug_render_constraint<PrismaticJoint, 2>, debug_render_constraint<FixedJoint, 2>, debug_render_contacts, debug_render_colliders, debug_render_bvh, debug_render_aabbs, debug_render_axes))
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and debug_render_constraint<RevoluteJoint, 2> (in set (debug_render_islands, debug_render_shapecasts, debug_render_raycasts, debug_render_constraint<SphericalJoint, 2>, debug_render_constraint<RevoluteJoint, 2>, debug_render_constraint<DistanceJoint, 2>, debug_render_constraint<PrismaticJoint, 2>, debug_render_constraint<FixedJoint, 2>, debug_render_contacts, debug_render_colliders, debug_render_bvh, debug_render_aabbs, debug_render_axes))
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and draw_all_skinned_mesh_bounds
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and draw_skinned_mesh_bounds
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and debug_render_constraint<SphericalJoint, 2> (in set (debug_render_islands, debug_render_shapecasts, debug_render_raycasts, debug_render_constraint<SphericalJoint, 2>, debug_render_constraint<RevoluteJoint, 2>, debug_render_constraint<DistanceJoint, 2>, debug_render_constraint<PrismaticJoint, 2>, debug_render_constraint<FixedJoint, 2>, debug_render_contacts, debug_render_colliders, debug_render_bvh, debug_render_aabbs, debug_render_axes))
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and draw_all_lights
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and draw_lights
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and build_directional_light_cascades (in set UpdateDirectionalLightCascades)
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and update_spot_light_bounding_spheres (in set UpdateBounds)
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and update_point_light_bounding_spheres (in set UpdateBounds)
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and update_emitter_positions (in set AudioPlaybackSystems)
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and play_queued_audio_system<Pitch> (in set AudioPlaybackSystems)
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and follow_eye (in set TrackPrintsSet)
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and debug_render_constraint<FixedJoint, 2> (in set (debug_render_islands, debug_render_shapecasts, debug_render_raycasts, debug_render_constraint<SphericalJoint, 2>, debug_render_constraint<RevoluteJoint, 2>, debug_render_constraint<DistanceJoint, 2>, debug_render_constraint<PrismaticJoint, 2>, debug_render_constraint<FixedJoint, 2>, debug_render_contacts, debug_render_colliders, debug_render_bvh, debug_render_aabbs, debug_render_axes))
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and play_queued_audio_system<AudioSource> (in set AudioPlaybackSystems)
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and update_listener_positions (in set AudioPlaybackSystems)
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]
+ -- follow_pose and debug_render_constraint<PrismaticJoint, 2> (in set (debug_render_islands, debug_render_shapecasts, debug_render_raycasts, debug_render_constraint<SphericalJoint, 2>, debug_render_constraint<RevoluteJoint, 2>, debug_render_constraint<DistanceJoint, 2>, debug_render_constraint<PrismaticJoint, 2>, debug_render_constraint<FixedJoint, 2>, debug_render_contacts, debug_render_colliders, debug_render_bvh, debug_render_aabbs, debug_render_axes))
+    conflict on: ["bevy_transform::components::global_transform::GlobalTransform"]

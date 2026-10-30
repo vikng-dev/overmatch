@@ -1,0 +1,18 @@
+{
+  "00012.5000": {
+    "state": "standing",
+    "frame_pixels_differing": 54545,
+    "frame_pixels_over_8": 5316,
+    "frame_max_channel_delta": 79,
+    "wheel_belt_pixels_differing": 41030,
+    "wheel_belt_max_channel_delta": 79
+  },
+  "00014.0000": {
+    "state": "moving",
+    "frame_pixels_differing": 84817,
+    "frame_pixels_over_8": 8404,
+    "frame_max_channel_delta": 106,
+    "wheel_belt_pixels_differing": 38331,
+    "wheel_belt_max_channel_delta": 81
+  }
+}
