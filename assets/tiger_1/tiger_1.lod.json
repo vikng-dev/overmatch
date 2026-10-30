@@ -1,7 +1,7 @@
 {
-  "view_glb_sha": "5d391fea79cb220885bc647709351b858ec4d2917238920d48ca6663b7be0436",
-  "sim_glb_sha": "c133972dfc74c21a1bf1f19fd44f1120222d21eb994b750e9b09c1491ffcdd91",
-  "mesh_count": 58,
+  "view_glb_sha": "a47cffd1d271eb53a48d9c7e8aef1697476afad85be1a8f56da63088405d1a9b",
+  "sim_glb_sha": "fac9a492a52793d980421902d4ee72a050b3fe598cece7b5dc382595ee30b0f9",
+  "mesh_count": 59,
   "chains": {
     "Ammo_L_0#0": {
       "radius_m": 0.671427,
@@ -609,6 +609,27 @@
         {
           "mesh": "Main_Gun_Barrel#0_LOD5",
           "deviation_mm": 61.963578
+        }
+      ]
+    },
+    "Main_Gun_Barrel_Shadow#0": {
+      "radius_m": 4.16141,
+      "rungs": [
+        {
+          "mesh": "Main_Gun_Barrel_Shadow#0_LOD3",
+          "deviation_mm": 13.200948
+        },
+        {
+          "mesh": "Main_Gun_Barrel_Shadow#0_LOD4",
+          "deviation_mm": 28.904503
+        },
+        {
+          "mesh": "Main_Gun_Barrel_Shadow#0_LOD5",
+          "deviation_mm": 43.385339
+        },
+        {
+          "mesh": "Main_Gun_Barrel_Shadow#0_LOD6",
+          "deviation_mm": 140.118605
         }
       ]
     },
