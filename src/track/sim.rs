@@ -419,6 +419,7 @@ pub fn sim_plugin(app: &mut App) {
     );
     app.add_systems(
         FixedUpdate,
+        // Chained: the published rpm is this tick's crank, which `apply_track_forces` writes.
         (apply_track_forces, publish_engine_rpm)
             .chain()
             .in_set(SimPhase::DrivingForces)
@@ -712,6 +713,13 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
 
 /// The drive step: shape the command, run each side's belt force model at the tick-truth
 /// pose, apply the returned forces in report order, commit the new belt state.
+///
+/// The tanks run in parallel ([`Query::par_iter_mut`]; serial where the compute pool has one
+/// thread). Every tank's result is the same bits on any thread count and in any order because a
+/// tank's tick reads only the shared, immutable gear, terrain field and volume facets and writes
+/// only that tank's components. The closure is `Fn + Sync`, so a shared write compiles only through
+/// interior mutability, and the drive path holds two: `warn_once!`'s flag, which no result reads,
+/// and the measurement-only bitprobe capture, behind a lock, whose fixture holds exactly one tank.
 fn apply_track_forces(
     time: Res<Time>,
     field: Res<TrackField>,
@@ -750,112 +758,126 @@ fn apply_track_forces(
     let Some(gear) = gear else {
         return;
     };
+    let gear: &TrackGear = &gear;
     let Some(oracle) = field.field.as_ref() else {
         return;
     };
     let mode = trans_feel.as_ref().map(|r| r.0).unwrap_or(gear.mode);
     let dt = time.delta_secs();
-    for (
-        pos,
-        rot,
-        center_of_mass,
-        body,
-        mut forces,
-        command,
-        mut drive,
-        mut signal,
-        mut grip,
-        mut grip_elements,
-        mut grip_effect,
-        mut trans_state,
-        mut contacts,
-        tank_volumes,
-        tank_caps,
-    ) in &mut tanks
-    {
-        #[cfg(feature = "bitprobe")]
-        if let Some(capture) = bitprobe.as_deref_mut() {
-            capture.tanks_seen += 1;
-            capture.command = [command.throttle, command.steer];
-        }
-        // Only dynamic bodies simulate the belt — and the guard sits BEFORE command shaping:
-        // the owner's `DriveSignal` is replicated state, and a client tick must not locally slew
-        // the replicated throttle/steer. Forces are no-ops on kinematic/static bodies, replicated
-        // tanks' `TrackDrive` arrives for their track view, and clients neither receive nor
-        // simulate the private element field (ADR-0027 disclosure). Skipping them entirely
-        // also keeps their replicated belt state from being fought by a locally-integrated
-        // one.
-        if !matches!(*body, RigidBody::Dynamic) {
-            continue;
-        }
-        // Drive gates THRUST, not grip: a dead driver/engine/transmission retargets the
-        // command slew to zero (a fade over ~1/DRIVE_SLEW_PER_SECOND, see the module doc)
-        // while the full contact model keeps running, so the tracks keep their kinetic grip.
-        let drive_ok = capability_available(tank_volumes, tank_caps, Capability::Drive, &volumes);
-        let target = if drive_ok {
-            DriveAxes {
-                throttle: command.throttle,
-                steer: command.steer,
+    #[cfg(feature = "bitprobe")]
+    let bitprobe = std::sync::Mutex::new(bitprobe.as_deref_mut());
+    tanks.par_iter_mut().for_each(
+        |(
+            pos,
+            rot,
+            center_of_mass,
+            body,
+            mut forces,
+            command,
+            mut drive,
+            mut signal,
+            mut grip,
+            mut grip_elements,
+            mut grip_effect,
+            mut trans_state,
+            mut contacts,
+            tank_volumes,
+            tank_caps,
+        )| {
+            #[cfg(feature = "bitprobe")]
+            if let Some(capture) = bitprobe
+                .lock()
+                .expect("no bitprobe capture holder panicked")
+                .as_deref_mut()
+            {
+                capture.tanks_seen += 1;
+                capture.command = [command.throttle, command.steer];
             }
-        } else {
-            DriveAxes::default()
-        };
+            // Only dynamic bodies simulate the belt — and the guard sits BEFORE command
+            // shaping: the owner's `DriveSignal` is replicated state, and a client tick must not
+            // locally slew the replicated throttle/steer. Forces are no-ops on kinematic/static
+            // bodies, replicated tanks' `TrackDrive` arrives for their track view, and clients
+            // neither receive nor simulate the private element field (ADR-0027 disclosure).
+            // Skipping them entirely also keeps their replicated belt state from being fought by
+            // a locally-integrated one.
+            if !matches!(*body, RigidBody::Dynamic) {
+                return;
+            }
+            // Drive gates THRUST, not grip: a dead driver/engine/transmission retargets the
+            // command slew to zero (a fade over ~1/DRIVE_SLEW_PER_SECOND, see the module doc)
+            // while the full contact model keeps running, so the tracks keep their kinetic grip.
+            let drive_ok =
+                capability_available(tank_volumes, tank_caps, Capability::Drive, &volumes);
+            let target = if drive_ok {
+                DriveAxes {
+                    throttle: command.throttle,
+                    steer: command.steer,
+                }
+            } else {
+                DriveAxes::default()
+            };
 
-        let affine = Affine3A::from_rotation_translation(rot.0, pos.0);
-        // avian3d 0.7 `ForcesItem` keeps this helper private; this is its version-pinned source
-        // expression (`query_data.rs`): position + rotation * local computed COM.
-        let center_of_mass = pos.0 + rot.0 * center_of_mass.0;
-        let mut effect = TrackGripEffect::default();
+            let affine = Affine3A::from_rotation_translation(rot.0, pos.0);
+            // avian3d 0.7 `ForcesItem` keeps this helper private; this is its version-pinned
+            // source expression (`query_data.rs`): position + rotation * local computed COM.
+            let center_of_mass = pos.0 + rot.0 * center_of_mass.0;
+            let mut effect = TrackGripEffect::default();
 
-        // The shared per-tank drivetrain tick — contact evaluation, joint transmission, belt
-        // commit — with this adapter supplying Avian's live velocity field. MP runs the declared
-        // architecture; the offline-only [`TransmissionFeelTest`] can override it.
-        #[cfg_attr(
-            not(feature = "bitprobe"),
-            expect(
-                unused_mut,
-                unused_variables,
-                reason = "only the bitprobe capture consumes"
-            )
-        )]
-        let (mut reports, tr) = belt_tick(
-            &gear,
-            oracle,
-            mode,
-            target,
-            affine,
-            dt,
-            |p| forces.velocity_at_point(p),
-            BeltRig {
-                drive: &mut drive,
-                signal: &mut signal,
-                grip: &mut grip,
-                elements: &mut grip_elements,
-                transmission: &mut trans_state.0,
-            },
-        );
-        #[cfg(feature = "bitprobe")]
-        if let Some(capture) = bitprobe.as_deref_mut() {
-            for (side, report) in reports.iter_mut().enumerate() {
-                capture.contact_inputs[side] = std::mem::take(&mut report.bitprobe_contacts);
-                capture.element_outputs[side] = std::mem::take(&mut report.bitprobe_elements);
+            // The shared per-tank drivetrain tick — contact evaluation, joint transmission, belt
+            // commit — with this adapter supplying Avian's live velocity field. MP runs the
+            // declared architecture; the offline-only [`TransmissionFeelTest`] can override it.
+            #[cfg_attr(
+                not(feature = "bitprobe"),
+                expect(
+                    unused_mut,
+                    unused_variables,
+                    reason = "only the bitprobe capture consumes"
+                )
+            )]
+            let (mut reports, tr) = belt_tick(
+                gear,
+                oracle,
+                mode,
+                target,
+                affine,
+                dt,
+                |p| forces.velocity_at_point(p),
+                BeltRig {
+                    drive: &mut drive,
+                    signal: &mut signal,
+                    grip: &mut grip,
+                    elements: &mut grip_elements,
+                    transmission: &mut trans_state.0,
+                },
+            );
+            #[cfg(feature = "bitprobe")]
+            if let Some(capture) = bitprobe
+                .lock()
+                .expect("no bitprobe capture holder panicked")
+                .as_deref_mut()
+            {
+                for (side, report) in reports.iter_mut().enumerate() {
+                    capture.contact_inputs[side] = std::mem::take(&mut report.bitprobe_contacts);
+                    capture.element_outputs[side] = std::mem::take(&mut report.bitprobe_elements);
+                }
+                capture.belt_reaction = [reports[0].belt_reaction, reports[1].belt_reaction];
+                capture.transmission = tr.bitprobe;
             }
-            capture.belt_reaction = [reports[0].belt_reaction, reports[1].belt_reaction];
-            capture.transmission = tr.bitprobe;
-        }
-        for (si, report) in reports.into_iter().enumerate() {
-            effect.belt_reaction[si] = report.belt_reaction;
-            for contact in &report.contacts {
-                effect.traction_force += contact.traction;
-                effect.traction_torque += (contact.point - center_of_mass).cross(contact.traction);
+            for (si, report) in reports.into_iter().enumerate() {
+                effect.belt_reaction[si] = report.belt_reaction;
+                for contact in &report.contacts {
+                    effect.traction_force += contact.traction;
+                    effect.traction_torque +=
+                        (contact.point - center_of_mass).cross(contact.traction);
+                }
+                // Apply in report order — accumulation order is part of determinism.
+                for app in &report.apps {
+                    forces.apply_force_at_point(app.force, app.point);
+                }
+                contacts.0[si] = report.contacts;
             }
-            // Apply in report order — accumulation order is part of determinism.
-            for app in &report.apps {
-                forces.apply_force_at_point(app.force, app.point);
-            }
-            contacts.0[si] = report.contacts;
-        }
-        effect.field_digest = coarse_grip_digest(&grip_elements);
-        *grip_effect = effect;
-    }
+            effect.field_digest = coarse_grip_digest(&grip_elements);
+            *grip_effect = effect;
+        },
+    );
 }
