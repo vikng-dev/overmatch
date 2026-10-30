@@ -5,11 +5,13 @@
 //! The invariant: a standing static body's child colliders keep their `Position`, `Rotation` and
 //! `ColliderAabb` change ticks across physics steps and across lightyear_avian's per-frame child
 //! pass, so Avian's `update_moved_collider_aabbs` skips them. Who relies on it: the dedicated
-//! server's tick, whose map holds every building element and tree segment as a static body's
-//! child collider; at 30 tanks the patch took the physics step's p50 from 904 to 618 µs (MEASURED
-//! 2026-10-31, M4, release, A/B/B/A). Stock Avian 0.7.0 and lightyear_avian3d 0.30.1 rewrite every
-//! child's pose unconditionally and fail the first test (MEASURED: all three ticks re-marked); a
+//! server's physics step, whose map holds every building element and tree segment as a static
+//! body's child collider (its measured cost is in the record). Stock Avian 0.7.0 and
+//! lightyear_avian3d 0.30.1 rewrite every child's pose unconditionally and fail the first test; a
 //! dependency bump that drops either patch fails it too.
+//!
+//! The poses, box dimensions and update counts below are fixture data: any off-origin, turned pose
+//! and any count of settling and observed updates exercise the same invariant.
 
 use std::time::Duration;
 
@@ -20,7 +22,8 @@ use bevy::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 use lightyear::avian3d::plugin::LightyearAvianPlugin;
 
-/// Avian's default plugins, one 64 Hz step per `update`.
+/// Avian's default plugins, one 64 Hz step per `update`: the manual clock advances 15 625 µs per
+/// update, DERIVED as 1 s / 64.
 fn physics_app() -> App {
     let mut app = App::new();
     app.add_plugins((

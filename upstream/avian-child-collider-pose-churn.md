@@ -36,10 +36,23 @@ as below, the same 30-tank server A/B/B/A on the stats line (MEASURED 2026-10-31
 Compute the same pose with the same expressions and assign only where the value differs in bits
 (`to_bits` per component, so a `-0.0` never replaces a `0.0` the unconditional write would have
 stored, and NaN payloads compare as stored). The stored values stay bit-identical; only the change
-ticks of unchanged values differ. Readers of those ticks in `avian3d`: `update_moved_collider_aabbs`
-(a pure function of pose and shape), `wake_on_changed` and `position_to_transform` (rigid bodies
-only; the systems above exclude `RigidBody`). A test would pin that a child of an unmoved static
-body keeps its `Position` change tick across a step, and that a moved body's child still updates.
+ticks of unchanged values differ. Readers of those ticks in `avian3d`:
+
+- `update_moved_collider_aabbs`: a pure function of pose and shape, so a skipped recompute
+  reproduces the AABB already stored.
+- `wake_on_changed`: reads only entities with a `BodyIslandNode`, which avian gives to a
+  `SolverBody` or to a dynamic or kinematic `RigidBody`. The systems above exclude `RigidBody`.
+- `position_to_transform`: filters on `Or<(With<RigidBody>, With<ApplyPosToTransform>)>`, so a
+  child collider reaches it only if it carries `ApplyPosToTransform`. Avian never inserts that
+  marker. `lightyear_avian3d` adds it only to an `Interpolated` non-rigid entity whose `ColliderOf`
+  is absent or names itself (`add_apply_pos_to_transform`). It removes it from any child collider
+  that gains it (`remove_apply_pos_to_transform_from_child_collider`). A child collider's
+  `Transform` holds its local offset, and writing its world pose there would apply the hierarchy
+  twice. So no child collider reaches the system in a lightyear app. An application that marks
+  one itself gets its `Transform` rewritten only on the steps where the child's pose bits change.
+
+A test would pin that a child of an unmoved static body keeps its `Position` change tick across a
+step, and that a moved body's child still updates.
 
 Cheaper still, and a separate decision: skip a child whose body pose and `ColliderTransform` are
 unchanged since the system's last run. That saves the iteration too, but must also notice a direct

@@ -765,7 +765,7 @@ fn apply_track_forces(
     let mode = trans_feel.as_ref().map(|r| r.0).unwrap_or(gear.mode);
     let dt = time.delta_secs();
     #[cfg(feature = "bitprobe")]
-    let bitprobe = std::sync::Mutex::new(bitprobe.as_deref_mut());
+    let bitprobe = bitprobe.as_deref_mut().map(std::sync::Mutex::new);
     tanks.par_iter_mut().for_each(
         |(
             pos,
@@ -785,11 +785,8 @@ fn apply_track_forces(
             tank_caps,
         )| {
             #[cfg(feature = "bitprobe")]
-            if let Some(capture) = bitprobe
-                .lock()
-                .expect("no bitprobe capture holder panicked")
-                .as_deref_mut()
-            {
+            if let Some(capture) = &bitprobe {
+                let mut capture = capture.lock().expect("no bitprobe capture holder panicked");
                 capture.tanks_seen += 1;
                 capture.command = [command.throttle, command.steer];
             }
@@ -851,11 +848,8 @@ fn apply_track_forces(
                 },
             );
             #[cfg(feature = "bitprobe")]
-            if let Some(capture) = bitprobe
-                .lock()
-                .expect("no bitprobe capture holder panicked")
-                .as_deref_mut()
-            {
+            if let Some(capture) = &bitprobe {
+                let mut capture = capture.lock().expect("no bitprobe capture holder panicked");
                 for (side, report) in reports.iter_mut().enumerate() {
                     capture.contact_inputs[side] = std::mem::take(&mut report.bitprobe_contacts);
                     capture.element_outputs[side] = std::mem::take(&mut report.bitprobe_elements);
