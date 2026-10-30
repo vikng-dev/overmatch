@@ -38,6 +38,7 @@ use avian3d::collider_tree::{ColliderTrees, update_moved_collider_aabbs};
 use avian3d::prelude::{
     AngularVelocity, Collider, ColliderDensity, CollisionLayers, LinearVelocity, Position, Rotation,
 };
+use bevy::math::DVec3;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
@@ -451,15 +452,54 @@ fn read_shell(
 }
 
 /// A building's pose: world from its frame (the root's translation and rotation; the root is at
-/// unit scale and the instance's scale is in the frame's lengths).
+/// unit scale and the instance's scale is in the frame's lengths), and a ball in world that holds
+/// its elements' bounds with room to spare ([`Frame::may_meet`]).
 #[derive(Clone, Copy)]
 struct Frame {
     translation: Vec3,
     rotation: Quat,
     scale: f32,
+    /// The ball's centre and radius, m, in f64.
+    centre: DVec3,
+    radius: f64,
 }
 
 impl Frame {
+    fn new(transform: &Transform, scale: f32, (lo, hi): (Vec3, Vec3)) -> Self {
+        let middle = (lo + hi) / 2.0;
+        let centre = transform.translation + transform.rotation * (middle * scale);
+        // The bounds' half-diagonal, grown 5 % and half a metre: far beyond the rounding of every
+        // test the deposits run in the building frame (DERIVED: f32 rounding, ~1e-4 m at a
+        // kilometre).
+        let radius = f64::from((hi - lo).length() / 2.0 * scale) * 1.05 + 0.5;
+        Self {
+            translation: transform.translation,
+            rotation: transform.rotation,
+            scale,
+            centre: centre.as_dvec3(),
+            radius,
+        }
+    }
+
+    /// Whether the ray from `origin` along `dir` (world) can meet the building's bounds: false only
+    /// when it passes clear of the ball, which holds the bounds with room to spare, so every ray
+    /// the bounds' own test ([`Block::span`] in the building frame) accepts is kept.
+    fn may_meet(&self, origin: Vec3, dir: Vec3) -> bool {
+        let to = self.centre - origin.as_dvec3();
+        let far = to.length_squared() - self.radius * self.radius;
+        if far <= 0.0 {
+            return true;
+        }
+        let along = to.dot(dir.as_dvec3().normalize_or_zero());
+        along > 0.0 && far <= along * along
+    }
+
+    /// Whether the world point `at` can lie within the building's bounds grown by `slack` m.
+    fn may_hold(&self, at: Vec3, slack: f32) -> bool {
+        let reach = self.radius + f64::from(slack);
+        self.centre.distance_squared(at.as_dvec3()) <= reach * reach
+    }
+
     /// A world point in the asset's own frame, at scale 1.
     fn unscaled(&self, p: Vec3) -> Vec3 {
         self.rotation.inverse() * (p - self.translation) / self.scale
@@ -552,11 +592,7 @@ fn apply_deposits(mut p: DepositParam) {
         .map(|(root, _, transform, breakage)| {
             (
                 root,
-                Frame {
-                    translation: transform.translation,
-                    rotation: transform.rotation,
-                    scale: breakage.scale,
-                },
+                Frame::new(transform, breakage.scale, breakage.kind.bounds()),
             )
         })
         .collect();
@@ -618,6 +654,9 @@ fn apply_deposits(mut p: DepositParam) {
                 continue;
             }
             for (root, frame) in &frames {
+                if !frame.may_hold(end, STOP_TOLERANCE_M) {
+                    continue;
+                }
                 let Ok((_, _, _, breakage)) = p.buildings.get(*root) else {
                     continue;
                 };
@@ -652,14 +691,18 @@ fn apply_deposits(mut p: DepositParam) {
                 let kind = &breakage.kind;
                 let (lo, hi) = kind.bounds();
                 let local = frame.unscaled(origin);
-                let bounds = Block::cuboid(lo, hi);
-                let shape = shapes.entry(*root).or_insert_with(|| breakage.shape());
+                let mut bounds = None;
                 let mut hits = Vec::new();
                 for &(dir, share) in directions {
+                    if !frame.may_meet(origin, dir) {
+                        continue;
+                    }
                     let turned = frame.turn(dir);
+                    let bounds = bounds.get_or_insert_with(|| Block::cuboid(lo, hi));
                     if bounds.span(local, turned).is_none() {
                         continue;
                     }
+                    let shape = shapes.entry(*root).or_insert_with(|| breakage.shape());
                     if let Some((Some(c), t)) = first_chunk(&kind.layout, shape, local, turned) {
                         hits.push(fracture::RayHit {
                             chunk: c,

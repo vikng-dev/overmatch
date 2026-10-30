@@ -303,3 +303,59 @@ fn a_round_meets_a_fallen_piece_as_its_substance() {
     let body = world.get::<ChildOf>(hit).unwrap().parent();
     assert!(world.get::<WallPiece>(body).is_some());
 }
+
+/// THE DEPOSITS' WORLD BALL NEVER DROPS WHAT THE BUILDING'S BOUNDS ACCEPT: for the shipped house
+/// (fixture data) at a fixture pose and scale, every blast direction whose ray from a fixture
+/// point the bounds' own test meets ([`Block::span`] in the building frame) passes
+/// [`Frame::may_meet`], from points inside, beside, above and 1.4 km from the house; and every
+/// fixture point the field-stop test admits passes [`Frame::may_hold`]. A ball that clipped the
+/// bounds would drop a blast ray or a field stop the building took, and with it a deposit; the
+/// deposits rely on the ball only to skip work.
+#[test]
+fn the_world_ball_keeps_every_ray_the_bounds_meet() {
+    let kind = shipped_house();
+    let (lo, hi) = kind.bounds();
+    let scale = 1.137;
+    let pose = Transform::from_xyz(312.5, -4.25, -187.0).with_rotation(Quat::from_rotation_y(0.7));
+    let frame = Frame::new(&pose, scale, (lo, hi));
+    let bounds = Block::cuboid(lo, hi);
+    let world = |p: Vec3| pose.translation + pose.rotation * (p * scale);
+    let middle = (lo + hi) / 2.0;
+    let origins = [
+        world(middle),
+        world(Vec3::new(hi.x + 0.3, middle.y, middle.z)),
+        world(Vec3::new(middle.x, hi.y + 2.0, lo.z - 0.5)),
+        world(hi + Vec3::splat(6.0)),
+        world(middle) + Vec3::new(1400.0, 3.0, -50.0),
+    ];
+    let mut met = 0;
+    for origin in origins {
+        let local = frame.unscaled(origin);
+        for &(dir, _) in fracture::blast_directions() {
+            if bounds.span(local, frame.turn(dir)).is_some() {
+                met += 1;
+                assert!(
+                    frame.may_meet(origin, dir),
+                    "{dir} from {origin} meets the bounds"
+                );
+            }
+        }
+    }
+    assert!(
+        met > fracture::BLAST_RAYS,
+        "the fixture points meet the bounds"
+    );
+    let slack = Vec3::splat(STOP_TOLERANCE_M / scale);
+    for corner in 0..8 {
+        let pick = |bit: usize, a: f32, b: f32| if corner >> bit & 1 == 0 { a } else { b };
+        let local = Vec3::new(
+            pick(0, lo.x - slack.x, hi.x + slack.x),
+            pick(1, lo.y - slack.y, hi.y + slack.y),
+            pick(2, lo.z - slack.z, hi.z + slack.z),
+        );
+        assert!(
+            frame.may_hold(world(local), STOP_TOLERANCE_M),
+            "corner {corner}"
+        );
+    }
+}
