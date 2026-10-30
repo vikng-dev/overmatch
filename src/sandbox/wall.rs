@@ -17,8 +17,9 @@
 //! * **The view.** Each chunk's pool as heat, local cracks in cyan and structural ones in
 //!   magenta, a dust puff where a chunk went, loose groups as falling bodies on the default layer
 //!   (out of ballistics; grey-blue when a local crack freed them, purple when a structural one
-//!   did), and a readout stating the active law's formula, the last deposit and the values. The
-//!   readout shows only while the camera stands within [`READOUT_RANGE`] of the wall, so the
+//!   did), and a one-line readout (the crack rule, the structural check, the last shot); H opens a
+//!   help panel of the keys and the colour legend. Every value of a resolved shot goes to the log.
+//!   The readout shows only while the camera stands within [`READOUT_RANGE`] of the wall, so the
 //!   range's own view carries no more text than its round's name.
 //! * **Spall.** Every exit cone the wall throws is read off the shell's record: the game's today
 //!   (its energy share of the energy lost) and the candidate (that, scaled by the exited
@@ -26,7 +27,7 @@
 //!   witness panel behind the wall; J toggles which is drawn. The game's own dose is untouched.
 //!
 //! Keys: 1–5 law A–E, K cut, N new wall, B round, F fire it, P point deposit and `[`/`]` its
-//! energy, O blast and `,`/`.` its filler mass, `;`/`'` its standoff, V its casing, U the
+//! energy, H help, O blast and `,`/`.` its filler mass, `;`/`'` its standoff, V its casing, U the
 //! structural check, J spall, G camera (front, back, witness).
 //!
 //! `OVERMATCH_WALL_CASE=<law letter>,<round key | p<energy> | x<kg>@<standoff m>>` (`B,88mm_AP`,
@@ -144,6 +145,7 @@ pub(super) fn plugin(app: &mut App) {
         spall: Spall::Today,
         round: 0,
         view: View::Front,
+        help: flag("OVERMATCH_WALL_HELP", "1"),
     };
     if flag("OVERMATCH_WALL_SPALL", "candidate") {
         controls.spall = Spall::Candidate;
@@ -222,9 +224,13 @@ struct WallRead {
     cones: usize,
 }
 
-/// The readout line block.
+/// The readout line: the active rule, the structural check and the last shot.
 #[derive(Component)]
 struct WallReadout;
+
+/// The help panel (H): the keys and the colour legend.
+#[derive(Component)]
+struct WallHelp;
 
 /// The wall as it stands: its cut, its state, each standing chunk's entity and drawn mesh, its
 /// material and the range of its joints' Griffith strengths (Pa) for the readout.
@@ -269,6 +275,8 @@ struct WallControls {
     spall: Spall,
     round: usize,
     view: View,
+    /// The help panel (H) is open.
+    help: bool,
 }
 
 /// One round F fires: its data key and display name, the round, its gun's fire mechanism, and how
@@ -876,6 +884,9 @@ fn wall_keys(mut p: KeysParam) {
             Spall::Today => Spall::Candidate,
             Spall::Candidate => Spall::Today,
         };
+    }
+    if keys.just_pressed(KeyCode::KeyH) {
+        controls.help = !controls.help;
     }
     if keys.just_pressed(KeyCode::KeyV) {
         controls.cased = !controls.cased;
@@ -1533,6 +1544,10 @@ fn apply_deposits(mut p: ApplyParam) {
                 last.spall_today,
                 last.blast,
             );
+            info!(
+                "wall prototype: values:\n{}",
+                detail(wall, &p.controls, &p.charge, &p.log, last).join("\n")
+            );
         }
     }
 }
@@ -1643,24 +1658,31 @@ fn animate_puffs(
 }
 
 fn spawn_readout(mut commands: Commands, script: Option<Res<WallScript>>) {
-    commands.spawn((
-        WallReadout,
-        Text::new(""),
-        TextFont {
-            font_size: FontSize::Px(10.0),
-            ..default()
-        },
-        TextColor(Color::srgb(0.92, 0.94, 1.0)),
-        BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
-        Visibility::Hidden,
-        Node {
-            position_type: PositionType::Absolute,
-            top: Val::Px(6.0),
-            left: Val::Px(if script.is_some() { 6.0 } else { UI_LEFT }),
-            padding: UiRect::all(Val::Px(4.0)),
-            ..default()
-        },
-    ));
+    let left = Val::Px(if script.is_some() { 6.0 } else { UI_LEFT });
+    for (top, help) in [(6.0, false), (30.0, true)] {
+        let mut text = commands.spawn((
+            Text::new(""),
+            TextFont {
+                font_size: FontSize::Px(10.0),
+                ..default()
+            },
+            TextColor(Color::srgb(0.92, 0.94, 1.0)),
+            BackgroundColor(Color::srgba(0.0, 0.0, 0.0, 0.5)),
+            Visibility::Hidden,
+            Node {
+                position_type: PositionType::Absolute,
+                top: Val::Px(top),
+                left,
+                padding: UiRect::all(Val::Px(4.0)),
+                ..default()
+            },
+        ));
+        if help {
+            text.insert(WallHelp);
+        } else {
+            text.insert(WallReadout);
+        }
+    }
 }
 
 /// `e` J in J, kJ or MJ.
@@ -1685,28 +1707,20 @@ fn metres(m: f32) -> String {
     }
 }
 
-#[derive(SystemParam)]
-struct ReadoutParam<'w, 's> {
-    wall: Option<Res<'w, Wall>>,
-    log: Res<'w, WallLog>,
-    controls: Res<'w, WallControls>,
-    rounds: Res<'w, WallRounds>,
-    charge: Res<'w, Charge>,
-    camera: Single<'w, 's, &'static Transform, With<FreeFlyCam>>,
-    text: Single<'w, 's, (&'static mut Text, &'static mut Visibility), With<WallReadout>>,
-}
-
-/// The readout: the active law and its formula, the material values, the controls, the last
-/// deposit's outcome and the lone-point reach each closed-form law gives its energy, the blast's
-/// energy and coupling, the structural check, and the spall today against the candidate. ASCII.
-fn update_readout(p: ReadoutParam) {
-    let Some(wall) = p.wall.as_deref() else {
-        return;
-    };
-    let c = *p.controls;
+/// The values behind the readout, for the log: the active rule's formula, the material, the
+/// controls, the last deposit's outcome and the lone-point reach each closed-form law gives its
+/// energy, the blast's energy and coupling, the structural check, and the spall today against the
+/// candidate. ASCII.
+fn detail(
+    wall: &Wall,
+    c: &WallControls,
+    charge_src: &Charge,
+    log: &WallLog,
+    last: &Outcome,
+) -> Vec<String> {
     let m = &wall.material;
     let joints = &wall.cut.structure.joints;
-    let charge = p.charge.blast(MASSES[c.mass], c.cased);
+    let charge = charge_src.blast(MASSES[c.mass], c.cased);
     let mut lines = vec![
         format!(
             "WALL PROTOTYPE  law [1-5] {} {}:  {}",
@@ -1733,14 +1747,10 @@ fn update_readout(p: ReadoutParam) {
             m.wave_speed()
         ),
         format!(
-            "cut [K] {} {} chunks {} joints   round [B, F] {}   point [P, [ ]] {}   camera [G]   new wall [N]",
+            "cut [K] {} {} chunks {} joints   point [P, [ ]] {}",
             c.cut.label(),
             wall.cut.structure.chunks.len(),
             joints.len(),
-            p.rounds
-                .0
-                .get(c.round)
-                .map_or("-", |round| round.name.as_str()),
             joules(ENERGIES[c.energy])
         ),
         format!(
@@ -1750,13 +1760,17 @@ fn update_readout(p: ReadoutParam) {
             if c.cased { "cased" } else { "bare" },
             joules(charge.chemical),
             joules(charge.casing),
-            if c.cased { p.charge.casing_ratio } else { 0.0 },
+            if c.cased {
+                charge_src.casing_ratio
+            } else {
+                0.0
+            },
             joules(charge.energy),
             charge.momentum,
             if c.structural { "on" } else { "off" }
         ),
     ];
-    if let Some(last) = &p.log.last {
+    {
         lines.push(format!(
             "last: {}: {} into {} chunks -> {} dust, {} local cracks, {} structural cracks in {} sections, {} groups fell ({} chunks)",
             last.what,
@@ -1802,8 +1816,8 @@ fn update_readout(p: ReadoutParam) {
         ));
         let scale = spall_scale();
         // `+ 0.0`: an empty sum is −0.0, which would print a sign.
-        let today = p.log.witness_today.iter().sum::<f32>() + 0.0;
-        let candidate = p.log.witness_candidate.iter().sum::<f32>() + 0.0;
+        let today = log.witness_today.iter().sum::<f32>() + 0.0;
+        let candidate = log.witness_candidate.iter().sum::<f32>() + 0.0;
         lines.push(format!(
             "spall [J] showing {}: exit cone S today {} | candidate x{:.4} {}   witness panel total today {} | candidate {}",
             match c.spall {
@@ -1817,18 +1831,95 @@ fn update_readout(p: ReadoutParam) {
             joules(candidate)
         ));
     }
-    let text = lines.join("\n");
+    lines
+}
+
+/// The last shot in a few words: what it was and the energy it put into the wall.
+fn last_shot(last: &Outcome) -> String {
+    format!("{}, {}", last.what, joules(last.deposited))
+}
+
+#[derive(SystemParam)]
+struct ReadoutParam<'w, 's> {
+    wall: Option<Res<'w, Wall>>,
+    log: Res<'w, WallLog>,
+    controls: Res<'w, WallControls>,
+    camera: Single<'w, 's, &'static Transform, With<FreeFlyCam>>,
+    text: Single<
+        'w,
+        's,
+        (&'static mut Text, &'static mut Visibility),
+        (With<WallReadout>, Without<WallHelp>, Without<super::Legend>),
+    >,
+    help: Single<
+        'w,
+        's,
+        (&'static mut Text, &'static mut Visibility),
+        (With<WallHelp>, Without<WallReadout>, Without<super::Legend>),
+    >,
+    range_legend: Single<
+        'w,
+        's,
+        &'static mut Visibility,
+        (With<super::Legend>, Without<WallReadout>, Without<WallHelp>),
+    >,
+}
+
+/// The readout: one line (the crack rule, the structural check, the last shot), and the help panel
+/// while H has it open. Both show only near the wall, where the range's own H legend stays shut.
+fn update_readout(p: ReadoutParam) {
+    if p.wall.is_none() {
+        return;
+    }
+    let c = *p.controls;
+    let line = format!(
+        "{} rule ({})  |  structural check {}  |  last: {}  |  H help",
+        {
+            let name = c.law.name();
+            format!("{}{}", name[..1].to_uppercase(), &name[1..])
+        },
+        c.law.letter(),
+        if c.structural { "on" } else { "off" },
+        p.log
+            .last
+            .as_ref()
+            .map_or_else(|| "none".to_string(), last_shot),
+    );
     let near = p.camera.translation.distance(WALL_MIN + WALL_SIZE / 2.0) < READOUT_RANGE;
-    let (mut shown, mut visibility) = p.text.into_inner();
-    visibility.set_if_neq(if near {
-        Visibility::Inherited
-    } else {
-        Visibility::Hidden
-    });
-    if shown.0 != text {
-        shown.0 = text;
+    let shown_if = |on: bool| {
+        if on {
+            Visibility::Inherited
+        } else {
+            Visibility::Hidden
+        }
+    };
+    let (mut text, mut visibility) = p.text.into_inner();
+    visibility.set_if_neq(shown_if(near));
+    if text.0 != line {
+        text.0 = line;
+    }
+    let (mut help, mut help_visibility) = p.help.into_inner();
+    help_visibility.set_if_neq(shown_if(near && c.help));
+    if help.0 != HELP {
+        help.0 = HELP.to_string();
+    }
+    if near {
+        p.range_legend.into_inner().set_if_neq(Visibility::Hidden);
     }
 }
+
+/// The help panel (H), ASCII: the keys by group, and what each colour on the wall means.
+const HELP: &str = "\
+FIRE     F fire the round   B next round   P point deposit   [ ] its energy
+BLAST    O blast   , . charge mass   ; ' standoff   V cased / bare
+RULES    1-5 crack rule A-E   U structural check   K cut   N new wall
+VIEW     G camera: front, back, witness   J spall: today / candidate
+COLOURS  brick red to glowing yellow chunk = crush capacity spent
+         cyan seam outline = cracked by the local push
+         magenta seam outline = cracked by the structural check
+         grey-blue piece = loose   purple piece = toppled section
+         orange / blue rays = spall cone (today's / candidate's)
+         yellow sphere and arrow = point deposit or blast";
 
 /// The capture script (module doc): stand the camera by the timeline and fire the case once.
 #[derive(SystemParam)]
