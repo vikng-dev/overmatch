@@ -206,6 +206,67 @@ and the Edgegap conditions.
   strength × thickness.
 - The prototype lane has the blast field, the structural check and an optional thin-plate demo.
 
+## Fuze modes (Yan, 2026-10-30)
+
+- **The crew can pick the fuze mode for rounds that have more than one; accepted.** "Nifty UX, a round
+  toggled live between modes" comes later. For now the mode only has to be pickable.
+- **Gameplay question for later:** can the mode change only before loading, so the toggle applies to
+  future rounds?
+- **Proposed data:** a round's `fuze` has a position (`Nose` or `Base`), a trigger (`Impact` with a
+  sensitivity in newtons, or `Time`), and a list of named modes, each with a delay, plus a default.
+  - The sensitivity is in newtons because the walk already computes the resisting force: dE/dx is in
+    J/m, which is N.
+  - A fuze with one mode shows no toggle. The fire event carries the mode index.
+  - No per-round branches.
+- **Sensitivity (Yan asked):** at 820 m/s, a wooden board pushes back on an 88 mm round with about 1 MN
+  (DERIVED from the wood worked case). The A.Z. 23/28's graze spring needs about 30 N (CITED, HEA12).
+  - So any solid thing sets the high-explosive shell off: fences, trunks, walls. The US manual says even
+    twigs at the muzzle can.
+  - Foliage is not a solid volume in the game, so it never does.
+  - Emergent: a fence or tree in front of a tank sets high-explosive off early, but not AP.
+  - The sensitivity number matters for base fuzes: the Pzgr. 39 must pass brick and function on armour.
+
+**The Sprgr. L/4.5 joins the first wall slice (Yan, yes)** as the first round with the generic fuze
+structure: a nose fuze with instant and delay modes, crew-pickable.
+
+**Trees move onto the chunk-and-joint model after the first wall slice (Yan, yes).** The game gets one
+destruction system.
+
+**The houses got Poly Haven PBR materials** (`09b930b`): brick_wall_006 and dark_planks, CC0, view only.
+
+## Edgegap debris run, by day (2026-10-30 19:05, `debris-edgegap-day/summary.txt`)
+
+Conditions: `0.7.0-alpha.2`, Singapore, AMD EPYC 7713 host, 1 vCPU, 29 bots plus one client (30 tanks).
+The server numbers are clean; the client's numbers are not (lanes were compiling).
+
+- **The server is saturated at 30 tanks with no debris at all** (MEASURED, medians):
+  - tick p50 16.3 ms against a 15.6 ms budget;
+  - CPU at 100 %, with about 46 overruns per second;
+  - it runs at about 58 Hz instead of 64.
+- **Physics is about 6.1 ms of the 16.3 ms tick, about 38 %** (p50).
+- **Breaches of 10 and 35 pieces every 5 s** (up to 55 live and 527 frozen pieces) moved tick p50 by
+  −0.34 and +0.20 ms, which is inside the run's noise of about ±0.4 ms. Sending to one client cost
+  +0.05 to +0.11 ms.
+  - So debris at this scale costs less than the run can resolve.
+  - But the server has no headroom left to absorb anything.
+- **The 200-piece condition crashed the client** inside Avian's contact solver (#183). The chain stopped
+  there, so there is no 200-piece data and no B/A repeats.
+
+## 2 vCPU against 1 vCPU (Edgegap, 30 tanks, 2026-10-30 ~20:00, `runs/vcpu-2026-10-30/`)
+
+| Size | Condition | Tick p50 | Tick p95 | Physics p50 | CPU % | Overruns/s |
+|---|---|---|---|---|---|---|
+| 2 vCPU | off | 15.3 ms | 18.4 ms | 5.3 ms | 102 | 28 |
+| 2 vCPU | 35:5 | 16.6 ms | 19.2 ms | 6.6 ms | 102 | 48 |
+| 2 vCPU | off | 14.4 ms | 17.0 ms | 4.7 ms | 103 | 12 |
+| 1 vCPU (control) | off | 15.7 ms | 21.0 ms | 5.6 ms | 100 | 34 |
+
+- **The server barely uses a second core** (102–103 %). It is effectively single-threaded, so a bigger
+  Edgegap size does not buy tanks. It mainly trims p95, most likely by throttling less.
+- **Run-to-run noise between deployments is about ±1 ms** (off: 14.4 against 15.3).
+- **The debris cost for 35-piece breaches every 5 s lies somewhere between 0 and about 1.5 ms**; single
+  runs cannot resolve it better. The controlled local runs tonight should.
+
 ## Open
 
 - Q2 (a hole is the fragments whose HP pools the existing doses empty), Q3 (a larger piece is whatever
