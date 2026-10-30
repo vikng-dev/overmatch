@@ -686,19 +686,24 @@ fn graph(structure: &Structure, state: &WallState) -> Graph {
 /// grounded chunk, so a section that holds nothing costs a walk to the nearest anchor.
 fn held(start: usize, cut: &[usize], (neighbours, anchors, buried): &Graph) -> Option<Vec<usize>> {
     let outside = |joint: &usize| cut.binary_search(joint).is_err();
-    let mut seen = std::collections::BTreeSet::from([start]);
+    let mut seen = vec![false; neighbours.len()];
+    seen[start] = true;
+    let mut reached = vec![start];
     let mut queue = std::collections::VecDeque::from([start]);
     while let Some(chunk) = queue.pop_front() {
         if buried[chunk] || anchors[chunk].iter().any(outside) {
             return None;
         }
         for &(next, joint) in &neighbours[chunk] {
-            if outside(&joint) && seen.insert(next) {
+            if outside(&joint) && !seen[next] {
+                seen[next] = true;
+                reached.push(next);
                 queue.push_back(next);
             }
         }
     }
-    Some(seen.into_iter().collect())
+    reached.sort_unstable();
+    Some(reached)
 }
 
 /// One shortest path from `start` to the ground through `graph`: its joints and the anchor that
@@ -707,15 +712,17 @@ fn held(start: usize, cut: &[usize], (neighbours, anchors, buried): &Graph) -> O
 /// `start` ([`held`] answers `None`): the structural check searches only the sections that cut a
 /// push's path.
 fn ground_path(start: usize, (neighbours, anchors, buried): &Graph) -> Option<Vec<usize>> {
-    let mut via = std::collections::BTreeMap::new();
-    let mut seen = std::collections::BTreeSet::from([start]);
+    // Per chunk reached: the chunk it was reached from and the joint between; `start`'s is unset.
+    let mut via: Vec<Option<(usize, usize)>> = vec![None; neighbours.len()];
+    let mut seen = vec![false; neighbours.len()];
+    seen[start] = true;
     let mut queue = std::collections::VecDeque::from([start]);
     while let Some(chunk) = queue.pop_front() {
         let anchor = anchors[chunk].first();
         if buried[chunk] || anchor.is_some() {
             let mut joints: Vec<usize> = anchor.into_iter().copied().collect();
             let mut at = chunk;
-            while let Some(&(from, joint)) = via.get(&at) {
+            while let Some((from, joint)) = via[at] {
                 joints.push(joint);
                 at = from;
             }
@@ -723,8 +730,9 @@ fn ground_path(start: usize, (neighbours, anchors, buried): &Graph) -> Option<Ve
             return Some(joints);
         }
         for &(next, joint) in &neighbours[chunk] {
-            if seen.insert(next) {
-                via.insert(next, (chunk, joint));
+            if !seen[next] {
+                seen[next] = true;
+                via[next] = Some((chunk, joint));
                 queue.push_back(next);
             }
         }
@@ -737,6 +745,10 @@ fn ground_path(start: usize, (neighbours, anchors, buried): &Graph) -> Option<Ve
 /// each ascending. Read from the joint graph alone.
 fn sections(structure: &Structure, state: &WallState) -> Vec<Vec<usize>> {
     let mut planes: Vec<(Vec3, f32, Vec<usize>)> = Vec::new();
+    // The planes by their offset's bucket ([`plane_bucket`]), each bucket in creation order. A
+    // joint's plane is the first plane, in creation order, within its offset's tolerance: one
+    // whose offset differs by under a millimetre lies in its bucket or the two either side.
+    let mut buckets: std::collections::HashMap<i64, Vec<usize>> = Default::default();
     let mut singles = Vec::new();
     for (index, joint) in structure.joints.iter().enumerate() {
         if state.cracked[index] || !state.live(joint) {
@@ -750,12 +762,22 @@ fn sections(structure: &Structure, state: &WallState) -> Vec<Vec<usize>> {
             -n
         };
         let offset = n.dot(joint.centroid);
-        match planes
-            .iter_mut()
-            .find(|(m, o, _)| m.dot(n) > 0.999 && (o - offset).abs() < 1e-3)
-        {
-            Some((.., members)) => members.push(index),
-            None => planes.push((n, offset, vec![index])),
+        let bucket = plane_bucket(offset);
+        let found = (-2..=2)
+            .filter_map(|step| buckets.get(&bucket.saturating_add(step)))
+            .flatten()
+            .copied()
+            .filter(|&p| {
+                let (m, o, _) = &planes[p];
+                m.dot(n) > 0.999 && (o - offset).abs() < 1e-3
+            })
+            .min();
+        match found {
+            Some(p) => planes[p].2.push(index),
+            None => {
+                buckets.entry(bucket).or_default().push(planes.len());
+                planes.push((n, offset, vec![index]));
+            }
         }
     }
     singles.extend(
@@ -765,6 +787,13 @@ fn sections(structure: &Structure, state: &WallState) -> Vec<Vec<usize>> {
             .map(|(.., members)| members),
     );
     singles
+}
+
+/// A plane offset's bucket, its millimetres floored (in f64, whose product adds no rounding a
+/// millimetre could notice): two offsets the section rule holds within `1e-3` of each other lie
+/// at most two buckets apart, the second covering the f32 rounding of their difference.
+fn plane_bucket(offset: f32) -> i64 {
+    (f64::from(offset) * 1e3).floor() as i64
 }
 
 /// The structural check: a push bends a section about its centroid, and the section fails when
@@ -803,18 +832,30 @@ pub(crate) fn structural(
                     .flatten()
             })
             .collect();
+        // Per joint, the pushes whose path to the ground crosses it, ascending: a section cuts
+        // push `k`'s path exactly when one of its joints lists `k`.
+        let mut crossing: Vec<Vec<usize>> = vec![Vec::new(); structure.joints.len()];
+        for (k, path) in paths.iter().enumerate() {
+            for &joint in path.iter().flatten() {
+                crossing[joint].push(k);
+            }
+        }
         let mut worst: Option<(f32, Failure)> = None;
         for section in sections(structure, state) {
+            // The pushes whose path the section cuts, in push order: the only pushes the search
+            // reads for it.
+            let mut cut: Vec<usize> = section
+                .iter()
+                .flat_map(|&joint| crossing[joint].iter().copied())
+                .collect();
+            if cut.is_empty() {
+                continue;
+            }
+            cut.sort_unstable();
+            cut.dedup();
             let mut group: Vec<usize> = Vec::new();
-            for (push, path) in pushes.iter().zip(&paths) {
-                let Some(path) = path else {
-                    continue;
-                };
-                if group.binary_search(&push.chunk).is_ok()
-                    || !section
-                        .iter()
-                        .any(|joint| path.binary_search(joint).is_ok())
-                {
+            for push in cut.into_iter().map(|k| &pushes[k]) {
+                if group.binary_search(&push.chunk).is_ok() {
                     continue;
                 }
                 if let Some(reached) = held(push.chunk, &section, &graph) {
@@ -1143,6 +1184,73 @@ mod tests {
             failures.push(failure);
         }
         failures
+    }
+
+    /// The section rule as specified, each joint's plane found by a scan of every plane in
+    /// creation order: the reference the bucketed search answers to.
+    fn sections_by_scan(structure: &Structure, state: &WallState) -> Vec<Vec<usize>> {
+        let mut planes: Vec<(Vec3, f32, Vec<usize>)> = Vec::new();
+        let mut singles = Vec::new();
+        for (index, joint) in structure.joints.iter().enumerate() {
+            if state.cracked[index] || !state.live(joint) {
+                continue;
+            }
+            singles.push(vec![index]);
+            let n = joint.normal;
+            let n = if n.max_element().abs() >= n.min_element().abs() {
+                n
+            } else {
+                -n
+            };
+            let offset = n.dot(joint.centroid);
+            match planes
+                .iter_mut()
+                .find(|(m, o, _)| m.dot(n) > 0.999 && (o - offset).abs() < 1e-3)
+            {
+                Some((.., members)) => members.push(index),
+                None => planes.push((n, offset, vec![index])),
+            }
+        }
+        singles.extend(
+            planes
+                .into_iter()
+                .filter(|(.., members)| members.len() > 1)
+                .map(|(.., members)| members),
+        );
+        singles
+    }
+
+    /// THE STRUCTURAL CHECK'S SECTIONS ARE THE SCAN'S: on the shipped house (fixture data) at two
+    /// instance scales, whole and with a fixture pattern of cracked joints and spent chunks, the
+    /// bucketed plane search gives every section the scan gives, members and order alike. A bucket
+    /// too narrow for the millimetre tolerance, or a search that took a later plane than the first
+    /// in creation order, fails here; the structural check, and with it every crack it records,
+    /// relies on the sections being the rule's.
+    #[test]
+    fn the_bucketed_sections_are_the_scan() {
+        let kind = crate::buildings::tests::shipped_house();
+        for scale in [1.0, 1.137] {
+            let structure = kind.layout.structure(&kind.asset, scale);
+            let mut state = WallState::new(&structure);
+            assert_eq!(
+                sections(&structure, &state),
+                sections_by_scan(&structure, &state),
+                "whole, scale {scale}"
+            );
+            for (j, cracked) in state.cracked.iter_mut().enumerate() {
+                *cracked = j % 7 == 3;
+            }
+            for (c, fate) in state.fate.iter_mut().enumerate() {
+                if c % 11 == 5 {
+                    *fate = Fate::Dust;
+                }
+            }
+            assert_eq!(
+                sections(&structure, &state),
+                sections_by_scan(&structure, &state),
+                "broken, scale {scale}"
+            );
+        }
     }
 
     /// THE STRUCTURAL CHECK SEARCHES ONLY THE SECTIONS THAT CUT A PUSH'S PATH TO THE GROUND, AND
