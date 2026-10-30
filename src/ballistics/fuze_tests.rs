@@ -156,14 +156,18 @@ fn an_impact_delay_is_flight_time_from_contact() {
     );
 }
 
-/// The game's damage model: the migration preserves the legacy burst position and every pool's
-/// dose across a thin unarmed body, an arming body, and a stopping body. The generic walk and
-/// pen cam rely on these results. Constants are the legacy APHE fixture data, unchanged bits.
+/// The game's damage model: the 8.8 cm Pzgr. 39 ring's `SpendExit` fuze keeps today's outcomes.
+/// Its shipped burst is the one it had before the fuze block, field for field, and on a slab too
+/// thin to arm it, one that arms it, and one that stops it, the march gives the same bursts
+/// (position, speed, wait at rest) and the same doses to the struck pool and to an off-axis pool
+/// only the fragment cone reaches. The pins are MEASURED fixture outcomes of the spend-at-exit law
+/// as it stood before it was generalized; a change to that path moves them.
 #[test]
-fn spend_exit_migration_preserves_burst_positions_and_doses() {
+fn the_spend_exit_fuze_keeps_todays_bursts_and_doses() {
     let fixture = crate::tank::WeaponRound::resolve("88mm_APHE_ring").unwrap();
-    let migrated = fixture.round.burst.unwrap();
-    let legacy = burst::Burst {
+    let shipped = fixture.round.burst.unwrap();
+    // The ring's burst as the round file stated it before the fuze block, DERIVED at load then.
+    let today = burst::Burst {
         trigger: Trigger::SpendExit { arming_spend: 35.0 },
         delay: 0.0015,
         nose: RoundBody {
@@ -174,9 +178,10 @@ fn spend_exit_migration_preserves_burst_positions_and_doses() {
         sideways_speed: 541.4819,
         energy: 211_073.97,
     };
-    assert_eq!(migrated, legacy, "unchanged spawn facts");
-    // MEASURED fixture outcomes under the unchanged legacy burst inputs: positions/speeds,
-    // total pool units on the primary and off-axis pools, and off-axis burst-only pool units.
+    assert_eq!(shipped, today, "the shipped burst, field for field");
+    // Per slab: the bursts as (position, speed, seconds waited at rest); the pool units the shot
+    // took from the struck pool and from the off-axis pool; and those the burst alone took from
+    // the off-axis pool.
     type Snapshot = (Vec<([f32; 3], f32, f32)>, [u32; 2], u32);
     let pins: [Snapshot; 3] = [
         (vec![], [204_265, 13_405], 0),
@@ -188,7 +193,6 @@ fn spend_exit_migration_preserves_burst_positions_and_doses() {
         (vec![], [1_000_000, 0], 0),
     ];
     for (thickness, pin) in [0.02, 0.05, 0.5].into_iter().zip(pins) {
-        // ASSUMED fixture plate dimensions, m.
         let fire = |burst| {
             let mut app = world_with_plate(Vec3::new(3.0, 3.0, thickness), PLATE);
             let world = app.world_mut();
@@ -200,8 +204,8 @@ fn spend_exit_migration_preserves_burst_positions_and_doses() {
             for entity in entities {
                 world.entity_mut(entity).insert(ComponentHealth::full(1000));
             }
-            // ASSUMED off-axis fixture pool: the fragment cone can dose it while the round's
-            // own line misses it. This distinguishes burst potency from direct line dose.
+            // Fixture data: an off-axis pool the round's line misses and the fragment cone
+            // reaches, so its dose is the burst's potency alone.
             let side = app
                 .world_mut()
                 .spawn((
@@ -254,8 +258,6 @@ fn spend_exit_migration_preserves_burst_positions_and_doses() {
             }
             (positions, doses, burst_dose)
         };
-        let actual = fire(migrated);
-        assert_eq!(actual, pin, "pinned fixture thickness {thickness}");
-        assert_eq!(actual, fire(legacy), "fixture thickness {thickness}");
+        assert_eq!(fire(shipped), pin, "a {thickness} m slab");
     }
 }
