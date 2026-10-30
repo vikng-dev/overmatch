@@ -116,6 +116,7 @@ runs:
             find assets/maps -type f \( -name '*.json' -o -name '*.png' -o -name '*.ron' \) \
               -not -path 'assets/maps/*/derived/*'
             find assets/trees -type f -name '*.ron'
+            find assets/buildings -type f -name '*.building.ron'
           } | LC_ALL=C sort
         )
         for path in "${paths[@]}"; do
