@@ -1,6 +1,6 @@
 {
-  "view_glb_sha": "a47cffd1d271eb53a48d9c7e8aef1697476afad85be1a8f56da63088405d1a9b",
-  "sim_glb_sha": "fac9a492a52793d980421902d4ee72a050b3fe598cece7b5dc382595ee30b0f9",
+  "view_glb_sha": "61950ce76ab7788c993e4ae4454c3b7b0183a0bcf05653768b073fac9ad830b4",
+  "sim_glb_sha": "85ee40fd6e49bc4638fd68c0c9907157abbcebcbcdfa39ec6521b3f8f0fd7f45",
   "mesh_count": 59,
   "chains": {
     "Ammo_L_0#0": {
@@ -204,19 +204,11 @@
       ]
     },
     "Hull_Collider#0": {
-      "radius_m": 3.500593,
+      "radius_m": 3.48257,
       "rungs": [
         {
-          "mesh": "Hull_Collider#0_LOD3",
-          "deviation_mm": 8.91999
-        },
-        {
-          "mesh": "Hull_Collider#0_LOD5",
-          "deviation_mm": 61.351534
-        },
-        {
-          "mesh": "Hull_Collider#0_LOD7",
-          "deviation_mm": 162.812893
+          "mesh": "Hull_Collider#0_LOD8",
+          "deviation_mm": 407.925904
         }
       ]
     },
@@ -476,15 +468,15 @@
       "rungs": [
         {
           "mesh": "Hull_Top#0_LOD3",
-          "deviation_mm": 14.743944
+          "deviation_mm": 12.524456
         },
         {
           "mesh": "Hull_Top#0_LOD4",
-          "deviation_mm": 27.631787
+          "deviation_mm": 20.216903
         },
         {
           "mesh": "Hull_Top#0_LOD6",
-          "deviation_mm": 115.069217
+          "deviation_mm": 68.196926
         }
       ]
     },

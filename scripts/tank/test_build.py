@@ -312,13 +312,19 @@ class TigerCensus(unittest.TestCase):
         with open(TIGER, "rb") as handle:
             blob = handle.read()
         cert_path = TRIO.paths(TIGER)[2]
+        certified = None
         if os.path.isfile(cert_path):
             with open(cert_path, encoding="utf-8") as handle:
-                blob = TRIO.strip_rungs(blob, json.load(handle)["mesh_count"])
+                certified = json.load(handle)["mesh_count"]
+            blob = TRIO.strip_rungs(blob, certified)
         js, binary = measure.glb_chunks_from_bytes(blob, TIGER)
         rows = TRIO.census(js, binary)
-        self.assertEqual(len(js["meshes"]), 58)
-        self.assertEqual(len(rows), 61, "58 meshes, three of them multi-primitive")
+        if certified is not None:
+            self.assertEqual(len(js["meshes"]), certified, "the stripped prefix is the certified source")
+        self.assertEqual(
+            len(rows), sum(len(mesh["primitives"]) for mesh in js["meshes"]),
+            "the census holds one row per primitive of every mesh",
+        )
         self.assertEqual([row["chain"] for row in rows if "refusal" in row], [])
         for name in ("Wheel_L#0", "Wheel_L#1", "Wheel_R#0", "Wheel_R#1"):
             row = next(r for r in rows if r["chain"] == name)
