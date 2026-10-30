@@ -5,8 +5,6 @@
 //! Product invariant (ADR-0023): visual scale and duration derive from physical event inputs, never
 //! viewer distance.
 
-use std::collections::VecDeque;
-
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 
@@ -15,8 +13,9 @@ use crate::view::PlayerView;
 
 use super::ViewRng;
 use super::billboard::{
-    BillboardRing, BillboardSpec, Flipbook, SOFT_PARTICLE_DEPTH, VfxBillboardMaterial, VfxParams,
-    gradient_lut, spawn_ballistic_billboard, spawn_billboard, spawn_billboard_ring, unit_quad,
+    BILLBOARD_CAP, BillboardLook, BillboardMaterials, BillboardRing, BillboardSpec, Flipbook,
+    SOFT_PARTICLE_DEPTH, VfxParams, gradient_lut, spawn_ballistic_billboard, spawn_billboard,
+    unit_quad,
 };
 
 // Alpha blending lets dust darken and occlude rather than behave as an emissive effect.
@@ -135,7 +134,8 @@ const SPLASH_CLOUD_RISE: f32 = 0.35;
 const GROUND_MARK_SIZE: f32 = 2.0;
 const GROUND_MARK_LIFETIME: f32 = 6.0;
 /// The scar ring cap: a handful of recent gouges. Small — scars are rare (88-only) and long-lived.
-const GROUND_MARK_CAP: usize = 16;
+/// Its slots follow the shared ring's in the billboard lane table (`BILLBOARD_SLOTS`).
+pub(super) const GROUND_MARK_CAP: usize = 16;
 
 // --- The 88 on ARMOR (caliber ≥ TRACER_MAX_CALIBER, surface Armor): steel is categorically NOT dirt
 // (War Thunder Drone-Age dev material + GHPC reference). A white-hot contact flash, a dense fast hot
@@ -183,8 +183,15 @@ const FLAME_LICK_RISE: f32 = 1.2;
 
 /// Independent eviction ring for the long-lived ground scars (see [`GROUND_MARK_CAP`]). Insulated
 /// from the shared [`BillboardRing`] so an MG storm filling that ring can't evict a fresh 88 scar.
-#[derive(Resource, Default)]
-pub(super) struct GroundMarkRing(pub VecDeque<Entity>);
+#[derive(Resource)]
+pub(super) struct GroundMarkRing(pub BillboardRing);
+
+/// Lane-table slots `BILLBOARD_CAP..BILLBOARD_CAP + GROUND_MARK_CAP`, after the shared ring's.
+impl Default for GroundMarkRing {
+    fn default() -> Self {
+        Self(BillboardRing::new(BILLBOARD_CAP, GROUND_MARK_CAP))
+    }
+}
 
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<GroundMarkRing>()
@@ -220,7 +227,7 @@ pub(super) struct ImpactAssets {
 
 #[cfg(test)]
 impl ImpactAssets {
-    /// Every handle default: the tests spawn real billboards and clone real material assets, but no
+    /// Every handle default: the tests spawn real billboards and make real family materials, but no
     /// render app samples the textures behind the handles. Shared with [`super::scatter_hit`]'s
     /// harness, which drives the same read from a crossing instead of from an [`Impact`].
     pub(super) fn test_stub() -> Self {
@@ -242,8 +249,8 @@ impl ImpactAssets {
 impl ImpactAssets {
     /// The dust-billow material template: alpha-blend mass (glow.y = 0 — the occluding contract),
     /// its own earthy LUT, soft erosion edges. Its 2×2 atlas frame lanes are set on spawn.
-    fn dust_material(&self) -> VfxBillboardMaterial {
-        VfxBillboardMaterial {
+    fn dust_material(&self) -> BillboardLook {
+        BillboardLook {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 // Moderate sharpness for soft dissolve edges; DUST_ALPHA overall.
@@ -258,8 +265,8 @@ impl ImpactAssets {
 
     /// The ping material template: additive glow (glow.y = 1 — premultiplied additive), single-frame
     /// full-image round glow, hard erosion so it snaps rather than ghosts.
-    fn ping_material(&self) -> VfxBillboardMaterial {
-        VfxBillboardMaterial {
+    fn ping_material(&self) -> BillboardLook {
+        BillboardLook {
             params: VfxParams {
                 frame: Vec4::new(0.0, 1.0, 1.0, 0.0),
                 fade: Vec4::new(0.0, 3.0, 0.0, 1.0),
@@ -273,8 +280,8 @@ impl ImpactAssets {
 
     /// The spark material template: additive (hot metal never darkens), a 2×2 tapered-streak atlas
     /// (each spark picks a random frame), hard erosion edge so the streak dissolves crisply.
-    pub(super) fn spark_material(&self) -> VfxBillboardMaterial {
-        VfxBillboardMaterial {
+    pub(super) fn spark_material(&self) -> BillboardLook {
+        BillboardLook {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 fade: Vec4::new(0.0, 3.0, 0.0, 1.0),
@@ -289,8 +296,8 @@ impl ImpactAssets {
     /// A dirt-mass material for the 88 splash's plume/ring/cloud: the dust atlas recolored through
     /// the earthy `dirt_lut`, alpha-blend occluding mass (glow.y = 0 — never additive), overall
     /// `alpha` per layer. Shares the already-warmed Blend billboard pipeline.
-    fn dirt_material(&self, alpha: f32) -> VfxBillboardMaterial {
-        VfxBillboardMaterial {
+    fn dirt_material(&self, alpha: f32) -> BillboardLook {
+        BillboardLook {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 fade: Vec4::new(0.0, 2.2, 0.0, alpha),
@@ -310,7 +317,7 @@ impl ImpactAssets {
     /// laid 0.1 m over the surface, so its whole area sits inside the fade band and the layer would
     /// scale itself out of existence (the same reason the ground scar never carries one — see
     /// [`SOFT_PARTICLE_DEPTH`]).
-    fn shock_ring_material(&self) -> VfxBillboardMaterial {
+    fn shock_ring_material(&self) -> BillboardLook {
         let mut material = self.dirt_material(SPLASH_RING_ALPHA);
         material.params.fade.y = SPLASH_RING_SHARPNESS;
         material.params.glow.z = 0.0;
@@ -319,8 +326,8 @@ impl ImpactAssets {
 
     /// The dirt-ejecta material: the spark-streak geometry recolored to dirt (Blend, no glow — soil
     /// clods are lit mass, not hot metal). Same Blend pipeline as the dust masses.
-    fn ejecta_material(&self) -> VfxBillboardMaterial {
-        VfxBillboardMaterial {
+    fn ejecta_material(&self) -> BillboardLook {
+        BillboardLook {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 fade: Vec4::new(0.0, 3.0, 0.0, 1.0),
@@ -335,8 +342,8 @@ impl ImpactAssets {
     /// The ground-scar material: the dust atlas pinned to its dirt frame (BR cell 3 of the 2×2 —
     /// `dirt_03`, via a 4-frame/rate-0/start-3 spec) recolored dark through `scar_lut`, alpha-blend,
     /// slow erosion so the gouge fades over its long life. Ground-oriented at spawn (fixed rotation).
-    fn ground_mark_material(&self) -> VfxBillboardMaterial {
-        VfxBillboardMaterial {
+    fn ground_mark_material(&self) -> BillboardLook {
+        BillboardLook {
             params: VfxParams {
                 frame: Vec4::new(3.0, 2.0, 2.0, 0.0),
                 fade: Vec4::new(0.0, 1.6, 0.0, 0.85),
@@ -351,8 +358,8 @@ impl ImpactAssets {
     /// A gray spall-smoke mass for the armor read's puff: the dust atlas recolored through the
     /// neutral `spall_lut` (never the earthy dirt LUT — steel throws gray spall/smoke, not dirt),
     /// alpha-blend occluding mass, overall `alpha`. Shares the already-warmed Blend pipeline.
-    fn spall_material(&self, alpha: f32) -> VfxBillboardMaterial {
-        VfxBillboardMaterial {
+    fn spall_material(&self, alpha: f32) -> BillboardLook {
+        BillboardLook {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 fade: Vec4::new(0.0, 2.4, 0.0, alpha),
@@ -367,8 +374,8 @@ impl ImpactAssets {
     /// The armor contact flash: a white-hot additive bloom, hotter/whiter than the terrain splash's
     /// warm flash ([`ImpactAssets::ping_material`] on the spark LUT) — welding-bright steel contact.
     /// The round-glow atlas through the white-hot `hot_lut`.
-    fn armor_flash_material(&self) -> VfxBillboardMaterial {
-        VfxBillboardMaterial {
+    fn armor_flash_material(&self) -> BillboardLook {
+        BillboardLook {
             params: VfxParams {
                 frame: Vec4::new(0.0, 1.0, 1.0, 0.0),
                 fade: Vec4::new(0.0, 3.0, 0.0, 1.0),
@@ -382,8 +389,8 @@ impl ImpactAssets {
 
     /// The armor spark material: the spark-streak atlas through the white-hot `hot_lut` — the dense
     /// fan's hotter, whiter streak (the terrain `spark_material` cools to ember orange). Additive.
-    fn armor_spark_material(&self) -> VfxBillboardMaterial {
-        VfxBillboardMaterial {
+    fn armor_spark_material(&self) -> BillboardLook {
+        BillboardLook {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 fade: Vec4::new(0.0, 3.0, 0.0, 1.0),
@@ -398,8 +405,8 @@ impl ImpactAssets {
     /// The flame-lick material (penetration only): a brief warm additive flame off the breach — the
     /// spark LUT's orange tail read as fire, over the soft dust atlas so it reads as a lick, not a
     /// spark. Additive so it blooms; kept small and short (see the flame-lick constants).
-    fn flame_material(&self) -> VfxBillboardMaterial {
-        VfxBillboardMaterial {
+    fn flame_material(&self) -> BillboardLook {
+        BillboardLook {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 fade: Vec4::new(0.0, 2.0, 0.0, 1.0),
@@ -497,7 +504,7 @@ pub(super) fn setup_impact_assets(
 #[derive(SystemParam)]
 pub(super) struct ImpactKit<'w, 's> {
     assets: Res<'w, ImpactAssets>,
-    materials: ResMut<'w, Assets<VfxBillboardMaterial>>,
+    materials: BillboardMaterials<'w>,
     ring: ResMut<'w, BillboardRing>,
     ground_ring: ResMut<'w, GroundMarkRing>,
     rng: ResMut<'w, ViewRng>,
@@ -856,11 +863,10 @@ fn spawn_big_splash(position: Vec3, normal: Vec3, to_camera: Vec3, kit: &mut Imp
 
     // --- Ground scar: one flat, ground-oriented gouge on the terrain — its OWN long-lived ring so it
     // isn't evicted within a frame by the sub-second billboard storm sharing BILLBOARD_CAP.
-    spawn_billboard_ring(
+    spawn_billboard(
         commands,
         materials,
         &mut ground_ring.0,
-        GROUND_MARK_CAP,
         assets.quad.clone(),
         BillboardSpec {
             material: assets.ground_mark_material(),
@@ -1067,7 +1073,12 @@ fn spark_orientation(dir: Vec3, to_camera: Vec3) -> Quat {
 mod tests {
     use super::*;
 
-    use crate::vfx::billboard::{BILLBOARD_CAP, Billboard};
+    use bevy::mesh::MeshTag;
+    use bevy::render::storage::ShaderBuffer;
+
+    use crate::vfx::billboard::{
+        BILLBOARD_SLOTS, Billboard, BillboardFamilies, VfxBillboardMaterial,
+    };
 
     /// An MG-belt round: below TRACER_MAX_CALIBER, so the small dust-ping-spark read.
     const MG_CALIBER: f32 = 0.0079;
@@ -1075,14 +1086,16 @@ mod tests {
     const BIG_CALIBER: f32 = 0.088;
 
     /// Minimal app carrying what the impact observer reads. Real `Assets` stores (initialized bare,
-    /// no asset plugins) so the per-billboard material clones run for real; fixed-seed view RNG; no
-    /// camera (spark facing falls back).
+    /// no asset plugins) so the family materials and the lane table are made for real; fixed-seed
+    /// view RNG; no camera (spark facing falls back).
     fn harness() -> App {
         let mut app = App::new();
         app.init_resource::<BillboardRing>()
             .init_resource::<GroundMarkRing>()
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<VfxBillboardMaterial>>()
+            .init_resource::<Assets<ShaderBuffer>>()
+            .init_resource::<BillboardFamilies>()
             .init_resource::<Time>()
             .insert_resource(ViewRng::seeded(42))
             .add_observer(spawn_impact_read);
@@ -1144,17 +1157,31 @@ mod tests {
     }
 
     /// The ground scars ride their OWN eviction ring, bounded by GROUND_MARK_CAP — insulated from the
-    /// shared billboard ring so a storm can't evict a fresh multi-second scar within a frame.
+    /// shared billboard ring so a storm can't evict a fresh multi-second scar within a frame — and
+    /// hold their own lane-table slots past the shared ring's, one per live scar.
     #[test]
     fn ground_scars_are_ring_capped() {
         let mut app = harness();
         for _ in 0..GROUND_MARK_CAP + 8 {
             trigger_impact(&mut app, Vec3::Y, BIG_CALIBER);
         }
+        let ring = &app.world().resource::<GroundMarkRing>().0;
         assert_eq!(
-            app.world().resource::<GroundMarkRing>().0.len(),
+            ring.live.len(),
             GROUND_MARK_CAP,
             "ground scars stay bounded by their own cap"
+        );
+        let slots: std::collections::BTreeSet<u32> = ring
+            .live
+            .iter()
+            .map(|&scar| app.world().get::<MeshTag>(scar).expect("a live scar").0)
+            .collect();
+        assert_eq!(slots.len(), GROUND_MARK_CAP, "one slot per live scar");
+        assert!(
+            slots
+                .iter()
+                .all(|&slot| (BILLBOARD_CAP..BILLBOARD_SLOTS).contains(&(slot as usize))),
+            "scar slots lie past the shared ring's, inside the lane table"
         );
     }
 
@@ -1179,7 +1206,7 @@ mod tests {
         for _ in 0..200 {
             trigger_impact(&mut app, Vec3::Y, MG_CALIBER);
         }
-        let ring_len = app.world().resource::<BillboardRing>().0.len();
+        let ring_len = app.world().resource::<BillboardRing>().live.len();
         assert_eq!(
             billboards(&mut app),
             ring_len,

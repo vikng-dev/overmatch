@@ -10,7 +10,7 @@ use bevy::world_serialization::WorldAssetRoot;
 
 use super::ViewRng;
 use super::billboard::{
-    BillboardRing, BillboardSpec, Flipbook, VfxBillboardMaterial, spawn_billboard,
+    BillboardMaterials, BillboardRing, BillboardSpec, Flipbook, spawn_billboard,
 };
 use super::ember::EmberAssets;
 use super::impact::ImpactAssets;
@@ -53,7 +53,7 @@ pub(super) fn spawn_prewarm_rig(
     impact: Res<ImpactAssets>,
     ember: Res<EmberAssets>,
     mut meshes: ResMut<Assets<Mesh>>,
-    mut billboard_materials: ResMut<Assets<VfxBillboardMaterial>>,
+    mut billboard_materials: BillboardMaterials,
     mut standard_materials: ResMut<Assets<StandardMaterial>>,
     mut rng: ResMut<ViewRng>,
     mut ring: ResMut<BillboardRing>,
@@ -68,15 +68,16 @@ pub(super) fn spawn_prewarm_rig(
         Transform::from_translation(PREWARM_POSITION),
     ));
 
-    // One billboard per material permutation the muzzle dressing draws: additive flash (the real
+    // One billboard per pipeline permutation the muzzle dressing draws: additive flash (the real
     // core atlas — a default handle would never finish preparing and the pipeline would never
     // compile) and alpha-blend smoke. Spawned through the real spawner so the entity shape matches
-    // a live one, then re-tagged as rig members with culling disabled.
+    // a live one, then re-tagged as rig members with culling disabled. Each one's family material
+    // outlives the rig, so its bind group is ready for the first live sprite of that family.
     for material in [
         muzzle.flash_material(muzzle.core_atlas.clone(), 2.0),
         muzzle.smoke_material(),
         // The impact sparks' template: same Add-blend quad pipeline as the flash (which also covers
-        // the additive ping), but its own LUT — warming it readies the spark bind group too. The
+        // the additive ping), but its own family — warming it readies the spark bind group too. The
         // impact dust billow rides the smoke's Blend pipeline, already warmed above.
         impact.spark_material(),
     ] {

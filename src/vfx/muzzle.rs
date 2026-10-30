@@ -12,8 +12,8 @@ use crate::view::PlayerView;
 
 use super::ViewRng;
 use super::billboard::{
-    BillboardRing, BillboardSpec, Flipbook, SOFT_PARTICLE_DEPTH, VfxBillboardMaterial, VfxParams,
-    gradient_lut, smoothstep, spawn_billboard, unit_quad,
+    BillboardLook, BillboardMaterials, BillboardRing, BillboardSpec, Flipbook, SOFT_PARTICLE_DEPTH,
+    VfxParams, gradient_lut, smoothstep, spawn_billboard, unit_quad,
 };
 
 /// Flash core lifetime in seconds. The 88's hot layers are STAGGERED — core dies first, then the
@@ -291,12 +291,8 @@ pub(super) struct MuzzleVfxAssets {
 
 impl MuzzleVfxAssets {
     /// The flash material template (additive — hot cores never darken; survey trick 9).
-    pub(super) fn flash_material(
-        &self,
-        atlas: Handle<Image>,
-        sharpness: f32,
-    ) -> VfxBillboardMaterial {
-        VfxBillboardMaterial {
+    pub(super) fn flash_material(&self, atlas: Handle<Image>, sharpness: f32) -> BillboardLook {
+        BillboardLook {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 fade: Vec4::new(0.0, sharpness, 0.0, 1.0),
@@ -313,7 +309,7 @@ impl MuzzleVfxAssets {
     /// The blast-core material template: one of the two flipbook sheets through the blast LUT.
     /// Rides the flash's additive pipeline (no new permutation), with its own 4×3 grid lanes,
     /// softer erosion and a lower boost.
-    fn blast_material(&self, atlas: Handle<Image>) -> VfxBillboardMaterial {
+    fn blast_material(&self, atlas: Handle<Image>) -> BillboardLook {
         let mut material = self.flash_material(atlas, BLAST_SHARPNESS);
         material.params.frame = Vec4::new(0.0, BLAST_COLS, BLAST_ROWS, 0.0);
         material.params.fade.w = BLAST_ALPHA;
@@ -323,8 +319,8 @@ impl MuzzleVfxAssets {
     }
 
     /// The smoke material template (alpha-blend — smoke is mass, it darkens and occludes).
-    pub(super) fn smoke_material(&self) -> VfxBillboardMaterial {
-        VfxBillboardMaterial {
+    pub(super) fn smoke_material(&self) -> BillboardLook {
+        BillboardLook {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 // Moderate sharpness: soft dissolve edges on the puff. w is the 88's overall alpha
@@ -342,8 +338,8 @@ impl MuzzleVfxAssets {
     /// The ground-dust material template: the billow atlas through the earth LUT, alpha-blend
     /// occluding mass with no heat (lifted soil is lit mass, never an emitter). Rides the smoke's
     /// already-warmed Blend pipeline.
-    fn dust_material(&self) -> VfxBillboardMaterial {
-        VfxBillboardMaterial {
+    fn dust_material(&self) -> BillboardLook {
+        BillboardLook {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
                 fade: Vec4::new(0.0, 2.2, 0.0, GROUND_DUST_ALPHA),
@@ -511,7 +507,7 @@ fn spawn_muzzle_light(
 fn on_main_gun_fire(
     fire: On<FireShell>,
     assets: Res<MuzzleVfxAssets>,
-    mut materials: ResMut<Assets<VfxBillboardMaterial>>,
+    mut materials: BillboardMaterials,
     mut ring: ResMut<BillboardRing>,
     mut light_ring: ResMut<MuzzleLightRing>,
     shadows: Res<MuzzleShadows>,
@@ -773,7 +769,7 @@ fn spawn_ground_dust(
     ground_y: f32,
     caliber: f32,
     assets: &MuzzleVfxAssets,
-    materials: &mut Assets<VfxBillboardMaterial>,
+    materials: &mut BillboardMaterials,
     ring: &mut BillboardRing,
     rng: &mut ViewRng,
     commands: &mut Commands,
@@ -838,7 +834,7 @@ fn spawn_ground_dust(
 fn on_mg_fire(
     fire: On<FireShell>,
     assets: Res<MuzzleVfxAssets>,
-    mut materials: ResMut<Assets<VfxBillboardMaterial>>,
+    mut materials: BillboardMaterials,
     mut ring: ResMut<BillboardRing>,
     mut light_ring: ResMut<MuzzleLightRing>,
     mut cadence: ResMut<MgSmokeCadence>,
@@ -1019,7 +1015,11 @@ fn decay_muzzle_lights(
 mod tests {
     use super::*;
     use crate::ballistics::FireShellOrigin;
-    use crate::vfx::billboard::{Billboard, age_billboards};
+    use bevy::render::storage::ShaderBuffer;
+
+    use crate::vfx::billboard::{
+        Billboard, BillboardFamilies, VfxBillboardMaterial, age_billboards,
+    };
 
     /// Minimal app carrying what BOTH fire observers + the agers read: bare asset stores, a
     /// fixed-seed view RNG, no camera (distance LOD treats that as near — full dressing), and NO
@@ -1039,6 +1039,8 @@ mod tests {
             .init_resource::<Assets<Mesh>>()
             .init_resource::<Assets<Image>>()
             .init_resource::<Assets<VfxBillboardMaterial>>()
+            .init_resource::<Assets<ShaderBuffer>>()
+            .init_resource::<BillboardFamilies>()
             .init_resource::<Time>()
             .insert_resource(ViewRng::seeded(42))
             .add_observer(on_main_gun_fire)

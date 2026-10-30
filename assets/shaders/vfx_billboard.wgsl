@@ -15,10 +15,15 @@
 // intersection line. Needs `DepthPrepass` on the camera (`camera::spawn_camera`) — without it the
 // DEPTH_PREPASS def is absent, the depth binding does not exist, and every layer stays hard-edged.
 //
-// Vertex stage is Bevy's default mesh vertex shader; the material is mounted only by the windowed
-// clients (vfx::plugin), never the headless server.
+// One material serves a whole FAMILY (atlas, LUT, alpha mode); each sprite's own lanes come from
+// the shared lane table, at the slot its `MeshTag` names (`get_tag`).
+//
+// Vertex stage is Bevy's default mesh vertex shader, which forwards `instance_index` (the mesh
+// pipeline always defines VERTEX_OUTPUT_INSTANCE_INDEX); the material is mounted only by the
+// windowed clients (vfx::plugin), never the headless server.
 
 #import bevy_pbr::forward_io::VertexOutput
+#import bevy_pbr::mesh_functions::get_tag
 #import bevy_pbr::mesh_view_bindings as view_bindings
 #import bevy_pbr::prepass_utils::prepass_depth
 #import bevy_pbr::view_transformations::depth_ndc_to_view_z
@@ -36,7 +41,8 @@ struct VfxParams {
     glow: vec4<f32>,
 }
 
-@group(3) @binding(0) var<uniform> params: VfxParams;
+// The lane table: one entry per billboard slot (`BILLBOARD_SLOTS`), shared by every family.
+@group(3) @binding(0) var<storage, read> lanes: array<VfxParams>;
 @group(3) @binding(1) var atlas_texture: texture_2d<f32>;
 @group(3) @binding(2) var atlas_sampler: sampler;
 @group(3) @binding(3) var lut_texture: texture_2d<f32>;
@@ -44,6 +50,7 @@ struct VfxParams {
 
 @fragment
 fn fragment(in: VertexOutput) -> @location(0) vec4<f32> {
+    let params = lanes[get_tag(in.instance_index)];
     let cols = params.frame.y;
     let rows = params.frame.z;
     let frame = params.frame.x;

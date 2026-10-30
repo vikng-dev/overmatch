@@ -130,7 +130,11 @@ mod tests {
     use super::*;
 
     use crate::vfx::ViewRng;
-    use crate::vfx::billboard::{Billboard, BillboardRing, VfxBillboardMaterial};
+    use bevy::render::storage::ShaderBuffer;
+
+    use crate::vfx::billboard::{
+        Billboard, BillboardFamilies, BillboardRing, VfxBillboardMaterial,
+    };
     use crate::vfx::impact::{GroundMarkRing, ImpactAssets};
 
     /// An MG-belt round: below the big-caliber threshold, so the compact read.
@@ -155,6 +159,8 @@ mod tests {
         .init_resource::<BillboardRing>()
         .init_resource::<GroundMarkRing>()
         .init_asset::<VfxBillboardMaterial>()
+        .init_asset::<ShaderBuffer>()
+        .init_resource::<BillboardFamilies>()
         .insert_resource(ViewRng::seeded(42))
         .insert_resource(ImpactAssets::test_stub())
         .add_systems(Update, read_scatter_crossings);

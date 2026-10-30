@@ -9,7 +9,7 @@ use bevy::asset::RenderAssetUsages;
 use bevy::camera::visibility::NoFrustumCulling;
 use bevy::image::Image;
 use bevy::light::{NotShadowCaster, NotShadowReceiver};
-use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::mesh::{Indices, MeshVertexAttribute, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat,
@@ -467,7 +467,7 @@ fn flush_removed_shell_path(
 /// its smoke has fully dissolved.
 #[expect(
     clippy::too_many_arguments,
-    reason = "per-frame trail upkeep spanning the clock, camera, shells, trails, meshes, rng, net clock, trace and evidence"
+    reason = "per-frame trail upkeep spanning the clock, camera, shells, trails, meshes, rng, net clock, trace, evidence and the station scratch"
 )]
 fn update_trails(
     time: Res<Time>,
@@ -479,6 +479,7 @@ fn update_trails(
     present: Option<Res<ShotClock>>,
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
     #[cfg(test)] mut mesh_evidence: MessageWriter<TrailStationMeshEvidence>,
+    mut stations: Local<Vec<Station>>,
     mut commands: Commands,
 ) {
     let dt = time.delta_secs();
@@ -520,7 +521,13 @@ fn update_trails(
         }
 
         if let Some(mut mesh) = meshes.get_mut(&mesh.0) {
-            write_ribbon(&mut mesh, trail.points.make_contiguous(), head, cam);
+            write_ribbon(
+                &mut mesh,
+                trail.points.make_contiguous(),
+                head,
+                cam,
+                &mut stations,
+            );
             #[cfg(test)]
             emit_mesh_evidence(&mut trail, &mesh, &mut mesh_evidence);
         }
@@ -560,71 +567,119 @@ pub(super) fn empty_ribbon_mesh() -> Mesh {
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
     );
-    write_ribbon(&mut mesh, &[], None, Vec3::Y);
+    write_ribbon(&mut mesh, &[], None, Vec3::Y, &mut Vec::new());
     mesh
+}
+
+/// One ribbon station: the drifted center and what its two vertices carry.
+#[derive(Clone, Copy)]
+pub(super) struct Station {
+    center: Vec3,
+    age: f32,
+    arc: f32,
+    seed: f32,
+    segment: u32,
 }
 
 /// (Re)build the ribbon geometry into `mesh`: camera-facing strips through each disconnected stored
 /// segment, plus (while the shell lives) a zero-age head vertex pair AT the shell, so the newest strip
 /// reaches the round that is making it. All strips remain one mesh/draw.
-pub(super) fn write_ribbon(mesh: &mut Mesh, points: &[TrailPoint], head: Option<Vec3>, cam: Vec3) {
-    let (positions, uvs, colors, segments) = ribbon_vertices(points, head, cam);
-    let indices = ribbon_indices(&segments);
-    let count = positions.len();
+///
+/// Allocation-free once warm: the mesh's own attribute and index vectors are refilled in place and
+/// `stations` is the caller's scratch, so a rebuild allocates only while its ribbon, or the
+/// scratch, grows past its largest earlier size. The positions are rewritten whole every frame
+/// because the strip faces `cam`.
+pub(super) fn write_ribbon(
+    mesh: &mut Mesh,
+    points: &[TrailPoint],
+    head: Option<Vec3>,
+    cam: Vec3,
+    stations: &mut Vec<Station>,
+) {
+    ribbon_stations(points, head, stations);
+    let mut positions = take_attribute(mesh, Mesh::ATTRIBUTE_POSITION, |values| match values {
+        VertexAttributeValues::Float32x3(values) => Some(values),
+        _ => None,
+    });
+    let mut normals = take_attribute(mesh, Mesh::ATTRIBUTE_NORMAL, |values| match values {
+        VertexAttributeValues::Float32x3(values) => Some(values),
+        _ => None,
+    });
+    let mut uvs = take_attribute(mesh, Mesh::ATTRIBUTE_UV_0, |values| match values {
+        VertexAttributeValues::Float32x2(values) => Some(values),
+        _ => None,
+    });
+    let mut colors = take_attribute(mesh, Mesh::ATTRIBUTE_COLOR, |values| match values {
+        VertexAttributeValues::Float32x4(values) => Some(values),
+        _ => None,
+    });
+    let mut indices = match mesh.indices_mut() {
+        Some(Indices::U32(indices)) => std::mem::take(indices),
+        _ => Vec::new(),
+    };
+    ribbon_vertices(stations, cam, &mut positions, &mut uvs, &mut colors);
+    ribbon_indices(stations, &mut indices);
+    normals.resize(positions.len(), [0.0, 1.0, 0.0]);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
-    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, vec![[0.0, 1.0, 0.0]; count]);
+    mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_attribute(Mesh::ATTRIBUTE_COLOR, colors);
     mesh.insert_indices(Indices::U32(indices));
 }
 
-/// Triangle indices for the station strip, deliberately omitting the quad between disconnected path
-/// segments. Each station owns two adjacent vertices.
-fn ribbon_indices(segments: &[u32]) -> Vec<u32> {
-    let mut indices = Vec::with_capacity(segments.len().saturating_sub(1) * 6);
-    for (i, adjacent) in segments.windows(2).enumerate() {
-        if adjacent[0] != adjacent[1] {
+/// `attribute`'s vector moved out of `mesh` with its capacity, emptied for a refill — or a new one
+/// on the first build. `values` names the variant the attribute's format stores.
+fn take_attribute<T>(
+    mesh: &mut Mesh,
+    attribute: MeshVertexAttribute,
+    values: fn(&mut VertexAttributeValues) -> Option<&mut Vec<T>>,
+) -> Vec<T> {
+    let mut taken = mesh
+        .attribute_mut(attribute.id)
+        .and_then(values)
+        .map(std::mem::take)
+        .unwrap_or_default();
+    taken.clear();
+    taken
+}
+
+/// Triangle indices for the station strip into `indices`, deliberately omitting the quad between
+/// disconnected path segments. Each station owns two adjacent vertices.
+fn ribbon_indices(stations: &[Station], indices: &mut Vec<u32>) {
+    indices.clear();
+    for (i, adjacent) in stations.windows(2).enumerate() {
+        if adjacent[0].segment != adjacent[1].segment {
             continue;
         }
         let base = i as u32 * 2;
         indices.extend_from_slice(&[base, base + 1, base + 2, base + 1, base + 3, base + 2]);
     }
-    indices
 }
 
-/// The pure strip math (testable headless): per point, the drifted center, the camera-facing side
-/// vector, the age-growing width, the arc-anchored V, and the age/seed vertex color the shader
-/// erodes by. Returns empty buffers for degenerate inputs (< 2 stations).
-fn ribbon_vertices(
-    points: &[TrailPoint],
-    head: Option<Vec3>,
-    cam: Vec3,
-) -> (Vec<[f32; 3]>, Vec<[f32; 2]>, Vec<[f32; 4]>, Vec<u32>) {
-    let station_count = points.len() + usize::from(head.is_some());
-    if station_count < 2 {
-        return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+/// The stations a ribbon draws, oldest → newest, into `out`: each point's drifted center, then the
+/// live head (age 0, at the shell). Empty for degenerate inputs (< 2 stations).
+fn ribbon_stations(points: &[TrailPoint], head: Option<Vec3>, out: &mut Vec<Station>) {
+    out.clear();
+    if points.len() + usize::from(head.is_some()) < 2 {
+        return;
     }
-    // Stations oldest → newest, the head (age 0, at the shell) last.
-    let mut centers = Vec::with_capacity(station_count);
-    let mut ages = Vec::with_capacity(station_count);
-    let mut arcs = Vec::with_capacity(station_count);
-    let mut seeds = Vec::with_capacity(station_count);
-    let mut segments = Vec::with_capacity(station_count);
-    for p in points {
-        centers.push(p.pos + p.drift * (p.age * p.age));
-        ages.push(p.age);
-        arcs.push(p.arc);
-        seeds.push(p.seed);
-        segments.push(p.segment);
-    }
+    out.extend(points.iter().map(|p| Station {
+        center: p.pos + p.drift * (p.age * p.age),
+        age: p.age,
+        arc: p.arc,
+        seed: p.seed,
+        segment: p.segment,
+    }));
     if let Some(head_pos) = head {
-        let arc = arcs.last().copied().unwrap_or(0.0)
-            + points.last().map_or(0.0, |p| p.pos.distance(head_pos));
-        centers.push(head_pos);
-        ages.push(0.0);
-        arcs.push(arc);
-        seeds.push(seeds.last().copied().unwrap_or(0.0));
-        segments.push(segments.last().copied().unwrap_or(0));
+        let newest = out.last().copied();
+        out.push(Station {
+            center: head_pos,
+            age: 0.0,
+            arc: newest.map_or(0.0, |s| s.arc)
+                + points.last().map_or(0.0, |p| p.pos.distance(head_pos)),
+            seed: newest.map_or(0.0, |s| s.seed),
+            segment: newest.map_or(0, |s| s.segment),
+        });
     }
 
     // Cut everything closer to the muzzle than TRAIL_START_ARC — that near-barrel smoke is the
@@ -632,81 +687,85 @@ fn ribbon_vertices(
     // or past the start arc; if a station precedes it, splice in a boundary station at EXACTLY the
     // start arc (interpolated between the straddling pair) so the ribbon's near end stays pinned
     // there instead of jumping by a whole station as near-muzzle points age out.
-    let n_full = centers.len();
-    let start_idx = arcs
+    let start = out
         .iter()
-        .position(|&a| a >= TRAIL_START_ARC)
-        .unwrap_or(n_full);
-    let cap = n_full - start_idx + 1;
-    let mut e_centers = Vec::with_capacity(cap);
-    let mut e_ages = Vec::with_capacity(cap);
-    let mut e_arcs = Vec::with_capacity(cap);
-    let mut e_seeds = Vec::with_capacity(cap);
-    let mut e_segments = Vec::with_capacity(cap);
-    if start_idx < n_full {
-        if start_idx > 0 && segments[start_idx - 1] == segments[start_idx] {
-            let (a, b) = (start_idx - 1, start_idx);
-            let span = arcs[b] - arcs[a];
-            let t = if span > 1e-4 {
-                (TRAIL_START_ARC - arcs[a]) / span
-            } else {
-                0.0
-            };
-            e_centers.push(centers[a].lerp(centers[b], t));
-            e_ages.push(ages[a] + (ages[b] - ages[a]) * t);
-            e_arcs.push(TRAIL_START_ARC);
-            e_seeds.push(seeds[b]);
-            e_segments.push(segments[b]);
-        }
-        e_centers.extend_from_slice(&centers[start_idx..]);
-        e_ages.extend_from_slice(&ages[start_idx..]);
-        e_arcs.extend_from_slice(&arcs[start_idx..]);
-        e_seeds.extend_from_slice(&seeds[start_idx..]);
-        e_segments.extend_from_slice(&segments[start_idx..]);
+        .position(|s| s.arc >= TRAIL_START_ARC)
+        .unwrap_or(out.len());
+    if start == out.len() {
+        out.clear();
+    } else if start > 0 && out[start - 1].segment == out[start].segment {
+        let (a, b) = (out[start - 1], out[start]);
+        let span = b.arc - a.arc;
+        let t = if span > 1e-4 {
+            (TRAIL_START_ARC - a.arc) / span
+        } else {
+            0.0
+        };
+        out[start - 1] = Station {
+            center: a.center.lerp(b.center, t),
+            age: a.age + (b.age - a.age) * t,
+            arc: TRAIL_START_ARC,
+            seed: b.seed,
+            segment: b.segment,
+        };
+        out.drain(..start - 1);
+    } else {
+        out.drain(..start);
     }
-    let (centers, ages, arcs, seeds, segments) = (e_centers, e_ages, e_arcs, e_seeds, e_segments);
-
-    let n = centers.len();
-    if n < 2 {
+    if out.len() < 2 {
         // The whole trail is still inside the start arc (the shell has barely cleared the muzzle):
         // no ribbon yet, the muzzle puff carries the read.
-        return (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        out.clear();
     }
-    let mut positions = Vec::with_capacity(n * 2);
-    let mut uvs = Vec::with_capacity(n * 2);
-    let mut colors = Vec::with_capacity(n * 2);
+}
+
+/// The pure strip math (testable headless), appended to the three vertex buffers: per station, the
+/// camera-facing side vector, the age-growing width, the arc-anchored V, and the age/seed vertex
+/// color the shader erodes by.
+fn ribbon_vertices(
+    stations: &[Station],
+    cam: Vec3,
+    positions: &mut Vec<[f32; 3]>,
+    uvs: &mut Vec<[f32; 2]>,
+    colors: &mut Vec<[f32; 4]>,
+) {
+    let n = stations.len();
     // Carried across stations so a degenerate side vector (viewing straight down the trail axis)
     // reuses the last good frame instead of snapping to a world axis — the old `Vec3::Y` fallback
     // flipped the ribbon's down-axis frame-to-frame. `Vec3::Y` seeds only the first station.
     let mut last_side = Vec3::Y;
     for i in 0..n {
-        let same_prev = i > 0 && segments[i - 1] == segments[i];
-        let same_next = i + 1 < n && segments[i + 1] == segments[i];
+        let station = stations[i];
+        let same_prev = i > 0 && stations[i - 1].segment == station.segment;
+        let same_next = i + 1 < n && stations[i + 1].segment == station.segment;
         let dir = match (same_prev, same_next) {
-            (true, true) => centers[i + 1] - centers[i - 1],
-            (true, false) => centers[i] - centers[i - 1],
-            (false, true) => centers[i + 1] - centers[i],
+            (true, true) => stations[i + 1].center - stations[i - 1].center,
+            (true, false) => station.center - stations[i - 1].center,
+            (false, true) => stations[i + 1].center - station.center,
             (false, false) => Vec3::X,
         };
         let side = dir
-            .cross(cam - centers[i])
+            .cross(cam - station.center)
             .try_normalize()
             .unwrap_or(last_side);
         last_side = side;
         // Taper geometry from the start arc.
-        let fade = smoothstep(TRAIL_START_ARC, TRAIL_START_ARC + HEAD_FADE_ARC, arcs[i]);
-        let half = 0.5 * (TRAIL_WIDTH_BIRTH + ages[i] * TRAIL_WIDTH_GROWTH) * fade;
+        let fade = smoothstep(
+            TRAIL_START_ARC,
+            TRAIL_START_ARC + HEAD_FADE_ARC,
+            station.arc,
+        );
+        let half = 0.5 * (TRAIL_WIDTH_BIRTH + station.age * TRAIL_WIDTH_GROWTH) * fade;
         // The shader multiplies alpha by this near-end taper.
         let alpha = fade;
-        let age_frac = (ages[i] / TRAIL_POINT_LIFETIME).clamp(0.0, 1.0);
+        let age_frac = (station.age / TRAIL_POINT_LIFETIME).clamp(0.0, 1.0);
         for (edge, u) in [(-1.0, 0.0), (1.0, 1.0)] {
-            let p = centers[i] + side * (half * edge);
+            let p = station.center + side * (half * edge);
             positions.push([p.x, p.y, p.z]);
-            uvs.push([u, arcs[i]]);
-            colors.push([age_frac, seeds[i], 0.0, alpha]);
+            uvs.push([u, station.arc]);
+            colors.push([age_frac, station.seed, 0.0, alpha]);
         }
     }
-    (positions, uvs, colors, segments)
 }
 
 /// A tiny but real ribbon mesh for the startup pipeline prewarm: same attribute layout and enough
@@ -738,6 +797,7 @@ pub(super) fn prewarm_ribbon_mesh() -> Mesh {
         &points,
         Some(Vec3::X * TRAIL_MIN_SPACING * 2.0),
         Vec3::Y * 50.0,
+        &mut Vec::new(),
     );
     mesh
 }
@@ -826,9 +886,12 @@ mod tests {
         ];
         points[2].segment = 1;
         points[3].segment = 1;
-        let (_, _, _, segments) = ribbon_vertices(&points, None, Vec3::new(0.0, 50.0, 50.0));
+        let mut stations = Vec::new();
+        ribbon_stations(&points, None, &mut stations);
+        let segments: Vec<u32> = stations.iter().map(|station| station.segment).collect();
         assert_eq!(segments, vec![0, 0, 1, 1]);
-        let indices = ribbon_indices(&segments);
+        let mut indices = Vec::new();
+        ribbon_indices(&stations, &mut indices);
         assert_eq!(
             indices.len(),
             12,
@@ -838,6 +901,43 @@ mod tests {
             indices,
             vec![0, 1, 2, 1, 3, 2, 4, 5, 6, 5, 7, 6],
             "no triangle connects the final pre-correction station to the re-seed"
+        );
+    }
+
+    /// A warm ribbon rebuild allocates nothing: the mesh's attribute and index vectors and the
+    /// station scratch are refilled in place. Every live trail is rebuilt at render rate, so a
+    /// rebuild that collected fresh vectors would allocate a dozen-odd of them per trail per frame.
+    #[test]
+    fn a_warm_ribbon_rebuild_allocates_nothing() {
+        let points: Vec<TrailPoint> = (0..40)
+            .map(|i| {
+                let arc = i as f32 * TRAIL_MIN_SPACING;
+                point(Vec3::X * arc, 0.05 * i as f32, arc)
+            })
+            .collect();
+        let head = Some(Vec3::X * 41.0 * TRAIL_MIN_SPACING);
+        let mut mesh = empty_ribbon_mesh();
+        let mut stations = Vec::new();
+        // Warm-up: the longest build sizes every buffer.
+        write_ribbon(
+            &mut mesh,
+            &points,
+            head,
+            Vec3::new(0.0, 50.0, 50.0),
+            &mut stations,
+        );
+
+        // Later frames: the camera moves and the tail expires, so every vertex is rewritten.
+        let allocations = crate::tests::alloc_count::allocations_in(|| {
+            for frame in 1..=8 {
+                let cam = Vec3::new(frame as f32, 50.0, 50.0 - frame as f32);
+                write_ribbon(&mut mesh, &points[frame..], head, cam, &mut stations);
+            }
+        });
+        assert_eq!(allocations, 0, "a warm ribbon rebuild must not allocate");
+        assert!(
+            !stations.is_empty() && mesh.count_vertices() == 2 * stations.len(),
+            "the rebuild still writes the whole strip"
         );
     }
 
