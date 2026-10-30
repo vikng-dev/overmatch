@@ -179,9 +179,10 @@ Each directory has `conditions.tsv`, the per-condition `*.server.json`, a stats-
 | 2 vCPU, 1 client, threads default / 1 | `edgegap-2vcpu/` | 16 of 16 | The client timed out in every armed condition but `d07-12:2-tdefault`, so most server windows are short (43–131 lines). Down 6.4–6.7 kB/s at zero debris, 27.3 kB/s at ~277 live. |
 | 2 vCPU, no client | `edgegap-2vcpu-noclient/` | 7 of 8 | The repeat of 100:2 was stopped mid-window by the client chain's final `stop-all-profile` sweep. |
 | 2 vCPU, no client, threads=4 | `edgegap-2vcpu-noclient-t4/`, `-t4b/` | 8 of 8 | Pools 2/1/1. Two palindromes: zero and 50:2, then 12:2 and 100:2. |
+| 1 vCPU, no client, threads=4 | `edgegap-1vcpu-noclient-t4/` | 2 of 2 | Zero debris only (TLDR 3). |
 
-- **Cost:** 43 deployments of ~4 min: 11 at 1 vCPU ($0.069/h), 32 at 2 vCPU ($0.138/h), about $0.35 (DERIVED, list
-  price).
+- **Cost:** 45 deployments of ~4 min: 13 at 1 vCPU ($0.069/h) and 32 at 2 vCPU ($0.138/h), about
+  $0.35 (DERIVED, list price).
 - **Stopped:** every `profile-` deployment is stopped, and the live count was confirmed 0 at the
   end.
 
@@ -193,7 +194,8 @@ Each directory has `conditions.tsv`, the per-condition `*.server.json`, a stats-
 - **The scripted client exits when the server falls behind.** It timed out whenever an Edgegap
   server ran far below 64 Hz. A player would see the same disconnect.
 - **The debris rule churns.** `wake_ahead` compares every frozen piece with every moving body each
-  tick. Frozen pieces were MEASURED expensive: TLDR's no-cap calibration.
+  tick (`src/debris.rs`, `wake_ahead`). Frozen pieces were MEASURED expensive in the no-cap
+  calibration above.
 
 ## Products
 
