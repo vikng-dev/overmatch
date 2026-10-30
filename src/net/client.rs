@@ -689,8 +689,11 @@ pub fn run() {
     super::shot_explanation::install_client(&mut app);
     // The destruction ledger's apply and the fall presentation's cursor clock.
     super::destruction::install_client(&mut app);
-    // The debris stress lever's fragments, drawn where the server's carriers say they are.
+    // The debris stress lever's fragments and the buildings' fallen pieces, drawn where the
+    // server's carriers say they are.
     super::debris_stress::install_client(&mut app);
+    // The wall ledger into the record the buildings derive from.
+    super::walls::install_client(&mut app);
     app.add_systems(
         FixedUpdate,
         apply_pending_recoil_kicks

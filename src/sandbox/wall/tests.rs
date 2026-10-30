@@ -1,10 +1,17 @@
-//! The wall prototype's invariants, about the game's environment destruction (game state only).
-//! Fixture numbers are fixture data; the brick is the prototype's own ([`super::brick`]).
+//! The wall prototype's invariants, about the game's environment destruction (game state only),
+//! on the game's laws over the baked wall. Fixture numbers are fixture data; the brick is the
+//! shipped row's ([`super::brick`]).
 
 use bevy::math::Vec3;
 
 use super::model::*;
 use super::{blast_field, brick, layout};
+
+/// A blast of 1 J and 1 N·s (fixture data): its rays' shares read straight off their hits.
+const UNIT_BLAST: Blast = Blast {
+    energy: 1.0,
+    momentum: 1.0,
+};
 
 /// SUPPORT IS CONNECTIVITY TO AN ANCHOR THROUGH INTACT JOINTS, on the baked wall. An intact wall
 /// has no loose group (a joint the bake missed would drop chunks the moment the wall stands);
@@ -137,6 +144,7 @@ fn a_push_fails_the_section_at_its_fracture_impulse() {
         centroid: Vec3::new(0.1, y, 0.125),
         mass: material.density * 0.2 * 0.2 * 0.25,
         material,
+        buried: false,
     };
     let structure = Structure {
         chunks: vec![chunk(0.1), chunk(0.3)],
@@ -163,7 +171,7 @@ fn a_push_fails_the_section_at_its_fracture_impulse() {
     let r = top.centroid - joint.centroid;
     let own = (3.0 * top.volume / (4.0 * std::f32::consts::PI)).cbrt();
     let inertia = top.mass * (r.length_squared() - r.x * r.x + 0.4 * own * own);
-    let capacity = (2.0 * inertia * material.joint_toughness * joint.area).sqrt();
+    let capacity = (2.0 * inertia * material.fracture_energy * joint.area).sqrt();
     let at = Vec3::new(0.1, 0.4, 0.25);
     let lever = at.y - joint.centroid.y;
     for (scale, fails) in [(1.01, true), (0.99, false)] {
@@ -189,7 +197,7 @@ fn blast_coupling_falls_with_standoff() {
         Vec3::new(50.0, 50.0, 0.0),
     )];
     let coupled = |standoff: f32| -> f32 {
-        blast_rays(&slab, |_| true, Vec3::Z * standoff, 1.0, 1.0, &field)
+        blast_rays(&slab, |_| true, Vec3::Z * standoff, UNIT_BLAST, &field)
             .iter()
             .map(|hit| hit.energy)
             .sum()
@@ -201,7 +209,7 @@ fn blast_coupling_falls_with_standoff() {
         Vec3::new(2.0, 1.0, 0.0),
     )];
     let on_wall = |standoff: f32| -> f32 {
-        blast_rays(&wall, |_| true, Vec3::Z * standoff, 1.0, 1.0, &field)
+        blast_rays(&wall, |_| true, Vec3::Z * standoff, UNIT_BLAST, &field)
             .iter()
             .map(|hit| hit.energy)
             .sum()

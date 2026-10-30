@@ -90,6 +90,8 @@ pub(crate) fn wall_cut(
                 centroid: place(Vec3::from_array(c.centroid)),
                 mass: c.mass_kg,
                 material,
+                // The range's wall stands on its foundation's bottom: nothing lies below grade.
+                buried: false,
             }
         })
         .collect();

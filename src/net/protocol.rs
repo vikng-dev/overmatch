@@ -211,7 +211,14 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// fixed point and the velocities its 6-byte i16 triples; `TrackDrive` keeps the belt state alone,
 /// in `wire_quant`'s 10-byte belt codec, and its throttle and steer become the owner-only
 /// `DriveSignal`. Surface, own-type graph and REV move.
-pub const PROTOCOL_REV: u32 = 40;
+///
+/// REV 41 (walls break): the wall ledger, one globally visible entity whose
+/// [`WallLedger`](super::walls::WallLedger) lists every building change as `(building, event,
+/// tick)` and replicates by diff, and each fallen group's [`WallPiece`] on its pose carrier.
+/// Surface and own-type graph move.
+///
+/// [`WallPiece`]: crate::buildings::breakage::WallPiece
+pub const PROTOCOL_REV: u32 = 41;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -935,6 +942,8 @@ const WIRE_SURFACE: &[&str] = &[
     "DestructionLedger",
     "HullMarks",
     "DebrisPose",
+    "WallLedger",
+    "WallPiece",
     // Message channels (`Name|Mode|Direction`), followed by their message types.
     "FireChannel|UnorderedUnreliable|ServerToClient",
     "OutcomeChannel|UnorderedReliable|ServerToClient",
@@ -964,7 +973,7 @@ const WIRE_SURFACE: &[&str] = &[
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0x01a3_69e1_a6fb_5542;
+const WIRE_SURFACE_HASH: u64 = 0xb764_85d6_94ca_578d;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -1006,7 +1015,7 @@ const WIRE_SURFACE_HASH: u64 = 0x01a3_69e1_a6fb_5542;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x8018_e26e_94e2_56f2;
+const WIRE_TYPES_HASH: u64 = 0xd28b_fbf4_b47e_d33d;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1049,9 +1058,18 @@ pub(crate) fn plugin(app: &mut App) {
     // the held set once.
     app.component::<crate::hull_marks::HullMarks>()
         .replicate_diff();
-    // The debris stress lever's carriers: one pose per server-simulated fragment, written only
-    // while it moves, so a frozen fragment sends nothing more.
+    // Every server piece's carrier: one pose per piece, written only while it moves, so a frozen
+    // piece sends nothing more. A building piece's carrier is interpolated, so it draws at the
+    // cursor the hulls draw at; the stress lever's are not, and apply on arrival.
     app.component::<super::debris_stress::DebrisPose>()
+        .replicate()
+        .add_interpolation_with(super::debris_stress::debris_pose_lerp);
+    // The wall ledger (one world entity): appended entries ride as diffs, a late joiner takes the
+    // list once.
+    app.component::<super::walls::WallLedger>().replicate_diff();
+    // A building's fallen group on its pose carrier: which building and which chunks, sent once
+    // with the carrier.
+    app.component::<crate::buildings::breakage::WallPiece>()
         .replicate();
 
     // Automatic-fire visuals may be lost or reordered. Application ShotId dedup and bounded copies
@@ -1463,6 +1481,56 @@ mod tests {
         );
     }
 
+    /// A building's fallen piece draws at the cursor the hulls and the wall record draw at
+    /// (ADR-0037): its carrier's pose is registered for interpolation, and the law between two
+    /// samples moves the position along the line and turns along the shorter arc. Unregistered,
+    /// a client writes each pose on arrival and the piece leads the round that freed it by the
+    /// interpolation delay.
+    #[test]
+    fn a_piece_pose_is_registered_for_cursor_interpolation() {
+        use lightyear::interpolation::prelude::InterpolationRegistry;
+        use lightyear::prelude::client::ClientPlugins;
+
+        use crate::net::debris_stress::{DebrisPose, debris_pose_lerp};
+
+        let mut app = crate::net::test_harness::base_app();
+        app.add_plugins(ClientPlugins {
+            tick_duration: crate::net::test_harness::TICK,
+        });
+        plugin(&mut app);
+        assert!(
+            app.world()
+                .resource::<InterpolationRegistry>()
+                .interpolated::<DebrisPose>()
+        );
+
+        let start = DebrisPose {
+            position: Vec3::ZERO,
+            rotation: Quat::IDENTITY,
+        };
+        let end = DebrisPose {
+            position: Vec3::new(2.0, -4.0, 0.0),
+            rotation: Quat::from_rotation_y(-0.2),
+        };
+        let mid = debris_pose_lerp(start, end, 0.5);
+        assert!(mid.position.abs_diff_eq(Vec3::new(1.0, -2.0, 0.0), 1e-6));
+        assert!(
+            mid.rotation.abs_diff_eq(Quat::from_rotation_y(-0.1), 1e-6),
+            "{:?}",
+            mid.rotation
+        );
+        // `-q` is `q`'s turn: the law takes the shorter arc to it, never the long way round.
+        let flipped = DebrisPose {
+            rotation: -end.rotation,
+            ..end
+        };
+        let mid = debris_pose_lerp(start, flipped, 0.5).rotation;
+        assert!(
+            mid.angle_between(Quat::from_rotation_y(-0.1)) < 1e-3,
+            "{mid:?}"
+        );
+    }
+
     /// The public `ServoAngles` drive every remote tank's servo targets, but the owner's belong to
     /// `aim::drive_aim_servos` alone. The OWN tank is `Remote` like every replicated tank, so only
     /// the owner marker keeps this pump off it — mutate `Without<GameControlled>` away and the
@@ -1793,6 +1861,10 @@ mod tests {
         ("src/hull_marks.rs", "HullMark"),
         ("src/hull_marks.rs", "MarkKind"),
         ("src/net/debris_stress.rs", "DebrisPose"),
+        ("src/net/walls.rs", "WallLedger"),
+        ("src/buildings/breakage.rs", "WallEntry"),
+        ("src/buildings/breakage.rs", "WallEvent"),
+        ("src/buildings/breakage.rs", "WallPiece"),
         ("src/net/protocol.rs", "FireChannel"),
         ("src/net/protocol.rs", "OutcomeChannel"),
         ("src/net/protocol.rs", "DamageChannel"),

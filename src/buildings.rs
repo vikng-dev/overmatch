@@ -14,8 +14,9 @@
 //! rounds and sight pass through it. The instance's uniform scale is applied to the points at
 //! spawn and the root's own scale is one (the trees' convention).
 //!
-//! THE CHUNKS STAY DATA. No chunk is a collider and no element holds an HP pool in this slice:
-//! the chunk table and the joint graph wait in the [`BuildingKind`] for the laws that break walls.
+//! THE CHUNKS STAY DATA UNTIL A HIT. No chunk is a collider while its element is whole; the
+//! first touch swaps the element to its chunks, and the fracture laws ([`fracture`]) wear, crack
+//! and drop them ([`breakage`]). Each root carries its [`breakage::Breakage`] from spawn.
 //!
 //! NOT TERRAIN. No element enters the [`crate::world::TerrainMap`] block list: the belts never
 //! climb a wall and the floor inside is the terrain (playtest fork F9). Spawn avoidance reads each
@@ -33,6 +34,8 @@ use crate::ballistics::{BallisticVolume, VolumeMaterial};
 use crate::scatter::MapInstance;
 use crate::substances::SubstanceRegistry;
 
+pub(crate) mod breakage;
+pub(crate) mod fracture;
 pub mod schema;
 pub(crate) mod view;
 
@@ -53,6 +56,8 @@ pub(crate) struct BuildingKind {
     materials: Vec<VolumeMaterial>,
     /// The elements' bounds in the building frame at scale 1, `(min, max)`.
     bounds: (Vec3, Vec3),
+    /// What the fracture laws read of it.
+    pub(crate) layout: breakage::Layout,
 }
 
 impl BuildingKind {
@@ -75,10 +80,17 @@ impl BuildingKind {
             .fold((Vec3::INFINITY, Vec3::NEG_INFINITY), |(lo, hi), p| {
                 (lo.min(p), hi.max(p))
             });
+        let masonry = asset
+            .materials
+            .iter()
+            .map(|name| fracture::Masonry::of(registry, name))
+            .collect::<Result<Vec<_>, _>>()?;
+        let layout = breakage::Layout::of(&asset, &masonry)?;
         Ok(Self {
             asset,
             materials,
             bounds,
+            layout,
         })
     }
 
@@ -138,9 +150,29 @@ pub(crate) struct BuildingElement(pub(crate) u16);
 #[derive(Component, Debug, Clone, Copy)]
 pub(crate) struct BuildingBody;
 
-/// The collision filter of an intact element: hulls contact it and rounds walk it.
+/// The collision filter of an intact element and of a standing chunk: hulls contact it and
+/// rounds walk it.
 fn element_layers() -> CollisionLayers {
     CollisionLayers::new([Layer::Terrain, Layer::Armor], LayerMask::ALL)
+}
+
+/// Element `k`'s collider entity, less its parent: the prism at the instance's `scale`, a
+/// ballistic volume of its substance.
+fn element_bundle(kind: &BuildingKind, k: usize, scale: f32) -> impl Bundle {
+    let element = &kind.asset.elements[k];
+    let points: Vec<Vec3> = element.points().into_iter().map(|p| p * scale).collect();
+    let material = usize::from(element.material);
+    (
+        Transform::IDENTITY,
+        Collider::convex_hull(points)
+            .unwrap_or_else(|| panic!("buildings: element {} has no convex hull", element.name)),
+        element_layers(),
+        BallisticVolume {
+            material: kind.materials[material],
+            substance: kind.asset.materials[material].clone(),
+        },
+        BuildingElement(u16::try_from(k).expect("the schema bounds the element count")),
+    )
 }
 
 /// Spawn one building of `kind` at `pose`, the ground pose: the authored XZ, the grid's Y, the
@@ -176,24 +208,11 @@ pub(crate) fn spawn(
             RigidBody::Static,
             identity,
             BuildingBody,
+            breakage::Breakage::new(kind.clone(), scale),
         ))
         .id();
-    for (k, element) in kind.asset.elements.iter().enumerate() {
-        let points: Vec<Vec3> = element.points().into_iter().map(|p| p * scale).collect();
-        let material = usize::from(element.material);
-        commands.spawn((
-            ChildOf(root),
-            Transform::IDENTITY,
-            Collider::convex_hull(points).unwrap_or_else(|| {
-                panic!("buildings: element {} has no convex hull", element.name)
-            }),
-            element_layers(),
-            BallisticVolume {
-                material: kind.materials[material],
-                substance: kind.asset.materials[material].clone(),
-            },
-            BuildingElement(u16::try_from(k).expect("the schema bounds the element count")),
-        ));
+    for k in 0..kind.asset.elements.len() {
+        commands.spawn((ChildOf(root), element_bundle(kind, k, scale)));
     }
     root
 }

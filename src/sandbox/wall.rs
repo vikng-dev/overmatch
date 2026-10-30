@@ -10,9 +10,10 @@
 //!   there ([`ArmourMark::Crossing`]), and pushes it with the momentum the round lost. The blast
 //!   tool (O) bursts a charge of 0.1–5 kg at 0–5 m standoff: a sphere of rays ([`blast_field`])
 //!   each stopping on the first chunk it meets with its share of the energy and the momentum.
-//! * **Responses.** [`model`] turns each deposit into dust (the pools), local cracks (the push
-//!   rule, [`model::crack`]) and structural cracks ([`model::structural`], always on), then lets
-//!   every group with no path to the ground fall with the momentum pushed into it.
+//! * **Responses.** The game's fracture laws ([`crate::buildings::fracture`], through [`model`])
+//!   turn each deposit into dust (the pools), local cracks (the push rule) and structural cracks
+//!   (the structural check), then let every group with no path to the ground fall with the
+//!   momentum pushed into it.
 //! * **The view.** Each chunk's pool as heat, local cracks in cyan and structural ones in
 //!   magenta, a dust puff where a chunk went, loose groups as falling bodies on the default layer
 //!   (out of ballistics; grey-blue when a local crack freed them, purple when a structural one
@@ -20,20 +21,17 @@
 //!   and the colour legend. Every value of a resolved shot goes to the log. The readout shows only
 //!   while the camera stands within [`READOUT_RANGE`] of the wall, so the range's own view carries
 //!   no more text than its round's name.
-//! * **Spall.** Every exit cone the wall throws is read off the shell's record: the game's today
-//!   (its energy share of the energy lost) and the candidate (that, scaled by the exited
-//!   substance's strength relative to armour steel, capped at 1), each one's dose summed on a
-//!   witness panel behind the wall; J toggles which is drawn. The game's own dose is untouched.
+//! * **Spall.** Every exit cone the wall throws is read off the shell's record and drawn, and its
+//!   rays' doses are summed on a witness panel behind the wall: the game's own dose.
 //!
 //! Keys: B round, F fire it, O blast and `,`/`.` its filler mass, `;`/`'` its standoff, V its
-//! casing, J spall, G camera (front, back, witness), N new wall, H help.
+//! casing, G camera (front, back, witness), N new wall, H help.
 //!
 //! `OVERMATCH_WALL_CASE=<round key | x<kg>@<standoff m>>` (`88mm_AP`, `x1@3`) runs one case for a
 //! hidden capture ([`drive_script`]): the camera stands at the front, then the back, fires (or
 //! bursts) at [`SCRIPT_FIRE`] s from the front, and stands front then back again for the after
-//! frames. `OVERMATCH_WALL_SPALL=candidate`, `OVERMATCH_WALL_CASING=bare`,
-//! `OVERMATCH_WALL_VIEW=witness` (the last frames from the witness pose) and
-//! `OVERMATCH_WALL_HELP=1` (the help panel open) set the rest.
+//! frames. `OVERMATCH_WALL_CASING=bare`, `OVERMATCH_WALL_VIEW=witness` (the last frames from the
+//! witness pose) and `OVERMATCH_WALL_HELP=1` (the help panel open) set the rest.
 
 mod baked;
 mod model;
@@ -50,14 +48,13 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use self::baked::Placement;
-use self::model::{Block, Cut, Masonry, Push, Source, WallState};
+use self::model::{Block, Cut, Loading, Masonry, Push, WallState};
 use super::{Autopilot, FreeFlyCam, SEED_SPEC, UI_LEFT, panel_capturing};
-use crate::ballistics::spall_cone::{AxisRule, ConeShape, FieldDescriptor, FieldLaw};
 use crate::ballistics::{
     ArmourMark, BallisticVolume, CrossingEnd, FireShell, PenetrationMarks, SpallMarks,
 };
 use crate::buildings::schema::BuildingAsset;
-use crate::substances::{REFERENCE_FACTOR, SubstanceRegistry};
+use crate::substances::SubstanceRegistry;
 use crate::{Layer, spec};
 
 /// The baked building the wall comes from, and which of its walls (an element's name begins
@@ -70,39 +67,16 @@ const PLACE: Placement = Placement {
     centre_x: 16.0,
     back_z: 3.875,
 };
-/// The substance every chunk wears.
+/// The substance every chunk wears; its values are its row's ([`Masonry::of`]).
 const SUBSTANCE: &str = "Brick";
-/// Brick density, kg/m³: London stock, a molded soft-mud brick. CLAIMED (Engineering ToolBox,
-/// "Bricks - Densities", read 2026-10-30); 1765–2165 across common clay bricks.
-const DENSITY: f32 = 1845.0;
-/// The joints' tensile strength, Pa: the modulus of rupture normal to bed joints of solid units in
-/// portland cement–lime Type N mortar, 690 kPa. CLAIMED (BIA Technical Note 3A, 2024, Table 7,
-/// read); 349–919 kPa across mortar types.
-const JOINT_TENSILE: f32 = 0.69e6;
-/// The brick–mortar interface's mode-I fracture energy, J/m²: the geometric mean of 5–20 J/m².
-/// CLAIMED (van der Pluijm's couplet tests as Lourenço 1996 restates them; not read here).
-const JOINT_TOUGHNESS: f32 = 10.0;
-/// The masonry's Young's modulus, Pa: `E_m = 700 f'm` (the TMS 402 lower bound; prisms test at
-/// 700–1200 f'm, BIA TN 3A eq. 1, read) at `f'm` 12.3 MPa, DERIVED by interpolating TN 3A Table 5
-/// for 36.5 MPa units in Type N mortar: 8.6 GPa, DERIVED.
-const MODULUS: f32 = 8.6e9;
-/// A filler's chemical energy per kilogram, J/kg: the TNT-equivalent convention, 1 kg = 4.184 MJ.
-/// CLAIMED (NIST SP 811, the ton of TNT as 4.184e9 J); ASSUMED to stand for the seed round's
-/// filler, whose own heat of detonation no file states.
-const FILLER_ENERGY: f32 = 4.184e6;
 /// The blast tool's filler masses, kg, and standoffs, m (the owner's 0.1–5 kg and 0–5 m).
 const MASSES: [f32; 6] = [0.1, 0.2, 0.5, 1.0, 2.0, 5.0];
 const STANDOFFS: [f32; 6] = [0.0, 0.5, 1.0, 2.0, 3.0, 5.0];
-/// The blast field's ray count (Resolution): 0.0031 sr a ray, a chunk face at 3 m holds ~1.4.
-const BLAST_RAYS: usize = 4096;
 /// Rounds an automatic gun fires per F (the brief's burst of 50).
 const BURST: usize = 50;
 /// The burst's spread half-angle, rad. ASSUMED: no gun file states a dispersion; a tight group so
 /// a burst's wear lands on a few chunks.
 const BURST_SPREAD: f32 = 0.003;
-/// Spacing of the point sources a line deposit is split into along its chord, m: a quarter of a
-/// chunk (Resolution).
-const LINE_STEP: f32 = 0.05;
 /// How far the drawn chunk falls short of its collider on every side, m: the drawn seam.
 const SEAM: f32 = 0.004;
 /// How far a loose chunk's collider falls short of its box on every side, m, so a group freed in
@@ -136,18 +110,14 @@ pub(super) fn plugin(app: &mut App) {
         .ok()
         .and_then(|case| parse_case(&case, &rounds));
     let flag = |name: &str, value: &str| std::env::var(name).as_deref() == Ok(value);
-    let mut controls = WallControls {
+    let controls = WallControls {
         mass: 3,
         standoff: 0,
         cased: !flag("OVERMATCH_WALL_CASING", "bare"),
-        spall: Spall::Today,
         round: 0,
         view: View::Front,
         help: flag("OVERMATCH_WALL_HELP", "1"),
     };
-    if flag("OVERMATCH_WALL_SPALL", "candidate") {
-        controls.spall = Spall::Candidate;
-    }
     if let Some(case) = script {
         info!("wall prototype: capture case {case:?}");
         // The range keeps the cursor free under an autopilot; the script is one.
@@ -226,12 +196,13 @@ struct WallReadout;
 #[derive(Component)]
 struct WallHelp;
 
-/// The wall as it stands: its cut, its state, each standing chunk's entity and drawn mesh, and
-/// its material.
+/// The wall as it stands: its cut, its state, which cracks the structural check made, each
+/// standing chunk's entity and drawn mesh, and its material.
 #[derive(Resource)]
 struct Wall {
     cut: Cut,
     state: WallState,
+    structural: Vec<bool>,
     entities: Vec<Option<Entity>>,
     meshes: Vec<Handle<Mesh>>,
     material: Masonry,
@@ -270,13 +241,6 @@ fn layout() -> &'static Layout {
     &LAYOUT
 }
 
-/// Which spall the view draws.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-enum Spall {
-    Today,
-    Candidate,
-}
-
 /// The camera stand G steps through.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum View {
@@ -286,14 +250,13 @@ enum View {
 }
 
 /// The wall's settings: the blast tool's mass and standoff (indices into [`MASSES`],
-/// [`STANDOFFS`]), whether the charge is cased, the spall drawn, the round F fires (an index into
+/// [`STANDOFFS`]), whether the charge is cased, the round F fires (an index into
 /// [`WallRounds`]), the camera stand and whether the help panel is open.
 #[derive(Resource, Clone, Copy, PartialEq, Debug)]
 struct WallControls {
     mass: usize,
     standoff: usize,
     cased: bool,
-    spall: Spall,
     round: usize,
     view: View,
     help: bool,
@@ -315,12 +278,14 @@ struct WallRound {
 #[derive(Resource)]
 struct WallRounds(Vec<WallRound>);
 
-/// The blast tool's charge, from data: the filler's density (kg/m³), and the casing of the seed
-/// tank's burst round as the burst law derives it — its mass per kg of filler `M/C` and the speed
-/// it is driven to, `v_s = K (M/C + ½)^−½` (m/s). A charge of `C` kg carries `M/C × C` kg of it.
+/// The blast tool's charge, from data: the filler's density (kg/m³) and chemical energy (J/kg),
+/// and the casing of the seed tank's burst round as the burst law derives it — its mass per kg of
+/// filler `M/C` and the speed it is driven to, `v_s = K (M/C + ½)^−½` (m/s). A charge of `C` kg
+/// carries `M/C × C` kg of it.
 #[derive(Resource, Clone, Copy, Debug)]
 struct Charge {
     density: f32,
+    chemical: f32,
     casing_ratio: f32,
     casing_speed: f32,
 }
@@ -341,17 +306,20 @@ impl Charge {
                 let speed = f64::from(burst.sideways_speed);
                 Self {
                     density: core.density as f32,
+                    chemical: core.chemical_energy.unwrap_or(0.0) as f32,
                     casing_ratio: ((core.speed_constant / speed).powi(2) - 0.5) as f32,
                     casing_speed: burst.sideways_speed,
                 }
             }
             (Some(core), None) => Self {
                 density: core.density as f32,
+                chemical: core.chemical_energy.unwrap_or(0.0) as f32,
                 casing_ratio: 0.0,
                 casing_speed: 0.0,
             },
             _ => Self {
                 density: 1650.0,
+                chemical: 0.0,
                 casing_ratio: 0.0,
                 casing_speed: 0.0,
             },
@@ -361,7 +329,7 @@ impl Charge {
     /// A charge of `mass` kg: its chemical energy, its casing's driven energy (none when bare), the
     /// blast's energy (the difference) and momentum `√(2 C E)`, all J or N·s, and its radius (m).
     fn blast(&self, mass: f32, cased: bool) -> Blast {
-        let chemical = FILLER_ENERGY * mass;
+        let chemical = self.chemical * mass;
         let casing = if cased {
             0.5 * self.casing_ratio * mass * self.casing_speed * self.casing_speed
         } else {
@@ -396,27 +364,7 @@ struct Blast {
 struct BlastField(Vec<(Vec3, f32)>);
 
 fn blast_field() -> Vec<(Vec3, f32)> {
-    let spread = ConeShape::new(AxisRule::ExitDirection, BLAST_RAYS).and_then(|shape| {
-        shape.spread(FieldDescriptor {
-            law: FieldLaw::Ball,
-            ratio: 0.0,
-        })
-    });
-    let directions: Vec<(Vec3, f32)> = match spread {
-        Ok(spread) => spread
-            .directions(Dir3::Y)
-            .map(|(dir, weight)| (Vec3::from(dir), weight))
-            .collect(),
-        Err(error) => {
-            error!("wall prototype: the blast field is not built: {error}");
-            Vec::new()
-        }
-    };
-    let total: f32 = directions.iter().map(|(_, w)| w).sum();
-    directions
-        .into_iter()
-        .map(|(dir, w)| (dir, w / total.max(f32::EPSILON)))
-        .collect()
+    model::blast_directions().to_vec()
 }
 
 /// The rounds of a burst still to fire: which round, how many fired, when the next goes (app s).
@@ -438,7 +386,7 @@ enum Deposit {
         lines: Vec<(usize, Vec3, Vec3, f32)>,
         along: Vec3,
         momentum: f32,
-        /// The strength (J) of the exit cones it threw, under today's spall.
+        /// The strength (J) of the exit cones it threw.
         spall: f32,
     },
     /// A charge of filler `mass` kg, its surface `standoff` m before the face point `at`, along
@@ -454,21 +402,19 @@ enum Deposit {
 #[derive(Resource, Default)]
 struct WallQueue(Vec<Deposit>);
 
-/// One exit cone the wall threw: its origin, and its rays' ends and strengths (J, today's law).
+/// One exit cone the wall threw: its origin, and its rays' ends and strengths (J).
 struct WallCone {
     origin: Vec3,
     rays: Vec<(Vec3, f32)>,
 }
 
 /// What the readout and the drawing keep: the last outcome, the cones thrown, each witness tile's
-/// dose under today's spall and the candidate's (J), and the last blast's origin, radius and drawn
-/// rays.
+/// dose (J), and the last blast's origin, radius and drawn rays.
 #[derive(Resource, Default)]
 struct WallLog {
     last: Option<Outcome>,
     cones: Vec<WallCone>,
-    witness_today: Vec<f32>,
-    witness_candidate: Vec<f32>,
+    witness: Vec<f32>,
     blast: Option<(Vec3, f32, Vec<Vec3>)>,
 }
 
@@ -485,7 +431,7 @@ struct Outcome {
     worst: Option<(f32, f32)>,
     groups: usize,
     fallen: usize,
-    spall_today: f32,
+    spall: f32,
     blast: Option<(Blast, f32, f32)>,
 }
 
@@ -584,35 +530,11 @@ fn parse_case(case: &str, rounds: &[WallRound]) -> Option<Case> {
     })
 }
 
-/// The brick as the wall reads it: the registry's `Brick` factor turned back into the unit's
-/// compressive strength (`factor / 1000 × the reference flow strength`), its crush energy the
-/// static term of the walk's own force law at that factor (`factor / 1000 × a`, the reference's
-/// cavity strength), and the handbook constants above.
+/// The brick as the wall reads it: the shipped registry's `Brick` row ([`Masonry::of`]).
 fn brick() -> Masonry {
-    let registry = SubstanceRegistry::shipped_static();
-    let factor = registry
-        .hard(SUBSTANCE)
+    Masonry::of(SubstanceRegistry::shipped_static(), SUBSTANCE)
         .expect("the shipped registry names Brick")
-        .factor();
-    let reference = registry.reference_facts();
-    let share = f64::from(factor / REFERENCE_FACTOR);
-    Masonry {
-        density: DENSITY,
-        compressive: (share * reference.flow_strength) as f32,
-        crush: (share * reference.cavity_strength()) as f32,
-        joint_tensile: JOINT_TENSILE,
-        joint_toughness: JOINT_TOUGHNESS,
-        modulus: MODULUS,
-    }
-}
-
-/// The candidate spall's scale: the exited substance's strength relative to armour steel, its
-/// factor over the reference's, capped at 1.
-fn spall_scale() -> f32 {
-    let factor = SubstanceRegistry::shipped_static()
-        .hard(SUBSTANCE)
-        .map_or(REFERENCE_FACTOR, |hard| hard.factor());
-    (factor / REFERENCE_FACTOR).min(1.0)
+        .expect("the shipped Brick states its seam")
 }
 
 /// The front face's z and the back face's, world metres.
@@ -841,6 +763,7 @@ fn spawn_wall(commands: &mut Commands, meshes: &mut Assets<Mesh>, assets: &WallA
     }
     Wall {
         state: WallState::new(&cut.structure),
+        structural: vec![false; cut.structure.joints.len()],
         cut,
         entities,
         meshes: chunk_meshes,
@@ -875,12 +798,6 @@ fn step(keys: &ButtonInput<KeyCode>, down: KeyCode, up: KeyCode, index: &mut usi
 fn wall_keys(mut p: KeysParam) {
     let keys = &p.keys;
     let mut controls = *p.controls;
-    if keys.just_pressed(KeyCode::KeyJ) {
-        controls.spall = match controls.spall {
-            Spall::Today => Spall::Candidate,
-            Spall::Candidate => Spall::Today,
-        };
-    }
     if keys.just_pressed(KeyCode::KeyH) {
         controls.help = !controls.help;
     }
@@ -1043,7 +960,6 @@ struct HitsParam<'w, 's> {
 }
 
 fn read_hits(mut p: HitsParam) {
-    let scale = spall_scale();
     let tiles = TILES.0 * TILES.1;
     for (shell, marks, spall, read) in &p.shells {
         let (log_at, mut cone_at) = read.map_or((0, 0), |read| (read.log, read.cones));
@@ -1090,15 +1006,13 @@ fn read_hits(mut p: HitsParam) {
                 CrossingEnd::Exit { speed, .. } => *speed,
                 CrossingEnd::Rest { .. } => 0.0,
             };
-            p.log.witness_today.resize(tiles, 0.0);
-            p.log.witness_candidate.resize(tiles, 0.0);
+            p.log.witness.resize(tiles, 0.0);
             let mut strength = 0.0;
             for cone in thrown {
                 let weight = 1.0 / cone.rays.len().max(1) as f32;
                 for ray in &cone.rays {
                     if let Some(tile) = witness_at(ray.end) {
-                        p.log.witness_today[tile] += ray.strength * weight;
-                        p.log.witness_candidate[tile] += ray.strength * weight * scale;
+                        p.log.witness[tile] += ray.strength * weight;
                     }
                 }
                 p.log.cones.push(WallCone {
@@ -1144,75 +1058,31 @@ struct Applied {
     blast: Option<(Blast, Vec3, f32, f32, Vec<Vec3>)>,
 }
 
-/// The sources, chunk energies and pushes of one deposit, read before anything is removed (each
-/// source's back face among them).
-struct Loading {
-    sources: Vec<Source>,
-    energies: Vec<(usize, f32)>,
-    pushes: Vec<Push>,
-}
-
-/// Split each chunk's line into point sources [`LINE_STEP`] apart, and share the round's lost
-/// momentum among the chunks by the energy each took, at its chord's midpoint.
-fn line_loading(lines: &[(usize, Vec3, Vec3, f32)], along: Vec3, momentum: f32) -> Loading {
+/// A round's crossing as the laws read it: its lines ([`Loading::lines`]), and the round's lost
+/// momentum shared among the chunks by the energy each took, at its chord's midpoint.
+fn line_loading(
+    lines: &[(usize, Vec3, Vec3, f32)],
+    along: Vec3,
+    momentum: f32,
+) -> (Loading, Vec<Push>) {
     let total: f32 = lines.iter().map(|line| line.3).sum();
-    let mut sources = Vec::new();
-    let mut pushes = Vec::new();
-    for &(chunk, entry, end, energy) in lines {
-        let chord = end - entry;
-        let length = chord.length();
-        let n = (length / LINE_STEP).ceil().max(1.0) as usize;
-        for k in 0..n {
-            let at = entry + chord * ((k as f32 + 0.5) / n as f32);
-            sources.push(Source {
-                energy: energy / n as f32,
-                at,
-            });
-        }
-        if total > 0.0 {
-            pushes.push(Push {
+    let pushes = if total > 0.0 {
+        lines
+            .iter()
+            .map(|&(chunk, entry, end, energy)| Push {
                 chunk,
                 at: (entry + end) / 2.0,
                 impulse: along * (momentum * energy / total),
-            });
-        }
-    }
-    Loading {
-        sources,
-        energies: lines.iter().map(|&(i, _, _, e)| (i, e)).collect(),
-        pushes,
-    }
-}
-
-/// A blast's rays summed per chunk: each chunk a source at the energy-weighted mean of its hits,
-/// pushing along their mean direction, and a push of their summed impulse there.
-fn blast_loading(hits: &[model::RayHit]) -> Loading {
-    let mut per: std::collections::BTreeMap<usize, (f32, Vec3, Vec3)> = Default::default();
-    for hit in hits {
-        let entry = per.entry(hit.chunk).or_default();
-        entry.0 += hit.energy;
-        entry.1 += hit.at * hit.energy;
-        entry.2 += hit.impulse;
-    }
-    let mut loading = Loading {
-        sources: Vec::new(),
-        energies: Vec::new(),
-        pushes: Vec::new(),
+            })
+            .collect()
+    } else {
+        Vec::new()
     };
-    for (chunk, (energy, weighted, impulse)) in per {
-        if energy <= 0.0 {
-            continue;
-        }
-        let at = weighted / energy;
-        loading.sources.push(Source { energy, at });
-        loading.energies.push((chunk, energy));
-        loading.pushes.push(Push { chunk, at, impulse });
-    }
-    loading
+    (Loading::lines(lines), pushes)
 }
 
-/// Run one deposit through the model: the wear and dust, the local cracks, the structural check,
-/// and the loose groups with the velocities the pushes on them give.
+/// Run one deposit through the game's laws: the wear and dust, the local cracks, the structural
+/// check, and the loose groups with the velocities the pushes on them give.
 fn apply_deposit(
     wall: &mut Wall,
     controls: &WallControls,
@@ -1221,7 +1091,7 @@ fn apply_deposit(
     deposit: &Deposit,
 ) -> Applied {
     let mut applied = Applied::default();
-    let loading = match deposit {
+    let (loading, pushes) = match deposit {
         Deposit::Line {
             lines,
             along,
@@ -1241,8 +1111,10 @@ fn apply_deposit(
                 &wall.cut.blocks,
                 |i| state.standing(i),
                 origin,
-                blast.energy,
-                blast.momentum,
+                model::Blast {
+                    energy: blast.energy,
+                    momentum: blast.momentum,
+                },
                 field,
             );
             let coupled: f32 = hits.iter().map(|hit| hit.energy).sum();
@@ -1253,28 +1125,27 @@ fn apply_deposit(
                 .map(|hit| hit.at)
                 .collect();
             applied.blast = Some((blast, origin, coupled, momentum, drawn));
-            blast_loading(&hits)
+            Loading::blast(&hits)
         }
     };
-    for &(chunk, energy) in &loading.energies {
-        applied.deposited += energy;
-        if model::wear(&wall.cut.structure, &mut wall.state, chunk, energy) {
-            applied.dusted.push(chunk);
-        } else {
-            applied.worn.push(chunk);
-        }
-    }
+    applied.deposited = loading.energies.iter().map(|(_, e)| e).sum();
     applied.chunks = loading.energies.len();
-    applied.local = model::crack(&wall.cut.structure, &mut wall.state, &loading.sources).len();
+    let struck = model::strike(&wall.cut.structure, &mut wall.state, &loading);
+    applied.worn = struck.worn;
+    applied.dusted = struck.dusted;
+    applied.local = struck.cracked.len();
     // A push on a chunk turned to dust went into crushing it, and moves nothing.
-    let pushes: Vec<Push> = loading
-        .pushes
-        .iter()
-        .copied()
+    let pushes: Vec<Push> = pushes
+        .into_iter()
         .filter(|push| wall.state.standing(push.chunk))
         .collect();
     applied.failures = model::structural(&wall.cut.structure, &mut wall.state, &pushes);
-    for group in model::loose_groups(&wall.cut.structure, &wall.state) {
+    for failure in &applied.failures {
+        for &j in &failure.joints {
+            wall.structural[j] = true;
+        }
+    }
+    for group in model::fall(&wall.cut.structure, &mut wall.state) {
         let chunks = &wall.cut.structure.chunks;
         let mass: f32 = group.iter().map(|&i| chunks[i].mass).sum();
         let centroid = group
@@ -1310,13 +1181,10 @@ fn apply_deposit(
             .iter()
             .enumerate()
             .any(|(j, joint)| {
-                wall.state.structural[j]
+                wall.structural[j]
                     && (group.binary_search(&joint.a).is_ok()
                         || matches!(joint.b, model::Side::Chunk(b) if group.binary_search(&b).is_ok()))
             });
-        for &i in &group {
-            wall.state.fate[i] = model::Fate::Fallen;
-        }
         applied
             .groups
             .push((group, centroid, velocity, angular / inertia, structural));
@@ -1444,7 +1312,7 @@ fn apply_deposits(mut p: ApplyParam) {
                 .map(|failure| (failure.demand, failure.capacity)),
             groups: applied.groups.len(),
             fallen: applied.groups.iter().map(|(group, ..)| group.len()).sum(),
-            spall_today: match &deposit {
+            spall: match &deposit {
                 Deposit::Line { spall, .. } => *spall,
                 _ => 0.0,
             },
@@ -1468,7 +1336,7 @@ fn apply_deposits(mut p: ApplyParam) {
                 last.worst,
                 last.groups,
                 last.fallen,
-                last.spall_today,
+                last.spall,
                 last.blast,
             );
             info!(
@@ -1480,14 +1348,8 @@ fn apply_deposits(mut p: ApplyParam) {
 }
 
 /// Cracked joints between standing matter (local in cyan, structural in magenta), the wall's exit
-/// cones (today's in orange, the candidate's as faint as its share), and the last blast's charge
-/// and a sample of its rays.
-fn draw_wall(
-    wall: Option<Res<Wall>>,
-    log: Res<WallLog>,
-    controls: Res<WallControls>,
-    mut gizmos: Gizmos<WallGizmos>,
-) {
+/// cones in orange, and the last blast's charge and a sample of its rays.
+fn draw_wall(wall: Option<Res<Wall>>, log: Res<WallLog>, mut gizmos: Gizmos<WallGizmos>) {
     let Some(wall) = wall else {
         return;
     };
@@ -1497,7 +1359,7 @@ fn draw_wall(
         if !wall.state.cracked[index] || !wall.state.live(joint) {
             continue;
         }
-        let colour = if wall.state.structural[index] {
+        let colour = if wall.structural[index] {
             Color::srgb(1.0, 0.2, 1.0)
         } else {
             Color::srgb(0.2, 1.0, 1.0)
@@ -1507,19 +1369,11 @@ fn draw_wall(
             gizmos.line(out(face[k]), out(face[(k + 1) % face.len()]), colour);
         }
     }
-    let scale = match controls.spall {
-        Spall::Today => 1.0,
-        Spall::Candidate => spall_scale(),
-    };
     for cone in &log.cones {
         let strongest = cone.rays.iter().map(|(_, s)| *s).fold(0.0_f32, f32::max);
         for &(end, strength) in &cone.rays {
-            let alpha = (strength * scale / strongest.max(f32::EPSILON)).clamp(0.02, 1.0);
-            let colour = match controls.spall {
-                Spall::Today => Color::srgba(1.0, 0.55, 0.1, alpha),
-                Spall::Candidate => Color::srgba(0.4, 0.8, 1.0, alpha),
-            };
-            gizmos.line(cone.origin, end, colour);
+            let alpha = (strength / strongest.max(f32::EPSILON)).clamp(0.02, 1.0);
+            gizmos.line(cone.origin, end, Color::srgba(1.0, 0.55, 0.1, alpha));
         }
     }
     let marker = Color::srgb(1.0, 0.95, 0.5);
@@ -1531,23 +1385,18 @@ fn draw_wall(
     }
 }
 
-/// Each witness tile's material from its dose under the spall drawn: none, or one of eight steps
-/// of a decade each from 1 J.
+/// Each witness tile's material from its dose: none, or one of eight steps of a decade each from
+/// 1 J.
 fn paint_witness(
     log: Res<WallLog>,
-    controls: Res<WallControls>,
     assets: Option<Res<WallAssets>>,
     mut tiles: Query<(&WitnessTile, &mut MeshMaterial3d<StandardMaterial>)>,
 ) {
     let Some(assets) = assets else {
         return;
     };
-    let doses = match controls.spall {
-        Spall::Today => &log.witness_today,
-        Spall::Candidate => &log.witness_candidate,
-    };
     for (tile, mut material) in &mut tiles {
-        let dose = doses.get(tile.0).copied().unwrap_or(0.0);
+        let dose = log.witness.get(tile.0).copied().unwrap_or(0.0);
         let level = if dose < 1.0 {
             0
         } else {
@@ -1620,8 +1469,8 @@ fn joules(e: f32) -> String {
 }
 
 /// The values behind the readout, for the log: the material, the controls, the last deposit's
-/// outcome, the blast's energy and coupling, the first structural failure, and the spall today
-/// against the candidate. ASCII.
+/// outcome, the blast's energy and coupling, the first structural failure, and the exit cones'
+/// strength and what the witness panel took. ASCII.
 fn detail(
     wall: &Wall,
     c: &WallControls,
@@ -1633,19 +1482,11 @@ fn detail(
     let charge = charge_src.blast(MASSES[c.mass], c.cased);
     let mut lines = vec![
         format!(
-            "brick  rho {:.0} kg/m3   fc {:.1} MPa   factor {:.1} ref-mm/m   crush w = {:.2} x fc = {:.1} MJ/m3",
+            "brick  rho {:.0} kg/m3   crush w {:.1} MJ/m3   seam ft {:.2} MPa   Gf {:.0} J/m2   {} chunks {} joints",
             m.density,
-            m.compressive / 1.0e6,
-            m.compressive / 1.0e6,
-            m.crush / m.compressive,
-            m.crush / 1.0e6
-        ),
-        format!(
-            "joint  ft {:.2} MPa   Gf {:.0} J/m2   Em {:.1} GPa   c {:.0} m/s   {} chunks {} joints",
-            m.joint_tensile / 1.0e6,
-            m.joint_toughness,
-            m.modulus / 1.0e9,
-            m.wave_speed(),
+            m.crush / 1.0e6,
+            m.tensile / 1.0e6,
+            m.fracture_energy,
             wall.cut.structure.chunks.len(),
             wall.cut.structure.joints.len()
         ),
@@ -1692,21 +1533,12 @@ fn detail(
             "      first structural failure: angular impulse {demand:.0} N s m against sqrt(2 I Gf A) = {capacity:.0} N s m"
         ));
     }
-    let scale = spall_scale();
     // `+ 0.0`: an empty sum is -0.0, which would print a sign.
-    let today = log.witness_today.iter().sum::<f32>() + 0.0;
-    let candidate = log.witness_candidate.iter().sum::<f32>() + 0.0;
+    let witness = log.witness.iter().sum::<f32>() + 0.0;
     lines.push(format!(
-        "spall [J] showing {}: exit cone S today {} | candidate x{:.4} {}   witness panel total today {} | candidate {}",
-        match c.spall {
-            Spall::Today => "today",
-            Spall::Candidate => "candidate",
-        },
-        joules(last.spall_today),
-        scale,
-        joules(last.spall_today * scale),
-        joules(today),
-        joules(candidate)
+        "spall: exit cone S {}   witness panel total {}",
+        joules(last.spall),
+        joules(witness)
     ));
     lines
 }
@@ -1783,13 +1615,12 @@ fn update_readout(p: ReadoutParam) {
 const HELP: &str = "\
 FIRE     B next round   F fire it
 BLAST    O blast   , . charge mass   ; ' standoff   V cased / bare
-VIEW     G camera: front, back, witness   J spall: today / candidate
-         N new wall   H this panel
+VIEW     G camera: front, back, witness   N new wall   H this panel
 COLOURS  brick red to glowing yellow chunk = crush capacity spent
          cyan seam outline = cracked by the local push
          magenta seam outline = cracked by the structural check
          grey-blue piece = loose   purple piece = toppled section
-         orange / blue rays = spall cone (today's / candidate's)
+         orange rays = spall cone
          yellow sphere and rays = blast";
 
 /// The capture script (module doc): stand the camera by the timeline and fire the case once.

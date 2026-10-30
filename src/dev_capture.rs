@@ -48,6 +48,11 @@
 //!   at or after app second `s`, that shipped round, in that fuze mode, is fired at a real tree or
 //!   at the ground beside it, and the frames are timed from its burst, the first two seconds after
 //!   it ([`offline_shot_plugin`]; the offline root alone mounts it).
+//! * `OVERMATCH_CAPTURE_WALL=<round key>[,<fuze mode index>]|x<kg>@<s>` — on the first frame at
+//!   or after app second `s`, that shipped round is fired square at a house wall, or a bare charge
+//!   of that mass is set off at its foot, and the camera stands in front of the wall
+//!   ([`offline_wall_plugin`] on the offline root; the dedicated server fires the same cue for its
+//!   hidden capture clients, [`server_wall_plugin`]).
 //!
 //! A capture run draws the view's cosmetic randomness (sprite roll, scale jitter, flipbook start)
 //! from one fixed seed, so two runs of one scenario on a fixed step draw the same sprites.
@@ -78,6 +83,8 @@
 
 mod fuze;
 pub(crate) use fuze::offline_shot_plugin;
+mod wall;
+pub(crate) use wall::{offline_wall_plugin, server_wall_plugin};
 
 use std::path::{Path, PathBuf};
 

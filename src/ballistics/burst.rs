@@ -27,6 +27,9 @@ pub(crate) struct BurstInputs {
     pub(crate) core_density: f64,
     /// The core substance's speed constant `K`.
     pub(crate) speed_constant: f64,
+    /// The chemical energy one kilogram of the core releases (J/kg); zero where its row states
+    /// none.
+    pub(crate) chemical_energy: f64,
     /// The parts at the base, behind the cavity.
     pub(crate) base_mass: f64,
     /// The cavity's diameter.
@@ -96,6 +99,11 @@ pub(crate) struct Burst {
     /// `½ M v_s²` (J), the driven mass's kinetic energy across the burst: what the burst's
     /// potency is scaled from.
     pub(crate) energy: f32,
+    /// The burst core's mass `C` (kg).
+    pub(crate) core_mass: f32,
+    /// The blast's energy (J): the core's chemical energy less what the casing took,
+    /// `C · e − ½ M v_s²`, at least zero. What the buildings' blast field carries.
+    pub(crate) blast: f32,
 }
 
 impl Burst {
@@ -141,6 +149,10 @@ impl Burst {
             },
             sideways_speed: sideways_speed as f32,
             energy: (0.5 * driven * sideways_speed * sideways_speed) as f32,
+            core_mass: inputs.core_mass as f32,
+            blast: (inputs.core_mass * inputs.chemical_energy
+                - 0.5 * driven * sideways_speed * sideways_speed)
+                .max(0.0) as f32,
         })
     }
 }
@@ -174,6 +186,14 @@ impl Fuze {
     /// The fuze a round of `burst` is fired with.
     pub(crate) fn of(burst: Option<Burst>) -> Self {
         burst.map_or(Self::Inert, Self::Unarmed)
+    }
+
+    /// The burst still ahead, `None` once the round has burst or never carried one.
+    pub(crate) fn burst(&self) -> Option<Burst> {
+        match *self {
+            Self::Inert => None,
+            Self::Unarmed(burst) | Self::Armed { burst, .. } => Some(burst),
+        }
     }
 
     /// The round left a body it spent `spend` reference-mm across, at `speed`, the body owned by
@@ -321,6 +341,7 @@ pub(super) fn fixture_inputs() -> BurstInputs {
         core_mass: 0.06,
         core_density: 1650.0,
         speed_constant: 2680.0,
+        chemical_energy: 0.0,
         base_mass: 0.33,
         cavity_diameter: 0.0357,
     }

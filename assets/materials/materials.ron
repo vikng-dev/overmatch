@@ -36,9 +36,13 @@
 //     ρ / ρ_ref ≈ 1.898.
 //   Cast armour has no sourced row.
 //
-// `bulk` = the bulk facts of a non-metal (density kg/m³, mode I fracture toughness K_IC Pa·√m): the
-// building bake reads the density for each chunk's mass; no law reads the toughness yet. Optional,
-// absent read as `None`, and never stated beside `facts` (each states a density). A non-metal's
+// `bulk` = the bulk facts of a non-metal (density kg/m³, mode I fracture toughness K_IC Pa·√m, and
+// optionally a seam between a building's pre-cut chunks: `tensile`, its tensile strength, Pa, and
+// `fracture_energy`, its mode-I fracture energy G_f, J/m², stated together): the building bake
+// reads the density for each chunk's mass; the buildings' fracture laws read the density, the
+// factor and the seam, and an element of a substance stating no seam never breaks; no law reads
+// the toughness yet. Optional, absent read as `None`, and never
+// stated beside `facts` (each states a density). A non-metal's
 // effective factor is its compressive (crushing) strength over the reference flow strength
 // (~1 GPa), × 1000: a strength ratio, the reading the steels' DERIVED rows note, not a measured
 // penetration equivalence.
@@ -265,6 +269,16 @@
                     three-point bending, notch depth 1/6 to 4/6 (MEASURED: Xiao & Shrive, 'Masonry
                     Fracture Mechanics Three Point Bending Test of Brick', 9th Canadian Masonry
                     Symposium, Table 4, read)")),
+                tensile: Some((0.69e6, Measured("CLAIMED: the modulus of rupture normal to bed joints of
+                    solid units in portland cement-lime Type N mortar, 690 kPa, Brick Industry
+                    Association Technical Note 3A (2024) Table 7, read 2026-10-30 (the wall
+                    prototype's value, .agents/scratch/destruction-2026-10-30-buildings/
+                    wall-prototype/README.md); 349-919 kPa across mortar types. A seam is the
+                    wall material's: mortar is no separate material"))),
+                fracture_energy: Some((10.0, Measured("CLAIMED, not read: the brick-mortar interface's
+                    mode-I fracture energy from van der Pluijm's couplet tests as Lourenco (1996)
+                    restates them, 5-20 J/m²; the geometric mean taken (the wall prototype's
+                    value)"))),
             )),
         ),
         // The 8.8 cm Pzgr. 39's burst core, named by its burst block's `core_substance`.
@@ -272,6 +286,10 @@
             burst: Some((
                 density: (1650.0, Derived("1.65 g/cm³: shape-law.md §4")),
                 speed_constant_mps: (2680.0, Derived("shape-law.md §4")),
+                chemical_energy_j_per_kg: Some((4.184e6, Tuned("ASSUMED: the TNT-equivalent convention,
+                    1 kg = 4.184 MJ (CLAIMED, NIST SP 811: the ton of TNT as 4.184e9 J), standing
+                    for this core, whose own heat of detonation no file states (the wall
+                    prototype's value)"))),
             )),
         ),
         // The 8.8 cm Sprgr. L/4.5's filler, poured amatol 60/40 (TM53 p.445), named by its burst
@@ -282,6 +300,10 @@
                     .agents/scratch/rounds-research/kwk36-rounds-2026-10-30.md gives it")),
                 speed_constant_mps: (2400.0, Tuned("ASSUMED, below the Pzgr. 39 core's 2680 m/s:
                     amatol is the weaker filler; no source in the research note gives it")),
+                chemical_energy_j_per_kg: Some((4.184e6, Tuned("ASSUMED: the TNT-equivalent convention,
+                    1 kg = 4.184 MJ (CLAIMED, NIST SP 811: the ton of TNT as 4.184e9 J), standing
+                    for amatol 60/40, whose own heat of detonation the research note does not
+                    give"))),
             )),
         ),
     },

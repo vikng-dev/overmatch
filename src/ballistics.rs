@@ -1094,6 +1094,18 @@ pub(crate) struct PoolEmptied {
     pub(crate) along: Option<Vec3>,
 }
 
+/// One authority march step of `shell` that logged armour marks, threw spall cones or burst,
+/// raised in the tick it marched, before the shell can despawn: its marks from `marks_from` and
+/// its cones from `cones_from` are this step's, and `burst` is the burst it set off, if it did.
+/// The buildings' fracture laws read their deposits off it (`buildings::breakage`).
+#[derive(Event, Debug, Clone, Copy)]
+pub(crate) struct ShellMarched {
+    pub(crate) shell: Entity,
+    pub(crate) marks_from: usize,
+    pub(crate) cones_from: usize,
+    pub(crate) burst: Option<burst::Burst>,
+}
+
 /// Trigger-agnostic shell spawn seam used by guns and sandbox tools.
 #[derive(Event)]
 pub struct FireShell {
@@ -1234,6 +1246,12 @@ impl Projectile {
     /// flight (the tracer streak's nominal length).
     pub(crate) fn speed(&self) -> f32 {
         self.velocity.length()
+    }
+
+    /// The momentum (N·s) the penetrator lost slowing from `speed_in` to `speed_out` m/s: its mass
+    /// times the speed it lost.
+    pub(crate) fn lost_momentum(&self, speed_in: f32, speed_out: f32) -> f32 {
+        self.body().mass * (speed_in - speed_out).max(0.0)
     }
 
     /// Whether the round's fuze is armed by a body of `tank`, so its burst will walk that tank.
@@ -2394,6 +2412,7 @@ fn integrate_projectiles(
         }
 
         let (marks_from, emptied_from) = (shell.marks.log.len(), shell.dose.emptied().len());
+        let (cones_from, burst_before) = (shell.spall.cones.len(), shell.projectile.fuze.burst());
         let owned_before = owned_losses(shell.dose, &world.owners);
         let Some(step) = march_shell_step(
             &mut shell,
@@ -2429,6 +2448,19 @@ fn integrate_projectiles(
                     entity: address,
                     at,
                     along,
+                });
+            }
+            // A fuze holds its burst until it bursts, and only bursting leaves it inert.
+            let burst = burst_before.filter(|_| shell.projectile.fuze.burst().is_none());
+            if shell.marks.log.len() > marks_from
+                || shell.spall.cones.len() > cones_from
+                || burst.is_some()
+            {
+                commands.trigger(ShellMarched {
+                    shell: entity,
+                    marks_from,
+                    cones_from,
+                    burst,
                 });
             }
         }
@@ -8993,6 +9025,8 @@ mod march_tests {
             },
             sideways_speed: 240.0,
             energy: 1.0e6,
+            core_mass: 0.5,
+            blast: 0.0,
         }));
         march_round(
             &mut app,

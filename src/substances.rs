@@ -121,14 +121,22 @@ impl MaterialFacts {
     }
 }
 
-/// The bulk facts of a non-metal: what a building's bake reads (a chunk's mass) and what a later
-/// crack law will read. SI units.
+/// The bulk facts of a non-metal: what a building's bake reads (a chunk's mass) and what the
+/// buildings' fracture laws read (`buildings::fracture`). SI units.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct BulkFacts {
     /// kg/m³.
     pub density: f64,
     /// Mode I fracture toughness `K_IC`, Pa·√m. No law reads it yet.
     pub toughness: f64,
+    /// The tensile strength across a seam between pre-cut chunks of this substance, Pa: what the
+    /// push rule compares the load at a joint with. `None` where none is sourced: an element of
+    /// such a substance never breaks.
+    pub tensile: Option<f64>,
+    /// The seam's mode-I fracture energy `G_f`, J/m²: the energy that opens a square metre of
+    /// seam, what the structural check charges a section. Stated with [`Self::tensile`] or not at
+    /// all (checked at parse).
+    pub fracture_energy: Option<f64>,
 }
 
 /// What a round's burst block reads of the substance its burst core is made of. SI units.
@@ -138,6 +146,10 @@ pub struct BurstFacts {
     pub density: f64,
     /// The speed constant `K` (m/s): the sideways speed scale of the burst's `v_s`.
     pub speed_constant: f64,
+    /// The chemical energy one kilogram of it releases, J/kg: what a burst's blast field carries
+    /// once the casing has taken its share (`buildings::fracture`). `None` where none is sourced:
+    /// such a core drives a casing and no blast.
+    pub chemical_energy: Option<f64>,
 }
 
 /// How a substance resists a round's force law.
@@ -302,6 +314,8 @@ enum SubstanceFile {
 struct BurstFile {
     density: Sourced<f64>,
     speed_constant_mps: Sourced<f64>,
+    #[serde(default)]
+    chemical_energy_j_per_kg: Option<Sourced<f64>>,
 }
 
 impl BurstFile {
@@ -309,16 +323,22 @@ impl BurstFile {
         BurstFacts {
             density: self.density.0,
             speed_constant: self.speed_constant_mps.0,
+            chemical_energy: self.chemical_energy_j_per_kg.map(|energy| energy.0),
         }
     }
 }
 
-/// A non-metal's bulk facts as authored: density (kg/m³) and fracture toughness (Pa·√m).
+/// A non-metal's bulk facts as authored: density (kg/m³), fracture toughness (Pa·√m) and,
+/// optionally, the seam's tensile strength (Pa).
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BulkFile {
     density: Sourced<f64>,
     toughness: Sourced<f64>,
+    #[serde(default)]
+    tensile: Option<Sourced<f64>>,
+    #[serde(default)]
+    fracture_energy: Option<Sourced<f64>>,
 }
 
 #[derive(Deserialize)]
@@ -383,6 +403,8 @@ fn converted(name: &str, file: SubstanceFile) -> Result<Substance, String> {
             bulk: bulk.map(|bulk| BulkFacts {
                 density: bulk.density.0,
                 toughness: bulk.toughness.0,
+                tensile: bulk.tensile.map(|tensile| tensile.0),
+                fracture_energy: bulk.fracture_energy.map(|energy| energy.0),
             }),
             burst: burst.map(BurstFile::facts),
         }),
@@ -477,10 +499,15 @@ fn checked(name: &str, substance: Substance) -> Result<Substance, String> {
 
 /// A burst core's two facts, each finite and positive.
 fn checked_burst(name: &str, facts: BurstFacts) -> Result<(), String> {
-    for (field, value) in [
-        ("density", facts.density),
-        ("speed_constant_mps", facts.speed_constant),
-    ] {
+    let stated = [
+        ("density", Some(facts.density)),
+        ("speed_constant_mps", Some(facts.speed_constant)),
+        ("chemical_energy_j_per_kg", facts.chemical_energy),
+    ];
+    for (field, value) in stated
+        .into_iter()
+        .filter_map(|(field, value)| value.map(|value| (field, value)))
+    {
         if !value.is_finite() || value <= 0.0 {
             return Err(format!(
                 "substance {name:?}: burst {field} must be finite and positive (got {value})"
@@ -498,7 +525,22 @@ fn checked_hard(name: &str, substance: HardSubstance) -> Result<HardSubstance, S
                  density, and a row states its density once"
             ));
         }
-        for (field, value) in [("density", bulk.density), ("toughness", bulk.toughness)] {
+        let stated = [
+            ("density", Some(bulk.density)),
+            ("toughness", Some(bulk.toughness)),
+            ("tensile", bulk.tensile),
+            ("fracture_energy", bulk.fracture_energy),
+        ];
+        if bulk.tensile.is_some() != bulk.fracture_energy.is_some() {
+            return Err(format!(
+                "substance {name:?}: a seam is stated by its tensile strength and its fracture \
+                 energy together, or not at all"
+            ));
+        }
+        for (field, value) in stated
+            .into_iter()
+            .filter_map(|(field, value)| value.map(|value| (field, value)))
+        {
             if !value.is_finite() || value <= 0.0 {
                 return Err(format!(
                     "substance {name:?}: bulk {field} must be finite and positive (got {value})"
@@ -799,6 +841,17 @@ mod tests {
             both,
             format!("facts: None, {}", bulk.replace("1800.0", "0.0")),
             format!("facts: None, {}", bulk.replace("5.0e5", "-1.0")),
+            format!(
+                "facts: None, {}",
+                bulk.replace(
+                    "))))",
+                    r#")), tensile: Some((-1.0, Tuned("fixture"))), fracture_energy: Some((10.0, Tuned("fixture")))))"#
+                )
+            ),
+            format!(
+                "facts: None, {}",
+                bulk.replace("))))", r#")), tensile: Some((1.0e6, Tuned("fixture")))))"#)
+            ),
         ] {
             let err = SubstanceRegistry::from_ron(&row(&refused)).expect_err(&refused);
             assert!(matches!(err, SubstanceError::Parse(_)), "{err}");
@@ -851,6 +904,7 @@ mod tests {
             Some(BurstFacts {
                 density: 1650.0,
                 speed_constant: 2680.0,
+                chemical_energy: None,
             })
         );
         assert_eq!(core.matter(), None);
@@ -914,6 +968,7 @@ mod tests {
             Some(BurstFacts {
                 density: 1650.0,
                 speed_constant: 2680.0,
+                chemical_energy: None,
             })
         );
         assert_eq!(

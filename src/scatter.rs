@@ -319,6 +319,12 @@ pub(crate) fn spawn(
     let view = view_assets
         .as_mut()
         .map(|assets| ScatterView::new(commands, meshes, materials, assets, manifest));
+    if let Some(view) = &view {
+        // The breaks' view draws a building's new meshes in the same one material.
+        commands.insert_resource(crate::buildings::view::BuildingLook {
+            surface: view.surface.clone(),
+        });
+    }
     let assets = view_assets.map(|assets| assets.server);
     let statics = CollisionLayers::new([Layer::Terrain], LayerMask::ALL);
     let (mut buildings, mut firs, mut trees, mut structures) = (0usize, 0usize, 0usize, 0usize);
@@ -345,6 +351,7 @@ pub(crate) fn spawn(
                         Mesh3d(view.structure[asset].clone()),
                         MeshMaterial3d(view.surface.clone()),
                         crate::render_cost::CasterClass::House,
+                        crate::buildings::view::BuildingView,
                     ));
                 }
                 structures += 1;

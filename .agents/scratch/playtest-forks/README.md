@@ -377,3 +377,56 @@ reads them there.
 **Lives in.** Code: `src/scatter.rs` (the structure arm), `src/buildings.rs` (`spawn`),
 `src/world.rs` (`SpawnObstacles`), `src/net/server.rs` (`resolve_free_spawn_xz`). Tracker: #182,
 epic #106.
+
+## F10 — A broken wall's pieces: when they freeze, what wakes them, how many move
+
+**Status:** open · default built 2026-10-30 (#188, walls break in game) · settles when tanks fight
+through broken houses in play
+
+Subject: Overmatch's environment destruction model, game state only.
+
+**The question.** A loose group of a house's chunks falls on the server as one body, brick in
+ballistics, its pose replicated. How long does such a piece stay a body the solver moves, what
+turns it back into one once it froze, and how many may move at once? It decides whether rubble
+reads as a heap a tank shoves or as fixed blocks, and what a breach costs the server per tick.
+
+**Default — the stress harness's rule, made safe** (`src/debris.rs`, shared by the game's pieces
+and the debris stress lever):
+
+- A piece whose speed and spin stay under 0.15 m/s and 0.15 rad/s for 0.5 s, touching something
+  and no dynamic body but other pieces, freezes to a static body (ASSUMED: avian 0.7's sleep
+  defaults), remembering what it rests on.
+- Past 256 live pieces (ASSUMED), the oldest pieces that rest now freeze early. The cap is kept by
+  freezing only resting pieces, never by admission: a moving or unsupported piece never freezes,
+  so the cap bounds the live pieces once the moving ones settle, not while they fall.
+- A frozen piece wakes when what it rests on goes (a chunk turned to dust or fallen, an element
+  swapped to its chunks) or moves, and before the physics step when a moving body other than a
+  piece is about to reach it, so a tank's first contact pushes rubble rather than meeting a fixed
+  block.
+- Rubble stays all match: nothing despawns a piece.
+
+There is no runtime switch: the numbers are constants of the rule.
+
+**Alternatives kept alive.**
+- **Admission control:** past the cap, a newly freed group becomes a body only once a live slot
+  frees, holding where it stood until then, so the cap holds at every instant. Costs a group
+  hanging unsupported for that wait, the static support in mid-air the default refuses.
+- **Coarse rubble:** a frozen piece is replaced by a coarser static shape (its group's hull) to
+  cut static proxies, keeping its mass and occupied space.
+- **Fading fine rubble:** small pieces despawn after a while; large ones stay. Costs gameplay
+  cover and line-of-sight changes.
+- **Avian sleeping instead of freezing:** rejected for now (module doc of `src/debris.rs`): it
+  sleeps whole islands, so neither the rule nor the cap can freeze one piece.
+
+**Why it's a playtest call.** Whether frozen rubble reads as solid ground or as props tanks clip
+through or snag on; whether a tank shoving a heap looks right; whether a big breach's settle time
+and server cost are acceptable at 30 tanks. Watch for pieces that hang, jitter on a tank, or
+stall a tank as if welded.
+
+**Revert cost.** Low: the four constants and the cap's resting test are in `src/debris.rs`; an
+admission cap is a queue in front of `buildings::breakage::spawn_piece`. No wire change for any
+of them.
+
+**Lives in.** Code: `src/debris.rs` (the rule), `src/buildings/breakage.rs` (`spawn_piece`),
+`src/net/debris_stress.rs` (the carriers). Tracker: #188, epic #106; the supported-settlement
+design in #189.

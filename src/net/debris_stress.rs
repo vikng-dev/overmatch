@@ -1,6 +1,7 @@
 //! The debris stress lever: a dev-only instrument that prices server-simulated wall fragments,
 //! `OVERMATCH_DEBRIS_STRESS=<pieces>:<period_s>[:<live_cap>[:<frozen_cap>]]` on the dedicated
-//! server. Unset, empty, `off`, `false` or zero pieces is off, and an off server mounts none of it.
+//! server. Unset, empty, `off`, `false` or zero pieces is off, and an off server mounts none of its
+//! releases.
 //!
 //! Every `period_s` of fixed time the server releases one breach of `pieces` dynamic fragments
 //! beside one tank, round-robin over every [`Tank`] root: a wall section [`WALL_OFFSET_M`] off the
@@ -8,31 +9,23 @@
 //! against hulls as well as on the terrain. A piece collides with `Layer::Terrain` (the ground,
 //! houses, trunks), `Layer::Vehicle` (the tanks' collision proxies) and the other pieces.
 //!
-//! THE FREEZE RULE ([`freeze_rested`]): a live piece whose speed stays under [`REST_SPEED_M_S`] and
-//! spin under [`REST_SPIN_RAD_S`] for [`REST_S`], touching no dynamic body but other pieces,
-//! becomes `RigidBody::Static`. Avian 0.7 then takes it out of the solver and the islands, moves its
-//! proxy to the static tree, and drops every contact pair it held (`remove_body_on::<Insert,
-//! RigidBody>` in its narrow phase), and its broad phase never pairs two static bodies: a frozen
-//! piece on the ground costs the physics a static proxy and nothing per tick (its carrier is still
-//! in replicon's per-send change scan). Avian's sleeping was rejected:
-//! it sleeps whole islands, so neither the rule nor the cap could freeze one piece, and a piece
-//! touching a tank shares the tank's island.
-//! THE CAP: past `live_cap` live pieces ([`DEFAULT_LIVE_CAP`]; `0` is none), the oldest live pieces
-//! freeze by the same switch, mid-air if need be, skipping a piece that touches a dynamic body.
-//! THAW ([`thaw_touched`]): a frozen piece that a dynamic body other than a piece starts touching
-//! turns dynamic again, so a tank pushes settled rubble rather than meeting a fixed block.
-//! `frozen_cap` (`0` or absent: none) despawns the oldest frozen pieces past it.
+//! SETTLING is the game's own rule ([`crate::debris`]), which a building's fallen chunks follow
+//! too: the lever's `live_cap` ([`crate::debris::DEFAULT_LIVE_CAP`]; `0` is none) is the rule's cap
+//! while it is armed. `frozen_cap` (`0` or absent: none) despawns the oldest frozen pieces past it.
 //!
-//! REPLICATION: each piece is a server-only body plus one replicated carrier entity holding its
-//! [`DebrisPose`], written only while the piece is live and only when it moved (`set_if_neq`), so
-//! a frozen piece's carrier stops changing and replicon sends it nothing more. A separate carrier,
-//! because avian's `Position`/`Rotation`/velocities replicate from any replicated entity that holds
-//! them (`protocol::plugin`): replicating the body itself would send four components per piece
-//! per tick. Clients draw a carrier as a plain mesh at its pose ([`install_client`]); they run no
-//! physics on it.
+//! REPLICATION: each server piece, the lever's and a building's ([`WallPiece`]) alike, is a
+//! server-only body plus one replicated carrier entity holding its [`DebrisPose`] ([`Carrier`]),
+//! written only while the piece is live and only when it moved (`set_if_neq`), so a frozen piece's
+//! carrier stops changing and replicon sends it nothing more. A separate carrier, because avian's
+//! `Position`/`Rotation`/velocities replicate from any replicated entity that holds them
+//! (`protocol::plugin`): replicating the body itself would send four components per piece per
+//! tick. Clients draw a lever carrier as a plain mesh at its pose ([`install_client`]) and a
+//! building's from its chunks (`buildings::view`); they run no physics on either. A building's
+//! carrier is interpolated, so its piece draws at the cursor the hulls draw at (ADR-0037); the
+//! lever's apply on arrival, as the instrument has always priced them.
 //!
-//! The piece's shape and density are fixture numbers, not a measured stone: [`FRAGMENT_HULL`],
-//! [`DENSITY_KG_M3`].
+//! The lever's piece shape and density are fixture numbers, not a measured stone:
+//! [`FRAGMENT_HULL`], [`DENSITY_KG_M3`].
 
 use avian3d::prelude::*;
 use bevy::asset::RenderAssetUsages;
@@ -43,15 +36,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::Layer;
+use crate::buildings::breakage::WallPiece;
+use crate::debris::{DEFAULT_LIVE_CAP, DebrisPiece, DebrisSettle, DebrisSettleSet, Frozen};
 use crate::tank::Tank;
 use crate::terrain_grid::HeightGrid;
 
 /// The lever.
 const LEVER: &str = "OVERMATCH_DEBRIS_STRESS";
-
-/// The live-piece cap when the lever names none. ASSUMED: one 200-piece breach and the tail of the
-/// one before it.
-const DEFAULT_LIVE_CAP: u32 = 256;
 
 /// A pre-cut masonry fragment, the fixture: two irregular hexagons 0.4 m apart, the top one turned
 /// 15°, about 0.53 × 0.49 × 0.40 m. Every one of the 12 points is a vertex of the hull.
@@ -72,14 +63,6 @@ const FRAGMENT_HULL: [Vec3; 12] = [
 
 /// ASSUMED masonry density, kg/m³ (fixture).
 const DENSITY_KG_M3: f32 = 1_800.0;
-
-/// At rest: speed under this, m/s. The rest constants are avian 0.7's sleep defaults
-/// (`SleepThreshold`, `TimeToSleep`), ASSUMED to suit a fragment.
-const REST_SPEED_M_S: f32 = 0.15;
-/// At rest: spin under this, rad/s.
-const REST_SPIN_RAD_S: f32 = 0.15;
-/// How long a piece stays at rest before it freezes, s.
-const REST_S: f32 = 0.5;
 
 /// Horizontal distance from the tank root to the breach's near face, m. Fixture: outside the hull's
 /// flank for a tank up to ~6 m wide.
@@ -157,25 +140,23 @@ pub(crate) struct DebrisPose {
 }
 
 impl DebrisPose {
-    fn transform(self) -> Transform {
+    pub(crate) fn transform(self) -> Transform {
         Transform::from_translation(self.position).with_rotation(self.rotation)
     }
 }
 
-/// A server-side piece body: its release order and its replicated carrier.
-#[derive(Component, Clone, Copy, Debug)]
-struct DebrisPiece {
-    seq: u64,
-    carrier: Entity,
+/// A carrier's pose `t` of the way from `start` to `end`: the position along the line, the
+/// rotation along the shorter arc.
+pub(crate) fn debris_pose_lerp(start: DebrisPose, end: DebrisPose, t: f32) -> DebrisPose {
+    DebrisPose {
+        position: start.position.lerp(end.position, t),
+        rotation: start.rotation.slerp(end.rotation, t),
+    }
 }
 
-/// Seconds a live piece has spent at rest, reset by any motion over the rest thresholds.
-#[derive(Component, Clone, Copy, Debug, Default)]
-struct DebrisRest(f32);
-
-/// A piece frozen by the freeze rule or the cap: `RigidBody::Static`, its pose final until a thaw.
+/// A server piece's replicated carrier entity.
 #[derive(Component, Clone, Copy, Debug)]
-struct Frozen;
+pub(crate) struct Carrier(pub(crate) Entity);
 
 /// The armed lever and its running counts.
 #[derive(Resource)]
@@ -185,9 +166,6 @@ pub(super) struct DebrisStress {
     next_release_s: f64,
     breaches: u64,
     released: u64,
-    rest_frozen: u64,
-    cap_frozen: u64,
-    thawed: u64,
     despawned: u64,
 }
 
@@ -200,9 +178,6 @@ impl DebrisStress {
             next_release_s: 0.0,
             breaches: 0,
             released: 0,
-            rest_frozen: 0,
-            cap_frozen: 0,
-            thawed: 0,
             despawned: 0,
         }
     }
@@ -212,23 +187,26 @@ impl DebrisStress {
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct DebrisCensus<'w, 's> {
     stress: Option<Res<'w, DebrisStress>>,
+    settle: Option<Res<'w, DebrisSettle>>,
     live: Query<'w, 's, (), (With<DebrisPiece>, Without<Frozen>)>,
     frozen: Query<'w, 's, (), (With<DebrisPiece>, With<Frozen>)>,
 }
 
 impl DebrisCensus<'_, '_> {
-    /// `live` and `frozen` pieces now; the cumulative counts since the server started: breaches,
-    /// pieces released, frozen by the rest rule and by the cap, thawed, despawned by `frozen_cap`.
+    /// `live` and `frozen` pieces now (the lever's and buildings'); the cumulative counts since the
+    /// server started: breaches, lever pieces released, frozen by the rest rule and by the cap,
+    /// woken, despawned by `frozen_cap`.
     pub(super) fn json(&self) -> Option<Value> {
         let stress = self.stress.as_ref()?;
+        let settle = self.settle.as_deref().copied().unwrap_or_default();
         Some(json!({
             "live": self.live.iter().count(),
             "frozen": self.frozen.iter().count(),
             "breaches": stress.breaches,
             "released": stress.released,
-            "rest_frozen": stress.rest_frozen,
-            "cap_frozen": stress.cap_frozen,
-            "thawed": stress.thawed,
+            "rest_frozen": settle.rest_frozen,
+            "cap_frozen": settle.cap_frozen,
+            "thawed": settle.thawed,
             "despawned": stress.despawned,
         }))
     }
@@ -238,8 +216,13 @@ fn fragment_collider() -> Collider {
     Collider::convex_hull(FRAGMENT_HULL.to_vec()).expect("the fixture hull is not degenerate")
 }
 
-/// Arm the lever on the dedicated server. A malformed value is refused.
+/// Every server: a carrier for each building piece and every live piece's pose onto its carrier.
+/// Then the lever, when armed; a malformed value is refused.
 pub(super) fn install_server(app: &mut App) -> Result<(), String> {
+    app.add_observer(carry_wall_piece).add_systems(
+        FixedPostUpdate,
+        publish_poses.after(DebrisSettleSet::Settle),
+    );
     let Some(lever) = Lever::parse(std::env::var(LEVER).ok().as_deref())? else {
         return Ok(());
     };
@@ -248,27 +231,50 @@ pub(super) fn install_server(app: &mut App) -> Result<(), String> {
          ({LEVER})",
         lever.pieces, lever.period_s, lever.live_cap, lever.frozen_cap
     );
+    app.insert_resource(DebrisSettle {
+        live_cap: lever.live_cap,
+        ..default()
+    });
     app.insert_resource(DebrisStress::new(lever));
     app.add_systems(FixedUpdate, release_breaches);
     app.add_systems(
         FixedPostUpdate,
-        (
-            thaw_touched,
-            publish_poses,
-            freeze_rested,
-            despawn_oldest_frozen,
-        )
-            .chain()
-            .after(PhysicsSystems::StepSimulation),
+        despawn_oldest_frozen.after(DebrisSettleSet::Settle),
     );
     Ok(())
 }
 
-/// Draw every arriving carrier as a plain mesh at its pose. Mounted by every client; a client
-/// without mesh or material assets draws nothing.
+/// Draw every arriving lever carrier as a plain mesh at its pose, and follow every carrier's pose.
+/// Mounted by every client; a client without mesh or material assets draws nothing.
 pub(super) fn install_client(app: &mut App) {
     app.add_systems(Startup, build_view)
         .add_systems(Update, (attach_view, follow_pose).chain());
+}
+
+/// A building piece's carrier: its pose and its group, replicated to every client.
+fn carry_wall_piece(
+    added: On<Add, WallPiece>,
+    pieces: Query<(&WallPiece, &Position, &Rotation)>,
+    mut commands: Commands,
+) {
+    let Ok((piece, position, rotation)) = pieces.get(added.entity) else {
+        return;
+    };
+    let carrier = commands
+        .spawn((
+            Name::new("WallPieceCarrier"),
+            DebrisPose {
+                position: position.0,
+                rotation: rotation.0,
+            },
+            piece.clone(),
+            Replicate::to_clients(NetworkTarget::All),
+            // ONE TIMELINE: a piece draws at the interpolation cursor, with the hulls and the
+            // record's presentation (`buildings::view`), never at its pose's arrival.
+            InterpolationTarget::to_clients(NetworkTarget::All),
+        ))
+        .id();
+    commands.entity(added.entity).insert(Carrier(carrier));
 }
 
 /// One piece of a breach, in world space.
@@ -378,7 +384,6 @@ fn release_breaches(
         [Layer::Terrain, Layer::Vehicle, Layer::Debris],
     );
     for release in releases {
-        let seq = stress.released;
         stress.released += 1;
         let carrier = commands
             .spawn((
@@ -394,8 +399,8 @@ fn release_breaches(
         // placeholder pose.
         commands.spawn((
             Name::new("Debris"),
-            DebrisPiece { seq, carrier },
-            DebrisRest::default(),
+            DebrisPiece::default(),
+            Carrier(carrier),
             Position(release.position),
             Rotation(release.rotation),
             RigidBody::Dynamic,
@@ -408,131 +413,14 @@ fn release_breaches(
     }
 }
 
-/// Whether `piece` touches a dynamic body that is not a piece: it rides or leans on a vehicle,
-/// so freezing it would leave a fixed block in that vehicle's way.
-fn touches_vehicle(
-    piece: Entity,
-    collisions: &Collisions,
-    vehicles: &Query<&RigidBody, Without<DebrisPiece>>,
-) -> bool {
-    collisions.collisions_with(piece).any(|pair| {
-        let other = if pair.body1 == Some(piece) {
-            pair.body2
-        } else {
-            pair.body1
-        };
-        other
-            .and_then(|body| vehicles.get(body).ok())
-            .is_some_and(RigidBody::is_dynamic)
-    })
-}
-
-/// The switch both the freeze rule and the cap make. `CollisionEventsEnabled` rides the same insert
-/// so the static proxy avian rebuilds for the new body type carries contact events ([`thaw_touched`]
-/// reads them); the velocities are zeroed so a thaw starts the piece from rest.
-fn freeze(commands: &mut Commands, piece: Entity) {
-    commands.entity(piece).insert((
-        Frozen,
-        CollisionEventsEnabled,
-        LinearVelocity::ZERO,
-        AngularVelocity::ZERO,
-        RigidBody::Static,
-    ));
-}
-
-/// The live pieces the cap freezes: oldest release first, past `cap`, skipping any for which
-/// `riding` holds. `live` is `(seq, piece)`, sorted here.
-fn past_cap(live: &mut [(u64, Entity)], cap: u32, riding: impl Fn(Entity) -> bool) -> Vec<Entity> {
-    let excess = live.len().saturating_sub(cap as usize);
-    if excess == 0 {
-        return Vec::new();
-    }
-    live.sort_unstable_by_key(|(seq, _)| *seq);
-    live.iter()
-        .map(|(_, piece)| *piece)
-        .filter(|piece| !riding(*piece))
-        .take(excess)
-        .collect()
-}
-
-/// `FixedPostUpdate`, after the step: THE FREEZE RULE, then THE CAP (module doc).
-fn freeze_rested(
-    time: Res<Time>,
-    mut stress: ResMut<DebrisStress>,
-    collisions: Collisions,
-    vehicles: Query<&RigidBody, Without<DebrisPiece>>,
-    mut live: Query<
-        (
-            Entity,
-            &DebrisPiece,
-            &mut DebrisRest,
-            &LinearVelocity,
-            &AngularVelocity,
-        ),
-        Without<Frozen>,
-    >,
-    mut commands: Commands,
-) {
-    let dt = time.delta_secs();
-    let mut remaining = Vec::new();
-    for (piece, body, mut rest, velocity, spin) in &mut live {
-        let at_rest = velocity.0.length() < REST_SPEED_M_S && spin.0.length() < REST_SPIN_RAD_S;
-        rest.0 = if at_rest { rest.0 + dt } else { 0.0 };
-        if rest.0 >= REST_S && !touches_vehicle(piece, &collisions, &vehicles) {
-            freeze(&mut commands, piece);
-            stress.rest_frozen += 1;
-        } else {
-            remaining.push((body.seq, piece));
-        }
-    }
-    let Some(cap) = stress.lever.live_cap else {
-        return;
-    };
-    for piece in past_cap(&mut remaining, cap, |piece| {
-        touches_vehicle(piece, &collisions, &vehicles)
-    }) {
-        freeze(&mut commands, piece);
-        stress.cap_frozen += 1;
-    }
-}
-
-/// `FixedPostUpdate`, after the step: THAW (module doc). A frozen piece carries
-/// `CollisionEventsEnabled`, so its new pairs with a moving body report their start here.
-fn thaw_touched(
-    mut started: MessageReader<CollisionStart>,
-    frozen: Query<(), With<Frozen>>,
-    vehicles: Query<&RigidBody, Without<DebrisPiece>>,
-    mut stress: ResMut<DebrisStress>,
-    mut thawed: Local<Vec<Entity>>,
-    mut commands: Commands,
-) {
-    thawed.clear();
-    for event in started.read() {
-        for (piece, other) in [(event.body1, event.body2), (event.body2, event.body1)] {
-            let (Some(piece), Some(other)) = (piece, other) else {
-                continue;
-            };
-            let pushed = vehicles.get(other).is_ok_and(RigidBody::is_dynamic);
-            if frozen.contains(piece) && pushed && !thawed.contains(&piece) {
-                thawed.push(piece);
-                commands
-                    .entity(piece)
-                    .remove::<(Frozen, CollisionEventsEnabled)>()
-                    .insert((DebrisRest::default(), RigidBody::Dynamic));
-            }
-        }
-    }
-    stress.thawed += thawed.len() as u64;
-}
-
 /// `FixedPostUpdate`, after the step: every live piece's pose onto its carrier, written only when
 /// it moved. A frozen piece is skipped, so its carrier's last write is the pose it froze at.
 fn publish_poses(
-    pieces: Query<(&DebrisPiece, &Position, &Rotation), Without<Frozen>>,
+    pieces: Query<(&Carrier, &Position, &Rotation), Without<Frozen>>,
     mut carriers: Query<&mut DebrisPose>,
 ) {
-    for (piece, position, rotation) in &pieces {
-        if let Ok(mut pose) = carriers.get_mut(piece.carrier) {
+    for (carrier, position, rotation) in &pieces {
+        if let Ok(mut pose) = carriers.get_mut(carrier.0) {
             pose.set_if_neq(DebrisPose {
                 position: position.0,
                 rotation: rotation.0,
@@ -544,7 +432,7 @@ fn publish_poses(
 /// `FixedPostUpdate`: past `frozen_cap`, despawn the oldest frozen pieces and their carriers.
 fn despawn_oldest_frozen(
     mut stress: ResMut<DebrisStress>,
-    frozen: Query<(Entity, &DebrisPiece), With<Frozen>>,
+    frozen: Query<(Entity, &DebrisPiece, Option<&Carrier>), With<Frozen>>,
     mut commands: Commands,
 ) {
     let Some(cap) = stress.lever.frozen_cap else {
@@ -554,14 +442,16 @@ fn despawn_oldest_frozen(
     let Some(excess) = count.checked_sub(cap as usize).filter(|excess| *excess > 0) else {
         return;
     };
-    let mut oldest: Vec<(u64, Entity, Entity)> = frozen
+    let mut oldest: Vec<(u64, Entity, Option<Entity>)> = frozen
         .iter()
-        .map(|(piece, body)| (body.seq, piece, body.carrier))
+        .map(|(piece, body, carrier)| (body.seq, piece, carrier.map(|c| c.0)))
         .collect();
     oldest.sort_unstable_by_key(|(seq, ..)| *seq);
     for (_, piece, carrier) in oldest.into_iter().take(excess) {
         commands.entity(piece).despawn();
-        commands.entity(carrier).despawn();
+        if let Some(carrier) = carrier {
+            commands.entity(carrier).despawn();
+        }
     }
     stress.despawned += excess as u64;
 }
@@ -620,20 +510,24 @@ fn build_view(
     });
 }
 
+/// A carrier's pose as its transform, from arrival; a lever carrier also takes the fixture mesh.
 fn attach_view(
     view: Option<Res<DebrisView>>,
-    arrived: Query<(Entity, &DebrisPose), Added<DebrisPose>>,
+    arrived: Query<(Entity, &DebrisPose, Has<WallPiece>), Added<DebrisPose>>,
     mut commands: Commands,
 ) {
-    let Some(view) = view else {
-        return;
-    };
-    for (carrier, pose) in &arrived {
-        commands.entity(carrier).insert((
-            Mesh3d(view.mesh.clone()),
-            MeshMaterial3d(view.material.clone()),
-            pose.transform(),
-        ));
+    for (carrier, pose, wall) in &arrived {
+        let mut entity = commands.entity(carrier);
+        // A building piece's view may already hold it hidden until its fall is presented.
+        entity
+            .insert(pose.transform())
+            .insert_if_new(Visibility::default());
+        if let (false, Some(view)) = (wall, view.as_deref()) {
+            entity.insert((
+                Mesh3d(view.mesh.clone()),
+                MeshMaterial3d(view.material.clone()),
+            ));
+        }
     }
 }
 
@@ -691,22 +585,6 @@ mod tests {
         }
     }
 
-    /// The cap takes the oldest live pieces first and never one riding a vehicle; a mutant that
-    /// takes the newest leaves the stalest bodies costing the solver, and one that freezes a riding
-    /// piece leaves a fixed block in a tank's path.
-    #[test]
-    fn the_cap_freezes_the_oldest_pieces_that_ride_nothing() {
-        let piece = |n: u32| Entity::from_raw_u32(n).expect("a valid index");
-        let mut live: Vec<(u64, Entity)> = [3, 1, 4, 0, 2]
-            .into_iter()
-            .map(|seq| (seq, piece(seq as u32 + 1)))
-            .collect();
-        let riding = piece(1);
-        let frozen = past_cap(&mut live, 3, |p| p == riding);
-        assert_eq!(frozen, vec![piece(2), piece(3)]);
-        assert!(past_cap(&mut live, 5, |_| false).is_empty());
-    }
-
     fn physics_app() -> App {
         let mut app = App::new();
         app.add_plugins((
@@ -715,6 +593,7 @@ mod tests {
             // Avian's collider cache reads `AssetEvent<Mesh>`.
             AssetPlugin::default(),
             PhysicsPlugins::default(),
+            crate::debris::sim_plugin,
         ))
         .init_asset::<Mesh>()
         // One fixed tick per update at the fixed clock's default 64 Hz.
@@ -738,18 +617,9 @@ mod tests {
     #[test]
     fn a_resting_piece_freezes_holds_no_contact_and_stops_publishing() {
         let mut app = physics_app();
-        // No breach system: the test places its own piece.
-        app.insert_resource(DebrisStress::new(Lever {
-            pieces: 1,
-            period_s: 1.0,
-            live_cap: None,
-            frozen_cap: None,
-        }))
-        .add_systems(
+        app.add_systems(
             FixedPostUpdate,
-            (thaw_touched, publish_poses, freeze_rested)
-                .chain()
-                .after(PhysicsSystems::StepSimulation),
+            publish_poses.after(DebrisSettleSet::Settle),
         );
         app.world_mut().spawn((
             RigidBody::Static,
@@ -765,8 +635,8 @@ mod tests {
         let piece = app
             .world_mut()
             .spawn((
-                DebrisPiece { seq: 0, carrier },
-                DebrisRest::default(),
+                DebrisPiece::default(),
+                Carrier(carrier),
                 Position(pose.position),
                 Rotation(pose.rotation),
                 RigidBody::Dynamic,
@@ -827,7 +697,7 @@ mod tests {
             last_change,
             "a frozen piece's carrier no longer changes, so it sends nothing"
         );
-        assert_eq!(app.world().resource::<DebrisStress>().rest_frozen, 1);
+        assert_eq!(app.world().resource::<DebrisSettle>().rest_frozen, 1);
     }
 
     /// The breach places every piece 0–3 m above the ground beside the tank's flank and throws it

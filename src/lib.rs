@@ -64,6 +64,9 @@ pub(crate) mod damage;
 /// shipped view of a hit, mounted by both client roots. Its recorder runs in [`SimPlugin`] on the
 /// authority.
 pub mod damage_cam;
+/// Server-simulated pieces settling (the game's environment destruction): the freeze, wake and cap
+/// rule every loose piece follows. Authority only.
+mod debris;
 #[cfg(feature = "dev_tools")]
 mod debug;
 /// The controlled tank's standard drive row + F3 diagnostics — one view-only implementation mounted
@@ -596,8 +599,10 @@ pub(crate) enum Layer {
     /// Witness volumes (crew, ADR-0040): never cast against, never in the armour walk; read only
     /// by the witness pass (`ballistics::wound`).
     Witness,
-    /// Server-simulated wall fragments (`net::debris_stress`): they collide with `Terrain`,
-    /// `Vehicle` and each other, and no ground or armour query reads them.
+    /// Server-simulated pieces (`crate::debris`): a building's fallen chunks and the debris stress
+    /// lever's fragments. They collide with `Terrain`, `Vehicle` and each other, and no ground
+    /// query reads them; a building's chunks are also on `Armor`, so the walk meets them as their
+    /// substance.
     Debris,
 }
 
@@ -688,6 +693,10 @@ impl Plugin for SimPlugin {
             // the vocabulary both ends explain them in.
             (damage_cam::recorder::plugin, damage_cam::delivery::plugin),
         ));
+        // Buildings breaking (the game's environment destruction): the authority's laws and
+        // record, every peer's colliders from it, and the rule loose pieces settle by. Separate
+        // call: the tuple above is at bevy's 15-plugin arity limit.
+        app.add_plugins((buildings::breakage::sim_plugin, debris::sim_plugin));
     }
 }
 
@@ -766,6 +775,8 @@ impl Plugin for ClientPlugin {
             ballistics::view_plugin,
             // The trees' glb binding and fall presentation (view-only, ADR-0014).
             trees::view::plugin,
+            // The broken buildings and their fallen pieces (view-only, ADR-0014).
+            buildings::view::plugin,
         ));
         app.add_plugins(drive_hud::plugin);
         // The pen cam's shooter corner over the player's own hits (view-only; the store it reads
@@ -853,6 +864,8 @@ impl Plugin for NetClientPlugin {
             ballistics::view_plugin,
             // The trees' glb binding and fall presentation (view-only, ADR-0014).
             trees::view::plugin,
+            // The broken buildings and their fallen pieces (view-only, ADR-0014).
+            buildings::view::plugin,
             drive_hud::plugin,
             // The render-policy resolver (see `ClientPlugin`) — every windowed root needs it, or
             // nothing that declares a scope or a profile is ever resolved. Down here rather than
@@ -1020,6 +1033,7 @@ pub fn run_offline() {
         dev_capture::offline_fell_plugin,
         dev_capture::offline_impact_plugin,
         dev_capture::offline_shot_plugin,
+        dev_capture::offline_wall_plugin,
     ));
     // The offline transmission feel test (phase 2.5): an EXPLICIT override of the spec's
     // declared architecture (which is authoritative and mandatory since REV 14), seeded to

@@ -484,6 +484,7 @@ fn resolved(
                 core_mass: block.core_mass.0,
                 core_density: facts.density,
                 speed_constant: facts.speed_constant,
+                chemical_energy: facts.chemical_energy.unwrap_or(0.0),
                 base_mass: block.base_mass.0,
                 cavity_diameter: block.cavity_diameter.0,
             };
@@ -1065,6 +1066,7 @@ pub(crate) mod tests {
             core_mass: 0.02,
             core_density: 1650.0,
             speed_constant: 2680.0,
+            chemical_energy: 0.0,
             base_mass: 0.1,
             cavity_diameter: 0.02,
         };

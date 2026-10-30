@@ -178,6 +178,8 @@ fn the_spend_exit_fuze_keeps_todays_bursts_and_doses() {
         },
         sideways_speed: 534.38837,
         energy: 397_738.22,
+        core_mass: shipped.core_mass,
+        blast: shipped.blast,
     };
     assert_eq!(shipped, today, "the shipped burst, field for field");
     // Per slab: the bursts as (position, speed, seconds waited at rest); the pool units the shot
