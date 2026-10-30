@@ -1811,6 +1811,11 @@ pub struct SpallSource {
     /// before the exit, the reached member's of the highest rear factor, the greatest ratio on a
     /// tie ([`ExitMember::rear_factor`], [`ExitMember::debris_ratio`]).
     pub debris_ratio: f32,
+    /// The exited substance's strength against the reference armour steel, the share of the
+    /// cone's potency it keeps: [`exit_strength_ratio`] of the highest rear factor among the
+    /// reached members, the layer [`Self::debris_ratio`] is read from. Exactly 1 at or above the
+    /// reference.
+    pub strength_ratio: f32,
     /// The round's speed (m/s) where the earliest member entered the body.
     pub entry_speed: f32,
     /// The round's speed (m/s) where the latest reached member left it.
@@ -1826,13 +1831,24 @@ impl SpallSource {
         self.strength_at(super::spall_cone::energy_share())
     }
 
-    /// The cone's strength `S = share × energy` (J): `share` of the kinetic energy the round lost
-    /// across the body ([`Self::energy`]), one IEEE f32 product. Whatever the round, the plate or
-    /// the exit material, a round that loses more energy across a body throws a stronger cone,
-    /// and one that loses none throws none.
+    /// The cone's strength `S = share × energy × ratio` (J): `share` of the kinetic energy the
+    /// round lost across the body ([`Self::energy`]), times the exited substance's strength ratio
+    /// ([`Self::strength_ratio`]), as IEEE f32 products in that order. Whatever the round or the
+    /// plate, a round that loses more energy across a body of one substance throws a stronger
+    /// cone, and one that loses none throws none. A ratio of exactly 1 leaves `share × energy`
+    /// to the bit, so every exit at or above the reference steel throws what it threw before the
+    /// ratio existed; a softer exit (brick, wood) keeps only its share.
     pub(crate) fn strength_at(&self, share: f32) -> f32 {
-        share * self.energy
+        share * self.energy * self.strength_ratio
     }
+}
+
+/// The spall potency share an exit through a substance of `rear_factor` keeps: its strength against
+/// the reference armour steel, `rear_factor / REFERENCE_FACTOR`, capped at 1. A substance's factor
+/// is its strength ratio × [`crate::substances::REFERENCE_FACTOR`] (`materials.ron`), so the cap
+/// leaves every substance at or above the reference exactly at 1.
+pub(crate) fn exit_strength_ratio(rear_factor: f32) -> f32 {
+    (rear_factor / crate::substances::REFERENCE_FACTOR).min(1.0)
 }
 
 /// One volume met by one sample over part of an [`Encounter`]: its identity (the address a dose
@@ -3298,6 +3314,12 @@ fn spall_sources<M: Mechanism>(
                 .map(|member| (member.rear_factor, member.debris_ratio))
                 .max_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)))
                 .map_or(0.0, |(_, ratio)| ratio),
+            strength_ratio: exit_strength_ratio(
+                reached
+                    .iter()
+                    .map(|member| member.rear_factor)
+                    .fold(0.0, f32::max),
+            ),
             entry_speed: mechanism.speed(entry) as f32,
             exit_speed: mechanism.speed(exit_state) as f32,
             coverage: (count as f64 / disc as f64) as f32,

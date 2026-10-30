@@ -242,15 +242,22 @@ once, and the directions' weights emit `S/2` (**Sampling**) — so a gated cone 
 any pool a unit. The gate adds no constant: it is the pool's quantum. A gate at the whole point
 would drop doses a pool accumulates.
 
-**Strength** (issue 116, owner 2026-10-28, provisional: the simplest model). `S = η_E × ΔE`
-(joules; the cone emits `S/2` in all, **Sampling**). `ΔE` is the kinetic energy the round lost
+**Strength** (issue 116, owner 2026-10-28, provisional: the simplest model; the exit ratio #182,
+2026-10-30). `S = η_E × ΔE × r` (joules; the cone emits `S/2` in all, **Sampling**). `ΔE` is the kinetic energy the round lost
 crossing the body, `½ m (v_entry² − v_exit²)`, `m` the mass that meets the plate (a sub-calibre
 round's core, §3): each stretch of the body's energy drop shared among the disc's samples as its
 spend is, summed over the samples that reached the exit, the energy the line's dose reads (§6).
 `η_E` is one fixed share for every cone (`energy_share` in `assets/ballistics/spall_cone.ron`,
-TUNED 0.88, provisional). Whatever the round, the plate or the exit material, a round that loses
-more energy at a plate throws the stronger cone, and one that loses none throws none. No term
-reads the exit material's factor, the hole's calibre or the speed ratio: the debris competence κ,
+TUNED 0.88, provisional). `r` is the exited substance's strength against the reference armour
+steel, its factor over the reference's 1000, capped at 1 (`walk::exit_strength_ratio`): exactly 1
+for every substance at or above the reference, so armour of the reference steel throws to the bit
+what it threw before the ratio; 0.04 for wood and 0.0365 for brick, which throw next to nothing
+(masonry does not fracture a shell, and what a wall sheds is negligible beside a plate's spall).
+Below the reference among the Tiger's substances sit cast armour (0.9), mild steel (0.8),
+ammunition (0.2), the engine block (0.15) and rubber (0.05): their exits throw that share, an owner
+call left open. Whatever the round or the plate, a round that loses more energy across a body of
+one substance throws the stronger cone, and one that loses none throws none. No term reads the
+hole's calibre or the speed ratio: the debris competence κ,
 the hole term `(d / d_ref)²` and the reference calibre retired with the law they belonged to,
 `S = spend × κ × (v_exit / v_entry)² × (d / d_ref)²` in reference-mm. The share was set so that
 the reference case throws the cone that law gave it: the reference 88 mm APCBC round at its
@@ -259,7 +266,7 @@ ASSUMED), loses 2.70 MJ and leaves at 259.7 m/s, where the retired law's 11.29 r
 emitted 395 HP points (DERIVED in `spall_cone.ron`). Away from that case the two laws part. A thin
 plate takes little energy and throws a weak cone. A barely perforating round, which the retired
 law's speed ratio silenced, throws the strongest cone a plate gives: all it lost there. A soft body
-is weak because a round loses little crossing it, not by a factor of its own. MEASURED from the
+is weak twice: a round loses little crossing it, and its exit keeps only its strength ratio. MEASURED from the
 re-recorded scenarios: s1's cone is 2.40 MJ, emitting 400 HP points against the retired law's 362
 (+11 %); s12's tungsten-carbide core loses about a fifth of the energy s1's round loses at the
 same plate and throws 0.19 of s1's cone, where the hole term gave it 0.62.

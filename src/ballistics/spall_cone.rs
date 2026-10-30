@@ -9,7 +9,8 @@
 //! # Units
 //!
 //! A field's strength `S` is energy, in joules: a cone's is [`energy_share`] of the kinetic energy
-//! its round lost across the body it left (`walk::SpallSource::strength`); a burst's is its own
+//! its round lost across the body it left, times the exited substance's strength against the
+//! reference steel, capped at 1 (`walk::SpallSource::strength`); a burst's is its own
 //! driven energy, the kinetic energy its explosive gives the wall (`burst::Burst::energy`), times
 //! the burst block's factor ([`BurstFields::strength`]), nothing the round lost entering it. Every
 //! field deposit is joules too, and turns
