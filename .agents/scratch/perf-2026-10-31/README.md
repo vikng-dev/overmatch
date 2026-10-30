@@ -55,6 +55,9 @@ every local run held the machine lock. Labels: MEASURED, DERIVED, ASSUMED.
      - this is the first Edgegap shape that holds 30 tanks in budget, with no headroom at p95;
      - it saves 2–5 ms of p50 at every level: 4.1 at zero, 3.3 at ~260 live, 4.9 at ~940 and 2.1
        at ~1600 (DERIVED, against the default-pool client-less curve).
+   - **`OVERMATCH_SERVER_THREADS=6` on 2 vCPU** (pools 2/2/2, zero debris, 2 runs,
+     `edgegap-2vcpu-noclient-t6/`) is worse than 4: tick p50 14.6–15.2 ms, p95 16.6–16.8, 61–62 Hz.
+     So 4 is the value to use.
    - **The same lever on 1 vCPU is worse** (zero debris, 2 runs, `edgegap-1vcpu-noclient-t4/`):
      - p50 falls to 14.2–14.5 ms, but p95 rises to 88–89 ms;
      - the simulation drops to 46 Hz;
@@ -180,9 +183,10 @@ Each directory has `conditions.tsv`, the per-condition `*.server.json`, a stats-
 | 2 vCPU, no client | `edgegap-2vcpu-noclient/` | 7 of 8 | The repeat of 100:2 was stopped mid-window by the client chain's final `stop-all-profile` sweep. |
 | 2 vCPU, no client, threads=4 | `edgegap-2vcpu-noclient-t4/`, `-t4b/` | 8 of 8 | Pools 2/1/1. Two palindromes: zero and 50:2, then 12:2 and 100:2. |
 | 1 vCPU, no client, threads=4 | `edgegap-1vcpu-noclient-t4/` | 2 of 2 | Zero debris only (TLDR 3). |
+| 2 vCPU, no client, threads=6 | `edgegap-2vcpu-noclient-t6/` | 2 of 2 | Zero debris only, pools 2/2/2 (TLDR 3). |
 
-- **Cost:** 45 deployments of ~4 min: 13 at 1 vCPU ($0.069/h) and 32 at 2 vCPU ($0.138/h), about
-  $0.35 (DERIVED, list price).
+- **Cost:** 47 deployments of ~4 min: 13 at 1 vCPU ($0.069/h) and 34 at 2 vCPU ($0.138/h), about
+  $0.37 (DERIVED, list price).
 - **Stopped:** every `profile-` deployment is stopped, and the live count was confirmed 0 at the
   end.
 
