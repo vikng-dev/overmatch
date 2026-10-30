@@ -352,6 +352,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     }
     raw[0] = 1.0 - saturate(covered);
 
+#ifndef TERRAIN_BASE_ONLY
     for (var i = 0u; i < LAYERS; i++) {
         let weight = painted[i];
         if weight <= blend.blend_law.z {
@@ -375,6 +376,7 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
         roughness[slot] = roughness_factor * arm.g;
         raw[slot] = weight;
     }
+#endif
 
     // THE BLEND LAW: bias every weight by its own pack's AO, cut everything more than a window
     // behind the leader, normalize.
@@ -411,12 +413,14 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // standard path above, outside the layer loop.
     //
     // A function of world XZ and nothing else — no camera term, so it does not swim under motion.
+#ifndef TERRAIN_NO_MACRO
     let macro_uv = in.world_position.xz * blend.macro_tint.x;
     let macro_field = macro_noise(macro_uv) + 0.5 * macro_noise(macro_uv * MACRO_OCTAVE_RATIO);
     // 0..MACRO_PEAK to -1..1, then a gain of 1 ± amplitude. The amplitude is bounded below 1, so
     // the gain is strictly positive whatever the field returns.
     let macro_signed = macro_field * (2.0 / MACRO_PEAK) - 1.0;
     blended_albedo *= 1.0 + blend.macro_tint.y * macro_signed;
+#endif
 
     // The trodden ground's look, by the same painted weights as its depth.
     blended_albedo *= mix(1.0, dot(ground, blend.print_albedo), footprint);

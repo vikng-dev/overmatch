@@ -60,6 +60,9 @@
 //!   `inset_half`, `inset_masks`, `inset_bloom` price the pen cam corner's parts while it shows
 //!   (`scripts/perf/run-pencam-attribution.sh`): its target at half size (the mask views follow,
 //!   keyed by size), no mask cameras, no bloom on its camera.
+//!   `terrain_macro` skips the terrain shader's per-pixel macro tint and `terrain_layers` draws the
+//!   base pack only (skips the painted-layer loop), both through shader defs on the terrain
+//!   material (`terrain_blend::TerrainAblate`); the picture changes (flatter ground).
 //!   `terrain-casters`, `tree-casters`, `house-casters`, `tank-casters` suppress only casting
 //!   through render policy; receivers and main-view geometry retain their roles.
 //!   `terrain-field` selects the raster terrain shadow instead of the baked one
@@ -118,9 +121,21 @@ pub(crate) struct Ablate {
     /// No mask cameras for the pen cam inset.
     pub(crate) inset_masks: bool,
     inset_bloom: bool,
+    /// The terrain shader's macro tint skipped (`TERRAIN_NO_MACRO`).
+    terrain_macro: bool,
+    /// The terrain shader's painted-layer loop skipped (`TERRAIN_BASE_ONLY`).
+    terrain_layers: bool,
 }
 
 impl Ablate {
+    /// The terrain material's shader-def levers; read when `world` builds the material.
+    pub(crate) fn terrain_ablate(self) -> crate::terrain_blend::TerrainAblate {
+        crate::terrain_blend::TerrainAblate {
+            macro_tint: self.terrain_macro,
+            base_only: self.terrain_layers,
+        }
+    }
+
     /// A comma-separated feature list; `Err` names the first unknown feature.
     pub(crate) fn parse(list: &str) -> Result<Self, String> {
         let mut ablate = Self::default();
@@ -143,6 +158,8 @@ impl Ablate {
                 "inset_half" => ablate.inset_half = true,
                 "inset_masks" => ablate.inset_masks = true,
                 "inset_bloom" => ablate.inset_bloom = true,
+                "terrain_macro" => ablate.terrain_macro = true,
+                "terrain_layers" => ablate.terrain_layers = true,
                 unknown => return Err(unknown.to_owned()),
             }
         }
@@ -277,7 +294,8 @@ fn ablation_instruments(app: &mut App) {
             panic!(
                 "SPIKE_ABLATE: unknown feature {unknown:?} (known: bloom, env_light, \
                  depth_prepass, depth_copy, ui, terrain-field, terrain-casters, tree-casters, \
-                 house-casters, tank-casters, inset_half, inset_masks, inset_bloom)"
+                 house-casters, tank-casters, inset_half, inset_masks, inset_bloom, terrain_macro, \
+                 terrain_layers)"
             )
         });
         info!("render_cost: ablating {ablate:?}");
@@ -722,6 +740,14 @@ mod tests {
         assert!(!ablate.depth_copy);
         let ablate = Ablate::parse("inset_half,inset_masks,inset_bloom").expect("inset levers");
         assert!(ablate.inset_half && ablate.inset_masks && ablate.inset_bloom && !ablate.bloom);
+        let terrain = Ablate::parse("terrain_macro")
+            .expect("terrain lever")
+            .terrain_ablate();
+        assert!(terrain.macro_tint && !terrain.base_only);
+        let terrain = Ablate::parse("terrain_layers")
+            .expect("terrain lever")
+            .terrain_ablate();
+        assert!(terrain.base_only && !terrain.macro_tint);
         let ablate = Ablate::parse("depth_copy").expect("known feature");
         assert!(ablate.depth_copy && !ablate.depth_prepass);
         assert_eq!(

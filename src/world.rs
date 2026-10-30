@@ -667,6 +667,10 @@ fn spawn_environment(
                     ..default()
                 },
                 extension: crate::terrain_blend::TerrainBlend {
+                    ablate: ablate
+                        .as_deref()
+                        .map(|ablate| ablate.terrain_ablate())
+                        .unwrap_or_default(),
                     params: crate::terrain_blend::params(manifest, &ground),
                     layer_albedo,
                     layer_normal,

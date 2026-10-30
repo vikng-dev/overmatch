@@ -39,9 +39,14 @@
 //! CPU can reproduce the depth it draws ([`print_depth_m`]): the drawn belt sinks by that depth
 //! (`track::view`), and nothing senses the ground per stamp.
 
-use bevy::pbr::{ExtendedMaterial, MaterialExtension};
+use bevy::mesh::MeshVertexBufferLayoutRef;
+use bevy::pbr::{
+    ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline,
+};
 use bevy::prelude::*;
-use bevy::render::render_resource::{AsBindGroup, ShaderType};
+use bevy::render::render_resource::{
+    AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+};
 use bevy::shader::ShaderRef;
 
 use crate::ground_types::{GroundTypes, PrintResponse};
@@ -243,7 +248,10 @@ pub(crate) struct TerrainBlendParams {
 /// Bindings start at 100 — bevy's convention for a material extension, keeping them clear of the
 /// `StandardMaterial` slots in the same bind group.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
+#[bind_group_data(TerrainAblate)]
 pub(crate) struct TerrainBlend {
+    /// Pricing instruments (`SPIKE_ABLATE=terrain_macro,terrain_layers`); both off in play.
+    pub ablate: TerrainAblate,
     #[uniform(100)]
     pub params: TerrainBlendParams,
     #[texture(101, dimension = "2d_array")]
@@ -272,9 +280,47 @@ pub(crate) struct TerrainBlend {
     pub prints_world: Handle<Image>,
 }
 
+/// Shader features removed from the terrain fragment to price them by difference. It is the
+/// material's pipeline key, so each combination compiles its own variant; the default compiles
+/// the shipped shader with no def set.
+#[derive(Reflect, Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub(crate) struct TerrainAblate {
+    /// Defines `TERRAIN_NO_MACRO`: the per-pixel macro tint is skipped.
+    pub macro_tint: bool,
+    /// Defines `TERRAIN_BASE_ONLY`: the painted-layer loop is skipped, so only the base pack draws.
+    pub base_only: bool,
+}
+
+impl From<&TerrainBlend> for TerrainAblate {
+    fn from(material: &TerrainBlend) -> Self {
+        material.ablate
+    }
+}
+
 impl MaterialExtension for TerrainBlend {
     fn fragment_shader() -> ShaderRef {
         "shaders/terrain_blend.wgsl".into()
+    }
+
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut RenderPipelineDescriptor,
+        _layout: &MeshVertexBufferLayoutRef,
+        key: MaterialExtensionKey<Self>,
+    ) -> Result<(), SpecializedMeshPipelineError> {
+        let ablate = key.bind_group_data;
+        if ablate != TerrainAblate::default() {
+            info!("terrain_blend: pipeline specialized with {ablate:?}");
+        }
+        if let Some(fragment) = descriptor.fragment.as_mut() {
+            if ablate.macro_tint {
+                fragment.shader_defs.push("TERRAIN_NO_MACRO".into());
+            }
+            if ablate.base_only {
+                fragment.shader_defs.push("TERRAIN_BASE_ONLY".into());
+            }
+        }
+        Ok(())
     }
 }
 
