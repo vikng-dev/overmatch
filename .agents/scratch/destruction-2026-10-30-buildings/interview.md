@@ -11,9 +11,10 @@ bring down a larger piece depending on the round type/explosive mass."
 
 ## Answers so far
 
-- **Broken-off pieces leave ballistics.** A wall and its intact fracture members are static. They take
-  part in ballistics, and every player sees them. A piece that breaks off becomes a falling body that
-  collides with tanks and the world, and it no longer takes part in ballistics.
+- **Superseded 2026-10-30 (see "Every piece is brick in ballistics" below).** Earlier answer: broken-off
+  pieces leave ballistics. A wall and its intact fracture members are static. They take part in
+  ballistics, and every player sees them. A piece that breaks off becomes a falling body that collides
+  with tanks and the world, and it no longer takes part in ballistics.
   - Yan leans towards client-side presentation for these pieces.
   - Yan is open to server simulation and settling: one player could see a fragment block vision while
     another doesn't, and server simulation has no determinism problem, since tanks are already
@@ -267,8 +268,30 @@ The server numbers are clean; the client's numbers are not (lanes were compiling
 - **The debris cost for 35-piece breaches every 5 s lies somewhere between 0 and about 1.5 ms**; single
   runs cannot resolve it better. The controlled local runs tonight should.
 
+## Prototype results, and decisions on them (2026-10-30 evening)
+
+- **Crack rule: the push rule (B) is adopted** (Yan: "that makes sense"). A seam cracks when the push
+  reaching it exceeds the wall material's strength. A "joint" is figurative: a seam between pre-cut
+  chunks, whose strength comes from the wall material's data. Mortar is not a separate material.
+- **Division of work:** energy sets how much is crushed to dust; push sets which seams crack.
+  Explosives work the same way, with air pressure on the face as the push.
+- **Gaps the prototype found** (decisions pending):
+  1. a rule for a chunk that is only partly crushed;
+  2. a layered cut (seams parallel to the face), so the back face can break out;
+  3. the structural check must include the wall's own mass, because a short, sharp hit is absorbed by
+     inertia.
+- **Sandbox text (Yan):** "an awful lot of text on the screen, it gives 0 value". A lane is trimming it
+  to one line, with H for the legend.
+
+**Every piece is brick in ballistics (Yan, 2026-10-30: yes).** A chunk counts as the wall's material
+from wall to rubble, moving or still: a round meets a falling or resting chunk as brick. Under one
+timeline (ADR-0037) every player sees the round meet the chunk where the server resolved it, so the
+choice carries no sync caveat. The server simulates falling pieces, with a cap.
+
 ## Open
 
-- Q2 (a hole is the fragments whose HP pools the existing doses empty), Q3 (a larger piece is whatever
-  loses support), Q4 (fragments are pre-cut by the compiler): asked, not yet answered.
-- Whether the server simulates broken-off pieces, or each client does.
+- Settlement: whether tanks climb or push rubble, and whether rubble persists all match or is capped.
+  Candidate from the stress harness: freeze to static after 0.5 s still and not touching a tank; a tank
+  thaws what it touches; live cap 256.
+- The three gaps above (partial crush, layered cut, the wall's own mass in the structural check).
+- The ram law.
