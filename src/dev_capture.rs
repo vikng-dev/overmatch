@@ -11,6 +11,10 @@
 //!   default 6.
 //! * `OVERMATCH_CAPTURE_SIGHT=1` — switch to the gunner optic two seconds before the first frame,
 //!   by writing the resource the Shift toggle writes; ignored where that resource is absent.
+//! * `OVERMATCH_CAPTURE_POSE=<x>,<y>,<z>,<lx>,<ly>,<lz>` — hold the player's camera at `x,y,z`
+//!   looking at `lx,ly,lz` (world metres) for the whole run, as a captor
+//!   ([`crate::camera::CameraCaptive`]): the player's own camera writers stand aside, and the lens
+//!   stays the one the camera last had. Ignored when malformed (logged).
 //! * `OVERMATCH_CAPTURE_SIZE=WxH` — the frame in physical pixels, default 2560x1440. The target's
 //!   scale factor is [`SCALE_FACTOR`], so the UI lays out at half that in logical pixels, as on a
 //!   retina window.
@@ -168,6 +172,24 @@ pub fn plugin(app: &mut App) {
         saved: 0,
     });
     app.add_systems(Update, capture);
+    if let Ok(raw) = std::env::var("OVERMATCH_CAPTURE_POSE") {
+        match parse_pose(&raw) {
+            Some(pose) => {
+                info!(
+                    "capture: camera held at {} looking at {}",
+                    pose.eye, pose.look
+                );
+                app.insert_resource(pose).add_systems(
+                    PostUpdate,
+                    hold_pose.in_set(crate::camera::CaptiveCameraPlaced),
+                );
+            }
+            None => warn!(
+                "capture: OVERMATCH_CAPTURE_POSE={raw:?} is not x,y,z,lx,ly,lz with distinct \
+                 finite points; the camera is the player's"
+            ),
+        }
+    }
     if !ui {
         app.add_systems(
             PostUpdate,
@@ -181,6 +203,40 @@ pub fn plugin(app: &mut App) {
 fn hide_ui(mut roots: Query<&mut Visibility, (With<Node>, Without<ChildOf>)>) {
     for mut visibility in &mut roots {
         visibility.set_if_neq(Visibility::Hidden);
+    }
+}
+
+/// Where `OVERMATCH_CAPTURE_POSE` holds the player's camera.
+#[derive(Resource, Clone, Copy, PartialEq, Debug)]
+struct Pose {
+    eye: Vec3,
+    look: Vec3,
+}
+
+/// Six comma-separated finite numbers, eye then target, two distinct points.
+fn parse_pose(s: &str) -> Option<Pose> {
+    let numbers: Vec<f32> = s
+        .split(',')
+        .map(|n| n.trim().parse().ok())
+        .collect::<Option<_>>()?;
+    let [x, y, z, lx, ly, lz] = numbers[..] else {
+        return None;
+    };
+    let (eye, look) = (Vec3::new(x, y, z), Vec3::new(lx, ly, lz));
+    (eye.is_finite() && look.is_finite() && eye != look).then_some(Pose { eye, look })
+}
+
+/// Hold the camera as a captor: claim the camera every frame, and write its pose.
+fn hold_pose(
+    pose: Res<Pose>,
+    captive: Option<ResMut<crate::camera::CameraCaptive>>,
+    mut cameras: Query<&mut Transform, With<crate::view::PlayerView>>,
+) {
+    if let Some(mut captive) = captive {
+        captive.set_if_neq(crate::camera::CameraCaptive(true));
+    }
+    for mut transform in &mut cameras {
+        *transform = Transform::from_translation(pose.eye).looking_at(pose.look, Vec3::Y);
     }
 }
 
@@ -356,6 +412,29 @@ mod tests {
         assert_eq!(parse_times(""), vec![6.0]);
         assert_eq!(parse_times("8, 2.5,x,4"), vec![2.5, 4.0, 8.0]);
         assert_eq!(parse_times("2.00001,2,3"), vec![2.0, 3.0]);
+    }
+
+    /// A pose is six finite numbers naming two distinct points; anything else leaves the camera
+    /// to the player rather than pointing it at a guess.
+    #[test]
+    fn a_pose_is_two_distinct_finite_points() {
+        assert_eq!(
+            parse_pose("1, 2,3,4,5,6"),
+            Some(Pose {
+                eye: Vec3::new(1.0, 2.0, 3.0),
+                look: Vec3::new(4.0, 5.0, 6.0),
+            })
+        );
+        for refused in [
+            "",
+            "1,2,3,4,5",
+            "1,2,3,4,5,6,7",
+            "1,2,3,1,2,3",
+            "1,2,x,4,5,6",
+            "nan,0,0,1,1,1",
+        ] {
+            assert_eq!(parse_pose(refused), None, "{refused}");
+        }
     }
 
     /// One frame keeps the given path; several stamp it. A sequence assembled by name plays in

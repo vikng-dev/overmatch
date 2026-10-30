@@ -988,6 +988,12 @@ pub struct TankSpec {
     /// `*_Collider` suffix scan. A proxy must NOT wear a substance material — it is a physics
     /// stand-in, not armour.
     pub colliders: Vec<String>,
+    /// Shadow proxies, by node name. Beyond the tank's caster switch range each one casts the
+    /// shadow of the rigid node it is parented under, in place of that node's drawn geometry
+    /// (`tank::shadow_proxy`). Never drawn and never armour: a collider listed here keeps its
+    /// collision role, and a node listed here alone is shadow-only and collides with nothing.
+    #[serde(default)]
+    pub shadow_proxies: Vec<String>,
     /// Roadwheel stations in wire-slot order. Explicit, replacing the `Wheel_{L,R}_{n}` pattern.
     pub roadwheels: Vec<RoadwheelSpec>,
     /// Weapons keyed by logical name — the **source of truth** for the tank's armament. Each names
@@ -1016,6 +1022,9 @@ pub enum NodeRole {
     Volume,
     /// A collision proxy — a convex-hull source, never armour.
     Collider,
+    /// A shadow proxy — a caster standing in for its parent's drawn geometry at range, never
+    /// armour.
+    ShadowProxy,
     /// A roadwheel station, which carries its own wheel mesh.
     Roadwheel,
     /// A weapon's bore or its recoiling barrel.
@@ -1045,7 +1054,7 @@ impl NodeRole {
     pub(crate) fn rigid_pose(self) -> bool {
         match self {
             Self::Servo | Self::Roadwheel | Self::Weapon | Self::View => true,
-            Self::Volume | Self::Collider => false,
+            Self::Volume | Self::Collider | Self::ShadowProxy => false,
         }
     }
 }
@@ -1060,8 +1069,9 @@ impl TankSpec {
         fn at(role: NodeRole, node: &str, field: String) -> NodeReference<'_> {
             NodeReference { role, node, field }
         }
-        // `servos` and `volumes` are keyed BY the node name and `colliders` is a list of them, so
-        // the field alone names the entry; the rest hold the name inside a keyed or indexed one.
+        // `servos` and `volumes` are keyed BY the node name and `colliders` and `shadow_proxies`
+        // are lists of them, so the field alone names the entry; the rest hold the name inside a
+        // keyed or indexed one.
         references.extend(
             self.servos
                 .keys()
@@ -1076,6 +1086,11 @@ impl TankSpec {
             self.colliders
                 .iter()
                 .map(|node| at(NodeRole::Collider, node, "colliders".to_owned())),
+        );
+        references.extend(
+            self.shadow_proxies
+                .iter()
+                .map(|node| at(NodeRole::ShadowProxy, node, "shadow_proxies".to_owned())),
         );
         references.extend(self.roadwheels.iter().enumerate().map(|(index, wheel)| {
             at(
@@ -1106,6 +1121,16 @@ impl TankSpec {
         references.sort_unstable();
         references.dedup();
         references
+    }
+
+    /// Every node the sheet moves relative to its parent: servo frames, recoiling barrels and
+    /// roadwheel stations. A rigid stand-in parented above one of them cannot follow it.
+    pub fn articulated_nodes(&self) -> impl Iterator<Item = &str> {
+        self.servos
+            .keys()
+            .map(String::as_str)
+            .chain(self.weapons.values().filter_map(|w| w.barrel.as_deref()))
+            .chain(self.roadwheels.iter().map(|wheel| wheel.node.as_str()))
     }
 
     /// Fail-fast semantic validation past what serde's shape check catches (ADR-0011: a competitive

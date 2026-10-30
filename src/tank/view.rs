@@ -5,6 +5,7 @@ use bevy::world_serialization::WorldInstanceReady;
 
 use super::model::GunBarrel;
 use super::servo::ServoSpec;
+use super::shadow_proxy::TankShadowProxy;
 use crate::render_policy::VisualScope;
 
 /// Name-keyed sim part table used to attach a separately loaded view tree.
@@ -31,17 +32,21 @@ impl ViewNode {
 pub struct ViewServo;
 
 /// Join an instantiated GLB view to the already-complete sim skeleton by node name. This hides
-/// declared collision proxies, seeds moving parts from current sim pose, and repairs a turret view
-/// whose sim part detached before presentation arrived. It never creates simulation state.
+/// declared collision proxies, binds declared shadow proxies to the assemblies they stand in for,
+/// seeds moving parts from current sim pose, and repairs a turret view whose sim part detached
+/// before presentation arrived. It never creates simulation state.
 #[expect(
     clippy::too_many_arguments,
-    reason = "an observer joining a view to its skeleton: hierarchy, names, transforms and five part-role filters"
+    reason = "an observer joining a view to its skeleton: hierarchy, names, transforms, the caster \
+              mode and five part-role filters"
 )]
 pub fn bind_tank_view(
     ready: On<WorldInstanceReady>,
     blueprint: Option<Res<crate::bake::TankBlueprint>>,
+    caster_mode: Option<Res<TankShadowProxy>>,
     roots: Query<&SimParts>,
     children: Query<&Children>,
+    parents: Query<&ChildOf>,
     names: Query<&Name>,
     meshes: Query<(), With<Mesh3d>>,
     servos: Query<(), With<ServoSpec>>,
@@ -53,12 +58,26 @@ pub fn bind_tank_view(
     let Ok(parts) = roots.get(ready.entity) else {
         return;
     };
-    // Which glb nodes must not render: the declared collision proxies, nothing else. The BAKE
-    // decides from the spec declaration — never a name suffix. The ballistic plates are the
-    // vehicle's rendered body since mesh unification, and enclosed component volumes stay
-    // because the closed hull occludes them.
+    // Which glb nodes must not render: the declared collision and shadow proxies, nothing else.
+    // The SHEET decides — never a name suffix. The ballistic plates are the vehicle's rendered body
+    // since mesh unification, and enclosed component volumes stay because the closed hull
+    // occludes them. A shadow proxy that will be bound as a caster is not hidden here: its scope
+    // keeps it out of every camera instead.
     let geometry = blueprint.as_deref().map(|blueprint| &blueprint.geometry);
-    let hidden = |name: &str| geometry.is_some_and(|geometry| geometry.is_collision_proxy(name));
+    let spec = blueprint.as_deref().map(|blueprint| &*blueprint.spec);
+    let shadow_proxy =
+        |name: &str| spec.is_some_and(|spec| spec.shadow_proxies.iter().any(|p| p == name));
+    let articulated =
+        |name: &str| spec.is_some_and(|spec| spec.articulated_nodes().any(|node| node == name));
+    let casters_bound = caster_mode.is_some_and(|mode| mode.binds());
+    let bound_proxy = |name: &str| casters_bound && shadow_proxy(name);
+    let hidden = |name: &str| {
+        !bound_proxy(name)
+            && (shadow_proxy(name)
+                || geometry.is_some_and(|geometry| geometry.is_collision_proxy(name)))
+    };
+    let mut proxy_nodes: Vec<(Entity, bool)> = Vec::new();
+    let mut articulated_nodes: Vec<Entity> = Vec::new();
     // Both trees share names; skip sim entities so links cannot point back to themselves.
     let skeleton: HashSet<Entity> = parts.0.values().copied().collect();
     for entity in children.iter_descendants(ready.entity) {
@@ -68,14 +87,24 @@ pub fn bind_tank_view(
         let Ok(name) = names.get(entity) else {
             continue;
         };
-        if hidden(name.as_str()) {
+        let name = name.as_str();
+        if hidden(name) {
             commands.entity(entity).insert(Visibility::Hidden);
         }
         // Mesh leaves may share object names but are not part anchors.
         if meshes.contains(entity) {
             continue;
         }
-        let Some(&sim) = parts.0.get(name.as_str()) else {
+        if bound_proxy(name) {
+            let draws = children
+                .iter_descendants(entity)
+                .any(|leaf| meshes.contains(leaf));
+            proxy_nodes.push((entity, draws));
+        }
+        if casters_bound && articulated(name) {
+            articulated_nodes.push(entity);
+        }
+        let Some(&sim) = parts.0.get(name) else {
             continue;
         };
         // The launch observer may have fired before this view existed.
@@ -101,6 +130,11 @@ pub fn bind_tank_view(
         if servos.contains(sim) {
             commands.entity(entity).insert(ViewServo);
         }
+    }
+    if casters_bound {
+        let parent = |entity| parents.get(entity).ok().map(ChildOf::parent);
+        super::shadow_proxy::plan(ready.entity, &proxy_nodes, &articulated_nodes, parent)
+            .bind(&mut commands, ready.entity);
     }
 }
 
@@ -144,10 +178,16 @@ fn detach_view_on_turret_launch(
         .remove::<(ViewOf, ViewServo)>();
 }
 
-/// Install presentation attachment and barrel pose synchronization.
+/// Install presentation attachment, barrel pose synchronization and the tank caster switch.
 pub fn view_attach_plugin(app: &mut App) {
+    let caster_mode = TankShadowProxy::from_env();
+    info!("tank shadow proxies: {caster_mode:?}");
+    app.insert_resource(caster_mode);
     app.add_observer(detach_view_on_turret_launch);
-    app.add_systems(Update, sync_view_barrels);
+    app.add_systems(
+        Update,
+        (sync_view_barrels, super::shadow_proxy::switch_tank_casters),
+    );
 }
 
 #[cfg(test)]

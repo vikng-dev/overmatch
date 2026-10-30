@@ -303,6 +303,10 @@ TankSpec(
     // Collision proxies (convex hull, Vehicle layer) — DECLARED, replacing the `*_Collider` suffix
     // scan. The suffix survives as a name because it reads well in Blender; nothing parses it.
     colliders: ["Hull_Collider", "Turret_Collider"],
+    // Shadow proxies: beyond the caster switch range each casts the shadow of the rigid node it is
+    // parented under, in place of that node's drawn geometry (tank::shadow_proxy). The two colliders
+    // stand in for the hull and the turret.
+    shadow_proxies: ["Hull_Collider", "Turret_Collider"],
     // Roadwheel stations — DECLARED, replacing the `Wheel_{L,R}_{n}` pattern match. The SAME node is
     // the suspension station and its own armour volume: each wheel is one object holding five closed
     // shells — two MildSteel bodies, two Rubber rims, one axle — so the wheel needs no volume

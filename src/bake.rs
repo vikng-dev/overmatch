@@ -1322,6 +1322,11 @@ fn declared_roles_resolve(geometry: &TankGeometry, spec: &TankSpec) -> Vec<Findi
             NodeRole::Collider if node.primitives.is_empty() => {
                 Some("it holds no mesh data at all".to_string())
             }
+            // Armour is drawn geometry that casts its own shadow; a node that is both would be
+            // silenced and stood in for by itself.
+            NodeRole::ShadowProxy if ballistic => {
+                Some("a primitive of it wears a registry substance".to_string())
+            }
             _ => None,
         };
         if let Some(evidence) = refusal {

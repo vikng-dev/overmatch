@@ -13,6 +13,7 @@ mod model;
 // shipped spawn point in one place (see `every_shipped_spawn_point_lands_above_the_shipped_terrain`).
 pub(crate) mod scenario;
 mod servo;
+mod shadow_proxy;
 mod spawn;
 mod view;
 

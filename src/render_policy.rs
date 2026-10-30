@@ -238,6 +238,21 @@ impl VisualScope {
         shadow: ShadowRole::ReceiveOnly,
     };
 
+    /// Drawn geometry that casts its own shadow and KEEPS INHERITING its channel: the detail side
+    /// of a [`CasterSwap`], and the scope of a moving part inside a swapped assembly that its
+    /// proxy cannot follow (a gun's pitch frame under a turret's proxy).
+    pub(crate) const OWN_CASTER: Self = Self {
+        channel: None,
+        shadow: ShadowRole::CastAndReceive,
+    };
+
+    /// A shadow proxy whose [`CasterSwap`] is on the detail side: drawn by no camera, seen by no
+    /// light.
+    pub(crate) const DORMANT_PROXY: Self = Self {
+        channel: Some(Channel::ShadowOnly),
+        shadow: ShadowRole::Neither,
+    };
+
     /// The pen cam inset's stage: drawn by the inset alone, in no shadow pass.
     pub(crate) const PEN_CAM_STAGE: Self = Self {
         channel: Some(Channel::PenCamStage),
@@ -255,6 +270,38 @@ impl VisualScope {
         channel: Some(Channel::PenCamPartMask),
         shadow: ShadowRole::Neither,
     };
+}
+
+/// Which half of a CASTER SWAP carries an assembly's shadow: its drawn geometry, or the shadow
+/// proxies standing in for it.
+///
+/// A swap is two scopes written together, one on the assembly's root and one on each of its
+/// proxies, and this is the one place that pairs them: in either state exactly one half casts, and
+/// the drawn half is drawn and lit in both.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub(crate) enum CasterSwap {
+    /// The drawn geometry casts; the proxies are dormant.
+    Detail,
+    /// The proxies cast; the drawn geometry only receives.
+    Proxy,
+}
+
+impl CasterSwap {
+    /// The scope the assembly's root takes, and its drawn geometry inherits.
+    pub(crate) const fn assembly(self) -> VisualScope {
+        match self {
+            Self::Detail => VisualScope::OWN_CASTER,
+            Self::Proxy => VisualScope::PROXIED_CASTER,
+        }
+    }
+
+    /// The scope each proxy standing in for the assembly takes.
+    pub(crate) const fn proxy(self) -> VisualScope {
+        match self {
+            Self::Detail => VisualScope::DORMANT_PROXY,
+            Self::Proxy => VisualScope::SHADOW_PROXY,
+        }
+    }
 }
 
 /// Which channels a camera draws. Put this on a `Camera3d` and change it to switch views; the mask
@@ -800,6 +847,75 @@ mod tests {
             !app.world().entity(shoe).contains::<NotShadowReceiver>(),
             "it still RECEIVES — the hull's shadow crossing the return run is visible"
         );
+    }
+
+    /// THE CASTER SWAP'S LAW: in either state exactly one half of an assembly casts — never both
+    /// (a double shadow), never neither (a missing one). The drawn half stays drawn, lit and on its
+    /// tank's channel in both states, and no camera ever draws the proxy. `tank::shadow_proxy`
+    /// switches tanks between the two states by writing these scopes and relies on this pairing.
+    #[test]
+    fn a_caster_swap_casts_exactly_one_half_in_either_state() {
+        let mut app = App::new();
+        app.add_plugins(plugin);
+        let world = app.world_mut();
+        let tank = world.spawn(VisualScope::VIEW_SUBJECT_BODY).id();
+        let assembly = world
+            .spawn((CasterSwap::Detail.assembly(), ChildOf(tank)))
+            .id();
+        let part = world.spawn(ChildOf(assembly)).id();
+        let drawn = world.spawn((Mesh3d(Handle::default()), ChildOf(part))).id();
+        let proxy = world
+            .spawn((CasterSwap::Detail.proxy(), ChildOf(assembly)))
+            .id();
+        let stand_in = world
+            .spawn((Mesh3d(Handle::default()), ChildOf(proxy)))
+            .id();
+        let third_person = world.spawn(CameraProfile::BattlefieldThirdPerson).id();
+        let optic = world.spawn(CameraProfile::BattlefieldOptic).id();
+        let sun = world.spawn(LightProfile::BattlefieldSun).id();
+        app.update();
+
+        for swap in [
+            CasterSwap::Detail,
+            CasterSwap::Proxy,
+            CasterSwap::Detail,
+            CasterSwap::Proxy,
+        ] {
+            let world = app.world_mut();
+            world.entity_mut(assembly).insert(swap.assembly());
+            world.entity_mut(proxy).insert(swap.proxy());
+            app.update();
+            let world = app.world();
+            assert_ne!(
+                casts_shadow(world, drawn),
+                casts_shadow(world, stand_in),
+                "{swap:?}: exactly one half casts"
+            );
+            assert_eq!(
+                casts_shadow(world, stand_in),
+                swap == CasterSwap::Proxy,
+                "{swap:?}: the proxy casts exactly when the swap says so"
+            );
+            assert!(
+                !world.entity(drawn).contains::<NotShadowReceiver>(),
+                "{swap:?}: the drawn half is always lit"
+            );
+            assert!(reaches(world, third_person, drawn));
+            assert!(
+                !reaches(world, optic, drawn),
+                "{swap:?}: the drawn half keeps inheriting its tank's channel"
+            );
+            for camera in [third_person, optic] {
+                assert!(
+                    !reaches(world, camera, stand_in),
+                    "{swap:?}: no camera draws a proxy"
+                );
+            }
+            assert!(
+                reaches(world, sun, stand_in),
+                "the sun sees the proxy's channel"
+            );
+        }
     }
 
     /// Late arrival: a mesh attached long after its ancestor was scoped still resolves. The tank
