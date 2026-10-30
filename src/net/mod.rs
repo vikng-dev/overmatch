@@ -16,6 +16,9 @@ mod death_screen;
 // The kill cam's composed schedule under test mounts the death screen, the reader of its gate.
 #[cfg(test)]
 pub(crate) use death_screen::{mount_bare as mount_death_screen, shows_died};
+/// The debris stress lever (`OVERMATCH_DEBRIS_STRESS`): server-simulated wall fragments, frozen at
+/// rest, their poses replicated, drawn by clients.
+mod debris_stress;
 mod debug_hud;
 /// The destruction ledger: tree state transitions on one globally visible entity.
 mod destruction;

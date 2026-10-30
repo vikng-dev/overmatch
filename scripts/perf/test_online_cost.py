@@ -18,7 +18,15 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent))
 
-from online_cost import after_marker, bots_spawned, net_row, parse_stats_line  # noqa: E402
+from online_cost import (  # noqa: E402
+    after_marker,
+    aggregate,
+    bots_spawned,
+    net_row,
+    parse_stats_line,
+    stress_cells,
+    stress_rollup,
+)
 
 # The shape src/net/server_stats.rs prints (`stats_line`), keys in its order.
 STATS = (
@@ -85,6 +93,45 @@ class BotsSpawned(unittest.TestCase):
 
     def test_a_count_line_reads_as_its_count(self):
         self.assertEqual(bots_spawned(["INFO server: spawned 10 bots (OVERMATCH_BOT=10)"]), 10)
+
+
+def debris_line(tick_p50: float, live: int) -> str:
+    # The shape src/net/server_stats.rs prints with the debris stress lever armed (`stats_line`).
+    return (
+        'server_stats {"budget_us":15625,"clients":1,"cpu_pct":40.0,"entities":4000,"overruns":0,'
+        '"period_s":1.0,"projectiles":0,"rss_mb":90.0,"tanks":30,"tick_hz":64.0,'
+        f'"tick_us":{{"max":3000,"p50":{tick_p50},"p95":2500}},"ticks":64,'
+        '"physics_us":{"max":900,"p50":400,"p95":700},"send_us":{"max":300,"p50":100,"p95":200},'
+        f'"debris":{{"live":{live},"frozen":120,"breaches":4,"released":{40 * live},'
+        '"rest_frozen":110,"cap_frozen":0,"thawed":2,"despawned":0}}'
+    )
+
+
+class StressTable(unittest.TestCase):
+    def test_the_stress_columns_read_the_keys_the_server_prints(self):
+        # The night's debris table is built from these dotted keys; a renamed field on either side
+        # empties its column instead of failing, so the coupling is pinned here.
+        stats = aggregate([parse_stats_line(debris_line(1000, 10)), parse_stats_line(debris_line(1200, 30))])
+        cells = stress_cells(stats)
+        self.assertEqual(cells["tick_p50"], 1100)
+        self.assertEqual(cells["phys_p95"], 700)
+        self.assertEqual(cells["send_p50"], 100)
+        self.assertEqual(cells["live"], 20)
+        self.assertEqual(cells["live_max"], 30)
+        self.assertEqual(cells["released"], 800, "released is cumulative: the window's count is last - first")
+
+    def test_an_off_condition_has_no_debris_cells_and_anchors_the_deltas(self):
+        # An unarmed server prints no `debris` object: its cells must read absent, not zero pieces,
+        # and every other lever's change is taken from its median, not from a neighbour's.
+        off = stress_cells(aggregate([parse_stats_line(STATS)]))
+        self.assertIsNone(off["live"])
+        armed = stress_cells(aggregate([parse_stats_line(debris_line(1000, 10))]))
+        rows = stress_rollup([("off", off), ("10:5", armed), ("off", off)])
+        self.assertEqual([row[0] for row in rows], ["off", "10:5"])
+        self.assertEqual(rows[0][1], "2")
+        # tick_p50: 210 off, 1000 armed.
+        self.assertEqual(rows[1][2:4], ["1000", "+790"])
+        self.assertEqual(rows[0][3], "+0")
 
 
 class NetRow(unittest.TestCase):

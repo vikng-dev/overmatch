@@ -13,12 +13,20 @@
 //! - `overruns`: ticks longer than the fixed timestep, `budget_us`;
 //! - `clients` (connected links), `tanks`, `projectiles`, `entities`, sampled at the line;
 //! - `cpu_pct`: the process's user + system CPU over the period, as % of one core;
-//! - `rss_mb`: resident memory at the line.
+//! - `rss_mb`: resident memory at the line;
+//! - `physics_us`: `p50`, `p95` and `max` of avian's step (its `PhysicsSchedule`, broad phase
+//!   through finalize), one sample per fixed tick, null when none ran;
+//! - `send_us`: `p50`, `p95` and `max` of the outbound path, one sample per frame that replicated:
+//!   the wall time from before replicon's `ServerSystems::Send` (the change scan and serialisation)
+//!   to after lightyear's `LinkSystems::Send` (the socket flush), null when none ran. It is a
+//!   bracket, so it also holds any unordered `PostUpdate` system the executor ran inside it;
+//! - `debris`: present only while the debris stress lever is armed (`net::debris_stress`): its
+//!   `live` and `frozen` pieces at the line, and its cumulative counts.
 //!
 //! `cpu_pct` and `rss_mb` are null where the platform gives no reading.
 //!
 //! The tick wall time is the cost recorder's measurement ([`crate::cost::TickClock`]), never a
-//! second timer.
+//! second timer. `physics_us` sits inside it; `send_us` runs after the fixed loop, outside it.
 //!
 //! Not carried: bytes per client. lightyear 0.30.1 shows a link's queued payloads only through an
 //! `iter` behind its `test_utils` feature, and counts bytes only in gauges behind its `metrics`
@@ -26,11 +34,16 @@
 
 use std::time::{Duration, Instant};
 
+use avian3d::prelude::{PhysicsSchedule, PhysicsStepSystems};
 use bevy::prelude::*;
+use bevy_replicon::prelude::ServerSystems;
+use bevy_replicon::server::server_tick::ServerTick;
+use lightyear::link::LinkSystems;
 use lightyear::prelude::Connected;
 use lightyear::prelude::server::ClientOf;
 use serde_json::{Value, json};
 
+use super::debris_stress::DebrisCensus;
 use crate::ballistics::Projectile;
 use crate::cost::{TickClock, TickClosed, arm_tick_clock};
 use crate::tank::Tank;
@@ -57,9 +70,27 @@ pub(super) fn install(app: &mut App) {
     app.insert_resource(ServerStats {
         period: Period::new(period, Instant::now()),
         ticks: TickWindow::default(),
+        physics: TickWindow::default(),
+        send: TickWindow::default(),
         cpu_at_start: process_cpu(),
     });
+    app.init_resource::<PhaseStarts>();
     app.add_systems(FixedLast, record_tick.after(TickClosed));
+    app.add_systems(
+        PhysicsSchedule,
+        (
+            open_physics.in_set(PhysicsStepSystems::First),
+            close_physics.in_set(PhysicsStepSystems::Last),
+        ),
+    );
+    app.add_systems(
+        PostUpdate,
+        (
+            open_send.before(ServerSystems::Send),
+            close_send.after(LinkSystems::Send),
+        )
+            .run_if(resource_changed::<ServerTick>),
+    );
     app.add_systems(Last, emit_line);
 }
 
@@ -80,8 +111,19 @@ fn period_from(value: Option<&str>) -> Option<Duration> {
 struct ServerStats {
     period: Period,
     ticks: TickWindow,
+    /// The period's avian steps, wall micros.
+    physics: TickWindow,
+    /// The period's outbound brackets, wall micros.
+    send: TickWindow,
     /// The process's CPU time when the current period opened.
     cpu_at_start: Option<Duration>,
+}
+
+/// The open phase brackets' starts.
+#[derive(Resource, Default)]
+struct PhaseStarts {
+    physics: Option<Instant>,
+    send: Option<Instant>,
 }
 
 /// The wall-clock period gate.
@@ -160,6 +202,9 @@ struct Snapshot {
     elapsed: Duration,
     budget_us: f64,
     ticks: Option<TickSummary>,
+    physics: Option<TickSummary>,
+    send: Option<TickSummary>,
+    debris: Option<Value>,
     clients: usize,
     tanks: usize,
     projectiles: usize,
@@ -178,14 +223,17 @@ fn stats_line(snapshot: &Snapshot) -> String {
     let period_s = snapshot.elapsed.as_secs_f64();
     let ticks = snapshot.ticks.as_ref();
     let count = ticks.map_or(0, |summary| summary.ticks);
-    let tick_us = ticks.map_or(Value::Null, |summary| {
-        json!({
-            "p50": tenth(summary.p50),
-            "p95": tenth(summary.p95),
-            "max": tenth(summary.max),
+    let percentiles = |summary: Option<&TickSummary>| {
+        summary.map_or(Value::Null, |summary| {
+            json!({
+                "p50": tenth(summary.p50),
+                "p95": tenth(summary.p95),
+                "max": tenth(summary.max),
+            })
         })
-    });
-    let body = json!({
+    };
+    let tick_us = percentiles(ticks);
+    let mut body = json!({
         "period_s": tenth(period_s),
         "ticks": count,
         "tick_hz": tenth(count as f64 / period_s),
@@ -198,7 +246,12 @@ fn stats_line(snapshot: &Snapshot) -> String {
         "entities": snapshot.entities,
         "cpu_pct": snapshot.cpu_pct.map(tenth),
         "rss_mb": snapshot.rss_bytes.map(|bytes| tenth(bytes as f64 / (1024.0 * 1024.0))),
+        "physics_us": percentiles(snapshot.physics.as_ref()),
+        "send_us": percentiles(snapshot.send.as_ref()),
     });
+    if let Some(debris) = &snapshot.debris {
+        body["debris"] = debris.clone();
+    }
     format!("{PREFIX} {body}")
 }
 
@@ -206,6 +259,26 @@ fn stats_line(snapshot: &Snapshot) -> String {
 fn record_tick(clock: Res<TickClock>, mut stats: ResMut<ServerStats>) {
     if let Some(closed) = clock.closed() {
         stats.ticks.push(closed.us);
+    }
+}
+
+fn open_physics(mut starts: ResMut<PhaseStarts>) {
+    starts.physics = Some(Instant::now());
+}
+
+fn close_physics(mut starts: ResMut<PhaseStarts>, mut stats: ResMut<ServerStats>) {
+    if let Some(start) = starts.physics.take() {
+        stats.physics.push(start.elapsed().as_secs_f64() * 1.0e6);
+    }
+}
+
+fn open_send(mut starts: ResMut<PhaseStarts>) {
+    starts.send = Some(Instant::now());
+}
+
+fn close_send(mut starts: ResMut<PhaseStarts>, mut stats: ResMut<ServerStats>) {
+    if let Some(start) = starts.send.take() {
+        stats.send.push(start.elapsed().as_secs_f64() * 1.0e6);
     }
 }
 
@@ -217,6 +290,7 @@ fn emit_line(
     tanks: Query<(), With<Tank>>,
     projectiles: Query<(), With<Projectile>>,
     all: Query<Entity>,
+    debris: DebrisCensus,
 ) {
     let Some(elapsed) = stats.period.close(Instant::now()) else {
         return;
@@ -231,6 +305,9 @@ fn emit_line(
         elapsed,
         budget_us,
         ticks: stats.ticks.drain(budget_us),
+        physics: stats.physics.drain(budget_us),
+        send: stats.send.drain(budget_us),
+        debris: debris.json(),
         clients: clients.iter().count(),
         tanks: tanks.iter().count(),
         projectiles: projectiles.iter().count(),
@@ -371,8 +448,9 @@ mod tests {
     }
 
     /// The line is `server_stats ` and one JSON object carrying every field the night's analysis
-    /// reads; a missing reading is null, not zero, so an absent CPU reading cannot pass for an idle
-    /// core.
+    /// reads (`scripts/perf/online_cost.py` flattens them to dotted keys: `physics_us.p95`,
+    /// `debris.live`); a missing reading is null, not zero, so an absent CPU reading cannot pass for
+    /// an idle core.
     #[test]
     fn the_line_is_a_prefix_then_one_json_object() {
         let full = Snapshot {
@@ -385,6 +463,21 @@ mod tests {
                 max: 16_000.0,
                 overruns: 1,
             }),
+            physics: Some(TickSummary {
+                ticks: 640,
+                p50: 301.04,
+                p95: 455.0,
+                max: 900.0,
+                overruns: 0,
+            }),
+            send: Some(TickSummary {
+                ticks: 640,
+                p50: 120.0,
+                p95: 180.06,
+                max: 250.0,
+                overruns: 0,
+            }),
+            debris: Some(json!({"live": 35, "frozen": 140})),
             clients: 2,
             tanks: 6,
             projectiles: 3,
@@ -413,11 +506,17 @@ mod tests {
                 "entities": 1234,
                 "cpu_pct": 37.6,
                 "rss_mb": 200.0,
+                "physics_us": {"p50": 301.0, "p95": 455.0, "max": 900.0},
+                "send_us": {"p50": 120.0, "p95": 180.1, "max": 250.0},
+                "debris": {"live": 35, "frozen": 140},
             })
         );
 
         let empty = Snapshot {
             ticks: None,
+            physics: None,
+            send: None,
+            debris: None,
             cpu_pct: None,
             rss_bytes: None,
             ..full
@@ -429,5 +528,11 @@ mod tests {
         assert_eq!(value["tick_us"], Value::Null);
         assert_eq!(value["cpu_pct"], Value::Null);
         assert_eq!(value["rss_mb"], Value::Null);
+        assert_eq!(value["physics_us"], Value::Null);
+        assert_eq!(value["send_us"], Value::Null);
+        assert!(
+            value.get("debris").is_none(),
+            "an unarmed debris lever adds no key, so a production line is unchanged by it"
+        );
     }
 }

@@ -590,6 +590,9 @@ pub(crate) enum Layer {
     /// Witness volumes (crew, ADR-0040): never cast against, never in the armour walk; read only
     /// by the witness pass (`ballistics::wound`).
     Witness,
+    /// Server-simulated wall fragments (`net::debris_stress`): they collide with `Terrain`,
+    /// `Vehicle` and each other, and no ground or armour query reads them.
+    Debris,
 }
 
 /// A non-zero, match-local identity assigned synchronously when a combatant spawns.

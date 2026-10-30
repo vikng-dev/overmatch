@@ -21,6 +21,16 @@
 #   Metal shader cache and the path] → the condition `botsN` (run-online-cost.sh) → logs → metrics →
 #   stop → confirmed gone. A count the server did not honour (fewer `spawned … bot` lines than N)
 #   ends the chain: the larger counts would measure the same server again.
+# DEBRIS (the debris stress lever's values, src/net/debris_stress.rs; `off` for none) makes the
+# chain one deployment per bot count AND value, each deployed with `--debris <value>`, named
+# `bots<N>-d<NN>-<value>`: the server's price per falling wall fragment on the 1 vCPU host, the
+# same conditions scripts/perf/run-debris-stress.sh runs locally. Tonight's:
+#
+#   /usr/bin/lockf -k -t 10800 /tmp/overmatch-cargo.lock env OFFSCREEN=1 BIN=<dir> ASSET_ROOT=<dir> \
+#     BOTS=29 DEBRIS='off 10:5 35:5 200:5 200:5 35:5 10:5 off' \
+#     scripts/perf/run-online-night.sh <out-dir> <edgegap-version>
+#
+# The measured client renders the fragments too, so its frame table is their client price as well.
 # Then the tables over every condition (client frames, client bytes, server stats), and the final
 # sweep: every live `profile-` deployment is stopped (only this kind of run makes them, and the
 # machine lock admits one at a time) and the count left must be 0.
@@ -29,18 +39,21 @@
 # pulls each unstopped deployment's logs, stops it, and runs the final sweep. Behind it, each
 # deployment's own watchdog (session.sh) stops it at MAX_MIN even if this process is killed -9.
 #
-# Products: <out>/deployments.tsv (id, bots, status line), <out>/warmup/, <out>/bots<N>/ (the
-# runner's products, plus server.log: the whole container log, and metrics.json: Edgegap's
-# `?raw=true` series), <out>/summary.txt (the three tables, headed by where the server ran).
+# Products: <out>/deployments.tsv (id, bots, debris, status line), <out>/warmup/, <out>/<condition>/
+# (the runner's products, plus server.log: the whole container log, and metrics.json: Edgegap's
+# `?raw=true` series), <out>/summary.txt (the three tables, headed by where the server ran; with
+# DEBRIS, the debris table after them, from <out>/conditions.tsv).
 #
-# Wall clock: per bot count ~2.5 min (deploy 5–15 s, startup + WARMUP_S 20 + DURATION_S 60 +
-# COOLDOWN_S 5, logs and stop ~15 s), plus ~1.5 min of warm-up: ~9 min for the default three.
-# Cost: ~10 deployment-minutes at 1 vCPU, ~$0.01 (DERIVED, $0.069/h list).
+# Wall clock: per condition ~2.5 min (deploy 5–15 s, startup + WARMUP_S 20 + DURATION_S 60 +
+# COOLDOWN_S 5, logs and stop ~15 s), plus ~1.5 min of warm-up: ~9 min for the default three, ~22
+# min for one bot count and eight debris values.
+# Cost: ~10 deployment-minutes at 1 vCPU, ~$0.01 (DERIVED, $0.069/h list); ~$0.03 for the eight.
 # Validity: the runner's gates, per condition; a condition that fails them is reported and the
 # chain goes on to the next count (the deployment is still stopped).
 # =======================================================================
 #
-# Knobs (env): BOTS ("1 10 28"), LOAD_CLIENTS (0: window-less scripted clients added to every
+# Knobs (env): BOTS ("1 10 28"), DEBRIS (unset: no debris lever; else its values, see above),
+# LOAD_CLIENTS (0: window-less scripted clients added to every
 # condition), MAX_MIN (30: each deployment's watchdog), DEPLOY_ENV (extra K=V words for every
 # deployment's server env), EDGEGAP_CITIES (session.sh's fallback list, default
 # "Singapore Tokyo Mumbai"), WARMUP_S (20), DURATION_S (60), COOLDOWN_S (5), WARMUP_RUN_S (20: the
@@ -130,18 +143,53 @@ caffeinate -dims -w $$ </dev/null >/dev/null 2>&1 &
 deploy_args=()
 for kv in $DEPLOY_ENV; do deploy_args+=(--env "$kv"); done
 
+# The chain's conditions, in order. Without DEBRIS: one per bot count, `bots<N>`. With it: one per
+# bot count and debris value, `bots<N>-d<NN>-<value, x for :>`, each listed in conditions.tsv for
+# the debris table.
+DEBRIS="${DEBRIS:-}"
+chain_bots=()
+chain_debris=()
+chain_names=()
+for bots in $BOTS; do
+  if [[ -z "$DEBRIS" ]]; then
+    chain_bots+=("$bots")
+    chain_debris+=(off)
+    chain_names+=("bots$bots")
+    continue
+  fi
+  n=0
+  for debris in $DEBRIS; do
+    n=$((n + 1))
+    chain_bots+=("$bots")
+    chain_debris+=("$debris")
+    chain_names+=("$(printf 'bots%s-d%02d-%s' "$bots" "$n" "${debris//:/x}")")
+  done
+done
+if [[ -n "$DEBRIS" ]]; then
+  : >"$OUT/conditions.tsv"
+  for i in "${!chain_names[@]}"; do
+    printf '%s\t%s\t%s\n' "${chain_names[$i]}" "${chain_debris[$i]}" \
+      "${chain_names[$i]}/${chain_names[$i]}.server.json" >>"$OUT/conditions.tsv"
+  done
+fi
+
 first=1
 baseline=""
-for bots in $BOTS; do
-  dir="$OUT/bots$bots"
-  say "== bots $bots: deploying $VERSION"
+for i in "${!chain_names[@]}"; do
+  bots="${chain_bots[$i]}"
+  debris="${chain_debris[$i]}"
+  name="${chain_names[$i]}"
+  dir="$OUT/$name"
+  debris_args=()
+  [[ -n "$DEBRIS" ]] && debris_args=(--debris "$debris")
+  say "== $name: deploying $VERSION (bots $bots, debris $debris)"
   if ! id="$("$SESSION" deploy "$VERSION" --bots "$bots" --stats-s "$STATS_PERIOD_S" \
-    --max-min "$MAX_MIN" ${deploy_args[@]+"${deploy_args[@]}"})"; then
-    say "bots $bots: no deployment turned READY; stopping the chain"
-    FAILED+=("bots$bots(deploy)")
+    ${debris_args[@]+"${debris_args[@]}"} --max-min "$MAX_MIN" ${deploy_args[@]+"${deploy_args[@]}"})"; then
+    say "$name: no deployment turned READY; stopping the chain"
+    FAILED+=("$name(deploy)")
     break
   fi
-  printf '%s\t%s\t%s\n' "$id" "$bots" "$("$SESSION" status "$id")" >>"$LEDGER"
+  printf '%s\t%s\t%s\t%s\n' "$id" "$bots" "$debris" "$("$SESSION" status "$id")" >>"$LEDGER"
   target="$("$SESSION" address "$id" --wait 60)"
 
   if [[ -n "$first" ]]; then
@@ -152,23 +200,23 @@ for bots in $BOTS; do
     first=""
   fi
 
-  spec="bots$bots|"
-  ((LOAD_CLIENTS > 0)) && spec="bots$bots||LOAD_CLIENTS=$LOAD_CLIENTS"
+  spec="$name|"
+  ((LOAD_CLIENTS > 0)) && spec="$name||LOAD_CLIENTS=$LOAD_CLIENTS"
   if run_waited env TARGET="$target" DEPLOYMENT="$id" "$RUNNER" "$dir" "$spec"; then
-    [[ -n "$baseline" ]] || baseline="bots$bots"
+    [[ -n "$baseline" ]] || baseline="$name"
   else
-    FAILED+=("bots$bots")
+    FAILED+=("$name")
   fi
 
-  "$SESSION" logs "$id" "$dir/server.log" >/dev/null || say "bots $bots: the full log could not be pulled"
-  "$SESSION" metrics "$id" "$dir/metrics.json" >/dev/null || say "bots $bots: no metrics"
+  "$SESSION" logs "$id" "$dir/server.log" >/dev/null || say "$name: the full log could not be pulled"
+  "$SESSION" metrics "$id" "$dir/metrics.json" >/dev/null || say "$name: no metrics"
   if "$SESSION" stop "$id"; then STOPPED="$STOPPED$id "; fi
 
   if ((bots > 1)); then
     spawned="$(cd "$REPO" && uv run scripts/perf/online_cost.py bots "$dir/server.log")"
     if ((spawned < bots)); then
-      say "bots $bots: the server spawned $spawned bot(s) — the N-bot lever did not take; the larger counts would repeat this one"
-      echo "bots$bots: OVERMATCH_BOT=$bots spawned $spawned bot(s)" >>"$OUT/notes.txt"
+      say "$name: the server spawned $spawned bot(s) — the N-bot lever did not take; the conditions after it would repeat this one"
+      echo "$name: OVERMATCH_BOT=$bots spawned $spawned bot(s)" >>"$OUT/notes.txt"
       break
     fi
   fi
@@ -176,7 +224,7 @@ done
 
 {
   echo "online profile: Edgegap version $VERSION, from $(hostname -s), $(date '+%F %H:%M %Z')"
-  cut -f2- "$LEDGER" | sed 's/^/deployment (bots, status at READY): /'
+  cut -f2- "$LEDGER" | sed 's/^/deployment (bots, debris, status at READY): /'
   [[ -f "$OUT/notes.txt" ]] && cat "$OUT/notes.txt"
 } >"$OUT/summary.txt"
 streams=("$OUT"/bots*/bots*.client.jsonl)
@@ -187,5 +235,8 @@ if [[ -n "$baseline" && -e "${streams[0]}" ]]; then
     --expected-duration-s "$DURATION_S" ${relax[@]+"${relax[@]}"} --baseline "$baseline" "${streams[@]}") |
     tee -a "$OUT/summary.txt" || FAILED+=("analysis")
   (cd "$REPO" && uv run scripts/perf/online_cost.py tables "$OUT"/bots*) | tee -a "$OUT/summary.txt"
+fi
+if [[ -n "$DEBRIS" ]]; then
+  (cd "$REPO" && uv run scripts/perf/online_cost.py stress "$OUT/conditions.tsv") | tee -a "$OUT/summary.txt"
 fi
 say "online night complete -> $OUT/summary.txt"

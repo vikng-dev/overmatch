@@ -4,7 +4,7 @@
 # ///
 """The online cost runner's server side and its tables (scripts/perf/run-online-cost.sh).
 
-Three subcommands:
+Four subcommands:
 
   server-window --label <cond> [--after-marker <file>] [--json out] <server.log>
       The server's stats lines inside one condition's window, aggregated per key.
@@ -13,6 +13,11 @@ Three subcommands:
   tables <out-dir> ...
       The per-condition client network table (nettop) and server table, beside the client frame
       table `analyze.py` prints.
+  stress <conditions.tsv>
+      The debris stress table (scripts/perf/run-debris-stress.sh, run-online-night.sh DEBRIS=): one
+      row per condition, then one per lever value with its change from `off`. The TSV's lines are
+      `<condition> <lever> <server.json>`, tab-separated, in run order; a relative json path is
+      read against the TSV's directory.
 
 THE STATS LINE (src/net/server_stats.rs) is one bare `println!` per period on stdout, no timestamp:
 
@@ -243,6 +248,94 @@ def cmd_tables(args: argparse.Namespace) -> int:
     return 0
 
 
+# The stress table's columns: (header, stats key, aggregate). A cell is that aggregate across the
+# window's periods of a per-period value, so `tick_p95` is the median period's p95.
+STRESS_COLUMNS = [
+    ("tick_p50", "tick_us.p50", "median"),
+    ("tick_p95", "tick_us.p95", "median"),
+    ("tick_max", "tick_us.max", "max"),
+    ("phys_p50", "physics_us.p50", "median"),
+    ("phys_p95", "physics_us.p95", "median"),
+    ("send_p50", "send_us.p50", "median"),
+    ("send_p95", "send_us.p95", "median"),
+    ("cpu_pct", "cpu_pct", "median"),
+    ("overruns", "overruns", "median"),
+    ("live", "debris.live", "median"),
+    ("live_max", "debris.live", "max"),
+    ("frozen_max", "debris.frozen", "max"),
+    ("released", "debris.released", "last_minus_first"),
+    ("tanks", "tanks", "median"),
+]
+# The rollup's columns, each also shown as its change from the `off` lever's.
+STRESS_DELTAS = ["tick_p50", "tick_p95", "phys_p50", "phys_p95", "send_p50", "send_p95", "cpu_pct"]
+
+
+def read_conditions(tsv: Path) -> list[tuple[str, str, Path]]:
+    """`(condition, lever, server.json)` per line of a conditions TSV, in run order."""
+    rows = []
+    for line in tsv.read_text().splitlines():
+        if not line.strip() or line.startswith("#"):
+            continue
+        cond, lever, path = line.split("\t")[:3]
+        json_path = Path(path) if Path(path).is_absolute() else tsv.parent / path
+        rows.append((cond, lever, json_path))
+    return rows
+
+
+def stress_cells(stats: dict[str, dict[str, float]]) -> dict[str, float | None]:
+    """One condition's stress columns from its aggregated stats; None where the key is absent (an
+    `off` server prints no `debris` object)."""
+    return {header: (stats[key][agg] if key in stats else None) for header, key, agg in STRESS_COLUMNS}
+
+
+def stress_rollup(rows: list[tuple[str, dict[str, float | None]]]) -> list[list[str]]:
+    """Per lever value, in first-seen order: the median of its conditions' cells for each
+    `STRESS_DELTAS` column, and that median's change from the `off` lever's ("-" without one)."""
+    by_lever: dict[str, list[dict[str, float | None]]] = {}
+    for lever, cells in rows:
+        by_lever.setdefault(lever, []).append(cells)
+
+    def median_of(cells: list[dict[str, float | None]], header: str) -> float | None:
+        values = [c[header] for c in cells if c[header] is not None]
+        return statistics.median(values) if values else None
+
+    base = by_lever.get("off")
+    out = []
+    for lever, cells in by_lever.items():
+        row = [lever, str(len(cells))]
+        for header in STRESS_DELTAS:
+            value = median_of(cells, header)
+            reference = median_of(base, header) if base else None
+            row.append("-" if value is None else fmt(value))
+            row.append("-" if value is None or reference is None else f"{value - reference:+.3g}")
+        out.append(row)
+    return out
+
+
+def cmd_stress(args: argparse.Namespace) -> int:
+    conditions = read_conditions(Path(args.tsv))
+    print("\n== debris stress, per condition: medians across the window's periods (*_max: the max)")
+    table, rollup = [], []
+    for cond, lever, path in conditions:
+        if not path.exists():
+            table.append([cond, lever, "-"] + ["-"] * len(STRESS_COLUMNS))
+            continue
+        result = json.loads(path.read_text())
+        cells = stress_cells(result["stats"])
+        rollup.append((lever, cells))
+        table.append(
+            [cond, lever, str(result["stats_lines"])]
+            + ["-" if cells[h] is None else fmt(cells[h]) for h, _, _ in STRESS_COLUMNS]
+        )
+    print_table(["condition", "lever", "lines"] + [h for h, _, _ in STRESS_COLUMNS], table)
+    print("\n== debris stress, per lever: the median of its conditions (d_: change from `off`)")
+    header = ["lever", "runs"]
+    for h in STRESS_DELTAS:
+        header += [h, f"d_{h}"]
+    print_table(header, stress_rollup(rollup))
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="cmd", required=True)
@@ -255,8 +348,11 @@ def main() -> int:
     bots.add_argument("log")
     tables = sub.add_parser("tables")
     tables.add_argument("dirs", nargs="+")
+    stress = sub.add_parser("stress")
+    stress.add_argument("tsv")
     args = parser.parse_args()
-    return {"server-window": cmd_server_window, "bots": cmd_bots, "tables": cmd_tables}[args.cmd](args)
+    commands = {"server-window": cmd_server_window, "bots": cmd_bots, "tables": cmd_tables, "stress": cmd_stress}
+    return commands[args.cmd](args)
 
 
 if __name__ == "__main__":

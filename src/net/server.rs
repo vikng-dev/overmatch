@@ -77,6 +77,10 @@ pub fn run() {
     app.add_plugins(super::plugin);
     super::disclosure::install_server(&mut app);
     super::destruction::install_server(&mut app);
+    if let Err(err) = super::debris_stress::install_server(&mut app) {
+        eprintln!("overmatch-server: fatal: {err}");
+        std::process::exit(2);
+    }
     app.add_plugins(physics::physics_plugins());
     app.add_plugins(SimPlugin);
     app.add_plugins(crate::trace::server_plugin);
