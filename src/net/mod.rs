@@ -72,6 +72,8 @@ mod tests;
 /// The net client's UI, screen by screen: every root owned, each screen drawing only its own.
 #[cfg(test)]
 mod ui_ownership;
+/// The quantised wire forms of the per-tick hull and belt state.
+mod wire_quant;
 
 /// Run the network client.
 pub use client::run as run_client;

@@ -204,8 +204,9 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// graph and REV move.
 ///
 /// REV 40 (#185, a client's download per remote tank): `TankTransmission` joins the owner-only
-/// disclosure scope and every tank root carries a public `EngineRpm` for the engine sound.
-/// Surface, own-type graph and REV move.
+/// disclosure scope and every tank root carries a public `EngineRpm` for the engine sound;
+/// `Rotation` rides `wire_quant`'s 6-byte smallest-three codec. Surface, own-type graph and REV
+/// move.
 pub const PROTOCOL_REV: u32 = 40;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
@@ -975,6 +976,10 @@ const WIRE_SURFACE_HASH: u64 = 0xa74c_507b_a869_c2e0;
 //     carries `WeaponLoad`, `TankCommand` (src/command.rs) carries `CrewSwap` and `RoundSelect`
 //     (which carries `RoundStep`), and both
 //     `CrewSnapshot` and `CrewSwap` carry `CrewStation` (src/damage.rs).
+//     A component whose bytes a CODEC decides rather than its serde derive (`wire_quant`'s rule
+//     functions) is covered by that codec's whole source, comments and whitespace stripped, folded
+//     into the same hash (the test module's `WIRE_CODEC_SOURCES`): a step, range or layout change
+//     there moves it.
 //   * EXTERNAL types (avian `Position`/`Rotation`/`LinearVelocity`/`AngularVelocity`, plus lightyear's
 //     own wire framing) — their source is not in this tree to scan, so they are covered by DEP VERSION:
 //     [`WIRE_DEP_AVIAN3D`]/[`WIRE_DEP_LIGHTYEAR`] pin the resolved `Cargo.lock` versions, so a bump of
@@ -987,7 +992,7 @@ const WIRE_SURFACE_HASH: u64 = 0xa74c_507b_a869_c2e0;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x375e_b7de_13cc_69bd;
+const WIRE_TYPES_HASH: u64 = 0x0cfc_5592_2f9d_f206;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1124,7 +1129,7 @@ pub(crate) fn plugin(app: &mut App) {
         .replicate()
         .add_linear_interpolation();
     app.component::<Rotation>()
-        .replicate()
+        .replicate_with(super::wire_quant::rotation_fns())
         .add_linear_interpolation();
     app.component::<LinearVelocity>().replicate();
     app.component::<AngularVelocity>().replicate();
@@ -1940,18 +1945,37 @@ mod tests {
         }
     }
 
-    /// FNV-1a over every own wire type's normalized definition, each terminated by `\n` (so no two
-    /// distinct definition sets collide by concatenation) — the same fold shape as `hash_wire_surface`.
+    /// The own wire CODECS: modules whose functions, not a type's serde derive, decide the bytes a
+    /// registered component rides as (`replicate_with`). Each file's whole source, comments and
+    /// whitespace stripped, folds into [`WIRE_TYPES_HASH`] after the type definitions, so a step,
+    /// range or bit-layout change re-pins it. Codec tests live in a child file, outside the fold.
+    const WIRE_CODEC_SOURCES: &[&str] = &["src/net/wire_quant.rs"];
+
+    /// FNV-1a over every own wire type's normalized definition, then every codec's normalized
+    /// source, each terminated by `\n` (so no two distinct sets collide by concatenation) — the same
+    /// fold shape as `hash_wire_surface`.
     fn hash_wire_types() -> u64 {
         let mut hash = 0xcbf2_9ce4_8422_2325u64;
-        for (file, name) in WIRE_TYPE_DEFS {
-            let stripped = strip_comments(&read_source(file));
-            for byte in normalized_type_def(&stripped, name).bytes() {
+        let mut fold = |text: &str| {
+            for byte in text.bytes() {
                 hash ^= u64::from(byte);
                 hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
             }
             hash ^= u64::from(b'\n');
             hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        };
+        for (file, name) in WIRE_TYPE_DEFS {
+            let stripped = strip_comments(&read_source(file));
+            fold(&normalized_type_def(&stripped, name));
+        }
+        for file in WIRE_CODEC_SOURCES {
+            let stripped = strip_comments(&read_source(file));
+            fold(
+                &stripped
+                    .chars()
+                    .filter(|c| !c.is_whitespace())
+                    .collect::<String>(),
+            );
         }
         hash
     }
