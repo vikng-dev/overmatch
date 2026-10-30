@@ -88,7 +88,7 @@ pub(super) fn mount_loss_harness(app: &mut App) {
 pub(crate) struct TrailHarnessSet;
 
 /// Test-only main-world ribbon evidence. It is emitted only after the spacing filter admitted a
-/// post-anchor station and [`write_ribbon`] produced non-empty mesh vertices and indices. It does
+/// post-anchor station and [`write_stations`] produced non-empty mesh vertices and indices. It does
 /// not claim render-world extraction or GPU visibility.
 #[cfg(test)]
 #[derive(Message, Debug, Clone, Copy)]
@@ -210,6 +210,13 @@ struct PendingTrailBounce {
 }
 
 /// A live smoke ribbon following (then outliving) one shell.
+///
+/// Its entity holds a [`Mesh3d`] only while the ribbon has stations to draw ([`update_trails`]), so
+/// no zero-vertex mesh asset ever exists. bevy_render 0.19.1's mesh allocator skips allocating a
+/// zero-vertex mesh but still copies it, logging `Use-after-free … unallocated key` on every
+/// extraction (bevy 0.20 makes that a warning, bevyengine/bevy#24960). A ribbon has no stations for
+/// its first frames of flight ([`TRAIL_START_ARC`]), and a trail the [`TRAIL_CAP`] ring evicts in
+/// the frame it attaches never has any.
 #[derive(Component)]
 pub(crate) struct TrailRibbon {
     shell: Entity,
@@ -240,7 +247,6 @@ struct TrailRing(VecDeque<Entity>);
 fn attach_trail(
     add: On<Add, ShellVisual>,
     shells: Query<(&ShellPath, Option<&Shot>), Without<TrailedShell>>,
-    mut meshes: ResMut<Assets<Mesh>>,
     assets: Res<TrailAssets>,
     mut ring: ResMut<TrailRing>,
     mut rng: ResMut<ViewRng>,
@@ -275,11 +281,10 @@ fn attach_trail(
         );
     }
     ribbon.consumed = pre;
-    let mesh = meshes.add(empty_ribbon_mesh());
+    // No `Mesh3d` yet: the first rebuild with stations adds it (`TrailRibbon`).
     let trail = commands
         .spawn((
             ribbon,
-            Mesh3d(mesh),
             MeshMaterial3d(assets.material.clone()),
             // Vertices are authored in world space and the ribbon spans hundreds of meters —
             // rebuilding a tight AABB every frame buys nothing, so skip culling (trails are few, see
@@ -383,7 +388,7 @@ fn consume_recorded_path(
 
     // This is the station-admission boundary: a bounce is consumed only after spacing admitted a
     // station strictly after its authoritative re-anchor, on that disconnected segment. The test
-    // harness emits its main-world mesh evidence after the subsequent `write_ribbon` rebuild.
+    // harness emits its main-world mesh evidence after the subsequent `write_stations` rebuild.
     let mut still_pending = VecDeque::new();
     while let Some(pending) = trail.pending_bounces.pop_front() {
         let rendered = trail.points.iter().any(|point| {
@@ -473,7 +478,7 @@ fn update_trails(
     time: Res<Time>,
     camera: Query<&GlobalTransform, With<PlayerView>>,
     shells: Query<(&ShellPath, &Transform, &PenetrationMarks)>,
-    mut trails: Query<(Entity, &mut TrailRibbon, &Mesh3d)>,
+    mut trails: Query<(Entity, &mut TrailRibbon, Option<&Mesh3d>)>,
     mut meshes: ResMut<Assets<Mesh>>,
     mut rng: ResMut<ViewRng>,
     present: Option<Res<ShotClock>>,
@@ -520,16 +525,23 @@ fn update_trails(
             continue;
         }
 
-        if let Some(mut mesh) = meshes.get_mut(&mesh.0) {
-            write_ribbon(
-                &mut mesh,
-                trail.points.make_contiguous(),
-                head,
-                cam,
-                &mut stations,
-            );
+        // A ribbon without stations holds no mesh (`TrailRibbon`).
+        ribbon_stations(trail.points.make_contiguous(), head, &mut stations);
+        if stations.is_empty() {
+            if mesh.is_some() {
+                commands.entity(entity).remove::<Mesh3d>();
+            }
+            continue;
+        }
+        if let Some(mut mesh) = mesh.and_then(|mesh| meshes.get_mut(&mesh.0)) {
+            write_stations(&mut mesh, &stations, cam);
             #[cfg(test)]
             emit_mesh_evidence(&mut trail, &mesh, &mut mesh_evidence);
+        } else {
+            let mesh = ribbon_mesh(&stations, cam);
+            #[cfg(test)]
+            emit_mesh_evidence(&mut trail, &mesh, &mut mesh_evidence);
+            commands.entity(entity).insert(Mesh3d(meshes.add(mesh)));
         }
     }
 }
@@ -560,20 +572,21 @@ fn emit_mesh_evidence(
     }
 }
 
-/// An empty triangle-list mesh with the ribbon's attribute set (position/normal/uv/color) — the
-/// layout the trail pipeline is specialized against, so the empty and full states are one pipeline.
-pub(super) fn empty_ribbon_mesh() -> Mesh {
+/// A new ribbon mesh drawing `stations`, which must not be empty (`TrailRibbon`). Its attribute set,
+/// position/normal/uv/color, is the layout the trail pipeline is specialized against; it stays in
+/// the main world because every rebuild refills its vectors in place ([`write_stations`]).
+fn ribbon_mesh(stations: &[Station], cam: Vec3) -> Mesh {
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
     );
-    write_ribbon(&mut mesh, &[], None, Vec3::Y, &mut Vec::new());
+    write_stations(&mut mesh, stations, cam);
     mesh
 }
 
 /// One ribbon station: the drifted center and what its two vertices carry.
 #[derive(Clone, Copy)]
-pub(super) struct Station {
+struct Station {
     center: Vec3,
     age: f32,
     arc: f32,
@@ -581,22 +594,15 @@ pub(super) struct Station {
     segment: u32,
 }
 
-/// (Re)build the ribbon geometry into `mesh`: camera-facing strips through each disconnected stored
-/// segment, plus (while the shell lives) a zero-age head vertex pair AT the shell, so the newest strip
-/// reaches the round that is making it. All strips remain one mesh/draw.
+/// (Re)build the ribbon geometry for `stations` ([`ribbon_stations`]) into `mesh`: camera-facing
+/// strips through each disconnected stored segment, plus (while the shell lives) a zero-age head
+/// vertex pair AT the shell, so the newest strip reaches the round that is making it. All strips
+/// remain one mesh/draw.
 ///
-/// Allocation-free once warm: the mesh's own attribute and index vectors are refilled in place and
-/// `stations` is the caller's scratch, so a rebuild allocates only while its ribbon, or the
-/// scratch, grows past its largest earlier size. The positions are rewritten whole every frame
-/// because the strip faces `cam`.
-pub(super) fn write_ribbon(
-    mesh: &mut Mesh,
-    points: &[TrailPoint],
-    head: Option<Vec3>,
-    cam: Vec3,
-    stations: &mut Vec<Station>,
-) {
-    ribbon_stations(points, head, stations);
+/// Allocation-free once warm: the mesh's own attribute and index vectors are refilled in place, so
+/// a rebuild allocates only while its ribbon grows past its largest earlier size. The positions are
+/// rewritten whole every frame because the strip faces `cam`.
+fn write_stations(mesh: &mut Mesh, stations: &[Station], cam: Vec3) {
     let mut positions = take_attribute(mesh, Mesh::ATTRIBUTE_POSITION, |values| match values {
         VertexAttributeValues::Float32x3(values) => Some(values),
         _ => None,
@@ -771,7 +777,6 @@ fn ribbon_vertices(
 /// A tiny but real ribbon mesh for the startup pipeline prewarm: same attribute layout and enough
 /// geometry that the trail pipeline compiles against exactly what live trails will draw.
 pub(super) fn prewarm_ribbon_mesh() -> Mesh {
-    let mut mesh = empty_ribbon_mesh();
     let points = [
         TrailPoint {
             pos: Vec3::ZERO,
@@ -792,14 +797,13 @@ pub(super) fn prewarm_ribbon_mesh() -> Mesh {
             segment: 0,
         },
     ];
-    write_ribbon(
-        &mut mesh,
+    let mut stations = Vec::new();
+    ribbon_stations(
         &points,
         Some(Vec3::X * TRAIL_MIN_SPACING * 2.0),
-        Vec3::Y * 50.0,
-        &mut Vec::new(),
+        &mut stations,
     );
-    mesh
+    ribbon_mesh(&stations, Vec3::Y * 50.0)
 }
 
 /// A 128×128 tileable two-octave value-noise texture (R8, repeat sampler) — the trail's breakup
@@ -916,22 +920,17 @@ mod tests {
             })
             .collect();
         let head = Some(Vec3::X * 41.0 * TRAIL_MIN_SPACING);
-        let mut mesh = empty_ribbon_mesh();
         let mut stations = Vec::new();
         // Warm-up: the longest build sizes every buffer.
-        write_ribbon(
-            &mut mesh,
-            &points,
-            head,
-            Vec3::new(0.0, 50.0, 50.0),
-            &mut stations,
-        );
+        ribbon_stations(&points, head, &mut stations);
+        let mut mesh = ribbon_mesh(&stations, Vec3::new(0.0, 50.0, 50.0));
 
         // Later frames: the camera moves and the tail expires, so every vertex is rewritten.
         let allocations = crate::tests::alloc_count::allocations_in(|| {
             for frame in 1..=8 {
                 let cam = Vec3::new(frame as f32, 50.0, 50.0 - frame as f32);
-                write_ribbon(&mut mesh, &points[frame..], head, cam, &mut stations);
+                ribbon_stations(&points[frame..], head, &mut stations);
+                write_stations(&mut mesh, &stations, cam);
             }
         });
         assert_eq!(allocations, 0, "a warm ribbon rebuild must not allocate");
@@ -1008,11 +1007,8 @@ mod tests {
         assert_eq!(ribbon.points.len(), TRAIL_MAX_POINTS);
     }
 
-    /// The live wiring on real ECS systems: a DRESSED shell (`ShellVisual`) grows a ribbon whose
-    /// mesh has geometry; an undressed MG round never does; and once the shell despawns the ribbon
-    /// outlives it only until its smoke fully expires.
-    #[test]
-    fn trails_attach_follow_and_outlive_the_shell() {
+    /// The trail observers and `update_trails` on a bare app, with the one shared material.
+    fn trail_app() -> App {
         let mut app = App::new();
         app.init_resource::<TrailRing>()
             .init_resource::<Assets<Mesh>>()
@@ -1036,6 +1032,79 @@ mod tests {
                 lut: Handle::default(),
             });
         app.insert_resource(TrailAssets { material });
+        app
+    }
+
+    /// The renderer is never handed a zero-vertex mesh, which bevy_render 0.19.1's allocator logs
+    /// as a `Use-after-free` on every extraction (`TrailRibbon`): a ribbon holds a `Mesh3d` exactly
+    /// while it has stations, and no mesh asset it wrote is ever left without vertices. A round
+    /// still inside the start arc has no stations; so has a ribbon whose shell is gone and whose
+    /// remaining points all lie inside it (two points at arc 0, split by a re-seed).
+    #[test]
+    fn a_ribbon_holds_a_mesh_only_while_it_has_stations() {
+        let mut app = trail_app();
+        let shell = app
+            .world_mut()
+            .spawn((
+                ShellPath {
+                    points: vec![Vec3::ZERO, Vec3::X],
+                    segment_starts: vec![1],
+                },
+                PenetrationMarks::default(),
+                ShellVisual,
+                Transform::from_translation(Vec3::X * 5.0),
+            ))
+            .id();
+        let mesh_of = |app: &mut App| {
+            let world = app.world_mut();
+            let trail = world
+                .query_filtered::<Entity, With<TrailRibbon>>()
+                .single(world)
+                .expect("one trail");
+            world.get::<Mesh3d>(trail).map(|mesh| mesh.0.id())
+        };
+        let every_asset_has_vertices = |app: &App| {
+            app.world()
+                .resource::<Assets<Mesh>>()
+                .iter()
+                .all(|(_, mesh)| mesh.count_vertices() > 0)
+        };
+
+        app.update();
+        assert_eq!(mesh_of(&mut app), None, "inside the start arc: no mesh");
+        assert_eq!(app.world().resource::<Assets<Mesh>>().len(), 0);
+
+        app.world_mut()
+            .get_mut::<Transform>(shell)
+            .expect("shell alive")
+            .translation = Vec3::X * (TRAIL_START_ARC + 2.0);
+        app.update();
+        let built = mesh_of(&mut app).expect("past the start arc: a mesh");
+        let vertices = app
+            .world()
+            .resource::<Assets<Mesh>>()
+            .get(built)
+            .map(Mesh::count_vertices);
+        assert!(
+            vertices.is_some_and(|v| v > 0),
+            "the first build has geometry"
+        );
+
+        app.world_mut().despawn(shell);
+        app.update();
+        assert_eq!(mesh_of(&mut app), None, "stations gone: the mesh goes too");
+        assert!(
+            every_asset_has_vertices(&app),
+            "no asset was emptied in place"
+        );
+    }
+
+    /// The live wiring on real ECS systems: a DRESSED shell (`ShellVisual`) grows a ribbon whose
+    /// mesh has geometry; an undressed MG round never does; and once the shell despawns the ribbon
+    /// outlives it only until its smoke fully expires.
+    #[test]
+    fn trails_attach_follow_and_outlive_the_shell() {
+        let mut app = trail_app();
 
         // A dressed shell mid-flight, and an undressed MG round (ShellPath only).
         let shell = app

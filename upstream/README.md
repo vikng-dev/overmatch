@@ -70,6 +70,12 @@ milestone. 0.19.1 has shipped and both backports are retired; the files stay as 
 | 16 | [bevy-cascade-count-stale-local-parallel.md](bevy-cascade-count-stale-local-parallel.md) | bevy_light 0.19.0 — `check_dir_light_mesh_visibility` panics when cascade count grows at runtime | issue #24804, PR **#24807**, milestone 0.19.1 | **RETIRED in bevy 0.19.1** — the vendored `bevy_light` entry is gone; cascade count stays a live setting like `ShadowDistance` |
 | 17 | [bevy-shadow-view-ignores-light-render-layers.md](bevy-shadow-view-ignores-light-render-layers.md) | bevy_pbr 0.19.0 — shadow views never inherit the light's `RenderLayers`, so off-layer meshes never cast | issue #24792, PR **#24797**, milestone 0.19.1 | **RETIRED in bevy 0.19.1** — the backport is gone (`src/tests/bevy_shadow_view_render_layers.rs` now guards upstream's shape); `vendor/bevy_pbr-0.19.1-scalar-math` carries only #14 |
 
+## Fixed upstream in bevy 0.20, not in our 0.19.1 pin
+
+| # | File | Target | Upstream fix | Our side |
+|---|------|--------|--------------|----------|
+| 19 | [bevy-empty-mesh-allocator-use-after-free.md](bevy-empty-mesh-allocator-use-after-free.md) | bevy_render 0.19.1: a zero-vertex mesh logs `Use-after-free … unallocated key` on every extraction | PR **#24960** (closes #24874), shipped in v0.20.0 as a `WARN` | No workaround needed: the game hands the renderer no zero-vertex mesh (#176) |
+
 ## Cross-report unlocks — the things blocked on MORE THAN ONE fix
 
 - **Adaptive input delay (`balanced()`) — needs #1, #10 AND #11.** A delay that tracks the link would give
