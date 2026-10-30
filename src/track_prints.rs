@@ -62,13 +62,13 @@ use crate::settings::{Settings, TrackPrintRange, TrackPrintRelief};
 use crate::tank::Tank;
 use crate::terrain_blend::{TerrainBlendParams, TerrainMaterial};
 use crate::terrain_grid::HeightGrid;
-use crate::track::link_view::{LinkTemplate, ShoeBelt, TrackLink};
+use crate::track::link_view::{BeltFrames, LinkTemplate, ShoeBelt};
 use crate::track::rig_geom::RigGeom;
 use crate::track::side::Side;
 use crate::view::PlayerView;
 
 use stamp::ClearanceStamp;
-use stamper::ShoeMemory;
+use stamper::{ShoeKey, ShoeMemory};
 use store::{
     KPA_PER_UNIT, NEAR_SIDE, NEAR_SPAN_M, NEAR_TEXEL_M, PrintLaw, PrintStores, StampEntry, Store,
     WORLD_SIDE,
@@ -398,15 +398,15 @@ fn snapped(previous: Affine3A, now: Affine3A) -> bool {
 }
 
 /// Stamp every grounded shoe whose press deepened or which moved, on every belt, at this frame's
-/// drawn pose.
+/// drawn pose: each material link of the belt's table carried through the belt's own
+/// `GlobalTransform`, the pose the belt draws it at. No GPU readback; the table is the CPU's.
 fn stamp_shoes(
     mut prints: ResMut<TrackPrints>,
     grid: Res<HeightGrid>,
     template: Res<LinkTemplate>,
     geom: Res<RigGeom>,
     tanks: Query<(Entity, &GlobalTransform), With<Tank>>,
-    belts: Query<(&ShoeBelt, &ChildOf, &Children)>,
-    links: Query<&GlobalTransform, With<TrackLink>>,
+    belts: Query<(Entity, &ShoeBelt, &BeltFrames, &ChildOf, &GlobalTransform)>,
 ) {
     let TrackPrints {
         law,
@@ -439,7 +439,7 @@ fn stamp_shoes(
             .then(|| grid.height_at(xz.x, xz.y))
     };
     let mut laid = Vec::new();
-    for (belt, parent, children) in &belts {
+    for (entity, belt, frames, parent, at) in &belts {
         let Some(tank) = memory.get_mut(&parent.parent()) else {
             continue;
         };
@@ -450,22 +450,23 @@ fn stamp_shoes(
         let mirrored = side == Side::Left;
         let to_mesh = template.frame(side).canonical_to_mesh();
         let bounds = shoe.bounds(mirrored);
-        for &link in children {
-            let Ok(global) = links.get(link) else {
-                continue;
-            };
+        let belt_pose = at.affine();
+        for link in 0..frames.count() {
+            let key = ShoeKey::new(entity, link);
+            // The composition transform propagation gave a per-link child of the belt.
+            let global = belt_pose * frames.pose(link).compute_affine();
             let Some(contact) = stamper::contact(
-                global.affine() * to_mesh,
+                global * to_mesh,
                 bounds,
                 shoe.datum_y(),
                 law.contact_m,
                 ground,
             ) else {
-                tank.memory.airborne(link);
+                tank.memory.airborne(key);
                 continue;
             };
-            let hull_local = hull.transform_point3(global.translation());
-            if let Some(sweep) = tank.memory.observe(link, &contact, hull_local, pitch) {
+            let hull_local = hull.transform_point3(global.translation.into());
+            if let Some(sweep) = tank.memory.observe(key, &contact, hull_local, pitch) {
                 laid.extend(sweep.map(|(contact, press)| {
                     StampEntry::new(contact.placement(0, mirrored), press, kpa)
                 }));

@@ -143,6 +143,7 @@ pub(super) fn materials(app: &mut App) {
         MaterialPlugin::<material::OutlineMaterial>::default(),
         MaterialPlugin::<material::SliceMaterial>::default(),
         MaterialPlugin::<look::LookMaterial>::default(),
+        MaterialPlugin::<look::BeltLookMaterial>::default(),
     ));
     picture::render(app);
 }

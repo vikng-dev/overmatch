@@ -641,11 +641,17 @@ pub(super) fn mask_copy(
         Mesh3d(mesh),
         MeshMaterial3d(material),
         Transform::IDENTITY,
-        match layer {
-            Layer::Body => VisualScope::PEN_CAM_HULL_MASK,
-            Layer::Scene => VisualScope::PEN_CAM_PART_MASK,
-        },
+        mask_scope(layer),
     )
+}
+
+/// The mask camera a copy of a mesh of `layer` is drawn for: the body's the hull mask, the scene's
+/// the part mask.
+pub(super) fn mask_scope(layer: Layer) -> VisualScope {
+    match layer {
+        Layer::Body => VisualScope::PEN_CAM_HULL_MASK,
+        Layer::Scene => VisualScope::PEN_CAM_PART_MASK,
+    }
 }
 
 /// The round's mask copies, one under each of its meshes (`meshes`, each with its mesh), on

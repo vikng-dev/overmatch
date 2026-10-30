@@ -178,6 +178,21 @@ impl Iterator for ShoeSweep {
     }
 }
 
+/// One physical shoe: material link `link` of the belt `belt` ([`crate::track::link_view::BeltFrames`]
+/// keeps record `link` on the same link for the belt's life), so a key follows the shoe round the
+/// belt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) struct ShoeKey {
+    belt: Entity,
+    link: usize,
+}
+
+impl ShoeKey {
+    pub(crate) fn new(belt: Entity, link: usize) -> Self {
+        Self { belt, link }
+    }
+}
+
 /// One continuously grounded shoe: where it was last stamped, where it was last frame, and how
 /// far into its press it is.
 #[derive(Clone, Copy)]
@@ -195,7 +210,7 @@ struct Grounded {
 
 /// Every continuously grounded shoe of one tank.
 #[derive(Default)]
-pub(crate) struct ShoeMemory(HashMap<Entity, Grounded>);
+pub(crate) struct ShoeMemory(HashMap<ShoeKey, Grounded>);
 
 impl ShoeMemory {
     /// The stamps grounded shoe `shoe` lays this frame, at `contact`, its hull-local position
@@ -205,7 +220,7 @@ impl ShoeMemory {
     /// moves a shoe farther than its own length. Nothing at touchdown: the press starts at none.
     pub(crate) fn observe(
         &mut self,
-        shoe: Entity,
+        shoe: ShoeKey,
         contact: &ShoeContact,
         hull_local: Vec3,
         pitch: f32,
@@ -253,7 +268,7 @@ impl ShoeMemory {
 
     /// An airborne shoe begins a new contact episode, and a new press, when it next touches
     /// down. Never draw a sweep through the air, or along the return run, between those episodes.
-    pub(crate) fn airborne(&mut self, shoe: Entity) {
+    pub(crate) fn airborne(&mut self, shoe: ShoeKey) {
         self.0.remove(&shoe);
     }
 
@@ -303,8 +318,8 @@ mod tests {
             .collect()
     }
 
-    fn entity(id: u32) -> Entity {
-        Entity::from_raw_u32(id + 1).expect("a valid index")
+    fn key(id: u32) -> ShoeKey {
+        ShoeKey::new(Entity::PLACEHOLDER, id as usize)
     }
 
     /// Roll a hull `travel` m in frames of `step` m; per side, the stamps laid, and per contact
@@ -324,7 +339,7 @@ mod tests {
                     let contact = contact(pose, (LOW, HIGH), 0.0, CONTACT_M, flat)
                         .expect("lies on the ground");
                     now.push(id);
-                    if let Some(sweep) = memory.observe(entity(id), &contact, local, PITCH) {
+                    if let Some(sweep) = memory.observe(key(id), &contact, local, PITCH) {
                         for (_, press) in sweep {
                             stamps[side] += 1;
                             presses.entry(id).or_default().push(press);
@@ -333,7 +348,7 @@ mod tests {
                 }
             }
             for id in grounded.iter().filter(|id| !now.contains(id)) {
-                memory.airborne(entity(*id));
+                memory.airborne(key(*id));
                 episodes.extend(presses.remove(id));
             }
             grounded = now;
@@ -391,7 +406,7 @@ mod tests {
         for frame in 0..60 {
             let travelled = frame as f32 * 0.005;
             let local = Vec3::new(0.0, 0.0, -travelled);
-            if let Some(sweep) = memory.observe(entity(0), &shoe, local, PITCH)
+            if let Some(sweep) = memory.observe(key(0), &shoe, local, PITCH)
                 && sweep.last().is_some_and(|(_, press)| press == 1.0)
             {
                 full_at.get_or_insert(travelled);
@@ -451,7 +466,7 @@ mod tests {
                 .collect();
             for (id, ((_, local), contact)) in shoes.into_iter().zip(&now).enumerate() {
                 let laid = memory
-                    .observe(entity(id as u32), contact, local, PITCH)
+                    .observe(key(id as u32), contact, local, PITCH)
                     .map_or(0, Iterator::count);
                 if let Some(before) = previous.get(id) {
                     let bound = (contact.motion_from(before) / spacing).ceil() as usize + 1;
@@ -477,7 +492,7 @@ mod tests {
             let contact = contact(pose, (LOW, HIGH), 0.0, CONTACT_M, flat).expect("grounded");
             assert!(
                 memory
-                    .observe(entity(id as u32), &contact, local, PITCH)
+                    .observe(key(id as u32), &contact, local, PITCH)
                     .is_none(),
                 "touchdown prints nothing: the press starts at none"
             );
@@ -489,7 +504,7 @@ mod tests {
             for (id, (pose, local)) in pivot_patch(turn).into_iter().enumerate() {
                 let contact = contact(pose, (LOW, HIGH), 0.0, CONTACT_M, flat).expect("grounded");
                 stamped[id] |= memory
-                    .observe(entity(id as u32), &contact, local, PITCH)
+                    .observe(key(id as u32), &contact, local, PITCH)
                     .is_some();
             }
         }
@@ -510,7 +525,7 @@ mod tests {
     /// pose leaves gaps once a frame's slide exceeds the shoe length.
     #[test]
     fn fast_sliding_is_sampled_without_gaps() {
-        let shoe = entity(0);
+        let shoe = key(0);
         let mut memory = ShoeMemory::default();
         let start = contact(lying(Vec2::ZERO, 0.0), (LOW, HIGH), 0.0, CONTACT_M, flat).unwrap();
         assert!(memory.observe(shoe, &start, Vec3::ZERO, PITCH).is_none());
@@ -540,7 +555,7 @@ mod tests {
     /// either discontinuity.
     #[test]
     fn airborne_and_reset_contacts_never_sweep_from_old_ground() {
-        let shoe = entity(0);
+        let shoe = key(0);
         let mut memory = ShoeMemory::default();
         let at = |z| {
             contact(

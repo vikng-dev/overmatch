@@ -26,8 +26,9 @@ use crate::bake::TankBlueprint;
 use crate::render_policy::VisualScope;
 use crate::tank::{Roadwheel, Tank, TrackSide, ViewNode};
 
+use super::belt_draw::BeltAssets;
 use super::gear_phase::{gear_spin_transform, spin_angle, sprocket_tooth_tip, tooth_angle};
-use super::link_view::{self, LinkFrame, LinkTemplate};
+use super::link_view::{self, BeltFrames, LinkTemplate, Stragglers};
 use super::oracle::{BlockField, TerrainOracle};
 use super::rig_geom::RigGeom;
 use super::shadow_proxy::{self, ProxyMode, ProxySide, ProxyStep};
@@ -61,6 +62,8 @@ pub fn view_plugin(app: &mut App) {
             .before(TransformSystems::Propagate),
     );
     app.add_systems(PostUpdate, drive_track_views.in_set(TrackViewSet));
+    // A belt's table reaches its GPU buffer and bounds in the frame the view fits it.
+    app.configure_sets(PostUpdate, super::belt_draw::BeltUpload.after(TrackViewSet));
     // The prints the drawn belts lay in the ground: they read the shoes this view places, so they
     // are composed wherever it is, and nowhere else.
     app.add_plugins(crate::track_prints::plugin);
@@ -312,19 +315,13 @@ struct RigSide {
     idler_view: Entity,
     /// The idler node's authored REST transform, captured at bind (see `sprocket_rest`).
     idler_rest: Transform,
-    /// This side's BELT ([`link_view::ShoeBelt`]): the identity-posed frame the shoes hang from,
-    /// and the entity that picks the rung they all draw. A recursive despawn of it takes the pool.
+    /// This side's BELT ([`link_view::ShoeBelt`]): the identity-posed entity that draws every shoe
+    /// of the side from its [`BeltFrames`] table — the same template, placement and mirrored
+    /// left-side mesh the sandbox draws, so the two tools cannot disagree about what this track
+    /// looks like. A despawn of it takes the table and its GPU assets.
     belt: Entity,
-    /// One entity per link, children of [`Self::belt`], local transforms in hull space. Real
-    /// instanced SHOES ([`super::link_view`]) — the same template, placer and mirrored left-side
-    /// mesh the sandbox draws, so the two tools cannot disagree about what this track looks like.
-    links: Vec<Entity>,
-    /// This side's mesh→canonical-pin-frame correction, captured from the template at bind (it is
-    /// `Copy`, and the template is immutable) so the per-frame placer never touches the resource.
-    link_frame: LinkFrame,
     /// The shoe's own lateral centre on this side (`RigGeom::link_center_x`) — NOT `plane_x`: the
-    /// Tiger's shoe is authored ~16.85 mm outboard of the pin plane, and anchoring it on the pin
-    /// plane would lose the authored overhang.
+    /// shoe is authored outboard of the pin plane, and the shadow ribbon's section is centred on it.
     link_center_x: f32,
     /// This side's SHADOW CASTER ([`super::shadow_proxy`]): the low-poly ribbon that casts the
     /// belt's shadow so the 1 520-triangle shoes do not have to. `None` under [`ProxyMode::Off`]
@@ -351,7 +348,7 @@ struct RigWheel {
 }
 
 /// A GLB re-instantiation (hot reload during authoring) replaces the wheel/sprocket view
-/// entities a bound rig points at: drop the rig and its links, and `bind_track_rigs` rebinds
+/// entities a bound rig points at: drop the rig and its belts, and `bind_track_rigs` rebinds
 /// against the fresh tree next frame.
 fn rebind_on_reinstance(
     ready: On<WorldInstanceReady>,
@@ -362,7 +359,8 @@ fn rebind_on_reinstance(
         return;
     };
     for side in &rig.sides {
-        // Recursive: the belt owns the shoes, so one despawn per side takes the whole pool.
+        // The belt carries its table and holds its buffer and material, so one despawn per side
+        // releases the whole draw.
         commands.entity(side.belt).despawn();
         // The shadow ribbon goes with them — `attach_shadow_proxies` spawns a fresh one (and a fresh
         // mesh asset) against the rebound rig, and a leaked one would keep casting the old belt.
@@ -381,7 +379,7 @@ fn rebind_on_reinstance(
 /// to spin.
 #[expect(
     clippy::too_many_arguments,
-    reason = "attaches a rig: blueprint, rig, template, tanks, hierarchy, names, wheels, transforms and meshes"
+    reason = "attaches a rig: blueprint, rig, template, tanks, hierarchy, names, wheels, transforms and the belt assets"
 )]
 fn bind_track_rigs(
     blueprint: Res<TankBlueprint>,
@@ -399,7 +397,9 @@ fn bind_track_rigs(
     // sprocket tooth ring.
     node_transforms: Query<&Transform>,
     primitives: Query<&Mesh3d>,
-    meshes: Res<Assets<Mesh>>,
+    // The belt's draw: its repeated meshes (and the sprocket's, read for the tooth ring), the
+    // shoe's material and each belt's own buffer and material.
+    mut belt_assets: BeltAssets,
     mut commands: Commands,
 ) {
     // The measured running gear lands with `TrackGear` on the first sim frame; until then there is
@@ -500,7 +500,7 @@ fn bind_track_rigs(
                 &children,
                 &node_transforms,
                 &primitives,
-                &meshes,
+                &belt_assets.meshes,
                 geom.teeth,
             ),
             sprocket_tooth_tip(
@@ -509,31 +509,35 @@ fn bind_track_rigs(
                 &children,
                 &node_transforms,
                 &primitives,
-                &meshes,
+                &belt_assets.meshes,
                 geom.teeth,
             ),
         ) else {
             continue;
         };
 
-        // The shoe pool: one instance of the glb's OWN link mesh per material link, per side, the
-        // left side wearing the template's genuine mirror. Every shoe is the same dark steel — the
-        // red "witness" link 0 used to wear was a dev sign-check for "does driving forward move the
-        // lower run rearward", and that invariant is now pinned by `link_view`'s slot-rotation test
-        // rather than by a differently-coloured link in every shipped session.
-        // One belt entity per side, and the shoes under it: the belt is what selects the rung the
-        // whole side draws, off the placed pose of its own nearest shoe.
-        let pool = |commands: &mut Commands, side: Side| -> (Entity, Vec<Entity>) {
-            let belt = link_view::spawn_belt(commands, side, root);
-            let links = (0..spec.link_count)
-                .map(|_| link_view::spawn_link(commands, &template, side, belt))
-                .collect();
-            (belt, links)
+        // The belts: one entity per side drawing the glb's OWN link mesh once per material link, the
+        // left side wearing the template's genuine mirror. Every repeated mesh and the shoe's
+        // material must be ready before either side spawns, so a bind never half-lands.
+        if !belt_assets.ready(&template, spec.link_count) {
+            continue;
+        }
+        let table = |side: Side| {
+            BeltFrames::new(
+                template.frame(side),
+                geom.link_center_x(side),
+                spec.link_count,
+            )
         };
-        let [(belt_l, links_l), (belt_r, links_r)] = [
-            pool(&mut commands, Side::Left),
-            pool(&mut commands, Side::Right),
-        ];
+        let (frames_l, frames_r) = (table(Side::Left), table(Side::Right));
+        let (Some(draw_l), Some(draw_r)) = (
+            belt_assets.draw(&template, Side::Left, &frames_l),
+            belt_assets.draw(&template, Side::Right, &frames_r),
+        ) else {
+            continue;
+        };
+        let belt_l = link_view::spawn_belt(&mut commands, Side::Left, root, frames_l, draw_l);
+        let belt_r = link_view::spawn_belt(&mut commands, Side::Right, root, frames_r, draw_r);
         let [wl, wr] = side_wheels;
         // Zip each view wheel (sorted front→rear) with its measured pin-line radius from the rest
         // circles' MIDDLE (`rest[0]` is the sprocket, `rest.last()` the idler). Counts were checked
@@ -566,8 +570,6 @@ fn bind_track_rigs(
                 idler_view: il,
                 idler_rest: il_rest,
                 belt: belt_l,
-                links: links_l,
-                link_frame: template.frame(Side::Left),
                 link_center_x: geom.link_center_x(Side::Left),
                 proxy: None,
             },
@@ -584,14 +586,12 @@ fn bind_track_rigs(
                 idler_view: ir,
                 idler_rest: ir_rest,
                 belt: belt_r,
-                links: links_r,
-                link_frame: template.frame(Side::Right),
                 link_center_x: geom.link_center_x(Side::Right),
                 proxy: None,
             },
         ];
         info!(
-            "track rig bound: {} links/side on one belt entity each ({}), {} \
+            "track rig bound: {} links/side drawn by one belt entity each ({}), {} \
              wheels/side; sprocket tooth tips L {:.2}° R {:.2}°",
             spec.link_count,
             template.chain_summary(),
@@ -718,7 +718,7 @@ fn attach_shadow_proxies(
 /// propagation, so the whole tank renders one consistent frame.
 #[expect(
     clippy::too_many_arguments,
-    reason = "the per-frame track view: clock, field, gear, blueprint, proxy mode and meshes, tanks and views"
+    reason = "the per-frame track view: clock, field, gear, blueprint, proxy mode and meshes, tanks, views and belt tables"
 )]
 fn drive_track_views(
     time: Res<Time>,
@@ -735,7 +735,9 @@ fn drive_track_views(
     mut proxy_meshes: ResMut<Assets<Mesh>>,
     mut tanks: Query<(&Transform, &TrackDrive, &mut TrackRig)>,
     mut views: Query<&mut Transform, Without<TrackRig>>,
-    // The caster swap's one write: `VisualScope::PROXIED_CASTER` onto this side's shoes, on the
+    // Each side's frame table, which its belt draws, the prints stamp and the rung selector reads.
+    mut belts: Query<&mut BeltFrames>,
+    // The caster swap's one write: `VisualScope::PROXIED_CASTER` onto this side's belt, on the
     // frame its ribbon first exists. Runs once per side per bind, never per frame.
     mut commands: Commands,
     // The belt sink: the depth the ground's shader draws a print at, and the running gear the
@@ -901,22 +903,20 @@ fn drive_track_views(
         for (si, side) in rig.sides.iter_mut().enumerate() {
             // The SHOES, on this frame's drawn pin joints: link `i` spans joint `i` → `i+1`, its
             // pin midpoint on the route and its own measured centre on `link_center_x`. The
-            // entity↔joint map rotates with the belt phase, so a shoe's identity rides the belt
+            // record↔joint map rotates with the belt phase, so a shoe's identity rides the belt
             // instead of wandering one link per pitch — all of it in `link_view`, which the sandbox
-            // drives with the same call.
-            link_view::place_links(
-                &side.link_frame,
-                side.link_center_x,
-                &out[si].joints,
-                phases[si],
-                rig.belt_len / rig.count.max(1) as f32,
-                &side.links,
-                |link, pose| {
-                    if let (Some(pose), Ok(mut tr)) = (pose, views.get_mut(link)) {
-                        tr.set_if_neq(pose);
-                    }
-                },
-            );
+            // drives with the same call. An unchanged table stays unmarked: its upload, its bounds
+            // and every reader key on the change.
+            if let Ok(mut frames) = belts.get_mut(side.belt)
+                && frames.bypass_change_detection().fit(
+                    &out[si].joints,
+                    phases[si],
+                    rig.belt_len / rig.count.max(1) as f32,
+                    Stragglers::Keep,
+                )
+            {
+                frames.set_changed();
+            }
             // The SHADOW CASTER, on the same joints ([`super::shadow_proxy`]). Under `Static` this
             // runs once and the ribbon rides the hull unchanged; live modes retain the topology
             // and update positions only when these hull-local joints change.
@@ -941,25 +941,25 @@ fn drive_track_views(
                     ProxyStep::Idle => {}
                     // The shoes keep rendering at full detail to the camera at every distance — this
                     // is a CASTER swap, not an LOD. `PROXIED_CASTER` is the preset that says so: it
-                    // stops the shoe casting and leaves it RECEIVING, and it deliberately keeps
-                    // inheriting the tank's channel, so a silenced shoe still follows its tank into
+                    // stops the belt casting and leaves it RECEIVING, and it deliberately keeps
+                    // inheriting the tank's channel, so a silenced belt still follows its tank into
                     // and out of the gunner optic. MEASURED triangles, never `count * 8`: the
                     // number in this line is the number of triangles that exist.
                     ProxyStep::Silence => {
-                        for &link in &side.links {
-                            commands.entity(link).insert(VisualScope::PROXIED_CASTER);
-                        }
+                        commands
+                            .entity(side.belt)
+                            .insert(VisualScope::PROXIED_CASTER);
                         info!(
                             "track shadow proxy: {mode:?} side {si} — ribbon built, {triangles} \
                              triangles MEASURED; {} shoes silenced",
-                            side.links.len()
+                            rig.count
                         );
                     }
                     ProxyStep::Overdue => warn!(
                         "track shadow proxy: side {si} still has no ribbon after {} frames — the \
                          {} real shoes are carrying the belt's shadow at full cost",
                         shadow_proxy::PROXY_READY_GRACE_FRAMES,
-                        side.links.len()
+                        rig.count
                     ),
                 }
             }
@@ -1012,25 +1012,31 @@ fn drive_track_views(
 
 #[cfg(test)]
 mod tests {
+    use super::super::link_view::LinkFrame;
     use super::*;
 
-    /// Invariant: an exactly settled, standing tank writes no shoe/wheel transforms or ribbon
-    /// assets. Transform propagation and render extraction rely on that absence of change flags.
-    /// The shipped rig is fixture data; the pass condition is generic and independent of its counts.
-    /// ASSUMED fixture cadence: stationary warmup followed by repeated identical presentation frames.
+    /// Invariant: an exactly settled, standing tank writes no belt table, wheel transform or ribbon
+    /// asset, and a moving belt writes its tables and NO per-link transform: the only transforms
+    /// the view writes are the running gear's. Transform propagation, the belt upload and render
+    /// extraction rely on both. The shipped rig is fixture data; the pass conditions are generic and
+    /// independent of its counts. ASSUMED fixture cadence: stationary warmup followed by repeated
+    /// identical presentation frames.
     #[test]
-    fn settled_standing_tank_writes_no_shoe_wheel_or_ribbon_data() {
+    fn settled_standing_tank_writes_no_belt_wheel_or_ribbon_data() {
         #[derive(Resource, Default)]
         struct Writes {
-            transforms: usize,
+            transforms: Vec<Entity>,
+            tables: Vec<Entity>,
             meshes: bool,
         }
         fn count_writes(
             mut writes: ResMut<Writes>,
-            poses: Query<(), (Changed<Transform>, Without<TrackRig>)>,
+            poses: Query<Entity, (Changed<Transform>, Without<TrackRig>)>,
+            tables: Query<Entity, Changed<BeltFrames>>,
             meshes: Res<Assets<Mesh>>,
         ) {
-            writes.transforms = poses.iter().count();
+            writes.transforms = poses.iter().collect();
+            writes.tables = tables.iter().collect();
             writes.meshes = meshes.is_changed();
         }
         let mut app = App::new();
@@ -1068,9 +1074,16 @@ mod tests {
                 sprocket_tooth_tip: 0.0,
                 idler_view: spawn_pose(world),
                 idler_rest: Transform::IDENTITY,
-                belt: spawn_pose(world),
-                links: (0..geom.link_count).map(|_| spawn_pose(world)).collect(),
-                link_frame: LinkFrame::default(),
+                belt: world
+                    .spawn((
+                        Transform::IDENTITY,
+                        BeltFrames::new(
+                            LinkFrame::default(),
+                            geom.link_center_x(side),
+                            geom.link_count,
+                        ),
+                    ))
+                    .id(),
                 link_center_x: geom.link_center_x(side),
                 proxy: Some(ProxySide {
                     entity: spawn_pose(world),
@@ -1131,12 +1144,19 @@ mod tests {
             let writes = world.resource::<Writes>();
             if frame == 0 {
                 assert!(
-                    writes.transforms > 0 && writes.meshes,
+                    !writes.transforms.is_empty() && writes.tables.len() == 2 && writes.meshes,
                     "cold placement must write"
                 );
             }
             if frame >= 768 {
-                assert_eq!(writes.transforms, 0, "settled pose write on frame {frame}");
+                assert!(
+                    writes.transforms.is_empty(),
+                    "settled pose write on frame {frame}"
+                );
+                assert!(
+                    writes.tables.is_empty(),
+                    "settled belt table write on frame {frame}"
+                );
                 assert!(
                     !writes.meshes,
                     "settled ribbon asset write on frame {frame}"
@@ -1148,11 +1168,33 @@ mod tests {
             side.phase += 0.03; // ASSUMED fixture travel in metres.
         }
         schedule.run(world);
+        let rig = world.get::<TrackRig>(tank).unwrap();
+        let gear: Vec<Entity> = rig
+            .sides
+            .iter()
+            .flat_map(|side| {
+                side.wheels
+                    .iter()
+                    .map(|wheel| wheel.view)
+                    .chain([side.sprocket_view, side.idler_view])
+            })
+            .collect();
+        let belts: Vec<Entity> = rig.sides.iter().map(|side| side.belt).collect();
         let writes = world.resource::<Writes>();
         assert!(
-            writes.transforms > 0 && writes.meshes,
+            !writes.transforms.is_empty() && writes.meshes,
             "belt motion must resume writes"
         );
+        assert!(
+            writes.transforms.iter().all(|moved| gear.contains(moved)),
+            "the view wrote a transform that is not a wheel, sprocket or idler: a belt's shoes move \
+             through its table, never through a per-link transform"
+        );
+        let mut tables = writes.tables.clone();
+        tables.sort();
+        let mut expected = belts;
+        expected.sort();
+        assert_eq!(tables, expected, "a moving belt writes both its tables");
     }
 
     /// Invariant: once pose, terrain/print inputs and wheel articulation settle, the view emits

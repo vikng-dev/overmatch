@@ -50,6 +50,9 @@ use std::f32::consts::PI;
 
 use bevy::camera::{Hdr, ImageRenderTarget, RenderTarget};
 use bevy::core_pipeline::tonemapping::{DebandDither, Tonemapping};
+use bevy::pbr::{
+    ExtendedMaterial, MaterialExtension, MaterialExtensionKey, MaterialExtensionPipeline,
+};
 use bevy::prelude::*;
 use bevy::render::render_resource::{
     AsBindGroup, CompareFunction, Face, ShaderType, TextureFormat,
@@ -385,6 +388,55 @@ impl Material for LookMaterial {
         Ok(())
     }
 }
+
+/// A belt's placement under the look (`pen_cam_look_belt.wgsl`): the same constants and table
+/// buffer as the belt's own material ([`crate::track::belt_draw::BeltShoes`]), so the look draws
+/// every shoe where the belt does. A live track belt is one mesh whose shoes the vertex stage
+/// places; a plain [`LookMaterial`] would draw the undeformed stack.
+#[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
+pub struct BeltLook {
+    #[uniform(100)]
+    params: crate::track::belt_draw::BeltParams,
+    #[storage(101, read_only)]
+    frames: Handle<bevy::render::storage::ShaderBuffer>,
+}
+
+impl BeltLook {
+    /// The look's placement of the belt `shoes` places.
+    pub(crate) fn of(shoes: &crate::track::belt_draw::BeltShoes) -> Self {
+        Self {
+            params: shoes.params,
+            frames: shoes.frames.clone(),
+        }
+    }
+}
+
+impl MaterialExtension for BeltLook {
+    fn vertex_shader() -> ShaderRef {
+        "shaders/pen_cam_look_belt.wgsl".into()
+    }
+
+    // The look is drawn in no prepass and casts no shadow, as `LookMaterial` itself.
+    fn enable_prepass() -> bool {
+        false
+    }
+
+    fn enable_shadows() -> bool {
+        false
+    }
+
+    fn specialize(
+        _pipeline: &MaterialExtensionPipeline,
+        descriptor: &mut bevy::render::render_resource::RenderPipelineDescriptor,
+        layout: &bevy::mesh::MeshVertexBufferLayoutRef,
+        _key: MaterialExtensionKey<Self>,
+    ) -> Result<(), bevy::render::render_resource::SpecializedMeshPipelineError> {
+        crate::track::belt_draw::bind_link_attribute(descriptor, layout)
+    }
+}
+
+/// The look on a live track belt: its tier's [`LookMaterial`], its shoes placed by [`BeltLook`].
+pub type BeltLookMaterial = ExtendedMaterial<LookMaterial, BeltLook>;
 
 /// The two mask images one viewer's base look is drawn against. Without a set the handles are
 /// `Handle::default()`, the id bevy keeps its shared white image at, whose every pixel reads as a

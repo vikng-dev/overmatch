@@ -82,14 +82,20 @@
 //! view can absorb the extra length (`wrap::station_params` reads the drawn polyline as a uniform
 //! strain); the sim cannot.
 //!
-//! # The entity↔station map ROTATES with the belt phase
+//! # The frame table: one record per MATERIAL link
+//!
+//! A belt publishes where every link lies this frame in its [`BeltFrames`]: record `m` is the span
+//! (two drawn pin joints) material link `m` lies across. The GPU draws every shoe of the side from
+//! that table ([`super::belt_draw`]), the prints stamp from it, and the rung selector measures from
+//! it; there is no per-link entity and no per-link transform.
+//!
+//! # The link↔station map ROTATES with the belt phase
 //!
 //! Joint slots shift material identity by one every pitch of travel (the wrap resamples at
-//! `phase mod pitch`), so a FIXED entity↔slot binding makes any per-link identity — damage, a
-//! texture, a witness paint — wander one link per pitch. [`place_links`] rotates the mapping by the
-//! whole-pitch quotient ([`phase_decompose`]), so entity `m` always wears material link `m` and
-//! anything a shoe carries RIDES the belt. It costs one integer per side per frame and it is the
-//! difference between "the shoes are identical so it does not matter" and "it is correct".
+//! `phase mod pitch`), so a FIXED record↔slot binding makes any per-link identity — damage, a
+//! texture, a witness paint, a print's press — wander one link per pitch. [`BeltFrames::fit`]
+//! rotates the mapping by the whole-pitch quotient ([`phase_decompose`]), so record `m` always
+//! holds material link `m` and anything a shoe carries RIDES the belt.
 //!
 //! # The left track is a MIRROR, not a copy
 //!
@@ -98,31 +104,31 @@
 //! NEGATIVE-DETERMINANT transform: it reverses triangle winding, so every face is backwards to the
 //! rasteriser (backface culling eats the shoe and lights the inside), and it flips the normals'
 //! handedness. So the mirror is baked into a SECOND MESH ASSET instead ([`mirrored_mesh`]): positions
-//! and normals negated in x, triangle winding reversed to compensate. Both instances then render
-//! under ordinary positive-determinant transforms.
+//! and normals negated in x, triangle winding reversed to compensate. Every placement is then a
+//! proper rotation.
 //!
-//! # Distance LOD: ONE entity per shoe, its mesh handle swapped PER BELT
+//! # Distance LOD: ONE mesh per belt, its handle swapped PER BELT
 //!
 //! The shoes are the largest geometry pool a tank owns — the Tiger's MEASURED 97 links per side ×
 //! 2 sides = 194 shoes, at 1 520 triangles each (counted out of `tiger_1.glb`), is 294 880 triangles
 //! per tank, and a 15v15 frame holds thirty of them. The lower-detail shoes are machine reductions of
 //! the same authored shoe, cut by `scripts/tank/build.py` into the tank's own view glb as rung mesh
 //! records and certified in `assets/tiger_1/tiger_1.lod.json`: same mesh-local frame, same material,
-//! same vertex layout, so the rung a shoe draws is a [`Mesh3d`] HANDLE and nothing else about the
-//! entity. The rungs count 656 / 400 / 252 / 166 triangles — 127 264 per tank at rung 1.
+//! same vertex layout, so the rung a belt draws is a [`Mesh3d`] HANDLE — the rung's shoe repeated
+//! once per link ([`super::belt_draw::BeltMeshes`]) — and nothing else about the belt. The rungs
+//! count 656 / 400 / 252 / 166 triangles — 127 264 per tank at rung 1.
 //!
-//! A shoe is one entity and carries no [`bevy::camera::visibility::VisibilityRange`].
-//! [`select_belt_rungs`] picks the rung and writes it onto every shoe of a [`ShoeBelt`] at once:
+//! A belt carries no [`bevy::camera::visibility::VisibilityRange`]. [`select_belt_rungs`] picks the
+//! rung of a [`ShoeBelt`] and writes its mesh:
 //!
-//!   * PER BELT, not per shoe: one selection and one draw bin for a side's 97 shoes, whose entity
-//!     origins span MEASURED 5.70 m (longest chord 5.70 m, over every cast pose).
-//!   * From the NEAREST active camera's distance to the belt's NEAREST SHOE, on this frame's placed
-//!     poses. Every other shoe stands further from that eye and so earns a coarser-or-equal rung of
-//!     its own: the belt's rung is the finest any of its shoes has earned, and no shoe is ever
-//!     reduced before its own certified distance. Same conservative direction as the `+ radius_m`
-//!     slack inside `ViewProfile::switch_distance_m`.
-//!   * On a TRANSITION only: the steady state is one scan of the belt's own shoes and no write at
-//!     all. A belt that gains a shoe re-writes, because a fresh shoe spawns at rung 0.
+//!   * PER BELT, not per shoe: one selection and one draw for a side's 97 shoes, whose mesh origins
+//!     span MEASURED 5.70 m (longest chord 5.70 m, over every cast pose).
+//!   * From the declared view's distance to the belt's NEAREST SHOE ORIGIN, on this frame's table.
+//!     Every other shoe stands further from that eye and so earns a coarser-or-equal rung of its
+//!     own: the belt's rung is the finest any of its shoes has earned, and no shoe is ever reduced
+//!     before its own certified distance. Same conservative direction as the `+ radius_m` slack
+//!     inside `ViewProfile::switch_distance_m`.
+//!   * On a TRANSITION only: the steady state is one scan of the belt's table and no write at all.
 //!   * On half-open `[start, end)` boundaries ([`rung_at`]) — the certificate's law
 //!     (`Chain::switches`), reproduced by hand rather than read off bevy's range predicate.
 //!
@@ -187,6 +193,8 @@ use super::side::{PerSide, Side};
 /// Register the template systems. Mounted by BOTH consumers (the game's `view_plugin` and the
 /// sandbox's `link_view` adapter) — one binary each, so the systems never double-register.
 pub(crate) fn template_plugin(app: &mut App) {
+    // The belt's GPU draw: its material, the repeated meshes and the table upload.
+    app.add_plugins(super::belt_draw::plugin);
     app.add_systems(
         Update,
         (
@@ -230,8 +238,8 @@ pub(crate) fn template_plugin(app: &mut App) {
             // this module mounts, refuses that one after startup.
             .run_if(any_with_component::<PlayerView>)
             // AN INSTRUMENT DRAWS WHAT IT MEASURES (see `geometry_lod::SourceDetailOnly`): where
-            // the composition has declared source detail there is no selection to make, and a shoe
-            // stays on the authored mesh `spawn_link` gives it.
+            // the composition has declared source detail there is no selection to make, and a belt
+            // stays on the authored shoe it spawns with.
             .run_if(not(
                 resource_exists::<crate::geometry_lod::SourceDetailOnly>,
             ))
@@ -294,8 +302,8 @@ pub(crate) struct LinkTemplate {
     /// The reduced levels, in CERTIFICATE order and always the same length as the chain's rungs
     /// (the bind refuses rather than binding a short chain, which would leave a distance band with
     /// no shoe in it). Per side: the same shoe reduced, mirrored by the same construction. ONE
-    /// handle per side per level for the whole session — every link instance clones it, so a
-    /// Tiger's 194 shoes at a given level are 194 references to two mesh assets.
+    /// handle per side per level for the whole session — every belt's repeated mesh is built from
+    /// it ([`super::belt_draw::BeltMeshes`]).
     lods: Vec<PerSide<Handle<Mesh>>>,
     /// One material for every link, read off the glb's own shoe primitive — the artist's
     /// [`LINK_MATERIAL`], never a `StandardMaterial` built here. The look is therefore changed by
@@ -326,14 +334,24 @@ impl LinkTemplate {
         self.mesh.get(side)
     }
 
-    /// The mesh one rung draws on `side`: `0` is the authored shoe, `1 + i` the chain's rung `i`.
+    /// The shoe one rung draws on `side`: `0` is the authored shoe, `1 + i` the chain's rung `i`.
     /// A rung past the chain's floor draws the floor — a pin ([`ShoeBelt::pin`]) is the only source
     /// of one, and a clamped belt showing the coarsest shoe it has beats one showing none.
-    fn rung_mesh(&self, rung: usize, side: Side) -> Handle<Mesh> {
+    pub(crate) fn rung_mesh(&self, rung: usize, side: Side) -> Handle<Mesh> {
         match rung.min(self.lods.len()).checked_sub(1) {
             None => self.mesh.get(side).clone(),
             Some(index) => self.lods[index].get(side).clone(),
         }
+    }
+
+    /// How many shoes the ladder holds, the authored one included.
+    pub(crate) fn levels(&self) -> usize {
+        self.lods.len() + 1
+    }
+
+    /// The shoe's material, the glb's own.
+    pub(crate) fn material(&self) -> &Handle<StandardMaterial> {
+        &self.material
     }
 
     /// The chain's levels and thresholds as one log-line phrase — `"4 reduced levels, LOD1 beyond
@@ -379,31 +397,187 @@ impl LinkFrame {
         self.correction * (point - self.origin)
     }
 
-    /// The canonical frame in mesh space: composed after a shoe entity's own transform, it places
-    /// the canonical frame where [`link_transform`] put the shoe.
+    /// The canonical frame in mesh space: composed after a link's pose ([`BeltFrames::pose`]), it
+    /// places the canonical frame where [`link_transform`] put the shoe.
     pub(crate) fn canonical_to_mesh(&self) -> bevy::math::Affine3A {
         bevy::math::Affine3A::from_rotation_translation(self.correction.inverse(), self.origin)
     }
+
+    /// The mesh → canonical rotation as a matrix and the mesh-local anchor: what the belt's vertex
+    /// shader reads to place a shoe vertex as [`Self::mesh_to_canonical`] does.
+    pub(crate) fn correction_and_origin(&self) -> (Mat3, Vec3) {
+        (Mat3::from_quat(self.correction), self.origin)
+    }
 }
 
-/// Marker on a pooled link instance, so a consumer's `Transform`/`Visibility` query cannot reach
-/// anything else — and so the sandbox's `mesh_layers` mesh tagger can exclude the shoe pool (the
-/// instances are nameless children of the hull, and without this marker they would fall through to
-/// the hull layer and fight the `links` switch for their visibility).
-#[derive(Component)]
-pub(crate) struct TrackLink;
+/// One link's place on its belt: the two drawn pin joints it lies across, side-plane `(z, y)` in
+/// the belt's frame. A link spans its joints rigidly — never stretched to the chord, never bent.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct LinkSpan {
+    a: Vec2,
+    b: Vec2,
+}
 
-/// ONE SIDE'S BELT: the entity every shoe on it is parented to, and the rung they all draw.
+impl LinkSpan {
+    /// Where a link lies before its first fit, a kilometre below its belt: read far away by the
+    /// rung selector, never grounded by the prints (`stamper::SINK_LIMIT_M`), on no screen.
+    const PARKED: Self = Self {
+        a: Vec2::new(-0.5, -1000.0),
+        b: Vec2::new(0.5, -1000.0),
+    };
+
+    /// The two joints, `[a, b]`.
+    pub(crate) fn joints(self) -> [Vec2; 2] {
+        [self.a, self.b]
+    }
+}
+
+/// What [`BeltFrames::fit`] does with a link no station reaches this frame (a table that briefly
+/// outruns its station list).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Stragglers {
+    /// Leave it where it last lay.
+    Keep,
+    /// Park it below the belt ([`LinkSpan::PARKED`]), off every screen.
+    Park,
+}
+
+/// ONE SIDE'S FRAME TABLE: where every material link of the belt lies this frame.
 ///
-/// The unit of LOD selection ([`select_belt_rungs`]) and the unit of lifetime — a recursive despawn
-/// of the belt takes its shoes with it. Spawned by [`spawn_belt`] and posed nowhere: it sits at
-/// identity in the frame its parent works in, so [`place_links`]' hull-local poses carry through
-/// unchanged.
+/// Record `m` is material link `m` for the belt's whole life ([`Self::fit`] rotates the
+/// station↔record map with the phase), so a consumer keyed by `(belt, m)` follows one physical shoe.
+/// Every reader takes poses from here: the GPU draw ([`super::belt_draw`]), the rung selector and
+/// the prints. Change detection on this component is the upload trigger, so a write that changes no
+/// record must not mark it.
+#[derive(Component, Clone, Debug)]
+pub(crate) struct BeltFrames {
+    /// This side's mesh → canonical-pin-frame correction.
+    frame: LinkFrame,
+    /// The shoe's own lateral centre in the belt's frame (`RigGeom::link_center_x`) — NOT the pin
+    /// plane: the shoe is authored outboard of its pins.
+    lateral_x: f32,
+    spans: Vec<LinkSpan>,
+}
+
+impl BeltFrames {
+    /// A table of `count` links on `side`'s frame, every link parked until the first fit.
+    pub(crate) fn new(frame: LinkFrame, lateral_x: f32, count: usize) -> Self {
+        Self {
+            frame,
+            lateral_x,
+            spans: vec![LinkSpan::PARKED; count],
+        }
+    }
+
+    /// The material link count: one record per link.
+    pub(crate) fn count(&self) -> usize {
+        self.spans.len()
+    }
+
+    /// Material link `link`'s span.
+    pub(crate) fn span(&self, link: usize) -> LinkSpan {
+        self.spans[link]
+    }
+
+    /// The shoe's lateral centre in the belt's frame.
+    pub(crate) fn lateral_x(&self) -> f32 {
+        self.lateral_x
+    }
+
+    /// The mesh → canonical correction every link of this side shares.
+    pub(crate) fn frame(&self) -> &LinkFrame {
+        &self.frame
+    }
+
+    /// Material link `link`'s pose in the belt's frame: the shoe mesh's own transform, exactly as
+    /// [`link_transform`] places it.
+    pub(crate) fn pose(&self, link: usize) -> Transform {
+        let span = self.spans[link];
+        link_transform(&self.frame, self.lateral_x, span.a, span.b)
+    }
+
+    /// Grow or shrink the table to `count` links, a new link parked. The sandbox's live link
+    /// count; the game's count is fixed for a belt's life.
+    pub(crate) fn resize(&mut self, count: usize) {
+        self.spans.resize(count, LinkSpan::PARKED);
+    }
+
+    /// Lay the table on this frame's drawn pin joints; whether any record changed.
+    ///
+    /// `stations` are side-plane `(z, y)` in loop order: link `i` spans stations `i` and `i+1`, the
+    /// last wrapping to the first, so `count` stations carry exactly `count` links. Station `i` is
+    /// worn by material link `(i − q) mod n`, `q` the whole-pitch quotient of `phase`
+    /// ([`phase_decompose`]), so a link's identity rides the belt instead of wandering one link per
+    /// pitch. A degenerate chord leaves its link where it lay; a link no station reaches is handled
+    /// by `stragglers`.
+    pub(crate) fn fit(
+        &mut self,
+        stations: &[Vec2],
+        phase: f64,
+        pitch: f32,
+        stragglers: Stragglers,
+    ) -> bool {
+        let n = self.spans.len();
+        if n == 0 {
+            return false;
+        }
+        let q = if pitch > 1e-6 {
+            phase_decompose(phase, pitch).0
+        } else {
+            0
+        };
+        let link = |i: usize| (i as i64 - q).rem_euclid(n as i64) as usize;
+        let count = stations.len();
+        let m = if count < 3 { 0 } else { count.min(n) };
+        let mut changed = false;
+        let mut lay = |record: &mut LinkSpan, span: LinkSpan| {
+            if *record != span {
+                *record = span;
+                changed = true;
+            }
+        };
+        for i in 0..m {
+            let (a, b) = (stations[i], stations[(i + 1) % count]);
+            if a.distance_squared(b) < 1e-8 {
+                continue;
+            }
+            lay(&mut self.spans[link(i)], LinkSpan { a, b });
+        }
+        // The rotation is a bijection over `0..n`, so the links with no station this frame are
+        // exactly the images of `m..n`.
+        if stragglers == Stragglers::Park {
+            for i in m..n {
+                lay(&mut self.spans[link(i)], LinkSpan::PARKED);
+            }
+        }
+        changed
+    }
+
+    /// The bounds of every shoe in the belt's frame, each grown by `reach` — the farthest any
+    /// vertex of any rung stands from the canonical origin. A vertex lies at its link's anchor
+    /// plus a rotation of its canonical offset, so `anchor ± reach` holds it on every axis.
+    pub(crate) fn bounds(&self, reach: f32) -> (Vec3, Vec3) {
+        let (mut low, mut high) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
+        for span in &self.spans {
+            let mid = (span.a + span.b) * 0.5;
+            let anchor = Vec3::new(self.lateral_x, mid.y, mid.x);
+            low = low.min(anchor);
+            high = high.max(anchor);
+        }
+        (low - Vec3::splat(reach), high + Vec3::splat(reach))
+    }
+}
+
+/// ONE SIDE'S BELT: the entity that draws every shoe on that side, and the rung they all draw.
+///
+/// The unit of LOD selection ([`select_belt_rungs`]), of drawing and of lifetime: a despawn of the
+/// belt takes its table and its GPU assets with it. Spawned by [`spawn_belt`] and posed nowhere: it
+/// sits at identity in the frame its parent works in, so its table's poses are in that frame.
 #[derive(Component)]
 pub(crate) struct ShoeBelt {
-    /// Which side's meshes this belt's shoes wear — the left is the template's genuine mirror.
+    /// Which side's meshes this belt wears — the left is the template's genuine mirror.
     side: Side,
-    /// The rung [`select_belt_rungs`] last wrote on every shoe.
+    /// The rung [`select_belt_rungs`] last wrote.
     rung: usize,
     /// A dev instrument's override ([`crate::lod_showcase`]) — the rung this belt draws at every
     /// distance. `None` on every production belt; nothing else writes it.
@@ -807,6 +981,11 @@ fn canonical_frame(pin_start: Vec3, pin_end: Vec3, shoe_offset: f32) -> LinkFram
 /// (`from_rotation_x(-atan2)` maps local `+z` onto the chord) composed with the template correction,
 /// so the whole "where is this mesh's nose" question is answered once at build time and never in the
 /// hot loop.
+///
+/// The belt's vertex shader (`shaders/track_belt.wgsl`, `link_position`) evaluates the same
+/// placement per vertex from the same span: `swing(correction · (p − origin)) + anchor`, the swing
+/// built from the normalised chord rather than an angle. The two agree to float rounding, and
+/// `the_shader_placement_is_the_cpu_placement` holds them together.
 fn link_transform(frame: &LinkFrame, lateral_x: f32, a: Vec2, b: Vec2) -> Transform {
     let chord = b - a;
     let rotation = Quat::from_rotation_x(-chord.y.atan2(chord.x)) * frame.correction;
@@ -814,7 +993,7 @@ fn link_transform(frame: &LinkFrame, lateral_x: f32, a: Vec2, b: Vec2) -> Transf
     let anchor = Vec3::new(lateral_x, mid.y, mid.x);
     Transform {
         // The anchor is where the frame's ORIGIN must land, and the mesh carries that origin
-        // unscaled before rotation — so the entity's translation backs it out.
+        // unscaled before rotation — so the pose's translation backs it out.
         translation: anchor - rotation * frame.origin,
         rotation,
         scale: Vec3::ONE,
@@ -826,7 +1005,7 @@ fn link_transform(frame: &LinkFrame, lateral_x: f32, a: Vec2, b: Vec2) -> Transf
 /// Both halves are load-bearing. Negating x alone leaves every triangle wound backwards (a
 /// reflection reverses orientation), so backface culling would eat the shoe and lighting would read
 /// from the inside; reversing the winding alone would mirror nothing. Doing it in the ASSET is what
-/// keeps the instance transform positive-determinant — a `Vec3::new(-1, 1, 1)` scale on the entity
+/// keeps every placement positive-determinant — a `Vec3::new(-1, 1, 1)` scale in a link's pose
 /// would push exactly this winding flip into the renderer, where it cannot be fixed.
 fn mirrored_mesh(source: &Mesh) -> Mesh {
     let mut mesh = source.clone();
@@ -929,17 +1108,23 @@ fn lod_shoe_meshes(source: &Mesh) -> Result<PerSide<Mesh>, GenerateTangentsError
 }
 
 // ---------------------------------------------------------------------------------------------
-// The pool
+// The belt
 // ---------------------------------------------------------------------------------------------
 
-/// Where the belt writes each shoe's rung mesh handle, in `PostUpdate`: anything that copies a
-/// shoe's handle for the same frame (the x-ray's mask copies) orders after it.
+/// Where the belt writes its rung mesh handle, in `PostUpdate`: anything that copies a belt's
+/// handle for the same frame (the x-ray's mask copies) orders after it.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct ShoeRungSelected;
 
-/// Spawn one side's BELT under `parent` (a hull-local frame in both consumers): the entity every
-/// shoe on that side hangs from, and the one that selects their rung.
-pub(crate) fn spawn_belt(commands: &mut Commands, side: Side, parent: Entity) -> Entity {
+/// Spawn one side's BELT under `parent` (a hull-local frame in both consumers): its table, and the
+/// GPU draw that reads it (`draw`, [`super::belt_draw::BeltAssets::draw`]), at rung 0.
+pub(crate) fn spawn_belt(
+    commands: &mut Commands,
+    side: Side,
+    parent: Entity,
+    frames: BeltFrames,
+    draw: impl Bundle,
+) -> Entity {
     commands
         .spawn((
             ShoeBelt {
@@ -947,38 +1132,13 @@ pub(crate) fn spawn_belt(commands: &mut Commands, side: Side, parent: Entity) ->
                 rung: 0,
                 pin: None,
             },
-            // IDENTITY: [`place_links`] writes poses in the frame `parent` already works in, so the
-            // belt must add nothing to it. `Visibility` keeps the propagation chain from the tank
-            // root to the shoes unbroken.
+            frames,
+            draw,
+            // IDENTITY: the table's poses are in the frame `parent` already works in, so the belt
+            // must add nothing to it.
             Transform::IDENTITY,
             Visibility::default(),
             ChildOf(parent),
-        ))
-        .id()
-}
-
-/// Spawn one pooled shoe on `side` under its [`ShoeBelt`]. ONE entity: the rung it draws is the
-/// [`Mesh3d`] handle the belt writes, so it spawns at rung 0 and the belt corrects it on the frame
-/// the parenting lands.
-///
-/// Persistent entities whose transforms are rewritten each frame — never rebuilt meshes and never
-/// immediate-mode gizmos: at 97 links × 2 sides × 1 520 triangles a per-frame rebuild would be
-/// 294 880 triangles of CPU work every frame, while identical mesh+material instances batch into two
-/// draws. Parked below the world until the first placement writes a real pose (the spawn lands via
-/// `Commands`, so the placer only sees it next frame, and an un-posed link must not flash on screen).
-pub(crate) fn spawn_link(
-    commands: &mut Commands,
-    template: &LinkTemplate,
-    side: Side,
-    belt: Entity,
-) -> Entity {
-    commands
-        .spawn((
-            TrackLink,
-            Mesh3d(template.mesh.get(side).clone()),
-            MeshMaterial3d(template.material.clone()),
-            Transform::from_xyz(0.0, -1000.0, 0.0),
-            ChildOf(belt),
         ))
         .id()
 }
@@ -993,16 +1153,15 @@ fn rung_at(switches: &[f32], distance_m: f32) -> usize {
     switches.partition_point(|&switch| switch <= distance_m)
 }
 
-/// Write each belt's rung onto its shoes, when it changes.
+/// Write each belt's rung mesh, when it changes.
 ///
 /// Steady state is one scan per belt and NO write.
 ///
-/// THE SELECTION DISTANCE IS THE BELT'S NEAREST SHOE — this frame's placed pose, read off the shoes'
-/// own `GlobalTransform`s, which is the same point the range would be measured to per shoe. Every
-/// other shoe is further from the eye, so the rung it earns on its own is coarser-or-equal and
-/// drawing it at the nearest shoe's rung is conservative; the whole side then carries one rung,
-/// which keeps it in ONE draw bin rather than straddling two. A shoe still parked below the world
-/// (spawned, not yet placed) reads far away, and the belt re-selects on the frame the placer lands.
+/// THE SELECTION DISTANCE IS THE BELT'S NEAREST SHOE — this frame's table, each link's mesh origin
+/// carried through the belt's own `GlobalTransform`, the same point a per-shoe range would be
+/// measured to. Every other shoe is further from the eye, so the rung it earns on its own is
+/// coarser-or-equal and drawing it at the nearest shoe's rung is conservative; the whole side then
+/// carries one rung in one draw. A parked link (no fit yet) reads a kilometre away.
 ///
 /// MEASURED FROM THE DECLARED PLAYER VIEW (`view::PlayerView`) — the same one fact
 /// `view::track_view_facts` takes its projection from, read here for its eye position. A mesh
@@ -1016,14 +1175,13 @@ fn rung_at(switches: &[f32], distance_m: f32) -> usize {
 /// behind the view existing (see [`template_plugin`]), so what reaches it is a contradiction in the
 /// declaration itself and reports as one ([`ViewError`]).
 ///
-/// A belt whose `Children` moved is rewritten even at an unchanged rung: [`spawn_link`] spawns at
-/// rung 0, and a pool that grows at range would otherwise leave the fresh shoes at source detail
-/// until the next transition.
+/// The mesh is looked up by the table's count as well as the rung, so a belt whose count changed
+/// (the sandbox's live knob) takes its new count's mesh at an unchanged rung.
 fn select_belt_rungs(
     template: Res<LinkTemplate>,
+    meshes: Res<super::belt_draw::BeltMeshes>,
     views: Query<&GlobalTransform, With<PlayerView>>,
-    mut belts: Query<(&mut ShoeBelt, Ref<Children>)>,
-    mut shoes: Query<(&GlobalTransform, &mut Mesh3d), With<TrackLink>>,
+    mut belts: Query<(&mut ShoeBelt, &BeltFrames, &GlobalTransform, &mut Mesh3d)>,
 ) -> Result<(), BevyError> {
     // `single()` answers a QUERY-SHAPE question; the count restates its failure as the domain fact.
     // The rows ARE the declarations — `PlayerView` requires the camera that carries this pose — so
@@ -1033,46 +1191,37 @@ fn select_belt_rungs(
         return Err(ViewError::resolving(views.iter().count()).into());
     };
     let eye = eye.translation();
-    for (mut belt, children) in &mut belts {
+    for (mut belt, frames, at, mut mesh) in &mut belts {
         let wanted = match belt.pin {
             Some(rung) => rung,
             None => {
                 // Squared throughout, one square root per belt: the comparison is monotone in it.
                 let mut nearest_sq = f32::INFINITY;
-                for shoe in children.iter() {
-                    let Ok((at, _)) = shoes.get(shoe) else {
-                        continue;
-                    };
-                    nearest_sq = nearest_sq.min(eye.distance_squared(at.translation()));
+                for link in 0..frames.count() {
+                    let origin = at.transform_point(frames.pose(link).translation);
+                    nearest_sq = nearest_sq.min(eye.distance_squared(origin));
                 }
-                // A belt with no shoe under it has no nearest shoe and nothing to write.
+                // A belt with no link has no nearest shoe and nothing to write.
                 if !nearest_sq.is_finite() {
                     continue;
                 }
                 rung_at(&template.switches, nearest_sq.sqrt())
             }
         };
-        if wanted == belt.rung && !children.is_changed() {
-            continue;
-        }
-        // Under the `Children` half the rung is usually UNCHANGED — a fresh shoe joining a belt that
-        // is where it was. Writing it anyway would dirty `ShoeBelt` for nothing.
+        // Reading through `Mut` marks nothing; only a moved rung dirties `ShoeBelt`.
         if wanted != belt.rung {
             belt.rung = wanted;
         }
-        let mesh = Mesh3d(template.rung_mesh(wanted, belt.side));
-        for shoe in children.iter() {
-            if let Ok((_, mut current)) = shoes.get_mut(shoe) {
-                current.set_if_neq(mesh.clone());
-            }
+        if let Some(handle) = meshes.rung(frames.count(), wanted, belt.side) {
+            mesh.set_if_neq(Mesh3d(handle.clone()));
         }
     }
     Ok(())
 }
 
-/// Re-derive the ladder's metres when the view profile moves — the pool's half of
-/// `geometry_lod::adapt_bands`, which cannot see these shoes (they carry no `GeometryLodLevel` and
-/// no band; the belt selects for them).
+/// Re-derive the ladder's metres when the view profile moves — the belt's half of
+/// `geometry_lod::adapt_bands`, which cannot see the belts (they carry no `GeometryLodLevel` and no
+/// band; the belt selects for itself).
 fn adapt_shoe_switches(mut template: ResMut<LinkTemplate>, view: Res<ViewProfile>) {
     let template = &mut *template;
     let Some(chain) = &template.chain else {
@@ -1081,61 +1230,10 @@ fn adapt_shoe_switches(mut template: ResMut<LinkTemplate>, view: Res<ViewProfile
     template.switches = chain.switches(*view);
 }
 
-/// Place one side's pool on this frame's belt stations.
-///
-/// `stations` are the drawn pin joints in side-plane `(z, y)`, in loop order: link `i` spans stations
-/// `i` and `i+1`, the last wrapping to the first, so `count` stations carry exactly `count` links.
-/// `lateral_x` is this side's `RigGeom::link_center_x`.
-///
-/// The entity↔station map ROTATES with the belt phase (see the module doc): station `i` is worn by
-/// entity `(i − q) mod n`, `q` the whole-pitch quotient of the phase, so a shoe's identity rides the
-/// belt instead of wandering one link per pitch.
-///
-/// `pose` is called once per pooled entity: `Some(transform)` for a slot that has a station this
-/// frame, `None` for one that does not (a pool that briefly outruns the station list — the frame a
-/// link-count bump spawns entities the belt has not resampled for yet — so the caller can hide the
-/// stragglers rather than leave a stale link hanging in the air). A degenerate chord is skipped
-/// entirely, leaving that entity's previous pose alone.
-pub(crate) fn place_links(
-    frame: &LinkFrame,
-    lateral_x: f32,
-    stations: &[Vec2],
-    phase: f64,
-    pitch: f32,
-    links: &[Entity],
-    mut pose: impl FnMut(Entity, Option<Transform>),
-) {
-    let n = links.len();
-    if n == 0 {
-        return;
-    }
-    // The whole-pitch quotient from the canonical decomposition (the offset half is the wrap's own
-    // sampling concern) — one home for the phase arithmetic.
-    let q = if pitch > 1e-6 {
-        phase_decompose(phase, pitch).0
-    } else {
-        0
-    };
-    let slot = |i: usize| links[(i as i64 - q).rem_euclid(n as i64) as usize];
-
-    let count = stations.len();
-    let m = if count < 3 { 0 } else { count.min(n) };
-    for i in 0..m {
-        let (a, b) = (stations[i], stations[(i + 1) % count]);
-        if a.distance_squared(b) < 1e-8 {
-            continue;
-        }
-        pose(slot(i), Some(link_transform(frame, lateral_x, a, b)));
-    }
-    // The rotation is a bijection over `0..n`, so the slots with no station this frame are exactly
-    // the images of `m..n` — no bookkeeping and no allocation to find them.
-    for i in m..n {
-        pose(slot(i), None);
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::f32::consts::FRAC_PI_2;
+
     use super::*;
 
     /// A FIXTURE template, re-measured from `tiger_1.glb` on 2026-07-26 (the export that APPLIED the
@@ -1178,7 +1276,7 @@ mod tests {
     }
 
     /// A template whose mesh handles are ALL DISTINCT — two per side for the base plus two per
-    /// certified rung — so a test can tell which one landed on which entity. Built from a bare
+    /// certified rung — so a test can tell which one landed on which belt. Built from a bare
     /// `Assets<Mesh>` rather than an `AssetPlugin` app: the only thing under test is which handle
     /// the belt writes where. The SWITCHES are the shipped chain's, derived exactly as the bind
     /// derives them.
@@ -1206,37 +1304,67 @@ mod tests {
         }
     }
 
-    /// One side's pool against a real `World`, exactly as a consumer builds it: the belt entity,
-    /// then one shoe per `offsets` entry under it — POSED at that belt-local offset, because the
-    /// selector reads the shoes' own placed transforms and [`spawn_link`] parks a fresh shoe a
-    /// kilometre below the world until the placer lands. All-zero offsets are a POINT BELT, whose
-    /// selection distance is exactly the camera's distance to the belt origin.
-    fn spawn_pool(
-        world: &mut World,
+    /// The belt meshes a belt of each of `counts` links draws, ALL DISTINCT per count, rung and
+    /// side, so a test can tell both the rung and the count a belt landed on.
+    fn fixture_belt_meshes(
         template: &LinkTemplate,
-        side: Side,
-        parent: Entity,
-        offsets: &[Vec3],
-    ) -> (Entity, Vec<Entity>) {
-        let mut queue = bevy::ecs::world::CommandQueue::default();
-        let mut commands = Commands::new(&mut queue, world);
-        let belt = spawn_belt(&mut commands, side, parent);
-        let shoes: Vec<Entity> = offsets
-            .iter()
-            .map(|_| spawn_link(&mut commands, template, side, belt))
-            .collect();
-        queue.apply(world);
-        for (&shoe, &offset) in shoes.iter().zip(offsets) {
-            *world.get_mut::<Transform>(shoe).expect("a posed shoe") =
-                Transform::from_translation(offset);
+        assets: &mut Assets<Mesh>,
+        counts: &[usize],
+    ) -> super::super::belt_draw::BeltMeshes {
+        let mut belt_meshes = super::super::belt_draw::BeltMeshes::default();
+        for &count in counts {
+            let rungs = (0..template.levels())
+                .map(|_| {
+                    PerSide::new(
+                        assets.add(Mesh::new(
+                            PrimitiveTopology::TriangleList,
+                            bevy::asset::RenderAssetUsages::default(),
+                        )),
+                        assets.add(Mesh::new(
+                            PrimitiveTopology::TriangleList,
+                            bevy::asset::RenderAssetUsages::default(),
+                        )),
+                    )
+                })
+                .collect();
+            belt_meshes.insert_fixture(count, rungs);
         }
-        (belt, shoes)
+        belt_meshes
     }
 
-    /// `count` co-located shoes — the point belt every ladder test that is not about the belt's own
-    /// extent wants.
-    fn point_belt(count: usize) -> Vec<Vec3> {
-        vec![Vec3::ZERO; count]
+    /// The table of a belt whose links' mesh ORIGINS stand at `origins`, side-plane `(z, y)` in the
+    /// belt's frame: an identity correction and a zero lateral centre, each link a short level chord
+    /// about its origin, so its pose IS the origin. All-zero origins are a POINT BELT, whose
+    /// selection distance is exactly the camera's distance to the belt origin.
+    fn table_at(origins: &[Vec2]) -> BeltFrames {
+        let mut frames = BeltFrames::new(LinkFrame::default(), 0.0, origins.len());
+        for (span, &at) in frames.spans.iter_mut().zip(origins) {
+            *span = LinkSpan {
+                a: at - Vec2::X * 0.05,
+                b: at + Vec2::X * 0.05,
+            };
+        }
+        frames
+    }
+
+    /// `count` co-located links.
+    fn point_belt(count: usize) -> Vec<Vec2> {
+        vec![Vec2::ZERO; count]
+    }
+
+    /// One side's belt against a real `World`, as a consumer spawns it, at rung 0 of its count.
+    fn spawn_table(
+        world: &mut World,
+        side: Side,
+        parent: Entity,
+        frames: BeltFrames,
+        rung0: Handle<Mesh>,
+    ) -> Entity {
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, world);
+        let belt = spawn_belt(&mut commands, side, parent, frames, Mesh3d(rung0));
+        queue.apply(world);
+        belt
     }
 
     /// The mesh asset an entity draws — the whole of what a rung IS under the swap.
@@ -1244,23 +1372,35 @@ mod tests {
         world
             .entity(entity)
             .get::<Mesh3d>()
-            .expect("a shoe is a mesh")
+            .expect("a belt is a mesh")
             .0
             .id()
     }
 
     /// Where the fixture's belts stand. NOT the world origin, and reached through a PARENT: the belt
-    /// contract is `Transform::IDENTITY`, so with the anchor at the origin a belt's local transform
-    /// and its global one are the same point and a selector reading the local one passes every test
-    /// — while in the game it would select every tank on the map at its distance to `(0, 0, 0)`.
+    /// contract is `Transform::IDENTITY`, so with the anchor at the origin a belt's local frame and
+    /// the world are the same and a selector reading the table without the belt's global pose passes
+    /// every test — while in the game it would select every tank on the map at its distance to
+    /// `(0, 0, 0)`. The anchor is TURNED a quarter about up, carrying the belt's `+z` onto world
+    /// `+x`, where the camera stands ([`look_from`]): a belt's links lie along its `z`, and an
+    /// unrotated parent would hide a selector that skips the rotation.
     const ANCHOR: Vec3 = Vec3::new(-137.0, 4.5, 61.0);
 
-    /// A live selector: the template as a resource, transform propagation mounted, one camera the
-    /// test moves by hand, and the displaced anchor every fixture belt hangs from.
-    fn selector_app(template: LinkTemplate) -> (App, Entity, Entity) {
+    fn anchor_pose() -> Transform {
+        Transform::from_translation(ANCHOR).with_rotation(Quat::from_rotation_y(FRAC_PI_2))
+    }
+
+    /// A live selector: the template and the belt meshes for `counts` as resources, transform
+    /// propagation mounted, one camera the test moves by hand, and the displaced anchor every
+    /// fixture belt hangs from.
+    fn selector_app(template: LinkTemplate, counts: &[usize]) -> (App, Entity, Entity) {
+        let mut assets = Assets::<Mesh>::default();
+        let belt_meshes = fixture_belt_meshes(&template, &mut assets, counts);
         let mut app = App::new();
         app.add_plugins(bevy::transform::TransformPlugin);
         app.insert_resource(template);
+        app.insert_resource(belt_meshes);
+        app.insert_resource(assets);
         // The production edge: the poses this reads are written upstream in `PostUpdate`.
         app.add_systems(
             PostUpdate,
@@ -1270,11 +1410,17 @@ mod tests {
             .world_mut()
             .spawn((Camera3d::default(), PlayerView))
             .id();
-        let anchor = app
-            .world_mut()
-            .spawn(Transform::from_translation(ANCHOR))
-            .id();
+        let anchor = app.world_mut().spawn(anchor_pose()).id();
         (app, camera, anchor)
+    }
+
+    /// The mesh a belt of `count` links draws at `rung` on `side`, in a running [`selector_app`].
+    fn belt_mesh(app: &App, count: usize, rung: usize, side: Side) -> bevy::asset::AssetId<Mesh> {
+        app.world()
+            .resource::<super::super::belt_draw::BeltMeshes>()
+            .rung(count, rung, side)
+            .expect("a fixture count")
+            .id()
     }
 
     /// Stand the camera `distance_m` from the belts' origin and run one frame.
@@ -1285,21 +1431,15 @@ mod tests {
         app.update();
     }
 
-    /// A pool under a running [`selector_app`] — the template is lifted out of the world for the
-    /// spawn and put straight back.
-    fn spawn_pool_in(
-        app: &mut App,
-        side: Side,
-        offsets: &[Vec3],
-        parent: Entity,
-    ) -> (Entity, Vec<Entity>) {
-        let template = app
-            .world_mut()
-            .remove_resource::<LinkTemplate>()
-            .expect("the fixture template");
-        let pool = spawn_pool(app.world_mut(), &template, side, parent, offsets);
-        app.insert_resource(template);
-        pool
+    /// A belt under a running [`selector_app`], at rung 0 of its count.
+    fn spawn_table_in(app: &mut App, side: Side, frames: BeltFrames, parent: Entity) -> Entity {
+        let rung0 = app
+            .world()
+            .resource::<super::super::belt_draw::BeltMeshes>()
+            .rung(frames.count(), 0, side)
+            .expect("a fixture count")
+            .clone();
+        spawn_table(app.world_mut(), side, parent, frames, rung0)
     }
 
     /// THE TILING LAW, reproduced by hand: exactly one rung owns every distance, and a boundary
@@ -1363,17 +1503,17 @@ mod tests {
         assert_eq!(rung_at(&switches, -1.0), 0);
     }
 
-    /// THE BELT SELECTS ON ITS NEAREST SHOE — the placed pose of one, not a bound around all of
-    /// them — and the whole side then wears that shoe's rung.
+    /// THE BELT SELECTS ON ITS NEAREST SHOE — one link's placed origin from the table, not a bound
+    /// around all of them — and draws that shoe's rung for the whole side.
     ///
     /// Two facts in one fixture. The switch lands where the NEAREST shoe crosses it, so a belt whose
     /// near end is `SPREAD_M` toward the camera switches `SPREAD_M` later in belt-origin distance
     /// and not a metre earlier; and the FAR shoes, which have earned coarser rungs of their own,
-    /// wear the near one's — conservative by construction, and one draw bin for the side.
+    /// draw the near one's — conservative by construction, and one draw for the side.
     ///
-    /// The same holds on a belt `place_links` lays on an articulated wrap: a drooped pose lowered
-    /// by the conform reach, where the nearest shoe is wherever the wrap put it. There the drawn
-    /// rung must be exactly the finest any shoe earns at its own distance.
+    /// The same holds on a table [`BeltFrames::fit`] lays on an articulated wrap: a drooped pose
+    /// lowered by the conform reach, where the nearest shoe is wherever the wrap put it. There the
+    /// drawn rung must be exactly the finest any shoe earns at its own distance.
     #[test]
     fn a_belt_selects_on_its_nearest_shoe() {
         use crate::track::derive::SuspensionParams;
@@ -1384,60 +1524,53 @@ mod tests {
         const SPREAD_M: f32 = 2.0;
         /// `track::view::PROBE_REACH` — the view's downward probe, and the sandbox's conform reach.
         const CONFORM_M: f32 = 0.5;
+        let rig = tiger_rig();
         let mut assets = Assets::<Mesh>::default();
         let template = fixture_template(&mut assets);
         let side = Side::Right;
         let switches = template.switches.clone();
-        let rungs: Vec<_> = (0..=template.lods.len())
-            .map(|rung| template.rung_mesh(rung, side).id())
+        let (mut app, camera, parent) = selector_app(template, &[4, rig.link_count]);
+        let rungs: Vec<_> = (0..=switches.len())
+            .map(|rung| belt_mesh(&app, 4, rung, side))
             .collect();
 
-        let (mut app, camera, parent) = selector_app(template);
-        // The camera stands out along +x ([`look_from`]), so +x is TOWARD it.
-        let (_, shoes) = spawn_pool_in(
+        // The anchor carries belt `+z` onto world `+x`, TOWARD the camera ([`look_from`]); `+y`
+        // stays up, across the camera's axis.
+        let spread = spawn_table_in(
             &mut app,
             side,
-            &[
-                Vec3::X * SPREAD_M,
-                Vec3::ZERO,
-                Vec3::X * -SPREAD_M,
-                Vec3::Z * SPREAD_M,
-            ],
+            table_at(&[
+                Vec2::X * SPREAD_M,
+                Vec2::ZERO,
+                Vec2::X * -SPREAD_M,
+                Vec2::Y * SPREAD_M,
+            ]),
             parent,
         );
-        let drawn = |app: &App| -> Vec<bevy::asset::AssetId<Mesh>> {
-            shoes
-                .iter()
-                .map(|&shoe| mesh_of(app.world(), shoe))
-                .collect()
-        };
 
         for (index, &switch) in switches.iter().enumerate() {
             // A hair nearer than the switch, measured on the NEAREST shoe: the finer rung holds —
-            // and the far shoes, already past it on their own distances, hold it too.
+            // and the far shoes, already past it on their own distances, draw it too.
             look_from(&mut app, camera, switch + SPREAD_M - 0.01);
             assert_eq!(
-                drawn(&app),
-                vec![rungs[index]; shoes.len()],
-                "with its nearest shoe a hair inside {switch} m the belt must draw rung {index} on \
-                 every shoe",
+                mesh_of(app.world(), spread),
+                rungs[index],
+                "with its nearest shoe a hair inside {switch} m the belt must draw rung {index}",
             );
-            // ...and the moment that shoe crosses, the whole belt takes the coarser rung together,
-            // which is what keeps it in ONE draw bin instead of straddling two.
+            // ...and the moment that shoe crosses, the whole belt takes the coarser rung together.
             look_from(&mut app, camera, switch + SPREAD_M);
             assert_eq!(
-                drawn(&app),
-                vec![rungs[index + 1]; shoes.len()],
-                "at {switch} m on the nearest shoe rung {} must take over on every shoe at once",
+                mesh_of(app.world(), spread),
+                rungs[index + 1],
+                "at {switch} m on the nearest shoe rung {} must take over for the whole belt",
                 index + 1,
             );
         }
         // Back to the muzzle: the selection is a function of the distance, not a ratchet.
         look_from(&mut app, camera, 0.0);
-        assert_eq!(drawn(&app), vec![rungs[0]; shoes.len()]);
+        assert_eq!(mesh_of(app.world(), spread), rungs[0]);
 
-        // The articulated, conformed belt, posed exactly as the consumers pose it.
-        let rig = tiger_rig();
+        // The articulated, conformed belt, fitted exactly as the consumers fit it.
         let route = build_route(
             &rig.circles(side, Pose::Droop, &SuspensionParams::default()),
             rig.belt_len(),
@@ -1446,28 +1579,20 @@ mod tests {
             .iter()
             .map(|p| Vec2::new(p.x, p.y - CONFORM_M))
             .collect();
-        let (_, wrapped) = spawn_pool_in(&mut app, side, &point_belt(rig.link_count), parent);
-        let slot: std::collections::HashMap<Entity, usize> = wrapped
-            .iter()
-            .enumerate()
-            .map(|(index, &shoe)| (shoe, index))
-            .collect();
-        let mut placed = vec![ANCHOR; wrapped.len()];
-        place_links(
-            tiger_frames().get(side),
+        let mut frames = BeltFrames::new(
+            *tiger_frames().get(side),
             rig.link_center_x(side),
-            &stations,
-            0.0,
-            rig.pitch,
-            &wrapped,
-            |shoe, at| {
-                let Some(at) = at else { return };
-                *app.world_mut()
-                    .get_mut::<Transform>(shoe)
-                    .expect("a pooled shoe") = at;
-                placed[slot[&shoe]] = ANCHOR + at.translation;
-            },
+            rig.link_count,
         );
+        assert!(frames.fit(&stations, 0.0, rig.pitch, Stragglers::Keep));
+        let anchor = anchor_pose().compute_affine();
+        let placed: Vec<Vec3> = (0..frames.count())
+            .map(|link| anchor.transform_point3(frames.pose(link).translation))
+            .collect();
+        let wrapped = spawn_table_in(&mut app, side, frames, parent);
+        let rungs: Vec<_> = (0..=switches.len())
+            .map(|rung| belt_mesh(&app, rig.link_count, rung, side))
+            .collect();
         // Stand off along +x far enough that the whole belt is behind the camera plane, so a nudge
         // of the standoff is a nudge of the nearest shoe's distance.
         let reach = placed
@@ -1482,15 +1607,13 @@ mod tests {
                     .iter()
                     .map(|&at| rung_at(&switches, eye.distance(at)))
                     .min()
-                    .expect("a full pool");
-                for &shoe in &wrapped {
-                    assert_eq!(
-                        mesh_of(app.world(), shoe),
-                        rungs[finest],
-                        "nudge {nudge} m about {switch} m: the wrapped belt must draw rung \
-                         {finest}, the finest its nearest shoe earns, on every shoe",
-                    );
-                }
+                    .expect("a full table");
+                assert_eq!(
+                    mesh_of(app.world(), wrapped),
+                    rungs[finest],
+                    "nudge {nudge} m about {switch} m: the wrapped belt must draw rung {finest}, \
+                     the finest its nearest shoe earns",
+                );
             }
         }
     }
@@ -1514,13 +1637,9 @@ mod tests {
         let template = fixture_template(&mut assets);
         let side = Side::Right;
         let switch = template.switches[0];
-        let (base, coarser) = (
-            template.rung_mesh(0, side).id(),
-            template.rung_mesh(1, side).id(),
-        );
-
-        let (mut app, view, parent) = selector_app(template);
-        let (_, shoes) = spawn_pool_in(&mut app, side, &point_belt(2), parent);
+        let (mut app, view, parent) = selector_app(template, &[2]);
+        let (base, coarser) = (belt_mesh(&app, 2, 0, side), belt_mesh(&app, 2, 1, side));
+        let belt = spawn_table_in(&mut app, side, table_at(&point_belt(2)), parent);
         // The sandbox's overlay camera: a 3-D camera sharing the scene, declaring nothing.
         let overlay = app
             .world_mut()
@@ -1536,34 +1655,28 @@ mod tests {
         // Both past the switch: the belt reduces, and a second camera did not silence the system.
         stand(&mut app, overlay, switch * 2.0);
         look_from(&mut app, view, switch * 3.0);
-        for &shoe in &shoes {
-            assert_eq!(
-                mesh_of(app.world(), shoe),
-                coarser,
-                "a second camera must not stop the selector — the belt is frozen at rung 0",
-            );
-        }
+        assert_eq!(
+            mesh_of(app.world(), belt),
+            coarser,
+            "a second camera must not stop the selector — the belt is frozen at rung 0",
+        );
 
         // The undeclared camera steps right onto the belt. It is not a view, so nothing moves.
         stand(&mut app, overlay, 0.0);
         look_from(&mut app, view, switch * 3.0);
-        for &shoe in &shoes {
-            assert_eq!(
-                mesh_of(app.world(), shoe),
-                coarser,
-                "a camera nobody looks through must not pull the ladder finer",
-            );
-        }
+        assert_eq!(
+            mesh_of(app.world(), belt),
+            coarser,
+            "a camera nobody looks through must not pull the ladder finer",
+        );
 
         // And the declared view alone governs: it steps inside the switch and the belt follows.
         look_from(&mut app, view, switch - 1.0);
-        for &shoe in &shoes {
-            assert_eq!(
-                mesh_of(app.world(), shoe),
-                base,
-                "the declared view is the view the rung is selected for",
-            );
-        }
+        assert_eq!(
+            mesh_of(app.world(), belt),
+            base,
+            "the declared view is the view the rung is selected for",
+        );
     }
 
     /// EVERY WAY THE DECLARATION CAN BE WRONG REACHES THIS SELECTOR AS A REPORT, and leaves the
@@ -1584,13 +1697,24 @@ mod tests {
         let declare_wrongly = |declare: &dyn Fn(&mut World)| -> BevyError {
             let mut assets = Assets::<Mesh>::default();
             let template = fixture_template(&mut assets);
+            let belt_meshes = fixture_belt_meshes(&template, &mut assets, &[2]);
             let side = Side::Right;
-            let authored = template.rung_mesh(0, side).id();
+            let authored = belt_meshes
+                .rung(2, 0, side)
+                .expect("a fixture count")
+                .clone();
 
             let mut world = World::new();
-            let parent = world.spawn(Transform::from_translation(ANCHOR)).id();
-            let (_, shoes) = spawn_pool(&mut world, &template, side, parent, &point_belt(2));
+            let parent = world.spawn(anchor_pose()).id();
+            let belt = spawn_table(
+                &mut world,
+                side,
+                parent,
+                table_at(&point_belt(2)),
+                authored.clone(),
+            );
             world.insert_resource(template);
+            world.insert_resource(belt_meshes);
             declare(&mut world);
 
             let selected: Result<(), BevyError> = world
@@ -1598,13 +1722,11 @@ mod tests {
                 .expect("the selector runs");
             let reported = selected
                 .expect_err("a declaration that does not resolve is a report, never a held rung");
-            for &shoe in &shoes {
-                assert_eq!(
-                    mesh_of(&world, shoe),
-                    authored,
-                    "a selector that cannot resolve the view writes nothing: {reported}",
-                );
-            }
+            assert_eq!(
+                mesh_of(&world, belt),
+                authored.id(),
+                "a selector that cannot resolve the view writes nothing: {reported}",
+            );
             reported
         };
 
@@ -1628,8 +1750,8 @@ mod tests {
     }
 
     /// THE STEADY STATE WRITES NOTHING. The whole design rests on it: a frame on which no belt
-    /// changed rung must cost one READ of each shoe's placed pose per tank and not one component
-    /// write — no `Mesh3d` churn to re-extract, no `ShoeBelt` change to re-run anything downstream.
+    /// changed rung must cost one READ of each belt's table and not one component write — no
+    /// `Mesh3d` churn to re-extract, no `ShoeBelt` change to re-run anything downstream.
     #[test]
     fn an_unmoved_belt_writes_no_handle() {
         #[derive(Resource, Default)]
@@ -1643,28 +1765,29 @@ mod tests {
             churn.0 += meshes.iter().count() + belts.iter().count();
         }
 
+        // ASSUMED fixture count: the Tiger's own links per side.
+        const COUNT: usize = 97;
         let mut assets = Assets::<Mesh>::default();
         let template = fixture_template(&mut assets);
         let switch = template.switches[0];
-        let (mut app, camera, parent) = selector_app(template);
+        let (mut app, camera, parent) = selector_app(template, &[COUNT]);
         app.init_resource::<Churn>()
             .add_systems(PostUpdate, count_churn.after(select_belt_rungs));
-        // The Tiger's own pool size, per side.
-        spawn_pool_in(&mut app, Side::Right, &point_belt(97), parent);
+        spawn_table_in(&mut app, Side::Right, table_at(&point_belt(COUNT)), parent);
 
-        // The frame the pool lands: the belt writes, because a fresh shoe spawns at rung 0.
+        // The frame the belt lands: it writes, because a fresh belt spawns at rung 0.
         look_from(&mut app, camera, switch * 2.0);
         assert!(app.world().resource::<Churn>().0 > 0, "the swap must land");
 
-        // Every frame after it, with the camera and the pool unmoved.
+        // Every frame after it, with the camera and the table unmoved.
         for _ in 0..3 {
             app.world_mut().resource_mut::<Churn>().0 = 0;
             app.update();
             assert_eq!(
                 app.world().resource::<Churn>().0,
                 0,
-                "an unmoved belt rewrote a handle it had already written — at 30 tanks that is \
-                 5 820 component writes and a re-extract per frame for nothing",
+                "an unmoved belt rewrote a handle it had already written — a re-extract per frame \
+                 for nothing",
             );
         }
         // ...and a camera that moves WITHOUT crossing a switch is just as quiet.
@@ -1673,54 +1796,42 @@ mod tests {
         assert_eq!(app.world().resource::<Churn>().0, 0);
     }
 
-    /// A SHOE THAT JOINS A REDUCED BELT takes the belt's rung, not the authored shoe.
-    ///
-    /// [`spawn_link`] spawns at rung 0 and the belt writes only on a transition, so the one thing
-    /// that can strand a shoe at source detail is a pool that GROWS at range — the sandbox's live
-    /// link-count knob, and a rig rebind. The belt's own `Children` changing is what catches it.
+    /// A BELT WHOSE COUNT CHANGES draws its new count's mesh at its rung, not the authored shoe and
+    /// not the old count's stack: the sandbox's live link-count knob resizes a belt in place, and a
+    /// mesh of the wrong count draws shoes from records that do not exist.
     #[test]
-    fn a_shoe_that_joins_a_reduced_belt_takes_its_rung() {
+    fn a_resized_belt_takes_its_new_counts_mesh_at_its_rung() {
         let mut assets = Assets::<Mesh>::default();
         let template = fixture_template(&mut assets);
         let side = Side::Left;
         let switch = template.switches[0];
-        let coarser = template.rung_mesh(1, side).id();
-
-        let (mut app, camera, parent) = selector_app(template);
-        let (belt, shoes) = spawn_pool_in(&mut app, side, &point_belt(2), parent);
-        // The belt sits BETWEEN the tank root and the shoes, and bevy's visibility is a chain of
-        // components, not of entities: without one here every shoe below it is unrendered.
+        let (mut app, camera, parent) = selector_app(template, &[2, 3]);
+        let belt = spawn_table_in(&mut app, side, table_at(&point_belt(2)), parent);
+        // The belt sits between the tank root and the drawn mesh's view chain, and bevy's
+        // visibility is a chain of components: the belt must carry its own.
         assert!(
             app.world().entity(belt).contains::<Visibility>(),
-            "the belt must carry a `Visibility` or it breaks the chain to its own shoes",
+            "the belt must carry a `Visibility` or it is never drawn",
         );
-        for &shoe in &shoes {
-            assert!(
-                !app.world()
-                    .entity(shoe)
-                    .contains::<crate::geometry_lod::GeometryLodLevel>(),
-                "a pooled shoe is invisible to `adapt_bands`, which would otherwise write a band \
-                 the belt already owns",
-            );
-        }
+        assert!(
+            !app.world()
+                .entity(belt)
+                .contains::<crate::geometry_lod::GeometryLodLevel>(),
+            "a belt is invisible to `adapt_bands`, which would otherwise write a band the belt \
+             already owns",
+        );
         look_from(&mut app, camera, switch + 1.0);
+        assert_eq!(mesh_of(app.world(), belt), belt_mesh(&app, 2, 1, side));
 
-        let template = app
-            .world_mut()
-            .remove_resource::<LinkTemplate>()
-            .expect("the fixture template");
-        let mut queue = bevy::ecs::world::CommandQueue::default();
-        let mut commands = Commands::new(&mut queue, app.world());
-        let fresh = spawn_link(&mut commands, &template, side, belt);
-        queue.apply(app.world_mut());
-        app.insert_resource(template);
-        assert_ne!(mesh_of(app.world(), fresh), coarser, "it spawns at rung 0");
-
+        app.world_mut()
+            .get_mut::<BeltFrames>(belt)
+            .expect("the table")
+            .resize(3);
         app.update();
         assert_eq!(
-            mesh_of(app.world(), fresh),
-            coarser,
-            "a shoe added to a belt already past the switch must join it at its rung",
+            mesh_of(app.world(), belt),
+            belt_mesh(&app, 3, 1, side),
+            "a resized belt already past the switch must draw its new count at its rung",
         );
     }
 
@@ -2254,99 +2365,176 @@ mod tests {
         );
     }
 
-    /// The slot rotation, which is the whole reason a shoe's identity rides the belt: driving one
-    /// pitch forward must move each material link ONE station along the loop, so the entity that
-    /// wore station `i` now wears station `i+1`. A fixed binding (the sandbox's old behaviour) fails
-    /// this — every entity would keep the station index it started with.
+    /// STABLE LINK IDENTITY, the whole reason a shoe's identity rides the belt: driving one pitch
+    /// forward must move each material link ONE station along the loop, so the record that held
+    /// station `i` now holds station `i+1`, and a whole loop of travel brings it home. A fixed
+    /// record↔station binding fails this — every record would keep the station it started on, and
+    /// a print's press (keyed by record) would wander one link per pitch.
     #[test]
-    fn a_pitch_of_travel_walks_every_shoe_one_station() {
+    fn a_pitch_of_travel_walks_every_link_one_station() {
         const N: usize = 8;
         const PITCH: f32 = 0.13;
         let frame = *tiger_frames().get(Side::Right);
-        // A closed octagon of stations, all distinct so a mis-map is visible in the pose.
+        // A closed octagon of stations, all distinct so a mis-map is visible in the span.
         let stations: Vec<Vec2> = (0..N)
             .map(|i| {
                 let a = std::f32::consts::TAU * i as f32 / N as f32;
                 Vec2::new(a.cos(), a.sin())
             })
             .collect();
-        let mut world = World::new();
-        let links: Vec<Entity> = (0..N).map(|_| world.spawn_empty().id()).collect();
-
-        let station_of = |phase: f64| {
-            let mut map = vec![usize::MAX; N];
-            place_links(
-                &frame,
-                LATERAL_X,
-                &stations,
-                phase,
-                PITCH,
-                &links,
-                |entity, transform| {
-                    let slot = links.iter().position(|&e| e == entity).expect("pooled");
-                    if let Some(t) = transform {
-                        // Recover which station this entity landed on from its pose: the anchor's
-                        // (z, y) is the chord midpoint.
-                        let mid = Vec2::new(t.translation.z, t.translation.y);
-                        let best = (0..N)
-                            .min_by(|&i, &j| {
-                                let m = |k: usize| (stations[k] + stations[(k + 1) % N]) * 0.5;
-                                m(i).distance(mid).total_cmp(&m(j).distance(mid))
-                            })
-                            .expect("a closed loop has stations");
-                        map[slot] = best;
-                    }
-                },
-            );
-            map
+        let station_of = |phase: f64| -> Vec<usize> {
+            let mut frames = BeltFrames::new(frame, LATERAL_X, N);
+            frames.fit(&stations, phase, PITCH, Stragglers::Keep);
+            (0..N)
+                .map(|link| {
+                    let [a, _] = frames.span(link).joints();
+                    stations
+                        .iter()
+                        .position(|&station| station == a)
+                        .expect("every record lies on a station")
+                })
+                .collect()
         };
 
         let at_rest = station_of(0.0);
-        // Every entity got exactly one station, and every station exactly one entity.
+        // Every record got exactly one station, and every station exactly one record.
         let mut seen = at_rest.clone();
         seen.sort_unstable();
         assert_eq!(seen, (0..N).collect::<Vec<_>>(), "the map is a bijection");
 
+        // The phase's whole-pitch quotient alone moves the map: a sub-pitch phase keeps it.
+        assert_eq!(station_of(f64::from(PITCH) * 0.5), at_rest);
         let one_pitch = station_of(f64::from(PITCH));
-        for slot in 0..N {
+        for link in 0..N {
             assert_eq!(
-                one_pitch[slot],
-                (at_rest[slot] + 1) % N,
-                "entity {slot} did not walk one station forward",
+                one_pitch[link],
+                (at_rest[link] + 1) % N,
+                "link {link} did not walk one station forward",
             );
         }
-        // ...and a whole loop of travel returns every entity to where it started (the material loop
+        // ...a pitch backward walks it back...
+        let back = station_of(-f64::from(PITCH));
+        for link in 0..N {
+            assert_eq!(back[link], (at_rest[link] + N - 1) % N);
+        }
+        // ...and a whole loop of travel returns every link to where it started (the material loop
         // closes: `count` pitches ≡ 0).
         assert_eq!(station_of(f64::from(PITCH) * N as f64), at_rest);
     }
 
-    /// A pool bigger than the station list must be told about its stragglers rather than leaving
-    /// them wherever they last were — one hidden link is a bug you never see, one stale link hanging
-    /// in the air is a bug in every screenshot.
+    /// THE COUNT: a table holds one record per material link whatever the station list does. A
+    /// table that outruns its stations leaves its stragglers where they lay (the game: a link must
+    /// never jump) or parks them below the belt (the sandbox: a stale link hanging in the air is a
+    /// bug in every screenshot), and a refit of identical stations changes nothing — the upload,
+    /// the bounds and every reader key on that change.
     #[test]
-    fn a_pool_that_outruns_the_stations_reports_its_stragglers() {
+    fn a_table_keeps_one_record_per_link_and_reports_only_real_changes() {
+        const PITCH: f32 = 0.13;
         let frame = *tiger_frames().get(Side::Right);
-        let stations: Vec<Vec2> = (0..5).map(|i| Vec2::new(i as f32 * 0.13, 0.4)).collect();
-        let mut world = World::new();
-        let links: Vec<Entity> = (0..8).map(|_| world.spawn_empty().id()).collect();
-        let (mut posed, mut unposed) = (0, 0);
-        place_links(
-            &frame,
-            LATERAL_X,
-            &stations,
-            0.0,
-            0.13,
-            &links,
-            |_, transform| {
-                if transform.is_some() {
-                    posed += 1;
-                } else {
-                    unposed += 1;
-                }
-            },
+        let full: Vec<Vec2> = (0..8)
+            .map(|i| {
+                let a = std::f32::consts::TAU * i as f32 / 8.0;
+                Vec2::new(a.cos(), a.sin())
+            })
+            .collect();
+        let short: Vec<Vec2> = (0..5).map(|i| Vec2::new(i as f32 * PITCH, 0.4)).collect();
+
+        let mut frames = BeltFrames::new(frame, LATERAL_X, 8);
+        assert!(
+            (0..8).all(|link| frames.span(link) == LinkSpan::PARKED),
+            "a fresh table is parked"
         );
-        assert_eq!(posed, 5, "one link per station");
-        assert_eq!(unposed, 3, "every straggler must be reported");
+        assert!(frames.fit(&full, 0.0, PITCH, Stragglers::Keep));
+        assert!(
+            !frames.fit(&full, 0.0, PITCH, Stragglers::Keep),
+            "a refit of the same stations must not report a change"
+        );
+        let laid: Vec<LinkSpan> = (0..8).map(|link| frames.span(link)).collect();
+
+        let mut kept = frames.clone();
+        assert!(kept.fit(&short, 0.0, PITCH, Stragglers::Keep));
+        assert_eq!(
+            kept.count(),
+            8,
+            "the count is the material loop's, not the station list's"
+        );
+        let moved = (0..8).filter(|&link| kept.span(link) != laid[link]).count();
+        assert_eq!(
+            moved, 5,
+            "one link per station moves; the stragglers keep their spans"
+        );
+
+        let mut parked = frames.clone();
+        parked.fit(&short, 0.0, PITCH, Stragglers::Park);
+        let stragglers = (0..8)
+            .filter(|&link| parked.span(link) == LinkSpan::PARKED)
+            .count();
+        assert_eq!(stragglers, 3, "every straggler is parked");
+
+        frames.resize(10);
+        assert_eq!(frames.count(), 10);
+        assert_eq!(
+            frames.span(9),
+            LinkSpan::PARKED,
+            "a grown table parks its new links"
+        );
+        frames.resize(4);
+        assert_eq!(frames.count(), 4);
+    }
+
+    /// THE SHADER PLACES WHAT THE CPU PLACES. The belt's vertex stage (`track_belt.wgsl`,
+    /// `link_position`) and the CPU readers ([`BeltFrames::pose`]: the prints, the rung selector)
+    /// read the same span and must put every vertex in the same place, or the prints stamp shoes
+    /// the player does not see. This mirrors the WGSL expression term for term — the swing from
+    /// the unit chord, applied to the corrected offset, plus the anchor — and checks it against
+    /// [`link_transform`] on both sides, every quadrant of chord, and the mesh's own corners.
+    #[test]
+    fn the_shader_placement_is_the_cpu_placement() {
+        fn swing(q: Vec3, dir: Vec2) -> Vec3 {
+            Vec3::new(q.x, q.y * dir.x + q.z * dir.y, q.z * dir.x - q.y * dir.y)
+        }
+        fn shader(frame: &LinkFrame, lateral_x: f32, span: LinkSpan, p: Vec3) -> Vec3 {
+            let (correction, origin) = frame.correction_and_origin();
+            let chord = span.b - span.a;
+            let dir = if chord.length() > 0.0 {
+                chord / chord.length()
+            } else {
+                Vec2::X
+            };
+            let mid = (span.a + span.b) * 0.5;
+            swing(correction * (p - origin), dir) + Vec3::new(lateral_x, mid.y, mid.x)
+        }
+        let corners = [
+            Vec3::new(0.3, -0.05, 0.08),
+            Vec3::new(-0.3, 0.06, -0.07),
+            Vec3::new(0.01, 0.12, 0.0),
+        ];
+        for (side, frame) in tiger_frames().iter() {
+            let lateral_x = LATERAL_X * side.sign();
+            for step in 0..16 {
+                let angle = std::f32::consts::TAU * step as f32 / 16.0 + 0.1;
+                let a = Vec2::new(0.4, -0.2);
+                let span = LinkSpan {
+                    a,
+                    b: a + Vec2::new(angle.cos(), angle.sin()) * 0.13,
+                };
+                let pose = link_transform(frame, lateral_x, span.a, span.b);
+                for &p in &corners {
+                    let cpu = pose.transform_point(p);
+                    let gpu = shader(frame, lateral_x, span, p);
+                    assert!(
+                        cpu.distance(gpu) < 1e-5,
+                        "{side:?} chord at {angle} rad: the shader puts {p} at {gpu}, the CPU at \
+                         {cpu}",
+                    );
+                    // Directions (normals, tangents) rotate by the same swing.
+                    let n = (p - Vec3::Y * 0.01).normalize();
+                    let (correction, _) = frame.correction_and_origin();
+                    let dir = (span.b - span.a).normalize();
+                    assert!((pose.rotation * n).distance(swing(correction * n, dir)) < 1e-5);
+                }
+            }
+        }
     }
 
     /// THE SCALE CONTRACT: a template that is not authored at unit scale aborts, and the message

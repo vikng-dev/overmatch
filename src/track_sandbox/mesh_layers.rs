@@ -51,7 +51,6 @@ use bevy::prelude::*;
 use super::wheel_view::gear_slot;
 use super::{Hull, VizLayers};
 use crate::bake::TankGeometry;
-use crate::track::link_view::TrackLink;
 
 /// Render layer for volumes drawn "on top" — the [`OverlayCamera`] renders only this, with its own
 /// depth buffer and no clear, so it composites over the main scene regardless of containment. Layer 0
@@ -292,9 +291,9 @@ enum ViewClass {
 
 /// Tag every un-tagged glb mesh with its [`ViewMesh`] class exactly once. Runs each frame (a filtered
 /// scan) so late-instantiated / hot-reloaded scene meshes are picked up — `Without<ViewMesh>` makes
-/// it a one-time tag per mesh. `Without<TrackLink>` keeps the instanced-shoe pool (nameless children
-/// of the hull, which would otherwise fall through to `Hull`) out; the running-gear nodes are named,
-/// so [`classify`] excludes them by name.
+/// it a one-time tag per mesh. The track belts (nameless children of the hull) wear the belt's own
+/// material, never a `StandardMaterial`, so they are never candidates; the running-gear nodes are
+/// named, so [`classify`] excludes them by name.
 ///
 /// A hull or world mesh remembers its current material so x-ray can restore it; volumes and skips
 /// carry none. Every tagged mesh gets an explicit `RenderLayers::layer(0)` so [`apply_view_layers`]
@@ -308,7 +307,7 @@ fn tag_view_meshes(
     hull: Single<Entity, With<Hull>>,
     candidates: Query<
         (Entity, &MeshMaterial3d<StandardMaterial>),
-        (With<Mesh3d>, Without<ViewMesh>, Without<TrackLink>),
+        (With<Mesh3d>, Without<ViewMesh>),
     >,
     parents: Query<&ChildOf>,
     names: Query<&Name>,

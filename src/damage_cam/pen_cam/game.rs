@@ -643,6 +643,7 @@ mod tests {
             .init_asset::<super::super::material::OutlineMaterial>()
             .init_asset::<super::super::material::SliceMaterial>()
             .init_asset::<super::super::look::LookMaterial>()
+            .init_asset::<super::super::look::BeltLookMaterial>()
             .init_resource::<Time>()
             .init_resource::<ShotExplanations>()
             .insert_resource(settings);

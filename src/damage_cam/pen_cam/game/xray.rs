@@ -4,8 +4,10 @@
 //! primitives — each mesh's `StandardMaterial` handle set aside ([`Dressed`]) and replaced by its
 //! tier's [`LookMaterial`], a component's painted with the record's fields by its live role
 //! ([`Footprint`]), a mask copy spawned under it — and the record's elements hang under the
-//! live hull and component meshes ([`spawn_glass`]), so the pose, the servos, the certified LOD and
-//! the pooled shoes follow for free; nothing is hidden and nothing is copied. One mask set is owned
+//! live hull and component meshes ([`spawn_glass`]), so the pose, the servos and the certified LOD
+//! follow for free. A live track belt draws its shoes in its vertex stage, so it wears its tier's
+//! look with its own placement ([`BeltLookMaterial`]) and its table moves its shoes under the look
+//! as under its own material; nothing is hidden and nothing is copied. One mask set is owned
 //! for the player's camera ([`MaskNeed`]). While on, the tank casts no shadow (`LookMaterial` casts
 //! none).
 //!
@@ -43,7 +45,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::sync::Arc;
 
-use bevy::camera::visibility::VisibilityRange;
+use bevy::camera::visibility::{NoFrustumCulling, VisibilityRange};
 use bevy::ecs::query::QueryData;
 use bevy::ecs::system::SystemParam;
 use bevy::gltf::{GltfMaterialName, GltfMeshName};
@@ -52,7 +54,9 @@ use bevy::window::{CursorOptions, PrimaryWindow};
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldInstanceReady};
 
 use super::super::Knobs;
-use super::super::look::{self, Footprint, Layer, LookMaterial, MaskNeed, MaskSet, Masks};
+use super::super::look::{
+    self, BeltLook, BeltLookMaterial, Footprint, Layer, LookMaterial, MaskNeed, MaskSet, Masks,
+};
 use super::super::material::{GlowMaterial, OutlineMaterial};
 use super::super::picture::{PictureDetail, PictureJobs, ViewPictures};
 use super::super::plan::{BoxPlan, Plan};
@@ -81,6 +85,7 @@ use crate::render_policy::VisualScope;
 use crate::sight::SightMode;
 use crate::spec::TankSpecHandle;
 use crate::tank::{Controlled, Rig as TankRig, Tank, ViewNode};
+use crate::track::belt_draw::BeltMaterial;
 use crate::view::PlayerView;
 use crate::{CombatantId, CombatantLife};
 
@@ -228,12 +233,19 @@ pub(super) struct XRayItem;
 /// their meshes.
 #[derive(Component)]
 pub(super) struct Dressed {
-    original: Handle<StandardMaterial>,
+    original: Original,
     names: Vec<String>,
 }
 
+/// The material a dressed mesh wore: a glb primitive's, or a live track belt's, whose look keeps
+/// the belt's placement ([`BeltLookMaterial`]).
+enum Original {
+    Mesh(Handle<StandardMaterial>),
+    Belt(Handle<BeltMaterial>),
+}
+
 /// The x-ray's mask copy of a dressed mesh, drawn for the mask cameras alone: it follows the
-/// source's mesh handle ([`follow_mesh`]), which a shoe's belt swaps.
+/// source's mesh handle ([`follow_mesh`]), which a belt's rung selection swaps.
 #[derive(Component)]
 pub(super) struct MaskCopy {
     of: Entity,
@@ -372,6 +384,17 @@ pub(super) struct Held<'w, 's> {
         ),
         (Without<Dressed>, Without<XRayItem>),
     >,
+    /// The tank's live track belts, one mesh per side ([`crate::track::belt_draw`]).
+    undressed_belts: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static Mesh3d,
+            &'static MeshMaterial3d<BeltMaterial>,
+        ),
+        (Without<Dressed>, Without<XRayItem>),
+    >,
     dressed: Query<'w, 's, (Entity, &'static Dressed, &'static Mesh3d)>,
     items: Query<'w, 's, Entity, With<XRayItem>>,
     elements: Query<'w, 's, Entity, (With<XRayItem>, Without<MaskCopy>)>,
@@ -381,10 +404,15 @@ impl Held<'_, '_> {
     /// Put every dressed mesh back in the material it wore and despawn every item of the x-ray.
     fn restore(&self, commands: &mut Commands) {
         for (entity, dressed, _) in &self.dressed {
-            commands
-                .entity(entity)
-                .remove::<(MeshMaterial3d<LookMaterial>, Dressed)>()
-                .insert(MeshMaterial3d(dressed.original.clone()));
+            let mut entity = commands.entity(entity);
+            match &dressed.original {
+                Original::Mesh(original) => entity
+                    .remove::<(MeshMaterial3d<LookMaterial>, Dressed)>()
+                    .insert(MeshMaterial3d(original.clone())),
+                Original::Belt(original) => entity
+                    .remove::<(MeshMaterial3d<BeltLookMaterial>, Dressed)>()
+                    .insert(MeshMaterial3d(original.clone())),
+            };
         }
         for item in &self.items {
             commands.entity(item).despawn();
@@ -420,6 +448,15 @@ pub(super) struct Stores<'w> {
     outlines: ResMut<'w, Assets<OutlineMaterial>>,
     looks: ResMut<'w, Assets<LookMaterial>>,
     pictures: ResMut<'w, RecordPictures>,
+    belts: BeltStores<'w>,
+}
+
+/// The stores a live track belt's look is built from: the belt's own material, whose placement
+/// the look keeps, and the belt looks.
+#[derive(SystemParam)]
+pub(super) struct BeltStores<'w> {
+    belts: Option<Res<'w, Assets<BeltMaterial>>>,
+    looks: ResMut<'w, Assets<BeltLookMaterial>>,
 }
 
 /// What the x-ray is drawn through: the player's view mode, the kill cam and the player's camera.
@@ -550,6 +587,7 @@ pub(super) fn build(
             &live,
             built,
             &mut stores.looks,
+            &mut stores.belts,
             &scene,
             &held,
         );
@@ -689,7 +727,7 @@ pub(super) fn forget_shown(_new: On<NewMatch>, mut state: ResMut<XRayState>) {
 /// proxy, and the x-ray's own meshes.
 #[expect(
     clippy::too_many_arguments,
-    reason = "dresses one tank: the command sink, the tank, its asset and live state, the build, the material store and the hierarchy and held reads are separate inputs"
+    reason = "dresses one tank: the command sink, the tank, its asset and live state, the build, the material stores and the hierarchy and held reads are separate inputs"
 )]
 fn dress(
     commands: &mut Commands,
@@ -698,24 +736,38 @@ fn dress(
     live: &LiveState,
     built: &mut Built,
     looks: &mut Assets<LookMaterial>,
+    belts: &mut BeltStores,
     scene: &Hierarchy,
     held: &Held,
 ) -> (bool, bool) {
+    /// One undressed mesh: a glb primitive with the range it draws in, or a live track belt.
+    enum Undressed<'a> {
+        Mesh(
+            &'a Mesh3d,
+            &'a Handle<StandardMaterial>,
+            Option<&'a VisibilityRange>,
+        ),
+        Belt(&'a Mesh3d, &'a Handle<BeltMaterial>),
+    }
     let spec = asset.spec();
     let potency = asset.crew_face().map(Potency::of_crew_face);
     let mut any = false;
     let mut skipped = false;
     for entity in scene.children.iter_descendants(root) {
-        let Ok((entity, mesh, material, range)) = held.undressed.get(entity) else {
+        let undressed = if let Ok((_, mesh, material, range)) = held.undressed.get(entity) {
+            if scene.source_only.is_none()
+                && scene.primitives.contains(entity)
+                && !scene.scanned.contains(entity)
+            {
+                skipped = true;
+                continue;
+            }
+            Undressed::Mesh(mesh, &material.0, range)
+        } else if let Ok((_, mesh, material)) = held.undressed_belts.get(entity) {
+            Undressed::Belt(mesh, &material.0)
+        } else {
             continue;
         };
-        if scene.source_only.is_none()
-            && scene.primitives.contains(entity)
-            && !scene.scanned.contains(entity)
-        {
-            skipped = true;
-            continue;
-        }
         if scene
             .scopes
             .get(entity)
@@ -746,32 +798,84 @@ fn dress(
             continue;
         }
         let role = live.role_of(&names);
-        let (handle, layer) = built
-            .tiers
-            .entry((tier, Footprint::of_mesh(tier, role)))
-            .or_insert_with(|| {
+        match undressed {
+            Undressed::Mesh(mesh, material, range) => {
+                let (handle, layer) = built
+                    .tiers
+                    .entry((tier, Footprint::of_mesh(tier, role)))
+                    .or_insert_with(|| {
+                        let draw = look::hull(tier, role, &built.masks, potency.as_ref());
+                        (looks.add(draw.material), draw.layer)
+                    })
+                    .clone();
+                commands
+                    .entity(entity)
+                    .remove::<MeshMaterial3d<StandardMaterial>>()
+                    .insert((
+                        MeshMaterial3d(handle),
+                        Dressed {
+                            original: Original::Mesh(material.clone()),
+                            names,
+                        },
+                    ));
+                let mut copy = commands.spawn((
+                    mask_copy(mesh.0.clone(), built.mask.clone(), layer),
+                    XRayItem,
+                    MaskCopy { of: entity },
+                    ChildOf(entity),
+                ));
+                if let Some(range) = range {
+                    copy.insert(range.clone());
+                }
+            }
+            // A belt wears its own look and mask materials, each its tier's look with the belt's
+            // placement: a shared tier material cannot place a belt's shoes. Its chain is unnamed,
+            // so it belongs to no component and is never painted, and its look holds still once
+            // built.
+            Undressed::Belt(mesh, material) => {
+                let Some(placement) = belts
+                    .belts
+                    .as_ref()
+                    .and_then(|stored| stored.get(material))
+                    .map(|belt| BeltLook::of(&belt.extension))
+                else {
+                    continue;
+                };
+                let Some(mask) = looks.get(&built.mask).cloned() else {
+                    continue;
+                };
                 let draw = look::hull(tier, role, &built.masks, potency.as_ref());
-                (looks.add(draw.material), draw.layer)
-            })
-            .clone();
-        commands
-            .entity(entity)
-            .remove::<MeshMaterial3d<StandardMaterial>>()
-            .insert((
-                MeshMaterial3d(handle),
-                Dressed {
-                    original: material.0.clone(),
-                    names,
-                },
-            ));
-        let mut copy = commands.spawn((
-            mask_copy(mesh.0.clone(), built.mask.clone(), layer),
-            XRayItem,
-            MaskCopy { of: entity },
-            ChildOf(entity),
-        ));
-        if let Some(range) = range {
-            copy.insert(range.clone());
+                let look = belts.looks.add(BeltLookMaterial {
+                    base: draw.material,
+                    extension: placement.clone(),
+                });
+                let mask = belts.looks.add(BeltLookMaterial {
+                    base: mask,
+                    extension: placement,
+                });
+                commands
+                    .entity(entity)
+                    .remove::<MeshMaterial3d<BeltMaterial>>()
+                    .insert((
+                        MeshMaterial3d(look),
+                        Dressed {
+                            original: Original::Belt(material.clone()),
+                            names,
+                        },
+                    ));
+                // The mesh's own bounds are the undeformed stack; the copy is drawn by the mask
+                // cameras alone, so it opts out of culling rather than tracking the belt's bounds.
+                commands.spawn((
+                    Mesh3d(mesh.0.clone()),
+                    MeshMaterial3d(mask),
+                    Transform::IDENTITY,
+                    stage::mask_scope(draw.layer),
+                    NoFrustumCulling,
+                    XRayItem,
+                    MaskCopy { of: entity },
+                    ChildOf(entity),
+                ));
+            }
         }
         any = true;
     }
@@ -951,7 +1055,7 @@ pub(super) fn log_presence(state: Res<XRayState>, time: Res<Time<Real>>, mut on:
     *on = now;
 }
 
-/// A mask copy follows its source's mesh handle: a pooled shoe draws the rung its belt writes.
+/// A mask copy follows its source's mesh handle: a belt's copy draws the rung its belt writes.
 pub(super) fn follow_mesh(
     sources: Query<&Mesh3d, (Changed<Mesh3d>, With<Dressed>)>,
     mut copies: Query<(&MaskCopy, &mut Mesh3d), Without<Dressed>>,

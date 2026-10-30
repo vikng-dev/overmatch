@@ -23,6 +23,7 @@ pub(crate) mod envelope;
 // the shoe-instancing render layer, both shared verbatim by the game's `view` and the sandbox's
 // `wheel_view`/`link_view` adapters. They used to be duplicated per consumer — a phase lock whose
 // whole point is that ONE measured constant seats twenty teeth cannot survive two copies of it.
+pub(crate) mod belt_draw;
 pub(crate) mod gear_phase;
 pub(crate) mod link_view;
 pub(crate) mod loop_geom;

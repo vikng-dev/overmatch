@@ -1511,7 +1511,7 @@ mod tests {
     #[ignore = "manual headless CPU measurement; run with --ignored --nocapture"]
     fn thirty_tank_pivot_cpu_and_upload_measurement() {
         use crate::terrain_grid::{HeightGrid, TerrainExtent};
-        use crate::track_prints::stamper::{ShoeMemory, contact};
+        use crate::track_prints::stamper::{ShoeKey, ShoeMemory, contact};
         use bevy::math::{Affine3A, Quat};
         use bevy::prelude::Entity;
         use std::sync::Arc;
@@ -1569,7 +1569,7 @@ mod tests {
                                 |p| Some(grid.height_at(p.x, p.y)),
                             )
                             .unwrap();
-                            let id = Entity::from_raw_u32((side * 27 + k + 1) as u32).unwrap();
+                            let id = ShoeKey::new(Entity::PLACEHOLDER, side * 27 + k);
                             let hull_local = Vec3::new(local.x, 0.0, local.y);
                             if let Some(sweep) = memory.observe(id, &c, hull_local, pitch) {
                                 laid.extend(sweep.map(|(c, press)| {

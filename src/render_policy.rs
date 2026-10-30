@@ -811,11 +811,11 @@ mod tests {
         );
     }
 
-    /// The inheritance walks THROUGH an unscoped ancestor, which is the shape the shoe pool has: a
-    /// tank root, a `ShoeBelt` that declares no scope of its own, and the shoes under it. Both halves
-    /// have to survive the extra hop — the channel inherited from the root two levels up, and the
-    /// shoe's own `PROXIED_CASTER` shadow role — or a track either casts twice or follows the wrong
-    /// view. The role silences the shoe's casting only: it still receives shadows.
+    /// The inheritance walks THROUGH an unscoped ancestor: a tank root, an intermediate node that
+    /// declares no scope of its own, and a `PROXIED_CASTER` mesh under it. Both halves have to
+    /// survive the extra hop — the channel inherited from the root two levels up, and the mesh's
+    /// own shadow role — or a proxied caster either casts twice or follows the wrong view. The role
+    /// silences the mesh's casting only: it still receives shadows.
     #[test]
     fn a_proxied_caster_inherits_through_an_unscoped_belt() {
         let mut app = App::new();
