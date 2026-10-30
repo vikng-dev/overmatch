@@ -1,0 +1,20 @@
+cond	lever	lines	live	frozen	tick50	tick95	phys50	send50	cpu	over_max	hz	clients
+cl01-12x2x8192x512-t4	12:2:8192:512	160	273	420	21570	24329	11794	183	134	64	44.3	0-0
+cl02-100x2x8192x512-t4	100:2:8192:512	145	1610	509	32646	36546	21688	236	140	64	29.4	0-0
+cl03-100x2x8192x512-t4	100:2:8192:512	148	1648	509	33350	37393	22182	235	140	64	28.8	0-0
+cl04-12x2x8192x512-t4	12:2:8192:512	156	274	436	22384	25589	12091	195	135	64	42.8	0-0
+
+== threads 4: 4 conditions
+  tick50  medians: a  19748.8  b/live   8.136  R² 0.997   |   per-second: a  15867.0  b/live   8.802  c/frozen   6.237  R² 0.792  n 609
+  tick95  medians: a  22530.2  b/live   8.867  R² 0.994   |   per-second: a  24011.8  b/live  11.708  c/frozen  -2.975  R² 0.082  n 609
+  phys50  medians: a   9923.8  b/live   7.375  R² 0.999   |   per-second: a   6792.5  b/live   7.823  c/frozen   5.082  R² 0.801  n 609
+  cpu     medians: a    133.7  b/live   0.004  R² 0.990   |   per-second: a    128.6  b/live   0.003  c/frozen   0.013  R² 0.477  n 609
+  live medians span 273–1648
+  per-second bins (armed seconds by live; `off` = lever-off seconds):
+    live_bin      n   live_med frozen_med tick50 tick95 phys50 send50 cpu   slope_vs_prev(us/piece)
+    1-127           35        54       257   13789   15996    5060    164   133   
+    128-255         86       242       264   20792   23700   10979    182   133   +37.25
+    256-511        195       344       476   22887   25880   12785    198   135   +20.54
+    512-1023        68       809       510   21671   24822   11805    207   139   -2.62
+    1024-2047      191      1734       509   34144   38170   22596    238   139   +13.48
+    2048-4095       34      2083       507   39412   45669   26252    259   141   +15.09
