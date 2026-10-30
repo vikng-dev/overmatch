@@ -134,7 +134,7 @@ impl TankTransmission {
 /// replicated to every client.
 ///
 /// Error against the crank: ≤ 0.5 rpm (round to nearest) over 0–65 535 rpm; a crank outside that
-/// band saturates to its bound, a non-finite one reads 0. Postcard writes the `u16` as a varint:
+/// band saturates to its bound, a NaN one reads 0. Postcard writes the `u16` as a varint:
 /// 2 bytes from 128 to 16 383 rpm.
 #[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct EngineRpm(pub u16);
