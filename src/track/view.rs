@@ -62,7 +62,9 @@ pub fn view_plugin(app: &mut App) {
             .before(TransformSystems::Propagate),
     );
     app.add_systems(PostUpdate, drive_track_views.in_set(TrackViewSet));
-    // A belt's table reaches its GPU buffer and bounds in the frame the view fits it.
+    // A belt's table reaches its bounds and the render world in the frame the view fits it: the
+    // upload runs after this fit and, by `belt_draw::plugin`, before `AssetEventSystems` flushes
+    // the page's `Modified` event.
     app.configure_sets(PostUpdate, super::belt_draw::BeltUpload.after(TrackViewSet));
     // The prints the drawn belts lay in the ground: they read the shoes this view places, so they
     // are composed wherever it is, and nowhere else.

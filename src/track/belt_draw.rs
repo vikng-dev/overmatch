@@ -62,7 +62,8 @@
 //! # Upload
 //!
 //! A changed belt table is written into its block in place; each written page is marked modified
-//! once per frame, and reaches the GPU whole (DERIVED 128 KiB a page). A settled belt's table is
+//! once per frame, and reaches the GPU whole (DERIVED 128 KiB a page), in the frame the table
+//! changed ([`BeltUpload`] orders before the asset-event flush). A settled belt's table is
 //! unchanged and writes nothing.
 //!
 //! # Bounds
@@ -73,7 +74,7 @@
 
 use std::ops::Range;
 
-use bevy::asset::RenderAssetUsages;
+use bevy::asset::{AssetEventSystems, RenderAssetUsages};
 use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::{NoAutoAabb, VisibilitySystems};
 use bevy::ecs::lifecycle::HookContext;
@@ -654,8 +655,11 @@ impl BeltAssets<'_> {
     }
 }
 
-/// Where a belt's changed table reaches its buffer and its bounds: after every table writer,
-/// before visibility reads the bounds.
+/// Where a belt's changed table reaches its page and its bounds: after every table writer (each
+/// consumer orders its writer before this set), before visibility reads the bounds, and before
+/// `AssetEventSystems` flushes the page's `Modified` event, which is the only way a page reaches
+/// the render world (`bevy_render`'s `extract_render_asset`). So a table, its bounds and the GPU's
+/// copy of it all belong to the frame that wrote the table.
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct BeltUpload;
 
@@ -704,14 +708,22 @@ fn evict_unused_counts(mut cache: ResMut<BeltMeshes>, tables: Query<&BeltFrames>
     }
 }
 
-/// The belt draw's material, mesh cache and upload. Mounted by [`super::link_view::template_plugin`].
+/// The belt draw's material, mesh cache, table and upload. Mounted by
+/// [`super::link_view::template_plugin`].
 pub(crate) fn plugin(app: &mut App) {
-    app.add_plugins(MaterialPlugin::<BeltMaterial>::default())
-        .init_resource::<BeltMeshes>()
+    app.add_plugins(MaterialPlugin::<BeltMaterial>::default());
+    schedule(app);
+}
+
+/// Everything [`plugin`] mounts but the material's render plugin.
+fn schedule(app: &mut App) {
+    app.init_resource::<BeltMeshes>()
         .init_resource::<BeltTable>()
         .configure_sets(
             PostUpdate,
-            BeltUpload.before(VisibilitySystems::CheckVisibility),
+            BeltUpload
+                .before(VisibilitySystems::CheckVisibility)
+                .before(AssetEventSystems),
         )
         .add_systems(PostUpdate, upload_belt_frames.in_set(BeltUpload))
         .add_systems(Last, evict_unused_counts);
@@ -943,6 +955,128 @@ mod tests {
             "a despawned belt's block is lent again"
         );
         assert_eq!(world.resource::<BeltTable>().pages.len(), 1);
+    }
+
+    /// A CHANGED TABLE REACHES THE RENDER WORLD IN THE FRAME IT CHANGED. A page reaches the render
+    /// world only through its `AssetEvent`, flushed in `AssetEventSystems`; an upload after the
+    /// flush would leave the first frame of every change (motion onset, a teleport, a respawn)
+    /// drawing last frame's spans under this frame's hull, wheels, bounds and prints. The schedule
+    /// must order the upload before the flush (an unordered pair can run either way, frame to
+    /// frame), and a reader in `Last`, after this frame's flush, must see the page modified in the
+    /// frame its table changed, with the new spans in it, and see nothing in a frame no table
+    /// changed.
+    #[test]
+    fn a_changed_table_reaches_the_render_world_in_the_frame_it_changed() {
+        use bevy::ecs::schedule::{NodeId, Schedules};
+
+        /// Whether `PostUpdate` orders set `first` ahead of set `then` by a path of ordering edges.
+        fn ordered(app: &App, first: impl SystemSet, then: impl SystemSet) -> bool {
+            let graph = app
+                .world()
+                .resource::<Schedules>()
+                .get(PostUpdate)
+                .expect("PostUpdate")
+                .graph();
+            let node = |set| graph.system_sets.get_key(set).map(NodeId::Set);
+            let (Some(from), Some(to)) = (node(first.intern()), node(then.intern())) else {
+                return false;
+            };
+            let edges = graph.dependency().graph();
+            let (mut stack, mut seen) = (vec![from], Vec::new());
+            while let Some(at) = stack.pop() {
+                if at == to {
+                    return true;
+                }
+                if !seen.contains(&at) {
+                    seen.push(at);
+                    stack.extend(edges.neighbors(at));
+                }
+            }
+            false
+        }
+
+        #[derive(Resource, Default)]
+        struct Flushed(Vec<AssetId<ShaderBuffer>>);
+        fn flushed(mut events: MessageReader<AssetEvent<ShaderBuffer>>, mut seen: ResMut<Flushed>) {
+            seen.0 = events
+                .read()
+                .filter_map(|event| match event {
+                    AssetEvent::Modified { id } => Some(*id),
+                    _ => None,
+                })
+                .collect();
+        }
+
+        const COUNT: usize = 5;
+        const PITCH: f32 = 0.1;
+        let mut app = App::new();
+        app.add_plugins((TaskPoolPlugin::default(), AssetPlugin::default()))
+            .init_asset::<Mesh>()
+            .init_asset::<StandardMaterial>()
+            .init_asset::<BeltMaterial>()
+            .init_asset::<ShaderBuffer>()
+            .init_resource::<Flushed>()
+            .add_systems(Last, flushed);
+        schedule(&mut app);
+        let world = app.world_mut();
+        let mut meshes = world.resource_mut::<Assets<Mesh>>();
+        let shoes = vec![PerSide::new(
+            meshes.add(fixture_shoe()),
+            meshes.add(fixture_shoe()),
+        )];
+        let look = world
+            .resource_mut::<Assets<StandardMaterial>>()
+            .add(StandardMaterial::default());
+        world.insert_resource(LinkTemplate::fixture(shoes, look));
+        let belt = spawn_drawn(
+            app.world_mut(),
+            Side::Right,
+            BeltFrames::new(LinkFrame::default(), 1.5, COUNT),
+        );
+        let page = app.world().resource::<BeltTable>().pages[0].buffer.id();
+        app.update();
+        assert!(
+            ordered(&app, BeltUpload, AssetEventSystems),
+            "the upload is ordered before the asset-event flush",
+        );
+        app.update();
+        assert!(
+            app.world().resource::<Flushed>().0.is_empty(),
+            "a frame no table changed sends no page",
+        );
+
+        let stations: Vec<Vec2> = (0..COUNT)
+            .map(|i| Vec2::new(i as f32 * PITCH, 0.3))
+            .collect();
+        assert!(
+            app.world_mut()
+                .get_mut::<BeltFrames>(belt)
+                .expect("the table")
+                .fit(&stations, 0.0, PITCH, Stragglers::Keep)
+        );
+        app.update();
+        assert_eq!(
+            app.world().resource::<Flushed>().0,
+            vec![page],
+            "the page reaches the render world in the frame its table changed, once",
+        );
+        let block = app.world().get::<MeshTag>(belt).expect("a tag").0;
+        let bytes = app
+            .world()
+            .resource::<Assets<ShaderBuffer>>()
+            .get(page)
+            .and_then(|page| page.data.clone())
+            .expect("a main-world page");
+        let [a, b] = app
+            .world()
+            .get::<BeltFrames>(belt)
+            .expect("the table")
+            .span(0)
+            .joints();
+        assert_eq!(
+            record(&bytes, block + HEADER_RECORDS),
+            Vec4::new(a.x, a.y, b.x, b.y)
+        );
     }
 
     /// A REFUSAL IS FINAL AND BUILDS NOTHING. Every rung is checked before any is built, so a shoe
