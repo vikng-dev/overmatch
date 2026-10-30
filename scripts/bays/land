@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# land — the orchestrator's merge of one lane: cherry-pick the bay's lane commits onto `main` in
+# the main checkout, push, then release the bay and delete its branch. Each step runs only if the
+# one before succeeded: a cherry-pick conflict stops here with the bay still leased and the branch
+# intact, the main checkout mid-cherry-pick for the orchestrator to resolve and continue.
+#
+# Usage: scripts/bays/land <bay> [--no-push]     <bay>: bay-2, 2, or the bay's path
+set -euo pipefail
+# shellcheck source-path=SCRIPTDIR source=lib.sh
+. "$(dirname "$0")/lib.sh"
+
+[[ $# -ge 1 ]] || die "usage: scripts/bays/land <bay> [--no-push]"
+bay=$(bay_resolve "$1") || die "'$1' is not a bay (bay-1..bay-$BAYS_COUNT under $bays_pool)"
+push=1
+[[ ${2:-} == --no-push ]] && push=0
+main=$(cd "$(dirname "$0")/../.." && pwd -P)
+
+[[ -z $(bay_dirt "$bay") ]] || die "land: $(basename "$bay") holds uncommitted work; commit it on its lane first"
+branch=$(git -C "$bay" symbolic-ref --quiet --short HEAD) || die "land: $(basename "$bay") has no lane branch checked out"
+[[ $branch == lane/* ]] || die "land: $(basename "$bay") is on '$branch', not a lane branch"
+[[ $(git -C "$main" symbolic-ref --short HEAD) == main ]] || die "land: the main checkout is not on main"
+
+# Commit ids hold no whitespace, so word splitting is exact; avoids bash-4 `mapfile`.
+# shellcheck disable=SC2207
+commits=($(git -C "$main" rev-list --reverse "main..$branch"))
+((${#commits[@]} > 0)) || die "land: $branch has no commits beyond main"
+
+git -C "$main" cherry-pick "${commits[@]}" >/dev/null ||
+  die "land: cherry-pick of $branch stopped on a conflict; resolve in the main checkout, 'git cherry-pick --continue', then rerun land's remaining steps by hand"
+git -C "$main" log --oneline -"${#commits[@]}"
+if ((push)); then
+  git -C "$main" push -q origin main
+fi
+"$(dirname "$0")/release" "$bay"
+git -C "$main" branch -D "$branch"
