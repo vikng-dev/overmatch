@@ -28,7 +28,7 @@ use crate::tank::{
     Controlled as GameControlled, Rig, ServoCommand, ServoIndex, ServoSpec, TankServos, WeaponGate,
     WeaponLoads,
 };
-use crate::track::sim::{TankTransmission, TrackDrive, TrackDriveSide};
+use crate::track::sim::{EngineRpm, TankTransmission, TrackDrive, TrackDriveSide};
 use crate::{CombatantId, CombatantLife, ShotId};
 
 // ---------------------------------------------------------------------------
@@ -202,7 +202,11 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// each `WeaponLoad` the crew's fuze mode per round type, and [`FireEvent`] the fired round's mode
 /// index, which the receiver binds the round in ([`crate::tank::WeaponRound::in_mode`]). Own-type
 /// graph and REV move.
-pub const PROTOCOL_REV: u32 = 39;
+///
+/// REV 40 (#185, a client's download per remote tank): `TankTransmission` joins the owner-only
+/// disclosure scope and every tank root carries a public `EngineRpm` for the engine sound.
+/// Surface, own-type graph and REV move.
+pub const PROTOCOL_REV: u32 = 40;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -940,12 +944,13 @@ const WIRE_SURFACE: &[&str] = &[
     "AngularVelocity",
     "TrackDrive",
     "TankTransmission",
+    "EngineRpm",
     "WeaponGate",
     "WeaponLoads",
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0xbe3d_4f3e_28b2_3b35;
+const WIRE_SURFACE_HASH: u64 = 0xa74c_507b_a869_c2e0;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -982,7 +987,7 @@ const WIRE_SURFACE_HASH: u64 = 0xbe3d_4f3e_28b2_3b35;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xfa2f_67ca_6bb5_efc8;
+const WIRE_TYPES_HASH: u64 = 0x375e_b7de_13cc_69bd;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1130,8 +1135,11 @@ pub(crate) fn plugin(app: &mut App) {
     app.component::<TrackDrive>()
         .replicate()
         .add_interpolation_with(track_drive_lerp);
-    // The declared transmission's correlated state: one atomic snapshot.
+    // The declared transmission's correlated state: one atomic snapshot, owner-only
+    // (`disclosure::CombatDisclosure`). Every other client hears the crank through `EngineRpm`,
+    // applied on arrival like the transmission it is read off.
     app.component::<TankTransmission>().replicate();
+    app.component::<EngineRpm>().replicate();
     // Complete weapon eligibility state: one atomic snapshot. `net::fire_presentation` reconciles
     // it as a legality report against the locally authored cadence.
     app.component::<WeaponGate>().replicate();
@@ -1468,8 +1476,8 @@ mod tests {
     fn replicated_rig_preserves_join_in_progress_authoritative_sim_snapshots() {
         let rig = strip_comments(&read_source("src/net/rig.rs"));
         assert!(
-            rig.contains("With<TankTransmission>"),
-            "client rig attachment must wait for the replicated current transmission state"
+            rig.contains("With<EngineRpm>"),
+            "client rig attachment must wait for the replicated public crank speed"
         );
 
         let spawn = strip_comments(&read_source("src/tank/spawn.rs"));
@@ -1727,6 +1735,7 @@ mod tests {
         ("src/track/sim.rs", "TrackDrive"),
         ("src/track/sim.rs", "TrackDriveSide"),
         ("src/track/sim.rs", "TankTransmission"),
+        ("src/track/sim.rs", "EngineRpm"),
         ("src/track/transmission.rs", "TransmissionState"),
         ("src/track/transmission.rs", "SchedulerState"),
         ("src/tank/model.rs", "WeaponGate"),

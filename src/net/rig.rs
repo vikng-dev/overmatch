@@ -11,7 +11,7 @@ use lightyear::prelude::*;
 
 use super::protocol::NetTank;
 use crate::tank::{PendingTankAssets, TankSimSource, attach_replicated_tank_body};
-use crate::track::sim::TankTransmission;
+use crate::track::sim::EngineRpm;
 
 /// Attach simulation from `TankSimSource` only after a replicated root has a valid pose.
 pub(crate) fn attach_replicated_rig(
@@ -24,9 +24,11 @@ pub(crate) fn attach_replicated_rig(
             With<Interpolated>,
             With<Position>,
             With<Rotation>,
-            // The replicated current transmission snapshot must precede body attachment, so no
-            // local consumer reads a freshly reconstructed JIP value.
-            With<TankTransmission>,
+            // The replicated public crank speed must precede body attachment, so the engine sound
+            // the body brings is born at the authority's crank, never a reconstructed JIP value.
+            // It is the one transmission fact every client receives: `TankTransmission` reaches
+            // only the owner, in the same init snapshot.
+            With<EngineRpm>,
             Without<RigidBody>,
         ),
     >,

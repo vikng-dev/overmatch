@@ -379,7 +379,7 @@ fn record_tick(
             &TrackDrive,
             &TrackGrip,
             Option<&TrackGripElements>,
-            &TankTransmission,
+            Option<&TankTransmission>,
             (Option<&WeaponGate>, Option<&WeaponLoads>),
             Option<&TankServos>,
             Option<&RemoteServos>,
@@ -582,20 +582,23 @@ fn record_tick(
                 })
                 .collect();
             // Same stable field order as `htrn`; the scheduler occupies tag/from/to slots so the
-            // verbose diagnostic shape stays fixed across variants.
-            let mut trn = Vec::with_capacity(18);
-            for field in transmission_state_projection(&transmission.0) {
-                match field {
-                    TransmissionProjectionValue::U8(value) => trn.push(Value::from(value)),
-                    TransmissionProjectionValue::I8(value) => trn.push(Value::from(value)),
-                    TransmissionProjectionValue::Bool(value) => trn.push(Value::from(value)),
-                    TransmissionProjectionValue::F32(value) => trn.push(num(value)),
-                    TransmissionProjectionValue::Scheduler { tag, from, to } => {
-                        trn.extend([Value::from(tag), Value::from(from), Value::from(to)]);
+            // verbose diagnostic shape stays fixed across variants. Null on a replica of a tank this
+            // client does not own: the transmission is owner-only on the wire.
+            let trn = transmission.map_or(Value::Null, |transmission| {
+                let mut trn = Vec::with_capacity(18);
+                for field in transmission_state_projection(&transmission.0) {
+                    match field {
+                        TransmissionProjectionValue::U8(value) => trn.push(Value::from(value)),
+                        TransmissionProjectionValue::I8(value) => trn.push(Value::from(value)),
+                        TransmissionProjectionValue::Bool(value) => trn.push(Value::from(value)),
+                        TransmissionProjectionValue::F32(value) => trn.push(num(value)),
+                        TransmissionProjectionValue::Scheduler { tag, from, to } => {
+                            trn.extend([Value::from(tag), Value::from(from), Value::from(to)]);
+                        }
                     }
                 }
-            }
-            let trn = Value::Array(trn);
+                Value::Array(trn)
+            });
             row.as_object_mut()
                 .expect("json! built an object")
                 .insert("simf".into(), json!({"srv": srv, "wpn": wpn, "trn": trn}));

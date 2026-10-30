@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 use super::protocol::{NetCrew, NetTank};
 use crate::damage::{KnockoutReason, TankKnockedOut};
 use crate::tank::{WeaponGate, WeaponLoads};
+use crate::track::sim::TankTransmission;
 
 /// Public, server-authored tank-life fact. Detailed damage and ammunition state stay owner-only.
 #[derive(Component, Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -35,8 +36,9 @@ impl NetTankStatus {
     }
 }
 
-/// Immutable policy attached at tank spawn. It exposes the replicated internal combat snapshots
-/// (`NetCrew`, `WeaponGate`, `WeaponLoads`) only to `owner`.
+/// Immutable policy attached at tank spawn. It exposes the replicated internal snapshots
+/// (`NetCrew`, `WeaponGate`, `WeaponLoads`, `TankTransmission`) only to `owner`; what every client
+/// needs of the drivetrain rides public `EngineRpm`.
 #[derive(Component, Clone, Copy, Debug, PartialEq, Eq)]
 #[component(immutable)]
 pub(super) struct CombatDisclosure {
@@ -55,7 +57,7 @@ impl CombatDisclosure {
 
 impl VisibilityFilter for CombatDisclosure {
     type ClientComponent = AuthorizedClient;
-    type Scope = (NetCrew, WeaponGate, WeaponLoads);
+    type Scope = (NetCrew, WeaponGate, WeaponLoads, TankTransmission);
 
     fn is_visible(&self, client: Entity, authorized: Option<&AuthorizedClient>) -> bool {
         authorized.is_some() && self.owner == Some(client)
@@ -124,6 +126,75 @@ mod tests {
         assert!(!disclosure.is_visible(observer, Some(&authorized)));
         assert!(!disclosure.is_visible(owner, None));
         assert!(!CombatDisclosure::hidden().is_visible(owner, Some(&authorized)));
+    }
+
+    /// The owner-only scope through replicon's own send path: one tank root replicated to its owner
+    /// and to one other client. The owner receives every scoped component; the other client
+    /// receives the public crank speed and none of the scoped state. Dropping a component from
+    /// [`CombatDisclosure`]'s `Scope` hands it to the non-owner and fails here — which is the
+    /// whole of what makes the transmission (and the shaped drive signal) owner-only.
+    #[test]
+    fn scoped_drivetrain_state_reaches_only_the_owner() {
+        use bevy::state::app::StatesPlugin;
+        use bevy_replicon::prelude::{AppRuleExt, Replicated, RepliconPlugins, ServerPlugin};
+        use bevy_replicon::test_app::{ServerTestAppExt, TestClientEntity};
+
+        use crate::track::sim::EngineRpm;
+
+        let mut server = App::new();
+        let mut owner = App::new();
+        let mut other = App::new();
+        for app in [&mut server, &mut owner, &mut other] {
+            app.add_plugins((
+                MinimalPlugins,
+                StatesPlugin,
+                RepliconPlugins.set(ServerPlugin::new(PostUpdate)),
+            ))
+            .replicate::<TankTransmission>()
+            .replicate::<EngineRpm>();
+        }
+        server.add_visibility_filter::<CombatDisclosure>();
+        for app in [&mut server, &mut owner, &mut other] {
+            app.finish();
+        }
+        server.connect_client(&mut owner);
+        server.connect_client(&mut other);
+        let owner_link = **owner.world().resource::<TestClientEntity>();
+
+        let transmission = TankTransmission::for_governor();
+        server.world_mut().spawn((
+            Replicated,
+            CombatDisclosure::owner(owner_link),
+            transmission,
+            EngineRpm(712),
+        ));
+        server.update();
+        for client in [&mut owner, &mut other] {
+            server.exchange_with_client(client);
+            client.update();
+        }
+
+        let received = |app: &mut App| {
+            let world = app.world_mut();
+            let mut query = world
+                .query_filtered::<(Option<&TankTransmission>, Option<&EngineRpm>), With<Remote>>();
+            let rows: Vec<_> = query
+                .iter(world)
+                .map(|(transmission, rpm)| (transmission.copied(), rpm.copied()))
+                .collect();
+            assert_eq!(rows.len(), 1, "the tank root replicates to every client");
+            rows[0]
+        };
+        assert_eq!(
+            received(&mut owner),
+            (Some(transmission), Some(EngineRpm(712))),
+            "the owner receives the transmission and the public rpm"
+        );
+        assert_eq!(
+            received(&mut other),
+            (None, Some(EngineRpm(712))),
+            "another client receives the public rpm and never the transmission"
+        );
     }
 
     #[test]

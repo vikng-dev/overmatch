@@ -27,7 +27,7 @@ use crate::firecontrol::RangeTable;
 use crate::shooting::RecoilParams;
 use crate::spec::{TankSpec, TankSpecHandle, Trigger, ViewKind, VolumeSpec, WeaponSpec};
 use crate::substances::Matter;
-use crate::track::sim::{TankTransmission, TrackGripElements};
+use crate::track::sim::{EngineRpm, TankTransmission, TrackGripElements};
 
 /// Presentation handles. Loading may gate admission or view attachment, never simulation data.
 ///
@@ -219,6 +219,7 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
     presentation: TankPresentation,
     root_bundle: B,
 ) -> Entity {
+    let transmission = tank_transmission(content.spec());
     // The element-grip slabs ride the SAME insertion that adds `Tank`: pre-sized synchronously
     // from the spec's link count (the REV-14 fixed-size invariant — `track::sim::TrackGripElements`),
     // never an empty vector awaiting a first-tick resize.
@@ -226,8 +227,9 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
         presentation.root_bundle(),
         TrackGripElements::for_links(content.spec().track.link_count),
         // Complete REV-14 transmission state, synchronously constructed from spec data before the
-        // root can replicate or simulate.
-        tank_transmission(content.spec()),
+        // root can replicate or simulate, and the public crank speed read off it.
+        transmission,
+        EngineRpm::of(&transmission),
         // Complete REV-17 weapon gate, synchronously constructed from the same sorted spec data as
         // its weapon slots. Replicated client attachment must preserve the arriving authority value.
         weapon_gate(content.spec()),
@@ -260,11 +262,13 @@ pub(crate) fn spawn_headless_tank<B: Bundle>(
     content: TankContent,
     root_bundle: B,
 ) -> Entity {
+    let transmission = tank_transmission(content.spec());
     let root = commands
         .spawn((
             Tank,
             TrackGripElements::for_links(content.spec().track.link_count),
-            tank_transmission(content.spec()),
+            transmission,
+            EngineRpm::of(&transmission),
             weapon_gate(content.spec()),
             weapon_loads(content.spec()),
             tank_servos(content.spec()),
@@ -276,8 +280,8 @@ pub(crate) fn spawn_headless_tank<B: Bundle>(
 }
 
 /// Transitional ADR-0014 exception for `net::rig`: attach to a replicated root with a valid pose
-/// and its authoritative [`TankTransmission`] already present. Normal spawn paths must use
-/// [`spawn_complete_tank`].
+/// and its authoritative [`EngineRpm`] (and, on the owner's own tank, [`TankTransmission`])
+/// already present. Normal spawn paths must use [`spawn_complete_tank`].
 pub(crate) fn attach_replicated_tank_body<B: Bundle>(
     commands: &mut Commands,
     root: Entity,
@@ -292,8 +296,9 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
     root_commands
         .insert((
             presentation.root_bundle(),
-            // Replicated authority state (TankTransmission, WeaponGate, WeaponLoads, servo snapshots) arrived
-            // in the replication init snapshot. Do not overwrite it with fresh spec-derived values.
+            // Replicated authority state (EngineRpm, servo snapshots; the owner's TankTransmission,
+            // WeaponGate, WeaponLoads) arrived in the replication init snapshot. Do not overwrite it
+            // with fresh spec-derived values.
             root_bundle,
         ))
         .observe(bind_tank_view);

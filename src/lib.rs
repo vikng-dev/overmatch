@@ -873,8 +873,8 @@ impl Plugin for NetClientPlugin {
             settings::plugin(settings::PageEntry::OverlayMenu),
         ));
         // View-layer audio (see `ClientPlugin`): the trigger click, each weapon's authored report,
-        // and the engine loop on own AND remote tanks — `TankTransmission` is replicated, so one
-        // code path.
+        // and the engine loop on own AND remote tanks — every root carries the public `EngineRpm`,
+        // so one code path.
         app.add_plugins(sfx::plugin);
         // The pen cam's shooter corner over the player's own hits (view-only; the store it reads
         // is the link's, `net::shot_explanation`).

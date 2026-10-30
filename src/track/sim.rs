@@ -89,10 +89,11 @@ pub struct TrackDriveSide {
 pub struct TransmissionFeelTest(pub TransmissionMode);
 
 /// The joint transmission's path-dependent state (gear/window/detent/direction/crank plus the
-/// stage-C demand/filter/target/hill-hold scheduler state). REV 14 replicates this one atomic root
-/// component: server-authoritative, advanced only where the body is dynamic through the
-/// spec-selected branch of [`apply_track_forces`]. The determinism trace hashes all 16 inventory
-/// fields in stable order, with raw bits for both floats.
+/// stage-C demand/filter/target/hill-hold scheduler state). Server-authoritative, advanced only
+/// where the body is dynamic through the spec-selected branch of [`apply_track_forces`], and
+/// replicated as one atomic snapshot to the tank's OWNER only; every other listener reads the
+/// crank through [`EngineRpm`]. The determinism trace hashes all 16 inventory fields in stable
+/// order, with raw bits for both floats.
 #[derive(Component, Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct TankTransmission(pub TransmissionState);
 
@@ -103,6 +104,28 @@ impl TankTransmission {
 
     pub(crate) fn for_governor() -> Self {
         Self(TransmissionState::for_governor())
+    }
+}
+
+/// The public crank speed, in whole rpm: the one transmission fact a listener other than the
+/// tank's owner needs (its engine sound). Written from [`TankTransmission`] by
+/// [`publish_engine_rpm`] wherever the body simulates, constructed beside it at spawn, and
+/// replicated to every client.
+///
+/// Error against the crank: ≤ 0.5 rpm (round to nearest) over 0–65 535 rpm; a crank outside that
+/// band saturates to its bound, a non-finite one reads 0. Postcard writes the `u16` as a varint:
+/// 2 bytes from 128 to 16 383 rpm.
+#[derive(Component, Clone, Copy, PartialEq, Eq, Debug, Serialize, Deserialize)]
+pub struct EngineRpm(pub u16);
+
+impl EngineRpm {
+    pub fn of(transmission: &TankTransmission) -> Self {
+        // `as` saturates at both bounds and maps NaN to 0.
+        Self((transmission.0.omega_e / transmission::RPM_TO_RAD).round() as u16)
+    }
+
+    pub fn rpm(self) -> f32 {
+        f32::from(self.0)
     }
 }
 
@@ -375,10 +398,24 @@ pub fn sim_plugin(app: &mut App) {
     );
     app.add_systems(
         FixedUpdate,
-        apply_track_forces
+        (apply_track_forces, publish_engine_rpm)
+            .chain()
             .in_set(SimPhase::DrivingForces)
             .in_set(GameplaySet),
     );
+}
+
+/// Mirror each simulated crank onto its public [`EngineRpm`]. The same dynamic-body gate as
+/// [`apply_track_forces`]: a replica's `EngineRpm` arrives from its authority and is never
+/// rewritten locally. `set_if_neq`, so an unchanged whole rpm costs no change tick and no resend.
+fn publish_engine_rpm(
+    mut tanks: Query<(&RigidBody, &TankTransmission, &mut EngineRpm), With<Tank>>,
+) {
+    for (body, transmission, mut rpm) in &mut tanks {
+        if matches!(*body, RigidBody::Dynamic) {
+            rpm.set_if_neq(EngineRpm::of(transmission));
+        }
+    }
 }
 
 /// Build [`TrackGear`] from the baked blueprint: the marker-derived running gear

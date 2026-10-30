@@ -22,8 +22,7 @@ use crate::ballistics::{FireShell, STALE_FIRE_TICKS};
 use crate::command::{Bindings, TankDeviceSet};
 use crate::state::{GameplaySet, PlayerInputSet};
 use crate::tank::{EngineSound, Muzzle, TankRoot, Weapon, WeaponIndex};
-use crate::track::sim::TankTransmission;
-use crate::track::transmission::RPM_TO_RAD;
+use crate::track::sim::EngineRpm;
 use crate::vfx::ViewRng;
 
 /// Spatial falloff scale. Bevy's attenuation is `1/(distance × scale)`, so this puts unity gain at
@@ -271,16 +270,17 @@ struct EngineSfx;
 #[derive(Component)]
 struct EngineEmitter(EngineSpeedLaw);
 
-/// Give every tank carrying an authored engine recording a looping emitter. `TankTransmission` is
-/// replicated to remotes too, so opponents idle and rev on the same code path; a tank whose spec
-/// authors no `engine.sound` carries no [`EngineSound`] and stays silent.
+/// Give every tank carrying an authored engine recording a looping emitter. Every tank carries the
+/// public [`EngineRpm`] — the own, an opponent, a single-player one — so all of them idle and rev
+/// on this one code path; a tank whose spec authors no `engine.sound` carries no [`EngineSound`]
+/// and stays silent.
 fn attach_engine_loops(
     asset_server: Res<AssetServer>,
     mut clips: ResMut<SfxClips>,
-    tanks: Query<(Entity, &EngineSound, &TankTransmission), Without<EngineSfx>>,
+    tanks: Query<(Entity, &EngineSound, &EngineRpm), Without<EngineSfx>>,
     mut commands: Commands,
 ) {
-    for (tank, sound, transmission) in &tanks {
+    for (tank, sound, rpm) in &tanks {
         let law = EngineSpeedLaw::for_engine(sound);
         let clip = clips.tank_clip(&asset_server, &sound.clip);
         commands.entity(tank).insert(EngineSfx);
@@ -292,7 +292,7 @@ fn attach_engine_loops(
                 .with_volume(Volume::Linear(ENGINE_VOLUME))
                 // Born at the crank's current speed, so a tank spawned under load does not open
                 // with a frame of idle.
-                .with_speed(law.speed(transmission.0.omega_e / RPM_TO_RAD)),
+                .with_speed(law.speed(rpm.rpm())),
             Transform::default(),
             ChildOf(tank),
         ));
@@ -304,16 +304,16 @@ fn attach_engine_loops(
 /// match this query.
 fn drive_engine_speed(
     time: Res<Time>,
-    tanks: Query<&TankTransmission>,
+    tanks: Query<&EngineRpm>,
     emitters: Query<(&ChildOf, &EngineEmitter, &SpatialAudioSink)>,
 ) {
     // Frame-rate-independent exponential approach over ENGINE_SPEED_TAU.
     let blend = 1.0 - (-time.delta_secs() / ENGINE_SPEED_TAU).exp();
     for (parent, emitter, sink) in &emitters {
-        let Ok(transmission) = tanks.get(parent.parent()) else {
+        let Ok(rpm) = tanks.get(parent.parent()) else {
             continue;
         };
-        let target = emitter.0.speed(transmission.0.omega_e / RPM_TO_RAD);
+        let target = emitter.0.speed(rpm.rpm());
         let current = sink.speed();
         sink.set_speed(current + (target - current) * blend);
     }
@@ -368,6 +368,8 @@ impl EngineSpeedLaw {
 
 #[cfg(test)]
 mod tests {
+    use bevy::ecs::system::RunSystemOnce;
+
     use super::*;
 
     /// A synthetic engine, so every expectation below is arithmetic on THESE numbers rather than a
@@ -407,6 +409,39 @@ mod tests {
             assert!(speed > previous, "speed fell at {rpm} rpm: {speed}");
             previous = speed;
         }
+    }
+
+    /// A replica of an opponent carries the public `EngineRpm` and no `TankTransmission` (owner-only
+    /// on the wire): its engine loop must still be born, at the speed the law gives that rpm. A
+    /// mutant that reads the crank off `TankTransmission` again leaves every opponent silent.
+    #[test]
+    fn a_remote_tank_without_a_transmission_rides_its_public_rpm() {
+        let mut app = App::new();
+        app.add_plugins((MinimalPlugins, AssetPlugin::default()))
+            .init_asset::<AudioSource>()
+            .insert_resource(SfxClips {
+                click: Handle::default(),
+                tank: HashMap::new(),
+            });
+        let sound = fixture();
+        let rpm = EngineRpm(1_234);
+        let tank = app.world_mut().spawn((sound.clone(), rpm)).id();
+
+        app.world_mut()
+            .run_system_once(attach_engine_loops)
+            .unwrap();
+
+        let world = app.world_mut();
+        let mut emitters = world.query::<(&ChildOf, &PlaybackSettings, &EngineEmitter)>();
+        let (parent, playback, _) = emitters
+            .single(world)
+            .expect("the remote tank gets exactly one engine emitter");
+        assert_eq!(parent.parent(), tank);
+        assert_eq!(
+            playback.speed,
+            EngineSpeedLaw::for_engine(&sound).speed(rpm.rpm()),
+            "the emitter is born at the public rpm's speed"
+        );
     }
 
     #[test]

@@ -122,7 +122,9 @@ pub(crate) struct TankState<'a> {
     pub(crate) drive: &'a TrackDrive,
     pub(crate) grip: &'a TrackGrip,
     pub(crate) elements: Option<&'a TrackGripElements>,
-    pub(crate) transmission: &'a TankTransmission,
+    /// `None` on a client's replica of a tank it does not own: the transmission is owner-only on
+    /// the wire.
+    pub(crate) transmission: Option<&'a TankTransmission>,
     pub(crate) weapon_gate: Option<&'a WeaponGate>,
     pub(crate) loads: Option<&'a WeaponLoads>,
     pub(crate) servos: &'a [ServoState],
@@ -239,9 +241,14 @@ pub(super) fn hash_tank_state(state: &TankState) -> TankStateHash {
 
     // The transmission module owns the exhaustive REV-14 field order and pinned scheduler tags.
     // This encoder preserves the original byte stream: scheduler from/to bytes exist only for a
-    // GradeShift tag.
+    // GradeShift tag. An absent transmission (a replica's: owner-only on the wire) hashes as the
+    // empty stream, which no present one can produce — every projection writes all 17 fields.
     let mut htr = Fnv64::new();
-    for field in transmission_state_projection(&transmission.0) {
+    for field in transmission
+        .map(|transmission| transmission_state_projection(&transmission.0))
+        .into_iter()
+        .flatten()
+    {
         match field {
             TransmissionProjectionValue::U8(value) => htr.write_u8(value),
             TransmissionProjectionValue::I8(value) => htr.write_i8(value),
@@ -347,7 +354,7 @@ fn hash_sample_with_gate_and_servos(
         drive,
         grip,
         elements: None,
-        transmission,
+        transmission: Some(transmission),
         weapon_gate: Some(weapon_gate),
         loads: None,
         servos: &servos.states,
@@ -384,7 +391,7 @@ fn hash_sample_with_loads(
         drive,
         grip,
         elements: None,
-        transmission,
+        transmission: Some(transmission),
         weapon_gate: Some(&gate),
         loads: Some(loads),
         servos: &servos.states,
@@ -803,7 +810,7 @@ mod tests {
             drive: &drive,
             grip: &grip,
             elements: Some(&elements),
-            transmission: &transmission,
+            transmission: Some(&transmission),
             weapon_gate: Some(&gate),
             loads: None,
             servos: &servos.states,
@@ -893,7 +900,7 @@ mod tests {
             drive: &drive,
             grip: &grip,
             elements: Some(&elements),
-            transmission: &transmission,
+            transmission: Some(&transmission),
             weapon_gate: Some(&gate),
             loads: None,
             servos: &servos.states,
