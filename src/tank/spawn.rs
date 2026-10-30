@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use avian3d::prelude::{
-    AngularInertia, CenterOfMass, CoefficientCombine, Collider, CollisionLayers, Friction,
-    LayerMask, Mass, NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass, TrimeshFlags,
+    AngularInertia, CenterOfMass, CoefficientCombine, CollisionLayers, Friction, LayerMask, Mass,
+    NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass,
 };
 use bevy::asset::LoadState;
 use bevy::ecs::system::SystemParam;
@@ -629,9 +629,9 @@ fn insert_weapons(
 
 /// Ballistic volumes: the volume bundle (design `armor-penetration-and-damage.md` §12; composition,
 /// not a `kind` enum — the substance carries resistance, optional facets layer roles on top) + a
-/// query-only trimesh collider per captured primitive, built from the extracted buffers.
-/// `trimesh_with_config(…, MERGE_DUPLICATE_VERTICES)` is the exact parry construction avian's
-/// `TrimeshFromMesh` performs (design §7.1, vendored-source proven), on the `Armor` layer with NO
+/// query-only trimesh collider per captured primitive, built once from the extracted buffers and
+/// shared by every spawn ([`crate::bake::MeshGeometry::trimesh_collider`]: the exact parry
+/// construction avian's `TrimeshFromMesh` performs, design §7.1), on the `Armor` layer with NO
 /// collision response (`filters = NONE`) so it never perturbs the body — watertight solids may be
 /// concave, fine for the march's raycast (ADR-0008).
 ///
@@ -753,22 +753,10 @@ fn insert_ballistic_volumes(
 
         for (substance, primitives) in &groups {
             for primitive in primitives {
-                let vertices: Vec<Vec3> = primitive
-                    .positions
-                    .iter()
-                    .copied()
-                    .map(Vec3::from)
-                    .collect();
-                let triangles: Vec<[u32; 3]> = primitive
-                    .indices
-                    .as_chunks::<3>()
-                    .0
-                    .iter()
-                    .map(|t| [t[0], t[1], t[2]])
-                    .collect();
+                let triangles = primitive.indices.as_chunks::<3>().0.len();
                 // Name the broken volume before Avian rejects an empty triangle list.
                 assert!(
-                    !triangles.is_empty(),
+                    triangles > 0,
                     "ballistic volume `{name}` has an unindexed or triangle-less mesh primitive"
                 );
                 // The bake's manifold certificate, index-aligned with those triangles. Armour
@@ -780,23 +768,18 @@ fn insert_ballistic_volumes(
                     .unwrap_or_else(|| panic!("ballistic volume `{name}` was never certified"));
                 assert_eq!(
                     certificate.shells.len(),
-                    triangles.len(),
-                    "ballistic volume `{name}` has {} triangles and {} certified faces",
-                    triangles.len(),
+                    triangles,
+                    "ballistic volume `{name}` has {triangles} triangles and {} certified faces",
                     certificate.shells.len(),
                 );
                 let mut collider = commands.spawn((
                     ChildOf(entity),
                     // ADR-0015 shields this authored local pose from position sync.
                     authored_attachment(Transform::IDENTITY),
-                    Collider::trimesh_with_config(
-                        vertices,
-                        triangles,
-                        TrimeshFlags::MERGE_DUPLICATE_VERTICES,
-                    ),
+                    primitive.trimesh_collider(),
                     BallisticSurfaces {
-                        shells: certificate.shells.as_slice().into(),
-                        corners: certificate.corners.as_slice().into(),
+                        shells: certificate.shells.clone(),
+                        corners: certificate.corners.clone(),
                     },
                     CollisionLayers::new(
                         [if witness {
@@ -1078,6 +1061,7 @@ mod proxy_tests {
             indices: vec![0, 2, 1, 0, 1, 3, 0, 3, 2, 1, 2, 3],
             substance: None,
             certificate: None,
+            colliders: Default::default(),
         }
     }
 

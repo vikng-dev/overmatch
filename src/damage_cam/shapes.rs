@@ -595,6 +595,7 @@ mod tests {
                 },
             }),
             certificate: None,
+            colliders: Default::default(),
         });
         nodes.push(cube);
         for index in 1..nodes.len() {

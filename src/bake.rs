@@ -158,6 +158,18 @@ pub(crate) struct MeshGeometry {
     /// What [`manifold_gate`] proved about this primitive, and the identities it proved it with.
     /// `None` for a non-substance primitive, which is not armour and is never walked.
     pub certificate: Option<ShellCertificate>,
+    /// The colliders built from these buffers, each on first use: every later spawn clones them,
+    /// and a [`Collider`] clone shares its shape.
+    pub colliders: ColliderCache,
+}
+
+/// A primitive's colliders, built once from its buffers ([`MeshGeometry::trimesh_collider`],
+/// [`MeshGeometry::convex_hull_colliders`]). The buffers never change after extraction, so a cached
+/// shape is the shape a fresh build would give.
+#[derive(Default)]
+pub(crate) struct ColliderCache {
+    trimesh: std::sync::OnceLock<Collider>,
+    hulls: std::sync::OnceLock<Option<Vec<Collider>>>,
 }
 
 /// The manifold gate's findings, carried forward instead of discarded — the identities the §13.4
@@ -169,12 +181,13 @@ pub(crate) struct MeshGeometry {
 #[derive(Debug)]
 pub(crate) struct ShellCertificate {
     /// Which closed shell each triangle belongs to, index-aligned with `indices.chunks_exact(3)` —
-    /// the gate's own edge-connected components, dense and in first-triangle order.
-    pub shells: Vec<u32>,
+    /// the gate's own edge-connected components, dense and in first-triangle order. Shared with
+    /// every spawned collider's [`crate::ballistics::BallisticSurfaces`].
+    pub shells: Arc<[u32]>,
     /// The WELDED vertex id of each triangle corner. Two triangles meeting at a welded edge or
     /// vertex name it with the same two numbers however their own index buffers spell it, which is
     /// what lets the collector canonicalize a whole fan onto one contact.
-    pub corners: Vec<[u32; 3]>,
+    pub corners: Arc<[[u32; 3]]>,
 }
 
 /// A ballistic primitive's substance, resolved against the registry at extraction so the walk never
@@ -198,8 +211,36 @@ impl MeshGeometry {
     /// to no part; a triangle indexing past the POSITION buffer is dropped.
     ///
     /// `None` when the primitive has no part or any part has no hull (avian's `convex_hull`
-    /// refuses a degenerate point set).
+    /// refuses a degenerate point set). Built on the first call ([`ColliderCache`]).
     pub(crate) fn convex_hull_colliders(&self) -> Option<Vec<Collider>> {
+        self.colliders
+            .hulls
+            .get_or_init(|| self.build_hulls())
+            .clone()
+    }
+
+    /// The primitive as one query trimesh, `MERGE_DUPLICATE_VERTICES`: the exact parry construction
+    /// avian's `TrimeshFromMesh` performs. Built on the first call ([`ColliderCache`]); panics,
+    /// as avian does, on a buffer with no whole triangle.
+    pub(crate) fn trimesh_collider(&self) -> Collider {
+        self.colliders
+            .trimesh
+            .get_or_init(|| {
+                Collider::trimesh_with_config(
+                    self.positions.iter().copied().map(Vec3::from).collect(),
+                    self.indices
+                        .as_chunks::<3>()
+                        .0
+                        .iter()
+                        .map(|t| [t[0], t[1], t[2]])
+                        .collect(),
+                    avian3d::prelude::TrimeshFlags::MERGE_DUPLICATE_VERTICES,
+                )
+            })
+            .clone()
+    }
+
+    fn build_hulls(&self) -> Option<Vec<Collider>> {
         let (welded, _) = weld(&self.positions);
         let mut parent: Vec<u32> = (0..welded.len() as u32).collect();
         fn find(parent: &mut [u32], mut id: u32) -> u32 {
@@ -500,8 +541,8 @@ pub(crate) fn manifold_gate(
     }
 
     Ok(ShellCertificate {
-        shells,
-        corners: triangles,
+        shells: shells.into(),
+        corners: triangles.into(),
     })
 }
 
@@ -1289,6 +1330,7 @@ impl MeshCapture<'_> {
                 indices,
                 substance,
                 certificate: None,
+                colliders: ColliderCache::default(),
             };
             if geometry.substance.is_some() {
                 match manifold_gate(name, index, &geometry, root_scale) {
@@ -1676,7 +1718,7 @@ mod tests {
 
     /// The gate at scale 1 — the case every synthetic fixture below is about.
     fn gate(node: &str, primitive: &MeshGeometry) -> Result<Vec<u32>, Vec<Finding>> {
-        manifold_gate(node, 0, primitive, Vec3::ONE).map(|certificate| certificate.shells)
+        manifold_gate(node, 0, primitive, Vec3::ONE).map(|certificate| certificate.shells.to_vec())
     }
 
     /// The check ids a report names, in report order.
@@ -1698,6 +1740,7 @@ mod tests {
                 },
             }),
             certificate: None,
+            colliders: ColliderCache::default(),
         }
     }
 
@@ -3081,6 +3124,7 @@ mod tests {
             indices,
             substance: None,
             certificate: None,
+            colliders: ColliderCache::default(),
         }
     }
 
@@ -3113,5 +3157,24 @@ mod tests {
         let primitive = proxy(&[(Vec3::ZERO, Vec3::ONE)]);
         assert_eq!(primitive.positions.len(), 24);
         assert_eq!(primitive.convex_hull_colliders().expect("a box").len(), 1);
+    }
+
+    /// Invariant: a primitive builds each of its colliders once, and every later call shares that
+    /// shape; another primitive's shape is its own. Relied on by every tank spawn after the first
+    /// (the server's respawns), which builds no trimesh and no hull. A cache that rebuilt on each
+    /// call, or handed one primitive's shape to another, fails here.
+    #[test]
+    fn a_primitive_builds_its_colliders_once() {
+        use avian3d::prelude::SimpleCollider;
+        let unit = proxy(&[(Vec3::ZERO, Vec3::ONE)]);
+        let double = proxy(&[(Vec3::ZERO, Vec3::splat(2.0))]);
+        let shared = |a: &Collider, b: &Collider| Arc::ptr_eq(&a.shape().0, &b.shape().0);
+        let hull = |p: &MeshGeometry| p.convex_hull_colliders().expect("a box").remove(0);
+        assert!(shared(&hull(&unit), &hull(&unit)));
+        assert!(shared(&unit.trimesh_collider(), &unit.trimesh_collider()));
+        let top = |c: &Collider| c.aabb(Vec3::ZERO, Quat::IDENTITY).max;
+        assert_eq!(top(&hull(&unit)), Vec3::ONE);
+        assert_eq!(top(&hull(&double)), Vec3::splat(2.0));
+        assert_eq!(top(&double.trimesh_collider()), Vec3::splat(2.0));
     }
 }

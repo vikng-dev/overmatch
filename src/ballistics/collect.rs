@@ -2546,6 +2546,7 @@ mod tests {
                     },
                 }),
                 certificate: None,
+                colliders: Default::default(),
             },
             Vec3::ONE,
         )
