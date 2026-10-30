@@ -1,0 +1,50 @@
+{
+ "near/00012.5000": {
+  "state": "standing",
+  "pixels_differing": 54577,
+  "pixels_over_8": 5317,
+  "max_channel_delta": 79
+ },
+ "near/00014.0000": {
+  "state": "moving",
+  "pixels_differing": 84842,
+  "pixels_over_8": 8403,
+  "max_channel_delta": 106
+ },
+ "xray/00012.5000": {
+  "state": "standing",
+  "pixels_differing": 20697,
+  "pixels_over_8": 1765,
+  "max_channel_delta": 78
+ },
+ "xray/00014.0000": {
+  "state": "moving",
+  "pixels_differing": 25469,
+  "pixels_over_8": 1903,
+  "max_channel_delta": 89
+ },
+ "mid/00012.5000": {
+  "state": "standing",
+  "pixels_differing": 0,
+  "pixels_over_8": 0,
+  "max_channel_delta": 0
+ },
+ "mid/00014.0000": {
+  "state": "moving",
+  "pixels_differing": 0,
+  "pixels_over_8": 0,
+  "max_channel_delta": 0
+ },
+ "far/00012.5000": {
+  "state": "standing",
+  "pixels_differing": 2830,
+  "pixels_over_8": 412,
+  "max_channel_delta": 124
+ },
+ "far/00014.0000": {
+  "state": "moving",
+  "pixels_differing": 8322,
+  "pixels_over_8": 575,
+  "max_channel_delta": 154
+ }
+}
