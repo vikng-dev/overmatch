@@ -63,10 +63,18 @@
 //! swaps the view's output attachment for its own texture by `NormalizedRenderTarget` equality,
 //! which `ImageRenderTarget` defines over both fields; `Screenshot::image` normalizes to scale 1,
 //! names a target no camera renders into, and reads back black.
+//!
+//! # Invariant: a capture run is silent
+//!
+//! The global volume is zero for the whole run, as under `OVERMATCH_MUTE=1` (`crate::sfx`), set or
+//! not. It is written in `PreStartup`, after every plugin has built — `AudioPlugin` inserts its own
+//! `GlobalVolume` at build — and before any audio sink exists (bevy reads the global volume when
+//! it creates a sink), so no mount order of this plugin lets a capture make a sound.
 
 use std::path::{Path, PathBuf};
 
 use bevy::app::AppExit;
+use bevy::audio::{GlobalVolume, Volume};
 use bevy::camera::visibility::VisibilitySystems;
 use bevy::camera::{Camera, ImageRenderTarget, RenderTarget};
 use bevy::prelude::*;
@@ -126,6 +134,7 @@ pub fn plugin(app: &mut App) {
         size.y
     );
     hide_window(app);
+    silence(app);
     // The effects plugin only `init_resource`s the RNG, so this seed holds in either mount order.
     app.insert_resource(crate::vfx::ViewRng::seeded(VIEW_SEED));
     if let Some(step) = std::env::var("OVERMATCH_CAPTURE_STEP_S")
@@ -217,6 +226,13 @@ pub fn plugin(app: &mut App) {
             hide_ui.before(VisibilitySystems::VisibilityPropagate),
         );
     }
+}
+
+/// Zero the global volume for the run, after every plugin's build (module doc).
+fn silence(app: &mut App) {
+    app.add_systems(PreStartup, |mut commands: Commands| {
+        commands.insert_resource(GlobalVolume::new(Volume::Linear(0.0)));
+    });
 }
 
 /// `OVERMATCH_CAPTURE_FELL`'s cue: which tree falls, when, and how.
@@ -605,6 +621,22 @@ pub(crate) fn retarget_to(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A CAPTURE RUN IS SILENT WHATEVER MOUNTS AFTER IT. Capture runs are unattended, on a machine
+    /// its owner is working at; `AudioPlugin` inserts its own `GlobalVolume` when it builds, so a
+    /// silence written at build would be undone by an audio plugin mounted later.
+    #[test]
+    fn a_capture_run_is_silent_whatever_mounts_after_it() {
+        let mut app = App::new();
+        silence(&mut app);
+        // What a later `AudioPlugin` build writes.
+        app.insert_resource(GlobalVolume::new(Volume::Linear(1.0)));
+        app.update();
+        assert_eq!(
+            app.world().resource::<GlobalVolume>().volume.to_linear(),
+            0.0
+        );
+    }
 
     /// The capture times default to 6 s, sort, drop junk, and fold times sharing a frame name into
     /// one frame, so two captures never race for one file.
