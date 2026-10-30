@@ -38,18 +38,18 @@ pub struct ViewMesh {
     pub tier: Tier,
 }
 
-/// What a mesh of a tank view is, by the tank's own data: membership is the substance material
-/// it wears, and the tank file's volume entry for its nearest named node says what such a volume is
-/// beyond armour.
+/// What a mesh of a tank view is, by the tank's own data: the tank file's volume entry for its
+/// nearest declared node says what the volume is (main armour, external armour or a component),
+/// and a mesh under no declared node is drawing only, whatever material it wears.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Tier {
-    /// A substance volume with no entry: main armour.
+    /// A declared main-armour volume.
     Armour,
-    /// A substance volume the tank file tags external: skirts, wheels, tracks.
+    /// A declared external volume: skirts, wheels, tracks.
     External,
-    /// A substance volume with component facets.
+    /// A declared volume with component facets.
     Component,
-    /// No substance: drawing only.
+    /// Not a declared volume, or wearing no substance: drawing only.
     Detail,
 }
 
@@ -70,7 +70,8 @@ impl Tier {
             return Self::Detail;
         }
         match chain.iter().find_map(|name| volumes.get(name)) {
-            None => Self::Armour,
+            None => Self::Detail,
+            Some(crate::spec::VolumeSpec::MainArmour) => Self::Armour,
             Some(crate::spec::VolumeSpec::External) => Self::External,
             Some(crate::spec::VolumeSpec::Component(_)) => Self::Component,
         }

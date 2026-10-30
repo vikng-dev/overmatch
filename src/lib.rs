@@ -208,8 +208,8 @@ mod spec;
 mod state;
 /// The global substance registry (`assets/materials/materials.ron`): the material library's numeric
 /// half, keyed by the Blender material datablock name each ballistic mesh wears. BOUND: `bake`
-/// resolves every glTF primitive against it at extraction — the lookup that both classifies a
-/// primitive as armour at all (§12 membership) and gives it its factor.
+/// resolves every primitive of a declared armour node against it at extraction — the lookup that
+/// gives it its factor. Which nodes are armour is the tank sheet's declaration, never this lookup.
 mod substances;
 mod tank;
 /// The ground's surface blend: four material packs mixed per fragment by the map's author-painted

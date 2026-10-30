@@ -1321,8 +1321,7 @@ impl ShellPath {
 /// line-of-sight distance (the unified primitive — armor plates and modules alike, design doc §2).
 /// On the `Armor` layer.
 ///
-/// Both fields come from the SUBSTANCE the model's primitives wear (§12, classifier precedent
-/// 2026-08-07): `bake` resolves the material datablock name against `assets/materials/materials.ron`
+/// Both fields come from the SUBSTANCE the model's primitives wear (§12): `bake` resolves the material datablock name against `assets/materials/materials.ron`
 /// once, at extraction, so the walk never does a string lookup per query and no per-node number is
 /// authored anywhere.
 #[derive(Component)]

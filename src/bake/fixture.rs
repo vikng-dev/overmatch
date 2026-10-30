@@ -15,9 +15,8 @@ pub(super) struct Node {
     pub mesh: Vec<Primitive>,
 }
 
-/// One mesh primitive: the material name that declares (or does not declare) membership, the
-/// positions, and the index buffer exactly as authored — including buffers no exporter would write,
-/// which is the point.
+/// One mesh primitive: the material name (a registry substance or not), the positions, and the
+/// index buffer exactly as authored — including buffers no exporter would write, which is the point.
 pub(super) struct Primitive {
     pub material: String,
     pub positions: Vec<[f32; 3]>,
@@ -155,7 +154,8 @@ pub(super) fn write(id: &str, nodes: &[Node], spec: &str) -> Asset {
 
 /// The spec sheet of a vehicle whose only declared structure is what a test needs: the domain
 /// values are the smallest ones `TankSpec::validate` accepts, so nothing here is a vehicle datum
-/// anybody could mistake for balance.
+/// anybody could mistake for balance. `volumes` are component nodes, `armour` main-armour nodes:
+/// both are keys of the sheet's one `volumes` map.
 pub(super) fn spec(
     colliders: &[&str],
     roadwheels: &[(&str, &str)],
@@ -174,11 +174,6 @@ pub(super) fn spec_with(
     armour: &[&str],
     declarations: &str,
 ) -> String {
-    let armour = armour
-        .iter()
-        .map(|node| format!("\"{node}\""))
-        .collect::<Vec<_>>()
-        .join(", ");
     let colliders = colliders
         .iter()
         .map(|node| format!("\"{node}\""))
@@ -192,6 +187,11 @@ pub(super) fn spec_with(
     let volumes = volumes
         .iter()
         .map(|node| format!("\"{node}\": (hp: 10)"))
+        .chain(
+            armour
+                .iter()
+                .map(|node| format!("\"{node}\": (main: true)")),
+        )
         .collect::<Vec<_>>()
         .join(", ");
     format!(
@@ -224,7 +224,6 @@ TankSpec(
         ),
     ),
     {declarations}
-    armour: [{armour}],
     volumes: {{{volumes}}},
     colliders: [{colliders}],
     roadwheels: [{roadwheels}],

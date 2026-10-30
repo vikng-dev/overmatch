@@ -148,10 +148,10 @@ pub(crate) struct NodeGeometry {
 pub(crate) struct MeshGeometry {
     pub positions: Vec<[f32; 3]>,
     pub indices: Vec<u32>,
-    /// The §12 membership declaration, resolved here once: `Some` iff this primitive's glTF
-    /// material name is a key in the global substance registry (`assets/materials/materials.ron`).
-    /// `None` = not a ballistic primitive — a collision-proxy hull, or a decor primitive that was
-    /// never captured at all. Per PRIMITIVE, not per node, because glTF splits a mesh by material
+    /// The substance this primitive wears, resolved here once: `Some` iff the primitive belongs to a
+    /// declared armour node and its glTF material name is a key in the global substance registry
+    /// (`assets/materials/materials.ron`). `None` = not a ballistic primitive — a collision-proxy
+    /// hull, or a decor primitive that was never captured at all. Per PRIMITIVE, not per node, because glTF splits a mesh by material
     /// and §13.7 authors a mixed-substance part as one object holding one closed shell per
     /// substance region (the Tiger road wheel: `MildSteel` bodies + `Rubber` rims in one object).
     pub substance: Option<PrimitiveSubstance>,
@@ -265,7 +265,7 @@ pub(crate) struct TankGeometry {
     /// index derives from it (each proxy just yields a convex hull); the order is fixed anyway so
     /// spawn is deterministic.
     pub collision_proxies: Vec<usize>,
-    /// Every declared armour node ([`TankSpec::declared_armour`]): MEMBERSHIP IS THE DECLARATION,
+    /// Every declared armour node (the keys of [`TankSpec::volumes`]): MEMBERSHIP IS THE DECLARATION,
     /// never the material. A node is here iff the sheet names it, and a named node wears registry
     /// substances only. A node that wears one without being named is view geometry and holds no
     /// substance primitive. Name-sorted, so spawn order is deterministic without depending on the
@@ -331,12 +331,12 @@ pub(crate) struct TankBlueprint {
 
 const TIGER_SPEC_RON: &str = include_str!("../assets/tiger_1/tiger_1.tank.ron");
 
-/// Which primitives' mesh buffers the sim consumes, and why (§12, classifier precedent 2026-08-07):
+/// Which primitives' mesh buffers the sim consumes, and why (§12):
 ///
 /// * **Ballistic volumes — DECLARED.** A node marches iff the sheet names it
-///   ([`TankSpec::declared_armour`]: the `armour` list and the `volumes` keys). Every primitive of
-///   a declared node wears a registry substance, whose resistance the walk reads; a registry
-///   material on an undeclared node is view geometry and captures nothing. Nothing is parsed out
+///   (a key of [`TankSpec::volumes`]). Every primitive of a declared node wears a registry
+///   substance, whose resistance the walk reads; a registry material on an undeclared node is view
+///   geometry and captures nothing. Nothing is parsed out
 ///   of a node name.
 /// * **Collision proxies — DECLARED.** The `colliders` list in `<tank>.tank.ron` names them; the
 ///   `*_Collider` suffix scan is retired with the rest. Every primitive of a declared proxy is
@@ -352,16 +352,15 @@ const TIGER_SPEC_RON: &str = include_str!("../assets/tiger_1/tiger_1.tank.ron");
 /// [`extract_tank_geometry`]): half-armour has no honest meaning here, and the shadow compare's
 /// whole-node mesh diff would quietly stop covering the uncaptured half.
 ///
-/// `Some(Err(material))` is a primitive wearing a registry key that is no matter
-/// ([`crate::substances::Substance::matter`] is `None`: an unworn substance). Wearing the key declares a
-/// volume and the volume has nothing the walk reads, so the capture refuses it rather than read it
-/// as art.
+/// This is the substance lookup only: whether the node is armour is the sheet's declaration, never
+/// this verdict. `Some(Err(material))` is a primitive wearing a registry key that is no matter
+/// ([`crate::substances::Substance::matter`] is `None`: an unworn substance); on a declared node
+/// the volume has nothing the walk reads, so the capture refuses it rather than read it as art.
 fn classify<'p>(
     primitive: &gltf::Primitive<'p>,
     registry: &SubstanceRegistry,
 ) -> Option<Result<PrimitiveSubstance, &'p str>> {
-    // An unnamed material cannot be a registry key, so it cannot declare membership. (The coax MG's
-    // physics-only meshes were exactly this case before the restructure.)
+    // An unnamed material is no registry key, so it names no substance.
     let material = primitive.material().name()?;
     // Not a substance ⇒ ordinary art. The registry's `Unknown` arm IS the classifier; the error case
     // is a name that only LOOKS like a substance, which `L1.SUBSTANCE_IDENTITY` refuses at the
@@ -869,15 +868,6 @@ pub(crate) fn certify_asset(
              position and field",
         )]
     })?;
-    spec.validate().map_err(|err| {
-        vec![Finding::new(
-            &L2_SPEC,
-            spec_subject(),
-            err.to_string(),
-            "author a value inside the domain the rejection names — a spec that parses but cannot \
-             yield a working vehicle never reaches the sim",
-        )]
-    })?;
     let geometry = extract_tank_geometry(glb, &spec, registry)?;
     Ok(CertifiedAsset { spec, geometry })
 }
@@ -968,7 +958,7 @@ pub fn verify_asset(glb: &Path, registry: Option<&Path>) -> Vec<Finding> {
 ///
 /// `node_references` is [`TankSpec::node_references`] — so a spec field added later reaches
 /// `L1.SPEC_REFERENCES` without Python learning its name — and `substance_keys` is the registry
-/// [`classify`] decides membership by. Both are already ordered by their producers.
+/// [`classify`] looks substances up in. Both are already ordered by their producers.
 ///
 /// The document is also everything the tank build's source pass reads of the sheet, in place of
 /// the sheet's bytes: a field it omits reaches no artifact byte, so its edits never move what
@@ -1016,6 +1006,18 @@ pub(crate) fn extract_tank_geometry(
     spec: &TankSpec,
     registry: &SubstanceRegistry,
 ) -> Result<TankGeometry, Vec<Finding>> {
+    // Every extraction validates the sheet first: the declarations capture reads (duplicate or
+    // overlapping nodes, a collider that is also armour) are only sound on a validated sheet, so no
+    // caller can reach extraction with one that is not.
+    spec.validate().map_err(|err| {
+        vec![Finding::new(
+            &L2_SPEC,
+            spec_subject_for(path),
+            err.to_string(),
+            "author a value inside the domain the rejection names — a spec that parses but cannot \
+             yield a working vehicle never reaches the sim",
+        )]
+    })?;
     let refused = |evidence: String, repair: &str| {
         vec![Finding::new(
             &L2_DOCUMENT,
@@ -1031,7 +1033,7 @@ pub(crate) fn extract_tank_geometry(
         )
     })?;
     let declared_colliders: HashSet<&str> = spec.colliders.iter().map(String::as_str).collect();
-    let declared_armour: HashSet<&str> = spec.declared_armour().collect();
+    let declared_armour: HashSet<&str> = spec.volumes.keys().map(String::as_str).collect();
 
     // Resolve buffer data: a .glb's buffers are the BIN chunk (`Source::Bin`). A `Source::Uri`
     // buffer — a sidecar or a data: URI — is refused, not resolved: the geometry the fingerprint
@@ -1161,7 +1163,8 @@ pub(crate) fn extract_tank_geometry(
     }
     // Name-sorted so spawn order never depends on the glTF node order.
     let mut ballistic_volumes: Vec<usize> = spec
-        .declared_armour()
+        .volumes
+        .keys()
         .filter_map(|name| by_name.get(name).copied())
         .collect();
     ballistic_volumes.sort_by(|a, b| nodes[*a].name.cmp(&nodes[*b].name));
@@ -1249,7 +1252,7 @@ impl MeshCapture<'_> {
                      substance ({ballistic} do)"
                 ),
                 "give every primitive of the node a registry substance, or drop the node from \
-                 the sheet's `armour` and `volumes`",
+                 the sheet's `volumes`",
             ));
         }
         if is_collider && is_armour {
@@ -1378,12 +1381,12 @@ fn declared_roles_resolve(
         let refusal = match role {
             // A facet on a node the march never meets is inert; a station that is not its own
             // armour is a wheel shells pass through.
-            NodeRole::Volume | NodeRole::Armour if !ballistic => Some(
+            NodeRole::Volume if !ballistic => Some(
                 "it is declared armour, and no primitive of it wears a registry substance"
                     .to_string(),
             ),
-            NodeRole::Roadwheel if !spec.declared_armour().any(|armour| armour == name) => {
-                Some("it is not declared armour (an `armour` entry or a `volumes` key)".to_string())
+            NodeRole::Roadwheel if !spec.volumes.contains_key(name) => {
+                Some("it is not declared armour (no `volumes` key)".to_string())
             }
             NodeRole::Collider if node.primitives.iter().any(|p| p.indices.is_empty()) => {
                 Some("its mesh data is unindexed".to_string())
@@ -1667,7 +1670,7 @@ mod tests {
     use fixture::{CLOSED, Node, Primitive, pierced, solid};
 
     /// A registry substance, and a material name that is not one. Which two does not matter — what
-    /// matters is that membership is decided by the registry and by nothing else.
+    /// matters is that the registry names a substance and nothing else.
     const SUBSTANCE: &str = "RHA";
     const ART: &str = "Mat_Decor";
 
@@ -1713,7 +1716,11 @@ mod tests {
 
     /// `spec` with `node` also declared main armour.
     fn declaring(spec: &str, node: &str) -> String {
-        spec.replacen("armour: [", &format!("armour: [\"{node}\", "), 1)
+        spec.replacen(
+            "volumes: {",
+            &format!("volumes: {{\"{node}\": (main: true), "),
+            1,
+        )
     }
 
     /// A vehicle that certifies: a hull, a plate, a collision proxy, and one station per side.
@@ -2000,43 +2007,42 @@ mod tests {
         }
     }
 
-    /// Migration parity, over every shipped asset: the declared armour set equals the set the
-    /// retired rule inferred (every node with a primitive wearing a registry substance), so every
-    /// ballistic outcome is the one the inferred set produced. A mutant that drops a plate from
-    /// the sheet's `armour` or `volumes` turns it into plain view geometry and fails here. Once a
-    /// shipped asset's decor wears a registry material on purpose, that asset's undeclared nodes
-    /// legitimately differ and this comparison is retired for it.
+    /// The bake captures exactly the declared armour, over every shipped asset. Invariant: a node
+    /// holds substance primitives iff the sheet's `volumes` keys it, and `ballistic_volumes` is
+    /// that set. A mutant that captures a registry-material node the sheet does not key, or drops a
+    /// keyed one from the walk, fails here; the march and the spawn rely on the two agreeing.
     #[test]
-    fn the_declared_armour_equals_the_set_the_materials_used_to_imply() {
+    fn the_bake_captures_exactly_the_declared_armour() {
         let registry = SubstanceRegistry::shipped();
         for model in fixture::shipped_assets() {
             let spec_ron =
                 std::fs::read_to_string(spec_ron_name(&model)).expect("the sheet is readable");
             let asset = certify_asset(&model, &spec_ron, &registry).expect("the pair certifies");
-            let declared: BTreeSet<&str> = asset
-                .geometry
+            let geometry = &asset.geometry;
+            let declared: BTreeSet<&str> = asset.spec.volumes.keys().map(String::as_str).collect();
+            let volumes: BTreeSet<&str> = geometry
                 .ballistic_volumes
                 .iter()
-                .map(|&index| asset.geometry.nodes[index].name.as_str())
+                .map(|&index| geometry.nodes[index].name.as_str())
                 .collect();
-            let document = gltf::Gltf::open(&model).expect("the glb opens").document;
-            let inferred: BTreeSet<&str> = document
-                .nodes()
-                .filter_map(|node| Some((node.name()?, node.mesh()?)))
-                .filter(|(_, mesh)| {
-                    mesh.primitives()
-                        .any(|primitive| matches!(classify(&primitive, &registry), Some(Ok(_))))
-                })
-                .map(|(name, _)| name)
+            let captured: BTreeSet<&str> = geometry
+                .nodes
+                .iter()
+                .filter(|node| node.is_ballistic())
+                .map(|node| node.name.as_str())
                 .collect();
             assert_eq!(
+                volumes,
                 declared,
-                inferred,
-                "{}: declared armour differs from the nodes wearing a registry substance \
-                 (only declared: {:?}; only worn: {:?})",
-                model.display(),
-                declared.difference(&inferred).collect::<Vec<_>>(),
-                inferred.difference(&declared).collect::<Vec<_>>()
+                "{}: volumes differ from the sheet",
+                model.display()
+            );
+            assert_eq!(
+                captured,
+                declared,
+                "{}: substance primitives captured on a node the sheet does not declare, or none \
+                 on one it does",
+                model.display()
             );
         }
     }
@@ -2266,6 +2272,26 @@ mod tests {
         assert_eq!(document["spec_validates"], serde_json::json!(false));
     }
 
+    /// Extraction validates the sheet itself. Invariant: no caller reaches capture with an
+    /// unvalidated sheet, so a repeated declaration is refused as `L2.SPEC` and never yields two
+    /// volume indices for one node; `damage_cam::shapes::TankAsset::load` relies on this, since it
+    /// parses and extracts without the certification door.
+    #[test]
+    fn extraction_refuses_a_sheet_that_does_not_validate() {
+        let (nodes, spec) = sound_vehicle();
+        let spec = spec.replacen(
+            "colliders: [\"Proxy\"]",
+            "colliders: [\"Proxy\", \"Proxy\"]",
+            1,
+        );
+        let asset = fixture::write("unvalidated-extraction", &nodes, &spec);
+        let parsed: TankSpec = ron::de::from_str(&spec).expect("it parses");
+        let findings = extract_tank_geometry(&asset.glb, &parsed, &SubstanceRegistry::shipped())
+            .err()
+            .expect("an invalid sheet is refused at extraction");
+        assert_eq!(refusals(&findings), ["L2.SPEC"], "{}", render(&findings));
+    }
+
     /// L2.ROLE_COHERENCE — a declared role the resolved node cannot play is refused by name.
     #[test]
     fn a_node_that_cannot_play_its_declared_role_is_refused() {
@@ -2348,8 +2374,11 @@ mod tests {
         };
         let wheels = [("Station_L", "Left"), ("Station_R", "Right")];
         let declared = |entry: &str| {
-            fixture::spec(&["Proxy"], &wheels, &[], &["Station_L", "Station_R"])
-                .replace("volumes: {}", &format!("volumes: {{\"Seat\": {entry}}}"))
+            fixture::spec(&["Proxy"], &wheels, &[], &["Station_L", "Station_R"]).replacen(
+                "volumes: {",
+                &format!("volumes: {{\"Seat\": {entry}, "),
+                1,
+            )
         };
         let crew = declared("(crew: Driver)");
         let with = |extra: Node| {

@@ -378,9 +378,9 @@ fn resolve_rig_nodes<'a>(geometry: &'a TankGeometry, spec: &'a TankSpec) -> RigN
             )
         })
         .collect();
-    // Volumes are the EXTRACTOR's list (membership is the sheet's declaration, §12), already name-sorted —
-    // volumes have no wire index, but stable creation order remains part of deterministic spawn.
-    // The spec contributes facets only, joined by node name.
+    // Volumes are the EXTRACTOR's list (membership is the sheet's declaration, §12), already
+    // name-sorted — volumes have no wire index, but stable creation order remains part of
+    // deterministic spawn. The spec contributes each volume's role and facets, joined by node name.
     let volume_nodes: Vec<_> = geometry
         .ballistic_volumes
         .iter()

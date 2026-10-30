@@ -231,37 +231,46 @@ TankSpec(
         "Hull_MG_Yaw":     (role: Yaw,   max_speed: 45.0, accel: 90.0, travel: Limited(min: -30.0, max: 30.0),  requires: [BowGunner]),
         "Hull_MG_Pitch":   (role: Pitch, max_speed: 45.0, accel: 90.0, travel: Limited(min: -10.0, max: 20.0),  requires: [BowGunner]),
     },
-    // COMPONENTS — behaviour only (design §12, classifier precedent 2026-08-07).
-    //
-    // This map no longer decides WHICH nodes the shell marches through: membership is the MATERIAL,
-    // per primitive. A mesh is a ballistic volume iff it wears one of the substances in
-    // assets/materials/materials.ron (RHA / Cast / GunSteel / MildSteel / EngineBlock / Ammunition /
-    // Rubber / Flesh), linked in from assets/materials/materials.blend. Resistance comes from that
-    // one registry, keyed by the substance name — per-node `material_factor` is GONE, and with it
-    // the possibility of a plate and its own material disagreeing.
-    //
-    // So this map holds ONLY the nodes that are more than armour: an hp pool, and the consequence
-    // facets layered on it (crew / ammo / function). Every pure armour plate — the whole hull and
-    // turret, the mantlet, the MG bodies and ball mount — is absent BY DESIGN; the running gear is
-    // listed only to tag it external. Both directions
-    // fail loud at bind: a key here that is not a ballistic volume is an error, and the
-    // material-implied lints catch the reverse (Flesh with no crew facet, Ammunition with no ammo
-    // facet, EngineBlock with no entry).
-    // Main armour — DECLARED: a node is a ballistic volume iff it is named here or keyed in
-    // `volumes`, whatever material it wears. Plates and shells with no facet to author.
-    armour: [
-        "Coax_MG_Body", "Commander_Cupola", "Commander_Hatch", "Gun_Mantlet", "Gun_Mask",
-        "Hull_Bottom", "Hull_LFP_Lower", "Hull_LFP_Upper", "Hull_MG_Ball", "Hull_MG_Body",
-        "Hull_MG_Mantlet", "Hull_Rear", "Hull_Side_Lower_L", "Hull_Side_Lower_R",
-        "Hull_Side_Track_L", "Hull_Side_Track_R", "Hull_Side_Upper_L", "Hull_Side_Upper_R",
-        "Hull_Top", "Hull_UFP_Lower", "Hull_UFP_Upper", "Turret_Bottom", "Turret_Mask",
-        "Turret_Side", "Turret_Top",
-    ],
+    // DECLARED ARMOUR (design §12). A node is a ballistic volume iff it is a key here, whatever
+    // material it wears; a node wearing a registry substance and not keyed here is view geometry.
+    // The substance a declared node wears (assets/materials/materials.ron, linked in from
+    // assets/materials/materials.blend) supplies its resistance, keyed by substance name. Each
+    // entry says what the volume is beyond armour: main armour `(main: true)`, external armour
+    // `(external: true)`, or a component with an hp pool and consequence facets (crew / ammo /
+    // function). A key naming no ballistic volume fails loud at bind, and the material-implied
+    // lints catch the reverse (Flesh with no crew facet, Ammunition with no ammo facet,
+    // EngineBlock with no entry).
     volumes: {
         // hp is in whole HP points: the line's dose converts at ballistics::HP_PER_REFERENCE_MM,
         // the field's at assets/ballistics/spall_cone.ron's calibration. A crew station authors
         // no hp: its pool is the shared crew pool (assets/ballistics/box_classes.ron). Every other
         // pool is authored here by hand and tuned in play; no rule ties it to the box's size.
+        // --- Main armour: plates and shells with nothing to declare beyond resisting a round ---
+        "Coax_MG_Body":      (main: true),
+        "Commander_Cupola":  (main: true),
+        "Commander_Hatch":   (main: true),
+        "Gun_Mantlet":       (main: true),
+        "Gun_Mask":          (main: true),
+        "Hull_Bottom":       (main: true),
+        "Hull_LFP_Lower":    (main: true),
+        "Hull_LFP_Upper":    (main: true),
+        "Hull_MG_Ball":      (main: true),
+        "Hull_MG_Body":      (main: true),
+        "Hull_MG_Mantlet":   (main: true),
+        "Hull_Rear":         (main: true),
+        "Hull_Side_Lower_L": (main: true),
+        "Hull_Side_Lower_R": (main: true),
+        "Hull_Side_Track_L": (main: true),
+        "Hull_Side_Track_R": (main: true),
+        "Hull_Side_Upper_L": (main: true),
+        "Hull_Side_Upper_R": (main: true),
+        "Hull_Top":          (main: true),
+        "Hull_UFP_Lower":    (main: true),
+        "Hull_UFP_Upper":    (main: true),
+        "Turret_Bottom":     (main: true),
+        "Turret_Mask":       (main: true),
+        "Turret_Side":       (main: true),
+        "Turret_Top":        (main: true),
         // --- Modules (hp = integrity; the substance carries resistance, independently) ---
         "Engine":           (hp: 336, function: Engine),
         "Transmission":     (hp: 479, function: Transmission),
@@ -327,7 +336,8 @@ TankSpec(
     // Roadwheel stations — DECLARED, replacing the `Wheel_{L,R}_{n}` pattern match. The SAME node is
     // the suspension station and its own armour volume: each wheel is one object holding five closed
     // shells — two MildSteel bodies, two Rubber rims, one axle — declared armour in `volumes`
-    // below, and it needs its station role and side stated here. ORDER IS LOAD-BEARING: this is the `WheelIndex` slot order both wire ends derive.
+    // above, and it needs its station role and side stated here. ORDER IS LOAD-BEARING: this is
+    // the `WheelIndex` slot order both wire ends derive.
     roadwheels: [
         (node: "Wheel_L_0", side: Left),
         (node: "Wheel_L_1", side: Left),

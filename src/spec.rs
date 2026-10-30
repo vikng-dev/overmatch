@@ -19,20 +19,23 @@ use crate::provenance::Sourced;
 use crate::tank::{ServoSpec, Tank};
 use crate::track::transmission::{ShiftAddressing, TransmissionAuthoring, TransmissionParams};
 
-/// One volume entry, keyed by model node name in [`TankSpec::volumes`]: a component's facets, or the
-/// external tag on a pure armour volume.
+/// One declared armour node, keyed by model node name in [`TankSpec::volumes`]: main armour, external
+/// armour, or a component with its facets.
 ///
 /// **Membership is the declaration, behaviour is RON facets** (design
-/// `armor-penetration-and-damage.md` §12). A node marches iff the sheet names it: a key of this map,
-/// or an entry of [`TankSpec::armour`] for main armour with nothing to declare beyond that. The
-/// material a node wears never decides membership; it supplies the resistance of a declared one.
+/// `armor-penetration-and-damage.md` §12). A node marches iff it is a key of that map; the material
+/// a node wears never decides membership, it supplies the resistance of a declared one. The map is
+/// the one home of the fact, so a node cannot be declared twice or in two roles.
 ///
-/// Authored as one record: `(hp: …, crew: …, ammo: …, function: …)` is a component, and
-/// `(external: true)` is external armour. An entry that is both, or neither, fails to parse
-/// ([`VolumeEntry`]).
+/// Authored as one record: `(main: true)` is main armour, `(external: true)` is external armour,
+/// and `(hp: …, crew: …, ammo: …, function: …)` is a component. An entry that is more than one of
+/// these, or none, fails to parse ([`VolumeEntry`]).
 #[derive(Deserialize, Clone)]
 #[serde(try_from = "VolumeEntry")]
 pub enum VolumeSpec {
+    /// Main armour: resists a round and carries no facet. The pen cam's shot verdict counts
+    /// perforating it.
+    MainArmour,
     /// A component: the HP pool that makes the volume damageable, and its consequence facets.
     Component(ComponentSpec),
     /// Armour outside the main armour — skirts, screens, stand-off plates, appliqué, road wheels,
@@ -42,11 +45,11 @@ pub enum VolumeSpec {
 }
 
 impl VolumeSpec {
-    /// The component facets, or `None` for external armour.
+    /// The component facets, or `None` for main and external armour.
     pub fn component(&self) -> Option<&ComponentSpec> {
         match self {
             Self::Component(component) => Some(component),
-            Self::External => None,
+            Self::MainArmour | Self::External => None,
         }
     }
 }
@@ -55,6 +58,8 @@ impl VolumeSpec {
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct VolumeEntry {
+    #[serde(default)]
+    main: bool,
     #[serde(default)]
     external: bool,
     #[serde(default, deserialize_with = "present")]
@@ -67,15 +72,44 @@ struct VolumeEntry {
     function: Option<FunctionRole>,
 }
 
+/// `volumes` as a map that refuses a repeated key: a plain `HashMap` keeps the last of two
+/// declarations of one node, silently dropping the first.
+fn unique_volumes<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<HashMap<String, VolumeSpec>, D::Error> {
+    struct Unique;
+    impl<'de> serde::de::Visitor<'de> for Unique {
+        type Value = HashMap<String, VolumeSpec>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a map of node name to volume entry")
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut volumes = HashMap::new();
+            while let Some((node, volume)) = map.next_entry::<String, VolumeSpec>()? {
+                if volumes.insert(node.clone(), volume).is_some() {
+                    return Err(serde::de::Error::custom(format!(
+                        "volumes declares `{node}` twice"
+                    )));
+                }
+            }
+            Ok(volumes)
+        }
+    }
+    deserializer.deserialize_map(Unique)
+}
+
 /// A field authored as a bare value, absent when not authored.
 fn present<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<u32>, D::Error> {
     u32::deserialize(deserializer).map(Some)
 }
 
-const EXTERNAL_WITH_FACETS: &str = "an external armour volume carries no component facet (hp, \
-     crew, ammo, function): a volume is armour or a component, never both";
-const COMPONENT_WITHOUT_HP: &str = "a component volume needs an hp pool; a main armour volume has \
-     no entry, and external armour is `(external: true)`";
+const ARMOUR_WITH_FACETS: &str = "a main or external armour volume carries no component facet (hp, \
+     crew, ammo, function) and is not both: a volume is main armour, external armour or a component";
+const COMPONENT_WITHOUT_HP: &str = "a component volume needs an hp pool; main armour is \
+     `(main: true)` and external armour is `(external: true)`";
 const CREW_WITH_HP: &str = "a crew station authors no hp: every crew station of every tank has \
      the one shared crew pool (`crew_hp` in assets/ballistics/box_classes.ron)";
 
@@ -86,15 +120,16 @@ impl TryFrom<VolumeEntry> for VolumeSpec {
     /// the one its entry authors.
     fn try_from(entry: VolumeEntry) -> Result<Self, String> {
         let facets = entry.crew.is_some() || entry.ammo || entry.function.is_some();
-        let hp = match (entry.external, entry.hp, entry.crew) {
-            (true, None, _) if !facets => return Ok(Self::External),
-            (true, ..) => return Err(EXTERNAL_WITH_FACETS.into()),
-            (false, Some(_), Some(_)) => return Err(CREW_WITH_HP.into()),
-            (false, None, Some(_)) => {
+        let hp = match (entry.main, entry.external, entry.hp, entry.crew) {
+            (true, false, None, _) if !facets => return Ok(Self::MainArmour),
+            (false, true, None, _) if !facets => return Ok(Self::External),
+            (true, ..) | (_, true, ..) => return Err(ARMOUR_WITH_FACETS.into()),
+            (false, false, Some(_), Some(_)) => return Err(CREW_WITH_HP.into()),
+            (false, false, None, Some(_)) => {
                 crate::ballistics::box_classes::BoxClasses::shipped().crew_hp()
             }
-            (false, Some(hp), None) => hp,
-            (false, None, None) => return Err(COMPONENT_WITHOUT_HP.into()),
+            (false, false, Some(hp), None) => hp,
+            (false, false, None, None) => return Err(COMPONENT_WITHOUT_HP.into()),
         };
         Ok(Self::Component(ComponentSpec {
             hp,
@@ -1025,22 +1060,16 @@ pub struct TankSpec {
     /// Pitch→X) and slew tuning; tank construction resolves each name and binds the servo.
     /// Replaces the old fixed `turret`/`gun` fields, so a variant can declare any number of mounts.
     pub servos: HashMap<String, ServoSpec>,
-    /// **Main armour**, by model node name: the plates and shells that resist a round and carry no
-    /// facet. Together with the keys of `volumes` this is the whole declared armour set
-    /// ([`TankSpec::declared_armour`]) — the only nodes that are ballistic volumes. A node wearing a
-    /// registry substance and named in neither is plain view geometry; a node named here wears
-    /// registry substances only, and no node is named in both lists. `volumes` is not the armour
-    /// list because most armour has nothing to declare beyond being armour.
-    pub armour: Vec<String>,
-    /// **Volume entries** keyed by model node name — the facets that make a ballistic volume a
-    /// component, or the tag that makes it external armour (design §12). A key is itself a
-    /// declaration that the node is armour (see `armour`). Every key must name a node that wears a
-    /// registry substance — an entry on a node the march never meets is an authoring error,
-    /// caught at bind.
+    /// **Declared armour** keyed by model node name — the only nodes that are ballistic volumes,
+    /// each as main armour, external armour or a component with its facets (design §12). A node
+    /// wearing a registry substance and not keyed here is plain view geometry; a node keyed here
+    /// wears registry substances only, and bind refuses a key naming no ballistic volume, since an
+    /// entry the march never meets is an authoring error.
+    #[serde(deserialize_with = "unique_volumes")]
     pub volumes: HashMap<String, VolumeSpec>,
     /// Collision-proxy nodes (convex hull, Vehicle layer), by node name. Explicit, replacing the
-    /// `*_Collider` suffix scan. A proxy must NOT wear a substance material — it is a physics
-    /// stand-in, not armour.
+    /// `*_Collider` suffix scan. A proxy is a physics stand-in: its node is never also a key of
+    /// `volumes`, since declared armour is charged by the march and a hull would charge it twice.
     pub colliders: Vec<String>,
     /// Shadow proxies, by node name. Beyond the tank's caster switch range each one casts the
     /// shadow of the rigid node it is parented under, in place of that node's drawn geometry
@@ -1072,10 +1101,8 @@ pub struct TankSpec {
 pub enum NodeRole {
     /// An actuator mount.
     Servo,
-    /// A component facet: hit points, crew, ammunition, a function.
+    /// A declared armour node: main armour, external armour or a component.
     Volume,
-    /// Main armour: a declared ballistic volume with no facet.
-    Armour,
     /// A collision proxy — a convex-hull source, never armour.
     Collider,
     /// A shadow proxy — a caster standing in for its parent's drawn geometry at range, never
@@ -1110,7 +1137,7 @@ impl NodeRole {
     pub(crate) fn rigid_pose(self) -> bool {
         match self {
             Self::Servo | Self::Roadwheel | Self::Weapon | Self::View => true,
-            Self::Volume | Self::Armour | Self::Collider | Self::ShadowProxy => false,
+            Self::Volume | Self::Collider | Self::ShadowProxy => false,
         }
     }
 }
@@ -1137,11 +1164,6 @@ impl TankSpec {
             self.volumes
                 .keys()
                 .map(|node| at(NodeRole::Volume, node, "volumes".to_owned())),
-        );
-        references.extend(
-            self.armour
-                .iter()
-                .map(|node| at(NodeRole::Armour, node, "armour".to_owned())),
         );
         references.extend(
             self.colliders
@@ -1182,15 +1204,6 @@ impl TankSpec {
         references.sort_unstable();
         references.dedup();
         references
-    }
-
-    /// The declared armour set: main armour plus every volume entry. The one definition of which
-    /// nodes are ballistic volumes — nothing infers it from a material.
-    pub fn declared_armour(&self) -> impl Iterator<Item = &str> {
-        self.armour
-            .iter()
-            .map(String::as_str)
-            .chain(self.volumes.keys().map(String::as_str))
     }
 
     /// Every node the sheet moves relative to its parent: servo frames, recoiling barrels and
@@ -1254,19 +1267,6 @@ impl TankSpec {
         for name in &self.colliders {
             if !seen.insert(name.as_str()) {
                 return Err(format!("colliders declares `{name}` twice").into());
-            }
-        }
-        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for name in &self.armour {
-            if !seen.insert(name.as_str()) {
-                return Err(format!("armour declares `{name}` twice").into());
-            }
-            if self.volumes.contains_key(name) {
-                return Err(format!(
-                    "`{name}` is declared in both armour and volumes — a volume entry already \
-                     declares its node armour"
-                )
-                .into());
             }
         }
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -1795,8 +1795,10 @@ TankSpec(
     volumes: {
         "Gunner": (crew: Gunner),
         "Breech": (hp: 80, function: Breech),
+        "Hull_Plate": (main: true),
+        "Wheel_L_0": (external: true),
+        "Wheel_R_0": (external: true),
     },
-    armour: ["Hull_Plate"],
     colliders: ["Hull_Collider"],
     roadwheels: [
         (node: "Wheel_L_0", side: Left),
@@ -1846,12 +1848,12 @@ TankSpec(
             .expect("the fixture authors a transmission block")
     }
 
-    /// A volume entry is a component or external armour, never both and never neither: the
-    /// external tag carries no component facet, a component other than a crew station authors an
+    /// A volume entry is exactly one of main armour, external armour or a component: the
+    /// armour tags carry no component facet, a component other than a crew station authors an
     /// hp pool, and a crew station authors none and carries the shared crew pool, so no tank file
     /// can give its crew a pool of its own.
     #[test]
-    fn a_volume_entry_is_a_component_or_external_armour() {
+    fn a_volume_entry_is_main_external_or_a_component() {
         // The extension the shipped sheets declare.
         let parse = |text: &str| {
             ron::de::from_str::<VolumeSpec>(&format!("#![enable(implicit_some)]\n{text}"))
@@ -1860,6 +1862,7 @@ TankSpec(
             parse("(external: true)"),
             Ok(VolumeSpec::External)
         ));
+        assert!(matches!(parse("(main: true)"), Ok(VolumeSpec::MainArmour)));
         let crew = parse("(crew: Driver)").expect("a crew station parses");
         let crew = crew.component().expect("it is a component");
         assert_eq!(
@@ -1870,6 +1873,9 @@ TankSpec(
         let module = parse("(hp: 20, external: false)").expect("a module parses");
         assert_eq!(module.component().expect("it is a component").hp, 20);
         for refused in [
+            "(main: true, hp: 20)",
+            "(main: true, external: true)",
+            "(main: false)",
             "(external: true, hp: 20)",
             "(external: true, ammo: true)",
             "(external: true, crew: Driver)",
@@ -1880,6 +1886,22 @@ TankSpec(
         ] {
             assert!(parse(refused).is_err(), "`{refused}` must not parse");
         }
+    }
+
+    /// A node keyed twice in `volumes` is refused at parse. Invariant: a plain map keeps the last
+    /// of two declarations, so the first would silently vanish; a node has exactly one role.
+    #[test]
+    fn a_repeated_volume_key_is_refused_at_parse() {
+        let doubled = FIXTURE_RON.replacen(
+            "\"Hull_Plate\": (main: true),",
+            "\"Hull_Plate\": (main: true),\n        \"Hull_Plate\": (external: true),",
+            1,
+        );
+        assert_ne!(doubled, FIXTURE_RON, "the fixture keys Hull_Plate");
+        let err = ron::de::from_str::<TankSpec>(&doubled)
+            .err()
+            .expect("a repeated key must not parse");
+        assert!(err.to_string().contains("twice"), "{err}");
     }
 
     /// The mutation battery's one baseline: unmutated, the fixture passes. Without this, a

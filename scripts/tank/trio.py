@@ -286,7 +286,8 @@ def sim_bytes(view_bytes, mesh_count):
 
     Textures, samplers, extensions, UVs, tangents and every rung record are gone; what survives is
     the scene graph, the meshes the scene nodes reference, and the material NAME each primitive
-    wears — material is membership (ADR 0007), and a name is the whole of it here.
+    wears. The tank sheet's declaration decides which nodes are armour; the name is the whole of
+    what the walk reads from a declared node, its substance.
     """
     js, binary = glb_ktx2.parse_glb(view_bytes, "<view>")
     out = {"asset": copy.deepcopy(js["asset"]), "accessors": [], "bufferViews": [], "meshes": []}

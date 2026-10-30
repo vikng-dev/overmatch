@@ -81,7 +81,10 @@ TankSpec(
         ),
     ),
     servos: {},
-    volumes: {},
+    volumes: {
+        "Wheel_L": (external: true),
+        "Wheel_R": (external: true),
+    },
     colliders: ["Hull_Collider"],
     roadwheels: [
         (node: "Wheel_L", side: Left),
