@@ -1365,9 +1365,7 @@ fn read_displays(
 /// silhouette deviation a simplified mesh may project to before the next-finer level has to be
 /// used. Lower is crisper and costs more triangles.
 ///
-/// **This slice lands the setting and [`LodPixelBudget`] alone — there is no consumer yet.** The
-/// LOD chain that reads it is unmerged; nothing in this tree changes behaviour because of this
-/// value today.
+/// [`LodPixelBudget`] carries the applied value; `geometry_lod` reads it.
 ///
 /// # The contract for whoever wires the consumer
 ///
@@ -1742,7 +1740,7 @@ pub(crate) struct Settings {
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) display: DisplaySelection,
     /// The LOD screen-space error budget in pixels — see [`PixelBudget`]. Applied by writing
-    /// [`LodPixelBudget`]; nothing reads that resource yet.
+    /// [`LodPixelBudget`], which `geometry_lod` reads.
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) lod_pixel_budget: PixelBudget,
     /// The frame-rate cap, active only under [`VsyncMode::Off`] — see [`FrameCap`].
@@ -2149,7 +2147,7 @@ fn apply_settings(
     // Present exactly on a hidden capture client (`SPIKE_SIM_WINDOWED` without
     // `SPIKE_SIM_VISIBLE`) — the window sub-block below must not run for it.
     capture_pinned: Option<Res<CaptureWindowPinned>>,
-    // The applied half of the LOD budget row. Nothing reads it yet — see `PixelBudget`.
+    // The applied half of the LOD budget row, read by `geometry_lod` — see `PixelBudget`.
     mut lod_budget: ResMut<LodPixelBudget>,
     // The attached displays, as `bevy_winit::create_monitors` synchronised them. COUNTED, never
     // ordered: `MonitorSelection::Index` indexes bevy's own `WinitMonitors` vec, so this system

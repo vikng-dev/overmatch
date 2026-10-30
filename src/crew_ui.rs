@@ -14,7 +14,7 @@ use crate::spec::{FireCycle, ViewKind};
 use crate::tank::{
     Controlled, TankRoot, TankViews, Weapon, WeaponIndex, WeaponLoad, WeaponLoads, WeaponRound,
 };
-use crate::ui_font::{PANEL_BG, TEXT, UiFonts};
+use crate::ui_font::{PANEL_BG, TEXT, UiFonts, set_text};
 
 /// The controlled tank's crew bar: one cell per seat, driven by the `1`–`5` swap input.
 #[derive(Component)]
@@ -189,11 +189,11 @@ fn update_status_panel(
     // Show the first controlled tank (exactly one on a client). Hide the whole card — text AND its
     // background — whenever none resolves, so no empty dark panel lingers in the corner.
     let Some((tank, volumes, caps, views, knocked_out)) = tank.iter().next() else {
-        *text = Text::new("");
-        *visibility = Visibility::Hidden;
+        set_text(text.reborrow(), "");
+        visibility.set_if_neq(Visibility::Hidden);
         return;
     };
-    *visibility = Visibility::Visible;
+    visibility.set_if_neq(Visibility::Visible);
 
     // Crew alive/total: this tank's seats, a seat down when flagged `Dead` (the notion the crew bar
     // draws too).
@@ -275,13 +275,14 @@ fn update_status_panel(
         .map(|ko| format!("KNOCKED OUT ({})", ko.reason.label()))
         .unwrap_or_else(|| "ALIVE".to_string());
 
-    *text = Text::new(format!(
+    let card = format!(
         "{state}\nCrew {alive}/{total}\n{} {}%   Gunner {}%\nWeapons: {}{round_lines}",
         Capability::Drive.label(),
         (drive * 100.0).round() as i32,
         (gunner * 100.0).round() as i32,
         weapon_line,
-    ));
+    );
+    set_text(text.reborrow(), &card);
 }
 
 /// `1`–`5` crew-bar input for the controlled tank: tap a seat to select it as the swap source, tap
@@ -349,7 +350,7 @@ fn update_crew_bar(
         return;
     };
     let Ok((tank, pending)) = tank.single() else {
-        *text = Text::new("");
+        set_text(text.reborrow(), "");
         return;
     };
 
@@ -395,7 +396,7 @@ fn update_crew_bar(
         Some(ps) => format!("SWAP {:.1}s   ", ps.remaining.max(0.0)),
         None => String::new(),
     };
-    *text = Text::new(format!("{prefix}{}", cells.join("    ")));
+    set_text(text.reborrow(), &format!("{prefix}{}", cells.join("    ")));
 }
 
 #[cfg(test)]

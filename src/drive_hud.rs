@@ -13,7 +13,7 @@ use crate::track::sim::{TankTransmission, TrackDrive, TrackGear, TransmissionFee
 use crate::track::transmission::{
     DriveReadout, SchedulerState, TransmissionMode, TransmissionParams, TransmissionState, readout,
 };
-use crate::ui_font::UiFonts;
+use crate::ui_font::{UiFonts, set_text};
 
 /// The normal-play drive row. One instance is mounted by this plugin in both client roots.
 #[derive(Component)]
@@ -212,10 +212,10 @@ fn update_drive_hud(
         return;
     };
     let Some((drive, transmission, velocity, rotation)) = controlled.iter().next() else {
-        standard_text.0.clear();
-        debug_text.0.clear();
-        *standard_visibility = Visibility::Hidden;
-        *debug_visibility = Visibility::Hidden;
+        set_text(standard_text.reborrow(), "");
+        set_text(debug_text.reborrow(), "");
+        standard_visibility.set_if_neq(Visibility::Hidden);
+        debug_visibility.set_if_neq(Visibility::Hidden);
         return;
     };
 
@@ -227,14 +227,17 @@ fn update_drive_hud(
         .as_ref()
         .map(|operating| (&transmission.0, operating));
     let ground_speed = horizontal_ground_speed(velocity.0);
-    standard_text.0 = standard_drive_row(standard_operating, ground_speed);
-    *standard_visibility = Visibility::Visible;
+    set_text(
+        standard_text.reborrow(),
+        &standard_drive_row(standard_operating, ground_speed),
+    );
+    standard_visibility.set_if_neq(Visibility::Visible);
 
     if !debug_visible.0 {
-        *debug_visibility = Visibility::Hidden;
+        debug_visibility.set_if_neq(Visibility::Hidden);
         return;
     }
-    *debug_visibility = Visibility::Visible;
+    debug_visibility.set_if_neq(Visibility::Visible);
 
     let mode_line = match mode {
         Some(mode) if feel.is_some() => format!("trans [T]: {}", mode.label()),
@@ -265,7 +268,7 @@ fn update_drive_hud(
         )
     });
 
-    debug_text.0 = format!(
+    let debug = format!(
         "{mode_line}\n{scheduler_line}\n\
          hull {signed_ground:+5.2} m/s ({:+6.1} km/h)\n\
          belt L {:+5.2} R {:+5.2} | slip L {:+5.2} R {:+5.2}\n\
@@ -278,4 +281,5 @@ fn update_drive_hud(
         drive.throttle,
         drive.steer,
     );
+    set_text(debug_text.reborrow(), &debug);
 }

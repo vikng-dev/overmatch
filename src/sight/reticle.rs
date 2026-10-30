@@ -24,7 +24,7 @@ use crate::overlay::{self, Overlay, Overlays};
 use crate::spec::ViewKind;
 use crate::state::GameplaySet;
 use crate::tank::{Controlled, Hull, Rig, TankViews, ViewNode};
-use crate::ui_font::UiFonts;
+use crate::ui_font::{UiFonts, set_text};
 use crate::view::PlayerView;
 
 use super::{SightMode, sight_line, view_available};
@@ -273,10 +273,13 @@ fn update_range_readout(
         return;
     };
     if range_readout_visible(*mode, !controlled.is_empty()) {
-        *text = Text::new(format!("RANGE {} m", ranging.range as i32));
-        *visibility = Visibility::Visible;
+        set_text(
+            text.reborrow(),
+            &format!("RANGE {} m", ranging.range as i32),
+        );
+        visibility.set_if_neq(Visibility::Visible);
     } else {
-        *visibility = Visibility::Hidden;
+        visibility.set_if_neq(Visibility::Hidden);
     }
 }
 
@@ -790,11 +793,12 @@ fn update_view_death_overlay(
     // stale text is harmless and re-derived here before it can be shown again.
     if crewman_down {
         let other_available = view_available(&controlled, &views, other_view);
-        *text = Text::new(if other_available {
+        let prompt = if other_available {
             format!("Crewman down — [Lshift] for {other_label}")
         } else {
             "All view crew down".to_string()
-        });
+        };
+        set_text(text.reborrow(), &prompt);
     }
 
     // Single-player: no authority — draw whenever the active crewman is down.
@@ -819,8 +823,8 @@ fn update_toast(
     };
     if toast.remaining > 0.0 {
         toast.remaining -= time.delta_secs();
-        *text = Text::new(toast.message.clone());
-        *visibility = Visibility::Visible;
+        set_text(text.reborrow(), &toast.message);
+        visibility.set_if_neq(Visibility::Visible);
     } else if *visibility != Visibility::Hidden {
         *visibility = Visibility::Hidden;
     }

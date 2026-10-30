@@ -144,6 +144,16 @@ pub(crate) fn drawable(text: &str) -> Option<String> {
         .then_some(out)
 }
 
+/// Assign `value` to `text` only when it differs. Every write to a [`Text`] marks it changed, and
+/// a changed text is re-measured and re-laid-out by `bevy_ui`; a HUD that rewrites an unchanged
+/// string every frame pays that cost for nothing. Per-frame HUD writers go through here.
+pub(crate) fn set_text(mut text: Mut<Text>, value: &str) {
+    if text.0 != value {
+        text.0.clear();
+        text.0.push_str(value);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
