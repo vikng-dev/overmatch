@@ -177,6 +177,7 @@ const TRANSMISSION_STATE_FIELDS: &[(&str, &str)] = &[
     ("demand_n", "f32"),
     ("demand_initialized", "bool"),
     ("grade_confirm_ticks", "u32"),
+    ("band_confirm_ticks", "u32"),
     ("grade_target", "u32"),
     ("scheduler_tag", "u32"),
     ("scheduler_from", "u32"),
@@ -991,4 +992,65 @@ pub fn run_bitprobe() -> Result<(), Box<dyn std::error::Error>> {
     }
     writer.finish()?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Each seam's payload is exactly as wide as the header's schema declares it: the invariant
+    /// `scripts/bitprobe/diff.py` checks on every tick of every seam before it compares a word. A
+    /// payload word the schema does not name, or a named field the payload does not write, makes
+    /// every dump unreadable.
+    #[test]
+    fn every_seam_payload_is_as_wide_as_its_header_schema() {
+        let mut world = World::new();
+        let tank = world
+            .spawn((
+                Position::default(),
+                Rotation::default(),
+                LinearVelocity::default(),
+                AngularVelocity::default(),
+                DriveSignal::default(),
+                TrackDrive::default(),
+                TrackGrip::default(),
+                TrackGripEffect::default(),
+                TankTransmission::for_governor(),
+            ))
+            .id();
+        let mut capture = BitprobeCapture {
+            tanks_seen: 1,
+            ..default()
+        };
+        // A record on each side, so a records seam is checked past its count prefix.
+        for records in &mut capture.contact_inputs {
+            records.push(ContactInputProbe::default());
+        }
+        for records in &mut capture.element_outputs {
+            records.push(ElementOutputProbe::default());
+        }
+        world.insert_resource(capture);
+
+        let payloads = tick_payloads(&world, tank).expect("the fixture captured one tank");
+        let header = header(&StartupBuilder::default());
+        let seams = header["seams"]
+            .as_array()
+            .expect("the header lists its seams");
+        assert_eq!(payloads.len(), seams.len(), "one payload per declared seam");
+        for (payload, seam) in payloads.iter().zip(seams) {
+            let width = |key: &str| seam[key].as_array().map_or(0, Vec::len);
+            let declared = if seam["layout"] == "records" {
+                1 + payload[0] as usize * width("record_fields")
+            } else {
+                width("fields")
+            };
+            assert_eq!(
+                payload.len(),
+                declared,
+                "seam {} writes {} words; its schema declares {declared}",
+                seam["name"],
+                payload.len(),
+            );
+        }
+    }
 }

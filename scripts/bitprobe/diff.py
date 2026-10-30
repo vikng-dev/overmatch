@@ -15,6 +15,14 @@ from typing import BinaryIO, Iterator
 
 MAGIC = b"OMBP\x01\r\n\0"
 
+# Fields a writer wrote without declaring: seam -> (the declared field it follows, the field).
+# Dumps from before the writer declared `band_confirm_ticks` write its word after
+# `grade_confirm_ticks` under an 18-field `transmission_state` schema; naming it here lets such a
+# dump diff against itself and against a dump that declares all 19.
+UNNAMED_LEGACY_FIELDS = {
+    "transmission_state": ("grade_confirm_ticks", {"name": "band_confirm_ticks", "type": "u32"}),
+}
+
 
 class DumpError(Exception):
     """Malformed or unsupported dump."""
@@ -25,6 +33,17 @@ def read_exact(stream: BinaryIO, size: int, context: str) -> bytes:
     if len(data) != size:
         raise DumpError(f"truncated {context}: wanted {size} bytes, got {len(data)}")
     return data
+
+
+def name_unnamed_legacy_fields(header: dict) -> None:
+    for seam in header["seams"]:
+        legacy = UNNAMED_LEGACY_FIELDS.get(seam["name"])
+        if legacy is None or seam.get("layout") != "fields":
+            continue
+        after, field = legacy
+        names = [declared["name"] for declared in seam["fields"]]
+        if field["name"] not in names and after in names:
+            seam["fields"].insert(names.index(after) + 1, dict(field))
 
 
 @dataclass(frozen=True)
@@ -58,6 +77,7 @@ class Dump:
                 raise DumpError(f"{path}: unsupported format {self.header.get('format')!r}")
             if self.header.get("version") != 1:
                 raise DumpError(f"{path}: unsupported version {self.header.get('version')!r}")
+            name_unnamed_legacy_fields(self.header)
             self.seam_schemas = self.header["seams"]
         except Exception:
             self.stream.close()

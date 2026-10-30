@@ -113,8 +113,9 @@ pub struct TransmissionFeelTest(pub TransmissionMode);
 /// stage-C demand/filter/target/hill-hold scheduler state). Server-authoritative, advanced only
 /// where the body is dynamic through the spec-selected branch of [`apply_track_forces`], and
 /// replicated as one atomic snapshot to the tank's OWNER only; every other listener reads the
-/// crank through [`EngineRpm`]. The determinism trace hashes all 16 inventory fields in stable
-/// order, with raw bits for both floats.
+/// crank through [`EngineRpm`]. The determinism trace hashes every field of the exhaustive
+/// projection (`transmission::transmission_state_projection`) in stable order, with raw bits for
+/// both floats.
 #[derive(Component, Clone, Copy, PartialEq, Debug, Serialize, Deserialize)]
 pub struct TankTransmission(pub TransmissionState);
 
