@@ -9,6 +9,7 @@
 /// The counting global allocator a zero-allocation test reads.
 pub(crate) mod alloc_count;
 mod bevy_ktx2_uastc_fallback;
+mod bevy_mesh_removal_lifecycle;
 mod bevy_shadow_view_render_layers;
 mod determinism_deps;
 mod doc_citations;

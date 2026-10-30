@@ -59,6 +59,24 @@ that wants the heightfield's shadow samples its own. Here the field is in the vi
 every receiver (terrain, vehicles, trees, buildings) must see a ridge's shadow, and most of them
 are glTF `StandardMaterial`s.
 
+## Mesh instance removals (`src/render/mesh.rs`, issue #173)
+
+GPU mesh building only. Each change is tagged with its own name, `OVERMATCH PATCH (removal
+batching)` or `OVERMATCH PATCH (removal skip)`, and either can be carried or dropped alone. Upstream
+`main` still has the stock behaviour of both; the draft is
+`upstream/bevy-invisible-mesh-removal-churn.md`.
+
+- **Removal batching** (`collect_meshes_for_gpu_building`). Stock sends every queued removal through
+  an `mpsc` channel, one send per entity, from the worker task that prepares that queue's changed
+  meshes. Here the workers leave `removed` in their queues, and the consumer drains every queue
+  after the prepared instances are applied: the same point in the frame where stock applied the
+  channel's removals. The order among removals was never defined, since the channel interleaved
+  the workers.
+
+Guards: `src/tests/bevy_mesh_removal_lifecycle.rs`, render-world lifecycle tests on a real adapter
+(`#[ignore]`d, since CI has none; the module doc has the command). Counter: `SPIKE_MESH_REMOVALS=1`
+(`src/render_cost.rs`), which logs the removals queued per frame and how many had an instance.
+
 ## Retired: shadow views inherit the light's `RenderLayers`
 
 The 0.19.0 vendor also carried a backport of bevyengine/bevy #24797. 0.19.1 ships it (upstream's
