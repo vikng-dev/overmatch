@@ -156,8 +156,13 @@ pub(super) fn write(id: &str, nodes: &[Node], spec: &str) -> Asset {
 /// The spec sheet of a vehicle whose only declared structure is what a test needs: the domain
 /// values are the smallest ones `TankSpec::validate` accepts, so nothing here is a vehicle datum
 /// anybody could mistake for balance.
-pub(super) fn spec(colliders: &[&str], roadwheels: &[(&str, &str)], volumes: &[&str]) -> String {
-    spec_with(colliders, roadwheels, volumes, "servos: {},")
+pub(super) fn spec(
+    colliders: &[&str],
+    roadwheels: &[(&str, &str)],
+    volumes: &[&str],
+    armour: &[&str],
+) -> String {
+    spec_with(colliders, roadwheels, volumes, armour, "servos: {},")
 }
 
 /// The same sheet with `declarations` standing in for the empty `servos` block — where a test that
@@ -166,8 +171,14 @@ pub(super) fn spec_with(
     colliders: &[&str],
     roadwheels: &[(&str, &str)],
     volumes: &[&str],
+    armour: &[&str],
     declarations: &str,
 ) -> String {
+    let armour = armour
+        .iter()
+        .map(|node| format!("\"{node}\""))
+        .collect::<Vec<_>>()
+        .join(", ");
     let colliders = colliders
         .iter()
         .map(|node| format!("\"{node}\""))
@@ -213,6 +224,7 @@ TankSpec(
         ),
     ),
     {declarations}
+    armour: [{armour}],
     volumes: {{{volumes}}},
     colliders: [{colliders}],
     roadwheels: [{roadwheels}],

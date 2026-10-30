@@ -247,6 +247,16 @@ TankSpec(
     // fail loud at bind: a key here that is not a ballistic volume is an error, and the
     // material-implied lints catch the reverse (Flesh with no crew facet, Ammunition with no ammo
     // facet, EngineBlock with no entry).
+    // Main armour — DECLARED: a node is a ballistic volume iff it is named here or keyed in
+    // `volumes`, whatever material it wears. Plates and shells with no facet to author.
+    armour: [
+        "Coax_MG_Body", "Commander_Cupola", "Commander_Hatch", "Gun_Mantlet", "Gun_Mask",
+        "Hull_Bottom", "Hull_LFP_Lower", "Hull_LFP_Upper", "Hull_MG_Ball", "Hull_MG_Body",
+        "Hull_MG_Mantlet", "Hull_Rear", "Hull_Side_Lower_L", "Hull_Side_Lower_R",
+        "Hull_Side_Track_L", "Hull_Side_Track_R", "Hull_Side_Upper_L", "Hull_Side_Upper_R",
+        "Hull_Top", "Hull_UFP_Lower", "Hull_UFP_Upper", "Turret_Bottom", "Turret_Mask",
+        "Turret_Side", "Turret_Top",
+    ],
     volumes: {
         // hp is in whole HP points: the line's dose converts at ballistics::HP_PER_REFERENCE_MM,
         // the field's at assets/ballistics/spall_cone.ron's calibration. A crew station authors
@@ -316,9 +326,8 @@ TankSpec(
     shadow_proxies: ["Hull_Collider", "Turret_Collider", "Main_Gun_Barrel_Shadow"],
     // Roadwheel stations — DECLARED, replacing the `Wheel_{L,R}_{n}` pattern match. The SAME node is
     // the suspension station and its own armour volume: each wheel is one object holding five closed
-    // shells — two MildSteel bodies, two Rubber rims, one axle — so the wheel needs no volume
-    // declaration (its materials are the declaration) but it does need its station role and side
-    // stated. ORDER IS LOAD-BEARING: this is the `WheelIndex` slot order both wire ends derive.
+    // shells — two MildSteel bodies, two Rubber rims, one axle — declared armour in `volumes`
+    // below, and it needs its station role and side stated here. ORDER IS LOAD-BEARING: this is the `WheelIndex` slot order both wire ends derive.
     roadwheels: [
         (node: "Wheel_L_0", side: Left),
         (node: "Wheel_L_1", side: Left),

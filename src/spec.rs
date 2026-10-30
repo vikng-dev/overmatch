@@ -22,10 +22,10 @@ use crate::track::transmission::{ShiftAddressing, TransmissionAuthoring, Transmi
 /// One volume entry, keyed by model node name in [`TankSpec::volumes`]: a component's facets, or the
 /// external tag on a pure armour volume.
 ///
-/// **Behavior is RON facets; membership is the material** (design `armor-penetration-and-damage.md`
-/// §12, classifier precedent 2026-08-07). Which nodes march is decided entirely by the substance
-/// material each primitive wears — this map no longer says. What it says is what a volume *is*
-/// beyond armour. A volume with no entry is main armour.
+/// **Membership is the declaration, behaviour is RON facets** (design
+/// `armor-penetration-and-damage.md` §12). A node marches iff the sheet names it: a key of this map,
+/// or an entry of [`TankSpec::armour`] for main armour with nothing to declare beyond that. The
+/// material a node wears never decides membership; it supplies the resistance of a declared one.
 ///
 /// Authored as one record: `(hp: …, crew: …, ammo: …, function: …)` is a component, and
 /// `(external: true)` is external armour. An entry that is both, or neither, fails to parse
@@ -1025,11 +1025,17 @@ pub struct TankSpec {
     /// Pitch→X) and slew tuning; tank construction resolves each name and binds the servo.
     /// Replaces the old fixed `turret`/`gun` fields, so a variant can declare any number of mounts.
     pub servos: HashMap<String, ServoSpec>,
+    /// **Main armour**, by model node name: the plates and shells that resist a round and carry no
+    /// facet. Together with the keys of `volumes` this is the whole declared armour set
+    /// ([`TankSpec::declared_armour`]) — the only nodes that are ballistic volumes. A node wearing a
+    /// registry substance and named in neither is plain view geometry; a node named here wears
+    /// registry substances only, and no node is named in both lists. `volumes` is not the armour
+    /// list because most armour has nothing to declare beyond being armour.
+    pub armour: Vec<String>,
     /// **Volume entries** keyed by model node name — the facets that make a ballistic volume a
-    /// component, or the tag that makes it external armour (design §12, classifier precedent
-    /// 2026-08-07). Not a membership list: which nodes are volumes comes from the material each
-    /// primitive wears, and a main armour plate appears here not at all. Every key must name a node
-    /// that IS a ballistic volume — an entry on a node the march never meets is an authoring error,
+    /// component, or the tag that makes it external armour (design §12). A key is itself a
+    /// declaration that the node is armour (see `armour`). Every key must name a node that wears a
+    /// registry substance — an entry on a node the march never meets is an authoring error,
     /// caught at bind.
     pub volumes: HashMap<String, VolumeSpec>,
     /// Collision-proxy nodes (convex hull, Vehicle layer), by node name. Explicit, replacing the
@@ -1068,6 +1074,8 @@ pub enum NodeRole {
     Servo,
     /// A component facet: hit points, crew, ammunition, a function.
     Volume,
+    /// Main armour: a declared ballistic volume with no facet.
+    Armour,
     /// A collision proxy — a convex-hull source, never armour.
     Collider,
     /// A shadow proxy — a caster standing in for its parent's drawn geometry at range, never
@@ -1102,7 +1110,7 @@ impl NodeRole {
     pub(crate) fn rigid_pose(self) -> bool {
         match self {
             Self::Servo | Self::Roadwheel | Self::Weapon | Self::View => true,
-            Self::Volume | Self::Collider | Self::ShadowProxy => false,
+            Self::Volume | Self::Armour | Self::Collider | Self::ShadowProxy => false,
         }
     }
 }
@@ -1129,6 +1137,11 @@ impl TankSpec {
             self.volumes
                 .keys()
                 .map(|node| at(NodeRole::Volume, node, "volumes".to_owned())),
+        );
+        references.extend(
+            self.armour
+                .iter()
+                .map(|node| at(NodeRole::Armour, node, "armour".to_owned())),
         );
         references.extend(
             self.colliders
@@ -1169,6 +1182,15 @@ impl TankSpec {
         references.sort_unstable();
         references.dedup();
         references
+    }
+
+    /// The declared armour set: main armour plus every volume entry. The one definition of which
+    /// nodes are ballistic volumes — nothing infers it from a material.
+    pub fn declared_armour(&self) -> impl Iterator<Item = &str> {
+        self.armour
+            .iter()
+            .map(String::as_str)
+            .chain(self.volumes.keys().map(String::as_str))
     }
 
     /// Every node the sheet moves relative to its parent: servo frames, recoiling barrels and
@@ -1232,6 +1254,19 @@ impl TankSpec {
         for name in &self.colliders {
             if !seen.insert(name.as_str()) {
                 return Err(format!("colliders declares `{name}` twice").into());
+            }
+        }
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for name in &self.armour {
+            if !seen.insert(name.as_str()) {
+                return Err(format!("armour declares `{name}` twice").into());
+            }
+            if self.volumes.contains_key(name) {
+                return Err(format!(
+                    "`{name}` is declared in both armour and volumes — a volume entry already \
+                     declares its node armour"
+                )
+                .into());
             }
         }
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -1761,6 +1796,7 @@ TankSpec(
         "Gunner": (crew: Gunner),
         "Breech": (hp: 80, function: Breech),
     },
+    armour: ["Hull_Plate"],
     colliders: ["Hull_Collider"],
     roadwheels: [
         (node: "Wheel_L_0", side: Left),

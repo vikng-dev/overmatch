@@ -265,16 +265,17 @@ pub(crate) struct TankGeometry {
     /// index derives from it (each proxy just yields a convex hull); the order is fixed anyway so
     /// spawn is deterministic.
     pub collision_proxies: Vec<usize>,
-    /// Every node holding at least one ballistic primitive — MEMBERSHIP IS THE MATERIAL (§12,
-    /// classifier precedent 2026-08-07): a node is here iff one of its glTF primitives wears a
-    /// registry substance. Name-sorted, so spawn order is deterministic without depending on the
-    /// glTF node order. Nothing in the bind path scans names for this any more.
+    /// Every declared armour node ([`TankSpec::declared_armour`]): MEMBERSHIP IS THE DECLARATION,
+    /// never the material. A node is here iff the sheet names it, and a named node wears registry
+    /// substances only. A node that wears one without being named is view geometry and holds no
+    /// substance primitive. Name-sorted, so spawn order is deterministic without depending on the
+    /// glTF node order.
     pub ballistic_volumes: Vec<usize>,
 }
 
 impl TankGeometry {
-    /// Whether a node name is a ballistic volume — the material verdict. Consult this, never a
-    /// suffix.
+    /// Whether a node name is a ballistic volume — the sheet's declaration. Consult this, never a
+    /// suffix or a material.
     pub fn is_ballistic(&self, name: &str) -> bool {
         self.by_name
             .get(name)
@@ -293,7 +294,8 @@ impl TankGeometry {
 }
 
 impl NodeGeometry {
-    /// Whether this node holds any ballistic primitive.
+    /// Whether this node holds any ballistic primitive: it is declared armour, since only a
+    /// declared node's substance primitives are captured.
     pub fn is_ballistic(&self) -> bool {
         self.primitives.iter().any(|p| p.substance.is_some())
     }
@@ -331,11 +333,11 @@ const TIGER_SPEC_RON: &str = include_str!("../assets/tiger_1/tiger_1.tank.ron");
 
 /// Which primitives' mesh buffers the sim consumes, and why (§12, classifier precedent 2026-08-07):
 ///
-/// * **Ballistic volumes — MEMBERSHIP IS THE MATERIAL.** A primitive marches iff its glTF material
-///   name is a key in the substance registry. Nothing is parsed out of a node name; the old
-///   `*_Ballistic` suffix is retired and stripped from the source .blend, and with it the last way
-///   a renamed volume could silently dodge capture. Wearing a registry material IS the declaration,
-///   which is also why decor must never wear one.
+/// * **Ballistic volumes — DECLARED.** A node marches iff the sheet names it
+///   ([`TankSpec::declared_armour`]: the `armour` list and the `volumes` keys). Every primitive of
+///   a declared node wears a registry substance, whose resistance the walk reads; a registry
+///   material on an undeclared node is view geometry and captures nothing. Nothing is parsed out
+///   of a node name.
 /// * **Collision proxies — DECLARED.** The `colliders` list in `<tank>.tank.ron` names them; the
 ///   `*_Collider` suffix scan is retired with the rest. Every primitive of a declared proxy is
 ///   captured (a proxy is a hull source, not a substance).
@@ -344,9 +346,9 @@ const TIGER_SPEC_RON: &str = include_str!("../assets/tiger_1/tiger_1.tank.ron");
 /// watertight mesh per station, so the same node is the suspension station AND its own armour. The
 /// station role is a marker component (`Roadwheel`) and the volume role a bundle + trimesh children,
 /// and they compose on one entity (`tank::spawn::assemble_tank_body`). Their capture needs no rule
-/// of its own — the wheel meshes wear `MildSteel`/`Rubber`, so the material rule already takes them.
+/// of its own — the wheel nodes are keyed in `volumes` and wear `MildSteel`/`Rubber`.
 ///
-/// A node that mixes substance and non-substance primitives is REFUSED (see
+/// A declared node that mixes substance and non-substance primitives is REFUSED (see
 /// [`extract_tank_geometry`]): half-armour has no honest meaning here, and the shadow compare's
 /// whole-node mesh diff would quietly stop covering the uncaptured half.
 ///
@@ -801,7 +803,7 @@ fn extract_at_startup(mut commands: Commands) {
     // while the asset server was reading `Contents/Resources/assets`. See `crate::assets`.
     let root = crate::assets::asset_root();
     // THE SIM ARTIFACT (ADR-0035), not the view glb: a byte-strip of the certified view glb holding
-    // LOD0 geometry and material names — membership is the material, so the walk's substance lookup
+    // LOD0 geometry and material names — the walk's substance lookup
     // travels with it. The server opens this file and no other; the client opens it too, so both
     // sides walk identical accessor bytes by construction. `geometry_lod` has already fingerprinted
     // it against the certificate by the time this runs.
@@ -1029,6 +1031,7 @@ pub(crate) fn extract_tank_geometry(
         )
     })?;
     let declared_colliders: HashSet<&str> = spec.colliders.iter().map(String::as_str).collect();
+    let declared_armour: HashSet<&str> = spec.declared_armour().collect();
 
     // Resolve buffer data: a .glb's buffers are the BIN chunk (`Source::Bin`). A `Source::Uri`
     // buffer — a sidecar or a data: URI — is refused, not resolved: the geometry the fingerprint
@@ -1055,6 +1058,7 @@ pub(crate) fn extract_tank_geometry(
     let capture = MeshCapture {
         registry,
         declared_colliders: &declared_colliders,
+        declared_armour: &declared_armour,
         buffers: &buffers,
     };
 
@@ -1145,8 +1149,8 @@ pub(crate) fn extract_tank_geometry(
         }
     }
 
-    // The sim's typed lists, resolved once here (design §8 step 3): two from the spec's explicit
-    // declarations, one from the material verdict. Nothing scans a node name for sim meaning.
+    // The sim's typed lists, resolved once here (design §8 step 3), each from the spec's explicit
+    // declarations. Nothing scans a node name for sim meaning.
     let mut collision_proxies: Vec<usize> = Vec::new();
     for name in &spec.colliders {
         collision_proxies.extend(by_name.get(name).copied());
@@ -1156,12 +1160,9 @@ pub(crate) fn extract_tank_geometry(
         roadwheels.extend(by_name.get(&wheel.node).map(|&index| (index, wheel.side)));
     }
     // Name-sorted so spawn order never depends on the glTF node order.
-    let mut ballistic_volumes: Vec<usize> = nodes
-        .iter()
-        .enumerate()
-        .skip(1)
-        .filter(|(_, node)| node.is_ballistic())
-        .map(|(index, _)| index)
+    let mut ballistic_volumes: Vec<usize> = spec
+        .declared_armour()
+        .filter_map(|name| by_name.get(name).copied())
         .collect();
     ballistic_volumes.sort_by(|a, b| nodes[*a].name.cmp(&nodes[*b].name));
 
@@ -1172,7 +1173,11 @@ pub(crate) fn extract_tank_geometry(
         collision_proxies,
         ballistic_volumes,
     };
-    findings.extend(declared_roles_resolve(&geometry, spec));
+    let refused_at_capture: BTreeSet<String> = findings
+        .iter()
+        .map(|finding| finding.subject.name.clone())
+        .collect();
+    findings.extend(declared_roles_resolve(&geometry, spec, &refused_at_capture));
     findings.extend(witness_roles(&geometry, spec));
     if report::has_error(&findings) {
         return Err(sorted(findings));
@@ -1180,18 +1185,21 @@ pub(crate) fn extract_tank_geometry(
     Ok(geometry)
 }
 
-/// What every node's mesh is captured against: the registry that decides membership ([`classify`]),
-/// the spec's declared collision proxies, and the document's resolved buffers.
+/// What every node's mesh is captured against: the registry that names the substances
+/// ([`classify`]), the spec's declared collision proxies and armour, and the document's resolved
+/// buffers.
 struct MeshCapture<'a> {
     registry: &'a SubstanceRegistry,
     declared_colliders: &'a HashSet<&'a str>,
+    declared_armour: &'a HashSet<&'a str>,
     buffers: &'a [Vec<u8>],
 }
 
 impl MeshCapture<'_> {
-    /// The primitives of node `name`'s mesh the sim consumes, in primitive order: every substance
-    /// primitive, gated by [`manifold_gate`] at the node's composed `root_scale`, and every primitive
-    /// of a declared collision proxy. Refusals are appended to `findings`: the node's role-coherence
+    /// The primitives of node `name`'s mesh the sim consumes, in primitive order: for a declared
+    /// armour node every primitive, gated by [`manifold_gate`] at the node's composed
+    /// `root_scale`; for any other node none of its substance primitives (they are view
+    /// geometry), and every primitive of a declared collision proxy. Refusals are appended to `findings`: the node's role-coherence
     /// refusals first, then each captured primitive's, in primitive order.
     fn primitives(
         &self,
@@ -1201,16 +1209,17 @@ impl MeshCapture<'_> {
         findings: &mut Vec<Finding>,
     ) -> Vec<MeshGeometry> {
         let is_collider = self.declared_colliders.contains(name);
+        let is_armour = self.declared_armour.contains(name);
         let mut captured: Vec<(usize, Option<PrimitiveSubstance>)> = Vec::new();
         let mut ballistic = 0usize;
         let mut plain = 0usize;
         for primitive in mesh.primitives() {
             match classify(&primitive, self.registry) {
-                Some(Ok(substance)) => {
+                Some(Ok(substance)) if is_armour => {
                     ballistic += 1;
                     captured.push((primitive.index(), Some(substance)));
                 }
-                Some(Err(material)) => findings.push(Finding::new(
+                Some(Err(material)) if is_armour => findings.push(Finding::new(
                     &L2_ROLE_COHERENCE,
                     Subject::node(name).element(format!("primitive {}", primitive.index())),
                     format!(
@@ -1220,7 +1229,7 @@ impl MeshCapture<'_> {
                     "give the primitive a hard or witness substance — an unworn substance's facts \
                      are read by a round, never by the walk",
                 )),
-                None => {
+                _ => {
                     plain += 1;
                     if is_collider {
                         captured.push((primitive.index(), None));
@@ -1236,19 +1245,19 @@ impl MeshCapture<'_> {
                 &L2_ROLE_COHERENCE,
                 Subject::node(name),
                 format!(
-                    "{ballistic} substance primitive(s) and {plain} non-substance one(s) in \
-                     one mesh"
+                    "declared armour, and {plain} of its primitive(s) wear no registry \
+                     substance ({ballistic} do)"
                 ),
-                "split the object, or give every primitive a registry substance — membership \
-                 is the material (§12)",
+                "give every primitive of the node a registry substance, or drop the node from \
+                 the sheet's `armour` and `volumes`",
             ));
         }
-        if is_collider && ballistic > 0 {
+        if is_collider && is_armour {
             findings.push(Finding::new(
                 &L2_ROLE_COHERENCE,
                 Subject::node(name),
-                format!("declared a collision proxy and wearing {ballistic} registry substance(s)"),
-                "strip the substance material, or drop the node from the spec's `colliders` — \
+                "declared a collision proxy and declared armour",
+                "drop the node from the spec's `colliders` or from its armour declaration — \
                  a convex hull that is also armour is charged twice by the march",
             ));
         }
@@ -1343,7 +1352,11 @@ fn witness_roles(geometry: &TankGeometry, spec: &TankSpec) -> Vec<Finding> {
 ///
 /// The reference vocabulary is `TankSpec::node_references`, so a spec field added later is checked
 /// here without this function learning its name.
-fn declared_roles_resolve(geometry: &TankGeometry, spec: &TankSpec) -> Vec<Finding> {
+fn declared_roles_resolve(
+    geometry: &TankGeometry,
+    spec: &TankSpec,
+    refused_at_capture: &BTreeSet<String>,
+) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut scaled: BTreeSet<&str> = BTreeSet::new();
     for NodeReference {
@@ -1365,8 +1378,12 @@ fn declared_roles_resolve(geometry: &TankGeometry, spec: &TankSpec) -> Vec<Findi
         let refusal = match role {
             // A facet on a node the march never meets is inert; a station that is not its own
             // armour is a wheel shells pass through.
-            NodeRole::Volume | NodeRole::Roadwheel if !ballistic => {
-                Some("no primitive of it wears a registry substance".to_string())
+            NodeRole::Volume | NodeRole::Armour if !ballistic => Some(
+                "it is declared armour, and no primitive of it wears a registry substance"
+                    .to_string(),
+            ),
+            NodeRole::Roadwheel if !spec.declared_armour().any(|armour| armour == name) => {
+                Some("it is not declared armour (an `armour` entry or a `volumes` key)".to_string())
             }
             NodeRole::Collider if node.primitives.iter().any(|p| p.indices.is_empty()) => {
                 Some("its mesh data is unindexed".to_string())
@@ -1376,12 +1393,10 @@ fn declared_roles_resolve(geometry: &TankGeometry, spec: &TankSpec) -> Vec<Findi
             }
             // Armour is drawn geometry that casts its own shadow; a node that is both would be
             // silenced and stood in for by itself.
-            NodeRole::ShadowProxy if ballistic => {
-                Some("a primitive of it wears a registry substance".to_string())
-            }
+            NodeRole::ShadowProxy if ballistic => Some("it is declared armour".to_string()),
             _ => None,
         };
-        if let Some(evidence) = refusal {
+        if let Some(evidence) = refusal.filter(|_| !refused_at_capture.contains(name)) {
             findings.push(Finding::new(
                 &L2_ROLE_COHERENCE,
                 Subject::node(&node.name).element(format!("declared {role:?}")),
@@ -1696,6 +1711,11 @@ mod tests {
         )
     }
 
+    /// `spec` with `node` also declared main armour.
+    fn declaring(spec: &str, node: &str) -> String {
+        spec.replacen("armour: [", &format!("armour: [\"{node}\", "), 1)
+    }
+
     /// A vehicle that certifies: a hull, a plate, a collision proxy, and one station per side.
     fn sound_vehicle() -> (Vec<Node>, String) {
         let nodes = vec![
@@ -1717,6 +1737,7 @@ mod tests {
             &["Proxy"],
             &[("Station_L", "Left"), ("Station_R", "Right")],
             &[],
+            &["Plate", "Station_L", "Station_R"],
         );
         (nodes, spec)
     }
@@ -1979,6 +2000,47 @@ mod tests {
         }
     }
 
+    /// Migration parity, over every shipped asset: the declared armour set equals the set the
+    /// retired rule inferred (every node with a primitive wearing a registry substance), so every
+    /// ballistic outcome is the one the inferred set produced. A mutant that drops a plate from
+    /// the sheet's `armour` or `volumes` turns it into plain view geometry and fails here. Once a
+    /// shipped asset's decor wears a registry material on purpose, that asset's undeclared nodes
+    /// legitimately differ and this comparison is retired for it.
+    #[test]
+    fn the_declared_armour_equals_the_set_the_materials_used_to_imply() {
+        let registry = SubstanceRegistry::shipped();
+        for model in fixture::shipped_assets() {
+            let spec_ron =
+                std::fs::read_to_string(spec_ron_name(&model)).expect("the sheet is readable");
+            let asset = certify_asset(&model, &spec_ron, &registry).expect("the pair certifies");
+            let declared: BTreeSet<&str> = asset
+                .geometry
+                .ballistic_volumes
+                .iter()
+                .map(|&index| asset.geometry.nodes[index].name.as_str())
+                .collect();
+            let document = gltf::Gltf::open(&model).expect("the glb opens").document;
+            let inferred: BTreeSet<&str> = document
+                .nodes()
+                .filter_map(|node| Some((node.name()?, node.mesh()?)))
+                .filter(|(_, mesh)| {
+                    mesh.primitives()
+                        .any(|primitive| matches!(classify(&primitive, &registry), Some(Ok(_))))
+                })
+                .map(|(name, _)| name)
+                .collect();
+            assert_eq!(
+                declared,
+                inferred,
+                "{}: declared armour differs from the nodes wearing a registry substance \
+                 (only declared: {:?}; only worn: {:?})",
+                model.display(),
+                declared.difference(&inferred).collect::<Vec<_>>(),
+                inferred.difference(&declared).collect::<Vec<_>>()
+            );
+        }
+    }
+
     /// THE MATERIAL-IMPLIED LINTS, over every shipped asset. A substance whose whole meaning is a
     /// consequence must have the facet that states it: an Ammunition rack that cannot cook off and
     /// an EngineBlock with no hp are each a plate pretending to be a module. (A witness without a
@@ -2058,7 +2120,12 @@ mod tests {
         assert_eq!(refusals(&findings), ["L2.SPEC"], "{}", render(&findings));
 
         // Parses, but declares a vehicle that cannot drive: no station on one side.
-        let refused = fixture::spec(&["Proxy"], &[("Station_L", "Left")], &[]);
+        let refused = fixture::spec(
+            &["Proxy"],
+            &[("Station_L", "Left")],
+            &[],
+            &["Station_L", "Station_R"],
+        );
         let findings = verify("half-tracked", &nodes, &refused);
         assert_eq!(refusals(&findings), ["L2.SPEC"], "{}", render(&findings));
 
@@ -2067,6 +2134,7 @@ mod tests {
             &["Proxy"],
             &[("Station_L", "Left"), ("Absent", "Right")],
             &[],
+            &["Station_L", "Station_R"],
         );
         let findings = verify("absent-node", &nodes, &absent);
         assert_eq!(refusals(&findings), ["L2.SPEC"], "{}", render(&findings));
@@ -2095,6 +2163,7 @@ mod tests {
             &["Proxy"],
             &[("Station_L", "Left"), ("Station_R", "Right")],
             &["Plate"],
+            &[],
             r#"servos: {"Turret_Yaw": (role: Yaw, max_speed: 1.0, accel: 1.0, travel: Continuous)},
     weapons: {"Main": (
         trigger: Primary,
@@ -2186,7 +2255,12 @@ mod tests {
             base,
             "a renamed node reference is read by the build"
         );
-        let invalid = fixture::spec(&[], &[("Station_L", "Left"), ("Station_R", "Right")], &[]);
+        let invalid = fixture::spec(
+            &[],
+            &[("Station_L", "Left"), ("Station_R", "Right")],
+            &[],
+            &[],
+        );
         let document: serde_json::Value =
             serde_json::from_str(&canon("projection-invalid", &invalid)).expect("one document");
         assert_eq!(document["spec_validates"], serde_json::json!(false));
@@ -2209,12 +2283,12 @@ mod tests {
         );
         assert_eq!(findings[0].subject.name, "Station_L");
 
-        // A collision proxy wearing armour would be charged twice by the march.
+        // A collision proxy declared armour would be charged twice by the march.
         let (mut nodes, spec) = sound_vehicle();
         nodes[2] = Node::new("Proxy")
             .child_of("Hull")
             .holding(solid(SUBSTANCE, [0.0, 3.0, 0.0]));
-        let findings = verify("armoured-proxy", &nodes, &spec);
+        let findings = verify("armoured-proxy", &nodes, &declaring(&spec, "Proxy"));
         assert_eq!(refusals(&findings), ["L2.ROLE_COHERENCE"]);
 
         // Half armour and half art in one mesh: the shadow compare diffs a node's bytes whole, so
@@ -2245,6 +2319,7 @@ mod tests {
             &["Proxy"],
             &[("Station_L", "Left"), ("Station_R", "Right")],
             &["Proxy"],
+            &["Station_L", "Station_R"],
         );
         let findings = verify("inert-facet", &nodes, &facets);
         assert_eq!(
@@ -2273,7 +2348,7 @@ mod tests {
         };
         let wheels = [("Station_L", "Left"), ("Station_R", "Right")];
         let declared = |entry: &str| {
-            fixture::spec(&["Proxy"], &wheels, &[])
+            fixture::spec(&["Proxy"], &wheels, &[], &["Station_L", "Station_R"])
                 .replace("volumes: {}", &format!("volumes: {{\"Seat\": {entry}}}"))
         };
         let crew = declared("(crew: Driver)");
@@ -2297,7 +2372,12 @@ mod tests {
             (
                 "witness-plate",
                 seat(witness),
-                fixture::spec(&["Proxy"], &wheels, &[]),
+                fixture::spec(
+                    &["Proxy"],
+                    &wheels,
+                    &[],
+                    &["Station_L", "Station_R", "Seat"],
+                ),
             ),
         ];
         for (id, node, spec) in cases {
@@ -2330,7 +2410,7 @@ mod tests {
                 .child_of("Hull")
                 .holding(solid(core, [0.0, 3.0, 0.0])),
         );
-        let findings = verify("burst-core-volume", &nodes, &spec);
+        let findings = verify("burst-core-volume", &nodes, &declaring(&spec, "Shield"));
         assert_eq!(
             refusals(&findings),
             ["L2.ROLE_COHERENCE"],
@@ -2338,6 +2418,46 @@ mod tests {
             render(&findings)
         );
         assert_eq!(findings[0].subject.name, "Shield");
+    }
+
+    /// Armour membership is the sheet's declaration, never a material. Invariant: an undeclared
+    /// node wearing a registry substance is view geometry (no volume, no captured primitive, no
+    /// finding), and a declared node wearing a non-registry material is refused by name. A mutant
+    /// that reads membership off the material makes the first half fail; one that accepts a
+    /// declared node of art makes the second fail. The shadow-proxy and collision-proxy checks
+    /// and the spawn consumers read the same set.
+    #[test]
+    fn armour_is_what_the_sheet_declares_not_what_a_material_implies() {
+        let (mut nodes, spec) = sound_vehicle();
+        nodes.push(
+            Node::new("Decor")
+                .child_of("Hull")
+                .holding(solid(SUBSTANCE, [0.0, 3.0, 0.0])),
+        );
+        let asset = fixture::write("undeclared-decor", &nodes, &spec);
+        let certified = certify_asset(&asset.glb, &spec, &SubstanceRegistry::shipped())
+            .expect("an undeclared registry-material node certifies");
+        let geometry = &certified.geometry;
+        assert!(!geometry.is_ballistic("Decor"), "undeclared is no volume");
+        let decor = &geometry.nodes[geometry.by_name["Decor"]];
+        assert!(
+            decor.primitives.is_empty(),
+            "an undeclared node's substance primitives are not captured"
+        );
+        assert!(geometry.is_ballistic("Plate"), "declared is a volume");
+
+        let (mut nodes, spec) = sound_vehicle();
+        nodes[1] = Node::new("Plate")
+            .child_of("Hull")
+            .holding(solid(ART, [0.0, 0.0, 0.0]));
+        let findings = verify("declared-art", &nodes, &spec);
+        assert_eq!(
+            refusals(&findings),
+            ["L2.ROLE_COHERENCE"],
+            "{}",
+            render(&findings)
+        );
+        assert_eq!(findings[0].subject.name, "Plate");
     }
 
     /// L2.PRIMITIVE_FORM — what the sim reads has to be there, and has to be triangles.
