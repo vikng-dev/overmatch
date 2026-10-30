@@ -1,0 +1,205 @@
+== base-0:  OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 (15s warmup + 60s measure) ==
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/base-0.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+base-0 VALID: 3559 post-warmup frame rows, gates passed
+   base-0 OK: 4435 rows (frame + occlusion + monitor + surface)
+== shadows-off-a: shadow_distance: Off, OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 (15s warmup + 60s measure) ==
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/shadows-off-a.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+shadows-off-a VALID: 4377 post-warmup frame rows, gates passed
+   shadows-off-a OK: 5468 rows (frame + occlusion + monitor + surface)
+== shadows-off-b: shadow_distance: Off, OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 (15s warmup + 60s measure) ==
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/shadows-off-b.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+shadows-off-b VALID: 4622 post-warmup frame rows, gates passed
+   shadows-off-b OK: 5711 rows (frame + occlusion + monitor + surface)
+== base-1:  OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 (15s warmup + 60s measure) ==
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/base-1.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+base-1 VALID: 3612 post-warmup frame rows, gates passed
+   base-1 OK: 4494 rows (frame + occlusion + monitor + surface)
+== cascades-2-a: shadow_cascades: Two, OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 (15s warmup + 60s measure) ==
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/cascades-2-a.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+cascades-2-a VALID: 3768 post-warmup frame rows, gates passed
+   cascades-2-a OK: 4681 rows (frame + occlusion + monitor + surface)
+== cascades-2-b: shadow_cascades: Two, OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 (15s warmup + 60s measure) ==
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/cascades-2-b.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+cascades-2-b VALID: 3739 post-warmup frame rows, gates passed
+   cascades-2-b OK: 4649 rows (frame + occlusion + monitor + surface)
+== base-2:  OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 (15s warmup + 60s measure) ==
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/base-2.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+base-2 VALID: 3633 post-warmup frame rows, gates passed
+   base-2 OK: 4520 rows (frame + occlusion + monitor + surface)
+== res-2048-a: shadow_resolution: X2048, OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 (15s warmup + 60s measure) ==
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/res-2048-a.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+res-2048-a VALID: 3614 post-warmup frame rows, gates passed
+   res-2048-a OK: 4505 rows (frame + occlusion + monitor + surface)
+== res-2048-b: shadow_resolution: X2048, OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 (15s warmup + 60s measure) ==
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/res-2048-b.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+res-2048-b VALID: 3603 post-warmup frame rows, gates passed
+   res-2048-b OK: 4490 rows (frame + occlusion + monitor + surface)
+== base-3:  OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 (15s warmup + 60s measure) ==
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/base-3.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+base-3 VALID: 3609 post-warmup frame rows, gates passed
+   base-3 OK: 4493 rows (frame + occlusion + monitor + surface)
+== msaa-off-a: msaa: Off, OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 (15s warmup + 60s measure) ==
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/msaa-off-a.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+msaa-off-a VALID: 4561 post-warmup frame rows, gates passed
+   msaa-off-a OK: 5528 rows (frame + occlusion + monitor + surface)
+== msaa-off-b: msaa: Off, OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 (15s warmup + 60s measure) ==
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/msaa-off-b.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+msaa-off-b VALID: 4563 post-warmup frame rows, gates passed
+   msaa-off-b OK: 5706 rows (frame + occlusion + monitor + surface)
+== base-4:  OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 (15s warmup + 60s measure) ==
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/base-4.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+base-4 VALID: 3641 post-warmup frame rows, gates passed
+   base-4 OK: 4523 rows (frame + occlusion + monitor + surface)
+== rs50-a: render_scale: Percent50, OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 (15s warmup + 60s measure) ==
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/rs50-a.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+rs50-a VALID: 6424 post-warmup frame rows, gates passed
+   rs50-a OK: 7944 rows (frame + occlusion + monitor + surface)
+== rs50-b: render_scale: Percent50, OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 (15s warmup + 60s measure) ==
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/rs50-b.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+rs50-b VALID: 6435 post-warmup frame rows, gates passed
+   rs50-b OK: 7972 rows (frame + occlusion + monitor + surface)
+== base-5:  OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 (15s warmup + 60s measure) ==
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/base-5.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+base-5 VALID: 3611 post-warmup frame rows, gates passed
+   base-5 OK: 4490 rows (frame + occlusion + monitor + surface)
+== no-env-light-a:  OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 SPIKE_ABLATE=env_light (15s warmup + 60s measure) ==
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/no-env-light-a.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+no-env-light-a VALID: 3981 post-warmup frame rows, gates passed
+   no-env-light-a OK: 4931 rows (frame + occlusion + monitor + surface)
+== no-env-light-b:  OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 SPIKE_ABLATE=env_light (15s warmup + 60s measure) ==
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/no-env-light-b.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+no-env-light-b VALID: 3975 post-warmup frame rows, gates passed
+   no-env-light-b OK: 4926 rows (frame + occlusion + monitor + surface)
+== base-6:  OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 (15s warmup + 60s measure) ==
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/base-6.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+base-6 VALID: 3645 post-warmup frame rows, gates passed
+   base-6 OK: 4525 rows (frame + occlusion + monitor + surface)
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/base-0.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/base-1.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/base-2.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/base-3.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/base-4.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/base-5.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/base-6.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/cascades-2-a.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/cascades-2-b.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/msaa-off-a.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/msaa-off-b.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/no-env-light-a.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/no-env-light-b.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/res-2048-a.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/res-2048-b.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/rs50-a.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/rs50-b.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/shadows-off-a.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30/shadows-off-b.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+
+frame time, ms (post-warmup 15s discarded)
+condition            n      p50      p95      p99    worst
+base-0            3559    17.05    20.85    22.09    29.38
+base-1            3612    16.53    19.99    21.28    25.61
+base-2            3633    16.70    20.33    21.24    31.69
+base-3            3609    16.79    20.49    21.59    25.46
+base-4            3641    16.67    20.16    21.13    25.15
+base-5            3611    16.58    20.06    21.13    24.72
+base-6            3645    16.66    20.25    21.43    30.79
+cascades-2-a      3768    16.12    18.91    20.92    31.50
+cascades-2-b      3739    16.26    19.31    20.76    25.26
+msaa-off-a        4561    13.23    17.66    18.61    21.83
+msaa-off-b        4563    13.29    17.80    18.71    32.42
+no-env-light-a    3981    15.20    17.32    20.07    27.87
+no-env-light-b    3975    15.23    17.25    20.27    54.18
+res-2048-a        3614    16.80    20.35    21.47    34.01
+res-2048-b        3603    16.79    20.38    21.40    29.50
+rs50-a            6424    10.18    13.30    14.44    19.97
+rs50-b            6435    10.21    13.28    14.15    17.66
+shadows-off-a     4377    13.72    19.01    26.57    58.97
+shadows-off-b     4622    13.11    17.60    18.79    30.28
+
+fps-equivalent (1000 / frame ms)
+condition           p50      p95      p99    worst
+base-0             58.6     48.0     45.3     34.0
+base-1             60.5     50.0     47.0     39.1
+base-2             59.9     49.2     47.1     31.6
+base-3             59.5     48.8     46.3     39.3
+base-4             60.0     49.6     47.3     39.8
+base-5             60.3     49.8     47.3     40.4
+base-6             60.0     49.4     46.7     32.5
+cascades-2-a       62.0     52.9     47.8     31.7
+cascades-2-b       61.5     51.8     48.2     39.6
+msaa-off-a         75.6     56.6     53.7     45.8
+msaa-off-b         75.2     56.2     53.4     30.8
+no-env-light-a     65.8     57.7     49.8     35.9
+no-env-light-b     65.7     58.0     49.3     18.5
+res-2048-a         59.5     49.1     46.6     29.4
+res-2048-b         59.5     49.1     46.7     33.9
+rs50-a             98.2     75.2     69.2     50.1
+rs50-b             97.9     75.3     70.6     56.6
+shadows-off-a      72.9     52.6     37.6     17.0
+shadows-off-b      76.2     56.8     53.2     33.0
+
+% of 16.67 ms budget (60 fps); >100 = over budget
+condition           p50      p95      p99    worst
+base-0            102.3    125.1    132.6    176.3
+base-1             99.2    119.9    127.7    153.6
+base-2            100.2    122.0    127.5    190.1
+base-3            100.8    123.0    129.5    152.7
+base-4            100.0    121.0    126.8    150.9
+base-5             99.5    120.4    126.8    148.3
+base-6            100.0    121.5    128.6    184.8
+cascades-2-a       96.7    113.5    125.5    189.0
+cascades-2-b       97.5    115.9    124.5    151.5
+msaa-off-a         79.4    106.0    111.6    131.0
+msaa-off-b         79.8    106.8    112.3    194.5
+no-env-light-a     91.2    103.9    120.4    167.2
+no-env-light-b     91.4    103.5    121.6    325.1
+res-2048-a        100.8    122.1    128.8    204.1
+res-2048-b        100.8    122.3    128.4    177.0
+rs50-a             61.1     79.8     86.7    119.8
+rs50-b             61.3     79.7     84.9    105.9
+shadows-off-a      82.3    114.1    159.4    353.8
+shadows-off-b      78.7    105.6    112.7    181.7
+
+% of 8.33 ms budget (120 fps); >100 = over budget
+condition           p50      p95      p99    worst
+base-0            204.7    250.2    265.1    352.5
+base-1            198.4    239.9    255.4    307.3
+base-2            200.4    244.0    254.9    380.3
+base-3            201.5    245.9    259.1    305.5
+base-4            200.0    241.9    253.6    301.8
+base-5            198.9    240.7    253.6    296.7
+base-6            200.0    243.0    257.2    369.5
+cascades-2-a      193.4    226.9    251.1    378.0
+cascades-2-b      195.1    231.8    249.1    303.1
+msaa-off-a        158.8    212.0    223.3    262.0
+msaa-off-b        159.5    213.6    224.6    389.0
+no-env-light-a    182.4    207.9    240.9    334.5
+no-env-light-b    182.8    207.0    243.3    650.2
+res-2048-a        201.6    244.2    257.7    408.1
+res-2048-b        201.5    244.6    256.8    354.0
+rs50-a            122.2    159.6    173.3    239.7
+rs50-b            122.5    159.3    169.9    211.9
+shadows-off-a     164.6    228.2    318.9    707.7
+shadows-off-b     157.4    211.2    225.5    363.4
+
+delta vs baseline 'base-0', ms (positive = slower than baseline)
+condition          dp50     dp95     dp99   dworst
+base-1            -0.52    -0.86    -0.81    -3.77
+base-2            -0.36    -0.52    -0.85    +2.31
+base-3            -0.26    -0.36    -0.50    -3.92
+base-4            -0.39    -0.69    -0.96    -4.23
+base-5            -0.48    -0.79    -0.96    -4.65
+base-6            -0.39    -0.60    -0.66    +1.42
+cascades-2-a      -0.93    -1.94    -1.17    +2.12
+cascades-2-b      -0.80    -1.54    -1.33    -4.12
+msaa-off-a        -3.82    -3.19    -3.48    -7.54
+msaa-off-b        -3.76    -3.05    -3.38    +3.04
+no-env-light-a    -1.85    -3.53    -2.02    -1.50
+no-env-light-b    -1.82    -3.61    -1.82   +24.81
+res-2048-a        -0.25    -0.50    -0.62    +4.63
+res-2048-b        -0.26    -0.47    -0.69    +0.12
+rs50-a            -6.87    -7.56    -7.65    -9.40
+rs50-b            -6.84    -7.58    -7.94   -11.72
+shadows-off-a     -3.34    -1.84    +4.48   +29.60
+shadows-off-b     -3.94    -3.25    -3.30    +0.90
+ablation run complete -> /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/battle-30

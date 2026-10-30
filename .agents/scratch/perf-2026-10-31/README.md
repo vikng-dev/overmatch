@@ -208,10 +208,39 @@ Each directory has `conditions.tsv`, the per-condition `*.server.json`, a stats-
 - `local-zero/`: the census-only zero on the M4.
 - `edgegap-*/`: the Edgegap curves above.
 - `calib/`: the lever calibration.
+- `battery/`: the two battery blocks' outputs.
 - `tools/`: the runners and analysis scripts.
 
 ## The night battery (item 4)
 
-Pending at this commit. Three offscreen blocks were queued at 06:05 +07: cal-start, battle-30 and
-duel-2, with `vis-off` skipped and `prints-*` not built. They wait behind other lanes' lock holds,
-each block starting only if it can end by 07:35.
+**Ran:** cal-start (05:57–06:07 +07) and battle-30 (06:21–06:46), offscreen, with the alpha.4
+client of `profile/BUILD-alpha4.txt`. The trace feature is compiled into that client and its spans
+are filtered off, which last night's binary did not carry. Products: `battery/*.out`.
+
+**Not run:**
+
+- `vis-off`: visible windows.
+- `prints-*`: the binary lacks `track_prints_demo`.
+- duel-2: cancelled at 06:49 while still queued, since it could no longer end by 07:35.
+- forest and cal-end.
+
+All 21 conditions passed their gates.
+
+- **cal-start, MEASURED (frame ms, p50 / p95):** cal-2 12.31 / 15.11, cal-30 17.29 / 21.45. Last
+  night's cal-start (alpha.1) read 14.45 / 16.02 and 19.32 / 24.26. The two nights cannot be
+  compared directly (`perf-2026-10-29/night-results-2026-10-30.md` §2).
+- **battle-30, 30 tanks, A/B/B/A.** Δ is the lever's mean against the mean of its two bracketing
+  bases; halves are each run against its adjacent base (DERIVED from the MEASURED
+  percentiles). Bases ran 16.53–17.05 ms p50.
+
+  | Lever | Δp50 | Halves | Δp95 | Last night's Δp50 |
+  |---|---|---|---|---|
+  | render scale 50 % | **−6.43** | −6.49, −6.37 | −6.82 | −6.29 |
+  | MSAA off | **−3.47** | −3.56, −3.38 | −2.60 | −3.10 |
+  | shadows off | **−3.38** | −3.33, −3.42 | −2.11 | −3.05 |
+  | sky env light off | **−1.41** | −1.38, −1.43 | −2.87 | −1.20 |
+  | cascades 3 → 2 | **−0.43** | −0.41, −0.44 | −1.05 | −0.72 |
+  | shadow maps 4096 → 2048 | +0.05 | +0.10, 0.00 | −0.05 | −0.25 |
+
+  The lever order and sizes hold from alpha.1 to alpha.4. The 2048 maps fell below the noise
+  floor.

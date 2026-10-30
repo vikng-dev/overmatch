@@ -1,0 +1,165 @@
+runner commit: 4faf75d725118dcb67de7fde6f638247df1fa95a
+binary build: built 2026-10-31 03:52:49 +07 from 1ed1c5d3863a74e17b2f2dd2459f686004f96da8 (tag v0.7.0-alpha.4), bay-3, 3239 s including the queue
+binary build: scripts/serial-cargo build --locked --profile profiling --features dev_ui,bitprobe,bevy/trace_chrome --bin overmatch
+binary build: 6f9f8cd5c05a804b751cf599226f98ddc269355f301d702430db8d9a1a7c8083  /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/bin/A4/overmatch
+binary build: built 2026-10-31 04:46:10 +07 from 1ed1c5d3863a74e17b2f2dd2459f686004f96da8 (tag v0.7.0-alpha.4), bay-3, 1843 s including the queue
+binary build: scripts/serial-cargo build --locked --profile profiling --features dev_ui,bitprobe,bevy/trace_chrome --bin overmatch-server
+binary build: 893f901319b2b6059e69f4a5d951e0150d7dd452d971cbc1b16ec9a9af33d670  /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/bin/A4/overmatch-server
+mode: offscreen (hidden window; the cameras render into a 2560x1440 image at scale 2; nothing presented)
+duration_s: 60  warmup_s: 15  cooldown_s: 5  min_rows: 1200  bin: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/bin/A4  asset_root: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/bin/A4/root
+presentation gates: offscreen — a 2560x1440 offscreen target throughout + the 3D camera drew on >=99% of measured frames + frame cap off; display and occlusion n/a (nothing presented)
+conditions: base-0||OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 shadows-off-a|shadow_distance: Off,|OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1  shadows-off-b|shadow_distance: Off,|OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1  base-1||OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 cascades-2-a|shadow_cascades: Two,|OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1  cascades-2-b|shadow_cascades: Two,|OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1  base-2||OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 res-2048-a|shadow_resolution: X2048,|OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1  res-2048-b|shadow_resolution: X2048,|OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1  base-3||OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 msaa-off-a|msaa: Off,|OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1  msaa-off-b|msaa: Off,|OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1  base-4||OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 rs50-a|render_scale: Percent50,|OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1  rs50-b|render_scale: Percent50,|OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1  base-5||OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 no-env-light-a||OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 SPIKE_ABLATE=env_light no-env-light-b||OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 SPIKE_ABLATE=env_light base-6||OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1
+binary: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/bin/A4/overmatch --offline  mtime=Oct 31 03:52:48 2026 size=195498152
+host: arm64 Apple M4
+base-0: video fields [] env [OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1]
+base-0: frame_cost: effective present mode Immediate, frame cap off
+base-0: occlusion transitions in stream: 0
+base-0: presenting monitor NOT REPORTED <- in force at the end
+base-0: monitor rows in stream: 0 (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)
+base-0: frame_cost: surface 2560x1440 physical (offscreen image at scale 2) at t=0.000s <- in force at the end
+base-0: render scale: native — the 3D main pass fills the [2560, 1440] target <- the renderer's own word for the same size
+base-0: surface rows in stream: 1 (1 = never resized; 2 is normally the startup re-pin after the park changed the scale factor)
+shadows-off-a: video fields [shadow_distance: Off,] env [OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 ]
+shadows-off-a: frame_cost: effective present mode Immediate, frame cap off
+shadows-off-a: occlusion transitions in stream: 0
+shadows-off-a: presenting monitor NOT REPORTED <- in force at the end
+shadows-off-a: monitor rows in stream: 0 (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)
+shadows-off-a: frame_cost: surface 2560x1440 physical (offscreen image at scale 2) at t=0.000s <- in force at the end
+shadows-off-a: render scale: native — the 3D main pass fills the [2560, 1440] target <- the renderer's own word for the same size
+shadows-off-a: surface rows in stream: 1 (1 = never resized; 2 is normally the startup re-pin after the park changed the scale factor)
+shadows-off-b: video fields [shadow_distance: Off,] env [OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 ]
+shadows-off-b: frame_cost: effective present mode Immediate, frame cap off
+shadows-off-b: occlusion transitions in stream: 0
+shadows-off-b: presenting monitor NOT REPORTED <- in force at the end
+shadows-off-b: monitor rows in stream: 0 (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)
+shadows-off-b: frame_cost: surface 2560x1440 physical (offscreen image at scale 2) at t=0.000s <- in force at the end
+shadows-off-b: render scale: native — the 3D main pass fills the [2560, 1440] target <- the renderer's own word for the same size
+shadows-off-b: surface rows in stream: 1 (1 = never resized; 2 is normally the startup re-pin after the park changed the scale factor)
+base-1: video fields [] env [OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1]
+base-1: frame_cost: effective present mode Immediate, frame cap off
+base-1: occlusion transitions in stream: 0
+base-1: presenting monitor NOT REPORTED <- in force at the end
+base-1: monitor rows in stream: 0 (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)
+base-1: frame_cost: surface 2560x1440 physical (offscreen image at scale 2) at t=0.000s <- in force at the end
+base-1: render scale: native — the 3D main pass fills the [2560, 1440] target <- the renderer's own word for the same size
+base-1: surface rows in stream: 1 (1 = never resized; 2 is normally the startup re-pin after the park changed the scale factor)
+cascades-2-a: video fields [shadow_cascades: Two,] env [OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 ]
+cascades-2-a: frame_cost: effective present mode Immediate, frame cap off
+cascades-2-a: occlusion transitions in stream: 0
+cascades-2-a: presenting monitor NOT REPORTED <- in force at the end
+cascades-2-a: monitor rows in stream: 0 (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)
+cascades-2-a: frame_cost: surface 2560x1440 physical (offscreen image at scale 2) at t=0.000s <- in force at the end
+cascades-2-a: render scale: native — the 3D main pass fills the [2560, 1440] target <- the renderer's own word for the same size
+cascades-2-a: surface rows in stream: 1 (1 = never resized; 2 is normally the startup re-pin after the park changed the scale factor)
+cascades-2-b: video fields [shadow_cascades: Two,] env [OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 ]
+cascades-2-b: frame_cost: effective present mode Immediate, frame cap off
+cascades-2-b: occlusion transitions in stream: 0
+cascades-2-b: presenting monitor NOT REPORTED <- in force at the end
+cascades-2-b: monitor rows in stream: 0 (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)
+cascades-2-b: frame_cost: surface 2560x1440 physical (offscreen image at scale 2) at t=0.000s <- in force at the end
+cascades-2-b: render scale: native — the 3D main pass fills the [2560, 1440] target <- the renderer's own word for the same size
+cascades-2-b: surface rows in stream: 1 (1 = never resized; 2 is normally the startup re-pin after the park changed the scale factor)
+base-2: video fields [] env [OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1]
+base-2: frame_cost: effective present mode Immediate, frame cap off
+base-2: occlusion transitions in stream: 0
+base-2: presenting monitor NOT REPORTED <- in force at the end
+base-2: monitor rows in stream: 0 (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)
+base-2: frame_cost: surface 2560x1440 physical (offscreen image at scale 2) at t=0.000s <- in force at the end
+base-2: render scale: native — the 3D main pass fills the [2560, 1440] target <- the renderer's own word for the same size
+base-2: surface rows in stream: 1 (1 = never resized; 2 is normally the startup re-pin after the park changed the scale factor)
+res-2048-a: video fields [shadow_resolution: X2048,] env [OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 ]
+res-2048-a: frame_cost: effective present mode Immediate, frame cap off
+res-2048-a: occlusion transitions in stream: 0
+res-2048-a: presenting monitor NOT REPORTED <- in force at the end
+res-2048-a: monitor rows in stream: 0 (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)
+res-2048-a: frame_cost: surface 2560x1440 physical (offscreen image at scale 2) at t=0.000s <- in force at the end
+res-2048-a: render scale: native — the 3D main pass fills the [2560, 1440] target <- the renderer's own word for the same size
+res-2048-a: surface rows in stream: 1 (1 = never resized; 2 is normally the startup re-pin after the park changed the scale factor)
+res-2048-b: video fields [shadow_resolution: X2048,] env [OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 ]
+res-2048-b: frame_cost: effective present mode Immediate, frame cap off
+res-2048-b: occlusion transitions in stream: 0
+res-2048-b: presenting monitor NOT REPORTED <- in force at the end
+res-2048-b: monitor rows in stream: 0 (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)
+res-2048-b: frame_cost: surface 2560x1440 physical (offscreen image at scale 2) at t=0.000s <- in force at the end
+res-2048-b: render scale: native — the 3D main pass fills the [2560, 1440] target <- the renderer's own word for the same size
+res-2048-b: surface rows in stream: 1 (1 = never resized; 2 is normally the startup re-pin after the park changed the scale factor)
+base-3: video fields [] env [OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1]
+base-3: frame_cost: effective present mode Immediate, frame cap off
+base-3: occlusion transitions in stream: 0
+base-3: presenting monitor NOT REPORTED <- in force at the end
+base-3: monitor rows in stream: 0 (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)
+base-3: frame_cost: surface 2560x1440 physical (offscreen image at scale 2) at t=0.000s <- in force at the end
+base-3: render scale: native — the 3D main pass fills the [2560, 1440] target <- the renderer's own word for the same size
+base-3: surface rows in stream: 1 (1 = never resized; 2 is normally the startup re-pin after the park changed the scale factor)
+msaa-off-a: video fields [msaa: Off,] env [OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 ]
+msaa-off-a: frame_cost: effective present mode Immediate, frame cap off
+msaa-off-a: occlusion transitions in stream: 0
+msaa-off-a: presenting monitor NOT REPORTED <- in force at the end
+msaa-off-a: monitor rows in stream: 0 (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)
+msaa-off-a: frame_cost: surface 2560x1440 physical (offscreen image at scale 2) at t=0.000s <- in force at the end
+msaa-off-a: render scale: native — the 3D main pass fills the [2560, 1440] target <- the renderer's own word for the same size
+msaa-off-a: surface rows in stream: 1 (1 = never resized; 2 is normally the startup re-pin after the park changed the scale factor)
+msaa-off-b: video fields [msaa: Off,] env [OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 ]
+msaa-off-b: frame_cost: effective present mode Immediate, frame cap off
+msaa-off-b: occlusion transitions in stream: 0
+msaa-off-b: presenting monitor NOT REPORTED <- in force at the end
+msaa-off-b: monitor rows in stream: 0 (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)
+msaa-off-b: frame_cost: surface 2560x1440 physical (offscreen image at scale 2) at t=0.000s <- in force at the end
+msaa-off-b: render scale: native — the 3D main pass fills the [2560, 1440] target <- the renderer's own word for the same size
+msaa-off-b: surface rows in stream: 1 (1 = never resized; 2 is normally the startup re-pin after the park changed the scale factor)
+base-4: video fields [] env [OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1]
+base-4: frame_cost: effective present mode Immediate, frame cap off
+base-4: occlusion transitions in stream: 0
+base-4: presenting monitor NOT REPORTED <- in force at the end
+base-4: monitor rows in stream: 0 (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)
+base-4: frame_cost: surface 2560x1440 physical (offscreen image at scale 2) at t=0.000s <- in force at the end
+base-4: render scale: native — the 3D main pass fills the [2560, 1440] target <- the renderer's own word for the same size
+base-4: surface rows in stream: 1 (1 = never resized; 2 is normally the startup re-pin after the park changed the scale factor)
+rs50-a: video fields [render_scale: Percent50,] env [OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 ]
+rs50-a: frame_cost: effective present mode Immediate, frame cap off
+rs50-a: occlusion transitions in stream: 0
+rs50-a: presenting monitor NOT REPORTED <- in force at the end
+rs50-a: monitor rows in stream: 0 (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)
+rs50-a: frame_cost: surface 2560x1440 physical (offscreen image at scale 2) at t=0.000s <- in force at the end
+rs50-a: render scale: 3D main pass 1280x720 inside a 2560x1440 target (25% of the pixels); UI, bloom and tonemapping stay at 2560x1440 <- the renderer's own word for the same size
+rs50-a: surface rows in stream: 1 (1 = never resized; 2 is normally the startup re-pin after the park changed the scale factor)
+rs50-b: video fields [render_scale: Percent50,] env [OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 ]
+rs50-b: frame_cost: effective present mode Immediate, frame cap off
+rs50-b: occlusion transitions in stream: 0
+rs50-b: presenting monitor NOT REPORTED <- in force at the end
+rs50-b: monitor rows in stream: 0 (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)
+rs50-b: frame_cost: surface 2560x1440 physical (offscreen image at scale 2) at t=0.000s <- in force at the end
+rs50-b: render scale: 3D main pass 1280x720 inside a 2560x1440 target (25% of the pixels); UI, bloom and tonemapping stay at 2560x1440 <- the renderer's own word for the same size
+rs50-b: surface rows in stream: 1 (1 = never resized; 2 is normally the startup re-pin after the park changed the scale factor)
+base-5: video fields [] env [OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1]
+base-5: frame_cost: effective present mode Immediate, frame cap off
+base-5: occlusion transitions in stream: 0
+base-5: presenting monitor NOT REPORTED <- in force at the end
+base-5: monitor rows in stream: 0 (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)
+base-5: frame_cost: surface 2560x1440 physical (offscreen image at scale 2) at t=0.000s <- in force at the end
+base-5: render scale: native — the 3D main pass fills the [2560, 1440] target <- the renderer's own word for the same size
+base-5: surface rows in stream: 1 (1 = never resized; 2 is normally the startup re-pin after the park changed the scale factor)
+no-env-light-a: video fields [] env [OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 SPIKE_ABLATE=env_light]
+no-env-light-a: frame_cost: effective present mode Immediate, frame cap off
+no-env-light-a: occlusion transitions in stream: 0
+no-env-light-a: presenting monitor NOT REPORTED <- in force at the end
+no-env-light-a: monitor rows in stream: 0 (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)
+no-env-light-a: frame_cost: surface 2560x1440 physical (offscreen image at scale 2) at t=0.000s <- in force at the end
+no-env-light-a: render scale: native — the 3D main pass fills the [2560, 1440] target <- the renderer's own word for the same size
+no-env-light-a: surface rows in stream: 1 (1 = never resized; 2 is normally the startup re-pin after the park changed the scale factor)
+no-env-light-b: video fields [] env [OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 SPIKE_ABLATE=env_light]
+no-env-light-b: frame_cost: effective present mode Immediate, frame cap off
+no-env-light-b: occlusion transitions in stream: 0
+no-env-light-b: presenting monitor NOT REPORTED <- in force at the end
+no-env-light-b: monitor rows in stream: 0 (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)
+no-env-light-b: frame_cost: surface 2560x1440 physical (offscreen image at scale 2) at t=0.000s <- in force at the end
+no-env-light-b: render scale: native — the 3D main pass fills the [2560, 1440] target <- the renderer's own word for the same size
+no-env-light-b: surface rows in stream: 1 (1 = never resized; 2 is normally the startup re-pin after the park changed the scale factor)
+base-6: video fields [] env [OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1]
+base-6: frame_cost: effective present mode Immediate, frame cap off
+base-6: occlusion transitions in stream: 0
+base-6: presenting monitor NOT REPORTED <- in force at the end
+base-6: monitor rows in stream: 0 (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)
+base-6: frame_cost: surface 2560x1440 physical (offscreen image at scale 2) at t=0.000s <- in force at the end
+base-6: render scale: native — the 3D main pass fills the [2560, 1440] target <- the renderer's own word for the same size
+base-6: surface rows in stream: 1 (1 = never resized; 2 is normally the startup re-pin after the park changed the scale factor)

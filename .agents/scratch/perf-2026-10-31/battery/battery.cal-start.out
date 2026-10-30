@@ -1,0 +1,35 @@
+== cal-2:  OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 SPIKE_PHASE_COUNTS=1 (15s warmup + 30s measure) ==
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/cal-start/cal-2.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+cal-2 VALID: 2458 post-warmup frame rows, gates passed
+   cal-2 OK: 3574 rows (frame + occlusion + monitor + surface)
+== cal-30:  OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_PROBE_TANKS=30 SPIKE_PHASE_COUNTS=1 (15s warmup + 30s measure) ==
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/cal-start/cal-30.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+cal-30 VALID: 1761 post-warmup frame rows, gates passed
+   cal-30 OK: 2623 rows (frame + occlusion + monitor + surface)
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/cal-start/cal-2.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+note: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/cal-start/cal-30.client.jsonl rendered offscreen — nothing was presented, so the display and occlusion gates do not apply
+
+frame time, ms (post-warmup 15s discarded)
+condition       n      p50      p95      p99    worst
+cal-2        2458    12.31    15.11    16.58    18.06
+cal-30       1761    17.29    21.45    23.43    26.06
+
+fps-equivalent (1000 / frame ms)
+condition      p50      p95      p99    worst
+cal-2         81.2     66.2     60.3     55.4
+cal-30        57.8     46.6     42.7     38.4
+
+% of 16.67 ms budget (60 fps); >100 = over budget
+condition      p50      p95      p99    worst
+cal-2         73.9     90.6     99.5    108.4
+cal-30       103.8    128.7    140.6    156.3
+
+% of 8.33 ms budget (120 fps); >100 = over budget
+condition      p50      p95      p99    worst
+cal-2        147.7    181.3    199.0    216.8
+cal-30       207.5    257.4    281.2    312.7
+
+delta vs baseline 'cal-2', ms (positive = slower than baseline)
+condition     dp50     dp95     dp99   dworst
+cal-30       +4.98    +6.35    +6.85    +7.99
+ablation run complete -> /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/battery/cal-start
