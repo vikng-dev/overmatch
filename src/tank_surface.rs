@@ -395,10 +395,11 @@ impl RestRow {
     }
 }
 
-/// A visual's three maps, loaded once.
+/// A visual's maps, loaded once: its normal and ARM, and its albedo where the surface draws it.
+/// Paint covers the albedo whole, so a visual that takes paint never loads it.
 #[derive(Clone)]
 struct VisualMaps {
-    albedo: Handle<Image>,
+    albedo: Option<Handle<Image>>,
     normal: Handle<Image>,
     arm: Handle<Image>,
 }
@@ -479,7 +480,12 @@ fn surface_material(
         base,
         extension: TankSurface {
             params,
-            visual_albedo: Some(maps.as_ref().map_or(stand_in, |maps| &maps.albedo).clone()),
+            visual_albedo: Some(
+                maps.as_ref()
+                    .and_then(|maps| maps.albedo.as_ref())
+                    .unwrap_or(stand_in)
+                    .clone(),
+            ),
             visual_normal: maps.as_ref().map(|maps| maps.normal.clone()),
             visual_arm: maps.map(|maps| maps.arm),
             camo_pattern,
@@ -505,7 +511,8 @@ struct Vehicle {
 #[derive(Resource)]
 pub(crate) struct SurfaceVehicles {
     vehicles: HashMap<AssetId<WorldAsset>, Vehicle>,
-    maps: HashMap<String, VisualMaps>,
+    /// By pack, and whether the visual takes paint.
+    maps: HashMap<(String, bool), VisualMaps>,
     pattern: Option<Handle<Image>>,
     /// Every map and pattern loaded, held by id for [`report_failed_surface_map`].
     required: HashSet<AssetId<Image>>,
@@ -725,7 +732,9 @@ impl Dress<'_, '_> {
             return handle.clone();
         }
         let maps = match visual {
-            Visual::Maps { maps, .. } => Some(self.maps(maps)),
+            Visual::Maps {
+                maps, takes_paint, ..
+            } => Some(self.maps(maps, *takes_paint)),
             Visual::Flat { .. } => None,
         };
         let pattern = self.pattern();
@@ -750,9 +759,10 @@ impl Dress<'_, '_> {
         handle
     }
 
-    /// A pack's three maps, loaded on first use.
-    fn maps(&mut self, maps: &str) -> VisualMaps {
-        if let Some(loaded) = self.vehicles.maps.get(maps) {
+    /// A pack's maps, loaded on first use: its albedo only where `takes_paint` is false.
+    fn maps(&mut self, maps: &str, takes_paint: bool) -> VisualMaps {
+        let key = (maps.to_owned(), takes_paint);
+        if let Some(loaded) = self.vehicles.maps.get(&key) {
             return loaded.clone();
         }
         let load = |map: &str, encoding| {
@@ -764,13 +774,14 @@ impl Dress<'_, '_> {
             )
         };
         let loaded = VisualMaps {
-            albedo: load("diff", MapEncoding::Srgb),
+            albedo: (!takes_paint).then(|| load("diff", MapEncoding::Srgb)),
             normal: load("nor_gl", MapEncoding::Linear),
             arm: load("arm", MapEncoding::Linear),
         };
         let required = &mut self.vehicles.required;
-        required.extend([loaded.albedo.id(), loaded.normal.id(), loaded.arm.id()]);
-        self.vehicles.maps.insert(maps.to_owned(), loaded.clone());
+        required.extend([loaded.normal.id(), loaded.arm.id()]);
+        required.extend(loaded.albedo.as_ref().map(Handle::id));
+        self.vehicles.maps.insert(key, loaded.clone());
         loaded
     }
 
@@ -1019,6 +1030,30 @@ mod tests {
             "camouflage drawn"
         );
         assert_eq!(made.extension.visual_albedo, Some(stand_in));
+    }
+
+    /// A PAINTED VISUAL LOADS NO ALBEDO. The shader samples a pack's albedo only where no paint
+    /// covers it, so a visual that takes paint loads its normal and ARM alone, and its surface binds
+    /// the stand-in at 101; a bare visual loads all three. A mutant loading every albedo, or none,
+    /// fails here.
+    #[test]
+    fn a_painted_visual_loads_its_relief_and_no_albedo() {
+        let mut app = dress_app();
+        let [painted, bare] = app
+            .world_mut()
+            .run_system_once(|mut dress: Dress| {
+                [true, false].map(|takes_paint| dress.maps("fixture/pack", takes_paint))
+            })
+            .expect("the maps load");
+        assert!(painted.albedo.is_none(), "paint covers the albedo");
+        assert!(bare.albedo.is_some(), "a bare visual draws its albedo");
+        assert_eq!(painted.normal, bare.normal, "one relief, loaded once");
+        let required = &app.world().resource::<SurfaceVehicles>().required;
+        assert_eq!(
+            required.len(),
+            3,
+            "the albedo once, the normal and ARM once"
+        );
     }
 
     /// One vehicle's view as a scene lands it: a root with two nodes, the outer moved, the inner
