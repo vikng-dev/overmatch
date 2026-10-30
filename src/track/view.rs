@@ -517,8 +517,9 @@ fn bind_track_rigs(
         };
 
         // The belts: one entity per side drawing the glb's OWN link mesh once per material link, the
-        // left side wearing the template's genuine mirror. Every repeated mesh and the shoe's
-        // material must be ready before either side spawns, so a bind never half-lands.
+        // left side wearing the template's genuine mirror. Every rung's shoe must be checked
+        // repeatable and the shoe's material loaded before either side spawns, so a bind never
+        // half-lands.
         if !belt_assets.ready(&template, spec.link_count) {
             continue;
         }

@@ -22,6 +22,24 @@
 //! group, the opaque, prepass and shadow phases, visibility, and the x-ray's look and mask
 //! materials. The repeated mesh costs the shoe's vertices once per link in GPU memory instead.
 //!
+//! # What the repeated meshes cost, and when they are built
+//!
+//! A rung's repeated mesh is its shoe's vertices and indices times the link count: DERIVED ~71 MB
+//! for all five rungs of both sides of a 97-link belt (the shipped shoe's MEASURED vertex and
+//! index counts, an ASSUMED 52-byte vertex), ~26 MB of it rung 0. Every belt of one count shares
+//! them ([`BeltMeshes`]). They are built on the main thread, one rung and side at a time, on the
+//! first frame a belt of that count draws that rung, and dropped with the last table of that
+//! count; the build logs each mesh's size.
+//!
+//! Vertex pulling (the link read as `vertex_index / V` off one copy of the shoe) does not remove
+//! the cost on bevy 0.19's material path: `DrawMesh` draws exactly the mesh's own index range
+//! (`bevy_pbr` `render/mesh.rs`, direct and indirect alike), and the instance range belongs to
+//! batching, so a belt still needs a mesh with one index per drawn corner — DERIVED ~7 MB per count
+//! at 4 bytes a corner — and every shoe attribute moved to a storage buffer, with the vertex
+//! shader defs (`VERTEX_UVS_A`, `VERTEX_TANGENTS`) set by hand in every pass the layout no longer
+//! implies. Drawing one shoe `count` times without a count-sized mesh needs a draw command of its
+//! own, which is the custom-instancing adapter above.
+//!
 //! # Per-belt assets
 //!
 //! A belt owns its storage buffer and its material ([`BeltDraw`]): `count` records of 16 bytes, one
@@ -153,98 +171,214 @@ pub(crate) struct BeltDraw {
     reach: f32,
 }
 
-/// The repeated meshes, per link count and per rung, each side's — and each side's reach.
+/// The repeated meshes, per link count: each count's verdict, and the rungs its belts have drawn.
+///
+/// A count's entry is made the first time a belt of that count asks ([`Self::ready`]) and holds
+/// one of two answers for as long as it lives. `Refused`: some rung's shoe cannot be repeated, the
+/// refusal was logged once, and the count is never examined again. `Ready`: every rung's shoe was
+/// checked before anything was built, so a rung built later cannot fail; a rung is built on the
+/// first frame a belt of that count draws it ([`Self::rung_or_build`]). While a shoe has not loaded
+/// there is no entry, and the next ask checks again.
+///
+/// A `Ready` count no live belt table uses is evicted ([`evict_unused_counts`]), which drops its
+/// meshes; a `Refused` count is kept, so a refusal is never re-examined.
 #[derive(Resource, Default)]
 pub(crate) struct BeltMeshes {
-    by_count: HashMap<usize, Vec<PerSide<Handle<Mesh>>>>,
-    reach: Option<PerSide<f32>>,
+    by_count: HashMap<usize, CountMeshes>,
+}
+
+/// One link count's verdict ([`BeltMeshes`]).
+enum CountMeshes {
+    Refused,
+    Ready {
+        /// The farthest any vertex of any rung of each side's shoe stands from the canonical
+        /// origin, m: the bounds' growth ([`BeltFrames::bounds`]).
+        reach: PerSide<f32>,
+        /// Per rung, nearest first, each side's repeated mesh once built.
+        rungs: Vec<PerSide<Option<Handle<Mesh>>>>,
+    },
 }
 
 impl BeltMeshes {
-    /// The mesh a belt of `count` links draws at `rung` on `side`; a rung past the floor draws the
-    /// floor ([`LinkTemplate::rung_mesh`]).
+    /// The mesh a belt of `count` links draws at `rung` on `side`, if it has been built; a rung
+    /// past the floor draws the floor ([`LinkTemplate::rung_mesh`]).
+    #[cfg(test)]
     pub(crate) fn rung(&self, count: usize, rung: usize, side: Side) -> Option<&Handle<Mesh>> {
-        let rungs = self.by_count.get(&count)?;
-        Some(rungs[rung.min(rungs.len().checked_sub(1)?)].get(side))
+        let Some(CountMeshes::Ready { rungs, .. }) = self.by_count.get(&count) else {
+            return None;
+        };
+        rungs[rung.min(rungs.len().checked_sub(1)?)]
+            .get(side)
+            .as_ref()
+    }
+
+    /// The mesh a belt of `count` links draws at `rung` on `side`, built now if no belt of that
+    /// count has drawn it yet. `None` for a count that is not [`Self::ready`].
+    pub(crate) fn rung_or_build(
+        &mut self,
+        count: usize,
+        rung: usize,
+        side: Side,
+        template: &LinkTemplate,
+        meshes: &mut Assets<Mesh>,
+    ) -> Option<Handle<Mesh>> {
+        let Some(CountMeshes::Ready { rungs, .. }) = self.by_count.get_mut(&count) else {
+            return None;
+        };
+        let rung = rung.min(rungs.len().checked_sub(1)?);
+        let slot = rungs[rung].get_mut(side);
+        if let Some(built) = slot {
+            return Some(built.clone());
+        }
+        let mesh = match repeated_shoe(meshes.get(&template.rung_mesh(rung, side))?, count) {
+            Ok(mesh) => mesh,
+            // Unreachable while the template's shoes are the ones [`Self::ready`] checked.
+            Err(why) => {
+                error_once!("track belt: rung {rung} cannot be repeated ({why}) — not drawn");
+                return None;
+            }
+        };
+        info!(
+            "track belt: rung {rung} {side:?} of {count} links built — {} vertices of {} B, {} \
+             indices, {:.1} MB DERIVED",
+            mesh.count_vertices(),
+            mesh.get_vertex_size(),
+            mesh.indices().map_or(0, Indices::len),
+            (mesh.count_vertices() as u64 * mesh.get_vertex_size()
+                + 4 * mesh.indices().map_or(0, Indices::len) as u64) as f64
+                / 1e6,
+        );
+        let handle = meshes.add(mesh);
+        *slot = Some(handle.clone());
+        Some(handle)
+    }
+
+    /// Whether belts of `count` links can be drawn: every rung's shoe loaded and repeatable. The
+    /// first answer for a count is kept ([`BeltMeshes`]); nothing is built here.
+    pub(crate) fn ready(
+        &mut self,
+        count: usize,
+        template: &LinkTemplate,
+        meshes: &Assets<Mesh>,
+    ) -> bool {
+        if !self.by_count.contains_key(&count) {
+            let Some(verdict) = verdict(count, template, meshes) else {
+                return false;
+            };
+            self.by_count.insert(count, verdict);
+        }
+        matches!(self.by_count.get(&count), Some(CountMeshes::Ready { .. }))
+    }
+
+    /// Each side's reach for belts of `count` links, once [`Self::ready`].
+    fn reach(&self, count: usize, side: Side) -> Option<f32> {
+        let Some(CountMeshes::Ready { reach, .. }) = self.by_count.get(&count) else {
+            return None;
+        };
+        Some(*reach.get(side))
+    }
+
+    /// Drop every built count `live` does not name, and its meshes with it. Refusals stay.
+    fn evict(&mut self, live: impl Fn(usize) -> bool) {
+        self.by_count
+            .retain(|&count, meshes| matches!(meshes, CountMeshes::Refused) || live(count));
     }
 
     /// A fixture's meshes for belts of `count` links, one per rung, without building any.
     #[cfg(test)]
     pub(crate) fn insert_fixture(&mut self, count: usize, rungs: Vec<PerSide<Handle<Mesh>>>) {
-        self.by_count.insert(count, rungs);
+        self.by_count.insert(
+            count,
+            CountMeshes::Ready {
+                reach: PerSide::default(),
+                rungs: rungs.into_iter().map(|rung| rung.map(Some)).collect(),
+            },
+        );
     }
+}
 
-    /// Build every rung's repeated mesh for `count` links, once per count. `None` while a rung's
-    /// shoe has not loaded, or for a shoe that cannot be repeated (refused loudly, once).
-    fn ensure(
-        &mut self,
-        count: usize,
-        template: &LinkTemplate,
-        meshes: &mut Assets<Mesh>,
-    ) -> Option<()> {
-        if self.by_count.contains_key(&count) {
-            return Some(());
-        }
-        let mut rungs = Vec::with_capacity(template.levels());
-        let mut reach = PerSide::new(0.0_f32, 0.0_f32);
-        for rung in 0..template.levels() {
-            let mut built = Vec::with_capacity(2);
-            for side in Side::ALL {
-                let shoe = meshes.get(&template.rung_mesh(rung, side))?;
-                let (_, origin) = template.frame(side).correction_and_origin();
-                let side_reach = reach.get_mut(side);
-                *side_reach = side_reach.max(canonical_reach(shoe, origin)?);
-                match repeated_shoe(shoe, count) {
-                    Ok(mesh) => built.push(mesh),
-                    Err(why) => {
-                        error_once!("track belt: rung {rung} cannot be repeated ({why}) — no belt");
-                        return None;
-                    }
+/// Every rung's shoe on both sides checked for belts of `count` links, before anything is built.
+/// `None` while a shoe has not loaded; a refusal is logged here, once.
+fn verdict(count: usize, template: &LinkTemplate, meshes: &Assets<Mesh>) -> Option<CountMeshes> {
+    let mut reach = PerSide::new(0.0_f32, 0.0_f32);
+    for rung in 0..template.levels() {
+        for side in Side::ALL {
+            let shoe = meshes.get(&template.rung_mesh(rung, side))?;
+            let (_, origin) = template.frame(side).correction_and_origin();
+            match repeatable(shoe, count).and_then(|()| canonical_reach(shoe, origin)) {
+                Ok(shoe_reach) => {
+                    let side_reach = reach.get_mut(side);
+                    *side_reach = side_reach.max(shoe_reach);
+                }
+                Err(why) => {
+                    error!(
+                        "track belt: rung {rung} {side:?} cannot be repeated {count} times ({why}) \
+                         — no belt of {count} links is drawn"
+                    );
+                    return Some(CountMeshes::Refused);
                 }
             }
-            let right = meshes.add(built.pop()?);
-            let left = meshes.add(built.pop()?);
-            rungs.push(PerSide::new(left, right));
         }
-        info!(
-            "track belt: {} rung meshes of {count} links per side built; shoe reach L {:.3} m R \
-             {:.3} m MEASURED",
-            rungs.len(),
-            reach.get(Side::Left),
-            reach.get(Side::Right),
-        );
-        self.reach = Some(reach);
-        self.by_count.insert(count, rungs);
-        Some(())
     }
+    Some(CountMeshes::Ready {
+        reach,
+        rungs: vec![PerSide::new(None, None); template.levels()],
+    })
+}
+
+/// Whether [`repeated_shoe`] can repeat `shoe` `count` times: a triangle list whose data the main
+/// world holds, every attribute a float format, and every repeated vertex addressable by a `u32`
+/// index.
+fn repeatable(shoe: &Mesh, count: usize) -> Result<(), String> {
+    if shoe.primitive_topology() != PrimitiveTopology::TriangleList {
+        return Err("not a triangle list".into());
+    }
+    let Ok(attributes) = shoe.try_attributes() else {
+        return Err("its data lives in the render world only".into());
+    };
+    for (attribute, values) in attributes {
+        if !matches!(
+            values,
+            VertexAttributeValues::Float32(_)
+                | VertexAttributeValues::Float32x2(_)
+                | VertexAttributeValues::Float32x3(_)
+                | VertexAttributeValues::Float32x4(_)
+        ) {
+            return Err(format!(
+                "attribute `{}` is {:?}",
+                attribute.name,
+                VertexFormat::from(values)
+            ));
+        }
+    }
+    if count
+        .checked_mul(shoe.count_vertices())
+        .is_none_or(|vertices| vertices > u32::MAX as usize)
+    {
+        return Err("more vertices than a u32 index reaches".into());
+    }
+    Ok(())
 }
 
 /// The farthest any vertex of `shoe` stands from the canonical origin `origin` (mesh space), m:
 /// the correction is a rotation, so mesh-space distance is canonical distance.
-fn canonical_reach(shoe: &Mesh, origin: Vec3) -> Option<f32> {
+fn canonical_reach(shoe: &Mesh, origin: Vec3) -> Result<f32, String> {
     let Ok(VertexAttributeValues::Float32x3(positions)) =
         shoe.try_attribute(Mesh::ATTRIBUTE_POSITION)
     else {
-        return None;
+        return Err("no f32x3 positions".into());
     };
-    Some(
-        positions
-            .iter()
-            .map(|&p| Vec3::from(p).distance(origin))
-            .fold(0.0, f32::max),
-    )
+    Ok(positions
+        .iter()
+        .map(|&p| Vec3::from(p).distance(origin))
+        .fold(0.0, f32::max))
 }
 
 /// `shoe` repeated `count` times, copy `k` tagged as link `k` in [`ATTRIBUTE_BELT_LINK`]: every
 /// attribute and index of the source, copy after copy, nothing transformed. Render-world only: no
 /// CPU reader needs the stack, and it is the shoe's size times the link count.
 fn repeated_shoe(shoe: &Mesh, count: usize) -> Result<Mesh, String> {
-    if shoe.primitive_topology() != PrimitiveTopology::TriangleList {
-        return Err("not a triangle list".into());
-    }
-    if shoe.try_attributes().is_err() {
-        return Err("its data lives in the render world only".into());
-    }
+    repeatable(shoe, count)?;
     let vertices = shoe.count_vertices();
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
@@ -301,17 +435,17 @@ pub(crate) struct BeltAssets<'w> {
 }
 
 impl BeltAssets<'_> {
-    /// Whether a belt of `count` links can be drawn: every rung's mesh built and the shoe's
-    /// material loaded. A consumer checks this before spawning anything, so a bind never half-lands.
+    /// Whether a belt of `count` links can be drawn: every rung's shoe checked repeatable and the
+    /// shoe's material loaded. A consumer checks this before spawning anything, so a bind never
+    /// half-lands. Builds nothing.
     pub(crate) fn ready(&mut self, template: &LinkTemplate, count: usize) -> bool {
-        self.cache
-            .ensure(count, template, &mut self.meshes)
-            .is_some()
+        self.cache.ready(count, template, &self.meshes)
             && self.standard.contains(template.material())
     }
 
-    /// Everything a belt drawing `frames` on `side` carries, at rung 0: its mesh, its own material
-    /// and buffer, and its bounds. `None` until [`Self::ready`].
+    /// Everything a belt drawing `frames` on `side` carries, at rung 0: its mesh (built here if no
+    /// belt of its count has drawn rung 0 yet), its own material and buffer, and its bounds. `None`
+    /// until [`Self::ready`].
     pub(crate) fn draw(
         &mut self,
         template: &LinkTemplate,
@@ -321,8 +455,10 @@ impl BeltAssets<'_> {
         if !self.ready(template, frames.count()) {
             return None;
         }
-        let mesh = self.cache.rung(frames.count(), 0, side)?.clone();
-        let reach = *self.cache.reach.as_ref()?.get(side);
+        let mesh = self
+            .cache
+            .rung_or_build(frames.count(), 0, side, template, &mut self.meshes)?;
+        let reach = self.cache.reach(frames.count(), side)?;
         let base = self.standard.get(template.material())?.clone();
         let buffer = self.buffers.add(ShaderBuffer::from(records(frames)));
         let material = self.materials.add(BeltMaterial {
@@ -376,6 +512,20 @@ fn upload_belt_frames(
     }
 }
 
+/// Drop the meshes of every link count no live belt table has: a despawned tank's, or the count
+/// the sandbox's knob left. In `Last`, after every system that spawns or resizes a table this
+/// frame, so a count drawn this frame is never dropped under its belt.
+fn evict_unused_counts(mut cache: ResMut<BeltMeshes>, tables: Query<&BeltFrames>) {
+    let live = |count: usize| tables.iter().any(|table| table.count() == count);
+    let stale = cache
+        .by_count
+        .iter()
+        .any(|(&count, meshes)| matches!(meshes, CountMeshes::Ready { .. }) && !live(count));
+    if stale {
+        cache.evict(live);
+    }
+}
+
 /// The belt draw's material, mesh cache and upload. Mounted by [`super::link_view::template_plugin`].
 pub(crate) fn plugin(app: &mut App) {
     app.add_plugins(MaterialPlugin::<BeltMaterial>::default())
@@ -384,11 +534,13 @@ pub(crate) fn plugin(app: &mut App) {
             PostUpdate,
             BeltUpload.before(VisibilitySystems::CheckVisibility),
         )
-        .add_systems(PostUpdate, upload_belt_frames.in_set(BeltUpload));
+        .add_systems(PostUpdate, upload_belt_frames.in_set(BeltUpload))
+        .add_systems(Last, evict_unused_counts);
 }
 
 #[cfg(test)]
 mod tests {
+    use super::super::link_view::LinkFrame;
     use super::*;
 
     /// A two-triangle fixture shoe with every attribute kind the shipped shoe carries.
@@ -410,6 +562,118 @@ mod tests {
         .with_inserted_attribute(Mesh::ATTRIBUTE_UV_0, vec![[0.0, 0.0]; 4])
         .with_inserted_attribute(Mesh::ATTRIBUTE_TANGENT, vec![[1.0, 0.0, 0.0, 1.0]; 4])
         .with_inserted_indices(Indices::U16(vec![0, 1, 2, 2, 1, 3]))
+    }
+
+    /// A template of `levels` shoes per side, each its own asset of the fixture shoe.
+    fn fixture_template(assets: &mut Assets<Mesh>, levels: usize) -> LinkTemplate {
+        let shoes = (0..levels)
+            .map(|_| PerSide::new(assets.add(fixture_shoe()), assets.add(fixture_shoe())))
+            .collect();
+        LinkTemplate::fixture(shoes, Handle::default())
+    }
+
+    /// GPU MEMORY GOES TO WHAT IS DRAWN. A repeated mesh is the shoe times the link count (DERIVED
+    /// ~13 MB per side at rung 0 of a 97-link belt), so a count's rungs are built one at a
+    /// time, the first time a belt of that count draws each, and a count no live table has lets
+    /// go of every one of them. Readiness builds nothing; a rung is built once however many belts
+    /// draw it.
+    #[test]
+    fn a_count_builds_only_the_rungs_drawn_and_lets_go_when_no_table_is_left() {
+        const COUNT: usize = 5;
+        let mut assets = Assets::<Mesh>::default();
+        let template = fixture_template(&mut assets, 3);
+        let shoes = assets.len();
+        let mut cache = BeltMeshes::default();
+        assert!(cache.ready(COUNT, &template, &assets));
+        assert_eq!(assets.len(), shoes, "readiness builds nothing");
+
+        let far = cache
+            .rung_or_build(COUNT, 2, Side::Left, &template, &mut assets)
+            .expect("a ready count builds its rungs");
+        assert_eq!(assets.len(), shoes + 1, "one rung on one side is one mesh");
+        assert!(cache.rung(COUNT, 0, Side::Left).is_none());
+        assert!(cache.rung(COUNT, 2, Side::Right).is_none());
+        assert_eq!(
+            cache.rung_or_build(COUNT, 2, Side::Left, &template, &mut assets),
+            Some(far),
+            "a built rung is shared, never rebuilt",
+        );
+        assert_eq!(assets.len(), shoes + 1);
+
+        let mut app = App::new();
+        app.insert_resource(cache)
+            .add_systems(Last, evict_unused_counts);
+        let table = app
+            .world_mut()
+            .spawn(BeltFrames::new(LinkFrame::default(), 0.0, COUNT))
+            .id();
+        app.update();
+        assert!(
+            app.world()
+                .resource::<BeltMeshes>()
+                .rung(COUNT, 2, Side::Left)
+                .is_some(),
+            "a count a live table has keeps its meshes",
+        );
+        app.world_mut().despawn(table);
+        app.update();
+        assert!(
+            app.world()
+                .resource::<BeltMeshes>()
+                .rung(COUNT, 2, Side::Left)
+                .is_none(),
+            "a count no table has lets go of its meshes",
+        );
+    }
+
+    /// A REFUSAL IS FINAL AND BUILDS NOTHING. Every rung is checked before any is built, so a shoe
+    /// that cannot be repeated (here the floor rung, carrying an integer attribute) leaves no
+    /// half-built count behind; and the count is never examined again, so a consumer asking every
+    /// frame does not redo the work every frame. A shoe still loading is not a refusal: the count
+    /// is examined again once it lands.
+    #[test]
+    fn a_refused_count_builds_nothing_and_is_never_examined_again() {
+        const COUNT: usize = 4;
+        const REFUSED: usize = COUNT + 1;
+        let mut assets = Assets::<Mesh>::default();
+        let template = fixture_template(&mut assets, 3);
+        let floor = template.rung_mesh(2, Side::Right);
+        let mut cache = BeltMeshes::default();
+
+        let shoe = assets.remove(&floor).expect("the fixture shoe");
+        assert!(!cache.ready(COUNT, &template, &assets), "a shoe is loading");
+        assets.insert(&floor, shoe).expect("the fixture id");
+        assert!(
+            cache.ready(COUNT, &template, &assets),
+            "a count is examined again once its shoe lands",
+        );
+
+        let tagged = fixture_shoe().with_inserted_attribute(
+            MeshVertexAttribute::new("FixtureTag", 0x0B31_7173, VertexFormat::Uint32),
+            vec![0_u32; 4],
+        );
+        assets.insert(&floor, tagged).expect("the fixture id");
+        let before = assets.len();
+        assert!(!cache.ready(REFUSED, &template, &assets));
+        assert!(
+            cache
+                .rung_or_build(REFUSED, 0, Side::Left, &template, &mut assets)
+                .is_none()
+        );
+        assert_eq!(assets.len(), before, "a refusal builds nothing");
+
+        assets
+            .insert(&floor, fixture_shoe())
+            .expect("the fixture id");
+        assert!(
+            !cache.ready(REFUSED, &template, &assets),
+            "a refusal is never examined again"
+        );
+        cache.evict(|_| false);
+        assert!(
+            !cache.ready(REFUSED, &template, &assets),
+            "eviction keeps a refusal"
+        );
     }
 
     /// The repeated mesh is the draw's geometry: copy `k` must be the source shoe exactly, tagged

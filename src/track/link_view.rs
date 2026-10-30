@@ -178,6 +178,7 @@
 //! [`crate::lod_showcase`] is the instrument for judging it by eye, and pins a belt's rung through
 //! [`ShoeBelt::pin`] rather than writing a ladder of its own.
 
+use bevy::asset::AssetEventSystems;
 use bevy::ecs::error::BevyError;
 use bevy::mesh::{GenerateTangentsError, Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
@@ -244,7 +245,11 @@ pub(crate) fn template_plugin(app: &mut App) {
                 resource_exists::<crate::geometry_lod::SourceDetailOnly>,
             ))
             .after(TransformSystems::Propagate)
-            .after(crate::camera::GunnerCameraPlaced),
+            .after(crate::camera::GunnerCameraPlaced)
+            // A rung built here is added to `Assets<Mesh>`; its `Added` event must flush this
+            // frame, or the render world has no mesh for the handle the belt now draws and skips
+            // the belt for a frame.
+            .before(AssetEventSystems),
     );
 }
 
@@ -352,6 +357,26 @@ impl LinkTemplate {
     /// The shoe's material, the glb's own.
     pub(crate) fn material(&self) -> &Handle<StandardMaterial> {
         &self.material
+    }
+
+    /// A fixture template drawing `levels` (authored shoe first, both sides each) in `material`,
+    /// with identity frames and no chain.
+    #[cfg(test)]
+    pub(crate) fn fixture(
+        mut levels: Vec<PerSide<Handle<Mesh>>>,
+        material: Handle<StandardMaterial>,
+    ) -> Self {
+        let mesh = levels.remove(0);
+        Self {
+            switches: (1..=levels.len())
+                .map(|level| level as f32 * 10.0)
+                .collect(),
+            mesh,
+            lods: levels,
+            material,
+            frame: PerSide::new(LinkFrame::default(), LinkFrame::default()),
+            chain: None,
+        }
     }
 
     /// The chain's levels and thresholds as one log-line phrase — `"4 reduced levels, LOD1 beyond
@@ -1176,10 +1201,13 @@ fn rung_at(switches: &[f32], distance_m: f32) -> usize {
 /// declaration itself and reports as one ([`ViewError`]).
 ///
 /// The mesh is looked up by the table's count as well as the rung, so a belt whose count changed
-/// (the sandbox's live knob) takes its new count's mesh at an unchanged rung.
+/// (the sandbox's live knob) takes its new count's mesh at an unchanged rung. A rung no belt of
+/// that count has drawn yet is built here, on the frame it is first selected
+/// ([`super::belt_draw::BeltMeshes::rung_or_build`]).
 fn select_belt_rungs(
     template: Res<LinkTemplate>,
-    meshes: Res<super::belt_draw::BeltMeshes>,
+    mut cache: ResMut<super::belt_draw::BeltMeshes>,
+    mut assets: ResMut<Assets<Mesh>>,
     views: Query<&GlobalTransform, With<PlayerView>>,
     mut belts: Query<(&mut ShoeBelt, &BeltFrames, &GlobalTransform, &mut Mesh3d)>,
 ) -> Result<(), BevyError> {
@@ -1212,8 +1240,10 @@ fn select_belt_rungs(
         if wanted != belt.rung {
             belt.rung = wanted;
         }
-        if let Some(handle) = meshes.rung(frames.count(), wanted, belt.side) {
-            mesh.set_if_neq(Mesh3d(handle.clone()));
+        if let Some(handle) =
+            cache.rung_or_build(frames.count(), wanted, belt.side, &template, &mut assets)
+        {
+            mesh.set_if_neq(Mesh3d(handle));
         }
     }
     Ok(())
@@ -1715,6 +1745,7 @@ mod tests {
             );
             world.insert_resource(template);
             world.insert_resource(belt_meshes);
+            world.insert_resource(assets);
             declare(&mut world);
 
             let selected: Result<(), BevyError> = world
