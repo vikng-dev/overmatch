@@ -180,6 +180,21 @@ each one is named in the note.
    diagnostic that could be gated.
 6. **Threads.** Bevy's default pools buy 0.7 ms of p50 (4457 against 5163 µs) for +24 points of
    one core. That trade inverts on a 1-vCPU host, where the extra threads only contend.
+7. **The pools on Edgegap** (alpha.4, the same night; `README.md`, TLDR 3).
+   - **With the defaults, the second vCPU sits idle.** On the 2-vCPU host Bevy sizes the pools
+     compute/async/io = 1/1/1. The server then holds ~102 % of one core, and its 30-tank tick
+     (17.5 ms p50) matches 1 vCPU's (18.5 ms).
+   - **`OVERMATCH_SERVER_THREADS=4` gives 2/1/1:** tick p50 13.4 ms, p95 ~15.2 ms, 64 Hz, 140 %
+     CPU.
+
+   Any multithreading of the systems above pays off on that host only once the compute pool has
+   more than one thread.
+
+## The release does not change the picture
+
+alpha.4 rebuilt the Tiger as a two-part hull collider. MEASURED locally, the same scene, default
+threads (`profile/p5-30t-plain-alpha4.server.json`): tick p50 4198 µs, p95 4597, physics p50 916,
+CPU 64 %. alpha.3 gave 4457 / 5175 / 1125 / 74 %. Nothing in this profile is specific to alpha.3.
 
 ## Products
 
