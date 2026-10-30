@@ -1,0 +1,106 @@
+{
+  "duel": {
+    "pixels": 2073600,
+    "differing": 53240,
+    "over_8": 4285,
+    "over_32": 684,
+    "max_channel_delta": 154,
+    "mean_channel_delta": 0.0685
+  },
+  "hulldown-high-8deg": {
+    "pixels": 2073600,
+    "differing": 906370,
+    "over_8": 99771,
+    "over_32": 44546,
+    "max_channel_delta": 195,
+    "mean_channel_delta": 2.5091
+  },
+  "hulldown-side-8deg": {
+    "pixels": 2073600,
+    "differing": 267755,
+    "over_8": 34579,
+    "over_32": 8963,
+    "max_channel_delta": 124,
+    "mean_channel_delta": 0.4814
+  },
+  "prints-mud-00038.5000s": {
+    "pixels": 2073600,
+    "differing": 28871,
+    "over_8": 3392,
+    "over_32": 481,
+    "max_channel_delta": 150,
+    "mean_channel_delta": 0.0466
+  },
+  "prints-mud-00040.5000s": {
+    "pixels": 2073600,
+    "differing": 286881,
+    "over_8": 39153,
+    "over_32": 24472,
+    "max_channel_delta": 155,
+    "mean_channel_delta": 0.7782
+  },
+  "prints-mud-00042.5000s": {
+    "pixels": 2073600,
+    "differing": 216666,
+    "over_8": 28208,
+    "over_32": 17097,
+    "max_channel_delta": 152,
+    "mean_channel_delta": 0.5409
+  },
+  "prints-mud-00044.5000s": {
+    "pixels": 2073600,
+    "differing": 30989,
+    "over_8": 4200,
+    "over_32": 542,
+    "max_channel_delta": 135,
+    "mean_channel_delta": 0.0542
+  },
+  "prints-mud-00046.5000s": {
+    "pixels": 2073600,
+    "differing": 556826,
+    "over_8": 140593,
+    "over_32": 107536,
+    "max_channel_delta": 152,
+    "mean_channel_delta": 2.9643
+  },
+  "prints-mud-00048.5000s": {
+    "pixels": 2073600,
+    "differing": 485304,
+    "over_8": 112873,
+    "over_32": 88652,
+    "max_channel_delta": 146,
+    "mean_channel_delta": 2.4125
+  },
+  "ridgeline-17deg": {
+    "pixels": 2073600,
+    "differing": 180,
+    "over_8": 2,
+    "over_32": 0,
+    "max_channel_delta": 13,
+    "mean_channel_delta": 0.0001
+  },
+  "ridgeline-8deg": {
+    "pixels": 2073600,
+    "differing": 961359,
+    "over_8": 148310,
+    "over_32": 67767,
+    "max_channel_delta": 191,
+    "mean_channel_delta": 3.1583
+  },
+  "treeline-17deg": {
+    "pixels": 2073600,
+    "differing": 269,
+    "over_8": 10,
+    "over_32": 0,
+    "max_channel_delta": 18,
+    "mean_channel_delta": 0.0002
+  },
+  "treeline-8deg": {
+    "pixels": 2073600,
+    "differing": 419,
+    "over_8": 16,
+    "over_32": 0,
+    "max_channel_delta": 23,
+    "mean_channel_delta": 0.0003
+  }
+}
