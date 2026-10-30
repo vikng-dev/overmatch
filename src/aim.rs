@@ -17,6 +17,7 @@
 //! peer's command drives its tank through the exact same path.
 
 use avian3d::prelude::{LayerMask, Position, Rotation, SpatialQuery, SpatialQueryFilter};
+use bevy::ecs::entity::EntityHashMap;
 use bevy::math::Affine3A;
 use bevy::prelude::*;
 
@@ -430,7 +431,9 @@ fn drive_aim_servos(
     mut servos: Query<(Entity, &mut ServoCommand, &ServoRole, &TankRoot)>,
     parents: Query<&ChildOf>,
     locals: Query<&Transform>,
+    mut laid: Local<EntityHashMap<LaidTank>>,
 ) {
+    laid.clear();
     for (tank, command, rig, position, rotation) in &tanks {
         let Some(intent) = command.aim else {
             continue; // no commitment yet — servos hold
@@ -471,22 +474,47 @@ fn drive_aim_servos(
             .get(rig.muzzle)
             .map_or(0.0, |table| table.superelevation(command.range));
         let point = hull_affine.transform_point3(lob(intent.in_hull(&to_local), theta));
-        for (servo, mut servo_command, role, root) in &mut servos {
-            if root.0 != tank {
-                continue;
-            }
-            let Some((servo_position, _)) =
-                rig_world_pose(servo, tank, position.0, rotation.0, &parents, &locals)
-            else {
-                continue;
-            };
-            let dir = to_local.transform_vector3(point - servo_position);
-            servo_command.target = match role {
-                ServoRole::Yaw => (-dir.x).atan2(-dir.z),
-                ServoRole::Pitch => dir.y.atan2((dir.x * dir.x + dir.z * dir.z).sqrt()),
-            };
-        }
+        laid.insert(
+            tank,
+            LaidTank {
+                point,
+                to_local,
+                position: position.0,
+                rotation: rotation.0,
+            },
+        );
     }
+    // One pass over the servos, each reading its root's entry: a servo of a held tank (no entry)
+    // keeps its target, as before.
+    for (servo, mut servo_command, role, root) in &mut servos {
+        let Some(tank) = laid.get(&root.0) else {
+            continue;
+        };
+        let Some((servo_position, _)) = rig_world_pose(
+            servo,
+            root.0,
+            tank.position,
+            tank.rotation,
+            &parents,
+            &locals,
+        ) else {
+            continue;
+        };
+        let dir = tank.to_local.transform_vector3(tank.point - servo_position);
+        servo_command.target = match role {
+            ServoRole::Yaw => (-dir.x).atan2(-dir.z),
+            ServoRole::Pitch => dir.y.atan2((dir.x * dir.x + dir.z * dir.z).sqrt()),
+        };
+    }
+}
+
+/// One tank's laid frame for the servo pass of `drive_aim_servos`: the lobbed world point, the
+/// inverse hull frame and the tick-truth root pose its servos compose against.
+struct LaidTank {
+    point: Vec3,
+    to_local: Affine3A,
+    position: Vec3,
+    rotation: Quat,
 }
 
 /// Project `world_point` to the screen and place a HUD dot there (its top-left offset by
@@ -629,6 +657,73 @@ mod tests {
     use crate::firecontrol::{RangeTable, Ranging};
     use crate::sight::drive_gunner_aim;
     use crate::tank::{ServoIndex, ServoRest, ServoSpec, TankServos, drive_servos};
+
+    /// The per-tank scan `drive_aim_servos` replaced: every servo visited for every tank. Kept
+    /// verbatim as the oracle.
+    fn drive_aim_servos_scan(
+        tanks: Query<(Entity, &TankCommand, &Rig, &Position, &Rotation), With<Tank>>,
+        tables: Query<&RangeTable>,
+        mut servos: Query<(Entity, &mut ServoCommand, &ServoRole, &TankRoot)>,
+        parents: Query<&ChildOf>,
+        locals: Query<&Transform>,
+    ) {
+        for (tank, command, rig, position, rotation) in &tanks {
+            let Some(intent) = command.aim else {
+                continue; // no commitment yet — servos hold
+            };
+            // The command crosses a trust boundary unvalidated (`net::protocol` bridges the action
+            // state whole), so this gate is the sim's only guard against a poisoned aim. Finiteness
+            // alone does not cover it: a merely LARGE point survives every `is_finite` and then
+            // overflows to NaN inside the hull composition below, which reaches the servo targets and
+            // the physics state. Bound the magnitude at the same envelope the aim rays already resolve
+            // in ([`MAX_RANGE`]) — no legitimate author can name a point outside the one every pick
+            // falls back to — with the hull's own world position added, since the point is named in
+            // world coordinates and the tank is not at the origin. Hold, like no-commitment.
+            let commanded = intent.point();
+            if !commanded.is_finite() || commanded.abs().max_element() > AIM_LIMIT {
+                continue;
+            }
+            // Tick-truth hull pose (`rig_world_pose`, never `GlobalTransform` — see its doc): the
+            // hull-local aim frame must be the physics state or client and server lay their servos
+            // from differently-stale hulls and diverge under maneuver.
+            let Some((hull_position, hull_rotation)) =
+                rig_world_pose(rig.hull, tank, position.0, rotation.0, &parents, &locals)
+            else {
+                continue;
+            };
+            let hull_affine = Affine3A::from_rotation_translation(hull_rotation, hull_position);
+            let to_local = hull_affine.inverse();
+            // Same NaN discipline as the aim check above, for the pose side (a NaN physics pose on a
+            // corrupt frame would poison every servo target below).
+            if !(to_local.matrix3.is_finite() && to_local.translation.is_finite()) {
+                continue;
+            }
+
+            // Lob the raw intention up by the superelevation here (not at commit), so the commanded aim
+            // — and its amber HUD dot — stay the intention, while the bore the servos reach is the
+            // lobbed point. The lob is a rotation in the hull frame (its plane is spanned by hull up),
+            // so the intention is named in that frame first.
+            let theta = tables
+                .get(rig.muzzle)
+                .map_or(0.0, |table| table.superelevation(command.range));
+            let point = hull_affine.transform_point3(lob(intent.in_hull(&to_local), theta));
+            for (servo, mut servo_command, role, root) in &mut servos {
+                if root.0 != tank {
+                    continue;
+                }
+                let Some((servo_position, _)) =
+                    rig_world_pose(servo, tank, position.0, rotation.0, &parents, &locals)
+                else {
+                    continue;
+                };
+                let dir = to_local.transform_vector3(point - servo_position);
+                servo_command.target = match role {
+                    ServoRole::Yaw => (-dir.x).atan2(-dir.z),
+                    ServoRole::Pitch => dir.y.atan2((dir.x * dir.x + dir.z * dir.z).sqrt()),
+                };
+            }
+        }
+    }
 
     /// The fixed clock the servos integrate on.
     const TICK: f32 = 1.0 / 64.0;
@@ -1428,5 +1523,101 @@ mod tests {
             None,
             "the old tank's key is gone once rekeyed"
         );
+    }
+
+    /// Build `tanks` tanks (distinct poses, ranges and nested servo chains; one holding, one with a
+    /// poisoned aim), with their servos spawned interleaved so no tank's servos are contiguous.
+    fn multi_tank_world(tanks: usize) -> (World, Vec<Entity>) {
+        let mut world = World::new();
+        let mut servos = Vec::new();
+        let mut chains = Vec::new();
+        for i in 0..tanks {
+            let f = i as f32;
+            let hull = world
+                .spawn(Transform::from_translation(Vec3::new(0.3 * f, 0.8, -0.4)))
+                .id();
+            let turret = world
+                .spawn(Transform::from_rotation(Quat::from_rotation_y(0.1 * f)))
+                .id();
+            let gun = world
+                .spawn(Transform::from_translation(Vec3::new(0.0, 0.5 + f, 1.0)))
+                .id();
+            let muzzle = world
+                .spawn((
+                    Transform::IDENTITY,
+                    RangeTable::test_fixed(0.01 * (f + 1.0)),
+                ))
+                .id();
+            let aim = match i {
+                1 => None,
+                2 => Some(AimIntent::World(Vec3::splat(f32::NAN))),
+                _ => Some(AimIntent::World(Vec3::new(
+                    40.0 + 13.0 * f,
+                    2.0 * f,
+                    -90.0 + 7.0 * f,
+                ))),
+            };
+            let tank = world
+                .spawn((
+                    Tank,
+                    TankCommand {
+                        aim,
+                        range: 300.0 + 50.0 * f,
+                        ..default()
+                    },
+                    Position(Vec3::new(137.0 + 11.0 * f, 4.0, -512.0 + 3.0 * f)),
+                    Rotation(Quat::from_euler(
+                        EulerRot::YXZ,
+                        0.7 * f,
+                        0.05 * f,
+                        -0.03 * f,
+                    )),
+                    Rig {
+                        hull,
+                        turret,
+                        gun,
+                        muzzle,
+                    },
+                ))
+                .id();
+            world.entity_mut(hull).insert(ChildOf(tank));
+            world.entity_mut(turret).insert(ChildOf(hull));
+            world.entity_mut(gun).insert(ChildOf(turret));
+            world.entity_mut(muzzle).insert(ChildOf(gun));
+            chains.push((tank, turret, gun));
+        }
+        for (tank, turret, gun) in &chains {
+            servos.push((*tank, *turret, ServoRole::Yaw));
+            servos.push((*tank, *gun, ServoRole::Pitch));
+        }
+        // Interleave across tanks: all yaws of every tank, then all pitches.
+        servos.sort_by_key(|(_, _, role)| matches!(role, ServoRole::Pitch));
+        for (tank, node, role) in &servos {
+            world
+                .entity_mut(*node)
+                .insert((TankRoot(*tank), ServoCommand { target: 9.0 }, *role));
+        }
+        let nodes = servos.iter().map(|(_, n, _)| *n).collect();
+        (world, nodes)
+    }
+
+    /// The sim tick's determinism across server and clients rests on `drive_aim_servos` writing the
+    /// same servo targets, bit for bit, as the per-tank scan it replaced: each servo's float
+    /// operations are unchanged, only the visiting order is. Held tanks and poisoned aims leave
+    /// their servos' prior target.
+    #[test]
+    fn servo_pass_matches_the_per_tank_scan_bit_for_bit() {
+        let (mut fast, nodes) = multi_tank_world(5);
+        let (mut scan, _) = multi_tank_world(5);
+        fast.run_system_once(drive_aim_servos).unwrap();
+        scan.run_system_once(drive_aim_servos_scan).unwrap();
+        let mut laid = 0;
+        for node in nodes {
+            let a = fast.get::<ServoCommand>(node).unwrap().target.to_bits();
+            let b = scan.get::<ServoCommand>(node).unwrap().target.to_bits();
+            assert_eq!(a, b);
+            laid += usize::from(a != 9.0_f32.to_bits());
+        }
+        assert_eq!(laid, 6, "three tanks lay both servos; two hold");
     }
 }
