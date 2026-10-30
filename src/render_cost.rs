@@ -50,10 +50,10 @@
 //!   per command. Read after the phases are batched, in `PrepareBindGroups`.
 //! * **`SPIKE_ABLATE=<feature>[,<feature>…]`**: render features removed, to measure what each costs
 //!   by difference. `bloom` and `depth_prepass` remove those components from every `Camera3d`;
-//!   `env_light` stops `world` from giving views the sky's generated environment light, whose
-//!   filter passes run every frame; `ui` hides every UI root, which removes the UI's extraction and
-//!   drawing but not its layout. An unknown name panics at boot, so a typo cannot read as a free
-//!   feature. Never part of a shipped measurement: the picture changes.
+//!   `env_light` stops `world` from filtering the sky's environment light and giving it to views;
+//!   `ui` hides every UI root, which removes the UI's extraction and drawing but not its layout. An
+//!   unknown name panics at boot, so a typo cannot read as a free feature. Never part of a shipped
+//!   measurement: the picture changes.
 //!   `terrain-casters`, `tree-casters`, `house-casters`, `tank-casters` suppress only casting
 //!   through render policy; receivers and main-view geometry retain their roles.
 //! * `SPIKE_SHADOW_FILTER=gaussian|hardware|temporal`, `SPIKE_SHADOW_SPLITS=<metres,...>` and
@@ -88,7 +88,7 @@ use crate::trace::{JsonlSink, role_path};
 /// lines per run are enough and the log stays readable.
 const PHASE_COUNT_PERIOD_S: f64 = 5.0;
 
-/// Render features removed by `SPIKE_ABLATE` (module doc). Read by `world::attach_environment_light`
+/// Render features removed by `SPIKE_ABLATE` (module doc). Read by `world::light_battlefield_views`
 /// for `env_light`; the other fields act here.
 #[derive(Resource, Clone, Copy, Default, Debug)]
 pub(crate) struct Ablate {

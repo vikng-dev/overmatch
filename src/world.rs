@@ -2,10 +2,18 @@
 //! Also home to the ground-plane query that aiming and the camera both use — the seam to swap
 //! for an Avian raycast once terrain has colliders.
 
+use std::sync::{Arc, Mutex};
+
 use avian3d::prelude::{
     Collider, CollisionLayers, LayerMask, RigidBody, SpatialQuery, SpatialQueryFilter,
 };
+use bevy::pbr::generate::{
+    GeneratorBindGroups, GeneratorPipelines, RenderEnvironmentMap, filtering_system,
+};
 use bevy::prelude::*;
+use bevy::render::render_resource::PipelineCache;
+use bevy::render::sync_world::MainEntity;
+use bevy::render::{Render, RenderApp, RenderSystems};
 
 use crate::Layer;
 use crate::render_policy::CameraProfile;
@@ -199,25 +207,73 @@ fn sky_cubemap() -> Image {
     )
 }
 
-/// Give every 3-D view of the battlefield image-based lighting, once, from the shared sky. A view
+/// The sky's environment light: [`sky_cubemap`] filtered into diffuse and specular maps ONCE per
+/// app, then carried by every battlefield view as a plain `EnvironmentMapLight`. Inserted when the
+/// first battlefield view appears, so an app with no camera (the dedicated server) never builds
+/// the cubemap.
+///
+/// Once is enough because the sky never changes for the life of the app; a sky that changes must
+/// start a new filtering. Bevy's `GeneratedEnvironmentMapLight` re-runs its compute passes on
+/// every frame the component exists (vendored `bevy_pbr` `light_probe/generate.rs`,
+/// `downsampling_system` and `filtering_system`), so the filter is despawned as soon as they have
+/// been recorded.
+///
+/// The filtered maps exist only on the GPU: bevy creates both images with placeholder contents and
+/// its passes write the textures. Nothing may mutate either `Image` asset: a mutation re-uploads
+/// the placeholder, and the views lose the sky's light.
+#[derive(Resource)]
+enum SkyLight {
+    /// The entity carrying `GeneratedEnvironmentMapLight`, until its passes are recorded.
+    Filtering(Entity),
+    /// The filtered maps, as every battlefield view carries them.
+    Filtered(EnvironmentMapLight),
+}
+
+/// Main-world ids of the sky filters whose passes the render world has recorded. One `Arc` in both
+/// worlds: the render world appends, the main world reads and clears.
+#[derive(Resource, Clone, Default)]
+struct RecordedSkyFilters(Arc<Mutex<Vec<Entity>>>);
+
+/// The sky light's two halves: the main world's [`SkyLight`] systems, and the render world's
+/// report of when the filter has run. An app without a render world (the dedicated server, the
+/// headless fixtures) never sees its filter retire, and never needs to.
+fn sky_light_plugin(app: &mut App) {
+    let recorded = RecordedSkyFilters::default();
+    app.insert_resource(recorded.clone()).add_systems(
+        Update,
+        (
+            retire_sky_filter.run_if(resource_exists::<SkyLight>),
+            light_battlefield_views,
+        )
+            .chain(),
+    );
+    let Some(render_app) = app.get_sub_app_mut(RenderApp) else {
+        return;
+    };
+    render_app.insert_resource(recorded).add_systems(
+        Render,
+        report_recorded_sky_filters
+            .after(filtering_system)
+            .before(RenderSystems::Render),
+    );
+}
+
+/// Give every 3-D view of the battlefield image-based lighting from the shared sky, starting the
+/// filter for the first one and attaching the filtered maps once [`SkyLight`] holds them. A view
 /// whose profile draws no battlefield (the pen cam's inset and masks) lights its own stage.
 ///
 /// Attached to VIEWS rather than spawned as a light: an environment map on a camera lights that
 /// whole view, which is what "the sky" means here — as opposed to a `LightProbe`, which bounds it
 /// to a region. Doing it in `world` (rather than at each camera's spawn) is what keeps the game and
-/// the armor sandbox honestly identical, and it costs nothing where there is no camera: the
-/// dedicated server never matches this query, so it never even builds the cubemap.
+/// the armor sandbox honestly identical.
 ///
 /// A frame-cost ablation (`SPIKE_ABLATE=env_light`, `render_cost`) leaves every view unlit by it.
-fn attach_environment_light(
+fn light_battlefield_views(
     mut commands: Commands,
     mut images: ResMut<Assets<Image>>,
-    mut sky: Local<Option<Handle<Image>>>,
+    sky: Option<Res<SkyLight>>,
     ablate: Option<Res<crate::render_cost::Ablate>>,
-    views: Query<
-        (Entity, Option<&CameraProfile>),
-        (With<Camera3d>, Without<GeneratedEnvironmentMapLight>),
-    >,
+    views: Query<(Entity, Option<&CameraProfile>), (With<Camera3d>, Without<EnvironmentMapLight>)>,
 ) {
     if ablate.is_some_and(|ablate| ablate.env_light) {
         return;
@@ -230,13 +286,89 @@ fn attach_environment_light(
     if views.peek().is_none() {
         return;
     }
-    let sky = sky.get_or_insert_with(|| images.add(sky_cubemap()));
-    for view in views {
-        commands.entity(view).insert(GeneratedEnvironmentMapLight {
-            environment_map: sky.clone(),
-            intensity: SKY_ENVIRONMENT_INTENSITY,
-            ..default()
-        });
+    match sky.as_deref() {
+        None => {
+            let filter = commands
+                .spawn((
+                    Name::new("Sky light filter"),
+                    GeneratedEnvironmentMapLight {
+                        environment_map: images.add(sky_cubemap()),
+                        intensity: SKY_ENVIRONMENT_INTENSITY,
+                        ..default()
+                    },
+                ))
+                .id();
+            commands.insert_resource(SkyLight::Filtering(filter));
+        }
+        Some(SkyLight::Filtering(_)) => {}
+        Some(SkyLight::Filtered(light)) => {
+            for view in views {
+                commands.entity(view).insert(light.clone());
+            }
+        }
+    }
+}
+
+/// Keep the maps the filter wrote and despawn it, once the render world reports its passes
+/// recorded. Bevy's `generate_environment_map_light` gives the filter its `EnvironmentMapLight`
+/// before extraction can hand it to the render world, so a recorded filter always carries one.
+fn retire_sky_filter(
+    mut commands: Commands,
+    mut sky: ResMut<SkyLight>,
+    recorded: Res<RecordedSkyFilters>,
+    maps: Query<&EnvironmentMapLight>,
+) {
+    let SkyLight::Filtering(filter) = *sky else {
+        return;
+    };
+    let ran = {
+        let mut recorded = recorded.0.lock().expect("sky filter report poisoned");
+        let ran = recorded.contains(&filter);
+        recorded.clear();
+        ran
+    };
+    if !ran {
+        return;
+    }
+    let Ok(light) = maps.get(filter) else {
+        return;
+    };
+    *sky = SkyLight::Filtered(light.clone());
+    commands.entity(filter).despawn();
+    info!("sky light: filtered once; the filter is retired and the views share its maps");
+}
+
+/// Render-world half: report each sky filter whose passes bevy recorded this frame. Bevy's
+/// `downsampling_system` and `filtering_system` record them for every entity carrying both
+/// `GeneratorBindGroups` and `RenderEnvironmentMap`, once all five generator pipelines have
+/// compiled. This runs after both and before `RenderSystems::Render`, whose
+/// `process_pipeline_queue_system` is the next system to change pipeline states, so it sees the
+/// readiness they saw.
+fn report_recorded_sky_filters(
+    filters: Query<&MainEntity, (With<GeneratorBindGroups>, With<RenderEnvironmentMap>)>,
+    pipelines: Option<Res<GeneratorPipelines>>,
+    cache: Res<PipelineCache>,
+    recorded: Res<RecordedSkyFilters>,
+) {
+    let Some(pipelines) = pipelines else {
+        return;
+    };
+    let compiled = [
+        pipelines.copy,
+        pipelines.downsample_first,
+        pipelines.downsample_second,
+        pipelines.radiance,
+        pipelines.irradiance,
+    ]
+    .into_iter()
+    .all(|id| cache.get_compute_pipeline(id).is_some());
+    if !compiled {
+        return;
+    }
+    let mut recorded = recorded.0.lock().expect("sky filter report poisoned");
+    for filter in &filters {
+        debug!("sky light: filter passes recorded for {}", filter.id());
+        recorded.push(filter.id());
     }
 }
 
@@ -247,10 +379,8 @@ pub fn plugin(app: &mut App) {
         Startup,
         (crate::terrain_grid::decode_height_grid, spawn_environment).chain(),
     );
-    app.add_systems(
-        Update,
-        (report_failed_terrain_map, attach_environment_light),
-    );
+    app.add_systems(Update, report_failed_terrain_map);
+    app.add_plugins(sky_light_plugin);
     // The ground material `spawn_environment` builds above. Mounted here rather than in a client
     // composition because `spawn_environment` writes its asset collection on every composition:
     // the plugin's render half is behind the render app, which the dedicated server does not have.
@@ -750,5 +880,71 @@ mod tests {
             Some((SKY_CUBEMAP_FACE_PX * SKY_CUBEMAP_FACE_PX * 6 * 4) as usize),
             "four bytes per texel across six faces",
         );
+    }
+
+    /// The sky light's steady state, which the frame cost depends on: once the render world
+    /// reports the filter's passes recorded, no `GeneratedEnvironmentMapLight` is left for bevy to
+    /// re-filter every frame, and every battlefield view (present then, or spawned later) carries
+    /// the one filtered pair. Until that report the filter must survive: retiring it early leaves
+    /// the views with maps nothing ever wrote.
+    #[test]
+    fn the_sky_is_filtered_once_and_then_shared_by_every_battlefield_view() {
+        let mut app = App::new();
+        app.init_resource::<Assets<Image>>()
+            .add_plugins(sky_light_plugin);
+        let view = app.world_mut().spawn(Camera3d::default()).id();
+        app.update();
+        let SkyLight::Filtering(filter) = *app.world().resource::<SkyLight>() else {
+            panic!("the first battlefield view starts the filter");
+        };
+
+        // What bevy's generator gives the filter before the render world first sees it.
+        let maps = {
+            let mut images = app.world_mut().resource_mut::<Assets<Image>>();
+            EnvironmentMapLight {
+                diffuse_map: images.add(Image::default()),
+                specular_map: images.add(Image::default()),
+                intensity: SKY_ENVIRONMENT_INTENSITY,
+                ..default()
+            }
+        };
+        app.world_mut().entity_mut(filter).insert(maps.clone());
+        app.update();
+        assert!(
+            app.world()
+                .get::<GeneratedEnvironmentMapLight>(filter)
+                .is_some(),
+            "the filter is retired only once its passes have been recorded",
+        );
+
+        app.world()
+            .resource::<RecordedSkyFilters>()
+            .0
+            .lock()
+            .unwrap()
+            .push(filter);
+        app.update();
+        let later_view = app.world_mut().spawn(Camera3d::default()).id();
+        app.update();
+
+        let world = app.world_mut();
+        assert_eq!(
+            world
+                .query::<&GeneratedEnvironmentMapLight>()
+                .iter(world)
+                .count(),
+            0,
+            "nothing is left for bevy to filter again",
+        );
+        for lit in [view, later_view] {
+            let light = world
+                .get::<EnvironmentMapLight>(lit)
+                .expect("every battlefield view carries the filtered maps");
+            assert_eq!(
+                (&light.diffuse_map, &light.specular_map),
+                (&maps.diffuse_map, &maps.specular_map),
+            );
+            assert_eq!(light.intensity, SKY_ENVIRONMENT_INTENSITY);
+        }
     }
 }
