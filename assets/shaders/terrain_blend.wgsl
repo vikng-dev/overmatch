@@ -27,11 +27,7 @@
     pbr_functions,
     pbr_functions::{alpha_discard, apply_pbr_lighting, main_pass_post_lighting_processing},
     pbr_types,
-    mesh_types,
     mesh_view_bindings as view_bindings,
-    mesh_view_types,
-    lighting,
-    shadows,
 }
 
 struct TerrainBlendParams {
@@ -242,52 +238,6 @@ fn sun_visibility(
     return 1.0 - scale * saturate(occluded);
 }
 
-// The sun's direct light as `apply_pbr_lighting` adds it for `pbr_input`, shadow map and exposure
-// included: what a rut's self-shadow takes away. The sun is the scene's first directional light;
-// the terrain material enables neither clearcoat nor anisotropy, so the base layer is the input.
-fn sun_direct(pbr_input: pbr_types::PbrInput) -> vec3<f32> {
-    if view_bindings::lights.n_directional_lights == 0u {
-        return vec3(0.0);
-    }
-    let base = pbr_input.material.base_color.rgb;
-    let metallic = pbr_input.material.metallic;
-    let perceptual_roughness = pbr_input.material.perceptual_roughness;
-    let NdotV = max(dot(pbr_input.N, pbr_input.V), 0.0001);
-    var input: lighting::LightingInput;
-    input.layers[lighting::LAYER_BASE].NdotV = NdotV;
-    input.layers[lighting::LAYER_BASE].N = pbr_input.N;
-    input.layers[lighting::LAYER_BASE].R = reflect(-pbr_input.V, pbr_input.N);
-    input.layers[lighting::LAYER_BASE].perceptual_roughness = perceptual_roughness;
-    input.layers[lighting::LAYER_BASE].roughness =
-        lighting::perceptualRoughnessToRoughness(perceptual_roughness);
-    input.P = pbr_input.world_position.xyz;
-    input.V = pbr_input.V;
-    input.diffuse_color = pbr_functions::calculate_diffuse_color(
-        base,
-        metallic,
-        pbr_input.material.specular_transmission,
-        pbr_input.material.diffuse_transmission,
-    );
-    input.metallic = metallic;
-    input.F0_dielectric = pbr_functions::calculate_F0_dielectric(pbr_input.material.reflectance);
-    input.F0_metallic = base;
-    input.F_ab = lighting::F_AB(perceptual_roughness, NdotV);
-    var shadow = 1.0;
-    if (pbr_input.flags & mesh_types::MESH_FLAGS_SHADOW_RECEIVER_BIT) != 0u
-        && (view_bindings::lights.directional_lights[0].flags
-            & mesh_view_types::DIRECTIONAL_LIGHT_FLAGS_SHADOWS_ENABLED_BIT) != 0u {
-        let view_z = dot(vec4<f32>(
-            view_bindings::view.view_from_world[0].z,
-            view_bindings::view.view_from_world[1].z,
-            view_bindings::view.view_from_world[2].z,
-            view_bindings::view.view_from_world[3].z
-        ), pbr_input.world_position);
-        shadow = shadows::fetch_directional_shadow(
-            0u, pbr_input.world_position, pbr_input.world_normal, view_z, pbr_input.frag_coord.xy);
-    }
-    return lighting::directional_light(0u, &input, true) * shadow * view_bindings::view.exposure;
-}
-
 @fragment
 fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> FragmentOutput {
     // Derivatives of the surface as the mesh draws it, before any print moves it: continuous across
@@ -485,13 +435,13 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
 
     pbr_input.material.base_color = alpha_discard(pbr_input.material, pbr_input.material.base_color);
 
+    // The rut's self-shadow joins the sun's shadow: it takes the direct sunlight, and only that,
+    // where the ground stands over the ray to the sun. It is a sun shadow like any other, so it
+    // lapses with them where the sun casts none (Shadows Off).
+    pbr_input.directional_shadow_factor = sun;
+
     var out: FragmentOutput;
     out.color = apply_pbr_lighting(pbr_input);
-    // The rut's self-shadow takes the sun's direct light, and only the sun's, where the ground
-    // stands over the ray to it.
-    if sun < 1.0 {
-        out.color = vec4(out.color.rgb - (1.0 - sun) * sun_direct(pbr_input), out.color.a);
-    }
     out.color = main_pass_post_lighting_processing(pbr_input, out.color);
     return out;
 }

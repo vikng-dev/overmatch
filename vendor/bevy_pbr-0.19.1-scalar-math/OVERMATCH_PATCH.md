@@ -1,7 +1,7 @@
 # Overmatch Bevy PBR patch
 
-This directory is the published `bevy_pbr` 0.19.1 crate with one source change, tagged
-`// OVERMATCH PATCH:` so the diff against pristine 0.19.1 is self-describing. (`Cargo.lock` and
+This directory is the published `bevy_pbr` 0.19.1 crate with the source changes below, each tagged
+`OVERMATCH PATCH` so the diff against pristine 0.19.1 is self-describing. (`Cargo.lock` and
 `.cargo_vcs_info.json` from the published crate are omitted; neither is read for a path dependency.)
 
 ## `MeshUniform` alignment (`src/render/mesh.rs`)
@@ -24,6 +24,16 @@ Encase minimum size.
 The generic bug and proposed upstream fix are recorded in
 `upstream/bevy-uninitbuffervec-rust-size-vs-shader-stride.md`. Not fixed in 0.19.1 (`MeshUniform`
 there is still a bare `#[derive(ShaderType, Clone)]`).
+
+## `directional_shadow_factor` (backport of bevyengine/bevy#24936)
+
+`PbrInput` gains `directional_shadow_factor` (default 1.0, set in `pbr_input_new`), which
+`apply_pbr_lighting` multiplies into each directional light's shadow inside the
+shadows-enabled-receiver block, exactly as upstream merged it after 0.19.1. A material folds a custom
+shadow term into the sun through it instead of evaluating the directional light a second time. The
+terrain material's track-print sun term uses it (`assets/shaders/terrain_blend.wgsl`). Being inside
+that block, the factor lapses with the light's shadow maps: a light with `shadow_maps_enabled` off,
+or a mesh with `NotShadowReceiver`, ignores it.
 
 ## Retired: shadow views inherit the light's `RenderLayers`
 

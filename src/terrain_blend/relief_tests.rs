@@ -5,7 +5,7 @@ use super::*;
 fn helpers() -> String {
     let source = include_str!("../../assets/shaders/terrain_blend.wgsl");
     let start = source.find("struct TerrainBlendParams").unwrap();
-    let end = source.find("// The sun's direct light").unwrap();
+    let end = source.find("@fragment").unwrap();
     source[start..end].replace("#{MATERIAL_BIND_GROUP}", "0")
 }
 
