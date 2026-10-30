@@ -1,5 +1,5 @@
 // The scatter buildings' surface (`src/building_surface.rs` — `BuildingMaterial`): the wall pack
-// through bevy's standard PBR path on every face, the roof pack swapped in on the top.
+// through bevy's standard PBR path on every face, the roof pack swapped in on the timber.
 //
 // THE VERTEX STAGE PUTS EVERY FACE IN METRES. The mesh (`building_surface::unit_box`) is the unit
 // cube each building's block transform scales, its UV in face units: `uv = (p·t, −p·b)` for a
@@ -37,8 +37,10 @@ struct BuildingSurfaceParams {
 @group(#{MATERIAL_BIND_GROUP}) @binding(103) var roof_normal_texture: texture_2d<f32>;
 @group(#{MATERIAL_BIND_GROUP}) @binding(104) var roof_arm_texture: texture_2d<f32>;
 
-// A face is roof where its normal is within 60° of up: the box's top, on any building that stands
-// within 60° of upright, and never a wall.
+// On a mesh with no second UV (the graybox box), a face is roof where its normal is within 60° of
+// up: the box's top, on any building that stands within 60° of upright, and never a wall. A mesh
+// built from a building's elements (`src/buildings/view.rs`) says it per vertex instead: the second
+// UV's `x` is 1 on timber, 0 on masonry.
 const ROOF_MIN_UP: f32 = 0.5;
 
 @vertex
@@ -54,6 +56,10 @@ fn vertex(vertex: Vertex) -> VertexOutput {
     let axes = mat3x3(world_from_local[0].xyz, world_from_local[1].xyz, world_from_local[2].xyz);
     let image_up = vertex.tangent.w * cross(vertex.normal, vertex.tangent.xyz);
     out.uv = vertex.uv * vec2(length(axes * vertex.tangent.xyz), length(axes * image_up));
+#ifdef VERTEX_UVS_B
+    // The pack mark (`ROOF_MIN_UP`'s note), passed through unscaled.
+    out.uv_b = vertex.uv_b;
+#endif
     out.world_tangent = mesh_functions::mesh_tangent_local_to_world(
         world_from_local, vertex.tangent, vertex.instance_index);
 
@@ -77,7 +83,12 @@ fn fragment(in: VertexOutput, @builtin(front_facing) is_front: bool) -> Fragment
     // tangents, ARM, and every non-texture material parameter.
     var pbr_input = pbr_input_from_standard_material(in, is_front);
 
-    if in.world_normal.y > ROOF_MIN_UP {
+#ifdef VERTEX_UVS_B
+    let roof = in.uv_b.x > 0.5;
+#else
+    let roof = in.world_normal.y > ROOF_MIN_UP;
+#endif
+    if roof {
         let double_sided = (pbr_input.material.flags
             & pbr_types::STANDARD_MATERIAL_FLAGS_DOUBLE_SIDED_BIT) != 0u;
         let TBN = pbr_functions::calculate_tbn_mikktspace(pbr_input.world_normal, in.world_tangent);

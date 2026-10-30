@@ -34,6 +34,7 @@ use crate::scatter::MapInstance;
 use crate::substances::SubstanceRegistry;
 
 pub mod schema;
+pub(crate) mod view;
 
 use schema::BuildingAsset;
 

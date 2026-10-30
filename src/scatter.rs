@@ -214,7 +214,12 @@ struct ScatterView {
     building: BTreeMap<String, Handle<Mesh>>,
     /// `(trunk, canopy)` per fir prototype, keyed by its id.
     fir: BTreeMap<String, (Handle<Mesh>, Handle<Mesh>)>,
-    /// The ONE material every building wears: no instance gets its own, so the buildings batch.
+    /// One merged mesh per building asset of the destruction model, keyed by the asset id: its
+    /// elements' faces in the building frame ([`crate::buildings::view::mesh`]), shared by every
+    /// instance.
+    structure: BTreeMap<String, Handle<Mesh>>,
+    /// The ONE material every building wears, graybox or not: no instance gets its own, so the
+    /// buildings batch.
     surface: Handle<BuildingMaterial>,
     bark: Handle<StandardMaterial>,
     needle: Handle<StandardMaterial>,
@@ -226,8 +231,9 @@ impl ScatterView {
         meshes: &mut Assets<Mesh>,
         materials: &mut Assets<StandardMaterial>,
         assets: &mut ViewAssets<'_>,
-        library: &BTreeMap<String, Prototype>,
+        manifest: &MapManifest,
     ) -> Self {
+        let library = &manifest.prototypes;
         Self {
             building: library
                 .iter()
@@ -264,6 +270,25 @@ impl ScatterView {
                     | Prototype::Structure { .. } => None,
                 })
                 .collect(),
+            structure: library
+                .values()
+                .filter_map(|shape| match shape {
+                    Prototype::Structure { asset } => Some(asset),
+                    Prototype::Building { .. } | Prototype::Fir { .. } | Prototype::Tree { .. } => {
+                        None
+                    }
+                })
+                .map(|asset| {
+                    let kind = manifest
+                        .buildings
+                        .get(asset)
+                        .expect("map::load loaded every building asset the library names");
+                    (
+                        asset.clone(),
+                        meshes.add(crate::buildings::view::mesh(&kind.asset)),
+                    )
+                })
+                .collect(),
             surface: crate::building_surface::material(
                 commands,
                 assets.server,
@@ -293,7 +318,7 @@ pub(crate) fn spawn(
     let placements = place(&resolve(&manifest.instances, &manifest.prototypes), grid);
     let view = view_assets
         .as_mut()
-        .map(|assets| ScatterView::new(commands, meshes, materials, assets, &manifest.prototypes));
+        .map(|assets| ScatterView::new(commands, meshes, materials, assets, manifest));
     let assets = view_assets.map(|assets| assets.server);
     let statics = CollisionLayers::new([Layer::Terrain], LayerMask::ALL);
     let (mut buildings, mut firs, mut trees, mut structures) = (0usize, 0usize, 0usize, 0usize);
@@ -305,8 +330,23 @@ pub(crate) fn spawn(
                     .buildings
                     .get(asset)
                     .expect("map::load loaded every building asset the library names");
-                crate::buildings::spawn(commands, kind, placement.identity.clone(), placement.pose);
+                let root = crate::buildings::spawn(
+                    commands,
+                    kind,
+                    placement.identity.clone(),
+                    placement.pose,
+                );
                 obstacles.push(crate::buildings::footprint(kind, placement.pose));
+                if let Some(view) = &view {
+                    // The root stands at unit scale; the view, a child, carries the instance's.
+                    commands.spawn((
+                        ChildOf(root),
+                        Transform::from_scale(placement.pose.scale),
+                        Mesh3d(view.structure[asset].clone()),
+                        MeshMaterial3d(view.surface.clone()),
+                        crate::render_cost::CasterClass::House,
+                    ));
+                }
                 structures += 1;
             }
             Prototype::Tree { asset } => {
@@ -555,11 +595,11 @@ mod tests {
         assert_eq!(blocks.len(), 2, "both houses are blocks");
         let world = app.world_mut();
         let drawn: Vec<(AssetId<Mesh>, AssetId<BuildingMaterial>)> = world
-            .query::<(&Mesh3d, &MeshMaterial3d<BuildingMaterial>)>()
+            .query_filtered::<(&Mesh3d, &MeshMaterial3d<BuildingMaterial>), Without<ChildOf>>()
             .iter(world)
             .map(|(mesh, material)| (mesh.id(), material.id()))
             .collect();
-        assert_eq!(drawn.len(), 2, "both houses draw");
+        assert_eq!(drawn.len(), 2, "both graybox houses draw");
         assert_eq!(drawn[0], drawn[1], "one mesh and one material for both");
         assert_eq!(
             world.resource::<Assets<BuildingMaterial>>().len(),
@@ -667,6 +707,60 @@ mod tests {
         assert_eq!(views, 0, "a windowless composition attaches no view");
         let meshes = world.query::<&Mesh3d>().iter(world).count();
         assert_eq!(meshes, 0, "a windowless composition draws nothing");
+    }
+
+    /// EVERY BUILDING OF ONE ASSET DRAWS ONE SHARED MESH IN THE ONE MATERIAL: a second instance of
+    /// the fixture's brick house at another scale (1.3, fixture data) draws, as a child of its
+    /// root at its own scale, with the first one's mesh, and both wear the material the graybox
+    /// houses wear. A view that built a mesh per instance (74 on Kalinovo) or a material per house
+    /// splits the buildings into a draw each; one at the root's unit scale draws a scaled house at
+    /// asset size, its walls off its colliders.
+    #[test]
+    fn every_building_of_one_asset_draws_one_mesh_at_its_instance_scale() {
+        let mut manifest = mixed_fixture_manifest();
+        let mut second = manifest
+            .instances
+            .iter()
+            .find(|instance| {
+                matches!(
+                    manifest.prototypes[&instance.prototype],
+                    Prototype::Structure { .. }
+                )
+            })
+            .expect("the fixture places a building")
+            .clone();
+        second.id = "brick_0002".to_owned();
+        second.translation[0] += 30.0;
+        second.scale = [1.3; 3];
+        manifest.instances.push(second);
+        let (mut app, _, _) = spawned(&manifest, true);
+        let world = app.world_mut();
+        let views: Vec<(Entity, Vec3, AssetId<Mesh>, AssetId<BuildingMaterial>)> = world
+            .query::<(
+                &ChildOf,
+                &Transform,
+                &Mesh3d,
+                &MeshMaterial3d<BuildingMaterial>,
+            )>()
+            .iter(world)
+            .map(|(parent, transform, mesh, material)| {
+                (parent.parent(), transform.scale, mesh.id(), material.id())
+            })
+            .collect();
+        assert_eq!(views.len(), 2, "one view per building");
+        assert_eq!(views[0].2, views[1].2, "one mesh for the asset");
+        assert_eq!(views[0].3, views[1].3, "one material");
+        let mut scales: Vec<f32> = views
+            .iter()
+            .map(|&(root, scale, ..)| {
+                assert!(world.get::<crate::buildings::BuildingBody>(root).is_some());
+                assert_eq!(scale, Vec3::splat(scale.x));
+                scale.x
+            })
+            .collect();
+        scales.sort_by(f32::total_cmp);
+        assert_eq!(scales, [1.0, 1.3], "each at its instance's scale");
+        assert_eq!(world.resource::<Assets<BuildingMaterial>>().len(), 1);
     }
 
     /// A COMPOSITION THAT DRAWS ATTACHES EACH TREE'S VIEW: the sim spawns a tree's body only, so

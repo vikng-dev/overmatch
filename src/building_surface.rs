@@ -1,5 +1,7 @@
 //! The scatter buildings' surface: brick walls under a timber roof, through ONE
-//! [`BuildingMaterial`] every building shares, on the graybox box each one is ([`crate::scatter`]).
+//! [`BuildingMaterial`] every building shares: a graybox building's box ([`crate::scatter`]) and a
+//! building of the destruction model's element mesh ([`crate::buildings::view`]), whose faces are
+//! framed by the same rule in metres and mark their pack per vertex (see Walls and roof below).
 //!
 //! VIEW ONLY (ADR-0014). The drawn box is the collider's own unit cube under the block transform,
 //! so the silhouette is exactly what the simulation blocks; this module decides only what its faces
@@ -24,7 +26,9 @@
 //! The standard half carries the [`WALL`] pack and shades every face. The fragment swaps the
 //! [`ROOF`] pack's albedo, normal and ARM in where the face's normal is within 60° of up: the box's
 //! top, on any building standing within 60° of upright. The roof's boards run along the box's longer
-//! horizontal side ([`ridge_axis`]), as a ridge would.
+//! horizontal side ([`ridge_axis`]), as a ridge would. A mesh that carries a second UV channel
+//! decides per vertex instead: its `x` is 1 on a timber face and 0 on masonry, so an element mesh's
+//! sill tops stay brick and its board edges stay timber.
 
 use bevy::asset::AssetLoadFailedEvent;
 use bevy::math::Affine2;
