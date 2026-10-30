@@ -996,8 +996,9 @@ pub fn run_offline() {
         app.add_systems(Startup, platform::revoke_macos_activation);
     }
     app.add_plugins(GamePlugin);
-    // Documentation frames; inert without `OVERMATCH_CAPTURE`.
-    app.add_plugins(dev_capture::plugin);
+    // Documentation frames; inert without `OVERMATCH_CAPTURE`. The tree-fall cue writes the
+    // authority's tree state, so this root, the only one with no replica, alone mounts it.
+    app.add_plugins((dev_capture::plugin, dev_capture::offline_fell_plugin));
     // The offline transmission feel test (phase 2.5): an EXPLICIT override of the spec's
     // declared architecture (which is authoritative and mandatory since REV 14), seeded to
     // the Tiger's own L600 so a bare offline boot matches the shipped spec. `T` cycles

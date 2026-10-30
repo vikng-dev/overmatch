@@ -32,6 +32,11 @@
 //!   the run's `video.ron`; point `OVERMATCH_CONFIG_DIR` at a scratch directory to stage them
 //!   without touching the player's own.
 //!
+//! * `OVERMATCH_CAPTURE_FELL=<instance id>,<s>,<cut>,<dir bin>` — on the first fixed tick at or
+//!   after app second `s`, the standing tree of that map instance falls broken at segment `cut`
+//!   toward azimuth bin `dir bin`, exactly as a law sets it ([`offline_fell_plugin`]; the offline
+//!   root alone mounts it).
+//!
 //! The process exits once every frame is on disk, with a failure code if any is missing.
 //!
 //! # Invariant: a capture run shows no window
@@ -196,6 +201,102 @@ pub fn plugin(app: &mut App) {
             hide_ui.before(VisibilitySystems::VisibilityPropagate),
         );
     }
+}
+
+/// `OVERMATCH_CAPTURE_FELL`'s cue: which tree falls, when, and how.
+#[derive(Resource, Debug, Clone, PartialEq)]
+struct FellCue {
+    instance: String,
+    at: f32,
+    cut: u8,
+    dir: u8,
+    done: bool,
+}
+
+/// `<instance id>,<s>,<cut>,<dir bin>`; `None` when malformed.
+fn parse_fell(s: &str) -> Option<FellCue> {
+    let parts: Vec<&str> = s.split(',').map(str::trim).collect();
+    let [instance, at, cut, dir] = parts.as_slice() else {
+        return None;
+    };
+    let at = at.parse::<f32>().ok().filter(|at| at.is_finite())?;
+    Some(FellCue {
+        instance: (*instance).to_owned(),
+        at,
+        cut: cut.parse().ok()?,
+        dir: dir.parse().ok()?,
+        done: false,
+    })
+}
+
+/// The capture's tree-fall lever, mounted by the offline root only: it writes the authority's
+/// state, so a replica never runs it. Inert unless both `OVERMATCH_CAPTURE` and
+/// `OVERMATCH_CAPTURE_FELL` are set.
+pub(crate) fn offline_fell_plugin(app: &mut App) {
+    if std::env::var_os("OVERMATCH_CAPTURE").is_none() {
+        return;
+    }
+    let Ok(raw) = std::env::var("OVERMATCH_CAPTURE_FELL") else {
+        return;
+    };
+    let Some(cue) = parse_fell(&raw) else {
+        warn!("capture: OVERMATCH_CAPTURE_FELL={raw:?} is not <instance id>,<s>,<cut>,<dir bin>");
+        return;
+    };
+    info!("capture: {cue:?}");
+    app.insert_resource(cue).add_systems(
+        FixedPostUpdate,
+        fell_on_cue
+            .in_set(crate::trees::TreeFallSet)
+            .run_if(not(resource_exists::<crate::ClientReplica>)),
+    );
+}
+
+/// Fell the cued tree on the first fixed tick at or after its second, as the laws do: the state
+/// and the transition's tick, in the fall set, so the body derives the same tick.
+fn fell_on_cue(
+    time: Res<Time>,
+    clock: Option<Res<crate::ShotClock>>,
+    mut cue: ResMut<FellCue>,
+    mut trees: Query<(
+        Entity,
+        &crate::scatter::MapInstance,
+        &crate::trees::TreeBody,
+        &mut crate::trees::TreeState,
+    )>,
+    mut commands: Commands,
+) {
+    if cue.done || time.elapsed_secs() < cue.at {
+        return;
+    }
+    cue.done = true;
+    let Some((root, _, body, mut state)) = trees
+        .iter_mut()
+        .find(|(_, instance, _, _)| instance.id == cue.instance)
+    else {
+        warn!("capture: no tree is map instance {:?}", cue.instance);
+        return;
+    };
+    if usize::from(cue.cut) >= body.kind.segments.len()
+        || *state != crate::trees::TreeState::Standing
+    {
+        warn!("capture: {cue:?} cannot fall: the tree is {:?}", *state);
+        return;
+    }
+    *state = crate::trees::TreeState::Down {
+        cut: cue.cut,
+        dir: cue.dir,
+    };
+    commands.entity(root).insert(crate::trees::Fell {
+        tick: clock.map_or(0, |clock| clock.0),
+    });
+    info!(
+        "capture: {} falls at {:.4} s, cut {}, bin {}",
+        cue.instance,
+        time.elapsed_secs(),
+        cue.cut,
+        cue.dir
+    );
 }
 
 /// Apps rewrite their UI roots' `Visibility` from `Update`; this runs after them and before the
@@ -434,6 +535,32 @@ mod tests {
             "nan,0,0,1,1,1",
         ] {
             assert_eq!(parse_pose(refused), None, "{refused}");
+        }
+    }
+
+    /// A fell cue is an instance id, a finite second and two bytes; anything else leaves every
+    /// tree standing rather than felling a guess.
+    #[test]
+    fn a_fell_cue_is_an_instance_a_second_a_cut_and_a_bin() {
+        assert_eq!(
+            parse_fell("fir_c_0160, 10,3,64"),
+            Some(FellCue {
+                instance: "fir_c_0160".to_owned(),
+                at: 10.0,
+                cut: 3,
+                dir: 64,
+                done: false,
+            })
+        );
+        for refused in [
+            "",
+            "fir,10,3",
+            "fir,10,3,64,1",
+            "fir,inf,3,64",
+            "fir,10,256,64",
+            "fir,10,3,-1",
+        ] {
+            assert_eq!(parse_fell(refused), None, "{refused}");
         }
     }
 
