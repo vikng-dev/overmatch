@@ -72,6 +72,20 @@ batching)` or `OVERMATCH PATCH (removal skip)`, and either can be carried or dro
   after the prepared instances are applied: the same point in the frame where stock applied the
   channel's removals. The order among removals was never defined, since the channel interleaved
   the workers.
+- **Removal skip** (`extract_mesh_for_gpu_building`). Extraction selects meshes on transform
+  changes whether they are visible or not, and stock queues a removal for every invisible one it
+  selects, so a hidden mesh that moves (a vehicle's hidden LOD rungs and enclosed parts) queues one
+  every frame, long after its instance is gone. Here an invisible mesh queues a removal only while
+  `render_mesh_instances` holds an instance for it. This relies on two invariants, named in the
+  source comment: every input slot and every `RenderGpuCulledEntities::entities` entry belongs to an
+  instance in that map, so a removal without one only re-lists the entity in
+  `RenderGpuCulledEntities::removed`, which each view acts on only for entities it lists; and
+  extraction reads the map as the previous frame's collection left it, while this frame's
+  collection adds an instance only for an entity queued as changed. A `Mesh3d` removed or despawned
+  still queues its removal unconditionally (`extract_meshes_for_gpu_building`).
+  Not reproduced from stock: a view that missed the frame its entity was removed (absent from
+  `collect_gpu_culled_meshes`) would keep listing it in `entities_gpu_culling`, and stock cleared
+  that only if the entity happened to move while invisible. Neither guarantees it.
 
 Guards: `src/tests/bevy_mesh_removal_lifecycle.rs`, render-world lifecycle tests on a real adapter
 (`#[ignore]`d, since CI has none; the module doc has the command). Counter: `SPIKE_MESH_REMOVALS=1`

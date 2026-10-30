@@ -213,6 +213,14 @@ impl Lab {
         assert!(self.has_instance(entity));
     }
 
+    fn global_translation(&self, entity: Entity) -> Vec3 {
+        self.app
+            .world()
+            .get::<GlobalTransform>(entity)
+            .expect("a mesh has a GlobalTransform")
+            .translation()
+    }
+
     fn has_instance(&self, entity: Entity) -> bool {
         self.app
             .sub_app(RenderApp)
@@ -578,5 +586,83 @@ fn despawns_leave_no_instance() {
         !cubes
             .iter()
             .any(|&e| lab.has_instance(e) || lab.in_gpu_culled_set(e))
+    );
+}
+
+/// The removal skip (`OVERMATCH_PATCH.md`, "Mesh instance removals"): a mesh that goes invisible
+/// queues one removal, for the instance it had, and none while it stays invisible however it moves:
+/// on its own, under a moving parent (a vehicle's hidden part), or outside the frustum. A mesh whose
+/// material never became ready has no instance and queues none. Without the skip it fails on the
+/// frame they go invisible and on every frame they move (MEASURED).
+#[test]
+#[ignore = "needs a GPU adapter (module doc); never opens a window"]
+fn a_hidden_mesh_queues_one_removal_however_long_it_moves() {
+    let mut lab = Lab::new();
+    let plain = lab.cube(IN_VIEW);
+    let culled = lab.cube(IN_VIEW + Vec3::X);
+    let parent = lab.parent();
+    let child = lab.cube(IN_VIEW - Vec3::X);
+    lab.entity(child).insert(ChildOf(parent));
+    let pending = lab.cube(IN_VIEW + Vec3::Y);
+    let never_ready = lab
+        .app
+        .world()
+        .resource::<Assets<StandardMaterial>>()
+        .reserve_handle();
+    lab.entity(pending).insert(MeshMaterial3d(never_ready));
+    let shown = [plain, culled, child];
+    lab.settle("three visible cubes", |lab| {
+        shown.iter().all(|&e| lab.has_instance(e))
+    });
+    assert!(!lab.has_instance(pending));
+
+    lab.entity(plain).insert(Visibility::Hidden);
+    lab.entity(parent).insert(Visibility::Hidden);
+    lab.entity(pending).insert(Visibility::Hidden);
+    lab.translate(culled, BEHIND - IN_VIEW);
+    let removals = lab.frame();
+    for entity in shown {
+        assert_eq!(
+            removals.iter().filter(|(e, _)| *e == entity).count(),
+            1,
+            "{entity} went invisible with an instance: exactly one removal"
+        );
+    }
+    // Every frame is checked before failing, so a failure lists each frame that broke the contract.
+    let mut stray = Vec::new();
+    let no_instance = |removals: &[(Entity, bool)]| -> Vec<Entity> {
+        removals
+            .iter()
+            .filter(|(_, live)| !live)
+            .map(|(e, _)| *e)
+            .collect()
+    };
+    stray.push(("the frame they went invisible", no_instance(&removals)));
+
+    let hidden = [plain, culled, child, pending];
+    for _ in 0..MOVING_FRAMES {
+        let before = lab.global_translation(child);
+        lab.translate(plain, NUDGE);
+        lab.translate(parent, NUDGE);
+        lab.translate(culled, NUDGE);
+        lab.translate(pending, NUDGE);
+        let removals = lab.frame();
+        assert_ne!(
+            lab.global_translation(child),
+            before,
+            "the hidden child did not move, so this frame proves nothing"
+        );
+        stray.push((
+            "a frame they moved while invisible",
+            removals
+                .into_iter()
+                .filter_map(|(e, _)| hidden.contains(&e).then_some(e))
+                .collect(),
+        ));
+    }
+    stray.retain(|(_, entities)| !entities.is_empty());
+    assert!(
+        stray.is_empty(),
+        "removals queued for meshes with no instance (hidden {hidden:?}): {stray:?}"
     );
 }

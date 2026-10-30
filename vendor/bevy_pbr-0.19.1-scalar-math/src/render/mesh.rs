@@ -2111,7 +2111,15 @@ fn extract_mesh_for_gpu_building(
 ) {
     // If the entity is invisible, remove it.
     if !view_visibility.get() {
-        queue.remove(entity.into(), any_gpu_culling);
+        // OVERMATCH PATCH (removal skip): only an entity with an instance has anything to remove.
+        // Every input slot and every `RenderGpuCulledEntities::entities` entry belongs to an
+        // instance in this map, so stock's removal of an entity without one only re-lists it in
+        // `RenderGpuCulledEntities::removed`. The map is as the previous frame's
+        // `collect_meshes_for_gpu_building` left it, and this frame's adds an instance only for an
+        // entity queued as changed, which this one is not.
+        if render_mesh_instances.contains_key(&MainEntity::from(entity)) {
+            queue.remove(entity.into(), any_gpu_culling);
+        }
         return;
     }
 
