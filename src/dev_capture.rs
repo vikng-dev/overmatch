@@ -24,7 +24,9 @@
 //!   retargeted.
 //!
 //! * `OVERMATCH_CAPTURE_STEP_S=<s>` — a positive, fixed virtual frame step for reproducible
-//!   comparisons; asset loading still runs asynchronously, so capture after the scene is ready.
+//!   comparisons. It also seeds the view RNG (cosmetic effect variation, otherwise seeded from the
+//!   wall clock) with [`VIEW_SEED`], so two runs draw the same effects. Asset loading still runs
+//!   asynchronously, so capture after the scene is ready.
 //! * `OVERMATCH_CAPTURE_FOLLOW=<x>,<y>,<z>` — hold the camera at this world-space offset from
 //!   the controlled tank, looking at its root, for close belt comparisons.
 //! * `OVERMATCH_CAPTURE_SETTINGS=<tab>` — hold the settings page open on that tab (`video` or
@@ -76,6 +78,8 @@ const WARM_UP: f32 = 1.0;
 const SIGHT_LEAD: f32 = 2.0;
 /// Seconds after the last frame's time by which it must be on disk, or the run exits failed.
 const GRACE: f32 = 3.0;
+/// The view RNG's seed under a fixed frame step; any constant serves.
+const VIEW_SEED: u64 = 0x5EED;
 
 #[derive(Resource)]
 struct Capture {
@@ -120,6 +124,8 @@ pub fn plugin(app: &mut App) {
         app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
             std::time::Duration::from_secs_f64(step),
         ));
+        // The effects plugin only `init_resource`s the RNG, so this seed holds in either mount order.
+        app.insert_resource(crate::vfx::ViewRng::seeded(VIEW_SEED));
     }
     if let Some(offset) = std::env::var("OVERMATCH_CAPTURE_FOLLOW")
         .ok()
