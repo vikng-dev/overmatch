@@ -132,8 +132,8 @@ pub(crate) struct TankCasterSwap {
 pub(crate) enum Refusal {
     /// Nothing under it draws: silencing its assembly against it would leave no shadow.
     Meshless,
-    /// It hangs off the tank's root, whose own scope is the tank's channel; the root is not a
-    /// rigid assembly a proxy can stand in for.
+    /// It hangs off the tank's root or the scene instance under it: neither is a rigid assembly a
+    /// proxy can stand in for, and the root's own scope is the tank's channel.
     AtRoot,
 }
 
@@ -153,18 +153,22 @@ pub(crate) struct CasterPlan {
 /// Partition one tank's view tree into assemblies, their proxies and the articulated parts inside
 /// them (module doc).
 ///
-/// `root` is the tank's root, the boundary of its view tree; `proxies` each declared proxy's view
-/// node with whether any mesh hangs under it; `articulated` the articulated view nodes; `parent` the
-/// view tree's parent link.
+/// `root` is the tank's root; `proxies` each declared proxy's view node with whether any mesh hangs
+/// under it; `articulated` the articulated view nodes; `parent` the view tree's parent link.
+///
+/// The view tree's boundary is the root AND every direct child of it: bevy's glTF loader spawns
+/// each scene as one instance entity under the root, whose children are the glTF's root nodes, so
+/// the first node a proxy can stand in for is two levels down.
 pub(crate) fn plan(
     root: Entity,
     proxies: &[(Entity, bool)],
     articulated: &[Entity],
     parent: impl Fn(Entity) -> Option<Entity>,
 ) -> CasterPlan {
+    let inside = |node: Entity| node != root && parent(node).is_some_and(|up| up != root);
     let mut plan = CasterPlan::default();
     for &(proxy, has_mesh) in proxies {
-        let assembly = parent(proxy).filter(|&node| node != root);
+        let assembly = parent(proxy).filter(|&node| inside(node));
         match (assembly, has_mesh) {
             (_, false) => plan.refused.push((proxy, Refusal::Meshless)),
             (None, true) => plan.refused.push((proxy, Refusal::AtRoot)),
@@ -181,7 +185,7 @@ pub(crate) fn plan(
             continue;
         }
         let mut ancestor = parent(node);
-        while let Some(current) = ancestor.filter(|&current| current != root) {
+        while let Some(current) = ancestor.filter(|&current| inside(current)) {
             if plan.assemblies.contains(&current) {
                 plan.fences.push(node);
                 break;
@@ -351,7 +355,9 @@ mod tests {
                     .spawn((Mesh3d(Handle::default()), ChildOf(parent)))
                     .id()
             };
-            let body = node(world, root);
+            // The scene instance bevy's glTF loader puts between the root and the glTF's nodes.
+            let scene = node(world, root);
+            let body = node(world, scene);
             let body_proxy = node(world, body);
             let ring = node(world, body);
             let ring_proxy = node(world, ring);
@@ -488,24 +494,39 @@ mod tests {
         assert!(plan.refused.is_empty());
     }
 
-    /// A proxy that cannot stand in is refused, and its assembly is never silenced against it: no
-    /// mesh under it, or no rigid node above it but the tank's root.
+    /// A proxy that cannot stand in is refused, and nothing is silenced against it: no mesh under
+    /// it, or no rigid node above it but the tank's root or the scene instance under the root.
     #[test]
     fn an_unusable_proxy_is_refused_and_silences_nothing() {
         let mut app = App::new();
         app.add_plugins(render_policy::plugin);
         let world = app.world_mut();
         let root = world.spawn(VisualScope::WORLD_SOLID).id();
-        let body = world.spawn(ChildOf(root)).id();
+        let scene = world.spawn(ChildOf(root)).id();
+        let body = world.spawn(ChildOf(scene)).id();
         let drawn = world.spawn((Mesh3d(Handle::default()), ChildOf(body))).id();
         let empty = world.spawn(ChildOf(body)).id();
-        let at_root = world.spawn(ChildOf(root)).id();
-        world.spawn((Mesh3d(Handle::default()), ChildOf(at_root)));
+        let mut drawing_proxy_under = |parent: Entity| {
+            let proxy = world.spawn(ChildOf(parent)).id();
+            world.spawn((Mesh3d(Handle::default()), ChildOf(proxy)));
+            proxy
+        };
+        let under_scene = drawing_proxy_under(scene);
+        let under_root = drawing_proxy_under(root);
         let parent = |e: Entity| app.world().entity(e).get::<ChildOf>().map(ChildOf::parent);
-        let plan = plan(root, &[(empty, false), (at_root, true)], &[], parent);
+        let plan = plan(
+            root,
+            &[(empty, false), (under_scene, true), (under_root, true)],
+            &[],
+            parent,
+        );
         assert_eq!(
             plan.refused,
-            vec![(empty, Refusal::Meshless), (at_root, Refusal::AtRoot)]
+            vec![
+                (empty, Refusal::Meshless),
+                (under_scene, Refusal::AtRoot),
+                (under_root, Refusal::AtRoot),
+            ]
         );
         assert!(plan.assemblies.is_empty() && plan.proxies.is_empty());
         let world = app.world_mut();
