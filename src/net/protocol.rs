@@ -205,8 +205,8 @@ use crate::{CombatantId, CombatantLife, ShotId};
 ///
 /// REV 40 (#185, a client's download per remote tank): `TankTransmission` joins the owner-only
 /// disclosure scope and every tank root carries a public `EngineRpm` for the engine sound;
-/// `Rotation` rides `wire_quant`'s 6-byte smallest-three codec. Surface, own-type graph and REV
-/// move.
+/// `Rotation` rides `wire_quant`'s 6-byte smallest-three codec, `Position` its 8-byte millimetre
+/// fixed point and the velocities its 6-byte i16 triples. Surface, own-type graph and REV move.
 pub const PROTOCOL_REV: u32 = 40;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
@@ -980,8 +980,9 @@ const WIRE_SURFACE_HASH: u64 = 0xa74c_507b_a869_c2e0;
 //     functions) is covered by that codec's whole source, comments and whitespace stripped, folded
 //     into the same hash (the test module's `WIRE_CODEC_SOURCES`): a step, range or layout change
 //     there moves it.
-//   * EXTERNAL types (avian `Position`/`Rotation`/`LinearVelocity`/`AngularVelocity`, plus lightyear's
-//     own wire framing) — their source is not in this tree to scan, so they are covered by DEP VERSION:
+//   * EXTERNAL types (avian `Position`/`Rotation`/`LinearVelocity`/`AngularVelocity`, whose bytes the
+//     `wire_quant` codecs write from their fields, plus lightyear's own wire framing) — their source
+//     is not in this tree to scan, so they are covered by DEP VERSION:
 //     [`WIRE_DEP_AVIAN3D`]/[`WIRE_DEP_LIGHTYEAR`] pin the resolved `Cargo.lock` versions, so a bump of
 //     either dep (which can silently change how those types serialize or how lightyear frames them)
 //     also trips a tripwire and changes the fingerprint when re-pinned.
@@ -992,7 +993,7 @@ const WIRE_SURFACE_HASH: u64 = 0xa74c_507b_a869_c2e0;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x0cfc_5592_2f9d_f206;
+const WIRE_TYPES_HASH: u64 = 0xf29c_1e42_7f78_6d37;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1124,15 +1125,18 @@ pub(crate) fn plugin(app: &mut App) {
         .transform_to_position = true;
     // The hull pose interpolates on the cursor; everything else applies the confirmed value on
     // arrival (per-tick keyframes, so the discrete components step at most one tick apart from
-    // the pose they ride beside).
+    // the pose they ride beside). All four ride `wire_quant`'s codecs, whose module doc states each
+    // step, range and error bound against the extrapolator's budget.
     app.component::<Position>()
-        .replicate()
+        .replicate_with(super::wire_quant::position_fns())
         .add_linear_interpolation();
     app.component::<Rotation>()
         .replicate_with(super::wire_quant::rotation_fns())
         .add_linear_interpolation();
-    app.component::<LinearVelocity>().replicate();
-    app.component::<AngularVelocity>().replicate();
+    app.component::<LinearVelocity>()
+        .replicate_with(super::wire_quant::linear_velocity_fns());
+    app.component::<AngularVelocity>()
+        .replicate_with(super::wire_quant::angular_velocity_fns());
     // The tracked drivetrain (phase B): velocity-like continuous sim state, replicated for the
     // remote track view. Interpolated like Position/Rotation so a cursor-rendered hull's track
     // view reads cursor-time belt speed/phase, never the arrival-fresh value that visibly leads

@@ -7,16 +7,27 @@
 //!
 //! | Component | Wire | Step | Range | Out of range | Error bound (DERIVED) |
 //! |---|---|---|---|---|---|
+//! | `Position` | 8 B: 3 × 21-bit fixed point | 2⁻¹⁰ m ≈ 0.98 mm | ±1024 m per axis | 13 B: a marker byte and the three f32s, exact | ≤ 0.49 mm per axis, ≤ 0.85 mm |
 //! | `Rotation` | 6 B smallest-three | √2/(2¹⁵−1) per component | every unit quaternion | — (non-finite or zero: the identity) | ≤ 1.50·10⁻⁴ rad, so ≤ 0.15 mm per metre from the root |
+//! | `LinearVelocity` | 6 B: 3 × i16 | 2⁻⁸ m/s ≈ 3.9 mm/s | ±128 m/s per axis | clamped to the range; NaN reads 0 | ≤ 1.95 mm/s per axis, ≤ 3.4 mm/s |
+//! | `AngularVelocity` | 6 B: 3 × i16 | 2⁻¹⁰ rad/s ≈ 0.98 mrad/s | ±32 rad/s per axis | clamped to the range; NaN reads 0 | ≤ 0.49 mrad/s per axis, ≤ 0.85 mrad/s |
 //!
-//! The extrapolator (`super::extrapolate`) spends the certified ε_vis = 12.08 mm on its
-//! constant-velocity projection from the newest sample; a decoded sample differs from the
-//! authority's by the bounds above.
+//! Every step is a power of two, so every code decodes to an exact f32. Kalinovo spans ±750 m
+//! (`assets/maps/kalinovo/level.json`), inside the packed position range; a larger map's far
+//! ground costs the 13-byte form, never a wrong position.
+//!
+//! Against the extrapolator (`super::extrapolate`): its horizon g* ≈ 52.3 ms spends the certified
+//! ε_vis = 12.08 mm on the constant-velocity projection from the newest sample, which these codecs
+//! deliver within the bounds above. The velocities move the projection by at most 3.4 mm/s × g* ≈
+//! 0.18 mm plus 0.85 mrad/s × g* ≈ 0.044 mm per metre from the root; the sample itself sits within
+//! 0.85 mm plus 0.15 mm per metre of the authority's, gap or no gap. At 5 m from the root (ASSUMED,
+//! a hull's far corner) the four add up to ≤ 2.0 mm, a sixth of ε_vis, which the horizon's
+//! derivation does not subtract.
 //!
 //! Every byte layout here is pinned by the wire-types hash (`protocol`'s `WIRE_CODEC_SOURCES`):
 //! this file's code, comments stripped, folds into it whole.
 
-use avian3d::prelude::Rotation;
+use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
 use bevy_replicon::bytes::Bytes;
 use bevy_replicon::prelude::RuleFns;
@@ -102,6 +113,122 @@ pub(super) fn rotation_fns() -> RuleFns<Rotation> {
             Ok(())
         },
         |_: &mut WriteCtx, message: &mut Bytes| read_rotation(message).map(Rotation),
+    )
+}
+
+/// Position steps per metre: a step of 2⁻¹⁰ m.
+const POSITION_STEPS_PER_M: f32 = 1024.0;
+
+/// Bits per packed position axis, two's complement: ±2²⁰ steps, ±1024 m.
+const POSITION_BITS: u32 = 21;
+
+/// The first byte of the full-precision form. Bit 0 is the form flag: the packed form keeps it
+/// clear (its fields start at bit 1).
+const POSITION_FULL: u8 = 1;
+
+/// A position in 8 bytes when every axis is inside ±1024 m: a clear flag bit, then x, y and z as
+/// 21-bit two's-complement counts of 2⁻¹⁰ m, little-endian. Error: half a step per axis, ≤ 2⁻¹¹ m
+/// ≈ 0.49 mm, ≤ √3·2⁻¹¹ m ≈ 0.85 mm in space. Any axis outside, or not finite: [`POSITION_FULL`]
+/// and the three f32s, 13 bytes and exact.
+pub(super) fn write_position(position: Vec3, message: &mut Vec<u8>) {
+    let half = 1i64 << (POSITION_BITS - 1);
+    let mut packed = 0u64;
+    for (axis, value) in position.to_array().into_iter().enumerate() {
+        let steps = (value * POSITION_STEPS_PER_M).round();
+        // Fails for NaN too.
+        if !(steps >= -(half as f32) && steps < half as f32) {
+            message.push(POSITION_FULL);
+            for value in position.to_array() {
+                message.extend_from_slice(&value.to_le_bytes());
+            }
+            return;
+        }
+        let code = (steps as i64 + half) as u64;
+        packed |= code << (1 + axis as u32 * POSITION_BITS);
+    }
+    message.extend_from_slice(&packed.to_le_bytes());
+}
+
+/// The position [`write_position`] wrote, in either form; consumes its 8 or 13 bytes.
+pub(super) fn read_position(message: &mut Bytes) -> Result<Vec3> {
+    let [first] = take::<1>(message)?;
+    if first & 1 == POSITION_FULL {
+        let bytes: [u8; 12] = take(message)?;
+        let axis =
+            |index: usize| f32::from_le_bytes(std::array::from_fn(|byte| bytes[4 * index + byte]));
+        return Ok(Vec3::new(axis(0), axis(1), axis(2)));
+    }
+    let rest: [u8; 7] = take(message)?;
+    let packed = u64::from_le_bytes(std::array::from_fn(|byte| {
+        if byte == 0 { first } else { rest[byte - 1] }
+    }));
+    let half = 1i64 << (POSITION_BITS - 1);
+    let axis = |index: u32| {
+        let code = (packed >> (1 + index * POSITION_BITS)) & ((1 << POSITION_BITS) - 1);
+        (code as i64 - half) as f32 / POSITION_STEPS_PER_M
+    };
+    Ok(Vec3::new(axis(0), axis(1), axis(2)))
+}
+
+/// [`Position`] on the wire as [`write_position`].
+pub(super) fn position_fns() -> RuleFns<Position> {
+    RuleFns::new(
+        |_: &mut SerializeCtx, position: &Position, message: &mut Vec<u8>| {
+            write_position(position.0, message);
+            Ok(())
+        },
+        |_: &mut WriteCtx, message: &mut Bytes| read_position(message).map(Position),
+    )
+}
+
+/// Linear velocity steps per m/s: a step of 2⁻⁸ m/s, so an i16 holds ±128 m/s.
+pub(super) const LINEAR_VELOCITY_STEPS: f32 = 256.0;
+
+/// Angular velocity steps per rad/s: a step of 2⁻¹⁰ rad/s, so an i16 holds ±32 rad/s.
+pub(super) const ANGULAR_VELOCITY_STEPS: f32 = 1024.0;
+
+/// A vector in 6 bytes: each axis an i16 count of `1/steps`, little-endian. Error: half a step per
+/// axis, `√3/(2·steps)` in space. An axis outside the i16 range saturates at its bound (Rust's
+/// float-to-int cast), and NaN reads 0. Postcard would write each i16 as a zigzag varint of up to
+/// 3 bytes; the fixed layout is 2.
+pub(super) fn write_i16x3(value: Vec3, steps: f32, message: &mut Vec<u8>) {
+    for axis in value.to_array() {
+        message.extend_from_slice(&((axis * steps).round() as i16).to_le_bytes());
+    }
+}
+
+/// The vector [`write_i16x3`] wrote at the same `steps`; consumes its 6 bytes.
+pub(super) fn read_i16x3(message: &mut Bytes, steps: f32) -> Result<Vec3> {
+    let bytes: [u8; 6] = take(message)?;
+    let axis = |index: usize| {
+        f32::from(i16::from_le_bytes([bytes[2 * index], bytes[2 * index + 1]])) / steps
+    };
+    Ok(Vec3::new(axis(0), axis(1), axis(2)))
+}
+
+/// [`LinearVelocity`] on the wire as [`write_i16x3`] at [`LINEAR_VELOCITY_STEPS`].
+pub(super) fn linear_velocity_fns() -> RuleFns<LinearVelocity> {
+    RuleFns::new(
+        |_: &mut SerializeCtx, velocity: &LinearVelocity, message: &mut Vec<u8>| {
+            write_i16x3(velocity.0, LINEAR_VELOCITY_STEPS, message);
+            Ok(())
+        },
+        |_: &mut WriteCtx, message: &mut Bytes| {
+            read_i16x3(message, LINEAR_VELOCITY_STEPS).map(LinearVelocity)
+        },
+    )
+}
+
+/// [`AngularVelocity`] on the wire as [`write_i16x3`] at [`ANGULAR_VELOCITY_STEPS`].
+pub(super) fn angular_velocity_fns() -> RuleFns<AngularVelocity> {
+    RuleFns::new(
+        |_: &mut SerializeCtx, velocity: &AngularVelocity, message: &mut Vec<u8>| {
+            write_i16x3(velocity.0, ANGULAR_VELOCITY_STEPS, message);
+            Ok(())
+        },
+        |_: &mut WriteCtx, message: &mut Bytes| {
+            read_i16x3(message, ANGULAR_VELOCITY_STEPS).map(AngularVelocity)
+        },
     )
 }
 
