@@ -1,0 +1,26 @@
+{
+  "close": {
+    "pixels": 2073600,
+    "differing": 0,
+    "over_8": 0,
+    "over_32": 0,
+    "max_channel_delta": 0,
+    "mean_channel_delta": 0.0
+  },
+  "duel": {
+    "pixels": 2073600,
+    "differing": 0,
+    "over_8": 0,
+    "over_32": 0,
+    "max_channel_delta": 0,
+    "mean_channel_delta": 0.0
+  },
+  "probes30": {
+    "pixels": 2073600,
+    "differing": 0,
+    "over_8": 0,
+    "over_32": 0,
+    "max_channel_delta": 0,
+    "mean_channel_delta": 0.0
+  }
+}

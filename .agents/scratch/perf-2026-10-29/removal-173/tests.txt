@@ -1,0 +1,33 @@
+# src/tests/bevy_mesh_removal_lifecycle.rs, run with --ignored on the M4 (Metal), MEASURED.
+# The contract test is a_hidden_mesh_queues_one_removal_however_long_it_moves; the other five are
+# the lifecycle tests.
+
+## Stock bevy_pbr 0.19.1 (the vendored crate as of 08dafad). The contract test here is an earlier
+## draft that stopped at its first violation, the frame the meshes went invisible.
+test tests::bevy_mesh_removal_lifecycle::despawns_leave_no_instance ... ok
+test tests::bevy_mesh_removal_lifecycle::culling_mode_switches_keep_instances_true ... ok
+test tests::bevy_mesh_removal_lifecycle::mesh_removal_and_reinsertion_keep_instances_true ... ok
+test tests::bevy_mesh_removal_lifecycle::material_readiness_keeps_instances_true ... ok
+test tests::bevy_mesh_removal_lifecycle::a_hidden_mesh_queues_one_removal_however_long_it_moves ... FAILED
+test tests::bevy_mesh_removal_lifecycle::visibility_transitions_keep_instances_true ... ok
+a removal was queued for a mesh with no instance: [(357v0, true), (354v0, true), (355v0, true), (358v0, false)]
+test result: FAILED. 5 passed; 1 failed
+
+## Removal batching only (c365bbc), with the committed contract test.
+test tests::bevy_mesh_removal_lifecycle::despawns_leave_no_instance ... ok
+test tests::bevy_mesh_removal_lifecycle::visibility_transitions_keep_instances_true ... ok
+test tests::bevy_mesh_removal_lifecycle::mesh_removal_and_reinsertion_keep_instances_true ... ok
+test tests::bevy_mesh_removal_lifecycle::a_hidden_mesh_queues_one_removal_however_long_it_moves ... FAILED
+test tests::bevy_mesh_removal_lifecycle::material_readiness_keeps_instances_true ... ok
+test tests::bevy_mesh_removal_lifecycle::culling_mode_switches_keep_instances_true ... ok
+removals queued for meshes with no instance (hidden [354v0, 355v0, 357v0, 358v0]): [("the frame they went invisible", [358v0]), ("a frame they moved while invisible", [355v0, 358v0, 357v0, 354v0]), ("a frame they moved while invisible", [354v0, 355v0, 358v0, 357v0]), ("a frame they moved while invisible", [354v0, 355v0, 358v0, 357v0]), ("a frame they moved while invisible", [355v0, 357v0, 358v0, 354v0]), ("a frame they moved while invisible", [354v0, 357v0, 358v0, 355v0])]
+test result: FAILED. 5 passed; 1 failed
+
+## Batching and skip (3659ff9).
+test tests::bevy_mesh_removal_lifecycle::a_hidden_mesh_queues_one_removal_however_long_it_moves ... ok
+test tests::bevy_mesh_removal_lifecycle::despawns_leave_no_instance ... ok
+test tests::bevy_mesh_removal_lifecycle::mesh_removal_and_reinsertion_keep_instances_true ... ok
+test tests::bevy_mesh_removal_lifecycle::visibility_transitions_keep_instances_true ... ok
+test tests::bevy_mesh_removal_lifecycle::material_readiness_keeps_instances_true ... ok
+test tests::bevy_mesh_removal_lifecycle::culling_mode_switches_keep_instances_true ... ok
+test result: ok. 6 passed (with doc_citations and render_cost: 16 passed)

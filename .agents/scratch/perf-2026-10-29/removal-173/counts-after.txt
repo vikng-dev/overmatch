@@ -1,0 +1,8 @@
+# after: SPIKE_MESH_REMOVALS lines from the hidden 30-tank run (built from 3659ff9 (counter + removal batching + removal skip): scripts/serial-cargo build --locked --features dev_ui,bitprobe --bin overmatch (dev profile))
+offline: spawned 28 probe tanks (OVERMATCH_PROBE_TANKS=30) — near placement, grid x -18..38 z 48..92, 43..91 m from the controlled tank at (10, 5)
+mesh_removals: frames=3 queued=2136 live=2079 queued_per_frame=712.0 live_per_frame=693.0
+mesh_removals: frames=101 queued=34 live=34 queued_per_frame=0.3 live_per_frame=0.3
+mesh_removals: frames=285 queued=9 live=9 queued_per_frame=0.0 live_per_frame=0.0
+mesh_removals: frames=269 queued=0 live=0 queued_per_frame=0.0 live_per_frame=0.0
+mesh_removals: frames=288 queued=0 live=0 queued_per_frame=0.0 live_per_frame=0.0
+mesh_removals: frames=291 queued=0 live=0 queued_per_frame=0.0 live_per_frame=0.0
