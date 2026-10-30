@@ -1,3 +1,12 @@
+# Two packages: the game (this one) and `tools/`, the asset tooling that is never shipped. The tools
+# depend on the game library for its data types; the game never depends on them. A bare `cargo`
+# command here selects the game alone (the root package is the default member), so every build and
+# run that names no package is unchanged; `--workspace` covers both (CI's clippy and test lanes).
+# `vendor/` holds patched upstream crates, which are not ours to lint.
+[workspace]
+members = ["tools"]
+exclude = ["vendor"]
+
 [package]
 name = "overmatch"
 version = "0.7.0-alpha.2"
@@ -124,9 +133,13 @@ dev_ui = ["dep:bevy_egui"]
 # carry the demo through `debug_assertions`; no shipped build enables this.
 track_prints_demo = ["dev_tools"]
 
-# The one home for lint policy. Levels are `warn`: CI's `clippy -- -D warnings` promotes them to
-# errors, local iteration is never blocked. Applies to this package only, never to `vendor/`.
-[lints.clippy]
+# The one home for lint policy, for every package of the workspace (each opts in with
+# `[lints] workspace = true`). Levels are `warn`: CI's `clippy -- -D warnings` promotes them to
+# errors, local iteration is never blocked. Never applies to `vendor/`, which is no member.
+[lints]
+workspace = true
+
+[workspace.lints.clippy]
 # Bevy query and `SystemParam` tuples are the engine's language, not a smell.
 type_complexity = "allow"
 allow_attributes_without_reason = "warn"

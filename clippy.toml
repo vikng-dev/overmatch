@@ -1,3 +1,3 @@
-# The one home of the function-length threshold `too_many_lines` (`Cargo.toml` `[lints.clippy]`)
+# The one home of the function-length threshold `too_many_lines` (`Cargo.toml` `[workspace.lints.clippy]`)
 # enforces: code lines per function, comments and blank lines not counted.
 too-many-lines-threshold = 200

@@ -1,0 +1,28 @@
+# The asset tooling: offline stages that turn authored inputs into the files the game reads. Never
+# shipped: a release builds the game's binaries by name (`--bin overmatch`, `--bin overmatch-server`),
+# and nothing in the game depends on this package. It depends on the game library for the data types
+# both sides share, so a schema has one definition.
+[package]
+name = "overmatch-tools"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[dependencies]
+overmatch = { path = ".." }
+# Already in the tree through the game (same locked versions — these add no compiled crate).
+ron = "0.12"
+serde = { version = "1", features = ["derive"] }
+glam = { version = "0.32.1", features = ["serde", "scalar-math"] }
+
+[lints]
+workspace = true
+
+# Tests are `#[cfg(test)]` modules of the lib; the bins hold none.
+[lib]
+doctest = false
+
+[[bin]]
+name = "bake-buildings"
+path = "src/bin/bake-buildings.rs"
+test = false

@@ -134,9 +134,11 @@ jobs:
       # The retired `--no-default-features` pair proved the sim didn't depend on netcode; that guard
       # now lives in `src/net/tests/net_boundary.rs` (a source scan) + `src/headless_test.rs`
       # (boots the sim with no netcode mounted) — no second full build required.
+      # `--workspace`: the game and the asset tools (`tools/`), one feature set, so the game library
+      # compiles once for both.
       - name: Clippy
         if: matrix.task == 'clippy'
-        run: cargo clippy --locked --all-targets --features dev_ui,bitprobe -- -D warnings
+        run: cargo clippy --locked --workspace --all-targets --features dev_ui,bitprobe -- -D warnings
 
       # The LOD lane's math, before the Cargo lane so a broken ladder fails fast and cheaply. Stdlib
       # + numpy, no Blender and no corpus: every named refusal, every declared gate limit, the
@@ -153,10 +155,11 @@ jobs:
           python3 -m pip install --quiet --disable-pip-version-check numpy
           python3 scripts/lod/test_refusals.py
 
+      # `--workspace` runs the asset tools' tests too: the bakes' determinism and invariants.
       - name: Tests
         if: matrix.task == 'tests'
         run: |
-          cargo test --locked -- --skip ballistics::field_casts::
+          cargo test --locked --workspace -- --skip ballistics::field_casts::
 
   # One context that is green iff EVERY lane a push or a PR runs here is green — `fmt` included,
   # because a summary that omits a lane is a summary that can go green over its failure, whatever
