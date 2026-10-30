@@ -226,6 +226,20 @@
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: None,
         ),
+        // Fired clay brick, worn only by the armour sandbox's wall prototype
+        // (`src/sandbox/wall.rs`). No penetration data: the factor is the brick unit's compressive
+        // strength over the reference steel's flow strength, scaled to the reference's 1000 — the
+        // strength ratio Wood's row reads, not a measured equivalence. The unit, not the masonry
+        // assemblage (12 MPa with Type N mortar): a round's line crosses brick far more than mortar.
+        "Brick": Hard(
+            resistance: Effective((36.5, Unknown("no penetration data; molded solid clay brick mean
+                unit compressive strength 36.5 MPa (s.d. 12.6; extruded 77.9), Brick Industry
+                Association Technical Note 3A (2024) Table 1, read 2026-10-30, over the reference
+                flow strength ~1 GPa, × 1000"))),
+            paintable: false,
+            debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
+            facts: None,
+        ),
         // The 8.8 cm Pzgr. 39's burst core, named by its burst block's `core_substance`.
         "88mm_burst_core": Unworn(
             burst: Some((

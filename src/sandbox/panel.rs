@@ -40,7 +40,11 @@ use super::{
 pub(super) fn plugin(app: &mut App) {
     app.add_plugins(EguiPlugin::default())
         // The primary context runs multi-pass in 0.41, so UI MUST be drawn in this schedule.
-        .add_systems(EguiPrimaryContextPass, panel);
+        // A wall capture draws no panel: its frames show the wall and its readout alone.
+        .add_systems(
+            EguiPrimaryContextPass,
+            panel.run_if(not(resource_exists::<super::wall::WallScript>)),
+        );
 }
 
 /// The resources the panel WRITES, as one bundle. Each is `Copy + PartialEq` or a tiny flag, so the

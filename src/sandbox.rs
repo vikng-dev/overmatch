@@ -73,6 +73,10 @@ mod panel;
 #[cfg(test)]
 mod tests;
 
+// The wall prototype: a brick wall the range's rounds, a point deposit and a blast break up under
+// candidate crack laws (the game's environment destruction design, 2026-10-30).
+mod wall;
+
 /// The spec sheet of the tank the sandbox spawns; the range's gun is its primary weapon as
 /// authored there ([`seed_gun`]).
 const SEED_SPEC: &str = include_str!("../assets/tiger_1/tiger_1.tank.ron");
@@ -384,6 +388,7 @@ pub fn plugin(app: &mut App) {
     #[cfg(feature = "dev_ui")]
     app.add_plugins(panel::plugin);
     autopilot_plugin(app);
+    wall::plugin(app);
     // The per-frame wall-clock recorder (idle unless `SPIKE_FRAME_COST` is set): the frame cost of
     // an autopilot capture, wall-clock under the flight's fixed step too.
     app.add_plugins(crate::frame_cost::client_plugin);
@@ -1238,7 +1243,10 @@ fn spawn_hud(mut commands: Commands, fonts: Res<crate::ui_font::UiFonts>) {
              Up / Down  slow-mo\n\
              T  march cadence\n\
              Esc  free cursor\n\
-             H  keys",
+             H  keys\n\
+             wall: 1-5 law  K cut  N new  B round  F fire\n\
+             wall: P point  [ ] energy  O blast  , . mass  ; ' standoff\n\
+             wall: V casing  U structural  J spall  G camera",
         ),
         TextFont {
             font_size: FontSize::Px(14.0),

@@ -646,7 +646,7 @@ mod tests {
 
     /// Every substance the shipped library declares. A rename or a deletion has to come here first,
     /// which is the point: the Blender link key and the code's vocabulary are one contract.
-    const EXPECTED: [&str; 11] = [
+    const EXPECTED: [&str; 12] = [
         "RHA",
         "GunSteel",
         "Cast",
@@ -657,6 +657,7 @@ mod tests {
         "TungstenCarbide",
         "Flesh",
         "Wood",
+        "Brick",
         "88mm_burst_core",
     ];
 
