@@ -1,0 +1,35 @@
+// This vehicle's default livery: the paint and camouflage the tank surface material lays over every
+// visual that takes paint (`assets/materials/visuals.ron`). VIEW ONLY — the dedicated server never
+// reads it. Design: `.agents/docs/design/tank-surfaces.md`.
+//
+// `paint` = one colour (sRGB) and a sheen (0 dead flat .. 1 mirror gloss; the surface's perceptual
+// roughness is 1 − sheen). `camouflage` = optional: one shared pattern
+// (`assets/materials/camouflage/<pattern>.ktx2`), the metres one repeat of it spans on the vehicle,
+// and up to three colours (sRGB), the pattern's R, G and B coverage in that order. `None` leaves the
+// paint alone.
+//
+// The default here: Dunkelgelb overall, matte, with Olivgrün and Rotbraun stripes over it, the
+// scheme the 18 Feb 1943 order allowed field units to apply
+// (`.agents/scratch/tank-texturing/tiger-materials-2026-10-30.md`, Factory finish). Every colour is
+// a published approximation of a paint standard, not a measurement of a vehicle.
+(
+    paint: (
+        colour: ("#9A8952", Measured("CLAIMED: RAL 7028 Dunkelgelb, the initial 1943 shade, as AK
+            Interactive's matched paint AK11318 is published (encycolorpedia.com/9a8952, read
+            2026-10-31). Its 'variant' AK11320 is #B59A58 and its 'Ausgabe 1944' AK11319 #B7A277; no
+            RAL-published sRGB for 7028 was found")),
+        sheen: (0.1, Tuned("ASSUMED: a matte military finish")),
+    ),
+    camouflage: Some((
+        pattern: "stripes",
+        metres_per_repeat: (4.0, Tuned("ASSUMED: field-sprayed bands a few tens of centimetres wide")),
+        colours: [
+            ("#4B573E", Measured("CLAIMED: RAL 6003 Olivgrün, RAL Classic sRGB approximation as
+                Wikipedia's 'List of RAL colours' gives it (read 2026-10-31); the modern swatch, not a
+                wartime sample")),
+            ("#44322D", Measured("CLAIMED: RAL 8017, RAL Classic 'Chocolate brown' (the wartime
+                Rotbraun's number), sRGB approximation as Wikipedia's 'List of RAL colours' gives it
+                (read 2026-10-31); the modern swatch, not a wartime sample")),
+        ],
+    )),
+)

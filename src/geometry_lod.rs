@@ -17,8 +17,9 @@
 //! and no shadow marker. Despawn is recursive, so a rung dies with the primitive it belongs to.
 //!
 //! A RUNG WEARS ITS SOURCE PRIMITIVE'S MATERIAL. Rung mesh records carry no glTF material — they
-//! are bare machine reductions — and the material is cloned off the rung-0 entity at bind time, so
-//! a swap changes the silhouette and nothing else.
+//! are bare machine reductions — and the material is cloned off the rung-0 entity at bind time,
+//! whichever it wears (the glb's standard material, or the tank surface `tank_surface` swapped in),
+//! with its `MeshTag`, so a swap changes the silhouette and nothing else.
 //!
 //! THE TRACK'S SHOES ARE THE EXCEPTION, and they are not spawned here ([`attach_rungs`] is gated on
 //! `GltfMeshName`, which the loader writes on scene-primitive leaves only). Every shoe of one side
@@ -55,10 +56,12 @@ use std::sync::Arc;
 use bevy::asset::AssetId;
 use bevy::camera::visibility::VisibilityRange;
 use bevy::gltf::{Gltf, GltfMesh, GltfMeshName};
+use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 
 pub(crate) use certificate::{Chain, TrioMember};
 
+use crate::tank_surface::TankSurfaceMaterial;
 use crate::view::ViewProfile;
 
 /// The selected tank's asset id ([`crate::assets::TANK_ID`]). The trio lives at
@@ -369,6 +372,12 @@ fn resolve_chains(
 // The bind
 // ---------------------------------------------------------------------------------------------
 
+/// The material a rung clones off its source primitive.
+enum RungMaterial {
+    Standard(Handle<StandardMaterial>),
+    Surface(Handle<TankSurfaceMaterial>),
+}
+
 /// Give every freshly spawned scene primitive its band, and one coincident sibling per rung.
 ///
 /// `GltfMeshName` is the scene-primitive discriminator: it is written by the glTF loader on
@@ -385,6 +394,8 @@ fn attach_rungs(
             Entity,
             &Mesh3d,
             Option<&MeshMaterial3d<StandardMaterial>>,
+            Option<&MeshMaterial3d<TankSurfaceMaterial>>,
+            Option<&MeshTag>,
             Option<&Name>,
         ),
         (With<GltfMeshName>, Without<GeometryLodScanned>),
@@ -392,7 +403,7 @@ fn attach_rungs(
     parents: Query<&ChildOf>,
     source_detail: Query<(), With<SourceDetail>>,
 ) {
-    for (entity, mesh, material, name) in &fresh {
+    for (entity, mesh, standard, surface, tag, name) in &fresh {
         let mut primitive = commands.entity(entity);
         primitive.insert(GeometryLodScanned);
         if parents
@@ -412,35 +423,49 @@ fn attach_rungs(
             },
             bands.remove(0),
         ));
-        let Some(material) = material else {
-            // A rung carries no material of its own; without one to clone it would render as the
-            // glTF default while its source does not.
-            warn_once!(
-                "geometry_lod: `{}` matches chain `{}` and carries no StandardMaterial — its \
-                 rungs are not bound, so it renders at source detail",
-                name.map_or("<unnamed>", Name::as_str),
-                chain.key(),
-            );
-            continue;
+        let material = match (standard, surface) {
+            (Some(standard), _) => RungMaterial::Standard(standard.0.clone()),
+            (None, Some(surface)) => RungMaterial::Surface(surface.0.clone()),
+            (None, None) => {
+                // A rung carries no material of its own; without one to clone it would render as
+                // the glTF default while its source does not.
+                warn_once!(
+                    "geometry_lod: `{}` matches chain `{}` and carries no material — its rungs \
+                     are not bound, so it renders at source detail",
+                    name.map_or("<unnamed>", Name::as_str),
+                    chain.key(),
+                );
+                continue;
+            }
         };
-        let material = material.0.clone();
+        let tag = tag.cloned();
         let index = chain.index();
         let rungs: Vec<(Handle<Mesh>, VisibilityRange)> =
             chain.rungs().iter().cloned().zip(bands).collect();
         primitive.with_children(|parent| {
             for (level, (mesh, band)) in rungs.into_iter().enumerate() {
-                parent.spawn((
+                let mut rung = parent.spawn((
                     GeometryLodLevel {
                         chain: index,
                         level: level + 1,
                     },
                     Mesh3d(mesh),
-                    MeshMaterial3d(material.clone()),
                     band,
                     // IDENTITY: every rung is authored in its source primitive's mesh-local frame,
                     // so riding the parent puts it exactly where the source was.
                     Transform::IDENTITY,
                 ));
+                match &material {
+                    RungMaterial::Standard(material) => {
+                        rung.insert(MeshMaterial3d(material.clone()))
+                    }
+                    RungMaterial::Surface(material) => {
+                        rung.insert(MeshMaterial3d(material.clone()))
+                    }
+                };
+                if let Some(tag) = &tag {
+                    rung.insert(tag.clone());
+                }
             }
         });
     }

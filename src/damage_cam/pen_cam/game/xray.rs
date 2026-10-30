@@ -1,7 +1,8 @@
 //! The x-ray: a tank in the glass look on the battlefield, the latest shot that struck it drawn
 //! over it, its key ([`XRay`], X) a preference kept across lives. Its own presentation beside the
 //! corner slot: no corner, no stage copy, no exhibit. The look goes on the tank's REAL render
-//! primitives — each mesh's `StandardMaterial` handle set aside ([`Dressed`]) and replaced by its
+//! primitives — each mesh's material handle (the glb's `StandardMaterial`, or the tank surface
+//! `tank_surface` swapped in) set aside ([`Dressed`]) and replaced by its
 //! tier's [`LookMaterial`], a component's painted with the record's fields by its live role
 //! ([`Footprint`]), a mask copy spawned under it — and the record's elements hang under the
 //! live hull and component meshes ([`spawn_glass`]), so the pose, the servos and the certified LOD
@@ -86,6 +87,7 @@ use crate::render_policy::VisualScope;
 use crate::sight::SightMode;
 use crate::spec::TankSpecHandle;
 use crate::tank::{Controlled, Rig as TankRig, Tank, ViewNode};
+use crate::tank_surface::TankSurfaceMaterial;
 use crate::track::belt_draw::BeltMaterial;
 use crate::view::PlayerView;
 use crate::{CombatantId, CombatantLife};
@@ -238,10 +240,11 @@ pub(super) struct Dressed {
     names: Vec<String>,
 }
 
-/// The material a dressed mesh wore: a glb primitive's, or a live track belt's, whose look keeps
-/// the belt's placement ([`BeltLookMaterial`]).
+/// The material a dressed mesh wore: a glb primitive's own, the tank surface it wears instead, or a
+/// live track belt's, whose look keeps the belt's placement ([`BeltLookMaterial`]).
 enum Original {
     Mesh(Handle<StandardMaterial>),
+    Surface(Handle<TankSurfaceMaterial>),
     Belt(Handle<BeltMaterial>),
 }
 
@@ -385,6 +388,18 @@ pub(super) struct Held<'w, 's> {
         ),
         (Without<Dressed>, Without<XRayItem>),
     >,
+    /// The tank's render primitives that wear the tank surface instead of the glb's material.
+    undressed_surfaces: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static Mesh3d,
+            &'static MeshMaterial3d<TankSurfaceMaterial>,
+            Option<&'static VisibilityRange>,
+        ),
+        (Without<Dressed>, Without<XRayItem>),
+    >,
     /// The tank's live track belts, one mesh per side ([`crate::track::belt_draw`]), each with
     /// the tag that names its block of the belt table.
     undressed_belts: Query<
@@ -410,6 +425,9 @@ impl Held<'_, '_> {
             let mut entity = commands.entity(entity);
             match &dressed.original {
                 Original::Mesh(original) => entity
+                    .remove::<(MeshMaterial3d<LookMaterial>, Dressed)>()
+                    .insert(MeshMaterial3d(original.clone())),
+                Original::Surface(original) => entity
                     .remove::<(MeshMaterial3d<LookMaterial>, Dressed)>()
                     .insert(MeshMaterial3d(original.clone())),
                 Original::Belt(original) => entity
@@ -743,13 +761,10 @@ fn dress(
     scene: &Hierarchy,
     held: &Held,
 ) -> (bool, bool) {
-    /// One undressed mesh: a glb primitive with the range it draws in, or a live track belt.
+    /// One undressed mesh: a glb primitive with the material it wears and the range it draws in,
+    /// or a live track belt.
     enum Undressed<'a> {
-        Mesh(
-            &'a Mesh3d,
-            &'a Handle<StandardMaterial>,
-            Option<&'a VisibilityRange>,
-        ),
+        Mesh(&'a Mesh3d, Original, Option<&'a VisibilityRange>),
         Belt(&'a Mesh3d, &'a Handle<BeltMaterial>, &'a MeshTag),
     }
     let spec = asset.spec();
@@ -757,7 +772,18 @@ fn dress(
     let mut any = false;
     let mut skipped = false;
     for entity in scene.children.iter_descendants(root) {
-        let undressed = if let Ok((_, mesh, material, range)) = held.undressed.get(entity) {
+        let primitive = held
+            .undressed
+            .get(entity)
+            .map(|(_, mesh, material, range)| (mesh, Original::Mesh(material.0.clone()), range))
+            .or_else(|_| {
+                held.undressed_surfaces
+                    .get(entity)
+                    .map(|(_, mesh, material, range)| {
+                        (mesh, Original::Surface(material.0.clone()), range)
+                    })
+            });
+        let undressed = if let Ok((mesh, original, range)) = primitive {
             if scene.source_only.is_none()
                 && scene.primitives.contains(entity)
                 && !scene.scanned.contains(entity)
@@ -765,7 +791,7 @@ fn dress(
                 skipped = true;
                 continue;
             }
-            Undressed::Mesh(mesh, &material.0, range)
+            Undressed::Mesh(mesh, original, range)
         } else if let Ok((_, mesh, material, tag)) = held.undressed_belts.get(entity) {
             Undressed::Belt(mesh, &material.0, tag)
         } else {
@@ -802,7 +828,7 @@ fn dress(
         }
         let role = live.role_of(&names);
         match undressed {
-            Undressed::Mesh(mesh, material, range) => {
+            Undressed::Mesh(mesh, original, range) => {
                 let (handle, layer) = built
                     .tiers
                     .entry((tier, Footprint::of_mesh(tier, role)))
@@ -813,14 +839,11 @@ fn dress(
                     .clone();
                 commands
                     .entity(entity)
-                    .remove::<MeshMaterial3d<StandardMaterial>>()
-                    .insert((
-                        MeshMaterial3d(handle),
-                        Dressed {
-                            original: Original::Mesh(material.clone()),
-                            names,
-                        },
-                    ));
+                    .remove::<(
+                        MeshMaterial3d<StandardMaterial>,
+                        MeshMaterial3d<TankSurfaceMaterial>,
+                    )>()
+                    .insert((MeshMaterial3d(handle), Dressed { original, names }));
                 let mut copy = commands.spawn((
                     mask_copy(mesh.0.clone(), built.mask.clone(), layer),
                     XRayItem,

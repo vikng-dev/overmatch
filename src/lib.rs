@@ -212,6 +212,9 @@ mod state;
 /// gives it its factor. Which nodes are armour is the tank sheet's declaration, never this lookup.
 mod substances;
 mod tank;
+/// A tank's drawn surface: each material's visual from the shared library, then the vehicle's
+/// livery (paint, camouflage), through one `ExtendedMaterial`. View-only. See the module doc.
+pub(crate) mod tank_surface;
 /// The ground's surface blend: four material packs mixed per fragment by the map's author-painted
 /// weight masks, through one `ExtendedMaterial`. View-only. See the module doc.
 pub(crate) mod terrain_blend;
@@ -772,6 +775,8 @@ impl Plugin for ClientPlugin {
         app.add_plugins((
             view::plugin,
             geometry_lod::view_plugin,
+            // Each tank's surface: its materials' visuals under the livery (view-only, ADR-0014).
+            tank_surface::plugin,
             ballistics::view_plugin,
             // The trees' glb binding and fall presentation (view-only, ADR-0014).
             trees::view::plugin,
@@ -856,7 +861,11 @@ impl Plugin for NetClientPlugin {
         ));
         // The live view + the render half of the certificate (see `ClientPlugin`), separate for the
         // same arity reason as the block below.
-        app.add_plugins((view::plugin, geometry_lod::view_plugin));
+        app.add_plugins((
+            view::plugin,
+            geometry_lod::view_plugin,
+            tank_surface::plugin,
+        ));
         // (Separate call: the tuple above is at bevy's 15-plugin tuple arity limit.)
         app.add_plugins((
             // The render half of ballistics (see `ClientPlugin`): the shell glb, the tracer streak

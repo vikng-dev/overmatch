@@ -33,7 +33,8 @@
 //! moves the eye and the point looked at in a straight line from the pose's to these between app
 //! seconds `<a>` and `<b>`, then holds there; while it is set the app clock steps a fixed 1/30 s a
 //! frame, so a frame's pose and the shot's tick are the same in every run. Any one leaves the
-//! cursor free.
+//! cursor free. `OVERMATCH_RANGE_XRAY=0` starts the range with the x-ray off, the target in its own
+//! surface.
 
 use std::collections::HashSet;
 
@@ -273,6 +274,8 @@ pub fn plugin(app: &mut App) {
         // terrain layer as well as the tank's chains.
         crate::view::plugin,
         crate::geometry_lod::view_plugin,
+        // The target's surface: its materials' visuals under its livery, as the game draws it.
+        crate::tank_surface::plugin,
         // The tank-geometry extractor: the target's sim body (armor volumes included) spawns from
         // `TankBlueprint`, exactly like the game's tanks; the shadow harness rides along.
         bake::plugin,
@@ -299,9 +302,12 @@ pub fn plugin(app: &mut App) {
         crate::render_policy::plugin,
         crate::damage_cam::pen_cam::game::plugin,
     ))
-    // The look's subject is the target, on from the start; the corner never opens (module doc).
+    // The look's subject is the target, on from the start unless a capture asks otherwise; the
+    // corner never opens (module doc).
     .insert_resource(XRaySubject::Struck(RANGE_TARGET))
-    .insert_resource(XRay { on: true })
+    .insert_resource(XRay {
+        on: std::env::var("OVERMATCH_RANGE_XRAY").as_deref() != Ok("0"),
+    })
     .insert_resource(Settings {
         pen_cam_corner: PenCamCorner::Off,
         ..default()
