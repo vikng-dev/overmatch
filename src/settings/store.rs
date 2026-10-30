@@ -435,9 +435,10 @@ pub(super) fn reset(path: Option<&Path>) -> bool {
 mod tests {
     use super::*;
     use crate::settings::{
-        DebugPanel, DisplaySelection, FrameCap, KillCam, MsaaLevel, PenCamCorner, PixelBudget,
-        ReduceMotion, RenderScaleLevel, ShadowCascades, ShadowDistance, ShadowResolution,
-        TrackPrintRange, TrackPrintRelief, UiScalePercent, VsyncMode, WindowModeSetting,
+        BloomLevel, DebugPanel, DisplaySelection, FrameCap, KillCam, MsaaLevel, PenCamCorner,
+        PixelBudget, ReduceMotion, RenderScaleLevel, ShadowCascades, ShadowDistance,
+        ShadowResolution, TrackPrintRange, TrackPrintRelief, UiScalePercent, VsyncMode,
+        WindowModeSetting,
     };
 
     /// Each platform lands on its own convention — and NEVER beside the executable, which is
@@ -655,6 +656,7 @@ mod tests {
                 shadow_resolution: ShadowResolution::X1024,
                 shadow_cascades: ShadowCascades::Two,
                 msaa: MsaaLevel::Off,
+                bloom: BloomLevel::Low,
                 vsync: VsyncMode::Off,
                 legacy_vsync: None,
                 render_scale: RenderScaleLevel::Percent67,
@@ -897,6 +899,7 @@ mod tests {
             shadow_resolution: ShadowResolution::X1024,
             shadow_cascades: ShadowCascades::Two,
             msaa: MsaaLevel::X2,
+            bloom: BloomLevel::Low,
             vsync: VsyncMode::Fast,
             legacy_vsync: None,
             render_scale: RenderScaleLevel::Percent75,

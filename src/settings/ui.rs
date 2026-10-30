@@ -60,9 +60,10 @@ use bevy::window::PrimaryWindow;
 
 use super::displays::DisplayLadder;
 use super::{
-    DebugPanel, FrameCap, KillCam, MsaaLevel, PenCamCorner, PixelBudget, PresentCaps, ReduceMotion,
-    RenderScaleLevel, SaveSettings, Settings, ShadowCascades, ShadowDistance, ShadowResolution,
-    TrackPrintRange, TrackPrintRelief, UiScalePercent, VsyncMode, WindowModeSetting,
+    BloomLevel, DebugPanel, FrameCap, KillCam, MsaaLevel, PenCamCorner, PixelBudget, PresentCaps,
+    ReduceMotion, RenderScaleLevel, SaveSettings, Settings, ShadowCascades, ShadowDistance,
+    ShadowResolution, TrackPrintRange, TrackPrintRelief, UiScalePercent, VsyncMode,
+    WindowModeSetting,
 };
 use crate::ui_font::{MODAL_BG, TEXT, TEXT_DIM, UiFonts};
 
@@ -149,6 +150,8 @@ enum Row {
     /// How far that relief reaches — see `settings::TrackPrintRange`.
     TrackPrintRange,
     Msaa,
+    /// How finely the glow around tracers and bright light is drawn — see `settings::BloomLevel`.
+    Bloom,
     /// Capability-gated: only the rungs the surface's probe reported are offered ([`PresentCaps`]).
     VSync,
     /// The one row that can be DISABLED: it renders greyed and is skipped by every input path
@@ -173,7 +176,7 @@ enum RowKind {
 }
 
 impl Row {
-    const ORDER: [Row; 17] = [
+    const ORDER: [Row; 18] = [
         Row::RenderScale,
         Row::LodPixelBudget,
         Row::WindowMode,
@@ -184,6 +187,7 @@ impl Row {
         Row::TrackPrints,
         Row::TrackPrintRange,
         Row::Msaa,
+        Row::Bloom,
         Row::VSync,
         Row::FrameCap,
         Row::UiScale,
@@ -207,6 +211,7 @@ impl Row {
             | Row::TrackPrints
             | Row::TrackPrintRange
             | Row::Msaa
+            | Row::Bloom
             | Row::VSync
             | Row::FrameCap
             | Row::UiScale => Tab::Video,
@@ -229,6 +234,7 @@ impl Row {
             Row::TrackPrints => "TRACK PRINTS",
             Row::TrackPrintRange => "TRACK PRINT RANGE",
             Row::Msaa => "ANTI-ALIASING",
+            Row::Bloom => "BLOOM",
             Row::VSync => "VSYNC",
             Row::FrameCap => "FRAME CAP",
             Row::UiScale => "UI SCALE",
@@ -302,6 +308,12 @@ impl Row {
                  only. Farther costs more."
             }
             Row::Msaa => "Smooths jagged edges. The cheapest setting to drop for more frames.",
+            // Says what LOW keeps, because a player lowering it worries about losing the tracers:
+            // every halo stays, drawn coarser.
+            Row::Bloom => {
+                "The glow around tracers, muzzle flashes and bright light. \
+                 LOW draws it at half resolution: cheaper, with coarser halos."
+            }
             Row::VSync => {
                 "ON locks frames to the display. FAST is uncapped without tearing. \
                  OFF can tear, and enables the frame cap. Only supported modes are offered."
@@ -395,6 +407,7 @@ impl Row {
             Row::TrackPrints => settings.track_prints.label().to_string(),
             Row::TrackPrintRange => settings.track_print_range.label().to_string(),
             Row::Msaa => settings.msaa.label().to_string(),
+            Row::Bloom => settings.bloom.label().to_string(),
             Row::VSync => settings.vsync.label().to_string(),
             Row::FrameCap => settings.frame_cap.label(),
             Row::UiScale => settings.ui_scale.label(),
@@ -450,6 +463,7 @@ impl Row {
                     step_in(&TrackPrintRange::ORDER, settings.track_print_range, delta);
             }
             Row::Msaa => settings.msaa = step_in(&MsaaLevel::ORDER, settings.msaa, delta),
+            Row::Bloom => settings.bloom = step_in(&BloomLevel::ORDER, settings.bloom, delta),
             Row::VSync => {
                 let offered: Vec<VsyncMode> = VsyncMode::ORDER
                     .into_iter()

@@ -55,6 +55,7 @@
 //! `.agents/docs/design/display/persistence-brief-2026-07.md` for the evidence behind all of it.
 
 use bevy::light::{CascadeShadowConfig, CascadeShadowConfigBuilder, DirectionalLightShadowMap};
+use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
 use bevy::render::view::Msaa;
 use bevy::ui::UiScale;
@@ -163,6 +164,11 @@ const SETTINGS_VERSION: u32 = 1;
 ///   `TextureCache` by descriptor and pipelines are specialized on a key carrying the sample count,
 ///   both derived from the same extracted value in the same frame. Bevy's own `check_msaa` mutates
 ///   this component at runtime, so it is a supported operation, not one we invented.
+/// * **Bloom** — `Bloom` is an `ExtractComponent`, re-extracted every frame. `prepare_bloom_textures`
+///   takes the mip chain from `TextureCache` by a descriptor built from that frame's
+///   `max_mip_dimension`, and `prepare_bloom_bind_groups` sizes its bind groups from that frame's
+///   `BloomTexture::mip_count`; nothing on the path is a `Local` (bevy_post_process 0.19.1
+///   `bloom/mod.rs`).
 /// * **Render scale** — `MainPassResolutionOverride` is reconciled onto the render-world view every
 ///   frame from an extracted resource, and it feeds only per-frame values: the pass scissor rect and
 ///   `View::main_pass_viewport`. Nothing is sized from it — view targets, depth and prepass textures
@@ -509,6 +515,49 @@ impl MsaaLevel {
     }
 
     pub(crate) const ORDER: [MsaaLevel; 3] = [MsaaLevel::Off, MsaaLevel::X2, MsaaLevel::X4];
+}
+
+/// How finely the battlefield camera's bloom is drawn: the glow that makes a tracer read as a
+/// tracer (its emissive rides far above 1.0 and only this halo shows it — `ballistics::view`),
+/// and the glow around muzzle flashes and the sun's highlights. Applied as bevy's
+/// `Bloom::max_mip_dimension`, the height in texels of the largest texture in the blur chain.
+///
+/// **No `Off`.** Tracers and muzzle flashes must stay visible under every graphics option (#159's
+/// never-list), and they are drawn through this glow; LOW keeps every halo and draws it coarser.
+///
+/// The cost, DERIVED from bevy_post_process 0.19.1 `prepare_bloom_textures`: the chain's top
+/// texture is `max_mip_dimension` texels tall (and the view's aspect wide), and the chain has
+/// `ilog2(max_mip_dimension) - 1` mips, so LOW's 256 holds a quarter of NORMAL's top-level texels
+/// and one mip fewer, and both chains end at the same 4-texel-tall mip, so the widest halo is the
+/// same size on screen. The full-resolution composite onto the view is unchanged. MEASURED: none.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, Serialize, Deserialize)]
+pub(crate) enum BloomLevel {
+    /// Half NORMAL's resolution on each axis.
+    Low,
+    /// **The shipped default**: `Bloom::NATURAL`'s own `max_mip_dimension`, 512.
+    #[default]
+    Normal,
+}
+
+impl BloomLevel {
+    /// The `Bloom::max_mip_dimension` this rung applies.
+    pub(crate) fn max_mip_dimension(self) -> u32 {
+        match self {
+            BloomLevel::Low => Bloom::NATURAL.max_mip_dimension / 2,
+            BloomLevel::Normal => Bloom::NATURAL.max_mip_dimension,
+        }
+    }
+
+    /// ASCII only — it reaches `Text`.
+    pub(crate) const fn label(self) -> &'static str {
+        match self {
+            BloomLevel::Low => "LOW",
+            BloomLevel::Normal => "NORMAL",
+        }
+    }
+
+    /// Ascending in cost, like every other ladder here.
+    pub(crate) const ORDER: [BloomLevel; 2] = [BloomLevel::Low, BloomLevel::Normal];
 }
 
 /// The fraction of the window the 3D world is rendered at, before being upscaled to fill it. See
@@ -1626,7 +1675,8 @@ fn is_default<T: Default + PartialEq>(value: &T) -> bool {
 
 /// The persisted player settings — and, as a `Resource`, the live truth the renderer is reconciled
 /// against by [`apply_settings`]. Nothing else may write `Msaa`, `CascadeShadowConfig`,
-/// `DirectionalLightShadowMap` or `Window::present_mode`.
+/// `DirectionalLightShadowMap`, `Window::present_mode` or a battlefield camera's
+/// `Bloom::max_mip_dimension`.
 ///
 /// **The file is a SPARSE DIFF against the current defaults**, which is what the per-field
 /// `skip_serializing_if` buys. Writing every field would freeze today's defaults into every player's
@@ -1655,6 +1705,9 @@ pub(crate) struct Settings {
     pub(crate) shadow_cascades: ShadowCascades,
     #[serde(skip_serializing_if = "is_default")]
     pub(crate) msaa: MsaaLevel,
+    /// See [`BloomLevel`].
+    #[serde(skip_serializing_if = "is_default")]
+    pub(crate) bloom: BloomLevel,
     /// Persisted as `vsync_mode` — a NEW key, because the retired `vsync` key was a `bool` and the
     /// ladder grew a third rung. See [`VsyncMode`]'s migration note.
     #[serde(rename = "vsync_mode", skip_serializing_if = "is_default")]
@@ -1723,6 +1776,7 @@ impl Default for Settings {
             shadow_resolution: ShadowResolution::default(),
             shadow_cascades: ShadowCascades::default(),
             msaa: MsaaLevel::default(),
+            bloom: BloomLevel::default(),
             vsync: VsyncMode::default(),
             legacy_vsync: None,
             render_scale: RenderScaleLevel::default(),
@@ -2070,7 +2124,8 @@ fn apply_settings(
     mut shadow_map: ResMut<DirectionalLightShadowMap>,
     // A camera or light with a profile that is not the battlefield's (the pen cam's inset, masks
     // and key lights) keeps its own: the masks must not multisample, and the stage casts nothing.
-    mut cameras: Query<(&mut Msaa, Option<&CameraProfile>), With<Camera3d>>,
+    // `Bloom` is optional: `SPIKE_ABLATE=bloom` removes it (`render_cost`).
+    mut cameras: Query<(&mut Msaa, Option<&mut Bloom>, Option<&CameraProfile>), With<Camera3d>>,
     mut lights: Query<(
         &mut DirectionalLight,
         &mut CascadeShadowConfig,
@@ -2104,9 +2159,16 @@ fn apply_settings(
     mut placement: ResMut<WindowPlacement>,
 ) {
     let msaa = settings.msaa.to_msaa();
-    for (mut camera_msaa, profile) in &mut cameras {
+    let bloom_mips = settings.bloom.max_mip_dimension();
+    for (mut camera_msaa, bloom, profile) in &mut cameras {
         if profile.is_none_or(|profile| profile.draws_battlefield()) {
             camera_msaa.set_if_neq(msaa);
+            // Compared by hand — `Bloom` derives no `PartialEq`.
+            if let Some(mut bloom) = bloom
+                && bloom.max_mip_dimension != bloom_mips
+            {
+                bloom.max_mip_dimension = bloom_mips;
+            }
         }
     }
 
@@ -2767,6 +2829,57 @@ mod tests {
                 app.world().resource::<RenderScale>().0,
                 level.fraction(),
                 "{level:?} did not reach the render-world resource",
+            );
+        }
+    }
+
+    /// **The bloom row reaches the battlefield camera, and only it.** Its value is a field on a
+    /// camera component, so the seam is `apply_settings`' profile filter: a pen-cam inset keeps the
+    /// bloom it was built with, as it keeps its own MSAA. Every rung is also a value bevy accepts
+    /// as a mip-chain height — a power of two, so `ilog2` takes no rounding.
+    #[test]
+    fn the_bloom_row_reaches_the_battlefield_camera_only() {
+        let mut app = App::new();
+        app.init_resource::<Settings>()
+            .init_resource::<DirectionalLightShadowMap>()
+            .init_resource::<crate::render_scale::RenderScale>()
+            .init_resource::<PresentCaps>()
+            .init_resource::<UiScale>()
+            .init_resource::<LodPixelBudget>()
+            .init_resource::<WindowPlacement>()
+            .add_systems(Update, apply_settings);
+        let battlefield = app
+            .world_mut()
+            .spawn((
+                Camera3d::default(),
+                Bloom::NATURAL,
+                CameraProfile::BattlefieldThirdPerson,
+            ))
+            .id();
+        let inset = app
+            .world_mut()
+            .spawn((
+                Camera3d::default(),
+                Bloom::NATURAL,
+                CameraProfile::PenCamInset,
+            ))
+            .id();
+
+        for level in BloomLevel::ORDER {
+            assert!(level.max_mip_dimension().is_power_of_two(), "{level:?}");
+            app.world_mut().resource_mut::<Settings>().bloom = level;
+            app.update();
+            let mips = |camera| {
+                app.world()
+                    .get::<Bloom>(camera)
+                    .expect("the camera keeps its bloom")
+                    .max_mip_dimension
+            };
+            assert_eq!(mips(battlefield), level.max_mip_dimension(), "{level:?}");
+            assert_eq!(
+                mips(inset),
+                Bloom::NATURAL.max_mip_dimension,
+                "{level:?}: the pen cam's inset must keep its own bloom",
             );
         }
     }
@@ -4285,6 +4398,7 @@ mod tests {
         assert!(is_default(&settings.shadow_resolution));
         assert!(is_default(&settings.shadow_cascades));
         assert!(is_default(&settings.msaa));
+        assert!(is_default(&settings.bloom));
         assert!(is_default(&settings.vsync));
         assert!(is_default(&settings.render_scale));
         assert!(is_default(&settings.window_mode));
