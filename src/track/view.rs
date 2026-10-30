@@ -320,7 +320,7 @@ struct RigSide {
     /// This side's BELT ([`link_view::ShoeBelt`]): the identity-posed entity that draws every shoe
     /// of the side from its [`BeltFrames`] table — the same template, placement and mirrored
     /// left-side mesh the sandbox draws, so the two tools cannot disagree about what this track
-    /// looks like. A despawn of it takes the table and its GPU assets.
+    /// looks like. A despawn of it takes the table and gives its block of the shared GPU table back.
     belt: Entity,
     /// The shoe's own lateral centre on this side (`RigGeom::link_center_x`) — NOT `plane_x`: the
     /// shoe is authored outboard of the pin plane, and the shadow ribbon's section is centred on it.
@@ -361,8 +361,8 @@ fn rebind_on_reinstance(
         return;
     };
     for side in &rig.sides {
-        // The belt carries its table and holds its buffer and material, so one despawn per side
-        // releases the whole draw.
+        // The belt carries its table and its block of the shared GPU table, so one despawn per side
+        // releases the whole draw (its block back to the table, its count's meshes to eviction).
         commands.entity(side.belt).despawn();
         // The shadow ribbon goes with them — `attach_shadow_proxies` spawns a fresh one (and a fresh
         // mesh asset) against the rebound rig, and a leaked one would keep casting the old belt.
@@ -482,8 +482,8 @@ fn bind_track_rigs(
         // Capture the sprocket/idler REST transforms (the pose the belt spin rides on) and measure
         // each sprocket's tooth-tip phase off its own mesh — the phase-lock calibration. Both must
         // succeed BEFORE anything is spawned: a mesh a frame late (or a node transform not yet
-        // present) just retries next frame rather than binding a mis-meshed sprocket or leaking the
-        // link entities a partial bind would spawn.
+        // present) just retries next frame rather than binding a mis-meshed sprocket or leaving a
+        // half-bound rig (a belt drawn on one side only) behind.
         let (Ok(&sl_rest), Ok(&sr_rest), Ok(&il_rest), Ok(&ir_rest)) = (
             node_transforms.get(sl),
             node_transforms.get(sr),

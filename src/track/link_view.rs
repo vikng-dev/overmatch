@@ -87,7 +87,8 @@
 //! A belt publishes where every link lies this frame in its [`BeltFrames`]: record `m` is the span
 //! (two drawn pin joints) material link `m` lies across. The GPU draws every shoe of the side from
 //! that table ([`super::belt_draw`]), the prints stamp from it, and the rung selector measures from
-//! it; there is no per-link entity and no per-link transform.
+//! it; there is no per-link entity. The CPU readers take each link's pose from the table, where it
+//! is computed once, when its span changes ([`BeltFrames::pose`]).
 //!
 //! # The link↔station map ROTATES with the belt phase
 //!
@@ -180,6 +181,7 @@
 
 use bevy::asset::AssetEventSystems;
 use bevy::ecs::error::BevyError;
+use bevy::math::Affine3A;
 use bevy::mesh::{GenerateTangentsError, Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 
@@ -474,6 +476,10 @@ pub(crate) enum Stragglers {
 /// Every reader takes poses from here: the GPU draw ([`super::belt_draw`]), the rung selector and
 /// the prints. Change detection on this component is the upload trigger, so a write that changes no
 /// record must not mark it.
+///
+/// Each record keeps its link's CPU pose beside its span, written only when the span is: a settled
+/// belt costs its CPU readers no trigonometry, and a moving one costs one pose per changed link per
+/// frame however many readers there are.
 #[derive(Component, Clone, Debug)]
 pub(crate) struct BeltFrames {
     /// This side's mesh → canonical-pin-frame correction.
@@ -482,16 +488,22 @@ pub(crate) struct BeltFrames {
     /// plane: the shoe is authored outboard of its pins.
     lateral_x: f32,
     spans: Vec<LinkSpan>,
+    /// `poses[m]` is [`link_transform`] of `spans[m]`: every span write goes through
+    /// [`Self::lay`] or [`Self::resize`], which write the pose with it.
+    poses: Vec<Affine3A>,
 }
 
 impl BeltFrames {
     /// A table of `count` links on `side`'s frame, every link parked until the first fit.
     pub(crate) fn new(frame: LinkFrame, lateral_x: f32, count: usize) -> Self {
-        Self {
+        let mut frames = Self {
             frame,
             lateral_x,
-            spans: vec![LinkSpan::PARKED; count],
-        }
+            spans: Vec::new(),
+            poses: Vec::new(),
+        };
+        frames.resize(count);
+        frames
     }
 
     /// The material link count: one record per link.
@@ -515,16 +527,32 @@ impl BeltFrames {
     }
 
     /// Material link `link`'s pose in the belt's frame: the shoe mesh's own transform, exactly as
-    /// [`link_transform`] places it.
-    pub(crate) fn pose(&self, link: usize) -> Transform {
-        let span = self.spans[link];
-        link_transform(&self.frame, self.lateral_x, span.a, span.b)
+    /// [`link_transform`] places it, computed when its span was written.
+    pub(crate) fn pose(&self, link: usize) -> Affine3A {
+        self.poses[link]
     }
 
     /// Grow or shrink the table to `count` links, a new link parked. The sandbox's live link
     /// count; the game's count is fixed for a belt's life.
     pub(crate) fn resize(&mut self, count: usize) {
+        let parked = self.pose_of(LinkSpan::PARKED);
         self.spans.resize(count, LinkSpan::PARKED);
+        self.poses.resize(count, parked);
+    }
+
+    /// The pose of a link of this belt lying across `span`.
+    fn pose_of(&self, span: LinkSpan) -> Affine3A {
+        link_transform(&self.frame, self.lateral_x, span.a, span.b).compute_affine()
+    }
+
+    /// Lay link `link` across `span`, and its pose with it; whether the record changed.
+    fn lay(&mut self, link: usize, span: LinkSpan) -> bool {
+        if self.spans[link] == span {
+            return false;
+        }
+        self.spans[link] = span;
+        self.poses[link] = self.pose_of(span);
+        true
     }
 
     /// Lay the table on this frame's drawn pin joints; whether any record changed.
@@ -555,24 +583,18 @@ impl BeltFrames {
         let count = stations.len();
         let m = if count < 3 { 0 } else { count.min(n) };
         let mut changed = false;
-        let mut lay = |record: &mut LinkSpan, span: LinkSpan| {
-            if *record != span {
-                *record = span;
-                changed = true;
-            }
-        };
         for i in 0..m {
             let (a, b) = (stations[i], stations[(i + 1) % count]);
             if a.distance_squared(b) < 1e-8 {
                 continue;
             }
-            lay(&mut self.spans[link(i)], LinkSpan { a, b });
+            changed |= self.lay(link(i), LinkSpan { a, b });
         }
         // The rotation is a bijection over `0..n`, so the links with no station this frame are
         // exactly the images of `m..n`.
         if stragglers == Stragglers::Park {
             for i in m..n {
-                lay(&mut self.spans[link(i)], LinkSpan::PARKED);
+                changed |= self.lay(link(i), LinkSpan::PARKED);
             }
         }
         changed
@@ -596,14 +618,14 @@ impl BeltFrames {
 /// ONE SIDE'S BELT: the entity that draws every shoe on that side, and the rung they all draw.
 ///
 /// The unit of LOD selection ([`select_belt_rungs`]), of drawing and of lifetime: a despawn of the
-/// belt takes its table and its GPU assets with it. Spawned by [`spawn_belt`] and posed nowhere: it
-/// sits at identity in the frame its parent works in, so its table's poses are in that frame.
+/// belt takes its table with it and gives its block of the shared GPU table back
+/// ([`super::belt_draw::BeltDraw`]). Spawned by [`spawn_belt`] and posed nowhere: it sits at
+/// identity in the frame its parent works in, so its table's poses are in that frame. The rung it
+/// draws is its `Mesh3d` and nothing else.
 #[derive(Component)]
 pub(crate) struct ShoeBelt {
     /// Which side's meshes this belt wears — the left is the template's genuine mirror.
     side: Side,
-    /// The rung [`select_belt_rungs`] last wrote.
-    rung: usize,
     /// A dev instrument's override ([`crate::lod_showcase`]) — the rung this belt draws at every
     /// distance. `None` on every production belt; nothing else writes it.
     pin: Option<usize>,
@@ -1152,11 +1174,7 @@ pub(crate) fn spawn_belt(
 ) -> Entity {
     commands
         .spawn((
-            ShoeBelt {
-                side,
-                rung: 0,
-                pin: None,
-            },
+            ShoeBelt { side, pin: None },
             frames,
             draw,
             // IDENTITY: the table's poses are in the frame `parent` already works in, so the belt
@@ -1209,7 +1227,7 @@ fn select_belt_rungs(
     mut cache: ResMut<super::belt_draw::BeltMeshes>,
     mut assets: ResMut<Assets<Mesh>>,
     views: Query<&GlobalTransform, With<PlayerView>>,
-    mut belts: Query<(&mut ShoeBelt, &BeltFrames, &GlobalTransform, &mut Mesh3d)>,
+    mut belts: Query<(&ShoeBelt, &BeltFrames, &GlobalTransform, &mut Mesh3d)>,
 ) -> Result<(), BevyError> {
     // `single()` answers a QUERY-SHAPE question; the count restates its failure as the domain fact.
     // The rows ARE the declarations — `PlayerView` requires the camera that carries this pose — so
@@ -1219,14 +1237,14 @@ fn select_belt_rungs(
         return Err(ViewError::resolving(views.iter().count()).into());
     };
     let eye = eye.translation();
-    for (mut belt, frames, at, mut mesh) in &mut belts {
+    for (belt, frames, at, mut mesh) in &mut belts {
         let wanted = match belt.pin {
             Some(rung) => rung,
             None => {
                 // Squared throughout, one square root per belt: the comparison is monotone in it.
                 let mut nearest_sq = f32::INFINITY;
                 for link in 0..frames.count() {
-                    let origin = at.transform_point(frames.pose(link).translation);
+                    let origin = at.transform_point(frames.pose(link).translation.into());
                     nearest_sq = nearest_sq.min(eye.distance_squared(origin));
                 }
                 // A belt with no link has no nearest shoe and nothing to write.
@@ -1236,10 +1254,6 @@ fn select_belt_rungs(
                 rung_at(&template.switches, nearest_sq.sqrt())
             }
         };
-        // Reading through `Mut` marks nothing; only a moved rung dirties `ShoeBelt`.
-        if wanted != belt.rung {
-            belt.rung = wanted;
-        }
         if let Some(handle) =
             cache.rung_or_build(frames.count(), wanted, belt.side, &template, &mut assets)
         {
@@ -1368,11 +1382,14 @@ mod tests {
     /// selection distance is exactly the camera's distance to the belt origin.
     fn table_at(origins: &[Vec2]) -> BeltFrames {
         let mut frames = BeltFrames::new(LinkFrame::default(), 0.0, origins.len());
-        for (span, &at) in frames.spans.iter_mut().zip(origins) {
-            *span = LinkSpan {
-                a: at - Vec2::X * 0.05,
-                b: at + Vec2::X * 0.05,
-            };
+        for (link, &at) in origins.iter().enumerate() {
+            frames.lay(
+                link,
+                LinkSpan {
+                    a: at - Vec2::X * 0.05,
+                    b: at + Vec2::X * 0.05,
+                },
+            );
         }
         frames
     }
@@ -1616,8 +1633,13 @@ mod tests {
         );
         assert!(frames.fit(&stations, 0.0, rig.pitch, Stragglers::Keep));
         let anchor = anchor_pose().compute_affine();
+        // The oracle places each link from its span, independent of the table's own poses.
         let placed: Vec<Vec3> = (0..frames.count())
-            .map(|link| anchor.transform_point3(frames.pose(link).translation))
+            .map(|link| {
+                let [a, b] = frames.span(link).joints();
+                let pose = link_transform(frames.frame(), frames.lateral_x(), a, b);
+                anchor.transform_point3(pose.translation)
+            })
             .collect();
         let wrapped = spawn_table_in(&mut app, side, frames, parent);
         let rungs: Vec<_> = (0..=switches.len())
@@ -2511,6 +2533,56 @@ mod tests {
         );
         frames.resize(4);
         assert_eq!(frames.count(), 4);
+    }
+
+    /// A TABLE'S POSES ARE ITS SPANS' PLACEMENTS, bit for bit, after every kind of write: a fit, a
+    /// refit that moves some links and keeps or parks the rest, a phase that rotates the map, and a
+    /// resize either way. The prints and the rung selector read [`BeltFrames::pose`] instead of
+    /// placing the span themselves, so a write that skipped its pose would stamp and select on a
+    /// shoe the GPU no longer draws there.
+    #[test]
+    fn every_pose_is_its_spans_placement_after_every_write() {
+        const PITCH: f32 = 0.13;
+        fn check(frames: &BeltFrames, after: &str) {
+            for link in 0..frames.count() {
+                let [a, b] = frames.span(link).joints();
+                assert_eq!(
+                    frames.pose(link),
+                    link_transform(frames.frame(), frames.lateral_x(), a, b).compute_affine(),
+                    "link {link} after {after}",
+                );
+            }
+        }
+        let ring = |n: usize, radius: f32| -> Vec<Vec2> {
+            (0..n)
+                .map(|i| {
+                    let a = std::f32::consts::TAU * i as f32 / n as f32;
+                    Vec2::new(a.cos(), a.sin()) * radius
+                })
+                .collect()
+        };
+        let short: Vec<Vec2> = (0..5).map(|i| Vec2::new(i as f32 * PITCH, 0.4)).collect();
+        for (side, lateral_x) in [(Side::Left, -LATERAL_X), (Side::Right, LATERAL_X)] {
+            let mut frames = BeltFrames::new(*tiger_frames().get(side), lateral_x, 8);
+            check(&frames, "spawn");
+            frames.fit(&ring(8, 1.0), 0.0, PITCH, Stragglers::Keep);
+            check(&frames, "a fit");
+            frames.fit(&short, 0.0, PITCH, Stragglers::Keep);
+            check(&frames, "a short refit that keeps its stragglers");
+            frames.fit(&short, 0.0, PITCH, Stragglers::Park);
+            check(&frames, "a short refit that parks its stragglers");
+            frames.fit(
+                &ring(8, 1.1),
+                f64::from(PITCH) * 3.0,
+                PITCH,
+                Stragglers::Keep,
+            );
+            check(&frames, "three pitches of travel");
+            frames.resize(11);
+            check(&frames, "growing");
+            frames.resize(5);
+            check(&frames, "shrinking");
+        }
     }
 
     /// THE SHADER PLACES WHAT THE CPU PLACES. The belt's vertex stage (`track_belt.wgsl`,

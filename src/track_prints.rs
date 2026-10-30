@@ -453,8 +453,9 @@ fn stamp_shoes(
         let belt_pose = at.affine();
         for link in 0..frames.count() {
             let key = ShoeKey::new(entity, link);
-            // The composition transform propagation gave a per-link child of the belt.
-            let global = belt_pose * frames.pose(link).compute_affine();
+            // The belt's `GlobalTransform` times the link's table pose: the transform the belt's
+            // vertex shader applies to this shoe.
+            let global = belt_pose * frames.pose(link);
             let Some(contact) = stamper::contact(
                 global * to_mesh,
                 bounds,

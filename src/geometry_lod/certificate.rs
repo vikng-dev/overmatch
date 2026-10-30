@@ -253,7 +253,7 @@ impl Chain {
     /// `rungs[i]` is legal. Strictly ascending, because the certified deviations are.
     ///
     /// The one derivation of the ladder's metres. Consumers that select by hand
-    /// ([`crate::track::link_view`]'s pooled shoes) take these; [`Self::bands`] is the same list
+    /// ([`crate::track::link_view`]'s belts) take these; [`Self::bands`] is the same list
     /// stated as ranges for the consumers bevy selects for.
     pub(crate) fn switches(&self, view: ViewProfile) -> Vec<f32> {
         self.rungs

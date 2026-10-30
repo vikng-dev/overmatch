@@ -78,7 +78,7 @@ mod flow;
 mod frame_cost;
 /// The tank build's certificate applied at runtime (ADR-0035): `<id>.lod.json` read as data, the
 /// trio fingerprinted, and one coincident `VisibilityRange` sibling per certified rung on every
-/// scene primitive (the track's pooled shoes swap a mesh handle instead — `track::link_view`). The
+/// scene primitive (a track belt swaps its one mesh handle instead — `track::link_view`). The
 /// single seam between what the build measured and what the renderer selects — no measurement is
 /// transcribed into Rust.
 mod geometry_lod;

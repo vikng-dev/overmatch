@@ -20,11 +20,12 @@
 //! are bare machine reductions — and the material is cloned off the rung-0 entity at bind time, so
 //! a swap changes the silhouette and nothing else.
 //!
-//! THE TRACK'S POOLED SHOES ARE THE EXCEPTION, and they are not spawned here ([`attach_rungs`] is
-//! gated on `GltfMeshName`, which the loader writes on scene-primitive leaves only). A shoe is one
-//! entity whose mesh HANDLE its belt swaps, because 194 shoes per tank moving every frame make the
-//! sibling's per-frame cost — propagation, the visibility sweep, the extract scan — the dominant
-//! one. It carries no `GeometryLodLevel` and no band; the certificate reaches it as
+//! THE TRACK'S SHOES ARE THE EXCEPTION, and they are not spawned here ([`attach_rungs`] is gated on
+//! `GltfMeshName`, which the loader writes on scene-primitive leaves only). Every shoe of one side
+//! is drawn by one belt entity whose mesh HANDLE selects the rung for all of them
+//! (`track::link_view`), because a per-shoe sibling for 194 shoes per tank moving every frame would
+//! make the sibling's per-frame cost — propagation, the visibility sweep, the extract scan — the
+//! dominant one. A belt carries no `GeometryLodLevel` and no band; the certificate reaches it as
 //! [`Chain::switches`] instead of as ranges.
 //!
 //! # Switch distances are derived, never shipped
@@ -114,8 +115,8 @@ pub(crate) struct SourceDetail;
 /// cost.
 ///
 /// BOTH ladders the certificate feeds obey it — [`attach_rungs`] spawns no sibling and writes no
-/// band, and `track::link_view`'s belt selector is not scheduled, so a pooled shoe keeps the
-/// authored mesh it spawns with. The terrain ladder is a different certificate and has its own
+/// band, and `track::link_view`'s belt selector is not scheduled, so a track belt keeps the
+/// authored shoe it spawns with. The terrain ladder is a different certificate and has its own
 /// clamp (`terrain_lod::TerrainLodClamp`).
 #[derive(Resource)]
 pub(crate) struct SourceDetailOnly;
@@ -370,10 +371,10 @@ fn resolve_chains(
 /// Give every freshly spawned scene primitive its band, and one coincident sibling per rung.
 ///
 /// `GltfMeshName` is the scene-primitive discriminator: it is written by the glTF loader on
-/// primitive leaves and by nothing else, so a pooled mesh (the track's shoes) and the rung siblings
-/// spawned below are never rescanned. `Without<GeometryLodScanned>` rather than `Added<Mesh3d>`
-/// because the chain resolution and the scene instantiation land on whichever frame the asset
-/// server finishes them.
+/// primitive leaves and by nothing else, so a mesh spawned in code (a track belt) and the rung
+/// siblings spawned below are never rescanned. `Without<GeometryLodScanned>` rather than
+/// `Added<Mesh3d>` because the chain resolution and the scene instantiation land on whichever frame
+/// the asset server finishes them.
 fn attach_rungs(
     mut commands: Commands,
     chains: Res<GeometryLodChains>,
@@ -487,9 +488,9 @@ pub(crate) fn compose_view_profile(
 
 /// Rewrite every band on a profile move. THE ONE WRITER, apart from the bind.
 ///
-/// `GeometryLodLevel` is exactly the set of entities bevy selects for. A pooled track shoe carries
-/// none: its level is a fact its BELT owns and rewrites (`track::link_view`), and one on a shoe
-/// would be a second writer of it.
+/// `GeometryLodLevel` is exactly the set of entities bevy selects for. A track belt carries none:
+/// its rung is a fact it owns and rewrites (`track::link_view`), and a band on it would be a second
+/// writer of it.
 fn adapt_bands(
     mut commands: Commands,
     chains: Option<Res<GeometryLodChains>>,
