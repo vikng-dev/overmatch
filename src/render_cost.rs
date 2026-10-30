@@ -54,6 +54,11 @@
 //!   filter passes run every frame; `ui` hides every UI root, which removes the UI's extraction and
 //!   drawing but not its layout. An unknown name panics at boot, so a typo cannot read as a free
 //!   feature. Never part of a shipped measurement: the picture changes.
+//!   `terrain-casters`, `tree-casters`, `house-casters`, `tank-casters` suppress only casting
+//!   through render policy; receivers and main-view geometry retain their roles.
+//! * `SPIKE_SHADOW_FILTER=gaussian|hardware|temporal`, `SPIKE_SHADOW_SPLITS=<metres,...>` and
+//!   `SPIKE_SHADOW_OVERLAP=<proportion>` independently override stock shadow controls at boot.
+//!   Explicit splits select count and envelope; overlap and filter leave both untouched.
 
 use std::any::TypeId;
 use std::collections::{BTreeMap, HashMap};
@@ -62,6 +67,7 @@ use bevy::camera::visibility::VisibilitySystems;
 use bevy::core_pipeline::core_3d::{AlphaMask3d, Opaque3d, Transparent3d};
 use bevy::core_pipeline::prepass::{AlphaMask3dPrepass, DepthPrepass, Opaque3dPrepass};
 use bevy::diagnostic::DiagnosticsStore;
+use bevy::light::{CascadeShadowConfig, ShadowFilteringMethod};
 use bevy::pbr::Shadow;
 use bevy::platform::time::Instant;
 use bevy::post_process::bloom::Bloom;
@@ -90,11 +96,15 @@ pub(crate) struct Ablate {
     pub(crate) env_light: bool,
     depth_prepass: bool,
     ui: bool,
+    terrain_casters: bool,
+    tree_casters: bool,
+    house_casters: bool,
+    tank_casters: bool,
 }
 
 impl Ablate {
     /// A comma-separated feature list; `Err` names the first unknown feature.
-    fn parse(list: &str) -> Result<Self, String> {
+    pub(crate) fn parse(list: &str) -> Result<Self, String> {
         let mut ablate = Self::default();
         for name in list
             .split(',')
@@ -106,10 +116,134 @@ impl Ablate {
                 "env_light" => ablate.env_light = true,
                 "depth_prepass" => ablate.depth_prepass = true,
                 "ui" => ablate.ui = true,
+                "terrain-casters" => ablate.terrain_casters = true,
+                "tree-casters" => ablate.tree_casters = true,
+                "house-casters" => ablate.house_casters = true,
+                "tank-casters" => ablate.tank_casters = true,
                 unknown => return Err(unknown.to_owned()),
             }
         }
         Ok(ablate)
+    }
+}
+
+/// View-only classification, inherited by mesh descendants. Tank ownership is read from the
+/// existing tank root/part markers, including detached assemblies and track proxies.
+#[derive(Component, Clone, Copy, Debug)]
+pub(crate) enum CasterClass {
+    Terrain,
+    Tree,
+    House,
+    Tank,
+}
+
+impl Ablate {
+    pub(crate) fn suppresses_caster(self, class: CasterClass) -> bool {
+        match class {
+            CasterClass::Terrain => self.terrain_casters,
+            CasterClass::Tree => self.tree_casters,
+            CasterClass::House => self.house_casters,
+            CasterClass::Tank => self.tank_casters,
+        }
+    }
+}
+
+/// Independent, boot-only stock shadow instruments; never persisted as player settings.
+#[derive(Resource, Default, Debug)]
+pub(crate) struct ShadowControls {
+    filter: Option<ShadowFilteringMethod>,
+    splits: Option<Vec<f32>>,
+    overlap: Option<f32>,
+}
+
+impl ShadowControls {
+    fn parse(filter: Option<&str>, splits: Option<&str>, overlap: Option<&str>) -> Self {
+        let filter = filter.map(|value| match value {
+            "gaussian" => ShadowFilteringMethod::Gaussian,
+            "hardware" => ShadowFilteringMethod::Hardware2x2,
+            "temporal" => ShadowFilteringMethod::Temporal,
+            _ => panic!("SPIKE_SHADOW_FILTER: expected gaussian, hardware or temporal"),
+        });
+        let splits = splits.map(|value| {
+            let bounds: Vec<f32> = value
+                .split(',')
+                .map(|v| {
+                    v.trim()
+                        .parse()
+                        .expect("SPIKE_SHADOW_SPLITS: expected comma-separated metres")
+                })
+                .collect();
+            // DERIVED stock minimum distance is 0.1 m; the shader supports at most four cascades.
+            assert!(
+                !bounds.is_empty()
+                    && bounds.len() <= 4
+                    && bounds.iter().all(|v| v.is_finite() && *v > 0.1)
+                    && bounds.windows(2).all(|w| w[0] < w[1]),
+                "SPIKE_SHADOW_SPLITS: expected increasing finite bounds above 0.1 m, at most four"
+            );
+            bounds
+        });
+        let overlap = overlap.map(|value| {
+            let value: f32 = value
+                .parse()
+                .expect("SPIKE_SHADOW_OVERLAP: expected a proportion");
+            assert!(
+                value.is_finite() && (0.0..1.0).contains(&value),
+                "SPIKE_SHADOW_OVERLAP: expected a finite proportion in [0,1)"
+            );
+            value
+        });
+        Self {
+            filter,
+            splits,
+            overlap,
+        }
+    }
+
+    /// Explicit bounds select their own count and envelope; absent fields retain the stock config.
+    pub(crate) fn configure_cascades(&self, config: &mut CascadeShadowConfig) {
+        if let Some(bounds) = &self.splits {
+            config.bounds.clone_from(bounds);
+        }
+        if let Some(overlap) = self.overlap {
+            config.overlap_proportion = overlap;
+        }
+    }
+}
+
+fn shadow_controls(app: &mut App) {
+    let filter = crate::env_value("SPIKE_SHADOW_FILTER");
+    let splits = crate::env_value("SPIKE_SHADOW_SPLITS");
+    let overlap = crate::env_value("SPIKE_SHADOW_OVERLAP");
+    if filter.is_none() && splits.is_none() && overlap.is_none() {
+        return;
+    }
+    let controls = ShadowControls::parse(filter.as_deref(), splits.as_deref(), overlap.as_deref());
+    info!("render_cost: shadow controls {controls:?}");
+    app.insert_resource(controls)
+        .add_systems(Update, apply_shadow_filter);
+}
+
+fn apply_shadow_filter(
+    mut commands: Commands,
+    controls: Res<ShadowControls>,
+    cameras: Query<
+        (
+            Entity,
+            Option<&crate::render_policy::CameraProfile>,
+            Option<&ShadowFilteringMethod>,
+        ),
+        With<Camera3d>,
+    >,
+) {
+    let Some(filter) = controls.filter else {
+        return;
+    };
+    for (entity, profile, current) in &cameras {
+        if profile.is_none_or(|p| p.draws_battlefield()) && current != Some(&filter) {
+            commands.entity(entity).insert(filter);
+            info!("render_cost: shadow filter applied {entity} {filter:?}");
+        }
     }
 }
 
@@ -119,7 +253,7 @@ fn ablation_instruments(app: &mut App) {
         let ablate = Ablate::parse(&list).unwrap_or_else(|unknown| {
             panic!(
                 "SPIKE_ABLATE: unknown feature {unknown:?} (known: bloom, env_light, \
-                 depth_prepass, ui)"
+                 depth_prepass, ui, terrain-casters, tree-casters, house-casters, tank-casters)"
             )
         });
         info!("render_cost: ablating {ablate:?}");
@@ -192,6 +326,11 @@ fn log_phase_census(
     log_binned("opaque_prepass", opaque_prepass.as_deref());
     log_binned("alpha_mask_prepass", alpha_mask_prepass.as_deref());
     log_binned("shadow", shadow.as_deref());
+    // Bevy keeps per-view batch_sets and multidraw bins private; the public indirect buffers
+    // aggregate all views. No cheap per-cascade command count exists without renderer changes.
+    info!(
+        "phase_census: shadow per_cascade_indirect_draws=unavailable (private batch_sets/bins; view subview index identifies cascade; draws counts sets)"
+    );
     let indirect = indirect.as_deref();
     log_indirect::<Opaque3d>("opaque", indirect);
     log_indirect::<AlphaMask3d>("alpha_mask", indirect);
@@ -313,6 +452,7 @@ struct RenderCost {
 /// `SPIKE_RENDER_COST` is set, and each ablation instrument of the module doc when its own is.
 pub fn client_plugin(app: &mut App) {
     ablation_instruments(app);
+    shadow_controls(app);
     let Some(path) = crate::env_value("SPIKE_RENDER_COST") else {
         return;
     };
@@ -408,6 +548,114 @@ mod tests {
     use bevy::diagnostic::{Diagnostic, DiagnosticMeasurement, DiagnosticPath};
 
     use super::*;
+
+    /// Attribution users rely on each exclusion preserving main-view visibility and receiving,
+    /// including late meshes, cast-only proxies and tank parts detached from their root.
+    #[test]
+    fn caster_classes_are_independent_and_late_meshes_keep_the_policy() {
+        use crate::render_policy::{VisualScope, plugin};
+        use bevy::light::{NotShadowCaster, NotShadowReceiver};
+        for (lever, excluded_class) in [
+            ("terrain-casters", 0),
+            ("tree-casters", 1),
+            ("house-casters", 2),
+            ("tank-casters", 3),
+        ] {
+            let mut app = App::new();
+            app.add_plugins(plugin)
+                .insert_resource(Ablate::parse(lever).unwrap());
+            let roots: Vec<_> = [CasterClass::Terrain, CasterClass::Tree, CasterClass::House]
+                .into_iter()
+                .map(|class| app.world_mut().spawn(class).id())
+                .collect();
+            let tank = app.world_mut().spawn(crate::tank::Tank).id();
+            let part = app.world_mut().spawn(crate::tank::TankRoot(tank)).id();
+            let roots: Vec<_> = roots.into_iter().chain([part]).collect();
+            app.update();
+            let meshes: Vec<_> = roots
+                .iter()
+                .map(|root| {
+                    app.world_mut()
+                        .spawn((
+                            Mesh3d(Handle::default()),
+                            ChildOf(*root),
+                            Visibility::Inherited,
+                        ))
+                        .id()
+                })
+                .collect();
+            let proxy = app
+                .world_mut()
+                .spawn((
+                    Mesh3d(Handle::default()),
+                    ChildOf(part),
+                    VisualScope::SHADOW_PROXY,
+                ))
+                .id();
+            app.update();
+            for (class, mesh) in meshes.into_iter().enumerate() {
+                let entity = app.world().entity(mesh);
+                assert_eq!(
+                    entity.contains::<NotShadowCaster>(),
+                    class == excluded_class
+                );
+                assert!(!entity.contains::<NotShadowReceiver>());
+                assert_eq!(*entity.get::<Visibility>().unwrap(), Visibility::Inherited);
+            }
+            assert_eq!(
+                app.world().entity(proxy).contains::<NotShadowCaster>(),
+                excluded_class == 3
+            );
+        }
+    }
+
+    /// Pricing conditions must alter only their named stock control, leaving the other axes fixed.
+    /// ASSUMED fixture bounds and overlap are test inputs, not product recommendations.
+    #[test]
+    fn shadow_controls_are_independent() {
+        let base = CascadeShadowConfig::default();
+        let mut config = base.clone();
+        ShadowControls::parse(Some("hardware"), None, None).configure_cascades(&mut config);
+        assert_eq!(config.bounds, base.bounds);
+        assert_eq!(config.overlap_proportion, base.overlap_proportion);
+        ShadowControls::parse(None, Some("60,180,350"), None).configure_cascades(&mut config);
+        assert_eq!(config.bounds, vec![60.0, 180.0, 350.0]);
+        assert_eq!(config.overlap_proportion, base.overlap_proportion);
+        ShadowControls::parse(None, None, Some("0.05")).configure_cascades(&mut config);
+        assert_eq!(config.bounds, vec![60.0, 180.0, 350.0]);
+        assert_eq!(config.overlap_proportion, 0.05);
+        assert_eq!(config.minimum_distance, base.minimum_distance);
+        for (name, filter) in [
+            ("gaussian", ShadowFilteringMethod::Gaussian),
+            ("hardware", ShadowFilteringMethod::Hardware2x2),
+            ("temporal", ShadowFilteringMethod::Temporal),
+        ] {
+            assert_eq!(
+                ShadowControls::parse(Some(name), None, None).filter,
+                Some(filter)
+            );
+        }
+    }
+
+    /// Bad conditions must fail before a battery can silently price a different experiment.
+    #[test]
+    fn invalid_shadow_controls_are_rejected() {
+        for splits in ["", "350,40", "0,350", "NaN,350", "1,2,3,4,5"] {
+            assert!(
+                std::panic::catch_unwind(|| ShadowControls::parse(None, Some(splits), None))
+                    .is_err()
+            );
+        }
+        for overlap in ["NaN", "-0.1", "1"] {
+            assert!(
+                std::panic::catch_unwind(|| ShadowControls::parse(None, None, Some(overlap)))
+                    .is_err()
+            );
+        }
+        assert!(
+            std::panic::catch_unwind(|| ShadowControls::parse(Some("typo"), None, None)).is_err()
+        );
+    }
 
     /// One measurement per simulated frame, 16 ms apart — real histories are never same-instant.
     fn diagnostic_with(path: &'static str, base: Instant, values: &[f64]) -> Diagnostic {

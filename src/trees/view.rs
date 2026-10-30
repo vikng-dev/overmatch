@@ -34,6 +34,7 @@ pub(crate) fn attach(
                 assets.load(GltfAssetLabel::Scene(0).from_asset(format!("trees/{id}/{id}.glb"))),
             ),
             TreeView,
+            crate::render_cost::CasterClass::Tree,
         ))
         .observe(bind_tree_view);
 }

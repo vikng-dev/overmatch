@@ -883,6 +883,7 @@ pub(crate) fn spawn(
             commands.spawn((
                 Transform::IDENTITY,
                 Mesh3d(meshes.add(mesh)),
+                crate::render_cost::CasterClass::Terrain,
                 MeshMaterial3d(material.clone()),
                 // The pinned anchor: the SAME bounds on every level of the tile, and no auto-AABB
                 // to overwrite them on the spawn-frame `Changed<Mesh3d>` (module doc).

@@ -451,6 +451,9 @@ fn resolve_visual_scopes(
         With<Mesh3d>,
     >,
     mut commands: Commands,
+    ablate: Option<Res<crate::render_cost::Ablate>>,
+    classes: Query<&crate::render_cost::CasterClass>,
+    tank_parts: Query<(), Or<(With<crate::tank::Tank>, With<crate::tank::TankRoot>)>>,
 ) {
     let mut dirty: HashSet<Entity> = added_meshes.iter().collect();
     // A scope or a parent changing re-resolves the whole subtree under it: the write is on the
@@ -475,6 +478,7 @@ fn resolve_visual_scopes(
         seed(entity, &mut dirty);
     }
 
+    let mut excluded = 0usize;
     for entity in dirty {
         let Ok((current, no_caster, no_receiver)) = meshes.get(entity) else {
             continue;
@@ -491,7 +495,24 @@ fn resolve_visual_scopes(
         if write {
             commands.entity(entity).insert(want);
         }
-        if shadow.casts() == no_caster {
+        let suppressed = ablate.as_deref().is_some_and(|ablate| {
+            let mut node = Some(entity);
+            while let Some(current) = node {
+                let class = classes.get(current).ok().copied().or_else(|| {
+                    tank_parts
+                        .contains(current)
+                        .then_some(crate::render_cost::CasterClass::Tank)
+                });
+                if let Some(class) = class {
+                    return ablate.suppresses_caster(class);
+                }
+                node = parents.get(current).ok().map(ChildOf::parent);
+            }
+            false
+        });
+        let casts = shadow.casts() && !suppressed;
+        excluded += usize::from(shadow.casts() && suppressed);
+        if casts == no_caster {
             if no_caster {
                 commands.entity(entity).remove::<NotShadowCaster>();
             } else {
@@ -505,6 +526,9 @@ fn resolve_visual_scopes(
                 commands.entity(entity).insert(NotShadowReceiver);
             }
         }
+    }
+    if excluded > 0 {
+        info!("render_cost: caster exclusions applied meshes={excluded}");
     }
 }
 

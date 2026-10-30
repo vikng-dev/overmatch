@@ -2041,6 +2041,20 @@ fn shadow_distance_override() -> Option<f32> {
 #[derive(Resource)]
 pub(crate) struct CaptureWindowPinned;
 
+/// Every public cascade field participates: an overlap-only change must reach the renderer.
+fn reconcile_shadow_config(config: &mut CascadeShadowConfig, rebuilt: CascadeShadowConfig) {
+    if config.bounds != rebuilt.bounds
+        || config.overlap_proportion != rebuilt.overlap_proportion
+        || config.minimum_distance != rebuilt.minimum_distance
+    {
+        info!(
+            "render_cost: cascades applied bounds={:?} overlap={} minimum={}",
+            rebuilt.bounds, rebuilt.overlap_proportion, rebuilt.minimum_distance
+        );
+        *config = rebuilt;
+    }
+}
+
 /// Reconcile the rendering world to [`Settings`]. The ONE writer of every knob below, which is what
 /// makes "the page and the picture cannot disagree" true by construction rather than by discipline.
 #[expect(
@@ -2049,6 +2063,7 @@ pub(crate) struct CaptureWindowPinned;
 )]
 fn apply_settings(
     settings: Res<Settings>,
+    shadow_controls: Option<Res<crate::render_cost::ShadowControls>>,
     mut shadow_map: ResMut<DirectionalLightShadowMap>,
     // A camera or light with a profile that is not the battlefield's (the pen cam's inset, masks
     // and key lights) keeps its own: the masks must not multisample, and the stage casts nothing.
@@ -2126,7 +2141,7 @@ fn apply_settings(
             // NOT listed here is a deliberate "bevy decides", not an oversight. Exactly one such
             // field is left: `minimum_distance` (0.1 m), the near clip, which no row of this page
             // has any business moving.
-            let rebuilt = CascadeShadowConfigBuilder {
+            let mut rebuilt = CascadeShadowConfigBuilder {
                 num_cascades: settings.shadow_cascades.count(),
                 maximum_distance,
                 first_cascade_far_bound: SHADOW_FIRST_CASCADE_FAR_BOUND_M,
@@ -2134,9 +2149,10 @@ fn apply_settings(
                 ..default()
             }
             .build();
-            if config.bounds != rebuilt.bounds {
-                *config = rebuilt;
+            if let Some(controls) = shadow_controls.as_deref() {
+                controls.configure_cascades(&mut rebuilt);
             }
+            reconcile_shadow_config(&mut config, rebuilt);
         }
         let enabled = distance.casts();
         if light.shadow_maps_enabled != enabled {
@@ -2700,6 +2716,21 @@ mod tests {
             }
         }
         states
+    }
+
+    /// The pricing runner relies on overlap-only reconciliation even when all bounds agree.
+    /// ASSUMED fixture overlap exercises the independent field, not a product recommendation.
+    #[test]
+    fn overlap_only_shadow_reconciliation_reaches_the_renderer() {
+        let mut config = CascadeShadowConfig::default();
+        let mut rebuilt = config.clone();
+        rebuilt.overlap_proportion = 0.05;
+        reconcile_shadow_config(&mut config, rebuilt);
+        assert_eq!(config.overlap_proportion, 0.05);
+        let mut rebuilt = config.clone();
+        rebuilt.minimum_distance = 0.2;
+        reconcile_shadow_config(&mut config, rebuilt);
+        assert_eq!(config.minimum_distance, 0.2);
     }
 
     /// The render-scale row reaches the render app through exactly one door: this reconciler writing

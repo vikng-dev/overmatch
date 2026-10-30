@@ -20,6 +20,19 @@
 # Useful levers: `msaa:`, `render_scale:`, `shadow_distance:`, `shadow_cascades:`,
 # `shadow_resolution:`, `track_prints:` (video.ron, src/settings.rs); OVERMATCH_PROBE_TANKS;
 # SPIKE_ABLATE=bloom,env_light,depth_prepass,ui and SPIKE_PHASE_COUNTS=1 (src/render_cost.rs).
+# Caster exclusions (instruments, not product settings): SPIKE_ABLATE=terrain-casters,
+#   tree-casters,house-casters,tank-casters (comma-separated; each removes only that class's casting).
+# Independent stock controls (environment assignments in the third condition field):
+#   SPIKE_SHADOW_FILTER=gaussian|hardware|temporal (per battlefield camera)
+#   SPIKE_SHADOW_SPLITS=40,118.3216,350 (explicit far bounds in metres; selects count and envelope,
+#     increasing finite bounds above the DERIVED stock 0.1 m near clip, at most four)
+#   SPIKE_SHADOW_OVERLAP=0.05 (finite proportion in [0,1); preserves bounds/count/envelope).
+# ASSUMED example splits/overlap above are probe inputs; omitted controls retain stock defaults.
+# Example: 'hardware||SPIKE_SHADOW_FILTER=hardware' or
+#   'splits||SPIKE_SHADOW_SPLITS=120,350' or 'overlap||SPIKE_SHADOW_OVERLAP=0.05'.
+# Census shadow view labels end in the cascade index; `draws` counts sets, not indirect commands.
+# Bevy's private per-view batch_sets/bins prevent cheap per-cascade indirect counts; all-view
+# indirect_draws remains available. See run-shadow-pricing.sh for the ready-to-run battery.
 # This runner gates on the probe tanks having spawned and on the client naming its ablation.
 # =======================================================================
 #
@@ -60,6 +73,12 @@ condition_gates() {
           grep -q "offline: spawned $((tanks - 2)) probe tanks" "$log" \
             || frame_run_invalid "$cond" "probe-tank spawn missing (see $log)"
         fi ;;
+      SPIKE_SHADOW_FILTER=*)
+        grep -q 'render_cost: shadow filter applied' "$log" \
+          || frame_run_invalid "$cond" "shadow filter never applied (see $log)" ;;
+      SPIKE_SHADOW_SPLITS=*|SPIKE_SHADOW_OVERLAP=*)
+        grep -q 'render_cost: cascades applied' "$log" \
+          || frame_run_invalid "$cond" "cascade controls never reconciled (see $log)" ;;
       SPIKE_ABLATE=*)
         grep -q "render_cost: ablating" "$log" \
           || frame_run_invalid "$cond" "the client never named its ablation (see $log)" ;;

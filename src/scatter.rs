@@ -289,7 +289,11 @@ pub(crate) fn spawn(
                     placement.identity.clone(),
                 ));
                 if let Some(view) = &view {
-                    entity.insert((Mesh3d(view.cube.clone()), MeshMaterial3d(view.wall.clone())));
+                    entity.insert((
+                        Mesh3d(view.cube.clone()),
+                        MeshMaterial3d(view.wall.clone()),
+                        crate::render_cost::CasterClass::House,
+                    ));
                 }
                 buildings += 1;
             }
@@ -318,6 +322,7 @@ pub(crate) fn spawn(
                     let (trunk_mesh, canopy_mesh) = &view.fir[placement.prototype];
                     entity.insert((
                         Mesh3d(trunk_mesh.clone()),
+                        crate::render_cost::CasterClass::Tree,
                         MeshMaterial3d(view.bark.clone()),
                     ));
                     // The canopy is view-only and spawns FLAT rather than as a child: nothing
@@ -325,6 +330,7 @@ pub(crate) fn spawn(
                     commands.spawn((
                         at(height_m * (1.0 + CANOPY_BASE_FRACTION) / 2.0),
                         Mesh3d(canopy_mesh.clone()),
+                        crate::render_cost::CasterClass::Tree,
                         MeshMaterial3d(view.needle.clone()),
                     ));
                 }

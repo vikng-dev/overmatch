@@ -620,6 +620,7 @@ fn spawn_block(
     blocks.push(transform);
     commands.spawn((
         Mesh3d(mesh),
+        crate::render_cost::CasterClass::Terrain,
         MeshMaterial3d(material),
         transform,
         RigidBody::Static,
