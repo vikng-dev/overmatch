@@ -1,0 +1,8 @@
+
+== debris stress, per condition: medians across the window's periods (*_max: the max)
+condition              lever              lines  tick_p50  tick_p95  tick_max  phys_p50  phys_p95  send_p50  send_p95  cpu_pct  overruns  thr_us  thr_n  live  live_max  frozen_max  released  tanks
+c01-1x100000x8192x512  1:100000:8192:512  -      -         -         -         -         -         -         -         -        -         -       -      -     -         -           -         -
+c02-1x100000x8192x512  1:100000:8192:512  -      -         -         -         -         -         -         -         -        -         -       -      -     -         -           -         -
+
+== debris stress, per lever: the median of its conditions (d_: change from `off`)
+lever  runs  tick_p50  d_tick_p50  tick_p95  d_tick_p95  phys_p50  d_phys_p50  phys_p95  d_phys_p95  send_p50  d_send_p50  send_p95  d_send_p95  cpu_pct  d_cpu_pct

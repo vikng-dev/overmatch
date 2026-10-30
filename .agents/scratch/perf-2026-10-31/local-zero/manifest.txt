@@ -1,0 +1,6 @@
+debris stress: Macbook-Pro-M4, 2026-10-31 05:56 +07, 1f6d2282
+server: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/bin/A/overmatch-server  env [OVERMATCH_SERVER_BIND=127.0.0.1 OVERMATCH_SERVER_STATS_S=1 OVERMATCH_BOT=29 ]
+clients: 1 x GPU-less /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/bin/A/overmatch, workload [SPIKE_SIM_IDLE=1]
+window: WARMUP_S 45, DURATION_S 180; conditions: 1:100000:8192:512 1:100000:8192:512
+c01-1x100000x8192x512: INVALID — the lever 1:100000:8192:512 released no fragment inside the window
+c02-1x100000x8192x512: INVALID — the lever 1:100000:8192:512 released no fragment inside the window
