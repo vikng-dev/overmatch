@@ -85,8 +85,8 @@
             points; R = 2.0 m needs E = 7540 HP points against the 214.8 kJ that ball drove (the
             8.8 cm Pzgr. 39 less its core). The ring at rest is 5.76 times as bright in its band,
             R = 4.75 m (design doc §5a, DERIVED). A field that carried only its driven energy
-            (factor 2, emitting ½ M v_s²) would emit 70.4 HP points from the shipped ring's
-            211.1 kJ against 7388 at 210 (DERIVED), a knockout radius 10.2 times shorter")),
+            (factor 2, emitting ½ M v_s²) would emit 132.6 HP points from the shipped ring's
+            397.7 kJ against 13,922 at 210 (DERIVED), a knockout radius 10.2 times shorter")),
         // h (degrees): the ring spans θ_c − h to θ_c + h of polar angle from the flight axis,
         // θ_c = atan(1/λ), uniform over that band; its near edge is held at the axis.
         ring_half_width_deg: (10.0, Tuned("provisional (owner's brief 4b): the band the wall's
@@ -99,7 +99,7 @@
         // support).
         ring_directions: (256, Tuned("provisional, flagged for the owner: the cost against the
             resolution. The ring's throw: 0.50 ms at N = 64, 1.47 at 256, 4.01 at 684; at rest
-            115, 29 and 11 HP points per direction (S = 210 × 211.1 kJ = 44.33 MJ), so at 256 one
-            direction is about one crew pool")),
+            218, 54 and 20 HP points per direction (S = 210 × 397.7 kJ = 83.53 MJ), so at 256 one
+            direction is about two crew pools")),
     ),
 )

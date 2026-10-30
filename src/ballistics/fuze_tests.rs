@@ -156,27 +156,28 @@ fn an_impact_delay_is_flight_time_from_contact() {
     );
 }
 
-/// The game's damage model: the 8.8 cm Pzgr. 39 ring's `SpendExit` fuze keeps today's outcomes.
-/// Its shipped burst is the one it had before the fuze block, field for field, and on a slab too
-/// thin to arm it, one that arms it, and one that stops it, the march gives the same bursts
-/// (position, speed, wait at rest) and the same doses to the struck pool and to an off-axis pool
-/// only the fragment cone reaches. The pins are MEASURED fixture outcomes of the spend-at-exit law
-/// as it stood before it was generalized; a change to that path moves them.
+/// The game's damage model: the 8.8 cm Pzgr. 39 ring's `SpendExit` fuze keeps its outcomes.
+/// Its shipped burst is the one its round file derives (113 g filler, 35.3 mm cavity), field for
+/// field, and on a slab too thin to arm it, one that arms it, and one that stops it, the march
+/// gives the same bursts (position, speed, wait at rest) and the same doses to the struck pool and
+/// to an off-axis pool only the fragment cone reaches. The pins are MEASURED outcomes of the
+/// spend-at-exit law under the shipped round data; a change to that path or to the round's burst
+/// block moves them.
 #[test]
 fn the_spend_exit_fuze_keeps_todays_bursts_and_doses() {
     let fixture = crate::tank::WeaponRound::resolve("88mm_APHE_ring").unwrap();
     let shipped = fixture.round.burst.unwrap();
-    // The ring's burst as the round file stated it before the fuze block, DERIVED at load then.
+    // The ring's burst as its round file states it, DERIVED at load.
     let today = burst::Burst {
         trigger: Trigger::SpendExit { arming_spend: 35.0 },
         delay: 0.0015,
         nose: RoundBody {
-            mass: 8.370_217,
+            mass: 6.971_434,
             caliber: 0.088,
             nose_factor: 0.291_666_66,
         },
-        sideways_speed: 541.4819,
-        energy: 211_073.97,
+        sideways_speed: 534.38837,
+        energy: 397_738.22,
     };
     assert_eq!(shipped, today, "the shipped burst, field for field");
     // Per slab: the bursts as (position, speed, seconds waited at rest); the pool units the shot
@@ -187,8 +188,8 @@ fn the_spend_exit_fuze_keeps_todays_bursts_and_doses() {
         (vec![], [204_265, 13_405], 0),
         (
             vec![([0.0, 1.999_035_8, -2.914_275_2], 592.8495, 0.0)],
-            [490_500, 1_994_517],
-            1_962_328,
+            [490_500, 3_675_533],
+            3_643_344,
         ),
         (vec![], [1_000_000, 0], 0),
     ];
