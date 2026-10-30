@@ -1,0 +1,17 @@
+runner commit: 5d23a7df24b61326b929d266a9d997aad3af98d4 (dirty)
+mode: offscreen (hidden window; the cameras render into a 2560x1440 image at scale 2; nothing presented)
+duration_s: 20  warmup_s: 30  cooldown_s: 2  min_rows: 400  bin: /Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-2/target/debug  asset_root: /Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-2
+presentation gates: offscreen — a 2560x1440 offscreen target throughout + the 3D camera drew on >=99% of measured frames + frame cap off; display and occlusion n/a (nothing presented)
+conditions: battle||OVERMATCH_BATTLE=1
+binary: /Users/Yan/github/vikng-dev/overmatch/.claude/worktrees/bay-2/target/debug/overmatch --offline  mtime=Oct 30 15:51:39 2026 size=302941736
+host: arm64 Apple M4
+battle: battle: armed — seed 153, 30 tanks, script digest 0x46eaae94c2b18f81, aims 28..320 m from the lanes, camera near (-165, 487) heading 165° pitch -10°, 50 trunks within 150 m of it (4 within ±36° of the view axis; DERIVED from the map's placement)
+battle: 2 full battle windows in the measured span
+battle: video fields [] env [OVERMATCH_BATTLE=1]
+battle: frame_cost: effective present mode Immediate, frame cap off
+battle: occlusion transitions in stream: 0
+battle: presenting monitor NOT REPORTED <- in force at the end
+battle: monitor rows in stream: 0 (1 = never moved; 2 is normally the startup park off the external panel, inside warmup — the analyzer gates on the state in force once warmup ends)
+battle: frame_cost: surface 2560x1440 physical (offscreen image at scale 2) — CHANGED at t=1.028s <- in force at the end
+battle: render scale: native — the 3D main pass fills the [2560, 1440] target <- the renderer's own word for the same size
+battle: surface rows in stream: 2 (1 = never resized; 2 is normally the startup re-pin after the park changed the scale factor)

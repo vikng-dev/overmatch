@@ -371,7 +371,7 @@ pub(crate) fn probe_spawn_xz(far: bool, index: usize) -> Vec2 {
 /// is an admission policy; assets do not initialize simulation state. Failed loads remain fatal.
 #[expect(
     clippy::too_many_arguments,
-    reason = "admission spans the loader, assets, sim source, terrain, certificate, view profile and app state"
+    reason = "admission spans the loader, assets, sim source, terrain, map, certificate, view profile and app state"
 )]
 fn spawn_tank_when_loaded(
     mut commands: Commands,
@@ -381,6 +381,7 @@ fn spawn_tank_when_loaded(
     height: Option<Res<crate::terrain_grid::HeightGrid>>,
     certificate: Res<crate::geometry_lod::TankCertificate>,
     view: Option<Res<crate::view::ViewProfile>>,
+    manifest: Option<Res<crate::map::MapManifest>>,
     mut next: ResMut<NextState<AppState>>,
 ) {
     let Some(pending) = pending else {
@@ -413,6 +414,18 @@ fn spawn_tank_when_loaded(
             grid,
             &certificate,
             *view,
+        );
+        commands.remove_resource::<PendingTankAssets>();
+        next.set(AppState::Playing);
+        return;
+    }
+    if super::battle::enabled() {
+        super::battle::spawn(
+            &mut commands,
+            content,
+            pending.presentation(),
+            grid,
+            manifest.as_deref(),
         );
         commands.remove_resource::<PendingTankAssets>();
         next.set(AppState::Playing);
@@ -631,8 +644,8 @@ fn identity(index: usize) -> (CombatantId, CombatantLife) {
     (CombatantId(index as u64 + 1), CombatantLife(0))
 }
 
-/// Spawn one complete dynamic tank for the local duel, the scenario's tank `index`.
-fn spawn_tank(
+/// Spawn one complete dynamic tank for the local scenario, its tank `index`, and return its root.
+pub(super) fn spawn_tank(
     commands: &mut Commands,
     content: TankContent,
     presentation: TankPresentation,
@@ -640,7 +653,7 @@ fn spawn_tank(
     name: &str,
     index: usize,
     controlled: bool,
-) {
+) -> Entity {
     let root = spawn_complete_tank(
         commands,
         content,
@@ -657,6 +670,7 @@ fn spawn_tank(
     if controlled {
         commands.entity(root).insert(Controlled);
     }
+    root
 }
 
 /// Move local possession to the next tank and return to third-person view.

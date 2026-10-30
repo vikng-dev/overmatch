@@ -175,6 +175,22 @@ comparison. The Fir branch of `scatter::spawn` has not changed since.
 **Not prepared: a binary built from `d16a458` itself.** It would carry every change made since
 (terrain packs, track prints, the damage model) into the delta, alongside the forest.
 
+### Battle (issue #153)
+
+`OVERMATCH_BATTLE=1` (`src/tank/battle.rs`, whose module doc owns the scene): 30 tanks at the north
+forest's edge, moving and firing on one seeded script, in place of the duel. Its subject touches the
+game's damage model only to stay out of it: every line of fire runs between the other lanes, so no
+tank is knocked out. It is a condition of `run-ablation.sh`, which gates it on its 10 s summary
+lines; give it `WARMUP_S=30`:
+
+```zsh
+OFFSCREEN=1 WARMUP_S=30 scripts/perf/run-ablation.sh runs/<run> \
+  'probes-a||OVERMATCH_PROBE_TANKS=30' 'battle-a||OVERMATCH_BATTLE=1' \
+  'battle-b||OVERMATCH_BATTLE=1' 'probes-b||OVERMATCH_PROBE_TANKS=30'
+```
+
+Stills, the smoke's manifest and its summary lines: `battle-153/`.
+
 ## Smoke (2026-10-29, hidden window)
 
 These runs prove that the plumbing works and nothing more. No frame time from them is a measurement.
@@ -192,3 +208,7 @@ These runs prove that the plumbing works and nothing more. No frame time from th
   - m350-5 and off-5 were valid, and the probe gate passed.
   - One earlier attempt died when the display slept. The liveness gate caught it, and the run passed
     under `caffeinate`.
+- **`run-ablation.sh`, battle (2026-10-30, `OFFSCREEN=1`, dev build, 30 s warmup + 20 s):** the
+  runner's gates passed, and both battle windows in the span were full: 30/30 tanks moved and fired,
+  no strike on a tank, no knockout, no tree down. Two runs fired the same main-gun counts window by
+  window (28, 35, 46, 39, 41; MEASURED).

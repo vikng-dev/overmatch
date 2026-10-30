@@ -1036,6 +1036,9 @@ pub fn run_offline() {
         tank::scenario::offline_target_fires_plugin,
         damage_cam::pen_cam::game::scripted_xray_plugin,
     ));
+    // The same boundary: the battle scene's driver (`OVERMATCH_BATTLE`) writes every tank's
+    // command, the controlled tank's included.
+    app.add_plugins(tank::battle::offline_plugin);
     // The game's cosmetic hull-mark demo fabricates marks and takes the camera in dev builds.
     #[cfg(all(feature = "dev_tools", debug_assertions))]
     app.add_plugins(hull_marks::demo::offline_plugin);

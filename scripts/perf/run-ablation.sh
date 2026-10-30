@@ -21,6 +21,13 @@
 # `shadow_resolution:`, `track_prints:` (video.ron, src/settings.rs); OVERMATCH_PROBE_TANKS;
 # SPIKE_ABLATE=bloom,env_light,depth_prepass,depth_copy,ui and SPIKE_PHASE_COUNTS=1
 #   (src/render_cost.rs; depth_copy = bevy's own depth prepass instead of the main-pass copy).
+# OVERMATCH_BATTLE=1 is the battle scene (src/tank/battle.rs): 30 tanks moving and firing on a
+# seeded script in place of the duel. Its first full 10 s summary window began 10 s into the stream
+# (MEASURED, warm dev build), so a run carrying it takes WARMUP_S=30, room for a cold start; the
+# gate fails any window of the measured span the scene ran short in.
+#   OFFSCREEN=1 WARMUP_S=30 scripts/perf/run-ablation.sh <out-dir> \
+#     'probes-a||OVERMATCH_PROBE_TANKS=30' 'battle-a||OVERMATCH_BATTLE=1' \
+#     'battle-b||OVERMATCH_BATTLE=1' 'probes-b||OVERMATCH_PROBE_TANKS=30'
 # Caster exclusions (instruments, not product settings): SPIKE_ABLATE=terrain-casters,
 #   tree-casters,house-casters,tank-casters (comma-separated; each removes only that class's casting).
 # Independent stock controls (environment assignments in the third condition field):
@@ -34,7 +41,8 @@
 # Census shadow view labels end in the cascade index; `draws` counts sets, not indirect commands.
 # Bevy's private per-view batch_sets/bins prevent cheap per-cascade indirect counts; all-view
 # indirect_draws remains available. See run-shadow-pricing.sh for the ready-to-run battery.
-# This runner gates on the probe tanks having spawned and on the client naming its ablation.
+# This runner gates on the probe tanks having spawned, on the battle scene's windows, and on the
+# client naming its ablation.
 # =======================================================================
 #
 # Usage: run-ablation.sh <out-dir> <condition> ...
@@ -64,10 +72,35 @@ CONDITIONS=("$@")
 source "$REPO/scripts/perf/frame-run.zsh"
 frame_run_begin
 
+# The battle scene's own gate: it armed, and every one of its 10 s summary windows that overlaps the
+# measured span reports `full` (all 30 tanks moved and fired, no strike on a tank, no knockout), with
+# at least DURATION_S/10 - 1 such windows logged (the window holding the span's end is still open
+# when the client is stopped). The windows are on the stream's clock (`Time<Real>`).
+battle_gates() {
+  local cond="$1" log="$2" stream="$3" t0 counts seen short
+  grep -q 'battle: armed' "$log" || frame_run_invalid "$cond" "the battle scene never armed (see $log)"
+  t0="$(frame_run_t_first "$stream")"
+  counts="$(awk -v from="$((t0 + WARMUP_S))" -v to="$((t0 + WARMUP_S + DURATION_S))" '
+    /battle: window / {
+      line = $0; sub(/.*battle: window /, "", line)
+      split(line, words, " "); split(words[1], span, "[.][.]")
+      if (span[2] + 0 > from && span[1] + 0 < to) { seen++; if (line !~ /^[^ ]+ s real: full/) short++ }
+    }
+    END { printf "%d %d", seen, short }' "$log")"
+  seen="${counts% *}" short="${counts#* }"
+  (( short == 0 )) || frame_run_invalid "$cond" "$short battle window(s) in the measured span were short (see 'battle: window' in $log)"
+  (( seen >= DURATION_S / 10 - 1 && seen >= 1 )) \
+    || frame_run_invalid "$cond" "only $seen battle window(s) cover the measured span (see $log)"
+  grep 'battle: armed' "$log" | sed 's/.*battle: armed/battle: armed/' | sed "s/^/$cond: /" >>"$OUT/manifest.txt"
+  echo "$cond: $seen full battle windows in the measured span" >>"$OUT/manifest.txt"
+}
+
 condition_gates() {
-  local cond="$1" log="$2" assignment
+  local cond="$1" log="$2" stream="$3" assignment
   for assignment in ${=envs}; do
     case "$assignment" in
+      OVERMATCH_BATTLE=*)
+        [[ "${assignment#*=}" == (|0|false|FALSE|False) ]] || battle_gates "$cond" "$log" "$stream" ;;
       OVERMATCH_PROBE_TANKS=*)
         local tanks="${assignment#*=}"
         if (( tanks > 2 )); then

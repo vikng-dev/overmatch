@@ -7,6 +7,8 @@
 use crate::state::{AppState, GameplaySet};
 use bevy::prelude::*;
 
+// The battle scene (`OVERMATCH_BATTLE`): its spawn is the scenario's, its runtime `run_offline`'s.
+pub(crate) mod battle;
 mod integrity;
 mod model;
 // `pub(crate)` for its spawn POINTS: `terrain_grid`'s spawn regression test asserts every
