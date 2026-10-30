@@ -5,7 +5,9 @@
 # `vendor/` holds patched upstream crates, which are not ours to lint.
 [workspace]
 members = ["tools"]
-exclude = ["vendor"]
+# `.claude` holds the bays (worktrees of this repo): a bay on a base older than this workspace has no
+# [workspace] of its own, and cargo would otherwise adopt this manifest as its root and refuse to build.
+exclude = ["vendor", ".claude"]
 
 [package]
 name = "overmatch"
