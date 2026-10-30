@@ -1,0 +1,35 @@
+# Client download per tank per tick (nettop, dev builds, local server, 1 window-less client;
+# MEASURED 2026-10-30 by day, owner working, other bays compiling). bytes.sh + analyze.py.
+# Builds: before = 470a78d (main), after1 = 3b9eb9c (win 1), after2 = 1448906 (+ win 2),
+# after3 = 7d2e8ef (+ win 3), after4 = ee51de9 (+ win 4); before-again re-runs 470a78d last.
+# "tanks" counts the client's own tank; the slope is per added (remote) tank.
+## before
+bots1: tanks [2] down 22.41 kB/s up 17.09 kB/s server 63.98 Hz overruns 15 -> 350.2 B/tick down
+bots5: tanks [6] down 54.36 kB/s up 17.63 kB/s server 63.95 Hz overruns 8 -> 850.0 B/tick down
+bots9: tanks [10] down 89.30 kB/s up 17.79 kB/s server 63.98 Hz overruns 7 -> 1395.8 B/tick down
+slope 130.7 B per tank per tick, intercept 81.2 B/tick (least squares, 3 points)
+## after1
+bots1: tanks [2] down 22.34 kB/s up 17.48 kB/s server 63.98 Hz overruns 0 -> 349.2 B/tick down
+bots5: tanks [6] down 48.22 kB/s up 17.96 kB/s server 64.02 Hz overruns 2 -> 753.2 B/tick down
+bots9: tanks [10] down 74.61 kB/s up 17.84 kB/s server 64.02 Hz overruns 4 -> 1165.4 B/tick down
+slope 102.0 B per tank per tick, intercept 143.8 B/tick (least squares, 3 points)
+## after2
+bots1: tanks [2] down 20.52 kB/s up 18.02 kB/s server 64.00 Hz overruns 0 -> 320.6 B/tick down
+bots5: tanks [6] down 44.26 kB/s up 17.94 kB/s server 64.01 Hz overruns 2 -> 691.4 B/tick down
+bots9: tanks [10] down 67.81 kB/s up 17.82 kB/s server 64.01 Hz overruns 3 -> 1059.4 B/tick down
+slope 92.3 B per tank per tick, intercept 136.4 B/tick (least squares, 3 points)
+## after3
+bots1: tanks [2] down 18.82 kB/s up 17.46 kB/s server 64.00 Hz overruns 0 -> 294.0 B/tick down
+bots5: tanks [6] down 38.35 kB/s up 17.85 kB/s server 63.98 Hz overruns 2 -> 599.4 B/tick down
+bots9: tanks [10] down 57.84 kB/s up 17.55 kB/s server 64.00 Hz overruns 3 -> 903.7 B/tick down
+slope 76.2 B per tank per tick, intercept 141.8 B/tick (least squares, 3 points)
+## after4
+bots1: tanks [2] down 16.20 kB/s up 17.95 kB/s server 64.03 Hz overruns 0 -> 253.1 B/tick down
+bots5: tanks [6] down 30.43 kB/s up 17.89 kB/s server 64.01 Hz overruns 2 -> 475.5 B/tick down
+bots9: tanks [10] down 44.13 kB/s up 17.79 kB/s server 64.00 Hz overruns 4 -> 689.4 B/tick down
+slope 54.5 B per tank per tick, intercept 145.4 B/tick (least squares, 3 points)
+## before-again
+bots1: tanks [2] down 23.58 kB/s up 17.52 kB/s server 64.00 Hz overruns 0 -> 368.4 B/tick down
+bots5: tanks [6] down 55.02 kB/s up 17.92 kB/s server 64.00 Hz overruns 2 -> 859.7 B/tick down
+bots9: tanks [10] down 90.02 kB/s up 17.73 kB/s server 64.00 Hz overruns 3 -> 1406.6 B/tick down
+slope 129.8 B per tank per tick, intercept 99.6 B/tick (least squares, 3 points)
