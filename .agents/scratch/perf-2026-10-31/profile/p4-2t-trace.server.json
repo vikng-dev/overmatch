@@ -1,0 +1,131 @@
+{
+ "label": "p4-2t-trace",
+ "log": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/profile/p4-2t-trace.window.log",
+ "log_present": true,
+ "window": "marked",
+ "stats_lines": 60,
+ "bots_spawned": 1,
+ "bot_knockouts_in_window": 0,
+ "stats": {
+  "budget_us": {
+   "n": 60,
+   "median": 15625.0,
+   "max": 15625.0,
+   "last_minus_first": 0.0
+  },
+  "clients": {
+   "n": 60,
+   "median": 1.0,
+   "max": 1.0,
+   "last_minus_first": 0.0
+  },
+  "cpu_pct": {
+   "n": 60,
+   "median": 93.55,
+   "max": 107.2,
+   "last_minus_first": 12.400000000000006
+  },
+  "entities": {
+   "n": 60,
+   "median": 13757.0,
+   "max": 13757.0,
+   "last_minus_first": 0.0
+  },
+  "overruns": {
+   "n": 60,
+   "median": 0.0,
+   "max": 0.0,
+   "last_minus_first": 0.0
+  },
+  "period_s": {
+   "n": 60,
+   "median": 1.0,
+   "max": 1.0,
+   "last_minus_first": 0.0
+  },
+  "physics_us.max": {
+   "n": 60,
+   "median": 1503.6,
+   "max": 2259.7,
+   "last_minus_first": 311.60000000000014
+  },
+  "physics_us.p50": {
+   "n": 60,
+   "median": 854.2,
+   "max": 1018.0,
+   "last_minus_first": 159.60000000000002
+  },
+  "physics_us.p95": {
+   "n": 60,
+   "median": 1247.75,
+   "max": 1671.3,
+   "last_minus_first": 270.0999999999999
+  },
+  "projectiles": {
+   "n": 60,
+   "median": 0.0,
+   "max": 0.0,
+   "last_minus_first": 0.0
+  },
+  "rss_mb": {
+   "n": 60,
+   "median": 287.9,
+   "max": 287.9,
+   "last_minus_first": 0.0
+  },
+  "send_us.max": {
+   "n": 60,
+   "median": 240.25,
+   "max": 308.3,
+   "last_minus_first": 29.80000000000001
+  },
+  "send_us.p50": {
+   "n": 60,
+   "median": 126.1,
+   "max": 148.5,
+   "last_minus_first": 29.80000000000001
+  },
+  "send_us.p95": {
+   "n": 60,
+   "median": 201.8,
+   "max": 240.9,
+   "last_minus_first": 29.5
+  },
+  "tanks": {
+   "n": 60,
+   "median": 2.0,
+   "max": 2.0,
+   "last_minus_first": 0.0
+  },
+  "tick_hz": {
+   "n": 60,
+   "median": 63.9,
+   "max": 64.8,
+   "last_minus_first": 0.29999999999999716
+  },
+  "tick_us.max": {
+   "n": 60,
+   "median": 2788.4,
+   "max": 3737.0,
+   "last_minus_first": 299.0999999999999
+  },
+  "tick_us.p50": {
+   "n": 60,
+   "median": 1778.35,
+   "max": 2039.9,
+   "last_minus_first": 248.4000000000001
+  },
+  "tick_us.p95": {
+   "n": 60,
+   "median": 2323.8,
+   "max": 3249.0,
+   "last_minus_first": 360.5999999999999
+  },
+  "ticks": {
+   "n": 60,
+   "median": 64.0,
+   "max": 65.0,
+   "last_minus_first": 0.0
+  }
+ }
+}

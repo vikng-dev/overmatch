@@ -1,0 +1,6 @@
+built 2026-10-31 02:09 +07 from ecdc13eb51a42625320858956a1e3317358c9f69 (tag v0.7.0-alpha.3, detached), bay-3, 41m 11s (cargo)
+scripts/serial-cargo build --locked --profile profiling --features dev_ui,bitprobe,bevy/trace_chrome --bin overmatch-server
+1dced192e377d70eaa1984a13688b58e53a0c805cf2efef4eff40f56204321fd  /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/bin/A/overmatch-server
+built 2026-10-31 02:19:36 +07 from ecdc13eb51a42625320858956a1e3317358c9f69 (tag v0.7.0-alpha.3), bay-3, 1050 s including the queue
+scripts/serial-cargo build --locked --profile profiling --features dev_ui,bitprobe,bevy/trace_chrome --bin overmatch
+e991b890eb334b131fb904ad4bebf024e5b5b473f417171409c0a1311e49de7b  /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/bin/A/overmatch
