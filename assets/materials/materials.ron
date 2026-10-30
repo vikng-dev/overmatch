@@ -34,6 +34,8 @@
 //   - MildSteel, 1020 analogue: a / a_ref ≈ 0.460 (≈ 460), ρ / ρ_ref ≈ 1.006.
 //   - TungstenCarbide, 6 % cobalt cemented-carbide analogue: a / a_ref ≈ 4.16 (≈ 4160),
 //     ρ / ρ_ref ≈ 1.898.
+//   - CastMild, ASTM A27 grade 65-35 analogue: a / a_ref ≈ 0.385 (≈ 385), ρ / ρ_ref ≈ 0.994.
+//   - TrackSteel, ASTM A128 (Hadfield) analogue: a / a_ref ≈ 0.673 (≈ 673), ρ / ρ_ref ≈ 1.005.
 //   Cast armour has no sourced row.
 //
 // `bulk` = the bulk facts of a non-metal (density kg/m³, mode I fracture toughness K_IC Pa·√m, and
@@ -57,8 +59,8 @@
 // "Q2" below is the research table in
 // `.agents/scratch/damage-cam-2026-10-08/research/hardness-anchor-free.md`. "Research pass
 // 2026-08-07" is the Tiger metallurgy pass whose sources live in that session's record, not in the
-// repo. `paintable` is a livery flag and the reference's resistance the unit's definition; neither
-// is a number with a provenance.
+// repo. `visual` is a key and the reference's resistance the unit's definition; neither is a number
+// with a provenance.
 //
 // Effective factors: baseline carried from the per-node values in tiger_1.tank.ron (2026-08-06); revised by the
 // material research pass 2026-08-07 (Tiger metallurgy, sources in the session record):
@@ -89,17 +91,28 @@
 //     the one weak spot in this table: it reads like a forming process and is not one. It covers
 //     the stamped/welded wheel bodies and forged rims, and equally the CAST running gear (sprockets
 //     and idlers, 2026-08-07) — a sprocket is plain `Stahlguß`, machinery steel that happens to be
-//     cast, so it belongs here and NOT in `Cast` (see the principle above). At ~0.8x RHA.
+//     cast, so it is NOT `Cast` (see the principle above). At ~0.8x RHA. A cast machinery part
+//     belongs in `CastMild` below; the model's sprockets and idlers still wear `MildSteel` until a
+//     source settles how they were made (`.agents/docs/design/tank-surfaces.md` §4).
 //     The wheels softened 1000->800 when the material bind landed; running-gear shots were a real
 //     weak axis. Rename to `Structural` if the name ever misleads someone into the `Cast` mistake
 //     this note exists to prevent.
+//   - `CastMild` = 800: plain cast machinery steel (Stahlguß): sprockets, idlers, housings. Its own
+//     row because its facts are a casting grade's, not a wrought one's, and its surface looks cast;
+//     its declared factor is `MildSteel`'s class, so moving a part here changes nothing ballistic
+//     until a law reads the facts. Still NOT `Cast`: that is armour-grade.
+//   - `TrackSteel`: cast track-link steel, the Hadfield manganese class (ASSUMED; no source states
+//     a given vehicle's track alloy). Worn by no mesh yet: the track links draw through their own
+//     belt material.
 //   - `EngineBlock` = 150: homogenized box — grey cast iron ~0.4x RHA, ~30-40% metal fraction
 //     along a shot line -> 0.4 x 0.35 ~= 0.14. HL210 fork (first ~250 Tigers, aluminium
 //     block) would sit ~100; declare the vehicle's date to settle it. Transmission shares
 //     the substance for now (denser gear mass — split only if the sandbox ever cares).
 //
-// `paintable` = whether the runtime livery composes onto this substance: exterior steels yes,
-// interior substances no.
+// `visual` = the key of this material's look in the view's shared visual library (`visuals.ron`
+// beside this file), which also decides whether the livery's paint goes on it. Every hard row names
+// one, and many rows share one: cast armour and cast machinery steel both look like cast steel. The
+// server parses it as a key and nothing more. Design: `.agents/docs/design/tank-surfaces.md`.
 //
 // THIS FILE IS THE CLASSIFIER. A glTF primitive is a ballistic volume iff its material name is a
 // key here, and the bake refuses one wearing an `Unworn` key; the tank RON carries no per-node
@@ -112,7 +125,7 @@
     substances: {
         "RHA": Hard(
             resistance: Reference,
-            paintable: true,
+            visual: "rolled_steel",
             debris_half_angle_deg: (26.2, Derived("the constant-angle fit of the MEASURED
                 normal-impact debris extents of Qi et al. 2026, shots 5 and 6 (sin α 0.446 and
                 0.436): reading B of
@@ -137,7 +150,7 @@
             resistance: Effective((1000.0, Tuned("declared effective factor: forged autofrettaged
                 gun steel taken as RHA quality, unified at the reference (research pass
                 2026-08-07). Not derived from the facts below, which give ≈ 1129 (DERIVED)"))),
-            paintable: true,
+            visual: "machined_steel",
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: Some((
                 density: (7800.0, Measured("4340, MakeItFrom 'Quenched and Tempered 4340 Ni-Cr-Mo
@@ -151,7 +164,7 @@
         "Cast": Hard(
             resistance: Effective((900.0, Derived("mid of cast armour running ~5–15 % below rolled
                 ballistically (research pass 2026-08-07)"))),
-            paintable: true,
+            visual: "cast_steel",
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: None,
         ),
@@ -159,7 +172,7 @@
             resistance: Effective((800.0, Tuned("non-armour structural and machinery steel taken
                 at ~0.8× RHA (research pass 2026-08-07). Not derived from the facts below, which
                 give ≈ 460 (DERIVED)"))),
-            paintable: true,
+            visual: "rolled_steel",
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: Some((
                 density: (7900.0, Measured("1020, MakeItFrom via search excerpt (read, secondary;
@@ -171,11 +184,51 @@
                 poisson_ratio: (0.29, Measured("1020, MakeItFrom via search excerpt, Q2")),
             )),
         ),
+        "CastMild": Hard(
+            resistance: Effective((800.0, Tuned("plain cast machinery steel taken at MildSteel's
+                declared ~0.8× RHA, the class its parts sit in today, so moving a part here changes
+                nothing ballistic until a law reads the facts. Not derived from the facts below,
+                which give ≈ 385 (DERIVED)"))),
+            visual: "cast_steel",
+            debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
+            facts: Some((
+                density: (7800.0, Measured("ASTM A27 grade 65-35 (450-240, J03001), normalized,
+                    MakeItFrom (read 2026-10-30, secondary)")),
+                flow_strength: (0.385e9, Derived("mean of Rp0.2 270 MPa and Rm 500 MPa (MEASURED,
+                    MakeItFrom ASTM A27 grade 65-35, normalized, read 2026-10-30, secondary), the
+                    flow-stress convention of Q2")),
+                youngs_modulus: (190.0e9, Measured("ASTM A27 grade 65-35, MakeItFrom (read
+                    2026-10-30, secondary)")),
+                poisson_ratio: (0.29, Measured("ASTM A27 grade 65-35, MakeItFrom (read 2026-10-30,
+                    secondary)")),
+            )),
+        ),
+        "TrackSteel": Hard(
+            resistance: Effective((800.0, Unknown("no penetration equivalence for cast manganese
+                track steel; carried at MildSteel's declared factor, the non-armour class. Not
+                derived from the facts below, which give ≈ 673 (DERIVED). Settled by a reading of
+                Hadfield steel against the force law"))),
+            visual: "track_steel",
+            debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
+            facts: Some((
+                density: (7890.0, Derived("0.285 lb/in³ × 27 680 (kg/m³)/(lb/in³): CLAIMED for
+                    austenitic manganese steel by a Columbia Steel alloy paper, read only in a search
+                    summary 2026-10-31")),
+                flow_strength: (0.6725e9, Derived("mean of yield 380 MPa (the middle of 345–415) and
+                    Rm 965 MPa, as-quenched Hadfield steel (CLAIMED: Total Materia, 'High Manganese
+                    Austenitic Steels: Part One', read only in a search summary 2026-10-31), the
+                    flow-stress convention of Q2")),
+                youngs_modulus: (200.0e9, Tuned("chosen inside the steel range 190–210 GPa; no
+                    source read for the manganese grade")),
+                poisson_ratio: (0.29, Tuned("chosen inside the steel range 0.27–0.30; no source
+                    read for the manganese grade")),
+            )),
+        ),
         "EngineBlock": Hard(
             resistance: Effective((150.0, Derived("grey cast iron ~0.4× RHA times a ~30–40 % metal
                 fraction along a shot line ≈ 140, rounded to 150 (research pass 2026-08-07). The
                 fill scaling is an assumption, not a fact"))),
-            paintable: false,
+            visual: "cast_steel",
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: None,
         ),
@@ -183,7 +236,7 @@
             resistance: Effective((200.0, Unknown("no derivation recorded; carried from the
                 per-node factors of the first tank file (2026-08-06). Settled by an effective
                 resistance for stowed rounds and propellant"))),
-            paintable: false,
+            visual: "machined_steel",
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: None,
         ),
@@ -191,7 +244,7 @@
             resistance: Effective((50.0, Unknown("no derivation recorded; carried from the
                 per-node factors of the first tank file (2026-08-06). Settled by a penetration
                 equivalence for road-wheel rubber"))),
-            paintable: false,
+            visual: "rubber",
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: None,
         ),
@@ -203,7 +256,7 @@
                 made of it and nothing reads a penetrator's factor under the rigid rule; settled
                 when the core-vs-plate hardness contest reads it. Not derived from the facts below,
                 which give ≈ 4160 (DERIVED)"))),
-            paintable: false,
+            visual: "machined_steel",
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: Some((
                 density: (14900.0, Measured("14.9 g/cm³ (ASTM C20), grade ACI-Co6 (WC, 6 % cobalt,
@@ -233,7 +286,7 @@
             resistance: Effective((40.0, Unknown("no penetration data; spruce/pine crushing
                 strength along the grain ~40 MPa (birch ~55) over the reference flow strength
                 ~1 GPa, × 1000; the conifers' value, the forest's wood"))),
-            paintable: false,
+            visual: "wood",
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: None,
             bulk: Some((
@@ -257,7 +310,7 @@
                 unit compressive strength 36.5 MPa (s.d. 12.6; extruded 77.9), Brick Industry
                 Association Technical Note 3A (2024) Table 1, read 2026-10-30, over the reference
                 flow strength ~1 GPa, × 1000"))),
-            paintable: false,
+            visual: "brick",
             debris_half_angle_deg: (26.2, Unknown("no measured debris extent; RHA's value")),
             facts: None,
             bulk: Some((

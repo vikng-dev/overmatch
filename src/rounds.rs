@@ -1038,13 +1038,13 @@ pub(crate) mod tests {
     /// A reference steel, one burst core worn by no volume, `"Fixture core"`, and one hard
     /// substance that is a burst core too, `"Fixture hard core"`: fixture data.
     const FIXTURE_SUBSTANCES: &str = r#"(substances: {
-        "GunSteel": Hard(resistance: Reference, paintable: true,
+        "GunSteel": Hard(resistance: Reference, visual: "fixture",
             debris_half_angle_deg: (26.2, Tuned("x")), facts: Some((
                 density: (7800.0, Tuned("x")), flow_strength: (1.18e9, Tuned("x")),
                 youngs_modulus: (190.0e9, Tuned("x")), poisson_ratio: (0.29, Tuned("x"))))),
         "Fixture core": Unworn(burst: Some((density: (1650.0, Tuned("x")),
             speed_constant_mps: (2680.0, Tuned("x"))))),
-        "Fixture hard core": Hard(resistance: Effective((200.0, Tuned("x"))), paintable: false,
+        "Fixture hard core": Hard(resistance: Effective((200.0, Tuned("x"))), visual: "fixture",
             debris_half_angle_deg: (26.2, Tuned("x")), facts: None,
             burst: Some((density: (1650.0, Tuned("x")),
                 speed_constant_mps: (2680.0, Tuned("x"))))),

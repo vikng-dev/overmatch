@@ -1783,7 +1783,7 @@ mod tests {
         // which is the whole reason the file has to come from the right revision.
         std::fs::write(
             &elsewhere,
-            r#"SubstanceRegistry(substances: {"Cheese": Hard(resistance: Reference, paintable: false,
+            r#"SubstanceRegistry(substances: {"Cheese": Hard(resistance: Reference, visual: "fixture",
                 debris_half_angle_deg: (26.2, Tuned("fixture")),
                 facts: Some((density: (1000.0, Tuned("fixture")),
                     flow_strength: (1.0e6, Tuned("fixture")),

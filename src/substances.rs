@@ -202,9 +202,6 @@ pub enum Substance {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HardSubstance {
     pub resistance: Resistance,
-    /// Whether the runtime livery composes onto this substance — exterior steels yes, interior
-    /// substances no. View-layer data; the walk never reads it.
-    pub paintable: bool,
     /// `λ = 1/sin α` of the authored debris half-angle `α`: the field law's ratio for the spall
     /// cone a body exit through this substance throws (design doc §5), at least 1 and in the law's
     /// domain (checked at parse).
@@ -284,8 +281,9 @@ pub enum Matter {
 }
 
 /// One entry as authored: `Hard(..)` or `Unworn(..)` with every number carrying its provenance
-/// ([`crate::provenance`]), or a bare `Witness`. `paintable` is a livery flag, not a number, and
-/// carries none; the reference's resistance is the unit's definition and carries none either.
+/// ([`crate::provenance`]), or a bare `Witness`. `visual` is the key of the material's look in the
+/// view's visual library (`assets/materials/visuals.ron`), not a number, and carries none; the
+/// reference's resistance is the unit's definition and carries none either.
 /// A hard row's `burst` is optional, absent read as `None`; an unworn row authors it, as it states
 /// nothing else.
 #[derive(Deserialize)]
@@ -293,7 +291,7 @@ pub enum Matter {
 enum SubstanceFile {
     Hard {
         resistance: ResistanceFile,
-        paintable: bool,
+        visual: String,
         /// Degrees, converted once at parse ([`debris_ratio`]).
         debris_half_angle_deg: Sourced<f64>,
         facts: Option<FactsFile>,
@@ -377,41 +375,52 @@ fn debris_ratio(name: &str, degrees: f64) -> Result<f32, String> {
 }
 
 /// Substance `name` as authored, converted: the debris half-angle to its ratio
-/// ([`debris_ratio`]), refused there by name.
-fn converted(name: &str, file: SubstanceFile) -> Result<Substance, String> {
+/// ([`debris_ratio`]), refused there by name, and a hard row's visual key beside it, refused blank.
+fn converted(name: &str, file: SubstanceFile) -> Result<(Substance, Option<String>), String> {
     Ok(match file {
         SubstanceFile::Hard {
             resistance,
-            paintable,
+            visual,
             debris_half_angle_deg,
             facts,
             bulk,
             burst,
-        } => Substance::Hard(HardSubstance {
-            resistance: match resistance {
-                ResistanceFile::Reference => Resistance::Reference,
-                ResistanceFile::Effective(Sourced(factor)) => Resistance::Effective(factor),
+        } => {
+            if visual.trim().is_empty() {
+                return Err(format!(
+                    "substance {name:?} names a blank visual — every hard substance is worn, and a \
+                     worn surface draws as the visual it names"
+                ));
+            }
+            let hard = HardSubstance {
+                resistance: match resistance {
+                    ResistanceFile::Reference => Resistance::Reference,
+                    ResistanceFile::Effective(Sourced(factor)) => Resistance::Effective(factor),
+                },
+                debris_ratio: debris_ratio(name, debris_half_angle_deg.0)?,
+                facts: facts.map(|facts| MaterialFacts {
+                    density: facts.density.0,
+                    flow_strength: facts.flow_strength.0,
+                    youngs_modulus: facts.youngs_modulus.0,
+                    poisson_ratio: facts.poisson_ratio.0,
+                }),
+                bulk: bulk.map(|bulk| BulkFacts {
+                    density: bulk.density.0,
+                    toughness: bulk.toughness.0,
+                    tensile: bulk.tensile.map(|tensile| tensile.0),
+                    fracture_energy: bulk.fracture_energy.map(|energy| energy.0),
+                }),
+                burst: burst.map(BurstFile::facts),
+            };
+            (Substance::Hard(hard), Some(visual))
+        }
+        SubstanceFile::Witness => (Substance::Witness, None),
+        SubstanceFile::Unworn { burst } => (
+            Substance::Unworn {
+                burst: burst.map(BurstFile::facts),
             },
-            paintable,
-            debris_ratio: debris_ratio(name, debris_half_angle_deg.0)?,
-            facts: facts.map(|facts| MaterialFacts {
-                density: facts.density.0,
-                flow_strength: facts.flow_strength.0,
-                youngs_modulus: facts.youngs_modulus.0,
-                poisson_ratio: facts.poisson_ratio.0,
-            }),
-            bulk: bulk.map(|bulk| BulkFacts {
-                density: bulk.density.0,
-                toughness: bulk.toughness.0,
-                tensile: bulk.tensile.map(|tensile| tensile.0),
-                fracture_energy: bulk.fracture_energy.map(|energy| energy.0),
-            }),
-            burst: burst.map(BurstFile::facts),
-        }),
-        SubstanceFile::Witness => Substance::Witness,
-        SubstanceFile::Unworn { burst } => Substance::Unworn {
-            burst: burst.map(BurstFile::facts),
-        },
+            None,
+        ),
     })
 }
 
@@ -419,6 +428,9 @@ fn converted(name: &str, file: SubstanceFile) -> Result<Substance, String> {
 #[derive(Clone, Debug)]
 pub struct SubstanceRegistry {
     substances: BTreeMap<String, Substance>,
+    /// Each hard substance's visual key (`assets/materials/visuals.ron`), by substance name. View
+    /// data the walk never reads, held apart from [`HardSubstance`] so the walk's entry stays `Copy`.
+    visuals: BTreeMap<String, String>,
     /// The one [`Resistance::Reference`] entry's name.
     reference: String,
 }
@@ -442,7 +454,10 @@ struct RegistryFile {
 /// `VolumeTable`: that one guards the WALK, this one guards the FILE, and a bad file must fail at
 /// the bake rather than at the first shot that happens to cross the offending plate.
 #[derive(Clone, Debug, Default)]
-struct SubstanceMap(BTreeMap<String, Substance>);
+struct SubstanceMap {
+    substances: BTreeMap<String, Substance>,
+    visuals: BTreeMap<String, String>,
+}
 
 impl<'de> Deserialize<'de> for SubstanceMap {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
@@ -458,12 +473,15 @@ impl<'de> Deserialize<'de> for SubstanceMap {
             fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
                 // BTreeMap, not HashMap: the diagnostic vocabulary and any future iteration are then
                 // ordered by construction rather than by hash seed.
-                let mut out: BTreeMap<String, Substance> = BTreeMap::new();
+                let mut out = SubstanceMap::default();
                 while let Some((name, substance)) = access.next_entry::<String, SubstanceFile>()? {
-                    let substance = converted(&name, substance)
-                        .and_then(|substance| checked(&name, substance))
+                    let (substance, visual) = converted(&name, substance)
+                        .and_then(|(substance, visual)| Ok((checked(&name, substance)?, visual)))
                         .map_err(de::Error::custom)?;
-                    if out.insert(name.clone(), substance).is_some() {
+                    if let Some(visual) = visual {
+                        out.visuals.insert(name.clone(), visual);
+                    }
+                    if out.substances.insert(name.clone(), substance).is_some() {
                         return Err(de::Error::custom(format!(
                             "substance {name:?} is declared twice — the datablock name is the join \
                              key between materials.blend and this file, so a duplicate means two \
@@ -471,7 +489,7 @@ impl<'de> Deserialize<'de> for SubstanceMap {
                         )));
                     }
                 }
-                Ok(SubstanceMap(out))
+                Ok(out)
             }
         }
 
@@ -638,7 +656,10 @@ impl SubstanceRegistry {
     pub fn from_ron(text: &str) -> Result<Self, SubstanceError> {
         let file: RegistryFile =
             ron::de::from_str(text).map_err(|err| SubstanceError::Parse(err.to_string()))?;
-        let substances = file.substances.0;
+        let SubstanceMap {
+            substances,
+            visuals,
+        } = file.substances;
         let references: Vec<&String> = substances
             .iter()
             .filter(|(_, substance)| {
@@ -666,6 +687,7 @@ impl SubstanceRegistry {
         };
         Ok(Self {
             substances,
+            visuals,
             reference,
         })
     }
@@ -715,6 +737,13 @@ impl SubstanceRegistry {
         }
     }
 
+    /// The visual key (`assets/materials/visuals.ron`) of the substance named `name`: `Some` for
+    /// every hard substance, `None` for a witness, an unworn substance and a name the registry does
+    /// not carry. View data: the walk never reads it.
+    pub fn visual(&self, name: &str) -> Option<&str> {
+        self.visuals.get(name).map(String::as_str)
+    }
+
     /// The identity of the substance named `name` in this registry — hard error on an unknown name.
     pub fn id(&self, name: &str) -> Result<SubstanceId, SubstanceError> {
         self.get(name)?;
@@ -741,11 +770,13 @@ mod tests {
 
     /// Every substance the shipped library declares. A rename or a deletion has to come here first,
     /// which is the point: the Blender link key and the code's vocabulary are one contract.
-    const EXPECTED: [&str; 13] = [
+    const EXPECTED: [&str; 15] = [
         "RHA",
         "GunSteel",
         "Cast",
         "MildSteel",
+        "CastMild",
+        "TrackSteel",
         "EngineBlock",
         "Ammunition",
         "Rubber",
@@ -770,7 +801,7 @@ mod tests {
     fn with(extra: &str) -> String {
         format!(
             r#"(substances: {{
-                "Ref": Hard(resistance: Reference, paintable: true, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: Some((
+                "Ref": Hard(resistance: Reference, visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: Some((
                         density: (7850.0, Tuned("fixture")),
                         flow_strength: (1.0e9, Tuned("fixture")),
                         youngs_modulus: (205.0e9, Tuned("fixture")),
@@ -816,6 +847,42 @@ mod tests {
         }
     }
 
+    /// EVERY WORN SURFACE NAMES ITS LOOK. The tank surface material draws a primitive as the visual
+    /// its substance names, so a hard row is refused without one and a blank one, and the key is
+    /// the registry's to answer by name; a witness or an unworn row is worn by no drawn surface and
+    /// names none. A mutant dropping the key at parse, or answering a witness with one, fails here.
+    #[test]
+    fn every_hard_substance_names_a_visual_and_nothing_else_does() {
+        let registry = SubstanceRegistry::shipped();
+        for name in registry.keys() {
+            let visual = registry.visual(name);
+            match registry.get(name).unwrap() {
+                Substance::Hard(_) => assert!(
+                    visual.is_some_and(|key| !key.trim().is_empty()),
+                    "{name} is hard and names no visual"
+                ),
+                Substance::Witness | Substance::Unworn { .. } => {
+                    assert_eq!(visual, None, "{name} is worn by no drawn surface")
+                }
+            }
+        }
+        assert_eq!(registry.visual("not a substance"), None);
+
+        let parsed = SubstanceRegistry::from_ron(&with(
+            r#""Mild": Hard(resistance: Effective((800.0, Tuned("fixture"))), visual: "cast", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
+        ))
+        .expect("a hard row naming a visual parses");
+        assert_eq!(parsed.visual("Mild"), Some("cast"));
+        for refused in [
+            r#""Mild": Hard(resistance: Effective((800.0, Tuned("fixture"))), debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
+            r#""Mild": Hard(resistance: Effective((800.0, Tuned("fixture"))), visual: " ", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
+        ] {
+            let err = SubstanceRegistry::from_ron(&with(refused))
+                .expect_err("a hard row without a visual must not parse");
+            assert!(matches!(err, SubstanceError::Parse(_)), "{err}");
+        }
+    }
+
     /// A ROW STATES ITS DENSITY ONCE: bulk facts give a non-metal its density, which the building
     /// bake reads for every chunk's mass, and a row stating them beside material facts (each with a
     /// density) is refused, as is a bulk fact out of its domain. A mutant reading the density off
@@ -825,7 +892,7 @@ mod tests {
         let bulk = r#"bulk: Some((density: (1800.0, Tuned("fixture")), toughness: (5.0e5, Tuned("fixture"))))"#;
         let row = |extra: &str| {
             with(&format!(
-                r#""Clay": Hard(resistance: Effective((20.0, Tuned("fixture"))), paintable: false, debris_half_angle_deg: (26.2, Tuned("fixture")), {extra}),"#
+                r#""Clay": Hard(resistance: Effective((20.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), {extra}),"#
             ))
         };
         let registry = SubstanceRegistry::from_ron(&row(&format!("facts: None, {bulk}")))
@@ -872,7 +939,7 @@ mod tests {
         assert!(registry.get("Crew").unwrap().hard().is_none());
         for refused in [
             r#""Crew": Witness(resistance: Effective((10.0, Tuned("fixture")))),"#,
-            r#""Crew": Witness(paintable: false),"#,
+            r#""Crew": Witness(visual: "fixture"),"#,
         ] {
             let err = SubstanceRegistry::from_ron(&with(refused))
                 .expect_err("a witness stating a field must not parse");
@@ -954,7 +1021,7 @@ mod tests {
     fn a_hard_row_may_state_burst_facts_too() {
         let hard = |burst: &str| {
             with(&format!(
-                r#""Filler": Hard(resistance: Effective((200.0, Tuned("fixture"))), paintable: false, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None{burst}),"#
+                r#""Filler": Hard(resistance: Effective((200.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None{burst}),"#
             ))
         };
         let plain = SubstanceRegistry::from_ron(&hard("")).expect("a hard row without burst facts");
@@ -1011,7 +1078,7 @@ mod tests {
     #[test]
     fn an_unknown_field_fails_the_parse() {
         let err = SubstanceRegistry::from_ron(&with(
-            r#""Steel": Hard(resistance: Effective((900.0, Tuned("fixture"))), paintable: true, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None, hardness: 3.0),"#,
+            r#""Steel": Hard(resistance: Effective((900.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None, hardness: 3.0),"#,
         ))
         .expect_err("deny_unknown_fields must reject a stray key");
         assert!(matches!(err, SubstanceError::Parse(_)));
@@ -1021,10 +1088,10 @@ mod tests {
     #[test]
     fn a_number_without_provenance_fails_the_parse() {
         let bare_factor = with(
-            r#""Cast": Hard(resistance: Effective(900.0), paintable: true, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
+            r#""Cast": Hard(resistance: Effective(900.0), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
         );
         let bare_fact = with(
-            r#""Mild": Hard(resistance: Effective((800.0, Tuned("fixture"))), paintable: true, debris_half_angle_deg: (26.2, Tuned("fixture")),
+            r#""Mild": Hard(resistance: Effective((800.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")),
                 facts: Some((density: 7900.0, flow_strength: (0.4e9, Tuned("fixture")),
                 youngs_modulus: (190.0e9, Tuned("fixture")), poisson_ratio: (0.29, Tuned("fixture"))))),"#,
         );
@@ -1040,8 +1107,8 @@ mod tests {
     #[test]
     fn a_duplicated_substance_name_fails_the_parse() {
         let err = SubstanceRegistry::from_ron(&with(
-            r#""Cast": Hard(resistance: Effective((900.0, Tuned("fixture"))), paintable: true, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),
-               "Cast": Hard(resistance: Effective((10.0, Tuned("fixture"))), paintable: false, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
+            r#""Cast": Hard(resistance: Effective((900.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),
+               "Cast": Hard(resistance: Effective((10.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
         ))
         .expect_err("a duplicate key must not silently overwrite");
         assert!(err.to_string().contains("Cast"), "{err}");
@@ -1052,7 +1119,7 @@ mod tests {
     #[test]
     fn a_negative_factor_fails_the_parse() {
         let err = SubstanceRegistry::from_ron(&with(
-            r#""Rubber": Hard(resistance: Effective((-50.0, Tuned("fixture"))), paintable: false, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
+            r#""Rubber": Hard(resistance: Effective((-50.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
         ))
         .expect_err("a negative factor must not parse");
         assert!(err.to_string().contains("Rubber"), "{err}");
@@ -1064,7 +1131,7 @@ mod tests {
     fn a_non_finite_factor_fails_the_parse() {
         for literal in ["NaN", "inf", "-inf"] {
             let err = SubstanceRegistry::from_ron(&with(&format!(
-                r#""Flesh": Hard(resistance: Effective(({literal}, Tuned("fixture"))), paintable: false, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#
+                r#""Flesh": Hard(resistance: Effective(({literal}, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#
             )))
             .unwrap_err();
             assert!(
@@ -1083,7 +1150,7 @@ mod tests {
     fn a_debris_half_angle_outside_the_quarter_turn_is_refused() {
         let entry = |degrees: &str| {
             with(&format!(
-                r#""Odd": Hard(resistance: Effective((500.0, Tuned("fixture"))), paintable: false, debris_half_angle_deg: ({degrees}, Tuned("fixture")), facts: None),"#
+                r#""Odd": Hard(resistance: Effective((500.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: ({degrees}, Tuned("fixture")), facts: None),"#
             ))
         };
         let ratio = |degrees: &str| {
@@ -1109,7 +1176,7 @@ mod tests {
             );
         }
         let missing = SubstanceRegistry::from_ron(&with(
-            r#""Odd": Hard(resistance: Effective((500.0, Tuned("fixture"))), paintable: false, facts: None),"#,
+            r#""Odd": Hard(resistance: Effective((500.0, Tuned("fixture"))), visual: "fixture", facts: None),"#,
         ))
         .expect_err("a hard entry states its debris half-angle");
         assert!(
@@ -1124,7 +1191,7 @@ mod tests {
     #[test]
     fn negative_zero_is_canonicalized() {
         let registry = SubstanceRegistry::from_ron(&with(
-            r#""Void": Hard(resistance: Effective((-0.0, Tuned("fixture"))), paintable: false, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
+            r#""Void": Hard(resistance: Effective((-0.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
         ))
         .expect("zero resistance is legal, it is just nothing");
         assert_eq!(
@@ -1167,7 +1234,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(", ");
             let err = SubstanceRegistry::from_ron(&with(&format!(
-                r#""Odd": Hard(resistance: Effective((500.0, Tuned("fixture"))), paintable: true, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: Some(({facts}))),"#
+                r#""Odd": Hard(resistance: Effective((500.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: Some(({facts}))),"#
             )))
             .expect_err("facts out of domain must not parse");
             assert!(
@@ -1182,19 +1249,19 @@ mod tests {
     #[test]
     fn the_reference_is_exactly_one_entry_with_facts() {
         let factless = SubstanceRegistry::from_ron(
-            r#"(substances: { "Ref": Hard(resistance: Reference, paintable: true, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None) })"#,
+            r#"(substances: { "Ref": Hard(resistance: Reference, visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None) })"#,
         )
         .expect_err("a reference without facts must not parse");
         assert!(factless.to_string().contains("Ref"), "{factless}");
 
         let none = SubstanceRegistry::from_ron(
-            r#"(substances: { "Cast": Hard(resistance: Effective((900.0, Tuned("fixture"))), paintable: true, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None) })"#,
+            r#"(substances: { "Cast": Hard(resistance: Effective((900.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None) })"#,
         )
         .expect_err("a registry without a reference must not load");
         assert!(matches!(none, SubstanceError::Reference(_)), "{none}");
 
         let two = SubstanceRegistry::from_ron(&with(
-            r#""Other": Hard(resistance: Reference, paintable: true, debris_half_angle_deg: (26.2, Tuned("fixture")), facts: Some((
+            r#""Other": Hard(resistance: Reference, visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: Some((
                 density: (7800.0, Tuned("fixture")),
                 flow_strength: (1.18e9, Tuned("fixture")),
                 youngs_modulus: (190.0e9, Tuned("fixture")),

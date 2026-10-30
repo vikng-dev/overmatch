@@ -1329,12 +1329,12 @@ pub struct BallisticVolume {
     /// The substance's identity and its §13.2 field value (reference-mm of armour per metre of
     /// chord).
     pub material: walk::VolumeMaterial,
-    /// The substance's registry name — identity, for diagnostics/inspection and the paint livery.
-    /// Never parsed for behaviour.
+    /// The substance's registry name — identity, for diagnostics and inspection. Never parsed for
+    /// behaviour.
     #[allow(
         dead_code,
-        reason = "carried from the bake for the x-ray readout and the paintable-livery pass; the \
-                  walk reads only the factor, deliberately"
+        reason = "carried from the bake for the x-ray readout; the walk reads only the factor, \
+                  deliberately"
     )]
     pub substance: String,
 }

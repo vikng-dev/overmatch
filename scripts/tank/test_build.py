@@ -57,19 +57,19 @@ REGISTRY = b"""\
     substances: {
         "RHA": Hard(
             resistance: Reference,
-            paintable: true,
+            visual: "fixture",
             debris_half_angle_deg: (26.2, Unknown("fixture")),
             facts: None,
         ),
         "Rubber": Hard(
             resistance: Effective((120.0, Unknown("fixture factor"))),
-            paintable: false,
+            visual: "fixture",
             debris_half_angle_deg: (26.2, Unknown("fixture")),
             facts: None,
         ),
         "Ammunition": Hard(
             resistance: Effective((400.0, Unknown("fixture"))),
-            paintable: false,
+            visual: "fixture",
             debris_half_angle_deg: (26.2, Unknown("fixture")),
             facts: None,
         ),
