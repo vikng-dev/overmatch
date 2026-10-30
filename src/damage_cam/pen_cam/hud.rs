@@ -242,6 +242,7 @@ pub fn layout(
     mut nodes: Query<(&CornerImage, &mut ImageNode)>,
     mut target: ResMut<CornerImages>,
     mut images: ResMut<Assets<Image>>,
+    ablate: Option<Res<crate::render_cost::Ablate>>,
 ) {
     let Some(main) = targets.p0().get().and_then(|ui| cameras.get(ui).ok()) else {
         return;
@@ -262,7 +263,9 @@ pub fn layout(
         node.width = Val::Px(width);
         node.height = Val::Px(height);
     }
-    let size = (Vec2::new(width, height) * scale)
+    // `SPIKE_ABLATE=inset_half`: a pixel-cost instrument, never a setting.
+    let half = ablate.is_some_and(|ablate| ablate.inset_half);
+    let size = (Vec2::new(width, height) * scale * if half { 0.5 } else { 1.0 })
         .round()
         .as_uvec2()
         .max(UVec2::ONE);
@@ -279,6 +282,9 @@ pub fn layout(
         target.size = size;
         target.scale = scale;
         retarget = true;
+        if half {
+            info!("render_cost: inset_half: pen cam inset target {size}");
+        }
     }
     let turn = corner.showing.map(|showing| showing.turn);
     if turn != target.turn {

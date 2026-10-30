@@ -549,11 +549,21 @@ pub fn own(
     mut masks: ResMut<Masks>,
     mut images: ResMut<Assets<Image>>,
     mut stage: ResMut<Stage>,
+    ablate: Option<Res<crate::render_cost::Ablate>>,
+    mut announced: Local<bool>,
 ) {
+    // `SPIKE_ABLATE=inset_masks`: the inset draws against no mask set.
+    let no_inset_masks = ablate.is_some_and(|ablate| ablate.inset_masks);
     let corners = corner
         .showing
         .filter(|showing| body_behind(showing.kind))
         .and_then(|showing| match showing.surface {
+            Surface::Corner if no_inset_masks => {
+                if !std::mem::replace(&mut *announced, true) {
+                    info!("render_cost: inset_masks: no mask cameras for the pen cam inset");
+                }
+                None
+            }
             Surface::Corner => inset.single().ok(),
             Surface::World => main.single().ok(),
         });

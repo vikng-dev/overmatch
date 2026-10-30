@@ -57,6 +57,9 @@
 //!   `ui` hides every UI root, which removes the UI's extraction and drawing but not its layout. An
 //!   unknown name panics at boot, so a typo cannot read as a free feature. Never part of a shipped
 //!   measurement: the picture changes.
+//!   `inset_half`, `inset_masks`, `inset_bloom` price the pen cam corner's parts while it shows
+//!   (`scripts/perf/run-pencam-attribution.sh`): its target at half size (the mask views follow,
+//!   keyed by size), no mask cameras, no bloom on its camera.
 //!   `terrain-casters`, `tree-casters`, `house-casters`, `tank-casters` suppress only casting
 //!   through render policy; receivers and main-view geometry retain their roles.
 //! * `SPIKE_SHADOW_FILTER=gaussian|hardware|temporal`, `SPIKE_SHADOW_SPLITS=<metres,...>` and
@@ -85,6 +88,7 @@ use bevy::render::view::RetainedViewEntity;
 use bevy::render::{Render, RenderApp, RenderSystems};
 use serde_json::json;
 
+use crate::render_policy::CameraProfile;
 use crate::scene_depth::MainPassDepth;
 use crate::trace::{JsonlSink, role_path};
 
@@ -105,6 +109,11 @@ pub(crate) struct Ablate {
     tree_casters: bool,
     house_casters: bool,
     tank_casters: bool,
+    /// The pen cam inset's target at half size, its masks with it.
+    pub(crate) inset_half: bool,
+    /// No mask cameras for the pen cam inset.
+    pub(crate) inset_masks: bool,
+    inset_bloom: bool,
 }
 
 impl Ablate {
@@ -126,6 +135,9 @@ impl Ablate {
                 "tree-casters" => ablate.tree_casters = true,
                 "house-casters" => ablate.house_casters = true,
                 "tank-casters" => ablate.tank_casters = true,
+                "inset_half" => ablate.inset_half = true,
+                "inset_masks" => ablate.inset_masks = true,
+                "inset_bloom" => ablate.inset_bloom = true,
                 unknown => return Err(unknown.to_owned()),
             }
         }
@@ -260,7 +272,7 @@ fn ablation_instruments(app: &mut App) {
             panic!(
                 "SPIKE_ABLATE: unknown feature {unknown:?} (known: bloom, env_light, \
                  depth_prepass, depth_copy, ui, terrain-casters, tree-casters, house-casters, \
-                 tank-casters)"
+                 tank-casters, inset_half, inset_masks, inset_bloom)"
             )
         });
         info!("render_cost: ablating {ablate:?}");
@@ -287,11 +299,24 @@ fn ablation_instruments(app: &mut App) {
 fn ablate_camera_features(
     mut commands: Commands,
     ablate: Res<Ablate>,
-    cameras: Query<(Entity, Has<Bloom>, Has<DepthPrepass>, Has<MainPassDepth>), With<Camera3d>>,
+    cameras: Query<
+        (
+            Entity,
+            Has<Bloom>,
+            Has<DepthPrepass>,
+            Has<MainPassDepth>,
+            Option<&CameraProfile>,
+        ),
+        With<Camera3d>,
+    >,
 ) {
-    for (camera, bloom, depth_prepass, depth_copy) in &cameras {
+    for (camera, bloom, depth_prepass, depth_copy, profile) in &cameras {
         if ablate.bloom && bloom {
             commands.entity(camera).remove::<Bloom>();
+        }
+        if ablate.inset_bloom && bloom && matches!(profile, Some(CameraProfile::PenCamInset)) {
+            commands.entity(camera).remove::<Bloom>();
+            info!("render_cost: inset_bloom: bloom removed from the pen cam inset camera {camera}");
         }
         if ablate.depth_prepass && depth_prepass {
             commands.entity(camera).remove::<DepthPrepass>();
@@ -690,6 +715,8 @@ mod tests {
         let ablate = Ablate::parse("bloom, env_light,,ui").expect("known features");
         assert!(ablate.bloom && ablate.env_light && ablate.ui && !ablate.depth_prepass);
         assert!(!ablate.depth_copy);
+        let ablate = Ablate::parse("inset_half,inset_masks,inset_bloom").expect("inset levers");
+        assert!(ablate.inset_half && ablate.inset_masks && ablate.inset_bloom && !ablate.bloom);
         let ablate = Ablate::parse("depth_copy").expect("known feature");
         assert!(ablate.depth_copy && !ablate.depth_prepass);
         assert_eq!(
