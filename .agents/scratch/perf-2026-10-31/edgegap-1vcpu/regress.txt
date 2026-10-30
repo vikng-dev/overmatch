@@ -1,0 +1,24 @@
+cond	lever	lines	live	frozen	tick50	tick95	phys50	send50	cpu	over_max	hz	clients
+bots29-d01-1x100000x8192x512	1:100000:8192:512	158	0	1	17609	22872	7774	415	100	64	52.6	1-1
+bots29-d02-12x2x8192x512	12:2:8192:512	87	270	260	21737	26538	11715	843	100	64	43.9	0-1
+bots29-d03-50x2x8192x512	50:2:8192:512	0
+bots29-d04-100x2x8192x512	100:2:8192:512	0
+bots29-d05-200x2x8192x512	200:2:8192:512	0
+bots29-d06-200x2x8192x512	200:2:8192:512	0
+bots29-d07-100x2x8192x512	100:2:8192:512	0
+bots29-d08-50x2x8192x512	50:2:8192:512	0
+bots29-d09-12x2x8192x512	12:2:8192:512	0
+bots29-d10-1x100000x8192x512	1:100000:8192:512	0
+
+== threads -: 2 conditions
+  tick50  medians: -   |   per-second: a  17741.9  b/live  21.508  c/frozen  -4.834  R² 0.466  n 245
+  tick95  medians: -   |   per-second: a  23549.9  b/live  14.254  c/frozen   2.888  R² 0.145  n 245
+  phys50  medians: -   |   per-second: a   7627.9  b/live  20.978  c/frozen  -3.651  R² 0.599  n 245
+  cpu     medians: -   |   per-second: a    100.0  b/live  -0.000  c/frozen   0.000  R² 0.000  n 245
+  live medians span 0–270
+  per-second bins (armed seconds by live; `off` = lever-off seconds):
+    live_bin      n   live_med frozen_med tick50 tick95 phys50 send50 cpu   slope_vs_prev(us/piece)
+    0-0            101         0         1   17313   22998    7432    406   100   
+    1-127           71         1         0   17296   22865    7585    452   100   -17.50
+    128-255         12       216       211   20968   26701   10489    828   100   +17.08
+    256-511         61       280       295   22047   26933   12235    867   100   +16.86

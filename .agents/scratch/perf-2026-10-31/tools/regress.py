@@ -30,6 +30,9 @@ def window_rows(json_path: Path) -> list[dict]:
     if not log_p.exists():
         log_p = Path(stem + ".server.log")
     if not log_p.exists():
+        # A condition whose client died early: the runner's full container-log pull.
+        log_p = json_path.parent / "server.log"
+    if not log_p.exists():
         return []
     lines = log_p.read_text(errors="replace").splitlines()
     marker = marker_p.read_text(errors="replace").strip() if marker_p.exists() else ""
@@ -57,7 +60,7 @@ def window_rows(json_path: Path) -> list[dict]:
         rows.append({"live": db.get("live", 0), "frozen": db.get("frozen", 0), "tick50": t.get("p50"),
                      "tick95": t.get("p95"), "phys50": p.get("p50"), "send50": s.get("p50"),
                      "cpu": d.get("cpu_pct"), "over": d.get("overruns"), "hz": d.get("tick_hz"),
-                     "thr": d.get("throttled_usec")})
+                     "thr": d.get("throttled_usec"), "clients": d.get("clients")})
     return rows
 
 
@@ -91,7 +94,7 @@ def med(rows, key):
 
 def main() -> int:
     groups: dict[str, list[tuple[str, str, list[dict]]]] = {}
-    hdr = ["cond", "lever", "lines", "live", "frozen", "tick50", "tick95", "phys50", "send50", "cpu", "over_max", "hz"]
+    hdr = ["cond", "lever", "lines", "live", "frozen", "tick50", "tick95", "phys50", "send50", "cpu", "over_max", "hz", "clients"]
     print("\t".join(hdr))
     for tsv in sys.argv[1:]:
         tsv = Path(tsv)
@@ -112,6 +115,7 @@ def main() -> int:
                 cells.append("-" if v is None else f"{v:.0f}")
             cells.append(str(max((r["over"] or 0) for r in rows)))
             cells.append(f"{med(rows, 'hz'):.1f}")
+            cells.append(f"{min(r['clients'] or 0 for r in rows)}-{max(r['clients'] or 0 for r in rows)}")
             print("\t".join(cells))
     for g, conds in groups.items():
         conds = [c for c in conds if c[2]]

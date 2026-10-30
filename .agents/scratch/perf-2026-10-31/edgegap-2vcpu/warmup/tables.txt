@@ -1,0 +1,40 @@
+
+== client network: the measured client's process (nettop), over the measurement window
+condition  window_s  down_B  up_B    down_KB/s  up_KB/s
+warmup     16.2      120252  170560  7.4        10.5
+
+== server: its server_stats lines inside the window (median and max across periods)
+condition  stats_lines  window  bots_spawned  bot_knockouts
+warmup     17           marked  29            16
+
+condition  key                 n   median  max     last-first
+warmup     budget_us           17  15625   15625   0
+warmup     clients             17  1       1       0
+warmup     cpu_pct             17  102     103     -0.1
+warmup     debris.breaches     17  1       1       0
+warmup     debris.cap_frozen   17  0       0       0
+warmup     debris.despawned    17  0       0       0
+warmup     debris.frozen       17  1       1       0
+warmup     debris.live         17  0       0       0
+warmup     debris.released     17  1       1       0
+warmup     debris.rest_frozen  17  8       8       0
+warmup     debris.thawed       17  7       7       0
+warmup     entities            17  21835   22294   2336
+warmup     nr_throttled        17  0       0       0
+warmup     overruns            17  48      64      13
+warmup     period_s            17  1.2     1.7     0.1
+warmup     physics_us.max      17  9751    12408   -268
+warmup     physics_us.p50      17  7020    8117    781
+warmup     physics_us.p95      17  8816    10026   540
+warmup     projectiles         17  9       16      5
+warmup     rss_mb              17  384     386     58.4
+warmup     send_us.max         17  611     806     -36.5
+warmup     send_us.p50         17  424     591     12.4
+warmup     send_us.p95         17  611     806     -36.5
+warmup     tanks               17  30      30      0
+warmup     throttled_usec      17  0       0       0
+warmup     tick_hz             17  53.4    64.6    -4.4
+warmup     tick_us.max         17  30811   649107  6706
+warmup     tick_us.p50         17  16769   19150   1804
+warmup     tick_us.p95         17  20205   62774   0.4
+warmup     ticks               17  64      76      1

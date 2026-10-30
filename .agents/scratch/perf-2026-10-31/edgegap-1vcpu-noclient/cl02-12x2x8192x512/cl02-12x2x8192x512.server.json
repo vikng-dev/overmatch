@@ -1,0 +1,191 @@
+{
+ "label": "cl02-12x2x8192x512",
+ "log": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/edgegap-1vcpu-noclient/cl02-12x2x8192x512/cl02-12x2x8192x512.server.log",
+ "log_present": true,
+ "window": "marked",
+ "stats_lines": 143,
+ "bots_spawned": 29,
+ "bot_knockouts_in_window": 36,
+ "stats": {
+  "budget_us": {
+   "n": 143,
+   "median": 15625.0,
+   "max": 15625.0,
+   "last_minus_first": 0.0
+  },
+  "clients": {
+   "n": 143,
+   "median": 0.0,
+   "max": 0.0,
+   "last_minus_first": 0.0
+  },
+  "cpu_pct": {
+   "n": 143,
+   "median": 100.0,
+   "max": 100.6,
+   "last_minus_first": 0.4000000000000057
+  },
+  "debris.breaches": {
+   "n": 143,
+   "median": 50.0,
+   "max": 76.0,
+   "last_minus_first": 54.0
+  },
+  "debris.cap_frozen": {
+   "n": 143,
+   "median": 0.0,
+   "max": 0.0,
+   "last_minus_first": 0.0
+  },
+  "debris.despawned": {
+   "n": 143,
+   "median": 0.0,
+   "max": 11.0,
+   "last_minus_first": 11.0
+  },
+  "debris.frozen": {
+   "n": 143,
+   "median": 345.0,
+   "max": 510.0,
+   "last_minus_first": 271.0
+  },
+  "debris.live": {
+   "n": 143,
+   "median": 253.0,
+   "max": 408.0,
+   "last_minus_first": 366.0
+  },
+  "debris.released": {
+   "n": 143,
+   "median": 600.0,
+   "max": 912.0,
+   "last_minus_first": 648.0
+  },
+  "debris.rest_frozen": {
+   "n": 143,
+   "median": 13048.0,
+   "max": 30109.0,
+   "last_minus_first": 27979.0
+  },
+  "debris.thawed": {
+   "n": 143,
+   "median": 12715.0,
+   "max": 29603.0,
+   "last_minus_first": 27697.0
+  },
+  "entities": {
+   "n": 143,
+   "median": 23985.0,
+   "max": 26104.0,
+   "last_minus_first": 7164.0
+  },
+  "nr_throttled": {
+   "n": 143,
+   "median": 5.0,
+   "max": 6.0,
+   "last_minus_first": 1.0
+  },
+  "overruns": {
+   "n": 143,
+   "median": 48.0,
+   "max": 64.0,
+   "last_minus_first": 10.0
+  },
+  "period_s": {
+   "n": 143,
+   "median": 1.3,
+   "max": 1.6,
+   "last_minus_first": 0.2999999999999998
+  },
+  "physics_us.max": {
+   "n": 143,
+   "median": 19749.0,
+   "max": 26600.1,
+   "last_minus_first": 5188.699999999997
+  },
+  "physics_us.p50": {
+   "n": 143,
+   "median": 14171.6,
+   "max": 23213.6,
+   "last_minus_first": 10722.000000000002
+  },
+  "physics_us.p95": {
+   "n": 143,
+   "median": 18121.3,
+   "max": 26005.3,
+   "last_minus_first": 7251.899999999998
+  },
+  "projectiles": {
+   "n": 143,
+   "median": 16.0,
+   "max": 34.0,
+   "last_minus_first": 2.0
+  },
+  "rss_mb": {
+   "n": 143,
+   "median": 390.8,
+   "max": 393.2,
+   "last_minus_first": 75.39999999999998
+  },
+  "send_us.max": {
+   "n": 143,
+   "median": 219.2,
+   "max": 490.0,
+   "last_minus_first": 20.80000000000001
+  },
+  "send_us.p50": {
+   "n": 143,
+   "median": 187.1,
+   "max": 331.1,
+   "last_minus_first": 3.799999999999983
+  },
+  "send_us.p95": {
+   "n": 143,
+   "median": 219.2,
+   "max": 490.0,
+   "last_minus_first": 20.80000000000001
+  },
+  "tanks": {
+   "n": 143,
+   "median": 29.0,
+   "max": 29.0,
+   "last_minus_first": 0.0
+  },
+  "throttled_usec": {
+   "n": 143,
+   "median": 19757.0,
+   "max": 34604.0,
+   "last_minus_first": -13932.0
+  },
+  "tick_hz": {
+   "n": 143,
+   "median": 37.8,
+   "max": 64.7,
+   "last_minus_first": -25.199999999999996
+  },
+  "tick_us.max": {
+   "n": 143,
+   "median": 33865.7,
+   "max": 597604.9,
+   "last_minus_first": 9238.8
+  },
+  "tick_us.p50": {
+   "n": 143,
+   "median": 24836.2,
+   "max": 35783.9,
+   "last_minus_first": 13257.9
+  },
+  "tick_us.p95": {
+   "n": 143,
+   "median": 29757.7,
+   "max": 77132.7,
+   "last_minus_first": 12153.3
+  },
+  "ticks": {
+   "n": 143,
+   "median": 48.0,
+   "max": 73.0,
+   "last_minus_first": -16.0
+  }
+ }
+}

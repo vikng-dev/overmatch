@@ -1,0 +1,14 @@
+runner commit: 1ed1c5d3863a74e17b2f2dd2459f686004f96da8
+binary build: built 2026-10-31 03:52:49 +07 from 1ed1c5d3863a74e17b2f2dd2459f686004f96da8 (tag v0.7.0-alpha.4), bay-3, 3239 s including the queue
+binary build: scripts/serial-cargo build --locked --profile profiling --features dev_ui,bitprobe,bevy/trace_chrome --bin overmatch
+binary build: 6f9f8cd5c05a804b751cf599226f98ddc269355f301d702430db8d9a1a7c8083  /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/bin/A4/overmatch
+mode: offscreen (hidden window; the cameras render into a 2560x1440 image at scale 2; nothing presented)
+duration_s: 180  warmup_s: 45  cooldown_s: 5  min_rows: 3600  bin: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/bin/A4  asset_root: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/bin/A4/root
+presentation gates: offscreen — a 2560x1440 offscreen target throughout + the 3D camera drew on >=99% of measured frames + frame cap off; display and occlusion n/a (nothing presented)
+conditions: bots29-d05-100x2x8192x512-tdefault|
+binary: /private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/bin/A4/overmatch   mtime=Oct 31 03:52:48 2026 size=195498152
+host: arm64 Apple M4
+target: 104.64.208.92:30187 (Edgegap deployment 686a7fa1f49a)
+base video fields: pen_cam_corner: Off, kill_cam: Off,
+measured client: SPIKE_SIMULATE_INPUT=1  workload [SPIKE_SIM_IDLE=1 SPIKE_SIM_AIM_SWEEP=1]; load clients: GPU-less, workload [SPIKE_SIM_IDLE=1 SPIKE_SIM_AIM_SWEEP=1]
+client network: nettop -P -p <measured pid> -x at the window's edges, rates over the stream span

@@ -15,7 +15,7 @@ while IFS= read -r -d '' f; do
   mkdir -p "$dst/$(dirname "$rel")"
   case "$rel" in
     *.server.json | *.marker | *.window.tsv | */manifest.txt | */tables.txt) cp "$f" "$dst/$rel" ;;
-    *.window.log | */*.server.log)
+    *.window.log | */*.server.log | */server.log)
       grep -a -E 'server_stats|debris stress|spawned circling bot|listening|threads_lever|cpu_quota' "$f" |
         sed 's/\x1b\[[0-9;]*m//g' >"$dst/$rel" || true ;;
   esac

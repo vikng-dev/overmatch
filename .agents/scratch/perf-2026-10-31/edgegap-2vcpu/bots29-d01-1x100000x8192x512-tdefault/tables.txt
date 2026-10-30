@@ -1,0 +1,40 @@
+
+== client network: the measured client's process (nettop), over the measurement window
+condition                              window_s  down_B   up_B     down_KB/s  up_KB/s
+bots29-d01-1x100000x8192x512-tdefault  174.0     1029007  3001862  5.9        17.3
+
+== server: its server_stats lines inside the window (median and max across periods)
+condition                              stats_lines  window  bots_spawned  bot_knockouts
+bots29-d01-1x100000x8192x512-tdefault  156          marked  29            28
+
+condition                              key                 n    median  max     last-first
+bots29-d01-1x100000x8192x512-tdefault  budget_us           156  15625   15625   0
+bots29-d01-1x100000x8192x512-tdefault  clients             156  1       1       0
+bots29-d01-1x100000x8192x512-tdefault  cpu_pct             156  102     103     -0.7
+bots29-d01-1x100000x8192x512-tdefault  debris.breaches     156  1       1       0
+bots29-d01-1x100000x8192x512-tdefault  debris.cap_frozen   156  0       0       0
+bots29-d01-1x100000x8192x512-tdefault  debris.despawned    156  0       0       0
+bots29-d01-1x100000x8192x512-tdefault  debris.frozen       156  0       1       0
+bots29-d01-1x100000x8192x512-tdefault  debris.live         156  2       2       1
+bots29-d01-1x100000x8192x512-tdefault  debris.released     156  1       1       0
+bots29-d01-1x100000x8192x512-tdefault  debris.rest_frozen  156  41      46      38
+bots29-d01-1x100000x8192x512-tdefault  debris.thawed       156  40      45      38
+bots29-d01-1x100000x8192x512-tdefault  entities            156  27242   27622   3824
+bots29-d01-1x100000x8192x512-tdefault  nr_throttled        156  0       0       0
+bots29-d01-1x100000x8192x512-tdefault  overruns            156  48      64      -16
+bots29-d01-1x100000x8192x512-tdefault  period_s            156  1.2     1.4     -0.1
+bots29-d01-1x100000x8192x512-tdefault  physics_us.max      156  12064   18170   3896
+bots29-d01-1x100000x8192x512-tdefault  physics_us.p50      156  9812    13420   2255
+bots29-d01-1x100000x8192x512-tdefault  physics_us.p95      156  11440   15003   3799
+bots29-d01-1x100000x8192x512-tdefault  projectiles         156  12      31      4
+bots29-d01-1x100000x8192x512-tdefault  rss_mb              156  399     400     10
+bots29-d01-1x100000x8192x512-tdefault  send_us.max         156  515     1192    185
+bots29-d01-1x100000x8192x512-tdefault  send_us.p50         156  433     619     37.9
+bots29-d01-1x100000x8192x512-tdefault  send_us.p95         156  515     1192    185
+bots29-d01-1x100000x8192x512-tdefault  tanks               156  30      30      0
+bots29-d01-1x100000x8192x512-tdefault  throttled_usec      156  0       0       0
+bots29-d01-1x100000x8192x512-tdefault  tick_hz             156  47.5    56      -10
+bots29-d01-1x100000x8192x512-tdefault  tick_us.max         156  35822   148454  33906
+bots29-d01-1x100000x8192x512-tdefault  tick_us.p50         156  19948   26537   3617
+bots29-d01-1x100000x8192x512-tdefault  tick_us.p95         156  22847   70808   3234
+bots29-d01-1x100000x8192x512-tdefault  ticks               156  48      64      -16

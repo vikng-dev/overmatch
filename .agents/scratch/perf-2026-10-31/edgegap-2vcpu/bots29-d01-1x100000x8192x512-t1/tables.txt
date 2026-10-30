@@ -1,0 +1,40 @@
+
+== client network: the measured client's process (nettop), over the measurement window
+condition                        window_s  down_B   up_B     down_KB/s  up_KB/s
+bots29-d01-1x100000x8192x512-t1  176.9     1170892  2352624  6.6        13.3
+
+== server: its server_stats lines inside the window (median and max across periods)
+condition                        stats_lines  window  bots_spawned  bot_knockouts
+bots29-d01-1x100000x8192x512-t1  157          marked  29            54
+
+condition                        key                 n    median  max     last-first
+bots29-d01-1x100000x8192x512-t1  budget_us           157  15625   15625   0
+bots29-d01-1x100000x8192x512-t1  clients             157  1       1       0
+bots29-d01-1x100000x8192x512-t1  cpu_pct             157  102     103     -0.6
+bots29-d01-1x100000x8192x512-t1  debris.breaches     157  1       1       0
+bots29-d01-1x100000x8192x512-t1  debris.cap_frozen   157  0       0       0
+bots29-d01-1x100000x8192x512-t1  debris.despawned    157  0       0       0
+bots29-d01-1x100000x8192x512-t1  debris.frozen       157  1       1       0
+bots29-d01-1x100000x8192x512-t1  debris.live         157  0       1       0
+bots29-d01-1x100000x8192x512-t1  debris.released     157  1       1       0
+bots29-d01-1x100000x8192x512-t1  debris.rest_frozen  157  15      22      14
+bots29-d01-1x100000x8192x512-t1  debris.thawed       157  14      21      14
+bots29-d01-1x100000x8192x512-t1  entities            157  25215   26955   6836
+bots29-d01-1x100000x8192x512-t1  nr_throttled        157  0       0       0
+bots29-d01-1x100000x8192x512-t1  overruns            157  58      64      -10
+bots29-d01-1x100000x8192x512-t1  period_s            157  1.2     1.4     -0.1
+bots29-d01-1x100000x8192x512-t1  physics_us.max      157  11128   23091   1549
+bots29-d01-1x100000x8192x512-t1  physics_us.p50      157  8336    11936   2089
+bots29-d01-1x100000x8192x512-t1  physics_us.p95      157  10058   13931   2287
+bots29-d01-1x100000x8192x512-t1  projectiles         157  12      40      -6
+bots29-d01-1x100000x8192x512-t1  rss_mb              157  402     406     76.5
+bots29-d01-1x100000x8192x512-t1  send_us.max         157  502     765     -112
+bots29-d01-1x100000x8192x512-t1  send_us.p50         157  424     608     51.8
+bots29-d01-1x100000x8192x512-t1  send_us.p95         157  502     765     -112
+bots29-d01-1x100000x8192x512-t1  tanks               157  30      30      0
+bots29-d01-1x100000x8192x512-t1  throttled_usec      157  0       0       0
+bots29-d01-1x100000x8192x512-t1  tick_hz             157  51.5    62.8    -9.9
+bots29-d01-1x100000x8192x512-t1  tick_us.max         157  27413   693289  3817
+bots29-d01-1x100000x8192x512-t1  tick_us.p50         157  18062   24578   3565
+bots29-d01-1x100000x8192x512-t1  tick_us.p95         157  21220   91236   4401
+bots29-d01-1x100000x8192x512-t1  ticks               157  64      73      -16

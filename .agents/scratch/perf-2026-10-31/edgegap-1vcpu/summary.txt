@@ -1,0 +1,66 @@
+online profile: Edgegap version 0.7.0-alpha.4, from Macbook-Pro-M4, 2026-10-31 04:05 +07
+deployment (bots, debris, threads, status at READY): 29	1:100000:8192:512	default	ed916a58473a ready 104.64.208.92:30729 city=Singapore since_ready_s=2 max_duration_min=1440 tags=profile-20261030t205447z-47eac6
+deployment (bots, debris, threads, status at READY): 29	12:2:8192:512	default	7441d8cefddd ready 104.64.208.92:32765 city=Singapore since_ready_s=2 max_duration_min=1440 tags=profile-20261030t210040z-02336c
+deployment (bots, debris, threads, status at READY): 29	50:2:8192:512	default	8c45b3d998d8 ready 104.64.208.92:32026 city=Singapore since_ready_s=2 max_duration_min=1440 tags=profile-20261030t210335z-b36fae
+bots29-d03-50x2x8192x512: OVERMATCH_BOT=29 spawned 0 bot(s)
+
+== client network: the measured client's process (nettop), over the measurement window
+condition                     window_s  down_B   up_B     down_KB/s  up_KB/s
+bots29-d01-1x100000x8192x512  175.7     1120452  2862058  6.4        16.3
+bots29-d02-12x2x8192x512      -         -        -        -          -
+bots29-d03-50x2x8192x512      -         -        -        -          -
+
+== server: its server_stats lines inside the window (median and max across periods)
+condition                     stats_lines  window  bots_spawned  bot_knockouts
+bots29-d01-1x100000x8192x512  158          marked  29            21
+bots29-d02-12x2x8192x512      -            -       -             -
+bots29-d03-50x2x8192x512      -            -       -             -
+
+condition                     key                 n    median  max     last-first
+bots29-d01-1x100000x8192x512  budget_us           158  15625   15625   0
+bots29-d01-1x100000x8192x512  clients             158  1       1       0
+bots29-d01-1x100000x8192x512  cpu_pct             158  100     101     0.4
+bots29-d01-1x100000x8192x512  debris.breaches     158  1       1       0
+bots29-d01-1x100000x8192x512  debris.cap_frozen   158  0       0       0
+bots29-d01-1x100000x8192x512  debris.despawned    158  0       0       0
+bots29-d01-1x100000x8192x512  debris.frozen       158  1       1       0
+bots29-d01-1x100000x8192x512  debris.live         158  0       1       0
+bots29-d01-1x100000x8192x512  debris.released     158  1       1       0
+bots29-d01-1x100000x8192x512  debris.rest_frozen  158  57      109     101
+bots29-d01-1x100000x8192x512  debris.thawed       158  56      108     101
+bots29-d01-1x100000x8192x512  entities            158  27252   28328   3877
+bots29-d01-1x100000x8192x512  nr_throttled        158  5       6       -2
+bots29-d01-1x100000x8192x512  overruns            158  48      64      -18
+bots29-d01-1x100000x8192x512  period_s            158  1.1     1.4     -0.2
+bots29-d01-1x100000x8192x512  physics_us.max      158  13763   20238   -5824
+bots29-d01-1x100000x8192x512  physics_us.p50      158  7774    11863   -3068
+bots29-d01-1x100000x8192x512  physics_us.p95      158  10658   15475   -2540
+bots29-d01-1x100000x8192x512  projectiles         158  23      37      0
+bots29-d01-1x100000x8192x512  rss_mb              158  397     401     8.5
+bots29-d01-1x100000x8192x512  send_us.max         158  547     919     33.2
+bots29-d01-1x100000x8192x512  send_us.p50         158  415     658     -51.7
+bots29-d01-1x100000x8192x512  send_us.p95         158  547     919     33.2
+bots29-d01-1x100000x8192x512  tanks               158  30      30      0
+bots29-d01-1x100000x8192x512  throttled_usec      158  21276   34109   -14646
+bots29-d01-1x100000x8192x512  tick_hz             158  52.6    64.8    6.8
+bots29-d01-1x100000x8192x512  tick_us.max         158  29747   244918  52176
+bots29-d01-1x100000x8192x512  tick_us.p50         158  17609   24066   -3338
+bots29-d01-1x100000x8192x512  tick_us.p95         158  22872   65801   -4326
+bots29-d01-1x100000x8192x512  ticks               158  64      74      0
+
+== debris stress, per condition: medians across the window's periods (*_max: the max)
+condition                     lever              lines  tick_p50  tick_p95  tick_max  phys_p50  phys_p95  send_p50  send_p95  cpu_pct  overruns  thr_us  thr_n  live  live_max  frozen_max  released  tanks
+bots29-d01-1x100000x8192x512  1:100000:8192:512  158    17609     22872     244918    7774      10658     415       547       100      48        21276   5      0     1         1           0         30
+bots29-d02-12x2x8192x512      12:2:8192:512      -      -         -         -         -         -         -         -         -        -         -       -      -     -         -           -         -
+bots29-d03-50x2x8192x512      50:2:8192:512      -      -         -         -         -         -         -         -         -        -         -       -      -     -         -           -         -
+bots29-d04-100x2x8192x512     100:2:8192:512     -      -         -         -         -         -         -         -         -        -         -       -      -     -         -           -         -
+bots29-d05-200x2x8192x512     200:2:8192:512     -      -         -         -         -         -         -         -         -        -         -       -      -     -         -           -         -
+bots29-d06-200x2x8192x512     200:2:8192:512     -      -         -         -         -         -         -         -         -        -         -       -      -     -         -           -         -
+bots29-d07-100x2x8192x512     100:2:8192:512     -      -         -         -         -         -         -         -         -        -         -       -      -     -         -           -         -
+bots29-d08-50x2x8192x512      50:2:8192:512      -      -         -         -         -         -         -         -         -        -         -       -      -     -         -           -         -
+bots29-d09-12x2x8192x512      12:2:8192:512      -      -         -         -         -         -         -         -         -        -         -       -      -     -         -           -         -
+bots29-d10-1x100000x8192x512  1:100000:8192:512  -      -         -         -         -         -         -         -         -        -         -       -      -     -         -           -         -
+
+== debris stress, per lever: the median of its conditions (d_: change from `off`)
+lever              runs  tick_p50  d_tick_p50  tick_p95  d_tick_p95  phys_p50  d_phys_p50  phys_p95  d_phys_p95  send_p50  d_send_p50  send_p95  d_send_p95  cpu_pct  d_cpu_pct
+1:100000:8192:512  1     17609     -           22872     -           7774      -           10658     -           415       -           547       -           100      -
