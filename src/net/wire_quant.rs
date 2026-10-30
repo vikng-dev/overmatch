@@ -11,6 +11,8 @@
 //! | `Rotation` | 6 B smallest-three | √2/(2¹⁵−1) per component | every unit quaternion | — (non-finite or zero: the identity) | ≤ 1.50·10⁻⁴ rad, so ≤ 0.15 mm per metre from the root |
 //! | `LinearVelocity` | 6 B: 3 × i16 | 2⁻⁸ m/s ≈ 3.9 mm/s | ±128 m/s per axis | clamped to the range; NaN reads 0 | ≤ 1.95 mm/s per axis, ≤ 3.4 mm/s |
 //! | `AngularVelocity` | 6 B: 3 × i16 | 2⁻¹⁰ rad/s ≈ 0.98 mrad/s | ±32 rad/s per axis | clamped to the range; NaN reads 0 | ≤ 0.49 mrad/s per axis, ≤ 0.85 mrad/s |
+//! | `TrackDrive` belt speed, per side | 2 B: i16 | 2⁻¹⁰ m/s ≈ 0.98 mm/s | ±32 m/s | clamped to the range; NaN reads 0 | ≤ 0.49 mm/s |
+//! | `TrackDrive` belt phase, per side | 3 B: u24, wrapped | 2⁻¹⁴ m ≈ 0.061 mm | modulo `BELT_PHASE_WRAP_M` = 1024 m | — (wrapped by design; non-finite sends 0) | ≤ 0.031 mm, modulo the wrap |
 //!
 //! Every step is a power of two, so every code decodes to an exact f32. Kalinovo spans ±750 m
 //! (`assets/maps/kalinovo/level.json`), inside the packed position range; a larger map's far
@@ -24,9 +26,14 @@
 //! a hull's far corner) the four add up to ≤ 2.0 mm, a sixth of ε_vis, which the horizon's
 //! derivation does not subtract.
 //!
+//! The belt state feeds the track view, which draws a phase carried at the belt speed and eased
+//! onto the replicated phase (`track::view`'s `presented_phase`): its errors sit three orders
+//! under a link pitch. The view and the belt interpolator take phase differences modulo the wrap.
+//!
 //! Every byte layout here is pinned by the wire-types hash (`protocol`'s `WIRE_CODEC_SOURCES`):
 //! this file's code, comments stripped, folds into it whole.
 
+use crate::track::sim::{BELT_PHASE_WRAP_M, TrackDrive, TrackDriveSide};
 use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
 use bevy_replicon::bytes::Bytes;
@@ -193,7 +200,7 @@ pub(super) const ANGULAR_VELOCITY_STEPS: f32 = 1024.0;
 /// 3 bytes; the fixed layout is 2.
 pub(super) fn write_i16x3(value: Vec3, steps: f32, message: &mut Vec<u8>) {
     for axis in value.to_array() {
-        message.extend_from_slice(&((axis * steps).round() as i16).to_le_bytes());
+        message.extend_from_slice(&i16_code(axis, steps));
     }
 }
 
@@ -230,6 +237,63 @@ pub(super) fn angular_velocity_fns() -> RuleFns<AngularVelocity> {
             read_i16x3(message, ANGULAR_VELOCITY_STEPS).map(AngularVelocity)
         },
     )
+}
+
+/// Belt speed steps per m/s: a step of 2⁻¹⁰ m/s, so an i16 holds ±32 m/s.
+pub(super) const BELT_SPEED_STEPS: f32 = 1024.0;
+
+/// Belt phase steps per metre: a step of 2⁻¹⁴ m. With [`BELT_PHASE_WRAP_M`] = 2¹⁰ m, the wrap is
+/// exactly 2²⁴ steps, so a u24 holds one wrap.
+const BELT_PHASE_STEPS_PER_M: f64 = 16_384.0;
+
+/// The phase's code count: one wrap of steps, exactly the u24's range.
+const BELT_PHASE_CODES: f64 = BELT_PHASE_WRAP_M * BELT_PHASE_STEPS_PER_M;
+const _: () = assert!(BELT_PHASE_CODES == (1u32 << 24) as f64);
+
+/// The belt state in 10 bytes: per side, left then right, the speed as an i16 count of 2⁻¹⁰ m/s
+/// (±32 m/s, clamped beyond, NaN 0; error ≤ 2⁻¹¹ m/s ≈ 0.49 mm/s) and the phase as a u24 count of
+/// 2⁻¹⁴ m modulo [`BELT_PHASE_WRAP_M`] (error ≤ 2⁻¹⁵ m ≈ 0.031 mm modulo the wrap; non-finite
+/// sends 0), little-endian. A decoded phase lies in `[0, BELT_PHASE_WRAP_M)`.
+pub(super) fn write_track_drive(drive: &TrackDrive, message: &mut Vec<u8>) {
+    for side in drive.sides {
+        message.extend_from_slice(&i16_code(side.speed, BELT_SPEED_STEPS));
+        let code = if side.phase.is_finite() {
+            (side.phase * BELT_PHASE_STEPS_PER_M)
+                .round()
+                .rem_euclid(BELT_PHASE_CODES) as u32
+        } else {
+            0
+        };
+        message.extend_from_slice(&code.to_le_bytes()[..3]);
+    }
+}
+
+/// The belt state [`write_track_drive`] wrote; consumes its 10 bytes.
+pub(super) fn read_track_drive(message: &mut Bytes) -> Result<TrackDrive> {
+    let mut sides = [TrackDriveSide::default(); 2];
+    for side in &mut sides {
+        let [s0, s1, p0, p1, p2] = take::<5>(message)?;
+        side.speed = f32::from(i16::from_le_bytes([s0, s1])) / BELT_SPEED_STEPS;
+        side.phase = f64::from(u32::from_le_bytes([p0, p1, p2, 0])) / BELT_PHASE_STEPS_PER_M;
+    }
+    Ok(TrackDrive { sides })
+}
+
+/// [`TrackDrive`] on the wire as [`write_track_drive`].
+pub(super) fn track_drive_fns() -> RuleFns<TrackDrive> {
+    RuleFns::new(
+        |_: &mut SerializeCtx, drive: &TrackDrive, message: &mut Vec<u8>| {
+            write_track_drive(drive, message);
+            Ok(())
+        },
+        |_: &mut WriteCtx, message: &mut Bytes| read_track_drive(message),
+    )
+}
+
+/// `value` as an i16 count of `1/steps`, little-endian: rounded, saturating at the i16 bounds
+/// (Rust's float-to-int cast), NaN 0.
+fn i16_code(value: f32, steps: f32) -> [u8; 2] {
+    ((value * steps).round() as i16).to_le_bytes()
 }
 
 /// The next `N` raw bytes, or an error naming the shortfall: a truncated message is refused, never

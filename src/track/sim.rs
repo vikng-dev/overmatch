@@ -59,25 +59,46 @@ use super::transmission::{
 pub(crate) const MU: f32 = 0.9;
 const SLIP_SATURATION: f32 = 0.4;
 
-/// Per-tank tracked-drivetrain sim state: server-authoritative, replicated to every client for
-/// the track view. Hashed into the determinism trace (`hblt`).
-#[derive(Component, Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
+/// Per-tank belt state: server-authoritative, replicated to every client for the track view
+/// (quantised, `net::wire_quant`). Hashed into the determinism trace (`hblt`).
+#[derive(Component, Clone, Copy, PartialEq, Debug, Default)]
 pub struct TrackDrive {
-    /// The shaped drive signal in [−1, 1]: `TankCommand` targets slewed through
-    /// [`super::drive::shape_drive`]. Sim state (not command) so every tank responds with the
-    /// same feel.
-    pub throttle: f32,
-    pub steer: f32,
     /// Per-side belt state, `[left, right]`.
     pub sides: [TrackDriveSide; 2],
 }
 
-#[derive(Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Debug, Default)]
 pub struct TrackDriveSide {
     /// Belt surface speed (m/s).
     pub speed: f32,
-    /// Unbounded belt travel (m) — advects the force stations; the view's exact scroll phase.
+    /// Belt travel (m) — advects the force stations; the view's exact scroll phase. Unbounded
+    /// where the tank simulates; on a replica, known only modulo [`BELT_PHASE_WRAP_M`].
     pub phase: f64,
+}
+
+/// The length (m) a replicated belt phase is known modulo: the wire carries it wrapped into
+/// `[0, BELT_PHASE_WRAP_M)`, so a replica's phase jumps by this length where the authority's
+/// crosses a multiple of it. Every reader of a phase takes differences through
+/// [`wrapped_phase_delta`], so none needs it to divide a link pitch — and no generic length could.
+/// A power of two, so the wire's power-of-two step tiles it exactly.
+pub const BELT_PHASE_WRAP_M: f64 = 1024.0;
+
+/// `to − from` as the shortest travel modulo [`BELT_PHASE_WRAP_M`]: exact for unbounded phases
+/// whose true difference is under half the wrap (512 m of belt — 25 s at 20 m/s), and equally
+/// right for wrapped ones.
+pub fn wrapped_phase_delta(from: f64, to: f64) -> f64 {
+    let delta = to - from;
+    delta - BELT_PHASE_WRAP_M * (delta / BELT_PHASE_WRAP_M).round()
+}
+
+/// The shaped drive signal in [−1, 1]: `TankCommand` targets slewed through
+/// [`super::drive::shape_drive`]. Sim state (not command) so every tank responds with the same
+/// feel. Server-authoritative and replicated to the tank's OWNER only (its drive HUD); no other
+/// client reads it.
+#[derive(Component, Clone, Copy, PartialEq, Debug, Default, Serialize, Deserialize)]
+pub struct DriveSignal {
+    pub throttle: f32,
+    pub steer: f32,
 }
 
 /// The OFFLINE transmission feel-test override: which drivetrain adapter [`apply_track_forces`]
@@ -562,6 +583,7 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
 /// (ECS components for the live sim, plain fields for the recoil microsim).
 pub(crate) struct BeltRig<'a> {
     pub drive: &'a mut TrackDrive,
+    pub signal: &'a mut DriveSignal,
     pub grip: &'a mut TrackGrip,
     pub elements: &'a mut TrackGripElements,
     pub transmission: &'a mut TransmissionState,
@@ -591,14 +613,14 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
 ) -> ([SideReport; 2], TransmissionReport) {
     let shaped = shape_drive(
         DriveAxes {
-            throttle: rig.drive.throttle,
-            steer: rig.drive.steer,
+            throttle: rig.signal.throttle,
+            steer: rig.signal.steer,
         },
         target,
         dt,
     );
-    rig.drive.throttle = shaped.throttle;
-    rig.drive.steer = shaped.steer;
+    rig.signal.throttle = shaped.throttle;
+    rig.signal.steer = shaped.steer;
     let side_commands = shaped.side_commands();
 
     // THE joint drivetrain form — every architecture, one path. An explicit Governor selection
@@ -665,8 +687,8 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
         tp,
         rig.transmission,
         &TransmissionInput {
-            throttle: rig.drive.throttle,
-            steer: rig.drive.steer,
+            throttle: rig.signal.throttle,
+            steer: rig.signal.steer,
             side_commands,
             speeds: [rig.drive.sides[0].speed, rig.drive.sides[1].speed],
             reactions: [reports[0].belt_reaction, reports[1].belt_reaction],
@@ -709,6 +731,7 @@ fn apply_track_forces(
             Forces,
             &TankCommand,
             &mut TrackDrive,
+            &mut DriveSignal,
             &mut TrackGrip,
             &mut TrackGripElements,
             &mut TrackGripEffect,
@@ -740,6 +763,7 @@ fn apply_track_forces(
         mut forces,
         command,
         mut drive,
+        mut signal,
         mut grip,
         mut grip_elements,
         mut grip_effect,
@@ -755,8 +779,8 @@ fn apply_track_forces(
             capture.command = [command.throttle, command.steer];
         }
         // Only dynamic bodies simulate the belt — and the guard sits BEFORE command shaping:
-        // `TrackDrive` is replicated state, and a client tick must not locally slew the
-        // replicated throttle/steer. Forces are no-ops on kinematic/static bodies, replicated
+        // the owner's `DriveSignal` is replicated state, and a client tick must not locally slew
+        // the replicated throttle/steer. Forces are no-ops on kinematic/static bodies, replicated
         // tanks' `TrackDrive` arrives for their track view, and clients neither receive nor
         // simulate the private element field (ADR-0027 disclosure). Skipping them entirely
         // also keeps their replicated belt state from being fought by a locally-integrated
@@ -804,6 +828,7 @@ fn apply_track_forces(
             |p| forces.velocity_at_point(p),
             BeltRig {
                 drive: &mut drive,
+                signal: &mut signal,
                 grip: &mut grip,
                 elements: &mut grip_elements,
                 transmission: &mut trans_state.0,

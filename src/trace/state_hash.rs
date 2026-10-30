@@ -5,7 +5,7 @@ use bevy::prelude::{Quat, Vec3};
 #[cfg(test)]
 use crate::tank::TankServos;
 use crate::tank::{ServoState, TankSim, WeaponGate, WeaponLoads};
-use crate::track::sim::{TankTransmission, TrackDrive, TrackGrip, TrackGripElements};
+use crate::track::sim::{DriveSignal, TankTransmission, TrackDrive, TrackGrip, TrackGripElements};
 use crate::track::transmission::{TransmissionProjectionValue, transmission_state_projection};
 
 // Per-tick state hashes use a fixed field/slot order and raw float bits. Entity IDs and unordered
@@ -120,6 +120,9 @@ pub(crate) struct TankState<'a> {
     pub(crate) linvel: Vec3,
     pub(crate) angvel: Vec3,
     pub(crate) drive: &'a TrackDrive,
+    /// `None` on a client's replica of a tank it does not own: the shaped signal is owner-only on
+    /// the wire.
+    pub(crate) signal: Option<&'a DriveSignal>,
     pub(crate) grip: &'a TrackGrip,
     pub(crate) elements: Option<&'a TrackGripElements>,
     /// `None` on a client's replica of a tank it does not own: the transmission is owner-only on
@@ -135,7 +138,7 @@ pub(crate) struct TankState<'a> {
 /// ECS-free precisely so it is unit-testable: same inputs → same hash, one flipped velocity bit → a
 /// different hash, and — because no entity ever enters it — hash equality is independent of the two
 /// worlds' entity ids. Field order is fixed and load-bearing: `position, rotation, linvel, angvel`,
-/// then `TrackDrive` (shaped command + per-side belt state), `TrackGrip`, `TrackGripElements`, the
+/// then `DriveSignal` (the shaped command), `TrackDrive` (per-side belt state), `TrackGrip`, `TrackGripElements`, the
 /// complete `TankTransmission` inventory, `WeaponGate` (`present`, then per slot: deadline-present,
 /// deadline, pause-present, pause tick, belt count), `WeaponLoads` (`present`, then per slot:
 /// `loaded`, `selected`), `TankServos` in slot order with each slot's `current, previous, velocity`,
@@ -147,6 +150,7 @@ pub(super) fn hash_tank_state(state: &TankState) -> TankStateHash {
         linvel,
         angvel,
         drive,
+        signal,
         grip,
         elements,
         transmission,
@@ -173,9 +177,13 @@ pub(super) fn hash_tank_state(state: &TankState) -> TankStateHash {
 
     // The carried state hashes as independent field-family streams so a `hsim` mismatch names its
     // field, then combines into the single `sim` boolean existing analysis keys on.
+    // An absent signal (a replica's: owner-only on the wire) hashes as the empty stream, which no
+    // present one can produce — it writes both fields.
     let mut hd = Fnv64::new();
-    hd.write_f32(drive.throttle);
-    hd.write_f32(drive.steer);
+    if let Some(signal) = signal {
+        hd.write_f32(signal.throttle);
+        hd.write_f32(signal.steer);
+    }
     let drv = hd.finish();
 
     let mut hsv = Fnv64::new();
@@ -336,10 +344,18 @@ fn test_servos() -> TankServos {
 #[cfg(test)]
 type Pose = (Vec3, Quat, Vec3, Vec3);
 
+/// A test root's carried drive: its belt state and the shaped signal beside it.
+#[cfg(test)]
+#[derive(Clone, Copy)]
+struct DriveSample {
+    belt: TrackDrive,
+    signal: DriveSignal,
+}
+
 #[cfg(test)]
 fn hash_sample_with_gate_and_servos(
     (position, rotation, linvel, angvel): Pose,
-    drive: &TrackDrive,
+    drive: &DriveSample,
     grip: &TrackGrip,
     transmission: &TankTransmission,
     weapon_gate: &WeaponGate,
@@ -351,7 +367,8 @@ fn hash_sample_with_gate_and_servos(
         rotation,
         linvel,
         angvel,
-        drive,
+        drive: &drive.belt,
+        signal: Some(&drive.signal),
         grip,
         elements: None,
         transmission: Some(transmission),
@@ -376,7 +393,7 @@ fn test_weapon_loads() -> WeaponLoads {
 #[cfg(test)]
 fn hash_sample_with_loads(
     (position, rotation, linvel, angvel): Pose,
-    drive: &TrackDrive,
+    drive: &DriveSample,
     grip: &TrackGrip,
     transmission: &TankTransmission,
     loads: &WeaponLoads,
@@ -388,7 +405,8 @@ fn hash_sample_with_loads(
         rotation,
         linvel,
         angvel,
-        drive,
+        drive: &drive.belt,
+        signal: Some(&drive.signal),
         grip,
         elements: None,
         transmission: Some(transmission),
@@ -402,7 +420,7 @@ fn hash_sample_with_loads(
 #[cfg(test)]
 fn hash_sample_with_gate(
     pose: Pose,
-    drive: &TrackDrive,
+    drive: &DriveSample,
     grip: &TrackGrip,
     transmission: &TankTransmission,
     weapon_gate: &WeaponGate,
@@ -422,7 +440,7 @@ fn hash_sample_with_gate(
 #[cfg(test)]
 fn hash_sample(
     pose: Pose,
-    drive: &TrackDrive,
+    drive: &DriveSample,
     grip: &TrackGrip,
     transmission: &TankTransmission,
     sim: &TankSim,
@@ -491,7 +509,7 @@ mod tests {
     /// A representative, non-trivial sim state (every `Vec` populated, one side anchored and
     /// one released, non-default drive) so the canonicalization is exercised over every
     /// production field path — including every carried-state sub-hash stream.
-    fn sample() -> (Vec3, Quat, Vec3, Vec3, TrackDrive, TankSim) {
+    fn sample() -> (Vec3, Quat, Vec3, Vec3, DriveSample, TankSim) {
         // Callers bind a default TrackGrip separately (`let grip = ...`) — zero grip keeps
         // the legacy expectations intact; the grip-ULP test flips it explicitly.
 
@@ -499,19 +517,23 @@ mod tests {
         let rotation = Quat::from_rotation_y(0.3);
         let linvel = Vec3::new(0.0, -0.153, 4.2);
         let angvel = Vec3::new(0.01, -0.02, 0.03);
-        let drive = TrackDrive {
-            throttle: 0.75,
-            steer: -0.25,
-            sides: [
-                crate::track::sim::TrackDriveSide {
-                    speed: 4.2,
-                    phase: 137.25,
-                },
-                crate::track::sim::TrackDriveSide {
-                    speed: 4.1,
-                    phase: 136.9,
-                },
-            ],
+        let drive = DriveSample {
+            belt: TrackDrive {
+                sides: [
+                    crate::track::sim::TrackDriveSide {
+                        speed: 4.2,
+                        phase: 137.25,
+                    },
+                    crate::track::sim::TrackDriveSide {
+                        speed: 4.1,
+                        phase: 136.9,
+                    },
+                ],
+            },
+            signal: DriveSignal {
+                throttle: 0.75,
+                steer: -0.25,
+            },
         };
         let sim = TankSim {
             weapons: vec![WeaponState {
@@ -663,7 +685,7 @@ mod tests {
 
         // Drive: steer one ULP off.
         let mut drive2 = drive;
-        drive2.steer = f32::from_bits(drive.steer.to_bits() ^ 1);
+        drive2.signal.steer = f32::from_bits(drive.signal.steer.to_bits() ^ 1);
         let d = hash_sample((p, q, lv, av), &drive2, &grip, &transmission, &sim);
         assert_ne!(base.drv, d.drv);
         assert_ne!(base.sim, d.sim);
@@ -766,7 +788,7 @@ mod tests {
 
         // Belt state: the left side's speed one ULP off — localizes to the `blt` stream.
         let mut drive5 = drive;
-        drive5.sides[0].speed = f32::from_bits(drive.sides[0].speed.to_bits() ^ 1);
+        drive5.belt.sides[0].speed = f32::from_bits(drive.belt.sides[0].speed.to_bits() ^ 1);
         let a = hash_sample((p, q, lv, av), &drive5, &grip, &transmission, &sim);
         assert_ne!(base.blt, a.blt);
         assert_ne!(base.sim, a.sim);
@@ -777,7 +799,7 @@ mod tests {
 
         // Belt phase: one f64 ULP off — force-station-advecting sim state, not cosmetic.
         let mut drive6 = drive;
-        drive6.sides[1].phase = f64::from_bits(drive.sides[1].phase.to_bits() ^ 1);
+        drive6.belt.sides[1].phase = f64::from_bits(drive.belt.sides[1].phase.to_bits() ^ 1);
         let ph = hash_sample((p, q, lv, av), &drive6, &grip, &transmission, &sim);
         assert_ne!(base.blt, ph.blt);
         assert_ne!(base.sim, ph.sim);
@@ -807,7 +829,8 @@ mod tests {
             rotation: q,
             linvel: lv,
             angvel: av,
-            drive: &drive,
+            drive: &drive.belt,
+            signal: Some(&drive.signal),
             grip: &grip,
             elements: Some(&elements),
             transmission: Some(&transmission),
@@ -897,7 +920,8 @@ mod tests {
             rotation: q,
             linvel: lv,
             angvel: av,
-            drive: &drive,
+            drive: &drive.belt,
+            signal: Some(&drive.signal),
             grip: &grip,
             elements: Some(&elements),
             transmission: Some(&transmission),

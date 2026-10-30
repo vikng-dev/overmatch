@@ -99,13 +99,17 @@ const PHASE_HEAL_OMEGA: f32 = 4.0;
 /// It also cannot invent travel the vehicle has not got: `speed` is the belt's surface speed, so a
 /// braked skid (`speed` 0) still stops the links dead and wheelspin still scrolls them under a
 /// stationary hull. The ease bounds what the carry accumulates — see [`PHASE_HEAL_OMEGA`].
+///
+/// The residual is taken modulo [`super::sim::BELT_PHASE_WRAP_M`]: a replica's `sim` phase is
+/// wrapped on the wire and jumps a whole wrap where the authority's crosses one, while the drawn
+/// phase stays continuous.
 fn presented_phase(previous: Option<f64>, sim: f64, speed: f32, dt: f32) -> f64 {
     let Some(previous) = previous else {
         return sim;
     };
     let carried = previous + f64::from(speed) * f64::from(dt);
     let heal = 1.0 - f64::from(-PHASE_HEAL_OMEGA * dt).exp();
-    carried + (sim - carried) * heal
+    carried + super::sim::wrapped_phase_delta(carried, sim) * heal
 }
 
 /// The ground the drawn belt fits: each probe reads its own ground's print depth, limited by the
@@ -1785,6 +1789,33 @@ mod tests {
             "steady drive must draw the sim phase, not {} m behind it",
             sim - drawn,
         );
+    }
+
+    /// A replica's phase arrives wrapped (`sim::BELT_PHASE_WRAP_M`), so where the authority's
+    /// crosses a whole wrap the replica's jumps back by one. The drawn belt must not see it: fed
+    /// the wrapped phase, it moves frame by frame exactly as it does fed the unbounded one. A
+    /// residual taken without the wrap would scroll a kilometre of belt through the heal.
+    #[test]
+    fn a_wrapped_replica_phase_draws_the_unbounded_belt() {
+        let wrap = crate::track::sim::BELT_PHASE_WRAP_M;
+        let mut sim = wrap - 3.0;
+        let mut unbounded = presented_phase(None, sim, SPEED, DT);
+        let mut wrapped = presented_phase(None, sim.rem_euclid(wrap), SPEED, DT);
+        let mut crossed = false;
+        for frame in 1..600 {
+            if frame % 2 == 0 {
+                sim += f64::from(SPEED) * 2.0 * f64::from(DT);
+            }
+            crossed |= sim >= wrap;
+            let (was_unbounded, was_wrapped) = (unbounded, wrapped);
+            unbounded = presented_phase(Some(unbounded), sim, SPEED, DT);
+            wrapped = presented_phase(Some(wrapped), sim.rem_euclid(wrap), SPEED, DT);
+            assert!(
+                ((unbounded - was_unbounded) - (wrapped - was_wrapped)).abs() < 1e-9,
+                "frame {frame}: the wrapped feed drew a different step",
+            );
+        }
+        assert!(crossed, "the run crosses the wrap");
     }
 
     /// Reseeding is the escape hatch for every discontinuity the ease is too slow for, so it must

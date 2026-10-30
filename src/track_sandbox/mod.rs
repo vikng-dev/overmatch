@@ -866,7 +866,7 @@ const RESET_SPOTS: [(f32, &str); 4] = [
 #[derive(Resource, Default)]
 struct RawDriveInput(crate::track::drive::DriveAxes);
 
-/// The slewed drive state — the sandbox's analogue of the game's `TrackDrive.throttle/steer`,
+/// The slewed drive state — the sandbox's analogue of the game's `DriveSignal`,
 /// advanced on the FIXED tick by the force adapter (never in `Update`: frame-rate-independent
 /// shaping is half of what makes harness runs bit-repeatable).
 #[derive(Resource, Default)]

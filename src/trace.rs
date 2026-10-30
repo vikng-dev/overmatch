@@ -20,7 +20,7 @@ use serde_json::{Value, json};
 
 use crate::tank::{Controlled, RemoteServos, Tank, TankServos, TankSim, WeaponGate, WeaponLoads};
 use crate::track::sim::{
-    TankTransmission, TrackContacts, TrackDrive, TrackGrip, TrackGripElements,
+    DriveSignal, TankTransmission, TrackContacts, TrackDrive, TrackGrip, TrackGripElements,
 };
 use crate::track::transmission::{TransmissionProjectionValue, transmission_state_projection};
 use crate::view::PlayerView;
@@ -376,7 +376,7 @@ fn record_tick(
             &Rotation,
             &LinearVelocity,
             &AngularVelocity,
-            &TrackDrive,
+            (&TrackDrive, Option<&DriveSignal>),
             &TrackGrip,
             Option<&TrackGripElements>,
             Option<&TankTransmission>,
@@ -436,7 +436,7 @@ fn record_tick(
         rotation,
         linvel,
         angvel,
-        drive,
+        (drive, signal),
         grip,
         elements,
         transmission,
@@ -503,6 +503,7 @@ fn record_tick(
             linvel: linvel.0,
             angvel: angvel.0,
             drive,
+            signal,
             grip,
             elements,
             transmission,
@@ -527,8 +528,9 @@ fn record_tick(
             "gnd": grounded,
             "loads": Value::Array(loads),
             "loads_act": Value::Array(loads_act),
-            "thr": num(drive.throttle),
-            "str": num(drive.steer),
+            // Null on a replica of a tank this client does not own: owner-only on the wire.
+            "thr": signal.map_or(Value::Null, |signal| num(signal.throttle)),
+            "str": signal.map_or(Value::Null, |signal| num(signal.steer)),
             "belt": [num(drive.sides[0].speed), num(drive.sides[1].speed)],
             // Full f64 — the phase IS f64 sim state; narrowing here would hide sub-f32-ULP
             // divergence from the offline join.

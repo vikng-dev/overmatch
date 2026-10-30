@@ -25,7 +25,9 @@ use crate::bake::TankBlueprint;
 use crate::command::TankCommand;
 use crate::state::AppState;
 use crate::tank::{Controlled, TankSimSource, spawn_headless_tank};
-use crate::track::sim::{TankTransmission, TrackDrive, TrackGear, TrackGrip, TrackGripEffect};
+use crate::track::sim::{
+    DriveSignal, TankTransmission, TrackDrive, TrackGear, TrackGrip, TrackGripEffect,
+};
 use crate::track::terrain::TrackField;
 use crate::track::transmission::{TransmissionProjectionValue, transmission_state_projection};
 use crate::world::TerrainMap;
@@ -890,6 +892,9 @@ fn pose_payload(world: &World, tank: Entity) -> Vec<u32> {
         .expect("tank has AngularVelocity")
         .0;
     let drive = world.get::<TrackDrive>(tank).expect("tank has TrackDrive");
+    let signal = world
+        .get::<DriveSignal>(tank)
+        .expect("tank has DriveSignal");
     let grip = world.get::<TrackGrip>(tank).expect("tank has TrackGrip");
     let effect = world
         .get::<TrackGripEffect>(tank)
@@ -901,8 +906,9 @@ fn pose_payload(world: &World, tank: Entity) -> Vec<u32> {
     }
     vec3_words(&mut output, linear);
     vec3_words(&mut output, angular);
-    f32_word(&mut output, drive.throttle);
-    f32_word(&mut output, drive.steer);
+    // The schema keeps its `drive.throttle`/`drive.steer` names: the shaped signal, in that order.
+    f32_word(&mut output, signal.throttle);
+    f32_word(&mut output, signal.steer);
     for side in drive.sides {
         f32_word(&mut output, side.speed);
         let phase = side.phase.to_bits();

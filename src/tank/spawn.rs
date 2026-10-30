@@ -27,7 +27,7 @@ use crate::firecontrol::RangeTable;
 use crate::shooting::RecoilParams;
 use crate::spec::{TankSpec, TankSpecHandle, Trigger, ViewKind, VolumeSpec, WeaponSpec};
 use crate::substances::Matter;
-use crate::track::sim::{EngineRpm, TankTransmission, TrackGripElements};
+use crate::track::sim::{DriveSignal, EngineRpm, TankTransmission, TrackGripElements};
 
 /// Presentation handles. Loading may gate admission or view attachment, never simulation data.
 ///
@@ -230,6 +230,8 @@ pub(crate) fn spawn_complete_tank<B: Bundle>(
         // root can replicate or simulate, and the public crank speed read off it.
         transmission,
         EngineRpm::of(&transmission),
+        // The shaped drive signal starts at rest, as the command does.
+        DriveSignal::default(),
         // Complete REV-17 weapon gate, synchronously constructed from the same sorted spec data as
         // its weapon slots. Replicated client attachment must preserve the arriving authority value.
         weapon_gate(content.spec()),
@@ -269,6 +271,7 @@ pub(crate) fn spawn_headless_tank<B: Bundle>(
             TrackGripElements::for_links(content.spec().track.link_count),
             transmission,
             EngineRpm::of(&transmission),
+            DriveSignal::default(),
             weapon_gate(content.spec()),
             weapon_loads(content.spec()),
             tank_servos(content.spec()),
@@ -297,8 +300,8 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
         .insert((
             presentation.root_bundle(),
             // Replicated authority state (EngineRpm, servo snapshots; the owner's TankTransmission,
-            // WeaponGate, WeaponLoads) arrived in the replication init snapshot. Do not overwrite it
-            // with fresh spec-derived values.
+            // DriveSignal, WeaponGate, WeaponLoads) arrived in the replication init snapshot. Do not
+            // overwrite it with fresh spec-derived values.
             root_bundle,
         ))
         .observe(bind_tank_view);

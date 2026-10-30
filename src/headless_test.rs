@@ -945,7 +945,10 @@ fn capture_scripted_determinism_tick(
             &avian3d::prelude::LinearVelocity,
             &avian3d::prelude::AngularVelocity,
             &avian3d::prelude::ComputedCenterOfMass,
-            &crate::track::sim::TrackDrive,
+            (
+                &crate::track::sim::TrackDrive,
+                &crate::track::sim::DriveSignal,
+            ),
             &crate::track::sim::TrackGrip,
             &crate::track::sim::TrackGripElements,
             &crate::track::sim::TankTransmission,
@@ -970,7 +973,7 @@ fn capture_scripted_determinism_tick(
         linear,
         angular,
         com,
-        drive,
+        (drive, signal),
         grip,
         elements,
         transmission,
@@ -987,6 +990,7 @@ fn capture_scripted_determinism_tick(
                 linvel: linear.0,
                 angvel: angular.0,
                 drive,
+                signal: Some(signal),
                 grip,
                 elements: Some(elements),
                 transmission: Some(transmission),
@@ -998,7 +1002,7 @@ fn capture_scripted_determinism_tick(
         ));
         if is_controlled {
             controlled = Some((
-                position.0, rotation.0, linear.0, angular.0, com.0, drive, contacts, sim,
+                position.0, rotation.0, linear.0, angular.0, com.0, signal, contacts, sim,
             ));
             run.saw_element_strain |= elements
                 .sides
@@ -1010,7 +1014,7 @@ fn capture_scripted_determinism_tick(
     digests.sort_unstable_by(|left, right| left.0.cmp(&right.0));
     assert_eq!(digests.len(), 2, "the local duel has two simulation tanks");
 
-    let (position, rotation, linear, angular, local_com, drive, contacts, sim) =
+    let (position, rotation, linear, angular, local_com, signal, contacts, sim) =
         controlled.expect("one controlled tank");
     let grounded = contacts.0.iter().filter(|side| !side.is_empty()).count();
     run.saw_airborne |= grounded == 0;
@@ -1027,7 +1031,7 @@ fn capture_scripted_determinism_tick(
         .flatten()
         .any(|c| c.load > 0.0 && c.slip.abs() > 0.3);
     run.saw_steering_slip |=
-        tick >= 300 && drive.steer.abs() > f32::EPSILON && loaded_contact_is_slipping;
+        tick >= 300 && signal.steer.abs() > f32::EPSILON && loaded_contact_is_slipping;
     run.saw_shot |= sim.weapons.iter().any(|weapon| weapon.rounds_fired > 0);
     run.saw_projectile_spawn |= !projectiles.is_empty();
     run.saw_projectile_march |= projectiles.iter().any(|path| path.points.len() > 1);
@@ -1160,9 +1164,11 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
         e.get_mut::<avian3d::prelude::LinearVelocity>().unwrap().0 =
             rot * Vec3::NEG_Z * approach_speed;
         e.get_mut::<avian3d::prelude::AngularVelocity>().unwrap().0 = Vec3::ZERO;
+        *e.get_mut::<crate::track::sim::DriveSignal>().unwrap() = crate::track::sim::DriveSignal {
+            throttle: 1.0,
+            steer: 0.0,
+        };
         let mut drive = e.get_mut::<crate::track::sim::TrackDrive>().unwrap();
-        drive.throttle = 1.0;
-        drive.steer = 0.0;
         drive.sides[0].speed = approach_speed;
         drive.sides[1].speed = approach_speed;
         *e.get_mut::<crate::track::sim::TankTransmission>().unwrap() = transmission;

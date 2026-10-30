@@ -268,6 +268,58 @@ fn a_velocity_round_trips_within_half_a_step_or_clamps() {
     }
 }
 
+/// The belt's half steps: speed 2⁻¹¹ m/s, phase 2⁻¹⁵ m.
+const BELT_SPEED_HALF_STEP: f32 = 0.5 / BELT_SPEED_STEPS;
+const BELT_PHASE_HALF_STEP_M: f64 = 1.0 / 32_768.0;
+
+fn belt(left: (f32, f64), right: (f32, f64)) -> TrackDrive {
+    let side = |(speed, phase)| TrackDriveSide { speed, phase };
+    TrackDrive {
+        sides: [side(left), side(right)],
+    }
+}
+
+/// The belt state at its range edges and inside: each speed within half a step inside ±32 m/s and
+/// clamped to the bound past it (NaN 0); each phase, unbounded and of either sign, decoded into
+/// `[0, BELT_PHASE_WRAP_M)` within half a step of it modulo the wrap (non-finite 0); 10 bytes. The
+/// track view draws a phase carried at this speed and eased onto this phase, both modulo the wrap.
+#[test]
+fn a_belt_round_trips_within_half_a_step_modulo_its_wrap() {
+    let top = f32::from(i16::MAX) / BELT_SPEED_STEPS;
+    let bottom = f32::from(i16::MIN) / BELT_SPEED_STEPS;
+    for (drive, expected_speeds) in [
+        (belt((top, 0.0), (bottom, -0.0)), [top, bottom]),
+        (
+            belt((1.0e4, BELT_PHASE_WRAP_M), (-1.0e4, -BELT_PHASE_WRAP_M)),
+            [top, bottom],
+        ),
+        (belt((f32::NAN, f64::NAN), (0.0, f64::INFINITY)), [0.0, 0.0]),
+    ] {
+        let (len, back) = round_trip(drive, |d, m| write_track_drive(&d, m), read_track_drive);
+        assert_eq!(len, 10);
+        assert_eq!(back.sides.map(|side| side.speed), expected_speeds);
+        assert_eq!(back.sides.map(|side| side.phase), [0.0, 0.0], "{drive:?}");
+    }
+    let mut samples = Samples(0xBF58_476D_1CE4_E5B9);
+    for _ in 0..100_000 {
+        let speed = samples.next() * top;
+        // Up to ±50 km of travel: a long match's belt, far past one wrap, either direction.
+        let phase = f64::from(samples.next()) * 5.0e4;
+        let drive = belt((speed, phase), (-speed, phase + 0.5));
+        let (len, back) = round_trip(drive, |d, m| write_track_drive(&d, m), read_track_drive);
+        assert_eq!(len, 10);
+        for (sent, got) in drive.sides.iter().zip(back.sides) {
+            assert!((got.speed - sent.speed).abs() <= BELT_SPEED_HALF_STEP);
+            assert!((0.0..BELT_PHASE_WRAP_M).contains(&got.phase), "{got:?}");
+            assert!(
+                crate::track::sim::wrapped_phase_delta(sent.phase, got.phase).abs()
+                    <= BELT_PHASE_HALF_STEP_M,
+                "{sent:?} -> {got:?}"
+            );
+        }
+    }
+}
+
 /// Every codec rides its quantised byte count through the registered rule functions — the path a
 /// mutation message takes — not postcard's 12 (a vector) or 16 (a quaternion).
 #[test]
@@ -291,6 +343,18 @@ fn the_rule_fns_send_the_quantised_bytes() {
     let (len, back) = through_rule_fns(angular_velocity_fns(), angular);
     assert_eq!(len, 6);
     assert!(back.0.abs_diff_eq(angular.0, 0.5 / ANGULAR_VELOCITY_STEPS));
+
+    // The belt state: 10 bytes, not postcard's 32 for two f32 speeds and two f64 phases.
+    let drive = belt((4.25, 1500.5), (-3.0, -20.125));
+    let (len, back) = through_rule_fns(track_drive_fns(), drive);
+    assert_eq!(len, 10);
+    assert_eq!(
+        back,
+        belt(
+            (4.25, 1500.5 - BELT_PHASE_WRAP_M),
+            (-3.0, BELT_PHASE_WRAP_M - 20.125)
+        )
+    );
 }
 
 /// A message cut short inside a component is refused, never read past: a reader that ran off the
@@ -307,4 +371,6 @@ fn a_truncated_message_is_refused() {
     assert!(read_position(&mut short(&|m| write_position(Vec3::ONE, m))).is_err());
     assert!(read_position(&mut short(&|m| write_position(Vec3::splat(5000.0), m))).is_err());
     assert!(read_i16x3(&mut short(&|m| write_i16x3(Vec3::ONE, 256.0, m)), 256.0).is_err());
+    let drive = belt((1.0, 2.0), (3.0, 4.0));
+    assert!(read_track_drive(&mut short(&|m| write_track_drive(&drive, m))).is_err());
 }

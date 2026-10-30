@@ -9,7 +9,9 @@ use bevy::prelude::*;
 
 use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
 use crate::tank::Controlled;
-use crate::track::sim::{TankTransmission, TrackDrive, TrackGear, TransmissionFeelTest};
+use crate::track::sim::{
+    DriveSignal, TankTransmission, TrackDrive, TrackGear, TransmissionFeelTest,
+};
 use crate::track::transmission::{
     DriveReadout, SchedulerState, TransmissionMode, TransmissionParams, TransmissionState, readout,
 };
@@ -193,7 +195,13 @@ fn update_drive_hud(
     gear: Option<Res<TrackGear>>,
     debug_visible: Res<DriveDebugVisible>,
     controlled: Query<
-        (&TrackDrive, &TankTransmission, &LinearVelocity, &Rotation),
+        (
+            &TrackDrive,
+            &DriveSignal,
+            &TankTransmission,
+            &LinearVelocity,
+            &Rotation,
+        ),
         With<Controlled>,
     >,
     mut standard_label: Query<
@@ -211,7 +219,7 @@ fn update_drive_hud(
     let Ok((mut debug_text, mut debug_visibility)) = debug_label.single_mut() else {
         return;
     };
-    let Some((drive, transmission, velocity, rotation)) = controlled.iter().next() else {
+    let Some((drive, signal, transmission, velocity, rotation)) = controlled.iter().next() else {
         set_text(standard_text.reborrow(), "");
         set_text(debug_text.reborrow(), "");
         standard_visibility.set_if_neq(Visibility::Hidden);
@@ -278,8 +286,8 @@ fn update_drive_hud(
         speeds[1],
         speeds[0] - projected,
         speeds[1] - projected,
-        drive.throttle,
-        drive.steer,
+        signal.throttle,
+        signal.steer,
     );
     set_text(debug_text.reborrow(), &debug);
 }

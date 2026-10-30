@@ -28,7 +28,9 @@ use crate::tank::{
     Controlled as GameControlled, Rig, ServoCommand, ServoIndex, ServoSpec, TankServos, WeaponGate,
     WeaponLoads,
 };
-use crate::track::sim::{EngineRpm, TankTransmission, TrackDrive, TrackDriveSide};
+use crate::track::sim::{
+    DriveSignal, EngineRpm, TankTransmission, TrackDrive, TrackDriveSide, wrapped_phase_delta,
+};
 use crate::{CombatantId, CombatantLife, ShotId};
 
 // ---------------------------------------------------------------------------
@@ -206,7 +208,9 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// REV 40 (#185, a client's download per remote tank): `TankTransmission` joins the owner-only
 /// disclosure scope and every tank root carries a public `EngineRpm` for the engine sound;
 /// `Rotation` rides `wire_quant`'s 6-byte smallest-three codec, `Position` its 8-byte millimetre
-/// fixed point and the velocities its 6-byte i16 triples. Surface, own-type graph and REV move.
+/// fixed point and the velocities its 6-byte i16 triples; `TrackDrive` keeps the belt state alone,
+/// in `wire_quant`'s 10-byte belt codec, and its throttle and steer become the owner-only
+/// `DriveSignal`. Surface, own-type graph and REV move.
 pub const PROTOCOL_REV: u32 = 40;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
@@ -880,22 +884,30 @@ fn apply_launched_turret_pose(
 
 /// CURSOR-clock source for the track view (the per-channel clock map): an interpolated hull
 /// renders at the interpolation cursor, so the belt speed/phase its track view draws must be
-/// sampled on the same clock — component-wise linear, the belt phase in f64. Client-side
-/// presentation only: registering interpolation adds no wire type, mode, or direction (the
-/// wire-surface pins prove it), and a simulated hull carries no `Interpolated` marker, so its
-/// sim-written component is untouched.
+/// sampled on the same clock — component-wise linear, the belt phase in f64 along the shorter way
+/// round [`crate::track::sim::BELT_PHASE_WRAP_M`] (the wire wraps it, so two consecutive samples
+/// can straddle a wrap). Client-side presentation only: registering interpolation adds no wire
+/// type, mode, or direction (the wire-surface pins prove it), and a simulated hull carries no
+/// `Interpolated` marker, so its sim-written component is untouched.
 pub(crate) fn track_drive_lerp(start: TrackDrive, end: TrackDrive, t: f32) -> TrackDrive {
     let side = |a: TrackDriveSide, b: TrackDriveSide| TrackDriveSide {
         speed: a.speed + (b.speed - a.speed) * t,
-        phase: a.phase + (b.phase - a.phase) * f64::from(t),
+        phase: a.phase + wrapped_phase_delta(a.phase, b.phase) * f64::from(t),
     };
     TrackDrive {
-        throttle: start.throttle + (end.throttle - start.throttle) * t,
-        steer: start.steer + (end.steer - start.steer) * t,
         sides: [
             side(start.sides[0], end.sides[0]),
             side(start.sides[1], end.sides[1]),
         ],
+    }
+}
+
+/// The owner's drive HUD reads its shaped signal beside the cursor-time belt state, so it is
+/// sampled on the same clock: component-wise linear.
+pub(crate) fn drive_signal_lerp(start: DriveSignal, end: DriveSignal, t: f32) -> DriveSignal {
+    DriveSignal {
+        throttle: start.throttle + (end.throttle - start.throttle) * t,
+        steer: start.steer + (end.steer - start.steer) * t,
     }
 }
 
@@ -944,6 +956,7 @@ const WIRE_SURFACE: &[&str] = &[
     "LinearVelocity",
     "AngularVelocity",
     "TrackDrive",
+    "DriveSignal",
     "TankTransmission",
     "EngineRpm",
     "WeaponGate",
@@ -951,7 +964,7 @@ const WIRE_SURFACE: &[&str] = &[
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0xa74c_507b_a869_c2e0;
+const WIRE_SURFACE_HASH: u64 = 0x01a3_69e1_a6fb_5542;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -993,7 +1006,7 @@ const WIRE_SURFACE_HASH: u64 = 0xa74c_507b_a869_c2e0;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0xf29c_1e42_7f78_6d37;
+const WIRE_TYPES_HASH: u64 = 0x8018_e26e_94e2_56f2;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1138,12 +1151,17 @@ pub(crate) fn plugin(app: &mut App) {
     app.component::<AngularVelocity>()
         .replicate_with(super::wire_quant::angular_velocity_fns());
     // The tracked drivetrain (phase B): velocity-like continuous sim state, replicated for the
-    // remote track view. Interpolated like Position/Rotation so a cursor-rendered hull's track
-    // view reads cursor-time belt speed/phase, never the arrival-fresh value that visibly leads
-    // the hull.
+    // remote track view through `wire_quant`'s belt codec. Interpolated like Position/Rotation so
+    // a cursor-rendered hull's track view reads cursor-time belt speed/phase, never the
+    // arrival-fresh value that visibly leads the hull.
     app.component::<TrackDrive>()
-        .replicate()
+        .replicate_with(super::wire_quant::track_drive_fns())
         .add_interpolation_with(track_drive_lerp);
+    // The shaped drive signal: owner-only (`disclosure::CombatDisclosure`), read by the owner's
+    // drive HUD on the belt state's clock.
+    app.component::<DriveSignal>()
+        .replicate()
+        .add_interpolation_with(drive_signal_lerp);
     // The declared transmission's correlated state: one atomic snapshot, owner-only
     // (`disclosure::CombatDisclosure`). Every other client hears the crank through `EngineRpm`,
     // applied on arrival like the transmission it is read off.
@@ -1385,8 +1403,6 @@ mod tests {
         );
 
         let start = TrackDrive {
-            throttle: 0.0,
-            steer: -1.0,
             sides: [
                 TrackDriveSide {
                     speed: 2.0,
@@ -1399,8 +1415,6 @@ mod tests {
             ],
         };
         let end = TrackDrive {
-            throttle: 1.0,
-            steer: 1.0,
             sides: [
                 TrackDriveSide {
                     speed: 6.0,
@@ -1420,8 +1434,6 @@ mod tests {
         assert_eq!(
             mid,
             TrackDrive {
-                throttle: 0.5,
-                steer: 0.0,
                 sides: [
                     TrackDriveSide {
                         speed: 4.0,
@@ -1434,6 +1446,20 @@ mod tests {
                 ],
             },
             "component-wise linear midpoint, belt phase carried in f64"
+        );
+
+        // A replica's phase is wrapped on the wire: a pair of samples straddling the wrap
+        // interpolates the short way across it, as the authority's unbounded phase moved.
+        let wrap = crate::track::sim::BELT_PHASE_WRAP_M;
+        let at = |phase: f64| TrackDrive {
+            sides: [TrackDriveSide { speed: 4.0, phase }; 2],
+        };
+        let mid = track_drive_lerp(at(wrap - 0.25), at(0.25), 0.5);
+        assert!(
+            wrapped_phase_delta(0.0, mid.sides[0].phase).abs() < 1e-9,
+            "the midpoint of a pair straddling the wrap sits on the wrap, not half a kilometre \
+             back: {}",
+            mid.sides[0].phase
         );
     }
 
@@ -1743,6 +1769,7 @@ mod tests {
         ("src/net/protocol.rs", "NetTank"),
         ("src/track/sim.rs", "TrackDrive"),
         ("src/track/sim.rs", "TrackDriveSide"),
+        ("src/track/sim.rs", "DriveSignal"),
         ("src/track/sim.rs", "TankTransmission"),
         ("src/track/sim.rs", "EngineRpm"),
         ("src/track/transmission.rs", "TransmissionState"),
