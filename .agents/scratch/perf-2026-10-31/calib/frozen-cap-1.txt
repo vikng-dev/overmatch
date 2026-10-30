@@ -1,0 +1,11 @@
+p2 02:34:04
+p2-30t-plain done: window {"label":"p2-30t-plain","w0_us":31977468,"w1_us":91984901,"bots":29,"clients":1,"threads":"default","trace":"","debris":"off"}
+p4 02:35:55
+p4-2t-trace done: window {"label":"p4-2t-trace","w0_us":31966151,"w1_us":91973925,"bots":1,"clients":1,"threads":"default","trace":"1","debris":"off"}
+p3 02:44:13
+p3-30t-plain-t1 done: window {"label":"p3-30t-plain-t1","w0_us":31971777,"w1_us":91980567,"bots":29,"clients":1,"threads":"1","trace":"","debris":"off"}
+cal 02:46:07
+50:2:8192:1: 44 lines; tick p50 4708 p95 5410 µs; physics p50 1683; send p50 52; cpu 66%; live mean 543 (min 344, max 698); frozen mean 1; released/s 24.41860465116279; tanks 29 entities 21022
+200:2:8192:1: 44 lines; tick p50 6844 p95 7828 µs; physics p50 3631; send p50 60; cpu 89%; live mean 2152 (min 1369, max 2918); frozen mean 1; released/s 97.67441860465117; tanks 29 entities 24480
+600:2:8192:1: 41 lines; tick p50 16852 p95 20428 µs; physics p50 12261; send p50 156; cpu 181%; live mean 6457 (min 4118, max 8169); frozen mean 1; released/s 264.5011600928074; tanks 29 entities 32792
+end 02:50:13

@@ -1,0 +1,2 @@
+50:2:8192: 44 lines; tick p50 6276 p95 7398 µs; physics p50 3057; send p50 57; cpu 86%; live mean 338 (min 171, max 936); frozen mean 863; released/s 25.58139534883721; tanks 29 entities 21765
+200:2:8192: 43 lines; tick p50 12286 p95 15227 µs; physics p50 8326; send p50 115; cpu 165%; live mean 1124 (min 529, max 2662); frozen mean 3649; released/s 96.99769053117784; tanks 29 entities 29231
