@@ -1,0 +1,71 @@
+// The shared visual library: how a material's surface looks before anything is painted on it.
+// VIEW ONLY — the dedicated server never reads this file. Design: `.agents/docs/design/tank-surfaces.md`.
+//
+// Every worn material in `materials.ron` names one visual here by key (`visual: "<key>"`), and many
+// materials share one: the cast armour and the cast machinery steel both look like cast steel. A
+// visual is the bottom of a surface's stack; paint, camouflage, markings and wear are layered over it
+// at runtime from the vehicle's livery (`assets/<tank>/<tank>.livery.ron`).
+//
+// `takes_paint` belongs to the visual, not to the material: steel takes the livery's paint and
+// camouflage; rubber, glass, wood, brick and track steel keep their own look.
+//
+// Two kinds:
+// - `Maps(..)`: a texture pack, three KTX2 maps at `<maps>_diff.ktx2` (albedo, sRGB),
+//   `<maps>_nor_gl.ktx2` (OpenGL-convention normal) and `<maps>_arm.ktx2` (R ambient occlusion,
+//   G roughness, B metallic), cut by `scripts/encode-visuals-ktx2.sh`. `metres_per_repeat` is the
+//   real-world size one repeat of the pack stands for; the pack's `cc.txt` names its source and
+//   licence.
+// - `Flat(..)`: no maps, a colour (sRGB) and two PBR factors.
+//
+// Every number carries its provenance (`src/provenance.rs`), and every colour too.
+(
+    visuals: {
+        "rolled_steel": Maps(
+            maps: "materials/visuals/rolled_steel/rolled_steel",
+            metres_per_repeat: (1.0, Tuned("ASSUMED: ambientCG publishes no size for Metal046A; its
+                mill-scale mottling reads at plate scale at one repeat per metre")),
+            takes_paint: true,
+        ),
+        "cast_steel": Maps(
+            maps: "materials/visuals/cast_steel/cast_steel",
+            metres_per_repeat: (0.5, Tuned("ASSUMED: ambientCG publishes no size for Metal052C; its
+                pits come out about 1 mm across at half a metre per repeat, a sand-cast grain")),
+            takes_paint: true,
+        ),
+        "machined_steel": Maps(
+            maps: "materials/visuals/machined_steel/machined_steel",
+            metres_per_repeat: (0.5, Tuned("ASSUMED: ambientCG publishes no size for Metal009; its
+                tool marks come out sub-millimetre at half a metre per repeat")),
+            takes_paint: true,
+        ),
+        "track_steel": Maps(
+            maps: "materials/visuals/track_steel/track_steel",
+            metres_per_repeat: (0.5, Tuned("ASSUMED: ambientCG publishes no size for Metal046B")),
+            takes_paint: false,
+        ),
+        "rubber": Maps(
+            maps: "materials/visuals/rubber/rubber",
+            metres_per_repeat: (0.5, Tuned("ASSUMED: ambientCG publishes no size for Rubber004")),
+            takes_paint: false,
+        ),
+        "wood": Maps(
+            maps: "materials/visuals/wood/wood",
+            metres_per_repeat: (0.5, Measured("Poly Haven rough_wood `dimensions: [500, 500]` mm")),
+            takes_paint: false,
+        ),
+        // The scatter buildings' wall pack, the one `building_surface::WALL` binds.
+        "brick": Maps(
+            maps: "buildings/brick_wall_006/brick_wall_006",
+            metres_per_repeat: (3.0, Measured("Poly Haven brick_wall_006 `dimensions: [3000, 3000]` mm")),
+            takes_paint: false,
+        ),
+        // Neither Poly Haven nor ambientCG carries a glass pack (their APIs, queried 2026-10-31), and
+        // a vision block's glass has no relief to map.
+        "glass": Flat(
+            colour: ("#1E2622", Tuned("ASSUMED: thick laminated glass reads near black with a green cast")),
+            roughness: (0.05, Tuned("ASSUMED: polished glass")),
+            metallic: (0.0, Derived("glass is a dielectric")),
+            takes_paint: false,
+        ),
+    },
+)

@@ -1,0 +1,8 @@
+Camouflage patterns (shared, named by a livery's `camouflage.pattern`)
+---------------------------------------------------------------------
+
+"stripes" — generated in-project by `scripts/visuals/camo_stripes.py` (fixed seed); no external
+source. A linear RGB mask: R the livery's first camouflage colour's coverage, G its second, B its
+third (unused by this pattern); 0 where the base paint shows. Shipped as KTX2 (UASTC 4x4 + zstd,
+full mip chain, linear) at 1024², tiling seamlessly in both directions, by
+`scripts/encode-visuals-ktx2.sh stripes`.

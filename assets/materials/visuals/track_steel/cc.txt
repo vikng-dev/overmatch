@@ -1,0 +1,11 @@
+"Metal046B" (https://ambientcg.com/view?id=Metal046B) by ambientCG (https://ambientcg.com) is licensed
+under CC0 1.0 Universal (https://creativecommons.org/publicdomain/zero/1.0/). No attribution is
+required; this note is kept for provenance.
+
+THE `track_steel` VISUAL of the shared library (`assets/materials/visuals.ron`). Shipped as KTX2 (UASTC
+4x4 + zstd supercompression, full mip chain) at 1024², cut from the pack's 2K PNG masters by
+`scripts/encode-visuals-ktx2.sh track_steel`: `track_steel_diff` from Color, `track_steel_nor_gl` from
+NormalGL, `track_steel_arm` packed from white (no AmbientOcclusion map), Roughness and Metalness.
+
+AUTHORED SCALE: ambientCG publishes no real-world size for this pack; the repeat the library states
+for it is ASSUMED there.

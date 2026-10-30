@@ -1,0 +1,8 @@
+"rough_wood" (https://polyhaven.com/a/rough_wood) by Poly Haven (Rob Tuytel) is licensed under CC0
+(https://creativecommons.org/publicdomain/zero/1.0/).
+
+THE `wood` VISUAL of the shared library (`assets/materials/visuals.ron`). Shipped as KTX2 (UASTC 4x4
++ zstd supercompression, full mip chain) at 1024², cut from the pack's 2k diff, nor_gl and arm
+masters by `scripts/encode-visuals-ktx2.sh wood`.
+
+AUTHORED SCALE: 0.5 x 0.5 m (Poly Haven `dimensions: [500, 500]` mm). At 1024², that is 2048 px/m.
