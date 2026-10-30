@@ -25,7 +25,8 @@ Those empirical acceptance cases remain evidence gates; analytical predictions m
 
 **Use the cheapest model whose differences cannot affect play.**
 Bake convex blocks instead of simulating individual bricks.
-Resolve actual holes, support capacity and finite-mass rubble because rounds, sight and tanks expose those differences.
+Resolve support capacity and finite-mass rubble because rounds and tanks expose those differences.
+Draw holes, because sight exposes them; rounds, mass and strength ignore them.
 A stand-in becomes acceptable through bounded error against those observations, not through resemblance in a capture.
 
 **Keep material values inside their physical ranges.**
@@ -59,11 +60,11 @@ Lazy allocation may expand that state; loaded visual assets never initialize it.
 
 An intact element remains one collision proxy until its first relevant load.
 Resolve that load against the underlying geometry before atomically replacing the proxy.
-A subsequent event must see the replacement geometry, including holes.
+A subsequent event sees the replacement geometry; holes stay out of it (see Local response and holes).
 
 Extend #188’s `Swap`, `Dust`, `Crack` and `Fall` record with:
 
-- Local geometry edits, identified within a baked chunk.
+- Holes: negative volumes in a per-chunk list, each identified within its baked chunk.
 - Partial cohesive failure and permanent compaction where they affect the view or collision geometry.
 - Carrier membership changes, splits and settlement transitions.
 - A topology revision and authoritative event time.
@@ -350,20 +351,19 @@ Neither becomes absent merely because a scalar pool is partly spent.
 
 For a round, resolve its swept channel and surrounding crater.
 For a blast, resolve the face-loaded crater and rear breakout.
-Subtract only material that actually vacates the original occupied region.
+A hole covers only the region its material actually vacates.
 
 Depth refinement must permit a rear layer to separate while the front survives.
 Choose refinement from convergence of aperture, residual speed, rear breakout and seam loading.
 Baked chunk width is not the minimum hole diameter.
 
-The visual surface, ballistic query and physical contact geometry consume the same surviving geometry.
-Repeated shots through an existing channel encounter only remaining matter.
-Recompute affected mass, centroid, inertia and connection polygons after removal.
-
-**Stand-in.**
-Use clipped convex remnants and a local refinement hierarchy.
-Keep ordinary baked blocks outside the affected patch.
-Accept simplification only when it preserves admitting projectile size, sight and load-bearing sections.
+**A hole is a negative volume, drawn only (owner decision).**
+A round's channel and a blast's crater dish are stored as shapes in a per-chunk hole list, carried in the record.
+The chunk's geometry and collider never change.
+The wall's shader skips the surface inside a hole and draws the hole's inner wall, shadow pass included, so sight passes through it.
+Rounds, mass, centroid, inertia and the structural calculation ignore holes: a later round meets the whole chunk.
+A cap on holes per chunk crumbles the chunk past it.
+A hole the size of a chunk or larger stays a chunk fate (`Dust`, `Fall`), as today.
 
 **Server cost.**
 **DERIVED `O(N_c N_t + G)`**, from activated local cells, time steps and generated geometric fragments.
@@ -776,7 +776,7 @@ A quoted spring force alone supplies none of the missing acceleration coupling.
 
 | Decision | Recommendation |
 |---|---|
-| Small-hole fidelity | Let sub-chunk perforations pass sight and later rounds through shared geometry. |
+| Small-hole fidelity | **Decided:** a hole is a negative volume, drawn only; rounds, mass and strength ignore it (see Local response and holes). |
 | Rubble persistence and mobility | Retain gameplay-relevant occupied geometry throughout the match; let mass, friction and track contact determine climbing or pushing. Fine presentation debris may fade. |
 | Contact-damage scope | Exclude tank HP dose; allow structural fracture on landing and under pushing loads. |
 | Accepted strength-scaled spall | Replace it with budgeted ejecta for walls and tanks; validate the changed tank outcomes explicitly. |
