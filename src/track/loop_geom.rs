@@ -2,7 +2,7 @@
 //! way a belt loop is wound and which side of a segment is OUT.
 //!
 //! Two consumers walk belt loops with different closure conventions: the shadow ribbon
-//! (`super::shadow_proxy::ribbon_mesh`) gets CYCLIC joint lists (last→first edge implied), the
+//! (`super::shadow_proxy::RibbonCache`) gets CYCLIC joint lists (last→first edge implied), the
 //! sandbox grip overlay (`track_sandbox::suspension_viz`) gets `route::build_route` polylines
 //! whose last point REPEATS the first. Both used to carry their own copy of this math; a sign
 //! drift between the copies would turn the shadow tube inside-out or draw grip stations inward —

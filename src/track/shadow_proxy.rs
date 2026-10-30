@@ -120,7 +120,7 @@
 //! envelope-to-material gap)`, both of which are measurable — never picked again.
 
 use bevy::asset::RenderAssetUsages;
-use bevy::mesh::{Indices, PrimitiveTopology};
+use bevy::mesh::{Indices, PrimitiveTopology, VertexAttributeValues};
 use bevy::prelude::*;
 
 use super::loop_geom;
@@ -170,9 +170,9 @@ impl ProxyMode {
         !matches!(self, Self::Off)
     }
 
-    /// Whether the ribbon is rebuilt every frame. [`ProxyMode::Static`] bakes once and rides the
-    /// hull; the other two follow the live belt.
-    pub(crate) const fn rebuilds_every_frame(self) -> bool {
+    /// Whether the ribbon follows changes in the live belt. [`ProxyMode::Static`] bakes once
+    /// and rides the hull; the other modes update only when hull-local joints change.
+    pub(crate) const fn follows_belt(self) -> bool {
         matches!(self, Self::Dynamic | Self::Visible)
     }
 }
@@ -209,6 +209,8 @@ pub(crate) struct ProxySide {
     pub(crate) pending_frames: u32,
     /// This side's cross-section, resolved from the measured shoe at bind.
     pub(crate) section: Section,
+    /// Retained hull-local shape and mesh buffers; independent of the root transform.
+    pub(crate) ribbon: RibbonCache,
 }
 
 /// What the view layer owes the world after folding one frame's build attempt into a proxy.
@@ -324,56 +326,108 @@ pub(crate) fn visible_probe_material() -> StandardMaterial {
     }
 }
 
-/// Sweep the ribbon along one side's drawn belt.
-///
-/// `stations` are the drawn pin joints in side-plane `(z, y)` — `wrap::WrapSideOutput::joints`,
-/// exactly what `link_view::place_links` is fed — in loop order. The result is in HULL space, so the
-/// proxy entity carries an identity transform.
-///
-/// Returns `None` for a degenerate belt (fewer than three joints), so a caller mid-bind leaves last
-/// frame's ribbon alone rather than replacing it with a fold.
-pub(crate) fn ribbon_mesh(stations: &[Vec2], section: Section) -> Option<Mesh> {
-    let n = stations.len();
-    if n < 3 {
-        return None;
-    }
-    // Which side of the loop is OUTWARD: [`loop_geom`] reads it from the polyline, because the
-    // wrap is free to emit either winding and a sign error here turns the ribbon inside out (a
-    // tube that hugs the wheels instead of the ground) without failing anything.
-    let winding = loop_geom::loop_winding(stations);
+/// A bound ribbon has a fixed station count, loop winding and cross-section. Rebinding the rig
+/// constructs a fresh cache. Invalid or incomplete joint lists leave the last valid ribbon alone.
+/// Positions live in the mesh's retained attribute buffer; the joint copy is the equality key.
+#[derive(Default)]
+pub(crate) struct RibbonCache {
+    stations: Vec<Vec2>,
+    winding: f32,
+    #[cfg(test)]
+    topology_builds: usize,
+}
 
-    // Per-station outward normal: the MITRE of the two adjacent edges. Averaging the neighbours
-    // rather than using one edge's normal is what keeps the four faces continuous around the
-    // sprocket and idler arcs, where consecutive chords turn by several degrees.
+impl RibbonCache {
+    pub(crate) fn needs_update(&self, stations: &[Vec2]) -> bool {
+        stations.len() >= 3
+            && (self.stations.is_empty() || self.stations.len() == stations.len())
+            && self.stations != stations
+    }
+
+    /// Write only a changed hull-local shape. Callers check `needs_update` before borrowing the
+    /// asset mutably, so a settled ribbon emits no asset modification for render extraction.
+    pub(crate) fn write(&mut self, mesh: &mut Mesh, stations: &[Vec2], section: Section) -> usize {
+        if !self.needs_update(stations) {
+            return 0;
+        }
+        if self.stations.is_empty() {
+            self.winding = loop_geom::loop_winding(stations);
+            *mesh = build_ribbon(stations, section, self.winding);
+            self.stations.extend_from_slice(stations);
+            #[cfg(test)]
+            {
+                self.topology_builds += 1;
+            }
+        } else {
+            let Some(VertexAttributeValues::Float32x3(positions)) =
+                mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
+            else {
+                return 0;
+            };
+            ribbon_vertices(stations, section, self.winding, |i, position, _, _, _| {
+                positions[i] = position;
+            });
+            self.stations.copy_from_slice(stations);
+        }
+        // DERIVED: a rectangular tube has four quads, hence eight triangles, per station.
+        stations.len() * 8
+    }
+}
+
+/// Visit the ribbon's vertices in ring order, using the mitre of adjacent edge normals to keep
+/// faces continuous around end arcs. Inputs and output are hull-local; root motion is irrelevant.
+fn ribbon_vertices(
+    stations: &[Vec2],
+    section: Section,
+    winding: f32,
+    mut vertex: impl FnMut(usize, [f32; 3], f32, Vec2, f32),
+) {
+    let n = stations.len();
     let edge_normal =
         |i: usize| loop_geom::outward_normal(stations[i], stations[(i + 1) % n], winding);
-
-    let mut positions: Vec<[f32; 3]> = Vec::with_capacity(n * 4);
-    let mut normals: Vec<[f32; 3]> = Vec::with_capacity(n * 4);
-    let mut uvs: Vec<[f32; 2]> = Vec::with_capacity(n * 4);
     for (i, &s) in stations.iter().enumerate() {
         let normal = (edge_normal((i + n - 1) % n) + edge_normal(i)).normalize_or_zero();
-        // A ring of four, in a consistent cycle around the cross-section: outer −x, outer +x,
-        // inner +x, inner −x. `(z, y)` in, `(x, y, z)` out.
+        // Ring order: outer -x, outer +x, inner +x, inner -x. Side-plane (z, y) becomes (x, y, z).
         let ring = [
             (-section.half_width, section.outer),
             (section.half_width, section.outer),
             (section.half_width, section.inner),
             (-section.half_width, section.inner),
         ];
-        for (dx, radial) in ring {
+        for (k, (dx, radial)) in ring.into_iter().enumerate() {
             let p = s + normal * radial;
-            positions.push([section.center_x + dx, p.y, p.x]);
-            // Corner normals: the cross-section direction the vertex sits in. Cosmetic only (the
-            // proxy is unlit and alpha-zero), but a mesh without them would specialise a different
-            // vertex layout than every other mesh in the scene.
-            let n3 = Vec3::new(dx, normal.y * radial, normal.x * radial).normalize_or_zero();
-            normals.push(n3.to_array());
-            uvs.push([0.0, 0.0]);
+            vertex(
+                i * 4 + k,
+                [section.center_x + dx, p.y, p.x],
+                dx,
+                normal,
+                radial,
+            );
         }
     }
+}
 
-    // Four quads per segment, each between ring `i` and ring `i+1`.
+/// Build topology and attribute buffers at the first valid fit. The opaque shadow pass reads
+/// positions only (`bevy_pbr`'s depth-only prepass); the visible diagnostic uses an unlit material.
+/// Normals and UVs retain the common vertex layout but need no subsequent writes.
+fn build_ribbon(stations: &[Vec2], section: Section, winding: f32) -> Mesh {
+    let n = stations.len();
+    let mut positions = Vec::with_capacity(n * 4);
+    let mut normals = Vec::with_capacity(n * 4);
+    let uvs = vec![[0.0, 0.0]; n * 4];
+    ribbon_vertices(
+        stations,
+        section,
+        winding,
+        |_, position, dx, normal, radial| {
+            positions.push(position);
+            normals.push(
+                Vec3::new(dx, normal.y * radial, normal.x * radial)
+                    .normalize_or_zero()
+                    .to_array(),
+            );
+        },
+    );
     let mut indices: Vec<u32> = Vec::with_capacity(n * 24);
     for i in 0..n {
         let a = (i * 4) as u32;
@@ -383,16 +437,13 @@ pub(crate) fn ribbon_mesh(stations: &[Vec2], section: Section) -> Option<Mesh> {
             indices.extend_from_slice(&[a + k, b + k, b + k2, a + k, b + k2, a + k2]);
         }
     }
-    // Winding, decided by measurement rather than by reasoning about the ring order crossed with the
-    // loop's own winding: a closed tube wound outward has POSITIVE signed volume. Backwards
-    // triangles would be eaten by the shadow pass's back-face culling and the proxy would cast
-    // nothing at all — a silent failure, and the exact one this prototype exists to avoid.
+    // Positive signed volume names outward faces: back-face culling must preserve the caster.
+    // The wrap keeps this loop's winding and connectivity for the lifetime of the bound rig.
     if signed_volume(&positions, &indices) < 0.0 {
         for tri in indices.as_chunks_mut::<3>().0 {
             tri.swap(1, 2);
         }
     }
-
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::default(),
@@ -401,7 +452,13 @@ pub(crate) fn ribbon_mesh(stations: &[Vec2], section: Section) -> Option<Mesh> {
     mesh.insert_attribute(Mesh::ATTRIBUTE_NORMAL, normals);
     mesh.insert_attribute(Mesh::ATTRIBUTE_UV_0, uvs);
     mesh.insert_indices(Indices::U32(indices));
-    Some(mesh)
+    mesh
+}
+
+#[cfg(test)]
+fn ribbon_mesh(stations: &[Vec2], section: Section) -> Option<Mesh> {
+    (stations.len() >= 3)
+        .then(|| build_ribbon(stations, section, loop_geom::loop_winding(stations)))
 }
 
 /// Six times the signed volume of a closed triangle soup (the divergence-theorem sum). Positive when
@@ -451,6 +508,75 @@ mod tests {
             .iter()
             .map(|p| Vec3::from_array(*p))
             .collect()
+    }
+
+    /// Invariant: a bound ribbon builds its topology once and retains all buffers while its shape
+    /// deforms. Shadow extraction relies on unchanged connectivity and exact fresh-build positions.
+    /// ASSUMED synthetic rings exercise both windings and changing mitres, independently of assets.
+    #[test]
+    fn a_deforming_ribbon_builds_indices_once_and_retains_its_buffers() {
+        for reverse in [false, true] {
+            let mut cache = RibbonCache::default();
+            let mut mesh = Mesh::new(
+                PrimitiveTopology::TriangleList,
+                RenderAssetUsages::default(),
+            );
+            let mut stations = ring(48, 2.0);
+            if reverse {
+                stations.reverse();
+            }
+            assert_eq!(
+                cache.write(&mut mesh, &stations, tiger_section()),
+                stations.len() * 8
+            );
+            let Some(Indices::U32(indices)) = mesh.indices() else {
+                panic!("indexed ribbon")
+            };
+            let index_ptr = indices.as_ptr();
+            let indices = indices.clone();
+            let position_ptr = mesh
+                .attribute(Mesh::ATTRIBUTE_POSITION)
+                .unwrap()
+                .as_float3()
+                .unwrap()
+                .as_ptr();
+            let normal = mesh.attribute(Mesh::ATTRIBUTE_NORMAL).unwrap().clone();
+            let uv = mesh.attribute(Mesh::ATTRIBUTE_UV_0).unwrap().clone();
+            let joint_ptr = cache.stations.as_ptr();
+            for frame in 1..64 {
+                let shape = stations
+                    .iter()
+                    .map(|p| Vec2::new(p.x, p.y + (p.x * frame as f32 * 0.01).sin() * 0.1))
+                    .collect::<Vec<_>>();
+                assert!(cache.needs_update(&shape));
+                cache.write(&mut mesh, &shape, tiger_section());
+                let reference = ribbon_mesh(&shape, tiger_section()).unwrap();
+                assert_eq!(positions(&mesh), positions(&reference));
+                let Some(Indices::U32(current)) = mesh.indices() else {
+                    panic!("indexed ribbon")
+                };
+                assert_eq!(current, &indices);
+                assert_eq!(current.as_ptr(), index_ptr);
+                assert_eq!(mesh.indices(), reference.indices());
+                assert_eq!(
+                    mesh.attribute(Mesh::ATTRIBUTE_POSITION)
+                        .unwrap()
+                        .as_float3()
+                        .unwrap()
+                        .as_ptr(),
+                    position_ptr
+                );
+                assert_eq!(mesh.attribute(Mesh::ATTRIBUTE_NORMAL), Some(&normal));
+                assert_eq!(mesh.attribute(Mesh::ATTRIBUTE_UV_0), Some(&uv));
+                assert_eq!(cache.stations.as_ptr(), joint_ptr);
+                assert!(!cache.needs_update(&shape));
+                assert_eq!(cache.write(&mut mesh, &shape, tiger_section()), 0);
+                assert_eq!(cache.topology_builds, 1);
+            }
+            assert!(!cache.needs_update(&[]));
+            assert!(!cache.needs_update(&ring(3, 1.0)));
+            assert_eq!(cache.topology_builds, 1);
+        }
     }
 
     /// The budget claim the whole exercise rests on: the ribbon is four quads per belt station and
@@ -598,6 +724,7 @@ mod tests {
             built: false,
             pending_frames: 0,
             section: tiger_section(),
+            ribbon: Default::default(),
         }
     }
 

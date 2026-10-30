@@ -363,6 +363,7 @@ impl LinkTemplate {
 /// that maps MESH axes onto the canonical (lateral, inner, longitudinal) = (x, y, z) triple, and the
 /// mesh-local point that becomes the frame's origin.
 #[derive(Clone, Copy, Debug)]
+#[cfg_attr(test, derive(Default))]
 pub(crate) struct LinkFrame {
     /// Mesh → canonical rotation (the inverse of the canonical basis expressed in mesh space).
     correction: Quat,

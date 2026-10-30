@@ -657,6 +657,7 @@ fn attach_shadow_proxies(
                 mesh,
                 built: false,
                 pending_frames: 0,
+                ribbon: Default::default(),
                 section: shadow_proxy::Section::from_shoe(
                     side.link_center_x,
                     geom.model.width,
@@ -884,8 +885,8 @@ fn drive_track_views(
                 },
             );
             // The SHADOW CASTER, on the same joints ([`super::shadow_proxy`]). Under `Static` this
-            // runs once and the ribbon then rides the hull unchanged; under `Dynamic` the mesh is
-            // rewritten every frame, which is what keeps the cast shadow honest over rough ground.
+            // runs once and the ribbon rides the hull unchanged; live modes retain the topology
+            // and update positions only when these hull-local joints change.
             //
             // This is also where the CASTER SWAP happens, and it is atomic on purpose: the shoes are
             // silenced on the frame a non-empty ribbon first lands, never at spawn. Every guard in
@@ -895,12 +896,13 @@ fn drive_track_views(
                 // Write the mesh, and count what was ACTUALLY written. Zero covers every way this
                 // frame can fail to produce geometry, including the ones the `&&` chain swallows.
                 let mut triangles = 0;
-                if (!proxy.built || mode.rebuilds_every_frame())
+                if (!proxy.built || mode.follows_belt())
+                    && proxy.ribbon.needs_update(&out[si].joints)
                     && let Some(mut mesh) = proxy_meshes.get_mut(&proxy.mesh)
-                    && let Some(fresh) = shadow_proxy::ribbon_mesh(&out[si].joints, proxy.section)
                 {
-                    triangles = fresh.indices().map_or(0, |indices| indices.len() / 3);
-                    *mesh = fresh;
+                    triangles = proxy
+                        .ribbon
+                        .write(&mut mesh, &out[si].joints, proxy.section);
                 }
                 match proxy.record_attempt(triangles) {
                     ProxyStep::Idle => {}
@@ -978,6 +980,147 @@ fn drive_track_views(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Invariant: an exactly settled, standing tank writes no shoe/wheel transforms or ribbon
+    /// assets. Transform propagation and render extraction rely on that absence of change flags.
+    /// The shipped rig is fixture data; the pass condition is generic and independent of its counts.
+    /// ASSUMED fixture cadence: stationary warmup followed by repeated identical presentation frames.
+    #[test]
+    fn settled_standing_tank_writes_no_shoe_wheel_or_ribbon_data() {
+        #[derive(Resource, Default)]
+        struct Writes {
+            transforms: usize,
+            meshes: bool,
+        }
+        fn count_writes(
+            mut writes: ResMut<Writes>,
+            poses: Query<(), (Changed<Transform>, Without<TrackRig>)>,
+            meshes: Res<Assets<Mesh>>,
+        ) {
+            writes.transforms = poses.iter().count();
+            writes.meshes = meshes.is_changed();
+        }
+        let mut app = App::new();
+        app.add_plugins((crate::bake::plugin, super::super::sim::sim_plugin));
+        // Run only construction: this presentation fixture has no physics or asset-loader clock.
+        app.world_mut().run_schedule(Startup);
+        app.world_mut().run_schedule(PreUpdate);
+        let geom = app.world().resource::<RigGeom>().clone();
+        let world = app.world_mut();
+        let mut meshes = Assets::<Mesh>::default();
+        let sides = [Side::Left, Side::Right].map(|side| {
+            let circles = geom.rest.get(side);
+            let plane_x = geom.plane_x * if side == Side::Left { -1.0 } else { 1.0 };
+            let spawn_pose = |world: &mut World| world.spawn(Transform::IDENTITY).id();
+            RigSide {
+                plane_x,
+                lateral_stations: geom.grip_stations(side),
+                sprocket: circles[0],
+                idler: *circles.last().unwrap(),
+                wheels: circles[1..circles.len() - 1]
+                    .iter()
+                    .map(|&(center, radius)| RigWheel {
+                        pivot: Vec3::new(plane_x, center.y, center.x),
+                        rest_rotation: Quat::IDENTITY,
+                        radius,
+                        dy: 0.0,
+                        dvel: 0.0,
+                        target: Default::default(),
+                        view: spawn_pose(world),
+                    })
+                    .collect(),
+                sprocket_view: spawn_pose(world),
+                sprocket_rest: Transform::IDENTITY,
+                sprocket_origin: geom.belt_origin_angle(side),
+                sprocket_tooth_tip: 0.0,
+                idler_view: spawn_pose(world),
+                idler_rest: Transform::IDENTITY,
+                belt: spawn_pose(world),
+                links: (0..geom.link_count).map(|_| spawn_pose(world)).collect(),
+                link_frame: LinkFrame::default(),
+                link_center_x: geom.link_center_x(side),
+                proxy: Some(ProxySide {
+                    entity: spawn_pose(world),
+                    mesh: meshes.add(Mesh::new(
+                        bevy::mesh::PrimitiveTopology::TriangleList,
+                        bevy::asset::RenderAssetUsages::default(),
+                    )),
+                    built: false,
+                    pending_frames: 0,
+                    section: shadow_proxy::Section::from_shoe(
+                        geom.link_center_x(side),
+                        geom.model.width,
+                        geom.model.pin_to_inner,
+                        geom.model.pin_to_outer,
+                    ),
+                    ribbon: Default::default(),
+                }),
+            }
+        });
+        let tank = world
+            .spawn((
+                Transform::from_translation(Vec3::Y * geom.hull_rest_y),
+                TrackDrive::default(),
+                TrackRig {
+                    belt_len: geom.belt_len(),
+                    count: geom.link_count,
+                    teeth: geom.teeth,
+                    pin_to_inner: geom.model.pin_to_inner,
+                    thickness: geom.thickness,
+                    wrap: Default::default(),
+                    presented_phase: [None; 2],
+                    sides,
+                    prev_affine: None,
+                    field_revision: None,
+                    fit_dependencies: None,
+                    fit_tick: None,
+                    fit_affine: None,
+                    contacts: Default::default(),
+                },
+            ))
+            .id();
+        world.insert_resource(meshes);
+        world.insert_resource(ProxyMode::Dynamic);
+        world.insert_resource(TrackField {
+            revision: Some(0),
+            field: Some(print_ground(vec![])),
+        });
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(Time::<Fixed>::default());
+        world.init_resource::<Writes>();
+        let mut schedule = Schedule::default();
+        schedule.add_systems((drive_track_views, count_writes).chain());
+        let dt = std::time::Duration::from_secs_f64(1.0 / 128.0);
+        for frame in 0..1024 {
+            world.resource_mut::<Time>().advance_by(dt);
+            world.resource_mut::<Time<Fixed>>().advance_by(dt);
+            schedule.run(world);
+            let writes = world.resource::<Writes>();
+            if frame == 0 {
+                assert!(
+                    writes.transforms > 0 && writes.meshes,
+                    "cold placement must write"
+                );
+            }
+            if frame >= 768 {
+                assert_eq!(writes.transforms, 0, "settled pose write on frame {frame}");
+                assert!(
+                    !writes.meshes,
+                    "settled ribbon asset write on frame {frame}"
+                );
+            }
+        }
+        // A phase change must wake every live output path again, even on an unchanged hull.
+        for side in &mut world.get_mut::<TrackDrive>(tank).unwrap().sides {
+            side.phase += 0.03; // ASSUMED fixture travel in metres.
+        }
+        schedule.run(world);
+        let writes = world.resource::<Writes>();
+        assert!(
+            writes.transforms > 0 && writes.meshes,
+            "belt motion must resume writes"
+        );
+    }
 
     /// Invariant: once pose, terrain/print inputs and wheel articulation settle, the view emits
     /// no fit rays. Match-scale rendering relies on that reuse; shoes, phase and the filters must
