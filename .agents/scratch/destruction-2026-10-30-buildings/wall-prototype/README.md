@@ -1,4 +1,4 @@
-# Wall prototype: candidate crack laws on a brick wall, handbook values only
+# Wall prototype: the push rule on a baked brick wall, handbook values only
 
 Subject: the game's environment destruction, as game state only. A wall chunk is **turned to dust**
 (removed) or **cracked loose** (its joints broke); rounds and blasts **dose** what they cross.
@@ -13,44 +13,40 @@ numbers), **CLAIMED** (stated by a source; "read" when the source was read this 
 cargo armor          # = cargo run --bin armor_sandbox --features dev_ui
 ```
 
-The wall stands to the right of the range (x 14–18 m, z 4 m). Press **G** to stand in front of it.
+The wall stands to the right of the range (x 13-19 m, z 4 m). Press **G** to stand in front of it,
+**H** for the key and colour help.
 
 | Key | Does |
 |---|---|
-| 1 2 3 4 5 | crack law A, B, C, D, E |
-| U | structural check on/off (on by default) |
 | B / F | pick the round (88 mm AP, 88 mm APCR, 88 mm APHE, 7.92 mm) / fire it (an MG fires a burst of 50) |
-| P, `[` `]` | point deposit at the aim point; its energy, 50 kJ to 5 MJ |
-| O, `,` `.`, `;` `'`, V | blast at the aim point; filler 0.1–5 kg; standoff 0–5 m; cased or bare |
-| J | spall: today or the candidate |
-| K / N | other cut (running bond, jittered) / new wall |
-| G | camera: wall front, wall back, witness panel |
-| LMB, E/Q, C, R, H, Space, Up/Down | the range's own keys (H lists them all) |
+| O, `,` `.`, `;` `'`, V | blast at the aim point; filler 0.1-5 kg; standoff 0-5 m; cased or bare |
+| J | spall: today or the candidate (still open) |
+| G / N | camera: wall front, back, witness panel / new wall |
+| H | the help panel |
+| LMB, E/Q, C, R, Space, Up/Down | the range's own keys |
 
-The readout (top left, shown while the camera is within 12 m of the wall) states the active law's
-formula, the material values, the last deposit's outcome, each closed-form law's crack reach for
-that energy, the blast's energy budget and coupling, the first structural failure, and the spall
-today against the candidate. Its `blast [O]` line is the tool's current setting; the `last:` lines
-are the deposit that happened.
+The readout (top left, shown while the camera is within 12 m of the wall) is one line: the last
+shot and its energy. Every value of a resolved shot (material, blast budget and coupling, first
+structural failure, spall today against the candidate) is in the log.
 
-Code: `src/sandbox/wall.rs` (the sandbox side), `src/sandbox/wall/model.rs` (removal, laws,
-support, structural check; reads only the chunk table and the joint graph), the `Brick` row in
-`assets/materials/materials.ron`.
+Code: `src/sandbox/wall.rs` (the sandbox side), `src/sandbox/wall/baked.rs` (selects and places the
+bake's wall), `src/sandbox/wall/model.rs` (removal, the push rule, support, structural check; reads
+only the chunk table and the joint graph), the `Brick` row in `assets/materials/materials.ron`.
 
 ## Captures
 
-`cases/<law>-<case>-<mode>.jpg`: front and back, before and after, one 2×2 per run. `mode` **L** is
-the local response alone (structural check off), **S** local plus structural. `sheet-<law>.jpg`:
-every after frame of one law, local beside local+structural.
+`cases/B-<case>-<mode>.jpg`: front and back, before and after, one 2x2 per run, on the earlier
+hand-cut wall (4 x 2 m, a running bond of 0.2 m chunks: 205 chunks, 575 joints, 20 ground anchors,
+MEASURED), before the sandbox read the bake's cut. `mode` **L** is the local response alone, **S**
+local plus structural. Their numbers are in `outcomes.md`; `readout/` holds the one-line readout and
+the help panel on the baked wall.
 
 | case | what |
 |---|---|
-| `ap`, `apcr`, `mg50` | 8.8 cm Pzgr. 39 (solid), 8.8 cm Pzgr. 40, 50 × 7.92 mm S.m.K., fired at the chunk nearest the wall's centre from 3.8 m |
-| `p100k`, `p1m`, `p5m` | point deposit of 100 kJ, 1 MJ, 5 MJ on the face (no push, so no S run) |
+| `ap`, `apcr`, `mg50` | 8.8 cm Pzgr. 39 (solid), 8.8 cm Pzgr. 40, 50 x 7.92 mm S.m.K., fired at the chunk nearest the wall's centre |
 | `x<kg>-<m>` | cased blast of 0.1, 1, 5 kg filler at 0, 1, 3 m standoff |
-| `B-ap-spall-today`, `-candidate` | the AP under law B, last frame from behind the witness panel |
+| `B-ap-spall-today`, `-candidate` | the AP, last frame from behind the witness panel |
 | `*-bare-S` | the same blast with no casing |
-| `*-jit-*` | the jittered cut: the laws unchanged on a cut that is no grid |
 
 Colours: chunk heat brick to yellow as the pool empties; local cracks cyan, structural magenta; a
 group a local crack freed grey-blue, one a structural crack freed purple; blast rays pale yellow;
@@ -58,21 +54,22 @@ exit cones orange (today) or pale blue (candidate); witness tiles yellow to red 
 per step from 1 J.
 
 Reproduce one: `OVERMATCH_MUTE=1 BEVY_ASSET_ROOT=<repo> OVERMATCH_CAPTURE=out.png
-OVERMATCH_CAPTURE_AT=3,4,11.5,12.5 OVERMATCH_CAPTURE_SIZE=1920x1080
-OVERMATCH_CAPTURE_STEP_S=0.0333333 OVERMATCH_WALL_CASE=B,x1@0 target/debug/armor_sandbox`
-(`OVERMATCH_WALL_STRUCTURAL=off`, `OVERMATCH_WALL_CASING=bare`, `OVERMATCH_WALL_CUT=jittered`,
-`OVERMATCH_WALL_SPALL=candidate`, `OVERMATCH_WALL_VIEW=witness` as needed), after
+OVERMATCH_CAPTURE_AT=12.5 OVERMATCH_CAPTURE_SIZE=1920x1080 OVERMATCH_CAPTURE_STEP_S=0.0333333
+OVERMATCH_WALL_CASE=88mm_AP target/debug/armor_sandbox` (`x1@0` for a blast;
+`OVERMATCH_WALL_CASING=bare`, `OVERMATCH_WALL_SPALL=candidate`, `OVERMATCH_WALL_VIEW=witness`,
+`OVERMATCH_WALL_HELP=1` as needed), after
 `scripts/serial-cargo build --bin armor_sandbox --features dev_ui,bitprobe`. The window stays
-hidden. Every run's numbers, read off its log, are in `outcomes.md` (MEASURED).
+hidden.
 
 ## The wall
 
-4 × 2 m, 0.25 m thick, cut in a running bond of 0.2 m chunks through the full thickness: 205 chunks,
-575 joints, 20 ground anchors (MEASURED). A chunk is 0.01 m³ and 18.5 kg; the wall 3,690 kg
-(DERIVED). The laws read only the chunk table (volume, centroid, mass, material) and the joint graph
-(pair, contact area, centroid, normal; anchors); the generator alone knows the pattern. A second
-generator (K, `*-jit-*`) jitters courses and seams, and its joints come from shared faces; the tests
-renumber its chunks and check that no outcome moves.
+The east wall of the baked house (`assets/buildings/house_1/house_1.building.ron`): its brick
+elements (piers, sills, lintels around three windows), 6 m wide, 2.9 m tall, 0.25 m thick, 254
+chunks and 619 joints (MEASURED, from the sandbox log). The bake's convex chunks are the colliders
+and the drawn pieces; its joints and ground anchors are the graph. The wall's joints to the
+house's other walls and its wooden plate and roof are dropped. The law reads only the chunk table
+(volume, centroid, mass, material) and the joint graph (pair, contact area, centroid, normal;
+anchors); the tests renumber the chunks and check that no outcome moves.
 
 ## Material values
 
@@ -90,7 +87,6 @@ renumber its chunks and check that no outcome moves.
 | filler chemical energy | 4.184 MJ/kg | the TNT-equivalent convention (NIST SP 811: 1 ton TNT = 4.184 GJ) | | CLAIMED; ASSUMED to stand for the seed round's filler |
 | casing per kg filler M/C | 24.0 | the seed round's burst (v_s 541.5 m/s, 211.1 kJ driven) and its core's K = 2680 m/s: M/C = (K/v_s)² − ½ | | DERIVED |
 | burst spread of the 7.92 mm burst | 3 mrad | no gun file states dispersion | | ASSUMED |
-| crack share η (law C) | 0.01 | "about 1 % of comminution energy ends as new surface" | | ASSUMED (CLAIMED in comminution texts, not read) |
 
 `w` cross-check: 135.5 MJ/m³ is 73 kJ/kg, the order of the Bond work index for grinding rock to
 ~100 µm (10–20 kWh/t, 36–72 kJ/kg; CLAIMED, not read). Brick unit, not masonry assemblage
@@ -102,75 +98,46 @@ A chunk turns to dust when the energy in it reaches `w × V`; partial deposits w
 
 - **Line deposit** (a round): the energy the walk says the round lost in each chunk
   (`VolumeCrossing::energy`) wears that chunk.
-- **Point deposit**: the ball holding `E / w` m³ of material about the point is crushed; each
-  chunk pays its overlap with the ball (each chunk taken as the ball of its own volume).
 - **Blast**: each chunk takes the energy of the rays that stop on it.
 
-**Verdict: in range, but the chunk is coarser than the crushed zone.** No chunk turned to dust in
-any brief case (MEASURED). The 88 mm AP leaves 278.0 kJ in one chunk, 21 % of its pool (MEASURED);
+**Verdict: in range, but the chunk was coarser than the crushed zone on the hand-cut wall.** No
+chunk turned to dust in any brief case there (MEASURED). The 88 mm AP leaves 278.0 kJ in one chunk, 21 % of its pool (MEASURED);
 its crushed radius is √(ε/πw) = 5.1 cm against the round's 4.4 cm (DERIVED), so the hole is real but
-smaller than a 20 cm chunk. A 5 MJ point crushes 3.7 chunk volumes (DERIVED) spread over 11 chunks
-(MEASURED), none fully. The first dust needs a bare 5 kg contact charge (MEASURED, `D-x5-0-bare-S`).
+smaller than a 20 cm chunk. The first dust needed a bare 5 kg contact charge (MEASURED).
 No material value is off; what is missing is a representation rule (a finer cut near a hit, or
 removing a chunk once a stated share of it is crushed). That is an owner decision, not a tuning.
 
-## Crack laws
+## The push rule
 
-Every deposit becomes point sources: a point deposit is one; a round's chord in each chunk is
-split every 5 cm; a blast gives one per chunk it reaches, at its rays' energy-weighted hit point.
-Each source of energy E at distance d from a joint. Loads superpose; a joint does not remember a
-load below its threshold. Stress laws take the mean normal traction over a 7-point disc of the
-joint's area.
+Every deposit becomes point sources: a round's chord in each chunk is split every 5 cm; a blast
+gives one per chunk it reaches, at its rays' energy-weighted hit point. Loads superpose; a joint
+does not remember a load below its threshold. The load is the mean normal stress over a 7-point
+disc of the joint's area from each source of energy E at distance d, and the joint cracks when it
+reaches the joint's tensile strength f_t:
 
-| law | formula | reach of a lone point (DERIVED) at 100 kJ / 1 MJ / 5 MJ |
-|---|---|---|
-| A energy flux | E / (4π d²) ≥ G_f | 28 m / 89 m / 199 m |
-| B stress | 3E/(8π d³) (1 − 3 cos²θ) ≥ f_t | 0.26 m / 0.56 m / 0.95 m |
-| C energy share | η E / (4π d²) ≥ G_f | 2.8 m / 8.9 m / 20 m |
-| D thin wall | B + 3E/(4π d′³) cos²θ′ ≥ f_t | depends on the back face |
-| E Griffith | B's stress ≥ √(E_m G_f / (π a)), a = √area / 2 | 0.29 m / 0.62 m / 1.06 m (head joint) |
+3E/(8 pi d^3) (1 - 3 cos^2 theta) >= f_t
 
-**B's spreading law.** The deposit crushes a ball whose wall holds the crush pressure P = w (work
-P·dV = energy), radius r_c with P r_c³ = 3E/4π. Outside it the elastic (Lamé) field of a pressurised
-spherical cavity: radial −P(r_c/d)³, hoop +½P(r_c/d)³. θ is the angle between the joint's normal
-and the radius, so a joint facing the source is squeezed and one lying along the radius is pulled
-(radial cracks). Note that P r_c³ = 3E/4π: the far field depends on the energy alone, not on the
-brick's crush strength (DERIVED). A chain of sources along a chord gives ¾ of the cylindrical Lamé
-field ε/(π d²) (DERIVED).
+The deposit crushes a ball whose wall holds the crush pressure P = w (work P dV = energy), radius
+r_c with P r_c^3 = 3E/4pi. Outside it the elastic (Lame) field of a pressurised spherical cavity:
+radial -P (r_c/d)^3, hoop +1/2 P (r_c/d)^3. theta is the angle between the joint's normal and the
+radius, so a joint facing the source is squeezed and one lying along the radius is pulled (radial
+cracks). P r_c^3 = 3E/4pi: the far field depends on the energy alone, not on the brick's crush
+strength (DERIVED). A chain of sources along a chord gives 3/4 of the cylindrical Lame field
+E/(pi d^2) (DERIVED). A lone point's reach is (3E/(8 pi f_t))^(1/3): 0.26 m / 0.56 m / 0.95 m at
+100 kJ / 1 MJ / 5 MJ (DERIVED).
 
-**D's reflection.** The source's mirror image across the free back face (found along its push by
-a ray cast; b its distance) sends the radial push back as tension, magnitude 3E/(4π d′³) along the
-image's radius. Thickness enters through b.
+**Verdict: adopted.** On the hand-cut wall: 88 AP 6 joints, APCR 2, 7.92 mm none, blasts 0-18
+(MEASURED). The cracks are radial (a cross about the hit). Radial cracks alone free nothing: 0
+groups fell in every run without the structural check (MEASURED), so the structural check is part
+of the design.
 
-### Verdicts
-
-- **A: off-range by four orders.** Every deposit, down to one 7.92 mm bullet (2.3 kJ), cracks all
-  575 joints and the whole wall comes apart (MEASURED, every A run). To hold a 278 kJ deposit's
-  cracks to 0.5 m, G_f would have to be 88 kJ/m², ~9,000× the handbook's 10 J/m² (DERIVED).
-  **Missing factor:** energy flowing past a joint is not a load on it. A crack needs the stress at
-  the joint, or the elastic energy stored there, not the flux through it.
-- **C: off-range, and the wrong form.** η = 0.01 still cracks the whole wall for every round and
-  every deposit of 100 kJ or more (MEASURED). The share that would match B's reach is
-  4π G_f r_B²/E: 8.5e-5 at 100 kJ, 3.9e-5 at 1 MJ, 2.3e-5 at 5 MJ (DERIVED). It falls as E^(−1/3),
-  so no constant share fits. **Missing factor:** the same as A; "most energy becomes heat" is true
-  but is not the factor that limits crack reach.
-- **B: in range.** 88 AP 6 joints, APCR 2, 7.92 mm none, points 2 / 22 / 56 joints, blasts 0–18
-  (MEASURED). The cracks are radial (a cross about the hit). **But B never frees a piece:** 0 groups
-  fell in every B run without the structural check (MEASURED). Radial cracks leave every chunk
-  bonded to its neighbours along the circumference, and the struck chunk's own joints are squeezed.
-  **Missing factor:** a mechanism that cuts around the hit (circumferential cracks, or crushing at
-  chunk scale). D was meant to supply it.
-- **D: in range, thickness enters, but it frees almost nothing with through-thickness chunks.** It
-  adds cracks where the back face is near (5 MJ point: 72 joints against B's 56; MEASURED), yet the
-  reflected pull is mostly normal to the wall's face, and no joint here lies in that plane: every
-  chunk spans the full thickness. **Missing factor:** a cut with seams parallel to the face (two
-  wythes, or chunks that stop short of the back), so a back-face layer can break out. That is a cut
-  decision, not a material value.
-- **E: in range, and it agrees with B.** The Griffith strength from handbook E_m and G_f, with the
-  joint's own size as the flaw, is 0.49–0.59 MPa on this cut (DERIVED), inside the handbook f_t band
-  0.35–0.92 MPa. Results track B (1 MJ: 28 joints against 22; MEASURED). So the toughness and the
-  strength the handbooks give are one property once the flaw size is the joint size, and E makes
-  joint size matter: larger joints are weaker.
+**Provenance.** Four other forms were run against it on that wall and set aside: energy flux
+against G_f (cracked all 575 joints for every deposit, four orders off range), a 1 % share of that
+flux (the same, and no constant share fits), B plus the push reflected off the back face (it adds
+cracks near the back face and frees almost nothing through-thickness), and Griffith's strength
+sqrt(E_m G_f / (pi a)) with the joint's own size as the flaw, which agrees with this rule (0.49-0.59 MPa
+on that cut against f_t 0.69 MPa; a lone 278 kJ point reaches 0.41 m against this rule's 0.36 m, DERIVED).
+The handbook toughness and strength are one property once the flaw size is the joint size.
 
 ## Blast (no direction)
 
@@ -188,10 +155,10 @@ image's radius. Thickness enters through b.
   reflecting off the wall would deliver up to twice that, so this is a lower bound. Cased: 115 /
   1154 / 5771 N·s for 0.1 / 1 / 5 kg; bare 1 kg 2893 N·s (DERIVED).
 - **Rounds push too:** the penetrator's mass × the speed it lost across the wall: 368 N·s for the
-  88 AP (DERIVED from the walk's 278 kJ). Point deposits carry no push.
+  88 AP (DERIVED from the walk's 278 kJ).
 
-Local response to blasts: crushing never empties a chunk below a bare 5 kg contact charge
-(MEASURED). B, D and E crack 0–24 joints, and only within a chunk of contact.
+Local response to blasts: crushing never emptied a chunk below a bare 5 kg contact charge on the
+hand-cut wall (MEASURED). The rule cracks 0-18 joints, and only within a chunk of contact.
 
 ## Structural check
 
@@ -230,7 +197,7 @@ A second textbook form agrees, so this is not an artefact of the energy view. Th
 cantilever mode is ω₁ = 137 rad/s, and the base's moment capacity f_t Z = 28.7 kN·m. Together they
 put the failing angular impulse at f_t Z / ω₁ = 210 N·s·m (DERIVED), the same order as 314.
 
-**Missing factor:** how much of a round's lost momentum the wall keeps. The walk credits all of it
+**Known gap:** the check ignores the wall's own mass (a later fix). **Open factor:** how much of a round's lost momentum the wall keeps. The walk credits all of it
 to the struck chunk, but the brick it crushes leaves the back as ejecta and carries a share away.
 That share decides whether one 88 mm slug cracks a free-standing wall's base.
 

@@ -1,42 +1,41 @@
 //! The wall prototype, about the game's environment destruction (game state only): a brick wall on
-//! the range whose chunks the range's rounds, a point deposit and a blast turn to dust or crack
-//! loose, under a candidate crack law switched live, with a structural check beside it. A
-//! prototype isolated to the sandbox: nothing here is wired into the game's sim or its net.
+//! the range whose chunks the range's rounds and a blast turn to dust or crack loose. A prototype
+//! isolated to the sandbox: nothing here is wired into the game's sim or its net.
 //!
-//! * **The wall.** 4 × 2 m of brick, 0.25 m thick, standing at [`WALL_MIN`], cut by a generator
-//!   ([`model::running_bond`] or [`model::jittered`], K) into chunks that each carry a static
-//!   collider and the `Brick` substance, so the walk crosses them as it crosses any hard volume.
+//! * **The wall.** One wall of the baked house (`assets/buildings/house_1/house_1.building.ron`,
+//!   [`WALL`]'s brick elements), set down at [`PLACE`] by [`baked::wall_cut`]: the bake's convex
+//!   chunks, each a static collider with the `Brick` substance, so the walk crosses them as it
+//!   crosses any hard volume, and the bake's joints and ground anchors.
 //! * **Deposits.** A round's crossing deposits, in each chunk, the energy the walk says it lost
-//!   there ([`ArmourMark::Crossing`]), and pushes it with the momentum the round lost. The point
-//!   tool (P) deposits a chosen energy, 50 kJ to 5 MJ, at the aim point, with no push. The blast
+//!   there ([`ArmourMark::Crossing`]), and pushes it with the momentum the round lost. The blast
 //!   tool (O) bursts a charge of 0.1–5 kg at 0–5 m standoff: a sphere of rays ([`blast_field`])
 //!   each stopping on the first chunk it meets with its share of the energy and the momentum.
-//! * **Responses.** [`model`] turns each deposit into dust (the pools), local cracks (the active
-//!   [`CrackLaw`]) and structural cracks ([`model::structural`], U toggles it), then lets every
-//!   group with no path to the ground fall with the momentum pushed into it.
+//! * **Responses.** [`model`] turns each deposit into dust (the pools), local cracks (the push
+//!   rule, [`model::crack`]) and structural cracks ([`model::structural`], always on), then lets
+//!   every group with no path to the ground fall with the momentum pushed into it.
 //! * **The view.** Each chunk's pool as heat, local cracks in cyan and structural ones in
 //!   magenta, a dust puff where a chunk went, loose groups as falling bodies on the default layer
 //!   (out of ballistics; grey-blue when a local crack freed them, purple when a structural one
-//!   did), and a one-line readout (the crack rule, the structural check, the last shot); H opens a
-//!   help panel of the keys and the colour legend. Every value of a resolved shot goes to the log.
-//!   The readout shows only while the camera stands within [`READOUT_RANGE`] of the wall, so the
-//!   range's own view carries no more text than its round's name.
+//!   did), a one-line readout (the last shot and its energy) and, on H, a help panel of the keys
+//!   and the colour legend. Every value of a resolved shot goes to the log. The readout shows only
+//!   while the camera stands within [`READOUT_RANGE`] of the wall, so the range's own view carries
+//!   no more text than its round's name.
 //! * **Spall.** Every exit cone the wall throws is read off the shell's record: the game's today
 //!   (its energy share of the energy lost) and the candidate (that, scaled by the exited
 //!   substance's strength relative to armour steel, capped at 1), each one's dose summed on a
 //!   witness panel behind the wall; J toggles which is drawn. The game's own dose is untouched.
 //!
-//! Keys: 1–5 law A–E, K cut, N new wall, B round, F fire it, P point deposit and `[`/`]` its
-//! energy, H help, O blast and `,`/`.` its filler mass, `;`/`'` its standoff, V its casing, U the
-//! structural check, J spall, G camera (front, back, witness).
+//! Keys: B round, F fire it, O blast and `,`/`.` its filler mass, `;`/`'` its standoff, V its
+//! casing, J spall, G camera (front, back, witness), N new wall, H help.
 //!
-//! `OVERMATCH_WALL_CASE=<law letter>,<round key | p<energy> | x<kg>@<standoff m>>` (`B,88mm_AP`,
-//! `D,p1m`, `E,x1@3`) runs one case for a hidden capture ([`drive_script`]): the camera stands at
-//! the front, then the back, fires (or deposits, or bursts) at [`SCRIPT_FIRE`] s from the front,
-//! and stands front then back again for the after frames. `OVERMATCH_WALL_SPALL=candidate`,
-//! `OVERMATCH_WALL_CUT=jittered`, `OVERMATCH_WALL_CASING=bare`, `OVERMATCH_WALL_STRUCTURAL=off`
-//! and `OVERMATCH_WALL_VIEW=witness` (the last frames from the witness pose) set the rest.
+//! `OVERMATCH_WALL_CASE=<round key | x<kg>@<standoff m>>` (`88mm_AP`, `x1@3`) runs one case for a
+//! hidden capture ([`drive_script`]): the camera stands at the front, then the back, fires (or
+//! bursts) at [`SCRIPT_FIRE`] s from the front, and stands front then back again for the after
+//! frames. `OVERMATCH_WALL_SPALL=candidate`, `OVERMATCH_WALL_CASING=bare`,
+//! `OVERMATCH_WALL_VIEW=witness` (the last frames from the witness pose) and
+//! `OVERMATCH_WALL_HELP=1` (the help panel open) set the rest.
 
+mod baked;
 mod model;
 #[cfg(test)]
 mod tests;
@@ -45,27 +44,32 @@ use avian3d::prelude::{
     AngularVelocity, Collider, ColliderDensity, CollisionLayers, LayerMask, LinearVelocity,
     RigidBody,
 };
+use bevy::asset::RenderAssetUsages;
 use bevy::ecs::system::SystemParam;
+use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
-use self::model::{CrackLaw, Cut, CutKind, Masonry, Push, Source, WallState};
+use self::baked::Placement;
+use self::model::{Block, Cut, Masonry, Push, Source, WallState};
 use super::{Autopilot, FreeFlyCam, SEED_SPEC, UI_LEFT, panel_capturing};
 use crate::ballistics::spall_cone::{AxisRule, ConeShape, FieldDescriptor, FieldLaw};
 use crate::ballistics::{
     ArmourMark, BallisticVolume, CrossingEnd, FireShell, PenetrationMarks, SpallMarks,
 };
+use crate::buildings::schema::BuildingAsset;
 use crate::substances::{REFERENCE_FACTOR, SubstanceRegistry};
 use crate::{Layer, spec};
 
-/// The wall's min corner, world metres: clear of the range's plates and target (x within ±7.5)
+/// The baked building the wall comes from, and which of its walls (an element's name begins
+/// `<wall>/`): the brick elements of that wall.
+const BUILDING: &str = include_str!("../../assets/buildings/house_1/house_1.building.ron");
+const WALL: &str = "east";
+/// Where the wall stands, world metres: clear of the range's plates and target (x within ±7.5)
 /// and of the test course (z ≤ −30). Its front face looks down +Z.
-const WALL_MIN: Vec3 = Vec3::new(14.0, 0.0, 3.875);
-/// Width, height and thickness, m (the brief's wall).
-const WALL_SIZE: Vec3 = Vec3::new(4.0, 2.0, 0.25);
-/// The cut's chunk size, m (the brief's ~20 cm along brick seams).
-const CHUNK: f32 = 0.2;
-/// The jittered cut's seed: any fixed value.
-const JITTER_SEED: u64 = 0x5EED_0001;
+const PLACE: Placement = Placement {
+    centre_x: 16.0,
+    back_z: 3.875,
+};
 /// The substance every chunk wears.
 const SUBSTANCE: &str = "Brick";
 /// Brick density, kg/m³: London stock, a molded soft-mud brick. CLAIMED (Engineering ToolBox,
@@ -86,8 +90,6 @@ const MODULUS: f32 = 8.6e9;
 /// CLAIMED (NIST SP 811, the ton of TNT as 4.184e9 J); ASSUMED to stand for the seed round's
 /// filler, whose own heat of detonation no file states.
 const FILLER_ENERGY: f32 = 4.184e6;
-/// The point tool's energy ladder, J (the brief's 50 kJ to 5 MJ).
-const ENERGIES: [f32; 7] = [5.0e4, 1.0e5, 2.0e5, 5.0e5, 1.0e6, 2.0e6, 5.0e6];
 /// The blast tool's filler masses, kg, and standoffs, m (the owner's 0.1–5 kg and 0–5 m).
 const MASSES: [f32; 6] = [0.1, 0.2, 0.5, 1.0, 2.0, 5.0];
 const STANDOFFS: [f32; 6] = [0.0, 0.5, 1.0, 2.0, 3.0, 5.0];
@@ -110,14 +112,14 @@ const LOOSE_GAP: f32 = 0.005;
 /// size and count (m, m, x × y).
 const WITNESS_GAP: f32 = 4.4;
 const TILE: f32 = 0.25;
-const TILES: (usize, usize) = (12, 8);
-/// The camera's distance from the face it frames, m: the 4 × 2 m wall fills two thirds of a 45°
-/// 16:9 view's height, below the readout.
-const VIEW_DISTANCE: f32 = 3.8;
+const TILES: (usize, usize) = (24, 14);
+/// The camera's distance from the face it frames, in wall heights: the wall fills two thirds of a
+/// 45 degree 16:9 view's height, below the readout.
+const VIEW_FILL: f32 = 1.8;
 /// A dust puff's life, s.
 const PUFF_LIFE: f32 = 1.6;
 /// How near the wall's centre the camera must stand for the readout to show, m: the wall's own
-/// views stand 3.8–7.4 m off it, the range's boot pose 21 m.
+/// views stand 5–9 m off it, the range's boot pose 21 m.
 const READOUT_RANGE: f32 = 12.0;
 /// Blast rays drawn of the last blast: every this-many-th hit.
 const RAY_DRAW_STRIDE: usize = 6;
@@ -135,13 +137,9 @@ pub(super) fn plugin(app: &mut App) {
         .and_then(|case| parse_case(&case, &rounds));
     let flag = |name: &str, value: &str| std::env::var(name).as_deref() == Ok(value);
     let mut controls = WallControls {
-        law: CrackLaw::Stress,
-        cut: CutKind::RunningBond,
-        energy: 4,
         mass: 3,
         standoff: 0,
         cased: !flag("OVERMATCH_WALL_CASING", "bare"),
-        structural: !flag("OVERMATCH_WALL_STRUCTURAL", "off"),
         spall: Spall::Today,
         round: 0,
         view: View::Front,
@@ -150,12 +148,8 @@ pub(super) fn plugin(app: &mut App) {
     if flag("OVERMATCH_WALL_SPALL", "candidate") {
         controls.spall = Spall::Candidate;
     }
-    if flag("OVERMATCH_WALL_CUT", "jittered") {
-        controls.cut = CutKind::Jittered;
-    }
-    if let Some((law, case)) = script {
-        controls.law = law;
-        info!("wall prototype: capture case {law:?}, {case:?}");
+    if let Some(case) = script {
+        info!("wall prototype: capture case {case:?}");
         // The range keeps the cursor free under an autopilot; the script is one.
         if !app.world().contains_resource::<Autopilot>() {
             app.insert_resource(Autopilot {
@@ -232,8 +226,8 @@ struct WallReadout;
 #[derive(Component)]
 struct WallHelp;
 
-/// The wall as it stands: its cut, its state, each standing chunk's entity and drawn mesh, its
-/// material and the range of its joints' Griffith strengths (Pa) for the readout.
+/// The wall as it stands: its cut, its state, each standing chunk's entity and drawn mesh, and
+/// its material.
 #[derive(Resource)]
 struct Wall {
     cut: Cut,
@@ -241,7 +235,39 @@ struct Wall {
     entities: Vec<Option<Entity>>,
     meshes: Vec<Handle<Mesh>>,
     material: Masonry,
-    griffith: (f32, f32),
+}
+
+/// The wall as the bake gives it, set down in the world: its cut and its bounding box.
+struct Layout {
+    cut: Cut,
+    min: Vec3,
+    size: Vec3,
+}
+
+impl Layout {
+    fn centre(&self) -> Vec3 {
+        self.min + self.size / 2.0
+    }
+}
+
+/// The wall's layout, read once from [`BUILDING`]. A building the bake wrote and the build
+/// shipped: one that does not parse is a broken build.
+fn layout() -> &'static Layout {
+    static LAYOUT: std::sync::LazyLock<Layout> = std::sync::LazyLock::new(|| {
+        let asset = BuildingAsset::from_ron(BUILDING).expect("the shipped building parses");
+        let cut = baked::wall_cut(&asset, WALL, SUBSTANCE, brick(), PLACE)
+            .expect("the shipped building has the wall");
+        let (min, max) = cut.blocks.iter().fold(
+            (Vec3::splat(f32::INFINITY), Vec3::splat(f32::NEG_INFINITY)),
+            |(lo, hi), block| (lo.min(block.min), hi.max(block.max)),
+        );
+        Layout {
+            cut,
+            min,
+            size: max - min,
+        }
+    });
+    &LAYOUT
 }
 
 /// Which spall the view draws.
@@ -259,23 +285,17 @@ enum View {
     Witness,
 }
 
-/// The wall's settings: the crack law, the cut, the point tool's energy and the blast tool's mass
-/// and standoff (indices into [`ENERGIES`], [`MASSES`], [`STANDOFFS`]), whether the charge is
-/// cased and the structural check runs, the spall drawn, the round F fires (an index into
-/// [`WallRounds`]) and the camera stand.
+/// The wall's settings: the blast tool's mass and standoff (indices into [`MASSES`],
+/// [`STANDOFFS`]), whether the charge is cased, the spall drawn, the round F fires (an index into
+/// [`WallRounds`]), the camera stand and whether the help panel is open.
 #[derive(Resource, Clone, Copy, PartialEq, Debug)]
 struct WallControls {
-    law: CrackLaw,
-    cut: CutKind,
-    energy: usize,
     mass: usize,
     standoff: usize,
     cased: bool,
-    structural: bool,
     spall: Spall,
     round: usize,
     view: View,
-    /// The help panel (H) is open.
     help: bool,
 }
 
@@ -421,8 +441,6 @@ enum Deposit {
         /// The strength (J) of the exit cones it threw, under today's spall.
         spall: f32,
     },
-    /// `energy` J at `at`, pushing along `push`; no momentum.
-    Point { energy: f32, at: Vec3, push: Vec3 },
     /// A charge of filler `mass` kg, its surface `standoff` m before the face point `at`, along
     /// the face's inward normal `into`.
     Blast {
@@ -443,15 +461,14 @@ struct WallCone {
 }
 
 /// What the readout and the drawing keep: the last outcome, the cones thrown, each witness tile's
-/// dose under today's spall and the candidate's (J), the last point deposit (where, crush
-/// radius, push) and the last blast's origin, radius and drawn rays.
+/// dose under today's spall and the candidate's (J), and the last blast's origin, radius and drawn
+/// rays.
 #[derive(Resource, Default)]
 struct WallLog {
     last: Option<Outcome>,
     cones: Vec<WallCone>,
     witness_today: Vec<f32>,
     witness_candidate: Vec<f32>,
-    point: Option<(Vec3, f32, Vec3)>,
     blast: Option<(Vec3, f32, Vec<Vec3>)>,
 }
 
@@ -486,8 +503,6 @@ pub(super) struct WallScript {
 enum Case {
     /// The [`WallRounds`] entry at this index.
     Round(usize),
-    /// A point deposit of this many J.
-    Point(f32),
     /// A blast of filler `mass` kg at `standoff` m.
     Blast { mass: f32, standoff: f32 },
 }
@@ -556,34 +571,17 @@ fn ascii(text: &str) -> String {
         .collect()
 }
 
-/// `<law letter>,<round key | p<energy> | x<kg>@<standoff m>>`, the energy in J with an optional
-/// `k` or `m` suffix.
-fn parse_case(case: &str, rounds: &[WallRound]) -> Option<(CrackLaw, Case)> {
-    let (law, what) = case.split_once(',')?;
-    let law = CrackLaw::of_letter(law.trim().chars().next()?)?;
-    let what = what.trim();
+/// `<round key | x<kg>@<standoff m>>`.
+fn parse_case(case: &str, rounds: &[WallRound]) -> Option<Case> {
+    let what = case.trim();
     if let Some(index) = rounds.iter().position(|round| round.key == what) {
-        return Some((law, Case::Round(index)));
+        return Some(Case::Round(index));
     }
-    if let Some(blast) = what.strip_prefix('x') {
-        let (mass, standoff) = blast.split_once('@')?;
-        return Some((
-            law,
-            Case::Blast {
-                mass: mass.parse().ok()?,
-                standoff: standoff.parse().ok()?,
-            },
-        ));
-    }
-    let energy = what.strip_prefix('p')?.to_ascii_lowercase();
-    let (number, scale) = if let Some(n) = energy.strip_suffix('k') {
-        (n, 1.0e3)
-    } else if let Some(n) = energy.strip_suffix('m') {
-        (n, 1.0e6)
-    } else {
-        (energy.as_str(), 1.0)
-    };
-    Some((law, Case::Point(number.parse::<f32>().ok()? * scale)))
+    let (mass, standoff) = what.strip_prefix('x')?.split_once('@')?;
+    Some(Case::Blast {
+        mass: mass.parse().ok()?,
+        standoff: standoff.parse().ok()?,
+    })
 }
 
 /// The brick as the wall reads it: the registry's `Brick` factor turned back into the unit's
@@ -617,32 +615,23 @@ fn spall_scale() -> f32 {
     (factor / REFERENCE_FACTOR).min(1.0)
 }
 
-fn new_cut(kind: CutKind) -> Cut {
-    match kind {
-        CutKind::RunningBond => model::running_bond(WALL_MIN, WALL_SIZE, CHUNK, brick()),
-        CutKind::Jittered => model::jittered(WALL_MIN, WALL_SIZE, CHUNK, JITTER_SEED, brick()),
-    }
-}
-
 /// The front face's z and the back face's, world metres.
 fn faces() -> (f32, f32) {
-    (WALL_MIN.z + WALL_SIZE.z, WALL_MIN.z)
+    let layout = layout();
+    (layout.min.z + layout.size.z, layout.min.z)
 }
 
 /// Witness tile `index`'s box, row-major from the panel's low corner.
 fn witness_tile(index: usize) -> model::Block {
     let (_, back) = faces();
     let low = Vec3::new(
-        WALL_MIN.x + WALL_SIZE.x / 2.0 - TILES.0 as f32 * TILE / 2.0,
+        layout().centre().x - TILES.0 as f32 * TILE / 2.0,
         0.1,
         back - WITNESS_GAP - 0.01,
     );
     let (column, row) = (index % TILES.0, index / TILES.0);
     let min = low + Vec3::new(column as f32 * TILE, row as f32 * TILE, 0.0);
-    model::Block {
-        min,
-        max: min + Vec3::new(TILE, TILE, 0.01),
-    }
+    model::Block::cuboid(min, min + Vec3::new(TILE, TILE, 0.01))
 }
 
 /// The tile a point lies on, within a millimetre.
@@ -653,9 +642,9 @@ fn witness_at(point: Vec3) -> Option<usize> {
     })
 }
 
-/// The aim point: the front-face centre of the chunk whose centroid is nearest the wall's centre.
+/// The aim point: the front-face centre of the chunk whose centre is nearest the wall's centre.
 fn aim_point(wall: &Wall) -> Vec3 {
-    let centre = WALL_MIN + WALL_SIZE / 2.0;
+    let centre = layout().centre();
     let block = wall
         .cut
         .blocks
@@ -665,21 +654,18 @@ fn aim_point(wall: &Wall) -> Vec3 {
                 .distance(centre)
                 .total_cmp(&b.center().distance(centre))
         })
-        .copied()
-        .unwrap_or(model::Block {
-            min: centre,
-            max: centre,
-        });
-    Vec3::new(block.center().x, block.center().y, faces().0)
+        .map_or(centre, Block::center);
+    Vec3::new(block.x, block.y, faces().0)
 }
 
 /// The camera's pose at `view`, framing the wall about `aim`.
 fn view_pose(view: View, aim: Vec3) -> Transform {
     let (front, back) = faces();
+    let distance = VIEW_FILL * layout().size.y;
     let (eye, look) = match view {
-        View::Front => (Vec3::new(aim.x, aim.y, front + VIEW_DISTANCE), aim),
+        View::Front => (Vec3::new(aim.x, aim.y, front + distance), aim),
         View::Back => (
-            Vec3::new(aim.x, aim.y, back - VIEW_DISTANCE),
+            Vec3::new(aim.x, aim.y, back - distance),
             Vec3::new(aim.x, aim.y, back),
         ),
         View::Witness => (
@@ -694,7 +680,6 @@ fn setup_wall(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
-    controls: Res<WallControls>,
     mut gizmos: ResMut<GizmoConfigStore>,
 ) {
     let (config, _) = gizmos.config_mut::<WallGizmos>();
@@ -775,30 +760,65 @@ fn setup_wall(
             ..default()
         },
         Transform::from_translation(
-            WALL_MIN + WALL_SIZE * Vec3::new(0.5, 0.7, 0.0) - Vec3::Z * 3.5,
+            layout().min + layout().size * Vec3::new(0.5, 0.7, 0.0) - Vec3::Z * 3.5,
         ),
     ));
-    let wall = spawn_wall(&mut commands, &mut meshes, &assets, controls.cut);
+    let wall = spawn_wall(&mut commands, &mut meshes, &assets);
     commands.insert_resource(wall);
     commands.insert_resource(assets);
 }
 
-/// Spawn a new wall of `kind`'s cut: one static chunk per block, full pools, nothing cracked.
-fn spawn_wall(
-    commands: &mut Commands,
-    meshes: &mut Assets<Mesh>,
-    assets: &WallAssets,
-    kind: CutKind,
-) -> Wall {
-    let cut = new_cut(kind);
+/// A chunk's drawn mesh, vertices about its bounding box's centre: its faces inset by [`SEAM`].
+fn chunk_mesh(block: &Block) -> Mesh {
+    let inset = inset(block, SEAM);
+    let (mut positions, mut normals, mut indices) = (Vec::new(), Vec::new(), Vec::new());
+    for &(normal, offset) in &block.planes {
+        let face = block.face_on(normal * offset, normal);
+        let base = positions.len() as u32;
+        for corner in &face {
+            positions.push(inset(*corner).to_array());
+            normals.push(normal.to_array());
+        }
+        for k in 1..face.len().saturating_sub(1) as u32 {
+            indices.extend([base, base + k, base + k + 1]);
+        }
+    }
+    Mesh::new(
+        PrimitiveTopology::TriangleList,
+        RenderAssetUsages::default(),
+    )
+    .with_inserted_attribute(Mesh::ATTRIBUTE_POSITION, positions)
+    .with_inserted_attribute(Mesh::ATTRIBUTE_NORMAL, normals)
+    .with_inserted_indices(Indices::U32(indices))
+}
+
+/// A map from a world point to its place about `block`'s bounding-box centre with every face moved
+/// in by `gap` m: the corners scaled about their centroid.
+fn inset(block: &Block, gap: f32) -> impl Fn(Vec3) -> Vec3 {
+    let centre = block.center();
+    let middle = block.points.iter().sum::<Vec3>() / block.points.len().max(1) as f32;
+    let scale = (1.0 - gap / block.inradius().max(1e-6)).max(0.2);
+    move |p| middle + (p - middle) * scale - centre
+}
+
+/// A convex collider of `block` with every face moved in by `gap` m, about its bounding box's
+/// centre.
+fn chunk_collider(block: &Block, gap: f32) -> Collider {
+    let inset = inset(block, gap);
+    Collider::convex_hull(block.points.iter().map(|p| inset(*p)).collect())
+        .expect("a bake chunk has volume")
+}
+
+/// Spawn a new wall: one static chunk per block, full pools, nothing cracked.
+fn spawn_wall(commands: &mut Commands, meshes: &mut Assets<Mesh>, assets: &WallAssets) -> Wall {
+    let cut = layout().cut.clone();
     let brick_material =
         crate::ballistics::VolumeMaterial::of(SubstanceRegistry::shipped_static(), SUBSTANCE)
             .expect("the shipped registry names Brick");
     let mut entities = Vec::with_capacity(cut.blocks.len());
     let mut chunk_meshes = Vec::with_capacity(cut.blocks.len());
     for (index, block) in cut.blocks.iter().enumerate() {
-        let size = block.size();
-        let mesh = meshes.add(Cuboid::from_size(size - 2.0 * SEAM));
+        let mesh = meshes.add(chunk_mesh(block));
         chunk_meshes.push(mesh.clone());
         entities.push(Some(
             commands
@@ -809,7 +829,7 @@ fn spawn_wall(
                     MeshMaterial3d(assets.heat[0].clone()),
                     Transform::from_translation(block.center()),
                     RigidBody::Static,
-                    Collider::cuboid(size.x, size.y, size.z),
+                    chunk_collider(block, 0.0),
                     CollisionLayers::new([Layer::Armor], LayerMask::ALL),
                     BallisticVolume {
                         material: brick_material,
@@ -819,22 +839,12 @@ fn spawn_wall(
                 .id(),
         ));
     }
-    let material = brick();
-    let griffith = cut
-        .structure
-        .joints
-        .iter()
-        .map(|joint| material.griffith_strength(joint.area))
-        .fold((f32::INFINITY, 0.0_f32), |(lo, hi), s| {
-            (lo.min(s), hi.max(s))
-        });
     Wall {
         state: WallState::new(&cut.structure),
         cut,
         entities,
         meshes: chunk_meshes,
-        material,
-        griffith,
+        material: brick(),
     }
 }
 
@@ -865,20 +875,6 @@ fn step(keys: &ButtonInput<KeyCode>, down: KeyCode, up: KeyCode, index: &mut usi
 fn wall_keys(mut p: KeysParam) {
     let keys = &p.keys;
     let mut controls = *p.controls;
-    for (key, law) in [
-        KeyCode::Digit1,
-        KeyCode::Digit2,
-        KeyCode::Digit3,
-        KeyCode::Digit4,
-        KeyCode::Digit5,
-    ]
-    .into_iter()
-    .zip(CrackLaw::ALL)
-    {
-        if keys.just_pressed(key) {
-            controls.law = law;
-        }
-    }
     if keys.just_pressed(KeyCode::KeyJ) {
         controls.spall = match controls.spall {
             Spall::Today => Spall::Candidate,
@@ -891,19 +887,9 @@ fn wall_keys(mut p: KeysParam) {
     if keys.just_pressed(KeyCode::KeyV) {
         controls.cased = !controls.cased;
     }
-    if keys.just_pressed(KeyCode::KeyU) {
-        controls.structural = !controls.structural;
-    }
     if keys.just_pressed(KeyCode::KeyB) && !p.rounds.0.is_empty() {
         controls.round = (controls.round + 1) % p.rounds.0.len();
     }
-    step(
-        keys,
-        KeyCode::BracketLeft,
-        KeyCode::BracketRight,
-        &mut controls.energy,
-        ENERGIES.len(),
-    );
     step(
         keys,
         KeyCode::Comma,
@@ -918,13 +904,6 @@ fn wall_keys(mut p: KeysParam) {
         &mut controls.standoff,
         STANDOFFS.len(),
     );
-    let new_cut = keys.just_pressed(KeyCode::KeyK);
-    if new_cut {
-        controls.cut = match controls.cut {
-            CutKind::RunningBond => CutKind::Jittered,
-            CutKind::Jittered => CutKind::RunningBond,
-        };
-    }
     if keys.just_pressed(KeyCode::KeyG) {
         controls.view = match controls.view {
             View::Front => View::Back,
@@ -943,9 +922,7 @@ fn wall_keys(mut p: KeysParam) {
             p.time.elapsed_secs(),
         );
     }
-    let point = keys.just_pressed(KeyCode::KeyP);
-    let blast = keys.just_pressed(KeyCode::KeyO);
-    if (point || blast)
+    if keys.just_pressed(KeyCode::KeyO)
         && let Some(wall) = p.wall.as_deref()
     {
         let eye = p.camera.translation;
@@ -953,24 +930,16 @@ fn wall_keys(mut p: KeysParam) {
         let state = &wall.state;
         if let Some((_, t)) = model::first_hit(&wall.cut.blocks, |i| state.standing(i), eye, dir) {
             let at = eye + dir * t;
-            p.queue.0.push(if point {
-                Deposit::Point {
-                    energy: ENERGIES[controls.energy],
-                    at,
-                    push: dir,
-                }
-            } else {
-                Deposit::Blast {
-                    mass: MASSES[controls.mass],
-                    standoff: STANDOFFS[controls.standoff],
-                    at,
-                    into: dir,
-                }
+            p.queue.0.push(Deposit::Blast {
+                mass: MASSES[controls.mass],
+                standoff: STANDOFFS[controls.standoff],
+                at,
+                into: dir,
             });
         }
     }
-    if new_cut || keys.just_pressed(KeyCode::KeyN) {
-        p.rebuild.rebuild(controls.cut);
+    if keys.just_pressed(KeyCode::KeyN) {
+        p.rebuild.rebuild();
     }
     p.controls.set_if_neq(controls);
 }
@@ -999,14 +968,14 @@ struct Rebuild<'w, 's> {
 }
 
 impl Rebuild<'_, '_> {
-    fn rebuild(&mut self, kind: CutKind) {
+    fn rebuild(&mut self) {
         let Some(assets) = self.assets.as_deref() else {
             return;
         };
         for entity in &self.old {
             self.commands.entity(entity).despawn();
         }
-        let wall = spawn_wall(&mut self.commands, &mut self.meshes, assets, kind);
+        let wall = spawn_wall(&mut self.commands, &mut self.meshes, assets);
         self.commands.insert_resource(wall);
         *self.log = WallLog::default();
     }
@@ -1171,8 +1140,6 @@ struct Applied {
     /// Each loose group, its centroid, linear and angular velocity, and whether a structural crack
     /// bounds it.
     groups: Vec<(Vec<usize>, Vec3, Vec3, Vec3, bool)>,
-    /// A point deposit's crush ball: centre, radius, push.
-    point: Option<(Vec3, f32, Vec3)>,
     /// A blast's charge, origin, coupled energy and momentum, and its drawn ray ends.
     blast: Option<(Blast, Vec3, f32, f32, Vec<Vec3>)>,
 }
@@ -1187,31 +1154,19 @@ struct Loading {
 
 /// Split each chunk's line into point sources [`LINE_STEP`] apart, and share the round's lost
 /// momentum among the chunks by the energy each took, at its chord's midpoint.
-fn line_loading(
-    wall: &Wall,
-    lines: &[(usize, Vec3, Vec3, f32)],
-    along: Vec3,
-    momentum: f32,
-) -> Loading {
-    let state = &wall.state;
-    let back = |at: Vec3, push: Vec3| {
-        model::back_distance(&wall.cut.blocks, |i| state.standing(i), at, push)
-    };
+fn line_loading(lines: &[(usize, Vec3, Vec3, f32)], along: Vec3, momentum: f32) -> Loading {
     let total: f32 = lines.iter().map(|line| line.3).sum();
     let mut sources = Vec::new();
     let mut pushes = Vec::new();
     for &(chunk, entry, end, energy) in lines {
         let chord = end - entry;
         let length = chord.length();
-        let push = if length > 1e-6 { chord / length } else { along };
         let n = (length / LINE_STEP).ceil().max(1.0) as usize;
         for k in 0..n {
             let at = entry + chord * ((k as f32 + 0.5) / n as f32);
             sources.push(Source {
                 energy: energy / n as f32,
                 at,
-                push,
-                back: back(at, push),
             });
         }
         if total > 0.0 {
@@ -1231,8 +1186,7 @@ fn line_loading(
 
 /// A blast's rays summed per chunk: each chunk a source at the energy-weighted mean of its hits,
 /// pushing along their mean direction, and a push of their summed impulse there.
-fn blast_loading(wall: &Wall, hits: &[model::RayHit]) -> Loading {
-    let state = &wall.state;
+fn blast_loading(hits: &[model::RayHit]) -> Loading {
     let mut per: std::collections::BTreeMap<usize, (f32, Vec3, Vec3)> = Default::default();
     for hit in hits {
         let entry = per.entry(hit.chunk).or_default();
@@ -1250,21 +1204,15 @@ fn blast_loading(wall: &Wall, hits: &[model::RayHit]) -> Loading {
             continue;
         }
         let at = weighted / energy;
-        let push = impulse.normalize_or(Vec3::NEG_Z);
-        loading.sources.push(Source {
-            energy,
-            at,
-            push,
-            back: model::back_distance(&wall.cut.blocks, |i| state.standing(i), at, push),
-        });
+        loading.sources.push(Source { energy, at });
         loading.energies.push((chunk, energy));
         loading.pushes.push(Push { chunk, at, impulse });
     }
     loading
 }
 
-/// Run one deposit through the model under `controls`' law: the wear and dust, the local cracks,
-/// the structural check when on, and the loose groups with the velocities the pushes on them give.
+/// Run one deposit through the model: the wear and dust, the local cracks, the structural check,
+/// and the loose groups with the velocities the pushes on them give.
 fn apply_deposit(
     wall: &mut Wall,
     controls: &WallControls,
@@ -1273,29 +1221,13 @@ fn apply_deposit(
     deposit: &Deposit,
 ) -> Applied {
     let mut applied = Applied::default();
-    let law = controls.law;
     let loading = match deposit {
         Deposit::Line {
             lines,
             along,
             momentum,
             ..
-        } => line_loading(wall, lines, *along, *momentum),
-        &Deposit::Point { energy, at, push } => {
-            let state = &wall.state;
-            let crush = model::crush_point(&wall.cut.structure, state, at, energy);
-            applied.point = Some((at, crush.radius, push));
-            Loading {
-                sources: vec![Source {
-                    energy,
-                    at,
-                    push,
-                    back: model::back_distance(&wall.cut.blocks, |i| state.standing(i), at, push),
-                }],
-                energies: crush.doses,
-                pushes: Vec::new(),
-            }
-        }
+        } => line_loading(lines, *along, *momentum),
         &Deposit::Blast {
             mass,
             standoff,
@@ -1321,7 +1253,7 @@ fn apply_deposit(
                 .map(|hit| hit.at)
                 .collect();
             applied.blast = Some((blast, origin, coupled, momentum, drawn));
-            blast_loading(wall, &hits)
+            blast_loading(&hits)
         }
     };
     for &(chunk, energy) in &loading.energies {
@@ -1333,7 +1265,7 @@ fn apply_deposit(
         }
     }
     applied.chunks = loading.energies.len();
-    applied.local = model::crack(law, &wall.cut.structure, &mut wall.state, &loading.sources).len();
+    applied.local = model::crack(&wall.cut.structure, &mut wall.state, &loading.sources).len();
     // A push on a chunk turned to dust went into crushing it, and moves nothing.
     let pushes: Vec<Push> = loading
         .pushes
@@ -1341,9 +1273,7 @@ fn apply_deposit(
         .copied()
         .filter(|push| wall.state.standing(push.chunk))
         .collect();
-    if controls.structural {
-        applied.failures = model::structural(&wall.cut.structure, &mut wall.state, &pushes);
-    }
+    applied.failures = model::structural(&wall.cut.structure, &mut wall.state, &pushes);
     for group in model::loose_groups(&wall.cut.structure, &wall.state) {
         let chunks = &wall.cut.structure.chunks;
         let mass: f32 = group.iter().map(|&i| chunks[i].mass).sum();
@@ -1352,6 +1282,9 @@ fn apply_deposit(
             .map(|&i| chunks[i].centroid * chunks[i].mass)
             .sum::<Vec3>()
             / mass.max(f32::EPSILON);
+        // A group's least moment of inertia: a ball of its mean chunk's size per chunk.
+        let piece =
+            (group.iter().map(|&i| chunks[i].volume).sum::<f32>() / group.len() as f32).cbrt();
         let on_group = || {
             pushes
                 .iter()
@@ -1365,7 +1298,7 @@ fn apply_deposit(
             .iter()
             .map(|&i| chunks[i].mass * (chunks[i].centroid - centroid).length_squared())
             .sum::<f32>()
-            .max(mass * CHUNK * CHUNK / 6.0);
+            .max(mass * piece * piece / 6.0);
         // Momentum conserved: a group leaves with the impulse pushed into it, no more. (A
         // free-surface velocity `2σ/(ρc)` describes a thin spalled layer, and credited to a whole
         // group it hands a 3.8 t wall tens of m/s.)
@@ -1468,13 +1401,12 @@ fn apply_deposits(mut p: ApplyParam) {
                 ))
                 .with_children(|parent| {
                     for &chunk in group {
-                        let block = wall.cut.blocks[chunk];
-                        let size = (block.size() - 2.0 * LOOSE_GAP).max(Vec3::splat(0.01));
+                        let block = &wall.cut.blocks[chunk];
                         parent.spawn((
                             Mesh3d(wall.meshes[chunk].clone()),
                             MeshMaterial3d(tint.clone()),
                             Transform::from_translation(block.center() - *centroid),
-                            Collider::cuboid(size.x, size.y, size.z),
+                            chunk_collider(block, LOOSE_GAP),
                             ColliderDensity(wall.material.density),
                             CollisionLayers::new(
                                 [Layer::Default],
@@ -1484,12 +1416,8 @@ fn apply_deposits(mut p: ApplyParam) {
                     }
                 });
         }
-        if applied.point.is_some() {
-            p.log.point = applied.point;
-        }
         let what = match &deposit {
             Deposit::Line { what, .. } => what.clone(),
-            Deposit::Point { energy, .. } => format!("point deposit {}", joules(*energy)),
             Deposit::Blast { mass, standoff, .. } => format!(
                 "blast {mass:.1} kg {} at {standoff:.1} m",
                 if p.controls.cased { "cased" } else { "bare" }
@@ -1527,10 +1455,9 @@ fn apply_deposits(mut p: ApplyParam) {
         });
         if let Some(last) = &p.log.last {
             info!(
-                "wall prototype: law {}: {}: {:.0} J into {} chunks, {} dust, {} local cracks, \
+                "wall prototype: {}: {:.0} J into {} chunks, {} dust, {} local cracks, \
                  {} structural cracks in {} sections (first {:?} N s m demand, capacity), {} groups \
                  fell ({} chunks), exit cones {:.0} J, blast {:?} (coupled J, N s)",
-                p.controls.law.letter(),
                 last.what,
                 last.deposited,
                 last.chunks,
@@ -1553,8 +1480,8 @@ fn apply_deposits(mut p: ApplyParam) {
 }
 
 /// Cracked joints between standing matter (local in cyan, structural in magenta), the wall's exit
-/// cones (today's in orange, the candidate's as faint as its share), the last point deposit's
-/// crush ball, and the last blast's charge and a sample of its rays.
+/// cones (today's in orange, the candidate's as faint as its share), and the last blast's charge
+/// and a sample of its rays.
 fn draw_wall(
     wall: Option<Res<Wall>>,
     log: Res<WallLog>,
@@ -1564,7 +1491,7 @@ fn draw_wall(
     let Some(wall) = wall else {
         return;
     };
-    let mid = WALL_MIN.z + WALL_SIZE.z / 2.0;
+    let mid = layout().min.z + layout().size.z / 2.0;
     let out = |p: Vec3| p + Vec3::Z * (0.003 * (p.z - mid).signum());
     for (index, joint) in wall.cut.structure.joints.iter().enumerate() {
         if !wall.state.cracked[index] || !wall.state.live(joint) {
@@ -1575,9 +1502,9 @@ fn draw_wall(
         } else {
             Color::srgb(0.2, 1.0, 1.0)
         };
-        let face = wall.cut.faces[index];
-        for k in 0..4 {
-            gizmos.line(out(face[k]), out(face[(k + 1) % 4]), colour);
+        let face = &wall.cut.faces[index];
+        for k in 0..face.len() {
+            gizmos.line(out(face[k]), out(face[(k + 1) % face.len()]), colour);
         }
     }
     let scale = match controls.spall {
@@ -1596,10 +1523,6 @@ fn draw_wall(
         }
     }
     let marker = Color::srgb(1.0, 0.95, 0.5);
-    if let Some((at, radius, push)) = log.point {
-        gizmos.sphere(Isometry3d::from_translation(at), radius, marker);
-        gizmos.arrow(at - push * 0.6, at, marker);
-    }
     if let Some((origin, radius, rays)) = &log.blast {
         gizmos.sphere(Isometry3d::from_translation(*origin), *radius, marker);
         for &end in rays {
@@ -1696,21 +1619,9 @@ fn joules(e: f32) -> String {
     }
 }
 
-/// `m` metres in m or km.
-fn metres(m: f32) -> String {
-    if m >= 1000.0 {
-        format!("{:.1} km", m / 1000.0)
-    } else if m >= 10.0 {
-        format!("{m:.0} m")
-    } else {
-        format!("{m:.2} m")
-    }
-}
-
-/// The values behind the readout, for the log: the active rule's formula, the material, the
-/// controls, the last deposit's outcome and the lone-point reach each closed-form law gives its
-/// energy, the blast's energy and coupling, the structural check, and the spall today against the
-/// candidate. ASCII.
+/// The values behind the readout, for the log: the material, the controls, the last deposit's
+/// outcome, the blast's energy and coupling, the first structural failure, and the spall today
+/// against the candidate. ASCII.
 fn detail(
     wall: &Wall,
     c: &WallControls,
@@ -1719,15 +1630,8 @@ fn detail(
     last: &Outcome,
 ) -> Vec<String> {
     let m = &wall.material;
-    let joints = &wall.cut.structure.joints;
     let charge = charge_src.blast(MASSES[c.mass], c.cased);
     let mut lines = vec![
-        format!(
-            "WALL PROTOTYPE  law [1-5] {} {}:  {}",
-            c.law.letter(),
-            c.law.name(),
-            c.law.formula()
-        ),
         format!(
             "brick  rho {:.0} kg/m3   fc {:.1} MPa   factor {:.1} ref-mm/m   crush w = {:.2} x fc = {:.1} MJ/m3",
             m.density,
@@ -1737,24 +1641,16 @@ fn detail(
             m.crush / 1.0e6
         ),
         format!(
-            "joint  ft {:.2} MPa   Gf {:.0} J/m2   Em {:.1} GPa   Griffith {:.2}-{:.2} MPa   eta {} (ASSUMED)   c {:.0} m/s",
+            "joint  ft {:.2} MPa   Gf {:.0} J/m2   Em {:.1} GPa   c {:.0} m/s   {} chunks {} joints",
             m.joint_tensile / 1.0e6,
             m.joint_toughness,
             m.modulus / 1.0e9,
-            wall.griffith.0 / 1.0e6,
-            wall.griffith.1 / 1.0e6,
-            model::CRACK_SHARE,
-            m.wave_speed()
-        ),
-        format!(
-            "cut [K] {} {} chunks {} joints   point [P, [ ]] {}",
-            c.cut.label(),
+            m.wave_speed(),
             wall.cut.structure.chunks.len(),
-            joints.len(),
-            joules(ENERGIES[c.energy])
+            wall.cut.structure.joints.len()
         ),
         format!(
-            "blast [O] {:.1} kg [, .] at {:.1} m [; '] {} [V]: {} chemical - {} casing (M/C {:.1}) = {}, p = sqrt(2 C E) = {:.0} N s   structural [U] {}",
+            "blast [O] {:.1} kg [, .] at {:.1} m [; '] {} [V]: {} chemical - {} casing (M/C {:.1}) = {}, p = sqrt(2 C E) = {:.0} N s",
             charge.mass,
             STANDOFFS[c.standoff],
             if c.cased { "cased" } else { "bare" },
@@ -1767,11 +1663,8 @@ fn detail(
             },
             joules(charge.energy),
             charge.momentum,
-            if c.structural { "on" } else { "off" }
         ),
-    ];
-    {
-        lines.push(format!(
+        format!(
             "last: {}: {} into {} chunks -> {} dust, {} local cracks, {} structural cracks in {} sections, {} groups fell ({} chunks)",
             last.what,
             joules(last.deposited),
@@ -1782,55 +1675,39 @@ fn detail(
             last.sections,
             last.groups,
             last.fallen
-        ));
-        if let Some((blast, coupled, momentum)) = last.blast {
-            lines.push(format!(
-                "      blast coupled {} of {} ({:.0} %), {:.0} of {:.0} N s",
-                joules(coupled),
-                joules(blast.energy),
-                100.0 * coupled / blast.energy.max(f32::EPSILON),
-                momentum,
-                blast.momentum
-            ));
-        }
-        if let Some((demand, capacity)) = last.worst {
-            lines.push(format!(
-                "      first structural failure: angular impulse {demand:.0} N s m against sqrt(2 I Gf A) = {capacity:.0} N s m"
-            ));
-        }
-        let area = joints
-            .iter()
-            .map(|joint| joint.area)
-            .fold(0.0_f32, f32::max);
-        let reach: Vec<String> = CrackLaw::ALL
-            .iter()
-            .filter_map(|law| {
-                law.point_reach(last.deposited, m, area)
-                    .map(|r| format!("{} {}", law.letter(), metres(r)))
-            })
-            .collect();
+        ),
+    ];
+    if let Some((blast, coupled, momentum)) = last.blast {
         lines.push(format!(
-            "      lone-point crack reach of {}: {}",
-            joules(last.deposited),
-            reach.join("   ")
-        ));
-        let scale = spall_scale();
-        // `+ 0.0`: an empty sum is −0.0, which would print a sign.
-        let today = log.witness_today.iter().sum::<f32>() + 0.0;
-        let candidate = log.witness_candidate.iter().sum::<f32>() + 0.0;
-        lines.push(format!(
-            "spall [J] showing {}: exit cone S today {} | candidate x{:.4} {}   witness panel total today {} | candidate {}",
-            match c.spall {
-                Spall::Today => "today",
-                Spall::Candidate => "candidate",
-            },
-            joules(last.spall_today),
-            scale,
-            joules(last.spall_today * scale),
-            joules(today),
-            joules(candidate)
+            "      blast coupled {} of {} ({:.0} %), {:.0} of {:.0} N s",
+            joules(coupled),
+            joules(blast.energy),
+            100.0 * coupled / blast.energy.max(f32::EPSILON),
+            momentum,
+            blast.momentum
         ));
     }
+    if let Some((demand, capacity)) = last.worst {
+        lines.push(format!(
+            "      first structural failure: angular impulse {demand:.0} N s m against sqrt(2 I Gf A) = {capacity:.0} N s m"
+        ));
+    }
+    let scale = spall_scale();
+    // `+ 0.0`: an empty sum is -0.0, which would print a sign.
+    let today = log.witness_today.iter().sum::<f32>() + 0.0;
+    let candidate = log.witness_candidate.iter().sum::<f32>() + 0.0;
+    lines.push(format!(
+        "spall [J] showing {}: exit cone S today {} | candidate x{:.4} {}   witness panel total today {} | candidate {}",
+        match c.spall {
+            Spall::Today => "today",
+            Spall::Candidate => "candidate",
+        },
+        joules(last.spall_today),
+        scale,
+        joules(last.spall_today * scale),
+        joules(today),
+        joules(candidate)
+    ));
     lines
 }
 
@@ -1865,7 +1742,7 @@ struct ReadoutParam<'w, 's> {
     >,
 }
 
-/// The readout: one line (the crack rule, the structural check, the last shot), and the help panel
+/// The readout: one line (the last shot), and the help panel
 /// while H has it open. Both show only near the wall, where the range's own H legend stays shut.
 fn update_readout(p: ReadoutParam) {
     if p.wall.is_none() {
@@ -1873,19 +1750,13 @@ fn update_readout(p: ReadoutParam) {
     }
     let c = *p.controls;
     let line = format!(
-        "{} rule ({})  |  structural check {}  |  last: {}  |  H help",
-        {
-            let name = c.law.name();
-            format!("{}{}", name[..1].to_uppercase(), &name[1..])
-        },
-        c.law.letter(),
-        if c.structural { "on" } else { "off" },
+        "{}  |  H help",
         p.log
             .last
             .as_ref()
-            .map_or_else(|| "none".to_string(), last_shot),
+            .map_or_else(|| "no shot yet".to_string(), last_shot),
     );
-    let near = p.camera.translation.distance(WALL_MIN + WALL_SIZE / 2.0) < READOUT_RANGE;
+    let near = p.camera.translation.distance(layout().centre()) < READOUT_RANGE;
     let shown_if = |on: bool| {
         if on {
             Visibility::Inherited
@@ -1910,16 +1781,16 @@ fn update_readout(p: ReadoutParam) {
 
 /// The help panel (H), ASCII: the keys by group, and what each colour on the wall means.
 const HELP: &str = "\
-FIRE     F fire the round   B next round   P point deposit   [ ] its energy
+FIRE     B next round   F fire it
 BLAST    O blast   , . charge mass   ; ' standoff   V cased / bare
-RULES    1-5 crack rule A-E   U structural check   K cut   N new wall
 VIEW     G camera: front, back, witness   J spall: today / candidate
+         N new wall   H this panel
 COLOURS  brick red to glowing yellow chunk = crush capacity spent
          cyan seam outline = cracked by the local push
          magenta seam outline = cracked by the structural check
          grey-blue piece = loose   purple piece = toppled section
          orange / blue rays = spall cone (today's / candidate's)
-         yellow sphere and arrow = point deposit or blast";
+         yellow sphere and rays = blast";
 
 /// The capture script (module doc): stand the camera by the timeline and fire the case once.
 #[derive(SystemParam)]
@@ -1961,11 +1832,6 @@ fn drive_script(mut p: ScriptParam) {
     p.script.done = true;
     match p.script.case {
         Case::Round(round) => start_burst(&mut p.burst, round, &p.rounds, t),
-        Case::Point(energy) => p.queue.0.push(Deposit::Point {
-            energy,
-            at: aim,
-            push: Vec3::NEG_Z,
-        }),
         Case::Blast { mass, standoff } => p.queue.0.push(Deposit::Blast {
             mass,
             standoff,
