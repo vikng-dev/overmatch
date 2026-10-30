@@ -31,6 +31,8 @@
 #     'battle-b||OVERMATCH_BATTLE=1' 'probes-b||OVERMATCH_PROBE_TANKS=30'
 # Caster exclusions (instruments, not product settings): SPIKE_ABLATE=terrain-casters,
 #   tree-casters,house-casters,tank-casters (comma-separated; each removes only that class's casting).
+# SPIKE_ABLATE=terrain-field is the terrain's raster shadow (terrain casting into the cascades, no
+#   baked field, src/terrain_shadow.rs): the A/B for the bake, e.g. 'raster||SPIKE_ABLATE=terrain-field'.
 # Independent stock controls (environment assignments in the third condition field):
 #   SPIKE_SHADOW_FILTER=gaussian|hardware|temporal (per battlefield camera)
 #   SPIKE_SHADOW_SPLITS=40,118.3216,350 (explicit far bounds in metres; selects count and envelope,

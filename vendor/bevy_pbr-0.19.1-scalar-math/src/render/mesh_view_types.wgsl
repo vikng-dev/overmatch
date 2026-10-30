@@ -86,6 +86,19 @@ struct Lights {
     rect_lights: array<RectLight, #{MAX_RECT_LIGHTS}u>,
 };
 
+// OVERMATCH PATCH: the heightfield shadow (`heightfield_shadow.rs`, `GpuHeightfieldShadow`).
+struct HeightfieldShadow {
+    // xy: world XZ of texel (0, 0); z: texels per metre; w: metres per texel.
+    map: vec4<f32>,
+    // xy: the unit horizontal direction toward the light; z: the light's rise per horizontal metre;
+    // w: 1 when the field is bound, 0 when absent.
+    ray: vec4<f32>,
+    // xyz: the direction toward the light the field was baked for; w: unused.
+    light: vec4<f32>,
+    // x: the light's angular radius (rad); y: the least penumbra half-width (m).
+    law: vec4<f32>,
+};
+
 struct Fog {
     base_color: vec4<f32>,
     directional_light_color: vec4<f32>,

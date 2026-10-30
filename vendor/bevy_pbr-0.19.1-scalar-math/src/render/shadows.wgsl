@@ -259,7 +259,65 @@ fn fetch_directional_shadow(
             shadow = mix(shadow, next_shadow, (-view_z - next_near_bound) / (this_far_bound - next_near_bound));
         }
     }
-    return shadow;
+    // OVERMATCH PATCH: the heightfield's own shadow, inside the same cascade envelope.
+    return shadow * fetch_heightfield_shadow(light_id, frag_position.xyz);
+}
+
+// OVERMATCH PATCH: the cosine above which a light's direction is the one the heightfield shadow was
+// baked for. ASSUMED: about 0.8°, far wider than the f32 difference between two derivations of one
+// direction, far narrower than any second light a scene would aim differently.
+const HEIGHTFIELD_SHADOW_SAME_LIGHT: f32 = 0.9999;
+
+// OVERMATCH PATCH: the heightfield shadow's visibility (0..1) at `position`, for directional light
+// `light_id` (`heightfield_shadow.rs`). Each of the four texels around the fragment holds the
+// occluder its own ray toward the light meets; that occluder's line toward the light is carried to
+// the fragment, which is lit above it. A texel whose occluder lies at or behind the fragment (or
+// that records none) has nothing to say about it and is left out; the rest are blended by their
+// bilinear weights. The penumbra is the light's disc seen past the occluder's edge: an edge `depth`
+// above the fragment's ray to the light's centre, `reach` metres away horizontally, stands
+// `depth · cos²(elevation) / reach` radians above it. Outside the field, or for any other light,
+// the field is silent.
+fn fetch_heightfield_shadow(light_id: u32, position: vec3<f32>) -> f32 {
+    let field = &view_bindings::heightfield_shadow;
+    if ((*field).ray.w == 0.0) {
+        return 1.0;
+    }
+    let light = &view_bindings::lights.directional_lights[light_id];
+    if (dot((*light).direction_to_light, (*field).light.xyz) < HEIGHTFIELD_SHADOW_SAME_LIGHT) {
+        return 1.0;
+    }
+    let size = vec2<i32>(textureDimensions(view_bindings::heightfield_shadow_texture));
+    let grid = (position.xz - (*field).map.xy) * (*field).map.z;
+    if (any(grid < vec2<f32>(0.0)) || any(grid > vec2<f32>(size - 1))) {
+        return 1.0;
+    }
+    let cell = min(vec2<i32>(floor(grid)), size - 2);
+    let f = grid - vec2<f32>(cell);
+    var depth = 0.0;
+    var reach = 0.0;
+    var weight = 0.0;
+    for (var k = 0u; k < 4u; k++) {
+        let corner = vec2<u32>(k & 1u, k >> 1u);
+        let occluder = textureLoad(
+            view_bindings::heightfield_shadow_texture, cell + vec2<i32>(corner), 0).rg;
+        // How far the fragment stands toward the light from this texel, m.
+        let ahead = dot(f - vec2<f32>(corner), (*field).ray.xy) * (*field).map.w;
+        if (occluder.y >= 0.0 && occluder.y > ahead) {
+            let w = select(1.0 - f.x, f.x, corner.x == 1u) * select(1.0 - f.y, f.y, corner.y == 1u);
+            depth += w * (occluder.x - (occluder.y - ahead) * (*field).ray.z - position.y);
+            reach += w * (occluder.y - ahead);
+            weight += w;
+        }
+    }
+    if (weight <= 0.0) {
+        return 1.0;
+    }
+    let tan_elevation = (*field).ray.z;
+    let half_width = max(
+        (*field).law.x * (reach / weight) * (1.0 + tan_elevation * tan_elevation),
+        (*field).law.y,
+    );
+    return 1.0 - smoothstep(-half_width, half_width, depth / weight);
 }
 
 fn cascade_debug_visualization(

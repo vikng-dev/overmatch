@@ -62,6 +62,9 @@
 //!   keyed by size), no mask cameras, no bloom on its camera.
 //!   `terrain-casters`, `tree-casters`, `house-casters`, `tank-casters` suppress only casting
 //!   through render policy; receivers and main-view geometry retain their roles.
+//!   `terrain-field` selects the raster terrain shadow instead of the baked one
+//!   (`terrain_shadow`): no field is baked and the terrain casts into the cascades again. Without
+//!   it the terrain casts nothing, so `terrain-casters` changes nothing on the heightmap world.
 //! * `SPIKE_SHADOW_FILTER=gaussian|hardware|temporal`, `SPIKE_SHADOW_SPLITS=<metres,...>` and
 //!   `SPIKE_SHADOW_OVERLAP=<proportion>` independently override stock shadow controls at boot.
 //!   Explicit splits select count and envelope; overlap and filter leave both untouched.
@@ -97,7 +100,7 @@ use crate::trace::{JsonlSink, role_path};
 const PHASE_COUNT_PERIOD_S: f64 = 5.0;
 
 /// Render features removed by `SPIKE_ABLATE` (module doc). Read by `world::light_battlefield_views`
-/// for `env_light`; the other fields act here.
+/// for `env_light` and by `world::spawn_environment` for `terrain_field`; the other fields act here.
 #[derive(Resource, Clone, Copy, Default, Debug)]
 pub(crate) struct Ablate {
     bloom: bool,
@@ -105,6 +108,7 @@ pub(crate) struct Ablate {
     depth_prepass: bool,
     depth_copy: bool,
     ui: bool,
+    pub(crate) terrain_field: bool,
     terrain_casters: bool,
     tree_casters: bool,
     house_casters: bool,
@@ -131,6 +135,7 @@ impl Ablate {
                 "depth_prepass" => ablate.depth_prepass = true,
                 "depth_copy" => ablate.depth_copy = true,
                 "ui" => ablate.ui = true,
+                "terrain-field" => ablate.terrain_field = true,
                 "terrain-casters" => ablate.terrain_casters = true,
                 "tree-casters" => ablate.tree_casters = true,
                 "house-casters" => ablate.house_casters = true,
@@ -271,8 +276,8 @@ fn ablation_instruments(app: &mut App) {
         let ablate = Ablate::parse(&list).unwrap_or_else(|unknown| {
             panic!(
                 "SPIKE_ABLATE: unknown feature {unknown:?} (known: bloom, env_light, \
-                 depth_prepass, depth_copy, ui, terrain-casters, tree-casters, house-casters, \
-                 tank-casters, inset_half, inset_masks, inset_bloom)"
+                 depth_prepass, depth_copy, ui, terrain-field, terrain-casters, tree-casters, \
+                 house-casters, tank-casters, inset_half, inset_masks, inset_bloom)"
             )
         });
         info!("render_cost: ablating {ablate:?}");

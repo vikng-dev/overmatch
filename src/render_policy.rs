@@ -238,6 +238,13 @@ impl VisualScope {
         shadow: ShadowRole::ReceiveOnly,
     };
 
+    /// World geometry whose sun shadow is BAKED (`terrain_shadow`): drawn everywhere and lit, but
+    /// cast into no shadow pass, because every receiver already samples its baked shadow.
+    pub(crate) const BAKED_CASTER: Self = Self {
+        channel: Some(Channel::BattlefieldWorld),
+        shadow: ShadowRole::ReceiveOnly,
+    };
+
     /// Drawn geometry that casts its own shadow and KEEPS INHERITING its channel: the detail side
     /// of a [`CasterSwap`], and the scope of a moving part inside a swapped assembly that its
     /// proxy cannot follow (a gun's pitch frame under a turret's proxy).

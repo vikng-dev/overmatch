@@ -213,6 +213,9 @@ pub(crate) mod terrain_grid;
 /// startup from the SAME decoded grid the collider and oracle read, selected by `VisibilityRange`.
 /// View-only — the oracle, the collider and `height_at` are untouched. See the module doc.
 mod terrain_lod;
+/// The terrain's sun shadow, baked once from the canonical grid toward the fixed sun and sampled by
+/// every lit fragment in place of terrain casters in the cascades. View-only. See the module doc.
+mod terrain_shadow;
 /// The repository-wide gates and the upstream tripwires on the engine.
 #[cfg(test)]
 mod tests;

@@ -29,6 +29,8 @@ mod cluster;
 pub mod contact_shadows;
 #[cfg(feature = "bevy_gltf")]
 mod gltf;
+// OVERMATCH PATCH: see `heightfield_shadow.rs`.
+mod heightfield_shadow;
 use bevy_light::cluster::GlobalClusterSettings;
 use bevy_render::{
     sync_component::SyncComponent,
@@ -72,6 +74,10 @@ pub use cluster::*;
 pub use decal::clustered::ClusteredDecalPlugin;
 pub use extended_material::*;
 pub use fog::*;
+pub use heightfield_shadow::{
+    ExtractedHeightfieldShadow, GpuHeightfieldShadow, HeightfieldShadow, HeightfieldShadowPlugin,
+    HeightfieldShadowUniform,
+};
 pub use light_probe::*;
 pub use lightmap::*;
 pub use material::*;
@@ -239,6 +245,8 @@ impl Plugin for PbrPlugin {
                 ClusteredDecalPlugin,
                 ContactShadowsPlugin,
             ))
+            // OVERMATCH PATCH: see `heightfield_shadow.rs`.
+            .add_plugins(HeightfieldShadowPlugin)
             .add_plugins((
                 decal::ForwardDecalPlugin,
                 SyncComponentPlugin::<DirectionalLight, Self>::default(),

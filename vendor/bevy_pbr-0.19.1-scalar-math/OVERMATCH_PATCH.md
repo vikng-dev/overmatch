@@ -35,6 +35,30 @@ terrain material's track-print sun term uses it (`assets/shaders/terrain_blend.w
 that block, the factor lapses with the light's shadow maps: a light with `shadow_maps_enabled` off,
 or a mesh with `NotShadowReceiver`, ignores it.
 
+## The heightfield shadow (`src/heightfield_shadow.rs`)
+
+A world-anchored occlusion field toward one directional light, which every lit fragment samples:
+
+- `HeightfieldShadow` (main-world resource): an `Rg32Float` image of per-texel occluders (height,
+  distance along the light), its world mapping, the light direction it was baked for, and the
+  light's angular radius, which sets the penumbra from each occluder's distance. Extracted while
+  present, removed when not.
+- Two bindings in EVERY mesh view layout, `@group(0) @binding(39)` (the texture, non-filterable)
+  and `@binding(40)` (`GpuHeightfieldShadow`, a uniform), filled by
+  `prepare_mesh_view_bind_groups` with the field's image once on the GPU and the 2D fallback
+  image before that. The uniform's `ray.w` says whether the field is bound.
+- `shadows.wgsl`: `fetch_directional_shadow` multiplies its cascade result by
+  `fetch_heightfield_shadow` for the light whose direction matches the field's, after the cascade
+  envelope check, so the field ends where the light's cascades end and is skipped wherever the
+  light casts no shadow or the mesh receives none.
+- `GpuHeightfieldShadow::from_field` is public so the application can run the shader's receiver
+  law against its own fields on a headless device (`src/terrain_shadow.rs` tests).
+
+Upstream has the hook (`directional_shadow_factor`) but no shared field: there, every material
+that wants the heightfield's shadow samples its own. Here the field is in the view bindings because
+every receiver (terrain, vehicles, trees, buildings) must see a ridge's shadow, and most of them
+are glTF `StandardMaterial`s.
+
 ## Retired: shadow views inherit the light's `RenderLayers`
 
 The 0.19.0 vendor also carried a backport of bevyengine/bevy #24797. 0.19.1 ships it (upstream's

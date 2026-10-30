@@ -59,18 +59,21 @@
 //! per-channel rules nobody can hold in their head. All figures MEASURED on the shipped map,
 //! 2026-08-02.
 //!
-//! 1. **Shadows.** Terrain casts under the shipped 17° sun, and the vendored
-//!    `check_dir_light_mesh_visibility` consults `VisibilityRange` while collecting directional
-//!    shadow casters, so a switched level casts the switched shadow — the shadow pass selects the
-//!    same LOD the main camera did. A vertical occluder change `δh` moves its shadow edge
-//!    horizontally by `δh·cot 17° ≈ 3.27 δh` on a flat receiver, and further where the ground runs
-//!    near-parallel to the light — so the positional rung underprices it by 3.27×. DERIVED from the
-//!    worst kept level (0.4946 m at the 50 cm rung) the edge can move ~1.6 m in world space. On
-//!    screen it is much smaller, because a horizontal displacement seen from tank height is heavily
-//!    foreshortened and because a level is only shown at or beyond the distance where its own
-//!    deviation is sub-pixel: the worst edge shift reads as ~1–2 px on this map at `ShadowDistance`
-//!    m1000, which is the setting at which the cascades reach the ranges where coarse levels are
-//!    selected at all. Below m1000 there is nothing to see.
+//! 1. **Shadows.** While the terrain's sun shadow is the baked field (`terrain_shadow`), no level
+//!    casts: the field reads the canonical grid. A level still RECEIVES at its own height, so an
+//!    edge on it moves by its deviation times `cot 17°`, the same factor as below. What follows is
+//!    the raster arm (`SPIKE_ABLATE=terrain-field`). Terrain casts under the shipped 17° sun, and
+//!    the vendored `check_dir_light_mesh_visibility` consults `VisibilityRange` while collecting
+//!    directional shadow casters, so a switched level casts the switched shadow — the shadow pass
+//!    selects the same LOD the main camera did. A vertical occluder change `δh` moves its shadow
+//!    edge horizontally by `δh·cot 17° ≈ 3.27 δh` on a flat receiver, and further where the
+//!    ground runs near-parallel to the light — so the positional rung underprices it by 3.27×.
+//!    DERIVED from the worst kept level (0.4946 m at the 50 cm rung) the edge can move ~1.6 m in
+//!    world space. On screen it is much smaller, because a horizontal displacement seen from tank
+//!    height is heavily foreshortened and because a level is only shown at or beyond the distance
+//!    where its own deviation is sub-pixel: the worst edge shift reads as ~1–2 px on this map at
+//!    `ShadowDistance` m1000, which is the setting at which the cascades reach the ranges where
+//!    coarse levels are selected at all. Below m1000 there is nothing to see.
 //!
 //! 2. **Grazing-LOS first-hit slide.** Projected error cannot see motion ALONG a pixel ray. Near
 //!    tangency the intersection satisfies `δt ≈ δh / (d_y − ∇h·d_xz)`, whose denominator goes to
@@ -119,6 +122,7 @@ use bevy::camera::visibility::{NoAutoAabb, VisibilityRange};
 use bevy::mesh::{Indices, Mesh, PrimitiveTopology};
 use bevy::prelude::*;
 
+use crate::render_policy::VisualScope;
 use crate::terrain_grid::{
     HeightGrid, MESH_TILE_CELLS, TERRAIN_MESH_USAGE, TEXTURE_TILE_M, mesh_tile_node_ranges,
     node_world_coord, surface_normal_at,
@@ -835,12 +839,17 @@ fn generate_tangents(lod: &mut TerrainLod) {
 /// authored surface, over-detailed rather than under-detailed, until [`adapt_ranges`] rewrites
 /// every threshold on the first frame that has facts. A seeded profile would be a guess at the
 /// player's field and screen, and a guess is what this whole shape removes.
+///
+/// Every level carries `scope`: [`VisualScope::BAKED_CASTER`] when the terrain's sun shadow is the
+/// baked field (`terrain_shadow`), so no level casts into the cascades, or
+/// [`VisualScope::WORLD_SOLID`] when the cascades carry it.
 pub(crate) fn spawn(
     commands: &mut Commands,
     meshes: &mut Assets<Mesh>,
     material: &Handle<crate::terrain_blend::TerrainMaterial>,
     grid: &HeightGrid,
     view: Option<ViewProfile>,
+    scope: VisualScope,
 ) {
     let mut lod = build(grid);
     let tangents_started = Instant::now();
@@ -884,6 +893,7 @@ pub(crate) fn spawn(
                 Transform::IDENTITY,
                 Mesh3d(meshes.add(mesh)),
                 crate::render_cost::CasterClass::Terrain,
+                scope,
                 MeshMaterial3d(material.clone()),
                 // The pinned anchor: the SAME bounds on every level of the tile, and no auto-AABB
                 // to overwrite them on the spawn-frame `Changed<Mesh3d>` (module doc).

@@ -130,6 +130,10 @@ const VISIBILITY_RANGE_UNIFORM_BUFFER_SIZE: u32 = 64u;
 @group(0) @binding(38) var dfg_lut_sampler: sampler;
 #endif // DFG_LUT
 
+// OVERMATCH PATCH: the heightfield shadow (`heightfield_shadow.rs`), bound in every layout.
+@group(0) @binding(39) var heightfield_shadow_texture: texture_2d<f32>;
+@group(0) @binding(40) var<uniform> heightfield_shadow: types::HeightfieldShadow;
+
 #ifdef ENVIRONMENT_MAP
 #ifdef MULTIPLE_LIGHT_PROBES_IN_ARRAY
 @group(1) @binding(0) var diffuse_environment_maps: binding_array<texture_cube<f32>, 8u>;

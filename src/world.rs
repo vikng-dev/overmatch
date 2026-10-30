@@ -81,11 +81,32 @@ pub(crate) fn sun_light() -> DirectionalLight {
     }
 }
 
-/// Unit vector pointing FROM the scene TOWARD the sun, from [`SUN_ELEVATION_DEG`] /
+/// The sun's elevation, degrees: [`SUN_ELEVATION_DEG`], or under `dev_tools` the evaluation lever
+/// `OVERMATCH_SUN_ELEVATION=<deg>` (between 0 and 90, exclusive; anything else is logged and the
+/// shipped sun stands). The lever moves the key light, its sky and the baked terrain shadow
+/// (`terrain_shadow`) together, so a capture can judge terrain shadows on a map whose slopes stay
+/// under the shipped sun. The illuminance is not rebalanced: a lower sun reads darker.
+fn sun_elevation_deg() -> f32 {
+    if !cfg!(feature = "dev_tools") {
+        return SUN_ELEVATION_DEG;
+    }
+    let Some(spec) = crate::env_value("OVERMATCH_SUN_ELEVATION") else {
+        return SUN_ELEVATION_DEG;
+    };
+    match spec.trim().parse::<f32>() {
+        Ok(degrees) if degrees > 0.0 && degrees < 90.0 => degrees,
+        _ => {
+            warn!("OVERMATCH_SUN_ELEVATION: want degrees in (0, 90), got {spec:?}; shipped sun");
+            SUN_ELEVATION_DEG
+        }
+    }
+}
+
+/// Unit vector pointing FROM the scene TOWARD the sun, from [`sun_elevation_deg`] /
 /// [`SUN_AZIMUTH_DEG`]. The one place that turns the two angles into a direction, so the key light
 /// and the sky it is embedded in can never disagree about where the sun is.
 fn toward_sun() -> Vec3 {
-    let (sin_elevation, cos_elevation) = SUN_ELEVATION_DEG.to_radians().sin_cos();
+    let (sin_elevation, cos_elevation) = sun_elevation_deg().to_radians().sin_cos();
     let (sin_azimuth, cos_azimuth) = SUN_AZIMUTH_DEG.to_radians().sin_cos();
     Vec3::new(
         cos_elevation * cos_azimuth,
@@ -488,7 +509,8 @@ fn report_failed_terrain_map(
 
 #[expect(
     clippy::too_many_arguments,
-    reason = "spawns the environment: four asset stores, terrain, map, window, view profile and loader"
+    reason = "spawns the environment: four asset stores, terrain, map, window, view profile, loader \
+              and the ablation lever"
 )]
 fn spawn_environment(
     mut commands: Commands,
@@ -507,6 +529,8 @@ fn spawn_environment(
     // `terrain_lod::adapt_ranges` writes the real thresholds on the first frame with facts.
     view: Option<Res<crate::view::ViewProfile>>,
     asset_server: Res<AssetServer>,
+    // `SPIKE_ABLATE=terrain-field` selects the raster terrain shadow (`render_cost`).
+    ablate: Option<Res<crate::render_cost::Ablate>>,
 ) {
     let mut blocks: Vec<Transform> = Vec::new();
     // The sun (see [`sun_light`]). NO cascade config is spawned here on purpose: `settings::
@@ -678,12 +702,25 @@ fn spawn_environment(
             // distance bevy switches them in. Generated HERE, from the in-memory grid, so there is
             // no build product that can go stale against the surface the sim reads. Tangent
             // generation (ADR-0011, required with no fallback) happens per level inside `spawn`.
+            //
+            // The ground's sun shadow is baked from the same grid (`terrain_shadow`) and every
+            // receiver samples it, so no level casts into the cascades; the raster arm keeps them
+            // casting.
+            let baked = !ablate.as_deref().is_some_and(|ablate| ablate.terrain_field);
+            if baked {
+                crate::terrain_shadow::install(&mut commands, &mut images, &grid, toward_sun());
+            }
             crate::terrain_lod::spawn(
                 &mut commands,
                 &mut meshes,
                 &material,
                 &grid,
                 view.as_deref().copied(),
+                if baked {
+                    crate::render_policy::VisualScope::BAKED_CASTER
+                } else {
+                    crate::render_policy::VisualScope::WORLD_SOLID
+                },
             );
         }
         // The map's object scatter (`scatter`): graybox proxies posed from the shipped level file
