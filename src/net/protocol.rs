@@ -820,13 +820,23 @@ fn publish_launched_turret_pose(
 /// in shared code, exactly like [`apply_servo_angles`]. Two phases keyed off whether the client's
 /// `Rig.turret` has been detached yet (`LaunchedTurret` presence — the one-time guard):
 ///   - Not yet detached: strip the servo attachment (`ChildOf` + the three servo components) and
-///     re-spawn the turret as a free `Kinematic` body seeded AT the authoritative pose. `Position`/
+///     re-spawn the turret as a free `Static` body seeded AT the authoritative pose. `Position`/
 ///     `Rotation` go in the tuple BEFORE `RigidBody` (the placeholder-NaN discipline — a body must
 ///     never flush with a `PLACEHOLDER` pose). Inserting `LaunchedTurret` fires the existing
 ///     `detach_view_on_turret_launch` observer, which reparents the glb turret subtree for free.
-///   - Already detached: write the pose straight onto the (kinematic) turret's `Position`/`Rotation`
-///     — avian never overrides a kinematic body's pose, so this direct write IS the kinematic drive
-///     that tracks the server's flying-then-resting turret. `set_if_neq` to avoid at-rest churn.
+///   - Already detached: write the pose straight onto the turret's `Position`/`Rotation` — avian
+///     never moves a static body, so this direct write is the turret's only drive, tracking the
+///     server's flying-then-resting turret. `set_if_neq` to avoid at-rest churn.
+///
+/// `Static`, never `Kinematic` or `Dynamic`: every body in the client's physics world is static
+/// (the replica hulls are, [`super::rig::attach_replicated_rig`]), avian's broad phase never pairs
+/// two static bodies, so no contact constraint exists on the client. The client's physics step
+/// relies on that. A resync of lightyear's interpolation timeline removes `Position` from every
+/// replica hull for a frame (`queue_history_presence` in `lightyear_interpolation` 0.30.1), and
+/// avian 0.7 keeps the constraints of a pair whose body leaves its body query, then adds them again
+/// when the body returns, so its solver indexes past the pair's manifolds and panics
+/// (`upstream/avian-body-query-gap-stale-constraints.md`, pinned by
+/// `src/tests/avian_body_query_gap.rs`). A kinematic turret resting on a hull is such a pair.
 ///
 /// Borrow structure: `tanks` reads the tank ROOT (`Rig`/`LaunchedTurretPose`), `launched` is the
 /// read-only detach guard, and `poses` mutates the TURRET's `Position`/`Rotation` — three disjoint
@@ -842,7 +852,7 @@ fn apply_launched_turret_pose(
             continue;
         };
         if launched.contains(rig.turret) {
-            // Already detached: kinematically drive the free turret to the authoritative pose.
+            // Already detached: move the free turret to the authoritative pose.
             if let Ok((mut p, mut r)) = poses.get_mut(rig.turret) {
                 p.set_if_neq(Position(position));
                 r.set_if_neq(Rotation(rotation));
@@ -856,7 +866,7 @@ fn apply_launched_turret_pose(
                 .insert((
                     Position(position),
                     Rotation(rotation),
-                    RigidBody::Kinematic,
+                    RigidBody::Static,
                     LaunchedTurret,
                 ));
         }
@@ -1005,7 +1015,7 @@ pub(crate) fn plugin(app: &mut App) {
     // replicating private crew, module, ammunition, or belt facts.
     app.component::<NetTankStatus>().replicate();
     // Authoritative launched-turret world pose (same plain-replication shape): the client shows the
-    // cooked-off toss it does NOT simulate locally, driving its own rig turret kinematically.
+    // cooked-off toss it does NOT simulate locally, writing the pose onto its own rig turret.
     app.component::<LaunchedTurretPose>().replicate();
     // The destruction ledger (one world entity): appended entries ride as diffs, a late joiner
     // takes the list once.
@@ -1241,6 +1251,102 @@ mod tests {
             position.distance(Vec3::new(40.0, 2.0, -15.0)) < 1e-4,
             "a Transform-only static body must spawn at its transform, got {position:?}"
         );
+    }
+
+    /// The client's physics world holds no contact constraint, and a launched turret is the body
+    /// that would bring one: it lands on or beside a hull. A resync of lightyear's interpolation
+    /// timeline takes `Position` off every replica hull for a frame, and avian 0.7 re-adds a
+    /// constraint it kept through that gap, so its solver panics
+    /// (`src/tests/avian_body_query_gap.rs`). A turret launched as any non-static body reds the
+    /// zero-constraint assertion; the gap below replays a resync.
+    #[test]
+    fn a_launched_turret_on_a_replica_hull_holds_no_contact_constraint() {
+        use avian3d::dynamics::solver::constraint_graph::ConstraintGraph;
+        use avian3d::prelude::Collider;
+
+        let mut app = crate::net::test_harness::net_physics_app();
+        super::super::physics::plugin(&mut app);
+        app.add_systems(FixedUpdate, apply_launched_turret_pose);
+        crate::net::test_harness::finish(&mut app);
+        let constraints = |app: &App| -> usize {
+            app.world()
+                .resource::<ConstraintGraph>()
+                .colors
+                .iter()
+                .map(|color| color.manifold_handles.len())
+                .sum()
+        };
+
+        // A replica hull as `rig::attach_replicated_rig` leaves it, and its turret: the turret's
+        // box sits 5 cm into the hull's, so a non-static turret touches the hull from its launch.
+        let hull_at = Vec3::new(0.0, 1.0, 0.0);
+        let resting = hull_at + Vec3::Y * 0.95;
+        let world = app.world_mut();
+        let root = world
+            .spawn((
+                Remote,
+                RigidBody::Static,
+                Position(hull_at),
+                Rotation::default(),
+            ))
+            .id();
+        world.spawn((
+            ChildOf(root),
+            Transform::IDENTITY,
+            Collider::cuboid(3.0, 1.0, 6.0),
+        ));
+        let turret = world
+            .spawn((
+                ChildOf(root),
+                Transform::from_translation(resting - hull_at),
+            ))
+            .id();
+        world.spawn((
+            ChildOf(turret),
+            Transform::IDENTITY,
+            Collider::cuboid(2.0, 1.0, 2.0),
+        ));
+        world.entity_mut(root).insert((
+            Rig {
+                hull: root,
+                turret,
+                gun: turret,
+                muzzle: turret,
+            },
+            LaunchedTurretPose(Some((resting, Quat::IDENTITY))),
+        ));
+
+        for _ in 0..4 {
+            app.update();
+            assert_eq!(
+                constraints(&app),
+                0,
+                "a launched turret joined a contact constraint"
+            );
+        }
+        assert!(
+            app.world().get::<LaunchedTurret>(turret).is_some(),
+            "the turret launched"
+        );
+        assert_eq!(
+            app.world().get::<Position>(turret).map(|p| p.0),
+            Some(resting),
+            "the launched turret rests at the authoritative pose"
+        );
+
+        // The resync: `Position` off the hull for one step, then back.
+        let pose = *app.world().get::<Position>(root).expect("the hull's pose");
+        app.world_mut().entity_mut(root).remove::<Position>();
+        app.update();
+        app.world_mut().entity_mut(root).insert(pose);
+        for _ in 0..4 {
+            app.update();
+            assert_eq!(
+                constraints(&app),
+                0,
+                "a contact constraint survived the resync"
+            );
+        }
     }
 
     #[test]
