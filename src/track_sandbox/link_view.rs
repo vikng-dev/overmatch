@@ -48,7 +48,7 @@ struct LinkPool(PerSide<Option<Entity>>);
 ///
 /// The link count is LIVE (`;` / `'` retunes it and rebuilds [`RigGeom`] under the running rig), so
 /// a count change resizes the belt's table in place and gives the belt a draw of the new size: the
-/// repeated mesh of that count, and a buffer and material sized to the table.
+/// repeated mesh of that count, and a block of the shared table sized to it.
 fn sync_link_pool(
     mut commands: Commands,
     template: Res<LinkTemplate>,

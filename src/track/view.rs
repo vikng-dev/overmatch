@@ -398,7 +398,7 @@ fn bind_track_rigs(
     node_transforms: Query<&Transform>,
     primitives: Query<&Mesh3d>,
     // The belt's draw: its repeated meshes (and the sprocket's, read for the tooth ring), the
-    // shoe's material and each belt's own buffer and material.
+    // shoe's material, and each belt's block of the shared table.
     mut belt_assets: BeltAssets,
     mut commands: Commands,
 ) {

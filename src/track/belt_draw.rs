@@ -6,15 +6,34 @@
 //! A belt's mesh is its rung's shoe repeated once per material link ([`repeated_shoe`]): the
 //! authored geometry untouched, every vertex tagged with the link it belongs to
 //! ([`ATTRIBUTE_BELT_LINK`]). The vertex shader (`shaders/track_belt_mesh.wgsl`, placing through
-//! `shaders/track_belt.wgsl`) reads that link's span from the belt's storage buffer and places the
-//! vertex rigidly, as [`BeltFrames::pose`] places the shoe on the CPU: the template correction, the
-//! swing about the belt's lateral axis onto the chord, the anchor. A shoe is never stretched or bent.
+//! `shaders/track_belt.wgsl`) reads that link's span from the belt's block of the shared table and
+//! places the vertex rigidly, as [`BeltFrames::pose`] places the shoe on the CPU: the template
+//! correction, the swing about the belt's lateral axis onto the chord, the anchor. A shoe is never
+//! stretched or bent.
 //!
 //! The material is the shoe's own `StandardMaterial` extended by [`BeltShoes`], so the belt rides
 //! every phase that material rides: opaque, depth prepass and shadow. The extension supplies a
 //! prepass vertex shader, which is also what makes bevy bind the material in its depth-only
 //! prepass and shadow paths (`prepass_reads_material`); without it those paths would draw the
 //! undeformed stack.
+//!
+//! # One material per look, one block per belt
+//!
+//! Every belt is drawn from a shared table ([`BeltTable`]): pages of 16-byte records, each belt
+//! owning one block of [`HEADER_RECORDS`] placement constants followed by one span per material
+//! link. The belt's `MeshTag` is its block's first record, which the vertex stage reads through
+//! `mesh_functions::get_tag`. Every belt of one look on one page wears ONE material, so belts of
+//! the same count, rung and side batch across tanks: bevy keys a batch set on the material's bind
+//! group (`Opaque3dBatchSetKey::material_bind_group_index`) and a batch on the mesh, never on the
+//! tag. DERIVED: one page holds 81 blocks of a 97-link belt.
+//!
+//! A page never changes size. A same-size `ShaderBuffer` write lands in the same GPU buffer
+//! (`GpuShaderBuffer::prepare_asset`), so a material's bind group stays valid for the session;
+//! a resized buffer would leave every material bound to the old one, because nothing re-prepares
+//! a material when a buffer it binds changes. A belt that fits no page opens a new page, with its
+//! own material per look. A block is released when its [`BeltDraw`] leaves the belt (despawn, or a
+//! new draw replacing it) and handed to the next belt that fits; pages and their materials live
+//! for the session.
 //!
 //! The rejected adapter is custom instancing (bevy 0.19's `custom_shader_instancing` example):
 //! it queues its own phase item with its own pipeline, so it would have to rebuild, for the shoe,
@@ -40,13 +59,11 @@
 //! implies. Drawing one shoe `count` times without a count-sized mesh needs a draw command of its
 //! own, which is the custom-instancing adapter above.
 //!
-//! # Per-belt assets
+//! # Upload
 //!
-//! A belt owns its storage buffer and its material ([`BeltDraw`]): `count` records of 16 bytes, one
-//! per material link, rewritten whenever the table changes. `ShaderBuffer` writes an unchanged size
-//! into the same GPU buffer, so the material's bind group stays valid. Both assets go with the belt
-//! entity. The repeated meshes are shared by every belt of one link count, side and rung
-//! ([`BeltMeshes`]).
+//! A changed belt table is written into its block in place; each written page is marked modified
+//! once per frame, and reaches the GPU whole (DERIVED 128 KiB a page). A settled belt's table is
+//! unchanged and writes nothing.
 //!
 //! # Bounds
 //!
@@ -54,12 +71,16 @@
 //! carries [`NoAutoAabb`] and an [`Aabb`] written from its table ([`BeltFrames::bounds`]): every
 //! anchor grown by the shoe's canonical reach.
 
+use std::ops::Range;
+
 use bevy::asset::RenderAssetUsages;
 use bevy::camera::primitives::Aabb;
 use bevy::camera::visibility::{NoAutoAabb, VisibilitySystems};
+use bevy::ecs::lifecycle::HookContext;
 use bevy::ecs::system::SystemParam;
+use bevy::ecs::world::DeferredWorld;
 use bevy::mesh::{
-    Indices, MeshVertexAttribute, MeshVertexBufferLayoutRef, PrimitiveTopology,
+    Indices, MeshTag, MeshVertexAttribute, MeshVertexBufferLayoutRef, PrimitiveTopology,
     VertexAttributeValues, VertexFormat,
 };
 use bevy::pbr::{
@@ -68,7 +89,7 @@ use bevy::pbr::{
 use bevy::platform::collections::HashMap;
 use bevy::prelude::*;
 use bevy::render::render_resource::{
-    AsBindGroup, RenderPipelineDescriptor, ShaderType, SpecializedMeshPipelineError,
+    AsBindGroup, RenderPipelineDescriptor, SpecializedMeshPipelineError,
 };
 use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
@@ -87,37 +108,24 @@ pub(crate) const LINK_LOCATION: u32 = 15;
 /// The belt's vertex shader, for the main pass and the prepass alike (`PREPASS_PIPELINE` selects).
 const MESH_SHADER: &str = "shaders/track_belt_mesh.wgsl";
 
-/// The per-side constants of the placement, `shaders/track_belt.wgsl`'s `BeltParams`.
-#[derive(ShaderType, Reflect, Debug, Clone, Copy, Default, PartialEq)]
-pub(crate) struct BeltParams {
-    /// Mesh → canonical rotation ([`super::link_view::LinkFrame`]).
-    correction: Mat3,
-    /// The canonical origin in mesh space.
-    origin: Vec3,
-    /// The shoe's lateral centre in the belt's frame.
-    lateral_x: f32,
-}
+/// Bytes in one table record: one `vec4<f32>`.
+const RECORD_BYTES: usize = 16;
 
-impl BeltParams {
-    /// The constants `frames`' shoes are placed with.
-    pub(crate) fn of(frames: &BeltFrames) -> Self {
-        let (correction, origin) = frames.frame().correction_and_origin();
-        Self {
-            correction,
-            origin,
-            lateral_x: frames.lateral_x(),
-        }
-    }
-}
+/// Records a belt's block starts with, before its spans: the mesh → canonical rotation's three
+/// columns (`xyz`), then the canonical origin in mesh space (`xyz`) and the shoe's lateral centre
+/// in the belt's frame (`w`). `shaders/track_belt.wgsl`'s `belt_at` reads them in this order.
+const HEADER_RECORDS: u32 = 4;
 
-/// The belt's half of its material: the placement constants and the table's GPU copy.
+/// Records in one table page: 128 KiB. A page never changes size (module doc).
+const PAGE_RECORDS: u32 = 8192;
+
+/// The belt's half of its material: the table page its belts' blocks live in.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 pub(crate) struct BeltShoes {
-    #[uniform(100)]
-    pub(crate) params: BeltParams,
-    /// One `vec4` per material link: the span's joints `(a.z, a.y, b.z, b.y)`.
-    #[storage(101, read_only)]
-    pub(crate) frames: Handle<ShaderBuffer>,
+    /// Every belt's block on this page, at the record its `MeshTag` names: [`HEADER_RECORDS`]
+    /// placement constants, then one span `(a.z, a.y, b.z, b.y)` per material link.
+    #[storage(100, read_only)]
+    pub(crate) table: Handle<ShaderBuffer>,
 }
 
 impl MaterialExtension for BeltShoes {
@@ -162,13 +170,169 @@ pub(crate) fn bind_link_attribute(
     Ok(())
 }
 
-/// A belt's table buffer, released with the belt (its material goes with its
-/// `MeshMaterial3d<BeltMaterial>`, or with whatever dressed it in another look).
+/// A belt's block of the shared table, and its bounds' growth.
+///
+/// Immutable, so the block it names is the one the table lent: the `on_discard` hook gives the
+/// block back whenever this component leaves the belt, by despawn or by a new draw replacing it.
 #[derive(Component)]
+#[component(immutable, on_discard = BeltDraw::release)]
 pub(crate) struct BeltDraw {
-    frames: Handle<ShaderBuffer>,
+    page: usize,
+    /// Records of `page`: the header, then one span per material link.
+    block: Range<u32>,
     /// The farthest any vertex of any rung of this side's shoe stands from the canonical origin, m.
     reach: f32,
+}
+
+impl BeltDraw {
+    fn release(mut world: DeferredWorld, HookContext { entity, .. }: HookContext) {
+        let Some(draw) = world.entity(entity).get::<Self>() else {
+            return;
+        };
+        let (page, block) = (draw.page, draw.block.clone());
+        if let Some(mut table) = world.get_resource_mut::<BeltTable>() {
+            table.release(page, block);
+        }
+    }
+}
+
+/// The shared table every belt is drawn from: pages that never change size, each lent out in
+/// blocks (module doc).
+#[derive(Resource, Default)]
+pub(crate) struct BeltTable {
+    pages: Vec<TablePage>,
+}
+
+/// One page of the [`BeltTable`].
+struct TablePage {
+    buffer: Handle<ShaderBuffer>,
+    /// The records no belt holds: ascending, never adjacent.
+    free: Vec<Range<u32>>,
+    /// This page's material per look, keyed by the shoe's own `StandardMaterial`.
+    looks: HashMap<AssetId<StandardMaterial>, Handle<BeltMaterial>>,
+}
+
+impl TablePage {
+    /// The first free block of `records`, taken.
+    fn take(&mut self, records: u32) -> Option<Range<u32>> {
+        let index = self
+            .free
+            .iter()
+            .position(|free| free.end - free.start >= records)?;
+        let free = &mut self.free[index];
+        let block = free.start..free.start + records;
+        free.start = block.end;
+        if free.start == free.end {
+            self.free.remove(index);
+        }
+        Some(block)
+    }
+
+    /// `block` given back, merged with the free records beside it.
+    fn give(&mut self, block: Range<u32>) {
+        let at = self.free.partition_point(|free| free.start < block.start);
+        self.free.insert(at, block);
+        if at + 1 < self.free.len() && self.free[at].end == self.free[at + 1].start {
+            let next = self.free.remove(at + 1);
+            self.free[at].end = next.end;
+        }
+        if at > 0 && self.free[at - 1].end == self.free[at].start {
+            let this = self.free.remove(at);
+            self.free[at - 1].end = this.end;
+        }
+    }
+}
+
+impl BeltTable {
+    /// A block of `records`: the first page with room, or a new page of at least [`PAGE_RECORDS`].
+    fn lend(&mut self, records: u32, buffers: &mut Assets<ShaderBuffer>) -> (usize, Range<u32>) {
+        for (index, page) in self.pages.iter_mut().enumerate() {
+            if let Some(block) = page.take(records) {
+                return (index, block);
+            }
+        }
+        let capacity = records.max(PAGE_RECORDS);
+        let mut page = TablePage {
+            buffer: buffers.add(ShaderBuffer::new(
+                &vec![0; capacity as usize * RECORD_BYTES],
+                RenderAssetUsages::MAIN_WORLD | RenderAssetUsages::RENDER_WORLD,
+            )),
+            free: vec![Range {
+                start: 0,
+                end: capacity,
+            }],
+            looks: HashMap::default(),
+        };
+        let block = page
+            .take(records)
+            .expect("a new page holds its first block");
+        self.pages.push(page);
+        (self.pages.len() - 1, block)
+    }
+
+    fn release(&mut self, page: usize, block: Range<u32>) {
+        if let Some(page) = self.pages.get_mut(page) {
+            page.give(block);
+        }
+    }
+
+    /// The material every belt of `look` on `page` wears, made on the first.
+    fn material(
+        &mut self,
+        page: usize,
+        look: &Handle<StandardMaterial>,
+        base: &StandardMaterial,
+        materials: &mut Assets<BeltMaterial>,
+    ) -> Handle<BeltMaterial> {
+        let TablePage { buffer, looks, .. } = &mut self.pages[page];
+        looks
+            .entry(look.id())
+            .or_insert_with(|| {
+                materials.add(BeltMaterial {
+                    base: base.clone(),
+                    extension: BeltShoes {
+                        table: buffer.clone(),
+                    },
+                })
+            })
+            .clone()
+    }
+}
+
+/// `value` written as table record `record` of a page's bytes.
+fn write_record(bytes: &mut [u8], record: u32, value: Vec4) {
+    let start = record as usize * RECORD_BYTES;
+    for (lane, component) in bytes[start..start + RECORD_BYTES]
+        .as_chunks_mut::<4>()
+        .0
+        .iter_mut()
+        .zip(value.to_array())
+    {
+        *lane = component.to_le_bytes();
+    }
+}
+
+/// `frames`' header written at the start of `block`.
+fn write_header(bytes: &mut [u8], block: &Range<u32>, frames: &BeltFrames) {
+    let (correction, origin) = frames.frame().correction_and_origin();
+    let header = [
+        correction.x_axis.extend(0.0),
+        correction.y_axis.extend(0.0),
+        correction.z_axis.extend(0.0),
+        origin.extend(frames.lateral_x()),
+    ];
+    for (record, value) in (block.start..).zip(header) {
+        write_record(bytes, record, value);
+    }
+}
+
+/// `frames`' spans written after `block`'s header: one `(a.z, a.y, b.z, b.y)` per material link,
+/// as many as the block holds.
+fn write_spans(bytes: &mut [u8], block: &Range<u32>, frames: &BeltFrames) {
+    for (record, link) in (block.start + HEADER_RECORDS..block.end).zip(0..frames.count()) {
+        let [a, b] = frames.span(link).joints();
+        write_record(bytes, record, Vec4::new(a.x, a.y, b.x, b.y));
+    }
 }
 
 /// The repeated meshes, per link count: each count's verdict, and the rungs its belts have drawn.
@@ -432,6 +596,7 @@ pub(crate) struct BeltAssets<'w> {
     materials: ResMut<'w, Assets<BeltMaterial>>,
     buffers: ResMut<'w, Assets<ShaderBuffer>>,
     cache: ResMut<'w, BeltMeshes>,
+    table: ResMut<'w, BeltTable>,
 }
 
 impl BeltAssets<'_> {
@@ -444,8 +609,12 @@ impl BeltAssets<'_> {
     }
 
     /// Everything a belt drawing `frames` on `side` carries, at rung 0: its mesh (built here if no
-    /// belt of its count has drawn rung 0 yet), its own material and buffer, and its bounds. `None`
-    /// until [`Self::ready`].
+    /// belt of its count has drawn rung 0 yet), its look's shared material, its block of the table
+    /// (`MeshTag` and [`BeltDraw`]) written with its header and spans, and its bounds. `None` until
+    /// [`Self::ready`].
+    ///
+    /// The block is lent here and given back when the [`BeltDraw`] leaves an entity, so a caller
+    /// spawns or inserts the bundle it is handed.
     pub(crate) fn draw(
         &mut self,
         template: &LinkTemplate,
@@ -455,41 +624,34 @@ impl BeltAssets<'_> {
         if !self.ready(template, frames.count()) {
             return None;
         }
+        let records = HEADER_RECORDS.checked_add(u32::try_from(frames.count()).ok()?)?;
         let mesh = self
             .cache
             .rung_or_build(frames.count(), 0, side, template, &mut self.meshes)?;
         let reach = self.cache.reach(frames.count(), side)?;
-        let base = self.standard.get(template.material())?.clone();
-        let buffer = self.buffers.add(ShaderBuffer::from(records(frames)));
-        let material = self.materials.add(BeltMaterial {
-            base,
-            extension: BeltShoes {
-                params: BeltParams::of(frames),
-                frames: buffer.clone(),
-            },
-        });
+        let base = self.standard.get(template.material())?;
+        let (page, block) = self.table.lend(records, &mut self.buffers);
+        let material = self
+            .table
+            .material(page, template.material(), base, &mut self.materials);
+        if let Some(bytes) = self
+            .buffers
+            .get_mut(&self.table.pages[page].buffer)
+            .and_then(|buffer| buffer.into_inner().data.as_mut())
+        {
+            write_header(bytes, &block, frames);
+            write_spans(bytes, &block, frames);
+        }
         let (low, high) = frames.bounds(reach);
         Some((
             Mesh3d(mesh),
             MeshMaterial3d(material),
-            BeltDraw {
-                frames: buffer,
-                reach,
-            },
+            MeshTag(block.start),
+            BeltDraw { page, block, reach },
             NoAutoAabb,
             Aabb::from_min_max(low, high),
         ))
     }
-}
-
-/// The table as the GPU reads it: one `(a.z, a.y, b.z, b.y)` per material link.
-fn records(frames: &BeltFrames) -> Vec<Vec4> {
-    (0..frames.count())
-        .map(|link| {
-            let [a, b] = frames.span(link).joints();
-            Vec4::new(a.x, a.y, b.x, b.y)
-        })
-        .collect()
 }
 
 /// Where a belt's changed table reaches its buffer and its bounds: after every table writer,
@@ -497,18 +659,34 @@ fn records(frames: &BeltFrames) -> Vec<Vec4> {
 #[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub(crate) struct BeltUpload;
 
-/// Copy every changed table to its GPU buffer and rewrite its bounds. A settled belt's table is
-/// unchanged ([`BeltFrames::fit`] marks nothing), so it uploads nothing.
+/// Write every changed table into its block and rewrite its bounds; mark each written page
+/// modified once. A settled belt's table is unchanged ([`BeltFrames::fit`] marks nothing), so it
+/// writes nothing.
 fn upload_belt_frames(
+    table: Res<BeltTable>,
     mut buffers: ResMut<Assets<ShaderBuffer>>,
     mut belts: Query<(&BeltFrames, &BeltDraw, &mut Aabb), Changed<BeltFrames>>,
+    mut written: Local<Vec<bool>>,
 ) {
+    written.clear();
+    written.resize(table.pages.len(), false);
     for (frames, draw, mut aabb) in &mut belts {
-        if let Some(mut buffer) = buffers.get_mut(&draw.frames) {
-            buffer.set_data(records(frames));
+        if let Some(bytes) = table
+            .pages
+            .get(draw.page)
+            .and_then(|page| buffers.get_mut_untracked(&page.buffer))
+            .and_then(|buffer| buffer.data.as_mut())
+        {
+            write_spans(bytes, &draw.block, frames);
+            written[draw.page] = true;
         }
         let (low, high) = frames.bounds(draw.reach);
         aabb.set_if_neq(Aabb::from_min_max(low, high));
+    }
+    for (page, _) in table.pages.iter().zip(written.iter()).filter(|(_, w)| **w) {
+        if let Some(buffer) = buffers.get_mut(&page.buffer) {
+            buffer.into_inner();
+        }
     }
 }
 
@@ -530,6 +708,7 @@ fn evict_unused_counts(mut cache: ResMut<BeltMeshes>, tables: Query<&BeltFrames>
 pub(crate) fn plugin(app: &mut App) {
     app.add_plugins(MaterialPlugin::<BeltMaterial>::default())
         .init_resource::<BeltMeshes>()
+        .init_resource::<BeltTable>()
         .configure_sets(
             PostUpdate,
             BeltUpload.before(VisibilitySystems::CheckVisibility),
@@ -540,7 +719,7 @@ pub(crate) fn plugin(app: &mut App) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::link_view::LinkFrame;
+    use super::super::link_view::{LinkFrame, Stragglers};
     use super::*;
 
     /// A two-triangle fixture shoe with every attribute kind the shipped shoe carries.
@@ -624,6 +803,146 @@ mod tests {
                 .is_none(),
             "a count no table has lets go of its meshes",
         );
+    }
+
+    /// A world holding every asset store and resource a belt's draw takes, and a template of
+    /// `levels` fixture shoes in a real `StandardMaterial`.
+    fn draw_world(levels: usize) -> World {
+        let mut world = World::new();
+        let mut meshes = Assets::<Mesh>::default();
+        let mut standard = Assets::<StandardMaterial>::default();
+        let look = standard.add(StandardMaterial::default());
+        let shoes = (0..levels)
+            .map(|_| PerSide::new(meshes.add(fixture_shoe()), meshes.add(fixture_shoe())))
+            .collect();
+        world.insert_resource(LinkTemplate::fixture(shoes, look));
+        world.insert_resource(meshes);
+        world.insert_resource(standard);
+        world.insert_resource(Assets::<BeltMaterial>::default());
+        world.insert_resource(Assets::<ShaderBuffer>::default());
+        world.init_resource::<BeltMeshes>();
+        world.init_resource::<BeltTable>();
+        world
+    }
+
+    /// Spawn a belt drawing `frames` on `side`, as a consumer does.
+    fn spawn_drawn(world: &mut World, side: Side, frames: BeltFrames) -> Entity {
+        use bevy::ecs::system::RunSystemOnce;
+        world
+            .run_system_once_with(
+                |In((side, frames)): In<(Side, BeltFrames)>,
+                 template: Res<LinkTemplate>,
+                 mut assets: BeltAssets,
+                 mut commands: Commands| {
+                    let draw = assets.draw(&template, side, &frames)?;
+                    Some(commands.spawn((frames, draw)).id())
+                },
+                (side, frames),
+            )
+            .expect("the draw runs")
+            .expect("a ready template draws")
+    }
+
+    /// Table record `record` of a page's bytes.
+    fn record(bytes: &[u8], record: u32) -> Vec4 {
+        let start = record as usize * RECORD_BYTES;
+        Vec4::from_array(std::array::from_fn(|lane| {
+            let at = start + 4 * lane;
+            f32::from_le_bytes(bytes[at..at + 4].try_into().expect("four bytes"))
+        }))
+    }
+
+    /// ONE MATERIAL PER LOOK, ONE BLOCK PER BELT. Belts of different tanks must wear the same
+    /// material and, at one count, rung and side, the same mesh: bevy batches on exactly those two
+    /// (`Opaque3dBatchSetKey` keys the material's bind group, the bin the mesh), so a material per
+    /// belt costs a batch set per belt. Each belt's records live in its own block, at the record
+    /// its `MeshTag` names, which is all the vertex stage has to find them by: blocks that overlap
+    /// would draw one belt's shoes on another's spans. A despawned belt's block goes to the next
+    /// belt, so a respawn does not grow the table.
+    #[test]
+    fn belts_share_one_material_and_each_reads_its_own_block() {
+        const COUNT: usize = 6;
+        const PITCH: f32 = 0.1;
+        let mut world = draw_world(2);
+        let table = |lateral_x: f32, lift: f32| {
+            let stations: Vec<Vec2> = (0..COUNT)
+                .map(|i| Vec2::new(i as f32 * PITCH, lift + (i % 2) as f32 * 0.03))
+                .collect();
+            let mut frames = BeltFrames::new(LinkFrame::default(), lateral_x, COUNT);
+            frames.fit(&stations, 0.0, PITCH, Stragglers::Keep);
+            frames
+        };
+        let belts = [
+            spawn_drawn(&mut world, Side::Left, table(-1.5, 0.0)),
+            spawn_drawn(&mut world, Side::Right, table(1.5, 0.2)),
+            spawn_drawn(&mut world, Side::Left, table(-1.5, 0.4)),
+        ];
+
+        let material = |belt: Entity| {
+            world
+                .get::<MeshMaterial3d<BeltMaterial>>(belt)
+                .expect("a drawn belt")
+                .id()
+        };
+        assert!(
+            belts
+                .iter()
+                .all(|&belt| material(belt) == material(belts[0])),
+            "every belt of one look wears one material",
+        );
+        let mesh = |belt: Entity| world.get::<Mesh3d>(belt).expect("a drawn belt").id();
+        assert_eq!(
+            mesh(belts[0]),
+            mesh(belts[2]),
+            "one count, rung and side, one mesh"
+        );
+
+        let tag = |world: &World, belt: Entity| world.get::<MeshTag>(belt).expect("a tag").0;
+        let page = world.resource::<BeltTable>().pages[0].buffer.clone();
+        let bytes = world
+            .resource::<Assets<ShaderBuffer>>()
+            .get(&page)
+            .expect("the page")
+            .data
+            .clone()
+            .expect("a main-world page");
+        let mut starts: Vec<u32> = belts.iter().map(|&belt| tag(&world, belt)).collect();
+        for &belt in &belts {
+            let block = tag(&world, belt);
+            let frames = world.get::<BeltFrames>(belt).expect("its table");
+            let (correction, origin) = frames.frame().correction_and_origin();
+            assert_eq!(record(&bytes, block), correction.x_axis.extend(0.0));
+            assert_eq!(
+                record(&bytes, block + 3),
+                origin.extend(frames.lateral_x()),
+                "the header carries this belt's lateral centre",
+            );
+            for link in 0..COUNT {
+                let [a, b] = frames.span(link).joints();
+                assert_eq!(
+                    record(&bytes, block + HEADER_RECORDS + link as u32),
+                    Vec4::new(a.x, a.y, b.x, b.y),
+                    "link {link} reads its own span",
+                );
+            }
+        }
+        starts.sort_unstable();
+        assert!(
+            starts
+                .windows(2)
+                .all(|pair| pair[1] - pair[0] >= HEADER_RECORDS + COUNT as u32),
+            "blocks never overlap: {starts:?}",
+        );
+
+        let freed = tag(&world, belts[1]);
+        world.despawn(belts[1]);
+        let next = spawn_drawn(&mut world, Side::Right, table(1.5, 0.6));
+        assert_eq!(
+            tag(&world, next),
+            freed,
+            "a despawned belt's block is lent again"
+        );
+        assert_eq!(world.resource::<BeltTable>().pages.len(), 1);
     }
 
     /// A REFUSAL IS FINAL AND BUILDS NOTHING. Every rung is checked before any is built, so a shoe

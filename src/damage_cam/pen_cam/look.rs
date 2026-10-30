@@ -389,24 +389,22 @@ impl Material for LookMaterial {
     }
 }
 
-/// A belt's placement under the look (`pen_cam_look_belt.wgsl`): the same constants and table
-/// buffer as the belt's own material ([`crate::track::belt_draw::BeltShoes`]), so the look draws
-/// every shoe where the belt does. A live track belt is one mesh whose shoes the vertex stage
-/// places; a plain [`LookMaterial`] would draw the undeformed stack.
+/// A belt's placement under the look (`pen_cam_look_belt.wgsl`): the same table page as the belt's
+/// own material ([`crate::track::belt_draw::BeltShoes`]), each belt's block found by the drawing
+/// entity's `MeshTag`, so the look draws every shoe where the belt does. A live track belt is one
+/// mesh whose shoes the vertex stage places; a plain [`LookMaterial`] would draw the undeformed
+/// stack.
 #[derive(Asset, AsBindGroup, Reflect, Debug, Clone)]
 pub struct BeltLook {
-    #[uniform(100)]
-    params: crate::track::belt_draw::BeltParams,
-    #[storage(101, read_only)]
-    frames: Handle<bevy::render::storage::ShaderBuffer>,
+    #[storage(100, read_only)]
+    table: Handle<bevy::render::storage::ShaderBuffer>,
 }
 
 impl BeltLook {
-    /// The look's placement of the belt `shoes` places.
+    /// The look's placement of the belts `shoes` places.
     pub(crate) fn of(shoes: &crate::track::belt_draw::BeltShoes) -> Self {
         Self {
-            params: shoes.params,
-            frames: shoes.frames.clone(),
+            table: shoes.table.clone(),
         }
     }
 }

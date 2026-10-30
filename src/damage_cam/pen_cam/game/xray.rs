@@ -49,6 +49,7 @@ use bevy::camera::visibility::{NoFrustumCulling, VisibilityRange};
 use bevy::ecs::query::QueryData;
 use bevy::ecs::system::SystemParam;
 use bevy::gltf::{GltfMaterialName, GltfMeshName};
+use bevy::mesh::MeshTag;
 use bevy::prelude::*;
 use bevy::window::{CursorOptions, PrimaryWindow};
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldInstanceReady};
@@ -384,7 +385,8 @@ pub(super) struct Held<'w, 's> {
         ),
         (Without<Dressed>, Without<XRayItem>),
     >,
-    /// The tank's live track belts, one mesh per side ([`crate::track::belt_draw`]).
+    /// The tank's live track belts, one mesh per side ([`crate::track::belt_draw`]), each with
+    /// the tag that names its block of the belt table.
     undressed_belts: Query<
         'w,
         's,
@@ -392,6 +394,7 @@ pub(super) struct Held<'w, 's> {
             Entity,
             &'static Mesh3d,
             &'static MeshMaterial3d<BeltMaterial>,
+            &'static MeshTag,
         ),
         (Without<Dressed>, Without<XRayItem>),
     >,
@@ -747,7 +750,7 @@ fn dress(
             &'a Handle<StandardMaterial>,
             Option<&'a VisibilityRange>,
         ),
-        Belt(&'a Mesh3d, &'a Handle<BeltMaterial>),
+        Belt(&'a Mesh3d, &'a Handle<BeltMaterial>, &'a MeshTag),
     }
     let spec = asset.spec();
     let potency = asset.crew_face().map(Potency::of_crew_face);
@@ -763,8 +766,8 @@ fn dress(
                 continue;
             }
             Undressed::Mesh(mesh, &material.0, range)
-        } else if let Ok((_, mesh, material)) = held.undressed_belts.get(entity) {
-            Undressed::Belt(mesh, &material.0)
+        } else if let Ok((_, mesh, material, tag)) = held.undressed_belts.get(entity) {
+            Undressed::Belt(mesh, &material.0, tag)
         } else {
             continue;
         };
@@ -832,7 +835,7 @@ fn dress(
             // placement: a shared tier material cannot place a belt's shoes. Its chain is unnamed,
             // so it belongs to no component and is never painted, and its look holds still once
             // built.
-            Undressed::Belt(mesh, material) => {
+            Undressed::Belt(mesh, material, tag) => {
                 let Some(placement) = belts
                     .belts
                     .as_ref()
@@ -865,8 +868,10 @@ fn dress(
                     ));
                 // The mesh's own bounds are the undeformed stack; the copy is drawn by the mask
                 // cameras alone, so it opts out of culling rather than tracking the belt's bounds.
+                // It carries the belt's tag, which names the block its vertex stage reads.
                 commands.spawn((
                     Mesh3d(mesh.0.clone()),
+                    tag.clone(),
                     MeshMaterial3d(mask),
                     Transform::IDENTITY,
                     stage::mask_scope(draw.layer),
@@ -1055,16 +1060,24 @@ pub(super) fn log_presence(state: Res<XRayState>, time: Res<Time<Real>>, mut on:
     *on = now;
 }
 
-/// A mask copy follows its source's mesh handle: a belt's copy draws the rung its belt writes.
+/// A mask copy follows its source's mesh handle and tag: a belt's copy draws the rung its belt
+/// writes, from the block its belt's tag names.
 pub(super) fn follow_mesh(
-    sources: Query<&Mesh3d, (Changed<Mesh3d>, With<Dressed>)>,
-    mut copies: Query<(&MaskCopy, &mut Mesh3d), Without<Dressed>>,
+    sources: Query<
+        (&Mesh3d, Option<&MeshTag>),
+        (Or<(Changed<Mesh3d>, Changed<MeshTag>)>, With<Dressed>),
+    >,
+    mut copies: Query<(&MaskCopy, &mut Mesh3d, Option<&mut MeshTag>), Without<Dressed>>,
 ) {
-    for (copy, mut mesh) in &mut copies {
-        if let Ok(source) = sources.get(copy.of)
-            && mesh.0 != source.0
-        {
+    for (copy, mut mesh, tag) in &mut copies {
+        let Ok((source, source_tag)) = sources.get(copy.of) else {
+            continue;
+        };
+        if mesh.0 != source.0 {
             mesh.0 = source.0.clone();
+        }
+        if let (Some(mut tag), Some(source_tag)) = (tag, source_tag) {
+            tag.set_if_neq(source_tag.clone());
         }
     }
 }

@@ -6,7 +6,7 @@
 // function, so the depth they write agrees.
 
 #import bevy_pbr::{mesh_functions, view_transformations::position_world_to_clip}
-#import "shaders/track_belt.wgsl"::{link_position, link_direction}
+#import "shaders/track_belt.wgsl"::{belt_at, link_position, link_direction}
 
 #ifdef PREPASS_PIPELINE
 #import bevy_pbr::prepass_io::{Vertex, VertexOutput}
@@ -18,7 +18,8 @@
 fn vertex(vertex: Vertex, @location(15) link: u32) -> VertexOutput {
     var out: VertexOutput;
     let world_from_local = mesh_functions::get_world_from_local(vertex.instance_index);
-    let local = link_position(link, vertex.position);
+    let belt = belt_at(vertex.instance_index);
+    let local = link_position(belt, link, vertex.position);
     out.world_position = mesh_functions::mesh_position_local_to_world(world_from_local, vec4<f32>(local, 1.0));
     out.position = position_world_to_clip(out.world_position.xyz);
 
@@ -39,24 +40,24 @@ fn vertex(vertex: Vertex, @location(15) link: u32) -> VertexOutput {
 #ifdef PREPASS_PIPELINE
 #ifdef NORMAL_PREPASS_OR_DEFERRED_PREPASS
 #ifdef VERTEX_NORMALS
-    out.world_normal = mesh_functions::mesh_normal_local_to_world(link_direction(link, vertex.normal), vertex.instance_index);
+    out.world_normal = mesh_functions::mesh_normal_local_to_world(link_direction(belt, link, vertex.normal), vertex.instance_index);
 #endif
 #ifdef VERTEX_TANGENTS
     out.world_tangent = mesh_functions::mesh_tangent_local_to_world(
         world_from_local,
-        vec4<f32>(link_direction(link, vertex.tangent.xyz), vertex.tangent.w),
+        vec4<f32>(link_direction(belt, link, vertex.tangent.xyz), vertex.tangent.w),
         vertex.instance_index
     );
 #endif
 #endif
 #else
 #ifdef VERTEX_NORMALS
-    out.world_normal = mesh_functions::mesh_normal_local_to_world(link_direction(link, vertex.normal), vertex.instance_index);
+    out.world_normal = mesh_functions::mesh_normal_local_to_world(link_direction(belt, link, vertex.normal), vertex.instance_index);
 #endif
 #ifdef VERTEX_TANGENTS
     out.world_tangent = mesh_functions::mesh_tangent_local_to_world(
         world_from_local,
-        vec4<f32>(link_direction(link, vertex.tangent.xyz), vertex.tangent.w),
+        vec4<f32>(link_direction(belt, link, vertex.tangent.xyz), vertex.tangent.w),
         vertex.instance_index
     );
 #endif
