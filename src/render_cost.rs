@@ -38,7 +38,7 @@
 //! Off (zero cost — nothing registered) unless the env var is set. Client-only: the headless
 //! server has no render app.
 //!
-//! # Two frame-cost ablation instruments, each off unless its env var is set
+//! # Frame-cost instruments, each off unless its env var is set
 //!
 //! * **`SPIKE_PHASE_COUNTS=1`**: every [`PHASE_COUNT_PERIOD_S`], one `phase_census:` log line per
 //!   view per 3D phase (opaque, alpha mask, transparent, both prepasses, shadow), and one per phase
@@ -68,6 +68,12 @@
 //!   `terrain-field` selects the raster terrain shadow instead of the baked one
 //!   (`terrain_shadow`): no field is baked and the terrain casts into the cascades again. Without
 //!   it the terrain casts nothing, so `terrain-casters` changes nothing on the heightmap world.
+//! * **`SPIKE_MESH_REMOVALS=1`**: every [`PHASE_COUNT_PERIOD_S`], one `mesh_removals:` log line:
+//!   the mesh-instance removals bevy's GPU mesh extraction queued per frame since the last line, and
+//!   how many of them had an instance to remove. Read after extraction, before
+//!   `collect_meshes_for_gpu_building` applies them (issue #173; the vendored `bevy_pbr`'s
+//!   `OVERMATCH_PATCH.md`). It walks every queued removal every frame, so it is a counter, never on
+//!   during a frame-time measurement.
 //! * `SPIKE_SHADOW_FILTER=gaussian|hardware|temporal`, `SPIKE_SHADOW_SPLITS=<metres,...>` and
 //!   `SPIKE_SHADOW_OVERLAP=<proportion>` independently override stock shadow controls at boot.
 //!   Explicit splits select count and envelope; overlap and filter leave both untouched.
@@ -80,7 +86,10 @@ use bevy::core_pipeline::core_3d::{AlphaMask3d, Opaque3d, Transparent3d};
 use bevy::core_pipeline::prepass::{AlphaMask3dPrepass, DepthPrepass, Opaque3dPrepass};
 use bevy::diagnostic::DiagnosticsStore;
 use bevy::light::{CascadeShadowConfig, ShadowFilteringMethod};
-use bevy::pbr::Shadow;
+use bevy::pbr::{
+    RenderMeshInstanceGpuQueue, RenderMeshInstanceGpuQueues, RenderMeshInstances, Shadow,
+    collect_meshes_for_gpu_building,
+};
 use bevy::platform::time::Instant;
 use bevy::post_process::bloom::Bloom;
 use bevy::prelude::*;
@@ -90,6 +99,7 @@ use bevy::render::render_phase::{
     BinnedPhaseItem, BinnedRenderPhase, SortedPhaseItem, ViewBinnedRenderPhases,
     ViewSortedRenderPhases,
 };
+use bevy::render::sync_world::MainEntity;
 use bevy::render::view::RetainedViewEntity;
 use bevy::render::{Render, RenderApp, RenderSystems};
 use serde_json::json;
@@ -314,6 +324,16 @@ fn ablation_instruments(app: &mut App) {
             log_phase_census.in_set(RenderSystems::PrepareBindGroups),
         );
     }
+    if crate::env_flag("SPIKE_MESH_REMOVALS", false)
+        && let Some(render_app) = app.get_sub_app_mut(RenderApp)
+    {
+        render_app.add_systems(
+            Render,
+            log_mesh_removals
+                .in_set(RenderSystems::PrepareMeshes)
+                .before(collect_meshes_for_gpu_building),
+        );
+    }
 }
 
 /// `depth_copy` relies on running in the first `Update`, after the `Startup` that spawns the camera
@@ -398,6 +418,70 @@ fn log_phase_census(
     log_indirect::<Opaque3dPrepass>("opaque_prepass", indirect);
     log_indirect::<AlphaMask3dPrepass>("alpha_mask_prepass", indirect);
     log_indirect::<Shadow>("shadow", indirect);
+}
+
+/// The removals bevy's GPU mesh extraction queued this frame, every worker's queue together. Valid
+/// between `MeshExtractionSystems` and `collect_meshes_for_gpu_building`, which drains them.
+pub(crate) fn queued_mesh_removals(
+    queues: &mut RenderMeshInstanceGpuQueues,
+) -> impl Iterator<Item = MainEntity> + '_ {
+    queues.iter_mut().flat_map(|queue| {
+        let removed: &[MainEntity] = match queue {
+            RenderMeshInstanceGpuQueue::None => &[],
+            RenderMeshInstanceGpuQueue::CpuCulling { removed, .. }
+            | RenderMeshInstanceGpuQueue::GpuCulling { removed, .. } => removed,
+        };
+        removed.iter().copied()
+    })
+}
+
+/// `mesh_removals:` totals since the last line.
+#[derive(Default)]
+struct RemovalWindow {
+    next: Option<Instant>,
+    frames: u64,
+    queued: u64,
+    live: u64,
+}
+
+/// Render world: the `mesh_removals:` lines of the module doc. Absent queues mean CPU mesh building,
+/// which queues no removals.
+fn log_mesh_removals(
+    queues: Option<ResMut<RenderMeshInstanceGpuQueues>>,
+    instances: Res<RenderMeshInstances>,
+    mut window: Local<RemovalWindow>,
+) {
+    let Some(mut queues) = queues else {
+        return;
+    };
+    window.frames += 1;
+    for entity in queued_mesh_removals(&mut queues) {
+        window.queued += 1;
+        if instances.mesh_asset_id(entity).is_some() {
+            window.live += 1;
+        }
+    }
+    let now = Instant::now();
+    let Some(next) = window.next else {
+        window.next = Some(now + core::time::Duration::from_secs_f64(PHASE_COUNT_PERIOD_S));
+        return;
+    };
+    if now < next {
+        return;
+    }
+    let frames = window.frames as f64;
+    info!(
+        "mesh_removals: frames={} queued={} live={} queued_per_frame={:.1} live_per_frame={:.1}",
+        window.frames,
+        window.queued,
+        window.live,
+        window.queued as f64 / frames,
+        window.live as f64 / frames,
+    );
+    *window = RemovalWindow {
+        next: Some(now + core::time::Duration::from_secs_f64(PHASE_COUNT_PERIOD_S)),
+        ..default()
+    };
 }
 
 /// One phase's indirect draw commands this frame, all views together (module doc).
