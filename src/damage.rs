@@ -1,14 +1,17 @@
-//! Damage consequences: interpret component HP loss as crew death, ammo cookoff, tank death label,
-//! and function loss. Ballistics owns *how* damage is deposited; this module owns what depleted
-//! damageable volumes mean.
+//! Damage consequences in the game's damage model: what an emptied HP pool means. A crew member
+//! whose HP pool is emptied is knocked out (latched as `Dead`); an ammunition volume whose pool is
+//! emptied cooks off; a module whose pool is emptied is out of action and stops supplying the
+//! capabilities that need it; and a tank carries a knocked-out label. Ballistics owns *how* a dose
+//! is deposited; this module owns what an emptied pool means.
 //!
-//! **Kill model (design §1a-A, under test):** there is no crew-count knockout gate. A tank is fully
-//! dead only at 0 living crew. Capability effectiveness is per-capability (§7b): a capability scores
-//! in [0, 1] from its requirement groups against the live world — living crew and intact modules
-//! supply quality, combined `min` across groups. The requirements are per-tank RON data.
-//! `TankKnockedOut` survives as a *label only* — it never gates sim capability (on the client it
-//! hands the player's device to the death flow: `command::DeviceOwner`). Cookoff still kills all
-//! crew and launches the turret; that hook triggers off `CookedOff` directly.
+//! **Knockout model (design §1a-A, under test):** there is no crew-count knockout gate. A tank is
+//! knocked out only when every crew member is. Capability effectiveness is per-capability (§7b): a
+//! capability scores in [0, 1] from its requirement groups against the live world — crew still in
+//! action and modules whose pools are not empty supply quality, combined `min` across groups. The
+//! requirements are per-tank RON data. `TankKnockedOut` survives as a *label only* — it never gates
+//! sim capability (on the client it takes the player's device from the tank:
+//! `command::DeviceOwner`). A cookoff empties every crew HP pool of its tank at once and launches
+//! the turret; that hook triggers off `CookedOff` directly.
 
 use avian3d::prelude::{
     AngularInertia, AngularVelocity, LinearVelocity, Mass, NoAutoAngularInertia, NoAutoMass,
