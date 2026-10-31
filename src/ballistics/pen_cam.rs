@@ -1819,12 +1819,8 @@ fn a_ground_stop_counts_its_approach_whatever_the_step() {
                 projectile.fuze = burst::Fuze::of(Some(burst));
             },
             |app| {
-                app.world_mut().spawn((
-                    Transform::from_xyz(0.0, -0.5, 0.0),
-                    RigidBody::Static,
-                    Collider::cuboid(40.0, 1.0, 40.0),
-                    CollisionLayers::new([crate::Layer::Terrain], LayerMask::ALL),
-                ));
+                // The march's ground is the declared height grid, at y = 0.
+                app.insert_resource(super::march_tests::flat_grid(0.0));
                 for _ in 0..8 {
                     app.update();
                 }
