@@ -1441,8 +1441,8 @@ fn certify(app: &mut App, at: Vec3, axis: Vec3, radius: f32) -> Result<Interior,
 /// Fixture data, from a DERIVED counterexample: a disc of radius 0.044 m laid at the origin along
 /// `+Z`, and a box over `x, y ∈ [0.030, 0.040]`, `z ∈ [−30, 30]` m. Its bounds meet the disc's
 /// enclosing cube, but neither the axis nor any ring sample lies in its `xy` rectangle, so it cannot
-/// contain a start. Probing through its bounds would need a 60 m probe, past [`MAX_CORRIDOR`]; read
-/// only for what could contain a start, every sample is outside everything.
+/// contain a start. Reading only candidates that could contain a start avoids an irrelevant
+/// DERIVED 60 m probe; every sample is outside everything.
 #[test]
 fn a_candidate_whose_bounds_contain_no_start_is_not_probed() {
     let (mut app, _) = settled(|app| {
@@ -1496,11 +1496,11 @@ fn a_probe_reads_every_finite_candidate() {
 /// The game's damage model reads every sample's finite containment faces.
 ///
 /// Fixture data: one trimesh of `count` separate closed boxes stacked along the probe at a 0.1 m
-/// pitch, so every sample crosses two faces of each and the disc's thirteen samples collect more
-/// than [`collect::MAX_FACES`] between them.
+/// pitch, so each sample crosses DERIVED 4400 faces. The collector must grow to hold every face;
+/// dropping one would break containment membership for the resumed walk.
 #[test]
 fn a_probe_reads_every_samples_finite_faces() {
-    let count = collect::MAX_FACES / (2 * (1 + walk::DEFAULT_RING)) + 1;
+    let count = 2200; // Fixture data: DERIVED 4400 faces per sample.
     let (cube, cube_surfaces) = box_trimesh(Vec3::ONE);
     let (cube_vertices, cube_indices) = {
         let mesh = cube.shape().as_trimesh().expect("a trimesh");
@@ -1531,6 +1531,35 @@ fn a_probe_reads_every_samples_finite_faces() {
     };
     let stack = (Collider::trimesh(vertices, indices), surfaces);
     let (mut app, _) = settled(|app| vec![mesh_volume(app, stack, Transform::IDENTITY)]);
+    let face_count = app
+        .world_mut()
+        .run_system_once(|world: ProjectileMarchWorld, colliders: Colliders| {
+            let context = ResolveContext {
+                world: &world,
+                colliders: &colliders,
+                deposit: false,
+                laws: WalkLaws::default(),
+            };
+            build_corridor(
+                &context,
+                &|_| true,
+                Vec3::new(0.031, 0.017, -111.0),
+                Vec3::ZERO,
+                Vec3::Z,
+                222.0,
+                DiscFrame::anchored(Vec3::Z).unwrap(),
+                0.0,
+                &[],
+            )
+            .map(|corridor| corridor.samples[0].hits.len())
+        })
+        .unwrap()
+        .expect("all finite fixture faces are collected");
+    assert_eq!(
+        face_count,
+        2 * count,
+        "each closed fixture box contributes both faces"
+    );
     let starts = certify(&mut app, Vec3::new(0.0, 0.0, 0.05), Vec3::Z, 0.044)
         .expect("the complete disc's finite faces are readable");
     assert_eq!(starts.seeds.len(), 1 + walk::DEFAULT_RING);
@@ -2525,8 +2554,8 @@ const TRUNK_STANDOFFS: [f32; 5] = [0.5, 2.0, 5.3, 9.7, 12.3];
 /// disc: one disc wholly outboard of the 12-gon's 30° vertex, which meets only the facet whose
 /// normal stands 75° off the line of fire, and discs at 0.70–1.10 of the trunk's radius toward its
 /// 0° vertex. Every disc meets the trunk, and the fixture round overmatches a trunk, so each must
-/// bite in and lay a positive chord into the trunk. A structured walk error instead stops the round
-/// dead at contact with no dose: the trunk becomes a wall.
+/// bite in and lay a positive chord into the trunk. The game's damage model treats a structured
+/// walk contradiction as a bug and panics, so the generic convex collector must pair honestly.
 ///
 /// What it holds the convex narrow phase to: `collect::collect_convex` reads the hull through
 /// `collect::clip_convex`, one entry strictly before one exit or none, each at the exact plane
@@ -2537,7 +2566,7 @@ const TRUNK_STANDOFFS: [f32; 5] = [0.5, 2.0, 5.3, 9.7, 12.3];
 /// of a face by more than that band puts a seed's hand-off point between its reading and the
 /// exact one, and the walk refuses the second entry (`UnexpectedEntry`); one that reads an exit
 /// before an entry at a vertical edge is `UnexpectedExit`; one that reads an entry with no exit is
-/// `IncompleteCorridor`. Each stops the round at contact with no dose.
+/// `IncompleteCorridor`. Each is a bug in the game's damage model and panics in gameplay.
 #[test]
 fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
     let mut app = world_with_trimesh_plates(&[]);
@@ -2785,9 +2814,8 @@ const REPLAY_ROUND: &str = "88mm_APHE_ring";
 
 /// THE REPLAYED FIRST-CONTACT STOPS RESOLVE.
 ///
-/// Each replayed round, fired at the bound fixture tank through the real march, meets armour and
-/// resolves it: no walk fails, so none stops at contact. The class invariant is the one the safe
-/// stop guards; the replays are where it broke.
+/// The game's damage model: each replay meets armour through the real march and resolves a
+/// crossing or bounce. The runtime consumer needs an actual contact; an empty log proves nothing.
 #[test]
 fn the_replayed_first_contact_stops_resolve() {
     let round = crate::guns::GunRegistry::shipped()
@@ -2822,6 +2850,14 @@ fn the_replayed_first_contact_stops_resolve() {
             .map(|marks| marks.log.clone())
             .collect();
         assert_eq!(logs.len(), 1, "replay {index}: one round");
+        assert!(
+            logs[0].iter().any(|mark| matches!(
+                mark,
+                ArmourMark::Crossing { .. } | ArmourMark::Bounce { .. }
+            )),
+            "replay {index}: the round must resolve a crossing or bounce, got {:?}",
+            logs[0]
+        );
     }
 }
 
@@ -2966,4 +3002,44 @@ fn witness_lines_reuse_the_resolved_hard_presence() {
     assert_eq!(crossed[0].entry, Vec3::Z);
     assert_eq!(crossed[0].end, Vec3::Z * 1.75);
     assert_eq!(crossed[0].chord, 0.75);
+}
+
+/// The game's damage model: material closure is bounded by loaded geometry, never a chosen
+/// distance. The crossing resolver needs the real exit even when one solid is larger than a tick.
+#[test]
+fn a_finite_material_crossing_longer_than_fifty_metres_closes() {
+    // Fixture data: a closed sixty-metre prism, entered one metre from the sample's start.
+    let (mut app, _) = settled(|app| {
+        vec![mesh_volume(
+            app,
+            box_trimesh(Vec3::new(1.0, 1.0, 60.0)),
+            Transform::IDENTITY,
+        )]
+    });
+    let walked = app
+        .world_mut()
+        .run_system_once(|world: ProjectileMarchWorld, colliders: Colliders| {
+            let context = ResolveContext {
+                world: &world,
+                colliders: &colliders,
+                deposit: false,
+                laws: WalkLaws::default(),
+            };
+            closing_walk(
+                &context,
+                &|_| true,
+                Vec3::new(0.01, 0.02, -31.0),
+                Vec3::ZERO,
+                Vec3::Z,
+                DiscFrame::anchored(Vec3::Z).unwrap(),
+                0.0,
+                &[],
+                1.0 + ENTRANCE_SPAN,
+            )
+        })
+        .unwrap()
+        .expect("finite certified material has a real exit");
+    assert_eq!(walked.events.len(), 1, "the prism is one crossing");
+    assert_eq!(walked.events[0].start, 1.0);
+    assert_eq!(walked.events[0].end, 61.0);
 }

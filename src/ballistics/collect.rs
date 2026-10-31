@@ -47,11 +47,6 @@ use super::BallisticSurfaces;
 use super::walk::{Contact, FaceHit, ShellKey, WalkError, WalkLaws};
 use crate::exact::Int;
 
-/// Policy ceiling for one corridor's collected faces (ASSUMED work bound). A world whose finite
-/// candidate geometry exceeds it has broken the collector contract and panics in gameplay; the
-/// fuzzer reports it. Collection never returns a truncated face list.
-pub(crate) const MAX_FACES: usize = 4096;
-
 /// Bound on the f64 evaluation of the crossing determinant `−axis · ((b − a) × (c − a))`, as a
 /// multiple of its permanent `Σ (|e1ᵤ·e2ᵥ| + |e1ᵥ·e2ᵤ|)·|axisₖ|`.
 ///
@@ -240,13 +235,6 @@ pub(crate) fn collect(
                 out,
             )?,
         }
-        if out.len() > MAX_FACES {
-            return Err(WalkError::CorridorOverflow {
-                volume: node,
-                collected: out.len(),
-                limit: MAX_FACES,
-            });
-        }
         debug_assert!(
             out[before..].iter().all(|hit| hit.t.is_finite()),
             "the collector emitted a non-finite crossing"
@@ -392,13 +380,6 @@ fn collect_trimesh(
             },
             entry,
         ));
-        if out.len() + claims.len() > MAX_FACES {
-            return Err(WalkError::CorridorOverflow {
-                volume: node,
-                collected: out.len() + claims.len(),
-                limit: MAX_FACES,
-            });
-        }
     }
 
     // One boundary per fan (one contact of one shell), in order along the ray within each shell.

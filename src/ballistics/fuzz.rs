@@ -318,9 +318,9 @@ pub struct WalkFailure {
 /// The volume a [`WalkError`] blames, when it blames one.
 fn blamed_volume(error: &WalkError) -> Option<Entity> {
     match error {
-        WalkError::UnknownVolume { volume }
-        | WalkError::CollectorFailed { volume, .. }
-        | WalkError::CorridorOverflow { volume, .. } => Some(*volume),
+        WalkError::UnknownVolume { volume } | WalkError::CollectorFailed { volume, .. } => {
+            Some(*volume)
+        }
         WalkError::UnexpectedExit { key, .. } | WalkError::UnexpectedEntry { key, .. } => {
             Some(key.volume)
         }
@@ -1027,7 +1027,7 @@ impl Pass<'_, '_, '_> {
         let leg = FuzzRay {
             origin: failure.origin,
             direction: failure.direction,
-            length: resolve::MAX_CORRIDOR,
+            length: resolve::FIELD_REACH,
         };
         WalkFailure {
             ray,

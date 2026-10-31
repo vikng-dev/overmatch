@@ -10,8 +10,8 @@
 //! §13.4's walk is defined over a corridor that CLOSES — one that contains the whole crossing plus
 //! enough clear space past it to prove no ε-weld reaches further. So the driver does not stop at the
 //! tick's travel budget: it collects from first contact, and if the walk reports
-//! [`WalkError::IncompleteCorridor`] it EXTENDS and re-collects, up to [`MAX_CORRIDOR`]. It never
-//! synthesizes the missing exit. That choice is what
+//! [`WalkError::IncompleteCorridor`] it extends and re-collects through the finite loaded geometry.
+//! It never synthesizes the missing exit or imposes a policy length on a material crossing. This
 //! keeps continuation state out of the resolver — the only thing that survives a crossing is which
 //! primitives the disc is still inside, and that is a lookup on rays already walked
 //! ([`DiscWalk::resume_at`]), never an inference.
@@ -68,18 +68,13 @@ mod tests;
 /// driver extends when they do not, so this is a starting guess, not a limit.
 const ENTRANCE_SPAN: f32 = 0.5;
 
-/// Ceiling on corridor extension. A crossing that has not closed in 50 m of material is not a
-/// crossing.
-pub(crate) const MAX_CORRIDOR: f32 = 50.0;
+/// The game's damage model: spatial reach of a field throw (ASSUMED metres), also used as an
+/// initial discovery guess for held material. Material corridors extend independently of it.
+pub(crate) const FIELD_REACH: f32 = 50.0;
 
-/// Ceiling on the crossings one step may decide — a chosen resource limit, not a certified bound.
-///
-/// Nothing maps a step's crossings onto a bounded set of faces: successive corridors can meet
-/// disjoint faces, a bounce can return to a face already struck, and an empty span consumes distance
-/// rather than a face. [`collect::MAX_FACES`] bounds one corridor's collection, not a step. So the
-/// value reuses that scale as policy, bounding the work one step may do; a step that reaches it
-/// panics, whether or not the geometry was well formed.
-pub(crate) const MAX_STEP_CROSSINGS: usize = collect::MAX_FACES;
+/// The game's damage model: chosen ceiling on discovery decisions per step (ASSUMED work bound).
+/// A decision may collect arbitrarily many faces; this bounds successive decisions, not geometry.
+pub(crate) const MAX_STEP_CROSSINGS: usize = 4096;
 
 /// The crossing ceiling a world's steps run under in place of [`MAX_STEP_CROSSINGS`], when it names
 /// one: a fixture reaches the limit in a few crossings instead of thousands.
@@ -514,7 +509,7 @@ pub(crate) struct FieldReach {
     hard: Vec<Reached>,
     /// Witness colliders the throw admits, with their witness node.
     witnesses: Vec<(Entity, Entity, ColliderAabb)>,
-    /// The union of the pose bounds of the hard colliders within [`MAX_CORRIDOR`] of the throw
+    /// The union of the pose bounds of the hard colliders within [`FIELD_REACH`] of the throw
     /// point ([`horizon`]), read on first use: it does not depend on the direction.
     union: OnceCell<(Vec3, Vec3)>,
 }
@@ -542,9 +537,9 @@ impl Reached {
 
 impl FieldReach {
     /// The reach of a field thrown from `at`. Every box a direction queries spans `at` to `at +
-    /// axis × L` with `L ≤` [`MAX_CORRIDOR`] (the presence corridor's, or the witness pass's to a
+    /// axis × L` with `L ≤` [`FIELD_REACH`] (the presence corridor's, or the witness pass's to a
     /// stop on that walk, whose crossings lie short of its length), or is the cube of half-side
-    /// [`MAX_CORRIDOR`] about `at` ([`horizon`]); the cube a metre wider holds every one. DERIVED
+    /// [`FIELD_REACH`] about `at` ([`horizon`]); the cube a metre wider holds every one. DERIVED
     /// from IEEE 754 round-to-nearest, at any magnitude of `at`: each face is an f32 `at + a`
     /// rounded and the wide cube's `at ± 51 m` rounded, and rounding is monotone, so a face with
     /// `|a| ≤ 51 m` stays inside. ASSUMED: `|axis_i × L| ≤ 51 m`, which a unit axis meets with a
@@ -554,7 +549,7 @@ impl FieldReach {
         admit: &dyn Fn(Entity) -> bool,
         at: Vec3,
     ) -> Self {
-        let half = Vec3::splat(MAX_CORRIDOR + 1.0);
+        let half = Vec3::splat(FIELD_REACH + 1.0);
         Self::within(
             context,
             admit,
@@ -640,7 +635,7 @@ pub(crate) struct FieldRay {
 /// direction starts inside is the parity of oriented crossings behind `at`, never assumed. It reaches
 /// back from `at` the way [`certified`] does ([`Corridor::behind`]): the line is formed at `at`
 /// itself. Candidates are the admitted volumes whose bounds, grown by [`PROBE_MARGIN`], the
-/// forward ray meets within [`MAX_CORRIDOR`]; the walk starts and ends outside the union of those
+/// forward ray meets within [`FIELD_REACH`]; the walk starts and ends outside the union of those
 /// grown bounds, so no candidate's face lies within the collector's sitting reach of either end.
 /// Its containment probe spans the finite loaded bounds; it does not truncate their geometry.
 pub(crate) fn field_presence(
@@ -670,7 +665,7 @@ pub(crate) fn field_presence(
     };
     let mut near = Vec::new();
     let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
-    for reached in field.hard_meeting(collect::swept_aabb(at, axis, MAX_CORRIDOR, 0.0)) {
+    for reached in field.hard_meeting(collect::swept_aabb(at, axis, FIELD_REACH, 0.0)) {
         let Some(bounds) = reached.bounds(context) else {
             return Err(WalkError::CollectorFailed {
                 volume: reached.node,
@@ -807,7 +802,7 @@ pub(crate) fn field_direction(
     let ahead = if reach.is_finite() {
         (reach - start) as f32
     } else {
-        MAX_CORRIDOR
+        FIELD_REACH
     };
     for (witness, t) in super::wound::entries_in(context, field, at, dir, ahead)? {
         let t = start + t;
@@ -823,14 +818,14 @@ pub(crate) fn field_direction(
 }
 
 /// The struck tank's horizon along a field direction thrown from `at`: where the line leaves the
-/// union of the bounds of every hard collider the throw admits within [`MAX_CORRIDOR`] of `at`
+/// union of the bounds of every hard collider the throw admits within [`FIELD_REACH`] of `at`
 /// (its [`FieldReach`], built for `at`); `at` itself where there is none or the union lies behind
 /// it. Witnesses take no part. The union does not depend on the direction, so a throw reads it
 /// once.
 fn horizon(context: &ResolveContext<'_, '_, '_>, field: &FieldReach, at: Vec3, dir: Dir3) -> Vec3 {
     let (lo, hi) = *field.union.get_or_init(|| {
         let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
-        let cube = collect::swept_aabb(at, Vec3::from(dir), 0.0, MAX_CORRIDOR);
+        let cube = collect::swept_aabb(at, Vec3::from(dir), 0.0, FIELD_REACH);
         for bounds in field
             .hard_meeting(cube)
             .filter_map(|reached| reached.bounds(context))
@@ -1807,7 +1802,6 @@ pub(crate) fn clear_path(
     flight: &Flight,
     travel: f32,
 ) -> Result<CertifiedSpan, WalkError> {
-    let travel = travel.min(MAX_CORRIDOR);
     let interior = flight
         .continuation
         .as_ref()
@@ -1871,32 +1865,70 @@ fn closing_walk(
     seeds: &[SampleSeed],
     initial: f32,
 ) -> Result<DiscWalk, WalkError> {
-    let mut length = initial.clamp(ENTRANCE_SPAN, MAX_CORRIDOR);
+    let mut length = initial.max(ENTRANCE_SPAN);
+    let horizon = OnceCell::new();
     loop {
         let corridor = build_corridor(
             context, not_own, anchor, origin, axis, length, frame, radius, seeds,
         )?;
         let volumes = volume_table(context, &corridor)?;
-        match walk::walk_disc(&corridor, &volumes, &context.laws) {
+        let result = walk::walk_disc(&corridor, &volumes, &context.laws);
+        match &result {
             Ok(walked) => {
                 let end = walked
                     .first_crossing()
                     .iter()
                     .map(|&piece| walked.events[piece].end)
                     .reduce(f64::max);
-                let settled = end.is_none_or(|end| {
-                    end + context.laws.weld_max_lookahead as f64 <= length as f64
-                });
-                if settled || length >= MAX_CORRIDOR {
-                    return Ok(walked);
+                if end
+                    .is_none_or(|end| end + context.laws.weld_max_lookahead as f64 <= length as f64)
+                {
+                    return result;
                 }
             }
-            // The corridor ran out with material still open. Extend it — the one thing never done
-            // is to invent the exit.
-            Err(WalkError::IncompleteCorridor { .. }) if length < MAX_CORRIDOR => {}
-            Err(error) => return Err(error),
+            Err(WalkError::IncompleteCorridor { .. }) => {}
+            Err(_) => return result,
         }
-        length = (length * 2.0).min(MAX_CORRIDOR);
+        // The game's damage model: every tree candidate is contained by its world AABB.
+        // Beyond their furthest support plane plus weld clearance there can be no new face.
+        // Read this finite scene bound only when a corridor actually needs extension.
+        let horizon = *horizon.get_or_init(|| {
+            let direction = axis.as_dvec3();
+            let norm_squared = direction.length_squared();
+            let far = context
+                .world
+                .aabbs
+                .iter()
+                .map(|bounds| {
+                    let a = ((bounds.min.as_dvec3() - anchor.as_dvec3()) - origin.as_dvec3())
+                        * direction;
+                    let b = ((bounds.max.as_dvec3() - anchor.as_dvec3()) - origin.as_dvec3())
+                        * direction;
+                    a.max(b).element_sum() / norm_squared
+                })
+                .fold(f64::from(length), f64::max);
+            // Staggered sample starts can lie behind the axis start; include their axial reach.
+            let stagger = seeds
+                .iter()
+                .map(|seed| seed.offset.as_dvec3().dot(direction).abs() / norm_squared)
+                .fold(f64::from(radius), f64::max);
+            let horizon = ((far
+                + stagger
+                + f64::from(context.laws.weld_max_lookahead)
+                + f64::from(PROBE_MARGIN)) as f32)
+                .next_up();
+            assert!(
+                horizon.is_finite(),
+                "game's damage model: finite loaded collider bounds yield a finite closing horizon"
+            );
+            horizon
+        });
+        if length >= horizon {
+            // An open shell here has no exit in its own bounds: a topology contradiction,
+            // rather than valid geometry exceeding a chosen resource ceiling.
+            return result;
+        }
+        length = (length * 2.0).min(horizon);
     }
 }
 

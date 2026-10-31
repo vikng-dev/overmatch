@@ -1649,8 +1649,8 @@ pub struct VolumeCrossing {
     pub end: Vec3,
     /// Disc-mean chord (m).
     pub chord: f32,
-    /// Hard matter's reference-mm readout, chord × factor. A witness keeps the legacy
-    /// `chord × wound` conversion input here; its HP dose follows the round's crew line rate
+    /// The game's damage model: hard matter's reference-mm readout, chord × factor. A witness
+    /// carries its `chord × wound` dose here, from the round's crew line rate
     /// ([`ArmourMark::Wound`]).
     pub cost: f32,
     /// The kinetic energy the round lost in it (J): hard matter's dose. Zero for a witness, which
@@ -4120,7 +4120,7 @@ fn next_surface(
 ) -> Ahead {
     let held = flight.holds_material();
     let reach = if held {
-        budget.max(resolve::MAX_CORRIDOR)
+        budget.max(resolve::FIELD_REACH)
     } else {
         budget
     };
@@ -7794,14 +7794,6 @@ mod march_tests {
             .id()
     }
 
-    /// Whether the march failed closed on armour: a walk error stops the round with a bare armour
-    /// spark (`Struck`) — no crossing, not deflected.
-    fn failed_closed(impacts: &[Captured]) -> bool {
-        impacts.iter().any(|impact| {
-            matches!(impact.surface, ImpactSurface::Armor) && impact.verdict == Verdict::Struck
-        })
-    }
-
     /// The game's damage model spends a tick's seconds at the speed each stretch actually has.
     /// The consumer is open flight after a perforation: allocating initial-speed metres there
     /// runs ahead. DERIVED counterexample: a zero-length change from 1000 to 200 m/s halfway
@@ -8026,7 +8018,7 @@ mod march_tests {
     /// volume's exit. Neither volume carries an envelope, so no crossing reach carries the step on;
     /// the held sample's drain alone does, closing the volume past the travel within the step
     /// ([`next_surface`]). A march that let the travel end the step would start the next inside the
-    /// volume with nothing declared, read its exit as `UnexpectedExit`, and fail closed on armour it
+    /// volume with nothing declared, read its exit as `UnexpectedExit`, and panic on armour it
     /// had already entered. No shipped body is without its envelope; this pins the drain that
     /// Playback retains that immutable continuation until its real path moment.
     #[test]
@@ -8077,14 +8069,6 @@ mod march_tests {
                 .first()
                 .is_some_and(|impact| impact.verdict.entered()),
             "the plate is perforated: {:?}",
-            impacts
-                .iter()
-                .map(|i| (i.position, i.verdict))
-                .collect::<Vec<_>>(),
-        );
-        assert!(
-            !failed_closed(&impacts),
-            "the continuation lapsed at the tick boundary and the march failed closed: {:?}",
             impacts
                 .iter()
                 .map(|i| (i.position, i.verdict))
@@ -8215,7 +8199,7 @@ mod march_tests {
     /// heading has a component ALONG the outgoing travel — `sin 30° = 0.5` for a 75° bounce, DERIVED —
     /// so half the ring starts up to 22 mm (an 88's radius × 0.5) ahead of the disc. A second face
     /// 10 mm past the bounce's resume point then has ring samples starting inside it with nothing
-    /// declared, and the walk fails closed on a face the round never reached.
+    /// declared, and the game's damage-model walk panics on a face the round never reached.
     ///
     /// [`graze_then_plate`] with the second plate's lower edge 5 mm above the outgoing axis: clear
     /// of the incoming disc, whose crossings of that face lie at least 4.4 mm below the axis
@@ -8229,10 +8213,6 @@ mod march_tests {
             impacts.first().map(|impact| impact.verdict),
             Some(Verdict::Ricochet),
             "the graze bounces: {read:?}",
-        );
-        assert!(
-            !failed_closed(&impacts),
-            "the contact after the bounce failed closed: {read:?}",
         );
         assert!(
             impacts
@@ -8249,7 +8229,7 @@ mod march_tests {
     /// grazed plate's, inside the graze's depth, so both pieces are one crossing (design doc §13.5,
     /// the hand-off) and the entrance reads both surfaces. The second face, square to the outgoing
     /// ray, tilts the read's normal toward the round, so the graze that ricochets alone bites:
-    /// one entry, its normal leaning toward the second face, no bounce and no fail-closed stop.
+    /// one entry, its normal leaning toward the second face, and no bounce or walk contradiction.
     #[test]
     fn a_graze_and_a_plate_struck_together_bite_as_one_crossing() {
         let impacts = graze_then_plate(-0.040);
@@ -8272,7 +8252,6 @@ mod march_tests {
                 .all(|impact| impact.verdict != Verdict::Ricochet),
             "nothing bounced: {read:?}",
         );
-        assert!(!failed_closed(&impacts), "no fail-closed stop: {read:?}");
     }
 
     /// Fly `shell`, launched within one march nudge of a face, for eight steps and assert it
@@ -8298,7 +8277,7 @@ mod march_tests {
         // With the face collected the crossing resolves honestly: an 88 through 50 mm.
         assert!(
             impacts[0].verdict.entered(),
-            "{at} the crossing resolved, rather than failing closed: {impacts:?}",
+            "{at} the crossing resolved: {impacts:?}",
             impacts = impacts
                 .iter()
                 .map(|i| (i.position, i.verdict))
@@ -8318,7 +8297,7 @@ mod march_tests {
     ///
     /// FREE PENETRATION IS THE ONE OUTCOME WORSE THAN A STOPPED SHELL. A face dropped from a TRANSIT
     /// corridor leaves a bare exit and the walk shouts `UnexpectedExit` — wrong, but loud, and the
-    /// driver fails closed on it. The same dropped face on an ENTRANCE corridor is silent: `begin`
+    /// game's damage-model driver panics on it. The same dropped face on an ENTRANCE corridor is silent: `begin`
     /// sees no material, returns [`walk::Begin::Miss`], and `resolve::decide` flies the round
     /// through the whole examined corridor with zero cost, zero damage and NO `Impact` at all. That
     /// is armour that was never modelled, which is precisely the defect class §13 exists to kill,
@@ -8566,7 +8545,7 @@ mod march_tests {
                 .filter(|impact| matches!(impact.surface, ImpactSurface::Armor))
                 .map(|impact| impact.verdict)
                 .collect();
-            if reads.len() != 1 || failed_closed(&impacts) {
+            if reads.len() != 1 {
                 misread.push((short, reads));
             }
             let _ = app.world_mut().try_despawn(shell);
@@ -8684,18 +8663,6 @@ mod march_tests {
         app.update();
         assert!(app.world().get::<Held>(shell).is_none(), "the hold cleared");
         assert_frame_spans_the_disc(&app, shell, "catch-up reseed");
-    }
-
-    /// The game's damage model cannot resolve a shell whose containing geometry exceeds the
-    /// closing corridor: membership is established, but the exit must still be reached. The
-    /// authority panics on this contradiction instead of recording a fabricated armour verdict.
-    #[test]
-    #[should_panic(expected = "the closing corridor must contain every opened shell's exit")]
-    fn a_shell_in_an_unclosable_volume_panics() {
-        // Fixture data: a volume longer than the resolution corridor, with the round at its centre.
-        let mut app = world_with_plate(Vec3::splat(200.0), Vec3::new(0.0, 2.0, 0.0));
-        spawn_headon_shell_at(&mut app, a_shot(), Vec3::new(0.0, 2.0, 0.0));
-        app.update();
     }
 
     /// The game's damage model charges both the incoming approach and the bent transit in
@@ -8896,7 +8863,7 @@ mod march_tests {
         assert_eq!(
             impacts.len(),
             2,
-            "two plates, two reads — not a pruned entry and a fail-closed stop: {:?}",
+            "two plates, each with its own resolved read: {:?}",
             impacts.iter().map(|i| i.position).collect::<Vec<_>>(),
         );
         assert!(
