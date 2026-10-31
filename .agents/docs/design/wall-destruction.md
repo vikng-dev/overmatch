@@ -3,7 +3,7 @@
 Subject: Overmatch’s environment destruction and tank damage model, game state only.
 Crew and modules are HP pools; dose can leave them reduced or their HP pool emptied and knocked out.
 
-Design for [#189](https://github.com/vikng-dev/overmatch/issues/189), building on [#188](https://github.com/vikng-dev/overmatch/issues/188).
+Design for [#189](https://github.com/vikng-dev/overmatch/issues/189), building on [#188](https://github.com/vikng-dev/overmatch/issues/188); the collision model is [#232](https://github.com/vikng-dev/overmatch/issues/232)'s.
 This document owns the environment model.
 [The tank damage design](armor-penetration-and-damage.md) owns the shared penetration, spall and burst narratives; amendments below state only what changes.
 
@@ -13,9 +13,9 @@ This document owns the environment model.
 **OWNER DECISION** marks a change to an accepted decision or an unresolved product choice.
 Proceed with the recommendations when prototyping; they are not recorded as owner acceptance.
 
-Every physical value below is **CLAIMED**, **DERIVED** or **ASSUMED**.
+Every physical value below is **MEASURED**, **CLAIMED**, **DERIVED** or **ASSUMED**.
 CLAIMED handbook values and source attributions are recalled knowledge or claims present in the supplied code, without external verification.
-No new MEASURED results are asserted.
+A MEASURED value names the count or the run it comes from.
 Equation coefficients, unit conversions, indices, issue numbers and version numbers are mathematical identities or identifiers.
 
 The supplied inputs do not contain a verified contact-charge breach example or an AP crater-size dataset.
@@ -47,10 +47,11 @@ Retain the offline bake, stable chunk identities, joint graph, authoritative led
 Use one deep destruction module with this interface:
 
 ```text
-advance(layout, state, timestamped_loads, contacts, interval)
+advance(layout, state, timestamped_loads, interval)
     -> state_delta, geometry_edits, body_transfers, receiver_deposits, audit
 ```
 
+Every source, a body's contact included, enters as a load (see Bodies in contact).
 The interface requires SI units, stable identities, event ordering and an explicit source budget.
 Its implementation owns local response, structural response, support assessment and representation changes.
 Callers do not decide which chunks fail.
@@ -314,33 +315,70 @@ Remove the burst potency multiplier from physical transport.
 Fragment dose follows actual absorbed energy and the shared receiver conversion.
 Existing ring geometry may remain an angular sampling stand-in if it passes the interception checks.
 
-### Rams and other contact
+### Bodies in contact
 
-Use transferred contact force over time:
+**Owner decision (2026-10-31, [#232](https://github.com/vikng-dev/overmatch/issues/232)): the collision model.**
+A body that touches a standing structure loads it through the same laws as a round or a blast.
+No collision scenario is written: no "tank rams wall" rule, no marker for which bodies may break things, no per-object threshold.
+
+**One load for every source.**
+A round's line, a fragment, a blast ray, any body's contact, the belt's reaction and weight enter the laws as one load on one chunk at one point: a **blow** (N·s), a **press** (N) and an **energy** (J).
+Its origin is a **field**, whose impulse its own law fixes, or a **body**, which shares momentum with whatever it frees.
+
+**Contacts are the solver's own transfers.**
+A contact's load is the momentum Avian's solver moved through each contact point in the step, normal and friction.
+Per substep that is the post-relax accumulated impulse less the share of the previous one warm starting did not reapply; restitution adds its increment after the substeps.
+`ContactPoint::normal_impulse` is not that momentum: Avian adds the whole accumulated impulse into it on every solve call, twice per substep.
+**MEASURED** 2026-10-26 on the game's 64 Hz, 6-substep solver, in a capture record not committed: it reads 1.90 × F·dt under a tank's sustained push, 1.56 × the hull's momentum change in a 5 km/h ram, 1.01× and 1.00× at 10 and 20 km/h.
+The reading (`contact_transfer`) sums Avian's public solver state for every contact between a structure and a dynamic body; the vendored crate is not patched.
+Its test holds each step's reading to the body's momentum change; there a 1000 kg cube pressed on a wall by 5 kN reads F·dt to within 10⁻⁵ through the reading and 2.000 × F·dt through `normal_impulse` (**MEASURED**, fixture data).
+A contact's transfer `J` splits at the body's rest speed, Avian's own `SleepThreshold` (0.15 m/s by default), below which the library calls a body at rest:
 
 ```text
-J_contact = ∫ F_contact dt
-Δp_tank = -Δp_structure
+v_n   = max(0, closing speed along n)
+blow  = n · min(J·n, m_b v_n)    when v_n exceeds the rest speed, else 0
+press = (J − blow) / dt
 ```
 
-Advance structural displacement and rotation throughout sustained loading.
-A below-threshold tick is not forgotten motion.
+`m_b` is the solver's effective mass of the body along `n` at the point.
+A ram's first tick is a blow plus that tick's engine press; a parked push is a press.
 
-**Inputs.**
-Mass, inertia, contact geometry, friction and the connection profiles determine response.
-Use the solver’s net transferred impulse, not a sum of retained iteration accumulators.
+**Two limits on every section.**
+A force must beat the section's strength: the weight check generalised, gravity one force beside each press and each blow's least mean force `blow / dt`.
+A blow must also pay the section's energy, its share reaching the section through the reduced mass below.
+A steady push meets the strength limit alone, so its verdict does not depend on the tick rate.
+The structure is rigid-plastic: a press below strength moves nothing and is read again each tick it persists; sub-threshold blows on a resting part are each read alone and never add (accepted).
+A field's blow keeps the energy limit alone (**ASSUMED**: its peak pressure beats a section's strength wherever its impulse pays the energy) until the blast's pressure fit can check it.
 
-**Stand-in.**
-Rigid-block contact is adequate where local indentation cannot change passage or failure.
-Read or instrument the actual momentum transfer before adapting Avian’s contact output.
+**Structures stay solid to the physics engine (option B).**
+Avian stops a body against a standing structure as against any static body, and the laws judge every joint from the contact's real transfer.
+A section's energy check reads a body's blow as the plastic exchange with the group it holds, `blow × m_h / (m_b + m_h)`, `m_h` the group's effective mass about its hinge at the point; a field's blow reaches it whole.
+A group that breaks free leaves with the plastic share against its free effective mass, `J_launch = blow × m_f / (m_b + m_f)`.
+The body gets back `blow − J_launch` at the contact point, so a body that breaks through slows by the momentum the freed group took, no more.
+Momentum is conserved by construction, and no energy is created (**DERIVED**: with `m_red = m_b m_f / (m_b + m_f)`, the body's loss exceeds the group's gain by `½ m_red v_n²`, the plastic loss the fracture work is drawn from).
+The launch reads the free mass, never the hinge mass, which grows without bound near the hinge and would create energy.
 
-**Server cost.**
-**DERIVED `O(C)`** transfer extraction for `C` contacts, plus structural solution cost.
+**Rejected: option A**, every piece a finite-mass body joined by breakable springs inside the solver: the compliant-seam reference model below, run in Avian with custom joints.
+Its visible result is the same, since masonry does not visibly flex, and no study could bound its cost: **DERIVED** 34,890 bodies and 97,980 joints and anchors with 30 houses in play, from house_1's 1,163 chunks, 3,185 joints and 81 anchors (**MEASURED**, `house_1.building.ron`).
+Reopen it only for a structure whose bending is visible: a swaying timber barn, a sagging bridge.
+
+**Trees are structures by the same laws.**
+A trunk's segments are chunks, its segment boundaries bonded joints of the wood along the grain, its root plate the anchor; the cut is wherever bending stress peaks, never a fixed segment.
+`fell_k` and the ram law go.
+A freed trunk is a dynamic body, like a wall piece: it strikes with its own mass, leaves with the plastic share of the blow that freed it, is stopped by any body, and rests by Avian's sleep.
+
+**Walls fail locally by punch rings.**
+A punch ring is a patch pushed out through its surrounding joints: the chunks a tick's loads touch, grown by rings through intact bonded joints, each group with no anchor a candidate whose cut set is every live joint to the rest.
+Its capacity reads sourced masonry shear strength `c` and mode-II fracture energy `G_II`, refused at load when absent.
+Planar sections cannot see a local failure: house_1's running bond leaves no single joint, and no coplanar set short of a whole course, that isolates a chunk under a tank's nose.
 
 **Tanks.**
-Tanks receive the opposing momentum once.
-Contact creates no tank HP dose under the recommended interpretation of the owner’s exclusion.
-Trees eventually use this same force-history response.
+A contact never doses a tank (decided 2026-10-31): the body takes the opposing momentum, through the solver and the give-back, once.
+
+**Lanes**, in order, each under 90 minutes.
+Walls ([#235](https://github.com/vikng-dev/overmatch/issues/235)): 1, the contact transfer reading; 2, one load type in place of the fracture laws' separate sources, pushes and energies, with no change in behaviour; 3, contacts into buildings, split at the rest speed; 4, the reduced mass, launch and give-back; 5, strength under gravity and presses; 6, sourced masonry shear data; 7, punch rings and the two-limit rule, where walls first break under tanks.
+Trees ([#236](https://github.com/vikng-dev/overmatch/issues/236)): 8, wood grain and root-plate data; 9, trees as structures; 10, the dynamic trunk.
+The blast's crush term waits for its own owner discussion; pricing follows the walls.
 
 ## Local response and holes
 
@@ -428,7 +466,7 @@ No fastener is modelled (no nail size, count, spacing or timber density as data)
 Without kinds every joint would hold like the material itself (a nailed roof as strong as solid timber).
 Every nailed joint shares the one kind, a ridge's included (its own nailing is 5× denser per contact area, DERIVED); a joint that plays as needing another strength is a second kind, never a per-building number.
 Step (1) runs as `fracture::weigh`: tension only (the weight's direct pull plus its bending moment, each joint a disc of its area), from the chunks a change touched; a touched chunk no single section holds stands unassessed and is counted.
-The every-tick compliant-seam model below stays the reference model, not the build: its only extra visible effects are sagging and swaying, at a per-tick server and network cost.
+The every-tick compliant-seam model below stays the reference model, not the build: its only extra visible effects are sagging and swaying, at a per-tick server and network cost (option A, rejected in Bodies in contact).
 Survey of shipped games and costs: `.agents/scratch/destruction-2026-10-31-collapse/collapse-survey.md`.
 
 Use rigid blocks with distributed, compliant seams and finite mass.
@@ -539,6 +577,8 @@ Local cracking still resolves short stress pulses.
 A globally impulsive event need not be locally quasistatic.
 Longer loads retain their force history and evolving displacement.
 
+The build reads every load by the two limits instead, a body's contact split into blow and press at its rest speed (see Bodies in contact).
+
 ## Energy and momentum budget
 
 For each source and interval:
@@ -624,8 +664,8 @@ v = P/M
 ```
 
 Use actual surviving geometry in each term.
-Transfer the velocities already produced by structural response.
-Do not add the initiating impulse again at carrier creation.
+A standing structure is rigid to the solver, so no structural response has moved a group before it breaks free.
+The group leaves with the momentum the load that freed it hands it, once, at carrier creation: a body's plastic share, a field's whole (see Bodies in contact).
 
 A rigid carrier is acceptable while internal relative motion is negligible.
 Retain unresolved elastic energy and seam history.
@@ -794,7 +834,7 @@ Measure server cost on deployment hardware before selecting runtime refinement a
 | 4 — partial removal | Shared sub-chunk geometry and depth refinement. |
 | 5 — strength-scaled inertia | Independent target density and resistance terms; porous-material validity remains a validation gate. |
 | 6 — fracture versus toppling | Cohesive work separates seams; gravity and unilateral contact decide rocking and toppling. |
-| 7 — sustained pushing | Force-history integration and net transferred contact impulse. |
+| 7 — sustained pushing | The strength limit, read against each tick's press from the solver's transferred momentum (see Bodies in contact). |
 | 8 — universal Lamé field | Restricted embedded-cavity domain; transient local response near boundaries. |
 | 9 — connection mechanisms | Symmetric opening, frictional sliding, crushing and cohesive softening; timber awaits directional data. |
 | 10 — ejecta budget | Ejection response determines mass and velocity; complete energy and momentum accounts constrain it. |
@@ -821,6 +861,7 @@ A quoted spring force alone supplies none of the missing acceleration coupling.
 |---|---|
 | Small-hole fidelity | **Decided:** a hole is a negative volume, drawn only; rounds, mass and strength ignore it (see Local response and holes). |
 | Rubble persistence and mobility | **Provisional (2026-10-31):** retain gameplay-relevant occupied geometry throughout the match; let mass, friction and track contact determine climbing or pushing. Fine presentation debris may fade. |
+| Collision loads | **Decided (2026-10-31, #232):** one load for every source; contacts read from the solver's transfers; two limits on every section; structures solid to the physics engine, a freed group taking the plastic share of the blow (option B; option A rejected); trees as structures; punch rings (see Bodies in contact). |
 | Contact-damage scope | **Decided (2026-10-31):** wall material never doses a tank, whether it falls, is pushed or is thrown off a hit; walls still fracture on landing and under pushing loads. |
 | Accepted strength-scaled spall | **Decided (2026-10-31):** wall ejecta are debris with no dose; the tanks' strength-scaled spall cone stays (see Spall as ejecta). |
 | Three-property material model | **Provisional (2026-10-31):** keep the summary, add sourced constitutive and attachment profiles; do not infer missing properties from strength. |
