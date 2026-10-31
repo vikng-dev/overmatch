@@ -79,6 +79,12 @@ every local run held the machine lock. Labels: MEASURED, DERIVED, ASSUMED.
    - **volley hitches of 20–200 ms come every ~3 s** from `integrate_projectiles` and
      `apply_deposits`.
 
+6. **alpha.5 (the #186 tick cuts) on Edgegap, 30 bots, no client, A/B/B/A:**
+   - 1 vCPU: tick p50 21.3 → 15.2 ms (−29 %);
+   - 2 vCPU with `OVERMATCH_SERVER_THREADS=4`: 16.0 → 10.9 ms (−32 %), p95 13.0, 64 Hz.
+
+   That shape now holds 30 tanks in budget (MEASURED; section below).
+
 ## What ran, from which tag
 
 | Part | Tag | Binaries | Where |
@@ -185,8 +191,8 @@ Each directory has `conditions.tsv`, the per-condition `*.server.json`, a stats-
 | 1 vCPU, no client, threads=4 | `edgegap-1vcpu-noclient-t4/` | 2 of 2 | Zero debris only (TLDR 3). |
 | 2 vCPU, no client, threads=6 | `edgegap-2vcpu-noclient-t6/` | 2 of 2 | Zero debris only, pools 2/2/2 (TLDR 3). |
 
-- **Cost:** 47 deployments of ~4 min: 13 at 1 vCPU ($0.069/h) and 34 at 2 vCPU ($0.138/h), about
-  $0.37 (DERIVED, list price).
+- **Cost:** 55 deployments of ~4 min, the alpha.5 A/B included: 17 at 1 vCPU ($0.069/h) and 38 at
+  2 vCPU ($0.138/h), about $0.43 (DERIVED, list price).
 - **Stopped:** every `profile-` deployment is stopped, and the live count was confirmed 0 at the
   end.
 
@@ -208,8 +214,39 @@ Each directory has `conditions.tsv`, the per-condition `*.server.json`, a stats-
 - `local-zero/`: the census-only zero on the M4.
 - `edgegap-*/`: the Edgegap curves above.
 - `calib/`: the lever calibration.
+- `ab-alpha4-alpha5-*/`: the release A/B on Edgegap.
 - `battery/`: the two battery blocks' outputs.
 - `tools/`: the runners and analysis scripts.
+
+## alpha.4 against alpha.5 on Edgegap (the orchestrator's late ask)
+
+The #186 server-tick cuts landed in v0.7.0-alpha.5 (`cc8682d`, release run 41142524061, green).
+Setup:
+
+- **Deployments:** 30 bots, no client, debris lever off, A/B/B/A, 07:06–07:24 +07, each
+  deployment its own `profile-` id, all stopped and the live count confirmed 0.
+- **Products:** `ab-alpha4-alpha5-*/`, run by `tools/clientless-ab.sh`.
+- **Registered:** `0.7.0-alpha.5-2vcpu`, 2048 units, max_duration 120, the same image
+  `0.7.0-alpha.5-cc8682d`.
+
+The cells are window medians, MEASURED: run 1 / run 2, ms.
+
+| Host | Release | tick p50 | tick p95 | physics p50 | sim rate | Overruns/s |
+|---|---|---|---|---|---|---|
+| 1 vCPU, default pools | alpha.4 | 21.19 / 21.50 | 27.06 / 26.68 | 10.48 / 10.31 | 43 Hz | 48 |
+| 1 vCPU, default pools | alpha.5 | **15.20 / 15.18** | 21.76 / 21.71 | 4.23 / 4.24 | 59 Hz | 26–27 |
+| 2 vCPU, `OVERMATCH_SERVER_THREADS=4` | alpha.4 | 16.03 / 16.05 | 18.65 / 19.20 | 5.52 / 5.65 | 57–58 Hz | 43–44 |
+| 2 vCPU, `OVERMATCH_SERVER_THREADS=4` | alpha.5 | **10.94 / 10.93** | **13.05 / 12.91** | 3.56 / 3.57 | 64 Hz | 1 |
+
+- **1 vCPU:** alpha.5 is −6.15 ms p50 (−29 %) and −5.14 p95 (DERIVED).
+  - p50 now sits just under the 15.6 ms budget. p95 does not, and the simulation still loses 5 Hz.
+- **2 vCPU with 4 threads:** alpha.5 is −5.11 ms p50 (−32 %) and −5.95 p95.
+  - 30 tanks now hold the budget with ~2.6 ms of p95 headroom, at 64 Hz.
+- **Agreement:** the two halves of each A/B agree within 0.3 ms at p50.
+- **Not like the curve's zero.** alpha.4 at 30 bots without the lever (21.3 ms) runs slower than
+  the curve's 29 bots plus the census-only lever (18.5 ms). Those are other deployments, on hosts
+  that differ from one deployment to the next, and with a bot more. So compare within this table
+  only.
 
 ## The night battery (item 4)
 

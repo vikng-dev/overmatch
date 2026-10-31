@@ -1,0 +1,1 @@
+server_stats {"budget_us":15625.0,"clients":0,"cpu_pct":99.9,"entities":18580,"nr_throttled":4,"overruns":11,"period_s":1.0,"physics_us":{"max":14316.3,"p50":2916.1,"p95":3731.5},"projectiles":20,"rss_mb":319.6,"send_us":{"max":270.5,"p50":144.3,"p95":228.0},"tanks":30,"throttled_usec":37929,"tick_hz":64.2,"tick_us":{"max":24664.1,"p50":12528.5,"p95":16515.7},"ticks":65}

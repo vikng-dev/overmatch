@@ -1,0 +1,15 @@
+cond	lever	lines	live	frozen	tick50	tick95	phys50	send50	cpu	over_max	hz	clients
+ab01-0.7.0-alpha.4-2vcpu-t4	0.7.0-alpha.4-2vcpu	183	0	0	16029	18646	5518	176	142	64	58.3	0-0
+ab02-0.7.0-alpha.5-2vcpu-t4	0.7.0-alpha.5-2vcpu	182	0	0	10938	13050	3561	170	148	9	64.0	0-0
+ab03-0.7.0-alpha.5-2vcpu-t4	0.7.0-alpha.5-2vcpu	182	0	0	10925	12915	3567	169	148	6	64.0	0-0
+ab04-0.7.0-alpha.4-2vcpu-t4	0.7.0-alpha.4-2vcpu	160	0	0	16049	19205	5651	179	142	64	57.2	0-0
+
+== threads 4: 4 conditions
+  tick50  medians: -   |   per-second: -
+  tick95  medians: -   |   per-second: -
+  phys50  medians: -   |   per-second: -
+  cpu     medians: -   |   per-second: -
+  live medians span 0–0
+  per-second bins (armed seconds by live; `off` = lever-off seconds):
+    live_bin      n   live_med frozen_med tick50 tick95 phys50 send50 cpu   slope_vs_prev(us/piece)
+    0-0            707         0         0   12542   15430    3960    173   144   

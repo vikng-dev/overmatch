@@ -1,0 +1,143 @@
+{
+ "label": "ab04-0.7.0-alpha.4",
+ "log": "/private/tmp/claude-502/-Users-Yan-github-vikng-dev-overmatch/13e20afd-7b0e-4ad2-9b6e-b78f39af0d6c/scratchpad/night/runs/ab-1vcpu/ab04-0.7.0-alpha.4/ab04-0.7.0-alpha.4.server.log",
+ "log_present": true,
+ "window": "marked",
+ "stats_lines": 151,
+ "bots_spawned": 30,
+ "bot_knockouts_in_window": 51,
+ "stats": {
+  "budget_us": {
+   "n": 151,
+   "median": 15625.0,
+   "max": 15625.0,
+   "last_minus_first": 0.0
+  },
+  "clients": {
+   "n": 151,
+   "median": 0.0,
+   "max": 0.0,
+   "last_minus_first": 0.0
+  },
+  "cpu_pct": {
+   "n": 151,
+   "median": 100.0,
+   "max": 101.1,
+   "last_minus_first": 0.09999999999999432
+  },
+  "entities": {
+   "n": 151,
+   "median": 23164.0,
+   "max": 26653.0,
+   "last_minus_first": 8072.0
+  },
+  "nr_throttled": {
+   "n": 151,
+   "median": 5.0,
+   "max": 6.0,
+   "last_minus_first": 0.0
+  },
+  "overruns": {
+   "n": 151,
+   "median": 48.0,
+   "max": 64.0,
+   "last_minus_first": -16.0
+  },
+  "period_s": {
+   "n": 151,
+   "median": 1.2,
+   "max": 1.5,
+   "last_minus_first": 0.0
+  },
+  "physics_us.max": {
+   "n": 151,
+   "median": 16525.4,
+   "max": 20376.7,
+   "last_minus_first": 8566.099999999999
+  },
+  "physics_us.p50": {
+   "n": 151,
+   "median": 10314.8,
+   "max": 13126.3,
+   "last_minus_first": 4593.599999999999
+  },
+  "physics_us.p95": {
+   "n": 151,
+   "median": 12728.7,
+   "max": 17122.8,
+   "last_minus_first": 4692.4000000000015
+  },
+  "projectiles": {
+   "n": 151,
+   "median": 10.0,
+   "max": 30.0,
+   "last_minus_first": -11.0
+  },
+  "rss_mb": {
+   "n": 151,
+   "median": 396.9,
+   "max": 407.0,
+   "last_minus_first": 86.60000000000002
+  },
+  "send_us.max": {
+   "n": 151,
+   "median": 224.2,
+   "max": 520.7,
+   "last_minus_first": 43.0
+  },
+  "send_us.p50": {
+   "n": 151,
+   "median": 194.3,
+   "max": 327.9,
+   "last_minus_first": 69.60000000000002
+  },
+  "send_us.p95": {
+   "n": 151,
+   "median": 224.2,
+   "max": 520.7,
+   "last_minus_first": 43.0
+  },
+  "tanks": {
+   "n": 151,
+   "median": 30.0,
+   "max": 30.0,
+   "last_minus_first": 0.0
+  },
+  "throttled_usec": {
+   "n": 151,
+   "median": 22262.0,
+   "max": 33597.0,
+   "last_minus_first": -9092.0
+  },
+  "tick_hz": {
+   "n": 151,
+   "median": 43.0,
+   "max": 56.8,
+   "last_minus_first": -11.099999999999994
+  },
+  "tick_us.max": {
+   "n": 151,
+   "median": 30426.5,
+   "max": 766533.5,
+   "last_minus_first": 4392.200000000001
+  },
+  "tick_us.p50": {
+   "n": 151,
+   "median": 21499.8,
+   "max": 25916.3,
+   "last_minus_first": 5484.299999999999
+  },
+  "tick_us.p95": {
+   "n": 151,
+   "median": 26676.1,
+   "max": 766533.5,
+   "last_minus_first": 5786.100000000002
+  },
+  "ticks": {
+   "n": 151,
+   "median": 48.0,
+   "max": 64.0,
+   "last_minus_first": -16.0
+  }
+ }
+}
