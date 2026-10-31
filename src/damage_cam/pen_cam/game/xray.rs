@@ -1119,7 +1119,6 @@ fn scripted(from: f32, to: f32) -> impl FnMut(Res<Time>, ResMut<XRay>, Local<boo
 /// Dev-only, offline: `OVERMATCH_XRAY=<from>-<to>` holds the x-ray preference on from
 /// `from` to `to` app seconds (`Time` as `Update` sees it) and lets it go at `to`, for captures.
 /// Mounted only by the offline composition.
-#[cfg(feature = "dev_tools")]
 pub(crate) fn scripted_xray_plugin(app: &mut App) {
     let Ok(window) = std::env::var("OVERMATCH_XRAY") else {
         return;

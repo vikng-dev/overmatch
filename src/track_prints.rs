@@ -35,7 +35,6 @@
 //! by the track view (`track::view_plugin`), which only windowed clients compose. Every system is
 //! inert until [`TrackPrints`] exists.
 
-#[cfg(feature = "dev_tools")]
 pub(crate) mod demo;
 mod stamp;
 mod stamper;

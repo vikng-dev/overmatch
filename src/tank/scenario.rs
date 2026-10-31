@@ -36,9 +36,6 @@ const START_SPOTS: [(&str, f32, f32, f32); 3] = [
 /// unreadable (logged), is every normal run; a dev lever on the offline path only, like
 /// [`target_ahead`].
 pub(crate) fn start_spot() -> Option<(Vec2, f32)> {
-    if !cfg!(feature = "dev_tools") {
-        return None;
-    }
     let spec = std::env::var("OVERMATCH_START").ok()?;
     let named = START_SPOTS
         .iter()
@@ -136,7 +133,6 @@ fn target_kills_enabled() -> bool {
 ///
 /// Mounted only by the offline composition (`run_offline`), as `command::offline_auto_fire_plugin`
 /// is: that root has no netcode, so the commands it writes never leave the process.
-#[cfg(feature = "dev_tools")]
 pub fn offline_target_fires_plugin(app: &mut App) {
     if !target_ahead() {
         return;
@@ -167,33 +163,27 @@ pub fn offline_target_fires_plugin(app: &mut App) {
 /// When the target-fires scenario's target pulls its trigger, `Time<Real>` seconds (TUNED: the
 /// first after its turret has traversed onto the player and the tanks have settled, the rest a
 /// reload apart and more).
-#[cfg(feature = "dev_tools")]
 const TARGET_FIRE_AT_S: [f32; 3] = [25.0, 40.0, 55.0];
 
 /// Where on the player's hull the target lays its gun, in the hull's frame, m: fixture data,
 /// [`TARGET_AIM_RISE_M`] up and toward the rear (+Z, the hull faces −Z), over the engine bay
 /// rather than the fighting compartment, so a round costs the tank a component without
 /// knocking it out at once.
-#[cfg(feature = "dev_tools")]
 const TARGET_FIRE_AIM_LOCAL_M: Vec3 = Vec3::new(0.0, TARGET_AIM_RISE_M, 2.2);
 
 /// How long each scheduled trigger pull stays latched, s: shorter than any reload, so it fires one
 /// round.
-#[cfg(feature = "dev_tools")]
 const TARGET_FIRE_LATCH_S: f32 = 0.5;
 
 /// When the target-kills scenario's target first pulls its trigger, and how often after,
 /// `Time<Real>` seconds (TUNED: once the turret has traversed and the tanks have settled; longer
 /// than a reload, so each pull fires).
-#[cfg(feature = "dev_tools")]
 const TARGET_KILL_FROM_S: f32 = 25.0;
-#[cfg(feature = "dev_tools")]
 const TARGET_KILL_EVERY_S: f32 = 10.0;
 
 /// The target-kills scenario: the target's gun on the centre of the player's ammunition volume
 /// nearest it (the union of its colliders' bounds), a pull every [`TARGET_KILL_EVERY_S`] until the
 /// player's tank is knocked out.
-#[cfg(feature = "dev_tools")]
 fn target_kills(
     time: Res<Time<Real>>,
     player: Query<
@@ -257,7 +247,6 @@ fn target_kills(
     }
 }
 
-#[cfg(feature = "dev_tools")]
 fn target_fires(
     time: Res<Time<Real>>,
     player: Query<&GlobalTransform, (With<Tank>, With<Controlled>)>,

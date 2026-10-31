@@ -125,8 +125,6 @@ lightyear_inputs = { version = "0.30.1", default-features = false }
 lightyear_inputs_native = { version = "0.30.1", default-features = false }
 
 [features]
-default = ["dev_tools"]
-dev_tools = []
 bitprobe = ["dep:flate2"]
 dev_ui = ["dep:bevy_egui"]
 
@@ -182,7 +180,6 @@ required-features = ["bitprobe"]
 name = "ballistic_fuzzer"
 path = "src/bin/ballistic_fuzzer.rs"
 test = false
-required-features = ["dev_tools"]
 
 [[bin]]
 name = "track_sandbox"
@@ -200,7 +197,6 @@ required-features = ["dev_ui"]
 name = "pen_cam_demo"
 path = "src/bin/pen_cam_demo.rs"
 test = false
-required-features = ["dev_tools"]
 
 [profile.dev]
 opt-level = 1

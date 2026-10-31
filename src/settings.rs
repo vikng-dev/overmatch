@@ -1,7 +1,7 @@
 //! Player-facing graphics settings: the persisted model, its on-disk home, and the ONE place that
 //! applies it to the rendering world.
 //!
-//! **Not `dev_tools`-gated** — this ships, and it is the ONLY thing that configures the renderer.
+//! It is the ONLY thing that configures the renderer.
 //!
 //! # Three writers: two player intent, one reality
 //!

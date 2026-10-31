@@ -42,7 +42,6 @@ use bevy::prelude::*;
 use bevy::world_serialization::WorldAsset;
 
 pub(crate) use self::killcam::{GameDeathScreen, KillCamGate, KillCamGateSet};
-#[cfg(feature = "dev_tools")]
 pub(crate) use self::xray::scripted_xray_plugin;
 pub(crate) use self::xray::{XRay, XRayRelease, XRaySubject};
 use super::hud::{self, CornerImages, Glyphs};

@@ -25,7 +25,6 @@
 //! [`MarkBuilder`]. The view — decals, textures, the client's diff — is `vfx::hull_marks`, mounted
 //! by every windowed composition.
 
-#[cfg(feature = "dev_tools")]
 pub(crate) mod demo;
 
 use std::collections::VecDeque;

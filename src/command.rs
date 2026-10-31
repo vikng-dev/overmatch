@@ -421,8 +421,8 @@ pub fn client_plugin(app: &mut App) {
 /// The scripted-trigger hook, as its OWN mount — the offline capture composition (`run_offline`)
 /// is the only caller, and that is a security boundary, not a tidiness preference.
 ///
-/// [`client_plugin`] above is shared: `NetClientPlugin` mounts it too, and `dev_tools` is a DEFAULT
-/// feature, so a packaged release client builds `auto_fire`'s code. Had the registration stayed in
+/// [`client_plugin`] above is shared: `NetClientPlugin` mounts it too, and every build, the
+/// packaged release client included, compiles `auto_fire`'s code. Had the registration stayed in
 /// the shared mount, any player could launch the shipped client with `SPIKE_AUTO_FIRE=1` and have
 /// scripted trigger edges written into `TankCommand` — which the net input bridge then sends to a
 /// LIVE server as genuine player input. Registering it here instead makes the hook STRUCTURALLY
@@ -434,7 +434,6 @@ pub fn client_plugin(app: &mut App) {
 /// and `run_offline` is the crate's ONLY mount site
 /// (`offline_auto_fire_plugin_is_mounted_only_inside_run_offline`, a source scan — "no other plugin
 /// mounts this" is not expressible in the type system).
-#[cfg(feature = "dev_tools")]
 pub fn offline_auto_fire_plugin(app: &mut App) {
     let armed = app.world().get_resource::<AutoFireArmed>().map_or_else(
         || crate::env_flag("SPIKE_AUTO_FIRE", false),
@@ -460,14 +459,12 @@ pub fn offline_auto_fire_plugin(app: &mut App) {
 /// Whether [`offline_auto_fire_plugin`] arms the scripted trigger. Read once, at that mount: an
 /// `App` already carrying it is taken at its word, and otherwise `SPIKE_AUTO_FIRE` decides. Nothing
 /// in production inserts it.
-#[cfg(feature = "dev_tools")]
 #[derive(Resource, Clone, Copy)]
 struct AutoFireArmed(bool);
 
 /// The hardcoded auto-fire timeline, in `Time<Real>` seconds — the SAME clock `frame_cost` stamps
 /// its rows with, so a capture can be split into windows by these boundaries alone. Stated as one
 /// string because it is logged verbatim at arm time: the capture's own record of what it drove.
-#[cfg(feature = "dev_tools")]
 const AUTO_FIRE_SCHEDULE: &str =
     "idle 0-20s, MG held 20-50s, idle 50-60s, main gun 60-75s, idle 75s+";
 
@@ -481,7 +478,6 @@ const AUTO_FIRE_SCHEDULE: &str =
 /// not to become a scripting facility. It writes only the two trigger fields, after
 /// [`gather_commands`] has written the real devices, so it composes as an override rather than a
 /// second input source.
-#[cfg(feature = "dev_tools")]
 fn auto_fire(
     time: Res<Time<Real>>,
     mut phase: Local<u8>,
@@ -686,7 +682,6 @@ mod tests {
     /// Every system name registered in `RunFixedMainLoop`, read off the schedule GRAPH so no
     /// initialization or `update()` is needed (`Schedule::systems` requires a run first; the graph
     /// holds the nodes from `add_systems` onward — vendored bevy_ecs-0.19.0 `ScheduleGraph`).
-    #[cfg(feature = "dev_tools")]
     fn run_fixed_main_loop_systems(app: &App) -> Vec<String> {
         let schedules = app.world().resource::<bevy::ecs::schedule::Schedules>();
         schedules
@@ -705,14 +700,13 @@ mod tests {
     /// SECURITY BOUNDARY (the reason [`offline_auto_fire_plugin`] is a separate mount): the shared
     /// device-gather plugin — the one `NetClientPlugin` composes into every packaged network client
     /// — must not register the scripted trigger, *even in an app armed for it* ([`AutoFireArmed`],
-    /// which stands in for `SPIKE_AUTO_FIRE`). A release client builds `dev_tools` (a default feature), so
-    /// if the hook rode along in `client_plugin` a player could arm it with an env var and have
-    /// scripted trigger edges sent to a live server as genuine input.
+    /// which stands in for `SPIKE_AUTO_FIRE`). A release client compiles the hook, so if it rode
+    /// along in `client_plugin` a player could arm it with an env var and have scripted trigger
+    /// edges sent to a live server as genuine input.
     ///
     /// The second half is the control: the same probe DOES see `auto_fire` once the offline mount is
     /// added, so the first assertion is proof of absence rather than proof of a blind probe.
     #[test]
-    #[cfg(feature = "dev_tools")]
     fn the_shared_device_gather_never_arms_auto_fire_even_when_armed() {
         let mut shared = App::new();
         shared.insert_resource(AutoFireArmed(true));

@@ -4,10 +4,9 @@
   // ~2.9 GB resident while agent `cargo` runs held several GB apiece on the same graph.
 
   // The load-bearing one. rust-analyzer runs its own `cargo check` into `target/` by default — the
-  // SAME directory the terminal builds use. This repo gates on two feature sets (`--features net`
-  // and `--no-default-features`, both in ci.yml), so a terminal build under one resolution evicts the
-  // artifacts rust-analyzer just produced under the other, and each rebuilds what the other threw
-  // away. `true` moves rust-analyzer to `target/rust-analyzer`, ending the mutual eviction. Costs a
+  // SAME directory the terminal builds use. Terminal builds run `--features dev_ui,bitprobe` and
+  // rust-analyzer checks the featureless build, so a build under one resolution evicts the artifacts
+  // the other just produced, and each rebuilds what the other threw away. `true` moves rust-analyzer to `target/rust-analyzer`, ending the mutual eviction. Costs a
   // second artifact tree on disk; `target/` is already in `.cursorignore`, so this is covered.
   "rust-analyzer.cargo.targetDir": true,
 
@@ -27,7 +26,6 @@
   // largest startup memory spike, for symbols that resolve on demand anyway.
   "rust-analyzer.cachePriming.enable": false
 
-  // Deliberately NOT set: `rust-analyzer.cargo.features`. `net` is a DEFAULT feature
-  // (Cargo.toml: `default = ["net", "dev_tools"]`), so rust-analyzer already enables it and pinning
-  // the list buys nothing. It would only matter if `net` were opt-in.
+  // Not set: `rust-analyzer.cargo.features`. The crate has no default features, so rust-analyzer
+  // checks the shipped feature set; `dev_ui` and `bitprobe` code reads as inactive.
 }

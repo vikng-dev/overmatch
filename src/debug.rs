@@ -1,9 +1,7 @@
-//! Dev-only debug helpers (compiled behind the `dev_tools` feature — default-on, and deliberately
-//! decoupled from `debug_assertions` so an optimized/`--release` playtest build still carries these
-//! keys; see `Cargo.toml`). Press `G` to toggle the debug
-//! gizmos: belt-contact force arrows (cyan = support load along the contact normal, orange =
-//! traction) plus Avian's collider wireframes. `F` detaches the camera. A see-through tank is the
-//! pen cam's x-ray (`X`, `damage_cam::pen_cam::game`), not a debug key.
+//! Debug helpers, compiled into every build, the packaged network client included. Press `G` to
+//! toggle the debug gizmos: belt-contact force arrows (cyan = support load along the contact
+//! normal, orange = traction) plus Avian's collider wireframes. `F` detaches the camera. A
+//! see-through tank is the pen cam's x-ray (`X`, `damage_cam::pen_cam::game`), not a debug key.
 //!
 //! Mounted by BOTH client compositions — `ClientPlugin` (single-player) and `NetClientPlugin`
 //! (the networked client bin) — always paired with Avian's `PhysicsDebugPlugin` (which registers

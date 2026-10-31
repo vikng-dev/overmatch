@@ -66,7 +66,6 @@ mod collect;
 /// and every corridor reaching crew or ammunition reported with its admitting caliber and per-caliber
 /// η. A corridor fails the gate by name, unconditionally: an effectively unarmoured route into the
 /// tank is a defect in the model.
-#[cfg(any(feature = "dev_tools", test))]
 pub mod fuzz;
 
 /// The spall-cone casts digested to the bit and compared with a pinned digest, run on every

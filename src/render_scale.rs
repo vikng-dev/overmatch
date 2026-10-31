@@ -1,6 +1,6 @@
 //! Render scale: draw the 3D world at a fraction of the window, present it at full size.
 //!
-//! Ships — NOT `dev_tools`-gated. This is the player-facing [`RenderScaleLevel`] row of the settings
+//! This is the player-facing [`RenderScaleLevel`] row of the settings
 //! page made real; `settings::apply_settings` is the ONE writer of the [`RenderScale`] resource this
 //! module reads, exactly as it is the one writer of `Msaa` and the shadow config.
 //!

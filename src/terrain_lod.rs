@@ -89,9 +89,9 @@
 //!    (zero) and 5 px (one). Sub-pixel doctrine deliberately does not gate this — re-measure if it
 //!    ever matters.
 //!
-//! Looking at any of the three by eye: the `dev_tools` rung cycler ([`TerrainLodClamp`]) pins the
-//! whole map to one rung, which is the only way to judge a level that would otherwise only ever
-//! appear a kilometre away. For the shadow channel, set `ShadowDistance` to m1000 first.
+//! Looking at any of the three by eye: the rung cycler ([`TerrainLodClamp`]) pins the whole map
+//! to one rung, which is the only way to judge a level that would otherwise only ever appear a
+//! kilometre away. For the shadow channel, set `ShadowDistance` to m1000 first.
 //!
 //! # The landmine this module is built around
 //!
@@ -963,25 +963,14 @@ pub(crate) struct TerrainLodLadder(pub(crate) TerrainLod);
 /// this module still owes — see the module doc). Both need eyes on a running frame, and switching
 /// them in at their real distances puts them a kilometre away where nobody can judge them.
 ///
-/// Only `dev_tools` mounts anything that can move this off `Adaptive`, so on a shipped client it is
-/// a resource that is read once per profile change and never written.
+/// Only the rung cycler's key ([`CLAMP_CYCLE_KEY`]) moves this off `Adaptive`; until it is pressed
+/// the resource is read once per profile change and never written.
 #[derive(Resource, Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub(crate) enum TerrainLodClamp {
     /// Live selection: every tile picks its level from the camera distance.
     #[default]
     Adaptive,
     /// Every tile pinned to one rung of [`TERRAIN_LOD_LADDER`], regardless of distance.
-    ///
-    /// Unconstructible without `dev_tools`, and the dead-code warning that produces on a release
-    /// build is the shipped-client guarantee stated by the compiler: nothing there can move the
-    /// clamp off `Adaptive`.
-    #[cfg_attr(
-        not(feature = "dev_tools"),
-        expect(
-            dead_code,
-            reason = "only the dev_tools rung cycler constructs this; see the variant doc"
-        )
-    )]
     Rung(usize),
 }
 
@@ -1118,10 +1107,8 @@ pub(crate) fn plugin(app: &mut App) {
             // Same frame as the resize that caused it, not the next one.
             .after(crate::view::track_view_facts),
     );
-    // The eyeball rig. `dev_tools` is a DEFAULT feature, so this ships to playtest builds and not
-    // to a release client; without it nothing can move `TerrainLodClamp` off `Adaptive` and the
-    // resource is inert.
-    #[cfg(feature = "dev_tools")]
+    // The eyeball rig, in every build: until its key is pressed, `TerrainLodClamp` stays
+    // `Adaptive` and the resource is inert.
     app.add_systems(Update, cycle_clamp.before(adapt_ranges));
 }
 
@@ -1130,7 +1117,6 @@ pub(crate) fn plugin(app: &mut App) {
 ///
 /// `K` because it is free — `G` gizmos, `X` the x-ray, `F` camera detach, `M` spawn map, `T`
 /// optic, `L` and the digits are taken (`debug`, `command`, `sight`, `net::spawn_map`).
-#[cfg(feature = "dev_tools")]
 const CLAMP_CYCLE_KEY: KeyCode = KeyCode::KeyK;
 
 /// Step the clamp on each press of [`CLAMP_CYCLE_KEY`].
@@ -1138,7 +1124,6 @@ const CLAMP_CYCLE_KEY: KeyCode = KeyCode::KeyK;
 /// The cycle visits EXACT plus every rung at least one tile keeps, read off the built ladder rather
 /// than off [`TERRAIN_LOD_LADDER`] — a rung no tile carries would be a press that changes nothing,
 /// which is worse than no key at all when the whole point is to see the difference.
-#[cfg(feature = "dev_tools")]
 fn cycle_clamp(
     // OPTIONAL because `world::plugin` mounts this module on the dedicated server too, and a
     // headless composition has no `InputPlugin` and therefore no keyboard resource at all.
@@ -1774,8 +1759,8 @@ mod tests {
     }
 
     /// The clamp is INERT until it is engaged: at its default, `Adaptive`, the ladder writes exactly
-    /// the adaptive thresholds. `dev_tools` is the only thing that mounts a system able to move
-    /// `TerrainLodClamp`, so on a release build that is the whole of the clamp's effect.
+    /// the adaptive thresholds. Until the rung cycler's key is pressed, that is the whole of the
+    /// clamp's effect.
     ///
     /// Engaged, the clamp pins every tile to ONE level: the requested rung shows over `[0, ∞)` and
     /// every other level of the tile is given a range no distance can satisfy. Returning to

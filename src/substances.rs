@@ -179,7 +179,6 @@ impl SubstanceId {
 
     /// The §13.6 gate's probe substance: the stronger copy its monotonicity check adds beside a
     /// real volume. Disjoint from every registry and fixture id.
-    #[cfg(any(feature = "dev_tools", test))]
     pub(crate) fn probe() -> Self {
         Self(2 << 32)
     }

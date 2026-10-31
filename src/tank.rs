@@ -41,7 +41,6 @@ pub use servo::{
 #[cfg(test)]
 pub(crate) use servo::{ServoRest, drive_servos, restore_servo_truth};
 pub(crate) use spawn::TANK_SPEC_PATH;
-#[cfg(any(feature = "bitprobe", feature = "dev_tools", test))]
 pub(crate) use spawn::spawn_headless_tank;
 pub(crate) use spawn::{
     PendingTankAssets, TANK_GLB_PATH, TANK_SIM_GLB_PATH, TankContent, TankPresentation,

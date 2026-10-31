@@ -3,7 +3,7 @@
 //! scalar ones. Two tabs ([`Tab`]): VIDEO (display and graphics) and GAMEPLAY. A tab exists only
 //! once it has rows.
 //!
-//! Player-facing, NOT `dev_tools`-gated. View + input only — it writes [`Settings`] and asks for a
+//! Player-facing. View + input only — it writes [`Settings`] and asks for a
 //! save; the reconcile is `settings::apply_settings`'s job.
 //!
 //! # Entry

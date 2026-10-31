@@ -19,7 +19,7 @@ mod armaments_index {
 }
 /// The runtime asset-root resolver (`asset_root`) — where `assets/` lives, resolved once and shared
 /// by both `AssetPlugin` (`net::client`) and the tank bake (`bake`) so they never open different
-/// `.glb` files. Always compiled: `bake` builds under `--no-default-features`, where `net` is off.
+/// `.glb` files.
 mod assets;
 /// The tank-geometry extractor + shadow harness (sim/view split — design
 /// `sim-view-split-and-tank-bake.md` §8). `extract(glb) → TankGeometry` IS the sim skeleton's
@@ -33,7 +33,6 @@ pub use bake::{Check, Finding, canon_lists, has_error, render, verify_asset};
 mod ballistics;
 /// The §13.6 ray fuzzer's bake-scale entry point (`cargo run --bin ballistic_fuzzer`). The gate
 /// itself also rides `cargo test` at CI scale — see `ballistics::fuzz`.
-#[cfg(any(feature = "dev_tools", test))]
 pub use ballistics::fuzz::run_ballistic_fuzzer;
 #[cfg(feature = "bitprobe")]
 mod bitprobe;
@@ -70,7 +69,6 @@ pub mod damage_cam;
 /// Server-simulated pieces at rest (the game's environment destruction): avian's island sleep and
 /// the one wake it lacks, the rule every loose piece follows.
 mod debris;
-#[cfg(feature = "dev_tools")]
 mod debug;
 /// The controlled tank's standard drive row + F3 diagnostics — one view-only implementation mounted
 /// by both the offline and network client roots.
@@ -165,8 +163,8 @@ mod render_cost;
 mod render_policy;
 /// Render scale (research brief "Route A"): the 3D main pass renders at a fraction of the window
 /// through `MainPassResolutionOverride` and one bilinear upscale node, while bloom, tonemapping and
-/// the whole UI stay native. Ships — NOT `dev_tools`-gated; `settings::apply_settings` is the one
-/// writer of its resource. Render-app blast radius only: the camera still targets the window, so
+/// the whole UI stay native. `settings::apply_settings` is the one writer of its resource.
+/// Render-app blast radius only: the camera still targets the window, so
 /// every `world_to_viewport` consumer (`aim`, `sight`, `hud`) is untouched. Mounted by `settings`
 /// itself (the one writer of its resource mounts the resource's owner), so it reaches every windowed
 /// root and no other.
@@ -192,8 +190,8 @@ mod scatter;
 mod scene_depth;
 /// Player-facing graphics settings: the persisted model (`video.ron` in the platform config
 /// directory), the ONE reconciler that applies it to the rendering world, and the `Esc` settings
-/// page. Ships — NOT `dev_tools`-gated, and the only writer of the renderer's knobs. ONE mount per
-/// windowed root — `settings::plugin(PageEntry::…)` pulls in `render_scale`, the page and the page's
+/// page; it is the only writer of the renderer's knobs. ONE mount per windowed root —
+/// `settings::plugin(PageEntry::…)` pulls in `render_scale`, the page and the page's
 /// entry declarer — and never the headless server.
 mod settings;
 /// Ship-facing view-layer audio: render-only subscribers to the device and `FireShell` seams (the
@@ -865,12 +863,10 @@ impl Plugin for ClientPlugin {
         // parameter, so mounting the page without a declarer is unrepresentable.
         app.add_plugins(settings::plugin(settings::PageEntry::PauseState));
 
-        // Physics visualization (collider/ray wireframes) + debug toggles, behind the `dev_tools`
-        // feature (default-on, droppable from an optimized build via `--no-default-features`).
+        // Physics visualization (collider/ray wireframes) + debug toggles, in every build.
         // Offline SP registers no diagnostic plugins at all, which is accepted: the settings page
         // covers the render knobs, `cargo tracy` is the frame-cost instrument, and the net client
         // still has `net::debug_hud`'s fps/frame-time card.
-        #[cfg(feature = "dev_tools")]
         app.add_plugins((avian3d::prelude::PhysicsDebugPlugin, debug::plugin));
     }
 }
@@ -967,8 +963,7 @@ impl Plugin for NetClientPlugin {
         // (`G` = force arrows + collider wireframes, `F` = camera detach). View-only:
         // it reads `TrackContacts`/`GlobalTransform` and draws gizmos — nothing sim-visible — so it is
         // safe on a predicting client and is never mounted by the headless server (which composes
-        // `SimPlugin` only, never this plugin). Behind the `dev_tools` feature (default-on).
-        #[cfg(feature = "dev_tools")]
+        // `SimPlugin` only, never this plugin).
         app.add_plugins((avian3d::prelude::PhysicsDebugPlugin, debug::plugin));
     }
 }
@@ -1120,15 +1115,12 @@ pub fn run_offline() {
     // The scripted-trigger capture hook (`SPIKE_AUTO_FIRE`), mounted HERE and nowhere else: this
     // offline root has no netcode at all — no lightyear plugins, no connection entity — so the
     // commands it writes cannot leave the process. Mounting it inside the shared device-gather
-    // plugin would put it in the packaged network client too (`dev_tools` is a default feature),
-    // where scripted trigger edges would ride the input bridge to a live server. See
-    // `command::offline_auto_fire_plugin`.
-    #[cfg(feature = "dev_tools")]
+    // plugin would put it in the packaged network client too, where scripted trigger edges would
+    // ride the input bridge to a live server. See `command::offline_auto_fire_plugin`.
     app.add_plugins(command::offline_auto_fire_plugin);
     // The same boundary: the parked target firing at the player (`OVERMATCH_TARGET_FIRES`) and
     // the scripted x-ray preference (`OVERMATCH_XRAY`), for captures of the player's own
     // tank struck.
-    #[cfg(feature = "dev_tools")]
     app.add_plugins((
         tank::scenario::offline_target_fires_plugin,
         damage_cam::pen_cam::game::scripted_xray_plugin,
@@ -1138,11 +1130,9 @@ pub fn run_offline() {
     app.add_plugins(tank::battle::offline_plugin);
     // The game's cosmetic hull-mark demo (`OVERMATCH_HULL_MARKS_DEMO`) fabricates marks and takes
     // the camera; inert unless its variable is set.
-    #[cfg(feature = "dev_tools")]
     app.add_plugins(hull_marks::demo::offline_plugin);
     // The game's cosmetic track-print demo (`OVERMATCH_TRACK_PRINTS_DEMO`) drives the player's tank
     // and takes the camera; inert unless its variable is set.
-    #[cfg(feature = "dev_tools")]
     app.add_plugins(track_prints::demo::offline_plugin);
     // The ground-type tuning panel, shown while paused; egui compiles only into `dev_ui` builds.
     #[cfg(feature = "dev_ui")]

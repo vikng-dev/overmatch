@@ -85,10 +85,10 @@ use crate::terrain_grid::HeightGrid;
 use crate::trees::TreeState;
 use crate::view::PlayerView;
 
-/// Is this process running the battle scene? A dev lever of `dev_tools` builds, read by the
+/// Is this process running the battle scene? A dev lever, `OVERMATCH_BATTLE`, read by the
 /// scenario's spawn (which lays out this scene instead of the duel) and by [`offline_plugin`].
 pub(crate) fn enabled() -> bool {
-    cfg!(feature = "dev_tools") && crate::env_flag("OVERMATCH_BATTLE", false)
+    crate::env_flag("OVERMATCH_BATTLE", false)
 }
 
 /// The script's seed (ASSUMED: any value; the issue's number).

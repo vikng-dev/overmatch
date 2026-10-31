@@ -415,7 +415,7 @@ fn bless_scenarios() {
 /// penetrating scenario's march steps are timed under the shipped shape at `N` directions and at
 /// one; the throw's cost is the difference over the cones thrown, scaled from `N − 1` to `N`
 /// directions. The best of [`COST_RUNS`] runs is taken.
-/// `cargo test --profile perf --lib --features dev_tools pen_cam::spall_law_cost -- --ignored --nocapture`
+/// `scripts/serial-cargo test --profile perf --lib --features dev_ui,bitprobe pen_cam::spall_law_cost -- --ignored --nocapture`
 #[test]
 #[ignore = "a measurement, run on demand"]
 fn spall_law_cost() {
@@ -466,7 +466,7 @@ const COST_DIRECTIONS: [usize; 4] = [24, 64, 128, 256];
 /// it on demand). The first scenario's line is fired with every burst round of the registry, its
 /// march timed with the ring at `N` directions and at one; the throw's cost is the difference,
 /// scaled from `N − 1` to `N` directions, the best of [`COST_RUNS`] runs.
-/// `cargo test --release --lib --features dev_tools pen_cam::burst_law_cost -- --ignored --nocapture`
+/// `scripts/serial-cargo test --release --lib --features dev_ui,bitprobe pen_cam::burst_law_cost -- --ignored --nocapture`
 #[test]
 #[ignore = "a measurement, run on demand"]
 fn burst_law_cost() {

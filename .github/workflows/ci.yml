@@ -127,10 +127,10 @@ jobs:
       # against the committed Cargo.lock, so CI is reproducible and fails loudly if
       # the lockfile drifts from Cargo.toml.
       # One feature variant: lightyear compiles unconditionally (the PVP client is the product), and
-      # `--all-targets` covers every bin whose required features are on. `dev_tools` is default-on;
-      # `dev_ui` (both sandbox bins, bevy_egui) and `bitprobe` are named here because cargo SKIPS a
-      # bin whose `required-features` are off — without them those bins were never linted. Additive
-      # features only: the lib this lints is the default one plus two optional deps.
+      # `--all-targets` covers every bin whose required features are on. `dev_ui` (both sandbox
+      # bins, bevy_egui) and `bitprobe` are named here because cargo SKIPS a bin whose
+      # `required-features` are off — without them those bins were never linted. Additive features
+      # only: the lib this lints is the featureless one plus two optional deps.
       # The retired `--no-default-features` pair proved the sim didn't depend on netcode; that guard
       # now lives in `src/net/tests/net_boundary.rs` (a source scan) + `src/headless_test.rs`
       # (boots the sim with no netcode mounted) — no second full build required.
