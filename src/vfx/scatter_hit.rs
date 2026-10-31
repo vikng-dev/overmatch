@@ -26,7 +26,7 @@ use crate::ballistics::Projectile;
 use crate::scatter::ScatterProxy;
 use crate::view::PlayerView;
 
-use super::impact::{ImpactKit, spawn_terrain_read};
+use super::impact::{ImpactKit, spawn_material_read};
 
 /// Minimum distance (m) into a frame's segment for a hit to count as an ENTRY — the march's own
 /// 1 mm boundary nudge. A hit nearer than this began at or inside the surface, which is the
@@ -63,11 +63,11 @@ struct ScatterProbe {
 /// (no hit at all) clears the state.
 ///
 /// Every shell entity is covered, whichever peer authored it: shells are not replicated — a remote
-/// player's round is reconstructed locally as its own `Projectile` (`net::client`), so predicted and
-/// remote fire both pass through this one query.
+/// player's round is reconstructed locally as its own `Projectile` (`net::client`), so all
+/// server-stream presentations pass through this query.
 fn read_scatter_crossings(
     mut shells: Query<(Entity, &Transform, &Projectile, Option<&mut ScatterProbe>)>,
-    proxies: Query<(), With<ScatterProxy>>,
+    proxies: Query<&crate::substances::SurfaceFeedback, With<ScatterProxy>>,
     spatial: SpatialQuery,
     mut kit: ImpactKit,
     camera: Query<&GlobalTransform, With<PlayerView>>,
@@ -114,7 +114,18 @@ fn read_scatter_crossings(
         let to_camera = camera
             .map(|cam| cam.translation() - position)
             .unwrap_or(Vec3::Z);
-        spawn_terrain_read(position, normal, to_camera, projectile.caliber(), &mut kit);
+        let feedback = *proxies
+            .get(hit.entity)
+            .expect("the cast predicate admitted this material-bearing proxy");
+        spawn_material_read(
+            position,
+            normal,
+            to_camera,
+            projectile.caliber(),
+            crate::ballistics::ImpactOutcome::Struck,
+            feedback,
+            &mut kit,
+        );
     }
 }
 
@@ -179,6 +190,7 @@ mod tests {
             Collider::cuboid(4.0, 5.0, 6.0),
             CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
             ScatterProxy,
+            crate::substances::SurfaceFeedback::fixture(),
         ));
         // Settle: let Avian register the static collider and build the spatial-query pipeline.
         for _ in 0..8 {

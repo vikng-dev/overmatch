@@ -19,7 +19,7 @@
 //! [`stretch`]. The surface under it ([`MarkSurface`]) is turned about +Y by the mark's roll, so
 //! the roll varies the pattern while the stretch stays on the shot. A scratch is not rolled: its
 //! gouge lies along the shot. [`dress_surface`], the render half, gives the surface its
-//! `ForwardDecal` and its material, shared per (kind, variant).
+//! `ForwardDecal` and its material, shared per (kind, variant, substance response).
 //!
 //! # What the forward decal cannot do (DERIVED from bevy_pbr 0.19's `forward.rs` and
 //! `forward_decal.wgsl`)
@@ -43,6 +43,7 @@ use bevy::pbr::{ExtendedMaterial, ParallaxMappingMethod};
 use bevy::prelude::*;
 
 use crate::hull_marks::{HullMark, HullMarks, MarkKind, in_plane, parts_in_index_order, stretch};
+use crate::substances::SurfaceFeedback;
 use crate::tank::{SimParts, ViewNode};
 use texture::VARIANTS;
 
@@ -53,7 +54,8 @@ pub(crate) const DEPTH_FADE_M: f32 = 0.04;
 /// The material each (kind, variant) shares.
 #[derive(Resource)]
 pub(super) struct MarkMaterials {
-    by_kind: [[Handle<ForwardDecalMaterial<StandardMaterial>>; VARIANTS]; 3],
+    by_response:
+        BTreeMap<SurfaceFeedback, [[Handle<ForwardDecalMaterial<StandardMaterial>>; VARIANTS]; 3]>,
 }
 
 impl MarkMaterials {
@@ -61,8 +63,12 @@ impl MarkMaterials {
         &self,
         kind: MarkKind,
         variant: usize,
+        feedback: SurfaceFeedback,
     ) -> Handle<ForwardDecalMaterial<StandardMaterial>> {
-        self.by_kind[kind_index(kind)][variant % VARIANTS].clone()
+        self.by_response.get(&feedback).expect(
+            "every authoritative mark carries a response from the shared hard-substance data",
+        )[kind_index(kind)][variant % VARIANTS]
+            .clone()
     }
 }
 
@@ -83,6 +89,7 @@ pub(super) struct HullMarkDecal {
 /// The surface of a drawn mark: which material it wears. [`dress_surface`] makes it a decal.
 #[derive(Component, Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) struct MarkSurface {
+    pub(super) feedback: SurfaceFeedback,
     pub(super) kind: MarkKind,
     pub(super) variant: usize,
 }
@@ -167,8 +174,13 @@ pub(super) fn build_materials(
             .collect()
     });
     let elapsed = started.elapsed();
-    let mut by_kind: [[Handle<ForwardDecalMaterial<StandardMaterial>>; VARIANTS]; 3] =
-        Default::default();
+    let mut by_response: BTreeMap<
+        SurfaceFeedback,
+        [[Handle<ForwardDecalMaterial<StandardMaterial>>; VARIANTS]; 3],
+    > = crate::substances::SubstanceRegistry::shipped_static()
+        .feedbacks()
+        .map(|feedback| (feedback, Default::default()))
+        .collect();
     for (kind, variant, maps) in sets {
         let base = StandardMaterial {
             base_color_texture: Some(images.add(maps.color)),
@@ -189,12 +201,14 @@ pub(super) fn build_materials(
             alpha_mode: AlphaMode::Blend,
             ..default()
         };
-        by_kind[kind_index(kind)][variant] = materials.add(ExtendedMaterial {
-            base,
-            extension: ForwardDecalMaterialExt {
-                depth_fade_factor: DEPTH_FADE_M,
-            },
-        });
+        for (feedback, by_kind) in &mut by_response {
+            by_kind[kind_index(kind)][variant] = materials.add(ExtendedMaterial {
+                base: surface_material(base.clone(), *feedback),
+                extension: ForwardDecalMaterialExt {
+                    depth_fade_factor: DEPTH_FADE_M,
+                },
+            });
+        }
     }
     info!(
         "hull marks: {} texture sets of {size}x{size} generated in {:.1} ms",
@@ -202,7 +216,17 @@ pub(super) fn build_materials(
         elapsed.as_secs_f64() * 1000.0,
         size = texture::SIZE,
     );
-    commands.insert_resource(MarkMaterials { by_kind });
+    commands.insert_resource(MarkMaterials { by_response });
+}
+
+/// Apply the resolved substance's exposed-surface response to the shared relief maps. Shapes and
+/// texture handles stay shared; only surface appearance differs between substances.
+fn surface_material(mut base: StandardMaterial, feedback: SurfaceFeedback) -> StandardMaterial {
+    let [r, g, b] = feedback.exposed_linear();
+    base.base_color = Color::linear_rgb(r, g, b);
+    base.metallic = f32::from(feedback.metallic) / 255.0;
+    base.perceptual_roughness = f32::from(feedback.roughness_gain) / 64.0;
+    base
 }
 
 /// Draw each root's held marks that are not drawn yet, and despawn the decals of marks its record
@@ -245,14 +269,10 @@ pub(super) fn draw_marks(
             if drawn.drawn.contains_key(&serial) {
                 continue;
             }
-            let Some(&part) = drawn.parts.get(usize::from(mark.part)) else {
-                warn!(
-                    "hull marks: mark {serial} names part {} of {}; not drawn",
-                    mark.part,
-                    drawn.parts.len()
-                );
-                continue;
-            };
+            let &part = drawn
+                .parts
+                .get(usize::from(mark.part))
+                .expect("the authority and view index the same spawn-built part table");
             let Ok(view) = views.get(part) else {
                 drawn.waiting = true;
                 continue;
@@ -281,6 +301,7 @@ fn spawn_decal(commands: &mut Commands, anchor: Entity, serial: u32, mark: &Hull
         .id();
     commands.spawn((
         MarkSurface {
+            feedback: mark.feedback,
             kind: mark.kind,
             variant: variant(mark.seed),
         },
@@ -299,21 +320,29 @@ fn dress_surface(
     materials: Res<MarkMaterials>,
     mut commands: Commands,
 ) {
-    let Ok(surface) = surfaces.get(add.entity) else {
-        return;
-    };
+    let surface = surfaces
+        .get(add.entity)
+        .expect("the Add observer reads the surface just spawned");
     commands.entity(add.entity).insert((
         ForwardDecal,
-        MeshMaterial3d(materials.get(surface.kind, surface.variant)),
+        MeshMaterial3d(materials.get(surface.kind, surface.variant, surface.feedback)),
     ));
 }
 
 /// One surface per kind under `rig`, so each kind's pipeline compiles during the startup prewarm
 /// rather than on the first hit. Unculled: nothing the camera sees has to be near them.
 pub(super) fn spawn_prewarm(commands: &mut Commands, rig: Entity) {
+    let feedback = crate::substances::SubstanceRegistry::shipped_static()
+        .feedbacks()
+        .next()
+        .expect("a valid registry has a hard reference substance");
     for kind in MarkKind::ALL {
         commands.spawn((
-            MarkSurface { kind, variant: 0 },
+            MarkSurface {
+                feedback,
+                kind,
+                variant: 0,
+            },
             Transform::IDENTITY,
             Visibility::default(),
             NoFrustumCulling,
@@ -328,6 +357,26 @@ mod tests {
     use crate::ballistics::{ComponentHealth, Verdict};
     use crate::hull_marks::tests::{Fixture, fixture_in, numbered, plate_in_world, strike};
     use crate::hull_marks::{MARK_CAP, offline_plugin};
+
+    /// A nonmetal mark must not expose metallic grey. Both responses share their shape maps, but
+    /// the resolved surface controls the colour and metallic factor a late joiner will see.
+    #[test]
+    fn mark_materials_follow_the_resolved_substrate() {
+        let metal = SurfaceFeedback::fixture();
+        let nonmetal = SurfaceFeedback {
+            exposed: [90, 45, 18],
+            metallic: 0,
+            roughness_gain: 128,
+            sparks: false,
+            ..metal
+        };
+        let a = surface_material(StandardMaterial::default(), metal);
+        let b = surface_material(StandardMaterial::default(), nonmetal);
+        assert_ne!(a.base_color, b.base_color);
+        assert!(a.metallic > 0.0);
+        assert_eq!(b.metallic, 0.0);
+        assert!(b.perceptual_roughness > a.perceptual_roughness);
+    }
 
     /// What a client shows of a root's marks: per drawn frame, its serial, the view node it hangs
     /// under, its pose and its surface's material and roll. Sorted by serial.
@@ -531,7 +580,19 @@ mod tests {
     fn a_decal_lies_on_its_face_stretched_along_the_shot() {
         let theta = 60f32.to_radians();
         let along = Vec3::new(theta.sin(), -theta.cos(), 0.0);
-        let mark = HullMark::pack(MarkKind::Hole, 0, Vec3::ZERO, along, Vec3::Y, 0.088, 0).unwrap();
+        let mark = HullMark::pack(
+            MarkKind::Hole,
+            0,
+            crate::hull_marks::MarkFace {
+                at: Vec3::ZERO,
+                along,
+                normal: Vec3::Y,
+            },
+            0.088,
+            0,
+            SurfaceFeedback::fixture(),
+        )
+        .unwrap();
         let DecalPose { frame, .. } = pose(&mark);
         assert!((frame.rotation * Vec3::Y).angle_between(Vec3::Y) < 0.01);
         assert!((frame.rotation * Vec3::X).angle_between(Vec3::X) < 0.01);

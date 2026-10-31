@@ -405,6 +405,7 @@ impl Playback {
                 Some(PathImpact::Bounce {
                     at: bounce.position,
                     normal: bounce.normal,
+                    feedback: bounce.feedback,
                     direction: *bounce.direction,
                     ordinal,
                 }),
@@ -415,6 +416,7 @@ impl Playback {
                     Some(PathImpact::Stopped {
                         at,
                         normal: bite.normal,
+                        feedback: bite.feedback,
                         ordinal,
                     }),
                 ),
@@ -423,6 +425,7 @@ impl Playback {
                     Some(PathImpact::Through {
                         at: bite.entrance,
                         normal: bite.normal,
+                        feedback: bite.feedback,
                         ordinal,
                     }),
                 ),

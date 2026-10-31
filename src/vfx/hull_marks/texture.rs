@@ -6,10 +6,10 @@
 //! layer comes from the distance to one shape, perturbed by value noise so no edge looks drawn:
 //!
 //! - **hole** (a circle): a near-black core, a lip whose height falls toward the core (metal
-//!   pushed in), a bare-steel ring whose outer edge the noise tears, and bare chips past it;
+//!   pushed in), a exposed-substrate ring whose outer edge the noise tears, and bare chips past it;
 //! - **dent** (a bowl, no core): the bowl's height and its raised rim shade it, a bare spot at the
 //!   centre, crazed paint in a ring around it;
-//! - **scratch** (a capsule along +x, its radius tapering toward +x): a bare-steel trough streaked
+//! - **scratch** (a capsule along +x, its radius tapering toward +x): a exposed-substrate trough streaked
 //!   along the gouge, a pushed-up paint lip at its edge, chips beside it.
 //!
 //! From the profile come four maps: base colour (sRGB, straight alpha), a tangent-space normal map
@@ -57,9 +57,9 @@ const HOLE_DEPTH: f32 = 0.12;
 const DENT_DEPTH: f32 = 0.05;
 const SCRATCH_DEPTH: f32 = 0.035;
 
-/// Fresh-cut steel, linear albedo. ASSUMED: neutral, a touch cool (War Thunder's cutting grey is
-/// 0.4, per the research note).
-const STEEL: Vec3 = Vec3::new(0.50, 0.51, 0.53);
+/// Neutral exposed-surface mask. The mark's resolved substance supplies its linear tint and PBR
+/// factors; this procedural map describes relief and grain only.
+const EXPOSED: Vec3 = Vec3::ONE;
 /// The hole's core, near-black.
 const CORE: Vec3 = Vec3::new(0.012, 0.011, 0.010);
 /// A paint edge or crack in shadow.
@@ -111,9 +111,9 @@ impl Texel {
         height: 0.0,
     };
 
-    fn steel(grain: f32, alpha: f32) -> Self {
+    fn exposed(grain: f32, alpha: f32) -> Self {
         Self {
-            albedo: STEEL * (0.88 + 0.3 * (grain - 0.5)),
+            albedo: EXPOSED * (0.88 + 0.3 * (grain - 0.5)),
             alpha,
             metallic: 0.85,
             roughness: 0.36 + 0.16 * (grain - 0.5),
@@ -162,7 +162,7 @@ fn hole(p: Vec2, seed: u32) -> Texel {
         // The bore's wall catches a little light just inside the rim.
         let wall = smoothstep(-0.05, 0.0, d);
         return Texel {
-            albedo: CORE.lerp(STEEL * 0.12, wall * 0.5),
+            albedo: CORE.lerp(EXPOSED * 0.12, wall * 0.5),
             alpha: 1.0,
             metallic: 0.3,
             roughness: 0.85,
@@ -172,8 +172,8 @@ fn hole(p: Vec2, seed: u32) -> Texel {
     if d < lip {
         let t = d / lip;
         return Texel {
-            // Darkened by the passage at the rim, bright steel where the ring begins.
-            albedo: (STEEL * 0.5).lerp(STEEL, t) * (0.92 + 0.16 * (grain - 0.5)),
+            // Darkened by the passage at the rim, bright exposed substrate where the ring begins.
+            albedo: (EXPOSED * 0.5).lerp(EXPOSED, t) * (0.92 + 0.16 * (grain - 0.5)),
             alpha: 1.0,
             metallic: 0.9,
             roughness: 0.32 + 0.1 * grain,
@@ -181,7 +181,7 @@ fn hole(p: Vec2, seed: u32) -> Texel {
         };
     }
     if r < ring {
-        return Texel::steel(grain, 1.0 - smoothstep(ring - 0.012, ring, r));
+        return Texel::exposed(grain, 1.0 - smoothstep(ring - 0.012, ring, r));
     }
     chipped_paint(p, r - ring, seed)
 }
@@ -199,13 +199,13 @@ fn dent(p: Vec2, seed: u32) -> Texel {
     let grain = fbm(p * 22.0, seed ^ 0x5C);
     let bare = 0.38 + 0.25 * (2.0 * fbm(p * 7.0 + Vec2::splat(3.0), seed ^ 0x11) - 1.0);
     if rho < bare {
-        let mut texel = Texel::steel(grain, 1.0);
+        let mut texel = Texel::exposed(grain, 1.0);
         texel.height += height;
         return texel;
     }
     let flake = fbm(p * 12.0, seed ^ 0x33);
     if (0.35..1.15).contains(&rho) && flake > 0.70 {
-        let mut texel = Texel::steel(grain, 1.0);
+        let mut texel = Texel::exposed(grain, 1.0);
         texel.height += height;
         return texel;
     }
@@ -249,7 +249,7 @@ fn scratch(p: Vec2, seed: u32) -> Texel {
         let q = (dist / width).min(1.0);
         let depth = SCRATCH_DEPTH * (1.0 - 0.7 * t);
         return Texel {
-            albedo: STEEL * (0.9 + 0.35 * (streak - 0.5)),
+            albedo: EXPOSED * (0.9 + 0.35 * (streak - 0.5)),
             alpha: smoothstep(0.0, 0.01, -d),
             metallic: 0.88,
             roughness: 0.34 + 0.15 * streak,
@@ -262,7 +262,7 @@ fn scratch(p: Vec2, seed: u32) -> Texel {
         return Texel::paint_edge(0.55 * s, 0.004 * s);
     }
     if d < 0.10 && fbm(p * 18.0, seed ^ 0x77) > 0.72 {
-        return Texel::steel(streak, 1.0);
+        return Texel::exposed(streak, 1.0);
     }
     Texel::CLEAR
 }
@@ -274,7 +274,7 @@ fn chipped_paint(p: Vec2, past: f32, seed: u32) -> Texel {
         return Texel::paint_edge(0.6 * (1.0 - past / edge), 0.003);
     }
     if past < 0.2 && fbm(p * 13.0, seed ^ 0x77) > 0.68 + past {
-        return Texel::steel(fbm(p * 22.0, seed ^ 0x5C), 1.0);
+        return Texel::exposed(fbm(p * 22.0, seed ^ 0x5C), 1.0);
     }
     Texel::CLEAR
 }
@@ -452,11 +452,14 @@ mod tests {
         let mark = HullMark::pack(
             MarkKind::Hole,
             0,
-            Vec3::ZERO,
-            Vec3::NEG_Y,
-            Vec3::Y,
+            crate::hull_marks::MarkFace {
+                at: Vec3::ZERO,
+                along: Vec3::NEG_Y,
+                normal: Vec3::Y,
+            },
             caliber,
             0,
+            crate::substances::SurfaceFeedback::fixture(),
         )
         .unwrap();
         let quad = super::super::pose(&mark).frame.scale;

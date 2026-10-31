@@ -73,16 +73,19 @@ pub enum PathImpact {
         normal: Vec3,
         direction: Vec3,
         ordinal: u32,
+        feedback: crate::substances::SurfaceFeedback,
     },
     Through {
         at: Vec3,
         normal: Vec3,
         ordinal: u32,
+        feedback: crate::substances::SurfaceFeedback,
     },
     Stopped {
         at: Vec3,
         normal: Vec3,
         ordinal: u32,
+        feedback: crate::substances::SurfaceFeedback,
     },
     Ground {
         at: Vec3,
@@ -238,10 +241,11 @@ impl FlightOutcome {
                 normal,
                 direction,
                 ordinal,
+                feedback,
             } => (
                 at,
                 normal,
-                ImpactSurface::Armor,
+                ImpactSurface::Material(feedback),
                 ImpactOutcome::Ricochet { direction },
                 Some(ordinal),
             ),
@@ -249,10 +253,11 @@ impl FlightOutcome {
                 at,
                 normal,
                 ordinal,
+                feedback,
             } => (
                 at,
                 normal,
-                ImpactSurface::Armor,
+                ImpactSurface::Material(feedback),
                 ImpactOutcome::Through,
                 Some(ordinal),
             ),
@@ -260,10 +265,11 @@ impl FlightOutcome {
                 at,
                 normal,
                 ordinal,
+                feedback,
             } => (
                 at,
                 normal,
-                ImpactSurface::Armor,
+                ImpactSurface::Material(feedback),
                 ImpactOutcome::Stopped,
                 Some(ordinal),
             ),
@@ -701,6 +707,7 @@ mod tests {
             at: through.resume,
             normal: Vec3::NEG_X,
             ordinal: 0,
+            feedback: crate::substances::SurfaceFeedback::fixture(),
         });
         let mut stop = super::super::path_fixture(shot(), 112);
         stop.sequence = 1;
@@ -710,6 +717,7 @@ mod tests {
             at: stop.resume,
             normal: Vec3::NEG_X,
             ordinal: 0,
+            feedback: crate::substances::SurfaceFeedback::fixture(),
         });
         {
             let mut paths = app.world_mut().resource_mut::<SanctionedShots>();

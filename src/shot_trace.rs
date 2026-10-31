@@ -216,8 +216,10 @@ fn record_unresolved_contact(
     clock: Res<crate::ShotClock>,
     mut trace: ResMut<ShotTrace>,
 ) {
-    if impact.surface == crate::ballistics::ImpactSurface::Armor
-        && matches!(impact.outcome, crate::ballistics::ImpactOutcome::Struck)
+    if matches!(
+        impact.surface,
+        crate::ballistics::ImpactSurface::Material(_)
+    ) && matches!(impact.outcome, crate::ballistics::ImpactOutcome::Struck)
     {
         trace.global_row("walk_first_contact_stop", clock.0, json!({}));
     }

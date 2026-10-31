@@ -398,6 +398,10 @@ pub(crate) fn spawn(
                     Collider::cuboid(1.0, 1.0, 1.0),
                     statics,
                     graybox_friction(substance),
+                    crate::substances::SubstanceRegistry::shipped_static()
+                        .hard(substance)
+                        .expect("map::parse certifies every graybox substance")
+                        .feedback,
                     ScatterProxy,
                     placement.identity.clone(),
                 ));
@@ -430,6 +434,10 @@ pub(crate) fn spawn(
                     Collider::cylinder(TRUNK_RADIUS_M, height_m),
                     statics,
                     graybox_friction(substance),
+                    crate::substances::SubstanceRegistry::shipped_static()
+                        .hard(substance)
+                        .expect("map::parse certifies every graybox substance")
+                        .feedback,
                     ScatterProxy,
                     placement.identity.clone(),
                 ));

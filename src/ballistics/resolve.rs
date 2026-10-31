@@ -1249,6 +1249,7 @@ impl Leg {
 /// carry η from the core (§13.5) — a graze is a partial ricochet in direction as well as in speed.
 #[derive(Clone, Debug)]
 pub(crate) struct Bounce {
+    pub feedback: crate::substances::SurfaceFeedback,
     pub position: Vec3,
     pub normal: Vec3,
     /// Entrance coverage η.
@@ -1293,6 +1294,7 @@ pub(crate) struct Bounce {
 /// An entry into the material (§§3–6).
 #[derive(Clone, Debug)]
 pub(crate) struct Bite {
+    pub feedback: crate::substances::SurfaceFeedback,
     /// Where the round punched in: the struck face.
     pub entrance: Vec3,
     pub normal: Vec3,
@@ -1551,6 +1553,13 @@ pub(crate) fn decide(
             }
             .with_presence(&entrance);
             Ok(Decision::Bounce(Bounce {
+                feedback: context
+                    .world
+                    .volumes
+                    .get(struck)
+                    .expect("the resolved entrance belongs to a gathered volume")
+                    .material
+                    .feedback,
                 position,
                 normal: read.normal,
                 coverage: read.coverage,
@@ -1583,9 +1592,17 @@ pub(crate) fn decide(
                 ENTRANCE_SPAN,
             )?;
             let plan = walk::finish(&transit, &request, round, state_in, &LIMITS, &context.laws)?;
+            let feedback = context
+                .world
+                .volumes
+                .get(plan.entrance.volume)
+                .expect("the resolved entrance belongs to a gathered volume")
+                .material
+                .feedback;
             Ok(Decision::Bite(Box::new(bite(
                 &transit,
                 plan,
+                feedback,
                 mass,
                 from,
                 dir,
@@ -1607,6 +1624,7 @@ pub(crate) fn decide(
 fn bite(
     transit: &DiscWalk,
     plan: walk::ResolutionPlan<super::mechanism::SolidShotState>,
+    feedback: crate::substances::SurfaceFeedback,
     // kg.
     mass: f32,
     // Where the flight's position is, RELATIVE to the transit's anchor.
@@ -1702,6 +1720,7 @@ fn bite(
         }
     };
     Bite {
+        feedback,
         entrance,
         incoming,
         speed_in,
@@ -2190,7 +2209,7 @@ fn apply_bounce(
         position: bounce.position,
         normal: bounce.normal,
         caliber: shell.projectile.caliber(),
-        surface: ImpactSurface::Armor,
+        surface: ImpactSurface::Material(bounce.feedback),
         outcome: ImpactOutcome::Ricochet {
             direction: Vec3::from(bounce.direction),
         },
@@ -2218,6 +2237,7 @@ fn apply_bounce(
             });
         }
         commands.trigger(ShellStrike {
+            feedback: bounce.feedback,
             shot: shot.0,
             sequence: (shell.marks.log.len() - 1) as u32,
             struck: bounce.struck,
@@ -2271,7 +2291,7 @@ fn finish_bite(
         position,
         normal: bite.normal,
         caliber: shell.projectile.caliber(),
-        surface: ImpactSurface::Armor,
+        surface: ImpactSurface::Material(bite.feedback),
         outcome: verdict.into(),
     });
     if let Some(shot) = shell.shot {
@@ -2287,6 +2307,7 @@ fn finish_bite(
             });
         }
         commands.trigger(ShellStrike {
+            feedback: bite.feedback,
             shot: shot.0,
             sequence: mark as u32,
             struck: bite.struck,

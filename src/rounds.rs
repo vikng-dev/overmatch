@@ -1020,13 +1020,13 @@ pub(crate) mod tests {
     /// A reference steel, one burst core worn by no volume, `"Fixture core"`, and one hard
     /// substance that is a burst core too, `"Fixture hard core"`: fixture data.
     const FIXTURE_SUBSTANCES: &str = r#"(substances: {
-        "GunSteel": Hard(resistance: Reference, visual: "fixture",
+        "GunSteel": Hard(resistance: Reference, visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))),
             debris_half_angle_deg: (26.2, Tuned("x")), facts: Some((
                 density: (7800.0, Tuned("x")), flow_strength: (1.18e9, Tuned("x")),
                 youngs_modulus: (190.0e9, Tuned("x")), poisson_ratio: (0.29, Tuned("x"))))),
         "Fixture core": Unworn(burst: Some((density: (1650.0, Tuned("x")),
             speed_constant_mps: (2680.0, Tuned("x"))))),
-        "Fixture hard core": Hard(resistance: Effective((200.0, Tuned("x"))), visual: "fixture",
+        "Fixture hard core": Hard(resistance: Effective((200.0, Tuned("x"))), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))),
             debris_half_angle_deg: (26.2, Tuned("x")), facts: None,
             burst: Some((density: (1650.0, Tuned("x")),
                 speed_constant_mps: (2680.0, Tuned("x"))))),

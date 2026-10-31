@@ -767,6 +767,10 @@ fn insert_ballistic_volumes(
                         entity.insert(BallisticVolume {
                             material: VolumeMaterial {
                                 substance: resolved.id,
+                                feedback: crate::substances::SubstanceRegistry::shipped_static()
+                                    .hard(substance)
+                                    .expect("the bake certified the volume's hard substance")
+                                    .feedback,
                                 factor,
                                 debris_ratio,
                             },
@@ -849,6 +853,11 @@ fn insert_ballistic_volumes(
                                 };
                                 VolumeMaterial {
                                     substance: resolved.id,
+                                    feedback: crate::substances::SubstanceRegistry::shipped_static(
+                                    )
+                                    .hard(substance)
+                                    .expect("the bake certified the volume's hard substance")
+                                    .feedback,
                                     factor,
                                     debris_ratio,
                                 }

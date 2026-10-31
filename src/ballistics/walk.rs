@@ -225,6 +225,8 @@ impl FaceHit {
 /// states no resistance and is never a walk volume.
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub struct VolumeMaterial {
+    /// Surface response from the same required substance row; the walk never reads it.
+    pub feedback: crate::substances::SurfaceFeedback,
     pub substance: SubstanceId,
     pub factor: f32,
     pub debris_ratio: f32,
@@ -241,6 +243,7 @@ impl VolumeMaterial {
         let hard = registry.hard(name)?;
         Ok(Self {
             substance: registry.id(name)?,
+            feedback: hard.feedback,
             factor: hard.factor(),
             debris_ratio: hard.debris_ratio,
         })
@@ -252,6 +255,7 @@ impl VolumeMaterial {
     pub(crate) fn fixture(factor: f32) -> Self {
         Self {
             substance: SubstanceId::fixture(factor),
+            feedback: crate::substances::SurfaceFeedback::fixture(),
             factor,
             debris_ratio: FIXTURE_DEBRIS_RATIO,
         }

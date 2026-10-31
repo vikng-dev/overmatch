@@ -62,7 +62,7 @@ pub(crate) enum MarkKind {
     Scratch,
     /// A bowl with crazed paint, no core.
     Dent,
-    /// A dark core, a lip and a bare-steel ring.
+    /// A dark core, a lip and an exposed-substrate ring.
     Hole,
 }
 
@@ -113,6 +113,7 @@ pub(crate) fn in_plane(along: Vec3, normal: Vec3) -> Vec3 {
 /// part; the view re-derives everything else (size, stretch, roll, material) from these fields.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct HullMark {
+    pub(crate) feedback: crate::substances::SurfaceFeedback,
     pub(crate) kind: MarkKind,
     /// The struck part: its index in the root's [`SimParts`] names, sorted. Both ends build the
     /// part table from the same tank data, so they number it the same.
@@ -130,18 +131,25 @@ pub(crate) struct HullMark {
     pub(crate) seed: u16,
 }
 
+/// The resolved face in the struck part's frame; packing preserves these three geometric facts.
+pub(crate) struct MarkFace {
+    pub at: Vec3,
+    pub along: Vec3,
+    pub normal: Vec3,
+}
+
 impl HullMark {
     /// Pack a strike already expressed in its part's frame. `None` when the point does not fit
     /// the wire's ±32.767 m, or a direction has no length.
     pub(crate) fn pack(
         kind: MarkKind,
         part: u16,
-        at: Vec3,
-        along: Vec3,
-        normal: Vec3,
+        face: MarkFace,
         caliber: f32,
         seed: u16,
+        feedback: crate::substances::SurfaceFeedback,
     ) -> Option<Self> {
+        let MarkFace { at, along, normal } = face;
         let mm = |metres: f32| {
             let mm = (metres * 1000.0).round();
             (mm.is_finite() && mm.abs() <= i16::MAX as f32).then_some(mm as i16)
@@ -151,6 +159,7 @@ impl HullMark {
             Some(unit.to_array().map(|c| (c * 127.0).round() as i8))
         };
         Some(Self {
+            feedback,
             kind,
             part,
             at: [mm(at.x)?, mm(at.y)?, mm(at.z)?],
@@ -270,6 +279,7 @@ pub(crate) fn parts_in_index_order(parts: &SimParts) -> Vec<Entity> {
 #[derive(SystemParam)]
 pub(crate) struct MarkBuilder<'w, 's> {
     owners: Query<'w, 's, &'static VolumeOf>,
+    marked_roots: Query<'w, 's, (), With<HullMarks>>,
     parents: Query<'w, 's, &'static ChildOf>,
     locals: Query<'w, 's, &'static Transform>,
     names: Query<'w, 's, &'static Name>,
@@ -280,28 +290,39 @@ pub(crate) struct MarkBuilder<'w, 's> {
 impl MarkBuilder<'_, '_> {
     /// The vehicle root a strike marks, and its mark. `None` when the verdict leaves no mark, the
     /// round is below [`MIN_MARK_CALIBER_MM`], the struck volume is not a part of a root that
-    /// keeps marks (a tree, a turret thrown clear of its hull), or the point does not pack.
+    /// keeps marks (a tree, a turret thrown clear of its hull). Packing failure violates the
+    /// bake's coordinate bound or the resolved direction invariants and is a bug.
     pub(crate) fn mark(&self, strike: &ShellStrike) -> Option<(Entity, HullMark)> {
         let kind = MarkKind::of(strike.verdict)?;
         if caliber_mm(strike.caliber) < MIN_MARK_CALIBER_MM {
             return None;
         }
         let root = self.owners.get(strike.struck).ok()?.tank();
-        let (parts, position, rotation) = self.roots.get(root).ok()?;
-        // The struck entity is the volume's node, or one substance's collider under it.
-        let mut part = strike.struck;
-        let name = loop {
-            if let Ok(name) = self.names.get(part)
-                && parts.0.get(name.as_str()) == Some(&part)
+        if !self.marked_roots.contains(root) {
+            return None; // Trees, structures and independently simulated detached parts keep no hull record.
+        }
+        let (parts, position, rotation) = self
+            .roots
+            .get(root)
+            .expect("a mark-keeping tank root has its complete physics pose");
+        let mut current = strike.struck;
+        let mut marked_part = None;
+        while current != root {
+            if marked_part.is_none()
+                && let Ok(name) = self.names.get(current)
+                && parts.0.get(name.as_str()) == Some(&current)
             {
-                break name;
+                marked_part = Some((current, name));
             }
-            part = self.parents.get(part).ok()?.parent();
-            if part == root {
-                return None;
-            }
-        };
-        let index = part_index(parts, name.as_str())?;
+            let Ok(parent) = self.parents.get(current) else {
+                return None; // A thrown-clear part no longer belongs to the recorded hull's chain.
+            };
+            current = parent.parent();
+        }
+        let (part, name) = marked_part
+            .expect("every struck volume under a tank belongs to its spawn-built part table");
+        let index = part_index(parts, name.as_str())
+            .expect("the part exists and the bake bounds the table to the mark wire's index");
         let (origin, turn) = rig_world_pose(
             part,
             root,
@@ -309,18 +330,23 @@ impl MarkBuilder<'_, '_> {
             rotation.0,
             &self.parents,
             &self.locals,
-        )?;
+        )
+        .expect("the verified ancestry has every spawn-time local pose");
         let to_part = turn.inverse();
-        HullMark::pack(
+        let mark = HullMark::pack(
             kind,
             index,
-            to_part * (strike.at - origin),
-            to_part * strike.incoming,
-            to_part * strike.normal,
+            MarkFace {
+                at: to_part * (strike.at - origin),
+                along: to_part * strike.incoming,
+                normal: to_part * strike.normal,
+            },
             strike.caliber,
             seed(strike),
+            strike.feedback,
         )
-        .map(|mark| (root, mark))
+        .expect("the bake bounds mark coordinates and resolved directions are finite and nonzero");
+        Some((root, mark))
     }
 }
 
@@ -363,6 +389,7 @@ pub(crate) mod tests {
     /// A mark whose fields all differ from its neighbours', told apart by `n`.
     pub(crate) fn numbered(n: u16) -> HullMark {
         HullMark {
+            feedback: crate::substances::SurfaceFeedback::fixture(),
             kind: MarkKind::ALL[n as usize % 3],
             part: n % 3,
             at: [n as i16, -(n as i16), 7],
@@ -445,6 +472,7 @@ pub(crate) mod tests {
 
     pub(crate) fn strike(struck: Entity, at: Vec3, verdict: Verdict) -> ShellStrike {
         ShellStrike {
+            feedback: crate::substances::SurfaceFeedback::fixture(),
             shot: ShotId {
                 combatant: CombatantId(3),
                 weapon: 1,
@@ -530,11 +558,18 @@ pub(crate) mod tests {
         let fixture = fixture_in(&mut world);
         let plate_world = plate_in_world(&world, &fixture);
         let local = Vec3::new(0.12, -0.05, -0.08);
-        let hit = strike(
+        let mut hit = strike(
             fixture.collider,
             plate_world.transform_point(local),
             Verdict::Through,
         );
+        hit.feedback = crate::substances::SurfaceFeedback {
+            exposed: [90, 40, 20],
+            metallic: 0,
+            sparks: false,
+            ..hit.feedback
+        };
+        let expected_feedback = hit.feedback;
         let root = fixture.root;
 
         let built = world
@@ -542,6 +577,10 @@ pub(crate) mod tests {
             .unwrap();
         let (marked, mark) = built.expect("a full-calibre strike through a part leaves a mark");
         assert_eq!(marked, root);
+        assert_eq!(
+            mark.feedback, expected_feedback,
+            "the recorded mark preserves its struck substance"
+        );
         assert_eq!(mark.kind, MarkKind::Hole);
         let parts = world.get::<SimParts>(root).unwrap();
         assert_eq!(Some(mark.part), part_index(parts, "Turret_Front"));

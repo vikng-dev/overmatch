@@ -1797,6 +1797,7 @@ fn debris_table(entries: &[(u32, SubstanceId, f32, f32)]) -> VolumeTable {
             volume(v),
             VolumeMaterial {
                 substance,
+                feedback: crate::substances::SurfaceFeedback::fixture(),
                 factor,
                 debris_ratio,
             },

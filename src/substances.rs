@@ -57,6 +57,9 @@
 //! (Box2D's mixing). No body carries a rule of its own, so Avian's combine-rule priority never
 //! picks a winner: both sides always state [`PAIR_RULE`].
 
+mod feedback;
+pub use feedback::SurfaceFeedback;
+
 use serde::Deserialize;
 use serde::de::{self, MapAccess, Visitor};
 use std::collections::BTreeMap;
@@ -257,6 +260,8 @@ pub enum Substance {
 /// A hard substance's entry.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct HardSubstance {
+    /// The surface's impact and exposed-mark response, authored with provenance.
+    pub feedback: SurfaceFeedback,
     pub resistance: Resistance,
     /// `λ = 1/sin α` of the authored debris half-angle `α`: the field law's ratio for the spall
     /// cone a body exit through this substance throws (design doc §5), at least 1 and in the law's
@@ -361,6 +366,7 @@ enum SubstanceFile {
     Hard {
         resistance: ResistanceFile,
         visual: String,
+        feedback: Box<feedback::File>,
         /// Degrees, converted once at parse ([`debris_ratio`]).
         debris_half_angle_deg: Sourced<f64>,
         facts: Option<FactsFile>,
@@ -549,6 +555,7 @@ fn converted(name: &str, file: SubstanceFile) -> Result<(Substance, Option<Strin
         SubstanceFile::Hard {
             resistance,
             visual,
+            feedback,
             debris_half_angle_deg,
             facts,
             bulk,
@@ -562,6 +569,7 @@ fn converted(name: &str, file: SubstanceFile) -> Result<(Substance, Option<Strin
                 ));
             }
             let hard = HardSubstance {
+                feedback: (*feedback).resolve(name)?,
                 resistance: match resistance {
                     ResistanceFile::Reference => Resistance::Reference,
                     ResistanceFile::Effective(Sourced(factor)) => Resistance::Effective(factor),
@@ -959,6 +967,13 @@ impl SubstanceRegistry {
         Ok(SubstanceId(index as u64))
     }
 
+    /// The surface responses of hard matter. Witnesses and unworn entries have no drawn surface.
+    pub(crate) fn feedbacks(&self) -> impl Iterator<Item = SurfaceFeedback> + '_ {
+        self.substances
+            .values()
+            .filter_map(|substance| substance.hard().map(|hard| hard.feedback))
+    }
+
     /// The reference steel's material facts — the force law's reference constants.
     pub fn reference_facts(&self) -> MaterialFacts {
         self.substances[&self.reference]
@@ -976,7 +991,7 @@ mod tests {
     fn with(extra: &str) -> String {
         format!(
             r#"(substances: {{
-                "Ref": Hard(resistance: Reference, visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: Some((
+                "Ref": Hard(resistance: Reference, visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))), debris_half_angle_deg: (26.2, Tuned("fixture")), facts: Some((
                         density: (7850.0, Tuned("fixture")),
                         flow_strength: (1.0e9, Tuned("fixture")),
                         youngs_modulus: (205.0e9, Tuned("fixture")),
@@ -1042,13 +1057,13 @@ mod tests {
         assert_eq!(registry.visual("not a substance"), None);
 
         let parsed = SubstanceRegistry::from_ron(&with(
-            r#""Mild": Hard(resistance: Effective((800.0, Tuned("fixture"))), visual: "cast", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
+            r#""Mild": Hard(resistance: Effective((800.0, Tuned("fixture"))), visual: "cast", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))), debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
         ))
         .expect("a hard row naming a visual parses");
         assert_eq!(parsed.visual("Mild"), Some("cast"));
         for refused in [
             r#""Mild": Hard(resistance: Effective((800.0, Tuned("fixture"))), debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
-            r#""Mild": Hard(resistance: Effective((800.0, Tuned("fixture"))), visual: " ", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
+            r#""Mild": Hard(resistance: Effective((800.0, Tuned("fixture"))), visual: " ", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))), debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
         ] {
             let err = SubstanceRegistry::from_ron(&with(refused))
                 .expect_err("a hard row without a visual must not parse");
@@ -1064,7 +1079,7 @@ mod tests {
     fn a_rows_friction_is_optional_and_in_domain() {
         let row = |extra: &str| {
             with(&format!(
-                r#""Clay": Hard(resistance: Effective((20.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None{extra}),"#
+                r#""Clay": Hard(resistance: Effective((20.0, Tuned("fixture"))), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))), debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None{extra}),"#
             ))
         };
         let bare = SubstanceRegistry::from_ron(&row("")).unwrap();
@@ -1103,7 +1118,7 @@ mod tests {
         let bulk = r#"bulk: Some((density: (1800.0, Tuned("fixture")), toughness: (5.0e5, Tuned("fixture"))))"#;
         let row = |extra: &str| {
             with(&format!(
-                r#""Clay": Hard(resistance: Effective((20.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), {extra}),"#
+                r#""Clay": Hard(resistance: Effective((20.0, Tuned("fixture"))), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))), debris_half_angle_deg: (26.2, Tuned("fixture")), {extra}),"#
             ))
         };
         let registry = SubstanceRegistry::from_ron(&row(&format!("facts: None, {bulk}")))
@@ -1147,7 +1162,7 @@ mod tests {
         let row = |shear: &str| {
             with(&format!(
                 r#""Fixture": Hard(resistance: Effective((20.0, Tuned("fixture"))),
-                visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")),
+                visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))), debris_half_angle_deg: (26.2, Tuned("fixture")),
                 bulk: Some((density: (1800.0, Tuned("fixture")),
                     toughness: (5.0e5, Tuned("fixture")),
                     tensile: Some((1.0e6, Tuned("fixture"))),
@@ -1397,7 +1412,7 @@ mod tests {
     fn a_hard_row_may_state_burst_facts_too() {
         let hard = |burst: &str| {
             with(&format!(
-                r#""Filler": Hard(resistance: Effective((200.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None{burst}),"#
+                r#""Filler": Hard(resistance: Effective((200.0, Tuned("fixture"))), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))), debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None{burst}),"#
             ))
         };
         let plain = SubstanceRegistry::from_ron(&hard("")).expect("a hard row without burst facts");
@@ -1454,7 +1469,7 @@ mod tests {
     #[test]
     fn an_unknown_field_fails_the_parse() {
         let err = SubstanceRegistry::from_ron(&with(
-            r#""Steel": Hard(resistance: Effective((900.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None, hardness: 3.0),"#,
+            r#""Steel": Hard(resistance: Effective((900.0, Tuned("fixture"))), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))), debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None, hardness: 3.0),"#,
         ))
         .expect_err("deny_unknown_fields must reject a stray key");
         assert!(matches!(err, SubstanceError::Parse(_)));
@@ -1464,10 +1479,10 @@ mod tests {
     #[test]
     fn a_number_without_provenance_fails_the_parse() {
         let bare_factor = with(
-            r#""Cast": Hard(resistance: Effective(900.0), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
+            r#""Cast": Hard(resistance: Effective(900.0), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))), debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
         );
         let bare_fact = with(
-            r#""Mild": Hard(resistance: Effective((800.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")),
+            r#""Mild": Hard(resistance: Effective((800.0, Tuned("fixture"))), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))), debris_half_angle_deg: (26.2, Tuned("fixture")),
                 facts: Some((density: 7900.0, flow_strength: (0.4e9, Tuned("fixture")),
                 youngs_modulus: (190.0e9, Tuned("fixture")), poisson_ratio: (0.29, Tuned("fixture"))))),"#,
         );
@@ -1483,8 +1498,8 @@ mod tests {
     #[test]
     fn a_duplicated_substance_name_fails_the_parse() {
         let err = SubstanceRegistry::from_ron(&with(
-            r#""Cast": Hard(resistance: Effective((900.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),
-               "Cast": Hard(resistance: Effective((10.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
+            r#""Cast": Hard(resistance: Effective((900.0, Tuned("fixture"))), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))), debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),
+               "Cast": Hard(resistance: Effective((10.0, Tuned("fixture"))), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))), debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
         ))
         .expect_err("a duplicate key must not silently overwrite");
         assert!(err.to_string().contains("Cast"), "{err}");
@@ -1495,7 +1510,7 @@ mod tests {
     #[test]
     fn a_negative_factor_fails_the_parse() {
         let err = SubstanceRegistry::from_ron_at(std::path::Path::new("assets/materials/materials.ron"), &with(
-            r#""Rubber": Hard(resistance: Effective((-50.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
+            r#""Rubber": Hard(resistance: Effective((-50.0, Tuned("fixture"))), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))), debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
         ))
         .expect_err("a negative factor must not parse");
         assert!(err.to_string().contains("Rubber"), "{err}");
@@ -1514,7 +1529,7 @@ mod tests {
     fn a_non_finite_factor_fails_the_parse() {
         for literal in ["NaN", "inf", "-inf"] {
             let err = SubstanceRegistry::from_ron(&with(&format!(
-                r#""Flesh": Hard(resistance: Effective(({literal}, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#
+                r#""Flesh": Hard(resistance: Effective(({literal}, Tuned("fixture"))), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))), debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#
             )))
             .unwrap_err();
             assert!(
@@ -1533,7 +1548,7 @@ mod tests {
     fn a_debris_half_angle_outside_the_quarter_turn_is_refused() {
         let entry = |degrees: &str| {
             with(&format!(
-                r#""Odd": Hard(resistance: Effective((500.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: ({degrees}, Tuned("fixture")), facts: None),"#
+                r#""Odd": Hard(resistance: Effective((500.0, Tuned("fixture"))), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))), debris_half_angle_deg: ({degrees}, Tuned("fixture")), facts: None),"#
             ))
         };
         let ratio = |degrees: &str| {
@@ -1559,7 +1574,7 @@ mod tests {
             );
         }
         let missing = SubstanceRegistry::from_ron(&with(
-            r#""Odd": Hard(resistance: Effective((500.0, Tuned("fixture"))), visual: "fixture", facts: None),"#,
+            r#""Odd": Hard(resistance: Effective((500.0, Tuned("fixture"))), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))), facts: None),"#,
         ))
         .expect_err("a hard entry states its debris half-angle");
         assert!(
@@ -1574,7 +1589,7 @@ mod tests {
     #[test]
     fn negative_zero_is_canonicalized() {
         let registry = SubstanceRegistry::from_ron(&with(
-            r#""Void": Hard(resistance: Effective((-0.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
+            r#""Void": Hard(resistance: Effective((-0.0, Tuned("fixture"))), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))), debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None),"#,
         ))
         .expect("zero resistance is legal, it is just nothing");
         assert_eq!(
@@ -1617,7 +1632,7 @@ mod tests {
                 .collect::<Vec<_>>()
                 .join(", ");
             let err = SubstanceRegistry::from_ron(&with(&format!(
-                r#""Odd": Hard(resistance: Effective((500.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: Some(({facts}))),"#
+                r#""Odd": Hard(resistance: Effective((500.0, Tuned("fixture"))), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))), debris_half_angle_deg: (26.2, Tuned("fixture")), facts: Some(({facts}))),"#
             )))
             .expect_err("facts out of domain must not parse");
             assert!(
@@ -1632,19 +1647,19 @@ mod tests {
     #[test]
     fn the_reference_is_exactly_one_entry_with_facts() {
         let factless = SubstanceRegistry::from_ron(
-            r#"(substances: { "Ref": Hard(resistance: Reference, visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None) })"#,
+            r#"(substances: { "Ref": Hard(resistance: Reference, visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))), debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None) })"#,
         )
         .expect_err("a reference without facts must not parse");
         assert!(factless.to_string().contains("Ref"), "{factless}");
 
         let none = SubstanceRegistry::from_ron(
-            r#"(substances: { "Cast": Hard(resistance: Effective((900.0, Tuned("fixture"))), visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None) })"#,
+            r#"(substances: { "Cast": Hard(resistance: Effective((900.0, Tuned("fixture"))), visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))), debris_half_angle_deg: (26.2, Tuned("fixture")), facts: None) })"#,
         )
         .expect_err("a registry without a reference must not load");
         assert!(matches!(none, SubstanceError::Reference(_)), "{none}");
 
         let two = SubstanceRegistry::from_ron(&with(
-            r#""Other": Hard(resistance: Reference, visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")), facts: Some((
+            r#""Other": Hard(resistance: Reference, visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))), debris_half_angle_deg: (26.2, Tuned("fixture")), facts: Some((
                 density: (7800.0, Tuned("fixture")),
                 flow_strength: (1.18e9, Tuned("fixture")),
                 youngs_modulus: (190.0e9, Tuned("fixture")),

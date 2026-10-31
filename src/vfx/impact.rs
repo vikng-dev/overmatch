@@ -1,12 +1,14 @@
 //! View-only impact dressing for [`Impact`].
 //!
 //! Invariant (ADR-0014): this module only reads simulation events and spawns transient render
-//! entities. Caliber and `ImpactSurface` choose the visual family; no visual entity affects damage.
+//! entities. Resolved substance responses choose powder and sparks; no visual entity affects game state.
 //! Product invariant (ADR-0023): visual scale and duration derive from physical event inputs, never
 //! viewer distance.
 
+use crate::substances::SurfaceFeedback;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
+use std::collections::BTreeMap;
 
 use crate::ballistics::{Impact, ImpactOutcome, ImpactSurface, TRACER_MAX_CALIBER};
 use crate::view::PlayerView;
@@ -219,7 +221,7 @@ pub(super) struct ImpactAssets {
     scar_lut: Handle<Image>,
     /// Neutral gray palette for the armor read's spall/smoke (steel spall, never brown dirt) — the
     /// MG armor billow swap and the 88 armor puff both use it.
-    spall_lut: Handle<Image>,
+    powder_luts: BTreeMap<[u8; 3], Handle<Image>>,
     /// White-hot palette for the armor read's contact flash + dense spark fan (and the flame lick's
     /// hot core) — whiter/hotter than the terrain `spark_lut`, which cools to ember orange.
     hot_lut: Handle<Image>,
@@ -240,13 +242,22 @@ impl ImpactAssets {
             spark_lut: Handle::default(),
             dirt_lut: Handle::default(),
             scar_lut: Handle::default(),
-            spall_lut: Handle::default(),
+            powder_luts: [(SurfaceFeedback::fixture().powder, Handle::default())]
+                .into_iter()
+                .collect(),
             hot_lut: Handle::default(),
         }
     }
 }
 
 impl ImpactAssets {
+    fn powder_lut(&self, feedback: SurfaceFeedback) -> Handle<Image> {
+        self.powder_luts
+            .get(&feedback.powder)
+            .expect("all hard-substance powder palettes are preloaded")
+            .clone()
+    }
+
     /// The dust-billow material template: alpha-blend mass (glow.y = 0 — the occluding contract),
     /// its own earthy LUT, soft erosion edges. Its 2×2 atlas frame lanes are set on spawn.
     fn dust_material(&self) -> BillboardLook {
@@ -356,9 +367,9 @@ impl ImpactAssets {
     }
 
     /// A gray spall-smoke mass for the armor read's puff: the dust atlas recolored through the
-    /// neutral `spall_lut` (never the earthy dirt LUT — steel throws gray spall/smoke, not dirt),
+    /// authored powder palette (never the earthy dirt LUT — steel throws gray spall/smoke, not dirt),
     /// alpha-blend occluding mass, overall `alpha`. Shares the already-warmed Blend pipeline.
-    fn spall_material(&self, alpha: f32) -> BillboardLook {
+    fn spall_material(&self, alpha: f32, feedback: SurfaceFeedback) -> BillboardLook {
         BillboardLook {
             params: VfxParams {
                 frame: Vec4::new(0.0, 2.0, 2.0, 0.0),
@@ -366,7 +377,7 @@ impl ImpactAssets {
                 glow: Vec4::new(0.0, 0.0, SOFT_PARTICLE_DEPTH, 0.0),
             },
             atlas: self.dust_atlas.clone(),
-            lut: self.spall_lut.clone(),
+            lut: self.powder_lut(feedback),
             alpha_mode: AlphaMode::Blend,
         }
     }
@@ -466,15 +477,16 @@ pub(super) fn setup_impact_assets(
         let color = LinearRgba::rgb(lum * 0.85, lum * 0.62, lum * 0.45);
         (color, 0.0)
     });
-    // Spall LUT for the armor read's gray spall/smoke: a NEUTRAL (faintly cool) gray with NO earth
-    // tint — steel throws gray spall and smoke, never brown dirt. Darkens slightly with age (Y); a
-    // whisper of heat only in the brightest young texels (the strike lights it for an instant).
-    let spall_lut = gradient_lut(&mut images, |x, y| {
-        let lum = 0.10 + 0.40 * x;
-        let color = LinearRgba::rgb(lum * 0.88, lum * 0.90, lum * 0.94);
-        let heat = 0.10 * x * (-y * 8.0).exp();
-        (color, heat)
-    });
+    let mut powder_luts = BTreeMap::new();
+    for feedback in crate::substances::SubstanceRegistry::shipped_static().feedbacks() {
+        powder_luts.entry(feedback.powder).or_insert_with(|| {
+            let [r, g, b] = feedback.powder_linear();
+            gradient_lut(&mut images, |x, _| {
+                let lum = 0.2 + 0.8 * x;
+                (LinearRgba::rgb(r * lum, g * lum, b * lum), 0.0)
+            })
+        });
+    }
     // Hot LUT for the armor flash + spark fan: white-hot at birth (all channels high, a touch of blue
     // in the hottest core) cooling toward white-yellow — hotter and WHITER than the spark LUT's orange
     // ember tail (armor contact is a welding-bright flash, not a campfire ember). Heat front-loaded.
@@ -494,7 +506,7 @@ pub(super) fn setup_impact_assets(
         spark_lut,
         dirt_lut,
         scar_lut,
-        spall_lut,
+        powder_luts,
         hot_lut,
     });
 }
@@ -512,8 +524,8 @@ pub(super) struct ImpactKit<'w, 's> {
 }
 
 /// Drop the layered read at each shell impact — branching on BOTH the round's physical caliber and
-/// the `surface` it struck. At/above [`TRACER_MAX_CALIBER`] the 88 lands either the big terrain
-/// splash ([`spawn_terrain_read`]) or the armor read ([`spawn_big_armor`]); below it, the MG's compact
+/// the resolved `surface` response. Large terrain contacts use [`spawn_terrain_read`]; a sparking
+/// substance admits [`spawn_big_armor`]. Smaller contacts use the compact
 /// dust-ping-spark read ([`spawn_small_impact`], which recolors its billow gray on armor but keeps
 /// the terrain path byte-for-byte). `normal`/`to_camera` are resolved once, before any path draws
 /// RNG, so the small path's RNG sequence is unchanged and the surface pick costs no RNG.
@@ -522,7 +534,8 @@ fn spawn_impact_read(
     mut kit: ImpactKit,
     camera: Query<&GlobalTransform, With<PlayerView>>,
 ) {
-    let normal = impact.normal.try_normalize().unwrap_or(Vec3::Y);
+    let normal = *Dir3::new(impact.normal)
+        .expect("the resolved impact carries a finite nonzero surface normal");
     let to_camera = camera
         .single()
         .map(|cam| cam.translation() - impact.position)
@@ -531,19 +544,15 @@ fn spawn_impact_read(
         ImpactSurface::Terrain => {
             spawn_terrain_read(impact.position, normal, to_camera, impact.caliber, &mut kit)
         }
-        ImpactSurface::Armor => {
-            if impact.caliber >= TRACER_MAX_CALIBER {
-                spawn_big_armor(impact.position, normal, to_camera, impact.outcome, &mut kit);
-            } else {
-                spawn_small_impact(
-                    impact.position,
-                    normal,
-                    to_camera,
-                    ImpactSurface::Armor,
-                    &mut kit,
-                );
-            }
-        }
+        ImpactSurface::Material(feedback) => spawn_material_read(
+            impact.position,
+            normal,
+            to_camera,
+            impact.caliber,
+            impact.outcome,
+            feedback,
+            &mut kit,
+        ),
     }
 }
 
@@ -565,11 +574,36 @@ pub(super) fn spawn_terrain_read(
     }
 }
 
+/// The resolved substance chooses its emission response. Non-sparking matter produces its own
+/// powder read, never a metal flash or a spark fan. Size class only selects the existing detail
+/// recipe after the material's emission has admitted it.
+pub(super) fn spawn_material_read(
+    position: Vec3,
+    normal: Vec3,
+    to_camera: Vec3,
+    caliber: f32,
+    outcome: ImpactOutcome,
+    feedback: SurfaceFeedback,
+    kit: &mut ImpactKit,
+) {
+    if feedback.sparks && caliber >= TRACER_MAX_CALIBER {
+        spawn_big_armor(position, normal, to_camera, outcome, feedback, kit);
+    } else {
+        spawn_small_impact(
+            position,
+            normal,
+            to_camera,
+            ImpactSurface::Material(feedback),
+            kit,
+        );
+    }
+}
+
 /// The MG / small-caliber read (the original terrain body, plus a gray-spall LUT swap on armor):
 /// dust billow (mass) + ping (contact flash) + a few sparks (crisp garnish), all on the shared
 /// billboard ring. This is what makes the four invisible non-tracer rounds of the belt cycle register
 /// at the target. On ARMOR the billow's LUT swaps from the earthy dust palette to the neutral gray
-/// `spall_lut` (the honest minimum recolor — a small round on steel throws gray spall, not dirt); the
+/// authored powder palette, so each substance keeps its own colour; the
 /// swap draws NO RNG, so the byte-identical terrain read (and its pinned RNG order) is untouched.
 fn spawn_small_impact(
     position: Vec3,
@@ -591,8 +625,8 @@ fn spawn_small_impact(
     // so the small read's RNG sequence (the pinned draw order) is identical on both surfaces.
     let billow = {
         let mut m = assets.dust_material();
-        if surface == ImpactSurface::Armor {
-            m.lut = assets.spall_lut.clone();
+        if let ImpactSurface::Material(feedback) = surface {
+            m.lut = assets.powder_lut(feedback);
         }
         m
     };
@@ -624,6 +658,10 @@ fn spawn_small_impact(
             rotation: None,
         },
     );
+
+    if matches!(surface, ImpactSurface::Material(feedback) if !feedback.sparks) {
+        return; // The substance states no contact-spark emission.
+    }
 
     // --- Ping: one small additive round glow at the hit point, 1–2 frames — the instant of contact.
     spawn_billboard(
@@ -904,6 +942,7 @@ fn spawn_big_armor(
     normal: Vec3,
     to_camera: Vec3,
     outcome: ImpactOutcome,
+    feedback: SurfaceFeedback,
     kit: &mut ImpactKit,
 ) {
     let ImpactKit {
@@ -997,7 +1036,7 @@ fn spawn_big_armor(
         ring,
         assets.quad.clone(),
         BillboardSpec {
-            material: assets.spall_material(SPALL_PUFF_ALPHA),
+            material: assets.spall_material(SPALL_PUFF_ALPHA, feedback),
             lifetime: rng.range(SPALL_PUFF_LIFETIME.0, SPALL_PUFF_LIFETIME.1),
             origin: position + normal * (SPALL_PUFF_SIZE.0 * 0.5),
             drift: normal * 0.3 + Vec3::Y * SPALL_PUFF_RISE,
@@ -1140,20 +1179,27 @@ mod tests {
             .count()
     }
 
-    /// Sparks are the needle-thin fixed-orientation streaks; dust + ping are the aspect-1 camera
-    /// facers. This splits them for the assertions below.
-    fn sparks(app: &mut App) -> Vec<(Vec3, f32)> {
-        let world = app.world_mut();
-        let mut q = world.query::<(&Billboard, &Transform)>();
-        q.iter(world)
-            .filter(|(b, _)| b.aspect.x < 0.2)
-            .map(|(b, t)| {
-                (
-                    b.drift,
-                    t.rotation.mul_vec3(Vec3::Y).dot(b.drift.normalize()),
-                )
-            })
-            .collect()
+    /// A non-sparking substance produces powder alone. A class-based metal recipe would add a
+    /// flash and sparks here even though the resolved material explicitly emits neither.
+    #[test]
+    fn non_sparking_matter_never_gets_the_metal_read() {
+        let mut app = harness();
+        let feedback = SurfaceFeedback {
+            sparks: false,
+            ..SurfaceFeedback::fixture()
+        };
+        trigger_surface(
+            &mut app,
+            Vec3::Y,
+            BIG_CALIBER,
+            ImpactSurface::Material(feedback),
+            ImpactOutcome::Through,
+        );
+        assert_eq!(
+            billboards(&mut app),
+            1,
+            "one powder mass, no metal flash or spark fan"
+        );
     }
 
     /// The ground scars ride their OWN eviction ring, bounded by GROUND_MARK_CAP — insulated from the
@@ -1185,17 +1231,13 @@ mod tests {
         );
     }
 
-    /// A degenerate (zero) normal still throws the read — sparks straight up, the terrain fallback —
-    /// so the effect can never panic or vanish on a weird raycast.
+    /// Resolved surfaces supply a finite nonzero normal. Inventing an up-facing surface would
+    /// hide a broken geometry or event invariant from the renderer.
     #[test]
-    fn degenerate_normal_falls_back_up() {
+    #[should_panic(expected = "finite nonzero surface normal")]
+    fn a_degenerate_impact_normal_is_a_bug() {
         let mut app = harness();
-        trigger_impact(&mut app, Vec3::ZERO, MG_CALIBER);
-        let sparks = sparks(&mut app);
-        assert!(sparks.len() >= SPARK_COUNT.0 as usize);
-        for (drift, _) in sparks {
-            assert!(drift.y > 0.0, "fallback sparks kick upward");
-        }
+        trigger_impact(&mut app, Vec3::ZERO, BIG_CALIBER);
     }
 
     /// The whole read rides the shared billboard ring: an impact storm is bounded by its cap, not
@@ -1228,7 +1270,7 @@ mod tests {
             &mut no_pen,
             Vec3::Y,
             BIG_CALIBER,
-            ImpactSurface::Armor,
+            ImpactSurface::Material(SurfaceFeedback::fixture()),
             ImpactOutcome::Struck,
         );
         let n0 = billboards(&mut no_pen);
@@ -1238,7 +1280,7 @@ mod tests {
             &mut pen,
             Vec3::Y,
             BIG_CALIBER,
-            ImpactSurface::Armor,
+            ImpactSurface::Material(SurfaceFeedback::fixture()),
             ImpactOutcome::Through,
         );
         let n1 = billboards(&mut pen);

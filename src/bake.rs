@@ -376,6 +376,29 @@ pub(crate) struct TankBlueprint {
 impl TankBlueprint {
     /// A tank kind's synchronous spawn data, shared by every instance.
     pub(crate) fn new(file: String, geometry: TankGeometry, spec: TankSpec) -> Self {
+        // DERIVED from the mark wire's unsigned part index and signed millimetre coordinates.
+        assert!(
+            geometry.nodes.len() <= usize::from(u16::MAX) + 1,
+            "{file}: hull_marks.part cannot index this node table — widen the mark wire format"
+        );
+        let mark_bound_m = f32::from(i16::MAX) * 0.001 - 0.001;
+        for node in &geometry.nodes {
+            for primitive in node
+                .primitives
+                .iter()
+                .filter(|primitive| primitive.substance.is_some())
+            {
+                assert!(
+                    primitive
+                        .positions
+                        .iter()
+                        .flatten()
+                        .all(|value| value.is_finite() && value.abs() <= mark_bound_m),
+                    "{file}: hull_marks.at cannot pack {}'s local surface — recenter its mesh in the model or widen the mark wire coordinates",
+                    node.name
+                );
+            }
+        }
         Self {
             file,
             geometry: Arc::new(geometry),
@@ -1932,7 +1955,7 @@ mod tests {
         // substance is no row of it, and neither is the collider's.
         std::fs::write(
             &elsewhere,
-            r#"SubstanceRegistry(substances: {"Cheese": Hard(resistance: Reference, visual: "fixture",
+            r#"SubstanceRegistry(substances: {"Cheese": Hard(resistance: Reference, visual: "fixture", feedback: (exposed_linear_rgb: ((0.5, 0.51, 0.53), Tuned("fixture")), powder_linear_rgb: ((0.47, 0.47, 0.47), Tuned("fixture")), metallic: (1.0, Tuned("fixture")), roughness_gain: (1.0, Tuned("fixture")), sparks: (true, Tuned("fixture"))),
                 debris_half_angle_deg: (26.2, Tuned("fixture")),
                 facts: Some((density: (1000.0, Tuned("fixture")),
                     flow_strength: (1.0e6, Tuned("fixture")),

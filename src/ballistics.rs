@@ -1025,6 +1025,7 @@ pub(crate) struct ShellTerminal {
 /// authority's cosmetic record (`hull_marks`) is its one reader, and the simulation never reads it.
 #[derive(Event, Clone, Copy, Debug)]
 pub(crate) struct ShellStrike {
+    pub feedback: crate::substances::SurfaceFeedback,
     pub shot: ShotId,
     /// The strike's ordinal in [`PenetrationMarks::log`], so no two resolved faces of one shot
     /// share it, including faces reached after the first terminal.
@@ -1660,11 +1661,11 @@ pub(crate) const STALE_FIRE_TICKS: u32 = 16;
 #[derive(Component, Clone, Copy, Default)]
 pub(crate) struct TracerRound;
 
-/// The impact surface class, resolved from ballistic-volume ancestry.
+/// The resolved surface: terrain, or the struck substance's complete presentation response.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum ImpactSurface {
     Terrain,
-    Armor,
+    Material(crate::substances::SurfaceFeedback),
 }
 
 /// The game's damage model: the public outcome at a surface. `Ricochet` is a resolved
@@ -1780,7 +1781,7 @@ pub(crate) struct AuthorityOutcomeDrawn {
 #[derive(Event)]
 pub(crate) struct Impact {
     pub(crate) position: Vec3,
-    /// Outward surface normal from the raycast; consumers normalize with a fallback.
+    /// Finite nonzero outward surface normal from the certified geometry or checked server path.
     pub(crate) normal: Vec3,
     /// Striking round caliber (m), used by impact visuals.
     pub(crate) caliber: f32,
@@ -4612,7 +4613,10 @@ mod march_tests {
                     "the SAME plate must still stop a round from any other source — self-exclusion is \
                      an exclusion, not a hole in the armour",
                 );
-                assert_eq!(hits[0].surface, ImpactSurface::Armor);
+                assert_eq!(
+                    hits[0].surface,
+                    ImpactSurface::Material(crate::substances::SurfaceFeedback::fixture())
+                );
             }
         }
     }
@@ -4760,7 +4764,13 @@ mod march_tests {
         let read = |hits: &[Captured]| -> Vec<(ImpactSurface, Verdict)> {
             hits.iter().map(|hit| (hit.surface, hit.verdict)).collect()
         };
-        assert_eq!(read(&bounce), [(ImpactSurface::Armor, Verdict::Ricochet)]);
+        assert_eq!(
+            read(&bounce),
+            [(
+                ImpactSurface::Material(crate::substances::SurfaceFeedback::fixture()),
+                Verdict::Ricochet
+            )]
+        );
         let deflect = bounce[0]
             .deflection
             .expect("a ricochet carries its outgoing direction");
@@ -4771,14 +4781,17 @@ mod march_tests {
         assert_eq!(
             stopped
                 .iter()
-                .filter(|hit| hit.surface == ImpactSurface::Armor)
+                .filter(|hit| matches!(hit.surface, ImpactSurface::Material(_)))
                 .map(|hit| hit.verdict)
                 .collect::<Vec<_>>(),
             [Verdict::Stopped],
         );
         assert_eq!(
             read(&through),
-            [(ImpactSurface::Armor, Verdict::Through)],
+            [(
+                ImpactSurface::Material(crate::substances::SurfaceFeedback::fixture()),
+                Verdict::Through
+            )],
             "a clean perforation fires exactly one impact"
         );
         assert!(
@@ -5353,7 +5366,11 @@ mod march_tests {
             impacts.len()
         );
         let armor = impacts[0];
-        assert_eq!(armor.surface, ImpactSurface::Armor, "the nearer plate wins");
+        assert_eq!(
+            armor.surface,
+            ImpactSurface::Material(crate::substances::SurfaceFeedback::fixture()),
+            "the nearer plate wins"
+        );
         assert!(armor.verdict.entered(), "an 88 perforates 50 mm flat");
         assert!((armor.position.y - 50.0).abs() < 0.2, "at the plate face");
         let last = *impacts.last().unwrap();
@@ -5624,7 +5641,7 @@ mod march_tests {
             );
             let faces = [origin.z + first + 0.025, origin.z + first - 0.925];
             for (impact, face) in impacts.iter().zip(faces) {
-                assert!(matches!(impact.surface, ImpactSurface::Armor));
+                assert!(matches!(impact.surface, ImpactSurface::Material(_)));
                 assert!(
                     impact.verdict.entered(),
                     "an 88 goes through 50 mm of RHA head-on: {:?}",
@@ -5748,7 +5765,7 @@ mod march_tests {
                 // A walk error stops the round with a bare armour spark (`Struck`): no crossing, not
                 // deflected. Nothing else in this arrangement reads that way.
                 if impacts.iter().any(|impact| {
-                    matches!(impact.surface, ImpactSurface::Armor)
+                    matches!(impact.surface, ImpactSurface::Material(_))
                         && impact.verdict == Verdict::Struck
                 }) {
                     failed.push(ahead);
@@ -6267,7 +6284,7 @@ mod march_tests {
         assert!(
             impacts
                 .iter()
-                .all(|impact| matches!(impact.surface, ImpactSurface::Armor)),
+                .all(|impact| matches!(impact.surface, ImpactSurface::Material(_))),
             "and what was reported is the plate, not the ground beyond it: {impacts:?}",
             impacts = impacts.iter().map(|i| i.position).collect::<Vec<_>>(),
         );
@@ -6519,7 +6536,7 @@ mod march_tests {
             let impacts = std::mem::take(&mut app.world_mut().resource_mut::<ImpactLog>().0);
             let reads: Vec<Verdict> = impacts
                 .iter()
-                .filter(|impact| matches!(impact.surface, ImpactSurface::Armor))
+                .filter(|impact| matches!(impact.surface, ImpactSurface::Material(_)))
                 .map(|impact| impact.verdict)
                 .collect();
             if reads.len() != 1 {
@@ -7037,10 +7054,8 @@ mod march_tests {
         // The wall's inner face is x = 1.75 m.
         let fast = fire_and_capture(&mut house_world(), origin, Vec3::NEG_X, 800.0);
         let through = fast.first().expect("800 m/s: the wall was never struck");
-        assert_eq!(
-            (through.surface, through.verdict),
-            (ImpactSurface::Armor, Verdict::Through)
-        );
+        assert!(matches!(through.surface, ImpactSurface::Material(_)));
+        assert_eq!(through.verdict, Verdict::Through);
         assert!(
             (through.position.x - 2.0).abs() < 0.01,
             "800 m/s: struck at the outer face, not {}",
@@ -7048,10 +7063,8 @@ mod march_tests {
         );
         let slow = fire_and_capture(&mut house_world(), origin, Vec3::NEG_X, 100.0);
         let stopped = slow.first().expect("100 m/s: the wall was never struck");
-        assert_eq!(
-            (stopped.surface, stopped.verdict),
-            (ImpactSurface::Armor, Verdict::Stopped)
-        );
+        assert!(matches!(stopped.surface, ImpactSurface::Material(_)));
+        assert_eq!(stopped.verdict, Verdict::Stopped);
         assert!(
             stopped.position.x > 1.75 && stopped.position.x < 2.0,
             "100 m/s: at rest inside the wall, not at {}",

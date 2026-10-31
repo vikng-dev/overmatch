@@ -1932,7 +1932,10 @@ fn a_main_gun_round_damages_a_tank_on_the_shipped_map() {
     };
     app.init_resource::<ArmorImpacts>();
     app.add_observer(|impact: On<Impact>, mut log: ResMut<ArmorImpacts>| {
-        if impact.surface == crate::ballistics::ImpactSurface::Armor {
+        if matches!(
+            impact.surface,
+            crate::ballistics::ImpactSurface::Material(_)
+        ) {
             log.0.push(impact.outcome.verdict().entered());
         }
     });

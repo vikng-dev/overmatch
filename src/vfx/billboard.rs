@@ -507,12 +507,13 @@ fn upload_billboard_lanes(
     if changed.is_empty() {
         return;
     }
-    let Some(mut table) = tables.get_mut(&families.lanes) else {
-        return;
-    };
-    let Some(bytes) = table.data.as_mut() else {
-        return;
-    };
+    let mut table = tables
+        .get_mut(&families.lanes)
+        .expect("billboard families keep a strong handle to the startup lane table");
+    let bytes = table
+        .data
+        .as_mut()
+        .expect("the billboard lane table retains its CPU storage for per-frame uploads");
     let stride = lane_stride();
     for (slot, billboard) in &changed {
         let start = slot.0 as usize * stride;

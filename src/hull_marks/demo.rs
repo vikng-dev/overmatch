@@ -84,6 +84,7 @@ fn strike_target(
     bound: Query<(), With<ViewNode>>,
     weapons: Query<(&Weapon, &crate::tank::TankRoot)>,
     volumes: Query<&VolumeOf>,
+    materials: Query<&crate::ballistics::BallisticVolume>,
     parents: Query<&ChildOf>,
     spatial: SpatialQuery,
     mut commands: Commands,
@@ -142,6 +143,11 @@ fn strike_target(
             forward
         };
         commands.trigger(ShellStrike {
+            feedback: materials
+                .get(volume)
+                .expect("the capture ray resolved a ballistic volume")
+                .material
+                .feedback,
             shot: ShotId {
                 combatant: CombatantId(u64::MAX),
                 weapon: 0,
