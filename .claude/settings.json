@@ -13,6 +13,15 @@
             "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/deny-bare-cargo.sh"
           }
         ]
+      },
+      {
+        "matcher": "Agent|Workflow",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$CLAUDE_PROJECT_DIR/.claude/hooks/deny-subagent-fanout.sh"
+          }
+        ]
       }
     ],
     "WorktreeCreate": [
