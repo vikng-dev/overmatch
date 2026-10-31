@@ -45,6 +45,10 @@ const NET_AWARE_FILES: &[&str] = &[
     // map, the readers of its gate, to prove the gate is written before them in the frame. The kill
     // cam itself names no netcode.
     "src/damage_cam/pen_cam/game/killcam/tests.rs",
+    // Test code: the guard for the vendored child-collider pose patch runs lightyear_avian3d's
+    // per-frame child pass on the same fixture it steps Avian's on, because both crates carry the
+    // patch and the saving needs both. It mounts no netcode and the sim names none.
+    "src/tests/avian_child_pose_churn.rs",
 ];
 
 /// The tokens that constitute naming the netcode layer from outside it: the dependency itself,
