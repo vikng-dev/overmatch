@@ -5192,6 +5192,23 @@ mod march_tests {
         app.world().resource::<ImpactLog>().0.clone()
     }
 
+    /// The game's damage model: armour-layer geometry requires ballistic-volume ancestry.
+    /// The authority must refuse missing material data rather than treating the collider as ground.
+    #[test]
+    #[should_panic(expected = "an Armor collider requires BallisticVolume ancestry")]
+    fn armour_without_a_ballistic_volume_is_a_wiring_bug() {
+        let mut app = world_with_plate(Vec3::splat(1.0), Vec3::new(0.0, 2.0, 0.0));
+        let plate = app
+            .world_mut()
+            .query_filtered::<Entity, With<BallisticVolume>>()
+            .single(app.world())
+            .expect("fixture plate");
+        app.world_mut()
+            .entity_mut(plate)
+            .remove::<BallisticVolume>();
+        fire_and_capture(&mut app, Vec3::new(0.0, 2.0, 2.0), Vec3::NEG_Z, 800.0);
+    }
+
     /// The game's damage model: a kept carrier delivers the assembly's momentum and a discarded
     /// one only the penetrator's. Hull shock relies on the flying mass at the fire-to-march seam.
     /// Both fixture cores stop in the plate, so a mutant retaining the discarded carrier's mass
