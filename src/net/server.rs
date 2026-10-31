@@ -64,13 +64,6 @@ pub fn run() {
             std::process::exit(2);
         }
     };
-    let threads = match super::server_host::ThreadsLever::from_env() {
-        Ok(threads) => threads,
-        Err(err) => {
-            eprintln!("overmatch-server: fatal: {err}");
-            std::process::exit(2);
-        }
-    };
     let stall = match super::server_host::StallLever::from_env() {
         Ok(stall) => stall,
         Err(err) => {
@@ -78,17 +71,11 @@ pub fn run() {
             std::process::exit(2);
         }
     };
-    let mut plugins = crate::server_plugin_floor();
-    if let Some(threads) = &threads {
-        plugins = plugins.set(TaskPoolPlugin {
-            task_pool_options: TaskPoolOptions::with_num_threads(threads.0),
-        });
-    }
     let mut app = App::new();
-    app.add_plugins(plugins)
+    app.add_plugins(crate::server_plugin_floor())
         // Headless composition needs its own application runner.
         .add_plugins(ScheduleRunnerPlugin::run_loop(FRAME));
-    super::server_host::log_startup(threads.as_ref());
+    super::server_host::log_startup();
     if let Some(stall) = stall {
         super::server_host::install_stall(&mut app, stall);
     }

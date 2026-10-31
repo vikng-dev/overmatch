@@ -30,12 +30,6 @@
 #     BOTS=29 DEBRIS='off 10:5 35:5 200:5 200:5 35:5 10:5 off' \
 #     scripts/perf/run-online-night.sh <out-dir> <edgegap-version>
 #
-# THREADS (the server's task-pool thread lever, src/net/server_host.rs; `default` for Bevy's own
-# sizing) is the same kind of axis, deployed with `--threads <value>` and named `-t<value>`: the A/B
-# of 1 thread against the default on the 1 vCPU host. It combines with BOTS and DEBRIS, e.g.
-# `BOTS=29 THREADS='default 1 default 1'`; the server table carries the throttle counters
-# (`throttled_usec`, `nr_throttled`) per condition.
-#
 # The measured client renders the fragments too, so its frame table is their client price as well.
 # Then the tables over every condition (client frames, client bytes, server stats), and the final
 # sweep: every live `profile-` deployment is stopped (only this kind of run makes them, and the
@@ -45,7 +39,7 @@
 # pulls each unstopped deployment's logs, stops it, and runs the final sweep. Behind it, each
 # deployment's own watchdog (session.sh) stops it at MAX_MIN even if this process is killed -9.
 #
-# Products: <out>/deployments.tsv (id, bots, debris, threads, status line), <out>/warmup/, <out>/<condition>/
+# Products: <out>/deployments.tsv (id, bots, debris, status line), <out>/warmup/, <out>/<condition>/
 # (the runner's products, plus server.log: the whole container log, and metrics.json: Edgegap's
 # `?raw=true` series), <out>/summary.txt (the three tables, headed by where the server ran; with
 # DEBRIS, the debris table after them, from <out>/conditions.tsv).
@@ -59,7 +53,6 @@
 # =======================================================================
 #
 # Knobs (env): BOTS ("1 10 28"), DEBRIS (unset: no debris lever; else its values, see above),
-# THREADS (unset: no thread lever; else its values),
 # LOAD_CLIENTS (0: window-less scripted clients added to every
 # condition), MAX_MIN (30: each deployment's watchdog), DEPLOY_ENV (extra K=V words for every
 # deployment's server env), EDGEGAP_CITIES (session.sh's fallback list, default
@@ -150,28 +143,21 @@ caffeinate -dims -w $$ </dev/null >/dev/null 2>&1 &
 deploy_args=()
 for kv in $DEPLOY_ENV; do deploy_args+=(--env "$kv"); done
 
-# The chain's conditions, in order: bot count, then debris value, then thread value. Without DEBRIS
-# or THREADS: one per bot count, `bots<N>`. DEBRIS appends `-d<NN>-<value, x for :>`, THREADS
-# appends `-t<value>`; the debris conditions are listed in conditions.tsv for the debris table.
+# The chain's conditions, in order: bot count, then debris value. Without DEBRIS:
+# one per bot count, `bots<N>`. DEBRIS appends `-d<NN>-<value, x for :>`; the debris conditions are listed in conditions.tsv for the debris table.
 DEBRIS="${DEBRIS:-}"
-THREADS="${THREADS:-}"
 chain_bots=()
 chain_debris=()
-chain_threads=()
 chain_names=()
 for bots in $BOTS; do
   n=0
   for debris in ${DEBRIS:-off}; do
     n=$((n + 1))
-    for threads in ${THREADS:-default}; do
-      chain_bots+=("$bots")
-      chain_debris+=("$debris")
-      chain_threads+=("$threads")
-      name="bots$bots"
-      [[ -n "$DEBRIS" ]] && name+="$(printf -- '-d%02d-%s' "$n" "${debris//:/x}")"
-      [[ -n "$THREADS" ]] && name+="-t$threads"
-      chain_names+=("$name")
-    done
+    chain_bots+=("$bots")
+    chain_debris+=("$debris")
+    name="bots$bots"
+    [[ -n "$DEBRIS" ]] && name+="$(printf -- '-d%02d-%s' "$n" "${debris//:/x}")"
+    chain_names+=("$name")
   done
 done
 if [[ -n "$DEBRIS" ]]; then
@@ -187,21 +173,18 @@ baseline=""
 for i in "${!chain_names[@]}"; do
   bots="${chain_bots[$i]}"
   debris="${chain_debris[$i]}"
-  threads="${chain_threads[$i]}"
   name="${chain_names[$i]}"
   dir="$OUT/$name"
   debris_args=()
   [[ -n "$DEBRIS" ]] && debris_args=(--debris "$debris")
-  threads_args=()
-  [[ -n "$THREADS" ]] && threads_args=(--threads "$threads")
-  say "== $name: deploying $VERSION (bots $bots, debris $debris, threads $threads)"
+  say "== $name: deploying $VERSION (bots $bots, debris $debris)"
   if ! id="$("$SESSION" deploy "$VERSION" --bots "$bots" --stats-s "$STATS_PERIOD_S" \
-    ${debris_args[@]+"${debris_args[@]}"} ${threads_args[@]+"${threads_args[@]}"} --max-min "$MAX_MIN" ${deploy_args[@]+"${deploy_args[@]}"})"; then
+    ${debris_args[@]+"${debris_args[@]}"} --max-min "$MAX_MIN" ${deploy_args[@]+"${deploy_args[@]}"})"; then
     say "$name: no deployment turned READY; stopping the chain"
     FAILED+=("$name(deploy)")
     break
   fi
-  printf '%s\t%s\t%s\t%s\t%s\n' "$id" "$bots" "$debris" "$threads" "$("$SESSION" status "$id")" >>"$LEDGER"
+  printf '%s\t%s\t%s\t%s\n' "$id" "$bots" "$debris" "$("$SESSION" status "$id")" >>"$LEDGER"
   target="$("$SESSION" address "$id" --wait 60)"
 
   if [[ -n "$first" ]]; then
@@ -236,7 +219,7 @@ done
 
 {
   echo "online profile: Edgegap version $VERSION, from $(hostname -s), $(date '+%F %H:%M %Z')"
-  cut -f2- "$LEDGER" | sed 's/^/deployment (bots, debris, threads, status at READY): /'
+  cut -f2- "$LEDGER" | sed 's/^/deployment (bots, debris, status at READY): /'
   [[ -f "$OUT/notes.txt" ]] && cat "$OUT/notes.txt"
 } >"$OUT/summary.txt"
 streams=("$OUT"/bots*/bots*.client.jsonl)

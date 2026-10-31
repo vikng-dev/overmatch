@@ -3,11 +3,10 @@
 //!
 //! - [`host_task_pools`] sizes Bevy's task pools for this host by the rule below;
 //!   `server_plugin_floor` mounts it, so the server and the bitprobe fixture run on the same pools.
-//! - [`log_startup`] prints one `server: host` line at startup: `available_parallelism`, which sizing
-//!   ran, each Bevy task pool's thread count, and (Linux) the container's cgroup CPU quota and
-//!   cpuset. An unreadable value logs as `unknown`.
+//! - [`log_startup`] prints one `server: host` line at startup: `available_parallelism`, each Bevy task
+//!   pool's thread count, and (Linux) the container's cgroup CPU quota and cpuset. An unreadable
+//!   value logs as `unknown`.
 //! - [`read_throttle`] reads the cgroup's cumulative throttle counters for `server_stats`.
-//! - [`ThreadsLever`] reads `OVERMATCH_SERVER_THREADS`, a measurement override of the sizing.
 //! - [`StallLever`] reads `OVERMATCH_SERVER_STALL`: a dev instrument that stands in for a host too
 //!   slow for the tick rate, so a client's ride through a slow authority reproduces on any machine.
 //!
@@ -65,42 +64,6 @@ pub(crate) fn host_task_pools() -> TaskPoolPlugin {
     let cores = std::thread::available_parallelism().unwrap_or(NonZero::<usize>::MIN);
     TaskPoolPlugin {
         task_pool_options: task_pool_options(cores),
-    }
-}
-
-/// The lever: a total thread count for Bevy's stock split, in place of [`host_task_pools`].
-pub(super) const THREADS_LEVER: &str = "OVERMATCH_SERVER_THREADS";
-
-/// The task-pool thread lever, a measurement override of the host sizing.
-///
-/// Bevy's stock policy (`TaskPoolOptions::with_num_threads`) splits the total over IO, async
-/// compute and compute and gives each at least one thread, so `N` = the host's cores reproduces
-/// Bevy's default sizing, and 1, 4 and 6 give the measured 1/1/1, 2/1/1 and 2/2/2. The startup
-/// line shows the real counts.
-#[derive(Debug, PartialEq, Eq)]
-pub(super) struct ThreadsLever(pub usize);
-
-impl ThreadsLever {
-    /// Unset, empty or `default` is `Ok(None)`: [`host_task_pools`] sizes the pools.
-    /// Anything else must be a positive integer, or the server refuses to start.
-    pub(super) fn parse(value: Option<&str>) -> Result<Option<Self>, String> {
-        let Some(value) = value.map(str::trim) else {
-            return Ok(None);
-        };
-        if value.is_empty() || value.eq_ignore_ascii_case("default") {
-            return Ok(None);
-        }
-        match value.parse::<usize>() {
-            Ok(n) if n > 0 => Ok(Some(Self(n))),
-            _ => Err(format!(
-                "{THREADS_LEVER}='{value}': want a positive integer or `default`"
-            )),
-        }
-    }
-
-    /// The lever from the environment.
-    pub(super) fn from_env() -> Result<Option<Self>, String> {
-        Self::parse(std::env::var(THREADS_LEVER).ok().as_deref())
     }
 }
 
@@ -301,15 +264,14 @@ pub(super) fn read_throttle() -> Option<Throttle> {
 }
 
 /// The one startup line. Call after the plugins are built, so the task pools exist.
-pub(super) fn log_startup(lever: Option<&ThreadsLever>) {
+pub(super) fn log_startup() {
     let pool =
         |threads: Option<usize>| threads.map_or_else(|| "unknown".to_owned(), |n| n.to_string());
     let parallelism = std::thread::available_parallelism()
         .map_or_else(|err| format!("unknown ({err})"), |n| n.to_string());
     info!(
-        "server: host available_parallelism={parallelism} sizing={} \
+        "server: host available_parallelism={parallelism} \
          pools(compute/async_compute/io)={}/{}/{} cpu_quota={} cpuset={}",
-        lever.map_or_else(|| "host".to_owned(), |l| format!("threads_lever({})", l.0)),
         pool(ComputeTaskPool::try_get().map(|p| p.thread_num())),
         pool(AsyncComputeTaskPool::try_get().map(|p| p.thread_num())),
         pool(IoTaskPool::try_get().map(|p| p.thread_num())),
@@ -341,20 +303,6 @@ mod tests {
                     "{pool} on {cores} cores"
                 );
             }
-        }
-    }
-
-    /// Unset and `default` keep the host sizing; a bad value must stop the server rather than
-    /// silently run the wrong arm of an A/B.
-    #[test]
-    fn the_threads_lever_is_a_positive_integer_or_default() {
-        assert_eq!(ThreadsLever::parse(None), Ok(None));
-        assert_eq!(ThreadsLever::parse(Some("")), Ok(None));
-        assert_eq!(ThreadsLever::parse(Some("default")), Ok(None));
-        assert_eq!(ThreadsLever::parse(Some(" 1 ")), Ok(Some(ThreadsLever(1))));
-        assert_eq!(ThreadsLever::parse(Some("8")), Ok(Some(ThreadsLever(8))));
-        for bad in ["0", "-1", "two", "1.5", "1 2"] {
-            assert!(ThreadsLever::parse(Some(bad)).is_err(), "{bad}");
         }
     }
 
