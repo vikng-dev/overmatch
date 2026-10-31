@@ -14,7 +14,7 @@ use bevy::prelude::*;
 /// The variable that asks for an unattended run.
 const VARIABLE: &str = "OVERMATCH_UNATTENDED";
 
-/// Mounted by both windowed client compositions; inert unless [`VARIABLE`] is on.
+/// Mounted by every windowed root (`crate::windowed_runtime`); inert unless [`VARIABLE`] is on.
 pub(crate) fn plugin(app: &mut App) {
     if crate::env_flag(VARIABLE, false) {
         info!("unattended: {VARIABLE} — silent, a focus loss never pauses");

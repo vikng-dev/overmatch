@@ -400,25 +400,26 @@ pub fn run() {
         // Read the player's settings BEFORE the window is described — see `load_at_boot`, which
         // also inserts the values and the boot report into the app.
         let settings = crate::settings::load_at_boot(&mut app);
-        app.add_plugins(
-            crate::default_plugins().set(WindowPlugin {
-                primary_window: Some(Window {
-                    // `Unprobed` on purpose: the capability probe needs a surface, which needs
-                    // this window — the mapping self-negotiates until the probe lands.
-                    present_mode: settings.present_mode(crate::settings::PresentCaps::Unprobed),
-                    // Described at creation so a persisted fullscreen boots fullscreen instead
-                    // of flashing a window first. The monitor is `at_window_creation`'s and NOT
-                    // the stored rung: naming an indexed display here would be cached
-                    // unresolved by bevy and would make the `Startup` correction
-                    // unrepresentable — see `settings::DisplaySelection`. A hidden run keeps it a
-                    // plain window (`run_window`).
-                    mode: settings
-                        .window_mode
-                        .to_window_mode(settings.display.at_window_creation()),
-                    ..default()
-                }),
+        // The windowed runtime reads `OVERMATCH_WINDOW` itself, visible when unset. It reads the
+        // `window` above: a run reaches this branch only by naming a windowed mode or, unscripted,
+        // by leaving the variable unset.
+        crate::windowed_runtime(
+            &mut app,
+            Window {
+                // `Unprobed` on purpose: the capability probe needs a surface, which needs
+                // this window — the mapping self-negotiates until the probe lands.
+                present_mode: settings.present_mode(crate::settings::PresentCaps::Unprobed),
+                // Described at creation so a persisted fullscreen boots fullscreen instead
+                // of flashing a window first. The monitor is `at_window_creation`'s and NOT
+                // the stored rung: naming an indexed display here would be cached
+                // unresolved by bevy and would make the `Startup` correction
+                // unrepresentable — see `settings::DisplaySelection`. A hidden run keeps it a
+                // plain window (`run_window`).
+                mode: settings
+                    .window_mode
+                    .to_window_mode(settings.display.at_window_creation()),
                 ..default()
-            }),
+            },
         );
         // Never drop below the 64 Hz tick: the default `WinitSettings::game()` throttles an
         // UNFOCUSED window to 60 Hz reactive updates — under tick rate, so an alt-tabbed client
@@ -440,7 +441,6 @@ pub fn run() {
         if let Some(script) = script {
             app.insert_resource(harness::SimulateInput::new(script));
         }
-        crate::run_window::mount(&mut app, window);
     }
 
     // Register the shared protocol before creating the client link. The step lightyear publishes as

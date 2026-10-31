@@ -263,7 +263,7 @@ mod trees;
 /// windowed composition root; retires Bevy's ASCII-only default font.
 mod ui_font;
 /// An unattended run (`OVERMATCH_UNATTENDED=1`): silent, and a focus loss never pauses it. Mounted by
-/// both windowed client compositions. See the module doc.
+/// [`windowed_runtime`], so every windowed root honours it. See the module doc.
 mod unattended;
 /// Ship-facing view-layer combat VFX: render-only subscribers to the sim's `Impact` and
 /// `FireShell` seams (impact puffs, the 88's muzzle flash/light/smoke + shell smoke trail) plus
@@ -282,13 +282,15 @@ mod world;
 /// [`assets::asset_root`], and the windowed clients' [`client_render_plugin`]. It is the one place
 /// `src/` names `DefaultPlugins` (`tests::default_plugins_root` fails on any other), so the asset
 /// server and every direct reader of `asset_root()` (the bake, the terrain grid, the tank's sim
-/// glb) open the same tree on every root.
+/// glb) open the same tree on every root. A root reaches it through [`windowed_runtime`] or
+/// [`gpu_less_default_plugins`] (the same test fails on any other caller outside tests), so no
+/// root opens a window the run's window mode has not seen.
 ///
 /// Invariant: `file_path` is absolute. Bevy's `FileAssetReader::new` joins `file_path` onto its own
 /// base path (`BEVY_ASSET_ROOT`, else `CARGO_MANIFEST_DIR`, else the executable's directory), and
 /// joining an absolute path yields that path, so Bevy's chain never picks the tree. The root is
 /// made absolute against the working directory, where the direct readers resolve a relative one.
-pub fn default_plugins() -> bevy::app::PluginGroupBuilder {
+pub(crate) fn default_plugins() -> bevy::app::PluginGroupBuilder {
     let root = assets::asset_root();
     let root = std::path::absolute(&root).unwrap_or(root);
     DefaultPlugins
@@ -297,6 +299,26 @@ pub fn default_plugins() -> bevy::app::PluginGroupBuilder {
             ..default()
         })
         .set(client_render_plugin())
+}
+
+/// The runtime every windowed composition root is built on: [`default_plugins`] with `window` as
+/// its primary window, the run's window mode (`OVERMATCH_WINDOW`, [`run_window`]; visible when
+/// unset) applied before winit creates that window, and the unattended lever
+/// (`OVERMATCH_UNATTENDED`, [`unattended`]). Every windowed root is built on it (the offline game,
+/// the windowed network client, both sandboxes and the pen cam demo), so a run that asked for a
+/// hidden window shows none and one that asked for silence makes no sound, on any root.
+///
+/// # Panics
+///
+/// When `OVERMATCH_WINDOW` names no mode, or names `headless` (`run_window::mount`).
+pub fn windowed_runtime(app: &mut App, window: Window) {
+    let mode = run_window::RunWindow::of_run(run_window::RunWindow::Visible);
+    app.add_plugins(default_plugins().set(WindowPlugin {
+        primary_window: Some(window),
+        ..default()
+    }));
+    run_window::mount(app, mode);
+    app.add_plugins(unattended::plugin);
 }
 
 /// Configure [`default_plugins`] for a GPU-less composition root.
@@ -820,8 +842,8 @@ impl Plugin for ClientPlugin {
         app.add_plugins(damage_cam::pen_cam::game::plugin);
         // View-layer audio (view-only, ADR-0014 — the server never mounts this): the trigger click,
         // each weapon's authored report on the fire seam, and the per-tank engine loop. An
-        // unattended run silences it and keeps a focus loss from pausing.
-        app.add_plugins((sfx::plugin, unattended::plugin));
+        // unattended run (`windowed_runtime`) silences it.
+        app.add_plugins(sfx::plugin);
         // Per-frame wall-clock recorder (idle unless `SPIKE_FRAME_COST` is set) — mounted on this
         // root so the offline frame-budget sweep needs no server; the net root mounts it too.
         app.add_plugins(frame_cost::client_plugin);
@@ -926,8 +948,8 @@ impl Plugin for NetClientPlugin {
         ));
         // View-layer audio (see `ClientPlugin`): the trigger click, each weapon's authored report,
         // and the engine loop on own AND remote tanks — every root carries the public `EngineRpm`,
-        // so one code path. An unattended run silences it.
-        app.add_plugins((sfx::plugin, unattended::plugin));
+        // so one code path. An unattended run (`windowed_runtime`) silences it.
+        app.add_plugins(sfx::plugin);
         // The pen cam's shooter corner over the player's own hits (view-only; the store it reads
         // is the link's, `net::shot_explanation`).
         app.add_plugins(damage_cam::pen_cam::game::plugin);
@@ -998,37 +1020,33 @@ impl Plugin for GamePlugin {
 /// connection entity, nothing that can attempt a connect.
 ///
 pub fn run_offline() {
-    let window = run_window::RunWindow::of_run(run_window::RunWindow::Visible);
     let mut app = App::new();
     // Read the player's settings BEFORE the window is described — see `load_at_boot`, which also
     // inserts the values and the boot report into the app.
     let settings = settings::load_at_boot(&mut app);
-    app.add_plugins(
-        default_plugins().set(WindowPlugin {
-            primary_window: Some(Window {
-                // ASCII hyphen: `lib.rs` is scanned by the ui_ascii guard now that the
-                // offline feel label spawns `Text` here (default-font surface).
-                title: "Overmatch - offline".into(),
-                // `Unprobed` on purpose: the capability probe needs a surface, which needs this
-                // window — the mapping self-negotiates until the probe lands.
-                present_mode: settings.present_mode(settings::PresentCaps::Unprobed),
-                // Described at creation so a persisted fullscreen boots fullscreen instead of
-                // flashing a window first. The monitor is `at_window_creation`'s and NOT the
-                // stored rung: naming an indexed display here would be cached unresolved by
-                // bevy and would make the `Startup` correction unrepresentable — see
-                // `settings::DisplaySelection`. A hidden run keeps it a plain window
-                // (`run_window`).
-                mode: settings
-                    .window_mode
-                    .to_window_mode(settings.display.at_window_creation()),
-                ..default()
-            }),
+    windowed_runtime(
+        &mut app,
+        Window {
+            // ASCII hyphen: `lib.rs` is scanned by the ui_ascii guard now that the
+            // offline feel label spawns `Text` here (default-font surface).
+            title: "Overmatch - offline".into(),
+            // `Unprobed` on purpose: the capability probe needs a surface, which needs this
+            // window — the mapping self-negotiates until the probe lands.
+            present_mode: settings.present_mode(settings::PresentCaps::Unprobed),
+            // Described at creation so a persisted fullscreen boots fullscreen instead of
+            // flashing a window first. The monitor is `at_window_creation`'s and NOT the
+            // stored rung: naming an indexed display here would be cached unresolved by
+            // bevy and would make the `Startup` correction unrepresentable — see
+            // `settings::DisplaySelection`. A hidden run keeps it a plain window
+            // (`run_window`).
+            mode: settings
+                .window_mode
+                .to_window_mode(settings.display.at_window_creation()),
             ..default()
-        }),
+        },
     );
     // Same policy as the net client: never drop below the 64 Hz tick when unfocused.
     app.insert_resource(bevy::winit::WinitSettings::continuous());
-    run_window::mount(&mut app, window);
     app.add_plugins(GamePlugin);
     // Documentation frames; inert without `OVERMATCH_CAPTURE`. The tree-fall cue writes the
     // authority's tree state and the impact cue raises the impact seam with no shot behind it, so

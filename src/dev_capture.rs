@@ -3,7 +3,7 @@
 //! grammar's one home. `scripts/capture/example.ron` is a worked plan, checked by a test. Without
 //! the variable every plugin here is inert.
 //!
-//! [`plugin`] takes the plan's `frames`. It is mounted after `crate::default_plugins` by every
+//! [`plugin`] takes the plan's `frames`. It is mounted after `crate::windowed_runtime` by every
 //! windowed root: the offline route, both sandboxes, and the windowed network client. A plan
 //! without `frames` runs its cues on a normal window and takes no frame (the scene of a frame
 //! cost measurement). The cue plugins take the plan's other fields where an authority

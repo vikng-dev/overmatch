@@ -1,5 +1,6 @@
 //! The track-model sandbox binary — a runtime shell that mounts the sandbox plugin
-//! (`overmatch::track_sandbox`) on `overmatch::default_plugins`.
+//! (`overmatch::track_sandbox`) on `overmatch::windowed_runtime`, so `OVERMATCH_WINDOW` and
+//! `OVERMATCH_UNATTENDED` hold here as on every windowed root.
 //!
 //! Run with `cargo run --bin track_sandbox --features dev_ui`. The `dev_ui` feature is REQUIRED
 //! (declared as `required-features` on this bin in `Cargo.toml`): it gates the egui control panel
@@ -12,9 +13,9 @@
 use bevy::prelude::*;
 
 fn main() {
-    App::new()
-        .add_plugins(overmatch::default_plugins())
-        .add_plugins(overmatch::track_sandbox::plugin)
+    let mut app = App::new();
+    overmatch::windowed_runtime(&mut app, Window::default());
+    app.add_plugins(overmatch::track_sandbox::plugin)
         // Documentation frames; inert without `OVERMATCH_CAPTURE`. A capture hides the window.
         .add_plugins(overmatch::dev_capture::plugin)
         .run();

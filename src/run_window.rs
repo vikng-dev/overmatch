@@ -13,8 +13,9 @@
 //!   and its default; every other root has a window and refuses it.
 //!
 //! A hidden or offscreen run is unattended (`crate::unattended`): nobody can see it, so nobody may
-//! hear it. Every root that reads the mode logs `window: <mode>` once, which the frame-cost runners
-//! (`scripts/perf/frame-run.zsh`) gate on.
+//! hear it. Every windowed root reads the mode through `crate::windowed_runtime`, and the scripted
+//! client's GPU-less root reads it itself; each logs `window: <mode>` once, which the frame-cost
+//! runners (`scripts/perf/frame-run.zsh`) gate on.
 
 use bevy::prelude::*;
 use bevy::window::PrimaryWindow;
@@ -66,13 +67,13 @@ impl RunWindow {
     }
 }
 
-/// Apply `mode` on a windowed root, after `crate::default_plugins` has spawned the primary window
-/// and before winit creates it.
+/// Apply `mode` on a windowed root (`crate::windowed_runtime`), after `crate::default_plugins` has
+/// spawned the primary window and before winit creates it.
 ///
 /// # Panics
 ///
 /// On [`RunWindow::Headless`]: this root draws a window, and only the scripted client has a root
-/// without one.
+/// without one. On a hidden mode with no single primary window ([`hide`]).
 pub(crate) fn mount(app: &mut App, mode: RunWindow) {
     info!("window: {}", mode.name());
     match mode {
@@ -87,6 +88,12 @@ pub(crate) fn mount(app: &mut App, mode: RunWindow) {
 
 /// What a run nobody can see implies, on any root: the window hidden and kept a plain window, and
 /// the run unattended.
+///
+/// # Panics
+///
+/// When the app holds no single primary window: it is called after the root's runtime
+/// (`crate::windowed_runtime`) has spawned the root's one window and before winit creates it, and
+/// a window spawned later would be created visible.
 pub(crate) fn hide(app: &mut App) {
     hide_window(app);
     pin_window(app);
@@ -100,12 +107,7 @@ pub(crate) fn hide(app: &mut App) {
 /// whatever `focused` says. winit still makes even an invisible unbundled process the active app
 /// at launch, so the process also renounces activation (`platform::revoke_macos_activation`).
 fn hide_window(app: &mut App) {
-    let world = app.world_mut();
-    let mut windows = world.query_filtered::<&mut Window, With<PrimaryWindow>>();
-    let Ok(mut window) = windows.single_mut(world) else {
-        warn!("window: no primary window at mount; one created later will be visible");
-        return;
-    };
+    let mut window = primary_window(app);
     if !window.visible {
         return;
     }
@@ -118,12 +120,21 @@ fn hide_window(app: &mut App) {
 /// fullscreen never boots, and [`crate::settings::CaptureWindowPinned`], so settings never
 /// re-applies one later. On macOS either would order the window front whatever `visible` says.
 fn pin_window(app: &mut App) {
+    primary_window(app).mode = bevy::window::WindowMode::Windowed;
+    app.insert_resource(crate::settings::CaptureWindowPinned);
+}
+
+/// The root's one primary window, as [`hide`] finds it ([`hide`]'s panics).
+fn primary_window(app: &mut App) -> Mut<'_, Window> {
     let world = app.world_mut();
     let mut windows = world.query_filtered::<&mut Window, With<PrimaryWindow>>();
-    if let Ok(mut window) = windows.single_mut(world) {
-        window.mode = bevy::window::WindowMode::Windowed;
-    }
-    app.insert_resource(crate::settings::CaptureWindowPinned);
+    windows.single_mut(world).unwrap_or_else(|error| {
+        panic!(
+            "a hidden run hides the root's one primary window, which the root's runtime \
+             (`crate::windowed_runtime`) spawns before this mount and winit creates after it; \
+             found {error}, and a window spawned later would be created visible"
+        )
+    })
 }
 
 #[cfg(test)]
@@ -192,6 +203,16 @@ mod tests {
                 0.0
             );
         }
+    }
+
+    /// A HIDDEN RUN WITH NO PRIMARY WINDOW YET REFUSES TO BOOT: a window a root spawned after the
+    /// mount would be created visible, taking the screen of a machine its owner is working at, so
+    /// mounting out of order is a bug, never a warning. Mutant: a [`hide`] that skips a missing
+    /// window returns here.
+    #[test]
+    #[should_panic(expected = "a window spawned later would be created visible")]
+    fn a_hidden_run_with_no_primary_window_refuses_to_boot() {
+        mount(&mut App::new(), RunWindow::Hidden);
     }
 
     /// A VISIBLE RUN IS LEFT AS THE ROOT DESCRIBED IT: the player's own window and its sound.
