@@ -813,6 +813,10 @@ pub(crate) enum Load {
     /// A part standing on rests alone slid down them by its weight ([`unseat`]): the tangent of
     /// their slope against the friction coefficient their pairs raise, dimensionless.
     Slide,
+    /// A part standing on rests alone lifted off them by a push ([`unseat`]): the push's impulse
+    /// along their normal away from them, against the impulse that raises the part's centre of
+    /// mass by its height over them, N·s.
+    Lift,
     /// A part standing on rests alone shoved off them by a push ([`unseat`]): the push's impulse
     /// along them net of the friction impulse it raises, against the impulse whose energy pays
     /// the friction work of sliding the part off, N·s.
@@ -1522,8 +1526,15 @@ fn unseated(
 /// 2. slid by its weight ([`Load::Slide`]) when the slope beats the friction, `tan θ > μ`;
 /// 3. turned over by the pushes ([`Load::Push`]) when their angular impulse about the bearing
 ///    rests' hinge pays for lifting the part over it, a section with no seam to open
-///    ([`section_failure`]);
-/// 4. shoved off by the pushes ([`Load::Shove`]) when their impulse along the rests, net of the
+///    ([`section_failure`]), which reads only their moment, so a push through the centre along
+///    the rests' normal turns nothing;
+/// 4. lifted off by the pushes ([`Load::Lift`]) when their impulse along `N̂`, away from the
+///    rests (which carry no tension), raises the part's centre of mass by its own height over
+///    them against gravity's share along `N̂`: `J·N̂ ≥ m √(2 g N̂_y h)`, `h` the centre's height
+///    along `N̂` over the bearing discs' area centroid. ASSUMED: lifted by as much as it stood
+///    over its seat, the part has left it; a lower hop lands it back where it stood, which the
+///    law reads as staying;
+/// 5. shoved off by the pushes ([`Load::Shove`]) when their impulse along the rests, net of the
 ///    friction impulse their press into the rests raises, `p = |J_t| − μ max(−J·N̂, 0)`, gives
 ///    the part the energy to slide its centre of mass off the bearing hull along that impulse
 ///    against friction and with gravity's share along the slope: `p ≥ √(2 m W)`, `W = m g d (μ
@@ -1547,8 +1558,8 @@ fn unseat(
     let inside = |c: usize| group.binary_search(&c).is_ok();
     let (mut rests, mut bearing) = (Vec::new(), Vec::new());
     let mut rim: Vec<(f32, f32)> = Vec::new();
-    // `Σ A n` and `Σ μ A` over the bearing rests.
-    let (mut normal, mut grip) = (Vec3::ZERO, 0.0);
+    // `Σ A n`, `Σ μ A` and `Σ A c` over the bearing rests.
+    let (mut normal, mut grip, mut seat) = (Vec3::ZERO, 0.0, Vec3::ZERO);
     *steps += structure.joints.len() + group.len();
     for (index, joint) in structure.joints.iter().enumerate() {
         if joint.seam().is_some() || state.cracked[index] || !state.live(joint) {
@@ -1574,6 +1585,7 @@ fn unseat(
         }
         bearing.push(index);
         normal += n * joint.area;
+        seat += joint.centroid * joint.area;
         grip += joint.area
             * crate::substances::pair_friction(
                 structure.chunks[joint.a].material.friction,
@@ -1629,6 +1641,14 @@ fn unseat(
         .map(|push| push.impulse)
         .sum();
     let press = total.dot(support);
+    if press > 0.0 {
+        let area: f32 = bearing.iter().map(|&j| structure.joints[j].area).sum();
+        let height = (centre - seat / area).dot(support).max(0.0);
+        let capacity = mass * (2.0 * GRAVITY * support.y * height).sqrt();
+        if press >= capacity {
+            return open(Load::Lift, press, capacity);
+        }
+    }
     let along = total - support * press;
     let net = along.length() - friction * (-press).max(0.0);
     if net <= 0.0 {
@@ -3192,6 +3212,50 @@ mod tests {
     }
 
     /// A PUSH SHOVES A SEATED PART OFF ITS RESTS AT ITS DERIVED IMPULSE, NET OF THE FRICTION ITS
+    /// A PUSH THROUGH A SEATED PART'S CENTRE ALONG ITS RESTS' NORMAL LIFTS IT AT ITS DERIVED
+    /// IMPULSE: a fixture cube resting level on an anchored one, pushed straight up at its centre
+    /// of mass, so the push turns it about no hinge and slides it nowhere. Its rests carry no
+    /// tension, so the push pays only for raising its centre `h = CUBE / 2` over the rest: the
+    /// rest opens from the impulse `m √(2 g h)` (DERIVED, fixture geometry). At 1 % over it opens,
+    /// read as a lift, and the cube falls free of it; at 1 % under it stays seated. A law that
+    /// read a rest by its moment alone (every centred normal push ignored, whatever its size), or
+    /// that freed a part on any lift, fails here.
+    #[test]
+    fn a_centred_push_along_the_rests_normal_lifts_a_seated_part_at_its_derived_impulse() {
+        let mass = 20.0;
+        let mut structure = cubes(&[[0, 0, 0], [0, 1, 0]], 0, &[0], mass);
+        let rest = joint_between(&structure, 0, 1);
+        structure.joints[rest].bond = Bond::Resting;
+        let top = structure.chunks[1].centroid;
+        let height = top.y - structure.joints[rest].centroid.y;
+        let capacity = mass * (2.0 * GRAVITY * height).sqrt();
+        for (scale, opens) in [(1.01, true), (0.99, false)] {
+            let mut state = WallState::new(&structure);
+            let push = Push {
+                chunk: 1,
+                at: top,
+                impulse: Vec3::Y * (scale * capacity),
+            };
+            let failures = structural(
+                &structure,
+                &mut state,
+                &[push],
+                &mut SectionCache::default(),
+            );
+            let fell = fall(&structure, &mut state);
+            if opens {
+                let loads: Vec<(Load, Vec<usize>)> = failures
+                    .iter()
+                    .map(|failure| (failure.load, failure.joints.clone()))
+                    .collect();
+                assert_eq!(loads, vec![(Load::Lift, vec![rest])], "{scale} x capacity");
+                assert_eq!(fell, vec![vec![1]], "{scale} x capacity");
+            } else {
+                assert!(failures.is_empty() && fell.is_empty(), "{scale} x capacity");
+            }
+        }
+    }
+
     /// PRESS RAISES: a fixture block of the shipped wood laid level on an anchored cube of the
     /// shipped brick, pushed along -z at its rest's centroid, so the push turns it about no hinge.
     /// Sliding its centre of mass off the rest, a disc of radius `r` read as its octagon, which has
