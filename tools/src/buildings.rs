@@ -489,87 +489,128 @@ mod tests {
         );
     }
 
-    /// WHAT HOLDS TWO PARTS IS THE SPEC'S, NEVER THE BAKE'S: every joint between two components
-    /// of a shipped house names the attachment kind its spec's join for the two elements' kinds
-    /// names, and nothing more (the kind's strength is the shared list's, which the game reads),
-    /// so the same house with its roof's join to the plates turned to "resting" bakes those joints
-    /// resting and nothing else changes. A spec with a touching pair no join names, a join no pair
-    /// makes, or a join naming a kind the shared list does not hold is refused naming it. A bake
-    /// that chose a bond by element kind or material, or fell back to one where the spec is
-    /// silent, fails here; a roof nailed to its plate and a beam laid loose on a wall differ only
-    /// by it.
-    #[test]
-    fn every_bond_between_components_is_the_kind_its_spec_names() {
-        use overmatch::buildings::attachments::ATTACHMENTS_PATH;
-        use overmatch::buildings::schema::{Bond, ElementKind};
-        // The kind a joint names, `None` for a component's own seam.
-        let kind_of = |asset: &BuildingAsset, bond: Bond| match bond {
-            Bond::Seam => None,
-            Bond::Attached(k) => Some(asset.attachments[usize::from(k)].clone()),
-        };
-        for (house, baked) in shipped() {
-            let asset = &baked.asset;
-            let element = |c: u32| &asset.elements[usize::from(asset.chunks[c as usize].element)];
-            let expected = |house: &House, a: u32, b: u32| {
-                let (ea, eb) = (element(a), element(b));
-                (ea.component != eb.component).then(|| {
-                    house
-                        .joins
-                        .iter()
-                        .find(|join| join.joins((ea.kind, eb.kind)))
-                        .expect("a baked pair has its join")
-                        .by
-                        .clone()
-                })
-            };
-            for joint in &asset.joints {
+    /// FIXTURE DATA: a constructed house with solid walls and a pitched board roof. No shipped
+    /// house is required to keep its openings, joins or attachment choices for mutation tests.
+    fn fixture_house() -> House {
+        House::from_ron(
+            r#"House(
+            id: "fixture", width_m: 4.0, length_m: 6.0, wall_thickness_m: 0.25,
+            course_m: 0.1, module_m: 0.3, foundation_courses: 1, eaves_course: 20,
+            pitch: (3, 4), plate_height_m: 0.1, board_width_m: 0.2,
+            board_thickness_m: 0.05, boards_per_slope: 14, gable_overhang_m: 0.3,
+            materials: (walls: Brick, plates: Wood, roof: Wood),
+            walls: (east: [], west: [], north: [], south: []),
+            joins: [
+                (kinds: (Pier, Pier), by: "mortared"),
+                (kinds: (Pier, WallPlate), by: "mortared"),
+                (kinds: (Gable, WallPlate), by: "mortared"),
+                (kinds: (WallPlate, Roof), by: "nailed"),
+                (kinds: (Roof, Roof), by: "nailed"),
+                (kinds: (Gable, Roof), by: "resting"),
+            ],
+            cuts: (row_courses: 3, crack_chance: 0.2, crack_shift_m: 0.09,
+                min_width_m: 0.06, board_piece_m: (0.4, 1.2), plate_piece_m: (0.6, 1.8)),
+        )"#,
+        )
+        .expect("the constructed fixture states a house")
+    }
+
+    /// Every joint holds by the spec's declared join between components, or by its own seam
+    /// inside one component. The runtime's fracture law relies on this distinction.
+    fn assert_bond_kinds(house: &House, asset: &BuildingAsset) {
+        use overmatch::buildings::schema::Bond;
+        let element = |c: u32| &asset.elements[usize::from(asset.chunks[c as usize].element)];
+        for joint in &asset.joints {
+            let (a, b) = (element(joint.a), element(joint.b));
+            if a.component == b.component {
+                assert_eq!(joint.bond, Bond::Seam, "{}: {joint:?}", house.id);
+            } else {
+                let declared = house
+                    .joins
+                    .iter()
+                    .find(|join| join.joins((a.kind, b.kind)))
+                    .expect("every baked component pair has its declared join");
+                let Bond::Attached(k) = joint.bond else {
+                    panic!("{}: {joint:?} is no attachment", house.id)
+                };
                 assert_eq!(
-                    kind_of(asset, joint.bond),
-                    expected(&house, joint.a, joint.b),
-                    "{joint:?}"
+                    asset.attachments[usize::from(k)],
+                    declared.by,
+                    "{}: {joint:?}",
+                    house.id
                 );
             }
-            let roof_on_plate = (ElementKind::WallPlate, ElementKind::Roof);
-            let mut loose = house.clone();
-            let k = loose
-                .joins
-                .iter()
-                .position(|join| join.joins(roof_on_plate))
-                .expect("the shipped house joins its roof to its plates");
-            loose.joins[k].by = "resting".to_owned();
-            let rebaked = bake(&loose).expect("the loose roof bakes");
-            let mut changed = 0;
-            for (was, now) in asset.joints.iter().zip(&rebaked.asset.joints) {
-                assert_eq!((was.a, was.b), (now.a, now.b));
-                let kind = kind_of(&rebaked.asset, now.bond);
-                assert_eq!(kind, expected(&loose, now.a, now.b));
-                changed += usize::from(kind_of(asset, was.bond) != kind);
-            }
-            assert!(
-                changed > 0,
-                "{}: the roof's joints to its plates rest",
-                house.id
-            );
-            let mut silent = house.clone();
-            silent.joins.remove(k);
-            let err = bake(&silent).map(|_| ()).unwrap_err();
-            assert!(err.contains("no join holds"), "{err}");
-            let mut idle = house.clone();
-            idle.joins.push(spec::Join {
-                kinds: (ElementKind::Sill, ElementKind::Roof),
-                by: "resting".to_owned(),
-            });
-            let err = bake(&idle).map(|_| ()).unwrap_err();
-            assert!(err.contains("holds no joint"), "{err}");
         }
-        for (path, _) in specs(&crate::repo_root()).expect("the shipped specs parse") {
-            let text = std::fs::read_to_string(&path).unwrap();
-            let glued = text.replacen("by: \"", "by: \"glued_", 1);
-            assert_ne!(glued, text, "{}: a join names a kind", path.display());
-            let err = House::from_ron(&glued).unwrap_err();
-            for part in ["glued_", ATTACHMENTS_PATH, "name one of those"] {
-                assert!(err.contains(part), "{part}: {err}");
+    }
+
+    /// The bake takes every component join from data. Iterate every shipped spec and each of
+    /// its joins; a new house with different construction adds no test branch. Switching a join
+    /// to a different declared kind changes those bonds alone, preserving the joint graph.
+    #[test]
+    fn every_bond_between_components_is_the_kind_its_spec_names() {
+        for (house, baked) in shipped() {
+            let asset = &baked.asset;
+            assert_bond_kinds(&house, asset);
+            for (k, join) in house.joins.iter().enumerate() {
+                let mut missing = house.clone();
+                missing.joins.remove(k);
+                let err = bake(&missing).map(|_| ()).unwrap_err();
+                assert!(err.contains("no join holds"), "{}: {err}", house.id);
+                // A spec using only one attachment kind offers no alternate kind to contrast;
+                // its direct mapping and missing-join refusal above still exercise every join.
+                let Some(other) = house.joins.iter().find(|other| other.by != join.by) else {
+                    continue;
+                };
+                let mut changed = house.clone();
+                changed.joins[k].by.clone_from(&other.by);
+                let rebaked = bake(&changed).expect("only the declared holding kind changed");
+                assert_bond_kinds(&changed, &rebaked.asset);
+                assert_eq!(asset.joints.len(), rebaked.asset.joints.len());
+                let mut differences = 0;
+                for (was, now) in asset.joints.iter().zip(&rebaked.asset.joints) {
+                    assert_eq!((was.a, was.b), (now.a, now.b));
+                    let kind = |asset: &BuildingAsset, bond| match bond {
+                        overmatch::buildings::schema::Bond::Seam => None,
+                        overmatch::buildings::schema::Bond::Attached(k) => {
+                            Some(asset.attachments[usize::from(k)].clone())
+                        }
+                    };
+                    differences +=
+                        usize::from(kind(asset, was.bond) != kind(&rebaked.asset, now.bond));
+                }
+                assert!(
+                    differences > 0,
+                    "{}: {join:?} holds an actual joint",
+                    house.id
+                );
             }
+        }
+    }
+
+    /// Idle joins and unknown attachment kinds are refused before play. FIXTURE DATA supplies
+    /// the intentionally absent sill-to-roof pair; shipped houses need not have that topology.
+    #[test]
+    fn a_join_that_holds_nothing_or_names_no_kind_is_refused() {
+        use overmatch::buildings::attachments::{ATTACHMENTS_PATH, Attachments};
+        use overmatch::buildings::schema::ElementKind;
+        let house = fixture_house();
+        bake(&house).expect("the unmutated construction bakes");
+        let mut idle = house.clone();
+        idle.joins.push(spec::Join {
+            kinds: (ElementKind::Sill, ElementKind::Roof),
+            by: house.joins[0].by.clone(),
+        });
+        let err = bake(&idle).map(|_| ()).unwrap_err();
+        assert!(err.contains("holds no joint"), "{err}");
+        let mut unknown = house;
+        let mut name = "unregistered-fixture-kind".to_owned();
+        while Attachments::shipped_static().holds(&name).is_ok() {
+            name.push('_');
+        }
+        unknown.joins[0].by.clone_from(&name);
+        let err = unknown.check().unwrap_err();
+        for part in [name.as_str(), ATTACHMENTS_PATH, "name one of those"] {
+            assert!(err.contains(part), "{part}: {err}");
         }
     }
 
@@ -580,41 +621,31 @@ mod tests {
     /// range's top passes one of these to the generator.
     #[test]
     fn a_house_the_generator_cannot_lay_out_is_refused() {
-        for (_, house) in specs(&crate::repo_root()).expect("the shipped specs parse") {
-            // FIXTURE DATA: constructed openings exercise the span/order gate regardless of
-            // whether this shipped house has any openings on this wall.
-            let mut house = house;
-            house.walls.east = vec![spec::Opening {
-                u: (-0.25 * house.length_m, 0.0),
-                courses: (0, house.eaves_course),
-            }];
-            house
-                .check()
-                .expect("the constructed opening is inside the wall");
-            let (_, end) = house.wall_span("east");
-            let mut past = house.clone();
-            past.walls
-                .east
-                .last_mut()
-                .expect("the fixture authors an opening")
-                .u
-                .1 = end + 1.0;
-            let mut over = house.clone();
-            let first = over.walls.east[0].u;
-            over.walls.east.push(spec::Opening {
-                u: (first.1 - 0.1, first.1 + 0.1),
-                courses: over.walls.east[0].courses,
-            });
-            let mut endless = house.clone();
-            endless.cuts.plate_piece_m.1 = f64::INFINITY;
-            for (case, broken, field) in [
-                ("past the wall", past, "pier"),
-                ("over the next", over, "pier"),
-                ("an endless piece", endless, "plate_piece_m"),
-            ] {
-                let err = broken.check().unwrap_err();
-                assert!(err.contains(field), "{}: {case}: {err}", house.id);
-            }
+        let mut house = fixture_house();
+        house.walls.east = vec![spec::Opening {
+            u: (-1.0, 0.0),
+            courses: (0, 10),
+        }];
+        house
+            .check()
+            .expect("the constructed opening is inside the wall");
+        let (_, end) = house.wall_span("east");
+        let mut past = house.clone();
+        past.walls.east[0].u.1 = end + 1.0;
+        let mut over = house.clone();
+        over.walls.east.push(spec::Opening {
+            u: (-0.1, 0.1),
+            courses: (0, 10),
+        });
+        let mut endless = house;
+        endless.cuts.plate_piece_m.1 = f64::INFINITY;
+        for (case, broken, field) in [
+            ("past the wall", past, "pier"),
+            ("over the next", over, "pier"),
+            ("an endless piece", endless, "plate_piece_m"),
+        ] {
+            let err = broken.check().unwrap_err();
+            assert!(err.contains(field), "{case}: {err}");
         }
     }
 }

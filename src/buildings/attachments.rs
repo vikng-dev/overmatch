@@ -139,44 +139,54 @@ mod tests {
         SubstanceRegistry::shipped_static()
     }
 
-    /// THE SHIPPED LIST LOADS, AND A KIND THAT NAMES A SEAM HOLDS BY THAT ROW'S OWN NUMBERS:
-    /// "mortared" is Brick's seam as `materials.ron` states it, "nailed" the seam the list
-    /// states, "resting" a rest. A list that copied the brick's numbers instead would drift from
-    /// the one row the brick's own seam reads (one source per number); a rest read as a bond of
-    /// zero strength would enter the tension check.
+    /// Every declared kind resolves to its own source, whatever names or number of kinds the
+    /// list carries. Fracture reads these bonds: copying a seam or treating rest as zero-strength
+    /// glue would substitute a different construction for the authored one.
     #[test]
-    fn the_shipped_kinds_resolve_to_their_sources() {
+    fn every_declared_kind_resolves_to_its_source() {
         let list = Attachments::shipped_static();
-        let brick = Masonry::of(registry(), "Brick")
-            .unwrap()
-            .expect("brick breaks");
-        assert_eq!(list.bond("mortared"), Ok(Bond::Bonded(brick.seam)));
-        assert!(
-            matches!(list.bond("nailed"), Ok(Bond::Bonded(seam)) if seam != brick.seam),
-            "nailed states its own seam"
-        );
-        assert_eq!(list.bond("resting"), Ok(Bond::Resting));
+        let KeyedMap(rows) = ron::from_str::<KeyedMap<Row>>(ATTACHMENTS_RON).unwrap();
+        assert_eq!(list.kinds.len(), rows.len());
+        for (name, row) in rows {
+            let expected = match row {
+                Row::Seam(substance) => Bond::Bonded(
+                    Masonry::of(registry(), &substance)
+                        .unwrap()
+                        .expect("a declared seam has bulk facts")
+                        .seam,
+                ),
+                Row::Stated {
+                    tensile_pa: Sourced(tensile),
+                    fracture_energy_j_per_m2: Sourced(energy),
+                } => Bond::Bonded(Seam {
+                    tensile: tensile as f32,
+                    fracture_energy: energy as f32,
+                }),
+                Row::Resting => Bond::Resting,
+            };
+            assert_eq!(list.bond(&name), Ok(expected), "{name}");
+        }
     }
 
-    /// AN UNKNOWN KIND IS REFUSED, NAMING THE LIST AND THE FIX: a building that names a kind the
-    /// list does not hold never loads with a joint of no strength. The building load gate and the
-    /// bake both refuse through this.
+    /// An unknown kind is refused with the available kinds and fix. FIXTURE DATA: this small
+    /// list makes absence independent of additions to the shipped attachment table.
     #[test]
     fn a_kind_the_list_does_not_hold_is_refused_naming_the_fix() {
-        let err = Attachments::shipped_static().bond("glued").unwrap_err();
+        let list = Attachments::from_ron(r#"{"fixture-kind": Resting}"#, registry()).unwrap();
+        let err = list.bond("unknown-kind").unwrap_err();
         for part in [
-            "\"glued\"",
+            "\"unknown-kind\"",
             ATTACHMENTS_PATH,
-            "\"mortared\"",
+            "\"fixture-kind\"",
             "add the kind there",
         ] {
             assert!(err.contains(part), "{part}: {err}");
         }
-        assert!(Attachments::shipped_static().holds("glued").is_err());
+        assert!(list.holds("unknown-kind").is_err());
     }
 
-    /// A KIND WITHOUT BOTH NUMBERS, OR WITHOUT THEIR SOURCES, DOES NOT LOAD: each of the shipped
-    /// "nailed" kind's two numbers dropped, its source dropped, a number of no strength, a name
+    /// A KIND WITHOUT BOTH NUMBERS, OR WITHOUT THEIR SOURCES, DOES NOT LOAD: each of the labelled fixture
+    /// kind's two numbers dropped, its source dropped, a number of no strength, a name
     /// stated twice, a field the format does not hold, and a seam of a substance that states none
     /// are each refused, naming the field or the kind. A list that let a kind load with a number
     /// missing would hold its joints by a code default.
