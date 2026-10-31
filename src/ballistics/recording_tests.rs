@@ -47,10 +47,29 @@ enum Kind {
 /// One fixture volume: name, full extents and centre in the tank's frame (m), kind.
 type Volume = (&'static str, Vec3, Vec3, Kind);
 
+/// Where a moved body's child colliders stand when the next march casts at them: the two
+/// compositions the march runs under ([`ProjectileMarchWorld::placed_pose`]).
+#[derive(Clone, Copy, Debug)]
+enum ChildPose {
+    /// Bare avian: the physics step places them from the body's pose at the step's start, a step
+    /// behind the body's own `Position`.
+    Avian,
+    /// The networked server's and client's: the lightyear avian plugin places them again after the
+    /// fixed loop at the body's pose after the step
+    /// (`LightyearAvianPlugin::update_child_collider_position`, mounted by `net::protocol`), so a
+    /// march that is its frame's only tick finds them at the body's own `Position`.
+    Networked,
+}
+
 /// The game's sim composition minus the tank asset: the march, the damage consequences and the
 /// recorder, on the fixed tick with the physics step after it. `client` adds the net client's
 /// replica marker.
 fn recording_world(client: bool) -> App {
+    recording_world_under(client, ChildPose::Avian)
+}
+
+/// [`recording_world`], its child colliders placed as `pose` places them.
+fn recording_world_under(client: bool, pose: ChildPose) -> App {
     let mut app = App::new();
     app.add_plugins((
         MinimalPlugins,
@@ -67,6 +86,13 @@ fn recording_world(client: bool) -> App {
     app.insert_resource(MgShortCircuit(false));
     if client {
         app.insert_resource(ClientReplica);
+    }
+    if let ChildPose::Networked = pose {
+        app.add_systems(
+            RunFixedMainLoop,
+            lightyear::avian3d::plugin::LightyearAvianPlugin::update_child_collider_position
+                .in_set(RunFixedMainLoopSystems::AfterFixedMainLoop),
+        );
     }
     while app.plugins_state() == bevy::app::PluginsState::Adding {
         std::thread::sleep(Duration::from_millis(1));
@@ -789,7 +815,8 @@ fn crossed_whole(reads: &[TickReads], tank: usize) -> usize {
     tick
 }
 
-/// A MOVING TANK'S CROSSING RESOLVES AGAINST ITS POSE AT CONTACT (design §13.5, "The envelope").
+/// A MOVING TANK'S CROSSING RESOLVES AGAINST ITS POSE AT CONTACT (design §13.5, "The envelope"),
+/// under either composition's child-collider placement ([`ChildPose`]).
 ///
 /// The fixture tank drives at the round at 10 m/s, and the tick that brings the round into its
 /// envelope ends between its plates ([`FROM`]). The crossing still resolves whole in that tick,
@@ -797,70 +824,77 @@ fn crossed_whole(reads: &[TickReads], tank: usize) -> usize {
 /// contact, not where the tank has driven it by the next tick. The round leaves the tick past the
 /// envelope, owing the travel it flew beyond the tick's. A march that let the tick's travel end the
 /// crossing reads the back plate a tick late, 0.16 m off its face (DERIVED); one that placed the
-/// envelope at the body's own pose, a step ahead of its colliders, ends the crossing short of the
-/// back plate, which has driven past the round by the next tick and is never read.
+/// envelope at the body's own pose alone, a step ahead of bare avian's colliders, ends the crossing
+/// short of the back plate, which has driven past the round by the next tick and is never read.
 #[test]
 fn a_moving_tanks_crossing_resolves_against_its_pose_at_contact() {
-    let mut app = recording_world(false);
-    let (tank, volumes) = enveloped_tank(&mut app, Vec3::ZERO);
-    settle(&mut app);
-    app.world_mut()
-        .entity_mut(tank)
-        .insert(LinearVelocity(Vec3::new(0.0, 0.0, 10.0)));
-    let reads = fire_and_read(&mut app, &[volumes[0]], Vec3::new(0.0, 0.0, FROM), 6);
-    let contact = crossed_whole(&reads, 0);
-    assert!(
-        reads[contact].owed > 0.0,
-        "the tick's travel ended inside the envelope, so the crossing ran on past it"
-    );
-    assert!(
-        reads[contact + 1].poses[0].0.z - reads[contact].poses[0].0.z > 0.1,
-        "the tank drove on after contact"
-    );
-    assert!(
-        hp(&app, volumes[1]) < DEEP_UNITS,
-        "the crew box took a dose"
-    );
+    for pose in [ChildPose::Avian, ChildPose::Networked] {
+        let mut app = recording_world_under(false, pose);
+        let (tank, volumes) = enveloped_tank(&mut app, Vec3::ZERO);
+        settle(&mut app);
+        app.world_mut()
+            .entity_mut(tank)
+            .insert(LinearVelocity(Vec3::new(0.0, 0.0, 10.0)));
+        let reads = fire_and_read(&mut app, &[volumes[0]], Vec3::new(0.0, 0.0, FROM), 6);
+        let contact = crossed_whole(&reads, 0);
+        assert!(
+            reads[contact].owed > 0.0,
+            "{pose:?}: the tick's travel ended inside the envelope, so the crossing ran on past it"
+        );
+        assert!(
+            reads[contact + 1].poses[0].0.z - reads[contact].poses[0].0.z > 0.1,
+            "{pose:?}: the tank drove on after contact"
+        );
+        assert!(
+            hp(&app, volumes[1]) < DEEP_UNITS,
+            "{pose:?}: the crew box took a dose"
+        );
+    }
 }
 
-/// A ROUND THROUGH ONE TANK INTO A SECOND RESOLVES BOTH, EACH AT ITS OWN INSTANT.
+/// A ROUND THROUGH ONE TANK INTO A SECOND RESOLVES BOTH, EACH AT ITS OWN INSTANT, under either
+/// composition's child-collider placement ([`ChildPose`]).
 ///
 /// Two fixture tanks on one line with disjoint envelopes, the near one driving at the round and the
 /// far one away from it, each at 10 m/s. The tick that enters the near envelope ends inside it, so
 /// that crossing runs on past the tick's travel and stops where the round leaves the near envelope,
 /// owing the overrun; the far tank is the next tick's crossing, resolved whole against the pose
 /// that tick found it at. Both are perforated plate by plate, each plate read once, and each crew
-/// box takes a dose. A march that chained disjoint envelopes resolves both in one tick; one that
+/// box takes a dose. A march that chained disjoint envelopes resolves both in one tick. One that
 /// ended the far crossing where the receding tank's next pose covers the round reads its back
-/// plate again a tick later.
+/// plate again a tick later: under bare avian that pose is the body's own `Position`; under the
+/// networked placement it is the pose the next physics step integrates the body to, which the
+/// colliders' pose and the body's own (there the same pose) both fall short of.
 #[test]
 fn a_round_through_one_tank_into_a_second_resolves_both() {
-    let mut app = recording_world(false);
-    let (near, near_volumes) = enveloped_tank(&mut app, Vec3::ZERO);
-    let (far, far_volumes) = enveloped_tank(&mut app, Vec3::new(0.0, 0.0, -9.0));
-    settle(&mut app);
-    for (tank, speed) in [(near, 10.0), (far, -10.0)] {
-        app.world_mut()
-            .entity_mut(tank)
-            .insert(LinearVelocity(Vec3::new(0.0, 0.0, speed)));
-    }
-    let fronts = [near_volumes[0], far_volumes[0]];
-    let reads = fire_and_read(&mut app, &fronts, Vec3::new(0.0, 0.0, FROM), 8);
-    let (first, second) = (crossed_whole(&reads, 0), crossed_whole(&reads, 1));
-    assert!(
-        reads[first].owed > 0.0,
-        "the near crossing ran past its tick's travel"
-    );
-    assert_eq!(
-        second,
-        first + 1,
-        "the far tank is the next tick's crossing, at its own instant"
-    );
-    for (name, crew) in [("near", near_volumes[1]), ("far", far_volumes[1])] {
+    for pose in [ChildPose::Avian, ChildPose::Networked] {
+        let mut app = recording_world_under(false, pose);
+        let (near, near_volumes) = enveloped_tank(&mut app, Vec3::ZERO);
+        let (far, far_volumes) = enveloped_tank(&mut app, Vec3::new(0.0, 0.0, -9.0));
+        settle(&mut app);
+        for (tank, speed) in [(near, 10.0), (far, -10.0)] {
+            app.world_mut()
+                .entity_mut(tank)
+                .insert(LinearVelocity(Vec3::new(0.0, 0.0, speed)));
+        }
+        let fronts = [near_volumes[0], far_volumes[0]];
+        let reads = fire_and_read(&mut app, &fronts, Vec3::new(0.0, 0.0, FROM), 8);
+        let (first, second) = (crossed_whole(&reads, 0), crossed_whole(&reads, 1));
         assert!(
-            hp(&app, crew) < DEEP_UNITS,
-            "the {name} crew box took a dose"
+            reads[first].owed > 0.0,
+            "{pose:?}: the near crossing ran past its tick's travel"
         );
+        assert_eq!(
+            second,
+            first + 1,
+            "{pose:?}: the far tank is the next tick's crossing, at its own instant"
+        );
+        for (name, crew) in [("near", near_volumes[1]), ("far", far_volumes[1])] {
+            assert!(
+                hp(&app, crew) < DEEP_UNITS,
+                "{pose:?}: the {name} crew box took a dose"
+            );
+        }
     }
 }
 

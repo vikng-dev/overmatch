@@ -1570,17 +1570,40 @@ across a tick boundary onto moving armour (the `unexpected_exit` above).
   along the plate), by `extent · 2^-20` and by `MARCH_EPS` for its own world-to-body arithmetic
   (`ProjectileMarchWorld::crossing_reach`). The shooter's own envelope is passed through, as its
   volumes are.
-- **An envelope stands at two poses (step 6c).** The physics step places a body's child colliders
-  from the body's pose at the step's start, so the walk casts against a moving body a step behind
-  its own `Position` (0.16 m on a tank at 10 m/s, DERIVED), and the next step's walk will cast
-  against its current `Position`. The envelope is tested at both
-  (`ProjectileMarchWorld::placed_pose`, read back off a child collider as the pen cam's hull frame
-  is), and a crossing ends outside both. Placed at the body's own pose alone, a crossing of a tank
-  driving at the round ended short of its rear plate, which had passed the round by the next step
-  and was never read (MEASURED in the fixture, `a_moving_tanks_crossing_resolves_against_its_pose_at_contact`);
-  placed at the colliders' pose alone, a tank driving away carried its rear plate back over the
-  round a disc's radius past it, and the next step read the plate again (MEASURED,
-  `a_round_through_one_tank_into_a_second_resolves_both`).
+- **An envelope stands at every pose the next walk can cast at.** Where a moving body's child
+  colliders stand when the walk casts depends on the composition. Bare avian (the sandbox, the
+  fixtures) places them from the body's pose at the physics step's start, a step behind the body's
+  own `Position` (0.16 m on a tank at 10 m/s, DERIVED), so the next walk casts at the current
+  `Position`. The networked server and client place them again after the fixed loop at the body's
+  post-step pose (`LightyearAvianPlugin::update_child_collider_position`), so a march that is its
+  frame's only tick finds them at the body's own `Position`, and the next walk casts at the pose
+  the next physics step integrates the body to. The envelope is tested at three poses: where the
+  colliders stand (`ProjectileMarchWorld::placed_pose`, read back off a child collider as the pen
+  cam's hull frame is), at the body's own pose, and at its pose integrated over the step at its
+  current velocities, turned about its centre of mass as avian's solver turns it
+  (`NextStep::integrated_pose`). A crossing ends outside all three. The pad grows by
+  `2 · |g| · dt²` for the next step's change of velocity: gravity, and as much again for a ground
+  force at μ ≤ 1 (DERIVED; the μ ceiling ASSUMED). Each pose has a fixture that fails without it,
+  and both run under both compositions (`ChildPose` in the recording tests). At the body's own pose
+  alone, a crossing of a tank driving at the round ended short of its rear plate, which had passed
+  the round by the next step and was never read (MEASURED in the fixture,
+  `a_moving_tanks_crossing_resolves_against_its_pose_at_contact`). At the colliders' pose alone, a
+  tank driving away carried its rear plate back over the round a disc's radius past it, and the
+  next step read the plate again (MEASURED, `a_round_through_one_tank_into_a_second_resolves_both`).
+  Under the networked placement, without the integrated pose, the receding tank's back plate was
+  read again a tick later (MEASURED, the same test).
+- **What the poses cannot see** (the stated limitation): the rule assumes one physics step of `dt`
+  runs before the next march, moves each body within the pad of where its velocities take it, and
+  that nothing else puts armour where it was not. A collision or a blast's push in the next step,
+  a body placed without being integrated there (a loose piece a deposit launches after the march;
+  a felled trunk laid along the round's own heading by `trees::derive_systems`, which needs a cut
+  at segment 0 and a hit below about 0.4 m on `fir_1`, DERIVED), and a frame of the sandbox's
+  per-frame march (`MarchMode::Demo`) spanning other than one physics step each put armour over
+  the next step's start. Certification then reads it as a start inside that armour, and the walk
+  charges its exit as a second crossing. The deposit's piece is the common one: a group launched
+  along the round's line faster than about 3.5 m/s covers the start of an 88 that just perforated
+  it, with its exit face on the building's bound (DERIVED at 64 Hz: the 50 mm pad and the 5 mm
+  loose gap over `dt`). No envelope size fixes that; fixing it is open (#191).
 - **No armour state crosses a tick.** The shell carries its axis position (anchor plus offset, so
   open flight never re-rounds it at world spacing) and the travel the last crossing flew past its
   step (`Projectile::owed`), which the next step's travel is short by: no travel is created or

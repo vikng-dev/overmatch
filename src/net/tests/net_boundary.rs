@@ -49,6 +49,11 @@ const NET_AWARE_FILES: &[&str] = &[
     // per-frame child pass on the same fixture it steps Avian's on, because both crates carry the
     // patch and the saving needs both. It mounts no netcode and the sim names none.
     "src/tests/avian_child_pose_churn.rs",
+    // Test code: the crossing fixtures run the march under the networked composition's child
+    // collider placement too, mounting lightyear_avian3d's after-loop child pass alone, because
+    // where a moving body's colliders stand when the march casts differs between the two. It
+    // mounts no netcode and the sim names none.
+    "src/ballistics/recording_tests.rs",
 ];
 
 /// The tokens that constitute naming the netcode layer from outside it: the dependency itself,

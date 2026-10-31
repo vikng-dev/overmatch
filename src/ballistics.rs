@@ -4,8 +4,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use avian3d::prelude::{
-    Collider, ColliderAabb, ColliderTransform, Forces, Position, RigidBody, RigidBodyColliders,
-    Rotation, SpatialQuery, SpatialQueryFilter,
+    Collider, ColliderAabb, ColliderTransform, ComputedCenterOfMass, Forces, Position,
+    ReadRigidBodyForces, RigidBody, RigidBodyColliders, Rotation, SpatialQuery, SpatialQueryFilter,
 };
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -2277,7 +2277,8 @@ struct ProjectileMarchWorld<'w, 's> {
     // armour classification.
     witnesses: Query<'w, 's, &'static WitnessVolume>,
     witness_surfaces: Query<'w, 's, (), With<WitnessSurface>>,
-    // Every free body's envelope, its pose and its colliders: where a crossing begins and ends.
+    // Every free body's envelope, its pose, its colliders and the centre of mass the physics step
+    // turns it about: where a crossing begins and ends.
     envelopes: Query<
         'w,
         's,
@@ -2287,6 +2288,7 @@ struct ProjectileMarchWorld<'w, 's> {
             &'static Position,
             &'static Rotation,
             Option<&'static RigidBodyColliders>,
+            Option<&'static ComputedCenterOfMass>,
         ),
         Without<ChildOf>,
     >,
@@ -2301,6 +2303,34 @@ struct ProjectileMarchWorld<'w, 's> {
         ),
         Without<RigidBody>,
     >,
+}
+
+/// The physics step between this march and the next, as the march sees it: its duration, and the
+/// bodies whose velocities it integrates. Read through the march's own [`Forces`], so a crossing's
+/// impulse earlier in the march ([`apply_hit_impulse`]) is in them.
+#[derive(Clone, Copy)]
+struct NextStep<'a, 'w, 's> {
+    bodies: &'a Query<'w, 's, Forces>,
+    dt: f32,
+}
+
+impl NextStep<'_, '_, '_> {
+    /// The pose `body` stands at once the step has integrated it at its current velocities:
+    /// avian's own integration (`integrate_positions`), which moves the body's centre of mass
+    /// `centre` (body frame) at its linear velocity and turns the body about it
+    /// (`writeback_solver_bodies`). `None` for a body at rest, which stays where it stands, and
+    /// for one the physics step does not integrate.
+    fn integrated_pose(&self, body: Entity, centre: &ComputedCenterOfMass) -> Option<(Vec3, Quat)> {
+        let body = self.bodies.get(body).ok()?;
+        let (linear, angular) = (body.linear_velocity(), body.angular_velocity());
+        if linear == Vec3::ZERO && angular == Vec3::ZERO {
+            return None;
+        }
+        let (position, rotation) = (body.position().0, body.rotation().0);
+        let turn = (Quat::from_scaled_axis(angular * self.dt) * rotation).normalize();
+        let at = position + linear * self.dt + rotation * centre.0 - turn * centre.0;
+        Some((at, turn))
+    }
 }
 
 impl ProjectileMarchWorld<'_, '_> {
@@ -2324,12 +2354,19 @@ impl ProjectileMarchWorld<'_, '_> {
         }
     }
 
-    /// The pose a body's colliders were placed at, which the walk casts against. The physics step
-    /// writes each child collider's pose from its body's pose at the step's START composed with
-    /// its [`ColliderTransform`], so on a body that moved in the step its colliders stand where the
-    /// body stood before it, a step behind the body's own [`Position`] (on a tank driving at
-    /// 10 m/s, 0.16 m, DERIVED). Read back off any child collider that is no body of its own, as
-    /// the pen cam's hull frame is (`damage_cam::recorder`); the body's own pose where it has none.
+    /// The pose a body's colliders were placed at, which this step's walk casts against. Read back
+    /// off any child collider that is no body of its own, as the pen cam's hull frame is
+    /// (`damage_cam::recorder`); the body's own pose where it has none, a collider on the body
+    /// itself standing where the body does.
+    ///
+    /// Which pose that is depends on the composition. Bare avian places each child collider in
+    /// `PhysicsStepSystems::First` from its body's pose at the step's START composed with its
+    /// [`ColliderTransform`] (avian's `update_child_collider_position`), so on a body that moved in
+    /// the last step its colliders stand a step behind the body's own [`Position`] (on a tank
+    /// driving at 10 m/s, 0.16 m, DERIVED). The networked server and client place them again after
+    /// the fixed loop, at the body's pose after the step (`LightyearAvianPlugin::update_child_collider_position`,
+    /// mounted by `net::protocol`), so a march that is its frame's only tick finds them at the
+    /// body's own `Position`, and a later tick of the same frame finds them a step behind it.
     fn placed_pose(
         &self,
         position: &Position,
@@ -2358,19 +2395,39 @@ impl ProjectileMarchWorld<'_, '_> {
     /// Each envelope is grown by `spread`: an axis start outside the box grown by it on some axis
     /// leaves every sample, at most `spread` from it, outside the box, so outside the body's every
     /// primitive, and a square disc laid there next step moves each sample only within that reach
-    /// of the axis; by `extent · 2^-20` for the sim's f32 placement (the bake's
-    /// contract, `bake::envelope`); and by [`MARCH_EPS`] for this test's own world-to-body
+    /// of the axis, as `spread` is at least the disc's radius (every ring seed keeps its offset
+    /// `radius` from the axis, so the farthest one is never nearer; the caller passes the larger of
+    /// the two all the same). It is grown further by `extent · 2^-20` for the sim's f32 placement
+    /// (the bake's contract, `bake::envelope`); by [`MARCH_EPS`] for this test's own world-to-body
     /// arithmetic and the body pose's read-back ([`Self::placed_pose`]) (DERIVED: a world f32 past
-    /// 2048 m is spaced 2.44e-4 m, and the two take three roundings of it). Growing it only moves
-    /// where a crossing ends further out.
+    /// 2048 m is spaced 2.44e-4 m, and the two take three roundings of it); and by
+    /// `2 · |g| · dt²` for the next step's change of a body's velocity, gravity's `g · dt` and as
+    /// much again for a ground force at friction μ ≤ 1 (DERIVED bound, the μ ceiling ASSUMED).
+    /// Growing it only moves where a crossing ends further out.
     ///
-    /// Each envelope stands twice: where its body's colliders were placed, the pose this step's
-    /// walk casts against ([`Self::placed_pose`]), and at the body's own pose, where the next
-    /// physics step places them for the next step's walk. A crossing ends outside both, so the next
-    /// step starts outside the body's every primitive however the body moved in between: a tank
-    /// driving away along the line would otherwise carry its rear plate back over a round that left
-    /// it a disc's radius behind, and one driving at it would carry its front plate over a round
-    /// stopped short of it.
+    /// Each envelope stands at every pose the next step's walk can cast at, and at this step's:
+    /// - where its body's colliders were placed, the pose this step's walk casts against
+    ///   ([`Self::placed_pose`]);
+    /// - at the body's own pose, where bare avian's next physics step places them for the next
+    ///   step's walk, as does the networked placement for a later tick of the same frame;
+    /// - at the pose the next physics step integrates a moving body to, at its velocities over
+    ///   `dt` ([`NextStep::integrated_pose`]): where the networked placement puts the colliders
+    ///   after the fixed loop, and where a body's own collider stands at the next step whatever the
+    ///   composition.
+    ///
+    /// A crossing ends outside all three, so the next step starts outside the body's every
+    /// primitive however the body moved in between: a tank driving away along the line would
+    /// otherwise carry its rear plate back over a round that left it a disc's radius behind, and
+    /// one driving at it would carry its front plate over a round stopped short of it.
+    ///
+    /// INVARIANT, relied on by every step's start: one physics step of `dt` runs before the next
+    /// march, it moves each body within the bound above of where its velocities take it, and
+    /// nothing else puts armour where it was not. What breaks it puts armour over the next step's
+    /// start, which certification ([`resolve::certified`]) reads as a start inside it and the walk
+    /// as a crossing of its exit: a collision or a blast's push in the next step; a body placed
+    /// without being integrated there (a loose piece a deposit launches after this march, a felled
+    /// trunk laid by `trees::derive_systems`); a frame of the sandbox's per-frame march
+    /// ([`MarchMode::Demo`]) spanning other than one physics step.
     fn crossing_reach(
         &self,
         origin: Vec3,
@@ -2378,6 +2435,7 @@ impl ProjectileMarchWorld<'_, '_> {
         travel: f32,
         spread: f32,
         shooter: Option<Entity>,
+        next: NextStep,
     ) -> f32 {
         let span = |lo: Vec3A, hi: Vec3A, (position, rotation): (Vec3, Quat)| {
             let inverse = rotation.inverse();
@@ -2397,17 +2455,20 @@ impl ProjectileMarchWorld<'_, '_> {
             }
             (enter <= leave && leave > 0.0).then_some((enter, leave))
         };
+        let kick = 2.0 * GRAVITY.length() * next.dt * next.dt;
         let spans: Vec<(f32, f32)> = self
             .envelopes
             .iter()
             .filter(|(body, ..)| Some(*body) != shooter)
-            .flat_map(|(_, envelope, position, rotation, colliders)| {
+            .flat_map(|(body, envelope, position, rotation, colliders, centre)| {
                 let extent = envelope.0.min.abs().max(envelope.0.max.abs()).max_element();
-                let pad = Vec3A::splat(spread + extent * 2.0_f32.powi(-20) + MARCH_EPS);
+                let pad = Vec3A::splat(spread + extent * 2.0_f32.powi(-20) + MARCH_EPS + kick);
                 let (lo, hi) = (envelope.0.min - pad, envelope.0.max + pad);
                 let placed = self.placed_pose(position, rotation, colliders);
-                [placed, (position.0, rotation.0)]
+                let integrated = centre.and_then(|centre| next.integrated_pose(body, centre));
+                [Some(placed), Some((position.0, rotation.0)), integrated]
                     .into_iter()
+                    .flatten()
                     .filter_map(move |pose| span(lo, hi, pose))
             })
             .collect();
@@ -3344,8 +3405,12 @@ fn march_shell_step(
         }
         let origin = flight.sweep_origin();
         let dir = flight.direction;
-        let spread = flight.spread(radius);
-        let reach = world.crossing_reach(origin, dir, budget.remaining(), spread, shooter);
+        let spread = flight.spread(radius).max(radius);
+        let next = NextStep {
+            bodies: &*bodies,
+            dt,
+        };
+        let reach = world.crossing_reach(origin, dir, budget.remaining(), spread, shooter, next);
         if reach <= MARCH_EPS && !flight.holds_material() {
             break;
         }
