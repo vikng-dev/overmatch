@@ -39,8 +39,8 @@
 //!
 //! # Downlink (the interpolation timeline)
 //!
-//! `net::interp_delay` writes the fused delay law (its module doc — the spread pays only its
-//! excess beyond the extrapolation horizon) from this estimator every frame. The Gaussian margin
+//! `net::interp_delay` writes the delay law, covering the full receipt spread, from this
+//! estimator every frame. The Gaussian margin
 //! chain on top is therefore ZEROED here
 //! (`jitter_multiple = 0`) — the quantile subsumes it — keeping the structural half-tick floor
 //! (per-tick keyframes put the cursor's phase against arrival uniform over one interval; the floor
@@ -51,7 +51,7 @@
 //! The uplink cannot measure its own arrival at the client, so its margin is the downlink
 //! distribution's spread — the SYMMETRY ASSUMPTION, stated: the measured burst structure (60–70 ms
 //! every ~0.52 s, sessions of 2026-08-15) was observed in BOTH directions, and the client's
-//! `FRONTIER` arrival summary (`net::extrapolate`) is the live certifier of this derivation.
+//! `FRONTIER` arrival summary (`net::frontier`) is the live certifier of this derivation.
 //! The objective's terms:
 //!
 //! - `jitter_margin` (coverage) = the half-tick content-phase floor + `(Q_p − Q_50)/tick` — the
@@ -315,24 +315,10 @@ impl ArrivalDelay {
     }
 }
 
-/// Feed the estimator from every received transport packet — the tick-stamped arrival stream the
-/// ping estimator never reads. Samples enter ONLY while ALL hold: `AppState::Playing` is active,
-/// the `InterpolationTimeline` resource reports synced, and the frame that drained the socket was
-/// no longer than `net::extrapolate`'s horizon g* — connect/loading-phase arrivals and arrivals
-/// stamped after a client frame stall carry client stalls, not path delay, and each one evicted at
-/// ring capacity swings the delay law into a resync.
-///
-/// THE STALL CONJUNCT: an arrival is stamped when its frame drains the socket, so a packet queued
-/// during a frame of length `dt` reads up to `dt` late. Every sample carries up to one frame of that
-/// error; a frame past g* (imported, never restated: the tail the extrapolator already hides) makes
-/// it an error the delay law would pay for as buffer. MEASURED on the scripted 80/10 ms loopback
-/// run: the local rig and shadow bake stall the client 460–560 ms about 0.5 s after connect, which
-/// held `min_delay` at ~0.5–0.6 s for the ring's full 60 s; on the same run with the receive
-/// conditioner off, excluding those frames takes the armed `min_delay` from 414 ms to 18 ms. (With
-/// `SPIKE_LATENCY_MS` on, the conditioner re-queues the post-stall drain and releases it on later
-/// ordinary frames, so ~200 ms of the stall still reads as spread — a harness artifact, no real
-/// socket queues after the drain.) A sustained low frame rate below g* (52 ms, ~19 fps) still
-/// records.
+/// Feed synchronized, in-play receipt samples. Receipt time includes the frame that drains the
+/// socket, so the estimator covers client scheduling stalls as well as path delay. Those delays
+/// can starve the presentation buffer too; excluding them would understate the observed spread.
+/// Before play or synchronization there is no established stream to estimate.
 fn record_packet_arrival(
     event: On<PacketReceived>,
     time: Res<Time<Real>>,
@@ -342,8 +328,7 @@ fn record_packet_arrival(
     mut estimator: ResMut<ArrivalDelay>,
 ) {
     let synced = timeline.is_some_and(|timeline| timeline.is_synced());
-    let stalled = time.delta() > super::extrapolate::horizon();
-    if *state.get() != AppState::Playing || !synced || stalled {
+    if *state.get() != AppState::Playing || !synced {
         return;
     }
     estimator.record(
@@ -710,17 +695,15 @@ mod tests {
             1,
             "playing ∧ synced records — the observer stays live"
         );
-        // A frame past the horizon stamps its arrivals late: they never record.
+        // A stalled drain is still an observed receipt delay and enters the distribution.
         let now = app.world().resource::<Time<Real>>().startup();
         let mut real = app.world_mut().resource_mut::<Time<Real>>();
         real.update_with_instant(now);
-        real.update_with_instant(
-            now + super::super::extrapolate::horizon() + Duration::from_millis(1),
-        );
+        real.update_with_instant(now + Duration::from_millis(500));
         assert_eq!(
             arrive(&mut app, 1_004),
-            1,
-            "an arrival drained by a stalled frame never records"
+            2,
+            "a stalled receipt is part of the full delivery spread"
         );
         let last = app
             .world()
@@ -732,7 +715,7 @@ mod tests {
             .update_with_instant(last + TICK);
         assert_eq!(
             arrive(&mut app, 1_005),
-            2,
+            3,
             "the next ordinary frame records again"
         );
     }

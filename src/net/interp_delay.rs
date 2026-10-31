@@ -5,8 +5,8 @@
 //! anchors `remote_estimate` RTT/2 AHEAD of the newest received keyframe (`lightyear_sync`
 //! `remote.rs`: `network_delay = ping_manager.rtt() / 2`). A keyframe therefore exists ahead of the
 //! cursor only while `delay ≥ rtt/2 + largest snapshot gap`; below that lightyear clamps to the
-//! newest sample (`lightyear_interpolation` `registry.rs`) — the buffer edge `net::extrapolate`
-//! instruments and softens.
+//! newest sample (`lightyear_interpolation` `registry.rs`) — the buffer edge `net::frontier`
+//! instruments.
 //!
 //! Lightyear's own `delay` term is `max(send_interval_ratio × remote_send_interval, min_delay)`,
 //! which carries the gap half only, and our per-tick server advertises `send_interval = 0` — that
@@ -14,18 +14,13 @@
 //! `min_delay` is the only writable slot, so it carries the whole law:
 //!
 //! ```text
-//! headroom  = max(Q_p{d_i} − min{d_i} − g*, 0)           (the arrival-delay distribution's
-//!             + one send interval                         covered spread — `net::sync_margin`'s
-//!                                                         estimator, empirical, no Gaussian —
-//!                                                         less the extrapolation horizon, plus
-//!                                                         the gap to the next keyframe)
-//! min_delay = rtt/2 + headroom                           (rtt/2 cancels the anchor, as above)
+//! headroom  = Q_p{d_i} - min{d_i} + one send interval
+//! min_delay = rtt/2 + headroom
 //! ```
 //!
-//! `g*` is `net::extrapolate`'s horizon (the single source — imported, never restated): the
-//! extrapolator covers tail excursions up to g* invisibly (ε-bounded), so the buffer pays only
-//! for the excess beyond it. On a clean link the subtraction floors at zero and the law reduces
-//! to `rtt/2 + one send interval`.
+//! The buffer covers the full measured receipt spread. No positive extrapolation horizon has an
+//! error bound in the presence of unknown impulses; the contract and rejected traction bound live
+//! in `.agents/docs/design/net-motion-contract.md`.
 //!
 //! The rtt/2 term stays on the ping EWMA (it cancels the anchor, which is built from the same
 //! EWMA); every jitter term now comes from the measured stream. The Gaussian margin chain on top
@@ -43,7 +38,7 @@
 //! stepped target is an error step the controller escalates to `Resync` (the live gauge showed
 //! `steady=2` from exactly this). The written value therefore FOLLOWS the law through a slewed
 //! follower — at most [`MAX_SLEW_PER_FRAME_TICKS`] per Update frame — and the steady-state
-//! resync count is ZERO (`net::extrapolate`'s FRONTIER `steady=` counter is the live gauge).
+//! resync count is ZERO (`net::frontier`'s FRONTIER `steady=` counter is the live gauge).
 //!
 //! Derivation and the contract constants behind `Q_p`:
 //! `net::sync_margin`'s module doc and `.agents/scratch/adaptive-cursor-frontier-2026-08-15.md` §1.
@@ -80,10 +75,9 @@ fn slewed(current: Duration, target: Duration, step: Duration) -> Duration {
 /// The law. The send interval is one tick — the server replicates every tick (`send_interval = 0`,
 /// the degenerate `src/net/tests/net_interp_delay.rs` pins), so the gap to the next keyframe is
 /// one tick.
-/// The spread pays only its excess beyond the extrapolation horizon (module doc); `saturating_sub`
-/// is the floor at zero.
+/// The whole measured receipt spread is covered; unknown impulses permit no projection discount.
 fn derived_min_delay(rtt: Duration, stats: &ArrivalStats, tick: Duration) -> Duration {
-    rtt / 2 + stats.spread().saturating_sub(super::extrapolate::horizon()) + tick
+    rtt / 2 + stats.spread() + tick
 }
 
 /// Mount the deriving system and hand back the initial `InterpolationConfig` resource.
@@ -188,28 +182,11 @@ mod tests {
         ArrivalStats::test_spread(ms / 1000.0)
     }
 
-    /// `g*` recomputed here from the raw inputs (μ the selected tank's track and the base
-    /// ground's rows under the pair rule, g = 9.81, ε_vis = 12.08 mm) independently of
-    /// `net::extrapolate`'s expression — the same independence discipline as `extrapolate`'s
-    /// own horizon test.
-    fn g_star() -> Duration {
-        let track = crate::substances::SubstanceRegistry::shipped_static()
-            .hard(&crate::bake::selected_spec().track.substance)
-            .unwrap()
-            .friction
-            .unwrap();
-        let ground = crate::ground_types::GroundTypes::load_shipped()
-            .get(crate::terrain_blend::BASE_GROUND)
-            .friction;
-        let mu = f64::from(track * ground).sqrt();
-        Duration::from_secs_f64((2.0 * 0.012_08_f64 / (mu * 9.81)).sqrt())
-    }
-
     /// Absolute values at three operating points. Dropping `rtt/2` fails the 100 ms cases;
     /// dropping the excess-spread term fails the burst case; dropping the one-interval gap term
     /// fails all three; using `rtt` instead of `rtt/2` fails the 100 ms cases.
     #[test]
-    fn law_is_half_rtt_plus_excess_spread_plus_the_interval_gap() {
+    fn law_is_half_rtt_plus_full_spread_plus_the_interval_gap() {
         // Loopback, cold estimator: the gap term alone — 15.625 ms.
         assert_close(
             derived_min_delay(Duration::ZERO, &ArrivalStats::default(), TICK),
@@ -222,28 +199,24 @@ mod tests {
             Duration::from_nanos(65_625_000),
             "rtt 100 ms clean",
         );
-        // rtt 100 ms over the measured burst link (Qp − min = 60 ms): 50 + (60 − g*) + 15.625 —
-        // the extrapolator absorbs the first g* ≈ 52.3 ms of the burst invisibly, so the buffer
-        // pays only the ~7.7 ms excess.
+        // DERIVED fixture: 100 ms RTT, 60 ms receipt spread: 50 + 60 + 15.625 ms.
         assert_close(
             derived_min_delay(Duration::from_millis(100), &spread(60.0), TICK),
-            Duration::from_millis(100) / 2 + (Duration::from_millis(60) - g_star()) + TICK,
+            Duration::from_micros(125_625),
             "rtt 100 ms burst",
         );
     }
 
-    /// THE SUBTRACTION FLOORS AT ZERO: any spread at or under the horizon is fully absorbed by
-    /// the extrapolator, so the law reduces to the clean form `rtt/2 + one tick` exactly.
-    /// Dropping the `− g*` subtraction reds this (a 30 ms spread would leak into the delay);
-    /// dropping the floor (a signed subtraction) reds the sub-horizon case by underflow.
+    /// Every nonzero receipt spread costs buffer time. A traction-derived discount would hide
+    /// small gaps from the law despite unbounded impulse error; clients rely on full coverage.
     #[test]
-    fn a_spread_under_the_horizon_floors_to_the_clean_law() {
+    fn every_receipt_spread_is_paid_in_full() {
         let clean = derived_min_delay(Duration::from_millis(100), &spread(0.0), TICK);
-        for ms in [10.0, 30.0, 52.0] {
+        for ms in [1.0, 10.0, 30.0, 52.0] {
             assert_close(
                 derived_min_delay(Duration::from_millis(100), &spread(ms), TICK),
-                clean,
-                "sub-horizon spread is the extrapolator's to cover",
+                clean + Duration::from_secs_f64(ms / 1000.0),
+                "full receipt spread",
             );
         }
     }
@@ -294,7 +267,7 @@ mod tests {
         let mut world = World::new();
         world.insert_resource(TickDuration(TICK));
         let mut estimator = ArrivalDelay::default();
-        // A beyond-horizon spread appearing at once: the law's value steps ~47.7 ms upward.
+        // DERIVED fixture: a 100 ms receipt spread raises the objective by 100 ms.
         estimator.stats = spread(100.0);
         world.insert_resource(estimator);
         let installed = Duration::from_nanos(15_625_000);

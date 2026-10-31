@@ -11,8 +11,7 @@
 //! #890 — closed 2026-08-03 without a fix — and #423). The delay collapses to the 5 ms `min_delay`
 //! default, while the server estimate sits RTT/2 AHEAD of the newest received keyframe — so on any
 //! real link the interpolation clock overruns the keyframe buffer and lightyear clamps (freeze,
-//! then step). Our fix writes `min_delay = rtt/2 + (arrival spread beyond the extrapolation
-//! horizon) + one tick` client-side every frame; `net::interp_delay`'s unit tests pin the
+//! then step). Our fix writes `min_delay = rtt/2 + arrival spread + one tick` client-side every frame; `net::interp_delay`'s unit tests pin the
 //! arithmetic. The law's gap term is a whole tick of its own and does not read
 //! `send_interval_ratio` — at `send_interval = 0` the ratio multiplies zero.
 //!

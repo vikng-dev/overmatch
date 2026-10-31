@@ -8,12 +8,9 @@
 //! leaving), shows only over a connected link, and only while the player's `DEBUG PANEL` setting
 //! (`settings::DebugPanel`, on by default during the beta) is on. There is no toggle key.
 //!
-//! Jitter is the delay law's instability term — `ArrivalStats::spread()` less
-//! `extrapolate::horizon()`, floored at zero: the exact milliseconds `net::interp_delay` buffers
-//! because the link is unstable, read from the SAME estimator resource (never a second estimator).
-//! Placeholder until the estimator warms (`ArrivalStats::warmed`, the delay law's own arming gate,
-//! latched like it). The value colour steps at one tick (amber) and the extrapolation horizon
-//! (red), both read from their single sources — `TickDuration` and `extrapolate::horizon()`.
+//! Jitter is the full receipt spread buffered by `net::interp_delay`, from the same estimator.
+//! The placeholder remains until `ArrivalStats::warmed`, latched like the delay law. The value
+//! warns at one authority tick and alarms above two ticks (DERIVED display bands in tick units).
 //!
 //! RTT comes from lightyear's `Link::stats` on the connected client entity; FPS/frame time from
 //! `FrameTimeDiagnosticsPlugin`, which is NOT in `DefaultPlugins` and is therefore registered by
@@ -49,7 +46,7 @@ const REFRESH_SECS: f32 = 1.0;
 /// tank-state card draws the same literal); local per this module's hardcoded-styling charter.
 const JITTER_WARN: Color = Color::srgb(1.0, 0.8, 0.3);
 
-/// Jitter value above the extrapolation horizon. The HUD family's red, same provenance as
+/// Jitter value above two authority intervals. The HUD family's red, same provenance as
 /// [`JITTER_WARN`].
 const JITTER_ALARM: Color = Color::srgb(1.0, 0.3, 0.2);
 
@@ -186,20 +183,17 @@ fn spawn_debug_hud(mut commands: Commands, fonts: Res<UiFonts>) {
         });
 }
 
-/// The jitter readout: the buffered excess `spread − horizon` floored at zero — the SAME term
-/// `net::interp_delay::derived_min_delay` consumes — as `+{n} ms` plus a severity colour: [`TEXT`]
-/// below one tick of excess, [`JITTER_WARN`] at/above one tick, [`JITTER_ALARM`] above the
-/// extrapolation horizon.
-fn jitter_readout(spread: Duration, tick: Duration, horizon: Duration) -> (String, Color) {
-    let excess = spread.saturating_sub(horizon);
-    let color = if excess > horizon {
+/// The buffered receipt spread, without a physics-dependent discount. DERIVED display bands:
+/// one additional authority interval warns; more than two alarms.
+fn jitter_readout(spread: Duration, tick: Duration) -> (String, Color) {
+    let color = if spread > tick * 2 {
         JITTER_ALARM
-    } else if excess >= tick {
+    } else if spread >= tick {
         JITTER_WARN
     } else {
         TEXT
     };
-    (format!("+{:.0} ms", excess.as_secs_f64() * 1000.0), color)
+    (format!("+{:.0} ms", spread.as_secs_f64() * 1000.0), color)
 }
 
 #[expect(
@@ -250,13 +244,8 @@ fn update_debug_hud(
     if *armed != Some(estimator.link()) && estimator.stats.warmed() {
         *armed = Some(estimator.link());
     }
-    let jitter = (*armed == Some(estimator.link())).then(|| {
-        jitter_readout(
-            estimator.stats.spread(),
-            tick.0,
-            super::extrapolate::horizon(),
-        )
-    });
+    let jitter = (*armed == Some(estimator.link()))
+        .then(|| jitter_readout(estimator.stats.spread(), tick.0));
     // Rolling averages over the diagnostic history buffer (not the raw per-frame value), so a single
     // slow frame doesn't make the number jump. FRAME_TIME is already in milliseconds.
     let fps = diagnostics
@@ -292,35 +281,24 @@ mod tests {
     /// sibling-test discipline (cf. `net::interp_delay`'s tests).
     const TICK: Duration = Duration::from_nanos(1_000_000_000 / 64);
 
-    /// A test horizon larger than one tick, as `g*` is at every shipped operating point. Arbitrary
-    /// round value: the readout is pure in it, so the thresholds are pinned without restating
-    /// `extrapolate`'s expression.
-    const HORIZON: Duration = Duration::from_millis(50);
-
-    /// The label is the buffered excess (`spread − horizon`) in whole milliseconds with the
-    /// explicit sign — the buffer bought, not the raw spread. A spread at or under the horizon is
-    /// the extrapolator's to cover, so the readout floors at exactly `+0 ms` in the resting
-    /// colour, never a negative or wrapped value. An excess between one tick and the horizon is
-    /// amber, the horizon itself included; only an excess beyond the horizon is red. Swapping the
-    /// two thresholds, or dropping the saturating floor, reds this.
+    /// The debug panel reports the exact spread charged by the buffer. Fixture spreads straddle
+    /// the display's authority-interval bands; a hidden extrapolation discount fails the label.
     #[test]
-    fn amber_below_the_horizon_red_above_it() {
-        for spread in [Duration::ZERO, Duration::from_millis(30), HORIZON] {
-            let (label, color) = jitter_readout(spread, TICK, HORIZON);
-            assert_eq!(label, "+0 ms", "spread {spread:?}");
-            assert_eq!(color, TEXT, "spread {spread:?}");
-        }
-        let mid = jitter_readout(HORIZON + Duration::from_millis(30), TICK, HORIZON);
-        assert_eq!(mid.1, JITTER_WARN, "excess between the thresholds warns");
-        let at_horizon = jitter_readout(HORIZON + HORIZON, TICK, HORIZON);
+    fn jitter_reports_the_full_buffered_spread() {
+        assert_eq!(jitter_readout(Duration::ZERO, TICK), ("+0 ms".into(), TEXT));
         assert_eq!(
-            at_horizon.1, JITTER_WARN,
-            "excess of the horizon still warns"
+            jitter_readout(Duration::from_millis(10), TICK),
+            ("+10 ms".into(), TEXT)
         );
-        let beyond = jitter_readout(HORIZON + HORIZON + Duration::from_micros(1), TICK, HORIZON);
-        assert_eq!(beyond.1, JITTER_ALARM, "excess beyond the horizon alarms");
-        let (label, color) = jitter_readout(HORIZON + Duration::from_millis(68), TICK, HORIZON);
-        assert_eq!(label, "+68 ms");
-        assert_eq!(color, JITTER_ALARM);
+        assert_eq!(jitter_readout(TICK, TICK).1, JITTER_WARN);
+        assert_eq!(jitter_readout(TICK * 2, TICK).1, JITTER_WARN);
+        assert_eq!(
+            jitter_readout(TICK * 2 + Duration::from_nanos(1), TICK).1,
+            JITTER_ALARM
+        );
+        assert_eq!(
+            jitter_readout(Duration::from_millis(68), TICK),
+            ("+68 ms".into(), JITTER_ALARM)
+        );
     }
 }

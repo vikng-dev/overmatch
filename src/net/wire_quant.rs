@@ -18,14 +18,6 @@
 //! (`assets/maps/kalinovo/level.json`), inside the packed position range; a larger map's far
 //! ground costs the 13-byte form, never a wrong position.
 //!
-//! Against the extrapolator (`super::extrapolate`): its horizon g* ≈ 52.3 ms spends the certified
-//! ε_vis = 12.08 mm on the constant-velocity projection from the newest sample, which these codecs
-//! deliver within the bounds above. The velocities move the projection by at most 3.4 mm/s × g* ≈
-//! 0.18 mm plus 0.85 mrad/s × g* ≈ 0.044 mm per metre from the root; the sample itself sits within
-//! 0.85 mm plus 0.15 mm per metre of the authority's, gap or no gap. At 5 m from the root (ASSUMED,
-//! a hull's far corner) the four add up to ≤ 2.0 mm, a sixth of ε_vis, which the horizon's
-//! derivation does not subtract.
-//!
 //! The belt state feeds the track view, which draws a phase carried at the belt speed and eased
 //! onto the replicated phase (`track::view`'s `presented_phase`): its errors sit three orders
 //! under a link pitch. The view and the belt interpolator take phase differences modulo the wrap.

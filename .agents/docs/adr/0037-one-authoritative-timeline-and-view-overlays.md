@@ -1,5 +1,7 @@
 # 0037 — One authoritative timeline, and view overlays
 
+Subject: the game's netcode and damage model; game state only.
+
 Status: ACCEPTED 2026-08-15. Ratified by feel on the `exp/unpredicted-drive` arc and by
 measurement (`.agents/scratch/one-timeline-state-of-play-2026-08-14.md`, the decision record, retired
 from the tree — `git show 9d31272:.agents/scratch/one-timeline-state-of-play-2026-08-14.md`;
@@ -19,9 +21,8 @@ and the prediction-era clauses of [[0014-sim-view-split]], [[0021-fire-replicati
 ## Ruling
 
 Every hull — the client's own included — renders from the interpolated server stream, at a
-delay derived from the link (`min_delay = rtt/2 + send_interval_ratio × tick`, zero tuned
-constants). The client predicts nothing and reconciles nothing: there is one timeline of
-authoritative state, and everything the player must feel before that stream can show it is a
+delay derived from the observed receipt stream (`net::interp_delay`). The client predicts nothing
+and reconciles nothing: there is one timeline of authoritative state, and everything the player must feel before that stream can show it is a
 **view overlay** — presentation computed beside the stream, never a second simulation corrected
 against the first.
 
@@ -31,8 +32,10 @@ turret). No engineering effort grows that class; a foreign fact is presentable n
 its arrival.
 
 Per-channel clock assignment replaces the architecture binary. Each perceptual channel is
-assigned to {click, arrival, cursor}; extrapolation applies only to continuous channels
-(inertia makes the near future computable), discrete events fuse to the motion cursor. The full
+assigned to {click, arrival, cursor}; continuous state uses the sampled server stream, and
+discrete events fuse to its motion cursor. Unknown impulses prevent a positive certified
+extrapolation horizon; the contract lives in
+[`net-motion-contract.md`](../design/net-motion-contract.md). The full
 map lives in the state-of-play doc.
 
 ## Why
@@ -44,10 +47,10 @@ map lives in the state-of-play doc.
 - The correction machinery was the dominant bug class. Every threshold-gated snap-vs-ease
   decision in the codebase lived in the dissolving set (hunt inventory: 12 of 22 mechanisms);
   nothing that survives makes one.
-- The recoil microsim proves the overlay discipline works at fidelity: the kicked/unkicked pair
-  shares the real `belt_tick`, residual 0.11 mm flat, 12.08 mm mid-bounce — a real trajectory
-  difference, not error. That 12.08 mm bar also derives the extrapolation horizon
-  (`sqrt(2·ε_vis/a_max)` = 52.3 ms).
+- The recoil microsim records the overlay discipline at fidelity: the kicked/unkicked pair
+  shares the real `belt_tick`. CLAIMED by the original certification: residual 0.11 mm flat,
+  12.08 mm mid-bounce — a real trajectory difference, not error. Those overlay residuals do not
+  bound unknown future hull impulses.
 - Remote fire fused to the cursor moved bang-before-motion from −3.52 ticks to +0.09: discrete
   facts never needed a buffer, they needed coherence with the motion cursor.
 
@@ -79,15 +82,14 @@ presentation consumers (recoil microsim, belt view).
 
 ## Surviving levers (all threshold-clean by design, or named as debt)
 
-- `interp_delay` — the derived delay law; no smoothing, no hysteresis.
+- `interp_delay` — the receipt-spread delay law, with bounded objective slew.
 - `sync_margin` — derived margins, both wire directions.
 - `fire_presentation` — client owns fire start/stop and cadence; the replicated `WeaponGate`
   is a legality report consumed as a belt-delta ledger, threshold-free.
 - `recoil_overlay` — the microsim-subtract own-recoil response (fork 1's candidate A).
 - `cursor_queue` — discrete facts present at the cursor crossing of their authority tick.
-- `extrapolate` — ε-bounded continuous gap-filler, always on (fork 2's candidate); its
-  impulse-coincidence instrument now covers Fire/Damage classes only (the
-  Shock source left with the wire fact).
+- `frontier` — read-only starvation, impulse-coincidence and timeline-resync diagnostics. It
+  observes the sampled stream without projecting or blending hull poses.
 - `hit_feel` at arrival (under review, fork 2), the FRONTIER/INPUT-ARRIVAL instruments,
   the track-view snap detector (its render_error upper bracket is unpinned — the remaining
   discontinuity sources are respawn, terrain revision, and lightyear's freeze-then-step clamp),
@@ -119,17 +121,17 @@ fork were deleted in demolition pass 2 — along with every mode lever (`OVERMAT
   from replicated `ServoAngles`.
 - **0032**: dissolves wholly, mechanism and need.
 
-## The two open forks (deliberately not decided here)
+## Presentation choices
 
 1. **Own-fire presentation — A (replay) vs B (fuse)**. A is the landed microsim-subtract
    (instant, ~900 LOC + a standing fidelity contract); B presents the whole shot at the cursor
    crossing (zero machinery, cost = the click→bang floor, ~145 ms at 75 ms ping). Taste call at
    the feel gate, order-counterbalanced with washout, at real margins. B winning ratifies
    delay-as-anticipation and kills A's machinery plus the foreign-impulse-early door.
-2. **Cursor position — padded tail-quantile vs arrival edge + ε-bounded extrapolation**. Data
-   call: the kill test and the impulse∧gap coincidence instrument decide. Certifying the edge
-   kills the padding AND dissolves the getting-hit-at-arrival exception (arrival ≈ cursor);
-   failing keeps the padded cursor with the honest freeze, and hit feel stays a live question.
+2. **Cursor position — full receipt-spread buffer and held server samples.** The traction-only
+   projection cannot certify its spatial error under unknown impulses. The current contract and
+   the rejected alternative live in [`net-motion-contract.md`](../design/net-motion-contract.md).
+   The impulse-coincidence instrument remains diagnostic; it cannot establish a motion bound.
 
-The track-snap detector rewrite is fork-2-dependent (clamp vs extrapolation seam) and was
-deliberately excluded from Wave C.
+The track-snap detector still observes the held-sample edge. A future projection proposal must
+supply the complete motion contract before it changes that seam.

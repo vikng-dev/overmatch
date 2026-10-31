@@ -30,12 +30,11 @@ mod debug_hud;
 mod destruction;
 mod diagnostics;
 mod disclosure;
-/// The interpolation buffer's edge: starvation instruments (always on) and the bounded
-/// extrapolation gap-filler.
-mod extrapolate;
 /// The owner's fire presentation: intent edges on the local tick, the arriving gate reconciled as a
 /// legality report instead of read as permission to draw.
 mod fire_presentation;
+/// Read-only starvation and resync instruments at the interpolation buffer's edge.
+mod frontier;
 mod harness;
 pub(crate) use harness::{env_flag, env_parse, env_value, refuse_start};
 mod hit_feel;

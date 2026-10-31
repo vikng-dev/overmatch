@@ -410,16 +410,6 @@ const TANK_SPEC_RON: &str = include_str!(concat!(
     crate::assets::tank_file!(".tank.ron")
 ));
 
-/// [`TANK_SPEC_RON`] parsed once, for a bound that holds before any blueprint exists (the
-/// client's extrapolation horizon, `net::extrapolate`). The bake certifies the same text at
-/// startup, so a sheet that fails to parse here is a broken build.
-pub(crate) fn selected_spec() -> &'static TankSpec {
-    static SPEC: std::sync::LazyLock<TankSpec> = std::sync::LazyLock::new(|| {
-        ron::de::from_str(TANK_SPEC_RON).expect("the selected tank's embedded sheet parses")
-    });
-    &SPEC
-}
-
 /// Which primitives' mesh buffers the sim consumes, and why (§12):
 ///
 /// * **Ballistic volumes — DECLARED.** A node marches iff the sheet names it

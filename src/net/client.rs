@@ -585,8 +585,8 @@ pub fn run() {
     // timeline below is built with, so its rebuilds cannot change the delay's shape.
     let interpolation =
         super::sync_margin::install(&mut app, sync_config, input_delay, interpolation);
-    // Buffer-edge starvation instruments and the bounded extrapolation gap-filler.
-    super::extrapolate::install(&mut app);
+    // Read-only buffer-edge starvation and timeline-resync instruments.
+    super::frontier::install(&mut app);
     // Both timeline configs are app-global resources. Inserted AFTER `ClientPlugins`, so
     // lightyear's `On<Insert, InputTimelineConfig>` observer exists and seeds the input delay
     // from `input_delay` at once rather than at the first timeline shift. Inputs are stamped and
@@ -1586,13 +1586,13 @@ impl SeenDamage {
 /// newest tick would reject the new server's arrivals ([`ArrivalDelay`](super::sync_margin::ArrivalDelay))
 /// and this client's newly authored inputs ([`AuthoredIntent`](super::fire_presentation::AuthoredIntent)),
 /// and a pending trigger edge would replay onto the next tank; the impulse ticks
-/// ([`ImpulseTicks`](super::extrapolate::ImpulseTicks)) would classify the new server's gaps by
+/// ([`ImpulseTicks`](super::frontier::ImpulseTicks)) would classify the new server's gaps by
 /// the old server's ticks.
 fn reset_link_state(
     _ended: On<Remove, Connected>,
     mut arrival: ResMut<super::sync_margin::ArrivalDelay>,
     mut intent: ResMut<super::fire_presentation::AuthoredIntent>,
-    mut impulses: ResMut<super::extrapolate::ImpulseTicks>,
+    mut impulses: ResMut<super::frontier::ImpulseTicks>,
 ) {
     arrival.reset_for_new_link();
     *intent = default();
@@ -1685,7 +1685,7 @@ pub(super) fn receive_fire_events(
     // `too_many_arguments` limit.
     (mut shot_trace, mut impulses, mut own_ledgers, mut own_diag): (
         Option<ResMut<crate::shot_trace::ShotTrace>>,
-        ResMut<super::extrapolate::ImpulseTicks>,
+        ResMut<super::frontier::ImpulseTicks>,
         Query<&mut super::fire_presentation::OwnFirePresentation>,
         ResMut<super::fire_presentation::OwnFireDiag>,
     ),
@@ -1715,7 +1715,7 @@ pub(super) fn receive_fire_events(
         for batch in receiver.receive() {
             for fact in batch.facts {
                 if let FireVisualFact::Fire(event) = &fact {
-                    impulses.record(event.fire_tick, super::extrapolate::ImpulseClass::Fire);
+                    impulses.record(event.fire_tick, super::frontier::ImpulseClass::Fire);
                 }
                 consume_fire_visual_fact(
                     fact,
@@ -1731,7 +1731,7 @@ pub(super) fn receive_fire_events(
     }
     for mut receiver in &mut fire_receivers {
         for event in receiver.receive() {
-            impulses.record(event.fire_tick, super::extrapolate::ImpulseClass::Fire);
+            impulses.record(event.fire_tick, super::frontier::ImpulseClass::Fire);
             consume_fire_event(&event, now, cursor, &mut seen, &mut held, &mut shot_trace);
         }
     }
@@ -2116,13 +2116,13 @@ pub(super) fn receive_damage_confirms(
     mut shot_trace: Option<ResMut<crate::shot_trace::ShotTrace>>,
     // Impulse ledger for the buffer-edge gap∧impulse coincidence instrument: a damage confirm
     // marks the tick the victim's hull took the shot's impulse.
-    mut impulses: ResMut<super::extrapolate::ImpulseTicks>,
+    mut impulses: ResMut<super::frontier::ImpulseTicks>,
     mut commands: Commands,
 ) {
     let received_tick = timeline.tick();
     for mut receiver in &mut receivers {
         for damage in receiver.receive() {
-            impulses.record(damage.damage_tick, super::extrapolate::ImpulseClass::Damage);
+            impulses.record(damage.damage_tick, super::frontier::ImpulseClass::Damage);
             consume_damage_confirm(
                 &damage,
                 received_tick,
@@ -2918,8 +2918,8 @@ mod tests {
     /// clock, so the next server's earlier ticks are accepted.
     #[test]
     fn a_link_ending_resets_its_clock_keyed_state() {
-        use super::super::extrapolate::{ImpulseClass, ImpulseTicks};
         use super::super::fire_presentation::AuthoredIntent;
+        use super::super::frontier::{ImpulseClass, ImpulseTicks};
         use super::super::sync_margin::ArrivalDelay;
         let mut app = App::new();
         app.insert_resource(ArrivalDelay::test_with_newest_remote(Tick(5_000)))

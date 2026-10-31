@@ -294,7 +294,7 @@ impl OwnFirePresentation {
     }
 }
 
-/// Self-heal counters, appended to the FRONTIER summary line by `net::extrapolate`.
+/// Self-heal counters, appended to the FRONTIER summary line by `net::frontier`.
 #[derive(Resource, Default, Debug)]
 pub(super) struct OwnFireDiag {
     /// Fallback bangs presented for state-proven consumptions with no announcement.

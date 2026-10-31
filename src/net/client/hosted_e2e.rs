@@ -115,7 +115,7 @@ fn client_app(api: &str, log: bool) -> App {
     let interpolation = crate::net::interp_delay::install(&mut app, tick_duration);
     let interpolation =
         crate::net::sync_margin::install(&mut app, sync_config, input_delay, interpolation);
-    crate::net::extrapolate::install(&mut app);
+    crate::net::frontier::install(&mut app);
     app.insert_resource(InputTimelineConfig::new(sync_config, input_delay));
     app.insert_resource(interpolation);
 

@@ -56,12 +56,6 @@ use super::transmission::{
 
 const SLIP_SATURATION: f32 = 0.4;
 
-/// The coefficient `spec`'s track slides at on the terrain's base ground: the pair the belt grips
-/// the field with ([`GripParams::on_ground`]). `net::extrapolate` bounds hull acceleration by it.
-pub(crate) fn terrain_grip(spec: &crate::spec::TankSpec) -> f32 {
-    GripParams::of(spec).on_ground()
-}
-
 /// Per-tank belt state: server-authoritative, replicated to every client for the track view
 /// (quantised, `net::wire_quant`). Hashed into the determinism trace (`hblt`).
 #[derive(Component, Clone, Copy, PartialEq, Debug, Default)]
