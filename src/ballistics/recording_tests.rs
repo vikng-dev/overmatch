@@ -579,6 +579,103 @@ fn the_killing_shot_alone_is_attributed() {
     assert_eq!(recorded[0].report.killed, Some(KnockoutReason::Cookoff));
 }
 
+/// The game's match score from a real round: a keyed round whose own deposition empties the one
+/// crew station of combatant B's tank credits its combatant A one knockout and B one loss, and
+/// opens B's respawn for that life the mode's wait after the knockout tick; the same round fired
+/// as B's own is a loss with no credit. The scoreboard, the server's respawn gate and the client's
+/// countdown rely on this credit. Mutants: crediting the victim, crediting nobody for another's
+/// round, crediting its own round, or a loss not counted fail. Fixture combatants and wait.
+#[test]
+fn a_round_from_a_knocks_out_b_crediting_a_a_knockout_and_b_a_loss() {
+    use crate::net::score::{Respawn, RespawnWait, Scoreboard, Standing};
+    use crate::{CombatantId, CombatantLife, ShotId};
+
+    let (a, b) = (CombatantId(1), CombatantId(2));
+    let wait = RespawnWait::new(Duration::from_secs(1), TICK);
+    let scored = |by: CombatantId| -> Vec<Standing> {
+        let mut app = recording_world(false);
+        crate::net::score::mount(&mut app, wait);
+        app.init_resource::<crate::ShotClock>();
+        app.world_mut().spawn(Scoreboard::default());
+        app.world_mut().spawn((a, CombatantLife(0)));
+        let (root, volumes) = tank(
+            &mut app,
+            Vec3::ZERO,
+            0.0,
+            Vec3::ZERO,
+            &plated(ONE, Kind::Crew(DEEP)),
+        );
+        // Only one crewman decides the tank: the rear box is a module.
+        app.world_mut()
+            .entity_mut(volumes[2])
+            .remove::<CrewStation>();
+        app.world_mut()
+            .entity_mut(root)
+            .insert((b, CombatantLife(0)));
+        settle(&mut app);
+        let shot = ShotId {
+            combatant: by,
+            weapon: 0,
+            fire_tick: 1,
+        };
+        fire_along(
+            &mut app,
+            Vec3::new(0.0, 0.0, 30.0),
+            Dir3::NEG_Z,
+            FireMechanism::Single,
+            Some(shot),
+        );
+        run(&mut app, 8);
+        assert!(app.world().get::<TankKnockedOut>(root).is_some());
+        let mut boards = app.world_mut().query::<&Scoreboard>();
+        boards
+            .single(app.world())
+            .expect("the fixture's one scoreboard")
+            .0
+            .clone()
+    };
+    let opened = Respawn::Opens {
+        life: CombatantLife(0),
+        tick: wait.ticks(),
+    };
+    assert_eq!(
+        scored(a),
+        [
+            Standing {
+                combatant: a,
+                knockouts: 1,
+                losses: 0,
+                respawn: Respawn::NeverKnockedOut,
+            },
+            Standing {
+                combatant: b,
+                knockouts: 0,
+                losses: 1,
+                respawn: opened,
+            },
+        ],
+        "A's round knocked out B's tank"
+    );
+    assert_eq!(
+        scored(b),
+        [
+            Standing {
+                combatant: a,
+                knockouts: 0,
+                losses: 0,
+                respawn: Respawn::NeverKnockedOut,
+            },
+            Standing {
+                combatant: b,
+                knockouts: 0,
+                losses: 1,
+                respawn: opened,
+            },
+        ],
+        "B's own round credits nobody"
+    );
+}
+
 /// Automatic fire is not recorded, though it struck and dosed the tank.
 #[test]
 fn automatic_fire_records_nothing() {

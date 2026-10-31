@@ -22,7 +22,8 @@
 //! [`super::record`]). A tank's death is the shot's when its own deposition emptied the box that
 //! decided it, in the same tick ([`attribute_kills`]): for a cookoff the first ammunition box
 //! emptied that tick, for crew loss the last crew station, in deposition order across every shell
-//! (automatic fire included, which can kill though it is not recorded).
+//! (automatic fire included, which can kill though it is not recorded). The same decision, for
+//! every knocked-out tank, is the authority's [`TankKnockout`] fact, which the match score credits.
 //!
 //! An encounter's record is finished ([`finish_records`]) once the shell ended, or is clear of the
 //! tank's colliders with no fuze that tank armed still running: a burst wherever the delay ends is
@@ -44,7 +45,8 @@ use crate::ballistics::{
     ShellPath, ShotDose, ShotSource, SpallCone, SpallMarks,
 };
 use crate::damage::{
-    Ammo, CrewStation, DamageConsequences, KnockoutReason, TankKnockedOut, TankVolumes, VolumeOf,
+    Ammo, CrewStation, DamageConsequences, KnockoutCause, KnockoutReason, TankKnockedOut,
+    TankKnockout, TankVolumes, VolumeOf,
 };
 use crate::spec::{FireMechanism, TankSpecHandle};
 use crate::state::{GameplaySet, SimPhase};
@@ -93,8 +95,8 @@ pub(crate) struct RecordedShot {
 /// The authority's recording state.
 #[derive(Resource, Default)]
 pub(crate) struct ShotRecorder {
-    /// This tick's emptied pools, `(shell, volume)`, in deposition order.
-    emptied: Vec<(Entity, Entity)>,
+    /// This tick's emptied pools, in deposition order.
+    emptied: Vec<Emptied>,
     /// Recordings whose shell despawned with an encounter unfinished, with its logs.
     spent: Vec<Spent>,
     /// Encounters not yet finished, live or spent.
@@ -109,6 +111,14 @@ impl ShotRecorder {
     pub(crate) fn is_idle(&self) -> bool {
         self.emptied.is_empty() && self.spent.is_empty() && self.open == 0 && !self.unposed
     }
+}
+
+/// One pool a shell's deposition emptied: the shell, its network identity (`None` for an unkeyed
+/// round), and the box.
+struct Emptied {
+    shell: Entity,
+    shot: Option<ShotId>,
+    volume: Entity,
 }
 
 /// A recording whose shell despawned, and the shell's logs.
@@ -195,11 +205,12 @@ impl MarchRecorder<'_, '_> {
     /// open encounter or a new one.
     #[expect(
         clippy::too_many_arguments,
-        reason = "one march step's evidence: the shell, its recording, the mark and dose cursors, and the ownership and health reads"
+        reason = "one march step's evidence: the shell and its shot identity, its recording, the mark and dose cursors, and the ownership and health reads"
     )]
     pub(crate) fn note(
         &mut self,
         shell: Entity,
+        shot: Option<ShotId>,
         recording: Option<Mut<ShotRecording>>,
         marks: &PenetrationMarks,
         marks_from: usize,
@@ -214,7 +225,11 @@ impl MarchRecorder<'_, '_> {
         recorder.emptied.extend(
             dose.emptied()[emptied_from..]
                 .iter()
-                .map(|&volume| (shell, volume)),
+                .map(|&volume| Emptied {
+                    shell,
+                    shot,
+                    volume,
+                }),
         );
         let Some(mut recording) = recording else {
             return;
@@ -416,20 +431,22 @@ fn hull_frame(world: &mut World, tank: Entity) -> Option<HullFrame> {
     Some(HullFrame::posed(at, turn))
 }
 
-/// Attribute each tank knocked out this tick to the shell whose deposition emptied the box that
-/// decided it, in that shell's open encounter with the tank (the one this tick's marks are in), and
-/// clear the tick's emptied log.
+/// Decide each tank knocked out this tick: the shell whose deposition emptied the box that decided
+/// it. Raise [`TankKnockout`] for every one, with that shell's round or none, and attribute the kill
+/// to the shell's open encounter with the tank (the one this tick's marks are in); then clear the
+/// tick's emptied log.
 fn attribute_kills(
     knocked: Query<(Entity, &TankKnockedOut), Added<TankKnockedOut>>,
     facets: Query<(&VolumeOf, Has<Ammo>, Has<CrewStation>)>,
     mut recordings: Query<&mut ShotRecording>,
     mut recorder: ResMut<ShotRecorder>,
+    mut commands: Commands,
 ) {
     let recorder = &mut *recorder;
     for (tank, knocked_out) in &knocked {
         let reason = knocked_out.reason;
-        let decides = |&&(_, volume): &&(Entity, Entity)| {
-            facets.get(volume).is_ok_and(|(owner, ammo, crew)| {
+        let decides = |emptied: &&Emptied| {
+            facets.get(emptied.volume).is_ok_and(|(owner, ammo, crew)| {
                 owner.tank() == tank
                     && match reason {
                         KnockoutReason::Cookoff => ammo,
@@ -441,7 +458,14 @@ fn attribute_kills(
             KnockoutReason::Cookoff => recorder.emptied.iter().find(decides),
             KnockoutReason::CrewLoss => recorder.emptied.iter().rev().find(decides),
         };
-        let Some(&(shell, _)) = killer else {
+        commands.trigger(TankKnockout {
+            tank,
+            cause: match killer.and_then(|killer| killer.shot) {
+                Some(shot) => KnockoutCause::Round(shot),
+                None => KnockoutCause::NoKeyedRound,
+            },
+        });
+        let Some(&Emptied { shell, .. }) = killer else {
             continue;
         };
         let struck = match recordings.get_mut(shell) {

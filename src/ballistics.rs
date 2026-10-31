@@ -2344,6 +2344,7 @@ fn integrate_projectiles(
         if deposit {
             recorder.note(
                 entity,
+                shot.map(|shot| shot.0),
                 recording,
                 shell.marks,
                 marks_from,

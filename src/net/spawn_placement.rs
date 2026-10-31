@@ -7,28 +7,12 @@ use bevy::prelude::*;
 
 use crate::map::SpawnPoints;
 
-/// Checked mode distances, in horizontal metres. No code defaults stand in for mode data.
-#[derive(Debug, serde::Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SpawnRule {
-    target_distance_m: f32,
-    minimum_distance_m: f32,
-}
-
-impl SpawnRule {
-    fn parse(text: &str) -> Self {
-        let rule: Self = ron::from_str(text)
-            .unwrap_or_else(|err| panic!("assets/modes/battle.ron spawn rule: {err}"));
-        assert!(
-            rule.minimum_distance_m.is_finite()
-                && rule.minimum_distance_m > 0.0
-                && rule.target_distance_m.is_finite()
-                && rule.target_distance_m >= rule.minimum_distance_m,
-            "assets/modes/battle.ron: minimum_distance_m must be positive and finite; \
-             target_distance_m must be finite and at least minimum_distance_m — fix the mode data"
-        );
-        rule
-    }
+/// The mode's spawn distances, in horizontal metres, as [`super::battle_mode::BattleMode`] checked
+/// them: `minimum_distance_m` positive and finite, `target_distance_m` finite and at least it.
+#[derive(Debug)]
+pub(super) struct SpawnRule {
+    pub(super) target_distance_m: f32,
+    pub(super) minimum_distance_m: f32,
 }
 
 /// A server-owned seeded SplitMix64 stream. Only the authority draws from it: placement is sent
@@ -40,9 +24,9 @@ pub(super) struct SpawnPlacement {
 }
 
 impl SpawnPlacement {
-    pub(super) fn battle() -> Self {
+    pub(super) fn new(rule: SpawnRule) -> Self {
         Self {
-            rule: SpawnRule::parse(include_str!("../../assets/modes/battle.ron")),
+            rule,
             seed: RandomState::new().hash_one("server spawn placement"),
         }
     }
@@ -113,7 +97,10 @@ mod tests {
 
     // ASSUMED fixture distances for an arbitrary mode, deliberately unlike the shipped tuning.
     fn rule() -> SpawnRule {
-        SpawnRule::parse("(target_distance_m: 40.0, minimum_distance_m: 20.0)")
+        SpawnRule {
+            target_distance_m: 40.0,
+            minimum_distance_m: 20.0,
+        }
     }
 
     fn points(xz: &[[f32; 2]]) -> SpawnPoints {
@@ -191,23 +178,5 @@ mod tests {
             }
         }
         assert_eq!(seen.len(), points.as_slice().len());
-    }
-
-    /// Invalid mode data must stop the server before players join, rather than invent tuning.
-    #[test]
-    fn mode_distances_are_required_finite_positive_and_ordered() {
-        for text in [
-            "()",
-            "(target_distance_m: 40.0, minimum_distance_m: 0.0)",
-            "(target_distance_m: 10.0, minimum_distance_m: 20.0)",
-            "(target_distance_m: inf, minimum_distance_m: 20.0)",
-            "(target_distance_m: 40.0, minimum_distance_m: NaN)",
-        ] {
-            assert!(
-                std::panic::catch_unwind(|| SpawnRule::parse(text)).is_err(),
-                "{text}"
-            );
-        }
-        SpawnPlacement::battle();
     }
 }

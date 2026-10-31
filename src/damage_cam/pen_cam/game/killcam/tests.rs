@@ -470,6 +470,8 @@ fn composed() -> (App, Entity, Entity) {
         (OverlaySet::Declare, OverlaySet::Toggle, OverlaySet::Cursor).chain(),
     )
     .init_resource::<Overlays>()
+    // The death screen's countdown reads the fixed timestep.
+    .init_resource::<Time<Fixed>>()
     .insert_resource(UiFonts {
         hud: Handle::default(),
         body: Handle::default(),

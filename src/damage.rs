@@ -22,6 +22,7 @@ use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
+use crate::ShotId;
 use crate::ballistics::ComponentHealth;
 use crate::command::{ConsumeCommandEdges, CrewSwap, TankCommand};
 use crate::state::GameplaySet;
@@ -287,6 +288,26 @@ impl KnockoutReason {
             KnockoutReason::Cookoff => "ammo cookoff",
         }
     }
+}
+
+/// The authority's knockout transition: `tank` gained [`TankKnockedOut`] this tick (once per life)
+/// and `cause` is what decided it, by the pen cam recorder's rule that also names a record's kill
+/// (`damage_cam::recorder`, which holds the tick's emptied pools). Raised on the authority only,
+/// for every knocked-out tank; the match score reads it (`net::score`).
+#[derive(Event, Debug, Clone, Copy)]
+pub(crate) struct TankKnockout {
+    pub(crate) tank: Entity,
+    pub(crate) cause: KnockoutCause,
+}
+
+/// What decided a knockout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum KnockoutCause {
+    /// The keyed round whose own deposition emptied the box that decided it.
+    Round(ShotId),
+    /// No keyed round emptied that box this tick: a round with no network identity (the sandbox's
+    /// tank-less fire), or a knockout no round's deposition decided.
+    NoKeyedRound,
 }
 
 /// The authority's knockout rule: cookoff takes precedence over zero living crew. Replicas receive

@@ -1,11 +1,15 @@
 //! Net-client death overlay and respawn request.
 //!
 //! Life state comes from public `NetTankStatus`; private crew state must not drive an observer's UI.
+//! The respawn's opening comes from the server's replicated `score::Scoreboard`: the overlay
+//! counts down to it and the key is inert before it.
 
+use bevy::ecs::query::QuerySingleError;
 use bevy::ecs::schedule::ScheduleConfigs;
-use bevy::ecs::system::ScheduleSystem;
+use bevy::ecs::system::{ScheduleSystem, SystemParam};
 use bevy::prelude::*;
 
+use super::score::{Opening, Scoreboard};
 use crate::command::TankCommand;
 use crate::damage::TankKnockedOut;
 use crate::damage_cam::pen_cam::game::{GameDeathScreen, KillCamGate};
@@ -14,6 +18,7 @@ use crate::overlay::{self, Overlay, Overlays};
 use crate::state::PlayerInputSet;
 use crate::tank::Controlled;
 use crate::ui_font::UiFonts;
+use crate::{CombatantId, CombatantLife, ShotClock};
 
 /// Temporary respawn binding.
 const RESPAWN_KEY: KeyCode = KeyCode::KeyR;
@@ -21,10 +26,64 @@ const RESPAWN_KEY: KeyCode = KeyCode::KeyR;
 /// Message represented by the status node.
 #[derive(Component, Clone, Copy, PartialEq, Eq)]
 enum DeathScreenNode {
-    /// Dead with no outstanding request.
-    Died,
+    /// Dead with no outstanding request; the respawn opens in `opens_in_s` whole seconds, `None`
+    /// once the key may be pressed ([`OwnRespawn::seconds_left`]).
+    Died { opens_in_s: Option<u32> },
     /// Request sent; keep the overlay until a live controlled tank arrives or the request expires.
     Respawning,
+}
+
+/// The own knocked-out life's respawn opening, as the replicated scoreboard names it.
+#[derive(SystemParam)]
+struct OwnRespawn<'w, 's> {
+    own: Query<
+        'w,
+        's,
+        (&'static CombatantId, &'static CombatantLife),
+        (With<Controlled>, With<TankKnockedOut>),
+    >,
+    boards: Query<'w, 's, &'static Scoreboard>,
+    clock: Option<Res<'w, ShotClock>>,
+    time: Res<'w, Time<Fixed>>,
+}
+
+impl OwnRespawn<'_, '_> {
+    /// Whole seconds, rounded up, until the own knocked-out life's respawn opens on the client's
+    /// local tick (`ShotClock`, at or behind the tick a request pressed now is filed for, which is
+    /// the tick the server reads it on), so a request sent at zero is never early.
+    /// `None` when the key may be pressed: the opening is past, or no opening for
+    /// this life has arrived yet (no scoreboard, or one not yet updated for this knockout), when
+    /// the server decides the request.
+    fn seconds_left(&self) -> Option<u32> {
+        let (&combatant, &life) = match self.own.single() {
+            Ok(own) => own,
+            // Alive, or no tank yet: nothing opens.
+            Err(QuerySingleError::NoEntities(_)) => return None,
+            Err(QuerySingleError::MultipleEntities(_)) => {
+                panic!("a client controls one tank: `Controlled` marks only its own root")
+            }
+        };
+        let board = match self.boards.single() {
+            Ok(board) => board,
+            // Before the first snapshot, or between links.
+            Err(QuerySingleError::NoEntities(_)) => return None,
+            Err(QuerySingleError::MultipleEntities(_)) => panic!(
+                "a replica has one scoreboard; disconnect cleanup removes the old link's \
+                 replicated entities before a replacement arrives"
+            ),
+        };
+        let clock = self
+            .clock
+            .as_ref()
+            .expect("a replicated scoreboard arrives only where the network clock is published");
+        match board.opening(combatant, life, clock.0)? {
+            Opening::Open => None,
+            Opening::In { ticks } => {
+                let seconds = f64::from(ticks) * self.time.timestep().as_secs_f64();
+                Some(seconds.ceil() as u32)
+            }
+        }
+    }
 }
 
 /// Bound an unfulfilled request so the player can retry.
@@ -88,7 +147,7 @@ pub(crate) fn shows_died(world: &mut World) -> bool {
     world
         .query::<&DeathScreenNode>()
         .iter(world)
-        .any(|node| *node == DeathScreenNode::Died)
+        .any(|node| matches!(node, DeathScreenNode::Died { .. }))
 }
 
 /// Declare respawning until a live controlled tank arrives or the request expires; otherwise declare
@@ -96,13 +155,14 @@ pub(crate) fn shows_died(world: &mut World) -> bool {
 /// ([`KillCamGate::holds_death_screen`]).
 #[expect(
     clippy::too_many_arguments,
-    reason = "a system spanning the clock, the kill cam gate, two controlled-tank states, the overlay, the respawn wait, the overlay registry and fonts"
+    reason = "a system spanning the clock, the kill cam gate, two controlled-tank states, the respawn's opening, the overlay, the respawn wait, the overlay registry and fonts"
 )]
 fn toggle_death_screen(
     time: Res<Time>,
     gate: Option<Res<KillCamGate>>,
     dead_own: Query<(), (With<Controlled>, With<TankKnockedOut>)>,
     live_own: Query<(), (With<Controlled>, Without<TankKnockedOut>)>,
+    opening: OwnRespawn,
     overlay: Query<(Entity, &DeathScreenNode)>,
     mut awaiting: ResMut<AwaitingRespawn>,
     mut overlays: ResMut<Overlays>,
@@ -124,7 +184,9 @@ fn toggle_death_screen(
     let desired = if awaiting.active && !has_live {
         Some(DeathScreenNode::Respawning)
     } else if !dead_own.is_empty() && !gate.is_some_and(|gate| gate.holds_death_screen) {
-        Some(DeathScreenNode::Died)
+        Some(DeathScreenNode::Died {
+            opens_in_s: opening.seconds_left(),
+        })
     } else {
         None
     };
@@ -163,16 +225,22 @@ fn toggle_death_screen(
 /// owner has released the cursor — refusing the latch there is what prevents a phantom `RESPAWNING…`.
 ///
 /// Inert while the knockout is younger than the kill cam's input dead-zone
-/// ([`KillCamGate::settling`]), so a key held through the hit does not respawn.
+/// ([`KillCamGate::settling`]), so a key held through the hit does not respawn, and while the
+/// respawn has not opened ([`OwnRespawn::seconds_left`]), so a request the server would refuse is
+/// not sent while the overlay counts down.
 fn request_respawn(
     time: Res<Time>,
     gate: Option<Res<KillCamGate>>,
     keys: Res<ButtonInput<KeyCode>>,
     overlays: Res<Overlays>,
+    opening: OwnRespawn,
     mut dead_own: Query<&mut TankCommand, (With<Controlled>, With<TankKnockedOut>)>,
     mut awaiting: ResMut<AwaitingRespawn>,
 ) {
-    if !keys.just_pressed(RESPAWN_KEY) || gate.is_some_and(|gate| gate.settling) {
+    if !keys.just_pressed(RESPAWN_KEY)
+        || gate.is_some_and(|gate| gate.settling)
+        || opening.seconds_left().is_some()
+    {
         return;
     }
     // Same-frame guard against a phantom `RESPAWNING…`: a menu opened THIS frame (R+Esc together) or
@@ -205,8 +273,11 @@ fn request_respawn(
 /// hides it with the death screen. The state enum doubles as the node's marker + despawn handle.
 fn spawn_death_screen(commands: &mut Commands, state: DeathScreenNode, font: &Handle<Font>) {
     let text = match state {
-        DeathScreenNode::Died => "YOU DIED\npress R to respawn",
-        DeathScreenNode::Respawning => "RESPAWNING…",
+        DeathScreenNode::Died { opens_in_s: None } => "YOU DIED\npress R to respawn".to_owned(),
+        DeathScreenNode::Died {
+            opens_in_s: Some(seconds),
+        } => format!("YOU DIED\nrespawn in {seconds} s"),
+        DeathScreenNode::Respawning => "RESPAWNING…".to_owned(),
     };
     // Two markers: the stateful `DeathScreenNode` enum (text form + despawn handle) and the shared
     // `OverlayNode(Death)`, which stamps the one-scrim `GlobalZIndex` via its hook and hands the full

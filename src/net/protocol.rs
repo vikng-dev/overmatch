@@ -224,9 +224,13 @@ use crate::{CombatantId, CombatantLife, ShotId};
 /// `LedgerEntry::{State, Stopped}`, a state transition as before or the authority tick a falling
 /// piece met another body at, which every peer holds the fall at. Own-type graph and REV move.
 ///
+/// REV 45 (#241, the match score): one globally visible entity's
+/// [`Scoreboard`](super::score::Scoreboard) lists each combatant's knockouts, losses and its
+/// knocked-out life's respawn opening, replicated whole. Surface and own-type graph move.
+///
 /// [`WallPiece`]: crate::buildings::breakage::WallPiece
 /// [`WallEvent`]: crate::buildings::breakage::WallEvent
-pub const PROTOCOL_REV: u32 = 44;
+pub const PROTOCOL_REV: u32 = 45;
 
 /// Compatibility tag derived from the complete pinned wire manifest plus the crate version. This
 /// is the runtime handshake value: version-exact, so a version bump intentionally changes it.
@@ -932,6 +936,7 @@ const WIRE_SURFACE: &[&str] = &[
     "DebrisPose",
     "WallLedger",
     "WallPiece",
+    "Scoreboard",
     // Message channels (`Name|Mode|Direction`), followed by their message types.
     "FireChannel|UnorderedUnreliable|ServerToClient",
     "OutcomeChannel|UnorderedReliable|ServerToClient",
@@ -960,7 +965,7 @@ const WIRE_SURFACE: &[&str] = &[
 ];
 
 /// Pinned hash for the ordered wire surface and a direct handshake-fingerprint input.
-const WIRE_SURFACE_HASH: u64 = 0xe862_3986_909d_2198;
+const WIRE_SURFACE_HASH: u64 = 0x7f38_8ab7_ad8d_2286;
 
 // ---------------------------------------------------------------------------
 // Deep wire-surface coverage (field-level + external-dep skew)
@@ -1002,7 +1007,7 @@ const WIRE_SURFACE_HASH: u64 = 0xe862_3986_909d_2198;
 /// The pinned hash of the OWN wire-facing type DEFINITIONS (field layout, not just names). Re-pin it
 /// whenever a wire-facing struct/enum definition changes; house process also bumps
 /// [`PROTOCOL_REV`]. The tripwire prints the new value. See the block above for the coverage model.
-const WIRE_TYPES_HASH: u64 = 0x8e73_a1f3_b2bf_1bbf;
+const WIRE_TYPES_HASH: u64 = 0x5f94_5d2d_c70f_fa12;
 
 /// The pinned `Cargo.lock` versions of the external crates whose types ride the wire (avian's
 /// replicated physics components; lightyear's wire framing / input protocol). A bump of either can
@@ -1059,6 +1064,9 @@ pub(crate) fn plugin(app: &mut App) {
     // with the carrier.
     app.component::<crate::buildings::breakage::WallPiece>()
         .replicate();
+    // The match score (one world entity): sent whole when a knockout changes it, a late joiner
+    // takes it once.
+    app.component::<super::score::Scoreboard>().replicate();
 
     // Automatic-fire visuals may be lost or reordered. Application ShotId dedup and bounded copies
     // repair ordinary loss without retaining stale cosmetic debt in the transport.
@@ -1848,6 +1856,9 @@ mod tests {
         ("src/buildings/breakage.rs", "WallEvent"),
         ("src/buildings/breakage.rs", "Hole"),
         ("src/buildings/breakage.rs", "WallPiece"),
+        ("src/net/score.rs", "Scoreboard"),
+        ("src/net/score.rs", "Standing"),
+        ("src/net/score.rs", "Respawn"),
         ("src/net/protocol.rs", "FireChannel"),
         ("src/net/protocol.rs", "OutcomeChannel"),
         ("src/net/protocol.rs", "DamageChannel"),

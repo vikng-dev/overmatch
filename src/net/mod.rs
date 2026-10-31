@@ -3,6 +3,8 @@
 use avian3d::schedule::PhysicsSystems;
 use bevy::prelude::*;
 
+/// The Battle mode's data: one file, parsed and checked once.
+mod battle_mode;
 mod client;
 /// Tick-stamped server announcements held until the interpolation cursor crosses their tick, so an
 /// event presents in sync with the interpolated motion it belongs to.
@@ -49,6 +51,10 @@ mod matchmaking;
 mod physics;
 mod protocol;
 mod rig;
+/// The match score: knockouts and losses per combatant, and each knocked-out life's respawn
+/// opening, held by the server and replicated. `pub(crate)` for the ballistics fixture that fires
+/// a real round at it.
+pub(crate) mod score;
 // `pub(crate)` for its spawn POINTS — see the note on `tank::scenario`.
 pub(crate) mod server;
 /// The dedicated server's host: its task-pool sizing, its startup line and its levers.

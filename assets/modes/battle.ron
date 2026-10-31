@@ -1,5 +1,7 @@
-// ASSUMED starting distances in metres; both are provisional and tuned in play (#220).
+// ASSUMED starting values, provisional and tuned in play (#220): spawn distances in horizontal
+// metres, the respawn wait in seconds from a tank's knockout.
 (
     target_distance_m: 400.0,
     minimum_distance_m: 200.0,
+    respawn_wait_s: 10.0,
 )

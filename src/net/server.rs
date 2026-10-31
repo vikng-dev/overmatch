@@ -11,11 +11,13 @@ use lightyear::prelude::input::server::{InputValidationAppExt, authorize_control
 use lightyear::prelude::server::*;
 use lightyear::prelude::*;
 
+use super::battle_mode::BattleMode;
 use super::disclosure::{CombatDisclosure, NetTankStatus};
 use super::hosting::{Hosted, HostedConfig};
 use super::protocol::{
     LaunchedTurretPose, NetCrew, NetTank, ServoAngles, SetSpawnPoint, protocol_id,
 };
+use super::score::{Opening, RespawnGate, RespawnWait};
 use super::spawn_placement::SpawnPlacement;
 use super::{diagnostics, harness, open_gameplay_gate, physics, spawn_map};
 use crate::command::{ConsumeCommandEdges, TankCommand};
@@ -120,7 +122,10 @@ pub fn run() {
     app.add_systems(Startup, load_tank_sim_assets);
     app.init_resource::<PendingClients>();
     app.init_resource::<SpawnLane>();
-    app.insert_resource(SpawnPlacement::battle());
+    // The mode's data, parsed and checked once: its spawn distances and its respawn wait.
+    let mode = BattleMode::shipped();
+    app.insert_resource(SpawnPlacement::new(mode.spawn));
+    super::score::install_server(&mut app, RespawnWait::new(mode.respawn_wait, TICK));
     app.init_resource::<SpawnOverrides>();
     app.init_resource::<CombatantIds>();
     app.insert_resource(BotCount::from_value(
@@ -957,7 +962,9 @@ struct AwaitingSpawnPoint;
 
 /// The game's damage model: server-authoritative player respawn replaces an owned knocked-out
 /// tank only after a client request. A request remains pending while no automatic point is safe.
-/// The authority's `TankKnockedOut` marker validates eligibility; `ControlledBy` excludes bots.
+/// The authority's `TankKnockedOut` marker validates eligibility; `ControlledBy` excludes bots. A
+/// request before the life's respawn opens (`score::RespawnGate`, the mode's wait after the
+/// knockout) is refused: it is dropped, and the client, which shows the time left, sends another.
 /// Runs in `GameplaySet` before `ConsumeCommandEdges`, after the command bridge. Both initial
 /// placement and automatic respawn use `SpawnPlacement`; the player's persistent spawn-map pick
 /// still wins. Recursive root despawn and `tank::sweep_launched_turret_on_root_despawn` sweep the
@@ -973,10 +980,12 @@ fn respawn_player_tanks(
             &TankCommand,
             &ControlledBy,
             &CombatantId,
+            &CombatantLife,
             Option<&AwaitingSpawnPoint>,
         ),
         With<TankKnockedOut>,
     >,
+    gate: RespawnGate,
     remotes: Query<&RemoteId>,
     // Every tank root's live position — the occupancy set an override spawn checks against
     // (includes dead husks still on the field and the bot; excludes roots swept this pass).
@@ -1003,8 +1012,17 @@ fn respawn_player_tanks(
     // respawned to a client that is leaving.
     let requests: Vec<(Entity, Entity, PeerId, CombatantId, bool)> = dead
         .iter()
-        .filter(|(_, command, _, _, waiting)| command.respawn || waiting.is_some())
-        .filter_map(|(root, _, controlled, combatant, waiting)| {
+        .filter(|(_, command, _, _, _, waiting)| command.respawn || waiting.is_some())
+        .filter(
+            |(root, _, _, combatant, life, _)| match gate.opening(**combatant, **life) {
+                Opening::Open => true,
+                Opening::In { ticks } => {
+                    info!("server: respawn of {root} refused — it opens in {ticks} ticks");
+                    false
+                }
+            },
+        )
+        .filter_map(|(root, _, controlled, combatant, _, waiting)| {
             remotes.get(controlled.owner).ok().map(|remote| {
                 (
                     root,
@@ -1323,13 +1341,91 @@ mod tests {
                 scene: None,
             })
             .insert_resource(crate::map::tests::fixture_manifest(750.0, 0.0, 50.0))
-            .insert_resource(SpawnPlacement::battle())
+            .insert_resource(SpawnPlacement::new(BattleMode::shipped().spawn))
             .init_resource::<PendingClients>()
             .init_resource::<SpawnOverrides>()
             .init_resource::<SpawnLane>()
             .init_resource::<CombatantIds>()
+            .init_resource::<crate::ShotClock>()
             .add_systems(Update, (spawn_pending_tanks, respawn_player_tanks).chain());
+        super::super::score::mount(&mut app, shipped_wait());
+        app.world_mut()
+            .spawn(super::super::score::Scoreboard::default());
         app
+    }
+
+    /// The shipped mode's respawn wait on the server's tick.
+    fn shipped_wait() -> RespawnWait {
+        RespawnWait::new(BattleMode::shipped().respawn_wait, TICK)
+    }
+
+    /// Knock `root` out as the authority's transition does: the label, then its scored fact, at
+    /// the current [`crate::ShotClock`] tick.
+    fn knock_out(app: &mut App, root: Entity) {
+        app.world_mut().entity_mut(root).insert(TankKnockedOut {
+            reason: crate::damage::KnockoutReason::CrewLoss,
+        });
+        app.world_mut().trigger(crate::damage::TankKnockout {
+            tank: root,
+            cause: crate::damage::KnockoutCause::NoKeyedRound,
+        });
+    }
+
+    /// Advance the authority tick by `ticks`.
+    fn advance(app: &mut App, ticks: u32) {
+        let mut clock = app.world_mut().resource_mut::<crate::ShotClock>();
+        clock.0 = clock.0.wrapping_add(ticks);
+    }
+
+    /// The respawn opens the mode's wait after the knockout, on the server: a request one tick
+    /// before is refused and leaves the tank as it was; a request at the opening replaces it. The
+    /// client's countdown and the server's gate read this one opening. Mutants: no gate, a gate on
+    /// a client-side clock, or a wait rounded down respawn early; a gate that never opens fails.
+    #[test]
+    fn a_respawn_request_is_refused_before_the_wait_and_granted_after() {
+        let mut app = placement_app();
+        let peer = PeerId::Netcode(1);
+        let link = app.world_mut().spawn((RemoteId(peer), Connected)).id();
+        app.world_mut()
+            .resource_mut::<PendingClients>()
+            .0
+            .push((link, peer));
+        app.update();
+        let root = app
+            .world_mut()
+            .query_filtered::<Entity, With<ControlledBy>>()
+            .single(app.world())
+            .expect("the joined player has a tank");
+        knock_out(&mut app, root);
+        let request = |app: &mut App, root: Entity| {
+            app.world_mut()
+                .get_mut::<TankCommand>(root)
+                .expect("tank command")
+                .respawn = true;
+            app.update();
+        };
+        let wait = shipped_wait().ticks();
+        assert!(wait > 0, "the shipped mode waits before a respawn");
+        advance(&mut app, wait - 1);
+        request(&mut app, root);
+        assert!(
+            app.world().get_entity(root).is_ok(),
+            "a request one tick before the opening is refused"
+        );
+        app.world_mut()
+            .get_mut::<TankCommand>(root)
+            .expect("tank command")
+            .respawn = false;
+        advance(&mut app, 1);
+        request(&mut app, root);
+        assert!(
+            app.world().get_entity(root).is_err(),
+            "a request at the opening replaces the knocked-out tank"
+        );
+        app.world_mut()
+            .query_filtered::<Entity, With<ControlledBy>>()
+            .single(app.world())
+            .expect("one replacement player tank");
     }
 
     /// The game's damage model: automatic joins and respawns share the minimum, ignore knocked-out
@@ -1373,15 +1469,12 @@ mod tests {
         app.world_mut()
             .entity_mut(blocker)
             .remove::<TankKnockedOut>();
-        app.world_mut().entity_mut(root).insert((
-            TankKnockedOut {
-                reason: crate::damage::KnockoutReason::CrewLoss,
-            },
-            TankCommand {
-                respawn: true,
-                ..default()
-            },
-        ));
+        knock_out(&mut app, root);
+        advance(&mut app, shipped_wait().ticks());
+        app.world_mut().entity_mut(root).insert(TankCommand {
+            respawn: true,
+            ..default()
+        });
         app.update();
         assert!(app.world().get::<AwaitingSpawnPoint>(root).is_some());
         app.world_mut()
@@ -1409,15 +1502,12 @@ mod tests {
         app.world_mut()
             .entity_mut(blocker)
             .remove::<TankKnockedOut>();
-        app.world_mut().entity_mut(fresh).insert((
-            TankKnockedOut {
-                reason: crate::damage::KnockoutReason::CrewLoss,
-            },
-            TankCommand {
-                respawn: true,
-                ..default()
-            },
-        ));
+        knock_out(&mut app, fresh);
+        advance(&mut app, shipped_wait().ticks());
+        app.world_mut().entity_mut(fresh).insert(TankCommand {
+            respawn: true,
+            ..default()
+        });
         app.update();
         let pos = app
             .world_mut()
