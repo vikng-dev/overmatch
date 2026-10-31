@@ -581,12 +581,22 @@ mod tests {
     #[test]
     fn a_house_the_generator_cannot_lay_out_is_refused() {
         for (_, house) in specs(&crate::repo_root()).expect("the shipped specs parse") {
+            // FIXTURE DATA: constructed openings exercise the span/order gate regardless of
+            // whether this shipped house has any openings on this wall.
+            let mut house = house;
+            house.walls.east = vec![spec::Opening {
+                u: (-0.25 * house.length_m, 0.0),
+                courses: (0, house.eaves_course),
+            }];
+            house
+                .check()
+                .expect("the constructed opening is inside the wall");
             let (_, end) = house.wall_span("east");
             let mut past = house.clone();
             past.walls
                 .east
                 .last_mut()
-                .expect("the east wall has openings")
+                .expect("the fixture authors an opening")
                 .u
                 .1 = end + 1.0;
             let mut over = house.clone();

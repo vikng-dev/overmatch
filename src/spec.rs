@@ -381,10 +381,15 @@ pub struct WeaponSpec {
     pub load: Requirement,
 }
 
-/// Whether `seconds` is a weapon delay the fire gate can count in ticks: finite and not negative
-/// (`Duration::from_secs_f32` in `shooting::duration_ticks` panics on anything else).
+/// Whether the game's damage model can count this weapon delay in its fixed-tick gate. The
+/// duration and its tick count must both fit the representations `shooting::duration_ticks` uses.
 fn duration(seconds: f32) -> bool {
-    seconds.is_finite() && seconds >= 0.0
+    std::time::Duration::try_from_secs_f32(seconds).is_ok_and(|delay| {
+        let ticks = delay
+            .as_nanos()
+            .div_ceil(Time::<Fixed>::default().timestep().as_nanos());
+        u32::try_from(ticks).is_ok()
+    })
 }
 
 /// Every [`Part`] a requirement names, flattened through its graded groups.
@@ -507,7 +512,8 @@ impl WeaponSpec {
             FireCycle::Single { reload_secs } => {
                 if !duration(reload_secs) {
                     return Err(format!(
-                        "Single.reload_secs must be a finite duration >= 0 s (got {reload_secs})"
+                        "Single.reload_secs must be a duration >= 0 s fitting u32 fixed ticks \
+                         (got {reload_secs})"
                     ));
                 }
             }
@@ -527,7 +533,7 @@ impl WeaponSpec {
                 }
                 if !duration(belt_swap_secs) {
                     return Err(format!(
-                        "Automatic.belt_swap_secs must be a finite duration >= 0 s (got \
+                        "Automatic.belt_swap_secs must be a duration >= 0 s fitting u32 fixed ticks (got \
                          {belt_swap_secs})"
                     ));
                 }
@@ -2185,7 +2191,7 @@ TankSpec(
 
         // A single-shot reload or a belt swap that is no duration: `shooting::duration_ticks`
         // panics in play on each, so the sheet refuses them by name.
-        for secs in [-0.5, f32::NAN, f32::INFINITY] {
+        for secs in [-0.5, f32::NAN, f32::INFINITY, f32::MAX, 100_000_000.0] {
             let err = with_weapon("BadReload", FireMode::Single { reload_secs: secs })
                 .validate()
                 .unwrap_err()
