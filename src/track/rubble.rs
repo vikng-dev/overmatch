@@ -853,23 +853,13 @@ mod tests {
     /// rely on it. A law gripping at one coefficient everywhere, reading one side's row alone, or
     /// leaving a piece's patch on the ground's pair fails here.
     ///
-    /// DATA: the seed tank's track substance and the shipped ground types of least and greatest
-    /// friction. FIXTURE DATA: the pad, a 0.3 piece, a 5 m/s sideways slide from zero strain.
+    /// FIXTURE DATA: a 0.7 track on 0.2 and 0.8 fields, the pad, a 0.3 piece, a 5 m/s sideways
+    /// slide from zero strain. The class invariant does not require shipped grounds to differ or
+    /// a selected vehicle to have nonzero friction.
     #[test]
     fn the_belt_grips_by_the_material_pair_on_ground_and_pieces() {
-        let track = crate::track::rig_geom::tiger_spec().track.friction();
-        let table = crate::ground_types::GroundTypes::load_shipped();
-        let (least, most) = table
-            .types
-            .values()
-            .map(|t| t.friction)
-            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), f| {
-                (lo.min(f), hi.max(f))
-            });
-        assert!(
-            most > least,
-            "the shipped ground types state one friction; the pair cannot be told apart"
-        );
+        let track = contact_friction(0.7);
+        let (least, most) = (0.2, 0.8);
         let slide = Vec3::new(5.0, 0.0, 0.0);
         let on_ground = |friction: f32| {
             let grip = GripParams {
