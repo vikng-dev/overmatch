@@ -313,7 +313,7 @@ impl ShadowCascades {
 ///
 /// | envelope | frame p50 | px per texel (lower = crisper) |
 /// |---|---|---|
-/// | 150 m (retired ceiling, reachable only via [`shadow_distance_override`]) | 14.56 ms | 2.44 |
+/// | 150 m (retired ceiling) | 14.56 ms | 2.44 |
 /// | **350 m** | **14.86 ms** | **3.64** |
 /// | 700 m | 15.38 ms | 5.12 |
 /// | 1000 m | 15.27 ms | 6.11 |
@@ -795,8 +795,8 @@ impl PresentCaps {
 /// fullscreen (`WindowMode::BorderlessFullscreen`), which on macOS is native Spaces fullscreen via
 /// `NSWindow toggleFullScreen` — the same thing the green traffic-light button does. Exclusive
 /// (`WindowMode::Fullscreen`) is deliberately unrepresentable here: bevy PANICS on an exclusive
-/// mode whose monitor cannot be resolved (the `--reset-display` escape hatch's origin story), and
-/// borderless is what every modern display stack actually wants.
+/// mode whose monitor cannot be resolved, which would make a saved config unlaunchable once that
+/// monitor is unplugged, and borderless is what every modern display stack actually wants.
 ///
 /// The monitor selection comes from [`DisplaySelection`] and defaults to
 /// [`MonitorSelection::Current`], none of which can panic for borderless:
@@ -1911,19 +1911,6 @@ pub(crate) struct ApplySettings;
 #[derive(Resource)]
 pub(crate) struct StoreReport(store::LoadNote);
 
-/// The CLI escape hatch: `overmatch --reset-display` deletes the saved settings and launches on
-/// defaults.
-///
-/// It exists because a display setting can make the game unlaunchable on the machine that saved it —
-/// bevy panics on an EXCLUSIVE `Fullscreen` whose monitor cannot be resolved, so a config written
-/// with a second display attached could brick boot once it is unplugged. A player in that state
-/// cannot reach the settings page to undo it, so the escape must live outside the app's own UI.
-/// (The window-mode row that landed deliberately keeps that state unrepresentable —
-/// [`WindowModeSetting`] is borderless-on-current-monitor only, which winit merely warns about —
-/// so nothing in [`Settings`] can cause it today either; the hatch stays because config files are
-/// hand-editable and future rows may not be so careful.)
-const RESET_FLAG: &str = "--reset-display";
-
 /// Read the player's settings INTO the app being built, and hand the values back.
 ///
 /// Called by each windowed composition root before `DefaultPlugins`, because
@@ -1938,18 +1925,12 @@ const RESET_FLAG: &str = "--reset-display";
 /// present, and the report is carried as DATA because this read happens before `LogPlugin` installs
 /// a subscriber ([`report_store_load`] turns it into log lines at `Startup`).
 ///
-/// Honours [`RESET_FLAG`] first: with it, the file is deleted and defaults are used. Never fails: a
-/// missing or corrupt file yields defaults.
+/// Never fails: a missing or corrupt file yields defaults, and the note says which. No row of
+/// [`Settings`] can make the game unlaunchable on the machine that saved it ([`WindowModeSetting`]
+/// keeps an exclusive fullscreen on an unresolvable monitor unrepresentable), so boot needs no
+/// escape hatch outside the app's own UI.
 pub(crate) fn load_at_boot(app: &mut App) -> Settings {
-    let (settings, note) = if std::env::args().any(|arg| arg == RESET_FLAG) {
-        store::reset(store::location().as_deref());
-        // Deliberately reports as a first launch rather than inventing a note: after the reset that
-        // is exactly what the next read would see, and it is what the player asked for.
-        (Settings::default(), store::LoadNote::FirstLaunch)
-    } else {
-        let store::Load { settings, note } = store::load(store::location().as_deref());
-        (settings, note)
-    };
+    let store::Load { settings, note } = store::load(store::location().as_deref());
     app.insert_resource(settings);
     app.insert_resource(StoreReport(note));
     settings
@@ -2046,38 +2027,6 @@ pub(crate) fn plugin(entry: PageEntry) -> impl Plugin {
             }
         }
     }
-}
-
-/// Dev-only far-shadow override, metres: `OVERMATCH_SHADOW_DISTANCE_M` replaces whatever
-/// [`ShadowDistance`] the settings row asks for, so the cascade envelope can be set to values the
-/// player-facing enum does not offer.
-///
-/// **Still earning its keep after the 2026-07-28 ladder change**, which is worth stating because the
-/// question it was built to answer — "does the whole map cast?" — is now a rung
-/// ([`ShadowDistance::M1000`]). What it is for now is the SPACE BETWEEN, BELOW and BEYOND the rungs:
-/// the ladder is four values and a sweep needs a continuum, so measuring where the cost curve
-/// actually saturates (it is flat by ~700 m on this 1 km map — see [`ShadowDistance`]'s envelope
-/// table) or what 2 km would do still needs this. It is also the only way to reach a RETIRED
-/// envelope: the 2026-07-28 decision sweep priced the old 150 m ceiling through
-/// `OVERMATCH_SHADOW_DISTANCE_M=150`, because no rung expresses it any more. A ladder rung is a
-/// product decision; this is the instrument that produces the evidence for the next one.
-///
-/// Read ONCE and cached: [`apply_settings`] runs every frame and must not touch the process
-/// environment there. Unset — every normal run, and every test — yields `None` and the enum decides,
-/// so this is inert rather than a second authority. It does NOT enable casting: with
-/// [`ShadowDistance::Off`] selected the light still stops casting, the override only sizes the
-/// envelope.
-///
-/// One sharp edge, since the value is unvalidated beyond `> 0`: a distance below
-/// [`SHADOW_FIRST_CASCADE_FAR_BOUND_M`] inverts the split (the cascade bounds run backwards) rather
-/// than being clamped. That threshold used to be bevy's 10 m and is 40 m now, so the useless range
-/// is wider than it was. Nothing asserts, because nothing should — the ladder's own floor is 350 m
-/// and this is an instrument, not a rung.
-fn shadow_distance_override() -> Option<f32> {
-    static OVERRIDE: std::sync::OnceLock<Option<f32>> = std::sync::OnceLock::new();
-    *OVERRIDE.get_or_init(|| {
-        crate::env_parse::<f32>("OVERMATCH_SHADOW_DISTANCE_M").filter(|metres| *metres > 0.0)
-    })
 }
 
 /// "An external capture harness has PINNED this window; settings must not manage it." Inserted by
@@ -2190,8 +2139,7 @@ fn apply_settings(
         // must not depend on a zero-metre envelope having been repaired first. A cascade-count
         // change made while off therefore stays PENDING and lands on this same rebuild the moment a
         // distance exists again — the row is inert while off, not lost.
-        if let Some(maximum_distance) = shadow_distance_override().or_else(|| distance.distance_m())
-        {
+        if let Some(maximum_distance) = distance.distance_m() {
             // The cascade COUNT may vary at runtime ONLY because the vendored bevy_light backport
             // resizes the stale per-thread queues — see `SHADOW_CASCADES` for the crash this line
             // used to be constant to avoid.

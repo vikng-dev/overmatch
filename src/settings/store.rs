@@ -403,42 +403,6 @@ pub(super) fn save(path: Option<&Path>, settings: &Settings) -> bool {
     true
 }
 
-/// Delete the settings file at `path` (`None`: no platform config directory) — the
-/// `--reset-display` escape hatch's implementation.
-///
-/// The failure it exists for: a persisted display choice that makes the game unlaunchable on THIS
-/// machine (bevy panics on a `Fullscreen` whose monitor is unresolvable, so a config written while a
-/// second display was attached can brick boot after it is unplugged). A player in that state cannot
-/// reach the settings page to undo it, so the escape has to be outside the app's own UI.
-///
-/// Deleting rather than rewriting defaults keeps this honest: the next launch takes the ordinary
-/// first-launch path, which is already proven.
-pub(super) fn reset(path: Option<&Path>) -> bool {
-    use bevy::prelude::{info, warn};
-
-    let Some(path) = path else {
-        warn!("settings: no platform config directory — nothing to reset");
-        return false;
-    };
-    match std::fs::remove_file(path) {
-        Ok(()) => {
-            info!("settings: reset — deleted {}", path.display());
-            true
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            info!(
-                "settings: nothing to reset ({} does not exist)",
-                path.display()
-            );
-            true
-        }
-        Err(err) => {
-            warn!("settings: cannot delete {} ({err})", path.display());
-            false
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1003,27 +967,5 @@ mod tests {
             "kept at {}",
             kept.display()
         );
-    }
-
-    /// `--reset-display`'s implementation: deletes the file so the next launch takes the ordinary,
-    /// already-proven first-launch path. Deleting an absent file is a success, not an error.
-    #[test]
-    fn reset_deletes_the_file_and_is_idempotent() {
-        let scratch = ScratchDir::new("reset");
-        std::fs::create_dir_all(&scratch.dir).unwrap();
-        let path = scratch.file();
-        assert!(save(
-            Some(&path),
-            &Settings {
-                shadow_distance: ShadowDistance::M350,
-                ..Settings::default()
-            }
-        ));
-        assert!(path.exists());
-
-        assert!(reset(Some(&path)));
-        assert!(!path.exists());
-        assert!(reset(Some(&path)), "resetting twice must not be an error");
-        assert_eq!(load(Some(&path)).note, LoadNote::FirstLaunch);
     }
 }
