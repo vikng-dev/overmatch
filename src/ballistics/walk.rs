@@ -467,7 +467,7 @@ impl Default for WalkLaws {
             topology_abs: 1.0e-6,
             // ~3 f32 ULP. Deliberately tiny: the corridor is ORIGIN-RELATIVE (the driver anchors it
             // where the march segment started, and a continuation keeps that anchor within a step and
-            // is re-anchored between steps, so it sits at most the step's reach plus `resolve::MAX_OVERRUN` behind any corridor), so
+            // is retained while an immutable discovery chain is decided), so
             // `t` stays within tens of metres of the anchor and this term only has to cover intersection
             // rounding — a relative term large enough to matter at world scale would swallow the
             // millimetre distinction the weld tolerance is written in.
@@ -561,12 +561,9 @@ pub enum WalkError {
     /// A mechanism asked the crossing driver for a control it does not carry out (a redirect or a
     /// schedule). Never approximated by stopping or continuing.
     UnsupportedControl,
-    /// The driver's step ran out of a limit: more crossings than `resolve::MAX_STEP_CROSSINGS`, or
-    /// travel more than `resolve::MAX_OVERRUN` past where the step legitimately ends
-    /// (`resolve::Budget::reach`). Each crossing was bounded; their succession was not, and a step
-    /// that never yields applies consequences ever further downrange. `crossings` counts the
-    /// refused one; `overrun` is metres past that end it would have reached.
-    DrainExhausted { crossings: usize, overrun: f32 },
+    /// The game's damage model refused discovery work past the step's crossing ceiling.
+    /// Each corridor is bounded; a sequence of crossings need not be.
+    DrainExhausted { crossings: usize },
 }
 
 impl WalkError {
@@ -609,7 +606,7 @@ impl WalkError {
             Self::UnsupportedControl => {
                 "the mechanism requests only controls implemented by its driver"
             }
-            Self::DrainExhausted { .. } => "a finite step fits its crossing and overrun limits",
+            Self::DrainExhausted { .. } => "a finite step fits its crossing limit",
         };
         panic!(
             "game's damage model: {invariant}; {}: {self:?}",

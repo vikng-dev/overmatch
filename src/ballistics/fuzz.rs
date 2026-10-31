@@ -654,7 +654,7 @@ impl Drive {
     /// close.
     ///
     /// TRANSIT DEPOSITS ONLY. The runtime also removes HP through a bounce's shock and through spall
-    /// fragments (`resolve::apply`); neither puts the round's own chord into the volume, and neither
+    /// fragments (timed playback); neither puts the round's own chord into the volume, and neither
     /// is observed here.
     pub(super) fn reaches(&self, target: Entity) -> bool {
         self.entered().any(|entity| entity == target)
@@ -727,7 +727,7 @@ pub(super) fn drive(
     // The probe round's mechanism, bound as a fired shell's is at spawn.
     let round = super::bound(body);
     let radius = resolve::disc_radius(body.caliber);
-    let mut budget = context.world.step_budget(length / speed, speed);
+    let mut budget = context.world.step_budget(f64::from(length / speed));
     let mut out = Drive::default();
     // The witness pass over `legs`: chord only, so the wound rate is a unit.
     let wounded = |legs: &[resolve::Leg], flight: &Flight, out: &mut Drive| {
@@ -752,14 +752,14 @@ pub(super) fn drive(
             context.world,
             &flight,
             radius,
-            budget.remaining() * flight.speed,
+            budget.remaining() as f32 * flight.speed,
             &|_| true,
         );
         let contact = match ahead {
             Ahead::Open | Ahead::Terrain { .. } => {
                 let length = match ahead {
                     Ahead::Terrain { distance, .. } => distance,
-                    _ => budget.remaining() * flight.speed,
+                    _ => budget.remaining() as f32 * flight.speed,
                 };
                 let leg = resolve::Leg::new(
                     flight.sweep_origin(),
@@ -787,9 +787,8 @@ pub(super) fn drive(
             contact,
         )
         .map_err(|error| fail(error, &flight))?;
-        budget
-            .charge(decision.seconds(flight.speed))
-            .map_err(|error| fail(error, &flight))?;
+        budget.charge().map_err(|error| fail(error, &flight))?;
+        budget.fly(f64::from(decision.seconds(flight.speed)));
         wounded(decision.legs(), &flight, &mut out)?;
         out.decisions.push(decision.clone());
         if flight.follow(decision) {

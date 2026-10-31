@@ -592,7 +592,7 @@ fn spawn_shot_round(
                 fuze: burst::Fuze::Inert,
                 disc: walk::DiscFrame::anchored(direction).expect("a shot fires along a real axis"),
                 axis: None,
-                owed: 0.0,
+                playback: Default::default(),
             },
             DamageReport::default(),
             TerminalReport::default(),

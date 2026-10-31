@@ -823,7 +823,7 @@ fn mapped_box_trimesh(place: impl Fn(Vec3) -> Vec3) -> (Collider, BallisticSurfa
 /// and in the gate's driver alike. Here the count trips first: a held link must be longer than a
 /// nudge, and every corridor must close in a gap shorter than one, which pins the period near a
 /// nudge (DERIVED below), so the worlds' crossing ceiling ([`StepCrossings`]) is reached
-/// millimetres downrange, far short of [`MAX_OVERRUN`].
+/// millimetres downrange. The immutable batch is refused before delivering any consequence.
 ///
 /// Generic geometry, a single-sample round falling straight down so no bend moves it off the
 /// chain: square entry faces (no normalization bend), exit faces sheared 65° (not opposed to the
@@ -912,7 +912,7 @@ fn a_chain_of_held_continuations_stops_at_the_step_s_limits() {
         .or_else(|| panic.downcast_ref::<&str>().copied())
         .expect("a diagnostic panic");
     assert!(
-        message.contains("a finite step fits its crossing and overrun limits"),
+        message.contains("a finite step fits its crossing limit"),
         "{message}"
     );
     let read = runtime.world().resource::<Read>().0.clone();
@@ -920,8 +920,8 @@ fn a_chain_of_held_continuations_stops_at_the_step_s_limits() {
         read.iter()
             .filter(|(verdict, _)| *verdict == Verdict::Through)
             .count(),
-        CEILING,
-        "the rejected crossing applies no consequences before the invariant panic"
+        0,
+        "the refused immutable batch applies no consequences before the invariant panic"
     );
 
     let mut gate = world_with_trimesh_plates(&[]);
@@ -941,78 +941,17 @@ fn a_chain_of_held_continuations_stops_at_the_step_s_limits() {
     );
 }
 
-/// THE STEP REFUSES THE CROSSING THAT WOULD CARRY IT PAST ITS OVERRUN, before anything is charged.
-#[test]
-fn a_step_refuses_the_crossing_past_its_overrun() {
-    let mut budget = Budget::new(1.0, MAX_STEP_CROSSINGS, 1.0);
-    budget
-        .charge(1.0 + MAX_OVERRUN)
-        .expect("exactly the overrun is within it");
-    assert_eq!(
-        budget.charge(0.5),
-        Err(WalkError::DrainExhausted {
-            crossings: 2,
-            overrun: MAX_OVERRUN + 0.5,
-        }),
-    );
-    assert_eq!(
-        budget.remaining(),
-        -MAX_OVERRUN,
-        "a refused crossing charges nothing"
-    );
-}
-
-/// AN OVERRUN IS COUNTED PAST WHERE THE STEP LEGITIMATELY ENDS, never past its travel alone
-/// ([`MAX_OVERRUN`]): neither the travel a step owes the last one's crossing nor the run through
-/// its envelopes past its travel is an overrun, and a drain already run stays counted when the
-/// step next reaches on. The march relies on it so a crossing of chained envelopes longer than
-/// the ceiling still resolves; a budget measured from the travel refuses the first case's
-/// crossing and the second's, and one whose reach forgave the drain run so far passes the
-/// third's.
-#[test]
-fn an_overrun_is_counted_past_the_steps_reach() {
-    let mut owing = Budget::new(-3.0, MAX_STEP_CROSSINGS, 1.0);
-    owing
-        .charge(MAX_OVERRUN)
-        .expect("the travel owed is no overrun");
-    let mut enveloped = Budget::new(1.0, MAX_STEP_CROSSINGS, 1.0);
-    enveloped.reach(20.0);
-    enveloped
-        .charge(20.0 + MAX_OVERRUN)
-        .expect("the run through the envelopes is no overrun");
-    assert!(
-        enveloped.charge(0.5).is_err(),
-        "past the envelopes' end the overrun counts"
-    );
-    let mut drained = Budget::new(1.0, MAX_STEP_CROSSINGS, 1.0);
-    drained.charge(11.0).expect("a 10 m drain");
-    drained.reach(0.0);
-    assert_eq!(
-        drained.charge(MAX_OVERRUN - 9.5),
-        Err(WalkError::DrainExhausted {
-            crossings: 2,
-            overrun: MAX_OVERRUN + 0.5,
-        }),
-        "a reach from outside every envelope forgives no drain",
-    );
-    drained.reach(5.0);
-    drained
-        .charge(5.0 + MAX_OVERRUN - 10.0)
-        .expect("an envelope met past the drain extends from where the round stands");
-}
-
 /// THE STEP REFUSES THE CROSSING PAST ITS COUNT, before anything is charged.
 #[test]
 fn a_step_refuses_the_crossing_past_its_count() {
-    let mut budget = Budget::new(1.0, MAX_STEP_CROSSINGS, 1.0);
+    let mut budget = Budget::new(1.0, MAX_STEP_CROSSINGS);
     for _ in 0..MAX_STEP_CROSSINGS {
-        budget.charge(0.0).expect("within the count");
+        budget.charge().expect("within the count");
     }
     assert_eq!(
-        budget.charge(0.0),
+        budget.charge(),
         Err(WalkError::DrainExhausted {
             crossings: MAX_STEP_CROSSINGS + 1,
-            overrun: 0.0,
         }),
     );
     assert_eq!(

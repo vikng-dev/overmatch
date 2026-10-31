@@ -195,6 +195,26 @@ impl SolidShot {
             / f64::from(REFERENCE_FACTOR)
     }
 
+    /// The game's damage model interpolates a resolved stretch in force-law potential, not
+    /// speed. The immutable endpoints fix the resistance over its entire distance.
+    pub(crate) fn speed_between(&self, before: f64, after: f64, fraction: f64) -> f64 {
+        if fraction <= 0.0 {
+            return before;
+        }
+        if fraction >= 1.0 {
+            return after;
+        }
+        let drop = libm::log1p(
+            self.inertia * (before - after) * (before + after)
+                / (1.0 + self.inertia * after * after),
+        );
+        let squared = before * before
+            + (before * before + 1.0 / self.inertia) * libm::expm1(-fraction * drop);
+        // The resolved endpoints bound nonnegative v²; the subtraction can round below zero
+        // at rest, where the force-law speed is exactly zero.
+        squared.max(0.0).sqrt()
+    }
+
     /// The force law's potential `ln(1 + k v² / a)` at `speed`, by `libm` (see
     /// [`super::capability_of`]).
     fn potential(&self, speed: f64) -> f64 {

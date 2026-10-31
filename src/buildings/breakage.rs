@@ -16,7 +16,7 @@
 //!   spall cone's, a burst's fragments) that stops on a chunk deposits its energy there. A burst
 //!   feeds the blast field ([`fracture::blast_rays`]) from its burst point, its energy the core's
 //!   chemical energy less the casing's share. A line pushes with all the momentum the round lost
-//!   in it ([`Projectile::lost_momentum`]: the share the crushed brick carries away is open); a
+//!   in it (the resolved line's share; how much the crushed brick carries away is open); a
 //!   blast pushes each face its rays stop on with its reflected impulse ([`Blast::push`]), over the
 //!   share of the ray's cone the struck chunk or body intercepts. A blast ray stops, within its
 //!   reach ([`Blast::reach`]), on the nearest of every building's standing chunks and unbreakable
@@ -69,8 +69,7 @@ use super::fracture::{
 use super::schema::{self, BuildingAsset};
 use super::{BuildingElement, BuildingKind};
 use crate::ballistics::{
-    ArmourMark, BallisticVolume, CrossingEnd, Envelope, PenetrationMarks, Projectile, ShellMarched,
-    SpallMarks,
+    ArmourMark, BallisticVolume, Envelope, PenetrationMarks, ShellMarched, SpallMarks,
 };
 use crate::scatter::MapInstance;
 use crate::{ClientReplica, Layer, ShotClock};
@@ -497,50 +496,37 @@ fn queue_dust(dust: On<WallDust>, mut queue: ResMut<WallQueue>) {
 
 /// The authority's read of one march step ([`ShellMarched`]): its crossings' lines, its new
 /// cones' and its burst field's rays, and its burst's blast, queued for [`apply_deposits`]. Runs
-/// at the command flush after the march, before a spent shell's despawn. A replica's cosmetic
-/// march raises the event too, and is ignored: its walls change only by the record.
+/// at the command flush after the authority's march, before a spent shell's despawn.
+/// Replica walls change only from the authority's record.
 fn read_shell(
     marched: On<ShellMarched>,
     replica: Option<Res<ClientReplica>>,
-    shells: Query<(&PenetrationMarks, Option<&SpallMarks>, &Projectile)>,
+    shells: Query<(&PenetrationMarks, Option<&SpallMarks>)>,
     mut queue: ResMut<WallQueue>,
 ) {
     if replica.is_some() {
         return;
     }
-    let Ok((marks, spall, projectile)) = shells.get(marched.shell) else {
+    let Ok((marks, spall)) = shells.get(marched.shell) else {
         return;
     };
     let mut deposit = RawDeposit::default();
     for mark in marks.log.get(marched.marks_from..).unwrap_or_default() {
-        match mark {
-            ArmourMark::Crossing {
-                volumes,
-                incoming,
-                speed_in,
-                end,
-                ..
-            } => {
-                let speed_out = match end {
-                    CrossingEnd::Exit { speed, .. } => *speed,
-                    CrossingEnd::Rest { .. } => 0.0,
-                };
-                deposit.crossings.push((
-                    volumes
-                        .iter()
-                        .map(|v| (v.volume, v.entry, v.end, v.energy))
-                        .collect(),
-                    incoming.normalize_or_zero(),
-                    projectile.lost_momentum(*speed_in, speed_out),
-                ));
-            }
-            ArmourMark::Burst { at, .. } => {
-                if let Some(burst) = marched.burst {
-                    deposit.blast = Some((*at, Blast::of(burst.blast)));
-                }
-            }
-            _ => {}
+        if let ArmourMark::Burst { at, .. } = mark
+            && let Some(burst) = marched.burst
+        {
+            deposit.blast = Some((*at, Blast::of(burst.blast)));
         }
+    }
+    // The game's damage model exposes only lines whose path moments fell in this tick. A
+    // crossing mark is immutable metadata and can exist before any of its doses arrive.
+    for line in &marched.lines {
+        let volume = line.crossing;
+        deposit.crossings.push((
+            vec![(volume.volume, volume.entry, volume.end, volume.energy)],
+            line.incoming,
+            line.momentum,
+        ));
     }
     if let Some(spall) = spall {
         let cones = spall.cones.get(marched.cones_from..).unwrap_or_default();

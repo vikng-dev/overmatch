@@ -1553,13 +1553,17 @@ intervals share both endpoint poses, so their chords agree at the boundary.
   round's real speed across tick boundaries. Each effect lands in the tick containing its moment;
   a later tick does not re-test moving armour or decide the same crossing again. Cumulative
   rounding is retained so changing the tick partition changes neither total dose nor path.
+  The immutable result addresses a line dose at the last exposed point of its volume, a witness
+  dose at the end of its read chord, and a cone at its exact corridor-progress exit. Doses convert
+  to integer units once; a tick boundary cannot split and re-round one. The crossing's impulse and
+  verdict are delivered at its physical exit or rest point, before any geometric resume nudge.
 - **Clients consume outcomes.** Clients never test armour. They rebuild the path from the fire
   event and the server's outcomes; an outcome arriving late is shown when it arrives.
 - **A start inside a collider is a bug**, and panics. Playback inside its already-decided crossing
   is not a new contact-discovery start. Bodies move rather than being placed: a felled tree falls.
 
 **Implementation boundary.** This paragraph specifies the target law, not a claim that all of it
-has landed. Lane `walk-w1` owns seconds, immutable timed crossings and removal of distance overrun.
+has landed. Seconds, immutable timed crossings and removal of distance overrun are implemented.
 Lane `walk-w2` owns contact discovery and the look-back body-frame segment; until it lands,
 `Envelope`, `NextStep` and `ProjectileMarchWorld::crossing_reach` remain temporary discovery
 machinery. The redesign also removes envelope baking and spawn inserts, pose prediction, tick-start

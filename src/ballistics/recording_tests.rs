@@ -708,13 +708,12 @@ fn enveloped_tank(app: &mut App, at: Vec3) -> (Entity, Vec<Entity>) {
     (root, spawned)
 }
 
-/// One fixed tick of a crossing test: each tank's pose where the tick's march found its armour,
-/// every armour read the tick fired (world position, verdict), and the travel the round owed after
-/// it.
+/// The game's damage model: collider poses, delivered impacts and whether immutable playback
+/// remains at the end of the tick.
 struct TickReads {
     poses: Vec<(Vec3, Quat)>,
     impacts: Vec<(Vec3, Verdict)>,
-    owed: f32,
+    playing: bool,
 }
 
 /// Fire the fixture 88 along `-Z` from `from` and run `ticks` fixed ticks, reading each. A tank's
@@ -745,27 +744,22 @@ fn fire_and_read(app: &mut App, fronts: &[Entity], from: Vec3, ticks: usize) -> 
                 })
                 .collect();
             app.update();
-            let owed = app
+            let playing = app
                 .world_mut()
                 .query::<&Projectile>()
                 .iter(app.world())
-                .map(|projectile| projectile.owed)
-                .sum();
+                .any(|projectile| !projectile.playback.is_empty());
             TickReads {
                 poses,
                 impacts: std::mem::take(&mut *log.lock().unwrap()),
-                owed,
+                playing,
             }
         })
         .collect()
 }
 
-/// The tick the round crossed the `tank`th tank in, asserting the crossing resolved whole there
-/// against the pose that tick's march found the tank's armour at: every read of the tank falls in that one tick,
-/// each lies on one of its boxes' faces toward the round in its hull frame at that pose, and both
-/// plates are read and perforated. A crossing split across a tick reads its later boxes against a
-/// pose the tank's travel in a tick (0.16 m, DERIVED) away; 1 mm is the tolerance. Reads are
-/// attributed by hull z: the fixture hulls stand metres apart.
+/// The game's damage model reads each face once against the discovery pose, even if delivery
+/// spans ticks while the fixture body moves. The first delivered face pins that discovery pose.
 fn crossed_whole(reads: &[TickReads], tank: usize) -> usize {
     let faces = hull().map(|(_, size, centre, _)| centre.z + size.z * 0.5);
     let hull_z = |tick: &TickReads, at: Vec3| {
@@ -780,21 +774,10 @@ fn crossed_whole(reads: &[TickReads], tank: usize) -> usize {
                 .any(|&(at, _)| hull_z(&reads[i], at).abs() < 2.0)
         })
         .collect();
-    let [tick] = ticks[..] else {
-        let hull_reads: Vec<(usize, f32, Verdict)> = ticks
-            .iter()
-            .flat_map(|&i| {
-                reads[i]
-                    .impacts
-                    .iter()
-                    .map(move |&(at, verdict)| (i, hull_z(&reads[i], at), verdict))
-            })
-            .collect();
-        panic!("tank {tank} is read in one tick, not in ticks {ticks:?}: {hull_reads:?}");
-    };
-    let read: Vec<(f32, Verdict)> = reads[tick]
-        .impacts
+    let tick = *ticks.first().expect("the fixture tank is crossed");
+    let read: Vec<(f32, Verdict)> = reads
         .iter()
+        .flat_map(|read| &read.impacts)
         .map(|&(at, verdict)| (hull_z(&reads[tick], at), verdict))
         .filter(|(z, _)| z.abs() < 2.0)
         .collect();
@@ -814,17 +797,8 @@ fn crossed_whole(reads: &[TickReads], tank: usize) -> usize {
     tick
 }
 
-/// A MOVING TANK'S CROSSING RESOLVES AGAINST ITS POSE AT CONTACT (design §13.5, "The envelope"),
-/// under either composition's child-collider placement ([`ChildPose`]).
-///
-/// The fixture tank drives at the round at 10 m/s, and the tick that brings the round into its
-/// envelope ends between its plates ([`FROM`]). The crossing still resolves whole in that tick,
-/// against the pose the tick found the tank's armour at: the back plate is read where it stood at
-/// contact, not where the tank has driven it by the next tick. The round leaves the tick past the
-/// envelope, owing the travel it flew beyond the tick's. A march that let the tick's travel end the
-/// crossing reads the back plate a tick late, 0.16 m off its face (DERIVED); one that placed the
-/// envelope at the body's own pose alone, a step ahead of bare avian's colliders, ends the crossing
-/// short of the back plate, which has driven past the round by the next tick and is never read.
+/// The game's damage model: immutable playback reads the moving body's plates at discovery,
+/// then delivers them at their real path moments under either collider-placement composition.
 #[test]
 fn a_moving_tanks_crossing_resolves_against_its_pose_at_contact() {
     for pose in [ChildPose::Avian, ChildPose::Networked] {
@@ -837,8 +811,8 @@ fn a_moving_tanks_crossing_resolves_against_its_pose_at_contact() {
         let reads = fire_and_read(&mut app, &[volumes[0]], Vec3::new(0.0, 0.0, FROM), 6);
         let contact = crossed_whole(&reads, 0);
         assert!(
-            reads[contact].owed > 0.0,
-            "{pose:?}: the tick's travel ended inside the envelope, so the crossing ran on past it"
+            reads[contact].playing,
+            "{pose:?}: the crossing continues as immutable playback beyond its contact tick"
         );
         assert!(
             reads[contact + 1].poses[0].0.z - reads[contact].poses[0].0.z > 0.1,
@@ -851,19 +825,8 @@ fn a_moving_tanks_crossing_resolves_against_its_pose_at_contact() {
     }
 }
 
-/// A ROUND THROUGH ONE TANK INTO A SECOND RESOLVES BOTH, EACH AT ITS OWN INSTANT, under either
-/// composition's child-collider placement ([`ChildPose`]).
-///
-/// Two fixture tanks on one line with disjoint envelopes, the near one driving at the round and the
-/// far one away from it, each at 10 m/s. The tick that enters the near envelope ends inside it, so
-/// that crossing runs on past the tick's travel and stops where the round leaves the near envelope,
-/// owing the overrun; the far tank is the next tick's crossing, resolved whole against the pose
-/// that tick found it at. Both are perforated plate by plate, each plate read once, and each crew
-/// box takes a dose. A march that chained disjoint envelopes resolves both in one tick. One that
-/// ended the far crossing where the receding tank's next pose covers the round reads its back
-/// plate again a tick later: under bare avian that pose is the body's own `Position`; under the
-/// networked placement it is the pose the next physics step integrates the body to, which the
-/// colliders' pose and the body's own (there the same pose) both fall short of.
+/// The game's damage model: disjoint bodies have distinct immutable discovery chains. Each
+/// plate is read once and each witness takes a dose, despite motion during playback.
 #[test]
 fn a_round_through_one_tank_into_a_second_resolves_both() {
     for pose in [ChildPose::Avian, ChildPose::Networked] {
@@ -880,13 +843,12 @@ fn a_round_through_one_tank_into_a_second_resolves_both() {
         let reads = fire_and_read(&mut app, &fronts, Vec3::new(0.0, 0.0, FROM), 8);
         let (first, second) = (crossed_whole(&reads, 0), crossed_whole(&reads, 1));
         assert!(
-            reads[first].owed > 0.0,
-            "{pose:?}: the near crossing ran past its tick's travel"
+            reads[first].playing,
+            "{pose:?}: the near crossing still has playback after its contact tick"
         );
-        assert_eq!(
-            second,
-            first + 1,
-            "{pose:?}: the far tank is the next tick's crossing, at its own instant"
+        assert!(
+            second > first,
+            "{pose:?}: the far tank is discovered after the first crossing"
         );
         for (name, crew) in [("near", near_volumes[1]), ("far", far_volumes[1])] {
             assert!(
@@ -897,12 +859,8 @@ fn a_round_through_one_tank_into_a_second_resolves_both() {
     }
 }
 
-/// A REPLICA'S ROUND RUNS THROUGH AN ENVELOPE AS THE AUTHORITY'S DOES (design §13.5, "The replica
-/// runs the same march"). Through a static envelope that holds no armour, the tick that ends inside
-/// it runs on past its travel in both roles, and every tick ends at the same place owing the same
-/// overrun. The presented shell march relies on it to stand where the authority's round stands
-/// once each overrun is paid; a march whose envelope reach or payback depended on the role parts
-/// the two. Fixture data: a 3 m box at the hull's place, the round from [`FROM`].
+/// The game's damage model: an empty discovery envelope consumes no extra flight seconds.
+/// Authority and replica free flight must stay identical through it. Dimensions are fixture data.
 #[test]
 fn a_replicas_round_runs_through_an_envelope_as_the_authoritys() {
     let track = |client: bool| {
@@ -923,16 +881,12 @@ fn a_replicas_round_runs_through_an_envelope_as_the_authoritys() {
                 app.world_mut()
                     .query::<(&Transform, &Projectile)>()
                     .iter(app.world())
-                    .map(|(at, projectile)| (at.translation, projectile.owed))
+                    .map(|(at, _)| at.translation)
                     .collect::<Vec<_>>()
             })
             .collect::<Vec<_>>()
     };
     let (authority, replica) = (track(false), track(true));
-    assert!(
-        authority.iter().flatten().any(|&(_, owed)| owed > 0.0),
-        "a tick ends inside the envelope and runs on past its travel: {authority:?}"
-    );
     assert_eq!(authority, replica);
 }
 

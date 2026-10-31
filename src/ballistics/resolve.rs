@@ -20,11 +20,11 @@
 //!
 //! [`decide`] resolves a crossing from a [`Flight`] — the round's position, direction, speed,
 //! CURRENT sampling frame and continuation — into a typed [`Decision`] with nothing mutated.
-//! [`apply`] carries the runtime's consequences out of it (HP, impulses, marks, spall, events), and
+//! Timed playback carries the runtime consequences out of it (HP, impulses, marks, fields, events), and
 //! [`Flight::follow`] advances the flight to where the next crossing starts. The runtime march and
 //! the §13.6 gate (`fuzz`) both drive successive crossings through exactly this state machine; the
-//! gate observes the decisions and applies nothing. The seam is not yet complete: a spall cone's
-//! directions are marched in [`apply`], not decided (see there).
+//! gate observes the decisions and applies nothing. Playback freezes field directions and
+//! witness lines before delivering any crossing consequence.
 //!
 //! # Fields
 //!
@@ -56,8 +56,10 @@ use super::{
     ArmourMark, BallisticSurfaces, ComponentHealth, CrossingEnd, Impact, ImpactOutcome,
     ImpactSurface, MARCH_EPS, MarchingShell, PenetrationEvent, ProjectileMarchWorld, ShellRicochet,
     ShellStrike, ShellTerminal, TerminalVerdict, Verdict, VolumeCrossing, apply_hit_impulse,
-    throw_spall_cone,
 };
+
+mod playback;
+pub(crate) use playback::Playback;
 
 #[cfg(test)]
 mod tests;
@@ -69,21 +71,6 @@ const ENTRANCE_SPAN: f32 = 0.5;
 /// Ceiling on corridor extension. A crossing that has not closed in 50 m of material is not a
 /// crossing.
 pub(crate) const MAX_CORRIDOR: f32 = 50.0;
-
-/// Ceiling on how far one step's crossings may carry the flight past where the step legitimately
-/// ends ([`Budget::reach`]) — a chosen travel limit, not a certified bound.
-///
-/// A step legitimately runs to the end of its travel, or past it to where the line leaves every
-/// envelope it is inside (the march's `ProjectileMarchWorld::crossing_reach`), and the travel it
-/// owes a crossing of the last step is no overrun of this one. Past that a step runs only to close
-/// material a sample is held inside ([`Interior::holds_material`]), which every body's envelope
-/// holds, so in the shipped composition nothing runs there; a body spawned without its envelope
-/// does. Each such crossing closes within one [`MAX_CORRIDOR`], but a succession of them does not:
-/// held crossings chained end to end can carry the flight arbitrarily far while each one stays
-/// certifiable, so exceeding this does not prove the geometry malformed. It bounds how far
-/// downrange one step may apply consequences; the value is set at the corridor's scale as policy,
-/// and a step that reaches it is a bug and panics.
-pub(crate) const MAX_OVERRUN: f32 = MAX_CORRIDOR;
 
 /// Ceiling on the crossings one step may decide — a chosen resource limit, not a certified bound.
 ///
@@ -99,79 +86,49 @@ pub(crate) const MAX_STEP_CROSSINGS: usize = collect::MAX_FACES;
 #[derive(Resource, Clone, Copy)]
 pub(crate) struct StepCrossings(pub(crate) usize);
 
-/// One step's travel budget, spent by its successive crossings, and the limits nothing may pass.
-///
-/// Shared by the runtime march and the §13.6 gate's driver, so both stop a runaway step at the same
-/// crossing with the same structured error.
+/// The game's damage model: one tick's seconds and a ceiling on discovery work. Playback
+/// spends only available seconds; deciding an immutable crossing charges work, not travel.
 pub(crate) struct Budget {
-    /// Seconds left; negative once an atomic crossing runs past the clock, or from the start when
-    /// the time owed exceeds the step's.
-    remaining: f32,
-    /// The lowest `remaining` the step legitimately runs to: zero, or the travel owed past the
-    /// step's own, lowered by every reach past it ([`Self::reach`]). What lies below it is the
-    /// overrun [`MAX_OVERRUN`] bounds.
-    floor: f32,
+    remaining: f64,
     crossings: usize,
-    /// The crossings the step may decide.
     max_crossings: usize,
-    speed: f32,
 }
 
 impl Budget {
-    /// `travel` seconds, spent by at most `max_crossings` crossings. A negative `travel` is time
-    /// owed past the step's own, which the step flies none of and counts as no overrun.
-    pub(crate) fn new(travel: f32, max_crossings: usize, speed: f32) -> Self {
+    pub(crate) fn new(seconds: f64, max_crossings: usize) -> Self {
+        assert!(
+            seconds.is_finite() && seconds >= 0.0,
+            "a step has finite nonnegative seconds"
+        );
         Self {
-            remaining: travel,
-            floor: travel.min(0.0),
+            remaining: seconds,
             crossings: 0,
             max_crossings,
-            speed,
         }
     }
 
-    /// The step runs on `reach` seconds from where the flight stands: to the end of its clock, or
-    /// past it to where its envelopes end. A crossing that runs no further overruns nothing, and an
-    /// overrun already run stays counted.
-    pub(crate) fn reach(&mut self, reach: f32) {
-        self.floor = self
-            .floor
-            .min(self.remaining - reach + self.overrun(self.remaining));
-    }
-
-    /// Seconds below the floor a step standing at `remaining` has run.
-    fn overrun(&self, remaining: f32) -> f32 {
-        (self.floor - remaining).max(0.0)
-    }
-
-    /// Seconds left in the step (negative while resolving an atomic crossing past it).
-    pub(crate) fn remaining(&self) -> f32 {
+    pub(crate) fn remaining(&self) -> f64 {
         self.remaining
     }
 
-    /// The step has more to resolve: travel left, or material the flight is held inside, whose
-    /// crossing resolves now, past the budget if need be (see [`MAX_OVERRUN`]).
     pub(crate) fn continues(&self, flight: &Flight) -> bool {
         self.remaining > 0.0 || flight.holds_material()
     }
 
-    /// Spend `travel` seconds of open flight, counting no crossing; a negative value hands
-    /// seconds back.
-    pub(crate) fn fly(&mut self, travel: f32) {
-        self.remaining -= travel;
+    pub(crate) fn fly(&mut self, seconds: f64) {
+        assert!(
+            seconds.is_finite() && seconds >= 0.0,
+            "flight spends finite nonnegative seconds"
+        );
+        self.remaining = (self.remaining - seconds).max(0.0);
     }
 
-    /// Charge one more crossing of `travel` seconds, BEFORE its consequences are applied — or the
-    /// structured diagnostic that panics in gameplay. A refused crossing applies no consequences.
-    pub(crate) fn charge(&mut self, travel: f32) -> Result<(), WalkError> {
+    pub(crate) fn charge(&mut self) -> Result<(), WalkError> {
         let crossings = self.crossings + 1;
-        let remaining = self.remaining - travel;
-        let overrun = self.overrun(remaining) * self.speed;
-        if crossings > self.max_crossings || overrun > MAX_OVERRUN {
-            return Err(WalkError::DrainExhausted { crossings, overrun });
+        if crossings > self.max_crossings {
+            return Err(WalkError::DrainExhausted { crossings });
         }
         self.crossings = crossings;
-        self.remaining = remaining;
         Ok(())
     }
 }
@@ -225,8 +182,8 @@ pub(crate) fn disc_radius(caliber: f32) -> f32 {
 /// entry face that close to the plane is then owned by the seed AND re-collected ahead of the origin,
 /// or by nobody. The flight converts to world only for its cast and for presentation.
 ///
-/// Lives within one step: a step ends outside every envelope ([`super::Envelope`]), and the next
-/// lays a fresh disc there, its membership established, from the axis start alone ([`AxisStart`]).
+/// Membership belongs to discovery. An immutable playback result retains its completed path;
+/// the next discovery chain lays a fresh disc only after leaving every envelope ([`super::Envelope`]).
 #[derive(Clone, Debug)]
 pub(crate) struct Interior {
     /// WORLD anchor of the corridor the seeds were read on.
@@ -967,8 +924,8 @@ pub(crate) struct Flight {
 impl Flight {
     /// A step's flight from a fresh disc laid on `frame` at the axis start `axis` (or, with none,
     /// at `position`), square to `swept`, its membership established ([`certified`]). Nothing a
-    /// sample was inside is carried in: a step ends outside every envelope ([`super::Envelope`]),
-    /// so a crossing never straddles the tick.
+    /// sample was inside is carried into new discovery: its preceding immutable chain ends
+    /// outside every envelope ([`super::Envelope`]). Playback itself can span ticks.
     ///
     /// The last sweep ran along `swept`; the flight now travels along `direction`. The disc stays
     /// square to `swept` and each sample's ray simply bends: no bend is too large for this, a
@@ -1137,7 +1094,7 @@ impl Flight {
 }
 
 /// What one crossing decided, before any consequence is applied: the runtime applies it
-/// ([`apply`]); the §13.6 gate only observes it.
+/// through timed playback; the §13.6 gate only observes it.
 ///
 /// Positions are WORLD; the continuation alone stays anchor-relative ([`Interior`]).
 #[derive(Clone, Debug)]
@@ -1169,7 +1126,9 @@ impl Decision {
     pub(crate) fn seconds(&self, speed: f32) -> f32 {
         match self {
             Self::Clear { travel, .. } => *travel / speed,
-            Self::Bounce(bounce) => bounce.travel / bounce.speed_in,
+            Self::Bounce(bounce) => {
+                (bounce.travel - MARCH_EPS).max(0.0) / bounce.speed_in + MARCH_EPS / bounce.speed
+            }
             Self::Bite(bite) => {
                 let mut seconds = f64::from(bite.approach / bite.speed_in);
                 let (mut at, mut speed) = (0.0, f64::from(bite.speed_in));
@@ -1343,6 +1302,8 @@ pub(crate) struct Bite {
     pub speed_in: f32,
     /// Every volume the line put a chord into, with how far it got through it, in volume order.
     pub volumes: Vec<VolumeCrossing>,
+    /// The game's damage model keeps effect progress in corridor f64, before world rounding.
+    pub volume_ends: std::collections::BTreeMap<Entity, f64>,
     /// Line-of-sight metres flown from the flight's position, summed over the segments actually
     /// flown: the approach to the AXIS hand-off along the way in, then the transit along the bend,
     /// and for a perforation the nudge on to the resume point.
@@ -1669,14 +1630,37 @@ fn bite(
     way_in.from = world(from);
     let entrance = world(plan.entrance.position);
     let rest = match plan.outcome {
-        Outcome::Embedded { t, .. } => Some(t as f64),
+        Outcome::Embedded { .. } => Some(
+            plan.motion
+                .last()
+                .expect("an embedded crossing advances at least one encounter")
+                .end,
+        ),
+        Outcome::Perforated { .. } if plan.state.speed == 0.0 => Some(
+            plan.motion
+                .last()
+                .expect("a rest at the rear face advanced a mechanism encounter")
+                .end,
+        ),
         Outcome::Perforated { .. } => None,
     };
     let volumes = volume_crossings(transit, &plan.crossing, &plan.deposits, rest, &world);
+    let volume_ends = exposed_spans(&plan.crossing, rest)
+        .into_iter()
+        .map(|(volume, (_, end))| (volume, rest.map_or(end, |stop| end.min(stop))))
+        .collect();
     let (end, flown) = match plan.outcome {
         Outcome::Embedded { at, t } => (
             BiteEnd::Embedded {
                 at: world(at),
+                direction: bent,
+                impulse: mass * v_in,
+            },
+            t,
+        ),
+        Outcome::Perforated { exit, t, .. } if plan.state.speed == 0.0 => (
+            BiteEnd::Embedded {
+                at: world(exit),
                 direction: bent,
                 impulse: mass * v_in,
             },
@@ -1710,6 +1694,7 @@ fn bite(
         incoming,
         speed_in,
         volumes,
+        volume_ends,
         normal: plan.entrance.normal,
         struck,
         coverage: plan.entrance.coverage,
@@ -1748,26 +1733,7 @@ fn volume_crossings(
     rest: Option<f64>,
     world: &impl Fn(Vec3) -> Vec3,
 ) -> Vec<VolumeCrossing> {
-    let mut spans: std::collections::BTreeMap<Entity, (f64, f64)> = Default::default();
-    for contact in event
-        .encounters
-        .iter()
-        .flat_map(|encounter| &encounter.samples)
-        .flat_map(|sample| {
-            let strongest = super::mechanism::overlap_factor(&sample.present);
-            sample
-                .present
-                .iter()
-                .filter(move |contact| contact.material.factor == strongest)
-        })
-        .filter(|contact| rest.is_none_or(|rest| contact.start < rest))
-    {
-        let span = spans
-            .entry(contact.volume)
-            .or_insert((contact.start, contact.end));
-        span.0 = span.0.min(contact.start);
-        span.1 = span.1.max(contact.end);
-    }
+    let spans = exposed_spans(event, rest);
     let at = |t: f64| world(transit.origin + transit.axis * t as f32);
     deposits
         .iter()
@@ -1793,6 +1759,95 @@ fn volume_crossings(
             })
         })
         .collect()
+}
+
+/// The game's damage model: exposed volume progress stays in corridor precision until effects
+/// are addressed by moment. World positions are readouts, never timing inputs.
+fn exposed_spans(
+    event: &walk::DiscEvent,
+    rest: Option<f64>,
+) -> std::collections::BTreeMap<Entity, (f64, f64)> {
+    let mut spans: std::collections::BTreeMap<Entity, (f64, f64)> = Default::default();
+    for contact in event
+        .encounters
+        .iter()
+        .flat_map(|encounter| &encounter.samples)
+        .flat_map(|sample| {
+            let strongest = super::mechanism::overlap_factor(&sample.present);
+            sample
+                .present
+                .iter()
+                .filter(move |contact| contact.material.factor == strongest)
+        })
+        .filter(|contact| rest.is_none_or(|rest| contact.start < rest))
+    {
+        let span = spans
+            .entry(contact.volume)
+            .or_insert((contact.start, contact.end));
+        span.0 = span.0.min(contact.start);
+        span.1 = span.1.max(contact.end);
+    }
+    spans
+}
+
+/// The game's damage model: a certified approach and the first contact it contains. A fuze
+/// can end its approach at that boundary; continuing discovery must process the contact first.
+pub(crate) struct CertifiedSpan {
+    pub decision: Decision,
+    pub contact: Option<f32>,
+}
+
+/// The game's damage model certifies an open discovery span before retaining its end membership.
+/// The nearest-hit cast is only discovery; the collector may still own a face within its rounding
+/// band. Such a face is resolved by the same crossing driver, never stepped over as clear air.
+pub(crate) fn clear_path(
+    context: &ResolveContext<'_, '_, '_>,
+    admit: &dyn Fn(Entity) -> bool,
+    round: &SolidShot,
+    flight: &Flight,
+    travel: f32,
+) -> Result<CertifiedSpan, WalkError> {
+    let travel = travel.min(MAX_CORRIDOR);
+    let interior = flight
+        .continuation
+        .as_ref()
+        .expect("discovery establishes each sample's start");
+    let walked = closing_walk(
+        context,
+        admit,
+        interior.anchor,
+        interior.origin,
+        *flight.direction,
+        flight.frame,
+        disc_radius(round.body().caliber),
+        &interior.seeds,
+        travel.max(ENTRANCE_SPAN),
+    )?;
+    let contact = walked
+        .events
+        .first()
+        .filter(|crossing| crossing.start <= f64::from(travel))
+        .map(|crossing| crossing.start.max(0.0) as f32);
+    let origin = interior.origin + flight.direction * travel;
+    Ok(CertifiedSpan {
+        contact,
+        decision: Decision::Clear {
+            resume: interior.anchor + origin,
+            travel,
+            continuation: Interior {
+                anchor: interior.anchor,
+                origin,
+                seeds: walked.resume_at(f64::from(travel), &context.laws),
+            },
+            leg: Leg::new(
+                interior.world_origin(),
+                flight.direction,
+                travel,
+                &walked.offsets,
+            )
+            .with_presence(&walked),
+        },
+    })
 }
 
 /// Collect and walk a corridor, extending it until the first crossing CLOSES.
@@ -1977,45 +2032,6 @@ pub(super) fn volume_table(
     Ok(VolumeTable::new(entries))
 }
 
-/// Apply a decision's consequences on the runtime: HP, impulses, the shell's marks and path, spall,
-/// and the impact and authority events. Returns the pool units actually removed.
-///
-/// Transit doses, a bounce's shock, the impulses and the events all come out of the
-/// [`Decision`]. Spall does NOT: the decision carries each spall source, but the cone's directions
-/// and what each one enters are resolved here, against the live world ([`throw_spall_cone`]), into
-/// addressed doses added to the same [`super::ShotDose`] as the line's. So the §13.6 gate, which
-/// observes the decisions and applies none of this, reads every transit dose and every bounce the
-/// runtime acts on, and no field dose. HP falls once the decision's doses are all added
-/// ([`super::ShotDose::settle`]).
-pub(crate) fn apply(
-    decision: &Decision,
-    shell: &mut MarchingShell,
-    context: &ResolveContext<'_, '_, '_>,
-    terminal_emitted: &mut bool,
-    health: &mut Query<&mut ComponentHealth>,
-    bodies: &mut Query<Forces>,
-    commands: &mut Commands,
-) -> u64 {
-    match decision {
-        Decision::Clear { .. } => return 0,
-        Decision::Bounce(bounce) => {
-            apply_bounce(bounce, shell, terminal_emitted, bodies, commands);
-        }
-        Decision::Bite(bite) => apply_bite(
-            bite,
-            shell,
-            context,
-            terminal_emitted,
-            &|volume| health.contains(volume),
-            bodies,
-            commands,
-        ),
-    }
-    // Both arms log exactly one mark, so the settle closes the last.
-    let mark = shell.marks.log.len().saturating_sub(1);
-    shell.dose.settle(health, context.deposit, mark)
-}
-
 fn apply_bounce(
     bounce: &Bounce,
     shell: &mut MarchingShell,
@@ -2077,35 +2093,14 @@ fn apply_bounce(
     }
 }
 
-fn apply_bite(
+fn finish_bite(
     bite: &Bite,
+    mark: usize,
     shell: &mut MarchingShell,
-    context: &ResolveContext<'_, '_, '_>,
     terminal_emitted: &mut bool,
-    is_box: &dyn Fn(Entity) -> bool,
     bodies: &mut Query<Forces>,
     commands: &mut Commands,
 ) {
-    // The game's damage model: transit doses give each HP-bearing volume the energy lost where
-    // it was the strongest volume present (§13.2's damage law), each deposit from the line's entry into its
-    // own volume. Every deposit has that entry: `walk::finish` builds the bite's
-    // deposits as Line doses only, each addressed to a volume present in the first event's
-    // encounters, and `volume_crossings` builds one crossing per Line deposit from the same
-    // encounters.
-    let incoming = Vec3::from(bite.incoming);
-    shell.dose.add_all(&bite.deposits, |dose| {
-        let entry = bite
-            .volumes
-            .iter()
-            .find(|crossed| crossed.volume == dose.address)
-            .expect("a crossing per Line deposit, both from the first event's encounters")
-            .entry;
-        super::DoseContext::Line {
-            entry,
-            along: incoming,
-        }
-    });
-
     let (verdict, position, terminal_at) = match &bite.end {
         BiteEnd::Embedded { at, impulse, .. } => {
             shell.marks.events.push(PenetrationEvent {
@@ -2135,31 +2130,6 @@ fn apply_bite(
             (TerminalVerdict::Through, bite.entrance, bite.entrance)
         }
     };
-    // Every exit the round reached throws, whether it then stopped or went on, unless its cone is
-    // below the pool quantum.
-    let mut cones = 0;
-    for source in &bite.spall {
-        if throw_spall_cone(shell.spall, shell.dose, source, bite.owner, context, is_box) {
-            cones += 1;
-        }
-    }
-    shell.marks.log.push(ArmourMark::Crossing {
-        entrance: bite.entrance,
-        normal: bite.normal,
-        incoming: Vec3::from(bite.incoming),
-        speed_in: bite.speed_in,
-        overmatched: bite.overmatched,
-        volumes: bite.volumes.clone(),
-        end: match &bite.end {
-            BiteEnd::Embedded { at, .. } => CrossingEnd::Rest { at: *at },
-            BiteEnd::Perforated { exit, speed, .. } => CrossingEnd::Exit {
-                at: *exit,
-                speed: *speed,
-            },
-        },
-        cones,
-    });
-
     commands.trigger(Impact {
         position,
         normal: bite.normal,
@@ -2181,7 +2151,7 @@ fn apply_bite(
         }
         commands.trigger(ShellStrike {
             shot: shot.0,
-            sequence: (shell.marks.log.len() - 1) as u32,
+            sequence: mark as u32,
             struck: bite.struck,
             at: bite.entrance,
             normal: bite.normal,
