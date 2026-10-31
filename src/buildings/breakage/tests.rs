@@ -2124,3 +2124,59 @@ fn degenerate_chunk_hulls_are_refused_before_play() {
         );
     }
 }
+
+/// A TINY CONTACT KEEPS THE SAME PLASTIC SHARE (the game's environment destruction model).
+/// The authority's shared exchange cap must square in f64, not underflow its positive-response
+/// check in f32. Scaling the input changes the launch by that scale, including subnormal inputs.
+/// Speeds and mass ratio below are ASSUMED fixture data.
+#[test]
+fn tiny_exchanges_keep_their_plastic_share_without_underflow() {
+    let kind = shipped_house();
+    let structure = kind.layout.structure(&kind.asset, 1.0);
+    let (_, [c, _, _]) = fixture_chunks(&kind);
+    let free = launch(&kind, &structure, 1.0, &[c], &[]);
+    let com = free.centroid + departure_mass(&structure, &free).center_of_mass;
+    let body = Entity::PLACEHOLDER;
+    for speed in [3.0, 1e-20, 1e-30, f32::from_bits(1)] {
+        let load = Load {
+            chunk: c,
+            at: com,
+            energy: 0.0,
+            blow: Vec3::Z * speed,
+            press: Vec3::ZERO,
+            peak: None,
+            origin: Origin::Body {
+                body,
+                mass: 1.0,
+                speed,
+            },
+        };
+        let mut departures = [Departure {
+            kind: kind.clone(),
+            building: 0,
+            scale: 1.0,
+            root: Transform::IDENTITY,
+            group: vec![c],
+            launch: launch(&kind, &structure, 1.0, &[c], &[load]),
+        }];
+        cap_exchanges(&mut departures, |_| crate::contact_transfer::BodyInertia {
+            centre: com,
+            inverse_mass: Vec3::ONE,
+            inverse_inertia: Mat3::ZERO,
+        });
+        let launched = &departures[0].launch;
+        assert!(launched.velocity.is_finite() && launched.spin.is_finite());
+        let expected = f64::from(speed) / (1.0 + f64::from(launched.mass));
+        let error = (f64::from(launched.velocity.z) - expected).abs();
+        assert!(
+            error <= expected * 2e-5 + f64::from(f32::from_bits(1)),
+            "speed {speed}: {error}"
+        );
+        assert!(
+            (launched.returns[0].impulse + launched.velocity * launched.mass - load.blow)
+                .as_dvec3()
+                .length()
+                <= f64::from(speed) * 2e-5 + f64::from(f32::from_bits(1))
+        );
+    }
+}

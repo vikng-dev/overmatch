@@ -1572,7 +1572,7 @@ pub(crate) fn launch(
         if load.blow == Vec3::ZERO {
             continue;
         }
-        let arm = (load.at - com).cross(load.blow.normalize());
+        let arm = (load.at - com).cross(load.blow.as_dvec3().normalize().as_vec3());
         let inverse_mass = 1.0 / total.mass + arm.dot(inverse_inertia * arm);
         let launched = load.blow * load.origin.share(inverse_mass);
         impulse += launched;
@@ -1649,45 +1649,48 @@ fn cap_connected_exchanges(
     component: &[usize],
     inertia_of: &impl Fn(Entity) -> crate::contact_transfer::BodyInertia,
 ) {
-    let mut sources: BTreeMap<Entity, (Vec3, Vec3)> = BTreeMap::new();
+    let mut sources: BTreeMap<Entity, (DVec3, DVec3)> = BTreeMap::new();
     let (mut work, mut quadratic) = (0.0_f64, 0.0_f64);
     for departure in component.iter().map(|&index| &departures[index]) {
         let launch = &departure.launch;
         let field_velocity = launch.velocity - launch.body_velocity;
         let field_spin = launch.spin - launch.body_spin;
-        work -= f64::from(
-            launch.mass * field_velocity.dot(launch.body_velocity)
-                + field_spin.dot(launch.inertia * launch.body_spin),
-        );
-        quadratic += f64::from(
-            launch.mass * launch.body_velocity.length_squared()
-                + launch.body_spin.dot(launch.inertia * launch.body_spin),
-        );
+        let body_velocity = launch.body_velocity.as_dvec3();
+        let body_spin = launch.body_spin.as_dvec3();
+        let inertia = launch.inertia.as_dmat3();
+        work -= f64::from(launch.mass) * field_velocity.as_dvec3().dot(body_velocity)
+            + field_spin.as_dvec3().dot(inertia * body_spin);
+        quadratic += f64::from(launch.mass) * body_velocity.length_squared()
+            + body_spin.dot(inertia * body_spin);
         for (load, impulse) in &launch.exchanges {
             let Origin::Body { body, speed, .. } = load.origin else {
                 unreachable!("only body blows have a source exchange");
             };
             let inertia = inertia_of(body);
             let at = departure.root.translation + departure.root.rotation * load.at;
-            let impulse_world = departure.root.rotation * *impulse;
+            let impulse_world = (departure.root.rotation * *impulse).as_dvec3();
             let source = sources.entry(body).or_default();
             source.0 += impulse_world;
-            source.1 += (at - inertia.centre).cross(impulse_world);
-            work += f64::from(impulse.length() * speed);
+            source.1 += (at - inertia.centre).as_dvec3().cross(impulse_world);
+            work += impulse.as_dvec3().length() * f64::from(speed);
         }
     }
     for (body, (impulse, angular)) in sources {
         let inertia = inertia_of(body);
-        quadratic += f64::from(
-            impulse.dot(inertia.inverse_mass * impulse)
-                + angular.dot(inertia.inverse_inertia * angular),
-        );
+        quadratic += impulse.dot(inertia.inverse_mass.as_dvec3() * impulse)
+            + angular.dot(inertia.inverse_inertia.as_dmat3() * angular);
     }
     assert!(
-        work.is_finite() && quadratic.is_finite() && quadratic > 0.0,
-        "finite contact velocities, impulses and occupied carrier mass give a finite positive response"
+        work.is_finite() && quadratic.is_finite() && quadratic >= 0.0,
+        "finite contact velocities, impulses and occupied carrier mass give a finite nonnegative response"
     );
-    let scale = (work / quadratic).clamp(0.0, 1.0) as f32;
+    // DERIVED: squaring an f32 impulse in f64 retains even its smallest subnormal. A launch
+    // rounded wholly to zero has no exchange to scale; return its source's blow whole.
+    let scale = if quadratic > 0.0 {
+        (work / quadratic).clamp(0.0, 1.0) as f32
+    } else {
+        0.0
+    };
     for &index in component {
         let launch = &mut departures[index].launch;
         launch.velocity += launch.body_velocity * (scale - 1.0);
