@@ -104,13 +104,13 @@ impl Look {
     }
 }
 
-/// `value`'s position in `order`; every ladder lists every value it can hold, so the fallback is
-/// unreachable from a parsed file.
+/// `value`'s position in `order`. Every caller passes a type's `ORDER`, which lists each of its
+/// variants once; a value missing from its ladder is a bug in that `ORDER`.
 fn rank<T: PartialEq>(order: &[T], value: T) -> usize {
     order
         .iter()
         .position(|entry| *entry == value)
-        .unwrap_or_default()
+        .expect("a ladder's ORDER lists every variant of its type")
 }
 
 impl Preset {

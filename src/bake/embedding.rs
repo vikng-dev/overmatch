@@ -39,7 +39,6 @@
 //! The parameter along that line is a coordinate the line's direction moves along, so it orders
 //! points on it exactly, and the endpoints are ratios of exact integers.
 
-use std::cmp::Ordering;
 use std::collections::BTreeMap;
 
 use crate::exact::{Int, Ratio};
@@ -69,11 +68,6 @@ struct Face {
     high: [f32; 3],
 }
 
-/// Certify that no shell passes through itself.
-///
-/// `triangles` are welded corners in mesh order, `shells` the dense shell id of each, and
-/// `vertices` the canonical position of each welded id — the manifold gate's own three products,
-/// so this measures exactly the surface the gate proved closed.
 /// Whether a welded triangle encloses exactly zero area — the exact spelling of "has no plane".
 ///
 /// `L2.EXACT_DEGENERACY` owns this, one law over both its spellings: repeated welded ids, and three
@@ -85,6 +79,11 @@ pub(super) fn encloses_zero_area(position: &[[f32; 3]; 3]) -> bool {
         .all(Int::is_zero)
 }
 
+/// Certify that no shell passes through itself.
+///
+/// `triangles` are welded corners in mesh order, `shells` the dense shell id of each, and
+/// `vertices` the canonical position of each welded id — the manifold gate's own three products,
+/// so this measures exactly the surface the gate proved closed.
 pub(super) fn certify_embedding(
     triangles: &[[u32; 3]],
     shells: &[u32],
@@ -115,8 +114,7 @@ pub(super) fn certify_embedding(
         let axis = longest_axis(faces);
         faces.sort_by(|a, b| {
             a.low[axis]
-                .partial_cmp(&b.low[axis])
-                .unwrap_or(Ordering::Equal)
+                .total_cmp(&b.low[axis])
                 .then(a.index.cmp(&b.index))
         });
         for (slot, face) in faces.iter().enumerate() {
@@ -149,7 +147,7 @@ fn longest_axis(faces: &[Face]) -> usize {
     }
     (0..3)
         .max_by(|a, b| spread[*a].total_cmp(&spread[*b]))
-        .unwrap_or(0)
+        .expect("three axes")
 }
 
 /// Whether one pair of same-shell triangles meets only inside what it declares it shares.
