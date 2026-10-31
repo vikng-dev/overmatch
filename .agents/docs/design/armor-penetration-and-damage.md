@@ -1523,16 +1523,10 @@ per 240 s at 30 bots, MEASURED 2026-10-31 on the build after the turret-scale fi
 - **The transit crossing** is the transit corridor's crossing, by the same rule, and it begins at
   the hand-off. The flight resumes past the crossing's end, so a run that began inside it and was
   resolved apart from it would be skipped, or charged only from the resume point on.
-- **The safe stop stays, as a tripwire.** A transit corridor that is not the one its entrance
-  asked for still stops the round at contact (fail closed). The stop is no outcome of the damage
-  model: it logs one error under a stable kind per failure reason (`WalkError::kind`), which a
-  report from real matches groups by (#194).
-
-The one stop the hand-off did not cause (`unexpected_exit`: a continuation carried across a tick
-onto moving armour) is gone with the envelope below, under which no continuation crosses a tick.
-The 240 s 30-bot run after it landed logged no walk failure and no uncertified start (MEASURED
-2026-10-31); that run stood no tree and moved no loose piece, so pieces and trees rest on the unit
-tests alone.
+- **The game's damage model refuses contradictions.** A transit corridor that is not the one its
+  entrance asked for is a broken invariant and panics in every build, naming the invariant and
+  structured diagnostic (`WalkError::kind`). Invalid geometry is refused at load. Neither case
+  becomes an armour verdict or a skipped dose.
 
 Rejected: extending the entrance walk until it covers the shared plane wherever it lands (no less
 shared, and a longer walk meets more pieces to land past — failures rose from 3 to 7 in the same
@@ -1540,116 +1534,38 @@ shared, and a longer walk meets more pieces to land past — failures rose from 
 depends on the corridor's length: moving a hand-off by `δ` along the incoming axis `u` shifts the
 bent ray `b` sideways by `δ (u − b (u·b))`, DERIVED).
 
-**The envelope: a crossing resolves at one instant (PROVISIONAL, owner decision 2026-10-31,
-#191).** From the moment a round enters a body's envelope until it has left every envelope, its
-crossing is resolved at one instant against the bodies as they stand, so no continuation is carried
-across a tick boundary onto moving armour (the `unexpected_exit` above).
+**The game's damage model: the walk's clock and moving-body law (#191).** The walk runs
+*after* the physics step. Each body is tested in its own frame, from its known tick-start pose
+`from` to its known tick-end pose `to`: the round's world segment `p0 → p1` becomes
+`from⁻¹ · p0 → to⁻¹ · p1`. The segment parameter is a moment in the tick, and the earliest entering
+face over all colliders is first contact. Nothing is predicted. Between the known poses the body
+moves on a straight chord (lerp/slerp); the departure from its true path is graze-sized (DERIVED
+≤ 1 cm for a turning tank, ≤ 3 cm for a turret at an ASSUMED angular speed of 10 rad/s). Adjacent
+intervals share both endpoint poses, so their chords agree at the boundary.
 
-- **What it is.** An invisible axis-aligned box, never a collider, in the body's own frame (the
-  tank root's). It holds every part the bake captures (armour, components, crew boxes, collision
-  proxies) at every angle each servo can take within the sheet's travel window, a full turn for a
-  continuous traverse, so it holds the turret's whole sweep and the gun's whole elevation range.
-- **Every body the walk can cross carries one**, built at spawn from its data, no class of body
-  special (ADR-0034). A tank's and a launched turret's come from the bake, swept over their servos
-  (below). A body with no servo carries the bounds of what it stands in its frame: a building the
-  bounds of its kind's element points and chunk hull points at its scale (`buildings::spawn`), so
-  every element and every chunk a swap can stand lies inside; a loose wall piece and a tree their
-  colliders' bounds (`ballistics::Envelope::holding`, a tree's re-derived with its body when its
-  state moves a segment, `trees::derive_state`); a sandbox target its one collider's
-  (`ballistics::Envelope::of`). A static body needs no sweep; a moving one is covered by the poses
-  below. A body spawned without one is crossed with no reach past its travel, so only a held
-  sample's drain carries a step through it (the fixtures alone have such bodies).
-- **How it is computed.** Once per tank kind at load, in the bake that extracts the armour
-  (`bake::envelope`, carried on `TankBlueprint::envelopes`), as a pure function of the extracted
-  geometry and the sheet's servos: conservative and threshold-free. Each servo's subtree enters its
-  parent as the corners of the exact box of every point's arc over the servo's window, and the
-  faces are rounded outward to f32. The box holds exact-arithmetic placement; a consumer pads it
-  for the sim's f32 placement by `extent · 2^-20` (`bake::envelope` states the derivation).
-- **A launched turret** gets its own envelope by the same rule, in its own frame: its traverse is
-  now its pose, and the servos under it are swept.
-- **The recoil stroke is swept.** Each recoiling barrel's sheet states its recoil stop
-  (`RecoilSpec::max_length`), the buffer's limit, which the spring never passes however fast the
-  gun fires; the barrel's subtree enters the envelope at battery and at the stop.
-- **The crossing (step 6b).** Each spawn carries its kind's envelopes (`ballistics::Envelope`: the
-  tank's on its root, the turret's on the turret, read once a cook-off launches it free). A step
-  whose travel ends inside an envelope runs on, past its travel, until the round's line has left
-  every envelope it is inside; overlapping envelopes chain into one crossing, and an envelope the
-  round reaches only after leaving another, beyond the step's travel, is the next step's crossing.
-  The test grows each box by the farthest any sample starts from the axis (`resolve::Flight::spread`:
-  the disc's radius, and once an oblique perforation staggers the starts along the plate up to
-  `r / cos(incidence)` for a planar exit, DERIVED; a curved exit staggers otherwise, and the march
-  reads the starts as they stand, so nothing relies on the bound), by `extent · 2^-20` and by
-  `MARCH_EPS` for its own world-to-body arithmetic (`ProjectileMarchWorld::crossing_reach`). The
-  shooter's own envelope is passed through, as its volumes are. The run past the travel through
-  envelopes is the step's own: `resolve::MAX_OVERRUN` counts only what a held drain runs past that
-  reach (`resolve::Budget::reach`), so a long chain of loose envelopes (a felled tree's box is up
-  to 17.8 × 1.8 × 17.8 m on `fir_1`, DERIVED in the #191 seam review) never fails a crossing closed.
-- **An envelope stands at every pose the next walk can cast at.** Where a moving body's child
-  colliders stand when the walk casts depends on the composition. Bare avian (the sandbox, the
-  fixtures) places them from the body's pose at the physics step's start, a step behind the body's
-  own `Position` (0.16 m on a tank at 10 m/s, DERIVED), so the next walk casts at the current
-  `Position`. The networked server and client place them again after the fixed loop at the body's
-  post-step pose (`LightyearAvianPlugin::update_child_collider_position`), so a march that is its
-  frame's only tick finds them at the body's own `Position`, and the next walk casts at the pose
-  the next physics step integrates the body to. The envelope is tested at three poses: where the
-  colliders stand (`ProjectileMarchWorld::placed_pose`, read back off a child collider as the pen
-  cam's hull frame is), at the body's own pose, and at its pose integrated over the step at its
-  current velocities, turned about its centre of mass as avian's solver turns it
-  (`NextStep::integrated_pose`). A crossing ends outside all three. The pad grows by
-  `2 · |g| · dt²` for the next step's change of velocity: gravity, and as much again for a ground
-  force at μ ≤ 1 (DERIVED; the μ ceiling ASSUMED). Each pose has a fixture that fails without it,
-  and both run under both compositions (`ChildPose` in the recording tests). At the body's own pose
-  alone, a crossing of a tank driving at the round ended short of its rear plate, which had passed
-  the round by the next step and was never read (MEASURED in the fixture,
-  `a_moving_tanks_crossing_resolves_against_its_pose_at_contact`). At the colliders' pose alone, a
-  tank driving away carried its rear plate back over the round a disc's radius past it, and the
-  next step read the plate again (MEASURED, `a_round_through_one_tank_into_a_second_resolves_both`).
-  Under the networked placement, without the integrated pose, the receding tank's back plate was
-  read again a tick later (MEASURED, the same test).
-- **What the poses cannot see** (the stated limitation): the rule assumes one physics step of `dt`
-  runs before the next march, moves each body within the pad of where its velocities take it, and
-  that nothing else puts armour where it was not. A collision or a blast's push in the next step,
-  a body placed without being integrated there (a loose piece a deposit launches after the march;
-  a felled trunk laid along the round's own heading by `trees::derive_systems`, which needs a cut
-  at segment 0 and a hit below about 0.4 m on `fir_1`, DERIVED), and a frame of the sandbox's
-  per-frame march (`MarchMode::Demo`) spanning other than one physics step each put armour over
-  the next step's start. Certification then reads it as a start inside that armour, and the walk
-  charges its exit as a second crossing. The deposit's piece is the common one: a group launched
-  along the round's line faster than about 3.5 m/s covers the start of an 88 that just perforated
-  it, with its exit face on the building's bound (DERIVED at 64 Hz: the 50 mm pad and the 5 mm
-  loose gap over `dt`). No envelope size fixes that; fixing it is open (#191).
-- **No armour state crosses a tick.** The shell carries its axis position (anchor plus offset, so
-  open flight never re-rounds it at world spacing) and the travel the last crossing flew past its
-  step (`Projectile::owed`), which the next steps' travel is short by, over as many steps as the
-  debt takes (`an_overrun_longer_than_a_step_is_paid_back_over_steps`). Every step lays a fresh
-  square disc at the axis start and establishes its membership (`resolve::certified`). As every
-  body carries an envelope and a step ends outside it at every pose above, that re-squaring moves
-  no sample over armour and no moving body's collider lag reaches the next step, within the stated
-  limitation above: an oblique perforation ending a tick reads its plate once and ends at least
-  1.5 r clear of it (`an_oblique_perforation_that_ends_a_tick_reads_its_plate_once`).
-- **Travel is conserved but at two ends.** A round that stops or holds inside a crossing's overrun
-  stands ahead of the clock by that overrun and owes nothing (a stopped or held round's
-  `Projectile::owed` is zero): a stopped round stays where it stopped, and a held one's release
-  lays its disc where it froze. A step whose crossing leaves no more than `MARCH_EPS` of travel ends
-  there owing nothing, dropping up to 1 mm (DERIVED from `MARCH_EPS`).
-- **The replica runs the same march**, so the presented shell march extends through envelopes and
-  owes its overrun by the authority's rule; its armour contacts still take the authority's
-  outcomes. Its inputs differ, so its overruns do:
-  - a client's bodies stand at interpolated, wire-quantised poses (`net::protocol`'s
-    `add_linear_interpolation` over `net::wire_quant`'s codecs), and a resync of lightyear's
-    interpolation timeline drops `Position` from every replica hull for a frame
-    (`apply_launched_turret_pose`'s doc), taking their envelopes out of the scan;
-  - loose wall pieces are server-only bodies, their client carriers view-only with no collider and
-    no envelope (`net::debris_stress` module doc), so a replica's march runs through no piece's
-    envelope;
-  - a client's tree envelopes change when the tree state arrives (`net::destruction`), not at the
-    authority's derive tick;
-  - the cosmetic catch-ups (`fast_forward_shell`, `catch_up_sanctioned_chain`) fly no overrun.
-  Each difference is at most one crossing's overrun, and the next steps pay it back, so the two
-  tracks come back together once `owed` is paid (DERIVED).
+- **Seconds, not metres.** A round spends the tick's seconds. Each mechanism stretch costs
+  `Δt = ∫ ds / v(s)`, including the slowing inside material; open flight consumes the remaining
+  seconds at the resulting speed. Allocating the tick's metres at its initial speed lets a slowed
+  round run ahead of its clock (DERIVED up to 6.25 m in a tick in the counterexample). No distance
+  debt or later payback can repair consequences already delivered ahead of time.
+- **Decide once, then play back (option B, decided).** First contact decides an immutable crossing:
+  its world path, speed along that path, and effects addressed by moment. Playback walks it at the
+  round's real speed across tick boundaries. Each effect lands in the tick containing its moment;
+  a later tick does not re-test moving armour or decide the same crossing again. Cumulative
+  rounding is retained so changing the tick partition changes neither total dose nor path.
+- **Clients consume outcomes.** Clients never test armour. They rebuild the path from the fire
+  event and the server's outcomes; an outcome arriving late is shown when it arrives.
+- **A start inside a collider is a bug**, and panics. Playback inside its already-decided crossing
+  is not a new contact-discovery start. Bodies move rather than being placed: a felled tree falls.
 
-Provisional: the computation may move into a refined asset-bake pipeline with dev tooling, which is
-why it reads nothing but the bake's data.
+**Implementation boundary.** This paragraph specifies the target law, not a claim that all of it
+has landed. Lane `walk-w1` owns seconds, immutable timed crossings and removal of distance overrun.
+Lane `walk-w2` owns contact discovery and the look-back body-frame segment; until it lands,
+`Envelope`, `NextStep` and `ProjectileMarchWorld::crossing_reach` remain temporary discovery
+machinery. The redesign also removes envelope baking and spawn inserts, pose prediction, tick-start
+containment certification, the Demo march mode, the flat-world terrain arm and treating an armour
+collider without a ballistic volume as ground (that case becomes an error). Those deletions belong
+to the later lanes; this law does not certify the old envelope model's pose assumptions.
 
 ### 13.6 Invariants — the machine-checkable contract
 
