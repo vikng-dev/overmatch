@@ -502,16 +502,20 @@ fn read_contacts(
     *read = transfers.steps();
     let contacts: Vec<(Entity, Load)> = transfers
         .split()
-        .filter_map(|(point, blow, press)| contact_load(&colliders, &buildings, point, blow, press))
+        .filter_map(|(point, blow, press, mass)| {
+            contact_load(&colliders, &buildings, point, blow, press, mass)
+        })
         .collect();
     resting.0.clear();
     for rest in transfers.resting() {
+        // A resting press has no blow, so no law reads its source mass; the point's own stands.
         if let Some((root, load)) = contact_load(
             &colliders,
             &buildings,
             &rest.transfer,
             Vec3::ZERO,
             rest.press(),
+            rest.transfer.effective_mass,
         ) {
             resting.0.entry(root).or_default().push(load);
         }
@@ -525,7 +529,8 @@ fn read_contacts(
 }
 
 /// The load a body's contact point `transfer` puts on a building, with `blow` (N·s) and `press`
-/// (N) in world terms: on the chunk whose collider the point lies on, or for an intact element
+/// (N) in world terms and its contact's source mass `mass` (kg, [`ContactTransfers::split`]):
+/// on the chunk whose collider the point lies on, or for an intact element
 /// the element's chunk whose hull holds the point (the hull nearest it, by [`Block::outside`],
 /// ties to the lower index), turned into the building's frame; with the building's root. `None`
 /// when the structure is no building (a tree) and on an element that never breaks, which the laws
@@ -536,6 +541,7 @@ fn contact_load(
     transfer: &ContactTransfer,
     blow: Vec3,
     press: Vec3,
+    mass: f32,
 ) -> Option<(Entity, Load)> {
     let (transform, breakage) = buildings.get(transfer.structure).ok()?;
     let (element, chunk, parent) = colliders.get(transfer.structure_collider).expect(
@@ -573,7 +579,7 @@ fn contact_load(
             press: frame.turn(press),
             origin: Origin::Body {
                 body: transfer.body,
-                mass: transfer.effective_mass,
+                mass,
                 speed: transfer.closing_speed,
             },
         },

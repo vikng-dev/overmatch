@@ -350,7 +350,8 @@ A body at rest against a structure (a pile on a wall, or a body Avian's `Constan
 The reading keeps the points of the last step it did move them, once, while Avian holds the pair sleeping and touching, and drops them when the pair wakes or ends.
 Their press stands on the structure: every run of the laws on it carries the press once, and the press starts no run, so rubble asleep on a wall costs nothing until something else loads the wall.
 
-Contacts reach the laws with their blow, press and source effective mass at each point.
+Contacts reach the laws with their blow and press at each point and one source mass per contact: the body's effective mass along the normal at the blow's centroid, the same on each of its points.
+A plastic share is linear in the blow, so the points of one contact then take its share once; read against each point's own effective mass they would each spend the receiver's whole mass (**DERIVED**: a cube's corner holds a quarter of the cube's mass along its face's normal, so a cube striking square on would hand a held group up to four times its exchange).
 The structural energy check reads the body's plastic share against the held hinge mass; rest lift and slide read the share against the translating group's mass.
 A freed group launches against its free collider mass and inertia, and the source receives the rest at the world contact in the same post-physics law pass, before the next solver step.
 A body blow on dust returns whole: dust has no dynamic carrier. A held chunk returns nothing; the failing tick's press stays with the standing structure.

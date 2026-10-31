@@ -145,7 +145,7 @@ impl ContactTransfers {
         *self
             .inertias
             .get(&body)
-            .expect("a departing body's load came from this step's recorded contacts")
+            .expect("every body in this step's contacts has its inertia recorded with them")
     }
 
     /// The points of every pair whose body sleeps against a structure, each pair once, in the
@@ -170,7 +170,17 @@ impl ContactTransfers {
     /// the point's: the solver's split of one contact's momentum among its points is its own
     /// (MEASURED: a cube striking a wall square on at 3 m/s, 106, 67, 112 and 67 N·s through its
     /// four corners, each corner's closing momentum 88.6 N·s).
-    pub(crate) fn split(&self) -> impl Iterator<Item = (&ContactTransfer, Vec3, Vec3)> {
+    ///
+    /// The fourth item is the contact's source mass (kg), the same on each of its points: the
+    /// body's effective mass along the normal at the blow's centroid, its rotation and locked
+    /// axes included. A plastic share is linear in the blow, so points that each take their share
+    /// of one contact's blow against this mass take the contact's share once; against each
+    /// point's own effective mass (a cube's corner holds a quarter of the cube's along its face's
+    /// normal, DERIVED) the points of one contact would each spend the receiver's whole mass and
+    /// hand it up to their count times the exchange. A contact whose solver moved nothing along
+    /// its normal has no blow and no blow centroid; its points' mean stands for it, and no law
+    /// reads a source mass without a blow.
+    pub(crate) fn split(&self) -> impl Iterator<Item = (&ContactTransfer, Vec3, Vec3, f32)> {
         let ends = self
             .kept
             .iter()
@@ -187,15 +197,44 @@ impl ContactTransfers {
                 .map(|point| point.effective_mass * point.closing_speed)
                 .sum();
             let blow = closing.min(moved);
+            let mass = self.contact_mass(points, moved);
             points.iter().map(move |point| {
                 let blow = if moved > 0.0 {
                     point.normal * (blow * along(point) / moved)
                 } else {
                     Vec3::ZERO
                 };
-                (point, -blow, (blow - point.impulse) / self.dt)
+                (point, -blow, (blow - point.impulse) / self.dt, mass)
             })
         })
+    }
+
+    /// One contact's source mass ([`Self::split`]), kg: its body's effective mass along the
+    /// contact's normal at the centroid of what the solver moved through its points along it
+    /// (`moved`, N·s), their mean where it moved nothing.
+    fn contact_mass(&self, points: &[ContactTransfer], moved: f32) -> f32 {
+        let first = points
+            .first()
+            .expect("Avian builds a contact constraint only for a manifold with points");
+        let at = if moved > 0.0 {
+            points
+                .iter()
+                .map(|point| point.point * point.impulse.dot(point.normal))
+                .sum::<Vec3>()
+                / moved
+        } else {
+            points.iter().map(|point| point.point).sum::<Vec3>() / points.len() as f32
+        };
+        let inertia = self.inertia(first.body);
+        let normal = first.normal;
+        let arm = (at - inertia.centre).cross(normal);
+        let inverse =
+            normal.dot(inertia.inverse_mass * normal) + arm.dot(inertia.inverse_inertia * arm);
+        assert!(
+            inverse > 0.0,
+            "a dynamic body in contact moves along its contact's normal"
+        );
+        inverse.recip()
     }
 }
 
@@ -614,7 +653,7 @@ mod tests {
                 app.update();
                 let transfers = app.world().resource::<ContactTransfers>();
                 let mut sums = (Vec3::ZERO, Vec3::ZERO, Vec3::ZERO);
-                for (point, blow, press) in transfers.split().filter(|(p, ..)| p.body == body) {
+                for (point, blow, press, _) in transfers.split().filter(|(p, ..)| p.body == body) {
                     sums.0 += blow;
                     sums.1 += press;
                     sums.2 -= point.impulse;
@@ -700,5 +739,52 @@ mod tests {
                 "press tick {tick}: the press {press} against 5 kN"
             );
         }
+    }
+
+    /// A CONTACT'S POINTS CARRY ONE SOURCE MASS, THE BODY'S FOR THEIR COMBINED BLOW (the game's
+    /// environment destruction model): a 1000 kg cube striking the structure square on at 3 m/s
+    /// gives every point of its contact the cube's whole mass within 2 %, though each corner's own
+    /// effective mass along the face's normal is a quarter of it (DERIVED for a cube's corner;
+    /// the solver's uneven split among the corners moves the blow's centroid off the face's
+    /// centre by a little, so not exactly). The section, rest and launch laws rely on it: each
+    /// point's plastic share of one blow against one receiver sums to the contact's share once.
+    /// Passing each point's own effective mass reads 250 kg and fails, as does a source mass that
+    /// differs between the points of one contact. Fixture numbers are fixture data.
+    #[test]
+    fn a_contacts_points_carry_its_bodys_mass_for_their_combined_blow() {
+        let mut app = world(1.0);
+        wall(&mut app);
+        let striker = cube(&mut app, Vec3::new(-1.3, 0.0, 0.0), Vec3::X * 3.0);
+        let mut struck = false;
+        for _ in 0..30 {
+            app.update();
+            let transfers = app.world().resource::<ContactTransfers>();
+            let points: Vec<(f32, Vec3, f32)> = transfers
+                .split()
+                .filter(|(point, ..)| point.body == striker)
+                .map(|(point, blow, _, mass)| (point.effective_mass, blow, mass))
+                .collect();
+            if points.iter().all(|(_, blow, _)| *blow == Vec3::ZERO) {
+                continue;
+            }
+            struck = true;
+            assert_eq!(points.len(), 4, "a face on a face meets at four corners");
+            for &(own, _, mass) in &points {
+                assert!(
+                    (own - 250.0).abs() <= 0.01 * 250.0,
+                    "a corner's own effective mass {own} kg is a quarter of the cube's"
+                );
+                assert!(
+                    (mass - 1000.0).abs() <= 0.02 * 1000.0,
+                    "the contact's source mass {mass} kg against the cube's 1000 kg"
+                );
+                assert_eq!(mass, points[0].2, "one source mass for the contact");
+            }
+            println!(
+                "MEASURED square-on contact source mass {:.2} kg, corner effective mass {:.2} kg",
+                points[0].2, points[0].0
+            );
+        }
+        assert!(struck, "the fixture cube strikes the structure");
     }
 }
