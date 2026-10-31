@@ -1030,9 +1030,9 @@ pub(super) fn connect_screen_plugin(app: &mut App) {
         );
 }
 
-/// The joining screen's label.
+/// The joining screen's label, and the failed-attempt count it renders.
 #[derive(Component)]
-struct JoiningText;
+struct JoiningText(u32);
 
 /// Spawn the persistent reconnect overlay; [`update_connect_status`] declares its presence, while
 /// `overlay::apply_overlay_visibility` owns visibility. The `OverlayNode` hook stamps its z.
@@ -1057,7 +1057,7 @@ fn spawn_joining_screen(mut commands: Commands, fonts: Res<UiFonts>) {
         &fonts.hud,
         crate::flow::FlowScoped(crate::flow::Flow::Joining),
         joining_label(0),
-        JoiningText,
+        JoiningText(0),
         Some(Color::srgba(0.01, 0.02, 0.03, 0.94)),
     );
 }
@@ -1079,11 +1079,11 @@ fn joining_label(attempts: u32) -> String {
 }
 
 /// Rewrite the joining label when the attempt count it renders changes.
-fn update_joining_screen(retry: Res<ConnectRetry>, mut text: Query<&mut Text, With<JoiningText>>) {
-    let label = joining_label(retry.attempts);
-    for mut text in &mut text {
-        if text.0 != label {
-            text.0.clone_from(&label);
+fn update_joining_screen(retry: Res<ConnectRetry>, mut text: Query<(&mut Text, &mut JoiningText)>) {
+    for (mut text, mut shown) in &mut text {
+        if shown.0 != retry.attempts {
+            shown.0 = retry.attempts;
+            text.0 = joining_label(retry.attempts);
         }
     }
 }
