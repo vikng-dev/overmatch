@@ -25,20 +25,20 @@ use std::path::{Path, PathBuf};
 /// [`FileAssetReader::get_base_path`]: bevy::asset::io::file::FileAssetReader::get_base_path
 fn asset_root_from(
     exe_dir: &Path,
-    manifest_dir: Option<&str>,
-    env_root: Option<&str>,
+    manifest_dir: Option<&Path>,
+    env_root: Option<&Path>,
     baked_manifest_dir: Option<&str>,
 ) -> PathBuf {
     // `BEVY_ASSET_ROOT` wins over everything: it is the only rung that places assets away from a
     // release-derived binary (perf scripts on `target/release`, bitprobe CI, the Windows smoke's
     // server fixture).
     if let Some(root) = env_root {
-        return Path::new(root).join("assets");
+        return root.join("assets");
     }
     // `CARGO_MANIFEST_DIR`: cargo sets it for `cargo run` / `cargo test`, so the dev loop and CI
     // resolve to `<repo>/assets` regardless of the exe's location under `target/`.
     if let Some(dir) = manifest_dir {
-        return Path::new(dir).join("assets");
+        return dir.join("assets");
     }
     // A dev-profile binary launched by hand (`target/debug/overmatch --offline`) has neither env
     // var; its assets are the checkout that compiled it, not a directory beside the exe.
@@ -96,17 +96,25 @@ pub(crate) const TANK_ID: &str = tank_id!();
 /// The `assets/` directory this process reads from — the thin env-reading wrapper over the pure
 /// [`asset_root_from`]. Used both as `AssetPlugin`'s `file_path` on every composition root
 /// (`crate::default_plugins`) and as the bake extractor's glb base (`bake::extract_at_startup`), so
-/// the two never disagree on which file they open. Falls back to `.` for the exe dir only if `current_exe()` itself fails (a case cargo's
-/// `CARGO_MANIFEST_DIR` already covers under `cargo run`/`cargo test`).
+/// the two never disagree on which file they open. Both env vars are read as OS paths, so a root
+/// that is not UTF-8 is still that root, never "unset". A process whose own executable the OS
+/// cannot locate refuses to start, naming the OS error and the lever that bypasses the lookup.
 pub(crate) fn asset_root() -> PathBuf {
-    let exe_dir = std::env::current_exe()
-        .ok()
-        .and_then(|exe| exe.parent().map(Path::to_path_buf))
-        .unwrap_or_else(|| PathBuf::from("."));
+    let manifest_dir = std::env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from);
+    let env_root = std::env::var_os("BEVY_ASSET_ROOT").map(PathBuf::from);
+    let exe = std::env::current_exe().unwrap_or_else(|err| {
+        panic!(
+            "cannot locate this executable to find its assets/ beside it: {err} — set \
+             BEVY_ASSET_ROOT to the directory that holds assets/"
+        )
+    });
+    let exe_dir = exe
+        .parent()
+        .expect("the OS names an executable by a file path, which has a parent directory");
     asset_root_from(
-        &exe_dir,
-        std::env::var("CARGO_MANIFEST_DIR").ok().as_deref(),
-        std::env::var("BEVY_ASSET_ROOT").ok().as_deref(),
+        exe_dir,
+        manifest_dir.as_deref(),
+        env_root.as_deref(),
         BAKED_MANIFEST_DIR,
     )
 }
@@ -134,8 +142,8 @@ mod tests {
     fn env_root_wins_over_everything() {
         let got = asset_root_from(
             Path::new("/App.app/Contents/MacOS"),
-            Some("/repo"),
-            Some("/opt/overmatch-server"),
+            Some(Path::new("/repo")),
+            Some(Path::new("/opt/overmatch-server")),
             Some("/build-machine/repo"),
         );
         assert_eq!(got, Path::new("/opt/overmatch-server/assets"));
@@ -145,7 +153,12 @@ mod tests {
     /// and every `cargo test`/`cargo run`, which is why CI never hit the packaged-app bug.
     #[test]
     fn manifest_dir_when_no_env_root() {
-        let got = asset_root_from(Path::new("/repo/target/debug"), Some("/repo"), None, None);
+        let got = asset_root_from(
+            Path::new("/repo/target/debug"),
+            Some(Path::new("/repo")),
+            None,
+            None,
+        );
         assert_eq!(got, Path::new("/repo/assets"));
     }
 
@@ -160,7 +173,7 @@ mod tests {
 
         let got = asset_root_from(
             Path::new("/wt/target/debug"),
-            Some("/wt"),
+            Some(Path::new("/wt")),
             None,
             Some("/repo"),
         );

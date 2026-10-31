@@ -142,26 +142,26 @@ pub(super) struct Load {
 /// defaults and reports [`LoadNote::NoLocation`], rather than inventing a path.
 fn config_dir_from(
     target_os: &str,
-    env_override: Option<&str>,
-    home: Option<&str>,
-    app_data: Option<&str>,
-    xdg_config_home: Option<&str>,
+    env_override: Option<&Path>,
+    home: Option<&Path>,
+    app_data: Option<&Path>,
+    xdg_config_home: Option<&Path>,
 ) -> Option<PathBuf> {
     if let Some(dir) = env_override {
-        return Some(PathBuf::from(dir));
+        return Some(dir.to_path_buf());
     }
     match target_os {
         "macos" => Some(
-            Path::new(home?)
+            home?
                 .join("Library")
                 .join("Application Support")
                 .join(CONFIG_DIR_NAME),
         ),
-        "windows" => Some(Path::new(app_data?).join(CONFIG_DIR_NAME)),
+        "windows" => Some(app_data?.join(CONFIG_DIR_NAME)),
         _ => {
             let base = match xdg_config_home {
-                Some(xdg) if !xdg.is_empty() => PathBuf::from(xdg),
-                _ => Path::new(home?).join(".config"),
+                Some(xdg) if !xdg.as_os_str().is_empty() => xdg.to_path_buf(),
+                _ => home?.join(".config"),
             };
             // Lower-case on Linux: `~/.config` is conventionally lower-case, unlike the two
             // platforms above whose directories are user-visible and title-cased. (XDG also puts
@@ -171,16 +171,24 @@ fn config_dir_from(
     }
 }
 
-/// The `video.ron` path for this process, or `None` when the platform home is unreadable. The one
+/// The `video.ron` path for this process, or `None` when the platform home is unset. The one
 /// reader of the process environment in this module: the production callers resolve it and hand it
-/// to [`load`], [`save`] and [`reset`], which read nothing but their `path`.
+/// to [`load`], [`save`] and [`reset`], which read nothing but their `path`. Every variable is read
+/// as an OS path, so a directory whose name is not UTF-8 is still that directory, never "unset".
 pub(super) fn location() -> Option<PathBuf> {
+    let var = |name: &str| std::env::var_os(name).map(PathBuf::from);
+    let (env_override, home, app_data, xdg) = (
+        var(CONFIG_DIR_ENV),
+        var("HOME"),
+        var("APPDATA"),
+        var("XDG_CONFIG_HOME"),
+    );
     config_dir_from(
         std::env::consts::OS,
-        std::env::var(CONFIG_DIR_ENV).ok().as_deref(),
-        std::env::var("HOME").ok().as_deref(),
-        std::env::var("APPDATA").ok().as_deref(),
-        std::env::var("XDG_CONFIG_HOME").ok().as_deref(),
+        env_override.as_deref(),
+        home.as_deref(),
+        app_data.as_deref(),
+        xdg.as_deref(),
     )
     .map(|dir| dir.join(CONFIG_FILE_NAME))
 }
@@ -450,12 +458,18 @@ mod tests {
     #[test]
     fn platform_config_dirs_follow_convention() {
         for os in ["macos", "windows", "linux"] {
-            let got = config_dir_from(os, Some("/scratch/cfg"), Some("/home/y"), None, None);
+            let got = config_dir_from(
+                os,
+                Some(Path::new("/scratch/cfg")),
+                Some(Path::new("/home/y")),
+                None,
+                None,
+            );
             assert_eq!(got, Some(PathBuf::from("/scratch/cfg")), "os {os}");
             assert_eq!(config_dir_from(os, None, None, None, None), None, "os {os}");
         }
         assert_eq!(
-            config_dir_from("macos", None, Some("/Users/yan"), None, None),
+            config_dir_from("macos", None, Some(Path::new("/Users/yan")), None, None),
             Some(PathBuf::from(
                 "/Users/yan/Library/Application Support/Overmatch"
             )),
@@ -465,22 +479,34 @@ mod tests {
                 "windows",
                 None,
                 None,
-                Some("C:\\Users\\yan\\AppData\\Roaming"),
+                Some(Path::new("C:\\Users\\yan\\AppData\\Roaming")),
                 None
             ),
             Some(PathBuf::from("C:\\Users\\yan\\AppData\\Roaming").join("Overmatch")),
         );
         assert_eq!(
-            config_dir_from("linux", None, Some("/home/yan"), None, None),
+            config_dir_from("linux", None, Some(Path::new("/home/yan")), None, None),
             Some(PathBuf::from("/home/yan/.config/overmatch")),
         );
         assert_eq!(
-            config_dir_from("linux", None, Some("/home/yan"), None, Some("/xdg")),
+            config_dir_from(
+                "linux",
+                None,
+                Some(Path::new("/home/yan")),
+                None,
+                Some(Path::new("/xdg"))
+            ),
             Some(PathBuf::from("/xdg/overmatch")),
             "XDG_CONFIG_HOME wins over ~/.config when set",
         );
         assert_eq!(
-            config_dir_from("linux", None, Some("/home/yan"), None, Some("")),
+            config_dir_from(
+                "linux",
+                None,
+                Some(Path::new("/home/yan")),
+                None,
+                Some(Path::new(""))
+            ),
             Some(PathBuf::from("/home/yan/.config/overmatch")),
             "an EMPTY XDG_CONFIG_HOME is unset, not a root-relative path",
         );
@@ -867,7 +893,7 @@ mod tests {
         /// The `video.ron` inside this directory: where [`location`] would point with the
         /// directory as the override.
         fn file(&self) -> PathBuf {
-            config_dir_from(std::env::consts::OS, self.dir.to_str(), None, None, None)
+            config_dir_from(std::env::consts::OS, Some(&self.dir), None, None, None)
                 .expect("the override always resolves")
                 .join(CONFIG_FILE_NAME)
         }
