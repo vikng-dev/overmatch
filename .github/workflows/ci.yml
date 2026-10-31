@@ -71,10 +71,13 @@ jobs:
       - name: cargo deny
         run: cargo deny --locked check -W unmaintained
 
-  # Compile-heavy checks share one matrix but run independently.
+  # Compile-heavy checks share one matrix but run independently. The limit covers a cold cache: a
+  # vendored crate's change re-keys it, and the tests lane then compiles for 28 min (MEASURED
+  # 2026-11-01) before its ~11 min of tests. A job stopped at its limit saves no cache, so a limit
+  # below that would fail every run after a vendor change.
   checks:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 55
     strategy:
       fail-fast: false
       matrix:
