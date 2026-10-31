@@ -88,9 +88,11 @@ scout §1.4). Each folder's `cc.txt` names the source.
 | `glass` | flat colour and factors: neither source carries a glass pack (APIs queried 2026-10-31) | — | — | no |
 
 ambientCG publishes no real-world size, so those repeats are ASSUMED. Memory, DERIVED: a 1024² map
-transcodes to 1 B/texel (BC7 or ASTC 4×4), +⅓ for mips ≈ 1.33 MiB; three maps ≈ 4 MiB per visual,
-paid once per visual in use, whatever the number of tanks. The fixture tank wears four (rolled, cast,
-machined, rubber): ≈ 16 MiB, plus the 1024² camouflage pattern ≈ 1.3 MiB.
+transcodes to 1 B/texel (BC7 or ASTC 4×4), +⅓ for mips ≈ 1.33 MiB, paid once per map in use,
+whatever the number of tanks. A visual that takes paint loads its normal and ARM maps (≈ 2.7 MiB):
+paint covers its albedo, which never loads (§6). One that does not loads all three (≈ 4 MiB). The
+fixture tank wears three painted visuals (rolled, cast, machined) and one bare (rubber): ≈ 12 MiB,
+plus the 1024² camouflage pattern ≈ 1.3 MiB.
 
 ## 4. Worked example: the Tiger I
 
