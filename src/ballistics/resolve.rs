@@ -1100,8 +1100,9 @@ impl Flight {
         }
     }
 
-    /// The farthest any sample starts from the axis start: a fresh disc's `radius`, and up to
-    /// `r / cos(incidence)` once an oblique perforation has staggered the starts along the plate.
+    /// The farthest any sample starts from the axis start: a fresh disc's `radius`, and wherever
+    /// the starts stand once an oblique perforation has staggered them along the plate (for a
+    /// planar exit, design §13.5 states the bound).
     pub(crate) fn spread(&self, radius: f32) -> f32 {
         self.sample_offsets(radius)
             .iter()

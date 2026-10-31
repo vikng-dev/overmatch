@@ -1230,8 +1230,10 @@ pub(crate) struct Projectile {
     /// and march.
     axis: Option<resolve::AxisStart>,
     /// Metres the round has already flown ahead of the clock: a crossing resolves whole in the step
-    /// that entered it, past that step's travel if need be, and the next step's travel is short by
-    /// the overrun, so no travel is created or lost. Zero at spawn and after a catch-up.
+    /// that entered it, past that step's travel if need be, and the next steps' travel is short by
+    /// the overrun until it is paid. Zero at spawn, after a catch-up, and for a stopped or held
+    /// round, which stays ahead of the clock by what it owed (design §13.5, "Travel is conserved
+    /// but at two ends").
     owed: f32,
 }
 
@@ -1353,11 +1355,12 @@ pub struct BallisticVolume {
 /// ([`ProjectileMarchWorld::crossing_reach`]). Read only on a body that is no entity's child: a
 /// turret carries its own from spawn, and it is live once a cook-off launches the turret free.
 ///
-/// Every body the walk can cross carries one, built at spawn from its data: a tank's from the
-/// bake, swept over its servos; a body with no servo, from its own colliders ([`Self::holding`]):
-/// a building, a loose wall piece, a tree (re-derived with its body when its state changes,
-/// `trees::derive_state`), a sandbox target. A step then never ends inside or beside armour, so
-/// nothing a sample is inside, and no collider lag of a moving body, ever reaches the next step.
+/// INVARIANT: every primitive the walk can cross under a free body lies inside its body's
+/// envelope, at every pose its servos can take. Every such body carries one, built at spawn from
+/// its data: from the bake (`bake::TankEnvelopes`), from its parts' bounds ([`Self::holding`],
+/// [`Self::of`]) or from its kind's bounds (`buildings::spawn`); a tree's is re-derived with its
+/// body (`trees::derive_state`). Which body takes which, why a step then never ends inside or beside
+/// armour, and what still puts armour over a step's start are design §13.5's ("The envelope").
 #[derive(Component, Clone, Copy, Debug, PartialEq)]
 pub(crate) struct Envelope(pub(crate) bevy::math::bounding::Aabb3d);
 

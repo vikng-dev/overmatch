@@ -1525,8 +1525,11 @@ per 240 s at 30 bots, MEASURED 2026-10-31 on the build after the turret-scale fi
   model: it logs one error under a stable kind per failure reason (`WalkError::kind`), which a
   report from real matches groups by (#194).
 
-One stop the hand-off does not cause remains (`unexpected_exit`): a continuation carried across a
-tick onto moving armour, left to step 6b, atomic crossings (queued).
+The one stop the hand-off did not cause (`unexpected_exit`: a continuation carried across a tick
+onto moving armour) is gone with the envelope below, under which no continuation crosses a tick.
+The 240 s 30-bot run after it landed logged no walk failure and no uncertified start (MEASURED
+2026-10-31); that run stood no tree and moved no loose piece, so pieces and trees rest on the unit
+tests alone.
 
 Rejected: extending the entrance walk until it covers the shared plane wherever it lands (no less
 shared, and a longer walk meets more pieces to land past — failures rose from 3 to 7 in the same
@@ -1544,11 +1547,15 @@ across a tick boundary onto moving armour (the `unexpected_exit` above).
   proxies) at every angle each servo can take within the sheet's travel window, a full turn for a
   continuous traverse, so it holds the turret's whole sweep and the gun's whole elevation range.
 - **Every body the walk can cross carries one**, built at spawn from its data, no class of body
-  special (ADR-0034). A body with no servo carries its own colliders' bounds in its frame
-  (`ballistics::Envelope::holding`): a building (every element and every chunk a swap can stand),
-  a loose wall piece, a tree (re-derived with its body when its state moves a segment,
-  `trees::derive_state`), a sandbox target. A static body needs no sweep; a moving one is covered
-  by the two poses below.
+  special (ADR-0034). A tank's and a launched turret's come from the bake, swept over their servos
+  (below). A body with no servo carries the bounds of what it stands in its frame: a building the
+  bounds of its kind's element points and chunk hull points at its scale (`buildings::spawn`), so
+  every element and every chunk a swap can stand lies inside; a loose wall piece and a tree their
+  colliders' bounds (`ballistics::Envelope::holding`, a tree's re-derived with its body when its
+  state moves a segment, `trees::derive_state`); a sandbox target its one collider's
+  (`ballistics::Envelope::of`). A static body needs no sweep; a moving one is covered by the poses
+  below. A body spawned without one is crossed with no reach past its travel, so only a held
+  sample's drain carries a step through it (the fixtures alone have such bodies).
 - **How it is computed.** Once per tank kind at load, in the bake that extracts the armour
   (`bake::envelope`, carried on `TankBlueprint::envelopes`), as a pure function of the extracted
   geometry and the sheet's servos: conservative and threshold-free. Each servo's subtree enters its
@@ -1566,10 +1573,14 @@ across a tick boundary onto moving armour (the `unexpected_exit` above).
   every envelope it is inside; overlapping envelopes chain into one crossing, and an envelope the
   round reaches only after leaving another, beyond the step's travel, is the next step's crossing.
   The test grows each box by the farthest any sample starts from the axis (`resolve::Flight::spread`:
-  the disc's radius, and up to `r / cos(incidence)` once an oblique perforation staggers the starts
-  along the plate), by `extent · 2^-20` and by `MARCH_EPS` for its own world-to-body arithmetic
-  (`ProjectileMarchWorld::crossing_reach`). The shooter's own envelope is passed through, as its
-  volumes are.
+  the disc's radius, and once an oblique perforation staggers the starts along the plate up to
+  `r / cos(incidence)` for a planar exit, DERIVED; a curved exit staggers otherwise, and the march
+  reads the starts as they stand, so nothing relies on the bound), by `extent · 2^-20` and by
+  `MARCH_EPS` for its own world-to-body arithmetic (`ProjectileMarchWorld::crossing_reach`). The
+  shooter's own envelope is passed through, as its volumes are. The run past the travel through
+  envelopes is the step's own: `resolve::MAX_OVERRUN` counts only what a held drain runs past that
+  reach (`resolve::Budget::reach`), so a long chain of loose envelopes (a felled tree's box is up
+  to 17.8 × 1.8 × 17.8 m on `fir_1`, DERIVED in the #191 seam review) never fails a crossing closed.
 - **An envelope stands at every pose the next walk can cast at.** Where a moving body's child
   colliders stand when the walk casts depends on the composition. Bare avian (the sandbox, the
   fixtures) places them from the body's pose at the physics step's start, a step behind the body's
@@ -1606,14 +1617,33 @@ across a tick boundary onto moving armour (the `unexpected_exit` above).
   loose gap over `dt`). No envelope size fixes that; fixing it is open (#191).
 - **No armour state crosses a tick.** The shell carries its axis position (anchor plus offset, so
   open flight never re-rounds it at world spacing) and the travel the last crossing flew past its
-  step (`Projectile::owed`), which the next step's travel is short by: no travel is created or
-  lost. Every step lays a fresh square disc at the axis start and establishes its membership
-  (`resolve::certified`). As every body carries an envelope, the step ended where that re-squaring
-  moves no sample over armour and no moving body's collider lag reaches the next step: an oblique
-  perforation ending a tick reads its plate once (`an_oblique_perforation_that_ends_a_tick_reads_its_plate_once`).
+  step (`Projectile::owed`), which the next steps' travel is short by, over as many steps as the
+  debt takes (`an_overrun_longer_than_a_step_is_paid_back_over_steps`). Every step lays a fresh
+  square disc at the axis start and establishes its membership (`resolve::certified`). As every
+  body carries an envelope and a step ends outside it at every pose above, that re-squaring moves
+  no sample over armour and no moving body's collider lag reaches the next step, within the stated
+  limitation above: an oblique perforation ending a tick reads its plate once and ends at least
+  1.5 r clear of it (`an_oblique_perforation_that_ends_a_tick_reads_its_plate_once`).
+- **Travel is conserved but at two ends.** A round that stops or holds inside a crossing's overrun
+  stands ahead of the clock by that overrun and owes nothing (a stopped or held round's
+  `Projectile::owed` is zero): a stopped round stays where it stopped, and a held one's release
+  lays its disc where it froze. A step whose crossing leaves no more than `MARCH_EPS` of travel ends
+  there owing nothing, dropping up to 1 mm (DERIVED from `MARCH_EPS`).
 - **The replica runs the same march**, so the presented shell march extends through envelopes and
-  owes its overrun exactly as the authority's does; its armour contacts still take the authority's
-  outcomes.
+  owes its overrun by the authority's rule; its armour contacts still take the authority's
+  outcomes. Its inputs differ, so its overruns do:
+  - a client's bodies stand at interpolated, wire-quantised poses (`net::protocol`'s
+    `add_linear_interpolation` over `net::wire_quant`'s codecs), and a resync of lightyear's
+    interpolation timeline drops `Position` from every replica hull for a frame
+    (`apply_launched_turret_pose`'s doc), taking their envelopes out of the scan;
+  - loose wall pieces are server-only bodies, their client carriers view-only with no collider and
+    no envelope (`net::debris_stress` module doc), so a replica's march runs through no piece's
+    envelope;
+  - a client's tree envelopes change when the tree state arrives (`net::destruction`), not at the
+    authority's derive tick;
+  - the cosmetic catch-ups (`fast_forward_shell`, `catch_up_sanctioned_chain`) fly no overrun.
+  Each difference is at most one crossing's overrun, and the next steps pay it back, so the two
+  tracks come back together once `owed` is paid (DERIVED).
 
 Provisional: the computation may move into a refined asset-bake pipeline with dev tooling, which is
 why it reads nothing but the bake's data.
