@@ -381,12 +381,13 @@ pub fn run() {
 
     let mut app = App::new();
     if headless {
-        info!("window: {}", window.name());
         app.add_plugins(crate::gpu_less_default_plugins(None))
-            .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(2)))
-            .insert_resource(harness::SimulateInput::new(
-                script.expect("a headless client runs a script"),
-            ));
+            .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(2)));
+        // After `LogPlugin` has built, like `run_window::mount`'s line on a windowed root.
+        info!("window: {}", window.name());
+        app.insert_resource(harness::SimulateInput::new(
+            script.expect("a headless client runs a script"),
+        ));
         // UPSTREAM WORKAROUND, same as every other GPU-less boot of the tank glb: without it,
         // bevy_image 0.19 PANICS transcoding the Tiger's mipped UASTC KTX2 textures under
         // `CompressedImageFormats::NONE`, and `tank::spawn` then aborts on the required view

@@ -222,7 +222,6 @@ pub(crate) fn script() -> Option<&'static Script> {
             let path = PathBuf::from(std::env::var_os(VARIABLE)?);
             let script = Script::load(&path)
                 .unwrap_or_else(|error| panic!("{VARIABLE}={}: {error}", path.display()));
-            info!("harness: {VARIABLE}={} {script:?}", path.display());
             Some(script)
         })
         .as_ref()
@@ -243,7 +242,9 @@ pub(crate) struct SimulateInput {
 }
 
 impl SimulateInput {
+    /// Called after `LogPlugin` has built, so the script it logs reaches the run's log.
     pub(crate) fn new(script: &Script) -> Self {
+        info!("harness: {script:?}");
         let course = matches!(script.drive, Drive::Straight | Drive::Reverse);
         Self {
             ticks: 0,
