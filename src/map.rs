@@ -28,12 +28,11 @@
 //! rather than refused: the reader reverses a `-Z` image's rows once at decode, so the world stands
 //! the way the author placed their objects on it.
 //!
-//! FAILURE LAW (ADR-0011). Absent → `None` → the flat-slab fallback world, the ONLY tolerated
-//! absence, and absent means NOT FOUND and nothing else ([`read_manifest`]). Present → everything
-//! it declares must hold: a file that cannot be read, an unparseable one, a mismatched coordinate
-//! system, an extent that describes no world, or a heightmap that is missing or undecodable panics,
-//! because a peer silently falling back to flat while others load the map would desync the
-//! deterministic sim.
+//! FAILURE LAW (ADR-0011). Every build loads a map: an absent manifest is refused at load, naming
+//! the path it looked at and the fix ([`read_manifest`]). Everything a present manifest declares
+//! must hold: a file that cannot be read, an unparseable one, a mismatched coordinate system, an
+//! extent that describes no world, or a heightmap that is missing or undecodable panics too. The
+//! flat slab is a fixture world, selected only by `terrain_grid::ForceFlatWorld`.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -400,16 +399,16 @@ impl ExtentXz {
     }
 }
 
-/// Read the selected map's manifest. `None` is "no map here" — the ONLY tolerated absence (see the
-/// module doc); a manifest that exists and does not hold panics.
-pub(crate) fn load(root: &Path) -> Option<MapManifest> {
+/// Read the selected map's manifest. A manifest that is absent or does not hold panics (module
+/// doc).
+pub(crate) fn load(root: &Path) -> MapManifest {
     let path = level_path(root);
-    let text = read_manifest(&path)?;
+    let text = read_manifest(&path);
     let library = read_prototypes(root);
     let mut manifest = parse(&text, &library, &path);
     manifest.trees = TreeLibrary::load(root, manifest.tree_assets());
     manifest.buildings = BuildingLibrary::load(root, manifest.structure_assets());
-    Some(manifest)
+    manifest
 }
 
 /// The selected map's prototype library text. Only read beside a manifest that exists, so there is
@@ -420,30 +419,25 @@ fn read_prototypes(root: &Path) -> String {
         .unwrap_or_else(|err| panic!("map: {} cannot be read: {err}", path.display()))
 }
 
-/// The manifest's text, or `None` when there is NO manifest.
-///
-/// ABSENT IS NOT THE SAME AS UNREADABLE. Only [`std::io::ErrorKind::NotFound`] is absence; a file
-/// that exists and cannot be read — a directory in its place, wrong permissions, bytes that are not
-/// UTF-8 — is present-but-broken and panics naming the path and the error (ADR-0011). Folding those
-/// into the fallback would drop this peer onto the flat slab while its opponents load the map, which
-/// is a desync dressed up as a log line.
-fn read_manifest(path: &Path) -> Option<String> {
+/// The manifest's text. Both failures panic naming the path (ADR-0011): an ABSENT manifest says
+/// where the asset root resolved and how to point it at a tree that ships `maps/`, and a file that
+/// exists and cannot be read — a directory in its place, wrong permissions, bytes that are not
+/// UTF-8 — carries the error.
+fn read_manifest(path: &Path) -> String {
     match std::fs::read_to_string(path) {
-        Ok(text) => Some(text),
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-            info!("map: no level manifest at {} — flat world", path.display());
-            None
-        }
+        Ok(text) => text,
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => panic!(
+            "map: no level manifest at {} — every build loads a map. Run from a checkout or \
+             archive that ships `{MAPS_DIR}/` in its assets directory, or set BEVY_ASSET_ROOT to \
+             the directory that holds `{MAPS_DIR}/`",
+            path.display(),
+        ),
         Err(err) => panic!("map: {} cannot be read: {err}", path.display()),
     }
 }
 
 /// FNV-1a offset basis — the seed every fold below starts from.
 const DIGEST_SEED: u64 = 0xcbf2_9ce4_8422_2325;
-
-/// The digest a peer with NO map carries. The flat-slab fallback is a WORLD like any other, so it
-/// gets its own labelled term rather than a zero some map's content could land on.
-const NO_MAP_DIGEST: u64 = fnv1a_64(DIGEST_SEED, b"overmatch-map-absent-v1");
 
 /// FNV-1a over bytes. Byte-driven and integer-only — no floats, no hasher whose seed or word size
 /// could differ — so every platform folds the same map to the same digest.
@@ -467,13 +461,10 @@ const fn fnv1a_64(seed: u64, bytes: &[u8]) -> u64 {
 /// checkout, a half-pulled LFS object, a hand-edited `level.json`), and the id would happily agree
 /// while the ground disagreed. `crate::net::protocol::protocol_id` folds this into the handshake.
 ///
-/// Same failure law as [`load`]: no manifest is a legal world and answers [`NO_MAP_DIGEST`];
-/// a manifest that is present and does not hold panics.
+/// Same failure law as [`load`]: a manifest that is absent or does not hold panics.
 pub(crate) fn content_digest(root: &Path) -> u64 {
     let path = level_path(root);
-    let Some(text) = read_manifest(&path) else {
-        return NO_MAP_DIGEST;
-    };
+    let text = read_manifest(&path);
     let library = read_prototypes(root);
     let manifest = parse(&text, &library, &path);
     let trees = TreeLibrary::load(root, manifest.tree_assets());
@@ -583,7 +574,7 @@ pub(crate) mod tests {
 
     /// The shipped map's manifest, parsed and checked through the real path.
     pub(crate) fn shipped_manifest() -> MapManifest {
-        load(&shipped_assets()).expect("the shipped tree carries a level manifest")
+        load(&shipped_assets())
     }
 
     /// A minimal manifest text: the terrain block a decode needs, the conventions the reader
@@ -668,8 +659,8 @@ pub(crate) mod tests {
     /// THE MANIFEST IS THE MAP (`terrain_grid::decode_height_grid`): the shipped tree must carry
     /// one at the default id, it must parse and pass every check through the real loader, and the
     /// heightmap it names must exist as more than an LFS pointer. A map half-shipped — a PNG with
-    /// no manifest, or a manifest naming a file nobody added — fails here in CI rather than
-    /// dropping one peer onto the flat world and desyncing the sim.
+    /// no manifest, or a manifest naming a file nobody added — fails here in CI rather than at
+    /// first boot.
     #[test]
     fn shipped_map_ships_a_valid_manifest() {
         let manifest = shipped_manifest();
@@ -847,18 +838,25 @@ pub(crate) mod tests {
         assert_eq!(manifest.heightmap_path(), Path::new("fixture/h.png"));
     }
 
-    /// A tree with no `maps/` in it at all is the flat-slab fallback world — the one absence the
-    /// loader tolerates.
+    /// A tree with no `maps/` in it is refused at load (ADR-0011), naming the path and the fix: a
+    /// build that silently built the flat slab would run offline on a world no map declares, and
+    /// a server would hand its peers a digest no shipped map produces.
     #[test]
-    fn a_missing_manifest_is_the_only_absence() {
-        assert!(read_manifest(&level_path(Path::new("/nonexistent-asset-root"))).is_none());
-        assert!(load(Path::new("/nonexistent-asset-root")).is_none());
+    #[should_panic(expected = "no level manifest at /nonexistent-asset-root/maps/")]
+    fn a_missing_manifest_is_refused() {
+        load(Path::new("/nonexistent-asset-root"));
     }
 
-    /// PRESENT-BUT-BROKEN (ADR-0011): a manifest path that exists and cannot be read is NOT
-    /// absence. Read here as a directory standing where the file should be — the same
-    /// `read_to_string` failure a permission bit or a non-UTF-8 file produces, and the class that
-    /// used to select the flat world silently while every other peer loaded the map.
+    /// The handshake digest takes the same refusal: no tree without a map can name a world.
+    #[test]
+    #[should_panic(expected = "set BEVY_ASSET_ROOT")]
+    fn a_missing_manifest_has_no_digest() {
+        content_digest(Path::new("/nonexistent-asset-root"));
+    }
+
+    /// PRESENT-BUT-BROKEN (ADR-0011): a manifest path that exists and cannot be read carries its
+    /// own error, not the absence message. Read here as a directory standing where the file should
+    /// be — the same `read_to_string` failure a permission bit or a non-UTF-8 file produces.
     #[test]
     #[should_panic(expected = "cannot be read")]
     fn an_unreadable_manifest_panics() {
@@ -904,7 +902,7 @@ pub(crate) mod tests {
     fn the_digest_folds_the_tree_and_building_texts_after_the_map_files() {
         let root = shipped_assets();
         let path = level_path(&root);
-        let text = read_manifest(&path).expect("the shipped map");
+        let text = read_manifest(&path);
         let library = read_prototypes(&root);
         let manifest = parse(&text, &library, &path);
         let trees = TreeLibrary::load(&root, manifest.tree_assets());
@@ -936,23 +934,6 @@ pub(crate) mod tests {
             shipped,
             digest_of(&files),
             "the fold is the map files, then the trees, then the buildings"
-        );
-    }
-
-    /// The flat-slab fallback is a WORLD, and it gets its own term: a peer with no map and a peer
-    /// with one must never hand the handshake the same tag.
-    #[test]
-    fn the_map_and_its_absence_digest_differently() {
-        let shipped = content_digest(&shipped_assets());
-        assert_eq!(
-            shipped,
-            content_digest(&shipped_assets()),
-            "the same tree must digest the same on every read",
-        );
-        assert_ne!(shipped, NO_MAP_DIGEST);
-        assert_eq!(
-            content_digest(Path::new("/nonexistent-asset-root")),
-            NO_MAP_DIGEST,
         );
     }
 

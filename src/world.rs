@@ -36,7 +36,7 @@ pub struct TerrainMap {
 #[derive(Resource, Default)]
 pub struct SpawnObstacles(pub Vec<Transform>);
 
-/// Side length of the (square) ground plane, in metres — the fallback world's extent
+/// Side length of the (square) ground plane, in metres — the flat fixture world's extent
 /// (`terrain_grid::FIXTURE_EXTENT`), which is what the spawn map's UV mapping and the authority's
 /// spawn clamp resolve against when no heightmap decoded.
 const GROUND_SIZE: f32 = crate::terrain_grid::FIXTURE_EXTENT.world_size_m;

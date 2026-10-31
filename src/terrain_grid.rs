@@ -33,8 +33,8 @@
 //! the client archives AND the server tar — see `.github/actions/build-server`), so the
 //! deterministic sim reads the same ground everywhere. WHAT the map is — its square, its vertical
 //! range, which file it is — is the map's own declaration ([`crate::map::MapManifest`]), not a
-//! constant here; when the manifest is absent the resource is simply not inserted and `world`
-//! falls back to the flat slab + authored test course.
+//! constant here. Only an explicit [`ForceFlatWorld`] leaves the resource out, and `world` then
+//! builds the flat slab + authored test course.
 
 use std::sync::Arc;
 
@@ -89,7 +89,7 @@ impl TerrainExtent {
     }
 }
 
-/// The extent every SYNTHETIC world is hung at: the flat-slab fallback world (`world::GROUND_SIZE`,
+/// The extent every SYNTHETIC world is hung at: the flat-slab fixture world (`world::GROUND_SIZE`,
 /// whose top face at y = 0 is the whole surface), the analytic ramp probes, and the unit fixtures.
 /// FIXTURE data — a shipped map declares its own extent and never reads this.
 pub(crate) const FIXTURE_EXTENT: TerrainExtent = TerrainExtent {
@@ -232,7 +232,7 @@ pub(crate) const SPAWN_FOOTPRINT_HALF_M: f32 = 5.0;
 /// spawns that put both Tigers ~116 m under the terrain surface, and the fix was not to pick a
 /// better number — there is no number, only the surface at the time of asking.
 ///
-/// Absent grid = the flat-slab fallback world, whose surface is y = 0 — which reproduces exactly
+/// Absent grid = the flat-slab fixture world, whose surface is y = 0 — which reproduces exactly
 /// the old flat-pad `y = 2.0` pose, so the authored test course is unchanged.
 pub(crate) fn spawn_surface_height(grid: Option<&HeightGrid>, xz: Vec2) -> f32 {
     grid.map_or(0.0, |grid| {
@@ -623,13 +623,12 @@ impl HeightGrid {
 /// Decode the heightmap synchronously at Startup (before `world::spawn_environment`, which is
 /// chained after this in `world::plugin`).
 ///
-/// THE MANIFEST IS THE MAP. The selected map's `level.json` ([`crate::map::MapManifest`]) is the
-/// presence marker: absent → no resource → the flat slab + test course world (deleting it restores
-/// the old world). Present, everything it declares must hold — an unparseable or invalid manifest,
-/// a missing heightmap, or an undecodable/non-square one is a broken ship and panics (ADR-0011
-/// fail-fast), because a peer silently falling back to flat while others load the map would desync
-/// the deterministic sim. `map::tests::shipped_map_ships_a_valid_manifest` refuses a half-shipped
-/// map at build time rather than at first boot.
+/// THE MANIFEST IS THE MAP. Every composition but a [`ForceFlatWorld`] fixture loads the selected
+/// map's `level.json` ([`crate::map::MapManifest`]), and everything it declares must hold — an
+/// absent, unparseable or invalid manifest, a missing heightmap, or an undecodable/non-square one
+/// is a broken ship and panics (ADR-0011 fail-fast).
+/// `map::tests::shipped_map_ships_a_valid_manifest` refuses a half-shipped map at build time rather
+/// than at first boot.
 ///
 /// THE ONE PARSE. The manifest is read here and published as a resource, so `scatter` places the
 /// author's objects out of the same struct this decode took its extent from.
@@ -651,10 +650,7 @@ pub(crate) fn decode_height_grid(
     let root = crate::assets::asset_root();
     let manifest = match preset_manifest {
         Some(preset) => preset.clone(),
-        None => match crate::map::load(&root) {
-            Some(manifest) => manifest,
-            None => return,
-        },
+        None => crate::map::load(&root),
     };
     let extent = manifest.extent;
     let rows = manifest.rows;
@@ -671,8 +667,8 @@ pub(crate) fn decode_height_grid(
         return;
     }
     if crate::lod_showcase::enabled() {
-        // A GRID of zeros, not "no grid": the no-manifest branch above drops the resource, and the
-        // world then builds its flat slab AND its authored obstacle course, which is scenery in
+        // A GRID of zeros, not "no grid": with no grid the world builds its flat slab AND its
+        // authored obstacle course (the `ForceFlatWorld` fixture world), which is scenery in
         // front of the thing being looked at. A zero grid keeps the real terrain path — same
         // decode-free construction, same collider, same render tiles, same oracle — so the one
         // surface stays one surface and it is level everywhere. Flattening only the render mesh

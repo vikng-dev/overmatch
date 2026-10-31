@@ -29,7 +29,7 @@ use crate::ui_font::UiFonts;
 const SPAWN_MAP_KEY: KeyCode = KeyCode::KeyM;
 
 /// Half-extent of the terrain square, metres — the LIVE world's, read off the decoded grid
-/// (`terrain_grid::world_extent`, which answers for the flat-slab fallback world too), never
+/// (`terrain_grid::world_extent`, which answers for the flat-slab fixture world too), never
 /// re-stated here. Both the server clamp ([`spawn_limit`]) and the map's UV↔world mapping take it,
 /// so a re-authored world moves the map and the clamp together.
 pub(super) fn world_half_extent(grid: Option<&crate::terrain_grid::HeightGrid>) -> f32 {
@@ -441,7 +441,7 @@ fn marker_node() -> Node {
 mod tests {
     use super::*;
 
-    /// The square these pure-mapping pins are made over: the flat-slab fallback world's,
+    /// The square these pure-mapping pins are made over: the flat-slab fixture world's,
     /// which `world_half_extent` answers with when no heightmap decoded.
     const HALF: f32 = crate::terrain_grid::FIXTURE_EXTENT.half_extent();
     const LIMIT: f32 = HALF * SPAWN_LIMIT_FRACTION;
