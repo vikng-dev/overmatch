@@ -1027,6 +1027,15 @@ pub(super) fn discovery_entry(
         .map(|crossing| ((crossing.t - start).max(0.0), crossing.normal))
 }
 
+/// The game's damage model: the last real exit of a body's sample ray, excluding tangent fans.
+pub(super) fn last_exit(hits: &[FaceHit]) -> Option<f64> {
+    canonical_crossings(&hits.iter().collect::<Vec<_>>())
+        .into_iter()
+        .filter(|crossing| crossing.sign < 0)
+        .map(|crossing| crossing.t)
+        .max_by(f64::total_cmp)
+}
+
 /// The live union field: which shells are open, and therefore what `max(factor)` is.
 ///
 /// Openness is a BOOLEAN, not a depth. A closed, outward-wound, EMBEDDED shell crossed transversely

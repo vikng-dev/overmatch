@@ -344,11 +344,30 @@ fn certified_at(
     frame: DiscFrame,
     radius: f32,
 ) -> Result<Interior, WalkError> {
+    certified_samples(
+        context,
+        not_own,
+        start,
+        axis,
+        frame,
+        radius,
+        layout(&frame, radius),
+    )
+}
+
+/// The game's damage model: contact-time membership for the starts discovery actually swept.
+/// The next layout's transported basis must not move or flatten those staggered sample starts.
+pub(crate) fn certified_samples(
+    context: &ResolveContext<'_, '_, '_>,
+    not_own: &dyn Fn(Entity) -> bool,
+    start: AxisStart,
+    axis: Dir3,
+    frame: DiscFrame,
+    radius: f32,
+    offsets: Vec<Vec3>,
+) -> Result<Interior, WalkError> {
     let AxisStart { anchor: at, origin } = start;
-    let offsets: Vec<Vec3> = layout(&frame, radius)
-        .into_iter()
-        .map(|offset| origin + offset)
-        .collect();
+    let offsets: Vec<Vec3> = offsets.into_iter().map(|offset| origin + offset).collect();
     let axis = Vec3::from(axis);
     let reach = offsets
         .iter()
@@ -1929,6 +1948,87 @@ fn closing_walk(
         }
         length = (length * 2.0).min(horizon);
     }
+}
+
+/// The game's damage model: finish the struck physical body's actual material on these
+/// sample rays. A finite support bound only sizes the collector; only its real exit faces
+/// extend the immutable crossing. No baked box, servo window or future pose supplies a face.
+pub(crate) fn body_completion(
+    context: &ResolveContext<'_, '_, '_>,
+    struck: Entity,
+    admit: &dyn Fn(Entity) -> bool,
+    flight: &Flight,
+    radius: f32,
+) -> Result<f32, WalkError> {
+    let parts: Vec<_> = context
+        .world
+        .body_primitives(struck)
+        .into_iter()
+        .filter(|&(_, primitive)| admit(primitive))
+        .collect();
+    let offsets = flight.sample_offsets(radius);
+    let axis = *flight.direction;
+    let (anchor, origin, seeds) = match &flight.continuation {
+        Some(interior) => (interior.anchor, interior.origin, interior.seeds.as_slice()),
+        None => (flight.position, Vec3::ZERO, &[][..]),
+    };
+    let far = parts
+        .iter()
+        .map(|&(_, primitive)| {
+            let (position, rotation, collider, _) = context
+                .colliders
+                .get(primitive)
+                .expect("game's damage model: body membership names prepared collider geometry");
+            let pose = context.world.pose(primitive);
+            let bounds = collider.aabb(
+                pose.map_or(position.0, |pose| pose.position),
+                pose.map_or(*rotation, |pose| Rotation(pose.rotation)),
+            );
+            let a =
+                ((bounds.min.as_dvec3() - anchor.as_dvec3()) - origin.as_dvec3()) * axis.as_dvec3();
+            let b =
+                ((bounds.max.as_dvec3() - anchor.as_dvec3()) - origin.as_dvec3()) * axis.as_dvec3();
+            a.max(b).element_sum()
+        })
+        .fold(0.0, f64::max);
+    let spread = offsets
+        .iter()
+        .map(|offset| f64::from(offset.length()))
+        .fold(0.0, f64::max);
+    let length = ((far + spread + f64::from(PROBE_MARGIN)) as f32).next_up();
+    assert!(
+        length.is_finite(),
+        "game's damage model: finite loaded body geometry has finite support"
+    );
+    let mut end = 0.0f64;
+    for (sample, offset) in offsets.into_iter().enumerate() {
+        let seed = seeds.get(sample);
+        let mut hits = Vec::new();
+        collect::collect(
+            &Corridor {
+                anchor,
+                origin: origin + offset,
+                axis,
+                length,
+                behind: 0.0,
+                seeded: seed.map_or(&[], |seed| seed.inside.as_slice()),
+                handoff: seed.map(|seed| seed.t),
+                laws: &context.laws,
+            },
+            &parts,
+            context.colliders,
+            &mut hits,
+            &|entity| context.world.pose(entity),
+        )?;
+        if let Some(exit) = walk::last_exit(&hits) {
+            end = end.max(exit);
+        }
+    }
+    Ok(if end > 0.0 {
+        (end as f32).next_up()
+    } else {
+        0.0
+    })
 }
 
 /// The candidate colliders whose AABB the corridor's swept box touches, as `(volume node, collider)`.

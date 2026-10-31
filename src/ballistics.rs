@@ -843,20 +843,30 @@ fn cast_disc_segment(
                     .geometry
                     .get(entity)
                     .expect("game's damage model: every tree candidate has resolved geometry");
-                let poses = match world.motion.as_ref() {
-                    Some(history) => *history.colliders.get(&entity).expect(
-                        "game's damage model: every tree candidate has captured endpoint poses",
-                    ),
-                    None => {
-                        // Standalone static fixtures do not simulate collider motion.
-                        let pose = motion::Pose {
-                            position: position.0,
-                            rotation: rotation.0,
-                        };
-                        motion::Poses {
-                            from: pose,
-                            to: pose,
+                let poses = if world.sweep.get().is_some() {
+                    match world.motion.as_ref() {
+                        Some(history) => *history.colliders.get(&entity).expect(
+                            "game's damage model: every tree candidate has captured endpoint poses",
+                        ),
+                        None => {
+                            let pose = motion::Pose {
+                                position: position.0,
+                                rotation: rotation.0,
+                            };
+                            motion::Poses {
+                                from: pose,
+                                to: pose,
+                            } // Standalone static fixtures.
                         }
+                    }
+                } else {
+                    let pose = world.pose(entity).unwrap_or(motion::Pose {
+                        position: position.0,
+                        rotation: rotation.0,
+                    });
+                    motion::Poses {
+                        from: pose,
+                        to: pose,
                     }
                 };
                 for &offset in offsets {
@@ -871,9 +881,12 @@ fn cast_disc_segment(
                         origin + offset + dir * max,
                     );
                     let (mut contact, hit) = if poses.from == poses.to {
+                        if max == 0.0 {
+                            continue;
+                        } // A stationary point has no static entering face.
                         let Some((distance, normal)) = collider.cast_ray(
-                            *position,
-                            *rotation,
+                            poses.to.position,
+                            poses.to.rotation,
                             origin + offset,
                             *dir,
                             max,
@@ -2213,6 +2226,8 @@ struct ProjectileMarchNet<'w> {
 #[derive(SystemParam)]
 struct ProjectileMarchWorld<'w, 's> {
     motion: Option<Res<'w, motion::ColliderMotion>>,
+    collider_bodies: Query<'w, 's, &'static avian3d::prelude::ColliderOf>,
+    body_colliders: Query<'w, 's, &'static avian3d::prelude::RigidBodyColliders>,
     layers: Query<'w, 's, &'static avian3d::prelude::CollisionLayers>,
     rigs: Query<'w, 's, (Entity, &'static crate::tank::Rig)>,
     locals: Query<'w, 's, &'static Transform, Without<Projectile>>,
@@ -2288,6 +2303,24 @@ impl ProjectileMarchWorld<'_, '_> {
                 (tank, crate::damage_cam::record::HullFrame::posed(at, turn))
             })
             .collect()
+    }
+
+    fn body_primitives(&self, primitive: Entity) -> Vec<(Entity, Entity)> {
+        let body = self
+            .collider_bodies
+            .get(primitive)
+            .expect("game's damage model: a prepared collider belongs to a physics body")
+            .body;
+        let parts = self
+            .body_colliders
+            .get(body)
+            .expect("game's damage model: ColliderOf populates its body's collider relationship");
+        let mut parts: Vec<_> = parts
+            .iter()
+            .filter_map(|part| self.armour(part).map(|(node, _)| (node, part)))
+            .collect();
+        parts.sort();
+        parts
     }
 
     fn motion_padding(&self) -> f32 {
@@ -3302,7 +3335,7 @@ fn march_shell_step(
                     damage_dealt += wound_legs(shell, &context, &not_own, &[leg], speed, health);
                 }
                 flight.fly(displacement);
-                budget.fly(f64::from(within / flight.speed));
+                budget.fly(budget.remaining());
                 break;
             }
             Ahead::Terrain { distance, normal } => {
@@ -3363,26 +3396,34 @@ fn march_shell_step(
             if world.motion_padding() > 0.0 {
                 let leg = resolve::Leg::new(origin, dir, contact, &flight.sample_offsets(radius));
                 damage_dealt += wound_legs(shell, &context, &not_own, &[leg], flight.speed, health);
-                budget.fly(f64::from(contact / flight.speed));
+                // The game's damage model clocks contact by fraction even when world speed
+                // is zero: a moving body can still enter a stationary round's position.
+                budget.fly(f64::from(moving.fraction - from) * f64::from(dt));
                 shell.projectile.fuze.flown(contact);
                 carrier = moving.velocity;
+                let offsets = flight.sample_offsets(radius);
                 let relative = flight.direction * flight.speed - carrier;
                 let direction = Dir3::new(relative).expect(
                     "game's damage model: an entering relative sweep has nonzero relative velocity",
                 );
+                flight.frame = flight.frame.transport(*flight.direction, *direction);
                 flight.direction = direction;
                 flight.speed = relative.length();
                 flight.position = moving.point;
                 // The game's damage model admits simultaneous geometry in the one frozen
                 // contact scene. This is contact-time membership, never tick-start discovery.
                 flight.continuation = Some(
-                    resolve::certified(
+                    resolve::certified_samples(
                         &context,
                         &not_own,
-                        moving.point,
+                        resolve::AxisStart {
+                            anchor: moving.point,
+                            origin: Vec3::ZERO,
+                        },
                         direction,
                         flight.frame,
                         radius,
+                        offsets,
                     )
                     .unwrap_or_else(|error| error.panic()),
                 );
@@ -3420,6 +3461,7 @@ fn march_shell_step(
             &not_own,
             &flight,
             contact,
+            hit.map(|hit| hit.entity),
             health,
             &mut budget,
         );
@@ -3475,14 +3517,19 @@ fn launch(
 }
 
 /// The game's damage model freezes the current discovery chain before playback starts. The
-/// held samples finish in the frozen scene. Separated contacts return to relative discovery;
+/// body's actual surfaces and held samples finish in the frozen scene. Other bodies return to relative discovery;
 /// no tick re-collects a chain that is already being played back.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the immutable planner also closes the struck physical body's actual geometry"
+)]
 fn decide_playback(
     shell: &MarchingShell,
     context: &resolve::ResolveContext<'_, '_, '_>,
     admit: &dyn Fn(Entity) -> bool,
     flight: &resolve::Flight,
     contact: f32,
+    struck: Option<Entity>,
     health: &Query<&mut ComponentHealth>,
     budget: &mut resolve::Budget,
 ) -> std::collections::VecDeque<resolve::Playback> {
@@ -3525,10 +3572,17 @@ fn decide_playback(
                 .unwrap_or_else(|error| error.panic())
             }
         } else {
-            if !flight.holds_material() {
+            let reach = if flight.holds_material() {
+                resolve::FIELD_REACH
+            } else if let Some(struck) = struck {
+                resolve::body_completion(context, struck, admit, &flight, radius)
+                    .unwrap_or_else(|error| error.panic())
+            } else {
+                break;
+            };
+            if reach == 0.0 {
                 break;
             }
-            let reach = resolve::FIELD_REACH;
             match next_surface(context.world, &flight, radius, reach, admit) {
                 Ahead::Armor(hit) if context.world.armour(hit.entity).is_some() => {
                     contact = Some(hit.distance);

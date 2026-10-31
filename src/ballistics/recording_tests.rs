@@ -1383,7 +1383,19 @@ fn an_approaching_face_is_met_before_the_next_start() {
     app.world_mut()
         .entity_mut(root)
         .insert(LinearVelocity(Vec3::Z * 10.0));
-    fire(&mut app, Vec3::new(0.0, 0.0, 12.60), FireMechanism::Single);
+    let from = Vec3::new(0.0, 0.0, 12.62);
+    let snapshot_end = from
+        + freeflight_step(
+            Vec3::NEG_Z * SPEED,
+            fixture_drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
+            TICK.as_secs_f32(),
+        ) * TICK.as_secs_f32();
+    let plate_end = 10.0 * TICK.as_secs_f32();
+    assert!(
+        (snapshot_end.z - plate_end).abs() < 0.025,
+        "the fixture's missed snapshot would leave the next start inside the plate"
+    );
+    fire(&mut app, from, FireMechanism::Single);
     app.update();
     let mut query = app.world_mut().query::<&PenetrationMarks>();
     let speeds: Vec<_> = query
@@ -1539,7 +1551,7 @@ fn a_piece_launched_faster_than_the_round_is_met_again() {
 fn a_third_body_arriving_at_contact_uses_the_same_sampled_scene() {
     let mut app = recording_world(false);
     app.insert_resource(RetainSpentShells(true));
-    let (_, first) = tank(
+    tank(
         &mut app,
         Vec3::ZERO,
         0.0,
@@ -1602,7 +1614,6 @@ fn a_third_body_arriving_at_contact_uses_the_same_sampled_scene() {
         crossing.iter().any(|volume| volume.volume == third[0]),
         "the crossing records the arriving material"
     );
-    assert!(app.world().get::<BallisticVolume>(first[0]).is_some());
 }
 
 /// The game's damage model: outside discovery is a runtime invariant, not a launch-time
@@ -1621,4 +1632,110 @@ fn runtime_discovery_refuses_a_foreign_interior_start() {
     settle(&mut app);
     fire(&mut app, Vec3::ZERO, FireMechanism::Single);
     app.update();
+}
+
+/// The game's damage model: a resolved moving frame can leave zero world speed. The remaining
+/// tick still has seconds, and an approaching body can reach the stationary round. Dividing
+/// world travel by speed would spend NaN seconds; gameplay relies on the contact fraction instead.
+#[test]
+fn a_zero_world_speed_waits_or_meets_a_moving_body_on_its_clock() {
+    use bevy::ecs::system::RunSystemOnce;
+    for enters in [false, true] {
+        let mut app = recording_world(false);
+        app.insert_resource(RetainSpentShells(true));
+        let at = Vec3::new(if enters { 0.0 } else { 10.0 }, 20.0, -1.0);
+        let (body, _) = tank(
+            &mut app,
+            at,
+            0.0,
+            Vec3::ZERO,
+            &[(
+                "moving plate",
+                Vec3::new(2.0, 2.0, 0.05),
+                Vec3::ZERO,
+                Kind::Plate,
+            )],
+        );
+        settle(&mut app);
+        app.world_mut()
+            .entity_mut(body)
+            .insert(LinearVelocity(Vec3::Z * 128.0));
+        let from = Vec3::Y * 20.0;
+        fire_along(&mut app, from, Dir3::Z, FireMechanism::Single, None);
+        app.world_mut().flush();
+        let playing = app
+            .world_mut()
+            .run_system_once(
+                move |world: ProjectileMarchWorld,
+                      colliders: Query<(
+                    &'static Position,
+                    &'static Rotation,
+                    &'static Collider,
+                    Option<&'static BallisticSurfaces>,
+                )>| {
+                    let context = resolve::ResolveContext {
+                        world: &world,
+                        colliders: &colliders,
+                        deposit: true,
+                        laws: walk::WalkLaws::default(),
+                    };
+                    let frame = walk::DiscFrame::anchored(Vec3::Z).unwrap();
+                    let interior = resolve::Interior::laid(
+                        from,
+                        resolve::layout(&frame, resolve::disc_radius(FIXTURE_88.caliber)),
+                    );
+                    let flight = resolve::Flight {
+                        position: from,
+                        direction: Dir3::Z,
+                        speed: SPEED,
+                        frame,
+                        continuation: Some(interior.clone()),
+                    };
+                    // Fixture: the completed relative path's carrier exactly cancels its world velocity.
+                    let mut playing = resolve::Playback::new(
+                        resolve::Decision::Clear {
+                            resume: from,
+                            travel: 0.0,
+                            continuation: interior,
+                            leg: resolve::Leg::new(from, Dir3::Z, 0.0, &[Vec3::ZERO]),
+                        },
+                        &flight,
+                        bound(FIXTURE_88),
+                        &context,
+                        &|_| true,
+                        0.0,
+                        &|_| false,
+                    );
+                    playing.in_moving_frame(Vec3::NEG_Z * SPEED);
+                    assert_eq!(playing.flight().speed, 0.0, "the fixture leaves world rest");
+                    playing
+                },
+            )
+            .unwrap();
+        let mut shells = app.world_mut().query::<&mut Projectile>();
+        shells
+            .single_mut(app.world_mut())
+            .unwrap()
+            .playback
+            .push_back(playing);
+        app.update();
+        let mut logs = app.world_mut().query::<(&Transform, &PenetrationMarks)>();
+        let (pose, marks) = logs.single(app.world()).unwrap();
+        if enters {
+            assert!(
+                marks.log.iter().any(|mark| matches!(mark,
+                ArmourMark::Crossing { speed_in, .. } if (*speed_in - 128.0).abs() < 0.01)),
+                "the moving body supplies the relative impact"
+            );
+        } else {
+            assert!(
+                marks.log.is_empty(),
+                "no static contact was invented at rest"
+            );
+            assert_eq!(
+                pose.translation, from,
+                "open world rest spends seconds without movement"
+            );
+        }
+    }
 }

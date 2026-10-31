@@ -1574,10 +1574,15 @@ The struck point's velocity is collider-origin translation plus angular velocity
 rotated local contact offset; child servo and recoil motion therefore participate. The mechanism
 uses the round's velocity minus this velocity. Its immutable relative path is carried back to world
 by the struck point's constant contact velocity, including each timed effect and sampled recording
-frame. No second world clock advances while that crossing is decided. Held material completes in
-that scene; separated contacts return to relative discovery at the elapsed tick fraction. Ground
+frame. No second world clock advances while that crossing is decided. The crossing completes the
+struck physical body's actual material along its sample rays,
+including gaps between its parts, in that scene. Completion reads real exit faces; a finite
+support bound only sizes that collection. Other bodies return to relative discovery at the
+elapsed tick fraction. This preserves the static body's immutable path without a baked envelope.
+Ground
 is only the declared height grid; geometry-only fixtures have no ground. An Armor collider without
-ballistic-volume ancestry is a bug at discovery. No envelope or future-pose prediction participates. Discovery uses the existing topological
+ballistic-volume ancestry is a bug at discovery. No envelope or future-pose prediction participates.
+Discovery uses the existing topological
 boundary band to recognize a represented point on a face after f32 coordinate conversion; an
 interior start beyond that band panics. This is face classification during the sweep, not a
 containment certificate supplying tick-start membership.
