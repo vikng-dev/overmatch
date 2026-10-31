@@ -860,13 +860,14 @@ impl RayWalk {
     /// or it has nothing to pair with.
     ///
     /// "AT the restart" is a TOLERANCE, not an equality, and that is the whole reason this takes
-    /// laws. A restart `t` read off anything but the boundary itself — a perforation's resume point,
-    /// a plane through the entrance surface — agrees with a boundary beside it only to within
-    /// rounding: a plane fitted to an oblique entrance was MEASURED 1.4e-8 from the faces it was
-    /// fitted to. Read as an exact comparison, that hair decides between "the seed owns this entry"
-    /// and "the corridor does", and getting it wrong is `UnexpectedEntry` and a round stopped dead on
-    /// a plate it should have crossed. [`coincident`] is the module's existing answer to "do these
-    /// two `t` name one boundary", so it is the one used here.
+    /// laws. A hand-off on a face reads its seed at exactly that face's `t`, and the transit
+    /// corridor re-measures the face along the bend at `t ≈ 0`; but a second boundary beside that
+    /// face, or any boundary beside a restart read off no boundary at all (a perforation's resume
+    /// point, a hand-off in air), agrees with the restart only to within rounding. Read as an exact
+    /// comparison, that hair decides between "the seed owns this entry" and "the corridor does", and
+    /// getting it wrong is `UnexpectedEntry` and a round stopped dead on a plate it should have
+    /// crossed. [`coincident`] is the module's existing answer to "do these two `t` name one
+    /// boundary", so it is the one used here.
     pub fn inside_at(&self, t: f64, laws: &WalkLaws) -> Vec<ShellKey> {
         self.shells
             .iter()

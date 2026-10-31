@@ -2687,7 +2687,7 @@ fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
 }
 
 // ---------------------------------------------------------------------------------------------
-// The hand-off on pieces the disc meets at a graze, side-on or together (#191)
+// The hand-off on pieces the disc meets at a graze, side-on or together
 // ---------------------------------------------------------------------------------------------
 
 /// A straight tube along local `Z`, `outer` and `bore` radii, `length` long, as a certified trimesh:
@@ -2794,7 +2794,7 @@ fn a_tube_crossed_side_on_resolves() {
 /// every sample handed off on the first piece's mean plane, as tank-local start and velocity (m,
 /// m/s): a grazed piece in front of another, a barrel's far wall, a grazed edge beside a piece at
 /// overlapping depth. FIXTURE DATA, MEASURED on that run's log and replayed at the fixture tank's
-/// spawn pose (#191).
+/// spawn pose.
 const FIRST_CONTACT_REPLAYS: [(Vec3, Vec3); 3] = [
     (
         Vec3::new(-0.484_449_24, 2.283_379, 10.736_783),

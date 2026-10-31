@@ -271,10 +271,14 @@ pub(crate) fn collect(
 ///
 /// - `topology_band(handoff)` — everything the seed declined. An entry it declined and this clamp
 ///   then dropped as already traversed is counted by nobody: the shell's exit arrives with nothing
-///   open, `UnexpectedExit`, and the round fails closed on a plate it bit into. MEASURED: a ring
-///   sample whose entrance ray entered 1.72e-6 behind the `t` its seed was read at, 10.585 m from
-///   its anchor (band 5.23e-6), re-measures that face 1.42e-6 behind the transit origin — beyond
-///   `topology_abs`, so a reach without this term drops it (`resolve::tests`).
+///   open, `UnexpectedExit`, and the round fails closed on a plate it bit into. A hand-off on a
+///   face reads its seed at exactly that face's entry `t`, so that face alone would need no band;
+///   the term covers every other entry the seed declined within the band: one beside the hand-off
+///   face, or beside a restart read off no boundary (a perforation's resume point, a hand-off in
+///   air). MEASURED under the retired hand-off on one shared plane, which read every seed off no
+///   boundary: a ring sample whose entrance ray entered 1.72e-6 behind the `t` its seed was read
+///   at, 10.585 m from its anchor (band 5.23e-6), re-measured that face 1.42e-6 behind the transit
+///   origin — beyond `topology_abs`, so a reach without this term dropped it.
 /// - `topology_band(scale)` — the corridor re-measures that face from an origin rounded at its own
 ///   scale: the larger of the anchor-relative origin and the collider-local origin the crossing
 ///   arithmetic runs in. The anchor is where the march segment started, not first contact, and a
