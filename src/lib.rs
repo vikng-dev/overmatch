@@ -108,6 +108,8 @@ mod hud;
 /// the scratches, dents and holes rounds leave, replicated to every client. The decals that draw
 /// it are `vfx::hull_marks`.
 mod hull_marks;
+/// A data file's table keyed by name, refusing a duplicated key at parse.
+mod keyed_map;
 /// `OVERMATCH_LOD_SHOWCASE=1`: a flat map, the player at one edge, and a clamped PAIR of Tigers at
 /// every switch distance in the shoe LOD chain — the two meshes the pipeline's rendered-difference
 /// gate compared, side by side, at the range it compared them. A dev eyeball harness for a gate

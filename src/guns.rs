@@ -33,8 +33,9 @@
 use serde::Deserialize;
 use std::collections::BTreeMap;
 
+use crate::keyed_map::KeyedMap;
 use crate::provenance::Sourced;
-use crate::rounds::{KeyedMap, Round, RoundError, RoundRegistry};
+use crate::rounds::{Round, RoundError, RoundRegistry};
 use crate::spec::FireMechanism;
 
 /// One gun as authored.

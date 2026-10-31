@@ -55,8 +55,9 @@ use bevy::render::storage::ShaderBuffer;
 use bevy::shader::ShaderRef;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldInstanceReady};
 use serde::Deserialize;
-use serde::de::{self, Deserializer, MapAccess, Visitor};
+use serde::de::{self, Deserializer};
 
+use crate::keyed_map::KeyedMap;
 use crate::provenance::Sourced;
 use crate::substances::SubstanceRegistry;
 use crate::world::{MapEncoding, MapTiling, surface_map, surface_sampler};
@@ -112,37 +113,6 @@ impl<'de> Deserialize<'de> for Srgb {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let text = String::deserialize(deserializer)?;
         Self::parse(&text).map_err(de::Error::custom)
-    }
-}
-
-/// A map keyed by name whose repeated key is refused, never overwritten: a second entry for one
-/// key is two answers, and the file cannot say which is meant.
-struct UniqueMap<V>(BTreeMap<String, V>);
-
-impl<'de, V: Deserialize<'de>> Deserialize<'de> for UniqueMap<V> {
-    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct MapVisitor<V>(std::marker::PhantomData<V>);
-
-        impl<'de, V: Deserialize<'de>> Visitor<'de> for MapVisitor<V> {
-            type Value = UniqueMap<V>;
-
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("a map of names, each named once")
-            }
-
-            fn visit_map<A: MapAccess<'de>>(self, mut access: A) -> Result<Self::Value, A::Error> {
-                let mut out = BTreeMap::new();
-                while let Some((key, value)) = access.next_entry::<String, V>()? {
-                    if out.contains_key(&key) {
-                        return Err(de::Error::custom(format!("{key:?} is declared twice")));
-                    }
-                    out.insert(key, value);
-                }
-                Ok(UniqueMap(out))
-            }
-        }
-
-        deserializer.deserialize_map(MapVisitor(std::marker::PhantomData))
     }
 }
 
@@ -212,7 +182,7 @@ pub(crate) struct VisualLibrary(BTreeMap<String, Visual>);
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct LibraryFile {
-    visuals: UniqueMap<Visual>,
+    visuals: KeyedMap<Visual>,
 }
 
 impl VisualLibrary {
