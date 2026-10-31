@@ -4,7 +4,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use avian3d::prelude::{
-    Collider, ColliderAabb, Forces, Position, Rotation, SpatialQuery, SpatialQueryFilter,
+    Collider, ColliderAabb, ColliderTransform, Forces, Position, RigidBody, RigidBodyColliders,
+    Rotation, SpatialQuery, SpatialQueryFilter,
 };
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
@@ -2214,7 +2215,7 @@ struct ProjectileMarchWorld<'w, 's> {
     // armour classification.
     witnesses: Query<'w, 's, &'static WitnessVolume>,
     witness_surfaces: Query<'w, 's, (), With<WitnessSurface>>,
-    // Every free body's envelope at its pose: where a crossing begins and ends.
+    // Every free body's envelope, its pose and its colliders: where a crossing begins and ends.
     envelopes: Query<
         'w,
         's,
@@ -2223,8 +2224,20 @@ struct ProjectileMarchWorld<'w, 's> {
             &'static Envelope,
             &'static Position,
             &'static Rotation,
+            Option<&'static RigidBodyColliders>,
         ),
         Without<ChildOf>,
+    >,
+    // A body's child colliders as the physics step placed them, and their place on the body.
+    placed: Query<
+        'w,
+        's,
+        (
+            &'static Position,
+            &'static Rotation,
+            &'static ColliderTransform,
+        ),
+        Without<RigidBody>,
     >,
 }
 
@@ -2249,6 +2262,31 @@ impl ProjectileMarchWorld<'_, '_> {
         }
     }
 
+    /// The pose a body's colliders were placed at, which the walk casts against. The physics step
+    /// writes each child collider's pose from its body's pose at the step's START composed with
+    /// its [`ColliderTransform`], so on a body that moved in the step its colliders stand where the
+    /// body stood before it, a step behind the body's own [`Position`] (on a tank driving at
+    /// 10 m/s, 0.16 m, DERIVED). Read back off any child collider that is no body of its own, as
+    /// the pen cam's hull frame is (`damage_cam::recorder`); the body's own pose where it has none.
+    fn placed_pose(
+        &self,
+        position: &Position,
+        rotation: &Rotation,
+        colliders: Option<&RigidBodyColliders>,
+    ) -> (Vec3, Quat) {
+        colliders
+            .and_then(|colliders| {
+                colliders
+                    .iter()
+                    .find_map(|collider| self.placed.get(collider).ok())
+            })
+            .map(|(at, turn, local)| {
+                let body = turn.0 * local.rotation.0.inverse();
+                (at.0 - body * local.translation, body)
+            })
+            .unwrap_or((position.0, rotation.0))
+    }
+
     /// How far along `dir` from `origin` a step with `travel` metres left must carry a disc of
     /// `radius`: `travel`, or, where the point `travel` ahead lies inside an envelope, on until the
     /// line has left every envelope it is inside, overlapping ones chained into one crossing. The
@@ -2257,8 +2295,17 @@ impl ProjectileMarchWorld<'_, '_> {
     /// Each envelope is grown by the disc's `radius`, so a sample outside the grown box is outside
     /// the body's every primitive; by `extent · 2^-20` for the sim's f32 placement (the bake's
     /// contract, `bake::envelope`); and by [`MARCH_EPS`] for this test's own world-to-body
-    /// arithmetic (DERIVED: a world f32 past 2048 m is spaced 2.44e-4 m). Growing it only moves
+    /// arithmetic and the body pose's read-back ([`Self::placed_pose`]) (DERIVED: a world f32 past
+    /// 2048 m is spaced 2.44e-4 m, and the two take three roundings of it). Growing it only moves
     /// where a crossing ends further out.
+    ///
+    /// Each envelope stands twice: where its body's colliders were placed, the pose this step's
+    /// walk casts against ([`Self::placed_pose`]), and at the body's own pose, where the next
+    /// physics step places them for the next step's walk. A crossing ends outside both, so the next
+    /// step starts outside the body's every primitive however the body moved in between: a tank
+    /// driving away along the line would otherwise carry its rear plate back over a round that left
+    /// it a disc's radius behind, and one driving at it would carry its front plate over a round
+    /// stopped short of it.
     fn crossing_reach(
         &self,
         origin: Vec3,
@@ -2267,30 +2314,36 @@ impl ProjectileMarchWorld<'_, '_> {
         radius: f32,
         shooter: Option<Entity>,
     ) -> f32 {
+        let span = |lo: Vec3A, hi: Vec3A, (position, rotation): (Vec3, Quat)| {
+            let inverse = rotation.inverse();
+            let from = Vec3A::from(inverse * (origin - position));
+            let along = Vec3A::from(inverse * Vec3::from(dir));
+            let (mut enter, mut leave) = (f32::NEG_INFINITY, f32::INFINITY);
+            for i in 0..3 {
+                if along[i] == 0.0 {
+                    if from[i] < lo[i] || from[i] > hi[i] {
+                        return None;
+                    }
+                } else {
+                    let (a, b) = ((lo[i] - from[i]) / along[i], (hi[i] - from[i]) / along[i]);
+                    enter = enter.max(a.min(b));
+                    leave = leave.min(a.max(b));
+                }
+            }
+            (enter <= leave && leave > 0.0).then_some((enter, leave))
+        };
         let spans: Vec<(f32, f32)> = self
             .envelopes
             .iter()
             .filter(|(body, ..)| Some(*body) != shooter)
-            .filter_map(|(_, envelope, position, rotation)| {
+            .flat_map(|(_, envelope, position, rotation, colliders)| {
                 let extent = envelope.0.min.abs().max(envelope.0.max.abs()).max_element();
                 let pad = Vec3A::splat(radius + extent * 2.0_f32.powi(-20) + MARCH_EPS);
                 let (lo, hi) = (envelope.0.min - pad, envelope.0.max + pad);
-                let inverse = rotation.0.inverse();
-                let from = Vec3A::from(inverse * (origin - position.0));
-                let along = Vec3A::from(inverse * Vec3::from(dir));
-                let (mut enter, mut leave) = (f32::NEG_INFINITY, f32::INFINITY);
-                for i in 0..3 {
-                    if along[i] == 0.0 {
-                        if from[i] < lo[i] || from[i] > hi[i] {
-                            return None;
-                        }
-                    } else {
-                        let (a, b) = ((lo[i] - from[i]) / along[i], (hi[i] - from[i]) / along[i]);
-                        enter = enter.max(a.min(b));
-                        leave = leave.min(a.max(b));
-                    }
-                }
-                (enter <= leave && leave > 0.0).then_some((enter, leave))
+                let placed = self.placed_pose(position, rotation, colliders);
+                [placed, (position.0, rotation.0)]
+                    .into_iter()
+                    .filter_map(move |pose| span(lo, hi, pose))
             })
             .collect();
         let mut reach = travel.max(0.0);

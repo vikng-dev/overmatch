@@ -1561,6 +1561,17 @@ across a tick boundary onto moving armour (the `unexpected_exit` above).
   The test grows each box by the disc's radius, by `extent · 2^-20` and by `MARCH_EPS` for its own
   world-to-body arithmetic (`ProjectileMarchWorld::crossing_reach`). The shooter's own envelope is
   passed through, as its volumes are.
+- **An envelope stands at two poses (step 6c).** The physics step places a body's child colliders
+  from the body's pose at the step's start, so the walk casts against a moving body a step behind
+  its own `Position` (0.16 m on a tank at 10 m/s, DERIVED), and the next step's walk will cast
+  against its current `Position`. The envelope is tested at both
+  (`ProjectileMarchWorld::placed_pose`, read back off a child collider as the pen cam's hull frame
+  is), and a crossing ends outside both. Placed at the body's own pose alone, a crossing of a tank
+  driving at the round ended short of its rear plate, which had passed the round by the next step
+  and was never read (MEASURED in the fixture, `a_moving_tanks_crossing_resolves_against_its_pose_at_contact`);
+  placed at the colliders' pose alone, a tank driving away carried its rear plate back over the
+  round a disc's radius past it, and the next step read the plate again (MEASURED,
+  `a_round_through_one_tank_into_a_second_resolves_both`).
 - **No armour state crosses a tick.** The shell carries its axis position (anchor plus offset, so
   open flight never re-rounds it at world spacing) and the travel the last crossing flew past its
   step (`Projectile::owed`), which the next step's travel is short by: no travel is created or

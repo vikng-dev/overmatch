@@ -640,6 +640,230 @@ fn a_record_is_stated_in_the_frame_the_march_resolved() {
     }
 }
 
+/// A fixture hull for the crossing tests: 20 mm plates 3 m apart at its front and back, and a crew
+/// box between them that no shot here empties. FIXTURE DATA: the fixture 88 perforates every plate
+/// of two such hulls.
+fn hull() -> [Volume; 3] {
+    let plate = Vec3::new(3.0, 3.0, 0.02);
+    [
+        ("front", plate, Vec3::new(0.0, 0.0, 1.5), Kind::Plate),
+        (
+            "crew",
+            Vec3::new(2.0, 2.0, 0.6),
+            Vec3::ZERO,
+            Kind::Crew(DEEP),
+        ),
+        ("back", plate, Vec3::new(0.0, 0.0, -1.5), Kind::Plate),
+    ]
+}
+
+/// Where a crossing test fires from, on the hull's axis along `-Z` (m from the near hull's centre).
+/// The round flies 12.5 m a tick (DERIVED: 800 m/s × 15.625 ms), so its third tick ends 37.5 m on;
+/// a hull driving at it at 10 m/s stands 0.31 m nearer by then (DERIVED), and the third tick ends
+/// between its plates, 1.5 m from each.
+const FROM: f32 = 37.8;
+
+/// A fixture tank of [`hull`] at rest at `at`, carrying its envelope as a tank's spawn does
+/// ([`Envelope`]): the bound of its boxes in its frame, exact for boxes square to that frame on a
+/// body with no servos. Returns the root and each volume.
+fn enveloped_tank(app: &mut App, at: Vec3) -> (Entity, Vec<Entity>) {
+    let volumes = hull();
+    let (root, spawned) = tank(app, at, 0.0, Vec3::ZERO, &volumes);
+    let (min, max) = volumes.iter().fold(
+        (Vec3::INFINITY, Vec3::NEG_INFINITY),
+        |(min, max), &(_, size, centre, _)| {
+            (min.min(centre - size * 0.5), max.max(centre + size * 0.5))
+        },
+    );
+    app.world_mut()
+        .entity_mut(root)
+        .insert(Envelope(bevy::math::bounding::Aabb3d::from_min_max(
+            min, max,
+        )));
+    (root, spawned)
+}
+
+/// One fixed tick of a crossing test: each tank's pose where the tick's march found its armour,
+/// every armour read the tick fired (world position, verdict), and the travel the round owed after
+/// it.
+struct TickReads {
+    poses: Vec<(Vec3, Quat)>,
+    impacts: Vec<(Vec3, Verdict)>,
+    owed: f32,
+}
+
+/// Fire the fixture 88 along `-Z` from `from` and run `ticks` fixed ticks, reading each. A tank's
+/// pose is read before the tick off its front plate (each of `fronts`, square to the hull at
+/// [`hull`]'s front centre): the collider the march casts against, which the physics step placed
+/// from the tank's pose at that step's start, a step behind a moving body's own `Position`.
+fn fire_and_read(app: &mut App, fronts: &[Entity], from: Vec3, ticks: usize) -> Vec<TickReads> {
+    let log = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let sink = log.clone();
+    app.add_observer(move |impact: On<Impact>| {
+        sink.lock()
+            .unwrap()
+            .push((impact.position, impact.outcome.verdict()));
+    });
+    fire(app, from, FireMechanism::Single);
+    let centre = hull()[0].2;
+    (0..ticks)
+        .map(|_| {
+            let poses = fronts
+                .iter()
+                .map(|&front| {
+                    let world = app.world();
+                    let turn = world.get::<Rotation>(front).unwrap().0;
+                    (
+                        world.get::<Position>(front).unwrap().0 - turn * centre,
+                        turn,
+                    )
+                })
+                .collect();
+            app.update();
+            let owed = app
+                .world_mut()
+                .query::<&Projectile>()
+                .iter(app.world())
+                .map(|projectile| projectile.owed)
+                .sum();
+            TickReads {
+                poses,
+                impacts: std::mem::take(&mut *log.lock().unwrap()),
+                owed,
+            }
+        })
+        .collect()
+}
+
+/// The tick the round crossed the `tank`th tank in, asserting the crossing resolved whole there
+/// against the pose that tick's march found the tank's armour at: every read of the tank falls in that one tick,
+/// each lies on one of its boxes' faces toward the round in its hull frame at that pose, and both
+/// plates are read and perforated. A crossing split across a tick reads its later boxes against a
+/// pose the tank's travel in a tick (0.16 m, DERIVED) away; 1 mm is the tolerance. Reads are
+/// attributed by hull z: the fixture hulls stand metres apart.
+fn crossed_whole(reads: &[TickReads], tank: usize) -> usize {
+    let faces = hull().map(|(_, size, centre, _)| centre.z + size.z * 0.5);
+    let hull_z = |tick: &TickReads, at: Vec3| {
+        let (position, rotation) = tick.poses[tank];
+        (rotation.inverse() * (at - position)).z
+    };
+    let ticks: Vec<usize> = (0..reads.len())
+        .filter(|&i| {
+            reads[i]
+                .impacts
+                .iter()
+                .any(|&(at, _)| hull_z(&reads[i], at).abs() < 2.0)
+        })
+        .collect();
+    let [tick] = ticks[..] else {
+        let hull_reads: Vec<(usize, f32, Verdict)> = ticks
+            .iter()
+            .flat_map(|&i| {
+                reads[i]
+                    .impacts
+                    .iter()
+                    .map(move |&(at, verdict)| (i, hull_z(&reads[i], at), verdict))
+            })
+            .collect();
+        panic!("tank {tank} is read in one tick, not in ticks {ticks:?}: {hull_reads:?}");
+    };
+    let read: Vec<(f32, Verdict)> = reads[tick]
+        .impacts
+        .iter()
+        .map(|&(at, verdict)| (hull_z(&reads[tick], at), verdict))
+        .filter(|(z, _)| z.abs() < 2.0)
+        .collect();
+    for &(z, _) in &read {
+        assert!(
+            faces.iter().any(|face| (z - face).abs() < 1.0e-3),
+            "tank {tank}: a read at hull z {z}, on none of its faces {faces:?}"
+        );
+    }
+    for plate in [faces[0], faces[2]] {
+        assert!(
+            read.iter()
+                .any(|&(z, verdict)| (z - plate).abs() < 1.0e-3 && verdict.entered()),
+            "tank {tank}: the plate at hull z {plate} is read and perforated: {read:?}"
+        );
+    }
+    tick
+}
+
+/// A MOVING TANK'S CROSSING RESOLVES AGAINST ITS POSE AT CONTACT (design §13.5, "The envelope").
+///
+/// The fixture tank drives at the round at 10 m/s, and the tick that brings the round into its
+/// envelope ends between its plates ([`FROM`]). The crossing still resolves whole in that tick,
+/// against the pose the tick found the tank's armour at: the back plate is read where it stood at
+/// contact, not where the tank has driven it by the next tick. The round leaves the tick past the
+/// envelope, owing the travel it flew beyond the tick's. A march that let the tick's travel end the
+/// crossing reads the back plate a tick late, 0.16 m off its face (DERIVED); one that placed the
+/// envelope at the body's own pose, a step ahead of its colliders, ends the crossing short of the
+/// back plate, which has driven past the round by the next tick and is never read.
+#[test]
+fn a_moving_tanks_crossing_resolves_against_its_pose_at_contact() {
+    let mut app = recording_world(false);
+    let (tank, volumes) = enveloped_tank(&mut app, Vec3::ZERO);
+    settle(&mut app);
+    app.world_mut()
+        .entity_mut(tank)
+        .insert(LinearVelocity(Vec3::new(0.0, 0.0, 10.0)));
+    let reads = fire_and_read(&mut app, &[volumes[0]], Vec3::new(0.0, 0.0, FROM), 6);
+    let contact = crossed_whole(&reads, 0);
+    assert!(
+        reads[contact].owed > 0.0,
+        "the tick's travel ended inside the envelope, so the crossing ran on past it"
+    );
+    assert!(
+        reads[contact + 1].poses[0].0.z - reads[contact].poses[0].0.z > 0.1,
+        "the tank drove on after contact"
+    );
+    assert!(
+        hp(&app, volumes[1]) < DEEP_UNITS,
+        "the crew box took a dose"
+    );
+}
+
+/// A ROUND THROUGH ONE TANK INTO A SECOND RESOLVES BOTH, EACH AT ITS OWN INSTANT.
+///
+/// Two fixture tanks on one line with disjoint envelopes, the near one driving at the round and the
+/// far one away from it, each at 10 m/s. The tick that enters the near envelope ends inside it, so
+/// that crossing runs on past the tick's travel and stops where the round leaves the near envelope,
+/// owing the overrun; the far tank is the next tick's crossing, resolved whole against the pose
+/// that tick found it at. Both are perforated plate by plate, each plate read once, and each crew
+/// box takes a dose. A march that chained disjoint envelopes resolves both in one tick; one that
+/// ended the far crossing where the receding tank's next pose covers the round reads its back
+/// plate again a tick later.
+#[test]
+fn a_round_through_one_tank_into_a_second_resolves_both() {
+    let mut app = recording_world(false);
+    let (near, near_volumes) = enveloped_tank(&mut app, Vec3::ZERO);
+    let (far, far_volumes) = enveloped_tank(&mut app, Vec3::new(0.0, 0.0, -9.0));
+    settle(&mut app);
+    for (tank, speed) in [(near, 10.0), (far, -10.0)] {
+        app.world_mut()
+            .entity_mut(tank)
+            .insert(LinearVelocity(Vec3::new(0.0, 0.0, speed)));
+    }
+    let fronts = [near_volumes[0], far_volumes[0]];
+    let reads = fire_and_read(&mut app, &fronts, Vec3::new(0.0, 0.0, FROM), 8);
+    let (first, second) = (crossed_whole(&reads, 0), crossed_whole(&reads, 1));
+    assert!(
+        reads[first].owed > 0.0,
+        "the near crossing ran past its tick's travel"
+    );
+    assert_eq!(
+        second,
+        first + 1,
+        "the far tank is the next tick's crossing, at its own instant"
+    );
+    for (name, crew) in [("near", near_volumes[1]), ("far", far_volumes[1])] {
+        assert!(
+            hp(&app, crew) < DEEP_UNITS,
+            "the {name} crew box took a dose"
+        );
+    }
+}
+
 /// A round that leaves a tank and strikes it again off another tank's armour: each encounter is its
 /// own record of the one shot, their losses partition the shot's loss on the tank, and a knockout
 /// the second encounter dealt is that encounter's. Fixture geometry: the round crosses the struck
