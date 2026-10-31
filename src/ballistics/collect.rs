@@ -128,7 +128,7 @@ pub(crate) struct Corridor<'a> {
     pub seeded: &'a [ShellKey],
     /// Progress along the ray the seed was READ on ([`super::walk::SampleSeed::t`]), or `None` for a
     /// corridor no seed hands off to. It is the scale [`super::walk::RayWalk::inside_at`] judged
-    /// "on the hand-off plane" at, which [`sitting_reach`] has to match.
+    /// "at the restart" at, which [`sitting_reach`] has to match.
     pub handoff: Option<f64>,
     /// Shared with the walk so the collector and the core agree about when two `t` name the same
     /// face — a second opinion about that is how an entry gets counted twice or not at all. Read
@@ -266,14 +266,14 @@ pub(crate) fn collect(
 ///
 /// A transit sample's seed and this clamp are the two halves of one decision about the entry face
 /// at the hand-off. [`super::walk::RayWalk::inside_at`] owns an entry only when it lies more than
-/// `topology_band(handoff)` behind the plane it read the seed on; nearer than that it is "on the
-/// plane" and left to the corridor. So the reach is the SUM of two bands:
+/// `topology_band(handoff)` behind the `t` it read the seed at; nearer than that it is "at the
+/// restart" and left to the corridor. So the reach is the SUM of two bands:
 ///
 /// - `topology_band(handoff)` — everything the seed declined. An entry it declined and this clamp
 ///   then dropped as already traversed is counted by nobody: the shell's exit arrives with nothing
 ///   open, `UnexpectedExit`, and the round fails closed on a plate it bit into. MEASURED: a ring
-///   sample whose entrance ray entered 1.72e-6 behind a hand-off plane 10.585 m from its anchor
-///   (band 5.23e-6) re-measures that face 1.42e-6 behind the transit origin — beyond
+///   sample whose entrance ray entered 1.72e-6 behind the `t` its seed was read at, 10.585 m from
+///   its anchor (band 5.23e-6), re-measures that face 1.42e-6 behind the transit origin — beyond
 ///   `topology_abs`, so a reach without this term drops it (`resolve::tests`).
 /// - `topology_band(scale)` — the corridor re-measures that face from an origin rounded at its own
 ///   scale: the larger of the anchor-relative origin and the collider-local origin the crossing

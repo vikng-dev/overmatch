@@ -51,7 +51,7 @@ use super::collect::{self, Corridor};
 use super::mechanism::{Dose, DoseSource, Limits, Mechanism, SolidShot};
 use super::walk::{
     self, Begin, DiscCorridor, DiscFrame, DiscWalk, Outcome, RayCorridor, SampleCorridor,
-    SampleSeed, ShellKey, Shot, SpallSource, VolumeTable, WalkError, WalkLaws,
+    SampleSeed, ShellKey, Shot, SpallSource, Stage, VolumeTable, WalkError, WalkLaws,
 };
 use super::{
     ArmourMark, BallisticSurfaces, ComponentHealth, CrossingEnd, Impact, ImpactOutcome,
@@ -941,10 +941,11 @@ impl Flight {
     /// laid on (the muzzle's, a bounce's), so its sampled cross-section projects by `|cos θ|` of
     /// the bend since, in the plane of the bend (DERIVED: 0.12 % narrower for a 2.8° drop, 13.4 %
     /// at 30°, 50 % at 60°, a line at 90°). A perforation's starts are no square disc at all —
-    /// staggered at the entrance plane, then bent — and that footprint can be WIDER than the
-    /// calibre, and stays so into later ticks (DERIVED: full coverage at 60° incidence into the
-    /// reference substance bends 12° under the default normalization, a width factor of
-    /// `cos 12° + tan 60° · sin 12° ≈ 1.338`; no substance is declared above the reference).
+    /// staggered along the entrance where each sample handed off, then bent — and that footprint can
+    /// be WIDER than the calibre, and stays so into later ticks (DERIVED: full coverage at 60°
+    /// incidence into the reference substance bends 12° under the default normalization, a width
+    /// factor of `cos 12° + tan 60° · sin 12° ≈ 1.338`; no substance is declared above the
+    /// reference).
     /// Slow rounds and steep lobs need the starts transported along per-sample paths instead.
     #[expect(
         clippy::too_many_arguments,
@@ -1181,31 +1182,6 @@ impl Leg {
                 .collect(),
         }
     }
-
-    /// Each sample flying from its own start, `from + offsets[i]`, to where its line meets the plane
-    /// through `point` square to `normal`; the whole leg at `length` when `axis` does not run into
-    /// that plane.
-    fn to_plane(
-        from: Vec3,
-        axis: Dir3,
-        length: f32,
-        offsets: &[Vec3],
-        point: Vec3,
-        normal: Vec3,
-    ) -> Self {
-        let denominator = axis.dot(normal);
-        if denominator >= 0.0 {
-            return Leg::new(from, axis, length, offsets);
-        }
-        let ends: Vec<Vec3> = offsets
-            .iter()
-            .map(|offset| {
-                let start = from + *offset;
-                start + *axis * ((point - start).dot(normal) / denominator)
-            })
-            .collect();
-        Leg::ending_at(from, axis, offsets, &ends)
-    }
 }
 
 /// A deflection off the entrance face (§4). The deflection ANGLE and the speed lost both already
@@ -1382,6 +1358,7 @@ pub(crate) fn entry_force(
         disc_radius(round.body().caliber),
         &interior.seeds,
         contact + ENTRANCE_SPAN,
+        Stage::Entrance,
     )?;
     let Some(event) = entrance.events.first() else {
         return Ok(None);
@@ -1453,6 +1430,7 @@ pub(crate) fn decide(
         radius,
         seeds,
         contact + ENTRANCE_SPAN,
+        Stage::Entrance,
     )?;
     let state_in = round.at(speed);
     let shot = Shot {
@@ -1468,7 +1446,7 @@ pub(crate) fn decide(
     };
     let v_in = Vec3::from(dir) * speed;
 
-    match walk::begin(&entrance, &shot, &context.laws) {
+    match walk::begin(&entrance, &shot, &context.laws)? {
         Begin::Miss => {
             let examined = contact + ENTRANCE_SPAN;
             Ok(Decision::Clear {
@@ -1492,16 +1470,25 @@ pub(crate) fn decide(
             let out = Dir3::new(direction).unwrap_or(dir);
             let kept = speed * speed_scale;
             let approach = (read.position - from).dot(Vec3::from(dir)).max(0.0);
-            // Each sample's way in ends on the mean entrance surface, as a transit's handoff does.
-            let mut way_in = Leg::to_plane(
-                from,
-                dir,
-                approach,
-                &entrance.offsets,
-                read.position,
-                read.normal,
-            );
-            way_in.from = anchor + from;
+            // Each sample's way in ends at its hand-off, as a transit's does: on the face it
+            // struck, or at the crossing's depth when it struck none ([`DiscWalk::hand_off`]).
+            let at = entrance
+                .hand_off()
+                .ok_or(WalkError::BadCorridor {
+                    sample: 0,
+                    reason: "a bounce was read off a disc that met nothing",
+                })?
+                .at;
+            let way_in = Leg {
+                from: anchor + from,
+                axis: dir,
+                samples: entrance
+                    .offsets
+                    .iter()
+                    .zip(at)
+                    .map(|(offset, t)| (*offset, t as f32))
+                    .collect(),
+            };
             Ok(Decision::Bounce(Bounce {
                 position,
                 normal: read.normal,
@@ -1533,6 +1520,7 @@ pub(crate) fn decide(
                 request.radius,
                 &request.seeds,
                 ENTRANCE_SPAN,
+                Stage::Transit,
             )?;
             let plan = walk::finish(&transit, &request, round, state_in, &LIMITS, &context.laws)?;
             Ok(Decision::Bite(bite(
@@ -1579,7 +1567,7 @@ fn bite(
     // anchor-relative: it is the next corridor's input, and rebuilding it in world would round it at
     // the world's spacing (see there).
     let world = |local: Vec3| transit.anchor + local;
-    let struck = transit.events[0].entrance_volume;
+    let struck = plan.crossing.entrance_volume;
     // The APPROACH: the flight's position to the axis handoff, along the way in. The transit's own
     // `t` then measures the rest, along the bend.
     let approach = (transit.origin - from).dot(Vec3::from(incoming)).max(0.0);
@@ -1596,7 +1584,7 @@ fn bite(
         Outcome::Embedded { t, .. } => Some(t as f64),
         Outcome::Perforated { .. } => None,
     };
-    let volumes = volume_crossings(transit, &plan.deposits, rest, &world);
+    let volumes = volume_crossings(transit, &plan.crossing, &plan.deposits, rest, &world);
     let (end, flown) = match plan.outcome {
         Outcome::Embedded { at, t } => (
             BiteEnd::Embedded {
@@ -1664,13 +1652,11 @@ fn bite(
 /// at or before `rest` — the whole disc came out — and always on a perforation (`rest` `None`).
 fn volume_crossings(
     transit: &DiscWalk,
+    event: &walk::DiscEvent,
     deposits: &[Dose],
     rest: Option<f64>,
     world: &impl Fn(Vec3) -> Vec3,
 ) -> Vec<VolumeCrossing> {
-    let Some(event) = transit.events.first() else {
-        return Vec::new();
-    };
     let mut spans: std::collections::BTreeMap<Entity, (f64, f64)> = Default::default();
     for contact in event
         .encounters
@@ -1709,9 +1695,9 @@ fn volume_crossings(
 /// Collect and walk a corridor, extending it until the first crossing CLOSES.
 ///
 /// "Closes" is two conditions, not one: the walk must pair (no primitive left open at the end), and
-/// the first event must end far enough inside the corridor that no ε-weld could reach past it. A
-/// corridor that stopped one millimetre after an exit could not tell a finished run from the first
-/// half of a welded sandwich.
+/// the first crossing, as `stage` reads it ([`DiscWalk::crossing_end`]), must end far enough inside
+/// the corridor that no ε-weld could reach past it. A corridor that stopped one millimetre after an
+/// exit could not tell a finished run from the first half of a welded sandwich.
 #[expect(
     clippy::too_many_arguments,
     reason = "private kernel of `decide`; every argument is corridor geometry"
@@ -1726,6 +1712,7 @@ fn closing_walk(
     radius: f32,
     seeds: &[SampleSeed],
     initial: f32,
+    stage: Stage,
 ) -> Result<DiscWalk, WalkError> {
     let mut length = initial.clamp(ENTRANCE_SPAN, MAX_CORRIDOR);
     loop {
@@ -1735,8 +1722,8 @@ fn closing_walk(
         let volumes = volume_table(context, &corridor)?;
         match walk::walk_disc(&corridor, &volumes, &context.laws) {
             Ok(walked) => {
-                let settled = walked.events.first().is_none_or(|event| {
-                    event.end + context.laws.weld_max_lookahead as f64 <= length as f64
+                let settled = walked.crossing_end(stage).is_none_or(|end| {
+                    end + context.laws.weld_max_lookahead as f64 <= length as f64
                 });
                 if settled || length >= MAX_CORRIDOR {
                     return Ok(walked);

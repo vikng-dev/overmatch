@@ -702,7 +702,7 @@ fn welded_overmatch_reads_the_summed_factor_weighted_thickness() {
     let disc = point_disc(2.0, sample(Vec3::ZERO, hits));
     let walked = walk_disc(&disc, &volumes, &WalkLaws::default()).unwrap();
     let shot = Shot { caliber: 0.088 };
-    match begin(&walked, &shot, &WalkLaws::default()) {
+    match begin(&walked, &shot, &WalkLaws::default()).unwrap() {
         Begin::Transit(request) => {
             assert!(!request.entrance.overmatched);
             // 30 mm × 1000 + 30 mm × 900 = 57 reference-mm, so 57 mm steel-equivalent — the
@@ -1179,7 +1179,7 @@ fn finish_at(
 }
 
 fn transit_request(walked: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> TransitRequest {
-    match begin(walked, shot, laws) {
+    match begin(walked, shot, laws).unwrap() {
         Begin::Transit(request) => request,
         other => panic!("expected the round to bite in, got {other:?}"),
     }
@@ -1204,7 +1204,7 @@ fn an_arm_does_not_ricochet_an_88() {
     let plate = entrance_disc(&[Slab::at(1, 0, 0.5, normal, 0.4)], 2.0);
     let walked = walk_disc(&plate, &table(&[(1, 1000.0)]), &laws).unwrap();
     assert!(matches!(
-        begin(&walked, &AP_88, &laws),
+        begin(&walked, &AP_88, &laws).unwrap(),
         Begin::Ricochet { .. }
     ));
 }
@@ -1236,7 +1236,7 @@ fn a_lightly_covered_plate_is_not_thin_enough_to_overmatch() {
     assert_eq!(covered, 4, "fixture must stay lightly covered");
     assert!(event.coverage < 0.35, "η = {}", event.coverage);
 
-    match begin(&walked, &AP_88, &laws) {
+    match begin(&walked, &AP_88, &laws).unwrap() {
         Begin::Ricochet { entrance, .. } => {
             assert!(!entrance.overmatched);
             // The covered-sample thickness, NOT the η-diluted one.
@@ -1269,7 +1269,7 @@ fn partial_coverage_scales_the_deflection_angle_and_the_speed_lost() {
 
     let full = disc_along(Vec3::ZERO, AXIS, frame, 0.044, 2.0, &steel, |_| true);
     let full = walk_disc(&full, &volumes, &laws).unwrap();
-    let (full_direction, full_scale) = match begin(&full, &AP_88, &laws) {
+    let (full_direction, full_scale) = match begin(&full, &AP_88, &laws).unwrap() {
         Begin::Ricochet {
             direction,
             speed_scale,
@@ -1300,7 +1300,7 @@ fn partial_coverage_scales_the_deflection_angle_and_the_speed_lost() {
         });
         let partial = walk_disc(&partial, &volumes, &laws).unwrap();
         let coverage = partial.events[0].coverage;
-        match begin(&partial, &AP_88, &laws) {
+        match begin(&partial, &AP_88, &laws).unwrap() {
             Begin::Ricochet {
                 direction,
                 speed_scale,
@@ -1445,77 +1445,54 @@ fn the_transit_ray_is_anchored_on_the_axis_not_the_coverage_centroid() {
     assert!((request.origin.z - 0.5).abs() < 1.0e-5);
 }
 
-/// The handoff exports per-sample SEED state, and the seed is a LOOKUP on a ray already walked
-/// rather than an inference — each sample resumes from the point where its own entrance ray met the
-/// surface.
+/// Every sample hands off on the face it crossed, at its own crossing point, with nothing seeded
+/// but presence it carried in. The transit relies on each sample starting ON its face, so the entry
+/// is the corridor's and the exit pairs with it; a shared plane puts some samples inside material
+/// and others short of it.
 ///
-/// Two flush plates staggered by 1 mm — exactly the sub-caliber authoring slop §13.7 tolerates — are
-/// one crossing whose mean surface sits between them. The samples that met the nearer plate are
-/// therefore already inside it at the handoff and must be seeded; the ones that met the further
-/// plate are not yet in and must not be, because their entry face arrives in the transit corridor's
-/// own hit list at `t = 0`.
+/// Two flush plates staggered by 1 mm — the sub-caliber authoring slop §13.7 tolerates — are one
+/// crossing whose mean surface sits between them, half a millimetre inside the nearer plate. Every
+/// sample resumes on its own plate's face, none is seeded, and the transit charges both plates.
+///
+/// FIXTURE DATA: the stagger, depths and thicknesses.
 #[test]
-fn the_handoff_seeds_every_sample_that_starts_inside_material() {
+fn every_sample_hands_off_on_the_face_it_crossed() {
     let laws = WalkLaws::default();
     let volumes = table(&[(1, 1000.0), (2, 1000.0)]);
     let frame = DiscFrame::from_axis_and_reference(AXIS, Vec3::Y).unwrap();
     let offsets = disc_offsets(&frame, 0.044, DEFAULT_RING);
     let near = Slab::at(1, 0, 0.499, -AXIS, 0.1);
     let far = Slab::at(2, 0, 0.5, -AXIS, 0.1);
-    let samples = offsets
-        .iter()
-        .map(|offset| {
-            let slab = if offset.y > 0.0 { near } else { far };
-            SampleCorridor {
-                offset: *offset,
-                initial_presence: Vec::new(),
-                hits: slab.hits(*offset, AXIS, 3.0, false),
-            }
-        })
-        .collect();
-    let walked = walk_disc(
-        &DiscCorridor {
-            anchor: Vec3::ZERO,
-            origin: Vec3::ZERO,
-            axis: AXIS,
-            length: 3.0,
-            radius: 0.044,
-            frame,
-            samples,
-        },
-        &volumes,
-        &laws,
-    )
-    .unwrap();
+    let slab_of = |sample: usize| if offsets[sample].y > 0.0 { near } else { far };
+    let entrance = DiscCorridor {
+        anchor: Vec3::ZERO,
+        origin: Vec3::ZERO,
+        axis: AXIS,
+        length: 3.0,
+        radius: 0.044,
+        frame,
+        samples: offsets
+            .iter()
+            .enumerate()
+            .map(|(index, offset)| sample(*offset, slab_of(index).hits(*offset, AXIS, 3.0, false)))
+            .collect(),
+    };
+    let walked = walk_disc(&entrance, &volumes, &laws).unwrap();
     assert_eq!(walked.events.len(), 1, "1 mm of stagger is one crossing");
     let request = transit_request(&walked, &AP_88, &laws);
 
-    assert_eq!(request.seeds.len(), request.samples);
     assert_eq!(request.seeds[0].offset, Vec3::ZERO, "sample 0 IS the axis");
-    let seeded = request
-        .seeds
-        .iter()
-        .filter(|s| !s.inside.is_empty())
-        .count();
-    assert!(
-        seeded > 0 && seeded < request.samples,
-        "a staggered surface seeds some samples and not others, got {seeded}/{}",
-        request.samples
-    );
-    // Every seeded sample names the NEAR plate — the one it is actually inside.
-    for seed in request.seeds.iter().filter(|s| !s.inside.is_empty()) {
+    for seed in &request.seeds {
         assert_eq!(
-            seed.inside,
-            vec![ShellKey {
-                volume: volume(1),
-                primitive: prim(0),
-                shell: 0,
-            }]
+            seed.t, walked.walks[seed.sample].runs[0].start,
+            "sample {} hands off where its own ray crossed",
+            seed.sample
         );
+        assert!(seed.inside.is_empty(), "sample {} is seeded", seed.sample);
     }
 
-    // The seeded corridor resolves; the same corridor WITHOUT the seeds reports the unmatched exits
-    // it inherits, which is the whole point of exporting them.
+    // Each sample from its own hand-off, along the bend: the transit pairs and both plates are
+    // charged.
     let transit = DiscCorridor {
         anchor: request.anchor,
         origin: request.origin,
@@ -1526,34 +1503,29 @@ fn the_handoff_seeds_every_sample_that_starts_inside_material() {
         samples: request
             .seeds
             .iter()
-            .map(|seed| {
-                let slab = if offsets[seed.sample].y > 0.0 {
-                    near
-                } else {
-                    far
-                };
-                SampleCorridor {
-                    offset: seed.offset,
-                    initial_presence: seed.inside.clone(),
-                    hits: slab.hits(
-                        request.origin + seed.offset,
-                        request.axis,
-                        3.0,
-                        seed.inside.contains(&slab.key()),
-                    ),
-                }
+            .map(|seed| SampleCorridor {
+                offset: seed.offset,
+                initial_presence: Vec::new(),
+                hits: slab_of(seed.sample).hits(
+                    request.origin + seed.offset,
+                    request.axis,
+                    3.0,
+                    false,
+                ),
             })
             .collect(),
     };
-    assert!(walk_disc(&transit, &volumes, &laws).is_ok());
-    let mut unseeded = transit;
-    for sample in &mut unseeded.samples {
-        sample.initial_presence.clear();
+    let transit = walk_disc(&transit, &volumes, &laws).unwrap();
+    let plan = finish_at(&transit, &request, AP_88_CAPABILITY, &laws).unwrap();
+    for plate in [1, 2] {
+        assert!(
+            plan.deposits
+                .iter()
+                .any(|dose| dose.address == volume(plate) && dose.amount > 0.0),
+            "plate {plate} is charged: {:?}",
+            plan.deposits
+        );
     }
-    assert!(matches!(
-        walk_disc(&unseeded, &volumes, &laws),
-        Err(WalkError::UnexpectedExit { .. })
-    ));
 }
 
 /// `finish` validates the corridor it is handed against the corridor it asked for. Nothing in the
@@ -2192,7 +2164,7 @@ fn an_empty_disc_is_a_miss() {
     let volumes = table(&[(1, 1000.0)]);
     let walked = walk_disc(&entrance_disc(&[], 2.0), &volumes, &laws).unwrap();
     assert!(walked.events.is_empty());
-    assert_eq!(begin(&walked, &AP_88, &laws), Begin::Miss);
+    assert_eq!(begin(&walked, &AP_88, &laws), Ok(Begin::Miss));
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3434,7 +3406,7 @@ fn the_mechanism_matches_the_scalar_law_on_reference_steel() {
         }
         let volumes = table(&volumes);
         let entrance = walk_disc(&entrance_disc(&slabs, 3.0), &volumes, &laws).unwrap();
-        let Begin::Transit(request) = begin(&entrance, &AP_88, &laws) else {
+        let Begin::Transit(request) = begin(&entrance, &AP_88, &laws).unwrap() else {
             ricochets += 1;
             continue;
         };
@@ -3842,10 +3814,10 @@ fn sequential_layers_advance_in_order_and_cost_both() {
 /// A seed is the walk's presence at the hand-off `t`, and outside the walked span there is none to
 /// read: behind the start lies ground the ray swept before this corridor, past the end ground no
 /// corridor has walked. A seed read there is a guess, and the transit resumed on it fails closed on
-/// material the sample sits in (`UnexpectedExit`). The mean entrance plane leaves the span on the
-/// samples that never touched the surface when it is oblique to them: here a plate tilted 50° whose
-/// edge runs along the axis, met by half the disc just past the start (its plane crosses the other
-/// half behind it) and just short of the end (past it).
+/// material the sample sits in (`UnexpectedExit`). The samples that never touch the surface hand
+/// off at the crossing's depth, clamped to the span: here a plate tilted 50° whose edge runs along
+/// the axis, met by half the disc just past the start and just short of the end, so a plane through
+/// it, extrapolated across the other half, would cross that half behind the start and past the end.
 ///
 /// FIXTURE DATA: the tilt, depths and chords; a thin plate near the end so its exit closes inside
 /// the corridor.
@@ -3869,7 +3841,7 @@ fn every_hand_off_lies_on_the_span_its_sample_walked() {
             |index| (offsets[index].y >= 0.0) == met_above || offsets[index].y == 0.0,
         );
         let walked = walk_disc(&corridor, &table(&[(1, 1000.0)]), &laws).unwrap();
-        let Begin::Transit(request) = begin(&walked, &AP_88, &laws) else {
+        let Begin::Transit(request) = begin(&walked, &AP_88, &laws).unwrap() else {
             panic!("front {front}: the plate is entered")
         };
         for seed in &request.seeds {
@@ -3881,4 +3853,322 @@ fn every_hand_off_lies_on_the_span_its_sample_walked() {
             );
         }
     }
+}
+
+/// Two pieces the disc meets at overlapping depths: a plate grazed at 75° by the disc's upper part,
+/// and a block the rest of the disc meets inside the plate's depth. Shaped on the #191 replays (a
+/// grazed edge over a piece behind and beside it, `CorridorMismatch` at first contact).
+#[derive(Clone, Copy)]
+struct Straddle {
+    plate: Slab,
+    block: Slab,
+}
+
+impl Straddle {
+    const FRAME: DiscFrame = DiscFrame {
+        u: Vec3::X,
+        v: Vec3::Y,
+    };
+
+    /// The block's front at `block` m along the axis. FIXTURE DATA: the plate is 25 mm thick at 75°
+    /// (97 mm of chord, 25 mm steel-equivalent, so an 88 overmatches it and bites) and crosses the
+    /// axis at 0.5 m; the block is 80 mm thick and square to the axis.
+    fn at(block: f32) -> Self {
+        let incidence = 75f32.to_radians();
+        Self {
+            plate: Slab::at(
+                1,
+                0,
+                0.5,
+                Vec3::new(0.0, -incidence.sin(), -incidence.cos()),
+                0.025 / incidence.cos(),
+            ),
+            block: Slab::at(2, 1, block, -AXIS, 0.08),
+        }
+    }
+
+    /// The piece sample `index` meets: the plate above `y = 20 mm` across the disc (five ring
+    /// samples), the block below.
+    fn piece(&self, offsets: &[Vec3], index: usize) -> Slab {
+        if offsets[index].y > 0.02 {
+            self.plate
+        } else {
+            self.block
+        }
+    }
+
+    fn entrance(&self, offsets: &[Vec3]) -> DiscCorridor {
+        DiscCorridor {
+            anchor: Vec3::ZERO,
+            origin: Vec3::ZERO,
+            axis: AXIS,
+            length: 2.0,
+            radius: 0.044,
+            frame: Self::FRAME,
+            samples: offsets
+                .iter()
+                .enumerate()
+                .map(|(index, offset)| {
+                    sample(
+                        *offset,
+                        self.piece(offsets, index).hits(*offset, AXIS, 2.0, false),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    fn transit(&self, offsets: &[Vec3], request: &TransitRequest) -> DiscCorridor {
+        DiscCorridor {
+            anchor: request.anchor,
+            origin: request.origin,
+            axis: request.axis,
+            length: 2.0,
+            radius: request.radius,
+            frame: request.frame,
+            samples: request
+                .seeds
+                .iter()
+                .map(|seed| {
+                    let piece = self.piece(offsets, seed.sample);
+                    SampleCorridor {
+                        offset: seed.offset,
+                        initial_presence: seed.inside.clone(),
+                        hits: piece.hits(
+                            request.origin + seed.offset,
+                            request.axis,
+                            2.0,
+                            seed.inside.contains(&piece.key()),
+                        ),
+                    }
+                })
+                .collect(),
+        }
+    }
+}
+
+/// A disc that meets two separate pieces at overlapping depths resolves, and charges both.
+///
+/// The plate is struck first, so it decides the crossing's depth: its mean entry point, 0.377 m
+/// along the axis (DERIVED from the fixture). A sample hands off on the face it crossed when that
+/// face is the plate's or lies no deeper than that depth; otherwise at the depth, in air, never past
+/// the first face on its ray. A block shallower than the depth joins the crossing at its face, and
+/// the entrance reads both surfaces; a deeper one is met in the transit before the plate's crossing
+/// ends and is resolved with it. Handing every sample off on the plate's mean plane instead put the
+/// block's samples inside the block (deeper case: its exit then opened the transit ahead of the
+/// plate, `CorridorMismatch`) or past it (shallower case: the block was never charged).
+#[test]
+fn a_disc_meeting_two_pieces_at_overlapping_depths_resolves() {
+    let laws = WalkLaws::default();
+    let volumes = table(&[(1, 1000.0), (2, 1000.0)]);
+    let offsets = disc_offsets(&Straddle::FRAME, 0.044, DEFAULT_RING);
+    // (block front, whether it joins the crossing at its face)
+    for (block, joins) in [(0.35, true), (0.43, false)] {
+        let straddle = Straddle::at(block);
+        let walked = walk_disc(&straddle.entrance(&offsets), &volumes, &laws).unwrap();
+        assert_eq!(
+            walked.events.len(),
+            2,
+            "block {block}: two pieces, two events"
+        );
+        assert!(
+            walked.events[1].start < walked.events[0].end,
+            "block {block}: the pieces overlap in depth"
+        );
+        let request = transit_request(&walked, &AP_88, &laws);
+        let plate_samples = (0..offsets.len())
+            .filter(|&index| offsets[index].y > 0.02)
+            .count();
+        let read = if joins { offsets.len() } else { plate_samples };
+        assert_eq!(
+            request.entrance.coverage,
+            (read as f64 / offsets.len() as f64) as f32,
+            "block {block}: the entrance reads the pieces the samples hand off on"
+        );
+        for seed in &request.seeds {
+            let face = walked.walks[seed.sample].runs[0].start;
+            assert!(
+                seed.t <= face,
+                "block {block}: sample {} hands off at {} past its first face {face}",
+                seed.sample,
+                seed.t
+            );
+            assert!(
+                seed.inside.is_empty(),
+                "block {block}: sample {}",
+                seed.sample
+            );
+        }
+
+        let transit = walk_disc(&straddle.transit(&offsets, &request), &volumes, &laws).unwrap();
+        let plan = finish_at(&transit, &request, AP_88_CAPABILITY, &laws)
+            .unwrap_or_else(|error| panic!("block {block}: {error:?}"));
+        for piece in [1, 2] {
+            assert!(
+                plan.deposits
+                    .iter()
+                    .any(|dose| dose.address == volume(piece) && dose.amount > 0.0),
+                "block {block}: piece {piece} is charged: {:?}",
+                plan.deposits
+            );
+        }
+    }
+}
+
+/// The hand-off fixture of [`a_crossing_resolves_the_same_however_far_its_entrance_was_walked`]: a
+/// plate tilted 60° whose edge runs along the axis, its front crossing the axis at 1 m, met by the
+/// lower half of the disc and the two samples on its edge; behind it a plate oblique to every axis
+/// here, which every sample meets.
+struct EdgeAndBehind {
+    edge: Slab,
+    behind: Slab,
+    offsets: Vec<Vec3>,
+}
+
+impl EdgeAndBehind {
+    const FRAME: DiscFrame = DiscFrame {
+        u: Vec3::X,
+        v: Vec3::Y,
+    };
+
+    fn new() -> Self {
+        let tilt = 60f32.to_radians();
+        Self {
+            edge: Slab::at(1, 0, 1.0, Vec3::new(0.0, tilt.sin(), -tilt.cos()), 0.005),
+            behind: Slab::at(2, 1, 1.4, Vec3::new(0.4, 0.3, -1.0), 0.05),
+            offsets: disc_offsets(&Self::FRAME, 0.044, DEFAULT_RING),
+        }
+    }
+
+    /// Whether sample `index` meets `slab`: the edged plate only below its edge.
+    fn meets(&self, index: usize, slab: &Slab) -> bool {
+        slab.vol != self.edge.vol || self.offsets[index].y <= 0.0
+    }
+
+    fn entrance(&self, length: f32) -> DiscCorridor {
+        DiscCorridor {
+            anchor: Vec3::ZERO,
+            origin: Vec3::ZERO,
+            axis: AXIS,
+            length,
+            radius: 0.044,
+            frame: Self::FRAME,
+            samples: self
+                .offsets
+                .iter()
+                .enumerate()
+                .map(|(index, offset)| {
+                    sample(
+                        *offset,
+                        [self.edge, self.behind]
+                            .iter()
+                            .filter(|slab| self.meets(index, slab))
+                            .flat_map(|slab| slab.hits(*offset, AXIS, length, false))
+                            .collect(),
+                    )
+                })
+                .collect(),
+        }
+    }
+
+    /// A disc resumed `from` metres along `request`'s axis from its hand-off, each sample from its
+    /// own seed, meeting the slabs it meets.
+    fn resumed(
+        &self,
+        request: &TransitRequest,
+        from: f32,
+        seeds: &[SampleSeed],
+        slabs: &[Slab],
+        length: f32,
+    ) -> DiscCorridor {
+        let origin = request.origin + request.axis * from;
+        DiscCorridor {
+            anchor: request.anchor,
+            origin,
+            axis: request.axis,
+            length,
+            radius: request.radius,
+            frame: request.frame,
+            samples: seeds
+                .iter()
+                .map(|seed| SampleCorridor {
+                    offset: seed.offset,
+                    initial_presence: seed.inside.clone(),
+                    hits: slabs
+                        .iter()
+                        .filter(|slab| self.meets(seed.sample, slab))
+                        .flat_map(|slab| {
+                            slab.hits(
+                                origin + seed.offset,
+                                request.axis,
+                                length,
+                                seed.inside.contains(&slab.key()),
+                            )
+                        })
+                        .collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// A crossing, and the one behind it, resolve the same however far the entrance was walked, once
+/// that walk closes.
+///
+/// A sample the edged plate never touches hands off at the crossing's depth, which the plate alone
+/// decides; a hand-off moved to wherever the walk happened to end instead would shift that sample's
+/// bent ray `b` sideways by `δ (u − b (u·b))` for a move `δ` along the incoming axis `u` (DERIVED),
+/// and nothing downstream cancels the shift: the starts a perforation leaves are each sample's own
+/// transit ray ([`DiscWalk::resume_at`]), so the plate behind would be met elsewhere, and its cost,
+/// dose and spall would depend on how far the first corridor reached.
+///
+/// FIXTURE DATA: [`EdgeAndBehind`]. The edged plate's crossing ends 55 mm short of the 1.06 m walk
+/// (closed, with the weld lookahead to spare), and the two samples farthest above its edge cross
+/// its plane past that walk's end (DERIVED: 1 m + r·sin θ·tan 60° for their ring angle θ).
+#[test]
+fn a_crossing_resolves_the_same_however_far_its_entrance_was_walked() {
+    let laws = WalkLaws::default();
+    let fixture = EdgeAndBehind::new();
+    let volumes = table(&[(1, 1000.0), (2, 1000.0)]);
+    let resolve = |length: f32| {
+        let walked = walk_disc(&fixture.entrance(length), &volumes, &laws).unwrap();
+        let request = transit_request(&walked, &AP_88, &laws);
+        let slabs = [fixture.edge, fixture.behind];
+        let transit = walk_disc(
+            &fixture.resumed(&request, 0.0, &request.seeds, &slabs, 2.0),
+            &volumes,
+            &laws,
+        )
+        .unwrap();
+        let first = finish_at(&transit, &request, AP_88_CAPABILITY, &laws).unwrap();
+        let Outcome::Perforated { t, .. } = first.outcome else {
+            panic!("the {length} m walk: the edged plate is perforated")
+        };
+        let resume = t + super::super::MARCH_EPS;
+        let starts = transit.resume_at(f64::from(resume), &laws);
+        let next = walk_disc(
+            &fixture.resumed(&request, resume, &starts, &[fixture.behind], 2.0),
+            &volumes,
+            &laws,
+        )
+        .unwrap();
+        let next_request = transit_request(&next, &AP_88, &laws);
+        let next_transit = walk_disc(
+            &transit_disc(&next_request, &[fixture.behind], 2.0),
+            &volumes,
+            &laws,
+        )
+        .unwrap();
+        let behind = finish_at(&next_transit, &next_request, AP_88_CAPABILITY, &laws).unwrap();
+        (request, first, behind)
+    };
+
+    let (short_request, short_first, short_behind) = resolve(1.06);
+    let (long_request, long_first, long_behind) = resolve(3.0);
+    assert_eq!(short_request, long_request, "the hand-off is the same");
+    assert_eq!(short_first, long_first, "the edged plate resolves the same");
+    assert_eq!(
+        short_behind, long_behind,
+        "the plate behind resolves the same"
+    );
 }

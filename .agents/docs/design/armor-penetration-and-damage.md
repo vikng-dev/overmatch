@@ -1478,6 +1478,57 @@ surface** — the first body physically touched. Anything behind it is shoved th
 the physics engine. Damage attribution stays per-presence as always; only the shove is routed.
 Revisit only if seam-threading shots ever matter.
 
+**The hand-off: each sample resumes on the piece it crossed (RULED 2026-10-31, #191).** The
+crossing is staged — the entrance is read along the incoming axis, the transit walked along the
+bent one — so every sample ray stops its entrance walk somewhere and resumes along the bend from
+there. It resumes on the face of the armour piece it actually crossed, at its own crossing point,
+never on one plane shared across the disc. The shared plane it replaces was the first piece's mean
+entrance plane, extrapolated across the whole disc, and at a graze it lies far from any face:
+across an 88's disc it spread the hand-offs over more than a metre of the incoming axis in two of
+the three replayed failures (MEASURED, #191 replays). It put samples past the face of a second
+piece the rest of the disc met behind or beside a grazed first one, past both faces of a thin
+curved wall (a barrel's far wall, crossed side-on from its bore), and behind a sample's start. A
+transit seeded there met an exit it never entered or skipped the piece, and the round stopped at
+first contact (`CorridorMismatch`, three per 240 s at 30 bots, MEASURED 2026-10-31 on the build
+after the turret-scale fix).
+
+- **Who hands off on a face.** Every sample whose first run is in the first piece struck (the disc
+  walk's first event), and every sample whose first run is in another piece it meets no deeper
+  than the crossing's DEPTH: the first piece's mean entry point, measured square to the incoming
+  axis. That other piece joins the crossing.
+- **Everyone else** — a sample that meets nothing by that depth — hands off at the depth, in air,
+  on its own ray: the uncovered part of the disc stays where the disc is. The depth is clamped to
+  the span between the sample's start and the first piece's far end, so a hand-off lies on ground
+  the sample's walk covered and never depends on how far the corridor reached. No sample hands off
+  past the first face on its own ray, so nothing is seeded except presence carried in from the
+  crossing before.
+- **The entrance read is the crossing's.** `n̄`, η, the steel-equivalent thickness and the bend
+  are read over the first piece and every piece that joined it, so a disc meeting two pieces at
+  once reads both surfaces, as it would read one piece of that shape — "the geometry around the
+  axis is the fact, indifferent to how steel is partitioned into meshes". With one piece the read
+  is that piece's alone.
+- **The transit crossing** is every event of the transit corridor that begins at the hand-off,
+  then every event that begins before the crossing so far ends. The flight resumes past the
+  crossing's end, so a run that began inside it and was resolved apart from it would be skipped,
+  or charged only from the resume point on.
+- **The safe stop stays, as a tripwire.** A transit corridor that is not the one its entrance
+  asked for still stops the round at contact (fail closed). The stop is no outcome of the damage
+  model: it logs one error under a stable kind per failure reason (`WalkError::kind`), which a
+  report from real matches groups by (#194).
+
+Measured after (2026-10-31, the same 240 s 30-bot run, twice): no `CorridorMismatch`. One stop
+remains, `unexpected_exit`: a round perforated a lower front plate as one tick ended, its seeds
+left one ring sample outside that plate, and the next tick's walk, against the struck tank moved
+since, found that sample inside it, 14 mm short of an exit (MEASURED in the run's log; the step
+replayed from a fresh start at a still tank resolves). That is a continuation carried across a
+tick boundary onto moving armour, not the hand-off.
+
+Rejected: extending the entrance walk until it covers the shared plane wherever it lands (no less
+shared, and a longer walk meets more pieces to land past — failures rose from 3 to 7 in the same
+240 s run, MEASURED 2026-10-31); clamping the shared plane to the walked span (an outcome that
+depends on the corridor's length: moving a hand-off by `δ` along the incoming axis `u` shifts the
+bent ray `b` sideways by `δ (u − b (u·b))`, DERIVED).
+
 ### 13.6 Invariants — the machine-checkable contract
 
 - **Idempotence:** duplicating any volume changes no outcome.

@@ -22,7 +22,7 @@ const PLATE: Vec3 = Vec3::new(3.0, 3.0, 0.05);
 /// Steel: reference-mm per metre.
 const STEEL: f32 = 1000.0;
 /// Where the march segment starts, short of first contact — the anchor's distance from the
-/// hand-off, which sizes the seed's "on the hand-off plane" band (DERIVED: 5.2e-6 m at 10.6 m).
+/// hand-off, which sizes the seed's "at the restart" band (DERIVED: 5.2e-6 m at 10.6 m).
 const STANDOFF: f32 = 10.585;
 /// Plate orientations per map position, and shots per plate.
 const PLATES: usize = 12;
@@ -67,12 +67,13 @@ fn assert_single_ownership(transit: &DiscCorridor, pose: &str) {
 
 /// THE HAND-OFF PARTITION, END TO END, ON GENERIC GEOMETRY.
 ///
-/// Each ring sample's entry face lies within rounding of the mean entrance plane the transit hands
-/// off on, so whether the seed or the transit corridor owns it is decided inside the topology band
-/// — the place a dropped entry (`UnexpectedExit`) or a doubled one (`UnexpectedEntry`) lives. A
-/// plate in general orientation, struck at up to 60° anywhere on its face, near the world origin
-/// and far from it, from the march's own stand-off before contact. Every pose the round bites into must hand off with every sample's
-/// entry owned once and the transit corridor pairing; the terminal outcome is not asserted.
+/// Each sample hands off on its own entry face, so the transit corridor re-measures that face within
+/// rounding of its origin, and whether the seed or the corridor owns it is decided inside the
+/// topology band — the place a dropped entry (`UnexpectedExit`) or a doubled one
+/// (`UnexpectedEntry`) lives. A plate in general orientation, struck at up to 60° anywhere on its
+/// face, near the world origin and far from it, from the march's own stand-off before contact.
+/// Every pose the round bites into must hand off with every sample's entry owned once and the
+/// transit corridor pairing; the terminal outcome is not asserted.
 #[test]
 fn every_entry_is_owned_once_across_the_hand_off() {
     let mut transits = 0;
@@ -153,12 +154,13 @@ fn every_entry_is_owned_once_across_the_hand_off() {
                                 radius,
                                 &[],
                                 STANDOFF + ENTRANCE_SPAN,
+                                Stage::Entrance,
                             )?;
                             let shot = Shot {
                                 caliber: ROUND.caliber,
                             };
                             let Begin::Transit(request) =
-                                walk::begin(&entrance, &shot, &context.laws)
+                                walk::begin(&entrance, &shot, &context.laws)?
                             else {
                                 return Ok(None);
                             };
@@ -183,6 +185,7 @@ fn every_entry_is_owned_once_across_the_hand_off() {
                                 request.radius,
                                 &request.seeds,
                                 ENTRANCE_SPAN,
+                                Stage::Transit,
                             )?;
                             let round = bound(ROUND);
                             walk::finish(
@@ -1109,6 +1112,7 @@ fn a_bounce_lifted_into_a_neighbour_resolves_it() {
                     radius,
                     &starts.seeds,
                     ENTRANCE_SPAN,
+                    Stage::Entrance,
                 )?;
                 Ok::<_, WalkError>((starts, corridor))
             },
@@ -1253,6 +1257,7 @@ fn certified_then_resumed(
                     radius,
                     &starts.seeds,
                     ENTRANCE_SPAN,
+                    Stage::Entrance,
                 );
                 Ok((starts, walked))
             },
@@ -2631,11 +2636,12 @@ fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
                             radius,
                             &[],
                             standoff + ENTRANCE_SPAN,
+                            Stage::Entrance,
                         )?;
                         let shot = Shot {
                             caliber: ROUND.caliber,
                         };
-                        let Begin::Transit(request) = walk::begin(&entrance, &shot, &context.laws)
+                        let Begin::Transit(request) = walk::begin(&entrance, &shot, &context.laws)?
                         else {
                             return Ok(None);
                         };
@@ -2649,6 +2655,7 @@ fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
                             request.radius,
                             &request.seeds,
                             ENTRANCE_SPAN,
+                            Stage::Transit,
                         )?;
                         let round = bound(ROUND);
                         let plan = walk::finish(
@@ -2683,4 +2690,185 @@ fn a_convex_trunk_is_crossed_with_a_chord_at_any_offset_and_incidence() {
         8 * TRUNK_STANDOFFS.len(),
         failures.join("\n"),
     );
+}
+
+// ---------------------------------------------------------------------------------------------
+// The hand-off on pieces the disc meets at a graze, side-on or together (#191)
+// ---------------------------------------------------------------------------------------------
+
+/// A straight tube along local `Z`, `outer` and `bore` radii, `length` long, as a certified trimesh:
+/// one closed, outward-wound shell of `segments` facets around, every vertex its own welded id.
+fn tube_trimesh(
+    outer: f32,
+    bore: f32,
+    length: f32,
+    segments: u32,
+) -> (Collider, BallisticSurfaces) {
+    let half = length * 0.5;
+    // Rings 0 and 1 are the outside at `-half` and `+half`, rings 2 and 3 the bore.
+    let rings = [(outer, -half), (outer, half), (bore, -half), (bore, half)];
+    let vertices: Vec<Vec3> = rings
+        .iter()
+        .flat_map(|&(radius, z)| {
+            (0..segments).map(move |i| {
+                let angle = std::f32::consts::TAU * i as f32 / segments as f32;
+                Vec3::new(radius * angle.cos(), radius * angle.sin(), z)
+            })
+        })
+        .collect();
+    let at = |ring: u32, i: u32| ring * segments + i % segments;
+    let mut indices: Vec<[u32; 3]> = Vec::new();
+    for i in 0..segments {
+        let j = i + 1;
+        // Outside, facing out; bore, facing the axis; the end at `-half` facing `-Z`, the end at
+        // `+half` facing `+Z`.
+        indices.push([at(0, i), at(0, j), at(1, j)]);
+        indices.push([at(0, i), at(1, j), at(1, i)]);
+        indices.push([at(2, i), at(3, j), at(2, j)]);
+        indices.push([at(2, i), at(3, i), at(3, j)]);
+        indices.push([at(0, i), at(2, j), at(0, j)]);
+        indices.push([at(0, i), at(2, i), at(2, j)]);
+        indices.push([at(1, i), at(1, j), at(3, j)]);
+        indices.push([at(1, i), at(3, j), at(3, i)]);
+    }
+    let surfaces = BallisticSurfaces {
+        shells: vec![0u32; indices.len()].into(),
+        corners: indices.as_slice().into(),
+    };
+    (Collider::trimesh(vertices, indices), surfaces)
+}
+
+/// A TUBE CROSSED SIDE-ON RESOLVES WALL, BORE AND WALL.
+///
+/// The disc meets the near wall's curved face at a graze across its rim, and from the bore the far
+/// wall's concave face, nearer at the rim than on the axis. A plane shared across the disc lies
+/// inside one wall and short of the other on different samples, and behind the starts of the
+/// samples already past it; each sample handing off on its own face does neither. Two tubes: one
+/// whose bore is the disc's radius, so the rim samples run along the bore's edge and the whole
+/// tube is one crossing, and one whose bore clears the disc, so the far wall is a second crossing
+/// met from inside the bore. Each square to the round and tilted along it, so the walls are also
+/// met obliquely, with lateral offsets across the whole tube. Every drive must walk, and the
+/// centred round through the square tube must come out below it.
+///
+/// FIXTURE DATA: the tubes (radii, 2 m long, 24 facets), the tilts and the offsets.
+#[test]
+fn a_tube_crossed_side_on_resolves() {
+    let tube = Vec3::new(DROP_FROM.x, 1.5, DROP_FROM.z);
+    // (outside radius, bore radius, crossings the centred round makes at least)
+    for (outer, bore, crossings) in [(0.08, 0.044, 1), (0.09, 0.06, 2)] {
+        for (tilt, lateral) in [0.0_f32, 40.0, 65.0].into_iter().flat_map(|tilt| {
+            [0.0, 0.01, -0.02, 0.035, -0.044, 0.06, -0.075].map(|lateral| (tilt, lateral))
+        }) {
+            let (mut app, _) = settled(|app| {
+                vec![mesh_volume(
+                    app,
+                    tube_trimesh(outer, bore, 2.0, 24),
+                    Transform::from_translation(tube + Vec3::X * lateral)
+                        .with_rotation(Quat::from_rotation_x(tilt.to_radians())),
+                )]
+            });
+            let flown = try_driven(&mut app, FIXTURE_88, 800.0).unwrap_or_else(|failure| {
+                panic!("bore {bore}, tilt {tilt}°, lateral {lateral}: {failure:?}")
+            });
+            if tilt == 0.0 && lateral == 0.0 {
+                let bites: Vec<&Bite> = flown
+                    .decisions
+                    .iter()
+                    .filter_map(|decision| match decision {
+                        Decision::Bite(bite) => Some(bite),
+                        _ => None,
+                    })
+                    .collect();
+                assert!(
+                    bites.len() >= crossings,
+                    "bore {bore}: the centred round makes {} crossings",
+                    bites.len()
+                );
+                assert!(
+                    bites.iter().any(|bite| matches!(
+                        bite.end,
+                        BiteEnd::Perforated { resume, .. } if resume.y < tube.y - outer
+                    )),
+                    "bore {bore}: the centred round comes out below the tube"
+                );
+            }
+        }
+    }
+}
+
+/// The three rounds a 30-bot server stopped at first contact in 240 s (`CorridorMismatch`) when
+/// every sample handed off on the first piece's mean plane, as tank-local start and velocity (m,
+/// m/s): a grazed piece in front of another, a barrel's far wall, a grazed edge beside a piece at
+/// overlapping depth. FIXTURE DATA, MEASURED on that run's log and replayed at the fixture tank's
+/// spawn pose (#191).
+const FIRST_CONTACT_REPLAYS: [(Vec3, Vec3); 3] = [
+    (
+        Vec3::new(-0.484_449_24, 2.283_379, 10.736_783),
+        Vec3::new(4.001_924_5, -2.115_455_6, -772.9867),
+    ),
+    (
+        Vec3::new(-3.105_393_4, 2.203_470_7, 5.245_123_4),
+        Vec3::new(225.038_28, -1.771_982_2, -739.5158),
+    ),
+    (
+        Vec3::new(-0.038_930_178, 2.497_682_6, 0.872_706),
+        Vec3::new(740.6852, 54.846_77, -214.257_52),
+    ),
+];
+
+/// The round the replays fired, a key in the round registry: fixture data.
+const REPLAY_ROUND: &str = "88mm_APHE_ring";
+
+/// THE REPLAYED FIRST-CONTACT STOPS RESOLVE.
+///
+/// Each replayed round, fired at the bound fixture tank through the real march, meets armour and
+/// resolves it: no walk fails, so none stops at contact. The class invariant is the one the safe
+/// stop guards; the replays are where it broke.
+#[test]
+fn the_replayed_first_contact_stops_resolve() {
+    let round = crate::guns::GunRegistry::shipped()
+        .round_by_key(REPLAY_ROUND)
+        .unwrap_or_else(|err| panic!("the replays' round: {err}"));
+    for (index, (local, velocity)) in FIRST_CONTACT_REPLAYS.into_iter().enumerate() {
+        let mut app = fuzz::probe_world().expect("the bound tank builds");
+        app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
+            std::time::Duration::from_micros(15_625),
+        ))
+        .insert_resource(RetainSpentShells(true))
+        .insert_resource(crate::ballistics::MgShortCircuit(false))
+        .add_systems(Update, crate::ballistics::integrate_projectiles)
+        .add_observer(crate::ballistics::on_fire_shell);
+        let mut fire = crate::ballistics::FireShell::of_round(
+            &round,
+            fuzz::PROBE_TANK_AT + local,
+            Dir3::new(velocity).expect("a replay has a direction"),
+            crate::spec::FireMechanism::Single,
+            false,
+            None,
+            None,
+        );
+        fire.speed = velocity.length();
+        app.world_mut().trigger(fire);
+        for _ in 0..4 {
+            app.update();
+        }
+        let logs: Vec<Vec<ArmourMark>> = app
+            .world_mut()
+            .query::<&crate::ballistics::PenetrationMarks>()
+            .iter(app.world())
+            .map(|marks| marks.log.clone())
+            .collect();
+        assert_eq!(logs.len(), 1, "replay {index}: one round");
+        assert!(
+            !logs[0].is_empty(),
+            "replay {index}: the round meets the tank's armour"
+        );
+        assert!(
+            !logs[0]
+                .iter()
+                .any(|mark| matches!(mark, ArmourMark::Failed)),
+            "replay {index}: a walk failed and stopped the round at contact: {:?}",
+            logs[0]
+        );
+    }
 }

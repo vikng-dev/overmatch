@@ -50,6 +50,12 @@
 //! the crossing's ordered [`Encounter`]s, and returns the [`ResolutionPlan`]. Fixture tests answer
 //! the request from fixtures; the runtime answers it with real casts.
 //!
+//! Each sample hands off between the stages on the face of the piece it crossed
+//! ([`DiscWalk::hand_off`]), and the transit crossing is every piece the hand-off starts in plus
+//! everything that begins inside it ([`DiscWalk::transit_pieces`]). The rule, and why no plane is
+//! shared across the disc, is the design doc's §13.5, "The hand-off"
+//! (`.agents/docs/design/armor-penetration-and-damage.md`).
+//!
 //! # Fail loud, never repair
 //!
 //! Unpairable topology returns a structured [`WalkError`] naming the sample, volume, primitive and
@@ -375,15 +381,16 @@ pub struct RayCorridor {
 /// are live knobs"), gathered so no law reads a hidden constant.
 #[derive(Clone, Copy, Debug)]
 pub struct WalkLaws {
-    /// SEED domain — absolute floor (m) under which two `t` name the same handoff plane.
+    /// SEED domain — absolute floor (m) under which two `t` name the same boundary at a restart.
     ///
-    /// It relates a RESTART to a face, and nothing else: the corridor's restart `t` is computed from
-    /// the aggregate entrance plane while each face came from its own ray, so the two agree only to
-    /// rounding. It decides which side of the handoff owns a face ([`RayWalk::inside_at`],
-    /// `collect::admit`). It has no part in pairing, which is topological.
+    /// It relates a RESTART to a face, and nothing else: a corridor restarts at a `t` read on one
+    /// ray (a sample's hand-off, a perforation's resume point) while the faces near it are
+    /// re-measured from the new corridor's own origin, so the two agree only to rounding. It decides
+    /// which side of the restart owns a face ([`RayWalk::inside_at`], `collect::admit`). It has no
+    /// part in pairing, which is topological.
     pub topology_abs: f32,
     /// SEED domain — relative term, so a corridor anchored far downrange (where f32 spacing is
-    /// coarser) still recognises its own handoff plane.
+    /// coarser) still recognises its own restart.
     pub topology_rel: f32,
     /// WELD domain (§13.4) — maximum PERPENDICULAR gap that merges event topology (~2 mm: far above
     /// export jitter, two orders below real spaced armour).
@@ -575,7 +582,7 @@ pub enum WalkError {
     /// would resolve one contact's geometry against another contact's entrance decision — an
     /// overmatch verdict, a normalization bend and a ricochet test all belonging to a surface the
     /// round never met.
-    CorridorMismatch { reason: &'static str },
+    CorridorMismatch { reason: Mismatch },
     /// The covered samples' entry normals cancelled, so no aggregate `n̄` exists.
     ///
     /// Defensive: a face is an ENTRY only when `axis · n < 0`, so every contributing normal leans
@@ -599,6 +606,75 @@ pub enum WalkError {
     /// downrange. `crossings` counts the refused one; `overrun` is metres past the budget it would
     /// have reached.
     DrainExhausted { crossings: usize, overrun: f32 },
+}
+
+impl WalkError {
+    /// The stable name of the invariant this error breaks: one per variant, and one per
+    /// [`Mismatch`] for a corridor mismatch. It is the key the runtime's safe stop logs, so reports
+    /// from real matches group by it; a name is never reworded once shipped. A variant carrying a
+    /// `reason` names the variant, and its reason travels beside it as context.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            WalkError::BadFactor { .. } => "bad_factor",
+            WalkError::SubstanceFactorConflict { .. } => "substance_factor_conflict",
+            WalkError::RepeatedVolume { .. } => "repeated_volume",
+            WalkError::UnknownVolume { .. } => "unknown_volume",
+            WalkError::BadCorridor { .. } => "bad_corridor",
+            WalkError::UnexpectedExit { .. } => "unexpected_exit",
+            WalkError::UnexpectedEntry { .. } => "unexpected_entry",
+            WalkError::IncompleteCorridor { .. } => "incomplete_corridor",
+            WalkError::UnrepresentableChord { .. } => "unrepresentable_chord",
+            WalkError::UnattributedRun { .. } => "unattributed_run",
+            WalkError::CollectorFailed { .. } => "collector_failed",
+            WalkError::CorridorOverflow { .. } => "corridor_overflow",
+            WalkError::CorridorMismatch { reason } => reason.kind(),
+            WalkError::DegenerateEntryNormal { .. } => "degenerate_entry_normal",
+            WalkError::UncertifiedStart { .. } => "uncertified_start",
+            WalkError::UnsupportedControl => "unsupported_control",
+            WalkError::DrainExhausted { .. } => "drain_exhausted",
+        }
+    }
+}
+
+/// How the corridor handed to [`finish`] departs from the one [`begin`] asked for
+/// ([`WalkError::CorridorMismatch`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mismatch {
+    /// Collected along a different axis than the bend asked for.
+    Axis,
+    /// Collected against a different world anchor.
+    Anchor,
+    /// Starts somewhere other than the axis sample's hand-off.
+    Origin,
+    /// The ring frame was re-derived instead of transported.
+    Frame,
+    /// Samples a different disc radius.
+    Radius,
+    /// Samples a different number of rays than the entrance disc.
+    SampleCount,
+    /// A sample ray resumes somewhere other than where the hand-off put it.
+    SampleOffset,
+    /// No crossing begins at the hand-off.
+    NotAtHandOff,
+    /// The crossing at the hand-off is neither made of the entrance's geometry nor on its surface.
+    NotTheEntrance,
+}
+
+impl Mismatch {
+    /// The stable name [`WalkError::kind`] reports for this mismatch.
+    pub fn kind(self) -> &'static str {
+        match self {
+            Mismatch::Axis => "corridor_mismatch.axis",
+            Mismatch::Anchor => "corridor_mismatch.anchor",
+            Mismatch::Origin => "corridor_mismatch.origin",
+            Mismatch::Frame => "corridor_mismatch.frame",
+            Mismatch::Radius => "corridor_mismatch.radius",
+            Mismatch::SampleCount => "corridor_mismatch.sample_count",
+            Mismatch::SampleOffset => "corridor_mismatch.sample_offset",
+            Mismatch::NotAtHandOff => "corridor_mismatch.not_at_hand_off",
+            Mismatch::NotTheEntrance => "corridor_mismatch.not_the_entrance",
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -778,19 +854,19 @@ impl RayWalk {
     /// presence.
     ///
     /// The interval is `(open, close]` — the entry face must be STRICTLY behind the restart. A face
-    /// sitting on the handoff plane arrives in the new corridor's own hit list at `t = 0` and is
+    /// sitting at the restart arrives in the new corridor's own hit list at `t = 0` and is
     /// processed there, so seeding it as well would double-count the entry
-    /// ([`WalkError::UnexpectedEntry`]). An exit sitting on the plane, conversely, must be seeded or
-    /// it has nothing to pair with.
+    /// ([`WalkError::UnexpectedEntry`]). An exit sitting at the restart, conversely, must be seeded
+    /// or it has nothing to pair with.
     ///
-    /// "ON the plane" is a TOLERANCE, not an equality, and that is the whole reason this takes laws.
-    /// The restart `t` is computed from the aggregate entrance plane while each span's boundary came
-    /// from that sample's own ray, so the two agree only to within rounding — at oblique incidence,
-    /// where the ring's crossings spread along the ray, they were measured 1.4e-8 apart. Read as an
-    /// exact comparison, that hair decides between "the seed owns this entry" and "the corridor
-    /// does", and getting it wrong is `UnexpectedEntry` and a round stopped dead on a plate it
-    /// should have crossed. [`coincident`] is the module's existing answer to "do these two `t` name
-    /// one boundary", so it is the one used here.
+    /// "AT the restart" is a TOLERANCE, not an equality, and that is the whole reason this takes
+    /// laws. A restart `t` read off anything but the boundary itself — a perforation's resume point,
+    /// a plane through the entrance surface — agrees with a boundary beside it only to within
+    /// rounding: a plane fitted to an oblique entrance was MEASURED 1.4e-8 from the faces it was
+    /// fitted to. Read as an exact comparison, that hair decides between "the seed owns this entry"
+    /// and "the corridor does", and getting it wrong is `UnexpectedEntry` and a round stopped dead on
+    /// a plate it should have crossed. [`coincident`] is the module's existing answer to "do these
+    /// two `t` name one boundary", so it is the one used here.
     pub fn inside_at(&self, t: f64, laws: &WalkLaws) -> Vec<ShellKey> {
         self.shells
             .iter()
@@ -1979,6 +2055,9 @@ pub struct DiscEvent {
     /// Every body exit along the crossing ([`BodyExit`]), ordered by mean exit progress.
     pub exits: Vec<BodyExit>,
     pub shares: Vec<EntityShare>,
+    /// The `(sample, run)` pairs the crossing clusters, each an index into [`DiscWalk::walks`] and
+    /// that walk's [`RayWalk::runs`], sorted. Crossings are merged by these ([`DiscWalk::merged`]).
+    pub runs: Vec<(usize, usize)>,
 }
 
 /// Every crossing the disc corridor met, in order.
@@ -1997,7 +2076,7 @@ pub struct DiscWalk {
     /// `t ∈ [0, length]`.
     pub length: f32,
     /// The per-sample walks, RETAINED. The staged handoff has to export which primitives each
-    /// sample is inside at the transit plane, and neither the events nor the per-entity presence
+    /// sample is inside where it hands off, and neither the events nor the per-entity presence
     /// carry primitive identity — without this the caller would have to infer the seed state, which
     /// is the one thing this module never does.
     pub walks: Vec<RayWalk>,
@@ -2010,13 +2089,13 @@ impl DiscWalk {
         self.walks.len()
     }
 
-    /// The seed state a corridor RESUMED at progress `t` would need — the same lookup [`begin`] makes
-    /// at the handoff, on a plane square to the axis instead of on the entrance surface.
+    /// The seed state a corridor RESUMED at progress `t` would need — the lookup [`begin`] makes at
+    /// each sample's hand-off, here at one progress for every sample.
     ///
     /// This is what lets the march step out of one crossing and into the next without ever inferring
     /// its own interior state: a shell that perforates an outer plate while a ring sample is already
-    /// inside the crewman behind it resumes KNOWING that, because the ray it would have to guess
-    /// about is one this walk already covered.
+    /// inside a volume behind it resumes KNOWING that, because the ray it would have to guess about
+    /// is one this walk already covered.
     pub fn resume_at(&self, t: f64, laws: &WalkLaws) -> Vec<SampleSeed> {
         self.walks
             .iter()
@@ -2029,6 +2108,130 @@ impl DiscWalk {
             })
             .collect()
     }
+
+    /// Where each sample of this ENTRANCE walk hands off, and the pieces its first crossing is made
+    /// of (design doc §13.5, the hand-off); `None` when the disc met nothing.
+    ///
+    /// A sample hands off at the start of its first run, on the face of the piece it crossed, when
+    /// that piece is the first one struck ([`DiscWalk::events`]`[0]`) or when it meets it no deeper
+    /// than the crossing's DEPTH: the first piece's mean entry point, square to the axis, clamped to
+    /// the span between the sample's start and the first piece's end. That piece joins the crossing.
+    /// A sample that meets nothing by that depth hands off there, in air. So no sample hands off
+    /// past the first face on its own ray, and every hand-off lies on ground its walk covered,
+    /// whatever the corridor's length.
+    pub fn hand_off(&self) -> Option<HandOff> {
+        let first = self.events.first()?;
+        let mut piece_of: BTreeMap<(usize, usize), usize> = BTreeMap::new();
+        for (index, event) in self.events.iter().enumerate() {
+            for &member in &event.runs {
+                piece_of.insert(member, index);
+            }
+        }
+        let mut pieces = vec![0];
+        let at = self
+            .walks
+            .iter()
+            .enumerate()
+            .map(|(sample, walk)| {
+                let start = self.origin + self.offsets[sample];
+                let depth = f64::from((first.entry_position - start).dot(self.axis))
+                    .min(first.end)
+                    .max(0.0);
+                let face = walk.runs.first().and_then(|run| {
+                    let piece = *piece_of.get(&(sample, 0))?;
+                    (piece == 0 || run.start <= depth).then_some((piece, run.start))
+                });
+                match face {
+                    Some((piece, t)) => {
+                        pieces.push(piece);
+                        t
+                    }
+                    None => depth,
+                }
+            })
+            .collect();
+        pieces.sort_unstable();
+        pieces.dedup();
+        Some(HandOff { pieces, at })
+    }
+
+    /// The events of this TRANSIT walk its crossing is made of, ascending: every one that begins at
+    /// the hand-off ([`HANDOFF_PROXIMITY`]), then every one that begins before the crossing so far
+    /// ends. Empty when none begins at the hand-off.
+    ///
+    /// The second clause is what keeps the crossing from leaving material behind: the flight resumes
+    /// past the crossing's end, so a run that began inside it and was not resolved with it would be
+    /// skipped, or charged only from the resume point on.
+    pub fn transit_pieces(&self) -> Vec<usize> {
+        let mut pieces = Vec::new();
+        let mut end = f64::NEG_INFINITY;
+        for (index, event) in self.events.iter().enumerate() {
+            if event.start > HANDOFF_PROXIMITY as f64 && event.start >= end {
+                break;
+            }
+            pieces.push(index);
+            end = end.max(event.end);
+        }
+        pieces
+    }
+
+    /// Where the first crossing of this walk ends, read as `stage` reads it; `None` when it met
+    /// nothing.
+    pub fn crossing_end(&self, stage: Stage) -> Option<f64> {
+        let pieces = match stage {
+            Stage::Entrance => self.hand_off()?.pieces,
+            Stage::Transit => self.transit_pieces(),
+        };
+        pieces
+            .iter()
+            .map(|&piece| self.events[piece].end)
+            .reduce(f64::max)
+            .or_else(|| self.events.first().map(|event| event.end))
+    }
+
+    /// The crossing the events `pieces` make together: the one event itself, or every aggregate
+    /// rebuilt over the union of their runs.
+    pub fn merged(&self, pieces: &[usize]) -> Result<Cow<'_, DiscEvent>, WalkError> {
+        match pieces {
+            [] => Err(WalkError::BadCorridor {
+                sample: 0,
+                reason: "a crossing was merged from no event",
+            }),
+            [one] => Ok(Cow::Borrowed(&self.events[*one])),
+            _ => {
+                let members: Vec<(usize, usize)> = pieces
+                    .iter()
+                    .flat_map(|&piece| self.events[piece].runs.iter().copied())
+                    .collect();
+                let rays = Rays {
+                    origin: self.origin,
+                    axis: self.axis,
+                    offsets: &self.offsets,
+                };
+                build_event(&rays, &self.walks, &members, self.samples()).map(Cow::Owned)
+            }
+        }
+    }
+}
+
+/// Where an entrance disc's samples hand off ([`DiscWalk::hand_off`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct HandOff {
+    /// The events the entrance crossing is made of, ascending: the first one struck, and every
+    /// piece a sample hands off on.
+    pub pieces: Vec<usize>,
+    /// Per sample, the progress along its entrance ray it hands off at, in `[0, length]`.
+    pub at: Vec<f64>,
+}
+
+/// Which side of the hand-off a disc corridor is walked on, and so what its first crossing is made
+/// of.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Stage {
+    /// From the flight's position along the incoming axis ([`DiscWalk::hand_off`]).
+    Entrance,
+    /// From the hand-off along the bent axis ([`DiscWalk::transit_pieces`]).
+    Transit,
 }
 
 /// Walk every sample and associate their runs into crossing events.
@@ -2169,15 +2372,21 @@ pub fn walk_disc(
         }
     }
 
-    let mut clusters: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for node in 0..nodes.len() {
+    let mut clusters: BTreeMap<usize, Vec<(usize, usize)>> = BTreeMap::new();
+    for (node, &member) in nodes.iter().enumerate() {
         let root = find(&mut parent, node);
-        clusters.entry(root).or_default().push(node);
+        clusters.entry(root).or_default().push(member);
     }
 
+    let offsets: Vec<Vec3> = corridor.samples.iter().map(|s| s.offset).collect();
+    let rays = Rays {
+        origin: corridor.origin,
+        axis: corridor.axis,
+        offsets: &offsets,
+    };
     let mut events: Vec<DiscEvent> = Vec::new();
     for members in clusters.values() {
-        events.push(build_event(corridor, &walks, &nodes, members, k, laws)?);
+        events.push(build_event(&rays, &walks, members, k)?);
     }
     events.sort_by(|a, b| a.start.total_cmp(&b.start).then(a.end.total_cmp(&b.end)));
 
@@ -2187,11 +2396,20 @@ pub fn walk_disc(
         origin: corridor.origin,
         frame: corridor.frame,
         radius: corridor.radius,
-        offsets: corridor.samples.iter().map(|s| s.offset).collect(),
+        offsets,
         length: corridor.length,
         walks,
         events,
     })
+}
+
+/// Where a disc's sample rays start and run: the corridor geometry an event's positions are read
+/// from.
+struct Rays<'a> {
+    origin: Vec3,
+    axis: Vec3,
+    /// Index-aligned with the walks.
+    offsets: &'a [Vec3],
 }
 
 /// Where ONE shared surface would put sample `b`'s run relative to sample `a`'s, along the ray.
@@ -2236,23 +2454,25 @@ fn separation_residual(
     ((run_b.start - run_a.start) - predicted as f64) as f32
 }
 
+/// The crossing the `(sample, run)` pairs `members` make: every aggregate over the disc of `k`.
 fn build_event(
-    corridor: &DiscCorridor,
+    rays: &Rays<'_>,
     walks: &[RayWalk],
-    nodes: &[(usize, usize)],
-    members: &[usize],
+    members: &[(usize, usize)],
     k: usize,
-    _laws: &WalkLaws,
 ) -> Result<DiscEvent, WalkError> {
     let kf = k as f64;
     let mut by_sample: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
-    for &node in members {
-        let (sample, run) = nodes[node];
+    for &(sample, run) in members {
         by_sample.entry(sample).or_default().push(run);
     }
     for runs in by_sample.values_mut() {
         runs.sort_unstable();
     }
+    let runs: Vec<(usize, usize)> = by_sample
+        .iter()
+        .flat_map(|(&sample, runs)| runs.iter().map(move |&run| (sample, run)))
+        .collect();
 
     let mut start = f64::INFINITY;
     let mut end = f64::NEG_INFINITY;
@@ -2271,9 +2491,9 @@ fn build_event(
         end = end.max(last.end);
         entry_sum += first.entry_normal;
         exit_sum += last.exit_normal;
-        let base = corridor.origin + corridor.samples[sample].offset;
-        entry_position += base + corridor.axis * first.start as f32;
-        exit_position += base + corridor.axis * last.end as f32;
+        let base = rays.origin + rays.offsets[sample];
+        entry_position += base + rays.axis * first.start as f32;
+        exit_position += base + rays.axis * last.end as f32;
     }
     let covered = by_sample.len();
     let coverage = (covered as f64 / kf) as f32;
@@ -2301,7 +2521,7 @@ fn build_event(
     let cost = disc_mean_cost(walks, &by_sample, start, end, k);
     let encounters = encounters(walks, &by_sample, start, end, k);
     let shares = entity_shares(walks, &by_sample, k);
-    let (exits, exit_covered) = body_exits(corridor, walks, &by_sample);
+    let (exits, exit_covered) = body_exits(rays, walks, &by_sample);
 
     let mut primitives: Vec<PrimitiveKey> = by_sample
         .iter()
@@ -2349,6 +2569,7 @@ fn build_event(
         encounters,
         exits,
         shares,
+        runs,
     })
 }
 
@@ -2469,7 +2690,7 @@ fn debris_ratio(present: &[Presence]) -> f32 {
 /// The body exits of one crossing, per sample, then grouped over the disc ([`BodyExit`]) and
 /// ordered by mean exit depth; with the number of samples one of whose runs exits material.
 fn body_exits(
-    corridor: &DiscCorridor,
+    rays: &Rays<'_>,
     walks: &[RayWalk],
     by_sample: &BTreeMap<usize, Vec<usize>>,
 ) -> (Vec<BodyExit>, usize) {
@@ -2477,7 +2698,7 @@ fn body_exits(
         BTreeMap::new();
     let mut exit_covered = 0usize;
     for (&sample, runs) in by_sample {
-        let base = corridor.origin + corridor.samples[sample].offset;
+        let base = rays.origin + rays.offsets[sample];
         let mut ordinals: BTreeMap<(Vec<SubstanceId>, bool), usize> = BTreeMap::new();
         let mut member = |substances: Vec<SubstanceId>,
                           (rear_factor, debris_ratio): (f32, f32),
@@ -2496,7 +2717,7 @@ fn body_exits(
                     sample,
                     start,
                     end,
-                    position: base + corridor.axis * end as f32,
+                    position: base + rays.axis * end as f32,
                     face,
                     exited,
                     rear_factor,
@@ -2720,8 +2941,9 @@ pub enum Begin {
 
 /// One transit sample's starting state — where its ray resumes, and what it is already inside.
 ///
-/// Each sample resumes from the point where its OWN entrance ray met the crossing surface, not from
-/// a flat disc re-projected around the bent axis. Two things fall out of that, and neither is
+/// Each sample resumes on its OWN entrance ray, at its hand-off ([`DiscWalk::hand_off`]): on the
+/// face of the piece it crossed, or in air at the crossing's depth when it crossed none by then.
+/// Never on a disc re-projected around the bent axis. Two things fall out of that, and neither is
 /// available any other way:
 ///
 /// - The seed is EXACT. The resume point lies on a ray this module already walked, so "which
@@ -2737,7 +2959,8 @@ pub struct SampleSeed {
     /// lateral — it carries the longitudinal spread of an oblique contact. `seeds[0].offset` is
     /// `ZERO`: the axis sample defines the origin.
     pub offset: Vec3,
-    /// Progress along that sample's ENTRANCE ray at which the seed was read.
+    /// Progress along that sample's ENTRANCE ray at which the seed was read: its hand-off, in
+    /// `[0, DiscWalk::length]`.
     pub t: f64,
     pub inside: Vec<ShellKey>,
 }
@@ -2754,39 +2977,44 @@ pub struct TransitRequest {
     /// from the same origin the entrance's face positions were measured from, so the two agree to
     /// corridor-scale rounding however far downrange the shot is.
     pub anchor: Vec3,
-    /// Where the DISC AXIS crosses the entrance surface, RELATIVE to [`anchor`](Self::anchor).
+    /// The AXIS sample's hand-off, RELATIVE to [`anchor`](Self::anchor): on the face it crossed, or
+    /// on its own ray at the crossing's depth when it crossed none ([`DiscWalk::hand_off`]).
     ///
     /// Deliberately NOT the covered-sample centroid. A centroid drags the shell's line of flight
     /// sideways toward whatever part of the disc happened to touch geometry — a lateral kick, which
     /// is exactly the asymmetry §13.5 rules out ("lateral asymmetry unmodeled", re-affirmed
     /// 2026-08-07). The aggregate SURFACE is a mean (`entrance.position`, `n̄`); the shell's AXIS is
-    /// not. This also gives the axis-miss/ring-hit case a definition instead of a special case: the
-    /// axis ray still crosses the mean entrance plane.
+    /// not.
     pub origin: Vec3,
     /// The spawn-anchored basis, parallel-transported onto the bent axis. Never re-derived.
     pub frame: DiscFrame,
     pub radius: f32,
     /// k — the corridor supplied to [`finish`] must sample the disc the same way.
     pub samples: usize,
-    /// The entities the entrance crossing engaged, sorted. [`finish`] checks the supplied corridor's
-    /// first crossing against these, so a corridor collected for some OTHER contact cannot be
-    /// resolved as if it were this one.
+    /// The entities the entrance crossing engaged, sorted.
     pub entrance_entities: Vec<Entity>,
-    /// The primitives the entrance crossing touched, sorted. Entity identity alone is too coarse for
-    /// the transit check: one volume can present several primitives metres apart, so "the corridor's
-    /// first crossing names a volume the entrance also named" is satisfied by a crossing of a
-    /// completely different part of the same hull.
+    /// The primitives the entrance crossing touched, sorted. [`finish`] checks the supplied
+    /// corridor's crossing against these, so a corridor collected for some OTHER contact cannot be
+    /// resolved as if it were this one. Entity identity alone is too coarse for that: one volume can
+    /// present several primitives metres apart, so "the corridor's crossing names a volume the
+    /// entrance also named" is satisfied by a crossing of a completely different part of the same
+    /// hull.
     pub entrance_primitives: Vec<PrimitiveKey>,
     pub seeds: Vec<SampleSeed>,
 }
 
 /// Read the entrance disc and decide whether the round enters (§4's decision tree, §13.3's inputs).
-pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Begin {
-    let Some(event) = entrance.events.first() else {
-        return Begin::Miss;
+///
+/// The read is the crossing's: the first piece struck and every piece a sample hands off on
+/// ([`DiscWalk::hand_off`]), so a disc meeting two pieces at once reads both surfaces, as it would
+/// read one piece of the same shape.
+pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin, WalkError> {
+    let Some(hand_off) = entrance.hand_off() else {
+        return Ok(Begin::Miss);
     };
+    let event = entrance.merged(&hand_off.pieces)?;
     if event.coverage <= 0.0 || event.entry_normal == Vec3::ZERO {
-        return Begin::Miss;
+        return Ok(Begin::Miss);
     }
     let normal = event.entry_normal;
     let incidence = entrance.axis.angle_between(-normal);
@@ -2807,10 +3035,10 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Begin {
     };
 
     let Ok(axis) = Dir3::new(entrance.axis) else {
-        return Begin::Miss;
+        return Ok(Begin::Miss);
     };
     let Ok(surface) = Dir3::new(normal) else {
-        return Begin::Miss;
+        return Ok(Begin::Miss);
     };
 
     // η scales the deflection ANGLE as well as the speed lost (§13.5). A graze that turned the
@@ -2838,11 +3066,11 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Begin {
         // IEEE square root rather than the sine of the read incidence, so the share is the same on
         // every target.
         let sliding = (1.0 - along_normal * along_normal).max(0.0).sqrt();
-        return Begin::Ricochet {
+        return Ok(Begin::Ricochet {
             entrance: read,
             direction: Vec3::from(direction),
             speed_scale: 1.0 - event.coverage * (1.0 - sliding),
-        };
+        });
     }
 
     // Normalize: a modest bend toward the inward normal as it bites in, scaled by η on the same
@@ -2858,44 +3086,20 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Begin {
         event.coverage * laws.normalization * incidence * resistance_share,
     );
 
-    // The handoff plane is the mean entrance surface; the transit ray is the DISC AXIS crossing it.
-    // `axis · n̄ < 0` always (every contributing entry face leans against the ray), so this cannot
-    // divide by zero.
-    //
-    // A sample hands off where its ray crosses that plane, kept to the span its own walk covered,
-    // `[0, length]`: outside it the walk holds no presence to seed from. Behind the start lies ground
-    // the ray swept before this corridor (`resolve::Interior`), already charged; past the end, ground
-    // no corridor has walked. The plane leaves that span on the samples that never touched the
-    // surface whenever the mean surface is oblique to them: the far wall of a bore met across its
-    // width, a curved face met at a graze. Clamped, a sample's transit begins on ground it walked, so
-    // it neither walks charged material twice nor starts past material it has not met.
-    let denominator = entrance.axis.dot(normal);
-    let length = f64::from(entrance.length);
-    let plane = |from: Vec3| {
-        let t = ((event.entry_position - from).dot(normal) / denominator) as f64;
-        if t < 0.0 {
-            0.0
-        } else if t > length {
-            length
-        } else {
-            t
-        }
-    };
-    let axis_t = plane(entrance.origin);
-    let handoff = entrance.origin + entrance.axis * axis_t as f32;
+    // Each sample resumes where [`DiscWalk::hand_off`] put it, and the transit ray is the AXIS
+    // sample's: the request's origin is its hand-off, every other sample's offset carries its own.
+    // The seed is a lookup on the ray each sample walked, at the point it resumes from.
+    let axis_t = hand_off.at[0];
+    let origin = entrance.origin + entrance.axis * axis_t as f32;
     let seeds = entrance
         .walks
         .iter()
         .enumerate()
         .map(|(index, walk)| {
-            let offset = entrance.offsets[index];
-            let t = plane(entrance.origin + offset);
+            let t = hand_off.at[index];
             SampleSeed {
                 sample: index,
-                // Where this sample resumes, relative to the handoff. Carries the longitudinal
-                // spread of an oblique contact, so the seed below is a lookup on a ray already
-                // walked rather than a guess about a re-projected disc.
-                offset: offset + entrance.axis * (t - axis_t) as f32,
+                offset: entrance.offsets[index] + entrance.axis * (t - axis_t) as f32,
                 t,
                 inside: walk.inside_at(t, laws),
             }
@@ -2904,18 +3108,18 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Begin {
     let mut entrance_entities: Vec<Entity> = event.shares.iter().map(|s| s.entity).collect();
     entrance_entities.sort();
 
-    Begin::Transit(TransitRequest {
+    Ok(Begin::Transit(TransitRequest {
         entrance: read,
         axis: Vec3::from(bent),
         anchor: entrance.anchor,
-        origin: handoff,
+        origin,
         frame: entrance.frame.transport(entrance.axis, Vec3::from(bent)),
         radius: entrance.radius,
         samples: entrance.samples(),
         entrance_entities,
         entrance_primitives: event.primitives.clone(),
         seeds,
-    })
+    }))
 }
 
 /// How the crossing ended.
@@ -2956,38 +3160,42 @@ pub struct ResolutionPlan<S> {
     /// One per body exit the round reached, in order: every exit before a stop throws, and the body
     /// the round stops inside throws nothing.
     pub spall: Vec<SpallSource>,
+    /// The transit crossing the plan resolved ([`DiscWalk::transit_pieces`]), corridor-relative.
+    pub crossing: DiscEvent,
 }
 
-/// The corridor [`finish`] was handed must be the corridor [`begin`] asked for.
+/// The corridor [`finish`] was handed must be the corridor [`begin`] asked for; if it is, its
+/// crossing ([`DiscWalk::transit_pieces`]).
 ///
 /// Between the two stages the caller runs a spatial query, and nothing in the type system stops it
 /// from collecting along the UNBENT axis, from the wrong origin, with a re-derived frame, or around
 /// a different contact entirely. Any of those silently resolves one surface's geometry against
 /// another surface's entrance verdict. Tolerances are loose enough for honest f32 round-tripping and
 /// far tighter than any of these mistakes.
-fn validate_transit(transit: &DiscWalk, request: &TransitRequest) -> Result<(), WalkError> {
+fn validate_transit<'t>(
+    transit: &'t DiscWalk,
+    request: &TransitRequest,
+) -> Result<Cow<'t, DiscEvent>, WalkError> {
     let mismatch = |reason| Err(WalkError::CorridorMismatch { reason });
     if (transit.axis - request.axis).length() > 1.0e-4 {
-        return mismatch(
-            "the corridor was collected along a different axis than the bend asked for",
-        );
+        return mismatch(Mismatch::Axis);
     }
     if transit.anchor != request.anchor {
-        return mismatch("the corridor was collected against a different world anchor");
+        return mismatch(Mismatch::Anchor);
     }
     if (transit.origin - request.origin).length() > 1.0e-4 {
-        return mismatch("the corridor starts somewhere other than the entrance handoff point");
+        return mismatch(Mismatch::Origin);
     }
     if (transit.frame.u - request.frame.u).length() > 1.0e-4
         || (transit.frame.v - request.frame.v).length() > 1.0e-4
     {
-        return mismatch("the ring frame was re-derived instead of transported");
+        return mismatch(Mismatch::Frame);
     }
     if (transit.radius - request.radius).abs() > 1.0e-6 {
-        return mismatch("the corridor samples a different disc radius");
+        return mismatch(Mismatch::Radius);
     }
     if transit.samples() != request.samples {
-        return mismatch("the corridor has a different sample count than the entrance disc");
+        return mismatch(Mismatch::SampleCount);
     }
 
     // PER-SAMPLE geometry, not just the disc's. The handoff exports where each ray resumes, and a
@@ -2996,43 +3204,47 @@ fn validate_transit(transit: &DiscWalk, request: &TransitRequest) -> Result<(), 
     // somewhere else entirely. The seeds are only sound for the rays they were read on.
     for (index, seed) in request.seeds.iter().enumerate() {
         if (transit.offsets[index] - seed.offset).length() > SEED_OFFSET_TOLERANCE {
-            return mismatch("a sample ray resumes somewhere other than where the handoff put it");
+            return mismatch(Mismatch::SampleOffset);
         }
     }
 
-    let Some(event) = transit.events.first() else {
-        return Ok(());
-    };
+    if transit.events.is_empty() {
+        return Err(WalkError::BadCorridor {
+            sample: 0,
+            reason: "the transit corridor met no material after the entrance decided to enter",
+        });
+    }
+    // Every sample starts at its hand-off, on the face it crossed or in air before the first face
+    // on its ray, so the crossing the entrance decided to enter begins there.
+    let pieces = transit.transit_pieces();
+    if pieces.is_empty() {
+        return mismatch(Mismatch::NotAtHandOff);
+    }
+    let crossing = transit.merged(&pieces)?;
     // IDENTITY, on the two things that actually name a crossing: the geometry it is made of, and
-    // where it sits. Sharing an ENTITY is too coarse — one hull presents primitives metres apart —
-    // and a crossing that begins far from the handoff plane is not the one the entrance decided to
-    // enter, however familiar its volumes look.
-    let shares_primitive = event
+    // the surface it presents. Sharing an ENTITY is too coarse — one hull presents primitives
+    // metres apart.
+    let shares_primitive = crossing
         .primitives
         .iter()
         .any(|key| request.entrance_primitives.binary_search(key).is_ok());
-    let same_surface = event.entry_normal.dot(request.entrance.normal) >= ENTRANCE_SURFACE_COS;
+    let same_surface = crossing.entry_normal.dot(request.entrance.normal) >= ENTRANCE_SURFACE_COS;
     if !(shares_primitive || same_surface) {
-        return mismatch(
-            "the corridor's first crossing is neither made of the entrance's geometry nor on its surface",
-        );
+        return mismatch(Mismatch::NotTheEntrance);
     }
-    if event.start > HANDOFF_PROXIMITY as f64 {
-        return mismatch("the corridor's first crossing does not begin at the handoff plane");
-    }
-    Ok(())
+    Ok(crossing)
 }
 
 /// How far a supplied sample origin may sit from the one the handoff exported. Generous enough for
 /// an honest f32 round-trip of a position through a corridor build, orders below any real re-aim.
 const SEED_OFFSET_TOLERANCE: f32 = 1.0e-4;
 
-/// How far into the transit corridor its first crossing may begin. The handoff plane IS the entrance
-/// surface, so the crossing the entrance decided to enter starts at zero; a millimetre covers the
-/// rounding of a face position that was computed, transported and re-collected.
+/// How far into a transit corridor a crossing may begin and still begin at the hand-off. A sample
+/// that hands off on a face re-measures it at zero; a millimetre covers the rounding of a face
+/// position that was computed, transported and re-collected.
 const HANDOFF_PROXIMITY: f32 = 1.0e-3;
 
-/// Cosine bound for "the transit's first crossing is on the surface the entrance read". Shares the
+/// Cosine bound for "the transit's crossing is on the surface the entrance read". Shares the
 /// magnitude of the event-plane rule for the same reason: two reads of one surface patch.
 const ENTRANCE_SURFACE_COS: f32 = 0.9;
 
@@ -3048,13 +3260,8 @@ pub(crate) fn finish<M: Mechanism>(
     limits: &Limits,
     _laws: &WalkLaws,
 ) -> Result<ResolutionPlan<M::State>, WalkError> {
-    validate_transit(transit, request)?;
-    let Some(event) = transit.events.first() else {
-        return Err(WalkError::BadCorridor {
-            sample: 0,
-            reason: "the transit corridor met no material after the entrance decided to enter",
-        });
-    };
+    let crossing = validate_transit(transit, request)?;
+    let event = &*crossing;
     let geometry = Geometry {
         axis: transit.axis,
         entrance_normal: request.entrance.normal,
@@ -3116,6 +3323,7 @@ pub(crate) fn finish<M: Mechanism>(
         cost_spent,
         deposits,
         spall,
+        crossing: crossing.into_owned(),
     })
 }
 

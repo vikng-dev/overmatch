@@ -187,7 +187,7 @@ fn the_spend_exit_fuze_keeps_todays_bursts_and_doses() {
     // the off-axis pool.
     type Snapshot = (Vec<([f32; 3], f32, f32)>, [u32; 2], u32);
     let pins: [Snapshot; 3] = [
-        (vec![], [204_265, 13_405], 0),
+        (vec![], [204_269, 13_405], 0),
         (
             vec![([0.0, 1.999_035_8, -2.914_275_2], 592.8495, 0.0)],
             [490_500, 3_675_533],

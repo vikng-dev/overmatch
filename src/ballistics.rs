@@ -3767,6 +3767,10 @@ fn replica_contact(
 /// AUTHORITY: a union walk that failed stops the round at its contact, `entry`: logged, its record
 /// marked [`ArmourMark::Failed`] so it opens no pen cam, and a struck armour [`Impact`] shown
 /// there. The caller stops the flight at `entry`.
+///
+/// No outcome of the damage model is meant to arrive here: each error is a broken invariant, the
+/// stop is the safe answer to it, and the log line, keyed by the error's stable
+/// [`walk::WalkError::kind`], is the tripwire that reports it.
 fn walk_failed(
     shell: &mut MarchingShell,
     hit: Option<avian3d::prelude::RayHitData>,
@@ -3776,6 +3780,7 @@ fn walk_failed(
     commands: &mut Commands,
 ) {
     error!(
+        kind = error.kind(),
         shot = ?shell.shot.map(|shot| shot.0),
         shell = ?shell.entity,
         struck = ?hit.map(|hit| hit.entity),
@@ -3817,6 +3822,7 @@ fn uncertified_start(
 ) -> bool {
     if deposit {
         error!(
+            kind = error.kind(),
             shot = ?shell.shot.map(|shot| shot.0),
             shell = ?shell.entity,
             ?position,
@@ -7805,7 +7811,10 @@ mod march_tests {
     /// declared, and the walk fails closed on a face the round never reached.
     ///
     /// Generic geometry: a thick plate grazed at 75°, and a plate square to the outgoing ray, its
-    /// face 10 mm past the resume point and its lower edge kept clear of the first plate.
+    /// face 10 mm past the resume point and its lower edge 5 mm above the outgoing axis: clear of
+    /// the incoming disc, whose crossings of that face lie at least 4.4 mm below the axis (DERIVED).
+    /// A plate the incoming disc meets as well is struck at the same time as the graze, and the
+    /// entrance reads both surfaces.
     #[test]
     fn a_bounce_then_a_contact_samples_the_current_frame() {
         let incidence = 75.0_f32.to_radians();
@@ -7823,8 +7832,8 @@ mod march_tests {
         let side = up.cross(back);
         let rotation = Quat::from_mat3(&Mat3::from_cols(side, up, back));
         let thickness = 0.05;
-        // In-plane extent along `up`: from 40 mm below the axis to 300 mm above it.
-        let (low, high) = (-0.040, 0.300);
+        // In-plane extent along `up`: from 5 mm above the axis to 300 mm above it.
+        let (low, high) = (0.005, 0.300);
         let centre = resume + outgoing * (0.010 + thickness * 0.5) + up * ((low + high) * 0.5);
         let mut app = world_with_trimesh_plates(&[first]);
         app.world_mut().spawn((
