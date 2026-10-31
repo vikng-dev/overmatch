@@ -1552,17 +1552,31 @@ fn track_sandbox_boots_headless() {
 
 /// A STRAIGHT DRIVE ON THE SHIPPED HEIGHTFIELD — a measurement bed, never a gate (`-- --ignored
 /// heightfield_drive_bed --nocapture`), in the game's tank driving physics (game state only): the
-/// controlled tank settles on the shipped terrain, then drives at full throttle for 10 s. Prints a
-/// digest of every tick's hull pose bits and the end pose, so two builds compare bit for bit, and
-/// every avian contact of the tank's colliders that carried a normal impulse.
+/// controlled tank settles on the shipped terrain, turns away from its duel partner and settles
+/// again, then drives at full throttle for 10 s. Per phase it prints a digest of every tick's hull
+/// pose bits and the end pose, so two builds compare bit for bit and a difference shows in the
+/// phase that makes it, and where the tank's colliders touched with a normal impulse.
 #[test]
 #[ignore = "a measurement bed, run on demand"]
 fn heightfield_drive_bed() {
     use avian3d::prelude::{ColliderOf, ContactGraph, Position, Rotation};
     use std::collections::BTreeMap;
 
-    /// One phase's pose-bit digest and the tank's collider contacts that carried a normal
-    /// impulse, by the tank's collider node and what it touched: (points, Σ impulse N·s).
+    /// The tank's collider contacts that carried a normal impulse, for one collider node and
+    /// what it touched.
+    #[derive(Default)]
+    struct Seen {
+        points: usize,
+        /// Σ normal impulse (N·s).
+        impulse: f32,
+        /// Hull-local |x| range and lowest y of the contact points (m).
+        x: (f32, f32),
+        y_lo: f32,
+        /// First and last phase tick with a touch.
+        ticks: (usize, usize),
+    }
+
+    /// One phase's pose-bit digest, its end pose, and what the tank's colliders touched.
     fn phase(
         app: &mut App,
         label: &str,
@@ -1571,8 +1585,8 @@ fn heightfield_drive_bed() {
         mut drive: impl FnMut(&mut App),
     ) {
         let mut digest = 0xcbf2_9ce4_8422_2325_u64;
-        let mut touches: BTreeMap<(String, &str), (usize, f32)> = BTreeMap::new();
-        for _ in 0..ticks {
+        let mut touches: BTreeMap<(String, &str), Seen> = BTreeMap::new();
+        for tick in 0..ticks {
             drive(app);
             let world = app.world();
             let p = world.get::<Position>(tank).unwrap().0;
@@ -1582,6 +1596,10 @@ fn heightfield_drive_bed() {
                     digest = (digest ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
                 }
             }
+            let to_local = Transform::from_translation(p)
+                .with_rotation(r)
+                .to_matrix()
+                .inverse();
             let body = |c: Entity| world.get::<ColliderOf>(c).map_or(c, |of| of.body);
             let node = |c: Entity| {
                 world
@@ -1604,15 +1622,37 @@ fn heightfield_drive_bed() {
                 };
                 for point in pair.manifolds.iter().flat_map(|m| m.points.iter()) {
                     if point.normal_impulse > 0.0 {
-                        let entry = touches.entry((node(ours), kind)).or_default();
-                        entry.0 += 1;
-                        entry.1 += point.normal_impulse;
+                        let local = to_local.transform_point3(point.point);
+                        let seen = touches.entry((node(ours), kind)).or_insert(Seen {
+                            x: (f32::INFINITY, 0.0),
+                            y_lo: f32::INFINITY,
+                            ticks: (tick, tick),
+                            ..Default::default()
+                        });
+                        seen.points += 1;
+                        seen.impulse += point.normal_impulse;
+                        seen.x = (seen.x.0.min(local.x.abs()), seen.x.1.max(local.x.abs()));
+                        seen.y_lo = seen.y_lo.min(local.y);
+                        seen.ticks.1 = tick;
                     }
                 }
             }
         }
         let p = app.world().get::<Position>(tank).unwrap().0;
-        println!("heightfield {label}: digest {digest:016x}, ends at {p:?}, contacts {touches:?}");
+        println!("heightfield {label}: digest {digest:016x}, ends at {p:?}");
+        for ((node, other), seen) in touches {
+            println!(
+                "  {node} on {other}: {} points, hull-local |x| {:.3}..{:.3} m, lowest y {:.3} m, \
+                 Σ normal impulse {:.0} N·s, phase ticks {}..={}",
+                seen.points,
+                seen.x.0,
+                seen.x.1,
+                seen.y_lo,
+                seen.impulse,
+                seen.ticks.0,
+                seen.ticks.1,
+            );
+        }
     }
 
     let mut app = booted_sim_on(Some(crate::terrain_grid::tests::shipped_grid()));
