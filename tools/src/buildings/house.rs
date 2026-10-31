@@ -11,19 +11,21 @@
 //! (under an opening) and lintels (over it). Above the eaves each gable wall carries its gable, a
 //! pentagon whose sloped top is the roof's underside. A timber wall plate lies along each long
 //! wall's top, its own top bevelled to the roof's slope, and each roof plane is a slab of boards
-//! resting on the plates and the gables, mitred where the two meet at the ridge.
+//! on the plates and the gables, mitred where the two meet at the ridge. The generator lays the
+//! parts out; how each is held to another it touches is the spec's ([`super::spec::Join`]).
 //!
 //! Every slope is the spec's pitch as a ratio (rise over run, a Pythagorean pair's hypotenuse taken
 //! by square root), so no angle and no trigonometry enters the bake.
 
 use glam::{DVec2, DVec3};
 use overmatch::buildings::schema::ElementKind;
+use serde::Deserialize;
 
 use super::geom::{Frame, Prism};
 use super::spec::{House, Opening};
 
 /// What an element is made of, as a key of `assets/materials/materials.ron`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize)]
 pub enum Material {
     Brick,
     Wood,
@@ -64,9 +66,6 @@ pub struct ElementPlan {
     pub kind: ElementKind,
     /// The component it is part of: its wall, or the timber part it is.
     pub component: String,
-    /// Set on what it touches rather than built into it: a timber part laid on masonry or on
-    /// another timber part, nothing fixing it. Every joint it makes with another component rests.
-    pub seated: bool,
     pub material: Material,
     pub prism: Prism,
     pub cutter: Cutter,
@@ -178,7 +177,6 @@ pub fn elements(house: &House) -> Vec<ElementPlan> {
             name: format!("{name}/plate"),
             kind: ElementKind::WallPlate,
             component: format!("{name}/plate"),
-            seated: true,
             material: Material::Wood,
             prism: Prism {
                 frame: frame(u),
@@ -201,7 +199,6 @@ pub fn elements(house: &House) -> Vec<ElementPlan> {
             name: format!("{name}/roof"),
             kind: ElementKind::Roof,
             component: format!("{name}/roof"),
-            seated: true,
             material: Material::Wood,
             prism: Prism {
                 frame: Frame {
@@ -263,7 +260,6 @@ fn wall_elements(
             kind,
             // A wall's piers, sills, lintels and gable are one brick wall, coursed in one bond.
             component: wall.name.to_owned(),
-            seated: false,
             material: Material::Brick,
             prism: Prism {
                 frame: wall.frame,

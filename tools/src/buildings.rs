@@ -4,9 +4,10 @@
 //!
 //! Three steps: the generator lays out the house's elements ([`house`]), the fracture bake cuts
 //! each into chunks ([`fracture`]), and the contact search finds the joints between chunks and
-//! the chunks the ground holds ([`contact`]). The output is canonical ([`write`]): every number
-//! rounded to a micrometre (or its unit's millionth) and printed by the same formatter, every list
-//! in a fixed order, so two bakes of one spec are the same bytes.
+//! the chunks the ground holds ([`contact`]); what holds each joint between two components is the
+//! spec's join for their elements' kinds ([`spec::Join`]). The output is canonical ([`write`]):
+//! every number rounded to a micrometre (or its unit's millionth) and printed by the same
+//! formatter, every list in a fixed order, so two bakes of one spec are the same bytes.
 
 use std::path::{Path, PathBuf};
 
@@ -46,7 +47,9 @@ fn canon3(v: DVec3) -> [f32; 3] {
     [canon(v.x), canon(v.y), canon(v.z)]
 }
 
-/// Bake `house` (module doc). Refuses a house whose materials the shipped registry cannot weigh.
+/// Bake `house` (module doc). Refuses a house whose materials the shipped registry cannot weigh,
+/// two components' parts touching where no join says what holds them, a join no two parts make,
+/// and a fixing taking the seam of a material the house has no part of.
 pub fn bake(house: &House) -> Result<Baked, String> {
     let plans = house::elements(house);
     let mut materials: Vec<Material> = plans.iter().map(|plan| plan.material).collect();
@@ -120,23 +123,54 @@ pub fn bake(house: &House) -> Result<Baked, String> {
     }
     let foundation_y = -f64::from(house.foundation_courses) * house.course_m;
     let index32 = |k: usize| u32::try_from(k).expect("chunk count fits u32");
-    let asset = BuildingAsset {
-        id: house.id.clone(),
-        format: schema::FORMAT,
-        foundation_y_m: canon(foundation_y),
-        materials: materials.iter().map(|m| m.key().to_owned()).collect(),
-        components,
-        joints: contact::joints(&prisms)
-            .into_iter()
-            .map(|joint| schema::Joint {
+    let fixings = house
+        .fixings
+        .iter()
+        .map(|(name, fixing)| match *fixing {
+            spec::Fixing::Seam(material) => materials
+                .iter()
+                .position(|&m| m == material)
+                .map(|m| schema::Fixing::Seam(u8::try_from(m).expect("two materials")))
+                .ok_or_else(|| {
+                    format!("fixing {name:?} takes the seam of {material:?}, which no part is of")
+                }),
+            spec::Fixing::Stated {
+                tensile_pa,
+                fracture_energy_j_per_m2,
+            } => Ok(schema::Fixing::Stated {
+                tensile_pa: canon(tensile_pa),
+                fracture_energy_j_per_m2: canon(fracture_energy_j_per_m2),
+            }),
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    let mut used = vec![false; house.joins.len()];
+    let joints = contact::joints(&prisms)
+        .into_iter()
+        .map(|joint| {
+            Ok(schema::Joint {
                 a: index32(joint.a),
                 b: index32(joint.b),
                 area_m2: canon(joint.area),
                 centroid: canon3(joint.centroid),
                 normal: canon3(joint.normal),
-                bond: bond(&plans, &chunks, joint.a, joint.b),
+                bond: bond(house, &plans, &chunks, (joint.a, joint.b), &mut used)?,
             })
-            .collect(),
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    if let Some(k) = used.iter().position(|used| !used) {
+        return Err(format!(
+            "the join of {:?} holds no joint: no two parts of those kinds touch",
+            house.joins[k].kinds
+        ));
+    }
+    let asset = BuildingAsset {
+        id: house.id.clone(),
+        format: schema::FORMAT,
+        foundation_y_m: canon(foundation_y),
+        materials: materials.iter().map(|m| m.key().to_owned()).collect(),
+        fixings,
+        components,
+        joints,
         elements,
         chunks,
         anchors: contact::anchors(&prisms, foundation_y)
@@ -153,26 +187,46 @@ pub fn bake(house: &House) -> Result<Baked, String> {
 }
 
 /// What holds the joint between chunks `a` and `b`: inside one component its seam; between two,
-/// a rest where either part is seated on the other ([`house::ElementPlan::seated`]), else the
-/// bond of chunk `a`'s material (masonry walls meeting at a corner, coursed into each other).
+/// the house's join for their elements' kinds ([`spec::Join`]), marked in `used` (one flag per
+/// join). Refuses a pair of kinds no join holds.
 fn bond(
+    house: &House,
     plans: &[house::ElementPlan],
     chunks: &[schema::Chunk],
-    a: usize,
-    b: usize,
-) -> schema::Bond {
-    let (ca, cb) = (&chunks[a], &chunks[b]);
+    (a, b): (usize, usize),
+    used: &mut [bool],
+) -> Result<schema::Bond, String> {
     let (pa, pb) = (
-        &plans[usize::from(ca.element)],
-        &plans[usize::from(cb.element)],
+        &plans[usize::from(chunks[a].element)],
+        &plans[usize::from(chunks[b].element)],
     );
     if pa.component == pb.component {
-        schema::Bond::Seam
-    } else if pa.seated || pb.seated {
-        schema::Bond::Resting
-    } else {
-        schema::Bond::Bonded(ca.material)
+        return Ok(schema::Bond::Seam);
     }
+    let k = house
+        .joins
+        .iter()
+        .position(|join| join.joins((pa.kind, pb.kind)))
+        .ok_or_else(|| {
+            format!(
+                "{} and {} touch, and no join holds a {:?} to a {:?}",
+                pa.name, pb.name, pa.kind, pb.kind
+            )
+        })?;
+    used[k] = true;
+    Ok(match &house.joins[k].by {
+        spec::Hold::Resting => schema::Bond::Resting,
+        spec::Hold::Fixed(name) => schema::Bond::Fixed(
+            u8::try_from(
+                house
+                    .fixings
+                    .keys()
+                    .position(|key| key == name)
+                    .expect("the spec's check holds every fixing a join names"),
+            )
+            .map_err(|_| "more fixings than a u8 names")?,
+        ),
+    })
 }
 
 /// The canonical text of `asset`: RON, one element, chunk, joint or anchor per line.
@@ -435,5 +489,79 @@ mod tests {
                 .map(|_| stream.unit())
                 .all(|u| (0.0..1.0).contains(&u))
         );
+    }
+
+    /// WHAT HOLDS TWO PARTS IS THE SPEC'S, NEVER THE BAKE'S: every joint between two components
+    /// of a shipped house takes the bond its spec's join for the two elements' kinds states (a
+    /// stated fixing, a material's seam, or a rest), so the same house with its roof's join to the
+    /// plates turned to `Resting` bakes those joints resting and nothing else changes. A spec with
+    /// a touching pair no join names, or a join no pair makes, is refused naming it. A bake that
+    /// chose a bond by element kind or material, or fell back to one where the spec is silent,
+    /// fails here; a roof nailed to its plate and a beam laid loose on a wall differ only by it.
+    #[test]
+    fn every_bond_between_components_is_the_join_its_spec_states() {
+        use overmatch::buildings::schema::{Bond, ElementKind};
+        for (house, baked) in shipped() {
+            let asset = &baked.asset;
+            let element = |c: u32| &asset.elements[usize::from(asset.chunks[c as usize].element)];
+            let expected = |house: &House, a: u32, b: u32| {
+                let (ea, eb) = (element(a), element(b));
+                if ea.component == eb.component {
+                    return Bond::Seam;
+                }
+                let join = house
+                    .joins
+                    .iter()
+                    .find(|join| join.joins((ea.kind, eb.kind)))
+                    .expect("a baked pair has its join");
+                match &join.by {
+                    spec::Hold::Resting => Bond::Resting,
+                    spec::Hold::Fixed(name) => {
+                        let index = house.fixings.keys().position(|key| key == name).unwrap();
+                        Bond::Fixed(index as u8)
+                    }
+                }
+            };
+            for joint in &asset.joints {
+                assert_eq!(joint.bond, expected(&house, joint.a, joint.b), "{joint:?}");
+            }
+            let roof_on_plate = (ElementKind::WallPlate, ElementKind::Roof);
+            let mut loose = house.clone();
+            let k = loose
+                .joins
+                .iter()
+                .position(|join| join.joins(roof_on_plate))
+                .expect("the shipped house joins its roof to its plates");
+            loose.joins[k].by = spec::Hold::Resting;
+            loose.fixings.retain(|name, _| {
+                loose
+                    .joins
+                    .iter()
+                    .any(|join| join.by == spec::Hold::Fixed(name.clone()))
+            });
+            let rebaked = bake(&loose).expect("the loose roof bakes");
+            let mut changed = 0;
+            for (was, now) in asset.joints.iter().zip(&rebaked.asset.joints) {
+                assert_eq!((was.a, was.b), (now.a, now.b));
+                assert_eq!(now.bond, expected(&loose, now.a, now.b));
+                changed += usize::from((was.bond == Bond::Resting) != (now.bond == Bond::Resting));
+            }
+            assert!(
+                changed > 0,
+                "{}: the roof's joints to its plates rest",
+                house.id
+            );
+            let mut silent = house.clone();
+            silent.joins.remove(k);
+            let err = bake(&silent).map(|_| ()).unwrap_err();
+            assert!(err.contains("no join holds"), "{err}");
+            let mut idle = house.clone();
+            idle.joins.push(spec::Join {
+                kinds: (ElementKind::Sill, ElementKind::Roof),
+                by: spec::Hold::Resting,
+            });
+            let err = bake(&idle).map(|_| ()).unwrap_err();
+            assert!(err.contains("holds no joint"), "{err}");
+        }
     }
 }

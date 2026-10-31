@@ -445,9 +445,10 @@ pub(crate) mod tests {
     /// A FILE THAT BREAKS THE CONTRACT DOES NOT LOAD: the shipped house parses and holds, and the
     /// same text naming another id, with an anchor lifted off the foundation plane, a joint out
     /// of order, an element whose run skips a chunk, a seam between two components or a bond
-    /// inside one, or a material the registry does not know, is refused naming why. The laws read
-    /// a joint's strength from its bond, so a mislabelled joint would hold a rest in tension or
-    /// let a wall's own seam fall open.
+    /// inside one, a bond naming a fixing past the table, a stated fixing of no strength, or a
+    /// material the registry does not know, is refused naming why. The laws read a joint's
+    /// strength from its bond, so a mislabelled joint would hold a rest in tension, let a wall's
+    /// own seam fall open, or nail a roof down by nothing.
     #[test]
     fn a_building_file_that_breaks_the_contract_is_refused() {
         let path = shipped_assets().join("buildings/house_1/house_1.building.ron");
@@ -488,6 +489,25 @@ pub(crate) mod tests {
             joint.bond = to;
             assert!(wrong.check().unwrap_err().contains(refusal), "{refusal}");
         }
+        let mut wrong = asset.clone();
+        let fixed = wrong
+            .joints
+            .iter_mut()
+            .find(|joint| matches!(joint.bond, schema::Bond::Fixed(_)))
+            .expect("the shipped house holds fixed bonds");
+        fixed.bond = schema::Bond::Fixed(u8::MAX);
+        assert!(wrong.check().unwrap_err().contains("past the table"));
+        let mut wrong = asset;
+        let stated = wrong
+            .fixings
+            .iter_mut()
+            .find(|fixing| matches!(fixing, schema::Fixing::Stated { .. }))
+            .expect("the shipped house states a fixing");
+        *stated = schema::Fixing::Stated {
+            tensile_pa: 0.0,
+            fracture_energy_j_per_m2: 1.0,
+        };
+        assert!(wrong.check().unwrap_err().contains("states no strength"));
         let unknown = text.replacen("\"Brick\"", "\"Adobe\"", 1);
         let err = BuildingKind::resolve("house_1", &unknown, registry).unwrap_err();
         assert!(err.contains("Adobe"), "{err}");

@@ -759,85 +759,106 @@ fn component_chunks(kind: &BuildingKind, component: u16) -> Vec<usize> {
         .collect()
 }
 
-/// The components whose chunks the chunks of `part` rest on (each a live rest whose normal toward
-/// `part` rises), ascending.
-fn rests_on(kind: &BuildingKind, structure: &Structure, part: &[usize]) -> Vec<u16> {
+/// The components whose chunks the chunks of `part` join through a joint `holds` keeps, and, with
+/// `under`, only those it bears on (the joint's normal toward `part` rising), ascending.
+fn joined_to(
+    kind: &BuildingKind,
+    structure: &Structure,
+    part: &[usize],
+    under: bool,
+    holds: impl Fn(&Joint) -> bool,
+) -> Vec<u16> {
     let component =
         |c: usize| kind.asset.elements[usize::from(kind.layout.element_of[c])].component;
-    let mut under: Vec<u16> = structure
+    let mut joined: Vec<u16> = structure
         .joints
         .iter()
-        .filter(|joint| joint.bond == Bond::Resting)
+        .filter(|joint| holds(joint))
         .filter_map(|joint| {
             let Side::Chunk(b) = joint.b else {
                 return None;
             };
-            let (held, support) = match (part.contains(&joint.a), part.contains(&b)) {
+            let (held, other) = match (part.contains(&joint.a), part.contains(&b)) {
                 (true, false) => (joint.a, b),
                 (false, true) => (b, joint.a),
                 _ => return None,
             };
             let toward = structure.chunks[held].centroid - joint.centroid;
-            (joint.normal.dot(toward).signum() * joint.normal.y > 0.0).then(|| component(support))
+            let bears = joint.normal.dot(toward).signum() * joint.normal.y > 0.0;
+            (bears || !under).then(|| component(other))
         })
         .collect();
-    under.sort_unstable();
-    under.dedup();
-    under
+    joined.sort_unstable();
+    joined.dedup();
+    joined
 }
 
-/// A ROOF PLANE STANDS ON ITS RESTS, BREAKABLE, AND FALLS WHEN THEY GO: on the shipped house
-/// (fixture data; the parts chosen by class: a roof plane, the components it rests on, the
-/// masonry its plate rests on), a light round through one of the plane's chunks wears it and
-/// moves nothing; a blast that turns one of its chunks to dust carves it and the plane stands.
-/// Shooting out the long wall under its plate (every standing unburied chunk of the masonry the
-/// plate rests on turned to dust) drops the plate, which bore on that wall alone; the plane
-/// stands on what else it rests on while its centre of mass lies over those rests, and falls
-/// whole once they go too. A check that let a rest carry tension would hold the plate up; one
-/// that read a roof's seams as a pull it could lose would break the plane apart.
+/// THE ROOF IS NAILED TO ITS PLATES: STRUCK IT STAYS, AND IT BREAKS ITS NAILS AND FALLS ONCE ITS
+/// LONG WALL AND THE GABLES GO. On the shipped house (fixture data; the parts chosen by class: the
+/// roof planes, the plate a plane is fixed to, the masonry that plate bears on, and the gables of
+/// the walls the planes rest on), a round through a plane's middle chunk wears it and moves
+/// nothing, and a blast that spends that chunk carves the plane, which stands. Shooting out the
+/// long wall under the plate (every standing unburied chunk of it turned to dust) leaves the whole
+/// roof on the house: the plate hangs between the gables, the planes still rest on them. Shooting
+/// out the gables too leaves the roof hanging from the other plate by nails, which its weight
+/// breaks (weight failures, across fixed joints alone), and every roof chunk falls. A roof laid
+/// unfixed on its plates (a rest at a 3 : 4 pitch, steeper than the friction of wood on wood)
+/// slides off at the first touch and fails here; so does a law that let a rest carry tension.
 #[test]
-fn a_roof_plane_stands_on_its_rests_and_falls_when_they_go() {
+fn a_nailed_roof_stays_when_struck_and_breaks_its_nails_when_its_walls_go() {
     let kind = shipped_house();
     let layout = &kind.layout;
     let elements = &kind.asset.elements;
-    let kinds = |kind_of: ElementKind| {
+    let of_kind = |kind_of: ElementKind| {
         (0..elements.len())
             .filter(|&e| elements[e].kind == kind_of)
             .collect::<Vec<_>>()
     };
-    let roof_element = kinds(ElementKind::Roof)[0];
-    let roof_component = kind.asset.elements[roof_element].component;
-    let roof = component_chunks(&kind, roof_component);
     let fresh = || Live::new(&kind, 1.0);
     let base = fresh();
-    let under_roof = rests_on(&kind, &base.structure, &roof);
-    let plate = kinds(ElementKind::WallPlate)
+    let fixed = |joint: &Joint| matches!(joint.bond, Bond::Bonded(_));
+    let resting = |joint: &Joint| joint.bond == Bond::Resting;
+    let mut roof: Vec<usize> = of_kind(ElementKind::Roof)
         .into_iter()
-        .map(|e| kind.asset.elements[e].component)
-        .find(|c| under_roof.contains(c))
-        .expect("the roof plane rests on a wall plate");
+        .flat_map(|e| layout.chunks_of(e))
+        .collect();
+    roof.sort_unstable();
+    let roof_element = of_kind(ElementKind::Roof)[0];
+    let plane = component_chunks(&kind, elements[roof_element].component);
+    let plate = of_kind(ElementKind::WallPlate)
+        .into_iter()
+        .map(|e| elements[e].component)
+        .find(|c| joined_to(&kind, &base.structure, &plane, false, fixed).contains(c))
+        .expect("the plane is fixed to a wall plate");
     let plate_chunks = component_chunks(&kind, plate);
-    let wall: Vec<u16> = rests_on(&kind, &base.structure, &plate_chunks);
+    let wall = joined_to(&kind, &base.structure, &plate_chunks, true, fixed);
+    let rests = joined_to(&kind, &base.structure, &roof, true, resting);
+    let gables: Vec<usize> = of_kind(ElementKind::Gable)
+        .into_iter()
+        .filter(|&e| rests.contains(&elements[e].component))
+        .flat_map(|e| layout.chunks_of(e))
+        .collect();
+    let name = |c: &u16| &kind.asset.components[usize::from(*c)];
+    println!(
+        "MEASURED: plane {} of {} chunks is fixed to plate {}, which bears on {:?}; the roof's {} \
+         chunks rest on {:?}, whose gables hold {} chunks",
+        name(&elements[roof_element].component),
+        plane.len(),
+        name(&plate),
+        wall.iter().map(name).collect::<Vec<_>>(),
+        roof.len(),
+        rests.iter().map(name).collect::<Vec<_>>(),
+        gables.len()
+    );
+    assert!(!wall.is_empty() && !gables.is_empty());
     let standing =
         |live: &Live, chunks: &[usize]| chunks.iter().filter(|&&c| live.state.standing(c)).count();
-    println!(
-        "MEASURED: roof plane {} of {} chunks rests on components {:?}; its plate {} rests on {:?}",
-        kind.asset.components[usize::from(roof_component)],
-        roof.len(),
-        under_roof
-            .iter()
-            .map(|&c| &kind.asset.components[usize::from(c)])
-            .collect::<Vec<_>>(),
-        kind.asset.components[usize::from(plate)],
-        wall.iter()
-            .map(|&c| &kind.asset.components[usize::from(c)])
-            .collect::<Vec<_>>()
-    );
 
-    // Hit lightly: a round's line through the plane's chunk nearest its centre, a tenth of its
-    // pool, then a blast that spends one chunk's pool.
+    // Struck: a round's line through the plane's chunk nearest its centre, a tenth of its pool
+    // pushing with the momentum a round at 773 m/s loses giving that energy up (fixture data,
+    // `ΔE / v`), then a blast that spends the chunk.
     let centre = layout.element_blocks[roof_element].center();
-    let middle = *roof
+    let middle = *plane
         .iter()
         .min_by(|&&a, &&b| {
             base.structure.chunks[a]
@@ -848,14 +869,27 @@ fn a_roof_plane_stands_on_its_rests_and_falls_when_they_go() {
         .unwrap();
     let mut live = fresh();
     let line = line_through_chunk(&kind, &live.structure, roof_element, middle, 0.1);
-    let loading = Loading::lines(&[line]);
-    let changes = run_laws(layout, &mut live, &loading, Vec::new(), Vec::new());
-    assert!(changes.groups.is_empty() && changes.failures.is_empty());
-    assert_eq!(
-        standing(&live, &roof),
-        roof.len(),
-        "a light round moves nothing"
+    let push = Push {
+        chunk: middle,
+        at: line.1,
+        impulse: (line.2 - line.1).normalize() * (line.3 / 773.0),
+    };
+    let changes = run_laws(
+        layout,
+        &mut live,
+        &Loading::lines(&[line]),
+        vec![push],
+        Vec::new(),
     );
+    println!(
+        "MEASURED: a round through the plane's middle ({:.0} J, {:.0} N s): {} failures, {} groups",
+        line.3,
+        push.impulse.length(),
+        changes.failures.len(),
+        changes.groups.len()
+    );
+    assert!(changes.groups.is_empty() && changes.failures.is_empty());
+    assert_eq!(standing(&live, &roof), roof.len(), "a round moves nothing");
     let (blast, pushes) = blast_on(&live.structure, middle, 1.0);
     let changes = run_laws(layout, &mut live, &blast, pushes, Vec::new());
     assert!(!live.state.standing(middle), "the blast spent the chunk");
@@ -863,38 +897,30 @@ fn a_roof_plane_stands_on_its_rests_and_falls_when_they_go() {
     assert_eq!(
         standing(&live, &roof),
         roof.len() - 1,
-        "carved, the plane stands"
+        "carved, the roof stands"
     );
 
-    // Shoot out the long wall under the plate.
+    // Shoot out the long wall under the plate, then the gables.
     let mut live = fresh();
-    let wall_chunks: Vec<usize> = wall
-        .iter()
-        .flat_map(|&c| component_chunks(&kind, c))
-        .filter(|&c| !live.structure.chunks[c].buried)
-        .collect();
     let dust = |live: &Live, chunks: &[usize]| Loading {
         sources: Vec::new(),
         energies: chunks
             .iter()
-            .filter(|&&c| live.state.standing(c))
+            .filter(|&&c| live.state.standing(c) && !live.structure.chunks[c].buried)
             .map(|&c| (c, fracture::full_pool(&live.structure.chunks[c])))
             .collect(),
     };
+    let wall_chunks: Vec<usize> = wall
+        .iter()
+        .flat_map(|&c| component_chunks(&kind, c))
+        .collect();
     let loading = dust(&live, &wall_chunks);
     let changes = run_laws(layout, &mut live, &loading, Vec::new(), Vec::new());
-    let rests = |changes: &Changes| {
-        changes
-            .failures
-            .iter()
-            .filter(|f| f.load == fracture::Load::Rest)
-            .count()
-    };
     println!(
-        "MEASURED: the long wall shot away ({} chunks to dust): {} rests opened, groups {:?}, plate \
-         standing {} of {}, roof plane standing {} of {}, weight steps {}",
+        "MEASURED: the long wall shot away ({} chunks to dust): {} failures, groups {:?}, plate \
+         standing {} of {}, roof standing {} of {}, weight steps {}",
         loading.energies.len(),
-        rests(&changes),
+        changes.failures.len(),
         changes
             .groups
             .iter()
@@ -906,28 +932,22 @@ fn a_roof_plane_stands_on_its_rests_and_falls_when_they_go() {
         roof.len(),
         changes.weight_steps
     );
-    assert_eq!(standing(&live, &plate_chunks), 0, "the plate fell");
-    let others: Vec<u16> = under_roof.iter().copied().filter(|&c| c != plate).collect();
-    let others_hold = !others.is_empty();
-    assert_eq!(
-        standing(&live, &roof),
-        if others_hold { roof.len() } else { 0 },
-        "the plane stands only on what else it rests on"
-    );
+    assert!(changes.failures.is_empty(), "{:?}", changes.failures);
+    assert_eq!(standing(&live, &plate_chunks), plate_chunks.len());
+    assert_eq!(standing(&live, &roof), roof.len(), "the roof stands");
 
-    // Then what else it rests on.
-    let rest_chunks: Vec<usize> = others
-        .iter()
-        .flat_map(|&c| component_chunks(&kind, c))
-        .filter(|&c| !live.structure.chunks[c].buried)
-        .collect();
-    let loading = dust(&live, &rest_chunks);
+    let loading = dust(&live, &gables);
     let changes = run_laws(layout, &mut live, &loading, Vec::new(), Vec::new());
+    let joints = &live.structure.joints;
     println!(
-        "MEASURED: its other rests shot away ({} chunks to dust): {} rests opened, groups {:?}, \
-         roof plane standing {} of {}",
+        "MEASURED: the gables shot away too ({} chunks to dust): failures {:?}, groups {:?}, roof \
+         standing {} of {}",
         loading.energies.len(),
-        rests(&changes),
+        changes
+            .failures
+            .iter()
+            .map(|f| (f.load, f.joints.len(), f.demand, f.capacity))
+            .collect::<Vec<_>>(),
         changes
             .groups
             .iter()
@@ -936,17 +956,15 @@ fn a_roof_plane_stands_on_its_rests_and_falls_when_they_go() {
         standing(&live, &roof),
         roof.len()
     );
+    assert!(!changes.failures.is_empty());
+    for failure in &changes.failures {
+        assert_eq!(failure.load, fracture::Load::Weight, "{failure:?}");
+        assert!(failure.joints.iter().all(|&j| fixed(&joints[j])));
+    }
     assert_eq!(
         standing(&live, &roof),
         0,
-        "with its rests gone the plane fell"
-    );
-    assert!(
-        changes
-            .groups
-            .iter()
-            .any(|(g, _)| roof.iter().all(|c| g.contains(c))),
-        "it fell whole, one body"
+        "the roof broke its nails and fell"
     );
 }
 

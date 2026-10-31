@@ -5,7 +5,7 @@
 //! * **The law's view of a building** ([`Layout`], once per asset): the chunks of the elements
 //!   whose substance states bulk facts ([`Masonry::of`]), numbered in asset order, and the joints
 //!   and anchors among them, each holding by the bond the asset gives it ([`Bond`]: a seam inside
-//!   a component, the seam of the material a bond between components names, or a rest). A chunk
+//!   a component, the seam of the fixing a bond between components names, or a rest). A chunk
 //!   and a joint keep that number on the wire.
 //! * **First touch swaps an element.** An element stays one collider until a deposit, a crack, a
 //!   fall or dust touches one of its chunks; from then on each of its standing chunks is a static
@@ -117,7 +117,7 @@ pub(crate) struct Layout {
 impl Layout {
     /// The layout of `asset`, its materials' values `masonry` (per asset material, `None` for a
     /// substance that never breaks). Refuses an asset whose law chunks or joints overrun the
-    /// wire's 16-bit numbers.
+    /// wire's 16-bit numbers, and a fixing taking the seam of a material that states none.
     pub(crate) fn of(asset: &BuildingAsset, masonry: &[Option<Masonry>]) -> Result<Self, String> {
         let mut chunks = Vec::new();
         let mut element_of = Vec::new();
@@ -143,18 +143,25 @@ impl Layout {
             if let (Some(a), Some(b)) = (law_of[joint.a as usize], law_of[joint.b as usize]) {
                 let bond = match joint.bond {
                     schema::Bond::Seam => Bond::Bonded(materials[a].seam),
-                    schema::Bond::Bonded(m) => Bond::Bonded(
-                        masonry
-                            .get(usize::from(m))
-                            .copied()
-                            .flatten()
-                            .ok_or_else(|| {
-                                format!(
-                                    "a bond names material {m}, which states no seam to hold it by"
-                                )
-                            })?
-                            .seam,
-                    ),
+                    schema::Bond::Fixed(f) => {
+                        Bond::Bonded(match asset.fixings[usize::from(f)] {
+                            schema::Fixing::Seam(m) => masonry[usize::from(m)]
+                                .ok_or_else(|| {
+                                    format!(
+                                        "fixing {f} takes the seam of material {m}, which states \
+                                         none to hold it by"
+                                    )
+                                })?
+                                .seam,
+                            schema::Fixing::Stated {
+                                tensile_pa,
+                                fracture_energy_j_per_m2,
+                            } => fracture::Seam {
+                                tensile: tensile_pa,
+                                fracture_energy: fracture_energy_j_per_m2,
+                            },
+                        })
+                    }
                     schema::Bond::Resting => Bond::Resting,
                 };
                 joints.push(Joint {
