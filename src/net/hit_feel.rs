@@ -134,9 +134,9 @@ fn detect_health_drops(
         // whose occupant changed, so a completing swap raises no false cue on the owner. Opponent
         // state deltas never own hit-confirm event count.
         let slots = slot_memory(net);
-        let bearers = health_bearing_volumes(volumes, |v| health.contains(v));
+        let bearers = health_bearing_volumes(volumes, |v| health.contains(v)).count();
         // A transient length skew while the rig is still spawning: resync memory, diff nothing.
-        if bearers.len() != slots.len() || memory.0.len() != slots.len() {
+        if bearers != slots.len() || memory.0.len() != slots.len() {
             memory.0 = slots;
             continue;
         }

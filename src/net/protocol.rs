@@ -602,8 +602,8 @@ pub struct SpawnChannel;
 pub(crate) fn health_bearing_volumes(
     volumes: &TankVolumes,
     has_health: impl Fn(Entity) -> bool,
-) -> Vec<Entity> {
-    volumes.iter().filter(|&v| has_health(v)).collect()
+) -> impl Iterator<Item = Entity> {
+    volumes.iter().filter(move |&v| has_health(v))
 }
 
 /// The read side of [`publish_net_crew`]: one health-bearing volume's live facts. `crew`/`crewman`/
@@ -628,28 +628,24 @@ fn publish_net_crew(
     sources: Query<VolumeSnapshotSource>,
     stations: Query<&CrewStation>,
 ) {
-    for (volumes, pending, mut net) in &mut tanks {
-        let snapshot: Vec<VolumeSnapshot> =
-            health_bearing_volumes(volumes, |v| sources.contains(v))
-                .iter()
-                .map(|&v| {
-                    let Ok(src) = sources.get(v) else {
-                        return VolumeSnapshot {
-                            held: 0,
-                            crew: None,
-                        };
-                    };
-                    VolumeSnapshot {
-                        held: src.health.held(),
-                        // A crew seat carries its occupant's home (defaulting to the seat before any
-                        // backfill) and the authority's monotonic aliveness.
-                        crew: src.crew.map(|seat| CrewSnapshot {
-                            home: src.crewman.map_or(*seat, |c| c.home),
-                            dead: src.dead.is_some(),
-                        }),
-                    }
-                })
-                .collect();
+    for (volumes, pending, net) in &mut tanks {
+        // Every bearer is a `sources` member by the filter, so each `get` holds.
+        let snapshot = || {
+            health_bearing_volumes(volumes, |v| sources.contains(v)).map(|v| {
+                let src = sources
+                    .get(v)
+                    .expect("a health bearer is a snapshot source");
+                VolumeSnapshot {
+                    held: src.health.held(),
+                    // A crew seat carries its occupant's home (defaulting to the seat before any
+                    // backfill) and the authority's monotonic aliveness.
+                    crew: src.crew.map(|seat| CrewSnapshot {
+                        home: src.crewman.map_or(*seat, |c| c.home),
+                        dead: src.dead.is_some(),
+                    }),
+                }
+            })
+        };
         // The in-flight swap as STATIONS (stable on the wire, unlike the seat entity ids in
         // `PendingSwap`); dropped if a seat vanished mid-flight, matching `tick_swaps`.
         let swap = pending.and_then(|ps| {
@@ -658,11 +654,15 @@ fn publish_net_crew(
             };
             Some((a, b, ps.remaining))
         });
-        // `set_if_neq`: no change-detection churn (nor replication resends) while at rest.
-        net.set_if_neq(NetCrew {
-            volumes: snapshot,
-            swap,
-        });
+        // Compared in place and written only on a difference: no change-detection churn (nor
+        // replication resends) while at rest, and no snapshot built to find that out.
+        if net.swap == swap && net.volumes.iter().copied().eq(snapshot()) {
+            continue;
+        }
+        let net = net.into_inner();
+        net.volumes.clear();
+        net.volumes.extend(snapshot());
+        net.swap = swap;
     }
 }
 
@@ -679,17 +679,26 @@ struct VolumeSink {
 ///
 /// `NetCrew` is plain replication, so this may run during replay; `Dead` is re-derived from the
 /// snapshot, while public life state remains `NetTankStatus`. Run before `DamageConsequences`.
+///
+/// Applied when its inputs move: a new snapshot, or the tank's volume set changing as its rig is
+/// built. Nothing else writes a replica's HP, occupant or `Dead` (the damage chain is gated off on
+/// a net client), so between those the sinks already hold the snapshot.
 fn apply_net_crew(
-    tanks: Query<(&TankVolumes, &NetCrew), With<Remote>>,
+    tanks: Query<
+        (&TankVolumes, &NetCrew),
+        (With<Remote>, Or<(Changed<NetCrew>, Changed<TankVolumes>)>),
+    >,
     mut volumes: Query<VolumeSink>,
     mut commands: Commands,
 ) {
     for (tank_volumes, net) in &tanks {
         // The health-bearing volumes in publish order (the SAME shared filter the server used).
-        let bearers = health_bearing_volumes(tank_volumes, |v| volumes.contains(v));
+        let bearers: Vec<Entity> =
+            health_bearing_volumes(tank_volumes, |v| volumes.contains(v)).collect();
         // A length mismatch is expected transiently while the client's rig is still spawning and
-        // self-heals once it's fully built; a persistent mismatch means client/server spec skew
-        // (a distribution concern — matched builds never skew). Skip rather than write misaligned.
+        // heals on the volume that completes it; a persistent mismatch means client/server spec
+        // skew (a distribution concern — matched builds never skew). Skip rather than write
+        // misaligned.
         if bearers.len() != net.volumes.len() {
             continue;
         }
@@ -731,23 +740,42 @@ fn apply_net_crew(
 /// so this synthesized `PendingSwap` is never ticked or completed locally — it is a display datum only,
 /// re-derived from the authoritative snapshot every tick (so a cancel/complete on the server clears it).
 fn mirror_swap_from_net_crew(
-    tanks: Query<(Entity, &NetCrew, Option<&PendingSwap>), With<Remote>>,
-    seats: Query<(Entity, &CrewStation, &crate::damage::VolumeOf)>,
+    mut tanks: Query<
+        (
+            Entity,
+            &NetCrew,
+            Option<&TankVolumes>,
+            Option<&mut PendingSwap>,
+        ),
+        With<Remote>,
+    >,
+    seats: Query<&CrewStation>,
     mut commands: Commands,
 ) {
-    for (tank, net, pending) in &tanks {
+    for (tank, net, volumes, pending) in &mut tanks {
         match net.swap {
             Some((a_station, b_station, remaining)) => {
+                // This tank's own seats, through its volumes; none before its rig is built.
                 let seat_of = |station: CrewStation| {
-                    seats
+                    volumes?
                         .iter()
-                        .find(|(_, s, owner)| **s == station && owner.tank() == tank)
-                        .map(|(e, ..)| e)
+                        .find(|&volume| seats.get(volume).is_ok_and(|seat| *seat == station))
                 };
-                if let (Some(a), Some(b)) = (seat_of(a_station), seat_of(b_station)) {
-                    commands
-                        .entity(tank)
-                        .insert(PendingSwap { a, b, remaining });
+                let (Some(a), Some(b)) = (seat_of(a_station), seat_of(b_station)) else {
+                    continue;
+                };
+                match pending {
+                    // The same swap ticking down: its countdown, in place.
+                    Some(mut pending) if pending.a == a && pending.b == b => {
+                        if pending.remaining != remaining {
+                            pending.remaining = remaining;
+                        }
+                    }
+                    _ => {
+                        commands
+                            .entity(tank)
+                            .insert(PendingSwap { a, b, remaining });
+                    }
                 }
             }
             // No swap in flight on the authority: drop any leftover display datum.
