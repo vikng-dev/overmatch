@@ -190,7 +190,7 @@ mod tests {
     /// turret's leave Avian's islands whole. Without the rule the pair keeps naming the hull: the
     /// hull's island is removed with that pair still linked (a debug build stops on Avian's
     /// `contact_count == 0` assertion there) and the turret's despawn then unlinks it from an
-    /// island that no longer exists, the dedicated server's panic (#193).
+    /// island that no longer exists, the dedicated server's panic.
     #[test]
     fn a_rehomed_colliders_pairs_name_its_new_body() {
         let mut app = physics_app(true);
@@ -233,7 +233,7 @@ mod tests {
         let (hull, _, turret_box, _) = rehomed(&mut app);
         assert!(
             named_bodies(app.world(), turret_box).contains(&Some(hull)),
-            "Avian renamed the rehomed collider's pair: retire the rule (see this test's doc)"
+            "the rehomed collider's pair no longer names the former body: retire the rule (see this test's doc)"
         );
     }
 }
