@@ -1821,9 +1821,15 @@ fn only_departing_chunks_give_back_their_body_blows() {
         repeated.groups.is_empty(),
         "a chunk freed by an earlier deposit launches once"
     );
-    assert!(
-        repeated.returns.is_empty(),
-        "a stale contact keeps the solver stop until Avian can resolve the departing carrier"
+    assert_eq!(
+        repeated.returns,
+        vec![BodyReturn {
+            body: Entity::PLACEHOLDER,
+            at: load.at,
+            impulse: load.blow
+        }],
+        "a later deposit on the departed chunk returns the whole body blow: kept, the static \
+         stop would take the source's momentum into no body"
     );
 }
 
