@@ -16,6 +16,7 @@
 use std::collections::HashMap;
 
 use bevy::ecs::error::Result;
+use bevy::ecs::query::QuerySingleError;
 use bevy::prelude::*;
 use bevy_replicon::prelude::{Diffable, EntityCommandsDiffExt};
 use lightyear::interpolation::timeline::InterpolationTimeline;
@@ -112,9 +113,9 @@ fn publish_falls(
     ledgers: Query<Entity, With<DestructionLedger>>,
     mut commands: Commands,
 ) {
-    let Ok(ledger) = ledgers.single() else {
-        return;
-    };
+    let ledger = ledgers.single().expect(
+        "authority startup spawns exactly one destruction ledger before publishing tree transitions",
+    );
     let states = fallen
         .iter()
         .filter(|(_, state, _)| **state != TreeState::Standing)
@@ -149,8 +150,14 @@ fn apply_ledger(
     mut trees: Query<(Entity, &MapInstance, &TreeBody, &mut TreeState)>,
     mut commands: Commands,
 ) {
-    let Ok((ledger, entries)) = ledgers.single() else {
-        return;
+    let (ledger, entries) = match ledgers.single() {
+        Ok(ledger) => ledger,
+        // Before the first snapshot, or between links, no authority ledger has arrived yet.
+        Err(QuerySingleError::NoEntities(_)) => return,
+        Err(QuerySingleError::MultipleEntities(_)) => panic!(
+            "a replica has one active authority ledger; disconnect cleanup removes the old \
+             link's replicated entities before a replacement arrives"
+        ),
     };
     if applied.ledger != Some(ledger) || entries.0.len() < applied.entries {
         if applied.ledger == Some(ledger) {
@@ -181,9 +188,9 @@ fn apply_ledger(
             error!("destruction ledger: entry {entry:?} names no tree of this map");
             continue;
         };
-        let Ok((_, _, body, mut state)) = trees.get_mut(tree) else {
-            continue;
-        };
+        let (_, _, body, mut state) = trees
+            .get_mut(tree)
+            .expect("by_ordinal enumerates this same tree query in this system call");
         match entry {
             LedgerEntry::State { word, tick, .. } => {
                 match TreeState::decode(word, body.kind.segments.len()) {
@@ -237,6 +244,44 @@ mod tests {
     use super::*;
     use crate::ballistics::{ComponentHealth, MarchProbe, PoolEmptied};
     use crate::trees::{FallPath, Resting};
+
+    /// Authority publication cannot silently discard transitions without its startup singleton.
+    /// A mutant that returns on a missing ledger hides this composition bug from the server.
+    #[test]
+    #[should_panic(expected = "authority startup spawns exactly one destruction ledger")]
+    fn publishing_without_the_startup_ledger_is_a_bug() {
+        let mut app = App::new();
+        app.add_systems(Update, publish_falls);
+        app.update();
+    }
+
+    /// A replica's pre-snapshot wait ends when its single ledger arrives, so late joiners
+    /// consume the authority record instead of treating absence as an initialization failure.
+    #[test]
+    fn a_replica_waits_for_its_first_ledger() {
+        let mut app = App::new();
+        app.init_resource::<Applied>()
+            .add_systems(Update, apply_ledger);
+        app.update();
+        assert!(app.world().resource::<Applied>().ledger.is_none());
+        let ledger = app.world_mut().spawn(DestructionLedger::default()).id();
+        app.update();
+        assert_eq!(app.world().resource::<Applied>().ledger, Some(ledger));
+    }
+
+    /// Two active ledgers would mix authorities. A single-query skip mutant would hide the
+    /// composition bug and leave every replica tree on its previous state indefinitely.
+    #[test]
+    #[should_panic(expected = "a replica has one active authority ledger")]
+    fn a_replica_with_two_authority_ledgers_is_a_bug() {
+        let mut app = App::new();
+        app.init_resource::<Applied>()
+            .add_systems(Update, apply_ledger);
+        for _ in 0..2 {
+            app.world_mut().spawn(DestructionLedger::default());
+        }
+        app.update();
+    }
 
     /// What stands in for replicon's receive: entries landing on the ledger in `PreUpdate`.
     #[derive(Resource, Default)]
