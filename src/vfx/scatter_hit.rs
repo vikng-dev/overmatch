@@ -1,22 +1,13 @@
-//! The client's scatter-crossing read: a round passing through a house wall or a fir trunk lights
-//! the surface where it crossed.
+//! The game's damage-model view: crossings of static graybox scatter proxies.
 //!
-//! DIRECTOR'S RULING — a deliberate interim, recorded here so an ADR-0023 (VFX honesty) reader sees
-//! a decision rather than an oversight. The deterministic shell walk resolves ground through the
-//! [`crate::terrain_grid::HeightGrid`] alone, and the map's 709 scatter proxies are not in it: a
-//! round flies through a building untouched, and this slice does not change that (no march change,
-//! no `PROTOCOL_REV` bump — nothing here is sim state). What ships is the VIEW half of the
-//! interaction: the crossing point draws the same terrain impact read a ground hit draws, and the
-//! shell continues unharmed. The white lie is the shell's survival, NOT the effect — the effect
-//! marks a real crossing of real collider geometry, at the real crossing point, with that surface's
-//! real normal, sized off the round's real caliber. The ballistic cost of a wall (obstruction,
-//! energy loss, debris) belongs to the destruction saga, which owns the sim side; when that lands,
-//! the crossing becomes an `Impact` and this module's cast retires.
+//! Only the map's `Building` and `Fir` prototypes carry [`ScatterProxy`]. They have no ballistic
+//! volume, so this view-only cast marks their actual entry geometry without changing shell state.
+//! `Structure` and `Tree` prototypes carry ballistic volumes instead: the authority resolves their
+//! impacts and this cast does not see them. The proxy's authored substance supplies its surface
+//! response. Impact dimensions still use the shared provisional recipes in `impact`.
 //!
-//! Invariant (ADR-0014): reads shell transforms and static collider geometry, writes only its own
-//! view state ([`ScatterProbe`]) and transient render entities. The projectile is never modified.
-//! Parry is the caster here, which is a VIEW-layer allowance (the same one `aim`/`sight` take); the
-//! determinism ban binds the sim path, and no sim path reads this module.
+//! Invariant (ADR-0014): reads presented shell transforms and static collider geometry, writes
+//! only [`ScatterProbe`] and transient render entities. No simulation path reads this state.
 
 use avian3d::prelude::{SpatialQuery, SpatialQueryFilter};
 use bevy::prelude::*;
@@ -52,7 +43,7 @@ struct ScatterProbe {
     inside: Option<Entity>,
 }
 
-/// Cast each shell's frame displacement against the scatter proxies alone and draw the terrain read
+/// Cast each shell's frame displacement against the scatter proxies alone and draw their substance read
 /// at every surface ENTRY. The mask keeps the traversal on the static terrain layer; the predicate
 /// narrows it to [`ScatterProxy`] entities, so the ground surface and every armor volume are
 /// invisible to this cast — those already have their own honest impacts.

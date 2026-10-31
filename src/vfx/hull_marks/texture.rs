@@ -6,10 +6,10 @@
 //! layer comes from the distance to one shape, perturbed by value noise so no edge looks drawn:
 //!
 //! - **hole** (a circle): a near-black core, a lip whose height falls toward the core (metal
-//!   pushed in), a exposed-substrate ring whose outer edge the noise tears, and bare chips past it;
+//!   pushed in), an exposed-substrate ring whose outer edge the noise tears, and bare chips past it;
 //! - **dent** (a bowl, no core): the bowl's height and its raised rim shade it, a bare spot at the
 //!   centre, crazed paint in a ring around it;
-//! - **scratch** (a capsule along +x, its radius tapering toward +x): a exposed-substrate trough streaked
+//! - **scratch** (a capsule along +x, its radius tapering toward +x): an exposed-substrate trough streaked
 //!   along the gouge, a pushed-up paint lip at its edge, chips beside it.
 //!
 //! From the profile come four maps: base colour (sRGB, straight alpha), a tangent-space normal map

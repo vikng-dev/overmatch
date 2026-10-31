@@ -38,7 +38,7 @@ const LATERAL_HALF_M: f32 = 6.0;
 /// ASSUMED presentation lane offset, metres: alternating lanes reduce mutual occlusion.
 const LANE_OFFSET_M: f32 = 15.0;
 
-/// The map's usable staging interval, with DERIVED 5% margins at both X edges.
+/// ASSUMED staging margin: 5% of each half-extent. Start and reach derive from the live map.
 #[derive(Clone, Copy)]
 pub(crate) struct Stage {
     start: Vec2,

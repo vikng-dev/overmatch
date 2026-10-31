@@ -523,12 +523,9 @@ pub(super) struct ImpactKit<'w, 's> {
     pub(super) commands: Commands<'w, 's>,
 }
 
-/// Drop the layered read at each shell impact — branching on BOTH the round's physical caliber and
-/// the resolved `surface` response. Large terrain contacts use [`spawn_terrain_read`]; a sparking
-/// substance admits [`spawn_big_armor`]. Smaller contacts use the compact
-/// dust-ping-spark read ([`spawn_small_impact`], which recolors its billow gray on armor but keeps
-/// the terrain path byte-for-byte). `normal`/`to_camera` are resolved once, before any path draws
-/// RNG, so the small path's RNG sequence is unchanged and the surface pick costs no RNG.
+/// Dress the resolved surface's response. Material facts select sparks and powder colour; terrain
+/// has its own ground recipe. Dimensions remain the provisional compact/large recipes below,
+/// selected by calibre rather than derived from deposited energy and emitted material.
 fn spawn_impact_read(
     impact: On<Impact>,
     mut kit: ImpactKit,
@@ -592,7 +589,7 @@ pub(super) fn spawn_material_read(
     kit: &mut ImpactKit,
 ) {
     if feedback.sparks && caliber >= TRACER_MAX_CALIBER {
-        spawn_big_armor(position, normal, to_camera, outcome, feedback, kit);
+        spawn_sparking_read(position, normal, to_camera, outcome, feedback, kit);
     } else {
         spawn_small_impact(
             position,
@@ -935,14 +932,10 @@ fn spawn_big_splash(position: Vec3, normal: Vec3, to_camera: Vec3, kit: &mut Imp
     );
 }
 
-/// The 88 ARMOR read (caliber ≥ TRACER_MAX_CALIBER, surface Armor): the spark-on-steel read — a
-/// white-hot contact flash, a dense fast hot spark fan, and a small gray spall/smoke puff, all on the
-/// shared ring. NO plume, NO shock ring, NO lingering cloud, and — deliberately — NO ground scar
-/// (steel isn't gouged like soil; the armor read touches only the shared billboard ring). A brief
-/// flame lick is appended ONLY when `verdict.entered()` (the round bit into the steel). When `deflection` is
-/// present (a ricochet) the spark fan leans toward the bounce direction; otherwise it splays off the
-/// surface normal. Physical read (module doc), not screen-relative.
-fn spawn_big_armor(
+/// The large sparking-surface recipe: contact glow, a spark fan and the substance's powder colour.
+/// A resolved bounce supplies the fan's bearing; an entered face admits a brief warm lick. Its
+/// emission geometry remains provisional. It never writes a soil scar or changes gameplay state.
+fn spawn_sparking_read(
     position: Vec3,
     normal: Vec3,
     to_camera: Vec3,

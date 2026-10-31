@@ -7,6 +7,7 @@
 
 use crate::provenance::Sourced;
 use serde::{Deserialize, Serialize};
+use std::num::NonZeroU8;
 
 #[derive(
     bevy::prelude::Component,
@@ -24,7 +25,7 @@ pub struct SurfaceFeedback {
     pub exposed: [u8; 3],
     pub powder: [u8; 3],
     pub metallic: u8,
-    pub roughness_gain: u8,
+    pub roughness_gain: NonZeroU8,
     pub sparks: bool,
 }
 
@@ -36,7 +37,7 @@ impl SurfaceFeedback {
             exposed: [128, 130, 135],
             powder: [120, 120, 120],
             metallic: 255,
-            roughness_gain: 64,
+            roughness_gain: NonZeroU8::new(64).expect("positive fixture gain"),
             sparks: true,
         }
     }
@@ -82,8 +83,23 @@ impl File {
             exposed: rgb("exposed_linear_rgb", self.exposed_linear_rgb.0)?,
             powder: rgb("powder_linear_rgb", self.powder_linear_rgb.0)?,
             metallic: unit("metallic", self.metallic.0)?,
-            roughness_gain: (gain * 64.0).round() as u8,
+            roughness_gain: NonZeroU8::new((gain * 64.0).round() as u8)
+                .expect("the authored gain is bounded to positive quantized units"),
             sparks: self.sparks.0,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A late-join mark's shading requires a positive roughness multiplier. The wire decoder must
+    /// refuse a zero gain at its edge, just as the authored-file gate does.
+    #[test]
+    fn a_wire_surface_cannot_construct_a_zero_roughness_gain() {
+        let mut wire = serde_json::to_value(SurfaceFeedback::fixture()).unwrap();
+        wire["roughness_gain"] = 0.into();
+        assert!(serde_json::from_value::<SurfaceFeedback>(wire).is_err());
     }
 }

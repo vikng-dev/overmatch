@@ -41,8 +41,7 @@ use crate::tank::{SimParts, rig_world_pose};
 /// The marks one vehicle keeps: the newest this many. ASSUMED: the owner's "about 50".
 pub(crate) const MARK_CAP: usize = 50;
 
-/// The smallest calibre that leaves a mark, whole millimetres as [`HullMark::caliber_mm`] holds
-/// it. Machine-gun rounds, below it, leave none, because of [`MARK_CAP`]: one belt on a hull
+/// The smallest calibre that leaves a mark, in whole millimetres. Machine-gun rounds, below it, leave none, because of [`MARK_CAP`]: one belt on a hull
 /// would turn the whole record over in about 4 s (DERIVED: the shipped machine gun's 750 rpm
 /// cyclic is 12.5 rounds a second, and 50 / 12.5 = 4), dropping every main-gun mark the vehicle
 /// holds. Issue 144 brings them back under a cap of their own. The value matches the tracer
@@ -109,6 +108,44 @@ pub(crate) fn in_plane(along: Vec3, normal: Vec3) -> Vec3 {
         .unwrap_or_else(|| normal.any_orthonormal_vector())
 }
 
+/// The game's damage-model view: an exact, finite positive calibre in metres. The bits give
+/// records reflexive equality while the serde conversion refuses invalid outside input.
+#[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+#[serde(try_from = "f32", into = "f32")]
+pub(crate) struct MarkCaliber(u32);
+
+#[derive(Debug)]
+pub(crate) enum MarkCaliberError {
+    Invalid(f32),
+}
+
+impl std::fmt::Display for MarkCaliberError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Invalid(value) => {
+                write!(f, "mark calibre must be finite and positive, got {value}")
+            }
+        }
+    }
+}
+
+impl TryFrom<f32> for MarkCaliber {
+    type Error = MarkCaliberError;
+    fn try_from(value: f32) -> Result<Self, Self::Error> {
+        if value.is_finite() && value > 0.0 {
+            Ok(Self(value.to_bits()))
+        } else {
+            Err(MarkCaliberError::Invalid(value))
+        }
+    }
+}
+
+impl From<MarkCaliber> for f32 {
+    fn from(value: MarkCaliber) -> Self {
+        Self::from_bits(value.0)
+    }
+}
+
 /// One mark, packed for the wire. Positions are in the struck part's frame, so the mark rides the
 /// part; the view re-derives everything else (size, stretch, roll, material) from these fields.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
@@ -124,8 +161,8 @@ pub(crate) struct HullMark {
     pub(crate) along: [i8; 3],
     /// The face's outward normal, part frame, unit vector in snorm8.
     pub(crate) normal: [i8; 3],
-    /// The round's calibre, whole millimetres (1–255).
-    pub(crate) caliber_mm: u8,
+    /// The round's exact calibre, metres; no presentation-size ceiling or invented minimum.
+    pub(crate) caliber: MarkCaliber,
     /// Hashed from the shot and the strike's ordinal in it; the view takes the mark's roll and
     /// texture variant from it.
     pub(crate) seed: u16,
@@ -140,7 +177,7 @@ pub(crate) struct MarkFace {
 
 impl HullMark {
     /// Pack a strike already expressed in its part's frame. `None` when the point does not fit
-    /// the wire's ±32.767 m, or a direction has no length.
+    /// the wire's ±32.767 m, a direction has no length, or calibre is nonfinite/nonpositive.
     pub(crate) fn pack(
         kind: MarkKind,
         part: u16,
@@ -165,7 +202,7 @@ impl HullMark {
             at: [mm(at.x)?, mm(at.y)?, mm(at.z)?],
             along: snorm(along)?,
             normal: snorm(normal)?,
-            caliber_mm: caliber_mm(caliber),
+            caliber: MarkCaliber::try_from(caliber).ok()?,
             seed,
         })
     }
@@ -187,13 +224,8 @@ impl HullMark {
 
     /// The round's calibre, metres.
     pub(crate) fn caliber(&self) -> f32 {
-        f32::from(self.caliber_mm) * 0.001
+        self.caliber.into()
     }
-}
-
-/// A calibre in metres as [`HullMark::caliber_mm`] holds it: whole millimetres, 1–255.
-fn caliber_mm(caliber: f32) -> u8 {
-    (caliber * 1000.0).round().clamp(1.0, 255.0) as u8
 }
 
 /// A packed unit vector back to unit length. `pack` never writes a zero vector; `Y` stands in for
@@ -294,7 +326,7 @@ impl MarkBuilder<'_, '_> {
     /// bake's coordinate bound or the resolved direction invariants and is a bug.
     pub(crate) fn mark(&self, strike: &ShellStrike) -> Option<(Entity, HullMark)> {
         let kind = MarkKind::of(strike.verdict)?;
-        if caliber_mm(strike.caliber) < MIN_MARK_CALIBER_MM {
+        if strike.caliber * 1000.0 < f32::from(MIN_MARK_CALIBER_MM) {
             return None;
         }
         let Ok(owner) = self.owners.get(strike.struck) else {
@@ -389,6 +421,27 @@ pub(crate) mod tests {
     use super::*;
     use crate::{CombatantId, ShotId};
 
+    /// The decal reader needs the authored physical size, including values beyond a byte of
+    /// millimetres. Serde must also refuse nonpositive or nonfinite network values at its edge.
+    #[test]
+    fn mark_calibre_round_trips_without_saturation_and_refuses_invalid_input() {
+        for calibre in [0.020_f32, 0.088, 0.280, 1.25] {
+            // FIXTURE DATA, metres.
+            let mut mark = numbered(0);
+            mark.caliber = MarkCaliber::try_from(calibre).unwrap();
+            let encoded = ron::ser::to_string(&mark).unwrap();
+            let decoded: HullMark = ron::from_str(&encoded).unwrap();
+            assert_eq!(decoded, mark);
+            assert_eq!(decoded.caliber().to_bits(), calibre.to_bits());
+        }
+        for value in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+            assert!(MarkCaliber::try_from(value).is_err());
+        }
+        for encoded in ["0.0", "-1.0", "NaN", "inf"] {
+            assert!(ron::from_str::<MarkCaliber>(encoded).is_err());
+        }
+    }
+
     /// A mark whose fields all differ from its neighbours', told apart by `n`.
     pub(crate) fn numbered(n: u16) -> HullMark {
         HullMark {
@@ -398,7 +451,7 @@ pub(crate) mod tests {
             at: [n as i16, -(n as i16), 7],
             along: [0, 0, -127],
             normal: [0, 127, 0],
-            caliber_mm: 88,
+            caliber: MarkCaliber::try_from(0.088).expect("positive finite fixture calibre"),
             seed: n.wrapping_mul(7919),
         }
     }
@@ -595,7 +648,7 @@ pub(crate) mod tests {
         let to_plate = plate_world.rotation.inverse();
         assert!(mark.normal().angle_between(to_plate * hit.normal) < 0.01);
         assert!(mark.along().angle_between(to_plate * hit.incoming) < 0.01);
-        assert_eq!(mark.caliber_mm, 88);
+        assert_eq!(mark.caliber(), 0.088);
     }
 
     /// A round below [`MIN_MARK_CALIBER_MM`] leaves no mark whatever its verdict, and a 20 mm
@@ -620,14 +673,14 @@ pub(crate) mod tests {
         let record = app.world().get::<HullMarks>(fixture.root).unwrap();
         let marks: Vec<_> = record
             .iter()
-            .map(|(_, mark)| (mark.kind, mark.caliber_mm))
+            .map(|(_, mark)| (mark.kind, mark.caliber()))
             .collect();
         assert_eq!(
             marks,
             [
-                (MarkKind::Scratch, 20),
-                (MarkKind::Dent, 20),
-                (MarkKind::Hole, 20)
+                (MarkKind::Scratch, 0.020),
+                (MarkKind::Dent, 0.020),
+                (MarkKind::Hole, 0.020)
             ],
         );
     }

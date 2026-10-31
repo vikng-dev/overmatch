@@ -225,7 +225,7 @@ fn surface_material(mut base: StandardMaterial, feedback: SurfaceFeedback) -> St
     let [r, g, b] = feedback.exposed_linear();
     base.base_color = Color::linear_rgb(r, g, b);
     base.metallic = f32::from(feedback.metallic) / 255.0;
-    base.perceptual_roughness = f32::from(feedback.roughness_gain) / 64.0;
+    base.perceptual_roughness = f32::from(feedback.roughness_gain.get()) / 64.0;
     base
 }
 
@@ -366,7 +366,7 @@ mod tests {
         let nonmetal = SurfaceFeedback {
             exposed: [90, 45, 18],
             metallic: 0,
-            roughness_gain: 128,
+            roughness_gain: std::num::NonZeroU8::new(128).expect("positive fixture gain"),
             sparks: false,
             ..metal
         };
