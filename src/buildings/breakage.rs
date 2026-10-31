@@ -1440,7 +1440,7 @@ fn spawn_piece(
                 collider,
                 ColliderDensity(structure.chunks[c].material.density),
                 piece_layers(),
-                kind.piece_friction(c),
+                kind.chunk_friction(c),
                 chunk_volume(kind, c),
             ));
         }
@@ -1554,6 +1554,7 @@ fn reconcile(
                         Transform::IDENTITY,
                         collider,
                         super::element_layers(),
+                        kind.chunk_friction(c),
                         chunk_volume(kind, c),
                         BuildingChunk(c as u16),
                         pose,

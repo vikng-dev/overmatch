@@ -93,13 +93,21 @@ struct Placement<'a> {
     pose: Transform,
 }
 
+/// The friction a graybox prototype's collider carries: its `substance` row's. A prototype naming
+/// a substance the registry lacks, or one that states no friction, is a broken map (ADR-0011).
+fn graybox_friction(substance: &str) -> avian3d::prelude::Friction {
+    crate::substances::SubstanceRegistry::shipped_static()
+        .contact_friction(substance)
+        .unwrap_or_else(|err| panic!("scatter: a graybox prototype's substance: {err}"))
+}
+
 impl Placement<'_> {
     /// A building's [`crate::world::TerrainMap`] block form: a unit cube posed and scaled (the
     /// Avian idiom `world::spawn_block` uses), its centre lifted off the ground pose by the
     /// prototype's own bounds. `None` for a fir or a tree — a trunk is not a block.
     fn block(&self) -> Option<Transform> {
         match self.shape {
-            Prototype::Building { min, max } => {
+            Prototype::Building { min, max, .. } => {
                 let (min, max) = (Vec3::from_array(*min), Vec3::from_array(*max));
                 Some(Transform {
                     translation: self.pose.translation
@@ -239,7 +247,7 @@ impl ScatterView {
             building: library
                 .iter()
                 .filter_map(|(id, shape)| match *shape {
-                    Prototype::Building { min, max } => Some((
+                    Prototype::Building { min, max, .. } => Some((
                         id.clone(),
                         meshes.add(crate::building_surface::unit_box(
                             crate::building_surface::ridge_axis(min, max),
@@ -256,6 +264,7 @@ impl ScatterView {
                     Prototype::Fir {
                         height_m,
                         canopy_diameter_m,
+                        ..
                     } => Some((
                         id.clone(),
                         (
@@ -376,7 +385,7 @@ pub(crate) fn spawn(
                 }
                 trees += 1;
             }
-            Prototype::Building { .. } => {
+            Prototype::Building { substance, .. } => {
                 let block = placement
                     .block()
                     .expect("a building placement carries a block transform");
@@ -386,6 +395,7 @@ pub(crate) fn spawn(
                     RigidBody::Static,
                     Collider::cuboid(1.0, 1.0, 1.0),
                     statics,
+                    graybox_friction(substance),
                     ScatterProxy,
                     placement.identity.clone(),
                 ));
@@ -401,6 +411,7 @@ pub(crate) fn spawn(
             Prototype::Fir {
                 height_m,
                 canopy_diameter_m: _,
+                substance,
             } => {
                 let (pose, height_m) = (placement.pose, *height_m);
                 // Both primitives are centred on their own origin, so each rides at its own centre
@@ -416,6 +427,7 @@ pub(crate) fn spawn(
                     RigidBody::Static,
                     Collider::cylinder(TRUNK_RADIUS_M, height_m),
                     statics,
+                    graybox_friction(substance),
                     ScatterProxy,
                     placement.identity.clone(),
                 ));
@@ -474,6 +486,7 @@ mod tests {
         Prototype::Building {
             min: [-2.0, -0.5, -3.0],
             max: [2.0, 2.5, 3.0],
+            substance: "Brick".to_owned(),
         }
     }
 

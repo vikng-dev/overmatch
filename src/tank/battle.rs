@@ -997,7 +997,7 @@ mod tests {
             let xz = Vec2::new(instance.translation[0], instance.translation[2]);
             match manifest.prototypes.get(&instance.prototype) {
                 Some(Prototype::Tree { .. } | Prototype::Fir { .. }) => trees.push(xz),
-                Some(Prototype::Building { min, max }) => {
+                Some(Prototype::Building { min, max, .. }) => {
                     let reach = Vec2::new(
                         min[0].abs().max(max[0].abs()),
                         min[2].abs().max(max[2].abs()),

@@ -59,7 +59,9 @@ What is true now:
   per-element in [[0027-element-grip-netcode]]) — a parked tank holds on grade.
 - Sandbox `belt` (renamed from `model4` 2026-07-26) is a thin adapter over `track::forces` — the entanglement noted in §0
   (codex E) was dissolved by the extraction; models 1–3 deleted in the consolidation pass.
-- Vehicle collision proxies carry `Friction::ZERO` (min-combine): all grip is the model's.
+- Vehicle collision proxies carry their substance's friction like every collider (`substances::PAIR_RULE`,
+  the geometric mean); they sit clear of the ground wherever the belts carry the load, so the
+  hull's grip there is the model's alone.
 
 ## 1. The shape: one geometric core, two consumers
 

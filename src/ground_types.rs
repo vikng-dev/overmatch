@@ -2,11 +2,15 @@
 //! as data (`assets/terrain/ground_types.ron`). Each terrain pack names the type it is
 //! (`terrain_blend::BlendLayer::ground`, `terrain_blend::BASE_GROUND`).
 //!
-//! Today a type carries only how it takes a track print (cosmetic terrain marks, view only,
-//! [`crate::track_prints`]): [`PrintResponse`]. A type is a record with one block per consumer, so
-//! the handling a type will drive later (grip, rolling resistance, sinking) joins as a sibling of
+//! A type carries how it takes a track print (cosmetic terrain marks, view only,
+//! [`crate::track_prints`]): [`PrintResponse`]; and the friction coefficient it brings to a
+//! contact ([`GroundType::friction`], `crate::substances` module doc, "Friction"). The terrain is
+//! one collider, so it carries the base pack's ground ([`GroundTypes::terrain_friction`]); the
+//! track law's own ground grip does not read it. A type is a record with one block per consumer,
+//! so the handling a type will drive later (rolling resistance, sinking) joins as a sibling of
 //! [`GroundType::print`] without touching the print's fields; every field is `#[serde(default)]`,
-//! so a file written before a field existed still loads.
+//! so a file written before a field existed still loads, and a consumer refuses a value the file
+//! does not state.
 //!
 //! # A print's depth
 //!
@@ -84,6 +88,10 @@ impl PrintResponse {
 #[serde(default)]
 pub(crate) struct GroundType {
     pub(crate) print: PrintResponse,
+    /// The friction coefficient this ground brings to a contact, dimensionless: one side's value
+    /// ([`crate::substances::PAIR_RULE`] combines it with the other side's). `None` where the file
+    /// states none.
+    pub(crate) friction: Option<f32>,
 }
 
 /// The table, keyed by the name a pack's contract uses.
@@ -102,10 +110,13 @@ const FILE_HEADER: &str = "\
 //   depth_cap_mm         the deepest print this ground takes, mm
 //   darkening            the share of albedo a print takes away, 0..1
 //   roughness_gain       roughness multiplier under a sole; below 1 reads wet
+//   friction             the friction coefficient the ground brings to a contact, one side's
 //
-// Every value is ASSUMED: ordered by the Bekker fits in the ground-stamping note's §2, dirt and
-// gravel raised so a print reads at 10-30 m, then tuned by eye in play (`track_prints::tuning`).
-// The module doc of `src/ground_types.rs` carries the provenance.
+// Every print value is ASSUMED: ordered by the Bekker fits in the ground-stamping note's §2, dirt
+// and gravel raised so a print reads at 10-30 m, then tuned by eye in play (`track_prints::tuning`).
+// The module doc of `src/ground_types.rs` carries the provenance. Every friction is ASSUMED, no
+// source read: gravel, the terrain collider's ground, at Avian's own default 0.5; the others
+// ordered by hand, paving gripping best and mud least.
 ";
 
 impl GroundTypes {
@@ -130,6 +141,18 @@ impl GroundTypes {
     pub(crate) fn load_shipped() -> Self {
         let path = Self::shipped_path();
         Self::load(&path).unwrap_or_else(|err| panic!("the ground-type table: {err}"))
+    }
+
+    /// The friction the terrain collider carries: the base pack's ground
+    /// ([`crate::terrain_blend::BASE_GROUND`]) under the one pair rule. A table that states none
+    /// for it aborts, naming the type (ADR-0011): a terrain without a stated friction would fall
+    /// back to Avian's default.
+    pub(crate) fn terrain_friction(&self) -> avian3d::prelude::Friction {
+        let name = crate::terrain_blend::BASE_GROUND;
+        let friction = self.get(name).friction.unwrap_or_else(|| {
+            panic!("ground type {name:?} states no friction, and the terrain collider is it")
+        });
+        crate::substances::contact_friction(friction)
     }
 
     /// The type named `name`; a pack naming a type the table lacks aborts, naming both.
@@ -206,6 +229,26 @@ mod tests {
                 "{name}: the cap holds any pressure"
             );
         }
+    }
+
+    /// EVERY GROUND STATES ITS FRICTION, IN DOMAIN: the terrain collider carries the base pack's
+    /// ([`GroundTypes::terrain_friction`]), and every pack's ground is a candidate for it, so a type
+    /// without one, or with a negative or non-finite one, fails here before a terrain falls back
+    /// to Avian's default.
+    #[test]
+    fn every_ground_states_its_friction_in_domain() {
+        let table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
+        for (name, ground) in &table.types {
+            let friction = ground
+                .friction
+                .unwrap_or_else(|| panic!("{name} states no friction"));
+            assert!(
+                friction.is_finite() && friction >= 0.0,
+                "{name}: {friction}"
+            );
+        }
+        let terrain = table.terrain_friction();
+        assert_eq!(terrain.combine_rule, crate::substances::PAIR_RULE);
     }
 
     /// A saved table reads back as the table: the owner's tuned values survive the round trip

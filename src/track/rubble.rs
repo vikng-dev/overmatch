@@ -29,8 +29,9 @@
 //!   each sized after the impulses before it: along the normal, the support reaction's impulse
 //!   `load × dt`, at most what stops the piece closing on the belt; along the traction reaction's
 //!   direction, its impulse, at most what stops the piece sliding against the belt surface's
-//!   velocity there and at most μ × that normal impulse (μ the belt's against the piece's
-//!   collider, combined as avian combines a pair). Each bound uses the piece's effective mass
+//!   velocity there and at most μ × that normal impulse (μ the belt's [`belt_friction`] against
+//!   the piece's collider, combined by the one pair rule every contact uses,
+//!   `substances::PAIR_RULE`). Each bound uses the piece's effective mass
 //!   along it at the contact, `1 / (1/m + (r×d)·I⁻¹(r×d))`; the two components couple through
 //!   the inertia, so both scale by one factor until neither passes its bound. Nothing beyond
 //!   that reaches the piece; avian's own contacts resolve what holds it.
@@ -112,6 +113,13 @@ impl RubbleQuery<'_, '_> {
             .copied()
             .unwrap_or(self.default_friction.0)
     }
+}
+
+/// The belt surface's friction against rubble: the track law's own grip coefficient
+/// ([`super::forces::ForceParams::mu`]) as one side of a pair, under the one pair rule, so a
+/// belt–piece contact is the geometric mean of the belt's and the piece's material rows.
+pub(crate) fn belt_friction(params: &super::forces::ForceParams) -> Friction {
+    crate::substances::contact_friction(params.mu)
 }
 
 /// What a dynamic piece's impulses read and write. Pieces lock no axes, so the effective mass
@@ -397,6 +405,7 @@ mod tests {
     use bevy::time::TimeUpdateStrategy;
 
     use super::*;
+    use crate::substances::contact_friction;
     use crate::track::forces::{
         ForceParams, GripElements, SideInput, SideReport, SideState, TravelField, contact_side,
         grip_stiffness,
@@ -581,7 +590,8 @@ mod tests {
             .world_mut()
             .run_system_once(move |rubble: RubbleQuery, mut bodies: Query<PieceData>| {
                 let near = rubble.near(Vec3::new(10.0, 0.0, 0.0), 15.0);
-                let mut pieces = RubbleBodies::gather(&rubble, &near, Friction::new(0.9), &bodies);
+                let mut pieces =
+                    RubbleBodies::gather(&rubble, &near, contact_friction(0.9), &bodies);
                 let pushes = piece_impulses(&mut pieces, &contacts, DT);
                 apply_pushes(&pushes, &mut bodies);
                 pushes
@@ -828,7 +838,7 @@ mod tests {
                     let field = ground();
                     let near = rubble.near(Vec3::new(0.0, h, 0.0), 3.0);
                     let mut pieces =
-                        RubbleBodies::gather(&rubble, &near, Friction::new(0.9), &bodies);
+                        RubbleBodies::gather(&rubble, &near, contact_friction(0.9), &bodies);
                     let report = pad_pass(
                         &RubbleOracle {
                             ground: &field,
@@ -920,7 +930,7 @@ mod tests {
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
                 let field = ground();
                 let near = rubble.near(Vec3::ZERO, 3.0);
-                let pieces = RubbleBodies::gather(&rubble, &near, Friction::new(0.9), &bodies);
+                let pieces = RubbleBodies::gather(&rubble, &near, contact_friction(0.9), &bodies);
                 let pass = |oracle: &dyn Fn(&mut GripElements) -> SideReport| {
                     oracle(&mut GripElements::for_links(25))
                 };
@@ -1018,7 +1028,7 @@ mod tests {
                     bodies: &RubbleBodies::default(),
                 };
                 let near = [far];
-                let pieces = RubbleBodies::gather(&rubble, &near, Friction::new(0.9), &bodies);
+                let pieces = RubbleBodies::gather(&rubble, &near, contact_friction(0.9), &bodies);
                 let forced = RubbleOracle {
                     ground: &field,
                     rubble: &rubble,

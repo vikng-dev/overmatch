@@ -1624,8 +1624,7 @@ pub(crate) mod tests {
     #[test]
     fn a_frictionless_edge_slides_across_flat_terrain_at_speed() {
         use avian3d::prelude::{
-            CoefficientCombine, Friction, LinearVelocity, LockedAxes, PhysicsPlugins, Position,
-            RigidBody, Rotation,
+            LinearVelocity, LockedAxes, PhysicsPlugins, Position, RigidBody, Rotation,
         };
         use bevy::time::TimeUpdateStrategy;
         use std::time::Duration;
@@ -1667,7 +1666,7 @@ pub(crate) mod tests {
             .spawn((
                 RigidBody::Dynamic,
                 Collider::cuboid(2.0 * half.x, 2.0 * half.y, 2.0 * half.z),
-                Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
+                crate::substances::contact_friction(0.0),
                 LockedAxes::ROTATION_LOCKED,
                 Position(Vec3::new(0.3, 0.005 - lowest, -8.0 * SPACING_M - 0.4)),
                 Rotation(pitch),

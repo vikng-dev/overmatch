@@ -176,6 +176,15 @@ pub struct RoadwheelSpec {
     pub side: crate::tank::TrackSide,
 }
 
+/// One collision-proxy node and the substance (`assets/materials/materials.ron`) it is of: the row
+/// whose friction its convex hulls carry from spawn, on the hull or on a launched turret alike.
+#[derive(Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct ColliderSpec {
+    pub node: String,
+    pub substance: String,
+}
+
 /// Which fire input a weapon answers to (design: LMB = the main gun, Spacebar = the MGs). Pure fire
 /// routing — it has *no* bearing on aiming or traverse (servos are weapon-agnostic). The `Primary`
 /// weapon also supplies the rig's main-bore handles (its chain → `Rig.turret`/`gun`/`muzzle`).
@@ -1003,9 +1012,6 @@ pub struct TurretSpec {
     pub mass: f32,
     /// Full box dimensions (x, y, z metres) approximating its angular-inertia distribution.
     pub inertia_extents: (f32, f32, f32),
-    /// The substance (`assets/materials/materials.ron`) the launched turret's collision shapes
-    /// take their friction from; its row must state one.
-    pub substance: String,
 }
 
 /// One model node name per track side.
@@ -1085,10 +1091,11 @@ pub struct TankSpec {
     /// entry the march never meets is an authoring error.
     #[serde(deserialize_with = "unique_volumes")]
     pub volumes: HashMap<String, VolumeSpec>,
-    /// Collision-proxy nodes (convex hull, Vehicle layer), by node name. Explicit, replacing the
-    /// `*_Collider` suffix scan. A proxy is a physics stand-in: its node is never also a key of
-    /// `volumes`, since declared armour is charged by the march and a hull would charge it twice.
-    pub colliders: Vec<String>,
+    /// Collision-proxy nodes (convex hull, Vehicle layer), by node name, each with its substance.
+    /// Explicit, replacing the `*_Collider` suffix scan. A proxy is a physics stand-in: its node is
+    /// never also a key of `volumes`, since declared armour is charged by the march and a hull
+    /// would charge it twice.
+    pub colliders: Vec<ColliderSpec>,
     /// Shadow proxies, by node name. Beyond the tank's caster switch range each one casts the
     /// shadow of the rigid node it is parented under, in place of that node's drawn geometry
     /// (`tank::shadow_proxy`). Never drawn and never armour: a collider listed here keeps its
@@ -1186,7 +1193,7 @@ impl TankSpec {
         references.extend(
             self.colliders
                 .iter()
-                .map(|node| at(NodeRole::Collider, node, "colliders".to_owned())),
+                .map(|collider| at(NodeRole::Collider, &collider.node, "colliders".to_owned())),
         );
         references.extend(
             self.shadow_proxies
@@ -1289,7 +1296,8 @@ impl TankSpec {
             return Err("colliders must declare at least one collision-proxy node".into());
         }
         let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
-        for name in &self.colliders {
+        for collider in &self.colliders {
+            let name = &collider.node;
             if !seen.insert(name.as_str()) {
                 return Err(format!("colliders declares `{name}` twice").into());
             }
@@ -1579,7 +1587,7 @@ mod tests {
 
         // A collision proxy is a physics stand-in, never armour and never an actuator mount, so
         // its node cannot also carry a volume entry or a servo.
-        for collider in &spec.colliders {
+        for collider in spec.colliders.iter().map(|collider| &collider.node) {
             assert!(
                 !spec.volumes.contains_key(collider),
                 "collider `{collider}` is also a ballistic volume"
@@ -1763,7 +1771,7 @@ TankSpec(
     display_name: "Fixture",
     mass: 30_000.0,
     inertia_extents: (3.0, 2.0, 6.0),
-    turret: (mass: 5_000.0, inertia_extents: (2.0, 1.0, 2.0), substance: "RHA"),
+    turret: (mass: 5_000.0, inertia_extents: (2.0, 1.0, 2.0)),
     track: (
         link_count: 80,
         link_mass: 20.0,
@@ -1824,7 +1832,7 @@ TankSpec(
         "Wheel_L_0": (external: true),
         "Wheel_R_0": (external: true),
     },
-    colliders: ["Hull_Collider"],
+    colliders: [(node: "Hull_Collider", substance: "RHA")],
     roadwheels: [
         (node: "Wheel_L_0", side: Left),
         (node: "Wheel_R_0", side: Right),

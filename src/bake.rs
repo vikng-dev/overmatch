@@ -1116,7 +1116,11 @@ pub(crate) fn extract_tank_geometry(
             "re-export the model — this file is not a glb",
         )
     })?;
-    let declared_colliders: HashSet<&str> = spec.colliders.iter().map(String::as_str).collect();
+    let declared_colliders: HashSet<&str> = spec
+        .colliders
+        .iter()
+        .map(|collider| collider.node.as_str())
+        .collect();
     let declared_armour: HashSet<&str> = spec.volumes.keys().map(String::as_str).collect();
 
     // Resolve buffer data: a .glb's buffers are the BIN chunk (`Source::Bin`). A `Source::Uri`
@@ -1238,8 +1242,8 @@ pub(crate) fn extract_tank_geometry(
     // The sim's typed lists, resolved once here (design §8 step 3), each from the spec's explicit
     // declarations. Nothing scans a node name for sim meaning.
     let mut collision_proxies: Vec<usize> = Vec::new();
-    for name in &spec.colliders {
-        collision_proxies.extend(by_name.get(name).copied());
+    for collider in &spec.colliders {
+        collision_proxies.extend(by_name.get(&collider.node).copied());
     }
     let mut roadwheels: Vec<(usize, TrackSide)> = Vec::new();
     for wheel in &spec.roadwheels {
@@ -2366,8 +2370,8 @@ mod tests {
     fn extraction_refuses_a_sheet_that_does_not_validate() {
         let (nodes, spec) = sound_vehicle();
         let spec = spec.replacen(
-            "colliders: [\"Proxy\"]",
-            "colliders: [\"Proxy\", \"Proxy\"]",
+            "colliders: [(node: \"Proxy\", substance: \"RHA\")]",
+            "colliders: [(node: \"Proxy\", substance: \"RHA\"), (node: \"Proxy\", substance: \"RHA\")]",
             1,
         );
         let asset = fixture::write("unvalidated-extraction", &nodes, &spec);

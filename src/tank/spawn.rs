@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 
 use avian3d::prelude::{
-    AngularInertia, CenterOfMass, CoefficientCombine, CollisionLayers, Friction, LayerMask, Mass,
-    NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass,
+    AngularInertia, CenterOfMass, CollisionLayers, Friction, LayerMask, Mass, NoAutoAngularInertia,
+    NoAutoCenterOfMass, NoAutoMass,
 };
 use bevy::asset::LoadState;
 use bevy::ecs::system::SystemParam;
@@ -822,6 +822,7 @@ fn insert_ballistic_volumes(
 fn insert_collision_proxies(
     commands: &mut Commands,
     geometry: &TankGeometry,
+    spec: &TankSpec,
     entity_at: impl Fn(usize) -> Entity,
 ) {
     for &index in &geometry.collision_proxies {
@@ -831,18 +832,34 @@ fn insert_collision_proxies(
             "collision proxy `{}` captured no mesh data",
             node.name
         );
+        let friction = proxy_friction(spec, &node.name);
         for primitive in &node.primitives {
-            spawn_proxy_parts(commands, entity_at(index), &node.name, primitive);
+            spawn_proxy_parts(commands, entity_at(index), &node.name, primitive, friction);
         }
     }
 }
 
-/// One child collider under `parent` per loose part of `primitive`.
+/// The friction collision proxy `node`'s hulls carry: the substance the sheet's `colliders` entry
+/// names. A proxy the sheet does not declare, or a substance stating no friction, is a broken
+/// ship (ADR-0011).
+pub(crate) fn proxy_friction(spec: &TankSpec, node: &str) -> Friction {
+    let collider = spec
+        .colliders
+        .iter()
+        .find(|collider| collider.node == node)
+        .unwrap_or_else(|| panic!("collision proxy `{node}` is not declared in `colliders`"));
+    crate::substances::SubstanceRegistry::shipped_static()
+        .contact_friction(&collider.substance)
+        .unwrap_or_else(|err| panic!("collision proxy `{node}`: {err}"))
+}
+
+/// One child collider under `parent` per loose part of `primitive`, carrying `friction`.
 fn spawn_proxy_parts(
     commands: &mut Commands,
     parent: Entity,
     node_name: &str,
     primitive: &crate::bake::MeshGeometry,
+    friction: Friction,
 ) {
     let colliders = primitive
         .convex_hull_colliders()
@@ -854,10 +871,9 @@ fn spawn_proxy_parts(
             authored_attachment(Transform::IDENTITY),
             collider,
             CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
-            // Penetration backstops ONLY: the analytic belt model owns ALL tangential
-            // ground physics (phase B). Avian's default friction on these hulls would
-            // silently add grip/wall-climb beneath it.
-            Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
+            // Its substance's, like every collider's: the belt model owns the hull's grip
+            // wherever the belts carry the load, and the proxies sit clear of the ground there.
+            friction,
         ));
     }
 }
@@ -963,7 +979,7 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
     insert_servos(commands, geometry, root, &nodes, entity_at);
     insert_weapons(commands, geometry, root, &nodes, entity_at);
     insert_ballistic_volumes(commands, geometry, root, &nodes, entity_at);
-    insert_collision_proxies(commands, geometry, entity_at);
+    insert_collision_proxies(commands, geometry, spec, entity_at);
 
     // --- Wheels: rig stations in name-sorted order (the track view reads their side/pose; the
     // belt force model uses the BAKED rest circles — articulation is view-only).
@@ -1005,17 +1021,11 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
             .insert(crate::ballistics::Envelope(envelope));
     }
     let (tx, ty, tz) = spec.turret.inertia_extents;
-    let friction = crate::substances::SubstanceRegistry::shipped_static()
-        .hard(&spec.turret.substance)
-        .map_err(|err| err.to_string())
-        .and_then(|hard| hard.friction_of(&spec.turret.substance))
-        .unwrap_or_else(|err| panic!("turret substance: {err}"));
     commands.entity(turret).insert((
         Turret,
         TurretBody {
             mass: spec.turret.mass,
             inertia_extents: Vec3::new(tx, ty, tz),
-            friction,
         },
     ));
 
@@ -1084,7 +1094,13 @@ mod proxy_tests {
         let mut world = World::new();
         let node = world.spawn_empty().id();
         let mut commands = world.commands();
-        spawn_proxy_parts(&mut commands, node, "proxy", &primitive);
+        spawn_proxy_parts(
+            &mut commands,
+            node,
+            "proxy",
+            &primitive,
+            crate::substances::contact_friction(0.5),
+        );
         world.flush();
 
         let parents: Vec<Entity> = world

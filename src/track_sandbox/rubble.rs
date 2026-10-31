@@ -160,6 +160,7 @@ pub(super) fn spawn_rubble_yard(
             Transform::IDENTITY,
             collider,
             crate::buildings::element_layers(),
+            kind.chunk_friction(c),
             BuildingChunk(c as u16),
         ));
     }
@@ -214,6 +215,7 @@ pub(super) fn spawn_rubble_yard(
             collider,
             ColliderDensity(structure.chunks[c].material.density),
             piece_layers(),
+            kind.chunk_friction(c),
             Mesh3d(meshes.add(crate::buildings::view::piece_mesh(
                 &kind.asset,
                 layout,

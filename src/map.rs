@@ -180,13 +180,20 @@ impl MapManifest {
 #[serde(deny_unknown_fields)]
 pub(crate) enum Prototype {
     /// A building: an axis-aligned box in the prototype's local frame, `min`/`max` corners around
-    /// the instance origin. A `min.y` below zero is a skirt that sinks into the surface.
-    Building { min: [f32; 3], max: [f32; 3] },
+    /// the instance origin, of `substance` (a hard row of `materials.ron`, whose friction its
+    /// collider carries). A `min.y` below zero is a skirt that sinks into the surface.
+    Building {
+        min: [f32; 3],
+        max: [f32; 3],
+        substance: String,
+    },
     /// A graybox fir: a trunk cylinder over the full `height_m` and a canopy cone
-    /// `canopy_diameter_m` wide ([`crate::scatter`] owns the trunk radius and the canopy's base).
+    /// `canopy_diameter_m` wide ([`crate::scatter`] owns the trunk radius and the canopy's base),
+    /// its trunk of `substance` as a building's box is.
     Fir {
         height_m: f32,
         canopy_diameter_m: f32,
+        substance: String,
     },
     /// A tree of the damage model ([`crate::trees`]): the asset `assets/trees/<asset>/`.
     Tree { asset: String },
@@ -625,7 +632,7 @@ pub(crate) mod tests {
 
     /// A single-building library and a placement that uses it, for the resolution law.
     const HOUSE_LIBRARY: &str =
-        r#"{"house": Building(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0))}"#;
+        r#"{"house": Building(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0), substance: "Brick")}"#;
     const HOUSE_INSTANCE: &str = r#"{"prototype":"house","translation":[0,0,0],
         "rotation":[0,0,0,1],"scale":[1,1,1],"id":"house_0001"}"#;
 
@@ -635,8 +642,8 @@ pub(crate) mod tests {
     /// map happens to place.
     pub(crate) fn mixed_fixture_manifest() -> MapManifest {
         const LIBRARY: &str = r#"{
-            "house": Building(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0)),
-            "fir_box": Fir(height_m: 14.0, canopy_diameter_m: 6.0),
+            "house": Building(min: (-1.0, -0.5, -1.0), max: (1.0, 2.0, 1.0), substance: "Brick"),
+            "fir_box": Fir(height_m: 14.0, canopy_diameter_m: 6.0, substance: "Wood"),
             "fir": Tree(asset: "fir_1"),
             "brick": Structure(asset: "house_1"),
         }"#;
@@ -818,6 +825,7 @@ pub(crate) mod tests {
             Prototype::Building {
                 min: [-1.0, -0.5, -1.0],
                 max: [1.0, 2.0, 1.0],
+                substance: "Brick".to_owned(),
             },
         );
     }

@@ -584,6 +584,7 @@ fn spawn_environment(
             RigidBody::Static,
             crate::terrain_grid::heightfield_collider(&grid),
             CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
+            crate::ground_types::GroundTypes::load_shipped().terrain_friction(),
         ));
         // The render mesh is view-only: windowed compositions have a primary window; the
         // dedicated server (and the headless harness) has none and must not pay for it.
@@ -801,7 +802,8 @@ fn spawn_environment(
 
 /// Spawn a static, unit-cube collision block scaled/posed by `transform` (the Avian idiom: a
 /// `Collider::cuboid(1,1,1)` that the Transform's scale stretches), on the Terrain layer — and
-/// record it in the [`TerrainMap`] block list (the single terrain data source).
+/// record it in the [`TerrainMap`] block list (the single terrain data source). A block is
+/// terrain, so it carries the terrain's friction ([`crate::ground_types::GroundTypes::terrain_friction`]).
 fn spawn_block(
     commands: &mut Commands,
     blocks: &mut Vec<Transform>,
@@ -818,6 +820,7 @@ fn spawn_block(
         RigidBody::Static,
         Collider::cuboid(1.0, 1.0, 1.0),
         CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
+        crate::ground_types::GroundTypes::load_shipped().terrain_friction(),
     ));
 }
 

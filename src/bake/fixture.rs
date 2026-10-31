@@ -176,7 +176,7 @@ pub(super) fn spec_with(
 ) -> String {
     let colliders = colliders
         .iter()
-        .map(|node| format!("\"{node}\""))
+        .map(|node| format!("(node: \"{node}\", substance: \"RHA\")"))
         .collect::<Vec<_>>()
         .join(", ");
     let roadwheels = roadwheels
@@ -200,7 +200,7 @@ TankSpec(
     display_name: \"Fixture\",
     mass: 1.0,
     inertia_extents: (1.0, 1.0, 1.0),
-    turret: (mass: 1.0, inertia_extents: (1.0, 1.0, 1.0), substance: \"RHA\"),
+    turret: (mass: 1.0, inertia_extents: (1.0, 1.0, 1.0)),
     track: (
         link_count: 3,
         link_mass: 1.0,

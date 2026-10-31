@@ -14,8 +14,8 @@
 //! the turret; that hook triggers off `CookedOff` directly.
 
 use avian3d::prelude::{
-    AngularInertia, AngularVelocity, Friction, LinearVelocity, Mass, NoAutoAngularInertia,
-    NoAutoMass, Position, Rotation,
+    AngularInertia, AngularVelocity, LinearVelocity, Mass, NoAutoAngularInertia, NoAutoMass,
+    Position, Rotation,
 };
 use bevy::ecs::query::QueryData;
 use bevy::ecs::system::SystemParam;
@@ -621,8 +621,6 @@ fn launch_turrets_on_cookoff(
         (With<Turret>, Without<LaunchedTurret>),
     >,
     parents: Query<&ChildOf>,
-    children: Query<&Children>,
-    frictions: Query<(), With<Friction>>,
     mut commands: Commands,
 ) {
     for ammo_owner in &cooked_ammo {
@@ -680,15 +678,6 @@ fn launch_turrets_on_cookoff(
                     AngularVelocity(right * 3.0 + up * 1.2),
                     LaunchedTurret,
                 ));
-            // Its collision shapes were made frictionless so the track model owns the hull's grip
-            // (`tank::spawn::spawn_proxy_parts`); a turret off its tracks is a body of its
-            // substance on the ground, and takes that substance's friction under Avian's default
-            // combine rule.
-            for shape in children.iter_descendants(turret) {
-                if frictions.contains(shape) {
-                    commands.entity(shape).insert(Friction::new(body.friction));
-                }
-            }
         }
     }
 }
@@ -843,7 +832,6 @@ mod tests {
                 TurretBody {
                     mass: 1234.0,
                     inertia_extents: extents,
-                    friction: 0.0,
                 },
                 ChildOf(tank),
                 GlobalTransform::default(),
@@ -860,62 +848,22 @@ mod tests {
         );
     }
 
-    /// A LAUNCHED TURRET'S COLLISION SHAPES TAKE ITS MATERIAL'S FRICTION: the proxies are spawned
-    /// frictionless (`tank::spawn::spawn_proxy_parts`) because the track model owns the hull's
-    /// grip, and a turret off its tracks would otherwise slide on any ground without end. Every
-    /// descendant shape that carried a `Friction` takes the body's value, under the default
-    /// combine rule so the ground's coefficient still enters; a shape that carried none (armour)
-    /// gains none. A launch that left the zero in place, or stamped every descendant, fails here.
-    #[test]
-    fn a_launched_turret_s_collision_shapes_take_its_friction() {
-        use super::*;
-        use avian3d::prelude::CoefficientCombine;
-        let mut app = App::new();
-        app.add_systems(Update, launch_turrets_on_cookoff);
-        let tank = app.world_mut().spawn_empty().id();
-        app.world_mut().spawn((VolumeOf(tank), CookedOff));
-        let turret = app
-            .world_mut()
-            .spawn((
-                Turret,
-                TurretBody {
-                    mass: 10.0,
-                    inertia_extents: Vec3::ONE,
-                    friction: 0.45,
-                },
-                ChildOf(tank),
-                GlobalTransform::default(),
-            ))
-            .id();
-        let shape = app
-            .world_mut()
-            .spawn((
-                ChildOf(turret),
-                Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
-            ))
-            .id();
-        let armour = app.world_mut().spawn(ChildOf(turret)).id();
-        app.update();
-        let friction = app.world().get::<Friction>(shape).unwrap();
-        assert_eq!(friction.dynamic_coefficient, 0.45);
-        assert_eq!(friction.combine_rule, CoefficientCombine::Average);
-        assert!(app.world().get::<Friction>(armour).is_none());
-    }
-
-    /// A LAUNCHED TURRET COMES TO REST ON FLAT GROUND, which the zero friction of its proxies
-    /// forbade (the measured symptom: a turret sliding on without end). Two identical turrets
-    /// launch from tanks standing on a wide static floor; one keeps the frictionless shape the
-    /// tank's proxies are spawned with, the other takes the launch's friction. After the flight and
-    /// the landing, the second has stopped and the first is still sliding, so the test fails if the
-    /// launch leaves the zero in place, and the control assertion keeps it from passing vacuously.
+    /// A LAUNCHED TURRET COMES TO REST ON A SLOPE: its collision shapes carry their substance's
+    /// friction from spawn (`tank::spawn::spawn_proxy_parts`), so off its tracks it is a body of
+    /// that substance on the terrain's ground, and the launch changes nothing about its grip. Two
+    /// identical turrets launch from tanks standing on a wide static floor inclined at 20° and
+    /// carrying the terrain's friction; one's shape carries the steel row the tank file names, the
+    /// other's is frictionless. After the flight and the
+    /// landing the first has stopped and the second still slides, so the test fails if a proxy
+    /// carries no friction, and the control keeps it from passing vacuously. The pair is the
+    /// geometric mean of both rows, which must exceed tan 20° ≈ 0.364 (DERIVED) for the rest to
+    /// be possible at all.
     ///
-    /// FIXTURE DATA: a 1000 kg turret, a 0.45 coefficient, 30 s of 16 ms frames.
+    /// FIXTURE DATA: a 1000 kg turret, the RHA row, a 20° slope, 30 s of 16 ms frames.
     #[test]
-    fn a_launched_turret_comes_to_rest_on_flat_ground() {
+    fn a_launched_turret_comes_to_rest_on_a_slope() {
         use super::*;
-        use avian3d::prelude::{
-            CoefficientCombine, Collider, CollisionLayers, LayerMask, PhysicsPlugins, RigidBody,
-        };
+        use avian3d::prelude::{Collider, CollisionLayers, LayerMask, PhysicsPlugins, RigidBody};
         use bevy::time::TimeUpdateStrategy;
         use std::time::Duration;
 
@@ -937,17 +885,26 @@ mod tests {
         app.finish();
         app.cleanup();
 
+        let slope = Quat::from_rotation_x(20f32.to_radians());
+        let ground = crate::ground_types::GroundTypes::load_shipped().terrain_friction();
+        let steel = crate::substances::SubstanceRegistry::shipped_static()
+            .contact_friction("RHA")
+            .unwrap();
+        assert!(steel.combine(ground).dynamic_coefficient > 20f32.to_radians().tan());
         app.world_mut().spawn((
             RigidBody::Static,
             Collider::cuboid(2000.0, 1.0, 2000.0),
-            Transform::from_xyz(0.0, -0.5, 0.0),
+            Transform::from_rotation(slope).with_translation(slope * Vec3::new(0.0, -0.5, 0.0)),
+            ground,
         ));
         let mut turrets = Vec::new();
-        for i in 0..2 {
+        let frictionless = crate::substances::contact_friction(0.0);
+        for (i, friction) in [steel, frictionless].into_iter().enumerate() {
             let tank = app
                 .world_mut()
                 .spawn((
-                    Transform::from_xyz(100.0 * i as f32, 1.0, 0.0),
+                    Transform::from_rotation(slope)
+                        .with_translation(slope * Vec3::new(100.0 * i as f32, 1.0, 0.0)),
                     RigidBody::Static,
                 ))
                 .id();
@@ -958,22 +915,18 @@ mod tests {
                     TurretBody {
                         mass: 1000.0,
                         inertia_extents: Vec3::new(2.0, 1.0, 2.0),
-                        friction: 0.45,
                     },
                     Transform::from_xyz(0.0, 0.5, 0.0),
                     ChildOf(tank),
                 ))
                 .id();
-            let shape = app
-                .world_mut()
-                .spawn((
-                    ChildOf(turret),
-                    Collider::cuboid(2.0, 1.0, 2.0),
-                    CollisionLayers::new([crate::Layer::Vehicle], LayerMask::ALL),
-                    Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
-                ))
-                .id();
-            turrets.push((tank, turret, shape));
+            app.world_mut().spawn((
+                ChildOf(turret),
+                Collider::cuboid(2.0, 1.0, 2.0),
+                CollisionLayers::new([crate::Layer::Vehicle], LayerMask::ALL),
+                friction,
+            ));
+            turrets.push((tank, turret));
         }
         for _ in 0..4 {
             app.update();
@@ -981,20 +934,19 @@ mod tests {
         for &(tank, ..) in &turrets {
             app.world_mut().spawn((VolumeOf(tank), CookedOff));
         }
-        app.update();
-        // The first turret stands for a launch that left the proxies' zero in place.
-        app.world_mut()
-            .entity_mut(turrets[0].2)
-            .insert(Friction::ZERO.with_combine_rule(CoefficientCombine::Min));
         for _ in 0..1900 {
             app.update();
         }
         let speed = |app: &App, turret: Entity| {
-            let v = app.world().get::<LinearVelocity>(turret).unwrap().0;
-            Vec3::new(v.x, 0.0, v.z).length()
+            app.world()
+                .get::<LinearVelocity>(turret)
+                .unwrap()
+                .0
+                .length()
         };
-        let control = speed(&app, turrets[0].1);
-        let launched = speed(&app, turrets[1].1);
+        let launched = speed(&app, turrets[0].1);
+        let control = speed(&app, turrets[1].1);
+        println!("launched turret on 20°: steel {launched} m/s, frictionless {control} m/s");
         assert!(control > 0.5, "the control must still slide, got {control}");
         assert!(
             launched < 0.05,
@@ -1066,7 +1018,6 @@ mod tests {
                     TurretBody {
                         mass: 1000.0,
                         inertia_extents: Vec3::ONE,
-                        friction: 0.0,
                     },
                     ring,
                     ChildOf(tank),

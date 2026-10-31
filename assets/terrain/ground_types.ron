@@ -5,10 +5,13 @@
 //   depth_cap_mm         the deepest print this ground takes, mm
 //   darkening            the share of albedo a print takes away, 0..1
 //   roughness_gain       roughness multiplier under a sole; below 1 reads wet
+//   friction             the friction coefficient the ground brings to a contact, one side's
 //
-// Every value is ASSUMED: ordered by the Bekker fits in the ground-stamping note's §2, dirt and
-// gravel raised so a print reads at 10-30 m, then tuned by eye in play (`track_prints::tuning`).
-// The module doc of `src/ground_types.rs` carries the provenance.
+// Every print value is ASSUMED: ordered by the Bekker fits in the ground-stamping note's §2, dirt
+// and gravel raised so a print reads at 10-30 m, then tuned by eye in play (`track_prints::tuning`).
+// The module doc of `src/ground_types.rs` carries the provenance. Every friction is ASSUMED, no
+// source read: gravel, the terrain collider's ground, at Avian's own default 0.5; the others
+// ordered by hand, paving gripping best and mud least.
 (
     types: {
         "concrete": (
@@ -18,6 +21,7 @@
                 darkening: 0.05,
                 roughness_gain: 1.0,
             ),
+            friction: Some(0.6),
         ),
         "dirt": (
             print: (
@@ -26,6 +30,7 @@
                 darkening: 0.2,
                 roughness_gain: 0.9,
             ),
+            friction: Some(0.5),
         ),
         "gravel": (
             print: (
@@ -34,6 +39,7 @@
                 darkening: 0.2,
                 roughness_gain: 1.0,
             ),
+            friction: Some(0.5),
         ),
         "mud": (
             print: (
@@ -42,6 +48,7 @@
                 darkening: 0.3,
                 roughness_gain: 0.6,
             ),
+            friction: Some(0.3),
         ),
         "sand": (
             print: (
@@ -50,6 +57,7 @@
                 darkening: 0.12,
                 roughness_gain: 0.9,
             ),
+            friction: Some(0.4),
         ),
     },
 )

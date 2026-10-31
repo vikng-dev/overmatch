@@ -207,7 +207,9 @@ pub(super) fn chain_and_tier(
             chain.push(name.as_str().to_owned());
         }
     }
-    let proxy = chain.iter().any(|name| spec.colliders.contains(name));
+    let proxy = chain
+        .iter()
+        .any(|name| spec.colliders.iter().any(|collider| collider.node == *name));
     let tier = Tier::of(material, &chain, &spec.volumes);
     (chain, tier, proxy)
 }

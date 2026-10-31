@@ -34,10 +34,9 @@
 //! identically.
 
 use avian3d::prelude::{
-    AngularInertia, AngularVelocity, CoefficientCombine, Collider, CollisionLayers, Forces,
-    Friction, LayerMask, LinearVelocity, Mass, NoAutoAngularInertia, NoAutoCenterOfMass,
-    NoAutoMass, Physics, PhysicsDebugPlugin, PhysicsGizmos, PhysicsTime, ReadRigidBodyForces,
-    RigidBody, WriteRigidBodyForces,
+    AngularInertia, AngularVelocity, Collider, CollisionLayers, Forces, LayerMask, LinearVelocity,
+    Mass, NoAutoAngularInertia, NoAutoCenterOfMass, NoAutoMass, Physics, PhysicsDebugPlugin,
+    PhysicsGizmos, PhysicsTime, ReadRigidBodyForces, RigidBody, WriteRigidBodyForces,
 };
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
@@ -295,8 +294,8 @@ pub(crate) struct Hull;
 
 /// The RED hard-stop collider for one side — the suspension's mechanical backstop. One convex-hull
 /// prism per side, extruded from [`RigGeom::hard_stop_polyline`] across the true shoe faces, hung on
-/// the hull. It is a PURE penetration stop (frictionless; the belt owns every tangential force) that
-/// nothing may cross once the springs bottom on the bump-stop; at rest it clears flat ground by the
+/// the hull. It is a penetration stop of the track steel it stands in for (its friction is that
+/// row's) that nothing may cross once the springs bottom on the bump-stop; at rest it clears flat ground by the
 /// bump-stop reserve and touches nothing. Marked so [`refresh_hard_stops`] can despawn and rebuild it
 /// whenever a retune moves the geometry it was cut from.
 #[derive(Component)]
@@ -1000,6 +999,8 @@ fn spawn_environment(
     // Every block also lands in the analytic terrain field (the belt's oracle) — colliders and
     // field are built from the same transforms, so the two representations cannot drift.
     let mut field: Vec<TerrainBlock> = Vec::new();
+    // Every block is terrain, so each carries the game terrain's friction.
+    let ground_friction = crate::ground_types::GroundTypes::load_shipped().terrain_friction();
 
     let block = |commands: &mut Commands,
                  field: &mut Vec<TerrainBlock>,
@@ -1017,6 +1018,7 @@ fn spawn_environment(
             RigidBody::Static,
             Collider::cuboid(1.0, 1.0, 1.0),
             CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
+            ground_friction,
         ));
     };
     // A ground slab spanning z_hi..z_lo (z_hi > z_lo), top face at y=0.
@@ -1297,14 +1299,6 @@ fn build_rig(
             Visibility::default(),
             crate::eased_dynamic_body(),
             CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
-            // The backstop colliders are *penetration stops only* — ALL tangential surface physics
-            // (traction, grinding-climb, skid) belongs to the belt. Avian colliders default to
-            // μ = 0.5, which silently made them frictional surfaces: pressed against a trench wall,
-            // the collider contact dragged *down* with 0.5·N exactly as the belt tried to grind up
-            // it, locking the climb (the harder the tracks pressed, the harder it dragged). Zero
-            // friction with `Min` combine (outranks the terrain's default `Average`) so the combined
-            // contact is frictionless regardless of terrain material.
-            Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
             // Mass properties are authored, not derived from the colliders (`NoAuto*`), exactly as
             // the game does: the spec's combat mass in the spec's inertia box.
             Mass(spec.mass),
@@ -1363,8 +1357,8 @@ fn build_rig(
                             Transform::from_translation(node.root_position)
                                 .with_rotation(node.root_rotation),
                             CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
-                            // Frictionless, like every backstop here — see the hull comment above.
-                            Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
+                            // Its substance's, as the game's proxies carry.
+                            crate::tank::proxy_friction(spec, &node.name),
                         ));
                     }
                 }
@@ -1514,8 +1508,11 @@ fn hard_stop_collider(geom: &RigGeom, side: Side, params: &SuspensionParams) -> 
 
 /// Spawn both sides' red hard-stop colliders as children of `hull`. Shared by [`build_rig`] (initial
 /// spawn) and [`refresh_hard_stops`] (rebuild on retune), so the two can never cut the prism from the
-/// geometry two different ways. Frictionless + `Layer::Vehicle` exactly like the authored proxies and
-/// the drive-wheel backstops — a pure penetration stop; the belt owns all tangential physics.
+/// geometry two different ways. `Layer::Vehicle` like the authored proxies, and the friction of the
+/// track steel it stands in for.
+/// The `materials.ron` row the hard stop is of: the track's shoe steel it stands in for.
+const HARD_STOP_SUBSTANCE: &str = "TrackSteel";
+
 fn spawn_hard_stops(
     commands: &mut Commands,
     hull: Entity,
@@ -1535,7 +1532,9 @@ fn spawn_hard_stops(
             // baked root-relative transform).
             Transform::IDENTITY,
             CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
-            Friction::ZERO.with_combine_rule(CoefficientCombine::Min),
+            crate::substances::SubstanceRegistry::shipped_static()
+                .contact_friction(HARD_STOP_SUBSTANCE)
+                .unwrap_or_else(|err| panic!("rig: the hard stop's substance: {err}")),
             ChildOf(hull),
         ));
     }

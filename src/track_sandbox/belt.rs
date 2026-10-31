@@ -157,7 +157,7 @@ pub(super) fn apply_belt_support_field(
     let mut pieces = RubbleBodies::gather(
         &rubble,
         &near,
-        avian3d::prelude::Friction::new(params.mu),
+        crate::track::rubble::belt_friction(&params),
         &bodies,
     );
     let oracle = super::rubble::oracle(&field, &rubble, &near, &pieces);

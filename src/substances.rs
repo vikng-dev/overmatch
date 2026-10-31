@@ -48,12 +48,30 @@
 //!
 //! FAIL-LOUD, NO DEFAULTS (ADR-0011, and §13.1's defect class): an unknown substance name is a hard
 //! error naming the name, never a fallback; a malformed entry is refused at parse, naming the entry.
+//!
+//! # Friction
+//!
+//! A row's `friction` is one side's coefficient, a material truth: every collider that can touch
+//! another carries its substance's (or its ground type's, [`crate::ground_types`]) through
+//! [`contact_friction`], and a pair's coefficient is the one rule, the geometric mean `√(μa·μb)`
+//! (Box2D's mixing). No body carries a rule of its own, so Avian's combine-rule priority never
+//! picks a winner: both sides always state [`PAIR_RULE`].
 
 use serde::Deserialize;
 use serde::de::{self, MapAccess, Visitor};
 use std::collections::BTreeMap;
 
 use crate::provenance::Sourced;
+
+/// The one rule every contact pair combines its two coefficients by (module doc, "Friction").
+pub(crate) const PAIR_RULE: avian3d::prelude::CoefficientCombine =
+    avian3d::prelude::CoefficientCombine::GeometricMean;
+
+/// The friction a collider whose surface has the dynamic coefficient `coefficient` carries: that
+/// value for static and dynamic friction alike, under [`PAIR_RULE`].
+pub(crate) fn contact_friction(coefficient: f32) -> avian3d::prelude::Friction {
+    avian3d::prelude::Friction::new(coefficient).with_combine_rule(PAIR_RULE)
+}
 
 /// The shipped registry, embedded so the walk never depends on asset-server timing (the same reason
 /// [`crate::bake`] embeds the Tiger spec).
@@ -210,10 +228,9 @@ pub struct HardSubstance {
     /// A non-metal's bulk facts, or `None` where none are sourced. Never stated beside
     /// [`Self::facts`] (checked at parse).
     pub bulk: Option<BulkFacts>,
-    /// The dynamic friction coefficient this substance brings to a contact, dimensionless, or
-    /// `None` where none is stated. Avian combines the two sides of a pair under its rule, so this
-    /// is one side's value, not the pair's. Read by every body that rests on the ground by
-    /// contact: a loose building piece, a launched turret.
+    /// The friction coefficient this substance brings to a contact, dimensionless, or `None` where
+    /// none is stated: one side's value, which [`PAIR_RULE`] combines with the other side's. Read
+    /// by every collider of this substance that can touch another ([`Self::contact_friction`]).
     pub friction: Option<f32>,
     /// The facts a round's burst block reads where the substance is a burst core too, or `None`.
     /// The walk never reads them.
@@ -230,11 +247,12 @@ impl HardSubstance {
         }
     }
 
-    /// [`Self::friction`], or an error naming `name` where the row states none: for a body whose
-    /// contact must not fall back to Avian's default.
-    pub fn friction_of(&self, name: &str) -> Result<f32, String> {
-        self.friction.ok_or_else(|| {
-            format!("substance {name:?} states no friction, and this body rests on it by contact")
+    /// The friction a collider of this substance (named `name`) carries ([`contact_friction`]), or
+    /// an error naming `name` where the row states none: a collider that can touch another never
+    /// falls back to Avian's default.
+    pub fn contact_friction(&self, name: &str) -> Result<avian3d::prelude::Friction, String> {
+        self.friction.map(contact_friction).ok_or_else(|| {
+            format!("substance {name:?} states no friction, and a collider of it touches others")
         })
     }
 
@@ -749,6 +767,14 @@ impl SubstanceRegistry {
         })
     }
 
+    /// The friction a collider of the hard substance `name` carries
+    /// ([`HardSubstance::contact_friction`]); the error names what is missing.
+    pub fn contact_friction(&self, name: &str) -> Result<avian3d::prelude::Friction, String> {
+        self.hard(name)
+            .map_err(|err| err.to_string())
+            .and_then(|hard| hard.contact_friction(name))
+    }
+
     /// The hard substance named `name` — hard error on an unknown name, a witness or an unworn
     /// substance.
     pub fn hard(&self, name: &str) -> Result<HardSubstance, SubstanceError> {
@@ -906,10 +932,10 @@ mod tests {
         }
     }
 
-    /// A ROW'S FRICTION IS OPTIONAL AND IN DOMAIN: absent reads as `None` (and `friction_of`
-    /// refuses it, naming the row, for a body that must not fall back to Avian's default), a stated
-    /// value is carried, and a negative or non-finite one is refused. The launched turret and the
-    /// loose building pieces read it.
+    /// A ROW'S FRICTION IS OPTIONAL AND IN DOMAIN: absent reads as `None` (and `contact_friction`
+    /// refuses it, naming the row, for a collider that must not fall back to Avian's default), a
+    /// stated value is carried under the one pair rule, and a negative or non-finite one is
+    /// refused. Every collider of a substance that touches others reads it.
     #[test]
     fn a_rows_friction_is_optional_and_in_domain() {
         let row = |extra: &str| {
@@ -922,14 +948,17 @@ mod tests {
         assert!(
             bare.hard("Clay")
                 .unwrap()
-                .friction_of("Clay")
+                .contact_friction("Clay")
                 .unwrap_err()
                 .contains("Clay")
         );
         let stated =
             SubstanceRegistry::from_ron(&row(r#", friction: Some((0.7, Tuned("fixture")))"#))
                 .unwrap();
-        assert_eq!(stated.hard("Clay").unwrap().friction_of("Clay"), Ok(0.7));
+        assert_eq!(
+            stated.hard("Clay").unwrap().contact_friction("Clay"),
+            Ok(avian3d::prelude::Friction::new(0.7).with_combine_rule(PAIR_RULE))
+        );
         for bad in ["-0.1", "inf"] {
             assert!(
                 SubstanceRegistry::from_ron(&row(&format!(

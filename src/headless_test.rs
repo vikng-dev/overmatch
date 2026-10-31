@@ -1727,6 +1727,7 @@ fn forest_tick_cost_bed() {
                 *prototype = Prototype::Fir {
                     height_m,
                     canopy_diameter_m,
+                    substance: "Wood".to_owned(),
                 };
                 k += 1;
             }
@@ -2260,4 +2261,100 @@ fn a_server_composition_builds_no_track_prints() {
         !crate::track_prints::composed(app.world()),
         "the server composition built track prints",
     );
+}
+
+/// EVERY COLLIDER THAT CAN TOUCH ANOTHER CARRIES ITS MATERIAL'S FRICTION UNDER THE ONE RULE, in
+/// the game's physics (game state only): on the shipped map, headless, each contact-capable
+/// collider (a filter that admits some layer) resolves, as Avian's narrow phase resolves it (its
+/// own `Friction`, else its body's, else `DefaultFriction`), to its material's row under
+/// `substances::PAIR_RULE`. The material is found by class, never by name: a ballistic volume's
+/// substance, a vehicle proxy's `colliders` entry, a graybox prototype's substance, and for the
+/// terrain the base ground type. A collider of no class, one falling back to Avian's default, or
+/// one under another rule (a frictionless `Min` or a `Max`, either of which makes a pair's value
+/// one side's) fails here, naming it.
+#[test]
+fn every_collider_carries_its_materials_friction_under_the_one_rule() {
+    use crate::ballistics::BallisticVolume;
+    use crate::map::Prototype;
+    use crate::scatter::{MapInstance, ScatterProxy};
+    use crate::substances::{PAIR_RULE, SubstanceRegistry};
+    use avian3d::prelude::{
+        Collider, ColliderOf, CollisionLayers, DefaultFriction, Friction, LayerMask,
+    };
+
+    let mut app = booted_sim_on(Some(crate::terrain_grid::tests::shipped_grid()));
+    let registry = SubstanceRegistry::shipped_static();
+    let terrain = crate::ground_types::GroundTypes::load_shipped().terrain_friction();
+    let spec = app
+        .world()
+        .resource::<crate::bake::TankBlueprint>()
+        .spec
+        .clone();
+    let manifest = app.world().resource::<crate::map::MapManifest>().clone();
+    let default = app.world().resource::<DefaultFriction>().0;
+    let world = app.world_mut();
+    let mut colliders = world.query_filtered::<(
+        Entity,
+        &CollisionLayers,
+        Option<&Friction>,
+        Option<&ColliderOf>,
+        Option<&BallisticVolume>,
+        Option<&ChildOf>,
+        Has<ScatterProxy>,
+        Option<&MapInstance>,
+    ), With<Collider>>();
+    let rows: Vec<_> = colliders
+        .iter(world)
+        .map(|(e, layers, own, of, volume, parent, scatter, instance)| {
+            (
+                e,
+                *layers,
+                own.copied(),
+                of.map(|of| of.body),
+                volume.map(|v| v.substance.clone()),
+                parent.map(ChildOf::parent),
+                scatter,
+                instance.map(|i| i.id.clone()),
+            )
+        })
+        .collect();
+    let mut checked = 0;
+    for (collider, layers, own, body, substance, parent, scatter, instance) in rows {
+        if layers.filters == LayerMask::NONE {
+            continue;
+        }
+        let resolved = own
+            .or_else(|| body.and_then(|body| world.get::<Friction>(body).copied()))
+            .unwrap_or(default);
+        let name = world.get::<Name>(collider).map(|n| n.as_str().to_owned());
+        let expected = if let Some(substance) = substance {
+            registry.contact_friction(&substance).unwrap()
+        } else if scatter {
+            let id = instance.expect("a scatter proxy carries its instance");
+            let record = manifest.instances.iter().find(|i| i.id == id).unwrap();
+            match &manifest.prototypes[&record.prototype] {
+                Prototype::Building { substance, .. } | Prototype::Fir { substance, .. } => {
+                    registry.contact_friction(substance).unwrap()
+                }
+                other => panic!("a scatter proxy of {other:?}"),
+            }
+        } else if layers.memberships.has_all(crate::Layer::Vehicle) {
+            let node = parent
+                .and_then(|p| world.get::<Name>(p))
+                .expect("a proxy hull hangs under its named node");
+            crate::tank::proxy_friction(&spec, node.as_str())
+        } else if layers.memberships.has_all(crate::Layer::Terrain) {
+            terrain
+        } else {
+            panic!("collider {collider} ({name:?}, {layers:?}) is of no material class");
+        };
+        assert_eq!(
+            resolved, expected,
+            "collider {collider} ({name:?}) carries {resolved:?}, its material states {expected:?}"
+        );
+        assert_eq!(resolved.combine_rule, PAIR_RULE);
+        checked += 1;
+    }
+    assert!(checked > 0, "the shipped map spawned no contact collider");
+    println!("{checked} contact colliders carry their material's friction");
 }

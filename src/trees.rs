@@ -134,6 +134,8 @@ pub(crate) struct TreeKind {
     r_tip_m: f32,
     pub(crate) material: VolumeMaterial,
     pub(crate) substance: String,
+    /// The friction its segments carry: the substance's (`substances::HardSubstance::contact_friction`).
+    pub(crate) friction: avian3d::prelude::Friction,
     pub(crate) fell_k: f32,
     /// HP points per square metre of a segment's mid-height cross-section
     /// ([`TreeBody::segment_hp`]).
@@ -180,6 +182,9 @@ impl TreeKind {
         }
         let material = VolumeMaterial::of(registry, &wood.substance)
             .map_err(|err| format!("{WOOD_FILE} substance: {err}"))?;
+        let friction = registry
+            .contact_friction(&wood.substance)
+            .map_err(|err| format!("{WOOD_FILE} substance: {err}"))?;
         let (fell_k, hp_per_m2) = (wood.fell_k.0, wood.hp_per_m2.0);
         for (name, value) in [("fell_k", fell_k), ("hp_per_m2", hp_per_m2)] {
             if !positive(value) {
@@ -192,6 +197,7 @@ impl TreeKind {
             r_tip_m,
             material,
             substance: wood.substance.clone(),
+            friction,
             fell_k,
             hp_per_m2,
             dbh_m: 0.0,
@@ -908,6 +914,7 @@ pub(crate) fn spawn(
             Transform::from_xyz(0.0, bottom, 0.0),
             collider,
             standing_layers(),
+            kind.friction,
             BallisticVolume {
                 material: kind.material,
                 substance: kind.substance.clone(),
