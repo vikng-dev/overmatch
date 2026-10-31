@@ -30,6 +30,26 @@ describe("join-or-create", () => {
 		expect((await ticket(b)).key).toBe(s.key);
 	});
 
+	it("reserves the early-access capacity before the first heartbeat, then sends overflow to a new server", async () => {
+		const req = { version: V, locations: ["Paris"], pings: {} };
+		const tickets: string[] = [];
+		const capacity = 30; // ASSUMED early-access player limit chosen in #220.
+		for (let i = 0; i < capacity; i++) tickets.push(await join(req));
+		expect(edgegap.count("POST", "/v1/deploy")).toBe(1);
+		expect(edgegap.env(edgegap.deployment(0), "OVERMATCH_CAPACITY")).toBe(String(capacity));
+		expect(await registry(V).snapshot()).toEqual([
+			expect.objectContaining({ state: "starting", players: 0, capacity, server_state: null }),
+		]);
+
+		const overflow = await join(req);
+		expect(edgegap.count("POST", "/v1/deploy")).toBe(2);
+		const first = launched(0);
+		edgegap.ready(edgegap.deployment(0));
+		expect((await heartbeat(first.id, first.secret, { players: 0, capacity, state: "open" })).status).toBe(204);
+		for (const t of tickets) expect((await ticket(t)).key).toBe(first.key);
+		expect(await ticket(overflow)).toEqual({ state: "starting" });
+	});
+
 	it("starts in the lowest-ping selected location, with the city filter and OVERMATCH_* env", async () => {
 		await join({ version: V, locations: ["Mumbai", "Singapore", "Paris"], pings: { Mumbai: 144, Singapore: 45, Paris: 228 } });
 		const d = edgegap.deployment(0);

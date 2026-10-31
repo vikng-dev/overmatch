@@ -38,7 +38,7 @@
 		"EDGEGAP_API": "https://api.edgegap.com",
 		"EDGEGAP_APP": "Overmatch",
 		"EDGEGAP_PORT_NAME": "game",
-		"CAPACITY": "10",
+		"CAPACITY": "30",
 		"HEARTBEAT_INTERVAL_S": "5",
 		// Three missed heartbeats.
 		"HEARTBEAT_DEADLINE_S": "15",

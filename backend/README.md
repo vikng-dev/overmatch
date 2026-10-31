@@ -113,6 +113,13 @@ closed: it receives no new tickets, stays registered while heartbeats continue, 
 `open` for the next fill-up. `closing` means the server has decided to exit and accepts no joins.
 The Worker must accept `closed` before game servers start reporting it (#240).
 
+The Worker's early-access `CAPACITY` is 30 (ASSUMED player limit chosen in #220), as in
+`contract/heartbeat.closed.request.json`. `contract/server-env.json` and
+`contract/heartbeat.request.json` retain capacity 10 (fixture data): the unchanged Rust
+`hosting::tests::the_contract_environment_parses_into_hosted_mode` and
+`hosting::tests::heartbeat_and_end_requests_match_the_contract` consume those examples.
+Deployment capacity comes from `CAPACITY`, not these compatibility fixtures.
+
 ## Configuration
 
 Tunables are `vars` in `wrangler.jsonc` (capacity, heartbeat interval and deadline, start deadline,
