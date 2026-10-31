@@ -380,6 +380,12 @@ pub struct WeaponSpec {
     pub load: Requirement,
 }
 
+/// Whether `seconds` is a weapon delay the fire gate can count in ticks: finite and not negative
+/// (`Duration::from_secs_f32` in `shooting::duration_ticks` panics on anything else).
+fn duration(seconds: f32) -> bool {
+    seconds.is_finite() && seconds >= 0.0
+}
+
 /// The most rounds one weapon can list: its round index travels as a `u8`.
 pub(crate) const MAX_WEAPON_ROUNDS: usize = u8::MAX as usize + 1;
 
@@ -457,14 +463,29 @@ impl WeaponSpec {
                      barrel's stroke"
                 ));
             }
+            // The live spring integrates all three every tick (`shooting::apply_recoil`): a kick of
+            // zero is a recoiling barrel that never moves (omit `barrel` instead), no stiffness
+            // never returns it to battery, and a NaN in any of them is a NaN barrel pose.
+            for (field, value, floor_is_legal) in [
+                ("kick", recoil.kick, false),
+                ("stiffness", recoil.stiffness, false),
+                ("damping", recoil.damping, true),
+            ] {
+                if !value.is_finite() || value < 0.0 || (value == 0.0 && !floor_is_legal) {
+                    let domain = if floor_is_legal { ">= 0" } else { "> 0" };
+                    return Err(format!(
+                        "recoil.{field} must be finite and {domain} (got {value})"
+                    ));
+                }
+            }
         }
         let cycle = self.fire_cycle()?;
         self.resolved_rounds().map_err(|err| err.to_string())?;
         match cycle {
             FireCycle::Single { reload_secs } => {
-                if reload_secs < 0.0 {
+                if !duration(reload_secs) {
                     return Err(format!(
-                        "Single.reload_secs must be >= 0 (got {reload_secs})"
+                        "Single.reload_secs must be a finite duration >= 0 s (got {reload_secs})"
                     ));
                 }
             }
@@ -482,9 +503,10 @@ impl WeaponSpec {
                             .into(),
                     );
                 }
-                if belt_swap_secs < 0.0 {
+                if !duration(belt_swap_secs) {
                     return Err(format!(
-                        "Automatic.belt_swap_secs must be >= 0 (got {belt_swap_secs})"
+                        "Automatic.belt_swap_secs must be a finite duration >= 0 s (got \
+                         {belt_swap_secs})"
                     ));
                 }
             }
@@ -1136,6 +1158,10 @@ impl TankSpec {
     ///   `tracer_every` on a single-shot mount, none on a belt): `fire_cycle` refuses the pair.
     /// - A recoil stop (`RecoilSpec::max_length`) that is not finite and positive: a NaN stop
     ///   compares false and never holds the barrel, and one at or ahead of battery leaves no stroke.
+    /// - A recoil spring the live barrel cannot integrate: a kick or stiffness that is not finite
+    ///   and positive, a damping that is not finite and non-negative.
+    /// - A reload or belt swap that is no duration (negative or not finite).
+    /// - Hull or turret body data (mass, inertia extents) that is not finite and positive.
     ///
     /// The gun's own numbers are the gun registry's to refuse (`crate::guns`): a cyclic rate that is
     /// not finite and positive never loads, so `60 / cyclic_rpm` is always a real interval here.
@@ -1212,7 +1238,13 @@ impl TankSpec {
             return Err("track.sprocket.teeth must be > 0".into());
         }
         let turret = &self.turret;
+        // The hull's and the turret's body data: `Mass` and the cuboid `AngularInertia` are built
+        // from these at spawn, and a zero or NaN one is a body the solver cannot integrate.
         for (what, value) in [
+            ("mass", self.mass),
+            ("inertia_extents.0", self.inertia_extents.0),
+            ("inertia_extents.1", self.inertia_extents.1),
+            ("inertia_extents.2", self.inertia_extents.2),
             ("turret.mass", turret.mass),
             ("turret.inertia_extents.0", turret.inertia_extents.0),
             ("turret.inertia_extents.1", turret.inertia_extents.1),
@@ -2126,15 +2158,32 @@ TankSpec(
             "{err}"
         );
 
-        // Negative single-shot reload.
-        let err = with_weapon("NegReload", FireMode::Single { reload_secs: -0.5 })
+        // A single-shot reload or a belt swap that is no duration: `shooting::duration_ticks`
+        // panics in play on each, so the sheet refuses them by name.
+        for secs in [-0.5, f32::NAN, f32::INFINITY] {
+            let err = with_weapon("BadReload", FireMode::Single { reload_secs: secs })
+                .validate()
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("BadReload") && err.contains("reload_secs"),
+                "{secs}: {err}"
+            );
+            let err = with_weapon(
+                "BadSwap",
+                FireMode::Automatic {
+                    belt_size: 150,
+                    belt_swap_secs: secs,
+                },
+            )
             .validate()
             .unwrap_err()
             .to_string();
-        assert!(
-            err.contains("NegReload") && err.contains("reload_secs"),
-            "{err}"
-        );
+            assert!(
+                err.contains("BadSwap") && err.contains("belt_swap_secs"),
+                "{secs}: {err}"
+            );
+        }
 
         // Track: a non-positive link_mass parses but yields zero-inverse-mass chain constraints —
         // validate() rejects it and names the field (the one surviving track dimension check now
@@ -2205,6 +2254,77 @@ TankSpec(
             );
         }
         assert!(fixture().validate().is_ok(), "the fixture's own stop loads");
+    }
+
+    /// `validate()` refuses a recoil spring the live barrel cannot integrate, naming the weapon and
+    /// the field: `shooting::apply_recoil` steps kick, stiffness and damping every tick, so a NaN is
+    /// a NaN barrel pose, a zero kick or stiffness a barrel that never moves or never returns. A
+    /// zero damping is an undamped spring and loads.
+    #[test]
+    fn validate_rejects_a_recoil_spring_it_cannot_integrate() {
+        type Mutate = fn(&mut RecoilSpec, f32);
+        let fields: [(&str, Mutate); 3] = [
+            ("kick", |recoil, value| recoil.kick = value),
+            ("stiffness", |recoil, value| recoil.stiffness = value),
+            ("damping", |recoil, value| recoil.damping = value),
+        ];
+        for (field, mutate) in fields {
+            let bad: &[f32] = if field == "damping" {
+                &[-1.0, f32::NAN, f32::INFINITY]
+            } else {
+                &[0.0, -1.0, f32::NAN, f32::INFINITY]
+            };
+            for &value in bad {
+                let mut spec = fixture();
+                mutate(
+                    spec.weapons
+                        .get_mut("Cannon")
+                        .and_then(|weapon| weapon.recoil.as_mut())
+                        .expect("the fixture's cannon recoils"),
+                    value,
+                );
+                let err = spec.validate().unwrap_err().to_string();
+                assert!(
+                    err.contains("Cannon") && err.contains(&format!("recoil.{field}")),
+                    "{field} {value}: {err}"
+                );
+            }
+        }
+        let mut undamped = fixture();
+        undamped
+            .weapons
+            .get_mut("Cannon")
+            .and_then(|weapon| weapon.recoil.as_mut())
+            .expect("the fixture's cannon recoils")
+            .damping = 0.0;
+        assert!(undamped.validate().is_ok(), "an undamped spring loads");
+    }
+
+    /// `validate()` refuses hull body data the solver cannot integrate, naming the field: `Mass`
+    /// and the cuboid `AngularInertia` are built from `mass` and `inertia_extents` at spawn.
+    #[test]
+    fn validate_rejects_hull_body_data_that_is_not_positive() {
+        type Mutate = fn(&mut TankSpec, f32);
+        let fields: [(&str, Mutate); 4] = [
+            ("mass", |spec, value| spec.mass = value),
+            ("inertia_extents.0", |spec, value| {
+                spec.inertia_extents.0 = value
+            }),
+            ("inertia_extents.1", |spec, value| {
+                spec.inertia_extents.1 = value
+            }),
+            ("inertia_extents.2", |spec, value| {
+                spec.inertia_extents.2 = value
+            }),
+        ];
+        for (field, mutate) in fields {
+            for value in [0.0, -1.0, f32::NAN, f32::INFINITY] {
+                let mut spec = fixture();
+                mutate(&mut spec, value);
+                let err = spec.validate().unwrap_err().to_string();
+                assert!(err.starts_with(field), "{field} {value}: {err}");
+            }
+        }
     }
 
     /// The servo window contract (`ServoSpec::travel_window_fault`): the sim clamps to the window
