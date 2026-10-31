@@ -32,8 +32,8 @@ House(
     // What each part is made of (`assets/materials/materials.ron` keys): the walls' masonry unit,
     // the wall plates and the roof boards.
     // The intrinsic seams' sourced c (Pa) and G_II (J/m²) live in those materials' bulk rows.
-    // The registry refuses either missing on a breakable material; no punch-ring law reads
-    // them yet. The separate attachment kinds below do not inherit a timber's intrinsic seam.
+    // The registry refuses either missing on a breakable material; the punch ring reads
+    // them. The separate attachment kinds below do not inherit a timber's intrinsic seam.
     materials: (walls: Brick, plates: Wood, roof: Wood),
     // Openings per wall, `u` along the wall in its own frame (east and west: `u` = −z and +z; north
     // and south: `u` = +x and −x), heights in courses from the foundation. Windows 1.0 m wide from
@@ -64,7 +64,7 @@ House(
         (kinds: (Gable, WallPlate), by: "mortared"),
         // The rafters skew-nailed to the plates, and each pair nailed at the ridge.
         // The nailed kind has no sourced c or lateral separation work G_II for this fixing.
-        // This is a punch-ring data gap; see
+        // Its seams answer by the opening law alone, and no punch ring forms across them; see
         // .agents/scratch/collision-c6-shear-sources.md. Never substitute solid wood's values.
         (kinds: (WallPlate, Roof), by: "nailed"),
         (kinds: (Roof, Roof), by: "nailed"),

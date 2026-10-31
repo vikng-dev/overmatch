@@ -154,6 +154,11 @@ impl ContactTransfers {
         &self.resting
     }
 
+    /// The last step's length, s: what its points' blows and presses were moved within.
+    pub(crate) fn dt(&self) -> f32 {
+        self.dt
+    }
+
     /// How many steps the reading has summed, the last step's points the latest.
     pub(crate) fn steps(&self) -> u64 {
         self.steps

@@ -48,7 +48,7 @@
 // stated beside `facts` (each states a density). A breakable seam also requires `shear_cohesion`
 // (c, Pa, without precompression) and `shear_fracture_energy` (cohesive G_II, J/m², excluding
 // continuing friction work). All four seam facts are stated together or none is; an incomplete
-// breakable row is refused at load. No law reads the shear facts yet (collision lane 7). A non-metal's
+// breakable row is refused at load. The punch ring reads the shear facts. A non-metal's
 // effective factor is its compressive (crushing) strength over the reference flow strength
 // (~1 GPa), × 1000: a strength ratio, the reading the steels' DERIVED rows note, not a measured
 // penetration equivalence.

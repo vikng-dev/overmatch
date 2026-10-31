@@ -165,11 +165,11 @@ pub struct BulkFacts {
     /// stated together or not at all (checked at parse).
     pub fracture_energy: Option<f64>,
     /// Cohesive shear strength `c` of the seam without precompression, Pa. Required with the
-    /// opening properties for a breakable row; absent on bulk-only, unbreakable matter.
-    /// Stored for the punch-ring law; no law reads it yet.
+    /// opening properties for a breakable row; absent on bulk-only, unbreakable matter. The
+    /// punch-ring law reads it (`buildings::fracture::Shear`).
     pub shear_cohesion: Option<f64>,
     /// Cohesive mode-II fracture energy `G_II`, J/m², excluding continuing friction work.
-    /// Required with [`Self::shear_cohesion`]. No law reads it yet.
+    /// Required with [`Self::shear_cohesion`]; the punch-ring law reads it.
     pub shear_fracture_energy: Option<f64>,
 }
 
@@ -1027,7 +1027,7 @@ mod tests {
 
     /// BREAKABLE MATERIALS NEED BOTH SHEAR FACTS AT LOAD (the game's environment destruction
     /// model). The bake and building loader must refuse an incomplete seam, naming its file,
-    /// row, missing field and repair, before a future punch ring can read a code default.
+    /// row, missing field and repair, so the punch ring never reads a code default.
     /// ASSUMED fixture values isolate the contract from changes in shipped material numbers.
     #[test]
     fn a_breakable_row_missing_either_shear_fact_is_refused_at_load() {

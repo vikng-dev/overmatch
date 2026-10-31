@@ -12,6 +12,9 @@ use crate::ballistics::MarchProbe;
 use crate::buildings::schema::ElementKind;
 use crate::buildings::tests::shipped_house;
 
+/// A fixture physics step, s: the harness's 64 Hz tick (fixture data).
+const STEP: f32 = 1.0 / 64.0;
+
 /// The breakage sim on the offline physics with the solver's contact reading, the march probe,
 /// and the shipped house spawned at the origin (unit scale), one fixed tick per update. `replica`
 /// adds the replica marker.
@@ -535,8 +538,9 @@ fn the_clients_hold_the_authoritys_holes_a_late_joiner_too() {
 }
 
 /// A HOLE CHANGES NO COLLIDER, MASS OR STRUCTURAL RESULT: two copies of the house take the same
-/// round twice (its line and its push), one cutting the line's hole and one not; the second
-/// round meets the holed chunk whole. Their events but the holes, their loose groups, structural
+/// round twice (its line and its push, fixture data under the chunk's punch-ring energy, so the
+/// chunk stands for the second), one cutting the line's hole and one not; the second round meets
+/// the holed chunk whole. Their events but the holes, their loose groups, structural
 /// failures, laws' state, swaps and chunk table are the same. A replica fed the record without its
 /// holes, then the holes, keeps the very same colliders and shape. The owner's decision (a hole is
 /// drawn only) rests on it: a hole read by a law, the mass or the colliders fails here.
@@ -551,7 +555,7 @@ fn a_hole_changes_no_collider_mass_or_structural_result() {
         chunk: c,
         at: cut.structure.chunks[c].centroid,
         energy: 0.0,
-        blow: (line.2 - line.1).normalize() * 100.0,
+        blow: (line.2 - line.1).normalize() * 10.0,
         press: Vec3::ZERO,
         peak: None,
         origin: Origin::Field,
@@ -1599,6 +1603,7 @@ fn a_break_keeps_linear_and_angular_momentum() {
                     body: Entity::PLACEHOLDER,
                     mass,
                     speed: 3.0,
+                    step: STEP,
                 },
             };
             let launched = launch(&kind, &structure, 1.0, &group, &[load]);
@@ -1655,6 +1660,7 @@ fn a_break_launches_with_free_mass_and_creates_no_energy() {
                     body: Entity::PLACEHOLDER,
                     mass,
                     speed: 3.0,
+                    step: STEP,
                 },
             };
             let launched = launch(&kind, &structure, 1.0, &group, &[load]);
@@ -1697,6 +1703,7 @@ fn a_break_launches_with_free_mass_and_creates_no_energy() {
                     body: Entity::PLACEHOLDER,
                     mass: 1e-12,
                     speed: 3.0,
+                    step: STEP,
                 },
                 ..load
             };
@@ -1771,6 +1778,7 @@ fn only_departing_chunks_give_back_their_body_blows() {
             body: Entity::PLACEHOLDER,
             mass: 1000.0,
             speed: 3.0,
+            step: STEP,
         },
     };
     let held = run_laws(&kind.layout, &mut live, &[load], Vec::new());
@@ -1862,6 +1870,7 @@ fn simultaneous_exchanges_keep_momentum_and_spend_one_kinetic_budget() {
                 body,
                 mass: source_mass,
                 speed: 3.0,
+                step: STEP,
             },
         };
         let departure = |loads: &[Load]| Departure {
@@ -2157,6 +2166,7 @@ fn tiny_exchanges_keep_their_plastic_share_without_underflow() {
                 body,
                 mass: 1.0,
                 speed,
+                step: STEP,
             },
         };
         let mut departures = [Departure {

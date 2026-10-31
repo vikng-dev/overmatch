@@ -31,8 +31,8 @@
     // m², DERIVED) is a kind of its own once play shows it needs one.
     // Shear cohesion c and mode-II separation work G_II are unsourced for this reference
     // nailing. The material source audit is recorded in
-    // .agents/scratch/collision-c6-shear-sources.md. The current laws read opening only; a
-    // punch-ring loader must refuse this kind until its lateral facts are supplied.
+    // .agents/scratch/collision-c6-shear-sources.md. A stated kind holds no shear pair, so its
+    // seams answer by the opening law alone and no punch ring forms across them.
     "nailed": Stated(
         tensile_pa: (3240.0, Derived("one nail's withdrawal capacity × 10.7 nails per m² of
             contact. One nail: CLAIMED, not read (EN 1995-1-1:2004 §8.3.2, eqs. 8.24 and 8.25,

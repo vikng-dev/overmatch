@@ -12,7 +12,7 @@ use std::sync::LazyLock;
 
 use serde::Deserialize;
 
-use super::fracture::{Bond, Masonry, Seam};
+use super::fracture::{Bond, Masonry, Seam, Shear};
 use crate::keyed_map::KeyedMap;
 use crate::provenance::Sourced;
 use crate::substances::SubstanceRegistry;
@@ -95,9 +95,12 @@ impl Attachments {
                                 ));
                             }
                         }
+                        // The kind states its opening alone, so its seam answers by the opening
+                        // law alone: no punch ring forms across it.
                         Bond::Bonded(Seam {
                             tensile: tensile as f32,
                             fracture_energy: energy as f32,
+                            shear: Shear::OpeningOnly,
                         })
                     }
                     Row::Resting => Bond::Resting,
@@ -161,6 +164,7 @@ mod tests {
                 } => Bond::Bonded(Seam {
                     tensile: tensile as f32,
                     fracture_energy: energy as f32,
+                    shear: Shear::OpeningOnly,
                 }),
                 Row::Resting => Bond::Resting,
             };

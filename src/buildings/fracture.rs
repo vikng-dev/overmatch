@@ -90,12 +90,28 @@ pub(crate) struct Seam {
     pub tensile: f32,
     /// Its mode-I fracture energy, J/m².
     pub fracture_energy: f32,
+    /// How it answers sliding along it.
+    pub shear: Shear,
+}
+
+/// How a seam answers sliding along it: what a punch ring reads of it ([`ring`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Shear {
+    /// By its shear cohesion `c` without precompression (Pa) and its cohesive mode-II fracture
+    /// energy `G_II` (J/m²): its material row's ([`Masonry::of`]).
+    Cohesive { cohesion: f32, energy: f32 },
+    /// By nothing the laws can read: the seam's data states its opening alone (an attachment kind
+    /// stated by its tensile strength and opening work, as the nailed fixing is,
+    /// `super::attachments`). It answers by its opening law alone: no punch ring forms across it,
+    /// and the section, push and rest laws read it as before.
+    OpeningOnly,
 }
 
 impl Masonry {
     /// Substance `name`'s values, or `None` where its row states no bulk facts (an element of it
-    /// never breaks). The density and the seam's strength and fracture energy are the row's bulk
-    /// facts (the registry refuses a row stating one of the seam's two without the other); the
+    /// never breaks). The density and the seam's strengths and fracture energies, opening and
+    /// shear, are the row's bulk facts (the registry refuses a row stating some of the seam's
+    /// four without the others); the
     /// crush energy is the static term of the walk's own force law at the row's factor
     /// (`factor / 1000 × a`, `a` the reference's cavity strength): the energy per volume the walk
     /// spends opening a cavity in it; the friction is the row's. Refuses a name the registry does
@@ -109,9 +125,14 @@ impl Masonry {
         let seam = bulk
             .tensile
             .zip(bulk.fracture_energy)
-            .map(|(tensile, energy)| Seam {
+            .zip(bulk.shear_cohesion.zip(bulk.shear_fracture_energy))
+            .map(|((tensile, energy), (cohesion, shear))| Seam {
                 tensile: tensile as f32,
                 fracture_energy: energy as f32,
+                shear: Shear::Cohesive {
+                    cohesion: cohesion as f32,
+                    energy: shear as f32,
+                },
             })
             .ok_or_else(|| {
                 format!("substance {name:?} states bulk facts but no seam to part its chunks by")
@@ -580,7 +601,30 @@ pub(crate) enum Origin {
         mass: f32,
         /// Closing speed along the normal at the solver's start, m/s; shared launch caps read it.
         speed: f32,
+        /// The physics step the solver delivered its blow within, s: the blow's least mean force
+        /// is `blow / step` ([`Load::mean_force`]).
+        step: f32,
     },
+}
+
+/// What a section's or ring's strength leaves the blows on it ([`Load::felt`]): the plastic
+/// demand factor a falling pulse's blows meet ([`plastic_demand`]), and whether the strength
+/// yields to gravity, the presses and every body blow's least mean force together. The second
+/// is the two-asymptote rule's force limit for a body's blow: its share pays the energy only
+/// where its force beats the strength too.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct Reading {
+    pub falling: f32,
+    pub yields: bool,
+}
+
+impl Reading {
+    /// Where no strength is read (a group on both sides of its section's plane): every blow keeps
+    /// the energy limit alone.
+    pub(crate) const UNRESISTED: Self = Self {
+        falling: 1.0,
+        yields: true,
+    };
 }
 
 impl Origin {
@@ -674,15 +718,32 @@ impl Load {
             .collect()
     }
 
-    /// The part of this load's blow a section's energy limit reads under a pulse of plastic demand
-    /// factor `pulse` ([`plastic_demand`]'s `g`): `√g` of a blow that peaks at a stated force
-    /// ([`Load::peak`]), the strength resisting it while the pulse lasts, so the section absorbs
-    /// `J² g / 2m` of it; the whole of one that states none (a round's line, a body's contact),
-    /// read impulsively.
-    fn felt(&self, pulse: f32) -> f32 {
-        match self.peak {
-            Some(_) => pulse.sqrt(),
-            None => 1.0,
+    /// The part of this load's blow a section's energy limit reads under `reading`: `√g` of a
+    /// blow that peaks at a stated force ([`Load::peak`]), the strength resisting it while the
+    /// pulse lasts, so the section absorbs `J² g / 2m` of it; a body's whole blow where the
+    /// strength yields to its least mean force ([`Load::mean_force`]) and none of it where the
+    /// strength holds that force (the two-asymptote rule); the whole of a round's line, read
+    /// impulsively (ASSUMED: its blow is over before a section moves).
+    fn felt(&self, reading: Reading) -> f32 {
+        match (self.peak, self.origin) {
+            (Some(_), _) => reading.falling.sqrt(),
+            (None, Origin::Body { .. }) => {
+                if reading.yields {
+                    1.0
+                } else {
+                    0.0
+                }
+            }
+            (None, Origin::Field) => 1.0,
+        }
+    }
+
+    /// The least mean force of a body's blow (N): the blow over the step the solver delivered it
+    /// within. `None` for a field, which states its pulse by its peak or not at all.
+    fn mean_force(&self) -> Option<Vec3> {
+        match self.origin {
+            Origin::Body { step, .. } => Some(self.blow / step),
+            Origin::Field => None,
         }
     }
 
@@ -925,6 +986,12 @@ pub(crate) enum Cause {
     /// along them net of the friction impulse it raises, against the impulse whose energy pays
     /// the friction work of sliding the part off, N·s.
     Shove,
+    /// A group punched out through its ring of joints by blows ([`ring_failure`]): the blows'
+    /// plastic share along its translation against the impulse whose energy opens the ring, N·s.
+    Punch,
+    /// A group punched out through its ring of joints by gravity and presses
+    /// ([`ring_force_failure`]): their force along its translation against the ring's strength, N.
+    PunchForce,
 }
 
 /// One structural failure: the section's joints, what loaded it, and the demand on it with the
@@ -1172,6 +1239,10 @@ fn plane_bucket(offset: f32) -> i64 {
 /// pushed part that stands on rests alone (no bonded path to the ground) is the rest law's
 /// ([`unseat`]): every rest it stood on opens when the blows can carry it over them, turned about
 /// their hinge as a section is with no seam to open, or slid along them against their friction.
+/// Beside the sections, the pushed chunks' punch rings compete on the same ratio
+/// ([`ring_groups`], [`ring_failure`]): a group translated out through every joint around it.
+/// A body's blow meets both limits on each: its least mean force must beat the strength there,
+/// and its share must pay the energy ([`Reading`]).
 ///
 /// The group a section holds is the part of the pushed chunks' component that loses its last path
 /// to the ground with the section's joints removed ([`held`]): a group no blow reaches takes no
@@ -1192,7 +1263,8 @@ pub(crate) fn structural(
         return failures;
     }
     let mut steps = 0;
-    // Every pass cracks a section and none closes again, so the passes end.
+    let incident = incident(structure);
+    // Every pass cracks a section or a ring and none closes again, so the passes end.
     loop {
         let graph = graph(structure, state);
         let paths: Vec<Option<Vec<usize>>> = pushed
@@ -1235,6 +1307,14 @@ pub(crate) fn structural(
             }
             let pulse = section_pulse(structure, section, &group, loads, &mut steps);
             if let Some(failure) = section_failure(structure, section, &group, loads, pulse) {
+                let ratio = failure.demand / failure.capacity;
+                if ratio >= 1.0 && worst.as_ref().is_none_or(|(w, _)| ratio > *w) {
+                    worst = Some((ratio, failure));
+                }
+            }
+        }
+        for group in ring_groups(state, &graph, &pushed, &mut steps) {
+            if let Some(failure) = ring_failure(structure, state, &incident, &group, loads) {
                 let ratio = failure.demand / failure.capacity;
                 if ratio >= 1.0 && worst.as_ref().is_none_or(|(w, _)| ratio > *w) {
                     worst = Some((ratio, failure));
@@ -1309,16 +1389,16 @@ fn bonded_group(start: usize, (neighbours, ..): &Graph, seen: &mut [bool]) -> Ve
 }
 
 /// The demand and capacity of `section` holding `group` under the blows of `loads`
-/// ([`structural`]), `None` when they bend it about no axis. `pulse` is the plastic demand factor
-/// the turn's strength leaves a pulse's blows ([`plastic_demand`], [`Load::felt`]), the caller's:
-/// a seam's Navier tension resists a bonded section's turn ([`section_pulse`]), a seated part's
-/// tipping its turn over its rests ([`unseat`]).
+/// ([`structural`]), `None` when they bend it about no axis. `pulse` is what the turn's strength
+/// leaves the blows ([`Reading`], [`Load::felt`]), the caller's: a seam's Navier tension resists a
+/// bonded section's turn ([`section_pulse`]), a seated part's tipping its turn over its rests
+/// ([`unseat`]).
 fn section_failure(
     structure: &Structure,
     section: &[usize],
     group: &[usize],
     loads: &[Load],
-    pulse: f32,
+    pulse: Reading,
 ) -> Option<Failure> {
     let joints: Vec<&Joint> = section.iter().map(|&j| &structure.joints[j]).collect();
     let area: f32 = joints.iter().map(|joint| joint.area).sum();
@@ -1449,7 +1529,9 @@ pub(crate) struct Weighed {
 /// ([`ground_path`]), the group it alone holds
 /// with that chunk ([`held`]) hangs from the section's joints that border it, its one cut set:
 /// statics fixes the force and moment through it exactly, and [`weight_failure`] reads them as a
-/// stress. The worst section at or over its strength cracks, the chunks on either side of it are
+/// stress. The pressed chunks' punch rings compete on the same ratio, force over strength
+/// ([`ring_groups`], [`ring_force_failure`]). The worst section or ring at or over its strength
+/// cracks, the chunks on either side of it are
 /// touched in turn, and the check repeats until none fails (each pass cracks at least one joint
 /// and none closes, so the passes end), so a failure can expose the next. A freed group falls by support ([`fall`]) and the
 /// physics.
@@ -1491,14 +1573,13 @@ pub(crate) fn weigh(
     touched.sort_unstable();
     touched.dedup();
     // Each chunk's joints, the anchors too: what a held group may bear on besides its section.
-    let mut incident = vec![Vec::new(); structure.chunks.len()];
-    for (index, joint) in structure.joints.iter().enumerate() {
-        incident[joint.a].push(index);
-        if let Side::Chunk(b) = joint.b {
-            incident[b].push(index);
-        }
-    }
+    let incident = incident(structure);
     weighed.steps += structure.joints.len();
+    let pressed: Vec<usize> = loads
+        .iter()
+        .filter(|load| load.press != Vec3::ZERO)
+        .map(|load| load.chunk)
+        .collect();
     // Every pass cracks at least one joint and none closes again, so the passes end.
     loop {
         touched.retain(|&c| state.standing(c));
@@ -1556,6 +1637,22 @@ pub(crate) fn weigh(
                 weighed_with.extend(group);
                 weighed_with.sort_unstable();
                 weighed_with.dedup();
+            }
+        }
+        for group in ring_groups(state, &graph, &pressed, &mut weighed.steps) {
+            let failure = ring_force_failure(
+                structure,
+                state,
+                &incident,
+                &group,
+                loads,
+                Vec3::NEG_Y * GRAVITY,
+            );
+            if let Some(failure) = failure {
+                let ratio = failure.demand / failure.capacity;
+                if ratio >= 1.0 && worst.as_ref().is_none_or(|(w, _)| ratio > *w) {
+                    worst = Some((ratio, failure));
+                }
             }
         }
         let failure = match worst {
@@ -1852,29 +1949,48 @@ fn unseat(
     {
         return None;
     }
-    // Each blow mode meets a pulse's peak forces with its twin in the sustained law: the turn
-    // with tipping, the lift with lifting, the shove with sliding ([`strength_ratio`]).
+    // Each blow mode meets a pulse's peak forces, and a body blow's least mean force, with its
+    // twin in the sustained law: the turn with tipping, the lift with lifting, the shove with
+    // sliding ([`strength_ratio`], [`Reading`]).
     let (peak_force, peak_torque) =
         force_wrench(structure, group, loads, Vec3::ZERO, seat_centre, |load| {
             load.peak
         });
+    let (mean_force, mean_torque) = force_wrench(
+        structure,
+        group,
+        loads,
+        Vec3::ZERO,
+        seat_centre,
+        Load::mean_force,
+    );
     let at = |s: f32| (force + peak_force * s, torque + peak_torque * s);
-    let tip_pulse = plastic_demand(strength_ratio(|s| {
-        let (f, t) = at(s);
-        lifts(f) || tip(f, t) > 0.0
-    }));
-    let lift_pulse = plastic_demand(strength_ratio(|s| lifts(at(s).0)));
-    let slide_pulse = plastic_demand(strength_ratio(|s| {
-        let f = at(s).0;
-        lifts(f) || slides(f)
-    }));
+    let (mean, mean_turn) = (force + mean_force, torque + mean_torque);
+    let tip_pulse = Reading {
+        falling: plastic_demand(strength_ratio(|s| {
+            let (f, t) = at(s);
+            lifts(f) || tip(f, t) > 0.0
+        })),
+        yields: lifts(mean) || tip(mean, mean_turn) > 0.0,
+    };
+    let lift_pulse = Reading {
+        falling: plastic_demand(strength_ratio(|s| lifts(at(s).0))),
+        yields: lifts(mean),
+    };
+    let slide_pulse = Reading {
+        falling: plastic_demand(strength_ratio(|s| {
+            let f = at(s).0;
+            lifts(f) || slides(f)
+        })),
+        yields: lifts(mean) || slides(mean),
+    };
     if let Some(turn) = section_failure(structure, &bearing, group, loads, tip_pulse)
         && turn.demand >= turn.capacity
     {
         return open(Cause::Push, turn.demand, turn.capacity);
     }
-    // The blows' plastic shares against the part's mass, a pulse's read in `pulse`'s mode.
-    let felt = |pulse: f32| -> Vec3 {
+    // The blows' plastic shares against the part's mass, each read in `pulse`'s mode.
+    let felt = |pulse: Reading| -> Vec3 {
         loads
             .iter()
             .filter(|load| inside(load.chunk))
@@ -2058,8 +2174,8 @@ fn force_wrench(
 /// `A²/4π` to `J`, and its peak is the gradient's reach to its rim. Each joint compares with its
 /// own seam (its bond's tensile strength, as [`crack`] reads it); the section's
 /// demand and capacity are the joint's whose ratio is highest. ASSUMED out of the check: the
-/// shear and the twist about `n` the joints also carry (no shear cohesion is in the material data),
-/// and crushing (self-weight compression is about 1/230 of brick's crushing strength, DERIVED in
+/// shear and the twist about `n` the joints also carry (a punch ring reads shear on its own
+/// mechanism, [`ring`]), and crushing (self-weight compression is about 1/230 of brick's crushing strength, DERIVED in
 /// the collapse survey, `.agents/scratch/destruction-2026-10-31-collapse/collapse-survey.md`).
 /// Adds the chunks and joints it reads to `steps`.
 fn weight_failure(
@@ -2192,22 +2308,24 @@ impl Navier {
     }
 }
 
-/// The plastic demand factor ([`plastic_demand`]) a pulse's blows on `group` meet at bonded
-/// `section` ([`structural`]): its `r` is the share of the peak forces of `loads` at which, with
-/// gravity and their presses, the section's Navier tension reaches its strength
-/// ([`weight_failure`], [`strength_ratio`]), so a far burst whose peak the seam holds turns
-/// nothing whatever its blow. A group on both sides of the section's plane has no Navier reading
-/// (the weight check leaves it standing): its strength is unread there, and a pulse's blows keep
-/// the energy limit alone, `g = 1`. Adds the joints and chunks it reads to `steps`.
+/// What bonded `section`'s strength leaves the blows on `group` ([`structural`], [`Reading`]):
+/// the plastic demand factor ([`plastic_demand`]) whose `r` is the share of the peak forces of
+/// `loads` at which, with gravity and their presses, the section's Navier tension reaches its
+/// strength ([`weight_failure`], [`strength_ratio`]), so a far burst whose peak the seam holds
+/// turns nothing whatever its blow; and whether that tension reaches it under gravity, the
+/// presses and the body blows' least mean forces ([`Load::mean_force`]). A group on both sides of
+/// the section's plane has no Navier reading (the weight check leaves it standing): its strength
+/// is unread there, and every blow keeps the energy limit alone ([`Reading::UNRESISTED`]). Adds
+/// the joints and chunks it reads to `steps`.
 fn section_pulse(
     structure: &Structure,
     section: &[usize],
     group: &[usize],
     loads: &[Load],
     steps: &mut usize,
-) -> f32 {
+) -> Reading {
     let Some(navier) = Navier::of(structure, section, group, steps) else {
-        return 1.0;
+        return Reading::UNRESISTED;
     };
     let gravity = Vec3::NEG_Y * GRAVITY;
     let (force, moment) = force_wrench(structure, group, loads, gravity, navier.centre, |load| {
@@ -2217,14 +2335,284 @@ fn section_pulse(
         force_wrench(structure, group, loads, Vec3::ZERO, navier.centre, |load| {
             load.peak
         });
-    plastic_demand(strength_ratio(|s| {
-        let (demand, capacity) = navier.peak(
-            &structure.joints,
-            force + peak_force * s,
-            moment + peak_moment * s,
-        );
-        demand >= capacity
-    }))
+    let (mean_force, mean_moment) = force_wrench(
+        structure,
+        group,
+        loads,
+        Vec3::ZERO,
+        navier.centre,
+        Load::mean_force,
+    );
+    let (demand, capacity) =
+        navier.peak(&structure.joints, force + mean_force, moment + mean_moment);
+    Reading {
+        falling: plastic_demand(strength_ratio(|s| {
+            let (demand, capacity) = navier.peak(
+                &structure.joints,
+                force + peak_force * s,
+                moment + peak_moment * s,
+            );
+            demand >= capacity
+        })),
+        yields: demand >= capacity,
+    }
+}
+
+/// Each chunk's joints, the anchors too, in joint order.
+fn incident(structure: &Structure) -> Vec<Vec<usize>> {
+    let mut incident = vec![Vec::new(); structure.chunks.len()];
+    for (index, joint) in structure.joints.iter().enumerate() {
+        incident[joint.a].push(index);
+        if let Side::Chunk(b) = joint.b {
+            incident[b].push(index);
+        }
+    }
+    incident
+}
+
+/// How many rings of bonded neighbours a punch-ring candidate grows past the loaded chunks
+/// (Resolution). Under a load fixed in size each ring adds perimeter, so past the loaded patch the
+/// force-to-strength ratio falls (DERIVED): the ratio picks the breach, never this cap.
+const RING_GROWTH: usize = 2;
+
+/// The punch-ring candidates about the standing chunks of `seeds`: the seeds, then the seeds grown
+/// by one and by [`RING_GROWTH`] rings of neighbours through `graph`'s intact bonded joints, each
+/// split into its bonded components, each component ascending, in growth order and without
+/// repeats. Adds the chunks it reaches to `steps`.
+fn ring_groups(
+    state: &WallState,
+    (neighbours, ..): &Graph,
+    seeds: &[usize],
+    steps: &mut usize,
+) -> Vec<Vec<usize>> {
+    let mut grown = vec![false; neighbours.len()];
+    let mut members: Vec<usize> = Vec::new();
+    for &chunk in seeds {
+        if state.standing(chunk) && !grown[chunk] {
+            grown[chunk] = true;
+            members.push(chunk);
+        }
+    }
+    let mut frontier = members.clone();
+    let mut groups: Vec<Vec<usize>> = Vec::new();
+    for ring in 0..=RING_GROWTH {
+        if ring > 0 {
+            let mut next = Vec::new();
+            for &chunk in &frontier {
+                for &(neighbour, _) in &neighbours[chunk] {
+                    if !grown[neighbour] && state.standing(neighbour) {
+                        grown[neighbour] = true;
+                        next.push(neighbour);
+                    }
+                }
+            }
+            if next.is_empty() {
+                break;
+            }
+            members.extend_from_slice(&next);
+            frontier = next;
+        }
+        let mut seen = vec![false; neighbours.len()];
+        for &start in &members {
+            if seen[start] {
+                continue;
+            }
+            seen[start] = true;
+            let mut component = vec![start];
+            let mut next = 0;
+            while let Some(&chunk) = component.get(next) {
+                next += 1;
+                *steps += 1;
+                for &(neighbour, _) in &neighbours[chunk] {
+                    if grown[neighbour] && !seen[neighbour] {
+                        seen[neighbour] = true;
+                        component.push(neighbour);
+                    }
+                }
+            }
+            component.sort_unstable();
+            if !groups.contains(&component) {
+                groups.push(component);
+            }
+        }
+    }
+    groups
+}
+
+/// A punch ring's reading of one group ([`ring`]).
+struct Ring {
+    /// Every live joint from the group to what stands outside it not yet opened, ascending: the
+    /// joints the punch opens.
+    opens: Vec<usize>,
+    /// The unit direction the group translates along.
+    along: Vec3,
+    /// The ring's strength along `along`, N.
+    strength: f32,
+    /// The work that opens the ring along `along`, J.
+    work: f32,
+    /// The group's mass, kg.
+    mass: f32,
+}
+
+/// The punch ring of `group` (ascending) pushed along `push` (`incident`, each chunk's joints): a
+/// rigid translation of the group out through every live joint to what stands outside it. The
+/// translation is `push`'s direction projected off each such joint it would press the group into
+/// (a group cannot move into matter that bears it), one joint after another (ASSUMED: exact for
+/// the bake's orthogonal faces). Each intact bonded joint of the ring, its normal `n` out of the
+/// group, opens by `⟨−d·n⟩` and slides by `|d − (d·n) n|` per unit of translation `d`; its
+/// strength is `A (f_t ⟨open⟩ + c ⟨slide⟩)` and its work `A (G_I ⟨open⟩ + G_II ⟨slide⟩)`, the
+/// linear mode interaction (the wall design, "Bodies in contact"). A rest, or a seam a
+/// crack opened, adds neither: the friction the group's own weight would clamp it with is
+/// ASSUMED nothing (the wall above's clamp is unknown without a static solve; nothing errs toward
+/// failure). `None` for a group with a buried chunk or an intact anchor, one with no translation
+/// left, one no intact seam holds, and one across a seam whose shear the data does not state
+/// ([`Shear::OpeningOnly`]): that seam answers by its opening law alone, and no ring forms
+/// across it.
+fn ring(
+    structure: &Structure,
+    state: &WallState,
+    incident: &[Vec<usize>],
+    group: &[usize],
+    push: Vec3,
+) -> Option<Ring> {
+    let inside = |c: usize| group.binary_search(&c).is_ok();
+    let mut contacts: Vec<(usize, Vec3)> = Vec::new();
+    let mut mass = 0.0;
+    for &c in group {
+        let chunk = &structure.chunks[c];
+        if chunk.buried {
+            return None;
+        }
+        mass += chunk.mass;
+        for &j in &incident[c] {
+            let joint = &structure.joints[j];
+            if !state.live(joint) {
+                continue;
+            }
+            match joint.b {
+                Side::Chunk(b) if inside(b) && inside(joint.a) => continue,
+                Side::Ground if joint.seam().is_some() && !state.cracked[j] => return None,
+                _ => {}
+            }
+            let n = if (joint.centroid - chunk.centroid).dot(joint.normal) >= 0.0 {
+                joint.normal
+            } else {
+                -joint.normal
+            };
+            contacts.push((j, n));
+        }
+    }
+    let mut along = push.try_normalize()?;
+    for _ in 0..3 {
+        for &(_, n) in &contacts {
+            let into = along.dot(n);
+            if into > 0.0 {
+                along = (along - n * into).try_normalize()?;
+            }
+        }
+    }
+    if contacts.iter().any(|&(_, n)| along.dot(n) > ON_PLANE) {
+        return None;
+    }
+    let (mut strength, mut work) = (0.0, 0.0);
+    for &(j, n) in &contacts {
+        let joint = &structure.joints[j];
+        let Some(seam) = joint.seam().filter(|_| !state.cracked[j]) else {
+            continue;
+        };
+        let Shear::Cohesive { cohesion, energy } = seam.shear else {
+            return None;
+        };
+        let normal = along.dot(n);
+        let (open, slide) = ((-normal).max(0.0), (along - n * normal).length());
+        strength += joint.area * (seam.tensile * open + cohesion * slide);
+        work += joint.area * (seam.fracture_energy * open + energy * slide);
+    }
+    if strength <= 0.0 {
+        return None;
+    }
+    let mut opens: Vec<usize> = contacts
+        .iter()
+        .map(|&(j, _)| j)
+        .filter(|&j| !state.cracked[j])
+        .collect();
+    opens.sort_unstable();
+    opens.dedup();
+    Some(Ring {
+        opens,
+        along,
+        strength,
+        work,
+        mass,
+    })
+}
+
+/// The punch ring of `group` under the blows of `loads` ([`structural`]), `None` where they push
+/// it nowhere or no ring forms ([`ring`]): the translation follows their summed blow; the demand
+/// is each blow along it, by its plastic share against the group's mass and by what the ring's
+/// strength leaves it ([`Reading`]: a pulse's peak forces against the strength along the
+/// translation, a body blow's least mean force with gravity and the presses), against the
+/// impulse whose energy opens the ring, `√(2 M W)`.
+fn ring_failure(
+    structure: &Structure,
+    state: &WallState,
+    incident: &[Vec<usize>],
+    group: &[usize],
+    loads: &[Load],
+) -> Option<Failure> {
+    let on: Vec<&Load> = loads
+        .iter()
+        .filter(|load| group.binary_search(&load.chunk).is_ok())
+        .collect();
+    let push: Vec3 = on.iter().map(|load| load.blow).sum();
+    let ring = ring(structure, state, incident, group, push)?;
+    let reaches = |f: Vec3| f.dot(ring.along) >= ring.strength;
+    let sustained =
+        on.iter().map(|load| load.press).sum::<Vec3>() + Vec3::NEG_Y * GRAVITY * ring.mass;
+    let peak: Vec3 = on.iter().filter_map(|load| load.peak).sum();
+    let mean: Vec3 = on.iter().filter_map(|load| load.mean_force()).sum();
+    let reading = Reading {
+        falling: plastic_demand(strength_ratio(|s| reaches(sustained + peak * s))),
+        yields: reaches(sustained + mean),
+    };
+    let demand: f32 = on
+        .iter()
+        .map(|load| {
+            load.blow.dot(ring.along) * load.origin.share(1.0 / ring.mass) * load.felt(reading)
+        })
+        .sum();
+    (demand > 0.0).then(|| Failure {
+        joints: ring.opens,
+        cause: Cause::Punch,
+        demand,
+        capacity: (2.0 * ring.mass * ring.work).sqrt(),
+    })
+}
+
+/// The punch ring of `group` under `gravity` and the presses of `loads` ([`weigh`]), `None` where
+/// they press it nowhere or no ring forms ([`ring`]): the translation follows their summed press,
+/// and the demand is their force along it, the group's weight included, against the ring's
+/// strength.
+fn ring_force_failure(
+    structure: &Structure,
+    state: &WallState,
+    incident: &[Vec<usize>],
+    group: &[usize],
+    loads: &[Load],
+    gravity: Vec3,
+) -> Option<Failure> {
+    let push: Vec3 = loads
+        .iter()
+        .filter(|load| group.binary_search(&load.chunk).is_ok())
+        .map(|load| load.press)
+        .sum();
+    let ring = ring(structure, state, incident, group, push)?;
+    Some(Failure {
+        joints: ring.opens,
+        cause: Cause::PunchForce,
+        demand: (push + gravity * ring.mass).dot(ring.along),
+        capacity: ring.strength,
+    })
 }
 
 /// The least share `s` of a pulse's peak forces, at most 1, at which `fails(s)`: the strength
@@ -2590,6 +2978,9 @@ pub(crate) fn blast_rays(
 mod tests {
     use super::*;
 
+    /// A fixture physics step, s: the game's 64 Hz tick (fixture data).
+    const STEP: f32 = 1.0 / 64.0;
+
     /// A row of `n` fixture chunks 0.2 m apart along x, each joined to the next and the first
     /// anchored: fixture geometry, the shipped brick's values.
     fn row(n: usize) -> Structure {
@@ -2713,6 +3104,17 @@ mod tests {
                 }
                 let pulse = section_pulse(structure, &section, &group, loads, &mut 0);
                 if let Some(failure) = section_failure(structure, &section, &group, loads, pulse) {
+                    let ratio = failure.demand / failure.capacity;
+                    if ratio >= 1.0 && worst.as_ref().is_none_or(|(w, _)| ratio > *w) {
+                        worst = Some((ratio, failure));
+                    }
+                }
+            }
+            let pushed = pushed(structure, loads);
+            for group in ring_groups(state, &graph, &pushed, &mut 0) {
+                if let Some(failure) =
+                    ring_failure(structure, state, &incident(structure), &group, loads)
+                {
                     let ratio = failure.demand / failure.capacity;
                     if ratio >= 1.0 && worst.as_ref().is_none_or(|(w, _)| ratio > *w) {
                         worst = Some((ratio, failure));
@@ -4005,6 +4407,7 @@ mod tests {
             body: Entity::PLACEHOLDER,
             mass: f32::INFINITY,
             speed: 0.0,
+            step: STEP,
         };
         for inverse in [0.0, 1e-45, 1e-30, 1.0] {
             assert_eq!(locked.share(inverse), 0.0, "inverse mass {inverse}");
@@ -4015,8 +4418,10 @@ mod tests {
     /// A BODY'S DEMAND IS ITS PLASTIC EXCHANGE WITH THE HELD HINGE MASS (the game's
     /// environment destruction model). The section and seated-part laws rely on that share;
     /// feeding them the whole blow, the group's free mass, or its total mass fails the sweep.
-    /// The field and vanishing-source-mass verdicts agree on either side of failure. Fixture
-    /// masses and heights below are ASSUMED; the hinge inertia and demands are DERIVED.
+    /// The field and vanishing-source-mass verdicts agree on either side of failure, the body's
+    /// blow delivered within a vanishing step so that its force beats any strength (a field
+    /// keeps the energy limit alone; the force limit is test 7's). Fixture masses, heights and
+    /// steps below are ASSUMED; the hinge inertia and demands are DERIVED.
     #[test]
     fn body_demand_uses_the_held_hinge_mass_and_fields_are_the_zero_mass_limit() {
         let mass = 28.8;
@@ -4039,7 +4444,8 @@ mod tests {
                 peak: None,
                 origin: Origin::Field,
             };
-            let failure = section_failure(&structure, &section, &[1], &[field], 1.0).unwrap();
+            let failure =
+                section_failure(&structure, &section, &[1], &[field], Reading::UNRESISTED).unwrap();
             // A locked source can touch the group without exchanging momentum. Its infinite
             // source mass must not turn a zero angular impulse into an undefined demand.
             let locked = Load {
@@ -4048,11 +4454,18 @@ mod tests {
                     body: Entity::PLACEHOLDER,
                     mass: f32::INFINITY,
                     speed: 0.0,
+                    step: STEP,
                 },
                 ..field
             };
             assert_eq!(
-                section_failure(&structure, &section, &[1], &[field, locked], 1.0),
+                section_failure(
+                    &structure,
+                    &section,
+                    &[1],
+                    &[field, locked],
+                    Reading::UNRESISTED
+                ),
                 Some(failure.clone())
             );
             let lever = at.y - hinge.y;
@@ -4062,9 +4475,12 @@ mod tests {
                     body: Entity::PLACEHOLDER,
                     mass: ratio * hinge_mass,
                     speed: 3.0,
+                    step: STEP,
                 };
                 let body = Load { origin, ..field };
-                let reduced = section_failure(&structure, &section, &[1], &[body], 1.0).unwrap();
+                let reduced =
+                    section_failure(&structure, &section, &[1], &[body], Reading::UNRESISTED)
+                        .unwrap();
                 let expected = failure.demand / (1.0 + ratio);
                 assert!(
                     (reduced.demand - expected).abs() <= expected * 2e-5,
@@ -4083,6 +4499,7 @@ mod tests {
                         body: Entity::PLACEHOLDER,
                         mass: 1e-12,
                         speed: 3.0,
+                        step: 1e-9,
                     },
                     ..field
                 };
@@ -4108,6 +4525,7 @@ mod tests {
             body: Entity::PLACEHOLDER,
             mass: 1e12,
             speed: 3.0,
+            step: STEP,
         };
         assert!(
             origin.share(1.0) < 1e-11,
@@ -4370,7 +4788,17 @@ mod tests {
             peak: None,
             origin: Origin::Field,
         };
-        let expected = section_failure(&structure, &section, &[1], &[line], 0.0).unwrap();
+        let expected = section_failure(
+            &structure,
+            &section,
+            &[1],
+            &[line],
+            Reading {
+                falling: 0.0,
+                yields: false,
+            },
+        )
+        .unwrap();
         for scale in [1.0, 2.0] {
             let held = Load {
                 blow: -line.blow * scale,
@@ -4379,7 +4807,7 @@ mod tests {
             };
             let loads = [line, held];
             let pulse = section_pulse(&structure, &section, &[1], &loads, &mut 0);
-            assert_eq!(pulse, 0.0, "fixture peak is below seam strength");
+            assert_eq!(pulse.falling, 0.0, "fixture peak is below seam strength");
             assert_eq!(
                 section_failure(&structure, &section, &[1], &loads, pulse),
                 Some(expected.clone()),
@@ -4422,7 +4850,14 @@ mod tests {
             peak: None,
             origin: Origin::Field,
         };
-        let unit = section_failure(&structure, &section, &[1], &[impulsive], 1.0).unwrap();
+        let unit = section_failure(
+            &structure,
+            &section,
+            &[1],
+            &[impulsive],
+            Reading::UNRESISTED,
+        )
+        .unwrap();
         let paying = unit.capacity / unit.demand;
         let blast = |blow: f32, peak: f32| Load {
             blow: Vec3::NEG_Z * blow,
@@ -4493,5 +4928,235 @@ mod tests {
             unseats(lift(1.01 * blow, Some(2.0 * weight))),
             Some(Cause::Lift)
         );
+    }
+
+    /// The shipped brick's shear cohesion (Pa) and mode-II energy (J/m²).
+    fn brick_shear() -> (f32, f32) {
+        match brick().seam.shear {
+            Shear::Cohesive { cohesion, energy } => (cohesion, energy),
+            Shear::OpeningOnly => panic!("the shipped brick states its shear pair"),
+        }
+    }
+
+    /// STRENGTH AND ENERGY ARE BOTH REQUIRED (the game's environment destruction model, the
+    /// collision study's test 7). A fixture plug cube held only by its four side seams to buried
+    /// neighbours (so no planar section holds it, and only its punch ring can free it) takes a
+    /// body's blow square on. Its ring slides on all four seams: strength `4 A c` and work
+    /// `4 A G_II` (DERIVED from the shipped brick's sourced row). A light body's blow whose share
+    /// pays twice the energy but whose least mean force is short of the strength frees nothing; a
+    /// heavy body's slow blow whose force beats the strength many times but whose share pays half
+    /// the energy frees nothing; with both met the plug is punched out through exactly its four
+    /// seams. The wall laws rely on both limits for every body contact: a tank's touch that
+    /// shatters a wall it barely loads, or a brick's bounce that breaks the wall it lands on,
+    /// fails here, so a law reading either limit alone fails one case. Masses, speeds and steps are
+    /// fixture data.
+    #[test]
+    fn strength_and_energy_are_both_required() {
+        let cells = [[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, 0]];
+        let mass = 28.8;
+        let structure = cubes(&cells, 4, &[], mass);
+        let plug = 4;
+        let ring: Vec<usize> = (0..4).map(|k| joint_between(&structure, k, plug)).collect();
+        let (cohesion, energy) = brick_shear();
+        let area = CUBE * CUBE;
+        let strength = 4.0 * area * cohesion;
+        let capacity = (2.0 * mass * 4.0 * area * energy).sqrt();
+        let blow = |source: f32, demand: f32, step: f32| {
+            let share = mass / (source + mass);
+            Load {
+                chunk: plug,
+                at: structure.chunks[plug].centroid + Vec3::Z * (CUBE / 2.0),
+                energy: 0.0,
+                blow: Vec3::NEG_Z * (demand * capacity / share),
+                press: Vec3::ZERO,
+                peak: None,
+                origin: Origin::Body {
+                    body: Entity::PLACEHOLDER,
+                    mass: source,
+                    speed: 1.0,
+                    step,
+                },
+            }
+        };
+        let force = |load: &Load| load.mean_force().expect("a body's blow").length();
+        let run = |load: Load| {
+            let mut state = WallState::new(&structure);
+            let failures = structural(
+                &structure,
+                &mut state,
+                &[load],
+                &mut SectionCache::default(),
+            );
+            (failures, fall(&structure, &mut state))
+        };
+        let light = blow(100.0, 2.0, STEP);
+        assert!(
+            force(&light) < 0.5 * strength,
+            "fixture: the light blow's force is short"
+        );
+        assert_eq!(
+            run(light),
+            (Vec::new(), Vec::new()),
+            "energy alone frees nothing"
+        );
+        let heavy = blow(50e3, 0.5, STEP);
+        assert!(
+            force(&heavy) > 10.0 * strength,
+            "fixture: the heavy blow's force beats it"
+        );
+        assert_eq!(
+            run(heavy),
+            (Vec::new(), Vec::new()),
+            "force alone frees nothing"
+        );
+        let both = blow(100.0, 2.0, light.blow.length() / (2.0 * strength));
+        let (failures, fell) = run(both);
+        assert_eq!(fell, vec![vec![plug]], "both met: the plug is punched out");
+        let mut opened = ring;
+        opened.sort_unstable();
+        assert_eq!(failures.len(), 1);
+        assert_eq!(
+            (failures[0].cause, &failures[0].joints),
+            (Cause::Punch, &opened)
+        );
+        assert!((failures[0].demand / failures[0].capacity - 2.0).abs() < 1e-3);
+    }
+
+    /// THE BREACH FOLLOWS STRENGTH (the game's environment destruction model, the collision study's
+    /// test 9). A fixture 7 × 7 wall of cubes whose border the soil holds (buried, so no section
+    /// frees anything and only punch rings can) takes a press square on, shared over a 2 × 2 patch.
+    /// The patch's own ring (8 sliding seams, `8 A c`, DERIVED) has the highest force-to-strength
+    /// ratio of the candidates (the next ring out has 12 seams' perimeter), so 1 % under `8 A c`
+    /// frees nothing and 1 % over it frees exactly the patch; doubling every seam's cohesion
+    /// doubles the press needed. The wall laws rely on the breach taking the contact's shape: a
+    /// ring cap that decides the size (the grown ring, or the one past it, which reaches the
+    /// buried border and so frees nothing) fails here, as does a ring read on any cohesion but its
+    /// seams'. Fixture geometry; the press is fixture data.
+    #[test]
+    fn the_breach_follows_strength() {
+        let mut cells = Vec::new();
+        for x in 0..7 {
+            for y in 0..7 {
+                if x == 0 || y == 0 || x == 6 || y == 6 {
+                    cells.push([x, y, 0]);
+                }
+            }
+        }
+        let border = cells.len();
+        for x in 1..6 {
+            for y in 1..6 {
+                cells.push([x, y, 0]);
+            }
+        }
+        let patch: Vec<usize> = [[2, 2, 0], [2, 3, 0], [3, 2, 0], [3, 3, 0]]
+            .iter()
+            .map(|cell| cells.iter().position(|c| c == cell).unwrap())
+            .collect();
+        let (cohesion, _) = brick_shear();
+        let threshold = 8.0 * CUBE * CUBE * cohesion;
+        for doubled in [false, true] {
+            let mut structure = cubes(&cells, border, &[], 28.8);
+            if doubled {
+                for joint in &mut structure.joints {
+                    if let Bond::Bonded(seam) = &mut joint.bond {
+                        seam.shear = Shear::Cohesive {
+                            cohesion: 2.0 * cohesion,
+                            energy: brick_shear().1,
+                        };
+                    }
+                }
+            }
+            let needed = threshold * if doubled { 2.0 } else { 1.0 };
+            for (scale, frees) in [(0.99, false), (1.01, true)] {
+                let loads: Vec<Load> = patch
+                    .iter()
+                    .map(|&chunk| Load {
+                        chunk,
+                        at: structure.chunks[chunk].centroid + Vec3::Z * (CUBE / 2.0),
+                        energy: 0.0,
+                        blow: Vec3::ZERO,
+                        press: Vec3::NEG_Z * (scale * needed / 4.0),
+                        peak: None,
+                        origin: Origin::Field,
+                    })
+                    .collect();
+                let mut state = WallState::new(&structure);
+                let weighed = weigh(
+                    &structure,
+                    &mut state,
+                    &[],
+                    &[],
+                    &loads,
+                    &[],
+                    &mut SectionCache::default(),
+                );
+                let fell = fall(&structure, &mut state);
+                let mut freed = patch.clone();
+                freed.sort_unstable();
+                if frees {
+                    assert_eq!(
+                        fell,
+                        vec![freed],
+                        "doubled {doubled}: the patch is punched out"
+                    );
+                    assert_eq!(cracks(&weighed).len(), 1);
+                    assert_eq!(weighed.failures[0].cause, Cause::PunchForce);
+                    assert_eq!(weighed.failures[0].joints.len(), 8);
+                } else {
+                    assert!(fell.is_empty(), "doubled {doubled}, {scale}: {fell:?}");
+                    assert!(weighed.failures.is_empty(), "doubled {doubled}, {scale}");
+                }
+            }
+        }
+    }
+
+    /// A SEAM WHOSE SHEAR THE DATA DOES NOT STATE FORMS NO RING (the game's environment
+    /// destruction model). A nailed fixing's attachment states its opening alone
+    /// ([`Shear::OpeningOnly`]); the plug of the strength test, its four seams made such a
+    /// fixing, takes a blow and a press that punch out the brick-seamed plug many times over and
+    /// frees nothing: that seam answers by its opening law alone. The ring law relies on it to
+    /// read no shear the data never stated; a ring that reads a nailed seam with a stand-in
+    /// cohesion, or with none (zero strength), fails here. Fixture geometry and loads.
+    #[test]
+    fn a_seam_with_no_stated_shear_forms_no_ring() {
+        let cells = [[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, 0]];
+        let mut structure = cubes(&cells, 4, &[], 28.8);
+        for joint in &mut structure.joints {
+            if let Bond::Bonded(seam) = &mut joint.bond {
+                seam.shear = Shear::OpeningOnly;
+            }
+        }
+        let (cohesion, _) = brick_shear();
+        let at = structure.chunks[4].centroid + Vec3::Z * (CUBE / 2.0);
+        let load = Load {
+            chunk: 4,
+            at,
+            energy: 0.0,
+            blow: Vec3::NEG_Z * 1e4,
+            press: Vec3::NEG_Z * (100.0 * CUBE * CUBE * cohesion),
+            peak: None,
+            origin: Origin::Field,
+        };
+        let mut state = WallState::new(&structure);
+        assert!(
+            structural(
+                &structure,
+                &mut state,
+                &[load],
+                &mut SectionCache::default()
+            )
+            .is_empty()
+        );
+        let weighed = weigh(
+            &structure,
+            &mut state,
+            &[],
+            &[],
+            &[load],
+            &[],
+            &mut SectionCache::default(),
+        );
+        assert!(weighed.failures.is_empty());
+        assert!(fall(&structure, &mut state).is_empty());
     }
 }

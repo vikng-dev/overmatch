@@ -158,10 +158,16 @@ fn renumbering_the_chunks_changes_no_outcome() {
 /// (the joint alone holds the top chunk), and 1 % under it cracks nothing; `I` is the top's inertia
 /// about the hinge and `E_g` the work of raising its centre of mass over it, for the bed bears the
 /// top. A capacity read about the centroid, or without the weight the section carries (one far
-/// push then opening a plane a whole building stands on), fails here. Fixture geometry.
+/// push then opening a plane a whole building stands on), fails here. Fixture geometry; the
+/// fixture's seams state no shear ([`Shear::OpeningOnly`]), so no punch ring (the top sliding off
+/// its bed) competes with the hinge this test pins.
 #[test]
 fn a_push_fails_the_section_at_its_fracture_impulse() {
     let material = brick();
+    let seam = Seam {
+        shear: Shear::OpeningOnly,
+        ..material.seam
+    };
     let chunk = |y: f32| Chunk {
         volume: 0.2 * 0.2 * 0.25,
         centroid: Vec3::new(0.1, y, 0.125),
@@ -178,7 +184,7 @@ fn a_push_fails_the_section_at_its_fracture_impulse() {
                 area: 0.05,
                 centroid: Vec3::new(0.1, 0.0, 0.125),
                 normal: Vec3::Y,
-                bond: Bond::Bonded(material.seam),
+                bond: Bond::Bonded(seam),
             },
             Joint {
                 a: 0,
@@ -186,7 +192,7 @@ fn a_push_fails_the_section_at_its_fracture_impulse() {
                 area: 0.05,
                 centroid: Vec3::new(0.1, 0.2, 0.125),
                 normal: Vec3::Y,
-                bond: Bond::Bonded(material.seam),
+                bond: Bond::Bonded(seam),
             },
         ],
     };
