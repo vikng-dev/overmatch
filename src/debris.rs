@@ -39,9 +39,10 @@
 //!
 //! HOW MANY PIECES (DERIVED from `buildings::breakage`): a chunk leaves its building at most once
 //! and a loose piece never splits, so the pieces of a map never exceed its breakable chunks, and
-//! nothing else limits them. The shipped map's bound is 74,370 (MEASURED: 1,005 brick chunks in
-//! `assets/buildings/house_1/house_1.building.ron`, the elements whose material states a seam, times
-//! the 74 `house_proxy` placements in `assets/maps/kalinovo/level.json`; wood chunks never break).
+//! nothing else limits them. The shipped map's bound is 86,062 (MEASURED: 1,163 chunks in
+//! `assets/buildings/house_1/house_1.building.ron`, 1,005 brick and 158 wood, every element's
+//! material stating a seam, times the 74 `house_proxy` placements in
+//! `assets/maps/kalinovo/level.json`).
 //! Awake pieces are the ones in the solver. A sleeping piece's own per-tick cost and an awake pile
 //! held by a tank's island (above) are both unpriced.
 

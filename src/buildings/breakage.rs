@@ -144,7 +144,16 @@ impl Layout {
                 let bond = match joint.bond {
                     schema::Bond::Seam => Bond::Bonded(materials[a].seam),
                     schema::Bond::Bonded(m) => Bond::Bonded(
-                        masonry[usize::from(m)].map_or(fracture::Seam::NEVER, |m| m.seam),
+                        masonry
+                            .get(usize::from(m))
+                            .copied()
+                            .flatten()
+                            .ok_or_else(|| {
+                                format!(
+                                    "a bond names material {m}, which states no seam to hold it by"
+                                )
+                            })?
+                            .seam,
                     ),
                     schema::Bond::Resting => Bond::Resting,
                 };

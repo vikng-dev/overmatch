@@ -306,6 +306,16 @@
                 toughness: (4.2e5, Measured("red spruce, mode I, TL system, 420 kPa·√m: USDA FPL
                     Wood Handbook, FPL-GTR-190, 2010, Table 5-10, read in a third-party copy of the
                     chapter. The handbook's mode I range is 220–550 kPa·√m")),
+                tensile: Some((2.4e6, Measured("CLAIMED, not read: red spruce's tension
+                    perpendicular to grain at 12 % moisture, about 2.4 MPa (USDA FPL Wood Handbook,
+                    FPL-GTR-190, 2010, Table 5-3a, recalled; the spruces span about 2.4–2.6 MPa
+                    there). A seam between two chunks of one timber is the timber parting across
+                    its grain, the weaker way, and a bond between timbers is no stronger than the
+                    wood"))),
+                fracture_energy: Some((370.0, Derived("G = K_IC² / E_T: this row's toughness,
+                    0.42 MPa·√m, over red spruce's tangential modulus, E_T ≈ 0.043 × E_L with E_L ≈
+                    11.1 GPa at 12 % moisture (CLAIMED, not read: Wood Handbook Tables 5-1 and
+                    5-3a, recalled), 0.48 GPa: 370 J/m²"))),
             )),
         ),
         // Fired clay brick: every building's masonry (`assets/buildings/<id>/<id>.building.ron`

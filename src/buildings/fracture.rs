@@ -62,7 +62,7 @@ pub(crate) struct Masonry {
     pub density: f32,
     /// The energy that turns one cubic metre to dust, J/m³.
     pub crush: f32,
-    /// The seam between its chunks: [`Seam::NEVER`] where the row states none.
+    /// The seam between its chunks.
     pub seam: Seam,
 }
 
@@ -75,35 +75,29 @@ pub(crate) struct Seam {
     pub fracture_energy: f32,
 }
 
-impl Seam {
-    /// The seam of a substance whose row states none: no load reaches its strength or its
-    /// fracture energy, so it never opens; its chunks part only by dust or a rest giving way.
-    pub(crate) const NEVER: Self = Self {
-        tensile: f32::INFINITY,
-        fracture_energy: f32::INFINITY,
-    };
-}
-
 impl Masonry {
     /// Substance `name`'s values, or `None` where its row states no bulk facts (an element of it
     /// never breaks). The density and the seam's strength and fracture energy are the row's bulk
-    /// facts (the registry refuses a row stating one of the seam's two without the other; a row
-    /// stating neither has [`Seam::NEVER`]); the crush energy is the static term of the walk's own
-    /// force law at the row's factor (`factor / 1000 × a`, `a` the reference's cavity strength):
-    /// the energy per volume the walk spends opening a cavity in it. Refuses a name the registry
-    /// does not hold as hard matter.
+    /// facts (the registry refuses a row stating one of the seam's two without the other); the
+    /// crush energy is the static term of the walk's own force law at the row's factor
+    /// (`factor / 1000 × a`, `a` the reference's cavity strength): the energy per volume the walk
+    /// spends opening a cavity in it. Refuses a name the registry does not hold as hard matter,
+    /// and a row stating bulk facts but no seam: its chunks would have no law to part by.
     pub(crate) fn of(registry: &SubstanceRegistry, name: &str) -> Result<Option<Self>, String> {
         let hard = registry.hard(name).map_err(|err| err.to_string())?;
         let Some(bulk) = hard.bulk else {
             return Ok(None);
         };
-        let seam =
-            bulk.tensile
-                .zip(bulk.fracture_energy)
-                .map_or(Seam::NEVER, |(tensile, energy)| Seam {
-                    tensile: tensile as f32,
-                    fracture_energy: energy as f32,
-                });
+        let seam = bulk
+            .tensile
+            .zip(bulk.fracture_energy)
+            .map(|(tensile, energy)| Seam {
+                tensile: tensile as f32,
+                fracture_energy: energy as f32,
+            })
+            .ok_or_else(|| {
+                format!("substance {name:?} states bulk facts but no seam to part its chunks by")
+            })?;
         let share = f64::from(hard.factor() / REFERENCE_FACTOR);
         Ok(Some(Self {
             density: bulk.density as f32,
@@ -1578,7 +1572,7 @@ fn touched(
 /// gradient `g` from `J g = n × M_b`, `J` the joints' second moment of area about `c`. Each joint
 /// is a disc of its area (the push rule's reading of a joint, [`disc`]), so it adds its own
 /// `A²/4π` to `J`, and its peak is the gradient's reach to its rim. Each joint compares with its
-/// own seam (chunk `a`'s material's tensile strength, as [`crack`] reads it); the section's
+/// own seam (its bond's tensile strength, as [`crack`] reads it); the section's
 /// demand and capacity are the joint's whose ratio is highest. ASSUMED out of the check: the
 /// shear and the twist about `n` the joints also carry (no shear cohesion is in the material data),
 /// and crushing (self-weight compression is about 1/230 of brick's crushing strength, DERIVED in
@@ -1659,7 +1653,13 @@ fn weight_failure(
             let (du, dv) = offset(j);
             let rim = (joints[j].area / PI).sqrt();
             let peak = direct + gu * du + gv * dv + reach * rim;
-            (peak, joints[j].seam().map_or(0.0, |seam| seam.tensile))
+            (
+                peak,
+                joints[j]
+                    .seam()
+                    .expect("a section holds bonded joints only")
+                    .tensile,
+            )
         })
         .max_by(|a, b| (a.0 / a.1).total_cmp(&(b.0 / b.1)))?;
     Some(Failure {
@@ -2259,8 +2259,8 @@ mod tests {
 
     /// THE LAWS READ THE MATERIAL FROM DATA: the shipped Brick's seam strength is its row's
     /// `tensile`, its crush energy the walk's own static resistance at its factor (135.5 MJ/m³,
-    /// DERIVED in the prototype's README from 36.5 ref-mm/m), and a substance whose row states no
-    /// seam strength (the shipped Wood) has a seam that never opens ([`Seam::NEVER`]). A law
+    /// DERIVED in the prototype's README from 36.5 ref-mm/m), and the shipped Wood's seam is its
+    /// own row's, so a timber parts by its sourced strength, never by an assumed one. A law
     /// reading a constant in place of the row, or breaking every substance, fails here.
     #[test]
     fn the_material_is_the_substance_row() {
@@ -2277,7 +2277,12 @@ mod tests {
         let wood = Masonry::of(registry, "Wood")
             .unwrap()
             .expect("Wood states bulk facts");
-        assert_eq!(wood.seam, Seam::NEVER);
+        let bulk = registry.hard("Wood").unwrap().bulk.unwrap();
+        assert_eq!(f64::from(wood.seam.tensile), bulk.tensile.unwrap());
+        assert_eq!(
+            f64::from(wood.seam.fracture_energy),
+            bulk.fracture_energy.unwrap()
+        );
         assert!(Masonry::of(registry, "Adobe").is_err());
     }
 
