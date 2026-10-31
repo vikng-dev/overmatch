@@ -10,9 +10,9 @@
 //! The hole, the dent and the scratch, with a hidden window:
 //!
 //! ```text
-//! OVERMATCH_OFFLINE=1 SPIKE_SIM_WINDOWED=1 OVERMATCH_TARGET_AHEAD=1 OVERMATCH_HULL_MARKS_DEMO=1 \
+//! SPIKE_SIM_WINDOWED=1 OVERMATCH_TARGET_AHEAD=1 OVERMATCH_HULL_MARKS_DEMO=1 \
 //!   OVERMATCH_CAPTURE=<dir>/hull-mark.png OVERMATCH_CAPTURE_AT=18,21,24 \
-//!   OVERMATCH_CAPTURE_UI=0 OVERMATCH_CAPTURE_GIZMOS=0 target/debug/overmatch
+//!   OVERMATCH_CAPTURE_UI=0 OVERMATCH_CAPTURE_GIZMOS=0 target/debug/overmatch --offline
 //! ```
 //!
 //! Mounted only by the offline composition (`run_offline`), as `tank::scenario`'s target-fires

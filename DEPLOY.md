@@ -45,6 +45,6 @@ whose projectiles carry no scene root at all. `materials/materials.ron` and the 
 ## Local and LAN play
 
 Without a Worker URL the client connects directly. `OVERMATCH_SERVER=<host>[:port]` names any
-server (port 5888 by default); `--local` and the no-target fallback both mean `127.0.0.1:5888`.
-Either direct path wins over a baked or `OVERMATCH_API` Worker URL. The server binary runs as is:
+server (port 5888 by default) and wins over a baked or `OVERMATCH_API` Worker URL; with no target
+at all the client dials `127.0.0.1:5888`. The server binary runs as is:
 `cargo run --bin overmatch-server`.

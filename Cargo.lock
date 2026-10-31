@@ -6239,7 +6239,6 @@ dependencies = [
  "bevy_egui",
  "bevy_replicon",
  "bevy_winit",
- "chrono",
  "flate2",
  "glam 0.32.1",
  "gltf",

@@ -1,7 +1,5 @@
 fn main() {
-    let offline = std::env::args().any(|a| a == "--offline")
-        || std::env::var("OVERMATCH_OFFLINE").as_deref() == Ok("1");
-    if offline {
+    if std::env::args().any(|a| a == "--offline") {
         overmatch::run_offline();
     } else {
         overmatch::run_client();

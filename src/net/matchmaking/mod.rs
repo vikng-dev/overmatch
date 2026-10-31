@@ -1,7 +1,7 @@
 //! Matchmaking mode: the pre-connect Join menu that asks the matchmaking Worker for a match.
 //!
 //! Mounted by `net::client` only when the client runs against a Worker (`OVERMATCH_API`, or the
-//! build-time `OVERMATCH_DEFAULT_API`); `--local` and `OVERMATCH_SERVER` never mount it.
+//! build-time `OVERMATCH_DEFAULT_API`); `OVERMATCH_SERVER` never mounts it.
 //!
 //! - **Flow.** Startup fetches `GET /v1/locations?version=`, then every listed same-city beacon is
 //!   probed ([`ping`]); the picker ([`picker`]) shows continents and locations with ping and match

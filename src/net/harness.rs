@@ -36,8 +36,6 @@
 //! | `SPIKE_SPAWN_POSE` | `x,y,z,qx,qy,qz,qw`; off | Server spawn-pose override. |
 //! | `SPIKE_TRACE` | path; off | Role-qualified jitter/divergence JSONL. |
 //! | `SPIKE_TRACE_SIM_FIELDS` | flag; off | Add raw sim fields to trace tick rows. |
-//! | `--local` | client flag; off | Force `127.0.0.1:5888`, ahead of `OVERMATCH_SERVER` and any Worker URL. |
-//! | `--capture` | client/server flag; off | Auto-path `SPIKE_TRACE` capture with sim fields on. |
 //!
 //! Seeded jitter is active only when latency and jitter are both nonzero. For example,
 //! `SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 SPIKE_JITTER_SEED=1` gives every received packet the
@@ -62,7 +60,7 @@ use lightyear::prelude::input::native::{ActionState, InputMarker};
 
 use crate::command::{AimIntent, TankCommand};
 
-/// `--simulate-input` state: a fixed-tick counter driving a scripted throttle window, then a
+/// `SPIKE_SIMULATE_INPUT` state: a fixed-tick counter driving a scripted throttle window, then a
 /// clean exit once the script has played out.
 /// `fire_tick` defaults to 300 (mid-drive); `SPIKE_FIRE_TICK` overrides it.
 /// `SPIKE_SIM_LONG=1` (long-drive diagnostic): drive straight at full throttle for ~15 s —

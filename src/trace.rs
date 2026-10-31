@@ -15,7 +15,6 @@ use std::time::{Duration, Instant};
 
 use avian3d::prelude::{AngularVelocity, Collisions, LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
-use chrono::Local as LocalTime;
 use serde_json::{Value, json};
 
 use crate::tank::{Controlled, RemoteServos, Tank, TankServos, TankSim, WeaponGate, WeaponLoads};
@@ -126,33 +125,14 @@ pub(crate) fn role_path(path: &str, role: &str) -> PathBuf {
     PathBuf::from(format!("{path}.{role}.jsonl"))
 }
 
-fn capture_path(role: &str, timestamp: &str) -> PathBuf {
-    PathBuf::from(format!("/tmp/overmatch-{role}-{timestamp}.jsonl"))
-}
-
-fn selected_trace_path(
-    role: &str,
-    environment: Option<&str>,
-    capture_timestamp: Option<&str>,
-) -> Option<PathBuf> {
-    environment
-        .map(|path| role_path(path, role))
-        .or_else(|| capture_timestamp.map(|timestamp| capture_path(role, timestamp)))
-}
-
-/// Open the role-qualified sink and register the shared meta/flush systems when `SPIKE_TRACE` or
-/// `--capture` arms it. An enabled `SPIKE_TRACE` supplies the path even when the flag is also present.
-/// Returns `true` iff tracing is armed, so each composition plugin registers its recorders only in a
-/// traced run (dropping per-frame `resource_exists` gating). Called once per composition root.
+/// Open the role-qualified sink and register the shared meta/flush systems when `SPIKE_TRACE` arms
+/// it. Returns `true` iff tracing is armed, so each composition plugin registers its recorders only
+/// in a traced run (dropping per-frame `resource_exists` gating). Called once per composition root.
 fn install(app: &mut App, role: &'static str) -> bool {
-    let capture = std::env::args().any(|argument| argument == "--capture");
-    let environment = crate::env_value("SPIKE_TRACE");
-    let capture_timestamp = capture.then(|| LocalTime::now().format("%Y%m%d-%H%M%S").to_string());
-    let Some(resolved) =
-        selected_trace_path(role, environment.as_deref(), capture_timestamp.as_deref())
-    else {
+    let Some(path) = crate::env_value("SPIKE_TRACE") else {
         return false;
     };
+    let resolved = role_path(&path, role);
     let sink = match JsonlSink::create(&resolved) {
         Ok(sink) => sink,
         Err(err) => {
@@ -160,11 +140,8 @@ fn install(app: &mut App, role: &'static str) -> bool {
             return false;
         }
     };
-    if capture {
-        info!("capture: recording to {}", resolved.display());
-    }
     info!("trace: recording {role} rows to {}", resolved.display());
-    let sim_fields = crate::env_flag("SPIKE_TRACE_SIM_FIELDS", capture);
+    let sim_fields = crate::env_flag("SPIKE_TRACE_SIM_FIELDS", false);
     app.insert_resource(TraceWriter {
         sink,
         role,
@@ -604,26 +581,4 @@ fn next_local_tick(counter: &mut Local<u64>) -> u64 {
 struct NetFrameCtx<'w> {
     timeline: Option<Res<'w, LocalTimeline>>,
     checkpoints: Option<Res<'w, ReplicationCheckpointMap>>,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn capture_path_formats_role_and_timestamp() {
-        assert_eq!(
-            capture_path("client", "20260721-154530"),
-            PathBuf::from("/tmp/overmatch-client-20260721-154530.jsonl")
-        );
-        assert_eq!(
-            capture_path("server", "20260721-154531"),
-            PathBuf::from("/tmp/overmatch-server-20260721-154531.jsonl")
-        );
-        assert_eq!(
-            selected_trace_path("client", Some("/tmp/manual.jsonl"), Some("20260721-154532")),
-            Some(PathBuf::from("/tmp/manual.client.jsonl")),
-            "SPIKE_TRACE must beat the --capture auto path"
-        );
-    }
 }

@@ -42,9 +42,8 @@ use crate::{CombatantId, NetClientPlugin, ShotId, SimPlugin};
 const SERVER_PORT: u16 = 5888;
 const LOCAL_SERVER: &str = "127.0.0.1:5888";
 /// The matchmaking Worker's base URL baked in at build time (the release workflow sets
-/// `OVERMATCH_DEFAULT_API` and refuses to ship a client without it); when set, a client with
-/// neither `--local` nor `OVERMATCH_SERVER` starts in the Join menu instead of connecting to
-/// [`LOCAL_SERVER`].
+/// `OVERMATCH_DEFAULT_API` and refuses to ship a client without it); when set, a client without
+/// `OVERMATCH_SERVER` starts in the Join menu instead of connecting to [`LOCAL_SERVER`].
 const DEFAULT_API: Option<&str> = option_env!("OVERMATCH_DEFAULT_API");
 
 /// Where the Worker base URL came from.
@@ -70,17 +69,15 @@ enum ClientMode<'a> {
     Matchmaking { api: &'a str, source: ApiSource },
 }
 
-/// `--local` and `OVERMATCH_SERVER` select their direct paths whatever else is set; otherwise a
-/// non-empty Worker URL — `OVERMATCH_API`, then the baked one — selects matchmaking; otherwise the
-/// local server.
+/// `OVERMATCH_SERVER` selects its direct path whatever else is set; otherwise a non-empty Worker
+/// URL — `OVERMATCH_API`, then the baked one — selects matchmaking; otherwise the local server.
 fn choose_mode<'a>(
-    local: bool,
     server: Option<&'a str>,
     api: Option<&'a str>,
     baked_api: Option<&'a str>,
 ) -> ClientMode<'a> {
-    let direct = ClientMode::Direct(choose_server(local, server));
-    if local || server.is_some() {
+    let direct = ClientMode::Direct(choose_server(server));
+    if server.is_some() {
         return direct;
     }
     let present = |url: Option<&'a str>| url.map(str::trim).filter(|url| !url.is_empty());
@@ -168,7 +165,6 @@ impl ClientLinkTemplate {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ServerSource {
-    LocalFlag,
     Environment,
     LocalDefault,
 }
@@ -176,7 +172,6 @@ enum ServerSource {
 impl ServerSource {
     const fn label(self) -> &'static str {
         match self {
-            Self::LocalFlag => "--local",
             Self::Environment => "OVERMATCH_SERVER",
             Self::LocalDefault => "local default",
         }
@@ -189,13 +184,8 @@ struct ServerSelection<'a> {
     source: ServerSource,
 }
 
-fn choose_server(local: bool, environment: Option<&str>) -> ServerSelection<'_> {
-    if local {
-        ServerSelection {
-            raw: LOCAL_SERVER,
-            source: ServerSource::LocalFlag,
-        }
-    } else if let Some(raw) = environment {
+fn choose_server(environment: Option<&str>) -> ServerSelection<'_> {
+    if let Some(raw) = environment {
         ServerSelection {
             raw,
             source: ServerSource::Environment,
@@ -271,20 +261,19 @@ struct LinkSetup {
     template: ClientLinkTemplate,
 }
 
-/// Reads `--local`, `OVERMATCH_SERVER`, `OVERMATCH_API` and the `SPIKE_*` receive-conditioning
+/// Reads `OVERMATCH_SERVER`, `OVERMATCH_API` and the `SPIKE_*` receive-conditioning
 /// knobs. A direct target that does not resolve is the error: the client has nowhere to connect.
 fn configure_link(simulate: bool, tick_duration: Duration) -> Result<LinkSetup, String> {
     // A direct target is resolved once at startup. Raw socket addresses bypass DNS; hostnames
     // select their resolver's first IPv4 result because the UDP transport binds an IPv4 wildcard
     // (`ClientLinkTemplate::bundle`). The scripted harness has no menu to click, so it always
     // connects directly.
-    let local = std::env::args().any(|arg| arg == "--local");
     let environment = std::env::var("OVERMATCH_SERVER").ok();
     let api = std::env::var("OVERMATCH_API").ok();
     let mode = if simulate {
-        ClientMode::Direct(choose_server(local, environment.as_deref()))
+        ClientMode::Direct(choose_server(environment.as_deref()))
     } else {
-        choose_mode(local, environment.as_deref(), api.as_deref(), DEFAULT_API)
+        choose_mode(environment.as_deref(), api.as_deref(), DEFAULT_API)
     };
     let target = match mode {
         ClientMode::Direct(selection) => {
@@ -375,8 +364,7 @@ fn configure_link(simulate: bool, tick_duration: Duration) -> Result<LinkSetup, 
 }
 
 pub fn run() {
-    let simulate = std::env::args().any(|a| a == "--simulate-input")
-        || harness::env_flag("SPIKE_SIMULATE_INPUT", false);
+    let simulate = harness::env_flag("SPIKE_SIMULATE_INPUT", false);
     let sim_windowed = simulate && harness::env_flag("SPIKE_SIM_WINDOWED", false);
     // The capture scripts are the only users of `SPIKE_SIM_WINDOWED`, and what they want is the
     // RenderApp (KTX2 transcode needs a real GPU device), not a window — so the window defaults to
@@ -2394,14 +2382,10 @@ mod tests {
         assert_eq!(resolved, "192.0.2.20:6000".parse().unwrap());
     }
 
-    /// One precedence law: `--local` beats `OVERMATCH_SERVER`, which beats any Worker URL
-    /// (`OVERMATCH_API` over the baked one, a blank one unset), which beats the local default.
+    /// One precedence law: `OVERMATCH_SERVER` beats any Worker URL (`OVERMATCH_API` over the
+    /// baked one, a blank one unset), which beats the local default.
     #[test]
     fn direct_paths_win_over_any_worker_url() {
-        let local_flag = ServerSelection {
-            raw: LOCAL_SERVER,
-            source: ServerSource::LocalFlag,
-        };
         let environment = ServerSelection {
             raw: "env.example",
             source: ServerSource::Environment,
@@ -2410,9 +2394,8 @@ mod tests {
             raw: LOCAL_SERVER,
             source: ServerSource::LocalDefault,
         };
-        assert_eq!(choose_server(true, Some("env.example")), local_flag);
-        assert_eq!(choose_server(false, Some("env.example")), environment);
-        assert_eq!(choose_server(false, None), local_default);
+        assert_eq!(choose_server(Some("env.example")), environment);
+        assert_eq!(choose_server(None), local_default);
 
         for (api, baked_api) in [
             (None, None),
@@ -2424,18 +2407,13 @@ mod tests {
             ),
         ] {
             assert_eq!(
-                choose_mode(true, Some("env.example"), api, baked_api),
-                ClientMode::Direct(local_flag),
-            );
-            assert_eq!(
-                choose_mode(false, Some("env.example"), api, baked_api),
+                choose_mode(Some("env.example"), api, baked_api),
                 ClientMode::Direct(environment),
             );
         }
 
         assert_eq!(
             choose_mode(
-                false,
                 None,
                 Some(" https://api.example "),
                 Some("https://baked-api.example"),
@@ -2446,7 +2424,7 @@ mod tests {
             }
         );
         assert_eq!(
-            choose_mode(false, None, Some(""), Some("https://baked-api.example")),
+            choose_mode(None, Some(""), Some("https://baked-api.example")),
             ClientMode::Matchmaking {
                 api: "https://baked-api.example",
                 source: ApiSource::BakedDefault,
@@ -2454,7 +2432,7 @@ mod tests {
             "an empty OVERMATCH_API is unset"
         );
         assert_eq!(
-            choose_mode(false, None, None, Some("  ")),
+            choose_mode(None, None, Some("  ")),
             ClientMode::Direct(local_default),
             "with no Worker URL anywhere the client connects to the local server"
         );

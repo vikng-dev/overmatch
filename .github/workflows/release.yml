@@ -5,8 +5,8 @@ name: Release
 #
 # THE SERVER RUNS ON EDGEGAP: one server per match, started by the matchmaking Worker (`backend/`)
 # for the version a joining client reports. A release client finds it only through the Worker URL
-# baked in as `OVERMATCH_DEFAULT_API` (from `scripts/default-api.sh`); it carries no server address. `OVERMATCH_SERVER` / `--local`
-# stay as runtime overrides for dev and LAN play.
+# baked in as `OVERMATCH_DEFAULT_API` (from `scripts/default-api.sh`); it carries no server address.
+# `OVERMATCH_SERVER` stays as the runtime override for dev and LAN play.
 #
 # WHAT IS GUARANTEED: no Release becomes visible unless Edgegap version `<CARGO_PKG_VERSION>` —
 # the version its clients report to the Worker — already runs this run's server image, both

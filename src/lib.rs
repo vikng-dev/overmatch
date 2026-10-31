@@ -1024,10 +1024,10 @@ impl Plugin for GamePlugin {
     }
 }
 
-/// The offline feel-test route (`overmatch --offline` / `OVERMATCH_OFFLINE=1`): the windowed
-/// runtime plugin set [`run_client`](net::run_client) mounts — exe-relative asset root, continuous
-/// winit updates — plus [`GamePlugin`], the true single-player composition. NO netcode: no
-/// lightyear plugins, no connection entity, nothing that can attempt a connect.
+/// The offline feel-test route (`overmatch --offline`): the windowed runtime plugin set
+/// [`run_client`](net::run_client) mounts — exe-relative asset root, continuous winit updates —
+/// plus [`GamePlugin`], the true single-player composition. NO netcode: no lightyear plugins, no
+/// connection entity, nothing that can attempt a connect.
 ///
 pub fn run_offline() {
     // Hidden-capture mode, the same contract as the net client's capture path (`net::run_client`'s
