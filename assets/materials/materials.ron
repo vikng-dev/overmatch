@@ -48,7 +48,11 @@
 // stated beside `facts` (each states a density). A breakable seam also requires `shear_cohesion`
 // (c, Pa, without precompression) and `shear_fracture_energy` (cohesive G_II, J/m², excluding
 // continuing friction work). All four seam facts are stated together or none is; an incomplete
-// breakable row is refused at load. The punch ring reads the shear facts. A non-metal's
+// breakable row is refused at load. The punch ring reads the shear facts. A breakable row also
+// states `bulk.blast`: compressive strength (Pa), its dynamic/static ratio and reference strain
+// rate (1/s), fully dense grain/cell-wall density (kg/m³) and Young's modulus (Pa). These inputs
+// are stored only: no blast law reads them yet. Missing or unusable inputs are refused at load.
+// Sources and analogue limits: .agents/scratch/blast-b3-material-sources.md. A non-metal's
 // effective factor is its compressive (crushing) strength over the reference flow strength
 // (~1 GPa), × 1000: a strength ratio, the reading the steels' DERIVED rows note, not a measured
 // penetration equivalence.
@@ -326,6 +330,37 @@
                     0.42 MPa·√m, over red spruce's tangential modulus, E_T ≈ 0.043 × E_L with E_L ≈
                     11.1 GPa at 12 % moisture (CLAIMED, not read: Wood Handbook Tables 5-1 and
                     5-3a, recalled), 0.48 GPa: 370 J/m²"))),
+                // Blast inputs only; no current law reads this block. ASSUMED European-spruce
+                // analogue for the scalar forest timber; the existing density and seam data
+                // retain their own sources. Grain and moisture are not resolved by this row.
+                blast: Some((
+                    compressive_strength: Some((5.6e6, Measured("spruce, tangential compression,
+                        quasi-static mean yield stress 5.60 MPa; Zulkifli, Kusumaningrum and Rahmi,
+                        Experimental Study and Numerical Model of Spruce and Teak Wood Strength
+                        Properties Under Compressive High Strain Rate Loading, J. Eng. Technol.
+                        Sci. 53(1), 210103 (2021), Table 3, read primary (specimen moisture 8-10%).
+                        https://journals.itb.ac.id/index.php/jets/article/download/13345/pdf_111/44406;
+                        doi:10.5614/j.eng.technol.sci.2021.53.1.3"))),
+                    compressive_dif: Some((5.960714285714286, Derived("MEASURED tangential yield
+                        stress 33.38 MPa at 2400 /s (specimen ST-52, Zulkifli et al. 2021,
+                        Table 7) divided by the same study's quasi-static mean 5.60 MPa (Table 3).
+                        A reference-rate datum, not a constant over all strain rates; read primary
+                        at the compressive_strength URL. ASSUMED spruce analogue"))),
+                    compressive_dif_strain_rate: Some((2400.0, Measured("2400 /s, tangential
+                        specimen ST-52; Zulkifli et al. 2021, Table 7, read primary at the
+                        compressive_strength URL. The paper's tangential tests span 591-2530 /s"))),
+                    solid_density: Some((1500.0, Derived("1.5 g/cm³ x 1000 = 1500 kg/m³, the
+                        cell-wall density used as the theoretical fully dense limit in Kamke,
+                        Densified Radiata Pine for Structural Composites, Maderas Ciencia y
+                        Tecnologia 8(2):83-92 (2006), discussion before Conclusions, read primary:
+                        https://doi.org/10.4067/S0718-221X2006000200002. ASSUMED cell-wall
+                        substance analogue, not a measured spruce lock-up strain; no 1.4
+                        densification factor is supplied or inferred from a recalled formula"))),
+                    youngs_modulus: Some((118.23e6, Measured("spruce, tangential quasi-static
+                        compression mean E = 118.23 MPa; Zulkifli et al. 2021, Table 3, read primary
+                        at the compressive_strength URL. Same specimens as compressive_strength,
+                        ASSUMED analogue for the scalar timber; not the longitudinal modulus"))),
+                )),
                 shear_cohesion: Some((8.9e6, Measured("red spruce, clear straight-grained wood,
                     12 % moisture: shear parallel to grain 8900 kPa; USDA Forest Products
                     Laboratory, Wood Handbook FPL-GTR-282 (2021), Chapter 5 Table 5-3a,
@@ -378,6 +413,37 @@
                     mode-I fracture energy from van der Pluijm's couplet tests as Lourenco (1996)
                     restates them, 5-20 J/m²; the geometric mean taken (the wall prototype's
                     value)"))),
+                // Blast inputs only; no current law reads this block. Unit compression and
+                // grain density describe local compaction; E is the effective assemblage's.
+                blast: Some((
+                    compressive_strength: Some((36.5e6, Measured("molded solid clay brick mean
+                        unit compressive strength 36.5 MPa, ASTM C67; BIA Technical Note 3A,
+                        June 2024, Table 1, read primary:
+                        https://www.gobrick.com/media/file/TN_3A_Brick_Masonry_Material_Properties.pdf.
+                        This is unit strength, not the masonry prism's f'm"))),
+                    compressive_dif: Some((2.357106867962561, Derived("0.3224 ln(100) + 0.8724,
+                        Pereira, Dias and Lourenco, Dynamic Properties of Clay Brick at Different
+                        Strain Rates, 12th Canadian Masonry Symposium (2013), eq. 1, read primary:
+                        https://www.canadamasonrydesigncentre.com/wp-content/uploads/12th_symposium/621.pdf.
+                        Fit to measured handmade Galveias brick; ASSUMED rate analogue for this
+                        molded-brick row. Published domain 4 < strain rate < 200 /s; this is a
+                        reference-rate datum, not permission to extrapolate"))),
+                    compressive_dif_strain_rate: Some((100.0, Tuned("ASSUMED reference rate
+                        100 /s within Pereira et al. 2013 eq. 1's published domain 4-200 /s;
+                        compressive_dif evaluates that material-property fit at this rate"))),
+                    solid_density: Some((2250.0, Measured("published grade SW brick grain-density
+                        parameter, Meyer, ARL-TR-5556 (2011), Table 1, read primary model report:
+                        https://www.govinfo.gov/content/pkg/GOVPUB-D101-PURL-gpo10967/pdf/GOVPUB-D101-PURL-gpo10967.pdf.
+                        Meyer attributes the datum to Williams et al., ERDC/GSL TR-07-24; that
+                        underlying test report was not independently inspected. ASSUMED grade SW
+                        analogue for this row's London-stock bulk density"))),
+                    youngs_modulus: Some((8.6e9, Derived("BIA TN 3A (June 2024), Table 5 and
+                        eq. 1, read at the compressive_strength URL. Linear interpolation for
+                        36.5 MPa units with Type N mortar between unit strengths 28.61 and
+                        42.75 MPa and prism strengths 10.34 and 13.79 MPa gives f'm = 12.265 MPa;
+                        E_m = 700 f'm = 8.586 GPa, rounded to 8.6 GPa. ASSUMED effective masonry
+                        modulus for the scalar material, not the intact brick unit's modulus"))),
+                )),
                 shear_cohesion: Some((0.165e6, Measured("cement-mortar and solid clay brick
                     triplets (TC), Mohr-Coulomb intercept 0.165 MPa: Segura et al. (2021),
                     Experimental comparison of two testing setups for characterizing the shear

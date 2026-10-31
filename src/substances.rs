@@ -171,6 +171,28 @@ pub struct BulkFacts {
     /// Cohesive mode-II fracture energy `G_II`, J/m², excluding continuing friction work.
     /// Required with [`Self::shear_cohesion`]; the punch-ring law reads it.
     pub shear_fracture_energy: Option<f64>,
+    /// Sourced inputs for the blast crush and scab laws, required on every breakable row.
+    /// No law reads these yet; the blast material laws will consume them.
+    pub blast: Option<BlastFacts>,
+}
+
+/// Material inputs reserved for the game's environment blast laws. SI units. This is data only:
+/// the current wear pool and push laws do not consume it. Sources and the scope of each analogue
+/// live in `assets/materials/materials.ron` and `.agents/scratch/blast-b3-material-sources.md`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BlastFacts {
+    /// Quasi-static compressive strength, Pa.
+    pub compressive_strength: f64,
+    /// Dynamic/static compressive-strength ratio at [`Self::compressive_dif_strain_rate`].
+    /// A reference-rate datum, not a rate-independent multiplier or permission to extrapolate.
+    pub compressive_dif: f64,
+    /// Strain rate of the stated dynamic ratio, s⁻¹.
+    pub compressive_dif_strain_rate: f64,
+    /// Fully dense grain or cell-wall density, kg/m³, greater than the bulk density. This is an
+    /// input to a compaction law, not a measured strain at the onset of densification.
+    pub solid_density: f64,
+    /// Young's modulus in the direction represented by the material row, Pa.
+    pub youngs_modulus: f64,
 }
 
 /// What a round's burst block reads of the substance its burst core is made of. SI units.
@@ -342,7 +364,7 @@ enum SubstanceFile {
         debris_half_angle_deg: Sourced<f64>,
         facts: Option<FactsFile>,
         #[serde(default)]
-        bulk: Option<BulkFile>,
+        bulk: Option<Box<BulkFile>>,
         #[serde(default)]
         friction: Option<Sourced<f32>>,
         #[serde(default)]
@@ -387,6 +409,101 @@ struct BulkFile {
     fracture_energy: Option<Sourced<f64>>,
     shear_cohesion: Option<Sourced<f64>>,
     shear_fracture_energy: Option<Sourced<f64>>,
+    blast: Option<BlastFile>,
+}
+
+impl BulkFile {
+    fn facts(self, name: &str) -> Result<BulkFacts, String> {
+        let breakable = self.tensile.is_some()
+            || self.fracture_energy.is_some()
+            || self.shear_cohesion.is_some()
+            || self.shear_fracture_energy.is_some();
+        let blast = match self.blast {
+            Some(file) => Some(file.facts(name, self.density.0)?),
+            None if breakable => {
+                return Err(format!(
+                    "substance {name:?}: bulk.blast is missing from a breakable material: author \
+                     compressive_strength (Pa), compressive_dif and its compressive_dif_strain_rate \
+                     (1/s), solid_density (kg/m³) and youngs_modulus (Pa), each with its \
+                     material-property source; no blast law reads these inputs yet"
+                ));
+            }
+            // Bulk-only matter is unbreakable, so the blast material laws never read it.
+            None => None,
+        };
+        Ok(BulkFacts {
+            density: self.density.0,
+            toughness: self.toughness.0,
+            tensile: self.tensile.map(|value| value.0),
+            fracture_energy: self.fracture_energy.map(|value| value.0),
+            shear_cohesion: self.shear_cohesion.map(|value| value.0),
+            shear_fracture_energy: self.shear_fracture_energy.map(|value| value.0),
+            blast,
+        })
+    }
+}
+
+/// Optional fields preserve the row name and a repair in load diagnostics; a complete parsed
+/// block becomes [`BlastFacts`], whose fields cannot be absent. No numeric defaults.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct BlastFile {
+    compressive_strength: Option<Sourced<f64>>,
+    compressive_dif: Option<Sourced<f64>>,
+    compressive_dif_strain_rate: Option<Sourced<f64>>,
+    solid_density: Option<Sourced<f64>>,
+    youngs_modulus: Option<Sourced<f64>>,
+}
+
+impl BlastFile {
+    fn facts(self, name: &str, density: f64) -> Result<BlastFacts, String> {
+        let required = |field, value: Option<Sourced<f64>>| {
+            let value = value
+                .ok_or_else(|| {
+                    format!(
+                        "substance {name:?}: bulk.blast.{field} is missing: author this blast \
+                     material input with its material-property source"
+                    )
+                })?
+                .0;
+            if !value.is_finite() || value <= 0.0 {
+                return Err(format!(
+                    "substance {name:?}: bulk.blast.{field} must be finite and positive \
+                     (got {value}); author a usable value with its material-property source"
+                ));
+            }
+            Ok(value)
+        };
+        let facts = BlastFacts {
+            compressive_strength: required("compressive_strength", self.compressive_strength)?,
+            compressive_dif: required("compressive_dif", self.compressive_dif)?,
+            compressive_dif_strain_rate: required(
+                "compressive_dif_strain_rate",
+                self.compressive_dif_strain_rate,
+            )?,
+            solid_density: required("solid_density", self.solid_density)?,
+            youngs_modulus: required("youngs_modulus", self.youngs_modulus)?,
+        };
+        if facts.compressive_dif < 1.0 {
+            return Err(format!(
+                "substance {name:?}: bulk.blast.compressive_dif must be at least one; author the \
+                 dynamic/static strength ratio with its material-property source"
+            ));
+        }
+        if facts.solid_density <= density {
+            return Err(format!(
+                "substance {name:?}: bulk.blast.solid_density must exceed bulk.density; author \
+                 the fully dense grain or cell-wall density with its material-property source"
+            ));
+        }
+        if !(facts.compressive_strength * facts.compressive_dif).is_finite() {
+            return Err(format!(
+                "substance {name:?}: bulk.blast.compressive_strength * compressive_dif overflows; \
+                 author usable strengths in Pa and a dimensionless ratio with their sources"
+            ));
+        }
+        Ok(facts)
+    }
 }
 
 #[derive(Deserialize)]
@@ -455,14 +572,7 @@ fn converted(name: &str, file: SubstanceFile) -> Result<(Substance, Option<Strin
                     youngs_modulus: facts.youngs_modulus.0,
                     poisson_ratio: facts.poisson_ratio.0,
                 }),
-                bulk: bulk.map(|bulk| BulkFacts {
-                    density: bulk.density.0,
-                    toughness: bulk.toughness.0,
-                    tensile: bulk.tensile.map(|tensile| tensile.0),
-                    fracture_energy: bulk.fracture_energy.map(|energy| energy.0),
-                    shear_cohesion: bulk.shear_cohesion.map(|cohesion| cohesion.0),
-                    shear_fracture_energy: bulk.shear_fracture_energy.map(|energy| energy.0),
-                }),
+                bulk: bulk.map(|bulk| (*bulk).facts(name)).transpose()?,
                 friction: friction.map(|friction| friction.0),
                 burst: burst.map(BurstFile::facts),
             };
@@ -1040,7 +1150,12 @@ mod tests {
                 bulk: Some((density: (1800.0, Tuned("fixture")),
                     toughness: (5.0e5, Tuned("fixture")),
                     tensile: Some((1.0e6, Tuned("fixture"))),
-                    fracture_energy: Some((10.0, Tuned("fixture"))), {shear}))),"#,
+                    fracture_energy: Some((10.0, Tuned("fixture"))), {shear},
+                    blast: Some((compressive_strength: Some((20e6, Tuned("fixture"))),
+                        compressive_dif: Some((2.0, Tuned("fixture"))),
+                        compressive_dif_strain_rate: Some((100.0, Tuned("fixture"))),
+                        solid_density: Some((2500.0, Tuned("fixture"))),
+                        youngs_modulus: Some((8e9, Tuned("fixture")))))))),"#,
             ))
         };
         let path = std::path::Path::new("fixture/materials.ron");
@@ -1084,6 +1199,80 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(err.contains("provenance"), "{err}");
+        }
+    }
+
+    /// BREAKABLE BLAST INPUTS ARE COMPLETE AND SOURCED BEFORE PLAY (the game's environment
+    /// destruction model). The future crush/scab consumers rely on no missing field becoming a
+    /// code default, on finite positive inputs and on nonzero pore volume. Each omission and
+    /// invalid value must name its actual file, row, field and repair. ASSUMED fixture data.
+    #[test]
+    fn a_breakable_row_needs_complete_sourced_blast_inputs_at_load() {
+        let fields = [
+            ("compressive_strength", "20e6"),
+            ("compressive_dif", "2.0"),
+            ("compressive_dif_strain_rate", "100.0"),
+            ("solid_density", "2500.0"),
+            ("youngs_modulus", "8e9"),
+        ];
+        let authored: Vec<String> = fields
+            .iter()
+            .map(|(field, value)| format!(r#"{field}: Some(({value}, Measured("fixture")))"#))
+            .collect();
+        let row = |blast: &str| {
+            with(&format!(
+                r#"
+            "Fixture": Hard(resistance: Effective((20.0, Tuned("fixture"))),
+                visual: "fixture", debris_half_angle_deg: (26.2, Tuned("fixture")),
+                bulk: Some((density: (1800.0, Tuned("fixture")),
+                    toughness: (5e5, Tuned("fixture")),
+                    tensile: Some((1e6, Tuned("fixture"))),
+                    fracture_energy: Some((10.0, Tuned("fixture"))),
+                    shear_cohesion: Some((200000.0, Tuned("fixture"))),
+                    shear_fracture_energy: Some((30.0, Tuned("fixture"))), {blast}))),
+        "#
+            ))
+        };
+        let path = std::path::Path::new("fixture/materials.ron");
+        let load = |blast: &str| SubstanceRegistry::from_ron_at(path, &row(blast));
+        let block = |fields: &[String]| format!("blast: Some(({}))", fields.join(","));
+        load(&block(&authored)).expect("complete sourced fixture loads");
+        let refusal = |blast: &str, field: &str| {
+            let err = load(blast).unwrap_err().to_string();
+            for required in [
+                "fixture/materials.ron",
+                "Fixture",
+                field,
+                "author",
+                "source",
+            ] {
+                assert!(err.contains(required), "{required}: {err}");
+            }
+        };
+        refusal("", "bulk.blast");
+        for (index, (field, valid)) in fields.iter().enumerate() {
+            let mut missing = authored.clone();
+            missing.remove(index);
+            refusal(&block(&missing), field);
+            for invalid in ["0.0", "-1.0", "NaN", "inf"] {
+                let mut invalid_fields = authored.clone();
+                invalid_fields[index] = authored[index].replace(valid, invalid);
+                refusal(&block(&invalid_fields), field);
+            }
+            let mut bare = authored.clone();
+            bare[index] = format!("{field}: Some({valid})");
+            let err = load(&block(&bare)).unwrap_err().to_string();
+            assert!(err.contains("provenance"), "{err}");
+        }
+        for (index, value, field) in [
+            (1, "0.5", "compressive_dif"),
+            (3, "1800.0", "solid_density"),
+            (3, "1700.0", "solid_density"),
+            (0, "1e308", "compressive_strength"),
+        ] {
+            let mut invalid = authored.clone();
+            invalid[index] = authored[index].replace(fields[index].1, value);
+            refusal(&block(&invalid), field);
         }
     }
 
