@@ -2084,8 +2084,9 @@ fn shadow_distance_override() -> Option<f32> {
 }
 
 /// "An external capture harness has PINNED this window; settings must not manage it." Inserted by
-/// the harness that creates a hidden capture window (`SPIKE_SIM_WINDOWED` without
-/// `SPIKE_SIM_VISIBLE` — see `net::client::run`), whose window is deliberately `Windowed` +
+/// each harness that creates a hidden capture window — a documentation capture on any root
+/// (`dev_capture`), and `SPIKE_SIM_WINDOWED` without `SPIKE_SIM_VISIBLE` (`net::client::run`,
+/// `run_offline`) — whose window is deliberately `Windowed` +
 /// invisible: [`apply_settings`] re-applying a persisted fullscreen at runtime would order that
 /// window front on macOS regardless of `visible: false`, defeating the no-focus-steal guarantee
 /// the creation-time fields bought.
@@ -2144,8 +2145,8 @@ fn apply_settings(
     // bevy_ui's global multiplier. Present on every windowed root (it comes with `UiPlugin`); a
     // bare-`App` test must init it, same as the shadow map above.
     mut ui_scale: ResMut<UiScale>,
-    // Present exactly on a hidden capture client (`SPIKE_SIM_WINDOWED` without
-    // `SPIKE_SIM_VISIBLE`) — the window sub-block below must not run for it.
+    // Present exactly on a hidden capture run (see `CaptureWindowPinned`) — the window sub-block
+    // below must not run for it.
     capture_pinned: Option<Res<CaptureWindowPinned>>,
     // The applied half of the LOD budget row, read by `geometry_lod` — see `PixelBudget`.
     mut lod_budget: ResMut<LodPixelBudget>,

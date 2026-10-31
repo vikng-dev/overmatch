@@ -12,19 +12,10 @@
 use bevy::prelude::*;
 
 fn main() {
-    // A capture run (`OVERMATCH_CAPTURE`) creates its window invisible: `visible: false` is the
-    // one macOS lever that keeps a run from taking the screen (see `overmatch::run_offline`).
-    let hidden = std::env::var_os("OVERMATCH_CAPTURE").is_some();
     App::new()
-        .add_plugins(overmatch::default_plugins().set(WindowPlugin {
-            primary_window: Some(Window {
-                visible: !hidden,
-                ..default()
-            }),
-            ..default()
-        }))
+        .add_plugins(overmatch::default_plugins())
         .add_plugins(overmatch::track_sandbox::plugin)
-        // Documentation frames; inert without `OVERMATCH_CAPTURE`.
+        // Documentation frames; inert without `OVERMATCH_CAPTURE`. A capture hides the window.
         .add_plugins(overmatch::dev_capture::plugin)
         .run();
 }

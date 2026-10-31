@@ -368,10 +368,10 @@ pub fn run() {
     // The capture scripts are the only users of `SPIKE_SIM_WINDOWED`, and what they want is the
     // RenderApp (KTX2 transcode needs a real GPU device), not a window — so the window defaults to
     // hidden and stops stealing focus from the operator. `SPIKE_SIM_VISIBLE=1` restores the
-    // eyes-on diagnostic.
-    // A documentation capture (`dev_capture`, `OVERMATCH_CAPTURE`) is hidden for the same reason.
+    // eyes-on diagnostic. A documentation capture (`dev_capture`, `OVERMATCH_CAPTURE`) hides and
+    // pins the window itself, as on every root.
     let capture = !simulate && std::env::var_os("OVERMATCH_CAPTURE").is_some();
-    let hidden = (sim_windowed && !harness::env_flag("SPIKE_SIM_VISIBLE", false)) || capture;
+    let hidden = sim_windowed && !harness::env_flag("SPIKE_SIM_VISIBLE", false);
 
     let mut app = App::new();
     if simulate && !sim_windowed {

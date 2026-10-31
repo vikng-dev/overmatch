@@ -64,10 +64,11 @@
 //!
 //! # Invariant: a capture run shows no window
 //!
-//! The primary window is created hidden and, on macOS, the process renounces activation. A root
-//! that already created its window hidden keeps both duties ([`run_offline`](crate::run_offline),
-//! whose `SPIKE_SIM_WINDOWED=1` mode also keeps a persisted fullscreen from re-applying — pass it
-//! there). A hidden window has no swapchain texture, and a window screenshot reads back nothing
+//! On every root that mounts this plugin, with no variable but the capture's own: the primary
+//! window is created hidden and `Windowed`, settings never re-apply a persisted fullscreen to it
+//! (`settings::CaptureWindowPinned`), and on macOS the process renounces activation unless the
+//! root created the window hidden and renounced it itself. A focus loss never pauses the run
+//! (`state::FocusPauseSuppressed`). A hidden window has no swapchain texture, and a window screenshot reads back nothing
 //! without one (`bevy_render::view::window::screenshot::submit_screenshot_commands` skips the
 //! copy), so the frame is instead read back from an offscreen image that every window-targeting
 //! camera is pointed at one second before the first frame.
@@ -162,8 +163,7 @@ pub fn plugin(app: &mut App) {
         size.x,
         size.y
     );
-    hide_window(app);
-    silence(app);
+    unattended(app);
     // The effects plugin only `init_resource`s the RNG, so this seed holds in either mount order.
     app.insert_resource(crate::vfx::ViewRng::seeded(VIEW_SEED));
     if let Some(step) = std::env::var("OVERMATCH_CAPTURE_STEP_S")
@@ -255,6 +255,27 @@ pub fn plugin(app: &mut App) {
             hide_ui.before(VisibilitySystems::VisibilityPropagate),
         );
     }
+}
+
+/// What a capture run implies on every root, with no variable of its own (module doc): the window
+/// hidden and pinned, the run silent, and a focus loss never pausing it.
+fn unattended(app: &mut App) {
+    hide_window(app);
+    pin_window(app);
+    silence(app);
+    app.insert_resource(crate::state::FocusPauseSuppressed);
+}
+
+/// Keep the primary window a plain window for the whole run: `Windowed` at creation, so a persisted
+/// fullscreen never boots, and [`crate::settings::CaptureWindowPinned`], so settings never
+/// re-applies one later. On macOS either would order the window front whatever `visible` says.
+fn pin_window(app: &mut App) {
+    let world = app.world_mut();
+    let mut windows = world.query_filtered::<&mut Window, With<PrimaryWindow>>();
+    if let Ok(mut window) = windows.single_mut(world) {
+        window.mode = bevy::window::WindowMode::Windowed;
+    }
+    app.insert_resource(crate::settings::CaptureWindowPinned);
 }
 
 /// Zero the global volume for the run, after every plugin's build (module doc).
@@ -661,6 +682,48 @@ pub(crate) fn retarget_to(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A CAPTURE RUN TAKES NO SCREEN AND NEVER PAUSES, on any root, with no variable of its own:
+    /// capture drivers run on a machine its owner is working at. The window a root described
+    /// visible and fullscreen is hidden and `Windowed` before winit creates it, settings are told
+    /// to leave it so, the run is silent, and a focus loss does not pause it. Mutants: dropping any
+    /// one of [`hide_window`], [`pin_window`], [`silence`] or the focus marker fails one assert.
+    #[test]
+    fn a_capture_run_is_hidden_pinned_silent_and_never_paused() {
+        let mut app = App::new();
+        let window = app
+            .world_mut()
+            .spawn((
+                Window {
+                    mode: bevy::window::WindowMode::BorderlessFullscreen(
+                        bevy::window::MonitorSelection::Primary,
+                    ),
+                    ..default()
+                },
+                PrimaryWindow,
+            ))
+            .id();
+        unattended(&mut app);
+        // What a later `AudioPlugin` build writes. Only `PreStartup` runs: `Startup` holds the
+        // macOS activation revocation, which needs the process's main thread.
+        app.insert_resource(GlobalVolume::new(Volume::Linear(1.0)));
+        app.world_mut().run_schedule(PreStartup);
+        let window = app.world().get::<Window>(window).expect("the window");
+        assert!(!window.visible);
+        assert_eq!(window.mode, bevy::window::WindowMode::Windowed);
+        assert!(
+            app.world()
+                .contains_resource::<crate::settings::CaptureWindowPinned>()
+        );
+        assert!(
+            app.world()
+                .contains_resource::<crate::state::FocusPauseSuppressed>()
+        );
+        assert_eq!(
+            app.world().resource::<GlobalVolume>().volume.to_linear(),
+            0.0
+        );
+    }
 
     /// A CAPTURE RUN IS SILENT WHATEVER MOUNTS AFTER IT. Capture runs are unattended, on a machine
     /// its owner is working at; `AudioPlugin` inserts its own `GlobalVolume` when it builds, so a

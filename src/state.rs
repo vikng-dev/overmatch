@@ -139,6 +139,9 @@ pub fn client_plugin(app: &mut App) {
     escape_router(app);
     // The pause toggle and the focus watcher must run in either state, so they are deliberately not
     // in `GameplaySet`.
+    if crate::env_flag("OVERMATCH_NO_FOCUS_PAUSE", false) {
+        app.insert_resource(FocusPauseSuppressed);
+    }
     app.add_systems(Update, (pause_toggle(), release_on_focus_lost))
         .add_systems(OnEnter(AppState::Playing), (grab_cursor, resume_physics))
         .add_systems(
@@ -156,6 +159,12 @@ pub(crate) fn grab_now(window: &mut Window, cursor: &mut CursorOptions) {
     cursor.grab_mode = CursorGrabMode::Locked;
     cursor.visible = false;
 }
+
+/// Losing window focus does not pause: an unattended run keeps simulating so it never stops
+/// mid-leg. Inserted at build by a capture run (`dev_capture`) and by `OVERMATCH_NO_FOCUS_PAUSE=1`
+/// (the perf scripts' measurement windows); nothing removes it.
+#[derive(Resource)]
+pub(crate) struct FocusPauseSuppressed;
 
 /// Collapse a frame's `WindowFocused` messages to the net result — whether the window ended the
 /// frame focused (the last event wins) — or `None` if focus didn't change this frame. Shared by the
@@ -180,14 +189,14 @@ fn release_on_focus_lost(
     state: Res<State<AppState>>,
     mut next: ResMut<NextState<AppState>>,
     cursor: Single<&mut CursorOptions, With<PrimaryWindow>>,
+    suppressed: Option<Res<FocusPauseSuppressed>>,
 ) {
     let Some(false) = collapse_focus(&mut focus) else {
         return;
     };
-    // Capture lever: the sim keeps running on focus loss so an unattended measurement window
-    // never pauses mid-leg. The log line lets a capture record count focus losses.
-    if crate::env_flag("OVERMATCH_NO_FOCUS_PAUSE", false) {
-        info!("state: focus lost — pause suppressed (OVERMATCH_NO_FOCUS_PAUSE)");
+    // The log line lets a capture record count focus losses.
+    if suppressed.is_some() {
+        info!("state: focus lost — pause suppressed (unattended run)");
         return;
     }
     let mut cursor = cursor.into_inner();
@@ -281,6 +290,47 @@ mod tests {
         keys.release(KeyCode::Escape);
         keys.clear();
         app.update();
+    }
+
+    /// Losing focus pauses a played run, unless the run is unattended: a capture or a measurement
+    /// window that paused on the first focus change would record a paused scene. Mutant: a
+    /// watcher that ignores [`FocusPauseSuppressed`] pauses the second app.
+    #[test]
+    fn focus_loss_pauses_unless_the_run_is_unattended() {
+        for suppressed in [false, true] {
+            let mut app = App::new();
+            app.add_plugins(bevy::state::app::StatesPlugin)
+                .init_state::<AppState>()
+                .add_message::<WindowFocused>()
+                .add_systems(Update, release_on_focus_lost);
+            if suppressed {
+                app.insert_resource(FocusPauseSuppressed);
+            }
+            let window = app
+                .world_mut()
+                .spawn((Window::default(), PrimaryWindow))
+                .id();
+            app.world_mut()
+                .resource_mut::<NextState<AppState>>()
+                .set(AppState::Playing);
+            app.update();
+            app.world_mut().write_message(WindowFocused {
+                window,
+                focused: false,
+            });
+            app.update();
+            app.update();
+            let want = if suppressed {
+                AppState::Playing
+            } else {
+                AppState::Paused
+            };
+            assert_eq!(
+                *app.world().resource::<State<AppState>>().get(),
+                want,
+                "suppressed: {suppressed}"
+            );
+        }
     }
 
     /// Offline, Esc pauses only when the router gives the press to the menu: while a kill cam run

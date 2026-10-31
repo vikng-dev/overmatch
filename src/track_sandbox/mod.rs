@@ -480,13 +480,6 @@ pub fn plugin(app: &mut App) {
     #[cfg(feature = "dev_ui")]
     app.add_plugins(panel::plugin);
 
-    // A capture run's window is invisible (`bin/track_sandbox`), but winit has already made the
-    // process the active app; give the activation back.
-    #[cfg(target_os = "macos")]
-    if std::env::var_os("OVERMATCH_CAPTURE").is_some() {
-        app.add_systems(Startup, crate::platform::revoke_macos_activation);
-    }
-
     // The scripted capture harness (`SANDBOX_HARNESS` env var): scenario in, JSONL out, exit.
     // Bit-REPEATABLE (step 25b): virtual time advances exactly one fixed tick per rendered frame
     // (wall clock never enters the sim), and the scripted throttle is written INSIDE FixedUpdate
