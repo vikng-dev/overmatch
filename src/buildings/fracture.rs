@@ -396,16 +396,17 @@ pub(crate) struct Source {
 }
 
 impl Source {
-    /// The radius of the ball this source alone crushes, m: where the field is clamped, since
-    /// nothing inside it is left to load.
+    /// The radius of the ball this source alone crushes in `material`, m: where the field is
+    /// clamped, since nothing inside it is left to load.
     fn crushed(&self, material: &Masonry) -> f32 {
         (3.0 * self.energy / (4.0 * PI * material.crush)).cbrt()
     }
 
     /// The normal stress on a plane of normal `n` at `x`, Pa, tension positive: the Lamé field of a
     /// spherical cavity the deposit crushed, at pressure the crush energy (`P r_c³ = 3E/4π`),
-    /// radial `−3E/(4π d³)` and hoop `+3E/(8π d³)`, the distance clamped at the crushed radius.
-    fn lame(&self, x: Vec3, n: Vec3, material: &Masonry) -> f32 {
+    /// radial `−3E/(4π d³)` and hoop `+3E/(8π d³)`, the distance clamped at `crushed`, this
+    /// source's crushed radius in the joint's material ([`Source::crushed`]).
+    fn lame(&self, x: Vec3, n: Vec3, crushed: f32) -> f32 {
         let offset = x - self.at;
         let length = offset.length();
         let dir = if length > 1e-9 {
@@ -413,7 +414,7 @@ impl Source {
         } else {
             Vec3::ZERO
         };
-        let d = length.max(self.crushed(material));
+        let d = length.max(crushed);
         let cos = n.dot(dir);
         3.0 * self.energy / (8.0 * PI * d.powi(3)) * (1.0 - 3.0 * cos * cos)
     }
@@ -435,24 +436,39 @@ fn disc(joint: &Joint) -> [(Vec3, f32); 7] {
     points
 }
 
+/// Each source's crushed radius in `material`, in source order ([`Source::crushed`]).
+fn crushed_radii(sources: &[Source], material: &Masonry) -> Vec<f32> {
+    sources.iter().map(|s| s.crushed(material)).collect()
+}
+
 /// The load the push rule puts on `joint` from `sources` (Pa, the mean of the Lamé normal stress
-/// over the joint's disc), and the threshold it is compared to: the seam's tensile strength.
-pub(crate) fn joint_load(joint: &Joint, material: &Masonry, sources: &[Source]) -> (f32, f32) {
+/// over the joint's disc), each source clamped at its radius in `crushed` (its crushed radius in
+/// the joint's `material`, [`crushed_radii`]), and the threshold it is compared to: the seam's
+/// tensile strength.
+fn joint_load(
+    joint: &Joint,
+    material: &Masonry,
+    sources: &[Source],
+    crushed: &[f32],
+) -> (f32, f32) {
     let load = disc(joint)
         .iter()
         .map(|(x, weight)| {
             weight
                 * sources
                     .iter()
-                    .map(|s| s.lame(*x, joint.normal, material))
+                    .zip(crushed)
+                    .map(|(s, &radius)| s.lame(*x, joint.normal, radius))
                     .sum::<f32>()
         })
         .sum();
     (load, material.tensile)
 }
 
-/// Crack every live, intact joint whose load from `sources` reaches its threshold; returns the
-/// joints cracked now, ascending. A joint's material is its chunk `a`'s.
+/// Crack every live, intact joint whose load from `sources` reaches its threshold
+/// ([`joint_load`]); returns the joints cracked now, ascending. A joint's material is its chunk
+/// `a`'s. The sources' crushed radii are taken once per crush energy the joints meet, keyed on its
+/// bits, not at each disc point of each joint: the same expression of the same values.
 pub(crate) fn crack(
     structure: &Structure,
     state: &mut WallState,
@@ -461,13 +477,22 @@ pub(crate) fn crack(
     if sources.is_empty() {
         return Vec::new();
     }
+    let mut radii: Vec<(u32, Vec<f32>)> = Vec::new();
     let mut cracked = Vec::new();
     for (index, joint) in structure.joints.iter().enumerate() {
         if state.cracked[index] || !state.live(joint) {
             continue;
         }
         let material = structure.chunks[joint.a].material;
-        let (load, threshold) = joint_load(joint, &material, sources);
+        let key = material.crush.to_bits();
+        let at = match radii.iter().position(|(crush, _)| *crush == key) {
+            Some(at) => at,
+            None => {
+                radii.push((key, crushed_radii(sources, &material)));
+                radii.len() - 1
+            }
+        };
+        let (load, threshold) = joint_load(joint, &material, sources, &radii[at].1);
         if load >= threshold {
             state.cracked[index] = true;
             cracked.push(index);
@@ -1509,7 +1534,9 @@ mod tests {
         let (mut near, mut far) = (0.0_f32, 5.0_f32);
         for _ in 0..60 {
             let mid = 0.5 * (near + far);
-            if joint_load(&joint, &material, &[source(mid)]).0 >= material.tensile {
+            let sources = [source(mid)];
+            let crushed = crushed_radii(&sources, &material);
+            if joint_load(&joint, &material, &sources, &crushed).0 >= material.tensile {
                 near = mid;
             } else {
                 far = mid;
@@ -1520,5 +1547,63 @@ mod tests {
             let cracked = crack(&structure, &mut state, &[source(d)]);
             assert_eq!(cracked.contains(&0), cracks, "at {d} m");
         }
+    }
+
+    /// THE PUSH RULE CLAMPS EACH SOURCE AT ITS CRUSHED RADIUS IN THE JOINT'S OWN MATERIAL: on a
+    /// fixture wall whose right half is a fixture masonry of an eighth of brick's crush energy (its
+    /// crushed radii twice brick's), two sources, one in each half, crack at every energy of a
+    /// sweep exactly the joints whose [`joint_load`] reaches its threshold, joint by joint. Some
+    /// energy of the sweep cracks other joints when every joint takes brick's radii, so a [`crack`]
+    /// that kept the radii of the first material it met fails here; a building of more than one
+    /// substance relies on each seam reading its own.
+    #[test]
+    fn each_joint_clamps_the_sources_at_its_own_materials_radius() {
+        let (w, h) = (6, 4);
+        let mut structure = grid(w, h);
+        let brick = brick();
+        let soft = Masonry {
+            crush: brick.crush / 8.0,
+            ..brick
+        };
+        for (i, chunk) in structure.chunks.iter_mut().enumerate() {
+            if i % w >= w / 2 {
+                chunk.material = soft;
+            }
+        }
+        let (left, right) = (
+            structure.chunks[w + w / 2 - 1].centroid,
+            structure.chunks[w + w / 2].centroid,
+        );
+        let mut told_apart = false;
+        for step in 0..40 {
+            let energy = 1.0e4 * 10.0_f32.powf(step as f32 / 10.0);
+            let sources = [
+                Source { energy, at: right },
+                Source {
+                    energy: energy / 2.0,
+                    at: left,
+                },
+            ];
+            let rule = |material_of: &dyn Fn(&Joint) -> Masonry| -> Vec<usize> {
+                (0..structure.joints.len())
+                    .filter(|&j| {
+                        let joint = &structure.joints[j];
+                        let material = material_of(joint);
+                        let crushed = crushed_radii(&sources, &material);
+                        let (load, threshold) = joint_load(joint, &material, &sources, &crushed);
+                        load >= threshold
+                    })
+                    .collect()
+            };
+            let expected = rule(&|joint| structure.chunks[joint.a].material);
+            told_apart |= rule(&|_| brick) != expected;
+            let mut state = WallState::new(&structure);
+            assert_eq!(
+                crack(&structure, &mut state, &sources),
+                expected,
+                "{energy} J"
+            );
+        }
+        assert!(told_apart, "the sweep tells the materials' radii apart");
     }
 }
