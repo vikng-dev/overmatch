@@ -10,7 +10,8 @@
 //! so the handling a type will drive later (rolling resistance, sinking) joins as a sibling of
 //! [`GroundType::print`] without touching the print's fields; every field is `#[serde(default)]`,
 //! so a file written before a field existed still loads, and a consumer refuses a value the file
-//! does not state.
+//! does not state. A field the table does not know, and a friction outside its domain (finite,
+//! not negative), are refused at load ([`GroundTypes::parse`]).
 //!
 //! # A print's depth
 //!
@@ -43,7 +44,7 @@ pub(crate) const GROUND_TYPES_PATH: &str = "terrain/ground_types.ron";
 
 /// How one ground type takes a track print.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub(crate) struct PrintResponse {
     /// Print depth per unit of ground pressure, mm per kPa.
     pub(crate) softness_mm_per_kpa: f32,
@@ -85,18 +86,18 @@ impl PrintResponse {
 
 /// One ground type: one block per thing the ground drives.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub(crate) struct GroundType {
     pub(crate) print: PrintResponse,
     /// The friction coefficient this ground brings to a contact, dimensionless: one side's value
-    /// ([`crate::substances::PAIR_RULE`] combines it with the other side's). `None` where the file
-    /// states none.
+    /// ([`crate::substances::PAIR_RULE`] combines it with the other side's), finite and not
+    /// negative ([`GroundTypes::parse`]). `None` where the file states none.
     pub(crate) friction: Option<f32>,
 }
 
 /// The table, keyed by the name a pack's contract uses.
 #[derive(Resource, Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(default, deny_unknown_fields)]
 pub(crate) struct GroundTypes {
     pub(crate) types: BTreeMap<String, GroundType>,
 }
@@ -127,8 +128,23 @@ impl GroundTypes {
         Self::parse(&text).map_err(|err| format!("{}: {err}", path.display()))
     }
 
+    /// The table `text` holds, or why it is refused: a malformed file, a field the table does not
+    /// know, or a ground whose friction is negative or not finite (the pair rule's square root
+    /// would make it a NaN contact friction).
     pub(crate) fn parse(text: &str) -> Result<Self, String> {
-        ron::de::from_str(text).map_err(|err| err.to_string())
+        let table: Self = ron::de::from_str(text).map_err(|err| err.to_string())?;
+        for (name, ground) in &table.types {
+            if let Some(friction) = ground.friction
+                && !(friction.is_finite() && friction >= 0.0)
+            {
+                return Err(format!(
+                    "ground type {name:?}: `friction` is {friction}, and a friction coefficient \
+                     is finite and not negative; state it as `Some(<coefficient>)` with a \
+                     coefficient of 0 or more"
+                ));
+            }
+        }
+        Ok(table)
     }
 
     /// The shipped table's path.
@@ -231,24 +247,39 @@ mod tests {
         }
     }
 
-    /// EVERY GROUND STATES ITS FRICTION, IN DOMAIN: the terrain collider carries the base pack's
+    /// EVERY GROUND STATES ITS FRICTION: the terrain collider carries the base pack's
     /// ([`GroundTypes::terrain_friction`]), and every pack's ground is a candidate for it, so a type
-    /// without one, or with a negative or non-finite one, fails here before a terrain falls back
-    /// to Avian's default.
+    /// without one fails here before a terrain falls back to Avian's default. Its domain is the
+    /// load's ([`a_friction_out_of_domain_is_refused_at_load_naming_the_ground`]).
     #[test]
-    fn every_ground_states_its_friction_in_domain() {
+    fn every_ground_states_its_friction() {
         let table = GroundTypes::load(&GroundTypes::shipped_path()).expect("the shipped table");
         for (name, ground) in &table.types {
-            let friction = ground
-                .friction
-                .unwrap_or_else(|| panic!("{name} states no friction"));
-            assert!(
-                friction.is_finite() && friction >= 0.0,
-                "{name}: {friction}"
-            );
+            assert!(ground.friction.is_some(), "{name} states no friction");
         }
         let terrain = table.terrain_friction();
         assert_eq!(terrain.combine_rule, crate::substances::PAIR_RULE);
+    }
+
+    /// A FRICTION OUT OF DOMAIN IS REFUSED AT LOAD, NAMING THE GROUND: a negative coefficient under
+    /// the pair rule's `√(μa·μb)` is a NaN contact friction, and an infinite one an unbounded grip,
+    /// so neither may reach a contact; every terrain collider and the prints read the table through
+    /// [`GroundTypes::parse`]. Mutant: a parse that skips the check, or checks only one of sign and
+    /// finiteness, loads one of these. A zero friction is in domain and loads, and a misspelt field
+    /// is refused rather than read as a ground that states none.
+    #[test]
+    fn a_friction_out_of_domain_is_refused_at_load_naming_the_ground() {
+        let table = |friction: &str| format!("(types: {{\"mud\": (friction: {friction})}})");
+        for bad in ["Some(-0.1)", "Some(inf)", "Some(-inf)", "Some(NaN)"] {
+            let error = GroundTypes::parse(&table(bad)).expect_err(bad);
+            assert!(
+                error.contains("\"mud\"") && error.contains("`friction`"),
+                "{bad}: {error}"
+            );
+        }
+        let zero = GroundTypes::parse(&table("Some(0.0)")).expect("zero is in domain");
+        assert_eq!(zero.get("mud").friction, Some(0.0));
+        assert!(GroundTypes::parse("(types: {\"mud\": (fricton: Some(0.5))})").is_err());
     }
 
     /// A saved table reads back as the table: the owner's tuned values survive the round trip
