@@ -41,6 +41,7 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use bevy::asset::{AssetLoadFailedEvent, RenderAssetUsages};
+use bevy::ecs::schedule::{InternedSystemSet, ScheduleConfigs};
 use bevy::ecs::system::SystemParam;
 use bevy::gltf::GltfMaterialName;
 use bevy::image::ImageSampler;
@@ -48,10 +49,13 @@ use bevy::math::Affine3A;
 use bevy::mesh::MeshTag;
 use bevy::pbr::{ExtendedMaterial, MaterialExtension};
 use bevy::prelude::*;
+use bevy::render::erased_render_asset::prepare_erased_assets;
+use bevy::render::render_asset::prepare_assets;
 use bevy::render::render_resource::{
     AsBindGroup, Extent3d, ShaderType, TextureDimension, TextureFormat,
 };
-use bevy::render::storage::ShaderBuffer;
+use bevy::render::storage::{GpuShaderBuffer, ShaderBuffer};
+use bevy::render::{Render, RenderApp};
 use bevy::shader::ShaderRef;
 use bevy::world_serialization::{WorldAsset, WorldAssetRoot, WorldInstanceReady};
 use serde::Deserialize;
@@ -505,8 +509,11 @@ fn surface_material(
 }
 
 /// What a surface draws until the images of the material it becomes (`made`) land: its glb
-/// material's own look, binding no image of the surface's own, so bevy prepares it at once. The glb
-/// material's normal map goes: the surface shader draws the geometric normal without maps, and a
+/// material's own look, binding no image of the surface's own. Its one other binding, the
+/// vehicle's rest table, is made the same frame and prepares first ([`RestTablesFirst`]), so bevy
+/// prepares the material the frame it is made; only the first compile of its pipeline, which bevy
+/// runs asynchronously (`synchronous_pipeline_compilation` is off), still leaves it undrawn while
+/// that compile runs. The glb material's normal map goes: the surface shader draws the geometric normal without maps, and a
 /// normal map flips bevy's pipeline key (`StandardMaterialKey::NORMAL_MAP`), so keeping it would
 /// leave the rewrite waiting on a pipeline of its own. Every other field `made` changes is a factor
 /// or a texture outside the key, so both share one pipeline.
@@ -950,6 +957,23 @@ fn finish_waiting(
     }
 }
 
+/// The render world prepares the rest tables before the surface materials. A vehicle's first
+/// surface materials bind its rest table, made the same frame, and bevy prepares the two asset
+/// types in one step in no set order (`MaterialPlugin` names no dependency on `GpuShaderBuffer`):
+/// a material prepared first finds no table, retries a frame later
+/// (`AsBindGroupError::RetryNextUpdate`) and leaves its meshes undrawn that frame. The set holds
+/// no system: bevy refuses to configure a system's own type set, and turns an empty set's edges
+/// into edges between its neighbours (bevy_ecs `DagGroups::flatten`).
+#[derive(SystemSet, Debug, Clone, PartialEq, Eq, Hash)]
+struct RestTablesFirst;
+
+/// [`RestTablesFirst`] between the two preparations.
+fn rest_tables_first() -> ScheduleConfigs<InternedSystemSet> {
+    RestTablesFirst
+        .after(prepare_assets::<GpuShaderBuffer>)
+        .before(prepare_erased_assets::<MeshMaterial3d<TankSurfaceMaterial>>)
+}
+
 /// Mounted on the windowed roots beside `geometry_lod::view_plugin`: the material's render half is
 /// behind the render app, and the dress only ever runs where a view scene lands.
 pub(crate) fn plugin(app: &mut App) {
@@ -958,6 +982,9 @@ pub(crate) fn plugin(app: &mut App) {
         .init_resource::<SurfaceVehicles>()
         .add_observer(dress_on_ready)
         .add_systems(Update, (report_failed_surface_map, finish_waiting));
+    if let Some(render_app) = app.get_sub_app_mut(RenderApp) {
+        render_app.configure_sets(Render, rest_tables_first());
+    }
 }
 
 #[cfg(test)]
@@ -1301,6 +1328,43 @@ mod tests {
             "it binds its images"
         );
         assert!(app.world().resource::<SurfaceVehicles>().waiting.is_empty());
+    }
+
+    /// THE REST TABLE PREPARES BEFORE THE SURFACE THAT BINDS IT. A vehicle's rest table and its
+    /// first surface materials are made the same frame; a material prepared before the table finds
+    /// none and its meshes go undrawn a frame. Both preparations touch the prepared tables, so bevy
+    /// calls them ambiguous unless ordered: a schedule holding both, ambiguity an error, builds
+    /// only under [`rest_tables_first`], and runs the table's first. A mutant dropping the edge, or
+    /// turning it round, fails here.
+    #[test]
+    fn the_rest_table_prepares_before_the_surface_material() {
+        use bevy::ecs::schedule::{LogLevel, ScheduleBuildSettings};
+        let tables = prepare_assets::<GpuShaderBuffer>;
+        let surfaces = prepare_erased_assets::<MeshMaterial3d<TankSurfaceMaterial>>;
+        let mut schedule = Schedule::default();
+        schedule
+            .set_build_settings(ScheduleBuildSettings {
+                ambiguity_detection: LogLevel::Error,
+                ..default()
+            })
+            .add_systems((surfaces, tables))
+            .configure_sets(rest_tables_first());
+        schedule
+            .initialize(&mut World::new())
+            .expect("the two preparations are ordered");
+        let order: Vec<InternedSystemSet> = schedule
+            .systems()
+            .expect("the schedule is built")
+            .flat_map(|(_, system)| system.default_system_sets())
+            .collect();
+        assert_eq!(
+            order,
+            [
+                tables.into_system_set().intern(),
+                surfaces.into_system_set().intern()
+            ],
+            "the rest table's preparation runs first"
+        );
     }
 
     /// One vehicle's view as a scene lands it: a root with two nodes, the outer moved, the inner
