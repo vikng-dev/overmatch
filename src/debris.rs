@@ -33,7 +33,11 @@
 //!   collider whose bounds come within avian's contact tolerance of the support's;
 //! * moves ([`wake_on_static_moved`]: a static body's collider re-posed, by its own [`Position`]
 //!   or [`Rotation`] or by its body's, as a falling tree's trunk is), read inside the step before
-//!   the broad phase, while the last step's pairs still stand.
+//!   the broad phase, while the last step's pairs still stand. It relies on the vendored avian and
+//!   lightyear child-pose writers (`vendor/avian3d-0.7.0-child-pose`,
+//!   `vendor/lightyear_avian3d-0.30.1-child-pose`) writing a child collider's pose only when its
+//!   bits change: a writer that rewrote it every step would wake every sleeper touching a
+//!   building every step.
 //!
 //! A piece stays all match: nothing here despawns one.
 //!
@@ -55,7 +59,7 @@ pub(crate) struct DebrisPiece;
 
 /// Wake every sleeping body in a touching pair with `collider` in avian's contact graph: removing
 /// `Sleeping` wakes its island (avian's `wake_on_remove_sleeping` hook).
-pub(crate) fn wake_touching(
+fn wake_touching(
     collider: Entity,
     contacts: &ContactGraph,
     sleeping: &Query<(), With<Sleeping>>,
@@ -128,7 +132,6 @@ fn wake_on_collider_disabled(
     });
 }
 
-/// Mount the rule.
 /// Every collider of a static body re-posed since the last step: every sleeping body touching it
 /// wakes (module doc).
 fn wake_on_static_moved(
@@ -145,6 +148,7 @@ fn wake_on_static_moved(
     }
 }
 
+/// Mount the rule.
 pub(crate) fn sim_plugin(app: &mut App) {
     app.add_observer(wake_on_collider_gone)
         .add_observer(wake_on_body_gone)
@@ -295,10 +299,10 @@ mod tests {
         wakes_and_falls(&mut app, resting);
     }
 
-    /// A SLEEPING BODY WAKES WHEN ITS SUPPORT IS DISABLED: a body asleep on a static slab wakes
-    /// when the slab takes `ColliderDisabled`, and falls through it. Avian drops the slab's pairs
-    /// and wakes no other body, so a mutant that drops [`wake_on_collider_disabled`] leaves the
-    /// body hanging over a slab it no longer meets.
+    /// A SLEEPING BODY WAKES WHEN ITS SUPPORT MOVES: a body asleep on a static slab wakes when the
+    /// slab is re-posed a metre down, and falls after it. Avian wakes no body for a static
+    /// collider's move, so a mutant that drops [`wake_on_static_moved`] leaves the body hanging
+    /// where the slab was; a falling tree's trunk under a piece relies on it.
     #[test]
     fn a_sleeping_body_wakes_when_its_support_moves() {
         let mut app = settling(Vec3::NEG_Y * 9.81);
@@ -309,6 +313,10 @@ mod tests {
         wakes_and_falls(&mut app, resting);
     }
 
+    /// A SLEEPING BODY WAKES WHEN ITS SUPPORT IS DISABLED: a body asleep on a static slab wakes
+    /// when the slab takes `ColliderDisabled`, and falls through it. Avian drops the slab's pairs
+    /// and wakes no other body, so a mutant that drops [`wake_on_collider_disabled`] leaves the
+    /// body hanging over a slab it no longer meets.
     #[test]
     fn a_sleeping_body_wakes_when_its_support_is_disabled() {
         let mut app = settling(Vec3::NEG_Y * 9.81);
