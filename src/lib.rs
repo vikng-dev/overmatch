@@ -273,14 +273,35 @@ mod vfx;
 mod view;
 mod world;
 
-/// Configure Bevy's default plugin group for a GPU-less composition root.
+/// Bevy's default plugin group as every composition root mounts it: the asset server rooted at
+/// [`assets::asset_root`], and the windowed clients' [`client_render_plugin`]. It is the one place
+/// `src/` names `DefaultPlugins` (`tests::default_plugins_root` fails on any other), so the asset
+/// server and every direct reader of `asset_root()` (the bake, the terrain grid, the tank's sim
+/// glb) open the same tree on every root.
+///
+/// Invariant: `file_path` is absolute. Bevy's `FileAssetReader::new` joins `file_path` onto its own
+/// base path (`BEVY_ASSET_ROOT`, else `CARGO_MANIFEST_DIR`, else the executable's directory), and
+/// joining an absolute path yields that path, so Bevy's chain never picks the tree. The root is
+/// made absolute against the working directory, where the direct readers resolve a relative one.
+pub fn default_plugins() -> bevy::app::PluginGroupBuilder {
+    let root = assets::asset_root();
+    let root = std::path::absolute(&root).unwrap_or(root);
+    DefaultPlugins
+        .set(bevy::asset::AssetPlugin {
+            file_path: root.to_string_lossy().into_owned(),
+            ..default()
+        })
+        .set(client_render_plugin())
+}
+
+/// Configure [`default_plugins`] for a GPU-less composition root.
 ///
 /// This owns only the shared render-backend, primary-window, and winit-runner edits. Callers keep
-/// ownership of their asset/image workarounds, clocks, runners, and physics choices.
+/// ownership of their image workarounds, clocks, runners, and physics choices.
 pub(crate) fn gpu_less_default_plugins(
     primary_window: Option<Window>,
 ) -> bevy::app::PluginGroupBuilder {
-    DefaultPlugins
+    default_plugins()
         .set(bevy::render::RenderPlugin {
             render_creation: bevy::render::settings::WgpuSettings {
                 backends: None,
@@ -354,9 +375,9 @@ pub(crate) fn server_plugin_floor() -> bevy::app::PluginGroupBuilder {
 }
 
 /// The windowed clients' `RenderPlugin`: stock settings everywhere except macOS, where the two
-/// GPU-query wgpu features are removed before device creation. Mounted by every windowed client
-/// composition root (the net client and the offline route) — never by the GPU-less server, which
-/// has its own [`gpu_less_default_plugins`] render settings.
+/// GPU-query wgpu features are removed before device creation. Part of [`default_plugins`], so
+/// every windowed root has it; a GPU-less root replaces it with [`gpu_less_default_plugins`]'
+/// render settings.
 ///
 /// WHY (the whole causal chain, MEASURED 2026-07-26 on the M4 / macOS 26.5 / Metal / wgpu 29):
 /// under the default `WgpuSettingsPriority::Functionality`, bevy takes the ADAPTER's feature set
@@ -380,7 +401,7 @@ pub(crate) fn server_plugin_floor() -> bevy::app::PluginGroupBuilder {
 ///
 /// The cfg gate is the point: on Windows/Linux (Vulkan/DX12) both features stay enabled, so
 /// `elapsed_gpu` diagnostics and the tracy GPU track remain real there.
-pub(crate) fn client_render_plugin() -> bevy::render::RenderPlugin {
+fn client_render_plugin() -> bevy::render::RenderPlugin {
     #[cfg(target_os = "macos")]
     let disabled_features = Some(
         bevy::render::settings::WgpuFeatures::TIMESTAMP_QUERY
@@ -1037,46 +1058,32 @@ pub fn run_offline() {
     // Read the player's settings BEFORE the window is described — see `load_at_boot`, which also
     // inserts the values and the boot report into the app.
     let settings = settings::load_at_boot(&mut app);
-    // Exe-relative asset root, exactly as `run_client` resolves it: a double-clicked binary
-    // finds `assets/` beside it no matter the launch cwd.
-    app.add_plugins(
-        DefaultPlugins
-            // On macOS this drops the GPU-query wgpu features whose timestamp query set Metal
-            // refuses to allocate (tracy builds DeviceLost-quit without it); see
-            // `client_render_plugin` for the full causal chain and the vendored citations.
-            .set(client_render_plugin())
-            .set(bevy::asset::AssetPlugin {
-                // The same `String` conversion `net::client`'s wrapper applies.
-                file_path: assets::asset_root().to_string_lossy().into_owned(),
-                ..default()
-            })
-            .set(WindowPlugin {
-                primary_window: Some(Window {
-                    // ASCII hyphen: `lib.rs` is scanned by the ui_ascii guard now that the
-                    // offline feel label spawns `Text` here (default-font surface).
-                    title: "Overmatch - offline".into(),
-                    // `Unprobed` on purpose: the capability probe needs a surface, which needs this
-                    // window — the mapping self-negotiates until the probe lands.
-                    present_mode: settings.present_mode(settings::PresentCaps::Unprobed),
-                    // Described at creation so a persisted fullscreen boots fullscreen instead of
-                    // flashing a window first. The monitor is `at_window_creation`'s and NOT the
-                    // stored rung: naming an indexed display here would be cached unresolved by
-                    // bevy and would make the `Startup` correction unrepresentable — see
-                    // `settings::DisplaySelection`. A hidden capture run must NOT boot into the
-                    // player's persisted fullscreen — it stays a plain window.
-                    mode: if hidden {
-                        bevy::window::WindowMode::Windowed
-                    } else {
-                        settings
-                            .window_mode
-                            .to_window_mode(settings.display.at_window_creation())
-                    },
-                    visible: !hidden,
-                    ..default()
-                }),
-                ..default()
-            }),
-    );
+    app.add_plugins(default_plugins().set(WindowPlugin {
+        primary_window: Some(Window {
+            // ASCII hyphen: `lib.rs` is scanned by the ui_ascii guard now that the
+            // offline feel label spawns `Text` here (default-font surface).
+            title: "Overmatch - offline".into(),
+            // `Unprobed` on purpose: the capability probe needs a surface, which needs this
+            // window — the mapping self-negotiates until the probe lands.
+            present_mode: settings.present_mode(settings::PresentCaps::Unprobed),
+            // Described at creation so a persisted fullscreen boots fullscreen instead of
+            // flashing a window first. The monitor is `at_window_creation`'s and NOT the
+            // stored rung: naming an indexed display here would be cached unresolved by
+            // bevy and would make the `Startup` correction unrepresentable — see
+            // `settings::DisplaySelection`. A hidden capture run must NOT boot into the
+            // player's persisted fullscreen — it stays a plain window.
+            mode: if hidden {
+                bevy::window::WindowMode::Windowed
+            } else {
+                settings
+                    .window_mode
+                    .to_window_mode(settings.display.at_window_creation())
+            },
+            visible: !hidden,
+            ..default()
+        }),
+        ..default()
+    }));
     // Same policy as the net client: never drop below the 64 Hz tick when unfocused.
     app.insert_resource(bevy::winit::WinitSettings::continuous());
     if hidden {

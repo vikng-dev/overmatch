@@ -1,5 +1,5 @@
 //! The track-model sandbox binary — a runtime shell that mounts the sandbox plugin
-//! (`overmatch::track_sandbox`) on `DefaultPlugins`.
+//! (`overmatch::track_sandbox`) on `overmatch::default_plugins`.
 //!
 //! Run with `cargo run --bin track_sandbox --features dev_ui`. The `dev_ui` feature is REQUIRED
 //! (declared as `required-features` on this bin in `Cargo.toml`): it gates the egui control panel
@@ -16,7 +16,7 @@ fn main() {
     // one macOS lever that keeps a run from taking the screen (see `overmatch::run_offline`).
     let hidden = std::env::var_os("OVERMATCH_CAPTURE").is_some();
     App::new()
-        .add_plugins(DefaultPlugins.set(WindowPlugin {
+        .add_plugins(overmatch::default_plugins().set(WindowPlugin {
             primary_window: Some(Window {
                 visible: !hidden,
                 ..default()

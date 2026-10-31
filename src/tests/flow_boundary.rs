@@ -33,7 +33,7 @@ const REGISTRATIONS: &[&str] = &["add_systems(", "configure_sets("];
 const SELF: &str = "src/tests/flow_boundary.rs";
 
 /// Blank `//` and nested `/* */` comments, keeping newlines.
-fn strip_comments(src: &str) -> String {
+pub(super) fn strip_comments(src: &str) -> String {
     let mut out = String::with_capacity(src.len());
     let mut i = 0;
     let mut depth = 0usize;
@@ -103,7 +103,7 @@ fn first_argument(args: &str) -> &str {
 }
 
 /// Whether `text` names `ident` as a whole identifier that is not a method call (`.ident`).
-fn names(text: &str, ident: &str) -> bool {
+pub(super) fn names(text: &str, ident: &str) -> bool {
     text.match_indices(ident).any(|(at, _)| {
         let before = text[..at].chars().next_back();
         let after = text[at + ident.len()..].chars().next();
@@ -272,7 +272,7 @@ fn violations_in(src: &str) -> Vec<String> {
     violations(&code, &tainted)
 }
 
-fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
+pub(super) fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) {
     for entry in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
         let path = entry.expect("readable entry").path();
         if path.is_dir() {

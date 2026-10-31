@@ -9,7 +9,6 @@ use std::io;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, ToSocketAddrs};
 
 use bevy::app::ScheduleRunnerPlugin;
-use bevy::asset::AssetPlugin;
 use bevy::ecs::system::SystemParam;
 use bevy::prelude::*;
 use bevy::window::{PrimaryWindow, WindowMode};
@@ -376,12 +375,9 @@ pub fn run() {
 
     let mut app = App::new();
     if simulate && !sim_windowed {
-        app.add_plugins(crate::gpu_less_default_plugins(None).set(AssetPlugin {
-            file_path: asset_root(),
-            ..default()
-        }))
-        .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(2)))
-        .init_resource::<harness::SimulateInput>();
+        app.add_plugins(crate::gpu_less_default_plugins(None))
+            .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(2)))
+            .init_resource::<harness::SimulateInput>();
         // UPSTREAM WORKAROUND, same as every other GPU-less boot of the tank glb: without it,
         // bevy_image 0.19 PANICS transcoding the Tiger's mipped UASTC KTX2 textures under
         // `CompressedImageFormats::NONE`, and `tank::spawn` then aborts on the required view
@@ -394,55 +390,42 @@ pub fn run() {
         // Read the player's settings BEFORE the window is described — see `load_at_boot`, which
         // also inserts the values and the boot report into the app.
         let settings = crate::settings::load_at_boot(&mut app);
-        // Exe-relative asset root (see `asset_root`): a double-clicked `overmatch`/`overmatch.exe`
-        // (or a macOS `.app`) finds `assets/` beside it no matter the launch cwd.
-        app.add_plugins(
-            DefaultPlugins
-                // On macOS this drops the GPU-query wgpu features whose timestamp query set Metal
-                // refuses to allocate (tracy builds DeviceLost-quit without it); see the helper's
-                // doc for the full causal chain and the vendored citations.
-                .set(crate::client_render_plugin())
-                .set(AssetPlugin {
-                    file_path: asset_root(),
-                    ..default()
-                })
-                .set(WindowPlugin {
-                    primary_window: Some(Window {
-                        // `Unprobed` on purpose: the capability probe needs a surface, which needs
-                        // this window — the mapping self-negotiates until the probe lands.
-                        present_mode: settings.present_mode(crate::settings::PresentCaps::Unprobed),
-                        // Described at creation so a persisted fullscreen boots fullscreen instead
-                        // of flashing a window first. The monitor is `at_window_creation`'s and NOT
-                        // the stored rung: naming an indexed display here would be cached
-                        // unresolved by bevy and would make the `Startup` correction
-                        // unrepresentable — see `settings::DisplaySelection`. A hidden capture
-                        // client must NOT boot into the player's persisted fullscreen — it stays a
-                        // plain window.
-                        mode: if hidden {
-                            WindowMode::Windowed
-                        } else {
-                            settings
-                                .window_mode
-                                .to_window_mode(settings.display.at_window_creation())
-                        },
-                        // macOS invariant: bevy creates every winit window `with_visible(false)`
-                        // (for AccessKit) and then calls `set_visible(window.visible)`, which on
-                        // macOS is `makeKeyAndOrderFront` — key + front REGARDLESS of `focused`
-                        // (vendored bevy_winit winit_windows.rs:71,315-317; winit 0.30
-                        // macos/window_delegate.rs:904-909). So `visible` is the only lever that
-                        // stops a capture client stealing focus; `focused: false` would be a dead,
-                        // misleading field.
-                        //
-                        // A hidden window's present returns `SurfaceError::Occluded` every frame
-                        // (wgpu-hal metal surface.rs:122-157 workaround), so nothing ever
-                        // vsync-blocks and the hidden frame loop free-runs — the ACCEPTED cost;
-                        // see the measured note on `WinitSettings::continuous()` below.
-                        visible: !hidden,
-                        ..default()
-                    }),
-                    ..default()
-                }),
-        );
+        app.add_plugins(crate::default_plugins().set(WindowPlugin {
+            primary_window: Some(Window {
+                // `Unprobed` on purpose: the capability probe needs a surface, which needs
+                // this window — the mapping self-negotiates until the probe lands.
+                present_mode: settings.present_mode(crate::settings::PresentCaps::Unprobed),
+                // Described at creation so a persisted fullscreen boots fullscreen instead
+                // of flashing a window first. The monitor is `at_window_creation`'s and NOT
+                // the stored rung: naming an indexed display here would be cached
+                // unresolved by bevy and would make the `Startup` correction
+                // unrepresentable — see `settings::DisplaySelection`. A hidden capture
+                // client must NOT boot into the player's persisted fullscreen — it stays a
+                // plain window.
+                mode: if hidden {
+                    WindowMode::Windowed
+                } else {
+                    settings
+                        .window_mode
+                        .to_window_mode(settings.display.at_window_creation())
+                },
+                // macOS invariant: bevy creates every winit window `with_visible(false)`
+                // (for AccessKit) and then calls `set_visible(window.visible)`, which on
+                // macOS is `makeKeyAndOrderFront` — key + front REGARDLESS of `focused`
+                // (vendored bevy_winit winit_windows.rs:71,315-317; winit 0.30
+                // macos/window_delegate.rs:904-909). So `visible` is the only lever that
+                // stops a capture client stealing focus; `focused: false` would be a dead,
+                // misleading field.
+                //
+                // A hidden window's present returns `SurfaceError::Occluded` every frame
+                // (wgpu-hal metal surface.rs:122-157 workaround), so nothing ever
+                // vsync-blocks and the hidden frame loop free-runs — the ACCEPTED cost;
+                // see the measured note on `WinitSettings::continuous()` below.
+                visible: !hidden,
+                ..default()
+            }),
+            ..default()
+        }));
         // Never drop below the 64 Hz tick: the default `WinitSettings::game()` throttles an
         // UNFOCUSED window to 60 Hz reactive updates — under tick rate, so an alt-tabbed client
         // drifts behind the server and resyncs on refocus (lightyear #1113's jitter class).
@@ -1199,15 +1182,6 @@ where
                 )
             }),
     }
-}
-
-/// `AssetPlugin`'s `file_path` — the `assets/` directory this client reads from, as a `String`
-/// (what `AssetPlugin` wants). Delegates to the shared, unit-tested resolver at `crate::assets`;
-/// the resolution logic (macOS `.app` → `Contents/Resources/assets`, flat Windows/Linux archive →
-/// `exe_dir/assets`, env overrides) lives there so the tank bake (`bake`, which compiles without the
-/// `net` feature) resolves the exact same directory. See `crate::assets::asset_root`.
-fn asset_root() -> String {
-    crate::assets::asset_root().to_string_lossy().into_owned()
 }
 
 /// Claim the locally controlled replicated tank for input and presentation.

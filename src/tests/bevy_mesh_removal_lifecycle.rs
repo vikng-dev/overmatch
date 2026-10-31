@@ -78,7 +78,7 @@ impl Lab {
     fn new() -> Self {
         let mut app = App::new();
         app.add_plugins(
-            DefaultPlugins
+            crate::default_plugins()
                 .set(WindowPlugin {
                     primary_window: None,
                     exit_condition: bevy::window::ExitCondition::DontExit,

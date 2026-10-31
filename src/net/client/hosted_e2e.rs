@@ -81,10 +81,7 @@ fn record_connected(_: On<Add, Connected>, mut probe: ResMut<Probe>) {
 /// the process installs the global log subscriber.
 fn client_app(api: &str, log: bool) -> App {
     let mut app = App::new();
-    let plugins = crate::gpu_less_default_plugins(None).set(AssetPlugin {
-        file_path: asset_root(),
-        ..default()
-    });
+    let plugins = crate::gpu_less_default_plugins(None);
     if log {
         app.add_plugins(plugins);
     } else {

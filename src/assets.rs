@@ -9,8 +9,9 @@ use std::path::{Path, PathBuf};
 /// and a `current_exe()` call, a shape nothing but a real `.app` ever exercised.
 ///
 /// Precedence extends Bevy's own [`FileAssetReader::get_base_path`] (`BEVY_ASSET_ROOT` →
-/// `CARGO_MANIFEST_DIR` → the executable's directory) by one rung, so the bake and the asset server
-/// always land on the same tree: env root → runtime manifest dir → `baked_manifest_dir` (the
+/// `CARGO_MANIFEST_DIR` → the executable's directory) by one rung, and the asset server is handed
+/// the result as an absolute path (`crate::default_plugins`), so Bevy's own chain never picks the
+/// tree: env root → runtime manifest dir → `baked_manifest_dir` (the
 /// manifest dir a dev-profile build captured at compile time, [`BAKED_MANIFEST_DIR`]) → the platform
 /// bundle layout for the env-less packaged case:
 /// - macOS `.app`: `exe_dir` = `<App>.app/Contents/MacOS` → the sibling `Contents/Resources/assets`
@@ -93,9 +94,9 @@ pub(crate) use {tank_file, tank_id};
 pub(crate) const TANK_ID: &str = tank_id!();
 
 /// The `assets/` directory this process reads from — the thin env-reading wrapper over the pure
-/// [`asset_root_from`]. Used both as `AssetPlugin`'s `file_path` (`net::client`) and as the bake
-/// extractor's glb base (`bake::extract_at_startup`), so the two never disagree on which file they
-/// open. Falls back to `.` for the exe dir only if `current_exe()` itself fails (a case cargo's
+/// [`asset_root_from`]. Used both as `AssetPlugin`'s `file_path` on every composition root
+/// (`crate::default_plugins`) and as the bake extractor's glb base (`bake::extract_at_startup`), so
+/// the two never disagree on which file they open. Falls back to `.` for the exe dir only if `current_exe()` itself fails (a case cargo's
 /// `CARGO_MANIFEST_DIR` already covers under `cargo run`/`cargo test`).
 pub(crate) fn asset_root() -> PathBuf {
     let exe_dir = std::env::current_exe()

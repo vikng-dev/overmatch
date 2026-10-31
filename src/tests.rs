@@ -14,6 +14,7 @@ mod avian_moved_aabb_prune;
 mod bevy_ktx2_uastc_fallback;
 mod bevy_mesh_removal_lifecycle;
 mod bevy_shadow_view_render_layers;
+mod default_plugins_root;
 mod determinism_deps;
 mod doc_citations;
 mod flow_boundary;

@@ -19,7 +19,6 @@ use std::path::PathBuf;
 
 use bevy::camera::visibility::{CascadesVisibleEntities, RenderLayers, VisibleEntities};
 use bevy::prelude::*;
-use bevy::render::settings::WgpuSettings;
 
 /// The linked `bevy_pbr`'s light module (wired in via `[patch.crates-io]`).
 const LINKED_LIGHT_RS: &str = "vendor/bevy_pbr-0.19.1-scalar-math/src/render/light.rs";
@@ -120,23 +119,7 @@ fn queue_shadows_filters_on_a_required_view_mask() {
 
 fn headless_app() -> App {
     let mut app = App::new();
-    app.add_plugins(
-        DefaultPlugins
-            .set(bevy::render::RenderPlugin {
-                render_creation: WgpuSettings {
-                    backends: None,
-                    ..default()
-                }
-                .into(),
-                ..default()
-            })
-            .set(WindowPlugin {
-                primary_window: None,
-                exit_condition: bevy::window::ExitCondition::DontExit,
-                ..default()
-            })
-            .disable::<bevy::winit::WinitPlugin>(),
-    );
+    app.add_plugins(crate::gpu_less_default_plugins(None));
     while app.plugins_state() == bevy::app::PluginsState::Adding {
         std::thread::sleep(std::time::Duration::from_millis(1));
     }
