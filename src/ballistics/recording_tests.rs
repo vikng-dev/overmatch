@@ -47,17 +47,13 @@ enum Kind {
 /// One fixture volume: name, full extents and centre in the tank's frame (m), kind.
 type Volume = (&'static str, Vec3, Vec3, Kind);
 
-/// Where a moved body's child colliders stand when the next march casts at them: the two
-/// compositions the march runs under ([`ProjectileMarchWorld::placed_pose`]).
+/// The game's damage-model fixture compositions. The walk refreshes children after physics in
+/// both; the networked composition also refreshes after the fixed loop for its render consumers.
 #[derive(Clone, Copy, Debug)]
 enum ChildPose {
-    /// Bare avian: the physics step places them from the body's pose at the step's start, a step
-    /// behind the body's own `Position`.
+    /// Avian without a network after-loop refresh.
     Avian,
-    /// The networked server's and client's: the lightyear avian plugin places them again after the
-    /// fixed loop at the body's pose after the step
-    /// (`LightyearAvianPlugin::update_child_collider_position`, mounted by `net::protocol`), so a
-    /// march that is its frame's only tick finds them at the body's own `Position`.
+    /// The Lightyear after-loop child refresh used by the networked server and client.
     Networked,
 }
 

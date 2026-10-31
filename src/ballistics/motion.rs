@@ -126,22 +126,45 @@ pub(super) fn snapshot(
         // Absence means birth at this boundary, not an invented earlier pose.
         let from = history.colliders.get(&entity).map_or(to, |poses| poses.to);
         let poses = Poses { from, to };
-        let bounds = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
-        let radius = bounds.min.abs().max(bounds.max.abs()).length();
-        // DERIVED: translation plus the longest radius's rotational chord bounds every point
-        // throughout shortest-arc slerp. Static endpoints contribute bit-exact zero.
-        let turn = if poses.from.rotation == poses.to.rotation {
-            0.0
-        } else {
-            poses.from.rotation.angle_between(poses.to.rotation)
-        };
-        let displacement =
-            poses.from.position.distance(poses.to.position) + 2.0 * radius * (0.5 * turn).sin();
+        let displacement = point_motion_bound(poses, &collider);
         largest_motion = largest_motion.max(displacement);
         next.insert(entity, poses);
     }
     history.colliders = next;
     history.largest_motion = largest_motion;
+}
+
+/// The game's damage model: a conservative geometric displacement for any collider point.
+/// DERIVED: for unit quaternions, their shorter signed chord `d = 2 sin(theta / 4)` bounds
+/// `sin(theta / 2)` from above. Thus `2 r min(d, 1)` bounds every rotational chord, without
+/// an inverse cosine whose rounded dot product can erase a small but real turn.
+fn point_motion_bound(poses: Poses, collider: &Collider) -> f32 {
+    if poses.from == poses.to {
+        return 0.0;
+    }
+    let bounds = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
+    let radius = bounds.min.abs().max(bounds.max.abs()).as_dvec3().length();
+    let from = poses.from.rotation.to_array().map(f64::from);
+    let to = poses.to.rotation.to_array().map(f64::from);
+    let difference = from
+        .iter()
+        .zip(to)
+        .map(|(&a, b)| (a - b).powi(2))
+        .sum::<f64>();
+    let sum = from
+        .iter()
+        .zip(to)
+        .map(|(&a, b)| (a + b).powi(2))
+        .sum::<f64>();
+    let angular = 2.0 * radius * difference.min(sum).sqrt().min(1.0);
+    let linear = poses
+        .from
+        .position
+        .as_dvec3()
+        .distance(poses.to.position.as_dvec3());
+    let bound = (linear + angular) as f32;
+    // Round the geometric bound outward; an equivalent signed quaternion at rest stays exact zero.
+    if bound == 0.0 { 0.0 } else { bound.next_up() }
 }
 
 #[cfg(test)]
@@ -283,6 +306,47 @@ mod tests {
                 pair[0],
                 pair[1]
             );
+        }
+    }
+
+    /// The game's damage model: tree-query padding must retain small rotations that an f32
+    /// quaternion dot rounds away. The broad phase relies on every swept point fitting this bound.
+    #[test]
+    fn the_motion_bound_keeps_small_turns_and_contains_the_rotational_sweep() {
+        // Fixture dimensions, turns and translations, independent of any authored body.
+        let collider = Collider::cuboid(2.0, 4.0, 6.0);
+        for angle in [1.0e-4, 0.25, std::f32::consts::PI] {
+            for translation in [Vec3::ZERO, Vec3::new(0.3, -0.4, 0.5)] {
+                let poses = Poses {
+                    from: Pose {
+                        position: Vec3::ZERO,
+                        rotation: Quat::IDENTITY,
+                    },
+                    to: Pose {
+                        position: translation,
+                        rotation: Quat::from_rotation_y(angle),
+                    },
+                };
+                let bound = point_motion_bound(poses, &collider);
+                assert!(bound > 0.0, "a real turn has nonzero displacement");
+                for x in [-1.0, 1.0] {
+                    for y in [-2.0, 2.0] {
+                        for z in [-3.0, 3.0] {
+                            let local = Vec3::new(x, y, z);
+                            for step in 0..=32 {
+                                let fraction = step as f32 / 32.0;
+                                let at = poses.from.position.lerp(poses.to.position, fraction)
+                                    + poses.from.rotation.slerp(poses.to.rotation, fraction)
+                                        * local;
+                                assert!(
+                                    at.distance(local) <= bound,
+                                    "every swept fixture corner stays within query padding: {angle}, {translation}, {fraction}"
+                                );
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 }

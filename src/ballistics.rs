@@ -2371,19 +2371,9 @@ impl ProjectileMarchWorld<'_, '_> {
         }
     }
 
-    /// The pose a body's colliders were placed at, which this step's walk casts against. Read back
-    /// off any child collider that is no body of its own, as the pen cam's hull frame is
-    /// (`damage_cam::recorder`); the body's own pose where it has none, a collider on the body
-    /// itself standing where the body does.
-    ///
-    /// Which pose that is depends on the composition. Bare avian places each child collider in
-    /// `PhysicsStepSystems::First` from its body's pose at the step's START composed with its
-    /// [`ColliderTransform`] (avian's `update_child_collider_position`), so on a body that moved in
-    /// the last step its colliders stand a step behind the body's own [`Position`] (on a tank
-    /// driving at 10 m/s, 0.16 m, DERIVED). The networked server and client place them again after
-    /// the fixed loop, at the body's pose after the step (`LightyearAvianPlugin::update_child_collider_position`,
-    /// mounted by `net::protocol`), so a march that is its frame's only tick finds them at the
-    /// body's own `Position`, and a later tick of the same frame finds them a step behind it.
+    /// The game's damage model: the completed body pose read back from a composed child collider,
+    /// as the recorder reads its hull frame. A body with no child collider uses its own pose.
+    /// Production refreshes children before every walk in every composition.
     fn placed_pose(
         &self,
         position: &Position,
@@ -2403,48 +2393,14 @@ impl ProjectileMarchWorld<'_, '_> {
             .unwrap_or((position.0, rotation.0))
     }
 
-    /// How far along `dir` from the axis start `origin` a step with `travel` metres left must carry
-    /// samples standing at most `spread` from the axis ([`resolve::Flight::spread`]): `travel`, or,
-    /// where the point `travel` ahead lies inside an envelope, on until the line has left every
-    /// envelope it is inside, overlapping ones chained into one crossing. The shooter's own
-    /// envelope is passed through, as its volumes are ([`not_own_volume`]).
+    /// The game's damage model: discovery reach through the union of body envelopes. The box
+    /// grows by sample spread, the bake's DERIVED `extent * 2^-20` placement allowance,
+    /// `MARCH_EPS`, and the DERIVED `2 |g| dt^2` acceleration pad with ASSUMED friction at most one.
+    /// It is tested at collider placement, the body pose and a velocity-integrated next pose.
     ///
-    /// Each envelope is grown by `spread`: an axis start outside the box grown by it on some axis
-    /// leaves every sample, at most `spread` from it, outside the box, so outside the body's every
-    /// primitive, and a square disc laid there next step moves each sample only within that reach
-    /// of the axis, as `spread` is at least the disc's radius (every ring seed keeps its offset
-    /// `radius` from the axis, so the farthest one is never nearer; the caller passes the larger of
-    /// the two all the same). It is grown further by `extent · 2^-20` for the sim's f32 placement
-    /// (the bake's contract, `bake::envelope`); by [`MARCH_EPS`] for this test's own world-to-body
-    /// arithmetic and the body pose's read-back ([`Self::placed_pose`]) (DERIVED: a world f32 past
-    /// 2048 m is spaced 2.44e-4 m, and the two take three roundings of it); and by
-    /// `2 · |g| · dt²` for the next step's change of a body's velocity, gravity's `g · dt` and as
-    /// much again for a ground force at friction μ ≤ 1 (DERIVED bound, the μ ceiling ASSUMED).
-    /// Growing it only moves where a crossing ends further out.
-    ///
-    /// Each envelope stands at every pose the next step's walk can cast at, and at this step's:
-    /// - where its body's colliders were placed, the pose this step's walk casts against
-    ///   ([`Self::placed_pose`]);
-    /// - at the body's own pose, where bare avian's next physics step places them for the next
-    ///   step's walk, as does the networked placement for a later tick of the same frame;
-    /// - at the pose the next physics step integrates a moving body to, at its velocities over
-    ///   `dt` ([`NextStep::integrated_pose`]): where the networked placement puts the colliders
-    ///   after the fixed loop, and where a body's own collider stands at the next step whatever the
-    ///   composition.
-    ///
-    /// A discovery chain ends outside all three, so the next fresh discovery starts outside every
-    /// primitive however the body moved in between: a tank driving away along the line would
-    /// otherwise carry its rear plate back over a round that left it a disc's radius behind, and
-    /// one driving at it would carry its front plate over a round stopped short of it.
-    ///
-    /// INVARIANT, relied on by every step's start: one physics step of `dt` runs before the next
-    /// march, it moves each body within the bound above of where its velocities take it, and
-    /// nothing else puts armour where it was not. What breaks it puts armour over the next step's
-    /// start, which certification ([`resolve::certified`]) reads as a start inside it and the walk
-    /// as a crossing of its exit: a collision or a blast's push in the next step; a body placed
-    /// without being integrated there (a loose piece a deposit launches after this march, a
-    /// falling trunk's piece moved a tick along its fall by `trees::derive_systems`, or the colliders
-    /// of a static body no step integrates).
+    /// This prediction assumes the next physics step adds no motion beyond that pad. Solver
+    /// impulses, a later push or derived topology can violate it; it does not establish moving
+    /// surface contact. The replacement body-frame law lives in the design doc's walk section.
     fn crossing_reach(
         &self,
         origin: Vec3,

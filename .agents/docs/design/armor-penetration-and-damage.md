@@ -1543,6 +1543,12 @@ moves on a straight chord (lerp/slerp); the departure from its true path is graz
 ≤ 1 cm for a turning tank, ≤ 3 cm for a turret at an ASSUMED angular speed of 10 rad/s). Adjacent
 intervals share both endpoint poses, so their chords agree at the boundary.
 
+**One sampling instant.** First contact freezes every collider at that same tick fraction.
+Entrance, normalization and bent transit consume no world time while deciding the immutable
+crossing. A third body whose entry has that same fraction belongs to the same contact set and
+union walk: ordinary simultaneous geometry, rather than an inside-start error. Bodies do not
+advance between these queries. The playback clock then delivers the already-decided effects.
+
 - **Seconds, not metres.** A round spends the tick's seconds. Each mechanism stretch costs
   `Δt = ∫ ds / v(s)`, including the slowing inside material; open flight consumes the remaining
   seconds at the resulting speed. Allocating the tick's metres at its initial speed lets a slowed
