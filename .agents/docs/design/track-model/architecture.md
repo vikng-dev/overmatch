@@ -303,8 +303,8 @@ needed one.
 - **ONE surface, past the track model.** The same `HeightGrid` feeds the oracle, the parry
   collider, the render mesh, spawn placement — and ballistics: a shell's terrain hit is
   `HeightGrid::cast_ray` too, min-folded against the separate armor cast so the nearer wins.
-  Parry's terrain cast survives only on the flat fallback world that has no grid. What a shell
-  stops on is what the tracks drive on.
+  No parry terrain cast remains: a fixture world without a grid has no ballistic ground. What a
+  shell stops on is what the tracks drive on.
 - Honesty note: the block term rounds corners and buries block bottoms — deliberate policy, not
   representational identity with colliders. The height term IS the collider's triangulation, to a
   pinned tolerance. "Visual ≡ physics" means both sample the SAME oracle.

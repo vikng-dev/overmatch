@@ -1935,9 +1935,8 @@ fn on_fire_shell(
     // would otherwise report "already landed" 1 cm out and swallow the shell whole.
     owners: Query<&VolumeOf>,
     parents: Query<&ChildOf>,
-    // The heightmap ground, when the heightmap world is live: catch-up terrain contacts read the
-    // exact deterministic caster, not parry (see [`cast_march_segment`]). Absent on the flat
-    // fallback world, where the parry terrain cast remains.
+    // The heightmap ground: catch-up terrain contacts read the exact deterministic caster, not
+    // parry (see [`cast_march_segment`]). Geometry-only fixtures may omit it; they have no ground.
     grid: Option<Res<HeightGrid>>,
     // The shared network protocol's net-neutral tick — the tick every cosmetic shell lives at, and
     // the one the shot-lifecycle recorder stamps its rows with. Absent on SP / sandbox, where an

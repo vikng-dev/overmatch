@@ -167,10 +167,12 @@ pub(crate) fn disc_radius(caliber: f32) -> f32 {
 /// INVARIANT: every sample's start (`anchor + origin + seeds[i].offset`) is a point its own ray has
 /// already reached — the end of an open-air sweep, of a corridor that met nothing, or a
 /// perforation's resume point one nudge past the exit along that sample's ray — and
-/// `seeds[i].inside` is what that ray's walk says the sample is inside there. A fresh disc — at the
-/// muzzle, after a bounce's lift, a replica's re-seed, a catch-up or a held round's release — is no
-/// exception: its starts are walked too, by the containment probe ([`certified`]) that reaches each
-/// one from outside every candidate's bounds along its own ray. Offsets are whatever the rays left
+/// `seeds[i].inside` is what that ray's walk says the sample is inside there. A fresh disc is no
+/// exception. One laid at the muzzle, after a catch-up or at a held round's release is outside
+/// everything ([`Interior::laid`]), and the relative sweep that starts from it panics on a start
+/// inside a collider. One laid after a bounce's lift or a replica's re-seed has its starts walked
+/// by the containment probe ([`certified`]), which reaches each one from outside every candidate's
+/// bounds along its own ray, in the contact scene. Offsets are whatever the rays left
 /// behind — staggered along an oblique plate after a perforation, tilted against the travel after a
 /// bend — and are never re-squared, rotated or flattened: any of those moves a start off the ray
 /// that certified it.
