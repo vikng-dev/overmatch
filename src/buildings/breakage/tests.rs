@@ -949,3 +949,197 @@ fn a_roof_plane_stands_on_its_rests_and_falls_when_they_go() {
         "it fell whole, one body"
     );
 }
+
+/// A fixture burst's blast energy, J: the 88 mm HE burst's (fixture data).
+const FIXTURE_BLAST_J: f32 = 1.47e6;
+
+/// A loose body of brick density that collides with nothing, so only a blast moves it: a cube of
+/// side `side` m at `at` (fixture data), a debris body that is no wall piece.
+fn loose_cube(app: &mut App, at: Vec3, side: f32) -> Entity {
+    app.world_mut()
+        .spawn((
+            DebrisPiece,
+            RigidBody::Dynamic,
+            Position(at),
+            Rotation::default(),
+            Collider::cuboid(side, side, side),
+            ColliderDensity(1845.0),
+            CollisionLayers::new([Layer::Debris], LayerMask::NONE),
+        ))
+        .id()
+}
+
+/// Every blast direction whose ray from `origin` meets a collider of `body`, through avian's own
+/// cast: the direction, its share of the field, the distance and the normal there.
+fn rays_on(app: &mut App, body: Entity, origin: Vec3) -> Vec<(Vec3, f32, f32, Vec3)> {
+    use bevy::ecs::system::RunSystemOnce;
+    app.world_mut()
+        .run_system_once(move |spatial: SpatialQuery, of: Query<&ColliderOf>| {
+            fracture::blast_directions()
+                .iter()
+                .filter_map(|&(dir, share)| {
+                    let hit = spatial.cast_ray_predicate(
+                        origin,
+                        Dir3::new(dir).ok()?,
+                        1000.0,
+                        true,
+                        &SpatialQueryFilter::default(),
+                        &|collider| of.get(collider).is_ok_and(|of| of.body == body),
+                    )?;
+                    Some((dir, share, hit.distance, hit.normal))
+                })
+                .collect::<Vec<_>>()
+        })
+        .expect("the cast runs")
+}
+
+/// Set off the fixture charge at `at`, and run the tick that applies it and the one after.
+fn charge(app: &mut App, at: Vec3) {
+    app.world_mut().trigger(WallCharge {
+        at,
+        blast: Blast::of(FIXTURE_BLAST_J),
+    });
+    app.update();
+    app.update();
+}
+
+/// A BLAST RAY THAT STOPS ON A LOOSE PIECE PUSHES IT BY ITS SHARE AND DEPOSITS NOTHING: a loose
+/// cube between a fixture burst and a standing chunk of the house leaves with the momentum of the
+/// rays that meet it, each its share's reflected impulse at the distance and on the face avian's
+/// cast gives ([`Blast::push`]), and the chunk it shades keeps its full pool, though the same burst
+/// wears it with no cube there. A ray that pushed a piece and went on into the wall, a push of the
+/// wrong share, distance or face, or a piece the rays pass through, fails here; every rubble pile a
+/// blast meets rests on it.
+#[test]
+fn a_ray_that_stops_on_a_loose_piece_pushes_it_by_its_share_and_deposits_nothing() {
+    let kind = shipped_house();
+    let (e, [c, ..]) = fixture_chunks(&kind);
+    let (near, w, _) = through(&kind, e, c, 0.0);
+    // The burst a metre before the chunk's near face, the cube half-way (fixture data).
+    let origin = near - *w * 0.5;
+    let blast = Blast::of(FIXTURE_BLAST_J);
+    let pool_after = |cube: bool| {
+        let (mut app, root) = composed(false);
+        let cube = cube.then(|| loose_cube(&mut app, near, 0.4));
+        app.update();
+        app.update();
+        // The rays that meet the cube before any of the house's blockers (the house stands at the
+        // origin at unit scale, so its frame is the world).
+        let expected = cube.map(|cube| {
+            let intact = Shape::intact(&kind.layout);
+            let rays: Vec<_> = rays_on(&mut app, cube, origin)
+                .into_iter()
+                .filter(|&(dir, _, d, _)| {
+                    first_chunk(&kind.layout, &intact, origin, dir).is_none_or(|(_, t)| t > d)
+                })
+                .collect();
+            assert!(rays.len() > 100, "the cube is in the field");
+            rays.iter()
+                .map(|&(dir, share, d, normal)| {
+                    blast.push(share, d, dir, normal.try_normalize().unwrap_or(-dir))
+                })
+                .sum::<Vec3>()
+        });
+        charge(&mut app, origin);
+        if let (Some(cube), Some(expected)) = (cube, expected) {
+            let world = app.world();
+            let momentum = world.get::<ComputedMass>(cube).unwrap().value()
+                * world.get::<LinearVelocity>(cube).unwrap().0;
+            assert!(
+                (momentum - expected).length() <= 1e-3 * expected.length(),
+                "the cube leaves with {momentum}, its rays pushed {expected}"
+            );
+        }
+        let breakage = app.world().get::<Breakage>(root).unwrap();
+        let live = breakage.live.as_ref().expect("the burst reached the house");
+        (
+            live.state.pool[c],
+            fracture::full_pool(&live.structure.chunks[c]),
+        )
+    };
+    let (shaded, full) = pool_after(true);
+    assert_eq!(shaded, full, "the shaded chunk takes nothing");
+    let (bare, _) = pool_after(false);
+    assert!(bare < full, "with no cube the burst wears the chunk");
+}
+
+/// A LOOSE PIECE SHADOWED BY A STANDING CHUNK TAKES NOTHING: a fixture burst half a metre before a
+/// house wall pushes a loose cube on its own side and leaves the same cube behind the wall, where
+/// every ray toward it meets a standing chunk first, at rest. Pieces tested ahead of the chunks, or
+/// a ray that passes a standing chunk to the piece behind it, fail here.
+#[test]
+fn a_loose_piece_shadowed_by_a_standing_chunk_takes_nothing() {
+    let kind = shipped_house();
+    let (e, [c, ..]) = fixture_chunks(&kind);
+    let element = &kind.asset.elements[e];
+    let (origin, w, _) = through(&kind, e, c, 0.0);
+    // Each cube 0.3 m past the wall's far face, or as far out on the burst's side (fixture data).
+    let out = 0.5 + element.depth[1] - element.depth[0] + 0.3;
+    let (mut app, _) = composed(false);
+    let behind = loose_cube(&mut app, origin + *w * out, 0.1);
+    let open = loose_cube(&mut app, origin - *w * out, 0.1);
+    app.update();
+    app.update();
+    assert!(
+        !rays_on(&mut app, behind, origin).is_empty(),
+        "the cube behind the wall is in the field"
+    );
+    charge(&mut app, origin);
+    let speed = |body: Entity| app.world().get::<LinearVelocity>(body).unwrap().length();
+    assert!(speed(open) > 0.0, "the burst pushes the cube on its side");
+    assert_eq!(speed(behind), 0.0, "the wall shades the cube behind it");
+}
+
+/// A SLEEPING LOOSE PIECE WAKES TO A BLAST: a wall piece asleep at rest on a slab is woken by a
+/// fixture burst beside it, and leaves away from the burst. An impulse that leaves a sleeping body
+/// asleep, or is held back from one, fails here; rubble settled for most of a match relies on it.
+#[test]
+fn a_sleeping_loose_piece_wakes_to_a_blast() {
+    let (mut app, _) = composed(false);
+    app.insert_resource(Gravity(Vec3::NEG_Y * 9.81));
+    let kind = shipped_house();
+    let (_, [c, ..]) = fixture_chunks(&kind);
+    let live = Live::new(&kind, 1.0);
+    {
+        let world = app.world_mut();
+        world.spawn((
+            RigidBody::Static,
+            Position(Vec3::new(30.0, -8.5, 0.0)),
+            Collider::cuboid(40.0, 1.0, 40.0),
+            CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
+        ));
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, world);
+        spawn_piece(
+            &mut commands,
+            &kind,
+            &live.structure,
+            (3, 1.0, Transform::from_xyz(30.0, 0.0, 0.0)),
+            &[c],
+            &[],
+        );
+        queue.apply(world);
+    }
+    let piece = app
+        .world_mut()
+        .query_filtered::<Entity, With<WallPiece>>()
+        .single(app.world())
+        .expect("one piece");
+    (0..1280)
+        .find(|_| {
+            app.update();
+            app.world().get::<Sleeping>(piece).is_some()
+        })
+        .expect("the piece came to rest asleep within 20 s");
+    let at = app.world().get::<Position>(piece).unwrap().0;
+    charge(&mut app, at + Vec3::X * 0.8);
+    assert!(
+        app.world().get::<Sleeping>(piece).is_none(),
+        "the burst wakes the piece"
+    );
+    let velocity = app.world().get::<LinearVelocity>(piece).unwrap().0;
+    assert!(
+        velocity.x < 0.0,
+        "it leaves away from the burst: {velocity}"
+    );
+}

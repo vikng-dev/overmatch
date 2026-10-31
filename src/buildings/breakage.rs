@@ -17,10 +17,13 @@
 //!   feeds the blast field ([`fracture::blast_rays`]) from its burst point, its energy the core's
 //!   chemical energy less the casing's share. A line pushes with all the momentum the round lost
 //!   in it ([`Projectile::lost_momentum`]: the share the crushed brick carries away is open); a
-//!   blast pushes each face its rays stop on with its reflected impulse ([`Blast::push`]). The
-//!   laws then run in order: removal and the push rule ([`fracture::strike`]), the structural
-//!   check ([`fracture::structural`]), the weight check on what those changed
-//!   ([`fracture::weigh`]), support ([`fracture::fall`]).
+//!   blast pushes each face its rays stop on with its reflected impulse ([`Blast::push`]). A blast
+//!   ray stops on the nearest of every building's standing chunks and unbreakable elements and the
+//!   loose pieces within its reach ([`Blast::reach`]); one that stops on a loose piece pushes it
+//!   the same way, through avian at the point it stops, and deposits nothing. The laws then run in
+//!   order: removal and the push rule ([`fracture::strike`]), the structural check
+//!   ([`fracture::structural`]), the weight check on what those changed ([`fracture::weigh`]),
+//!   support ([`fracture::fall`]).
 //! * **Holes** ([`Hole`], drawn only): a line cuts a channel in each chunk it crosses and a blast a
 //!   dish in each chunk its rays stop on ([`holes_of`]); a chunk still standing after the deposit
 //!   keeps its hole in a per-chunk list ([`Live::holes`]), for the view to draw. No law, collider
@@ -36,7 +39,8 @@
 //!   brick in ballistics on [`Layer::Armor`], colliding as [`Layer::Debris`], settled by the shared
 //!   rule ([`crate::debris`]). It leaves with the momentum pushed into it, its spin the angular
 //!   momentum over its own inertia tensor; gravity, contact and friction decide whether a group
-//!   a cracked section freed rocks back or topples.
+//!   a cracked section freed rocks back or topples. A later blast's impulse on it is a write to
+//!   its velocity and sleep timer, which wakes it asleep (avian's `wake_on_changed`).
 //!
 //! THE BODY IN THE PHYSICS WORLD. A state change reaches avian's world in the frame it is made
 //! ([`reconcile`], then avian's refit of moved colliders), so the next tick's march reads it.
@@ -46,7 +50,8 @@ use std::sync::Arc;
 
 use avian3d::collider_tree::{ColliderTrees, update_moved_collider_aabbs};
 use avian3d::prelude::{
-    AngularVelocity, Collider, ColliderDensity, CollisionLayers, LinearVelocity, Position, Rotation,
+    AngularVelocity, Collider, ColliderAabb, ColliderDensity, ColliderOf, CollisionLayers, Forces,
+    LinearVelocity, Position, Rotation, SpatialQuery, SpatialQueryFilter, WriteRigidBodyForces,
 };
 use bevy::math::DVec3;
 use bevy::prelude::*;
@@ -62,6 +67,7 @@ use crate::ballistics::{
     ArmourMark, BallisticVolume, CrossingEnd, Envelope, PenetrationMarks, Projectile, ShellMarched,
     SpallMarks,
 };
+use crate::debris::DebrisPiece;
 use crate::scatter::MapInstance;
 use crate::{ClientReplica, Layer, ShotClock};
 
@@ -643,6 +649,30 @@ struct DepositParam<'w, 's> {
     clock: Option<Res<'w, ShotClock>>,
     record: ResMut<'w, WallRecord>,
     commands: Commands<'w, 's>,
+    /// The loose pieces a blast's rays meet ([`pieces_near`]) and push.
+    spatial: SpatialQuery<'w, 's>,
+    collider_of: Query<'w, 's, &'static ColliderOf>,
+    pieces: Query<'w, 's, Forces, With<DebrisPiece>>,
+}
+
+/// The colliders of every loose piece (a [`DebrisPiece`] body) whose bounds meet the cube of
+/// half-side `reach` m about `origin`, ascending: the only colliders a blast's rays test.
+fn pieces_near(p: &DepositParam, origin: Vec3, reach: f32) -> Vec<Entity> {
+    let mut near = Vec::new();
+    p.spatial.aabb_intersections_with_aabb_callback(
+        ColliderAabb::new(origin, Vec3::splat(reach)),
+        |collider| {
+            if p.collider_of
+                .get(collider)
+                .is_ok_and(|of| p.pieces.contains(of.body))
+            {
+                near.push(collider);
+            }
+            true
+        },
+    );
+    near.sort_unstable();
+    near
 }
 
 /// AUTHORITY: run the tick's deposits through the laws (module doc), record every change and spawn
@@ -749,42 +779,7 @@ fn apply_deposits(mut p: DepositParam) {
             }
         }
         if let Some((origin, blast)) = deposit.blast {
-            let directions = fracture::blast_directions();
-            for (root, frame) in &frames {
-                let Ok((_, _, _, breakage)) = p.buildings.get(*root) else {
-                    continue;
-                };
-                let kind = &breakage.kind;
-                let (lo, hi) = kind.bounds();
-                let local = frame.unscaled(origin);
-                let mut bounds = None;
-                let mut hits = Vec::new();
-                for &(dir, share) in directions {
-                    if !frame.may_meet(origin, dir) {
-                        continue;
-                    }
-                    let turned = frame.turn(dir);
-                    let bounds = bounds.get_or_insert_with(|| Block::cuboid(lo, hi));
-                    if bounds.span(local, turned).is_none() {
-                        continue;
-                    }
-                    let shape = shapes.entry(*root).or_insert_with(|| breakage.shape());
-                    if let Some((Some(c), t)) = first_chunk(&kind.layout, shape, local, turned) {
-                        let normal = kind.layout.blocks[c]
-                            .entry_face(local, turned)
-                            .map_or(-turned, |(_, normal)| normal);
-                        hits.push(fracture::RayHit {
-                            chunk: c,
-                            at: (local + turned * t) * frame.scale,
-                            energy: blast.energy * share,
-                            impulse: blast.push(share, t * frame.scale, turned, normal),
-                        });
-                    }
-                }
-                if !hits.is_empty() {
-                    taken.entry(*root).or_default().blast.extend(hits);
-                }
-            }
+            cast_blast(&mut p, &frames, &mut shapes, &mut taken, origin, blast);
         }
         for (root, taken) in taken {
             let Ok((_, identity, transform, mut breakage)) = p.buildings.get_mut(root) else {
@@ -858,6 +853,103 @@ fn log_changes(id: &str, loading: &Loading, counts: [usize; 3], changes: &Change
         count(|e| matches!(e, WallEvent::Fall(_))),
         changes.groups.len(),
     );
+}
+
+/// One blast's rays from `origin` (module doc): each stops on the nearest of every building's
+/// present blockers ([`first_chunk`]) and the loose pieces within the blast's reach
+/// ([`pieces_near`]). A ray on a standing chunk joins its building's take; a ray on a loose piece
+/// pushes the piece through avian at the point it stops, and deposits nothing.
+fn cast_blast(
+    p: &mut DepositParam,
+    frames: &BTreeMap<Entity, Frame>,
+    shapes: &mut BTreeMap<Entity, Shape>,
+    taken: &mut BTreeMap<Entity, Taken>,
+    origin: Vec3,
+    blast: Blast,
+) {
+    let reach = blast.reach();
+    let near = pieces_near(p, origin, reach);
+    // Per building a ray may meet: the origin in its frame, and its bounds.
+    let mut views: BTreeMap<Entity, (Vec3, Block)> = BTreeMap::new();
+    let mut thrown: Vec<(Entity, Vec3, Vec3)> = Vec::new();
+    for &(dir, share) in fracture::blast_directions() {
+        // The nearest present blocker of every building: its root, its law chunk (`None`,
+        // an unbreakable element), its distance in the building frame and in metres.
+        let mut stop: Option<(Entity, Option<usize>, f32, f32)> = None;
+        for (root, frame) in frames {
+            if !frame.may_meet(origin, dir) {
+                continue;
+            }
+            let Ok((_, _, _, breakage)) = p.buildings.get(*root) else {
+                continue;
+            };
+            let kind = &breakage.kind;
+            let (local, bounds) = views.entry(*root).or_insert_with(|| {
+                let (lo, hi) = kind.bounds();
+                (frame.unscaled(origin), Block::cuboid(lo, hi))
+            });
+            let turned = frame.turn(dir);
+            if bounds.span(*local, turned).is_none() {
+                continue;
+            }
+            let shape = shapes.entry(*root).or_insert_with(|| breakage.shape());
+            if let Some((chunk, t)) = first_chunk(&kind.layout, shape, *local, turned)
+                && stop.is_none_or(|(.., d)| t * frame.scale < d)
+            {
+                stop = Some((*root, chunk, t, t * frame.scale));
+            }
+        }
+        let piece = if near.is_empty() {
+            None
+        } else {
+            Dir3::new(dir).ok().and_then(|ray| {
+                p.spatial.cast_ray_predicate(
+                    origin,
+                    ray,
+                    stop.map_or(reach, |(.., d)| d.min(reach)),
+                    true,
+                    &SpatialQueryFilter::default(),
+                    &|collider| near.binary_search(&collider).is_ok(),
+                )
+            })
+        };
+        if let Some(hit) = piece {
+            if let Ok(of) = p.collider_of.get(hit.entity) {
+                let normal = hit.normal.try_normalize().unwrap_or(-dir);
+                thrown.push((
+                    of.body,
+                    origin + dir * hit.distance,
+                    blast.push(share, hit.distance, dir, normal),
+                ));
+            }
+        } else if let Some((root, Some(c), t, d)) = stop
+            && let Ok((_, _, _, breakage)) = p.buildings.get(root)
+        {
+            let (frame, local) = (frames[&root], views[&root].0);
+            let turned = frame.turn(dir);
+            let normal = breakage.kind.layout.blocks[c]
+                .entry_face(local, turned)
+                .map_or(-turned, |(_, normal)| normal);
+            taken.entry(root).or_default().blast.push(fracture::RayHit {
+                chunk: c,
+                at: (local + turned * t) * frame.scale,
+                energy: blast.energy * share,
+                impulse: blast.push(share, d, turned, normal),
+            });
+        }
+    }
+    if !thrown.is_empty() {
+        debug!(
+            "buildings: a blast pushed loose pieces with {} rays ({:.1} N s)",
+            thrown.len(),
+            thrown.iter().map(|(.., i)| i.length()).sum::<f32>(),
+        );
+    }
+    for (body, at, impulse) in thrown {
+        if let Ok(mut forces) = p.pieces.get_mut(body) {
+            forces.apply_linear_impulse_at_point(impulse, at);
+        }
+    }
 }
 
 /// The holes one deposit cuts (module doc), each with its law chunk, in the baked chunk's frame
@@ -1161,7 +1253,7 @@ fn spawn_piece(
         Position(at),
         Rotation(root.rotation),
         Visibility::default(),
-        crate::debris::DebrisPiece,
+        DebrisPiece,
         crate::eased_dynamic_body(),
         LinearVelocity(root.rotation * velocity),
         AngularVelocity(root.rotation * spin),

@@ -1586,9 +1586,14 @@ struct ImpulseFit {
 }
 
 impl ImpulseFit {
+    /// The last scaled distance a branch covers, m/kg^⅓.
+    const fn edge(&self) -> f32 {
+        self.branches[self.branches.len() - 1].0
+    }
+
     /// The scaled impulse at scaled distance `z`, Pa·s per kg^⅓.
     fn at(&self, z: f32) -> f32 {
-        let (edge, _) = self.branches[self.branches.len() - 1];
+        let edge = self.edge();
         let held = z.max(self.from).min(edge);
         let (_, c) = self
             .branches
@@ -1634,6 +1639,14 @@ impl Blast {
             energy,
             charge: energy / TNT_ENERGY,
         }
+    }
+
+    /// How far the blast reaches a loose piece, m: the reflected fit's last scaled distance at this
+    /// charge (Resolution: past it the push is the fit's `1/Z` extension, ASSUMED). DERIVED: the
+    /// 88 mm HE fixture burst (1.47 MJ) reaches 23.2 m, where it moves a 0.25 m brick cube square
+    /// on at 0.017 m/s, under avian's 0.15 m/s sleep threshold.
+    pub(crate) fn reach(&self) -> f32 {
+        REFLECTED_IMPULSE.edge() * (self.charge / SURFACE_BURST_FACTOR).cbrt()
     }
 
     /// The specific impulse (Pa·s) the blast loads a face with `distance` m from the charge, at
