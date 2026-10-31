@@ -1,6 +1,6 @@
 # avian3d 0.7: a collider moved onto another rigid body keeps its contact pairs naming the old body
 
-**Target:** github.com/avianphysics/avian · avian3d 0.7.0; `main` not checked · **Severity for us:**
+**Target:** github.com/avianphysics/avian · avian3d 0.7.0; `main` checked against a local clone, no fetch (pair bodies set once at the broad phase, `ColliderOf` immutable: unchanged) · **Severity for us:**
 HIGH before the workaround: the dedicated server panicked inside Avian's island manager about a
 minute into a 29-bot match with wall debris (overmatch #193) · **Status:** LOCAL DRAFT, not filed.
 
@@ -24,10 +24,10 @@ IslandId(n) does not exist", or, with debug assertions, `island.contact_count > 
 
 - `collision/broad_phase/bvh_broad_phase.rs:178,190`: a new pair takes `body1`/`body2` from the
   tree proxies. No system writes them again.
-- `collision/collider/collider_hierarchy/plugin.rs:66-113` (`on_collider_body_changed`): a
+- `collision/collider/collider_hierarchy/plugin.rs:66-116` (`on_collider_body_changed`): a
   `RigidBody` inserted mid-hierarchy re-inserts `ColliderOf` on the colliders below it. Nothing
   touches their pairs. The narrow phase reads each collider's new `ColliderOf` for the contact
-  computation but keeps the pair's stored bodies.
+  computation (`collision/narrow_phase/system_param.rs:523-528`) but keeps the pair's stored bodies.
 - `dynamics/solver/plugin.rs:404` (`prepare_contact_constraints`): the constraint's bodies are the
   pair's stored ones.
 - `dynamics/solver/islands/mod.rs:509-526` (`add_contact`): a pair that starts touching is linked
@@ -36,9 +36,9 @@ IslandId(n) does not exist", or, with debug assertions, `island.contact_count > 
   `remove_body_on` (`collision/narrow_phase/mod.rs:465-500`, on a body's despawn or type switch)
   and `split_island` (`dynamics/solver/islands/mod.rs:1120`). Neither finds the moved collider's
   pair from the old body. `split_island` destroys the base island first (`:1070`), so the pair is
-  left holding the destroyed island's id. `BodyIslandNode::on_remove` (`:1338-1369`) removes the
+  left holding the destroyed island's id. `BodyIslandNode::on_remove` (island removal at `:1374-1376`) removes the
   old body's island when its last body goes, with the pair still counted.
-- The island id is then reused, and the next unlink of the pair reads another island's lists.
+- The island id is then reused (`dynamics/solver/islands/mod.rs:463-465`), and the next unlink of the pair reads another island's lists.
 - One path hides the defect. When the subtree's root is made a body in place, `on_insert_rigid_body`
   (`dynamics/solver/solver_body/plugin.rs`) queues the `SolverBody` that brings `BodyIslandNode`,
   and `on_collider_body_changed` queues the new `ColliderOf`s. If the colliders join first,
@@ -91,7 +91,7 @@ despawn then unlinks the pair from an island that no longer exists.
 ## Suggested fix
 
 When a collider's `ColliderOf` changes to another body, remove its pairs the way
-`remove_collider_on` does (unlink from the constraint graph and the island, send `CollisionEnd`)
+`remove_collider_on` does (unlink from the constraint graph and the island, send `CollisionEnd` for pairs with contact events on)
 and mark its proxy moved, so the broad phase makes them again under the new body. Alternatively,
 detect `ColliderOf.body != pair.body` in `update_contacts` and route the pair through the same
 removal. Rewriting the stored bodies in place would also need the pair's constraint handles and
