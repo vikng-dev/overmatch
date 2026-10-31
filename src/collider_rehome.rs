@@ -101,10 +101,8 @@ mod tests {
     /// any collider moved onto another body while it touches a third exercises the same invariant.
     ///
     /// The box moves onto a body that already exists, not onto the node made a body in place as a
-    /// launch does, because the launch's path hides the defect under one order of Avian's
-    /// observers: when the new body's island node is added after its colliders have joined it,
-    /// Avian's `on_body_remove_rigid_body_disabled` drops their pairs as a side effect. Which order
-    /// runs follows observer registration, which this app and the dedicated server do not share.
+    /// launch does: that path can hide the defect, depending on Avian's observer order (see the
+    /// upstream draft).
     fn rehomed(app: &mut App) -> (Entity, Entity, Entity, Entity) {
         let world = app.world_mut();
         let ground = world
