@@ -33,6 +33,13 @@
 //!   look and binds no image of its own ([`waiting_material`]); [`finish_waiting`] rewrites it in
 //!   place once its images have landed. The handle never changes, so rungs and the x-ray, which
 //!   hold it, follow without a swap of their own.
+//! - A MAP IS BOUND AS IT WAS PREPARED. A finished surface material's bind group holds its maps'
+//!   GPU textures as they were when it prepared, and nothing here rebinds it. A map reloaded with
+//!   its descriptor unchanged keeps its texture (bevy writes the new texels into it); one whose
+//!   size, format or mips change gets a new texture the material never sees. No build reloads a
+//!   map: bevy's `file_watcher` feature is off (`Cargo.toml`) and nothing calls
+//!   `AssetServer::reload`. Hot reload, if turned on, wants a rebind: on an
+//!   `AssetEvent::<Image>::Modified`, mark every surface material binding that image modified.
 //! - A RUNG WEARS ITS SOURCE'S MATERIAL AND TAG: `geometry_lod` copies both, so a LOD switch changes
 //!   the silhouette and nothing else.
 //! - Rows are rigid up to a uniform scale: the shader takes their 3×3 as the normal's rotation and
