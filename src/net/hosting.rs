@@ -431,17 +431,20 @@ impl Hosted {
     }
 
     pub(super) fn install(&self, app: &mut App) {
-        app.init_resource::<JoinAdmission>()
-            .insert_resource(HostingLink {
-                shared: self.shared.clone(),
-                control: self.control.clone(),
-                listening: false,
-                empty: EmptyTimer::new(self.empty_exit),
-            })
-            .add_systems(
-                Update,
-                (announce_listening, track_players, exit_when_unknown).chain(),
-            );
+        assert!(
+            app.world().contains_resource::<JoinAdmission>(),
+            "the server root must install the JoinAdmission shared with its netcode handler before hosting"
+        );
+        app.insert_resource(HostingLink {
+            shared: self.shared.clone(),
+            control: self.control.clone(),
+            listening: false,
+            empty: EmptyTimer::new(self.empty_exit),
+        })
+        .add_systems(
+            Update,
+            (announce_listening, track_players, exit_when_unknown).chain(),
+        );
     }
 
     /// After `App::run` returns: stop and join the reporter, then post `end` unless the Worker
@@ -877,7 +880,8 @@ mod tests {
 
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
-        app.add_message::<AppExit>();
+        app.add_message::<AppExit>()
+            .init_resource::<JoinAdmission>();
         app.world_mut()
             .spawn(super::super::battle::BattleState::default());
         hosted.install(&mut app);
@@ -918,7 +922,8 @@ mod tests {
         let hosted = Hosted::start(&config);
         let mut app = App::new();
         app.add_plugins(MinimalPlugins);
-        app.add_message::<AppExit>();
+        app.add_message::<AppExit>()
+            .init_resource::<JoinAdmission>();
         app.world_mut()
             .spawn(super::super::battle::BattleState::default());
         hosted.install(&mut app);
