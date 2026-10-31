@@ -48,7 +48,7 @@ use bevy::mesh::{Indices, PrimitiveTopology};
 use bevy::prelude::*;
 
 use self::baked::Placement;
-use self::model::{Block, Cut, Loading, Masonry, Push, WallState};
+use self::model::{Block, Cut, Loading, Masonry, Push, SectionCache, WallState};
 use super::{Autopilot, FreeFlyCam, SEED_SPEC, UI_LEFT, panel_capturing};
 use crate::ballistics::{
     ArmourMark, BallisticVolume, CrossingEnd, FireShell, PenetrationMarks, SpallMarks,
@@ -196,13 +196,14 @@ struct WallReadout;
 #[derive(Component)]
 struct WallHelp;
 
-/// The wall as it stands: its cut, its state, which cracks the structural check made, each
-/// standing chunk's entity and drawn mesh, and its material.
+/// The wall as it stands: its cut, its state, which cracks the structural check made and the
+/// check's sections of the cut, each standing chunk's entity and drawn mesh, and its material.
 #[derive(Resource)]
 struct Wall {
     cut: Cut,
     state: WallState,
     structural: Vec<bool>,
+    sections: SectionCache,
     entities: Vec<Option<Entity>>,
     meshes: Vec<Handle<Mesh>>,
     material: Masonry,
@@ -764,6 +765,7 @@ fn spawn_wall(commands: &mut Commands, meshes: &mut Assets<Mesh>, assets: &WallA
     Wall {
         state: WallState::new(&cut.structure),
         structural: vec![false; cut.structure.joints.len()],
+        sections: SectionCache::default(),
         cut,
         entities,
         meshes: chunk_meshes,
@@ -1139,7 +1141,12 @@ fn apply_deposit(
         .into_iter()
         .filter(|push| wall.state.standing(push.chunk))
         .collect();
-    applied.failures = model::structural(&wall.cut.structure, &mut wall.state, &pushes);
+    applied.failures = model::structural(
+        &wall.cut.structure,
+        &mut wall.state,
+        &pushes,
+        &mut wall.sections,
+    );
     for failure in &applied.failures {
         for &j in &failure.joints {
             wall.structural[j] = true;

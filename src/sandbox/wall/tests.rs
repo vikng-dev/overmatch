@@ -106,7 +106,12 @@ fn renumbering_the_chunks_changes_no_outcome() {
     let outcome = |structure: &Structure| {
         let mut state = WallState::new(structure);
         crack(structure, &mut state, &sources);
-        structural(structure, &mut state, &pushes(structure));
+        structural(
+            structure,
+            &mut state,
+            &pushes(structure),
+            &mut SectionCache::default(),
+        );
         let mut cracked: Vec<[i64; 3]> = structure
             .joints
             .iter()
@@ -181,7 +186,12 @@ fn a_push_fails_the_section_at_its_fracture_impulse() {
             at,
             impulse: Vec3::NEG_Z * (scale * capacity / lever),
         };
-        let failures = structural(&structure, &mut state, &[push]);
+        let failures = structural(
+            &structure,
+            &mut state,
+            &[push],
+            &mut SectionCache::default(),
+        );
         assert_eq!(state.cracked[bed], fails, "{scale} x capacity");
         assert_eq!(failures.is_empty(), !fails);
     }

@@ -743,7 +743,8 @@ fn ground_path(start: usize, (neighbours, anchors, buried): &Graph) -> Option<Ve
 
 /// The sections a structural check tries: every live intact joint alone, and every set of two or
 /// more live intact joints lying in one plane (normals parallel, offsets within a millimetre),
-/// each ascending. Read from the joint graph alone.
+/// each ascending, the singles first in joint order, then the planes in creation order. Read from
+/// the structure's joints and the state's cracks and fates alone.
 fn sections(structure: &Structure, state: &WallState) -> Vec<Vec<usize>> {
     let mut planes: Vec<(Vec3, f32, Vec<usize>)> = Vec::new();
     // The planes by their offset's bucket ([`plane_bucket`]), each bucket in creation order. A
@@ -790,6 +791,33 @@ fn sections(structure: &Structure, state: &WallState) -> Vec<Vec<usize>> {
     singles
 }
 
+/// One structure's [`sections`], kept from one structural check to the next. They are a function
+/// of the structure and of the state's cracks and fates alone, so the cache answers with the ones
+/// it holds exactly while the state's cracks and fates equal those it read them from, and reads
+/// them afresh otherwise: a crack, a chunk turned to dust or fallen, or a state replaced whole
+/// invalidates it, whoever made the change. It holds no structure: one cache serves the one
+/// structure its holder keeps beside it (a building's [`super::breakage::Live`]).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct SectionCache {
+    /// The cracks and fates `sections` were read from. Empty at first: the state of a structure
+    /// with no chunks and no joints, which has no sections.
+    cracked: Vec<bool>,
+    fate: Vec<Fate>,
+    sections: Vec<Vec<usize>>,
+}
+
+impl SectionCache {
+    /// The sections of `structure` in `state`.
+    fn read(&mut self, structure: &Structure, state: &WallState) -> &[Vec<usize>] {
+        if self.cracked != state.cracked || self.fate != state.fate {
+            self.sections = sections(structure, state);
+            self.cracked.clone_from(&state.cracked);
+            self.fate.clone_from(&state.fate);
+        }
+        &self.sections
+    }
+}
+
 /// A plane offset's bucket, its millimetres floored. Two offsets the section rule joins lie at
 /// most two buckets apart, DERIVED from IEEE 754 round-to-nearest alone: the f64 product is exact
 /// (an f32's 24-bit significand times 1000's 7 odd bits fits f64's 53), so the bucket is `⌊1000
@@ -816,11 +844,12 @@ fn plane_bucket(offset: f32) -> i64 {
 /// demand, and a push on a chunk with no path to the ground left (the push rule freed it) bends no
 /// section, its group leaving as a body with that push ([`super::breakage`]). Only the sections
 /// that cut a push's path to the ground are searched for it ([`ground_path`]). Reads the chunk
-/// table and the joint graph only.
+/// table and the joint graph only; `sections` is `structure`'s cache of them ([`SectionCache`]).
 pub(crate) fn structural(
     structure: &Structure,
     state: &mut WallState,
     pushes: &[Push],
+    sections: &mut SectionCache,
 ) -> Vec<Failure> {
     let mut failures = Vec::new();
     if pushes.is_empty() {
@@ -846,7 +875,7 @@ pub(crate) fn structural(
             }
         }
         let mut worst: Option<(f32, Failure)> = None;
-        for section in sections(structure, state) {
+        for section in sections.read(structure, state) {
             // The pushes whose path the section cuts, in push order: the only pushes the search
             // reads for it.
             let mut cut: Vec<usize> = section
@@ -863,7 +892,7 @@ pub(crate) fn structural(
                 if group.binary_search(&push.chunk).is_ok() {
                     continue;
                 }
-                if let Some(reached) = held(push.chunk, &section, &graph) {
+                if let Some(reached) = held(push.chunk, section, &graph) {
                     group.extend(reached);
                     group.sort_unstable();
                     group.dedup();
@@ -872,7 +901,7 @@ pub(crate) fn structural(
             if group.is_empty() {
                 continue;
             }
-            if let Some(failure) = section_failure(structure, &section, &group, pushes) {
+            if let Some(failure) = section_failure(structure, section, &group, pushes) {
                 let ratio = failure.demand / failure.capacity;
                 if ratio >= 1.0 && worst.as_ref().is_none_or(|(w, _)| ratio > *w) {
                     worst = Some((ratio, failure));
@@ -1262,8 +1291,9 @@ mod tests {
     /// ANSWERS AS THE FULL SEARCH DOES: on a fixture wall, an out-of-plane push on its top middle
     /// chunk (its path to the ground the longest), pushes on two chunks, and pushes on a chunk
     /// already cut loose and on a grounded one each give the full search's failures, in its order,
-    /// and its cracks. A pruning that skipped a section cutting a push's path fails here; the
-    /// server relies on the pruning to keep a burst beside a house within its tick.
+    /// and its cracks, one [`SectionCache`] carried from case to case as a building carries its
+    /// own from deposit to deposit. A pruning that skipped a section cutting a push's path fails
+    /// here; the server relies on the pruning to keep a burst beside a house within its tick.
     ///
     /// AND A PUSH ON A LOOSE CHUNK BENDS NO SECTION: alone, it fails nothing. Were every section
     /// to hold the loose chunk (each cut leaves it as loose as before), its demand over capacity
@@ -1299,6 +1329,7 @@ mod tests {
                 vec![push(loose, Vec3::Z * 500.0), push(top, Vec3::Z * 200.0)],
             ),
         ];
+        let mut cache = SectionCache::default();
         for (index, (cracked, pushes)) in cases.into_iter().enumerate() {
             let mut full = WallState::new(&structure);
             for &j in &cracked {
@@ -1308,7 +1339,7 @@ mod tests {
             let expected = structural_by_full_search(&structure, &mut full, &pushes);
             assert!(!expected.is_empty(), "case {index} fails a section");
             assert_eq!(
-                structural(&structure, &mut pruned, &pushes),
+                structural(&structure, &mut pruned, &pushes, &mut cache),
                 expected,
                 "case {index}"
             );
@@ -1318,7 +1349,63 @@ mod tests {
         for (j, joint) in structure.joints.iter().enumerate() {
             state.cracked[j] = joint.a == loose || joint.b == Side::Chunk(loose);
         }
-        assert!(structural(&structure, &mut state, &[push(loose, Vec3::Z * 500.0)]).is_empty());
+        let pushes = [push(loose, Vec3::Z * 500.0)];
+        assert!(structural(&structure, &mut state, &pushes, &mut cache).is_empty());
+    }
+
+    /// THE SECTIONS ARE READ AFRESH ONCE THE CRACKS OR FATES CHANGE: on the shipped house (fixture
+    /// data), one [`SectionCache`] read whole, then after a crack, after a chunk turned to dust,
+    /// after a chunk fell and after the state was replaced whole (a replica deriving from a new
+    /// record), answers each time as [`sections`] does on that state, and each change moves the
+    /// sections. A cache that kept its sections past a change, or keyed on the cracks alone (dust
+    /// ends a chunk's joints without cracking one), fails here; every crack the structural check
+    /// records relies on its sections being the state's.
+    #[test]
+    fn a_change_to_the_cracks_or_fates_invalidates_the_sections() {
+        let kind = crate::buildings::tests::shipped_house();
+        let structure = kind.layout.structure(&kind.asset, 1.0);
+        let mut state = WallState::new(&structure);
+        let mut cache = SectionCache::default();
+        let mut last = sections(&structure, &state);
+        assert_eq!(cache.read(&structure, &state), &last[..], "whole");
+        assert_eq!(
+            cache.read(&structure, &state),
+            &last[..],
+            "whole, read again"
+        );
+        // A chunk one of whose joints is still live, so its fate moves the sections.
+        let live_chunk = |state: &WallState| {
+            let index = (0..structure.joints.len())
+                .find(|&j| !state.cracked[j] && state.live(&structure.joints[j]))
+                .expect("the house keeps a live joint");
+            structure.joints[index].a
+        };
+        let changes: [(&str, &dyn Fn(&mut WallState)); 4] = [
+            ("a crack", &|state| {
+                let index = (0..structure.joints.len())
+                    .find(|&j| matches!(structure.joints[j].b, Side::Chunk(_)))
+                    .expect("the house joins two chunks");
+                state.cracked[index] = true;
+            }),
+            ("dust", &|state| {
+                let chunk = live_chunk(state);
+                state.fate[chunk] = Fate::Dust;
+            }),
+            ("a fall", &|state| {
+                let chunk = live_chunk(state);
+                state.fate[chunk] = Fate::Fallen;
+            }),
+            ("a state replaced whole", &|state| {
+                *state = WallState::new(&structure)
+            }),
+        ];
+        for (change, apply) in changes {
+            apply(&mut state);
+            let fresh = sections(&structure, &state);
+            assert_ne!(fresh, last, "{change} moves the sections");
+            assert_eq!(cache.read(&structure, &state), &fresh[..], "after {change}");
+            last = fresh;
+        }
     }
 
     fn brick() -> Masonry {

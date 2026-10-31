@@ -43,7 +43,8 @@ use bevy::prelude::*;
 use serde::{Deserialize, Serialize};
 
 use super::fracture::{
-    self, Blast, Block, Chunk, Fate, Joint, Loading, Masonry, Push, Side, Structure, WallState,
+    self, Blast, Block, Chunk, Fate, Joint, Loading, Masonry, Push, SectionCache, Side, Structure,
+    WallState,
 };
 use super::schema::BuildingAsset;
 use super::{BuildingElement, BuildingKind};
@@ -276,12 +277,14 @@ impl Shape {
     }
 }
 
-/// A building's live state: the structure the laws read at its instance scale, the laws' state
-/// and its shape. The shape's fates and cracks are the state's, mirrored as the laws move them.
+/// A building's live state: the structure the laws read at its instance scale, the laws' state,
+/// its shape, and the structural check's sections of the structure. The shape's fates and cracks
+/// are the state's, mirrored as the laws move them.
 pub(crate) struct Live {
     pub(crate) structure: Structure,
     pub(crate) state: WallState,
     pub(crate) swapped: Vec<bool>,
+    pub(crate) sections: SectionCache,
 }
 
 impl Live {
@@ -290,6 +293,7 @@ impl Live {
         Self {
             state: WallState::new(&structure),
             swapped: vec![false; kind.layout.elements.len()],
+            sections: SectionCache::default(),
             structure,
         }
     }
@@ -803,7 +807,12 @@ pub(crate) fn run_laws(
         .into_iter()
         .filter(|push| live.state.standing(push.chunk))
         .collect();
-    let failures = fracture::structural(&live.structure, &mut live.state, &pushes);
+    let failures = fracture::structural(
+        &live.structure,
+        &mut live.state,
+        &pushes,
+        &mut live.sections,
+    );
     let structural: Vec<usize> = failures
         .iter()
         .flat_map(|failure| failure.joints.iter().copied())
