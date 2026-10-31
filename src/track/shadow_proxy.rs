@@ -382,12 +382,14 @@ impl RibbonCache {
     }
 
     /// The first fit: the whole ribbon, topology and all, or `None` while the joints cannot close
-    /// a loop (under three) or once the topology exists. Fixes the station count and winding for
-    /// the life of the bound rig.
+    /// a loop (under three). Fixes the station count and winding for the life of the bound rig.
+    /// Called only while [`ProxySide::mesh`] is `None`; that field is the one record of whether
+    /// the ribbon is built.
     pub(crate) fn build(&mut self, stations: &[Vec2], section: Section) -> Option<Mesh> {
-        if !self.stations.is_empty() || !self.needs_update(stations) {
+        if !self.needs_update(stations) {
             return None;
         }
+        debug_assert!(self.stations.is_empty(), "a built ribbon never rebuilds");
         self.winding = loop_geom::loop_winding(stations);
         self.stations.extend_from_slice(stations);
         #[cfg(test)]
@@ -401,9 +403,7 @@ impl RibbonCache {
     /// of the mesh [`RibbonCache::build`] returned. Callers check `needs_update` before borrowing
     /// the asset mutably, so a settled ribbon emits no asset modification for render extraction.
     pub(crate) fn write(&mut self, mesh: &mut Mesh, stations: &[Vec2], section: Section) {
-        if self.stations.is_empty() || !self.needs_update(stations) {
-            return;
-        }
+        debug_assert!(self.needs_update(stations) && !self.stations.is_empty());
         let Some(VertexAttributeValues::Float32x3(positions)) =
             mesh.attribute_mut(Mesh::ATTRIBUTE_POSITION)
         else {
@@ -607,10 +607,6 @@ mod tests {
                 assert_eq!(mesh.attribute(Mesh::ATTRIBUTE_UV_0), Some(&uv));
                 assert_eq!(cache.stations.as_ptr(), joint_ptr);
                 assert!(!cache.needs_update(&shape));
-                assert!(
-                    cache.build(&shape, tiger_section()).is_none(),
-                    "a bound ribbon never rebuilds its topology"
-                );
                 assert_eq!(cache.topology_builds, 1);
             }
             assert!(!cache.needs_update(&[]));
