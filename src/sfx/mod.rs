@@ -60,7 +60,8 @@ pub fn plugin(app: &mut App) {
         .init_resource::<LastReportVariant>()
         // The one falloff law for every spatial emitter in the game.
         .insert_resource(DefaultSpatialScale(SpatialScale::new(SPATIAL_SCALE)))
-        .add_systems(Startup, setup_sfx_clips)
+        .init_resource::<crate::assets::PresentationLoads>()
+        .add_systems(PreStartup, setup_sfx_clips)
         .add_observer(on_weapon_report)
         .add_systems(Update, fire_click())
         // Warm before attach so a tank's clips are already in flight when its emitter is born, and
@@ -69,9 +70,7 @@ pub fn plugin(app: &mut App) {
             Update,
             (warm_tank_clips, attach_engine_loops, drive_engine_speed).chain(),
         );
-    // Dev-only guard: confirm every clip path resolves, so a renamed or missing file surfaces as a
-    // loud error instead of silence.
-    #[cfg(debug_assertions)]
+    // A failed required clip is an asset fault in every build.
     app.add_systems(Update, verify_sfx_clips);
 }
 
@@ -94,11 +93,77 @@ impl SfxClips {
     }
 }
 
-fn setup_sfx_clips(mut commands: Commands, asset_server: Res<AssetServer>) {
-    commands.insert_resource(SfxClips {
+fn setup_sfx_clips(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    mut required: ResMut<crate::assets::PresentationLoads>,
+) {
+    let root = crate::assets::asset_root();
+    let mut clips = SfxClips {
         click: asset_server.load(CLICK_CLIP),
         tank: HashMap::new(),
+    };
+    for (path, field) in required_clips(crate::bake::selected_spec()) {
+        verify_clip(
+            crate::assets::require_file(&root, &path, &field),
+            &path,
+            &field,
+        );
+        let handle = if path == CLICK_CLIP {
+            clips.click.clone()
+        } else {
+            clips.tank_clip(&asset_server, &path)
+        };
+        required.0.push((path, handle.untyped()));
+    }
+    commands.insert_resource(clips);
+}
+
+/// Bevy's audio loader stores bytes without opening the codec. Construct its exact decoder here
+/// so unsupported or corrupt headers refuse at startup, with the owning field, before playback.
+fn verify_clip(bytes: Vec<u8>, path: &str, field: &str) {
+    assert!(
+        path.ends_with(".ogg"),
+        "{path}: {field}: author a Vorbis .ogg supported by the shipped audio loader"
+    );
+    type Decoder = <AudioSource as bevy::audio::Decodable>::Decoder;
+    let source = AudioSource {
+        bytes: bytes.into(),
+    };
+    let _decoder = Decoder::new(std::io::Cursor::new(source)).unwrap_or_else(|err| {
+        panic!(
+            "{path}: {field}: required clip cannot decode: {err} — export a supported Vorbis .ogg"
+        )
     });
+}
+
+/// Every selected tank clip is checked and warmed before any tank exists. Gun reports belong to
+/// the gun registry; the engine loop belongs to the tank sheet. An empty report list and an absent
+/// engine sound are authored silence.
+fn required_clips(spec: &crate::spec::TankSpec) -> Vec<(String, String)> {
+    let mut clips = vec![(CLICK_CLIP.to_owned(), "sfx::CLICK_CLIP".to_owned())];
+    let registry = crate::guns::GunRegistry::shipped();
+    for weapon in spec.weapons.values() {
+        let gun = registry
+            .gun(&weapon.gun)
+            .expect("the bake certifies every mounted gun");
+        for path in gun.report_clips() {
+            clips.push((
+                path.clone(),
+                format!("assets/guns/{}.gun.ron report_clips", weapon.gun),
+            ));
+        }
+    }
+    if let Some(sound) = &spec.track.powertrain.transmission.engine.sound {
+        clips.push((
+            sound.clip.clone(),
+            format!(
+                "{} track.powertrain.transmission.engine.sound.clip",
+                crate::tank::TANK_SPEC_PATH
+            ),
+        ));
+    }
+    clips
 }
 
 /// Start every clip a newly built tank declares, so the handles are warm before the first shot or
@@ -119,17 +184,9 @@ fn warm_tank_clips(
     }
 }
 
-/// Dev-time asset-load guard: each frame, check the load state of every clip the running game has
-/// asked for — the click plus whatever the loaded tanks authored — and `error!` any that FAILED (a
-/// bad path, a missing file, a codec bevy was not built with — only Vorbis decodes here). Cheap: it
-/// reads load states off handles that already exist. `debug_assertions` only, so shipped clients
-/// never pay for it.
-#[cfg(debug_assertions)]
-fn verify_sfx_clips(
-    asset_server: Res<AssetServer>,
-    clips: Res<SfxClips>,
-    mut reported: Local<std::collections::HashSet<String>>,
-) {
+/// Required clips must decode in every build. The set grows as tanks spawn, so successful handles
+/// are checked again while a newly authored dependency may still be loading.
+fn verify_sfx_clips(asset_server: Res<AssetServer>, clips: Res<SfxClips>) {
     use bevy::asset::LoadState;
 
     let entries = std::iter::once((CLICK_CLIP, &clips.click)).chain(
@@ -139,12 +196,10 @@ fn verify_sfx_clips(
             .map(|(path, handle)| (path.as_str(), handle)),
     );
     for (path, handle) in entries {
-        // One report per path: the set of clips grows as tanks spawn, so this system can never
-        // idle off the way a fixed list would.
-        if let LoadState::Failed(err) = asset_server.load_state(handle)
-            && reported.insert(path.to_string())
-        {
-            error!("sfx asset failed to load: {path}: {err}");
+        if let LoadState::Failed(err) = asset_server.load_state(handle) {
+            panic!(
+                "{path}: required sfx clip failed to load: {err} — restore a supported Vorbis .ogg or correct its authored path"
+            );
         }
     }
 }
@@ -364,6 +419,28 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
 
     use super::*;
+
+    /// Every selected tank dependency must exist before admission; another weapon or engine
+    /// recording must extend this same list rather than depending on its first play call.
+    #[test]
+    fn authored_sfx_dependencies_resolve_before_play() {
+        let root = crate::assets::asset_root();
+        for (path, field) in required_clips(crate::bake::selected_spec()) {
+            verify_clip(
+                crate::assets::require_file(&root, &path, &field),
+                &path,
+                &field,
+            );
+        }
+    }
+
+    /// The audio loader accepts raw bytes. Admission must reject a malformed recording before a
+    /// weapon's first report reaches the audio thread.
+    #[test]
+    #[should_panic(expected = "fixture.report_clips: required clip cannot decode")]
+    fn a_malformed_clip_is_refused_before_playback() {
+        verify_clip(b"not audio".to_vec(), "fixture.ogg", "fixture.report_clips");
+    }
 
     /// A synthetic engine, so every expectation below is arithmetic on THESE numbers rather than a
     /// constant copied out of a shipped sheet: 8 cylinders over a 500–2000 rpm band, on a recording

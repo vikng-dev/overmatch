@@ -339,15 +339,15 @@ pub(super) fn setup_muzzle_assets(
     });
     commands.insert_resource(MuzzleVfxAssets {
         quad: unit_quad(&mut meshes),
-        core_atlas: asset_server.load("vfx/flash_core_atlas.png"),
+        core_atlas: asset_server.load(super::Texture::FlashCore.path()),
         blast_atlas: [
-            asset_server.load("vfx/blast_core_a.ktx2"),
-            asset_server.load("vfx/blast_core_b.ktx2"),
+            asset_server.load(super::Texture::BlastCoreA.path()),
+            asset_server.load(super::Texture::BlastCoreB.path()),
         ],
-        mg_core: asset_server.load("vfx/mg_core.png"),
-        flame_atlas: asset_server.load("vfx/flash_flames_atlas.png"),
-        smoke_atlas: asset_server.load("vfx/smoke_atlas.png"),
-        dust_atlas: asset_server.load("vfx/impact_dust.png"),
+        mg_core: asset_server.load(super::Texture::MgCore.path()),
+        flame_atlas: asset_server.load(super::Texture::FlashFlames.path()),
+        smoke_atlas: asset_server.load(super::Texture::Smoke.path()),
+        dust_atlas: asset_server.load(super::Texture::ImpactDust.path()),
         flash_lut,
         blast_lut,
         smoke_lut,

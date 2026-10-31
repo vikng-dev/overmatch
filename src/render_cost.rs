@@ -606,8 +606,11 @@ pub fn client_plugin(app: &mut App) {
     let sink = match JsonlSink::create(&resolved) {
         Ok(sink) => sink,
         Err(err) => {
-            error!("render_cost: cannot open {}: {err}", resolved.display());
-            return;
+            eprintln!(
+                "SPIKE_RENDER_COST: cannot open {}: {err} — choose a writable output path",
+                resolved.display()
+            );
+            std::process::exit(2);
         }
     };
     // A `bevy/trace_tracy` build has already mounted the plugin via `RenderPlugin` (the vendored

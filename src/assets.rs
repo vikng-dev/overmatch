@@ -119,9 +119,81 @@ pub(crate) fn asset_root() -> PathBuf {
     )
 }
 
+/// Client-only dependencies collected in `PreStartup`, before tank admission starts in `Startup`.
+/// Each view plugin contributes its own handles. A headless composition with no view plugins has
+/// no such resource and no presentation dependencies.
+#[derive(bevy::prelude::Resource, Default)]
+pub(crate) struct PresentationLoads(pub Vec<(String, bevy::asset::UntypedHandle)>);
+
+/// Refuse an authored presentation dependency before play. These paths use the same root as
+/// Bevy's file reader; a missing file, an empty export or an unhydrated LFS pointer is an asset
+/// fault. The asynchronous loader still checks the format and refuses a failed decode.
+pub(crate) fn require_file(root: &Path, path: &str, field: &str) -> Vec<u8> {
+    assert!(
+        !path.is_empty()
+            && Path::new(path)
+                .components()
+                .all(|part| matches!(part, std::path::Component::Normal(_))),
+        "{field}: {path:?} must be an asset-relative file path — author a path within assets/"
+    );
+    let resolved = root.join(path);
+    let bytes = std::fs::read(&resolved).unwrap_or_else(|err| {
+        panic!(
+            "{}: {field}: cannot read required asset: {err} — restore the file or correct the authored path",
+            resolved.display()
+        )
+    });
+    assert!(
+        !bytes.is_empty() && !bytes.starts_with(b"version https://git-lfs.github.com/spec/"),
+        "{}: {field}: required asset is empty or an LFS pointer — export the asset or hydrate it with git lfs pull",
+        resolved.display()
+    );
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Client admission relies on readable exports. A missing path or an LFS pointer must refuse
+    /// at the file gate rather than becoming silent audio or a blank effect during play.
+    #[test]
+    fn required_presentation_files_refuse_missing_empty_and_lfs_inputs() {
+        let root =
+            std::env::temp_dir().join(format!("overmatch-view-files-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for bytes in [
+            b"".as_slice(),
+            b"version https://git-lfs.github.com/spec/v1\n".as_slice(),
+        ] {
+            std::fs::write(root.join("clip.ogg"), bytes).unwrap();
+            assert!(
+                std::panic::catch_unwind(|| require_file(
+                    &root,
+                    "clip.ogg",
+                    "fixture.report_clips"
+                ))
+                .is_err()
+            );
+        }
+        assert!(
+            std::panic::catch_unwind(|| require_file(&root, "missing.ogg", "fixture.report_clips"))
+                .is_err()
+        );
+        for path in ["", "../clip.ogg", "/clip.ogg"] {
+            assert!(
+                std::panic::catch_unwind(|| require_file(&root, path, "fixture.report_clips"))
+                    .is_err()
+            );
+        }
+        std::fs::write(
+            root.join("clip.ogg"),
+            b"a nonempty fixture; the loader checks its codec",
+        )
+        .unwrap();
+        require_file(&root, "clip.ogg", "fixture.report_clips");
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// FIXTURE DATA (the shipped tank): the id and the trio paths the program derives. Every
     /// consumer reaches the files only through these, so a wrong suffix or a dropped `<id>/`

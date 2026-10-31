@@ -485,12 +485,12 @@ pub(super) fn setup_impact_assets(
     });
     commands.insert_resource(ImpactAssets {
         quad: unit_quad(&mut meshes),
-        dust_atlas: asset_server.load("vfx/impact_dust.png"),
+        dust_atlas: asset_server.load(super::Texture::ImpactDust.path()),
         dust_lut,
         // A generic round glow (the same `light_01`-derived sprite the MG core uses; the asset
         // server dedupes the load and shares the GPU texture).
-        ping_atlas: asset_server.load("vfx/mg_core.png"),
-        spark_atlas: asset_server.load("vfx/spark_atlas.png"),
+        ping_atlas: asset_server.load(super::Texture::MgCore.path()),
+        spark_atlas: asset_server.load(super::Texture::Spark.path()),
         spark_lut,
         dirt_lut,
         scar_lut,

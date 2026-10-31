@@ -40,6 +40,8 @@ use crate::track::sim::{DriveSignal, EngineRpm, TankTransmission, TrackGripEleme
 pub(crate) struct PendingTankAssets {
     pub spec: Handle<TankSpec>,
     pub scene: Option<Handle<bevy::world_serialization::WorldAsset>>,
+    /// Client presentation dependencies, loaded before admission; empty on the dedicated server.
+    pub effects: Vec<(String, bevy::asset::UntypedHandle)>,
 }
 
 impl PendingTankAssets {
@@ -63,6 +65,10 @@ impl PendingTankAssets {
                 .scene
                 .as_ref()
                 .is_none_or(|scene| resolved(TANK_GLB_PATH, asset_server.load_state(scene)))
+            && self
+                .effects
+                .iter()
+                .all(|(path, handle)| resolved(path, asset_server.load_state(handle.id())))
     }
 
     /// Clone handles for a root; the spec handle remains available to presentation validation.
@@ -195,10 +201,16 @@ fn transformed_radius(radius: f32, transform: &Transform) -> f32 {
 }
 
 /// The windowed compositions' load: the spec sheet and the view artifact's scene.
-pub(crate) fn load_tank_assets(mut commands: Commands, asset_server: Res<AssetServer>) {
+pub(crate) fn load_tank_assets(
+    mut commands: Commands,
+    asset_server: Res<AssetServer>,
+    effects: Option<Res<crate::assets::PresentationLoads>>,
+) {
     commands.insert_resource(PendingTankAssets {
         spec: asset_server.load(TANK_SPEC_PATH),
         scene: Some(asset_server.load(GltfAssetLabel::Scene(0).from_asset(TANK_GLB_PATH))),
+        // No view plugins means no client effects (headless test composition).
+        effects: effects.map_or_else(Vec::new, |loads| loads.0.clone()),
     });
 }
 
@@ -208,6 +220,7 @@ pub(crate) fn load_tank_sim_assets(mut commands: Commands, asset_server: Res<Ass
     commands.insert_resource(PendingTankAssets {
         spec: asset_server.load(TANK_SPEC_PATH),
         scene: None,
+        effects: Vec::new(),
     });
 }
 

@@ -1353,6 +1353,7 @@ mod tests {
             .insert_resource(PendingTankAssets {
                 spec: Handle::default(),
                 scene: None,
+                effects: Vec::new(),
             })
             .insert_resource(BotCount(4))
             .init_resource::<CombatantIds>()
@@ -1458,6 +1459,7 @@ mod tests {
             .insert_resource(PendingTankAssets {
                 spec: Handle::default(),
                 scene: None,
+                effects: Vec::new(),
             })
             .insert_resource(crate::map::tests::fixture_manifest(750.0, 0.0, 50.0))
             .insert_resource(SpawnPlacement::new(BattleMode::shipped().spawn))

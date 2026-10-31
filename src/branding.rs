@@ -11,7 +11,7 @@
 use bevy::ecs::system::NonSendMarker;
 use bevy::prelude::*;
 use bevy::winit::WINIT_WINDOWS;
-use winit::window::Icon;
+use winit::window::{BadIcon, Icon};
 
 /// 256² window icon, baked into the binary at compile time from the branding sources.
 const ICON_PNG: &[u8] = include_bytes!("../build/icons/window_icon.png");
@@ -27,13 +27,13 @@ pub(crate) fn plugin(app: &mut App) {
 /// is populated and where winit's `set_window_icon` must be called — off the main
 /// thread the thread-local is empty and the call can hang.
 fn set_window_icon(_non_send_marker: NonSendMarker) {
-    let icon = match load_icon() {
-        Ok(icon) => icon,
-        Err(err) => {
-            warn!("could not build window icon, falling back to default: {err}");
-            return;
+    let icon = load_icon().unwrap_or_else(|err| match err {
+        BadIcon::OsError(source) => {
+            eprintln!("window icon: the OS refused the embedded icon: {source}");
+            std::process::exit(2);
         }
-    };
+        invalid => panic!("a decoded RGBA image has matching dimensions: {invalid}"),
+    });
     WINIT_WINDOWS.with_borrow(|winit_windows| {
         for window in winit_windows.windows.values() {
             window.set_window_icon(Some(icon.clone()));
@@ -41,8 +41,19 @@ fn set_window_icon(_non_send_marker: NonSendMarker) {
     });
 }
 
-fn load_icon() -> Result<Icon, Box<dyn std::error::Error>> {
-    let rgba = image::load_from_memory(ICON_PNG)?.into_rgba8();
+fn load_icon() -> Result<Icon, BadIcon> {
+    let rgba = image::load_from_memory(ICON_PNG)
+        .expect("build/icons/window_icon.png is an embedded PNG; regenerate it with scripts/gen-icons.sh")
+        .into_rgba8();
     let (width, height) = rgba.dimensions();
-    Ok(Icon::from_rgba(rgba.into_raw(), width, height)?)
+    Icon::from_rgba(rgba.into_raw(), width, height)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Window startup relies on a valid embedded icon; a broken export must fail before shipping.
+    #[test]
+    fn the_embedded_window_icon_decodes() {
+        super::load_icon().expect("the embedded icon has valid dimensions and the OS accepts it");
+    }
 }

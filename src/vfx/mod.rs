@@ -52,50 +52,86 @@ pub fn plugin(app: &mut App) {
         Update,
         (prewarm::tag_prewarm_meshes, prewarm::expire_prewarm),
     );
-    // Dev-only guard (§5a): confirm every vfx texture path actually resolves, so a renamed/missing
-    // atlas surfaces as a loud error instead of silently regressing to blank/again-square sprites.
-    #[cfg(debug_assertions)]
+    app.init_resource::<crate::assets::PresentationLoads>();
+    app.add_systems(PreStartup, verify_vfx_paths);
     app.add_systems(Update, verify_vfx_assets);
 }
 
-/// Dev-time asset-load guard: each frame until every vfx texture has settled, check its load state
-/// and `error!` any that FAILED (a bad path, a missing file, a renamed atlas). Cheap — the paths are
-/// already loaded by the effect setups, so `asset_server.load` here just returns the existing handle
-/// (the server dedupes), and the whole system idles off once everything is settled. `debug_assertions`
-/// only, so shipped clients never pay for it.
-#[cfg(debug_assertions)]
+/// The texture catalog shared by the load gate and the effect setups. Procedural noise and LUTs
+/// have no file dependency. Each path is stated once, here.
+#[derive(Clone, Copy)]
+pub(super) enum Texture {
+    FlashCore,
+    BlastCoreA,
+    BlastCoreB,
+    MgCore,
+    FlashFlames,
+    Smoke,
+    ImpactDust,
+    Spark,
+}
+
+impl Texture {
+    const ALL: [Self; 8] = [
+        Self::FlashCore,
+        Self::BlastCoreA,
+        Self::BlastCoreB,
+        Self::MgCore,
+        Self::FlashFlames,
+        Self::Smoke,
+        Self::ImpactDust,
+        Self::Spark,
+    ];
+
+    const fn path(self) -> &'static str {
+        match self {
+            Self::FlashCore => "vfx/flash_core_atlas.png",
+            Self::BlastCoreA => "vfx/blast_core_a.ktx2",
+            Self::BlastCoreB => "vfx/blast_core_b.ktx2",
+            Self::MgCore => "vfx/mg_core.png",
+            Self::FlashFlames => "vfx/flash_flames_atlas.png",
+            Self::Smoke => "vfx/smoke_atlas.png",
+            Self::ImpactDust => "vfx/impact_dust.png",
+            Self::Spark => "vfx/spark_atlas.png",
+        }
+    }
+}
+
+fn verify_vfx_paths(
+    asset_server: Res<AssetServer>,
+    mut required: ResMut<crate::assets::PresentationLoads>,
+) {
+    let root = crate::assets::asset_root();
+    for texture in Texture::ALL {
+        crate::assets::require_file(&root, texture.path(), "vfx::Texture");
+        let handle: Handle<Image> = asset_server.load(texture.path());
+        required
+            .0
+            .push((texture.path().to_owned(), handle.untyped()));
+    }
+}
+
+/// A format or decode failure is an asset fault in every build. Loading is a legitimate startup
+/// state; once every texture is loaded there is no remaining dependency to poll.
 fn verify_vfx_assets(asset_server: Res<AssetServer>, mut done: Local<bool>) {
     use bevy::asset::LoadState;
 
     if *done {
         return;
     }
-    /// Every texture the vfx layer draws (the LUTs/noise are procedural, so not here).
-    const VFX_TEXTURES: &[&str] = &[
-        "vfx/flash_core_atlas.png",
-        "vfx/blast_core_a.ktx2",
-        "vfx/blast_core_b.ktx2",
-        "vfx/mg_core.png",
-        "vfx/flash_flames_atlas.png",
-        "vfx/smoke_atlas.png",
-        "vfx/impact_dust.png",
-        "vfx/spark_atlas.png",
-    ];
-    let mut all_settled = true;
-    for path in VFX_TEXTURES {
-        let handle: Handle<Image> = asset_server.load(*path);
+    let mut all_loaded = true;
+    for texture in Texture::ALL {
+        let path = texture.path();
+        let handle: Handle<Image> = asset_server.load(path);
         match asset_server.load_state(&handle) {
-            LoadState::Failed(err) => {
-                error!("vfx asset failed to load: {path}: {err}");
-            }
+            LoadState::Failed(err) => panic!(
+                "{path}: required vfx texture failed to load: {err} — restore the texture or correct vfx::Texture"
+            ),
             LoadState::Loaded => {}
-            // NotLoaded / Loading: come back next frame.
-            _ => all_settled = false,
+            LoadState::NotLoaded | LoadState::Loading => all_loaded = false,
         }
     }
-    if all_settled {
-        *done = true;
-    }
+    *done = all_loaded;
 }
 
 /// The splitmix64 finalizer's two multiply-xorshift rounds — the bit-mixing core shared by
@@ -153,6 +189,16 @@ mod gpu_layout_tests {
     use bevy::render::render_resource::ShaderType;
 
     use super::{billboard::VfxParams, trail::TrailParams};
+
+    /// Effect setup and admission share the catalog; every declared texture must be exported and
+    /// hydrated before a client can play.
+    #[test]
+    fn vfx_dependencies_resolve_before_play() {
+        let root = crate::assets::asset_root();
+        for texture in super::Texture::ALL {
+            crate::assets::require_file(&root, texture.path(), "vfx::Texture");
+        }
+    }
 
     /// A `Vec4` lane, both sides of the wire.
     const LANE_BYTES: usize = 16;
