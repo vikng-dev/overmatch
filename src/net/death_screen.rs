@@ -9,6 +9,7 @@ use bevy::ecs::schedule::ScheduleConfigs;
 use bevy::ecs::system::{ScheduleSystem, SystemParam};
 use bevy::prelude::*;
 
+use super::battle::BattleState;
 use super::score::{Opening, Scoreboard};
 use crate::command::TankCommand;
 use crate::damage::TankKnockedOut;
@@ -43,11 +44,25 @@ struct OwnRespawn<'w, 's> {
         (With<Controlled>, With<TankKnockedOut>),
     >,
     boards: Query<'w, 's, &'static Scoreboard>,
+    battles: Query<'w, 's, &'static BattleState>,
     clock: Option<Res<'w, ShotClock>>,
     time: Res<'w, Time<Fixed>>,
 }
 
 impl OwnRespawn<'_, '_> {
+    /// The replicated phase closes respawn outside combat, even while the old tank's despawn is
+    /// still in flight. Without a Battle yet (or in an isolated death-view fixture), the authority
+    /// still decides a request against the life; absence cannot invent a phase.
+    fn between_combats(&self) -> bool {
+        match self.battles.single() {
+            Ok(battle) => !battle.is_combat(),
+            Err(QuerySingleError::NoEntities(_)) => false,
+            Err(QuerySingleError::MultipleEntities(_)) => {
+                panic!("a replica has one Battle; disconnect cleanup removes the previous link")
+            }
+        }
+    }
+
     /// Whole seconds, rounded up, until the own knocked-out life's respawn opens on the client's
     /// local tick (`ShotClock`, at or behind the tick a request pressed now is filed for, which is
     /// the tick the server reads it on), so a request sent at zero is never early.
@@ -170,8 +185,9 @@ fn toggle_death_screen(
     mut commands: Commands,
 ) {
     let has_live = !live_own.is_empty();
-    if has_live {
-        // The fresh tank is claimed and alive — the round-trip is over.
+    let between_combats = opening.between_combats();
+    if has_live || between_combats {
+        // A live replacement completes the request; a phase boundary cancels it.
         awaiting.active = false;
     } else if respawn_timed_out(&awaiting, has_live, time.elapsed_secs_f64()) {
         // The request stalled past the timeout (asset-gate skip, or a drop while dead): drop the
@@ -181,7 +197,9 @@ fn toggle_death_screen(
         info!("client: respawn request timed out — reverting to the death screen");
     }
 
-    let desired = if awaiting.active && !has_live {
+    let desired = if between_combats {
+        None
+    } else if awaiting.active && !has_live {
         Some(DeathScreenNode::Respawning)
     } else if !dead_own.is_empty() && !gate.is_some_and(|gate| gate.holds_death_screen) {
         Some(DeathScreenNode::Died {
@@ -237,7 +255,8 @@ fn request_respawn(
     mut dead_own: Query<&mut TankCommand, (With<Controlled>, With<TankKnockedOut>)>,
     mut awaiting: ResMut<AwaitingRespawn>,
 ) {
-    if !keys.just_pressed(RESPAWN_KEY)
+    if opening.between_combats()
+        || !keys.just_pressed(RESPAWN_KEY)
         || gate.is_some_and(|gate| gate.settling)
         || opening.seconds_left().is_some()
     {
@@ -360,6 +379,50 @@ fn apply_death_status_line(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The game's damage model: results cancel an in-flight respawn immediately and suppress a
+    /// new request even if the old knocked-out replica has not despawned. Players must see results
+    /// rather than a timeout-length respawn wait. Fixture clocks leave the timeout in the future.
+    #[test]
+    fn results_cancel_a_pending_respawn_and_refuse_another() {
+        use super::super::battle::{BattleOutcome, BattlePhase};
+        use bevy::ecs::system::RunSystemOnce;
+        let mut world = World::new();
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(Time::<Fixed>::default());
+        world.insert_resource(ButtonInput::<KeyCode>::default());
+        world.insert_resource(Overlays::default());
+        world.insert_resource(UiFonts {
+            hud: Handle::default(),
+            body: Handle::default(),
+        });
+        world.insert_resource(awaiting(true, 1000.0));
+        world.spawn(BattleState {
+            number: 1,
+            phase: BattlePhase::Results {
+                ends_at: 100,
+                outcome: BattleOutcome::NoContest,
+            },
+        });
+        let own = world
+            .spawn((
+                Controlled,
+                TankKnockedOut {
+                    reason: crate::damage::KnockoutReason::CrewLoss,
+                },
+                TankCommand::default(),
+            ))
+            .id();
+        world.run_system_once(toggle_death_screen).unwrap();
+        assert!(!world.resource::<AwaitingRespawn>().active);
+        assert_eq!(world.query::<&DeathScreenNode>().iter(&world).count(), 0);
+        world
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(RESPAWN_KEY);
+        world.run_system_once(request_respawn).unwrap();
+        assert!(!world.get::<TankCommand>(own).unwrap().respawn);
+        assert!(!world.resource::<AwaitingRespawn>().active);
+    }
 
     fn awaiting(active: bool, deadline: f64) -> AwaitingRespawn {
         AwaitingRespawn { active, deadline }
