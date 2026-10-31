@@ -188,11 +188,21 @@ mod tests {
         ArrivalStats::test_spread(ms / 1000.0)
     }
 
-    /// `g*` recomputed here from the raw constants (μ = 0.9, g = 9.81, ε_vis = 12.08 mm)
-    /// independently of `net::extrapolate`'s expression — the same independence discipline as
-    /// `extrapolate`'s own horizon test.
+    /// `g*` recomputed here from the raw inputs (μ the selected tank's track and the base
+    /// ground's rows under the pair rule, g = 9.81, ε_vis = 12.08 mm) independently of
+    /// `net::extrapolate`'s expression — the same independence discipline as `extrapolate`'s
+    /// own horizon test.
     fn g_star() -> Duration {
-        Duration::from_secs_f64((2.0 * 0.012_08_f64 / (0.9 * 9.81)).sqrt())
+        let track = crate::substances::SubstanceRegistry::shipped_static()
+            .hard(&crate::bake::selected_spec().track.substance)
+            .unwrap()
+            .friction
+            .unwrap();
+        let ground = crate::ground_types::GroundTypes::load_shipped()
+            .get(crate::terrain_blend::BASE_GROUND)
+            .friction;
+        let mu = f64::from(track * ground).sqrt();
+        Duration::from_secs_f64((2.0 * 0.012_08_f64 / (mu * 9.81)).sqrt())
     }
 
     /// Absolute values at three operating points. Dropping `rtt/2` fails the 100 ms cases;
