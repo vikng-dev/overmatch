@@ -3247,7 +3247,7 @@ fn march_shell_step(
     // supplies its own world path and speed until playback reaches its end.
     let mut flight = match playback.front() {
         Some(playing) => playing.flight(),
-        None => launch(shell, previous, dir, speed, radius),
+        None => launch(shell, &context, &not_own, previous, dir, speed, radius),
     };
 
     loop {
@@ -3507,23 +3507,33 @@ fn march_shell_step(
     })
 }
 
-/// The game's damage model launches an outside disc; discovery refuses an inside start.
+/// The game's damage model: the step's discovery disc. One laid on an axis start a sweep reached is
+/// outside by the walk law, and discovery panics on an inside start. One no sweep has reached is
+/// placed, not moved, into the scene: a round's birth at the muzzle, a catch-up's end, a bounce
+/// lift the last tick ended on. Its membership is read where it stands ([`resolve::Flight::born`]),
+/// so a muzzle inside a foreign body starts the round inside that body's material (MEASURED in a
+/// 30-bot run: tanks pressed together, one gun's muzzle in the other's turret side), and the walk
+/// carries it out like any held start.
 fn launch(
     shell: &mut MarchingShell,
+    context: &resolve::ResolveContext<'_, '_, '_>,
+    not_own: &dyn Fn(Entity) -> bool,
     previous: Dir3,
     dir: Dir3,
     speed: f32,
     radius: f32,
 ) -> resolve::Flight {
-    resolve::Flight::launched(
-        shell.transform.translation,
-        previous,
-        dir,
-        speed,
-        shell.projectile.disc,
-        radius,
-        shell.projectile.axis.take(),
-    )
+    let position = shell.transform.translation;
+    let frame = shell.projectile.disc;
+    match shell.projectile.axis.take() {
+        Some(axis) => {
+            resolve::Flight::launched(position, previous, dir, speed, frame, radius, Some(axis))
+        }
+        None => resolve::Flight::born(
+            context, not_own, position, previous, dir, speed, frame, radius,
+        )
+        .unwrap_or_else(|error| error.panic()),
+    }
 }
 
 /// The game's damage model freezes the current discovery chain before playback starts. The
@@ -5315,8 +5325,9 @@ mod march_tests {
     /// march's very first cast struck the shooter's own armour a centimetre out — embedding the round on
     /// the authority, and fail-closing the tracer on every net client. The plate here stands for that
     /// mantlet: a round fired from INSIDE it must fly straight out if the plate belongs to its shooter,
-    /// and the very same plate must stop a foreign round entering from outside. That second half is the point —
-    /// this is an exclusion, not a hole in the armour.
+    /// and must still be stopped by the very same plate if it does not: a round's birth reads its
+    /// membership where it stands ([`launch`]). That second half is the point — this is an
+    /// exclusion, not a hole in the armour.
     #[test]
     fn a_shell_ignores_the_tank_that_fired_it() {
         use crate::damage::VolumeOf;
@@ -5338,7 +5349,7 @@ mod march_tests {
             let plate = plates.single(app.world()).expect("one plate");
             app.world_mut().entity_mut(plate).insert(VolumeOf(tank));
 
-            let origin = Vec3::new(0.0, 2.0, if own { 0.0 } else { 0.4 });
+            let origin = Vec3::new(0.0, 2.0, 0.0);
             let dir = Vec3::NEG_Z;
             let shell = app
                 .world_mut()
@@ -6482,7 +6493,7 @@ mod march_tests {
     /// The game's damage model constructs readable ballistic shapes on both authority and
     /// replicas. A compound inserted by a broken fixture is a wiring bug, never a hold or verdict.
     #[test]
-    #[should_panic(expected = "spawned ballistic colliders carry a resolved pose")]
+    #[should_panic(expected = "spawn constructs certified trimesh or convex ballistic geometry")]
     fn a_replica_panics_on_an_unreadable_ballistic_shape() {
         let mut app = replica_world(SanctionedShots::default());
         spawn_uncertifiable(&mut app);
@@ -6553,7 +6564,7 @@ mod march_tests {
 
     /// The game's damage model requires the same certified-shape invariant on the authority.
     #[test]
-    #[should_panic(expected = "spawned ballistic colliders carry a resolved pose")]
+    #[should_panic(expected = "spawn constructs certified trimesh or convex ballistic geometry")]
     fn the_authority_panics_on_an_unreadable_ballistic_shape() {
         let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.10), Vec3::new(0.0, 2.0, 0.0));
         spawn_uncertifiable(&mut app);

@@ -1616,13 +1616,17 @@ fn a_third_body_arriving_at_contact_uses_the_same_sampled_scene() {
     );
 }
 
-/// The game's damage model: outside discovery is a runtime invariant, not a launch-time
-/// containment certificate. An unrelated owner cannot turn an interior start into a crossing.
+/// The game's damage model: a round is placed at its birth, not moved there, so its membership is
+/// read at the muzzle. A muzzle inside a foreign body (MEASURED in a 30-bot run: tanks pressed
+/// together, one gun's muzzle in the other's turret side) starts the round in that body's
+/// material, and the walk carries it out as a crossing of that body; the server relies on this not
+/// being read as a broken walk. A swept start inside a collider remains a bug (`motion`'s
+/// `discovery_refuses_a_shallow_inside_start`). Mutant: laying the birth disc as swept panics.
 #[test]
-#[should_panic(expected = "discovery starts outside every collider")]
-fn runtime_discovery_refuses_a_foreign_interior_start() {
+fn a_round_born_inside_a_foreign_body_starts_in_its_material() {
     let mut app = recording_world(false);
-    tank(
+    app.insert_resource(RetainSpentShells(true));
+    let (_, plates) = tank(
         &mut app,
         Vec3::ZERO,
         0.0,
@@ -1631,7 +1635,19 @@ fn runtime_discovery_refuses_a_foreign_interior_start() {
     );
     settle(&mut app);
     fire(&mut app, Vec3::ZERO, FireMechanism::Single);
-    app.update();
+    run(&mut app, 2);
+    let mut query = app.world_mut().query::<&PenetrationMarks>();
+    let crossed = query
+        .iter(app.world())
+        .flat_map(|marks| &marks.log)
+        .any(|mark| {
+            matches!(mark, ArmourMark::Crossing { volumes, .. }
+                if volumes.iter().any(|volume| volume.volume == plates[0]))
+        });
+    assert!(
+        crossed,
+        "the round's crossing records the body it was born in"
+    );
 }
 
 /// The game's damage model: a resolved moving frame can leave zero world speed. The remaining

@@ -964,7 +964,8 @@ pub(crate) struct Flight {
 
 impl Flight {
     /// The game's damage model: a new discovery disc starts outside material. Its sweep
-    /// verifies that invariant; no tick-start containment probe supplies membership.
+    /// verifies that invariant; no tick-start containment probe supplies membership. A disc no
+    /// sweep has reached is placed through [`Self::born`] instead.
     pub(crate) fn launched(
         position: Vec3,
         swept: Dir3,
@@ -990,6 +991,33 @@ impl Flight {
             frame: frame.transport(Vec3::from(swept), Vec3::from(direction)),
             continuation: Some(starts),
         }
+    }
+
+    /// The game's damage model: a disc no sweep has reached, placed into the scene
+    /// (`ballistics::launch`): the disc [`Self::launched`] lays at `position` with no axis start,
+    /// its membership read there by the containment probe ([`certified`]) along `swept`.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "the flight's whole state plus the world its birth membership is read in"
+    )]
+    pub(crate) fn born(
+        context: &ResolveContext<'_, '_, '_>,
+        not_own: &dyn Fn(Entity) -> bool,
+        position: Vec3,
+        swept: Dir3,
+        direction: Dir3,
+        speed: f32,
+        frame: DiscFrame,
+        radius: f32,
+    ) -> Result<Self, WalkError> {
+        let starts = certified(context, not_own, position, swept, frame, radius)?;
+        Ok(Self {
+            position: starts.world_origin(),
+            direction,
+            speed,
+            frame: frame.transport(Vec3::from(swept), Vec3::from(direction)),
+            continuation: Some(starts),
+        })
     }
 
     /// Lay the fresh disc a bounce or a re-seed left — on `frame` at `position`, square to
