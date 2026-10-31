@@ -26,15 +26,18 @@
 //!   ([`RubbleBodies::velocity_at`]).
 //! - *The piece's side* is the clamped contact impulse of sequential-impulse solvers (Catto, the
 //!   family avian's own solver belongs to), one pass over the tick's contacts in emission order,
-//!   each sized after the impulses before it: along the normal, the support reaction's impulse
-//!   `load × dt`, at most what stops the piece closing on the belt; along the traction reaction's
-//!   direction, its impulse, at most what stops the piece sliding against the belt surface's
-//!   velocity there and at most μ × that normal impulse (μ the belt's [`belt_friction`] against
-//!   the piece's collider, combined by the one pair rule every contact uses,
-//!   `substances::PAIR_RULE`). Each bound uses the piece's effective mass
-//!   along it at the contact, `1 / (1/m + (r×d)·I⁻¹(r×d))`; the two components couple through
-//!   the inertia, so both scale by one factor until neither passes its bound. Nothing beyond
-//!   that reaches the piece; avian's own contacts resolve what holds it.
+//!   each sized after the impulses before it. The push, along the normal: the support reaction's
+//!   impulse `load × dt`, at most what stops the piece closing on the belt. Then the drag, along
+//!   the traction reaction's direction: its impulse, at most Coulomb's `μ × load × dt` (the
+//!   normal force the belt presses with over the tick, whether or not the piece is closing, so a
+//!   parked or pivoting hull still drags what it stands on; μ the belt's [`belt_friction`]
+//!   against the piece's collider, combined by the one pair rule every contact uses,
+//!   `substances::PAIR_RULE`), and at most what brings the piece, already pushed, to the belt
+//!   surface's velocity there. Each bound uses the piece's effective mass along it at the
+//!   contact, `1 / (1/m + (r×d)·I⁻¹(r×d))`, so neither part drives the piece past the belt along
+//!   its own direction. The drag's turn of the piece may open the contact along the normal (a
+//!   brick tipping under the belt), which no bound stops: avian's own contacts resolve what holds
+//!   the piece. Nothing beyond that reaches it.
 //! - **Accepted error**: a piece resting on nothing (a brick falling off a pile edge) still
 //!   supports the tank for the ticks it is probed. The refinement, not built, limits the support
 //!   by the impulses avian's contacts on the piece carried the tick before.
@@ -345,43 +348,25 @@ pub(crate) fn piece_impulses(
     pushes
 }
 
-/// The impulse one contact puts on `body` (module doc). `contact.normal` points from the piece
-/// to the belt and the traction is the belt's force on the hull, so the piece's side runs along
-/// `-normal` and `-traction`.
+/// The impulse one contact puts on `body` (module doc): the push, then the drag sized against the
+/// pushed piece. `contact.normal` points from the piece to the belt and the traction is the
+/// belt's force on the hull, so the piece's side runs along `-normal` and `-traction`.
 fn contact_impulse(body: &PieceBody, contact: &BeltContact, mu: f32, dt: f32) -> Vec3 {
     let (point, normal) = (contact.point, contact.normal);
+    let load_j = contact.load.max(0.0) * dt;
     // The piece's velocity against the belt surface at the contact.
     let rel = body.velocity_at(point) - contact.belt_velocity;
     let closing = rel.dot(normal);
-    let normal_j = (contact.load * dt).min(body.effective_mass(point, normal) * closing.max(0.0));
-    if normal_j <= 0.0 {
-        return Vec3::ZERO;
-    }
-    let mut impulse = -normal * normal_j;
-    let mut along = None;
-    if let Ok(dir) = Dir3::new(-contact.traction) {
-        let lag = -rel.dot(*dir);
-        let tangent_j = (contact.traction.length() * dt)
-            .min(body.effective_mass(point, *dir) * lag.max(0.0))
-            .min(mu * normal_j);
-        if tangent_j > 0.0 {
-            impulse += *dir * tangent_j;
-            along = Some((*dir, lag));
-        }
-    }
-    let response = body.response(impulse, point);
-    let mut scale = 1.0_f32;
-    let normal_dv = response.dot(normal);
-    if normal_dv < 0.0 {
-        scale = scale.min(closing / -normal_dv);
-    }
-    if let Some((dir, lag)) = along {
-        let tangent_dv = response.dot(dir);
-        if tangent_dv > 0.0 {
-            scale = scale.min(lag / tangent_dv);
-        }
-    }
-    impulse * scale
+    let push = -normal * load_j.min(body.effective_mass(point, normal) * closing.max(0.0));
+    let Ok(dir) = Dir3::new(-contact.traction) else {
+        return push;
+    };
+    // How far the pushed piece lags the belt surface along the drag.
+    let lag = -(rel + body.response(push, point)).dot(*dir);
+    let drag = (contact.traction.length() * dt)
+        .min(mu * load_j)
+        .min(body.effective_mass(point, *dir) * lag.max(0.0));
+    push + *dir * drag
 }
 
 /// Put every push on its body through avian, which wakes a sleeping body for a non-zero impulse.
@@ -679,18 +664,20 @@ mod tests {
     }
 
     /// THE IMPULSE ON A PIECE NEVER DRIVES IT PAST THE BELT, AND ITS TANGENTIAL PART NEVER
-    /// EXCEEDS μ × ITS NORMAL PART: the clamp is what keeps a light piece from being flung, so
-    /// over 4000 fixture contacts (pieces of 5 kg to 3 t with skewed inertia, off-centre contacts,
-    /// any normal, traction and belt velocity) the normal impulse lies in `[0, load·dt]`, the
-    /// tangential one within `|traction|·dt` and μ × the normal one, and after the impulse the
-    /// piece is still closing on the belt or level with it along the normal, and still behind
-    /// the belt surface or level with it along the tangential impulse's direction. A clamp
-    /// sized without the inertia coupling, a cap on the wrong side, or a friction bound off the
-    /// support reaction instead of the clamped impulse fails here; every clamp is seen to bind.
+    /// EXCEEDS COULOMB'S μ × load × dt: the clamp is what keeps a light piece from being flung, and
+    /// the belt's normal force over the tick is what the friction reads, so over 4000 fixture
+    /// contacts (pieces of 5 kg to 3 t with skewed inertia, off-centre contacts, any normal,
+    /// traction and belt velocity) the normal impulse lies in `[0, load·dt]`, the tangential one
+    /// within `|traction|·dt` and `μ·load·dt`; the push alone leaves the piece still closing on the
+    /// belt or level with it along the normal, and the whole impulse leaves it still behind the
+    /// belt surface or level with it along the drag. A clamp sized without the inertia coupling,
+    /// a drag sized against the unpushed piece, a cap on the wrong side, or a friction bound off
+    /// the clamped normal impulse (which drags nothing under a hull that is not closing) fails
+    /// here; every clamp is seen to bind, and the drag is seen with no push at all.
     #[test]
     fn the_impulse_never_drives_a_piece_past_the_belt() {
         let mut rng = Lcg(0x5eed);
-        let (mut by_closing, mut by_load, mut by_cone, mut by_lag) = (0, 0, 0, 0);
+        let (mut by_closing, mut by_load, mut by_cone, mut by_lag, mut unpushed) = (0, 0, 0, 0, 0);
         for case in 0..4000 {
             let mass = rng.range(5.0, 3000.0);
             let axes = Quat::from_euler(
@@ -741,7 +728,7 @@ mod tests {
                 "case {case}: {normal_j}"
             );
             assert!(
-                tangent_j <= mu * normal_j + tol,
+                tangent_j <= mu * contact.load * DT + tol,
                 "case {case}: outside the cone"
             );
             assert!(
@@ -754,12 +741,15 @@ mod tests {
             after_body.apply(impulse, contact.point);
             let after = after_body.velocity_at(contact.point) - contact.belt_velocity;
             let vtol = 1e-4 * (1.0 + before.length());
-            if normal_j > 0.0 {
+            if normal_j > tol {
+                let mut pushed = body;
+                pushed.apply(-normal * normal_j, contact.point);
+                let pushed = pushed.velocity_at(contact.point) - contact.belt_velocity;
                 assert!(
-                    after.dot(normal) >= -vtol,
-                    "case {case}: driven past the belt along the normal, {} → {}",
+                    pushed.dot(normal) >= -vtol,
+                    "case {case}: pushed past the belt along the normal, {} → {}",
                     before.dot(normal),
-                    after.dot(normal),
+                    pushed.dot(normal),
                 );
             }
             if let Ok(dir) = Dir3::new(-contact.traction)
@@ -779,11 +769,13 @@ mod tests {
                 } else {
                     by_load += 1;
                 }
-                if tangent_j > tol && tangent_j > mu * normal_j * 0.999 {
-                    by_cone += 1;
-                } else if tangent_j > tol {
-                    by_lag += 1;
-                }
+            } else if tangent_j > tol {
+                unpushed += 1;
+            }
+            if tangent_j > tol && tangent_j > mu * contact.load * DT * 0.999 {
+                by_cone += 1;
+            } else if tangent_j > tol && tangent_j < contact.traction.length() * DT * 0.999 {
+                by_lag += 1;
             }
         }
         for (name, count) in [
@@ -791,6 +783,7 @@ mod tests {
             ("load", by_load),
             ("cone", by_cone),
             ("lag", by_lag),
+            ("drag with no push", unpushed),
         ] {
             assert!(count > 20, "the {name} bound bound only {count} times");
         }
