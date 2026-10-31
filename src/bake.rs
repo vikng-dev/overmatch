@@ -12,16 +12,19 @@ use bevy::mesh::VertexAttributeValues;
 use bevy::prelude::*;
 use bevy::world_serialization::WorldInstanceReady;
 
-use crate::spec::{NodeReference, NodeRole, TankSpec, TankSpecHandle};
+use crate::spec::{NodeReference, NodeRole, TankSpec, TankSpecHandle, ViewKind};
 use crate::substances::SubstanceRegistry;
-use crate::tank::{SimParts, TrackSide, rig_world_pose};
+use crate::tank::{ServoRole, SimParts, TrackSide, rig_world_pose};
 
 mod embedding;
+/// A tank kind's envelopes, computed from the bake's data (design §13.5, "The envelope").
+mod envelope;
 #[cfg(test)]
 mod fixture;
 /// The one finding shape every stage of the asset door emits.
 mod report;
 
+pub(crate) use envelope::TankEnvelopes;
 use report::sorted;
 pub use report::{Check, Finding, Severity, Stage, Subject, has_error, render};
 
@@ -368,6 +371,49 @@ pub(crate) struct TankBlueprint {
     pub file: String,
     pub geometry: Arc<TankGeometry>,
     pub spec: Arc<TankSpec>,
+    /// Computed from `geometry` and `spec` by [`TankBlueprint::new`], once per kind.
+    #[cfg_attr(
+        not(test),
+        expect(
+            dead_code,
+            reason = "the atomic crossing (design §13.5, \"The envelope\", step 6b) reads it; \
+                      nothing does yet"
+        )
+    )]
+    pub envelopes: TankEnvelopes,
+}
+
+impl TankBlueprint {
+    /// A tank kind's blueprint, with its envelopes computed here from its data, so every spawn of
+    /// the kind shares one result.
+    pub(crate) fn new(file: String, geometry: TankGeometry, spec: TankSpec) -> Self {
+        let envelopes = TankEnvelopes::of(&geometry, &spec);
+        Self {
+            file,
+            geometry: Arc::new(geometry),
+            spec: Arc::new(spec),
+            envelopes,
+        }
+    }
+}
+
+/// The node a cook-off launches as its own body: the first Yaw servo at or above the Gunner view's
+/// node, the traverse of the gunner's chain. `None` when the sheet names no Gunner view, its node is
+/// not in the model, or no Yaw servo sits above it.
+pub(crate) fn turret_node(geometry: &TankGeometry, spec: &TankSpec) -> Option<usize> {
+    let mut index = *geometry
+        .by_name
+        .get(&spec.views.get(&ViewKind::Gunner)?.node)?;
+    loop {
+        let yaw = spec
+            .servos
+            .get(&geometry.nodes[index].name)
+            .is_some_and(|servo| servo.role() == ServoRole::Yaw);
+        if yaw {
+            return Some(index);
+        }
+        index = geometry.nodes[index].parent?;
+    }
 }
 
 const TIGER_SPEC_RON: &str = include_str!("../assets/tiger_1/tiger_1.tank.ron");
@@ -875,11 +921,11 @@ fn extract_at_startup(mut commands: Commands) {
         asset.geometry.ballistic_volumes.len(),
     );
 
-    commands.insert_resource(TankBlueprint {
-        file: crate::tank::TANK_SPEC_PATH.to_owned(),
-        geometry: Arc::new(asset.geometry),
-        spec: Arc::new(asset.spec),
-    });
+    commands.insert_resource(TankBlueprint::new(
+        crate::tank::TANK_SPEC_PATH.to_owned(),
+        asset.geometry,
+        asset.spec,
+    ));
 }
 
 /// A GLB/spec pair that passed the whole L2 contract: the spec sheet and the certified geometry.

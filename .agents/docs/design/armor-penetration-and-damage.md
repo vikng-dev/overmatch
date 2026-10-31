@@ -1529,6 +1529,29 @@ shared, and a longer walk meets more pieces to land past — failures rose from 
 depends on the corridor's length: moving a hand-off by `δ` along the incoming axis `u` shifts the
 bent ray `b` sideways by `δ (u − b (u·b))`, DERIVED).
 
+**The envelope: a crossing resolves at one instant (PROVISIONAL, owner decision 2026-10-31,
+#191).** From the moment a round enters a tank's envelope until it has left every envelope, its
+crossing is resolved at one instant against the tanks as they stand, so no continuation is carried
+across a tick boundary onto moving armour (the `unexpected_exit` above).
+
+- **What it is.** An invisible axis-aligned box, never a collider, in the body's own frame (the
+  tank root's). It holds every part the bake captures (armour, components, crew boxes, collision
+  proxies) at every angle each servo can take within the sheet's travel window, a full turn for a
+  continuous traverse, so it holds the turret's whole sweep and the gun's whole elevation range.
+- **How it is computed.** Once per tank kind at load, in the bake that extracts the armour
+  (`bake::envelope`, carried on `TankBlueprint::envelopes`), as a pure function of the extracted
+  geometry and the sheet's servos: conservative and threshold-free. Each servo's subtree enters its
+  parent as the corners of the exact box of every point's arc over the servo's window, and the
+  faces are rounded outward to f32.
+- **A launched turret** gets its own envelope by the same rule, in its own frame: its traverse is
+  now its pose, and the servos under it are swept.
+- **Not swept: the recoil stroke.** The sheet states a spring, not a stroke, and repeated kicks
+  accumulate, so no stroke bound follows from data; the recoiling parts are held at battery.
+- **Pending: step 6b**, the atomic resolution itself. Nothing reads the envelope yet.
+
+Provisional: the computation may move into a refined asset-bake pipeline with dev tooling, which is
+why it reads nothing but the bake's data.
+
 ### 13.6 Invariants — the machine-checkable contract
 
 - **Idempotence:** duplicating any volume changes no outcome.

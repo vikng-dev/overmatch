@@ -311,19 +311,6 @@ pub(crate) fn attach_replicated_tank_body<B: Bundle>(
     assemble_tank_body(commands, root, content);
 }
 
-fn first_geometry_ancestor(
-    geometry: &TankGeometry,
-    mut index: usize,
-    pred: impl Fn(usize) -> bool,
-) -> Option<usize> {
-    loop {
-        if pred(index) {
-            return Some(index);
-        }
-        index = geometry.nodes[index].parent?;
-    }
-}
-
 /// Every spec-declared node resolved to a geometry index, in the deterministic sorted orders the
 /// wire indices are assigned from. Produced by [`resolve_rig_nodes`], which asserts the rig
 /// contract before returning — so every field here is a node that exists and downstream assembly
@@ -413,8 +400,9 @@ fn resolve_rig_nodes<'a>(geometry: &'a TankGeometry, spec: &'a TankSpec) -> RigN
     let com_index = resolve("Center_Of_Mass");
 
     // The gunner's chain feeds the rig's `turret`/`gun` (optic, camera, launched-turret): the
-    // declared Pitch node + the Yaw servo above it in the extracted topology — the binder never
-    // guesses which of several yaw/pitch mounts is the main one.
+    // declared Pitch node + the Yaw servo above it in the extracted topology
+    // (`bake::turret_node`, which the envelope bake reads too) — the binder never guesses which of
+    // several yaw/pitch mounts is the main one.
     let servo_nodes_with_role = |role: ServoRole| -> HashSet<usize> {
         servo_entries
             .iter()
@@ -423,10 +411,8 @@ fn resolve_rig_nodes<'a>(geometry: &'a TankGeometry, spec: &'a TankSpec) -> RigN
             .filter_map(|(_, index)| *index)
             .collect()
     };
-    let yaw_indices = servo_nodes_with_role(ServoRole::Yaw);
     let pitch_indices = servo_nodes_with_role(ServoRole::Pitch);
-    let turret_index = gunner_pitch
-        .and_then(|pitch| first_geometry_ancestor(geometry, pitch, |i| yaw_indices.contains(&i)));
+    let turret_index = crate::bake::turret_node(geometry, spec);
     // The single `Primary` weapon supplies the rig's main bore (`Rig.muzzle`) — what the bore HUD
     // reads and LMB fires. Trigger never speaks to aiming; the chain handles come from the gunner
     // view above.

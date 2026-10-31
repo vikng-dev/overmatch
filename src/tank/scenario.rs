@@ -706,10 +706,11 @@ fn swap_controlled_tank(
 mod spawn_contract_tests {
     use std::{collections::HashMap, sync::Arc};
 
-    use bevy::prelude::{App, ResMut, Resource, Update};
+    use bevy::math::bounding::Aabb3d;
+    use bevy::prelude::{App, ResMut, Resource, Update, Vec3};
 
     use super::super::spawn::TankSimSource;
-    use crate::bake::{TankBlueprint, TankGeometry};
+    use crate::bake::{TankBlueprint, TankEnvelopes, TankGeometry};
     use crate::spec::TankSpec;
 
     #[derive(Resource, Default)]
@@ -733,10 +734,16 @@ mod spawn_contract_tests {
         };
 
         let mut app = App::new();
+        // No geometry, so no envelope follows from it; nothing here reads one.
+        let nowhere = Aabb3d::new(Vec3::ZERO, Vec3::ZERO);
         app.insert_resource(TankBlueprint {
             file: crate::tank::TANK_SPEC_PATH.to_owned(),
             geometry: Arc::new(geometry),
             spec: Arc::new(spec),
+            envelopes: TankEnvelopes {
+                tank: nowhere,
+                turret: nowhere,
+            },
         })
         .init_resource::<SourceProbe>()
         .add_systems(Update, probe_unresolved_handle);

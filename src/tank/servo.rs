@@ -19,7 +19,7 @@ pub enum ServoRole {
 }
 
 impl ServoRole {
-    fn axis(self) -> Vec3 {
+    pub(crate) fn axis(self) -> Vec3 {
         match self {
             ServoRole::Yaw => Vec3::Y,
             ServoRole::Pitch => Vec3::X,

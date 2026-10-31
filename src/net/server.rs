@@ -1215,8 +1215,6 @@ mod tests {
     /// Fixture data: the shipped Tiger, the one tank in the tree.
     #[test]
     fn n_bots_spawn_n_tanks_each_its_own_combatant_at_its_own_home() {
-        use std::sync::Arc;
-
         let root = crate::assets::asset_root();
         let spec_ron = std::fs::read_to_string(root.join(crate::tank::TANK_SPEC_PATH))
             .expect("the shipped spec sheet");
@@ -1227,11 +1225,11 @@ mod tests {
         )
         .unwrap_or_else(|_| panic!("the shipped sim artifact certifies"));
         let mut app = App::new();
-        app.insert_resource(crate::bake::TankBlueprint {
-            file: crate::tank::TANK_SPEC_PATH.to_owned(),
-            geometry: Arc::new(asset.geometry),
-            spec: Arc::new(asset.spec),
-        })
+        app.insert_resource(crate::bake::TankBlueprint::new(
+            crate::tank::TANK_SPEC_PATH.to_owned(),
+            asset.geometry,
+            asset.spec,
+        ))
         .insert_resource(PendingTankAssets {
             spec: Handle::default(),
             scene: None,
