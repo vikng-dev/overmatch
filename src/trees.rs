@@ -1,5 +1,5 @@
 //! Trees in the game's damage model: a hard body of segments, each with its own HP pool, and a
-//! state. Game rounds dose it, tanks push it, and it falls at a segment.
+//! state. Game rounds dose it, bodies push it, and it falls at a segment.
 //!
 //! A TREE IS DATA (ADR-0034). `assets/trees/<id>/<id>.tree.ron` ([`TreeAsset`]) is the trunk as a
 //! chain of tapered segments, each boundary's radius stored once — every segment's base radius,
@@ -24,10 +24,11 @@
 //!
 //! THE STATE. [`TreeState`] is `Standing` or `Down { cut, dir }`: the segment the trunk broke at
 //! and the fall azimuth's bin. The authority sets it once — when a segment's pool empties
-//! ([`PoolEmptied`]: the cut is that segment, the direction the dose's own) or when a ram's
-//! torque beats `fell_k × dbh³` — with the tick it fell at ([`Fell`]), and every peer derives the
-//! rest from the two: the body here, the glb and the fall's presentation in [`view`], which the
-//! sim never waits on. One break per tree: a tree that is down holds no pool.
+//! ([`PoolEmptied`]: the cut is that segment, the direction the dose's own) or when the torque
+//! any body's contacts put on the trunk in one tick beats `fell_k × dbh³` — with the tick it fell
+//! at ([`Fell`]), and every peer derives the rest from the two: the body here, the glb and the
+//! fall's presentation in [`view`], which the sim never waits on. One break per tree: a tree that
+//! is down holds no pool.
 //!
 //! THE FALL IS A MOTION, NEVER A PLACEMENT. The piece above the cut is a rigid physical pendulum
 //! about the cut's centre ([`Pendulum`]: its moments from the taper, its starting spin the least
@@ -65,7 +66,6 @@ use crate::buildings::fracture::GRAVITY;
 use crate::provenance::Sourced;
 use crate::scatter::MapInstance;
 use crate::substances::SubstanceRegistry;
-use crate::tank::Tank;
 use crate::terrain_grid::HeightGrid;
 use crate::{ClientReplica, ShotClock};
 
@@ -1395,31 +1395,26 @@ pub(crate) fn ram_torque(contacts: &[RamContact]) -> (f32, Vec2) {
 }
 
 /// The ram law's reading of one tick's contacts: for every ACTIVE touching pair between a trunk
-/// segment and a tank's body, the solver's normal impulse (N·s) at its lever above the tree's base
-/// and its horizontal push into the tree, grouped by standing tree. Sleeping pairs are never read
-/// — their retained impulse is not this tick's — and only a tank pushes. A pair names its
-/// colliders' BODIES, and a tank is one body: its root, marked [`Tank`], under which the hull and
-/// turret nodes hang with their proxies (`Hull` marks a node, never a body). A body that is no
-/// tank — a launched turret — rolls off a tree. The manifold normal runs from the pair's first
-/// collider to its second, so it points into the tree exactly when the tree's segment is the
-/// second.
+/// segment and a collider of anything but a tree, the solver's normal impulse (N·s) at its lever
+/// above the tree's base and its horizontal push into the tree, grouped by standing tree. Sleeping
+/// pairs are never read — their retained impulse is not this tick's. What the other body is never
+/// enters: a tank's hull, a launched turret and a falling piece of debris push by the impulse the
+/// solver gave their contact, and the trunk's construction ([`TreeBody::fell_torque`]) decides
+/// whether that fells it. The manifold normal runs from the pair's first collider to its second,
+/// so it points into the tree exactly when the tree's segment is the second.
 fn ram_contacts<'a>(
     pairs: impl Iterator<Item = &'a ContactPair>,
     segment_root: impl Fn(Entity) -> Option<Entity>,
-    is_tank: impl Fn(Entity) -> bool,
     standing_base_y: impl Fn(Entity) -> Option<f32>,
 ) -> BTreeMap<Entity, Vec<RamContact>> {
     let mut per_tree: BTreeMap<Entity, Vec<RamContact>> = BTreeMap::new();
     for pair in pairs {
-        let (tree_first, root, other) =
-            match (segment_root(pair.collider1), segment_root(pair.collider2)) {
-                (Some(root), None) => (true, root, pair.body2),
-                (None, Some(root)) => (false, root, pair.body1),
-                _ => continue,
-            };
-        if !other.is_some_and(&is_tank) {
-            continue;
-        }
+        let (tree_first, root) = match (segment_root(pair.collider1), segment_root(pair.collider2))
+        {
+            (Some(root), None) => (true, root),
+            (None, Some(root)) => (false, root),
+            _ => continue,
+        };
         let Some(base_y) = standing_base_y(root) else {
             continue;
         };
@@ -1446,12 +1441,11 @@ fn ram_contacts<'a>(
 }
 
 /// The authority's ram rule, read after the solver stored this tick's impulses: a standing tree
-/// whose trunk took its [`TreeBody::fell_torque`] of a tank's torque in one tick falls whole,
-/// along the push ([`ram_contacts`] reads the contacts, [`ram_torque`] sums them).
+/// whose trunk took its [`TreeBody::fell_torque`] of torque in one tick falls whole, along the
+/// push ([`ram_contacts`] reads the contacts, [`ram_torque`] sums them).
 fn fell_on_ram(
     graph: Res<ContactGraph>,
     segments: Query<&ChildOf, With<TreeSegment>>,
-    tanks: Query<(), With<Tank>>,
     mut trees: Query<(&mut TreeState, &TreeBody, &Transform)>,
     clock: Option<Res<ShotClock>>,
     mut commands: Commands,
@@ -1459,7 +1453,6 @@ fn fell_on_ram(
     let per_tree = ram_contacts(
         graph.iter_active_touching(),
         |collider| segments.get(collider).ok().map(ChildOf::parent),
-        |body| tanks.contains(body),
         |root| {
             trees
                 .get(root)
@@ -1805,18 +1798,19 @@ pub(crate) mod tests {
         let _ = TreeState::Down { cut: 255, dir: 0 }.encode();
     }
 
-    /// THE RAM LAW READS A TANK BODY'S CONTACTS ON A STANDING TREE AND NOTHING ELSE: a pair whose
-    /// other body is no tank (a launched turret), a pair with no trunk segment, and any pair on
-    /// a tree no longer standing contribute nothing; a tank's point reads its impulse at its
-    /// height above the base, pushing along the manifold normal into the tree. Dropping the tank
-    /// check, the standing check or the normal's flip for a tree-first pair reds this.
+    /// THE RAM LAW READS EVERY BODY'S PUSH ON A STANDING TREE AND NOTHING ELSE: a pair with no
+    /// trunk segment, a pair of two trunk segments and any pair on a tree no longer standing
+    /// contribute nothing; every other pair's point reads its impulse at its height above the base,
+    /// pushing along the manifold normal into the tree, whatever body it is. Gating on the other
+    /// body, dropping the standing check or the normal's flip for a tree-first pair reds this.
     #[test]
-    fn ram_contacts_read_tank_body_pairs_on_standing_trees_only() {
+    fn ram_contacts_read_every_bodys_push_on_standing_trees_only() {
         use avian3d::collision::contact_types::ContactId;
         use avian3d::prelude::{ContactManifold, ContactPoint};
         let mut world = World::new();
         let mut entity = || world.spawn_empty().id();
         let (tree, segment) = (entity(), entity());
+        let (neighbour, neighbour_segment) = (entity(), entity());
         let (tank, tank_collider) = (entity(), entity());
         let (turret, turret_collider) = (entity(), entity());
         let (other, other_collider) = (entity(), entity());
@@ -1834,39 +1828,44 @@ pub(crate) mod tests {
             pair(segment, tank_collider, tree, tank),
             pair(turret_collider, segment, turret, tree),
             pair(tank_collider, other_collider, tank, other),
+            pair(segment, neighbour_segment, tree, neighbour),
         ];
-        let segment_root = |collider| (collider == segment).then_some(tree);
-        let is_tank = |body| body == tank;
-        let read = ram_contacts(pairs.iter(), segment_root, is_tank, |root| {
+        let segment_root = |collider| {
+            (collider == segment)
+                .then_some(tree)
+                .or((collider == neighbour_segment).then_some(neighbour))
+        };
+        let read = ram_contacts(pairs.iter(), segment_root, |root| {
             (root == tree).then_some(1.0)
         });
         assert_eq!(read.len(), 1, "one tree pushed: {read:?}");
+        let point = |push| RamContact {
+            impulse: 10.0,
+            lever_m: 2.0,
+            push,
+        };
         assert_eq!(
             read[&tree],
-            vec![RamContact {
-                impulse: 10.0,
-                lever_m: 2.0,
-                push: Vec2::new(-1.0, 0.0),
-            }],
-            "the tank's point, 2 m above the base, pushing against the normal (tree first)",
+            vec![point(Vec2::new(-1.0, 0.0)), point(Vec2::new(1.0, 0.0))],
+            "both bodies' points, 2 m above the base, each pushing into the tree",
         );
-        let down = ram_contacts(pairs.iter(), segment_root, is_tank, |_| None);
+        let down = ram_contacts(pairs.iter(), segment_root, |_| None);
         assert!(down.is_empty(), "a tree not standing takes no push");
     }
 
-    /// THE RAM READS THE TANK'S ROOT BODY, THE WAY AVIAN NAMES IT: a tank is one dynamic body —
-    /// its root, carrying [`Tank`] — whose `Hull` node and that node's collision proxy are
-    /// children with no body of their own, so a contact pair names the root and never the `Hull`
-    /// node. In a physics world with the real schedule, a proxy driven into a standing trunk
-    /// fells it along the push; a launched turret — a dynamic body of its own, no tank — driven
-    /// the same way does not, though it touches the trunk and its contacts, read as the law
-    /// reads a tank's, carry the fell torque in one tick: only the body's identity spares the
-    /// tree. A law reading `Hull` off the pair's body fells neither; a turret that never reaches
-    /// its trunk leaves the tree standing for no reason the law gives, and reds this.
-    /// DERIVED: 20 t stopped from 4 m/s is 80 kN·s; at the cube's half-metre of lever or more
-    /// that is four times the fixture's 10.4 kN·s·m threshold.
+    /// A RAM FELLS BY ITS PUSH AND THE TRUNK'S CONSTRUCTION, NEVER BY WHAT THE BODY IS: in a
+    /// physics world with the real schedule, three dynamic bodies each drive a cube into a
+    /// standing trunk — a tank's shape (root body → `Hull` node → proxy, as `tank::spawn` builds
+    /// it), a launched turret's (a free body carrying its collider) of the same momentum, and a
+    /// light body. The first two fell their trees along the push; the light one touches its tree
+    /// with a positive impulse whose torque stays under the trunk's [`TreeBody::fell_torque`], and
+    /// the tree stands. A law gating on the body's identity spares the turret's tree; a law
+    /// ignoring the threshold fells the light one's; either reds this. DERIVED: 20 t stopped from
+    /// 4 m/s is 80 kN·s, at the cube's half-metre of lever or more four times the fixture's
+    /// 10.4 kN·s·m threshold; 200 kg is 0.8 kN·s, under 2.4 kN·s·m at the cube's 1.5 m of lever
+    /// read twice (a sustained contact's reading, [`ram_torque`]).
     #[test]
-    fn a_tanks_proxies_ram_through_the_root_body_and_a_launched_turret_rolls_off() {
+    fn a_ram_fells_by_its_push_and_the_trunk_whatever_the_body_is() {
         use crate::tank::Hull;
         use avian3d::prelude::{Gravity, LinearVelocity, Mass, PhysicsPlugins};
         use bevy::time::TimeUpdateStrategy;
@@ -1915,12 +1914,13 @@ pub(crate) mod tests {
         };
         let rammed = tree_at(&mut app, 0.0, 0);
         let nudged = tree_at(&mut app, 20.0, 1);
-        let body = |app: &mut App, z: f32| -> Entity {
+        let brushed = tree_at(&mut app, 40.0, 2);
+        let body = |app: &mut App, z: f32, mass: f32| -> Entity {
             app.world_mut()
                 .spawn((
                     Transform::from_xyz(-1.2, 1.0, z),
                     RigidBody::Dynamic,
-                    Mass(20_000.0),
+                    Mass(mass),
                     LinearVelocity(Vec3::X * 4.0),
                 ))
                 .id()
@@ -1929,39 +1929,40 @@ pub(crate) mod tests {
             Collider::cuboid(1.0, 1.0, 1.0),
             CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
         );
-        // The tank: root body → `Hull` node → proxy, as `tank::spawn` builds it.
-        let tank = body(&mut app, 0.0);
-        app.world_mut().entity_mut(tank).insert(Tank);
+        let tank = body(&mut app, 0.0, 20_000.0);
         let hull = app
             .world_mut()
             .spawn((ChildOf(tank), Transform::IDENTITY, Hull))
             .id();
         app.world_mut()
             .spawn((ChildOf(hull), Transform::IDENTITY, proxy.clone()));
-        // The launched turret: a free body carrying its collider, no tank above it.
-        let turret = body(&mut app, 20.0);
-        app.world_mut().entity_mut(turret).insert(proxy);
-        let nudged_segments: Vec<Entity> = app
-            .world()
-            .get::<Children>(nudged)
-            .expect("segments")
-            .iter()
-            .collect();
+        let turret = body(&mut app, 20.0, 20_000.0);
+        app.world_mut().entity_mut(turret).insert(proxy.clone());
+        let light = body(&mut app, 40.0, 200.0);
+        app.world_mut().entity_mut(light).insert(proxy);
+        let segments_of = |app: &App, tree: Entity| -> Vec<Entity> {
+            app.world()
+                .get::<Children>(tree)
+                .expect("segments")
+                .iter()
+                .collect()
+        };
+        let brushed_segments = segments_of(&app, brushed);
         let base_y = app
             .world()
-            .get::<Transform>(nudged)
+            .get::<Transform>(brushed)
             .expect("the root")
             .translation
             .y;
-        // Each tick: whether the turret touches a segment of its tree with a positive normal
-        // impulse, and the torque those contacts carry as the ram law reads a tank's.
+        // Each tick: whether the light body touches a segment of its tree with a positive normal
+        // impulse, and the torque those contacts carry as the ram law reads them.
         let (mut touched, mut peak) = (false, 0.0_f32);
         for _ in 0..20 {
             app.update();
             let graph = app.world().resource::<ContactGraph>();
-            let pairs: Vec<&ContactPair> = nudged_segments
+            let pairs: Vec<&ContactPair> = brushed_segments
                 .iter()
-                .filter_map(|segment| graph.get(turret, *segment))
+                .filter_map(|segment| graph.get(light, *segment))
                 .map(|(_, pair)| pair)
                 .filter(|pair| pair.is_touching())
                 .collect();
@@ -1970,40 +1971,41 @@ pub(crate) mod tests {
                 .any(|pair| pair.total_normal_impulse_magnitude() > 0.0);
             let contacts = ram_contacts(
                 pairs.into_iter(),
-                |collider| nudged_segments.contains(&collider).then_some(nudged),
-                |_| true,
+                |collider| brushed_segments.contains(&collider).then_some(brushed),
                 |_| Some(base_y),
             );
-            if let Some(contacts) = contacts.get(&nudged) {
+            if let Some(contacts) = contacts.get(&brushed) {
                 peak = peak.max(ram_torque(contacts).0);
             }
         }
         let threshold = app
             .world()
-            .get::<TreeBody>(nudged)
+            .get::<TreeBody>(brushed)
             .expect("the body")
             .fell_torque();
         assert!(
             touched,
-            "the turret touches its tree with a positive normal impulse"
+            "the light body touches its tree with a positive normal impulse"
         );
         assert!(
-            peak >= threshold,
-            "the turret's push carries the fell torque in one tick: {peak} N·s·m of {threshold}"
+            peak > 0.0 && peak < threshold,
+            "the light body's push stays under the fell torque: {peak} N·s·m of {threshold}"
         );
+        for (tree, what) in [(rammed, "the tank's proxy"), (nudged, "the turret")] {
+            assert_eq!(
+                app.world().get::<TreeState>(tree),
+                Some(&TreeState::Down { cut: 0, dir: 0 }),
+                "{what} fells the trunk along +x"
+            );
+            assert!(
+                app.world().get::<Fell>(tree).is_some(),
+                "the transition carries its tick"
+            );
+        }
         assert_eq!(
-            app.world().get::<TreeState>(rammed),
-            Some(&TreeState::Down { cut: 0, dir: 0 }),
-            "the tank's proxy fells the trunk along +x"
-        );
-        assert!(
-            app.world().get::<Fell>(rammed).is_some(),
-            "the transition carries its tick"
-        );
-        assert_eq!(
-            app.world().get::<TreeState>(nudged),
+            app.world().get::<TreeState>(brushed),
             Some(&TreeState::Standing),
-            "a launched turret rolls off"
+            "a push under the trunk's threshold leaves it standing"
         );
     }
 
