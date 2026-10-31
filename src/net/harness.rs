@@ -152,8 +152,8 @@ impl Default for Aim {
 #[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
 #[serde(try_from = "AuthoredSpawnPose")]
 pub(crate) struct SpawnPose {
-    pub(crate) pos: Vec3,
-    pub(crate) rot: Quat,
+    pos: Vec3,
+    rot: Quat,
 }
 
 #[derive(Deserialize)]

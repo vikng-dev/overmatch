@@ -40,8 +40,7 @@
 //! follower — at most [`MAX_SLEW_PER_FRAME_TICKS`] per Update frame — and the steady-state
 //! resync count is ZERO (`net::frontier`'s FRONTIER `steady=` counter is the live gauge).
 //!
-//! Derivation and the contract constants behind `Q_p`:
-//! `net::sync_margin`'s module doc and `.agents/scratch/adaptive-cursor-frontier-2026-08-15.md` §1.
+//! The quantile contract and estimator parameters live in `net::sync_margin`'s module doc.
 
 use core::time::Duration;
 
