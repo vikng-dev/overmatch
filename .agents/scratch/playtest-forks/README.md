@@ -430,3 +430,154 @@ of them.
 **Lives in.** Code: `src/debris.rs` (the rule), `src/buildings/breakage.rs` (`spawn_piece`),
 `src/net/debris_stress.rs` (the carriers). Tracker: #188, epic #106; the supported-settlement
 design in #189.
+
+---
+
+## F11 — The first Battle's combatants and capacity
+
+**Status:** open · owner default chosen in #220 · mode and admission wired
+
+Subject: Overmatch's match flow and the game's damage model, game state only. F11–F16
+record #220's provisional mode decisions; numeric defaults attributed to that issue
+are **CLAIMED owner decisions**, not physical measurements. Alternatives are prose,
+not runtime switches.
+
+**Default — free-for-all, no automatic bots, capacity 30 (CLAIMED, #220).** There are
+no teams or balancing assignments. Development bots remain an explicit operator
+instrument; early-access hosting does not enable them. The Worker supplies capacity,
+and the hosted server requires it explicitly.
+
+**Alternatives kept alive.** Balanced teams with assignment at admission; other team
+splits; bots filling empty slots; a different configured capacity. A queue that forms
+filled or balanced lobbies can replace sparse-server admission later.
+
+**Why it's a playtest call.** Watch whether sparse free-for-all Battles are engaging,
+whether new players find opponents, and whether the chosen concurrency feels crowded.
+A guaranteed player population cannot be assumed for early access.
+
+**Revert cost.** Low for capacity data; medium for teams or automatic slot-filling,
+which need explicit assignment and score policy rather than a hidden flag.
+
+**Lives in.** `backend/wrangler.jsonc`, `src/net/hosting.rs`, `src/net/server.rs`;
+tracker #220 and #239.
+
+## F12 — The Battle cycle and late admission
+
+**Status:** open · owner durations chosen in #220 · clock and replicated phase wired
+
+**Default — a recurring Battle, with players staying connected.** CLAIMED from #220:
+fill-up lasts 60 s from the first player, combat lasts its full 15 min even alone,
+late join closes 10 min into combat, results last 15 s, then another fill-up begins.
+An empty initial fill-up waits; an occupied next fill-up starts its timer immediately.
+The authority publishes phase, deadlines and result. Results stay closed to joins.
+An in-flight challenge is refused if admission closes before its response arrives;
+a new connection is refused after closure even if it previously played here.
+
+The implementation's boundary policy is provisional too: fresh tanks at combat
+start, no tanks or flying rounds in results or fill-up, score frozen through results
+and reset at the next fill-up. Battlefield destruction persists for the server's
+lifetime; the cycle does not rebuild the battlefield.
+
+**Alternatives kept alive.** Shorter or longer phases and admission windows; filled
+or balanced matchmaking lobbies instead of timed fill-up; a fresh battlefield each
+Battle; a different reconnect policy after closure. Other modes can choose a victory
+condition that ends combat early rather than retaining this mode's full timer.
+
+**Why it's a playtest call.** Watch the solo wait, how much useful combat a late
+arrival gets, whether results linger, and whether persistent destruction gives the
+next Battle useful history or an exhausted battlefield.
+
+**Revert cost.** Low for duration data. Medium for admission policy; high for replacing
+fill-up with queued matchmaking or resetting world ledgers, colliders and their replicas.
+
+**Lives in.** `assets/modes/battle.ron`, `src/net/battle.rs`, `src/net/server.rs`,
+`src/net/admission.rs`, `src/net/hosting.rs`; boundary contract in
+`.agents/docs/design/battle-cycle.md`; tracker #240.
+
+## F13 — Unlimited respawn with a wait
+
+**Status:** open · owner default chosen in #220 · scored opening wired for all combatants
+
+**Default — unlimited respawns after 10 s (CLAIMED, #220).** The game's damage model:
+a knocked-out life has one authority-tick opening. Players request another life;
+development bots use the same mode wait. Respawning cannot change the retained score.
+
+**Alternatives kept alive.** A finite life budget, one life per Battle, or a different
+wait. Those remain prose alternatives; no unused life-budget branch remains in code.
+
+**Why it's a playtest call.** Watch whether re-entry sustains a full-length Battle or
+makes a knockout inconsequential, and whether the wait is useful breathing room or
+idle time.
+
+**Revert cost.** Low for the duration; medium for a finite budget, which needs a new
+explicit admission state and corresponding server refusal and player readout.
+
+**Lives in.** `assets/modes/battle.ron`, `src/net/score.rs`, `src/net/server.rs`,
+`src/net/death_screen.rs`; tracker #241.
+
+## F14 — Winning by knockouts, with losses breaking ties
+
+**Status:** open · owner default chosen in #220 · ranking and authoritative result wired
+
+**Default — most knockouts, then fewer losses, then a draw.** The game's damage model:
+only combat scores. There are no survival points; the owner rejected rewarding hiding.
+A disconnected combatant's standing remains eligible for the result.
+
+**Alternatives kept alive.** Objective or capture scores, a score threshold, last
+combatant or team standing, or different tie-breakers. Survival scoring remains a
+rejected alternative to revisit only if play changes the owner's reason for rejecting it.
+
+**Why it's a playtest call.** Watch whether the ranking rewards active play and whether
+losses are a satisfying tie-breaker. Record draws and cases where the table's winner
+feels different from the Battle players experienced.
+
+**Revert cost.** Low for ranking and tie-breaking; medium for objective state or a
+victory trigger that changes the cycle's full-duration promise.
+
+**Lives in.** `src/net/score.rs` (`rank`, `Scoreboard::outcome`), `src/net/battle.rs`;
+tracker #241 and #240. The tank-knockout rule itself remains #227's concern.
+
+## F15 — Automatic fixed-point spawns, without protection
+
+**Status:** open · owner default chosen in #220 · automatic selection wired
+
+**Default — authored points selected by nearest-live-tank distance.** CLAIMED from
+#220: choose the point closest to a target distance of about 400 m, never inside
+200 m; alone, choose a random authored point. There is no spawn protection. Distances
+are mode data and points are map data. Existing spawn-map picks and harness placement
+remain named instruments. Automatic placement retries congestion without relaxing the
+minimum; the next combat starts from a fresh combatant layout.
+
+**Alternatives kept alive.** Team bases or zones, different distance tuning, different
+candidate layouts, player-selected placement, or temporary spawn protection. Each
+would need its own explicit rule; a crowded map does not silently enable one.
+
+**Why it's a playtest call.** Watch immediate re-entry pressure, time spent seeking an
+opponent, and waiting when players block candidates. A mathematically valid distance
+can still feel too close or too remote.
+
+**Revert cost.** Low for distances or map points; medium for zones, bases or protection,
+which change the server's placement or combat-entry contract.
+
+**Lives in.** `assets/maps/kalinovo/level.json`, `assets/modes/battle.ron`,
+`src/net/spawn_placement.rs`, `src/net/server.rs`; tracker #242.
+
+## F16 — A small held scoreboard and the same table at results
+
+**Status:** open · owner presentation chosen in #220 · server data wired, UI queued in #243
+
+**Default — Tab holds rank, name, knockouts, losses and time left; results reuse that
+table and mark the winner.** The game's damage model: no other figures are requested.
+The authority holds the standings, phase, deadline and winner; the UI reads them.
+
+**Alternatives kept alive.** A persistent HUD table, a different results layout,
+additional authoritative figures, or a different binding and information density.
+
+**Why it's a playtest call.** Watch whether players can read their standing and the
+remaining time without losing sight of the battlefield, and whether the result explains
+who won without inviting irrelevant statistics.
+
+**Revert cost.** Low for layout or binding once #243 exists; medium if new figures
+need a wider authority-owned wire contract.
+
+**Lives in.** `src/net/score.rs`, `src/net/battle.rs`; presentation tracker #243.
