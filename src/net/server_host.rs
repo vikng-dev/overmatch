@@ -1,35 +1,87 @@
 //! What the dedicated server's host gives it: the CPU it may use and the threads it starts, and the
-//! lever that sets those threads.
+//! levers that override them.
 //!
-//! - [`log_startup`] prints one `server: host` line at startup: `available_parallelism`, each Bevy
-//!   task pool's thread count, and (Linux) the container's cgroup CPU quota and cpuset. An
-//!   unreadable value logs as `unknown`.
+//! - [`host_task_pools`] sizes Bevy's task pools for this host by the rule below;
+//!   `server_plugin_floor` mounts it, so the server and the bitprobe fixture run on the same pools.
+//! - [`log_startup`] prints one `server: host` line at startup: `available_parallelism`, which sizing
+//!   ran, each Bevy task pool's thread count, and (Linux) the container's cgroup CPU quota and
+//!   cpuset. An unreadable value logs as `unknown`.
 //! - [`read_throttle`] reads the cgroup's cumulative throttle counters for `server_stats`.
-//! - [`ThreadsLever`] reads `OVERMATCH_SERVER_THREADS` for the task-pool size.
+//! - [`ThreadsLever`] reads `OVERMATCH_SERVER_THREADS`, a measurement override of the sizing.
 //! - [`StallLever`] reads `OVERMATCH_SERVER_STALL`: a dev instrument that stands in for a host too
 //!   slow for the tick rate, so a client's ride through a slow authority reproduces on any machine.
 //!
 //! The cgroup parsers take the file's text, so they are tested from fixtures. Off Linux the files
 //! do not exist and every reading is `None`.
+//!
+//! # Task-pool sizing
+//!
+//! [`task_pool_options`]: the compute pool gets every core the process may use, async compute and
+//! IO one thread each. One is the least either can have: a pool with no thread never runs a spawned
+//! task, and Avian's step blocks on the tree-optimization tasks it spawns on the async pool. The
+//! main thread drives the schedule without running the compute pool's tasks (bevy_ecs 0.19's
+//! multi-threaded executor scopes with `tick_task_pool_executor: false`), so compute = cores leaves
+//! no core idle in a parallel phase and starts no compute thread a core cannot run.
+//!
+//! The core count is `std::thread::available_parallelism`. On Linux that is the smaller of the
+//! affinity mask (the cpuset) and the cgroup v1/v2 CPU quota rounded down (Rust 1.98 std,
+//! `sys/thread/unix.rs`), so a fractional quota gets no thread it cannot run. On Edgegap a 2.00-cpu
+//! quota over cpuset 0-15 reads 2 and a 1.00-cpu quota reads 1 (MEASURED, the startup lines of
+//! `.agents/scratch/perf-2026-10-31/`).
+//!
+//! Evidence, 30 tanks on Edgegap (that folder's README, TLDR 3; MEASURED): Bevy's stock split gives
+//! 2 vCPU pools of 1/1/1 (compute/async/io), and the server then held ~102 % of one core and ran no
+//! faster than on 1 vCPU (tick p50 17.5 against 18.5 ms). Pools 2/1/1 cut the tick p50 to 13.4 ms
+//! on alpha.4 and 10.9 ms on alpha.5; 2/2/2 was worse (14.6–15.2 ms). On 1 vCPU, a compute pool of
+//! 2 ran into the quota: tick p95 88 ms, throttled 441–472 ms of every second.
 
+use core::num::NonZero;
 use core::time::Duration;
 
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, ComputeTaskPool, IoTaskPool};
 
-/// The lever: the total thread count handed to Bevy's task pool options.
+/// The task-pool sizing (module doc) for a host of `cores` usable cores.
+///
+/// Each pool's policy pins `min_threads == max_threads`: Bevy clamps its proportional count into
+/// that range (`TaskPoolThreadAssignmentPolicy::get_number_of_threads`, bevy_app 0.19), so the pin
+/// is the count whatever Bevy reads the host as.
+fn task_pool_options(cores: NonZero<usize>) -> TaskPoolOptions {
+    let mut options = TaskPoolOptions::default();
+    for (policy, threads) in [
+        (&mut options.compute, cores.get()),
+        (&mut options.async_compute, 1),
+        (&mut options.io, 1),
+    ] {
+        policy.min_threads = threads;
+        policy.max_threads = threads;
+    }
+    options
+}
+
+/// The task pools [`task_pool_options`] gives this host. An unreadable core count is 1, as it is
+/// in Bevy's own sizing.
+pub(crate) fn host_task_pools() -> TaskPoolPlugin {
+    let cores = std::thread::available_parallelism().unwrap_or(NonZero::<usize>::MIN);
+    TaskPoolPlugin {
+        task_pool_options: task_pool_options(cores),
+    }
+}
+
+/// The lever: a total thread count for Bevy's stock split, in place of [`host_task_pools`].
 pub(super) const THREADS_LEVER: &str = "OVERMATCH_SERVER_THREADS";
 
-/// The task-pool thread lever.
+/// The task-pool thread lever, a measurement override of the host sizing.
 ///
-/// Bevy splits a total over three pools (IO, async compute, compute) and gives each at least one
-/// thread (`TaskPoolThreadAssignmentPolicy::min_threads`), so a total of 1 still starts three
-/// worker threads; the startup line shows the real counts.
+/// Bevy's stock policy (`TaskPoolOptions::with_num_threads`) splits the total over IO, async
+/// compute and compute and gives each at least one thread, so `N` = the host's cores reproduces
+/// Bevy's default sizing, and 1, 4 and 6 give the measured 1/1/1, 2/1/1 and 2/2/2. The startup
+/// line shows the real counts.
 #[derive(Debug, PartialEq, Eq)]
 pub(super) struct ThreadsLever(pub usize);
 
 impl ThreadsLever {
-    /// Unset, empty or `default` is `Ok(None)`: Bevy sizes the pools from `available_parallelism`.
+    /// Unset, empty or `default` is `Ok(None)`: [`host_task_pools`] sizes the pools.
     /// Anything else must be a positive integer, or the server refuses to start.
     pub(super) fn parse(value: Option<&str>) -> Result<Option<Self>, String> {
         let Some(value) = value.map(str::trim) else {
@@ -255,12 +307,12 @@ pub(super) fn log_startup(lever: Option<&ThreadsLever>) {
     let parallelism = std::thread::available_parallelism()
         .map_or_else(|err| format!("unknown ({err})"), |n| n.to_string());
     info!(
-        "server: host available_parallelism={parallelism} \
-         pools(compute/async_compute/io)={}/{}/{} threads_lever={} cpu_quota={} cpuset={}",
+        "server: host available_parallelism={parallelism} sizing={} \
+         pools(compute/async_compute/io)={}/{}/{} cpu_quota={} cpuset={}",
+        lever.map_or_else(|| "host".to_owned(), |l| format!("threads_lever({})", l.0)),
         pool(ComputeTaskPool::try_get().map(|p| p.thread_num())),
         pool(AsyncComputeTaskPool::try_get().map(|p| p.thread_num())),
         pool(IoTaskPool::try_get().map(|p| p.thread_num())),
-        lever.map_or_else(|| "default".to_owned(), |l| l.0.to_string()),
         cpu_max().map_or_else(|| "unknown".to_owned(), |q| q.describe()),
         cpuset().as_deref().unwrap_or("unknown"),
     );
@@ -270,7 +322,29 @@ pub(super) fn log_startup(lever: Option<&ThreadsLever>) {
 mod tests {
     use super::*;
 
-    /// Unset and `default` keep Bevy's sizing; a bad value must stop the server rather than
+    /// The compute pool is exactly the cores the process may use: one fewer leaves a core idle
+    /// (pools 1/1/1 held a 2-vCPU host to ~102 % of one core), one more starts a thread no core can
+    /// run (2 compute threads on 1 vCPU ran into the quota). Async compute and IO keep one thread
+    /// each, the least that runs a spawned task. Every deployed server's pools rest on it.
+    #[test]
+    fn the_compute_pool_gets_every_core_and_no_more() {
+        for cores in [1, 2, 4, 10] {
+            let options = task_pool_options(NonZero::new(cores).unwrap());
+            for (pool, policy, threads) in [
+                ("compute", &options.compute, cores),
+                ("async_compute", &options.async_compute, 1),
+                ("io", &options.io, 1),
+            ] {
+                assert_eq!(
+                    (policy.min_threads, policy.max_threads),
+                    (threads, threads),
+                    "{pool} on {cores} cores"
+                );
+            }
+        }
+    }
+
+    /// Unset and `default` keep the host sizing; a bad value must stop the server rather than
     /// silently run the wrong arm of an A/B.
     #[test]
     fn the_threads_lever_is_a_positive_integer_or_default() {

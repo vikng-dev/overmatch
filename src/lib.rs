@@ -300,7 +300,8 @@ pub(crate) fn gpu_less_default_plugins(
 }
 
 /// The dedicated server's plugin floor: [`gpu_less_default_plugins`] without the plugins that serve
-/// only a player's screen, speakers or hands. Mounted by the server and by the bitprobe fixture, so
+/// only a player's screen, speakers or hands, with task pools sized for the host
+/// (`net::server_host::host_task_pools`). Mounted by the server and by the bitprobe fixture, so
 /// the fixture simulates on the floor the authority runs.
 ///
 /// No authority system reads what a dropped plugin produces: UI nodes and text, sprites, picking
@@ -321,6 +322,7 @@ pub(crate) fn server_plugin_floor() -> bevy::app::PluginGroupBuilder {
         world_serialization,
     };
     gpu_less_default_plugins(None)
+        .set(net::server_host::host_task_pools())
         .disable::<ui::UiPlugin>()
         .disable::<ui_render::UiRenderPlugin>()
         .disable::<ui_widgets::popover::PopoverPlugin>()
