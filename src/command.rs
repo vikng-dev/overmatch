@@ -548,6 +548,9 @@ fn select_round_input(
         (false, true) => Some(RoundStep::Previous),
         _ => None,
     };
+    if step.is_none() && !toggle {
+        return;
+    }
     for (tank, mut command) in &mut tanks {
         let primary = weapons.iter().find_map(|(weapon, slot, root)| {
             (root.0 == tank && weapon.trigger == Trigger::Primary).then_some(slot.0)
