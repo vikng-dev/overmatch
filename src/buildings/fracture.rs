@@ -37,8 +37,9 @@
 //! * **The blast field** ([`blast_rays`]). A charge's blast energy leaves it uniformly over the
 //!   sphere out to the fits' range ([`Blast::reach`]); each ray stops on the first standing chunk
 //!   it meets and pushes the face it meets with the blast's reflected impulse over the patch it
-//!   stands for ([`Blast::push`]), the chunk taking only the share of the ray's cone its own
-//!   silhouette intercepts ([`intercepted`]). The wall design
+//!   stands for ([`Blast::push`]), with the peak force of the blast's peak overpressure over the
+//!   same patch ([`Blast::peak`], a load's `peak`, which no law reads yet), the chunk taking only
+//!   the share of the ray's cone its own silhouette intercepts ([`intercepted`]). The wall design
 //!   (`.agents/docs/design/wall-destruction.md`, "Standoff blast") owns the model.
 //!
 //! A round's line in each chunk becomes loads [`LINE_STEP`] apart along its chord ([`Load::line`]);
@@ -46,7 +47,8 @@
 //! their stops ([`Load::field`], [`Load::blast`]). Gaps these laws leave open (the wall
 //! prototype's README and the 2026-10-30 design review): a chunk partly crushed stays whole, the
 //! share of a round's lost momentum the crushed brick carries away is unknown (the struck chunks
-//! keep all of it), and a blast is an impulse, not a pressure over time. The README beside the
+//! keep all of it), and a blast acts by its impulse alone: its peak force rides its loads, unread.
+//! The README beside the
 //! prototype's captures
 //! (`.agents/scratch/destruction-2026-10-30-buildings/wall-prototype/README.md`) owns the
 //! derivations, the values' sources and the verdicts.
@@ -549,6 +551,12 @@ pub(crate) struct Load {
     pub blow: Vec3,
     /// N.
     pub press: Vec3,
+    /// The force its blow peaks at (N), where its source states one: a blast's, the peak
+    /// overpressure over the patches its rays load, into the faces ([`Blast::peak`]), its rays
+    /// summed as if they arrive together (ASSUMED: one chunk's rays do). `None` where the source
+    /// states none: a round's line (its blow is over before a section moves, ASSUMED), a fragment's
+    /// stop (no blow) and a body's contact (its force is its press). No law reads it yet.
+    pub peak: Option<Vec3>,
     pub origin: Origin,
 }
 
@@ -600,47 +608,55 @@ impl Load {
             energy: energy / n as f32,
             blow: blow / n as f32,
             press: Vec3::ZERO,
+            peak: None,
             origin: Origin::Field,
         })
     }
 
     /// A field's rays, each `(chunk, where it stopped, energy J)`, as loads ([`Load::per_chunk`])
-    /// with no blow: a fragment's momentum is not carried.
+    /// with no blow and so no peak force: a fragment's momentum is not carried.
     pub(crate) fn field(hits: &[(usize, Vec3, f32)]) -> Vec<Self> {
         Self::per_chunk(
             hits.iter()
-                .map(|&(chunk, at, energy)| (chunk, at, energy, Vec3::ZERO)),
+                .map(|&(chunk, at, energy)| (chunk, at, energy, Vec3::ZERO, Vec3::ZERO)),
         )
+        .into_iter()
+        .map(|load| Self { peak: None, ..load })
+        .collect()
     }
 
     /// A blast's ray hits as loads ([`Load::per_chunk`]), each chunk's blow the impulse its rays
-    /// pushed its faces with.
+    /// pushed its faces with and its peak force theirs.
     pub(crate) fn blast(hits: &[RayHit]) -> Vec<Self> {
         Self::per_chunk(
             hits.iter()
-                .map(|hit| (hit.chunk, hit.at, hit.energy, hit.impulse)),
+                .map(|hit| (hit.chunk, hit.at, hit.energy, hit.impulse, hit.peak)),
         )
     }
 
-    /// Ray stops `(chunk, where, energy J, impulse N·s)` summed per chunk: one load each, at the
-    /// energy-weighted mean of its stops, in chunk order. A chunk its stops gave no energy has no
-    /// such mean and takes no load: the impulse its stops carried is dropped with it.
-    fn per_chunk(stops: impl Iterator<Item = (usize, Vec3, f32, Vec3)>) -> Vec<Self> {
-        let mut per: std::collections::BTreeMap<usize, (f32, Vec3, Vec3)> = Default::default();
-        for (chunk, at, energy, impulse) in stops {
+    /// Ray stops `(chunk, where, energy J, impulse N·s, peak force N)` summed per chunk: one load
+    /// each, at the energy-weighted mean of its stops, in chunk order. A chunk its stops gave no
+    /// energy has no such mean and takes no load: the impulse and peak force its stops carried
+    /// are dropped with it.
+    fn per_chunk(stops: impl Iterator<Item = (usize, Vec3, f32, Vec3, Vec3)>) -> Vec<Self> {
+        let mut per: std::collections::BTreeMap<usize, (f32, Vec3, Vec3, Vec3)> =
+            Default::default();
+        for (chunk, at, energy, impulse, peak) in stops {
             let entry = per.entry(chunk).or_default();
             entry.0 += energy;
             entry.1 += at * energy;
             entry.2 += impulse;
+            entry.3 += peak;
         }
         per.into_iter()
             .filter(|(_, (energy, ..))| *energy > 0.0)
-            .map(|(chunk, (energy, weighted, blow))| Self {
+            .map(|(chunk, (energy, weighted, blow, peak))| Self {
                 chunk,
                 at: weighted / energy,
                 energy,
                 blow,
                 press: Vec3::ZERO,
+                peak: Some(peak),
                 origin: Origin::Field,
             })
             .collect()
@@ -2014,27 +2030,25 @@ const GRAZING_COS: f32 = 0.1;
 
 /// One of Swisdak's fits of a surface burst of TNT (Swisdak 1994, "Simplified Kingery Airblast
 /// Calculations", 26th DoD Explosives Safety Seminar; its metric table, which restates Kingery &
-/// Bulmash 1984, ARBRL-TR-02555, within 1 %): scaled impulse `i / W^⅓` (kPa·ms per kg^⅓, which is
-/// Pa·s per kg^⅓) at scaled distance `Z = R / W^⅓` (m/kg^⅓) as `exp(Σ cₖ (ln Z)ᵏ)`, each branch
-/// good up to its `Z`. Below `from` it holds the edge's value (the contact regime is the wall
-/// design's "Contact and near-contact blast", not this law). Nothing is read past the last branch:
-/// every walk stops a ray at the reflected fit's edge ([`Blast::reach`]), and a distance over it by
-/// rounding reads the edge's value. CITED through the `kingery-bulmash` Python package's
-/// transcription (fcento100/kingery-bulmash); the primary was not opened. Its metric reflected
-/// row agrees with its imperial row, transcribed apart, to 0.05 % (DERIVED; the module's tests
-/// hold it to 0.1 %).
-struct ImpulseFit {
+/// Bulmash 1984, ARBRL-TR-02555, within 1 %): a scaled quantity at scaled distance
+/// `Z = R / W^⅓` (m/kg^⅓) as `exp(Σ cₖ (ln Z)ᵏ)`, each branch good up to its `Z`; the scaled
+/// impulse `i / W^⅓` in kPa·ms per kg^⅓ (Pa·s per kg^⅓), the peak overpressure in kPa. Below
+/// `from` it holds the edge's value (the contact regime is the wall design's "Contact and
+/// near-contact blast", not this law). Nothing is read past the last branch: every walk stops a
+/// ray at the reflected impulse fit's edge ([`Blast::reach`]), and a distance over it by rounding
+/// reads the edge's value.
+struct SwisdakFit {
     from: f32,
-    branches: &'static [(f32, [f32; 5])],
+    branches: &'static [(f32, &'static [f32])],
 }
 
-impl ImpulseFit {
+impl SwisdakFit {
     /// The last scaled distance a branch covers, m/kg^⅓.
     const fn edge(&self) -> f32 {
         self.branches[self.branches.len() - 1].0
     }
 
-    /// The scaled impulse at scaled distance `z`, Pa·s per kg^⅓.
+    /// The fit's value at scaled distance `z`, in its own unit.
     fn at(&self, z: f32) -> f32 {
         let held = z.clamp(self.from, self.edge());
         let (_, c) = self
@@ -2047,22 +2061,63 @@ impl ImpulseFit {
     }
 }
 
-/// Swisdak's normally reflected impulse, Z 0.06–40 m/kg^⅓.
-const REFLECTED_IMPULSE: ImpulseFit = ImpulseFit {
+/// Swisdak's normally reflected impulse, Z 0.06–40 m/kg^⅓. CITED through the `kingery-bulmash`
+/// Python package's transcription (fcento100/kingery-bulmash), as is [`INCIDENT_IMPULSE`]; the
+/// primary was not opened. Its metric row agrees with its imperial row, transcribed apart, to
+/// 0.05 % (DERIVED; the module's tests hold it to 0.1 %).
+const REFLECTED_IMPULSE: SwisdakFit = SwisdakFit {
     from: 0.06,
-    branches: &[(40.0, [6.7853, -1.3466, 0.101, -0.01123, 0.0])],
+    branches: &[(40.0, &[6.7853, -1.3466, 0.101, -0.01123])],
 };
 
 /// Swisdak's incident (side-on) impulse, Z 0.2–158.7 m/kg^⅓.
-const INCIDENT_IMPULSE: ImpulseFit = ImpulseFit {
+const INCIDENT_IMPULSE: SwisdakFit = SwisdakFit {
     from: 0.2,
     branches: &[
-        (0.96, [5.522, 1.117, 0.6, -0.292, -0.087]),
-        (2.38, [5.465, -0.308, -1.464, 1.362, -0.432]),
-        (33.7, [5.2749, -0.4677, -0.2499, 0.0588, -0.00554]),
-        (158.7, [5.9825, -1.062, 0.0, 0.0, 0.0]),
+        (0.96, &[5.522, 1.117, 0.6, -0.292, -0.087]),
+        (2.38, &[5.465, -0.308, -1.464, 1.362, -0.432]),
+        (33.7, &[5.2749, -0.4677, -0.2499, 0.0588, -0.00554]),
+        (158.7, &[5.9825, -1.062]),
     ],
 };
+
+/// Swisdak's incident (side-on) peak overpressure, kPa, Z 0.2–198.5 m/kg^⅓. CLAIMED: the
+/// metric rows as the blast study of #237 states them, recalled, not read from the primary or a
+/// transcription. Its branches meet within 0.7 % at their joins (DERIVED).
+const INCIDENT_PRESSURE: SwisdakFit = SwisdakFit {
+    from: 0.2,
+    branches: &[
+        (2.9, &[7.2106, -2.1069, -0.3229, 0.1117, 0.0685]),
+        (23.8, &[7.5938, -3.0523, 0.40977, 0.0261, -0.01267]),
+        (198.5, &[6.0536, -1.4066]),
+    ],
+};
+
+/// Swisdak's normally reflected peak overpressure, kPa, its near branch, Z 0.06–2 m/kg^⅓, where
+/// real-gas reflection matters. CLAIMED as [`INCIDENT_PRESSURE`] is; it reads within 1.5 % of
+/// the ideal reflection of the incident fit over Z 1–2 and above it nearer in, as real-gas
+/// reflection does (DERIVED). Past its edge [`Blast::reflected_pressure`] reflects the incident
+/// fit. Rejected: the far branch as recalled (Z 2–40), which reads under twice the incident
+/// pressure past Z ≈ 4, below what any normal reflection gives (DERIVED: 9.2 kPa against an
+/// incident 14.9 kPa at Z = 10).
+const REFLECTED_PRESSURE: SwisdakFit = SwisdakFit {
+    from: 0.06,
+    branches: &[(
+        2.0,
+        &[9.006, -2.6893, -0.6295, 0.1011, 0.29255, 0.13505, 0.019736],
+    )],
+};
+
+/// The ambient pressure a blast's overpressure reflects against, Pa (CLAIMED: the standard
+/// atmosphere, the wall design's "Standoff blast").
+const AMBIENT_PA: f32 = 101_325.0;
+
+/// The ideal-gas normal reflection of an incident overpressure `incident` (Pa), Pa:
+/// `2 p_s (7 p_0 + 4 p_s) / (7 p_0 + p_s)` (CLAIMED: air at γ = 1.4, the standard shock
+/// relations; the wall design's "Standoff blast"). Twice the incident as it vanishes.
+fn ideal_reflection(incident: f32) -> f32 {
+    2.0 * incident * (7.0 * AMBIENT_PA + 4.0 * incident) / (7.0 * AMBIENT_PA + incident)
+}
 
 /// A blast: its energy (J) and its charge `W` (kg of TNT), the TNT that carries that energy
 /// (ASSUMED: impulse equivalence is energy equivalence; the wall design notes they need not agree).
@@ -2114,33 +2169,76 @@ impl Blast {
                 + INCIDENT_IMPULSE.at(z) * (1.0 - cos) * (1.0 - cos))
     }
 
+    /// The normally reflected peak overpressure at scaled distance `z` (m/kg^⅓), Pa: Swisdak's
+    /// near branch to its edge ([`REFLECTED_PRESSURE`]), the ideal reflection of the incident
+    /// fit past it ([`ideal_reflection`]), the two meeting within 0.4 % at Z = 2 (DERIVED).
+    fn reflected_pressure(z: f32) -> f32 {
+        if z <= REFLECTED_PRESSURE.edge() {
+            REFLECTED_PRESSURE.at(z) * 1e3
+        } else {
+            ideal_reflection(INCIDENT_PRESSURE.at(z) * 1e3)
+        }
+    }
+
+    /// The peak overpressure (Pa) the blast loads a face with `distance` m from the charge, at
+    /// incidence cosine `cos`: the normally reflected `p_r` square on, the incident `p_s`
+    /// grazing, between them the ConWep blend [`Self::specific_impulse`] reads on impulse,
+    /// `p_r cos²θ + p_s (1 + cos²θ − 2 cos θ)` (CLAIMED there, stated for pressure). A function
+    /// of the scaled distance alone (Hopkinson–Cranz).
+    pub(crate) fn peak_pressure(&self, distance: f32, cos: f32) -> f32 {
+        let scale = (self.charge / SURFACE_BURST_FACTOR).cbrt();
+        if scale <= 0.0 {
+            return 0.0;
+        }
+        let z = distance / scale;
+        let cos = cos.clamp(0.0, 1.0);
+        Self::reflected_pressure(z) * cos * cos
+            + INCIDENT_PRESSURE.at(z) * 1e3 * (1.0 - cos) * (1.0 - cos)
+    }
+
+    /// The area (m²) of the face a ray of `share` of the field stands for where it stops
+    /// `distance` m out at incidence cosine `cos`: [`Self::section`] / cos θ, [`GRAZING_COS`]
+    /// the least.
+    fn patch(share: f32, distance: f32, cos: f32) -> f32 {
+        Self::section(share, distance) / cos.max(GRAZING_COS)
+    }
+
     /// The impulse (N·s) a ray of `share` of the field delivers where it stops `distance` m out,
     /// travelling along unit `dir`, on a face of outward unit normal `normal`, its cone wholly on
-    /// the face: the specific impulse there over the patch of the face the ray stands for,
-    /// [`Self::section`] / cos θ ([`GRAZING_COS`] the least), pushed into the face (a pressure acts
-    /// along the normal). A face smaller than the cone takes its intercepted share of this
-    /// ([`intercepted`]).
+    /// the face: the specific impulse there over the patch of the face the ray stands for
+    /// ([`Self::patch`]), pushed into the face (a pressure acts along the normal). A face smaller
+    /// than the cone takes its intercepted share of this ([`intercepted`]).
     pub(crate) fn push(&self, share: f32, distance: f32, dir: Vec3, normal: Vec3) -> Vec3 {
         let cos = -dir.dot(normal);
-        let patch = Self::section(share, distance) / cos.max(GRAZING_COS);
-        -normal * (self.specific_impulse(distance, cos) * patch)
+        -normal * (self.specific_impulse(distance, cos) * Self::patch(share, distance, cos))
+    }
+
+    /// The peak force (N) of the same ray on the same patch as its [`Self::push`]: the peak
+    /// overpressure there ([`Self::peak_pressure`]) over the patch, into the face. A face smaller
+    /// than the cone takes its intercepted share of this, as of the push.
+    pub(crate) fn peak(&self, share: f32, distance: f32, dir: Vec3, normal: Vec3) -> Vec3 {
+        let cos = -dir.dot(normal);
+        -normal * (self.peak_pressure(distance, cos) * Self::patch(share, distance, cos))
     }
 }
 
-/// One blast ray's arrival: the chunk it stopped on, where, its energy (J) and impulse (N·s).
+/// One blast ray's arrival: the chunk it stopped on, where, its energy (J), impulse (N·s) and
+/// peak force (N, [`Blast::peak`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) struct RayHit {
     pub chunk: usize,
     pub at: Vec3,
     pub energy: f32,
     pub impulse: Vec3,
+    pub peak: Vec3,
 }
 
 /// A blast's rays from `origin`: each of `directions` (unit, with its share of the field; the
 /// shares sum to 1) carries that share of the blast's energy, stops on the first standing block it
 /// meets within the blast's reach ([`Blast::reach`]), which shadows everything behind it, and
-/// pushes the face it meets ([`Blast::push`]); the block takes the share of the ray's energy and
-/// push its silhouette intercepts ([`intercepted`]). A ray that meets none leaves. Coupling is the
+/// pushes the face it meets ([`Blast::push`]) with a peak force ([`Blast::peak`]); the block takes
+/// the share of the ray's energy, push and peak force its silhouette intercepts
+/// ([`intercepted`]). A ray that meets none leaves. Coupling is the
 /// geometry's: the share of directions the blocks intercept, and of each cone the block it meets.
 pub(crate) fn blast_rays(
     blocks: &[Block],
@@ -2168,6 +2266,7 @@ pub(crate) fn blast_rays(
                 at: origin + dir * t,
                 energy: blast.energy * share,
                 impulse: blast.push(share, t, dir, normal),
+                peak: blast.peak(share, t, dir, normal),
             })
         })
         .collect();
@@ -2176,6 +2275,7 @@ pub(crate) fn blast_rays(
         .map(|(hit, kept)| RayHit {
             energy: hit.energy * kept,
             impulse: hit.impulse * kept,
+            peak: hit.peak * kept,
             ..hit
         })
         .collect()
@@ -2413,6 +2513,7 @@ mod tests {
             energy: 0.0,
             blow,
             press: Vec3::ZERO,
+            peak: None,
             origin: Origin::Field,
         };
         let top = (h - 1) * w + w / 2;
@@ -2627,6 +2728,7 @@ mod tests {
             energy: 1.0e5,
             blow: Vec3::ZERO,
             press: Vec3::ZERO,
+            peak: None,
             origin: Origin::Field,
         };
         let (mut near, mut far) = (0.0_f32, 5.0_f32);
@@ -2678,6 +2780,7 @@ mod tests {
                 energy,
                 blow: Vec3::ZERO,
                 press: Vec3::ZERO,
+                peak: None,
                 origin: Origin::Field,
             };
             let sources = [source(right, energy), source(left, energy / 2.0)];
@@ -2708,11 +2811,12 @@ mod tests {
     /// A SOURCE'S LOADS CARRY ITS ENERGY AND ITS MOMENTUM WHOLE: a fixture line's loads lie at
     /// most [`LINE_STEP`] apart along its chord, sum to its energy and its blow, and their blows'
     /// moment about any point is the whole blow's at the chord's midpoint; a blast's ray hits give
-    /// one load per chunk, in chunk order, each the sum of the chunk's hits' energy and impulse at
-    /// the energy-weighted mean of its stops. The structural check and a freed group's launch read
-    /// a line's momentum through its loads, and a blast's dish and push the one point of each
-    /// chunk: a line that multiplied or shifted its blow, or a blast that parted a chunk's energy
-    /// from its push, fails here.
+    /// one load per chunk, in chunk order, each the sum of the chunk's hits' energy, impulse and
+    /// peak force at the energy-weighted mean of its stops; a line and a field state no peak force.
+    /// The structural check and a freed group's launch read a line's momentum through its loads,
+    /// and a blast's dish and push the one point of each chunk, as the section law will its peak
+    /// force: a line that multiplied or shifted its blow, or a blast that parted a chunk's energy
+    /// from its push or its peak force, fails here.
     #[test]
     fn a_sources_loads_carry_its_energy_and_momentum_whole() {
         let close = |got: Vec3, want: Vec3| (got - want).length() <= 1e-5 * want.length();
@@ -2735,29 +2839,38 @@ mod tests {
             .map(|load| (load.at - pivot).cross(load.blow))
             .sum();
         assert!(close(moment, ((entry + end) / 2.0 - pivot).cross(blow)));
+        assert!(loads.iter().all(|load| load.peak.is_none()));
+        let field = Load::field(&[(4, entry, 2.0), (4, end, 1.0)]);
+        assert!(field.len() == 1 && field[0].peak.is_none(), "{field:?}");
 
-        let hit = |chunk: usize, at: Vec3, energy: f32, impulse: Vec3| RayHit {
+        let hit = |chunk: usize, at: Vec3, energy: f32, (impulse, peak): (Vec3, Vec3)| RayHit {
             chunk,
             at,
             energy,
             impulse,
+            peak,
         };
         let (a, b, c) = (Vec3::X, Vec3::Y, Vec3::new(0.0, 0.0, 2.0));
         let (i, j) = (Vec3::new(3.0, 0.0, -1.0), Vec3::new(-1.0, 2.0, 0.0));
+        let (f, g) = (Vec3::new(2.0e5, 0.0, 0.0), Vec3::new(0.0, -3.0e5, 1.0e5));
         let loads = Load::blast(&[
-            hit(3, a, 1.0, i),
-            hit(1, b, 2.0, Vec3::Z),
-            hit(3, c, 3.0, j),
+            hit(3, a, 1.0, (i, f)),
+            hit(1, b, 2.0, (Vec3::Z, Vec3::Y)),
+            hit(3, c, 3.0, (j, g)),
         ]);
         let chunks: Vec<usize> = loads.iter().map(|load| load.chunk).collect();
         assert_eq!(chunks, vec![1, 3]);
         assert_eq!(
-            (loads[0].at, loads[0].energy, loads[0].blow),
-            (b, 2.0, Vec3::Z)
+            (loads[0].at, loads[0].energy, loads[0].blow, loads[0].peak),
+            (b, 2.0, Vec3::Z, Some(Vec3::Y))
         );
         assert_eq!(loads[1].energy, 4.0);
         assert!(close(loads[1].at, (a + c * 3.0) / 4.0));
         assert!(close(loads[1].blow, i + j));
+        assert!(close(
+            loads[1].peak.expect("a blast load states its peak"),
+            f + g
+        ));
     }
 
     /// THE BLAST'S IMPULSES ARE SWISDAK'S FITS: at Z = 1 and 10 m/kg^⅓ the reflected fit reads
@@ -2788,6 +2901,106 @@ mod tests {
             );
             assert!((i / incident - 1.0).abs() < 1e-3, "incident at Z {z}: {i}");
         }
+    }
+
+    /// THE BLAST'S PEAK PRESSURES ARE SWISDAK'S FITS, REFLECTED AT LEAST TWOFOLD: at Z = 1 the
+    /// reflected and incident rows read 8152 and 1354 kPa, and at Z = 10 the incident 14.89 kPa
+    /// and its ideal reflection 31.62 kPa (DERIVED from the rows); over the whole field
+    /// (Z 0.06–40 m/kg^⅓) the normally reflected peak is at least twice the incident, both fall
+    /// with distance but for the fits' joins (each a step under 1 %), and the near branch meets
+    /// the ideal reflection at its edge within 1 %. The peak depends on the scaled distance alone
+    /// and blends from reflected square on to incident grazing. Every blast load's peak force
+    /// reads these, as the section law of #237 will: a mistyped coefficient, a branch taken at the
+    /// wrong Z, the rejected far branch (under twice the incident past Z ≈ 4), a pressure scaled
+    /// by the charge like an impulse, or the blend's weights swapped fails here.
+    #[test]
+    fn the_blast_peak_pressures_are_swisdaks_fits_reflected_at_least_twofold() {
+        let close = |got: f32, want: f32| (got / want - 1.0).abs() < 1e-3;
+        assert!(close(Blast::reflected_pressure(1.0), 8.1518e6));
+        assert!(close(INCIDENT_PRESSURE.at(1.0) * 1e3, 1.3537e6));
+        assert!(close(INCIDENT_PRESSURE.at(10.0) * 1e3, 14.889e3));
+        assert!(close(Blast::reflected_pressure(10.0), 31.616e3));
+        let edge = REFLECTED_PRESSURE.edge();
+        let reflected_edge = ideal_reflection(INCIDENT_PRESSURE.at(edge) * 1e3);
+        assert!(
+            (REFLECTED_PRESSURE.at(edge) * 1e3 / reflected_edge - 1.0).abs() < 0.01,
+            "the near branch meets the ideal reflection at its edge"
+        );
+        let n = 2000;
+        let z = |k: usize| 0.06 * (40.0_f32 / 0.06).powf(k as f32 / n as f32);
+        for k in 0..=n {
+            let (r, s) = (
+                Blast::reflected_pressure(z(k)),
+                INCIDENT_PRESSURE.at(z(k)) * 1e3,
+            );
+            assert!(
+                r >= 2.0 * s,
+                "Z {}: reflected {r} Pa under twice {s} Pa",
+                z(k)
+            );
+            if k < n {
+                let (r1, s1) = (
+                    Blast::reflected_pressure(z(k + 1)),
+                    INCIDENT_PRESSURE.at(z(k + 1)) * 1e3,
+                );
+                assert!(r1 <= r * 1.01 && s1 <= s * 1.01, "Z {}: rises", z(k));
+            }
+        }
+        // W / 1.8 = 1 kg and 8 kg: the same scaled distance at twice the range (fixture data).
+        let (one, eight) = (
+            Blast::of(TNT_ENERGY * SURFACE_BURST_FACTOR),
+            Blast::of(8.0 * TNT_ENERGY * SURFACE_BURST_FACTOR),
+        );
+        for (d, cos) in [(0.5, 1.0), (3.0, 0.4), (12.0, 0.0)] {
+            let (near, far) = (one.peak_pressure(d, cos), eight.peak_pressure(2.0 * d, cos));
+            assert!((far / near - 1.0).abs() < 1e-4, "{d} m, cos {cos}");
+        }
+        assert!(close(
+            one.peak_pressure(3.0, 1.0),
+            Blast::reflected_pressure(3.0)
+        ));
+        assert!(close(
+            one.peak_pressure(3.0, 0.0),
+            INCIDENT_PRESSURE.at(3.0) * 1e3
+        ));
+    }
+
+    /// A BLAST RAY'S PEAK FORCE IS ITS PEAK PRESSURE OVER THE PATCH ITS PUSH LOADS: square on, at
+    /// 60° and grazing, the peak force lies along the push, into the face, and stands to it as the
+    /// peak pressure to the specific impulse; a cube's face that intercepts a share of a far
+    /// ray's cone takes that share of both (fixture geometry). The section law of #237 reads the
+    /// peak force against a section's strength: a peak along the ray, over another patch, or kept
+    /// whole where the push is intercepted fails here. No law reads it yet.
+    #[test]
+    fn a_blast_rays_peak_force_is_its_peak_pressure_over_its_pushs_patch() {
+        // W / 1.8 = 1 kg, so the scaled distance is the distance (fixture data).
+        let blast = Blast::of(TNT_ENERGY * SURFACE_BURST_FACTOR);
+        let share = 1.0 / BLAST_RAYS as f32;
+        let d = 2.0;
+        for angle in [0.0_f32, 60.0, 89.4] {
+            let (sin, cos) = angle.to_radians().sin_cos();
+            let dir = Vec3::new(sin, 0.0, -cos);
+            let (push, peak) = (
+                blast.push(share, d, dir, Vec3::Z),
+                blast.peak(share, d, dir, Vec3::Z),
+            );
+            let ratio = blast.peak_pressure(d, cos) / blast.specific_impulse(d, cos);
+            assert!(
+                (peak - push * ratio).length() <= 1e-4 * peak.length() && peak.z < 0.0,
+                "{angle}°: peak {peak} against push {push}"
+            );
+        }
+        let cube = [Block::cuboid(Vec3::ZERO, Vec3::splat(CUBE))];
+        let origin = Vec3::new(CUBE / 2.0, CUBE / 2.0, -10.0);
+        let hits = blast_rays(&cube, |_| true, origin, blast, &[(Vec3::Z, share)]);
+        let kept = CUBE * CUBE / Blast::section(share, 10.0);
+        assert!(kept < 1.0, "the far ray's cone outgrows the face");
+        let want = Blast::reflected_pressure(10.0) * Blast::section(share, 10.0) * kept;
+        assert!(
+            (hits[0].peak - Vec3::Z * want).length() <= 1e-4 * want,
+            "{} against {want}",
+            hits[0].peak
+        );
     }
 
     /// A BLAST RAY PUSHES THE FACE IT MEETS ALONG THE FACE'S NORMAL, WITH THE SPECIFIC IMPULSE
@@ -3196,6 +3409,7 @@ mod tests {
                 energy: 0.0,
                 blow: Vec3::NEG_Z * (scale * capacity / lever),
                 press: Vec3::ZERO,
+                peak: None,
                 origin: Origin::Field,
             };
             let failures = structural(
@@ -3333,6 +3547,7 @@ mod tests {
                 energy: 0.0,
                 blow: Vec3::Y * (scale * capacity),
                 press: Vec3::ZERO,
+                peak: None,
                 origin: Origin::Field,
             };
             let failures = structural(
@@ -3388,6 +3603,7 @@ mod tests {
                 blow: Vec3::NEG_Z * (along * capacity)
                     + Vec3::NEG_Y * (press * capacity / friction),
                 press: Vec3::ZERO,
+                peak: None,
                 origin: Origin::Field,
             };
             let failures = structural(
@@ -3434,6 +3650,7 @@ mod tests {
                 energy: 0.0,
                 blow: Vec3::NEG_Z * 100.0,
                 press: Vec3::ZERO,
+                peak: None,
                 origin: Origin::Field,
             };
             let failure = section_failure(&structure, &section, &[1], &[field]).unwrap();

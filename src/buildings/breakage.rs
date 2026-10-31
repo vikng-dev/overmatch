@@ -577,6 +577,7 @@ fn contact_load(
             energy: 0.0,
             blow: frame.turn(blow),
             press: frame.turn(press),
+            peak: None,
             origin: Origin::Body {
                 body: transfer.body,
                 mass,
@@ -1166,6 +1167,7 @@ fn cast_blast(
                     at: (local + turned * t) * frame.scale,
                     energy: blast.energy * share,
                     impulse: blast.push(share, d, turned, normal),
+                    peak: blast.peak(share, d, turned, normal),
                 },
             ));
         }
@@ -1183,6 +1185,7 @@ fn cast_blast(
         taken.entry(root).or_default().blast.push(fracture::RayHit {
             energy: hit.energy * k,
             impulse: hit.impulse * k,
+            peak: hit.peak * k,
             ..hit
         });
     }

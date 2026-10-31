@@ -444,7 +444,7 @@ fn line_loads(lines: &[(usize, Vec3, Vec3, f32)]) -> Vec<Load> {
 }
 
 /// A blast's single ray on law chunk `c` at its centroid, carrying `share` of its full pool and
-/// no impulse, as the laws read it.
+/// no impulse or peak force, as the laws read it.
 fn blast_on(structure: &Structure, c: usize, share: f32) -> Vec<Load> {
     let chunk = &structure.chunks[c];
     Load::blast(&[fracture::RayHit {
@@ -452,6 +452,7 @@ fn blast_on(structure: &Structure, c: usize, share: f32) -> Vec<Load> {
         at: chunk.centroid,
         energy: share * fracture::full_pool(chunk),
         impulse: Vec3::ZERO,
+        peak: Vec3::ZERO,
     }])
 }
 
@@ -552,6 +553,7 @@ fn a_hole_changes_no_collider_mass_or_structural_result() {
         energy: 0.0,
         blow: (line.2 - line.1).normalize() * 100.0,
         press: Vec3::ZERO,
+        peak: None,
         origin: Origin::Field,
     };
     let loads: Vec<Load> = line_loads(&[line]).into_iter().chain([push]).collect();
@@ -834,6 +836,7 @@ fn a_nailed_roof_stays_when_struck_and_breaks_its_nails_when_its_walls_go() {
         energy: 0.0,
         blow: (line.2 - line.1).normalize() * (line.3 / 773.0),
         press: Vec3::ZERO,
+        peak: None,
         origin: Origin::Field,
     };
     let loads: Vec<Load> = line_loads(&[line]).into_iter().chain([push]).collect();
@@ -1589,6 +1592,7 @@ fn a_break_keeps_linear_and_angular_momentum() {
                 energy: 0.0,
                 blow: Vec3::Z * (mass * 3.0),
                 press: Vec3::ZERO,
+                peak: None,
                 origin: Origin::Body {
                     body: Entity::PLACEHOLDER,
                     mass,
@@ -1644,6 +1648,7 @@ fn a_break_launches_with_free_mass_and_creates_no_energy() {
                 energy: 0.0,
                 blow: Vec3::Z * (mass * 3.0),
                 press: Vec3::ZERO,
+                peak: None,
                 origin: Origin::Body {
                     body: Entity::PLACEHOLDER,
                     mass,
@@ -1759,6 +1764,7 @@ fn only_departing_chunks_give_back_their_body_blows() {
         energy: 0.0,
         blow: Vec3::Z * 0.001,
         press: Vec3::X * 1000.0,
+        peak: None,
         origin: Origin::Body {
             body: Entity::PLACEHOLDER,
             mass: 1000.0,
@@ -1848,6 +1854,7 @@ fn simultaneous_exchanges_keep_momentum_and_spend_one_kinetic_budget() {
             energy: 0.0,
             blow: Vec3::Z * (source_mass * 3.0),
             press: Vec3::ZERO,
+            peak: None,
             origin: Origin::Body {
                 body,
                 mass: source_mass,
