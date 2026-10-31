@@ -2333,3 +2333,84 @@ fn awake_and_sleeping_presses_join_every_deposit_once() {
         assert_eq!(live.held_presses.len(), 2, "each point once");
     }
 }
+
+/// NO ELEMENT'S KIND OR NAME ENTERS THE LAWS (the game's environment destruction model, the #237
+/// study's test 8; ADR-0034). A wall chunk and a roof board take one law, from their material rows
+/// and their construction: the law's view of the shipped house (its layout and structure) is the
+/// same whatever its elements are called and whichever kind each is labelled, so one blast's loads
+/// change it identically, while the same loads on the house with its elements' materials swapped
+/// change it otherwise. A mutant that reads an element's kind or name into the law's view, or
+/// branches the laws on either, fails here. The charge and its point are ASSUMED fixture data.
+#[test]
+fn no_elements_kind_or_name_enters_the_laws() {
+    let kind = shipped_house();
+    let registry = crate::substances::SubstanceRegistry::shipped_static();
+    let masonry: Vec<Option<Masonry>> = kind
+        .asset
+        .materials
+        .iter()
+        .map(|name| Masonry::of(registry, name).unwrap())
+        .collect();
+    let attachments = Attachments::shipped_static();
+    let kinds = [
+        ElementKind::Pier,
+        ElementKind::Sill,
+        ElementKind::Lintel,
+        ElementKind::Gable,
+        ElementKind::WallPlate,
+        ElementKind::Roof,
+    ];
+    let mut relabelled = kind.asset.clone();
+    for (k, element) in relabelled.elements.iter_mut().enumerate() {
+        let at = kinds.iter().position(|&of| of == element.kind).unwrap();
+        element.kind = kinds[(at + 1) % kinds.len()];
+        element.name = format!("relabelled/{k}");
+    }
+    let mut swapped = kind.asset.clone();
+    let materials = swapped.materials.len() as u8;
+    for element in &mut swapped.elements {
+        element.material = (element.material + 1) % materials;
+    }
+    let (lo, hi) = kind.bounds();
+    let blast = Blast::of(5.0 * 4.184e6);
+    let origin = Vec3::new(hi.x + 6.0, lo.y + 1.0, 0.5 * (lo.z + hi.z));
+    let run = |asset: &BuildingAsset| {
+        let layout = Layout::of(asset, &masonry, attachments).unwrap();
+        let structure = layout.structure(asset, 1.0);
+        let mut live = Live {
+            state: WallState::new(&structure),
+            swapped: vec![false; layout.elements.len()],
+            sections: SectionCache::default(),
+            held_presses: Vec::new(),
+            holes: vec![Vec::new(); structure.chunks.len()],
+            structure,
+        };
+        let hits = fracture::blast_rays(
+            &layout.blocks,
+            |c| live.state.standing(c),
+            origin,
+            blast,
+            fracture::blast_directions(),
+        );
+        let changes = run_laws(&layout, &mut live, &Load::blast(&hits), Vec::new());
+        (layout, live.structure, changes)
+    };
+    let (layout, structure, changes) = run(&kind.asset);
+    assert!(
+        !changes.events.is_empty(),
+        "the fixture charge changes the house"
+    );
+    let (other_layout, other_structure, other_changes) = run(&relabelled);
+    assert_eq!(other_layout, layout);
+    assert_eq!(
+        (other_structure.chunks, other_structure.joints),
+        (structure.chunks.clone(), structure.joints.clone())
+    );
+    assert_eq!(other_changes, changes, "kinds and names change no law");
+    let (_, other_structure, other_changes) = run(&swapped);
+    assert_ne!(other_structure.chunks, structure.chunks);
+    assert_ne!(
+        other_changes, changes,
+        "a material changes the law's outcome"
+    );
+}
