@@ -1353,7 +1353,7 @@ fn section_failure(
             .filter(|load| group.binary_search(&load.chunk).is_ok())
     };
     let moment: Vec3 = on_group()
-        .map(|load| (load.at - centre).cross(load.blow))
+        .map(|load| (load.at - centre).cross(load.blow * load.felt(pulse)))
         .sum();
     let bending = moment - n * moment.dot(n);
     if bending.length() <= 0.0 {
@@ -4309,6 +4309,41 @@ mod tests {
                 result.failures.first().map(|failure| failure.cause),
                 expected,
                 "{force}"
+            );
+        }
+    }
+
+    /// A STRENGTH-HELD PULSE CANNOT HIDE AN IMPULSIVE TURN (the game's environment destruction
+    /// model). The authority must choose the hinge from the same effective blows it uses for
+    /// demand. ASSUMED fixture opposing blows cancel before weighting; DERIVED pulse factor
+    /// zero leaves exactly the line's hinge and demand. Choosing the raw-blow axis fails here.
+    #[test]
+    fn a_strength_held_pulse_cannot_cancel_an_impulsive_hinge() {
+        let structure = cubes(&[[0, 0, 0], [0, 1, 0]], 1, &[], 28.8);
+        let section = [joint_between(&structure, 0, 1)];
+        let line = Load {
+            chunk: 1,
+            at: structure.chunks[1].centroid + Vec3::Y * (CUBE / 2.0),
+            energy: 0.0,
+            blow: Vec3::NEG_Z * 100.0,
+            press: Vec3::ZERO,
+            peak: None,
+            origin: Origin::Field,
+        };
+        let expected = section_failure(&structure, &section, &[1], &[line], 0.0).unwrap();
+        for scale in [1.0, 2.0] {
+            let held = Load {
+                blow: -line.blow * scale,
+                peak: Some(Vec3::Z),
+                ..line
+            };
+            let loads = [line, held];
+            let pulse = section_pulse(&structure, &section, &[1], &loads, &mut 0);
+            assert_eq!(pulse, 0.0, "fixture peak is below seam strength");
+            assert_eq!(
+                section_failure(&structure, &section, &[1], &loads, pulse),
+                Some(expected.clone()),
+                "a resisted pulse neither cancels nor reverses the line's hinge"
             );
         }
     }
