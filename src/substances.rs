@@ -73,6 +73,15 @@ pub(crate) fn contact_friction(coefficient: f32) -> avian3d::prelude::Friction {
     avian3d::prelude::Friction::new(coefficient).with_combine_rule(PAIR_RULE)
 }
 
+/// The coefficient a contact between surfaces of coefficients `a` and `b` slides at: their
+/// [`contact_friction`]s combined as avian's narrow phase combines a pair's, the dynamic
+/// coefficient its solver applies, so a law that reads a pair reads the physics' own number.
+pub(crate) fn pair_friction(a: f32, b: f32) -> f32 {
+    contact_friction(a)
+        .combine(contact_friction(b))
+        .dynamic_coefficient
+}
+
 /// The shipped registry, embedded so the walk never depends on asset-server timing (the same reason
 /// [`crate::bake`] embeds the Tiger spec).
 pub(crate) const MATERIALS_RON: &str = include_str!("../assets/materials/materials.ron");

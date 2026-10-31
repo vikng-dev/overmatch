@@ -22,10 +22,11 @@
 //!   bending moment across it, reaches the seam's tensile strength. A part held through several
 //!   sections at once (a span between two piers) is left standing and counted: the design's step 3
 //!   (`.agents/docs/design/wall-destruction.md`, "Structural calculation").
-//! * **Rests** ([`unseated`], inside [`weigh`]). A joint between two components the building's
-//!   data marks resting ([`Bond::Resting`]: a roof plane on its plate) carries no tension: a part
-//!   whose only way to the ground is over rests stands while its centre of mass lies over the
-//!   rests that bear it, and is freed whole when it no longer does.
+//! * **Rests** ([`unseat`], inside [`weigh`] and [`structural`]). A joint between two components
+//!   the building's data marks resting ([`Bond::Resting`]: a beam laid on a wall, nothing fixing
+//!   it) carries no tension: a part whose only way to the ground is over rests stands while its
+//!   centre of mass lies over the rests that bear it and their slope is within the friction of
+//!   their pairs, and while no push can carry it over them, turned or slid; else it is freed whole.
 //! * **Support** ([`loose_groups`]). A chunk group with no path of intact joints to a ground anchor
 //!   or to a buried chunk ([`Chunk::buried`]: the soil holds it) falls as one body.
 //! * **The blast field** ([`blast_rays`]). A charge's blast energy leaves it uniformly over the
@@ -64,6 +65,9 @@ pub(crate) struct Masonry {
     pub crush: f32,
     /// The seam between its chunks.
     pub seam: Seam,
+    /// The friction coefficient its surface brings to a contact, dimensionless: one side of a
+    /// rest's pair ([`crate::substances::pair_friction`]).
+    pub friction: f32,
 }
 
 /// A bonded seam's strength.
@@ -81,8 +85,9 @@ impl Masonry {
     /// facts (the registry refuses a row stating one of the seam's two without the other); the
     /// crush energy is the static term of the walk's own force law at the row's factor
     /// (`factor / 1000 × a`, `a` the reference's cavity strength): the energy per volume the walk
-    /// spends opening a cavity in it. Refuses a name the registry does not hold as hard matter,
-    /// and a row stating bulk facts but no seam: its chunks would have no law to part by.
+    /// spends opening a cavity in it; the friction is the row's. Refuses a name the registry does
+    /// not hold as hard matter, and a row stating bulk facts but no seam (its chunks would have no
+    /// law to part by) or no friction (a part of it laid on another would have none to stand by).
     pub(crate) fn of(registry: &SubstanceRegistry, name: &str) -> Result<Option<Self>, String> {
         let hard = registry.hard(name).map_err(|err| err.to_string())?;
         let Some(bulk) = hard.bulk else {
@@ -98,11 +103,15 @@ impl Masonry {
             .ok_or_else(|| {
                 format!("substance {name:?} states bulk facts but no seam to part its chunks by")
             })?;
+        let friction = hard.friction.ok_or_else(|| {
+            format!("substance {name:?} states bulk facts but no friction for a rest on it")
+        })?;
         let share = f64::from(hard.factor() / REFERENCE_FACTOR);
         Ok(Some(Self {
             density: bulk.density as f32,
             crush: (share * registry.reference_facts().cavity_strength()) as f32,
             seam,
+            friction,
         }))
     }
 }
@@ -135,11 +144,10 @@ pub(crate) enum Side {
 pub(crate) enum Bond {
     /// A seam: it opens under tension at its strength, and a push spends its fracture energy.
     Bonded(Seam),
-    /// One part set on another: no pull strength and no fracture work. It holds only what bears
-    /// on it from above, so no tension check reads it (it lies in no section and on no path a
-    /// section cuts) and the push rule never opens it; it opens when the part it carries can no
-    /// longer stand on its rests ([`unseated`]), or when a push carries that part over them
-    /// ([`structural`]).
+    /// One part laid on another, nothing fixing it: no pull strength and no fracture work. It
+    /// holds only what bears on it from above, by weight and the friction of its two materials,
+    /// so no tension check reads it (it lies in no section and on no path a section cuts) and the
+    /// push rule never opens it; it opens when the part it carries leaves its rests ([`unseat`]).
     Resting,
 }
 
@@ -791,16 +799,24 @@ pub(crate) struct Push {
 /// What loaded a failed section, and so the units of its demand and capacity.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Load {
-    /// A push ([`structural`]): the angular impulse bending the section against the impulse that
-    /// would spend its fracture energy, N·s·m.
+    /// A push turning a group about a section's hinge ([`structural`]), or a part over the hinge of
+    /// the rests it stands on ([`unseat`]): the angular impulse about the hinge against the impulse
+    /// that would pay for opening the section and lifting the group over it, N·s·m.
     Push,
     /// The held group's weight ([`weigh`]): the peak tension across the section against its seam's
     /// tensile strength, Pa.
     Weight,
-    /// A group standing on rests alone that can no longer ([`unseated`]): how far its centre of
-    /// mass reaches past the rests that bear it, horizontally, against nothing, m (infinite when
-    /// none bears). The section is every rest it stood on.
-    Rest,
+    /// A part standing on rests alone tipped off them by its weight ([`unseat`]): how far its
+    /// centre of mass reaches past the rests that bear it, horizontally, against nothing, m
+    /// (infinite when none bears). The section is every rest it stood on, as for the two below.
+    Tip,
+    /// A part standing on rests alone slid down them by its weight ([`unseat`]): the tangent of
+    /// their slope against the friction coefficient their pairs raise, dimensionless.
+    Slide,
+    /// A part standing on rests alone shoved off them by a push ([`unseat`]): the push's impulse
+    /// along them net of the friction impulse it raises, against the impulse whose energy pays
+    /// the friction work of sliding the part off, N·s.
+    Shove,
 }
 
 /// One structural failure: the section's joints, what loaded it, and the demand on it with the
@@ -816,7 +832,7 @@ pub(crate) struct Failure {
 /// The live, intact bonded joints' graph: each chunk's neighbours with the joint between, each
 /// chunk's live anchors, and whether it is buried (held by the soil, never by a joint a section can
 /// cut). A rest is no edge: it carries no tension, so no section's group hangs on one, and a group
-/// whose only way to the ground is over rests is the rest check's ([`unseated`]).
+/// whose only way to the ground is over rests is the rest law's ([`unseat`]).
 type Graph = (Vec<Vec<(usize, usize)>>, Vec<Vec<usize>>, Vec<bool>);
 
 fn graph(structure: &Structure, state: &WallState) -> Graph {
@@ -1043,9 +1059,9 @@ fn plane_bucket(offset: f32) -> i64 {
 /// section cracks first, and the check repeats until none fails, so a failure can expose the next.
 /// The freed group is the physics' from then on, with its weight, contact and friction
 /// ([`super::breakage`] launches it with the momentum pushed into it). A pushed part that stands on
-/// rests alone (no bonded path to the ground) is turned the same way about the rests that bear it,
-/// with no seam to open: every rest it stood on opens when the push pays for carrying it over
-/// their hinge.
+/// rests alone (no bonded path to the ground) is the rest law's ([`unseat`]): every rest it stood
+/// on opens when the push can carry it over them, turned about their hinge as a section is with no
+/// seam to open, or slid along them against their friction.
 ///
 /// The group a section holds is the part of the pushed chunks' component that loses its last path
 /// to the ground with the section's joints removed ([`held`]): a group no push reaches takes no
@@ -1120,10 +1136,8 @@ pub(crate) fn structural(
         }
         failures.push(failure);
     }
-    // A push on a part that stands on rests alone (no bonded path to the ground: a roof plane on
-    // its plate) turns it about the rests that bear it as about a section with no seam; when the
-    // push pays for carrying its weight over their hinge, every rest it stood on opens and the
-    // part leaves with its pushes.
+    // A pushed part that stands on rests alone (no bonded path to the ground) leaves with its
+    // pushes when the rest law opens every rest it stood on.
     let graph = graph(structure, state);
     let mut seen = vec![false; structure.chunks.len()];
     for push in pushes {
@@ -1134,20 +1148,11 @@ pub(crate) fn structural(
             continue;
         }
         let group = bonded_group(push.chunk, &graph, &mut seen);
-        let (rests, bearing) = rests_of(structure, state, &group);
-        if bearing.is_empty() {
-            continue;
-        }
-        if let Some(failure) = section_failure(structure, &bearing, &group, pushes)
-            && failure.demand >= failure.capacity
-        {
-            for &j in &rests {
+        if let Some(failure) = unseat(structure, state, &group, pushes, &mut steps) {
+            for &j in &failure.joints {
                 state.cracked[j] = true;
             }
-            failures.push(Failure {
-                joints: rests,
-                ..failure
-            });
+            failures.push(failure);
         }
     }
     failures
@@ -1170,32 +1175,6 @@ fn bonded_group(start: usize, (neighbours, ..): &Graph, seen: &mut [bool]) -> Ve
     }
     group.sort_unstable();
     group
-}
-
-/// The live, intact rests joining `group` (ascending) to a standing chunk outside it, ascending,
-/// and those of them that bear it: their normal toward the group rising past [`BEARS`].
-fn rests_of(structure: &Structure, state: &WallState, group: &[usize]) -> (Vec<usize>, Vec<usize>) {
-    let inside = |c: usize| group.binary_search(&c).is_ok();
-    let (mut rests, mut bearing) = (Vec::new(), Vec::new());
-    for (index, joint) in structure.joints.iter().enumerate() {
-        if joint.seam().is_some() || state.cracked[index] || !state.live(joint) {
-            continue;
-        }
-        let Side::Chunk(b) = joint.b else {
-            continue;
-        };
-        let held = match (inside(joint.a), inside(b)) {
-            (true, false) => joint.a,
-            (false, true) => b,
-            _ => continue,
-        };
-        rests.push(index);
-        let toward = structure.chunks[held].centroid - joint.centroid;
-        if toward.dot(joint.normal).signum() * joint.normal.y > BEARS {
-            bearing.push(index);
-        }
-    }
-    (rests, bearing)
 }
 
 /// The demand and capacity of `section` holding `group` under `pushes` ([`structural`]), `None`
@@ -1498,24 +1477,14 @@ const BEARS: f32 = 1e-3;
 
 /// The rest check, for the touched chunks with no bonded path to the ground (`paths`, one per
 /// chunk of `touched`, [`ground_path`]): each such chunk's bonded group (its chunks joined to it
-/// through intact bonded joints, `graph`) stands on rests alone. The rests that bear it (each a
-/// live intact rest joining it to a standing chunk outside, its normal toward the group rising past
-/// [`BEARS`]) are discs of their area in their planes, as the tension check reads a joint; the
-/// group stands while the vertical through its centre of mass passes inside the horizontal convex
-/// hull of those discs, where vertical forces in the rests alone hold its weight and its moment.
-/// The first group, in `touched` order, that does not stand opens every rest it stood on, as one
-/// [`Load::Rest`] failure; `None` when every group stands. A group with no rest left is loose,
-/// support's to drop ([`fall`]).
-///
-/// ASSUMED: friction holds a seated part from sliding (a roof plane at 3 : 4 on its plate stands
-/// though no friction in the material data reaches tan 36.87°, 0.75), and a rest bears no part of
-/// another's weight that reaches it through the part it carries: the check reads each group's own
-/// weight on its own rests. Once a part is freed, the physics' contact and friction decide whether
-/// it slides, rocks or settles. Adds the chunks it walks and the joints it reads to `steps`.
+/// through intact bonded joints, `graph`) stands on rests alone, and the rest law reads it under
+/// its weight ([`unseat`], no push). The first group, in `touched` order, that leaves its rests is
+/// the failure; `None` when every group stays. Adds the chunks it walks and the joints it reads to
+/// `steps`.
 fn unseated(
     structure: &Structure,
     state: &WallState,
-    (neighbours, ..): &Graph,
+    graph: &Graph,
     touched: &[usize],
     paths: &[Option<Vec<usize>>],
     steps: &mut usize,
@@ -1525,38 +1494,61 @@ fn unseated(
         if path.is_some() || seen[start] {
             continue;
         }
-        seen[start] = true;
-        let mut group = vec![start];
-        let mut next = 0;
-        while let Some(&chunk) = group.get(next) {
-            next += 1;
-            *steps += 1;
-            for &(neighbour, _) in &neighbours[chunk] {
-                if !seen[neighbour] {
-                    seen[neighbour] = true;
-                    group.push(neighbour);
-                }
-            }
-        }
-        group.sort_unstable();
-        if let Some(failure) = unseat(structure, state, &group, steps) {
+        let group = bonded_group(start, graph, &mut seen);
+        *steps += group.len();
+        if let Some(failure) = unseat(structure, state, &group, &[], steps) {
             return Some(failure);
         }
     }
     None
 }
 
-/// `group`'s rests and whether it stands on them ([`unseated`]): `None` when it stands or has no
-/// rest left.
+/// The rest law: whether `group` (ascending), a part with no bonded path to the ground, leaves the
+/// rests it stands on under its weight and the `pushes` on its chunks. Its rests are the live
+/// intact rests joining it to standing chunks outside it; those that bear it are the ones whose
+/// normal toward it rises past [`BEARS`], each a disc of its area in its plane (the tension
+/// check's reading of a joint), pressed evenly over their area by what holds the part up
+/// (ASSUMED: the rests' shares of the load are statically indeterminate, and an even pressure is
+/// the reading that needs no stiffness). Each bearing rest's friction coefficient is its pair's,
+/// its two materials' rows under the one pair rule ([`crate::substances::pair_friction`]). With
+/// `N = Σ A n` over the bearing rests, `θ` its tilt from vertical and `μ = Σ μ_i A_i / |N|` the
+/// friction the even pressure raises per unit of the load along `N` (ASSUMED: each rest's
+/// friction can turn against the slide, exact where the rests are parallel), the part leaves, in
+/// this order of reading:
+///
+/// 1. tipped by its weight ([`Load::Tip`]) when the vertical through its centre of mass passes
+///    outside the horizontal convex hull of the bearing discs, where vertical forces in the rests
+///    alone can no longer hold its weight's moment;
+/// 2. slid by its weight ([`Load::Slide`]) when the slope beats the friction, `tan θ > μ`;
+/// 3. turned over by the pushes ([`Load::Push`]) when their angular impulse about the bearing
+///    rests' hinge pays for lifting the part over it, a section with no seam to open
+///    ([`section_failure`]);
+/// 4. shoved off by the pushes ([`Load::Shove`]) when their impulse along the rests, net of the
+///    friction impulse their press into the rests raises, `p = |J_t| − μ max(−J·N̂, 0)`, gives
+///    the part the energy to slide its centre of mass off the bearing hull along that impulse
+///    against friction and with gravity's share along the slope: `p ≥ √(2 m W)`, `W = m g d (μ
+///    cos θ + t_y)`, `d` the slide's length in the rests' plane and `t` its unit direction. The
+///    weight is held to raise no friction impulse during a push (ASSUMED: a push is
+///    instantaneous) and the part to slide in contact the whole way (ASSUMED: a push that also
+///    lifts it slides it farther than this reads).
+///
+/// Any of them opens every rest the part stood on, as one failure; `None` when it stays, and when
+/// it has no rest left (it is loose, support's to drop, [`fall`]). Once the part is freed the
+/// physics' contact and friction decide whether it slides, rocks or settles. ASSUMED: a rest bears
+/// no part of another's weight that reaches it through the part it carries; the law reads each
+/// part's own weight on its own rests. Adds the joints and chunks it reads to `steps`.
 fn unseat(
     structure: &Structure,
     state: &WallState,
     group: &[usize],
+    pushes: &[Push],
     steps: &mut usize,
 ) -> Option<Failure> {
     let inside = |c: usize| group.binary_search(&c).is_ok();
-    let mut rests = Vec::new();
+    let (mut rests, mut bearing) = (Vec::new(), Vec::new());
     let mut rim: Vec<(f32, f32)> = Vec::new();
+    // `Σ A n` and `Σ μ A` over the bearing rests.
+    let (mut normal, mut grip) = (Vec3::ZERO, 0.0);
     *steps += structure.joints.len() + group.len();
     for (index, joint) in structure.joints.iter().enumerate() {
         if joint.seam().is_some() || state.cracked[index] || !state.live(joint) {
@@ -1580,6 +1572,13 @@ fn unseat(
         if n.y <= BEARS {
             continue;
         }
+        bearing.push(index);
+        normal += n * joint.area;
+        grip += joint.area
+            * crate::substances::pair_friction(
+                structure.chunks[joint.a].material.friction,
+                structure.chunks[b].material.friction,
+            );
         let (u, v) = plane_axes(n);
         let radius = (joint.area / PI).sqrt();
         rim.extend((0..8).map(|k| {
@@ -1591,29 +1590,68 @@ fn unseat(
     if rests.is_empty() {
         return None;
     }
+    let open = |load, demand, capacity| {
+        Some(Failure {
+            joints: rests.clone(),
+            load,
+            demand,
+            capacity,
+        })
+    };
     let (mass, moment) = group.iter().fold((0.0, Vec3::ZERO), |(mass, moment), &i| {
         let chunk = &structure.chunks[i];
         (mass + chunk.mass, moment + chunk.centroid * chunk.mass)
     });
     let centre = moment / mass;
-    let reach = beyond(&mut rim, (centre.x, centre.z));
-    (reach > 0.0).then_some(Failure {
-        joints: rests,
-        load: Load::Rest,
-        demand: reach,
-        capacity: 0.0,
-    })
+    let hull = convex_hull(&mut rim);
+    let reach = beyond(&hull, (centre.x, centre.z));
+    if reach > 0.0 {
+        return open(Load::Tip, reach, 0.0);
+    }
+    // The hull spans an area, so some rest bears and `N` rises.
+    let friction = grip / normal.length();
+    let slope = normal.x.hypot(normal.z) / normal.y;
+    if slope > friction {
+        return open(Load::Slide, slope, friction);
+    }
+    if !pushes.iter().any(|push| inside(push.chunk)) {
+        return None;
+    }
+    if let Some(turn) = section_failure(structure, &bearing, group, pushes)
+        && turn.demand >= turn.capacity
+    {
+        return open(Load::Push, turn.demand, turn.capacity);
+    }
+    let support = normal.normalize();
+    let total: Vec3 = pushes
+        .iter()
+        .filter(|push| inside(push.chunk))
+        .map(|push| push.impulse)
+        .sum();
+    let press = total.dot(support);
+    let along = total - support * press;
+    let net = along.length() - friction * (-press).max(0.0);
+    if net <= 0.0 {
+        return None;
+    }
+    // `t` lies in the rests' plane, which the slope check held within `atan μ` of level, so its
+    // horizontal part is at least `cos θ` long.
+    let t = along.normalize();
+    let level = t.x.hypot(t.z);
+    let slide = exit(&hull, (centre.x, centre.z), (t.x / level, t.z / level)) / level;
+    let work = mass * GRAVITY * slide * (friction * support.y + t.y);
+    let capacity = (2.0 * mass * work.max(0.0)).sqrt();
+    if net >= capacity {
+        return open(Load::Shove, net, capacity);
+    }
+    None
 }
 
-/// How far `p` lies outside the convex hull of `points` (reordered), m: the largest of its
-/// distances past the hull's edges, at most 0 inside, infinite when the points span no area.
-fn beyond(points: &mut [(f32, f32)], p: (f32, f32)) -> f32 {
-    let cross = |o: (f32, f32), a: (f32, f32), b: (f32, f32)| {
-        (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
-    };
+/// The convex hull of `points` (reordered), counter-clockwise, by Andrew's monotone chain: fewer
+/// than three corners when the points span no area.
+fn convex_hull(points: &mut [(f32, f32)]) -> Vec<(f32, f32)> {
     points.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)));
-    // Andrew's monotone chain: the lower hull left to right, then the upper right to left,
-    // counter-clockwise.
+    // The lower hull left to right, then the upper right to left.
     let mut hull: Vec<(f32, f32)> = Vec::with_capacity(points.len() + 1);
     let push = |hull: &mut Vec<(f32, f32)>, floor: usize, q: (f32, f32)| {
         while hull.len() >= floor && cross(hull[hull.len() - 2], hull[hull.len() - 1], q) <= 0.0 {
@@ -1630,6 +1668,17 @@ fn beyond(points: &mut [(f32, f32)], p: (f32, f32)) -> f32 {
     }
     // The upper chain ends on the first point again.
     hull.pop();
+    hull
+}
+
+/// `(a − o) × (b − o)`: positive when `o, a, b` turn counter-clockwise.
+fn cross(o: (f32, f32), a: (f32, f32), b: (f32, f32)) -> f32 {
+    (a.0 - o.0) * (b.1 - o.1) - (a.1 - o.1) * (b.0 - o.0)
+}
+
+/// How far `p` lies outside the counter-clockwise convex `hull`, m: the largest of its distances
+/// past the hull's edges, at most 0 inside, infinite when the hull spans no area.
+fn beyond(hull: &[(f32, f32)], p: (f32, f32)) -> f32 {
     if hull.len() < 3 {
         return f32::INFINITY;
     }
@@ -1639,6 +1688,21 @@ fn beyond(points: &mut [(f32, f32)], p: (f32, f32)) -> f32 {
             -cross(a, b, p) / (b.0 - a.0).hypot(b.1 - a.1)
         })
         .fold(f32::NEG_INFINITY, f32::max)
+}
+
+/// How far `p`, inside the counter-clockwise convex `hull` (three corners or more), travels along
+/// unit `e` before it leaves it, m: the nearest crossing of the edges `e` runs toward.
+fn exit(hull: &[(f32, f32)], p: (f32, f32), e: (f32, f32)) -> f32 {
+    (0..hull.len())
+        .filter_map(|k| {
+            let (a, b) = (hull[k], hull[(k + 1) % hull.len()]);
+            let length = (b.0 - a.0).hypot(b.1 - a.1);
+            // The edge's outward unit normal: its direction turned clockwise.
+            let out = ((b.1 - a.1) / length, (a.0 - b.0) / length);
+            let toward = out.0 * e.0 + out.1 * e.1;
+            (toward > 0.0).then(|| (cross(a, b, p) / length).max(0.0) / toward)
+        })
+        .fold(f32::INFINITY, f32::min)
 }
 
 /// The standing chunks whose support a change moved ([`weigh`]), ascending: each side of a joint
@@ -2963,7 +3027,7 @@ mod tests {
     /// prop that turns to dust, at 2 % under the cantilever limit of its root joint
     /// ([`cantilever_limit`]). Joined by a seam it hangs from the root and stands; joined by a
     /// rest (its plane upright, so it bears nothing) it falls at that first change, every rest it
-    /// stood on opened as one [`Load::Rest`] failure, though no load reaches anything's strength.
+    /// stood on opened as one [`Load::Tip`] failure, though no load reaches anything's strength.
     /// The roof planes and wall plates of a building rely on it: a part set on another holds only
     /// by bearing on it.
     #[test]
@@ -2981,7 +3045,7 @@ mod tests {
         let root = joint_between(&structure, 0, 1);
         structure.joints[root].bond = Bond::Resting;
         let (state, weighed, fell) = dust_and_weigh(&structure, &props);
-        assert_eq!(cracks(&weighed), vec![(Load::Rest, vec![root])]);
+        assert_eq!(cracks(&weighed), vec![(Load::Tip, vec![root])]);
         assert!(state.cracked[root]);
         assert_eq!(fell, vec![vec![1]]);
     }
@@ -3058,11 +3122,121 @@ mod tests {
             structure.chunks[2].mass = 100.0 * share;
             let (_, weighed, fell) = dust_and_weigh(&structure, &props);
             if falls {
-                assert_eq!(cracks(&weighed), vec![(Load::Rest, vec![seat])]);
+                assert_eq!(cracks(&weighed), vec![(Load::Tip, vec![seat])]);
                 assert_eq!(fell, vec![vec![1, 2]]);
             } else {
                 assert_eq!(cracks(&weighed), Vec::new(), "at {reach} r it stands");
                 assert!(fell.is_empty());
+            }
+        }
+    }
+
+    /// The shipped wood, as the laws read it.
+    fn wood() -> Masonry {
+        Masonry::of(SubstanceRegistry::shipped_static(), "Wood")
+            .expect("the shipped registry holds Wood")
+            .expect("Wood states bulk facts")
+    }
+
+    /// `structure` turned by `angle` (radians) about the z axis through the origin, its +y tilting
+    /// toward +x: every centroid and joint normal turned with it (fixture geometry).
+    fn tilted(mut structure: Structure, angle: f32) -> Structure {
+        let turn = bevy::math::Quat::from_rotation_z(-angle);
+        for chunk in &mut structure.chunks {
+            chunk.centroid = turn * chunk.centroid;
+        }
+        for joint in &mut structure.joints {
+            joint.centroid = turn * joint.centroid;
+            joint.normal = turn * joint.normal;
+        }
+        structure
+    }
+
+    /// A RESTING BLOCK SLIDES DOWN AN INCLINE STEEPER THAN ITS PAIR'S FRICTION, AND STAYS ON ONE
+    /// SHALLOWER: a fixture block of the shipped wood laid on an anchored cube of the shipped
+    /// brick, kept from sliding by a stop downhill, the whole tilted until the rest's slope is
+    /// 0.5 % over or under the pair's coefficient (the geometric mean of the two rows, the one
+    /// pair rule, about 0.57, DERIVED). The stop turns to dust. The block's centre of mass lies
+    /// well over its rest, so only the slope can free it: over, its one rest opens as a
+    /// [`Load::Slide`] failure and the block falls; under, it stands. A law that held
+    /// every seated part by friction, read one side's coefficient (wood's 0.5, brick's 0.65) or
+    /// another pair rule (the mean, 0.9 % over the geometric), fails here; a timber laid unfixed on
+    /// a slope slides by it.
+    #[test]
+    fn a_resting_block_slides_down_an_incline_steeper_than_its_pairs_friction() {
+        // The one pair rule, the geometric mean (`substances::PAIR_RULE`), restated.
+        let friction = (wood().friction * brick().friction).sqrt();
+        let stop = 2;
+        for (share, slides) in [(1.005, true), (0.995, false)] {
+            let mut structure = cubes(
+                &[[0, 0, 0], [0, 1, 0], [1, 1, 0], [1, 0, 0]],
+                0,
+                &[0, 3],
+                100.0,
+            );
+            structure.chunks[1].material = wood();
+            let seat = joint_between(&structure, 0, 1);
+            structure.joints[seat].bond = Bond::Resting;
+            let structure = tilted(structure, (share * friction).atan());
+            let (_, weighed, fell) = dust_and_weigh(&structure, &[stop]);
+            if slides {
+                assert_eq!(cracks(&weighed), vec![(Load::Slide, vec![seat])]);
+                let failure = &weighed.failures[0];
+                assert!((failure.demand / failure.capacity / share - 1.0).abs() < 1e-4);
+                assert_eq!(fell, vec![vec![1]]);
+            } else {
+                assert_eq!(cracks(&weighed), Vec::new(), "at {share} x its friction");
+                assert!(fell.is_empty(), "at {share} x its friction");
+            }
+        }
+    }
+
+    /// A PUSH SHOVES A SEATED PART OFF ITS RESTS AT ITS DERIVED IMPULSE, NET OF THE FRICTION ITS
+    /// PRESS RAISES: a fixture block of the shipped wood laid level on an anchored cube of the
+    /// shipped brick, pushed along -z at its rest's centroid, so the push turns it about no hinge.
+    /// Sliding its centre of mass off the rest, a disc of radius `r` read as its octagon, which has
+    /// a corner along -z (a level plane's axes run along x and z, [`plane_axes`]), costs the
+    /// friction work `μ m g r`, `μ` the pair's coefficient, so the rest opens from the impulse
+    /// `m √(2 μ g r)` (DERIVED, fixture geometry). At 1 % over the block falls with its push and at
+    /// 1 % under it stays; at 1 % over with a press into the rest whose friction impulse takes 5 %
+    /// back, it stays. A law that let only a turn carry a part off its rests (a beam shoved along a
+    /// wall's top at its foot), or that read no friction impulse from a press, fails here.
+    #[test]
+    fn a_push_shoves_a_seated_part_off_its_rests_at_its_derived_impulse() {
+        let friction = (wood().friction * brick().friction).sqrt();
+        let mass = 20.0;
+        let mut structure = cubes(&[[0, 0, 0], [0, 1, 0]], 0, &[0], mass);
+        structure.chunks[1].material = wood();
+        let rest = joint_between(&structure, 0, 1);
+        structure.joints[rest].bond = Bond::Resting;
+        let joint = structure.joints[rest];
+        let radius = (joint.area / PI).sqrt();
+        let capacity = mass * (2.0 * friction * GRAVITY * radius).sqrt();
+        for (along, press, opens) in [(1.01, 0.0, true), (0.99, 0.0, false), (1.01, 0.05, false)] {
+            let mut state = WallState::new(&structure);
+            let push = Push {
+                chunk: 1,
+                at: joint.centroid,
+                impulse: Vec3::NEG_Z * (along * capacity)
+                    + Vec3::NEG_Y * (press * capacity / friction),
+            };
+            let failures = structural(
+                &structure,
+                &mut state,
+                &[push],
+                &mut SectionCache::default(),
+            );
+            let fell = fall(&structure, &mut state);
+            let case = format!("{along} x along, {press} back by the press");
+            if opens {
+                let loads: Vec<(Load, Vec<usize>)> = failures
+                    .iter()
+                    .map(|failure| (failure.load, failure.joints.clone()))
+                    .collect();
+                assert_eq!(loads, vec![(Load::Shove, vec![rest])], "{case}");
+                assert_eq!(fell, vec![vec![1]], "{case}");
+            } else {
+                assert!(failures.is_empty() && fell.is_empty(), "{case}");
             }
         }
     }
