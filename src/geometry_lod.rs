@@ -411,8 +411,24 @@ fn attach_rungs(
         {
             continue;
         }
+        // A primitive no chain names is art the certificate does not cover: it draws at source
+        // detail and takes no band.
         let Some(chain) = chains.of_mesh(mesh.0.id()) else {
             continue;
+        };
+        // Bound before the band goes on: a rung carries no material of its own and clones its
+        // source's, so a certified primitive with none would draw its source to the band's edge
+        // and nothing past it.
+        let material = match (standard, surface) {
+            (Some(standard), _) => RungMaterial::Standard(standard.0.clone()),
+            (None, Some(surface)) => RungMaterial::Surface(surface.0.clone()),
+            (None, None) => panic!(
+                "geometry_lod: `{}` matches chain `{}` and carries no material: the glTF loader \
+                 gives every primitive one, so a certified primitive without one is a scene \
+                 the view did not build",
+                name.map_or("<unnamed>", Name::as_str),
+                chain.key(),
+            ),
         };
         let mut bands = chain.bands(*view);
         primitive.insert((
@@ -422,21 +438,6 @@ fn attach_rungs(
             },
             bands.remove(0),
         ));
-        let material = match (standard, surface) {
-            (Some(standard), _) => RungMaterial::Standard(standard.0.clone()),
-            (None, Some(surface)) => RungMaterial::Surface(surface.0.clone()),
-            (None, None) => {
-                // A rung carries no material of its own; without one to clone it would render as
-                // the glTF default while its source does not.
-                warn_once!(
-                    "geometry_lod: `{}` matches chain `{}` and carries no material — its rungs \
-                     are not bound, so it renders at source detail",
-                    name.map_or("<unnamed>", Name::as_str),
-                    chain.key(),
-                );
-                continue;
-            }
-        };
         let tag = tag.cloned();
         let index = chain.index();
         let rungs: Vec<(Handle<Mesh>, VisibilityRange)> =
@@ -522,16 +523,21 @@ fn adapt_bands(
     view: Res<ViewProfile>,
     levels: Query<(Entity, &GeometryLodLevel)>,
 ) {
+    // No chain table yet: no certificate has resolved, so no entity carries a level either.
     let Some(chains) = chains else {
         return;
     };
     for (entity, level) in &levels {
-        let Some(chain) = chains.at(level.chain) else {
-            continue;
-        };
-        let Some(band) = chain.bands(*view).into_iter().nth(level.level) else {
-            continue;
-        };
+        // `attach_rungs` writes every level from the installed table: the chain's own index, and
+        // 0 for the source or 1..=rungs for a rung.
+        let chain = chains
+            .at(level.chain)
+            .expect("a level names a chain of the installed table (attach_rungs)");
+        let band = chain
+            .bands(*view)
+            .into_iter()
+            .nth(level.level)
+            .expect("a level is the source or one of its chain's rungs (attach_rungs)");
         commands.entity(entity).insert(band);
     }
 }
