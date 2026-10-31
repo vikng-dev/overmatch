@@ -17,7 +17,7 @@ use super::model::{
 use super::servo::{RemoteServos, ServoCommand, ServoIndex, ServoRest, ServoRole, ServoSpec};
 use super::view::{SimParts, bind_tank_view};
 use crate::Layer;
-use crate::bake::{TankBlueprint, TankGeometry};
+use crate::bake::{TankBlueprint, TankEnvelopes, TankGeometry};
 use crate::ballistics::{
     ArmorVolume, BallisticSurfaces, BallisticVolume, ComponentHealth, ComponentVolume,
     ExternalArmour, VolumeMaterial, WitnessSurface, WitnessVolume,
@@ -129,6 +129,7 @@ impl TankSimSource<'_> {
         Some(TankContent {
             geometry: &blueprint.geometry,
             spec: &blueprint.spec,
+            envelopes: blueprint.envelopes(),
         })
     }
 }
@@ -138,6 +139,7 @@ impl TankSimSource<'_> {
 pub(crate) struct TankContent<'a> {
     geometry: &'a TankGeometry,
     spec: &'a TankSpec,
+    envelopes: TankEnvelopes,
 }
 
 impl<'a> TankContent<'a> {
@@ -990,6 +992,19 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
     let muzzle = entity_at(nodes.primary_muzzle);
     commands.entity(hull).insert(Hull);
     commands.entity(gun).insert(Gun);
+    // Each body's envelope, from the kind's bake: the tank's on its root, the turret's on the
+    // turret, live once a cook-off launches it free.
+    let envelopes = content.envelopes;
+    if let Some(envelope) = envelopes.tank {
+        commands
+            .entity(root)
+            .insert(crate::ballistics::Envelope(envelope));
+    }
+    if let Some(envelope) = envelopes.turret {
+        commands
+            .entity(turret)
+            .insert(crate::ballistics::Envelope(envelope));
+    }
     let (tx, ty, tz) = spec.turret.inertia_extents;
     commands.entity(turret).insert((
         Turret,

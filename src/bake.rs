@@ -372,11 +372,6 @@ pub(crate) struct TankBlueprint {
     pub geometry: Arc<TankGeometry>,
     pub spec: Arc<TankSpec>,
     /// Computed from `geometry` and `spec` by [`TankBlueprint::new`], once per kind.
-    #[expect(
-        dead_code,
-        reason = "the atomic crossing (design §13.5, \"The envelope\", step 6b) reads it; \
-                  nothing does yet"
-    )]
     envelopes: TankEnvelopes,
 }
 
@@ -391,6 +386,11 @@ impl TankBlueprint {
             spec: Arc::new(spec),
             envelopes,
         }
+    }
+
+    /// The kind's envelopes, which every spawn of it carries ([`crate::ballistics::Envelope`]).
+    pub(crate) fn envelopes(&self) -> TankEnvelopes {
+        self.envelopes
     }
 }
 

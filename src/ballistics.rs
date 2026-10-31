@@ -1219,16 +1219,19 @@ pub(crate) struct Projectile {
     /// Deterministic from spawn inputs alone, so a replica reconstructs the identical frame from the
     /// same `FireShell`; nothing about it rides the wire.
     disc: walk::DiscFrame,
-    /// Where each sample's next sweep starts and what it is inside there ([`resolve::Interior`]) —
-    /// SIM state, carried from one step to the next so a tick boundary never re-lays the disc.
+    /// Where the axis sample stands as the last step ended ([`resolve::AxisStart`]): a position
+    /// held as anchor plus offset, so open flight never re-rounds it at world spacing. Every step
+    /// lays a fresh disc there and establishes its membership ([`resolve::certified`]); what a
+    /// sample is inside never crosses a tick, as a step ends outside every [`Envelope`].
     ///
-    /// `None` at spawn, in every spawn path: the first step lays the disc on [`disc`](Self::disc)
-    /// at the muzzle. Each step then leaves the starts it ended on. A sanctioned catch-up clears
-    /// them: it moved the round without sweeping its samples, so the next step lays a fresh disc
-    /// and establishes its membership ([`resolve::certified`]); nothing about the catch-up's own
-    /// path is certified. Never on the wire: a replica derives its own from the same spawn and
-    /// march.
-    continuation: Option<resolve::Interior>,
+    /// `None` at spawn, in every spawn path, and after a sanctioned catch-up: the step lays its disc
+    /// at the shell's translation. Never on the wire: a replica derives its own from the same spawn
+    /// and march.
+    axis: Option<resolve::AxisStart>,
+    /// Metres the round has already flown ahead of the clock: a crossing resolves whole in the step
+    /// that entered it, past that step's travel if need be, and the next step's travel is short by
+    /// the overrun, so no travel is created or lost. Zero at spawn and after a catch-up.
+    owed: f32,
 }
 
 impl Projectile {
@@ -1283,7 +1286,8 @@ impl Projectile {
                 u: Vec3::X,
                 v: Vec3::Y,
             },
-            continuation: None,
+            axis: None,
+            owed: 0.0,
         }
     }
 }
@@ -1340,6 +1344,15 @@ pub struct BallisticVolume {
     )]
     pub substance: String,
 }
+
+/// A body's envelope (design §13.5, "The envelope"): a box in the body's own frame that every
+/// primitive under the body stays inside whatever its servos do, from the load-time bake
+/// (`bake::TankEnvelopes`). A round's crossing of a body runs from entering its envelope until the
+/// round has left every envelope, and resolves whole in the step that entered it
+/// ([`ProjectileMarchWorld::crossing_reach`]). Read only on a body that is no entity's child: a
+/// turret carries its own from spawn, and it is live once a cook-off launches the turret free.
+#[derive(Component, Clone, Copy, Debug)]
+pub(crate) struct Envelope(pub(crate) bevy::math::bounding::Aabb3d);
 
 /// A witness volume (ADR-0040): a crew box. Not matter — it is no layer of the armour walk, never
 /// resists the shell, never shadows a spall direction and never throws one. It is wounded by what
@@ -2066,7 +2079,8 @@ fn on_fire_shell(
                     v: Vec3::Y,
                 },
             ),
-            continuation: None,
+            axis: None,
+            owed: 0.0,
         },
         DamageReport::default(),
         TerminalReport::default(),
@@ -2200,6 +2214,18 @@ struct ProjectileMarchWorld<'w, 's> {
     // armour classification.
     witnesses: Query<'w, 's, &'static WitnessVolume>,
     witness_surfaces: Query<'w, 's, (), With<WitnessSurface>>,
+    // Every free body's envelope at its pose: where a crossing begins and ends.
+    envelopes: Query<
+        'w,
+        's,
+        (
+            Entity,
+            &'static Envelope,
+            &'static Position,
+            &'static Rotation,
+        ),
+        Without<ChildOf>,
+    >,
 }
 
 impl ProjectileMarchWorld<'_, '_> {
@@ -2221,6 +2247,62 @@ impl ProjectileMarchWorld<'_, '_> {
         } else {
             self.armour(collider).map(|(node, _)| node)
         }
+    }
+
+    /// How far along `dir` from `origin` a step with `travel` metres left must carry a disc of
+    /// `radius`: `travel`, or, where the point `travel` ahead lies inside an envelope, on until the
+    /// line has left every envelope it is inside, overlapping ones chained into one crossing. The
+    /// shooter's own envelope is passed through, as its volumes are ([`not_own_volume`]).
+    ///
+    /// Each envelope is grown by the disc's `radius`, so a sample outside the grown box is outside
+    /// the body's every primitive; by `extent · 2^-20` for the sim's f32 placement (the bake's
+    /// contract, `bake::envelope`); and by [`MARCH_EPS`] for this test's own world-to-body
+    /// arithmetic (DERIVED: a world f32 past 2048 m is spaced 2.44e-4 m). Growing it only moves
+    /// where a crossing ends further out.
+    fn crossing_reach(
+        &self,
+        origin: Vec3,
+        dir: Dir3,
+        travel: f32,
+        radius: f32,
+        shooter: Option<Entity>,
+    ) -> f32 {
+        let spans: Vec<(f32, f32)> = self
+            .envelopes
+            .iter()
+            .filter(|(body, ..)| Some(*body) != shooter)
+            .filter_map(|(_, envelope, position, rotation)| {
+                let extent = envelope.0.min.abs().max(envelope.0.max.abs()).max_element();
+                let pad = Vec3A::splat(radius + extent * 2.0_f32.powi(-20) + MARCH_EPS);
+                let (lo, hi) = (envelope.0.min - pad, envelope.0.max + pad);
+                let inverse = rotation.0.inverse();
+                let from = Vec3A::from(inverse * (origin - position.0));
+                let along = Vec3A::from(inverse * Vec3::from(dir));
+                let (mut enter, mut leave) = (f32::NEG_INFINITY, f32::INFINITY);
+                for i in 0..3 {
+                    if along[i] == 0.0 {
+                        if from[i] < lo[i] || from[i] > hi[i] {
+                            return None;
+                        }
+                    } else {
+                        let (a, b) = ((lo[i] - from[i]) / along[i], (hi[i] - from[i]) / along[i]);
+                        enter = enter.max(a.min(b));
+                        leave = leave.min(a.max(b));
+                    }
+                }
+                (enter <= leave && leave > 0.0).then_some((enter, leave))
+            })
+            .collect();
+        let mut reach = travel.max(0.0);
+        while let Some(leave) = spans
+            .iter()
+            .filter(|(enter, leave)| *enter <= reach && reach < *leave)
+            .map(|&(_, leave)| leave)
+            .reduce(f32::max)
+        {
+            reach = leave;
+        }
+        reach
     }
 
     /// One step's budget of `travel` metres under this world's crossing ceiling.
@@ -2974,9 +3056,10 @@ fn resume_from_catch_up(
             .disc
             .transport(shell.projectile.velocity, Vec3::from(direction));
     }
-    // The catch-up moved the round without sweeping its samples: the next step lays a fresh disc
-    // and establishes its membership.
-    shell.projectile.continuation = None;
+    // The catch-up moved the round to the authority's state: the next step lays its disc there and
+    // owes no travel.
+    shell.projectile.axis = None;
+    shell.projectile.owed = 0.0;
     shell.projectile.velocity = caught_up.velocity;
     shell.readout.speed = caught_up.velocity.length();
     shell.readout.capability = capability(shell.projectile.body(), caught_up.velocity.length());
@@ -3073,7 +3156,7 @@ fn march_shell_step(
     };
     let speed = stepped.length();
     shell.projectile.fuze.at_speed(speed);
-    let mut budget = world.step_budget(speed * dt);
+    let mut budget = world.step_budget(speed * dt - shell.projectile.owed);
     let mut stopped = false;
     // Set when an observer shell freezes at armor contact to await its bounce keyframe (see the
     // `!deposit` branch): the shell keeps its entity and velocity, and the `Held` handler above
@@ -3082,7 +3165,8 @@ fn march_shell_step(
     // Whether the march has bent the shell off its original free-flight segment. Until it does,
     // an open-air fly-out moves the axis by exactly `stepped × dt` (the catch-up kernel's step);
     // after a bend the leftover budget flies along the new direction instead.
-    let mut bent = false;
+    // A step owing travel to the last one's crossing flies only its remainder, along `dir`.
+    let mut bent = shell.projectile.owed > 0.0;
     // AUTHORITY: whether this shell's ONE terminal (`ShellTerminal` — embed/perforation) has been
     // emitted. A perforated shell can keep marching through the interior across fixed ticks, so
     // this spawn-time latch supplies both the same-tick and cross-tick halves of the invariant
@@ -3110,11 +3194,12 @@ fn march_shell_step(
         deposit,
         laws: walk::WalkLaws::default(),
     };
-    // The crossing state machine shared with the §13.6 gate, resumed from the starts the last step
-    // left (`resolve::Interior`), or from a fresh disc whose membership it establishes. A
-    // perforation that leaves a sample inside material is resolved on within this step, past the
-    // travel budget if need be (see [`next_surface`]), within the step's limits
-    // (`resolve::Budget`); what crosses the tick is the starts, never an owed exit.
+    // The crossing state machine shared with the §13.6 gate, from a fresh disc at the axis start
+    // the last step left, its membership established. A crossing resolves whole within this step:
+    // it runs past the travel budget until the round has left every envelope
+    // ([`ProjectileMarchWorld::crossing_reach`]) and any material a sample is held inside (see
+    // [`next_surface`]), within the step's limits (`resolve::Budget`); what crosses the tick is
+    // the axis position and the travel owed, never a sample's membership.
     let mut flight = match launch(
         shell, &context, &not_own, previous, dir, speed, radius, tick,
     ) {
@@ -3139,20 +3224,19 @@ fn march_shell_step(
             stopped = !holding;
             break;
         }
-        if !budget.continues(&flight) {
-            break;
-        }
         let origin = flight.sweep_origin();
         let dir = flight.direction;
-        let ahead = next_surface(world, &flight, radius, budget.remaining(), &not_own);
-        // Open air flies out the rest of the step. On the original (unbent) segment this is
-        // exactly the catch-up kernel's displacement; a `continue` past this point only ever
-        // follows a bend, so `bent` is the exact discriminant.
-        let displacement = if bent {
-            dir * budget.remaining()
-        } else {
-            stepped * dt
-        };
+        let reach = world.crossing_reach(origin, dir, budget.remaining(), radius, shooter);
+        if reach <= MARCH_EPS && !flight.holds_material() {
+            break;
+        }
+        let ahead = next_surface(world, &flight, radius, reach, &not_own);
+        // Open air flies out the rest of the step, then on through any envelope it ends inside. On
+        // the original (unbent) segment the first part is exactly the catch-up kernel's
+        // displacement; a `continue` past this point only ever follows a bend, so `bent` is the
+        // exact discriminant.
+        let within = budget.remaining().max(0.0);
+        let displacement = if bent { dir * within } else { stepped * dt } + dir * (reach - within);
         // An armed round whose delay runs out short of what lies ahead bursts in the open.
         let open = ahead.open_metres(displacement.length());
         if let Some(at) = open.and_then(|open| shell.projectile.fuze.due_within(open)) {
@@ -3179,6 +3263,7 @@ fn march_shell_step(
                     damage_dealt += wound_legs(shell, &context, &not_own, &[leg], speed, health);
                 }
                 flight.fly(displacement);
+                budget.fly(reach);
                 break;
             }
             Ahead::Terrain { distance, normal } => {
@@ -3337,15 +3422,21 @@ fn march_shell_step(
     if stopped {
         damage_dealt += burst_here(shell, &context, &flight, 0.0, health).1;
     }
-    // Carry the (possibly re-rolled) basis and the per-sample starts back onto the shell, so the
-    // next tick transports from where this one left off and resumes every sample where its ray
-    // stopped. A held round is frozen at contact, not at a start; its release lays a fresh disc, as
-    // does the next step of a flight whose bounce ended this one before it settled.
+    // Carry the (possibly re-rolled) basis, the axis start and the travel owed back onto the shell,
+    // so the next tick transports from where this one left off. No sample's membership is carried:
+    // the step ended outside every envelope, and the next lays a fresh disc. A held round is frozen
+    // at contact, not at a start; its release lays its disc at the translation, as does the next
+    // step of a flight whose bounce ended this one before it settled.
     shell.projectile.disc = flight.frame;
-    shell.projectile.continuation = if holding {
+    shell.projectile.axis = if holding {
         None
     } else {
-        flight.continuation.take()
+        flight.continuation.as_ref().map(resolve::Interior::axis)
+    };
+    shell.projectile.owed = if stopped || holding {
+        0.0
+    } else {
+        (-budget.remaining()).max(0.0)
     };
 
     Some(MarchStep {
@@ -3384,7 +3475,7 @@ fn launch(
         speed,
         shell.projectile.disc,
         radius,
-        shell.projectile.continuation.take(),
+        shell.projectile.axis.take(),
     );
     launched.map_err(|error| {
         let position = shell.transform.translation;
@@ -5008,7 +5099,8 @@ mod march_tests {
                 fuze: burst::Fuze::Inert,
                 // Anchored on THIS round's fire direction, exactly as `on_fire_shell` would.
                 disc: test_disc(velocity.normalize()),
-                continuation: None,
+                axis: None,
+                owed: 0.0,
             },
             ShellReadout {
                 speed,
@@ -7662,6 +7754,128 @@ mod march_tests {
         })
     }
 
+    /// An 88 falling straight down at 800 m/s from `height` through two 20 mm steel plates at
+    /// y = 1 and y = 0, after one step of the test world. `envelopes` are `(centre, half extents)`
+    /// boxes, each on its own static body. Returns the impacts, the readout speed, the shell's
+    /// translation, its owed travel, and the step's travel budget. FIXTURE DATA. Straight down, so
+    /// gravity stays along the line and every placement crosses the same faces at the same speed.
+    fn fall_through_two_plates(
+        height: f32,
+        envelopes: &[(Vec3, Vec3)],
+    ) -> (Vec<Captured>, f32, Vec3, f32, f32) {
+        const DT: f32 = 0.016;
+        let plate = Vec3::new(1.0, 0.02, 1.0);
+        let mut app =
+            world_with_trimesh_plates(&[(plate, Vec3::new(0.0, 1.0, 0.0)), (plate, Vec3::ZERO)]);
+        for &(centre, half) in envelopes {
+            app.world_mut().spawn((
+                Transform::from_translation(centre),
+                RigidBody::Static,
+                Envelope(bevy::math::bounding::Aabb3d::new(Vec3::ZERO, half)),
+            ));
+        }
+        for _ in 0..2 {
+            app.update();
+        }
+        let velocity = Vec3::NEG_Y * 800.0;
+        let stepped = freeflight_step(
+            velocity,
+            fixture_drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
+            DT,
+        );
+        let shell = spawn_round(&mut app, FIXTURE_88, Vec3::new(0.0, height, 0.0), velocity);
+        app.update();
+        let impacts = app.world().resource::<ImpactLog>().0.clone();
+        let speed = app.world().get::<ShellReadout>(shell).unwrap().speed;
+        let at = app.world().get::<Transform>(shell).unwrap().translation;
+        let owed = app.world().get::<Projectile>(shell).unwrap().owed;
+        (impacts, speed, at, owed, stepped.length() * DT)
+    }
+
+    /// A CROSSING THAT STRADDLES THE TICK RESOLVES AS ONE INSIDE IT, AT ONE INSTANT.
+    ///
+    /// One envelope holds both plates. Placed so the step's travel ends between them, the step
+    /// still resolves the second plate, at the speed the first left, exactly as a placement whose
+    /// travel holds both; the step ends outside the envelope, owing the overrun. A march that let
+    /// the travel end the crossing resolves the second plate a tick later, after a free-flight step
+    /// has changed the speed, against wherever the plate has moved by then.
+    #[test]
+    fn a_crossing_straddling_the_tick_resolves_as_one_inside_it() {
+        let envelope = [(Vec3::new(0.0, 0.5, 0.0), Vec3::new(0.6, 0.6, 0.6))];
+        let (inside, inside_speed, _, inside_owed, budget) =
+            fall_through_two_plates(3.0, &envelope);
+        let (straddle, straddle_speed, at, owed, _) =
+            fall_through_two_plates(0.5 + budget, &envelope);
+        let shown = |impacts: &[Captured]| {
+            impacts
+                .iter()
+                .map(|i| (i.position, i.verdict))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(inside_owed, 0.0, "a crossing inside the travel owes none");
+        assert_eq!(
+            straddle.len(),
+            inside.len(),
+            "the straddling step resolved {:?}, the inside one {:?}",
+            shown(&straddle),
+            shown(&inside),
+        );
+        assert!(!failed_closed(&straddle), "{:?}", shown(&straddle));
+        for (a, b) in straddle.iter().zip(&inside) {
+            assert_eq!(a.verdict, b.verdict);
+            assert!(
+                (a.position - b.position).abs().max_element() < 1.0e-4,
+                "{:?} against {:?}",
+                shown(&straddle),
+                shown(&inside),
+            );
+        }
+        assert!(
+            (straddle_speed - inside_speed).abs() < 1.0e-3,
+            "the second plate was met at another speed: {straddle_speed} against {inside_speed}",
+        );
+        let floor = 0.5 - 0.6 - resolve::disc_radius(FIXTURE_88.caliber);
+        assert!(
+            at.y < floor,
+            "the step ends outside the envelope (below y = {floor}), not at {at}",
+        );
+        assert!(
+            (owed - (0.5 - at.y)).abs() < 1.0e-3,
+            "the step owes exactly what it flew past its travel: {owed}, flown to {at}",
+        );
+    }
+
+    /// OVERLAPPING ENVELOPES ARE ONE CROSSING. Each plate in its own envelope, the two
+    /// overlapping, and the step's travel ending inside the first alone: the step runs on through
+    /// the second, as through one envelope. Two disjoint envelopes with the travel ending inside
+    /// the first: the step stops at the first's far side, owing its overrun, and the second plate
+    /// is the next step's crossing, at its own instant.
+    #[test]
+    fn overlapping_envelopes_are_one_crossing_disjoint_ones_two() {
+        let (_, _, _, _, budget) = fall_through_two_plates(3.0, &[]);
+        let height = 0.9 + budget;
+        let overlapping = [
+            (Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.6, 0.3, 0.6)),
+            (Vec3::new(0.0, 0.25, 0.0), Vec3::new(0.6, 0.5, 0.6)),
+        ];
+        let (impacts, _, at, _, _) = fall_through_two_plates(height, &overlapping);
+        assert!(!failed_closed(&impacts));
+        assert!(
+            at.y < -0.25,
+            "the overlapping envelopes carried the step through both plates: {at}",
+        );
+        let disjoint = [
+            (Vec3::new(0.0, 1.0, 0.0), Vec3::new(0.6, 0.2, 0.6)),
+            (Vec3::new(0.0, 0.0, 0.0), Vec3::new(0.6, 0.2, 0.6)),
+        ];
+        let (impacts, _, at, owed, _) = fall_through_two_plates(height, &disjoint);
+        assert!(!failed_closed(&impacts));
+        assert!(
+            (0.2..0.8).contains(&at.y) && owed > 0.0,
+            "the step ends between the disjoint envelopes, owing its overrun: {at}, {owed}",
+        );
+    }
+
     /// A CONTINUATION SURVIVES THE TICK BOUNDARY.
     ///
     /// The resume fixture above, with the round's travel for the tick ending half a nudge past the
@@ -7755,10 +7969,9 @@ mod march_tests {
             .world()
             .get::<Projectile>(shell)
             .unwrap()
-            .continuation
-            .as_ref()
-            .expect("an open-air flight carries its starts across the tick")
-            .world_origin();
+            .axis
+            .map(|axis| axis.anchor + axis.origin)
+            .expect("an open-air flight carries its axis start across the tick");
         assert!(
             (1.5..1.7).contains(&(pose.x - origin.x)),
             "the round flew its open-air steps: {pose}",

@@ -1553,7 +1553,23 @@ across a tick boundary onto moving armour (the `unexpected_exit` above).
 - **The recoil stroke is swept.** Each recoiling barrel's sheet states its recoil stop
   (`RecoilSpec::max_length`), the buffer's limit, which the spring never passes however fast the
   gun fires; the barrel's subtree enters the envelope at battery and at the stop.
-- **Pending: step 6b**, the atomic resolution itself. Nothing reads the envelope yet.
+- **The crossing (step 6b).** Each spawn carries its kind's envelopes (`ballistics::Envelope`: the
+  tank's on its root, the turret's on the turret, read once a cook-off launches it free). A step
+  whose travel ends inside an envelope runs on, past its travel, until the round's line has left
+  every envelope it is inside; overlapping envelopes chain into one crossing, and an envelope the
+  round reaches only after leaving another, beyond the step's travel, is the next step's crossing.
+  The test grows each box by the disc's radius, by `extent · 2^-20` and by `MARCH_EPS` for its own
+  world-to-body arithmetic (`ProjectileMarchWorld::crossing_reach`). The shooter's own envelope is
+  passed through, as its volumes are.
+- **No armour state crosses a tick.** The shell carries its axis position (anchor plus offset, so
+  open flight never re-rounds it at world spacing) and the travel the last crossing flew past its
+  step (`Projectile::owed`), which the next step's travel is short by: no travel is created or
+  lost. Every step lays a fresh disc and establishes its membership (`resolve::certified`). A body
+  with no envelope (a debris piece) still drains a sample held inside its material within the step
+  (`next_surface`), and its next step's membership is established against its pose then.
+- **The replica runs the same march**, so the presented shell march extends through envelopes and
+  owes its overrun exactly as the authority's does; its armour contacts still take the authority's
+  outcomes.
 
 Provisional: the computation may move into a refined asset-bake pipeline with dev tooling, which is
 why it reads nothing but the bake's data.

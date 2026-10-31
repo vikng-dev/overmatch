@@ -77,7 +77,10 @@ fn recording_world(client: bool) -> App {
 }
 
 /// A fixture tank rooted at `at`, turned `yaw` about `+Y` and moving at `velocity`: one kinematic
-/// body whose volumes are its child colliders, as a tank's are. Returns the root and each volume.
+/// body whose volumes are its child colliders, as a tank's are, with a tank's mass (FIXTURE DATA:
+/// 50 t, inertia 1e5 kg m² about each axis), so a hit's impulse leaves it in place. With the mass
+/// its colliders' default density gives, the impulse throws it downrange faster than the round,
+/// over the round's next start, and the round crosses it again. Returns the root and each volume.
 fn tank(
     app: &mut App,
     at: Vec3,
@@ -91,6 +94,10 @@ fn tank(
             Transform::from_translation(at).with_rotation(Quat::from_rotation_y(yaw)),
             RigidBody::Kinematic,
             LinearVelocity(velocity),
+            Mass(50_000.0),
+            AngularInertia::new(Vec3::splat(1.0e5)),
+            NoAutoMass,
+            NoAutoAngularInertia,
         ))
         .id();
     app.world_mut().entity_mut(root).insert(Rig {
@@ -439,25 +446,19 @@ fn a_shell_despawned_after_the_shot_keeps_its_record() {
 /// is clear of the tank: it holds the burst wherever the delay ends, while its nose piece flies on.
 /// The fixture 88 at 800 m/s arms in the 50 mm plate and, on a 50 ms delay (fixture data), flies
 /// clear of the tank for 3 ticks and bursts about 26 m past its last box (DERIVED from the fixture
-/// data); the tank is given a tank's mass so the hit's impulse leaves it in place. A mutant that
+/// data); the fixture tank's mass leaves it in place under the hit's impulse. A mutant that
 /// finishes the record once the round is clear, or drops the burst's field from the shell's logs,
 /// fails here.
 #[test]
 fn an_armed_round_keeps_its_record_open_until_it_bursts() {
     let mut app = recording_world(false);
-    let (root, _) = tank(
+    tank(
         &mut app,
         Vec3::ZERO,
         0.0,
         Vec3::ZERO,
         &plated(DEEP, Kind::Crew(DEEP)),
     );
-    app.world_mut().entity_mut(root).insert((
-        Mass(50_000.0),
-        AngularInertia::new(Vec3::splat(1.0e5)),
-        NoAutoMass,
-        NoAutoAngularInertia,
-    ));
     settle(&mut app);
     let inputs = burst::BurstInputs {
         delay: 0.05,

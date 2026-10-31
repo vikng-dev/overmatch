@@ -1,7 +1,7 @@
 //! A tank kind's envelopes: invisible boxes, never colliders, that every part of a body stays inside
 //! whatever its servos do. Subject: the game's damage model, which resolves a round's crossing of a
 //! tank against them (design `armor-penetration-and-damage.md` §13.5, "The envelope", provisional;
-//! nothing reads them yet).
+//! each spawn carries them as `ballistics::Envelope`).
 //!
 //! Window contract (§13.5): a `Limited` servo travel is finite with `min <= 0 <= max`, which certify refuses otherwise (`ServoSpec::travel_window_fault`), and `drive_servos` never leaves.
 //!

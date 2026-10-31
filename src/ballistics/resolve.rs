@@ -200,7 +200,8 @@ pub(crate) fn disc_radius(caliber: f32) -> f32 {
 /// entry face that close to the plane is then owned by the seed AND re-collected ahead of the origin,
 /// or by nobody. The flight converts to world only for its cast and for presentation.
 ///
-/// Persisted on the shell across ticks ([`super::Projectile`]), so a tick boundary is not a start.
+/// Lives within one step: a step ends outside every envelope ([`super::Envelope`]), and the next
+/// lays a fresh disc there, its membership established, from the axis start alone ([`AxisStart`]).
 #[derive(Clone, Debug)]
 pub(crate) struct Interior {
     /// WORLD anchor of the corridor the seeds were read on.
@@ -243,16 +244,45 @@ impl Interior {
         self.anchor + self.origin
     }
 
-    /// The same starts, re-anchored at the axis start so a new step's corridors sit within one
-    /// step's reach of their anchor (the scale [`collect`]'s sitting reach is bounded for). The
-    /// residual `origin` keeps what world rounding of the new anchor lost, so the starts move by
-    /// corridor-scale rounding only.
+    /// Re-anchored at the axis start so a new layout's corridors sit within one step's reach of
+    /// their anchor (the scale [`collect`]'s sitting reach is bounded for). The residual `origin`
+    /// keeps what world rounding of the new anchor lost, so the start moves by corridor-scale
+    /// rounding only.
     pub(crate) fn rebased(self) -> Self {
         let anchor = self.world_origin();
         Self {
             origin: self.origin - (anchor - self.anchor),
             anchor,
             seeds: self.seeds,
+        }
+    }
+
+    /// The axis sample's start, without what any sample is inside.
+    pub(crate) fn axis(&self) -> AxisStart {
+        AxisStart {
+            anchor: self.anchor,
+            origin: self.origin,
+        }
+    }
+}
+
+/// Where the axis sample stands as a step ends: a WORLD anchor and the start relative to it
+/// ([`Interior::anchor`], [`Interior::origin`]), so the next step's layout keeps what world
+/// rounding of a re-taken anchor loses. A position only: what a sample is inside never crosses a
+/// tick ([`super::Envelope`]).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct AxisStart {
+    pub anchor: Vec3,
+    pub origin: Vec3,
+}
+
+impl AxisStart {
+    /// The same start re-anchored at itself, as [`Interior::rebased`].
+    fn rebased(self) -> Self {
+        let anchor = self.anchor + self.origin;
+        Self {
+            origin: self.origin - (anchor - self.anchor),
+            anchor,
         }
     }
 }
@@ -331,17 +361,45 @@ pub(crate) fn certified(
     frame: DiscFrame,
     radius: f32,
 ) -> Result<Interior, WalkError> {
-    let offsets = layout(&frame, radius);
+    certified_at(
+        context,
+        not_own,
+        AxisStart {
+            anchor: at,
+            origin: Vec3::ZERO,
+        },
+        axis,
+        frame,
+        radius,
+    )
+}
+
+/// [`certified`] at an axis start held as a WORLD anchor and a start relative to it: every probe
+/// line is formed from `start.anchor` and `start.origin + offset`, the values the returned starts
+/// hold, so the low bits the anchor's world rounding would drop are kept.
+fn certified_at(
+    context: &ResolveContext<'_, '_, '_>,
+    not_own: &dyn Fn(Entity) -> bool,
+    start: AxisStart,
+    axis: Dir3,
+    frame: DiscFrame,
+    radius: f32,
+) -> Result<Interior, WalkError> {
+    let AxisStart { anchor: at, origin } = start;
+    let offsets: Vec<Vec3> = layout(&frame, radius)
+        .into_iter()
+        .map(|offset| origin + offset)
+        .collect();
     let axis = Vec3::from(axis);
     let reach = offsets
         .iter()
-        .map(|offset| offset.length())
+        .map(|offset| (*offset - origin).length())
         .fold(0.0, f32::max);
 
     // The candidates whose bounds contain a start, and the union of those bounds, relative to `at`.
     let mut near = Vec::new();
     let (mut lo, mut hi) = (Vec3::INFINITY, Vec3::NEG_INFINITY);
-    for (node, primitive) in candidates(context, not_own, at, axis, 0.0, reach) {
+    for (node, primitive) in candidates(context, not_own, at + origin, axis, 0.0, reach) {
         let Ok((position, rotation, collider, _)) = context.colliders.get(primitive) else {
             return Err(WalkError::CollectorFailed {
                 volume: node,
@@ -369,7 +427,18 @@ pub(crate) fn certified(
         near.push((node, primitive));
     }
     if near.is_empty() {
-        return Ok(Interior::laid(at, offsets));
+        return Ok(Interior {
+            anchor: at,
+            origin,
+            seeds: Interior::laid(at, offsets)
+                .seeds
+                .into_iter()
+                .map(|seed| SampleSeed {
+                    offset: seed.offset - origin,
+                    ..seed
+                })
+                .collect(),
+        });
     }
     if near.len() > MAX_PROBE_CANDIDATES {
         return Err(WalkError::UncertifiedStart {
@@ -471,7 +540,7 @@ pub(crate) fn certified(
             )?;
             Ok(SampleSeed {
                 sample,
-                offset: corridor.offset,
+                offset: corridor.offset - origin,
                 t: handoff,
                 inside: walked.inside_at(handoff, &context.laws),
             })
@@ -479,7 +548,7 @@ pub(crate) fn certified(
         .collect::<Result<Vec<_>, WalkError>>()?;
     Ok(Interior {
         anchor: at,
-        origin: Vec3::ZERO,
+        origin,
         seeds,
     })
 }
@@ -927,26 +996,16 @@ pub(crate) struct Flight {
 }
 
 impl Flight {
-    /// A step's flight from the shell's persisted starts, or — with none — from a fresh disc laid
-    /// on `frame` at `position`, square to `swept`, its membership established ([`certified`]).
+    /// A step's flight from a fresh disc laid on `frame` at the axis start `axis` (or, with none,
+    /// at `position`), square to `swept`, its membership established ([`certified`]). Nothing a
+    /// sample was inside is carried in: a step ends outside every envelope ([`super::Envelope`]),
+    /// so a crossing never straddles the tick.
     ///
-    /// The last sweep ran along `swept`; the flight now travels along `direction`. The starts are
-    /// kept exactly where the last sweep left them and each sample's ray simply bends: moving a start
-    /// to square the disc to the new direction would put it on ground no ray has swept. No bend is
-    /// too large for this, a reversal included. `frame` is transported through the bend by minimal
-    /// rotation for the next fresh layout.
-    ///
-    /// The cost is the footprint, and this representation of it is provisional, for the bounded
-    /// bends of the rounds fired today. An untouched laid disc stays square to the direction it was
-    /// laid on (the muzzle's, a bounce's), so its sampled cross-section projects by `|cos θ|` of
-    /// the bend since, in the plane of the bend (DERIVED: 0.12 % narrower for a 2.8° drop, 13.4 %
-    /// at 30°, 50 % at 60°, a line at 90°). A perforation's starts are no square disc at all —
-    /// staggered along the entrance where each sample handed off, then bent — and that footprint can
-    /// be WIDER than the calibre, and stays so into later ticks (DERIVED: full coverage at 60°
-    /// incidence into the reference substance bends 12° under the default normalization, a width
-    /// factor of `cos 12° + tan 60° · sin 12° ≈ 1.338`; no substance is declared above the
-    /// reference).
-    /// Slow rounds and steep lobs need the starts transported along per-sample paths instead.
+    /// The last sweep ran along `swept`; the flight now travels along `direction`. The disc stays
+    /// square to `swept` and each sample's ray simply bends: no bend is too large for this, a
+    /// reversal included. `frame` is transported through the bend by minimal rotation for the next
+    /// fresh layout. The disc's sampled cross-section projects by `|cos θ|` of the bend, in the
+    /// plane of the bend (DERIVED: 0.12 % narrower for a 2.8° drop).
     #[expect(
         clippy::too_many_arguments,
         reason = "the flight's whole state plus the world its fresh starts are certified against"
@@ -960,12 +1019,16 @@ impl Flight {
         speed: f32,
         frame: DiscFrame,
         radius: f32,
-        starts: Option<Interior>,
+        axis: Option<AxisStart>,
     ) -> Result<Self, WalkError> {
-        let starts = match starts {
-            Some(starts) => starts.rebased(),
-            None => certified(context, not_own, position, swept, frame, radius)?,
-        };
+        let start = axis.map_or(
+            AxisStart {
+                anchor: position,
+                origin: Vec3::ZERO,
+            },
+            AxisStart::rebased,
+        );
+        let starts = certified_at(context, not_own, start, swept, frame, radius)?;
         Ok(Self {
             position: starts.world_origin(),
             direction,
