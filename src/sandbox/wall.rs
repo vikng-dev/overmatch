@@ -671,7 +671,7 @@ fn setup_wall(
             MeshMaterial3d(witness[0].clone()),
             Transform::from_translation(tile.center()),
             RigidBody::Static,
-            envelope_of(&collider),
+            crate::ballistics::Envelope::of(&collider),
             collider,
             CollisionLayers::new([Layer::Armor], LayerMask::ALL),
             BallisticVolume {
@@ -740,12 +740,6 @@ fn chunk_collider(block: &Block, gap: f32) -> Collider {
         .expect("a bake chunk has volume")
 }
 
-/// The envelope of a static body whose one collider is `collider`, at the body's origin.
-fn envelope_of(collider: &Collider) -> crate::ballistics::Envelope {
-    crate::ballistics::Envelope::holding([(collider, Vec3::ZERO, Quat::IDENTITY)])
-        .expect("one part")
-}
-
 /// Spawn a new wall: one static chunk per block, full pools, nothing cracked.
 fn spawn_wall(commands: &mut Commands, meshes: &mut Assets<Mesh>, assets: &WallAssets) -> Wall {
     let cut = layout().cut.clone();
@@ -767,7 +761,7 @@ fn spawn_wall(commands: &mut Commands, meshes: &mut Assets<Mesh>, assets: &WallA
                     MeshMaterial3d(assets.heat[0].clone()),
                     Transform::from_translation(block.center()),
                     RigidBody::Static,
-                    envelope_of(&collider),
+                    crate::ballistics::Envelope::of(&collider),
                     collider,
                     CollisionLayers::new([Layer::Armor], LayerMask::ALL),
                     BallisticVolume {

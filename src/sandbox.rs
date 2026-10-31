@@ -496,9 +496,7 @@ fn spawn_targets(
             ..default()
         });
         let collider = Collider::cuboid(3.0, 3.0, thickness);
-        let envelope =
-            crate::ballistics::Envelope::holding([(&collider, Vec3::ZERO, Quat::IDENTITY)])
-                .expect("one part");
+        let envelope = crate::ballistics::Envelope::of(&collider);
         commands.spawn((
             Mesh3d(meshes.add(Cuboid::new(3.0, 3.0, thickness))),
             MeshMaterial3d(material),

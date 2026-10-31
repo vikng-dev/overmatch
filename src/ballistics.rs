@@ -1377,11 +1377,23 @@ impl Envelope {
             .reduce(|(lo, hi), (min, max)| (lo.min(min), hi.max(max)))
             .map(|(min, max)| Self(bevy::math::bounding::Aabb3d::from_min_max(min, max)))
     }
+
+    /// The envelope of a body whose one collider is `collider`, at the body's origin.
+    pub(crate) fn of(collider: &Collider) -> Self {
+        use avian3d::prelude::SimpleCollider;
+        let aabb = collider.aabb(Vec3::ZERO, Quat::IDENTITY);
+        Self(bevy::math::bounding::Aabb3d::from_min_max(
+            aabb.min, aabb.max,
+        ))
+    }
 }
 
 /// Assert that `root`'s [`Envelope`] holds every collider of the body: the root's own, at its
-/// origin, and each child's at the child's place on it. Returns how many it checked; panics on
-/// the first collider outside, or on a body with no envelope.
+/// origin, and every descendant's at its place on the root, its transforms composed down the
+/// hierarchy. Returns how many it checked; panics on the first collider outside, on a body with no
+/// envelope, and on a scaled descendant, whose collider's bounds this does not scale. The slack is
+/// the march's own pad for the sim's f32 placement, `extent · 2^-20`
+/// (`ProjectileMarchWorld::crossing_reach`).
 #[cfg(test)]
 pub(crate) fn assert_envelope_holds(world: &World, root: Entity) -> usize {
     use avian3d::prelude::SimpleCollider;
@@ -1389,23 +1401,28 @@ pub(crate) fn assert_envelope_holds(world: &World, root: Entity) -> usize {
         .get::<Envelope>(root)
         .unwrap_or_else(|| panic!("body {root} carries no envelope"))
         .0;
-    let own = world
-        .get::<Collider>(root)
-        .map(|collider| (root, collider, Transform::IDENTITY));
-    let children = world.get::<Children>(root).into_iter().flatten();
-    let parts: Vec<_> = own
-        .into_iter()
-        .chain(children.filter_map(|&child| {
-            Some((
-                child,
-                world.get::<Collider>(child)?,
-                *world.get::<Transform>(child)?,
-            ))
-        }))
-        .collect();
+    let mut parts = Vec::new();
+    let mut open = vec![(root, Transform::IDENTITY)];
+    while let Some((node, place)) = open.pop() {
+        if let Some(collider) = world.get::<Collider>(node) {
+            parts.push((node, collider, place));
+        }
+        for &child in world.get::<Children>(node).into_iter().flatten() {
+            let local = *world
+                .get::<Transform>(child)
+                .unwrap_or_else(|| panic!("part {child} of body {root} has no transform"));
+            assert_eq!(
+                local.scale,
+                Vec3::ONE,
+                "part {child} of body {root} is scaled"
+            );
+            open.push((child, place * local));
+        }
+    }
+    let extent = Vec3::from(envelope.min.abs().max(envelope.max.abs())).max_element();
     for (part, collider, local) in &parts {
         let aabb = collider.aabb(local.translation, local.rotation);
-        let slack = 1.0e-5 * Vec3::from(envelope.min.abs().max(envelope.max.abs())).max_element();
+        let slack = extent * 2.0_f32.powi(-20);
         assert!(
             Vec3::from(envelope.min).cmple(aabb.min + slack).all()
                 && Vec3::from(envelope.max).cmpge(aabb.max - slack).all(),
@@ -3411,6 +3428,7 @@ fn march_shell_step(
             dt,
         };
         let reach = world.crossing_reach(origin, dir, budget.remaining(), spread, shooter, next);
+        budget.reach(reach);
         if reach <= MARCH_EPS && !flight.holds_material() {
             break;
         }
@@ -4173,8 +4191,10 @@ impl Ahead {
 /// budget is: its exit lies ahead with its entry behind, and only the continuation declares that. So
 /// such a flight looks as far as a corridor may reach ([`resolve::MAX_CORRIDOR`]) and its crossing
 /// resolves now, past the budget if need be: a step never yields owing an exit, so what crosses a
-/// tick is the per-sample starts alone. How far past is bounded: [`resolve::Budget`] stops a drain
-/// at [`resolve::MAX_OVERRUN`].
+/// tick is the axis start and the travel owed ([`Projectile`]), never a sample's membership. How
+/// far past is bounded: [`resolve::Budget`] stops a drain at [`resolve::MAX_OVERRUN`] past where
+/// the step's travel and envelopes end. Every body's envelope holds its material, so a drain past
+/// that end needs a body spawned without one, which only a fixture is.
 fn next_surface(
     world: &ProjectileMarchWorld,
     flight: &resolve::Flight,
@@ -8079,6 +8099,58 @@ mod march_tests {
         );
     }
 
+    /// AN OVERRUN LONGER THAN A STEP IS PAID BACK OVER AS MANY STEPS AS IT TAKES.
+    ///
+    /// A slow round whose first step ends inside a deep envelope with nothing in it runs on to the
+    /// envelope's far side, owing more than a step's travel. The steps after fly nothing until the
+    /// debt is paid, then the rest of their travel, so after every step the round stands the steps'
+    /// travel (each the free-flight kernel's speed at the step's start × dt) below its start, and
+    /// once paid it owes nothing. A march that clamped a step's budget at zero forgives the excess
+    /// and runs ahead of the clock by it. Fixture data: an 88 falling at 100 m/s into an empty
+    /// envelope 6 m deep, the first step's travel ending 0.5 m inside it.
+    #[test]
+    fn an_overrun_longer_than_a_step_is_paid_back_over_steps() {
+        const DT: f32 = 0.016;
+        const STEPS: usize = 8;
+        let mut app = world_with_trimesh_plates(&[]);
+        app.world_mut().spawn((
+            Transform::IDENTITY,
+            RigidBody::Static,
+            Envelope(bevy::math::bounding::Aabb3d::new(
+                Vec3::ZERO,
+                Vec3::new(1.0, 3.0, 1.0),
+            )),
+        ));
+        for _ in 0..2 {
+            app.update();
+        }
+        let velocity = Vec3::NEG_Y * 100.0;
+        let drag_k = fixture_drag_k(FIXTURE_88.caliber, FIXTURE_88.mass);
+        let first = freeflight_step(velocity, drag_k, DT).length() * DT;
+        let height = 3.0 + first - 0.5;
+        let shell = spawn_round(&mut app, FIXTURE_88, Vec3::new(0.0, height, 0.0), velocity);
+        app.update();
+        let owed = app.world().get::<Projectile>(shell).unwrap().owed;
+        assert!(
+            owed > first,
+            "the first step owes more than a step's travel: {owed} against {first}"
+        );
+        let mut clock = first;
+        for _ in 1..STEPS {
+            let projectile = app.world().get::<Projectile>(shell).unwrap();
+            clock += freeflight_step(projectile.velocity, projectile.drag_k, DT).length() * DT;
+            app.update();
+        }
+        let owed = app.world().get::<Projectile>(shell).unwrap().owed;
+        let at = app.world().get::<Transform>(shell).unwrap().translation;
+        assert_eq!(owed, 0.0, "the debt is paid within {STEPS} steps");
+        assert!(
+            (height - at.y - clock).abs() < 1.0e-3 && at.xz().length() < 1.0e-4,
+            "over {STEPS} steps the round flew {} m to {at}, not their travel {clock} m",
+            height - at.y,
+        );
+    }
+
     /// OVERLAPPING ENVELOPES ARE ONE CROSSING. Each plate in its own envelope, the two
     /// overlapping, and the step's travel ending inside the first alone: the step runs on through
     /// the second, as through one envelope. Two disjoint envelopes with the travel ending inside
@@ -8110,16 +8182,19 @@ mod march_tests {
         );
     }
 
-    /// A CONTINUATION SURVIVES THE TICK BOUNDARY.
+    /// A HELD SAMPLE'S DRAIN CLOSES ITS MATERIAL PAST THE TRAVEL.
     ///
     /// The resume fixture above, with the round's travel for the tick ending half a nudge past the
     /// plate's exit: the perforation leaves the axis sample inside the tilted volume (its entry lies
     /// before the resumption plane, so the seed owns it), and the tick's budget runs out before that
-    /// volume's exit. A march that lets the continuation lapse with the tick starts the next one
-    /// inside the volume with nothing declared, reads its exit as `UnexpectedExit`, and fails closed
-    /// on armour it had already entered.
+    /// volume's exit. Neither volume carries an envelope, so no crossing reach carries the step on;
+    /// the held sample's drain alone does, closing the volume past the travel within the step
+    /// ([`next_surface`]). A march that let the travel end the step would start the next inside the
+    /// volume with nothing declared, read its exit as `UnexpectedExit`, and fail closed on armour it
+    /// had already entered. No shipped body is without its envelope; this pins the drain that
+    /// [`resolve::MAX_OVERRUN`] bounds.
     #[test]
-    fn a_continuation_survives_the_tick_boundary() {
+    fn a_held_samples_drain_closes_its_material_past_the_travel() {
         const TILT: f32 = 65.0;
         const DT: f32 = 0.016;
         let body = FIXTURE_MG;
@@ -8627,6 +8702,15 @@ mod march_tests {
     /// time: a second read and a second charge of the round's energy, or a fail-closed exit with
     /// nothing declared.
     ///
+    /// The pad is the starts' spread, not the disc's radius: every tick ends with the axis outside
+    /// the plate's box by at least 1.5 r. The farthest staggered start of this disc stands at least
+    /// 1.95 r from the axis (DERIVED: one of the 12 ring samples lies within 15° of the plane of
+    /// incidence, where the stagger is `r / cos 60°` = 2 r), so a step padded by `spread` ends past
+    /// that, and one padded by the radius ends about 1.15 r out (DERIVED: r plus the fixed terms),
+    /// leaving a lagging start over the strip the next fresh disc never sweeps. Here the plate's own
+    /// faces bound the box, so that strip holds no armour and the reads alone cannot tell the two
+    /// pads apart.
+    ///
     /// Fixture data: an 88 at 60° through 20 mm, from 200 stand-offs 0.2 mm apart across a 4 cm
     /// window centred on the tick's end, so the perforation lands at every phase of the boundary.
     #[test]
@@ -8663,7 +8747,10 @@ mod march_tests {
                 size * 0.5,
             )));
         app.update();
+        let radius = resolve::disc_radius(FIXTURE_88.caliber);
+        let (lo, hi) = (centre - size * 0.5, centre + size * 0.5);
         let mut misread = Vec::new();
+        let mut near = Vec::new();
         for index in 0..STANDOFFS {
             // The face lies this far short of the tick's travel: the crossing ends the tick for
             // stand-offs whose perforation spends what is left of it.
@@ -8676,6 +8763,12 @@ mod march_tests {
             );
             for _ in 0..3 {
                 app.update();
+                if let Some(at) = app.world().get::<Transform>(shell).map(|at| at.translation) {
+                    let outside = (lo - at).max(at - hi).max_element();
+                    if outside < 1.5 * radius {
+                        near.push((short, outside));
+                    }
+                }
             }
             let impacts = std::mem::take(&mut app.world_mut().resource_mut::<ImpactLog>().0);
             let reads: Vec<Verdict> = impacts
@@ -8693,6 +8786,12 @@ mod march_tests {
             "{} of {STANDOFFS} stand-offs did not read the plate exactly once, with the face this \
              far short of the tick's travel: {misread:?}",
             misread.len(),
+        );
+        assert!(
+            near.is_empty(),
+            "ticks ended within 1.5 r ({} m) of the plate's box, at (stand-off, metres outside): \
+             {near:?}",
+            1.5 * radius,
         );
     }
 

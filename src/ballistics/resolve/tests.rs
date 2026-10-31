@@ -967,6 +967,45 @@ fn a_step_refuses_the_crossing_past_its_overrun() {
     );
 }
 
+/// AN OVERRUN IS COUNTED PAST WHERE THE STEP LEGITIMATELY ENDS, never past its travel alone
+/// ([`MAX_OVERRUN`]): neither the travel a step owes the last one's crossing nor the run through
+/// its envelopes past its travel is an overrun, and a drain already run stays counted when the
+/// step next reaches on. The march relies on it so a crossing of chained envelopes longer than
+/// the ceiling still resolves; a budget measured from the travel refuses the first case's
+/// crossing and the second's, and one whose reach forgave the drain run so far passes the
+/// third's.
+#[test]
+fn an_overrun_is_counted_past_the_steps_reach() {
+    let mut owing = Budget::new(-3.0, MAX_STEP_CROSSINGS);
+    owing
+        .charge(MAX_OVERRUN)
+        .expect("the travel owed is no overrun");
+    let mut enveloped = Budget::new(1.0, MAX_STEP_CROSSINGS);
+    enveloped.reach(20.0);
+    enveloped
+        .charge(20.0 + MAX_OVERRUN)
+        .expect("the run through the envelopes is no overrun");
+    assert!(
+        enveloped.charge(0.5).is_err(),
+        "past the envelopes' end the overrun counts"
+    );
+    let mut drained = Budget::new(1.0, MAX_STEP_CROSSINGS);
+    drained.charge(11.0).expect("a 10 m drain");
+    drained.reach(0.0);
+    assert_eq!(
+        drained.charge(MAX_OVERRUN - 9.5),
+        Err(WalkError::DrainExhausted {
+            crossings: 2,
+            overrun: MAX_OVERRUN + 0.5,
+        }),
+        "a reach from outside every envelope forgives no drain",
+    );
+    drained.reach(5.0);
+    drained
+        .charge(5.0 + MAX_OVERRUN - 10.0)
+        .expect("an envelope met past the drain extends from where the round stands");
+}
+
 /// THE STEP REFUSES THE CROSSING PAST ITS COUNT, before anything is charged.
 #[test]
 fn a_step_refuses_the_crossing_past_its_count() {

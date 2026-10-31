@@ -283,8 +283,9 @@ pub(crate) fn collect(
 ///   scale: the larger of the anchor-relative origin and the collider-local origin the crossing
 ///   arithmetic runs in. The anchor is where the march segment started, not first contact, and a
 ///   continuation keeps its anchor within a step (it is re-anchored at the start of each,
-///   `resolve::Interior::rebased`), so a hand-off sits up to one step's travel budget plus
-///   `resolve::MAX_OVERRUN` from it.
+///   `resolve::Interior::rebased`), so a hand-off sits up to the step's reach (its travel, or past
+///   it through the envelopes it is inside, `resolve::Budget::reach`) plus `resolve::MAX_OVERRUN`
+///   from it.
 ///
 /// A corridor with no hand-off carries only the second band.
 ///
@@ -294,9 +295,10 @@ pub(crate) fn collect(
 /// whole nudge would re-collect the EXIT face of the plate just perforated — an exit for a primitive
 /// the walk is not inside, `UnexpectedExit`, and a round stopped dead in mid-air one millimetre past
 /// the plate it punched through. DERIVED: the two bands reach a quarter of the nudge only past
-/// ~310 m of scale, and a corridor origin sits at most one step's budget plus
-/// `resolve::MAX_OVERRUN` from its anchor: about 63 m for a round at 800 m/s over a 16 ms tick. The
-/// ceiling is defence in depth, never reached.
+/// ~310 m of scale, and a corridor origin sits at most the step's reach plus `resolve::MAX_OVERRUN`
+/// from its anchor: about 63 m for a round at 800 m/s over a 16 ms tick; reaching ~310 m takes a
+/// chain of envelopes about 250 m long past the travel (DERIVED), longer than any the shipped map
+/// stands (ASSUMED, unmeasured). The ceiling is defence in depth.
 fn sitting_reach(handoff: Option<f64>, origin: Vec3, local_origin: Vec3, laws: &WalkLaws) -> f32 {
     let declined = handoff.map_or(0.0, |t| super::walk::topology_band(t.abs(), laws));
     let scale = origin.length().max(local_origin.length()) as f64;

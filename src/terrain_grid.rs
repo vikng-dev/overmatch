@@ -861,10 +861,10 @@ pub(crate) fn gaussian_smooth(samples: &[f32], size: usize) -> Vec<f32> {
 /// full `[-WORLD_HALF_EXTENT, +WORLD_HALF_EXTENT]` square.
 ///
 /// Orientation is pinned EMPIRICALLY by `oracle_matches_collider_at_seeded_points` below (the
-/// classic transposed-heightfield bug fails its seeded noise-grid comparison): the parry matrix
-/// is filled row-major as avian 0.7's `Collider::heightfield(Vec<Vec<f32>>, scale)` fills it, so
-/// the ROW index runs along world X and the COLUMN index along world Z (trust the raycast, not
-/// the doc comments). The field is centered on the origin with `scale.x`/`scale.z` as TOTAL spans
+/// classic transposed-heightfield bug fails its seeded noise-grid comparison): the fill is
+/// avian 0.7's `Collider::heightfield(Vec<Vec<f32>>, scale)`'s, the grid's `sample(i, j)` at
+/// `data[i·n + j]`, which parry's column-major `Array2` reads as `heights_zx`, so `i` runs along
+/// world X and `j` along world Z (trust the raycast, not the doc comments). The field is centered on the origin with `scale.x`/`scale.z` as TOTAL spans
 /// and `scale.y` multiplying the raw heights. Parry splits each cell along the anti-diagonal,
 /// which is exactly what [`HeightGrid::height_at`] evaluates —
 /// `oracle_matches_collider_at_seeded_points` pins the two surfaces together to millimetres.

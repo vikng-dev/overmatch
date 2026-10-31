@@ -345,8 +345,9 @@ pub(crate) mod tests {
     /// a round's crossing of the building runs until it has left the envelope, so a step never
     /// ends beside a wall, `ballistics::Envelope`): each intact element's, and each chunk's that
     /// a swap stands in its place, at the instance's scale (1.5, fixture data). A spawn without
-    /// the envelope, or one built from the elements alone where a chunk reaches past them, or at
-    /// scale 1, fails here.
+    /// the envelope, or one at scale 1, fails here. One built from the elements alone passes on
+    /// this house, whose chunks never reach past its elements (DERIVED from
+    /// `house_1.building.ron`); the chunk loop is for a kind whose chunks do.
     #[test]
     fn every_collider_a_building_stands_lies_inside_its_envelope() {
         let kind = shipped_house();

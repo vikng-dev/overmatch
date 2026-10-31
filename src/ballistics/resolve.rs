@@ -71,15 +71,19 @@ const ENTRANCE_SPAN: f32 = 0.5;
 /// crossing.
 pub(crate) const MAX_CORRIDOR: f32 = 50.0;
 
-/// Ceiling on how far past its travel budget one step may carry the flight — a chosen travel
-/// limit, not a certified bound.
+/// Ceiling on how far one step's crossings may carry the flight past where the step legitimately
+/// ends ([`Budget::reach`]) — a chosen travel limit, not a certified bound.
 ///
-/// Past the budget a step runs only to close material a sample is held inside
-/// ([`Interior::holds_material`]). Each such crossing closes within one [`MAX_CORRIDOR`], but a
-/// succession of them does not: held crossings chained end to end can carry the flight arbitrarily
-/// far while each one stays certifiable, so exceeding this does not prove the geometry malformed. It
-/// bounds how far downrange one step may apply consequences; the value is set at the corridor's
-/// scale as policy, and a step that reaches it stops the round (fail closed).
+/// A step legitimately runs to the end of its travel, or past it to where the line leaves every
+/// envelope it is inside (the march's `ProjectileMarchWorld::crossing_reach`), and the travel it
+/// owes a crossing of the last step is no overrun of this one. Past that a step runs only to close
+/// material a sample is held inside ([`Interior::holds_material`]), which every body's envelope
+/// holds, so in the shipped composition nothing runs there; a body spawned without its envelope
+/// does. Each such crossing closes within one [`MAX_CORRIDOR`], but a succession of them does not:
+/// held crossings chained end to end can carry the flight arbitrarily far while each one stays
+/// certifiable, so exceeding this does not prove the geometry malformed. It bounds how far
+/// downrange one step may apply consequences; the value is set at the corridor's scale as policy,
+/// and a step that reaches it stops the round (fail closed).
 pub(crate) const MAX_OVERRUN: f32 = MAX_CORRIDOR;
 
 /// Ceiling on the crossings one step may decide — a chosen resource limit, not a certified bound.
@@ -101,21 +105,42 @@ pub(crate) struct StepCrossings(pub(crate) usize);
 /// Shared by the runtime march and the §13.6 gate's driver, so both stop a runaway step at the same
 /// crossing with the same structured error.
 pub(crate) struct Budget {
-    /// Metres of travel left; negative once a drain runs past the budget.
+    /// Metres of travel left; negative once a drain runs past the budget, or from the start when
+    /// the travel owed exceeds the step's.
     remaining: f32,
+    /// The lowest `remaining` the step legitimately runs to: zero, or the travel owed past the
+    /// step's own, lowered by every reach past it ([`Self::reach`]). What lies below it is the
+    /// overrun [`MAX_OVERRUN`] bounds.
+    floor: f32,
     crossings: usize,
     /// The crossings the step may decide.
     max_crossings: usize,
 }
 
 impl Budget {
-    /// `travel` metres, spent by at most `max_crossings` crossings.
+    /// `travel` metres, spent by at most `max_crossings` crossings. A negative `travel` is travel
+    /// owed past the step's own, which the step flies none of and counts as no overrun.
     pub(crate) fn new(travel: f32, max_crossings: usize) -> Self {
         Self {
             remaining: travel,
+            floor: travel.min(0.0),
             crossings: 0,
             max_crossings,
         }
+    }
+
+    /// The step runs on `reach` metres from where the flight stands: to the end of its travel, or
+    /// past it to where its envelopes end. A crossing that runs no further overruns nothing, and an
+    /// overrun already run stays counted.
+    pub(crate) fn reach(&mut self, reach: f32) {
+        self.floor = self
+            .floor
+            .min(self.remaining - reach + self.overrun(self.remaining));
+    }
+
+    /// Metres below the floor a step standing at `remaining` has run.
+    fn overrun(&self, remaining: f32) -> f32 {
+        (self.floor - remaining).max(0.0)
     }
 
     /// Metres of travel left in the step (negative while draining past it).
@@ -141,7 +166,7 @@ impl Budget {
     pub(crate) fn charge(&mut self, travel: f32) -> Result<(), WalkError> {
         let crossings = self.crossings + 1;
         let remaining = self.remaining - travel;
-        let overrun = (-remaining).max(0.0);
+        let overrun = self.overrun(remaining);
         if crossings > self.max_crossings || overrun > MAX_OVERRUN {
             return Err(WalkError::DrainExhausted { crossings, overrun });
         }
