@@ -4934,6 +4934,7 @@ mod march_tests {
     #[derive(Clone, Copy)]
     struct Captured {
         position: Vec3,
+        normal: Vec3,
         surface: ImpactSurface,
         verdict: Verdict,
         deflection: Option<Vec3>,
@@ -4946,6 +4947,7 @@ mod march_tests {
     fn capture_impact(impact: On<Impact>, mut log: ResMut<ImpactLog>) {
         log.0.push(Captured {
             position: impact.position,
+            normal: impact.normal,
             surface: impact.surface,
             verdict: impact.outcome.verdict(),
             deflection: impact.outcome.deflection(),
@@ -7801,22 +7803,10 @@ mod march_tests {
         );
     }
 
-    /// A BOUNCE THEN A CONTACT IN ONE TICK SAMPLES THE SECOND SURFACE ON THE CURRENT FRAME.
-    ///
-    /// The march transports the sampling basis through the bounce; resolution must read that
-    /// transported basis, not the one the shell started the tick with. A basis left on the incoming
-    /// heading has a component ALONG the outgoing travel — `sin 30° = 0.5` for a 75° bounce, DERIVED —
-    /// so half the ring starts up to 22 mm (an 88's radius × 0.5) ahead of the disc. A second face
-    /// 10 mm past the bounce's resume point then has ring samples starting inside it with nothing
-    /// declared, and the walk fails closed on a face the round never reached.
-    ///
-    /// Generic geometry: a thick plate grazed at 75°, and a plate square to the outgoing ray, its
-    /// face 10 mm past the resume point and its lower edge 5 mm above the outgoing axis: clear of
-    /// the incoming disc, whose crossings of that face lie at least 4.4 mm below the axis (DERIVED).
-    /// A plate the incoming disc meets as well is struck at the same time as the graze, and the
-    /// entrance reads both surfaces.
-    #[test]
-    fn a_bounce_then_a_contact_samples_the_current_frame() {
+    /// An 88 grazing a thick plate at 75°, and a second plate square to the bounce's outgoing ray,
+    /// its face 10 mm past the bounce's resume point and extending `low` m along its own `up` from
+    /// the outgoing axis to 300 mm above it: the impacts the round made. FIXTURE DATA.
+    fn graze_then_plate(low: f32) -> Vec<Captured> {
         let incidence = 75.0_f32.to_radians();
         let incoming = Vec3::new(incidence.sin(), 0.0, -incidence.cos());
         let normal = Vec3::Z;
@@ -7832,8 +7822,7 @@ mod march_tests {
         let side = up.cross(back);
         let rotation = Quat::from_mat3(&Mat3::from_cols(side, up, back));
         let thickness = 0.05;
-        // In-plane extent along `up`: from 5 mm above the axis to 300 mm above it.
-        let (low, high) = (0.005, 0.300);
+        let high = 0.300;
         let centre = resume + outgoing * (0.010 + thickness * 0.5) + up * ((low + high) * 0.5);
         let mut app = world_with_trimesh_plates(&[first]);
         app.world_mut().spawn((
@@ -7858,7 +7847,25 @@ mod march_tests {
         for _ in 0..4 {
             app.update();
         }
-        let impacts = app.world().resource::<ImpactLog>().0.clone();
+        app.world().resource::<ImpactLog>().0.clone()
+    }
+
+    /// A BOUNCE THEN A CONTACT IN ONE TICK SAMPLES THE SECOND SURFACE ON THE CURRENT FRAME.
+    ///
+    /// The march transports the sampling basis through the bounce; resolution must read that
+    /// transported basis, not the one the shell started the tick with. A basis left on the incoming
+    /// heading has a component ALONG the outgoing travel — `sin 30° = 0.5` for a 75° bounce, DERIVED —
+    /// so half the ring starts up to 22 mm (an 88's radius × 0.5) ahead of the disc. A second face
+    /// 10 mm past the bounce's resume point then has ring samples starting inside it with nothing
+    /// declared, and the walk fails closed on a face the round never reached.
+    ///
+    /// [`graze_then_plate`] with the second plate's lower edge 5 mm above the outgoing axis: clear
+    /// of the incoming disc, whose crossings of that face lie at least 4.4 mm below the axis
+    /// (DERIVED). A plate the incoming disc meets as well is struck with the graze
+    /// ([`a_graze_and_a_plate_struck_together_bite_as_one_crossing`]).
+    #[test]
+    fn a_bounce_then_a_contact_samples_the_current_frame() {
+        let impacts = graze_then_plate(0.005);
         let read: Vec<(Vec3, Verdict)> = impacts.iter().map(|i| (i.position, i.verdict)).collect();
         assert_eq!(
             impacts.first().map(|impact| impact.verdict),
@@ -7875,6 +7882,39 @@ mod march_tests {
                 .is_some_and(|impact| impact.verdict.entered()),
             "the round bit into the second plate: {read:?}",
         );
+    }
+
+    /// A GRAZE AND A PLATE THE DISC MEETS WITHIN THE GRAZE'S DEPTH ARE ONE CROSSING, AND IT BITES.
+    ///
+    /// [`graze_then_plate`] with the second plate reaching 40 mm below the outgoing axis, into the
+    /// incoming disc's path: the disc's upper samples meet its face before they would meet the
+    /// grazed plate's, inside the graze's depth, so both pieces are one crossing (design doc §13.5,
+    /// the hand-off) and the entrance reads both surfaces. The second face, square to the outgoing
+    /// ray, tilts the read's normal toward the round, so the graze that ricochets alone bites:
+    /// one entry, its normal leaning toward the second face, no bounce and no fail-closed stop.
+    #[test]
+    fn a_graze_and_a_plate_struck_together_bite_as_one_crossing() {
+        let impacts = graze_then_plate(-0.040);
+        let read: Vec<(Vec3, Verdict)> = impacts.iter().map(|i| (i.position, i.verdict)).collect();
+        assert!(
+            impacts
+                .first()
+                .is_some_and(|impact| impact.verdict.entered()),
+            "the round bit at first contact: {read:?}",
+        );
+        // The grazed face's normal is +Z and the second face's leans back along -X, toward the round.
+        assert!(
+            impacts[0].normal.x < -0.01,
+            "the entry reads the second plate's face as well as the grazed one: {:?}",
+            impacts[0].normal,
+        );
+        assert!(
+            impacts
+                .iter()
+                .all(|impact| impact.verdict != Verdict::Ricochet),
+            "nothing bounced: {read:?}",
+        );
+        assert!(!failed_closed(&impacts), "no fail-closed stop: {read:?}");
     }
 
     /// Fly `shell`, launched within one march nudge of a face, for eight steps and assert it

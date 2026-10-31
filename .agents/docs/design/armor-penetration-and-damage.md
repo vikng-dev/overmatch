@@ -1510,6 +1510,10 @@ after the turret-scale fix).
   face on the sample's own ray (a hull side behind a fender) is the transit's, never summed into
   the plate the round strikes. With one piece met face-first by every sample the read is that
   piece's alone.
+- **A graze can bite.** A graze that would ricochet alone bites when the disc also meets a second
+  piece that begins before the grazed piece's crossing ends: the second face enters the read,
+  tilts `n̄` toward the round and can bring the incidence under the ricochet angle. Corners and
+  overhangs are where this happens (`a_graze_and_a_plate_struck_together_bite_as_one_crossing`).
 - **The transit crossing** is the transit corridor's crossing, by the same rule, and it begins at
   the hand-off. The flight resumes past the crossing's end, so a run that began inside it and was
   resolved apart from it would be skipped, or charged only from the resume point on.
