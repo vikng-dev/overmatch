@@ -372,13 +372,11 @@ pub struct WeaponSpec {
     #[serde(default)]
     pub recoil: Option<RecoilSpec>,
     /// Fire gate (design §7b): what must be crewed/intact to fire — operator + ordnance (e.g. the
-    /// main gun's `[Gunner, Breech, GunBarrel]`, a coax's `Backup(Gunner|Loader)`). The per-weapon
-    /// successor to the old global `Fire` capability. Empty = always firable.
-    #[serde(default)]
+    /// main gun's `[Gunner, Breech, GunBarrel]`, a coax's `Backup(Gunner|Loader)`). Required: an
+    /// authored `[]` is a weapon nothing gates, an omitted one is an authoring omission.
     pub fire: Requirement,
-    /// Load gate: what must hold for the reload timer to tick (e.g. `[Loader, Breech]`). The
-    /// per-weapon successor to the old global `Load`. Empty = always loading.
-    #[serde(default)]
+    /// Load gate: what must hold for the reload timer to tick (e.g. `[Loader, Breech]`). Required,
+    /// as [`Self::fire`] is: an authored `[]` always loads.
     pub load: Requirement,
 }
 
@@ -618,15 +616,13 @@ impl Optics {
 
 /// One view's parameters: the model node the camera bolts to (which rides its servo's lay), the
 /// [`Optics`] the crewman looks through, and the `requires` gate that decides whether the view is
-/// usable. `requires` is the per-view successor to the old global `GunnerSight`/`CommanderView`
-/// capabilities (same slew/fire-gate grammar, evaluated against the controlled tank); empty =
-/// always available.
+/// usable (the slew/fire-gate grammar, evaluated against the controlled tank). `requires` is
+/// required: an authored `[]` is a view always available, an omitted one an authoring omission.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct ViewSpec {
     pub node: String,
     pub optics: Optics,
-    #[serde(default)]
     pub requires: Requirement,
 }
 
@@ -779,10 +775,7 @@ pub struct EngineSpec {
     /// rising motoring-torque curve, as a fraction of peak torque — the motoring torque
     /// equals this fraction of peak at `(idle + governed)/2` rpm and grows linearly with
     /// crank speed (`track::transmission::engine_drag` — pumping/friction losses rise with
-    /// speed). Diesel motoring torque runs ~20–30% of rated mid-band (INFERRED band — no
-    /// per-engine motoring curve reached); defaults to 0.25 when the vehicle does not
-    /// author one.
-    #[serde(default = "default_drag_fraction")]
+    /// speed). Engine data, required: each sheet states its value and its provenance.
     pub drag_fraction: f32,
     /// Crank + flywheel + main-clutch rotational inertia J (kg·m²) — the stage-B engine
     /// crank state integrates against this. A declared transmission must declare its crank
@@ -793,11 +786,6 @@ pub struct EngineSpec {
     /// The stage-B coupling clamp; a torque-converter characteristic replaces the clamp
     /// for modern automatics later.
     pub clutch_capacity_nm: f32,
-}
-
-/// See [`EngineSpec::drag_fraction`] — the middle of the diesel compression-braking band.
-fn default_drag_fraction() -> f32 {
-    0.25
 }
 
 /// One engine's loop recording: the clip, and the cylinder-pop rate MEASURED off it. Both are facts
@@ -823,24 +811,15 @@ pub struct GearboxSpec {
     pub shift_up_rpm: f32,
     pub shift_down_rpm: f32,
     /// Gear-shift torque-interruption time (s) — how long the drive is uncoupled through a
-    /// shift. Vehicle data (a preselector and a crash box differ); defaults to 0.31 s when
-    /// unauthored (INFERRED, no per-vehicle shift-time datum reached).
-    #[serde(default = "default_shift_secs")]
+    /// shift. Vehicle data, required: a preselector and a crash box differ.
     pub shift_secs: f32,
-    /// Selection capability. Missing sheets default to [`ShiftAddressing::Sequential`]: paying
-    /// one window per adjacent gear is the conservative behavior, while arbitrary selection is a
-    /// vehicle capability that must be declared.
-    #[serde(default)]
+    /// Selection capability, required: whether one shift event reaches any gear or one adjacent
+    /// gear is the gearbox's mechanism, which only its sheet can state.
     pub shift_addressing: ShiftAddressing,
 }
 
-/// See [`GearboxSpec::shift_secs`].
-fn default_shift_secs() -> f32 {
-    0.31
-}
-
-/// The steering member: per-gear fixed radii (the L600's two detents; the hybrid interpolates
-/// the tight column continuously), its force capacity, and the regenerative power path.
+/// The steering member: per-gear fixed radii (the L600's two detents), its force capacity, and the
+/// regenerative power path.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct SteeringSpec {
@@ -1004,24 +983,22 @@ pub struct TankSpec {
     /// shadow of the rigid node it is parented under, in place of that node's drawn geometry
     /// (`tank::shadow_proxy`). Never drawn and never armour: a collider listed here keeps its
     /// collision role, and a node listed here alone is shadow-only and collides with nothing.
-    #[serde(default)]
+    /// Required; `[]` is a tank whose drawn geometry casts its own shadow at every range.
     pub shadow_proxies: Vec<String>,
     /// Roadwheel stations in wire-slot order. Explicit, replacing the `Wheel_{L,R}_{n}` pattern.
     pub roadwheels: Vec<RoadwheelSpec>,
     /// Weapons keyed by logical name — the **source of truth** for the tank's armament. Each names
     /// its bore (+ optional recoiling barrel) node and carries its ballistics/reload/recoil; the
     /// binder attaches a `Weapon` the shooting systems read. Replaces the hardcoded `shooting.rs`
-    /// consts. (Multi-weapon control — selecting/aiming the coax + hull MG — is a later increment.)
-    #[serde(default)]
+    /// consts. Required; `{}` is an unarmed vehicle.
     pub weapons: HashMap<String, WeaponSpec>,
     /// Crew viewpoints (camera/optic anchors) keyed by [`ViewKind`]. The gunner's also identifies
-    /// the gunner's chain for the rig's main-bore handles.
-    #[serde(default)]
+    /// the gunner's chain for the rig's main-bore handles. Required; `{}` declares none.
     pub views: HashMap<ViewKind, ViewSpec>,
     /// Per-tank capability requirements (design §7b). Each capability maps to a list of requirement
     /// groups (AND'd): a bare `Part` is mandatory; `Pool(..)`/`Backup(..)` express graded redundancy.
     /// Drives [`crate::damage::capability_effectiveness`] — the single gate consuming systems query.
-    #[serde(default)]
+    /// Required; `{}` gates no capability.
     pub capabilities: HashMap<Capability, Requirement>,
 }
 
@@ -1331,6 +1308,18 @@ impl TankSpec {
             return Err(format!(
                 "engine.sound.clip_pop_hz must be finite and > 0 (got {})",
                 sound.clip_pop_hz
+            )
+            .into());
+        }
+        // A capability the sheet does not key reads as unavailable to every consumer, so each one is
+        // stated: `[]` is an ungated capability.
+        if let Some(missing) = Capability::ALL
+            .iter()
+            .find(|capability| !self.capabilities.contains_key(capability))
+        {
+            return Err(format!(
+                "capabilities states no `{}` — key every capability, `[]` for an ungated one",
+                missing.label()
             )
             .into());
         }
@@ -1729,6 +1718,7 @@ TankSpec(
         "Wheel_R_0": (external: true),
     },
     colliders: [(node: "Hull_Collider", substance: "RHA")],
+    shadow_proxies: [],
     roadwheels: [
         (node: "Wheel_L_0", side: Left),
         (node: "Wheel_R_0", side: Right),
@@ -1755,11 +1745,14 @@ TankSpec(
             stowage: [(round: "7.9mm_AP", count: (1000, Tuned("fixture")))],
             fire_mode: Automatic(belt_size: 100, belt_swap_secs: 3.0),
             tracer_every: 5,
+            fire: [],
+            load: [],
         ),
     },
     views: {
         Gunner: (node: "Cannon_Sight", optics: Magnified(magnification: 2.5, field_deg: 25.0), requires: [Gunner]),
     },
+    capabilities: { Drive: [] },
 )
 "#;
 
@@ -2337,6 +2330,54 @@ TankSpec(
         assert!(
             err.contains("powertrain.inertia floor"),
             "expected the belt-inertia floor in: {err}"
+        );
+    }
+
+    /// Every field a law reads is the sheet's to state, so omitting one is refused at parse, naming
+    /// it, never filled from code (ADR-0011). A mutant restoring a `#[serde(default)]` on any of
+    /// these parses the cut sheet and fails here; the gates, the drivetrain and the shadow pass all
+    /// read the sheet's own value.
+    #[test]
+    fn a_sheet_omitting_a_required_field_does_not_parse() {
+        for (field, authored, kept) in [
+            ("drag_fraction", "drag_fraction: 0.25,", ""),
+            ("shift_secs", "shift_secs: 0.3,", ""),
+            ("shift_addressing", "shift_addressing: Direct,", ""),
+            ("shadow_proxies", "shadow_proxies: [],", ""),
+            ("capabilities", "capabilities: { Drive: [] },", ""),
+            ("fire", "fire: [Gunner, Breech],", ""),
+            ("load", "load: [Gunner],", ""),
+            (
+                "requires",
+                "travel: Continuous, requires: [Gunner]",
+                "travel: Continuous",
+            ),
+            (
+                "requires",
+                "field_deg: 25.0), requires: [Gunner]",
+                "field_deg: 25.0)",
+            ),
+        ] {
+            let cut = FIXTURE_RON.replacen(authored, kept, 1);
+            assert_ne!(cut, FIXTURE_RON, "the fixture authors `{authored}`");
+            let err = ron::de::from_str::<TankSpec>(&cut)
+                .err()
+                .unwrap_or_else(|| panic!("a sheet without `{field}` must not parse"))
+                .to_string();
+            assert!(err.contains(field), "the refusal names `{field}`: {err}");
+        }
+    }
+
+    /// A capability the sheet does not key would read as unavailable to every consumer, so
+    /// `validate` refuses the sheet that omits one.
+    #[test]
+    fn validate_refuses_a_sheet_missing_a_capability() {
+        let mut spec = fixture();
+        spec.capabilities.clear();
+        let err = spec.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("Drive"),
+            "the refusal names the capability: {err}"
         );
     }
 

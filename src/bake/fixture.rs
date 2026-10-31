@@ -162,11 +162,18 @@ pub(super) fn spec(
     volumes: &[&str],
     armour: &[&str],
 ) -> String {
-    spec_with(colliders, roadwheels, volumes, armour, "servos: {},")
+    spec_with(
+        colliders,
+        roadwheels,
+        volumes,
+        armour,
+        "servos: {}, weapons: {}, views: {},",
+    )
 }
 
-/// The same sheet with `declarations` standing in for the empty `servos` block — where a test that
-/// needs the roles a bare vehicle does not declare (servos, weapons, views) authors them.
+/// The same sheet with `declarations` standing in for the empty `servos`, `weapons` and `views`
+/// blocks — where a test that needs the roles a bare vehicle does not declare authors them. It
+/// authors all three.
 pub(super) fn spec_with(
     colliders: &[&str],
     roadwheels: &[(&str, &str)],
@@ -250,7 +257,9 @@ TankSpec(
     {declarations}
     volumes: {{{volumes}}},
     colliders: [{colliders}],
+    shadow_proxies: [],
     roadwheels: [{roadwheels}],
+    capabilities: {{ Drive: [] }},
 )
 "
     )

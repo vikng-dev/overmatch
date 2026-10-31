@@ -156,8 +156,8 @@ pub enum FunctionRole {
 }
 
 /// A gameplay verb the tank can perform (design §7b). Closed enum — consuming systems (driving,
-/// shooting, cameras) reference variants directly. Adding one is a one-line enum change + one
-/// consuming system. The *requirements* for each capability are per-tank RON data
+/// shooting, cameras) reference variants directly. Adding one is a variant, its entry in
+/// [`Self::ALL`] and one consuming system. The *requirements* for each capability are per-tank RON data
 /// ([`TankCapabilities`]); its current degree is its effectiveness ([`capability_effectiveness`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Deserialize)]
 pub enum Capability {
@@ -165,6 +165,9 @@ pub enum Capability {
 }
 
 impl Capability {
+    /// Every capability: a tank's sheet states each one (`TankSpec::validate`).
+    pub const ALL: [Self; 1] = [Self::Drive];
+
     pub fn label(self) -> &'static str {
         match self {
             Capability::Drive => "Drive",

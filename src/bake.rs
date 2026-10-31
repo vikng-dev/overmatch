@@ -2269,7 +2269,8 @@ mod tests {
             &[("Station_L", "Left"), ("Station_R", "Right")],
             &["Plate"],
             &[],
-            r#"servos: {"Turret_Yaw": (role: Yaw, max_speed: 1.0, accel: 1.0, travel: Continuous)},
+            r#"servos: {"Turret_Yaw": (role: Yaw, max_speed: 1.0, accel: 1.0, travel: Continuous,
+        requires: [])},
     weapons: {"Main": (
         trigger: Primary,
         muzzle: "Muzzle",
@@ -2278,8 +2279,11 @@ mod tests {
         stowage: [(round: "88mm_AP", count: (1, Tuned("fixture")))],
         fire_mode: Single(reload_secs: 1.0),
         recoil: (kick: 1.0, stiffness: 1.0, damping: 1.0, max_length: (1.0, Tuned("fixture"))),
+        fire: [],
+        load: [],
     )},
-    views: {Gunner: (node: "Sight", optics: Magnified(magnification: 2.0, field_deg: 30.0))},"#,
+    views: {Gunner: (node: "Sight", optics: Magnified(magnification: 2.0, field_deg: 30.0),
+        requires: [])},"#,
         );
         let asset = fixture::write("canon", &nodes, &declared);
         let json =

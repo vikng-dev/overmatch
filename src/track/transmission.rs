@@ -222,13 +222,12 @@ use crate::bitprobe::TransmissionProbe;
 /// this datum decides whether one interruption reaches it directly or pays one window per
 /// adjacent step. VEHICLE DATA, not scheduler policy: the model accepts arbitrary targets, and
 /// whether a gearbox can address one is an era/mechanism capability the spec declares.
-#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, serde::Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug, serde::Deserialize)]
 pub enum ShiftAddressing {
     /// Preselector/automatic capability: one shift event commits straight to the legal target.
     Direct,
-    /// Conservative crash-box capability: each event moves one adjacent gear and the held target
-    /// is approached over repeated interruption windows.
-    #[default]
+    /// Crash-box capability: each event moves one adjacent gear and the held target is approached
+    /// over repeated interruption windows.
     Sequential,
 }
 

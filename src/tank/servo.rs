@@ -42,8 +42,8 @@ pub struct ServoSpec {
     /// Slew acceleration, degrees/second².
     accel: f32,
     travel: Travel,
-    /// Damage/crew requirement whose effectiveness scales slew speed.
-    #[serde(default)]
+    /// Damage/crew requirement whose effectiveness scales slew speed. Required: an authored `[]`
+    /// slews at full speed whatever the crew's state.
     pub(crate) requires: Requirement,
 }
 
