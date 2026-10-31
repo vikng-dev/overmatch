@@ -26,14 +26,14 @@ const BOOT_DEADLINE: Duration = Duration::from_secs(60);
 /// fixed loop per [`App::update`], so every bound and elapsed-time report is stated in ticks.
 const FIXED_TICKS_PER_SECOND: usize = 64;
 
-fn start_fixed_clock(app: &mut App) {
+pub(crate) fn start_fixed_clock(app: &mut App) {
     // Verified against Bevy 0.19: one `App::update` runs exactly one fixed loop.
     app.insert_resource(TimeUpdateStrategy::FixedTimesteps(1));
 }
 
 /// Serializes full-app fixtures. The lease spans each test because booting and running apps compete
 /// for the same host resources; mutex poisoning is irrelevant to this external resource.
-static BOOT_LEASE: Mutex<()> = Mutex::new(());
+pub(crate) static BOOT_LEASE: Mutex<()> = Mutex::new(());
 
 fn assert_tank_state_at_add(
     add: On<Add, Tank>,
@@ -163,7 +163,7 @@ fn headless_app_on(world: Option<crate::terrain_grid::HeightGrid>) -> App {
 ///
 /// The returned clock is FROZEN (`ManualDuration(ZERO)`); a caller that wants time picks its own
 /// strategy, as [`start_fixed_clock`] does.
-fn headless_shell() -> App {
+pub(crate) fn headless_shell() -> App {
     let mut app = App::new();
     app.add_plugins(crate::gpu_less_default_plugins(None))
         .insert_resource(TimeUpdateStrategy::ManualDuration(Duration::ZERO));
@@ -187,7 +187,7 @@ fn headless_shell() -> App {
 
 /// `App::run` normally drives plugin finish/cleanup (some registration — e.g. Avian's diagnostics
 /// resources — happens in `Plugin::finish`); a bare `update()` loop must do it.
-fn finish_plugins(app: &mut App) {
+pub(crate) fn finish_plugins(app: &mut App) {
     while app.plugins_state() == bevy::app::PluginsState::Adding {
         std::thread::sleep(Duration::from_millis(1));
     }
@@ -1547,6 +1547,58 @@ fn track_sandbox_boots_headless() {
         "the track sandbox never built its rig within {SANDBOX_BOOT_FRAMES} frames (build_rig \
          waits on bake's TankBlueprint) — everything downstream is gated on RigGeom, so nothing \
          past the plugin build was actually exercised",
+    );
+}
+
+/// A STRAIGHT DRIVE ON THE SHIPPED HEIGHTFIELD — a measurement bed, never a gate (`-- --ignored
+/// heightfield_drive_bed --nocapture`), in the game's tank driving physics (game state only): the
+/// controlled tank settles on the shipped terrain, then drives at full throttle for 10 s. Prints a
+/// digest of every tick's hull pose bits and the end pose, so two builds compare bit for bit, and
+/// every avian contact of the tank's colliders that carried a normal impulse.
+#[test]
+#[ignore = "a measurement bed, run on demand"]
+fn heightfield_drive_bed() {
+    use avian3d::prelude::{ColliderOf, ContactGraph, Position, Rotation};
+    let mut app = booted_sim_on(Some(crate::terrain_grid::tests::shipped_grid()));
+    start_fixed_clock(&mut app);
+    for _ in 0..120 {
+        app.update();
+    }
+    let tank = app
+        .world_mut()
+        .query_filtered::<Entity, (With<Tank>, With<Controlled>)>()
+        .single(app.world())
+        .expect("one controlled tank");
+    // Away from the duel partner, so the drive meets only the terrain.
+    face_positive_z(&mut app, tank);
+    let start = app.world().get::<Position>(tank).unwrap().0;
+    let mut digest = 0xcbf2_9ce4_8422_2325_u64;
+    let mut touches = 0usize;
+    for _ in 0..640 {
+        drive_tick(&mut app, tank, 1.0, 0.0);
+        let world = app.world();
+        let p = world.get::<Position>(tank).unwrap().0;
+        let r = world.get::<Rotation>(tank).unwrap().0;
+        for w in p.to_array().into_iter().chain(r.to_array()) {
+            for b in w.to_bits().to_le_bytes() {
+                digest = (digest ^ u64::from(b)).wrapping_mul(0x0100_0000_01b3);
+            }
+        }
+        let graph = world.resource::<ContactGraph>();
+        let ours = |c: Entity| world.get::<ColliderOf>(c).is_some_and(|of| of.body == tank);
+        touches += graph
+            .iter_active()
+            .filter(|pair| ours(pair.collider1) || ours(pair.collider2))
+            .flat_map(|pair| pair.manifolds.iter().flat_map(|m| m.points.iter()))
+            .filter(|point| point.normal_impulse > 0.0)
+            .count();
+    }
+    let world = app.world();
+    let p = world.get::<Position>(tank).unwrap().0;
+    let r = world.get::<Rotation>(tank).unwrap().0;
+    println!(
+        "heightfield straight drive: digest {digest:016x}, from {start:?} to {p:?} {r:?}, \
+         {touches} tank-collider contact points with a normal impulse"
     );
 }
 

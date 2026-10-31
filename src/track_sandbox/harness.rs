@@ -102,7 +102,7 @@ where
         .map_err(|err| format!("invalid value `{value}` for `{key}`: {err}"))
 }
 
-fn parse_spec(spec: &str) -> Result<Harness, String> {
+pub(super) fn parse_spec(spec: &str) -> Result<Harness, String> {
     let mut h = Harness::default();
     for (index, pair) in spec.split(',').enumerate() {
         let pair = pair.trim();

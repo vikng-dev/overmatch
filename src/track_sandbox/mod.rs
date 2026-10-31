@@ -50,6 +50,9 @@ use crate::bake::TankBlueprint;
 // Shared course/rig/belt machinery lives here in `mod.rs`; the model's force and view systems
 // live in `belt.rs` (the field-belt — the sandbox's single model, promoted into the game as
 // `track::forces`).
+/// The headless measurement beds over the harness (`-- --ignored`).
+#[cfg(test)]
+mod bed;
 mod harness;
 // The TRACK-LINK render layer: the Tiger's own shoe mesh, instanced onto the belt stations the
 // active view resamples. Everything else in this file draws the track as a line; this is the one
@@ -488,6 +491,13 @@ pub fn plugin(app: &mut App) {
     let harness_scenario =
         harness::parse_env().unwrap_or_else(|err| panic!("invalid SANDBOX_HARNESS: {err}"));
     if let Some(scenario) = harness_scenario {
+        mount_harness(app, scenario);
+    }
+}
+
+/// Mount the scripted harness for `scenario` (module doc of `harness`).
+fn mount_harness(app: &mut App, scenario: harness::Harness) {
+    {
         app.insert_resource(scenario)
             .insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
                 std::time::Duration::from_micros(15_625), // exactly 1/64 s
