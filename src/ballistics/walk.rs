@@ -3174,6 +3174,9 @@ pub struct ResolutionPlan<S> {
     /// The mechanism's state where the crossing left it: at rest on an embed, past the exit on a
     /// perforation.
     pub state: S,
+    /// The game's damage model: resolved transit stretches, with the clock integrated by the
+    /// mechanism. Progress is corridor-relative metres; duration is seconds.
+    pub motion: Vec<Motion>,
     /// Reference-mm spent — the readout of the state in, less the readout of the state out.
     pub cost_spent: f32,
     /// The line's doses, one per volume it put a positive chord into, summed over the crossing in
@@ -3192,6 +3195,16 @@ pub struct ResolutionPlan<S> {
     pub spall: Vec<SpallSource>,
     /// The transit crossing the plan resolved ([`DiscWalk::first_crossing`]), corridor-relative.
     pub crossing: DiscEvent,
+}
+
+/// The game's damage model: one immutable force-law stretch and its elapsed seconds.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Motion {
+    pub start: f64,
+    pub end: f64,
+    pub speed_in: f64,
+    pub speed_out: f64,
+    pub seconds: f64,
 }
 
 /// The corridor [`finish`] was handed must be the corridor [`begin`] asked for; if it is, its
@@ -3359,6 +3372,21 @@ pub(crate) fn finish<M: Mechanism>(
         deposits,
         spall,
         crossing: crossing.into_owned(),
+        motion: advanced
+            .stretches
+            .iter()
+            .map(|stretch| Motion {
+                start: stretch.start,
+                end: stretch.end,
+                speed_in: mechanism.speed(stretch.before),
+                speed_out: mechanism.speed(stretch.after),
+                seconds: mechanism.flight_time(
+                    stretch.before,
+                    stretch.after,
+                    stretch.end - stretch.start,
+                ),
+            })
+            .collect(),
     })
 }
 

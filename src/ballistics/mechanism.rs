@@ -41,6 +41,9 @@ pub(crate) trait Mechanism {
     /// The round's speed (m/s) in `state`.
     fn speed(&self, state: Self::State) -> f64;
 
+    /// The game's damage model: seconds spent over `length` metres between two resolved states.
+    fn flight_time(&self, before: Self::State, after: Self::State, length: f64) -> f64;
+
     /// The kinetic energy (J) the round carries in `state`, `½ m v²`, `m` the mass that meets the
     /// plate: what a crossing's energy lost is measured from, the line's dose and a spall cone's
     /// strength alike.
@@ -363,6 +366,25 @@ impl Mechanism for SolidShot {
         state.speed
     }
 
+    fn flight_time(&self, before: SolidShotState, after: SolidShotState, length: f64) -> f64 {
+        // The game's damage model: DERIVED from d(v²)/ds = -q (v² + 1/inertia).
+        // Integrating ds/v gives 2 sqrt(inertia)/q times the difference of arctangents.
+        // The ratio form preserves a small speed loss without subtracting two potentials.
+        if length == 0.0 {
+            return 0.0;
+        }
+        let (a, b) = (before.speed, after.speed);
+        if a == b {
+            assert!(a > 0.0, "positive flight length has positive speed");
+            return length / a;
+        }
+        assert!(a > b && b >= 0.0, "a resisted stretch slows toward rest");
+        let root = self.inertia.sqrt();
+        let drop = libm::log1p(self.inertia * (a - b) * (a + b) / (1.0 + self.inertia * b * b));
+        let angle = libm::atan(root * (a - b) / (1.0 + self.inertia * a * b));
+        2.0 * root * length / drop * angle
+    }
+
     fn energy(&self, state: SolidShotState) -> f64 {
         0.5 * self.body.mass as f64 * state.speed * state.speed
     }
@@ -435,6 +457,11 @@ impl<M: Mechanism> Mechanism for OvermatchProjection<'_, M> {
 
     fn speed(&self, state: M::State) -> f64 {
         self.inner.speed(state)
+    }
+
+    fn flight_time(&self, before: M::State, after: M::State, length: f64) -> f64 {
+        // Timing uses the travelled slope length, even when resistance uses its projection.
+        self.inner.flight_time(before, after, length)
     }
 
     fn energy(&self, state: M::State) -> f64 {
@@ -531,6 +558,90 @@ mod tests {
                     advance.state.speed
                 );
             }
+        }
+    }
+
+    /// The game's damage model must spend seconds inside material, including a finite time
+    /// to rest. Playback relies on this integral rather than endpoint-speed division. The
+    /// independent Simpson integral below is in velocity space, where the rest endpoint is smooth.
+    #[test]
+    fn a_stretch_clock_integrates_the_force_law_including_rest() {
+        let round = round();
+        // Fixture data: incoming/outgoing speeds and path lengths.
+        for (a, b, length) in [
+            (1000.0, 200.0, 0.1),
+            (800.0, 0.0, 0.3),
+            (700.0, 699.999, 0.01),
+        ] {
+            let before = SolidShotState { speed: a };
+            let after = SolidShotState { speed: b };
+            let q = (round.potential(a) - round.potential(b)) / length;
+            let intervals = 4096;
+            let step = (a - b) / f64::from(intervals);
+            let integrand = |v: f64| 2.0 * round.inertia / (q * (1.0 + round.inertia * v * v));
+            let sum: f64 = (0..=intervals)
+                .map(|i| {
+                    let weight = if i == 0 || i == intervals {
+                        1.0
+                    } else if i % 2 == 0 {
+                        2.0
+                    } else {
+                        4.0
+                    };
+                    weight * integrand(b + f64::from(i) * step)
+                })
+                .sum();
+            let measured = round.flight_time(before, after, length);
+            let integrated = sum * step / 3.0;
+            assert!(
+                (measured / integrated - 1.0).abs() < 1.0e-9,
+                "{a} -> {b}: {measured} vs {integrated}"
+            );
+        }
+        let state = round.at(800.0);
+        assert_eq!(round.flight_time(state, state, 2.0), 2.0 / 800.0);
+        assert_eq!(round.flight_time(round.at(0.0), round.at(0.0), 0.0), 0.0);
+    }
+
+    /// The game's damage model's clock and energy dose compose over one material path. A
+    /// consumer splitting playback into ticks must reach the same path time and total dose.
+    #[test]
+    fn partitioning_a_material_path_preserves_seconds_and_dose() {
+        let round = round();
+        let state = round.at(800.0);
+        let whole = round.advance(
+            state,
+            &encounter(0.1, 1, &[&[(1, 1000.0)]]),
+            &LIMITS,
+            &HEAD_ON,
+        );
+        let duration = round.flight_time(state, whole.state, whole.consumed);
+        let energy = |advance: &Advance<SolidShotState>| {
+            advance
+                .effects
+                .iter()
+                .map(|effect| {
+                    let Effect::Line { energy, .. } = effect;
+                    energy
+                })
+                .sum::<f64>()
+        };
+        for cuts in [vec![0.03, 0.07], vec![0.01; 10], vec![0.025; 4]] {
+            let (mut current, mut seconds, mut dose) = (state, 0.0, 0.0);
+            for length in cuts {
+                let part = round.advance(
+                    current,
+                    &encounter(length, 1, &[&[(1, 1000.0)]]),
+                    &LIMITS,
+                    &HEAD_ON,
+                );
+                seconds += round.flight_time(current, part.state, part.consumed);
+                current = part.state;
+                dose += energy(&part);
+            }
+            assert!((seconds / duration - 1.0).abs() < 1.0e-12);
+            assert!((current.speed / whole.state.speed - 1.0).abs() < 1.0e-12);
+            assert!((dose / energy(&whole) - 1.0).abs() < 1.0e-12);
         }
     }
 

@@ -1228,9 +1228,8 @@ pub(crate) struct Projectile {
     /// at the shell's translation. Never on the wire: a replica derives its own from the same spawn
     /// and march.
     axis: Option<resolve::AxisStart>,
-    /// Metres the round has already flown ahead of the clock: a crossing resolves whole in the step
-    /// that entered it, past that step's travel if need be, and the next steps' travel is short by
-    /// the overrun until it is paid. Zero at spawn, after a catch-up, and for a stopped or held
+    /// Seconds the game's damage model has already resolved ahead of the clock: an atomic
+    /// crossing spends its force-law duration, and later steps repay those seconds. Zero at spawn, after a catch-up, and for a stopped or held
     /// round, which stays ahead of the clock by what it owed (design §13.5, "Travel is conserved
     /// but at two ends").
     owed: f32,
@@ -2496,12 +2495,12 @@ impl ProjectileMarchWorld<'_, '_> {
     }
 
     /// One step's budget of `travel` metres under this world's crossing ceiling.
-    fn step_budget(&self, travel: f32) -> resolve::Budget {
+    fn step_budget(&self, seconds: f32, speed: f32) -> resolve::Budget {
         let ceiling = self
             .step_crossings
             .as_ref()
             .map_or(resolve::MAX_STEP_CROSSINGS, |ceiling| ceiling.0);
-        resolve::Budget::new(travel, ceiling)
+        resolve::Budget::new(seconds, ceiling, speed)
     }
 }
 
@@ -3328,7 +3327,7 @@ fn march_shell_step(
     };
     let speed = stepped.length();
     shell.projectile.fuze.at_speed(speed);
-    let mut budget = world.step_budget(speed * dt - shell.projectile.owed);
+    let mut budget = world.step_budget(dt - shell.projectile.owed, speed);
     let mut stopped = false;
     // Set when an observer shell freezes at armor contact to await its bounce keyframe (see the
     // `!deposit` branch): the shell keeps its entity and velocity, and the `Held` handler above
@@ -3385,8 +3384,15 @@ fn march_shell_step(
             bodies: &*bodies,
             dt,
         };
-        let reach = world.crossing_reach(origin, dir, budget.remaining(), spread, shooter, next);
-        budget.reach(reach);
+        let reach = world.crossing_reach(
+            origin,
+            dir,
+            budget.remaining() * flight.speed,
+            spread,
+            shooter,
+            next,
+        );
+        budget.reach(reach / flight.speed);
         if reach <= MARCH_EPS && !flight.holds_material() {
             break;
         }
@@ -3395,7 +3401,7 @@ fn march_shell_step(
         // the original (unbent) segment the first part is exactly the catch-up kernel's
         // displacement; a `continue` past this point only ever follows a bend, so `bent` is the
         // exact discriminant.
-        let within = budget.remaining().max(0.0);
+        let within = budget.remaining().max(0.0) * flight.speed;
         let displacement = if bent { dir * within } else { stepped * dt } + dir * (reach - within);
         // An armed round whose delay runs out short of what lies ahead bursts in the open.
         let open = ahead.open_metres(displacement.length());
@@ -3423,7 +3429,7 @@ fn march_shell_step(
                     damage_dealt += wound_legs(shell, &context, &not_own, &[leg], speed, health);
                 }
                 flight.fly(displacement);
-                budget.fly(reach);
+                budget.fly(reach / flight.speed);
                 break;
             }
             Ahead::Terrain { distance, normal } => {
@@ -3512,7 +3518,11 @@ fn march_shell_step(
             &flight,
             contact,
         )
-        .and_then(|decision| budget.charge(decision.charged()).map(|()| decision))
+        .and_then(|decision| {
+            budget
+                .charge(decision.seconds(flight.speed))
+                .map(|()| decision)
+        })
         .unwrap_or_else(|error| error.panic());
         // A corridor the disc found clear is open flight: an armed round whose delay runs out
         // inside it bursts there. The budget was charged the whole corridor, which is handed back;
@@ -3520,7 +3530,7 @@ fn march_shell_step(
         if let resolve::Decision::Clear { travel, .. } = &decided
             && let Some(at) = shell.projectile.fuze.due_within(*travel)
         {
-            budget.fly(-*travel);
+            budget.fly(-(*travel / flight.speed));
             let (ended, removed) =
                 burst_ahead(shell, &context, &mut flight, &mut budget, at, health);
             damage_dealt += removed;
@@ -3731,7 +3741,7 @@ fn burst_ahead(
     );
     let wounded = wound_legs(shell, context, &not_own, &[leg], flight.speed, health);
     flight.fly(flight.direction * metres);
-    budget.fly(metres);
+    budget.fly(metres / flight.speed);
     let (ended, removed) = burst_here(shell, context, flight, flight.speed, health);
     (ended, wounded + removed)
 }
@@ -3897,7 +3907,7 @@ fn replica_contact(
             // The same step limits the authority's crossings are held to, charged from
             // the flight's position.
             budget
-                .charge(hit.distance + MARCH_EPS)
+                .charge((hit.distance + MARCH_EPS) / flight.speed)
                 .unwrap_or_else(|error| error.panic());
             if let Some(new_dir) = direction {
                 // Carry the sampling basis through the sanctioned bend, exactly as the
@@ -7707,6 +7717,61 @@ mod march_tests {
         (impacts, speed, at, owed, stepped.length() * DT)
     }
 
+    /// The game's damage model spends a tick's seconds at the speed each stretch actually has.
+    /// The consumer is open flight after a perforation: allocating initial-speed metres there
+    /// runs ahead. DERIVED counterexample: a zero-length change from 1000 to 200 m/s halfway
+    /// through a 1/64 s tick runs ahead by (1000 - 200)/128 = 6.25 m. The fixture below includes
+    /// the plate's finite force-law time as well. All dimensions and speeds are fixture data.
+    #[test]
+    fn a_perforation_ends_the_tick_where_its_clock_says() {
+        use mechanism::Mechanism;
+        let dt = 1.0 / 64.0;
+        let velocity = Vec3::NEG_Y * 1000.0;
+        let speed = freeflight_step(
+            velocity,
+            fixture_drag_k(FIXTURE_88.caliber, FIXTURE_88.mass),
+            dt,
+        )
+        .length();
+        let thickness = (capability(FIXTURE_88, speed) - capability(FIXTURE_88, 200.0)) / STEEL;
+        let centre = Vec3::Y * 50.0;
+        let top = centre.y + thickness * 0.5;
+        let approach = speed * dt * 0.5;
+        let origin = Vec3::Y * (top + approach);
+        let mut app = world_with_trimesh_plates(&[(Vec3::new(3.0, thickness, 3.0), centre)]);
+        app.insert_resource(TimeUpdateStrategy::ManualDuration(Duration::from_secs_f64(
+            f64::from(dt),
+        )));
+        app.update();
+        let shell = spawn_round(&mut app, FIXTURE_88, origin, velocity);
+        app.update();
+        let projectile = app.world().get::<Projectile>(shell).unwrap();
+        let exit_speed = projectile.speed();
+        assert!(
+            (exit_speed - 200.0).abs() < 0.1,
+            "the fixture slows to its chosen exit speed: {exit_speed}"
+        );
+        let material_time = projectile.round.flight_time(
+            projectile.round.at(speed),
+            projectile.round.at(exit_speed),
+            f64::from(thickness),
+        );
+        let expected = origin.y
+            - approach
+            - thickness
+            - exit_speed * (dt - approach / speed - material_time as f32);
+        let actual = app.world().get::<Transform>(shell).unwrap().translation.y;
+        let metre_budget_position = origin.y - speed * dt;
+        assert!(
+            (actual - expected).abs() < 1.0e-3,
+            "clock expects y={expected}, actual y={actual}"
+        );
+        assert!(
+            actual - metre_budget_position > 6.0,
+            "the counterexample exposes metres allocated at the old speed"
+        );
+    }
+
     /// A CROSSING THAT STRADDLES THE TICK RESOLVES AS ONE INSIDE IT, AT ONE INSTANT.
     ///
     /// One envelope holds both plates. Placed so the step's travel ends between them, the step
@@ -7755,103 +7820,8 @@ mod march_tests {
             "the step ends outside the envelope (below y = {floor}), not at {at}",
         );
         assert!(
-            (owed - (0.5 - at.y)).abs() < 1.0e-3,
-            "the step owes exactly what it flew past its travel: {owed}, flown to {at}",
-        );
-    }
-
-    /// A CROSSING'S OVERRUN IS TIME-NEUTRAL: THE NEXT STEP PAYS IT BACK.
-    ///
-    /// The straddling placement above, run one tick more. The first step flies past its travel to
-    /// leave the envelope; the second flies its own travel short by that overrun, so over the two
-    /// steps the round has flown exactly the two steps' travel (each the free-flight kernel's speed
-    /// at the step's start × dt) and owes nothing once paid. The authority and every replica rely
-    /// on it to come back to the clock's position after a crossing. A march whose next step flew
-    /// its whole travel, or flew the paying step as the unbent kernel's `stepped × dt`, runs ahead
-    /// by the overrun.
-    #[test]
-    fn a_crossings_overrun_is_paid_back_by_the_next_step() {
-        const DT: f32 = 0.016;
-        let envelope = [(Vec3::new(0.0, 0.5, 0.0), Vec3::new(0.6, 0.6, 0.6))];
-        let (_, _, _, _, budget) = fall_through_two_plates(3.0, &envelope);
-        let height = 0.5 + budget;
-        let mut app = two_plates_world(&envelope);
-        let shell = spawn_round(
-            &mut app,
-            FIXTURE_88,
-            Vec3::new(0.0, height, 0.0),
-            Vec3::NEG_Y * 800.0,
-        );
-        app.update();
-        let projectile = app.world().get::<Projectile>(shell).unwrap();
-        let overrun = projectile.owed;
-        assert!(
-            overrun > 0.1,
-            "the first step crosses the envelope past its travel: {overrun}"
-        );
-        let second = freeflight_step(projectile.velocity, projectile.drag_k, DT).length() * DT;
-        app.update();
-        let owed = app.world().get::<Projectile>(shell).unwrap().owed;
-        let at = app.world().get::<Transform>(shell).unwrap().translation;
-        assert_eq!(owed, 0.0, "the open-air step pays the overrun back whole");
-        let flown = height - at.y;
-        assert!(
-            (flown - (budget + second)).abs() < 1.0e-3 && at.xz().length() < 1.0e-4,
-            "over the two steps the round flew {flown} m to {at}, not their travel {} m \
-             ({budget} + {second}), the first step's overrun being {overrun} m",
-            budget + second,
-        );
-    }
-
-    /// AN OVERRUN LONGER THAN A STEP IS PAID BACK OVER AS MANY STEPS AS IT TAKES.
-    ///
-    /// A slow round whose first step ends inside a deep envelope with nothing in it runs on to the
-    /// envelope's far side, owing more than a step's travel. The steps after fly nothing until the
-    /// debt is paid, then the rest of their travel, so after every step the round stands the steps'
-    /// travel (each the free-flight kernel's speed at the step's start × dt) below its start, and
-    /// once paid it owes nothing. A march that clamped a step's budget at zero forgives the excess
-    /// and runs ahead of the clock by it. Fixture data: an 88 falling at 100 m/s into an empty
-    /// envelope 6 m deep, the first step's travel ending 0.5 m inside it.
-    #[test]
-    fn an_overrun_longer_than_a_step_is_paid_back_over_steps() {
-        const DT: f32 = 0.016;
-        const STEPS: usize = 8;
-        let mut app = world_with_trimesh_plates(&[]);
-        app.world_mut().spawn((
-            Transform::IDENTITY,
-            RigidBody::Static,
-            Envelope(bevy::math::bounding::Aabb3d::new(
-                Vec3::ZERO,
-                Vec3::new(1.0, 3.0, 1.0),
-            )),
-        ));
-        for _ in 0..2 {
-            app.update();
-        }
-        let velocity = Vec3::NEG_Y * 100.0;
-        let drag_k = fixture_drag_k(FIXTURE_88.caliber, FIXTURE_88.mass);
-        let first = freeflight_step(velocity, drag_k, DT).length() * DT;
-        let height = 3.0 + first - 0.5;
-        let shell = spawn_round(&mut app, FIXTURE_88, Vec3::new(0.0, height, 0.0), velocity);
-        app.update();
-        let owed = app.world().get::<Projectile>(shell).unwrap().owed;
-        assert!(
-            owed > first,
-            "the first step owes more than a step's travel: {owed} against {first}"
-        );
-        let mut clock = first;
-        for _ in 1..STEPS {
-            let projectile = app.world().get::<Projectile>(shell).unwrap();
-            clock += freeflight_step(projectile.velocity, projectile.drag_k, DT).length() * DT;
-            app.update();
-        }
-        let owed = app.world().get::<Projectile>(shell).unwrap().owed;
-        let at = app.world().get::<Transform>(shell).unwrap().translation;
-        assert_eq!(owed, 0.0, "the debt is paid within {STEPS} steps");
-        assert!(
-            (height - at.y - clock).abs() < 1.0e-3 && at.xz().length() < 1.0e-4,
-            "over {STEPS} steps the round flew {} m to {at}, not their travel {clock} m",
-            height - at.y,
+            owed > 0.0,
+            "the atomic crossing ran past the tick's seconds"
         );
     }
 
@@ -8618,27 +8588,17 @@ mod march_tests {
         app.update();
     }
 
-    /// A CROSSING IS TWO SEGMENTS, AND THE TICK PAYS FOR BOTH.
-    ///
-    /// The round flies from the corridor origin to the AXIS handoff along the way in, then from
-    /// there to the exit along the bend. The driver knew only where its own cast first touched
-    /// armour — the nearest of thirteen sample rays — and charged the budget to THAT. At oblique
-    /// incidence the nearest ray leads the axis by `r·tan(incidence)`: codex measured an 88 at 72°
-    /// charged 0.3934 m for a path whose segments total 0.5288 m, so 135.4 mm of the tick was flown
-    /// for free. Free travel inside a tick moves subsequent impacts across tick and REV-25
-    /// accounting boundaries, which is a netcode bug wearing a geometry costume.
-    ///
-    /// The observable needs no internals: a tick's route is a POLYLINE — start to entry, entry to
-    /// exit, exit to wherever the leftover budget ran out — and its total length is the budget. An
-    /// undercharge shows up as a shell that ended the tick further along than its own velocity
-    /// could carry it, by exactly the metres that were skipped.
+    /// The game's damage model charges both the incoming approach and the bent transit in
+    /// seconds. The axis hand-off can trail the nearest sample, so charging only first contact
+    /// grants free approach time. The observer is open flight after the perforation. All speeds,
+    /// angles and dimensions below are fixture data.
     #[test]
     fn a_crossing_charges_the_whole_path_it_flew() {
         let start = Vec3::new(0.0, 2.0, 2.0);
         let dt = 0.016_f32;
         // The budget the march works from: this tick's velocity after gravity and drag, times dt.
         let stepped = freeflight_step(Vec3::NEG_Z * 800.0, fixture_drag_k(0.088, 10.2), dt);
-        let budget = stepped.length() * dt;
+        let incoming_speed = stepped.length();
 
         for degrees in [0.0_f32, 40.0, 72.0] {
             let mut app = world_with_trimesh_plates(&[]);
@@ -8678,10 +8638,19 @@ mod march_tests {
             let approach = start.distance(entry);
             let through = entry.distance(exit);
             let onward = exit.distance(end);
-            let flown = approach + through + onward;
+            use mechanism::Mechanism;
+            let projectile = app.world().get::<Projectile>(shell).unwrap();
+            let outgoing_speed = projectile.speed();
+            let material_seconds = projectile.round.flight_time(
+                projectile.round.at(incoming_speed),
+                projectile.round.at(outgoing_speed),
+                f64::from(through),
+            );
+            let flown_seconds =
+                f64::from(approach / incoming_speed + onward / outgoing_speed) + material_seconds;
             assert!(
-                (flown - budget).abs() < 1.0e-3,
-                "{degrees}°: the tick flew {flown} m on a {budget} m budget                  (approach {approach}, through {through}, onward {onward})",
+                (flown_seconds - f64::from(dt)).abs() < 2.0e-6,
+                "{degrees} degrees: path spent {flown_seconds} s, tick has {dt} s"
             );
             // The defect is invisible head-on and grows with the ring's spread, so the oblique arms
             // are the ones that mean anything: name the reach they are testing.

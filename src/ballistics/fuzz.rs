@@ -727,7 +727,7 @@ pub(super) fn drive(
     // The probe round's mechanism, bound as a fired shell's is at spawn.
     let round = super::bound(body);
     let radius = resolve::disc_radius(body.caliber);
-    let mut budget = context.world.step_budget(length);
+    let mut budget = context.world.step_budget(length / speed, speed);
     let mut out = Drive::default();
     // The witness pass over `legs`: chord only, so the wound rate is a unit.
     let wounded = |legs: &[resolve::Leg], flight: &Flight, out: &mut Drive| {
@@ -748,14 +748,18 @@ pub(super) fn drive(
         if !budget.continues(&flight) {
             break;
         }
-        let ahead = next_surface(context.world, &flight, radius, budget.remaining(), &|_| {
-            true
-        });
+        let ahead = next_surface(
+            context.world,
+            &flight,
+            radius,
+            budget.remaining() * flight.speed,
+            &|_| true,
+        );
         let contact = match ahead {
             Ahead::Open | Ahead::Terrain { .. } => {
                 let length = match ahead {
                     Ahead::Terrain { distance, .. } => distance,
-                    _ => budget.remaining(),
+                    _ => budget.remaining() * flight.speed,
                 };
                 let leg = resolve::Leg::new(
                     flight.sweep_origin(),
@@ -784,7 +788,7 @@ pub(super) fn drive(
         )
         .map_err(|error| fail(error, &flight))?;
         budget
-            .charge(decision.charged())
+            .charge(decision.seconds(flight.speed))
             .map_err(|error| fail(error, &flight))?;
         wounded(decision.legs(), &flight, &mut out)?;
         out.decisions.push(decision.clone());

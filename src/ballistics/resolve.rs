@@ -104,8 +104,8 @@ pub(crate) struct StepCrossings(pub(crate) usize);
 /// Shared by the runtime march and the §13.6 gate's driver, so both stop a runaway step at the same
 /// crossing with the same structured error.
 pub(crate) struct Budget {
-    /// Metres of travel left; negative once a drain runs past the budget, or from the start when
-    /// the travel owed exceeds the step's.
+    /// Seconds left; negative once an atomic crossing runs past the clock, or from the start when
+    /// the time owed exceeds the step's.
     remaining: f32,
     /// The lowest `remaining` the step legitimately runs to: zero, or the travel owed past the
     /// step's own, lowered by every reach past it ([`Self::reach`]). What lies below it is the
@@ -114,21 +114,23 @@ pub(crate) struct Budget {
     crossings: usize,
     /// The crossings the step may decide.
     max_crossings: usize,
+    speed: f32,
 }
 
 impl Budget {
-    /// `travel` metres, spent by at most `max_crossings` crossings. A negative `travel` is travel
+    /// `travel` seconds, spent by at most `max_crossings` crossings. A negative `travel` is time
     /// owed past the step's own, which the step flies none of and counts as no overrun.
-    pub(crate) fn new(travel: f32, max_crossings: usize) -> Self {
+    pub(crate) fn new(travel: f32, max_crossings: usize, speed: f32) -> Self {
         Self {
             remaining: travel,
             floor: travel.min(0.0),
             crossings: 0,
             max_crossings,
+            speed,
         }
     }
 
-    /// The step runs on `reach` metres from where the flight stands: to the end of its travel, or
+    /// The step runs on `reach` seconds from where the flight stands: to the end of its clock, or
     /// past it to where its envelopes end. A crossing that runs no further overruns nothing, and an
     /// overrun already run stays counted.
     pub(crate) fn reach(&mut self, reach: f32) {
@@ -137,12 +139,12 @@ impl Budget {
             .min(self.remaining - reach + self.overrun(self.remaining));
     }
 
-    /// Metres below the floor a step standing at `remaining` has run.
+    /// Seconds below the floor a step standing at `remaining` has run.
     fn overrun(&self, remaining: f32) -> f32 {
         (self.floor - remaining).max(0.0)
     }
 
-    /// Metres of travel left in the step (negative while draining past it).
+    /// Seconds left in the step (negative while resolving an atomic crossing past it).
     pub(crate) fn remaining(&self) -> f32 {
         self.remaining
     }
@@ -150,21 +152,21 @@ impl Budget {
     /// The step has more to resolve: travel left, or material the flight is held inside, whose
     /// crossing resolves now, past the budget if need be (see [`MAX_OVERRUN`]).
     pub(crate) fn continues(&self, flight: &Flight) -> bool {
-        self.remaining > MARCH_EPS || flight.holds_material()
+        self.remaining > 0.0 || flight.holds_material()
     }
 
-    /// Spend `travel` metres of open flight, counting no crossing; a negative `travel` hands
-    /// metres back.
+    /// Spend `travel` seconds of open flight, counting no crossing; a negative value hands
+    /// seconds back.
     pub(crate) fn fly(&mut self, travel: f32) {
         self.remaining -= travel;
     }
 
-    /// Charge one more crossing of `travel` metres, BEFORE its consequences are applied — or the
+    /// Charge one more crossing of `travel` seconds, BEFORE its consequences are applied — or the
     /// structured diagnostic that panics in gameplay. A refused crossing applies no consequences.
     pub(crate) fn charge(&mut self, travel: f32) -> Result<(), WalkError> {
         let crossings = self.crossings + 1;
         let remaining = self.remaining - travel;
-        let overrun = self.overrun(remaining);
+        let overrun = self.overrun(remaining) * self.speed;
         if crossings > self.max_crossings || overrun > MAX_OVERRUN {
             return Err(WalkError::DrainExhausted { crossings, overrun });
         }
@@ -1078,7 +1080,7 @@ impl Flight {
 
     /// Advance the flight along a decision: the state the next crossing starts from. The sampling
     /// frame is transported through every direction change, including the null one. Returns whether
-    /// the round came to rest; the travel it charges is [`Decision::charged`].
+    /// the round came to rest; its clock is [`Decision::seconds`].
     pub(crate) fn follow(&mut self, decision: Decision) -> bool {
         match decision {
             Decision::Clear {
@@ -1158,18 +1160,31 @@ pub(crate) enum Decision {
     /// Too oblique and not overmatched: deflected off the face — no entry, no spall.
     Bounce(Bounce),
     /// It bit in: stopped inside the material or came out the far side.
-    Bite(Bite),
+    Bite(Box<Bite>),
 }
 
 impl Decision {
-    /// Line-of-sight metres following this decision charges against the step's budget, measured
-    /// from the flight's position — known before anything is applied, so [`Budget::charge`] can
-    /// refuse a crossing before its consequences land.
-    pub(crate) fn charged(&self) -> f32 {
+    /// The game's damage model: elapsed seconds along the resolved path, including the
+    /// incoming approach, material stretches, intervening air and the exit nudge.
+    pub(crate) fn seconds(&self, speed: f32) -> f32 {
         match self {
-            Decision::Clear { travel, .. } => *travel,
-            Decision::Bounce(bounce) => bounce.travel,
-            Decision::Bite(bite) => bite.travel,
+            Self::Clear { travel, .. } => *travel / speed,
+            Self::Bounce(bounce) => bounce.travel / bounce.speed_in,
+            Self::Bite(bite) => {
+                let mut seconds = f64::from(bite.approach / bite.speed_in);
+                let (mut at, mut speed) = (0.0, f64::from(bite.speed_in));
+                for motion in &bite.motion {
+                    seconds += (motion.start - at).max(0.0) / speed + motion.seconds;
+                    at = motion.end;
+                    speed = motion.speed_out;
+                }
+                let suffix = (f64::from(bite.travel - bite.approach) - at).max(0.0);
+                if suffix > 0.0 && matches!(bite.end, BiteEnd::Perforated { .. }) {
+                    assert!(speed > 0.0, "a flight suffix cannot follow rest");
+                    seconds += suffix / speed;
+                }
+                seconds as f32
+            }
         }
     }
 
@@ -1341,6 +1356,8 @@ pub(crate) struct Bite {
     /// Line-of-sight metres of `travel` flown from the flight's position to the axis hand-off,
     /// along the way in; the rest is the transit along the bend.
     pub approach: f32,
+    /// The game's damage model: the transit's resolved force-law clock, in corridor metres.
+    pub motion: Vec<walk::Motion>,
     pub end: BiteEnd,
     /// The approach to the axis hand-off along `incoming`, then the transit along the bend to the
     /// rest point or the resume point.
@@ -1593,7 +1610,7 @@ pub(crate) fn decide(
                 ENTRANCE_SPAN,
             )?;
             let plan = walk::finish(&transit, &request, round, state_in, &LIMITS, &context.laws)?;
-            Ok(Decision::Bite(bite(
+            Ok(Decision::Bite(Box::new(bite(
                 &transit,
                 plan,
                 mass,
@@ -1604,7 +1621,7 @@ pub(crate) fn decide(
                 speed,
                 owner,
                 &context.laws,
-            )))
+            ))))
         }
     }
 }
@@ -1709,6 +1726,7 @@ fn bite(
             .collect(),
         travel: approach + flown,
         approach,
+        motion: plan.motion,
         end,
         legs: [
             way_in,

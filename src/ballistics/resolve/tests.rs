@@ -708,14 +708,11 @@ fn a_budget_short_of_the_crossing_terminates_before_the_target() {
     assert!(short.transit_only());
 }
 
-/// A ROUND WHOSE READOUT EQUALS A CROSSING'S COST LEAVES IT WITH A SUB-RESOLUTION RESIDUAL.
-///
-/// The crossing's cost equals the round's f32 readout. Speed is the state and the readout its f32
-/// rounding (DOWN here: the unrounded readout is above it), so the round crosses the metre with a
-/// tiny positive residual speed rather than none. That residual geometrically reaches the target
-/// behind — a positive chord — but its dose is below the target's f32 HP resolution: reach without
-/// admission, and the runtime removes no HP. Fixture: a one-sample round, a metre of material whose
-/// factor is the round's readout per metre, faces at exactly representable heights.
+/// The game's damage model: a sub-resolution residual cannot reach a distant target before
+/// its clock allows it. The readout rounds down, so this fixture leaves the material with a
+/// positive residual; a distance budget would spend initial-speed metres at that tiny speed.
+/// The runtime and the probe driver must both stop this tick short of the target. Fixture data:
+/// a one-sample round, one metre of material, a target behind it and representable face heights.
 #[test]
 fn an_exact_budget_crossing_terminates_before_the_target() {
     let stepped = freeflight_step(
@@ -742,12 +739,12 @@ fn an_exact_budget_crossing_terminates_before_the_target() {
     });
     assert_eq!(
         exact.impacts.iter().map(|i| i.0).collect::<Vec<_>>(),
-        [Verdict::Through, Verdict::Stopped],
-        "through the metre with a sub-resolution residual, then stopped in the target",
+        [Verdict::Through],
+        "the residual has not had time to reach the target",
     );
     assert!(
-        exact.reached,
-        "the residual puts a positive chord into the target"
+        !exact.reached,
+        "a positive residual does not grant instantaneous travel to the target"
     );
     assert!(
         !exact.admitted && !exact.damaged,
@@ -947,7 +944,7 @@ fn a_chain_of_held_continuations_stops_at_the_step_s_limits() {
 /// THE STEP REFUSES THE CROSSING THAT WOULD CARRY IT PAST ITS OVERRUN, before anything is charged.
 #[test]
 fn a_step_refuses_the_crossing_past_its_overrun() {
-    let mut budget = Budget::new(1.0, MAX_STEP_CROSSINGS);
+    let mut budget = Budget::new(1.0, MAX_STEP_CROSSINGS, 1.0);
     budget
         .charge(1.0 + MAX_OVERRUN)
         .expect("exactly the overrun is within it");
@@ -974,11 +971,11 @@ fn a_step_refuses_the_crossing_past_its_overrun() {
 /// third's.
 #[test]
 fn an_overrun_is_counted_past_the_steps_reach() {
-    let mut owing = Budget::new(-3.0, MAX_STEP_CROSSINGS);
+    let mut owing = Budget::new(-3.0, MAX_STEP_CROSSINGS, 1.0);
     owing
         .charge(MAX_OVERRUN)
         .expect("the travel owed is no overrun");
-    let mut enveloped = Budget::new(1.0, MAX_STEP_CROSSINGS);
+    let mut enveloped = Budget::new(1.0, MAX_STEP_CROSSINGS, 1.0);
     enveloped.reach(20.0);
     enveloped
         .charge(20.0 + MAX_OVERRUN)
@@ -987,7 +984,7 @@ fn an_overrun_is_counted_past_the_steps_reach() {
         enveloped.charge(0.5).is_err(),
         "past the envelopes' end the overrun counts"
     );
-    let mut drained = Budget::new(1.0, MAX_STEP_CROSSINGS);
+    let mut drained = Budget::new(1.0, MAX_STEP_CROSSINGS, 1.0);
     drained.charge(11.0).expect("a 10 m drain");
     drained.reach(0.0);
     assert_eq!(
@@ -1007,7 +1004,7 @@ fn an_overrun_is_counted_past_the_steps_reach() {
 /// THE STEP REFUSES THE CROSSING PAST ITS COUNT, before anything is charged.
 #[test]
 fn a_step_refuses_the_crossing_past_its_count() {
-    let mut budget = Budget::new(1.0, MAX_STEP_CROSSINGS);
+    let mut budget = Budget::new(1.0, MAX_STEP_CROSSINGS, 1.0);
     for _ in 0..MAX_STEP_CROSSINGS {
         budget.charge(0.0).expect("within the count");
     }
@@ -2803,7 +2800,7 @@ fn a_tube_crossed_side_on_resolves() {
                     .decisions
                     .iter()
                     .filter_map(|decision| match decision {
-                        Decision::Bite(bite) => Some(bite),
+                        Decision::Bite(bite) => Some(bite.as_ref()),
                         _ => None,
                     })
                     .collect();
