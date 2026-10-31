@@ -1,5 +1,4 @@
-//! What the dedicated server's host gives it: the CPU it may use and the threads it starts, and the
-//! levers that override them.
+//! What the dedicated server's host gives it: the CPU it may use and and the threads it starts.
 //!
 //! - [`host_task_pools`] sizes Bevy's task pools for this host by the rule below;
 //!   `server_plugin_floor` mounts it, so the server and the bitprobe fixture run on the same pools.
@@ -7,8 +6,6 @@
 //!   pool's thread count, and (Linux) the container's cgroup CPU quota and cpuset. An unreadable
 //!   value logs as `unknown`.
 //! - [`read_throttle`] reads the cgroup's cumulative throttle counters for `server_stats`.
-//! - [`StallLever`] reads `OVERMATCH_SERVER_STALL`: a dev instrument that stands in for a host too
-//!   slow for the tick rate, so a client's ride through a slow authority reproduces on any machine.
 //!
 //! The cgroup parsers take the file's text, so they are tested from fixtures. Off Linux the files
 //! do not exist and every reading is `None`.
@@ -35,7 +32,6 @@
 //! 2 ran into the quota: tick p95 88 ms, throttled 441–472 ms of every second.
 
 use core::num::NonZero;
-use core::time::Duration;
 
 use bevy::prelude::*;
 use bevy::tasks::{AsyncComputeTaskPool, ComputeTaskPool, IoTaskPool};
@@ -64,87 +60,6 @@ pub(crate) fn host_task_pools() -> TaskPoolPlugin {
     let cores = std::thread::available_parallelism().unwrap_or(NonZero::<usize>::MIN);
     TaskPoolPlugin {
         task_pool_options: task_pool_options(cores),
-    }
-}
-
-/// The stall lever.
-pub(super) const STALL_LEVER: &str = "OVERMATCH_SERVER_STALL";
-
-/// `OVERMATCH_SERVER_STALL=<ms>[@<from_s>-<to_s>]`: every fixed tick sleeps `ms` of wall time, for
-/// the whole run or only while the server's real elapsed time lies in `[from_s, to_s)`.
-///
-/// A tick that costs more than its 15.625 ms budget runs the server below 64 Hz the way a slow host
-/// does: Bevy's fixed loop catches up several ticks per frame until `Time<Virtual>`'s max delta
-/// clamps it, and lightyear sends one replication message per frame that ran the fixed loop.
-#[derive(Resource, Debug, Clone, Copy, PartialEq)]
-pub(super) struct StallLever {
-    per_tick: Duration,
-    /// Real seconds since startup, `[from, to)`; `None` is the whole run.
-    window: Option<(f64, f64)>,
-}
-
-impl StallLever {
-    /// Unset, empty, `off` or `0` is `Ok(None)`. Anything else must parse, or the server refuses to
-    /// start: a typo must not run a stall condition with no stall in it.
-    pub(super) fn parse(value: Option<&str>) -> Result<Option<Self>, String> {
-        let Some(value) = value.map(str::trim) else {
-            return Ok(None);
-        };
-        if value.is_empty() || value.eq_ignore_ascii_case("off") || value == "0" {
-            return Ok(None);
-        }
-        let bad = || format!("{STALL_LEVER}='{value}': want <ms>[@<from_s>-<to_s>] or `off`");
-        let (ms, window) = match value.split_once('@') {
-            None => (value, None),
-            Some((ms, window)) => {
-                let (from, to) = window.split_once('-').ok_or_else(bad)?;
-                let from = from.trim().parse::<f64>().map_err(|_| bad())?;
-                let to = to.trim().parse::<f64>().map_err(|_| bad())?;
-                if !(from.is_finite() && to.is_finite() && 0.0 <= from && from < to) {
-                    return Err(bad());
-                }
-                (ms, Some((from, to)))
-            }
-        };
-        let ms = ms.trim().parse::<u64>().map_err(|_| bad())?;
-        if ms == 0 {
-            return Err(bad());
-        }
-        Ok(Some(Self {
-            per_tick: Duration::from_millis(ms),
-            window,
-        }))
-    }
-
-    /// The lever from the environment.
-    pub(super) fn from_env() -> Result<Option<Self>, String> {
-        Self::parse(std::env::var(STALL_LEVER).ok().as_deref())
-    }
-
-    fn active_at(&self, elapsed_s: f64) -> bool {
-        self.window
-            .is_none_or(|(from, to)| from <= elapsed_s && elapsed_s < to)
-    }
-
-    fn describe(&self) -> String {
-        let window = self.window.map_or_else(
-            || "the whole run".to_owned(),
-            |(from, to)| format!("from {from} s to {to} s of real time"),
-        );
-        format!("{} ms per tick, {window}", self.per_tick.as_millis())
-    }
-}
-
-/// Mount the stall lever: one sleep at the head of every fixed tick it covers.
-pub(super) fn install_stall(app: &mut App, lever: StallLever) {
-    info!("server: stall lever — {} ({STALL_LEVER})", lever.describe());
-    app.insert_resource(lever)
-        .add_systems(FixedFirst, stall_tick);
-}
-
-fn stall_tick(lever: Res<StallLever>, time: Res<Time<Real>>) {
-    if lever.active_at(time.elapsed_secs_f64()) {
-        std::thread::sleep(lever.per_tick);
     }
 }
 
@@ -303,39 +218,6 @@ mod tests {
                     "{pool} on {cores} cores"
                 );
             }
-        }
-    }
-
-    /// Unset and `off` must leave a production server unstalled; a malformed value must stop the
-    /// server rather than run a slow-server condition at full rate; the window bounds are
-    /// half-open, so a run can name back-to-back windows.
-    #[test]
-    fn the_stall_lever_is_off_unless_it_names_milliseconds() {
-        for off in [None, Some(""), Some("off"), Some("OFF"), Some("0")] {
-            assert_eq!(StallLever::parse(off), Ok(None), "{off:?}");
-        }
-        let whole = StallLever::parse(Some("30")).unwrap().unwrap();
-        assert_eq!(whole.per_tick, Duration::from_millis(30));
-        assert!(whole.active_at(0.0) && whole.active_at(1.0e6));
-        let window = StallLever::parse(Some(" 30@40-100 ")).unwrap().unwrap();
-        assert_eq!(window.window, Some((40.0, 100.0)));
-        assert!(!window.active_at(39.9));
-        assert!(window.active_at(40.0));
-        assert!(window.active_at(99.9));
-        assert!(!window.active_at(100.0));
-        for bad in [
-            "-1",
-            "1.5",
-            "x",
-            "30@",
-            "30@40",
-            "30@100-40",
-            "30@40-40",
-            "30@-1-5",
-            "0@1-2",
-            "30@a-b",
-        ] {
-            assert!(StallLever::parse(Some(bad)).is_err(), "{bad}");
         }
     }
 
