@@ -52,6 +52,6 @@ pub(super) fn shield_late_authored_marker(
 }
 
 /// Construct the live and recorded poses from one value so the shield cannot restore stale data.
-pub(super) fn authored_attachment(transform: Transform) -> impl Bundle {
+pub(crate) fn authored_attachment(transform: Transform) -> impl Bundle {
     (transform, AuthoredLocalTransform(transform))
 }

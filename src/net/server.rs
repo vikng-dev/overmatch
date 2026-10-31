@@ -1201,19 +1201,25 @@ mod tests {
             &crate::substances::SubstanceRegistry::shipped(),
         )
         .unwrap_or_else(|_| panic!("the shipped sim artifact certifies"));
-        let mut app = App::new();
-        app.insert_resource(crate::bake::TankBlueprint::new(
+        let blueprint = crate::bake::TankBlueprint::new(
             crate::tank::TANK_SPEC_PATH.to_owned(),
             asset.geometry,
             asset.spec,
-        ))
-        .insert_resource(PendingTankAssets {
-            spec: Handle::default(),
-            scene: None,
-        })
-        .insert_resource(BotCount(4))
-        .init_resource::<CombatantIds>()
-        .add_systems(Update, spawn_bots);
+        );
+        let bump_stops = crate::track::bump_stop::BumpStops::of_blueprint(
+            &blueprint,
+            &root.join(crate::tank::TANK_SIM_GLB_PATH),
+        );
+        let mut app = App::new();
+        app.insert_resource(blueprint)
+            .insert_resource(bump_stops)
+            .insert_resource(PendingTankAssets {
+                spec: Handle::default(),
+                scene: None,
+            })
+            .insert_resource(BotCount(4))
+            .init_resource::<CombatantIds>()
+            .add_systems(Update, spawn_bots);
         app.update();
         app.update();
 

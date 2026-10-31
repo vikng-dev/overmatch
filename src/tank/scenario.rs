@@ -802,12 +802,17 @@ mod spawn_contract_tests {
             ballistic_volumes: Vec::new(),
         };
 
+        let bump_stops = crate::track::bump_stop::BumpStops::new(
+            &crate::track::rig_geom::tiger_rig(),
+            &spec.track.suspension.params(),
+        );
         let mut app = App::new();
         app.insert_resource(TankBlueprint::new(
             crate::tank::TANK_SPEC_PATH.to_owned(),
             geometry,
             spec,
         ))
+        .insert_resource(bump_stops)
         .init_resource::<SourceProbe>()
         .add_systems(Update, probe_unresolved_handle);
         app.update();

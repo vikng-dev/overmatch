@@ -43,6 +43,7 @@ use bevy::world_serialization::WorldAssetRoot;
 
 use crate::Layer;
 use crate::bake::TankBlueprint;
+use crate::track::bump_stop::{BumpStop, BumpStops, spawn_bump_stops};
 
 // Shared course/rig/belt machinery lives here in `mod.rs`; the model's force and view systems
 // live in `belt.rs` (the field-belt — the sandbox's single model, promoted into the game as
@@ -286,15 +287,6 @@ impl ConformedBelts {
 #[derive(Component)]
 pub(crate) struct Hull;
 
-/// The RED hard-stop collider for one side — the suspension's mechanical backstop. One convex-hull
-/// prism per side, extruded from [`RigGeom::hard_stop_polyline`] across the true shoe faces, hung on
-/// the hull. It is a penetration stop of the track steel it stands in for (its friction is that
-/// row's) that nothing may cross once the springs bottom on the bump-stop; at rest it clears flat ground by the
-/// bump-stop reserve and touches nothing. Marked so [`refresh_hard_stops`] can despawn and rebuild it
-/// whenever a retune moves the geometry it was cut from.
-#[derive(Component)]
-struct HardStop;
-
 /// The free-fly inspection camera (own copy, like `armor_sandbox`'s).
 #[derive(Component)]
 struct FreeFlyCam;
@@ -418,7 +410,7 @@ pub fn plugin(app: &mut App) {
                 )
                     .chain(),
                 refresh_envelope,
-                refresh_hard_stops,
+                refresh_bump_stops,
                 reset_rig,
                 // `;`/`'` `n`/`m` are now INTENT writers onto `RigCounts`; `apply_rig_counts` is the
                 // single commit path (shared with the panel's stepper) that rebuilds the rig.
@@ -680,7 +672,7 @@ struct VizLayers {
     /// The collocation stations at the *physics* ring (where the physics thinks the shoes are, vs
     /// the drawn view).
     casts: bool,
-    /// Avian collider wireframes (hull box, hard-stop prisms, terrain).
+    /// Avian collider wireframes (hull box, bump-stop prisms, terrain).
     colliders: bool,
     /// The taut reference loop (the belt's rest path, vs the conformed/solved view).
     reference: bool,
@@ -1313,7 +1305,7 @@ fn build_rig(
                 }
 
                 // Sprocket/idler data carriers for the hub-gizmo layer — NO colliders. The RED
-                // hard-stop prism (`spawn_hard_stops`) is the whole rig's penetration backstop,
+                // bump-stop prism (`track::bump_stop`) is the whole rig's penetration backstop,
                 // its end arcs riding the unsprung wheels' INNER (wheel-rim) surface.
                 for (kind, (centre, _radius)) in
                     [(WheelKind::Sprocket, sprocket), (WheelKind::Idler, idler)]
@@ -1329,12 +1321,10 @@ fn build_rig(
         })
         .id();
 
-    // The RED hard-stop backstops — one convex-hull prism per side, cut from the compression-pose
-    // INNER-surface (wheel-rim) wrap (see `RigGeom::hard_stop_polyline` — the full plate below it
-    // is the support penalty's dig-in band). Spawned here so the rig is never up for a
-    // frame without its bottoming stop; [`refresh_hard_stops`] recuts them on every retune. It
-    // covers the whole belly the suspension bottoms onto — it is the rig's only penetration stop.
-    spawn_hard_stops(&mut commands, hull, &geom, &suspension.0);
+    // The RED bump stops, through the constructor every game tank's body uses
+    // ([`spawn_bump_stops`]), cut at the live knobs' travel. Spawned here so the rig is never up
+    // for a frame without its bottoming stop; [`refresh_bump_stops`] recuts them on every retune.
+    spawn_bump_stops(&mut commands, hull, &BumpStops::new(&geom, &suspension.0));
 
     // The authored counts as the panel/keyboard INTENT seam (see [`RigCounts`] / [`apply_rig_counts`]).
     // Lands in the same flush as `RigGeom`, so `is_added()` covers this first frame in the commit
@@ -1404,75 +1394,19 @@ fn report_collision_proxies(blueprint: &TankBlueprint, geom: &RigGeom) {
     }
 }
 
-/// The hull-local convex-hull collider for one side's RED hard stop: the side's
-/// [`RigGeom::hard_stop_polyline`] extruded across the track's TRUE lateral extent. The two x
-/// positions are the EDGE grip columns ([`RigGeom::grip_columns`] index 0 and 2 — the measured shoe
-/// faces), NOT `plane_x ± width/2`: the Tiger's shoe is authored ~17 mm outboard of the pin plane, so
-/// the symmetric span would place the prism off the steel it is standing in for.
-///
-/// `None` on a degenerate point cloud — it never is for a real rig, but a retune into a broken count
-/// should warn, not panic, so the caller can skip that side.
-fn hard_stop_collider(geom: &RigGeom, side: Side, params: &SuspensionParams) -> Option<Collider> {
-    let cols = geom.grip_columns(side);
-    let (x_in, x_out) = (cols[0].0, cols[2].0);
-    // Side-plane (z, y) → 3-D with the SAME mapping the wheel/cylinder spawns use
-    // (`Transform::from_xyz(x, centre.y, centre.x)`): the polyline's `Vec2` is `(z, y)`. Extruding
-    // each vertex to both faces turns the convex 2-D wrap into a convex prism.
-    let points: Vec<Vec3> = geom
-        .hard_stop_polyline(side, params)
-        .into_iter()
-        .flat_map(|p| [Vec3::new(x_in, p.y, p.x), Vec3::new(x_out, p.y, p.x)])
-        .collect();
-    Collider::convex_hull(points)
-}
-
-/// The `materials.ron` row the hard stop is of: the track's shoe steel it stands in for.
-const HARD_STOP_SUBSTANCE: &str = "TrackSteel";
-
-/// Spawn both sides' red hard-stop colliders as children of `hull`. Shared by [`build_rig`] (initial
-/// spawn) and [`refresh_hard_stops`] (rebuild on retune), so the two can never cut the prism from the
-/// geometry two different ways. `Layer::Vehicle` like the authored proxies, and the friction of the
-/// track steel it stands in for ([`HARD_STOP_SUBSTANCE`]).
-fn spawn_hard_stops(
-    commands: &mut Commands,
-    hull: Entity,
-    geom: &RigGeom,
-    params: &SuspensionParams,
-) {
-    for side in Side::ALL {
-        let Some(collider) = hard_stop_collider(geom, side, params) else {
-            warn!("rig: hard-stop hull for {side:?} is degenerate — no backstop spawned");
-            continue;
-        };
-        commands.spawn((
-            HardStop,
-            collider,
-            // The extruded points are ALREADY full hull-local, so identity — there is no glb node
-            // pose to compose (unlike the authored `*_Collider` proxies, which carry their node's
-            // baked root-relative transform).
-            Transform::IDENTITY,
-            CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
-            crate::substances::SubstanceRegistry::shipped_static()
-                .contact_friction(HARD_STOP_SUBSTANCE)
-                .unwrap_or_else(|err| panic!("rig: the hard stop's substance: {err}")),
-            ChildOf(hull),
-        ));
-    }
-}
-
-/// Rebuild the red hard-stop colliders whenever the geometry they are cut from moves: a rig rebuild
+/// Rebuild the red bump-stop colliders whenever the geometry they are cut from moves: a rig rebuild
 /// (`;`/`'`, `n`/`m`, `R` — [`tune_rig_counts`] commits with `*geom = next`, so `is_changed` fires)
 /// or the bump-stop knob ([`RigSuspension`], which sets the compression pose). The whole
 /// prism is despawned and recut rather than reshaped in place — a collider's convex hull is not a
 /// mutable field, and a retune is rare (a keypress), so the allocation is free. Mirrors
 /// [`refresh_envelope`]'s change-gate; unordered against [`tune_rig_counts`] like it, so a retune is
 /// reflected either this frame or the next.
-fn refresh_hard_stops(
+fn refresh_bump_stops(
     mut commands: Commands,
     geom: Res<RigGeom>,
     suspension: Res<RigSuspension>,
     hull: Single<Entity, With<Hull>>,
-    existing: Query<Entity, With<HardStop>>,
+    existing: Query<Entity, With<BumpStop>>,
 ) {
     if !(geom.is_changed() || suspension.is_changed()) {
         return;
@@ -1480,7 +1414,7 @@ fn refresh_hard_stops(
     for entity in &existing {
         commands.entity(entity).despawn();
     }
-    spawn_hard_stops(&mut commands, *hull, &geom, &suspension.0);
+    spawn_bump_stops(&mut commands, *hull, &BumpStops::new(&geom, &suspension.0));
 }
 
 /// Every piece of belt state that is INDEXED BY the loop — its link count (the grip-element slabs)
@@ -1682,7 +1616,7 @@ fn tune_rig_counts(
 ///
 /// Change-gated: skips the initial `RigCounts` insert (`is_added` — `build_rig` already built the
 /// matching geometry) and any frame the counts already equal the geometry's, so no per-frame
-/// rebuild can occur. `refresh_envelope` / `refresh_hard_stops` then react to the `RigGeom` change
+/// rebuild can occur. `refresh_envelope` / `refresh_bump_stops` then react to the `RigGeom` change
 /// as they do for a knob tweak.
 fn apply_rig_counts(
     counts: Res<RigCounts>,

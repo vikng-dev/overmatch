@@ -931,6 +931,156 @@ fn full_throttle_reaches_and_holds_the_governed_top_speed() {
     );
 }
 
+/// The world height (m) of the lowest vertex of the bump-stop colliders `tank`'s body carries.
+fn lowest_bump_stop_y(app: &mut App, tank: Entity) -> f32 {
+    use avian3d::prelude::{Collider, Position, Rotation};
+    let world = app.world_mut();
+    let (position, rotation) = (
+        world.get::<Position>(tank).expect("tank has a position").0,
+        world.get::<Rotation>(tank).expect("tank has a rotation").0,
+    );
+    world
+        .query_filtered::<(&Collider, &ChildOf), With<crate::track::bump_stop::BumpStop>>()
+        .iter(world)
+        .filter(|(_, parent)| parent.parent() == tank)
+        .flat_map(|(collider, _)| {
+            collider
+                .shape()
+                .as_convex_polyhedron()
+                .expect("a bump stop is a convex hull")
+                .points()
+                .to_vec()
+        })
+        .map(|p| (position + rotation * p).y)
+        .fold(f32::INFINITY, f32::min)
+}
+
+/// A tank whose springs are too soft to hold it bottoms on its bump stops: it comes to rest on
+/// them, not through them, and their contacts reach the contact reader as any collider's do. On
+/// its own springs the same tank at rest touches nothing with them: the stop must never stand in
+/// for the belt. FIXTURE DATA: the support springs at 2 % of the tank's own, far softer than its
+/// stop's clearance can hold; the solver's resting penetration bound (3 cm) is ASSUMED.
+#[test]
+fn a_tank_too_soft_for_its_springs_rests_on_its_bump_stops() {
+    use crate::contact_transfer::{ContactTransfers, StructureBody};
+    use crate::track::bump_stop::BumpStop;
+    use avian3d::prelude::{Collider, LinearVelocity, Position, RigidBody};
+
+    let (mut app, tank) = booted_offline_sim();
+    let rest_clearance = lowest_bump_stop_y(&mut app, tank);
+    assert!(
+        rest_clearance > 0.0,
+        "on its own springs the stop must clear flat ground at rest (lowest vertex at \
+         {rest_clearance:.4} m)"
+    );
+    let stops = {
+        let world = app.world_mut();
+        world
+            .query_filtered::<(Entity, &ChildOf), With<BumpStop>>()
+            .iter(world)
+            .filter(|(_, parent)| parent.parent() == tank)
+            .count()
+    };
+    assert_eq!(stops, 2, "every tank spawns one bump stop per side");
+
+    // A structure flush with the flat ground (top face at y = 0) under the tank, so the reader
+    // that serves structures sees what the stop presses on.
+    let at = app
+        .world()
+        .get::<Position>(tank)
+        .expect("tank has a position")
+        .0;
+    let slab = app
+        .world_mut()
+        .spawn((
+            Transform::from_xyz(at.x, -0.5, at.z),
+            RigidBody::Static,
+            StructureBody,
+        ))
+        .id();
+    app.world_mut().spawn((
+        ChildOf(slab),
+        Transform::IDENTITY,
+        Collider::cuboid(30.0, 1.0, 30.0),
+    ));
+    app.world_mut()
+        .resource_mut::<crate::track::sim::TrackGear>()
+        .params_mut()
+        .support_stiffness_per_m *= 0.02;
+    // Dropped from 0.3 m above its rest pose.
+    {
+        let mut e = app.world_mut().entity_mut(tank);
+        e.get_mut::<Position>().expect("tank has a position").0.y += 0.3;
+        e.get_mut::<LinearVelocity>()
+            .expect("tank has a velocity")
+            .0 = Vec3::ZERO;
+    }
+
+    let ticks = 5 * FIXED_TICKS_PER_SECOND;
+    let mut lowest_late = f32::INFINITY;
+    let mut fastest_late = 0.0f32;
+    let mut press_up = 0.0f32;
+    let mut pressed_ticks = 0;
+    for tick in 0..ticks {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+        if tick < ticks - FIXED_TICKS_PER_SECOND {
+            continue;
+        }
+        lowest_late = lowest_late.min(lowest_bump_stop_y(&mut app, tank));
+        let world = app.world();
+        let speed = world
+            .get::<LinearVelocity>(tank)
+            .expect("tank has a velocity")
+            .0
+            .length();
+        fastest_late = fastest_late.max(speed);
+        let press: f32 = world
+            .resource::<ContactTransfers>()
+            .split()
+            .filter(|(point, _, _)| {
+                point.body == tank && world.get::<BumpStop>(point.body_collider).is_some()
+            })
+            .map(|(_, _, press)| -press.y)
+            .sum();
+        if press > 0.0 {
+            pressed_ticks += 1;
+            press_up += press;
+        }
+    }
+    let weight = app
+        .world()
+        .get::<avian3d::prelude::Mass>(tank)
+        .expect("tank has mass")
+        .0
+        * crate::track::derive::G;
+    println!(
+        "bump stop: rest clearance {rest_clearance:.4} m; soft springs: lowest vertex \
+         {lowest_late:.4} m, fastest {fastest_late:.4} m/s over the last second; the structure \
+         read a press on the stops in {pressed_ticks}/{FIXED_TICKS_PER_SECOND} ticks, mean \
+         {:.0} N ({:.3} of the weight)",
+        press_up / FIXED_TICKS_PER_SECOND as f32,
+        press_up / FIXED_TICKS_PER_SECOND as f32 / weight,
+    );
+    assert!(
+        lowest_late >= -0.03,
+        "the tank sank {:.4} m through its bump stops",
+        -lowest_late
+    );
+    assert!(
+        lowest_late <= 0.03,
+        "springs this soft cannot hold the tank clear of its stops (lowest vertex \
+         {lowest_late:.4} m)"
+    );
+    assert!(
+        fastest_late < 0.05,
+        "the tank must come to rest on its stops (moving {fastest_late:.4} m/s)"
+    );
+    assert_eq!(
+        pressed_ticks, FIXED_TICKS_PER_SECOND,
+        "the contact reader must read the stops' press on the structure every tick at rest"
+    );
+}
+
 #[derive(Resource, Default)]
 struct ScriptedDeterminismRun {
     digests: Vec<Vec<(String, crate::trace::CanonicalTankStateDigest)>>,
@@ -2470,7 +2620,7 @@ fn a_server_composition_builds_no_track_prints() {
 /// collider (a filter that admits some layer) resolves, as Avian's narrow phase resolves it (its
 /// own `Friction`, else its body's, else `DefaultFriction`), to its material's row under
 /// `substances::PAIR_RULE`. The material is found by class, never by name: a ballistic volume's
-/// substance, a vehicle proxy's `colliders` entry, a graybox prototype's substance, and for the
+/// substance, a vehicle proxy's `colliders` entry, a bump stop's track steel, a graybox prototype's substance, and for the
 /// terrain the base ground type. A collider of no class, one falling back to Avian's default, or
 /// one under another rule (a frictionless `Min` or a `Max`, either of which makes a pair's value
 /// one side's) fails here, naming it.
@@ -2540,6 +2690,13 @@ fn every_collider_carries_its_materials_friction_under_the_one_rule() {
                 }
                 other => panic!("a scatter proxy of {other:?}"),
             }
+        } else if world
+            .get::<crate::track::bump_stop::BumpStop>(collider)
+            .is_some()
+        {
+            registry
+                .contact_friction(crate::track::bump_stop::SUBSTANCE)
+                .unwrap()
         } else if layers.memberships.has_all(crate::Layer::Vehicle) {
             let node = parent
                 .and_then(|p| world.get::<Name>(p))

@@ -35,6 +35,7 @@ pub use scenario::{client_plugin, sp_spawn_plugin};
 pub(crate) use servo::RemoteServos;
 // The servo mechanism itself, for the aim regression net: `aim`'s transport tests converge real
 // servos at authored Tiger rates rather than asserting on a target angle.
+pub(crate) use integrity::authored_attachment;
 pub use servo::{
     ServoCommand, ServoIndex, ServoRole, ServoSpec, ServoState, servo_pose, shortest_angle,
 };

@@ -368,6 +368,13 @@ impl TrackGear {
     pub(crate) fn trans_mut(&mut self) -> &mut TransmissionParams {
         &mut self.trans
     }
+
+    /// Test-only variant fixture seam for the contact law, as [`Self::trans_mut`] is for the
+    /// transmission.
+    #[cfg(test)]
+    pub(crate) fn params_mut(&mut self) -> &mut ForceParams {
+        &mut self.params
+    }
 }
 
 pub fn sim_plugin(app: &mut App) {

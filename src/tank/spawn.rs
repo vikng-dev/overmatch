@@ -27,6 +27,7 @@ use crate::firecontrol::RangeTable;
 use crate::shooting::RecoilParams;
 use crate::spec::{TankSpec, TankSpecHandle, Trigger, ViewKind, VolumeSpec, WeaponSpec};
 use crate::substances::Matter;
+use crate::track::bump_stop::{BumpStops, spawn_bump_stops};
 use crate::track::sim::{DriveSignal, EngineRpm, TankTransmission, TrackGripElements};
 
 /// Presentation handles. Loading may gate admission or view attachment, never simulation data.
@@ -121,14 +122,22 @@ pub(crate) const TANK_SPEC_PATH: &str = crate::assets::tank_file!(".tank.ron");
 #[derive(SystemParam)]
 pub(crate) struct TankSimSource<'w> {
     blueprint: Option<Res<'w, TankBlueprint>>,
+    bump_stops: Option<Res<'w, BumpStops>>,
 }
 
 impl TankSimSource<'_> {
+    /// `None` before the bake has run: the blueprint and its bump stops land in one command flush,
+    /// so no state holds one without the other.
     pub(crate) fn get(&self) -> Option<TankContent<'_>> {
         let blueprint = self.blueprint.as_deref()?;
+        let bump_stops = self
+            .bump_stops
+            .as_deref()
+            .expect("the bake inserts a blueprint and its bump stops together");
         Some(TankContent {
             geometry: &blueprint.geometry,
             spec: &blueprint.spec,
+            bump_stops,
         })
     }
 }
@@ -138,6 +147,7 @@ impl TankSimSource<'_> {
 pub(crate) struct TankContent<'a> {
     geometry: &'a TankGeometry,
     spec: &'a TankSpec,
+    bump_stops: &'a BumpStops,
 }
 
 impl<'a> TankContent<'a> {
@@ -975,6 +985,7 @@ fn assemble_tank_body(commands: &mut Commands, root: Entity, content: TankConten
     insert_weapons(commands, geometry, root, &nodes, entity_at);
     insert_ballistic_volumes(commands, geometry, root, &nodes, entity_at);
     insert_collision_proxies(commands, geometry, spec, entity_at);
+    spawn_bump_stops(commands, root, content.bump_stops);
 
     // --- Wheels: rig stations in name-sorted order (the track view reads their side/pose; the
     // belt force model uses the BAKED rest circles — articulation is view-only).

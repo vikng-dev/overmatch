@@ -915,11 +915,17 @@ fn extract_at_startup(mut commands: Commands) {
         asset.geometry.ballistic_volumes.len(),
     );
 
-    commands.insert_resource(TankBlueprint::new(
+    let blueprint = TankBlueprint::new(
         crate::tank::TANK_SPEC_PATH.to_owned(),
         asset.geometry,
         asset.spec,
+    );
+    // The bump stops ride the same flush as the blueprint: every body built from it gets them at
+    // spawn. They are cut from the running gear measured off this same sim artifact.
+    commands.insert_resource(crate::track::bump_stop::BumpStops::of_blueprint(
+        &blueprint, &path,
     ));
+    commands.insert_resource(blueprint);
 }
 
 /// A GLB/spec pair that passed the whole L2 contract: the spec sheet and the certified geometry.

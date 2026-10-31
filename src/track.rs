@@ -24,6 +24,8 @@ pub(crate) mod envelope;
 // `wheel_view`/`link_view` adapters. They used to be duplicated per consumer — a phase lock whose
 // whole point is that ONE measured constant seats twenty teeth cannot survive two copies of it.
 pub(crate) mod belt_draw;
+// The rigid compression shape each track bottoms on, one collider per side on every tank's body.
+pub(crate) mod bump_stop;
 pub(crate) mod gear_phase;
 pub(crate) mod link_view;
 pub(crate) mod loop_geom;

@@ -305,7 +305,7 @@ impl RigGeom {
 
     /// The RED hard-stop wrap for a side, in the side plane `(z, y)` — the outermost surface the
     /// track can ever present toward the hull, and therefore the pure penetration BACKSTOP a
-    /// collider is extruded from (see `mod.rs`'s `HardStop`). Everything softer than this is the
+    /// collider is extruded from ([`super::bump_stop`]). Everything softer than this is the
     /// support penalty's job; this is only the wall the suspension bottoms against.
     ///
     /// It is the taut wrap of the [`Pose::Compression`] circles (road wheels raised by
