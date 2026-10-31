@@ -28,7 +28,8 @@
 //! any body's contacts put on the trunk in one tick beats `fell_k × dbh³` — with the tick it fell
 //! at ([`Fell`]), and every peer derives the rest from the two: the body here, the glb and the
 //! fall's presentation in [`view`], which the sim never waits on. One break per tree: a tree that
-//! is down holds no pool.
+//! is down keeps every pool as the doses left it, its wood still taking a round's dose, and a pool
+//! emptied on it breaks nothing more ([`fell_on_pool_emptied`] reads standing trees only).
 //!
 //! THE FALL IS A MOTION, NEVER A PLACEMENT. The piece above the cut is a rigid physical pendulum
 //! about the cut's centre ([`Pendulum`]: its moments from the taper, its starting spin the least
@@ -856,14 +857,14 @@ fn segment_layers() -> CollisionLayers {
 }
 
 /// Every peer derives the whole body from the state on every change of it (ADR-0016, A10),
-/// never from the body before: standing, every segment stands at its spawn height with its pool
-/// present (a full one where it had none) and the root holds no resting pose, fall path, stop or
-/// transition tick; down, the resting pose and the fall's path to it are derived
-/// ([`resting_pose`], [`FallPath::new`]) and recorded at the path's first pose, and every
-/// segment's pool is gone — one break per tree, so what is down, stump included, takes no more dose. Every segment
-/// stands here; [`pose_falls`] moves the piece along its path. A tree back to standing (a
-/// replaced ledger) or down at another cut derives exactly as one that never held the old state,
-/// its setter having cleared the old state's stop.
+/// never from the body before: standing, every segment stands at its spawn height and the root
+/// holds no resting pose, fall path, stop or transition tick; down, the resting pose and the
+/// fall's path to it are derived ([`resting_pose`], [`FallPath::new`]) and recorded at the path's
+/// first pose. Every segment stands here; [`pose_falls`] moves the piece along its path. A tree
+/// back to standing (a replaced ledger) or down at another cut derives exactly as one that never
+/// held the old state, its setter having cleared the old state's stop. The state never touches a
+/// pool: what the wood took is the material's, standing or down, the stump's and the lying
+/// piece's alike.
 fn derive_state(
     mut trees: Query<
         (
@@ -876,12 +877,7 @@ fn derive_state(
         ),
         (Changed<TreeState>, Without<TreeSegment>),
     >,
-    mut segments: Query<(
-        &TreeSegment,
-        &mut Transform,
-        &Collider,
-        Has<ComponentHealth>,
-    )>,
+    mut segments: Query<(&TreeSegment, &mut Transform, &Collider)>,
     grid: Option<Res<HeightGrid>>,
     step: Res<Time<Fixed>>,
     mut commands: Commands,
@@ -893,12 +889,11 @@ fn derive_state(
     };
     let dt = step.timestep().as_secs_f64();
     for (root, state, body, transform, children, mut envelope) in &mut trees {
-        let cut = match *state {
+        match *state {
             TreeState::Standing => {
                 commands
                     .entity(root)
                     .remove::<(Resting, FallPath, Stopped, Fell)>();
-                None
             }
             TreeState::Down { cut, dir } => {
                 let resting = resting_pose(body, transform.translation, cut, dir, |x, z| {
@@ -908,30 +903,16 @@ fn derive_state(
                 // A stop is the setter's: the ledger's apply clears the last state's with the
                 // state and may carry this one's in the same frame.
                 commands.entity(root).insert((resting, path));
-                Some(usize::from(cut))
             }
-        };
+        }
         let mut parts = Vec::with_capacity(children.len());
         for &child in children {
-            let Ok((&TreeSegment(k), mut local, collider, has_pool)) = segments.get_mut(child)
-            else {
+            let Ok((&TreeSegment(k), mut local, collider)) = segments.get_mut(child) else {
                 continue;
             };
-            let k = usize::from(k);
-            let pose = Transform::from_xyz(0.0, body.prefix[k], 0.0);
+            let pose = Transform::from_xyz(0.0, body.prefix[usize::from(k)], 0.0);
             local.set_if_neq(pose);
             parts.push((collider.clone(), pose.translation, pose.rotation));
-            match cut {
-                Some(_) if has_pool => {
-                    commands.entity(child).remove::<ComponentHealth>();
-                }
-                None if !has_pool => {
-                    commands
-                        .entity(child)
-                        .insert(ComponentHealth::full(body.segment_hp(k)));
-                }
-                _ => {}
-            }
         }
         if let Some(derived) = Envelope::holding(
             parts
@@ -2771,17 +2752,17 @@ pub(crate) mod tests {
     /// down, the stump's segments keep their place, every segment from the cut up leaves the
     /// vertical — the cut's segment at the recorded seat beside the stump, the ones above it along
     /// the fall — and every segment, lying or not, keeps the body's collision filter, so a hull
-    /// meets a fallen trunk as it met the standing one; the resting pose is recorded,
-    /// the setter's transition tick stays and every segment's pool is gone, the stump's too;
-    /// back to standing, every segment stands at its spawn height on that filter, the
-    /// pose and the transition tick are gone and every segment's own pool is back, full; down at
-    /// another cut, the segments the new cut spares stand again and the rest lie; in every state
-    /// the root's envelope holds every segment as derived (the game's damage model ends a round's
-    /// crossing outside it, `ballistics::Envelope`). A derive that skips `Standing`, touches only
-    /// the segments at and above the new cut, turns the piece about the stump's top instead of the
-    /// seat, leaves a pool on the stump, leaves a pool, the pose or the tick from the state before,
-    /// takes a lying segment out of a hull's contacts, or keeps the standing envelope under a
-    /// lying trunk reds this.
+    /// meets a fallen trunk as it met the standing one; the resting pose is recorded and the
+    /// setter's transition tick stays; back to standing, every segment stands at its spawn height
+    /// on that filter and the pose and the transition tick are gone; down at another cut, the
+    /// segments the new cut spares stand again and the rest lie; in every state every segment's
+    /// pool is exactly what the doses left it — a dosed tip, the stump and the lying piece alike —
+    /// and the root's envelope holds every segment as derived (the game's damage model ends a
+    /// round's crossing outside it, `ballistics::Envelope`). A derive that skips `Standing`,
+    /// touches only the segments at and above the new cut, turns the piece about the stump's top
+    /// instead of the seat, drops or refills a pool, leaves the pose or the tick from the state
+    /// before, takes a lying segment out of a hull's contacts, or keeps the standing envelope
+    /// under a lying trunk reds this.
     #[test]
     fn every_state_derives_the_whole_body_from_the_state() {
         let (mut app, root) =
@@ -2814,6 +2795,16 @@ pub(crate) mod tests {
             spawned,
             "standing derives the spawn"
         );
+        // A dose short of emptying the tip's pool, as a march charges it.
+        let tip = app.world().get::<Children>(root).expect("segments")[2];
+        let taken = app
+            .world_mut()
+            .get_mut::<ComponentHealth>(tip)
+            .expect("the tip's pool")
+            .take(5);
+        assert_eq!(taken, 5);
+        let dosed = pools(&app);
+        assert!(dosed[2] != full[2] && dosed[..2] == full[..2]);
 
         // As every setter does: a `Down` state lands with its transition tick.
         let set = |app: &mut App, state: TreeState| {
@@ -2832,8 +2823,8 @@ pub(crate) mod tests {
         set(&mut app, TreeState::Down { cut: 1, dir: 0 });
         assert_eq!(
             pools(&app),
-            [None; 3],
-            "down: no pool, the stump's included"
+            dosed,
+            "down: every pool as the doses left it, the stump's and the lying tip's"
         );
         assert_eq!(
             app.world().get::<Fell>(root),
@@ -2880,9 +2871,8 @@ pub(crate) mod tests {
         );
         assert_eq!(
             pools(&app),
-            full,
-            "back to standing: every segment's own pool is back, full (the fixture wood's 1000 HP \
-             per square metre)"
+            dosed,
+            "back to standing: every pool still as the doses left it"
         );
         assert!(
             app.world().get::<Resting>(root).is_none()
@@ -2917,6 +2907,11 @@ pub(crate) mod tests {
         assert_ne!(
             down_0[1], down_2[1],
             "the once-spared segment no longer stands"
+        );
+        assert_eq!(
+            pools(&app),
+            dosed,
+            "down at another cut: every pool still as the doses left it"
         );
     }
 

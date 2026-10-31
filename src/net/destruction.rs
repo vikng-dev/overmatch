@@ -545,7 +545,7 @@ mod tests {
 
     /// ANOTHER LEDGER IS ANOTHER AUTHORITY'S RECORD: a link's ledger fells tree A; the next
     /// link's ledger — a new entity of the same length — names only tree B. Tree A stands again
-    /// (its tick, its pose and its lying transforms gone, its segment pools back) and tree B
+    /// (its tick, its pose and its lying transforms gone, its segment pools kept) and tree B
     /// falls; a replica that remembers only a length skips B and leaves A down.
     #[test]
     fn a_replaced_ledger_stands_every_tree_it_does_not_name() {
@@ -603,7 +603,7 @@ mod tests {
                 .unwrap()
                 .iter()
                 .all(|segment| world.get::<ComponentHealth>(segment).is_some()),
-            "A's segment pools are back"
+            "A's segment pools are kept"
         );
         assert_eq!(
             spawned(&app, roots[0]),
