@@ -20,12 +20,10 @@
 #   incremental, a 9.8 min cold rebuild). The ceiling therefore sits above the incremental steady
 #   state the reaper above bounds, and the reaper runs first.
 #
-# A bay (`.claude/worktrees/bay-N`, scripts/bays/lib.sh) is never swept. Its incremental cache is
-# what the pool exists to keep: reaping a day-idle bay's incremental directory would make its next
-# lane pay a from-scratch compile of this crate. What bounds a bay instead: agent builds use one
-# feature set (AGENTS.md), so its incremental directories stay few and rustc collects old sessions
-# inside each, and a lease deletes the whole target/ whenever main's Cargo.lock differs from the
-# bay's. `scripts/bays/status` names the bays; delete a bay's target/ by hand to reclaim it.
+# A bay (`.claude/worktrees/bay-N`, scripts/bays/lib.sh) is never swept: a sweep cannot tell a bay
+# whose lane is compiling from an idle one. What bounds a bay instead: `release` drops its
+# incremental caches when its lane ends, and a lease deletes the whole target/ whenever main's
+# Cargo.lock differs from the bay's. `scripts/bays/status` names the bays.
 #
 # Runs only while a Claude Code session is running: that is when builds happen and disk fills, and an
 # idle box has nothing to reap. Run by launchd every 6 h (com.overmatch.target-sweep.plist) or by

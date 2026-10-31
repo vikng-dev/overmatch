@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # release — free a bay: detach its HEAD, so `lane/<lane>` keeps its commits and can be merged and
-# deleted, and drop its lease record.
+# deleted, drop its incremental caches, and drop its lease record.
 #
 # Usage: scripts/bays/release [--force] <bay>        <bay>: bay-2, 2, or the bay's path
 #
@@ -62,5 +62,10 @@ if [[ -n $dirt ]]; then
 fi
 
 git -C "$bay" switch -q --detach >&2
+# The pool keeps a bay's dependency builds warm, not its incremental caches (lib.sh, "Disk").
+kb_free() { df -k "$bay" | awk 'NR == 2 {print $4}'; }
+before=$(kb_free)
+rm -rf "$bay"/target/*/incremental
+freed=$(awk -v a="$before" -v b="$(kb_free)" 'BEGIN {printf "%.1f", (b - a) / 1048576}')
 rm -f "$admin/bay-lease"
-echo "release: $name free (was $holder; HEAD detached at $(git -C "$bay" rev-parse --short HEAD))" >&2
+echo "release: $name free (was $holder; HEAD detached at $(git -C "$bay" rev-parse --short HEAD); incremental caches dropped, df +$freed GB)" >&2

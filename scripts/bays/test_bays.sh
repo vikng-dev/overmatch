@@ -32,6 +32,9 @@
 #      and exits nonzero, keeping the bay, when it holds work or is not a bay.
 #      Mutants: lease progress printed to stdout (Claude Code would read a wrong path); the
 #      WorktreeRemove hook deleting the directory, or exiting 0 over uncommitted work.
+#   7. `release` drops a bay's incremental caches and keeps the rest of its target/.
+#      Mutants: the drop removed (the caches grow unbounded: lib.sh, "Disk"), or widened to the
+#      whole target/ (every lane rebuilds every dependency).
 
 set -u
 
@@ -202,6 +205,19 @@ echo lock-v2 >"$REPO/Cargo.lock"
 commit_in "$REPO" "dependency bump"
 pl=$(lease l)
 is "main's Cargo.lock moved: the target is deleted" no "$(exists "$pl/target")"
+release_all
+
+# ── 7. release drops the incremental caches and keeps every other build ─────────────────────────
+
+group "7. release drops the incremental caches and keeps every other build"
+pi=$(lease inc)
+mkdir -p "$pi/target/debug/incremental/crate-a" "$pi/target/edit/incremental/crate-b" \
+  "$pi/target/debug/deps"
+echo warm >"$pi/target/debug/deps/libdep.rlib"
+release bay-1
+is "every profile's incremental cache is gone" "no no" \
+  "$(exists "$pi/target/debug/incremental") $(exists "$pi/target/edit/incremental")"
+is "the dependency builds stay" warm "$(cat "$pi/target/debug/deps/libdep.rlib" 2>/dev/null)"
 release_all
 
 # Forced release must preserve both versions of a partially staged file for the orchestrator.

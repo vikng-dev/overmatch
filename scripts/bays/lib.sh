@@ -8,13 +8,17 @@
 #
 # A bay is the linked worktree `.claude/worktrees/bay-N` (N = 1..3) under the MAIN checkout's root,
 # which is resolved from the common git dir, so a copy of these scripts in any worktree drives the
-# same pool. Its path never changes, and that is the point: rustc discards a crate's incremental
-# cache when the compiler's working directory changes (the working directory is a tracked option),
-# so a worktree at a new path compiles this crate from scratch while a bay recompiles only what a
-# lane changed. `target/` sits inside the bay (`/target` is ignored), so its path is as fixed as the
-# bay's. MEASURED 2026-10-28 at add9115, `scripts/serial-cargo test --lib --features
-# dev_ui,bitprobe --no-run`, build lock free: a new bay's first build, warmed from main's target/,
-# 91.1 s; the same bay released and leased again at the same main, 1.1 s.
+# same pool. Its path never changes and `target/` sits inside it (`/target` is ignored), so every
+# lane starts with the dependencies the last one built.
+#
+# Disk: `release` drops the bay's incremental caches (`target/*/incremental`) and keeps the rest of
+# target/. Nothing else bounds them: there is one per crate, target and profile, the ones measured
+# each held two sessions, and three bays of them filled the disk in four days (MEASURED 2026-11-01:
+# 33 GB of bay-1's 57 GB target/ was incremental). The price is each lane's first build compiling
+# the workspace crates without one. MEASURED 2026-10-28 at add9115, `scripts/serial-cargo test
+# --lib --features dev_ui,bitprobe --no-run`, build lock free: a new bay warmed from main's target/
+# (rustc discards an incremental cache made in another working directory), 91.1 s; the same bay
+# released and leased again with its cache, at the same main, 1.1 s.
 #
 # The invariants, each one a test in test_bays.sh:
 #   1. Three bays, no overflow. A lease with no bay free exits 1 naming every holder; nothing is
