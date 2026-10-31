@@ -2135,7 +2135,9 @@ impl DiscWalk {
     /// (design doc §13.5, the hand-off); `None` when the disc met nothing.
     ///
     /// A sample whose first run is in a piece of the [first crossing](Self::first_crossing) hands
-    /// off at that run's start, on the face it crossed. Any other sample hands off in air at the
+    /// off at that run's start, on the face it crossed, and the read is those runs: the faces the
+    /// samples strike and the material welded to them, never a run behind a face on its own ray, so
+    /// spaced armour is not read as one plate. Any other sample hands off in air at the
     /// crossing's DEPTH: the read's mean entry point, square to the axis, clamped to the span
     /// between the sample's start and the crossing's end. Such a sample's first face, if it has
     /// one, is in a piece that begins at or past that end, so no sample hands off past the first
@@ -2163,9 +2165,9 @@ impl DiscWalk {
             .map(|piece| piece.is_some_and(|piece| pieces.contains(&piece)))
             .collect();
         let read = self.crossing_of(
-            pieces
-                .iter()
-                .flat_map(|&piece| self.events[piece].runs.iter().copied())
+            (0..self.samples())
+                .filter(|&sample| on_face[sample])
+                .map(|sample| (sample, 0))
                 .collect(),
         )?;
         let at = self

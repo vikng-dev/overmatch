@@ -1504,9 +1504,12 @@ after the turret-scale fix).
   a hand-off lies on ground the sample's walk covered and never depends on how far the corridor
   reached. No sample hands off past the first face on its own ray, so nothing is seeded except
   presence carried in from the crossing before.
-- **The entrance read is the crossing's.** `n̄`, η, the steel-equivalent thickness and the bend
-  are read over every piece of the crossing, so a disc meeting two pieces that overlap in depth
-  reads both surfaces, whichever it meets first. With one piece the read is that piece's alone.
+- **The entrance read is the crossing's faces.** `n̄`, η, the steel-equivalent thickness and the
+  bend are read over the first run of every sample that hands off on a face, so a disc meeting two
+  pieces that overlap in depth reads both surfaces, whichever it meets first. A run behind that
+  face on the sample's own ray (a hull side behind a fender) is the transit's, never summed into
+  the plate the round strikes. With one piece met face-first by every sample the read is that
+  piece's alone.
 - **The transit crossing** is the transit corridor's crossing, by the same rule, and it begins at
   the hand-off. The flight resumes past the crossing's end, so a run that began inside it and was
   resolved apart from it would be skipped, or charged only from the resume point on.

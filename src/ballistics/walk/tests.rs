@@ -3856,12 +3856,13 @@ fn every_hand_off_lies_on_the_span_its_sample_walked() {
 }
 
 /// Two pieces the disc meets at overlapping depths: a plate grazed at 75° by the disc's upper part,
-/// and a block the rest of the disc meets inside the plate's depth. Shaped on the #191 replays (a
-/// grazed edge over a piece behind and beside it, `CorridorMismatch` at first contact).
+/// and a block the rest of the disc meets inside the plate's depth.
 #[derive(Clone, Copy)]
 struct Straddle {
     plate: Slab,
     block: Slab,
+    /// The block's part behind the plate, which only the plate's samples meet.
+    behind: Option<Slab>,
 }
 
 impl Straddle {
@@ -3884,16 +3885,32 @@ impl Straddle {
                 0.025 / incidence.cos(),
             ),
             block: Slab::at(2, 1, block, -AXIS, 0.08),
+            behind: None,
         }
     }
 
-    /// The piece sample `index` meets: the plate above `y = 20 mm` across the disc (five ring
-    /// samples), the block below.
-    fn piece(&self, offsets: &[Vec3], index: usize) -> Slab {
+    /// The block 300 mm deep from its front at `block` m, stepped back to 0.55 m above the plate's
+    /// samples: one piece, its two parts sharing a primitive and overlapping along the axis, so one
+    /// crossing event. With `behind`, the plate's samples meet that stepped part, 35 mm past the
+    /// plate's last exit at 0.515 m (DERIVED). FIXTURE DATA.
+    fn deep(block: f32, behind: bool) -> Self {
+        Self {
+            block: Slab::at(2, 1, block, -AXIS, 0.30),
+            behind: behind.then(|| Slab::at(2, 1, 0.55, -AXIS, block + 0.30 - 0.55)),
+            ..Self::at(block)
+        }
+    }
+
+    /// The pieces sample `index` meets: the plate, and the block's part behind it, above
+    /// `y = 20 mm` across the disc (five ring samples); the block's front below.
+    fn pieces(&self, offsets: &[Vec3], index: usize) -> Vec<Slab> {
         if offsets[index].y > 0.02 {
-            self.plate
+            [Some(self.plate), self.behind]
+                .into_iter()
+                .flatten()
+                .collect()
         } else {
-            self.block
+            vec![self.block]
         }
     }
 
@@ -3911,7 +3928,10 @@ impl Straddle {
                 .map(|(index, offset)| {
                     sample(
                         *offset,
-                        self.piece(offsets, index).hits(*offset, AXIS, 2.0, false),
+                        self.pieces(offsets, index)
+                            .iter()
+                            .flat_map(|piece| piece.hits(*offset, AXIS, 2.0, false))
+                            .collect(),
                     )
                 })
                 .collect(),
@@ -3929,18 +3949,21 @@ impl Straddle {
             samples: request
                 .seeds
                 .iter()
-                .map(|seed| {
-                    let piece = self.piece(offsets, seed.sample);
-                    SampleCorridor {
-                        offset: seed.offset,
-                        initial_presence: seed.inside.clone(),
-                        hits: piece.hits(
-                            request.origin + seed.offset,
-                            request.axis,
-                            2.0,
-                            seed.inside.contains(&piece.key()),
-                        ),
-                    }
+                .map(|seed| SampleCorridor {
+                    offset: seed.offset,
+                    initial_presence: seed.inside.clone(),
+                    hits: self
+                        .pieces(offsets, seed.sample)
+                        .iter()
+                        .flat_map(|piece| {
+                            piece.hits(
+                                request.origin + seed.offset,
+                                request.axis,
+                                2.0,
+                                seed.inside.contains(&piece.key()),
+                            )
+                        })
+                        .collect(),
                 })
                 .collect(),
         }
@@ -4017,6 +4040,50 @@ fn a_disc_meeting_two_pieces_at_overlapping_depths_resolves() {
             "block {block}: {} steel-equivalent against {}",
             read.steel_equivalent,
             first.steel_equivalent
+        );
+    }
+}
+
+/// The entrance reads the face each sample hands off on, never material behind it on that
+/// sample's ray.
+///
+/// [`Straddle::deep`]: the plate's samples also meet the block's stepped part behind the plate. The
+/// block joins the crossing, and that part is in the block's event, so a read over every run of
+/// the block would add the block behind to the plate those samples strike: spaced armour read as
+/// one plate, its overmatch lost. The read with the block behind is the read without it, whichever
+/// piece is struck first, and the transit still charges the block behind.
+#[test]
+fn the_entrance_reads_no_material_behind_a_face() {
+    let laws = WalkLaws::default();
+    let volumes = table(&[(1, 1000.0), (2, 1000.0)]);
+    let offsets = disc_offsets(&Straddle::FRAME, 0.044, DEFAULT_RING);
+    for block in [0.33, 0.35] {
+        let read = |straddle: Straddle| {
+            let walked = walk_disc(&straddle.entrance(&offsets), &volumes, &laws).unwrap();
+            assert_eq!(walked.events.len(), 2, "block {block}: two pieces");
+            let request = transit_request(&walked, &AP_88, &laws);
+            let transit =
+                walk_disc(&straddle.transit(&offsets, &request), &volumes, &laws).unwrap();
+            let plan = finish_at(&transit, &request, AP_88_CAPABILITY, &laws)
+                .unwrap_or_else(|error| panic!("block {block}: {error:?}"));
+            (request.entrance, plan)
+        };
+        let (bare, _) = read(Straddle::deep(block, false));
+        let (behind, plan) = read(Straddle::deep(block, true));
+        assert_eq!(behind, bare, "block {block}: the block behind is read");
+        assert!(
+            plan.crossing
+                .encounters
+                .iter()
+                .any(
+                    |encounter| encounter.samples.iter().any(|layer| offsets[layer.sample].y
+                        > 0.02
+                        && layer
+                            .present
+                            .iter()
+                            .any(|contact| contact.volume == volume(2)))
+                ),
+            "block {block}: the transit's crossing holds the block behind the plate"
         );
     }
 }
