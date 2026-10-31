@@ -364,7 +364,8 @@ fn configure_link(simulate: bool, tick_duration: Duration) -> Result<LinkSetup, 
 }
 
 pub fn run() {
-    let simulate = harness::env_flag("SPIKE_SIMULATE_INPUT", false);
+    let script = harness::script();
+    let simulate = script.is_some();
     // A scripted client is GPU-less unless the run asks for a window; a player's always has one.
     let window = RunWindow::of_run(if simulate {
         RunWindow::Headless
@@ -374,7 +375,7 @@ pub fn run() {
     let headless = window == RunWindow::Headless;
     assert!(
         simulate || !headless,
-        "OVERMATCH_WINDOW=headless: only a scripted client (SPIKE_SIMULATE_INPUT) runs without a \
+        "OVERMATCH_WINDOW=headless: only a scripted client (OVERMATCH_HARNESS) runs without a \
          window"
     );
 
@@ -383,7 +384,9 @@ pub fn run() {
         info!("window: {}", window.name());
         app.add_plugins(crate::gpu_less_default_plugins(None))
             .add_plugins(ScheduleRunnerPlugin::run_loop(Duration::from_millis(2)))
-            .init_resource::<harness::SimulateInput>();
+            .insert_resource(harness::SimulateInput::new(
+                script.expect("a headless client runs a script"),
+            ));
         // UPSTREAM WORKAROUND, same as every other GPU-less boot of the tank glb: without it,
         // bevy_image 0.19 PANICS transcoding the Tiger's mipped UASTC KTX2 textures under
         // `CompressedImageFormats::NONE`, and `tank::spawn` then aborts on the required view
@@ -433,8 +436,8 @@ pub fn run() {
         // invisible surface's `SurfaceError::Occluded` skips the vsync block). Anyone re-trying
         // reactive must A/B it on a WARM cache.
         app.insert_resource(bevy::winit::WinitSettings::continuous());
-        if simulate {
-            app.init_resource::<harness::SimulateInput>();
+        if let Some(script) = script {
+            app.insert_resource(harness::SimulateInput::new(script));
         }
         crate::run_window::mount(&mut app, window);
     }

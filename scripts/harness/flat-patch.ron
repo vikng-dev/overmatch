@@ -1,0 +1,8 @@
+// A harness script (`net::harness::Script`) for the dedicated server: the flattest 40 m patch on
+// the shipped heightmap (MEASURED 4 cm relief, centre x=149.3 z=293.9), y = surface + 2 m spawn
+// clearance, identity rotation. The lane spawn's default sits at the world origin, a slope the
+// tanks slide apart on; lane 1 lands 8 m along +x from lane 0. Fixture data of the shot and
+// pen cam runners (`scripts/shot/`, `scripts/perf/run-pencam-cost.sh`), not of any tank.
+(
+    spawn_pose: (pos: (149.3, 8.75, 293.9), rot: (0.0, 0.0, 0.0, 1.0)),
+)

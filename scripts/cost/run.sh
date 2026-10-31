@@ -48,10 +48,12 @@ start_server() {
 }
 stop_server() { kill "$SERVER_PID" 2>/dev/null; wait "$SERVER_PID" 2>/dev/null; }
 
-# Run one client to completion (foreground). $1=costbase $2=ticks ; extra env as further args.
+# Run one client to completion (foreground). $1=costbase $2=ticks $3=harness script fields
+# (src/net/harness.rs), written to $OUT/<costbase>.harness.ron.
 run_client() {
-  local base="$1"; local ticks="$2"; shift 2
-  env "$@" SPIKE_SIMULATE_INPUT=1 SPIKE_SIM_TICKS="$ticks" SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 \
+  local base="$1" ticks="$2" fields="${3:-}"
+  printf '(ticks: %s, %s)\n' "$ticks" "$fields" >"$OUT/$base.harness.ron"
+  env OVERMATCH_HARNESS="$OUT/$base.harness.ron" SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 \
     SPIKE_COST_TRACE="$OUT/$base.jsonl" SPIKE_COST_WARMUP="$WARMUP" BEVY_ASSET_ROOT="$REPO" \
     "$CLIENT" > "$OUT/$base.client.log" 2>&1
 }
@@ -59,14 +61,14 @@ run_client() {
 if want idle1; then
   echo "== idle1 =="
   start_server idle1
-  run_client idle1 "$TICKS" SPIKE_SIM_IDLE=1
+  run_client idle1 "$TICKS" "drive: Idle"
   stop_server
 fi
 
 if want fire1; then
   echo "== fire1 =="
   start_server fire1
-  run_client fire1 "$TICKS" SPIKE_FIRE_SECONDARY=1
+  run_client fire1 "$TICKS" "drive: Fire(secondary: true)"
   stop_server
 fi
 
@@ -74,9 +76,9 @@ if want fire2; then
   echo "== fire2 (2 tanks firing; server cost is the target) =="
   start_server fire2
   # Client B (the second tank) writes its own cost base so the two clients never clobber one .client file.
-  run_client fire2b "$TICKS" SPIKE_FIRE_SECONDARY=1 &
+  run_client fire2b "$TICKS" "drive: Fire(secondary: true)" &
   CB=$!
-  run_client fire2 "$TICKS" SPIKE_FIRE_SECONDARY=1
+  run_client fire2 "$TICKS" "drive: Fire(secondary: true)"
   wait "$CB" 2>/dev/null
   stop_server
 fi
@@ -84,10 +86,10 @@ fi
 if want armor1; then
   echo "== armor1 (A fires into stationary target B at ~8 m — full penetration march) =="
   start_server armor1
-  run_client armor1b "$TICKS" SPIKE_SIM_IDLE=1 &            # B: stationary target, no fire
+  run_client armor1b "$TICKS" "drive: Idle" &                # B: stationary target, no fire
   CB=$!
   sleep 1                                                    # let B spawn on lane 0 first
-  run_client armor1 "$TICKS" SPIKE_FIRE_SECONDARY=1 SPIKE_AIM_POINT="-8,0,0" SPIKE_SIM_RANGE=12
+  run_client armor1 "$TICKS" "drive: Fire(secondary: true), aim: Point((-8, 0, 0)), range_m: 12"
   wait "$CB" 2>/dev/null
   stop_server
 fi
@@ -95,7 +97,7 @@ fi
 if want loft1; then
   echo "== loft1 (short projectile-population sweep, 640 ticks) =="
   start_server loft1
-  run_client loft1 640 SPIKE_FIRE_SECONDARY=1 SPIKE_AIM_POINT="30,50,-800" SPIKE_SIM_RANGE=800
+  run_client loft1 640 "drive: Fire(secondary: true), aim: Point((30, 50, -800)), range_m: 800"
   stop_server
 fi
 

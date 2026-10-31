@@ -173,8 +173,8 @@ contact-free ticks, so it was never evidence of a replay-determinism failure in 
      prediction is bounded by information (you cannot know a remote player's next input).
      Determinism eliminates the **divergence** error class (same inputs, different results); it
      cannot touch the **misprediction** class (unknown remote inputs). Those are separate budgets.
-5. **Keep the divergence budget honest with the tools built this session:** `SPIKE_SIM_LONG` +
-   `OVERMATCH_WINDOW=hidden` + `SPIKE_SIM_AIM_SWEEP` reproduce the workload classes; `nan_tripwire`
+5. **Keep the divergence budget honest with the tools built this session:** a harness script's
+   `drive: Straight` + `aim: Sweep` with `OVERMATCH_WINDOW=hidden` reproduce the workload classes; `nan_tripwire`
    names corruption; per-component thresholds are the tuning surface (velocity loose, position/
    rotation tight — discrete/gameplay-binary state must never be threshold-banded).
 
@@ -260,8 +260,7 @@ shield landed (33cc4e4). Nobody had re-measured after the shield. This section i
 measurement. Binary built from `src/` as of 0fa6cd8 — the last commit touching it; the commits
 after it are docs and editor config (shield 33cc4e4 and probe reclassification 8a08d60
 both in). Same harness as the original *(`SPIKE_PERTURB` deleted 2026-08-15 — ADR-0037)*:
-server `SPIKE_PERTURB=0`, client `SPIKE_SIM_LONG=1
-SPIKE_SIMULATE_INPUT=1` (the ~20 s dead-straight course crossing the bump z≈−70 and washboard
+server `SPIKE_PERTURB=0`, client harness script `(drive: Straight)` (the ~20 s dead-straight course crossing the bump z≈−70 and washboard
 z≈−82…−90), each of `SPIKE_LATENCY_MS=0` and `SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10`. Metric
 identical to the original: fraction of client `tick` rows with `rp=true` where `hc==0` — the
 `SPIKE_TRACE` schema's own fields, no instrumentation added. `NAN-TRIPWIRE|FIXED-NAN|panicked|
@@ -478,9 +477,10 @@ need `BEVY_ASSET_ROOT=<repo>`:
 ```
 # server (background)
 BEVY_ASSET_ROOT=$PWD SPIKE_PERTURB=0 SPIKE_TRACE=/tmp/base.jsonl ./target/debug/overmatch-server &
-# client (headless scripted; 80/10 = the standard jittered condition; add SPIKE_SIM_LONG=1
-# for the ~20 s course crossing the bump z~-70 and washboard z~-82..-90)
-BEVY_ASSET_ROOT=$PWD SPIKE_SIMULATE_INPUT=1 SPIKE_SIM_LONG=1 SPIKE_LATENCY_MS=80 \
+# client (headless scripted; 80/10 = the standard jittered condition; `drive: Straight` is the
+# ~20 s course crossing the bump z~-70 and washboard z~-82..-90, `()` the default arc)
+echo '(drive: Straight)' >/tmp/straight.ron
+BEVY_ASSET_ROOT=$PWD OVERMATCH_HARNESS=/tmp/straight.ron SPIKE_LATENCY_MS=80 \
     SPIKE_JITTER_MS=10 SPIKE_TRACE=/tmp/base.jsonl ./target/debug/overmatch
 # analyze (warmup-ticks 0 reports the full run; default drops the first 64 shared ticks)
 uv run scripts/divergence/analyze.py --client /tmp/base.client.jsonl \
@@ -492,7 +492,7 @@ uv run scripts/divergence/analyze.py --client /tmp/base.client.jsonl \
 `NAN-TRIPWIRE|FIXED-NAN|panicked|B0004` all 0 in every log, both runs. Full-run numbers
 (`--warmup-ticks 0`).
 
-| Metric | long course (`SPIKE_SIM_LONG`, bump+washboard) | default short course (steer arc + fire) |
+| Metric | long course (`drive: Straight`, bump+washboard) | default short course (steer arc + fire) |
 |---|---|---|
 | shared ticks | 1278 (~20 s) | 584 (~9 s) |
 | rollbacks (whole run) | 1 (connect-time, depth 13, empty `trg`) | 2 (connect window, Position ~0.93 m) |
@@ -512,7 +512,7 @@ Reading, in order of importance:
    constraint-order row) did NOT appear here: post-shield/witness-fix, this course never enters
    the multi-manifold wedge state that term was measured in. Consequence for the wave-A avian
    A/B: **this course is not a discriminating workload for the constraint-order patch** — use the
-   wedge repro (`SPIKE_SPAWN_POSE` on the slab edge, per
+   wedge repro (a harness `spawn_pose` on the slab edge, per
    `upstream/avian-solver-constraint-order.md`), with this instrument as the metric.
 2. **The only residual divergence class on this harness is carried-mechanism state (`hsim`),
    invisible to every pose/velocity field** — precisely what the hash exists to catch. It is

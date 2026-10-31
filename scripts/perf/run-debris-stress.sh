@@ -19,7 +19,7 @@
 # condition (every stats line carries it).
 #
 # Why a client at all: the server replicates only to connected links, and the price under test
-# includes sending the fragments. The clients sit idle (SPIKE_SIM_IDLE=1): their tanks stay parked
+# includes sending the fragments. The clients sit idle (`drive: Idle`): their tanks stay parked
 # in their lanes, while the bots circle and fire. Bots have no link, so with one client the
 # outbound cost is one link's; CLIENTS=K shows the slope per link, but each client also loads this
 # Mac's CPU beside the server.
@@ -52,7 +52,8 @@
 # Knobs (env): BIN (the directory holding `overmatch-server` and `overmatch`; default
 #   target/release), ASSET_ROOT (default the repo), BOTS (29), CLIENTS (1), PERIOD_S (5: the default
 #   conditions' period), WARMUP_S (20), DURATION_S (60), STARTUP_GRACE_S (90), CLIENT_WORKLOAD
-#   (`SPIKE_SIM_IDLE=1`), SERVER_ENV (extra K=V words for every server), SMOKE.
+#   (harness script fields, src/net/harness.rs; `drive: Idle`), SERVER_ENV (extra K=V words for
+#   every server), SMOKE.
 
 set -eu
 setopt null_glob
@@ -78,7 +79,7 @@ else
   DURATION_S="${DURATION_S:-60}"
 fi
 STARTUP_GRACE_S="${STARTUP_GRACE_S:-90}"
-CLIENT_WORKLOAD="${CLIENT_WORKLOAD:-SPIKE_SIM_IDLE=1}"
+CLIENT_WORKLOAD="${CLIENT_WORKLOAD:-drive: Idle}"
 SERVER_ENV="${SERVER_ENV:-}"
 ADDR="127.0.0.1:5888"
 # The scripted client exits after its ticks (64 Hz, counted from its input slot); the runner ends it
@@ -99,6 +100,7 @@ for exe in overmatch-server overmatch; do
   [[ -x "$BIN/$exe" ]] || { echo "no $exe at $BIN/$exe" >&2; exit 1; }
 done
 mkdir -p "$OUT"
+printf '(ticks: %s, %s)\n' "$SIM_TICKS" "$CLIENT_WORKLOAD" >"$OUT/client.harness.ron"
 rm -f "$OUT"/*.server.json "$OUT"/*.marker "$OUT/conditions.tsv" "$OUT/summary.txt"
 
 SERVER_PID=""
@@ -130,7 +132,7 @@ caffeinate -ims -w $$ </dev/null >/dev/null 2>&1 &
 {
   echo "debris stress: $(hostname -s), $(date '+%F %H:%M %Z'), $(cd "$REPO" && git rev-parse --short HEAD)"
   echo "server: $BIN/overmatch-server  env [OVERMATCH_SERVER_BIND=127.0.0.1 OVERMATCH_SERVER_STATS_S=1 OVERMATCH_BOT=$BOTS $SERVER_ENV]"
-  echo "clients: $CLIENTS x GPU-less $BIN/overmatch, workload [$CLIENT_WORKLOAD]"
+  echo "clients: $CLIENTS x GPU-less $BIN/overmatch, script (ticks: $SIM_TICKS, $CLIENT_WORKLOAD)"
   echo "window: WARMUP_S $WARMUP_S, DURATION_S $DURATION_S; conditions: ${CONDITIONS[*]}"
   [[ -n "$SMOKE" ]] && echo "SMOKE: plumbing only, every number fiction"
 } >"$OUT/manifest.txt"
@@ -168,8 +170,8 @@ run_condition() {
 
   for (( i = 1; i <= CLIENTS; i++ )); do
     env -u SPIKE_FRAME_COST OVERMATCH_WINDOW=headless \
-      SPIKE_SIMULATE_INPUT=1 OVERMATCH_SERVER="$ADDR" \
-      SPIKE_SIM_TICKS="$SIM_TICKS" BEVY_ASSET_ROOT="$ASSET_ROOT" ${=CLIENT_WORKLOAD} \
+      OVERMATCH_HARNESS="$OUT/client.harness.ron" OVERMATCH_SERVER="$ADDR" \
+      BEVY_ASSET_ROOT="$ASSET_ROOT" \
       "$BIN/overmatch" >"$OUT/$cond.client$i.log" 2>&1 &
     CLIENT_PIDS+=($!)
   done

@@ -47,8 +47,9 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# The flat patch `run-mg-armor.sh` documents; lane 1 spawns 8 m along +x from lane 0, both facing −z.
-env SPIKE_SPAWN_POSE="149.3,8.75,293.9,0,0,0,1" \
+# The flat patch (scripts/harness/flat-patch.ron); lane 1 spawns 8 m along +x from lane 0, both
+# facing −z.
+env OVERMATCH_HARNESS="$REPO/scripts/harness/flat-patch.ron" \
   SPIKE_SHOT_TRACE="$OUT/server" BEVY_ASSET_ROOT="$REPO" \
   "$SERVER" >"$OUT/server.log" 2>&1 &
 SERVER_PID=$!
@@ -64,11 +65,10 @@ grep -q "listening" "$OUT/server.log"
 # as the offline target-fires scenario lays it), b's at a's front hull, so a round costs a
 # component, not the tank.
 client() {
+  printf '(drive: Fire(primary: true, secondary: true), fire_tick: %s, fire_interval: 256, aim: Point((%s)), range_m: 12, ticks: %s)\n' \
+    "$3" "$2" "$4" >"$OUT/$1.harness.ron"
   env OVERMATCH_WINDOW=hidden \
-    SPIKE_SIMULATE_INPUT=1 OVERMATCH_SERVER=127.0.0.1:5888 \
-    SPIKE_SIM_TICKS="$4" SPIKE_FIRE_PRIMARY=1 SPIKE_FIRE_SECONDARY=1 \
-    SPIKE_FIRE_TICK="$3" SPIKE_FIRE_INTERVAL=256 \
-    SPIKE_AIM_POINT="$2" SPIKE_SIM_RANGE=12 \
+    OVERMATCH_HARNESS="$OUT/$1.harness.ron" OVERMATCH_SERVER=127.0.0.1:5888 \
     SPIKE_LATENCY_MS="$LAT" SPIKE_JITTER_MS="$JIT" SPIKE_JITTER_SEED="$SEED" \
     SPIKE_SHOT_TRACE="$OUT/$1" BEVY_ASSET_ROOT="$REPO" \
     "$CLIENT" >"$OUT/$1.log" 2>&1

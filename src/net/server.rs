@@ -503,9 +503,9 @@ pub(crate) fn lane_spawn_xz(base_xz: Vec2, lane: u32) -> Vec2 {
 /// A lane pose: the lane's XZ resolved against the live surface (`terrain_grid::spawn_pos`). On the
 /// flat-slab world this is exactly the old `y = 2.0` pose.
 ///
-/// `harness_pose` is the ONE documented exception to horizontal-only spawn data: `SPIKE_SPAWN_POSE`
-/// names an exact resting CONTACT for the beached-rest repro, so its Y is honoured verbatim and
-/// never re-sampled. It is a measurement instrument, not a spawn definition — an ordinary run never
+/// `harness_pose` is the ONE documented exception to horizontal-only spawn data:
+/// `harness::spawn_pose` names an exact resting CONTACT for the beached-rest repro, so its Y is
+/// honoured verbatim and never re-sampled. It is a measurement instrument, not a spawn definition — an ordinary run never
 /// sets it.
 fn lane_spawn_pos(
     harness_pose: Option<Vec3>,
@@ -658,14 +658,14 @@ fn spawn_pending_tanks(
     let Some(content) = source.get() else {
         return;
     };
-    // Harness override (`SPIKE_SPAWN_POSE`): place the tank onto a known resting contact for the
-    // beached-rest repro; unset in every normal run, so the default flat-pad spawn stands.
+    // Harness override (`harness::spawn_pose`): place the tank onto a known resting contact for
+    // the beached-rest repro; unset in every normal run, so the default flat-pad spawn stands.
     let harness_pose = harness::spawn_pose();
     let spawn_rot = harness_pose.map_or(Quat::IDENTITY, |(_, rot)| rot);
     let harness_pos = harness_pose.map(|(pos, _)| pos);
     for (link, client_id) in pending.0.drain(..) {
         // Fan each client out onto its own lane (lane 0 = the base pose, so the single-client and
-        // `SPIKE_SPAWN_POSE` cases are unshifted); the counter persists so reconnects don't collide.
+        // spawn-pose cases are unshifted); the counter persists so reconnects don't collide.
         // The lane's XZ is unchanged; only its Y follows the ground now (`lane_spawn_pos`), so a
         // join onto a hillside no longer starts inside the terrain.
         let spawn_pos = lane_spawn_pos(harness_pos, lane.0, height.as_deref());
@@ -994,7 +994,7 @@ fn respawn_player_tanks(
     };
     // A respawn takes the NEXT free lane (never reset — same rule a reconnecting client follows), so a
     // fresh tank never lands on top of another body and NaNs the solver. The base pose honors the
-    // `SPIKE_SPAWN_POSE` harness override exactly as the connect path does.
+    // harness spawn-pose override exactly as the connect path does.
     let harness_pose = harness::spawn_pose();
     let spawn_rot = harness_pose.map_or(Quat::IDENTITY, |(_, rot)| rot);
     let harness_pos = harness_pose.map(|(pos, _)| pos);
@@ -1515,7 +1515,7 @@ mod tests {
     /// The footprint ground query (Finding: sampling only the tank-root point buried the uphill
     /// axles 1.65 m on a legal slope click): spawn Y reads the MAXIMUM grid height over the
     /// 10 m × 10 m footprint, so a bump 2.5 m off-center lifts the spawn even though the
-    /// center-point height is 0. A `SPIKE_SPAWN_POSE` override is passed through untouched — it
+    /// center-point height is 0. A harness spawn-pose override is passed through untouched — it
     /// names an exact resting contact, so re-sampling it would break the beached-rest repro.
     #[test]
     fn spawn_height_samples_the_tank_footprint_not_the_point() {

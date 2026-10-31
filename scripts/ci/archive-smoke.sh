@@ -12,9 +12,9 @@
 #
 # WHAT IS OVERRIDDEN, and nothing else: `OVERMATCH_SERVER`, so the client dials this machine (a
 # scripted client always connects directly; a player's opens the Join menu against the baked
-# Worker), and the `SPIKE_*` harness contract (`src/net/harness.rs`), which is
-# how a client with no window, no GPU and no human runs a scripted session and exits on its own.
-# `SPIKE_SIMULATE_INPUT` with no `OVERMATCH_WINDOW` selects the GPU-less composition root
+# Worker), and the harness script (`OVERMATCH_HARNESS`, `src/net/harness.rs`), which is how a
+# client with no window, no GPU and no human runs a scripted session and exits on its own. A
+# script with no `OVERMATCH_WINDOW` selects the GPU-less composition root
 # (`net::client::run` → `gpu_less_default_plugins`: wgpu `backends: None`, `WinitPlugin` disabled),
 # which is what makes this runnable on a headless runner at all.
 #
@@ -100,15 +100,17 @@ if ! grep -q "server: starting, listening" "$server_log" 2>/dev/null; then
     exit 1
 fi
 
-# The client, exactly as shipped except for the address and the scripted-session contract. Started
-# from its own directory for the same exe-relative asset reason as the server.
+# The client, exactly as shipped except for the address and the scripted session: parked, never
+# firing, for `$ticks`. Started from its own directory for the same exe-relative asset reason as
+# the server, so the script's path is absolute — and a native Windows process reads it, so it is a
+# Windows path there (`pwd -W` is git-bash's translation of its own POSIX view; elsewhere `pwd`).
+harness="$(cd "$logs" && { pwd -W 2>/dev/null || pwd; })/harness.ron"
+printf '(drive: Idle, ticks: %s)\n' "$ticks" > "$logs/harness.ron"
 echo "smoke: running $client_bin against 127.0.0.1:5888 for $ticks ticks"
 (
     cd "$(dirname "$client_bin")" || exit 1
     exec env OVERMATCH_SERVER=127.0.0.1:5888 \
-        SPIKE_SIMULATE_INPUT=1 \
-        SPIKE_SIM_IDLE=1 \
-        SPIKE_SIM_TICKS="$ticks" \
+        OVERMATCH_HARNESS="$harness" \
         "./$(basename "$client_bin")"
 ) > "$client_log" 2>&1 &
 client_pid=$!

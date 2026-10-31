@@ -35,12 +35,11 @@ trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
 
-# SPIKE_SPAWN_POSE: the lane-spawn default sits at world origin, which on the heightmap world is
-# a slope — the tanks slide apart and the hull-local -8,0,0 aim never touches armor (verified:
-# zero damage rows in a full run). This pose is the flattest 40 m patch on the shipped heightmap
-# (4 cm relief, center x=149.3 z=293.9); y = surface + 2 m spawn clearance. Lane 1 puts the
-# shooter at +8 x, so aim -8,0,0 points back at the target; identity rotation.
-env SPIKE_SPAWN_POSE="149.3,8.75,293.9,0,0,0,1" \
+# The flat patch (scripts/harness/flat-patch.ron): the lane-spawn default sits at world origin,
+# which on the heightmap world is a slope — the tanks slide apart and the hull-local -8,0,0 aim
+# never touches armor (verified: zero damage rows in a full run). Lane 1 puts the shooter at +8 x,
+# so aim -8,0,0 points back at the target.
+env OVERMATCH_HARNESS="$REPO/scripts/harness/flat-patch.ron" \
   SPIKE_SHOT_TRACE="$OUT/server" BEVY_ASSET_ROOT="$REPO" \
   "$SERVER" >"$OUT/server.log" 2>&1 &
 SERVER_PID=$!
@@ -58,8 +57,8 @@ grep -q "listening" "$OUT/server.log"
 # transcode path, the path taken when no RenderApp exists (ktx2.rs:209). Windowed transcodes to
 # a 4x4-block GPU format and loads fine, so captures are windowed-only until the upstream fix.
 # DERIVED: the target runs 128 fixed ticks longer so it remains present for the later-started shooter.
-env SPIKE_SIMULATE_INPUT=1 OVERMATCH_WINDOW=hidden OVERMATCH_SERVER=127.0.0.1:5888 \
-  SPIKE_SIM_IDLE=1 SPIKE_SIM_TICKS="$((TICKS + 128))" \
+printf '(drive: Idle, ticks: %s)\n' "$((TICKS + 128))" >"$OUT/target.harness.ron"
+env OVERMATCH_HARNESS="$OUT/target.harness.ron" OVERMATCH_WINDOW=hidden OVERMATCH_SERVER=127.0.0.1:5888 \
   SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 SPIKE_SHOT_TRACE="$OUT/target" \
   BEVY_ASSET_ROOT="$REPO" "$CLIENT" >"$OUT/target.log" 2>&1 &
 TARGET_PID=$!
@@ -79,9 +78,10 @@ for _ in {1..150}; do
 done
 grep -q "client connected" "$OUT/server.log"
 
-env SPIKE_SIMULATE_INPUT=1 OVERMATCH_WINDOW=hidden OVERMATCH_SERVER=127.0.0.1:5888 \
-  SPIKE_SIM_TICKS="$TICKS" SPIKE_FIRE_SECONDARY=1 \
-  SPIKE_AIM_POINT="-8,0,0" SPIKE_SIM_RANGE=12 SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 \
+printf '(drive: Fire(secondary: true), aim: Point((-8, 0, 0)), range_m: 12, ticks: %s)\n' "$TICKS" \
+  >"$OUT/shooter.harness.ron"
+env OVERMATCH_HARNESS="$OUT/shooter.harness.ron" OVERMATCH_WINDOW=hidden OVERMATCH_SERVER=127.0.0.1:5888 \
+  SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 \
   SPIKE_SHOT_TRACE="$OUT/shooter" BEVY_ASSET_ROOT="$REPO" \
   "$CLIENT" >"$OUT/shooter.log" 2>&1
 

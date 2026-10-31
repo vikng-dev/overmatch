@@ -3,7 +3,7 @@
 # The online client's frame cost, its network bytes and the server's own stats, per condition,
 # against a dedicated server: a remote one (TARGET=<ip:port>, an Edgegap deployment started by
 # scripts/edgegap/session.sh) or a local one this runner starts (TARGET unset). The measured client
-# is the scripted one (SPIKE_SIMULATE_INPUT=1) with the game's full presentation stack (a window
+# is the scripted one (OVERMATCH_HARNESS) with the game's full presentation stack (a window
 # from frame-run.zsh's mode, src/run_window.rs), so its frame rows are the online game's frames.
 #
 #   VISIBLE=1 TARGET=1.2.3.4:31085 DEPLOYMENT=<id> scripts/perf/run-online-cost.sh out/ \
@@ -64,8 +64,8 @@
 #   DEPLOYMENT (Edgegap id: its container log is pulled at each window's edges), BIN (directory
 #   holding `overmatch` and, for a local server, `overmatch-server`; default target/release),
 #   ASSET_ROOT (default the repo), DURATION_S (60), WARMUP_S (20), COOLDOWN_S (5), MIN_ROWS (DURATION_S*20),
-#   STARTUP_GRACE_S (90), CLIENT_WORKLOAD and LOAD_WORKLOAD (client env words; default
-#   `SPIKE_SIM_IDLE=1 SPIKE_SIM_AIM_SWEEP=1`: parked, turret sweeping, no fire), BASE_FIELDS
+#   STARTUP_GRACE_S (90), CLIENT_WORKLOAD and LOAD_WORKLOAD (harness script fields,
+#   src/net/harness.rs; default `drive: Idle, aim: Sweep`: parked, turret sweeping, no fire), BASE_FIELDS
 #   (`pen_cam_corner: Off, kill_cam: Off,`), SERVER_ENV (env words for a LOCAL server, e.g.
 #   `OVERMATCH_BOT=10`; it always gets OVERMATCH_SERVER_BIND=127.0.0.1, so it never listens on the
 #   network and the host firewall has nothing to ask), STATS_PERIOD_S (the local server's
@@ -92,8 +92,8 @@ MIN_ROWS="${MIN_ROWS:-$((DURATION_S * 20))}"
 STARTUP_GRACE_S="${STARTUP_GRACE_S:-90}"
 TARGET="${TARGET:-local}"
 DEPLOYMENT="${DEPLOYMENT:-}"
-CLIENT_WORKLOAD="${CLIENT_WORKLOAD:-SPIKE_SIM_IDLE=1 SPIKE_SIM_AIM_SWEEP=1}"
-LOAD_WORKLOAD="${LOAD_WORKLOAD:-SPIKE_SIM_IDLE=1 SPIKE_SIM_AIM_SWEEP=1}"
+CLIENT_WORKLOAD="${CLIENT_WORKLOAD:-drive: Idle, aim: Sweep}"
+LOAD_WORKLOAD="${LOAD_WORKLOAD:-drive: Idle, aim: Sweep}"
 SERVER_ENV="${SERVER_ENV:-}"
 BASE_FIELDS="${BASE_FIELDS:-pen_cam_corner: Off, kill_cam: Off,}"
 STATS_PERIOD_S="${STATS_PERIOD_S:-1}"
@@ -195,8 +195,8 @@ launch_load() {
   local cond="$1" i
   for (( i = 1; i <= load_count; i++ )); do
     env -u SPIKE_FRAME_COST OVERMATCH_WINDOW=headless \
-      SPIKE_SIMULATE_INPUT=1 OVERMATCH_SERVER="$ADDR" \
-      SPIKE_SIM_TICKS="$SIM_TICKS" BEVY_ASSET_ROOT="$ASSET_ROOT" ${=LOAD_WORKLOAD} \
+      OVERMATCH_HARNESS="$OUT/load.harness.ron" OVERMATCH_SERVER="$ADDR" \
+      BEVY_ASSET_ROOT="$ASSET_ROOT" \
       "$CLIENT" >"$OUT/$cond.load$i.log" 2>&1 &
     LOAD_PIDS+=($!)
   done
@@ -264,7 +264,7 @@ condition_gates() {
   echo "target: $ADDR${DEPLOYMENT:+ (Edgegap deployment $DEPLOYMENT)}"
   [[ "$TARGET" == local ]] && echo "local server: $BIN/overmatch-server  env [OVERMATCH_SERVER_BIND=127.0.0.1 OVERMATCH_SERVER_STATS_S=$STATS_PERIOD_S $SERVER_ENV]"
   echo "base video fields: $BASE_FIELDS"
-  echo "measured client: SPIKE_SIMULATE_INPUT=1 OVERMATCH_WINDOW=$FRAME_RUN_WINDOW workload [$CLIENT_WORKLOAD]; load clients: GPU-less, workload [$LOAD_WORKLOAD]"
+  echo "measured client: OVERMATCH_WINDOW=$FRAME_RUN_WINDOW script (ticks: $SIM_TICKS, $CLIENT_WORKLOAD); load clients: GPU-less, script (ticks: $SIM_TICKS, $LOAD_WORKLOAD)"
   echo "client network: nettop -P -p <measured pid> -x at the window's edges, rates over the stream span"
 } >>"$OUT/manifest.txt"
 
@@ -288,6 +288,8 @@ if [[ "$TARGET" == local ]]; then
     || { echo "the local server never listened (see $OUT/server.log)" >&2; exit 1; }
 fi
 
+printf '(ticks: %s, %s)\n' "$SIM_TICKS" "$CLIENT_WORKLOAD" >"$OUT/client.harness.ron"
+printf '(ticks: %s, %s)\n' "$SIM_TICKS" "$LOAD_WORKLOAD" >"$OUT/load.harness.ron"
 for spec in "${CONDITIONS[@]}"; do
   cond="${spec%%|*}"
   rest="${spec#*|}"
@@ -304,8 +306,8 @@ for spec in "${CONDITIONS[@]}"; do
     esac
   done
   frame_run_condition "$cond" "$BASE_FIELDS $fields" \
-    SPIKE_SIMULATE_INPUT=1 OVERMATCH_SERVER="$ADDR" OVERMATCH_UNATTENDED=1 \
-    SPIKE_SIM_TICKS="$SIM_TICKS" ${=CLIENT_WORKLOAD} "${client_env[@]}"
+    OVERMATCH_HARNESS="$OUT/client.harness.ron" OVERMATCH_SERVER="$ADDR" OVERMATCH_UNATTENDED=1 \
+    "${client_env[@]}"
   ( cd "$REPO" && uv run scripts/perf/online_cost.py server-window --label "$cond" \
       --after-marker "$OUT/$cond.marker" --json "$OUT/$cond.server.json" "$OUT/$cond.server.log" )
 done

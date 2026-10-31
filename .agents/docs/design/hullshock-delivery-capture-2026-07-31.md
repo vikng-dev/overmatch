@@ -27,7 +27,7 @@ choice:
    mip. Headless takes that path because no RenderApp means no `CompressedImageFormatSupport`;
    windowed transcodes to a 4×4-block GPU format whose geometry coincidentally matches, which is
    why played builds never see it. The tank-asset connect gate then hangs the client forever.
-3. **`SPIKE_SPAWN_POSE="149.3,8.75,293.9,0,0,0,1"` on the server.** The lane spawn's world-origin
+3. **The flat-patch spawn pose on the server (`scripts/harness/flat-patch.ron`).** The lane spawn's world-origin
    base sits on a heightmap slope since the alpha.10 terrain world; the tanks settle 23 m apart
    with 11 m of height difference, the hull-local `-8,0,0` aim never touches armor, and the run
    produces ZERO damage — the strict analyzer cannot pass at HEAD. The pose is the flattest 40 m

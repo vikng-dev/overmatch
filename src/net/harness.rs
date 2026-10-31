@@ -1,36 +1,32 @@
-//! Reproducible workload levers for feel and cost measurements and the shared `SPIKE_*` environment
-//! parser. Boolean/value switches treat `0`, `false` (case-insensitive), and the empty string as
-//! off; every other non-numeric value is on. Numeric values retain ordinary parsing (including a
-//! meaningful zero) and ignore an empty string.
+//! The scripted session and the shared `SPIKE_*` environment parser.
+//!
+//! A scripted session has one input: the RON file `OVERMATCH_HARNESS=<script>.ron` names, one
+//! [`Script`], whose struct docs are the grammar's one home. On a client it selects the scripted
+//! client (`net::client::run`: GPU-less unless `OVERMATCH_WINDOW` names a window,
+//! `crate::run_window`), which plays the script against the server and exits once it has; the
+//! dedicated server reads the same variable for [`Script::spawn_pose`]. `scripts/harness/idle.ron`
+//! is a worked script, checked by a test.
+//!
+//! The other levers stay variables. Boolean/value switches treat `0`, `false` (case-insensitive),
+//! and the empty string as off; every other non-numeric value is on. Numeric values retain ordinary
+//! parsing (including a meaningful zero) and ignore an empty string.
 //!
 //! | Variable / flag | Kind and default | Effect |
 //! |---|---|---|
 //! | `OVERMATCH_BOT` | count; off, bare = `1` | Server: that many ownerless circling, firing bot tanks. |
+//! | `OVERMATCH_HARNESS` | path; off | The scripted session ([`Script`]). |
 //! | `OVERMATCH_SERVER_BIND` | IPv4; every interface | Server: bind the UDP socket to this address only. |
 //! | `OVERMATCH_SERVER_STATS_S` | seconds; off, bare = `10` | Server: one `server_stats {json}` line on stdout per period (`net::server_stats`). |
-//! | `SPIKE_AIM_POINT` | `x,y,z`; downrange default | Scripted hull-local aim point. |
 //! | `SPIKE_BURST_MS` | milliseconds; `0` | Periodic receive stall: every burst-window packet delivers at the window's end. |
 //! | `SPIKE_BURST_PERIOD_TICKS` | ticks; `0` | Burst recurrence period; both burst values set activates the seeded conditioner. |
 //! | `SPIKE_COST_TRACE` | path; off | Role-qualified fixed-tick cost JSONL. |
 //! | `SPIKE_COST_WARMUP` | ticks; `384` | Cost rows skipped before recording. |
-//! | `SPIKE_FIRE_INTERVAL` | ticks; `256` | Stationary primary-fire interval; zero disables clicks. |
-//! | `SPIKE_FIRE_PRIMARY` | flag; off | Stationary: click the primary trigger every interval from `SPIKE_FIRE_TICK`. |
-//! | `SPIKE_FIRE_SECONDARY` | flag; off | Hold the scripted secondary trigger. |
-//! | `SPIKE_FIRE_TICK` | tick; `300` | Scripted primary-fire tick. |
 //! | `SPIKE_FRAME_COST` | path; off | Role-qualified raw per-frame wall-clock JSONL (client). |
 //! | `SPIKE_JITTER_MS` | milliseconds; `0` | Receive-conditioner jitter. |
 //! | `SPIKE_JITTER_SEED` | `u64`; off | Make active receive jitter reproducible by packet index. |
 //! | `SPIKE_LATENCY_MS` | milliseconds; `0` | Receive-conditioner latency. |
 //! | `SPIKE_RENDER_COST` | path; off | Role-qualified per-render-pass CPU/GPU-time JSONL (client). |
 //! | `SPIKE_SHOT_TRACE` | path; off | Role-qualified shot-lifecycle JSONL. |
-//! | `SPIKE_SIMULATE_INPUT` | flag; off | Run the scripted client input harness: GPU-less unless `OVERMATCH_WINDOW` names a window (`crate::run_window`). |
-//! | `SPIKE_SIM_AIM_SWEEP` | flag; off | Sweep scripted aim around the tank. |
-//! | `SPIKE_SIM_IDLE` | flag; off | Zero-input scripted observation. |
-//! | `SPIKE_SIM_LONG` | flag; off | Extend the scripted drive and run. |
-//! | `SPIKE_SIM_RANGE` | metres; `800` | Scripted fire-control range. |
-//! | `SPIKE_SIM_REVERSE` | flag; off | Straight reverse scripted drive. |
-//! | `SPIKE_SIM_TICKS` | ticks; script default | Override scripted run length. |
-//! | `SPIKE_SPAWN_POSE` | `x,y,z,qx,qy,qz,qw`; off | Server spawn-pose override. |
 //! | `SPIKE_TRACE` | path; off | Role-qualified jitter/divergence JSONL. |
 //! | `SPIKE_TRACE_SIM_FIELDS` | flag; off | Add raw sim fields to trace tick rows. |
 //!
@@ -48,92 +44,218 @@
 
 use core::time::Duration;
 use std::collections::{BTreeMap, VecDeque};
+use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
 use bevy::prelude::*;
 use lightyear::core::time::Instant;
 use lightyear::link::RecvPayload;
 use lightyear::prelude::Link;
 use lightyear::prelude::input::native::{ActionState, InputMarker};
+use serde::Deserialize;
 
 use crate::command::{AimIntent, TankCommand};
 
-/// `SPIKE_SIMULATE_INPUT` state: a fixed-tick counter driving a scripted throttle window, then a
-/// clean exit once the script has played out.
-/// `fire_tick` defaults to 300 (mid-drive); `SPIKE_FIRE_TICK` overrides it.
-/// `SPIKE_SIM_LONG=1` (long-drive diagnostic): drive straight at full throttle for ~15 s —
-/// from spawn that crosses the speed bump (z≈−70) and the washboard (z≈−82…−90); the default 4 s
-/// arc never leaves the flat pad.
-/// `SPIKE_SIM_IDLE=1` (beached-rest diagnostic): hold zero throttle/steer, never fire, aim
-/// constant, for the whole default ~600-tick run — a pure idle observation window, so a tank
-/// spawned onto a resting contact (`SPIKE_SPAWN_POSE`) is watched settling, with no drive input
-/// perturbing the resting contact state.
-/// `SPIKE_SIM_REVERSE=1` (minimal-divergence diagnostic): the mirror of the forward course run —
-/// drive dead straight at throttle −1.0, steer 0, no fire, and NO turret slew (aim `None`, so
-/// `drive_aim_servos` holds every servo at rest). From spawn the obstacles lie down −Z ahead, so
-/// reversing heads up +Z across the flat 1000×1000 ground slab all the way: the SIMPLEST workload
-/// the sim has — flat ground, constant throttle, zero steer, zero moving parts above the hull.
-/// Meant with `SPIKE_SIM_LONG` (the ~15 s straight window); it isolates pure re-simulation
-/// reproducibility from every contact/feature/servo transient the forward run mixes in.
-#[derive(Resource)]
-pub(crate) struct SimulateInput {
-    pub(crate) ticks: u32,
-    fire_tick: u32,
-    /// `SPIKE_FIRE_INTERVAL`: ticks between the stationary workload's primary-fire clicks,
-    /// anchored at `fire_tick`. DERIVED: at the fixed 64 Hz tick rate, the 256-tick default is four seconds.
-    fire_interval: u32,
-    /// Last tick of the throttle window (steer is zeroed when extended, so the course features
-    /// dead ahead are actually reached).
-    drive_until: u32,
-    /// Script length — exit after this many ticks.
-    pub(crate) total: u32,
-    /// `SPIKE_SIM_IDLE`: suppress ALL drive input (throttle/steer stay 0, no fire) for the whole
-    /// run — the beached-rest observation window.
-    idle: bool,
-    /// `SPIKE_SIM_REVERSE`: drive backward (throttle −1.0) up the flat slab, steer 0, no fire, aim
-    /// held (`None` → servos rest) — the minimal-divergence straight-flat workload.
-    reverse: bool,
-    /// `SPIKE_FIRE_SECONDARY` (the MG-cost workload): stay stationary and HOLD the secondary trigger
-    /// from a short warmup to the end of the run, so the only difference from the `SPIKE_SIM_IDLE`
-    /// baseline is the machine-gun fire itself — the clean A/B for `integrate_projectiles` cost.
-    /// Overrides the drive script (throttle/steer forced to 0). Aim held constant at `aim_point`.
-    fire_secondary: bool,
-    /// `SPIKE_FIRE_PRIMARY`: the stationary workload of `fire_secondary`, clicking the primary
-    /// trigger every `fire_interval` from `fire_tick`; with `fire_secondary` too, both weapons fire.
-    fire_primary: bool,
-    /// `SPIKE_AIM_POINT="x,y,z"` (hull-local metres): the point every servo chases in the fire/idle
-    /// workloads. Default `(200,0,-800)` lays the guns downrange into open ground (rounds strike
-    /// terrain — the common spray case); set it at a stationary target's hull so the rounds strike
-    /// ARMOR instead, exercising the full penetration march (thickness/span probes, spall). Ignored by
-    /// the drive scripts (which choose aim by their own rule).
-    aim_point: Vec3,
-    /// `SPIKE_SIM_RANGE` (m): the dialed range for the fire/idle aim solution's superelevation. 800 m
-    /// default. A close armor-hit target wants a small value so the rounds shoot flat into the plate.
-    range: f32,
+/// The variable that names the script file.
+const VARIABLE: &str = "OVERMATCH_HARNESS";
+
+/// A scripted session, read from the file [`VARIABLE`] names. Every field is optional; a missing
+/// file, a RON or serde error, an unknown field or a value outside its field's domain fails the
+/// boot naming the file and the field (ADR-0011). Optional fields may be written bare
+/// (`ticks: 256`) or as `Some(…)`. The client ignores [`Script::spawn_pose`]; the server reads
+/// nothing else.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub(crate) struct Script {
+    /// Run length in fixed ticks from the input slot; the client exits once it has played them.
+    /// Default 600, or 1280 on the [`Drive::Straight`] and [`Drive::Reverse`] courses.
+    pub(crate) ticks: Option<u32>,
+    /// What the tank does ([`Drive`]). Default [`Drive::Arc`].
+    pub(crate) drive: Drive,
+    /// Where every servo aims ([`Aim`]), from tick 0. Ignored by [`Drive::Reverse`].
+    pub(crate) aim: Aim,
+    /// The dialed range for the aim solution's superelevation, metres; finite and positive.
+    /// Default 800. A close armour target wants a small one, so the rounds shoot flat into the
+    /// plate.
+    pub(crate) range_m: f32,
+    /// The tick of the one primary click of [`Drive::Arc`] and [`Drive::Straight`], and the first
+    /// click of a [`Drive::Fire`] primary. Default 300, mid-drive.
+    pub(crate) fire_tick: u32,
+    /// Ticks between a [`Drive::Fire`] primary's clicks; zero clicks none. Default 256 (DERIVED:
+    /// four seconds at the fixed 64 Hz).
+    pub(crate) fire_interval: u32,
+    /// The server's spawned tank starts here instead of its lane spawn ([`SpawnPose`]).
+    pub(crate) spawn_pose: Option<SpawnPose>,
 }
 
-impl Default for SimulateInput {
+impl Default for Script {
     fn default() -> Self {
-        let long = env_flag("SPIKE_SIM_LONG", false);
-        // `SPIKE_SIM_TICKS` overrides the script length — the MG-cost workload needs ≥30 s of steady
-        // fire (≈2000+ ticks past the warmup), far longer than either default arc.
-        let total_override: Option<u32> = env_parse("SPIKE_SIM_TICKS");
         Self {
-            ticks: 0,
-            fire_tick: env_parse("SPIKE_FIRE_TICK").unwrap_or(300),
-            fire_interval: env_parse("SPIKE_FIRE_INTERVAL").unwrap_or(256),
-            drive_until: if long { 1088 } else { 384 },
-            total: total_override.unwrap_or(if long { 1280 } else { 600 }),
-            idle: env_flag("SPIKE_SIM_IDLE", false),
-            reverse: env_flag("SPIKE_SIM_REVERSE", false),
-            fire_secondary: env_flag("SPIKE_FIRE_SECONDARY", false),
-            fire_primary: env_flag("SPIKE_FIRE_PRIMARY", false),
-            aim_point: parse_aim_point().unwrap_or(Vec3::new(200.0, 0.0, -800.0)),
-            range: env_parse("SPIKE_SIM_RANGE").unwrap_or(800.0),
+            ticks: None,
+            drive: Drive::Arc,
+            aim: Aim::default(),
+            range_m: 800.0,
+            fire_tick: 300,
+            fire_interval: 256,
+            spawn_pose: None,
         }
     }
 }
 
+/// What the scripted tank does. One enum, so two workloads cannot both be asked for.
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[serde(deny_unknown_fields)]
+pub(crate) enum Drive {
+    /// The default, exercising the real sim: 2 s idle (the rig binds, the hull settles onto the
+    /// belt), 4 s at full throttle with steer 0.3 (belt forces and skid steer), then coast to rest;
+    /// one primary click at `fire_tick` (fire, recoil, reload).
+    #[default]
+    Arc,
+    /// Dead straight at full throttle for ~15 s: from spawn it crosses the speed bump (z≈−70) and
+    /// the washboard (z≈−82…−90) on the spawn axis, which the arc never leaves the flat pad for.
+    /// One primary click at `fire_tick`.
+    Straight,
+    /// The straight course backward: throttle −1 up the flat ground slab away from the obstacles,
+    /// no steer, no fire, and no aim (every servo holds at rest). The simplest workload the sim
+    /// has, isolating re-simulation reproducibility from every contact, feature and servo
+    /// transient.
+    Reverse,
+    /// Never drive, never fire: the tank sits on whatever contact it spawned onto (with
+    /// `spawn_pose`, a known resting contact), with no drive input perturbing it.
+    Idle,
+    /// Stationary fire, so the only difference from [`Drive::Idle`] is the fire itself: hold the
+    /// secondary trigger from a ~3 s warmup to the end, and click the primary every
+    /// `fire_interval` from `fire_tick`. At least one of the two; the aim is a point.
+    Fire {
+        #[serde(default)]
+        primary: bool,
+        #[serde(default)]
+        secondary: bool,
+    },
+}
+
+/// Where the scripted servos aim, in hull-local metres.
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) enum Aim {
+    /// Chase this point, finite. Default `(200, 0, -800)`: downrange into open ground (the common
+    /// spray case); at a stationary target's hull the rounds strike armour instead.
+    Point((f32, f32, f32)),
+    /// Sweep around the tank at ~1.3 rad/s, recommitted every tick, as a player scanning with the
+    /// mouse does. Not with [`Drive::Fire`].
+    Sweep,
+}
+
+impl Default for Aim {
+    fn default() -> Self {
+        Self::Point((200.0, 0.0, -800.0))
+    }
+}
+
+/// The server's spawned tank pose: translation `pos` in world metres and the xyzw quaternion
+/// `rot`, normalized on read so a hand-entered pose lands as a valid `Rotation`. Places the tank
+/// onto a known resting contact so a beached-rest repro is deterministic.
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct SpawnPose {
+    pub(crate) pos: (f32, f32, f32),
+    pub(crate) rot: (f32, f32, f32, f32),
+}
+
+impl Script {
+    /// The script `text` holds, validated; the error names the field.
+    fn parse(text: &str) -> Result<Self, String> {
+        let script: Self = ron::Options::default()
+            .with_default_extension(ron::extensions::Extensions::IMPLICIT_SOME)
+            .from_str(text)
+            .map_err(|error| error.to_string())?;
+        script.validate()?;
+        Ok(script)
+    }
+
+    fn load(path: &Path) -> Result<Self, String> {
+        let text = std::fs::read_to_string(path).map_err(|error| error.to_string())?;
+        Self::parse(&text)
+    }
+
+    fn validate(&self) -> Result<(), String> {
+        if let Drive::Fire {
+            primary: false,
+            secondary: false,
+        } = self.drive
+        {
+            return Err("drive: a Fire workload fires the primary, the secondary or both".into());
+        }
+        match self.aim {
+            Aim::Point(point) if !Vec3::from(point).is_finite() => {
+                return Err(format!("aim: {point:?} is not a finite point"));
+            }
+            Aim::Sweep if matches!(self.drive, Drive::Fire { .. }) => {
+                return Err("aim: a Fire workload aims at a point, not a sweep".into());
+            }
+            _ => {}
+        }
+        if !(self.range_m.is_finite() && self.range_m > 0.0) {
+            return Err(format!("range_m: {} is not a positive range", self.range_m));
+        }
+        if let Some(SpawnPose { pos, rot }) = self.spawn_pose {
+            let rot = Vec4::from(rot);
+            if !(Vec3::from(pos).is_finite() && rot.is_finite() && rot.length() > 0.0) {
+                return Err(format!(
+                    "spawn_pose: {pos:?} {rot:?} is not a finite position and rotation"
+                ));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// This process's script, read once from the file [`VARIABLE`] names; `None` when it is unset.
+///
+/// # Panics
+///
+/// When the variable names a file that is missing or holds no valid script ([`Script`]).
+pub(crate) fn script() -> Option<&'static Script> {
+    static SCRIPT: OnceLock<Option<Script>> = OnceLock::new();
+    SCRIPT
+        .get_or_init(|| {
+            let path = PathBuf::from(std::env::var_os(VARIABLE)?);
+            let script = Script::load(&path)
+                .unwrap_or_else(|error| panic!("{VARIABLE}={}: {error}", path.display()));
+            info!("harness: {VARIABLE}={} {script:?}", path.display());
+            Some(script)
+        })
+        .as_ref()
+}
+
+/// The scripted client's state: a fixed-tick counter playing its [`Script`], then a clean exit once
+/// the script has played out ([`simulate_watchdog`]).
+#[derive(Resource)]
+pub(crate) struct SimulateInput {
+    pub(crate) ticks: u32,
+    /// Script length — exit after this many ticks.
+    pub(crate) total: u32,
+    drive: Drive,
+    aim: Aim,
+    range: f32,
+    fire_tick: u32,
+    fire_interval: u32,
+}
+
 impl SimulateInput {
+    pub(crate) fn new(script: &Script) -> Self {
+        let course = matches!(script.drive, Drive::Straight | Drive::Reverse);
+        Self {
+            ticks: 0,
+            total: script.ticks.unwrap_or(if course { 1280 } else { 600 }),
+            drive: script.drive,
+            aim: script.aim,
+            range: script.range_m,
+            fire_tick: script.fire_tick,
+            fire_interval: script.fire_interval,
+        }
+    }
+
     /// The scripted secondary trigger's held window: from the warmup boundary to the end of the
     /// run.
     fn holding_secondary(t: u32) -> bool {
@@ -150,21 +272,20 @@ impl SimulateInput {
             && t >= self.fire_tick
             && (t - self.fire_tick).is_multiple_of(self.fire_interval)
     }
-}
 
-/// Parse `SPIKE_AIM_POINT="x,y,z"` into a hull-local aim point; `None` (unset or malformed) falls
-/// back to the downrange default. Three comma-separated f32s.
-fn parse_aim_point() -> Option<Vec3> {
-    let raw = env_value("SPIKE_AIM_POINT")?;
-    let nums: Vec<f32> = raw
-        .split(',')
-        .filter_map(|s| s.trim().parse().ok())
-        .collect();
-    if nums.len() != 3 {
-        error!("harness: SPIKE_AIM_POINT=\"{raw}\" is not three f32s (x,y,z) — using the default");
-        return None;
+    /// The point every servo chases on tick `t`, or `None` to hold them at rest.
+    fn aim_at(&self, t: u32) -> Option<AimIntent> {
+        if self.drive == Drive::Reverse {
+            return None;
+        }
+        Some(AimIntent::HullLocal(match self.aim {
+            Aim::Point(point) => Vec3::from(point),
+            Aim::Sweep => {
+                let theta = 0.02 * t as f32;
+                Vec3::new(800.0 * theta.sin(), 0.0, -800.0 * theta.cos())
+            }
+        }))
     }
-    Some(Vec3::new(nums[0], nums[1], nums[2]))
 }
 
 /// Headless simulate mode: write the scripted `TankCommand` into the lightyear `ActionState` slot
@@ -177,72 +298,35 @@ pub(crate) fn buffer_input(
         return;
     };
     sim.ticks += 1;
-    let t = sim.ticks;
-    // Stationary fire workloads: hold the secondary trigger over `holding_secondary`'s window
-    // (`SPIKE_FIRE_SECONDARY`, the MG-cost workload) and click the primary every `fire_interval`
-    // (`SPIKE_FIRE_PRIMARY`). Stationary + constant aim means the ONLY delta from the
-    // `SPIKE_SIM_IDLE` baseline is the fire, so the per-tick cost recorder's idle-vs-fire
-    // difference is exactly the march + shell spawn/despawn cost. Returns early — this overrides
-    // the drive script.
-    if sim.fire_secondary || sim.fire_primary {
-        state.0.throttle = 0.0;
-        state.0.steer = 0.0;
-        state.0.aim = Some(AimIntent::HullLocal(sim.aim_point));
-        state.0.range = sim.range;
-        state.0.fire_primary = sim.fire_primary && sim.clicking_primary(t);
-        state.0.fire_secondary = sim.fire_secondary && SimulateInput::holding_secondary(t);
-        return;
+    sim.write(sim.ticks, &mut state.0);
+}
+
+impl SimulateInput {
+    /// Tick `t`'s scripted drive, aim and triggers into `command`.
+    fn write(&self, t: u32, command: &mut TankCommand) {
+        // Throttle and steer over the drive's window: the arc steers to exercise skid steer, the
+        // courses run dead straight along the spawn axis.
+        let (window, throttle, steer) = match self.drive {
+            Drive::Arc => (128..384, 1.0, 0.3),
+            Drive::Straight => (128..1088, 1.0, 0.0),
+            Drive::Reverse => (128..1088, -1.0, 0.0),
+            Drive::Idle | Drive::Fire { .. } => (0..0, 0.0, 0.0),
+        };
+        let driving = window.contains(&t);
+        command.throttle = if driving { throttle } else { 0.0 };
+        command.steer = if driving { steer } else { 0.0 };
+        command.aim = self.aim_at(t);
+        command.range = self.range;
+        (command.fire_primary, command.fire_secondary) = match self.drive {
+            Drive::Fire { primary, secondary } => (
+                primary && self.clicking_primary(t),
+                secondary && Self::holding_secondary(t),
+            ),
+            Drive::Arc | Drive::Straight => (t == self.fire_tick, false),
+            // A recoil impulse would disturb the resting contact or the minimal run under study.
+            Drive::Idle | Drive::Reverse => (false, false),
+        };
     }
-    // The default script, exercising the real sim: 2 s idle (rig binds, the hull settles onto the
-    // belt) → 4 s throttle 1.0 + steer 0.3 (belt forces + skid-steer) → coast to rest. The aim
-    // intention + range are held from tick 0 so the turret/gun servos slew (drive_aim_servos →
-    // drive_servos) while driving; one fire click at tick 300 (Reload starts ready) exercises
-    // fire + recoil + reload.
-    // Idle window (`SPIKE_SIM_IDLE`): never drive — the tank just sits on whatever contact it
-    // spawned onto, so the trace isolates beached rest from any drive churn.
-    let driving = !sim.idle && (128..sim.drive_until).contains(&t);
-    // Reverse (`SPIKE_SIM_REVERSE`) mirrors the drive up the flat slab: throttle −1.0 instead of
-    // +1.0, heading up +Z away from the −Z obstacles — the minimal-divergence straight-flat run.
-    state.0.throttle = if driving {
-        if sim.reverse { -1.0 } else { 1.0 }
-    } else {
-        0.0
-    };
-    // The long course run drives dead straight (the bump/washboard are on the spawn axis); the
-    // default short script arcs to exercise skid-steer. Reverse always drives dead straight — a
-    // steer input would peel the run off the spawn axis and defeat the minimal workload.
-    state.0.steer = if driving && !sim.reverse && sim.drive_until == 384 {
-        0.3
-    } else {
-        0.0
-    };
-    // Hull-local, far off-axis so the yaw servo visibly slews; range 800 m dials in real
-    // superelevation from the weapon's range table.
-    // SPIKE_SIM_AIM_SWEEP (aim-churn diagnostic): instead of the constant point, sweep the
-    // aim around the tank at ~1.3 rad/s — a player scanning with the mouse. A human recommits the
-    // aim EVERY frame from the camera ray; the constant-aim script never exercised that churn.
-    // Reverse: aim `None` — `drive_aim_servos` skips (no target written), so every servo holds at
-    // its rest pose. The point is zero moving parts above the hull, so a servo slew can't feed the
-    // pose divergence under study.
-    state.0.aim = if sim.reverse {
-        None
-    } else if env_flag("SPIKE_SIM_AIM_SWEEP", false) {
-        let theta = 0.02 * t as f32;
-        Some(AimIntent::HullLocal(Vec3::new(
-            800.0 * theta.sin(),
-            0.0,
-            -800.0 * theta.cos(),
-        )))
-    } else {
-        // The idle/drive baseline aims at the SAME point the fire workload uses, so an idle-vs-fire
-        // A/B differs only by the trigger (the aim/servo pose is identical in both).
-        Some(AimIntent::HullLocal(sim.aim_point))
-    };
-    state.0.range = sim.range;
-    // No fire in the idle window — a recoil impulse would disturb the resting contact under study —
-    // nor in reverse, where the recoil transient would be exactly the kind of moving part the
-    // minimal-divergence run exists to exclude.
-    state.0.fire_primary = !sim.idle && !sim.reverse && t == sim.fire_tick;
 }
 
 /// Simulate mode: exit cleanly once the script has played out, or bail on a wall-clock timeout if
@@ -453,29 +537,13 @@ fn seeded_delay_ms(seed: u64, packet_index: u64, latency_ms: u64, jitter_ms: u64
     delay_ms.clamp(0, i128::from(u64::MAX)) as u64
 }
 
-/// `SPIKE_SPAWN_POSE="x,y,z,qx,qy,qz,qw"` (server): override the spawned tank's initial
-/// `Position`/`Rotation` — parsed once at boot, applied in `spawn_pending_tanks`. Seven
-/// comma-separated f32s (translation metres, then an xyzw quaternion, normalized on read); any
-/// malformed value logs and falls back to the default spawn. Used to place the tank onto a known
-/// resting contact (the field-captured beached pose on the §2 side-slope slab edge) so the
-/// beached-rest repro is deterministic. Inert when unset.
+/// The server's spawn-pose override ([`Script::spawn_pose`]), applied in `spawn_pending_tanks`;
+/// `None` without a script or a pose.
 pub(crate) fn spawn_pose() -> Option<(Vec3, Quat)> {
-    let raw = env_value("SPIKE_SPAWN_POSE")?;
-    let nums: Vec<f32> = raw
-        .split(',')
-        .filter_map(|s| s.trim().parse().ok())
-        .collect();
-    if nums.len() != 7 {
-        error!(
-            "server: SPIKE_SPAWN_POSE=\"{raw}\" is not seven f32s (x,y,z,qx,qy,qz,qw) — ignored"
-        );
-        return None;
-    }
-    let pos = Vec3::new(nums[0], nums[1], nums[2]);
-    // xyzw, matching the trace/analysis quaternion layout; normalize so a hand-entered field
-    // capture (not bit-exact unit) lands as a valid `Rotation`.
-    let rot = Quat::from_xyzw(nums[3], nums[4], nums[5], nums[6]).normalize();
-    info!("server: SPIKE_SPAWN_POSE pos={pos:?} rot={rot:?}");
+    let SpawnPose { pos, rot } = script()?.spawn_pose?;
+    let pos = Vec3::from(pos);
+    let rot = Quat::from_xyzw(rot.0, rot.1, rot.2, rot.3).normalize();
+    info!("server: harness spawn pose pos={pos:?} rot={rot:?}");
     Some((pos, rot))
 }
 
@@ -485,7 +553,147 @@ mod tests {
 
     use lightyear::core::time::Instant;
 
-    use super::{BurstSpec, SeededRecvConditioner, parse_env_flag};
+    use bevy::math::Vec3;
+
+    use super::{
+        Aim, BurstSpec, Drive, Script, SeededRecvConditioner, SimulateInput, SpawnPose,
+        parse_env_flag,
+    };
+    use crate::command::{AimIntent, TankCommand};
+
+    /// EVERY FIELD OF THE GRAMMAR PARSES TO ITS OWN SLOT, bare or as `Some(…)`, and integers stand
+    /// for floats: the runners write scripts by hand and from shell values (`aim: Point(($aim))`),
+    /// and the client and server read each slot unchecked.
+    #[test]
+    fn a_full_script_parses_every_field() {
+        let script = Script::parse(
+            "(ticks: Some(2048), drive: Fire(primary: true, secondary: true), \
+             aim: Point((8, 1.2, -2)), range_m: 12, fire_tick: 320, fire_interval: 128, \
+             spawn_pose: (pos: (149.3, 8.75, 293.9), rot: (0, 0, 0, 1)))",
+        )
+        .expect("a valid script");
+        assert_eq!(
+            script,
+            Script {
+                ticks: Some(2048),
+                drive: Drive::Fire {
+                    primary: true,
+                    secondary: true,
+                },
+                aim: Aim::Point((8.0, 1.2, -2.0)),
+                range_m: 12.0,
+                fire_tick: 320,
+                fire_interval: 128,
+                spawn_pose: Some(SpawnPose {
+                    pos: (149.3, 8.75, 293.9),
+                    rot: (0.0, 0.0, 0.0, 1.0),
+                }),
+            }
+        );
+        let sweep = Script::parse("(drive: Idle, aim: Sweep, ticks: 256)").expect("valid");
+        assert_eq!(
+            (sweep.drive, sweep.aim, sweep.ticks),
+            (Drive::Idle, Aim::Sweep, Some(256))
+        );
+    }
+
+    /// AN EMPTY SCRIPT IS THE DEFAULT SESSION THE RUNNERS LEAN ON: the arc drive, 600 ticks, the
+    /// downrange aim at 800 m, one click at tick 300, and no spawn override; the two courses run
+    /// 1280. A changed default silently changes every script that names only what it changes.
+    #[test]
+    fn an_empty_script_takes_the_documented_defaults() {
+        let script = Script::parse("()").expect("an empty script");
+        assert_eq!(script, Script::default());
+        assert_eq!(script.drive, Drive::Arc);
+        assert_eq!(script.aim, Aim::Point((200.0, 0.0, -800.0)));
+        assert_eq!(
+            (script.range_m, script.fire_tick, script.fire_interval),
+            (800.0, 300, 256)
+        );
+        assert_eq!((script.ticks, script.spawn_pose), (None, None));
+        assert_eq!(SimulateInput::new(&script).total, 600);
+        for drive in ["Straight", "Reverse"] {
+            let course = Script::parse(&format!("(drive: {drive})")).expect("a course");
+            assert_eq!(SimulateInput::new(&course).total, 1280, "{drive}");
+        }
+    }
+
+    /// A SCRIPT THAT CANNOT MEAN WHAT IT SAYS FAILS THE BOOT, NAMING ITS FIELD (ADR-0011): a typo,
+    /// a fire workload with no trigger or a sweeping aim, a non-finite aim, a range that is not
+    /// positive, a degenerate spawn rotation. Each was a silent default or an ignored variable
+    /// under the levers the script replaced.
+    #[test]
+    fn a_script_outside_its_domain_is_refused_naming_the_field() {
+        for (text, field) in [
+            ("(tick: 5)", "tick"),
+            ("(drive: Fire())", "drive"),
+            ("(drive: Fire(secondary: true), aim: Sweep)", "aim"),
+            ("(aim: Point((1.0, 1e39, 0.0)))", "aim"),
+            ("(range_m: 0.0)", "range_m"),
+            (
+                "(spawn_pose: (pos: (0.0, 0.0, 0.0), rot: (0.0, 0.0, 0.0, 0.0)))",
+                "spawn_pose",
+            ),
+            ("(drive: Forward)", "Forward"),
+        ] {
+            let error = Script::parse(text).expect_err("the script is refused");
+            assert!(
+                error.contains(field),
+                "{text}: {error:?} names no `{field}`"
+            );
+        }
+    }
+
+    /// EACH DRIVE PLAYS THE WORKLOAD ITS RUNNERS MEASURE: the arc drives and steers inside its
+    /// window and clicks once at `fire_tick`; idle never moves or fires; a fire workload stays put,
+    /// holds the secondary only past its warmup and clicks the primary every interval from
+    /// `fire_tick`; reverse backs straight with every servo at rest. The cost and pen cam runners
+    /// read their deltas against these exact windows.
+    #[test]
+    fn each_drive_plays_its_workload() {
+        let at = |text: &str, t: u32| {
+            let sim = SimulateInput::new(&Script::parse(text).expect("valid"));
+            let mut command = TankCommand::default();
+            sim.write(t, &mut command);
+            command
+        };
+        let arc = at("()", 200);
+        assert_eq!(
+            (arc.throttle, arc.steer, arc.fire_primary),
+            (1.0, 0.3, false)
+        );
+        assert!(at("()", 300).fire_primary && !at("()", 301).fire_primary);
+        assert_eq!(at("()", 400).throttle, 0.0);
+        let idle = at("(drive: Idle)", 300);
+        assert_eq!((idle.throttle, idle.fire_primary), (0.0, false));
+        let fire = "(drive: Fire(primary: true, secondary: true), fire_tick: 320, \
+                    fire_interval: 256, aim: Point((8.0, 1.2, 2.2)))";
+        assert!(!at(fire, 192).fire_secondary && at(fire, 193).fire_secondary);
+        assert!(at(fire, 320).fire_primary && at(fire, 576).fire_primary);
+        assert!(!at(fire, 448).fire_primary);
+        assert_eq!(at(fire, 200).throttle, 0.0);
+        assert_eq!(
+            at(fire, 200).aim,
+            Some(AimIntent::HullLocal(Vec3::new(8.0, 1.2, 2.2)))
+        );
+        let reverse = at("(drive: Reverse)", 1000);
+        assert_eq!(
+            (reverse.throttle, reverse.steer, reverse.aim),
+            (-1.0, 0.0, None)
+        );
+        assert!(!at("(drive: Reverse)", 300).fire_primary);
+        assert_eq!(at("(drive: Straight)", 1000).steer, 0.0);
+    }
+
+    /// THE WORKED SCRIPT THE MODULE DOC NAMES IS A VALID SCRIPT: it is the grammar's one example
+    /// file, the one copied to write the next.
+    #[test]
+    fn the_example_script_parses() {
+        let path =
+            std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("scripts/harness/idle.ron");
+        let script = Script::load(&path).unwrap_or_else(|error| panic!("{error}"));
+        assert_eq!(script.drive, Drive::Idle);
+    }
 
     #[test]
     fn env_flag_value_parsing_truth_table() {

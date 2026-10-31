@@ -1,0 +1,12 @@
+// A harness script (`net::harness::Script`): the release smoke's session, the tank parked and
+// never firing for 256 fixed ticks (DERIVED: 4 s at 64 Hz), then a clean exit. From the checkout
+// root, against a local server:
+//
+//   OVERMATCH_HARNESS=scripts/harness/idle.ron OVERMATCH_SERVER=127.0.0.1:5888 target/debug/overmatch
+//
+// runs GPU-less (no `OVERMATCH_WINDOW`). The run length is session configuration (ASSUMED), not
+// game data.
+(
+    drive: Idle,
+    ticks: 256,
+)

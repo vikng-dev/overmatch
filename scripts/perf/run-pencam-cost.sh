@@ -186,8 +186,8 @@ for cond in "${CONDITIONS[@]}"; do
     # DERIVED: 64 Hz fixed ticks; the measured client runs 128 ticks longer so it outlives the
     # later-started opponent (as the latency runner's first client does).
     ticks=$((run_s * 64))
-    # The flat patch the latency runner documents; lane 1 spawns 8 m along +x from lane 0.
-    env SPIKE_SPAWN_POSE="149.3,8.75,293.9,0,0,0,1" BEVY_ASSET_ROOT="$REPO" \
+    # The flat patch (scripts/harness/flat-patch.ron); lane 1 spawns 8 m along +x from lane 0.
+    env OVERMATCH_HARNESS="$REPO/scripts/harness/flat-patch.ron" BEVY_ASSET_ROOT="$REPO" \
       "$SERVER" >"$OUT/$cond.server.log" 2>&1 &
     SERVER_PID=$!
     for _ in {1..150}; do
@@ -196,10 +196,10 @@ for cond in "${CONDITIONS[@]}"; do
     done
     grep -q "listening" "$OUT/$cond.server.log" || invalid "$cond" "the server never listened"
     # The measured client: lane 0, visible, its guns on the opponent's engine bay.
+    printf '(drive: Fire(primary: true, secondary: true), fire_tick: 320, fire_interval: 256, aim: Point((8, 1.2, 2.2)), range_m: 12, ticks: %s)\n' \
+      "$((ticks + 128))" >"$OUT/$cond.harness.ron"
     env OVERMATCH_UNATTENDED=1 OVERMATCH_CONFIG_DIR="$cfg" \
-      SPIKE_SIMULATE_INPUT=1 OVERMATCH_WINDOW=visible OVERMATCH_SERVER=127.0.0.1:5888 \
-      SPIKE_SIM_TICKS="$((ticks + 128))" SPIKE_FIRE_PRIMARY=1 SPIKE_FIRE_SECONDARY=1 \
-      SPIKE_FIRE_TICK=320 SPIKE_FIRE_INTERVAL=256 SPIKE_AIM_POINT="8,1.2,2.2" SPIKE_SIM_RANGE=12 \
+      OVERMATCH_HARNESS="$OUT/$cond.harness.ron" OVERMATCH_WINDOW=visible OVERMATCH_SERVER=127.0.0.1:5888 \
       SPIKE_FRAME_COST="$OUT/$cond.jsonl" RUST_LOG="$LOG_FILTER" BEVY_ASSET_ROOT="$REPO" \
       "$CLIENT" >"$log" 2>&1 &
     CLIENT_PID=$!
@@ -209,10 +209,10 @@ for cond in "${CONDITIONS[@]}"; do
     done
     grep -q "client connected" "$OUT/$cond.server.log" || invalid "$cond" "the measured client never connected (see $log)"
     # The opponent: lane 1, hidden (so unattended), its guns on the measured tank's front hull.
+    printf '(drive: Fire(primary: true, secondary: true), fire_tick: 448, fire_interval: 256, aim: Point((-8, 0.8, -2.2)), range_m: 12, ticks: %s)\n' \
+      "$ticks" >"$OUT/$cond.opponent.harness.ron"
     env OVERMATCH_WINDOW=hidden \
-      SPIKE_SIMULATE_INPUT=1 OVERMATCH_SERVER=127.0.0.1:5888 \
-      SPIKE_SIM_TICKS="$ticks" SPIKE_FIRE_PRIMARY=1 SPIKE_FIRE_SECONDARY=1 \
-      SPIKE_FIRE_TICK=448 SPIKE_FIRE_INTERVAL=256 SPIKE_AIM_POINT="-8,0.8,-2.2" SPIKE_SIM_RANGE=12 \
+      OVERMATCH_HARNESS="$OUT/$cond.opponent.harness.ron" OVERMATCH_SERVER=127.0.0.1:5888 \
       BEVY_ASSET_ROOT="$REPO" \
       "$CLIENT" >"$OUT/$cond.opponent.log" 2>&1 &
     OTHER_PID=$!

@@ -20,6 +20,8 @@ START=${2:-1}
 CLIENT_TIMEOUT=90   # healthy run exits ~11-25 s; a wedged main loop never exits on its own
 
 mkdir -p "$OUT"
+# The default scripted session (src/net/harness.rs): the arc drive with one primary click.
+printf '()\n' >"$OUT/harness.ron"
 cd "$REPO" || exit 1
 [ -x target/debug/overmatch ] && [ -x target/debug/overmatch-server ] || {
   echo "build first: cargo build --bin overmatch --bin overmatch-server" >&2; exit 1; }
@@ -47,7 +49,7 @@ for i in $(seq $START $((START + N - 1))); do
   done
 
   t0=$(date +%s)
-  SPIKE_SIMULATE_INPUT=1 SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 OVERMATCH_SERVER=127.0.0.1:5888 \
+  OVERMATCH_HARNESS="$OUT/harness.ron" SPIKE_LATENCY_MS=80 SPIKE_JITTER_MS=10 OVERMATCH_SERVER=127.0.0.1:5888 \
     SPIKE_TRACE="$base.jsonl" BEVY_ASSET_ROOT="$REPO" \
     ./target/debug/overmatch > "$base.client.log" 2>&1 &
   CLIENT_PID=$!
