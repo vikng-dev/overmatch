@@ -1,4 +1,4 @@
-//! Main-gun smoke ribbon derived from [`ShellPath`].
+//! The game's damage-model view: authored flight smoke along [`ShellPath`].
 //!
 //! Invariant (ADR-0014): view state never extends a simulation path. Disconnected path segments
 //! receive no bridge triangles.
@@ -17,7 +17,8 @@ use bevy::render::render_resource::{
 use bevy::shader::ShaderRef;
 use serde_json::json;
 
-use crate::ballistics::{PenetrationMarks, ShellPath, ShellVisual, Shot};
+use crate::ballistics::{PenetrationMarks, ShellPath, Shot};
+use crate::rounds::{FlightEffects, SmokeEmission};
 use crate::view::PlayerView;
 use crate::{ShotClock, ShotId};
 
@@ -26,23 +27,10 @@ use super::billboard::{gradient_lut, smoothstep};
 
 /// Minimum spacing (m) between captured trail points.
 const TRAIL_MIN_SPACING: f32 = 14.0;
-/// A trail point's lifetime (s) — the tail fully erodes by then (the shader's age axis).
-const TRAIL_POINT_LIFETIME: f32 = 2.2;
 /// Hard per-trail point cap.
 const TRAIL_MAX_POINTS: usize = 128;
-/// Ribbon width (m): at birth, plus growth per second of point age (smoke expands as it ages).
-const TRAIL_WIDTH_BIRTH: f32 = 0.35;
-const TRAIL_WIDTH_GROWTH: f32 = 1.3;
-/// Per-point lateral drift and rise.
-const TRAIL_DRIFT_LATERAL: f32 = 0.4;
-const TRAIL_DRIFT_RISE: f32 = 0.35;
 /// Live-trail ring cap.
 const TRAIL_CAP: usize = 8;
-/// Arc length from the muzzle before ribbon geometry begins. The boundary is interpolated so expiry
-/// cannot move it by one captured station.
-const TRAIL_START_ARC: f32 = 10.0;
-/// Taper length after [`TRAIL_START_ARC`].
-const HEAD_FADE_ARC: f32 = 20.0;
 
 pub(super) fn plugin(app: &mut App) {
     app.init_resource::<TrailRing>()
@@ -220,10 +208,11 @@ struct PendingTrailBounce {
 /// no zero-vertex mesh asset ever exists. bevy_render 0.19.1's mesh allocator skips allocating a
 /// zero-vertex mesh but still copies it, logging `Use-after-free … unallocated key` on every
 /// extraction (bevy 0.20 makes that a warning, bevyengine/bevy#24960). A ribbon has no stations for
-/// its first frames of flight ([`TRAIL_START_ARC`]), and a trail the [`TRAIL_CAP`] ring evicts in
+/// its authored near-muzzle arc, and a trail the [`TRAIL_CAP`] ring evicts in
 /// the frame it attaches never has any.
 #[derive(Component)]
 pub(crate) struct TrailRibbon {
+    emission: SmokeEmission,
     shell: Entity,
     shot: Option<ShotId>,
     points: VecDeque<TrailPoint>,
@@ -243,26 +232,35 @@ pub(crate) struct TrailRibbon {
 #[derive(Resource, Default)]
 struct TrailRing(VecDeque<Entity>);
 
-/// Give every new main-gun shell a trail ribbon. The gate is `ShellVisual` — the marker
-/// `ballistics::view` puts on a shell-class round, and the same one the ember keys on.
+/// A round declaring flight smoke grows its own ribbon, with the emission facts it was born
+/// with. A smokeless round grows none, regardless of calibre or scene dressing.
 ///
 /// It OBSERVES the dressing rather than polling for it: the ribbon then opens on the round's real
 /// birth tick in whichever schedule spawned it, so a shell whose whole flight resolves between two
 /// rendered frames still has its path captured.
 fn attach_trail(
-    add: On<Add, ShellVisual>,
-    shells: Query<(&ShellPath, Option<&Shot>), Without<TrailedShell>>,
+    add: On<Add, FlightEffects>,
+    shells: Query<(&ShellPath, Option<&Shot>, &FlightEffects, Has<TrailedShell>)>,
     assets: Res<TrailAssets>,
     mut ring: ResMut<TrailRing>,
     mut rng: ResMut<ViewRng>,
     mut commands: Commands,
 ) {
     let shell = add.entity;
-    let Ok((path, shot)) = shells.get(shell) else {
+    let (path, shot, effects, attached) = shells
+        .get(shell)
+        .expect("flight emissions and the complete shell path are built in one spawn bundle");
+    if attached {
         return;
-    };
-    commands.entity(shell).insert(TrailedShell);
+    }
+    let Some(emission) = effects.smoke else {
+        return;
+    }; // Authored smokeless ammunition.
+    commands
+        .entity(shell)
+        .insert((TrailedShell, Visibility::Inherited));
     let mut ribbon = TrailRibbon {
+        emission,
         shell,
         shot: shot.map(|shot| shot.0),
         points: VecDeque::new(),
@@ -323,11 +321,13 @@ fn capture_point(
     }
     // Random lateral direction ⊥ nothing in particular (smoke shear is chaotic) + a constant rise.
     let theta = rng.range(0.0, std::f32::consts::TAU);
-    let lateral = Vec3::new(theta.cos(), 0.0, theta.sin()) * rng.range(0.2, TRAIL_DRIFT_LATERAL);
+    let lateral = Vec3::new(theta.cos(), 0.0, theta.sin())
+        * rng.range(0.5, 1.0)
+        * ribbon.emission.lateral_accel_mps2;
     ribbon.points.push_back(TrailPoint {
         pos,
         age,
-        drift: lateral + Vec3::Y * TRAIL_DRIFT_RISE,
+        drift: lateral + Vec3::Y * ribbon.emission.rise_accel_mps2,
         arc: ribbon.arc,
         seed: rng.next_f32(),
         source_index,
@@ -446,7 +446,7 @@ fn finish_pending_bounces(
 /// bounce and terminal between render frames would lose the last segment before `update_trails` saw it.
 fn flush_removed_shell_path(
     remove: On<Remove, ShellPath>,
-    shells: Query<(&ShellPath, &PenetrationMarks, Option<&Shot>), With<ShellVisual>>,
+    shells: Query<(&ShellPath, &PenetrationMarks, Option<&Shot>), With<FlightEffects>>,
     mut trails: Query<&mut TrailRibbon>,
     mut rng: ResMut<ViewRng>,
     present: Option<Res<ShotClock>>,
@@ -503,7 +503,7 @@ fn update_trails(
         while trail
             .points
             .front()
-            .is_some_and(|p| p.age >= TRAIL_POINT_LIFETIME)
+            .is_some_and(|p| p.age >= trail.emission.lifetime_s)
         {
             trail.points.pop_front();
         }
@@ -531,7 +531,13 @@ fn update_trails(
         }
 
         // A ribbon without stations holds no mesh (`TrailRibbon`).
-        ribbon_stations(trail.points.make_contiguous(), head, &mut stations);
+        let emission = trail.emission;
+        ribbon_stations(
+            emission,
+            trail.points.make_contiguous(),
+            head,
+            &mut stations,
+        );
         if stations.is_empty() {
             if mesh.is_some() {
                 commands.entity(entity).remove::<Mesh3d>();
@@ -539,11 +545,11 @@ fn update_trails(
             continue;
         }
         if let Some(mut mesh) = mesh.and_then(|mesh| meshes.get_mut(&mesh.0)) {
-            write_stations(&mut mesh, &stations, cam);
+            write_stations(emission, &mut mesh, &stations, cam);
             #[cfg(test)]
             emit_mesh_evidence(&mut trail, &mesh, &mut mesh_evidence);
         } else {
-            let mesh = ribbon_mesh(&stations, cam);
+            let mesh = ribbon_mesh(emission, &stations, cam);
             #[cfg(test)]
             emit_mesh_evidence(&mut trail, &mesh, &mut mesh_evidence);
             commands.entity(entity).insert(Mesh3d(meshes.add(mesh)));
@@ -580,12 +586,12 @@ fn emit_mesh_evidence(
 /// A new ribbon mesh drawing `stations`, which must not be empty (`TrailRibbon`). Its attribute set,
 /// position/normal/uv/color, is the layout the trail pipeline is specialized against; it stays in
 /// the main world because every rebuild refills its vectors in place ([`write_stations`]).
-fn ribbon_mesh(stations: &[Station], cam: Vec3) -> Mesh {
+fn ribbon_mesh(emission: SmokeEmission, stations: &[Station], cam: Vec3) -> Mesh {
     let mut mesh = Mesh::new(
         PrimitiveTopology::TriangleList,
         RenderAssetUsages::RENDER_WORLD | RenderAssetUsages::MAIN_WORLD,
     );
-    write_stations(&mut mesh, stations, cam);
+    write_stations(emission, &mut mesh, stations, cam);
     mesh
 }
 
@@ -607,7 +613,7 @@ struct Station {
 /// Allocation-free once warm: the mesh's own attribute and index vectors are refilled in place, so
 /// a rebuild allocates only while its ribbon grows past its largest earlier size. The positions are
 /// rewritten whole every frame because the strip faces `cam`.
-fn write_stations(mesh: &mut Mesh, stations: &[Station], cam: Vec3) {
+fn write_stations(emission: SmokeEmission, mesh: &mut Mesh, stations: &[Station], cam: Vec3) {
     let mut positions = take_attribute(mesh, Mesh::ATTRIBUTE_POSITION, |values| match values {
         VertexAttributeValues::Float32x3(values) => Some(values),
         _ => None,
@@ -628,7 +634,14 @@ fn write_stations(mesh: &mut Mesh, stations: &[Station], cam: Vec3) {
         Some(Indices::U32(indices)) => std::mem::take(indices),
         _ => Vec::new(),
     };
-    ribbon_vertices(stations, cam, &mut positions, &mut uvs, &mut colors);
+    ribbon_vertices(
+        emission,
+        stations,
+        cam,
+        &mut positions,
+        &mut uvs,
+        &mut colors,
+    );
     ribbon_indices(stations, &mut indices);
     normals.resize(positions.len(), [0.0, 1.0, 0.0]);
     mesh.insert_attribute(Mesh::ATTRIBUTE_POSITION, positions);
@@ -669,7 +682,12 @@ fn ribbon_indices(stations: &[Station], indices: &mut Vec<u32>) {
 
 /// The stations a ribbon draws, oldest → newest, into `out`: each point's drifted center, then the
 /// live head (age 0, at the shell). Empty for degenerate inputs (< 2 stations).
-fn ribbon_stations(points: &[TrailPoint], head: Option<Vec3>, out: &mut Vec<Station>) {
+fn ribbon_stations(
+    emission: SmokeEmission,
+    points: &[TrailPoint],
+    head: Option<Vec3>,
+    out: &mut Vec<Station>,
+) {
     out.clear();
     if points.len() + usize::from(head.is_some()) < 2 {
         return;
@@ -693,14 +711,13 @@ fn ribbon_stations(points: &[TrailPoint], head: Option<Vec3>, out: &mut Vec<Stat
         });
     }
 
-    // Cut everything closer to the muzzle than TRAIL_START_ARC — that near-barrel smoke is the
-    // muzzle puff's job, not the trail's (module doc / TRAIL_START_ARC). Find the first station at
+    // Cut the authored near-muzzle arc: the muzzle cloud occupies it. Find the first station at
     // or past the start arc; if a station precedes it, splice in a boundary station at EXACTLY the
     // start arc (interpolated between the straddling pair) so the ribbon's near end stays pinned
     // there instead of jumping by a whole station as near-muzzle points age out.
     let start = out
         .iter()
-        .position(|s| s.arc >= TRAIL_START_ARC)
+        .position(|s| s.arc >= emission.start_m)
         .unwrap_or(out.len());
     if start == out.len() {
         out.clear();
@@ -708,14 +725,14 @@ fn ribbon_stations(points: &[TrailPoint], head: Option<Vec3>, out: &mut Vec<Stat
         let (a, b) = (out[start - 1], out[start]);
         let span = b.arc - a.arc;
         let t = if span > 1e-4 {
-            (TRAIL_START_ARC - a.arc) / span
+            (emission.start_m - a.arc) / span
         } else {
             0.0
         };
         out[start - 1] = Station {
             center: a.center.lerp(b.center, t),
             age: a.age + (b.age - a.age) * t,
-            arc: TRAIL_START_ARC,
+            arc: emission.start_m,
             seed: b.seed,
             segment: b.segment,
         };
@@ -734,6 +751,7 @@ fn ribbon_stations(points: &[TrailPoint], head: Option<Vec3>, out: &mut Vec<Stat
 /// camera-facing side vector, the age-growing width, the arc-anchored V, and the age/seed vertex
 /// color the shader erodes by.
 fn ribbon_vertices(
+    emission: SmokeEmission,
     stations: &[Station],
     cam: Vec3,
     positions: &mut Vec<[f32; 3]>,
@@ -762,14 +780,14 @@ fn ribbon_vertices(
         last_side = side;
         // Taper geometry from the start arc.
         let fade = smoothstep(
-            TRAIL_START_ARC,
-            TRAIL_START_ARC + HEAD_FADE_ARC,
+            emission.start_m,
+            emission.start_m + emission.fade_m,
             station.arc,
         );
-        let half = 0.5 * (TRAIL_WIDTH_BIRTH + station.age * TRAIL_WIDTH_GROWTH) * fade;
+        let half = 0.5 * (emission.width_m + station.age * emission.growth_mps) * fade;
         // The shader multiplies alpha by this near-end taper.
         let alpha = fade;
-        let age_frac = (station.age / TRAIL_POINT_LIFETIME).clamp(0.0, 1.0);
+        let age_frac = (station.age / emission.lifetime_s).clamp(0.0, 1.0);
         for (edge, u) in [(-1.0, 0.0), (1.0, 1.0)] {
             let p = station.center + side * (half * edge);
             positions.push([p.x, p.y, p.z]);
@@ -782,6 +800,16 @@ fn ribbon_vertices(
 /// A tiny but real ribbon mesh for the startup pipeline prewarm: same attribute layout and enough
 /// geometry that the trail pipeline compiles against exactly what live trails will draw.
 pub(super) fn prewarm_ribbon_mesh() -> Mesh {
+    // ASSUMED synthetic unit emission for pipeline compilation, never a round's emission data.
+    let emission = SmokeEmission {
+        lifetime_s: 2.0,
+        width_m: 1.0,
+        growth_mps: 0.0,
+        lateral_accel_mps2: 0.0,
+        rise_accel_mps2: 0.0,
+        start_m: 0.0,
+        fade_m: 1.0,
+    };
     let points = [
         TrailPoint {
             pos: Vec3::ZERO,
@@ -804,11 +832,12 @@ pub(super) fn prewarm_ribbon_mesh() -> Mesh {
     ];
     let mut stations = Vec::new();
     ribbon_stations(
+        emission,
         &points,
         Some(Vec3::X * TRAIL_MIN_SPACING * 2.0),
         &mut stations,
     );
-    ribbon_mesh(&stations, Vec3::Y * 50.0)
+    ribbon_mesh(emission, &stations, Vec3::Y * 50.0)
 }
 
 /// A 128×128 tileable two-octave value-noise texture (R8, repeat sampler) — the trail's breakup
@@ -873,6 +902,11 @@ fn noise_texture(images: &mut Assets<Image>) -> Handle<Image> {
 mod tests {
     use super::*;
 
+    /// FIXTURE DATA for the shared renderer; no shipped emission reads this constructor.
+    fn fixture_emission() -> SmokeEmission {
+        FlightEffects::fixture_traced().smoke.unwrap()
+    }
+
     fn point(pos: Vec3, age: f32, arc: f32) -> TrailPoint {
         TrailPoint {
             pos,
@@ -896,7 +930,7 @@ mod tests {
         points[2].segment = 1;
         points[3].segment = 1;
         let mut stations = Vec::new();
-        ribbon_stations(&points, None, &mut stations);
+        ribbon_stations(fixture_emission(), &points, None, &mut stations);
         let segments: Vec<u32> = stations.iter().map(|station| station.segment).collect();
         assert_eq!(segments, vec![0, 0, 1, 1]);
         let mut indices = Vec::new();
@@ -927,15 +961,15 @@ mod tests {
         let head = Some(Vec3::X * 41.0 * TRAIL_MIN_SPACING);
         let mut stations = Vec::new();
         // Warm-up: the longest build sizes every buffer.
-        ribbon_stations(&points, head, &mut stations);
-        let mut mesh = ribbon_mesh(&stations, Vec3::new(0.0, 50.0, 50.0));
+        ribbon_stations(fixture_emission(), &points, head, &mut stations);
+        let mut mesh = ribbon_mesh(fixture_emission(), &stations, Vec3::new(0.0, 50.0, 50.0));
 
         // Later frames: the camera moves and the tail expires, so every vertex is rewritten.
         let allocations = crate::tests::alloc_count::allocations_in(|| {
             for frame in 1..=8 {
                 let cam = Vec3::new(frame as f32, 50.0, 50.0 - frame as f32);
-                ribbon_stations(&points[frame..], head, &mut stations);
-                write_stations(&mut mesh, &stations, cam);
+                ribbon_stations(fixture_emission(), &points[frame..], head, &mut stations);
+                write_stations(fixture_emission(), &mut mesh, &stations, cam);
             }
         });
         assert_eq!(allocations, 0, "a warm ribbon rebuild must not allocate");
@@ -945,12 +979,60 @@ mod tests {
         );
     }
 
+    /// The shared ribbon uses each round's width, expansion and lifetime. Replacing any of them
+    /// with one global signature would make distinct emissions render alike.
+    #[test]
+    fn ribbon_geometry_uses_its_own_emission() {
+        let stations = [
+            Station {
+                center: Vec3::ZERO,
+                age: 0.5,
+                arc: 100.0,
+                seed: 0.0,
+                segment: 0,
+            },
+            Station {
+                center: Vec3::X * 10.0,
+                age: 0.5,
+                arc: 110.0,
+                seed: 0.0,
+                segment: 0,
+            },
+        ];
+        let first = fixture_emission();
+        let mut second = first;
+        second.width_m *= 2.0;
+        second.growth_mps *= 2.0;
+        second.lifetime_s *= 2.0;
+        let draw = |emission| {
+            let mut positions = Vec::new();
+            let mut uvs = Vec::new();
+            let mut colours = Vec::new();
+            ribbon_vertices(
+                emission,
+                &stations,
+                Vec3::new(0.0, 10.0, 10.0),
+                &mut positions,
+                &mut uvs,
+                &mut colours,
+            );
+            let width = Vec3::from_array(positions[1]).distance(Vec3::from_array(positions[0]));
+            (width, colours[0][0])
+        };
+        let (a_width, a_age) = draw(first);
+        let (b_width, b_age) = draw(second);
+        assert!((a_width - (first.width_m + 0.5 * first.growth_mps)).abs() < 1e-6);
+        assert!((b_width - 2.0 * a_width).abs() < 1e-6);
+        assert_eq!(b_age, a_age / 2.0);
+    }
+
     /// Capture discipline: the spacing filter drops close points, the arc accumulates only over
     /// captured ones, and the hard cap evicts oldest-first.
     #[test]
     fn capture_respects_spacing_and_cap() {
         let mut rng = ViewRng::seeded(3);
         let mut ribbon = TrailRibbon {
+            emission: fixture_emission(),
             shell: Entity::PLACEHOLDER,
             shot: None,
             points: VecDeque::new(),
@@ -1056,7 +1138,7 @@ mod tests {
                     segment_starts: vec![1],
                 },
                 PenetrationMarks::default(),
-                ShellVisual,
+                FlightEffects::fixture_traced(),
                 Transform::from_translation(Vec3::X * 5.0),
             ))
             .id();
@@ -1082,7 +1164,7 @@ mod tests {
         app.world_mut()
             .get_mut::<Transform>(shell)
             .expect("shell alive")
-            .translation = Vec3::X * (TRAIL_START_ARC + 2.0);
+            .translation = Vec3::X * (fixture_emission().start_m + 2.0);
         app.update();
         let built = mesh_of(&mut app).expect("past the start arc: a mesh");
         let vertices = app
@@ -1104,14 +1186,13 @@ mod tests {
         );
     }
 
-    /// The live wiring on real ECS systems: a DRESSED shell (`ShellVisual`) grows a ribbon whose
-    /// mesh has geometry; an undressed MG round never does; and once the shell despawns the ribbon
-    /// outlives it only until its smoke fully expires.
+    /// A round declaring smoke grows drawable ribbon geometry; an explicitly smokeless round
+    /// grows none. Its ribbon survives the shell only for the authored particle lifetime.
     #[test]
     fn trails_attach_follow_and_outlive_the_shell() {
         let mut app = trail_app();
 
-        // A dressed shell mid-flight, and an undressed MG round (ShellPath only).
+        // FIXTURE DATA: two paths, one emitting smoke and one explicitly smokeless.
         let shell = app
             .world_mut()
             .spawn((
@@ -1120,7 +1201,7 @@ mod tests {
                     segment_starts: Vec::new(),
                 },
                 PenetrationMarks::default(),
-                ShellVisual,
+                FlightEffects::fixture_traced(),
                 Transform::from_translation(Vec3::X * 50.0),
             ))
             .id();
@@ -1130,6 +1211,7 @@ mod tests {
                 segment_starts: Vec::new(),
             },
             PenetrationMarks::default(),
+            FlightEffects::NONE,
             Transform::from_translation(Vec3::X * 25.0),
         ));
         app.update();
@@ -1142,7 +1224,7 @@ mod tests {
         assert_eq!(
             trails.len(),
             1,
-            "exactly the 88 grows a trail, never the MG"
+            "only the round declaring smoke grows a ribbon"
         );
         let mesh_handle = world
             .get::<Mesh3d>(trails[0])
@@ -1215,7 +1297,7 @@ mod tests {
         app.world_mut()
             .resource_mut::<Time>()
             .advance_by(std::time::Duration::from_secs_f32(
-                TRAIL_POINT_LIFETIME + 0.1,
+                fixture_emission().lifetime_s + 0.1,
             ));
         app.update();
         app.update();

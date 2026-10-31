@@ -1064,6 +1064,7 @@ mod tests {
             WeaponIndex(0),
         ));
         app.world_mut().trigger(FireShell {
+            effects: crate::rounds::FlightEffects::fixture_traced(),
             origin: FIRE_ORIGIN,
             direction: Dir3::X,
             speed: 773.0,

@@ -222,6 +222,7 @@ fn fire_round(
 ) {
     let shooter = app.world_mut().spawn_empty().id();
     app.world_mut().trigger(FireShell {
+        effects: crate::rounds::FlightEffects::fixture_traced(),
         origin: from,
         direction,
         speed: SPEED,

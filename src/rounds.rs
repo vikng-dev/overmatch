@@ -38,6 +38,10 @@
 //!   design doc §5a, "The burst". A round without the block is inert. A burst and a fuze are
 //!   authored together.
 //!
+//! `effects` states both flight-emission presences with provenance (`ember` and `smoke`). A present
+//! emitter supplies its size, colour, placement, burn and expansion facts; explicit absence emits
+//! nothing. The view reads these facts independently of calibre and the shell-scene marker.
+//!
 //! # How a round flies
 //!
 //! Drag reads the round type's flight nose, never the round's hit nose: a ballistic-capped type
@@ -72,7 +76,9 @@ use crate::provenance::Sourced;
 use crate::spec::NoseShape;
 use crate::substances::{MaterialFacts, SubstanceRegistry};
 
+mod effects;
 pub(crate) mod fuze;
+pub(crate) use effects::{EmberEmission, FlightEffects, SmokeEmission};
 
 /// The shipped round-type table, embedded as the round files are, so a round is in hand
 /// synchronously wherever it is bound (ADR-0014: built from data, never from an asset).
@@ -111,6 +117,8 @@ pub(crate) struct Round {
     /// file's `default_mode` until [`crate::tank::WeaponRound::in_mode`] picks another. 0 for an
     /// inert round.
     pub(crate) fuze_mode: u8,
+    /// Authored view-only emissions, carried through both fire paths from round data.
+    pub(crate) effects: FlightEffects,
 }
 
 /// One round as its file and its type resolve it, before a gun gives it a muzzle speed: its
@@ -128,6 +136,7 @@ pub(crate) struct RoundFacts {
     core: MaterialFacts,
     pub(crate) burst: Option<Burst>,
     pub(crate) fuze: Option<fuze::Spec>,
+    effects: FlightEffects,
 }
 
 impl RoundFacts {
@@ -159,6 +168,7 @@ impl RoundFacts {
             core: self.core,
             burst: self.burst,
             fuze_mode: self.fuze.as_ref().map_or(0, |f| f.default_mode),
+            effects: self.effects,
         })
     }
 }
@@ -178,6 +188,7 @@ struct RoundFile {
     mass: Sourced<f32>,
     caliber: Sourced<f32>,
     wound: Sourced<f32>,
+    effects: effects::File,
     /// The part of a sub-calibre round that meets the plate; absent, the whole round does.
     #[serde(default)]
     penetrator: Option<PenetratorFile>,
@@ -404,6 +415,7 @@ fn resolved(
         flying.caliber,
         flying.mass,
     );
+    let effects = file.effects.resolve()?;
     let wound = file.wound.0;
     if !wound.is_finite() || wound <= 0.0 {
         return Err(format!(
@@ -471,6 +483,7 @@ fn resolved(
             core,
             burst,
             fuze,
+            effects,
         },
         name,
     ))
@@ -587,7 +600,10 @@ pub(crate) mod tests {
 
     /// The fixture round file, its fields `fields` authored, then `extra` verbatim.
     pub(crate) fn file(fields: &[(&str, &str)], extra: &str) -> String {
-        format!("({}{extra})", authored(fields))
+        format!(
+            "({}, effects: (ember: (None, Unknown(\"fixture absence\")), smoke: (None, Unknown(\"fixture absence\"))){extra})",
+            authored(fields)
+        )
     }
 
     /// A registry of the one round `text`, keyed "Probe", over the fixture types.
@@ -1098,7 +1114,7 @@ pub(crate) mod tests {
     fn malformed_files_do_not_load() {
         let bare = r#"(name: ("Probe", Tuned("fixture")), round_type: ("Fixture", Tuned("fixture")),
             core: ("GunSteel", Tuned("fixture")), mass: 5.0, caliber: (0.05, Tuned("fixture")),
-            wound: (20.0, Tuned("fixture")))"#;
+            wound: (20.0, Tuned("fixture")), effects: (ember: (None, Unknown("fixture absence")), smoke: (None, Unknown("fixture absence"))))"#;
         let err = load(bare).unwrap_err();
         assert!(err.to_string().contains("provenance"), "{err}");
 

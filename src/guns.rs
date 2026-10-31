@@ -395,13 +395,14 @@ mod tests {
         nose_factor: 0.291_666_66,
     };
 
-    /// Fixture data: every shipped round's resolved record, to the bit — the values the laws, the
-    /// shot and every pinned digest are measured against, read off the shipped data. A data edit
-    /// that moves any of them moves the game's ballistics, and moves its pin here deliberately.
+    /// FIXTURE DATA: every shipped round's physical record, to the bit — the values the laws,
+    /// shot and pinned digests are measured against. Presentation emissions have separate parser
+    /// and renderer invariants, so these physics pins explicitly exclude them.
     const PINS: [(&str, Round); 5] = [
         (
             "7.9mm_AP",
             Round {
+                effects: crate::rounds::FlightEffects::NONE,
                 body: RoundBody {
                     mass: 0.0118,
                     caliber: 0.0079,
@@ -428,6 +429,7 @@ mod tests {
         (
             "88mm_AP",
             Round {
+                effects: crate::rounds::FlightEffects::NONE,
                 body: PZGR_39,
                 flying: PZGR_39,
                 penetrator: PZGR_39,
@@ -442,6 +444,7 @@ mod tests {
         (
             "88mm_APCR",
             Round {
+                effects: crate::rounds::FlightEffects::NONE,
                 body: RoundBody {
                     mass: 7.3,
                     caliber: 0.088,
@@ -473,6 +476,7 @@ mod tests {
         (
             "88mm_APHE_ring",
             Round {
+                effects: crate::rounds::FlightEffects::NONE,
                 body: PZGR_39,
                 flying: PZGR_39,
                 penetrator: PZGR_39,
@@ -499,6 +503,7 @@ mod tests {
         (
             "88mm_HE",
             Round {
+                effects: crate::rounds::FlightEffects::NONE,
                 body: RoundBody {
                     mass: 9.30,
                     caliber: 0.088,
@@ -538,13 +543,17 @@ mod tests {
         ),
     ];
 
-    /// THE PURE-REFACTOR GATE. Every shipped round, read through the gun that fires it, is field for
-    /// field its pinned record ([`PINS`], to the bit); and so is every round the shipped tank
+    /// The game's damage model: every shipped round's physical facts, read through the gun that
+    /// fires it, are field for field their pinned record ([`PINS`], to the bit); and so is every round the shipped tank
     /// stows, read through its mount's gun as spawn reads it. The laws, the shot and every pinned
     /// digest read this record, so a mutant that moves any row's muzzle speed, any type's or
     /// round's nose, a core, a crew line rate or a burst input fails here.
     #[test]
-    fn every_round_reads_through_its_gun_bit_for_bit_as_pinned() {
+    fn every_rounds_physical_facts_read_through_its_gun_bit_for_bit_as_pinned() {
+        let physical = |mut round: Round| {
+            round.effects = crate::rounds::FlightEffects::NONE;
+            round
+        };
         let guns = GunRegistry::shipped();
         let pinned: BTreeMap<&str, Round> = PINS.into_iter().collect();
         let shipped: Vec<&str> = RoundRegistry::shipped().keys().collect();
@@ -557,7 +566,7 @@ mod tests {
             let round = guns
                 .round_by_key(key)
                 .unwrap_or_else(|err| panic!("{key}: {err}"));
-            assert_eq!(&round, pin, "{key}");
+            assert_eq!(&physical(round), pin, "{key}");
         }
         let sheet: crate::spec::TankSpec =
             ron::de::from_str(include_str!("../assets/tiger_1/tiger_1.tank.ron"))
@@ -572,9 +581,9 @@ mod tests {
                 let pin = pinned
                     .get(key)
                     .unwrap_or_else(|| panic!("{mount}: {key} is not pinned"));
-                assert_eq!(&round, pin, "{mount}: {key}");
+                assert_eq!(&physical(round), pin, "{mount}: {key}");
                 assert_eq!(
-                    guns.round(&weapon.gun, key).as_ref(),
+                    guns.round(&weapon.gun, key).map(physical).as_ref(),
                     Ok(pin),
                     "{mount}: {key}"
                 );

@@ -58,7 +58,7 @@ pub(super) fn spawn_prewarm_rig(
     mut rng: ResMut<ViewRng>,
     mut ring: ResMut<BillboardRing>,
 ) {
-    // The 88 shell scene — the same asset path `ballistics::view`'s setup preloads, so this rides
+    // The shell scene — the same asset path `ballistics::view`'s setup preloads, so this rides
     // the identical (already started) load and only ADDS the instantiate + first-draw that used to
     // happen on the first shot. Its glTF meshes get `NoFrustumCulling` as they appear
     // (`tag_prewarm_meshes`); the root can't carry it for them.
@@ -113,7 +113,7 @@ pub(super) fn spawn_prewarm_rig(
     }
 
     // One real trail ribbon (its own mesh layout — position/normal/uv/color — is its own pipeline
-    // permutation) and one 88 ember clone (Blend emissive `StandardMaterial` over the ember sphere —
+    // permutation) and one ember pipeline specimen (Blend emissive `StandardMaterial` over the ember sphere —
     // the same pipeline the old impact puff warmed, now serving the shell-base ember).
     commands.spawn((
         PrewarmRig::new(),

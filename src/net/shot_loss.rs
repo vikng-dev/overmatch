@@ -100,6 +100,7 @@ fn scripted_shell(
 ) -> FireShell {
     let (speed, body, wound) = FIXTURE_ROUNDS[usize::from(source.round)];
     FireShell {
+        effects: crate::rounds::FlightEffects::fixture_traced(),
         origin: MUZZLE,
         direction: Dir3::NEG_Z,
         speed,

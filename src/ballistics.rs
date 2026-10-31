@@ -94,6 +94,7 @@ mod recording_tests;
 /// composes [`sim_plugin`] and therefore opens no view artifact and emits no render component.
 mod view;
 
+#[cfg(test)]
 pub(crate) use view::ShellVisual;
 pub use view::{TracerStreak, plugin as view_plugin};
 
@@ -1117,6 +1118,8 @@ pub struct FireShell {
     /// The round's burst ([`crate::rounds::Round::burst`]); `None` for an inert round.
     pub burst: Option<burst::Burst>,
     pub fuze_mode: u8,
+    /// The game's damage-model view: emissions authored by the round, never inferred from calibre.
+    pub(crate) effects: crate::rounds::FlightEffects,
     /// Fire mechanism at the source.
     pub mechanism: crate::spec::FireMechanism,
     /// Firing source for self-exclusion and authority attribution.
@@ -1157,6 +1160,7 @@ impl FireShell {
             wound: round.wound,
             burst: round.burst,
             fuze_mode: round.fuze_mode,
+            effects: round.effects,
             mechanism,
             tracer,
             shooter,
@@ -1921,6 +1925,7 @@ fn on_fire_shell(
         nose_factor: fire.nose_factor,
     };
     let shell_base = (
+        fire.effects,
         Projectile {
             velocity,
             round: bound(penetrator),
@@ -4798,6 +4803,7 @@ mod march_tests {
     fn fire_shell_catch_up(app: &mut App, catch_up_ticks: u32) -> Vec<Captured> {
         app.add_observer(on_fire_shell);
         app.world_mut().trigger(FireShell {
+            effects: crate::rounds::FlightEffects::fixture_traced(),
             origin: Vec3::new(0.0, 2.0, 2.0),
             direction: Dir3::NEG_Z,
             speed: 800.0,
@@ -4843,6 +4849,7 @@ mod march_tests {
         let shot = a_shot();
         let shooter = Entity::PLACEHOLDER;
         app.world_mut().trigger(FireShell {
+            effects: crate::rounds::FlightEffects::fixture_traced(),
             origin: Vec3::new(0.0, 2.0, 2.0),
             direction: Dir3::NEG_Z,
             speed: 800.0,
@@ -4896,6 +4903,7 @@ mod march_tests {
         let mut app = world_with_plate(Vec3::new(3.0, 3.0, 0.05), Vec3::new(0.0, 2.0, -50.0));
         app.add_observer(on_fire_shell);
         app.world_mut().trigger(FireShell {
+            effects: crate::rounds::FlightEffects::fixture_traced(),
             origin: Vec3::new(0.0, 2.0, 2.0),
             direction: Dir3::NEG_Z,
             speed: SPEED,

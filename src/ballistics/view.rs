@@ -25,9 +25,8 @@ pub fn plugin(app: &mut App) {
         .add_observer(dress_projectile);
 }
 
-/// Marks a projectile dressed with the main-gun shell scene — the DURABLE "this is a shell-class
-/// round" interface `vfx` classifies on. (It used to classify on `WorldAssetRoot`, which is a
-/// renderer implementation detail that happens to correlate.)
+/// Marks a projectile dressed with the shell scene. Composition tests inspect this identity;
+/// flight emitters read their authored emission component independently of scene dressing.
 #[derive(Component, Clone, Copy, Default)]
 pub(crate) struct ShellVisual;
 

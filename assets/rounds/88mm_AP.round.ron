@@ -1,3 +1,4 @@
+// Subject: the game's damage model and its view, game state only.
 // The solid Pzgr. 39: the fixture round the pen cam scenarios and the field casts fire.
 // The file's fields are `src/rounds.rs`'s module doc.
 (
@@ -15,4 +16,23 @@
     wound: (30.0, Tuned("a main-gun round empties the 30 HP crew pool at ~10 cm of chord
         (3 / 0.10): a clean pass through a station knocks it out, a graze of its edge leaves it
         reduced (crew-model decision 2026-10-17)")),
+    effects: (
+        ember: (Some((
+            radius_m: (0.09, Tuned("ASSUMED: provisional presentation bead radius, preserved from the original effect")),
+            base_offset_m: (0.35, Unknown("ASSUMED: base of the current shell view; replace from this round's certified visual geometry")),
+            burn_s: (2.0, Unknown("ASSUMED: provisional tracer burn, no measured duration read")),
+            fade_s: (0.4, Tuned("ASSUMED: provisional burn-out tail")),
+            emissive: ((10.0, 2.5, 0.5), Tuned("ASSUMED: provisional red-orange linear HDR output")),
+        )), Unknown("ASSUMED: retained provisional tracer signature; no measured emission data has been read for this round")),
+        smoke: (Some((
+            lifetime_s: (2.2, Tuned("ASSUMED: provisional smoke dissolution time")),
+            width_m: (0.35, Tuned("ASSUMED: provisional smoke birth diameter")),
+            growth_mps: (1.3, Tuned("ASSUMED: provisional smoke expansion rate")),
+            lateral_accel_mps2: (0.4, Tuned("ASSUMED: provisional smoke shear coefficient")),
+            rise_accel_mps2: (0.35, Tuned("ASSUMED: provisional smoke rise coefficient")),
+            start_m: (10.0, Tuned("ASSUMED: muzzle cloud occupies the first travelled arc")),
+            fade_m: (20.0, Tuned("ASSUMED: smoke ribbon's birth taper beyond the muzzle cloud")),
+        )), Unknown("ASSUMED: provisional smoke signature retained with this round's tracer")),
+    ),
+
 )

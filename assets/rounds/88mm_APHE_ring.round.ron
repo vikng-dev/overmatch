@@ -1,3 +1,4 @@
+// Subject: the game's damage model and its view, game state only.
 // The 8.8 cm Pzgr. 39 with its burst core, bursting as every burst round does, as the ring: the
 // Pzgr. 39's body with its burst core. DERIVED at load from the data below and the body's GunSteel
 // density: a cavity of 68.5 cm³ and 70.0 mm length; a wall of 2.786 kg and a nose of 6.971 kg;
@@ -48,4 +49,23 @@
             it; a slender base cavity, longer than it is wide), d = sqrt(4 V / (pi L)) = 35.29 mm, authored
             as 35.3 mm. The burst law re-derives the length from d, the mass and the density: 70.0 mm")),
     )),
+    effects: (
+        ember: (Some((
+            radius_m: (0.09, Tuned("ASSUMED: provisional presentation bead radius, preserved from the original effect")),
+            base_offset_m: (0.35, Unknown("ASSUMED: base of the current shell view; replace from this round's certified visual geometry")),
+            burn_s: (2.0, Unknown("ASSUMED: provisional tracer burn, no measured duration read")),
+            fade_s: (0.4, Tuned("ASSUMED: provisional burn-out tail")),
+            emissive: ((10.0, 2.5, 0.5), Tuned("ASSUMED: provisional red-orange linear HDR output")),
+        )), Unknown("ASSUMED: retained provisional tracer signature; no measured emission data has been read for this round")),
+        smoke: (Some((
+            lifetime_s: (2.2, Tuned("ASSUMED: provisional smoke dissolution time")),
+            width_m: (0.35, Tuned("ASSUMED: provisional smoke birth diameter")),
+            growth_mps: (1.3, Tuned("ASSUMED: provisional smoke expansion rate")),
+            lateral_accel_mps2: (0.4, Tuned("ASSUMED: provisional smoke shear coefficient")),
+            rise_accel_mps2: (0.35, Tuned("ASSUMED: provisional smoke rise coefficient")),
+            start_m: (10.0, Tuned("ASSUMED: muzzle cloud occupies the first travelled arc")),
+            fade_m: (20.0, Tuned("ASSUMED: smoke ribbon's birth taper beyond the muzzle cloud")),
+        )), Unknown("ASSUMED: provisional smoke signature retained with this round's tracer")),
+    ),
+
 )

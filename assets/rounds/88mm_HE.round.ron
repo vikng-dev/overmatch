@@ -1,3 +1,4 @@
+// Subject: the game's damage model and its view, game state only.
 // The 8.8 cm Sprgr. L/4.5, the KwK 36's high-explosive round, with its nose fuze A.Z. 23/28, in
 // the game's damage model: it bursts as every burst round does, as the ring, with today's fragment
 // cone; a blast with no direction is a later slice. Source keys (TM53, Brit43, E9-369A, HEA12) and
@@ -40,4 +41,9 @@
         cavity_diameter: (0.065, Tuned("ASSUMED: no source gives the cavity; with the core it
             DERIVES a 0.171 m cavity, about two calibres")),
     )),
+    effects: (
+        ember: (None, Unknown("ASSUMED: untraced shell; no base-tracer composition is authored")),
+        smoke: (None, Unknown("ASSUMED: no sustained flight smoke emission authored")),
+    ),
+
 )
