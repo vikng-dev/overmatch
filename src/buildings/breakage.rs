@@ -198,18 +198,30 @@ impl Layout {
                 joints.len()
             ));
         }
+        use avian3d::dynamics::rigid_body::mass_properties::bevy_heavy::ComputeMassProperties3d;
         let blocks = chunks
             .iter()
             .map(|&c| {
-                Block::hull(
-                    asset.chunks[c as usize]
-                        .hull
-                        .iter()
-                        .map(|p| Vec3::from_array(*p))
-                        .collect(),
-                )
+                let points: Vec<Vec3> = asset.chunks[c as usize]
+                    .hull
+                    .iter()
+                    .map(|p| Vec3::from_array(*p))
+                    .collect();
+                if points.iter().any(|p| !p.is_finite())
+                    || !Collider::convex_hull(points.clone()).is_some_and(|collider| {
+                        let properties = collider.mass_properties(1.0);
+                        properties.mass.is_finite()
+                            && properties.mass > 0.0
+                            && properties.angular_inertia_tensor().inverse().is_finite()
+                    })
+                {
+                    return Err(format!(
+                        "chunks[{c}].hull cannot form a convex collider; rebake a finite, nondegenerate solid hull"
+                    ));
+                }
+                Ok(Block::hull(points))
             })
-            .collect();
+            .collect::<Result<Vec<_>, _>>()?;
         Ok(Self {
             elements: elements
                 .into_iter()

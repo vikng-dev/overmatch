@@ -2094,3 +2094,38 @@ fn a_break_launches_and_returns_in_one_authority_pass() {
         0.5 * source_mass * 9.0
     );
 }
+
+/// DEGENERATE CHUNK HULLS ARE REFUSED BEFORE PLAY (the game's environment destruction model).
+/// Launch and collider reconciliation rely on solid baked hulls; four coplanar corners or a
+/// nonfinite corner must fail the load gate with the field and fix, rather than panic on contact.
+#[test]
+fn degenerate_chunk_hulls_are_refused_before_play() {
+    let kind = shipped_house();
+    let masonry: Vec<Option<Masonry>> = kind
+        .asset
+        .materials
+        .iter()
+        .map(|name| {
+            Masonry::of(crate::substances::SubstanceRegistry::shipped_static(), name).unwrap()
+        })
+        .collect();
+    let attachments = Attachments::shipped_static();
+    let c = kind.layout.chunks[0] as usize;
+    for hull in [
+        vec![
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 0.0, 1.0],
+            [1.0, 0.0, 1.0],
+        ],
+        vec![[f32::NAN, 0.0, 0.0]; 4],
+    ] {
+        let mut asset = kind.asset.clone();
+        asset.chunks[c].hull = hull;
+        let error = Layout::of(&asset, &masonry, attachments).unwrap_err();
+        assert!(
+            error.contains(&format!("chunks[{c}].hull")) && error.contains("rebake"),
+            "{error}"
+        );
+    }
+}
