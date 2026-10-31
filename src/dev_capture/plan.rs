@@ -36,6 +36,96 @@ pub(crate) struct CapturePlan {
     /// server fires them for its capture clients, reading the same plan.
     #[serde(default)]
     pub(crate) wall: Option<Wall>,
+    /// What the root sets the scene up as ([`Scene`]).
+    #[serde(default)]
+    pub(crate) scene: Scene,
+}
+
+/// The scene: each field is read by the roots it names and ignored by the rest.
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields, default)]
+pub(crate) struct Scene {
+    /// The sun's elevation, degrees, strictly between 0 and 90, on every root that lights the
+    /// world (`world::sun_elevation_deg`): the key light, its sky and the baked terrain shadow move
+    /// together. The illuminance is not rebalanced: a lower sun reads darker. Default the shipped
+    /// sun.
+    pub(crate) sun_elevation_deg: Option<f32>,
+    /// The armour sandbox's x-ray at start: `false` shows the target in its own surface. Default
+    /// `true`.
+    pub(crate) xray: bool,
+    /// The armour sandbox's wall prototype ([`RangeWall`]).
+    pub(crate) range_wall: Option<RangeWall>,
+    /// The pen cam demo opens with its corner expanded.
+    pub(crate) pen_cam_expanded: bool,
+    /// The offline root's scripted demo ([`Demo`]).
+    pub(crate) demo: Option<Demo>,
+}
+
+impl Default for Scene {
+    fn default() -> Self {
+        Self {
+            sun_elevation_deg: None,
+            xray: true,
+            range_wall: None,
+            pen_cam_expanded: false,
+            demo: None,
+        }
+    }
+}
+
+/// The armour sandbox's wall prototype as the run opens it (`sandbox::wall`).
+#[derive(Deserialize, Debug, Clone, PartialEq, Default)]
+#[serde(deny_unknown_fields, default)]
+pub(crate) struct RangeWall {
+    /// The one case the script fires ([`RangeWallCase`]); absent, the wall waits for its keys.
+    pub(crate) case: Option<RangeWallCase>,
+    /// The blast tool's charge without its casing.
+    pub(crate) bare: bool,
+    /// The script's last frames stand at the witness panel rather than the wall's front.
+    pub(crate) witness: bool,
+    /// The help panel open.
+    pub(crate) help: bool,
+}
+
+/// What the wall script fires, in the game's environment destruction (game state only).
+#[derive(Deserialize, Debug, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) enum RangeWallCase {
+    /// One of the wall's rounds, by its shipped key.
+    Round(String),
+    /// A burst of filler `kg` at `standoff_m` from the wall's front face.
+    Blast { kg: f32, standoff_m: f32 },
+}
+
+/// A scripted demo on the offline root, which takes the player's tank or camera from the player.
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub(crate) enum Demo {
+    /// The hull marks, struck on the parked target (`hull_marks::demo`).
+    HullMarks,
+    /// The track prints, driven at world `(x, z)` on travel heading `heading_deg` (from `+Z`
+    /// toward `+X`), pivoting at `steer` (default 1, right) (`track_prints::demo`).
+    TrackPrints {
+        x: f32,
+        z: f32,
+        heading_deg: f32,
+        #[serde(default = "right")]
+        steer: f32,
+        /// Hold one view for good in place of the relief level cycle.
+        #[serde(default)]
+        hold: Option<DemoHold>,
+    },
+}
+
+/// The track-print demo view held for good.
+#[derive(Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DemoHold {
+    Drive,
+    Pivot,
+}
+
+fn right() -> f32 {
+    1.0
 }
 
 /// What the frames are and where they go.
@@ -266,6 +356,35 @@ impl CapturePlan {
         if let Some(shot) = &self.shot {
             finite_at("shot.at", shot.at)?;
         }
+        let scene = &self.scene;
+        if let Some(degrees) = scene.sun_elevation_deg
+            && !(degrees > 0.0 && degrees < 90.0)
+        {
+            return Err(format!(
+                "scene.sun_elevation_deg: {degrees} is not strictly between 0 and 90"
+            ));
+        }
+        if let Some(RangeWall {
+            case: Some(RangeWallCase::Blast { kg, standoff_m }),
+            ..
+        }) = scene.range_wall
+            && !(kg.is_finite() && kg > 0.0 && standoff_m.is_finite() && standoff_m >= 0.0)
+        {
+            return Err(format!(
+                "scene.range_wall.case: a blast of {kg} kg at {standoff_m} m"
+            ));
+        }
+        if let Some(Demo::TrackPrints {
+            x,
+            z,
+            heading_deg,
+            steer,
+            ..
+        }) = scene.demo
+            && ![x, z, heading_deg, steer].iter().all(|n| n.is_finite())
+        {
+            return Err("scene.demo: a track-print drive needs finite numbers".into());
+        }
         if let Some(wall) = &self.wall {
             if wall.shots.is_empty() {
                 return Err("wall.shots: no shot".into());
@@ -355,6 +474,13 @@ mod tests {
                     ],
                     sun: true,
                 ),
+                scene: (
+                    sun_elevation_deg: 12.5,
+                    xray: false,
+                    range_wall: (case: Blast(kg: 1.0, standoff_m: 3.0), bare: true, witness: true),
+                    pen_cam_expanded: true,
+                    demo: TrackPrints(x: 70.0, z: -20.0, heading_deg: 90.0, hold: Pivot),
+                ),
             )"#,
         )
         .expect("a valid plan");
@@ -418,11 +544,36 @@ mod tests {
                 sun: true,
             })
         );
+        assert_eq!(
+            plan.scene,
+            Scene {
+                sun_elevation_deg: Some(12.5),
+                xray: false,
+                range_wall: Some(RangeWall {
+                    case: Some(RangeWallCase::Blast {
+                        kg: 1.0,
+                        standoff_m: 3.0,
+                    }),
+                    bare: true,
+                    witness: true,
+                    help: false,
+                }),
+                pen_cam_expanded: true,
+                demo: Some(Demo::TrackPrints {
+                    x: 70.0,
+                    z: -20.0,
+                    heading_deg: 90.0,
+                    steer: 1.0,
+                    hold: Some(DemoHold::Pivot),
+                }),
+            }
+        );
     }
 
     /// A PLAN NAMES ONLY WHAT IT CHANGES: a bare `out` takes one frame at six seconds, at the
-    /// documented size, with the UI and gizmos drawn, the player's camera and no cue; an empty plan
-    /// takes no frame. A changed default silently changes every plan that leans on it.
+    /// documented size, with the UI and gizmos drawn, the player's camera, no cue and the shipped
+    /// scene (the x-ray on); an empty plan takes no frame. A changed default silently changes every
+    /// plan that leans on it.
     #[test]
     fn a_minimal_plan_takes_the_documented_defaults() {
         let plan = CapturePlan::parse(r#"(frames: (out: "f.png"))"#).expect("a valid plan");
@@ -436,14 +587,23 @@ mod tests {
             (&plan.fell, plan.impacts.is_empty(), &plan.shot, &plan.wall),
             (&None, true, &None, &None)
         );
+        let scene = &plan.scene;
+        assert!(scene.xray && !scene.pen_cam_expanded);
+        assert_eq!(
+            (scene.sun_elevation_deg, &scene.range_wall, scene.demo),
+            (None, &None, None)
+        );
+        let wall = CapturePlan::parse("(scene: (range_wall: ()))").expect("a valid plan");
+        assert_eq!(wall.scene.range_wall, Some(RangeWall::default()));
         let scene = CapturePlan::parse("()").expect("an empty plan");
         assert_eq!(scene.frames, None);
     }
 
     /// A PLAN THAT CANNOT MEAN WHAT IT SAYS FAILS THE BOOT, NAMING ITS FIELD (ADR-0011): a typo, a
     /// missing path, an empty or negative time, a zero side, a non-positive step, a degenerate
-    /// pose, an unknown tab, a non-positive calibre or charge, an empty dust name. Each was a
-    /// silent default or a skipped cue under the variables the plan replaced.
+    /// pose, an unknown tab, a non-positive calibre or charge, an empty dust name, a sun at or past
+    /// the zenith, an unknown demo. Each was a silent default or a skipped cue under the variables
+    /// the plan replaced.
     #[test]
     fn a_plan_outside_its_domain_is_refused_naming_the_field() {
         let pose = "Pose(eye: (1.0, 1.0, 1.0), look: (1.0, 1.0, 1.0))";
@@ -500,6 +660,15 @@ mod tests {
                 r#"(wall: (shots: [Dust(names: ["east", ""], at: 1.0)]))"#.to_owned(),
                 "wall.shots",
             ),
+            (
+                "(scene: (sun_elevation_deg: 90.0))".to_owned(),
+                "scene.sun_elevation_deg",
+            ),
+            (
+                "(scene: (range_wall: (case: Blast(kg: 0.0, standoff_m: 1.0))))".to_owned(),
+                "scene.range_wall.case",
+            ),
+            ("(scene: (demo: Spin))".to_owned(), "Spin"),
         ] {
             let error = CapturePlan::parse(&text).expect_err("the plan is refused");
             assert!(

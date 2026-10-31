@@ -1,5 +1,6 @@
-//! `OVERMATCH_HULL_MARKS_DEMO=1`, a dev capture of the hull marks (the visual layer of the game's
-//! damage model) on the offline route, with `OVERMATCH_TARGET=ahead`'s placement: once the
+//! A capture plan's `scene.demo: HullMarks` (`dev_capture::plan::Demo`), a dev capture of the hull
+//! marks (the visual layer of the game's damage model) on the offline route, with
+//! `OVERMATCH_TARGET=ahead`'s placement: once the
 //! parked target's view has bound, three rays from the player's line of sight find three points on
 //! its armour, and each is struck as the authority's march would report it — a hole (`Through`),
 //! a dent (`Stopped`), a scratch (`Ricochet`, from a [`GRAZE_DEG`] graze along the face) — at the
@@ -7,12 +8,14 @@
 //! rounds are not flown. The camera is then held on each mark in turn, [`SHOW_EVERY_S`] apart from
 //! [`FIRST_SHOW_S`], for `OVERMATCH_CAPTURE` stills.
 //!
-//! The hole, the dent and the scratch, with a capture plan (`dev_capture::plan`) whose `frames`
-//! are `(out: "<dir>/hull-mark.png", at: [18.0, 21.0, 24.0], ui: false, gizmos: false)`:
+//! The hole, the dent and the scratch:
 //!
 //! ```text
-//! OVERMATCH_TARGET=ahead OVERMATCH_HULL_MARKS_DEMO=1 OVERMATCH_CAPTURE=<plan>.ron \
-//!   target/debug/overmatch --offline
+//! (
+//!     frames: (out: "<dir>/hull-mark.png", at: [18.0, 21.0, 24.0], ui: false, gizmos: false),
+//!     scene: (demo: Some(HullMarks)),
+//! )
+//! OVERMATCH_TARGET=ahead OVERMATCH_CAPTURE=<plan>.ron target/debug/overmatch --offline
 //! ```
 //!
 //! Mounted only by the offline composition (`run_offline`), as `tank::scenario`'s target-fires
@@ -52,7 +55,8 @@ const LOOK_PAST_M: f32 = 0.15;
 struct Struck(Vec<(Vec3, Vec3)>);
 
 pub(crate) fn offline_plugin(app: &mut App) {
-    if !crate::env_flag("OVERMATCH_HULL_MARKS_DEMO", false) {
+    let demo = crate::dev_capture::plan().and_then(|plan| plan.scene.demo);
+    if demo != Some(crate::dev_capture::plan::Demo::HullMarks) {
         return;
     }
     info!(

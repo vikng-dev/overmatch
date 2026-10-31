@@ -1,37 +1,44 @@
-//! `OVERMATCH_TRACK_PRINTS_DEMO=<x>,<z>,<heading°>[,<steer>]`, a dev capture of the track prints
-//! (cosmetic terrain marks) on the offline route. At [`PLACE_AT_S`] the player's tank is set down at
-//! world XZ `(x, z)`, its travel heading `heading°` from `+Z` toward `+X`; once settled it drives
-//! straight, stops, pivots on the spot at `steer` (default 1, right), stops, and drives out of the
+//! A capture plan's `scene.demo: TrackPrints(…)` (`dev_capture::plan::Demo`), a dev capture of the
+//! track prints (cosmetic terrain marks) on the offline route. At [`PLACE_AT_S`] the player's tank
+//! is set down at world XZ `(x, z)`, its travel heading `heading_deg` from `+Z` toward `+X`; once
+//! settled it drives straight, stops, pivots on the spot at `steer`, stops, and drives out of the
 //! pivot. The camera is then held low, about 10 m off, first on the straight drive's track and then
 //! on the pivot, each at the three relief levels in turn ([`crate::settings::TrackPrintRelief`],
 //! forced through [`super::ReliefOverride`]) for `OVERMATCH_CAPTURE` stills. Every phase boundary is
 //! logged with its app time.
 //!
-//! `OVERMATCH_TRACK_PRINTS_DEMO_HOLD=drive|pivot` replaces the views' level cycle: the camera holds
-//! that one view for good and nothing overrides the player's relief setting, the scene of the frame
-//! cost measurement (`scripts/perf/run-track-prints-cost.sh`). The hold's start is logged on the
-//! `Time<Real>` clock the frame stream (`crate::frame_cost`) stamps its rows on.
+//! `hold: Drive` or `Pivot` replaces the views' level cycle: the camera holds that one view for
+//! good and nothing overrides the player's relief setting, the scene of the frame cost measurement
+//! (`scripts/perf/run-track-prints-cost.sh`, a plan with no `frames`). The hold's start is logged
+//! on the `Time<Real>` clock the frame stream (`crate::frame_cost`) stamps its rows on.
 //!
 //! The three spots on the shipped map (fixture data: stretches where one pack dominates the mask,
-//! the same spots `OVERMATCH_START` names), each with a capture plan (`dev_capture::plan`) whose
-//! `frames` are `(out: "<dir>/track-prints.png", at: [38.5, 40.5, 42.5, 44.5, 46.5, 48.5],
-//! ui: false, gizmos: false)`:
+//! the same spots `OVERMATCH_START` names), with `OVERMATCH_CAPTURE=<plan>.ron target/debug/overmatch
+//! --offline`:
 //!
 //! ```text
-//! OVERMATCH_TRACK_PRINTS_DEMO=599.9,-599.9,195 OVERMATCH_CAPTURE=<plan>.ron \
-//!   target/debug/overmatch --offline
-//! OVERMATCH_TRACK_PRINTS_DEMO=302.5,542.7,315,-1   (sand, same otherwise)
-//! OVERMATCH_TRACK_PRINTS_DEMO=70,-20,90            (the base pack)
+//! (
+//!     frames: (
+//!         out: "<dir>/track-prints.png",
+//!         at: [38.5, 40.5, 42.5, 44.5, 46.5, 48.5],
+//!         ui: false,
+//!         gizmos: false,
+//!     ),
+//!     scene: (demo: Some(TrackPrints(x: 599.9, z: -599.9, heading_deg: 195.0))),
+//! )
+//! TrackPrints(x: 302.5, z: 542.7, heading_deg: 315.0, steer: -1.0)   (sand)
+//! TrackPrints(x: 70.0, z: -20.0, heading_deg: 90.0)                  (the base pack)
 //! ```
 //!
 //! Mounted only by the offline composition (`run_offline`): nothing it writes leaves the process.
-//! Compiled into every build, inert unless `OVERMATCH_TRACK_PRINTS_DEMO` is set.
+//! Compiled into every build, inert unless the plan names the demo.
 
 use avian3d::prelude::{AngularVelocity, LinearVelocity, Position, Rotation};
 use bevy::prelude::*;
 
 use crate::camera::{CameraCaptive, CaptiveCameraPlaced};
 use crate::command::TankCommand;
+use crate::dev_capture::plan::{self, DemoHold};
 use crate::settings::{Settings, TrackPrintRelief};
 use crate::tank::{Controlled, Tank};
 use crate::view::PlayerView;
@@ -156,30 +163,20 @@ struct Demo {
 }
 
 pub(crate) fn offline_plugin(app: &mut App) {
-    let Ok(spec) = std::env::var("OVERMATCH_TRACK_PRINTS_DEMO") else {
+    let Some(plan::Demo::TrackPrints {
+        x,
+        z,
+        heading_deg: heading,
+        steer: pivot_steer,
+        hold,
+    }) = crate::dev_capture::plan().and_then(|plan| plan.scene.demo)
+    else {
         return;
     };
-    let parts: Vec<f32> = spec
-        .split(',')
-        .filter_map(|part| part.trim().parse().ok())
-        .collect();
-    let (x, z, heading, pivot_steer) = match parts[..] {
-        [x, z, heading] => (x, z, heading, 1.0),
-        [x, z, heading, steer] => (x, z, heading, steer),
-        _ => {
-            warn!("track prints demo: want <x>,<z>,<heading°>[,<steer>], got {spec:?} — not armed");
-            return;
-        }
-    };
-    let hold = match crate::env_value("OVERMATCH_TRACK_PRINTS_DEMO_HOLD").as_deref() {
-        None => None,
-        Some("drive") => Some(Phase::DriveView(0)),
-        Some("pivot") => Some(Phase::PivotView(0)),
-        Some(other) => {
-            warn!("track prints demo: want a hold of drive or pivot, got {other:?} — not armed");
-            return;
-        }
-    };
+    let hold = hold.map(|hold| match hold {
+        DemoHold::Drive => Phase::DriveView(0),
+        DemoHold::Pivot => Phase::PivotView(0),
+    });
     info!(
         "track prints demo: armed at ({x}, {z}) heading {heading}°, set down at {PLACE_AT_S} s, \
          hold {hold:?}"

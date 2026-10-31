@@ -28,11 +28,12 @@
 //! Keys: B round, F fire it, O blast and `,`/`.` its filler mass, `;`/`'` its standoff, V its
 //! casing, G camera (front, back, witness), N new wall, H help.
 //!
-//! `OVERMATCH_WALL_CASE=<round key | x<kg>@<standoff m>>` (`88mm_AP`, `x1@3`) runs one case for a
-//! hidden capture ([`drive_script`]): the camera stands at the front, then the back, fires (or
-//! bursts) at [`SCRIPT_FIRE`] s from the front, and stands front then back again for the after
-//! frames. `OVERMATCH_WALL_CASING=bare`, `OVERMATCH_WALL_VIEW=witness` (the last frames from the
-//! witness pose) and `OVERMATCH_WALL_HELP=1` (the help panel open) set the rest.
+//! A capture plan's `scene.range_wall` (`dev_capture::plan::RangeWall`) opens the wall for a
+//! capture: its `case` (`Round("88mm_AP")`, `Blast(kg: 1.0, standoff_m: 3.0)`) runs one case
+//! ([`drive_script`]): the camera stands at the front, then the back, fires (or bursts) at
+//! [`SCRIPT_FIRE`] s from the front, and stands front then back again for the after frames, at the
+//! witness pose for the last ones under `witness`. `bare` and `help` set the charge's casing and the
+//! help panel.
 
 mod baked;
 mod model;
@@ -50,11 +51,12 @@ use bevy::prelude::*;
 
 use self::baked::Placement;
 use self::model::{Block, Cut, Loading, Masonry, Push, SectionCache, WallState};
-use super::{Autopilot, FreeFlyCam, SEED_SPEC, UI_LEFT, panel_capturing};
+use super::{FreeFlyCam, SEED_SPEC, UI_LEFT, panel_capturing};
 use crate::ballistics::{
     ArmourMark, BallisticVolume, CrossingEnd, FireShell, PenetrationMarks, SpallMarks,
 };
 use crate::buildings::schema::BuildingAsset;
+use crate::dev_capture::plan::RangeWallCase;
 use crate::substances::SubstanceRegistry;
 use crate::{Layer, spec};
 
@@ -107,27 +109,23 @@ const SCRIPT_BACK_AGAIN: f32 = 12.0;
 
 pub(super) fn plugin(app: &mut App) {
     let rounds = wall_rounds();
-    let script = std::env::var("OVERMATCH_WALL_CASE")
-        .ok()
-        .and_then(|case| parse_case(&case, &rounds));
-    let flag = |name: &str, value: &str| std::env::var(name).as_deref() == Ok(value);
+    let planned = crate::dev_capture::plan()
+        .and_then(|plan| plan.scene.range_wall.clone())
+        .unwrap_or_default();
     let controls = WallControls {
         mass: 3,
         standoff: 0,
-        cased: !flag("OVERMATCH_WALL_CASING", "bare"),
+        cased: !planned.bare,
         round: 0,
         view: View::Front,
-        help: flag("OVERMATCH_WALL_HELP", "1"),
+        help: planned.help,
     };
-    if let Some(case) = script {
+    if let Some(case) = &planned.case {
+        let case = resolve_case(case, &rounds);
         info!("wall prototype: capture case {case:?}");
-        // The range keeps the cursor free under an autopilot; the script is one.
-        if !app.world().contains_resource::<Autopilot>() {
-            app.insert_resource(Autopilot { pose: None });
-        }
         app.insert_resource(WallScript {
             case,
-            witness: flag("OVERMATCH_WALL_VIEW", "witness"),
+            witness: planned.witness,
             done: false,
         })
         .add_systems(Update, drive_script.before(fire_burst));
@@ -520,17 +518,29 @@ fn ascii(text: &str) -> String {
         .collect()
 }
 
-/// `<round key | x<kg>@<standoff m>>`.
-fn parse_case(case: &str, rounds: &[WallRound]) -> Option<Case> {
-    let what = case.trim();
-    if let Some(index) = rounds.iter().position(|round| round.key == what) {
-        return Some(Case::Round(index));
+/// The plan's case among the wall's `rounds`.
+///
+/// # Panics
+///
+/// When the case names a key none of the wall's rounds has (ADR-0011).
+fn resolve_case(case: &RangeWallCase, rounds: &[WallRound]) -> Case {
+    match case {
+        RangeWallCase::Round(key) => Case::Round(
+            rounds
+                .iter()
+                .position(|round| round.key == *key)
+                .unwrap_or_else(|| {
+                    panic!(
+                        "{}: scene.range_wall.case: no wall round has the key {key:?}",
+                        crate::dev_capture::plan::VARIABLE
+                    )
+                }),
+        ),
+        &RangeWallCase::Blast { kg, standoff_m } => Case::Blast {
+            mass: kg,
+            standoff: standoff_m,
+        },
     }
-    let (mass, standoff) = what.strip_prefix('x')?.split_once('@')?;
-    Some(Case::Blast {
-        mass: mass.parse().ok()?,
-        standoff: standoff.parse().ok()?,
-    })
 }
 
 /// The brick as the wall reads it: the shipped registry's `Brick` row ([`Masonry::of`]).

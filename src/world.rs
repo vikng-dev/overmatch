@@ -88,22 +88,14 @@ pub(crate) fn sun_light() -> DirectionalLight {
     }
 }
 
-/// The sun's elevation, degrees: [`SUN_ELEVATION_DEG`], or the evaluation lever
-/// `OVERMATCH_SUN_ELEVATION=<deg>` (between 0 and 90, exclusive; anything else is logged and the
-/// shipped sun stands). The lever moves the key light, its sky and the baked terrain shadow
-/// (`terrain_shadow`) together, so a capture can judge terrain shadows on a map whose slopes stay
-/// under the shipped sun. The illuminance is not rebalanced: a lower sun reads darker.
+/// The sun's elevation, degrees: [`SUN_ELEVATION_DEG`], or a capture plan's
+/// `scene.sun_elevation_deg` (`dev_capture::plan`, validated there). It moves the key light, its
+/// sky and the baked terrain shadow (`terrain_shadow`) together, so a capture can judge terrain
+/// shadows on a map whose slopes stay under the shipped sun.
 fn sun_elevation_deg() -> f32 {
-    let Some(spec) = crate::env_value("OVERMATCH_SUN_ELEVATION") else {
-        return SUN_ELEVATION_DEG;
-    };
-    match spec.trim().parse::<f32>() {
-        Ok(degrees) if degrees > 0.0 && degrees < 90.0 => degrees,
-        _ => {
-            warn!("OVERMATCH_SUN_ELEVATION: want degrees in (0, 90), got {spec:?}; shipped sun");
-            SUN_ELEVATION_DEG
-        }
-    }
+    crate::dev_capture::plan()
+        .and_then(|plan| plan.scene.sun_elevation_deg)
+        .unwrap_or(SUN_ELEVATION_DEG)
 }
 
 /// Unit vector pointing FROM the scene TOWARD the sun, from [`sun_elevation_deg`] /

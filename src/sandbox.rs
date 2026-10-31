@@ -26,10 +26,9 @@
 //!
 //! Sandbox controls use real time so inspection remains available while simulation time is paused.
 //!
-//! For in-engine captures (`dev_capture`) the range runs on an autopilot instead of the mouse:
-//! `OVERMATCH_RANGE_POSE=x,y,z,lx,ly,lz` stands the camera-gun at `x,y,z` looking at `lx,ly,lz`
-//! and leaves the cursor free. `OVERMATCH_RANGE_XRAY=0` starts the range with the x-ray off, the
-//! target in its own surface.
+//! Under a capture plan (`dev_capture::plan`) the cursor is never grabbed, so an unattended run
+//! takes no mouse. The plan's `frames.camera` pose holds the camera-gun, and its `scene.xray:
+//! false` starts the range with the x-ray off, the target in its own surface.
 
 use std::collections::HashSet;
 
@@ -301,7 +300,7 @@ pub fn plugin(app: &mut App) {
     // corner never opens (module doc).
     .insert_resource(XRaySubject::Struck(RANGE_TARGET))
     .insert_resource(XRay {
-        on: std::env::var("OVERMATCH_RANGE_XRAY").as_deref() != Ok("0"),
+        on: crate::dev_capture::plan().is_none_or(|plan| plan.scene.xray),
     })
     .insert_resource(Settings {
         pen_cam_corner: PenCamCorner::Off,
@@ -335,7 +334,7 @@ pub fn plugin(app: &mut App) {
         Startup,
         (
             spawn_camera,
-            grab_cursor.run_if(not(resource_exists::<Autopilot>)),
+            grab_cursor.run_if(|| crate::dev_capture::plan().is_none()),
             spawn_targets,
             spawn_hud,
             load_target,
@@ -388,10 +387,9 @@ pub fn plugin(app: &mut App) {
     // `EguiPlugin` and runs in `EguiPrimaryContextPass`. Launch it with the `cargo armor` alias.
     #[cfg(feature = "dev_ui")]
     app.add_plugins(panel::plugin);
-    autopilot_plugin(app);
     wall::plugin(app);
     // The per-frame wall-clock recorder (idle unless `SPIKE_FRAME_COST` is set): the frame cost of
-    // an autopilot capture.
+    // a capture plan's scene.
     app.add_plugins(crate::frame_cost::client_plugin);
 }
 
@@ -798,47 +796,6 @@ fn fire_round(
         ..round
     });
     true
-}
-
-/// The capture autopilot (module doc): the camera-gun's pose (eye and the point looked at), taken
-/// on the first frame. A malformed pose still mounts it, so the cursor stays free.
-#[derive(Resource)]
-struct Autopilot {
-    pose: Option<(Vec3, Vec3)>,
-}
-
-/// An eye and the point it looks at, `x,y,z,lx,ly,lz`.
-fn parse_pose(pose: &str) -> Option<(Vec3, Vec3)> {
-    let v: Vec<f32> = pose
-        .split(',')
-        .filter_map(|v| v.trim().parse().ok())
-        .collect();
-    let [x, y, z, lx, ly, lz] = v[..] else {
-        warn!("OVERMATCH_RANGE_POSE={pose}: expected x,y,z,lx,ly,lz");
-        return None;
-    };
-    Some((Vec3::new(x, y, z), Vec3::new(lx, ly, lz)))
-}
-
-/// Mount the [`Autopilot`] when `OVERMATCH_RANGE_POSE` is set.
-fn autopilot_plugin(app: &mut App) {
-    let Ok(pose) = std::env::var("OVERMATCH_RANGE_POSE") else {
-        return;
-    };
-    let pose = parse_pose(&pose);
-    info!("armour sandbox: autopilot pose {pose:?}");
-    app.insert_resource(Autopilot { pose })
-        .add_systems(Update, drive_autopilot);
-}
-
-/// Stand the camera-gun at the autopilot's pose.
-fn drive_autopilot(
-    mut pilot: ResMut<Autopilot>,
-    mut camera: Single<&mut Transform, With<FreeFlyCam>>,
-) {
-    if let Some((eye, look)) = pilot.pose.take() {
-        **camera = Transform::from_translation(eye).looking_at(look, Vec3::Y);
-    }
 }
 
 /// The round bindings step the [`RangeGun`]'s selection through its rounds, wrapping, and drop a

@@ -5,9 +5,11 @@
 # pack and on the base pack. The relief is drawn only on print pixels within TRACK PRINT RANGE, so
 # the scene is prints held on screen: the track-print demo (src/track_prints/demo.rs) sets the
 # player's tank down on the spot at 10 s, drives it straight, stops, pivots, drives out, and from
-# ~37 s holds the camera ~10 m off the pivot for good (`OVERMATCH_TRACK_PRINTS_DEMO_HOLD`), at the
-# relief level and range the condition injects into video.ron. Nothing but those two settings
-# differs between two conditions on one ground. Offline single-player path, no server.
+# ~37 s holds the camera ~10 m off the pivot for good (the demo's `hold`), at the relief level and
+# range the condition injects into video.ron. Each condition's scene is a capture plan with no
+# frames (`$OUT/<condition>.plan.ron`, `dev_capture::plan`), so the window stays a normal one.
+# Nothing but those two settings differs between two conditions on one ground. Offline
+# single-player path, no server.
 #
 # Conditions: <ground>-<level>; ground mud (599.9,-599.9 heading 195°) or base (70,-20 heading
 # 90°) — the demo's documented spots, fixture data where one pack dominates the painted mask —
@@ -63,8 +65,8 @@ MIN_ROWS="${MIN_ROWS:-$((DURATION_S * 20))}"
 STARTUP_GRACE_S="${STARTUP_GRACE_S:-60}"
 
 case "$VIEW" in
-  pivot) held="PivotView(0)" ;;
-  drive) held="DriveView(0)" ;;
+  pivot) held="PivotView(0)"; hold=Pivot ;;
+  drive) held="DriveView(0)"; hold=Drive ;;
   *) echo "VIEW must be pivot or drive, got $VIEW" >&2; exit 1 ;;
 esac
 case "$RANGE" in
@@ -112,17 +114,18 @@ condition_gates() {
 
 for cond in "${CONDITIONS[@]}"; do
   case "$cond" in
-    mud-*) spot="599.9,-599.9,195" ;;
-    base-*) spot="70,-20,90" ;;
+    mud-*) spot="x: 599.9, z: -599.9, heading_deg: 195.0" ;;
+    base-*) spot="x: 70.0, z: -20.0, heading_deg: 90.0" ;;
   esac
+  plan="$OUT/$cond.plan.ron"
+  print -r -- "(scene: (demo: Some(TrackPrints($spot, hold: Some($hold)))))" >"$plan"
   case "$cond" in
     *-lighting) relief=Lighting ;;
     *-parallax) relief=Parallax ;;
     *-sun) relief=SunShadow ;;
   esac
   frame_run_condition "$cond" "track_prints: $relief, track_print_range: $RANGE," \
-    OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 \
-    OVERMATCH_TRACK_PRINTS_DEMO="$spot" OVERMATCH_TRACK_PRINTS_DEMO_HOLD="$VIEW"
+    OVERMATCH_MUTE=1 OVERMATCH_NO_FOCUS_PAUSE=1 OVERMATCH_CAPTURE="$plan"
 done
 
 for ground in mud base; do

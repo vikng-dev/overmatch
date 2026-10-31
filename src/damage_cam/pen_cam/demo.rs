@@ -12,7 +12,7 @@
 //! pauses, `←`/`→` scrub, `[`/`]` change speed, mouse drag orbits the corner while paused, `F`
 //! expands the corner, `O` switches the slice between orthographic and perspective, `L` toggles
 //! each field's axis line and `M` toggles reduce motion; captures set the expanded corner through
-//! [`Settings::from_env`].
+//! [`Settings::from_plan`].
 //!
 //! Capture: a capture plan whose `frames.step_s` is fixed (1/30 s steps one presentation frame per
 //! rendered frame) makes `dev_capture`'s frame times presentation times; virtual time stays paused
@@ -276,10 +276,11 @@ impl Default for Settings {
 }
 
 impl Settings {
-    /// The defaults with the capture environment applied: `PEN_CAM_EXPANDED=1` expands the corner.
-    fn from_env() -> Self {
+    /// The defaults with a capture plan's scene applied: `scene.pen_cam_expanded` expands the
+    /// corner.
+    fn from_plan() -> Self {
         Self {
-            expanded: std::env::var("PEN_CAM_EXPANDED").is_ok_and(|value| value == "1"),
+            expanded: crate::dev_capture::plan().is_some_and(|plan| plan.scene.pen_cam_expanded),
             ..Self::default()
         }
     }
@@ -497,7 +498,7 @@ pub fn demo_plugin(app: &mut App) {
         })
         .unwrap_or(0);
     let library = Library::load();
-    let settings = Settings::from_env();
+    let settings = Settings::from_plan();
     let run = Run::new(start, &library, &settings, once);
     app.add_plugins((
         crate::quit::plugin,
