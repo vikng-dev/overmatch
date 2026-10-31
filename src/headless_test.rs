@@ -948,6 +948,128 @@ fn a_tank_too_soft_for_its_springs_rests_on_its_bump_stops() {
     );
 }
 
+/// THE GAME'S BUOYANCY CARRIES A DRIVING TANK ONTO LOOSE PIECES. A sandbox-only adapter, sparse
+/// rubble probes or a missing game-side reaction fails this gate or the footprint/clamp gates in
+/// `track::rubble`. The pieces lie between the rigid side slices: neither the slices nor the
+/// compression stops may supply their lift. FIXTURE DATA: two long pieces, height 0.1 m, each
+/// one eighth of the hull's mass; dimensions and positions otherwise come from its running gear.
+/// ASSUMED acceptance: the hull rises by half to 1.25 times the piece height, and a piece's centre
+/// never rises a whole piece height above its starting centre.
+#[test]
+fn a_driving_tank_rides_onto_loose_pieces_through_its_belt_support() {
+    use crate::track::side::Side;
+    use crate::track::sim::TrackContacts;
+    use avian3d::prelude::{
+        AngularInertia, CenterOfMass, Collider, LinearVelocity, Mass, NoAutoAngularInertia,
+        NoAutoCenterOfMass, NoAutoMass, Position, RigidBody, Rotation,
+    };
+
+    let (mut app, tank) = booted_offline_sim();
+    face_positive_z(&mut app, tank);
+    let at = app.world().get::<Position>(tank).unwrap().0;
+    let rotation = app.world().get::<Rotation>(tank).unwrap().0;
+    let mass = app.world().get::<Mass>(tank).unwrap().0 / 8.0;
+    let geom = app.world().resource::<crate::track::rig_geom::RigGeom>();
+    let points = &geom.rest.get(Side::Right);
+    let z_min = points
+        .iter()
+        .map(|(p, _)| p.x)
+        .fold(f32::INFINITY, f32::min);
+    let z_max = points
+        .iter()
+        .map(|(p, _)| p.x)
+        .fold(f32::NEG_INFINITY, f32::max);
+    let span = z_max - z_min + geom.model.pin_to_outer * 2.0;
+    let height = 0.1;
+    let length = span * 3.0;
+    let front = at.z + z_min.abs().max(z_max.abs()) + geom.pitch * 4.0;
+    let dimensions = Side::ALL.map(|side| {
+        let columns = geom.grip_columns(side);
+        let width = (columns[2].0 - columns[0].0).abs() - geom.thickness * 4.0;
+        assert!(
+            width > 0.0,
+            "the fixture must fit between the rigid shoe-edge slices"
+        );
+        let x = (columns[0].0 + columns[2].0) / 2.0;
+        let center = at + rotation * Vec3::X * x;
+        (
+            Vec3::new(center.x, height / 2.0, front + length / 2.0),
+            width,
+        )
+    });
+    let pieces = dimensions.map(|(position, width)| {
+        app.world_mut()
+            .spawn((
+                crate::debris::DebrisPiece,
+                Transform::from_translation(position),
+                Position(position),
+                Rotation::default(),
+                RigidBody::Dynamic,
+                Collider::cuboid(width, height, length),
+                Mass(mass),
+                NoAutoMass,
+                AngularInertia::from_shape(&Cuboid::new(width, height, length), mass),
+                NoAutoAngularInertia,
+                CenterOfMass(Vec3::ZERO),
+                NoAutoCenterOfMass,
+                crate::substances::contact_friction(0.6),
+                crate::buildings::breakage::piece_layers(),
+            ))
+            .id()
+    });
+    let mut carried = false;
+    let mut max_piece_y = height / 2.0;
+    let mut max_piece_speed = 0.0_f32;
+    let mut arrived = false;
+    for _ in 0..(20 * FIXED_TICKS_PER_SECOND) {
+        drive_tick(&mut app, tank, 0.35, 0.0);
+        let world = app.world();
+        carried |= world
+            .get::<TrackContacts>(tank)
+            .unwrap()
+            .0
+            .iter()
+            .flatten()
+            .any(|c| {
+                c.collider.is_some_and(|e| pieces.contains(&e)) && c.normal.y > 0.5 && c.load > 0.0
+            });
+        for piece in pieces {
+            max_piece_y = max_piece_y.max(world.get::<Position>(piece).unwrap().0.y);
+            max_piece_speed =
+                max_piece_speed.max(world.get::<LinearVelocity>(piece).unwrap().0.length());
+        }
+        if world.get::<Position>(tank).unwrap().0.z > front + span {
+            arrived = true;
+            break;
+        }
+    }
+    assert!(arrived, "the tank never drove onto the fixture pieces");
+    for _ in 0..(4 * FIXED_TICKS_PER_SECOND) {
+        drive_tick(&mut app, tank, 0.0, 0.0);
+        for piece in pieces {
+            max_piece_y = max_piece_y.max(app.world().get::<Position>(piece).unwrap().0.y);
+            max_piece_speed =
+                max_piece_speed.max(app.world().get::<LinearVelocity>(piece).unwrap().0.length());
+        }
+    }
+    let rise = app.world().get::<Position>(tank).unwrap().0.y - at.y;
+    println!(
+        "MEASURED driven hull rise {rise:.6} m over {height} m pieces; peak piece centre {max_piece_y:.6} m, peak speed {max_piece_speed:.6} m/s"
+    );
+    assert!(
+        carried,
+        "the game's track reports never carried the tank on a loose piece"
+    );
+    assert!(
+        (height * 0.5..=height * 1.25).contains(&rise),
+        "the hull rose {rise} over a {height} m piece"
+    );
+    assert!(
+        max_piece_y < height * 1.5,
+        "a piece was launched above its own height"
+    );
+}
+
 #[derive(Resource, Default)]
 struct ScriptedDeterminismRun {
     digests: Vec<Vec<(String, crate::trace::CanonicalTankStateDigest)>>,

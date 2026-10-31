@@ -3,10 +3,10 @@
 //! and by the track sandbox (which is where every piece of it was developed and feel-tested;
 //! provenance in `track_sandbox` steps 17–26 and HQ.md).
 //!
-//! Pure math, no ECS: the caller supplies the pose affine, a velocity field, the terrain
-//! oracle, and applies the returned forces itself (in report order — force-accumulator float
-//! order is part of bit-reproducibility). Everything here is deterministic closed-form
-//! arithmetic — no spatial queries, no BVH, safe under rollback replay by construction.
+//! No ECS: the caller supplies the pose affine, a velocity field, the terrain oracle and the
+//! tick-start piece shapes, then applies the returned forces in report order. The field uses
+//! closed-form profiles; pieces use convex footprint checks and the same support law. Snapshot
+//! and force-accumulator order are fixed by the server adapter ([`super::sim`]).
 //!
 //! The model, per station segment × three lateral collocation columns:
 //! - **Support**: directional field depth at pin/mid/pin on the contact envelope (the outer
@@ -30,6 +30,7 @@ use bevy::math::{Affine3A, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 
 use super::oracle::TerrainOracle;
+use super::rubble::{RubbleBodies, Slab, SlabOverlap};
 
 use super::route::{polyline_len, resample};
 #[cfg(feature = "bitprobe")]
@@ -397,6 +398,7 @@ pub fn contact_side<O: TerrainOracle>(
     dt: f32,
     params: &ForceParams,
     oracle: &O,
+    pieces: &RubbleBodies,
     vel_at: impl Fn(Vec3) -> Vec3,
     elements: &mut GripElements,
 ) -> (SideReport, bool) {
@@ -433,6 +435,7 @@ pub fn contact_side<O: TerrainOracle>(
         affine,
         params,
         oracle,
+        pieces,
         vel_at,
         state.speed,
         elements_mode,
@@ -473,7 +476,7 @@ struct ColumnContact {
     element: usize,
     /// [`BeltContact::belt_velocity`].
     belt_velocity: Vec3,
-    /// The collider of the column's deepest probe, `None` for the terrain field.
+    /// The surface carrying this patch, `None` for the terrain field.
     collider: Option<Entity>,
     #[cfg(feature = "bitprobe")]
     probe_index: usize,
@@ -489,6 +492,123 @@ fn sample_halves(x: f32, len: f32, v: [f32; 3]) -> f32 {
     } else {
         v[1] + (v[2] - v[1]) * ((x - half) / half)
     }
+}
+
+/// A rectangle of one column's strip carried by one surface. Its signed pressure profile has
+/// the same pin/mid/pin form as the field's; all surfaces enter the same support law below.
+#[derive(Clone, Copy)]
+struct SupportPatch {
+    origin: Vec3,
+    len: f32,
+    weight: f32,
+    pen: [f32; 3],
+    travel: [f32; 3],
+    collider: Option<Entity>,
+}
+
+/// Partition a strip at footprint edges and at field/piece depth crossings. Within each cell
+/// only the deepest surface carries the belt, so stacked pieces cannot multiply its support.
+/// Column widths are DERIVED from their quadrature shares, retaining the existing field rule
+/// while a narrow piece takes exactly its covered fraction of the true shoe width.
+fn footprint_patches(
+    slab: &Slab,
+    strip: (f32, f32),
+    field_offset: f32,
+    pen: [f32; 3],
+    travel: [f32; 3],
+    overlaps: &[SlabOverlap],
+    pieces: &RubbleBodies,
+) -> Vec<SupportPatch> {
+    let mut us = vec![0.0, slab.len / 2.0, slab.len];
+    let mut ls = vec![strip.0, strip.1];
+    for hit in overlaps {
+        us.extend([hit.u.0, hit.u.1]);
+        ls.extend([
+            hit.l.0.clamp(strip.0, strip.1),
+            hit.l.1.clamp(strip.0, strip.1),
+        ]);
+    }
+    us.sort_unstable_by(f32::total_cmp);
+    us.dedup();
+    ls.sort_unstable_by(f32::total_cmp);
+    ls.dedup();
+    let mut patches = Vec::new();
+    for l in ls.windows(2) {
+        let lateral = (l[0] + l[1]) / 2.0;
+        for u in us.windows(2) {
+            let mid = (u[0] + u[1]) / 2.0;
+            let deepest = overlaps
+                .iter()
+                .filter(|hit| {
+                    mid > hit.u.0 && mid < hit.u.1 && lateral > hit.l.0 && lateral < hit.l.1
+                })
+                .fold(None::<&SlabOverlap>, |best, hit| match best {
+                    Some(best) if best.depth >= hit.depth => Some(best),
+                    _ => Some(hit),
+                });
+            let field = |x| sample_halves(x, slab.len, pen);
+            let local_travel = |x| sample_halves(x, slab.len, travel);
+            let mut cuts = vec![u[0], u[1]];
+            if let Some(hit) = deepest {
+                let a = hit.depth + local_travel(u[0]) - field(u[0]);
+                let b = hit.depth + local_travel(u[1]) - field(u[1]);
+                if (a < 0.0 && b > 0.0) || (a > 0.0 && b < 0.0) {
+                    cuts.insert(1, u[0] + (u[1] - u[0]) * a / (a - b));
+                }
+            }
+            for range in cuts.windows(2) {
+                let xs = [range[0], (range[0] + range[1]) / 2.0, range[1]];
+                let winner = deepest.filter(|hit| hit.depth + local_travel(xs[1]) > field(xs[1]));
+                patches.push(SupportPatch {
+                    // A field cell retains its quadrature column's location. Only the covered
+                    // piece area moves to its true lateral centroid, so a vanishing footprint
+                    // cannot shift the remaining ground's roll lever arm.
+                    origin: slab.origin
+                        + slab.axis * range[0]
+                        + slab.lat
+                            * if winner.is_some() {
+                                lateral
+                            } else {
+                                field_offset
+                            },
+                    len: range[1] - range[0],
+                    weight: (l[1] - l[0]) / (slab.lateral.1 - slab.lateral.0),
+                    pen: xs.map(|x| match winner {
+                        Some(hit) => hit.depth + local_travel(x),
+                        None => field(x),
+                    }),
+                    travel: xs.map(local_travel),
+                    collider: winner.map(|hit| pieces.collider(hit.piece)),
+                });
+            }
+        }
+    }
+    patches
+}
+
+/// Pieces that actually replace positive field support in this column strip. A buried or
+/// laterally separate piece must not change the remaining field's quadrature or force bits.
+fn raised_footprints(
+    overlaps: &[SlabOverlap],
+    strip: (f32, f32),
+    len: f32,
+    pen: [f32; 3],
+    travel: [f32; 3],
+) -> Vec<SlabOverlap> {
+    overlaps
+        .iter()
+        .copied()
+        .filter(|hit| {
+            hit.l.1 > strip.0
+                && hit.l.0 < strip.1
+                && [hit.u.0, hit.u.1, (len / 2.0).clamp(hit.u.0, hit.u.1)]
+                    .into_iter()
+                    .any(|x| {
+                        let depth = hit.depth + sample_halves(x, len, travel);
+                        depth > 0.0 && depth > sample_halves(x, len, pen)
+                    })
+        })
+        .collect()
 }
 
 /// Integrate the two-piece clipped-linear pressure profile `pen` (at `0`, `len/2`, `len`) over
@@ -554,6 +674,7 @@ fn collect_column_contacts<O: TerrainOracle>(
     affine: Affine3A,
     params: &ForceParams,
     oracle: &O,
+    pieces: &RubbleBodies,
     vel_at: impl Fn(Vec3) -> Vec3,
     belt_speed: f32,
     elements_mode: bool,
@@ -615,6 +736,24 @@ fn collect_column_contacts<O: TerrainOracle>(
         let face_m = out * (params.face_offset + travel[1]);
         let face_b = out * (params.face_offset + travel[2]);
 
+        let lateral = (
+            input.columns[0].0.min(input.columns[2].0),
+            input.columns[0].0.max(input.columns[2].0),
+        );
+        let slab = Slab {
+            origin: wa,
+            axis,
+            lat: lat_axis,
+            out,
+            len,
+            lateral,
+            face: params.face_offset,
+            reach: params.probe_reach,
+            travel: travel.into_iter().fold(0.0_f32, f32::max),
+        };
+        let overlaps = pieces.in_slab(&slab);
+        let mut share = 0.0;
+
         // The shoe is sampled as three lateral COLUMNS (measured faces + centre — see
         // [`SideInput::columns`]): each column runs the full profile machinery on its own
         // three stations with its weight of the per-metre coefficients and applies its
@@ -637,15 +776,15 @@ fn collect_column_contacts<O: TerrainOracle>(
             // feedback (measured: the headless Tiger tail-sunk at 1.46 m of 4 s full
             // throttle).
             let probes = [
-                oracle.probe(ca + face_a, out, params.probe_reach + travel[0]),
-                oracle.probe(
+                oracle.depth_along(ca + face_a, out, params.probe_reach + travel[0]),
+                oracle.depth_along(
                     (ca + cb) / 2.0 + face_m,
                     out,
                     params.probe_reach + travel[1],
                 ),
-                oracle.probe(cb + face_b, out, params.probe_reach + travel[2]),
+                oracle.depth_along(cb + face_b, out, params.probe_reach + travel[2]),
             ];
-            let pen = probes.map(|probe| probe.depth);
+            let pen = probes;
             #[cfg(feature = "bitprobe")]
             let probe_index = {
                 let (query_a, query_m, query_b) =
@@ -670,90 +809,118 @@ fn collect_column_contacts<O: TerrainOracle>(
                 });
                 report.bitprobe_elements.len() - 1
             };
-            let pen_max = pen[0].max(pen[1]).max(pen[2]);
-            if pen_max <= 0.0 {
-                continue;
-            }
-
-            let Some((area, contact_len, x_c)) = profile_resultant(len, pen) else {
-                continue;
+            let strip = if input.columns[0].0 < input.columns[2].0 {
+                (
+                    lateral.0 + (lateral.1 - lateral.0) * share,
+                    lateral.0 + (lateral.1 - lateral.0) * (share + weight),
+                )
+            } else {
+                (
+                    lateral.1 - (lateral.1 - lateral.0) * (share + weight),
+                    lateral.1 - (lateral.1 - lateral.0) * share,
+                )
             };
-            // Resultant at the terrain surface, on this column: the profile's own value at
-            // the centroid position. (The normal force is offset-invariant along its own
-            // line; the traction lever is not.) The centroid's own datum interpolates the
-            // travel exactly like the penetration, so `p` lands on the terrain surface under
-            // a varying profile too.
-            let pen_c = sample_halves(x_c, len, pen).max(0.0);
-            let t_c = sample_halves(x_c, len, travel);
-            let p = ca + axis * x_c + out * (params.face_offset + t_c - pen_c);
-
-            // The column's resultant presses on the collider of its deepest probe (the first
-            // such probe in a/m/b order): one collider per column, the one carrying most of the
-            // profile.
-            let collider = probes
-                .iter()
-                .fold((f32::NEG_INFINITY, None), |(deepest, collider), probe| {
-                    if probe.depth > deepest {
-                        (probe.depth, probe.collider)
-                    } else {
-                        (deepest, collider)
-                    }
-                })
-                .1;
-
-            // Support: penalty spring along the belt's own inward normal, at the column's
-            // share of the per-metre coefficients. Damping and slip read the hull's velocity
-            // relative to the surface it presses: a piece's own motion enters the slip, which
-            // is stable because the piece takes back only a clamped impulse
-            // (`track::rubble::piece_impulses`), never the explicit reaction.
-            let normal = -out;
-            let hull_vel = vel_at(p);
-            let vel = match collider {
-                Some(collider) => hull_vel - oracle.surface_velocity(collider, p),
-                None => hull_vel,
+            share += weight;
+            let affected = raised_footprints(&overlaps, strip, len, pen, travel);
+            let field_patch = SupportPatch {
+                origin: ca,
+                len,
+                weight,
+                pen,
+                travel,
+                collider: None,
             };
-            let engage = (pen_max / params.engage_depth).clamp(0.0, 1.0);
-            let load_elastic = weight * params.support_stiffness_per_m * area * engage;
-            let load = weight
-                * (params.support_stiffness_per_m * area
-                    - params.support_damping_per_m * contact_len * vel.dot(normal))
-                .max(0.0)
-                * engage;
-            #[cfg(feature = "bitprobe")]
-            {
-                let output = &mut report.bitprobe_elements[probe_index];
-                output.load = load;
-                output.load_elastic = load_elastic;
-                output.point = p;
-                output.normal = normal;
-            }
-            if load <= 0.0 {
-                if elements_mode && load_elastic > 0.0 {
-                    held.push((material(i) * 3 + ci, load_elastic));
+            let split;
+            let patches = if affected.is_empty() {
+                std::slice::from_ref(&field_patch)
+            } else {
+                split = footprint_patches(&slab, strip, offset, pen, travel, &affected, pieces);
+                &split
+            };
+            for &patch in patches {
+                let SupportPatch {
+                    origin: ca,
+                    len,
+                    weight,
+                    pen,
+                    travel,
+                    collider,
+                } = patch;
+                let pen_max = pen[0].max(pen[1]).max(pen[2]);
+                if pen_max <= 0.0 {
+                    continue;
                 }
-                continue;
-            }
 
-            let (long_dir, lat_dir, has_plane, slip_long, slip_lat) =
-                contact_frame(affine, tan2, normal, vel, belt_speed);
-            let belt_velocity = hull_vel - long_dir * belt_speed;
+                let Some((area, contact_len, x_c)) = profile_resultant(len, pen) else {
+                    continue;
+                };
+                // Resultant at the terrain surface, on this column: the profile's own value at
+                // the centroid position. (The normal force is offset-invariant along its own
+                // line; the traction lever is not.) The centroid's own datum interpolates the
+                // travel exactly like the penetration, so `p` lands on the terrain surface under
+                // a varying profile too.
+                let pen_c = sample_halves(x_c, len, pen).max(0.0);
+                let t_c = sample_halves(x_c, len, travel);
+                let p = ca + axis * x_c + out * (params.face_offset + t_c - pen_c);
 
-            cols.push(ColumnContact {
-                p,
-                normal,
-                load,
-                load_elastic,
-                long_dir,
-                lat_dir,
-                has_plane,
-                slip_long,
-                slip_lat,
-                element: material(i) * 3 + ci,
-                belt_velocity,
-                collider,
+                // Support: penalty spring along the belt's own inward normal, at the column's
+                // share of the per-metre coefficients. Damping and slip read the hull's velocity
+                // relative to the surface it presses: a piece's own motion enters the slip, which
+                // is stable because the piece takes back only a clamped impulse
+                // (`track::rubble::piece_impulses`), never the explicit reaction.
+                let normal = -out;
+                let hull_vel = vel_at(p);
+                let vel = match collider {
+                    Some(collider) => hull_vel - pieces.velocity_at(collider, p),
+                    None => hull_vel,
+                };
+                let engage = (pen_max / params.engage_depth).clamp(0.0, 1.0);
+                let load_elastic = weight * params.support_stiffness_per_m * area * engage;
+                let load = weight
+                    * (params.support_stiffness_per_m * area
+                        - params.support_damping_per_m * contact_len * vel.dot(normal))
+                    .max(0.0)
+                    * engage;
                 #[cfg(feature = "bitprobe")]
-                probe_index,
-            });
+                {
+                    let output = &mut report.bitprobe_elements[probe_index];
+                    output.point = if output.load == 0.0 {
+                        p
+                    } else {
+                        (output.point * output.load + p * load) / (output.load + load)
+                    };
+                    output.load += load;
+                    output.load_elastic += load_elastic;
+                    output.normal = normal;
+                }
+                if load <= 0.0 {
+                    if elements_mode && load_elastic > 0.0 {
+                        held.push((material(i) * 3 + ci, load_elastic));
+                    }
+                    continue;
+                }
+
+                let (long_dir, lat_dir, has_plane, slip_long, slip_lat) =
+                    contact_frame(affine, tan2, normal, vel, belt_speed);
+                let belt_velocity = hull_vel - long_dir * belt_speed;
+
+                cols.push(ColumnContact {
+                    p,
+                    normal,
+                    load,
+                    load_elastic,
+                    long_dir,
+                    lat_dir,
+                    has_plane,
+                    slip_long,
+                    slip_lat,
+                    element: material(i) * 3 + ci,
+                    belt_velocity,
+                    collider,
+                    #[cfg(feature = "bitprobe")]
+                    probe_index,
+                });
+            }
         }
     }
     (cols, held)
@@ -835,6 +1002,22 @@ fn update_grip_elements(
     let leave = side_weight * GRIP_ELEMENT_LEAVE_FRACTION;
     let mut kept = vec![false; element_len];
     let mut elem_g = vec![Vec2::ZERO; cols.len()];
+    // A footprint can split a material element into several surface patches. Membership reads
+    // their summed elastic load, and its one strain advances once from their load-weighted slip.
+    // The single-contact case keeps the field-only arithmetic unchanged.
+    let mut loads = vec![0.0; element_len];
+    let mut slips = vec![Vec3::ZERO; element_len];
+    let mut counts = vec![0_usize; element_len];
+    let mut advanced = vec![false; element_len];
+    for c in cols {
+        loads[c.element] += c.load_elastic;
+        slips[c.element] += (c.long_dir * c.slip_long - c.lat_dir * c.slip_lat) * c.load_elastic;
+        counts[c.element] += 1;
+    }
+    let mut membership_loads = loads.clone();
+    for &(element, elastic) in held {
+        membership_loads[element] += elastic;
+    }
     // The damping partner, normalized per unit budget: σ1 = 2ζ√(K·m) reduced through
     // the stiffness derivation, at the LuGre-canonical ζ.
     let d_coef =
@@ -843,8 +1026,8 @@ fn update_grip_elements(
         // ENTER above the high bound; STAY down to the low bound while already a member
         // (hysteresis + dwell refresh). Never the damped load's sign — see
         // [`GRIP_ELEMENT_ENTER_FRACTION`].
-        let member =
-            c.load_elastic >= enter || (c.load_elastic >= leave && elements.dwell[c.element] > 0);
+        let elastic = membership_loads[c.element];
+        let member = elastic >= enter || (elastic >= leave && elements.dwell[c.element] > 0);
         if member {
             elements.dwell[c.element] = GRIP_ELEMENT_LOSS_DWELL_TICKS;
             kept[c.element] = true;
@@ -856,17 +1039,21 @@ fn update_grip_elements(
         // hull (+slip_long along long_dir, −slip_lat along lat_dir — the kinetic law's
         // signs, vectorized).
         let sdot = c.long_dir * c.slip_long - c.lat_dir * c.slip_lat;
-        let j1 = if c.load_elastic >= enter {
-            let j1 = advance_element_strain(elements.strain[c.element], sdot, c.normal, dt);
-            elements.strain[c.element] = j1;
-            j1
-        } else {
-            // Below the enter bound (hysteresis band, or a fading straggler): stored
-            // strain HELD, not integrated — the low-load policy (see
-            // [`GRIP_ELEMENT_ENTER_FRACTION`]); force still scales by the current
-            // elastic load, so engagement fades continuously.
-            elements.strain[c.element]
-        };
+        if !advanced[c.element] {
+            if loads[c.element] >= enter {
+                let mean_slip = if counts[c.element] == 1 {
+                    sdot
+                } else {
+                    slips[c.element] / loads[c.element]
+                };
+                elements.strain[c.element] =
+                    advance_element_strain(elements.strain[c.element], mean_slip, c.normal, dt);
+            }
+            // Below the enter bound the existing strain holds; each patch's force still scales
+            // with its own current elastic load, including its own local damping slip.
+            advanced[c.element] = true;
+        }
+        let j1 = elements.strain[c.element];
         let mut g = j1 / GRIP_SHEAR_MODULUS_M + sdot * d_coef;
         let g_len = g.length();
         if g_len > 1.0 {
@@ -877,8 +1064,9 @@ fn update_grip_elements(
     // Columns the damped support clipped out this tick but whose elastic penetration
     // remains: still on the ground — membership continues, stored strain holds, no force
     // (support omitted the contact entirely).
-    for &(el, e) in held {
-        if e >= enter || (e >= leave && elements.dwell[el] > 0) {
+    for &(el, _) in held {
+        let elastic = membership_loads[el];
+        if elastic >= enter || (elastic >= leave && elements.dwell[el] > 0) {
             elements.dwell[el] = GRIP_ELEMENT_LOSS_DWELL_TICKS;
             kept[el] = true;
         }
@@ -957,8 +1145,8 @@ fn emit_contact_forces(
             output.active = true;
             output.slip_long = c.slip_long;
             output.slip_lat = c.slip_lat;
-            output.f_long = f_long;
-            output.f_lat = f_lat;
+            output.f_long += f_long;
+            output.f_lat += f_lat;
         }
     }
     (elem_sum, belt_reaction)
@@ -1037,6 +1225,7 @@ mod tests {
             1.0 / 64.0,
             &rig_params(),
             &FlatGround { surface_y },
+            &RubbleBodies::default(),
             |_| vel,
             elems,
         );
@@ -1090,6 +1279,7 @@ mod tests {
             1.0 / 64.0,
             &params,
             &Ceiling { under_y: 0.55 },
+            &RubbleBodies::default(),
             |_| Vec3::ZERO,
             &mut GripElements::for_links(25),
         );
@@ -1110,6 +1300,7 @@ mod tests {
             1.0 / 64.0,
             &params,
             &Ceiling { under_y: 0.51 },
+            &RubbleBodies::default(),
             |_| Vec3::ZERO,
             &mut GripElements::for_links(25),
         );
@@ -1144,6 +1335,7 @@ mod tests {
                 1.0 / 64.0,
                 &params,
                 &FlatGround { surface_y: 0.0 },
+                &RubbleBodies::default(),
                 |_| Vec3::ZERO,
                 &mut GripElements::for_links(25),
             );

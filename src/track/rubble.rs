@@ -1,23 +1,29 @@
 //! Buildings and rubble under the running gear, in the game's tank driving physics (game state
 //! only). The terrain field ([`super::oracle::BlockField`]) is the heightmap and the authored
 //! blocks; a building's elements and standing chunks and every loose piece are Avian colliders the
-//! field never holds. [`RubbleOracle`] folds those colliders onto a terrain oracle with the field's
-//! own probe semantics and names the collider each probe hit, so the belt model's support and grip
-//! press on it, and [`piece_impulses`] sizes what a loose piece takes back in the same tick.
+//! field never holds. [`RubbleBodies`] snapshots those colliders near one tank, the belt's support
+//! reads each through an exact shape check over every link's footprint ([`RubbleBodies::in_slab`])
+//! at the ground's own per-metre spring, and [`piece_impulses`] sizes what a loose piece takes
+//! back in the same tick.
 //!
 //! - **What counts as rubble**: a collider carrying [`BuildingElement`] or [`BuildingChunk`] (on a
 //!   static building root), or any collider of a [`DebrisPiece`] body. Terrain colliders, trees and
 //!   vehicle colliders are not: the field already holds the ground, and a hull is no ground.
-//! - **Probe semantics**: one solid ray over the segment [`TerrainOracle::depth_along`] walks
-//!   (origin `reach` behind the station, length `2 × reach`). A buried origin hits at distance 0,
-//!   depth `reach`: the field's own buried saturation. The deeper answer wins; a tie goes to the
-//!   field.
-//! - **Cost gate**: one AABB query per tank per tick over the whole probe reach
-//!   ([`RubbleQuery::near`]). With no rubble collider in it every probe is the field's alone and
-//!   no ray is cast, so open ground is bit-identical to the field-only oracle.
+//! - **The footprint check**: a link's slab ([`Slab`]) is the volume its field probes sweep, made
+//!   solid across the true shoe width: along the link, between its measured faces, and from the
+//!   probes' origin out to the contact envelope. A piece's extent in it is six support points of
+//!   its own convex shape (along, across and through the link), so a piece narrower than the gap
+//!   between the probe columns is read. The convex boundary is clipped to the footprint before
+//!   its depth is read: a remote vertex and an empty convex corner cannot become support.
+//! - **One support law**: `forces::contact_side` partitions overlapping footprints; the deepest
+//!   surface in each cell enters the field's own support law at its covered share of the shoe.
+//!   Stacked pieces cannot multiply the hull's support.
+//! - **Cost gate**: one AABB query per tank per tick over the footprint's bounding sphere
+//!   ([`RubbleQuery::near`], [`footprint_radius`]). With no rubble collider in it no shape is
+//!   read, so open ground is bit-identical to the field alone.
 //! - **Tick truth**: avian refits dynamic bodies' AABBs at the end of its physics step
-//!   (`update_solver_body_aabbs`) and each candidate's narrow test reads its current
-//!   `Position`/`Rotation`, so a cast in `FixedUpdate` sees the poses the last step wrote.
+//!   (`update_solver_body_aabbs`) and writes each collider's `Position`/`Rotation`, so a snapshot
+//!   in `FixedUpdate` reads the poses the last step wrote.
 //!
 //! **The two sides of a belt-piece contact are sized differently**, because a piece resting on
 //! something passes the tank's load on to what holds it, and only avian's solver sees that.
@@ -39,18 +45,19 @@
 //!   brick tipping under the belt), which no bound stops: avian's own contacts resolve what holds
 //!   the piece. Nothing beyond that reaches it.
 //! - **Accepted error**: a piece resting on nothing (a brick falling off a pile edge) still
-//!   supports the tank for the ticks it is probed. The refinement, not built, limits the support
-//!   by the impulses avian's contacts on the piece carried the tick before.
-//! - **Rejected alternative**: kinematic belt colliders on the debris layer with avian's conveyor
-//!   contacts (`ContactManifold::tangent_velocity`, set in `CollisionHooks::modify_contacts`)
-//!   would let avian push pieces too, but they model the belt twice (probes hold the tank,
-//!   colliders push pieces) and push without limit. It is the fallback if piles look wrong in
-//!   play.
+//!   supports the tank for the ticks it is read. Avian alone sees what holds the piece; that
+//!   support is not limited by its previous contacts. Dynamic-piece velocities are advanced by
+//!   each clamped impulse, in tank-entity and report order, before the next impulse is sized.
+//! - **Rejected alternatives**: probe rays folded onto the colliders (each probe also a ray
+//!   against the rubble, the deepest hit wins) see only the three column lines, so a brick between
+//!   them sits under the belt unseen. Kinematic belt colliders with avian's conveyor contacts
+//!   (`ContactManifold::tangent_velocity`, set in `CollisionHooks::modify_contacts`) model the
+//!   belt twice (the field holds the tank, colliders push pieces) and push without limit.
 
 use avian3d::prelude::{
-    ColliderAabb, ColliderOf, ComputedAngularInertia, ComputedCenterOfMass, ComputedMass,
-    DefaultFriction, Forces, Friction, ReadRigidBodyForces, RigidBody, SpatialQuery,
-    SpatialQueryFilter, WriteRigidBodyForces,
+    Collider, ColliderAabb, ColliderOf, ComputedAngularInertia, ComputedCenterOfMass, ComputedMass,
+    DefaultFriction, Forces, Friction, Position, ReadRigidBodyForces, RigidBody, Rotation,
+    SpatialQuery, WriteRigidBodyForces,
 };
 use bevy::ecs::query::QueryFilter;
 use bevy::ecs::system::SystemParam;
@@ -61,15 +68,25 @@ use crate::buildings::breakage::BuildingChunk;
 use crate::debris::DebrisPiece;
 
 use super::forces::BeltContact;
-use super::oracle::{Probe, TerrainOracle};
 
-/// The spatial query, the markers that say which colliders are rubble, and their friction.
+/// The spatial query, the markers that say which colliders are rubble, their shapes and friction.
 #[derive(SystemParam)]
 pub(crate) struct RubbleQuery<'w, 's> {
     spatial: SpatialQuery<'w, 's>,
     built: Query<'w, 's, (), Or<(With<BuildingElement>, With<BuildingChunk>)>>,
     collider_of: Query<'w, 's, &'static ColliderOf>,
     pieces: Query<'w, 's, (), With<DebrisPiece>>,
+    rigid_bodies: Query<'w, 's, &'static RigidBody>,
+    shapes: Query<
+        'w,
+        's,
+        (
+            &'static Collider,
+            &'static Position,
+            &'static Rotation,
+            &'static ColliderAabb,
+        ),
+    >,
     frictions: Query<'w, 's, &'static Friction>,
     default_friction: Res<'w, DefaultFriction>,
 }
@@ -84,8 +101,8 @@ impl RubbleQuery<'_, '_> {
                 .is_ok_and(|of| self.pieces.contains(of.body))
     }
 
-    /// The rubble colliders whose AABBs meet the sphere of `radius` about `center`, in the order
-    /// avian's trees visit them.
+    /// The rubble colliders meeting the AABB of half-extent `radius` about `center`, ascending
+    /// by entity, so their contacts and the force sums over them keep one order.
     pub(crate) fn near(&self, center: Vec3, radius: f32) -> Vec<Entity> {
         let mut near = Vec::new();
         self.spatial.aabb_intersections_with_aabb_callback(
@@ -97,6 +114,8 @@ impl RubbleQuery<'_, '_> {
                 true
             },
         );
+        near.sort_unstable();
+        near.dedup();
         near
     }
 
@@ -174,24 +193,179 @@ impl PieceBody {
     }
 }
 
-/// One rubble collider near the tank: its dynamic body's slot in [`RubbleBodies::bodies`]
-/// (`None` for a static or kinematic one, which takes nothing), and μ against the belt.
-#[derive(Clone, Copy, Debug)]
+/// One rubble collider near the tank, as the footprint check reads it: its convex shape at its
+/// tick-start world pose and bounds, its dynamic body's slot in [`RubbleBodies::bodies`] (`None`
+/// for a static or kinematic one, which takes nothing), and μ against the belt.
+#[derive(Clone, Debug)]
 struct Surface {
     collider: Entity,
+    shape: Collider,
+    position: Vec3,
+    rotation: Quat,
+    aabb: ColliderAabb,
+    /// The convex boundary at the same tick-start pose, for clipping support to a footprint.
+    triangles: Vec<[Vec3; 3]>,
     body: Option<usize>,
     mu: f32,
 }
 
+impl Surface {
+    fn triangles(shape: &Collider, position: Vec3, rotation: Quat) -> Vec<[Vec3; 3]> {
+        let shape = shape.shape_scaled();
+        let (vertices, indices) = if let Some(cuboid) = shape.as_cuboid() {
+            cuboid.to_trimesh()
+        } else if let Some(hull) = shape.as_convex_polyhedron() {
+            hull.to_trimesh()
+        } else {
+            panic!(
+                "building and loose-piece support shapes are convex polyhedra or boxes; fix the collider constructor"
+            );
+        };
+        let world: Vec<_> = vertices
+            .into_iter()
+            .map(|v| position + rotation * v)
+            .collect();
+        indices
+            .into_iter()
+            .map(|tri| tri.map(|i| world[i as usize]))
+            .collect()
+    }
+
+    /// The shape's farthest world point along unit `dir`.
+    fn support(&self, dir: Vec3) -> Vec3 {
+        let map = self.shape.shape_scaled().as_support_map().unwrap_or_else(|| {
+            panic!(
+                "rubble collider {:?} is not convex: building elements, chunks and loose pieces \
+                 are convex hulls or boxes, the shapes the belt's footprint check reads",
+                self.collider
+            )
+        });
+        self.position + self.rotation * map.local_support_point(self.rotation.inverse() * dir)
+    }
+
+    /// Extrema of the convex shape *inside* the footprint's four side planes. Projected support
+    /// intervals alone can overlap at an empty corner, or pick the remote end of a long piece
+    /// outside an angled link. Clipping the actual boundary supplies the missing constraints.
+    fn clipped_extent(&self, slab: &Slab) -> Option<(Vec3, Vec3)> {
+        let mut lo = Vec3::INFINITY;
+        let mut hi = Vec3::NEG_INFINITY;
+        let mut area = false;
+        for triangle in &self.triangles {
+            let mut polygon: Vec<_> = triangle
+                .iter()
+                .map(|p| {
+                    let r = *p - slab.origin;
+                    Vec3::new(r.dot(slab.axis), r.dot(slab.lat), r.dot(slab.out))
+                })
+                .collect();
+            for (axis, sign, bound) in [
+                (0, 1.0, 0.0),
+                (0, -1.0, -slab.len),
+                (1, 1.0, slab.lateral.0),
+                (1, -1.0, -slab.lateral.1),
+            ] {
+                polygon = clip_polygon(&polygon, axis, sign, bound);
+            }
+            if !polygon.is_empty() {
+                let mut projected_area = 0.0;
+                for i in 0..polygon.len() {
+                    let a = polygon[i];
+                    let b = polygon[(i + 1) % polygon.len()];
+                    projected_area += a.x * b.y - a.y * b.x;
+                    lo = lo.min(a);
+                    hi = hi.max(a);
+                }
+                area |= projected_area.abs() > 0.0;
+            }
+        }
+        area.then_some((lo, hi))
+    }
+}
+
+/// Sutherland-Hodgman clipping to one footprint half-plane, in slab coordinates. Boundary
+/// points stay in the polygon; a mere touching edge has no projected support area.
+fn clip_polygon(points: &[Vec3], axis: usize, sign: f32, bound: f32) -> Vec<Vec3> {
+    let mut out = Vec::new();
+    if points.is_empty() {
+        return out;
+    }
+    let mut a = points[points.len() - 1];
+    let mut da = sign * a[axis] - bound;
+    for &b in points {
+        let db = sign * b[axis] - bound;
+        if (da < 0.0 && db >= 0.0) || (da >= 0.0 && db < 0.0) {
+            out.push(a + (b - a) * (da / (da - db)));
+        }
+        if db >= 0.0 {
+            out.push(b);
+        }
+        a = b;
+        da = db;
+    }
+    out
+}
+
+/// One link's slab: the volume its field probes sweep, solid across the shoe (module doc). World
+/// axes: `axis` along the link from `origin` (its first pin), `lat` the hull's lateral axis,
+/// `out` the link's outward normal.
+pub(crate) struct Slab {
+    pub(crate) origin: Vec3,
+    pub(crate) axis: Vec3,
+    pub(crate) lat: Vec3,
+    pub(crate) out: Vec3,
+    /// Link length (m).
+    pub(crate) len: f32,
+    /// The shoe's lateral faces as offsets along `lat` from the pin plane (m), low then high.
+    pub(crate) lateral: (f32, f32),
+    /// Pin line → rest outer face (m).
+    pub(crate) face: f32,
+    /// How far behind the rest face the probes start, and the depth they saturate at (m).
+    pub(crate) reach: f32,
+    /// The link's largest free travel past the rest face (m).
+    pub(crate) travel: f32,
+}
+
+impl Slab {
+    /// The slab's world bounds.
+    fn aabb(&self) -> (Vec3, Vec3) {
+        let mut lo = Vec3::INFINITY;
+        let mut hi = Vec3::NEG_INFINITY;
+        for u in [0.0, self.len] {
+            for l in [self.lateral.0, self.lateral.1] {
+                for t in [self.face + self.travel, self.face - self.reach] {
+                    let p = self.origin + self.axis * u + self.lat * l + self.out * t;
+                    lo = lo.min(p);
+                    hi = hi.max(p);
+                }
+            }
+        }
+        (lo, hi)
+    }
+}
+
+/// One piece's extent in a [`Slab`]: along the link (`u`, m from the first pin, clipped to the
+/// link), across the shoe (`l`, offsets from the pin plane, clipped to the shoe), and `depth`,
+/// how far its innermost point lies past the rest face toward the pins (m, saturated at the
+/// probes' reach). The local free travel adds to `depth` exactly as it adds to a probe's.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct SlabOverlap {
+    pub(crate) piece: usize,
+    pub(crate) u: (f32, f32),
+    pub(crate) l: (f32, f32),
+    pub(crate) depth: f32,
+}
+
 /// The rubble near one tank this tick: each collider's surface and its dynamic bodies' states.
+/// Empty where a tank has none near it, and for every pass that reads the field alone (the
+/// envelope calibration).
 #[derive(Default)]
-pub(crate) struct RubbleBodies {
+pub struct RubbleBodies {
     surfaces: Vec<Surface>,
     pub(crate) bodies: Vec<PieceBody>,
 }
 
 impl RubbleBodies {
-    /// Read the `near` colliders' bodies out of `bodies`, with `belt` the belt surface's friction.
+    /// Read the `near` colliders' shapes and bodies, with `belt` the belt surface's friction.
     pub(crate) fn gather<F: QueryFilter>(
         rubble: &RubbleQuery,
         near: &[Entity],
@@ -202,9 +376,14 @@ impl RubbleBodies {
         for &collider in near {
             let body = rubble.body_of(collider);
             let mut slot = out.bodies.iter().position(|b| b.entity == body);
-            if slot.is_none()
-                && let Ok((forces, RigidBody::Dynamic, mass, inertia, com)) = bodies.get(body)
-            {
+            let rigid_body = rubble
+                .rigid_bodies
+                .get(body)
+                .expect("a gathered building or loose-piece collider belongs to a rigid body");
+            if slot.is_none() && *rigid_body == RigidBody::Dynamic {
+                let (forces, _, mass, inertia, com) = bodies
+                    .get(body)
+                    .expect("a dynamic rubble body carries its computed mass and force state");
                 let rotation = forces.rotation().0;
                 out.bodies.push(PieceBody {
                     entity: body,
@@ -216,8 +395,17 @@ impl RubbleBodies {
                 });
                 slot = Some(out.bodies.len() - 1);
             }
+            let (shape, position, rotation, aabb) = rubble
+                .shapes
+                .get(collider)
+                .expect("a collider the spatial query returned carries its shape and pose");
             out.surfaces.push(Surface {
                 collider,
+                shape: shape.clone(),
+                position: position.0,
+                rotation: rotation.0,
+                aabb: *aabb,
+                triangles: Surface::triangles(shape, position.0, rotation.0),
                 body: slot,
                 mu: belt.combine(rubble.friction(collider)).dynamic_coefficient,
             });
@@ -225,89 +413,91 @@ impl RubbleBodies {
         out
     }
 
-    fn surface(&self, collider: Entity) -> Option<Surface> {
+    fn surface(&self, collider: Entity) -> &Surface {
         self.surfaces
             .iter()
             .find(|s| s.collider == collider)
-            .copied()
+            .expect("a belt collider contact belongs to the gathered footprint surfaces")
     }
 
     /// Whether `collider` belongs to a gathered dynamic piece.
     pub(crate) fn is_dynamic(&self, collider: Entity) -> bool {
-        self.surface(collider).is_some_and(|s| s.body.is_some())
+        self.surface(collider).body.is_some()
+    }
+
+    /// The collider of a [`SlabOverlap::piece`].
+    pub(crate) fn collider(&self, piece: usize) -> Entity {
+        self.surfaces[piece].collider
     }
 
     /// The world velocity of `collider`'s surface at `point`: its dynamic body's, zero for a
-    /// static one or a collider not gathered.
+    /// static or kinematic one. Only a collider from this snapshot may be read.
     pub(crate) fn velocity_at(&self, collider: Entity, point: Vec3) -> Vec3 {
         self.surface(collider)
-            .and_then(|s| s.body)
+            .body
             .map_or(Vec3::ZERO, |slot| self.bodies[slot].velocity_at(point))
     }
-}
 
-/// A terrain oracle with the rubble near one tank folded on (module doc).
-pub(crate) struct RubbleOracle<'a, 'w, 's, O> {
-    pub(crate) ground: &'a O,
-    pub(crate) rubble: &'a RubbleQuery<'w, 's>,
-    /// [`RubbleQuery::near`] of this tank this tick.
-    pub(crate) near: &'a [Entity],
-    /// The near pieces' states, for [`TerrainOracle::surface_velocity`]; empty where nothing
-    /// reads it.
-    pub(crate) bodies: &'a RubbleBodies,
-}
-
-impl<O: TerrainOracle> TerrainOracle for RubbleOracle<'_, '_, '_, O> {
-    fn depth_along(&self, station: Vec3, out: Vec3, reach: f32) -> f32 {
-        self.probe(station, out, reach).depth
-    }
-
-    fn probe(&self, station: Vec3, out: Vec3, reach: f32) -> Probe {
-        let ground = self.ground.probe(station, out, reach);
-        if self.near.is_empty() {
-            return ground;
+    /// Every gathered piece that reaches into `slab`, with its extent there, in gather order.
+    pub(crate) fn in_slab(&self, slab: &Slab) -> Vec<SlabOverlap> {
+        let mut overlaps = Vec::new();
+        if self.surfaces.is_empty() {
+            return overlaps;
         }
-        let Ok(dir) = Dir3::new(out) else {
-            return ground;
-        };
-        let Some(hit) = self.rubble.spatial.cast_ray_predicate(
-            station - out * reach,
-            dir,
-            2.0 * reach,
-            true,
-            &SpatialQueryFilter::default(),
-            &|collider| self.near.contains(&collider),
-        ) else {
-            return ground;
-        };
-        let depth = reach - hit.distance;
-        if depth > ground.depth {
-            Probe {
-                depth,
-                collider: Some(hit.entity),
+        let (lo, hi) = slab.aabb();
+        let radial = (slab.face - slab.reach, slab.face + slab.travel);
+        for (piece, s) in self.surfaces.iter().enumerate() {
+            if (s.aabb.min.cmpgt(hi) | s.aabb.max.cmplt(lo)).any() {
+                continue;
             }
-        } else {
-            ground
+            let extent = |dir: Vec3| {
+                (
+                    (s.support(-dir) - slab.origin).dot(dir),
+                    (s.support(dir) - slab.origin).dot(dir),
+                )
+            };
+            let (u0, u1) = extent(slab.axis);
+            let (l0, l1) = extent(slab.lat);
+            let (inner, outer) = extent(slab.out);
+            let u = (u0.max(0.0), u1.min(slab.len));
+            let l = (l0.max(slab.lateral.0), l1.min(slab.lateral.1));
+            // The piece must reach out past the probes' origin, `reach` behind the rest face at
+            // every travel.
+            if u.1 <= u.0 || l.1 <= l.0 || outer <= radial.0 || inner >= radial.1 {
+                continue;
+            }
+            // Six support calls reject separated intervals cheaply. The retained boundary is
+            // clipped before its depth is read, so a vertex outside the footprint cannot lift
+            // the hull and an empty convex corner cannot become a contact.
+            let Some((lo, hi)) = s.clipped_extent(slab) else {
+                continue;
+            };
+            if hi.z <= radial.0 || lo.z >= radial.1 {
+                continue;
+            }
+            overlaps.push(SlabOverlap {
+                piece,
+                u: (lo.x.max(0.0), hi.x.min(slab.len)),
+                l: (lo.y.max(slab.lateral.0), hi.y.min(slab.lateral.1)),
+                depth: (slab.face - lo.z).min(slab.reach),
+            });
         }
-    }
-
-    fn surface_velocity(&self, collider: Entity, point: Vec3) -> Vec3 {
-        self.bodies.velocity_at(collider, point)
+        overlaps
     }
 }
 
-/// The probe sphere's radius about the hull origin (m), DERIVED from the probe geometry: a ray
-/// ends at most `|pin| + face + 2 × travel + reach` from the origin (station = pin + out ×
-/// (face + travel), ray end = station + out × (reach + travel)), with `pin_radius` the farthest
-/// pin-line point from the hull origin and `column` the widest lateral column offset.
-pub(crate) fn probe_radius(
+/// The footprint's bounding sphere about the hull origin (m), DERIVED by the triangle
+/// inequality: the farthest pin, the widest shoe offset, and the larger of the slab's outward
+/// travel and inward probe reach. Both radial faces must fit, including a short rig with a long
+/// probe reach.
+pub(crate) fn footprint_radius(
     pin_radius: f32,
     column: f32,
     face: f32,
     max_travel: f32,
     reach: f32,
 ) -> f32 {
-    pin_radius + column + face + 2.0 * max_travel + reach
+    pin_radius + column + (face + max_travel).abs().max((face - reach).abs())
 }
 
 /// One impulse a dynamic piece took: `impulse` (N·s, world) at `point`, through `collider`.
@@ -329,18 +519,22 @@ pub(crate) fn piece_impulses(
 ) -> Vec<Push> {
     let mut pushes = Vec::new();
     for contact in contacts {
-        let Some(surface) = contact.collider.and_then(|c| bodies.surface(c)) else {
+        // The field has no body to push; every collider contact came from this snapshot.
+        let Some(collider) = contact.collider else {
             continue;
         };
+        let surface = bodies.surface(collider);
+        // Static and kinematic construction carries support without taking dynamic impulses.
         let Some(slot) = surface.body else {
             continue;
         };
+        let (collider, mu) = (surface.collider, surface.mu);
         let body = &mut bodies.bodies[slot];
-        let impulse = contact_impulse(body, contact, surface.mu, dt);
+        let impulse = contact_impulse(body, contact, mu, dt);
         body.apply(impulse, contact.point);
         pushes.push(Push {
             body: body.entity,
-            collider: surface.collider,
+            collider,
             impulse,
             point: contact.point,
         });
@@ -372,9 +566,10 @@ fn contact_impulse(body: &PieceBody, contact: &BeltContact, mu: f32, dt: f32) ->
 /// Put every push on its body through avian, which wakes a sleeping body for a non-zero impulse.
 pub(crate) fn apply_pushes<F: QueryFilter>(pushes: &[Push], bodies: &mut Query<PieceData, F>) {
     for push in pushes {
-        if let Ok((mut forces, ..)) = bodies.get_mut(push.body) {
-            forces.apply_linear_impulse_at_point(push.impulse, push.point);
-        }
+        let (mut forces, ..) = bodies
+            .get_mut(push.body)
+            .expect("a gathered dynamic piece remains alive during the synchronous force pass");
+        forces.apply_linear_impulse_at_point(push.impulse, push.point);
     }
 }
 
@@ -395,7 +590,7 @@ mod tests {
         ForceParams, GripElements, SideInput, SideReport, SideState, TravelField, contact_side,
         grip_stiffness,
     };
-    use crate::track::oracle::{BlockField, TerrainBlock};
+    use crate::track::oracle::{BlockField, TerrainBlock, TerrainOracle};
 
     /// One fixed tick (s).
     const DT: f32 = 1.0 / 64.0;
@@ -478,56 +673,96 @@ mod tests {
         )])
     }
 
-    /// Probe `station` straight down at reach 0.5 m through the rubble near it.
-    fn probe_down(app: &mut App, station: Vec3) -> Probe {
+    /// STATIC CONSTRUCTION IS A SUPPORT SURFACE TOO, AND EMPTY CONVEX CORNERS ARE NOT.
+    /// The footprint reader must classify geometry, not rigid-body kind or world AABB overlap.
+    /// FIXTURE DATA: a narrow slab beside the corner of a yawed box and below a standing chunk.
+    #[test]
+    fn the_shape_check_reads_static_construction_and_rejects_empty_corners() {
+        let mut app = physics();
+        let (_, chunk) = standing_chunk(&mut app, 0.0, 0.0);
+        let corner = piece_box(&mut app, Vec3::new(3.0, 0.2, 0.0), Vec3::new(1.0, 0.4, 1.0));
+        app.world_mut().get_mut::<Rotation>(corner).unwrap().0 =
+            Quat::from_rotation_y(std::f32::consts::FRAC_PI_4);
+        app.update();
         app.world_mut()
-            .run_system_once(move |rubble: RubbleQuery| {
-                let field = ground();
-                let near = rubble.near(station, 1.0);
-                let oracle = RubbleOracle {
-                    ground: &field,
-                    rubble: &rubble,
-                    near: &near,
-                    bodies: &RubbleBodies::default(),
+            .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                let near = rubble.near(Vec3::ZERO, 5.0);
+                let pieces = RubbleBodies::gather(&rubble, &near, contact_friction(0.9), &bodies);
+                let mut slab = Slab {
+                    origin: Vec3::new(0.0, 0.1, -0.1),
+                    axis: Vec3::Z,
+                    lat: Vec3::X,
+                    out: Vec3::NEG_Y,
+                    len: 0.2,
+                    lateral: (-0.1, 0.1),
+                    face: 0.0,
+                    reach: 0.5,
+                    travel: 0.1,
                 };
-                oracle.probe(station, Vec3::NEG_Y, 0.5)
+                let hits = pieces.in_slab(&slab);
+                assert!(hits.iter().any(|h| pieces.collider(h.piece) == chunk));
+                assert!(!pieces.is_dynamic(chunk));
+                slab.origin = Vec3::new(3.6, 0.1, 0.5);
+                let (lo, hi) = slab.aabb();
+                let surface = pieces.surface(corner);
+                assert!(
+                    !(surface.aabb.min.cmpgt(hi) | surface.aabb.max.cmplt(lo)).any(),
+                    "fixture must exercise a world-AABB false positive"
+                );
+                assert!(
+                    pieces.in_slab(&slab).is_empty(),
+                    "empty corner counted as support"
+                );
             })
-            .expect("the probe system runs")
+            .unwrap();
     }
 
-    /// A PROBE OVER A PIECE REPORTS THE PIECE'S SURFACE, AND ONLY RUBBLE COUNTS: the track
-    /// model's support datum (`forces::contact_side`) reads this depth, so a probe blind to
-    /// pieces leaves a tank's belts sinking through rubble its hull then slides on, and a probe
-    /// that took any collider would make terrain colliders and a hull's own proxies its ground.
-    /// Over a piece (top 0.4 m) a station at 0.3 m is 0.1 m deep and names the piece; over a
-    /// standing chunk (top 0.6 m) 0.3 m deep and names the chunk; over an unmarked collider of
-    /// the piece's size, and over open ground, it reads the field's own bits and no collider.
+    /// A LONG PIECE'S REMOTE VERTEX CANNOT COMPRESS AN ANGLED LINK. The hull relies on depth
+    /// being constrained to the actual footprint, not a shape-wide support point. A flat top
+    /// below this inclined footprint has the same local intrusion at either fixture length.
+    /// FIXTURE DATA: unit tangent (0, 0.6, 0.8), top y = 0.1 m, face offset 0.025 m.
     #[test]
-    fn a_probe_over_a_piece_reports_the_piece_surface() {
+    fn support_depth_is_clipped_to_the_footprint_before_it_is_read() {
         let mut app = physics();
-        let loose = piece(&mut app, 0.0, 0.0);
-        let (_, chunk) = standing_chunk(&mut app, 10.0, 0.0);
-        app.world_mut().spawn((
-            Position(Vec3::new(20.0, 0.2, 0.0)),
-            RigidBody::Static,
-            Collider::cuboid(2.0, 0.4, 2.0),
-        ));
+        let short = piece_box(
+            &mut app,
+            Vec3::new(0.0, 0.05, 0.0),
+            Vec3::new(0.4, 0.1, 4.0),
+        );
+        let long = piece_box(
+            &mut app,
+            Vec3::new(10.0, 0.05, 0.0),
+            Vec3::new(0.4, 0.1, 400.0),
+        );
         app.update();
-
-        let on_piece = probe_down(&mut app, Vec3::new(0.0, 0.3, 0.0));
-        assert!((on_piece.depth - 0.1).abs() < 1e-5, "{on_piece:?}");
-        assert_eq!(on_piece.collider, Some(loose));
-
-        let on_chunk = probe_down(&mut app, Vec3::new(10.0, 0.3, 0.0));
-        assert!((on_chunk.depth - 0.3).abs() < 1e-5, "{on_chunk:?}");
-        assert_eq!(on_chunk.collider, Some(chunk));
-
-        let field = ground().depth_along(Vec3::new(0.0, 0.3, 0.0), Vec3::NEG_Y, 0.5);
-        for open in [Vec3::new(20.0, 0.3, 0.0), Vec3::new(-10.0, 0.3, 0.0)] {
-            let probe = probe_down(&mut app, open);
-            assert_eq!(probe.depth.to_bits(), field.to_bits(), "{open}: {probe:?}");
-            assert_eq!(probe.collider, None, "{open}");
-        }
+        app.world_mut()
+            .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                let pieces =
+                    RubbleBodies::gather(&rubble, &[short, long], contact_friction(0.9), &bodies);
+                let mut slab = Slab {
+                    origin: Vec3::Y * 0.1,
+                    axis: Vec3::new(0.0, 0.6, 0.8),
+                    lat: Vec3::X,
+                    out: Vec3::new(0.0, -0.8, 0.6),
+                    len: 0.2,
+                    lateral: (-0.1, 0.1),
+                    face: 0.025,
+                    reach: 0.5,
+                    travel: 0.1,
+                };
+                let short_depth = pieces.in_slab(&slab)[0].depth;
+                slab.origin.x = 10.0;
+                let long_depth = pieces.in_slab(&slab)[0].depth;
+                assert!(
+                    (short_depth - 0.025).abs() < 1e-5,
+                    "local depth {short_depth}"
+                );
+                assert!(
+                    (long_depth - short_depth).abs() < 1e-5,
+                    "remote geometry changed depth {short_depth} -> {long_depth}"
+                );
+            })
+            .unwrap();
     }
 
     /// A contact pressing `load` (N) along +Y on `collider` at `point`, belt at rest, no traction.
@@ -789,10 +1024,11 @@ mod tests {
         }
     }
 
-    /// One contact pass of a 2 m pad (pins at local y = 0.02, the face 25 mm out) under a hull at
-    /// `affine`, belt at `state`, moving at `vel` everywhere (fixture data).
+    /// One contact pass of a fixture pad, with its complete shoe footprint and no suspension
+    /// travel. The tall return run leaves the piece tests clear of its inward probe origins.
     fn pad_pass<O: TerrainOracle>(
         oracle: &O,
+        pieces: &RubbleBodies,
         affine: Affine3A,
         state: SideState,
         vel: Vec3,
@@ -801,13 +1037,13 @@ mod tests {
         let loop_pts = [
             Vec2::new(-1.0, 0.02),
             Vec2::new(1.0, 0.02),
-            Vec2::new(1.0, 0.52),
-            Vec2::new(-1.0, 0.52),
+            Vec2::new(1.0, 1.02),
+            Vec2::new(-1.0, 1.02),
             Vec2::new(-1.0, 0.02),
         ];
         let input = SideInput {
             loop_pts: &loop_pts,
-            count: 25,
+            count: 30,
             plane_x: 0.0,
             columns: [(-0.1, 0.25), (0.0, 0.5), (0.1, 0.25)],
             travel: TravelField { knots: &[] },
@@ -831,6 +1067,7 @@ mod tests {
             DT,
             &params,
             oracle,
+            pieces,
             |_| vel,
             elements,
         );
@@ -838,10 +1075,11 @@ mod tests {
         report
     }
 
-    /// The fixture pad 5 mm into flat ground at y = 0, driving and sliding.
-    fn flat_pass<O: TerrainOracle>(oracle: &O) -> SideReport {
+    /// The fixture pad just into flat ground, driving and sliding.
+    fn flat_pass(pieces: &RubbleBodies) -> SideReport {
         pad_pass(
-            oracle,
+            &ground(),
+            pieces,
             Affine3A::IDENTITY,
             SideState {
                 speed: 0.4,
@@ -849,33 +1087,27 @@ mod tests {
                 grip: Vec2::ZERO,
             },
             Vec3::new(0.0, -0.01, 0.3),
-            &mut GripElements::for_links(25),
+            &mut GripElements::for_links(30),
         )
     }
 
-    /// Park a 6 t hull (fixture data) on the fixture pad for `ticks`, dropped at height `h` and
-    /// integrated vertically alone, the world stepped once per tick with the pieces' impulses
-    /// applied; returns the hull's final height.
+    /// Park a fixture hull, integrating heave under the actual support and clamped reactions.
+    /// FIXTURE DATA: mass 6 t, duration supplied in fixed ticks, gravity 9.81 m/s².
     fn park(app: &mut App, mut h: f32, ticks: usize) -> f32 {
         const MASS: f32 = 6000.0;
         let mut vy = 0.0;
-        let mut elements = GripElements::for_links(25);
+        let mut elements = GripElements::for_links(30);
         for _ in 0..ticks {
             let (lift, kept) = app
                 .world_mut()
                 .run_system_once(move |rubble: RubbleQuery, mut bodies: Query<PieceData>| {
                     let mut elements = std::mem::take(&mut elements);
-                    let field = ground();
                     let near = rubble.near(Vec3::new(0.0, h, 0.0), 3.0);
                     let mut pieces =
                         RubbleBodies::gather(&rubble, &near, contact_friction(0.9), &bodies);
                     let report = pad_pass(
-                        &RubbleOracle {
-                            ground: &field,
-                            rubble: &rubble,
-                            near: &near,
-                            bodies: &pieces,
-                        },
+                        &ground(),
+                        &pieces,
                         Affine3A::from_translation(Vec3::new(0.0, h, 0.0)),
                         SideState::default(),
                         Vec3::new(0.0, vy, 0.0),
@@ -895,20 +1127,16 @@ mod tests {
         h
     }
 
-    /// A TANK PARKED ON A BRICK LYING ON FLAT GROUND KEEPS ITS RIDE HEIGHT, AND THE BRICK STAYS
-    /// PUT: a piece supports the tank as ground does, and what the piece takes back is only what
-    /// stops it closing on the belt, so a 173 kg brick under a 6 t hull's 59 kN neither sinks
-    /// into the ground under it nor shifts. The hull settles exactly as high above the brick's
-    /// top as above bare ground (3 s, from a drop at first touch). A brick that took the raw
-    /// reaction instead shifts 5 cm in those 3 s (MEASURED, that mutant); a support blind to the
-    /// brick lets the hull sink to the ground.
+    /// THE BELT CARRIES THE HULL OVER A LOOSE PIECE AT THE SAME RIDE HEIGHT AS GROUND, AND THE
+    /// PIECE STAYS PUT. Driving relies on support reading the complete footprint and its reaction
+    /// using the R2 clamp; a raw opposite force sinks or throws the light piece.
+    /// FIXTURE DATA: a 0.1 m tall piece under a 6 t hull, settled for 192 fixed ticks.
     #[test]
-    fn a_tank_parked_on_a_brick_keeps_its_ride_height() {
+    fn a_piece_lifts_the_hull_by_its_height_without_being_thrown() {
         let gravity = Vec3::NEG_Y * 9.81;
         let mut bare = physics_with(gravity);
         bare.update();
         let on_bare = park(&mut bare, 0.0, 192);
-
         let mut app = physics_with(gravity);
         app.world_mut().spawn((
             Position(Vec3::new(0.0, -0.5, 0.0)),
@@ -926,85 +1154,183 @@ mod tests {
         let rest = app.world().get::<Position>(brick).unwrap().0;
         let on_brick = park(&mut app, rest.y + 0.05, 192);
         let after = app.world().get::<Position>(brick).unwrap().0;
-
+        let speed = app.world().get::<LinearVelocity>(brick).unwrap().0.length();
+        let rise = on_brick - on_bare;
+        println!(
+            "MEASURED hull rise {rise:.6} m; piece displacement {:.6} m, final speed {speed:.6} m/s",
+            (after - rest).length()
+        );
         assert!(
             (after - rest).length() < 1e-3,
-            "the brick moved {rest} → {after}"
+            "piece moved {rest} -> {after}"
         );
-        let top = after.y + 0.05;
+        assert!(speed < 1e-3, "piece thrown at {speed} m/s");
         assert!(
-            ((on_brick - top) - on_bare).abs() < 5e-4,
-            "ride height {} above the brick, {on_bare} above bare ground",
-            on_brick - top,
+            (rise - (after.y + 0.05)).abs() < 5e-4,
+            "rise {rise}, top {}",
+            after.y + 0.05
         );
     }
 
-    /// THE TANK'S SLIP ON A PIECE IS MEASURED AGAINST THE PIECE: a pad over a piece that moves
-    /// with the hull sees the slip the belt speed alone makes, as on ground that moves with it,
-    /// so a piece carried along under a track is not ground streaming past. Over the static
-    /// field the same pad slips at belt speed less the hull's ground speed.
+    /// A PIECE BETWEEN EVERY PROBE LINE STILL CARRIES ITS TRUE WIDTH'S SHARE, WHILE A PIECE
+    /// BESIDE THE SHOE CARRIES NOTHING. Driving over small rubble relies on coverage independent
+    /// of the lateral sample columns; widening a hit to the whole column also fails this test.
+    /// FIXTURE DATA: shoe width 0.2 m, narrow piece width 0.02 m, centred 0.04 m off the pin plane.
+    #[test]
+    fn support_reads_the_whole_footprint_and_only_the_footprint() {
+        let pass = |x, width| {
+            let mut app = physics();
+            piece_box(&mut app, Vec3::new(x, 0.1, 0.0), Vec3::new(width, 0.2, 4.0));
+            app.update();
+            app.world_mut()
+                .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                    let near = rubble.near(Vec3::ZERO, 4.0);
+                    let pieces =
+                        RubbleBodies::gather(&rubble, &near, contact_friction(0.9), &bodies);
+                    let mut elements = GripElements::for_links(30);
+                    let report = pad_pass(
+                        &ground(),
+                        &pieces,
+                        Affine3A::from_translation(Vec3::Y * 0.1),
+                        SideState::default(),
+                        Vec3::ZERO,
+                        &mut elements,
+                    );
+                    (
+                        report
+                            .contacts
+                            .iter()
+                            .filter(|c| c.collider.is_some())
+                            .map(|c| c.load_elastic * c.normal.y)
+                            .sum::<f32>(),
+                        elements,
+                    )
+                })
+                .unwrap()
+        };
+        let (full, _) = pass(0.0, 0.4);
+        let (narrow, _) = pass(0.04, 0.02);
+        let (beside, _) = pass(0.12, 0.02);
+        println!(
+            "MEASURED support: full {full:.3} N, between columns {narrow:.3} N, beside {beside:.3} N"
+        );
+        assert!(full > 0.0);
+        assert!(
+            (narrow / full - 0.1).abs() < 1e-5,
+            "wrong footprint share: {narrow}/{full}"
+        );
+        assert_eq!(beside, 0.0);
+    }
+
+    /// STACKED PIECES DO NOT MULTIPLY SUPPORT, AND A SPLIT ELEMENT ADVANCES ITS GRIP ONCE.
+    /// The hull and transmission rely on the deepest surface winning each area, and material
+    /// strain must not depend on how many colliders partition an otherwise identical surface.
+    #[test]
+    fn stacked_and_partitioned_surfaces_preserve_support_and_grip() {
+        let pass = |partition: bool, buried: bool| {
+            let mut app = physics();
+            if partition {
+                for x in [-0.05, 0.05] {
+                    piece_box(&mut app, Vec3::new(x, 0.1, 0.0), Vec3::new(0.1, 0.2, 4.0));
+                }
+            } else {
+                piece_box(&mut app, Vec3::new(0.0, 0.1, 0.0), Vec3::new(0.2, 0.2, 4.0));
+            }
+            if buried {
+                piece_box(
+                    &mut app,
+                    Vec3::new(0.0, -0.1, 0.0),
+                    Vec3::new(0.2, 0.2, 4.0),
+                );
+            }
+            app.update();
+            app.world_mut()
+                .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                    let near = rubble.near(Vec3::ZERO, 4.0);
+                    let pieces =
+                        RubbleBodies::gather(&rubble, &near, contact_friction(0.9), &bodies);
+                    let mut elements = GripElements::for_links(30);
+                    let report = pad_pass(
+                        &ground(),
+                        &pieces,
+                        Affine3A::from_translation(Vec3::Y * 0.1),
+                        SideState {
+                            speed: 0.2,
+                            ..Default::default()
+                        },
+                        Vec3::ZERO,
+                        &mut elements,
+                    );
+                    (
+                        report
+                            .contacts
+                            .iter()
+                            .map(|c| c.load_elastic * c.normal.y)
+                            .sum::<f32>(),
+                        elements,
+                    )
+                })
+                .unwrap()
+        };
+        let (load, grip) = pass(false, false);
+        for (partition, buried) in [(true, false), (false, true), (true, true)] {
+            let (other, elements) = pass(partition, buried);
+            assert!(
+                (other - load).abs() < load * 1e-5,
+                "support multiplied: {load} -> {other}"
+            );
+            for (a, b) in grip.strain.iter().zip(elements.strain) {
+                assert!(
+                    (*a - b).length() < 1e-6,
+                    "grip advanced per patch: {a} -> {b}"
+                );
+            }
+        }
+    }
+
+    /// A MOVING PIECE SETS CONTACT SLIP. The belt's damping and grip must see relative motion,
+    /// so a carried surface differs from static ground even when their shapes are identical.
     #[test]
     fn the_slip_on_a_piece_is_measured_against_the_piece() {
         let mut app = physics();
-        let carried = piece(&mut app, 0.0, 0.0);
+        let carried = piece_box(&mut app, Vec3::new(0.0, 0.2, 0.0), Vec3::new(0.4, 0.4, 4.0));
         app.update();
-        // The fixture pad drives along −Z.
         let hull_vel = Vec3::new(0.0, 0.0, -0.3);
         app.world_mut()
             .get_mut::<LinearVelocity>(carried)
             .unwrap()
             .0 = hull_vel;
-        let (on_piece, on_field) = app
+        let slips = app
             .world_mut()
             .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
-                let field = ground();
-                let near = rubble.near(Vec3::ZERO, 3.0);
+                let near = rubble.near(Vec3::ZERO, 4.0);
                 let pieces = RubbleBodies::gather(&rubble, &near, contact_friction(0.9), &bodies);
-                let pass = |oracle: &dyn Fn(&mut GripElements) -> SideReport| {
-                    oracle(&mut GripElements::for_links(25))
-                };
-                let state = SideState {
-                    speed: 0.4,
-                    phase: 0.0,
-                    grip: Vec2::ZERO,
-                };
-                let lifted = Affine3A::from_translation(Vec3::new(0.0, 0.4, 0.0));
-                let on_piece = pass(&|elements| {
-                    pad_pass(
-                        &RubbleOracle {
-                            ground: &field,
-                            rubble: &rubble,
-                            near: &near,
-                            bodies: &pieces,
-                        },
-                        lifted,
-                        state,
-                        hull_vel,
-                        elements,
-                    )
-                });
-                let on_field = pass(&|elements| {
-                    pad_pass(&field, Affine3A::IDENTITY, state, hull_vel, elements)
-                });
-                (
-                    on_piece.contacts.iter().map(|c| c.slip).collect::<Vec<_>>(),
-                    on_field.contacts.iter().map(|c| c.slip).collect::<Vec<_>>(),
-                )
+                let report = pad_pass(
+                    &ground(),
+                    &pieces,
+                    Affine3A::from_translation(Vec3::Y * 0.4),
+                    SideState {
+                        speed: 0.4,
+                        ..Default::default()
+                    },
+                    hull_vel,
+                    &mut GripElements::for_links(30),
+                );
+                report
+                    .contacts
+                    .into_iter()
+                    .filter(|c| c.collider.is_some() && c.normal.y > 0.99)
+                    .map(|c| c.slip)
+                    .collect::<Vec<_>>()
             })
-            .expect("the slip system runs");
-        assert!(!on_piece.is_empty() && !on_field.is_empty());
-        for slip in on_piece {
-            assert!(
-                (slip - 0.4).abs() < 1e-5,
-                "slip {slip} on the carried piece"
-            );
-        }
-        for slip in on_field {
-            assert!((slip - 0.1).abs() < 1e-5, "slip {slip} on the field");
+            .unwrap();
+        assert!(!slips.is_empty());
+        for slip in slips {
+            assert!((slip - 0.4).abs() < 1e-5, "slip {slip}");
         }
     }
 
-    /// Every bit of a report's force applications, contacts and belt reaction.
+    /// Every bit of a field-only report's force applications, contacts and belt reaction.
     fn bits(report: &SideReport) -> Vec<u32> {
         let mut out = Vec::new();
         for app in &report.apps {
@@ -1029,44 +1355,28 @@ mod tests {
         out
     }
 
-    /// FLAT GROUND WITH NO PIECES GIVES BIT-IDENTICAL TRACK FORCES: the rubble fold is free where
-    /// there is no rubble, so a tank on open ground keeps the exact arithmetic of the field-only
-    /// oracle (`track::sim` runs `BlockField` alone). A fold that re-derived the ground, took a
-    /// collider hit of equal depth over the field's, or measured the slip against a surface
-    /// velocity where none was hit, would move bits. Checked with nothing near (no ray cast) and
-    /// with a piece 50 m away forced into the near list and gathered (rays cast, every one
-    /// losing to the field).
+    /// OPEN GROUND WITH NO OVERLAPPING PIECES PRESERVES EVERY FORCE BIT. The field's original
+    /// arithmetic is the driving contract; gathering a remote piece must not change it.
     #[test]
     fn flat_ground_with_no_pieces_gives_bit_identical_track_forces() {
-        let reference = bits(&flat_pass(&ground()));
-        assert!(reference.len() > 1, "the fixture pad is in contact");
-
-        let mut app = physics();
-        let far = piece(&mut app, 50.0, 0.0);
-        app.update();
-        app.world_mut().get_mut::<LinearVelocity>(far).unwrap().0 = Vec3::new(1.0, 2.0, 3.0);
-        let (nothing_near, far_near) = app
-            .world_mut()
-            .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
-                let field = ground();
-                let empty = RubbleOracle {
-                    ground: &field,
-                    rubble: &rubble,
-                    near: &[],
-                    bodies: &RubbleBodies::default(),
-                };
-                let near = [far];
-                let pieces = RubbleBodies::gather(&rubble, &near, contact_friction(0.9), &bodies);
-                let forced = RubbleOracle {
-                    ground: &field,
-                    rubble: &rubble,
-                    near: &near,
-                    bodies: &pieces,
-                };
-                (bits(&flat_pass(&empty)), bits(&flat_pass(&forced)))
-            })
-            .expect("the contact system runs");
-        assert_eq!(nothing_near, reference);
-        assert_eq!(far_near, reference);
+        let reference = bits(&flat_pass(&RubbleBodies::default()));
+        assert!(reference.len() > 1);
+        for (at, size) in [
+            (Vec3::new(50.0, 0.2, 0.0), Vec3::new(2.0, 0.4, 2.0)),
+            (Vec3::new(0.0, -0.051, 0.0), Vec3::new(0.2, 0.1, 4.0)),
+        ] {
+            let mut app = physics();
+            let piece = piece_box(&mut app, at, size);
+            app.update();
+            let actual = app
+                .world_mut()
+                .run_system_once(move |rubble: RubbleQuery, bodies: Query<PieceData>| {
+                    let pieces =
+                        RubbleBodies::gather(&rubble, &[piece], contact_friction(0.9), &bodies);
+                    bits(&flat_pass(&pieces))
+                })
+                .unwrap();
+            assert_eq!(actual, reference);
+        }
     }
 }

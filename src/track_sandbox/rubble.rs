@@ -6,7 +6,8 @@
 //! Gizmos, always on (they draw only where a contact presses on a body): a dot on the contact,
 //! cyan on a static body and red on a dynamic one, with a line to the body it pressed; the impulse
 //! a dynamic body took draws as an orange arrow of its mean force over the tick at
-//! [`FORCE_VIZ_SCALE`]. The casts layer (`9`) colours each probe that lands in a body red.
+//! [`FORCE_VIZ_SCALE`]. The field casts layer (`9`) shows the field; the contact dots show
+//! the footprint contacts.
 
 use avian3d::prelude::{ColliderDensity, Position, RigidBody, Rotation};
 use bevy::prelude::*;
@@ -14,9 +15,9 @@ use bevy::prelude::*;
 use crate::buildings::BuildingLibrary;
 use crate::buildings::breakage::{BuildingChunk, chunk_collider, piece_layers};
 use crate::debris::DebrisPiece;
-use crate::track::rubble::{RubbleBodies, RubbleOracle, RubbleQuery, probe_radius};
+use crate::track::rubble::footprint_radius;
 
-use super::belt::{EnvelopeLaw, TerrainField};
+use super::belt::EnvelopeLaw;
 use super::{CONTACT_PROBE, FORCE_VIZ_SCALE, RigGeom, Side, belt_loop};
 
 /// The building asset the yard is cut from.
@@ -47,9 +48,9 @@ pub(super) struct Touch {
     pub(super) reaction: Vec3,
 }
 
-/// The probe sphere about the hull origin for [`RubbleQuery::near`]: [`probe_radius`] over the
-/// rig's rest pin line, its widest grip column and the envelope's largest travel.
-pub(super) fn probe_sphere(geom: &RigGeom, envelope: &EnvelopeLaw) -> f32 {
+/// The footprint bound about the hull origin for the rubble candidate query: [`footprint_radius`]
+/// over the rig's rest pin line, its widest shoe face and the envelope's largest travel.
+pub(super) fn footprint_sphere(geom: &RigGeom, envelope: &EnvelopeLaw) -> f32 {
     let mut pin_radius = 0.0_f32;
     let mut column = 0.0_f32;
     let mut travel = 0.0_f32;
@@ -65,29 +66,13 @@ pub(super) fn probe_sphere(geom: &RigGeom, envelope: &EnvelopeLaw) -> f32 {
             travel = travel.max(t);
         }
     }
-    probe_radius(
+    footprint_radius(
         pin_radius,
         column,
         geom.model.pin_to_outer,
         travel.max(envelope.free_travel),
         CONTACT_PROBE,
     )
-}
-
-/// The rig's oracle this tick: the course field with the rubble `near` the hull folded on, the
-/// pieces' velocities read from `bodies`.
-pub(super) fn oracle<'a, 'w, 's>(
-    field: &'a TerrainField,
-    rubble: &'a RubbleQuery<'w, 's>,
-    near: &'a [Entity],
-    bodies: &'a RubbleBodies,
-) -> RubbleOracle<'a, 'w, 's, crate::track::oracle::BlockField> {
-    RubbleOracle {
-        ground: &field.0,
-        rubble,
-        near,
-        bodies,
-    }
 }
 
 /// Spawn the yard (module doc).

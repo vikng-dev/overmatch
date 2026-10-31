@@ -152,14 +152,17 @@ pub(super) fn apply_belt_support_field(
     let side_commands = shaped.0.side_commands();
 
     let params = force_params(&geom, &rig_spec, &envelope);
-    let near = rubble.near(hull_pos.0, super::rubble::probe_sphere(&geom, &envelope));
+    let near = rubble.near(
+        hull_pos.0,
+        super::rubble::footprint_sphere(&geom, &envelope),
+    );
     let mut pieces = RubbleBodies::gather(
         &rubble,
         &near,
         crate::track::rubble::belt_friction(&params),
         &bodies,
     );
-    let oracle = super::rubble::oracle(&field, &rubble, &near, &pieces);
+    let oracle = &field.0;
 
     // Phase 1 — both sides' contact passes at their pre-tick belt speeds (transmission-design
     // §2 scheduling: the joint drivetrain needs both reactions before either belt
@@ -199,7 +202,8 @@ pub(super) fn apply_belt_support_field(
             affine,
             dt,
             &params,
-            &oracle,
+            oracle,
+            &pieces,
             |p| forces.velocity_at_point(p),
             elements,
         );
@@ -392,27 +396,16 @@ fn force_params(geom: &RigGeom, rig: &RigSpec, envelope: &EnvelopeLaw) -> ForceP
 /// wraps them (`ground → wheels → belt`, acyclic; a belt-first order is circular). Probe + easing
 /// live in [`track::wheels`](crate::track::wheels): implicit critically-damped rise, ballistic
 /// fall, deepest of the physics' lateral columns along the lower arc.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the view wheels: hull, field, rubble, clock, rig and the wheels"
-)]
 pub(super) fn articulate_wheels_field(
     hull: Single<&GlobalTransform, With<Hull>>,
     field: Res<TerrainField>,
-    rubble: RubbleQuery,
-    envelope: Res<EnvelopeLaw>,
     time: Res<Time>,
     geom: Res<RigGeom>,
     suspension: Res<RigSuspension>,
     mut wheels: Query<(&RigWheel, &mut Suspension, &mut Transform)>,
 ) {
     let affine = hull.affine();
-    let near = rubble.near(
-        hull.translation(),
-        super::rubble::probe_sphere(&geom, &envelope),
-    );
-    let still = RubbleBodies::default();
-    let oracle = super::rubble::oracle(&field, &rubble, &near, &still);
+    let oracle = &field.0;
     let down = affine.transform_vector3(Vec3::NEG_Y).normalize_or_zero();
     // Per side: the lateral stations are the measured shoe columns, signed per-side.
     let params = Side::ALL.map(|side| WheelParams {
@@ -434,7 +427,7 @@ pub(super) fn articulate_wheels_field(
             continue;
         }
         let params = &params[wheel.side.index()];
-        let target = wheel_lift_target(&oracle, &affine, down, susp.pivot_local, params);
+        let target = wheel_lift_target(oracle, &affine, down, susp.pivot_local, params);
         let (mut dy, mut dvel) = (susp.dy, susp.dvel);
         wheel_lift_step(&mut dy, &mut dvel, target, time.delta_secs(), params);
         susp.dy = dy;
@@ -514,7 +507,6 @@ pub(super) fn conform_belts_field(
     hull: Single<&GlobalTransform, With<Hull>>,
     wheels: Query<(&RigWheel, &Suspension)>,
     field: Res<TerrainField>,
-    (rubble, envelope): (RubbleQuery, Res<EnvelopeLaw>),
     pin_belt: Res<PinBelt>,
     phase: Res<BeltPhase>,
     time: Res<Time>,
@@ -561,13 +553,8 @@ pub(super) fn conform_belts_field(
             phase: phase.get(side),
         }),
     };
-    let near = rubble.near(
-        hull.translation(),
-        super::rubble::probe_sphere(&geom, &envelope),
-    );
-    let still = RubbleBodies::default();
-    let oracle = super::rubble::oracle(&field, &rubble, &near, &still);
-    let out = wrap::step(&input, &oracle, &mut memory.states);
+    let oracle = &field.0;
+    let out = wrap::step(&input, oracle, &mut memory.states);
 
     for side in Side::ALL {
         let track_x = side.plane_x(geom.plane_x);
@@ -607,8 +594,8 @@ pub(super) fn conform_belts_field(
 /// itself, pins + mids pushed to the measured outer face PLUS the local free travel (the same
 /// per-position [`TravelField`] the live law probes from: full droop over the road-wheel span,
 /// tapering to zero at the unsprung sprocket/idler). Grey when clear, orange when penetrating
-/// the terrain field, red when penetrating a building or a piece — the whole oracle, visible, at
-/// the law's ACTUAL probe points.
+/// the terrain field, at the law's actual field-probe points. The rubble contact dots show the
+/// separate footprint contacts, including those between every probe line.
 #[expect(
     clippy::too_many_arguments,
     reason = "a gizmo layer spanning the hull, the belt, the field, the rig and the envelope"
@@ -622,18 +609,12 @@ pub(super) fn draw_sample_points(
     field: Res<TerrainField>,
     geom: Res<RigGeom>,
     envelope: Res<EnvelopeLaw>,
-    rubble: RubbleQuery,
 ) {
     if !viz.casts {
         return;
     }
     let affine = hull.affine();
-    let near = rubble.near(
-        hull.translation(),
-        super::rubble::probe_sphere(&geom, &envelope),
-    );
-    let still = RubbleBodies::default();
-    let oracle = super::rubble::oracle(&field, &rubble, &near, &still);
+    let oracle = &field.0;
     // Hull lateral axis: column offsets are hull-x measurements (per-side signed shoe faces).
     let lat_axis = affine.transform_vector3(Vec3::X);
     for side in Side::ALL {
@@ -687,12 +668,13 @@ pub(super) fn draw_sample_points(
                 let shift = lat_axis * offset;
                 let (ca, cb) = (wa + shift, wb + shift);
                 for s in [ca + face_a, (ca + cb) / 2.0 + face_m, cb + face_b] {
-                    // Orange into the terrain field, red into a body, grey when clear.
-                    let probe = oracle.probe(s, out, CONTACT_PROBE);
-                    let color = match (probe.depth > 0.0, probe.collider) {
-                        (false, _) => CAST_COLOR,
-                        (true, None) => TRACTION_FORCE_COLOR,
-                        (true, Some(_)) => Color::srgb(1.0, 0.2, 0.2),
+                    // Orange into the terrain field, grey when clear. Body contacts come from
+                    // the footprint pass and have their own contact dots.
+                    let depth = oracle.depth_along(s, out, CONTACT_PROBE);
+                    let color = if depth > 0.0 {
+                        TRACTION_FORCE_COLOR
+                    } else {
+                        CAST_COLOR
                     };
                     gizmos.sphere(Isometry3d::from_translation(s), 0.015, color);
                 }
@@ -778,6 +760,7 @@ mod tests {
                 1.0 / 64.0,
                 &params,
                 &crate::track::envelope::FlatRest,
+                &RubbleBodies::default(),
                 |_| Vec3::ZERO,
                 &mut crate::track::forces::GripElements::for_links(geom.link_count),
             );

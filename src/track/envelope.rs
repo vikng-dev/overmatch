@@ -149,6 +149,7 @@ pub(crate) fn calibrate(
             1.0 / 64.0,
             &probe,
             &FlatRest,
+            &super::rubble::RubbleBodies::default(),
             |_| Vec3::ZERO,
             &mut scratch,
         );
