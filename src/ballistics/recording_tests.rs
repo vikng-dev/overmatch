@@ -1739,3 +1739,116 @@ fn a_zero_world_speed_waits_or_meets_a_moving_body_on_its_clock() {
         }
     }
 }
+
+/// The game's damage model: discovery's fuze keeps its seconds when a crossing slows the round,
+/// as playback's does ([`follow_fuzed`]). The consumer is a delayed `Impact` burst whose point
+/// falls in the gap between two parts of one body: discovery freezes that gap in the same
+/// immutable chain as the slab before it, so a count left at the entry speed carries the burst
+/// past its point (DERIVED: by the factor `v_in / v_out` on the metres left) and onto the rear
+/// part, with the whole round's crossing decided there. Contact falls late in a tick, so the
+/// chain's playback spans the boundary. Mutant: dropping the rescale in discovery carries the
+/// burst onto the rear part (MEASURED: to its face). All dimensions, speeds and the delay are
+/// fixture data.
+#[test]
+fn a_slowed_impact_delay_bursts_where_its_seconds_run_out() {
+    // Fixture: a 120 mm fixture-steel slab the 88 perforates and leaves much slower.
+    const SLAB: f32 = 0.12;
+    let slab = ("slab", Vec3::new(3.0, 3.0, SLAB), Vec3::ZERO, Kind::Plate);
+    // Contact about 0.92 of a tick after the shot (12.5 m per tick at the fixture speed).
+    let from = Vec3::new(0.0, 0.0, 0.5 * SLAB + 11.5);
+    let marks_of = |app: &mut App| -> Vec<ArmourMark> {
+        let mut query = app.world_mut().query::<&PenetrationMarks>();
+        query
+            .iter(app.world())
+            .flat_map(|marks| marks.log.clone())
+            .collect()
+    };
+
+    // Calibration: the slab's entry and exit speeds under the fixture round, inert.
+    let mut app = recording_world(false);
+    app.insert_resource(RetainSpentShells(true));
+    tank(&mut app, Vec3::ZERO, 0.0, Vec3::ZERO, &[slab]);
+    settle(&mut app);
+    fire(&mut app, from, FireMechanism::Single);
+    run(&mut app, 4);
+    let (v_in, v_out) = marks_of(&mut app)
+        .iter()
+        .find_map(|mark| match mark {
+            ArmourMark::Crossing {
+                speed_in,
+                end: CrossingEnd::Exit { speed, .. },
+                ..
+            } => Some((*speed_in, *speed)),
+            _ => None,
+        })
+        .expect("fixture: the 88 perforates the slab");
+    let r = v_out / v_in;
+    assert!(
+        r < 0.8,
+        "fixture: the slab slows the round hard ({v_in} -> {v_out} m/s)"
+    );
+
+    // The delay leaves `left` metres of path past the slab at the entry speed's count: the
+    // correct burst lies `left * r` past the slab, the stale count's `left` past it. The rear
+    // part's face sits halfway between.
+    let left = 4.0;
+    let delay = (left + SLAB) / v_in;
+    let gap = left * (1.0 + r) / 2.0;
+    let back = -0.5 * SLAB;
+    let rear = (
+        "rear",
+        Vec3::new(3.0, 3.0, THIN),
+        Vec3::new(0.0, 0.0, back - gap - 0.5 * THIN),
+        Kind::Plate,
+    );
+    let mut app = recording_world(false);
+    app.insert_resource(RetainSpentShells(true));
+    tank(&mut app, Vec3::ZERO, 0.0, Vec3::ZERO, &[slab, rear]);
+    settle(&mut app);
+    let inputs = burst::BurstInputs {
+        trigger: crate::rounds::fuze::Trigger::Impact {
+            sensitivity_n: 30.0,
+        },
+        delay,
+        ..burst::fixture_inputs()
+    };
+    let burst = burst::Burst::derived(FIXTURE_88, burst::FIXTURE_STEEL, &inputs).unwrap();
+    fire_round(
+        &mut app,
+        from,
+        Dir3::NEG_Z,
+        FireMechanism::Single,
+        None,
+        Some(burst),
+    );
+    let burst_at = |marks: &[ArmourMark]| {
+        marks.iter().find_map(|mark| match mark {
+            ArmourMark::Burst { at, .. } => Some(*at),
+            _ => None,
+        })
+    };
+    run(&mut app, 1);
+    let first = marks_of(&mut app);
+    assert!(
+        first
+            .iter()
+            .any(|mark| matches!(mark, ArmourMark::Crossing { .. })),
+        "the round meets the slab in the first tick: {first:?}"
+    );
+    assert!(
+        burst_at(&first).is_none(),
+        "the chain's playback reaches the burst only in a later tick"
+    );
+    run(&mut app, 3);
+    let at = burst_at(&marks_of(&mut app)).expect("the round bursts");
+    let past = back - at.z;
+    assert!(
+        past > 0.0 && past < gap,
+        "the burst lies in the gap ({gap} m), {past} m past the slab"
+    );
+    assert!(
+        (past - left * r).abs() < 0.05,
+        "the delay's seconds reach {} m past the slab at the exit speed, not {past} m",
+        left * r
+    );
+}

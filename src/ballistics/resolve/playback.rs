@@ -103,6 +103,8 @@ enum Effect {
 /// The game's damage model: only this cursor mutates across ticks; the crossing it reads does not.
 pub(crate) struct Playback {
     crossing: Crossing,
+    /// The context's deposit flag: whether this end's pools take the crossing's doses.
+    deposit: bool,
     elapsed: f64,
     next_effect: usize,
     mark: Option<usize>,
@@ -111,93 +113,9 @@ pub(crate) struct Playback {
 }
 
 impl Crossing {
-    fn add_stretch(
-        &mut self,
-        from: Vec3,
-        axis: Dir3,
-        length: f64,
-        before: f64,
-        after: f64,
-        seconds: f64,
-    ) {
-        if length > 0.0 {
-            assert!(
-                seconds.is_finite() && seconds > 0.0,
-                "a nonempty resolved path has a finite positive clock"
-            );
-            self.seconds += seconds;
-            self.path.push(Stretch {
-                from,
-                axis,
-                length,
-                before,
-                after,
-                seconds,
-            });
-        }
-    }
-
-    fn seconds_to(&self, distance: f64) -> f64 {
-        let (mut remaining, mut seconds) = (distance.max(0.0), 0.0);
-        for stretch in &self.path {
-            if remaining < stretch.length {
-                return seconds + stretch.seconds_at(&self.round, remaining / stretch.length);
-            }
-            seconds += stretch.seconds;
-            remaining -= stretch.length;
-        }
-        self.seconds
-    }
-
-    fn point_distance(&self, point: Vec3) -> f64 {
-        let (mut prefix, mut nearest) = (0.0, (f32::INFINITY, 0.0));
-        for stretch in &self.path {
-            let along = (point - stretch.from)
-                .dot(*stretch.axis)
-                .clamp(0.0, stretch.length as f32);
-            let separation = point.distance_squared(stretch.from + stretch.axis * along);
-            if separation <= nearest.0 {
-                nearest = (separation, prefix + f64::from(along));
-            }
-            prefix += stretch.length;
-        }
-        nearest.1
-    }
-
-    fn at(&self, seconds: f64) -> Flight {
-        let mut flight = self.flight.clone();
-        if seconds >= self.seconds {
-            flight.follow(self.decision.clone());
-            return flight;
-        }
-        let mut remaining = seconds;
-        for stretch in &self.path {
-            if remaining < stretch.seconds {
-                let (position, speed) = stretch.at(&self.round, remaining);
-                flight.frame = flight.frame.transport(*flight.direction, *stretch.axis);
-                flight.direction = stretch.axis;
-                flight.position = position;
-                flight.speed = speed;
-                // A point inside a decided crossing is playback, never a fresh discovery start.
-                flight.continuation = None;
-                return flight;
-            }
-            remaining -= stretch.seconds;
-        }
-        panic!("the crossing's path spans its elapsed clock");
-    }
-}
-
-impl Playback {
-    pub(crate) fn new(
-        decision: Decision,
-        flight: &Flight,
-        round: SolidShot,
-        context: &ResolveContext<'_, '_, '_>,
-        admit: &dyn Fn(Entity) -> bool,
-        wound: f32,
-        is_box: &dyn Fn(Entity) -> bool,
-    ) -> Self {
+    /// The game's damage model: the one clock of a decided crossing, its resolved path
+    /// stretch by stretch. Playback spends it and the fuzzer reads it ([`Decision::seconds`]).
+    fn of(decision: Decision, flight: &Flight, round: SolidShot) -> Self {
         let mut crossing = Crossing {
             decision,
             flight: flight.clone(),
@@ -277,66 +195,186 @@ impl Playback {
                         suffix / speed,
                     );
                 }
-                crossing
-                    .effects
-                    .push((f64::from(bite.approach / bite.speed_in), Effect::Mark));
-                for dose in &bite.deposits {
-                    let volume = bite
-                        .volumes
-                        .iter()
-                        .find(|volume| volume.volume == dose.address)
-                        .expect("each line dose has a resolved exposed volume span");
-                    let moment = crossing
-                        .seconds_to(f64::from(bite.approach) + bite.volume_ends[&dose.address]);
-                    crossing.effects.push((
-                        moment,
-                        Effect::Line {
-                            crossing: *volume,
-                            units: super::super::energy_units(dose.amount),
-                            context: DoseContext::Line {
-                                entry: volume.entry,
-                                along: *bite.incoming,
-                            },
-                            momentum: {
-                                let total: f32 = bite.deposits.iter().map(|dose| dose.amount).sum();
-                                let out = match bite.end {
-                                    BiteEnd::Embedded { .. } => 0.0,
-                                    BiteEnd::Perforated { speed, .. } => speed,
-                                };
-                                // A zero-energy crossing has no resisting momentum to distribute.
-                                if total > 0.0 {
-                                    round.body().mass * (bite.speed_in - out) * dose.amount / total
-                                } else {
-                                    0.0
-                                }
-                            },
+            }
+        }
+        crossing
+    }
+
+    fn add_stretch(
+        &mut self,
+        from: Vec3,
+        axis: Dir3,
+        length: f64,
+        before: f64,
+        after: f64,
+        seconds: f64,
+    ) {
+        if length > 0.0 {
+            assert!(
+                seconds.is_finite() && seconds > 0.0,
+                "a nonempty resolved path has a finite positive clock"
+            );
+            self.seconds += seconds;
+            self.path.push(Stretch {
+                from,
+                axis,
+                length,
+                before,
+                after,
+                seconds,
+            });
+        }
+    }
+
+    fn seconds_to(&self, distance: f64) -> f64 {
+        let (mut remaining, mut seconds) = (distance.max(0.0), 0.0);
+        for stretch in &self.path {
+            if remaining < stretch.length {
+                return seconds + stretch.seconds_at(&self.round, remaining / stretch.length);
+            }
+            seconds += stretch.seconds;
+            remaining -= stretch.length;
+        }
+        self.seconds
+    }
+
+    /// The round's speed `distance` metres along the resolved path.
+    fn speed_to(&self, distance: f64) -> f64 {
+        let mut remaining = distance.max(0.0);
+        for stretch in &self.path {
+            if remaining < stretch.length {
+                return stretch.speed_at(&self.round, remaining / stretch.length);
+            }
+            remaining -= stretch.length;
+        }
+        self.path
+            .last()
+            .expect("a crossing that delivers a line has a resolved path")
+            .after
+    }
+
+    fn point_distance(&self, point: Vec3) -> f64 {
+        let (mut prefix, mut nearest) = (0.0, (f32::INFINITY, 0.0));
+        for stretch in &self.path {
+            let along = (point - stretch.from)
+                .dot(*stretch.axis)
+                .clamp(0.0, stretch.length as f32);
+            let separation = point.distance_squared(stretch.from + stretch.axis * along);
+            if separation <= nearest.0 {
+                nearest = (separation, prefix + f64::from(along));
+            }
+            prefix += stretch.length;
+        }
+        nearest.1
+    }
+
+    fn at(&self, seconds: f64) -> Flight {
+        let mut flight = self.flight.clone();
+        if seconds >= self.seconds {
+            flight.follow(self.decision.clone());
+            return flight;
+        }
+        let mut remaining = seconds;
+        for stretch in &self.path {
+            if remaining < stretch.seconds {
+                let (position, speed) = stretch.at(&self.round, remaining);
+                flight.frame = flight.frame.transport(*flight.direction, *stretch.axis);
+                flight.direction = stretch.axis;
+                flight.position = position;
+                flight.speed = speed;
+                // A point inside a decided crossing is playback, never a fresh discovery start.
+                flight.continuation = None;
+                return flight;
+            }
+            remaining -= stretch.seconds;
+        }
+        panic!("the crossing's path spans its elapsed clock");
+    }
+}
+
+impl Decision {
+    /// The game's damage model: elapsed seconds along the resolved path, from `flight` (the
+    /// flight the decision was made on) to its end: the playback clock itself ([`Crossing::of`]),
+    /// so the §13.6 gate spends exactly what the runtime does.
+    pub(crate) fn seconds(&self, flight: &Flight, round: SolidShot) -> f64 {
+        Crossing::of(self.clone(), flight, round).seconds
+    }
+}
+
+impl Playback {
+    pub(crate) fn new(
+        decision: Decision,
+        flight: &Flight,
+        round: SolidShot,
+        context: &ResolveContext<'_, '_, '_>,
+        admit: &dyn Fn(Entity) -> bool,
+        wound: f32,
+        is_box: &dyn Fn(Entity) -> bool,
+    ) -> Self {
+        let mut crossing = Crossing::of(decision, flight, round);
+        if let Decision::Bite(bite) = crossing.decision.clone() {
+            crossing
+                .effects
+                .push((f64::from(bite.approach / bite.speed_in), Effect::Mark));
+            for dose in &bite.deposits {
+                let volume = bite
+                    .volumes
+                    .iter()
+                    .find(|volume| volume.volume == dose.address)
+                    .expect("each line dose has a resolved exposed volume span");
+                let moment =
+                    crossing.seconds_to(f64::from(bite.approach) + bite.volume_ends[&dose.address]);
+                crossing.effects.push((
+                    moment,
+                    Effect::Line {
+                        crossing: *volume,
+                        units: super::super::energy_units(dose.amount),
+                        context: DoseContext::Line {
+                            entry: volume.entry,
+                            along: *bite.incoming,
                         },
-                    ));
-                }
-                for source in &bite.spall {
-                    let (mut spall, mut dose) = (SpallMarks::default(), ShotDose::default());
-                    super::super::throw_spall_cone(
-                        &mut spall, &mut dose, source, bite.owner, context, is_box,
-                    );
-                    let doses =
-                        dose.tallies
+                        // The game's damage model: the momentum a line takes is the energy it
+                        // took over the speed the round had where it lost it, `dp = dE / v`; on one
+                        // span that is `2 E / (v_entry + v_end)`, so disjoint lines sum to the
+                        // round's whole `m (v_in - v_out)` (1000 -> 800 -> 400 m/s gives 1/3, 2/3).
+                        momentum: {
+                            let entry = crossing.speed_to(crossing.point_distance(volume.entry));
+                            let end = crossing.speed_to(
+                                f64::from(bite.approach) + bite.volume_ends[&dose.address],
+                            );
+                            assert!(
+                                entry > 0.0,
+                                "a line's volume is entered at a positive speed"
+                            );
+                            (2.0 * f64::from(dose.amount) / (entry + end)) as f32
+                        },
+                    },
+                ));
+            }
+            for source in &bite.spall {
+                let (mut spall, mut dose) = (SpallMarks::default(), ShotDose::default());
+                super::super::throw_spall_cone(
+                    &mut spall, &mut dose, source, bite.owner, context, is_box,
+                );
+                let doses = dose
+                    .tallies
+                    .into_iter()
+                    .flat_map(|tally| {
+                        tally
+                            .deposits
                             .into_iter()
-                            .flat_map(|tally| {
-                                tally.deposits.into_iter().map(move |landed| {
-                                    (tally.address, landed.units, landed.context)
-                                })
-                            })
-                            .collect();
-                    let moment = crossing.seconds_to(f64::from(bite.approach) + source.t);
-                    crossing.effects.push((
-                        moment,
-                        Effect::Cone {
-                            cone: spall.cones.pop(),
-                            gated: spall.gated,
-                            doses,
-                        },
-                    ));
-                }
+                            .map(move |landed| (tally.address, landed.units, landed.context))
+                    })
+                    .collect();
+                let moment = crossing.seconds_to(f64::from(bite.approach) + source.t);
+                crossing.effects.push((
+                    moment,
+                    Effect::Cone {
+                        cone: spall.cones.pop(),
+                        gated: spall.gated,
+                        doses,
+                    },
+                ));
             }
         }
         let (witnesses, incoming) =
@@ -373,6 +411,7 @@ impl Playback {
         crossing.effects.sort_by(|a, b| a.0.total_cmp(&b.0));
         Self {
             crossing,
+            deposit: context.deposit,
             elapsed: 0.0,
             next_effect: 0,
             mark: None,
@@ -582,7 +621,7 @@ impl Playback {
                     );
                     removed += shell.dose.settle(
                         health,
-                        true,
+                        self.deposit,
                         self.mark.expect("a transit dose follows its entrance mark"),
                     );
                 }
@@ -601,7 +640,7 @@ impl Playback {
                         speed: *speed,
                         volumes: vec![crossing],
                     });
-                    removed += shell.dose.settle(health, true, mark);
+                    removed += shell.dose.settle(health, self.deposit, mark);
                 }
                 Effect::Cone { cone, gated, doses } => {
                     for &(address, units, context) in doses {
@@ -626,13 +665,16 @@ impl Playback {
                         };
                         *cones += 1;
                     }
-                    removed += shell.dose.settle(health, true, mark);
+                    removed += shell.dose.settle(health, self.deposit, mark);
                 }
                 Effect::Finish => match &self.world_decision() {
                     Decision::Clear { .. } => {}
                     Decision::Bounce(bounce) => {
                         apply_bounce(bounce, shell, terminal_emitted, bodies, commands);
-                        removed += shell.dose.settle(health, true, shell.marks.log.len() - 1);
+                        removed +=
+                            shell
+                                .dose
+                                .settle(health, self.deposit, shell.marks.log.len() - 1);
                     }
                     Decision::Bite(bite) => finish_bite(
                         bite,

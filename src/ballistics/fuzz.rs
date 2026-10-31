@@ -771,12 +771,7 @@ pub(super) fn drive(
                 break;
             }
             Ahead::Held => 0.0,
-            Ahead::Armor(hit) => {
-                if context.world.armour(hit.entity).is_none() {
-                    break;
-                }
-                hit.distance
-            }
+            Ahead::Armor(hit) => hit.distance,
         };
         let decision = resolve::decide(
             context,
@@ -788,7 +783,7 @@ pub(super) fn drive(
         )
         .map_err(|error| fail(error, &flight))?;
         budget.charge().map_err(|error| fail(error, &flight))?;
-        budget.fly(f64::from(decision.seconds(flight.speed)));
+        budget.fly(decision.seconds(&flight, round));
         wounded(decision.legs(), &flight, &mut out)?;
         out.decisions.push(decision.clone());
         if flight.follow(decision) {

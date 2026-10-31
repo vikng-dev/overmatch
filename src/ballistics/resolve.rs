@@ -110,6 +110,10 @@ impl Budget {
         self.remaining > 0.0 || flight.holds_material()
     }
 
+    /// Spend `seconds` of flight. A spend past the remaining seconds ends the tick at zero: the
+    /// spends that reach it are metres converted back to seconds, whose f32 rounding can exceed
+    /// the remainder they were cut from, and a replica's re-seed, which charges its boundary nudge
+    /// (`MARCH_EPS / speed`) beyond the contact it met. No clock below zero carries into the tick.
     pub(crate) fn fly(&mut self, seconds: f64) {
         assert!(
             seconds.is_finite() && seconds >= 0.0,
@@ -1133,32 +1137,6 @@ pub(crate) enum Decision {
 }
 
 impl Decision {
-    /// The game's damage model: elapsed seconds along the resolved path, including the
-    /// incoming approach, material stretches, intervening air and the exit nudge.
-    pub(crate) fn seconds(&self, speed: f32) -> f32 {
-        match self {
-            Self::Clear { travel, .. } => *travel / speed,
-            Self::Bounce(bounce) => {
-                (bounce.travel - MARCH_EPS).max(0.0) / bounce.speed_in + MARCH_EPS / bounce.speed
-            }
-            Self::Bite(bite) => {
-                let mut seconds = f64::from(bite.approach / bite.speed_in);
-                let (mut at, mut speed) = (0.0, f64::from(bite.speed_in));
-                for motion in &bite.motion {
-                    seconds += (motion.start - at).max(0.0) / speed + motion.seconds;
-                    at = motion.end;
-                    speed = motion.speed_out;
-                }
-                let suffix = (f64::from(bite.travel - bite.approach) - at).max(0.0);
-                if suffix > 0.0 && matches!(bite.end, BiteEnd::Perforated { .. }) {
-                    assert!(speed > 0.0, "a flight suffix cannot follow rest");
-                    seconds += suffix / speed;
-                }
-                seconds as f32
-            }
-        }
-    }
-
     /// The straight stretches the round's axis flies following this decision, in order, ending
     /// where the next one starts or where it came to rest — what the witness pass intersects
     /// ([`super::wound`]). A bounce's lift to its resume point repositions the body and is no leg.

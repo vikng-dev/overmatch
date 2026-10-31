@@ -1125,7 +1125,7 @@ pub(crate) struct PoolEmptied {
 }
 
 /// The game's damage model: one line contribution delivered at its resolved path moment.
-/// Its momentum is its energy share of the crossing's resisting momentum exchange.
+/// Its momentum is what its own span took from the round: its energy over the round's speed there.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct DeliveredLine {
     pub(crate) crossing: VolumeCrossing,
@@ -3363,27 +3363,35 @@ fn march_shell_step(
         let mut contact = hit.map_or(0.0, |hit| hit.distance);
         let entry = origin + dir * contact;
 
-        if let Some(hit) = hit {
-            // Replica armor state machine: consume a buffered bounce/terminal, otherwise hold a
-            // keyed shell hidden; an unkeyed replica shell ends locally. INVARIANT: every replica
-            // arm below continues or breaks, so the physical armor resolution after it is
-            // authority-only.
-            if !deposit {
-                match replica_contact(shell, &mut flight, &mut budget, hit, entry, radius, tick) {
-                    ReplicaSweep::Reseeded => {
-                        bent = true;
-                        continue;
-                    }
-                    ReplicaSweep::Stopped => {
-                        flight.position = entry;
-                        stopped = true;
-                        break;
-                    }
-                    ReplicaSweep::Holding => {
-                        flight.position = entry;
-                        holding = true;
-                        break;
-                    }
+        // Replica armor state machine: consume a buffered bounce/terminal, otherwise hold a keyed
+        // shell hidden; an unkeyed replica shell ends locally. A replica disc that starts inside
+        // its own copy of armour (`Ahead::Held`) meets that armour where it stands. INVARIANT:
+        // every replica arm below continues or breaks, so the physical armor resolution after it
+        // is authority-only ([`decide_playback`] asserts it).
+        if !deposit {
+            let normal = hit.map_or(-*dir, |hit| hit.normal);
+            match replica_contact(
+                shell,
+                &mut flight,
+                &mut budget,
+                (contact, normal),
+                entry,
+                radius,
+                tick,
+            ) {
+                ReplicaSweep::Reseeded => {
+                    bent = true;
+                    continue;
+                }
+                ReplicaSweep::Stopped => {
+                    flight.position = entry;
+                    stopped = true;
+                    break;
+                }
+                ReplicaSweep::Holding => {
+                    flight.position = entry;
+                    holding = true;
+                    break;
                 }
             }
         }
@@ -3409,6 +3417,9 @@ fn march_shell_step(
                 flight.frame = flight.frame.transport(*flight.direction, *direction);
                 flight.direction = direction;
                 flight.speed = relative.length();
+                // The crossing is decided in the struck body's frame, where the round flies at
+                // its relative speed: an armed `Impact` count keeps its seconds there too.
+                shell.projectile.fuze.at_speed(flight.speed);
                 flight.position = moving.point;
                 // The game's damage model admits simultaneous geometry in the one frozen
                 // contact scene. This is contact-time membership, never tick-start discovery.
@@ -3533,6 +3544,11 @@ fn decide_playback(
     health: &Query<&mut ComponentHealth>,
     budget: &mut resolve::Budget,
 ) -> std::collections::VecDeque<resolve::Playback> {
+    assert!(
+        context.deposit,
+        "game's damage model: only the authority decides a crossing; a replica's contact ends in \
+         its replica state machine"
+    );
     let mut out = std::collections::VecDeque::new();
     let mut flight = flight.clone();
     let mut fuze = shell.projectile.fuze;
@@ -3584,7 +3600,7 @@ fn decide_playback(
                 break;
             }
             match next_surface(context.world, &flight, radius, reach, admit) {
-                Ahead::Armor(hit) if context.world.armour(hit.entity).is_some() => {
+                Ahead::Armor(hit) => {
                     contact = Some(hit.distance);
                     continue;
                 }
@@ -3638,8 +3654,7 @@ fn decide_playback(
             matches!(&decision,
             resolve::Decision::Clear { travel, .. } if *travel >= distance)
         });
-        advance_fuze(&mut fuze, &decision);
-        let stopped = flight.follow(decision);
+        let stopped = follow_fuzed(&mut fuze, &mut flight, decision);
         if stopped || reached_barrier || fuze.due_within(0.0).is_some() {
             break;
         }
@@ -3714,6 +3729,26 @@ fn stop_at(shell: &mut MarchingShell, flight: &mut resolve::Flight, entry: Vec3,
     flight.position = entry;
 }
 
+/// AUTHORITY: the one step that carries a fuze and a flight over a decided crossing, shared by
+/// playback ([`follow_crossing`]) and discovery ([`decide_playback`]): advance the fuze along the
+/// crossing's path ([`advance_fuze`]), follow it, and rescale an armed `Impact` count to the speed
+/// the crossing hands back ([`burst::Fuze::at_speed`]). Discovery relies on the rescale to end its
+/// immutable chain where playback's fuze runs out: without it a round slowed hard inside a body
+/// keeps its entry-speed metres, and the next frozen span carries the burst past its point.
+/// Returns whether the round came to rest.
+fn follow_fuzed(
+    fuze: &mut burst::Fuze,
+    flight: &mut resolve::Flight,
+    decision: resolve::Decision,
+) -> bool {
+    advance_fuze(fuze, &decision);
+    if flight.follow(decision) {
+        return true;
+    }
+    fuze.at_speed(flight.speed);
+    false
+}
+
 /// AUTHORITY: advance the fuze ([`advance_fuze`]) and the flight over a decided crossing. A delay
 /// that ran out inside the crossing bursts where the crossing hands the flight back, at the speed it
 /// hands back, whatever is left of the step's budget ([`burst_here`]). Returns whether the round
@@ -3725,11 +3760,9 @@ fn follow_crossing(
     decision: resolve::Decision,
     health: &mut Query<&mut ComponentHealth>,
 ) -> (bool, u64) {
-    advance_fuze(&mut shell.projectile.fuze, &decision);
-    if flight.follow(decision) {
+    if follow_fuzed(&mut shell.projectile.fuze, flight, decision) {
         return (true, 0);
     }
-    shell.projectile.fuze.at_speed(flight.speed);
     if shell.projectile.fuze.due_within(0.0).is_some() {
         return burst_here(shell, context, flight, flight.speed, health);
     }
@@ -3852,7 +3885,8 @@ enum ReplicaSweep {
     Holding,
 }
 
-/// A REPLICA's armour contact at `entry` on `hit`, resolved by [`resolve_replica_armor_contact`]:
+/// A REPLICA's armour contact at `entry`, `distance` metres ahead on a face of outward normal
+/// `hit_normal`, resolved by [`resolve_replica_armor_contact`]:
 /// a buffered bounce re-seeds `flight` from authority truth, charged to the step's `budget`.
 /// `flight` is as the sweep that met the contact left it, so its direction is the heading the
 /// face was struck on. A stopped or holding round is left for the caller to stop at `entry`.
@@ -3860,7 +3894,7 @@ fn replica_contact(
     shell: &mut MarchingShell,
     flight: &mut resolve::Flight,
     budget: &mut resolve::Budget,
-    hit: avian3d::prelude::RayHitData,
+    (distance, hit_normal): (f32, Vec3),
     entry: Vec3,
     radius: f32,
     tick: &mut MarchTick,
@@ -3870,9 +3904,8 @@ fn replica_contact(
     } = *tick;
     let (shot_trace, commands) = (&mut *tick.shot_trace, &mut *tick.commands);
     let dir = flight.direction;
-    let hit_normal = hit.normal;
     match resolve_replica_armor_contact(
-        shell, entry, hit.normal, sanctioned, now, shot_trace, commands,
+        shell, entry, hit_normal, sanctioned, now, shot_trace, commands,
     ) {
         ReplicaArmorContact::Reseed {
             origin,
@@ -3882,7 +3915,7 @@ fn replica_contact(
             // The same step limits the authority's crossings are held to, charged from
             // the flight's position.
             budget.charge().unwrap_or_else(|error| error.panic());
-            budget.fly(f64::from((hit.distance + MARCH_EPS) / flight.speed));
+            budget.fly(f64::from((distance + MARCH_EPS) / flight.speed));
             if let Some(new_dir) = direction {
                 // Carry the sampling basis through the sanctioned bend, exactly as the
                 // authority's own ricochet does. A replica that re-seeds on server
