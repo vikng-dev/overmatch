@@ -2222,6 +2222,58 @@ impl Blast {
     }
 }
 
+/// The plastic demand factor `g(r)` of a rigid-plastic section under a blast's positive phase,
+/// against `r`, its strength over the pulse's peak force: a section of mass `m` taking blow `J`
+/// absorbs `J² g(r) / 2m` before it stops. DERIVED (the #237 study, §4): a triangular pulse,
+/// falling from its peak force to zero over its duration, against the strength as a constant
+/// resistance; `1 − 4r/3` while the section still moves when the pulse ends (`r < ½`),
+/// `(16/3) r (1 − r)³` after, and nothing once the strength holds the peak (`r ≥ 1`). Its two
+/// ends are the wall design's two limits: the impulsive (`g → 1` as the strength vanishes
+/// against the peak) and the quasi-static (`g = 0` where the peak force cannot beat the
+/// strength). A negative or undefined ratio is a bug: strengths and peak forces are not negative.
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the section law reads it from #237's second lane")
+)]
+pub(crate) fn plastic_demand(r: f32) -> f32 {
+    assert!(
+        r >= 0.0,
+        "a strength over a peak force is a ratio of magnitudes, got {r}"
+    );
+    if r >= 1.0 {
+        0.0
+    } else if r < 0.5 {
+        1.0 - 4.0 * r / 3.0
+    } else {
+        16.0 / 3.0 * r * (1.0 - r).powi(3)
+    }
+}
+
+/// The crush factor `f(r)` of a snowplow compaction front under the same triangular pulse,
+/// against `r = σ_c,d / P`, the material's dynamic compressive strength over the face's peak
+/// pressure: a face patch taking impulse `J` crushes `J f(r) / u_c` of mass, `u_c` its slowest
+/// front speed. DERIVED (the #237 study, §3, checked there by numeric integration to 0.3 %):
+/// `√(1 − 4r/3)` for `r < ½`, `√((16/3) r (1 − r)³)` for `½ ≤ r < 1`, nothing where the peak
+/// cannot beat the strength (`r ≥ 1`); the whole blow's worth as the strength vanishes. A
+/// negative or undefined ratio is a bug, as for [`plastic_demand`].
+#[cfg_attr(
+    not(test),
+    expect(dead_code, reason = "the crush law reads it from #237's fourth lane")
+)]
+pub(crate) fn crush_factor(r: f32) -> f32 {
+    assert!(
+        r >= 0.0,
+        "a strength over a peak pressure is a ratio of magnitudes, got {r}"
+    );
+    if r >= 1.0 {
+        0.0
+    } else if r < 0.5 {
+        (1.0 - 4.0 * r / 3.0).sqrt()
+    } else {
+        (16.0 / 3.0 * r * (1.0 - r).powi(3)).sqrt()
+    }
+}
+
 /// One blast ray's arrival: the chunk it stopped on, where, its energy (J), impulse (N·s) and
 /// peak force (N, [`Blast::peak`]).
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -2963,6 +3015,55 @@ mod tests {
             one.peak_pressure(3.0, 0.0),
             INCIDENT_PRESSURE.at(3.0) * 1e3
         ));
+    }
+
+    /// THE PULSE'S FACTORS HIT THEIR LIMITS AND FALL BETWEEN THEM (the #237 study's test 7):
+    /// `g(0) = f(0) = 1`, `g(1) = f(1) = 0` and both zero past 1, both falling strictly over
+    /// `(0, 1)` and meeting their own branches at ½; and `g` is the work a rigid-plastic section
+    /// absorbs under the triangular pulse, `J² g(r) / 2m`, integrated here directly within 0.5 %
+    /// (fixture pulse). The section law of #237 relies on `g`'s ends being the wall design's two
+    /// limits (impulsive, and a peak force under the strength moving nothing), the crush law on
+    /// `f`'s: a branch flipped or taken at the wrong `r`, a ratio inverted, or a factor that does
+    /// not vanish once the strength holds the peak fails here.
+    #[test]
+    fn the_pulse_factors_hit_their_limits_and_fall_between_them() {
+        for factor in [plastic_demand, crush_factor] {
+            assert_eq!((factor(0.0), factor(1.0)), (1.0, 0.0));
+            for r in [1.5, 10.0, f32::INFINITY] {
+                assert_eq!(factor(r), 0.0, "r {r}");
+            }
+            let n = 1000;
+            for k in 0..n {
+                let (r0, r1) = (k as f32 / n as f32, (k + 1) as f32 / n as f32);
+                assert!(factor(r1) < factor(r0), "r {r0} to {r1}");
+            }
+            assert!(
+                (factor(0.5 - 1e-4) - factor(0.5)).abs() < 1e-3,
+                "the branches meet"
+            );
+        }
+        // A section of unit mass under a pulse of unit peak force and duration (fixture data):
+        // `F(t) = 1 − t` against resistance `r`, moving while the load beats it or it has speed.
+        let blow = 0.5_f64;
+        for r in [0.1_f64, 0.3, 0.5, 0.6, 0.8, 0.95] {
+            let (dt, mut t, mut x, mut v) = (1e-5_f64, 0.0_f64, 0.0_f64, 0.0_f64);
+            loop {
+                let force = (1.0 - t).max(0.0);
+                if v <= 0.0 && force <= r && t > 0.0 {
+                    break;
+                }
+                let next = (v + (force - r) * dt).max(0.0);
+                x += 0.5 * (v + next) * dt;
+                v = next;
+                t += dt;
+            }
+            let absorbed = r * x / (blow * blow / 2.0);
+            let g = f64::from(plastic_demand(r as f32));
+            assert!(
+                (absorbed / g - 1.0).abs() < 5e-3,
+                "r {r}: {absorbed} against {g}"
+            );
+        }
     }
 
     /// A BLAST RAY'S PEAK FORCE IS ITS PEAK PRESSURE OVER THE PATCH ITS PUSH LOADS: square on, at
