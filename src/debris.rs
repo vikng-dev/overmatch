@@ -205,7 +205,12 @@ mod tests {
                 ColliderDensity(1800.0),
                 CollisionLayers::new(
                     [Layer::Debris],
-                    [Layer::Terrain, Layer::Vehicle, Layer::Debris],
+                    [
+                        Layer::Terrain,
+                        Layer::Vehicle,
+                        Layer::Debris,
+                        Layer::TrackSide,
+                    ],
                 ),
             ))
             .id()

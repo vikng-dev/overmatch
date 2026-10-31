@@ -3,9 +3,9 @@
 //! reader compares between two builds; none is a gate (`-- --ignored friction_bed --nocapture`).
 //!
 //! Per tick it reads the hull's pose bits, the belt's total load, and every touching avian contact
-//! of a hull collider (an authored proxy, named by its node, or a bump stop) that carries a normal
-//! impulse: what it touches (terrain, a standing chunk, a loose piece), the hull-local point, the
-//! pair's friction.
+//! of a hull collider (an authored proxy, a bump stop, or a side plate) carrying a normal impulse:
+//! what it touches (terrain, a standing chunk, a loose piece), the hull-local point, and the pair's
+//! friction. Authored proxies are named by their nodes.
 
 use avian3d::prelude::{
     Collider, ColliderOf, ContactGraph, ContactPairFlags, LinearVelocity, Position, Rotation,
@@ -17,7 +17,7 @@ use crate::bake::TankBlueprint;
 use crate::buildings::breakage::BuildingChunk;
 use crate::debris::DebrisPiece;
 use crate::headless_test::{BOOT_LEASE, finish_plugins, headless_shell, start_fixed_clock};
-use crate::track::bump_stop::BumpStop;
+use crate::track::bump_stop::{BumpStop, SidePlate};
 
 /// One hull collider's touch in one tick.
 struct Touch {
@@ -113,13 +113,15 @@ fn run(spec: &str, ticks: usize) -> Run {
             .to_matrix()
             .inverse();
         let mut hull_parts =
-            world.query_filtered::<(Entity, &Transform, Has<BumpStop>, &ChildOf), With<Collider>>();
+            world.query_filtered::<(Entity, &Transform, Has<BumpStop>, Has<SidePlate>, &ChildOf), With<Collider>>();
         let parts: Vec<(Entity, String)> = hull_parts
             .iter(world)
             .filter(|(.., parent)| parent.parent() == hull)
-            .map(|(e, transform, hard_stop, _)| {
+            .map(|(e, transform, hard_stop, side_plate, _)| {
                 let name = if hard_stop {
                     "bump stop".to_owned()
+                } else if side_plate {
+                    "side plate".to_owned()
                 } else {
                     proxies
                         .iter()

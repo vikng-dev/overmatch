@@ -1206,13 +1206,13 @@ mod tests {
             asset.geometry,
             asset.spec,
         );
-        let bump_stops = crate::track::bump_stop::BumpStops::of_blueprint(
+        let track_colliders = crate::track::bump_stop::TrackColliders::of_blueprint(
             &blueprint,
             &root.join(crate::tank::TANK_SIM_GLB_PATH),
         );
         let mut app = App::new();
         app.insert_resource(blueprint)
-            .insert_resource(bump_stops)
+            .insert_resource(track_colliders)
             .insert_resource(PendingTankAssets {
                 spec: Handle::default(),
                 scene: None,

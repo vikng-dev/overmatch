@@ -664,6 +664,8 @@ pub(crate) enum Layer {
     /// query reads them; a building's chunks are also on `Armor`, so the walk meets them as their
     /// substance.
     Debris,
+    /// Track side faces: physical contacts with bodies and structures, excluded from terrain.
+    TrackSide,
 }
 
 /// A non-zero, match-local identity assigned synchronously when a combatant spawns.

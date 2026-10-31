@@ -920,9 +920,9 @@ fn extract_at_startup(mut commands: Commands) {
         asset.geometry,
         asset.spec,
     );
-    // The bump stops ride the same flush as the blueprint: every body built from it gets them at
+    // The rigid track colliders ride the blueprint's flush: every body built from it gets them at
     // spawn. They are cut from the running gear measured off this same sim artifact.
-    commands.insert_resource(crate::track::bump_stop::BumpStops::of_blueprint(
+    commands.insert_resource(crate::track::bump_stop::TrackColliders::of_blueprint(
         &blueprint, &path,
     ));
     commands.insert_resource(blueprint);

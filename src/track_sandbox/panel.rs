@@ -7,7 +7,7 @@
 //!
 //! # Change-tick discipline
 //!
-//! `refresh_envelope` / `refresh_bump_stops` recalibrate on a `RigSuspension` change tick, and
+//! `refresh_envelope` / `refresh_track_colliders` recalibrate on a `RigSuspension` change tick, and
 //! `apply_rig_counts` rebuilds the rig on a `RigCounts` change tick — recalibrating every frame was a
 //! bug we already fixed once. So this panel NEVER hands egui `&mut resource.field`: it copies each
 //! mutable resource into a local, draws every widget against the local, and writes the resource back

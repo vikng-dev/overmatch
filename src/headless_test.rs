@@ -835,9 +835,19 @@ fn a_tank_too_soft_for_its_springs_rests_on_its_bump_stops() {
             .count()
     };
     assert_eq!(stops, 2, "every tank spawns one bump stop per side");
+    let plates = {
+        let world = app.world_mut();
+        world
+            .query_filtered::<(Entity, &ChildOf), With<crate::track::bump_stop::SidePlate>>()
+            .iter(world)
+            .filter(|(_, parent)| parent.parent() == tank)
+            .count()
+    };
+    assert_eq!(plates, 4, "every tank spawns a plate at each shoe edge");
 
-    // A structure flush with the flat ground (top face at y = 0) under the tank, so the reader
-    // that serves structures sees what the stop presses on.
+    // Instrumented flat ground: StructureBody lets the reader see the stop's press. Its Terrain
+    // membership excludes side plates, exactly as the coincident ordinary ground does. FIXTURE
+    // slab top at y = 0 m; the dedicated plate gate covers real standing structure contacts.
     let at = app
         .world()
         .get::<Position>(tank)
@@ -855,6 +865,10 @@ fn a_tank_too_soft_for_its_springs_rests_on_its_bump_stops() {
         ChildOf(slab),
         Transform::IDENTITY,
         Collider::cuboid(30.0, 1.0, 30.0),
+        avian3d::prelude::CollisionLayers::new(
+            [crate::Layer::Terrain],
+            avian3d::prelude::LayerMask::ALL,
+        ),
     ));
     app.world_mut()
         .resource_mut::<crate::track::sim::TrackGear>()

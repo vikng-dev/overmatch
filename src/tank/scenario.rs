@@ -802,7 +802,7 @@ mod spawn_contract_tests {
             ballistic_volumes: Vec::new(),
         };
 
-        let bump_stops = crate::track::bump_stop::BumpStops::new(
+        let track_colliders = crate::track::bump_stop::TrackColliders::new(
             &crate::track::rig_geom::tiger_rig(),
             &spec.track.suspension.params(),
         );
@@ -812,7 +812,7 @@ mod spawn_contract_tests {
             geometry,
             spec,
         ))
-        .insert_resource(bump_stops)
+        .insert_resource(track_colliders)
         .init_resource::<SourceProbe>()
         .add_systems(Update, probe_unresolved_handle);
         app.update();

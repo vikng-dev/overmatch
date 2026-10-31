@@ -43,7 +43,7 @@ use bevy::world_serialization::WorldAssetRoot;
 
 use crate::Layer;
 use crate::bake::TankBlueprint;
-use crate::track::bump_stop::{BumpStop, BumpStops, spawn_bump_stops};
+use crate::track::bump_stop::{BumpStop, SidePlate, TrackColliders, spawn_track_colliders};
 
 // Shared course/rig/belt machinery lives here in `mod.rs`; the model's force and view systems
 // live in `belt.rs` (the field-belt — the sandbox's single model, promoted into the game as
@@ -410,7 +410,7 @@ pub fn plugin(app: &mut App) {
                 )
                     .chain(),
                 refresh_envelope,
-                refresh_bump_stops,
+                refresh_track_colliders,
                 reset_rig,
                 // `;`/`'` `n`/`m` are now INTENT writers onto `RigCounts`; `apply_rig_counts` is the
                 // single commit path (shared with the panel's stepper) that rebuilds the rig.
@@ -672,7 +672,7 @@ struct VizLayers {
     /// The collocation stations at the *physics* ring (where the physics thinks the shoes are, vs
     /// the drawn view).
     casts: bool,
-    /// Avian collider wireframes (hull box, bump-stop prisms, terrain).
+    /// Avian collider wireframes (hull box, bump stops, side plates, terrain).
     colliders: bool,
     /// The taut reference loop (the belt's rest path, vs the conformed/solved view).
     reference: bool,
@@ -1321,10 +1321,14 @@ fn build_rig(
         })
         .id();
 
-    // The RED bump stops, through the constructor every game tank's body uses
-    // ([`spawn_bump_stops`]), cut at the live knobs' travel. Spawned here so the rig is never up
-    // for a frame without its bottoming stop; [`refresh_bump_stops`] recuts them on every retune.
-    spawn_bump_stops(&mut commands, hull, &BumpStops::new(&geom, &suspension.0));
+    // The bump stops and side plates, through the constructor every game tank's body uses
+    // ([`spawn_track_colliders`]), cut at the live knobs' travel. Spawned here so the rig is never up
+    // for a frame without its bottoming stop; [`refresh_track_colliders`] recuts them on every retune.
+    spawn_track_colliders(
+        &mut commands,
+        hull,
+        &TrackColliders::new(&geom, &suspension.0),
+    );
 
     // The authored counts as the panel/keyboard INTENT seam (see [`RigCounts`] / [`apply_rig_counts`]).
     // Lands in the same flush as `RigGeom`, so `is_added()` covers this first frame in the commit
@@ -1394,19 +1398,19 @@ fn report_collision_proxies(blueprint: &TankBlueprint, geom: &RigGeom) {
     }
 }
 
-/// Rebuild the red bump-stop colliders whenever the geometry they are cut from moves: a rig rebuild
+/// Rebuild the track colliders whenever the geometry they are cut from moves: a rig rebuild
 /// (`;`/`'`, `n`/`m`, `R` — [`tune_rig_counts`] commits with `*geom = next`, so `is_changed` fires)
 /// or the bump-stop knob ([`RigSuspension`], which sets the compression pose). The whole
 /// prism is despawned and recut rather than reshaped in place — a collider's convex hull is not a
 /// mutable field, and a retune is rare (a keypress), so the allocation is free. Mirrors
 /// [`refresh_envelope`]'s change-gate; unordered against [`tune_rig_counts`] like it, so a retune is
 /// reflected either this frame or the next.
-fn refresh_bump_stops(
+fn refresh_track_colliders(
     mut commands: Commands,
     geom: Res<RigGeom>,
     suspension: Res<RigSuspension>,
     hull: Single<Entity, With<Hull>>,
-    existing: Query<Entity, With<BumpStop>>,
+    existing: Query<Entity, Or<(With<BumpStop>, With<SidePlate>)>>,
 ) {
     if !(geom.is_changed() || suspension.is_changed()) {
         return;
@@ -1414,7 +1418,11 @@ fn refresh_bump_stops(
     for entity in &existing {
         commands.entity(entity).despawn();
     }
-    spawn_bump_stops(&mut commands, *hull, &BumpStops::new(&geom, &suspension.0));
+    spawn_track_colliders(
+        &mut commands,
+        *hull,
+        &TrackColliders::new(&geom, &suspension.0),
+    );
 }
 
 /// Every piece of belt state that is INDEXED BY the loop — its link count (the grip-element slabs)
@@ -1616,7 +1624,7 @@ fn tune_rig_counts(
 ///
 /// Change-gated: skips the initial `RigCounts` insert (`is_added` — `build_rig` already built the
 /// matching geometry) and any frame the counts already equal the geometry's, so no per-frame
-/// rebuild can occur. `refresh_envelope` / `refresh_bump_stops` then react to the `RigGeom` change
+/// rebuild can occur. `refresh_envelope` / `refresh_track_colliders` then react to the `RigGeom` change
 /// as they do for a knob tweak.
 fn apply_rig_counts(
     counts: Res<RigCounts>,

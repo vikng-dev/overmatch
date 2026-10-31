@@ -808,7 +808,12 @@ struct DepositParam<'w, 's> {
 /// The layers of the surfaces a blast's rays meet through avian: the ground, a standing tree and
 /// every other static surface ([`Layer::Terrain`]), and a moving body's collision proxy. A tank's
 /// armour and witness volumes ([`Layer`]) are its ballistics, not its surface.
-const SURFACES: [Layer; 3] = [Layer::Terrain, Layer::Vehicle, Layer::Debris];
+const SURFACES: [Layer; 4] = [
+    Layer::Terrain,
+    Layer::Vehicle,
+    Layer::Debris,
+    Layer::TrackSide,
+];
 
 /// The colliders of every dynamic body whose bounds meet the cube of half-side `reach` m about
 /// `origin`, ascending: the moving bodies a blast's rays push. Every other collider a ray meets
@@ -1827,7 +1832,12 @@ fn spawn_piece(
 pub(crate) fn piece_layers() -> CollisionLayers {
     CollisionLayers::new(
         [Layer::Debris, Layer::Armor],
-        [Layer::Terrain, Layer::Vehicle, Layer::Debris],
+        [
+            Layer::Terrain,
+            Layer::Vehicle,
+            Layer::Debris,
+            Layer::TrackSide,
+        ],
     )
 }
 
