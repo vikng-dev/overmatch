@@ -1093,6 +1093,33 @@ impl NodeRole {
 }
 
 impl TankSpec {
+    /// Why the sheet's weapons cannot be mounted, if they cannot: a weapon its own rules refuse
+    /// ([`WeaponSpec::checked`]), or more than one `Primary`. Every consumer that resolves the main
+    /// bore (`tank::spawn`'s rig, `command`, `crew_sweep`) takes the first `Primary` it finds, so a
+    /// second one would be dropped unseen. A sheet with none is refused at spawn by the rig contract,
+    /// which names it.
+    fn check_armament(&self) -> Result<(), String> {
+        for (name, weapon) in &self.weapons {
+            weapon
+                .checked()
+                .map_err(|err| format!("weapon `{name}`: {err}"))?;
+        }
+        let mut primaries: Vec<&str> = self
+            .weapons
+            .iter()
+            .filter(|(_, weapon)| weapon.trigger == Trigger::Primary)
+            .map(|(name, _)| name.as_str())
+            .collect();
+        primaries.sort_unstable();
+        if primaries.len() > 1 {
+            return Err(format!(
+                "weapons {primaries:?} are all `Primary`; one weapon supplies the main bore, so \
+                 mark the others `Secondary`"
+            ));
+        }
+        Ok(())
+    }
+
     /// Why the sheet's volumes cannot serve its crew swaps and gates, if they cannot: two volumes
     /// seating one crew station, or a requirement naming a part no volume provides.
     fn check_seats_and_gates(&self) -> Result<(), String> {
@@ -1442,11 +1469,7 @@ impl TankSpec {
             )
             .into());
         }
-        for (name, weapon) in &self.weapons {
-            if let Err(err) = weapon.checked() {
-                return Err(format!("weapon `{name}`: {err}").into());
-            }
-        }
+        self.check_armament()?;
         // Every view's FOV is a DIVISOR downstream, not merely a camera setting: both LOD ladders
         // derive every switch distance through `2·tan(fov/2)`
         // (`view::ViewFacts::sub_pixel_distance_m`) and the sight derives its cursor-travel margin
@@ -1971,11 +1994,12 @@ TankSpec(
         }
     }
 
-    /// The fixture sheet with its `base` mount cloned as "Phantom" and edited by `edit`, validated;
-    /// the error as text.
+    /// The fixture sheet with its `base` mount cloned as a `Secondary` "Phantom" (the fixture's
+    /// cannon stays its one `Primary`) and edited by `edit`, validated; the error as text.
     fn with_phantom(base: &str, edit: impl FnOnce(&mut WeaponSpec)) -> Result<(), String> {
         let mut spec = fixture();
         let mut weapon = spec.weapons[base].clone();
+        weapon.trigger = Trigger::Secondary;
         edit(&mut weapon);
         spec.weapons.insert("Phantom".to_string(), weapon);
         spec.validate().map_err(|err| err.to_string())
@@ -2124,6 +2148,7 @@ TankSpec(
             };
             let mut weapon = spec.weapons[base].clone();
             weapon.fire_mode = mode;
+            weapon.trigger = Trigger::Secondary;
             spec.weapons.insert(name.to_string(), weapon);
             spec
         };
@@ -2260,6 +2285,23 @@ TankSpec(
     /// the field: `shooting::apply_recoil` steps kick, stiffness and damping every tick, so a NaN is
     /// a NaN barrel pose, a zero kick or stiffness a barrel that never moves or never returns. A
     /// zero damping is an undamped spring and loads.
+    /// The main bore is resolved by finding THE `Primary` weapon (`tank::spawn`'s rig, `command`,
+    /// `crew_sweep`); a sheet with two would bind whichever the map yields first. A mutant that
+    /// drops the count lets the second one load and be ignored.
+    #[test]
+    fn validate_refuses_a_sheet_with_two_primary_weapons() {
+        let mut spec = fixture();
+        spec.weapons
+            .get_mut("MG")
+            .expect("the fixture mounts an MG")
+            .trigger = Trigger::Primary;
+        let err = spec.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("[\"Cannon\", \"MG\"]") && err.contains("Primary"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn validate_rejects_a_recoil_spring_it_cannot_integrate() {
         type Mutate = fn(&mut RecoilSpec, f32);
