@@ -1,18 +1,25 @@
 //! The capture's wall cue, in the game's environment destruction (game state only): on the first
-//! frame at or after app second `s`, a shipped round is fired square at a house wall, or a bare
-//! charge is set off against the foot of it, and the camera stands in front of that wall.
+//! frame at or after app second `s`, a shipped round is fired square at a house wall, a bare
+//! charge is set off against the foot of it, or named parts of the house are shot out, and the
+//! camera stands in front of that wall.
 //!
-//! `OVERMATCH_CAPTURE_WALL=<shot>@<s>[;<shot>@<s>…]`, a shot `<round key>[,<fuze mode index>]` or
-//! `x<kg>`, with `OVERMATCH_CAPTURE` set, on the offline root ([`offline_wall_plugin`]); each shot
-//! goes off at its own second, all at one wall. The dedicated server mounts the same cue keyed by
-//! `OVERMATCH_CAPTURE_WALL` alone ([`server_wall_plugin`]): it fires and draws nothing, and logs the
-//! camera pose its hidden capture clients hold (`OVERMATCH_CAPTURE_POSE`), so every peer frames the
-//! one break the server made. The wall is chosen by class, the same on every run: the
-//! building nearest the map's centre (the lowest ordinal on a tie), its breakable pier of the
-//! largest volume (the lowest element on a tie). A round is fired 25 m out along the pier's outward
-//! normal at the chunk nearest the pier's centre; a charge sits on the pier's outer face at its
-//! foot, its energy the first shipped burst core's chemical energy per kilogram times its mass, with
-//! no casing.
+//! `OVERMATCH_CAPTURE_WALL=<shot>@<s>[;<shot>@<s>…]`, a shot `<round key>[,<fuze mode index>]`,
+//! `x<kg>` or `dust:<name>[+<name>…][,<below m>]`, with `OVERMATCH_CAPTURE` set, on the offline
+//! root ([`offline_wall_plugin`]); each shot goes off at its own second, all at one wall. The
+//! dedicated server mounts the same cue keyed by `OVERMATCH_CAPTURE_WALL` alone
+//! ([`server_wall_plugin`]): it fires and draws nothing, and logs the camera pose its hidden
+//! capture clients hold (`OVERMATCH_CAPTURE_POSE`), so every peer frames the one break the server
+//! made. The wall is chosen by class, the same on every run: the building nearest the map's centre
+//! (the lowest ordinal on a tie), its breakable pier of the largest volume (the lowest element on a
+//! tie). A round is fired 25 m out along the pier's outward normal at the chunk nearest the pier's
+//! centre; a charge sits on the pier's outer face at its foot, its energy the first shipped burst
+//! core's chemical energy per kilogram times its mass, with no casing. A `dust:` shot turns to
+//! dust, in one deposit ([`WallDust`]), every chunk of the house's elements whose own name or whose
+//! component's name is one of the names, whose centroid lies below `below` m in the building frame
+//! when given: `dust:east` shoots out the east wall, `dust:east/pier_1,0.225` the first course of
+//! that pier above grade.
+//!
+//! With `OVERMATCH_CAPTURE_POSE` set the cue leaves the camera to it.
 //!
 //! `OVERMATCH_CAPTURE_WALL_SUN=1` turns the wall to the light: the pier is the one whose outer
 //! face looks most into the sun (then the largest, then the lowest element), and a round flies
@@ -21,7 +28,8 @@
 use bevy::prelude::*;
 
 use crate::ballistics::FireShell;
-use crate::buildings::breakage::{Breakage, WallCharge};
+use crate::buildings::BuildingKind;
+use crate::buildings::breakage::{Breakage, WallCharge, WallDust};
 use crate::buildings::fracture::Blast;
 use crate::buildings::schema::ElementKind;
 use crate::scatter::MapInstance;
@@ -35,10 +43,17 @@ const STANDOFF_M: f32 = 25.0;
 const CAMERA_OUT_M: f32 = 7.0;
 const CAMERA_UP_M: f32 = 0.6;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum What {
     Round(crate::rounds::Round),
-    Charge { mass: f32 },
+    Charge {
+        mass: f32,
+    },
+    /// Element or component names, and the height in the building frame the chunks lie below.
+    Dust {
+        names: Vec<String>,
+        below: Option<f32>,
+    },
 }
 
 /// The cue's shots in order, each with its second and whether it went off; whether the wall faces
@@ -59,11 +74,13 @@ pub(crate) fn offline_wall_plugin(app: &mut App) {
     };
     app.insert_resource(cue)
         .insert_resource(crate::camera::CameraCaptive(true))
-        .add_systems(Update, fire_on_cue)
-        .add_systems(
+        .add_systems(Update, fire_on_cue);
+    if std::env::var_os("OVERMATCH_CAPTURE_POSE").is_none() {
+        app.add_systems(
             PostUpdate,
             hold_camera.in_set(crate::camera::CaptiveCameraPlaced),
         );
+    }
 }
 
 /// The dedicated server's cue (module doc): it fires, and its clients frame the wall.
@@ -82,11 +99,25 @@ fn cue_from_env() -> Option<Cue> {
             .parse()
             .ok()
             .filter(|at: &f32| at.is_finite() && *at >= 0.0)?;
-        let what = match what.strip_prefix('x') {
-            Some(mass) => What::Charge {
+        let what = match (what.strip_prefix("dust:"), what.strip_prefix('x')) {
+            (Some(dust), _) => {
+                let (names, below) = match dust.split_once(',') {
+                    Some((names, below)) => (
+                        names,
+                        Some(below.parse().ok().filter(|b: &f32| b.is_finite())?),
+                    ),
+                    None => (dust, None),
+                };
+                let names: Vec<String> = names.split('+').map(str::to_owned).collect();
+                if names.iter().any(String::is_empty) {
+                    return None;
+                }
+                What::Dust { names, below }
+            }
+            (None, Some(mass)) => What::Charge {
                 mass: mass.parse().ok().filter(|m: &f32| *m > 0.0)?,
             },
-            None => {
+            (None, None) => {
                 let (key, mode) = what.split_once(',').unwrap_or((what, "0"));
                 What::Round(
                     WeaponRound::resolve(key)
@@ -125,15 +156,9 @@ fn framing(outward: Vec3, aim: Vec3, foot: Vec3) -> Transform {
 /// and a point inside the building a metre past its middle from the pier, at the aim's height, all
 /// world.
 fn the_wall(
-    buildings: &Query<(&MapInstance, &Transform, &Breakage)>,
+    (root, breakage): (&Transform, &Breakage),
     light: Option<Vec3>,
 ) -> Option<(Vec3, Vec3, Vec3, Vec3)> {
-    let (_, root, breakage) = buildings.iter().min_by(|a, b| {
-        let reach = |t: &Transform| Vec2::new(t.translation.x, t.translation.z).length_squared();
-        reach(a.1)
-            .total_cmp(&reach(b.1))
-            .then(a.0.ordinal.cmp(&b.0.ordinal))
-    })?;
     let kind = &breakage.kind;
     let layout = &kind.layout;
     let (lo, hi) = kind.bounds();
@@ -189,15 +214,49 @@ fn the_wall(
     ))
 }
 
+/// The building the cue works on (module doc): its root, pose and breakable state.
+fn the_house<'a>(
+    buildings: &'a Query<(Entity, &MapInstance, &Transform, &Breakage)>,
+) -> Option<(Entity, &'a Transform, &'a Breakage)> {
+    let reach = |t: &Transform| Vec2::new(t.translation.x, t.translation.z).length_squared();
+    buildings
+        .iter()
+        .min_by(|a, b| {
+            reach(a.2)
+                .total_cmp(&reach(b.2))
+                .then(a.1.ordinal.cmp(&b.1.ordinal))
+        })
+        .map(|(root, _, transform, breakage)| (root, transform, breakage))
+}
+
+/// The law chunks a `dust:` shot names (module doc).
+fn dust_chunks(kind: &BuildingKind, names: &[String], below: Option<f32>) -> Vec<usize> {
+    let asset = &kind.asset;
+    (0..asset.elements.len())
+        .filter(|&e| {
+            let element = &asset.elements[e];
+            let component = &asset.components[usize::from(element.component)];
+            names.iter().any(|n| *n == element.name || n == component)
+        })
+        .flat_map(|e| kind.layout.chunks_of(e))
+        .filter(|&c| {
+            below.is_none_or(|top| asset.chunks[kind.layout.chunks[c] as usize].centroid[1] < top)
+        })
+        .collect()
+}
+
 /// Find the wall and frame it (logging the pose), then fire the cue on its second.
 fn fire_on_cue(
     time: Res<Time>,
     mut cue: ResMut<Cue>,
-    buildings: Query<(&MapInstance, &Transform, &Breakage)>,
+    buildings: Query<(Entity, &MapInstance, &Transform, &Breakage)>,
     mut commands: Commands,
 ) {
     let light = cue.sun.then(|| *crate::world::sun_transform().forward());
-    let Some((outward, aim, foot, inside)) = the_wall(&buildings, light) else {
+    let Some((house, transform, breakage)) = the_house(&buildings) else {
+        return;
+    };
+    let Some((outward, aim, foot, inside)) = the_wall((transform, breakage), light) else {
         return;
     };
     if cue.camera.is_none() {
@@ -220,14 +279,21 @@ fn fire_on_cue(
         .filter(|(_, at, fired)| !*fired && now >= *at)
     {
         *fired = true;
-        shoot(*what, (outward, aim, foot), light, &mut commands);
+        shoot(
+            what,
+            (house, breakage),
+            (outward, aim, foot),
+            light,
+            &mut commands,
+        );
     }
 }
 
-/// Fire `what` at the wall (its outward normal, aim point and foot, world): a round along `light`
-/// when given, else square to the wall.
+/// Fire `what` at the wall of the house (its root and state; the wall's outward normal, aim point
+/// and foot, world): a round along `light` when given, else square to the wall.
 fn shoot(
-    what: What,
+    what: &What,
+    (house, breakage): (Entity, &Breakage),
     (outward, aim, foot): (Vec3, Vec3, Vec3),
     light: Option<Vec3>,
     commands: &mut Commands,
@@ -237,7 +303,7 @@ fn shoot(
             let along = light.unwrap_or(-outward);
             let origin = aim - along * STANDOFF_M;
             commands.trigger(FireShell::of_round(
-                &round,
+                round,
                 origin,
                 Dir3::new(along).unwrap_or(Dir3::NEG_Z),
                 crate::spec::FireMechanism::Single,
@@ -247,7 +313,7 @@ fn shoot(
             ));
             info!("capture: wall round from {origin:?} at {aim:?}");
         }
-        What::Charge { mass } => {
+        &What::Charge { mass } => {
             let registry = SubstanceRegistry::shipped_static();
             let core = registry
                 .keys()
@@ -266,6 +332,17 @@ fn shoot(
                 blast: Blast::of(energy),
             });
             info!("capture: wall charge of {mass} kg ({energy:.0} J) at {at:?}");
+        }
+        What::Dust { names, below } => {
+            let chunks = dust_chunks(&breakage.kind, names, *below);
+            info!(
+                "capture: {} chunks of {names:?} below {below:?} m to dust",
+                chunks.len()
+            );
+            commands.trigger(WallDust {
+                building: house,
+                chunks,
+            });
         }
     }
 }

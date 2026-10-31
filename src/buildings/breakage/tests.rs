@@ -1257,3 +1257,49 @@ fn a_sleeping_loose_piece_wakes_to_a_blast() {
         "it leaves away from the burst: {velocity}"
     );
 }
+
+/// A CAPTURE'S DUST SPENDS THE CHUNKS IT NAMES THAT STAND ABOVE GRADE, AND NOTHING ELSE: every chunk
+/// of a breakable element with chunks on both sides of grade (fixture data; chosen by class) named
+/// to [`WallDust`] is recorded as dust once the deposit runs, except the buried ones the soil
+/// holds, and no hole is cut. The capture's wall cue shoots out whole walls this way, as the roof
+/// test does in the laws; a dust that reached a buried chunk, missed a named one or cut holes
+/// would frame a different break than the one the laws were tested on.
+#[test]
+fn a_capture_dust_spends_the_named_chunks_above_grade_and_nothing_else() {
+    let kind = shipped_house();
+    let layout = &kind.layout;
+    let structure = layout.structure(&kind.asset, 1.0);
+    let e = (0..layout.elements.len())
+        .find(|&e| {
+            let buried = |c: usize| structure.chunks[c].buried;
+            layout.chunks_of(e).any(buried) && !layout.chunks_of(e).all(buried)
+        })
+        .expect("the house has an element on both sides of grade");
+    let named: Vec<usize> = layout.chunks_of(e).collect();
+    let (mut app, root) = composed(false);
+    app.world_mut().trigger(WallDust {
+        building: root,
+        chunks: named.clone(),
+    });
+    app.update();
+    app.update();
+    let record = &app.world().resource::<WallRecord>().entries;
+    let mut dusted: Vec<usize> = record
+        .iter()
+        .filter_map(|entry| match entry.event {
+            WallEvent::Dust(c) => Some(usize::from(c)),
+            _ => None,
+        })
+        .collect();
+    dusted.sort_unstable();
+    let above: Vec<usize> = named
+        .into_iter()
+        .filter(|&c| !structure.chunks[c].buried)
+        .collect();
+    assert_eq!(dusted, above);
+    assert!(
+        !record
+            .iter()
+            .any(|entry| matches!(entry.event, WallEvent::Hole(..)))
+    );
+}

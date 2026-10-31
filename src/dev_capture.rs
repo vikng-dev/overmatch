@@ -48,11 +48,13 @@
 //!   at or after app second `s`, that shipped round, in that fuze mode, is fired at a real tree or
 //!   at the ground beside it, and the frames are timed from its burst, the first two seconds after
 //!   it ([`offline_shot_plugin`]; the offline root alone mounts it).
-//! * `OVERMATCH_CAPTURE_WALL=<round key>[,<fuze mode index>]|x<kg>@<s>[;…]` — on the first frame
-//!   at or after app second `s`, that shipped round is fired square at a house wall, or a bare
-//!   charge of that mass is set off at its foot, each shot of the list at its own second, and the
-//!   camera stands in front of the wall ([`offline_wall_plugin`] on the offline root; the dedicated
-//!   server fires the same cue for its hidden capture clients, [`server_wall_plugin`]).
+//! * `OVERMATCH_CAPTURE_WALL=<round key>[,<fuze mode index>]|x<kg>|dust:<names>[,<m>]@<s>[;…]`
+//!   — on the first frame at or after app second `s`, that shipped round is fired square at a
+//!   house wall, a bare charge of that mass is set off at its foot, or the named elements or
+//!   components of the house are shot out, each shot of the list at its own second, and the camera
+//!   stands in front of the wall unless `OVERMATCH_CAPTURE_POSE` holds it ([`offline_wall_plugin`]
+//!   on the offline root; the dedicated server fires the same cue for its hidden capture clients,
+//!   [`server_wall_plugin`]).
 //!   `OVERMATCH_CAPTURE_WALL_SUN=1` picks the wall facing the sun and fires along its rays.
 //!
 //! A capture run draws the view's cosmetic randomness (sprite roll, scale jitter, flipbook start)
