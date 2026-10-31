@@ -179,6 +179,8 @@ struct TrackRig {
     contact_clock: ContactClock,
     fit_affine: Option<Affine3A>,
     contacts: [wrap::ContactCache; 2],
+    /// Per-side wrap circles, rewritten in place each frame ([`drive_track_views`]).
+    circles: [Vec<(Vec2, f32)>; 2],
 }
 
 impl TrackRig {
@@ -619,6 +621,7 @@ fn bind_track_rigs(
             contact_clock: Default::default(),
             fit_affine: None,
             contacts: Default::default(),
+            circles: Default::default(),
         });
     }
 }
@@ -834,18 +837,16 @@ fn drive_track_views(
 
         // The kinematic wrap: side-plane circles (sprocket FIRST, idler LAST — the wrap keys its end
         // arcs off that order), articulated wheel centres.
-        let circles: [Vec<(Vec2, f32)>; 2] = [0, 1].map(|si| {
-            let side = &rig.sides[si];
-            let mut c = Vec::with_capacity(side.wheels.len() + 2);
-            c.push(side.sprocket);
-            c.extend(
+        for (circles, side) in rig.circles.iter_mut().zip(&rig.sides) {
+            circles.clear();
+            circles.push(side.sprocket);
+            circles.extend(
                 side.wheels
                     .iter()
                     .map(|w| (Vec2::new(w.pivot.z, w.pivot.y + w.dy), w.radius)),
             );
-            c.push(side.idler);
-            c
-        });
+            circles.push(side.idler);
+        }
         let input = wrap::WrapInput {
             dt,
             affine,
@@ -860,7 +861,7 @@ fn drive_track_views(
             // The game draws no reference loop — skip the throwaway `sag_span` + `Vec` per side.
             reference: false,
             sides: [0, 1].map(|si| wrap::WrapSideInput {
-                circles: &circles[si],
+                circles: &rig.circles[si],
                 plane_x: rig.sides[si].plane_x,
                 lateral_stations: rig.sides[si].lateral_stations,
                 phase: phases[si],
@@ -1157,6 +1158,7 @@ mod tests {
             contact_clock: Default::default(),
             fit_affine: None,
             contacts: Default::default(),
+            circles: Default::default(),
         }
     }
 
