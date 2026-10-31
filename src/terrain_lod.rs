@@ -969,6 +969,7 @@ fn adapt_ranges(
     mut applied: Local<Option<ViewProfile>>,
     entities: Query<(Entity, &TerrainLodEntity)>,
 ) {
+    // A headless world or a view before terrain spawn has no ladder to adapt.
     let Some(ladder) = ladder else {
         return;
     };
@@ -978,12 +979,17 @@ fn adapt_ranges(
     }
     *applied = Some(wanted);
     for (entity, marker) in &entities {
-        let Some(tile) = ladder.0.tiles.get(marker.tile) else {
-            continue;
-        };
-        let Some(range) = ladder.0.ranges(tile, wanted).into_iter().nth(marker.level) else {
-            continue;
-        };
+        let tile = ladder
+            .0
+            .tiles
+            .get(marker.tile)
+            .expect("terrain spawn writes every marker's tile index from the installed ladder");
+        let range = ladder
+            .0
+            .ranges(tile, wanted)
+            .into_iter()
+            .nth(marker.level)
+            .expect("terrain spawn writes every marker's level index from its tile's ladder");
         commands.entity(entity).insert(range);
     }
     info!(
@@ -1021,6 +1027,37 @@ mod tests {
     /// The reference view the shipped corpus was cut against: the gunner optic at 4K native.
     fn reference_facts() -> ViewFacts {
         measured(crate::camera::GUNNER_FOV_FALLBACK, 2160.0)
+    }
+
+    /// The view cannot leave stale ranges on a marker outside the ladder that spawned it.
+    /// FIXTURE DATA: an empty tile separates a missing tile from a missing level, with no meshes.
+    fn adapt_invalid_marker(tile: usize, level: usize) {
+        let mut app = App::new();
+        app.insert_resource(reference_facts())
+            .insert_resource(TerrainLodLadder(TerrainLod {
+                tiles: vec![TerrainLodTile {
+                    min: Vec3::ZERO,
+                    max: Vec3::ONE,
+                    levels: Vec::new(),
+                }],
+                bounding_radius_m: 1.0,
+                build: std::time::Duration::ZERO,
+            }))
+            .add_systems(Update, adapt_ranges);
+        app.world_mut().spawn(TerrainLodEntity { tile, level });
+        app.update();
+    }
+
+    #[test]
+    #[should_panic(expected = "terrain spawn writes every marker's tile index")]
+    fn a_marker_outside_the_spawned_tiles_is_a_bug() {
+        adapt_invalid_marker(1, 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "terrain spawn writes every marker's level index")]
+    fn a_marker_outside_its_tiles_levels_is_a_bug() {
+        adapt_invalid_marker(0, 0);
     }
 
     use crate::terrain_grid::{GRID_RESOLUTION, tests::shipped_grid};

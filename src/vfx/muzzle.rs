@@ -1,3 +1,5 @@
+//! The game's damage-model view, game state only.
+//!
 //! View-only muzzle dressing for [`FireShell`] events.
 //!
 //! Invariant (ADR-0014): spawned entities are render-only. Light and billboard rings bound replay
@@ -8,6 +10,8 @@ use bevy::prelude::*;
 // `STALE_FIRE_TICKS` is shared with the sim-side catch-up impact gate (`ballistics::on_fire_shell`)
 // so the muzzle flash and the impact phantom fall stale together — one constant, no drift.
 use crate::ballistics::{FireShell, STALE_FIRE_TICKS, TRACER_MAX_CALIBER};
+use crate::spec::FireCycle;
+use crate::tank::{TankRoot, Weapon, WeaponIndex};
 use crate::view::PlayerView;
 
 use super::ViewRng;
@@ -374,9 +378,38 @@ struct MuzzleLightRing(std::collections::VecDeque<Entity>);
 #[derive(Resource, Default)]
 struct MgSmokeCadence(u32);
 
-/// Spawn one transient muzzle light into the shared ring — the 88's and the MGs' common machinery;
-/// peak/range/lifetime/radius are the caller's scale knobs, `shadows` whether it casts (the main
-/// gun's does, an MG round's does not: `on_mg_fire`).
+/// ASSUMED shadow-read window (s): a persistent light or an isolated flash casts; repeated
+/// flashes shorter than this do not. MEASURED evidence for the short/repeating regime:
+/// `scripts/perf/run-fire-capture.sh`, M4, two tanks, M350, vsync off: firing with shadows
+/// moved p50 from 13.5 to 15.5 ms, without from 13.5 to 14.6 ms. DERIVED at the fixture's
+/// combined rate of 25/s and 0.05 s life, each cubemap lasts about three 60 Hz frames.
+/// This window is a presentation policy, not a measured perceptual threshold.
+const SHADOW_READ_WINDOW_S: f32 = 0.1;
+
+/// The game's damage-model flash's shortest refire interval, from its loaded weapon data.
+/// An unattributed dev/test shot, or a delivered shot whose weapon has left the scene, is an
+/// isolated flash with no current repeating source.
+fn refire_interval(
+    fire: &FireShell,
+    weapons: &Query<(&Weapon, &TankRoot, &WeaponIndex)>,
+) -> Option<f32> {
+    let source = fire.shooter?;
+    let Some((weapon, _, _)) = weapons
+        .iter()
+        .find(|(_, root, slot)| root.0 == source.tank && slot.0 == source.weapon)
+    else {
+        // A fire cause may outlive its weapon: presentation is delivered after the source left
+        // or its queued teardown ran. This orphaned flash has no live cadence to repeat at.
+        return None;
+    };
+    Some(match weapon.fire_cycle {
+        FireCycle::Single { reload_secs } => reload_secs,
+        FireCycle::Automatic { cyclic_rpm, .. } => 60.0 / cyclic_rpm,
+    })
+}
+
+/// Spawn a transient light into the shared ring. Its life and minimum refire interval decide
+/// whether a shadow can read; weapon kind does not enter the decision.
 #[expect(
     clippy::too_many_arguments,
     reason = "one light: the sinks, then each argument a separate dimension of the light"
@@ -389,7 +422,7 @@ fn spawn_muzzle_light(
     range: f32,
     lifetime: f32,
     radius: f32,
-    shadows: bool,
+    refire_interval: Option<f32>,
 ) {
     let light = commands
         .spawn((
@@ -404,14 +437,13 @@ fn spawn_muzzle_light(
                 intensity: peak,
                 range,
                 radius,
-                // Direction-less point (the hull occludes it like any object); shadow casting is the
-                // caller's call — the expensive half of the light.
-                shadow_maps_enabled: shadows,
+                shadow_maps_enabled: lifetime >= SHADOW_READ_WINDOW_S
+                    || refire_interval.is_none_or(|interval| interval >= SHADOW_READ_WINDOW_S),
                 ..default()
             },
             // "The hull occludes it like any object" is only true while the light can SEE the hull.
-            // This light does cast by default, and with the vendored shadow-view patch its shadow
-            // view inherits this mask — so without a profile it would neither light nor be occluded
+            // With the vendored shadow-view patch a casting light's shadow view inherits this
+            // mask — so without a profile it would neither light nor be occluded
             // by the player's own tank (which lives on its own channel), and the track ribbon would
             // stop casting from it too.
             crate::render_policy::LightProfile::BattlefieldMuzzleFlash,
@@ -427,7 +459,7 @@ fn spawn_muzzle_light(
 /// MG-calibre rounds pass through untouched — their dressing is slice B, on this same machinery.
 #[expect(
     clippy::too_many_arguments,
-    reason = "dresses a main-gun shot: assets, materials, two rings, rng, camera and terrain"
+    reason = "dresses a main-gun shot: assets, materials, two rings, rng, camera, weapon cadence and terrain"
 )]
 fn on_main_gun_fire(
     fire: On<FireShell>,
@@ -437,6 +469,7 @@ fn on_main_gun_fire(
     mut light_ring: ResMut<MuzzleLightRing>,
     mut rng: ResMut<ViewRng>,
     camera: Query<&GlobalTransform, With<PlayerView>>,
+    weapons: Query<(&Weapon, &TankRoot, &WeaponIndex)>,
     // The decoded terrain surface, when the world has one — the ground-dust gate's only query.
     grid: Option<Res<crate::terrain_grid::HeightGrid>>,
     mut commands: Commands,
@@ -646,7 +679,7 @@ fn on_main_gun_fire(
     }
 
     // --- Muzzle light: transient, first frame hottest (Vlambeer: the environment lighting up IS a
-    // large share of the perceived power). The main gun's light casts a shadow.
+    // large share of the perceived power). Its lifetime and refire cadence decide casting.
     spawn_muzzle_light(
         &mut commands,
         &mut light_ring,
@@ -655,7 +688,7 @@ fn on_main_gun_fire(
         LIGHT_RANGE,
         LIGHT_LIFETIME,
         0.4,
-        true,
+        refire_interval(&fire, &weapons),
     );
 }
 
@@ -753,7 +786,7 @@ fn spawn_ground_dust(
 /// [`on_main_gun_fire`]); staleness and distance LOD gates are the 88's exactly.
 #[expect(
     clippy::too_many_arguments,
-    reason = "dresses an MG shot: assets, materials, two rings, smoke cadence, rng and camera"
+    reason = "dresses an MG shot: assets, materials, two rings, smoke cadence, rng, camera and weapon cadence"
 )]
 fn on_mg_fire(
     fire: On<FireShell>,
@@ -764,6 +797,7 @@ fn on_mg_fire(
     mut cadence: ResMut<MgSmokeCadence>,
     mut rng: ResMut<ViewRng>,
     camera: Query<&GlobalTransform, With<PlayerView>>,
+    weapons: Query<(&Weapon, &TankRoot, &WeaponIndex)>,
     mut commands: Commands,
 ) {
     // The complement of the 88 observer's gate — the SAME boundary the shell-scene/tracer split
@@ -885,19 +919,8 @@ fn on_mg_fire(
         );
     }
 
-    // --- Muzzle light: EVERY round (the tracer-only gate is gone — a per-round glimmer reads as
-    // real automatic fire). A tracer round spikes brighter so the streak still pops as it leaves the
-    // barrel. It does NOT cast a shadow. A main-gun flash does (one shot per reload, a real
-    // lighting event); MG rounds' do not, on MEASURED evidence (M4, 2 tanks, `M350` shadows, vsync
-    // off, `scripts/perf/run-fire-capture.sh` 2026-07-31): a shadow-casting point light per MG
-    // round at the Tiger's 2 × 750 rpm is the single dominant cost of holding the trigger. Idle
-    // blew the 60 fps budget on 3.6% of frames; with both MGs firing that became ~42%, while the
-    // same scene with muzzle shadows off moved only 14.4% → 16.8%. p50 tracked it: 13.5 → 15.5 ms
-    // firing with MG shadow casting, 13.5 → 14.6 ms without. A point light's shadow is SIX
-    // cubemap faces, each re-submitting the shooter's own tank (194 track links per pass on the
-    // project's worst shadow caster): at ~25 rounds/s over a 0.05 s light lifetime that is a
-    // shadow cubemap built, used for ~3 frames and thrown away, continuously, for a 16 m glimmer
-    // that lasts long enough to be seen but nowhere near long enough for its SHADOW to be read.
+    // The game's damage-model view gives each shot a glimmer. Its lifetime and the loaded
+    // weapon's cadence select shadows through the same rule as every other muzzle light.
     let peak = if fire.tracer {
         MG_LIGHT_PEAK_LUMENS * MG_TRACER_LIGHT_BOOST
     } else {
@@ -911,7 +934,7 @@ fn on_mg_fire(
         MG_LIGHT_RANGE,
         MG_LIGHT_LIFETIME,
         0.1,
-        false,
+        refire_interval(&fire, &weapons),
     );
 }
 
@@ -1013,6 +1036,33 @@ mod tests {
     const FIRE_ORIGIN: Vec3 = Vec3::new(1.0, 2.0, 3.0);
 
     fn fire_round(app: &mut App, caliber: f32, catch_up_ticks: u32, tracer: bool) {
+        // FIXTURE DATA: a rapid belt and a slower single-shot cycle; no weapon identity is a rule.
+        let cycle = if caliber <= MG_CALIBER {
+            FireCycle::Automatic {
+                cyclic_rpm: 750.0,
+                belt_size: 100,
+                belt_swap_secs: 1.0,
+                tracer_every: 1,
+            }
+        } else {
+            FireCycle::Single { reload_secs: 1.0 }
+        };
+        let root = app.world_mut().spawn_empty().id();
+        app.world_mut().spawn((
+            Weapon {
+                name: "fixture".to_owned(),
+                rounds: Vec::new(),
+                fire_cycle: cycle,
+                recoil: None,
+                barrel: None,
+                fire: Vec::new(),
+                load: Vec::new(),
+                trigger: crate::spec::Trigger::Primary,
+                report_clips: Vec::new(),
+            },
+            TankRoot(root),
+            WeaponIndex(0),
+        ));
         app.world_mut().trigger(FireShell {
             origin: FIRE_ORIGIN,
             direction: Dir3::X,
@@ -1026,12 +1076,12 @@ mod tests {
             wound: 30.0,
             burst: None,
             fuze_mode: 0,
-            mechanism: if caliber <= MG_CALIBER {
-                crate::spec::FireMechanism::Automatic
-            } else {
-                crate::spec::FireMechanism::Single
-            },
-            shooter: None,
+            mechanism: cycle.mechanism(),
+            shooter: Some(crate::ballistics::ShotSource {
+                tank: root,
+                weapon: 0,
+                round: 0,
+            }),
             tracer,
             shot_origin: FireShellOrigin::Local,
             catch_up_ticks,
@@ -1311,11 +1361,11 @@ mod tests {
         }
     }
 
-    /// A main-gun flash casts and an MG round's glimmer does not. The MG half is the cost-bearing
-    /// one: an MG round's light casting is six cubemap faces of the shooter's own tank per round.
-    /// Fails if either gun's light is spawned with the other's shadow decision.
+    /// The game's damage-model view applies the shared light rule to both dressing paths.
+    /// FIXTURE DATA: the slower single-shot cycle casts and the short rapid-belt flash does not;
+    /// a caller that still hardcodes its shadow decision fails the cadence/duration cases below.
     #[test]
-    fn only_the_main_gun_light_casts() {
+    fn both_dressing_paths_use_their_loaded_flash_cadence() {
         let mut main = harness();
         fire(&mut main, 0.088, 0);
         let world = main.world_mut();
@@ -1327,6 +1377,76 @@ mod tests {
         let world = mg.world_mut();
         let mut q = world.query::<&PointLight>();
         assert!(!q.single(world).expect("one MG light").shadow_maps_enabled);
+    }
+
+    /// The game's damage-model fire cause can outlive its firing source. The view must still
+    /// draw that isolated flash; a live-weapon expect mutant panics on this delivered event.
+    #[test]
+    fn a_delivered_flash_may_outlive_its_firing_source() {
+        let mut app = harness();
+        let source = app.world_mut().spawn_empty().id();
+        // FIXTURE DATA: a round from the first loaded gun, without assuming unique chambering.
+        let guns = crate::guns::GunRegistry::shipped();
+        let gun = crate::armaments_index::GUN_FILES[0].0;
+        let round = crate::rounds::RoundRegistry::shipped()
+            .keys()
+            .find_map(|key| guns.round(gun, key).ok())
+            .expect("a loaded gun chambers at least one registered round");
+        let fire = FireShell::of_round(
+            &round,
+            FIRE_ORIGIN,
+            Dir3::X,
+            crate::spec::FireMechanism::Single,
+            true,
+            Some(crate::ballistics::ShotSource {
+                tank: source,
+                weapon: 0,
+                round: 0,
+            }),
+            None,
+        );
+        assert!(app.world_mut().despawn(source));
+        app.world_mut().trigger(fire);
+        app.world_mut().flush();
+        let world = app.world_mut();
+        let light = world
+            .query::<&PointLight>()
+            .single(world)
+            .expect("the isolated flash");
+        assert!(light.shadow_maps_enabled);
+    }
+
+    /// The game's damage-model view shadows persistent or isolated lights, independent of
+    /// weapon class. FIXTURE DATA spans short/long lives and fast/slow/absent refire intervals.
+    /// A mutant that ignores either lifetime or cadence breaks this presentation contract.
+    #[test]
+    fn shadow_casting_follows_light_lifetime_and_refire_interval() {
+        for (lifetime, interval, casts) in [
+            (0.05, Some(0.08), false),
+            (0.05, Some(1.0), true),
+            (0.2, Some(0.08), true),
+            (0.05, None, true),
+        ] {
+            let mut world = World::new();
+            let mut queue = bevy::ecs::world::CommandQueue::default();
+            let mut commands = Commands::new(&mut queue, &world);
+            spawn_muzzle_light(
+                &mut commands,
+                &mut MuzzleLightRing::default(),
+                Vec3::ZERO,
+                1.0,
+                1.0,
+                lifetime,
+                0.1,
+                interval,
+            );
+            queue.apply(&mut world);
+            let light = world.query::<&PointLight>().single(&world).unwrap();
+            assert_eq!(
+                light.shadow_maps_enabled, casts,
+                "life {lifetime}, interval {interval:?}"
+            );
+        }
     }
 
     /// MG smoke is rationed to every [`MG_SMOKE_EVERY`]-th round — per-round puffs at the cyclic
