@@ -2923,6 +2923,9 @@ pub enum Begin {
         /// `½ m (v cos θ)²`. η blends it from 1 (η → 0, nothing lost) to that, as it blends the
         /// direction — a graze IS a partial ricochet.
         speed_scale: f32,
+        /// Per sample, the progress along its incoming ray where its way in ends: its hand-off
+        /// ([`DiscWalk::hand_off`]), as a transit's way in does.
+        hand_offs: Vec<f64>,
     },
     /// It bit in. The caller must now collect the transit corridor along `request.axis`.
     Transit(TransitRequest),
@@ -2980,8 +2983,6 @@ pub struct TransitRequest {
     pub radius: f32,
     /// k — the corridor supplied to [`finish`] must sample the disc the same way.
     pub samples: usize,
-    /// The entities the entrance crossing engaged, sorted.
-    pub entrance_entities: Vec<Entity>,
     /// The primitives the entrance crossing touched, sorted. [`finish`] checks the supplied
     /// corridor's crossing against these, so a corridor collected for some OTHER contact cannot be
     /// resolved as if it were this one. Entity identity alone is too coarse for that: one volume can
@@ -3058,6 +3059,7 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
             entrance: read,
             direction: Vec3::from(direction),
             speed_scale: 1.0 - event.coverage * (1.0 - sliding),
+            hand_offs: at,
         });
     }
 
@@ -3093,8 +3095,6 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
             }
         })
         .collect();
-    let mut entrance_entities: Vec<Entity> = event.shares.iter().map(|s| s.entity).collect();
-    entrance_entities.sort();
 
     Ok(Begin::Transit(TransitRequest {
         entrance: read,
@@ -3104,7 +3104,6 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
         frame: entrance.frame.transport(entrance.axis, Vec3::from(bent)),
         radius: entrance.radius,
         samples: entrance.samples(),
-        entrance_entities,
         entrance_primitives: event.primitives.clone(),
         seeds,
     }))

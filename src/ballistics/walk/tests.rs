@@ -228,33 +228,45 @@ fn entrance_disc(slabs: &[Slab], length: f32) -> DiscCorridor {
 /// resumes, along the bent axis, with the TRANSPORTED frame, seeded from the request. This is the
 /// slice-2 driver contract written out; `finish` rejects a corridor that departs from it.
 fn transit_disc(request: &TransitRequest, slabs: &[Slab], length: f32) -> DiscCorridor {
-    let samples = request
-        .seeds
-        .iter()
-        .map(|seed| SampleCorridor {
-            offset: seed.offset,
-            initial_presence: seed.inside.clone(),
-            hits: slabs
-                .iter()
-                .flat_map(|slab| {
-                    slab.hits(
-                        request.origin + seed.offset,
-                        request.axis,
-                        length,
-                        seed.inside.contains(&slab.key()),
-                    )
-                })
-                .collect(),
-        })
-        .collect();
+    resumed_disc(request, 0.0, &request.seeds, length, |_| slabs.to_vec())
+}
+
+/// The disc resumed `from` metres along `request`'s axis past its hand-off, each sample from its
+/// own entry in `seeds` (its offset and what it is inside), meeting the slabs `slabs_of` gives for
+/// its sample index.
+fn resumed_disc(
+    request: &TransitRequest,
+    from: f32,
+    seeds: &[SampleSeed],
+    length: f32,
+    slabs_of: impl Fn(usize) -> Vec<Slab>,
+) -> DiscCorridor {
+    let origin = request.origin + request.axis * from;
     DiscCorridor {
         anchor: request.anchor,
-        origin: request.origin,
+        origin,
         axis: request.axis,
         length,
         radius: request.radius,
         frame: request.frame,
-        samples,
+        samples: seeds
+            .iter()
+            .map(|seed| SampleCorridor {
+                offset: seed.offset,
+                initial_presence: seed.inside.clone(),
+                hits: slabs_of(seed.sample)
+                    .iter()
+                    .flat_map(|slab| {
+                        slab.hits(
+                            origin + seed.offset,
+                            request.axis,
+                            length,
+                            seed.inside.contains(&slab.key()),
+                        )
+                    })
+                    .collect(),
+            })
+            .collect(),
     }
 }
 
@@ -1493,28 +1505,9 @@ fn every_sample_hands_off_on_the_face_it_crossed() {
 
     // Each sample from its own hand-off, along the bend: the transit pairs and both plates are
     // charged.
-    let transit = DiscCorridor {
-        anchor: request.anchor,
-        origin: request.origin,
-        axis: request.axis,
-        length: 3.0,
-        radius: request.radius,
-        frame: request.frame,
-        samples: request
-            .seeds
-            .iter()
-            .map(|seed| SampleCorridor {
-                offset: seed.offset,
-                initial_presence: Vec::new(),
-                hits: slab_of(seed.sample).hits(
-                    request.origin + seed.offset,
-                    request.axis,
-                    3.0,
-                    false,
-                ),
-            })
-            .collect(),
-    };
+    let transit = resumed_disc(&request, 0.0, &request.seeds, 3.0, |sample| {
+        vec![slab_of(sample)]
+    });
     let transit = walk_disc(&transit, &volumes, &laws).unwrap();
     let plan = finish_at(&transit, &request, AP_88_CAPABILITY, &laws).unwrap();
     for plate in [1, 2] {
@@ -3939,34 +3932,9 @@ impl Straddle {
     }
 
     fn transit(&self, offsets: &[Vec3], request: &TransitRequest) -> DiscCorridor {
-        DiscCorridor {
-            anchor: request.anchor,
-            origin: request.origin,
-            axis: request.axis,
-            length: 2.0,
-            radius: request.radius,
-            frame: request.frame,
-            samples: request
-                .seeds
-                .iter()
-                .map(|seed| SampleCorridor {
-                    offset: seed.offset,
-                    initial_presence: seed.inside.clone(),
-                    hits: self
-                        .pieces(offsets, seed.sample)
-                        .iter()
-                        .flat_map(|piece| {
-                            piece.hits(
-                                request.origin + seed.offset,
-                                request.axis,
-                                2.0,
-                                seed.inside.contains(&piece.key()),
-                            )
-                        })
-                        .collect(),
-                })
-                .collect(),
-        }
+        resumed_disc(request, 0.0, &request.seeds, 2.0, |sample| {
+            self.pieces(offsets, sample)
+        })
     }
 }
 
@@ -4113,9 +4081,13 @@ impl EdgeAndBehind {
         }
     }
 
-    /// Whether sample `index` meets `slab`: the edged plate only below its edge.
-    fn meets(&self, index: usize, slab: &Slab) -> bool {
-        slab.vol != self.edge.vol || self.offsets[index].y <= 0.0
+    /// The slabs of `slabs` sample `index` meets: the edged plate only below its edge.
+    fn met(&self, index: usize, slabs: &[Slab]) -> Vec<Slab> {
+        slabs
+            .iter()
+            .copied()
+            .filter(|slab| slab.vol != self.edge.vol || self.offsets[index].y <= 0.0)
+            .collect()
     }
 
     fn entrance(&self, length: f32) -> DiscCorridor {
@@ -4133,52 +4105,11 @@ impl EdgeAndBehind {
                 .map(|(index, offset)| {
                     sample(
                         *offset,
-                        [self.edge, self.behind]
+                        self.met(index, &[self.edge, self.behind])
                             .iter()
-                            .filter(|slab| self.meets(index, slab))
                             .flat_map(|slab| slab.hits(*offset, AXIS, length, false))
                             .collect(),
                     )
-                })
-                .collect(),
-        }
-    }
-
-    /// A disc resumed `from` metres along `request`'s axis from its hand-off, each sample from its
-    /// own seed, meeting the slabs it meets.
-    fn resumed(
-        &self,
-        request: &TransitRequest,
-        from: f32,
-        seeds: &[SampleSeed],
-        slabs: &[Slab],
-        length: f32,
-    ) -> DiscCorridor {
-        let origin = request.origin + request.axis * from;
-        DiscCorridor {
-            anchor: request.anchor,
-            origin,
-            axis: request.axis,
-            length,
-            radius: request.radius,
-            frame: request.frame,
-            samples: seeds
-                .iter()
-                .map(|seed| SampleCorridor {
-                    offset: seed.offset,
-                    initial_presence: seed.inside.clone(),
-                    hits: slabs
-                        .iter()
-                        .filter(|slab| self.meets(seed.sample, slab))
-                        .flat_map(|slab| {
-                            slab.hits(
-                                origin + seed.offset,
-                                request.axis,
-                                length,
-                                seed.inside.contains(&slab.key()),
-                            )
-                        })
-                        .collect(),
                 })
                 .collect(),
         }
@@ -4208,7 +4139,9 @@ fn a_crossing_resolves_the_same_however_far_its_entrance_was_walked() {
         let request = transit_request(&walked, &AP_88, &laws);
         let slabs = [fixture.edge, fixture.behind];
         let transit = walk_disc(
-            &fixture.resumed(&request, 0.0, &request.seeds, &slabs, 2.0),
+            &resumed_disc(&request, 0.0, &request.seeds, 2.0, |sample| {
+                fixture.met(sample, &slabs)
+            }),
             &volumes,
             &laws,
         )
@@ -4220,7 +4153,9 @@ fn a_crossing_resolves_the_same_however_far_its_entrance_was_walked() {
         let resume = t + super::super::MARCH_EPS;
         let starts = transit.resume_at(f64::from(resume), &laws);
         let next = walk_disc(
-            &fixture.resumed(&request, resume, &starts, &[fixture.behind], 2.0),
+            &resumed_disc(&request, resume, &starts, 2.0, |sample| {
+                fixture.met(sample, &[fixture.behind])
+            }),
             &volumes,
             &laws,
         )

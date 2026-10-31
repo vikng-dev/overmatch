@@ -1462,28 +1462,20 @@ pub(crate) fn decide(
             entrance: read,
             direction,
             speed_scale,
+            hand_offs,
         } => {
             let struck = read.volume;
             let position = anchor + read.position;
             let out = Dir3::new(direction).unwrap_or(dir);
             let kept = speed * speed_scale;
             let approach = (read.position - from).dot(Vec3::from(dir)).max(0.0);
-            // Each sample's way in ends at its hand-off, as a transit's does: on the face it
-            // struck, or at the crossing's depth when it struck none ([`DiscWalk::hand_off`]).
-            let at = entrance
-                .hand_off()?
-                .ok_or(WalkError::BadCorridor {
-                    sample: 0,
-                    reason: "a bounce was read off a disc that met nothing",
-                })?
-                .at;
             let way_in = Leg {
                 from: anchor + from,
                 axis: dir,
                 samples: entrance
                     .offsets
                     .iter()
-                    .zip(at)
+                    .zip(hand_offs)
                     .map(|(offset, t)| (*offset, t as f32))
                     .collect(),
             };
