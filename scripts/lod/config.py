@@ -77,20 +77,20 @@ MAX_RUNGS = 12
 
 # ── the right wall ───────────────────────────────────────────────────────────────────────────────
 
-#: `DEFAULT_MAP_ID` as `src/map.rs` declares it — READ, not copied. The world this ladder is cut for
-#: has to be the world the game loads, and a second spelling of the id here would pick a different
-#: one in silence the day a map is renamed. A pattern that stops matching is a named refusal.
-_DEFAULT_MAP_ID = re.compile(r'DEFAULT_MAP_ID:\s*&str\s*=\s*"([^"]+)"')
+#: `MAP_ID` as `src/map.rs` declares it — READ, not copied. The world this ladder is cut for has to
+#: be the world the game loads, and a second spelling of the id here would pick a different one in
+#: silence the day a map is renamed. A pattern that stops matching is a named refusal.
+_MAP_ID = re.compile(r'MAP_ID:\s*&str\s*=\s*"([^"]+)"')
 
 
-def default_map_id(root=None):
-    """The map the game resolves when `OVERMATCH_MAP` names none — `crate::map::DEFAULT_MAP_ID`."""
+def game_map_id(root=None):
+    """The map every build of the game loads — `crate::map::MAP_ID`."""
     path = os.path.join(root or repo_root(), "src", "map.rs")
     with open(path, encoding="utf-8") as handle:
-        found = _DEFAULT_MAP_ID.search(handle.read())
+        found = _MAP_ID.search(handle.read())
     if found is None:
         raise RuntimeError(
-            f"scripts/lod: {path} declares no `DEFAULT_MAP_ID: &str = \"...\"` — the right wall is "
+            f"scripts/lod: {path} declares no `MAP_ID: &str = \"...\"` — the right wall is "
             f"cut from the map the game loads, and this is where that id lives"
         )
     return found.group(1)
@@ -106,7 +106,7 @@ def map_world_size_m(map_id=None, root=None):
     a diagonal means nothing without them.
     """
     root = root or repo_root()
-    path = os.path.join(root, "assets", "maps", map_id or default_map_id(root), "level.json")
+    path = os.path.join(root, "assets", "maps", map_id or game_map_id(root), "level.json")
     with open(path, encoding="utf-8") as handle:
         extent = json.load(handle)["terrain"]["heightmap"]["world_extent_xz"]
     (min_x, min_z), (max_x, max_z) = extent["minimum"], extent["maximum"]
@@ -121,7 +121,7 @@ def map_world_size_m(map_id=None, root=None):
 
 #: The id and the side the wall is cut from, resolved once at import so everything downstream reads
 #: one answer and the manifest records which map produced it.
-MAP_ID = default_map_id()
+MAP_ID = game_map_id()
 WORLD_SIZE_M = map_world_size_m(MAP_ID)
 
 #: The maximum renderable camera-to-surface distance, in metres. Past it a level never renders, so

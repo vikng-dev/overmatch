@@ -28,7 +28,7 @@ client's whole tree:
 
 | Path | Opened by |
 |---|---|
-| `assets/maps/*/level.json`, `assets/maps/*/*.png` | `crate::map::parse`, the terrain height decode, and the handshake content digest. Every map: `$OVERMATCH_MAP` picks one at runtime, and the heightmap's file name is inside `level.json`. |
+| `assets/maps/*/level.json`, `assets/maps/*/*.png` | `crate::map::parse`, the terrain height decode, and the handshake content digest. Every map: the heightmap's file name is inside `level.json`, so it cannot be resolved at packaging time. |
 | `assets/maps/*/prototypes.ron` | `crate::map::read_prototypes` and the content digest (`map::load` panics without it) |
 | `assets/trees/**/*.ron` | `crate::trees::TreeLibrary::load` (species table, wood row, each `<id>.tree.ron`) and the content digest |
 | `assets/<id>/<id>.sim.glb` | the bake's consumer contract, the `geometry_lod` trio fingerprint, and the track rig — the one geometry artifact the server reads (ADR-0035) |

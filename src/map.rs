@@ -43,11 +43,9 @@ use crate::buildings::BuildingLibrary;
 use crate::terrain_grid::{RowOrder, TerrainExtent};
 use crate::trees::TreeLibrary;
 
-/// The map loaded when nothing selects another.
-pub(crate) const DEFAULT_MAP_ID: &str = "kalinovo";
-
-/// Dev override for the map id — the whole of map selection.
-const MAP_ENV: &str = "OVERMATCH_MAP";
+/// The map every build loads: `assets/maps/<MAP_ID>/`. `scripts/lod/config.py` reads this
+/// declaration for the world the LOD ladder is cut for.
+pub(crate) const MAP_ID: &str = "kalinovo";
 
 /// Directory holding one folder per map, relative to the resolved asset root
 /// (`crate::assets::asset_root`).
@@ -64,20 +62,9 @@ const PROTOTYPES_FILE: &str = "prototypes.ron";
 /// opposed to what the author shipped.
 const DERIVED_DIR: &str = "derived";
 
-/// The map id this process loads. Read through `crate::env_value`, so the shared off vocabulary
-/// (empty, `0`, `false`) reads as "no override" exactly as it does for every other switch.
-pub(crate) fn map_id() -> String {
-    resolve_map_id(crate::env_value(MAP_ENV))
-}
-
-/// The id rule, pure: the override when one is named, [`DEFAULT_MAP_ID`] otherwise.
-fn resolve_map_id(env: Option<String>) -> String {
-    env.unwrap_or_else(|| DEFAULT_MAP_ID.to_owned())
-}
-
-/// `<root>/maps/<id>` — the selected map's directory.
+/// `<root>/maps/<id>` — the map's directory.
 pub(crate) fn map_dir(root: &Path) -> PathBuf {
-    root.join(MAPS_DIR).join(map_id())
+    root.join(MAPS_DIR).join(MAP_ID)
 }
 
 /// The selected map's manifest.
@@ -93,13 +80,13 @@ fn prototypes_path(root: &Path) -> PathBuf {
 /// An asset-server path (`/`-separated, relative to the asset root) into the selected map's own
 /// directory — what the author shipped, as the asset server names it.
 pub(crate) fn map_asset(name: &str) -> String {
-    format!("{MAPS_DIR}/{}/{name}", map_id())
+    format!("{MAPS_DIR}/{MAP_ID}/{name}")
 }
 
 /// An asset-server path (`/`-separated, relative to the asset root) into the selected map's
 /// `derived/` folder — the view-only copies generated from the authored data.
 pub(crate) fn derived_asset(name: &str) -> String {
-    format!("{MAPS_DIR}/{}/{DERIVED_DIR}/{name}", map_id())
+    format!("{MAPS_DIR}/{MAP_ID}/{DERIVED_DIR}/{name}")
 }
 
 /// One map's `level.json`, parsed and checked. The extent is a claim the map's author makes about
@@ -436,22 +423,6 @@ fn read_manifest(path: &Path) -> String {
     }
 }
 
-/// FNV-1a offset basis — the seed every fold below starts from.
-const DIGEST_SEED: u64 = 0xcbf2_9ce4_8422_2325;
-
-/// FNV-1a over bytes. Byte-driven and integer-only — no floats, no hasher whose seed or word size
-/// could differ — so every platform folds the same map to the same digest.
-const fn fnv1a_64(seed: u64, bytes: &[u8]) -> u64 {
-    let mut hash = seed;
-    let mut i = 0;
-    while i < bytes.len() {
-        hash ^= bytes[i] as u64;
-        hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
-        i += 1;
-    }
-    hash
-}
-
 /// The CONTENT digest of the world this process will build: the manifest's own bytes, its prototype
 /// library's, the bytes of the heightmap it names, the species table, the wood row and every tree
 /// asset the library names, then every building asset it names — the files that decide the terrain
@@ -484,16 +455,71 @@ pub(crate) fn content_digest(root: &Path) -> u64 {
     digest_of(&files)
 }
 
-/// The fold itself, pure. Each file's LENGTH is folded before its bytes, so no two different sets
-/// of files can shift bytes across a boundary into the same digest.
+/// The fold itself, pure: [`crate::fingerprint`]'s FNV-1a, byte-driven and integer-only, so every
+/// platform folds the same map to the same digest. Each file's LENGTH is folded before its bytes,
+/// so no two different sets of files can shift bytes across a boundary into the same digest.
 fn digest_of(files: &[&[u8]]) -> u64 {
+    use crate::fingerprint::{FNV_OFFSET_BASIS, fnv1a_64};
     files.iter().fold(
-        fnv1a_64(DIGEST_SEED, b"overmatch-map-content-v2"),
+        fnv1a_64(FNV_OFFSET_BASIS, b"overmatch-map-content-v2"),
         |hash, bytes| {
             let hash = fnv1a_64(hash, &(bytes.len() as u64).to_le_bytes());
             fnv1a_64(hash, bytes)
         },
     )
+}
+
+/// Refuse a graybox prototype that describes no collider, naming the library file, the id, the
+/// field and the fix: a building box whose corners are not finite and ordered on every axis, a fir
+/// whose height or canopy is not finite and positive, and either one of a substance that states no
+/// friction (its collider carries the substance's, `scatter`). A tree or a structure is its own
+/// asset's to check (`TreeLibrary::load`, `BuildingLibrary::load`).
+fn check_prototype(id: &str, prototype: &Prototype, library: &Path) {
+    let substance = match prototype {
+        Prototype::Building {
+            min,
+            max,
+            substance,
+        } => {
+            for axis in 0..3 {
+                assert!(
+                    min[axis].is_finite() && max[axis].is_finite() && min[axis] < max[axis],
+                    "map: {} prototype {id:?}: `min` {min:?} / `max` {max:?} is no box on axis \
+                     {axis} — state finite corners with min < max on every axis",
+                    library.display(),
+                );
+            }
+            substance
+        }
+        Prototype::Fir {
+            height_m,
+            canopy_diameter_m,
+            substance,
+        } => {
+            for (field, value) in [
+                ("height_m", height_m),
+                ("canopy_diameter_m", canopy_diameter_m),
+            ] {
+                assert!(
+                    value.is_finite() && *value > 0.0,
+                    "map: {} prototype {id:?}: `{field}` is {value} — state a finite length \
+                     above 0 m",
+                    library.display(),
+                );
+            }
+            substance
+        }
+        Prototype::Tree { .. } | Prototype::Structure { .. } => return,
+    };
+    if let Err(err) =
+        crate::substances::SubstanceRegistry::shipped_static().contact_friction(substance)
+    {
+        panic!(
+            "map: {} prototype {id:?}: `substance`: {err} — name a hard row of materials.ron \
+             that states its friction",
+            library.display(),
+        );
+    }
 }
 
 /// Parse and check one manifest's text against its prototype library's text. `path` is where the
@@ -509,6 +535,10 @@ pub(crate) fn parse(text: &str, library: &str, path: &Path) -> MapManifest {
             path.with_file_name(PROTOTYPES_FILE).display()
         )
     });
+    let library_path = path.with_file_name(PROTOTYPES_FILE);
+    for (id, prototype) in &prototypes {
+        check_prototype(id, prototype, &library_path);
+    }
     // Every id the placement uses AND every id the author declared must resolve (ADR-0011): a
     // prototype with no instances today is one the next export may place.
     for id in level
@@ -786,6 +816,50 @@ pub(crate) mod tests {
             r#""prototypes":{"barn":{"asset":"barn.glb","included":false}},"instances":[]"#,
         );
         parse(&text, HOUSE_LIBRARY, Path::new("fixture/level.json"));
+    }
+
+    /// A graybox prototype that describes no collider is refused when the library is read, naming
+    /// the library file, the id and the field: `scatter` builds the box, the trunk and their
+    /// friction from these with no check of its own. Mutant: dropping any arm of `check_prototype`
+    /// loads its case. FIXTURE DATA: the dimensions are round and stand for no building.
+    #[test]
+    fn a_graybox_prototype_that_describes_no_collider_is_refused_at_parse() {
+        let text = manifest_text(750.0, 0.0, 50.0, "+Z");
+        for (library, field) in [
+            (
+                r#"{"p": Building(min: (1.0, 0.0, 0.0), max: (1.0, 1.0, 1.0), substance: "Brick")}"#,
+                "`min`",
+            ),
+            (
+                r#"{"p": Building(min: (0.0, 0.0, 0.0), max: (1.0, NaN, 1.0), substance: "Brick")}"#,
+                "`min`",
+            ),
+            (
+                r#"{"p": Fir(height_m: 0.0, canopy_diameter_m: 6.0, substance: "Wood")}"#,
+                "`height_m`",
+            ),
+            (
+                r#"{"p": Fir(height_m: 14.0, canopy_diameter_m: inf, substance: "Wood")}"#,
+                "`canopy_diameter_m`",
+            ),
+            (
+                r#"{"p": Building(min: (0.0, 0.0, 0.0), max: (1.0, 1.0, 1.0), substance: "Nope")}"#,
+                "`substance`",
+            ),
+        ] {
+            let refusal =
+                std::panic::catch_unwind(|| parse(&text, library, Path::new("fixture/level.json")))
+                    .expect_err(library);
+            let message = refusal
+                .downcast_ref::<String>()
+                .expect("a formatted refusal");
+            assert!(
+                message.contains("prototypes.ron")
+                    && message.contains("\"p\"")
+                    && message.contains(field),
+                "{library}: {message}"
+            );
+        }
     }
 
     /// A map that places a tree whose asset this tree does not carry is present-but-broken: the

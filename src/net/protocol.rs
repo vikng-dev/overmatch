@@ -243,9 +243,10 @@ pub const PROTOCOL_FINGERPRINT: u64 = protocol_fingerprint_for(
 /// manifest — folded with the digest of the WORLD this process will build
 /// ([`crate::map::content_digest`]).
 ///
-/// The map is a RUNTIME choice (`OVERMATCH_MAP`) over content shipped beside the binary, and its
-/// terrain and scatter are DERIVED on both ends rather than replicated. Without this term a
-/// same-build server and client on different maps complete the handshake and then integrate
+/// The map is content shipped beside the binary, not inside it, and its terrain and scatter are
+/// DERIVED on both ends rather than replicated. Without this term a same-build server and client
+/// over different map files (a stale checkout, a half-pulled LFS object) complete the handshake and
+/// then integrate
 /// different ground: belt contacts, spawn heights and hull collisions all diverge, and the first
 /// symptom is a rollback storm nobody can trace to a file. With it the refusal lands at the
 /// connect: netcode encrypts the connect token under `protocol_id` (ADR-0018), so a client holding

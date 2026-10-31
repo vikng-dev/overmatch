@@ -1363,7 +1363,7 @@ class ProjectionTests(unittest.TestCase):
         """The optic reference the doctrine quotes, re-derived rather than remembered."""
         self.assertAlmostEqual(CONFIG.switch_distance_m(1.0, 0.0, self.VIEW), 17.98, places=1)
 
-    def test_the_right_wall_is_the_default_maps_diagonal(self):
+    def test_the_right_wall_is_the_game_maps_diagonal(self):
         """The wall read here independently of `config`'s own parse.
 
         The number this asserts is not written down anywhere in this file: it comes out of
@@ -1372,7 +1372,7 @@ class ProjectionTests(unittest.TestCase):
         catches is `config` deriving the wall from something OTHER than the world the game loads.
         """
         root = CONFIG.repo_root()
-        level = os.path.join(root, "assets", "maps", CONFIG.default_map_id(root), "level.json")
+        level = os.path.join(root, "assets", "maps", CONFIG.game_map_id(root), "level.json")
         with open(level, encoding="utf-8") as handle:
             extent = json.load(handle)["terrain"]["heightmap"]["world_extent_xz"]
         side = extent["maximum"][0] - extent["minimum"][0]

@@ -93,12 +93,14 @@ struct Placement<'a> {
     pose: Transform,
 }
 
-/// The friction a graybox prototype's collider carries: its `substance` row's. A prototype naming
-/// a substance the registry lacks, or one that states no friction, is a broken map (ADR-0011).
+/// The friction a graybox prototype's collider carries: its `substance` row's, which
+/// `map::parse` certified when it read the library.
 fn graybox_friction(substance: &str) -> avian3d::prelude::Friction {
     crate::substances::SubstanceRegistry::shipped_static()
         .contact_friction(substance)
-        .unwrap_or_else(|err| panic!("scatter: a graybox prototype's substance: {err}"))
+        .unwrap_or_else(|err| {
+            panic!("scatter: map::parse refuses a graybox substance with no friction: {err}")
+        })
 }
 
 impl Placement<'_> {
