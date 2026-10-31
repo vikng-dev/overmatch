@@ -4,11 +4,9 @@ The single top-level authority on what this game is, where it stands, and what i
 
 ## Now
 
-Milestone: **core loop feature-complete** — map detail, a destructible and affectible world, then a polish round (sound, sky) — then a Steam early-access build people can play, then the meta loop (Garage, Progression, more tanks).
+Goal: **early access** (#196): one map, a 30-tank Battle played to a result, with an honest world, damage model and driving, at 120 fps on LOW, shipped as a Steam early-access build. After it: the meta loop (Garage, Progression, more tanks).
 
-In flight: level design in-house, the damage-model and destruction epics on GitHub (#103, #106). Landed: the union-field walk with its 10⁶-ray fuzzer gate, geometry/terrain LOD, display settings, the rebuilt Tiger asset, and the one-command tank build — `scripts/tank/build.py` cuts a per-tank trio (view glb, sim glb, LOD certificate) and the server runs on the sim bytes (ADR-0035/0036, shipped v0.3.1).
-
-Next: coincident-shell refinement (unconditional fuzzer zero); the next destruction slice (#106).
+Tracks, each an epic under #196: the ballistic walk; the damage model (spall fields from material parameters, what knocked-out crew and modules do to a tank); destruction (ramming, structure, collapse, rubble); driving (the track model, sideways push and grind against forward roll); the Battle (teams, spawns, a victory condition, a result); netcode at 30 tanks; performance, client and server; tank surfaces (paint and camouflage); feedback and polish (impact feedback, sound, sky); maps; code quality (the review lenses, error handling); shipping (the release pipeline, the Steam build). Work that serves none of them waits.
 
 ## Values
 
