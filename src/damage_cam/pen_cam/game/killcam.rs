@@ -1,5 +1,5 @@
 //! The victim kill cam in play: the struck player's own tank knocked out by a recorded shot, shown
-//! in the four beats of the demo's kill cam ([`super::super::killcam`]) on the real clock, then the
+//! in the four beats of the kill cam's law ([`super::super::killcam`]) on the real clock, then the
 //! death screen.
 //!
 //! * **Trigger.** The player's controlled tank carries the knockout fact ([`TankKnockedOut`], the
@@ -42,7 +42,7 @@
 //!   offers the replay (presentation only; never re-requested).
 //!
 //! The slot is closed by the knockout and stays closed while the tank is knocked out, so the kill
-//! cam is the only writer of [`Corner`] then: one surface at a time. Every duration is the demo's,
+//! cam is the only writer of [`Corner`] then: one surface at a time. Every duration is the law's,
 //! TUNED.
 
 use std::sync::Arc;
@@ -829,9 +829,6 @@ fn place(
         shooter_pivot,
         impact: run.impact,
         muzzle: run.muzzle,
-        radius: run.radius,
-        // Unread: the ground is the terrain's, taken below.
-        ground_y: f32::NEG_INFINITY,
     };
     let hit = run.hit.unwrap_or(transform.rotation);
     let (centre, look) = rig.orbit_drifting(run.beats, run.t, run.real, hit, hit, reduce);

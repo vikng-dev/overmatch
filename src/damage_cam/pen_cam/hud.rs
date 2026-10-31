@@ -20,7 +20,7 @@ use super::look::{self, MaskNeed};
 use super::picture::{PictureDetail, detail_of};
 use super::stage::StageCamera;
 use super::timeline::{self, CornerKind};
-use super::{CornerRig, Knobs, WorldViewer};
+use super::{CornerRig, WorldViewer};
 use crate::overlay::Overlay;
 use crate::render_scale::{NativeResolution, RenderScale};
 
@@ -65,10 +65,6 @@ pub(super) struct CornerImages {
 #[derive(Resource)]
 pub(super) struct Glyphs {
     images: Vec<(CornerKind, Handle<Image>)>,
-}
-
-pub fn spawn(mut commands: Commands, mut images: ResMut<Assets<Image>>) {
-    spawn_corner(&mut commands, &mut images);
 }
 
 /// The corner's nodes, hidden, and its images and glyphs.
@@ -234,7 +230,6 @@ pub fn detail(
     reason = "a system spanning the UI camera, the stage camera's target, the corner's nodes and the image store"
 )]
 pub fn layout(
-    knobs: Res<Knobs>,
     corner: Res<super::Corner>,
     mut targets: ParamSet<(DefaultUiCamera, Query<&mut RenderTarget, With<StageCamera>>)>,
     cameras: Query<&Camera>,
@@ -251,12 +246,8 @@ pub fn layout(
     else {
         return;
     };
-    let (width, height) = if knobs.expanded {
-        expanded(window).into()
-    } else {
-        let width = (window.x * WIDTH_FRACTION).clamp(WIDTH_PX.0, WIDTH_PX.1);
-        (width, width / ASPECT)
-    };
+    let width = (window.x * WIDTH_FRACTION).clamp(WIDTH_PX.0, WIDTH_PX.1);
+    let height = width / ASPECT;
     if let Ok(mut node) = root.single_mut()
         && (node.width != Val::Px(width) || node.height != Val::Px(height))
     {

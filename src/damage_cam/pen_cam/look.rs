@@ -2733,7 +2733,7 @@ mod tests {
              `the_pen_cam_intensity_times_a_face_is_its_dose` for the intensity's law, \
              `the_eye_depth_runs_forward_in_both_projections` for `eye_depth` and `eye_ray`) and \
              a hidden capture of every frame the moved items draw (`OVERMATCH_CAPTURE` over \
-             `pen_cam_demo`) shows the change meant.",
+             the game's corner and x-ray) shows the change meant.",
             moved.join("\n")
         );
     }

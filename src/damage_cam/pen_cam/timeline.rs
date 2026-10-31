@@ -186,30 +186,6 @@ pub fn presence(c: f32, duration: f32) -> (f32, f32) {
     (opacity, 0.96 + 0.04 * open)
 }
 
-/// One record's turn in the corner: shown from `start` (run seconds) until the next turn's start
-/// or its own end.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct Turn {
-    /// Index of the record among the run's arrivals.
-    pub record: usize,
-    pub start: f32,
-}
-
-/// The corner's turns for records arriving at `arrivals` (run seconds, ascending): the newest
-/// record wins once the current one has shown [`MIN_SHOWN_S`]; one that arrives sooner waits until
-/// then, and only the latest waiting record is kept ([`Lineup`]).
-pub fn turns(arrivals: &[f32]) -> Vec<Turn> {
-    let mut lineup = Lineup::default();
-    for (record, &at) in arrivals.iter().enumerate() {
-        lineup.arrive(record, at);
-    }
-    let mut out = Vec::new();
-    lineup.advance(f32::INFINITY, |&record, start| {
-        out.push(Turn { record, start });
-    });
-    out
-}
-
 /// The replacement rule on a running clock: records arrive, each to open at its own time, and
 /// [`Self::advance`] starts their turns as the clock reaches them. A record whose time comes while
 /// the current turn is inside its first [`MIN_SHOWN_S`] waits until that minimum is out, displacing
@@ -385,6 +361,30 @@ pub const FIELD_DIM: Color = Color::srgb_u8(0x1E, 0x6B, 0x66);
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// One record's turn in the corner: shown from `start` (run seconds) until the next turn's start
+    /// or its own end.
+    #[derive(Clone, Copy, Debug, PartialEq)]
+    struct Turn {
+        /// Index of the record among the run's arrivals.
+        record: usize,
+        start: f32,
+    }
+
+    /// The corner's turns for records arriving at `arrivals` (run seconds, ascending): the newest
+    /// record wins once the current one has shown [`MIN_SHOWN_S`]; one that arrives sooner waits until
+    /// then, and only the latest waiting record is kept ([`Lineup`]).
+    fn turns(arrivals: &[f32]) -> Vec<Turn> {
+        let mut lineup = Lineup::default();
+        for (record, &at) in arrivals.iter().enumerate() {
+            lineup.arrive(record, at);
+        }
+        let mut out = Vec::new();
+        lineup.advance(f32::INFINITY, |&record, start| {
+            out.push(Turn { record, start });
+        });
+        out
+    }
 
     /// A record 0.8 s behind the first replaces it on arrival; one 0.3 s behind waits until the
     /// first has shown 0.6 s; of two that arrive inside that window only the latest shows; one

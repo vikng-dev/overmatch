@@ -44,14 +44,6 @@ impl GlowMaterial {
         }
     }
 
-    /// Intensity `base + gain · (1 − |n·v|)^power`: clear face-on, bright at grazing angles.
-    pub fn with_rim(mut self, base: f32, gain: f32, power: f32) -> Self {
-        self.params.rim.x = base;
-        self.params.rim.y = gain;
-        self.params.rim.z = power;
-        self
-    }
-
     pub fn set_fade(&mut self, fade: f32) {
         self.params.color.w = fade;
     }

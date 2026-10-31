@@ -5,15 +5,13 @@
 //! `…/product/in-battle/owner-direction-2026-10-10.md` (four verdicts).
 //!
 //! The presentation (this module's [`Corner`], [`Exhibits`], [`Knobs`], and the stage, look, plan,
-//! timeline and corner HUD under it) draws whatever a driver puts in [`Corner`]: a record on show,
-//! its frame and its clock. Two drivers write it:
-//!
-//! * [`game`], the corner slot in play: the shooter's corner, each explanation of the local
-//!   player's own hit once its world impact is drawn, by the delivery store's rule. Beside it the
-//!   x-ray, the player's own tank dressed in the look on the battlefield under the latest
-//!   record that struck it, is its own presentation (`game::xray`): no corner, no stage copy.
-//! * [`demo`], the design bench over the recorded scenarios in `assets/dev/pen_cam/`: its own
-//!   battlefield, virtual-time control, keys and the kill cam's lesson.
+//! timeline and corner HUD under it) draws whatever its driver puts in [`Corner`]: a record on
+//! show, its frame and its clock. The driver is [`game`], the corner slot in play: the shooter's
+//! corner, each explanation of the local player's own hit once its world impact is drawn, by the
+//! delivery store's rule, and the victim's kill cam. Beside it the x-ray, the player's own tank
+//! dressed in the look on the battlefield under the latest record that struck it, is its own
+//! presentation (`game::xray`): no corner, no stage copy. The recorded scenarios in
+//! `assets/dev/pen_cam/` are the tests' fixtures.
 //!
 //! A view over the record: nothing here marches a shell or reads the sim. Every position the shot
 //! reached is the record's (hull-local, the stage's frame); the tank asset, posed by the record's
@@ -21,7 +19,6 @@
 //! bounds, which the camera frames. Every timing comes from [`timeline`] and the record's own
 //! places, and the record's few derived quantities are named in [`plan`].
 
-mod demo;
 pub mod game;
 mod hud;
 mod killcam;
@@ -33,7 +30,6 @@ pub(crate) mod potency;
 mod stage;
 mod timeline;
 mod view;
-mod world;
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -44,7 +40,6 @@ use bevy::ecs::schedule::ScheduleConfigs;
 use bevy::ecs::system::ScheduleSystem;
 use bevy::prelude::*;
 
-pub use self::demo::demo_plugin;
 use self::plan::Plan;
 use self::timeline::CornerKind;
 use crate::camera::{CaptiveCameraPlaced, GunnerCameraPlaced, OrbitCameraSet};
@@ -97,32 +92,14 @@ pub struct Exhibit {
 #[derive(Resource, Default)]
 pub struct Exhibits(pub Vec<Exhibit>);
 
-/// How the presentation draws: the player's reduce-motion setting, and the bench's switches, which
-/// the game leaves at their defaults.
-#[derive(Resource, Clone, PartialEq, Debug)]
+/// How the presentation draws: the player's reduce-motion setting, and the viewer's drag on the
+/// corner camera, which the game leaves at rest.
+#[derive(Resource, Clone, PartialEq, Debug, Default)]
 pub struct Knobs {
     /// No orbit or drift, and the record's events land with short fades.
     pub reduce_motion: bool,
-    /// The slice frame's camera is orthographic.
-    pub slice_ortho: bool,
-    /// The corner fills the window.
-    pub expanded: bool,
-    /// Each field's axis drawn as a line.
-    pub axis_line: bool,
     /// The viewer's drag on the corner camera (yaw, pitch; rad).
     pub orbit: Vec2,
-}
-
-impl Default for Knobs {
-    fn default() -> Self {
-        Self {
-            reduce_motion: false,
-            slice_ortho: true,
-            expanded: false,
-            axis_line: false,
-            orbit: Vec2::ZERO,
-        }
-    }
 }
 
 /// Every entity the corner spawns for its own drawing: the inset camera, its lights, the shell, the
@@ -154,8 +131,7 @@ pub(super) fn materials(app: &mut App) {
 /// The mask cameras copy their viewer's lens and pose ([`look::follow_lens`], [`look::follow_pose`]),
 /// so they run after every writer of either. The corner's viewer, the inset camera, is written
 /// only by [`stage::animate`] in `Update`, which every `PostUpdate` system follows. The kill cam's
-/// viewer is the battlefield camera: in the demo its writers run in `Update`; in the game the
-/// orbit camera writes its pose and lens in [`OrbitCameraSet`], the gunner camera its global pose
+/// viewer is the battlefield camera: the orbit camera writes its pose and lens in [`OrbitCameraSet`], the gunner camera its global pose
 /// and lens in [`GunnerCameraPlaced`] after propagation, and the kill cam its captive pose, lens
 /// and profile in [`CaptiveCameraPlaced`], so all three edges are named here (`crate::camera`
 /// states the writers' own).

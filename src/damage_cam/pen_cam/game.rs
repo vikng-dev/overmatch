@@ -20,7 +20,7 @@
 //!   than any the slot has admitted since it last held nothing, or than any admitted one still
 //!   waiting on its impact, is dropped; of several presented together only the newest opens.
 //! * **What it draws.** The struck tank's stage view, of the tank file the record names, under
-//!   the record's plan over the same tank asset the demo stages ([`TankAsset`]); a component the
+//!   the record's plan over the tank asset the record names ([`TankAsset`]); a component the
 //!   shooter's projection does not list is the base layout, untinted.
 //! * **Teardown.** The slot's entities exist from an arrival until the slot closes with nothing
 //!   queued, a new life of that combatant (a tank's knockout or absence ends one; a free

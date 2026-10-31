@@ -1301,7 +1301,6 @@ fn newest(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::damage_cam::pen_cam::demo::Library;
     use crate::damage_cam::pen_cam::timeline::Condition;
     use crate::damage_cam::shapes::TankAsset;
 
@@ -1310,10 +1309,10 @@ mod tests {
         (0..=16).map(|k| k as f32 / 16.0)
     }
 
-    /// Every record of the demo's playlist, by stem, with its tank's shapes as posed at its shot.
-    fn records() -> Vec<(&'static str, PenetrationReport, TankShapes)> {
+    /// Every recorded scenario, by stem, with its tank's shapes as posed at its shot.
+    fn records() -> Vec<(String, PenetrationReport, TankShapes)> {
         let mut assets = HashMap::<String, TankAsset>::new();
-        Library::reports()
+        crate::damage_cam::pen_cam::plan::tests::records()
             .into_iter()
             .map(|(stem, report)| {
                 let vehicle = report

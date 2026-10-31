@@ -51,7 +51,7 @@ use super::timeline::{self, CornerKind};
 use super::view::{Proxy, StageView, ViewMesh, ViewRoot};
 use super::{Corner, CornerRig, Exhibits, Knobs, WorldViewer};
 use crate::damage_cam::Role;
-use crate::render_policy::{self, CameraProfile, LightProfile, VisualScope};
+use crate::render_policy::{CameraProfile, LightProfile, VisualScope};
 
 /// The corner's clear colour.
 const BACKGROUND: Color = Color::srgb_u8(0x0F, 0x13, 0x18);
@@ -190,9 +190,6 @@ pub fn component_meshes<'a>(
         .collect()
 }
 
-#[derive(GizmoConfigGroup, Default, Reflect)]
-pub struct StageGizmos;
-
 /// What the stage is built for; a change rebuilds it.
 #[derive(Clone, PartialEq)]
 pub(super) struct StageKey {
@@ -276,28 +273,7 @@ impl Stage {
 }
 
 pub fn plugin(app: &mut App) {
-    app.init_resource::<Stage>().insert_gizmo_config(
-        StageGizmos,
-        GizmoConfig {
-            render_layers: render_policy::pen_cam_gizmo_layers(),
-            // The axis line draws over the tank.
-            depth_bias: -1.0,
-            line: GizmoLineConfig {
-                width: 1.5,
-                ..default()
-            },
-            ..default()
-        },
-    );
-}
-
-pub fn spawn(
-    mut commands: Commands,
-    asset_server: Res<AssetServer>,
-    mut images: ResMut<Assets<Image>>,
-    mut stage: ResMut<Stage>,
-) {
-    spawn_inset(&mut commands, &asset_server, &mut images, &mut stage);
+    app.init_resource::<Stage>();
 }
 
 /// The inset camera, inactive, into a placeholder image until the corner's layout sizes one; the
@@ -1461,21 +1437,6 @@ impl<'a> Playing<'a> {
             Visibility::Hidden
         });
     }
-
-    /// Each thrown cone's axis as a line, in the record's frame (the bench's switch).
-    fn axis_lines(&self, gizmos: &mut Gizmos<StageGizmos>) {
-        let (plan, kind, c) = (self.plan, self.kind, self.c);
-        for (index, cone) in plan.cones.iter().enumerate() {
-            if c >= cone_start(plan, kind, index, self.reduce) {
-                let reach = cone.max_reach();
-                gizmos.line(
-                    cone.origin,
-                    cone.origin + cone.axis * reach,
-                    Color::srgb(0.95, 0.95, 0.95),
-                );
-            }
-        }
-    }
 }
 
 /// Animate the stage from the corner's clock and frame the corner camera.
@@ -1550,7 +1511,6 @@ pub fn animate(
         (With<StageCamera>, Without<LineSeg>, Without<FieldVolume>),
     >,
     mut round: StageRoundPose,
-    mut gizmos: Gizmos<StageGizmos>,
 ) {
     let Ok((mut camera, mut eye, mut projection)) = camera.single_mut() else {
         return;
@@ -1633,9 +1593,6 @@ pub fn animate(
             &mut looks,
         );
     }
-    if knobs.axis_line {
-        playing.axis_lines(&mut gizmos);
-    }
 
     // The slice's reveal.
     if let Some((normal, point)) = stage.plane {
@@ -1660,8 +1617,8 @@ pub fn animate(
 /// The views the corner draws `plan`'s fields from, each a camera's pose and lens in the record
 /// frame: the along-shot eye at every one of [`ORBIT_SAMPLES`] spins of a full turn (the glass,
 /// victim and damaged frames, the kill cam's lesson among them), and in a record its verdict
-/// opens in the slice ([`Plan::verdict_kind`], whichever frame a view draws it in) the slice's eye
-/// in both its lenses. The fields' pictures take their pitch from these, at the detail of each
+/// opens in the slice ([`Plan::verdict_kind`], whichever frame a view draws it in) the slice's
+/// orthographic eye. The fields' pictures take their pitch from these, at the detail of each
 /// view that shows them ([`super::picture::pitch_of`]); the viewer's drag, the x-ray and the
 /// gunner's sight see the fields at the pitch these give.
 pub(super) fn field_sightings(plan: &Plan) -> Vec<(Transform, Projection)> {
@@ -1675,13 +1632,13 @@ pub(super) fn field_sightings(plan: &Plan) -> Vec<(Transform, Projection)> {
             plane: Some(slice_plane(plan)),
             ..default()
         };
-        for slice_ortho in [true, false] {
-            let knobs = Knobs {
-                slice_ortho,
-                ..default()
-            };
-            sightings.push(framing(plan, CornerKind::Slice, 0.0, &knobs, &stage));
-        }
+        sightings.push(framing(
+            plan,
+            CornerKind::Slice,
+            0.0,
+            &Knobs::default(),
+            &stage,
+        ));
     }
     sightings
 }
@@ -1740,7 +1697,6 @@ fn framing(
                 .try_normalize()
                 .unwrap_or_else(|| normal.any_orthonormal_vector());
             let yawed = Quat::from_axis_angle(up, orbit.x) * normal;
-            let wide = slice_frame(plan, normal, up, SLICE_LEAD_M, SLICE_MIN_HEIGHT_M);
             let tight = slice_frame(
                 plan,
                 normal,
@@ -1748,31 +1704,16 @@ fn framing(
                 plan.reach(SLICE_LEAD_M),
                 plan.reach(SLICE_MIN_HEIGHT_M),
             );
-            if knobs.slice_ortho {
-                (
-                    Transform::from_translation(tight.center + yawed * 10.0).looking_to(-yawed, up),
-                    Projection::Orthographic(OrthographicProjection {
-                        scaling_mode: ScalingMode::AutoMin {
-                            min_width: tight.width * 1.1,
-                            min_height: tight.height * 1.1,
-                        },
-                        ..OrthographicProjection::default_3d()
-                    }),
-                )
-            } else {
-                // The eye stands as far off the plane as the metre figures put it; the tight frame
-                // is held by narrowing the field from there, never by closing the distance.
-                let distance = 0.55 * wide.height / half_fov.tan();
-                let half = (0.55 * tight.height / distance).atan().min(half_fov);
-                (
-                    Transform::from_translation(tight.center + yawed * distance)
-                        .looking_to(-yawed, up),
-                    Projection::Perspective(PerspectiveProjection {
-                        fov: 2.0 * half,
-                        ..default()
-                    }),
-                )
-            }
+            (
+                Transform::from_translation(tight.center + yawed * 10.0).looking_to(-yawed, up),
+                Projection::Orthographic(OrthographicProjection {
+                    scaling_mode: ScalingMode::AutoMin {
+                        min_width: tight.width * 1.1,
+                        min_height: tight.height * 1.1,
+                    },
+                    ..OrthographicProjection::default_3d()
+                }),
+            )
         }
         CornerKind::Ricochet => {
             let Some(bounce) = plan.bounce.as_ref() else {
@@ -2038,10 +1979,10 @@ fn enclose(points: &[Vec3]) -> (Vec3, f32) {
 
 #[cfg(test)]
 mod tests {
-    use super::super::demo::Library;
     use super::super::hud::ASPECT;
     use super::super::material::Blend;
     use super::super::picture::tests::DETAIL;
+    use super::super::plan::tests::Library;
     use super::super::plan::{LEAD_M, LEG_EPS_M};
     use super::super::timeline::Condition;
     use super::*;
@@ -2135,7 +2076,7 @@ mod tests {
             let kind = plan.kind;
             let pace = pace(plan, kind);
             let (from, to) = (pace.travel_start, pace.travel_end);
-            let name = record.stem;
+            let name = record.stem.as_str();
             assert_eq!(from, kind.travel_start(), "{name}");
             assert!(
                 (head_arc(plan, kind, from, false) - plan.start_arc).abs() < 1e-5,
@@ -2234,7 +2175,7 @@ mod tests {
                 point: (at + leg.normalize() * 0.05).to_array(),
             });
             let cut_plan = Plan::new(&cut, &asset.shapes(&cut.servo_deg));
-            let name = record.stem;
+            let name = record.stem.as_str();
             for (plan, played) in [(&*record.plan, "as recorded"), (&cut_plan, "cut")] {
                 let line = &plan.line;
                 let n = line.points.len() - 1;
@@ -2302,7 +2243,7 @@ mod tests {
         for record in &library.records {
             let plan = &record.plan;
             let kind = plan.kind;
-            let name = record.stem;
+            let name = record.stem.as_str();
             let mut speeds: Vec<f32> = Vec::new();
             for pair in record.report.path.windows(2) {
                 let (a, b) = (Vec3::from(pair[0].point), Vec3::from(pair[1].point));
@@ -2411,7 +2352,7 @@ mod tests {
                 continue;
             };
             let plan = &record.plan;
-            let name = record.stem;
+            let name = record.stem.as_str();
             let flies_on = flies_on(&record.report);
             let last = *plan.line.points.last().unwrap();
             for kind in [CornerKind::Glass, plan.kind] {
@@ -2503,7 +2444,7 @@ mod tests {
                 continue;
             };
             let plan = &record.plan;
-            let name = record.stem;
+            let name = record.stem.as_str();
             let index = plan
                 .burst
                 .as_ref()
@@ -2645,7 +2586,7 @@ mod tests {
             let Some(index) = plan.burst.as_ref().and_then(|b| b.cone) else {
                 continue;
             };
-            let name = record.stem;
+            let name = record.stem.as_str();
             for kind in [CornerKind::Glass, plan.kind] {
                 let pace = pace(plan, kind);
                 let left = shell_share(plan, kind, kind.travel_start(), true);
@@ -2713,7 +2654,7 @@ mod tests {
                 continue;
             };
             let count = record.plan.cones[cone].rays.len();
-            let name = record.stem;
+            let name = record.stem.as_str();
             let (mut app, _) = staged(&library, &asset, index, record.plan.kind, Vec3::ZERO);
             let world = app.world_mut();
             let round = world.resource::<Stage>().round_material.id();
@@ -2863,7 +2804,7 @@ mod tests {
                     .angle_to(Vec2::new(b.x, b.z))
                     .to_degrees()
                     .abs();
-                let name = record.stem;
+                let name = record.stem.as_str();
                 assert!(
                     (turned - rate * elapsed).abs() < NUDGE_TOL_DEG,
                     "{name} {kind:?}: turned {turned}°"
@@ -3034,13 +2975,9 @@ mod tests {
     }
 
     /// The real [`animate`] after [`rebuild`] on a [`staged`] app, with what it reads beside the
-    /// stage: the knobs, the stage's gizmo group (configured without the render side that draws
-    /// it), the inset camera and the round's model.
+    /// stage: the knobs, the inset camera and the round's model.
     fn animated(app: &mut App) {
-        let mut gizmos = GizmoConfigStore::default();
-        gizmos.insert(GizmoConfig::default(), StageGizmos);
         app.insert_resource(Knobs::default())
-            .insert_resource(gizmos)
             .add_systems(Update, animate.after(rebuild));
         app.world_mut().spawn((
             Camera::default(),
@@ -3813,7 +3750,15 @@ mod tests {
         .init_asset::<Image>()
         .init_asset::<StandardMaterial>()
         .init_resource::<Stage>()
-        .add_systems(Startup, spawn);
+        .add_systems(
+            Startup,
+            |mut commands: Commands,
+             asset_server: Res<AssetServer>,
+             mut images: ResMut<Assets<Image>>,
+             mut stage: ResMut<Stage>| {
+                spawn_inset(&mut commands, &asset_server, &mut images, &mut stage);
+            },
+        );
         app.update();
         let world = app.world_mut();
         let shell = world
@@ -3845,12 +3790,12 @@ mod tests {
         );
     }
 
-    /// Fixture data: the playlist's records with every component's pool doubled, so each stood at
+    /// Fixture data: the recorded scenarios with every component's pool doubled, so each stood at
     /// half its pool before the shot, and the first component no dose names left with no hit
     /// points at the shot, lost before it. No recorded scenario carries damage from before its
     /// shot.
     fn with_prior_damage() -> Library {
-        let reports = Library::reports()
+        let reports = super::super::plan::tests::records()
             .into_iter()
             .map(|(stem, mut report)| {
                 for component in &mut report.components {
@@ -4217,7 +4162,7 @@ mod tests {
         let (mut spall, mut inside, mut burst) = (0, 0, 0);
         for record in &library.records {
             let (plan, report) = (&record.plan, &record.report);
-            let name = record.stem;
+            let name = record.stem.as_str();
             for kind in [CornerKind::Glass, plan.kind] {
                 for (index, cone) in plan.cones.iter().enumerate() {
                     let start = cone_start(plan, kind, index, false);
@@ -4300,7 +4245,7 @@ mod tests {
         let (mut later_field, mut front_first) = (0, 0);
         for record in &library.records {
             let (plan, report) = (&record.plan, &record.report);
-            let name = record.stem;
+            let name = record.stem.as_str();
             for kind in [CornerKind::Glass, plan.kind, CornerKind::Victim] {
                 for b in &plan.boxes {
                     let Some(dose) = report.doses.iter().find(|d| d.volume == b.name) else {
@@ -4383,7 +4328,7 @@ mod tests {
                 continue;
             }
             let report = &record.report;
-            let name = record.stem;
+            let name = record.stem.as_str();
             assert_eq!(
                 report.path[1].t, 0.0,
                 "{name}: contact is the path's second node"
@@ -4436,7 +4381,7 @@ mod tests {
 
     /// A record's corner runs no shorter than its frame's minimum and holds its full hold beat and
     /// close after every element has arrived: `hold_from >= settle`, `duration >= settle + hold +
-    /// close`. The hold key and the corner's end in the game, the demo and the x-ray read these.
+    /// close`. The hold key and the corner's end in the game and the x-ray read these.
     /// Both regimes occur: a record that settles late runs past the minimum, and the x-ray's
     /// record-less plan settles early and runs the minimum, so neither a fixed length nor a dropped
     /// minimum passes.
@@ -4447,7 +4392,7 @@ mod tests {
         let plans = library
             .records
             .iter()
-            .map(|r| (r.stem, &*r.plan))
+            .map(|r| (r.stem.as_str(), &*r.plan))
             .chain([("bare", &bare)]);
         let (mut late, mut early) = (0, 0);
         for (name, plan) in plans {

@@ -396,12 +396,6 @@ impl LightProfile {
     }
 }
 
-/// The mask a gizmo group drawn on the pen cam stage takes: gizmos carry no [`VisualScope`], so
-/// their group's config names the channel instead.
-pub(crate) fn pen_cam_gizmo_layers() -> RenderLayers {
-    Channel::mask(&[Channel::PenCamStage])
-}
-
 /// Resolve profiles and scopes into bevy's own components, before anything reads them.
 ///
 /// `PostUpdate`, ahead of `VisibilitySystems::CheckVisibility` (and therefore ahead of

@@ -55,8 +55,6 @@ pub(crate) struct Scene {
     pub(crate) xray: bool,
     /// The armour sandbox's wall prototype ([`RangeWall`]).
     pub(crate) range_wall: Option<RangeWall>,
-    /// The pen cam demo opens with its corner expanded.
-    pub(crate) pen_cam_expanded: bool,
     /// The offline root's scripted demo ([`Demo`]).
     pub(crate) demo: Option<Demo>,
 }
@@ -67,7 +65,6 @@ impl Default for Scene {
             sun_elevation_deg: None,
             xray: true,
             range_wall: None,
-            pen_cam_expanded: false,
             demo: None,
         }
     }
@@ -478,7 +475,6 @@ mod tests {
                     sun_elevation_deg: 12.5,
                     xray: false,
                     range_wall: (case: Blast(kg: 1.0, standoff_m: 3.0), bare: true, witness: true),
-                    pen_cam_expanded: true,
                     demo: TrackPrints(x: 70.0, z: -20.0, heading_deg: 90.0, hold: Pivot),
                 ),
             )"#,
@@ -558,7 +554,6 @@ mod tests {
                     witness: true,
                     help: false,
                 }),
-                pen_cam_expanded: true,
                 demo: Some(Demo::TrackPrints {
                     x: 70.0,
                     z: -20.0,
@@ -588,7 +583,7 @@ mod tests {
             (&None, true, &None, &None)
         );
         let scene = &plan.scene;
-        assert!(scene.xray && !scene.pen_cam_expanded);
+        assert!(scene.xray);
         assert_eq!(
             (scene.sun_elevation_deg, &scene.range_wall, scene.demo),
             (None, &None, None)

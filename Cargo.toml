@@ -193,11 +193,6 @@ path = "src/bin/armor_sandbox.rs"
 test = false
 required-features = ["dev_ui"]
 
-[[bin]]
-name = "pen_cam_demo"
-path = "src/bin/pen_cam_demo.rs"
-test = false
-
 [profile.dev]
 opt-level = 1
 debug = "line-tables-only"

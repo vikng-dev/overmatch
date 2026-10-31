@@ -351,7 +351,7 @@ impl Default for Bindings {
             fire_secondary: ButtonBinding::Key(KeyCode::Space),
             // TUNED: the x-ray's key.
             xray: ButtonBinding::Key(KeyCode::KeyX),
-            // TUNED: the pen cam demo's kill cam keys.
+            // TUNED: the kill cam's keys.
             kill_cam_hold: ButtonBinding::Key(KeyCode::KeyC),
             kill_cam_replay: ButtonBinding::Key(KeyCode::Space),
             // TUNED: the round selector's keys.

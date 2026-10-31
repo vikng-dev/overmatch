@@ -4,9 +4,9 @@
 //! the variable every plugin here is inert.
 //!
 //! [`plugin`] takes the plan's `frames`. It is mounted after `crate::default_plugins` by every
-//! windowed root: the offline route, both sandboxes, the pen cam demo, and the windowed network
-//! client. A plan without `frames` runs its cues on a normal window and takes no frame (the scene
-//! of a frame cost measurement). The cue plugins take the plan's other fields where an authority
+//! windowed root: the offline route, both sandboxes, and the windowed network client. A plan
+//! without `frames` runs its cues on a normal window and takes no frame (the scene of a frame
+//! cost measurement). The cue plugins take the plan's other fields where an authority
 //! can raise their events: [`offline_fell_plugin`], [`offline_impact_plugin`],
 //! [`offline_shot_plugin`] and [`offline_wall_plugin`] on the offline root alone, and
 //! [`server_wall_plugin`] on the dedicated server, which reads the same plan file so that it fires

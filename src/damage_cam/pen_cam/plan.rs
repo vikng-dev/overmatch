@@ -881,6 +881,66 @@ pub(super) mod tests {
         out
     }
 
+    /// Every recorded scenario, planned on the one vehicle the records name, by [`records`]'
+    /// order: the fixture the stage and kill cam tests share. A malformed or unresolved record,
+    /// or a second vehicle, is a broken fixture.
+    pub(in super::super) struct Library {
+        pub records: Vec<Record>,
+        /// The struck vehicle's tank file, shared by every record.
+        pub vehicle: String,
+    }
+
+    pub(in super::super) struct Record {
+        pub stem: String,
+        pub report: PenetrationReport,
+        pub plan: Arc<Plan>,
+    }
+
+    impl Library {
+        pub(in super::super) fn load() -> Self {
+            Self::of(records())
+        }
+
+        /// The library of `reports`, planned on the one vehicle they name.
+        pub(in super::super) fn of(reports: Vec<(String, PenetrationReport)>) -> Self {
+            let vehicle = reports
+                .iter()
+                .find_map(|(_, report)| report.vehicle.clone())
+                .expect("a recorded scenario names its vehicle");
+            let asset = crate::damage_cam::shapes::TankAsset::load(&vehicle).unwrap();
+            let records = reports
+                .into_iter()
+                .map(|(stem, report)| {
+                    assert!(
+                        report.vehicle.as_deref() == Some(vehicle.as_str()),
+                        "{stem}: the records stage one vehicle, {vehicle}"
+                    );
+                    let unresolved = report.unresolved();
+                    assert!(
+                        report.synthetic || unresolved.is_empty(),
+                        "{stem}: {unresolved:?}"
+                    );
+                    let plan = Arc::new(Plan::new(&report, &asset.shapes(&report.servo_deg)));
+                    Record { stem, report, plan }
+                })
+                .collect();
+            Self { records, vehicle }
+        }
+
+        /// Every record as the stage draws it, by the library's index.
+        pub(in super::super) fn exhibits(&self) -> super::super::Exhibits {
+            super::super::Exhibits(
+                self.records
+                    .iter()
+                    .map(|record| super::super::Exhibit {
+                        plan: record.plan.clone(),
+                        servo_deg: record.report.servo_deg.clone(),
+                    })
+                    .collect(),
+            )
+        }
+    }
+
     /// For every recorded scenario: the drawn span starts before contact and ends at or after
     /// it, the energy never rises along the path, the plan holds every field the record threw,
     /// each with a ray for every fragment that left its origin and none for one that did not, a

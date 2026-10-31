@@ -83,7 +83,6 @@ const BARLOW_TEXT_FILES: &[&str] = &[
 const ASCII_ONLY_TEXT_FILES: &[&str] = &[
     "src/sandbox.rs",
     "src/sandbox/wall.rs",
-    "src/damage_cam/pen_cam/demo.rs",
     "src/track_sandbox/mod.rs",
     "src/track_sandbox/suspension_viz.rs",
 ];
