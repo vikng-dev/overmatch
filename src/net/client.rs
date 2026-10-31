@@ -2810,12 +2810,13 @@ mod tests {
         }
     }
 
-    /// A `RecoilSpec` with the given kick (stiffness/damping are irrelevant to the derive).
+    /// A `RecoilSpec` with the given kick (stiffness/damping/stop are irrelevant to the derive).
     fn recoil(kick: f32) -> RecoilSpec {
         RecoilSpec {
             kick,
             stiffness: 100.0,
             damping: 5.0,
+            max_length: crate::provenance::Sourced(0.5),
         }
     }
 

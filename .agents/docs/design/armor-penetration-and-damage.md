@@ -1545,8 +1545,9 @@ across a tick boundary onto moving armour (the `unexpected_exit` above).
   faces are rounded outward to f32.
 - **A launched turret** gets its own envelope by the same rule, in its own frame: its traverse is
   now its pose, and the servos under it are swept.
-- **Not swept: the recoil stroke.** The sheet states a spring, not a stroke, and repeated kicks
-  accumulate, so no stroke bound follows from data; the recoiling parts are held at battery.
+- **The recoil stroke is swept.** Each recoiling barrel's sheet states its recoil stop
+  (`RecoilSpec::max_length`), the buffer's limit, which the spring never passes however fast the
+  gun fires; the barrel's subtree enters the envelope at battery and at the stop.
 - **Pending: step 6b**, the atomic resolution itself. Nothing reads the envelope yet.
 
 Provisional: the computation may move into a refined asset-bake pipeline with dev tooling, which is

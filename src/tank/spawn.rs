@@ -607,6 +607,7 @@ fn insert_weapons(
                     rest: geometry.nodes[barrel_index].transform.translation,
                     stiffness: recoil.stiffness,
                     damping: recoil.damping,
+                    max_length: recoil.max_length.0,
                 });
             }
         }

@@ -384,7 +384,13 @@ TankSpec(
                     9 %"))),
             ],
             fire_mode: Single(reload_secs: 3.0),
-            recoil: (kick: 14.0, stiffness: 90.0, damping: 14.0),
+            // max_length is the recoil stop: the farthest the barrel travels back from battery, m.
+            // The spring's own peak from one shot is 0.53 m (DERIVED, the 64 Hz fixed-step
+            // integration of this kick, stiffness and damping), so a single shot never reaches it.
+            recoil: (kick: 14.0, stiffness: 90.0, damping: 14.0, max_length: (0.58,
+                Unknown("ASSUMED 580 mm, the KwK 36 recoil length a secondary source gives
+                (historyrise.com, 'the technical breakdown of the Tiger's 88mm gun system'); no
+                gun handbook states it in the repo; settled by a cited handbook figure"))),
             fire: [Gunner, Breech, GunBarrel],
             load: [Loader, Breech],
         ),
@@ -400,7 +406,13 @@ TankSpec(
             ],
             fire_mode: Automatic(belt_size: 150, belt_swap_secs: 3.5),
             tracer_every: 5,
-            recoil: (kick: 3.0, stiffness: 240.0, damping: 18.0),
+            // The stop bounds the spring's peak in sustained fire at the gun's cyclic rate, 0.113 m
+            // (DERIVED, 64 Hz fixed-step integration, a kick every 6 ticks), so it holds the barrel
+            // only past that rate.
+            recoil: (kick: 3.0, stiffness: 240.0, damping: 18.0, max_length: (0.12,
+                Unknown("ASSUMED: no handbook figure for the MG 34's barrel travel in the repo;
+                0.12 m clears the spring's peak at the cyclic rate; settled by a cited handbook
+                figure"))),
             fire: [Backup([(1.0, [Gunner]), (1.0, [Loader])]), CoaxMgBarrel],
             load: [Backup([(1.0, [Gunner]), (1.0, [Loader])])],
         ),
@@ -416,7 +428,11 @@ TankSpec(
             ],
             fire_mode: Automatic(belt_size: 150, belt_swap_secs: 3.5),
             tracer_every: 5,
-            recoil: (kick: 3.0, stiffness: 240.0, damping: 18.0),
+            // The stop as the coax's: the same gun and spring.
+            recoil: (kick: 3.0, stiffness: 240.0, damping: 18.0, max_length: (0.12,
+                Unknown("ASSUMED: no handbook figure for the MG 34's barrel travel in the repo;
+                0.12 m clears the spring's peak at the cyclic rate; settled by a cited handbook
+                figure"))),
             fire: [BowGunner, BowMgBarrel],
             // Same rule as the coax: the swap needs the gun's crew.
             load: [BowGunner],

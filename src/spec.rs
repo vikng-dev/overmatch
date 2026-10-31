@@ -404,7 +404,8 @@ impl WeaponSpec {
     }
 
     /// Why the mount cannot spawn or fire, if it cannot: [`TankSpec::validate`]'s mount rules (the
-    /// stowage, the gun, the fire mode against the gun's mechanism, the tracer mix, the timers).
+    /// stowage, the recoil stop, the gun, the fire mode against the gun's mechanism, the tracer mix,
+    /// the timers).
     fn checked(&self) -> Result<(), String> {
         if self.stowage.is_empty() {
             return Err(
@@ -440,6 +441,15 @@ impl WeaponSpec {
                 "round {:?} is stowed with a count of 0 — a stowed round is one the tank carries",
                 stowed.round
             ));
+        }
+        if let Some(recoil) = &self.recoil {
+            let stop = recoil.max_length.0;
+            if !stop.is_finite() || stop <= 0.0 {
+                return Err(format!(
+                    "recoil.max_length must be finite and > 0 m (got {stop}) — the stop bounds the \
+                     barrel's stroke"
+                ));
+            }
         }
         let cycle = self.fire_cycle()?;
         self.resolved_rounds().map_err(|err| err.to_string())?;
@@ -519,7 +529,7 @@ impl WeaponSpec {
     }
 }
 
-/// A weapon's procedural barrel-recoil spring (a 1-DOF damped spring along the bore).
+/// A weapon's procedural barrel recoil: a 1-DOF damped spring along the bore, between two stops.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct RecoilSpec {
@@ -529,6 +539,11 @@ pub struct RecoilSpec {
     pub stiffness: f32,
     /// Damping; slightly underdamped lets the barrel lumber home with a small settle.
     pub damping: f32,
+    /// The recoil stop: the farthest the barrel travels back from battery, in METRES, the buffer's
+    /// mechanical limit. No run of kicks carries the barrel past it (`shooting::apply_recoil`), so
+    /// it bounds the stroke the tank's envelope sweeps (`bake::envelope`). `validate()` refuses one
+    /// that is not finite and positive.
+    pub max_length: Sourced<f32>,
 }
 
 /// A crew viewpoint — the camera/optic anchor. A closed set of kinds (each its own bespoke camera
@@ -1228,6 +1243,8 @@ impl TankSpec {
     /// - `Automatic { belt_swap_secs: < 0.0 }` / `Single { reload_secs: < 0.0 }` — a negative timer.
     /// - A mount whose fire mode and its gun's mechanism disagree (a belt on a single-shot gun, a
     ///   `tracer_every` on a single-shot mount, none on a belt): `fire_cycle` refuses the pair.
+    /// - A recoil stop (`RecoilSpec::max_length`) that is not finite and positive: a NaN stop
+    ///   compares false and never holds the barrel, and one at or ahead of battery leaves no stroke.
     ///
     /// The gun's own numbers are the gun registry's to refuse (`crate::guns`): a cyclic rate that is
     /// not finite and positive never loads, so `60 / cyclic_rpm` is always a real interval here.
@@ -1815,7 +1832,7 @@ TankSpec(
                 (round: "88mm_APCR", count: (10, Tuned("fixture"))),
             ],
             fire_mode: Single(reload_secs: 3.0),
-            recoil: (kick: 10.0, stiffness: 90.0, damping: 14.0),
+            recoil: (kick: 10.0, stiffness: 90.0, damping: 14.0, max_length: (0.5, Tuned("fixture"))),
             fire: [Gunner, Breech],
             load: [Gunner],
         ),
@@ -2270,6 +2287,28 @@ TankSpec(
                 .is_ok(),
             "reload_secs: 0 is a legal instant reload"
         );
+    }
+
+    /// `validate()` refuses a recoil stop that is not a finite positive length, naming the weapon.
+    /// `shooting::apply_recoil` holds the barrel at the stop and `bake::envelope` sweeps the stroke
+    /// to it: a NaN stop compares false and never holds, an infinite one bounds nothing, and one at
+    /// or ahead of battery leaves no stroke. A mutant that drops any arm of the check loads these.
+    #[test]
+    fn validate_rejects_a_recoil_stop_that_is_not_a_positive_length() {
+        for stop in [0.0, -0.1, f32::NAN, f32::INFINITY] {
+            let mut spec = fixture();
+            spec.weapons
+                .get_mut("Cannon")
+                .and_then(|weapon| weapon.recoil.as_mut())
+                .expect("the fixture's cannon recoils")
+                .max_length = Sourced(stop);
+            let err = spec.validate().unwrap_err().to_string();
+            assert!(
+                err.contains("Cannon") && err.contains("max_length"),
+                "stop {stop}: {err}"
+            );
+        }
+        assert!(fixture().validate().is_ok(), "the fixture's own stop loads");
     }
 
     /// Transmission-block runtime invariants: non-finite capacities NaN out the

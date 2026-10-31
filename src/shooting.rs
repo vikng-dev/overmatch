@@ -31,17 +31,19 @@ pub(crate) fn recoil_impulse(bore: Dir3, mass: f32, speed: f32) -> Vec3 {
     bore * (-mass * speed * RECOIL_FEEL)
 }
 
-/// Procedural barrel recoil CONFIG: the damped-spring tuning + the barrel's rest (battery)
-/// position, built during complete tank construction from the weapon's `recoil` spec and barrel
-/// node's authored translation — spawn-time data, not a bind-time transform capture. The recoil
-/// STATE (offset/velocity) is sim truth — the muzzle rides the barrel — and lives root-resident
-/// in `TankSim::weapons` (see `TankSim`), keyed by the barrel's `WeaponIndex`. The translational
-/// cousin of `Servo`.
+/// Procedural barrel recoil CONFIG: the damped-spring tuning, the recoil stop + the barrel's rest
+/// (battery) position, built during complete tank construction from the weapon's `recoil` spec and
+/// barrel node's authored translation — spawn-time data, not a bind-time transform capture. The
+/// recoil STATE (offset/velocity) is sim truth — the muzzle rides the barrel — and lives
+/// root-resident in `TankSim::weapons` (see `TankSim`), keyed by the barrel's `WeaponIndex`. The
+/// translational cousin of `Servo`.
 #[derive(Component)]
 pub(crate) struct RecoilParams {
     pub(crate) rest: Vec3,
     pub(crate) stiffness: f32,
     pub(crate) damping: f32,
+    /// The farthest the barrel travels back from `rest`, m (`RecoilSpec::max_length`).
+    pub(crate) max_length: f32,
 }
 
 /// THE single expression of how a fired weapon kicks its barrel: add `weapon`'s `recoil.kick` to
@@ -465,9 +467,14 @@ fn apply_recoil(
             -params.stiffness * state.recoil_offset - params.damping * state.recoil_velocity;
         state.recoil_velocity += accel * dt;
         state.recoil_offset += state.recoil_velocity * dt;
-        // Battery stop — the barrel can't return past its rest position.
+        // The two stops: battery ahead (the barrel can't return past its rest position) and the
+        // recoil stop behind (the buffer's limit). Each holds the barrel and zeroes its velocity,
+        // so no run of kicks carries it past either; `bake::envelope` sweeps the stroke between.
         if state.recoil_offset < 0.0 {
             state.recoil_offset = 0.0;
+            state.recoil_velocity = 0.0;
+        } else if state.recoil_offset > params.max_length {
+            state.recoil_offset = params.max_length;
             state.recoil_velocity = 0.0;
         }
         // Recoil rides back along the bore (+local Z), measured from the rest position.
@@ -484,7 +491,10 @@ mod tests {
     use bevy::ecs::system::RunSystemOnce;
     use bevy::prelude::*;
 
-    use super::{advance_weapon_clock, fire, plugin, tick_weapon_gate, tracer_round};
+    use super::{
+        RecoilParams, advance_weapon_clock, apply_recoil, fire, plugin, tick_weapon_gate,
+        tracer_round,
+    };
     use crate::command::{RoundSelect, RoundStep, TankCommand};
     use crate::damage::{CrewStation, Dead, Group, Part, Requirement, VolumeOf};
     use crate::spec::{FireCycle, Trigger};
@@ -1134,6 +1144,7 @@ mod tests {
             kick: 1.5,
             stiffness: 10.0,
             damping: 1.0,
+            max_length: crate::provenance::Sourced(0.5),
         });
         weapon.barrel = Some(barrel);
     }
@@ -1332,5 +1343,66 @@ mod tests {
             1,
             "an echo-less round must not lose its only presentation",
         );
+    }
+
+    /// Invariant: a recoiling barrel never travels past its recoil stop, however fast it is kicked,
+    /// and stops dead there: `apply_recoil` holds the offset at `max_length` and zeroes the velocity.
+    /// The tank envelope (`bake::envelope`) sweeps the stroke only as far as the stop, so it relies
+    /// on this bound. A kick every tick, the fastest any weapon fires (`arm` spaces shots at least
+    /// a tick apart), drives the spring past the stop; a mutant that drops the clamp carries the
+    /// barrel through it, and one that keeps the velocity at the stop leaves it moving there.
+    #[test]
+    fn rapid_kicks_never_carry_the_barrel_past_its_recoil_stop() {
+        // Fixture data: a stiff kick against a short stop, at the game's 64 Hz tick.
+        const KICK: f32 = 2.0;
+        const STOP: f32 = 0.3;
+        let rest = Vec3::new(0.0, 1.0, 2.0);
+        let mut world = World::new();
+        let mut time = Time::<()>::default();
+        time.advance_by(core::time::Duration::from_secs_f64(1.0 / 64.0));
+        world.insert_resource(time);
+        let root = world
+            .spawn(TankSim {
+                weapons: vec![WeaponState::default()],
+            })
+            .id();
+        let barrel = world
+            .spawn((
+                Transform::from_translation(rest),
+                RecoilParams {
+                    rest,
+                    stiffness: 90.0,
+                    damping: 14.0,
+                    max_length: STOP,
+                },
+                WeaponIndex(0),
+                TankRoot(root),
+            ))
+            .id();
+
+        let mut at_stop = 0;
+        for tick in 0..256 {
+            world.get_mut::<TankSim>(root).expect("sim on root").weapons[0].recoil_velocity += KICK;
+            world.run_system_once(apply_recoil).unwrap();
+            let state = weapon_state(&mut world, root);
+            assert!(
+                (0.0..=STOP).contains(&state.recoil_offset),
+                "tick {tick}: offset {} outside [battery, stop {STOP}]",
+                state.recoil_offset
+            );
+            assert_eq!(
+                world.get::<Transform>(barrel).expect("barrel").translation,
+                rest + Vec3::Z * state.recoil_offset,
+                "tick {tick}: the barrel node sits where the offset says",
+            );
+            if state.recoil_offset == STOP {
+                at_stop += 1;
+                assert_eq!(
+                    state.recoil_velocity, 0.0,
+                    "tick {tick}: the barrel stops dead at the stop"
+                );
+            }
+        }
+        assert!(at_stop > 0, "a kick every tick reaches the stop");
     }
 }
