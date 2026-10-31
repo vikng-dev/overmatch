@@ -201,6 +201,9 @@ pub(super) struct ArrivalDelay {
     link: u64,
     /// The per-frame digest, refreshed by [`refresh_arrival_stats`].
     pub(super) stats: ArrivalStats,
+    /// `samples` when `stats` was last digested; `None` until the first digest of this link. The
+    /// digest is a pure function of the samples, so an equal count means it is current.
+    digested: Option<u64>,
 }
 
 impl ArrivalDelay {
@@ -227,10 +230,14 @@ impl ArrivalDelay {
         self.samples += 1;
     }
 
-    /// Recompute the digest. `Q_p` is the smallest sample with cumulative mass ≥ p (at ring
-    /// capacity `1/(1−p)` that is the window maximum by construction); `min` anchors on the spike
-    /// window.
+    /// Recompute the digest if a sample arrived since the last one. `Q_p` is the smallest sample
+    /// with cumulative mass ≥ p (at ring capacity `1/(1−p)` that is the window maximum by
+    /// construction); `min` anchors on the spike window.
     fn refresh(&mut self, scratch: &mut Vec<f64>) {
+        if self.digested == Some(self.samples) {
+            return;
+        }
+        self.digested = Some(self.samples);
         if self.ring.is_empty() {
             self.stats = ArrivalStats::default();
             return;
@@ -346,7 +353,8 @@ fn record_packet_arrival(
     );
 }
 
-/// Digest the estimator once per frame, ahead of both margin laws and the delay law.
+/// Digest the estimator on each frame that brought a sample (or followed a reset), ahead of both
+/// margin laws and the delay law.
 pub(super) fn refresh_arrival_stats(
     mut estimator: ResMut<ArrivalDelay>,
     mut scratch: Local<Vec<f64>>,
@@ -609,6 +617,26 @@ mod tests {
         assert!(
             !dense.stats.warmed(),
             "a full ring inside a short span is still warmup"
+        );
+    }
+
+    /// A NEW LINK DIGESTS EMPTY ON ITS FIRST FRAME: the digest is skipped while the sample count
+    /// stands, and a reset starts the count over, so a reset must still re-digest or the new link
+    /// reads the old link's spread (the delay law and the debug readout both arm on it). Mutant:
+    /// a plain count defaulting to 0 in place of the `None` marker — the reset's zero count reads
+    /// as digested, the stale digest survives and this reds.
+    #[test]
+    fn a_reset_redigests_though_no_sample_arrived() {
+        let mut estimator = fed((0..129).map(|_| 0.0));
+        assert!(estimator.stats.warmed(), "the old link's digest is live");
+        estimator.reset_for_new_link();
+        estimator.refresh(&mut Vec::new());
+        assert_eq!(estimator.stats, ArrivalStats::default());
+        estimator.record(0.0, Tick(5), TICK_SECS);
+        estimator.refresh(&mut Vec::new());
+        assert_eq!(
+            estimator.stats.samples, 1,
+            "a sample after the reset is digested"
         );
     }
 
