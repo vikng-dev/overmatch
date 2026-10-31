@@ -278,7 +278,8 @@ sleeping piece wakes when a collider it touches goes. Without it, a piece stays 
 after its static support despawns (MEASURED: the test fails with the observer removed).
 
 New counts, MEASURED over 10 s on a fixture lattice of 54 cubes, 0.4 m, 2 cm apart, beside a
-3 × 2 × 6 m box that never sleeps (a driven tank's stand-in):
+3 × 2 × 6 m box that never sleeps (a driven tank's stand-in). The harness is not in the repo or a
+lane branch (`git grep lattice` finds nothing); the numbers rest on an uncommitted harness:
 
 | Case | Touching the box | Awake of 54 | Active pairs | Sleeping pairs |
 |---|---|---|---|---|
@@ -289,9 +290,9 @@ New counts, MEASURED over 10 s on a fixture lattice of 54 cubes, 0.4 m, 2 cm apa
 | Pressed, box free to sleep | 18 | 0 | 329 | 73 |
 
 - **The risk B1 named is real.** An island sleeps whole, so a pile against a hull stays awake
-  through every piece touching it. At the README's ~8–9 µs per live piece per M4 tick, the thrown
+  through every piece touching it. At the README's ~8–9 µs per live piece per M4 tick (MEASURED during freeze-and-wake churn, so it may not hold for a settled awake pile), the thrown
   case's 30 extra awake pieces cost ~0.26 ms per tick per such pile (DERIVED). Under the freeze rule
-  only the 6 hull-touching pieces stayed live. Avian offers nothing per body: `Sleeping` on one body
+  only the 6 hull-touching pieces stayed live (DERIVED from the freeze rule, not measured). Avian offers nothing per body: `Sleeping` on one body
   sleeps its whole island, the tank included. A contact that generates no constraints does not link
   islands, but then the tank passes through the rubble.
 - **A sleeping body is not free (new, A7).** `ContactGraph::sleep_entity_with` moves only touching

@@ -992,7 +992,7 @@ fn spawn_piece(
             Position(at),
             Rotation(root.rotation),
             Visibility::default(),
-            crate::debris::DebrisPiece::default(),
+            crate::debris::DebrisPiece,
             crate::eased_dynamic_body(),
             LinearVelocity(root.rotation * velocity),
             AngularVelocity(root.rotation * spin),

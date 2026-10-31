@@ -1,5 +1,5 @@
 //! The debris stress lever: a dev-only instrument that prices server-simulated wall fragments,
-//! `OVERMATCH_DEBRIS_STRESS=<pieces>:<period_s>[:<sleeping_cap>]` on the dedicated
+//! `OVERMATCH_DEBRIS_STRESS=<pieces>:<period_s>` on the dedicated
 //! server. Unset, empty, `off`, `false` or zero pieces is off, and an off server mounts none of its
 //! releases.
 //!
@@ -10,7 +10,9 @@
 //! houses, trunks), `Layer::Vehicle` (the tanks' collision proxies) and the other pieces.
 //!
 //! REST is the game's own rule ([`crate::debris`]), which a building's fallen chunks follow too.
-//! `sleeping_cap` (`0` or absent: none) despawns the oldest sleeping pieces past it.
+//! The lever has no cap on sleeping pieces: a despawn wakes the piece's whole island (avian's
+//! `remove_body_on`), and the oldest pieces sit at the bottom of their piles, so a cap would cause
+//! the wakes the lever measures.
 //!
 //! REPLICATION: each server piece, the lever's and a building's ([`WallPiece`]) alike, is a
 //! server-only body plus one replicated carrier entity holding its [`DebrisPose`] ([`Carrier`]),
@@ -84,7 +86,6 @@ const HALF_HEIGHT_M: f32 = 0.2;
 struct Lever {
     pieces: u32,
     period_s: f64,
-    sleeping_cap: Option<u32>,
 }
 
 impl Lever {
@@ -100,27 +101,17 @@ impl Lever {
         {
             return Ok(None);
         }
-        let malformed =
-            || format!("{LEVER}={value}: want <pieces>:<period_s>[:<sleeping_cap>], or off");
+        let malformed = || format!("{LEVER}={value}: want <pieces>:<period_s>, or off");
         let fields: Vec<&str> = value.split(':').map(str::trim).collect();
-        if !(2..=3).contains(&fields.len()) {
+        let [pieces, period_s] = fields[..] else {
             return Err(malformed());
-        }
-        let count = |field: &str| field.parse::<u32>().map_err(|_| malformed());
-        let pieces = count(fields[0])?;
-        let period_s: f64 = fields[1].parse().map_err(|_| malformed())?;
+        };
+        let pieces: u32 = pieces.parse().map_err(|_| malformed())?;
+        let period_s: f64 = period_s.parse().map_err(|_| malformed())?;
         if !(period_s.is_finite() && period_s > 0.0) {
             return Err(malformed());
         }
-        let sleeping_cap = match fields.get(2) {
-            Some(field) => Some(count(field)?).filter(|cap| *cap > 0),
-            None => None,
-        };
-        Ok((pieces > 0).then_some(Self {
-            pieces,
-            period_s,
-            sleeping_cap,
-        }))
+        Ok((pieces > 0).then_some(Self { pieces, period_s }))
     }
 }
 
@@ -158,7 +149,6 @@ pub(super) struct DebrisStress {
     next_release_s: f64,
     breaches: u64,
     released: u64,
-    despawned: u64,
 }
 
 impl DebrisStress {
@@ -170,12 +160,11 @@ impl DebrisStress {
             next_release_s: 0.0,
             breaches: 0,
             released: 0,
-            despawned: 0,
         }
     }
 }
 
-/// The stats line's view of the pieces: present only while the lever is armed.
+/// The stats line's view of the pieces, the lever's and buildings'.
 #[derive(bevy::ecs::system::SystemParam)]
 pub(super) struct DebrisCensus<'w, 's> {
     stress: Option<Res<'w, DebrisStress>>,
@@ -184,17 +173,18 @@ pub(super) struct DebrisCensus<'w, 's> {
 }
 
 impl DebrisCensus<'_, '_> {
-    /// `live` (awake) and `sleeping` pieces now, the lever's and buildings'; the cumulative counts
-    /// since the server started: breaches, lever pieces released, despawned by `sleeping_cap`.
-    pub(super) fn json(&self) -> Option<Value> {
-        let stress = self.stress.as_ref()?;
-        Some(json!({
+    /// `live` (awake) and `sleeping` pieces now, always; while the lever is armed also its
+    /// cumulative counts since the server started: `breaches` and lever pieces `released`.
+    pub(super) fn json(&self) -> Value {
+        let mut census = json!({
             "live": self.live.iter().count(),
             "sleeping": self.sleeping.iter().count(),
-            "breaches": stress.breaches,
-            "released": stress.released,
-            "despawned": stress.despawned,
-        }))
+        });
+        if let Some(stress) = &self.stress {
+            census["breaches"] = json!(stress.breaches);
+            census["released"] = json!(stress.released);
+        }
+        census
     }
 }
 
@@ -213,15 +203,11 @@ pub(super) fn install_server(app: &mut App) -> Result<(), String> {
         return Ok(());
     };
     info!(
-        "server: debris stress — a breach of {} pieces every {} s, sleeping cap {:?} ({LEVER})",
-        lever.pieces, lever.period_s, lever.sleeping_cap
+        "server: debris stress — a breach of {} pieces every {} s ({LEVER})",
+        lever.pieces, lever.period_s
     );
     app.insert_resource(DebrisStress::new(lever));
     app.add_systems(FixedUpdate, release_breaches);
-    app.add_systems(
-        FixedPostUpdate,
-        despawn_oldest_sleeping.after(PhysicsSystems::StepSimulation),
-    );
     Ok(())
 }
 
@@ -380,7 +366,7 @@ fn release_breaches(
         // placeholder pose.
         commands.spawn((
             Name::new("Debris"),
-            DebrisPiece::default(),
+            DebrisPiece,
             Carrier(carrier),
             Position(release.position),
             Rotation(release.rotation),
@@ -409,33 +395,6 @@ fn publish_poses(
             });
         }
     }
-}
-
-/// `FixedPostUpdate`: past `sleeping_cap`, despawn the oldest sleeping pieces and their carriers.
-fn despawn_oldest_sleeping(
-    mut stress: ResMut<DebrisStress>,
-    sleeping: Query<(Entity, &DebrisPiece, Option<&Carrier>), With<Sleeping>>,
-    mut commands: Commands,
-) {
-    let Some(cap) = stress.lever.sleeping_cap else {
-        return;
-    };
-    let count = sleeping.iter().count();
-    let Some(excess) = count.checked_sub(cap as usize).filter(|excess| *excess > 0) else {
-        return;
-    };
-    let mut oldest: Vec<(u64, Entity, Option<Entity>)> = sleeping
-        .iter()
-        .map(|(piece, body, carrier)| (body.seq, piece, carrier.map(|c| c.0)))
-        .collect();
-    oldest.sort_unstable_by_key(|(seq, ..)| *seq);
-    for (_, piece, carrier) in oldest.into_iter().take(excess) {
-        commands.entity(piece).despawn();
-        if let Some(carrier) = carrier {
-            commands.entity(carrier).despawn();
-        }
-    }
-    stress.despawned += excess as u64;
 }
 
 /// The client's shared fragment mesh and material.
@@ -540,27 +499,17 @@ mod tests {
             Ok(Some(Lever {
                 pieces: 35,
                 period_s: 5.0,
-                sleeping_cap: None,
             }))
         );
         assert_eq!(
-            Lever::parse(Some(" 200 : 2.5 : 1000 ")),
+            Lever::parse(Some(" 200 : 2.5 ")),
             Ok(Some(Lever {
                 pieces: 200,
                 period_s: 2.5,
-                sleeping_cap: Some(1000),
             }))
         );
-        assert_eq!(
-            Lever::parse(Some("200:2.5:0")),
-            Ok(Some(Lever {
-                pieces: 200,
-                period_s: 2.5,
-                sleeping_cap: None,
-            }))
-        );
-        // A fourth field is refused, so a run scripted for another form never measures a cap it
-        // did not ask for.
+        // A third field is refused, so a run scripted for the lever's old cap form fails at launch
+        // instead of measuring a condition it did not ask for.
         for bad in [
             "35",
             "35:",
@@ -568,6 +517,7 @@ mod tests {
             "35:-1",
             "x:5",
             "35:5:x",
+            "200:2.5:1000",
             "12:2:8192:512",
             "on",
         ] {
@@ -623,7 +573,7 @@ mod tests {
         let piece = app
             .world_mut()
             .spawn((
-                DebrisPiece::default(),
+                DebrisPiece,
                 Carrier(carrier),
                 Position(pose.position),
                 Rotation(pose.rotation),

@@ -1058,7 +1058,7 @@ pub(crate) fn plugin(app: &mut App) {
     // the held set once.
     app.component::<crate::hull_marks::HullMarks>()
         .replicate_diff();
-    // Every server piece's carrier: one pose per piece, written only while it moves, so a frozen
+    // Every server piece's carrier: one pose per piece, written only while it moves, so a sleeping
     // piece sends nothing more. A building piece's carrier is interpolated, so it draws at the
     // cursor the hulls draw at; the stress lever's are not, and apply on arrival.
     app.component::<super::debris_stress::DebrisPose>()

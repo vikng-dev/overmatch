@@ -2,47 +2,45 @@
 //! one rule every loose piece follows, a building's fallen chunks ([`crate::buildings::breakage`])
 //! and the debris stress lever's fixture fragments (`net::debris_stress`) alike. The authority
 //! alone simulates a piece; a replica draws it at the pose the network carries. A piece is a body
-//! with [`DebrisPiece`]; its colliders are the body's own ([`RigidBodyColliders`]).
+//! with [`DebrisPiece`]; its colliders are the body's own ([`RigidBodyColliders`]). Paths below
+//! are under `vendor/avian3d-0.7.0-child-pose/src/`.
 //!
 //! REST IS AVIAN'S ISLAND SLEEP. A piece is a dynamic body all match; nothing here changes its
 //! body type. Avian 0.7 links dynamic bodies through touching contacts into islands and puts an
 //! island to sleep once every member has stayed under its `SleepThreshold` for `TimeToSleep`
 //! (0.15 m/s, 0.15 rad/s and 0.5 s, avian's defaults, ASSUMED to suit a piece). A sleeping body
-//! leaves the solver, its contact pairs move to the sleeping set the narrow phase skips, and it
-//! keeps its mass, so what touches it next meets finite mass. An awake body that starts touching a
-//! sleeping one wakes its whole island (`narrow_phase/system_param.rs`), as does a body or a body's
-//! collider of that island going (`narrow_phase/mod.rs`, `remove_body_on`, `remove_collider_on`).
-//! An island sleeps whole: a piece touching an awake body that is no piece (a driven tank, which
-//! applies forces every tick) shares its island and stays awake while it touches, with every
-//! piece that touches it in turn.
+//! leaves the solver and keeps its mass, so what touches it next meets finite mass. Only its
+//! touching contact pairs move to the sleeping set the narrow phase skips
+//! (`collision/contact_types/contact_graph.rs:797`); a pair that overlaps in bounds without
+//! touching stays active and is recomputed every tick (`collision/narrow_phase/system_param.rs:480`).
+//! An awake body that starts touching a sleeping one wakes its whole island
+//! (`collision/narrow_phase/system_param.rs:247-261`), as does a body or a body's collider of that
+//! island going (`collision/narrow_phase/mod.rs:484,528`). An island sleeps whole: a piece touching
+//! an awake body that is no piece (a driven tank) shares its island and stays awake while it
+//! touches, with every piece that touches it in turn. A tank never sleeps (DERIVED): a non-zero
+//! force call resets the sleep timer (`dynamics/rigid_body/forces/query_data.rs:345,687`) and the
+//! track code applies forces every tick (`src/track/sim.rs:870`).
 //!
 //! THE ONE WAKE AVIAN LACKS ([`wake_on_collider_gone`]): avian wakes no body when a collider it
-//! touches goes without a dynamic body of its own (`remove_collider`'s TODO in its narrow phase),
+//! touches goes without a dynamic body of its own (the TODO at `collision/narrow_phase/mod.rs:414`),
 //! so a building chunk turned to dust under a sleeping piece would leave the piece hanging. Every
 //! sleeping piece touching a collider as it goes wakes. A piece stays all match: nothing here
 //! despawns one.
+//!
+//! HOW MANY PIECES (DERIVED from `buildings::breakage`): a chunk leaves its building at most once
+//! and a loose piece never splits, so the pieces of a map never exceed its breakable chunks, and
+//! nothing else limits them. The shipped map's bound is 74,370 (MEASURED: 1,005 brick chunks in
+//! `assets/buildings/house_1/house_1.building.ron`, the elements whose material states a seam, times
+//! the 74 `house_proxy` placements in `assets/maps/kalinovo/level.json`; wood chunks never break).
+//! Awake pieces are the ones in the solver. A sleeping piece's own per-tick cost and an awake pile
+//! held by a tank's island (above) are both unpriced.
 
 use avian3d::prelude::*;
 use bevy::prelude::*;
 
-/// A piece body under the rule: its release order, numbered as it is added. A piece spawns
-/// dynamic with it.
-#[derive(Component, Clone, Copy, Debug, Default)]
-pub(crate) struct DebrisPiece {
-    pub(crate) seq: u64,
-}
-
-/// Number each piece as it is added, in release order.
-fn number(
-    added: On<Add, DebrisPiece>,
-    mut released: Local<u64>,
-    mut pieces: Query<&mut DebrisPiece>,
-) {
-    if let Ok(mut piece) = pieces.get_mut(added.entity) {
-        piece.seq = *released;
-        *released += 1;
-    }
-}
+/// A piece body under the rule. A piece spawns dynamic with it.
+#[derive(Component, Clone, Copy, Debug)]
+pub(crate) struct DebrisPiece;
 
 /// A collider about to go: every sleeping piece it touches wakes. `Discard` runs before avian's
 /// own `Remove` observer drops the collider's contact pairs, so they are still there to read.
@@ -66,7 +64,7 @@ fn wake_on_collider_gone(
 
 /// Mount the rule.
 pub(crate) fn sim_plugin(app: &mut App) {
-    app.add_observer(number).add_observer(wake_on_collider_gone);
+    app.add_observer(wake_on_collider_gone);
 }
 
 #[cfg(test)]
@@ -105,7 +103,7 @@ mod tests {
     fn piece(app: &mut App, at: Vec3) -> Entity {
         app.world_mut()
             .spawn((
-                DebrisPiece::default(),
+                DebrisPiece,
                 Position(at),
                 Rotation::default(),
                 RigidBody::Dynamic,
@@ -141,35 +139,6 @@ mod tests {
             .expect("the piece came to rest and slept within 10 s")
     }
 
-    /// A PIECE AT REST SLEEPS, A DYNAMIC BODY STILL: a piece dropped from 3 m onto the ground falls
-    /// asleep there, never in the air, and keeps `RigidBody::Dynamic`. The server's per-tick cost
-    /// of settled rubble rests on it: a mutant that disables sleeping on pieces leaves every one
-    /// in the solver for the match, and one that switches a resting piece's body type brings back
-    /// the rebuild of its contacts and island on every rest and every wake.
-    #[test]
-    fn a_piece_at_rest_sleeps_a_dynamic_body_still() {
-        let mut app = settling(Vec3::NEG_Y * 9.81);
-        slab(&mut app, 0.0);
-        let falling = piece(&mut app, Vec3::Y * 3.0);
-        let tick = until_asleep(&mut app, falling);
-        let height = app.world().get::<Position>(falling).unwrap().0.y;
-        assert!(
-            height < 0.25,
-            "asleep at tick {tick} at {height} m, on the ground"
-        );
-        assert_eq!(
-            app.world().get::<RigidBody>(falling),
-            Some(&RigidBody::Dynamic)
-        );
-        for _ in 0..64 {
-            app.update();
-        }
-        assert!(
-            app.world().get::<Sleeping>(falling).is_some(),
-            "it stays asleep"
-        );
-    }
-
     /// A SLEEPING PIECE WAKES WHEN WHAT IT RESTS ON GOES: a piece asleep on a static slab is awake
     /// in the tick after the slab despawns (a chunk turned to dust under it), and falls. Avian
     /// wakes nothing for a static collider's removal, so a mutant that drops
@@ -196,7 +165,10 @@ mod tests {
     /// sliding into a piece asleep on the ground, a tank's stand-in (no piece) or a thrown piece,
     /// finds it awake and moving in the first tick the two touch, and pushes it. A rule that rested
     /// pieces by making them static would meet the first contact with infinite mass; one that woke
-    /// only for a tank would leave a thrown piece bouncing off a fixed block.
+    /// only for a tank would leave a thrown piece bouncing off a fixed block. No game code runs
+    /// here: this is the tripwire on avian's wake-on-touch (`collision/narrow_phase/system_param.rs:
+    /// 247-261`, `dynamics/solver/islands/mod.rs:964-966`) the module's rest rule rests on, and
+    /// the one test of it.
     #[test]
     fn a_body_that_touches_a_sleeping_piece_wakes_and_pushes_it() {
         for mover_is_a_piece in [false, true] {
@@ -216,7 +188,7 @@ mod tests {
             ));
             if mover_is_a_piece {
                 mover.insert((
-                    DebrisPiece::default(),
+                    DebrisPiece,
                     CollisionLayers::new([Layer::Debris], LayerMask::ALL),
                 ));
             } else {
@@ -247,32 +219,5 @@ mod tests {
                 "the rubble was pushed (mover a piece: {mover_is_a_piece})"
             );
         }
-    }
-
-    /// A PIECE RESTING ON AN AWAKE BODY STAYS AWAKE: a piece on a body that never sleeps (a driven
-    /// tank's stand-in) shares its island and never sleeps, so it stays mobile with what carries
-    /// it. A rule that slept pieces one by one would leave it hanging when its carrier moves off.
-    #[test]
-    fn a_piece_on_an_awake_body_stays_awake() {
-        let mut app = settling(Vec3::NEG_Y * 9.81);
-        slab(&mut app, 0.0);
-        app.world_mut().spawn((
-            Position(Vec3::Y * 0.5),
-            Rotation::default(),
-            RigidBody::Dynamic,
-            SleepingDisabled,
-            Collider::cuboid(3.0, 1.0, 3.0),
-            ColliderDensity(1000.0),
-            CollisionLayers::new([Layer::Vehicle], LayerMask::ALL),
-        ));
-        let riding = piece(&mut app, Vec3::Y * 1.25);
-        for _ in 0..320 {
-            app.update();
-            assert!(app.world().get::<Sleeping>(riding).is_none());
-        }
-        assert!(
-            app.world().get::<Position>(riding).unwrap().0.y > 1.1,
-            "it rests on the carrier"
-        );
     }
 }

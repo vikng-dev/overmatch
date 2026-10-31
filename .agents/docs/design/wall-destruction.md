@@ -653,7 +653,7 @@ A rest timer is debounce, not proof of support.
 
 **OWNER DECISION — cap semantics.**
 Recommend capping detailed Avian bodies, not declaring excess matter static.
-The inherited **ASSUMED cap of 256 detailed bodies** is a resource setting, not a physical constant.
+The inherited **ASSUMED cap of 256 detailed bodies** is a resource setting, not a physical constant. It is not implemented: no cap exists in the code.
 
 Reserve slots before activation.
 Use bonded compounds where internal motion is negligible.
@@ -673,9 +673,11 @@ Rubble rests through Avian's island sleep and its wake on contact.
 No resting piece switches to a static body: a switch rebuilt the piece's contacts and woke its island, and the switching undid Avian's own sleep (`.agents/scratch/destruction-2026-10-30-buildings/debris-cost-survey.md`, §2).
 No cap applies until a sleeping piece's per-tick cost is measured.
 
-Two costs of the library's sleep, MEASURED as counts over 10 s on a fixture lattice of 54 cubes, 0.4 m, 2 cm apart:
+What limits the piece count (DERIVED from `src/buildings/breakage.rs`): a chunk leaves its building at most once and a loose piece never splits, so the pieces of a map never exceed its breakable chunks, and nothing else limits them. The shipped map's bound is 74,370 (MEASURED: 1,005 brick chunks in `assets/buildings/house_1/house_1.building.ron`, times the 74 `house_proxy` placements in `assets/maps/kalinovo/level.json`; wood has no seam and never breaks). A bound, not a forecast. The risk this decision brings is an awake pile held by a tank's island (below), which no measurement prices yet; the pricing lane must price it.
 
-- An island sleeps whole. A tank applies track forces every tick, so it never sleeps, and every piece connected to it through touching pieces stays awake. Six pieces thrown against a hull kept 36 of 54 awake. Pressed against a hull, 15 touching kept 18 awake. With a body free to sleep in the tank's place, all 54 slept.
+Two costs of the library's sleep, MEASURED as counts over 10 s on a fixture lattice of 54 cubes, 0.4 m, 2 cm apart, beside a 3 × 2 × 6 m box with sleeping disabled standing in for a tank (not a hull). The harness that produced the counts is not committed; the numbers rest on it:
+
+- An island sleeps whole. A tank never sleeps (DERIVED: a non-zero force call resets the sleep timer in Avian, and the track code applies forces every tick), so every piece connected to it through touching pieces stays awake. MEASURED against the box: six pieces thrown at it kept 36 of 54 awake; pressed against it, 15 touching kept 18 awake. With a body free to sleep in the box's place, all 54 slept.
 - Avian moves only touching pairs to its sleeping set. The fully sleeping pile kept 329 non-touching near pairs active, and the narrow phase recomputes those every tick; 54 touching pairs slept.
 
 ## Validation without outcome tuning

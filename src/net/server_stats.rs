@@ -23,8 +23,9 @@
 //! - `throttled_usec`, `nr_throttled`: the container's CPU-quota throttling over the period, from
 //!   the cgroup's `cpu.stat` (microseconds throttled, enforcement periods throttled); null off
 //!   Linux or where the file is unreadable;
-//! - `debris`: present only while the debris stress lever is armed (`net::debris_stress`): its
-//!   `live` (awake) and `sleeping` pieces at the line, and its cumulative counts.
+//! - `debris`: the `live` (awake) and `sleeping` loose pieces at the line, a building's and the
+//!   debris stress lever's (`net::debris_stress`); while the lever is armed also its cumulative
+//!   `breaches` and `released`.
 //!
 //! `cpu_pct`, `rss_mb` and the throttle fields are null where the platform gives no reading.
 //!
@@ -211,7 +212,7 @@ struct Snapshot {
     ticks: Option<TickSummary>,
     physics: Option<TickSummary>,
     send: Option<TickSummary>,
-    debris: Option<Value>,
+    debris: Value,
     clients: usize,
     tanks: usize,
     projectiles: usize,
@@ -260,9 +261,7 @@ fn stats_line(snapshot: &Snapshot) -> String {
         "throttled_usec": snapshot.throttled.map(|t| t.throttled_usec),
         "nr_throttled": snapshot.throttled.map(|t| t.nr_throttled),
     });
-    if let Some(debris) = &snapshot.debris {
-        body["debris"] = debris.clone();
-    }
+    body["debris"] = snapshot.debris.clone();
     format!("{PREFIX} {body}")
 }
 
@@ -494,7 +493,7 @@ mod tests {
                 max: 250.0,
                 overruns: 0,
             }),
-            debris: Some(json!({"live": 35, "sleeping": 140})),
+            debris: json!({"live": 35, "sleeping": 140}),
             clients: 2,
             tanks: 6,
             projectiles: 3,
@@ -539,7 +538,6 @@ mod tests {
             ticks: None,
             physics: None,
             send: None,
-            debris: None,
             cpu_pct: None,
             rss_bytes: None,
             throttled: None,
@@ -556,9 +554,10 @@ mod tests {
         assert_eq!(value["send_us"], Value::Null);
         assert_eq!(value["throttled_usec"], Value::Null);
         assert_eq!(value["nr_throttled"], Value::Null);
-        assert!(
-            value.get("debris").is_none(),
-            "an unarmed debris lever adds no key, so a production line is unchanged by it"
+        assert_eq!(
+            value["debris"],
+            json!({"live": 35, "sleeping": 140}),
+            "the piece count prints with no lever armed"
         );
     }
 }

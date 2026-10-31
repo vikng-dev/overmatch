@@ -4,7 +4,7 @@
 
 use std::time::Duration;
 
-use avian3d::prelude::Gravity;
+use avian3d::prelude::*;
 use bevy::time::TimeUpdateStrategy;
 
 use super::*;
@@ -302,6 +302,61 @@ fn a_round_meets_a_fallen_piece_as_its_substance() {
     );
     let body = world.get::<ChildOf>(hit).unwrap().parent();
     assert!(world.get::<WallPiece>(body).is_some());
+}
+
+/// A FALLEN PIECE COMES TO REST ASLEEP, A DYNAMIC BODY STILL: a group spawned by `spawn_piece`
+/// above a static slab falls, lands and sleeps there (never in the air), and keeps
+/// `RigidBody::Dynamic`. The server's per-tick cost of settled rubble rests on it: a spawn that
+/// disables sleeping on a piece (or makes it static at rest) leaves every one in the solver or
+/// rebuilds its contacts on every wake. Built through `spawn_piece`, so the mutant can go red.
+#[test]
+fn a_fallen_piece_comes_to_rest_asleep_a_dynamic_body_still() {
+    let (mut app, _) = composed(false);
+    app.insert_resource(Gravity(Vec3::NEG_Y * 9.81));
+    let kind = shipped_house();
+    let (_, [c, ..]) = fixture_chunks(&kind);
+    let live = Live::new(&kind, 1.0);
+    let at = Transform::from_xyz(30.0, 0.0, 0.0);
+    {
+        let world = app.world_mut();
+        world.spawn((
+            RigidBody::Static,
+            Position(Vec3::new(30.0, -8.5, 0.0)),
+            Collider::cuboid(40.0, 1.0, 40.0),
+            CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
+        ));
+        let mut queue = bevy::ecs::world::CommandQueue::default();
+        let mut commands = Commands::new(&mut queue, world);
+        spawn_piece(
+            &mut commands,
+            &kind,
+            &live.structure,
+            (3, 1.0, at),
+            &[c],
+            &[],
+        );
+        queue.apply(world);
+    }
+    let piece = app
+        .world_mut()
+        .query_filtered::<Entity, With<WallPiece>>()
+        .single(app.world())
+        .expect("one piece");
+    let tick = (0..1280)
+        .find(|_| {
+            app.update();
+            app.world().get::<Sleeping>(piece).is_some()
+        })
+        .expect("the piece fell, came to rest and slept within 20 s");
+    let height = app.world().get::<Position>(piece).unwrap().0.y;
+    assert!(
+        height < -7.0,
+        "asleep at tick {tick} at {height} m, on the slab, not in the air"
+    );
+    assert_eq!(
+        app.world().get::<RigidBody>(piece),
+        Some(&RigidBody::Dynamic)
+    );
 }
 
 /// THE DEPOSITS' WORLD BALL NEVER DROPS WHAT THE BUILDING'S BOUNDS ACCEPT: for the shipped house
