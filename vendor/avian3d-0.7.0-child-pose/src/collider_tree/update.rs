@@ -835,23 +835,54 @@ fn update_solver_body_aabbs<C: AnyCollider>(
     diagnostics.update += start.elapsed();
 }
 
+// OVERMATCH PATCH: the data `update_moved_collider_aabbs` reads per collider, and one item of it.
+type MovedColliderData<C> = (
+    Entity,
+    Ref<'static, Position>,
+    Ref<'static, Rotation>,
+    &'static mut ColliderAabb,
+    &'static mut EnlargedAabb,
+    Ref<'static, C>,
+    Option<&'static CollisionMargin>,
+    &'static ColliderTreeProxyKey,
+);
+type MovedColliderItem<'w, C> = (
+    Entity,
+    Ref<'w, Position>,
+    Ref<'w, Rotation>,
+    Mut<'w, ColliderAabb>,
+    Mut<'w, EnlargedAabb>,
+    Ref<'w, C>,
+    Option<&'w CollisionMargin>,
+    &'w ColliderTreeProxyKey,
+);
+
+// OVERMATCH PATCH: one batch's examined count, added to the run's total when the batch ends.
+struct ExaminedTally<'a> {
+    total: &'a core::sync::atomic::AtomicU32,
+    count: u32,
+}
+
+impl Drop for ExaminedTally<'_> {
+    fn drop(&mut self) {
+        self.total
+            .fetch_add(self.count, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
 /// Updates the AABBs of colliders that have been manually moved after the previous physics step.
 pub fn update_moved_collider_aabbs<C: AnyCollider>(
     mut colliders: ParamSet<(
-        Query<
-            (
-                Entity,
-                Ref<Position>,
-                Ref<Rotation>,
-                &mut ColliderAabb,
-                &mut EnlargedAabb,
-                Ref<C>,
-                Option<&CollisionMargin>,
-                &ColliderTreeProxyKey,
-            ),
-            Without<ColliderDisabled>,
-        >,
+        Query<MovedColliderData<C>, Without<ColliderDisabled>>,
         Query<&EnlargedAabb, Without<ColliderDisabled>>,
+        // OVERMATCH PATCH: the same colliders, pruned on their change ticks alone.
+        Query<
+            MovedColliderData<C>,
+            (
+                Without<ColliderDisabled>,
+                Or<(Changed<Position>, Changed<Rotation>, Changed<C>)>,
+            ),
+        >,
     )>,
     narrow_phase_config: Res<NarrowPhaseConfig>,
     length_unit: Res<PhysicsLengthUnit>,
@@ -885,52 +916,75 @@ pub fn update_moved_collider_aabbs<C: AnyCollider>(
 
     // TODO: This doesn't do velocity-based enlargement like the dynamic/kinematic AABB update.
     //       We should overall rework CCD to not rely on velocity-based AABB enlargement for all bodies.
-    // TODO: par-iter over all colliders, check if they have actually changed since the `LastPhysicsTick`
-    let mut collider_query = colliders.p0();
-    collider_query.par_iter_mut().for_each(
-        |(entity, pos, rot, mut aabb, mut enlarged_aabb, collider, collision_margin, proxy_key)| {
-            // Skip if the collider's AABB can't have changed since the last physics tick.
-            if !pos.last_changed().is_newer_than(last_tick.0, this_run)
-                && !rot.last_changed().is_newer_than(last_tick.0, this_run)
-                && !collider.last_changed().is_newer_than(last_tick.0, this_run)
-            {
-                return;
-            }
+    // OVERMATCH PATCH: examine only the colliders whose pose or shape changed since this system's
+    // previous run, pruned by the query's change filter on the ticks alone, so an unchanged
+    // collider (every standing static one) costs three tick reads and nothing else. Exact while
+    // `LastPhysicsTick` is newer than that run, as `update_last_physics_tick` makes it by running
+    // after this system in every step: then every collider the tick check below accepts also
+    // passes the filter. Otherwise every collider is examined, as without the prune.
+    let examined = core::sync::atomic::AtomicU32::new(0);
+    let tally = || ExaminedTally {
+        total: &examined,
+        count: 0,
+    };
+    let update_moved = |tally: &mut ExaminedTally, item: MovedColliderItem<'_, C>| {
+        tally.count += 1;
+        let (entity, pos, rot, mut aabb, mut enlarged_aabb, collider, collision_margin, proxy_key) =
+            item;
 
-            let collision_margin = collision_margin.map_or(0.0, |margin| margin.0);
+        // Skip if the collider's AABB can't have changed since the last physics tick.
+        if !pos.last_changed().is_newer_than(last_tick.0, this_run)
+            && !rot.last_changed().is_newer_than(last_tick.0, this_run)
+            && !collider.last_changed().is_newer_than(last_tick.0, this_run)
+        {
+            return;
+        }
 
-            // Update tight-fitting AABB.
-            let context = AabbContext::new(entity, &*collider_context);
-            let growth = Vector::splat(contact_tolerance + collision_margin);
-            *aabb = collider
-                .aabb_with_context(pos.0, *rot, context)
-                .grow(growth);
+        let collision_margin = collision_margin.map_or(0.0, |margin| margin.0);
 
-            // Try to update the enlarged AABB, and if it changed, mark the proxy as moved.
-            let moved = enlarged_aabb.update(&aabb, margin);
+        // Update tight-fitting AABB.
+        let context = AabbContext::new(entity, &*collider_context);
+        let growth = Vector::splat(contact_tolerance + collision_margin);
+        *aabb = collider
+            .aabb_with_context(pos.0, *rot, context)
+            .grow(growth);
 
-            if moved {
-                let tree_type = proxy_key.tree_type();
-                let mut thread_local_bit_vec = enlarged_proxies
-                    .bit_vec_for_type(tree_type)
-                    .thread_local
-                    .get_or(|| {
-                        let capacity = match tree_type {
-                            ColliderTreeType::Dynamic => cap_dynamic,
-                            ColliderTreeType::Kinematic => cap_kinematic,
-                            ColliderTreeType::Static => cap_static,
-                            ColliderTreeType::Standalone => cap_standalone,
-                        };
-                        let mut bit_vec = BitVec::new(capacity);
-                        bit_vec.set_bit_count_and_clear(capacity);
-                        RefCell::new(bit_vec)
-                    })
-                    .borrow_mut();
+        // Try to update the enlarged AABB, and if it changed, mark the proxy as moved.
+        let moved = enlarged_aabb.update(&aabb, margin);
 
-                thread_local_bit_vec.set(proxy_key.id().index());
-            }
-        },
-    );
+        if moved {
+            let tree_type = proxy_key.tree_type();
+            let mut thread_local_bit_vec = enlarged_proxies
+                .bit_vec_for_type(tree_type)
+                .thread_local
+                .get_or(|| {
+                    let capacity = match tree_type {
+                        ColliderTreeType::Dynamic => cap_dynamic,
+                        ColliderTreeType::Kinematic => cap_kinematic,
+                        ColliderTreeType::Static => cap_static,
+                        ColliderTreeType::Standalone => cap_standalone,
+                    };
+                    let mut bit_vec = BitVec::new(capacity);
+                    bit_vec.set_bit_count_and_clear(capacity);
+                    RefCell::new(bit_vec)
+                })
+                .borrow_mut();
+
+            thread_local_bit_vec.set(proxy_key.id().index());
+        }
+    };
+    if last_tick.0.is_newer_than(system_tick.last_run(), this_run) {
+        colliders
+            .p2()
+            .par_iter_mut()
+            .for_each_init(tally, update_moved);
+    } else {
+        colliders
+            .p0()
+            .par_iter_mut()
+            .for_each_init(tally, update_moved);
+    }
+    diagnostics.moved_aabb_candidates += examined.into_inner();
 
     // Reinsert moved proxies in each tree.
     let aabb_query = colliders.p1();
