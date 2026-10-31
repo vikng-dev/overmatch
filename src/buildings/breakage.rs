@@ -1309,8 +1309,7 @@ pub(crate) struct Changes {
     pub(crate) failures: Vec<fracture::Failure>,
     pub(crate) unassessed: Vec<usize>,
     pub(crate) weight_steps: usize,
-    /// Body blows on chunks with no carrier in this deposit, returned whole in building terms.
-    /// Dust has no carrier; a chunk freed by an earlier deposit already launched there.
+    /// Body blows on dust, returned whole in building terms because dust has no carrier.
     pub(crate) returns: Vec<BodyReturn>,
 }
 
@@ -1344,8 +1343,8 @@ impl BodyReturn {
 /// [`HOLES_PER_CHUNK`] crumbles to dust before the laws run; a hole is kept only in a chunk
 /// standing after the removal, and no law reads one. A field load on a chunk turned to dust
 /// went into crushing it and moves nothing; a body's blow there is returned whole because dust
-/// has no carrier. A chunk freed by an earlier deposit also has no carrier in this deposit and
-/// returns the body's blow whole. A held section reads the body's plastic share against its hinge effective mass;
+/// has no carrier. A queued contact on a chunk freed by an earlier deposit keeps the solver's
+/// stop: its carrier already launched, so refunding that contact would overlap the departing body. A held section reads the body's plastic share against its hinge effective mass;
 /// a freed group's launch reads its free effective mass. No law reads a press.
 pub(crate) fn run_laws(
     layout: &Layout,
@@ -1378,7 +1377,7 @@ pub(crate) fn run_laws(
     }
     let returns = loads
         .iter()
-        .filter(|load| !live.state.standing(load.chunk))
+        .filter(|load| live.state.fate[load.chunk] == Fate::Dust)
         .filter_map(|load| BodyReturn::of(load, Vec3::ZERO))
         .collect();
     let loads: Vec<Load> = loads
