@@ -232,8 +232,13 @@ enum MatchUi {
 enum Part {
     ClockLine,
     Title,
+    ScrollHint,
     Column(Column),
 }
+
+/// The table scrolls as one unit so every standing's columns stay aligned.
+#[derive(Component)]
+struct BoardViewport;
 
 pub fn plugin(app: &mut App) {
     crate::flow::require(app, "net::battle_hud");
@@ -319,10 +324,17 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                     },
                     TextColor(TEXT),
                 ));
-                card.spawn(Node {
-                    column_gap: Val::Px(28.0),
-                    ..default()
-                })
+                card.spawn((
+                    BoardViewport,
+                    ScrollPosition::default(),
+                    Node {
+                        column_gap: Val::Px(28.0),
+                        max_height: Val::Vh(55.0),
+                        min_height: Val::Px(0.0),
+                        overflow: Overflow::scroll_y(),
+                        ..default()
+                    },
+                ))
                 .with_children(|columns| {
                     for column in Column::ALL {
                         columns.spawn((
@@ -339,12 +351,26 @@ fn spawn_battle_hud(mut commands: Commands, fonts: Res<UiFonts>) {
                         ));
                     }
                 });
+                card.spawn((
+                    Part::ScrollHint,
+                    Text::new("PAGE UP / PAGE DOWN TO SCROLL"),
+                    TextFont {
+                        font: fonts.body.clone().into(),
+                        font_size: FontSize::Px(16.0),
+                        ..default()
+                    },
+                    TextColor(TEXT),
+                ));
             });
         });
 }
 
 /// Rewrite and show the clock line and the board from the replicated Battle and score. The board
 /// shows only while nothing captures input ([`overlay::input_blocked`]).
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the replicated view also owns its table's scroll position"
+)]
 fn update_battle_hud(
     battles: Query<(&BattleState, &Scoreboard)>,
     clock: Option<Res<InterpolationTimeline>>,
@@ -353,6 +379,7 @@ fn update_battle_hud(
     overlays: Res<Overlays>,
     mut roots: Query<(&MatchUi, &mut Visibility)>,
     mut parts: Query<(&Part, &mut Text)>,
+    mut viewports: Query<(&ComputedNode, &mut ScrollPosition), With<BoardViewport>>,
 ) {
     let (battle, board) = match battles.single() {
         Ok(replicated) => replicated,
@@ -375,6 +402,24 @@ fn update_battle_hud(
     let view = View::of(battle.phase, now, time.timestep());
     let board_shown =
         view.shows_board(keys.pressed(BOARD_KEY)) && !overlay::input_blocked(&overlays, true);
+    for (node, mut scroll) in &mut viewports {
+        if !board_shown {
+            if scroll.0 != Vec2::ZERO {
+                scroll.0 = Vec2::ZERO;
+            }
+            continue;
+        }
+        let direction = i32::from(keys.just_pressed(KeyCode::PageDown))
+            - i32::from(keys.just_pressed(KeyCode::PageUp));
+        if direction != 0 {
+            let page = node.size.y * node.inverse_scale_factor;
+            let limit = ((node.content_size.y - node.size.y) * node.inverse_scale_factor).max(0.0);
+            let next = (scroll.0.y + direction as f32 * page).clamp(0.0, limit);
+            if scroll.0.y != next {
+                scroll.0.y = next;
+            }
+        }
+    }
     for (root, mut visibility) in &mut roots {
         let shown = match root {
             MatchUi::Clock => true,
@@ -390,6 +435,7 @@ fn update_battle_hud(
     for (&part, mut text) in &mut parts {
         let value = match (part, &board_rows) {
             (Part::ClockLine, _) => view.clock_line(),
+            (Part::ScrollHint, _) => continue,
             (Part::Title, Some(_)) => title(*battle),
             (Part::Column(column), Some(rows)) => column.text(rows, view.winner()),
             // A hidden board keeps its last text; it is rewritten before it shows again.
@@ -453,6 +499,62 @@ mod tests {
         assert_eq!(clock(900), "15:00");
         assert_eq!(clock(59), "0:59");
         assert_eq!(clock(0), "0:00");
+    }
+
+    /// Players can reach standings beyond the viewport while the board is shown. Fixture layout
+    /// is in physical pixels with a scaled UI; paging uses logical pixels and stops at the end.
+    /// A menu suppresses paging and resets the viewport rather than scrolling an obscured board.
+    #[test]
+    fn the_board_pages_all_columns_together_only_while_shown() {
+        let mut app = app(Duration::from_millis(500));
+        app.world_mut()
+            .spawn((BattleState::combat_fixture(), Scoreboard::default()));
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(BOARD_KEY);
+        app.update();
+        let viewport = {
+            let world = app.world_mut();
+            world
+                .query_filtered::<Entity, With<BoardViewport>>()
+                .single(world)
+                .unwrap()
+        };
+        app.world_mut().entity_mut(viewport).insert(ComputedNode {
+            size: Vec2::new(800.0, 600.0),
+            content_size: Vec2::new(800.0, 2000.0),
+            inverse_scale_factor: 0.5,
+            ..default()
+        });
+        for expected in [300.0, 600.0, 700.0, 700.0] {
+            let mut keys = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
+            keys.release(KeyCode::PageDown);
+            keys.press(KeyCode::PageDown);
+            app.update();
+            assert_eq!(
+                app.world().get::<ScrollPosition>(viewport).unwrap().0.y,
+                expected
+            );
+        }
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .clear();
+        app.world_mut()
+            .resource_mut::<ButtonInput<KeyCode>>()
+            .press(KeyCode::PageUp);
+        app.update();
+        assert_eq!(
+            app.world().get::<ScrollPosition>(viewport).unwrap().0.y,
+            400.0
+        );
+        app.world_mut()
+            .resource_mut::<Overlays>()
+            .declare(Overlay::Menu, true);
+        app.update();
+        assert_eq!(
+            app.world().get::<ScrollPosition>(viewport).unwrap().0.y,
+            0.0
+        );
     }
 
     fn app(fixed: Duration) -> App {

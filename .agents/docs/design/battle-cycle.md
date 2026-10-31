@@ -73,6 +73,8 @@ results. The scoreboard lists rank, name, knockouts and losses in `rank` order; 
 share a place. It shows while Tab is held in combat and without a key through results, where its
 title names the authority's winner (also marked on its row), the draw or no contest. It hides
 whenever an input-capturing overlay is latched and otherwise draws above the death banner.
+The table has a viewport bounded by screen height; Page Up/Down moves every column together,
+so larger rosters remain reachable. Hiding the board resets its scroll position.
 
 Countdowns run from the replicated deadline on the shared presentation timeline
 (`InterpolationTimeline`), the clock used to sample the server stream. Input time deliberately
