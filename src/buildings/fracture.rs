@@ -2462,7 +2462,8 @@ struct Ring {
 /// [`translation`]. This is numerical resolution, not clearance through a neighbouring body.
 const TRANSLATION_EPS: f32 = 32.0 * f32::EPSILON;
 
-/// The unit translation doing most work under `push` without moving into any boundary normal.
+/// The unit translation doing most work under `push` without moving into any outward unit
+/// boundary normal.
 /// DERIVED: the admissible directions form a convex polyhedral cone in three dimensions. Its
 /// closest direction to the load is the load itself, a projection onto one active plane, or an
 /// edge formed by two planes. A feasible single-plane projection of a violated constraint is

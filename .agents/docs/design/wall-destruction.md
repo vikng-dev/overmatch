@@ -253,10 +253,11 @@ The law is stated on the field, whatever finds the surfaces it reaches ([#204](h
   - **Built** (lane 2): every energy limit a blow meets reads a blast's blow by `√g`. Its `r` is the share of the group's peak forces at which that failure mode's strength law, with gravity and the presses, first fails (`fracture::strength_ratio`, by bisection: each law holds on a set of loadings convex in that share). A bonded section's turn reads its seam's Navier tension (`fracture::section_pulse`); a seated part's turn reads tipping, its lift lifting, its shove sliding. A load stating no peak (a round's line, a body's contact) keeps `g = 1`; one group's sources add their angular impulses each so weighted (**ASSUMED**: a line's blow and a pulse act in phase). A group lying on both sides of a bonded section's plane has no Navier reading and keeps `g = 1`.
 - **Energy is audited, never an input.** The round's chemistry splits once, casing against blast (`burst.rs`); the blast-energy-to-wear and blast-to-Lamé paths go.
 - **Material data.** `σ_c,d` with its rate factor, `ε_v`, the stiffness and `σ_t,d`, sourced per breakable material; a breakable row lacking them is refused at load.
+  - **Built:** `BulkFacts::blast` stores compression, its reference-rate DIF, fully dense grain/cell-wall density and Young's modulus. Every breakable bulk row must state the complete sourced block at load. No simulation law consumes it yet. Source domains and analogue limits are in `.agents/scratch/blast-b3-material-sources.md`; a separately sourced dynamic tensile input remains for the scab law.
 - **Near contact.** A products floor inside `Z < 0.6` corrects the fits' ~1.7× under-read of contact impulse (**DERIVED** in the study), the last lane.
 - **Fragments.** The casing's fragment momentum becomes a blow.
 - **Validation.** The repo holds no verified blast breach case (**code fact**, "Evidence and status"): the laws are gated on class-invariant tests and the prototype's measured qualitative matrix.
-- **Lanes**, in order: 1, the peak-pressure fits and each load's peak force (built, with `f` a pure function no law reads yet); 2, `g` in the section law (built); 3, the material data; 4, Law 1 and the volume pool; 5, Law 2; 6, the field's origin at the filler centre and fragment momentum; 7, the dead energy paths deleted; 8, the near-contact floor; then pricing.
+- **Lanes**, in order: 1, the peak-pressure fits and each load's peak force (built, with `f` a pure function no law reads yet); 2, `g` in the section law (built); 3, the material data (compression/compaction-density/stiffness block built); 4, Law 1 and the volume pool; 5, Law 2; 6, the field's origin at the filler centre and fragment momentum; 7, the dead energy paths deleted; 8, the near-contact floor; then pricing.
 
 ### Contact and near-contact blast
 
@@ -391,6 +392,12 @@ A blow must also pay the section's energy, its share reaching the section throug
 A steady push meets the strength limit alone, so its verdict does not depend on the tick rate.
 The structure is rigid-plastic: a press below strength moves nothing and is read again each tick it persists; sub-threshold blows on a resting part are each read alone and never add (accepted).
 A blast's blow meets both at once through `g(F_R / F_peak)` ("Standoff blast", Law 3): a far burst whose peak force the section's strength holds fails it by no impulse, however large (**DERIVED** by rerunning the #237 study's disc-wall arithmetic on the sourced rows: an 88 mm HE burst's peak force on house_1's east wall stays over its base section's strength out to the burst's 23.2 m reach, so `g(r)` trims the impulse limit only from 15.0 to 13.8 m; the #237 study's ~11 m cut-off came from the misrecalled far row). A round's line keeps the energy limit alone (**ASSUMED**: its blow is over before a section moves).
+
+The disc-wall arithmetic above retains the prototype's no-gravity section capacity; it is not a
+prediction for the current hinged, gravity-loaded wall. The shipped-wall measurement and its
+negative study-burst result are recorded in `.agents/scratch/blast-b3-far-topple.md`. That report
+also preserves a non-monotone production-sampler comparison; the monotone fixed-face section-law
+fixture does not discharge that surface-representation limitation.
 
 **Body contact duration.**
 `Origin::Body::step` is the numerical physics step, not a material contact duration.

@@ -5,7 +5,9 @@
 use bevy::math::Vec3;
 
 use super::model::*;
-use super::{blast_field, brick, layout};
+use super::{
+    Applied, Charge, Deposit, View, Wall, WallControls, apply_deposit, blast_field, brick, layout,
+};
 
 /// The 88 mm HE fixture burst (fixture data): 1.47 MJ, its charge the TNT that carries it, so its
 /// reach (23.2 m, DERIVED) holds every standoff here; a coupling is its hits' energy over its own.
@@ -261,6 +263,216 @@ fn blast_coupling_falls_with_standoff() {
     };
     let (near, mid, far) = (on_wall(0.1), on_wall(1.0), on_wall(3.0));
     assert!(near > mid && mid > far && far > 0.0, "{near} {mid} {far}");
+}
+
+/// Centroid quadrature of the same field on the shipped cut's coplanar front faces: one fixed
+/// point and its actual face area per chunk, independent of which angular sample hits it.
+/// This is a Law 3 fixture input, not a second production surface finder. ASSUMED fixture
+/// energy (J), source height and distance (m); the cut supplies the geometry and material data.
+fn wall_face_pushes(energy: f32, distance: f32) -> Vec<Load> {
+    let layout = layout();
+    let origin = Vec3::new(
+        layout.centre().x,
+        layout.min.y + 1.45,
+        layout.min.z + layout.size.z + distance,
+    );
+    let blast = Blast::of(energy);
+    layout
+        .cut
+        .structure
+        .chunks
+        .iter()
+        .zip(&layout.cut.blocks)
+        .enumerate()
+        .filter_map(|(chunk, (part, block))| {
+            // ASSUMED f32 angular allowance when identifying the coplanar front cap.
+            let area: f32 = block
+                .face_areas()
+                .iter()
+                .filter(|(n, _)| n.dot(Vec3::Z) > 1.0 - 1e-5)
+                .map(|(_, area)| area)
+                .sum();
+            assert!(
+                area > 0.0,
+                "the planar-wall fixture has a visible front cap"
+            );
+            let at = Vec3::new(part.centroid.x, part.centroid.y, block.max.z);
+            let path = at - origin;
+            let d = path.length();
+            // Outside the sourced field's reach there is no load.
+            if d > blast.reach() {
+                return None;
+            }
+            let cos = -(path / d).dot(Vec3::Z);
+            Some(Load {
+                chunk,
+                at,
+                energy: 0.0,
+                blow: Vec3::NEG_Z * (area * blast.specific_impulse(d, cos)),
+                press: Vec3::ZERO,
+                peak: Some(Vec3::NEG_Z * (area * blast.peak_pressure(d, cos))),
+                origin: Origin::Field,
+            })
+        })
+        .collect()
+}
+
+/// The shipped free-standing wall under the sandbox's actual field-to-law path. ASSUMED fixture
+/// burst energy (J), centre-to-face distance (m), filler density and height. No colliders, bodies
+/// or view resources are spawned; `apply_deposit` returns the law outcome before entity work.
+fn wall_deposit_at(energy: f32, distance: f32) -> Applied {
+    let layout = layout();
+    let mut wall = Wall {
+        cut: layout.cut.clone(),
+        state: WallState::new(&layout.cut.structure),
+        structural: vec![false; layout.cut.structure.joints.len()],
+        sections: SectionCache::default(),
+        entities: Vec::new(),
+        meshes: Vec::new(),
+        material: brick(),
+    };
+    let controls = WallControls {
+        mass: 0,
+        standoff: 0,
+        cased: false,
+        round: 0,
+        view: View::Front,
+        help: false,
+    };
+    let charge = Charge {
+        density: 1650.0,
+        chemical: 4.184e6,
+        casing_ratio: 0.0,
+        casing_speed: 0.0,
+    };
+    let mass = energy / charge.chemical;
+    let radius = charge.blast(mass, false).radius;
+    assert!(
+        distance > radius,
+        "the fixture measures standoff, not contact"
+    );
+    let deposit = Deposit::Blast {
+        mass,
+        standoff: distance - radius,
+        at: Vec3::new(
+            layout.centre().x,
+            layout.min.y + 1.45,
+            layout.min.z + layout.size.z,
+        ),
+        into: Vec3::NEG_Z,
+    };
+    apply_deposit(&mut wall, &controls, &charge, &blast_field(), &deposit)
+}
+
+/// THE SAMPLED WALL HAS A FINITE FIELD REACH (the game's environment destruction model).
+/// The real sandbox adapter must leave the structure untouched outside the sourced field.
+/// Inside it, report its measured toppling curve without asserting an asset-specific distance
+/// or assuming its changing angular hit footprint is monotone. ASSUMED fixture energies,
+/// source height and sample spacing; the study's comparison distance is DERIVED there.
+#[test]
+fn the_sampled_wall_reports_its_far_toppling_limit() {
+    let step = 0.25_f32;
+    for (name, energy) in [
+        ("study burst", FIXTURE_BLAST.energy),
+        ("bare control", 5.0 * 4.184e6),
+    ] {
+        let reach = Blast::of(energy).reach();
+        let samples = (reach / step).ceil() as usize + 1;
+        let (mut last_topple, mut first_hold, mut previous) = (None, None, None);
+        let mut revivals = 0;
+        for k in 2..=samples {
+            let distance = k as f32 * step;
+            let applied = wall_deposit_at(energy, distance);
+            let fell: usize = applied.groups.iter().map(|(group, ..)| group.len()).sum();
+            let topples = fell > 0 && applied.failures.iter().any(|f| f.cause == Cause::Push);
+            if topples {
+                last_topple = Some(distance);
+                revivals += usize::from(previous == Some(false));
+            } else if first_hold.is_none() {
+                first_hold = Some(distance);
+            }
+            if previous != Some(topples) {
+                println!(
+                    "MEASURED sampled {name}: at {distance} m topples {topples}, released {fell}"
+                );
+            }
+            previous = Some(topples);
+        }
+        let outside = wall_deposit_at(energy, samples as f32 * step);
+        assert_eq!(
+            outside.deposited, 0.0,
+            "no energy arrives outside field reach"
+        );
+        assert!(
+            outside.failures.is_empty() && outside.groups.is_empty(),
+            "no structural change occurs outside field reach"
+        );
+        println!(
+            "MEASURED sampled {name}: last topple {last_topple:?}, first hold {first_hold:?}, \
+            revivals {revivals}, interval {step} m, sampled through {} m",
+            samples as f32 * step
+        );
+        let at_study = wall_deposit_at(energy, 13.8);
+        let fell: usize = at_study.groups.iter().map(|(group, ..)| group.len()).sum();
+        println!("MEASURED sampled {name} at study's DERIVED 13.8 m: released {fell}");
+    }
+}
+
+/// A FIXED FAR FACE LOADING TOPPLES MONOTONICALLY AND STOPS AT FINITE DISTANCE (the game's
+/// environment destruction model). Law 3 must preserve this ordering when the source moves
+/// beyond the wall's bounding diagonal and samples remain attached to its coplanar front caps.
+/// This checks the material/section law independently of changing angular-ray coverage. The
+/// authority relies on that separation when changing the surface finder. ASSUMED fixture
+/// energies and resolution; the geometry supplies the beginning of the far regime. Measured
+/// crossings are output only, never a required distance or required outcome for this asset.
+#[test]
+fn a_fixed_far_face_loading_topples_monotonically_and_stops() {
+    let layout = layout();
+    let step = 0.25_f32;
+    let from = layout.size.length();
+    for (name, energy) in [
+        ("study burst", FIXTURE_BLAST.energy),
+        ("bare control", 5.0 * 4.184e6),
+        ("large bare control", 50.0 * 4.184e6),
+    ] {
+        let reach = Blast::of(energy).reach();
+        let samples = ((reach - from).max(0.0) / step).ceil() as usize + 1;
+        let (mut last_topple, mut first_hold) = (None, None);
+        for k in 0..=samples {
+            let distance = from + k as f32 * step;
+            let loads = wall_face_pushes(energy, distance);
+            let mut state = WallState::new(&layout.cut.structure);
+            let failures = structural(
+                &layout.cut.structure,
+                &mut state,
+                &loads,
+                &mut SectionCache::default(),
+            );
+            let topples = failures.iter().any(|f| f.cause == Cause::Push)
+                && !fall(&layout.cut.structure, &mut state).is_empty();
+            assert!(
+                !(first_hold.is_some() && topples),
+                "{name}: fixed-face toppling reappeared at {distance} m after {first_hold:?}"
+            );
+            if topples {
+                last_topple = Some(distance);
+            } else if first_hold.is_none() {
+                first_hold = Some(distance);
+            }
+        }
+        assert!(
+            first_hold.is_some(),
+            "toppling stops within finite field reach"
+        );
+        assert!(
+            wall_face_pushes(energy, from + samples as f32 * step).is_empty(),
+            "the finite field stops before the final source pose"
+        );
+        println!(
+            "MEASURED fixed-face {name}: last topple {last_topple:?}, first hold {first_hold:?}, \
+            interval {step} m, far regime from {from} m"
+        );
+    }
 }
 
 /// A HULL'S RAY ENTRY IS THE SHAPE'S, NOT ITS BOX'S: a ray that passes the cut corner of a
