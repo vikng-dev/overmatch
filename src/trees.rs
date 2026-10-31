@@ -43,7 +43,7 @@ use std::sync::Arc;
 use avian3d::collider_tree::{ColliderTrees, update_moved_collider_aabbs};
 use avian3d::prelude::{
     Collider, ColliderTransform, CollisionLayers, ContactGraph, ContactPair, LayerMask, Position,
-    RigidBody, Rotation, Sleeping,
+    RigidBody, Rotation,
 };
 use avian3d::schedule::PhysicsSystems;
 use bevy::ecs::schedule::ScheduleConfigs;
@@ -747,8 +747,6 @@ fn derive_state(
 /// on the same inputs, so the next physics step rewrites the same bits. The `ColliderTransform`
 /// is written with them because lightyear recomputes a child collider's pose from it after each
 /// fixed loop once that pose has changed (`LightyearAvianPlugin::update_child_collider_position`).
-/// A segment that moves wakes every sleeping body it touched ([`crate::debris::wake_touching`]):
-/// avian wakes nothing when a static collider moves.
 fn place_segment_colliders(
     trees: Query<
         (&Transform, &Position, &Rotation, &Children),
@@ -763,9 +761,6 @@ fn place_segment_colliders(
         ),
         With<TreeSegment>,
     >,
-    contacts: Option<Res<ContactGraph>>,
-    sleeping: Query<(), With<Sleeping>>,
-    mut commands: Commands,
 ) {
     for (root, body_position, body_rotation, children) in &trees {
         let parent = ColliderTransform::from(*root);
@@ -781,13 +776,10 @@ fn place_segment_colliders(
                 scale: parent.scale * local.scale,
             };
             collider.set_if_neq(placed);
-            let moved = position.set_if_neq(Position(
+            position.set_if_neq(Position(
                 body_position.0 + body_rotation * placed.translation,
-            )) | rotation
-                .set_if_neq((body_rotation.0 * placed.rotation.0).normalize().into());
-            if moved && let Some(contacts) = &contacts {
-                crate::debris::wake_touching(child, contacts, &sleeping, &mut commands);
-            }
+            ));
+            rotation.set_if_neq((body_rotation.0 * placed.rotation.0).normalize().into());
         }
     }
 }
@@ -1599,12 +1591,12 @@ pub(crate) mod tests {
     }
 
     /// A BODY ASLEEP ON A TRUNK WAKES WHEN THE TREE FALLS: a cube asleep on the standing fixture
-    /// trunk's tip wakes in the tick the trunk is re-posed lying, and falls. Avian wakes nothing
-    /// when a static collider moves, so a placement that re-poses the segments without
-    /// [`crate::debris::wake_touching`] leaves the cube hanging where the tip stood.
+    /// trunk's tip wakes in the step after the trunk is re-posed lying, and falls. Avian wakes
+    /// nothing when a static collider moves, so a world without the game's wake for a moved
+    /// support (`debris::wake_on_static_moved`) leaves the cube hanging where the tip stood.
     #[test]
     fn a_body_asleep_on_a_trunk_wakes_when_the_tree_falls() {
-        use avian3d::prelude::{ColliderDensity, Gravity, PhysicsPlugins};
+        use avian3d::prelude::{ColliderDensity, Gravity, PhysicsPlugins, Sleeping};
         use bevy::time::TimeUpdateStrategy;
         use std::time::Duration;
         let mut app = App::new();
@@ -1671,6 +1663,8 @@ pub(crate) mod tests {
         app.world_mut()
             .entity_mut(tree)
             .insert(TreeState::Down { cut: 0, dir: 0 });
+        // The tick that re-poses the trunk after its step, then the step that reads the move.
+        app.update();
         app.update();
         assert!(
             app.world().get::<Sleeping>(cube).is_none(),

@@ -31,8 +31,9 @@
 //! * is disabled ([`wake_on_collider_disabled`]): avian drops the pairs in an `Add` observer that
 //!   Bevy may run before this one, so the rule reads bounds instead: every sleeping body with a
 //!   collider whose bounds come within avian's contact tolerance of the support's;
-//! * moves, when the game moves a static collider: the mover calls [`wake_touching`]
-//!   (`trees::place_segment_colliders`).
+//! * moves ([`wake_on_static_moved`]: a static body's collider re-posed, by its own [`Position`]
+//!   or [`Rotation`] or by its body's, as a falling tree's trunk is), read inside the step before
+//!   the broad phase, while the last step's pairs still stand.
 //!
 //! A piece stays all match: nothing here despawns one.
 //!
@@ -109,9 +110,9 @@ fn wake_on_collider_disabled(
     sleeping: Query<(), With<Sleeping>>,
     mut commands: Commands,
 ) {
-    let Ok(aabb) = aabbs.get(disabled.entity) else {
-        return;
-    };
+    let aabb = aabbs
+        .get(disabled.entity)
+        .expect("`ColliderDisabled` marks a collider, which carries its bounds");
     let grown = ColliderAabb::from_min_max(
         aabb.min - Vec3::splat(config.contact_tolerance),
         aabb.max + Vec3::splat(config.contact_tolerance),
@@ -127,10 +128,32 @@ fn wake_on_collider_disabled(
 }
 
 /// Mount the rule.
+/// Every collider of a static body re-posed since the last step: every sleeping body touching it
+/// wakes (module doc).
+fn wake_on_static_moved(
+    moved: Query<(Entity, &ColliderOf), Or<(Changed<Position>, Changed<Rotation>)>>,
+    bodies: Query<&RigidBody>,
+    contacts: Res<ContactGraph>,
+    sleeping: Query<(), With<Sleeping>>,
+    mut commands: Commands,
+) {
+    for (collider, of) in &moved {
+        if bodies.get(of.body).is_ok_and(RigidBody::is_static) {
+            wake_touching(collider, &contacts, &sleeping, &mut commands);
+        }
+    }
+}
+
 pub(crate) fn sim_plugin(app: &mut App) {
     app.add_observer(wake_on_collider_gone)
         .add_observer(wake_on_body_gone)
-        .add_observer(wake_on_collider_disabled);
+        .add_observer(wake_on_collider_disabled)
+        .add_systems(
+            PhysicsSchedule,
+            wake_on_static_moved
+                .after(PhysicsStepSystems::First)
+                .before(PhysicsStepSystems::BroadPhase),
+        );
 }
 
 #[cfg(test)]
@@ -275,6 +298,16 @@ mod tests {
     /// when the slab takes `ColliderDisabled`, and falls through it. Avian drops the slab's pairs
     /// and wakes no other body, so a mutant that drops [`wake_on_collider_disabled`] leaves the
     /// body hanging over a slab it no longer meets.
+    #[test]
+    fn a_sleeping_body_wakes_when_its_support_moves() {
+        let mut app = settling(Vec3::NEG_Y * 9.81);
+        let support = slab(&mut app, 1.0);
+        let resting = piece(&mut app, Vec3::Y * 1.25);
+        until_asleep(&mut app, resting);
+        app.world_mut().get_mut::<Position>(support).unwrap().0 += Vec3::NEG_Y;
+        wakes_and_falls(&mut app, resting);
+    }
+
     #[test]
     fn a_sleeping_body_wakes_when_its_support_is_disabled() {
         let mut app = settling(Vec3::NEG_Y * 9.81);
