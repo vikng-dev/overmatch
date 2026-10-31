@@ -458,7 +458,8 @@ pub struct VolumeFacets {
 /// — the *effectiveness* (design §7b). Resolves each [`Part`]'s live quality (living crew → 1.0,
 /// intact module → 1.0; backfill competence and graded damage layer in later), then combines via
 /// [`evaluate`]. Requirements are per-tank RON data ([`TankCapabilities`]); the query walks the
-/// tank's volumes once.
+/// tank's volumes once. An entity without volumes or capabilities is not a bound tank, and serves
+/// nothing (0).
 pub fn capability_effectiveness(
     tank_volumes: Option<&TankVolumes>,
     tank_caps: Option<&TankCapabilities>,
@@ -468,9 +469,11 @@ pub fn capability_effectiveness(
     let (Some(tank_volumes), Some(tank_caps)) = (tank_volumes, tank_caps) else {
         return 0.0;
     };
-    let Some(requirement) = tank_caps.0.get(&capability) else {
-        return 0.0;
-    };
+    let requirement = tank_caps.0.get(&capability).unwrap_or_else(|| {
+        panic!(
+            "{capability:?}: TankSpec::validate refuses a sheet that does not state every capability"
+        )
+    });
     evaluate(requirement, &part_qualities(tank_volumes, volumes))
 }
 
