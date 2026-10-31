@@ -126,9 +126,8 @@ mod map;
 mod net;
 pub(crate) use net::{env_flag, env_parse, env_value};
 pub use net::{run_client, run_server};
-/// Documentation frames to disk; inert without `OVERMATCH_CAPTURE`. Public so the damage cam demo
-/// can mount it; the offline root mounts it too, and the windowed network client when the variable
-/// is set.
+/// Documentation frames to disk, from the capture plan `OVERMATCH_CAPTURE` names; inert without it.
+/// Public so the sandbox and demo bins can mount it (module doc).
 pub mod dev_capture;
 /// The net client's single overlay authority (active-set resource + pure input/cursor/scrim rules for
 /// the connect / death / menu / view-death overlays). Lives at the crate root, NOT under `net`,

@@ -1,77 +1,34 @@
-//! In-engine frames to disk, for documentation. Inert unless `OVERMATCH_CAPTURE` is set; mounted
-//! AFTER `DefaultPlugins` by the offline root and the damage cam demo, and by the windowed network
-//! client only when the variable is set (that client then creates its window hidden itself).
+//! In-engine frames to disk, for documentation. A capture run has one input: the plan file that
+//! `OVERMATCH_CAPTURE=<plan>.ron` names, one [`plan::CapturePlan`], whose struct docs are the
+//! grammar's one home. `scripts/capture/example.ron` is a worked plan, checked by a test. Without
+//! the variable every plugin here is inert.
 //!
-//! * `OVERMATCH_CAPTURE=<png>` — the frame's path. With several times the time goes before the
-//!   extension, zero-padded to a fixed width: `shot.png` → `shot-00004.0000s.png`,
-//!   `shot-00008.5000s.png`. Byte order of the names is time order, so a glob assembles a sequence
-//!   as is: `ffmpeg -framerate 30 -pattern_type glob -i 'shot-*s.png' out.mp4`. Times that round
-//!   to the same name are one frame.
-//! * `OVERMATCH_CAPTURE_AT=<s>[,<s>…]` — app seconds (`Time` as `Update` sees it) of each frame;
-//!   default 6.
-//! * `OVERMATCH_CAPTURE_SIGHT=1` — switch to the gunner optic two seconds before the first frame,
-//!   by writing the resource the Shift toggle writes; ignored where that resource is absent.
-//! * `OVERMATCH_CAPTURE_POSE=<x>,<y>,<z>,<lx>,<ly>,<lz>` — hold the player's camera at `x,y,z`
-//!   looking at `lx,ly,lz` (world metres) for the whole run, as a captor
-//!   ([`crate::camera::CameraCaptive`]): the player's own camera writers stand aside, and the lens
-//!   stays the one the camera last had. Ignored when malformed (logged).
-//! * `OVERMATCH_CAPTURE_SIZE=WxH` — the frame in physical pixels, default 2560x1440. The target's
-//!   scale factor is [`SCALE_FACTOR`], so the UI lays out at half that in logical pixels, as on a
-//!   retina window.
-//! * `OVERMATCH_CAPTURE_UI=0` — hide every UI tree, every frame, after whatever the app's own
-//!   systems wrote to its roots' `Visibility` that frame.
-//! * `OVERMATCH_CAPTURE_GIZMOS=0` — disable the default gizmo group when the cameras are
-//!   retargeted.
+//! [`plugin`] takes the plan's `frames`. It is mounted after `crate::default_plugins` by every
+//! windowed root: the offline route, both sandboxes, the pen cam demo, and the windowed network
+//! client. A plan without `frames` runs its cues on a normal window and takes no frame (the scene
+//! of a frame cost measurement). The cue plugins take the plan's other fields where an authority
+//! can raise their events: [`offline_fell_plugin`], [`offline_impact_plugin`],
+//! [`offline_shot_plugin`] and [`offline_wall_plugin`] on the offline root alone, and
+//! [`server_wall_plugin`] on the dedicated server, which reads the same plan file so that it fires
+//! the wall shots its capture clients frame.
 //!
-//! * `OVERMATCH_CAPTURE_STEP_S=<s>` — a positive, fixed virtual frame step for reproducible
-//!   comparisons. Asset loading still runs asynchronously, so capture after the scene is ready.
-//! * `OVERMATCH_CAPTURE_AMBIGUITIES=1` — report Update and PostUpdate schedule ambiguities.
-//!
-//! Every capture run seeds the view RNG (cosmetic effect variation, otherwise seeded from the wall
-//! clock) with [`VIEW_SEED`], so two runs draw the same effects.
-//! * `OVERMATCH_CAPTURE_FOLLOW=<x>,<y>,<z>` — hold the camera at this world-space offset from
-//!   the controlled tank, looking at its root, for close belt comparisons.
-//! * `OVERMATCH_CAPTURE_SETTINGS=<tab>` — hold the settings page open on that tab (`video` or
-//!   `gameplay`), its first row selected, on a root that mounts the page. The values it shows are
-//!   the run's `video.ron`; point `OVERMATCH_CONFIG_DIR` at a scratch directory to stage them
-//!   without touching the player's own.
-//!
-//! * `OVERMATCH_CAPTURE_FELL=<instance id>,<s>,<cut>,<dir bin>` — on the first fixed tick at or
-//!   after app second `s`, the standing tree of that map instance falls broken at segment `cut`
-//!   toward azimuth bin `dir bin`, exactly as a law sets it ([`offline_fell_plugin`]; the offline
-//!   root alone mounts it).
-//! * `OVERMATCH_CAPTURE_IMPACT=<x>,<z>,<calibre m>@<s>[;…]` — on the first frame at or after app
-//!   second `s`, a round of that calibre strikes the terrain under world `x,z`: the view's impact
-//!   read (dust, smoke, the ground mark) is raised there with no round flown and no shot recorded
-//!   ([`offline_impact_plugin`]; the offline root alone mounts it).
-//! * `OVERMATCH_CAPTURE_SHOT=<round key>,<fuze mode index>,tree|ground@<s>` — on the first frame
-//!   at or after app second `s`, that shipped round, in that fuze mode, is fired at a real tree or
-//!   at the ground beside it, and the frames are timed from its burst, the first two seconds after
-//!   it ([`offline_shot_plugin`]; the offline root alone mounts it).
-//! * `OVERMATCH_CAPTURE_WALL=<round key>[,<fuze mode index>]|x<kg>|dust:<names>[,<m>]@<s>[;…]`
-//!   — on the first frame at or after app second `s`, that shipped round is fired square at a
-//!   house wall, a bare charge of that mass is set off at its foot, or the named elements or
-//!   components of the house are shot out, each shot of the list at its own second, and the camera
-//!   stands in front of the wall unless `OVERMATCH_CAPTURE_POSE` holds it ([`offline_wall_plugin`]
-//!   on the offline root; the dedicated server fires the same cue for its hidden capture clients,
-//!   [`server_wall_plugin`]).
-//!   `OVERMATCH_CAPTURE_WALL_SUN=1` picks the wall facing the sun and fires along its rays.
-//!
-//! A capture run draws the view's cosmetic randomness (sprite roll, scale jitter, flipbook start)
-//! from one fixed seed, so two runs of one scenario on a fixed step draw the same sprites.
-//!
-//! The process exits once every frame is on disk, with a failure code if any is missing.
+//! The target's scale factor is [`SCALE_FACTOR`], so the UI lays out at half the frame's size in
+//! logical pixels, as on a retina window. Every capture run seeds the view RNG (cosmetic effect
+//! variation, otherwise seeded from the wall clock) with [`VIEW_SEED`], so two runs of one scenario
+//! on a fixed step draw the same sprites. The process exits once every frame is on disk, with a
+//! failure code if any is missing.
 //!
 //! # Invariant: a capture run shows no window
 //!
-//! On every root that mounts this plugin, with no variable but the capture's own: the primary
-//! window is created hidden and `Windowed`, settings never re-apply a persisted fullscreen to it
+//! On every root, whenever the plan takes frames and with no other variable: the primary window is
+//! created hidden and `Windowed`, settings never re-apply a persisted fullscreen to it
 //! (`settings::CaptureWindowPinned`), and on macOS the process renounces activation unless the
 //! root created the window hidden and renounced it itself. A focus loss never pauses the run
-//! (`state::FocusPauseSuppressed`). A hidden window has no swapchain texture, and a window screenshot reads back nothing
-//! without one (`bevy_render::view::window::screenshot::submit_screenshot_commands` skips the
-//! copy), so the frame is instead read back from an offscreen image that every window-targeting
-//! camera is pointed at one second before the first frame.
+//! (`state::FocusPauseSuppressed`). A hidden window has no swapchain texture, and a window
+//! screenshot reads back nothing without one
+//! (`bevy_render::view::window::screenshot::submit_screenshot_commands` skips the copy), so the
+//! frame is instead read back from an offscreen image that every window-targeting camera is
+//! pointed at one second before the first frame.
 //!
 //! The screenshot names that target exactly — same handle AND same scale factor. `ScreenshotPlugin`
 //! swaps the view's output attachment for its own texture by `NormalizedRenderTarget` equality,
@@ -87,7 +44,9 @@
 
 mod fuze;
 pub(crate) use fuze::offline_shot_plugin;
+pub(crate) mod plan;
 mod wall;
+pub(crate) use plan::plan;
 pub(crate) use wall::{offline_wall_plugin, server_wall_plugin};
 
 use std::path::{Path, PathBuf};
@@ -134,11 +93,15 @@ struct Capture {
     saved: usize,
 }
 
+/// The capture of the plan's `frames` (module doc); inert without a plan or without frames.
 pub fn plugin(app: &mut App) {
-    let Some(path) = std::env::var_os("OVERMATCH_CAPTURE") else {
-        return;
-    };
-    if std::env::var("OVERMATCH_CAPTURE_AMBIGUITIES").as_deref() == Ok("1") {
+    if let Some(frames) = plan().and_then(|plan| plan.frames.as_ref()) {
+        mount(app, frames);
+    }
+}
+
+fn mount(app: &mut App, frames: &plan::Frames) {
+    if frames.ambiguities {
         use bevy::ecs::schedule::{LogLevel, ScheduleBuildSettings, ScheduleLabel};
         for label in [Update.intern(), PostUpdate.intern()] {
             app.edit_schedule(label, |schedule| {
@@ -149,112 +112,121 @@ pub fn plugin(app: &mut App) {
             });
         }
     }
-    let at = parse_times(&std::env::var("OVERMATCH_CAPTURE_AT").unwrap_or_default());
-    let sight = std::env::var("OVERMATCH_CAPTURE_SIGHT").as_deref() == Ok("1");
-    let size = std::env::var("OVERMATCH_CAPTURE_SIZE")
-        .ok()
-        .and_then(|s| parse_size(&s))
-        .unwrap_or(UVec2::new(2560, 1440));
-    let ui = std::env::var("OVERMATCH_CAPTURE_UI").as_deref() != Ok("0");
-    let gizmos = std::env::var("OVERMATCH_CAPTURE_GIZMOS").as_deref() != Ok("0");
+    let size = frames.size();
     info!(
-        "capture: {} at {at:?} s, sight {sight}, {}x{}, ui {ui}, gizmos {gizmos}",
-        path.to_string_lossy(),
+        "capture: {} at {:?} s, sight {}, {}x{}, ui {}, gizmos {}",
+        frames.out.display(),
+        frames.at,
+        frames.sight,
         size.x,
-        size.y
+        size.y,
+        frames.ui,
+        frames.gizmos
     );
+    if let Some(dir) = frames
+        .out
+        .parent()
+        .filter(|dir| !dir.as_os_str().is_empty())
+    {
+        std::fs::create_dir_all(dir).unwrap_or_else(|error| {
+            panic!("{}: frames.out: {}: {error}", plan::VARIABLE, dir.display())
+        });
+    }
     unattended(app);
     // The effects plugin only `init_resource`s the RNG, so this seed holds in either mount order.
     app.insert_resource(crate::vfx::ViewRng::seeded(VIEW_SEED));
-    if let Some(step) = std::env::var("OVERMATCH_CAPTURE_STEP_S")
-        .ok()
-        .and_then(|s| s.parse::<f64>().ok())
-        .filter(|s| s.is_finite() && *s > 0.0)
-    {
+    if let Some(step) = frames.step_s {
         app.insert_resource(bevy::time::TimeUpdateStrategy::ManualDuration(
             std::time::Duration::from_secs_f64(step),
         ));
     }
-    if let Some(offset) = std::env::var("OVERMATCH_CAPTURE_FOLLOW")
-        .ok()
-        .and_then(|s| {
-            let values: Vec<f32> = s
-                .split(',')
-                .map(str::parse)
-                .collect::<Result<_, _>>()
-                .ok()?;
-            let [x, y, z] = values.as_slice() else {
-                return None;
+    match frames.camera {
+        plan::Camera::Player => {}
+        plan::Camera::Pose { eye, look } => {
+            let pose = Pose {
+                eye: eye.into(),
+                look: look.into(),
             };
-            Some(Vec3::new(*x, *y, *z))
-        })
-    {
-        app.add_systems(
-            PostUpdate,
-            (move |tanks: Query<&Transform, With<crate::tank::Controlled>>,
-                   mut cameras: Query<
-                &mut Transform,
-                (
-                    With<crate::view::PlayerView>,
-                    Without<crate::tank::Controlled>,
-                ),
-            >| {
-                if let Ok(tank) = tanks.single() {
-                    for mut camera in &mut cameras {
-                        *camera = Transform::from_translation(tank.translation + offset)
-                            .looking_at(tank.translation, Vec3::Y);
+            info!(
+                "capture: camera held at {} looking at {}",
+                pose.eye, pose.look
+            );
+            // A root that mounts no orbit camera configures no captor set; the pose still lands
+            // before the frame's transforms propagate.
+            app.configure_sets(
+                PostUpdate,
+                crate::camera::CaptiveCameraPlaced.before(TransformSystems::Propagate),
+            )
+            .insert_resource(pose)
+            .add_systems(
+                PostUpdate,
+                hold_pose.in_set(crate::camera::CaptiveCameraPlaced),
+            );
+        }
+        plan::Camera::Follow { offset } => {
+            let offset = Vec3::from(offset);
+            app.add_systems(
+                PostUpdate,
+                (move |tanks: Query<&Transform, With<crate::tank::Controlled>>,
+                       mut cameras: Query<
+                    &mut Transform,
+                    (
+                        With<crate::view::PlayerView>,
+                        Without<crate::tank::Controlled>,
+                    ),
+                >| {
+                    if let Ok(tank) = tanks.single() {
+                        for mut camera in &mut cameras {
+                            *camera = Transform::from_translation(tank.translation + offset)
+                                .looking_at(tank.translation, Vec3::Y);
+                        }
                     }
-                }
-            })
-            .after(crate::camera::OrbitCameraSet)
-            .after(crate::camera::CaptiveCameraPlaced)
-            .before(TransformSystems::Propagate),
-        );
-    }
-    if let Ok(tab) = std::env::var("OVERMATCH_CAPTURE_SETTINGS") {
-        match crate::settings::CapturePage::named(&tab) {
-            Some(page) => {
-                app.insert_resource(page);
-            }
-            None => panic!("OVERMATCH_CAPTURE_SETTINGS={tab}: no settings tab has that name"),
+                })
+                .after(crate::camera::OrbitCameraSet)
+                .after(crate::camera::CaptiveCameraPlaced)
+                .before(TransformSystems::Propagate),
+            );
         }
     }
+    if let Some(tab) = &frames.settings {
+        app.insert_resource(
+            crate::settings::CapturePage::named(tab).expect("the plan's tab is validated"),
+        );
+    }
     app.insert_resource(Capture {
-        path: path.into(),
-        at,
-        sight,
+        path: frames.out.clone(),
+        at: frames.at.clone(),
+        sight: frames.sight,
         size,
-        gizmos,
+        gizmos: frames.gizmos,
         target: None,
         switched: false,
         requested: 0,
         saved: 0,
     });
     app.add_systems(Update, capture);
-    if let Ok(raw) = std::env::var("OVERMATCH_CAPTURE_POSE") {
-        match parse_pose(&raw) {
-            Some(pose) => {
-                info!(
-                    "capture: camera held at {} looking at {}",
-                    pose.eye, pose.look
-                );
-                app.insert_resource(pose).add_systems(
-                    PostUpdate,
-                    hold_pose.in_set(crate::camera::CaptiveCameraPlaced),
-                );
-            }
-            None => warn!(
-                "capture: OVERMATCH_CAPTURE_POSE={raw:?} is not x,y,z,lx,ly,lz with distinct \
-                 finite points; the camera is the player's"
-            ),
-        }
-    }
-    if !ui {
+    if !frames.ui {
         app.add_systems(
             PostUpdate,
             hide_ui.before(VisibilitySystems::VisibilityPropagate),
         );
     }
+}
+
+/// The shipped round `key` in fuze mode `mode`, as the plan's `field` names it.
+///
+/// # Panics
+///
+/// When no shipped round has that key, or it has no such fuze mode (ADR-0011).
+fn resolve_round(key: &str, mode: u8, field: &str) -> crate::rounds::Round {
+    let round = crate::tank::WeaponRound::resolve(key)
+        .unwrap_or_else(|error| panic!("{}: {field}: {error}", plan::VARIABLE));
+    round.in_mode(mode).unwrap_or_else(|| {
+        panic!(
+            "{}: {field}: round {key:?} has no fuze mode {mode}",
+            plan::VARIABLE
+        )
+    })
 }
 
 /// What a capture run implies on every root, with no variable of its own (module doc): the window
@@ -285,7 +257,7 @@ fn silence(app: &mut App) {
     });
 }
 
-/// `OVERMATCH_CAPTURE_FELL`'s cue: which tree falls, when, and how.
+/// The plan's `fell` cue ([`plan::Fell`]) and whether it has fired.
 #[derive(Resource, Debug, Clone, PartialEq)]
 struct FellCue {
     instance: String,
@@ -295,35 +267,18 @@ struct FellCue {
     done: bool,
 }
 
-/// `<instance id>,<s>,<cut>,<dir bin>`; `None` when malformed.
-fn parse_fell(s: &str) -> Option<FellCue> {
-    let parts: Vec<&str> = s.split(',').map(str::trim).collect();
-    let [instance, at, cut, dir] = parts.as_slice() else {
-        return None;
-    };
-    let at = at.parse::<f32>().ok().filter(|at| at.is_finite())?;
-    Some(FellCue {
-        instance: (*instance).to_owned(),
-        at,
-        cut: cut.parse().ok()?,
-        dir: dir.parse().ok()?,
-        done: false,
-    })
-}
-
-/// The capture's tree-fall lever, mounted by the offline root only: it writes the authority's
-/// state, so a replica never runs it. Inert unless both `OVERMATCH_CAPTURE` and
-/// `OVERMATCH_CAPTURE_FELL` are set.
+/// The capture's tree-fall cue, mounted by the offline root only: it writes the authority's
+/// state, so a replica never runs it. Inert unless the plan has a `fell`.
 pub(crate) fn offline_fell_plugin(app: &mut App) {
-    if std::env::var_os("OVERMATCH_CAPTURE").is_none() {
-        return;
-    }
-    let Ok(raw) = std::env::var("OVERMATCH_CAPTURE_FELL") else {
+    let Some(fell) = plan().and_then(|plan| plan.fell.as_ref()) else {
         return;
     };
-    let Some(cue) = parse_fell(&raw) else {
-        warn!("capture: OVERMATCH_CAPTURE_FELL={raw:?} is not <instance id>,<s>,<cut>,<dir bin>");
-        return;
+    let cue = FellCue {
+        instance: fell.instance.clone(),
+        at: fell.at,
+        cut: fell.cut,
+        dir: fell.dir,
+        done: false,
     };
     info!("capture: {cue:?}");
     app.insert_resource(cue).add_systems(
@@ -381,51 +336,17 @@ fn fell_on_cue(
     );
 }
 
-/// One `OVERMATCH_CAPTURE_IMPACT` strike.
-#[derive(Clone, Copy, Debug, PartialEq)]
-struct ImpactCue {
-    at: f32,
-    x: f32,
-    z: f32,
-    caliber: f32,
-}
-
-/// The strikes not yet raised.
+/// The plan's `impacts` ([`plan::Impact`]) not yet raised.
 #[derive(Resource, Debug)]
-struct ImpactCues(Vec<ImpactCue>);
+struct ImpactCues(Vec<plan::Impact>);
 
-/// `<x>,<z>,<calibre m>@<s>` entries separated by `;`, every number finite and the calibre
-/// positive; `None` when any entry is malformed.
-fn parse_impacts(s: &str) -> Option<Vec<ImpactCue>> {
-    s.split(';')
-        .map(|entry| {
-            let (point, at) = entry.split_once('@')?;
-            let numbers: Vec<f32> = point
-                .split(',')
-                .map(|n| n.trim().parse().ok())
-                .collect::<Option<_>>()?;
-            let [x, z, caliber] = numbers[..] else {
-                return None;
-            };
-            let at: f32 = at.trim().parse().ok()?;
-            ([x, z, caliber, at].iter().all(|n| n.is_finite()) && caliber > 0.0)
-                .then_some(ImpactCue { at, x, z, caliber })
-        })
-        .collect()
-}
-
-/// The capture's terrain-impact lever, mounted by the offline root only, where the impact seam has
-/// no replica reading it. Inert unless both `OVERMATCH_CAPTURE` and `OVERMATCH_CAPTURE_IMPACT` are
-/// set.
+/// The capture's terrain-impact cue, mounted by the offline root only, where the impact seam has
+/// no replica reading it. Inert unless the plan lists `impacts`.
 pub(crate) fn offline_impact_plugin(app: &mut App) {
-    if std::env::var_os("OVERMATCH_CAPTURE").is_none() {
-        return;
-    }
-    let Ok(raw) = std::env::var("OVERMATCH_CAPTURE_IMPACT") else {
-        return;
-    };
-    let Some(cues) = parse_impacts(&raw) else {
-        warn!("capture: OVERMATCH_CAPTURE_IMPACT={raw:?} is not <x>,<z>,<calibre m>@<s>[;…]");
+    let Some(cues) = plan()
+        .map(|plan| plan.impacts.clone())
+        .filter(|cues| !cues.is_empty())
+    else {
         return;
     };
     info!("capture: impacts {cues:?}");
@@ -454,7 +375,7 @@ fn raise_impacts(
                 commands.trigger(crate::ballistics::Impact {
                     position,
                     normal: hit.normal,
-                    caliber: cue.caliber,
+                    caliber: cue.calibre_m,
                     surface: crate::ballistics::ImpactSurface::Terrain,
                     outcome: crate::ballistics::ImpactOutcome::Struck,
                 });
@@ -473,24 +394,11 @@ fn hide_ui(mut roots: Query<&mut Visibility, (With<Node>, Without<ChildOf>)>) {
     }
 }
 
-/// Where `OVERMATCH_CAPTURE_POSE` holds the player's camera.
+/// Where the plan's `Pose` camera ([`plan::Camera`]) holds the player's camera.
 #[derive(Resource, Clone, Copy, PartialEq, Debug)]
 struct Pose {
     eye: Vec3,
     look: Vec3,
-}
-
-/// Six comma-separated finite numbers, eye then target, two distinct points.
-fn parse_pose(s: &str) -> Option<Pose> {
-    let numbers: Vec<f32> = s
-        .split(',')
-        .map(|n| n.trim().parse().ok())
-        .collect::<Option<_>>()?;
-    let [x, y, z, lx, ly, lz] = numbers[..] else {
-        return None;
-    };
-    let (eye, look) = (Vec3::new(x, y, z), Vec3::new(lx, ly, lz));
-    (eye.is_finite() && look.is_finite() && eye != look).then_some(Pose { eye, look })
 }
 
 /// Hold the camera as a captor: claim the camera every frame, and write its pose.
@@ -507,13 +415,9 @@ fn hold_pose(
     }
 }
 
-/// Comma-separated seconds; unparsable entries are dropped; empty means the default. Times that
-/// share a [`stamp`] are kept once, so every frame has its own file.
-fn parse_times(s: &str) -> Vec<f32> {
-    let mut at: Vec<f32> = s.split(',').filter_map(|t| t.trim().parse().ok()).collect();
-    if at.is_empty() {
-        at.push(6.0);
-    }
+/// Frame times in ascending order, times that share a [`stamp`] kept once, so every frame has its
+/// own file.
+fn normalize_times(mut at: Vec<f32>) -> Vec<f32> {
     at.sort_by(f32::total_cmp);
     at.dedup_by(|a, b| stamp(*a) == stamp(*b));
     at
@@ -523,11 +427,6 @@ fn parse_times(s: &str) -> Vec<f32> {
 /// [0, 100000) s, at 0.1 ms resolution.
 fn stamp(at: f32) -> String {
     format!("{at:010.4}")
-}
-
-fn parse_size(s: &str) -> Option<UVec2> {
-    let (w, h) = s.split_once('x')?;
-    Some(UVec2::new(w.parse().ok()?, h.parse().ok()?))
 }
 
 /// One frame keeps `path`; several put the time before the extension.
@@ -741,95 +640,12 @@ mod tests {
         );
     }
 
-    /// The capture times default to 6 s, sort, drop junk, and fold times sharing a frame name into
-    /// one frame, so two captures never race for one file.
+    /// The capture times sort and fold times sharing a frame name into one frame, so two captures
+    /// never race for one file.
     #[test]
-    fn times_default_sort_and_drop_junk() {
-        assert_eq!(parse_times(""), vec![6.0]);
-        assert_eq!(parse_times("8, 2.5,x,4"), vec![2.5, 4.0, 8.0]);
-        assert_eq!(parse_times("2.00001,2,3"), vec![2.0, 3.0]);
-    }
-
-    /// A pose is six finite numbers naming two distinct points; anything else leaves the camera
-    /// to the player rather than pointing it at a guess.
-    #[test]
-    fn a_pose_is_two_distinct_finite_points() {
-        assert_eq!(
-            parse_pose("1, 2,3,4,5,6"),
-            Some(Pose {
-                eye: Vec3::new(1.0, 2.0, 3.0),
-                look: Vec3::new(4.0, 5.0, 6.0),
-            })
-        );
-        for refused in [
-            "",
-            "1,2,3,4,5",
-            "1,2,3,4,5,6,7",
-            "1,2,3,1,2,3",
-            "1,2,x,4,5,6",
-            "nan,0,0,1,1,1",
-        ] {
-            assert_eq!(parse_pose(refused), None, "{refused}");
-        }
-    }
-
-    /// A fell cue is an instance id, a finite second and two bytes; anything else leaves every
-    /// tree standing rather than felling a guess.
-    #[test]
-    fn a_fell_cue_is_an_instance_a_second_a_cut_and_a_bin() {
-        assert_eq!(
-            parse_fell("fir_c_0160, 10,3,64"),
-            Some(FellCue {
-                instance: "fir_c_0160".to_owned(),
-                at: 10.0,
-                cut: 3,
-                dir: 64,
-                done: false,
-            })
-        );
-        for refused in [
-            "",
-            "fir,10,3",
-            "fir,10,3,64,1",
-            "fir,inf,3,64",
-            "fir,10,256,64",
-            "fir,10,3,-1",
-        ] {
-            assert_eq!(parse_fell(refused), None, "{refused}");
-        }
-    }
-
-    /// An impact cue is a ground point, a positive calibre and a second; one bad entry refuses the
-    /// whole list rather than raising some of the strikes asked for.
-    #[test]
-    fn impact_cues_are_points_calibres_and_seconds() {
-        assert_eq!(
-            parse_impacts("-400, -430,0.088@17.5;1,2,0.0079@18"),
-            Some(vec![
-                ImpactCue {
-                    at: 17.5,
-                    x: -400.0,
-                    z: -430.0,
-                    caliber: 0.088,
-                },
-                ImpactCue {
-                    at: 18.0,
-                    x: 1.0,
-                    z: 2.0,
-                    caliber: 0.0079,
-                },
-            ])
-        );
-        for refused in [
-            "",
-            "1,2,0.088",
-            "1,2@3",
-            "1,2,0@3",
-            "1,2,0.088@inf",
-            "1,2,0.088@3;x",
-        ] {
-            assert_eq!(parse_impacts(refused), None, "{refused}");
-        }
+    fn times_sort_and_fold_onto_their_frame_names() {
+        assert_eq!(normalize_times(vec![8.0, 2.5, 4.0]), vec![2.5, 4.0, 8.0]);
+        assert_eq!(normalize_times(vec![2.00001, 2.0, 3.0]), vec![2.0, 3.0]);
     }
 
     /// One frame keeps the given path; several stamp it. A sequence assembled by name plays in
@@ -843,10 +659,14 @@ mod tests {
             frame_path(single, 8.5, 2),
             Path::new("/out/shot-00008.5000s.png")
         );
-        let spec: Vec<String> = (0..3750)
-            .map(|k| format!("{:.4}", 1.0 + k as f32 / 30.0))
+        let spec: Vec<f32> = (0..3750)
+            .map(|k| {
+                format!("{:.4}", 1.0 + k as f32 / 30.0)
+                    .parse()
+                    .expect("a number")
+            })
             .collect();
-        let at = parse_times(&spec.join(","));
+        let at = normalize_times(spec);
         assert_eq!(at.len(), 3750);
         let path = Path::new("/out/f.png");
         let names: Vec<PathBuf> = at.iter().map(|&t| frame_path(path, t, at.len())).collect();

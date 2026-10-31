@@ -7,12 +7,12 @@
 //! rounds are not flown. The camera is then held on each mark in turn, [`SHOW_EVERY_S`] apart from
 //! [`FIRST_SHOW_S`], for `OVERMATCH_CAPTURE` stills.
 //!
-//! The hole, the dent and the scratch, with a hidden window:
+//! The hole, the dent and the scratch, with a capture plan (`dev_capture::plan`) whose `frames`
+//! are `(out: "<dir>/hull-mark.png", at: [18.0, 21.0, 24.0], ui: false, gizmos: false)`:
 //!
 //! ```text
-//! SPIKE_SIM_WINDOWED=1 OVERMATCH_TARGET=ahead OVERMATCH_HULL_MARKS_DEMO=1 \
-//!   OVERMATCH_CAPTURE=<dir>/hull-mark.png OVERMATCH_CAPTURE_AT=18,21,24 \
-//!   OVERMATCH_CAPTURE_UI=0 OVERMATCH_CAPTURE_GIZMOS=0 target/debug/overmatch --offline
+//! OVERMATCH_TARGET=ahead OVERMATCH_HULL_MARKS_DEMO=1 OVERMATCH_CAPTURE=<plan>.ron \
+//!   target/debug/overmatch --offline
 //! ```
 //!
 //! Mounted only by the offline composition (`run_offline`), as `tank::scenario`'s target-fires

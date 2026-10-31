@@ -368,9 +368,8 @@ pub fn run() {
     // The capture scripts are the only users of `SPIKE_SIM_WINDOWED`, and what they want is the
     // RenderApp (KTX2 transcode needs a real GPU device), not a window — so the window defaults to
     // hidden and stops stealing focus from the operator. `SPIKE_SIM_VISIBLE=1` restores the
-    // eyes-on diagnostic. A documentation capture (`dev_capture`, `OVERMATCH_CAPTURE`) hides and
-    // pins the window itself, as on every root.
-    let capture = !simulate && std::env::var_os("OVERMATCH_CAPTURE").is_some();
+    // eyes-on diagnostic. A documentation capture (`dev_capture`'s plan) hides and pins the window
+    // itself, as on every root.
     let hidden = sim_windowed && !harness::env_flag("SPIKE_SIM_VISIBLE", false);
 
     let mut app = App::new();
@@ -496,8 +495,9 @@ pub fn run() {
     if !simulate || sim_windowed {
         app.add_plugins(NetClientPlugin);
     }
-    if capture {
+    if !simulate {
         // Documentation frames to disk (the Join menu, a connect screen); exits once they are.
+        // Inert unless a capture plan takes frames.
         app.add_plugins(crate::dev_capture::plugin);
     }
     // Passive jitter-trace recorder: frame + tick rows with link/interpolation extras. Idle unless

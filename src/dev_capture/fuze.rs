@@ -1,18 +1,17 @@
 //! The capture's shot lever, in the game's damage model: on the first frame at or after app second
-//! `s`, a shipped round in one of its fuze modes is fired at a real tree or at the ground beside it,
-//! and the capture's frames are timed from the round's burst. The burst outside a tank opens no pen
-//! cam, so the view draws it over the scene: the flight path cyan, a quarter of the fragment cone's
-//! directions orange (4 m each), the burst point a white cross. The controlled tank's weapon that lists the
-//! round selects it in that mode, so the HUD's readout names both.
+//! `at`, a shipped round in one of its fuze modes is fired at a real tree or at the ground beside
+//! it, and the capture's frames are timed from the round's burst. The burst outside a tank opens no
+//! pen cam, so the view draws it over the scene: the flight path cyan, a quarter of the fragment
+//! cone's directions orange (4 m each), the burst point a white cross. The controlled tank's weapon
+//! that lists the round selects it in that mode, so the HUD's readout names both.
 //!
-//! `OVERMATCH_CAPTURE_SHOT=<round key>,<mode index>,tree|ground@<s>`, with `OVERMATCH_CAPTURE` set;
-//! the offline root alone mounts it. A shot that has not burst [`GIVE_UP_S`] after its cue ends
-//! the run with a failure code.
+//! The capture plan's `shot` ([`super::plan::Shot`]); the offline root alone mounts it. A shot that
+//! has not burst [`GIVE_UP_S`] after its cue ends the run with a failure code.
 use crate::ballistics::spall_cone::BurstFields;
 use crate::ballistics::{
     ArmourMark, FireShell, PenetrationMarks, RetainSpentShells, ShellPath, SpallMarks,
 };
-use crate::tank::{Controlled, Muzzle, TankRoot, Weapon, WeaponIndex, WeaponLoads, WeaponRound};
+use crate::tank::{Controlled, Muzzle, TankRoot, Weapon, WeaponIndex, WeaponLoads};
 use bevy::prelude::*;
 
 /// App seconds past the cue after which a shot with no burst fails the run (ASSUMED: a 0.1 s delay
@@ -35,40 +34,20 @@ struct Cue {
 }
 
 pub(crate) fn offline_shot_plugin(app: &mut App) {
-    if std::env::var_os("OVERMATCH_CAPTURE").is_none() {
-        return;
-    }
-    let Ok(raw) = std::env::var("OVERMATCH_CAPTURE_SHOT") else {
+    let Some(shot) = super::plan().and_then(|plan| plan.shot.as_ref()) else {
         return;
     };
-    let parse = || {
-        let (spec, at) = raw.split_once('@')?;
-        let fields: Vec<_> = spec.split(',').collect();
-        let [key, mode, target] = fields[..] else {
-            return None;
-        };
-        let round = WeaponRound::resolve(key)
-            .ok()?
-            .in_mode(mode.parse().ok()?)?;
-        let at: f32 = at.parse().ok()?;
-        if !at.is_finite() || at < 0.0 || !matches!(target, "tree" | "ground") {
-            return None;
-        }
-        Some(Cue {
-            key: key.to_owned(),
-            round,
-            tree: target == "tree",
-            at,
-            fired: false,
-            camera: None,
-            logged: false,
-        })
+    let round = super::resolve_round(&shot.round, shot.mode, "shot");
+    let cue = Cue {
+        key: shot.round.clone(),
+        round,
+        tree: shot.target == super::plan::ShotTarget::Tree,
+        at: shot.at,
+        fired: false,
+        camera: None,
+        logged: false,
     };
-    let Some(cue) = parse() else {
-        warn!("capture: invalid shot cue {raw:?}");
-        return;
-    };
-    info!("capture: game's damage model shot {raw}");
+    info!("capture: game's damage model shot {shot:?}");
     app.insert_resource(ShotReady(None))
         .insert_resource(cue)
         .insert_resource(RetainSpentShells(true))

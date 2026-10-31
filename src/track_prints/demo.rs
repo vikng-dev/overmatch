@@ -12,14 +12,14 @@
 //! cost measurement (`scripts/perf/run-track-prints-cost.sh`). The hold's start is logged on the
 //! `Time<Real>` clock the frame stream (`crate::frame_cost`) stamps its rows on.
 //!
-//! The three spots on the shipped map, with a hidden window (fixture data: stretches where one
-//! pack dominates the mask, the same spots `OVERMATCH_START` names):
+//! The three spots on the shipped map (fixture data: stretches where one pack dominates the mask,
+//! the same spots `OVERMATCH_START` names), each with a capture plan (`dev_capture::plan`) whose
+//! `frames` are `(out: "<dir>/track-prints.png", at: [38.5, 40.5, 42.5, 44.5, 46.5, 48.5],
+//! ui: false, gizmos: false)`:
 //!
 //! ```text
-//! SPIKE_SIM_WINDOWED=1 OVERMATCH_TRACK_PRINTS_DEMO=599.9,-599.9,195 \
-//!   OVERMATCH_CAPTURE=<dir>/bay1-track-prints-s2-mud.png \
-//!   OVERMATCH_CAPTURE_AT=38.5,40.5,42.5,44.5,46.5,48.5 \
-//!   OVERMATCH_CAPTURE_UI=0 OVERMATCH_CAPTURE_GIZMOS=0 target/debug/overmatch --offline
+//! OVERMATCH_TRACK_PRINTS_DEMO=599.9,-599.9,195 OVERMATCH_CAPTURE=<plan>.ron \
+//!   target/debug/overmatch --offline
 //! OVERMATCH_TRACK_PRINTS_DEMO=302.5,542.7,315,-1   (sand, same otherwise)
 //! OVERMATCH_TRACK_PRINTS_DEMO=70,-20,90            (the base pack)
 //! ```

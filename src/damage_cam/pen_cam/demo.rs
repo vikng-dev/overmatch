@@ -14,18 +14,16 @@
 //! each field's axis line and `M` toggles reduce motion; captures set the expanded corner through
 //! [`Settings::from_env`].
 //!
-//! Capture: with `OVERMATCH_CAPTURE` set the clock steps a fixed 1/30 s per frame, so
-//! `dev_capture`'s frame times are presentation times; virtual time stays paused until both tank
-//! views have spawned, so a frame time never lands on a loading screen.
+//! Capture: a capture plan whose `frames.step_s` is fixed (1/30 s steps one presentation frame per
+//! rendered frame) makes `dev_capture`'s frame times presentation times; virtual time stays paused
+//! until both tank views have spawned, so a frame time never lands on a loading screen.
 
 use std::sync::Arc;
-use std::time::Duration;
 
 use bevy::ecs::schedule::ScheduleConfigs;
 use bevy::ecs::system::ScheduleSystem;
 use bevy::input::mouse::AccumulatedMouseMotion;
 use bevy::prelude::*;
-use bevy::time::TimeUpdateStrategy;
 
 use super::plan::Plan;
 use super::timeline::{self, CornerKind, Turn};
@@ -151,8 +149,6 @@ const GAP_S: f32 = 2.0;
 /// Scrub step (s) and the speed ladder.
 const SCRUB_S: f32 = 0.1;
 const SPEEDS: [f32; 5] = [0.1, 0.25, 0.5, 1.0, 2.0];
-/// The capture clock's fixed step.
-const CAPTURE_STEP: Duration = Duration::from_nanos(33_333_333);
 
 /// Every record the playlist names, loaded once. A malformed record is a broken fixture.
 #[derive(Resource)]
@@ -503,9 +499,6 @@ pub fn demo_plugin(app: &mut App) {
     let library = Library::load();
     let settings = Settings::from_env();
     let run = Run::new(start, &library, &settings, once);
-    if std::env::var_os("OVERMATCH_CAPTURE").is_some() {
-        app.insert_resource(TimeUpdateStrategy::ManualDuration(CAPTURE_STEP));
-    }
     app.add_plugins((
         crate::quit::plugin,
         crate::spec::plugin,

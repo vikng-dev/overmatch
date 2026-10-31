@@ -1,32 +1,33 @@
 //! The capture's wall cue, in the game's environment destruction (game state only): on the first
-//! frame at or after app second `s`, a shipped round is fired square at a house wall, a bare
-//! charge is set off against the foot of it, or named parts of the house are shot out, and the
-//! camera stands in front of that wall.
+//! frame at or after each shot's app second, a shipped round is fired square at a house wall, a
+//! bare charge is set off against the foot of it, or named parts of the house are shot out, and
+//! the camera stands in front of that wall.
 //!
-//! `OVERMATCH_CAPTURE_WALL=<shot>@<s>[;<shot>@<s>…]`, a shot `<round key>[,<fuze mode index>]`,
-//! `x<kg>` or `dust:<name>[+<name>…][,<below m>]`, with `OVERMATCH_CAPTURE` set, on the offline
-//! root ([`offline_wall_plugin`]); each shot goes off at its own second, all at one wall. The
-//! dedicated server mounts the same cue keyed by `OVERMATCH_CAPTURE_WALL` alone
-//! ([`server_wall_plugin`]): it fires and draws nothing, and logs the camera pose its hidden
-//! capture clients hold (`OVERMATCH_CAPTURE_POSE`), so every peer frames the one break the server
-//! made. The wall is chosen by class, the same on every run: the building nearest the map's centre
-//! (the lowest ordinal on a tie), its breakable pier of the largest volume (the lowest element on a
-//! tie). A round is fired 25 m out along the pier's outward normal at the chunk nearest the pier's
-//! centre; a charge sits on the pier's outer face at its foot, its energy the first shipped burst
-//! core's chemical energy per kilogram times its mass, with no casing. A `dust:` shot turns to
-//! dust, in one deposit ([`WallDust`]), every chunk of the house's elements whose own name or whose
-//! component's name is one of the names, whose centroid lies below `below` m in the building frame
-//! when given: `dust:east` shoots out the east wall, `dust:east/pier_1,0.225` the first course of
-//! that pier above grade.
+//! The capture plan's `wall` ([`super::plan::Wall`]), on the offline root
+//! ([`offline_wall_plugin`]); each shot goes off at its own second, all at one wall. The dedicated
+//! server mounts the same cue from the same plan file ([`server_wall_plugin`]): it fires and draws
+//! nothing, and logs the camera its capture clients hold as a plan fragment (a `frames.camera`
+//! value), so every peer frames the one break the server made. The wall is chosen by class, the
+//! same on every run: the building nearest the map's centre (the lowest ordinal on a tie), its
+//! breakable pier of the largest volume (the lowest element on a tie). A round is fired 25 m out
+//! along the pier's outward normal at the chunk nearest the pier's centre; a charge sits on the
+//! pier's outer face at its foot, its energy the first shipped burst core's chemical energy per
+//! kilogram times its mass, with no casing. A `Dust` shot turns to dust, in one deposit
+//! ([`WallDust`]), every chunk of the house's elements whose own name or whose component's name is
+//! one of its `names`, whose centroid lies below `below_m` in the building frame when given:
+//! `Dust(names: ["east"], at: 8.0)` shoots out the east wall, `Dust(names: ["east/pier_1"],
+//! below_m: 0.225, at: 8.0)` the first course of that pier above grade.
 //!
-//! With `OVERMATCH_CAPTURE_POSE` set the cue leaves the camera to it.
+//! When the plan's `frames.camera` places the camera (a pose or a follow), the cue leaves the
+//! camera to it.
 //!
-//! `OVERMATCH_CAPTURE_WALL_SUN=1` turns the wall to the light: the pier is the one whose outer
-//! face looks most into the sun (then the largest, then the lowest element), and a round flies
-//! along the sun's rays at the same chunk, so the channel it cuts is one the sun shines down.
+//! `sun: true` turns the wall to the light: the pier is the one whose outer face looks most into
+//! the sun (then the largest, then the lowest element), and a round flies along the sun's rays at
+//! the same chunk, so the channel it cuts is one the sun shines down.
 
 use bevy::prelude::*;
 
+use super::plan::WallShot;
 use crate::ballistics::FireShell;
 use crate::buildings::BuildingKind;
 use crate::buildings::breakage::{Breakage, WallCharge, WallDust};
@@ -34,7 +35,6 @@ use crate::buildings::fracture::Blast;
 use crate::buildings::schema::ElementKind;
 use crate::scatter::MapInstance;
 use crate::substances::SubstanceRegistry;
-use crate::tank::WeaponRound;
 
 /// How far out along the wall's normal a round is fired from, m (fixture).
 const STANDOFF_M: f32 = 25.0;
@@ -66,16 +66,16 @@ struct Cue {
 }
 
 pub(crate) fn offline_wall_plugin(app: &mut App) {
-    if std::env::var_os("OVERMATCH_CAPTURE").is_none() {
-        return;
-    }
-    let Some(cue) = cue_from_env() else {
+    let Some(cue) = cue_from_plan() else {
         return;
     };
     app.insert_resource(cue)
         .insert_resource(crate::camera::CameraCaptive(true))
         .add_systems(Update, fire_on_cue);
-    if std::env::var_os("OVERMATCH_CAPTURE_POSE").is_none() {
+    let placed = super::plan()
+        .and_then(|plan| plan.frames.as_ref())
+        .is_some_and(|frames| frames.camera != super::plan::Camera::Player);
+    if !placed {
         app.add_systems(
             PostUpdate,
             hold_camera.in_set(crate::camera::CaptiveCameraPlaced),
@@ -85,62 +85,40 @@ pub(crate) fn offline_wall_plugin(app: &mut App) {
 
 /// The dedicated server's cue (module doc): it fires, and its clients frame the wall.
 pub(crate) fn server_wall_plugin(app: &mut App) {
-    if let Some(cue) = cue_from_env() {
+    if let Some(cue) = cue_from_plan() {
         app.insert_resource(cue).add_systems(Update, fire_on_cue);
     }
 }
 
-/// The cue `OVERMATCH_CAPTURE_WALL` names, `None` when unset or malformed (logged).
-fn cue_from_env() -> Option<Cue> {
-    let raw = std::env::var("OVERMATCH_CAPTURE_WALL").ok()?;
-    let shot = |shot: &str| {
-        let (what, at) = shot.split_once('@')?;
-        let at: f32 = at
-            .parse()
-            .ok()
-            .filter(|at: &f32| at.is_finite() && *at >= 0.0)?;
-        let what = match (what.strip_prefix("dust:"), what.strip_prefix('x')) {
-            (Some(dust), _) => {
-                let (names, below) = match dust.split_once(',') {
-                    Some((names, below)) => (
-                        names,
-                        Some(below.parse().ok().filter(|b: &f32| b.is_finite())?),
-                    ),
-                    None => (dust, None),
-                };
-                let names: Vec<String> = names.split('+').map(str::to_owned).collect();
-                if names.iter().any(String::is_empty) {
-                    return None;
-                }
-                What::Dust { names, below }
-            }
-            (None, Some(mass)) => What::Charge {
-                mass: mass.parse().ok().filter(|m: &f32| *m > 0.0)?,
-            },
-            (None, None) => {
-                let (key, mode) = what.split_once(',').unwrap_or((what, "0"));
-                What::Round(
-                    WeaponRound::resolve(key)
-                        .ok()?
-                        .in_mode(mode.parse().ok()?)?,
-                )
-            }
-        };
-        Some((what, at, false))
-    };
-    let parse = || {
-        Some(Cue {
-            shots: raw.split(';').map(shot).collect::<Option<_>>()?,
-            sun: std::env::var("OVERMATCH_CAPTURE_WALL_SUN").is_ok_and(|v| v == "1"),
-            camera: None,
+/// The plan's `wall` cue, `None` when the plan has none.
+fn cue_from_plan() -> Option<Cue> {
+    let wall = super::plan()?.wall.as_ref()?;
+    let shots = wall
+        .shots
+        .iter()
+        .map(|shot| match shot {
+            WallShot::Round { round, mode, at } => (
+                What::Round(super::resolve_round(round, *mode, "wall.shots")),
+                *at,
+                false,
+            ),
+            WallShot::Charge { kg, at } => (What::Charge { mass: *kg }, *at, false),
+            WallShot::Dust { names, below_m, at } => (
+                What::Dust {
+                    names: names.clone(),
+                    below: *below_m,
+                },
+                *at,
+                false,
+            ),
         })
-    };
-    let Some(cue) = parse() else {
-        warn!("capture: invalid wall cue {raw:?}");
-        return None;
-    };
-    info!("capture: game's environment destruction wall cue {raw}");
-    Some(cue)
+        .collect();
+    info!("capture: game's environment destruction wall cue {wall:?}");
+    Some(Cue {
+        shots,
+        sun: wall.sun,
+        camera: None,
+    })
 }
 
 /// The camera that frames the wall: [`CAMERA_OUT_M`] out from the middle of the aim point and the
@@ -229,7 +207,7 @@ fn the_house<'a>(
         .map(|(root, _, transform, breakage)| (root, transform, breakage))
 }
 
-/// The law chunks a `dust:` shot names (module doc).
+/// The law chunks a `Dust` shot names (module doc).
 fn dust_chunks(kind: &BuildingKind, names: &[String], below: Option<f32>) -> Vec<usize> {
     let asset = &kind.asset;
     (0..asset.elements.len())
@@ -263,11 +241,11 @@ fn fire_on_cue(
         let camera = framing(outward, aim, foot);
         let (at, look) = (camera.translation, (aim + foot) / 2.0);
         info!(
-            "capture: wall camera OVERMATCH_CAPTURE_POSE={},{},{},{},{},{}",
+            "capture: wall outside — camera: Pose(eye: ({:?}, {:?}, {:?}), look: ({:?}, {:?}, {:?})),",
             at.x, at.y, at.z, look.x, look.y, look.z
         );
         info!(
-            "capture: wall inside pose {},{},{},{},{},{}",
+            "capture: wall inside — camera: Pose(eye: ({:?}, {:?}, {:?}), look: ({:?}, {:?}, {:?})),",
             inside.x, inside.y, inside.z, look.x, look.y, look.z
         );
         cue.camera = Some(camera);

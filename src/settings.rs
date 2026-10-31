@@ -90,7 +90,7 @@ mod store;
 /// which is what makes mounting the page without its entry declarer unrepresentable.
 mod ui;
 /// The capture lever that holds the page open on one tab (`dev_capture`'s
-/// `OVERMATCH_CAPTURE_SETTINGS`).
+/// plan field `frames.settings`).
 pub(crate) use ui::CapturePage;
 /// The page's root, which the UI-ownership audit counts as an owner (`net::ui_ownership`).
 #[cfg(test)]

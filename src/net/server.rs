@@ -79,7 +79,7 @@ pub fn run() {
     super::disclosure::install_server(&mut app);
     super::destruction::install_server(&mut app);
     super::walls::install_server(&mut app);
-    // A capture's wall cue (`OVERMATCH_CAPTURE_WALL`): inert unless set.
+    // A capture plan's wall cue (`OVERMATCH_CAPTURE`, its `wall`): inert without one.
     crate::dev_capture::server_wall_plugin(&mut app);
     if let Err(err) = super::debris_stress::install_server(&mut app) {
         eprintln!("overmatch-server: fatal: {err}");

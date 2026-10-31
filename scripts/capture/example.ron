@@ -1,0 +1,20 @@
+// A capture plan (`dev_capture::plan::CapturePlan`), the game's environment destruction (game
+// state only): one shipped round fired square at the house wall nearest the map's centre, framed
+// by the wall cue's own camera before and after. From the checkout root:
+//
+//   OVERMATCH_CAPTURE=scripts/capture/example.ron OVERMATCH_MUTE=1 target/debug/overmatch --offline
+//
+// writes target/capture/example-00009.0000s.png and target/capture/example-00012.0000s.png, then
+// exits. Times and size are capture configuration (ASSUMED), not game data.
+(
+    frames: (
+        out: "target/capture/example.png",
+        at: [9.0, 12.0],
+        size: (1280, 720),
+        ui: false,
+        gizmos: false,
+    ),
+    wall: (
+        shots: [Round(round: "88mm_AP", at: 10.0)],
+    ),
+)

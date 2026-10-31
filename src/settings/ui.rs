@@ -950,8 +950,8 @@ pub(super) fn declare_from_pause_state(
 }
 
 /// Holds the page open on one tab, its first row selected, whatever the pause surface declares —
-/// the capture lever `dev_capture` inserts for `OVERMATCH_CAPTURE_SETTINGS`. Nothing else inserts
-/// it, so a shipped run never sees it.
+/// the capture lever `dev_capture` inserts for a capture plan's `frames.settings`. Nothing else
+/// inserts it, so a shipped run never sees it.
 #[derive(Resource, Clone, Copy, Debug)]
 pub(crate) struct CapturePage(Tab);
 
