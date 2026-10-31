@@ -2880,6 +2880,9 @@ pub struct Shot {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EntranceRead {
     pub position: Vec3,
+    /// The volume owning the surface struck, the read's [`DiscEvent::entrance_volume`]: the body
+    /// the whole momentum exchange goes to (§13.5), for a bounce and a bite alike.
+    pub volume: Entity,
     /// `n̄`, the area-mean entry normal.
     pub normal: Vec3,
     pub coverage: f32,
@@ -3011,6 +3014,7 @@ pub fn begin(entrance: &DiscWalk, shot: &Shot, laws: &WalkLaws) -> Result<Begin,
         steel_equivalent > 0.0 && shot.caliber >= laws.overmatch_ratio * steel_equivalent;
     let read = EntranceRead {
         position: event.entry_position,
+        volume: event.entrance_volume,
         normal,
         coverage: event.coverage,
         incidence,

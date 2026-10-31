@@ -1463,7 +1463,7 @@ pub(crate) fn decide(
             direction,
             speed_scale,
         } => {
-            let struck = entrance.events[0].entrance_volume;
+            let struck = read.volume;
             let position = anchor + read.position;
             let out = Dir3::new(direction).unwrap_or(dir);
             let kept = speed * speed_scale;
@@ -1564,7 +1564,7 @@ fn bite(
     // anchor-relative: it is the next corridor's input, and rebuilding it in world would round it at
     // the world's spacing (see there).
     let world = |local: Vec3| transit.anchor + local;
-    let struck = plan.crossing.entrance_volume;
+    let struck = plan.entrance.volume;
     // The APPROACH: the flight's position to the axis handoff, along the way in. The transit's own
     // `t` then measures the rest, along the bend.
     let approach = (transit.origin - from).dot(Vec3::from(incoming)).max(0.0);
