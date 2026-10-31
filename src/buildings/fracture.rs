@@ -1649,7 +1649,7 @@ const BEARS: f32 = 1e-3;
 /// The rest check, for the touched chunks with no bonded path to the ground (`paths`, one per
 /// chunk of `touched`, [`ground_path`]): each such chunk's bonded group (its chunks joined to it
 /// through intact bonded joints, `graph`) stands on rests alone, and the rest law reads it under
-/// gravity and the presses in `loads` ([`unseat`]). The first group, in `touched` order, that leaves
+/// gravity and the presses and blows in `loads` ([`unseat`]). The first group, in `touched` order, that leaves
 /// its rests is
 /// the failure; `None` when every group stays. Adds the chunks it walks and the joints it reads to
 /// `steps`.
@@ -1816,14 +1816,14 @@ fn unseat(
     // The sustained law on a resultant force `f` (N) and moment `t` (N m) about the seat: it
     // lifts the part when it pulls away from the rests; it tips it by how far its pressure
     // centre lies past the bearing hull, infinitely when a resultant with no vertical part
-    // still turns it; it slides it when its tangent beats friction times its compression.
+    // still overturns it about a horizontal axis; it slides it when its tangent beats friction times its compression.
     let compression = |f: Vec3| -f.dot(support);
     let lifts = |f: Vec3| f.y > 0.0 || compression(f) < 0.0;
     let tip = |f: Vec3, t: Vec3| {
         if f.y < 0.0 {
             let pressure = seat_centre + Vec3::new(t.z / f.y, 0.0, -t.x / f.y);
             beyond(&hull, (pressure.x, pressure.z))
-        } else if t != Vec3::ZERO {
+        } else if t.x != 0.0 || t.z != 0.0 {
             f32::INFINITY
         } else {
             0.0
@@ -4311,6 +4311,58 @@ mod tests {
                 "{force}"
             );
         }
+    }
+
+    /// A VERTICAL-AXIS TWIST IS NOT A TIP (the game's environment destruction model). The
+    /// bearing-hull check used by resting components reads only overturning moments; a pure
+    /// twist has no pressure-centre displacement, even with no vertical resultant. ASSUMED
+    /// fixture couples isolate each axis. Torsional friction remains outside this rest model.
+    #[test]
+    fn a_rest_does_not_report_pure_twist_as_overturning() {
+        let mut structure = cubes(&[[0, 0, 0], [0, 1, 0]], 1, &[], 28.8);
+        let rest = joint_between(&structure, 0, 1);
+        structure.joints[rest].bond = Bond::Resting;
+        let seat = structure.joints[rest].centroid;
+        let load = Load {
+            chunk: 1,
+            at: seat + Vec3::X,
+            energy: 0.0,
+            blow: Vec3::ZERO,
+            press: Vec3::Z,
+            peak: None,
+            origin: Origin::Field,
+        };
+        for (offset, expected) in [(Vec3::X, None), (Vec3::Y, Some(Cause::Tip))] {
+            let loads = [
+                Load {
+                    at: seat + offset,
+                    ..load
+                },
+                Load {
+                    at: seat - offset,
+                    press: -load.press,
+                    ..load
+                },
+            ];
+            let failure = unseat(
+                &structure,
+                &WallState::new(&structure),
+                &[1],
+                &loads,
+                Vec3::ZERO,
+                &mut 0,
+            );
+            assert_eq!(failure.map(|failure| failure.cause), expected);
+        }
+        let sideways = unseat(
+            &structure,
+            &WallState::new(&structure),
+            &[1],
+            &[load],
+            Vec3::ZERO,
+            &mut 0,
+        );
+        assert_eq!(sideways.unwrap().cause, Cause::Slide);
     }
 
     /// A STRENGTH-HELD PULSE CANNOT HIDE AN IMPULSIVE TURN (the game's environment destruction
