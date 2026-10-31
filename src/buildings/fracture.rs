@@ -1746,10 +1746,9 @@ const BEARS: f32 = 1e-3;
 /// The rest check, for the touched chunks with no bonded path to the ground (`paths`, one per
 /// chunk of `touched`, [`ground_path`]): each such chunk's bonded group (its chunks joined to it
 /// through intact bonded joints, `graph`) stands on rests alone, and the rest law reads it under
-/// gravity and the presses and blows in `loads` ([`unseat`]). The first group, in `touched` order, that leaves
-/// its rests is
-/// the failure; `None` when every group stays. Adds the chunks it walks and the joints it reads to
-/// `steps`.
+/// gravity and the presses and blows in `loads` ([`unseat`]). The first group, in `touched`
+/// order, that leaves its rests is the failure; `None` when every group stays. Adds the chunks it
+/// walks and the joints it reads to `steps`.
 fn unseated(
     structure: &Structure,
     state: &WallState,
@@ -1913,7 +1912,8 @@ fn unseat(
     // The sustained law on a resultant force `f` (N) and moment `t` (N m) about the seat: it
     // lifts the part when it pulls away from the rests; it tips it by how far its pressure
     // centre lies past the bearing hull, infinitely when a resultant with no vertical part
-    // still overturns it about a horizontal axis; it slides it when its tangent beats friction times its compression.
+    // still overturns it about a horizontal axis; it slides it when its tangent beats friction
+    // times its compression.
     let compression = |f: Vec3| -f.dot(support);
     let lifts = |f: Vec3| f.y > 0.0 || compression(f) < 0.0;
     let tip = |f: Vec3, t: Vec3| {
