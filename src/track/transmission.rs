@@ -14,21 +14,16 @@
 //! points, the invariants and their units, and the classification of every constant the
 //! module still owns.
 //!
-//! Three adapters behind one mode enum:
-//! - [`TransmissionMode::Governor`] — the EXACT governor math ([`forces::governor_belt`],
-//!   verbatim): every MP composition and every existing baseline runs this.
-//! - [`TransmissionMode::Hybrid`] — the arcade-honest continuous regenerative box (design
-//!   menu C/D): engine torque curve × gear ratio → propulsion force on `m`; a
-//!   capacity-limited steering servo on `d` (continuous curvature command interpolating the
-//!   authored radii); power conservation with inner-track recirculation at declared η.
-//! - [`TransmissionMode::FixedRadii`] — the Tiger L600: the same machinery, but `d` is
-//!   CONSTRAINED to `s·κ(gear, step)·|m|` (two steering detents per gear with hysteresis);
-//!   the constraint force λ is solved semi-implicitly and clamped so each output's steering
-//!   share stays inside the per-output capacity (beyond it the constraint slips). At `m≈0`
-//!   the neutral turn is the MARGINAL
-//!   brake-gated one the restoration literature describes: a slow capacity-limited
-//!   counter-rotation at the DERIVED 1st-gear pivot scale
-//!   [`TransmissionParams::neutral_d_full`].
+//! One law, the fixed-radius geared regenerative box (design menu B, the L600 family): engine
+//! torque curve × gear ratio → propulsion force on `m`; `d` CONSTRAINED to `s·κ(gear, step)·|m|`
+//! (two steering detents per gear with hysteresis); the constraint force λ solved
+//! semi-implicitly and clamped so each output's steering share stays inside the per-output
+//! capacity (beyond it the constraint slips); power conservation with inner-track recirculation
+//! at declared η. At `m≈0` the neutral turn is the MARGINAL brake-gated one the restoration
+//! literature describes: a slow capacity-limited counter-rotation at the DERIVED 1st-gear pivot
+//! scale [`TransmissionParams::neutral_d_full`]. A vehicle whose drivetrain is another family
+//! adds that family to its spec data and its law here; the design doc's menu names the
+//! candidates.
 //!
 //! Brakes (design §3, the hold reframe): the ground reaction is ALWAYS applied to the belt
 //! (never attenuated). The brake force is the capacity-limited STOP force
@@ -38,13 +33,13 @@
 //! zero). `cap` comes from the parking LATCH (zero command near standstill sets it; any
 //! throttle OR steer intent releases it — steer by design, the neutral pivot must move the
 //! belts, and it re-latches when the stick returns to zero at standstill), the hill-hold
-//! latch, the governor hold-blend entry envelope
+//! latch, the hold-blend entry envelope
 //! while unlatched, or the service pedal (opposite-throttle driver intent). A latched belt
 //! strictly inside [`PARK_ENGAGE_SPEED`] gets the authored static breakaway multiplier; a
 //! moving belt, service braking, and every post-breach latched slide stay at dynamic
-//! `B_max`. The `Governor` adapter keeps the old hold blend verbatim instead.
+//! `B_max`.
 //!
-//! Signed shaft (stage A): the regenerative adapters measure the geared shaft RELATIVE TO
+//! Signed shaft (stage A): the box measures the geared shaft RELATIVE TO
 //! THE ENGAGED LADDER — `shaft = dir·m` with `dir = −1` on the R ladder — so driving
 //! normally reads POSITIVE and a BACK-DRIVEN belt (rolling against the engaged gear on a
 //! grade) reads NEGATIVE. The SHAFT is signed (rigid gearing); the ENGINE never is — it
@@ -70,7 +65,7 @@
 //! clutch-slip equilibrium; pivot power spools with the crank; `readout` reports ω_e
 //! directly (the state IS the display).
 //!
-//! Reserve scheduler (stage C): on every decision tick the regenerative adapters project the
+//! Reserve scheduler (stage C): on every decision tick the box projects the
 //! two owned ground reactions onto the signed `m` axis and low-pass the positive load demand
 //! `D` with a fixed-tick ASYMMETRIC EMA — rise [`DEMAND_FILTER_TICKS`], fall
 //! [`DEMAND_FALL_FILTER_TICKS`]: rising demand is believed fast for safety, a collapsing
@@ -223,22 +218,6 @@ use super::forces::{self, ForceParams};
 #[cfg(feature = "bitprobe")]
 use crate::bitprobe::TransmissionProbe;
 
-/// Which drivetrain adapter computes the sprocket forces. Selected per-vehicle by the SPEC
-/// (`TankSpec.track.powertrain.transmission.architecture` — mandatory, `Governor` included),
-/// or by an explicit dev-time switch (offline `TransmissionFeelTest`, sandbox `TransSwitch`,
-/// harness `trans=` key). Deliberately NO `Default` impl: every selection path must name its
-/// adapter — an implicit Governor is exactly the silent-selection bug this enum used to hide.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum TransmissionMode {
-    /// The per-side symmetric governor + hold blend, bit-for-bit — the tableless adapter a
-    /// spec selects with `architecture: Governor`.
-    Governor,
-    /// `Regenerative { continuous }` — the arcade-honest hybrid (design menu D).
-    Hybrid,
-    /// `Regenerative { fixed_radii }` — the L600 geared-steering adapter (design menu B).
-    FixedRadii,
-}
-
 /// Gear-selection capability declared by the vehicle spec. The scheduler may name any target;
 /// this datum decides whether one interruption reaches it directly or pays one window per
 /// adjacent step. VEHICLE DATA, not scheduler policy: the model accepts arbitrary targets, and
@@ -267,16 +246,6 @@ pub enum SchedulerState {
     },
     HillHold,
     GradeLimit,
-}
-
-impl TransmissionMode {
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Governor => "governor (symmetric per-side)",
-            Self::Hybrid => "hybrid (continuous regenerative)",
-            Self::FixedRadii => "L600 (fixed-radius regenerative)",
-        }
-    }
 }
 
 /// The fixed simulation tick rate the shift countdown quantizes against (the module operates
@@ -539,10 +508,8 @@ const DIRECTION_SWAP_SPEED: f32 = 0.5;
 /// thresholds only — the neutral turn's SPEED SCALE is the spec-DERIVED
 /// [`TransmissionParams::neutral_d_full`], not a module constant. SIM POLICY.
 const NEUTRAL_THROTTLE: f32 = 0.1;
-/// The |m| half of that entry test, and — in the Hybrid — the `hold_blend` WIDTH over which
-/// the continuous curvature servo blends into the power-limited standstill pivot
-/// ([`steering_force`]). [`CLUTCH_OUT_M_SPEED`]/[`CLUTCH_IN_M_SPEED`] are derived from it.
-/// SIM POLICY.
+/// The |m| half of that entry test. [`CLUTCH_OUT_M_SPEED`]/[`CLUTCH_IN_M_SPEED`] are derived
+/// from it. SIM POLICY.
 const NEUTRAL_M_SPEED: f32 = 0.5;
 
 /// Steering-detent hysteresis on |steer| (design: two steps per gear, `|steer| ≥ 0.5` tight):
@@ -587,9 +554,8 @@ pub struct TransmissionParams {
     /// Auto-shift rpm bands (hysteresis: the gap between them must exceed one ratio step).
     pub shift_up_rpm: f32,
     pub shift_down_rpm: f32,
-    /// Per FORWARD gear `(κ_tight, κ_wide)` where `κ = half_tread / R` — the L600 detents;
-    /// the hybrid reads `κ_tight` as its full-lock continuous curvature. Reverse gears index
-    /// the same table (R1–R4 mirror F1–F4).
+    /// Per FORWARD gear `(κ_tight, κ_wide)` where `κ = half_tread / R` — the L600 detents.
+    /// Reverse gears index the same table (R1–R4 mirror F1–F4).
     pub steer_kappa: Vec<(f32, f32)>,
     /// The authored per-forward-gear `(R_tight, R_wide)` table (m), retained verbatim for
     /// presentation. The sim law consumes [`Self::steer_kappa`]; retaining the source table keeps
@@ -608,8 +574,6 @@ pub struct TransmissionParams {
     /// scale for a fixed-radius box: the radii table's own invariant makes `κ_tight(g) ×
     /// v(g)` gear-independent (Tiger: ≈ 0.337 m/s @ 3000 rpm in every gear). The authored
     /// `neutral_fraction` feel scalar that used to shrink it was DELETED as unprovenanced.
-    /// The hybrid does not read this: its standstill pivot is POWER-limited, not
-    /// speed-targeted.
     pub neutral_d_full: f32,
     /// Inner→outer recirculation efficiency η (mechanical ~0.9, INFERRED tag at the authoring
     /// site).
@@ -1052,10 +1016,10 @@ impl TransmissionState {
         Self::with_crank_speed(tp.engine.idle_rpm * RPM_TO_RAD)
     }
 
-    /// Canonical inert state for a vehicle with no declared regenerative transmission. The
-    /// Governor adapter never reads or mutates this state, so its absent crank has no vehicle
-    /// speed to initialize from and remains explicitly zero rather than acting as a sentinel.
-    pub(crate) fn for_governor() -> Self {
+    /// A state at rest with its crank stopped: the fixture for tests whose subject is not the
+    /// transmission (replication scope, probe layout, HUD formatting).
+    #[cfg(test)]
+    pub(crate) fn stopped() -> Self {
         Self::with_crank_speed(0.0)
     }
 
@@ -1116,8 +1080,8 @@ pub fn readout(st: &TransmissionState, tp: &TransmissionParams) -> DriveReadout 
 }
 
 /// One tick's joint input: the SHAPED drive axes plus the per-side mixed commands (the brake
-/// envelope and the governor adapter consume the sides; the regenerative adapters consume the
-/// axes), the pre-tick belt speeds, and this tick's summed longitudinal ground reactions.
+/// envelope consumes the sides; the drive and steering laws consume the axes), the pre-tick
+/// belt speeds, and this tick's summed longitudinal ground reactions.
 pub struct TransmissionInput {
     pub throttle: f32,
     pub steer: f32,
@@ -1145,59 +1109,6 @@ pub struct TransmissionReport {
     pub power_available: f32,
     #[cfg(feature = "bitprobe")]
     pub(crate) bitprobe: TransmissionProbe,
-}
-
-/// Advance the joint drivetrain one fixed tick and integrate both belt speeds.
-///
-/// `Governor` is the exact per-side path ([`forces::governor_belt`]) — `state` is not
-/// touched, and the results are bit-identical to the shipped `step_side` tail. The
-/// regenerative adapters implement the m/d superimposed model documented at module level.
-pub fn step(
-    mode: TransmissionMode,
-    fp: &ForceParams,
-    tp: Option<&TransmissionParams>,
-    state: &mut TransmissionState,
-    inp: &TransmissionInput,
-) -> TransmissionReport {
-    // Selection is the CALLER's explicit contract: a regenerative mode without its declared
-    // tables is a selection bug upstream, and it fails loudly here instead of silently
-    // demoting to the governor (both live callers — `track::sim` and the sandbox — pass
-    // `Some` by construction).
-    let (mode, tp) = match (mode, tp) {
-        (TransmissionMode::Governor, _) => (TransmissionMode::Governor, None),
-        (m, Some(tp)) => (m, Some(tp)),
-        (m, None) => panic!(
-            "transmission::step: {m:?} selected without TransmissionParams — regenerative \
-             adapters require the spec's declared tables; there is no silent governor demotion"
-        ),
-    };
-    match mode {
-        TransmissionMode::Governor => {
-            let mut report = TransmissionReport {
-                power_scale: 1.0,
-                ..Default::default()
-            };
-            for i in 0..2 {
-                let (engine, next) = forces::governor_belt(
-                    fp,
-                    inp.side_commands[i],
-                    inp.speeds[i],
-                    inp.reactions[i],
-                    inp.dt,
-                );
-                report.forces[i] = engine;
-                report.next_speeds[i] = next;
-            }
-            report
-        }
-        _ => regenerative(
-            mode,
-            fp,
-            tp.expect("regenerative modes carry params"),
-            state,
-            inp,
-        ),
-    }
 }
 
 /// The engine's compression-braking (motoring) drag torque at the CRANK (stage B — drag
@@ -1486,7 +1397,7 @@ struct CrankTick {
 /// clamped to ±`clutch_capacity` (beyond it the clutch slips honestly — the launch force is
 /// the capacity, not the lock demand). `F_other` is the m-axis force sum EXCLUDING the
 /// engine path — the summed ground reactions. This is a PREDICTOR approximation: the later
-/// brake stop-forces, the FixedRadii λ mean-axis share
+/// brake stop-forces, the λ mean-axis share
 /// (`j_L + j_R = −e` does NOT cancel), and the belt ±max_speed clamp all move `m_next`
 /// after this solve, and exact pre-accounting is CIRCULAR (the brake law reads the very
 /// `q` that needs `F_c`). What makes the approximation safe is the end-of-step FEASIBILITY
@@ -1626,8 +1537,8 @@ struct DriverIntent {
     service: f32,
 }
 
-/// Resolve the shaped drive axes into the declared W/S contract, with honest mechanisms — the
-/// Governor conflated zero-throttle with brake-to-zero:
+/// Resolve the shaped drive axes into the declared W/S contract, with honest mechanisms — never
+/// conflating zero-throttle with brake-to-zero:
 ///   * throttle WITH the engaged ladder → drive (`propulsive`);
 ///   * throttle AGAINST it → SERVICE BRAKES (`service`, the declared brake capacity) until near
 ///     standstill, where [`swap_ladder_direction`] engages the opposite gears — never
@@ -1816,18 +1727,15 @@ fn update_hill_hold(
 /// Update the L600 steering detent (hysteresis on |steer|), the ONE detent truth this tick's
 /// gear decisions and this tick's steering solve both read.
 ///
-/// This must run BEFORE the shift scheduler. The update used to live inside the FixedRadii
-/// steering arm BELOW the scheduler, so `detent_turn` read the PREVIOUS tick's step: seven
+/// This must run BEFORE the shift scheduler. The update used to live inside the
+/// steering law BELOW the scheduler, so `detent_turn` read the PREVIOUS tick's step: seven
 /// qualifying straight ticks followed by a detent engage on the committing tick still
 /// incremented the confirmation to N and committed an ordinary upshift on the exact tick the
 /// turn began — and the same invocation then applied the λ constraint in the NEW gear, where the
 /// landing predictor is explicitly invalid. The update depends only on `steer` and the previous
 /// step, and nothing between the old and new sites read it, so every non-engage tick is
 /// unchanged.
-fn update_steer_detent(st: &mut TransmissionState, mode: TransmissionMode, steer: f32) {
-    if mode != TransmissionMode::FixedRadii {
-        return;
-    }
+fn update_steer_detent(st: &mut TransmissionState, steer: f32) {
     let a = steer.abs();
     st.steer_step = match st.steer_step {
         0 => u8::from(a >= WIDE_ON),
@@ -2255,8 +2163,8 @@ fn update_park_latch(st: &mut TransmissionState, inp: &TransmissionInput) {
 }
 
 /// THE COUPLING SEAM latch: engaged ⇔ not shifting ∧ not the neutral-idle regime. The
-/// neutral-idle regime generalizes the L600 neutral-turn seam to BOTH regenerative adapters — no
-/// propulsive drive near standstill means the driver has the main clutch out (an engaged
+/// neutral-idle regime generalizes the L600 neutral-turn seam from steering to the whole drive —
+/// no propulsive drive near standstill means the driver has the main clutch out (an engaged
 /// idle-governed crank at standstill would otherwise ride the clutch: idle torque through a
 /// first-gear reduction is hundreds of kN of spurious creep/pivot-drag force). Keyed on
 /// `propulsive` (not |throttle|) so a service-brake command at speed stays engaged (engine
@@ -2353,7 +2261,7 @@ fn crank_free_torque(
 }
 
 /// The steering member's contribution to this tick: the difference-axis force `F_s`, the L600
-/// constraint force λ, and λ's per-output Jacobian `j`. Returned as `(f_s, lambda, j)`; a mode
+/// constraint force λ, and λ's per-output Jacobian `j`. Returned as `(f_s, lambda, j)`; a tick
 /// that commands neither leaves all three at zero.
 ///
 /// κ is table-indexed by the ACTIVE gear (reverse mirrors the low forward gears); `d` follows the
@@ -2370,12 +2278,7 @@ fn crank_free_torque(
 /// masked). The difference-axis bound is 2× the per-output capacity: `F_s` splits `±F_s/2` onto
 /// the outputs, and each output's share is what the per-output datum caps (see
 /// [`TransmissionParams::steer_capacity_n`] — the pivot-dead convention fix).
-#[expect(
-    clippy::too_many_arguments,
-    reason = "the steering law reads the mode, both parameter sets, state, input and three axis forces"
-)]
 fn steering_force(
-    mode: TransmissionMode,
     tp: &TransmissionParams,
     fp: &ForceParams,
     st: &TransmissionState,
@@ -2395,114 +2298,78 @@ fn steering_force(
     let r_d = (inp.reactions[0] - inp.reactions[1]) / 2.0;
     let servo =
         |target_d: f32| (2.0 * ((target_d - d) * fp.inertia / dt + r_d)).clamp(-f_s_max, f_s_max);
-    match mode {
-        TransmissionMode::Hybrid => {
-            // Continuous curvature command, GEAR-INDEPENDENT: |steer| interpolates
-            // 0..κ(R_min) where R_min is the vehicle's tightest authored radius (the
-            // 1st-gear tight entry). This is the hydrostatic-superimposed family's defining
-            // trait (design menu C: "infinitely variable… variable-speed pivot turns") — the
-            // steer path bypasses the gearbox, so full lock always commands the minimum
-            // radius and the POWER budget, not the ratio ladder, is what forces a fast tank
-            // wide (measured: the power scale slows the hull into the radius it can afford —
-            // the design's "strong turn-in, then physically required speed loss").
-            //
-            // At m → 0 the SAME doctrine holds: the hydrostatic family's pivot is limited by
-            // the POWER budget, not by a speed target — the old neutral_d_full FLOOR was a
-            // kinematic speed command that left the engine at ~1/6 of its budget and pivoted
-            // at 0.131 rad/s. Standing still, the box commands steer FORCE up to the
-            // capacity bound (steer-proportional, the per-output convention's ±2×capacity on
-            // the difference axis) and the power-conservation scale is the binding limiter,
-            // so the pivot rate settles where engine power balances scrub dissipation. The
-            // blend weight is continuous in BOTH regime axes — `hold_blend` over |m|
-            // (NEUTRAL_M_SPEED) × |steer| — so no one-tick force jump crosses either seam,
-            // and steer → 0 continuously returns the whole force to the curvature servo,
-            // whose target is then 0: releasing the stick actively ARRESTS the belt
-            // difference (weighting on |m| alone zeroed both terms at steer = 0 and left an
-            // airborne pivot counter-rotating forever).
-            let k_full = tp.steer_kappa[0].0;
-            if inp.steer != 0.0 || d != 0.0 {
-                let servo_f = servo(inp.steer.signum() * (inp.steer.abs() * k_full * m.abs()));
-                let pivot_f = inp.steer * f_s_max;
-                let w = forces::hold_blend(m.abs() / NEUTRAL_M_SPEED) * inp.steer.abs().min(1.0);
-                f_s = servo_f + (pivot_f - servo_f) * w;
+    // The steering detent (`st.steer_step`) was already updated for THIS tick
+    // above the shift scheduler — one detent truth per tick; this law only
+    // consumes it.
+    let neutral = inp.throttle.abs() < NEUTRAL_THROTTLE && m.abs() < NEUTRAL_M_SPEED;
+    if neutral {
+        // The marginal brake-gated neutral turn: a slow capacity-limited servo
+        // toward the DERIVED pivot scale `neutral_d_full = κ_tight(F1) ×
+        // v1_governed` — the radii table's own gear-independent invariant (the
+        // unprovenanced `neutral_fraction` that used to shrink it was deleted).
+        f_s = servo(inp.steer * tp.neutral_d_full);
+    } else {
+        // The geared-radius constraint g = d − s·κ·|m| = 0, solved semi-implicitly:
+        // λ is the force that lands g at zero after this tick's integration, clamped
+        // so each output's share stays inside the per-output capacity (beyond it the
+        // constraint slips). Zero ideal work: Q_c·v = λ·g, which the solve drives to
+        // zero.
+        let s = if inp.steer > 0.0 {
+            1.0
+        } else if inp.steer < 0.0 {
+            -1.0
+        } else {
+            0.0
+        };
+        let kappa = match st.steer_step {
+            0 => 0.0,
+            1 => k_wide,
+            _ => k_tight,
+        };
+        let a_l = f_c / 2.0 - inp.reactions[0];
+        let a_r = f_c / 2.0 - inp.reactions[1];
+        // One |m| branch of the solve: on branch b, |m| linearizes as `b·m`, so
+        // `g = jl·v_L + jr·v_R` with the branch's Jacobian. Returns λ (per-output
+        // capacity clamp — straight-gear `max|j| = 1/2` gives the same 2× bound
+        // the servo uses), the Jacobian, and the m the tick lands on under that λ
+        // (brakes are disengaged in this regime: throttle is past the neutral
+        // band, so no park/service term perturbs the prediction).
+        let solve = |branch: f32| -> (f32, [f32; 2], f32) {
+            let e = s * kappa * branch;
+            let jl = (1.0 - e) / 2.0;
+            let jr = -(1.0 + e) / 2.0;
+            let g_now = jl * vl + jr * vr;
+            let denom = jl * jl + jr * jr;
+            let lambda_max = tp.steer_capacity_n / jl.abs().max(jr.abs()).max(1e-3);
+            let l = (-(g_now * fp.inertia / dt + jl * a_l + jr * a_r) / denom)
+                .clamp(-lambda_max, lambda_max);
+            let m_next = m + (a_l + l * jl + a_r + l * jr) / (2.0 * fp.inertia) * dt;
+            (l, [jl, jr], m_next)
+        };
+        let b0 = if m > 0.0 {
+            1.0
+        } else if m < 0.0 {
+            -1.0
+        } else {
+            0.0
+        };
+        let (l0, j0, m_next) = solve(b0);
+        if b0 != 0.0 && m_next * b0 < 0.0 {
+            // The tick crosses m = 0: the pre-tick branch would project onto
+            // `d = s·κ·m` on the WRONG side of the |m| cusp — a one-tick
+            // steering-sign reversal. Re-solve on the branch the belt actually
+            // lands on; if the branches disagree about the landing side (the
+            // genuine cusp), the constraint takes the tick off — λ = 0 is stable
+            // and passive there.
+            let (l1, j1, m1) = solve(-b0);
+            if m1 * b0 <= 0.0 {
+                lambda = l1;
+                j = j1;
             }
+        } else {
+            lambda = l0;
+            j = j0;
         }
-        TransmissionMode::FixedRadii => {
-            // The steering detent (`st.steer_step`) was already updated for THIS tick
-            // above the shift scheduler — one detent truth per tick; this arm only
-            // consumes it.
-            let neutral = inp.throttle.abs() < NEUTRAL_THROTTLE && m.abs() < NEUTRAL_M_SPEED;
-            if neutral {
-                // The marginal brake-gated neutral turn: a slow capacity-limited servo
-                // toward the DERIVED pivot scale `neutral_d_full = κ_tight(F1) ×
-                // v1_governed` — the radii table's own gear-independent invariant (the
-                // unprovenanced `neutral_fraction` that used to shrink it was deleted).
-                f_s = servo(inp.steer * tp.neutral_d_full);
-            } else {
-                // The geared-radius constraint g = d − s·κ·|m| = 0, solved semi-implicitly:
-                // λ is the force that lands g at zero after this tick's integration, clamped
-                // so each output's share stays inside the per-output capacity (beyond it the
-                // constraint slips). Zero ideal work: Q_c·v = λ·g, which the solve drives to
-                // zero.
-                let s = if inp.steer > 0.0 {
-                    1.0
-                } else if inp.steer < 0.0 {
-                    -1.0
-                } else {
-                    0.0
-                };
-                let kappa = match st.steer_step {
-                    0 => 0.0,
-                    1 => k_wide,
-                    _ => k_tight,
-                };
-                let a_l = f_c / 2.0 - inp.reactions[0];
-                let a_r = f_c / 2.0 - inp.reactions[1];
-                // One |m| branch of the solve: on branch b, |m| linearizes as `b·m`, so
-                // `g = jl·v_L + jr·v_R` with the branch's Jacobian. Returns λ (per-output
-                // capacity clamp — straight-gear `max|j| = 1/2` gives the same 2× bound
-                // the servo uses), the Jacobian, and the m the tick lands on under that λ
-                // (brakes are disengaged in this regime: throttle is past the neutral
-                // band, so no park/service term perturbs the prediction).
-                let solve = |branch: f32| -> (f32, [f32; 2], f32) {
-                    let e = s * kappa * branch;
-                    let jl = (1.0 - e) / 2.0;
-                    let jr = -(1.0 + e) / 2.0;
-                    let g_now = jl * vl + jr * vr;
-                    let denom = jl * jl + jr * jr;
-                    let lambda_max = tp.steer_capacity_n / jl.abs().max(jr.abs()).max(1e-3);
-                    let l = (-(g_now * fp.inertia / dt + jl * a_l + jr * a_r) / denom)
-                        .clamp(-lambda_max, lambda_max);
-                    let m_next = m + (a_l + l * jl + a_r + l * jr) / (2.0 * fp.inertia) * dt;
-                    (l, [jl, jr], m_next)
-                };
-                let b0 = if m > 0.0 {
-                    1.0
-                } else if m < 0.0 {
-                    -1.0
-                } else {
-                    0.0
-                };
-                let (l0, j0, m_next) = solve(b0);
-                if b0 != 0.0 && m_next * b0 < 0.0 {
-                    // The tick crosses m = 0: the pre-tick branch would project onto
-                    // `d = s·κ·m` on the WRONG side of the |m| cusp — a one-tick
-                    // steering-sign reversal. Re-solve on the branch the belt actually
-                    // lands on; if the branches disagree about the landing side (the
-                    // genuine cusp), the constraint takes the tick off — λ = 0 is stable
-                    // and passive there.
-                    let (l1, j1, m1) = solve(-b0);
-                    if m1 * b0 <= 0.0 {
-                        lambda = l1;
-                        j = j1;
-                    }
-                } else {
-                    lambda = l0;
-                    j = j0;
-                }
-            }
-        }
-        TransmissionMode::Governor => unreachable!("handled by the caller"),
     }
     (f_s, lambda, j)
 }
@@ -2585,8 +2452,8 @@ fn release_hill_hold(
 
 /// The reframed brake (design §3) applied to the assembled per-side sprocket forces: −R always
 /// reaches the belt; near zero command + zero belt speed the parking/service brake statically
-/// balances what the drivetrain doesn't, inside its capacity. `h` reuses the governor hold-blend
-/// SHAPE purely as the engagement envelope (tick-stable, exact at rest); `grip_stiffness = 0`
+/// balances what the drivetrain doesn't, inside its capacity. `h` reuses the hold-blend
+/// SHAPE ([`forces::hold_blend`]) purely as the engagement envelope (tick-stable, exact at rest); `grip_stiffness = 0`
 /// (support-only rigs, e.g. calibration) keeps the brake disengaged, like the hold it extends.
 fn apply_brake_stop_forces(
     q: &mut [f32; 2],
@@ -2708,8 +2575,9 @@ fn settle_crank(
     }
 }
 
-fn regenerative(
-    mode: TransmissionMode,
+/// Advance the joint drivetrain one fixed tick and integrate both belt speeds: the m/d
+/// superimposed model documented at module level.
+pub fn step(
     fp: &ForceParams,
     tp: &TransmissionParams,
     st: &mut TransmissionState,
@@ -2774,14 +2642,14 @@ fn regenerative(
     // its ordinary landing-band gate for engine protection.
     let grade_landing_positive = dir * predict_shift_landing_m(tp, fp, m, r_mean, dt) > 0.0;
 
-    update_steer_detent(st, mode, inp.steer);
+    update_steer_detent(st, inp.steer);
 
     // Predictor-domain guard: while the L600 detent is engaged the constraint force λ loads the
     // outputs in a way the predictor cannot model (it carries no λ/steer state), so its landing
     // prediction is invalid mid-geared-turn — DEFER upshifts until the detent releases.
     // Downshifts stay allowed (the over-rev gate still applies). The broader "hold gear during
     // any turn" UX rule is a separate pending design decision, deliberately NOT implemented.
-    let detent_turn = mode == TransmissionMode::FixedRadii && st.steer_step != 0;
+    let detent_turn = st.steer_step != 0;
     if st.shift_ticks == 0 {
         run_shift_decision(
             st,
@@ -2874,7 +2742,7 @@ fn regenerative(
     };
     let f_c_pre_scale = k * dir * tau_c;
 
-    let (f_s_pre_scale, lambda, j) = steering_force(mode, tp, fp, st, inp, m, d, f_c_pre_scale);
+    let (f_s_pre_scale, lambda, j) = steering_force(tp, fp, st, inp, m, d, f_c_pre_scale);
 
     let power_scale = power_conservation_scale(
         tp,

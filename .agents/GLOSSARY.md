@@ -222,14 +222,10 @@ Counter-rotating the belts at near-zero mean speed so their equal-and-opposite t
 _Avoid_: pivot turn, neutral turn
 
 **Declared transmission**:
-The vehicle-authored engine envelope, gear ladders, steering radii, capacities, brakes, shift behavior, and architecture. Speeds and radii are source data; reductions, curvatures, and other coupled quantities derive in one validated constructor.
+The vehicle-authored engine envelope, gear ladders, steering radii, capacities, brakes, and shift behavior. Speeds and radii are source data; reductions, curvatures, and other coupled quantities derive in one validated constructor.
 
-**Transmission adapter**:
-The drivetrain law selected behind the shared joint two-output seam:
-
-- *Governor* — the legacy independent-belt path and multiplayer parity mode.
-- *Hybrid* — continuously variable regenerative steering with inner-to-outer power recirculation.
-- *Fixed radii* — geared regenerative steering constrained to the declared radius detents.
+**Transmission law**:
+The one drivetrain law behind the joint two-output seam: *fixed radii*, geared regenerative steering constrained to the declared radius detents (the L600 family). A vehicle with another drivetrain family adds it as spec data plus a law; the design doc's architecture menu names the candidates.
 
 **Signed shaft**:
 Mean belt motion expressed relative to the engaged forward or reverse ladder. Normal motion in the selected direction is positive; a belt back-driven against that direction is negative. The sign belongs to the shaft, not the engine crank.

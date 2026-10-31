@@ -168,7 +168,8 @@ mod tests {
         server.connect_client(&mut other);
         let owner_link = **owner.world().resource::<TestClientEntity>();
 
-        let transmission = TankTransmission::for_governor();
+        let transmission =
+            TankTransmission(crate::track::transmission::TransmissionState::stopped());
         let signal = DriveSignal {
             throttle: 0.5,
             steer: -0.25,

@@ -118,9 +118,7 @@ pub(crate) fn calibrate(
         mu: 1.0,
         slip_saturation: 1.0,
         max_speed: 1.0,
-        engine_power: 0.0,
         engine_force: 0.0,
-        governor_gain: 0.0,
         inertia: 1.0,
         grip_stiffness: 0.0,
     };
@@ -144,7 +142,6 @@ pub(crate) fn calibrate(
             count,
             plane_x: side.plane_x,
             columns: side.columns,
-            command: 0.0,
             travel: TravelField { knots: side.knots },
         };
         let (report, _) = contact_side(

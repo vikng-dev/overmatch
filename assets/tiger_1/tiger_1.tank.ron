@@ -48,10 +48,10 @@ TankSpec(
         // The idler meshes' view nodes, one per side.
         idler: ( nodes: ( left: "Idler_L", right: "Idler_R" ) ),
         // Phase-B locomotion: the SANDBOX force law scaled to the Tiger (the retired raycast
-        // sim was a placeholder — nothing structural carries over). Stiff sandbox governor;
-        // the contact-envelope law derives its spring/damper from `suspension` below (same
-        // ~5 cm static sink at 57 t); inertia likewise. Hill-hold arrived with the grip regime
-        // (ADR-0026); parking creep is gone.
+        // sim was a placeholder — nothing structural carries over). The contact-envelope law
+        // derives its spring/damper from `suspension` below (same ~5 cm static sink at 57 t);
+        // inertia likewise. Hill-hold arrived with the grip regime (ADR-0026); parking creep is
+        // gone.
         //
         // Force cap = the GRIP-LIMIT gearing rule (the T-34 lab benchmark: first gear can
         // just spin the tracks, cap ≈ μ·W/2 ≈ 252 kN here). The previous 100 kN was tuned
@@ -64,19 +64,14 @@ TankSpec(
         // traction stall moves to ~arctan μ ≈ 42°.
         powertrain: (
             max_speed: 10.5,
-            power: 260_000.0,
             force: 250_000.0,
-            governor_gain: 60_000.0,
             inertia: 16_000.0,
             // The DECLARED drivetrain (phase 2.5) — authored from the anchored tables in
-            // .agents/docs/design/track-model/tiger-transmission-data.md. This declared
-            // architecture SHIPS everywhere, MP included (REV 14 replicates the full
-            // TransmissionState atomically; the governor knobs above remain shared belt-law
-            // data, not a separate MP path).
+            // .agents/docs/design/track-model/tiger-transmission-data.md. It SHIPS everywhere, MP
+            // included (REV 14 replicates the full TransmissionState atomically).
             // Architecture: "wheel controlled hydraulic operated regenerative" [ANCHOR] — the
-            // L600 fixed-radius adapter is the historically right one.
+            // L600 fixed-radius box, the one law `track::transmission` runs.
             transmission: (
-                architecture: FixedRadii,
                 engine: (
                     // HL230 P45. idle INFERRED (~600, typical for the engine class);
                     // governed 2500 = the fleet condition from Nov 1943 [ANCHOR]; per-gear

@@ -22,8 +22,8 @@
 //!   column carries its own bristle strain, force follows the strain direction, each element
 //!   saturates against μ × its own elastic load. Longitudinal force reacts back into belt
 //!   dynamics.
-//! - **Belt dynamics**: constant-power engine curve under a low-speed force cap, a governor
-//!   chasing `command × max_speed`, ground reaction, reflected inertia; phase advection.
+//! - **Belt dynamics** are the joint drivetrain's (`track::transmission::step`): this module hands
+//!   it each side's summed ground reaction, and the caller advects the phase.
 
 use bevy::ecs::entity::Entity;
 use bevy::math::{Affine3A, Vec2, Vec3};
@@ -34,10 +34,6 @@ use super::oracle::TerrainOracle;
 use super::route::{polyline_len, resample};
 #[cfg(feature = "bitprobe")]
 use crate::bitprobe::{ContactInputProbe, ElementOutputProbe};
-
-/// Belt-speed floor (m/s) for the constant-power curve — keeps stall force finite. Global
-/// numerical policy, not vehicle data.
-const STALL_SPEED: f32 = 0.5;
 
 /// The static-grip shear modulus (m): the Janosi–Hanamoto `K` for RUBBER TRACK PADS ON
 /// FIRM GROUND (Wong & Chiang's measured parameter set — the terramechanics provenance,
@@ -136,10 +132,9 @@ pub fn phase_decompose(phase: f64, pitch: f32) -> (i64, f32) {
     (wraps, offset)
 }
 
-/// `1 − smoothstep` on [0, 1] — the belt-hold blend factor. Public because the transmission
-/// module reuses the SAME shape as the brake-engagement envelope (transmission-design.md §3:
-/// the hold reframe keeps the blend only as the engagement smoothing, never as a reaction
-/// attenuator).
+/// `1 − smoothstep` on [0, 1] — the hold blend. The transmission reads it as the
+/// brake-engagement envelope and the drag release (transmission-design.md §3: the hold reframe
+/// keeps the blend only as the engagement smoothing, never as a reaction attenuator).
 pub fn hold_blend(x: f32) -> f32 {
     let t = x.clamp(0.0, 1.0);
     1.0 - t * t * (3.0 - 2.0 * t)
@@ -176,15 +171,13 @@ pub struct ForceParams {
     /// friction story per element (μ × elastic load); turning resistance emerges from
     /// footprint geometry, not from an authored lateral share.
     pub mu: f32,
-    /// Slip speed (m/s) normalizing the belt-hold blend (and the transmission's brake
-    /// release threshold) — the scale on which a belt counts as "moving".
+    /// Slip speed (m/s) normalizing the transmission's brake-engagement blend — the scale on
+    /// which a belt counts as "moving".
     pub slip_saturation: f32,
-    /// Powertrain: top belt speed (m/s), per-track engine power (W) and low-speed force cap
-    /// (N), governor gain (N per m/s of speed error), reflected belt+drivetrain inertia (kg).
+    /// Powertrain: top belt speed (m/s), per-track low-speed force cap (N) and reflected
+    /// belt+drivetrain inertia (kg).
     pub max_speed: f32,
-    pub engine_power: f32,
     pub engine_force: f32,
-    pub governor_gain: f32,
     pub inertia: f32,
     /// Static-grip bristle stiffness per side (N/m of shear) — [`grip_stiffness`]. `0.0`
     /// disables traction and belt-hold entirely (support only) — the envelope calibration
@@ -221,7 +214,7 @@ pub struct GripElements {
 impl GripElements {
     /// Both slabs pre-sized for `link_count` material links × 3 lateral columns, at rest
     /// (zero strain, zero dwell) — the ONLY legal construction for a caller entering the
-    /// element regime. `step_side` no longer resizes at runtime (the REV-14 fixed-size
+    /// element regime. [`contact_side`] never resizes at runtime (the REV-14 fixed-size
     /// invariant): wrong-length slabs skip the
     /// regime instead of being silently rebuilt.
     pub fn for_links(link_count: usize) -> Self {
@@ -304,8 +297,6 @@ pub struct SideInput<'a> {
     /// `RigGeom::grip_column_offsets(side)` is the measured source; a symmetric
     /// `±width/2` here is the very approximation it replaced.
     pub columns: [(f32, f32); 3],
-    /// Drive command −1..1 (throttle ± steer, capability-gated by the caller).
-    pub command: f32,
     /// Per-position free travel (the contact envelope's local reach), REQUIRED: production
     /// callers pass the rig's measured knot profile (`envelope::wheel_travel_knots`); test
     /// fixtures pass uniform knots (empty knots = a rest-anchored zero-droop pad).
@@ -352,8 +343,6 @@ pub struct SideReport {
     pub state: SideState,
     pub apps: Vec<ForceApp>,
     pub contacts: Vec<BeltContact>,
-    /// The engine force actually applied to the belt this tick (post-governor, post-clamp, N).
-    pub engine_force: f32,
     /// Ground reaction summed into belt dynamics (Σ f_long, N).
     pub belt_reaction: f32,
     /// Full oracle-call inputs/results, in execution order. Measurement builds only.
@@ -389,92 +378,18 @@ pub fn clipped_linear_piece(x0: f32, x1: f32, p0: f32, p1: f32) -> (f32, f32, f3
     }
 }
 
-/// The drivetrain force available to spin one track's belt at the given belt speed: a
-/// constant-power curve (force × speed can't exceed `engine_power`) under the low-speed
-/// torque cap `engine_force`.
-fn engine_available(params: &ForceParams, belt_speed: f32) -> f32 {
-    (params.engine_power / belt_speed.abs().max(STALL_SPEED)).min(params.engine_force)
-}
-
-/// The symmetric-governor belt integration (the Governor branch of the transmission
-/// seam): constant-power curve under the force cap, governor chasing
-/// `command × max_speed`, the hold blend attenuating the ground reaction at zero
-/// command + zero belt speed, reflected inertia, and the top-speed clamp. Returns
-/// `(engine force applied, next belt speed)`.
+/// Advance one side's contact by one fixed tick: support + traction forces at the advected
+/// stations (probing `oracle` at the presented `affine`, reading the hull's velocity field
+/// through `vel_at`), contacts, grip-state update, and the summed longitudinal ground reaction.
+/// Force application does not feed back into `vel_at` within a tick (velocities integrate
+/// later), so reading everything first and applying afterwards is exact. `elements`: the
+/// per-element isotropic shear state (see [`GripElements`]) — the caller owns the state vector
+/// and must construct it pre-sized to `count * 3` ([`GripElements::for_links`]; wrong-length
+/// slabs skip traction for the tick — see the invariant below).
 ///
-/// Extracted from the tail of [`step_side`] EXACTLY as it stood (phase-2.5 commit A) so the
-/// joint transmission's `Governor` adapter and `step_side` share one implementation — every
-/// float op in the same order, bit-identical to the shipped law. Any change here is an MP
-/// behavior change; the sandbox capture-diff gates guard it.
-pub fn governor_belt(
-    params: &ForceParams,
-    command: f32,
-    belt_speed: f32,
-    belt_reaction: f32,
-    dt: f32,
-) -> (f32, f32) {
-    let target = command * params.max_speed;
-    let avail = engine_available(params, belt_speed);
-    let engine = (params.governor_gain * (target - belt_speed)).clamp(-avail, avail);
-    let hold = if params.grip_stiffness > 0.0 {
-        hold_blend(target.abs() / params.slip_saturation)
-            * hold_blend(belt_speed.abs() / params.slip_saturation)
-    } else {
-        0.0
-    };
-    let next = belt_speed + (engine - (1.0 - hold) * belt_reaction) / params.inertia * dt;
-    (engine, next.clamp(-params.max_speed, params.max_speed))
-}
-
-/// Advance one side by one fixed tick: compute support + traction at the advected stations
-/// (probing `oracle` at the presented `affine`, reading the hull's velocity field through
-/// `vel_at`), integrate belt dynamics, and return the forces for the caller to apply IN
-/// ORDER. Force application does not feed back into `vel_at` within a tick (velocities
-/// integrate later), so reading everything first and applying afterwards is exact.
-/// `elements`: the per-element isotropic shear state (see [`GripElements`]) — the caller
-/// owns the state vector and must construct it pre-sized to `count * 3`
-/// ([`GripElements::for_links`]; wrong-length slabs skip traction for the tick — see the
-/// invariant below).
-///
-/// This is [`contact_side`] + the [`governor_belt`] tail in one call — the shape this
-/// module's own tests drive. The LIVE compositions (the game's `track::sim` and the sandbox)
-/// call `contact_side` on both sides first and run `track::transmission::step` once
-/// (transmission-design.md §2 scheduling) for EVERY architecture; that seam's `Governor` arm
-/// is this exact tail, bit-identical (pinned by
-/// `transmission::tests::governor_adapter_matches_legacy_belt`).
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one side's tick: input, state, pose, clock, params, oracle, velocity field and grip elements"
-)]
-pub fn step_side<O: TerrainOracle>(
-    input: &SideInput,
-    state: SideState,
-    affine: Affine3A,
-    dt: f32,
-    params: &ForceParams,
-    oracle: &O,
-    vel_at: impl Fn(Vec3) -> Vec3,
-    elements: &mut GripElements,
-) -> SideReport {
-    let (mut report, live) =
-        contact_side(input, state, affine, dt, params, oracle, vel_at, elements);
-    if !live {
-        return report;
-    }
-    let (engine, next) =
-        governor_belt(params, input.command, state.speed, report.belt_reaction, dt);
-    report.state.speed = next;
-    report.state.phase = state.phase + f64::from(state.speed * dt);
-    report.engine_force = engine;
-    report
-}
-
-/// The contact pass of [`step_side`] WITHOUT belt integration: support + traction forces,
-/// contacts, grip-state update, and the summed longitudinal ground reaction. Returns the
-/// report (with `state.speed`/`state.phase` still the INPUT values and `engine_force` 0)
-/// plus `true` iff the station geometry was live — the same condition under which
-/// `step_side` integrates at all (a degenerate loop returns untouched state, verbatim the
-/// old early-return).
+/// Returns the report (with `state.speed`/`state.phase` still the INPUT values) plus `true` iff
+/// the station geometry was live — the condition under which the caller integrates the belt at
+/// all (a degenerate loop returns untouched state).
 #[expect(
     clippy::too_many_arguments,
     reason = "one side's contact pass: input, state, pose, clock, params, oracle, velocity field and grip elements"
@@ -542,8 +457,8 @@ pub fn contact_side<O: TerrainOracle>(
         emit_contact_forces(&mut report, &cols, &elem_g, params.mu, elements_mode);
 
     // The grip slot carries the summed element force (long, lat) — telemetry only (the
-    // element state is authoritative and lives with the caller). Belt dynamics (the governor
-    // tail, or the joint transmission) integrate AFTER this pass — `state.speed`/
+    // element state is authoritative and lives with the caller). Belt dynamics (the joint
+    // transmission) integrate AFTER this pass — `state.speed`/
     // `state.phase` are returned untouched, the pre-tick truth the phase advection and the
     // transmission both key on.
     report.state.grip = elem_sum;
@@ -1106,9 +1021,7 @@ mod tests {
             mu: 0.9,
             slip_saturation: 0.5,
             max_speed: 10.0,
-            engine_power: 1.0e5,
             engine_force: 1.0e5,
-            governor_gain: 1.0e4,
             inertia: 500.0,
             grip_stiffness: grip_stiffness(0.9, 30_000.0 * 9.81),
         }
@@ -1126,11 +1039,10 @@ mod tests {
             count: 25,
             plane_x: 0.0,
             columns: TEST_COLUMNS,
-            command: 0.0,
             // Empty knots: a rest-anchored zero-droop pad (the fixture's free_travel is 0).
             travel: TravelField { knots: &[] },
         };
-        let report = step_side(
+        let (report, _) = contact_side(
             &input,
             *state,
             Affine3A::IDENTITY,
@@ -1181,7 +1093,6 @@ mod tests {
             count: 25,
             plane_x: 0.0,
             columns: TEST_COLUMNS,
-            command: 0.0,
             travel: TravelField { knots: &knots },
         };
         let (report, live) = contact_side(
@@ -1236,7 +1147,6 @@ mod tests {
                 count: 25,
                 plane_x: 0.0,
                 columns: TEST_COLUMNS,
-                command: 0.0,
                 travel: TravelField { knots },
             };
             let (report, live) = contact_side(

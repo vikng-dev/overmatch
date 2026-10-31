@@ -1,5 +1,12 @@
 # Transmission declaration — design brief (codex, 2026-07-18)
 
+> **2026-10-31, owner decision:** the code runs one law, menu B (fixed radii, the L600 family).
+> The Governor and Hybrid adapters, the offline `T` dial that switched the seed tank onto them, the
+> sandbox's adapter selector and the harness `trans=` key are deleted: no shipped tank declared
+> either, and a future tank that needs one adds it back as spec data plus law. The spec's
+> `transmission` block is required and carries no `architecture` field. Sections below that name
+> the Governor or Hybrid as live describe the code at their date.
+>
 > **2026-08-15, [ADR-0037](../../adr/0037-one-authoritative-timeline-and-view-overlays.md):** the
 > as-built sections below are REV-scoped records; "predicts and rolls it back" is retired —
 > `TankTransmission` replicates on the one timeline. The declaration model and the atomic-snapshot

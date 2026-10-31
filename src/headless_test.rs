@@ -689,16 +689,14 @@ fn a_replica_coax_shell_clears_the_shooters_mantlet() {
 // The process fix behind the phase-2.5 postmortem: every physics gate ran on the sandbox's T-34
 // lab vehicle, and vehicle-scaling defects (steering capacity vs footprint scrub) sailed through
 // on the smaller tank. These gates drive the REAL Tiger blueprint through the offline
-// composition — the same boot, spawn path, spec, and terrain the `--offline` feel session runs —
-// with `TransmissionFeelTest` set per case. They are permanent `cargo test` members: the sandbox
-// gates remain, but can never again be the only physics evidence.
+// composition — the same boot, spawn path, spec, and terrain the `--offline` feel session runs.
+// They are permanent `cargo test` members: the sandbox gates remain, but can never again be the
+// only physics evidence.
 
-/// [`booted_sim`] + the offline transmission dial exactly as `run_offline` mounts it
-/// (`TransmissionFeelTest(mode)`), clock started, tracks grounded and settled. Returns the
-/// sim and the controlled Tiger.
-fn booted_offline_sim(mode: crate::track::transmission::TransmissionMode) -> (BootedSim, Entity) {
+/// [`booted_sim`] on the vehicle's declared transmission, clock started, tracks grounded and
+/// settled. Returns the sim and the controlled tank.
+fn booted_offline_sim() -> (BootedSim, Entity) {
     let mut app = booted_sim();
-    app.insert_resource(crate::track::sim::TransmissionFeelTest(mode));
     start_fixed_clock(&mut app);
     let mut grounded = 0;
     for _ in 0..300 {
@@ -728,8 +726,7 @@ fn fresh_tank_transmission(app: &BootedSim) -> crate::track::sim::TankTransmissi
     let params = app
         .world()
         .resource::<crate::track::sim::TrackGear>()
-        .trans()
-        .expect("the Tiger declares a transmission");
+        .trans();
     crate::track::sim::TankTransmission::from_spec(params)
 }
 
@@ -779,15 +776,10 @@ fn face_positive_z(app: &mut App, tank: Entity) {
 }
 
 /// The pivot gate body: zero throttle, full steer, ≥ 4 s; the mean yaw rate over the last second
-/// must clear the adapter's floor and the belts must actually counter-rotate. ZERO is the original
-/// bug this pins: the Tiger's steering capacity read on the wrong axis could not break its own
-/// footprint scrub.
-fn tiger_pivot_gate(
-    app: &mut App,
-    tank: Entity,
-    mode: crate::track::transmission::TransmissionMode,
-    min_yaw: f32,
-) {
+/// must clear `min_yaw` and the belts must actually counter-rotate. ZERO is the original bug this
+/// pins: the Tiger's steering capacity read on the wrong axis could not break its own footprint
+/// scrub.
+fn tiger_pivot_gate(app: &mut App, tank: Entity, min_yaw: f32) {
     let mut yaw_sum = 0.0f32;
     let mut samples = 0u32;
     for tick in 0..320 {
@@ -803,54 +795,28 @@ fn tiger_pivot_gate(
         .get::<crate::track::sim::TrackDrive>(tank)
         .expect("tank drives");
     let (l, r) = (drive.sides[0].speed, drive.sides[1].speed);
-    println!("tiger pivot [{mode:?}]: mean yaw {mean_yaw:.4} rad/s, belts L {l:.3} / R {r:.3}");
+    println!("tiger pivot: mean yaw {mean_yaw:.4} rad/s, belts L {l:.3} / R {r:.3}");
     assert!(
         l * r < 0.0,
-        "[{mode:?}] a neutral pivot must counter-rotate the belts (L {l:.3}, R {r:.3})"
+        "a neutral pivot must counter-rotate the belts (L {l:.3}, R {r:.3})"
     );
     assert!(
         mean_yaw.abs() >= min_yaw,
-        "[{mode:?}] pivot yaw {mean_yaw:.4} rad/s under full steer — gate ≥ {min_yaw} rad/s"
+        "pivot yaw {mean_yaw:.4} rad/s under full steer — gate ≥ {min_yaw} rad/s"
     );
 }
 
-/// Tiger pivot under each steering adapter, on one boot; each adapter's pivot scale is a different
-/// LAW, so each has its own floor:
-///
-/// * L600 fixed-radius adapter (the vehicle's authored architecture): the MARGINAL brake-gated
-///   neutral turn toward the DERIVED `neutral_d_full` = 0.2885 m/s (0.2808 before half_tread went
-///   1.4904 → 1.5312; no unprovenanced 0.75 fraction shrinks the target any more). MEASURED on the
-///   declared data: 0.131 rad/s mean ground yaw, belts exactly ±neutral_d_full (the
-///   belt-kinematic ceiling d/half-tread ≈ 0.188 rad/s, less scrub slip); gated at ≥ 0.10 rad/s
-///   (margin for platform float drift — the restoration literature's "technically yes, advisable
-///   no" crawl is exactly this regime).
-/// * Hybrid continuous adapter: POWER-limited (the standstill pivot commands steer force up to
-///   capacity and the power-conservation scale is the binding limiter, so the rate settles where
-///   engine power balances scrub dissipation; the old neutral_d_full speed FLOOR used ~68 kW of the
-///   ~407 kW budget and pivoted at 0.131 rad/s). MEASURED on the declared data: 0.654 rad/s mean
-///   ground yaw pre-stage-B; 0.646 rad/s with the stage-B crank (the declutched steer demand parks
-///   the crank at the same peak-torque operating point the old rev floor used, minus the
-///   rev-governor's ~30 rpm taper droop — steady rate preserved by design); gated at ≥ 0.35 rad/s
-///   (margin, same policy as the L600 gate).
-///
-/// The adapter switches as the offline `T` key does: the dial moves and every tank's transmission
-/// restarts from its constructed state. The hybrid run starts from the L600 pivot; the floor is
-/// read on its last second, past the spin-up.
+/// Tiger pivot on the declared L600 fixed-radius law: the MARGINAL brake-gated neutral turn
+/// toward the DERIVED `neutral_d_full` = 0.2885 m/s (0.2808 before half_tread went 1.4904 →
+/// 1.5312; no unprovenanced 0.75 fraction shrinks the target any more). MEASURED on the declared
+/// data: 0.131 rad/s mean ground yaw, belts exactly ±neutral_d_full (the belt-kinematic ceiling
+/// d/half-tread ≈ 0.188 rad/s, less scrub slip); gated at ≥ 0.10 rad/s (margin for platform float
+/// drift — the restoration literature's "technically yes, advisable no" crawl is exactly this
+/// regime).
 #[test]
-fn pivot_tiger_clears_each_steering_adapters_yaw_floor() {
-    use crate::track::sim::{TankTransmission, TransmissionFeelTest};
-    use crate::track::transmission::TransmissionMode;
-
-    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
-    tiger_pivot_gate(&mut app, tank, TransmissionMode::FixedRadii, 0.10);
-
-    app.insert_resource(TransmissionFeelTest(TransmissionMode::Hybrid));
-    let fresh = fresh_tank_transmission(&app);
-    let world = app.world_mut();
-    for mut state in world.query::<&mut TankTransmission>().iter_mut(world) {
-        *state = fresh;
-    }
-    tiger_pivot_gate(&mut app, tank, TransmissionMode::Hybrid, 0.35);
+fn pivot_tiger_clears_the_l600_yaw_floor() {
+    let (mut app, tank) = booted_offline_sim();
+    tiger_pivot_gate(&mut app, tank, 0.10);
 }
 
 /// The fix-1 smoking gun: a standstill full-throttle climb must walk the Tiger ladder
@@ -861,8 +827,7 @@ fn pivot_tiger_clears_each_steering_adapters_yaw_floor() {
 /// predicted-landing gate + reversal dwell the gear sequence never decreases.
 #[test]
 fn gear_climb_monotone_tiger() {
-    use crate::track::transmission::TransmissionMode;
-    let (mut app, tank) = booted_offline_sim(TransmissionMode::FixedRadii);
+    let (mut app, tank) = booted_offline_sim();
     face_positive_z(&mut app, tank);
     let mut trace: Vec<u8> = vec![];
     let mut max_gear = 0u8;
@@ -1151,7 +1116,6 @@ fn scripted_determinism_run() -> ScriptedDeterminismRun {
     app.world_mut()
         .resource_mut::<crate::track::sim::TrackGear>()
         .trans_mut()
-        .expect("the tank declares a transmission")
         .shift_addressing = crate::track::transmission::ShiftAddressing::Sequential;
     let rot = Quat::from_rotation_x(20.0_f32.to_radians());
     let approach_speed = 4.0;

@@ -1,7 +1,7 @@
 use super::*;
 
 /// A lab ForceParams: only the fields the transmission reads matter (inertia, max_speed,
-/// slip_saturation, grip_stiffness envelope switch, and the governor's own knobs).
+/// engine_force, slip_saturation and the grip_stiffness envelope switch).
 fn lab_fp() -> ForceParams {
     ForceParams {
         face_offset: 0.02,
@@ -13,9 +13,7 @@ fn lab_fp() -> ForceParams {
         mu: 0.9,
         slip_saturation: 0.4,
         max_speed: 15.0,
-        engine_power: 186_500.0,
         engine_force: 120_000.0,
-        governor_gain: 60_000.0,
         inertia: 8_000.0,
         grip_stiffness: forces::grip_stiffness(0.9, 26_500.0 * 9.81),
     }
@@ -167,9 +165,8 @@ fn grade_reserve_veto_blocks_f3_to_f4_on_20_degrees() {
         ..confirmed(&tp)
     };
     step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&tp),
+        &tp,
         &mut flat,
         &input(1.0, 0.0, [shaft, shaft], [0.0, 0.0]),
     );
@@ -184,9 +181,8 @@ fn grade_reserve_veto_blocks_f3_to_f4_on_20_degrees() {
         ..confirmed(&tp)
     };
     step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&tp),
+        &tp,
         &mut grade,
         &input(1.0, 0.0, [shaft, shaft], [demand / 2.0; 2]),
     );
@@ -223,9 +219,8 @@ fn direct_and_sequential_execute_the_same_grade_target_differently() {
     direct_tp.shift_addressing = ShiftAddressing::Direct;
     let mut direct = seeded(&direct_tp);
     step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&direct_tp),
+        &direct_tp,
         &mut direct,
         &input(1.0, 0.0, [shaft; 2], [demand / 2.0; 2]),
     );
@@ -242,9 +237,8 @@ fn direct_and_sequential_execute_the_same_grade_target_differently() {
     sequential_tp.shift_addressing = ShiftAddressing::Sequential;
     let mut sequential = seeded(&sequential_tp);
     step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&sequential_tp),
+        &sequential_tp,
         &mut sequential,
         &input(1.0, 0.0, [shaft; 2], [demand / 2.0; 2]),
     );
@@ -263,9 +257,8 @@ fn direct_and_sequential_execute_the_same_grade_target_differently() {
 
     for _ in 0..8 {
         step(
-            TransmissionMode::FixedRadii,
             &fp,
-            Some(&sequential_tp),
+            &sequential_tp,
             &mut sequential,
             &input(1.0, 0.0, [shaft; 2], [demand / 2.0; 2]),
         );
@@ -303,9 +296,8 @@ fn hill_hold_engages_selects_launch_gear_and_releases_on_capability() {
         };
 
         let first = step(
-            TransmissionMode::FixedRadii,
             &fp,
-            Some(&tp),
+            &tp,
             &mut st,
             &input(dir, 0.0, [0.0; 2], [dir * demand / 2.0; 2]),
         );
@@ -327,9 +319,8 @@ fn hill_hold_engages_selects_launch_gear_and_releases_on_capability() {
         let mut speeds = first.next_speeds;
         for tick in 1..8 {
             let report = step(
-                TransmissionMode::FixedRadii,
                 &fp,
-                Some(&tp),
+                &tp,
                 &mut st,
                 &input(dir, 0.0, speeds, [dir * demand / 2.0; 2]),
             );
@@ -350,9 +341,8 @@ fn hill_hold_engages_selects_launch_gear_and_releases_on_capability() {
         assert_eq!(st.scheduler, SchedulerState::Normal);
 
         step(
-            TransmissionMode::FixedRadii,
             &fp,
-            Some(&tp),
+            &tp,
             &mut st,
             &input(0.0, 0.0, speeds, [dir * demand / 2.0; 2]),
         );
@@ -409,9 +399,8 @@ fn synthetic_weak_powertrain_30_deg_at_rest_enters_grade_limit() {
     let mut entered_at = None;
     for tick in 0..96 {
         let report = step(
-            TransmissionMode::FixedRadii,
             &fp,
-            Some(&tp),
+            &tp,
             &mut st,
             &input(1.0, 0.0, speeds, [demand / 2.0; 2]),
         );
@@ -460,9 +449,8 @@ fn hill_hold_rechecks_capability_while_latched() {
     };
 
     step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(1.0, 0.0, [0.0; 2], [demand / 2.0; 2]),
     );
@@ -504,9 +492,8 @@ fn hill_hold_margin_short_capable_gear_can_release() {
     };
 
     let report = step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(1.0, 0.0, [0.0; 2], [demand / 2.0; 2]),
     );
@@ -544,9 +531,8 @@ fn hill_hold_release_cooldown_never_overridden_then_relatches() {
     };
 
     step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(1.0, 0.0, [0.0; 2], [release_demand / 2.0; 2]),
     );
@@ -556,9 +542,8 @@ fn hill_hold_release_cooldown_never_overridden_then_relatches() {
     let deficit_demand = modeled + 100_000.0;
     st.demand_n = deficit_demand;
     step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(1.0, 0.0, [0.0; 2], [deficit_demand / 2.0; 2]),
     );
@@ -570,9 +555,8 @@ fn hill_hold_release_cooldown_never_overridden_then_relatches() {
     st.demand_n = deficit_demand;
     let rollback = -(HILL_HOLD_ENGAGE_SPEED + 0.01);
     step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(1.0, 0.0, [rollback; 2], [deficit_demand / 2.0; 2]),
     );
@@ -585,9 +569,8 @@ fn hill_hold_release_cooldown_never_overridden_then_relatches() {
     for _ in 0..HOLD_REENGAGE_TICKS {
         st.demand_n = deficit_demand;
         step(
-            TransmissionMode::FixedRadii,
             &fp,
-            Some(&tp),
+            &tp,
             &mut st,
             &input(1.0, 0.0, [0.0; 2], [deficit_demand / 2.0; 2]),
         );
@@ -627,9 +610,8 @@ fn hill_hold_engages_only_near_rest() {
         // irrelevant to the latch decision under test.
         let dir = if reverse { -1.0 } else { 1.0 };
         step(
-            TransmissionMode::FixedRadii,
             &fp,
-            Some(&tp),
+            &tp,
             &mut st,
             &input(throttle, 0.0, [m; 2], [dir * demand / 2.0; 2]),
         );
@@ -742,13 +724,7 @@ fn confirmed_deficit_precedes_upshift_arm() {
     // then commit F2→F3. This proves the upshift was genuinely one step from firing;
     // without it, the main leg's F1 would pass even with the arbitration broken.
     let mut control = contender(GRADE_CONFIRM_TICKS - 2);
-    step(
-        TransmissionMode::FixedRadii,
-        &fp,
-        Some(&tp),
-        &mut control,
-        &inp,
-    );
+    step(&fp, &tp, &mut control, &inp);
     assert_eq!(
         control.gear, 3,
         "control: with the deficit unconfirmed on this tick, the armed upshift must \
@@ -758,7 +734,7 @@ fn confirmed_deficit_precedes_upshift_arm() {
     // MAIN leg: identical state, but the deficit confirmation crosses on the SAME tick
     // as the upshift's — the deficit owns the tick and corrects downward.
     let mut st = contender(GRADE_CONFIRM_TICKS - 1);
-    step(TransmissionMode::FixedRadii, &fp, Some(&tp), &mut st, &inp);
+    step(&fp, &tp, &mut st, &inp);
     assert_eq!(
         st.gear, 1,
         "the confirmed deficit must correct DOWNWARD through the simultaneously-armed \
@@ -811,7 +787,7 @@ fn confirmed_deficit_defers_through_post_upshift_dwell() {
     };
     let inp = input(1.0, 0.0, [shaft; 2], [demand / 2.0; 2]);
     for tick in 0..REVERSAL_DWELL_TICKS {
-        step(TransmissionMode::FixedRadii, &fp, Some(&tp), &mut st, &inp);
+        step(&fp, &tp, &mut st, &inp);
         assert_eq!(
             st.gear, 2,
             "tick {tick}: the pending correction must HOLD the gear through the \
@@ -821,7 +797,7 @@ fn confirmed_deficit_defers_through_post_upshift_dwell() {
         );
     }
     assert_eq!(st.dwell_ticks, 0, "the dwell must have drained");
-    step(TransmissionMode::FixedRadii, &fp, Some(&tp), &mut st, &inp);
+    step(&fp, &tp, &mut st, &inp);
     assert_eq!(
         st.gear, 1,
         "the accumulated correction must commit at dwell expiry"
@@ -864,9 +840,8 @@ fn steep_grade_after_upshift_corrects_before_lug() {
     };
     let mut speeds = [shaft0; 2];
     let first = step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(1.0, 0.0, speeds, [demand / 2.0; 2]),
     );
@@ -882,9 +857,8 @@ fn steep_grade_after_upshift_corrects_before_lug() {
     // moving FORWARD (the lug bled through zero in the tall gear before the override).
     for _ in 0..8 {
         let rep = step(
-            TransmissionMode::FixedRadii,
             &fp,
-            Some(&tp),
+            &tp,
             &mut st,
             &input(1.0, 0.0, speeds, [demand / 2.0; 2]),
         );
@@ -918,13 +892,7 @@ fn sequential_target_cancels_when_propulsive_intent_releases() {
         ..fresh(&tp)
     };
 
-    step(
-        TransmissionMode::FixedRadii,
-        &fp,
-        Some(&tp),
-        &mut st,
-        &input(0.0, 0.0, [shaft; 2], [0.0; 2]),
-    );
+    step(&fp, &tp, &mut st, &input(0.0, 0.0, [shaft; 2], [0.0; 2]));
 
     assert_eq!(st.gear, 5, "released intent must not continue the cascade");
     assert_eq!(st.grade_target, 0);
@@ -941,13 +909,7 @@ fn sequential_target_cancels_when_propulsive_intent_releases() {
         scheduler: SchedulerState::GradeShift { from: 3, to: 1 },
         ..fresh(&tp)
     };
-    step(
-        TransmissionMode::FixedRadii,
-        &fp,
-        Some(&tp),
-        &mut st,
-        &input(1.0, 0.0, [shaft; 2], [0.0; 2]),
-    );
+    step(&fp, &tp, &mut st, &input(1.0, 0.0, [shaft; 2], [0.0; 2]));
     assert_eq!(st.gear, 2, "recovered demand must not continue the cascade");
     assert_eq!(st.grade_target, 0);
     assert_eq!(st.scheduler, SchedulerState::Normal);
@@ -968,9 +930,8 @@ fn direction_swap_reseeds_demand_ema() {
     };
 
     step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(-1.0, 0.0, [0.0; 2], [-reverse_demand / 2.0; 2]),
     );
@@ -1000,27 +961,19 @@ fn reserve_confirmation_decays_across_one_tick_jitter() {
     for _ in 0..(GRADE_CONFIRM_TICKS - 1) {
         st.demand_n = demand;
         step(
-            TransmissionMode::FixedRadii,
             &fp,
-            Some(&tp),
+            &tp,
             &mut st,
             &input(1.0, 0.0, [shaft; 2], [demand / 2.0; 2]),
         );
     }
     st.demand_n = 0.0;
-    step(
-        TransmissionMode::FixedRadii,
-        &fp,
-        Some(&tp),
-        &mut st,
-        &input(1.0, 0.0, [shaft; 2], [0.0; 2]),
-    );
+    step(&fp, &tp, &mut st, &input(1.0, 0.0, [shaft; 2], [0.0; 2]));
     for _ in 0..2 {
         st.demand_n = demand;
         step(
-            TransmissionMode::FixedRadii,
             &fp,
-            Some(&tp),
+            &tp,
             &mut st,
             &input(1.0, 0.0, [shaft; 2], [demand / 2.0; 2]),
         );
@@ -1064,9 +1017,8 @@ fn overrun_below_ceiling_holds_gear_for_engine_braking() {
             ..fresh(&tp)
         };
         step(
-            TransmissionMode::FixedRadii,
             &fp,
-            Some(&tp),
+            &tp,
             &mut st,
             &input(throttle, 0.0, [shaft; 2], [-40_000.0; 2]),
         );
@@ -1126,13 +1078,7 @@ fn protective_rescue_walks_ladder_under_guard_or_holds() {
     let mut speeds = [m_of(3, start_rpm); 2];
     let mut prev_gear = st.gear;
     for tick in 0..256 {
-        let rep = step(
-            TransmissionMode::FixedRadii,
-            &fp,
-            Some(&tp),
-            &mut st,
-            &input(0.0, 0.0, speeds, [60_000.0; 2]),
-        );
+        let rep = step(&fp, &tp, &mut st, &input(0.0, 0.0, speeds, [60_000.0; 2]));
         speeds = rep.next_speeds;
         assert!(
             st.omega_e <= guard + 1e-3,
@@ -1164,9 +1110,8 @@ fn protective_rescue_walks_ladder_under_guard_or_holds() {
     // Extreme overspeed: even R4's static projection exceeds the ceiling — hold.
     let mut hold = state(3, ceiling + 1_800.0);
     step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&tp),
+        &tp,
         &mut hold,
         &input(0.0, 0.0, [m_of(3, ceiling + 1_800.0); 2], [40_000.0; 2]),
     );
@@ -1179,9 +1124,8 @@ fn protective_rescue_walks_ladder_under_guard_or_holds() {
     // Top gear: nothing above.
     let mut top = state(4, ceiling + 400.0);
     step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&tp),
+        &tp,
         &mut top,
         &input(0.0, 0.0, [m_of(4, ceiling + 400.0); 2], [40_000.0; 2]),
     );
@@ -1218,13 +1162,7 @@ fn sequential_rescue_steps_toward_static_target() {
     let mut prev_gear = st.gear;
     let mut reached_at = None;
     for tick in 0..16 {
-        let rep = step(
-            TransmissionMode::FixedRadii,
-            &fp,
-            Some(&tp),
-            &mut st,
-            &input(0.0, 0.0, speeds, [10_000.0; 2]),
-        );
+        let rep = step(&fp, &tp, &mut st, &input(0.0, 0.0, speeds, [10_000.0; 2]));
         speeds = rep.next_speeds;
         assert!(
             st.gear >= prev_gear,
@@ -1251,9 +1189,8 @@ fn sequential_rescue_steps_toward_static_target() {
         ..fresh(&tp_direct)
     };
     step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&tp_direct),
+        &tp_direct,
         &mut direct,
         &input(
             0.0,
@@ -1290,11 +1227,11 @@ fn flat_downshift_window_does_not_latch_hill_hold() {
     // Near rest under W on the flat: the band downshift chain commits immediately and
     // opens its paid window (capable — light demand, huge low-gear reserve).
     let inp = input(1.0, 0.0, [0.01; 2], [2_500.0; 2]);
-    step(TransmissionMode::FixedRadii, &fp, Some(&tp), &mut st, &inp);
+    step(&fp, &tp, &mut st, &inp);
     assert_eq!(st.gear, 2, "the ordinary band downshift must commit");
     assert!(st.shift_ticks > 0, "its window must be in flight");
     for tick in 0..tp.shift_ticks {
-        step(TransmissionMode::FixedRadii, &fp, Some(&tp), &mut st, &inp);
+        step(&fp, &tp, &mut st, &inp);
         assert!(
             !st.hill_hold,
             "tick {tick}: a flat-ground downshift window with residual demand must NOT \
@@ -1337,7 +1274,7 @@ fn grade_confirmation_paces_commit_when_target_already_legal() {
     // constant's own doc: "13 ticks DERIVED = 0.203125 s at 64 Hz".
     const PINNED_CONFIRM_CROSSING: u8 = 13;
     for tick in 1..PINNED_CONFIRM_CROSSING {
-        step(TransmissionMode::FixedRadii, &fp, Some(&tp), &mut st, &inp);
+        step(&fp, &tp, &mut st, &inp);
         assert_eq!(
             st.gear, 2,
             "tick {tick}: nothing may commit before the confirmation crosses"
@@ -1351,9 +1288,8 @@ fn grade_confirmation_paces_commit_when_target_already_legal() {
     };
     for _ in 0..32 {
         step(
-            TransmissionMode::FixedRadii,
             &fp,
-            Some(&tp),
+            &tp,
             &mut cleared,
             &input(1.0, 0.0, [shaft; 2], [0.0; 2]),
         );
@@ -1366,7 +1302,7 @@ fn grade_confirmation_paces_commit_when_target_already_legal() {
         cleared.grade_confirm_ticks, 0,
         "the cleared deficit decays confirmation back to zero"
     );
-    step(TransmissionMode::FixedRadii, &fp, Some(&tp), &mut st, &inp);
+    step(&fp, &tp, &mut st, &inp);
     assert_eq!(
         st.gear, 1,
         "the correction must commit on exactly the {PINNED_CONFIRM_CROSSING}th deficit tick"
@@ -1396,13 +1332,7 @@ fn deficit_commit_honors_landing_sign_boundary() {
             grade_confirm_ticks: 20,
             ..fresh(&tp)
         };
-        step(
-            TransmissionMode::FixedRadii,
-            &fp,
-            Some(&tp),
-            &mut st,
-            &input(1.0, 0.0, [0.30; 2], [r_side; 2]),
-        );
+        step(&fp, &tp, &mut st, &input(1.0, 0.0, [0.30; 2], [r_side; 2]));
         st
     };
     let commits = run(70_000.0);
@@ -1445,9 +1375,8 @@ fn crank_rescue_not_preempted_by_deficit_machinery() {
         ..fresh(&tp)
     };
     step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(1.0, 0.0, [shaft; 2], [150_000.0; 2]),
     );
@@ -1503,13 +1432,7 @@ fn steep_grade_full_loop_upshift_freeze_recover_confirm_correct() {
     let mut correction_tick = None;
     for tick in 0..400 {
         let r = if upshift_tick.is_some() { steep } else { light };
-        let rep = step(
-            TransmissionMode::FixedRadii,
-            &fp,
-            Some(&tp),
-            &mut st,
-            &input(1.0, 0.0, speeds, [r; 2]),
-        );
+        let rep = step(&fp, &tp, &mut st, &input(1.0, 0.0, speeds, [r; 2]));
         speeds = rep.next_speeds;
         if upshift_tick.is_none() && st.gear == 6 {
             // The REAL upshift paid its confirmation live: at least the confirm window
@@ -1637,13 +1560,7 @@ fn overrun_slip_guard_bounds_crank_at_top_gear() {
     };
     let mut rep = TransmissionReport::default();
     for tick in 0..64 {
-        rep = step(
-            TransmissionMode::FixedRadii,
-            &fp,
-            Some(&tp),
-            &mut st,
-            &input(0.0, 0.0, [m; 2], [40_000.0; 2]),
-        );
+        rep = step(&fp, &tp, &mut st, &input(0.0, 0.0, [m; 2], [40_000.0; 2]));
         assert!(
             st.omega_e <= guard + 1e-3,
             "tick {tick}: crank {:.0} rpm blew past the over-rev guard point ({:.0})",
@@ -1687,13 +1604,7 @@ fn upshift_confirmation_rejects_transient_band_excursions() {
     let v_lo = (tp.shift_up_rpm - 100.0) * RPM_TO_RAD * tp.sprocket_radius / g1;
     let mut st = fresh(&tp);
     let at = |st: &mut TransmissionState, v: f32| {
-        step(
-            TransmissionMode::Hybrid,
-            &fp,
-            Some(&tp),
-            st,
-            &input(1.0, 0.0, [v, v], [0.0, 0.0]),
-        );
+        step(&fp, &tp, st, &input(1.0, 0.0, [v, v], [0.0, 0.0]));
     };
 
     for burst in 0..2 {
@@ -1741,13 +1652,7 @@ fn detent_engage_on_the_committing_tick_resets_confirmation() {
     let g1 = tp.gears_fwd[0];
     let v_hi = (tp.shift_up_rpm + 80.0) * RPM_TO_RAD * tp.sprocket_radius / g1;
     let at = |st: &mut TransmissionState, steer: f32| {
-        step(
-            TransmissionMode::FixedRadii,
-            &fp,
-            Some(&tp),
-            st,
-            &input(1.0, steer, [v_hi, v_hi], [0.0, 0.0]),
-        );
+        step(&fp, &tp, st, &input(1.0, steer, [v_hi, v_hi], [0.0, 0.0]));
     };
 
     // Control: the identical straight stream commits on exactly the confirm-th tick.
@@ -1791,28 +1696,6 @@ fn detent_engage_on_the_committing_tick_resets_confirmation() {
     );
 }
 
-/// The Governor adapter IS the legacy tail: per side, bit-equal to `governor_belt`.
-#[test]
-fn governor_adapter_matches_legacy_belt() {
-    let fp = lab_fp();
-    let tp = lab_tp();
-    let mut st = fresh(&tp);
-    let inp = input(0.7, 0.3, [4.2, -1.1], [23_000.0, -9_500.0]);
-    let report = step(TransmissionMode::Governor, &fp, Some(&tp), &mut st, &inp);
-    for i in 0..2 {
-        let (engine, next) = forces::governor_belt(
-            &fp,
-            inp.side_commands[i],
-            inp.speeds[i],
-            inp.reactions[i],
-            inp.dt,
-        );
-        assert_eq!(report.forces[i], engine);
-        assert_eq!(report.next_speeds[i], next);
-    }
-    assert_eq!(st, fresh(&tp), "governor must not touch state");
-}
-
 /// Auto-shift: crossing the up band shifts up exactly once (the interruption window
 /// blocks a second decision), the mid-band is quiet in both directions, and the down
 /// band shifts down — the hysteresis gap is what kills hunting.
@@ -1828,22 +1711,10 @@ fn gear_shift_hysteresis() {
     // Up band + 80 (1780 rpm): comfortably past the band AND past the fix-1a landing gate
     // (unloaded landing 1780 × 8/12.7 ≈ 1121 rpm ≥ down band 900 + margin 150).
     let v = m_for(tp.shift_up_rpm + 80.0);
-    step(
-        TransmissionMode::Hybrid,
-        &fp,
-        Some(&tp),
-        &mut st,
-        &input(1.0, 0.0, [v, v], [0.0, 0.0]),
-    );
+    step(&fp, &tp, &mut st, &input(1.0, 0.0, [v, v], [0.0, 0.0]));
     assert_eq!(st.gear, 2);
     assert!(st.shift_ticks > 0);
-    step(
-        TransmissionMode::Hybrid,
-        &fp,
-        Some(&tp),
-        &mut st,
-        &input(1.0, 0.0, [v, v], [0.0, 0.0]),
-    );
+    step(&fp, &tp, &mut st, &input(1.0, 0.0, [v, v], [0.0, 0.0]));
     assert_eq!(
         st.gear, 2,
         "no second decision inside the interruption window"
@@ -1855,9 +1726,8 @@ fn gear_shift_hysteresis() {
     let v_mid = (tp.shift_up_rpm + tp.shift_down_rpm) / 2.0 * RPM_TO_RAD * tp.sprocket_radius / g2;
     for _ in 0..(tp.shift_ticks as usize + REVERSAL_DWELL_TICKS as usize + 5) {
         step(
-            TransmissionMode::Hybrid,
             &fp,
-            Some(&tp),
+            &tp,
             &mut st,
             &input(1.0, 0.0, [v_mid, v_mid], [0.0, 0.0]),
         );
@@ -1868,9 +1738,8 @@ fn gear_shift_hysteresis() {
     // Below the down band → downshift.
     let v_low = (tp.shift_down_rpm - 50.0) * RPM_TO_RAD * tp.sprocket_radius / g2;
     step(
-        TransmissionMode::Hybrid,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(1.0, 0.0, [v_low, v_low], [0.0, 0.0]),
     );
@@ -1890,7 +1759,7 @@ fn shift_torque_interruption_window() {
     let inp = input(1.0, 0.0, [v, v], [0.0, 0.0]);
     let mut zero_ticks = 0;
     loop {
-        let r = step(TransmissionMode::Hybrid, &fp, Some(&tp), &mut st, &inp);
+        let r = step(&fp, &tp, &mut st, &inp);
         if r.shifting {
             assert_eq!(
                 r.forces[0], 0.0,
@@ -1932,13 +1801,7 @@ fn upshift_landing_gate_blocks_shift_cut_hunting() {
     let v = (tp.shift_up_rpm + 80.0) * RPM_TO_RAD * tp.sprocket_radius / g1;
 
     let mut st = confirmed(&tp);
-    step(
-        TransmissionMode::Hybrid,
-        &fp,
-        Some(&tp),
-        &mut st,
-        &input(1.0, 0.0, [v, v], [0.0, 0.0]),
-    );
+    step(&fp, &tp, &mut st, &input(1.0, 0.0, [v, v], [0.0, 0.0]));
     assert_eq!(st.gear, 2, "unloaded, the operating point upshifts");
 
     // Working grade: the honest predictor must NOT refuse (the old frozen model did).
@@ -1950,9 +1813,8 @@ fn upshift_landing_gate_blocks_shift_cut_hunting() {
         ..confirmed(&tp)
     };
     step(
-        TransmissionMode::Hybrid,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(1.0, 0.0, [v, v], [25_000.0, 25_000.0]),
     );
@@ -1968,9 +1830,8 @@ fn upshift_landing_gate_blocks_shift_cut_hunting() {
         ..confirmed(&tp)
     };
     step(
-        TransmissionMode::Hybrid,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(1.0, 0.0, [v, v], [60_000.0, 60_000.0]),
     );
@@ -2014,9 +1875,8 @@ fn protective_upshift_fires_under_brake_steer_and_fuel_cut() {
         ..fresh(&tp)
     };
     let report = step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(-1.0, 0.6, [shaft; 2], [-40_000.0; 2]),
     );
@@ -2068,9 +1928,8 @@ fn upshift_arms_refuse_overrun_shaft_without_crank() {
             ..confirmed(&tp) // crank at authored idle — nowhere near the spike
         };
         step(
-            TransmissionMode::FixedRadii,
             &fp,
-            Some(&tp),
+            &tp,
             &mut st,
             &input(throttle, 0.0, [shaft; 2], [0.0; 2]),
         );
@@ -2089,13 +1948,7 @@ fn upshift_arms_refuse_overrun_shaft_without_crank() {
         demand_initialized: true,
         ..confirmed(&tp)
     };
-    step(
-        TransmissionMode::FixedRadii,
-        &fp,
-        Some(&tp),
-        &mut st,
-        &input(1.0, 0.0, [shaft; 2], [0.0; 2]),
-    );
+    step(&fp, &tp, &mut st, &input(1.0, 0.0, [shaft; 2], [0.0; 2]));
     assert_eq!(st.gear, 7, "a corroborated overrun must still upshift");
 }
 
@@ -2130,9 +1983,8 @@ fn confirmed_deficit_without_target_falls_through_to_legal_upshift() {
         ..confirmed(&tp)
     };
     step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(1.0, 0.0, [shaft; 2], [demand / 2.0; 2]),
     );
@@ -2161,9 +2013,8 @@ fn demand_ema_seeds_from_first_sample_and_converges() {
         ..fresh(&tp)
     };
     step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(1.0, 0.0, [shaft; 2], [40_000.0; 2]),
     );
@@ -2174,9 +2025,8 @@ fn demand_ema_seeds_from_first_sample_and_converges() {
     );
     for _ in 0..32 {
         step(
-            TransmissionMode::FixedRadii,
             &fp,
-            Some(&tp),
+            &tp,
             &mut st,
             &input(1.0, 0.0, [shaft; 2], [60_000.0; 2]),
         );
@@ -2225,9 +2075,8 @@ fn backslide_holds_gear_and_keeps_forward_drive() {
     let mut st = fresh(&tp);
     for tick in 0..96 {
         let rep = step(
-            TransmissionMode::Hybrid,
             &fp,
-            Some(&tp),
+            &tp,
             &mut st,
             &input(1.0, 0.0, [-2.5, -2.5], [40_000.0, 40_000.0]),
         );
@@ -2253,9 +2102,8 @@ fn backslide_holds_gear_and_keeps_forward_drive() {
         ..fresh(&tp)
     };
     step(
-        TransmissionMode::Hybrid,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(1.0, 0.0, [-2.5, -2.5], [40_000.0, 40_000.0]),
     );
@@ -2310,9 +2158,8 @@ fn backslide_holds_gear_and_keeps_forward_drive() {
     };
     for tick in 0..96 {
         let rep = step(
-            TransmissionMode::Hybrid,
             &fp,
-            Some(&tp),
+            &tp,
             &mut st,
             &input(-1.0, 0.0, [2.5, 2.5], [-40_000.0, -40_000.0]),
         );
@@ -2336,13 +2183,7 @@ fn backslide_holds_gear_and_keeps_forward_drive() {
         reverse: true,
         ..fresh(&tp)
     };
-    step(
-        TransmissionMode::Hybrid,
-        &fp,
-        Some(&tp),
-        &mut st,
-        &input(-1.0, 0.0, [0.3, 0.3], [0.0, 0.0]),
-    );
+    step(&fp, &tp, &mut st, &input(-1.0, 0.0, [0.3, 0.3], [0.0, 0.0]));
     assert_eq!(
         st.gear, 2,
         "a reverse backslide must hold the engaged gear, not downshift-walk"
@@ -2363,9 +2204,8 @@ fn landing_gate_refuses_sign_flipped_landing() {
     let v = 1_780.0 * RPM_TO_RAD * tp.sprocket_radius / g1; // above the up band
     let mut st = fresh(&tp);
     step(
-        TransmissionMode::Hybrid,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(1.0, 0.0, [v, v], [221_000.0, 221_000.0]),
     );
@@ -2406,9 +2246,8 @@ fn readout_reports_crank_state() {
     let mut rep = TransmissionReport::default();
     for _ in 0..64 {
         rep = step(
-            TransmissionMode::Hybrid,
             &fp,
-            Some(&tp),
+            &tp,
             &mut st,
             &input(-1.0, 0.0, [-2.0, -2.0], [0.0, 0.0]),
         );
@@ -2432,9 +2271,8 @@ fn readout_reports_crank_state() {
     };
     for _ in 0..64 {
         step(
-            TransmissionMode::Hybrid,
             &fp,
-            Some(&tp),
+            &tp,
             &mut st,
             &input(-1.0, 0.0, [2.0, 2.0], [-40_000.0, -40_000.0]),
         );
@@ -2450,8 +2288,8 @@ fn readout_reports_crank_state() {
 
 /// Stage A: coasting to rest in a cruise gear must
 /// complete the downshift chain to gear 1. The brake stop-force/integration order
-/// leaves a stable numerical residual at rest (measured ≈ −1.7e−9 m/s: Hybrid, gear
-/// 3, zero command, 20 kN/side reaction) — a hard `shaft >= 0` backslide guard read
+/// leaves a stable numerical residual at rest (order 1e−9 m/s: MEASURED −1.7e−9 m/s at gear
+/// 3, zero command, 20 kN/side reaction, under a steering law since deleted) — a hard `shaft >= 0` backslide guard read
 /// that residual as "back-driven" and stranded the box in gear 3 forever. The guard's
 /// −PARK_ENGAGE_SPEED threshold lets numerical rest downshift normally.
 #[test]
@@ -2464,9 +2302,8 @@ fn coast_to_rest_completes_downshift_chain() {
     let mut speeds = [-1.0e-5f32, -1.0e-5];
     for _ in 0..256 {
         let rep = step(
-            TransmissionMode::Hybrid,
             &fp,
-            Some(&tp),
+            &tp,
             &mut st,
             &input(0.0, 0.0, speeds, [20_000.0, 20_000.0]),
         );
@@ -2493,13 +2330,7 @@ fn dwell_blocks_reversal_not_same_direction() {
     let rpm_v = |rpm: f32, g: f32| rpm * RPM_TO_RAD * tp.sprocket_radius / g;
     let mut st = confirmed(&tp);
     let at = |st: &mut TransmissionState, v: f32| {
-        step(
-            TransmissionMode::Hybrid,
-            &fp,
-            Some(&tp),
-            st,
-            &input(1.0, 0.0, [v, v], [0.0, 0.0]),
-        );
+        step(&fp, &tp, st, &input(1.0, 0.0, [v, v], [0.0, 0.0]));
     };
     // 1 → 2 commits (dwell armed) at up band + 80 (1780 rpm).
     at(&mut st, rpm_v(tp.shift_up_rpm + 80.0, tp.gears_fwd[0]));
@@ -2556,13 +2387,7 @@ fn no_upshift_while_braking_or_coasting() {
     let v = (tp.shift_up_rpm + 80.0) * RPM_TO_RAD * tp.sprocket_radius / g1;
     for throttle in [0.0, -1.0] {
         let mut st = fresh(&tp);
-        step(
-            TransmissionMode::Hybrid,
-            &fp,
-            Some(&tp),
-            &mut st,
-            &input(throttle, 0.0, [v, v], [0.0, 0.0]),
-        );
+        step(&fp, &tp, &mut st, &input(throttle, 0.0, [v, v], [0.0, 0.0]));
         assert_eq!(
             st.gear, 1,
             "throttle {throttle}: no upshift without propulsive drive"
@@ -2586,9 +2411,8 @@ fn l600_detent_defers_upshift() {
         ..confirmed(&tp)
     };
     step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(1.0, 1.0, [v_up, v_up], [0.0, 0.0]),
     );
@@ -2597,9 +2421,8 @@ fn l600_detent_defers_upshift() {
     // that defers, not the operating point.
     let mut st = confirmed(&tp);
     step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(1.0, 0.0, [v_up, v_up], [0.0, 0.0]),
     );
@@ -2612,9 +2435,8 @@ fn l600_detent_defers_upshift() {
         ..fresh(&tp)
     };
     step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(1.0, 1.0, [v_low, v_low], [0.0, 0.0]),
     );
@@ -2627,33 +2449,21 @@ fn l600_detent_defers_upshift() {
 /// pivot_f = 0), leaving the belts counter-rotating forever; the steer-scaled weight
 /// returns the released stick to the curvature servo, whose target is 0.
 #[test]
-fn hybrid_steer_release_arrests_pivot() {
+fn steer_release_arrests_pivot() {
     let (fp, tp) = (lab_fp(), lab_tp());
     let mut st = fresh(&tp);
     let mut speeds = [0.0f32; 2];
     // Spin up a standstill pivot (zero reactions — the worst case: nothing external
     // ever damps the belts).
     for _ in 0..64 {
-        let rep = step(
-            TransmissionMode::Hybrid,
-            &fp,
-            Some(&tp),
-            &mut st,
-            &input(0.0, 1.0, speeds, [0.0, 0.0]),
-        );
+        let rep = step(&fp, &tp, &mut st, &input(0.0, 1.0, speeds, [0.0, 0.0]));
         speeds = rep.next_speeds;
     }
     let d0 = (speeds[0] - speeds[1]) / 2.0;
     assert!(d0 > 0.1, "the pivot must actually be turning (d = {d0})");
     // Release the steer: d must decay to ~0 within a bounded window.
     for _ in 0..32 {
-        let rep = step(
-            TransmissionMode::Hybrid,
-            &fp,
-            Some(&tp),
-            &mut st,
-            &input(0.0, 0.0, speeds, [0.0, 0.0]),
-        );
+        let rep = step(&fp, &tp, &mut st, &input(0.0, 0.0, speeds, [0.0, 0.0]));
         speeds = rep.next_speeds;
     }
     let d1 = (speeds[0] - speeds[1]) / 2.0;
@@ -2712,25 +2522,13 @@ fn overrev_gate_refuses_too_early_downshift() {
         ..fresh(&tp)
     };
     let v = 900.0 * RPM_TO_RAD * tp.sprocket_radius / g2;
-    step(
-        TransmissionMode::Hybrid,
-        &fp,
-        Some(&tp),
-        &mut st,
-        &input(1.0, 0.0, [v, v], [0.0, 0.0]),
-    );
+    step(&fp, &tp, &mut st, &input(1.0, 0.0, [v, v], [0.0, 0.0]));
     assert_eq!(
         st.gear, 2,
         "a landing past max curve rpm − margin must refuse the downshift"
     );
     let v = 600.0 * RPM_TO_RAD * tp.sprocket_radius / g2;
-    step(
-        TransmissionMode::Hybrid,
-        &fp,
-        Some(&tp),
-        &mut st,
-        &input(1.0, 0.0, [v, v], [0.0, 0.0]),
-    );
+    step(&fp, &tp, &mut st, &input(1.0, 0.0, [v, v], [0.0, 0.0]));
     assert_eq!(st.gear, 1, "an in-envelope landing must downshift");
 }
 
@@ -2744,7 +2542,7 @@ fn l600_constraint_holds_geared_ratio() {
     let mut last = TransmissionReport::default();
     for _ in 0..400 {
         let inp = input(0.5, 1.0, speeds, [0.0, 0.0]);
-        last = step(TransmissionMode::FixedRadii, &fp, Some(&tp), &mut st, &inp);
+        last = step(&fp, &tp, &mut st, &inp);
         speeds = last.next_speeds;
     }
     assert_eq!(st.steer_step, 2, "|steer| = 1 must engage the tight detent");
@@ -2776,9 +2574,8 @@ fn tiger_f8_wide_outer_belt_exceeds_mean_speed_limit() {
         ..fresh(&tp)
     };
     let rep = step(
-        TransmissionMode::FixedRadii,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(1.0, 0.3, [cruise_m, cruise_m], [0.0, 0.0]),
     );
@@ -2830,7 +2627,7 @@ fn l600_constraint_survives_m_zero_crossing() {
     };
     let (m0, d0) = (0.100f32, 0.043);
     let inp = input(0.5, 1.0, [m0 + d0, m0 - d0], [250_000.0, 250_000.0]);
-    let rep = step(TransmissionMode::FixedRadii, &fp, Some(&tp), &mut st, &inp);
+    let rep = step(&fp, &tp, &mut st, &inp);
     let m_next = (rep.next_speeds[0] + rep.next_speeds[1]) / 2.0;
     let d_next = (rep.next_speeds[0] - rep.next_speeds[1]) / 2.0;
     assert!(
@@ -2859,9 +2656,8 @@ fn steer_step_hysteresis() {
     let mut st = fresh(&tp);
     let mut at = |steer: f32| {
         step(
-            TransmissionMode::FixedRadii,
             &fp,
-            Some(&tp),
+            &tp,
             &mut st,
             &input(0.5, steer, [2.0, 2.0], [0.0, 0.0]),
         );
@@ -2890,9 +2686,8 @@ fn brake_capacity_breach_backdrives() {
     // speed -> exact hold.
     let r_in = 1.5 * tp.brake_capacity_n;
     let rep = step(
-        TransmissionMode::Hybrid,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(0.0, 0.0, [0.0, 0.0], [r_in, r_in]),
     );
@@ -2904,9 +2699,8 @@ fn brake_capacity_breach_backdrives() {
     // Past static capacity: R = 1.7·B_dynamic > 1.6·B_dynamic -> honest back-drive.
     let r_out = 1.7 * tp.brake_capacity_n;
     let rep = step(
-        TransmissionMode::Hybrid,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(0.0, 0.0, [0.0, 0.0], [r_out, r_out]),
     );
@@ -2956,9 +2750,8 @@ fn parking_brake_settles_creep() {
     // Creep below the latch threshold, zero command, a ground reaction R > Q inside
     // capacity.
     let rep = step(
-        TransmissionMode::Hybrid,
         &fp,
-        Some(&tp),
+        &tp,
         &mut st,
         &input(0.0, 0.0, [0.03, 0.03], [20_000.0, 20_000.0]),
     );
@@ -2984,7 +2777,7 @@ fn parking_brake_stays_saturated_past_breach() {
     let mut last = TransmissionReport::default();
     for _ in 0..30 {
         let inp = input(0.0, 0.0, speeds, [r_breach, r_breach]);
-        last = step(TransmissionMode::Hybrid, &fp, Some(&tp), &mut st, &inp);
+        last = step(&fp, &tp, &mut st, &inp);
         speeds = last.next_speeds;
     }
     assert!(
@@ -3016,20 +2809,8 @@ fn parking_brake_stays_saturated_past_breach() {
         ..fresh(&tp)
     };
     let mut dynamic_state = static_state;
-    let static_report = step(
-        TransmissionMode::Hybrid,
-        &fp,
-        Some(&tp),
-        &mut static_state,
-        &moving,
-    );
-    let dynamic_report = step(
-        TransmissionMode::Hybrid,
-        &fp,
-        Some(&dynamic_tp),
-        &mut dynamic_state,
-        &moving,
-    );
+    let static_report = step(&fp, &tp, &mut static_state, &moving);
+    let dynamic_report = step(&fp, &dynamic_tp, &mut dynamic_state, &moving);
     assert_eq!(
         static_report.forces, dynamic_report.forces,
         "a moving latched slide must drop to dynamic brake capacity"
@@ -3058,21 +2839,9 @@ fn brake_is_discretely_passive() {
                 let r = r * tp.brake_capacity_n;
                 let inp = input(0.0, 0.0, [v, v], [r, r]);
                 let mut st_b = TransmissionState { park, ..fresh(&tp) };
-                let braked = step(
-                    TransmissionMode::Hybrid,
-                    &fp_braked,
-                    Some(&tp),
-                    &mut st_b,
-                    &inp,
-                );
+                let braked = step(&fp_braked, &tp, &mut st_b, &inp);
                 let mut st_f = TransmissionState { park, ..fresh(&tp) };
-                let free = step(
-                    TransmissionMode::Hybrid,
-                    &fp_free,
-                    Some(&tp),
-                    &mut st_f,
-                    &inp,
-                );
+                let free = step(&fp_free, &tp, &mut st_f, &inp);
                 for i in 0..2 {
                     let (b, f) = (braked.next_speeds[i], free.next_speeds[i]);
                     assert!(
@@ -3094,24 +2863,20 @@ fn brake_is_discretely_passive() {
 /// Energy honesty over 64-tick windows: Σ(Q_L·v_L + Q_R·v_R)·dt never exceeds the
 /// integrated engine power available plus released belt-inertia energy — regeneration
 /// recirculates, it does not create (the design's no-free-energy bound). Exercised over
-/// a launch, a driving turn, and a pivot, in both regenerative modes — and, for the
+/// a launch, a driving turn, and a pivot — and, for the
 /// physical-power split, from an asymmetric rolling start with a hard steer command at gentle
 /// throttle (`F_s ≫ F_p`, `m > d > 0`): the case where one SPROCKET's power is negative
 /// while both MODAL powers read positive, so the modal split never charged η.
 #[test]
 fn energy_bound_no_free_energy() {
     let (fp, tp) = (lab_fp(), lab_tp());
-    for (mode, throttle, steer, seed) in [
-        (TransmissionMode::Hybrid, 1.0, 0.0, [0.0f32, 0.0]),
-        (TransmissionMode::Hybrid, 0.7, 0.6, [0.0, 0.0]),
-        (TransmissionMode::Hybrid, 0.0, 1.0, [0.0, 0.0]),
+    for (throttle, steer, seed) in [
+        (1.0, 0.0, [0.0f32, 0.0]),
+        (0.7, 0.8, [0.0, 0.0]),
+        (0.0, 1.0, [0.0, 0.0]),
         // Steer-dominant at a rolling start — inner sprocket goes negative.
-        (TransmissionMode::Hybrid, 0.2, 1.0, [4.0, 2.0]),
-        (TransmissionMode::Hybrid, 0.2, -1.0, [4.0, 2.0]),
-        (TransmissionMode::FixedRadii, 1.0, 0.0, [0.0, 0.0]),
-        (TransmissionMode::FixedRadii, 0.7, 0.8, [0.0, 0.0]),
-        (TransmissionMode::FixedRadii, 0.0, 1.0, [0.0, 0.0]),
-        (TransmissionMode::FixedRadii, 0.2, 1.0, [4.0, 2.0]),
+        (0.2, 1.0, [4.0, 2.0]),
+        (0.2, -1.0, [4.0, 2.0]),
     ] {
         let mut st = fresh(&tp);
         let mut speeds = seed;
@@ -3128,7 +2893,7 @@ fn energy_bound_no_free_energy() {
                 // saturating at 25 kN) — enough load to exercise the power limiter.
                 let reactions = speeds.map(|v| (v * 30_000.0).clamp(-25_000.0, 25_000.0));
                 let inp = input(throttle, steer, speeds, reactions);
-                let rep = step(mode, &fp, Some(&tp), &mut st, &inp);
+                let rep = step(&fp, &tp, &mut st, &inp);
                 delivered +=
                     f64::from(rep.forces[0] * speeds[0] + rep.forces[1] * speeds[1]) * dt_s;
                 available += f64::from(rep.power_available) * dt_s;
@@ -3141,7 +2906,7 @@ fn energy_bound_no_free_energy() {
             let released = (e0 - e1).max(0.0);
             assert!(
                 delivered <= available + released + 500.0,
-                "{mode:?} t={throttle} s={steer} window {window}: delivered {delivered:.0} J \
+                "t={throttle} s={steer} window {window}: delivered {delivered:.0} J \
                      > available {available:.0} J + released {released:.0} J"
             );
         }
@@ -3149,46 +2914,41 @@ fn energy_bound_no_free_energy() {
 }
 
 /// The recirculation split reads the PHYSICAL sprocket powers, not the
-/// modal ones. Steer-only at an asymmetric rolling start (`F_p = 0`, saturated `F_s`,
-/// `v_L = 5, v_R = 3`): the outer sprocket delivers `F_s/2·v_L`, the inner ABSORBS
-/// `F_s/2·v_R` — physical net `= F_s/2·(v_L − η·v_R)`, while the modal split reads
-/// `F_s·d` with no negative term at all. The reported power_scale must be the physical
-/// one (and measurably NOT the modal one). Stage B: the scenario runs inside a shift
-/// window (`shift_ticks: 5`, declutched) so the engine path contributes NO m-axis
-/// force — what is pinned here is the SPLIT LAW, isolated from the crank coupling
-/// (engaged, the cold crank against a 4 m/s shaft would add a clutch transient that
-/// obscures the arithmetic).
+/// modal ones. Steer-only at an asymmetric rolling pair (`F_p = 0`, `F_s` at the
+/// difference-axis bound, `v_L = 5, v_R = 3`): the outer sprocket delivers `F_s/2·v_L`, the
+/// inner ABSORBS `F_s/2·v_R` — physical net `= F_s/2·(v_L − η·v_R)`, while the modal split
+/// reads `F_s·d` with no negative term at all. Pinned on the split function itself with fixture
+/// forces: at rolling speed the steering law turns through the λ constraint, not `F_s`, so no
+/// drive scenario isolates the split.
 #[test]
 fn recirculation_splits_physical_output_powers() {
-    let (fp, tp) = (lab_fp(), lab_tp());
-    let mut st = TransmissionState {
-        gear: 5,
-        shift_ticks: 5,
-        ..fresh(&tp)
-    };
+    let tp = lab_tp();
     let (vl, vr) = (5.0f32, 3.0);
-    let rep = step(
-        TransmissionMode::Hybrid,
-        &fp,
-        Some(&tp),
-        &mut st,
-        &input(0.0, 1.0, [vl, vr], [0.0, 0.0]),
-    );
-    // Saturated servo (target far past the band): F_s = 2 × per-output capacity.
     let f_s = 2.0 * tp.steer_capacity_n;
     let (p_l, p_r) = (f_s / 2.0 * vl, -f_s / 2.0 * vr);
     let physical_net = p_l - tp.recirculation * -p_r;
-    let expect = rep.power_available / physical_net;
-    assert!(
-        (rep.power_scale - expect).abs() < 1e-3,
-        "power_scale {} must be the physical-output split {expect}",
-        rep.power_scale
+    // A budget a quarter of the physical demand (fixture data), so the scale binds.
+    let p_avail = physical_net / 4.0;
+    let scale = power_conservation_scale(
+        &tp,
+        vl,
+        vr,
+        0.0,
+        f_s,
+        p_avail,
+        #[cfg(feature = "bitprobe")]
+        &mut TransmissionProbe::default(),
     );
-    let modal = rep.power_available / (f_s * ((vl - vr) / 2.0));
+    let expect = p_avail / physical_net;
     assert!(
-        (rep.power_scale - modal).abs() > 0.02,
+        (scale - expect).abs() < 1e-6,
+        "power_scale {scale} must be the physical-output split {expect}"
+    );
+    let modal = p_avail / (f_s * ((vl - vr) / 2.0));
+    assert!(
+        (scale - modal).abs() > 0.02,
         "the physical split must be distinguishable from the modal one here \
-             (physical {expect} vs modal {modal}) — otherwise this test pins nothing"
+         (physical {expect} vs modal {modal}) — otherwise this test pins nothing"
     );
 }
 
@@ -3210,7 +2970,7 @@ fn opposite_throttle_at_speed_brakes_then_reverses() {
     for tick in 0..1024 {
         // Reactions zero — the hardest case: the OLD code accelerated forward here.
         let inp = input(-1.0, 0.0, speeds, [0.0, 0.0]);
-        let rep = step(TransmissionMode::Hybrid, &fp, Some(&tp), &mut st, &inp);
+        let rep = step(&fp, &tp, &mut st, &inp);
         let m_next = (rep.next_speeds[0] + rep.next_speeds[1]) / 2.0;
         if swapped_at.is_none() {
             assert!(
@@ -3254,7 +3014,7 @@ fn held_reversal_keeps_braking_through_swap_window() {
     // held: the swap commits on the first tick and opens its interruption window.
     let m0 = DIRECTION_SWAP_SPEED - 0.05;
     let inp = input(-1.0, 0.0, [m0, m0], [0.0, 0.0]);
-    let rep = step(TransmissionMode::FixedRadii, &fp, Some(&tp), &mut st, &inp);
+    let rep = step(&fp, &tp, &mut st, &inp);
     assert!(st.reverse, "the swap must commit at the seam");
     assert!(st.shift_ticks > 0, "the swap must open its window");
     for (i, force) in rep.forces.iter().enumerate() {
@@ -3266,7 +3026,7 @@ fn held_reversal_keeps_braking_through_swap_window() {
     }
     // And every remaining window tick with the belt still rolling forward brakes too.
     while st.shift_ticks > 0 {
-        let rep = step(TransmissionMode::FixedRadii, &fp, Some(&tp), &mut st, &inp);
+        let rep = step(&fp, &tp, &mut st, &inp);
         for (i, force) in rep.forces.iter().enumerate() {
             assert!(
                 *force < 0.0,
@@ -3300,13 +3060,7 @@ fn coast_drag_reaches_belt_through_coupling() {
     let v = 1_300.0 * RPM_TO_RAD * tp.sprocket_radius / g3;
     let mut rep = TransmissionReport::default();
     for _ in 0..32 {
-        rep = step(
-            TransmissionMode::Hybrid,
-            &fp,
-            Some(&tp),
-            &mut st,
-            &input(0.0, 0.0, [v, v], [0.0, 0.0]),
-        );
+        rep = step(&fp, &tp, &mut st, &input(0.0, 0.0, [v, v], [0.0, 0.0]));
     }
     assert_eq!(st.gear, 3, "mid-band coast must not shift");
     let expect = -(engine_drag(&tp, st.omega_e, 0.0) * g3 / tp.sprocket_radius) / 2.0;
@@ -3359,49 +3113,34 @@ fn motoring_drag_curve_pins_documented_anchors() {
 /// drives the two OUTPUTS differentially, so each output may carry up to the full
 /// PER-OUTPUT capacity (`F_s` bounded by `2 × capacity`, `±capacity` per belt) — not
 /// `±capacity/2`, which halves the yaw moment and left the Tiger under its own
-/// footprint scrub. At rest under full steer the Hybrid commands full steer FORCE
-/// outright (the power-limited pivot; the power scale cannot bind at v = 0),
-/// and the L600's brake-gated neutral regime asks the semi-implicit servo for the
-/// exact-landing force `2·neutral_d_full·I/dt`, capacity-clamped — for the lab data
-/// both must land each side at the FULL per-output datum (which EXCEEDS the old
-/// difference-axis reading's `capacity/2` ceiling outright).
+/// footprint scrub. At rest under full steer the L600's brake-gated neutral regime asks
+/// the semi-implicit servo for the exact-landing force `2·neutral_d_full·I/dt`,
+/// capacity-clamped — for the lab data it must land each side near the FULL per-output
+/// datum (which EXCEEDS the old difference-axis reading's `capacity/2` ceiling outright).
 #[test]
 fn pivot_authority_is_per_output_capacity() {
     let (fp, tp) = (lab_fp(), lab_tp());
     let dt = 1.0 / 64.0;
-    for mode in [TransmissionMode::Hybrid, TransmissionMode::FixedRadii] {
-        let mut st = fresh(&tp);
-        let rep = step(
-            mode,
-            &fp,
-            Some(&tp),
-            &mut st,
-            &input(0.0, 1.0, [0.0, 0.0], [0.0, 0.0]),
-        );
-        let expect = match mode {
-            // Force command up to capacity, power-limited thereafter.
-            TransmissionMode::Hybrid => tp.steer_capacity_n,
-            // The neutral servo's exact-landing force, per-output capacity clamp.
-            _ => (tp.neutral_d_full * fp.inertia / dt).min(tp.steer_capacity_n),
-        };
-        assert!(
-            (rep.forces[0] - expect).abs() < 1.0,
-            "{mode:?}: left output must carry min(capacity, exact-landing) = {expect}, \
-                 got {}",
-            rep.forces[0]
-        );
-        assert!(
-            (rep.forces[1] + expect).abs() < 1.0,
-            "{mode:?}: right output mirrors it (counter-rotation), got {}",
-            rep.forces[1]
-        );
-        assert!(
-            expect > 0.9 * tp.steer_capacity_n,
-            "the lab targets must exercise near-capacity authority ({expect} vs \
-                 {}) — under the old difference-axis reading the ceiling was capacity/2",
-            tp.steer_capacity_n
-        );
-    }
+    let mut st = fresh(&tp);
+    let rep = step(&fp, &tp, &mut st, &input(0.0, 1.0, [0.0, 0.0], [0.0, 0.0]));
+    // The neutral servo's exact-landing force, per-output capacity clamp.
+    let expect = (tp.neutral_d_full * fp.inertia / dt).min(tp.steer_capacity_n);
+    assert!(
+        (rep.forces[0] - expect).abs() < 1.0,
+        "left output must carry min(capacity, exact-landing) = {expect}, got {}",
+        rep.forces[0]
+    );
+    assert!(
+        (rep.forces[1] + expect).abs() < 1.0,
+        "right output mirrors it (counter-rotation), got {}",
+        rep.forces[1]
+    );
+    assert!(
+        expect > 0.9 * tp.steer_capacity_n,
+        "the lab targets must exercise near-capacity authority ({expect} vs {}) — under the \
+         old difference-axis reading the ceiling was capacity/2",
+        tp.steer_capacity_n
+    );
 }
 
 /// Stage B: a standing start under full W is CLUTCH-SLIP-LIMITED. From rest the lock
@@ -3421,13 +3160,7 @@ fn launch_is_clutch_slip_limited() {
     let floor = (tp.engine.idle_rpm - STALL_GUARD_BAND_RPM) * RPM_TO_RAD;
     let mut st = fresh(&tp);
     for tick in 0..16 {
-        let rep = step(
-            TransmissionMode::Hybrid,
-            &fp,
-            Some(&tp),
-            &mut st,
-            &input(1.0, 0.0, [0.0, 0.0], [0.0, 0.0]),
-        );
+        let rep = step(&fp, &tp, &mut st, &input(1.0, 0.0, [0.0, 0.0], [0.0, 0.0]));
         let total = rep.forces[0] + rep.forces[1];
         assert!(
             (total - expect).abs() < 0.01 * expect,
@@ -3470,13 +3203,7 @@ fn stall_guard_holds_crank_under_grade_lug() {
     ] {
         let mut st = fresh(&tp);
         for tick in 0..128 {
-            let rep = step(
-                TransmissionMode::Hybrid,
-                &fp,
-                Some(&tp),
-                &mut st,
-                &input(throttle, 0.0, speeds, reactions),
-            );
+            let rep = step(&fp, &tp, &mut st, &input(throttle, 0.0, speeds, reactions));
             assert!(
                 st.omega_e >= floor - 1e-3,
                 "{label} tick {tick}: ω_e {:.0} rpm fell below the stall-guard floor \
@@ -3512,9 +3239,8 @@ fn rev_match_across_upshift_is_continuous() {
     // Warm to the locked geared point below the up band.
     for _ in 0..32 {
         step(
-            TransmissionMode::Hybrid,
             &fp,
-            Some(&tp),
+            &tp,
             &mut st,
             &input(1.0, 0.0, [v_warm, v_warm], [0.0, 0.0]),
         );
@@ -3526,9 +3252,8 @@ fn rev_match_across_upshift_is_continuous() {
     let mut rep = TransmissionReport::default();
     for tick in 0..96 {
         rep = step(
-            TransmissionMode::Hybrid,
             &fp,
-            Some(&tp),
+            &tp,
             &mut st,
             &input(1.0, 0.0, [v_up, v_up], [0.0, 0.0]),
         );
@@ -3583,13 +3308,7 @@ fn free_rev_reaches_steer_target_promptly() {
     let mut st = fresh(&tp);
     let mut reached = None;
     for tick in 0..128 {
-        step(
-            TransmissionMode::Hybrid,
-            &fp,
-            Some(&tp),
-            &mut st,
-            &input(0.0, 1.0, [0.0, 0.0], [0.0, 0.0]),
-        );
+        step(&fp, &tp, &mut st, &input(0.0, 1.0, [0.0, 0.0], [0.0, 0.0]));
         let rpm = st.omega_e / RPM_TO_RAD;
         if reached.is_none() && rpm >= 0.95 * tp.peak_torque_rpm {
             reached = Some(tick + 1);
@@ -3629,13 +3348,7 @@ fn braking_never_teleports_crank_past_clutch_capacity() {
     let mut st = fresh(&tp);
     // Warm to a locked coast in gear 1 at m = 1.0 (held speeds).
     for _ in 0..32 {
-        step(
-            TransmissionMode::Hybrid,
-            &fp,
-            Some(&tp),
-            &mut st,
-            &input(0.0, 0.0, [1.0, 1.0], [0.0, 0.0]),
-        );
+        step(&fp, &tp, &mut st, &input(0.0, 0.0, [1.0, 1.0], [0.0, 0.0]));
     }
     assert!(
         st.omega_e / RPM_TO_RAD > tp.engine.idle_rpm,
@@ -3654,13 +3367,7 @@ fn braking_never_teleports_crank_past_clutch_capacity() {
             break; // swap/declutch territory — the teleport window is over.
         }
         let omega_pre = st.omega_e;
-        let rep = step(
-            TransmissionMode::Hybrid,
-            &fp,
-            Some(&tp),
-            &mut st,
-            &input(-1.0, 0.0, speeds, [0.0, 0.0]),
-        );
+        let rep = step(&fp, &tp, &mut st, &input(-1.0, 0.0, speeds, [0.0, 0.0]));
         let delta = st.omega_e - omega_pre;
         assert!(
             delta >= -slew_bound,
@@ -3689,13 +3396,7 @@ fn clutch_seam_hysteresis_kills_boundary_chatter() {
     let (fp, tp) = (lab_fp(), lab_tp());
     let mut st = fresh(&tp);
     let at = |st: &mut TransmissionState, v: f32| {
-        step(
-            TransmissionMode::Hybrid,
-            &fp,
-            Some(&tp),
-            st,
-            &input(0.0, 0.0, [v, v], [0.0, 0.0]),
-        );
+        step(&fp, &tp, st, &input(0.0, 0.0, [v, v], [0.0, 0.0]));
         st.clutch_out
     };
     // Park below CLUTCH_OUT_M_SPEED: the clutch goes out.

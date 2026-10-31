@@ -17,21 +17,18 @@
 //! # Control surface
 //!
 //! Every non-driving control lives in one clickable egui [`panel`] (a left `SidePanel` with
-//! collapsing Tune / Model / Layers / Telemetry / Scene sections), compiled ONLY under the `dev_ui`
+//! collapsing Tune / Layers / Telemetry / Scene sections), compiled ONLY under the `dev_ui`
 //! feature — `cargo run --bin track_sandbox --features dev_ui` — so egui never reaches the shipping
 //! client. The KEYBOARD is exactly the direct-manipulation set:
 //! arrow keys drive, `WASD`+mouse+Shift/Ctrl free-fly the camera, `R` cycles the reset spots, `Esc`
-//! pauses/frees the cursor, and the live toggles are `T` (transmission), `L` (log) and
-//! `;`/`'` `n`/`m` (link/tooth counts) — where a panel widget shares the resource (the
-//! transmission selector, the counts stepper) keyboard and panel write it the same way
-//! (write-on-change), so they never fight. The panel gates the driving/camera input systems off while
+//! pauses/frees the cursor, and the live toggles are `L` (log) and `;`/`'` `n`/`m` (link/tooth
+//! counts) — where a panel widget shares the resource (the counts stepper) keyboard and panel write
+//! it the same way (write-on-change), so they never fight. The panel gates the driving/camera input systems off while
 //! an egui widget has focus ([`PanelWantsInput`]).
 //!
 //! Two intent seams exist so panel and keyboard share one commit path with correct change-ticks:
 //! [`RigCounts`] (link/tooth counts; committed by [`apply_rig_counts`]) and [`ResetRequested`]
-//! (consumed by [`reset_rig`]). The transmission selector's state reset is centralised the same way
-//! in [`reset_trans_on_change`], so a flip from the `T` key or the panel refreshes the adapter
-//! identically.
+//! (consumed by [`reset_rig`]).
 
 use avian3d::prelude::{
     AngularInertia, AngularVelocity, Collider, CollisionLayers, Forces, LayerMask, LinearVelocity,
@@ -137,12 +134,9 @@ struct RigSpec {
     /// is compliant, not a hard edge. Well below the static sink, so it sets the behaviour at the
     /// contact boundary, not the ride height.
     engage_depth: f32,
-    /// Governor envelope (`track.powertrain`): governed belt speed (m/s), constant-power engine
-    /// (W/track), low-speed force cap (N), governor gain (N per m/s of speed error).
+    /// Belt envelope (`track.powertrain`): top belt speed (m/s) and low-speed force cap (N).
     max_speed: f32,
-    engine_power: f32,
     engine_force: f32,
-    governor_gain: f32,
     /// Reflected belt + drivetrain inertia (kg).
     belt_inertia: f32,
 }
@@ -355,7 +349,6 @@ pub fn plugin(app: &mut App) {
         .init_resource::<SideDynamics>()
         .init_resource::<BeltGrip>()
         .init_resource::<BeltGripElements>()
-        .init_resource::<TransSwitch>()
         .init_resource::<TransTelemetry>()
         .init_resource::<Paused>()
         .init_resource::<ResetSpot>()
@@ -427,11 +420,6 @@ pub fn plugin(app: &mut App) {
                     draw_rig_gizmos,
                 )
                     .chain(),
-                toggle_trans_mode,
-                // The transmission state reset (a fresh adapter never inherits another's gear),
-                // centralised as a change-reaction so a flip from EITHER the `T` key or the panel
-                // refreshes identically — neither surface has to own the reset.
-                reset_trans_on_change,
                 refresh_envelope,
                 refresh_hard_stops,
                 reset_rig,
@@ -591,68 +579,15 @@ impl BeltGripElements {
     }
 }
 
-/// The active transmission adapter (harness `trans=` key; `T` or the panel's Model selector cycle
-/// live). `None` ONLY on the pre-rig frames: [`build_rig`] seeds it from the SPEC's declared
-/// `transmission.architecture`, so a bare sandbox/harness run sims the same drivetrain the
-/// shipped tank does — the old implicit Governor default silently A/B'd against the wrong
-/// transmission. Every sim consumer runs behind the `RigGeom` gate, which lands in the same
-/// command flush as the seed, so no tick ever executes on `None`.
-#[derive(Resource, Default)]
-struct TransSwitch(Option<crate::track::transmission::TransmissionMode>);
-
 /// The joint transmission's state (gear, shift countdown, steering detent, direction) — the
-/// sandbox analogue of the game's `TankTransmission` component. Reset with the rig and on
-/// every mode flip (a fresh adapter never inherits another's gear).
+/// sandbox analogue of the game's `TankTransmission` component. Reset with the rig.
 #[derive(Resource)]
 struct TransState(crate::track::transmission::TransmissionState);
 
 /// Last tick's transmission report (gear/rpm/detent/power scale) — harness `tr` rows + the
-/// legend. `None` while the governor runs (it has no operating point to report).
+/// legend. `None` before the first tick.
 #[derive(Resource, Default)]
 struct TransTelemetry(Option<crate::track::transmission::TransmissionReport>);
-
-/// `T` (or the panel's Model selector) cycles the transmission adapter live
-/// (governor → hybrid → L600). A pure INTENT write: the state reset that gives the incoming
-/// adapter a fresh gear lives in [`reset_trans_on_change`], so a flip from either surface refreshes
-/// identically. Write-on-change so an idle frame never marks [`TransSwitch`] changed.
-fn toggle_trans_mode(keys: Res<ButtonInput<KeyCode>>, mut switch: ResMut<TransSwitch>) {
-    use crate::track::transmission::TransmissionMode;
-    if !keys.just_pressed(KeyCode::KeyT) {
-        return;
-    }
-    // Behind the `RigGeom` gate the switch is always seeded; the `else` is unreachable belt
-    // and suspenders, not a hidden default.
-    let Some(current) = switch.0 else {
-        return;
-    };
-    switch.0 = Some(match current {
-        TransmissionMode::Governor => TransmissionMode::Hybrid,
-        TransmissionMode::Hybrid => TransmissionMode::FixedRadii,
-        TransmissionMode::FixedRadii => TransmissionMode::Governor,
-    });
-}
-
-/// Reset the transmission state whenever the adapter changes (from the `T` key or the panel): the
-/// incoming adapter starts constructed (gear 1, no shift in flight) instead of inheriting the
-/// previous one's gear. Change-driven so it is the ONE owner of the reset regardless of who moved
-/// the switch. Skips the initial resource insert — [`TransState`] is not up yet on the frame
-/// [`TransSwitch`] is first added (`build_rig` builds a fresh state a flush later).
-fn reset_trans_on_change(
-    switch: Res<TransSwitch>,
-    transmission: Res<RigTransmission>,
-    mut state: ResMut<TransState>,
-) {
-    if switch.is_added() || !switch.is_changed() {
-        return;
-    }
-    let Some(mode) = switch.0 else {
-        return;
-    };
-    *state = TransState(crate::track::transmission::TransmissionState::from_spec(
-        &transmission.0,
-    ));
-    info!("transmission → {}", mode.label());
-}
 
 /// Recalibrate the envelope law whenever its inputs move: a rig rebuild (`;`/`'`, `n`/`m`,
 /// `R`) or a suspension knob (the panel's Tune section). Change-detection driven — the calibration
@@ -1159,7 +1094,6 @@ fn build_rig(
     asset_server: Res<AssetServer>,
     mut suspension: ResMut<RigSuspension>,
     mut grip_elements: ResMut<BeltGripElements>,
-    mut trans_switch: ResMut<TransSwitch>,
 ) {
     let spec = &blueprint.spec;
     let track = &spec.track;
@@ -1221,9 +1155,7 @@ fn build_rig(
         weight_n: spec.mass * derive::G,
         engage_depth: track.suspension.engage,
         max_speed: track.powertrain.max_speed,
-        engine_power: track.powertrain.power,
         engine_force: track.powertrain.force,
-        governor_gain: track.powertrain.governor_gain,
         belt_inertia: track.powertrain.inertia,
     });
 
@@ -1246,29 +1178,12 @@ fn build_rig(
     let transmission = RigTransmission(
         track
             .transmission_params(geom.rest.get(Side::Right)[0].1, geom.plane_x)
-            .expect("the Tiger's transmission block is validated at bake")
-            .expect("the Tiger authors a transmission block"),
+            .expect("the Tiger's transmission block is validated at bake"),
     );
     commands.insert_resource(TransState(
         crate::track::transmission::TransmissionState::from_spec(&transmission.0),
     ));
     commands.insert_resource(transmission);
-    // Seed the adapter switch from the SPEC's declared architecture — the sandbox boots
-    // geared exactly like the shipped tank (the shared `TransmissionArchitecture::mode`
-    // mapping, so game and sandbox can never disagree on what a spec runs). A harness
-    // `trans=` key or a live `T`/panel flip overrides it EXPLICITLY afterwards; before this
-    // seed the switch is `None` and nothing sims (everything gates on `RigGeom`, which lands
-    // in this same command flush).
-    trans_switch.0 = Some(
-        track
-            .powertrain
-            .transmission
-            .as_ref()
-            .expect("the Tiger's transmission block is validated at bake")
-            .architecture
-            .mode(),
-    );
-
     // The pin belt IS the material loop now (see `PinBelt::for_rig`); the element slabs size from it
     // here rather than in a chained system — `contact_side` never resizes at runtime (the fixed-size
     // invariant), so empty slabs would silently skip traction.

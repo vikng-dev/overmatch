@@ -179,11 +179,7 @@ fn tank_transmission(spec: &TankSpec) -> TankTransmission {
         .track
         .transmission_params(1.0, 1.0)
         .expect("TankSpec transmission was validated before tank construction");
-    // `None` ⇔ the spec EXPLICITLY declares `architecture: Governor` (a missing block is a
-    // load-time validation error, so this branch is never a silent fallback).
-    params
-        .as_ref()
-        .map_or_else(TankTransmission::for_governor, TankTransmission::from_spec)
+    TankTransmission::from_spec(&params)
 }
 
 /// Complete fire-gate state in the same name-sorted order used to assign every [`WeaponIndex`].
@@ -945,16 +941,9 @@ fn insert_root_components(
 }
 
 /// The engine's recording and the crank facts its playback speed derives from, lifted out of the
-/// declared transmission. `None` for a vehicle with no declared engine (`architecture: Governor`)
-/// or one whose engine authors no `sound` — either way the tank runs silent.
+/// declared transmission. `None` for an engine that authors no `sound` — the tank runs silent.
 fn engine_sound(spec: &TankSpec) -> Option<EngineSound> {
-    let engine = spec
-        .track
-        .powertrain
-        .transmission
-        .as_ref()?
-        .engine
-        .as_ref()?;
+    let engine = &spec.track.powertrain.transmission.engine;
     let sound = engine.sound.as_ref()?;
     Some(EngineSound {
         clip: sound.clip.clone(),

@@ -123,7 +123,6 @@ pub(super) fn apply_belt_support_field(
     mut grip_elements: ResMut<BeltGripElements>,
     // Tuple params: the function is at Bevy's 16-arg SystemParam ceiling.
     transmission_params: (
-        Res<TransSwitch>,
         Res<RigTransmission>,
         ResMut<TransState>,
         ResMut<TransTelemetry>,
@@ -136,7 +135,7 @@ pub(super) fn apply_belt_support_field(
         ResMut<super::rubble::RubbleTouches>,
     ),
 ) {
-    let (trans, transmission, mut trans_state, mut telemetry) = transmission_params;
+    let (transmission, mut trans_state, mut telemetry) = transmission_params;
     let (geom, rig_spec, envelope) = rig;
     let Ok((hull_pos, hull_rot, mut forces)) = hull.single_mut() else {
         return;
@@ -182,7 +181,6 @@ pub(super) fn apply_belt_support_field(
             count: pin_belt.count,
             plane_x: side.plane_x(geom.plane_x),
             columns: geom.grip_column_offsets(side),
-            command: side_commands[side.index()],
             // The envelope's per-position reach profile: full droop over the road-wheel span,
             // tapering to zero at the unsprung sprocket/idler centres.
             travel: crate::track::forces::TravelField {
@@ -209,17 +207,10 @@ pub(super) fn apply_belt_support_field(
         live[side.index()] = ok;
     }
 
-    // Phase 2 — ONE joint drivetrain solve. The governor adapter runs the direct belt math
-    // verbatim; the regenerative adapters consume the Tiger's declared L600 tables. The
-    // switch is seeded from the SPEC by `build_rig` (same command flush as the `RigGeom`
-    // gate this system runs behind), so a `None` here is a scheduling bug, not a default.
-    let mode = trans
-        .0
-        .expect("build_rig seeds TransSwitch from the spec before the sim runs");
+    // Phase 2 — ONE joint drivetrain solve on the vehicle's declared tables.
     let tr = transmission::step(
-        mode,
         &params,
-        Some(&transmission.0),
+        &transmission.0,
         &mut trans_state.0,
         &TransmissionInput {
             throttle: shaped.0.throttle,
@@ -230,10 +221,7 @@ pub(super) fn apply_belt_support_field(
             dt,
         },
     );
-    telemetry.0 = match mode {
-        transmission::TransmissionMode::Governor => None,
-        _ => Some(tr),
-    };
+    telemetry.0 = Some(tr);
 
     // Phase 3 — apply forces in the same per-side report order as ever, commit the state. A
     // dynamic piece under a contact takes its clamped impulse in the same tick.
@@ -397,9 +385,7 @@ fn force_params(geom: &RigGeom, rig: &RigSpec, envelope: &EnvelopeLaw) -> ForceP
         mu: MU,
         slip_saturation: SLIP_SATURATION,
         max_speed: rig.max_speed,
-        engine_power: rig.engine_power,
         engine_force: rig.engine_force,
-        governor_gain: rig.governor_gain,
         inertia: rig.belt_inertia,
         // The declared park-target stiffness (forces.rs provenance doc): it gates the traction
         // regime and the belt-hold; the shear law derives its own stiffness from μ·load/K.
@@ -772,9 +758,7 @@ mod tests {
             mu: MU,
             slip_saturation: SLIP_SATURATION,
             max_speed: 1.0,
-            engine_power: 0.0,
             engine_force: 0.0,
-            governor_gain: 0.0,
             inertia: 1.0,
             grip_stiffness: 0.0,
         };
@@ -790,7 +774,6 @@ mod tests {
                 count: geom.link_count,
                 plane_x: side.plane_x(geom.plane_x),
                 columns: geom.grip_column_offsets(side),
-                command: 0.0,
                 travel: crate::track::forces::TravelField {
                     knots: law.knots.get(side),
                 },

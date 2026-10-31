@@ -183,10 +183,8 @@ seeded with the exact front tangent point, while the view keeps the raw walk spa
 conform resample. One walk, two consumers, no second implementation to drift.
 
 **The sim has ONE force path.** `apply_track_forces` runs `contact_side` per side and then
-`transmission::step` once, for every architecture — the Governor arm goes through the same joint
-form as a declared gearbox, with `(mode, params)` normalized at the call site. There is no
-alternate governor tail and no branch to pick between them. (`forces::step_side` survives only as
-the `contact_side` + governor convenience wrapper that the forces unit tests drive.)
+`transmission::step` once, on the vehicle's declared tables. There is one drivetrain law and no
+branch to pick between laws.
 
 **Suspension travel is not optional.** `SideInput::travel` is a required per-position
 `TravelField` — the contact envelope's local reach, built by `envelope::wheel_travel_knots` (0 at

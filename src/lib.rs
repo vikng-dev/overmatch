@@ -442,67 +442,13 @@ pub(crate) fn push_capped_entity(
 }
 
 #[cfg(test)]
-mod offline_feel_tests {
+mod drive_row_tests {
     use super::*;
-    use track::sim::{TankTransmission, TransmissionFeelTest};
-    use track::transmission::{DriveReadout, TransmissionMode, TransmissionState};
-
-    /// The offline `T` dial: each press advances governor → hybrid → L600 → governor and
-    /// resets every tank's transmission state to a freshly-constructed one (the mode flip
-    /// must never inherit another adapter's gear/shift leftovers). This is the scripted
-    /// stand-in for the interactive cycle proof — macOS blocks synthetic keystrokes into the
-    /// windowed launch, so the cycle path is pinned here instead.
-    #[test]
-    fn t_key_cycles_transmission_mode_and_resets_state() {
-        let mut app = App::new();
-        app.insert_resource(TransmissionFeelTest(TransmissionMode::FixedRadii));
-        app.init_resource::<ButtonInput<KeyCode>>();
-        app.add_systems(Update, cycle_transmission_feel);
-        let tank = app
-            .world_mut()
-            .spawn(TankTransmission(TransmissionState {
-                gear: 5,
-                shift_ticks: 3,
-                steer_step: 2,
-                reverse: true,
-                park: true,
-                last_shift_dir: 1,
-                dwell_ticks: 7,
-                omega_e: 250.0,
-                clutch_out: true,
-                demand_n: 42_000.0,
-                demand_initialized: true,
-                grade_confirm_ticks: 9,
-                band_confirm_ticks: 4,
-                grade_target: 3,
-                scheduler: track::transmission::SchedulerState::GradeShift { from: 5, to: 3 },
-                hill_hold: true,
-                hold_reengage_ticks: 11,
-            }))
-            .id();
-
-        let press = |app: &mut App| {
-            let mut input = app.world_mut().resource_mut::<ButtonInput<KeyCode>>();
-            input.clear();
-            input.release(KeyCode::KeyT);
-            input.clear();
-            input.press(KeyCode::KeyT);
-            app.update();
-            app.world().resource::<TransmissionFeelTest>().0
-        };
-        assert_eq!(press(&mut app), TransmissionMode::Governor);
-        assert_eq!(
-            app.world().get::<TankTransmission>(tank).unwrap().0,
-            TransmissionState::for_governor(),
-            "a mode flip must reset the transmission state"
-        );
-        assert_eq!(press(&mut app), TransmissionMode::Hybrid);
-        assert_eq!(press(&mut app), TransmissionMode::FixedRadii);
-    }
+    use track::transmission::{DriveReadout, TransmissionState};
 
     /// One formatter owns the normal row in both client roots. `P` and `*` are independent
-    /// park/hill-hold markers; cruise/reverse leave both markers off; Governor hides the
-    /// inapplicable gear/rpm fields without hiding speed, and speed is horizontal ground speed.
+    /// park/hill-hold markers; cruise/reverse leave both markers off; with no readout yet the
+    /// row hides the gear/rpm fields without hiding speed, and speed is horizontal ground speed.
     #[test]
     fn standard_drive_row_format_is_shared_and_compact() {
         // The row's fields and markers, with the column padding stripped.
@@ -514,7 +460,7 @@ mod offline_feel_tests {
             gear: 1,
             park: true,
             hill_hold: true,
-            ..TransmissionState::for_governor()
+            ..TransmissionState::stopped()
         };
         let mut operating = DriveReadout {
             rpm: 2_600.0,
@@ -573,7 +519,7 @@ mod offline_feel_tests {
         assert_eq!(
             fields(drive_hud::standard_drive_row(None, speed_mps)),
             ["Speed", "45", "km/h"],
-            "Governor/spec-less vehicles retain speed and omit inapplicable fields"
+            "with no readout the row retains speed and omits the gear and rpm fields"
         );
         assert_eq!(
             drive_hud::horizontal_ground_speed(Vec3::new(3.0, 99.0, 4.0)),
@@ -1094,18 +1040,6 @@ pub fn run_offline() {
         dev_capture::offline_shot_plugin,
         dev_capture::offline_wall_plugin,
     ));
-    // The offline transmission feel test (phase 2.5): an EXPLICIT override of the spec's
-    // declared architecture (which is authoritative and mandatory since REV 14), seeded to
-    // the Tiger's own L600 so a bare offline boot matches the shipped spec. `T` cycles
-    // governor → hybrid → L600 live; the shared F3 drive panel names the selected adapter
-    // while the diagnostic view is open.
-    app.insert_resource(track::sim::TransmissionFeelTest(
-        track::transmission::TransmissionMode::FixedRadii,
-    ));
-    app.add_systems(
-        Update,
-        cycle_transmission_feel.before(drive_hud::DriveHudUpdate),
-    );
     // The scripted-trigger capture hook (`SPIKE_AUTO_FIRE`), mounted HERE and nowhere else: this
     // offline root has no netcode at all — no lightyear plugins, no connection entity — so the
     // commands it writes cannot leave the process. Mounting it inside the shared device-gather
@@ -1133,39 +1067,4 @@ pub fn run_offline() {
     #[cfg(feature = "dev_ui")]
     app.add_plugins(track_prints::tuning::offline_plugin);
     app.run();
-}
-
-/// `T` cycles the offline transmission mode (governor → hybrid → L600). Every tank's
-/// [`track::sim::TankTransmission`] resets so the incoming adapter starts from a constructed
-/// state (gear 1, no shift in flight) instead of another mode's leftovers. The mode is logged
-/// here; the shared F3 drive panel renders the active mode.
-fn cycle_transmission_feel(
-    keys: Option<Res<ButtonInput<KeyCode>>>,
-    feel: Option<ResMut<track::sim::TransmissionFeelTest>>,
-    gear: Option<Res<track::sim::TrackGear>>,
-    mut states: Query<&mut track::sim::TankTransmission>,
-) {
-    use track::transmission::TransmissionMode;
-    let Some(mut feel) = feel else {
-        return;
-    };
-    let cycled = keys.is_some_and(|keys| keys.just_pressed(KeyCode::KeyT));
-    if cycled {
-        feel.0 = match feel.0 {
-            TransmissionMode::Governor => TransmissionMode::Hybrid,
-            TransmissionMode::Hybrid => TransmissionMode::FixedRadii,
-            TransmissionMode::FixedRadii => TransmissionMode::Governor,
-        };
-        let fresh = gear
-            .as_deref()
-            .and_then(track::sim::TrackGear::trans)
-            .map_or_else(
-                track::sim::TankTransmission::for_governor,
-                track::sim::TankTransmission::from_spec,
-            );
-        for mut state in &mut states {
-            *state = fresh;
-        }
-        info!("offline transmission mode → {}", feel.0.label());
-    }
 }

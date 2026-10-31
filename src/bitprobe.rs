@@ -375,14 +375,6 @@ impl StartupBuilder {
         });
     }
 
-    pub(crate) fn bool(&mut self, name: &str, value: bool) {
-        self.entries.push(StartupEntry {
-            name: name.to_string(),
-            kind: "bool",
-            bits: u32::from(value),
-        });
-    }
-
     pub(crate) fn f64(&mut self, name: &str, value: f64) {
         let bits = value.to_bits();
         self.u32(&format!("{name}.lo"), bits as u32);
@@ -574,12 +566,7 @@ fn startup_dump(app: &App, tank: Entity) -> StartupBuilder {
         "spec.track.powertrain.max_speed",
         track.powertrain.max_speed,
     );
-    out.f32("spec.track.powertrain.power", track.powertrain.power);
     out.f32("spec.track.powertrain.force", track.powertrain.force);
-    out.f32(
-        "spec.track.powertrain.governor_gain",
-        track.powertrain.governor_gain,
-    );
     out.f32("spec.track.powertrain.inertia", track.powertrain.inertia);
     out.f32("spec.track.suspension.engage", track.suspension.engage);
 
@@ -1017,7 +1004,7 @@ mod tests {
                 TrackDrive::default(),
                 TrackGrip::default(),
                 TrackGripEffect::default(),
-                TankTransmission::for_governor(),
+                TankTransmission(crate::track::transmission::TransmissionState::stopped()),
             ))
             .id();
         let mut capture = BitprobeCapture {

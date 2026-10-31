@@ -795,7 +795,6 @@ mod tests {
         oracle: &O,
         affine: Affine3A,
         state: SideState,
-        command: f32,
         vel: Vec3,
         elements: &mut GripElements,
     ) -> SideReport {
@@ -811,7 +810,6 @@ mod tests {
             count: 25,
             plane_x: 0.0,
             columns: [(-0.1, 0.25), (0.0, 0.5), (0.1, 0.25)],
-            command,
             travel: TravelField { knots: &[] },
         };
         let params = ForceParams {
@@ -824,9 +822,7 @@ mod tests {
             mu: 0.9,
             slip_saturation: 0.5,
             max_speed: 10.0,
-            engine_power: 1.0e5,
             engine_force: 1.0e5,
-            governor_gain: 1.0e4,
             inertia: 500.0,
             grip_stiffness: grip_stiffness(0.9, 30_000.0 * 9.81),
         };
@@ -854,7 +850,6 @@ mod tests {
                 phase: 0.0,
                 grip: Vec2::ZERO,
             },
-            0.3,
             Vec3::new(0.0, -0.01, 0.3),
             &mut GripElements::for_links(25),
         )
@@ -885,7 +880,6 @@ mod tests {
                         },
                         Affine3A::from_translation(Vec3::new(0.0, h, 0.0)),
                         SideState::default(),
-                        0.0,
                         Vec3::new(0.0, vy, 0.0),
                         &mut elements,
                     );
@@ -987,13 +981,12 @@ mod tests {
                         },
                         lifted,
                         state,
-                        0.3,
                         hull_vel,
                         elements,
                     )
                 });
                 let on_field = pass(&|elements| {
-                    pad_pass(&field, Affine3A::IDENTITY, state, 0.3, hull_vel, elements)
+                    pad_pass(&field, Affine3A::IDENTITY, state, hull_vel, elements)
                 });
                 (
                     on_piece.contacts.iter().map(|c| c.slip).collect::<Vec<_>>(),

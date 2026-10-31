@@ -48,8 +48,7 @@ use super::route::build_route;
 use super::side::Side;
 use super::terrain::TrackField;
 use super::transmission::{
-    self, TransmissionInput, TransmissionMode, TransmissionParams, TransmissionReport,
-    TransmissionState,
+    self, TransmissionInput, TransmissionParams, TransmissionReport, TransmissionState,
 };
 
 // Surface friction policy (ADR-0007 bucket 3: a property of the track–ground PAIR, destined
@@ -101,14 +100,6 @@ pub struct DriveSignal {
     pub steer: f32,
 }
 
-/// The OFFLINE transmission feel-test override: which drivetrain adapter [`apply_track_forces`]
-/// runs instead of the vehicle's declared architecture. Inserted ONLY by the `--offline`
-/// composition; MP has no dial and follows the spec. Unlike the element gate this one is live (the
-/// offline `T` key cycles governor → hybrid → L600): [`TankTransmission`] resets on every flip, so
-/// a mid-session mode change cannot poison hidden state the way an element-regime flip would.
-#[derive(Resource)]
-pub struct TransmissionFeelTest(pub TransmissionMode);
-
 /// The joint transmission's path-dependent state (gear/window/detent/direction/crank plus the
 /// stage-C demand/filter/target/hill-hold scheduler state). Server-authoritative, advanced only
 /// where the body is dynamic through the spec-selected branch of [`apply_track_forces`], and
@@ -122,10 +113,6 @@ pub struct TankTransmission(pub TransmissionState);
 impl TankTransmission {
     pub fn from_spec(tp: &TransmissionParams) -> Self {
         Self(TransmissionState::from_spec(tp))
-    }
-
-    pub(crate) fn for_governor() -> Self {
-        Self(TransmissionState::for_governor())
     }
 }
 
@@ -271,26 +258,15 @@ pub struct TrackGear {
     /// per-side because the shoe is not centred on its pins (~17 mm outboard on the Tiger).
     columns: [[(f32, f32); 3]; 2],
     params: ForceParams,
-    /// The declared joint transmission tables. `None` ⇔ the spec explicitly selects
-    /// `architecture: Governor` (the tableless adapter) — never "the block was absent"
-    /// (validation rejects that at load).
-    trans: Option<TransmissionParams>,
-    /// Spec-selected adapter — the RON's explicit `transmission.architecture`, mapped through
-    /// [`crate::spec::TransmissionArchitecture::mode`]. Always an explicit authored choice.
-    mode: TransmissionMode,
+    /// The declared joint transmission tables, derived against the measured geometry.
+    trans: TransmissionParams,
 }
 
 impl TrackGear {
-    /// The declared joint transmission params, if the spec authored one. Read-only accessor for
-    /// the shared drive HUD; the field stays private so only the drive step and HUD consume it.
-    pub fn trans(&self) -> Option<&TransmissionParams> {
-        self.trans.as_ref()
-    }
-
-    /// Spec-selected adapter for the shared client HUD. Read-only view access; the drive step remains
-    /// the sole owner of how this choice affects simulation.
-    pub(crate) fn mode(&self) -> TransmissionMode {
-        self.mode
+    /// The declared joint transmission params. Read-only accessor for the shared drive HUD; the
+    /// field stays private so only the drive step and HUD consume it.
+    pub fn trans(&self) -> &TransmissionParams {
+        &self.trans
     }
 
     /// The chain-clamped droop (m): the maximum wheel-travel knot — how far below its rest line a
@@ -314,14 +290,6 @@ impl TrackGear {
     pub(crate) fn bitprobe_startup(&self, out: &mut crate::bitprobe::StartupBuilder) {
         out.u32("track_gear.count", self.count as u32);
         out.f32("track_gear.plane_x", self.plane_x);
-        out.u32(
-            "track_gear.mode",
-            match self.mode {
-                TransmissionMode::Governor => 0,
-                TransmissionMode::Hybrid => 1,
-                TransmissionMode::FixedRadii => 2,
-            },
-        );
         for (index, point) in self.loop_pts.iter().enumerate() {
             out.vec2(&format!("track_gear.route[{index}]"), *point);
         }
@@ -345,17 +313,11 @@ impl TrackGear {
         out.f32("force.mu", p.mu);
         out.f32("force.slip_saturation", p.slip_saturation);
         out.f32("force.max_speed", p.max_speed);
-        out.f32("force.engine_power", p.engine_power);
         out.f32("force.engine_force", p.engine_force);
-        out.f32("force.governor_gain", p.governor_gain);
         out.f32("force.inertia", p.inertia);
         out.f32("force.grip_stiffness", p.grip_stiffness);
 
-        let Some(tp) = self.trans.as_ref() else {
-            out.bool("transmission.present", false);
-            return;
-        };
-        out.bool("transmission.present", true);
+        let tp = &self.trans;
         out.f32("transmission.engine.idle_rpm", tp.engine.idle_rpm);
         out.f32("transmission.engine.governed_rpm", tp.engine.governed_rpm);
         for (index, (rpm, torque)) in tp.engine.torque_nm.iter().copied().enumerate() {
@@ -405,8 +367,8 @@ impl TrackGear {
     /// Test-only variant fixture seam: headless gates may vary a declared transmission capability
     /// without rebuilding the Tiger asset/spec. Production callers get read-only params.
     #[cfg(test)]
-    pub(crate) fn trans_mut(&mut self) -> Option<&mut TransmissionParams> {
-        self.trans.as_mut()
+    pub(crate) fn trans_mut(&mut self) -> &mut TransmissionParams {
+        &mut self.trans
     }
 }
 
@@ -511,37 +473,21 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
         sus.damping_ratio,
     );
 
-    // The spec's EXPLICIT architecture selection. There is no fallback here any more: a spec
-    // without a transmission block fails validation at load (spec.rs), so Governor runs only
-    // when a sheet NAMES it (`architecture: Governor`) — never because a block was forgotten.
-    let declared = spec
-        .powertrain
-        .transmission
-        .as_ref()
-        .expect("TankSpec transmission was validated before TrackGear construction");
     // The declared transmission, derived from the authored tables against the MEASURED sprocket
     // radius and half-tread (tiger-transmission-data.md rule: speeds are the anchors, reductions
-    // derive, so the ladder survives the 19-vs-20-tooth discrepancy). Governor is tableless
-    // by contract (params() rejects a Governor block carrying tables).
-    match declared.gearbox.as_ref() {
-        Some(gearbox) => info!(
-            "declared transmission: {:?}, {}F/{}R",
-            declared.architecture,
-            gearbox.forward_speeds_kmh.len(),
-            gearbox.reverse_speeds_kmh.len()
-        ),
-        None => info!(
-            "declared transmission: {:?} (tableless)",
-            declared.architecture
-        ),
-    }
+    // derive, so the ladder survives the 19-vs-20-tooth discrepancy).
+    let gearbox = &spec.powertrain.transmission.gearbox;
+    info!(
+        "declared transmission: {}F/{}R",
+        gearbox.forward_speeds_kmh.len(),
+        gearbox.reverse_speeds_kmh.len()
+    );
     // Measured geometry: the sprocket pin-line pitch radius is the rest running gear's first
     // circle (chord-exact `derive::sprocket_pitch_radius(geom.pitch, teeth)` by construction), and
     // the half-tread is `geom.plane_x` — the same measured values the belt/envelope ride.
     let trans = spec
         .transmission_params(circles[0].1, geom.plane_x)
         .expect("TankSpec transmission was validated before TrackGear construction");
-    let mode = declared.architecture.mode();
 
     commands.insert_resource(TrackGear {
         loop_pts,
@@ -550,7 +496,6 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
         travel_knots,
         columns,
         trans,
-        mode,
         params: ForceParams {
             // The contact-envelope suspension: measured face datum, free length at the
             // droop envelope, spring/damper calibrated above — the authored rest pose is
@@ -565,9 +510,7 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
             mu: MU,
             slip_saturation: SLIP_SATURATION,
             max_speed: spec.powertrain.max_speed,
-            engine_power: spec.powertrain.power,
             engine_force: spec.powertrain.force,
-            governor_gain: spec.powertrain.governor_gain,
             inertia: spec.powertrain.inertia,
             // Derived from authored mass via the declared park target (forces.rs) — not a
             // spec field: the target is model policy, the vehicle datum is its weight.
@@ -599,14 +542,9 @@ pub(crate) struct BeltRig<'a> {
 /// Returns the per-side reports (force applications in emission order — the caller applies or
 /// integrates them, left then right, verbatim) and the transmission report. Belt state
 /// (`drive.sides`, `grip.sides`) is committed in here; forces/telemetry stay with the caller.
-#[expect(
-    clippy::too_many_arguments,
-    reason = "one tank's drivetrain tick: gear, oracle, mode, target, pose, clock, velocity field and rig"
-)]
 pub(crate) fn belt_tick<O: TerrainOracle>(
     gear: &TrackGear,
     oracle: &O,
-    mode: TransmissionMode,
     target: DriveAxes,
     affine: Affine3A,
     dt: f32,
@@ -625,25 +563,6 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
     rig.signal.steer = shaped.steer;
     let side_commands = shaped.side_commands();
 
-    // THE joint drivetrain form — every architecture, one path. An explicit Governor selection
-    // runs through [`transmission::step`] like the others: its Governor arm is the exact
-    // per-side [`super::forces::governor_belt`] law, bit-identical to the `step_side` tail this
-    // module no longer calls (pinned by `transmission::tests::governor_adapter_matches_legacy_belt`),
-    // and it never touches the transmission state. A regenerative override on a vehicle whose
-    // spec declares `architecture: Governor` has no tables to run — say so instead of silently
-    // pretending (dev-time loudness; the spec path can never hit this arm because `mode` and
-    // `trans` come from the same validated block).
-    let (mode, tp) = match (mode, gear.trans.as_ref()) {
-        (TransmissionMode::Governor, _) => (TransmissionMode::Governor, None),
-        (m, Some(tp)) => (m, Some(tp)),
-        (m, None) => {
-            bevy::log::warn_once!(
-                "transmission override {m:?} needs declared tables, but this vehicle's \
-                 spec selects architecture: Governor (tableless) — running the governor"
-            );
-            (TransmissionMode::Governor, None)
-        }
-    };
     // Transmission-design §2 scheduling: evaluate BOTH contact patches at their pre-tick belt
     // speeds, solve the joint transmission once, integrate both speeds, advect both phases.
     // Within a tick force application never feeds back into `vel_at`, so contact evaluation
@@ -659,7 +578,6 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
             count: gear.count,
             plane_x: side.plane_x(gear.plane_x),
             columns: gear.columns[si],
-            command: side_commands[si],
             travel: super::forces::TravelField {
                 knots: &gear.travel_knots,
             },
@@ -684,9 +602,8 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
         live[si] = ok;
     }
     let tr = transmission::step(
-        mode,
         &gear.params,
-        tp,
+        &gear.trans,
         rig.transmission,
         &TransmissionInput {
             throttle: rig.signal.throttle,
@@ -703,7 +620,7 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
             rig.drive.sides[si] = TrackDriveSide {
                 speed: tr.next_speeds[si],
                 // Phase advects at the PRE-update speed — `contact_side` evaluated the
-                // stations there, and the retired governor tail advected the same way.
+                // stations there.
                 phase: rig.drive.sides[si].phase + f64::from(pre_speed * dt),
             };
         }
@@ -719,16 +636,12 @@ pub(crate) fn belt_tick<O: TerrainOracle>(
 /// thread). Every tank's result is the same bits on any thread count and in any order because a
 /// tank's tick reads only the shared, immutable gear, terrain field and volume facets and writes
 /// only that tank's components. The closure is `Fn + Sync`, so a shared write compiles only through
-/// interior mutability, and the drive path holds two: `warn_once!`'s flag, which no result reads,
-/// and the measurement-only bitprobe capture, behind a lock, whose fixture holds exactly one tank.
+/// interior mutability, and the drive path holds one: the measurement-only bitprobe capture, behind
+/// a lock, whose fixture holds exactly one tank.
 fn apply_track_forces(
     time: Res<Time>,
     field: Res<TrackField>,
     gear: Option<Res<TrackGear>>,
-    // Offline-only adapter override. MP leaves it absent and follows `TrackGear::mode` — the
-    // spec's EXPLICIT `transmission.architecture` (a missing block is a load-time validation
-    // error now, not a silent Governor).
-    trans_feel: Option<Res<TransmissionFeelTest>>,
     #[cfg(feature = "bitprobe")] mut bitprobe: Option<ResMut<BitprobeCapture>>,
     volumes: Query<VolumeFacets>,
     mut tanks: Query<
@@ -763,7 +676,6 @@ fn apply_track_forces(
     let Some(oracle) = field.field.as_ref() else {
         return;
     };
-    let mode = trans_feel.as_ref().map(|r| r.0).unwrap_or(gear.mode);
     let dt = time.delta_secs();
     #[cfg(feature = "bitprobe")]
     let bitprobe = bitprobe.as_deref_mut().map(std::sync::Mutex::new);
@@ -822,8 +734,7 @@ fn apply_track_forces(
             let mut effect = TrackGripEffect::default();
 
             // The shared per-tank drivetrain tick — contact evaluation, joint transmission, belt
-            // commit — with this adapter supplying Avian's live velocity field. MP runs the
-            // declared architecture; the offline-only [`TransmissionFeelTest`] can override it.
+            // commit — with this adapter supplying Avian's live velocity field.
             #[cfg_attr(
                 not(feature = "bitprobe"),
                 expect(
@@ -835,7 +746,6 @@ fn apply_track_forces(
             let (mut reports, tr) = belt_tick(
                 gear,
                 oracle,
-                mode,
                 target,
                 affine,
                 dt,

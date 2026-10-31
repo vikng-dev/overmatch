@@ -120,9 +120,9 @@ h = H(|target|/vs)·H(|belt|/vs) (smoothstep, the existing 0.4 m/s scale):
 `ḃ = (engine − (1−h)·R)/I` — at zero command + zero belt speed the locked drivetrain bears
 the ground reaction instead of being back-driven; during motion h→0, today's dynamics
 unchanged. Legitimate force balance: the belt's 1-D coordinate is fully known to the belt
-integrator, which is `transmission::step` — the Governor arm calls `forces::governor_belt` (this
-term, verbatim), and the declared-gearbox arm builds the same hold from `forces::hold_blend`. A
-future neutral/clutch or brake-damage mechanic weakens this term explicitly.
+integrator, which is `transmission::step` — it builds the hold from `forces::hold_blend` as the
+brake-engagement envelope. A future neutral/clutch or brake-damage mechanic weakens this term
+explicitly.
 
 ### Constants (declared, with provenance)
 

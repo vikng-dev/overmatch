@@ -67,11 +67,35 @@ TankSpec(
         idler: (nodes: (left: "Idler_L", right: "Idler_R")),
         powertrain: (
             max_speed: 10.0,
-            power: 100000.0,
             force: 50000.0,
-            governor_gain: 5000.0,
             inertia: 100.0,
-            transmission: (architecture: Governor),
+            transmission: (
+                engine: (
+                    idle_rpm: 600.0,
+                    governed_rpm: 2000.0,
+                    rated_rpm: 2400.0,
+                    cylinders: 1,
+                    torque_curve: [(700.0, 1000.0), (2000.0, 1200.0), (2400.0, 1100.0)],
+                    drag_fraction: 0.25,
+                    inertia_kgm2: 3.0,
+                    clutch_capacity_nm: 1600.0,
+                ),
+                gearbox: (
+                    forward_speeds_kmh: [5.0, 8.0],
+                    reverse_speeds_kmh: [5.0],
+                    shift_up_rpm: 2000.0,
+                    shift_down_rpm: 900.0,
+                    shift_secs: 0.3,
+                    shift_addressing: Direct,
+                ),
+                steering: (
+                    radii: [(4.0, 12.0), (6.0, 18.0)],
+                    capacity: 1.0,
+                    recirculation: 0.9,
+                ),
+                brake_force: 1.0,
+                brake_static_factor: 1.5,
+            ),
         ),
         suspension: (
             ride_frequency: 1.2,

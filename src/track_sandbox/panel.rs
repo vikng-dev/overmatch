@@ -12,12 +12,10 @@
 //! bug we already fixed once. So this panel NEVER hands egui `&mut resource.field`: it copies each
 //! mutable resource into a local, draws every widget against the local, and writes the resource back
 //! only when the local actually differs (the write-backs are guarded by `!=`). Every value this panel
-//! writes — [`RigSuspension`], [`RigCounts`], [`TransSwitch`], [`VizLayers`], [`SuspensionViz`] — is
+//! writes — [`RigSuspension`], [`RigCounts`], [`VizLayers`], [`SuspensionViz`] — is
 //! `Copy + PartialEq` for exactly that pattern. The heavy commit path stays OUT of the panel: a count
 //! edit writes the [`RigCounts`] intent (committed by `apply_rig_counts`), so the panel holds no
 //! `ResMut<RigGeom>` / `ResMut<PinBelt>` / belt state and cannot itself trigger a per-frame rebuild.
-//! A transmission flip writes [`TransSwitch`]; the adapter reset is `reset_trans_on_change`, exactly
-//! as the `T` key drives it.
 //!
 //! The panel runs in `EguiPrimaryContextPass` (mandatory for the multi-pass primary context in
 //! bevy_egui 0.41) and publishes egui's focus state into [`PanelWantsInput`] so `mod.rs` gates the
@@ -34,11 +32,10 @@ use super::rig_geom::{DroopLimiter, RigGeom};
 use super::suspension_viz::SuspensionViz;
 use super::{
     BeltContacts, BeltSpeed, Hull, MeshState, PanelWantsInput, ResetRequested, RigCounts, RigSpec,
-    RigSuspension, TransSwitch, VizLayers, VolumeState, clamp_link_count,
+    RigSuspension, VizLayers, VolumeState, clamp_link_count,
 };
 use crate::bake::TankBlueprint;
 use crate::track::side::Side;
-use crate::track::transmission::TransmissionMode;
 
 pub(super) fn plugin(app: &mut App) {
     app.add_plugins(EguiPlugin::default())
@@ -52,7 +49,6 @@ pub(super) fn plugin(app: &mut App) {
 struct Write<'w> {
     knobs: ResMut<'w, RigSuspension>,
     counts: ResMut<'w, RigCounts>,
-    trans: ResMut<'w, TransSwitch>,
     layers: ResMut<'w, VizLayers>,
     viz: ResMut<'w, SuspensionViz>,
     reset: ResMut<'w, ResetRequested>,
@@ -114,7 +110,6 @@ fn panel(
     // Local working copies — every widget edits THESE, never the resources (change-tick discipline).
     let mut knobs = w.knobs.0;
     let mut counts = *w.counts;
-    let mut trans = w.trans.0;
     let mut layers = *w.layers;
     let mut viz = *w.viz;
     let mut do_reset = false;
@@ -131,29 +126,6 @@ fn panel(
                     .default_open(true)
                     .show(ui, |ui| {
                         tune_section(ui, &r, &mut knobs, &mut counts, &mut reset_to_ron)
-                    });
-
-                egui::CollapsingHeader::new("Model")
-                    .default_open(true)
-                    .show(ui, |ui| {
-                        // The drivetrain adapter — the live selector the `T` key also cycles. The
-                        // support law (calibrated contact envelope) and grip law (per-element shear)
-                        // are the settled model, not switchable. `TransSwitch` holds an Option:
-                        // `None` only on the pre-rig frames (no radio lit), then `build_rig` seeds
-                        // it from the spec's declared architecture — a click is always an EXPLICIT
-                        // override of that seed.
-                        ui.label("transmission");
-                        ui.radio_value(&mut trans, Some(TransmissionMode::Governor), "Governor");
-                        ui.radio_value(
-                            &mut trans,
-                            Some(TransmissionMode::Hybrid),
-                            "Hybrid (continuous regenerative)",
-                        );
-                        ui.radio_value(
-                            &mut trans,
-                            Some(TransmissionMode::FixedRadii),
-                            "L600 (geared steering)",
-                        );
                     });
 
                 egui::CollapsingHeader::new("Layers")
@@ -185,9 +157,6 @@ fn panel(
     }
     if counts != *w.counts {
         *w.counts = counts;
-    }
-    if trans != w.trans.0 {
-        w.trans.0 = trans;
     }
     if layers != *w.layers {
         *w.layers = layers;

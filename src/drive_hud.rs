@@ -9,12 +9,8 @@ use bevy::prelude::*;
 
 use crate::flow::{Flow, FlowScoped, InMatchSystems, MatchResourceExt};
 use crate::tank::Controlled;
-use crate::track::sim::{
-    DriveSignal, TankTransmission, TrackDrive, TrackGear, TransmissionFeelTest,
-};
-use crate::track::transmission::{
-    DriveReadout, SchedulerState, TransmissionMode, TransmissionParams, TransmissionState, readout,
-};
+use crate::track::sim::{DriveSignal, TankTransmission, TrackDrive, TrackGear};
+use crate::track::transmission::{DriveReadout, SchedulerState, TransmissionState, readout};
 use crate::ui_font::{UiFonts, set_text};
 
 /// The normal-play drive row. One instance is mounted by this plugin in both client roots.
@@ -29,17 +25,13 @@ struct DriveDebugHudText;
 #[derive(Resource, Default)]
 struct DriveDebugVisible(bool);
 
-/// The HUD refresh set lets the offline-only `T` mode cycle commit before this view reads it.
-#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub(crate) struct DriveHudUpdate;
-
 pub(crate) fn plugin(app: &mut App) {
     crate::flow::require(app, "drive_hud");
     app.init_match_resource::<DriveDebugVisible>()
         .add_systems(OnEnter(Flow::InMatch), spawn_drive_hud)
         .add_systems(
             Update,
-            (toggle_drive_debug, update_drive_hud.in_set(DriveHudUpdate))
+            (toggle_drive_debug, update_drive_hud)
                 .chain()
                 .in_set(InMatchSystems),
         );
@@ -103,8 +95,8 @@ fn toggle_drive_debug(keys: Res<ButtonInput<KeyCode>>, mut visible: ResMut<Drive
 /// standard-row marker; its scheduler detail belongs to the F3 panel.
 ///
 /// Gear occupies four characters (the Tiger's `F1P*` maximum), rpm stays at one decimal in thousands,
-/// and speed is an integer km/h in a three-character field. A Governor/spec-less vehicle passes no
-/// readout and therefore renders only speed — no placeholder noise.
+/// and speed is an integer km/h in a three-character field. Before the track gear is built there is
+/// no readout, and the row renders only speed — no placeholder noise.
 pub(crate) fn standard_drive_row(
     transmission: Option<(&TransmissionState, &DriveReadout)>,
     ground_speed_mps: f32,
@@ -146,14 +138,12 @@ pub(crate) fn scheduler_hud_line(st: &TransmissionState) -> String {
 }
 
 /// Fixed-radius steering visibility from the live detent state and the source radius table retained
-/// by [`TransmissionParams`]. Hybrid stays blank: its continuous command target is internal to the
-/// solve, while this line promises an authored gear/detent radius.
+/// by [`TransmissionParams`](crate::track::transmission::TransmissionParams).
 pub(crate) fn steering_hud_line(
-    mode: TransmissionMode,
     st: &TransmissionState,
     authored_radii: Option<&[(f32, f32)]>,
 ) -> String {
-    if mode != TransmissionMode::FixedRadii || st.steer_step == 0 {
+    if st.steer_step == 0 {
         return String::new();
     }
     let Some(radii) = authored_radii.filter(|radii| !radii.is_empty()) else {
@@ -169,29 +159,10 @@ pub(crate) fn steering_hud_line(
     format!("STEER {detent} R~{radius:.0}m")
 }
 
-fn selected_mode(
-    feel: Option<&TransmissionFeelTest>,
-    gear: Option<&TrackGear>,
-) -> Option<TransmissionMode> {
-    feel.map(|feel| feel.0)
-        .or_else(|| gear.map(TrackGear::mode))
-}
-
-fn active_transmission(
-    mode: Option<TransmissionMode>,
-    gear: Option<&TrackGear>,
-) -> Option<&TransmissionParams> {
-    if mode == Some(TransmissionMode::Governor) {
-        return None;
-    }
-    gear.and_then(TrackGear::trans)
-}
-
 /// Rebuild both shared HUD surfaces from the controlled tank's predicted/tick-truth components.
 /// The standard row is always visible once a controlled body exists; detailed formatting is skipped
 /// entirely while F3 is closed.
 fn update_drive_hud(
-    feel: Option<Res<TransmissionFeelTest>>,
     gear: Option<Res<TrackGear>>,
     debug_visible: Res<DriveDebugVisible>,
     controlled: Query<
@@ -227,9 +198,7 @@ fn update_drive_hud(
         return;
     };
 
-    let gear = gear.as_deref();
-    let mode = selected_mode(feel.as_deref(), gear);
-    let params = active_transmission(mode, gear);
+    let params = gear.as_deref().map(TrackGear::trans);
     let operating = params.map(|params| readout(&transmission.0, params));
     let standard_operating = operating
         .as_ref()
@@ -247,11 +216,6 @@ fn update_drive_hud(
     }
     debug_visibility.set_if_neq(Visibility::Visible);
 
-    let mode_line = match mode {
-        Some(mode) if feel.is_some() => format!("trans [T]: {}", mode.label()),
-        Some(mode) => format!("trans: {}", mode.label()),
-        None => "trans: --".to_string(),
-    };
     let scheduler_line = if params.is_some() {
         scheduler_hud_line(&transmission.0)
     } else {
@@ -266,18 +230,13 @@ fn update_drive_hud(
     let projected = horizontal.dot(forward_horizontal);
     let signed_ground = horizontal.length() * projected.signum();
     let speeds = [drive.sides[0].speed, drive.sides[1].speed];
-    // No mode ⇒ no steering line. (This used to default to Governor — display-inert, since
-    // only FixedRadii prints, but implicit transmission selection is banned everywhere.)
-    let steering = mode.map_or_else(String::new, |mode| {
-        steering_hud_line(
-            mode,
-            &transmission.0,
-            params.map(|params| params.steer_radii_m.as_slice()),
-        )
-    });
+    let steering = steering_hud_line(
+        &transmission.0,
+        params.map(|params| params.steer_radii_m.as_slice()),
+    );
 
     let debug = format!(
-        "{mode_line}\n{scheduler_line}\n\
+        "{scheduler_line}\n\
          hull {signed_ground:+5.2} m/s ({:+6.1} km/h)\n\
          belt L {:+5.2} R {:+5.2} | slip L {:+5.2} R {:+5.2}\n\
          cmd thr {:+5.2} steer {:+5.2} | {steering:<15}",
