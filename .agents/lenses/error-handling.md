@@ -18,12 +18,16 @@ the state.
 
 ## Finding classes
 
-- **Silent exit**: a `let … else { return / continue }`, an `if let` with no else, or an
-  `Option<Single>` / `Single` system that leaves a case unseen when that case is a failure rather
-  than a named absence. Bevy 0.19 skips a `Single` system silently on none and on many.
+- **Silent exit**: a `let … else { return / continue }`, an `if let` with no else, or a system
+  whose parameters drop a case unseen when that case is a failure rather than a named absence. In
+  Bevy 0.19, `Single`, `Populated` and `If` skip the whole system silently on a failed match (and a
+  skipped system also stops tracking changes and drops its unread messages); `Option<Single>`
+  never skips but yields `None` on zero AND on many matches, so three cameras read as none;
+  `.single()` with `else { return }` does both.
 - **Invented default**: a value standing in for a truth the data should state: `unwrap_or(<number>)`,
   `unwrap_or_default()`, `Default` impls or `#[serde(default)]` on asset data (`*.tank.ron`,
-  `materials.ron`, rounds, substances, maps), a code constant used when a field is absent.
+  `materials.ron`, rounds, substances, maps), a code constant used when a field is absent, and a
+  `#[require(T)]` whose `T::default()` fills in what the spec should supply.
 - **Dropped error**: `.ok()`, `let _ = <Result>`, `.unwrap_or(..)` on a `Result`, `.flatten()` over
   results, an error mapped to `None` or to a log line and then ignored.
 - **Degrade in release**: `debug_assert!` guarding an invariant the release build relies on, a
