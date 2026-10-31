@@ -974,6 +974,8 @@ pub(crate) struct SectionCache {
     cracked: Vec<bool>,
     fate: Vec<Fate>,
     sections: Vec<Vec<usize>>,
+    /// Per joint, the sections holding it, ascending: at most its single and its plane.
+    of_joint: Vec<Vec<usize>>,
 }
 
 impl SectionCache {
@@ -981,10 +983,38 @@ impl SectionCache {
     fn read(&mut self, structure: &Structure, state: &WallState) -> &[Vec<usize>] {
         if self.cracked != state.cracked || self.fate != state.fate {
             self.sections = sections(structure, state);
+            self.of_joint = vec![Vec::new(); structure.joints.len()];
+            for (s, section) in self.sections.iter().enumerate() {
+                for &j in section {
+                    self.of_joint[j].push(s);
+                }
+            }
             self.cracked.clone_from(&state.cracked);
             self.fate.clone_from(&state.fate);
         }
         &self.sections
+    }
+
+    /// The sections of `structure` in `state`, and the indices, ascending, of those holding a joint
+    /// of `paths` ([`ground_path`]): the only sections that can cut one, so the checks visit
+    /// those alone, in the order they hold among all, and their work follows the paths' length,
+    /// not the building's size.
+    fn cutting(
+        &mut self,
+        structure: &Structure,
+        state: &WallState,
+        paths: &[Option<Vec<usize>>],
+    ) -> (&[Vec<usize>], Vec<usize>) {
+        self.read(structure, state);
+        let mut cutting: Vec<usize> = paths
+            .iter()
+            .flatten()
+            .flatten()
+            .flat_map(|&j| self.of_joint[j].iter().copied())
+            .collect();
+        cutting.sort_unstable();
+        cutting.dedup();
+        (&self.sections, cutting)
     }
 }
 
@@ -1044,7 +1074,8 @@ pub(crate) fn structural(
             .collect();
         let crossing = crossing(structure.joints.len(), &paths);
         let mut worst: Option<(f32, Failure)> = None;
-        for section in sections.read(structure, state) {
+        let (all, cutting) = sections.cutting(structure, state, &paths);
+        for section in cutting.iter().map(|&s| &all[s]) {
             // The pushes whose path the section cuts, in push order: the only pushes the search
             // reads for it.
             let mut cut: Vec<usize> = section
@@ -1250,7 +1281,8 @@ pub(crate) fn weigh(
         let crossing = crossing(structure.joints.len(), &paths);
         let mut assessed = vec![false; touched.len()];
         let mut worst: Option<(f32, Failure)> = None;
-        for section in sections.read(structure, state) {
+        let (all, cutting) = sections.cutting(structure, state, &paths);
+        for section in cutting.iter().map(|&s| &all[s]) {
             weighed.steps += section.len();
             let mut cut: Vec<usize> = section
                 .iter()
