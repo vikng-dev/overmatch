@@ -635,9 +635,10 @@ fn bind_track_rigs(
 /// see [`shadow_proxy::ProxySide::mesh`] for why neither an empty mesh nor shoes silenced against
 /// one may exist for even a frame.
 ///
-/// A separate system rather than more parameters on [`bind_track_rigs`], which is already at twelve:
+/// A separate system rather than more parameters on [`bind_track_rigs`], which already takes eleven:
 /// this one needs the material writer, and the ribbon's mesh cannot be built until the belt has
-/// been fitted once anyway. `Added<TrackRig>` fires the frame after the bind's `Commands` flush.
+/// been fitted once anyway. The `.chain()` that orders it after the bind puts a sync point between
+/// them, so `Added<TrackRig>` sees the rig in the bind's own frame.
 fn attach_shadow_proxies(
     mode: Res<ProxyMode>,
     geom: Option<Res<RigGeom>>,
