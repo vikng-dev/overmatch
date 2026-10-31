@@ -24,8 +24,9 @@
 //!   order: removal and the push rule ([`fracture::strike`]), the structural check
 //!   ([`fracture::structural`]), the weight check on what those changed ([`fracture::weigh`]),
 //!   support ([`fracture::fall`]).
-//! * **Holes** ([`Hole`], drawn only): a line cuts a channel in each chunk it crosses and a blast a
-//!   dish in each chunk its rays stop on ([`holes_of`]); a chunk still standing after the deposit
+//! * **Holes** ([`Hole`], drawn only): a line cuts a channel in each chunk it crosses, the cylinder
+//!   about its chord, open across each face it crosses ([`open_ends`]), and a blast a dish in each
+//!   chunk its rays stop on ([`holes_of`]); a chunk still standing after the deposit
 //!   keeps its hole in a per-chunk list ([`Live::holes`]), for the view to draw. No law, collider
 //!   or mass reads a hole: they see the whole chunk, and [`Shape`] holds none. A hole holds no more
 //!   than the volume its energy crushed (`energy / crush`), so one the size of its chunk is a spent
@@ -243,11 +244,13 @@ impl Layout {
 }
 
 /// One hole in one chunk (module doc): the chunk's matter within `radius` of the segment
-/// `from`–`to`. A round's channel runs along its line; a blast's dish has `from == to`, a ball
-/// about its centre. In millimetres of the asset frame at scale 1, about the baked chunk's
-/// centroid ([`super::schema::Chunk::centroid`]), so it is the same hole at every instance scale;
-/// each coordinate saturates at the `i16` range, ±32.767 m from the centroid, which every point of
-/// a chunk under 65 m across stays within.
+/// `from`–`to`. A round's channel runs along its line, each end where the line crosses a face
+/// moved out past the chunk ([`open_ends`]), so it is the cylinder the round crossed; a blast's
+/// dish has `from == to`, a ball about its centre. In millimetres of the asset frame at scale 1,
+/// about the baked chunk's centroid ([`super::schema::Chunk::centroid`]), so it is the same hole
+/// at every instance scale; each coordinate saturates at the `i16` range, ±32.767 m from the
+/// centroid, which a channel's ends, within two of its chunk's widths of the centroid, keep for
+/// every chunk under 16 m across.
 #[derive(Serialize, Deserialize, Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) struct Hole {
     pub(crate) from: [i16; 3],
@@ -975,7 +978,8 @@ fn holes_of(
         let volume = crushed(c, energy);
         let ball = (0.75 * volume / PI).cbrt();
         let radius = (volume / (PI * from.distance(to))).sqrt().min(ball);
-        Hole::cut(centroid(c), from / scale, to / scale, radius / scale).map(|hole| (c, hole))
+        let (from, to) = open_ends(&layout.blocks[c], from / scale, to / scale, scale);
+        Hole::cut(centroid(c), from, to, radius / scale).map(|hole| (c, hole))
     });
     let dishes = blast
         .sources
@@ -987,6 +991,44 @@ fn holes_of(
             Hole::cut(centroid(c), at, at, radius / scale).map(|hole| (c, hole))
         });
     channels.chain(dishes).collect()
+}
+
+/// How far inside its chunk's hull a channel's end may sit and still be where the line crosses a
+/// face, m (DERIVED: the walk's crossings meet a face to f32 rounding, far under a millimetre).
+const ON_FACE_M: f32 = 1e-3;
+
+/// A channel's ends `from`–`to` in its chunk's hull `block` (asset frame, scale 1; the instance at
+/// `scale`), each end on the hull's surface moved out along the line to the hull's farthest corner
+/// along it. Inside the chunk the capsule a [`Hole`] draws is then the cylinder about the line:
+/// every chunk point projects between the ends, so its distance to the segment is its distance to
+/// the line, and each face the line crosses opens across the cylinder's whole ellipse, with no rim
+/// closed by the capsule's rounded end. An end inside the hull (a round at rest there) stays, so
+/// its channel stays closed there. The ends lie within the hull's width of the hull.
+fn open_ends(block: &Block, from: Vec3, to: Vec3, scale: f32) -> (Vec3, Vec3) {
+    let Some(along) = (to - from).try_normalize() else {
+        return (from, to);
+    };
+    let on_face = |p: Vec3| {
+        block
+            .planes
+            .iter()
+            .any(|&(n, o)| n.dot(p) >= o - ON_FACE_M / scale)
+    };
+    let (low, high) = block
+        .points
+        .iter()
+        .map(|p| (*p - from).dot(along))
+        .fold((0.0_f32, from.distance(to)), |(low, high), s| {
+            (low.min(s), high.max(s))
+        });
+    (
+        if on_face(from) {
+            from + along * low
+        } else {
+            from
+        },
+        if on_face(to) { from + along * high } else { to },
+    )
 }
 
 /// What the laws changed in one building: its record events in order, each loose group with the

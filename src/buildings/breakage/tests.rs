@@ -950,6 +950,104 @@ fn a_roof_plane_stands_on_its_rests_and_falls_when_they_go() {
     );
 }
 
+/// A ROUND'S CHANNEL IS THE CYLINDER IT CROSSED, OPEN ACROSS EACH FACE: a line through a house
+/// chunk's centroid at 30° to its element's axis (fixture data) leaves a hole whose capsule holds,
+/// on each face the line crosses, every point of the cylinder's ellipse that lies on that face, to
+/// the record's millimetre, where the capsule about the bare entry and exit points leaves part of
+/// that rim closed. A line that stops inside the chunk keeps its end there, so its far face stays
+/// closed. A channel stored from entry to exit, whose rounded ends close a crescent at each
+/// oblique rim, fails here; the opening the view draws through a perforated wall rests on it.
+#[test]
+fn a_channel_is_the_cylinder_it_crossed_open_across_each_face() {
+    use std::f32::consts::{PI, TAU};
+    let kind = shipped_house();
+    let (e, [c, ..]) = fixture_chunks(&kind);
+    let block = &kind.layout.blocks[c];
+    let structure = kind.layout.structure(&kind.asset, 1.0);
+    let centroid = Vec3::from_array(kind.asset.chunks[kind.layout.chunks[c] as usize].centroid);
+    let w = kind.asset.elements[e].frame.w().normalize();
+    // Tilted along the chunk's widest direction across the axis, so both ends sit inside their
+    // faces with room for the rim.
+    let extent = |t: Vec3| {
+        let along = || block.points.iter().map(move |p| p.dot(t));
+        along().fold(f32::MIN, f32::max) - along().fold(f32::MAX, f32::min)
+    };
+    let (a, b) = w.any_orthonormal_pair();
+    let across = (0..16)
+        .map(|k| {
+            let phi = k as f32 / 16.0 * PI;
+            a * phi.cos() + b * phi.sin()
+        })
+        .max_by(|x, y| extent(*x).total_cmp(&extent(*y)))
+        .expect("sixteen directions");
+    let (sin, cos) = 30.0_f32.to_radians().sin_cos();
+    let dir = (w * cos + across * sin).normalize();
+    let (t0, t1) = block
+        .span(centroid - dir * 10.0, dir)
+        .expect("the line crosses the chunk");
+    let (entry, exit) = (centroid + dir * (t0 - 10.0), centroid + dir * (t1 - 10.0));
+    // A 2 cm channel (fixture data): its energy crushes that cylinder about the chord.
+    let r = 0.02;
+    let energy = PI * r * r * entry.distance(exit) * structure.chunks[c].material.crush;
+    let metres = |p: [i16; 3]| centroid + Vec3::from_array(p.map(|v| f32::from(v) / 1000.0));
+    let to_segment = |x: Vec3, a: Vec3, b: Vec3| {
+        let ab = b - a;
+        let s = ((x - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0);
+        x.distance(a + ab * s)
+    };
+    let [(_, channel)] = holes_of(&kind, 1.0, &[(c, entry, exit, energy)], &Loading::default())[..]
+    else {
+        panic!("one channel");
+    };
+    let radius = f32::from(channel.radius) / 1000.0;
+    let (from, to) = (metres(channel.from), metres(channel.to));
+    let inside = |x: Vec3| block.planes.iter().all(|&(n, o)| n.dot(x) <= o + 1e-4);
+    let (e1, e2) = dir.any_orthonormal_pair();
+    let mut closed_by_caps = 0;
+    for end in [entry, exit] {
+        let &(n, o) = block
+            .planes
+            .iter()
+            .max_by(|a, b| (a.0.dot(end) - a.1).total_cmp(&(b.0.dot(end) - b.1)))
+            .expect("a hull has planes");
+        let mut rim = 0;
+        for k in 0..64 {
+            let phi = k as f32 / 64.0 * TAU;
+            // Where the cylinder's line at angle `phi` about the axis meets the face's plane.
+            let base = end + (e1 * phi.cos() + e2 * phi.sin()) * radius;
+            let x = base + dir * ((o - n.dot(base)) / n.dot(dir));
+            if !inside(x) {
+                continue;
+            }
+            rim += 1;
+            assert!(
+                to_segment(x, from, to) <= radius + 0.002,
+                "the rim at {x} on the face through {end} is open"
+            );
+            closed_by_caps += usize::from(to_segment(x, entry, exit) > radius + 0.002);
+        }
+        assert!(rim >= 8, "the face through {end} holds its rim");
+    }
+    assert!(
+        closed_by_caps > 0,
+        "the bare entry-to-exit capsule closes part of the rim"
+    );
+
+    let rest = (entry + exit) / 2.0;
+    let [(_, blind)] = holes_of(&kind, 1.0, &[(c, entry, rest, energy)], &Loading::default())[..]
+    else {
+        panic!("one blind channel");
+    };
+    assert!(
+        metres(blind.to).distance(rest) < 0.002,
+        "a channel ends where its round came to rest"
+    );
+    assert!(
+        metres(blind.from).distance(entry) > 0.002,
+        "and opens past the face it entered"
+    );
+}
+
 /// A fixture burst's blast energy, J: the 88 mm HE burst's (fixture data).
 const FIXTURE_BLAST_J: f32 = 1.47e6;
 
