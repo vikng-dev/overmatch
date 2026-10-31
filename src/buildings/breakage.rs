@@ -17,11 +17,13 @@
 //!   feeds the blast field ([`fracture::blast_rays`]) from its burst point, its energy the core's
 //!   chemical energy less the casing's share. A line pushes with all the momentum the round lost
 //!   in it ([`Projectile::lost_momentum`]: the share the crushed brick carries away is open); a
-//!   blast pushes each face its rays stop on with its reflected impulse ([`Blast::push`]). A blast
-//!   ray stops on the nearest of every building's standing chunks and unbreakable elements and the
-//!   moving bodies within its reach ([`Blast::reach`]: a loose piece, a hull, a launched turret);
-//!   one that stops on a moving body pushes it the same way, through avian at the point it stops,
-//!   and deposits nothing. A capture's dust ([`WallDust`]) spends the full pool of each chunk it
+//!   blast pushes each face its rays stop on with its reflected impulse ([`Blast::push`]), over the
+//!   share of the ray's cone the struck chunk or body intercepts. A blast ray stops, within its
+//!   reach ([`Blast::reach`]), on the nearest of every building's standing chunks and unbreakable
+//!   elements, the moving bodies (a loose piece, a hull, a launched turret) and every other surface
+//!   (the ground, a standing tree); one that stops on a moving body pushes it the same way, through
+//!   avian at the point it stops, and deposits nothing, and one on any other surface does nothing.
+//!   A capture's dust ([`WallDust`]) spends the full pool of each chunk it
 //!   names that stands above grade, and nothing else. The laws then run in order: removal and the
 //!   push rule ([`fracture::strike`]), the structural check ([`fracture::structural`]), the weight
 //!   check on what those changed ([`fracture::weigh`]), support ([`fracture::fall`]).
@@ -677,16 +679,18 @@ struct DepositParam<'w, 's> {
     /// The moving bodies a blast's rays meet ([`moving_near`]) and push.
     spatial: SpatialQuery<'w, 's>,
     collider_of: Query<'w, 's, &'static ColliderOf>,
+    aabbs: Query<'w, 's, &'static ColliderAabb>,
     bodies: Query<'w, 's, (Forces, &'static RigidBody)>,
 }
 
-/// The layers of a moving body's collision proxy, the only colliders a blast's rays meet on one:
-/// a tank's armour and witness volumes ([`Layer`]) are its ballistics, not its surface.
-const MOVING_SURFACE: [Layer; 2] = [Layer::Vehicle, Layer::Debris];
+/// The layers of the surfaces a blast's rays meet through avian: the ground, a standing tree and
+/// every other static surface ([`Layer::Terrain`]), and a moving body's collision proxy. A tank's
+/// armour and witness volumes ([`Layer`]) are its ballistics, not its surface.
+const SURFACES: [Layer; 3] = [Layer::Terrain, Layer::Vehicle, Layer::Debris];
 
 /// The colliders of every dynamic body whose bounds meet the cube of half-side `reach` m about
-/// `origin`, ascending: with [`MOVING_SURFACE`], the only colliders a blast's rays test. A static
-/// body is a building's (its own walk) or the ground's, which no ray stops on.
+/// `origin`, ascending: the moving bodies a blast's rays push. Every other collider a ray meets
+/// on [`SURFACES`] stops it with nothing, but a building's, which its own walk reads.
 fn moving_near(p: &DepositParam, origin: Vec3, reach: f32) -> Vec<Entity> {
     let mut near = Vec::new();
     p.spatial.aabb_intersections_with_aabb_callback(
@@ -900,10 +904,15 @@ fn log_changes(id: &str, loading: &Loading, counts: [usize; 3], changes: &Change
     );
 }
 
-/// One blast's rays from `origin` (module doc): each stops on the nearest of every building's
-/// present blockers ([`first_chunk`]) and the moving bodies within the blast's reach
-/// ([`moving_near`]). A ray on a standing chunk joins its building's take; a ray on a moving body
-/// pushes the body through avian at the point it stops, and deposits nothing.
+/// One blast's rays from `origin` (module doc): each stops, within the blast's reach, on the
+/// nearest of every building's present blockers ([`first_chunk`]), the moving bodies
+/// ([`moving_near`]) and every other surface on [`SURFACES`] (the ground, a standing tree). A ray
+/// on a standing chunk joins its building's take; a ray on a moving body pushes the body through
+/// avian at the point it stops, and deposits nothing; a ray on any other surface does nothing.
+/// Each chunk and body collider takes the share of its rays' cones its silhouette intercepts
+/// ([`fracture::intercepted`]): a chunk's from its faces, a collider's from its bounds, the
+/// silhouette of the box that holds it. A collider holding `origin` shades nothing and takes
+/// nothing: what a burst inside a body does to it is no law here.
 fn cast_blast(
     p: &mut DepositParam,
     frames: &BTreeMap<Entity, Frame>,
@@ -914,8 +923,26 @@ fn cast_blast(
 ) {
     let reach = blast.reach();
     let near = moving_near(p, origin, reach);
+    // The colliders holding the burst point: a ray from inside one leaves it through no face it
+    // meets, so they shade nothing and take no push of the field's.
+    let surfaces = SpatialQueryFilter::from_mask(SURFACES);
+    let inside = p.spatial.point_intersections(origin, &surfaces);
+    let surfaces = surfaces.with_excluded_entities(inside);
+    // A building's colliders are its walk's ([`first_chunk`]); every other surface stops a ray.
+    let meets = |collider: Entity| {
+        near.binary_search(&collider).is_ok()
+            || !p
+                .collider_of
+                .get(collider)
+                .is_ok_and(|of| p.buildings.contains(of.body))
+    };
     // Per building a ray may meet: the origin in its frame, and its bounds.
     let mut views: BTreeMap<Entity, (Vec3, Block)> = BTreeMap::new();
+    let mut faces: BTreeMap<(Entity, usize), Vec<(Vec3, f32)>> = BTreeMap::new();
+    // Each stop before interception ([`fracture::intercepted`]): its target, the ray's section
+    // there and the target's silhouette across it; and what it delivers whole.
+    let mut stops: Vec<(Stop, f32, f32)> = Vec::new();
+    let mut chunk_hits: Vec<(Entity, fracture::RayHit)> = Vec::new();
     let mut thrown: Vec<(Entity, Vec3, Vec3)> = Vec::new();
     for &(dir, share) in fracture::blast_directions() {
         // The nearest present blocker of every building: its root, its law chunk (`None`,
@@ -939,32 +966,44 @@ fn cast_blast(
             }
             let shape = shapes.entry(*root).or_insert_with(|| breakage.shape());
             if let Some((chunk, t)) = first_chunk(&kind.layout, shape, *local, turned)
+                && t * frame.scale <= reach
                 && stop.is_none_or(|(.., d)| t * frame.scale < d)
             {
                 stop = Some((*root, chunk, t, t * frame.scale));
             }
         }
-        let moving = if near.is_empty() {
-            None
-        } else {
-            Dir3::new(dir).ok().and_then(|ray| {
-                p.spatial.cast_ray_predicate(
-                    origin,
-                    ray,
-                    stop.map_or(reach, |(.., d)| d.min(reach)),
-                    true,
-                    &SpatialQueryFilter::from_mask(MOVING_SURFACE),
-                    &|collider| near.binary_search(&collider).is_ok(),
-                )
-            })
-        };
-        if let Some(hit) = moving {
+        let surface = Dir3::new(dir).ok().and_then(|ray| {
+            p.spatial.cast_ray_predicate(
+                origin,
+                ray,
+                stop.map_or(reach, |(.., d)| d),
+                true,
+                &surfaces,
+                &meets,
+            )
+        });
+        if let Some(hit) = surface {
+            // The ground, a standing tree or another static surface stops the ray with nothing.
+            if near.binary_search(&hit.entity).is_err() {
+                continue;
+            }
             let of = p
                 .collider_of
                 .get(hit.entity)
                 .expect("a collider in reach has a body");
-            // A ray from inside a body stops at 0 m with no face normal; its patch, so its push,
-            // is 0 there whatever the normal.
+            let aabb = p
+                .aabbs
+                .get(hit.entity)
+                .expect("a collider in reach has its bounds");
+            let size = aabb.max - aabb.min;
+            let shown = dir.x.abs() * size.y * size.z
+                + dir.y.abs() * size.x * size.z
+                + dir.z.abs() * size.x * size.y;
+            stops.push((
+                Stop::Body(hit.entity),
+                Blast::section(share, hit.distance),
+                shown,
+            ));
             thrown.push((
                 of.body,
                 origin + dir * hit.distance,
@@ -975,28 +1014,66 @@ fn cast_blast(
         {
             let (frame, local) = (frames[&root], views[&root].0);
             let turned = frame.turn(dir);
-            let normal = breakage.kind.layout.blocks[c]
+            let block = &breakage.kind.layout.blocks[c];
+            let (_, normal) = block
                 .entry_face(local, turned)
-                .map_or(-turned, |(_, normal)| normal);
-            taken.entry(root).or_default().blast.push(fracture::RayHit {
-                chunk: c,
-                at: (local + turned * t) * frame.scale,
-                energy: blast.energy * share,
-                impulse: blast.push(share, d, turned, normal),
-            });
+                .expect("the ray's stop is where it enters the chunk");
+            let shown = fracture::silhouette(
+                faces.entry((root, c)).or_insert_with(|| block.face_areas()),
+                turned,
+            ) * frame.scale
+                * frame.scale;
+            stops.push((Stop::Chunk(root, c), Blast::section(share, d), shown));
+            chunk_hits.push((
+                root,
+                fracture::RayHit {
+                    chunk: c,
+                    at: (local + turned * t) * frame.scale,
+                    energy: blast.energy * share,
+                    impulse: blast.push(share, d, turned, normal),
+                },
+            ));
         }
+    }
+    // The stops are in ray order, bodies and chunks interleaved; each list reads its own in order.
+    let mut body_kept = Vec::with_capacity(thrown.len());
+    let mut chunk_kept = Vec::with_capacity(chunk_hits.len());
+    for ((stop, ..), k) in stops.iter().zip(fracture::intercepted(&stops)) {
+        match stop {
+            Stop::Body(_) => body_kept.push(k),
+            Stop::Chunk(..) => chunk_kept.push(k),
+        }
+    }
+    for ((root, hit), k) in chunk_hits.into_iter().zip(chunk_kept) {
+        taken.entry(root).or_default().blast.push(fracture::RayHit {
+            energy: hit.energy * k,
+            impulse: hit.impulse * k,
+            ..hit
+        });
     }
     if !thrown.is_empty() {
         debug!(
             "buildings: a blast pushed moving bodies with {} rays ({:.1} N s)",
             thrown.len(),
-            thrown.iter().map(|(.., i)| i.length()).sum::<f32>(),
+            thrown
+                .iter()
+                .zip(&body_kept)
+                .map(|((.., i), k)| i.length() * k)
+                .sum::<f32>(),
         );
     }
-    for (body, at, impulse) in thrown {
+    for ((body, at, impulse), k) in thrown.into_iter().zip(body_kept) {
         let (mut forces, _) = p.bodies.get_mut(body).expect("a body in reach is dynamic");
-        forces.apply_linear_impulse_at_point(impulse, at);
+        forces.apply_linear_impulse_at_point(impulse * k, at);
     }
+}
+
+/// What a blast ray stopped on ([`cast_blast`]): a building's law chunk, or a moving body's
+/// collider.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum Stop {
+    Chunk(Entity, usize),
+    Body(Entity),
 }
 
 /// The holes one deposit cuts (module doc), each with its law chunk, in the baked chunk's frame

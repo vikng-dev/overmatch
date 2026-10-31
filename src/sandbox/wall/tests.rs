@@ -7,11 +7,11 @@ use bevy::math::Vec3;
 use super::model::*;
 use super::{blast_field, brick, layout};
 
-/// A blast of 1 J and no charge (fixture data): its rays' shares of the energy read straight off
-/// their hits.
-const UNIT_BLAST: Blast = Blast {
-    energy: 1.0,
-    charge: 0.0,
+/// The 88 mm HE fixture burst (fixture data): 1.47 MJ, its charge the TNT that carries it, so its
+/// reach (23.2 m, DERIVED) holds every standoff here; a coupling is its hits' energy over its own.
+const FIXTURE_BLAST: Blast = Blast {
+    energy: 1.47e6,
+    charge: 1.47e6 / 4.184e6,
 };
 
 /// SUPPORT IS CONNECTIVITY TO AN ANCHOR THROUGH INTACT JOINTS, on the baked wall. An intact wall
@@ -139,9 +139,13 @@ fn renumbering_the_chunks_changes_no_outcome() {
     assert_eq!(outcome(&renumbered), original);
 }
 
-/// THE STRUCTURAL CHECK COMPARES THE ANGULAR IMPULSE WITH `√(2 I G_f A)`: on a two-chunk column a
-/// push at the top whose moment about the bed joint is 1 % over that capacity cracks the bed joint
-/// (the joint alone holds the top chunk), and 1 % under it cracks nothing. Fixture geometry.
+/// THE STRUCTURAL CHECK COMPARES THE ANGULAR IMPULSE ABOUT THE HINGE WITH `√(2 I (G_f A + E_g))`:
+/// on a two-chunk column a push at the top whose moment about the bed joint's hinge (the rim of its
+/// disc on the side the push turns the top toward) is 1 % over that capacity cracks the bed joint
+/// (the joint alone holds the top chunk), and 1 % under it cracks nothing; `I` is the top's inertia
+/// about the hinge and `E_g` the work of raising its centre of mass over it, for the bed bears the
+/// top. A capacity read about the centroid, or without the weight the section carries (one far
+/// push then opening a plane a whole building stands on), fails here. Fixture geometry.
 #[test]
 fn a_push_fails_the_section_at_its_fracture_impulse() {
     let material = brick();
@@ -176,10 +180,13 @@ fn a_push_fails_the_section_at_its_fracture_impulse() {
     let bed = 1;
     let joint = structure.joints[bed];
     let top = structure.chunks[1];
-    let r = top.centroid - joint.centroid;
+    // The push along -z turns the top about -x, so the hinge is the bed disc's rim toward -z.
+    let hinge = joint.centroid - Vec3::Z * (joint.area / std::f32::consts::PI).sqrt();
+    let r = top.centroid - hinge;
     let own = (3.0 * top.volume / (4.0 * std::f32::consts::PI)).cbrt();
     let inertia = top.mass * (r.length_squared() - r.x * r.x + 0.4 * own * own);
-    let capacity = (2.0 * inertia * material.seam.fracture_energy * joint.area).sqrt();
+    let lift = top.mass * GRAVITY * (r.y.hypot(r.z) - r.y);
+    let capacity = (2.0 * inertia * (material.seam.fracture_energy * joint.area + lift)).sqrt();
     let at = Vec3::new(0.1, 0.4, 0.25);
     let lever = at.y - joint.centroid.y;
     for (scale, fails) in [(1.01, true), (0.99, false)] {
@@ -210,10 +217,11 @@ fn blast_coupling_falls_with_standoff() {
         Vec3::new(50.0, 50.0, 0.0),
     )];
     let coupled = |standoff: f32| -> f32 {
-        blast_rays(&slab, |_| true, Vec3::Z * standoff, UNIT_BLAST, &field)
+        blast_rays(&slab, |_| true, Vec3::Z * standoff, FIXTURE_BLAST, &field)
             .iter()
             .map(|hit| hit.energy)
-            .sum()
+            .sum::<f32>()
+            / FIXTURE_BLAST.energy
     };
     let contact = coupled(1.0e-4);
     assert!((contact - 0.5).abs() < 0.01, "contact couples {contact}");
@@ -222,10 +230,11 @@ fn blast_coupling_falls_with_standoff() {
         Vec3::new(2.0, 1.0, 0.0),
     )];
     let on_wall = |standoff: f32| -> f32 {
-        blast_rays(&wall, |_| true, Vec3::Z * standoff, UNIT_BLAST, &field)
+        blast_rays(&wall, |_| true, Vec3::Z * standoff, FIXTURE_BLAST, &field)
             .iter()
             .map(|hit| hit.energy)
-            .sum()
+            .sum::<f32>()
+            / FIXTURE_BLAST.energy
     };
     let (near, mid, far) = (on_wall(0.1), on_wall(1.0), on_wall(3.0));
     assert!(near > mid && mid > far && far > 0.0, "{near} {mid} {far}");

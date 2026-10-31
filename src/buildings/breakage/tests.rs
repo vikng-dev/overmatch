@@ -1204,6 +1204,55 @@ fn a_loose_piece_shadowed_by_a_standing_chunk_takes_nothing() {
     assert_eq!(speed(behind), 0.0, "the wall shades the cube behind it");
 }
 
+/// THE GROUND STOPS A BLAST'S RAYS, AND A BODY HOLDING THE BURST SHADES NOTHING: a loose cube on a
+/// fixture burst's side of a house wall, pushed with nothing between, takes nothing behind a static
+/// slab on the ground's layer (the layer of the ground and of a standing tree); and a burst inside
+/// a dynamic body's proxy still wears the chunk it faces. Rays that pass the ground (a house below
+/// the horizon taking a push), or a field blanked at 0 m by the body it bursts in, fail here.
+#[test]
+fn the_ground_stops_a_blast_and_a_body_holding_the_burst_shades_nothing() {
+    let kind = shipped_house();
+    let (e, [c, ..]) = fixture_chunks(&kind);
+    let element = &kind.asset.elements[e];
+    let (origin, w, _) = through(&kind, e, c, 0.0);
+    let out = 0.5 + element.depth[1] - element.depth[0] + 0.3;
+    let speed_of_open = |slab: bool| {
+        let (mut app, _) = composed(false);
+        let open = loose_cube(&mut app, origin - *w * out, 0.1);
+        if slab {
+            // A 5 cm slab 4 m square across `w`, half-way to the cube (fixture geometry).
+            app.world_mut().spawn((
+                RigidBody::Static,
+                Position(origin - *w * (out / 2.0)),
+                Rotation(Quat::from_rotation_arc(Vec3::X, *w)),
+                Collider::cuboid(0.05, 4.0, 4.0),
+                CollisionLayers::new([Layer::Terrain], LayerMask::ALL),
+            ));
+        }
+        app.update();
+        app.update();
+        charge(&mut app, origin);
+        app.world().get::<LinearVelocity>(open).unwrap().length()
+    };
+    assert!(
+        speed_of_open(false) > 0.0,
+        "with nothing between, the cube is pushed"
+    );
+    assert_eq!(speed_of_open(true), 0.0, "the ground's layer shades it");
+
+    let (mut app, root) = composed(false);
+    moving_cube(&mut app, origin, 0.4, Layer::Vehicle);
+    app.update();
+    app.update();
+    charge(&mut app, origin);
+    let breakage = app.world().get::<Breakage>(root).unwrap();
+    let live = breakage.live.as_ref().expect("the burst reached the house");
+    assert!(
+        live.state.pool[c] < fracture::full_pool(&live.structure.chunks[c]),
+        "the body holding the burst shades nothing"
+    );
+}
+
 /// A SLEEPING LOOSE PIECE WAKES TO A BLAST: a wall piece asleep at rest on a slab is woken by a
 /// fixture burst beside it, and leaves away from the burst. An impulse that leaves a sleeping body
 /// asleep, or is held back from one, fails here; rubble settled for most of a match relies on it.

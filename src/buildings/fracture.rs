@@ -15,7 +15,8 @@
 //!   load is the elastic stress about the cavity a source crushed. Sources superpose; a joint does
 //!   not remember a load below its threshold.
 //! * **Structure** ([`structural`]). A push on a group that one section alone holds to the ground
-//!   cracks the section when its angular impulse would spend the section's fracture energy.
+//!   cracks the section when its angular impulse about the section's hinge would spend the
+//!   section's fracture energy and, where the section bears the group, topple the group over it.
 //! * **Weight** ([`weigh`]). After a wall changes, each group that one section alone holds and
 //!   whose support the change moved cracks the section when its weight, as a direct pull and a
 //!   bending moment across it, reaches the seam's tensile strength. A part held through several
@@ -28,8 +29,10 @@
 //! * **Support** ([`loose_groups`]). A chunk group with no path of intact joints to a ground anchor
 //!   or to a buried chunk ([`Chunk::buried`]: the soil holds it) falls as one body.
 //! * **The blast field** ([`blast_rays`]). A charge's blast energy leaves it uniformly over the
-//!   sphere; each ray stops on the first standing chunk it meets and pushes the face it meets with
-//!   the blast's reflected impulse over the patch it stands for ([`Blast::push`]). The wall design
+//!   sphere out to the fits' range ([`Blast::reach`]); each ray stops on the first standing chunk
+//!   it meets and pushes the face it meets with the blast's reflected impulse over the patch it
+//!   stands for ([`Blast::push`]), the chunk taking only the share of the ray's cone its own
+//!   silhouette intercepts ([`intercepted`]). The wall design
 //!   (`.agents/docs/design/wall-destruction.md`, "Standoff blast") owns the model.
 //!
 //! A deposit becomes point sources ([`Loading`]): a round's line in each chunk is split every
@@ -350,6 +353,54 @@ impl Block {
             .filter(|(_, corners)| corners.len() >= 3)
             .collect()
     }
+
+    /// Every face as its outward unit normal and its area, m² (the shape's own units squared).
+    pub fn face_areas(&self) -> Vec<(Vec3, f32)> {
+        self.faces()
+            .into_iter()
+            .map(|(normal, corners)| {
+                let twice: Vec3 = (1..corners.len() - 1)
+                    .map(|k| (corners[k] - corners[0]).cross(corners[k + 1] - corners[0]))
+                    .sum();
+                (normal, 0.5 * twice.dot(normal).abs())
+            })
+            .collect()
+    }
+}
+
+/// The area a convex shape of faces `faces` ([`Block::face_areas`]) shows a ray along unit `dir`:
+/// its silhouette across the ray, the faces turned toward the ray each projected onto the plane
+/// across it.
+pub(crate) fn silhouette(faces: &[(Vec3, f32)], dir: Vec3) -> f32 {
+    faces
+        .iter()
+        .map(|&(normal, area)| area * (-normal.dot(dir)).max(0.0))
+        .sum()
+}
+
+/// Per ray stop `(target, section, silhouette)`, the share of its cone its target intercepts: a
+/// ray stands for a cone, `section` its cross-section where it stops ([`Blast::section`]), and the
+/// cones that stop on one target together cover at most the target's own silhouette across them,
+/// their `section`-weighted mean `silhouette` ([`silhouette`]). Each stop on a target the cones
+/// overfill keeps `silhouette / Σ section`, so the target takes the blast over its own area, and
+/// a target the cones do not fill takes each whole (1). In stop order.
+pub(crate) fn intercepted<K: Ord + Copy>(stops: &[(K, f32, f32)]) -> Vec<f32> {
+    let mut per: std::collections::BTreeMap<K, (f32, f32)> = Default::default();
+    for &(target, section, area) in stops {
+        let sum = per.entry(target).or_default();
+        sum.0 += section;
+        sum.1 += section * area;
+    }
+    stops
+        .iter()
+        .map(|(target, ..)| {
+            let (sections, weighted) = per[target];
+            if sections <= 0.0 {
+                return 1.0;
+            }
+            (weighted / sections / sections).min(1.0)
+        })
+        .collect()
 }
 
 /// Two unit axes spanning the plane of unit `normal`, right-handed with it.
@@ -954,15 +1005,19 @@ fn plane_bucket(offset: f32) -> i64 {
     (f64::from(offset) * 1e3).floor() as i64
 }
 
-/// The structural check: a push bends a section about its centroid, and the section fails when
-/// the angular impulse in its plane, `|Σ (x − c) × J|` over the pushes on the group it alone holds
-/// to the ground, reaches the impulse that would spend its fracture energy on opening it,
-/// `√(2 I G_f A)`: `I` the group's moment of inertia about the bending axis through the section's
-/// centroid (each chunk a ball of its volume), `A` the section's area, `G_f` its chunks' seam
-/// fracture energy. The worst failing section cracks first, and the check repeats until none
-/// fails, so a failure can expose the next. A seam cracks on that cohesive work alone: whether the
-/// freed group then rocks back or topples is the physics' to decide, with the group's weight,
-/// contact and friction ([`super::breakage`] launches it with the momentum pushed into it).
+/// The structural check: a push turns the group a section alone holds to the ground about the
+/// section's hinge, the edge of the section that the turn presses (the bending axis is that of the
+/// pushes' angular impulse in the plane about the section's centroid, `Σ (x − c) × J`), and the
+/// section fails when the angular impulse about the hinge reaches the impulse whose rotational
+/// energy pays for opening the section and for carrying the group's weight with it,
+/// `√(2 I (Σ G_f A + E_g))`: `I` the group's moment of inertia about the hinge (each chunk a ball
+/// of its volume), `Σ G_f A` each joint's seam fracture energy over its area, and `E_g` the work
+/// against gravity of raising the group's centre of mass over the hinge where the section bears
+/// the group's weight (the section a push opens carries its load: a group standing on its section
+/// leaves only by toppling over it), 0 for a group beside or under its section. The worst failing
+/// section cracks first, and the check repeats until none fails, so a failure can expose the next.
+/// The freed group is the physics' from then on, with its weight, contact and friction
+/// ([`super::breakage`] launches it with the momentum pushed into it).
 ///
 /// The group a section holds is the part of the pushed chunks' component that loses its last path
 /// to the ground with the section's joints removed ([`held`]): a group no push reaches takes no
@@ -1053,33 +1108,68 @@ fn section_failure(
         .map(|joint| joint.centroid * joint.area)
         .sum::<Vec3>()
         / area;
+    let (mass, weighted) = group.iter().fold((0.0, Vec3::ZERO), |(mass, at), &i| {
+        let chunk = &structure.chunks[i];
+        (mass + chunk.mass, at + chunk.centroid * chunk.mass)
+    });
+    let com = weighted / mass;
+    // The plane's normal toward the group: a group point moving along it leaves the section.
     let n = joints[0].normal;
-    let moment: Vec3 = pushes
-        .iter()
-        .filter(|push| group.binary_search(&push.chunk).is_ok())
+    let n = if n.dot(com - centre) >= 0.0 { n } else { -n };
+    let on_group = || {
+        pushes
+            .iter()
+            .filter(|push| group.binary_search(&push.chunk).is_ok())
+    };
+    let moment: Vec3 = on_group()
         .map(|push| (push.at - centre).cross(push.impulse))
         .sum();
     let bending = moment - n * moment.dot(n);
-    let demand = bending.length();
+    if bending.length() <= 0.0 {
+        return None;
+    }
+    let axis = bending.normalize();
+    // The hinge: the section's edge farthest back along `n × axis`, where the turn presses.
+    let across = n.cross(axis);
+    let back = joints
+        .iter()
+        .map(|joint| across.dot(joint.centroid - centre) - (joint.area / PI).sqrt())
+        .fold(f32::INFINITY, f32::min);
+    let hinge = centre + across * back;
+    let total: Vec3 = on_group().map(|push| push.impulse).sum();
+    let demand = (moment + (centre - hinge).cross(total)).dot(axis);
     if demand <= 0.0 {
         return None;
     }
-    let axis = bending / demand;
     let inertia: f32 = group
         .iter()
         .map(|&i| {
             let chunk = &structure.chunks[i];
-            let r = chunk.centroid - centre;
+            let r = chunk.centroid - hinge;
             let own = (3.0 * chunk.volume / (4.0 * PI)).cbrt();
             chunk.mass * (r.length_squared() - r.dot(axis).powi(2) + 0.4 * own * own)
         })
         .sum();
-    let toughness = joints[0].seam()?.fracture_energy;
+    // The work the turn does against the group's weight where the section bears it (`n` rising,
+    // the weight pressing the plane): the opened group still stands on the plane and leaves only
+    // past the hinge, its centre of mass raised to the top of its circle about it when the turn
+    // starts it upward. A group beside or under its section has nothing under it once it opens.
+    let r = (com - hinge) - axis * (com - hinge).dot(axis);
+    let up = axis.cross(r).y;
+    let lift = if n.y > 0.0 && up > 0.0 {
+        mass * GRAVITY * (r.y.hypot(up) - r.y)
+    } else {
+        0.0
+    };
+    let cohesion = joints
+        .iter()
+        .map(|joint| joint.seam().map(|seam| seam.fracture_energy * joint.area))
+        .sum::<Option<f32>>()?;
     Some(Failure {
         joints: section.to_vec(),
         load: Load::Push,
         demand,
-        capacity: (2.0 * inertia * toughness * area).sqrt(),
+        capacity: (2.0 * inertia * (cohesion + lift)).sqrt(),
     })
 }
 
@@ -1566,8 +1656,8 @@ const TNT_ENERGY: f32 = 4.184e6;
 const SURFACE_BURST_FACTOR: f32 = 1.8;
 
 /// The least cosine of incidence a ray's patch is reckoned at (ASSUMED, Resolution): past 84° one
-/// ray's patch, `4π share d² / cos θ`, outgrows the chunk face it stops on and would load the face
-/// with impulse that lands beyond it.
+/// ray's patch, `4π share d² / cos θ`, grows without bound on the face it stops on, though the
+/// face itself bounds the cones that land on it ([`intercepted`]).
 const GRAZING_COS: f32 = 0.1;
 
 /// One of Swisdak's fits of a surface burst of TNT (Swisdak 1994, "Simplified Kingery Airblast
@@ -1575,8 +1665,9 @@ const GRAZING_COS: f32 = 0.1;
 /// Bulmash 1984, ARBRL-TR-02555, within 1 %): scaled impulse `i / W^⅓` (kPa·ms per kg^⅓, which is
 /// Pa·s per kg^⅓) at scaled distance `Z = R / W^⅓` (m/kg^⅓) as `exp(Σ cₖ (ln Z)ᵏ)`, each branch
 /// good up to its `Z`. Below `from` it holds the edge's value (the contact regime is the wall
-/// design's "Contact and near-contact blast", not this law); past the last branch it falls as
-/// `1/Z` (ASSUMED: the acoustic far field). CITED through the `kingery-bulmash` Python package's
+/// design's "Contact and near-contact blast", not this law). Nothing is read past the last branch:
+/// every walk stops a ray at the reflected fit's edge ([`Blast::reach`]), and a distance over it by
+/// rounding reads the edge's value. CITED through the `kingery-bulmash` Python package's
 /// transcription (fcento100/kingery-bulmash); the primary was not opened. Its metric reflected
 /// row agrees with its imperial row, transcribed apart, to 0.05 % (DERIVED; the module's tests
 /// hold it to 0.1 %).
@@ -1593,16 +1684,14 @@ impl ImpulseFit {
 
     /// The scaled impulse at scaled distance `z`, Pa·s per kg^⅓.
     fn at(&self, z: f32) -> f32 {
-        let edge = self.edge();
-        let held = z.max(self.from).min(edge);
+        let held = z.clamp(self.from, self.edge());
         let (_, c) = self
             .branches
             .iter()
             .find(|(to, _)| held <= *to)
             .expect("held is within the last branch's edge");
         let l = held.ln();
-        let scaled = c.iter().rev().fold(0.0, |sum, ck| sum * l + ck).exp();
-        scaled * (held / z.max(held))
+        c.iter().rev().fold(0.0, |sum, ck| sum * l + ck).exp()
     }
 }
 
@@ -1641,12 +1730,19 @@ impl Blast {
         }
     }
 
-    /// How far the blast reaches a loose piece, m: the reflected fit's last scaled distance at this
-    /// charge (Resolution: past it the push is the fit's `1/Z` extension, ASSUMED). DERIVED: the
-    /// 88 mm HE fixture burst (1.47 MJ) reaches 23.2 m, where it moves a 0.25 m brick cube square
-    /// on at 0.017 m/s, under avian's 0.15 m/s sleep threshold.
+    /// How far the blast reaches, m: the reflected fit's last scaled distance at this charge, where
+    /// every ray stops, whatever it would meet beyond (a chunk, a body, the ground). DERIVED: the
+    /// 88 mm HE fixture burst (1.47 MJ) reaches 23.2 m, where a ray that meets a 0.25 m brick cube
+    /// square on moves it at 0.017 m/s (the cube's face's share of the ray's cone, [`intercepted`]),
+    /// under avian's 0.15 m/s sleep threshold.
     pub(crate) fn reach(&self) -> f32 {
         REFLECTED_IMPULSE.edge() * (self.charge / SURFACE_BURST_FACTOR).cbrt()
+    }
+
+    /// The cross-section of the cone a ray of `share` of the field stands for, `distance` m out,
+    /// m²: its solid angle `4π share` × `d²`.
+    pub(crate) fn section(share: f32, distance: f32) -> f32 {
+        4.0 * PI * share * distance * distance
     }
 
     /// The specific impulse (Pa·s) the blast loads a face with `distance` m from the charge, at
@@ -1667,12 +1763,14 @@ impl Blast {
     }
 
     /// The impulse (N·s) a ray of `share` of the field delivers where it stops `distance` m out,
-    /// travelling along unit `dir`, on a face of outward unit normal `normal`: the specific impulse
-    /// there over the patch of the face the ray stands for, its solid angle `4π share` × `d²` /
-    /// cos θ ([`GRAZING_COS`] the least), pushed into the face (a pressure acts along the normal).
+    /// travelling along unit `dir`, on a face of outward unit normal `normal`, its cone wholly on
+    /// the face: the specific impulse there over the patch of the face the ray stands for,
+    /// [`Self::section`] / cos θ ([`GRAZING_COS`] the least), pushed into the face (a pressure acts
+    /// along the normal). A face smaller than the cone takes its intercepted share of this
+    /// ([`intercepted`]).
     pub(crate) fn push(&self, share: f32, distance: f32, dir: Vec3, normal: Vec3) -> Vec3 {
         let cos = -dir.dot(normal);
-        let patch = 4.0 * PI * share * distance * distance / cos.max(GRAZING_COS);
+        let patch = Self::section(share, distance) / cos.max(GRAZING_COS);
         -normal * (self.specific_impulse(distance, cos) * patch)
     }
 }
@@ -1688,9 +1786,10 @@ pub(crate) struct RayHit {
 
 /// A blast's rays from `origin`: each of `directions` (unit, with its share of the field; the
 /// shares sum to 1) carries that share of the blast's energy, stops on the first standing block it
-/// meets, which shadows everything behind it, and pushes the face it meets ([`Blast::push`]). A ray
-/// that meets none leaves. Coupling is the geometry's: the share of directions the blocks
-/// intercept.
+/// meets within the blast's reach ([`Blast::reach`]), which shadows everything behind it, and
+/// pushes the face it meets ([`Blast::push`]); the block takes the share of the ray's energy and
+/// push its silhouette intercepts ([`intercepted`]). A ray that meets none leaves. Coupling is the
+/// geometry's: the share of directions the blocks intercept, and of each cone the block it meets.
 pub(crate) fn blast_rays(
     blocks: &[Block],
     standing: impl Fn(usize) -> bool,
@@ -1698,15 +1797,34 @@ pub(crate) fn blast_rays(
     blast: Blast,
     directions: &[(Vec3, f32)],
 ) -> Vec<RayHit> {
-    directions
+    let reach = blast.reach();
+    let mut faces: std::collections::BTreeMap<usize, Vec<(Vec3, f32)>> = Default::default();
+    let mut stops = Vec::new();
+    let hits: Vec<RayHit> = directions
         .iter()
         .filter_map(|&(dir, share)| {
-            first_hit(blocks, &standing, origin, dir).map(|(chunk, t, normal)| RayHit {
+            let (chunk, t, normal) = first_hit(blocks, &standing, origin, dir)?;
+            if t > reach {
+                return None;
+            }
+            let faces = faces
+                .entry(chunk)
+                .or_insert_with(|| blocks[chunk].face_areas());
+            stops.push((chunk, Blast::section(share, t), silhouette(faces, dir)));
+            Some(RayHit {
                 chunk,
                 at: origin + dir * t,
                 energy: blast.energy * share,
                 impulse: blast.push(share, t, dir, normal),
             })
+        })
+        .collect();
+    hits.into_iter()
+        .zip(intercepted(&stops))
+        .map(|(hit, kept)| RayHit {
+            energy: hit.energy * kept,
+            impulse: hit.impulse * kept,
+            ..hit
         })
         .collect()
 }
@@ -1981,12 +2099,12 @@ mod tests {
         let top = (h - 1) * w + w / 2;
         let loose = 2 * w + 1;
         let cases: [(Vec<usize>, Vec<Push>); 3] = [
-            (Vec::new(), vec![push(top, Vec3::Z * 400.0)]),
+            (Vec::new(), vec![push(top, Vec3::Z * 1600.0)]),
             (
                 Vec::new(),
                 vec![
-                    push(top, Vec3::new(0.0, 0.0, -150.0)),
-                    push(w + 6, Vec3::new(20.0, 0.0, 300.0)),
+                    push(top, Vec3::new(0.0, 0.0, -600.0)),
+                    push(w + 6, Vec3::new(80.0, 0.0, 1200.0)),
                 ],
             ),
             (
@@ -1996,7 +2114,7 @@ mod tests {
                         joint.a == loose || joint.b == Side::Chunk(loose)
                     })
                     .collect(),
-                vec![push(loose, Vec3::Z * 500.0), push(top, Vec3::Z * 200.0)],
+                vec![push(loose, Vec3::Z * 500.0), push(top, Vec3::Z * 800.0)],
             ),
         ];
         let mut cache = SectionCache::default();
@@ -2324,6 +2442,42 @@ mod tests {
             close(skim, Vec3::NEG_Z * skim_impulse * patch / GRAZING_COS),
             "{skim}"
         );
+    }
+
+    /// A RAY'S CONE PUSHES AND LOADS ONLY THE SILHOUETTE IT LANDS ON, AND NO RAY GOES PAST REACH:
+    /// one ray square onto a cube face (fixture geometry), at a range where its cone's section
+    /// outgrows the face, delivers the reflected impulse over the face's own area and the share of
+    /// its energy the face intercepts, `A / section`; close in, where the section is under the
+    /// face, the whole ray; and past [`Blast::reach`] the cube takes nothing. A push over the
+    /// ray's patch (one far ray throwing a whole house), an energy deposit independent of range, or
+    /// a field read past its fit's range fails here; every chunk and body a blast meets reads this.
+    #[test]
+    fn a_ray_pushes_only_the_face_it_meets_and_stops_at_reach() {
+        // W / 1.8 = 1 kg, so the scaled distance is the distance and reach is the fit's edge.
+        let blast = Blast::of(TNT_ENERGY * SURFACE_BURST_FACTOR);
+        let share = 1.0 / BLAST_RAYS as f32;
+        let face = CUBE * CUBE;
+        let cube = [Block::cuboid(Vec3::ZERO, Vec3::splat(CUBE))];
+        let hit = |d: f32| {
+            let origin = Vec3::new(CUBE / 2.0, CUBE / 2.0, -d);
+            blast_rays(&cube, |_| true, origin, blast, &[(Vec3::Z, share)])
+        };
+        for d in [0.5_f32, 10.0, 39.0] {
+            let section = Blast::section(share, d);
+            let kept = (face / section).min(1.0);
+            let hits = hit(d);
+            assert_eq!(hits.len(), 1, "{d} m");
+            let want = REFLECTED_IMPULSE.at(d) * section * kept;
+            assert!(
+                (hits[0].impulse - Vec3::Z * want).length() <= 1e-4 * want,
+                "{d} m: {} against {want}",
+                hits[0].impulse
+            );
+            let energy = blast.energy * share * kept;
+            assert!((hits[0].energy - energy).abs() <= 1e-4 * energy, "{d} m");
+        }
+        assert!(Blast::section(share, 0.5) < face && Blast::section(share, 10.0) > face);
+        assert!(hit(blast.reach() + 0.5).is_empty(), "past reach");
     }
 
     /// The fixture cube's width, m, and so its faces' area, m².
