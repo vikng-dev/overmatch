@@ -102,8 +102,8 @@ def debris_line(tick_p50: float, live: int) -> str:
         '"period_s":1.0,"projectiles":0,"rss_mb":90.0,"tanks":30,"tick_hz":64.0,'
         f'"tick_us":{{"max":3000,"p50":{tick_p50},"p95":2500}},"ticks":64,'
         '"physics_us":{"max":900,"p50":400,"p95":700},"send_us":{"max":300,"p50":100,"p95":200},'
-        f'"debris":{{"live":{live},"frozen":120,"breaches":4,"released":{40 * live},'
-        '"rest_frozen":110,"cap_frozen":0,"thawed":2,"despawned":0}}'
+        f'"debris":{{"live":{live},"sleeping":120,"breaches":4,"released":{40 * live}}}'
+        "}"
     )
 
 
@@ -118,11 +118,12 @@ class StressTable(unittest.TestCase):
         self.assertEqual(cells["send_p50"], 100)
         self.assertEqual(cells["live"], 20)
         self.assertEqual(cells["live_max"], 30)
+        self.assertEqual(cells["sleeping_max"], 120)
         self.assertEqual(cells["released"], 800, "released is cumulative: the window's count is last - first")
 
     def test_an_off_condition_has_no_debris_cells_and_anchors_the_deltas(self):
-        # An unarmed server prints no `debris` object: its cells must read absent, not zero pieces,
-        # and every other lever's change is taken from its median, not from a neighbour's.
+        # A line with no `debris` object (a server older than the census): its cells must read
+        # absent, not zero pieces, and every other lever's change is taken from its median, not from a neighbour's.
         off = stress_cells(aggregate([parse_stats_line(STATS)]))
         self.assertIsNone(off["live"])
         armed = stress_cells(aggregate([parse_stats_line(debris_line(1000, 10))]))

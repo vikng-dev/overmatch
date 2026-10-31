@@ -264,7 +264,7 @@ STRESS_COLUMNS = [
     ("thr_n", "nr_throttled", "median"),
     ("live", "debris.live", "median"),
     ("live_max", "debris.live", "max"),
-    ("frozen_max", "debris.frozen", "max"),
+    ("sleeping_max", "debris.sleeping", "max"),
     ("released", "debris.released", "last_minus_first"),
     ("tanks", "tanks", "median"),
 ]

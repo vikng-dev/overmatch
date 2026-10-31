@@ -14,9 +14,9 @@
 #
 # Conditions (default): off 10:5 35:5 200:5 200:5 35:5 10:5 off. Every lever value runs twice, as
 # a palindrome, so a drift linear in time cancels from each value's mean: the A/B/B/A design over
-# four levels. A condition is a lever value: `off`, or `<pieces>:<period_s>[:<live_cap>[:
-# <frozen_cap>]]`, the lever's own format (live cap default 256; frozen cap default none, so the
-# rubble persists and the frozen count climbs through a condition; every stats line carries it).
+# four levels. A condition is a lever value: `off`, or `<pieces>:<period_s>`, the
+# lever's own format. Pieces are never despawned, so the sleeping count climbs through a
+# condition (every stats line carries it).
 #
 # Why a client at all: the server replicates only to connected links, and the price under test
 # includes sending the fragments. The clients sit idle (SPIKE_SIM_IDLE=1): their tanks stay parked
@@ -38,7 +38,7 @@
 # Products in <out-dir>: c<NN>-<label>.server.log (the whole log), .window.log (the log at the
 # window's close), .marker, .server.json, .client<i>.log per condition; conditions.tsv (condition,
 # lever, json); manifest.txt; summary.txt (online_cost.py stress: per condition the tick p50/p95,
-# the physics step and outbound brackets, CPU and the live/frozen fragments; then per lever, with
+# the physics step and outbound brackets, CPU and the live/sleeping fragments; then per lever, with
 # its change from `off`).
 #
 # A day run or a SMOKE quotes no number: other builds share the machine by day.

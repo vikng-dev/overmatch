@@ -22,7 +22,7 @@
 #       --stats-s S sets the server-stats lever ($STATS_LEVER, default OVERMATCH_SERVER_STATS_S) to
 #                   S seconds (default 1); 0 leaves it unset. A server without the lever ignores it.
 #       --debris V  sets the debris stress lever ($DEBRIS_LEVER, default OVERMATCH_DEBRIS_STRESS) to
-#                   V, `<pieces>:<period_s>[:<live_cap>[:<frozen_cap>]]` (src/net/debris_stress.rs);
+#                   V, `<pieces>:<period_s>` (src/net/debris_stress.rs);
 #                   `off` or absent: unset. A server older than the lever ignores it.
 #       --env K=V   any other server env var.
 #       --max-min M the watchdog's limit in minutes (default 90, or $EDGEGAP_PROFILE_MAX_MIN).
@@ -428,8 +428,8 @@ cmd_deploy() {
   [[ "$stats_s" =~ ^[0-9]+$ ]] || die "--stats-s must be a non-negative integer"
   # The server refuses a malformed debris value at launch, which a deployment shows only as an
   # ERROR: refused here instead.
-  [[ "$debris" == off || "$debris" =~ ^[0-9]+:[0-9]+(\.[0-9]+)?(:[0-9]+){0,2}$ ]] ||
-    die "--debris wants <pieces>:<period_s>[:<live_cap>[:<frozen_cap>]] or off, got '$debris'"
+  [[ "$debris" == off || "$debris" =~ ^[0-9]+:[0-9]+(\.[0-9]+)?$ ]] ||
+    die "--debris wants <pieces>:<period_s> or off, got '$debris'"
   ((bots > 0)) && envs+=("$BOT_LEVER=$bots")
   ((stats_s > 0)) && envs+=("$STATS_LEVER=$stats_s")
   [[ "$debris" != off ]] && envs+=("$DEBRIS_LEVER=$debris")
