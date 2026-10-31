@@ -846,8 +846,9 @@ mod tests {
     /// A launched turret's armour reaches the world at a bit-exact unit scale, whatever pose the
     /// tank and turret were in. The collector refuses armour at any other scale
     /// (`ballistics::collect`), and avian composes each collider's scale from its root's
-    /// `Transform` (`ColliderTransform`), so a turret whose scale is read back out of its rotated
-    /// world matrix, an ULP off 1 for most poses, fails closed every round that meets it.
+    /// `Transform` (`ColliderTransform`). Decomposing a rotated world matrix can perturb a unit
+    /// scale, so a turret whose scale is read back out of it fails closed every round that meets
+    /// it.
     ///
     /// FIXTURE DATA: sixteen poses, at least one of whose world matrix decomposes off 1 (asserted,
     /// so the test cannot pass vacuously).
