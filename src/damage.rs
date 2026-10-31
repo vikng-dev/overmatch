@@ -312,6 +312,8 @@ pub(crate) fn knockout_from_counts(
 pub struct DamageConsequences;
 
 pub fn plugin(app: &mut App) {
+    // A launched turret's colliders change body; the rule keeps their contact pairs naming it.
+    app.add_plugins(crate::collider_rehome::plugin);
     // The crew-swap seam: commands start/cancel swaps on the fixed clock (consuming the edge);
     // `tick_swaps` runs the in-flight timer. The whole consequence chain is sim — it decides who
     // lives and what works — so it steps on the fixed clock with the rest of the simulation.
