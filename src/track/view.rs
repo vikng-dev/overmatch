@@ -55,11 +55,14 @@ pub fn view_plugin(app: &mut App) {
     // the A/B is a launch-time arm, not something a frame gets to change.
     app.insert_resource(ProxyMode::from_env());
     app.add_systems(Update, (bind_track_rigs, attach_shadow_proxies).chain());
+    // Before scope resolution: the caster swap gives the ribbon its `Mesh3d` here, and a mesh that
+    // resolves a frame late is drawn by the camera on the default channel for that frame.
     app.configure_sets(
         PostUpdate,
         TrackViewSet
             .after(PhysicsSystems::Writeback)
-            .before(TransformSystems::Propagate),
+            .before(TransformSystems::Propagate)
+            .before(crate::render_policy::ScopeResolution),
     );
     app.add_systems(PostUpdate, drive_track_views.in_set(TrackViewSet));
     // A belt's table reaches its bounds and the render world in the frame the view fits it: the
@@ -627,19 +630,18 @@ fn bind_track_rigs(
 /// ([`super::shadow_proxy`] — read its module doc first; the mechanism that hides the ribbon from
 /// the camera is not the obvious one, and the obvious one is broken upstream).
 ///
-/// This system does NOT silence the shoes. The caster swap is atomic and lives in
-/// [`drive_track_views`], which flips it on the frame a real ribbon exists — see
-/// [`shadow_proxy::ProxySide::built`] for why spawning an empty proxy and silencing the shoes in
-/// the same breath is a silent total shadow loss waiting for its first slow frame.
+/// The ribbon entity is spawned WITHOUT a mesh, and this system does NOT silence the shoes. Both
+/// happen in [`drive_track_views`], on the frame the first fit creates the ribbon's mesh asset —
+/// see [`shadow_proxy::ProxySide::mesh`] for why neither an empty mesh nor shoes silenced against
+/// one may exist for even a frame.
 ///
 /// A separate system rather than more parameters on [`bind_track_rigs`], which is already at twelve:
-/// this one needs two `Assets` writers, and the mesh it spawns cannot be built until the belt has
+/// this one needs the material writer, and the ribbon's mesh cannot be built until the belt has
 /// been fitted once anyway. `Added<TrackRig>` fires the frame after the bind's `Commands` flush.
 fn attach_shadow_proxies(
     mode: Res<ProxyMode>,
     geom: Option<Res<RigGeom>>,
     mut rigs: Query<(Entity, &mut TrackRig), Added<TrackRig>>,
-    mut meshes: ResMut<Assets<Mesh>>,
     mut materials: ResMut<Assets<StandardMaterial>>,
     // One material for every proxy in the session — the ribbons differ in MESH, never in look.
     mut material: Local<Option<Handle<StandardMaterial>>>,
@@ -662,13 +664,6 @@ fn attach_shadow_proxies(
         .clone();
     for (root, mut rig) in &mut rigs {
         for (si, side) in rig.sides.iter_mut().enumerate() {
-            // An empty mesh until the first belt fit lands (`built`), so a proxy can never flash a
-            // fold of a half-initialised polyline — and, with the swap now atomic, so the shoes
-            // keep casting until this is real geometry.
-            let mesh = meshes.add(Mesh::new(
-                bevy::mesh::PrimitiveTopology::TriangleList,
-                bevy::asset::RenderAssetUsages::default(),
-            ));
             let proxy = commands.spawn((
                 Name::new(if si == 0 {
                     "Track shadow proxy L"
@@ -685,26 +680,21 @@ fn attach_shadow_proxies(
                 } else {
                     VisualScope::SHADOW_PROXY
                 },
-                Mesh3d(mesh.clone()),
                 MeshMaterial3d(material.clone()),
                 // Identity: the ribbon is authored directly in hull space, the frame the belt
                 // joints already live in.
                 Transform::IDENTITY,
                 ChildOf(root),
             ));
-            side.proxy = Some(ProxySide {
-                entity: proxy.id(),
-                mesh,
-                built: false,
-                pending_frames: 0,
-                ribbon: Default::default(),
-                section: shadow_proxy::Section::from_shoe(
+            side.proxy = Some(ProxySide::new(
+                proxy.id(),
+                shadow_proxy::Section::from_shoe(
                     side.link_center_x,
                     geom.model.width,
                     geom.model.pin_to_inner,
                     geom.model.pin_to_outer,
                 ),
-            });
+            ));
         }
         // Intent only — deliberately says nothing about triangles or silenced shoes, because at this
         // point neither exists. `drive_track_views` logs the MEASURED geometry when the swap lands.
@@ -734,16 +724,17 @@ fn drive_track_views(
     // per frame — well below the SystemParam ceiling.
     gear: Res<super::sim::TrackGear>,
     blueprint: Res<TankBlueprint>,
-    // The shadow ribbon's arm and the assets it writes into: one `Mesh` per tank SIDE, rewritten in
-    // place under [`ProxyMode::Dynamic`] (never shared — two tanks stand on different ground).
+    // The shadow ribbon's arm and the assets it writes into: one `Mesh` per tank SIDE, created by
+    // its first fit and rewritten in place under [`ProxyMode::Dynamic`] (never shared — two tanks
+    // stand on different ground).
     mode: Res<ProxyMode>,
     mut proxy_meshes: ResMut<Assets<Mesh>>,
     mut tanks: Query<(&Transform, &TrackDrive, &mut TrackRig)>,
     mut views: Query<&mut Transform, Without<TrackRig>>,
     // Each side's frame table, which its belt draws, the prints stamp and the rung selector reads.
     mut belts: Query<&mut BeltFrames>,
-    // The caster swap's one write: `VisualScope::PROXIED_CASTER` onto this side's belt, on the
-    // frame its ribbon first exists. Runs once per side per bind, never per frame.
+    // The caster swap's writes: the ribbon's `Mesh3d` and `VisualScope::PROXIED_CASTER` onto this
+    // side's belt, on the frame its ribbon first exists. Once per side per bind, never per frame.
     mut commands: Commands,
     // The belt sink: the depth the ground's shader draws a print at, and the running gear the
     // tank's ground pressure is read from. Absent without a printed world, where nothing sinks.
@@ -926,23 +917,16 @@ fn drive_track_views(
             // runs once and the ribbon rides the hull unchanged; live modes retain the topology
             // and update positions only when these hull-local joints change.
             //
-            // This is also where the CASTER SWAP happens, and it is atomic on purpose: the shoes are
-            // silenced on the frame a non-empty ribbon first lands, never at spawn. Every guard in
-            // the chain below can legitimately fail (no mesh asset yet, a mid-bind belt under three
-            // joints) and each one used to mean a tank with no belt shadow at all.
+            // This is also where the CASTER SWAP happens, and it is atomic on purpose: the ribbon
+            // gets its mesh and the shoes are silenced on the frame the first fit closes a loop,
+            // never at spawn and never apart ([`shadow_proxy::ProxySide::mesh`]). Both writes are
+            // resolved this frame: `TrackViewSet` runs before `ScopeResolution`.
             if let Some(proxy) = &mut side.proxy {
-                // Write the mesh, and count what was ACTUALLY written. Zero covers every way this
-                // frame can fail to produce geometry, including the ones the `&&` chain swallows.
-                let mut triangles = 0;
-                if (!proxy.built || mode.follows_belt())
-                    && proxy.ribbon.needs_update(&out[si].joints)
-                    && let Some(mut mesh) = proxy_meshes.get_mut(&proxy.mesh)
-                {
-                    triangles = proxy
-                        .ribbon
-                        .write(&mut mesh, &out[si].joints, proxy.section);
-                }
-                match proxy.record_attempt(triangles) {
+                match proxy.fit(
+                    proxy_meshes.reborrow(),
+                    &out[si].joints,
+                    mode.follows_belt(),
+                ) {
                     ProxyStep::Idle => {}
                     // The shoes keep rendering at full detail to the camera at every distance — this
                     // is a CASTER swap, not an LOD. `PROXIED_CASTER` is the preset that says so: it
@@ -950,7 +934,8 @@ fn drive_track_views(
                     // inheriting the tank's channel, so a silenced belt still follows its tank into
                     // and out of the gunner optic. MEASURED triangles, never `count * 8`: the
                     // number in this line is the number of triangles that exist.
-                    ProxyStep::Silence => {
+                    ProxyStep::Silence { mesh, triangles } => {
+                        commands.entity(proxy.entity).insert(Mesh3d(mesh));
                         commands
                             .entity(side.belt)
                             .insert(VisualScope::PROXIED_CASTER);
@@ -1021,11 +1006,14 @@ mod tests {
     use super::*;
 
     /// Tank-part presentation consumes fresh view facts, then writes running gear before globals
-    /// and belt upload consume it. Audit the production registrations without running a renderer;
-    /// removing a required order must expose the conflicting pair regardless of executor order.
+    /// and belt upload consume it, and gives the ribbon its mesh before scope resolution reads it.
+    /// Audit the production registrations without running a renderer; removing a required order
+    /// must expose the conflicting pair or the missing path regardless of executor order.
     #[test]
     fn presented_tank_parts_have_ordered_producers_and_consumers() {
-        use bevy::ecs::schedule::{LogLevel, ScheduleBuildSettings, ScheduleLabel};
+        use bevy::ecs::schedule::{
+            InternedSystemSet, LogLevel, NodeId, ScheduleBuildSettings, ScheduleLabel,
+        };
 
         let mut app = App::new();
         app.add_plugins((
@@ -1093,42 +1081,46 @@ mod tests {
                         "{producer} must produce this frame's value before {consumer} reads it"
                     );
                 }
+                // The ribbon's `Mesh3d` lands by command, which no access conflict sees: a path of
+                // ordering edges to scope resolution is what resolves it onto the shadow-only
+                // channel in its first frame, instead of the camera drawing it on the default one.
+                if label == PostUpdate.intern() {
+                    let node =
+                        |set: InternedSystemSet| graph.system_sets.get_key(set).map(NodeId::Set);
+                    let from = node(TrackViewSet.intern()).expect("TrackViewSet");
+                    let to = node(crate::render_policy::ScopeResolution.intern())
+                        .expect("ScopeResolution");
+                    let edges = graph.dependency().graph();
+                    let (mut stack, mut seen) = (vec![from], Vec::new());
+                    let mut reached = false;
+                    while let Some(at) = stack.pop() {
+                        reached |= at == to;
+                        if !seen.contains(&at) {
+                            seen.push(at);
+                            stack.extend(edges.neighbors(at));
+                        }
+                    }
+                    assert!(reached, "the caster swap resolves before scope resolution");
+                }
             });
         }
     }
 
-    /// Invariant: an exactly settled, standing tank writes no belt table, wheel transform or ribbon
-    /// asset, and a moving belt writes its tables and NO per-link transform: the only transforms
-    /// the view writes are the running gear's. Transform propagation, the belt upload and render
-    /// extraction rely on both. The shipped rig is fixture data; the pass conditions are generic and
-    /// independent of its counts. ASSUMED fixture cadence: stationary warmup followed by repeated
-    /// identical presentation frames.
-    #[test]
-    fn settled_standing_tank_writes_no_belt_wheel_or_ribbon_data() {
-        #[derive(Resource, Default)]
-        struct Writes {
-            transforms: Vec<Entity>,
-            tables: Vec<Entity>,
-            meshes: bool,
-        }
-        fn count_writes(
-            mut writes: ResMut<Writes>,
-            poses: Query<Entity, (Changed<Transform>, Without<TrackRig>)>,
-            tables: Query<Entity, Changed<BeltFrames>>,
-            meshes: Res<Assets<Mesh>>,
-        ) {
-            writes.transforms = poses.iter().collect();
-            writes.tables = tables.iter().collect();
-            writes.meshes = meshes.is_changed();
-        }
+    /// The shipped rig's construction world (`bake` and `sim` plugins, `Startup` and `PreUpdate`
+    /// only: a presentation fixture has no physics or asset-loader clock) and its measured
+    /// running gear. Fixture data: no pass condition reads a count from it.
+    fn construction_app() -> (App, RigGeom) {
         let mut app = App::new();
         app.add_plugins((crate::bake::plugin, super::super::sim::sim_plugin));
-        // Run only construction: this presentation fixture has no physics or asset-loader clock.
         app.world_mut().run_schedule(Startup);
         app.world_mut().run_schedule(PreUpdate);
         let geom = app.world().resource::<RigGeom>().clone();
-        let world = app.world_mut();
-        let mut meshes = Assets::<Mesh>::default();
+        (app, geom)
+    }
+
+    /// A rig on `geom` with its wheel, sprocket, idler and belt entities spawned, as
+    /// `bind_track_rigs` leaves it: no shadow proxy yet.
+    fn fixture_rig(world: &mut World, geom: &RigGeom) -> TrackRig {
         let sides = [Side::Left, Side::Right].map(|side| {
             let circles = geom.rest.get(side);
             let plane_x = geom.plane_x * if side == Side::Left { -1.0 } else { 1.0 };
@@ -1167,47 +1159,76 @@ mod tests {
                     ))
                     .id(),
                 link_center_x: geom.link_center_x(side),
-                proxy: Some(ProxySide {
-                    entity: spawn_pose(world),
-                    mesh: meshes.add(Mesh::new(
-                        bevy::mesh::PrimitiveTopology::TriangleList,
-                        bevy::asset::RenderAssetUsages::default(),
-                    )),
-                    built: false,
-                    pending_frames: 0,
-                    section: shadow_proxy::Section::from_shoe(
-                        geom.link_center_x(side),
-                        geom.model.width,
-                        geom.model.pin_to_inner,
-                        geom.model.pin_to_outer,
-                    ),
-                    ribbon: Default::default(),
-                }),
+                proxy: None,
             }
         });
+        TrackRig {
+            belt_len: geom.belt_len(),
+            count: geom.link_count,
+            teeth: geom.teeth,
+            pin_to_inner: geom.model.pin_to_inner,
+            thickness: geom.thickness,
+            wrap: Default::default(),
+            presented_phase: [None; 2],
+            sides,
+            prev_affine: None,
+            field_revision: None,
+            fit_dependencies: None,
+            contact_clock: Default::default(),
+            fit_affine: None,
+            contacts: Default::default(),
+        }
+    }
+
+    /// One side's ribbon section, from the measured shoe.
+    fn fixture_section(geom: &RigGeom, side: Side) -> shadow_proxy::Section {
+        shadow_proxy::Section::from_shoe(
+            geom.link_center_x(side),
+            geom.model.width,
+            geom.model.pin_to_inner,
+            geom.model.pin_to_outer,
+        )
+    }
+
+    /// Invariant: an exactly settled, standing tank writes no belt table, wheel transform or ribbon
+    /// asset, and a moving belt writes its tables and NO per-link transform: the only transforms
+    /// the view writes are the running gear's. Transform propagation, the belt upload and render
+    /// extraction rely on both. The shipped rig is fixture data; the pass conditions are generic and
+    /// independent of its counts. ASSUMED fixture cadence: stationary warmup followed by repeated
+    /// identical presentation frames.
+    #[test]
+    fn settled_standing_tank_writes_no_belt_wheel_or_ribbon_data() {
+        #[derive(Resource, Default)]
+        struct Writes {
+            transforms: Vec<Entity>,
+            tables: Vec<Entity>,
+            meshes: bool,
+        }
+        fn count_writes(
+            mut writes: ResMut<Writes>,
+            poses: Query<Entity, (Changed<Transform>, Without<TrackRig>)>,
+            tables: Query<Entity, Changed<BeltFrames>>,
+            meshes: Res<Assets<Mesh>>,
+        ) {
+            writes.transforms = poses.iter().collect();
+            writes.tables = tables.iter().collect();
+            writes.meshes = meshes.is_changed();
+        }
+        let (mut app, geom) = construction_app();
+        let world = app.world_mut();
+        let mut rig = fixture_rig(world, &geom);
+        for (side, rig_side) in [Side::Left, Side::Right].into_iter().zip(&mut rig.sides) {
+            let entity = world.spawn(Transform::IDENTITY).id();
+            rig_side.proxy = Some(ProxySide::new(entity, fixture_section(&geom, side)));
+        }
         let tank = world
             .spawn((
                 Transform::from_translation(Vec3::Y * geom.hull_rest_y),
                 TrackDrive::default(),
-                TrackRig {
-                    belt_len: geom.belt_len(),
-                    count: geom.link_count,
-                    teeth: geom.teeth,
-                    pin_to_inner: geom.model.pin_to_inner,
-                    thickness: geom.thickness,
-                    wrap: Default::default(),
-                    presented_phase: [None; 2],
-                    sides,
-                    prev_affine: None,
-                    field_revision: None,
-                    fit_dependencies: None,
-                    contact_clock: Default::default(),
-                    fit_affine: None,
-                    contacts: Default::default(),
-                },
+                rig,
             ))
             .id();
-        world.insert_resource(meshes);
+        world.insert_resource(Assets::<Mesh>::default());
         world.insert_resource(ProxyMode::Dynamic);
         world.insert_resource(TrackField {
             revision: Some(0),
@@ -1277,6 +1298,87 @@ mod tests {
         let mut expected = belts;
         expected.sort();
         assert_eq!(tables, expected, "a moving belt writes both its tables");
+    }
+
+    /// Invariant: no empty mesh reaches a render entity. On every frame of a bound rig's life,
+    /// the frames before its first fit included, every `Mesh3d` names a mesh with positions and
+    /// vertices, no mesh asset is empty, and a ribbon gets its `Mesh3d` on the frame its belt is
+    /// silenced, never apart. The renderer relies on the first two: bevy_render 0.19.1 logs every
+    /// extraction of a zero-vertex mesh as `Use-after-free`, and a `Mesh3d` on a mesh with no
+    /// positions fails the shadow prepass pipeline's validation, which quits the client. The
+    /// caster swap relies on the third. The late fit here is a replica bound before its
+    /// interpolated `TrackDrive` is visible (`drive_track_views` skips a tank without one), the
+    /// route ASSUMED for the client's quits on a respawn wave; the frame count is ASSUMED, the rig
+    /// is fixture data, and no pass condition reads its counts.
+    #[test]
+    fn no_empty_mesh_reaches_a_render_entity_before_or_after_the_first_fit() {
+        /// Frames the fixture runs before the belt state lands. ASSUMED.
+        const LATE_FRAMES: usize = 5;
+        let (mut app, geom) = construction_app();
+        let world = app.world_mut();
+        let rig = fixture_rig(world, &geom);
+        let belts: Vec<Entity> = rig.sides.iter().map(|side| side.belt).collect();
+        let tank = world
+            .spawn(Transform::from_translation(Vec3::Y * geom.hull_rest_y))
+            .id();
+        world.insert_resource(Assets::<Mesh>::default());
+        world.insert_resource(Assets::<StandardMaterial>::default());
+        world.insert_resource(ProxyMode::Dynamic);
+        world.insert_resource(TrackField {
+            revision: Some(0),
+            field: Some(print_ground(vec![])),
+        });
+        world.insert_resource(Time::<()>::default());
+        world.insert_resource(Time::<Fixed>::default());
+        let mut schedule = Schedule::default();
+        schedule.add_systems((attach_shadow_proxies, drive_track_views).chain());
+        world.entity_mut(tank).insert(rig);
+        let dt = std::time::Duration::from_secs_f64(1.0 / 128.0);
+        for frame in 0..LATE_FRAMES + 3 {
+            if frame == LATE_FRAMES {
+                world.entity_mut(tank).insert(TrackDrive::default());
+            }
+            world.resource_mut::<Time>().advance_by(dt);
+            world.resource_mut::<Time<Fixed>>().advance_by(dt);
+            schedule.run(world);
+
+            let drawn: Vec<Handle<Mesh>> = world
+                .query::<&Mesh3d>()
+                .iter(world)
+                .map(|mesh| mesh.0.clone())
+                .collect();
+            let meshes = world.resource::<Assets<Mesh>>();
+            let drawable = |mesh: &Mesh| {
+                mesh.attribute(Mesh::ATTRIBUTE_POSITION).is_some() && mesh.count_vertices() > 0
+            };
+            assert!(
+                meshes.iter().all(|(_, mesh)| drawable(mesh)),
+                "an empty mesh asset on frame {frame}"
+            );
+            for mesh in &drawn {
+                assert!(
+                    meshes.get(mesh).is_some_and(drawable),
+                    "a Mesh3d names an empty or absent mesh on frame {frame}"
+                );
+            }
+            let rig = world.get::<TrackRig>(tank).expect("the rig");
+            for (side, &belt) in rig.sides.iter().zip(&belts) {
+                let proxy = side.proxy.as_ref().expect("attached on the bind frame");
+                let ribbon = world.get::<Mesh3d>(proxy.entity).map(|mesh| mesh.id());
+                let silenced = world.get::<VisualScope>(belt) == Some(&VisualScope::PROXIED_CASTER);
+                assert_eq!(
+                    ribbon.is_some(),
+                    frame >= LATE_FRAMES,
+                    "a ribbon has a mesh from the frame its first fit lands, frame {frame}"
+                );
+                assert_eq!(
+                    ribbon.is_some(),
+                    silenced,
+                    "the ribbon's mesh and its silenced shoes arrive together, frame {frame}"
+                );
+                assert_eq!(ribbon, proxy.mesh.as_ref().map(Handle::id));
+            }
+        }
     }
 
     /// Invariant: once pose, terrain/print inputs and wheel articulation settle, the view emits

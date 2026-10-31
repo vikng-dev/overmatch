@@ -407,19 +407,25 @@ pub(crate) fn pen_cam_gizmo_layers() -> RenderLayers {
 /// `PostUpdate`, ahead of `VisibilitySystems::CheckVisibility` (and therefore ahead of
 /// `bevy_light`'s caster sweep, which is ordered after it): an entity spawned anywhere from
 /// `Startup` through the scene-spawner schedules is resolved in the SAME frame it appears, so
-/// nothing ever renders a frame on the wrong channel. A camera's profile resolves after
-/// [`CaptiveCameraPlaced`], whose captor changes it.
+/// nothing ever renders a frame on the wrong channel. A `PostUpdate` system that gives an entity
+/// its `Mesh3d` or its scope keeps that promise only by running before [`ScopeResolution`]. A
+/// camera's profile resolves after [`CaptiveCameraPlaced`], whose captor changes it.
 pub(crate) fn plugin(app: &mut App) {
     app.add_systems(
         PostUpdate,
         (
             resolve_camera_profiles.after(CaptiveCameraPlaced),
             resolve_light_profiles,
-            resolve_visual_scopes,
+            resolve_visual_scopes.in_set(ScopeResolution),
         )
             .before(VisibilitySystems::CheckVisibility),
     );
 }
+
+/// The `PostUpdate` set in which every new `Mesh3d` and every changed [`VisualScope`] resolves
+/// into bevy's own components ([`plugin`]).
+#[derive(SystemSet, Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub(crate) struct ScopeResolution;
 
 // ---------------------------------------------------------------------------------------------
 // Implementation
