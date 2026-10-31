@@ -836,17 +836,22 @@ fn insert_collision_proxies(
 }
 
 /// The friction collision proxy `node`'s hulls carry: the substance the sheet's `colliders` entry
-/// names. A proxy the sheet does not declare, or a substance stating no friction, is a broken
-/// ship (ADR-0011).
+/// names. Both panics are bugs: the bake's proxies are the sheet's `colliders`, and the bake
+/// refuses a sheet whose collider substance the registry gives no friction for
+/// (`bake::collider_substances`, `L2.SPEC`).
 pub(crate) fn proxy_friction(spec: &TankSpec, node: &str) -> Friction {
     let collider = spec
         .colliders
         .iter()
         .find(|collider| collider.node == node)
-        .unwrap_or_else(|| panic!("collision proxy `{node}` is not declared in `colliders`"));
+        .unwrap_or_else(|| {
+            panic!("collision proxy `{node}` is not declared in `colliders`, yet the bake made it")
+        });
     crate::substances::SubstanceRegistry::shipped_static()
         .contact_friction(&collider.substance)
-        .unwrap_or_else(|err| panic!("collision proxy `{node}`: {err}"))
+        .unwrap_or_else(|err| {
+            panic!("collision proxy `{node}`: {err}, yet the bake certified its sheet")
+        })
 }
 
 /// One child collider under `parent` per loose part of `primitive`, carrying `friction`.

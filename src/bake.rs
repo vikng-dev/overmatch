@@ -34,8 +34,8 @@ static L2_SPEC: Check = Check {
     id: "L2.SPEC",
     stage: Stage::Consumer,
     severity: Severity::Error,
-    law: "the tank RON parses, passes TankSpec::validate, and every typed node reference resolves \
-          to a model node",
+    law: "the tank RON parses, passes TankSpec::validate, every typed node reference resolves \
+          to a model node, and every collider's substance is a registry row that states a friction",
 };
 /// Not a law about the model: the condition under which the laws below can be evaluated at all.
 static L2_DOCUMENT: Check = Check {
@@ -1269,11 +1269,32 @@ pub(crate) fn extract_tank_geometry(
         .map(|finding| finding.subject.name.clone())
         .collect();
     findings.extend(declared_roles_resolve(&geometry, spec, &refused_at_capture));
+    findings.extend(collider_substances(spec, registry));
     findings.extend(witness_roles(&geometry, spec));
     if report::has_error(&findings) {
         return Err(sorted(findings));
     }
     Ok(geometry)
+}
+
+/// Each declared collider whose substance the registry cannot give a contact friction: a name it
+/// lacks, a substance that is not hard, or a row that states no friction. Every collision proxy's
+/// hulls carry their substance's friction (`tank::proxy_friction`), so a sheet naming one of these
+/// is refused here, at the door and at the runtime bake, instead of at a tank's first spawn.
+fn collider_substances(spec: &TankSpec, registry: &SubstanceRegistry) -> Vec<Finding> {
+    spec.colliders
+        .iter()
+        .filter_map(|collider| {
+            let error = registry.contact_friction(&collider.substance).err()?;
+            Some(Finding::new(
+                &L2_SPEC,
+                Subject::node(&collider.node).element("declared Collider substance"),
+                error,
+                "name a hard substance of `assets/materials/materials.ron` whose row states a \
+                 `friction`, or give that row one",
+            ))
+        })
+        .collect()
 }
 
 /// What every node's mesh is captured against: the registry that names the substances
@@ -1870,7 +1891,8 @@ mod tests {
         assert!(findings.is_empty(), "{}", render(&findings));
 
         // A registry that declares OTHER substances is a different verdict about the same bytes,
-        // which is the whole reason the file has to come from the right revision.
+        // which is the whole reason the file has to come from the right revision: the plates'
+        // substance is no row of it, and neither is the collider's.
         std::fs::write(
             &elsewhere,
             r#"SubstanceRegistry(substances: {"Cheese": Hard(resistance: Reference, visual: "fixture",
@@ -1886,7 +1908,7 @@ mod tests {
             refusals(&findings)
                 .into_iter()
                 .collect::<std::collections::BTreeSet<_>>(),
-            ["L2.ROLE_COHERENCE"].into_iter().collect(),
+            ["L2.ROLE_COHERENCE", "L2.SPEC"].into_iter().collect(),
             "{}",
             render(&findings)
         );
@@ -2380,6 +2402,25 @@ mod tests {
             .err()
             .expect("an invalid sheet is refused at extraction");
         assert_eq!(refusals(&findings), ["L2.SPEC"], "{}", render(&findings));
+    }
+
+    /// L2.SPEC — A COLLIDER'S SUBSTANCE IS CHECKED AT LOAD: every collision proxy's hulls carry
+    /// their substance's friction (`tank::proxy_friction`), so a sheet naming a substance the
+    /// registry cannot give a friction for is refused at the door and the runtime bake, naming the
+    /// node, not at the first spawn of that tank on a server. Mutant: dropping
+    /// `collider_substances` certifies this sheet. A row that states no friction takes the same
+    /// path (`SubstanceRegistry::contact_friction`'s own test).
+    #[test]
+    fn a_collider_whose_substance_states_no_friction_is_refused_at_load() {
+        let (nodes, spec) = sound_vehicle();
+        let spec = spec.replacen(
+            "colliders: [(node: \"Proxy\", substance: \"RHA\")]",
+            "colliders: [(node: \"Proxy\", substance: \"Unobtainium\")]",
+            1,
+        );
+        let findings = verify("collider-substance", &nodes, &spec);
+        assert_eq!(refusals(&findings), ["L2.SPEC"], "{}", render(&findings));
+        assert_eq!(findings[0].subject.name, "Proxy", "{}", render(&findings));
     }
 
     /// L2.ROLE_COHERENCE — a declared role the resolved node cannot play is refused by name.
