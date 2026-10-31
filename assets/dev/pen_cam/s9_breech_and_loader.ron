@@ -36,9 +36,9 @@
             t: 0.0,
             entry: (-1.3096657, 1.9994535, -0.5),
             exit: Some((-1.2274876, 2.0012302, -0.50270414)),
-            chord_mm: 82.117294,
-            steel_equiv_mm: 82.117294,
-            cost_mm: 82.117294,
+            chord_mm: 82.117325,
+            steel_equiv_mm: 82.117325,
+            cost_mm: 82.117325,
             overmatched: false,
             class: Main,
             factor: 1000.0,
@@ -59,11 +59,11 @@
             point: (-1.2276115, 2.0012279, -0.50269985),
         ),
         (
-            t: 0.0018477165,
+            t: 0.0018477174,
             point: (-0.5659027, 2.0155344, -0.5244746),
         ),
         (
-            t: 0.0020154328,
+            t: 0.0020154337,
             point: (-0.533638, 2.0160928, -0.52872753),
         ),
     ],
@@ -77,594 +77,594 @@
                 ratio: 2.2649755,
             ),
             half_angle_deg: 26.2,
-            strength: 1998430.0,
+            strength: 1998430.5,
             fragments: [
                 (
                     end: (-0.5751724, 2.0446582, -0.54063797),
-                    strength: 1672343.1,
+                    strength: 1672343.5,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 26130.361,
+                            damage: 26130.367,
                         ),
                     ],
                 ),
                 (
                     end: (-0.6072521, 2.0134354, -0.596086),
-                    strength: 1651751.3,
+                    strength: 1651751.6,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 25808.613,
+                            damage: 25808.62,
                         ),
                     ],
                 ),
                 (
                     end: (-0.58665943, 2.1022406, -0.5607486),
-                    strength: 1631187.8,
+                    strength: 1631188.1,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 25487.309,
+                            damage: 25487.314,
                         ),
                     ],
                 ),
                 (
                     end: (-0.56628895, 1.9894242, -0.52504635),
-                    strength: 1610650.6,
+                    strength: 1610651.0,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 25166.416,
+                            damage: 25166.422,
                         ),
                     ],
                 ),
                 (
                     end: (-0.6294317, 2.0545588, -0.6346545),
-                    strength: 1590138.6,
+                    strength: 1590139.0,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 24845.916,
+                            damage: 24845.922,
                         ),
                     ],
                 ),
                 (
                     end: (-0.5472927, 2.0951781, -0.49253654),
-                    strength: 1569649.9,
+                    strength: 1569650.3,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 24525.78,
+                            damage: 24525.785,
                         ),
                     ],
                 ),
                 (
                     end: (0.85898685, 1.8467197, -0.7877197),
-                    strength: 1549182.8,
+                    strength: 1549183.1,
                     hits: [],
                 ),
                 (
                     end: (-0.61427975, 2.1299725, -0.60869074),
-                    strength: 1528735.4,
+                    strength: 1528735.8,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 23886.49,
+                            damage: 23886.496,
                         ),
                     ],
                 ),
                 (
                     end: (-0.53036404, 2.007586, -0.46289015),
-                    strength: 1508305.6,
+                    strength: 1508306.0,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 23567.275,
+                            damage: 23567.281,
                         ),
                     ],
                 ),
                 (
                     end: (-0.64305687, 2.000691, -0.6580534),
-                    strength: 1487891.8,
+                    strength: 1487892.1,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 23248.309,
+                            damage: 23248.314,
                         ),
                     ],
                 ),
                 (
                     end: (-0.5601597, 2.1593423, -0.51506186),
-                    strength: 1467491.4,
+                    strength: 1467491.8,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 22929.553,
+                            damage: 22929.559,
                         ),
                     ],
                 ),
                 (
                     end: (0.98135185, 1.7408695, -0.5923686),
-                    strength: 1447102.6,
+                    strength: 1447103.0,
                     hits: [
                         (
                             volume: "Ammo_R_0",
-                            damage: 22610.979,
+                            damage: 22610.984,
                         ),
                     ],
                 ),
                 (
                     end: (-0.6473112, 2.101914, -0.6657996),
-                    strength: 1426723.0,
+                    strength: 1426723.3,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 22292.547,
+                            damage: 22292.55,
                         ),
                     ],
                 ),
                 (
                     end: (-0.50876427, 2.0807118, -0.42574978),
-                    strength: 1406349.9,
+                    strength: 1406350.3,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 21974.217,
+                            damage: 21974.223,
                         ),
                     ],
                 ),
                 (
-                    end: (0.5025358, 1.8044024, -0.89447975),
-                    strength: 1385981.0,
+                    end: (0.5025368, 1.8044019, -0.8944802),
+                    strength: 1385981.4,
                     hits: [],
                 ),
                 (
                     end: (-0.5996094, 2.188828, -0.5834999),
-                    strength: 1365613.4,
+                    strength: 1365613.8,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 21337.709,
+                            damage: 21337.715,
                         ),
                     ],
                 ),
                 (
                     end: (1.122406, 1.8062935, -0.3188014),
-                    strength: 1345244.4,
+                    strength: 1345244.8,
                     hits: [
                         (
                             volume: "Loader",
-                            damage: 21019.443,
+                            damage: 21019.45,
                         ),
                     ],
                 ),
                 (
                     end: (-0.6664419, 2.0338464, -0.6986809),
-                    strength: 1324870.9,
+                    strength: 1324871.3,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 20701.107,
+                            damage: 20701.113,
                         ),
                     ],
                 ),
                 (
                     end: (-0.52065086, 2.172412, -0.44667864),
-                    strength: 1304489.9,
+                    strength: 1304490.3,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 20382.654,
+                            damage: 20382.66,
                         ),
                     ],
                 ),
                 (
                     end: (-0.932456, 1.9459047, -0.5352702),
-                    strength: 1284097.8,
+                    strength: 1284098.0,
                     hits: [],
                 ),
                 (
                     end: (-0.64527893, 2.1632175, -0.66250753),
-                    strength: 1263691.1,
+                    strength: 1263691.4,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 19745.174,
+                            damage: 19745.178,
                         ),
                     ],
                 ),
                 (
                     end: (-0.48259068, 2.023447, -0.38020277),
-                    strength: 1243266.0,
+                    strength: 1243266.4,
                     hits: [
                         (
                             volume: "Gunner",
-                            damage: 19426.031,
+                            damage: 19426.037,
                         ),
                         (
                             volume: "Breech",
-                            damage: 19426.031,
+                            damage: 19426.037,
                         ),
                     ],
                 ),
                 (
                     end: (0.4722681, 1.8433862, -1.0651073),
-                    strength: 1222818.6,
+                    strength: 1222819.0,
                     hits: [],
                 ),
                 (
                     end: (-0.566226, 2.2315712, -0.52583647),
-                    strength: 1202344.8,
+                    strength: 1202345.0,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 18786.637,
+                            damage: 18786.64,
                         ),
                     ],
                 ),
                 (
                     end: (-0.9183922, 1.9456782, -0.48955202),
-                    strength: 1181839.5,
+                    strength: 1181839.8,
                     hits: [],
                 ),
                 (
                     end: (-0.66923714, 2.091961, -0.72223663),
-                    strength: 1161298.4,
+                    strength: 1161298.6,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 18145.287,
+                            damage: 18145.291,
                         ),
                     ],
                 ),
                 (
                     end: (-0.47808266, 2.1438704, -0.37284327),
-                    strength: 1140716.0,
+                    strength: 1140716.3,
                     hits: [
                         (
                             volume: "Gunner",
-                            damage: 17823.688,
+                            damage: 17823.691,
                         ),
                         (
                             volume: "Breech",
-                            damage: 17823.688,
+                            damage: 17823.691,
                         ),
                     ],
                 ),
                 (
                     end: (-0.9726763, 1.9460135, -0.5582261),
-                    strength: 1120086.9,
+                    strength: 1120087.1,
                     hits: [],
                 ),
                 (
                     end: (-0.62559414, 2.2266126, -0.6286473),
-                    strength: 1099405.1,
+                    strength: 1099405.4,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 17178.205,
+                            damage: 17178.209,
                         ),
                     ],
                 ),
                 (
                     end: (1.1563358, 1.8119526, -0.08082104),
-                    strength: 1078664.3,
+                    strength: 1078664.5,
                     hits: [
                         (
                             volume: "Gunner",
-                            damage: 16854.129,
+                            damage: 16854.133,
                         ),
                         (
                             volume: "Loader",
-                            damage: 16854.129,
+                            damage: 16854.133,
                         ),
                     ],
                 ),
                 (
                     end: (-0.6647463, 1.9917502, -0.7418604),
-                    strength: 1057857.6,
+                    strength: 1057857.9,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 16529.025,
+                            damage: 16529.03,
                         ),
                     ],
                 ),
                 (
                     end: (-0.51905155, 2.2468314, -0.44418573),
-                    strength: 1036977.44,
+                    strength: 1036977.7,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 16202.772,
+                            damage: 16202.776,
                         ),
                     ],
                 ),
                 (
                     end: (-1.0134354, 1.9457388, -0.51179457),
-                    strength: 1016015.94,
+                    strength: 1016016.2,
                     hits: [],
                 ),
                 (
                     end: (-0.6695051, 2.1624832, -0.7168398),
-                    strength: 994964.3,
+                    strength: 994964.56,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 15546.317,
+                            damage: 15546.321,
                         ),
                     ],
                 ),
                 (
                     end: (-0.44427967, 2.0738125, -0.3140335),
-                    strength: 973813.2,
+                    strength: 973813.44,
                     hits: [
                         (
                             volume: "Gunner",
-                            damage: 15215.831,
+                            damage: 15215.835,
                         ),
                         (
                             volume: "Breech",
-                            damage: 15215.831,
+                            damage: 15215.835,
                         ),
                     ],
                 ),
                 (
                     end: (-0.9449854, 1.946197, -0.59953356),
-                    strength: 952552.4,
+                    strength: 952552.6,
                     hits: [],
                 ),
                 (
                     end: (-0.5884628, 2.2806463, -0.56453514),
-                    strength: 931170.44,
+                    strength: 931170.7,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 14549.538,
+                            damage: 14549.542,
                         ),
                     ],
                 ),
                 (
                     end: (-0.9427023, 1.945509, -0.46318483),
-                    strength: 909655.2,
+                    strength: 909655.4,
                     hits: [],
                 ),
                 (
                     end: (-0.6681452, 2.0600224, -0.7741437),
-                    strength: 887992.94,
+                    strength: 887993.2,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 13874.89,
+                            damage: 13874.894,
                         ),
                     ],
                 ),
                 (
                     end: (-0.46542358, 2.2222252, -0.3512087),
-                    strength: 866168.9,
+                    strength: 866169.1,
                     hits: [
                         (
                             volume: "Gunner",
-                            damage: 13533.889,
+                            damage: 13533.893,
                         ),
                         (
                             volume: "Breech",
-                            damage: 13533.889,
+                            damage: 13533.893,
                         ),
                     ],
                 ),
                 (
                     end: (-1.0446434, 1.9458394, -0.5330806),
-                    strength: 844166.44,
+                    strength: 844166.6,
                     hits: [],
                 ),
                 (
                     end: (-0.65664864, 2.2359242, -0.68246937),
-                    strength: 821967.1,
+                    strength: 821967.3,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 12843.236,
+                            damage: 12843.239,
                         ),
                     ],
                 ),
                 (
                     end: (-0.4312687, 1.9732699, -0.29112434),
-                    strength: 799550.4,
+                    strength: 799550.56,
                     hits: [
                         (
                             volume: "Gunner",
-                            damage: 12492.975,
+                            damage: 12492.978,
                         ),
                         (
                             volume: "Breech",
-                            damage: 12492.975,
+                            damage: 12492.978,
                         ),
                     ],
                 ),
                 (
                     end: (-0.7606354, 1.9466362, -0.7185192),
-                    strength: 776893.2,
+                    strength: 776893.4,
                     hits: [],
                 ),
                 (
                     end: (-0.5352478, 2.3117342, -0.47247934),
-                    strength: 753969.44,
+                    strength: 753969.6,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 11780.772,
+                            damage: 11780.775,
                         ),
                     ],
                 ),
                 (
                     end: (-1.0409393, 1.9456134, -0.49338007),
-                    strength: 730749.6,
+                    strength: 730749.8,
                     hits: [],
                 ),
                 (
                     end: (-0.66816235, 2.144143, -0.7780547),
-                    strength: 707199.94,
+                    strength: 707200.1,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 11049.999,
+                            damage: 11050.002,
                         ),
                     ],
                 ),
                 (
                     end: (-0.41719818, 2.1502442, -0.2674117),
-                    strength: 683281.44,
+                    strength: 683281.6,
                     hits: [
                         (
                             volume: "Gunner",
-                            damage: 10676.272,
+                            damage: 10676.275,
                         ),
                         (
                             volume: "Breech",
-                            damage: 10676.272,
+                            damage: 10676.275,
                         ),
                     ],
                 ),
                 (
                     end: (-1.0410032, 1.946003, -0.56102276),
-                    strength: 658949.2,
+                    strength: 658949.4,
                     hits: [],
                 ),
                 (
                     end: (-0.6200962, 2.306222, -0.6194205),
-                    strength: 634150.5,
+                    strength: 634150.6,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 9908.602,
+                            damage: 9908.604,
                         ),
                     ],
                 ),
                 (
                     end: (-0.90639687, 1.9453216, -0.42614603),
-                    strength: 608823.1,
+                    strength: 608823.3,
                     hits: [],
                 ),
                 (
                     end: (0.20636082, 2.0204668, -1.2943478),
-                    strength: 582892.7,
+                    strength: 582892.8,
                     hits: [],
                 ),
                 (
                     end: (-0.4707451, 2.3041587, -0.3607297),
-                    strength: 556269.1,
+                    strength: 556269.25,
                     hits: [
                         (
                             volume: "Gunner",
-                            damage: 8691.705,
+                            damage: 8691.707,
                         ),
                         (
                             volume: "Breech",
-                            damage: 8691.705,
+                            damage: 8691.707,
                         ),
                     ],
                 ),
                 (
                     end: (-1.0764141, 1.9457135, -0.515203),
-                    strength: 528841.75,
+                    strength: 528841.9,
                     hits: [],
                 ),
                 (
                     end: (-0.66904163, 2.2297206, -0.7454233),
-                    strength: 500472.22,
+                    strength: 500472.34,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 7819.8784,
+                            damage: 7819.8804,
                         ),
                     ],
                 ),
                 (
                     end: (-0.3891859, 2.0361576, -0.21846819),
-                    strength: 470983.3,
+                    strength: 470983.44,
                     hits: [
                         (
                             volume: "Gunner",
-                            damage: 7359.1143,
+                            damage: 7359.116,
                         ),
                         (
                             volume: "Breech",
-                            damage: 7359.1143,
+                            damage: 7359.116,
                         ),
                     ],
                 ),
                 (
                     end: (-0.98826313, 1.9462643, -0.61308384),
-                    strength: 440142.72,
+                    strength: 440142.84,
                     hits: [],
                 ),
                 (
                     end: (-0.56495667, 2.3590336, -0.5241127),
-                    strength: 407635.47,
+                    strength: 407635.56,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 6369.304,
+                            damage: 6369.3057,
                         ),
                     ],
                 ),
                 (
                     end: (-1.0442343, 1.9454994, -0.47405005),
-                    strength: 373016.25,
+                    strength: 373016.34,
                     hits: [],
                 ),
                 (
                     end: (-0.6671238, 2.1036053, -0.8330059),
-                    strength: 335619.56,
+                    strength: 335619.66,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 5244.0557,
+                            damage: 5244.057,
                         ),
                     ],
                 ),
                 (
                     end: (-0.40556145, 2.2439022, -0.24760485),
-                    strength: 294369.6,
+                    strength: 294369.66,
                     hits: [
                         (
                             volume: "Gunner",
-                            damage: 4599.525,
+                            damage: 4599.526,
                         ),
                         (
                             volume: "Breech",
-                            damage: 4599.525,
+                            damage: 4599.526,
                         ),
                     ],
                 ),
                 (
                     end: (-1.084322, 1.9458394, -0.5379977),
-                    strength: 247305.22,
+                    strength: 247305.28,
                     hits: [],
                 ),
                 (
                     end: (-0.6559715, 2.3081546, -0.6815667),
-                    strength: 189999.2,
+                    strength: 189999.25,
                     hits: [
                         (
                             volume: "Breech",
-                            damage: 2968.7375,
+                            damage: 2968.7383,
                         ),
                     ],
                 ),
                 (
                     end: (0.98135185, 1.739243, 0.2329197),
-                    strength: 103413.41,
+                    strength: 103413.44,
                     hits: [
                         (
                             volume: "Gunner",
-                            damage: 1615.8345,
+                            damage: 1615.835,
                         ),
                         (
                             volume: "Ammo_R_1",
-                            damage: 1615.8345,
+                            damage: 1615.835,
                         ),
                     ],
                 ),
@@ -678,35 +678,35 @@
         (
             volume: "Ammo_R_0",
             line: 0.0,
-            field: 7.536993,
+            field: 7.536995,
             taken: 7537,
             entered: None,
         ),
         (
             volume: "Ammo_R_1",
             line: 0.0,
-            field: 0.5386115,
+            field: 0.53861165,
             taken: 539,
             entered: None,
         ),
         (
             volume: "Breech",
-            line: 256.1076,
-            field: 226.88191,
+            line: 256.1074,
+            field: 226.88196,
             taken: 142000,
             entered: Some((-0.5659027, 2.0155344, -0.5244746)),
         ),
         (
             volume: "Gunner",
             line: 0.0,
-            field: 42.762997,
+            field: 42.76301,
             taken: 30000,
             entered: None,
         ),
         (
             volume: "Loader",
             line: 0.0,
-            field: 12.624524,
+            field: 12.624527,
             taken: 12625,
             entered: None,
         ),

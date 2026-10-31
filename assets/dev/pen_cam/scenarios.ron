@@ -147,11 +147,11 @@
     ),
     (
         name: "s16_restart_at_rest",
-        shows: "s4's line fired with the 88's burst round: the road wheel's first disc arms the fuze, its rubber and far disc restart the delay, and the lower hull side stops the round 21 mm in; it bursts at rest there when the delay ends, a flat band about the line with no nose piece to fly on, and the plate around it stops every direction of its field",
+        shows: "s4's line 10 cm lower, fired with the 88's burst round: the road wheel's near disc arms the fuze, its far disc restarts the delay, and the lower hull side stops the round 36 mm in; it bursts at rest there when the delay ends, a flat band about the line with no nose piece to fly on, and the plate around it stops every direction of its field",
         weapon: "MainGun",
         round: "88mm_APHE_ring",
-        from: (-5.0, 0.8, -0.79),
-        toward: (0.0, 0.8, -0.79),
+        from: (-5.0, 0.7, -0.79),
+        toward: (0.0, 0.7, -0.79),
         verdict: NonPen,
     ),
 ]
