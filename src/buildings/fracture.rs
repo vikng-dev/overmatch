@@ -688,17 +688,18 @@ fn held(start: usize, cut: &[usize], (neighbours, anchors, buried): &Graph) -> O
     let outside = |joint: &usize| cut.binary_search(joint).is_err();
     let mut seen = vec![false; neighbours.len()];
     seen[start] = true;
+    // The queue too: the chunks in the order they were found, `next` the first not yet expanded.
     let mut reached = vec![start];
-    let mut queue = std::collections::VecDeque::from([start]);
-    while let Some(chunk) = queue.pop_front() {
+    let mut next = 0;
+    while let Some(&chunk) = reached.get(next) {
+        next += 1;
         if buried[chunk] || anchors[chunk].iter().any(outside) {
             return None;
         }
-        for &(next, joint) in &neighbours[chunk] {
-            if outside(&joint) && !seen[next] {
-                seen[next] = true;
-                reached.push(next);
-                queue.push_back(next);
+        for &(neighbour, joint) in &neighbours[chunk] {
+            if outside(&joint) && !seen[neighbour] {
+                seen[neighbour] = true;
+                reached.push(neighbour);
             }
         }
     }
@@ -789,9 +790,13 @@ fn sections(structure: &Structure, state: &WallState) -> Vec<Vec<usize>> {
     singles
 }
 
-/// A plane offset's bucket, its millimetres floored (in f64, whose product adds no rounding a
-/// millimetre could notice): two offsets the section rule holds within `1e-3` of each other lie
-/// at most two buckets apart, the second covering the f32 rounding of their difference.
+/// A plane offset's bucket, its millimetres floored. Two offsets the section rule joins lie at
+/// most two buckets apart, DERIVED from IEEE 754 round-to-nearest alone: the f64 product is exact
+/// (an f32's 24-bit significand times 1000's 7 odd bits fits f64's 53), so the bucket is `⌊1000
+/// x⌋` of the f32 `x` itself; the rule's `|o − x| < 1e-3`, taken in f32, holds only when the exact
+/// difference is under the f32 `1e-3` (1.00000005e-3), since rounding is monotone and that bound is
+/// representable; and two reals under 1.00000005 apart floor at most two apart. The second bucket
+/// covers only the f32 `1e-3` lying above a millimetre.
 fn plane_bucket(offset: f32) -> i64 {
     (f64::from(offset) * 1e3).floor() as i64
 }
