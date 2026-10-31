@@ -68,11 +68,11 @@ const VARIABLE: &str = "OVERMATCH_HARNESS";
 #[serde(deny_unknown_fields, default)]
 pub(crate) struct Script {
     /// Run length in fixed ticks from the input slot; the client exits once it has played them.
-    /// Default 600, or 1280 on the [`Drive::Straight`] and [`Drive::Reverse`] courses.
+    /// Default 600, or 1280 on the [`Drive::Straight`] course.
     pub(crate) ticks: Option<u32>,
     /// What the tank does ([`Drive`]). Default [`Drive::Arc`].
     pub(crate) drive: Drive,
-    /// Where every servo aims ([`Aim`]), from tick 0. Ignored by [`Drive::Reverse`].
+    /// Where every servo aims ([`Aim`]), from tick 0.
     pub(crate) aim: Aim,
     /// The dialed range for the aim solution's superelevation, metres; finite and positive.
     /// Default 800. A close armour target wants a small one, so the rounds shoot flat into the
@@ -115,11 +115,6 @@ pub(crate) enum Drive {
     /// the washboard (z≈−82…−90) on the spawn axis, which the arc never leaves the flat pad for.
     /// One primary click at `fire_tick`.
     Straight,
-    /// The straight course backward: throttle −1 up the flat ground slab away from the obstacles,
-    /// no steer, no fire, and no aim (every servo holds at rest). The simplest workload the sim
-    /// has, isolating re-simulation reproducibility from every contact, feature and servo
-    /// transient.
-    Reverse,
     /// Never drive, never fire: the tank sits on whatever contact it spawned onto (with
     /// `spawn_pose`, a known resting contact), with no drive input perturbing it.
     Idle,
@@ -245,7 +240,7 @@ impl SimulateInput {
     /// Called after `LogPlugin` has built, so the script it logs reaches the run's log.
     pub(crate) fn new(script: &Script) -> Self {
         info!("harness: {script:?}");
-        let course = matches!(script.drive, Drive::Straight | Drive::Reverse);
+        let course = script.drive == Drive::Straight;
         Self {
             ticks: 0,
             total: script.ticks.unwrap_or(if course { 1280 } else { 600 }),
@@ -274,18 +269,15 @@ impl SimulateInput {
             && (t - self.fire_tick).is_multiple_of(self.fire_interval)
     }
 
-    /// The point every servo chases on tick `t`, or `None` to hold them at rest.
-    fn aim_at(&self, t: u32) -> Option<AimIntent> {
-        if self.drive == Drive::Reverse {
-            return None;
-        }
-        Some(AimIntent::HullLocal(match self.aim {
+    /// The point every servo chases on tick `t`.
+    fn aim_at(&self, t: u32) -> AimIntent {
+        AimIntent::HullLocal(match self.aim {
             Aim::Point(point) => Vec3::from(point),
             Aim::Sweep => {
                 let theta = 0.02 * t as f32;
                 Vec3::new(800.0 * theta.sin(), 0.0, -800.0 * theta.cos())
             }
-        }))
+        })
     }
 }
 
@@ -310,13 +302,12 @@ impl SimulateInput {
         let (window, throttle, steer) = match self.drive {
             Drive::Arc => (128..384, 1.0, 0.3),
             Drive::Straight => (128..1088, 1.0, 0.0),
-            Drive::Reverse => (128..1088, -1.0, 0.0),
             Drive::Idle | Drive::Fire { .. } => (0..0, 0.0, 0.0),
         };
         let driving = window.contains(&t);
         command.throttle = if driving { throttle } else { 0.0 };
         command.steer = if driving { steer } else { 0.0 };
-        command.aim = self.aim_at(t);
+        command.aim = Some(self.aim_at(t));
         command.range = self.range;
         (command.fire_primary, command.fire_secondary) = match self.drive {
             Drive::Fire { primary, secondary } => (
@@ -324,8 +315,8 @@ impl SimulateInput {
                 secondary && Self::holding_secondary(t),
             ),
             Drive::Arc | Drive::Straight => (t == self.fire_tick, false),
-            // A recoil impulse would disturb the resting contact or the minimal run under study.
-            Drive::Idle | Drive::Reverse => (false, false),
+            // A recoil impulse would disturb the resting contact under study.
+            Drive::Idle => (false, false),
         };
     }
 }
@@ -599,8 +590,8 @@ mod tests {
     }
 
     /// AN EMPTY SCRIPT IS THE DEFAULT SESSION THE RUNNERS LEAN ON: the arc drive, 600 ticks, the
-    /// downrange aim at 800 m, one click at tick 300, and no spawn override; the two courses run
-    /// 1280. A changed default silently changes every script that names only what it changes.
+    /// downrange aim at 800 m, one click at tick 300, and no spawn override; the straight course
+    /// runs 1280. A changed default silently changes every script that names only what it changes.
     #[test]
     fn an_empty_script_takes_the_documented_defaults() {
         let script = Script::parse("()").expect("an empty script");
@@ -613,10 +604,8 @@ mod tests {
         );
         assert_eq!((script.ticks, script.spawn_pose), (None, None));
         assert_eq!(SimulateInput::new(&script).total, 600);
-        for drive in ["Straight", "Reverse"] {
-            let course = Script::parse(&format!("(drive: {drive})")).expect("a course");
-            assert_eq!(SimulateInput::new(&course).total, 1280, "{drive}");
-        }
+        let course = Script::parse("(drive: Straight)").expect("a course");
+        assert_eq!(SimulateInput::new(&course).total, 1280);
     }
 
     /// A SCRIPT THAT CANNOT MEAN WHAT IT SAYS FAILS THE BOOT, NAMING ITS FIELD (ADR-0011): a typo,
@@ -648,7 +637,7 @@ mod tests {
     /// EACH DRIVE PLAYS THE WORKLOAD ITS RUNNERS MEASURE: the arc drives and steers inside its
     /// window and clicks once at `fire_tick`; idle never moves or fires; a fire workload stays put,
     /// holds the secondary only past its warmup and clicks the primary every interval from
-    /// `fire_tick`; reverse backs straight with every servo at rest. The cost and pen cam runners
+    /// `fire_tick`; the straight course never steers. The cost and pen cam runners
     /// read their deltas against these exact windows.
     #[test]
     fn each_drive_plays_its_workload() {
@@ -677,12 +666,6 @@ mod tests {
             at(fire, 200).aim,
             Some(AimIntent::HullLocal(Vec3::new(8.0, 1.2, 2.2)))
         );
-        let reverse = at("(drive: Reverse)", 1000);
-        assert_eq!(
-            (reverse.throttle, reverse.steer, reverse.aim),
-            (-1.0, 0.0, None)
-        );
-        assert!(!at("(drive: Reverse)", 300).fire_primary);
         assert_eq!(at("(drive: Straight)", 1000).steer, 0.0);
     }
 

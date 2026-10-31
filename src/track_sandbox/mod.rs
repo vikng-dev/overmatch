@@ -1431,13 +1431,13 @@ fn hard_stop_collider(geom: &RigGeom, side: Side, params: &SuspensionParams) -> 
     Collider::convex_hull(points)
 }
 
-/// Spawn both sides' red hard-stop colliders as children of `hull`. Shared by [`build_rig`] (initial
-/// spawn) and [`refresh_hard_stops`] (rebuild on retune), so the two can never cut the prism from the
-/// geometry two different ways. `Layer::Vehicle` like the authored proxies, and the friction of the
-/// track steel it stands in for.
 /// The `materials.ron` row the hard stop is of: the track's shoe steel it stands in for.
 const HARD_STOP_SUBSTANCE: &str = "TrackSteel";
 
+/// Spawn both sides' red hard-stop colliders as children of `hull`. Shared by [`build_rig`] (initial
+/// spawn) and [`refresh_hard_stops`] (rebuild on retune), so the two can never cut the prism from the
+/// geometry two different ways. `Layer::Vehicle` like the authored proxies, and the friction of the
+/// track steel it stands in for ([`HARD_STOP_SUBSTANCE`]).
 fn spawn_hard_stops(
     commands: &mut Commands,
     hull: Entity,

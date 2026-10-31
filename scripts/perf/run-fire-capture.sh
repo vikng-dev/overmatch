@@ -16,7 +16,7 @@
 # Usage: run-fire-capture.sh <out-dir> [condition ...]
 # Conditions are run names, each one fresh client playing the shipped game (default: one run,
 # `shipped`); several names are repeated runs, for run-to-run spread. Main-gun muzzle lights cast
-# shadows and MG rounds' do not (`MG_LIGHT_CASTS`, `vfx::muzzle`).
+# shadows and MG rounds' do not (`vfx::muzzle`, `on_mg_fire`).
 #
 # Validity conditions are the frame sweep's, for the same reasons (see run-frame-sweep.sh):
 # visible unoccluded frontmost window, machine quiet, hands off, warm shader cache. Gates enforced

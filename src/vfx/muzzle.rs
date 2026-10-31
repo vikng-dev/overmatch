@@ -181,21 +181,6 @@ pub(super) fn plugin(app: &mut App) {
         .add_systems(Update, decay_muzzle_lights);
 }
 
-/// Whether an MG round's muzzle light casts a shadow. A main-gun flash does (one shot per reload,
-/// a real lighting event); MG rounds' do not, on MEASURED evidence (M4, 2 tanks, `M350` shadows, vsync
-/// off, `scripts/perf/run-fire-capture.sh` 2026-07-31): a shadow-casting point light per MG round
-/// at the Tiger's 2 × 750 rpm is the single dominant cost of holding the trigger. Idle blew the
-/// 60 fps budget on 3.6% of frames; with both MGs firing that became ~42% — while the same scene
-/// with muzzle shadows off moved only 14.4% → 16.8%. p50 tracked it: 13.5 → 15.5 ms firing with
-/// MG shadow casting, 13.5 → 14.6 ms without.
-///
-/// The mechanism is that a point light's shadow is SIX cubemap faces, each re-submitting the
-/// shooter's own tank — and a Tiger is the project's known worst shadow caster (194 track links
-/// per pass). At ~25 rounds/s over a 0.05 s light lifetime that is a shadow cubemap being built,
-/// used for ~3 frames, and thrown away, continuously, for a 16 m glimmer that lasts long enough to
-/// be seen but nowhere near long enough for its SHADOW to be read.
-const MG_LIGHT_CASTS: bool = false;
-
 /// Preloaded muzzle-dressing assets: the shared quad, the two sprite atlases, and the per-effect
 /// gradient LUTs (one grayscale sprite set, recolored per effect — the LUT trick).
 #[derive(Resource)]
@@ -390,8 +375,8 @@ struct MuzzleLightRing(std::collections::VecDeque<Entity>);
 struct MgSmokeCadence(u32);
 
 /// Spawn one transient muzzle light into the shared ring — the 88's and the MGs' common machinery;
-/// peak/range/lifetime/radius are the caller's scale knobs, `shadows` whether it casts
-/// ([`MG_LIGHT_CASTS`]).
+/// peak/range/lifetime/radius are the caller's scale knobs, `shadows` whether it casts (the main
+/// gun's does, an MG round's does not: `on_mg_fire`).
 #[expect(
     clippy::too_many_arguments,
     reason = "one light: the sinks, then each argument a separate dimension of the light"
@@ -420,7 +405,7 @@ fn spawn_muzzle_light(
                 range,
                 radius,
                 // Direction-less point (the hull occludes it like any object); shadow casting is the
-                // caller's call (see [`MG_LIGHT_CASTS`]) — the expensive half of the light.
+                // caller's call — the expensive half of the light.
                 shadow_maps_enabled: shadows,
                 ..default()
             },
@@ -902,9 +887,17 @@ fn on_mg_fire(
 
     // --- Muzzle light: EVERY round (the tracer-only gate is gone — a per-round glimmer reads as
     // real automatic fire). A tracer round spikes brighter so the streak still pops as it leaves the
-    // barrel. It does NOT cast a shadow: six cubemap faces of the shooter's own tank, per round, at
-    // 750 rpm, was the measured dominant cost of holding the trigger — see [`MG_LIGHT_CASTS`] for
-    // the numbers.
+    // barrel. It does NOT cast a shadow. A main-gun flash does (one shot per reload, a real
+    // lighting event); MG rounds' do not, on MEASURED evidence (M4, 2 tanks, `M350` shadows, vsync
+    // off, `scripts/perf/run-fire-capture.sh` 2026-07-31): a shadow-casting point light per MG
+    // round at the Tiger's 2 × 750 rpm is the single dominant cost of holding the trigger. Idle
+    // blew the 60 fps budget on 3.6% of frames; with both MGs firing that became ~42%, while the
+    // same scene with muzzle shadows off moved only 14.4% → 16.8%. p50 tracked it: 13.5 → 15.5 ms
+    // firing with MG shadow casting, 13.5 → 14.6 ms without. A point light's shadow is SIX
+    // cubemap faces, each re-submitting the shooter's own tank (194 track links per pass on the
+    // project's worst shadow caster): at ~25 rounds/s over a 0.05 s light lifetime that is a
+    // shadow cubemap built, used for ~3 frames and thrown away, continuously, for a 16 m glimmer
+    // that lasts long enough to be seen but nowhere near long enough for its SHADOW to be read.
     let peak = if fire.tracer {
         MG_LIGHT_PEAK_LUMENS * MG_TRACER_LIGHT_BOOST
     } else {
@@ -918,7 +911,7 @@ fn on_mg_fire(
         MG_LIGHT_RANGE,
         MG_LIGHT_LIFETIME,
         0.1,
-        MG_LIGHT_CASTS,
+        false,
     );
 }
 
