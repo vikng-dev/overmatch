@@ -185,7 +185,7 @@ impl ProxyMode {
 /// The swap is atomic (see [`ProxySide::mesh`]) so an unbuilt proxy costs nothing but performance
 /// — the shoes are still casting and the picture is still right. But "the optimisation quietly did
 /// not happen" is exactly the kind of thing that survives a year, so it gets said out loud. ~2 s at
-/// 60 fps: long enough that a slow first frame or a mid-bind belt never trips it.
+/// 60 fps (DERIVED: 120 frames / 60 fps): long enough that a slow first frame or a mid-bind belt never trips it.
 pub(crate) const PROXY_READY_GRACE_FRAMES: u32 = 120;
 
 /// One side's proxy, held on the side's rig entry.
