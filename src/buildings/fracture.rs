@@ -1311,7 +1311,7 @@ fn section_failure(
     let on_group = || {
         loads
             .iter()
-            .filter(|load| group.binary_search(&load.chunk).is_ok())
+            .filter(|load| load.blow != Vec3::ZERO && group.binary_search(&load.chunk).is_ok())
     };
     let moment: Vec3 = on_group()
         .map(|load| (load.at - centre).cross(load.blow))
@@ -3755,6 +3755,21 @@ mod tests {
                 origin: Origin::Field,
             };
             let failure = section_failure(&structure, &section, &[1], &[field]).unwrap();
+            // A locked source can touch the group without exchanging momentum. Its infinite
+            // source mass must not turn a zero angular impulse into an undefined demand.
+            let locked = Load {
+                blow: Vec3::ZERO,
+                origin: Origin::Body {
+                    body: Entity::PLACEHOLDER,
+                    mass: f32::INFINITY,
+                    speed: 0.0,
+                },
+                ..field
+            };
+            assert_eq!(
+                section_failure(&structure, &section, &[1], &[field, locked]),
+                Some(failure.clone())
+            );
             let lever = at.y - hinge.y;
             let hinge_mass = inertia / (lever * lever);
             for ratio in [0.001, 0.1, 1.0, 10.0, 1000.0] {

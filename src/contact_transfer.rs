@@ -231,9 +231,11 @@ impl ContactTransfers {
         let inverse =
             normal.dot(inertia.inverse_mass * normal) + arm.dot(inertia.inverse_inertia * arm);
         assert!(
-            inverse > 0.0,
-            "a dynamic body in contact moves along its contact's normal"
+            inverse.is_finite() && inverse >= 0.0,
+            "a contact's solver inverse effective mass is finite and nonnegative"
         );
+        // Locked axes can prevent all motion along this normal even on a dynamic body.
+        // Its effective mass is infinite, and Avian's zero effective mass moves no blow.
         inverse.recip()
     }
 }
@@ -441,7 +443,7 @@ mod tests {
 
     use avian3d::prelude::{
         Collider, ColliderDensity, ComputedMass, ConstantForce, Friction, Gravity, LinearVelocity,
-        Physics, PhysicsPlugins, Restitution, RigidBody, SleepingDisabled,
+        LockedAxes, Physics, PhysicsPlugins, Restitution, RigidBody, SleepingDisabled,
     };
     use bevy::time::TimeUpdateStrategy;
 
@@ -786,5 +788,29 @@ mod tests {
             );
         }
         assert!(struck, "the fixture cube strikes the structure");
+    }
+    /// A LOCKED BODY'S ZERO TRANSFER STILL HAS A CONTACT (the game's environment destruction
+    /// model). The contact reader must accept Avian's zero inverse response: the infinite source
+    /// mass carries no blow. Panicking on that constraint would stop the authority's law pass.
+    #[test]
+    fn a_locked_body_can_touch_without_delivering_a_blow() {
+        let mut app = world(1.0);
+        wall(&mut app);
+        let body = cube(&mut app, Vec3::new(-0.7, 0.0, 0.0), Vec3::ZERO);
+        app.world_mut()
+            .entity_mut(body)
+            .insert(LockedAxes::ALL_LOCKED);
+        let mut seen = false;
+        for _ in 0..5 {
+            app.update();
+            let transfers = app.world().resource::<ContactTransfers>();
+            for (_, blow, press, mass) in transfers.split().filter(|(p, ..)| p.body == body) {
+                seen = true;
+                assert_eq!(blow, Vec3::ZERO);
+                assert_eq!(press, Vec3::ZERO);
+                assert_eq!(mass, f32::INFINITY);
+            }
+        }
+        assert!(seen, "Avian keeps a constraint for the locked dynamic body");
     }
 }
