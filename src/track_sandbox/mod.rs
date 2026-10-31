@@ -122,7 +122,7 @@ pub(crate) struct RigSuspension(pub(crate) SuspensionParams);
 ///
 /// It is all AUTHORED for the 57 t Tiger, which is exactly why it can't stay as constants: the
 /// belt inertia here and the one the declared transmission is built with are the same
-/// `powertrain.inertia`, so the governor and the regenerative adapters spin the same belt, and the
+/// `powertrain.inertia`, so the transmission and belt share one inertia, and the
 /// weight the envelope law calibrates against is the spec's combat mass.
 #[derive(Resource)]
 struct RigSpec {
@@ -134,9 +134,6 @@ struct RigSpec {
     /// is compliant, not a hard edge. Well below the static sink, so it sets the behaviour at the
     /// contact boundary, not the ride height.
     engage_depth: f32,
-    /// Belt envelope (`track.powertrain`): top belt speed (m/s) and low-speed force cap (N).
-    max_speed: f32,
-    engine_force: f32,
     /// Reflected belt + drivetrain inertia (kg).
     belt_inertia: f32,
 }
@@ -1154,8 +1151,6 @@ fn build_rig(
     commands.insert_resource(RigSpec {
         weight_n: spec.mass * derive::G,
         engage_depth: track.suspension.engage,
-        max_speed: track.powertrain.max_speed,
-        engine_force: track.powertrain.force,
         belt_inertia: track.powertrain.inertia,
     });
 

@@ -153,8 +153,6 @@ const CLUTCH_ENGINE_FIELDS: &[(&str, &str)] = &[
     ("omega_integrated", "f32"),
     ("force_left", "f32"),
     ("force_right", "f32"),
-    ("raw_next_left", "f32"),
-    ("raw_next_right", "f32"),
     ("next_speed_left", "f32"),
     ("next_speed_right", "f32"),
     ("reanchor_attempted", "bool"),
@@ -312,7 +310,6 @@ pub(crate) struct TransmissionProbe {
     pub power_scale: f32,
     pub omega_integrated: f32,
     pub forces: [f32; 2],
-    pub raw_next: [f32; 2],
     pub next_speeds: [f32; 2],
     pub reanchor_attempted: bool,
     pub reanchor_locked: f32,
@@ -562,11 +559,6 @@ fn startup_dump(app: &App, tank: Entity) -> StartupBuilder {
     out.f32("derived.pitch", geom.pitch);
     out.f32("derived.thickness", geom.thickness);
     out.f32("derived.width", geom.model.width);
-    out.f32(
-        "spec.track.powertrain.max_speed",
-        track.powertrain.max_speed,
-    );
-    out.f32("spec.track.powertrain.force", track.powertrain.force);
     out.f32("spec.track.powertrain.inertia", track.powertrain.inertia);
     out.f32("spec.track.suspension.engage", track.suspension.engage);
 
@@ -839,8 +831,6 @@ fn clutch_engine_payload(probe: TransmissionProbe) -> Vec<u32> {
         probe.omega_integrated,
         probe.forces[0],
         probe.forces[1],
-        probe.raw_next[0],
-        probe.raw_next[1],
         probe.next_speeds[0],
         probe.next_speeds[1],
     ] {

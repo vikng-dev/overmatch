@@ -234,7 +234,7 @@ Mean belt motion expressed relative to the engaged forward or reverse ladder. No
 The non-negative engine-side angular-speed state. Engine torque, drag, inertia, clutch coupling, stall guard, and declutched rev matching evolve it directly; geared belt speed no longer stands in for engine rpm.
 
 **Reserve scheduler**:
-The gear selector for the regenerative adapters. It filters signed mean-axis load demand, compares each legal gear's available force with the required reserve, and schedules protective downshifts, hill-hold recovery, or grade-limit truth without discarding the shift and landing guards.
+The gear selector for the transmission. It filters signed mean-axis load demand, compares each legal gear's available force with the required reserve, and schedules protective downshifts, hill-hold recovery, or grade-limit truth without discarding the shift and landing guards.
 
 **Steering detent**:
 A fixed-radii steering state selected with hysteresis: straight, wide radius, or tight radius. While a turn detent is engaged, the transmission constrains belt-speed difference to the declared curvature and defers predictor-blind upshifts.

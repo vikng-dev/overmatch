@@ -165,7 +165,7 @@ pub(super) fn apply_belt_support_field(
     // §2 scheduling: the joint drivetrain needs both reactions before either belt
     // integrates). Force application stays all-left-then-all-right below; within a tick
     // application never feeds back into the velocity field, so evaluating R's contacts
-    // before applying L's forces is exact — the governor parity captures pin it byte-level.
+    // before applying L's forces is exact.
     let mut reports: [SideReport; 2] = [SideReport::default(), SideReport::default()];
     let mut live = [false; 2];
     for side in Side::ALL {
@@ -280,11 +280,8 @@ pub(super) fn apply_belt_support_field(
     }
 }
 
-/// The rig's DECLARED transmission — the Tiger's own `track.powertrain.transmission` block, built
-/// in [`build_rig`](super::build_rig) through the same validated seam (`TrackSpec::transmission_params`)
-/// the game builds it with. It replaces the sandbox's old hand-authored T-34 lab tables: those
-/// existed to exercise the regenerative adapters on a lab vehicle, and the lab vehicle is now the
-/// shipped one, so the adapters run the real L600 fixed-radius box against the real HL230 curve.
+/// The rig's declared transmission, built in [`build_rig`](super::build_rig) through the
+/// same validated seam (`TrackSpec::transmission_params`) as the game.
 #[derive(Resource)]
 pub(super) struct RigTransmission(pub(super) TransmissionParams);
 
@@ -384,8 +381,6 @@ fn force_params(geom: &RigGeom, rig: &RigSpec, envelope: &EnvelopeLaw) -> ForceP
         probe_reach: CONTACT_PROBE,
         mu: MU,
         slip_saturation: SLIP_SATURATION,
-        max_speed: rig.max_speed,
-        engine_force: rig.engine_force,
         inertia: rig.belt_inertia,
         // The declared park-target stiffness (forces.rs provenance doc): it gates the traction
         // regime and the belt-hold; the shear law derives its own stiffness from μ·load/K.
@@ -757,8 +752,6 @@ mod tests {
             probe_reach: CONTACT_PROBE,
             mu: MU,
             slip_saturation: SLIP_SATURATION,
-            max_speed: 1.0,
-            engine_force: 0.0,
             inertia: 1.0,
             grip_stiffness: 0.0,
         };

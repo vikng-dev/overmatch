@@ -1,6 +1,6 @@
 //! The locomotion sim (phase B): the track model's belt forces ARE how tanks drive. The ECS
 //! adapter over [`super::forces`] — one deep boundary; support, traction, and belt dynamics
-//! live behind `contact_side` + `transmission::step` (one joint form for every architecture),
+//! live behind `contact_side` + `transmission::step` (one joint form),
 //! this module owns queries, scheduling, capability gating, and the netcode-visible
 //! [`TrackDrive`] state.
 //!
@@ -102,7 +102,7 @@ pub struct DriveSignal {
 
 /// The joint transmission's path-dependent state (gear/window/detent/direction/crank plus the
 /// stage-C demand/filter/target/hill-hold scheduler state). Server-authoritative, advanced only
-/// where the body is dynamic through the spec-selected branch of [`apply_track_forces`], and
+/// where the body is dynamic through [`apply_track_forces`], and
 /// replicated as one atomic snapshot to the tank's OWNER only; every other listener reads the
 /// crank through [`EngineRpm`]. The determinism trace hashes every field of the exhaustive
 /// projection (`transmission::transmission_state_projection`) in stable order, with raw bits for
@@ -312,8 +312,6 @@ impl TrackGear {
         out.f32("force.probe_reach", p.probe_reach);
         out.f32("force.mu", p.mu);
         out.f32("force.slip_saturation", p.slip_saturation);
-        out.f32("force.max_speed", p.max_speed);
-        out.f32("force.engine_force", p.engine_force);
         out.f32("force.inertia", p.inertia);
         out.f32("force.grip_stiffness", p.grip_stiffness);
 
@@ -509,8 +507,6 @@ fn init_track_gear(blueprint: Res<TankBlueprint>, mut commands: Commands) {
             probe_reach: 0.5,
             mu: MU,
             slip_saturation: SLIP_SATURATION,
-            max_speed: spec.powertrain.max_speed,
-            engine_force: spec.powertrain.force,
             inertia: spec.powertrain.inertia,
             // Derived from authored mass via the declared park target (forces.rs) — not a
             // spec field: the target is model policy, the vehicle datum is its weight.

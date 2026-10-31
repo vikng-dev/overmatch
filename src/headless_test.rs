@@ -775,11 +775,18 @@ fn face_positive_z(app: &mut App, tank: Entity) {
     }
 }
 
-/// The pivot gate body: zero throttle, full steer, ≥ 4 s; the mean yaw rate over the last second
-/// must clear `min_yaw` and the belts must actually counter-rotate. ZERO is the original bug this
-/// pins: the Tiger's steering capacity read on the wrong axis could not break its own footprint
-/// scrub.
-fn tiger_pivot_gate(app: &mut App, tank: Entity, min_yaw: f32) {
+/// A neutral pivot must counter-rotate its belts and deliver an ASSUMED class acceptance
+/// bound: at least half of the commanded belt-kinematic yaw reaches the ground after settling.
+/// The ceiling derives from the vehicle's own neutral differential and measured half-tread;
+/// driving relies on the steering capacity overcoming the footprint's scrub.
+fn neutral_pivot_gate(app: &mut App, tank: Entity) {
+    let gear = app.world().resource::<crate::track::sim::TrackGear>();
+    let half_tread = app
+        .world()
+        .resource::<crate::track::rig_geom::RigGeom>()
+        .plane_x;
+    let ceiling = gear.trans().neutral_d_full / half_tread;
+    let min_yaw = 0.5 * ceiling;
     let mut yaw_sum = 0.0f32;
     let mut samples = 0u32;
     for tick in 0..320 {
@@ -795,7 +802,10 @@ fn tiger_pivot_gate(app: &mut App, tank: Entity, min_yaw: f32) {
         .get::<crate::track::sim::TrackDrive>(tank)
         .expect("tank drives");
     let (l, r) = (drive.sides[0].speed, drive.sides[1].speed);
-    println!("tiger pivot: mean yaw {mean_yaw:.4} rad/s, belts L {l:.3} / R {r:.3}");
+    println!(
+        "pivot: mean yaw {mean_yaw:.4} rad/s, kinematic ceiling {ceiling:.4}, ratio {:.4}, belts L {l:.3} / R {r:.3}",
+        mean_yaw.abs() / ceiling
+    );
     assert!(
         l * r < 0.0,
         "a neutral pivot must counter-rotate the belts (L {l:.3}, R {r:.3})"
@@ -806,17 +816,13 @@ fn tiger_pivot_gate(app: &mut App, tank: Entity, min_yaw: f32) {
     );
 }
 
-/// Tiger pivot on the declared L600 fixed-radius law: the MARGINAL brake-gated neutral turn
-/// toward the DERIVED `neutral_d_full` = 0.2885 m/s (0.2808 before half_tread went 1.4904 →
-/// 1.5312; no unprovenanced 0.75 fraction shrinks the target any more). MEASURED on the declared
-/// data: 0.131 rad/s mean ground yaw, belts exactly ±neutral_d_full (the belt-kinematic ceiling
-/// d/half-tread ≈ 0.188 rad/s, less scrub slip); gated at ≥ 0.10 rad/s (margin for platform float
-/// drift — the restoration literature's "technically yes, advisable no" crawl is exactly this
-/// regime).
+/// The declared transmission's neutral turn clears the class yaw bound in the game's
+/// authoritative simulation. FIXTURE DATA: the shipped vehicle supplies the geometry and tables;
+/// no measured yaw of that vehicle defines the pass condition.
 #[test]
-fn pivot_tiger_clears_the_l600_yaw_floor() {
+fn pivot_clears_its_own_kinematic_yaw_floor() {
     let (mut app, tank) = booted_offline_sim();
-    tiger_pivot_gate(&mut app, tank, 0.10);
+    neutral_pivot_gate(&mut app, tank);
 }
 
 /// The fix-1 smoking gun: a standstill full-throttle climb must walk the Tiger ladder

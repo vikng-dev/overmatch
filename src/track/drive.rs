@@ -15,7 +15,7 @@ pub struct DriveAxes {
     pub steer: f32,
 }
 
-/// Command slew (per second): the vehicle's input shaping, SEPARATE from the belt governor —
+/// Command slew (per second): the vehicle's input shaping, separate from the transmission's belt dynamics —
 /// folding them changes keyboard feel and damage-recovery semantics.
 /// Provenance: adopted into the sandbox reference untuned; a playtest feel dial, not a physics
 /// constant.

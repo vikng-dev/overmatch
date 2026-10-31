@@ -1,7 +1,7 @@
 use super::*;
 
-/// A lab ForceParams: only the fields the transmission reads matter (inertia, max_speed,
-/// engine_force, slip_saturation and the grip_stiffness envelope switch).
+/// FIXTURE DATA: a lab contact law. Inertia, slip saturation and the grip-stiffness
+/// envelope determine how the transmission exchanges force with these contacts.
 fn lab_fp() -> ForceParams {
     ForceParams {
         face_offset: 0.02,
@@ -12,8 +12,6 @@ fn lab_fp() -> ForceParams {
         probe_reach: 0.5,
         mu: 0.9,
         slip_saturation: 0.4,
-        max_speed: 15.0,
-        engine_force: 120_000.0,
         inertia: 8_000.0,
         grip_stiffness: forces::grip_stiffness(0.9, 26_500.0 * 9.81),
     }
@@ -156,7 +154,7 @@ fn grade_reserve_veto_blocks_f3_to_f4_on_20_degrees() {
     tp.shift_up_rpm = 980.0 * tp.gears_fwd[2] / tp.gears_fwd[3] - 1.0;
     tp.shift_down_rpm = 800.0;
     let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+
     fp.inertia = 16_000.0;
     let shaft = 980.0 * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[3];
 
@@ -203,7 +201,7 @@ fn direct_and_sequential_execute_the_same_grade_target_differently() {
     base.shift_down_rpm = 0.0;
     base.shift_ticks = 2;
     let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+
     fp.inertia = 16_000.0;
     let shaft = 600.0 * RPM_TO_RAD * base.sprocket_radius / base.gears_fwd[5];
     let demand = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
@@ -283,7 +281,7 @@ fn hill_hold_engages_selects_launch_gear_and_releases_on_capability() {
     tp.shift_ticks = 2;
     tp.shift_addressing = ShiftAddressing::Direct;
     let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+
     fp.inertia = 16_000.0;
     let demand = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
     // A reverse climb's command and reactions are NEGATIVE (demand projects through dir = −1).
@@ -368,13 +366,13 @@ fn synthetic_weak_powertrain_30_deg_at_rest_enters_grade_limit() {
     tp.peak_torque_nm = 100.0;
     tp.clutch_capacity = 100.0;
     let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+
     fp.inertia = 16_000.0;
     let demand = 57_000.0 * 9.81 * 30.0_f32.to_radians().sin();
     let max_launch_force = tp
         .gears_fwd
         .iter()
-        .map(|&ratio| (tp.torque_at(0.0) * ratio / tp.sprocket_radius).min(2.0 * fp.engine_force))
+        .map(|&ratio| tp.torque_at(0.0) * ratio / tp.sprocket_radius)
         .fold(0.0f32, f32::max);
     assert!(
         max_launch_force < demand,
@@ -436,7 +434,7 @@ fn hill_hold_rechecks_capability_while_latched() {
     let mut tp = tiger_tp();
     tp.shift_ticks = 0;
     let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+
     fp.inertia = 16_000.0;
     let demand = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
     let mut st = TransmissionState {
@@ -471,11 +469,10 @@ fn hill_hold_margin_short_capable_gear_can_release() {
     let mut tp = tiger_tp();
     tp.shift_ticks = 0;
     let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+
     fp.inertia = 16_000.0;
-    let k = tp.gears_fwd[0] / tp.sprocket_radius;
-    tp.clutch_capacity = 2.0 * fp.engine_force / k;
-    let modeled = available_force_in_gear(&tp, &fp, 0.0, tp.gears_fwd[0]);
+    tp.clutch_capacity = tp.torque_at(0.0);
+    let modeled = available_force_in_gear(&tp, 0.0, tp.gears_fwd[0]);
     let demand = modeled - 10_000.0;
     assert!(
         modeled - demand < reserve_margin(demand),
@@ -515,11 +512,10 @@ fn hill_hold_release_cooldown_never_overridden_then_relatches() {
     let mut tp = tiger_tp();
     tp.shift_ticks = 0;
     let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+
     fp.inertia = 16_000.0;
-    let k = tp.gears_fwd[0] / tp.sprocket_radius;
-    tp.clutch_capacity = 2.0 * fp.engine_force / k;
-    let modeled = available_force_in_gear(&tp, &fp, 0.0, tp.gears_fwd[0]);
+    tp.clutch_capacity = tp.torque_at(0.0);
+    let modeled = available_force_in_gear(&tp, 0.0, tp.gears_fwd[0]);
     let release_demand = modeled - 10_000.0;
     let mut st = TransmissionState {
         omega_e: tp.engine.idle_rpm * RPM_TO_RAD,
@@ -594,7 +590,7 @@ fn hill_hold_engages_only_near_rest() {
     // capable launch gear latches, transmits, and releases inside the same tick.
     tp.shift_ticks = 2;
     let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+
     fp.inertia = 16_000.0;
     let demand = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
     let run = |reverse: bool, throttle: f32, m: f32| -> TransmissionState {
@@ -651,8 +647,8 @@ fn hill_hold_engages_only_near_rest() {
 }
 
 fn correction_priority_fixture() -> (ForceParams, TransmissionParams, f32, f32) {
-    let mut fp = lab_fp();
-    fp.engine_force = 1_000_000.0;
+    let fp = lab_fp();
+
     let mut tp = lab_tp();
     tp.shift_ticks = 0;
     tp.engine.governed_rpm = 4_000.0;
@@ -664,9 +660,9 @@ fn correction_priority_fixture() -> (ForceParams, TransmissionParams, f32, f32) 
         (4_000.0, 2_000.0),
     ];
     let shaft = 1_800.0 * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[1];
-    let current = available_force_in_gear(&tp, &fp, shaft, tp.gears_fwd[1]);
-    let lower = available_force_in_gear(&tp, &fp, shaft, tp.gears_fwd[0]);
-    let upper = available_force_in_gear(&tp, &fp, shaft, tp.gears_fwd[2]);
+    let current = available_force_in_gear(&tp, shaft, tp.gears_fwd[1]);
+    let lower = available_force_in_gear(&tp, shaft, tp.gears_fwd[0]);
+    let upper = available_force_in_gear(&tp, shaft, tp.gears_fwd[2]);
     let demand = current + 12_000.0;
     assert!(lower - demand >= reserve_margin(demand));
     assert!(upper - demand >= reserve_margin(demand));
@@ -705,7 +701,7 @@ fn confirmed_deficit_precedes_upshift_arm() {
         "fixture's predicted F3 landing must clear the fix-1a gate (the landing leg)"
     );
     assert!(
-        modeled_reserve_in_gear(&tp, &fp, shaft, g_up, demand) >= reserve_margin(demand),
+        modeled_reserve_in_gear(&tp, shaft, g_up, demand) >= reserve_margin(demand),
         "fixture's F3 reserve must clear the margin (the reserve leg)"
     );
     let contender = |grade_confirm_ticks: u8| TransmissionState {
@@ -758,7 +754,7 @@ fn confirmed_deficit_defers_through_post_upshift_dwell() {
     let (fp, tp, shaft, _) = correction_priority_fixture();
     // A SHALLOW deficit: 4 kN below zero reserve, well inside the margin scale
     // (0.1·demand + 10 kN), so the deferral — not the deep override — owns it.
-    let current = available_force_in_gear(&tp, &fp, shaft, tp.gears_fwd[1]);
+    let current = available_force_in_gear(&tp, shaft, tp.gears_fwd[1]);
     let demand = current + 4_000.0;
     assert!(
         demand - current < reserve_margin(demand),
@@ -771,8 +767,7 @@ fn confirmed_deficit_defers_through_post_upshift_dwell() {
         "fixture must keep the ordinary upshift arm live above the band"
     );
     assert!(
-        available_force_in_gear(&tp, &fp, shaft, tp.gears_fwd[2]) - demand
-            >= reserve_margin(demand),
+        available_force_in_gear(&tp, shaft, tp.gears_fwd[2]) - demand >= reserve_margin(demand),
         "fixture's upper gear must be capable — the upshift is refused by the HOLD, \
              not by its own reserve gate"
     );
@@ -817,7 +812,7 @@ fn steep_grade_after_upshift_corrects_before_lug() {
     let mut tp = tiger_tp();
     tp.shift_ticks = 2;
     let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+
     fp.inertia = 16_000.0;
     fp.grip_stiffness = forces::grip_stiffness(0.9, 57_000.0 * 9.81);
     // The slope investigation's F4 operating point meeting a DERIVED 25-degree demand.
@@ -825,7 +820,7 @@ fn steep_grade_after_upshift_corrects_before_lug() {
     let f4 = tp.gears_fwd[3];
     let shaft0 = 980.0 * RPM_TO_RAD * tp.sprocket_radius / f4;
     assert!(
-        demand - available_force_in_gear(&tp, &fp, shaft0, f4) > reserve_margin(demand),
+        demand - available_force_in_gear(&tp, shaft0, f4) > reserve_margin(demand),
         "fixture must be a deep deficit for F4"
     );
     let mut st = TransmissionState {
@@ -948,8 +943,8 @@ fn reserve_confirmation_decays_across_one_tick_jitter() {
     tp.shift_ticks = 0;
     tp.shift_up_rpm = 10_000.0;
     tp.shift_down_rpm = 0.0;
-    let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+    let fp = lab_fp();
+
     let shaft = 600.0 * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[5];
     let demand = 57_000.0 * 9.81 * 20.0_f32.to_radians().sin();
     let mut st = TransmissionState {
@@ -998,7 +993,7 @@ fn overrun_below_ceiling_holds_gear_for_engine_braking() {
     let mut tp = tiger_tp();
     tp.shift_ticks = 2;
     let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+
     fp.inertia = 16_000.0;
     // Deep past the old governed + 150 firing floor, still under the curve-top ceiling.
     let overrun_rpm = (tp.engine.governed_rpm + tp.max_curve_rpm()) / 2.0;
@@ -1052,7 +1047,7 @@ fn protective_rescue_walks_ladder_under_guard_or_holds() {
         "the authored window must stay realistic"
     );
     let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+
     fp.inertia = 16_000.0;
     let ceiling = tp.max_curve_rpm();
     let guard = (ceiling + OVERREV_MARGIN_RPM) * RPM_TO_RAD;
@@ -1144,7 +1139,7 @@ fn protective_rescue_walks_ladder_under_guard_or_holds() {
 #[test]
 fn sequential_rescue_steps_toward_static_target() {
     let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+
     fp.inertia = 16_000.0;
     let overrun_rpm = tiger_tp().max_curve_rpm() + 1_500.0;
 
@@ -1216,7 +1211,7 @@ fn sequential_rescue_steps_toward_static_target() {
 fn flat_downshift_window_does_not_latch_hill_hold() {
     let tp = tiger_tp();
     let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+
     fp.inertia = 16_000.0;
     let mut st = TransmissionState {
         gear: 3,
@@ -1322,8 +1317,8 @@ fn deficit_commit_honors_landing_sign_boundary() {
         tp.shift_ticks, 20,
         "the authored window must stay realistic"
     );
-    let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+    let fp = lab_fp();
+
     let run = |r_side: f32| -> TransmissionState {
         let mut st = TransmissionState {
             gear: 6,
@@ -1362,7 +1357,7 @@ fn crank_rescue_not_preempted_by_deficit_machinery() {
     let mut tp = tiger_tp();
     tp.shift_ticks = 2;
     let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+
     fp.inertia = 16_000.0;
     let overrun_rpm = tp.max_curve_rpm() + 100.0;
     let shaft = overrun_rpm * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[4];
@@ -1414,7 +1409,7 @@ fn steep_grade_full_loop_upshift_freeze_recover_confirm_correct() {
         "the authored window must stay realistic"
     );
     let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+
     fp.inertia = 45_000.0;
     fp.grip_stiffness = forces::grip_stiffness(0.9, 57_000.0 * 9.81);
     let light = 6_000.0f32; // per-side approach load
@@ -1546,7 +1541,7 @@ fn steep_grade_full_loop_upshift_freeze_recover_confirm_correct() {
 fn overrun_slip_guard_bounds_crank_at_top_gear() {
     let tp = tiger_tp();
     let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+
     fp.inertia = 16_000.0;
     let guard = (tp.max_curve_rpm() + OVERREV_MARGIN_RPM) * RPM_TO_RAD;
     // The field-class overrun: a belt speed implying ~6000 rpm in top reverse gear.
@@ -1855,14 +1850,14 @@ fn protective_upshift_fires_under_brake_steer_and_fuel_cut() {
     let mut tp = tiger_tp();
     tp.shift_ticks = 2;
     let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+
     fp.inertia = 16_000.0;
     // Past the mechanical-protection ceiling (and so also past the governor-cut end).
     let overrun_rpm = tp.max_curve_rpm() + 200.0;
     let g4 = tp.gears_fwd[3];
     let shaft = overrun_rpm * RPM_TO_RAD * tp.sprocket_radius / g4;
     assert_eq!(
-        available_force_in_gear(&tp, &fp, shaft, g4),
+        available_force_in_gear(&tp, shaft, g4),
         0.0,
         "fixture must sit past the fuel cut, where every gear's modeled force is zero"
     );
@@ -1915,7 +1910,7 @@ fn upshift_arms_refuse_overrun_shaft_without_crank() {
     let mut tp = tiger_tp();
     tp.shift_ticks = 2;
     let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+
     fp.inertia = 16_000.0;
     let spike_rpm = tp.engine.governed_rpm + 200.0;
     let shaft = spike_rpm * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[5];
@@ -1964,13 +1959,13 @@ fn confirmed_deficit_without_target_falls_through_to_legal_upshift() {
     let mut tp = tiger_tp();
     tp.shift_ticks = 2;
     let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+
     fp.inertia = 16_000.0;
     let dead_zone_rpm = tp.engine.governed_rpm + 120.0;
     let shaft = dead_zone_rpm * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[4];
     let demand = 20_000.0;
     assert_eq!(
-        available_force_in_gear(&tp, &fp, shaft, tp.gears_fwd[4]),
+        available_force_in_gear(&tp, shaft, tp.gears_fwd[4]),
         0.0,
         "fixture must sit in the fuel-cut dead zone (zero modeled force in-gear)"
     );
@@ -2003,7 +1998,7 @@ fn confirmed_deficit_without_target_falls_through_to_legal_upshift() {
 fn demand_ema_seeds_from_first_sample_and_converges() {
     let tp = tiger_tp();
     let mut fp = lab_fp();
-    fp.engine_force = 250_000.0;
+
     fp.inertia = 16_000.0;
     // Mid-band F4 operating point: no band, reserve, or hill-hold decision interferes.
     let shaft = 1_700.0 * RPM_TO_RAD * tp.sprocket_radius / tp.gears_fwd[3];
@@ -2443,11 +2438,9 @@ fn l600_detent_defers_upshift() {
     assert_eq!(st.gear, 2, "downshifts stay allowed during a detent turn");
 }
 
-/// Releasing the steer at a standstill pivot must actively
-/// ARREST the belt difference — with zero ground reactions (airborne), only the servo
-/// can. The |m|-only blend weight zeroed both force terms at steer = 0 (w = 1,
-/// pivot_f = 0), leaving the belts counter-rotating forever; the steer-scaled weight
-/// returns the released stick to the curvature servo, whose target is 0.
+/// Releasing steer makes the neutral-turn servo target zero belt difference. With no
+/// ground reactions the servo alone must arrest the pivot, so the driver's released stick
+/// cannot leave the vehicle turning indefinitely.
 #[test]
 fn steer_release_arrests_pivot() {
     let (fp, tp) = (lab_fp(), lab_tp());
@@ -2558,19 +2551,52 @@ fn l600_constraint_holds_geared_ratio() {
     );
 }
 
-/// At the Tiger's F8 cruise, the WIDE fixed-radius differential legitimately puts the
-/// outer belt above the vehicle's mean-axis speed limit. The transmission must preserve
-/// that authored `d = kappa * m` instead of clipping the outer belt back to `max_speed`.
+/// External load can drive belts past the engine's governed speed. The contact law and
+/// mechanical over-rev guard rely on receiving that motion instead of a clipped speed;
+/// a speed-clamp mutant would discard the impulse this fixture applies during a shift.
 #[test]
-fn tiger_f8_wide_outer_belt_exceeds_mean_speed_limit() {
-    let tp = tiger_tp();
-    let mut fp = lab_fp();
-    fp.max_speed = 10.5;
-    let half_tread_m = 1.4904f32;
-    let cruise_m = 10.49f32;
+fn an_external_load_can_drive_belts_past_governed_speed() {
+    let (fp, tp) = (lab_fp(), lab_tp());
+    for reverse in [false, true] {
+        let direction = if reverse { -1.0 } else { 1.0 };
+        let speed = direction * 2.0 * tp.governed_speed(reverse);
+        let mut state = TransmissionState {
+            reverse,
+            shift_ticks: 2,
+            ..fresh(&tp)
+        };
+        // FIXTURE DATA: equal downhill reactions increase the signed speed while declutched.
+        let reaction = -direction * 10_000.0;
+        let report = step(
+            &fp,
+            &tp,
+            &mut state,
+            &input(0.0, 0.0, [speed; 2], [reaction; 2]),
+        );
+        assert!(
+            report
+                .next_speeds
+                .iter()
+                .all(|next| direction * next > direction * speed)
+        );
+    }
+}
+
+/// A wide steering detent adds a differential to the mean speed at top-gear cruise.
+/// The outer belt must keep that differential, even beyond the ladder's governed mean speed;
+/// contact traction relies on the transmission preserving both axes.
+
+#[test]
+fn top_gear_wide_steer_preserves_the_outer_belt_differential() {
+    let tp = lab_tp();
+    let fp = lab_fp();
+
+    let half_tread_m = tp.steer_kappa[0].1 * tp.steer_radii_m[0].1;
+    let top = tp.gears_fwd.len() - 1;
+    let cruise_m = 0.999 * tp.governed_speed(false);
     let mut st = TransmissionState {
-        gear: 8,
-        omega_e: cruise_m * tp.gears_fwd[7] / tp.sprocket_radius,
+        gear: (top + 1) as u8,
+        omega_e: cruise_m * tp.gears_fwd[top] / tp.sprocket_radius,
         ..fresh(&tp)
     };
     let rep = step(
@@ -2583,30 +2609,25 @@ fn tiger_f8_wide_outer_belt_exceeds_mean_speed_limit() {
     assert_eq!(rep.steer_step, 1, "0.3 steer must engage the WIDE detent");
     let m = (rep.next_speeds[0] + rep.next_speeds[1]) / 2.0;
     let d = (rep.next_speeds[0] - rep.next_speeds[1]) / 2.0;
-    let expected_d = tp.steer_kappa[7].1 * m.abs();
+    let expected_d = tp.steer_kappa[top].1 * m.abs();
     assert!(
-        m <= fp.max_speed + 1e-5,
-        "F8 cruise mean speed must remain bounded at max_speed (m {m}, limit {})",
-        fp.max_speed,
-    );
-    assert!(
-        rep.next_speeds[0] > fp.max_speed,
-        "F8 WIDE outer belt must exceed the {limit} m/s mean-axis limit by its kinematic \
+        rep.next_speeds[0] > tp.governed_speed(false),
+        "top-gear WIDE outer belt must exceed the {limit} m/s mean-axis limit by its kinematic \
              differential (belts {:?}, m {m}, d {d})",
         rep.next_speeds,
-        limit = fp.max_speed,
+        limit = tp.governed_speed(false),
     );
     let outer_excess = rep.next_speeds[0] - m;
     assert!(
         (d - expected_d).abs() <= 0.02 * expected_d
             && (outer_excess - expected_d).abs() <= 0.02 * expected_d,
-        "F8 WIDE must preserve outer = m + d with d = kappa*m \
+        "top-gear WIDE must preserve outer = m + d with d = kappa*m \
              (d {d}, outer excess {outer_excess}, expected {expected_d})"
     );
     let belt_radius = half_tread_m / (d / m.abs());
     assert!(
-        (belt_radius - 165.0).abs() <= 0.02 * 165.0,
-        "F8 WIDE belt-kinematic radius must stay within 2% of the authored 165 m \
+        (belt_radius - tp.steer_radii_m[top].1).abs() <= 0.02 * tp.steer_radii_m[top].1,
+        "top-gear WIDE belt-kinematic radius must stay within 2% of the authored wide radius \
              (got {belt_radius})"
     );
 }

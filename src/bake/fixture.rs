@@ -216,8 +216,6 @@ TankSpec(
         sprocket: (teeth: 1, nodes: (left: \"Sprocket_L\", right: \"Sprocket_R\")),
         idler: (nodes: (left: \"Idler_L\", right: \"Idler_R\")),
         powertrain: (
-            max_speed: 1.0,
-            force: 1.0,
             inertia: 1.0,
             transmission: (
                 engine: (

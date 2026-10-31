@@ -157,7 +157,7 @@ pub fn taut_lower_run(circles: &[(Vec2, f32)], front_up: Vec2, rear_up: Vec2,
 pub fn contact_side<O: TerrainOracle>(input: &SideInput, state: SideState, affine: Affine3A,
     dt: f32, params: &ForceParams, oracle: &O, vel_at: impl Fn(Vec3) -> Vec3,
     elements: &mut GripElements) -> (SideReport, bool);
-pub fn step(mode: TransmissionMode, fp: &ForceParams, tp: Option<&TransmissionParams>,
+pub fn step(fp: &ForceParams, tp: &TransmissionParams,
     state: &mut TransmissionState, inp: &TransmissionInput) -> TransmissionReport;
 
 // View

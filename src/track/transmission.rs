@@ -71,7 +71,7 @@
 //! [`DEMAND_FALL_FILTER_TICKS`]: rising demand is believed fast for safety, a collapsing
 //! sample slowly (pessimistic about LOSING load). The filter freezes through shift windows.
 //! For every gear `j`, full-throttle capability at current speed is
-//! `F_j = min(torque_at(rpm_j)·G_j/r_s, 2·engine_force)` and reserve is `R_j = F_j − D`.
+//! `F_j = min(torque_at(rpm_j), clutch_capacity)·G_j/r_s` and reserve is `R_j = F_j − D`.
 //! Upshifts retain every stage-A/B gate, add `R_next ≥ 0.10·D + 10 kN`, and must hold the FULL
 //! ordinary-upshift predicate — band AND landing AND reserve, every condition the commit
 //! itself needs — for [`UPSHIFT_CONFIRM_TICKS`] consecutive decision ticks, HARD-reset on any
@@ -194,7 +194,6 @@
 //! | [`STALL_GUARD_BAND_RPM`] | SIM POLICY |
 //! | [`CLUTCH_OUT_M_SPEED`]/[`CLUTCH_IN_M_SPEED`] | SIM POLICY |
 //! | [`REV_MATCH_BAND_RPM`] | SIM POLICY |
-//! | [`BELT_RUNAWAY_LIMIT_MULTIPLIER`] | SIM POLICY |
 //! | `gearbox.shift_addressing` / [`ShiftAddressing`] | VEHICLE DATA |
 //! | `DRAG_SAT_SPEED` | REMOVED (stage B) — the belt-side drag saturation ramp died with the belt-side drag term; what replaces it is the engine-side spin-up fade confined below the stall-guard floor, DERIVED from spec with no new const ([`engine_drag`]) |
 //!
@@ -520,12 +519,6 @@ const WIDE_OFF: f32 = 0.05;
 const TIGHT_ON: f32 = 0.55;
 const TIGHT_OFF: f32 = 0.45;
 
-/// Pure numerical runaway protection for each regenerative belt output. The ceiling is
-/// DERIVED per vehicle as `1.5 × max_speed`; unlike the mean-axis top-speed limit, it has no
-/// physical role and must never bind in legal operation (including an authored outer-belt
-/// steering differential, which may legally exceed `max_speed`). SIM POLICY.
-const BELT_RUNAWAY_LIMIT_MULTIPLIER: f32 = 1.5;
-
 /// The engine's declared operating envelope: a piecewise-linear torque curve (N·m over rpm,
 /// ascending, clamped at the ends) under a fuel governor at `governed_rpm`.
 #[derive(Clone, Debug)]
@@ -832,6 +825,20 @@ impl TransmissionParams {
             peak_torque_rpm,
             peak_torque_nm,
         })
+    }
+
+    /// DERIVED top-gear speed (m/s) at the fuel governor's rpm for the selected ladder.
+    /// This scales the brake's command blend; external loads may drive the belts faster.
+    pub fn governed_speed(&self, reverse: bool) -> f32 {
+        let ladder = if reverse {
+            &self.gears_rev
+        } else {
+            &self.gears_fwd
+        };
+        let top = ladder
+            .last()
+            .expect("authoring requires a nonempty gear ladder");
+        self.engine.governed_rpm * RPM_TO_RAD * self.sprocket_radius / top
     }
 
     /// Engine torque (N·m) at `rpm`: piecewise-linear over the authored points (end-clamped),
@@ -1141,9 +1148,8 @@ fn engine_drag(tp: &TransmissionParams, omega_e: f32, u_fuel: f32) -> f32 {
 /// Fix-1a: roll the shift's torque-cut window forward on the mean belt axis and return the
 /// PREDICTED landing speed `m`, under the shift window's own stage-B rules: the box is
 /// DECLUTCHED, so the belt gets NO engine force and NO engine drag (the old predictor's
-/// drag-through-the-landing-gear term died with the belt-side drag). `max_speed` bounds
-/// this vehicle/mean axis, matching the live regenerative integration; it is not a
-/// per-belt bound.
+/// drag-through-the-landing-gear term is absent). The ground reaction changes the mean
+/// speed under the same inertia law as the live belt integration.
 ///
 /// THE WINDOW MODEL (the physical premise). The pre-cut `r_mean` is
 /// dominated by the DRIVE shear the grip elements carry, and cutting the drive is exactly
@@ -1191,54 +1197,18 @@ pub(crate) fn predict_shift_landing_m(
     let mut pm = m;
     let mut r = r_mean;
     for _ in 0..tp.shift_ticks {
-        pm = clamp_mean_speed(pm - r / i_coupled * dt, fp.max_speed);
+        pm -= r / i_coupled * dt;
         r *= LANDING_REACTION_DECAY;
     }
     pm
 }
 
-/// Apply the regenerative path's speed limits without conflating its superimposed axes:
-/// `max_speed` bounds the vehicle/mean axis `m`, while the legal steering difference `d`
-/// passes through unchanged. Only the much wider per-belt runaway ceiling can clip `d`.
-///
-/// The in-range branch returns the raw integration results directly so scenarios that never
-/// touched the old clamp retain their exact f32 values.
-fn limit_regenerative_belt_speeds(raw: [f32; 2], max_speed: f32) -> [f32; 2] {
-    let mean = (raw[0] + raw[1]) / 2.0;
-    let limited_mean = clamp_mean_speed(mean, max_speed);
-    let mut limited = if limited_mean != mean {
-        let correction = limited_mean - mean;
-        [raw[0] + correction, raw[1] + correction]
-    } else {
-        raw
-    };
-
-    let runaway_limit = BELT_RUNAWAY_LIMIT_MULTIPLIER * max_speed;
-    for speed in &mut limited {
-        if *speed > runaway_limit {
-            *speed = runaway_limit;
-        } else if *speed < -runaway_limit {
-            *speed = -runaway_limit;
-        }
-    }
-    limited
-}
-
-fn clamp_mean_speed(mean: f32, max_speed: f32) -> f32 {
-    mean.clamp(-max_speed, max_speed)
-}
-
 /// Full-throttle mean-axis force available in one gear at the current signed shaft speed. The
-/// engine reads only non-negative rpm (stage A); the result is capped by the existing two-track
-/// low-speed/traction envelope (`engine_force` is authored per track).
-fn available_force_in_gear(
-    tp: &TransmissionParams,
-    fp: &ForceParams,
-    shaft: f32,
-    gear: f32,
-) -> f32 {
+/// engine reads only non-negative rpm. Its torque and the clutch's capacity bound the shaft
+/// torque; gearing converts it to belt force. Contact grip bounds traction separately.
+fn available_force_in_gear(tp: &TransmissionParams, shaft: f32, gear: f32) -> f32 {
     let rpm = shaft.max(0.0) * gear / tp.sprocket_radius / RPM_TO_RAD;
-    (tp.torque_at(rpm) * gear / tp.sprocket_radius).min(2.0 * fp.engine_force)
+    tp.torque_at(rpm).min(tp.clutch_capacity) * gear / tp.sprocket_radius
 }
 
 /// Positive capability headroom required of a selected gear (N, both tracks together).
@@ -1253,12 +1223,11 @@ pub(crate) fn reserve_margin(demand: f32) -> f32 {
 /// duplicating it — see the driving-feel probes in `headless_test`.
 pub(crate) fn modeled_reserve_in_gear(
     tp: &TransmissionParams,
-    fp: &ForceParams,
     shaft: f32,
     gear: f32,
     demand: f32,
 ) -> f32 {
-    available_force_in_gear(tp, fp, shaft, gear) - demand
+    available_force_in_gear(tp, shaft, gear) - demand
 }
 
 /// Choose the highest gear below `current` that clears reserve margin, then apply the downshift
@@ -1266,7 +1235,6 @@ pub(crate) fn modeled_reserve_in_gear(
 /// toward it (which may not yet clear margin); later decisions can continue after speed falls.
 fn select_grade_target(
     tp: &TransmissionParams,
-    fp: &ForceParams,
     ladder: &[f32],
     shaft: f32,
     current: u8,
@@ -1277,7 +1245,7 @@ fn select_grade_target(
     }
     let margin = reserve_margin(demand);
     let ideal = (1..current).rev().find(|&gear| {
-        available_force_in_gear(tp, fp, shaft, ladder[(gear - 1) as usize]) - demand >= margin
+        available_force_in_gear(tp, shaft, ladder[(gear - 1) as usize]) - demand >= margin
     })?;
     let lowest_legal = (1..current).find(|&gear| {
         let rpm = shaft * ladder[(gear - 1) as usize] / tp.sprocket_radius / RPM_TO_RAD;
@@ -1291,7 +1259,6 @@ fn select_grade_target(
 /// is what separates a truthful grade limit from a margin-short but physically capable launch.
 fn select_hill_hold_target(
     tp: &TransmissionParams,
-    fp: &ForceParams,
     ladder: &[f32],
     shaft: f32,
     current: u8,
@@ -1302,7 +1269,7 @@ fn select_hill_hold_target(
             let ratio = ladder[(gear - 1) as usize];
             let rpm = shaft * ratio / tp.sprocket_radius / RPM_TO_RAD;
             rpm <= tp.max_curve_rpm() - OVERREV_MARGIN_RPM
-                && modeled_reserve_in_gear(tp, fp, shaft, ratio, demand) >= minimum
+                && modeled_reserve_in_gear(tp, shaft, ratio, demand) >= minimum
         })
     };
     highest_with_reserve(reserve_margin(demand)).or_else(|| highest_with_reserve(0.0))
@@ -1332,13 +1299,12 @@ fn commit_grade_shift(st: &mut TransmissionState, tp: &TransmissionParams, targe
 fn refresh_hill_hold(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
-    fp: &ForceParams,
     ladder: &[f32],
     shaft: f32,
     rollback_rescue: bool,
 ) -> bool {
     let downshift_allowed = shaft > -PARK_ENGAGE_SPEED || rollback_rescue;
-    match select_hill_hold_target(tp, fp, ladder, shaft, st.gear, st.demand_n) {
+    match select_hill_hold_target(tp, ladder, shaft, st.gear, st.demand_n) {
         Some(target) if target < st.gear && downshift_allowed => {
             // A latched rollback that the current gear plus full brakes cannot arrest is the
             // deliberate exception to both ordinary grade-shift guards: this downshift is crew
@@ -1397,7 +1363,7 @@ struct CrankTick {
 /// the capacity, not the lock demand). `F_other` is the m-axis force sum EXCLUDING the
 /// engine path — the summed ground reactions. This is a PREDICTOR approximation: the later
 /// brake stop-forces, the λ mean-axis share
-/// (`j_L + j_R = −e` does NOT cancel), and the belt ±max_speed clamp all move `m_next`
+/// (`j_L + j_R = −e` does NOT cancel), all move `m_next`
 /// after this solve, and exact pre-accounting is CIRCULAR (the brake law reads the very
 /// `q` that needs `F_c`). What makes the approximation safe is the end-of-step FEASIBILITY
 /// check in [`regenerative`]: the crank re-anchors to the belt that actually integrated
@@ -1656,7 +1622,6 @@ fn update_demand_filter(
 fn update_hill_hold(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
-    fp: &ForceParams,
     ladder: &[f32],
     shaft: f32,
     propulsive: f32,
@@ -1717,7 +1682,7 @@ fn update_hill_hold(
             let braked_rollback_rescue =
                 real_rollback && current_reserve + 2.0 * tp.brake_capacity_n < 0.0;
             hill_hold_step_committed =
-                refresh_hill_hold(st, tp, fp, ladder, shaft, braked_rollback_rescue);
+                refresh_hill_hold(st, tp, ladder, shaft, braked_rollback_rescue);
         }
     }
     hill_hold_step_committed
@@ -1843,7 +1808,7 @@ fn run_shift_decision(
     // cascade; a changed capability target retargets while retaining the original HUD `from`.
     if !grade_step_committed && st.grade_target > 0 {
         let selected = (propulsive > 0.0 && current_reserve < 0.0)
-            .then(|| select_grade_target(tp, fp, ladder, shaft, st.gear, st.demand_n))
+            .then(|| select_grade_target(tp, ladder, shaft, st.gear, st.demand_n))
             .flatten()
             .filter(|&target| target < st.gear);
         if let Some(target) = selected {
@@ -1897,7 +1862,7 @@ fn run_shift_decision(
         && current_reserve < 0.0
         && st.grade_confirm_ticks >= GRADE_CONFIRM_TICKS;
     let deficit_target = confirmed_deficit
-        .then(|| select_grade_target(tp, fp, ladder, shaft, st.gear, st.demand_n))
+        .then(|| select_grade_target(tp, ladder, shaft, st.gear, st.demand_n))
         .flatten();
 
     // A confirmed reserve deficit is a CORRECTION, not a preference: with a target it
@@ -1994,7 +1959,7 @@ fn run_shift_decision(
             let landing = predict_shift_landing_m(tp, fp, m, r_mean, dt);
             let landing_shaft = dir * landing;
             let g_up = ladder[st.gear as usize];
-            let next_reserve = modeled_reserve_in_gear(tp, fp, shaft, g_up, st.demand_n);
+            let next_reserve = modeled_reserve_in_gear(tp, shaft, g_up, st.demand_n);
             landing_shaft > 0.0
                 && shaft_rpm_of(landing_shaft, g_up) >= tp.shift_down_rpm + POSTSHIFT_MARGIN_RPM
                 && next_reserve >= reserve_margin(st.demand_n)
@@ -2428,7 +2393,6 @@ fn power_conservation_scale(
 fn release_hill_hold(
     st: &mut TransmissionState,
     tp: &TransmissionParams,
-    fp: &ForceParams,
     shaft: f32,
     g: f32,
     dir: f32,
@@ -2439,7 +2403,7 @@ fn release_hill_hold(
     if !st.hill_hold {
         return;
     }
-    let selected_reserve = modeled_reserve_in_gear(tp, fp, shaft, g, st.demand_n);
+    let selected_reserve = modeled_reserve_in_gear(tp, shaft, g, st.demand_n);
     let release_margin = reserve_margin(st.demand_n).min(selected_reserve.max(0.0) * 0.5);
     if dir * f_c >= st.demand_n + release_margin {
         st.hill_hold = false;
@@ -2475,7 +2439,7 @@ fn apply_brake_stop_forces(
             if st.park {
                 1.0
             } else {
-                let target = inp.side_commands[i] * fp.max_speed;
+                let target = inp.side_commands[i] * tp.governed_speed(st.reverse);
                 forces::hold_blend(target.abs() / fp.slip_saturation)
                     * forces::hold_blend(inp.speeds[i].abs() / fp.slip_saturation)
             }
@@ -2629,10 +2593,10 @@ pub fn step(
 
     let shaft = dir * m;
     let current_reserve =
-        modeled_reserve_in_gear(tp, fp, shaft, ladder[(st.gear - 1) as usize], st.demand_n);
+        modeled_reserve_in_gear(tp, shaft, ladder[(st.gear - 1) as usize], st.demand_n);
 
     let hill_hold_step_committed =
-        update_hill_hold(st, tp, fp, ladder, shaft, propulsive, current_reserve);
+        update_hill_hold(st, tp, ladder, shaft, propulsive, current_reserve);
 
     let r_mean = (inp.reactions[0] + inp.reactions[1]) / 2.0;
     // Ordinary grade shifts still require a forward landing. The braked rollback rescue commits
@@ -2757,7 +2721,7 @@ pub fn step(
     let f_s = f_s_pre_scale * power_scale;
 
     let hill_brake_active = st.hill_hold;
-    release_hill_hold(st, tp, fp, shaft, g, dir, f_c);
+    release_hill_hold(st, tp, shaft, g, dir, f_c);
 
     // --- Integrate the crank: J·ω̇_e = τ_free − τ_c (the transmitted torque scaled by the
     // power gate exactly as the belt-side force was — one bookkeeping for both ends of the
@@ -2775,11 +2739,10 @@ pub fn step(
     apply_brake_stop_forces(&mut q, tp, fp, st, inp, service, hill_brake_active);
 
     // --- Integrate both sides simultaneously: I·v̇ = Q − R (the reaction ALWAYS applies).
-    let raw_next = [
+    let next = [
         inp.speeds[0] + (q[0] - inp.reactions[0]) / fp.inertia * dt,
         inp.speeds[1] + (q[1] - inp.reactions[1]) / fp.inertia * dt,
     ];
-    let next = limit_regenerative_belt_speeds(raw_next, fp.max_speed);
 
     settle_crank(
         st,
@@ -2810,7 +2773,6 @@ pub fn step(
         j,
         omega_integrated,
         forces: q,
-        raw_next,
         next_speeds: next,
         ..bitprobe
     };

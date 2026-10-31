@@ -821,8 +821,6 @@ mod tests {
             probe_reach: 0.5,
             mu: 0.9,
             slip_saturation: 0.5,
-            max_speed: 10.0,
-            engine_force: 1.0e5,
             inertia: 500.0,
             grip_stiffness: grip_stiffness(0.9, 30_000.0 * 9.81),
         };

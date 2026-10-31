@@ -388,8 +388,7 @@ pub(super) fn harness_record(
         "{{\"t\":\"e\",\"k\":{k},\"n\":[{ln},{rn}],\"jsum\":[{ls:.6},{rs:.6}],\"jmax\":[{lm:.6},{rm:.6}]}}"
     )
     .unwrap();
-    // Transmission telemetry (`tr` line, regenerative modes only — governor `k` lines stay
-    // byte-stable for the capture-diff gates): operating point + the joint solve's outputs.
+    // Transmission telemetry follows each tick that has an operating point and joint solve.
     if let Some(t) = &trans_telemetry.0 {
         writeln!(
             log.writer,

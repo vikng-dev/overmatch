@@ -174,10 +174,7 @@ pub struct ForceParams {
     /// Slip speed (m/s) normalizing the transmission's brake-engagement blend — the scale on
     /// which a belt counts as "moving".
     pub slip_saturation: f32,
-    /// Powertrain: top belt speed (m/s), per-track low-speed force cap (N) and reflected
-    /// belt+drivetrain inertia (kg).
-    pub max_speed: f32,
-    pub engine_force: f32,
+    /// Reflected belt + drivetrain inertia (kg).
     pub inertia: f32,
     /// Static-grip bristle stiffness per side (N/m of shear) — [`grip_stiffness`]. `0.0`
     /// disables traction and belt-hold entirely (support only) — the envelope calibration
@@ -214,9 +211,8 @@ pub struct GripElements {
 impl GripElements {
     /// Both slabs pre-sized for `link_count` material links × 3 lateral columns, at rest
     /// (zero strain, zero dwell) — the ONLY legal construction for a caller entering the
-    /// element regime. [`contact_side`] never resizes at runtime (the REV-14 fixed-size
-    /// invariant): wrong-length slabs skip the
-    /// regime instead of being silently rebuilt.
+    /// element regime. [`contact_side`] refuses wrong-length slabs in every build;
+    /// resizing would erase the strain the contact law carries from tick to tick.
     pub fn for_links(link_count: usize) -> Self {
         let n = link_count * 3;
         Self {
@@ -384,8 +380,8 @@ pub fn clipped_linear_piece(x0: f32, x1: f32, p0: f32, p1: f32) -> (f32, f32, f3
 /// Force application does not feed back into `vel_at` within a tick (velocities integrate
 /// later), so reading everything first and applying afterwards is exact. `elements`: the
 /// per-element isotropic shear state (see [`GripElements`]) — the caller owns the state vector
-/// and must construct it pre-sized to `count * 3` ([`GripElements::for_links`]; wrong-length
-/// slabs skip traction for the tick — see the invariant below).
+/// and must construct it pre-sized to `count * 3` ([`GripElements::for_links`]); wrong-length
+/// slabs violate the spawn invariant and panic in every build.
 ///
 /// Returns the report (with `state.speed`/`state.phase` still the INPUT values) plus `true` iff
 /// the station geometry was live — the condition under which the caller integrates the belt at
@@ -417,24 +413,18 @@ pub fn contact_side<O: TerrainOracle>(
         return (report, false);
     }
 
-    // INVARIANT (REV-14): the caller owns FIXED-SIZE slabs, constructed `count * 3` at spawn
-    // ([`GripElements::for_links`]). The branch that used to live here cleared and re-sized mismatched slabs at runtime — which
-    // erases valid strain exactly when it matters most: a predicted root that runs one
-    // driving tick before its authoritative JIP seed arrives records a zeroed field into
-    // local prediction history and replay follows it; a snapshot with one mismatched slab
-    // wipes real state instead of surfacing the violation. Wrong-length slabs are therefore
-    // a caller defect: assert loudly in debug, and in release SKIP traction for this tick
-    // (support still carries the hull) WITHOUT touching the stored state.
+    // The caller owns fixed-size slabs constructed at spawn by `GripElements::for_links`.
+    // A size mismatch is a construction bug; resizing here would erase valid contact strain.
     let element_len = input.count * 3;
     let sized = elements.strain.len() == element_len && elements.dwell.len() == element_len;
-    debug_assert!(
+    assert!(
         sized,
         "GripElements slabs must be pre-sized to count*3 = {element_len} at construction \
-         (strain {}, dwell {}) — runtime resizing erases rollback-visible strain",
+         (strain {}, dwell {}) — runtime resizing erases contact strain",
         elements.strain.len(),
         elements.dwell.len(),
     );
-    let elements_mode = sized && params.grip_stiffness > 0.0;
+    let elements_mode = params.grip_stiffness > 0.0;
 
     let (cols, held) = collect_column_contacts(
         input,
@@ -1020,8 +1010,6 @@ mod tests {
             probe_reach: 0.5,
             mu: 0.9,
             slip_saturation: 0.5,
-            max_speed: 10.0,
-            engine_force: 1.0e5,
             inertia: 500.0,
             grip_stiffness: grip_stiffness(0.9, 30_000.0 * 9.81),
         }

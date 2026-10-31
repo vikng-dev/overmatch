@@ -39,4 +39,21 @@ The two known walk-test failures belong to `walk-w3` and are excluded from this 
 
 ## Boundary items
 
-Implementation decisions, verification and evidence are recorded below as each item lands.
+### Driving
+
+- `contact_side` asserts the spawn-sized grip slabs in every build; neither its docs nor
+  `GripElements::for_links` describes lost traction as an intended release outcome.
+- Removed the authored speed and force caps, their fixture data and their consumers. Powered
+  speed follows the gear ladder and fuel governor; static gear reserve uses engine torque bounded
+  by the authored clutch capacity. Contact grip bounds traction. External load may drive belts
+  beyond governed speed; the existing mechanical over-rev guard still bounds the crank.
+- The parking-brake command blend uses the selected ladder's DERIVED governed top-gear speed as
+  its scale. It does not limit belt speed. The now-identical pre/post-clamp bitprobe columns were
+  reduced to the actual next-speed columns.
+- The neutral-pivot test uses an ASSUMED class acceptance bound of half the vehicle's own
+  belt-kinematic yaw ceiling, rather than a fixed yaw measured on the seed vehicle. The wide-turn
+  test also derives its expected speed and radius from a labelled lab fixture.
+- Updated all cited live-tense drivetrain docs; `SteeringSpec`'s hybrid wording was already removed
+  by sweep-load at the starting revision.
+- Gates: formatting, workspace CI clippy, and the targeted track/spec/bake/bitprobe/pivot and
+  doc-citation tests passed (MEASURED: 230 tests). No full suite or pricing was run.

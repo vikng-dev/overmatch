@@ -117,8 +117,6 @@ pub(crate) fn calibrate(
         probe_reach,
         mu: 1.0,
         slip_saturation: 1.0,
-        max_speed: 1.0,
-        engine_force: 0.0,
         inertia: 1.0,
         grip_stiffness: 0.0,
     };

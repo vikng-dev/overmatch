@@ -729,15 +729,11 @@ impl TrackSpec {
     }
 }
 
-/// Per-track powertrain: the belt's speed and force envelope and its reflected inertia, and the
-/// declared drivetrain that drives it.
+/// Per-track powertrain: reflected belt inertia and the declared drivetrain that drives it.
+/// Powered speed and force derive from its gear ladder, engine and clutch; contact grip bounds traction.
 #[derive(Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct PowertrainSpec {
-    /// Top belt speed (m/s).
-    pub max_speed: f32,
-    /// Low-speed tractive force cap per track (N).
-    pub force: f32,
     /// Reflected belt + drivetrain inertia (kg).
     pub inertia: f32,
     /// The DECLARED transmission (transmission-design.md): engine torque curve, gear ladders,
@@ -1422,12 +1418,9 @@ impl TankSpec {
             )
             .into());
         }
-        // The force-law scalars: each reaches an integrator division or clamp bound in
-        // `track::forces` (engage/inertia divide; power/force/max_speed bound the engine
-        // curve; a NaN in any of them dissolves the belt state in one tick).
+        // The force-law scalars reach integrator divisions: inertia sets belt acceleration,
+        // and suspension data sets support. A NaN dissolves the belt state in one tick.
         for (field, value) in [
-            ("powertrain.max_speed", t.powertrain.max_speed),
-            ("powertrain.force", t.powertrain.force),
             ("powertrain.inertia", t.powertrain.inertia),
             ("suspension.ride_frequency", t.suspension.ride_frequency),
             ("suspension.damping_ratio", t.suspension.damping_ratio),
@@ -1742,8 +1735,6 @@ TankSpec(
         sprocket: (teeth: 16, nodes: (left: "Sprocket_L", right: "Sprocket_R")),
         idler: (nodes: (left: "Idler_L", right: "Idler_R")),
         powertrain: (
-            max_speed: 8.0,
-            force: 200_000.0,
             inertia: 10_000.0,
             transmission: (
                 engine: (
@@ -2226,11 +2217,7 @@ TankSpec(
 
         // Force-law scalars: each mutation must be rejected BY NAME — a NaN or zero here
         // reaches a division in `track::forces` and dissolves the belt state in one tick.
-        let cases: [(&str, fn(&mut TankSpec)); 4] = [
-            ("powertrain.max_speed", |s| {
-                s.track.powertrain.max_speed = f32::NAN;
-            }),
-            ("powertrain.force", |s| s.track.powertrain.force = -1.0),
+        let cases: [(&str, fn(&mut TankSpec)); 2] = [
             ("powertrain.inertia", |s| s.track.powertrain.inertia = 0.0),
             ("suspension.engage", |s| s.track.suspension.engage = 0.0),
         ];

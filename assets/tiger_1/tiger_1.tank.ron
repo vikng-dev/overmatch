@@ -47,24 +47,9 @@ TankSpec(
         sprocket: ( teeth: 20, nodes: ( left: "Sprocket_L", right: "Sprocket_R" ) ),
         // The idler meshes' view nodes, one per side.
         idler: ( nodes: ( left: "Idler_L", right: "Idler_R" ) ),
-        // Phase-B locomotion: the SANDBOX force law scaled to the Tiger (the retired raycast
-        // sim was a placeholder — nothing structural carries over). The contact-envelope law
-        // derives its spring/damper from `suspension` below (same ~5 cm static sink at 57 t);
-        // inertia likewise. Hill-hold arrived with the grip regime (ADR-0026); parking creep is
-        // gone.
-        //
-        // Force cap = the GRIP-LIMIT gearing rule (the T-34 lab benchmark: first gear can
-        // just spin the tracks, cap ≈ μ·W/2 ≈ 252 kN here). The previous 100 kN was tuned
-        // under the retired placeholder law for "climbs 20°, stalls 30°" and at 0.40× the
-        // grip limit could not break a neutral steer (thrust moment 298 kN·m vs 478 kN·m of
-        // footprint scrub — measured "Tiger unable to steer in place", 2026-07-18). At the
-        // grip limit the pivot ratio is 1.56 (T-34 lab: 1.33) and the real Tiger could
-        // neutral-steer. Consequence: steep climbs are now traction/power-limited, not
-        // cap-limited — 30° crawls (~1.9 m/s power-limited) instead of stalling; the
-        // traction stall moves to ~arctan μ ≈ 42°.
+        // Reflected belt/drivetrain inertia. The gear ladder, engine, clutch and contact grip
+        // determine powered speed and traction without a separate speed or force cap.
         powertrain: (
-            max_speed: 10.5,
-            force: 250_000.0,
             inertia: 16_000.0,
             // The DECLARED drivetrain (phase 2.5) — authored from the anchored tables in
             // .agents/docs/design/track-model/tiger-transmission-data.md. It SHIPS everywhere, MP
@@ -116,8 +101,7 @@ TankSpec(
                     // OLVAR OG 40 12 16, 8F/4R [ANCHOR]. Per-gear top speeds @ 3000 rpm
                     // [ANCHOR — hamby / Jentz]; R1–R4 mirror F1–F4 [ANCHOR]. Reductions
                     // derive at build against the spec's own sprocket radius (the
-                    // 19-vs-20-tooth discrepancy rule). F8 @ governed 2500 → 10.48 m/s,
-                    // matching max_speed 10.5.
+                    // 19-vs-20-tooth discrepancy rule). DERIVED F8 @ governed 2500 → 10.48 m/s.
                     forward_speeds_kmh: [2.8, 4.3, 6.2, 9.2, 14.1, 20.9, 30.5, 45.4],
                     reverse_speeds_kmh: [2.8, 4.3, 6.2, 9.2],
                     // Auto-shift bands (INFERRED policy): up at 92% of governed; down at
