@@ -1011,9 +1011,7 @@ mod tests {
     /// must expose the conflicting pair or the missing path regardless of executor order.
     #[test]
     fn presented_tank_parts_have_ordered_producers_and_consumers() {
-        use bevy::ecs::schedule::{
-            InternedSystemSet, LogLevel, NodeId, ScheduleBuildSettings, ScheduleLabel,
-        };
+        use bevy::ecs::schedule::{LogLevel, NodeId, ScheduleBuildSettings, ScheduleLabel};
 
         let mut app = App::new();
         app.add_plugins((
@@ -1024,6 +1022,7 @@ mod tests {
         .add_plugins((
             crate::view::plugin,
             crate::geometry_lod::view_plugin,
+            crate::render_policy::plugin,
             view_plugin,
         ));
         for label in [Update.intern(), PostUpdate.intern()] {
@@ -1081,26 +1080,43 @@ mod tests {
                         "{producer} must produce this frame's value before {consumer} reads it"
                     );
                 }
-                // The ribbon's `Mesh3d` lands by command, which no access conflict sees: a path of
-                // ordering edges to scope resolution is what resolves it onto the shadow-only
-                // channel in its first frame, instead of the camera drawing it on the default one.
+                // The ribbon's `Mesh3d` lands by command, which no access conflict sees, and the
+                // flattened order above leaves two unordered systems in either order. A path of
+                // ordering edges from `TrackViewSet` to `resolve_visual_scopes` (through the
+                // sets' members: the system joins `ScopeResolution` by hierarchy, the order edge
+                // targets the set) is what puts the ribbon on the shadow-only channel in its first
+                // frame, instead of the camera drawing it on the default one.
                 if label == PostUpdate.intern() {
-                    let node =
-                        |set: InternedSystemSet| graph.system_sets.get_key(set).map(NodeId::Set);
-                    let from = node(TrackViewSet.intern()).expect("TrackViewSet");
-                    let to = node(crate::render_policy::ScopeResolution.intern())
-                        .expect("ScopeResolution");
-                    let edges = graph.dependency().graph();
+                    let system = |name: &str| {
+                        schedule
+                            .systems()
+                            .expect("initialized schedule")
+                            .find(|(_, system)| system.name().shortname().to_string() == name)
+                            .map(|(key, _)| NodeId::System(key))
+                            .expect(name)
+                    };
+                    let from = graph
+                        .system_sets
+                        .get_key(TrackViewSet.intern())
+                        .map(NodeId::Set)
+                        .expect("TrackViewSet");
+                    let to = system("resolve_visual_scopes");
+                    let (dependency, hierarchy) =
+                        (graph.dependency().graph(), graph.hierarchy().graph());
                     let (mut stack, mut seen) = (vec![from], Vec::new());
                     let mut reached = false;
                     while let Some(at) = stack.pop() {
                         reached |= at == to;
                         if !seen.contains(&at) {
                             seen.push(at);
-                            stack.extend(edges.neighbors(at));
+                            stack.extend(dependency.neighbors(at));
+                            stack.extend(hierarchy.neighbors(at));
                         }
                     }
-                    assert!(reached, "the caster swap resolves before scope resolution");
+                    assert!(
+                        reached,
+                        "the caster swap must be ordered before scope resolution"
+                    );
                 }
             });
         }
