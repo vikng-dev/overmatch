@@ -392,6 +392,18 @@ A steady push meets the strength limit alone, so its verdict does not depend on 
 The structure is rigid-plastic: a press below strength moves nothing and is read again each tick it persists; sub-threshold blows on a resting part are each read alone and never add (accepted).
 A blast's blow meets both at once through `g(F_R / F_peak)` ("Standoff blast", Law 3): a far burst whose peak force the section's strength holds fails it by no impulse, however large (**DERIVED** by rerunning the #237 study's disc-wall arithmetic on the sourced rows: an 88 mm HE burst's peak force on house_1's east wall stays over its base section's strength out to the burst's 23.2 m reach, so `g(r)` trims the impulse limit only from 15.0 to 13.8 m; the #237 study's ~11 m cut-off came from the misrecalled far row). A round's line keeps the energy limit alone (**ASSUMED**: its blow is over before a section moves).
 
+**Body contact duration.**
+`Origin::Body::step` is the numerical physics step, not a material contact duration.
+`Load::mean_force` divides the solver's transfer by that step: a lower bound on the contact's
+peak force, not a measured peak. It is sufficient to demonstrate strength exceedance, but
+cannot demonstrate that a contact whose mean is below strength never exceeded it. For a fixed
+blow and inertia, changing the physics rate can change the strength verdict; steady force
+inputs remain rate independent because their per-step transfer scales with the step.
+The contact model has no compliance or separation-time input from which to recover a physical
+peak. Replacing the bound requires that missing material/construction truth, not a fixed
+contact-time constant. The rate-sweep evidence is in
+`.agents/scratch/blast-b3-collision-review.md`.
+
 **Structures stay solid to the physics engine (option B).**
 Avian stops a body against a standing structure as against any static body, and the laws judge every joint from the contact's real transfer.
 A section's energy check reads a body's blow as the plastic exchange with the group it holds, `blow × m_h / (m_b + m_h)`, `m_h` the group's effective mass about its hinge at the point; a field's blow reaches it whole.

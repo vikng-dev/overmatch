@@ -601,8 +601,9 @@ pub(crate) enum Origin {
         mass: f32,
         /// Closing speed along the normal at the solver's start, m/s; shared launch caps read it.
         speed: f32,
-        /// The physics step the solver delivered its blow within, s: the blow's least mean force
-        /// is `blow / step` ([`Load::mean_force`]).
+        /// The numerical physics step the solver delivered its blow within, s, not a material
+        /// contact duration. `blow / step` bounds the contact's peak force from below
+        /// ([`Load::mean_force`]); see the wall design's "Body contact duration" limitation.
         step: f32,
     },
 }
@@ -738,8 +739,10 @@ impl Load {
         }
     }
 
-    /// The least mean force of a body's blow (N): the blow over the step the solver delivered it
-    /// within. `None` for a field, which states its pulse by its peak or not at all.
+    /// A lower bound on a body contact's peak force (N): its blow over the numerical solver
+    /// step, not a resolved contact duration. Increasing the physics rate raises this bound for
+    /// the same blow; the wall design records that approximation. `None` for a field, which
+    /// states its pulse by its peak or not at all.
     fn mean_force(&self) -> Option<Vec3> {
         match self.origin {
             Origin::Body { step, .. } => Some(self.blow / step),
@@ -2371,8 +2374,9 @@ fn incident(structure: &Structure) -> Vec<Vec<usize>> {
 }
 
 /// How many rings of bonded neighbours a punch-ring candidate grows past the loaded chunks
-/// (Resolution). Under a load fixed in size each ring adds perimeter, so past the loaded patch the
-/// force-to-strength ratio falls (DERIVED): the ratio picks the breach, never this cap.
+/// (Resolution). The laws compare these candidates by demand over capacity; they do not search
+/// every connected group. Nonuniform seam strengths or concave groups need not have increasing
+/// capacity as a candidate grows, so this bound can omit a weaker ring.
 const RING_GROWTH: usize = 2;
 
 /// The punch-ring candidates about the standing chunks of `seeds`: the seeds, then the seeds grown
@@ -4420,7 +4424,7 @@ mod tests {
     /// feeding them the whole blow, the group's free mass, or its total mass fails the sweep.
     /// The field and vanishing-source-mass verdicts agree on either side of failure, the body's
     /// blow delivered within a vanishing step so that its force beats any strength (a field
-    /// keeps the energy limit alone; the force limit is test 7's). Fixture masses, heights and
+    /// keeps the energy limit alone; `strength_and_energy_are_both_required` pins the force limit). Fixture masses, heights and
     /// steps below are ASSUMED; the hinge inertia and demands are DERIVED.
     #[test]
     fn body_demand_uses_the_held_hinge_mass_and_fields_are_the_zero_mass_limit() {
@@ -4627,7 +4631,7 @@ mod tests {
                 })
             })
             .collect();
-        for hz in [64.0, 128.0, 256.0] {
+        for hz in [64.0_f32, 128.0, 256.0] {
             let dt = 1.0 / hz;
             for (force, leaves) in [(4500.0, false), (6000.0, true)] {
                 let load = Load {
@@ -5020,6 +5024,56 @@ mod tests {
             (Cause::Punch, &opened)
         );
         assert!((failures[0].demand / failures[0].capacity - 2.0).abs() < 1e-3);
+    }
+
+    /// A SOLVER STEP BOUNDS A BODY CONTACT'S PEAK FROM BELOW (the game's environment destruction
+    /// model). With impulse and source inertia held fixed, shortening the step can enable the
+    /// strength gate, never disable it. The authority's conservative two-limit reading relies
+    /// on this; it is not a claim of timestep-independent contact physics. ASSUMED fixture
+    /// geometry and rates; impulse chosen from the ring's strength to straddle its force gate.
+    #[test]
+    fn a_body_contact_step_bounds_its_peak_from_below() {
+        let cells = [[-1, 0, 0], [1, 0, 0], [0, -1, 0], [0, 1, 0], [0, 0, 0]];
+        let structure = cubes(&cells, 4, &[], 28.8);
+        let state = WallState::new(&structure);
+        let incident = incident(&structure);
+        let ring = ring(&structure, &state, &incident, &[4], Vec3::NEG_Z).unwrap();
+        let impulse = ring.strength / 96.0;
+        let mut has_failed = false;
+        let mut outcomes = Vec::new();
+        for hz in [64.0_f32, 128.0, 256.0] {
+            let load = Load {
+                chunk: 4,
+                at: structure.chunks[4].centroid,
+                energy: 0.0,
+                blow: Vec3::NEG_Z * impulse,
+                press: Vec3::ZERO,
+                peak: None,
+                origin: Origin::Body {
+                    body: Entity::PLACEHOLDER,
+                    mass: 1.0,
+                    speed: impulse,
+                    step: hz.recip(),
+                },
+            };
+            let failure = ring_failure(&structure, &state, &incident, &[4], &[load]);
+            let failed = failure.is_some_and(|f| f.demand >= f.capacity);
+            assert!(
+                !has_failed || failed,
+                "a shorter step cannot lower the force bound"
+            );
+            has_failed |= failed;
+            outcomes.push(failed);
+            println!(
+                "MEASURED body contact {hz} Hz: force bound {} N, strength {} N, fails {failed}",
+                impulse * hz,
+                ring.strength
+            );
+        }
+        assert!(
+            outcomes.contains(&false) && outcomes.contains(&true),
+            "fixture straddles the numerical force gate"
+        );
     }
 
     /// THE BREACH FOLLOWS STRENGTH (the game's environment destruction model, the collision study's
